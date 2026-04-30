@@ -222,6 +222,13 @@ pub fn refine_assignments(
 
     let mut rng = SmallRng::seed_from_u64(params.seed);
 
+    use indicatif::{ProgressBar, ProgressStyle};
+    let outer_pb = ProgressBar::new(num_levels as u64).with_style(
+        ProgressStyle::with_template("Refine levels {bar:40} {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+
     // Walk coarsest → finest (highest level index down to 0).
     for level in (0..num_levels).rev() {
         let k = ks[level];
@@ -249,7 +256,9 @@ pub fn refine_assignments(
         let (compact, new_k) = compact_labels(sc_to_group);
         *sc_to_group = compact;
         ks[level] = new_k;
+        outer_pb.inc(1);
     }
+    outer_pb.finish_and_clear();
 
     Ok(RefinedAssignment {
         sc_to_group: refined,

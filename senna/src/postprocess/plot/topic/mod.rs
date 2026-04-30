@@ -414,17 +414,51 @@ fn load_batch_labels(resolved: &ResolvedInputs, n_cells: usize) -> anyhow::Resul
         return Ok(vec!["all".into(); n_cells]);
     }
 
-    // No batch files: replicate `senna_input.rs:86-92`'s fallback —
-    // batch i = data-file index. Cheap because num_columns() reads only
-    // the on-disk index, not the full matrix.
+    // No batch files: derive a label per data file from its basename
+    // (with `.zarr.zip`/`.zarr`/`.h5` stripped) — same convention
+    // SparseIoVec uses for batch identity. Falls back to the file index
+    // only if a basename can't be extracted, and disambiguates duplicate
+    // basenames with a `_{i}` suffix. Cheap because num_columns() reads
+    // only the on-disk index, not the full matrix.
     use data_beans::convert::try_open_or_convert;
+    use data_beans::hdf5_io::strip_backend_suffix;
+    let raw_labels: Vec<Box<str>> = resolved
+        .data_files
+        .iter()
+        .enumerate()
+        .map(|(idx, df)| {
+            Path::new(df.as_str())
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(strip_backend_suffix)
+                .map(Box::<str>::from)
+                .unwrap_or_else(|| idx.to_string().into_boxed_str())
+        })
+        .collect();
+    let mut counts: FxHashMap<&str, usize> = FxHashMap::default();
+    for n in &raw_labels {
+        *counts.entry(n.as_ref()).or_insert(0) += 1;
+    }
+    let mut seen: FxHashMap<&str, usize> = FxHashMap::default();
+    let unique_labels: Vec<Box<str>> = raw_labels
+        .iter()
+        .map(|n| {
+            if counts[n.as_ref()] == 1 {
+                n.clone()
+            } else {
+                let k = seen.entry(n.as_ref()).or_insert(0);
+                let s = format!("{}_{}", n, k).into_boxed_str();
+                *k += 1;
+                s
+            }
+        })
+        .collect();
     let mut all: Vec<Box<str>> = Vec::with_capacity(n_cells);
-    for (idx, df) in resolved.data_files.iter().enumerate() {
+    for (df, label) in resolved.data_files.iter().zip(unique_labels.iter()) {
         let n = try_open_or_convert(df)?
             .num_columns()
             .ok_or_else(|| anyhow::anyhow!("data file {df} has no column count"))?;
-        let label: Box<str> = idx.to_string().into_boxed_str();
-        all.extend(std::iter::repeat_n(label, n));
+        all.extend(std::iter::repeat_n(label.clone(), n));
     }
     if all.len() != n_cells {
         anyhow::bail!(
@@ -511,15 +545,48 @@ fn cells_by_batch(batch_labels: &[Box<str>]) -> Vec<(Box<str>, Vec<usize>)> {
         .collect()
 }
 
-/// Argmax-then-dominant-prob ordering inside one batch's cell list.
+/// Global display order for the K topic columns: descending total
+/// prevalence (sum of probabilities across all cells). The most
+/// prevalent topic comes first, so the same color block lands at the
+/// same horizontal position in every batch panel — gives the structure
+/// plot visual continuity across batches without changing the topic ↔
+/// color identity (which is still keyed by topic-id, see `topic_colors`
+/// in `fit_plot_topic`).
+fn global_topic_order(probs: &[f32], n_topics: usize) -> Vec<usize> {
+    if n_topics == 0 || probs.is_empty() {
+        return (0..n_topics).collect();
+    }
+    let n_cells = probs.len() / n_topics;
+    let mut totals = vec![0.0f32; n_topics];
+    for i in 0..n_cells {
+        let row = &probs[i * n_topics..(i + 1) * n_topics];
+        for (j, &v) in row.iter().enumerate() {
+            if v.is_finite() && v > 0.0 {
+                totals[j] += v;
+            }
+        }
+    }
+    let mut order: Vec<usize> = (0..n_topics).collect();
+    order.sort_by(|&a, &b| {
+        totals[b]
+            .partial_cmp(&totals[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.cmp(&b))
+    });
+    order
+}
+
+/// Argmax-then-dominant-prob ordering inside one batch's cell list. The
+/// primary sort key is the *display rank* of each cell's argmax topic
+/// (so cells dominated by the same topic land at the same horizontal
+/// position across batches); secondary key is descending dominant prob.
 fn order_by_argmax(
     cells: &[usize],
     probs: &[f32],
     n_topics: usize,
-    topic_ids: &[i64],
+    topic_rank: &[usize],
 ) -> Vec<usize> {
-    // Per cell: (argmax topic-id, -dominant prob).
-    let mut keyed: Vec<(usize, i64, f32)> = cells
+    let mut keyed: Vec<(usize, usize, f32)> = cells
         .iter()
         .map(|&i| {
             let row = &probs[i * n_topics..(i + 1) * n_topics];
@@ -531,7 +598,7 @@ fn order_by_argmax(
                     best_j = j;
                 }
             }
-            (i, topic_ids[best_j], best_v)
+            (i, topic_rank[best_j], best_v)
         })
         .collect();
     keyed.sort_by(|a, b| {
@@ -548,20 +615,20 @@ fn order_by_coord(
     cell_coords_path: Option<&str>,
     probs: &[f32],
     n_topics: usize,
-    topic_ids: &[i64],
+    topic_rank: &[usize],
 ) -> anyhow::Result<Vec<usize>> {
     let Some(path) = cell_coords_path else {
         info!("--order coord: no layout.cell_coords in manifest, falling back to argmax");
-        return Ok(order_by_argmax(cells, probs, n_topics, topic_ids));
+        return Ok(order_by_argmax(cells, probs, n_topics, topic_rank));
     };
     let MatWithNames { cols, mat, .. } = Mat::from_parquet(path)?;
     let Some(xj) = cols.iter().position(|c| &**c == "x") else {
         info!("--order coord: no 'x' column in {path}, falling back to argmax");
-        return Ok(order_by_argmax(cells, probs, n_topics, topic_ids));
+        return Ok(order_by_argmax(cells, probs, n_topics, topic_rank));
     };
     if mat.nrows() < cells.iter().copied().max().unwrap_or(0) + 1 {
         info!("--order coord: cell_coords too short, falling back to argmax");
-        return Ok(order_by_argmax(cells, probs, n_topics, topic_ids));
+        return Ok(order_by_argmax(cells, probs, n_topics, topic_rank));
     }
     let mut keyed: Vec<(usize, f32)> = cells.iter().map(|&i| (i, mat[(i, xj)])).collect();
     keyed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -576,6 +643,8 @@ struct StructDims {
     bar_h: u32,
     label_band: u32,
     legend_band: u32,
+    /// Horizontal gap between adjacent panels in the combined view.
+    panel_gap: u32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -597,12 +666,31 @@ fn render_structure_plots(
 
     let struct_dir = format!("{plot_root}/struct");
     let by_group_dir = format!("{struct_dir}/by_{}", args.group_by.subdir_suffix());
+    // Clear per-group outputs so renaming (e.g., index labels → basenames,
+    // or batch reruns with a different cohort) doesn't leave stale files
+    // alongside the new ones. Only this dir is owned exclusively by
+    // plot-topic's per-group writer; sibling dirs (e.g. `by_celltype/`
+    // when this run uses `by_batch/`) are preserved.
+    if Path::new(&by_group_dir).exists() {
+        fs::remove_dir_all(&by_group_dir)?;
+    }
     fs::create_dir_all(&by_group_dir)?;
+
+    // Global topic display order: descending total prevalence across all
+    // cells. Cells dominated by the same topic land at the same x-band
+    // in every panel, so structure-bar blocks read consistently across
+    // batches. `topic_rank[j]` = position of topic-column `j` in the
+    // display order; `topic_display_order[i]` = topic-column at slot `i`.
+    let topic_display_order = global_topic_order(probs, n_topics);
+    let mut topic_rank = vec![0usize; n_topics];
+    for (pos, &j) in topic_display_order.iter().enumerate() {
+        topic_rank[j] = pos;
+    }
 
     let ordered: Vec<(Box<str>, Vec<usize>)> = match args.order {
         CellOrder::Argmax => groups
             .iter()
-            .map(|(b, cs)| (b.clone(), order_by_argmax(cs, probs, n_topics, topic_ids)))
+            .map(|(b, cs)| (b.clone(), order_by_argmax(cs, probs, n_topics, &topic_rank)))
             .collect(),
         CellOrder::Coord => groups
             .iter()
@@ -612,7 +700,7 @@ fn render_structure_plots(
                     resolved.cell_coords.as_deref(),
                     probs,
                     n_topics,
-                    topic_ids,
+                    &topic_rank,
                 )?;
                 Ok::<_, anyhow::Error>((b.clone(), o))
             })
@@ -629,8 +717,20 @@ fn render_structure_plots(
         bar_h: (args.height * args.dpi as f32).round().max(1.0) as u32,
         label_band: (args.dpi as f32 * 0.35).round().max(20.0) as u32,
         legend_band: (args.dpi as f32 * 0.6).round().max(40.0) as u32,
+        // ~0.06 in @ 300 DPI ≈ 18 px; small but visible separator.
+        panel_gap: (args.dpi as f32 * 0.06).round().max(8.0) as u32,
     };
-    let total_width_px = (args.width * args.dpi as f32).round().max(1.0) as u32;
+    // Reserve gap room when budgeting per-panel widths so the combined
+    // SVG width still respects `args.width`. With a single panel there
+    // are no gaps.
+    let n_panels = ordered.len();
+    let total_gap_px = if n_panels > 1 {
+        dims.panel_gap * (n_panels as u32 - 1)
+    } else {
+        0
+    };
+    let usable_width_px = (args.width * args.dpi as f32).round().max(1.0) as u32;
+    let total_width_px = usable_width_px.saturating_sub(total_gap_px).max(1);
 
     // Per-group raster panels (rayon-parallel; each panel is an
     // independent tiny-skia render).
@@ -665,7 +765,13 @@ fn render_structure_plots(
         .collect::<anyhow::Result<_>>()?;
 
     panels.par_iter().try_for_each(|p| -> anyhow::Result<()> {
-        let svg = emit_struct_svg(std::slice::from_ref(p), &dims, topic_ids, topic_colors);
+        let svg = emit_struct_svg(
+            std::slice::from_ref(p),
+            &dims,
+            topic_ids,
+            topic_colors,
+            &topic_display_order,
+        );
         let base = format!("{by_group_dir}/{}", sanitize(&p.batch));
         emit_outputs(
             &svg,
@@ -676,11 +782,22 @@ fn render_structure_plots(
         )
     })?;
 
-    let combined_w: u32 = panels.iter().map(|p| p.width_px).sum();
-    let svg = emit_struct_svg(&panels, &dims, topic_ids, topic_colors);
+    let combined_bars_w: u32 = panels.iter().map(|p| p.width_px).sum();
+    let svg = emit_struct_svg(
+        &panels,
+        &dims,
+        topic_ids,
+        topic_colors,
+        &topic_display_order,
+    );
+    let combined_gap_w: u32 = if panels.len() > 1 {
+        dims.panel_gap * (panels.len() as u32 - 1)
+    } else {
+        0
+    };
     emit_outputs(
         &svg,
-        combined_w + dims.legend_band,
+        combined_bars_w + combined_gap_w + dims.legend_band,
         dims.label_band + dims.bar_h,
         &format!("{struct_dir}/all"),
         args,
@@ -707,9 +824,12 @@ fn emit_struct_svg(
     d: &StructDims,
     topic_ids: &[i64],
     topic_colors: &[Rgb],
+    topic_display_order: &[usize],
 ) -> String {
     let bars_w: u32 = panels.iter().map(|p| p.width_px).sum();
-    let total_w = bars_w + d.legend_band;
+    let n_gaps = panels.len().saturating_sub(1) as u32;
+    let total_gaps_w = d.panel_gap * n_gaps;
+    let total_w = bars_w + total_gaps_w + d.legend_band;
     let total_h = d.label_band + d.bar_h;
     let label_fs = (d.label_band as f32 * PANEL_LABEL_FONT_FRAC).round();
 
@@ -729,7 +849,7 @@ fn emit_struct_svg(
     );
 
     let mut x_offset: u32 = 0;
-    for p in panels {
+    for (panel_idx, p) in panels.iter().enumerate() {
         let label = format!("{} (n={})", plot_utils::escape_xml(&p.batch), p.n_cells);
         let _ = writeln!(
             s,
@@ -759,9 +879,21 @@ fn emit_struct_svg(
             h = d.bar_h as f32 - 1.0,
         );
         x_offset += p.width_px;
+        if panel_idx + 1 < panels.len() {
+            x_offset += d.panel_gap;
+        }
     }
 
-    emit_topic_legend(&mut s, bars_w, d, topic_ids, topic_colors);
+    // Legend lists topics in display order so the top swatch matches the
+    // dominant block at the leftmost x in every panel.
+    emit_topic_legend(
+        &mut s,
+        bars_w + total_gaps_w,
+        d,
+        topic_ids,
+        topic_colors,
+        topic_display_order,
+    );
     let _ = writeln!(s, "</svg>");
     s
 }
@@ -772,6 +904,7 @@ fn emit_topic_legend(
     d: &StructDims,
     topic_ids: &[i64],
     topic_colors: &[Rgb],
+    topic_display_order: &[usize],
 ) {
     let n = topic_ids.len();
     if n == 0 || d.legend_band < 8 {
@@ -784,7 +917,9 @@ fn emit_topic_legend(
     let start_y = d.label_band as f32 + ((d.bar_h as f32 - total_legend_h) * 0.5).max(0.0);
 
     let _ = writeln!(s, "  <g id=\"legend\">");
-    for (i, (&tid, &(r, g, b))) in topic_ids.iter().zip(topic_colors).enumerate() {
+    for (i, &j) in topic_display_order.iter().enumerate() {
+        let tid = topic_ids[j];
+        let (r, g, b) = topic_colors[j];
         let y = start_y + i as f32 * line_h;
         let x = bar_x_end as f32 + pad_left;
         let _ = writeln!(
@@ -908,6 +1043,12 @@ fn render_dict_plot(
     }
 
     let dict_dir = format!("{plot_root}/dict");
+    // Clear so a hinton↔heatmap switch (driven by n_genes crossing
+    // HINTON_GENE_THRESHOLD) doesn't leave both old + new files
+    // side-by-side.
+    if Path::new(&dict_dir).exists() {
+        fs::remove_dir_all(&dict_dir)?;
+    }
     fs::create_dir_all(&dict_dir)?;
 
     // Diagonalize: rows ordered so peak topic per gene runs along the
@@ -965,7 +1106,11 @@ fn render_dict_plot(
         // size (≈ 0.55 × font height per char).
         let label_band_left = ((max_label_chars * label_font_px * 0.55).ceil() as u32 + 8).min(220);
         let label_band_top: u32 = 28;
-        let total_w = label_band_left + bar_w + 16;
+        let cbar_w: u32 = 12;
+        let cbar_pad: u32 = 12;
+        let cbar_label_w: u32 = 56; // room for "log10  -3.21" labels
+        let right_band = cbar_pad + cbar_w + cbar_label_w + 8;
+        let total_w = label_band_left + bar_w + right_band;
         let total_h = label_band_top + bar_h + 8;
 
         // Reorder sub matrix so PNG draws cells in display order.
@@ -975,16 +1120,16 @@ fn render_dict_plot(
                 sub_disp.push(sub[rr * n_topics + cc]);
             }
         }
-        let topic_colors_disp: Vec<Rgb> = col_order.iter().map(|&cc| topic_colors[cc]).collect();
 
-        let png = render_dict_heatmap_png(
-            &sub_disp,
-            n_genes,
-            n_topics,
-            cell_w,
-            cell_h,
-            &topic_colors_disp,
-        )?;
+        // Percentile-clipped log10 bounds for the diverging color scale.
+        let (lo_log, hi_log) = log10_clip_bounds(&sub_disp, 0.01, 0.99);
+        info!(
+            "Heatmap log10 range (1%–99%): [{:.2}, {:.2}]",
+            lo_log, hi_log
+        );
+
+        let png =
+            render_dict_heatmap_png(&sub_disp, n_genes, n_topics, cell_w, cell_h, lo_log, hi_log)?;
 
         let mut s = String::with_capacity(png.len() * 2 + sub_gene_names.len() * 64 + 4096);
         let _ = write!(
@@ -1019,6 +1164,51 @@ fn render_dict_plot(
             y = label_band_top,
             w = bar_w,
             h = bar_h,
+        );
+        // Colorbar (RdBu_r) on the right with min/mid/max log10 ticks.
+        // Height matches the heatmap so cell rows and gradient stops are
+        // directly comparable by y-position.
+        let cbar_x = label_band_left + bar_w + cbar_pad;
+        let cbar_y = label_band_top;
+        let cbar_h = bar_h;
+        let cbar_png = render_colorbar_png(cbar_w, cbar_h)?;
+        let cbar_b64 = BASE64.encode(&cbar_png);
+        let _ = writeln!(
+            s,
+            "  <image x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" \
+             preserveAspectRatio=\"none\" href=\"data:image/png;base64,{cbar_b64}\"/>",
+            x = cbar_x,
+            y = cbar_y,
+            w = cbar_w,
+            h = cbar_h,
+        );
+        let _ = writeln!(
+            s,
+            "  <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{w}\" height=\"{h}\" \
+             fill=\"none\" stroke=\"black\" stroke-width=\"0.5\"/>",
+            x = cbar_x as f32 + 0.5,
+            y = cbar_y as f32 + 0.5,
+            w = cbar_w.saturating_sub(1),
+            h = cbar_h.saturating_sub(1),
+        );
+        let tick_x = (cbar_x + cbar_w + 4) as f32;
+        let mid_log = 0.5 * (lo_log + hi_log);
+        for (frac, val) in [(0.0_f32, hi_log), (0.5, mid_log), (1.0, lo_log)] {
+            let ty = cbar_y as f32 + frac * cbar_h as f32;
+            let _ = writeln!(
+                s,
+                "  <text x=\"{tx:.1}\" y=\"{ty:.1}\" font-family=\"Helvetica, Arial, sans-serif\" \
+                 font-size=\"9\" dominant-baseline=\"central\">{v}</text>",
+                tx = tick_x,
+                v = format_sci(10f32.powf(val)),
+            );
+        }
+        let _ = writeln!(
+            s,
+            "  <text x=\"{tx:.1}\" y=\"{ty}\" font-family=\"Helvetica, Arial, sans-serif\" \
+             font-size=\"9\" text-anchor=\"start\">β</text>",
+            tx = cbar_x as f32,
+            ty = cbar_y.saturating_sub(8),
         );
         // Gene labels along the left side. Skip when the row pitch is
         // too small to render legibly even at the auto-shrunk font; in
@@ -1056,9 +1246,18 @@ fn render_dict_plot(
 }
 
 /// Top-N gene indices per topic, unioned across topics, returned in
-/// sorted order. Tie-break favors specificity: a gene's per-topic weight
-/// minus its mean over the other topics. Mirrors pinto's
-/// `pinto/src/plot/markers.rs:16-61`.
+/// sorted order. Ranks by the gene's KL contribution to topic `j`,
+///
+///     score(g, j) = w_gj · ln((w_gj + ε) / (m_g + ε)),
+///
+/// where `m_g` is the gene's mean weight over the *other* `K − 1`
+/// topics. The product form requires *both* high mass and high
+/// specificity: housekeeping genes (high everywhere → ratio ≈ 1, log ≈ 0)
+/// score near zero even when `w` is large, and ultra-rare genes (tiny
+/// mass) also score near zero even when the ratio is huge. Topic-
+/// specific markers — high mass *and* lifted relative to other topics —
+/// dominate. ε is set to `1e−8 / K` so housekeeping doesn't get a free
+/// boost from the smoothing on simplex-normalized inputs.
 fn top_genes_per_topic(
     weights_gk: &[f32],
     n_genes: usize,
@@ -1078,16 +1277,25 @@ fn top_genes_per_topic(
         }
     }
 
+    let eps = 1e-8 / n_topics as f32;
     for j in 0..n_topics {
         let mut scored: Vec<(usize, f32, f32)> = (0..n_genes)
-            .map(|i| {
+            .filter_map(|i| {
                 let w = weights_gk[i * n_topics + j];
+                if w <= 0.0 {
+                    return None;
+                }
                 let other_mean = if n_topics > 1 {
-                    (row_sums[i] - w) / (n_topics - 1) as f32
+                    (row_sums[i] - w).max(0.0) / (n_topics - 1) as f32
                 } else {
                     0.0
                 };
-                (i, w, w - other_mean)
+                let ratio = (w + eps) / (other_mean + eps);
+                let score = w * ratio.ln();
+                if !score.is_finite() || score <= 0.0 {
+                    return None;
+                }
+                Some((i, score, w))
             })
             .collect();
         scored.sort_by(|a, b| {
@@ -1104,18 +1312,106 @@ fn top_genes_per_topic(
     out
 }
 
-/// Viridis-bin rasterized heatmap (n_genes × n_topics). Color shade
-/// within a topic-column = log-magnitude bin (cheap quantization, no
-/// external viridis dep). Topic columns share the topic palette to keep
-/// the dictionary plot keyed to the same color identity as the
-/// structure plot.
+/// Compact scientific-notation formatter for colorbar tick labels:
+/// `2.7e-5` style with one fractional digit. Avoids the noise of
+/// printf's `{:e}` (which uses `2.7e0` for 2.7) and is short enough to
+/// fit a vertical colorbar's right margin.
+fn format_sci(v: f32) -> String {
+    if !v.is_finite() || v == 0.0 {
+        return "0".to_string();
+    }
+    let abs = v.abs();
+    let exp = abs.log10().floor() as i32;
+    let mantissa = v / 10f32.powi(exp);
+    // Round mantissa to 1 fractional digit; if rounding pushes it to 10,
+    // bump the exponent so we still show "1.0e3" not "10.0e2".
+    let rounded = (mantissa * 10.0).round() / 10.0;
+    let (m, e) = if rounded.abs() >= 10.0 {
+        (rounded / 10.0, exp + 1)
+    } else {
+        (rounded, exp)
+    };
+    if e == 0 {
+        format!("{m:.1}")
+    } else {
+        format!("{m:.1}e{e}")
+    }
+}
+
+/// RdBu_r diverging palette, 3-stop linear interpolation.
+/// `t ∈ [0, 1]`: 0 = blue (low), 0.5 = white (mid), 1 = red (high).
+/// Stops chosen to match matplotlib's `RdBu_r` endpoints.
+fn rdbu_r(t: f32) -> Rgb {
+    const LOW: (u8, u8, u8) = (33, 102, 172);
+    const MID: (u8, u8, u8) = (247, 247, 247);
+    const HIGH: (u8, u8, u8) = (178, 24, 43);
+    let t = t.clamp(0.0, 1.0);
+    let lerp = |a: u8, b: u8, u: f32| (a as f32 + (b as f32 - a as f32) * u).round() as u8;
+    if t < 0.5 {
+        let u = t / 0.5;
+        (
+            lerp(LOW.0, MID.0, u),
+            lerp(LOW.1, MID.1, u),
+            lerp(LOW.2, MID.2, u),
+        )
+    } else {
+        let u = (t - 0.5) / 0.5;
+        (
+            lerp(MID.0, HIGH.0, u),
+            lerp(MID.1, HIGH.1, u),
+            lerp(MID.2, HIGH.2, u),
+        )
+    }
+}
+
+/// Percentile-clip bounds in log10 space across all finite, positive
+/// entries of `sub`. Returns `(low_log10, high_log10)`. Uses 1st/99th
+/// percentile so a handful of extreme values can't compress the rest of
+/// the dynamic range. Falls back to a symmetric ±1 window if no positive
+/// data is present.
+fn log10_clip_bounds(sub: &[f32], lo_q: f32, hi_q: f32) -> (f32, f32) {
+    let mut logs: Vec<f32> = sub
+        .iter()
+        .filter_map(|&v| {
+            if v.is_finite() && v > 0.0 {
+                Some(v.log10())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if logs.is_empty() {
+        return (-1.0, 1.0);
+    }
+    logs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pick = |q: f32| -> f32 {
+        let n = logs.len();
+        let idx = ((q.clamp(0.0, 1.0) * (n - 1) as f32).round() as usize).min(n - 1);
+        logs[idx]
+    };
+    let lo = pick(lo_q);
+    let hi = pick(hi_q);
+    if (hi - lo).abs() < 1e-6 {
+        // Constant data — give the colorbar *some* width.
+        (lo - 0.5, hi + 0.5)
+    } else {
+        (lo, hi)
+    }
+}
+
+/// RdBu_r diverging heatmap (n_genes × n_topics). Values are mapped via
+/// log10 with 1st/99th percentile clipping so a few extreme entries
+/// don't wash out the rest. Color = `rdbu_r((log10(w) − lo) / (hi − lo))`.
+/// Cells with `w ≤ 0` or non-finite values are drawn at the low end of
+/// the palette (deep blue), matching the "no signal" visual convention.
 fn render_dict_heatmap_png(
     sub: &[f32],
     n_genes: usize,
     n_topics: usize,
     cell_w: u32,
     cell_h: u32,
-    topic_colors: &[Rgb],
+    lo_log: f32,
+    hi_log: f32,
 ) -> anyhow::Result<Vec<u8>> {
     use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
 
@@ -1123,39 +1419,21 @@ fn render_dict_heatmap_png(
     let bar_h = n_genes as u32 * cell_h;
     let mut pixmap = Pixmap::new(bar_w, bar_h)
         .ok_or_else(|| anyhow::anyhow!("pixmap alloc failed ({bar_w}x{bar_h})"))?;
-
-    // Per-column max for normalization.
-    let mut col_max = vec![0.0f32; n_topics];
-    for i in 0..n_genes {
-        for j in 0..n_topics {
-            let v = sub[i * n_topics + j];
-            if v.is_finite() && v > col_max[j] {
-                col_max[j] = v;
-            }
-        }
-    }
-
-    // White background so blend-toward-saturated-topic-color reads
-    // correctly at full alpha — transparency would let the underlying
-    // SVG color through and washed out the low-magnitude cells.
     pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
 
+    let span = (hi_log - lo_log).max(1e-6);
     let identity = Transform::identity();
     for i in 0..n_genes {
         for j in 0..n_topics {
             let v = sub[i * n_topics + j];
-            if !v.is_finite() || v <= 0.0 || col_max[j] <= 0.0 {
-                continue;
-            }
-            // log1p compression so heavy-tailed weights stay readable.
-            let frac = (v.ln_1p() / col_max[j].ln_1p().max(1e-12)).clamp(0.0, 1.0);
-            let (r, g, b) = topic_colors[j];
-            // Magnitude → blend white→topic-color at full alpha. Avoids
-            // alpha < 1 which renders ambiguously over PDF backgrounds.
-            let inv = 1.0 - frac;
-            let blend = |c: u8| (inv * 255.0 + frac * c as f32).round().clamp(0.0, 255.0) as u8;
+            let t = if v.is_finite() && v > 0.0 {
+                ((v.log10() - lo_log) / span).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let (r, g, b) = rdbu_r(t);
             let mut p = Paint::default();
-            p.set_color_rgba8(blend(r), blend(g), blend(b), 255);
+            p.set_color_rgba8(r, g, b, 255);
             p.anti_alias = false;
             let x = j as f32 * cell_w as f32;
             let y = i as f32 * cell_h as f32;
@@ -1173,6 +1451,30 @@ fn render_dict_heatmap_png(
     pixmap
         .encode_png()
         .map_err(|e| anyhow::anyhow!("PNG encode failed: {e}"))
+}
+
+/// Render a vertical RdBu_r colorbar PNG with `bar_w × bar_h` pixels.
+/// `bar_w` is typically 10–14 px; the gradient runs top (high) → bottom
+/// (low) so it visually pairs with a y-axis scale.
+fn render_colorbar_png(bar_w: u32, bar_h: u32) -> anyhow::Result<Vec<u8>> {
+    use tiny_skia::Pixmap;
+    let mut pixmap =
+        Pixmap::new(bar_w, bar_h).ok_or_else(|| anyhow::anyhow!("colorbar pixmap alloc failed"))?;
+    let data = pixmap.data_mut();
+    for y in 0..bar_h {
+        let t = 1.0 - (y as f32 / (bar_h - 1).max(1) as f32);
+        let (r, g, b) = rdbu_r(t);
+        for x in 0..bar_w {
+            let off = ((y * bar_w + x) * 4) as usize;
+            data[off] = r;
+            data[off + 1] = g;
+            data[off + 2] = b;
+            data[off + 3] = 255;
+        }
+    }
+    pixmap
+        .encode_png()
+        .map_err(|e| anyhow::anyhow!("colorbar PNG encode failed: {e}"))
 }
 
 // ---------------------------------------------------------------------------

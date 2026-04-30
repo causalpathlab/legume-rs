@@ -34,11 +34,6 @@ pub struct MultilevelParams {
     pub num_levels: usize,
     pub sort_dim: usize,
     pub num_opt_iter: usize,
-    /// When true, add 1 bit to each level's sort dimension to create
-    /// ~2× more pseudobulk groups, and store the over-resolved
-    /// `CollapsedStat` in each `CollapsedOut` for jitter-time
-    /// resampling.
-    pub oversample: bool,
     /// Opt-in BBKNN + Poisson DC-SBM refinement on top of the hash
     /// partition. `None` preserves legacy behavior.
     pub refine: Option<crate::refine_multilevel::RefineParams>,
@@ -51,7 +46,6 @@ impl MultilevelParams {
             num_levels: DEFAULT_NUM_LEVELS,
             sort_dim: proj_dim.min(12),
             num_opt_iter: DEFAULT_OPT_ITER,
-            oversample: false,
             refine: Some(crate::refine_multilevel::RefineParams::default()),
         }
     }
@@ -502,7 +496,6 @@ fn optimize(
             mu_residual: Some(mu_resid_param),
             gamma: Some(gamma_param),
             delta: Some(delta_param),
-            overresolved_stat: None,
         })
     } else {
         let mut denom_ds = DMatrix::<f32>::zeros(num_genes, num_samples);
@@ -517,7 +510,6 @@ fn optimize(
             mu_residual: None,
             gamma: None,
             delta: None,
-            overresolved_stat: None,
         })
     }
 }
@@ -530,10 +522,6 @@ pub struct CollapsedOut {
     pub mu_residual: Option<GammaMatrix>,
     pub gamma: Option<GammaMatrix>,
     pub delta: Option<GammaMatrix>,
-    /// Over-resolved sufficient statistics for pseudobulk augmentation.
-    /// When present, the training loop can randomly subsample groups at
-    /// each jitter boundary to improve generalisability.
-    pub overresolved_stat: Option<Box<CollapsedStat>>,
 }
 
 /// a struct to hold the sufficient statistics for the model
@@ -1153,13 +1141,20 @@ struct RefineCollectCtx<'a> {
     num_batches: usize,
     knn: usize,
     opt_iter: usize,
-    oversample: bool,
     refine_params: &'a crate::refine_multilevel::RefineParams,
 }
 
 /// Refinement integration path for `SparseIoVec`.
 ///
 /// Walks each level of the hash-initialized hierarchy, runs
+fn collapse_level_progress_bar(num_levels: usize) -> ProgressBar {
+    ProgressBar::new(num_levels as u64).with_style(
+        ProgressStyle::with_template("Collapse levels {bar:40} {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("##-"),
+    )
+}
+
 /// `refine_multilevel::refine_assignments` over super-cells, then rebuilds
 /// `CollapsedStat` per level from the refined cell → group assignment and
 /// emits `CollapsedOut` with identical shape to the legacy path.
@@ -1176,7 +1171,6 @@ fn refine_and_collect_single_layer(
         num_batches,
         knn,
         opt_iter,
-        oversample,
         refine_params,
     } = *ctx;
     info!(
@@ -1268,12 +1262,11 @@ fn refine_and_collect_single_layer(
         "Level 1/{}: refined k={} (finest; {} cells read)",
         num_levels, k_finest, ncols
     );
+    let level_pb = collapse_level_progress_bar(num_levels);
     let mut results: Vec<CollapsedOut> = Vec::with_capacity(num_levels);
-    let mut finest_out = optimize(&fine_stat, (1.0, 1.0), opt_iter)?;
-    if oversample {
-        finest_out.overresolved_stat = Some(Box::new(fine_stat.clone()));
-    }
+    let finest_out = optimize(&fine_stat, (1.0, 1.0), opt_iter)?;
     results.push(finest_out);
+    level_pb.inc(1);
 
     let mut prev_stat = fine_stat;
     for level in 1..num_levels {
@@ -1293,13 +1286,12 @@ fn refine_and_collect_single_layer(
             k_prev
         );
         let level_opt_iter = (opt_iter / 2).max(10);
-        let mut out = optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?;
-        if oversample {
-            out.overresolved_stat = Some(Box::new(coarse_stat.clone()));
-        }
+        let out = optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?;
         results.push(out);
         prev_stat = coarse_stat;
+        level_pb.inc(1);
     }
+    level_pb.finish_and_clear();
 
     Ok(results)
 }
@@ -1323,7 +1315,6 @@ fn refine_and_collect_stack(
         num_batches,
         knn,
         opt_iter,
-        oversample,
         refine_params,
     } = *ctx;
     let num_layers = stack.num_types();
@@ -1428,10 +1419,7 @@ fn refine_and_collect_stack(
                 &mut stat,
             )?;
         }
-        let mut out = optimize(&stat, (1.0, 1.0), opt_iter)?;
-        if oversample {
-            out.overresolved_stat = Some(Box::new(stat.clone()));
-        }
+        let out = optimize(&stat, (1.0, 1.0), opt_iter)?;
         finest_layer_results.push(out);
         fine_stats.push(stat);
     }
@@ -1439,8 +1427,10 @@ fn refine_and_collect_stack(
         "Level 1/{}: refined k={} (finest; {} layers × {} cells)",
         num_levels, k_finest, num_layers, ncols
     );
+    let level_pb = collapse_level_progress_bar(num_levels);
     let mut results: Vec<Vec<CollapsedOut>> = Vec::with_capacity(num_levels);
     results.push(finest_layer_results);
+    level_pb.inc(1);
 
     let mut prev_stats = fine_stats;
     for level in 1..num_levels {
@@ -1456,10 +1446,7 @@ fn refine_and_collect_stack(
         let mut coarse_stats = Vec::with_capacity(num_layers);
         for prev_stat in prev_stats.iter() {
             let coarse_stat = merge_stat(prev_stat, &fine_to_coarse, k_level);
-            let mut out = optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?;
-            if oversample {
-                out.overresolved_stat = Some(Box::new(coarse_stat.clone()));
-            }
+            let out = optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?;
             layer_results.push(out);
             coarse_stats.push(coarse_stat);
         }
@@ -1473,7 +1460,9 @@ fn refine_and_collect_stack(
         );
         results.push(layer_results);
         prev_stats = coarse_stats;
+        level_pb.inc(1);
     }
+    level_pb.finish_and_clear();
 
     Ok(results)
 }
@@ -1630,7 +1619,6 @@ impl MultilevelCollapsingOps for SparseIoVec {
         let sort_dim = params.sort_dim;
         let knn = params.knn_super_cells;
         let opt_iter = params.num_opt_iter;
-        let oversample = params.oversample;
 
         self.register_batch_membership(batch_membership);
         let num_features = self.num_rows();
@@ -1640,20 +1628,13 @@ impl MultilevelCollapsingOps for SparseIoVec {
         }
 
         // Level dims: [finest, ..., coarsest]
-        // When oversampling, add 1 bit to each level → ~2× groups
-        let base_dims = compute_level_sort_dims(sort_dim, params.num_levels);
-        let level_dims: Vec<usize> = if oversample {
-            base_dims.iter().map(|&d| d + 1).collect()
-        } else {
-            base_dims
-        };
+        let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
 
         info!(
-            "Multi-level collapsing (fine→coarse): {} levels, sort_dims={:?}, {} batches{}",
+            "Multi-level collapsing (fine→coarse): {} levels, sort_dims={:?}, {} batches",
             level_dims.len(),
             level_dims,
             num_batches,
-            if oversample { " [oversample 2×]" } else { "" },
         );
 
         // Compute binary codes at finest resolution once
@@ -1684,7 +1665,6 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 num_batches,
                 knn,
                 opt_iter,
-                oversample,
                 refine_params,
             };
             return refine_and_collect_single_layer(self, proj_kn, &ctx);
@@ -1727,11 +1707,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
 
         // Optimize finest level
         info!("Optimizing parameters ...");
-        let mut result = optimize(&fine_stat, (1.0, 1.0), opt_iter)?;
-        if oversample {
-            result.overresolved_stat = Some(Box::new(fine_stat.clone()));
-        }
-        #[allow(unused_mut)]
+        let result = optimize(&fine_stat, (1.0, 1.0), opt_iter)?;
         let mut results = vec![result];
 
         // Agglomeratively merge for coarser levels
@@ -1756,10 +1732,8 @@ impl MultilevelCollapsingOps for SparseIoVec {
             let coarse_stat = merge_stat(&prev_stat, &fine_to_coarse, num_coarse);
 
             info!("Optimizing parameters ...");
-            let mut coarse_result = optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?;
-            if oversample {
-                coarse_result.overresolved_stat = Some(Box::new(coarse_stat.clone()));
-            }
+            let coarse_result = optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?;
+            results.push(coarse_result);
 
             let mut coarse_group_to_cols = vec![vec![]; num_coarse];
             for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {
@@ -1811,7 +1785,6 @@ impl MultilevelCollapsingOps for SparseIoStack {
         let sort_dim = params.sort_dim;
         let knn = params.knn_super_cells;
         let opt_iter = params.num_opt_iter;
-        let oversample = params.oversample;
 
         self.register_batch_membership(batch_membership);
 
@@ -1829,12 +1802,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
 
         // Opt-in refinement path for the stack.
         if let Some(refine_params) = params.refine.as_ref() {
-            let base_dims = compute_level_sort_dims(sort_dim, params.num_levels);
-            let level_dims: Vec<usize> = if oversample {
-                base_dims.iter().map(|&d| d + 1).collect()
-            } else {
-                base_dims
-            };
+            let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
             let finest_dim = level_dims[0];
             let kk = proj_kn.nrows().min(finest_dim).min(ncols);
             let fine_codes = binary_sort_columns(proj_kn, kk)?;
@@ -1854,7 +1822,6 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 num_batches,
                 knn,
                 opt_iter,
-                oversample,
                 refine_params,
             };
             return refine_and_collect_stack(self, proj_kn, &ctx);

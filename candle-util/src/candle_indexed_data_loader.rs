@@ -34,7 +34,7 @@ pub struct IndexedMinibatchData {
 /// each side, producing separate [N, S_in] and [N, S_out] tensors.
 ///
 /// Call `precompute_all_minibatches` after `shuffle_minibatch` to cache all
-/// minibatch tensors for the jitter interval. Use `minibatch_cached` to retrieve.
+/// minibatch tensors. Use `minibatch_cached` to retrieve.
 pub struct IndexedInMemoryData {
     input_samples: Vec<IndexedSample>,
     input_null_rows: Option<Vec<Vec<f32>>>,
@@ -59,6 +59,12 @@ where
     pub output: &'a D,
     pub input_context_size: usize,
     pub output_context_size: usize,
+    /// Per-feature weights used to *score* candidates during top-K selection
+    /// on the encoder (input) side. Stored values remain raw row values.
+    /// Pass `&[1.0; n_features]` to fall back to raw value-only selection.
+    pub input_shortlist_weights: &'a [f32],
+    /// Same role on the decoder (output) side.
+    pub output_shortlist_weights: &'a [f32],
 }
 
 /// Select top-K indices by value from a dense row.
@@ -85,6 +91,32 @@ pub fn top_k_indices(row: &[f32], k: usize) -> (Vec<u32>, Vec<f32>) {
     let indices: Vec<u32> = top_k.iter().map(|&(i, _)| i).collect();
     let values: Vec<f32> = top_k.iter().map(|&(_, v)| v).collect();
     (indices, values)
+}
+
+/// Like [`top_k_indices`] but ranks candidates by `row[i] * weights[i]` while
+/// returning the raw `row[i]` for the selected indices. Used to bias shortlist
+/// selection against high-mean / low-information genes (e.g. via NB-Fisher
+/// weights) without distorting the values fed to the model.
+pub fn top_k_indices_weighted(row: &[f32], weights: &[f32], k: usize) -> (Vec<u32>, Vec<f32>) {
+    debug_assert_eq!(row.len(), weights.len());
+    let k = k.min(row.len());
+
+    let mut scored: Vec<(f32, u32)> = row
+        .iter()
+        .zip(weights.iter())
+        .enumerate()
+        .map(|(i, (&v, &w))| (v * w, i as u32))
+        .collect();
+
+    scored.select_nth_unstable_by(k.saturating_sub(1), |a, b| {
+        b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut idx: Vec<u32> = scored[..k].iter().map(|&(_, i)| i).collect();
+    idx.sort_unstable();
+
+    let values: Vec<f32> = idx.iter().map(|&i| row[i as usize]).collect();
+    (idx, values)
 }
 
 struct UnionScatterOut {
@@ -152,12 +184,13 @@ fn build_indexed_samples<D: CandleDataLoaderOps + Sync>(
     data: &D,
     n_samples: usize,
     context_size: usize,
+    shortlist_weights: &[f32],
 ) -> Vec<IndexedSample> {
     (0..n_samples)
         .into_par_iter()
         .map(|i| {
             let row = data.row_to_f32_vec(i);
-            let (indices, values) = top_k_indices(&row, context_size);
+            let (indices, values) = top_k_indices_weighted(&row, shortlist_weights, context_size);
             IndexedSample { indices, values }
         })
         .collect()
@@ -197,8 +230,18 @@ impl IndexedInMemoryData {
         let input_context_size = args.input_context_size.min(n_input_features);
         let output_context_size = args.output_context_size.min(n_output_features);
 
-        let input_samples = build_indexed_samples(args.input, n_samples, input_context_size);
-        let output_samples = build_indexed_samples(args.output, n_samples, output_context_size);
+        let input_samples = build_indexed_samples(
+            args.input,
+            n_samples,
+            input_context_size,
+            args.input_shortlist_weights,
+        );
+        let output_samples = build_indexed_samples(
+            args.output,
+            n_samples,
+            output_context_size,
+            args.output_shortlist_weights,
+        );
 
         let output_log_q = compute_log_selection_freq(&output_samples, n_output_features);
 
@@ -270,7 +313,7 @@ impl IndexedInMemoryData {
     /// Pre-build all minibatch tensors for the current shuffle order.
     ///
     /// Call this once after `shuffle_minibatch` to avoid rebuilding
-    /// union+scatter on every `minibatch_cached` call within a jitter interval.
+    /// union+scatter on every `minibatch_cached` call within an epoch.
     pub fn precompute_all_minibatches(&mut self, target_device: &Device) -> anyhow::Result<()> {
         self.cached_batches = (0..self.minibatches.chunks.len())
             .map(|b| {
@@ -424,6 +467,19 @@ mod tests {
     }
 
     #[test]
+    fn test_top_k_indices_weighted() {
+        // raw row top-3 by value would be {3,5,1} (0.9, 0.7, 0.5).
+        // Down-weight idx 3 and 5 ("housekeeping"); idx 0,2,4 should win.
+        let row = vec![0.1, 0.5, 0.3, 0.9, 0.2, 0.7];
+        let weights = vec![1.0, 0.1, 1.0, 0.01, 1.0, 0.05];
+        let (indices, values) = top_k_indices_weighted(&row, &weights, 3);
+        // Scored: [0.1, 0.05, 0.3, 0.009, 0.2, 0.035] → top-3 = {2,4,0}
+        assert_eq!(indices, vec![0, 2, 4]);
+        // Values returned must be raw row entries, not weighted.
+        assert_eq!(values, vec![0.1, 0.3, 0.2]);
+    }
+
+    #[test]
     fn test_indexed_from_dense() {
         // 4 samples, 6 features, context_size=3
         let data = DMatrix::<f32>::from_row_slice(
@@ -437,12 +493,15 @@ mod tests {
             ],
         );
 
+        let w = vec![1.0f32; 6];
         let args = IndexedInMemoryArgs {
             input: &data,
             input_null: None,
             output: &data,
             input_context_size: 3,
             output_context_size: 3,
+            input_shortlist_weights: &w,
+            output_shortlist_weights: &w,
         };
 
         let indexed = IndexedInMemoryData::from_dense(args).unwrap();
@@ -471,12 +530,15 @@ mod tests {
             ],
         );
 
+        let w = vec![1.0f32; 6];
         let args = IndexedInMemoryArgs {
             input: &data,
             input_null: None,
             output: &data,
             input_context_size: 2,
             output_context_size: 2,
+            input_shortlist_weights: &w,
+            output_shortlist_weights: &w,
         };
 
         let indexed = IndexedInMemoryData::from_dense(args).unwrap();
@@ -519,12 +581,15 @@ mod tests {
             ],
         );
 
+        let w = vec![1.0f32; 4];
         let args = IndexedInMemoryArgs {
             input: &input,
             input_null: None,
             output: &output,
             input_context_size: 2,
             output_context_size: 2,
+            input_shortlist_weights: &w,
+            output_shortlist_weights: &w,
         };
 
         let indexed = IndexedInMemoryData::from_dense(args).unwrap();
@@ -558,12 +623,15 @@ mod tests {
             ],
         );
 
+        let w = vec![1.0f32; 6];
         let args = IndexedInMemoryArgs {
             input: &data,
             input_null: None,
             output: &data,
             input_context_size: 3,
             output_context_size: 1,
+            input_shortlist_weights: &w,
+            output_shortlist_weights: &w,
         };
 
         let indexed = IndexedInMemoryData::from_dense(args).unwrap();

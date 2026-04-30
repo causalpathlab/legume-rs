@@ -3,18 +3,18 @@
 //! 2D layout algorithm. Optionally runs a cell-level SGD pass after
 //! Nyström to resolve intra-PB structure (`--umap-finetune-epochs > 0`).
 
-use super::fit_visualize_common::{
+use super::fit_layout_common::{
     nystrom_cell_coords, preprocess_layout_data, random_init_2d, resolve_inputs, write_viz_outputs,
-    VisualizeCommonArgs,
+    LayoutCommonArgs,
 };
 use crate::embed_common::*;
 use crate::geometry::umap::Umap;
 use std::collections::HashMap;
 
 #[derive(Args, Debug)]
-pub struct VisualizeUmapArgs {
+pub struct LayoutUmapArgs {
     #[clap(flatten)]
-    common: VisualizeCommonArgs,
+    common: LayoutCommonArgs,
 
     #[arg(long, default_value_t = 500, help = "Number of SGD epochs")]
     umap_epochs: usize,
@@ -50,7 +50,7 @@ pub struct VisualizeUmapArgs {
     umap_finetune_knn: usize,
 }
 
-pub fn fit_visualize_umap(args: &VisualizeUmapArgs) -> anyhow::Result<()> {
+pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
     let prep = preprocess_layout_data(&args.common, &resolved)?;
 
