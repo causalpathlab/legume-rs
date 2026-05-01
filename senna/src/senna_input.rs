@@ -5,6 +5,15 @@ pub use auxiliary_data::data_loading::{
     read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch,
 };
 
+/// Collapse a batch-membership slice into a single batch ("all"), neutralizing
+/// any downstream per-batch correction. Use when `--ignore-batch` is set.
+pub fn collapse_to_single_batch(membership: &mut [Box<str>]) {
+    let label: Box<str> = "all".into();
+    for tag in membership.iter_mut() {
+        *tag = label.clone();
+    }
+}
+
 ///////////////////////////////////////////////
 // read data stack (vector of `SparseIoVec`) //
 ///////////////////////////////////////////////

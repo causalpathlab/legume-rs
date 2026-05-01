@@ -62,6 +62,16 @@ pub struct SvdArgs {
     batch_files: Option<Vec<Box<str>>>,
 
     #[arg(
+        long,
+        help = "Skip per-batch correction; treat all cells as a single batch",
+        long_help = "Collapses batch membership to a single label so the random\n\
+                     projection, multilevel collapsing, and δ estimation are all\n\
+                     run as if there were no batch structure. Useful when batches\n\
+                     are believed homogeneous, or for reference-only baselines."
+    )]
+    ignore_batch: bool,
+
+    #[arg(
         short = 'w',
         long = "warm-start",
         help = "Warm-start projection file (cell × k)",
@@ -158,13 +168,17 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     // 1. Read the data with batch membership
     let SparseDataWithBatch {
         data: mut data_vec,
-        batch: batch_membership,
+        batch: mut batch_membership,
         ..
     } = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
         preload: args.preload_data,
     })?;
+    if args.ignore_batch {
+        info!("--ignore-batch: collapsing all cells to a single batch");
+        crate::senna_input::collapse_to_single_batch(&mut batch_membership);
+    }
 
     // HVG selection (skipped with --warm-start for compatibility)
     let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();

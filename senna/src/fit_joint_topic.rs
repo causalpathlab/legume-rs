@@ -88,6 +88,15 @@ pub struct JointTopicArgs {
     pub(crate) batch_files: Option<Vec<Box<str>>>,
 
     #[arg(
+        long,
+        help = "Skip per-batch correction; treat all cells as a single batch",
+        long_help = "Collapses batch membership to a single label across all\n\
+                     modalities so the joint pipeline runs as if there were no\n\
+                     batch structure."
+    )]
+    pub(crate) ignore_batch: bool,
+
+    #[arg(
         short = 'c',
         long,
         default_value_t = 1e4,
@@ -236,13 +245,19 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     // 1. Read the data with batch membership
     let SparseStackWithBatch {
         mut data_stack,
-        batch_stack,
+        mut batch_stack,
     } = read_data_on_shared_columns(ReadSharedColumnsArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
         num_types: args.num_modalities,
         preload: args.preload_data,
     })?;
+    if args.ignore_batch {
+        info!("--ignore-batch: collapsing all cells to a single batch (per modality)");
+        for batch in batch_stack.iter_mut() {
+            crate::senna_input::collapse_to_single_batch(batch);
+        }
+    }
 
     // 1a. For delta decoder, validate shared features across modalities
     if args.decoder_type == JointDecoderType::Delta {

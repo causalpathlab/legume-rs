@@ -103,6 +103,16 @@ pub struct TopicArgs {
     pub(crate) batch_files: Option<Vec<Box<str>>>,
 
     #[arg(
+        long,
+        help = "Skip per-batch correction; treat all cells as a single batch",
+        long_help = "Collapses batch membership to a single label so the projection,\n\
+                     multilevel collapsing, and δ estimation all run as if there were\n\
+                     no batch structure. Useful for homogeneous datasets or as a\n\
+                     reference baseline."
+    )]
+    pub(crate) ignore_batch: bool,
+
+    #[arg(
         short = 'w',
         long = "warm-start",
         help = "Warm-start projection file (cell × k)",
@@ -368,6 +378,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             seed: args.refine_seed,
             ..data_beans_alg::refine_multilevel::RefineParams::default()
         }),
+        ignore_batch: args.ignore_batch,
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
