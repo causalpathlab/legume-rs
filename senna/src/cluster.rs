@@ -211,15 +211,14 @@ pub fn leiden_clustering(
     );
 
     // Check connected components
-    let n_components = count_components(&graph);
+    let n_components = matrix_util::graph::num_connected_components(&graph);
     info!("KNN graph has {n_components} connected component(s)");
 
     // Step 2: Convert to Leiden Network with modularity objective
-    let ln = graph.to_leiden_network();
-    let resolution_scaled = ln.scale_resolution(resolution);
+    let (network, total_edge_weight) = graph.to_leiden_network();
+    let resolution_scaled = knn_graph::modularity_to_cpm_resolution(resolution, total_edge_weight);
     info!(
-        "Modularity resolution={:.4} → scaled={:.6e}, total_edge_weight={:.1}",
-        resolution, resolution_scaled, ln.total_edge_weight
+        "Modularity resolution={resolution:.4} → scaled={resolution_scaled:.6e}, total_edge_weight={total_edge_weight:.1}"
     );
 
     // Step 3: Run Leiden — with optional resolution tuning
@@ -227,10 +226,10 @@ pub fn leiden_clustering(
 
     let labels = if let Some(target_k) = target_clusters {
         info!("Auto-tuning resolution to target ~{target_k} clusters ...");
-        knn_graph::tune_leiden_resolution(&ln.network, n, target_k, resolution_scaled, seed_val)
+        knn_graph::tune_leiden_resolution(&network, n, target_k, resolution_scaled, seed_val)
     } else {
         info!("Running Leiden at scaled resolution={resolution_scaled:.6e} ...");
-        knn_graph::run_leiden(&ln.network, n, resolution_scaled, seed_val)
+        knn_graph::run_leiden(&network, n, resolution_scaled, seed_val)
     };
 
     let mut compact = labels;
@@ -312,9 +311,8 @@ pub fn hsblock_clustering(
         mean_degree
     );
 
-    // Step 2: Convert to leiden::Network
-    let ln = graph.to_leiden_network();
-    let network = ln.network;
+    // Step 2: Convert to leiden::Network (discard total edge weight; HSBM doesn't need it)
+    let (network, _total_edge_weight) = graph.to_leiden_network();
 
     // Step 3: Run HSBM
     let options = HsbmOptions {
@@ -357,34 +355,6 @@ pub fn hsblock_clustering(
     );
 
     Ok(result)
-}
-
-/// Count connected components in the KNN graph using BFS.
-fn count_components(graph: &KnnGraph) -> usize {
-    let n = graph.num_nodes();
-    let mut visited = vec![false; n];
-    let mut n_components = 0;
-
-    for start in 0..n {
-        if visited[start] {
-            continue;
-        }
-        n_components += 1;
-        let mut stack = vec![start];
-        while let Some(node) = stack.pop() {
-            if visited[node] {
-                continue;
-            }
-            visited[node] = true;
-            for &neighbor in graph.neighbors(node) {
-                if !visited[neighbor] {
-                    stack.push(neighbor);
-                }
-            }
-        }
-    }
-
-    n_components
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use crate::parallel_local_moving::ParallelLocalMoving;
-use crate::{Clustering, Graph, Network};
+use crate::{Clustering, Network};
 use rustc_hash::FxHashSet as HashSet;
 
 /// Perform the Louvain clustering algorithm
@@ -30,15 +30,11 @@ impl ParallelLouvain {
     /// # Panics
     /// If an edge endpoint refers to a node index ≥ `n_nodes`, or if a node
     /// index in the constructed graph cannot be retrieved.
-    pub fn build_network<I: Iterator<Item = (u32, u32)>>(
-        n_nodes: usize,
-        n_edges: usize,
-        adjacency: I,
-    ) -> Network {
-        let mut graph = Graph::with_capacity(n_nodes, n_edges);
+    pub fn build_network<I: Iterator<Item = (u32, u32)>>(n_nodes: usize, adjacency: I) -> Network {
+        let mut network = Network::with_capacity(n_nodes);
         let mut node_indices = Vec::with_capacity(n_nodes);
         for _ in 0..n_nodes {
-            node_indices.push(graph.add_node(1.0));
+            node_indices.push(network.add_node(1.0));
         }
         let mut seen: Vec<HashSet<u32>> = vec![HashSet::default(); n_nodes];
         let mut node_weights = vec![0.0; n_nodes];
@@ -47,16 +43,14 @@ impl ParallelLouvain {
             let i_ = i as usize;
             let j_ = j as usize;
             if seen[i_].insert(j) {
-                graph.add_edge(i.into(), j.into(), 1.0);
-                // weights are just degree here
+                network.add_edge(i_, j_, 1.0);
                 node_weights[i_] += 1.0;
                 node_weights[j_] += 1.0;
             }
         }
-        // reweight nodes based on # of edges
         for &i in &node_indices {
-            *graph.node_weight_mut(i).unwrap() = node_weights[i.index() as usize];
+            *network.node_weight_mut(i) = node_weights[i];
         }
-        Network::new_from_graph(graph)
+        network
     }
 }
