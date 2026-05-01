@@ -112,6 +112,19 @@ pub struct TopicArgs {
     pub(crate) warm_start_proj_file: Option<Box<str>>,
 
     #[arg(
+        long = "init-from",
+        help = "Initialize encoder + decoder weights from a previously trained model",
+        long_help = "Path prefix of a model saved by `senna topic` (matching\n\
+                     {prefix}.model.json + {prefix}.safetensors). Architecture must\n\
+                     match: same K, encoder layers, level_decoder_dims, and\n\
+                     n_features_full / n_features_encoder. Cross-gene-set\n\
+                     warm-start is not supported — train on the same gene set.\n\
+                     Independent of `--warm-start` (which seeds the random\n\
+                     projection)."
+    )]
+    pub(crate) init_from: Option<Box<str>>,
+
+    #[arg(
         long,
         default_value_t = 10,
         help = "In-batch k-NN for super-cell merging",
@@ -856,6 +869,29 @@ where
     // prior during training. Warm-starting logits with log(anchor) can lock
     // the dictionary too early.
 
+    // Optional model-checkpoint warm-start: load encoder + decoder weights
+    // from a previously trained run (must match this run's architecture).
+    if let Some(prefix) = ctx.args.init_from.as_deref() {
+        use crate::topic::warm_start::{warm_start_load, WarmStartCheck};
+        let n_features_encoder = *ctx
+            .level_decoder_dims
+            .last()
+            .unwrap_or(&ctx.n_features_full);
+        warm_start_load(
+            ctx.parameters,
+            prefix,
+            &WarmStartCheck {
+                model_type_expected: crate::topic::model_metadata::MODEL_TYPE_TOPIC,
+                n_topics: ctx.n_topics,
+                n_features_full: ctx.n_features_full,
+                n_features_encoder,
+                encoder_hidden: &ctx.args.encoder_layers,
+                level_decoder_dims: ctx.level_decoder_dims,
+                embedding_dim: None,
+            },
+        )?;
+    }
+
     let train_config = TrainConfig {
         parameters: ctx.parameters,
         dev: ctx.dev,
@@ -1053,8 +1089,8 @@ where
 
     save_parameters(ctx.parameters, &ctx.args.out)?;
 
-    let metadata = TopicModelMetadata {
-        model_type: "topic".into(),
+    let mut metadata = TopicModelMetadata {
+        model_type: crate::topic::model_metadata::MODEL_TYPE_TOPIC.into(),
         decoder_types: ctx.args.decoder.iter().map(|d| d.as_str().into()).collect(),
         decoder_weights: decoder_weights.to_vec(),
         n_features_encoder: *ctx
@@ -1068,6 +1104,10 @@ where
         level_decoder_dims: ctx.level_decoder_dims.to_vec(),
         adj_method: ctx.args.adj_method.as_str().into(),
         has_coarsening: ctx.finest_coarsening.is_some(),
+        embedding_dim: None,
+        enc_context_size: None,
+        dec_context_size: None,
+        theta_mean: None,
     };
     metadata.save(&ctx.args.out)?;
 
@@ -1131,12 +1171,17 @@ where
         decoder: refine_decoder.as_ref(),
         refine_config: refine_config.as_ref(),
     };
-    evaluate_latent_by_encoder(
+    let z_nk = evaluate_latent_by_encoder(
         ctx.data_vec,
         &cpu_encoder,
         ctx.finest_collapsed,
         &eval_config,
-    )
+    )?;
+
+    // Re-save metadata with θ̄_train populated — initial δ guess at predict
+    // time, better than uniform 1/K when training is composition-imbalanced.
+    metadata.populate_theta_mean_and_save(&z_nk, &ctx.args.out)?;
+    Ok(z_nk)
 }
 
 /// Multi-decoder pipeline: builds multiple decoder types per level,
@@ -1169,6 +1214,28 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
                 .collect()
         })
         .collect();
+
+    // Optional model-checkpoint warm-start (multi-decoder variant).
+    if let Some(prefix) = ctx.args.init_from.as_deref() {
+        use crate::topic::warm_start::{warm_start_load, WarmStartCheck};
+        let n_features_encoder = *ctx
+            .level_decoder_dims
+            .last()
+            .unwrap_or(&ctx.n_features_full);
+        warm_start_load(
+            ctx.parameters,
+            prefix,
+            &WarmStartCheck {
+                model_type_expected: crate::topic::model_metadata::MODEL_TYPE_TOPIC,
+                n_topics: ctx.n_topics,
+                n_features_full: ctx.n_features_full,
+                n_features_encoder,
+                encoder_hidden: &ctx.args.encoder_layers,
+                level_decoder_dims: ctx.level_decoder_dims,
+                embedding_dim: None,
+            },
+        )?;
+    }
 
     let train_config = TrainConfig {
         parameters: ctx.parameters,

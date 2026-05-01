@@ -73,25 +73,46 @@ pub(crate) struct GeneRemap {
 }
 
 /// Build a gene remap from training gene names and new-data gene names.
+///
+/// Tries case-insensitive exact match first; falls back to
+/// `flexible_gene_match` (handles aliases like `ENSG..._CD8A` ↔ `CD8A`,
+/// case differences, and `_`-delimited prefixes/suffixes).
 pub(crate) fn build_gene_remap(
     training_genes: &[Box<str>],
     new_data_genes: &[Box<str>],
 ) -> GeneRemap {
-    let train_pos: rustc_hash::FxHashMap<&str, usize> = training_genes
+    use crate::marker_support::flexible_gene_match;
+
+    // Lowercased exact-match index — fast path for matching name sets.
+    let train_pos: rustc_hash::FxHashMap<String, usize> = training_genes
         .iter()
         .enumerate()
-        .map(|(i, g)| (g.as_ref(), i))
+        .map(|(i, g)| (g.to_lowercase(), i))
         .collect();
 
+    let mut n_exact = 0usize;
+    let mut n_flexible = 0usize;
     let new_to_train: Vec<Option<usize>> = new_data_genes
         .iter()
-        .map(|g| train_pos.get(g.as_ref()).copied())
+        .map(|g| {
+            if let Some(&i) = train_pos.get(&g.to_lowercase()) {
+                n_exact += 1;
+                Some(i)
+            } else if let Some(i) = training_genes
+                .iter()
+                .position(|t| flexible_gene_match(g, t))
+            {
+                n_flexible += 1;
+                Some(i)
+            } else {
+                None
+            }
+        })
         .collect();
 
-    let n_mapped = new_to_train.iter().filter(|x| x.is_some()).count();
+    let n_mapped = n_exact + n_flexible;
     log::info!(
-        "Gene alignment: {}/{} new genes mapped to {}/{} training genes",
-        n_mapped,
+        "Gene alignment: {n_mapped}/{} new genes mapped to {}/{} training genes ({n_exact} exact, {n_flexible} flexible)",
         new_data_genes.len(),
         n_mapped,
         training_genes.len()
