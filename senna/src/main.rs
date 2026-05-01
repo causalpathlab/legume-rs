@@ -48,6 +48,8 @@ mod hvg;
 mod logging;
 mod marker_support;
 mod postprocess;
+mod predict;
+mod predict_tmle;
 mod refine_weighting;
 mod run_manifest;
 mod senna_input;
@@ -62,6 +64,7 @@ use fit_indexed_topic::*;
 use fit_joint_topic::*;
 use fit_topic::*;
 use postprocess::*;
+use predict::{predict_model, PredictArgs};
 use svd::*;
 
 use colored::Colorize;
@@ -175,10 +178,22 @@ enum Commands {
     Annotate(AnnotateArgs),
 
     #[command(
-        about = "Apply a trained topic model to new data",
-        long_about = "Run encoder inference with a previously trained topic model.\n\
-                      Handles gene-set misalignment, re-estimates per-batch delta\n\
-                      from the frozen dictionary, and runs on CPU with rayon."
+        about = "Apply a trained topic / indexed-topic model to held-out data",
+        long_about = "Run latent inference + per-cell predictive log-likelihood\n\
+                      on a separate held-out backend file. Auto-dispatches between\n\
+                      the dense (`topic`) and indexed (`indexed-topic`) paths via\n\
+                      the model.json metadata. Handles gene-set misalignment via\n\
+                      flexible name matching, re-estimates per-batch delta from\n\
+                      the frozen dictionary, and supports three latent modes:\n\
+                      encoder-only (default), encoder+refine, and decoder-only."
+    )]
+    Predict(PredictArgs),
+
+    #[command(
+        about = "[deprecated] Use `senna predict`",
+        long_about = "Deprecated alias for `senna predict`. The new `predict`\n\
+                      subcommand handles both `topic` and `indexed-topic` models\n\
+                      and additionally computes per-cell predictive log-likelihood."
     )]
     EvalTopic(EvalTopicArgs),
 
@@ -312,6 +327,9 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Annotate(args) => {
             annotate_run(args)?;
+        }
+        Commands::Predict(args) => {
+            predict_model(args)?;
         }
         Commands::EvalTopic(args) => {
             eval_topic_model(args)?;

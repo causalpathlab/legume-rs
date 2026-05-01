@@ -2,6 +2,12 @@ use candle_util::candle_nn;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use serde::{Deserialize, Serialize};
 
+/// Canonical `model_type` strings for `TopicModelMetadata`. Use these in place
+/// of inline `"topic"` / `"indexed_topic"` literals so a typo doesn't silently
+/// break warm-start or predict dispatch.
+pub const MODEL_TYPE_TOPIC: &str = "topic";
+pub const MODEL_TYPE_INDEXED: &str = "indexed_topic";
+
 /// Metadata needed to reconstruct a trained topic model for inference.
 #[derive(Serialize, Deserialize)]
 pub struct TopicModelMetadata {
@@ -27,6 +33,20 @@ pub struct TopicModelMetadata {
     pub adj_method: Box<str>,
     /// Whether feature coarsening was used
     pub has_coarsening: bool,
+    /// [D, H] feature embedding width (indexed_topic only)
+    #[serde(default)]
+    pub embedding_dim: Option<usize>,
+    /// Top-K shortlist size at encoder (indexed_topic only)
+    #[serde(default)]
+    pub enc_context_size: Option<usize>,
+    /// Top-K shortlist size at decoder (indexed_topic only)
+    #[serde(default)]
+    pub dec_context_size: Option<usize>,
+    /// Mean training topic proportions θ̄ ∈ ℝ^K. Used at predict time as the
+    /// mixture weights for the training-implied gene marginal in
+    /// per-batch δ estimation. Falls back to uniform 1/K when absent.
+    #[serde(default)]
+    pub theta_mean: Option<Vec<f32>>,
 }
 
 impl TopicModelMetadata {
@@ -43,6 +63,26 @@ impl TopicModelMetadata {
         let json = std::fs::read_to_string(&path)?;
         let metadata: Self = serde_json::from_str(&json)?;
         Ok(metadata)
+    }
+
+    /// Compute `θ̄_train` from the training-time `[N, K]` log θ matrix and
+    /// re-save the metadata. Idempotent — call after the post-training eval
+    /// pass returns `z_nk`.
+    pub fn populate_theta_mean_and_save(
+        &mut self,
+        log_z_nk: &nalgebra::DMatrix<f32>,
+        prefix: &str,
+    ) -> anyhow::Result<()> {
+        let n = log_z_nk.nrows() as f32;
+        if n <= 0.0 {
+            return Ok(());
+        }
+        let k = log_z_nk.ncols();
+        let theta_mean: Vec<f32> = (0..k)
+            .map(|kk| log_z_nk.column(kk).iter().map(|&x| x.exp()).sum::<f32>() / n)
+            .collect();
+        self.theta_mean = Some(theta_mean);
+        self.save(prefix)
     }
 }
 
@@ -88,4 +128,51 @@ pub fn save_parameters(parameters: &candle_nn::VarMap, prefix: &str) -> anyhow::
     parameters.save(&path)?;
     log::info!("Saved model parameters to {path}");
     Ok(())
+}
+
+/// Save NB-Fisher shortlist weights for indexed-topic prediction.
+pub fn save_shortlist_weights(
+    weights: &[f32],
+    gene_names: &[Box<str>],
+    prefix: &str,
+) -> anyhow::Result<()> {
+    use matrix_util::traits::IoOps;
+    let path = format!("{prefix}.shortlist_weights.parquet");
+    let mat = nalgebra::DMatrix::<f32>::from_column_slice(weights.len(), 1, weights);
+    let cols: Vec<Box<str>> = vec!["weight".into()];
+    mat.to_parquet_with_names(&path, (Some(gene_names), Some("gene")), Some(&cols))?;
+    log::info!("Saved shortlist weights to {path}");
+    Ok(())
+}
+
+/// Load NB-Fisher shortlist weights from disk; returns (gene_names, weights).
+pub fn load_shortlist_weights(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32>)> {
+    use matrix_util::traits::IoOps;
+    let path = format!("{prefix}.shortlist_weights.parquet");
+    let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))?;
+    anyhow::ensure!(
+        result.mat.ncols() >= 1,
+        "shortlist_weights parquet missing column at {path}"
+    );
+    let weights: Vec<f32> = result.mat.column(0).iter().copied().collect();
+    log::info!("Loaded {} shortlist weights from {path}", weights.len());
+    Ok((result.rows, weights))
+}
+
+/// Load per-gene NB dispersion φ from `{prefix}.dispersion.parquet`.
+/// Returns `None` if the file doesn't exist (e.g. multinomial-only training run).
+pub fn load_dispersion(prefix: &str) -> anyhow::Result<Option<Vec<f32>>> {
+    use matrix_util::traits::IoOps;
+    let path = format!("{prefix}.dispersion.parquet");
+    if !std::path::Path::new(&path).exists() {
+        return Ok(None);
+    }
+    let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))?;
+    anyhow::ensure!(
+        result.mat.ncols() >= 1,
+        "dispersion parquet missing column at {path}"
+    );
+    let phi: Vec<f32> = result.mat.column(0).iter().copied().collect();
+    log::info!("Loaded {} dispersion values from {path}", phi.len());
+    Ok(Some(phi))
 }
