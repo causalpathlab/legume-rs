@@ -1,4 +1,3 @@
-use crate::graph::node_index;
 use crate::{Clustering, Network};
 use rayon::iter::ParallelIterator;
 use rayon::prelude::*;
@@ -9,15 +8,15 @@ pub fn cpm(resolution: f64, graph: &Network, clustering: &impl Clustering) -> f6
     let mut quality = 0.0f64;
     let mut total_edge_weight = 0.0f64;
 
-    for e in graph.graph.edge_references() {
-        let c1 = clustering.get(e.source().index() as usize);
-        let c2 = clustering.get(e.target().index() as usize);
+    for (src, tgt, w) in graph.edge_references() {
+        let c1 = clustering.get(src);
+        let c2 = clustering.get(tgt);
 
         if c1 == c2 {
-            quality += 2.0 * f64::from(*e.weight());
+            quality += 2.0 * f64::from(w);
         }
 
-        total_edge_weight += f64::from(*e.weight());
+        total_edge_weight += f64::from(w);
     }
 
     // Edgeless graph → modularity is undefined; return 0 rather than
@@ -59,11 +58,9 @@ pub fn par_cpm<C: Clustering + Sync>(resolution: f64, graph: &Network, clusterin
 
             for i in nodes {
                 let c_i = clustering.get(*i);
-                for edge in graph.graph.edges(node_index(*i)) {
-                    let j = edge.target().index() as usize;
+                for (j, edge_weight) in graph.neighbors(*i) {
                     // Enforce ordering of node indices to avoid processing edges twice.
                     if j < *i {
-                        let edge_weight = f64::from(*edge.weight());
                         total_edge_weight += edge_weight;
                         let c_j = clustering.get(j);
                         quality += if c_i == c_j { 2.0 * edge_weight } else { 0.0 };

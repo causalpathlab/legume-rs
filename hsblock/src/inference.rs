@@ -206,7 +206,6 @@ fn count_nonempty_clusters(stats: &SufficientStats) -> usize {
 mod tests {
     use super::*;
     use leiden::clustering::SimpleClustering;
-    use leiden::network::Graph;
 
     /// Build a planted partition graph as a leiden Network.
     fn planted_partition_network(
@@ -246,15 +245,15 @@ mod tests {
             }
         }
 
-        let mut graph = Graph::with_capacity(n, edge_list.len());
+        let mut network = Network::with_capacity(n);
         for &deg in degree.iter().take(n) {
-            graph.add_node(deg);
+            network.add_node(deg);
         }
         for &(i, j, w) in &edge_list {
-            graph.add_edge((i as u32).into(), (j as u32).into(), w);
+            network.add_edge(i, j, w);
         }
 
-        (Network::new_from_graph(graph), true_labels)
+        (network, true_labels)
     }
 
     #[test]
@@ -353,15 +352,14 @@ mod tests {
     #[test]
     fn test_extract_edges() {
         // Small test: triangle 0-1-2
-        let mut graph = Graph::with_capacity(3, 3);
+        let mut network = Network::with_capacity(3);
         for _ in 0..3 {
-            graph.add_node(2.0);
+            network.add_node(2.0);
         }
-        graph.add_edge(0u32.into(), 1u32.into(), 1.0);
-        graph.add_edge(1u32.into(), 2u32.into(), 1.0);
-        graph.add_edge(0u32.into(), 2u32.into(), 1.0);
+        network.add_edge(0, 1, 1.0);
+        network.add_edge(1, 2, 1.0);
+        network.add_edge(0, 2, 1.0);
 
-        let network = Network::new_from_graph(graph);
         let edges = extract_edges(&network, 1.0);
 
         assert_eq!(edges.len(), 3);

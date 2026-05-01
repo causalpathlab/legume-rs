@@ -361,29 +361,40 @@ fn directed_umap_weight(d: f32, rho: f32, sigma: f32) -> f32 {
 // Leiden integration       //
 //////////////////////////////
 
-/// Leiden network built from a KNN graph with fuzzy kernel weights.
-pub struct LeidenNetwork {
-    pub network: leiden::Network,
-    pub total_edge_weight: f64,
+impl WeightedGraph for leiden::Network {
+    fn num_nodes(&self) -> usize {
+        self.nodes()
+    }
+
+    fn num_edges(&self) -> usize {
+        leiden::Network::edge_count(self)
+    }
+
+    fn neighbors_with_weight<'a>(
+        &'a self,
+        node: usize,
+    ) -> Box<dyn Iterator<Item = (usize, f32)> + 'a> {
+        Box::new(self.neighbors(node).map(|(n, w)| (n, w as f32)))
+    }
 }
 
-impl LeidenNetwork {
-    /// Scale a modularity resolution to the CPM scale for this network.
-    ///
-    /// CPM resolution = modularity_gamma / (2 * total_edge_weight).
-    /// Guards against division by zero for degenerate graphs.
-    pub fn scale_resolution(&self, modularity_gamma: f64) -> f64 {
-        modularity_gamma / (2.0 * self.total_edge_weight).max(1.0)
-    }
+/// Convert a modularity resolution `gamma` to the CPM scale expected by the
+/// Leiden crate, given the total undirected edge weight of the graph.
+///
+/// CPM resolution = `gamma / (2 * total_edge_weight)`. Guards against division
+/// by zero for degenerate graphs by clamping the denominator to at least 1.
+#[must_use]
+pub fn modularity_to_cpm_resolution(modularity_gamma: f64, total_edge_weight: f64) -> f64 {
+    modularity_gamma / (2.0 * total_edge_weight).max(1.0)
 }
 
 impl KnnGraph {
     /// Convert this KNN graph to a Leiden `Network` with modularity objective.
     ///
     /// Node weights = weighted degree, edge weights = fuzzy kernel weights.
-    /// Use `resolution / (2 * total_edge_weight)` to convert a modularity
-    /// resolution to the CPM scale expected by the Leiden crate.
-    pub fn to_leiden_network(&self) -> LeidenNetwork {
+    /// Returns `(network, total_edge_weight)`. Pass `total_edge_weight` to
+    /// [`modularity_to_cpm_resolution`] to get a CPM-scale resolution.
+    pub fn to_leiden_network(&self) -> (leiden::Network, f64) {
         let n = self.n_nodes;
         let weights = self.fuzzy_kernel_weights();
 
@@ -395,18 +406,15 @@ impl KnnGraph {
             total_edge_weight += w as f64;
         }
 
-        let mut graph = leiden::Graph::with_capacity(n, self.num_edges());
+        let mut network = leiden::Network::with_capacity(n);
         for &nd in &node_degree {
-            graph.add_node(nd);
+            network.add_node(nd);
         }
         for (&(i, j), &w) in self.edges.iter().zip(weights.iter()) {
-            graph.add_edge((i as u32).into(), (j as u32).into(), w);
+            network.add_edge(i, j, w);
         }
 
-        LeidenNetwork {
-            network: leiden::Network::new_from_graph(graph),
-            total_edge_weight,
-        }
+        (network, total_edge_weight)
     }
 }
 
