@@ -153,11 +153,18 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0.05,
+        default_value_t = 0.01,
         alias = "lr",
         help = "Adam learning rate"
     )]
     pub(crate) learning_rate: f32,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Global L2 gradient norm clip per minibatch (0 = off; typical 0.5–5.0)"
+    )]
+    pub(crate) grad_clip: f32,
 
     #[arg(
         long,

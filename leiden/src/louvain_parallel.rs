@@ -9,6 +9,7 @@ pub struct ParallelLouvain {
 
 impl ParallelLouvain {
     /// Initialize the Leiden algorithm with the given resolution and randomness parameters.
+    #[must_use]
     pub fn new(resolution: f64) -> ParallelLouvain {
         ParallelLouvain {
             local_moving: ParallelLocalMoving::new(resolution),
@@ -25,6 +26,10 @@ impl ParallelLouvain {
     }
 
     /// Build a Louvain-compatible network from a list of adjacencies
+    ///
+    /// # Panics
+    /// If an edge endpoint refers to a node index ≥ `n_nodes`, or if a node
+    /// index in the constructed graph cannot be retrieved.
     pub fn build_network<I: Iterator<Item = (u32, u32)>>(
         n_nodes: usize,
         n_edges: usize,
@@ -35,7 +40,7 @@ impl ParallelLouvain {
         for _ in 0..n_nodes {
             node_indices.push(graph.add_node(1.0));
         }
-        let mut seen: Vec<HashSet<u32>> = vec![Default::default(); n_nodes];
+        let mut seen: Vec<HashSet<u32>> = vec![HashSet::default(); n_nodes];
         let mut node_weights = vec![0.0; n_nodes];
         for (i, j) in adjacency {
             let (i, j) = if i < j { (i, j) } else { (j, i) };

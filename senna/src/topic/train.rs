@@ -4,7 +4,6 @@ use crate::logging::new_progress_bar;
 
 use candle_core::{Device, Tensor};
 use candle_nn::AdamW;
-use candle_nn::Optimizer;
 use candle_util::candle_data_loader::*;
 use candle_util::candle_loss_functions::topic_likelihood;
 use candle_util::candle_model_traits::*;
@@ -172,7 +171,7 @@ where
 
                 let loss = (&kl - &llik)?.mean_all()?;
                 let loss = config.add_anchor_penalty(loss, level)?;
-                adam.backward_step(&loss)?;
+                clip_grads_and_step(&mut adam, &loss, f64::from(config.args.grad_clip))?;
 
                 llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
                 kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
@@ -297,7 +296,7 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
                 }
 
                 let loss = (&kl - &weighted_llik)?.mean_all()?;
-                adam.backward_step(&loss)?;
+                clip_grads_and_step(&mut adam, &loss, f64::from(config.args.grad_clip))?;
 
                 llik_tot += weighted_llik.sum_all()?.to_scalar::<f32>()?;
                 kl_tot += kl.sum_all()?.to_scalar::<f32>()?;

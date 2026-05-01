@@ -1,4 +1,4 @@
-use crate::graph::{Edges, UnGraph};
+use crate::graph::{node_index, Edges, UnGraph};
 use crate::Clustering;
 use rayon::prelude::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::ParallelSlice;
@@ -12,7 +12,7 @@ pub struct Network {
     pub(crate) graph: Graph,
 }
 
-/// Iterator over pairs of (adjacent node id, edge_weight) for all neighbors of a chosen node.
+/// Iterator over pairs of (adjacent node id, `edge_weight`) for all neighbors of a chosen node.
 pub struct NeighborAndWeightIter<'a> {
     edge_iter: Edges<'a, f32, u32>,
     home_node: usize,
@@ -24,9 +24,9 @@ impl Iterator for NeighborAndWeightIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         match self.edge_iter.next() {
             Some(edge_ref) => {
-                assert!(edge_ref.source().index() as usize == self.home_node);
+                debug_assert!(edge_ref.source().index() as usize == self.home_node);
                 let neighbor = edge_ref.target().index();
-                Some((neighbor as usize, *edge_ref.weight() as f64))
+                Some((neighbor as usize, f64::from(*edge_ref.weight())))
             }
             None => None,
         }
@@ -35,6 +35,7 @@ impl Iterator for NeighborAndWeightIter<'_> {
 
 impl Network {
     /// Create a new empty network
+    #[must_use]
     pub fn new() -> Network {
         Network {
             graph: Graph::with_capacity(0, 0),
@@ -42,26 +43,33 @@ impl Network {
     }
 
     /// Create a new network from a graph
+    #[must_use]
     pub fn new_from_graph(graph: Graph) -> Network {
         Network { graph }
     }
 
     /// Number of nodes in the graph
+    #[must_use]
     pub fn nodes(&self) -> usize {
         self.graph.node_count() as usize
     }
 
     /// Get the node weight of `node`.
+    ///
+    /// # Panics
+    /// If `node` is out of range or exceeds `u32::MAX`.
+    #[must_use]
     pub fn weight(&self, node: usize) -> f64 {
-        *self.graph.node_weight((node as u32).into()).unwrap() as f64
+        f64::from(*self.graph.node_weight(node_index(node)).unwrap())
     }
 
     /// Iterate over edges connected to `node`
     fn edges(&'_ self, node: usize) -> Edges<'_, f32, u32> {
-        self.graph.edges((node as u32).into())
+        self.graph.edges(node_index(node))
     }
 
-    /// Iterator over pairs of (adjacent node id, edge_weight) for all neighbors of `node`.
+    /// Iterator over pairs of (adjacent node id, `edge_weight`) for all neighbors of `node`.
+    #[must_use]
     pub fn neighbors(&'_ self, node: usize) -> NeighborAndWeightIter<'_> {
         NeighborAndWeightIter {
             edge_iter: self.edges(node),
@@ -70,6 +78,7 @@ impl Network {
     }
 
     /// Get the total weight of all nodes in the graph
+    #[must_use]
     pub fn get_total_node_weight(&self) -> f64 {
         let mut w = 0.0;
         for i in 0..self.nodes() {
@@ -80,13 +89,15 @@ impl Network {
     }
 
     /// Get the total edge weight of all nodes in the graph
+    #[must_use]
     pub fn get_total_edge_weight(&self) -> f64 {
         self.graph
             .edge_references()
-            .fold(0.0, |acc, edge| acc + *edge.weight() as f64)
+            .fold(0.0, |acc, edge| acc + f64::from(*edge.weight()))
     }
 
     /// Get the total edge weight of all nodes in the graph
+    #[must_use]
     pub fn get_total_edge_weight_par(&self) -> f64 {
         let mut partial_sums = vec![];
 
@@ -99,7 +110,7 @@ impl Network {
             .map(|node_chunk| {
                 node_chunk
                     .iter()
-                    .map(|w| w.iter().fold(0.0, |acc, edge| acc + edge.weight as f64))
+                    .map(|w| w.iter().fold(0.0, |acc, edge| acc + f64::from(edge.weight)))
                     .sum::<f64>()
             })
             .collect_into_vec(&mut partial_sums);
@@ -115,7 +126,7 @@ impl Network {
         for i in 0..self.nodes() {
             let mut w = 0.0;
             for e in self.edges(i) {
-                w += *e.weight() as f64;
+                w += f64::from(*e.weight());
             }
 
             result.push(w);
@@ -129,28 +140,35 @@ impl Network {
     /// original network. The weight of an edge between two nodes in the reduced
     /// network equals the sum of the weights of the edges between the nodes in
     /// the two corresponding clusters in the original network.
+    ///
+    /// # Panics
+    /// If a cluster id exceeds `u32::MAX`, or if the clustering's node count
+    /// disagrees with the graph's node count.
+    #[must_use]
     pub fn create_reduced_network(&self, clustering: &impl Clustering) -> Network {
         let mut cluster_g =
             Graph::with_capacity(clustering.num_clusters(), clustering.num_clusters() * 2);
 
         for i in 0..clustering.num_clusters() {
             let ni = cluster_g.add_node(0.0);
-            assert_eq!(ni.index() as usize, i);
+            debug_assert_eq!(ni.index() as usize, i);
         }
 
         // add up node weights into cluster weights
         for n in self.graph.node_indices() {
             let cluster = clustering.get(n.index() as usize);
 
-            let cluster_node_weight = cluster_g.node_weight_mut((cluster as u32).into()).unwrap();
+            let cluster_node_weight = cluster_g.node_weight_mut(node_index(cluster)).unwrap();
             *cluster_node_weight += self.graph.node_weight(n).unwrap();
         }
 
-        let mut edge_memo: HashMap<(u32, u32), f32> = Default::default();
+        let mut edge_memo: HashMap<(u32, u32), f32> = HashMap::default();
 
         for e in self.graph.edge_references() {
-            let c1 = clustering.get(e.source().index() as usize) as u32;
-            let c2 = clustering.get(e.target().index() as usize) as u32;
+            let c1 = u32::try_from(clustering.get(e.source().index() as usize))
+                .expect("cluster id exceeds u32::MAX");
+            let c2 = u32::try_from(clustering.get(e.target().index() as usize))
+                .expect("cluster id exceeds u32::MAX");
 
             if c1 == c2 {
                 continue;
@@ -161,7 +179,7 @@ impl Network {
             *edge_memo.entry((min1, max1)).or_insert(0.0) += e.weight();
         }
 
-        for (&(c1, c2), &weight) in edge_memo.iter() {
+        for (&(c1, c2), &weight) in &edge_memo {
             cluster_g.add_edge(c1.into(), c2.into(), weight);
         }
 
@@ -181,6 +199,9 @@ impl Network {
     }
 
     /// Make a subnetwork for each cluster
+    ///
+    /// # Panics
+    /// If a node index exceeds `u32::MAX`.
     pub fn create_subnetworks(&self, c: &impl Clustering) -> Vec<Network> {
         let mut graphs = Vec::new();
         let mut new_id_map = Vec::with_capacity(c.nodes());
@@ -197,7 +218,7 @@ impl Network {
             let new_id: u32 = counts[c];
             new_id_map.push(new_id);
             counts[c] += 1;
-            graphs[c].add_node(*self.graph.node_weight((i as u32).into()).unwrap());
+            graphs[c].add_node(*self.graph.node_weight(node_index(i)).unwrap());
         }
 
         for e in self.graph.edge_references() {

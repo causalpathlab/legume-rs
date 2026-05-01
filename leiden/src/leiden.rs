@@ -18,6 +18,7 @@ pub struct Leiden {
 impl Leiden {
     /// Initialize the Leiden algorithm with the given resolution and randomness parameters.
     /// An optional random seed can be supplied, otherwise a seed of 0 will be used.
+    #[must_use]
     pub fn new(resolution: f64, randomness: f64, seed: Option<usize>) -> Leiden {
         let seed = seed.unwrap_or_default() as u64;
 
@@ -64,7 +65,7 @@ impl Leiden {
             }
 
             cluster_counter += sub_clustering.num_clusters();
-            self.num_nodes_per_cluster_reduced_network[i] = sub_clustering.num_clusters()
+            self.num_nodes_per_cluster_reduced_network[i] = sub_clustering.num_clusters();
         }
         c.remove_empty_clusters();
 

@@ -118,13 +118,6 @@ pub struct CnvArgs {
         help = "If ≥3, BIC-select K ∈ [3..max] via kmeans on the marginal signal."
     )]
     pub cnv_gmm_k_max: usize,
-
-    #[arg(
-        long,
-        default_value_t = 5,
-        help = "(SVD path only) Number of k-means cell clusters used as cell-type proxy."
-    )]
-    pub cnv_svd_clusters: usize,
 }
 
 /// Training score tracker for topic models
@@ -235,4 +228,49 @@ pub fn read_bulk_data_aligned(
         samples,
         data: bulk_data,
     })
+}
+
+/// Backward + global-L2-norm gradient clipping + optimizer step.
+/// `max_norm <= 0` skips clipping (falls back to plain `backward_step`).
+pub fn clip_grads_and_step<O: candle_nn::Optimizer>(
+    opt: &mut O,
+    loss: &candle_core::Tensor,
+    max_norm: f64,
+) -> anyhow::Result<()> {
+    if max_norm <= 0.0 {
+        opt.backward_step(loss)?;
+        return Ok(());
+    }
+    let mut grads = loss.backward()?;
+    let ids: Vec<_> = grads.get_ids().copied().collect();
+
+    let mut sumsq: Option<candle_core::Tensor> = None;
+    for id in &ids {
+        if let Some(g) = grads.get_id(*id) {
+            let s = g.sqr()?.sum_all()?;
+            sumsq = Some(match sumsq {
+                None => s,
+                Some(prev) => (prev + s)?,
+            });
+        }
+    }
+    let Some(sumsq) = sumsq else {
+        return Ok(());
+    };
+
+    // scale = min(1, max_norm / (sqrt(sumsq) + eps)), kept on-device so the
+    // scaling decision doesn't force a per-step host sync. Always-multiply
+    // is cheaper than the host round-trip we'd need to skip the multiply
+    // when scale==1.
+    let inv_norm = sumsq.sqrt()?.affine(1.0, 1e-6)?.powf(-1.0)?;
+    let scale = inv_norm.affine(max_norm, 0.0)?.clamp(0.0_f64, 1.0_f64)?;
+
+    for id in &ids {
+        if let Some(g) = grads.get_id(*id) {
+            let scaled = g.broadcast_mul(&scale)?;
+            grads.insert_id(*id, scaled);
+        }
+    }
+    opt.step(&grads)?;
+    Ok(())
 }

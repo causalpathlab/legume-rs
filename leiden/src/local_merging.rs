@@ -149,19 +149,14 @@ impl LocalMerging {
 
                 if total_transformed_qv_increment < f64::INFINITY {
                     let r = total_transformed_qv_increment * rng.random::<f64>();
-                    let mut min_idx = -1;
-                    let mut max_idx = (num_neighboring_clusters + 1) as isize;
-
-                    while min_idx < max_idx - 1 {
-                        let mid_idx = (min_idx + max_idx) / 2;
-                        if self.cum_transformed_qv_incr_per_cluster[mid_idx as usize] >= r {
-                            max_idx = mid_idx;
-                        } else {
-                            min_idx = mid_idx;
-                        }
-                    }
-
-                    chosen_cluster = self.neighboring_clusters[max_idx as usize];
+                    let cum = &self.cum_transformed_qv_incr_per_cluster;
+                    // `cum` is non-empty: it was just populated by the
+                    // `for k in 0..num_neighboring_clusters` loop, and
+                    // `num_neighboring_clusters ≥ 1` (slot 0 is `j`).
+                    // The clamp is defensive against fp edge cases where
+                    // `r` could round up to `cum.last()`.
+                    let idx = cum.partition_point(|&x| x < r).min(cum.len() - 1);
+                    chosen_cluster = self.neighboring_clusters[idx];
                 }
 
                 /*

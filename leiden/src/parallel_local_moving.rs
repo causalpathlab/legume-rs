@@ -22,6 +22,12 @@ impl ParallelLocalMoving {
 
     /// Run a louvain iteration, but update all the nodes simultaneously using only information
     /// from the previous iteration.
+    // Exact `==` on `qv_increment == max_qv_increment` is intentional:
+    // both sides are computed from identical operands within the same
+    // loop body, so identical bits indicate a true tie. A tolerance
+    // would either mask non-ties as ties or mask actual ties — either
+    // breaks the deterministic tiebreak heuristic.
+    #[allow(clippy::float_cmp)]
     pub fn iterate<C: Clustering + Clone + Send + Sync + Default>(
         &mut self,
         n: &Network,
@@ -53,8 +59,7 @@ impl ParallelLocalMoving {
         // (There are no serial dependencies among individual node updates).
         let node_order = (0..n.nodes()).collect::<Vec<_>>();
 
-        let chunk_size = ((n.nodes() as f64) / (rayon::current_num_threads() as f64)) as usize;
-        let chunk_size = std::cmp::max(256, chunk_size);
+        let chunk_size = (n.nodes() / rayon::current_num_threads().max(1)).max(256);
 
         let mut updates = vec![0usize; n.nodes()];
         node_order

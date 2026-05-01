@@ -25,6 +25,20 @@ use rand::{rngs::SmallRng, SeedableRng};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 
+/// How to pick landmarks for the latent-driven layout path.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
+#[clap(rename_all = "kebab-case")]
+pub enum LandmarkStrategy {
+    /// Uniform random subsample of cells. Largest topics dominate the
+    /// landmark set in proportion to their cell count.
+    Random,
+    /// Argmax-stratified: equal landmark budget per active topic. Use
+    /// when one topic dominates and you want minor topics resolved
+    /// without intra-major-topic substructure overwhelming the layout.
+    /// Falls back to Random for non-topic kinds (SVD).
+    PerTopic,
+}
+
 /// Self-loop amount added during similarity regularization to prevent
 /// isolated nodes from collapsing the layout.
 const SELF_LOOP_REG: f32 = 0.01;
@@ -200,6 +214,34 @@ pub struct LayoutCommonArgs {
                      Ignored by the projection-space fallback path."
     )]
     pub n_landmarks: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Temperature τ applied to topic θ before Hellinger transform",
+        long_help = "Re-softmax the trained log-θ at temperature τ before the \
+                     latent-path layout: feat ∝ sqrt(softmax(log_θ / τ)). \
+                     τ=1.0 (default) leaves θ unchanged. τ<1 sharpens \
+                     (cells with mixed topics get pulled toward their dominant \
+                     topic, tightening clusters at the cost of intermediate \
+                     positions). τ>1 softens. Only affects the latent path; \
+                     ignored by projection-space layouts."
+    )]
+    pub theta_temperature: f32,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "per-topic",
+        help = "Landmark sampling strategy for latent-driven layout",
+        long_help = "per-topic — equal landmark budget per active argmax \
+                     topic (default). Tightens cluster-level structure \
+                     when one topic dominates. Topic-only; falls back to \
+                     random for SVD.\n\
+                     random    — uniform random subsample. Largest topics \
+                     get the most landmarks."
+    )]
+    pub landmark_strategy: LandmarkStrategy,
 }
 
 /// PHATE diffusion-embedding args. Shared by `layout phate` (main
@@ -270,6 +312,8 @@ impl Default for LayoutCommonArgs {
             clusters: None,
             seed: 42,
             n_landmarks: 1000,
+            theta_temperature: 1.0,
+            landmark_strategy: LandmarkStrategy::PerTopic,
         }
     }
 }
@@ -482,11 +526,16 @@ fn preprocess_layout_data_from_latent(
         data_cell_names.len()
     );
 
+    let tau = args.theta_temperature.max(1e-6);
     let feat_kn: Mat = if kind.is_topic_family() {
+        // softmax(log_θ / τ) per cell → Hellinger sqrt. τ=1 reduces to
+        // sqrt(exp(log_θ)); τ<1 sharpens, τ>1 softens.
         let mut m = latent_nk.transpose();
-        for v in m.iter_mut() {
-            *v = v.exp().max(0.0).sqrt();
+        if (tau - 1.0).abs() > 1e-6 {
+            m.apply(|v| *v /= tau);
         }
+        m.normalize_exp_logits_columns_inplace();
+        m.apply(|v| *v = v.sqrt());
         m
     } else {
         let mut m = latent_nk.transpose();
@@ -498,26 +547,72 @@ fn preprocess_layout_data_from_latent(
         "Loaded latent: {n_cells} cells × {} dims ({})",
         feat_kn.nrows(),
         if kind.is_topic_family() {
-            "Hellinger-θ"
+            if (tau - 1.0).abs() < 1e-6 {
+                "Hellinger-θ".to_string()
+            } else {
+                format!("Hellinger-θ, τ={tau:.3}")
+            }
         } else {
-            "z-scored scores"
+            "z-scored scores".to_string()
         }
     );
 
     let n_pb_target = args.n_landmarks.min(n_cells).max(1);
-    let landmark_cells: Vec<usize> = {
+    let use_per_topic =
+        args.landmark_strategy == LandmarkStrategy::PerTopic && kind.is_topic_family();
+
+    let landmark_cells: Vec<usize> = if use_per_topic {
+        // Bucket cells by argmax topic, then pick ~equal budget from each.
+        // Small topics contribute all their cells; budget is the floor.
+        // feat_kn is [n_topics × n_cells] column-major, so feat_kn.column(c)
+        // is contiguous — cache-friendly vs strided latent_nk row access.
+        let n_topics = feat_kn.nrows();
+        let argmax_per_cell: Vec<usize> = (0..n_cells)
+            .into_par_iter()
+            .map(|c| feat_kn.column(c).argmax().0)
+            .collect();
+        let mut by_topic: Vec<Vec<usize>> = vec![Vec::new(); n_topics];
+        for (c, &t) in argmax_per_cell.iter().enumerate() {
+            by_topic[t].push(c);
+        }
+        let active: Vec<usize> = (0..n_topics).filter(|&t| !by_topic[t].is_empty()).collect();
+        let n_active = active.len().max(1);
+        let per_topic_budget = (n_pb_target / n_active).max(1);
+
+        let mut rng = SmallRng::seed_from_u64(args.seed);
+        let mut picked: Vec<usize> = Vec::with_capacity(n_pb_target);
+        for &t in &active {
+            let cells = &by_topic[t];
+            let take = per_topic_budget.min(cells.len());
+            let sampled: Vec<usize> = rand::seq::index::sample(&mut rng, cells.len(), take)
+                .into_iter()
+                .map(|i| cells[i])
+                .collect();
+            picked.extend(sampled);
+        }
+        picked.sort_unstable();
+        info!(
+            "Per-topic landmarks: {} active topic(s) × ~{} budget = {} landmarks (seed={})",
+            n_active,
+            per_topic_budget,
+            picked.len(),
+            args.seed
+        );
+        picked
+    } else {
         let mut rng = SmallRng::seed_from_u64(args.seed);
         let mut picked: Vec<usize> = rand::seq::index::sample(&mut rng, n_cells, n_pb_target)
             .into_iter()
             .collect();
         picked.sort_unstable();
+        info!(
+            "Random landmarks: picked {} cells as PBs (seed={})",
+            picked.len(),
+            args.seed
+        );
         picked
     };
     let n_pb_full = landmark_cells.len();
-    info!(
-        "Landmark subsample: picked {n_pb_full} cells as PBs (seed={})",
-        args.seed
-    );
 
     let landmark_cols: Vec<nalgebra::DVectorView<f32>> =
         landmark_cells.iter().map(|&c| feat_kn.column(c)).collect();
@@ -821,8 +916,15 @@ fn preprocess_layout_data_recompute(
         100.0 * covered as f32 / total_cells.max(1) as f32
     );
 
-    let log_expr_dp = log_expr_full_dp.select_columns(kept_indices.iter());
+    let mut log_expr_dp = log_expr_full_dp.select_columns(kept_indices.iter());
     let pb_size: Vec<usize> = kept_indices.iter().map(|&i| pb_size_full[i]).collect();
+
+    // NB-Fisher gene weighting before cosine similarity downweights
+    // high-mean / low-information genes so noisy housekeepers don't
+    // dominate the PB-PB graph.
+    let fisher_w = crate::empirical_dict::compute_nb_fisher_weights(&data_vec, args.block_size)?;
+    crate::empirical_dict::apply_gene_weights(&mut log_expr_dp, &fisher_w);
+    info!("Applied NB-Fisher gene weights to PB feature matrix");
 
     let mut old_to_new = vec![usize::MAX; n_pb_full];
     for (new_i, &old_i) in kept_indices.iter().enumerate() {

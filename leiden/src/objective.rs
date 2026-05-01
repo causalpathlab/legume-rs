@@ -1,3 +1,4 @@
+use crate::graph::node_index;
 use crate::{Clustering, Network};
 use rayon::iter::ParallelIterator;
 use rayon::prelude::*;
@@ -13,10 +14,16 @@ pub fn cpm(resolution: f64, graph: &Network, clustering: &impl Clustering) -> f6
         let c2 = clustering.get(e.target().index() as usize);
 
         if c1 == c2 {
-            quality += 2.0 * *e.weight() as f64;
+            quality += 2.0 * f64::from(*e.weight());
         }
 
-        total_edge_weight += *e.weight() as f64;
+        total_edge_weight += f64::from(*e.weight());
+    }
+
+    // Edgeless graph → modularity is undefined; return 0 rather than
+    // letting the divisions below propagate NaN into caller code.
+    if total_edge_weight <= 0.0 {
+        return 0.0;
     }
 
     let mut cluster_weights = vec![0.0; clustering.num_clusters()];
@@ -42,7 +49,7 @@ pub fn cpm(resolution: f64, graph: &Network, clustering: &impl Clustering) -> f6
 pub fn par_cpm<C: Clustering + Sync>(resolution: f64, graph: &Network, clustering: &C) -> f64 {
     // Create a number of chunks that is large relative to typical thread-counts
     // To allow rayon to balance the uneven chunk loads induced by the "node ordering" constraint.
-    let chunk_size = std::cmp::max(1, ((graph.nodes() as f64) / 64.0) as usize);
+    let chunk_size = (graph.nodes() / 64).max(1);
     let qual_weight_chunks = (0..graph.nodes())
         .collect::<Vec<usize>>()
         .par_chunks(chunk_size)
@@ -52,11 +59,11 @@ pub fn par_cpm<C: Clustering + Sync>(resolution: f64, graph: &Network, clusterin
 
             for i in nodes {
                 let c_i = clustering.get(*i);
-                for edge in graph.graph.edges((*i as u32).into()) {
+                for edge in graph.graph.edges(node_index(*i)) {
                     let j = edge.target().index() as usize;
                     // Enforce ordering of node indices to avoid processing edges twice.
                     if j < *i {
-                        let edge_weight = *edge.weight() as f64;
+                        let edge_weight = f64::from(*edge.weight());
                         total_edge_weight += edge_weight;
                         let c_j = clustering.get(j);
                         quality += if c_i == c_j { 2.0 * edge_weight } else { 0.0 };
@@ -71,6 +78,12 @@ pub fn par_cpm<C: Clustering + Sync>(resolution: f64, graph: &Network, clusterin
     let (mut quality, total_edge_weight) = qual_weight_chunks
         .into_iter()
         .fold((0f64, 0f64), |a, b| (a.0 + b.0, a.1 + b.1));
+
+    // Edgeless graph → modularity is undefined; return 0 rather than
+    // letting the divisions below propagate NaN into caller code.
+    if total_edge_weight <= 0.0 {
+        return 0.0;
+    }
 
     let mut cluster_weights = vec![0.0; clustering.num_clusters()];
 
