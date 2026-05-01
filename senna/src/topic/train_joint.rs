@@ -5,7 +5,6 @@ use crate::logging::new_progress_bar;
 
 use candle_core::{Device, Tensor};
 use candle_nn::AdamW;
-use candle_nn::Optimizer;
 use candle_util::candle_encoder_joint_softmax::LogSoftmaxJointEncoder;
 use candle_util::candle_joint_data_loader::*;
 use candle_util::candle_loss_functions::topic_likelihood;
@@ -418,7 +417,7 @@ where
                 let (_, llik) = decoder.forward_with_llik(&z_nk, &y_vec, &topic_likelihood)?;
 
                 let loss = (&kl - &llik)?.mean_all()?;
-                adam.backward_step(&loss)?;
+                clip_grads_and_step(&mut adam, &loss, f64::from(config.args.grad_clip))?;
 
                 let llik_val = llik.sum_all()?.to_scalar::<f32>()?;
                 let kl_val = kl.sum_all()?.to_scalar::<f32>()?;

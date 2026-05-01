@@ -52,6 +52,14 @@ where
     }
 }
 
+/// Convert a `usize` node id to the crate's `Index<u32>` type, panicking
+/// if it doesn't fit. Centralises the `usize → u32` boundary so callers
+/// don't need their own `as u32` casts (which clippy flags as truncating).
+#[inline]
+pub fn node_index(n: usize) -> Index<u32> {
+    Index(u32::try_from(n).expect("node index exceeds u32::MAX"))
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct Edge<W, NodeIx>
 where

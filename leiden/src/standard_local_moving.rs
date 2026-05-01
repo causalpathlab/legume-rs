@@ -21,6 +21,12 @@ impl StandardLocalMoving {
         }
     }
 
+    // Exact `==` on `qv_increment == max_qv_increment` is intentional:
+    // both sides are computed from identical operands within the same
+    // loop body, so identical bits indicate a true tie. A tolerance
+    // would either mask non-ties as ties or mask actual ties — either
+    // breaks the deterministic tiebreak heuristic.
+    #[allow(clippy::float_cmp)]
     pub fn iterate(&mut self, n: &Network, c: &mut impl Clustering, rng: &mut impl Rng) -> bool {
         let mut update = false;
 

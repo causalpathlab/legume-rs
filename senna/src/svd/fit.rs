@@ -143,6 +143,13 @@ pub struct SvdArgs {
 
     #[command(flatten)]
     cnv: CnvArgs,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Number of k-means cell clusters used as cell-type proxy for CNV."
+    )]
+    cnv_svd_clusters: usize,
 }
 
 pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
@@ -356,7 +363,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             &nystrom_out.latent_nk,
             &batch_membership,
             &positions,
-            args.cnv.cnv_svd_clusters.max(2),
+            args.cnv_svd_clusters.max(2),
             &cnv_config,
         )?;
 

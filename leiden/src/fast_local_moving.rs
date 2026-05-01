@@ -22,6 +22,10 @@ impl FastLocalMoving {
         }
     }
 
+    // Single-char names (`n`, `c`, `i`, `j`, `k`, `l`) follow the
+    // Traag et al. (2019) Leiden paper; renaming hurts traceability
+    // back to the published pseudocode.
+    #[allow(clippy::many_single_char_names)]
     pub fn iterate(&mut self, n: &Network, c: &mut impl Clustering, rng: &mut impl Rng) -> bool {
         let mut update = false;
 

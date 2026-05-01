@@ -212,7 +212,8 @@ pub fn rasterize_group_png(
             }
             // Group points by quantized radius so the marker path is
             // allocated once per bin rather than per point.
-            let mut by_bin: std::collections::BTreeMap<i32, Vec<(f32, f32)>> = Default::default();
+            let mut by_bin: std::collections::BTreeMap<i32, Vec<(f32, f32)>> =
+                std::collections::BTreeMap::default();
             for (&(x, y), &r) in pts_px.iter().zip(radii) {
                 if !x.is_finite() || !y.is_finite() || !r.is_finite() || r <= 0.0 {
                     continue;
@@ -222,9 +223,8 @@ pub fn rasterize_group_png(
             }
             for (bin, pts) in by_bin {
                 let r = (bin as f32) * RADIUS_QUANT_PX;
-                let marker = match shape.build_path(r) {
-                    Some(m) => m,
-                    None => continue,
+                let Some(marker) = shape.build_path(r) else {
+                    continue;
                 };
                 for (x, y) in pts {
                     let t = Transform::from_translate(x, y);

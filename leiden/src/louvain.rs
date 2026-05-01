@@ -16,6 +16,7 @@ pub const DEFAULT_RESOLUTION: f64 = 1.0;
 impl Louvain {
     /// Initialize the Leiden algorithm with the given resolution and randomness parameters.
     /// An optional random seed can be supplied, otherwise a seed of 0 will be used.
+    #[must_use]
     pub fn new(resolution: f64, seed: Option<usize>) -> Louvain {
         let seed = seed.unwrap_or_default() as u64;
 
@@ -54,6 +55,10 @@ impl Louvain {
     }
 
     /// Build a Louvain-compatible network from a list of adjacencies
+    ///
+    /// # Panics
+    /// If an edge endpoint refers to a node index ≥ `n_nodes`, or if a node
+    /// index in the constructed graph cannot be retrieved.
     pub fn build_network<I: Iterator<Item = (u32, u32)>>(
         n_nodes: usize,
         n_edges: usize,
@@ -64,7 +69,7 @@ impl Louvain {
         for _ in 0..n_nodes {
             node_indices.push(graph.add_node(1.0));
         }
-        let mut seen: Vec<HashSet<u32>> = vec![Default::default(); n_nodes];
+        let mut seen: Vec<HashSet<u32>> = vec![HashSet::default(); n_nodes];
         let mut node_weights = vec![0.0; n_nodes];
         for (i, j) in adjacency {
             let (i, j) = if i < j { (i, j) } else { (j, i) };

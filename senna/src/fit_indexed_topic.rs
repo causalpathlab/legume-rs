@@ -155,6 +155,13 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
+        default_value_t = 1.0,
+        help = "Global L2 gradient norm clip per minibatch (0 = off; typical 0.5–5.0)"
+    )]
+    grad_clip: f32,
+
+    #[arg(
+        long,
         value_enum,
         default_value = "cpu",
         help = "Compute device (cpu|cuda|metal)"
@@ -385,6 +392,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         anchor_prior_per_level: Some(&anchor_tensors),
         anchor_penalty: args.anchor_penalty,
         shortlist_weights: &shortlist_weights,
+        grad_clip: args.grad_clip,
     };
 
     let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_full, &bulk_deltas) {
