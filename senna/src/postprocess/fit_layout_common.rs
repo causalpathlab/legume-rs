@@ -879,6 +879,7 @@ fn preprocess_layout_data_recompute(
             gene_weighting: args.refine_weighting.into(),
             ..data_beans_alg::refine_multilevel::RefineParams::default()
         }),
+        ignore_batch: false,
     })?;
 
     let finest = collapsed_levels

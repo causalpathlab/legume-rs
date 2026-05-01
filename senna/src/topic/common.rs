@@ -183,6 +183,8 @@ pub struct LoadCollapseArgs<'a> {
     /// Opt-in BBKNN + Poisson DC-SBM refinement of the multilevel
     /// partition. `None` keeps the legacy hash-only behavior.
     pub refine: Option<data_beans_alg::refine_multilevel::RefineParams>,
+    /// Treat all cells as a single batch — no per-batch δ estimation.
+    pub ignore_batch: bool,
 }
 
 /// Load sparse data, project, multi-level collapse, and write delta output.
@@ -191,13 +193,17 @@ pub struct LoadCollapseArgs<'a> {
 pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData> {
     let SparseDataWithBatch {
         data: mut data_vec,
-        batch: batch_membership,
+        batch: mut batch_membership,
         ..
     } = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: args.data_files.to_vec(),
         batch_files: args.batch_files.clone(),
         preload: args.preload,
     })?;
+    if args.ignore_batch {
+        info!("--ignore-batch: collapsing all cells to a single batch");
+        crate::senna_input::collapse_to_single_batch(&mut batch_membership);
+    }
 
     // 2. Take projection results by warm start or projecting it again
     let proj_kn = if let Some(proj_file) = args.warm_start_proj_file {

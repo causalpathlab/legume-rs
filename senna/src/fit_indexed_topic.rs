@@ -73,6 +73,15 @@ pub struct IndexedTopicArgs {
     batch_files: Option<Vec<Box<str>>>,
 
     #[arg(
+        long,
+        help = "Skip per-batch correction; treat all cells as a single batch",
+        long_help = "Collapses batch membership to a single label so the projection,\n\
+                     multilevel collapsing, and δ estimation all run as if there\n\
+                     were no batch structure."
+    )]
+    ignore_batch: bool,
+
+    #[arg(
         short = 'w',
         long = "warm-start",
         help = "Warm-start projection file (cell × k)",
@@ -298,6 +307,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             gene_weighting: args.refine_weighting.into(),
             ..data_beans_alg::refine_multilevel::RefineParams::default()
         }),
+        ignore_batch: args.ignore_batch,
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
