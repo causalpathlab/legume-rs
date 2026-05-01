@@ -3,14 +3,14 @@
 //! defensive `return 0.0` behaviour rather than letting NaN escape.
 
 use crate::objective::{cpm, par_cpm};
-use crate::{Clustering, Graph, Network, SimpleClustering};
+use crate::{Clustering, Network, SimpleClustering};
 
 fn empty_network(n_nodes: usize) -> Network {
-    let mut g = Graph::with_capacity(n_nodes, 0);
+    let mut net = Network::with_capacity(n_nodes);
     for _ in 0..n_nodes {
-        g.add_node(1.0);
+        net.add_node(1.0);
     }
-    Network::new_from_graph(g)
+    net
 }
 
 #[test]
@@ -43,13 +43,12 @@ fn cpm_returns_zero_on_zero_node_graph() {
 
 #[test]
 fn cpm_and_par_cpm_agree_on_small_graph() {
-    let mut g = Graph::with_capacity(4, 4);
-    let nodes: Vec<_> = (0..4).map(|_| g.add_node(1.0)).collect();
-    g.add_edge(nodes[0], nodes[1], 1.0);
-    g.add_edge(nodes[1], nodes[0], 1.0);
-    g.add_edge(nodes[2], nodes[3], 1.0);
-    g.add_edge(nodes[3], nodes[2], 1.0);
-    let net = Network::new_from_graph(g);
+    let mut net = Network::with_capacity(4);
+    let nodes: Vec<_> = (0..4).map(|_| net.add_node(1.0)).collect();
+    net.add_edge(nodes[0], nodes[1], 1.0);
+    net.add_edge(nodes[1], nodes[0], 1.0);
+    net.add_edge(nodes[2], nodes[3], 1.0);
+    net.add_edge(nodes[3], nodes[2], 1.0);
 
     let clustering: SimpleClustering = SimpleClustering::new_from_labels(&[0, 0, 1, 1]);
     let serial = cpm(1.0, &net, &clustering);

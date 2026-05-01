@@ -98,28 +98,21 @@ pub fn leiden_gene_modules(
 
     // Build leiden::Network: node weights = subgraph degree, edge weights = 1.0.
     let mut total_edge_weight = 0.0f64;
-    let mut lg = leiden::Graph::with_capacity(n_sub, graph.gene_edges.len());
+    let mut network = leiden::Network::with_capacity(n_sub);
     for g in 0..graph.n_genes {
         if sub_of[g].is_some() {
-            lg.add_node(sub_degrees[g] as f32);
+            network.add_node(sub_degrees[g] as f32);
         }
     }
     for &(u, v) in &graph.gene_edges {
         if let (Some(su), Some(sv)) = (sub_of[u], sub_of[v]) {
-            lg.add_edge((su as u32).into(), (sv as u32).into(), 1.0);
+            network.add_edge(su, sv, 1.0);
             total_edge_weight += 1.0;
         }
     }
-    let network = leiden::Network::new_from_graph(lg);
 
-    // The Leiden crate expects CPM-scale resolution. Convert from the
-    // user-facing modularity γ via `γ / (2 * total_edge_weight)`, matching
-    // matrix_util::knn_graph conventions.
-    let cpm_resolution = if total_edge_weight > 0.0 {
-        resolution / (2.0 * total_edge_weight)
-    } else {
-        resolution
-    };
+    let cpm_resolution =
+        matrix_util::knn_graph::modularity_to_cpm_resolution(resolution, total_edge_weight);
 
     let sub_labels =
         matrix_util::knn_graph::run_leiden(&network, n_sub, cpm_resolution, Some(seed as usize));

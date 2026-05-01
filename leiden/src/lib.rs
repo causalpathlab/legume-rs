@@ -20,7 +20,6 @@ pub mod louvain_parallel;
 pub mod objective;
 
 mod fast_local_moving;
-mod graph;
 mod local_merging;
 mod parallel_local_moving;
 mod standard_local_moving;
@@ -35,7 +34,7 @@ mod local_merging_test;
 mod objective_test;
 
 pub use clustering::{Clustering, SimpleClustering};
-pub use network::{Graph, Network};
+pub use network::Network;
 
 trait ZeroVec {
     fn zero(&mut self);

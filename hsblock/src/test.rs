@@ -6,7 +6,7 @@ use crate::model::poisson_score_cpu;
 use crate::sufficient_stats::SufficientStats;
 use leiden::clustering::SimpleClustering;
 use leiden::leiden::Leiden;
-use leiden::network::{Graph, Network};
+use leiden::network::Network;
 use leiden::Clustering;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -62,15 +62,15 @@ fn planted_partition_network(
         }
     }
 
-    let mut graph = Graph::with_capacity(n, edge_list.len());
+    let mut network = Network::with_capacity(n);
     for &deg in degree.iter().take(n) {
-        graph.add_node(deg);
+        network.add_node(deg);
     }
     for &(i, j, w) in &edge_list {
-        graph.add_edge((i as u32).into(), (j as u32).into(), w);
+        network.add_edge(i, j, w);
     }
 
-    (Network::new_from_graph(graph), true_labels)
+    (network, true_labels)
 }
 
 /// Compute Adjusted Rand Index between two label vectors.

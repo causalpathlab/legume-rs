@@ -2,7 +2,7 @@ use crate::leiden::Leiden;
 use crate::louvain::Louvain;
 use crate::louvain_parallel::ParallelLouvain;
 use crate::objective::{cpm, par_cpm};
-use crate::{Clustering, Graph, Network, SimpleClustering};
+use crate::{Clustering, Network, SimpleClustering};
 use flate2::read::GzDecoder;
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt, SeedableRng};
@@ -18,7 +18,7 @@ fn gen_sample_network(
     nodes_per_cluster: usize,
     mean_degree: f64,
     mu: f64,
-) -> (Graph, SimpleClustering) {
+) -> (Network, SimpleClustering) {
     assert!(num_clusters > 1);
     assert!(nodes_per_cluster > 1);
 
@@ -35,10 +35,10 @@ fn gen_sample_network(
     }
     let true_clusters = SimpleClustering::new_from_labels(&cluster);
 
-    let mut g = Graph::with_capacity(total_nodes, total_edges);
+    let mut network = Network::with_capacity(total_nodes);
 
     for _ in 0..total_nodes {
-        g.add_node(1.0);
+        network.add_node(1.0);
     }
 
     for _ in 0..total_edges {
@@ -71,11 +71,11 @@ fn gen_sample_network(
             c2 = cluster[n2];
         }
 
-        g.add_edge((n1 as u32).into(), (n2 as u32).into(), 1.0);
-        g.add_edge((n2 as u32).into(), (n1 as u32).into(), 1.0);
+        network.add_edge(n1, n2, 1.0);
+        network.add_edge(n2, n1, 1.0);
     }
 
-    (g, true_clusters)
+    (network, true_clusters)
 }
 
 const DEFAULT_RESOLUTION: f64 = 1.0;
@@ -89,9 +89,8 @@ fn run_leiden() {
     let num_clusters = 100_000 / 50;
     let nodes_per_cluster = 50;
 
-    let (g, true_clusters) =
+    let (n, true_clusters) =
         gen_sample_network(&mut rng, num_clusters, nodes_per_cluster, 10.0, 0.4);
-    let n = Network { graph: g };
     check_edge_weight_par(&n);
 
     println!("best cpm: {}", cpm(DEFAULT_RESOLUTION, &n, &true_clusters));
@@ -185,12 +184,12 @@ fn run_louvain() -> std::io::Result<()> {
         }
         (nodes.len(), adjacency)
     };
-    let network = Louvain::build_network(n_nodes, adjacency.len(), adjacency.into_iter());
+    let network = Louvain::build_network(n_nodes, adjacency.into_iter());
     check_edge_weight_par(&network);
     println!(
         "nodes: {:?}\nedges: {:?}",
-        network.graph.node_count(),
-        network.graph.edge_count()
+        network.nodes(),
+        network.edge_count()
     );
     let resolution = crate::louvain::DEFAULT_RESOLUTION;
     let mut clustering: SimpleClustering = Clustering::init_different_clusters(n_nodes);
@@ -272,12 +271,12 @@ fn run_louvain_parallel() -> std::io::Result<()> {
         }
         (nodes.len(), adjacency)
     };
-    let network = Louvain::build_network(n_nodes, adjacency.len(), adjacency.into_iter());
+    let network = Louvain::build_network(n_nodes, adjacency.into_iter());
     check_edge_weight_par(&network);
     println!(
         "nodes: {:?}\nedges: {:?}",
-        network.graph.node_count(),
-        network.graph.edge_count()
+        network.nodes(),
+        network.edge_count()
     );
     let resolution = crate::louvain::DEFAULT_RESOLUTION;
     let mut clustering: SimpleClustering = Clustering::init_different_clusters(n_nodes);
@@ -368,8 +367,7 @@ fn edge_weight_par() {
     for (seed, num_clusters, nodes_per_cluster) in settings {
         let mut rng = SmallRng::seed_from_u64(seed);
 
-        let (g, _) = gen_sample_network(&mut rng, num_clusters, nodes_per_cluster, 10.0, 0.4);
-        let n = Network { graph: g };
+        let (n, _) = gen_sample_network(&mut rng, num_clusters, nodes_per_cluster, 10.0, 0.4);
         check_edge_weight_par(&n);
     }
 }
