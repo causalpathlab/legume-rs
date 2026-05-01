@@ -82,6 +82,17 @@ pub struct IndexedTopicArgs {
     warm_start_proj_file: Option<Box<str>>,
 
     #[arg(
+        long = "init-from",
+        help = "Initialize encoder + decoder weights from a previously trained model",
+        long_help = "Path prefix of a model saved by `senna indexed-topic`\n\
+                     (matching {prefix}.model.json + {prefix}.safetensors).\n\
+                     Architecture must match: same K, encoder layers,\n\
+                     embedding_dim, and n_features_full. Cross-gene-set\n\
+                     warm-start is not supported — train on the same gene set."
+    )]
+    init_from: Option<Box<str>>,
+
+    #[arg(
         long,
         default_value_t = 10,
         help = "In-batch k-NN for super-cell merging",
@@ -331,6 +342,23 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         })
         .collect();
 
+    if let Some(prefix) = args.init_from.as_deref() {
+        use crate::topic::warm_start::{warm_start_load, WarmStartCheck};
+        warm_start_load(
+            &parameters,
+            prefix,
+            &WarmStartCheck {
+                model_type_expected: crate::topic::model_metadata::MODEL_TYPE_INDEXED,
+                n_topics,
+                n_features_full,
+                n_features_encoder: n_features_full,
+                encoder_hidden: &args.encoder_layers,
+                level_decoder_dims: &vec![n_features_full; num_levels],
+                embedding_dim: Some(args.embedding_dim),
+            },
+        )?;
+    }
+
     info!(
         "input: {} -> indexed encoder (emb={}, ctx={}) -> {} decoders (D={}, ctx={})",
         n_features_full,
@@ -414,6 +442,32 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let finest_decoder = decoders.last().unwrap();
     write_indexed_dictionary(finest_decoder, &gene_names, &args.out)?;
 
+    // Persist trainable weights, model architecture, and shortlist weights
+    // so `senna predict` (and `--warm-start` re-runs) can rebuild this model.
+    use crate::topic::model_metadata::{
+        save_parameters, save_shortlist_weights, TopicModelMetadata,
+    };
+    save_parameters(&parameters, &args.out)?;
+    let mut metadata = TopicModelMetadata {
+        model_type: crate::topic::model_metadata::MODEL_TYPE_INDEXED.into(),
+        decoder_types: vec!["multinom".into()],
+        decoder_weights: vec![1.0],
+        n_features_encoder: n_features_full,
+        n_features_full,
+        n_topics,
+        encoder_hidden: args.encoder_layers.clone(),
+        num_levels,
+        level_decoder_dims: vec![n_features_full; num_levels],
+        adj_method: args.adj_method.as_str().into(),
+        has_coarsening: false,
+        embedding_dim: Some(args.embedding_dim),
+        enc_context_size: Some(args.context_size),
+        dec_context_size: Some(dec_context_size),
+        theta_mean: None,
+    };
+    metadata.save(&args.out)?;
+    save_shortlist_weights(&shortlist_weights, &gene_names, &args.out)?;
+
     // Move VarMap to CPU, then rebuild encoder + finest-level decoder from the
     // CPU Vars. The original structs still hold CUDA/Metal tensors internally
     // and will trigger "device mismatch" errors if reused on CPU indices.
@@ -468,6 +522,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         finest_collapsed,
         &eval_config,
     )?;
+
+    metadata.populate_theta_mean_and_save(&z_nk, &args.out)?;
 
     // Evaluate bulk with the CPU encoder/decoder for consistency.
     if let (Some(bulk), Some(bulk_deltas)) = (&bulk, &bulk_deltas) {

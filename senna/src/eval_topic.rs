@@ -164,9 +164,10 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
         None
     };
 
-    let delta_db = estimate_delta(
+    let delta_db = crate::topic::predict_common::estimate_delta(
         &data_vec,
         &beta_dk,
+        metadata.theta_mean.as_deref(),
         gene_remap_opt.as_ref(),
         args.block_size,
     )?;
@@ -306,83 +307,4 @@ where
     };
 
     evaluate_latent_with_gene_remap(data_vec, encoder, delta_db, gene_remap, &eval_config)
-}
-
-///
-/// `delta[d,b] = (pb[d,b] / lib_b) / predicted[d]` where predicted is the
-/// marginal gene proportion from the dictionary.
-fn estimate_delta(
-    data_vec: &SparseIoVec,
-    beta_dk: &Mat,
-    gene_remap: Option<&GeneRemap>,
-    block_size: Option<usize>,
-) -> anyhow::Result<Option<Mat>> {
-    let n_batches = data_vec.num_batches();
-    if n_batches <= 1 {
-        info!("Single batch or no batches — skipping delta estimation");
-        return Ok(None);
-    }
-
-    let d_train = beta_dk.nrows();
-    let k = beta_dk.ncols();
-
-    // Predicted marginal gene proportions from dictionary
-    let exp_beta = beta_dk.map(f32::exp);
-    let mut predicted = nalgebra::DVector::<f32>::zeros(d_train);
-    for d in 0..d_train {
-        predicted[d] = exp_beta.row(d).sum() / k as f32;
-    }
-    let pred_sum: f32 = predicted.iter().sum();
-    if pred_sum > 0.0 {
-        predicted /= pred_sum;
-    }
-
-    // Stream pseudobulk per batch in block order
-    let d_new = data_vec.num_rows();
-    let ntot = data_vec.num_columns();
-    let mut pb_new = Mat::zeros(d_new, n_batches);
-
-    let block_size =
-        block_size.unwrap_or_else(|| matrix_util::utils::default_block_size(data_vec.num_rows()));
-    for lb in (0..ntot).step_by(block_size) {
-        let ub = (lb + block_size).min(ntot);
-        let csc = data_vec.read_columns_csc(lb..ub)?;
-        let batch_ids = data_vec.get_batch_membership(lb..ub);
-        for (local_j, &batch_id) in batch_ids.iter().enumerate() {
-            let col = csc.col(local_j);
-            for (&row, &val) in col.row_indices().iter().zip(col.values().iter()) {
-                pb_new[(row, batch_id)] += val;
-            }
-        }
-    }
-
-    // Remap to training gene order
-    let mut pb_train = Mat::zeros(d_train, n_batches);
-    if let Some(remap) = gene_remap {
-        for (new_idx, opt_train) in remap.new_to_train.iter().enumerate() {
-            if let Some(&train_idx) = opt_train.as_ref() {
-                pb_train.row_mut(train_idx).copy_from(&pb_new.row(new_idx));
-            }
-        }
-    } else {
-        pb_train.copy_from(&pb_new);
-    }
-
-    // delta = observed_proportion / predicted_proportion
-    let mut delta_db = Mat::zeros(d_train, n_batches);
-    for b in 0..n_batches {
-        let lib: f32 = pb_train.column(b).sum();
-        if lib <= 0.0 {
-            delta_db.column_mut(b).fill(1.0);
-            continue;
-        }
-        for d in 0..d_train {
-            let obs_prop = pb_train[(d, b)] / lib;
-            let pred = predicted[d].max(1e-10);
-            delta_db[(d, b)] = (obs_prop / pred).clamp(0.01, 100.0);
-        }
-    }
-
-    info!("Estimated delta: {d_train} genes × {n_batches} batches");
-    Ok(Some(delta_db))
 }
