@@ -86,7 +86,7 @@ const DEFAULT_EPSILON: f64 = 1e-6;
 fn run_leiden() {
     let mut rng = SmallRng::seed_from_u64(0);
 
-    let num_clusters = 100000 / 50;
+    let num_clusters = 100_000 / 50;
     let nodes_per_cluster = 50;
 
     let (g, true_clusters) =
@@ -117,10 +117,10 @@ fn run_leiden() {
 
 fn relabel_by_size(labels: &mut [i16]) -> Vec<(i16, usize)> {
     let max_label = labels.iter().max().unwrap();
-    let mut hist = (0..(max_label + 1))
-        .map(|i| (i, 0usize))
-        .collect::<Vec<_>>();
-    labels.iter().for_each(|&x| hist[x as usize].1 += 1);
+    let mut hist = (0..=*max_label).map(|i| (i, 0usize)).collect::<Vec<_>>();
+    for &x in labels.iter() {
+        hist[x as usize].1 += 1;
+    }
     hist.sort_by(|(_, x), (_, y)| y.cmp(x));
     let map = hist
         .iter()
@@ -130,7 +130,7 @@ fn relabel_by_size(labels: &mut [i16]) -> Vec<(i16, usize)> {
     for x in labels.iter_mut() {
         *x = map[x];
     }
-    for kv in hist.iter_mut() {
+    for kv in &mut hist {
         kv.0 = map[&kv.0];
     }
     hist
@@ -172,7 +172,7 @@ fn run_louvain() -> std::io::Result<()> {
         let file = BufReader::new(GzDecoder::new(File::open(
             "testdata/louvain/adjacency.txt.gz",
         )?));
-        let mut nodes: HashSet<u32> = Default::default();
+        let mut nodes: HashSet<u32> = HashSet::default();
         let mut adjacency = Vec::new();
         for line in file.lines() {
             let line = line?;
@@ -194,7 +194,7 @@ fn run_louvain() -> std::io::Result<()> {
     );
     let resolution = crate::louvain::DEFAULT_RESOLUTION;
     let mut clustering: SimpleClustering = Clustering::init_different_clusters(n_nodes);
-    let mut louvain = Louvain::new(resolution, Some(0xBADC0FFEE0DDF000));
+    let mut louvain = Louvain::new(resolution, Some(0xBADC_0FFE_E0DD_F000));
     let mut score = cpm(resolution, &network, &clustering);
     println!("initial cpm: {score:.8}");
     for iter in 1.. {
@@ -244,7 +244,7 @@ fn run_louvain_parallel() -> std::io::Result<()> {
         .bytes()
         .collect::<Result<_, _>>()?;
 
-        let mut nodes: HashSet<u32> = Default::default();
+        let mut nodes: HashSet<u32> = HashSet::default();
         let mut adjacency = Vec::new();
         let mut max_orig_node = 0;
         for line in BufReader::new(data.as_slice()).lines() {
@@ -370,6 +370,6 @@ fn edge_weight_par() {
 
         let (g, _) = gen_sample_network(&mut rng, num_clusters, nodes_per_cluster, 10.0, 0.4);
         let n = Network { graph: g };
-        check_edge_weight_par(&n)
+        check_edge_weight_par(&n);
     }
 }

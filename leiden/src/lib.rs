@@ -28,6 +28,12 @@ mod standard_local_moving;
 #[cfg(test)]
 mod test;
 
+#[cfg(test)]
+mod local_merging_test;
+
+#[cfg(test)]
+mod objective_test;
+
 pub use clustering::{Clustering, SimpleClustering};
 pub use network::{Graph, Network};
 
@@ -45,6 +51,6 @@ impl<T: Default> ZeroVec for Vec<T> {
 
     fn zero_len(&mut self, len: usize) {
         self.zero();
-        self.resize_with(len, T::default)
+        self.resize_with(len, T::default);
     }
 }
