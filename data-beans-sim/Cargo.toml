@@ -1,0 +1,31 @@
+[package]
+name = "data-beans-sim"
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "data-beans-sim"
+path = "src/main.rs"
+
+[dependencies]
+data-beans = { workspace = true }
+matrix-util = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+
+nalgebra = { workspace = true }
+
+rand = { workspace = true }
+rand_distr = { workspace = true }
+
+rayon = { workspace = true }
+indicatif = { workspace = true }
+dashmap = { workspace = true }

@@ -15,6 +15,7 @@ auxiliary-data = { workspace = true }
 cnv = { workspace = true }
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
+data-beans-sim = { workspace = true }
 genomic-data = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }

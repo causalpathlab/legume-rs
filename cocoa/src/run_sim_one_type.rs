@@ -5,7 +5,7 @@ use rustc_hash::FxHashMap as HashMap;
 use std::ops::Div;
 
 use clap::Parser;
-use data_beans::simulations::core::{sample_cnv_blocks, CnvSimOut, CnvSimParams};
+use data_beans_sim::core::{sample_cnv_blocks, CnvSimOut, CnvSimParams};
 use indicatif::ParallelProgressIterator;
 use log::info;
 use matrix_util::common_io::{mkdir_parent, write_lines, write_types};
