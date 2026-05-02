@@ -2,7 +2,8 @@ use clap::{Parser, Subcommand};
 
 use data_beans_sim::deconv::{generate_convoluted_data, SimConvArgs};
 use data_beans_sim::handlers::{
-    run_simulate, run_simulate_multimodal, RunSimulateArgs, RunSimulateMultimodalArgs,
+    run_copula_sim, run_simulate, run_simulate_multimodal, CopulaSimArgs, RunSimulateArgs,
+    RunSimulateMultimodalArgs,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -27,6 +28,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Simulate(args) => run_simulate(args)?,
         Commands::SimulateConv(args) => generate_convoluted_data(args)?,
         Commands::SimulateMultimodal(args) => run_simulate_multimodal(args)?,
+        Commands::CopulaSim(args) => run_copula_sim(args)?,
     }
 
     Ok(())
@@ -79,4 +81,19 @@ enum Commands {
                       Delta is sparse (spike-and-slab): n_delta_features genes per topic are perturbed."
     )]
     SimulateMultimodal(RunSimulateMultimodalArgs),
+
+    #[command(
+        name = "copula-sim",
+        about = "Reference-conditioned copula simulator (scDesign / scDesign2 / scDesign3 style)",
+        long_about = "Fit per-gene NB marginals + a Gaussian copula on a real reference dataset,\n\
+                      then sample synthetic counts that preserve gene-gene dependence. Optionally\n\
+                      partition cells via SVD + leiden (or an external label file) and layer batch,\n\
+                      CNV (clonal tree), and housekeeping effects on top of the copula draws.\n\
+                      \n\
+                      References:\n\
+                      - Li & Li 2019, Bioinformatics 35(14):i41-i50 (scDesign)\n\
+                      - Sun, Song, Li & Li 2021, Genome Biology 22:163 (scDesign2)\n\
+                      - Song et al. 2024, Nat Biotechnology 42(2):247-252 (scDesign3)"
+    )]
+    CopulaSim(CopulaSimArgs),
 }

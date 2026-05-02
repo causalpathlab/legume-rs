@@ -1,3 +1,5 @@
+use crate::copula::reference::{load_cell_type_labels, open_reference};
+use crate::copula::{fit_copula, sample_copula, CopulaFitArgs, CopulaModel, PartitionMode};
 use crate::core as simulate;
 use crate::multimodal as simulate_multimodal;
 use data_beans::hdf5_io::*;
@@ -516,5 +518,361 @@ pub fn run_simulate_multimodal(cmd_args: &RunSimulateMultimodalArgs) -> anyhow::
     }
 
     info!("done");
+    Ok(())
+}
+
+/// CLI arguments for the scDesign-style copula simulator.
+#[derive(Args, Debug)]
+pub struct CopulaSimArgs {
+    /// Reference single-cell dataset (`.h5`, `.zarr`, or `.zarr.zip`).
+    /// Per-gene NB marginals and the Gaussian copula `Σ̂` are estimated from
+    /// this matrix.
+    #[arg(short = 'r', long, required = true)]
+    pub reference: Box<str>,
+
+    /// Number of synthetic cells generated per cluster.
+    #[arg(short = 'n', long, default_value_t = 1000)]
+    pub n_cells: usize,
+
+    /// Number of HVGs included in the copula dependence structure. Genes
+    /// outside the HVG set are sampled independently from their NB fits.
+    #[arg(long, default_value_t = 2000)]
+    pub n_hvg: usize,
+
+    /// Target cluster count for the SVD+leiden cell-type inference step.
+    /// `0` ⇒ skip clustering, fit a single global copula.
+    #[arg(long, default_value_t = 0)]
+    pub n_clusters: usize,
+
+    /// Optional `barcode<TAB>label` file (.tsv / .tsv.gz). When supplied,
+    /// overrides `--n-clusters` and uses the file's labels directly.
+    #[arg(long)]
+    pub cell_type_file: Option<Box<str>>,
+
+    /// k for the cell-cell KNN graph used by leiden during cluster inference.
+    #[arg(long, default_value_t = 15)]
+    pub knn: usize,
+
+    /// RSVD rank used for the cluster-inference embedding.
+    #[arg(long, default_value_t = 30)]
+    pub rsvd_rank: usize,
+
+    /// HVG count used for the clustering step; defaults to `--n-hvg` when 0.
+    #[arg(long, default_value_t = 0)]
+    pub hvg_for_clustering: usize,
+
+    /// Number of synthetic batches. Cells are assigned round-robin within
+    /// each cluster. Batch 0 is the reference (δ_batch = 1).
+    #[arg(long, default_value_t = 1)]
+    pub n_batches: usize,
+
+    /// Standard deviation of the per-gene log-normal batch shift.
+    #[arg(long, default_value_t = 1.0)]
+    pub batch_effect_sigma: f32,
+
+    /// Number of synthetic chromosomes for CNV. `0` disables CNV. Clone
+    /// index ≡ batch index — matches the convention from `data-beans-sim simulate`.
+    #[arg(long, default_value_t = 0)]
+    pub n_chromosomes: usize,
+
+    /// Expected CNV events per chromosome (Poisson rate).
+    #[arg(long, default_value_t = 0.5)]
+    pub cnv_events_per_chr: f32,
+
+    /// CNV block size as fraction of genes per chromosome.
+    #[arg(long, default_value_t = 0.15)]
+    pub cnv_block_frac: f32,
+
+    /// Fold-change for CNV gain events.
+    #[arg(long, default_value_t = 2.0)]
+    pub cnv_gain_fold: f32,
+
+    /// Fold-change for CNV loss events.
+    #[arg(long, default_value_t = 0.5)]
+    pub cnv_loss_fold: f32,
+
+    /// Number of housekeeping genes (top-K by reference mean) inflated by
+    /// `--housekeeping-fold` during sampling. Default 0 ⇒ no inflation.
+    #[arg(long, default_value_t = 0)]
+    pub n_housekeeping: usize,
+
+    /// Multiplicative fold change applied to the housekeeping-gene mean.
+    /// `1.0` keeps the reference fit (no inflation).
+    #[arg(long, default_value_t = 1.0)]
+    pub housekeeping_fold: f32,
+
+    /// Maximum rank of the low-rank `Σ̂` factor `F = U·diag(σ)/√N`. Effective
+    /// rank is `min(rank, n_hvg, n_cells_in_cluster)`. Default 100 captures
+    /// most of the gene-gene dependence in single-cell data; raise for
+    /// higher-fidelity copulas (cost is `O(g · rank)` memory and CPU).
+    #[arg(long, default_value_t = 100)]
+    pub copula_rank: usize,
+
+    /// Per-gene isotropic ridge variance added at sample time. Plays the role
+    /// of the previous `(1-λ)Σ̂ + λI` regularization but does not require
+    /// densifying Σ̂.
+    #[arg(long, default_value_t = 1e-3)]
+    pub regularization: f32,
+
+    /// Lower bound on the NB size parameter `r̂`. Tames runaway dispersion
+    /// when MoM yields a near-zero `r` for noisy genes.
+    #[arg(long, default_value_t = 1e-2)]
+    pub r_floor: f32,
+
+    /// Random seed.
+    #[arg(long, default_value_t = 42)]
+    pub rseed: u64,
+
+    /// Output prefix (no extension; the backend suffix is added automatically).
+    #[arg(short, long, required = true)]
+    pub output: Box<str>,
+
+    #[arg(long, value_enum, default_value = "zarr")]
+    pub backend: SparseIoBackend,
+
+    /// Produce a `.zarr.zip` archive instead of a `.zarr` directory.
+    #[arg(long, default_value_t = false)]
+    pub zip: bool,
+}
+
+/// Reference-conditioned copula simulator (scDesign / scDesign2 / scDesign3).
+pub fn run_copula_sim(cmd: &CopulaSimArgs) -> anyhow::Result<()> {
+    let effective_output = apply_zip_flag(&cmd.output, cmd.zip);
+    let output: Box<str> = strip_backend_suffix(&effective_output).into();
+
+    dirname(&output).as_deref().map(mkdir).transpose()?;
+
+    let backend = cmd.backend.clone();
+    let (_, backend_file) = resolve_backend_file(&effective_output, Some(backend.clone()))?;
+
+    info!("opening reference: {}", &cmd.reference);
+    let sc = open_reference(&cmd.reference)?;
+    let column_names = sc.column_names()?;
+    let row_names = sc.row_names()?;
+
+    let partition = match (&cmd.cell_type_file, cmd.n_clusters) {
+        (Some(path), _) => {
+            let (labels, label_names) = load_cell_type_labels(path, &column_names)?;
+            PartitionMode::Labels {
+                labels,
+                label_names,
+            }
+        }
+        (None, k) if k > 0 => PartitionMode::AutoCluster {
+            n_clusters: k,
+            knn: cmd.knn,
+            rsvd_rank: cmd.rsvd_rank,
+            hvg_for_clustering: if cmd.hvg_for_clustering > 0 {
+                cmd.hvg_for_clustering
+            } else {
+                cmd.n_hvg
+            },
+        },
+        _ => PartitionMode::Single,
+    };
+
+    let fit_args = CopulaFitArgs {
+        sc: &sc,
+        partition,
+        n_hvg: cmd.n_hvg,
+        copula_rank: cmd.copula_rank,
+        regularization: cmd.regularization,
+        r_floor: cmd.r_floor,
+        n_batches: cmd.n_batches,
+        batch_effect_sigma: cmd.batch_effect_sigma,
+        n_chromosomes: cmd.n_chromosomes,
+        cnv_events_per_chr: cmd.cnv_events_per_chr,
+        cnv_block_frac: cmd.cnv_block_frac,
+        cnv_gain_fold: cmd.cnv_gain_fold,
+        cnv_loss_fold: cmd.cnv_loss_fold,
+        n_housekeeping: cmd.n_housekeeping,
+        housekeeping_fold: cmd.housekeeping_fold,
+        rseed: cmd.rseed,
+    };
+
+    let model = fit_copula(&fit_args)?;
+    let sample = sample_copula(&model, cmd.n_cells, cmd.rseed)?;
+    info!(
+        "sampled {} cells producing {} nonzero triplets",
+        sample.n_cells_total,
+        sample.triplets.len()
+    );
+
+    // Output sparse backend.
+    let cols: Vec<Box<str>> = (0..sample.n_cells_total)
+        .map(|j| {
+            let cluster = sample.cluster_assignment[j];
+            let batch = sample.batch_assignment[j];
+            format!(
+                "synthetic_{}_{}_{}",
+                model.clusters[cluster].label_name, batch, j
+            )
+            .into_boxed_str()
+        })
+        .collect();
+    let mtx_shape = (model.n_genes, sample.n_cells_total, sample.triplets.len());
+    let mut data = create_sparse_from_triplets(
+        &sample.triplets,
+        mtx_shape,
+        Some(&backend_file),
+        Some(&backend),
+    )?;
+    data.register_row_names_vec(&row_names);
+    data.register_column_names_vec(&cols);
+    finalize_zarr_output(&backend_file, &effective_output)?;
+    info!("wrote sparse backend: {}", &backend_file);
+
+    write_companion_files(&model, &sample, &output, &cols)?;
+
+    info!("done");
+    Ok(())
+}
+
+fn write_companion_files(
+    model: &CopulaModel,
+    sample: &crate::copula::SampleOut,
+    output: &str,
+    cols: &[Box<str>],
+) -> anyhow::Result<()> {
+    let cluster_file = format!("{}.cluster_membership.tsv.gz", output);
+    let mut cluster_lines: Vec<Box<str>> = vec!["cell\tcluster\tbatch".into()];
+    for (j, name) in cols.iter().enumerate() {
+        let c = sample.cluster_assignment[j];
+        let b = sample.batch_assignment[j];
+        cluster_lines
+            .push(format!("{}\t{}\t{}", name, model.clusters[c].label_name, b).into_boxed_str());
+    }
+    write_lines(&cluster_lines, &cluster_file)?;
+    info!("cluster membership: {}", cluster_file);
+
+    let marg_file = format!("{}.marginals.tsv.gz", output);
+    let mut marg_lines: Vec<Box<str>> = vec!["cluster\tgene\tmu\tr\tis_hvg".into()];
+    for cluster in &model.clusters {
+        let mut hvg_set = vec![false; model.n_genes];
+        for &h in &cluster.hvg_indices {
+            hvg_set[h] = true;
+        }
+        for (g, fit) in cluster.marginals.iter().enumerate() {
+            let r_str = if fit.r.is_finite() {
+                format!("{:.6}", fit.r)
+            } else {
+                "inf".to_string()
+            };
+            marg_lines.push(
+                format!(
+                    "{}\t{}\t{:.6}\t{}\t{}",
+                    cluster.label_name, model.gene_names[g], fit.mu, r_str, hvg_set[g] as u8,
+                )
+                .into_boxed_str(),
+            );
+        }
+    }
+    write_lines(&marg_lines, &marg_file)?;
+    info!("per-gene marginals: {}", marg_file);
+
+    let n_batches = model.effects.n_batches();
+    if n_batches > 1 {
+        let ln_batch_file = format!("{}.ln_batch.parquet", output);
+        let batch_names: Vec<Box<str>> = (0..n_batches)
+            .map(|b| format!("batch_{}", b).into_boxed_str())
+            .collect();
+        model.effects.ln_batch_delta.to_parquet_with_names(
+            &ln_batch_file,
+            (Some(&model.gene_names), Some("feature")),
+            Some(&batch_names),
+        )?;
+        info!("batch shifts: {}", ln_batch_file);
+    }
+
+    if let Some(cnv) = &model.effects.cnv {
+        let state_labels = ["loss", "neutral", "gain"];
+
+        let cnv_file = format!("{}.cnv_ground_truth.tsv.gz", output);
+        let cnv_lines: Vec<Box<str>> = std::iter::once("gene\tchromosome\tposition\tstate".into())
+            .chain(
+                model
+                    .gene_names
+                    .iter()
+                    .zip(cnv.chromosomes.iter())
+                    .zip(cnv.positions.iter())
+                    .zip(cnv.cnv_states.iter())
+                    .map(|(((g, chr), pos), &st)| {
+                        format!("{}\t{}\t{}\t{}", g, chr, pos, state_labels[st as usize])
+                            .into_boxed_str()
+                    }),
+            )
+            .collect();
+        write_lines(&cnv_lines, &cnv_file)?;
+        info!("CNV ground truth: {}", cnv_file);
+
+        let per_batch_file = format!("{}.cnv_per_batch_ground_truth.tsv.gz", output);
+        let mut per_batch_lines: Vec<Box<str>> =
+            vec!["gene\tchromosome\tposition\tbatch\tstate".into()];
+        for (b, batch_states) in cnv.cnv_states_db.iter().enumerate() {
+            for (g, &st) in batch_states.iter().enumerate() {
+                if st != 1 {
+                    per_batch_lines.push(
+                        format!(
+                            "{}\t{}\t{}\t{}\t{}",
+                            model.gene_names[g],
+                            cnv.chromosomes[g],
+                            cnv.positions[g],
+                            b,
+                            state_labels[st as usize],
+                        )
+                        .into_boxed_str(),
+                    );
+                }
+            }
+        }
+        write_lines(&per_batch_lines, &per_batch_file)?;
+        info!("per-batch CNV ground truth: {}", per_batch_file);
+
+        let tree_file = format!("{}.cnv_clone_tree.tsv.gz", output);
+        let tree_lines: Vec<Box<str>> = std::iter::once("clone\tparent".into())
+            .chain(
+                cnv.clone_parent
+                    .iter()
+                    .enumerate()
+                    .map(|(b, &p)| format!("{}\t{}", b, p).into_boxed_str()),
+            )
+            .collect();
+        write_lines(&tree_lines, &tree_file)?;
+        info!("clone tree: {}", tree_file);
+
+        let gff_file = format!("{}.genes.gff.gz", output);
+        let gff_lines: Vec<Box<str>> = std::iter::once("##gff-version 3".into())
+            .chain(
+                model
+                    .gene_names
+                    .iter()
+                    .zip(cnv.chromosomes.iter())
+                    .zip(cnv.positions.iter())
+                    .map(|((gene_name, chr), &pos)| {
+                        let start = pos + 1;
+                        let end = start + 1000;
+                        format!(
+                            "{}\tsimulation\tgene\t{}\t{}\t.\t+\t.\tgene_name={}",
+                            chr, start, end, gene_name,
+                        )
+                        .into_boxed_str()
+                    }),
+            )
+            .collect();
+        write_lines(&gff_lines, &gff_file)?;
+        info!("synthetic gene annotations: {}", gff_file);
+    }
+
+    if !model.effects.hk_indices.is_empty() {
+        let hk_file = format!("{}.housekeeping.tsv.gz", output);
+        let hk_lines: Vec<Box<str>> = std::iter::once("gene\tfold".into())
+            .chain(model.effects.hk_indices.iter().map(|&g| {
+                format!("{}\t{:.4}", model.gene_names[g], model.effects.hk_fold).into_boxed_str()
+            }))
+            .collect();
+        write_lines(&hk_lines, &hk_file)?;
+        info!("housekeeping genes: {}", hk_file);
+    }
+
     Ok(())
 }
