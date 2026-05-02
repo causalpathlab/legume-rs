@@ -14,7 +14,9 @@ path = "src/main.rs"
 
 [dependencies]
 data-beans = { workspace = true }
+data-beans-alg = { workspace = true }
 matrix-util = { workspace = true }
+leiden = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -22,10 +24,13 @@ env_logger = { workspace = true }
 log = { workspace = true }
 
 nalgebra = { workspace = true }
+nalgebra-sparse = { workspace = true }
 
 rand = { workspace = true }
 rand_distr = { workspace = true }
+statrs = { workspace = true }
 
 rayon = { workspace = true }
 indicatif = { workspace = true }
 dashmap = { workspace = true }
+rustc-hash = { workspace = true }
