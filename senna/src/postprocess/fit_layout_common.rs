@@ -15,7 +15,7 @@ use crate::geometry::cell_layout::project_cells_nystrom;
 use crate::geometry::similarity::{
     compute_cosine_similarity, local_scale_similarity, regularize_similarity, threshold_similarity,
 };
-use crate::run_manifest::{self, RunManifest};
+use crate::run_manifest::{self, rel_to_manifest, RunManifest};
 use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use crate::topic::common::{
     load_and_collapse, preferred_posterior_log_mean, LoadCollapseArgs, PreparedData,
@@ -1188,28 +1188,4 @@ fn update_manifest_viz(
     manifest.layout.pb_gene_mean = pb_gene_mean_path.map(|p| rel_to_manifest(manifest_dir, p));
 
     manifest.save(manifest_path)
-}
-
-/// Store `written_path` as a basename-relative string when it lives
-/// inside `manifest_dir`; otherwise leave as absolute. Keeps the
-/// manifest portable across directory moves without accidentally
-/// rewriting paths that point elsewhere (e.g. `-o /tmp/foo` while the
-/// manifest lives in `~/work/run1/`).
-fn rel_to_manifest(manifest_dir: &Path, written_path: &str) -> String {
-    let abs = PathBuf::from(written_path);
-    let abs = if abs.is_absolute() {
-        abs
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(&abs))
-            .unwrap_or(abs)
-    };
-    let manifest_abs = manifest_dir
-        .canonicalize()
-        .unwrap_or_else(|_| manifest_dir.to_path_buf());
-    let written_abs = abs.canonicalize().unwrap_or(abs);
-    match written_abs.strip_prefix(&manifest_abs) {
-        Ok(rel) => rel.to_string_lossy().into_owned(),
-        Err(_) => written_abs.to_string_lossy().into_owned(),
-    }
 }
