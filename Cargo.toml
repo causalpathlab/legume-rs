@@ -8,6 +8,7 @@ members = [
     "cocoa",
     "data-beans",
     "data-beans-alg",
+    "data-beans-sim",
     "enrichment",
     "faba",
     "fagioli",
@@ -100,6 +101,7 @@ candle-util = { path = "candle-util" }
 cnv = { path = "cnv" }
 data-beans = { path = "data-beans" }
 data-beans-alg = { path = "data-beans-alg" }
+data-beans-sim = { path = "data-beans-sim" }
 enrichment = { path = "enrichment" }
 faba = { path = "faba" }
 genomic-data = { path = "genomic-data" }

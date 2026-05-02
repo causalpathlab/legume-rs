@@ -2,7 +2,6 @@ mod handlers;
 mod hdf5_io;
 mod interactive;
 mod qc;
-mod simulations;
 mod sparse_backend;
 mod sparse_data_visitors;
 mod sparse_io;
@@ -12,10 +11,7 @@ mod utilities;
 #[allow(dead_code)]
 mod zarr_io;
 
-use crate::handlers::analysis::{
-    run_simulate, run_simulate_multimodal, run_stat, RunSimulateArgs, RunSimulateMultimodalArgs,
-    RunStatArgs,
-};
+use crate::handlers::analysis::{run_stat, RunStatArgs};
 use crate::handlers::builders::{
     run_build_from_10x_matrix, run_build_from_10x_molecule, run_build_from_h5ad,
     run_build_from_mtx, run_build_from_zarr_triplets, From10xMatrixArgs, From10xMoleculeArgs,
@@ -33,7 +29,6 @@ use crate::handlers::transformation::{
     reorder_rows, run_squeeze, subset_columns, subset_rows, ReorderRowsArgs, RunSqueezeArgs,
     SubsetColumnsArgs, SubsetRowsArgs,
 };
-use crate::simulations::deconv::{generate_convoluted_data, SimConvArgs};
 
 use clap::{Parser, Subcommand};
 
@@ -76,15 +71,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::From10xMolecule(args) => {
             run_build_from_10x_molecule(args)?;
-        }
-        Commands::Simulate(args) => {
-            run_simulate(args)?;
-        }
-        Commands::SimulateConv(args) => {
-            generate_convoluted_data(args)?;
-        }
-        Commands::SimulateMultimodal(args) => {
-            run_simulate_multimodal(args)?;
         }
         Commands::Info(args) => {
             show_info(args)?;
@@ -345,22 +331,4 @@ enum Commands {
         visible_alias = "stat"
     )]
     Statistics(RunStatArgs),
-
-    #[command(
-        about = "Simulate matrix with Gamma topic",
-        long_about = "`Y(i,j) ~ δ(i,B(j)) Σ β(i,k) θ(j,k)` with β,θ ~ Gamma topic;\n\
-		      B(j)`=batch; `ln δ`~N(0,1)"
-    )]
-    Simulate(RunSimulateArgs),
-
-    #[command(about = "Simulate convoluted data matrix (experimental)")]
-    SimulateConv(SimConvArgs),
-
-    #[command(
-        about = "Simulate multimodal count data with shared base + delta dictionaries",
-        long_about = "Generate M count matrices from shared latent topics with modality-specific\n\
-                      dictionaries: reference = softmax(W_base), others = softmax(W_base + W_delta_m).\n\
-                      Delta is sparse (spike-and-slab): n_delta_features genes per topic are perturbed."
-    )]
-    SimulateMultimodal(RunSimulateMultimodalArgs),
 }
