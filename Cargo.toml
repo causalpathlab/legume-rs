@@ -83,6 +83,9 @@ anndists = "0.1"
 clustering = { version = "0.2", features = ["parallel"] }
 hnsw_rs = "0.3"
 
+# Graphs (MST, Dijkstra, etc.)
+petgraph = "0.8"
+
 # Progress / display
 colored = "3"
 indicatif = { version = "^0.18", features = ["rayon"] }

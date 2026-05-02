@@ -86,6 +86,8 @@ pub struct RunManifest {
     #[serde(default)]
     pub annotate: RunAnnotate,
     #[serde(default)]
+    pub pseudotime: RunPseudotime,
+    #[serde(default)]
     pub defaults: RunDefaults,
 }
 
@@ -194,6 +196,40 @@ pub struct RunAnnotate {
     pub markers: Option<String>,
 }
 
+/// Paths to artifacts produced by `senna pseudotime`. Populated when the
+/// command is invoked with `--from <manifest>`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunPseudotime {
+    /// `{pt_out}.pseudotime.parquet` — cells × 1 scalar pseudotime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pseudotime: Option<String>,
+    /// `{pt_out}.principal_graph.nodes.parquet` — K × D centroid
+    /// coordinates in the latent space the graph was fit on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes_latent: Option<String>,
+    /// `{pt_out}.principal_graph.nodes_2d.parquet` — K × 2 centroid
+    /// coordinates in the 2D layout space (only written when
+    /// `layout.cell_coords` is present).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes_2d: Option<String>,
+    /// `{pt_out}.principal_graph.edges.parquet` — E × 3 (from, to, weight).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edges: Option<String>,
+    /// Root principal-graph node id used when computing pseudotime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_node: Option<usize>,
+    /// `{pt_out}.tree_layout.cell_coords.parquet` — N × 2 cell positions
+    /// in a Reingold-Tilford tree layout (x = sibling slot, y = geodesic
+    /// pseudotime). Used by `senna plot --colour-by pseudotime` to render
+    /// a Monocle-2-style tree plot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_cell_coords: Option<String>,
+    /// `{pt_out}.tree_layout.nodes_2d.parquet` — K × 2 principal-graph
+    /// node positions in the same tree layout as `tree_cell_coords`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_nodes_2d: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunDefaults {
     /// Default `--colour-by` for `senna plot`: `"topic" | "cluster" | "pb-id"`.
@@ -215,6 +251,7 @@ impl RunManifest {
             layout: RunLayout::default(),
             cluster: RunCluster::default(),
             annotate: RunAnnotate::default(),
+            pseudotime: RunPseudotime::default(),
             defaults: RunDefaults::default(),
         }
     }
@@ -247,6 +284,31 @@ impl RunManifest {
         fs::write(path, s).map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
         log::info!("wrote {}", path.display());
         Ok(())
+    }
+}
+
+/// Inverse of [`resolve`]: turn a freshly-written artifact path into the
+/// manifest-relative form for storage. Canonicalizes both sides so the
+/// strip works across symlinks and `./`-anchored relative paths, and
+/// silently keeps the absolute form when the artifact lives outside the
+/// manifest dir (e.g. `-o /tmp/foo` while the manifest is in `~/work/`).
+#[must_use]
+pub fn rel_to_manifest(manifest_dir: &Path, written_path: &str) -> String {
+    let abs = PathBuf::from(written_path);
+    let abs = if abs.is_absolute() {
+        abs
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&abs))
+            .unwrap_or(abs)
+    };
+    let manifest_abs = manifest_dir
+        .canonicalize()
+        .unwrap_or_else(|_| manifest_dir.to_path_buf());
+    let written_abs = abs.canonicalize().unwrap_or(abs);
+    match written_abs.strip_prefix(&manifest_abs) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => written_abs.to_string_lossy().into_owned(),
     }
 }
 

@@ -183,7 +183,7 @@ fn emit_halo_text(
     text: &str,
 ) {
     let (x, y) = xy;
-    if !x.is_finite() || !y.is_finite() {
+    if !x.is_finite() || !y.is_finite() || text.is_empty() {
         return;
     }
     let (r, g, b) = color;

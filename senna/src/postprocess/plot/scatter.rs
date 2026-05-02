@@ -40,6 +40,12 @@ pub enum ColorBy {
     /// Per-cell celltype label from `senna annotate`'s argmax TSV
     /// (`--annotation`, defaults to `manifest.annotate.argmax`).
     Annotation,
+    /// Continuous scalar from `senna pseudotime`'s `.pseudotime.parquet`
+    /// (defaults to `manifest.pseudotime.pseudotime`). Cells are coloured
+    /// on a sequential blue→red ramp (ColorBrewer RdYlBu reversed). When
+    /// the manifest also has `pseudotime.nodes_2d` + `pseudotime.edges`,
+    /// the principal-graph tree is drawn as a black overlay on top.
+    Pseudotime,
 }
 
 /// Label placement strategy per group.
@@ -100,6 +106,12 @@ pub struct PlotArgs {
         help = "Annotation argmax TSV from `senna annotate` (cell\\tcell_type\\tprobability). Defaults to manifest's annotate.argmax."
     )]
     pub annotation: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Pseudotime parquet from `senna pseudotime` (cells × 1). Defaults to manifest's pseudotime.pseudotime."
+    )]
+    pub pseudotime: Option<Box<str>>,
 
     #[arg(
         long,
@@ -237,6 +249,15 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     // on top so users can still rename specific celltypes.
     let mut auto_label_map: FxHashMap<i64, String> = FxHashMap::default();
 
+    // For continuous coloring (pseudotime) we keep a per-cell normalized
+    // value in [0, 1] (NaN for invalid) and feed it to `sample_blue_red`
+    // at rasterization time — no binning, no quantization stairs.
+    // `group_ids` is still used to drive the bucketing pass that gives
+    // bounds + skip-mask, but for pseudotime mode every valid cell shares
+    // group 0 (single-bucket) and the float vector below is what colors
+    // them.
+    let mut pseudotime_norm: Option<Vec<f32>> = None;
+
     let group_ids = match resolved.colour_by {
         ColorBy::Cluster => coords_by_name
             .get("cluster")
@@ -273,6 +294,22 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
                 )
             })?;
             argmax_topics(topics_path, n_cells)?
+        }
+        ColorBy::Pseudotime => {
+            let path = resolved.pseudotime.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--colour-by pseudotime requires --pseudotime PATH \
+                     (or `senna pseudotime --from manifest` to populate \
+                     manifest.pseudotime.pseudotime)"
+                )
+            })?;
+            let norm = read_pseudotime_normalized(path, n_cells)?;
+            let g: Vec<i64> = norm
+                .iter()
+                .map(|&t| if t.is_finite() { 0 } else { -1 })
+                .collect();
+            pseudotime_norm = Some(norm);
+            g
         }
     };
 
@@ -326,7 +363,12 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
 
     let mut unique: Vec<i64> = pts_by_group.keys().copied().collect();
     unique.sort_unstable();
-    info!("Plotting {} groups", unique.len());
+    if pseudotime_norm.is_some() {
+        let n_total: usize = pts_by_group.values().map(|v| v.len()).sum();
+        info!("Plotting {n_total} cells (continuous pseudotime, single-PNG layer)");
+    } else {
+        info!("Plotting {} groups", unique.len());
+    }
 
     let width_px = (args.width * args.dpi as f32).round() as u32;
     let height_px = (args.height * args.dpi as f32).round() as u32;
@@ -354,59 +396,92 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     // are opt-in now and median is the default label position.
     let need_hull_geometry = args.hull || args.label_position == LabelPosition::HullCentroid;
 
-    // Per-group rasterization + hull + label placement in parallel.
-    // Each group is independent and encodes its own PNG — outermost loop
-    // is the right place to fan out rayon (per repo convention).
-    let layers: Vec<TopicLayer> = unique
-        .par_iter()
-        .map(|g| -> anyhow::Result<TopicLayer> {
-            let pts = pts_by_group.get(g).expect("group present");
-            let pts_px: Vec<(f32, f32)> = pts.iter().map(|&p| to_pixel(p, &bounds, ext)).collect();
+    // Continuous coloring (pseudotime): emit a single PNG with per-cell
+    // colors so the SVG embeds one raster layer instead of one per bin.
+    // The per-cell normalized float is sampled directly through the
+    // blue→red ramp — no quantization, smooth gradient.
+    let mut layers: Vec<TopicLayer> = if let Some(norm) = pseudotime_norm.as_deref() {
+        vec![rasterize_continuous_layer(
+            n_cells,
+            x,
+            y,
+            norm,
+            &bounds,
+            ext,
+            radius_px,
+            args.alpha,
+            args.point_shape,
+        )?]
+    } else {
+        unique
+            .par_iter()
+            .map(|g| -> anyhow::Result<TopicLayer> {
+                let pts = pts_by_group.get(g).expect("group present");
+                let pts_px: Vec<(f32, f32)> =
+                    pts.iter().map(|&p| to_pixel(p, &bounds, ext)).collect();
 
-            // Key palette by group id, not enumerate index, so colors
-            // stay aligned across every view that maps id → color.
-            let color_idx = (*g).max(0) as usize;
-            let color = palette::color(&palette, color_idx);
-            let shape = if args.point_shape_cycle {
-                PointShape::cycle_nth(color_idx)
-            } else {
-                args.point_shape
-            };
-            let png = rasterize_group_png(
-                &pts_px,
-                ext,
-                plot_utils::RadiusSpec::Scalar(radius_px),
-                color,
-                args.alpha,
-                shape,
-            )?;
+                // Key palette by group id, not enumerate index, so colors
+                // stay aligned across every view that maps id → color.
+                let color_idx = (*g).max(0) as usize;
+                let color = palette::color(&palette, color_idx);
+                let shape = if args.point_shape_cycle {
+                    PointShape::cycle_nth(color_idx)
+                } else {
+                    args.point_shape
+                };
+                let png = rasterize_group_png(
+                    &pts_px,
+                    ext,
+                    plot_utils::RadiusSpec::Scalar(radius_px),
+                    color,
+                    args.alpha,
+                    shape,
+                )?;
 
-            let (hull_px, hull_data) = if need_hull_geometry {
-                let trimmed = trim_outliers_by_median(pts, args.hull_coverage);
-                let h = convex_hull(&trimmed);
-                let px: Vec<Pt> = h.iter().map(|&p| to_pixel(p, &bounds, ext)).collect();
-                (px, h)
-            } else {
-                (Vec::new(), Vec::new())
-            };
+                let (hull_px, hull_data) = if need_hull_geometry {
+                    let trimmed = trim_outliers_by_median(pts, args.hull_coverage);
+                    let h = convex_hull(&trimmed);
+                    let px: Vec<Pt> = h.iter().map(|&p| to_pixel(p, &bounds, ext)).collect();
+                    (px, h)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
 
-            let label_xy_data = match args.label_position {
-                LabelPosition::Median => median_xy(pts),
-                LabelPosition::HullCentroid => hull_centroid(&hull_data),
-            };
-            let label_xy_px = to_pixel(label_xy_data, &bounds, ext);
+                let label_xy_data = match args.label_position {
+                    LabelPosition::Median => median_xy(pts),
+                    LabelPosition::HullCentroid => hull_centroid(&hull_data),
+                };
+                let label_xy_px = to_pixel(label_xy_data, &bounds, ext);
 
-            let label = label_map.get(g).cloned().unwrap_or_else(|| format!("T{g}"));
+                let label = label_map.get(g).cloned().unwrap_or_else(|| format!("T{g}"));
 
-            Ok(TopicLayer {
-                label,
-                png,
-                hull_px,
-                label_xy_px,
-                color,
+                Ok(TopicLayer {
+                    label,
+                    png,
+                    hull_px,
+                    label_xy_px,
+                    color,
+                })
             })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+            .collect::<anyhow::Result<Vec<_>>>()?
+    };
+
+    // Principal-graph overlay: drawn unconditionally when both
+    // pseudotime.nodes_2d and pseudotime.edges are available in the
+    // manifest. Drawn last so the tree sits on top of the rasterized
+    // cells.
+    if let (Some(nodes_path), Some(edges_path)) = (
+        resolved.principal_graph_nodes_2d.as_deref(),
+        resolved.principal_graph_edges.as_deref(),
+    ) {
+        match build_principal_graph_layer(nodes_path, edges_path, &bounds, ext, radius_px) {
+            Ok(Some(layer)) => layers.push(layer),
+            Ok(None) => log::warn!(
+                "principal-graph overlay skipped: nodes_2d {nodes_path} produced no finite segments"
+            ),
+            Err(e) => log::warn!("principal-graph overlay skipped: {e}"),
+        }
+    }
 
     let svg = emit_svg(
         &layers,
@@ -467,6 +542,12 @@ struct ResolvedInputs {
     topics: Option<String>,
     annotation: Option<String>,
     labels: Option<String>,
+    pseudotime: Option<String>,
+    /// Principal-graph node 2D coordinates parquet (K × 2) — drawn as a
+    /// tree overlay when ColorBy::Pseudotime is in effect.
+    principal_graph_nodes_2d: Option<String>,
+    /// Principal-graph edges parquet (E × 3: from, to, weight).
+    principal_graph_edges: Option<String>,
     out: String,
     colour_by: ColorBy,
     palette: Palette,
@@ -512,16 +593,33 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
             .into_owned()
     };
 
+    // When the user asked for `--colour-by pseudotime` and the manifest
+    // has the Reingold-Tilford tree layout populated by `senna pseudotime`,
+    // prefer that over the generic PHATE/UMAP layout. The tree layout
+    // gives a Monocle-2-style trajectory plot — guaranteed tree-shaped
+    // because cells are placed directly on the principal-graph edges.
+    // Explicit --cell-coords still wins over either default.
+    let want_tree_layout = matches!(args.colour_by, Some(ColorBy::Pseudotime))
+        || manifest
+            .as_ref()
+            .and_then(|m| m.defaults.colour_by.as_deref())
+            .and_then(parse_colour_by)
+            == Some(ColorBy::Pseudotime);
+    let manifest_cell_coords = manifest.as_ref().and_then(|m| {
+        if want_tree_layout {
+            m.pseudotime
+                .tree_cell_coords
+                .as_deref()
+                .or(m.layout.cell_coords.as_deref())
+        } else {
+            m.layout.cell_coords.as_deref()
+        }
+    });
     let cell_coords = args
         .cell_coords
         .as_deref()
         .map(String::from)
-        .or_else(|| {
-            manifest
-                .as_ref()
-                .and_then(|m| m.layout.cell_coords.as_deref())
-                .map(resolve_opt)
-        })
+        .or_else(|| manifest_cell_coords.map(resolve_opt))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no --cell-coords given and manifest {} has no layout.cell_coords \
@@ -543,6 +641,33 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
             .and_then(|m| m.annotate.argmax.as_deref())
             .map(resolve_opt)
     });
+
+    let pseudotime = args.pseudotime.as_deref().map(String::from).or_else(|| {
+        manifest
+            .as_ref()
+            .and_then(|m| m.pseudotime.pseudotime.as_deref())
+            .map(resolve_opt)
+    });
+    // Edges are always the same. Nodes_2d depends on whether the plot
+    // is using the tree layout (pseudotime mode) or the PHATE/UMAP
+    // layout — pick the matching nodes so the overlay aligns.
+    let principal_graph_nodes_2d = manifest
+        .as_ref()
+        .and_then(|m| {
+            if want_tree_layout {
+                m.pseudotime
+                    .tree_nodes_2d
+                    .as_deref()
+                    .or(m.pseudotime.nodes_2d.as_deref())
+            } else {
+                m.pseudotime.nodes_2d.as_deref()
+            }
+        })
+        .map(resolve_opt);
+    let principal_graph_edges = manifest
+        .as_ref()
+        .and_then(|m| m.pseudotime.edges.as_deref())
+        .map(resolve_opt);
 
     let labels = args.labels.as_deref().map(String::from).or_else(|| {
         manifest
@@ -593,6 +718,9 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
         topics,
         annotation,
         labels,
+        pseudotime,
+        principal_graph_nodes_2d,
+        principal_graph_edges,
         out,
         colour_by,
         palette,
@@ -605,6 +733,7 @@ fn parse_colour_by(s: &str) -> Option<ColorBy> {
         "cluster" => Some(ColorBy::Cluster),
         "pb-id" | "pb_id" => Some(ColorBy::PbId),
         "annotation" => Some(ColorBy::Annotation),
+        "pseudotime" => Some(ColorBy::Pseudotime),
         _ => None,
     }
 }
@@ -623,6 +752,150 @@ fn to_pixel(p: Pt, bounds: &DataBounds, ext: Extent) -> (f32, f32) {
     let tx = (p.0 - bounds.xmin) / (bounds.xmax - bounds.xmin) * w;
     let ty = h - (p.1 - bounds.ymin) / (bounds.ymax - bounds.ymin) * h;
     (tx, ty)
+}
+
+/// Read pseudotime parquet (cells × 1) and rescale to `[0, 1]` using
+/// the (min, max) of finite values. Cells with non-finite pseudotime
+/// get NaN so the rasterizer skips them.
+fn read_pseudotime_normalized(path: &str, n_cells_expected: usize) -> anyhow::Result<Vec<f32>> {
+    let MatWithNames { mat, .. } = Mat::from_parquet(path)?;
+    if mat.nrows() != n_cells_expected {
+        anyhow::bail!(
+            "pseudotime parquet has {} rows but cell_coords has {}",
+            mat.nrows(),
+            n_cells_expected
+        );
+    }
+    if mat.ncols() < 1 {
+        anyhow::bail!("pseudotime parquet has no columns");
+    }
+    let vals: Vec<f32> = (0..mat.nrows()).map(|i| mat[(i, 0)]).collect();
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for &v in &vals {
+        if v.is_finite() {
+            if v < lo {
+                lo = v;
+            }
+            if v > hi {
+                hi = v;
+            }
+        }
+    }
+    if !lo.is_finite() || !hi.is_finite() || hi <= lo {
+        anyhow::bail!("pseudotime has no finite range (all NaN/constant?)");
+    }
+    let span = hi - lo;
+    Ok(vals
+        .into_iter()
+        .map(|v| {
+            if v.is_finite() {
+                (v - lo) / span
+            } else {
+                f32::NAN
+            }
+        })
+        .collect())
+}
+
+/// Pack every cell into one PNG with per-cell colors sampled from the
+/// blue→red ramp. One raster layer instead of one-per-bin keeps the
+/// SVG/PDF small even at 10k+ cells.
+fn rasterize_continuous_layer(
+    n_cells: usize,
+    x: &[f32],
+    y: &[f32],
+    norm: &[f32],
+    bounds: &DataBounds,
+    ext: Extent,
+    radius_px: f32,
+    alpha: f32,
+    shape: PointShape,
+) -> anyhow::Result<TopicLayer> {
+    let mut pts_px: Vec<(f32, f32)> = Vec::with_capacity(n_cells);
+    let mut colors: Vec<plot_utils::palette::Rgb> = Vec::with_capacity(n_cells);
+    for i in 0..n_cells {
+        let t = norm[i];
+        if !t.is_finite() || !x[i].is_finite() || !y[i].is_finite() {
+            continue;
+        }
+        pts_px.push(to_pixel((x[i], y[i]), bounds, ext));
+        colors.push(palette::sample_blue_red(t));
+    }
+    let png = plot_utils::rasterize::rasterize_per_point_png(
+        &pts_px, &colors, ext, radius_px, alpha, shape,
+    )?;
+    Ok(TopicLayer {
+        label: String::new(),
+        png,
+        hull_px: Vec::new(),
+        label_xy_px: (f32::NAN, f32::NAN),
+        color: (0, 0, 0),
+    })
+}
+
+/// Build a single overlay layer carrying the principal graph drawn as
+/// black line segments on a transparent canvas. Returns `None` when the
+/// graph has no usable (finite) edges — caller logs and skips.
+fn build_principal_graph_layer(
+    nodes_2d_path: &str,
+    edges_path: &str,
+    bounds: &DataBounds,
+    ext: Extent,
+    radius_px: f32,
+) -> anyhow::Result<Option<TopicLayer>> {
+    let MatWithNames { mat: nodes, .. } = Mat::from_parquet(nodes_2d_path)?;
+    if nodes.ncols() < 2 {
+        anyhow::bail!("principal-graph nodes_2d at {nodes_2d_path} has < 2 columns");
+    }
+    let MatWithNames {
+        cols: edge_cols,
+        mat: edges,
+        ..
+    } = Mat::from_parquet(edges_path)?;
+    let from_col = edge_cols
+        .iter()
+        .position(|c| c.as_ref() == "from")
+        .unwrap_or(0);
+    let to_col = edge_cols
+        .iter()
+        .position(|c| c.as_ref() == "to")
+        .unwrap_or(1);
+
+    let n_nodes = nodes.nrows();
+    let mut segs_px: Vec<((f32, f32), (f32, f32))> = Vec::with_capacity(edges.nrows());
+    for i in 0..edges.nrows() {
+        let a = edges[(i, from_col)] as i64;
+        let b = edges[(i, to_col)] as i64;
+        if a < 0 || b < 0 || (a as usize) >= n_nodes || (b as usize) >= n_nodes {
+            continue;
+        }
+        let (ax, ay) = (nodes[(a as usize, 0)], nodes[(a as usize, 1)]);
+        let (bx, by) = (nodes[(b as usize, 0)], nodes[(b as usize, 1)]);
+        if !ax.is_finite() || !ay.is_finite() || !bx.is_finite() || !by.is_finite() {
+            continue;
+        }
+        let p0 = to_pixel((ax, ay), bounds, ext);
+        let p1 = to_pixel((bx, by), bounds, ext);
+        segs_px.push((p0, p1));
+    }
+    if segs_px.is_empty() {
+        return Ok(None);
+    }
+    let stroke_px = (radius_px * 1.6).max(1.0);
+    let png = plot_utils::rasterize::rasterize_segment_layer_png(
+        &segs_px,
+        ext,
+        stroke_px,
+        (0, 0, 0),
+        1.0,
+    )?;
+    Ok(Some(TopicLayer {
+        label: String::new(),
+        png,
+        hull_px: Vec::new(),
+        label_xy_px: (f32::NAN, f32::NAN),
+        color: (0, 0, 0),
+    }))
 }
 
 type CellCoords = (Vec<Box<str>>, FxHashMap<String, Vec<f32>>);
