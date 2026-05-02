@@ -155,6 +155,48 @@ const CATEGORY20: &[Rgb] = &[
     (158, 218, 229),
 ];
 
+/// 11-stop ColorBrewer RdYlBu, reversed → sequential blue→red ramp.
+/// Used for continuous fields like pseudotime where blue=low and
+/// red=high. Reference: ColorBrewer 2.0 (Brewer & Harrower, RdYlBu).
+const BLUE_RED_STOPS: &[Rgb] = &[
+    (49, 54, 149),   // #313695
+    (69, 117, 180),  // #4575b4
+    (116, 173, 209), // #74add1
+    (171, 217, 233), // #abd9e9
+    (224, 243, 248), // #e0f3f8
+    (255, 255, 191), // #ffffbf
+    (254, 224, 144), // #fee090
+    (253, 174, 97),  // #fdae61
+    (244, 109, 67),  // #f46d43
+    (215, 48, 39),   // #d73027
+    (165, 0, 38),    // #a50026
+];
+
+/// Sample the blue→red ramp at `t ∈ [0, 1]` via piecewise-linear
+/// interpolation across [`BLUE_RED_STOPS`]. NaN/out-of-range `t` clamps
+/// to the nearest endpoint.
+#[must_use]
+pub fn sample_blue_red(t: f32) -> Rgb {
+    let n = BLUE_RED_STOPS.len();
+    if !t.is_finite() || t <= 0.0 {
+        return BLUE_RED_STOPS[0];
+    }
+    if t >= 1.0 {
+        return BLUE_RED_STOPS[n - 1];
+    }
+    let pos = t * (n - 1) as f32;
+    let lo = pos.floor() as usize;
+    let hi = (lo + 1).min(n - 1);
+    let frac = pos - lo as f32;
+    let (r0, g0, b0) = BLUE_RED_STOPS[lo];
+    let (r1, g1, b1) = BLUE_RED_STOPS[hi];
+    let lerp = |a: u8, b: u8| -> u8 {
+        let v = a as f32 + (b as f32 - a as f32) * frac;
+        v.round().clamp(0.0, 255.0) as u8
+    };
+    (lerp(r0, r1), lerp(g0, g1), lerp(b0, b1))
+}
+
 /// Resolve `Auto` to a concrete palette based on `n` topics.
 #[must_use]
 pub fn resolve(palette: &Palette, n: usize) -> Palette {

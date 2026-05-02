@@ -42,6 +42,7 @@ mod eval_topic;
 mod fit_clustering;
 mod fit_indexed_topic;
 mod fit_joint_topic;
+mod fit_pseudotime;
 mod fit_topic;
 mod geometry;
 mod hvg;
@@ -50,11 +51,13 @@ mod marker_support;
 mod postprocess;
 mod predict;
 mod predict_tmle;
+mod principal_graph;
 mod refine_weighting;
 mod run_manifest;
 mod senna_input;
 mod svd;
 mod topic;
+mod tree_layout;
 
 use annotate::{annotate_run, AnnotateArgs};
 use embed_common::*;
@@ -62,6 +65,7 @@ use eval_topic::*;
 use fit_clustering::*;
 use fit_indexed_topic::*;
 use fit_joint_topic::*;
+use fit_pseudotime::{run_pseudotime, PseudotimeArgs};
 use fit_topic::*;
 use postprocess::*;
 use predict::{predict_model, PredictArgs};
@@ -172,8 +176,7 @@ enum Commands {
                       per-cell labels come from cluster-broadcast Q.\n\n\
                       Usage: senna annotate --from run.senna.json -m markers.tsv -o out\n\n\
                       Provide --clusters <PATH> (or run `senna cluster --from ...`\n\
-                      first) to skip the internal Leiden pass.",
-        visible_alias = "annotate"
+                      first) to skip the internal Leiden pass."
     )]
     Annotate(AnnotateArgs),
 
@@ -289,6 +292,22 @@ enum Commands {
                         hsblock — hierarchical stochastic block model (2^(depth-1) clusters)"
     )]
     Clustering(ClusteringArgs),
+
+    #[command(
+        about = "Pseudotime via Monocle-style principal graph (SimplePPT) on latent topics",
+        long_about = "Faithful port of the principal-tree fitter Monocle 3 uses\n\
+                      (Mao et al. 2015, SimplePPT) operating on senna's cell-level\n\
+                      latent matrix (topic θ or SVD components).\n\n\
+                      Pipeline:\n  \
+                      (1) k-means initialize K centroids in latent space,\n  \
+                      (2) iterate: soft-assign cells → recompute MST over centroids\n      \
+                          → solve (D_R + γL) Y = R^T Z for centroid coordinates,\n  \
+                      (3) project each cell onto its nearest tree edge,\n  \
+                      (4) Dijkstra geodesic from a chosen root → pseudotime.\n\n\
+                      Outputs:\n  \
+                      {out}.pseudotime.parquet, {out}.principal_graph.{{nodes,edges}}.parquet"
+    )]
+    Pseudotime(PseudotimeArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -350,6 +369,9 @@ fn main() -> anyhow::Result<()> {
         },
         Commands::Clustering(args) => {
             run_clustering(args)?;
+        }
+        Commands::Pseudotime(args) => {
+            run_pseudotime(args)?;
         }
         Commands::Plot(args) => {
             fit_plot(args)?;

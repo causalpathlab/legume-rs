@@ -365,6 +365,56 @@ pub fn rasterize_arrow_layer_png(
         .map_err(|e| anyhow::anyhow!("PNG encode failed: {e}"))
 }
 
+/// Rasterize one PNG with a per-point color. Used for continuous fields
+/// (e.g. pseudotime via the blue→red ramp) where bucketing into one
+/// layer per color is wasteful — 64 full-canvas PNGs at 300 DPI bloats
+/// the embedding SVG/PDF roughly linearly. This packs every cell into
+/// one paint pass with a unique RGBA per point.
+///
+/// Points are grouped by exact RGB so tiny-skia gets a small handful of
+/// fill operations rather than one per cell.
+pub fn rasterize_per_point_png(
+    pts_px: &[(f32, f32)],
+    colors: &[Rgb],
+    ext: Extent,
+    radius: f32,
+    alpha: f32,
+    shape: PointShape,
+) -> anyhow::Result<Vec<u8>> {
+    if colors.len() != pts_px.len() {
+        anyhow::bail!(
+            "per-point color len {} != pts len {}",
+            colors.len(),
+            pts_px.len()
+        );
+    }
+    let mut pixmap = Pixmap::new(ext.w, ext.h)
+        .ok_or_else(|| anyhow::anyhow!("pixmap alloc failed ({}x{})", ext.w, ext.h))?;
+    let marker = shape
+        .build_path(radius.max(0.1))
+        .ok_or_else(|| anyhow::anyhow!("invalid marker path for {shape:?}"))?;
+
+    let mut by_color: std::collections::BTreeMap<Rgb, Vec<(f32, f32)>> =
+        std::collections::BTreeMap::new();
+    for (&p, &c) in pts_px.iter().zip(colors) {
+        if !p.0.is_finite() || !p.1.is_finite() {
+            continue;
+        }
+        by_color.entry(c).or_default().push(p);
+    }
+    for (color, pts) in by_color {
+        let paint = fill_paint(color, alpha);
+        for (x, y) in pts {
+            let t = Transform::from_translate(x, y);
+            pixmap.fill_path(&marker, &paint, FillRule::Winding, t, None);
+        }
+    }
+
+    pixmap
+        .encode_png()
+        .map_err(|e| anyhow::anyhow!("PNG encode failed: {e}"))
+}
+
 fn fill_paint(color: Rgb, alpha: f32) -> Paint<'static> {
     let mut paint = Paint::default();
     let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
