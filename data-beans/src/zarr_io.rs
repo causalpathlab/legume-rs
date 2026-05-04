@@ -22,24 +22,30 @@ use zarrs_zip::ZipStorageAdapter;
 pub type ZarrStoreRw = (Arc<dyn ZReadStorageTraits>, Option<Arc<FilesystemStore>>);
 
 /// Detect the path prefix inside a zarr zip (empty if entries are at root).
+///
+/// Tries the new `foo/` prefix first (zips produced by `finalize_zarr_output`
+/// after the rename), then falls back to the legacy `foo.zarr/` prefix for
+/// archives created before the rename.
 fn detect_zip_zarr_prefix(zip_path: &std::path::Path) -> anyhow::Result<Box<str>> {
     let filename = zip_path
         .file_name()
         .and_then(|f| f.to_str())
         .ok_or_else(|| anyhow::anyhow!("invalid zip path: {:?}", zip_path))?;
-    let expected_prefix = format!("{}/", filename.strip_suffix(".zip").unwrap_or(""));
+    let stem = filename.strip_suffix(".zip").unwrap_or(filename);
+    let new_prefix = format!("{}/", stem.strip_suffix(".zarr").unwrap_or(stem));
+    let legacy_prefix = format!("{}/", stem);
 
     let file = std::fs::File::open(zip_path)?;
     let archive = zip::ZipArchive::new(std::io::BufReader::new(file))?;
-    let has_prefix = archive
-        .file_names()
-        .any(|name| name.starts_with(&expected_prefix));
-
-    Ok(if has_prefix {
-        expected_prefix.into()
+    if archive.file_names().any(|n| n.starts_with(&new_prefix)) {
+        Ok(new_prefix.into())
+    } else if new_prefix != legacy_prefix
+        && archive.file_names().any(|n| n.starts_with(&legacy_prefix))
+    {
+        Ok(legacy_prefix.into())
     } else {
-        "".into()
-    })
+        Ok("".into())
+    }
 }
 
 /// Open a zarr store, returning both a read store and an optional write store.
@@ -101,17 +107,21 @@ pub fn extract_zarr_zip(zip_path: &str, target_dir: &str) -> anyhow::Result<()> 
     let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))?;
 
     // Detect prefix directly from the already-opened archive (avoids a
-    // second open + central-directory parse).
+    // second open + central-directory parse). Try the new `foo/` prefix
+    // first, then fall back to legacy `foo.zarr/`.
     let filename = std::path::Path::new(zip_path)
         .file_name()
         .and_then(|f| f.to_str())
         .ok_or_else(|| anyhow::anyhow!("invalid zip path: {}", zip_path))?;
-    let expected_prefix = format!("{}/", filename.strip_suffix(".zip").unwrap_or(""));
-    let prefix: &str = if archive
-        .file_names()
-        .any(|n| n.starts_with(&expected_prefix))
+    let stem = filename.strip_suffix(".zip").unwrap_or(filename);
+    let new_prefix = format!("{}/", stem.strip_suffix(".zarr").unwrap_or(stem));
+    let legacy_prefix = format!("{}/", stem);
+    let prefix: &str = if archive.file_names().any(|n| n.starts_with(&new_prefix)) {
+        &new_prefix
+    } else if new_prefix != legacy_prefix
+        && archive.file_names().any(|n| n.starts_with(&legacy_prefix))
     {
-        &expected_prefix
+        &legacy_prefix
     } else {
         ""
     };
@@ -153,11 +163,19 @@ pub fn materialize_writable_backend(src: &str, dst: &str) -> anyhow::Result<()> 
 
 /// If `target_path` ends with `.zarr.zip`, zip the `zarr_dir` into it and
 /// remove the directory. Otherwise this is a no-op (the directory IS the target).
+///
+/// To keep in-zip entry names compact, the directory is renamed to drop a
+/// trailing `.zarr` before zipping (so entries are prefixed `foo/...` rather
+/// than `foo.zarr/...`).
 pub fn finalize_zarr_output(zarr_dir: &str, target_path: &str) -> anyhow::Result<()> {
     if target_path.ends_with(".zarr.zip") {
-        info!("Zipping zarr output: {} → {}", zarr_dir, target_path);
-        matrix_util::common_io::zip_dir(zarr_dir, target_path)?;
-        std::fs::remove_dir_all(zarr_dir)?;
+        let clean_dir = zarr_dir.strip_suffix(".zarr").unwrap_or(zarr_dir);
+        if clean_dir != zarr_dir {
+            std::fs::rename(zarr_dir, clean_dir)?;
+        }
+        info!("Zipping zarr output: {} → {}", clean_dir, target_path);
+        matrix_util::common_io::zip_dir(clean_dir, target_path)?;
+        std::fs::remove_dir_all(clean_dir)?;
     }
     Ok(())
 }

@@ -213,7 +213,12 @@ impl CollapsingOps for SparseIoVec {
 
         info!("optimizing the collapsed parameters...");
         let (a0, b0) = (1_f32, 1_f32);
-        optimize(&stat, (a0, b0), num_opt_iter.unwrap_or(DEFAULT_OPT_ITER))
+        optimize(
+            &stat,
+            (a0, b0),
+            num_opt_iter.unwrap_or(DEFAULT_OPT_ITER),
+            "Optimizing",
+        )
     }
 
     fn collect_basic_stat(&self, stat: &mut CollapsedStat) -> anyhow::Result<()> {
@@ -387,6 +392,7 @@ fn optimize(
     stat: &CollapsedStat,
     hyper: (f32, f32),
     num_iter: usize,
+    label: &str,
 ) -> anyhow::Result<CollapsedOut> {
     let (a0, b0) = hyper;
     let num_genes = stat.num_genes();
@@ -424,9 +430,12 @@ fn optimize(
         };
 
         let pb = ProgressBar::new(num_iter as u64).with_style(
-            ProgressStyle::with_template("Optimizing {bar:40} {pos}/{len} iterations ({eta})")
-                .unwrap()
-                .progress_chars("##-"),
+            ProgressStyle::with_template(&format!(
+                "{} {{bar:40}} {{pos}}/{{len}} iterations ({{eta}})",
+                label
+            ))
+            .unwrap()
+            .progress_chars("##-"),
         );
         (0..num_iter)
             .progress_with(pb.clone())
@@ -609,7 +618,7 @@ pub fn resample_and_optimize(
     indices.truncate(target);
     indices.sort_unstable();
     let sub_stat = stat.select_columns(&indices);
-    optimize(&sub_stat, (1.0, 1.0), opt_iter)
+    optimize(&sub_stat, (1.0, 1.0), opt_iter, "Optimizing")
 }
 
 /////////////////////////////////////////////////////////////
@@ -1147,14 +1156,6 @@ struct RefineCollectCtx<'a> {
 /// Refinement integration path for `SparseIoVec`.
 ///
 /// Walks each level of the hash-initialized hierarchy, runs
-fn collapse_level_progress_bar(num_levels: usize) -> ProgressBar {
-    ProgressBar::new(num_levels as u64).with_style(
-        ProgressStyle::with_template("Collapse levels {bar:40} {pos}/{len} ({eta})")
-            .unwrap()
-            .progress_chars("##-"),
-    )
-}
-
 /// `refine_multilevel::refine_assignments` over super-cells, then rebuilds
 /// `CollapsedStat` per level from the refined cell → group assignment and
 /// emits `CollapsedOut` with identical shape to the legacy path.
@@ -1262,11 +1263,14 @@ fn refine_and_collect_single_layer(
         "Level 1/{}: refined k={} (finest; {} cells read)",
         num_levels, k_finest, ncols
     );
-    let level_pb = collapse_level_progress_bar(num_levels);
     let mut results: Vec<CollapsedOut> = Vec::with_capacity(num_levels);
-    let finest_out = optimize(&fine_stat, (1.0, 1.0), opt_iter)?;
+    let finest_out = optimize(
+        &fine_stat,
+        (1.0, 1.0),
+        opt_iter,
+        &format!("Coarsen L1/{}", num_levels),
+    )?;
     results.push(finest_out);
-    level_pb.inc(1);
 
     let mut prev_stat = fine_stat;
     for level in 1..num_levels {
@@ -1286,12 +1290,15 @@ fn refine_and_collect_single_layer(
             k_prev
         );
         let level_opt_iter = (opt_iter / 2).max(10);
-        let out = optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?;
+        let out = optimize(
+            &coarse_stat,
+            (1.0, 1.0),
+            level_opt_iter,
+            &format!("Coarsen L{}/{}", level + 1, num_levels),
+        )?;
         results.push(out);
         prev_stat = coarse_stat;
-        level_pb.inc(1);
     }
-    level_pb.finish_and_clear();
 
     Ok(results)
 }
@@ -1299,9 +1306,8 @@ fn refine_and_collect_single_layer(
 /// Refinement integration path for `SparseIoStack`.
 ///
 /// Shares one `RefinedAssignment` across all layers (first-layer-owns the
-/// grouping decision, matching the existing stack convention at line 1337 of
-/// the legacy path). Per level × layer we rebuild `CollapsedStat` and emit
-/// `CollapsedOut`.
+/// grouping decision, matching the existing stack convention). Per level ×
+/// layer we rebuild `CollapsedStat` and emit `CollapsedOut`.
 fn refine_and_collect_stack(
     stack: &mut SparseIoStack,
     proj_kn: &DMatrix<f32>,
@@ -1419,7 +1425,12 @@ fn refine_and_collect_stack(
                 &mut stat,
             )?;
         }
-        let out = optimize(&stat, (1.0, 1.0), opt_iter)?;
+        let out = optimize(
+            &stat,
+            (1.0, 1.0),
+            opt_iter,
+            &format!("Coarsen L1/{} layer {}/{}", num_levels, d + 1, num_layers),
+        )?;
         finest_layer_results.push(out);
         fine_stats.push(stat);
     }
@@ -1427,10 +1438,8 @@ fn refine_and_collect_stack(
         "Level 1/{}: refined k={} (finest; {} layers × {} cells)",
         num_levels, k_finest, num_layers, ncols
     );
-    let level_pb = collapse_level_progress_bar(num_levels);
     let mut results: Vec<Vec<CollapsedOut>> = Vec::with_capacity(num_levels);
     results.push(finest_layer_results);
-    level_pb.inc(1);
 
     let mut prev_stats = fine_stats;
     for level in 1..num_levels {
@@ -1444,9 +1453,20 @@ fn refine_and_collect_stack(
         let level_opt_iter = (opt_iter / 2).max(10);
         let mut layer_results = Vec::with_capacity(num_layers);
         let mut coarse_stats = Vec::with_capacity(num_layers);
-        for prev_stat in prev_stats.iter() {
+        for (d, prev_stat) in prev_stats.iter().enumerate() {
             let coarse_stat = merge_stat(prev_stat, &fine_to_coarse, k_level);
-            let out = optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?;
+            let out = optimize(
+                &coarse_stat,
+                (1.0, 1.0),
+                level_opt_iter,
+                &format!(
+                    "Coarsen L{}/{} layer {}/{}",
+                    level + 1,
+                    num_levels,
+                    d + 1,
+                    num_layers
+                ),
+            )?;
             layer_results.push(out);
             coarse_stats.push(coarse_stat);
         }
@@ -1460,9 +1480,7 @@ fn refine_and_collect_stack(
         );
         results.push(layer_results);
         prev_stats = coarse_stats;
-        level_pb.inc(1);
     }
-    level_pb.finish_and_clear();
 
     Ok(results)
 }
@@ -1706,8 +1724,12 @@ impl MultilevelCollapsingOps for SparseIoVec {
         }
 
         // Optimize finest level
-        info!("Optimizing parameters ...");
-        let result = optimize(&fine_stat, (1.0, 1.0), opt_iter)?;
+        let result = optimize(
+            &fine_stat,
+            (1.0, 1.0),
+            opt_iter,
+            &format!("Coarsen L1/{}", level_dims.len()),
+        )?;
         let mut results = vec![result];
 
         // Agglomeratively merge for coarser levels
@@ -1731,8 +1753,12 @@ impl MultilevelCollapsingOps for SparseIoVec {
 
             let coarse_stat = merge_stat(&prev_stat, &fine_to_coarse, num_coarse);
 
-            info!("Optimizing parameters ...");
-            let coarse_result = optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?;
+            let coarse_result = optimize(
+                &coarse_stat,
+                (1.0, 1.0),
+                level_opt_iter,
+                &format!("Coarsen L{}/{}", level + 1, level_dims.len()),
+            )?;
             results.push(coarse_result);
 
             let mut coarse_group_to_cols = vec![vec![]; num_coarse];
@@ -1853,12 +1879,22 @@ impl MultilevelCollapsingOps for SparseIoStack {
             // Finest level stats
             let mut fine_stats: Vec<CollapsedStat> = Vec::with_capacity(num_layers);
             let mut layer_results = Vec::with_capacity(num_layers);
-            for layer in self.stack.iter() {
+            for (d, layer) in self.stack.iter().enumerate() {
                 let num_features = layer.num_rows();
                 let num_groups = group_to_cols.len();
                 let mut stat = CollapsedStat::new(num_features, num_groups, 0);
                 layer.collect_basic_stat(&mut stat)?;
-                layer_results.push(optimize(&stat, (1.0, 1.0), opt_iter)?);
+                layer_results.push(optimize(
+                    &stat,
+                    (1.0, 1.0),
+                    opt_iter,
+                    &format!(
+                        "Coarsen L1/{} layer {}/{}",
+                        level_dims.len(),
+                        d + 1,
+                        num_layers
+                    ),
+                )?);
                 fine_stats.push(stat);
             }
 
@@ -1868,7 +1904,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
             let mut prev_stats = fine_stats;
             let mut prev_group_to_cols = group_to_cols.clone();
 
-            for &level_sort_dim in level_dims.iter().skip(1) {
+            for (level, &level_sort_dim) in level_dims.iter().enumerate().skip(1) {
                 let level_opt_iter = (opt_iter / 2).max(10);
                 let (fine_to_coarse, num_coarse) = compute_fine_to_coarse_mapping(
                     &prev_group_to_cols,
@@ -1878,9 +1914,20 @@ impl MultilevelCollapsingOps for SparseIoStack {
 
                 let mut layer_results = Vec::with_capacity(num_layers);
                 let mut coarse_stats = Vec::with_capacity(num_layers);
-                for prev_stat in prev_stats.iter() {
+                for (d, prev_stat) in prev_stats.iter().enumerate() {
                     let coarse_stat = merge_stat(prev_stat, &fine_to_coarse, num_coarse);
-                    layer_results.push(optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?);
+                    layer_results.push(optimize(
+                        &coarse_stat,
+                        (1.0, 1.0),
+                        level_opt_iter,
+                        &format!(
+                            "Coarsen L{}/{} layer {}/{}",
+                            level + 1,
+                            level_dims.len(),
+                            d + 1,
+                            num_layers
+                        ),
+                    )?);
                     coarse_stats.push(coarse_stat);
                 }
                 results.push(layer_results);
@@ -1969,7 +2016,17 @@ impl MultilevelCollapsingOps for SparseIoStack {
             )?;
 
             // Optimize finest-level parameters
-            layer_results.push(optimize(&stat, (1.0, 1.0), opt_iter)?);
+            layer_results.push(optimize(
+                &stat,
+                (1.0, 1.0),
+                opt_iter,
+                &format!(
+                    "Coarsen L1/{} layer {}/{}",
+                    level_dims.len(),
+                    d + 1,
+                    num_layers
+                ),
+            )?);
             fine_stats.push(stat);
         }
 
@@ -2002,8 +2059,18 @@ impl MultilevelCollapsingOps for SparseIoStack {
             for (d, prev_stat) in prev_stats.iter().enumerate() {
                 let coarse_stat = merge_stat(prev_stat, &fine_to_coarse, num_coarse);
 
-                info!("Layer {}/{}: optimizing ...", d + 1, num_layers);
-                layer_results.push(optimize(&coarse_stat, (1.0, 1.0), level_opt_iter)?);
+                layer_results.push(optimize(
+                    &coarse_stat,
+                    (1.0, 1.0),
+                    level_opt_iter,
+                    &format!(
+                        "Coarsen L{}/{} layer {}/{}",
+                        level + 1,
+                        level_dims.len(),
+                        d + 1,
+                        num_layers
+                    ),
+                )?);
                 coarse_stats.push(coarse_stat);
             }
 
