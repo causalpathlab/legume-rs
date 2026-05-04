@@ -6,6 +6,8 @@ use crate::topic::eval::{save_outputs, EvalContext};
 use crate::topic::training::{TrainingContext, TrainingParams};
 use candle_util::candle_core::Device;
 use data_beans_alg::collapse_data::MultilevelParams;
+use data_beans_alg::gene_weighting::{compute_nb_fisher_weights, save_fisher_weights};
+use data_beans_alg::hvg::{select_hvg_streaming, HvgCliArgs};
 
 #[derive(Args, Debug)]
 pub struct FitTopicArgs {
@@ -219,6 +221,12 @@ pub struct FitTopicArgs {
                      {out}.prop.parquet"
     )]
     out: Box<str>,
+
+    /* HVG gating of the random projection (RNA modality only). ATAC peaks
+     * always get weight 1.0, since per-peak variability is dominated by
+     * sparsity rather than housekeeping signal. */
+    #[command(flatten)]
+    hvg: HvgCliArgs,
 }
 
 pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
@@ -234,16 +242,47 @@ pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
     let ncells = paired.data_stack.num_columns()?;
     let block_size: Option<usize> = None;
 
-    /* 2. Shared random projection */
+    /* 2. Shared random projection.
+     *
+     * Down-weight housekeeping genes via HVG selection on the RNA
+     * modality so the sketch geometry reflects variable biology. ATAC
+     * peaks always carry weight 1.0 — for ATAC the per-peak signal is
+     * mostly sparsity, not constant-high background, so HVP filtering
+     * tends to discard rare-state peaks rather than denoise.
+     */
+    let n_rna = paired.data_stack.stack[0].num_rows();
+    let n_total: usize = paired.data_stack.stack.iter().map(|v| v.num_rows()).sum();
+    let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
+
     info!(
-        "Random projection (dim={}, {} cells)...",
-        args.proj_dim, ncells
-    );
-    let proj = paired.data_stack.project_columns_with_batch_correction(
+        "Random projection (dim={}, {} cells, RNA HVG {})...",
         args.proj_dim,
-        block_size,
-        Some(&paired.batch_membership),
-    )?;
+        ncells,
+        if hvg_enabled { "on" } else { "off" }
+    );
+    let proj = if hvg_enabled {
+        let hvg = select_hvg_streaming(
+            &paired.data_stack.stack[0],
+            (args.hvg.n_hvg > 0).then_some(args.hvg.n_hvg),
+            args.hvg.feature_list_file.as_deref(),
+            block_size,
+        )?;
+        let mut row_weights = vec![1.0_f32; n_total];
+        let rna_weights = hvg.row_weights(n_rna);
+        row_weights[..n_rna].copy_from_slice(&rna_weights);
+        paired.data_stack.project_columns_weighted(
+            args.proj_dim,
+            block_size,
+            Some(&paired.batch_membership),
+            &row_weights,
+        )?
+    } else {
+        paired.data_stack.project_columns_with_batch_correction(
+            args.proj_dim,
+            block_size,
+            Some(&paired.batch_membership),
+        )?
+    };
 
     /* 3. Multi-level collapsing */
     let collapsed: Vec<Vec<_>> = paired
@@ -368,6 +407,18 @@ pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
         dev: &dev,
     };
     save_outputs(&model, &eval_ctx, &args.out)?;
+
+    /* 8. Persist NB Fisher gene weights (RNA modality) so downstream
+     * consumers can reload them instead of re-scanning. Mirrors
+     * `senna topic`'s `{out}.fisher_weights.parquet`. ATAC peaks are
+     * implicit weight = 1.0; not saved. */
+    let fisher_w = compute_nb_fisher_weights(&paired.data_stack.stack[0], block_size)?;
+    save_fisher_weights(&args.out, &fisher_w, &gene_names)?;
+    info!(
+        "Wrote {}.fisher_weights.parquet ({} genes)",
+        args.out,
+        fisher_w.len()
+    );
 
     Ok(())
 }

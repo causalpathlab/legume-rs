@@ -5,7 +5,8 @@ use super::args::AnnotateArgs;
 use super::inputs::{load_from_manifest, LeidenArgs};
 use crate::cluster_aggregation::{accumulate_gene_sum_pair, weighted_mean_profile};
 use crate::embed_common::{axis_id_names, Mat};
-use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
+use crate::run_manifest;
+use data_beans_alg::gene_weighting::{compute_nb_fisher_weights, load_fisher_weights};
 use enrichment::{annotate, AnnotateConfig, AnnotateOutputs, GroupInputs, SpecificityMode};
 use log::info;
 use matrix_util::common_io::mkdir_parent;
@@ -40,7 +41,28 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
     );
 
     // ----- NB-Fisher per-gene weights -----
-    let nb_fisher: Vec<f32> = compute_nb_fisher_weights(loaded.data_vec(), Some(args.block_size))?;
+    // Try the cached parquet from training first; fall back to recomputing.
+    let fisher_prefix = run_manifest::resolve(&manifest_dir, &manifest.prefix)
+        .to_string_lossy()
+        .into_owned();
+    let nb_fisher: Vec<f32> = match load_fisher_weights(&fisher_prefix)? {
+        Some((cached_genes, cached_w)) if cached_genes == loaded.gene_names => {
+            info!(
+                "Loaded {} NB-Fisher weights from {fisher_prefix}.fisher_weights.parquet",
+                cached_w.len()
+            );
+            cached_w
+        }
+        Some((cached_genes, _)) => {
+            info!(
+                "Cached fisher_weights gene names ({}) don't match data ({}); recomputing",
+                cached_genes.len(),
+                loaded.gene_names.len()
+            );
+            compute_nb_fisher_weights(loaded.data_vec(), Some(args.block_size))?
+        }
+        None => compute_nb_fisher_weights(loaded.data_vec(), Some(args.block_size))?,
+    };
     let (w_min, w_max, w_sum) = nb_fisher.par_iter().map(|&w| (w, w, w)).reduce(
         || (f32::INFINITY, 0.0f32, 0.0f32),
         |(lo, hi, s), (a, b, c)| (lo.min(a), hi.max(b), s + c),

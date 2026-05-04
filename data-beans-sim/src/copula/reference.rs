@@ -89,7 +89,10 @@ pub fn per_gene_stats_and_marginals(
     r_floor: f32,
 ) -> anyhow::Result<(Vec<GeneStats>, Vec<NbFit>)> {
     let stats = per_gene_stats(sc, cells, n_genes)?;
-    let marginals = stats.iter().map(|s| nb_fit_from_stats(s, r_floor)).collect();
+    let marginals = stats
+        .iter()
+        .map(|s| nb_fit_from_stats(s, r_floor))
+        .collect();
     Ok((stats, marginals))
 }
 
@@ -110,7 +113,7 @@ fn nb_fit_from_stats(s: &GeneStats, r_floor: f32) -> NbFit {
 }
 
 /// Select up to `n_hvg` highly variable genes via the workspace's NB
-/// dispersion-trend HVG ranker (`data_beans_alg::hvg_selection`). It fits
+/// dispersion-trend HVG ranker (`data_beans_alg::hvg`). It fits
 /// `σ²(μ) = μ + φ(μ)·μ²` and ranks each gene by its excess dispersion above
 /// the trend — the same `φ(μ)` fit that the rest of the workspace uses for
 /// Fisher-info gene weighting and DC-Poisson clustering, so the copula sim
@@ -118,7 +121,7 @@ fn nb_fit_from_stats(s: &GeneStats, r_floor: f32) -> NbFit {
 pub fn select_hvg(stats: &[GeneStats], n_hvg: usize) -> Vec<usize> {
     let means: Vec<f32> = stats.iter().map(|s| s.mu as f32).collect();
     let vars: Vec<f32> = stats.iter().map(|s| s.var as f32).collect();
-    data_beans_alg::hvg_selection::select_hvg_by_stats(&means, &vars, n_hvg)
+    data_beans_alg::hvg::select_hvg_by_stats(&means, &vars, n_hvg)
 }
 
 /// Build a (n_cells × |hvg|) dense embedding: `log1p(X[hvg, :])ᵀ` then column

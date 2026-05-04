@@ -492,16 +492,8 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     // Modality-0 only — joint multi-modality annotation is a follow-up.
     {
         let pb_gene_gp: Mat = collapsed_data_vec[0].mu_observed.posterior_mean().clone();
-        let n_pb = pb_gene_gp.ncols();
-        let pb_names: Vec<Box<str>> = (0..n_pb)
-            .map(|i| format!("PB_{i}").into_boxed_str())
-            .collect();
         let gene_names_0: Vec<Box<str>> = data_stack.stack[0].row_names()?;
-        pb_gene_gp.to_parquet_with_names(
-            &format!("{}.pb_gene.parquet", args.out),
-            (Some(&gene_names_0), Some("gene")),
-            Some(&pb_names),
-        )?;
+        crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names_0)?;
     }
 
     let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();

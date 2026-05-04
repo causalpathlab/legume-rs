@@ -153,7 +153,8 @@ pub fn fit_copula(args: &CopulaFitArgs) -> anyhow::Result<CopulaModel> {
     // Global per-gene stats are needed for AutoCluster (HVG selection for the
     // embedding) and for housekeeping (top-k by mean). Compute once, share both.
     let hk_enabled = args.n_housekeeping > 0 && args.housekeeping_fold != 1.0;
-    let needs_global_stats = matches!(args.partition, PartitionMode::AutoCluster { .. }) || hk_enabled;
+    let needs_global_stats =
+        matches!(args.partition, PartitionMode::AutoCluster { .. }) || hk_enabled;
     let global_stats = if needs_global_stats {
         let global_cells: Vec<usize> = (0..n_cells_total).collect();
         Some(reference::per_gene_stats(args.sc, &global_cells, n_genes)?)
@@ -162,56 +163,55 @@ pub fn fit_copula(args: &CopulaFitArgs) -> anyhow::Result<CopulaModel> {
     };
 
     // 1. Resolve the cluster partition.
-    let (partition, label_names): (Vec<ClusterPartition>, Vec<Box<str>>) =
-        match &args.partition {
-            PartitionMode::Single => {
-                let cells: Vec<usize> = (0..n_cells_total).collect();
-                let names = vec!["all".to_string().into_boxed_str()];
-                (vec![(0, names[0].clone(), cells)], names)
+    let (partition, label_names): (Vec<ClusterPartition>, Vec<Box<str>>) = match &args.partition {
+        PartitionMode::Single => {
+            let cells: Vec<usize> = (0..n_cells_total).collect();
+            let names = vec!["all".to_string().into_boxed_str()];
+            (vec![(0, names[0].clone(), cells)], names)
+        }
+        PartitionMode::AutoCluster {
+            n_clusters,
+            knn,
+            rsvd_rank,
+            hvg_for_clustering,
+        } => {
+            info!(
+                "auto-clustering: hvg_global={}, rank={}, knn={}, target_clusters={}",
+                hvg_for_clustering, rsvd_rank, knn, n_clusters
+            );
+            let stats = global_stats
+                .as_ref()
+                .expect("global stats computed for AutoCluster");
+            let hvg_global = reference::select_hvg(stats, *hvg_for_clustering);
+            let emb = reference::cell_embedding(args.sc, &hvg_global, *rsvd_rank)?;
+            let labels = reference::cluster_cells(&emb, *knn, *n_clusters, args.rseed)?;
+            let n_clusters_actual = labels.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+            info!("auto-clustering produced {} clusters", n_clusters_actual);
+            let groups = reference::partition_by_label(&labels);
+            let names: Vec<Box<str>> = (0..n_clusters_actual)
+                .map(|c| format!("cluster_{}", c).into_boxed_str())
+                .collect();
+            let parts = groups
+                .into_iter()
+                .map(|(l, cells)| (l, names[l].clone(), cells))
+                .collect();
+            (parts, names)
+        }
+        PartitionMode::Labels {
+            labels,
+            label_names,
+        } => {
+            if labels.len() != n_cells_total {
+                anyhow::bail!("label count {} != n_cells {}", labels.len(), n_cells_total);
             }
-            PartitionMode::AutoCluster {
-                n_clusters,
-                knn,
-                rsvd_rank,
-                hvg_for_clustering,
-            } => {
-                info!(
-                    "auto-clustering: hvg_global={}, rank={}, knn={}, target_clusters={}",
-                    hvg_for_clustering, rsvd_rank, knn, n_clusters
-                );
-                let stats = global_stats
-                    .as_ref()
-                    .expect("global stats computed for AutoCluster");
-                let hvg_global = reference::select_hvg(stats, *hvg_for_clustering);
-                let emb = reference::cell_embedding(args.sc, &hvg_global, *rsvd_rank)?;
-                let labels = reference::cluster_cells(&emb, *knn, *n_clusters, args.rseed)?;
-                let n_clusters_actual = labels.iter().copied().max().map(|m| m + 1).unwrap_or(0);
-                info!("auto-clustering produced {} clusters", n_clusters_actual);
-                let groups = reference::partition_by_label(&labels);
-                let names: Vec<Box<str>> = (0..n_clusters_actual)
-                    .map(|c| format!("cluster_{}", c).into_boxed_str())
-                    .collect();
-                let parts = groups
-                    .into_iter()
-                    .map(|(l, cells)| (l, names[l].clone(), cells))
-                    .collect();
-                (parts, names)
-            }
-            PartitionMode::Labels {
-                labels,
-                label_names,
-            } => {
-                if labels.len() != n_cells_total {
-                    anyhow::bail!("label count {} != n_cells {}", labels.len(), n_cells_total);
-                }
-                let groups = reference::partition_by_label(labels);
-                let parts: Vec<ClusterPartition> = groups
-                    .into_iter()
-                    .map(|(l, cells)| (l, label_names[l].clone(), cells))
-                    .collect();
-                (parts, label_names.clone())
-            }
-        };
+            let groups = reference::partition_by_label(labels);
+            let parts: Vec<ClusterPartition> = groups
+                .into_iter()
+                .map(|(l, cells)| (l, label_names[l].clone(), cells))
+                .collect();
+            (parts, label_names.clone())
+        }
+    };
 
     info!(
         "fitting {} cluster(s): {}",
@@ -422,8 +422,7 @@ pub fn sample_copula(
                 .filter(|&g| !is_hvg[g] && cluster.marginals[g].mu > 0.0)
                 .collect();
 
-            let mut local_triplets: Vec<(u64, u64, f32)> =
-                Vec::with_capacity(n_per_cluster * 4096);
+            let mut local_triplets: Vec<(u64, u64, f32)> = Vec::with_capacity(n_per_cluster * 4096);
             let mut batch_assn: Vec<usize> = Vec::with_capacity(n_per_cluster);
 
             for j_local in 0..n_per_cluster {

@@ -89,6 +89,15 @@ pub trait SparseIo: Sync + Send {
         CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
+    /// Zero-copy view of preloaded column-major CSC arrays as
+    /// `(indptr, indices, data)`. Returns `None` when the backend has
+    /// not preloaded columns or doesn't support direct array access.
+    /// Callers (e.g. `SparseIoVec::read_columns_csc`) use this to skip
+    /// the triplet roundtrip when columns are already in memory.
+    fn csc_column_arrays(&self) -> Option<(&[u64], &[u64], &[f32])> {
+        None
+    }
+
     /// Read rows within the range and return dense `ndarray::Array2`
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///

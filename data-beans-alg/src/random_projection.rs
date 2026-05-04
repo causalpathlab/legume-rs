@@ -11,6 +11,15 @@ use matrix_util::traits::*;
 use matrix_util::utils::*;
 use nalgebra::DVector;
 
+/// Bundle passed as `SharedIn` so the visitor signature stays compatible
+/// with `visit_columns_by_block`. The basis is stored as `K × D`
+/// (transposed) so the inner kernel accesses contiguous K-vectors per
+/// non-zero, instead of stride-D reads across `D × K` column-major
+/// storage.
+struct ProjVisitorIn<'a> {
+    basis_kd: &'a nalgebra::DMatrix<f32>,
+}
+
 pub struct RandColProjOut {
     pub basis: nalgebra::DMatrix<f32>,
     pub proj: nalgebra::DMatrix<f32>,
@@ -97,20 +106,32 @@ pub trait RandProjOps {
 fn project_columns_visitor(
     job: (usize, usize),
     data_vec: &SparseIoVec,
-    basis_dk: &nalgebra::DMatrix<f32>,
+    shared_in: &ProjVisitorIn<'_>,
     arc_proj_kn: Arc<Mutex<&mut nalgebra::DMatrix<f32>>>,
 ) -> anyhow::Result<()> {
     let (lb, ub) = job;
+    let basis_kd = shared_in.basis_kd;
+    let target_dim = basis_kd.nrows();
+    let n_block = ub - lb;
+
     let mut xx_dm = data_vec.read_columns_csc(lb..ub)?;
     for x in xx_dm.values_mut() {
         *x = x.ln_1p();
     }
     xx_dm.normalize_columns_inplace();
-    let chunk = (xx_dm.transpose() * basis_dk).transpose();
+
+    // Direct K×N kernel: chunk[:, j] = Σᵢ X[i,j] · B_kd[:, i]. One pass
+    // over CSC non-zeros. Both column slices are unit-stride (contiguous),
+    // so the SAXPY vectorizes; no sparse transpose, no dense transpose.
+    let mut chunk = nalgebra::DMatrix::<f32>::zeros(target_dim, n_block);
+    for (j, col) in xx_dm.col_iter().enumerate() {
+        for (&i, &v) in col.row_indices().iter().zip(col.values()) {
+            chunk.column_mut(j).axpy(v, &basis_kd.column(i), 1.0);
+        }
+    }
 
     let mut proj_kn = arc_proj_kn.lock().expect("proj_kn lock");
     proj_kn.columns_range_mut(lb..ub).copy_from(&chunk);
-
     Ok(())
 }
 
@@ -183,18 +204,33 @@ impl RandProjOps for SparseIoStack {
         let ncols = self.num_columns()?;
         let batch_membership = batch_membership.and_then(|x| x.get(0..ncols));
 
-        let proj_vec = self
-            .stack
-            .iter()
-            .map(|data_vec| -> anyhow::Result<_> {
-                data_vec.project_columns_weighted(
-                    target_dim,
-                    block_size,
-                    batch_membership,
-                    row_weights,
-                )
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        // Interpret `row_weights` as the concatenated feature axis across
+        // all stacked modalities, in `self.stack` order. Slice per
+        // modality so each per-vec call sees weights of length equal to
+        // its own `num_rows()`.
+        let total_rows: usize = self.stack.iter().map(|v| v.num_rows()).sum();
+        if row_weights.len() != total_rows {
+            return Err(anyhow::anyhow!(
+                "row_weights length {} does not match total feature count {} \
+                 (sum of num_rows() across the stack)",
+                row_weights.len(),
+                total_rows
+            ));
+        }
+
+        let mut offset = 0usize;
+        let mut proj_vec = Vec::with_capacity(self.stack.len());
+        for data_vec in self.stack.iter() {
+            let nrows = data_vec.num_rows();
+            let slice = &row_weights[offset..offset + nrows];
+            offset += nrows;
+            proj_vec.push(data_vec.project_columns_weighted(
+                target_dim,
+                block_size,
+                batch_membership,
+                slice,
+            )?);
+        }
 
         let basis = concatenate_vertical(
             &proj_vec
@@ -264,13 +300,25 @@ impl RandProjOps for SparseIoVec {
         let mut proj_kn = nalgebra::DMatrix::<f32>::zeros(target_dim, ncols);
 
         let basis_dk = nalgebra::DMatrix::<f32>::rnorm(nrows, target_dim);
+        // Carry a K×D copy for the inner kernel so per-non-zero column
+        // slices into the basis are contiguous (unit-stride SAXPY).
+        let basis_kd = basis_dk.transpose();
 
+        let shared_in = ProjVisitorIn {
+            basis_kd: &basis_kd,
+        };
+        info!(
+            "starting random projection loop (project_columns_with_batch_correction): \
+             D={nrows}, N={ncols}, K={target_dim}, block_size={:?}",
+            block_size
+        );
         self.visit_columns_by_block(
             &project_columns_visitor,
-            &basis_dk,
+            &shared_in,
             &mut proj_kn,
             block_size,
         )?;
+        info!("finished random projection loop");
 
         if let Some(col_to_batch) = batch_membership {
             if col_to_batch.len() == ncols {
@@ -339,12 +387,22 @@ impl RandProjOps for SparseIoVec {
             }
         }
 
+        let basis_kd = basis_dk.transpose();
+        let shared_in = ProjVisitorIn {
+            basis_kd: &basis_kd,
+        };
+        info!(
+            "starting random projection loop (project_columns_weighted): \
+             D={nrows}, N={ncols}, K={target_dim}, block_size={:?}",
+            block_size
+        );
         self.visit_columns_by_block(
             &project_columns_visitor,
-            &basis_dk,
+            &shared_in,
             &mut proj_kn,
             block_size,
         )?;
+        info!("finished random projection loop");
 
         if let Some(col_to_batch) = batch_membership {
             if col_to_batch.len() == ncols {
