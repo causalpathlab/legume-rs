@@ -1,5 +1,6 @@
 pub(crate) mod anchor_prior;
 pub(crate) mod common;
+pub(crate) mod decoder_output;
 pub(crate) mod eval;
 pub(crate) mod eval_indexed;
 pub(crate) mod model_metadata;

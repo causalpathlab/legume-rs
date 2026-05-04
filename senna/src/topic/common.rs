@@ -163,6 +163,119 @@ pub struct PreparedData {
     pub proj_kn: Mat,
 }
 
+/// Result of the read + batch + HVG + project pipeline. Shared by
+/// `load_and_collapse` (multilevel collapse downstream) and `senna svd`
+/// (single-level collapse downstream).
+pub struct ProjectedData {
+    pub data_vec: SparseIoVec,
+    pub batch_membership: Vec<Box<str>>,
+    /// `proj_dim × n_cells` random-projection sketch (post-batch-correction
+    /// when batch labels are present). Same shape and semantics as
+    /// `PreparedData::proj_kn`.
+    pub proj_kn: Mat,
+    /// HVG selection used to weight the basis, if any. `None` when HVG
+    /// is disabled or when warm-starting from a saved projection.
+    pub selected_features: Option<HvgSelection>,
+}
+
+/// Args for [`load_and_project`] — the read + batch + HVG + project
+/// portion shared by topic, indexed-topic, and svd routines.
+pub struct LoadProjectArgs<'a> {
+    pub data_files: &'a [Box<str>],
+    pub batch_files: &'a Option<Vec<Box<str>>>,
+    pub preload: bool,
+    pub warm_start_proj_file: Option<&'a str>,
+    pub proj_dim: usize,
+    pub block_size: Option<usize>,
+    pub max_features: usize,
+    pub feature_list_file: Option<&'a str>,
+    pub ignore_batch: bool,
+}
+
+/// Read sparse files, resolve batch membership, optionally pick HVGs,
+/// then run the random projection (or load a warm-start projection).
+/// Used by `load_and_collapse` and by `senna svd` so the pre-collapse
+/// pipeline is identical across routines.
+pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData> {
+    let SparseDataWithBatch {
+        data: data_vec,
+        batch: mut batch_membership,
+        ..
+    } = read_data_on_shared_rows(ReadSharedRowsArgs {
+        data_files: args.data_files.to_vec(),
+        batch_files: args.batch_files.clone(),
+        preload: args.preload,
+    })?;
+    if args.ignore_batch {
+        info!("--ignore-batch: collapsing all cells to a single batch");
+        crate::senna_input::collapse_to_single_batch(&mut batch_membership);
+    }
+
+    let mut selected_features: Option<HvgSelection> = None;
+
+    let proj_kn = if let Some(proj_file) = args.warm_start_proj_file {
+        use matrix_util::common_io::file_ext;
+        let ext = file_ext(proj_file)?;
+
+        let MatWithNames {
+            rows: cell_names,
+            cols: _,
+            mat: proj_nk,
+        } = match ext.as_ref() {
+            "parquet" => Mat::from_parquet_with_row_names(proj_file, Some(0))?,
+            _ => Mat::read_data_with_names(proj_file, &['\t', ',', ' '], Some(0), Some(0))?,
+        };
+
+        if data_vec.column_names()? != cell_names {
+            return Err(anyhow::anyhow!(
+                "warm start projection rows don't match with the data"
+            ));
+        }
+
+        proj_nk.transpose()
+    } else {
+        // HVG-weighted projection: down-weight uninformative genes so the
+        // random sketch (and hence the PB partitioning + cached cell_proj)
+        // reflects variable biology. Collapsing still reads all genes.
+        let hvg_enabled = args.max_features > 0 || args.feature_list_file.is_some();
+        if hvg_enabled {
+            selected_features = Some(select_hvg_streaming(
+                &data_vec,
+                (args.max_features > 0).then_some(args.max_features),
+                args.feature_list_file,
+                args.block_size,
+            )?);
+        }
+
+        let proj_out = if let Some(sel) = selected_features.as_ref() {
+            let weights = sel.row_weights(data_vec.num_rows());
+            data_vec.project_columns_weighted(
+                args.proj_dim,
+                args.block_size,
+                Some(&batch_membership),
+                &weights,
+            )?
+        } else {
+            data_vec.project_columns_with_batch_correction(
+                args.proj_dim,
+                args.block_size,
+                Some(&batch_membership),
+            )?
+        };
+
+        proj_out.proj
+    };
+
+    info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
+
+    Ok(ProjectedData {
+        data_vec,
+        batch_membership,
+        proj_kn,
+        selected_features,
+    })
+}
+
 pub struct LoadCollapseArgs<'a> {
     pub data_files: &'a [Box<str>],
     pub batch_files: &'a Option<Vec<Box<str>>>,
@@ -189,81 +302,27 @@ pub struct LoadCollapseArgs<'a> {
 
 /// Load sparse data, project, multi-level collapse, and write delta output.
 ///
-/// Shared pipeline for topic and indexed-topic models.
+/// Shared pipeline for topic and indexed-topic models. The pre-collapse
+/// portion (read + batch + HVG + project) is delegated to
+/// [`load_and_project`] so `senna svd` can share the same code.
 pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData> {
-    let SparseDataWithBatch {
-        data: mut data_vec,
-        batch: mut batch_membership,
-        ..
-    } = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: args.data_files.to_vec(),
-        batch_files: args.batch_files.clone(),
+    let ProjectedData {
+        mut data_vec,
+        batch_membership,
+        proj_kn,
+        selected_features: _,
+    } = load_and_project(&LoadProjectArgs {
+        data_files: args.data_files,
+        batch_files: args.batch_files,
         preload: args.preload,
+        warm_start_proj_file: args.warm_start_proj_file,
+        proj_dim: args.proj_dim,
+        block_size: args.block_size,
+        max_features: args.max_features,
+        feature_list_file: args.feature_list_file,
+        ignore_batch: args.ignore_batch,
     })?;
-    if args.ignore_batch {
-        info!("--ignore-batch: collapsing all cells to a single batch");
-        crate::senna_input::collapse_to_single_batch(&mut batch_membership);
-    }
 
-    // 2. Take projection results by warm start or projecting it again
-    let proj_kn = if let Some(proj_file) = args.warm_start_proj_file {
-        use matrix_util::common_io::file_ext;
-        let ext = file_ext(proj_file)?;
-
-        let MatWithNames {
-            rows: cell_names,
-            cols: _,
-            mat: proj_nk,
-        } = match ext.as_ref() {
-            "parquet" => Mat::from_parquet_with_row_names(proj_file, Some(0))?,
-            _ => Mat::read_data_with_names(proj_file, &['\t', ',', ' '], Some(0), Some(0))?,
-        };
-
-        if data_vec.column_names()? != cell_names {
-            return Err(anyhow::anyhow!(
-                "warm start projection rows don't match with the data"
-            ));
-        }
-
-        proj_nk.transpose()
-    } else {
-        // HVG-weighted projection: down-weight uninformative genes so the
-        // random sketch (and hence the PB partitioning + cached cell_proj)
-        // reflects variable biology. Collapsing still reads all genes.
-        let hvg_enabled = args.max_features > 0 || args.feature_list_file.is_some();
-        let selected: Option<HvgSelection> = if hvg_enabled {
-            Some(select_hvg_streaming(
-                &data_vec,
-                (args.max_features > 0).then_some(args.max_features),
-                args.feature_list_file,
-                args.block_size,
-            )?)
-        } else {
-            None
-        };
-
-        let proj_out = if let Some(sel) = selected.as_ref() {
-            let weights = sel.row_weights(data_vec.num_rows());
-            data_vec.project_columns_weighted(
-                args.proj_dim,
-                args.block_size,
-                Some(&batch_membership),
-                &weights,
-            )?
-        } else {
-            data_vec.project_columns_with_batch_correction(
-                args.proj_dim,
-                args.block_size,
-                Some(&batch_membership),
-            )?
-        };
-
-        proj_out.proj
-    };
-
-    info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
-
-    // 3. Multi-level collapsing (pseudobulk)
     info!("Multi-level collapsing with super-cells ...");
     let mut collapsed_levels: Vec<CollapsedOut> = data_vec.collapse_columns_multilevel_vec(
         &proj_kn,

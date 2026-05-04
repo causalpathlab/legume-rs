@@ -1017,6 +1017,20 @@ impl SparseIo for SparseMtxData {
         }
     }
 
+    fn csc_column_arrays(&self) -> Option<(&[u64], &[u64], &[f32])> {
+        match (
+            self.by_column_data.as_ref(),
+            self.by_column_indices.as_ref(),
+        ) {
+            (Some(data), Some(indices)) if !self.by_column_indptr.is_empty() => Some((
+                self.by_column_indptr.as_slice(),
+                indices.as_slice(),
+                data.as_slice(),
+            )),
+            _ => None,
+        }
+    }
+
     /// Read rows within the range and return a vector of triplets (row, col, value)
     /// * `rows` : range e.g., 0..3 -> [0, 1, 2] or vec![0, 1, 2]
     ///
