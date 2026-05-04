@@ -12,10 +12,9 @@
 //! chickpea / other consumers don't have to duplicate the implementation.
 
 use crate::nb_dispersion::DispersionTrend;
+use crate::sparse_streaming::streaming_sparse_running_stats;
 use data_beans::sparse_io_vector::SparseIoVec;
-use matrix_util::sparse_stat::SparseRunningStatistics;
-use matrix_util::traits::RunningStatOps;
-use matrix_util::utils::generate_minibatch_intervals;
+use matrix_util::traits::{IoOps, RunningStatOps};
 
 /// Fit the NB mean-variance trend on `data_vec` and return per-gene
 /// Fisher-info weights in row order (same as `data_vec.row_names()`).
@@ -25,13 +24,7 @@ pub fn compute_nb_fisher_weights(
 ) -> anyhow::Result<Vec<f32>> {
     let n_genes = data_vec.num_rows();
     let n_cells = data_vec.num_columns();
-    let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
-
-    let mut stats = SparseRunningStatistics::<f32>::new(n_genes);
-    for &(lb, ub) in &jobs {
-        let csc = data_vec.read_columns_csc(lb..ub)?;
-        stats.add_csc(&csc);
-    }
+    let stats = streaming_sparse_running_stats(data_vec, block_size, "NB-Fisher")?;
 
     let trend = DispersionTrend::from_sparse_stats(&stats);
     let means = stats.mean();
@@ -51,6 +44,68 @@ pub fn compute_nb_fisher_weights(
     Ok((0..n_genes)
         .map(|g| trend.fisher_weight(sums[g] * inv_total, avg_s, means[g]))
         .collect())
+}
+
+/// Save a per-gene weight vector as a single-column parquet keyed on
+/// gene name. The output path is fully specified — callers control the
+/// filename. For the standard `{out}.fisher_weights.parquet` convention
+/// used by senna and chickpea, see [`save_fisher_weights`].
+pub fn save_per_gene_weights(
+    weights: &[f32],
+    gene_names: &[Box<str>],
+    out_path: &str,
+) -> anyhow::Result<()> {
+    let mat = nalgebra::DMatrix::<f32>::from_column_slice(weights.len(), 1, weights);
+    let weight_col = vec![Box::<str>::from("weight")];
+    mat.to_parquet_with_names(
+        out_path,
+        (Some(gene_names), Some("gene")),
+        Some(&weight_col),
+    )?;
+    Ok(())
+}
+
+/// Convenience wrapper: write per-gene weights to the conventional
+/// `{out_prefix}.fisher_weights.parquet` path used by senna `topic` and
+/// chickpea `fit-topic`. Downstream consumers (e.g. `senna annotate`)
+/// look for this filename to reload weights instead of re-scanning all
+/// cells.
+pub fn save_fisher_weights(
+    out_prefix: &str,
+    weights: &[f32],
+    gene_names: &[Box<str>],
+) -> anyhow::Result<()> {
+    save_per_gene_weights(
+        weights,
+        gene_names,
+        &format!("{out_prefix}.fisher_weights.parquet"),
+    )
+}
+
+/// `(gene_names, per-gene weights)` returned by the per-gene weight loaders.
+pub type GeneWeights = (Vec<Box<str>>, Vec<f32>);
+
+/// Load a per-gene weight vector previously written by
+/// [`save_per_gene_weights`]. Returns `(gene_names, weights)`.
+pub fn load_per_gene_weights(path: &str) -> anyhow::Result<GeneWeights> {
+    let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(path, Some(0))?;
+    anyhow::ensure!(
+        result.mat.ncols() >= 1,
+        "per-gene weights parquet at {path} has no value column",
+    );
+    let weights: Vec<f32> = result.mat.column(0).iter().copied().collect();
+    Ok((result.rows, weights))
+}
+
+/// Convenience wrapper: load `{prefix}.fisher_weights.parquet`. Returns
+/// `Ok(None)` when the file doesn't exist so callers can fall back to
+/// recomputing via [`compute_nb_fisher_weights`].
+pub fn load_fisher_weights(prefix: &str) -> anyhow::Result<Option<GeneWeights>> {
+    let path = format!("{prefix}.fisher_weights.parquet");
+    if !std::path::Path::new(&path).exists() {
+        return Ok(None);
+    }
+    Ok(Some(load_per_gene_weights(&path)?))
 }
 
 /// Scale each row of `sum_gk` by its corresponding entry of `weights`.

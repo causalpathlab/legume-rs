@@ -962,3 +962,186 @@ fn rows_triplets_duplicate_row_indices() -> anyhow::Result<()> {
     assert_eq!(mat, expected);
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────
+// read_columns_csc direct-slice path
+// ─────────────────────────────────────────────────────
+
+/// Reconstruct a dense matrix from a CscMatrix for assertion purposes.
+fn csc_to_dense(csc: &nalgebra_sparse::csc::CscMatrix<f32>) -> Array2<f32> {
+    let mut out = Array2::<f32>::zeros((csc.nrows(), csc.ncols()));
+    for (j, col) in csc.col_iter().enumerate() {
+        for (&i, &v) in col.row_indices().iter().zip(col.values()) {
+            out[(i, j)] = v;
+        }
+    }
+    out
+}
+
+/// Build a sparse dataset without preloading columns, to exercise the
+/// fallback path inside `read_columns_csc` when `csc_column_arrays` is
+/// `None`.
+fn make_named_sparse_no_preload(
+    data: &Array2<f32>,
+    row_names: &[Box<str>],
+    col_names: &[Box<str>],
+) -> Arc<SparseData> {
+    let mut sp = create_sparse_from_ndarray(data, None, None).unwrap();
+    sp.register_row_names_vec(row_names);
+    sp.register_column_names_vec(col_names);
+    Arc::from(sp)
+}
+
+#[test]
+fn read_columns_csc_single_backend_contiguous() -> anyhow::Result<()> {
+    let nrow = 12;
+    let ncol = 20;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let rows = str_vec(nrow, "r");
+    let cols = str_vec(ncol, "c");
+
+    let sp = make_named_sparse(&raw, &rows, &cols);
+    let mut vec = SparseIoVec::new();
+    vec.push(sp, None)?;
+
+    let csc = vec.read_columns_csc(5..15)?;
+    assert_eq!(csc.nrows(), nrow);
+    assert_eq!(csc.ncols(), 10);
+    let dense = csc_to_dense(&csc);
+    let expected = raw.select(Axis(1), &(5..15).collect::<Vec<_>>());
+    assert_eq!(dense, expected);
+    Ok(())
+}
+
+#[test]
+fn read_columns_csc_single_backend_arbitrary() -> anyhow::Result<()> {
+    let nrow = 8;
+    let ncol = 16;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let sp = make_named_sparse(&raw, &str_vec(nrow, "r"), &str_vec(ncol, "c"));
+    let mut vec = SparseIoVec::new();
+    vec.push(sp, None)?;
+
+    let sel = vec![15, 0, 7, 3, 11];
+    let csc = vec.read_columns_csc(sel.iter().copied())?;
+    let expected = raw.select(Axis(1), &sel);
+    assert_eq!(csc_to_dense(&csc), expected);
+    Ok(())
+}
+
+#[test]
+fn read_columns_csc_two_backends() -> anyhow::Result<()> {
+    let nrow = 6;
+    let ncol_a = 5;
+    let ncol_b = 7;
+    let rows = str_vec(nrow, "r");
+    let raw_a = Array2::<f32>::runif(nrow, ncol_a);
+    let raw_b = Array2::<f32>::runif(nrow, ncol_b);
+
+    let sp_a = make_named_sparse(&raw_a, &rows, &str_vec(ncol_a, "a"));
+    let sp_b = make_named_sparse(&raw_b, &rows, &str_vec(ncol_b, "b"));
+
+    let mut vec = SparseIoVec::new();
+    vec.push(sp_a, Some("A".into()))?;
+    vec.push(sp_b, Some("B".into()))?;
+
+    // Mix cells across backends.
+    let sel: Vec<usize> = vec![0, 6, 2, 4, ncol_a + 3, ncol_a + ncol_b - 1];
+    let csc = vec.read_columns_csc(sel.iter().copied())?;
+    let dense = csc_to_dense(&csc);
+    assert_eq!(dense.nrows(), nrow);
+    assert_eq!(dense.ncols(), sel.len());
+
+    // Build the expected matrix by hand.
+    let mut expected = Array2::<f32>::zeros((nrow, sel.len()));
+    for (out_j, &g) in sel.iter().enumerate() {
+        if g < ncol_a {
+            for i in 0..nrow {
+                expected[(i, out_j)] = raw_a[(i, g)];
+            }
+        } else {
+            let lj = g - ncol_a;
+            for i in 0..nrow {
+                expected[(i, out_j)] = raw_b[(i, lj)];
+            }
+        }
+    }
+    assert_eq!(dense, expected);
+    Ok(())
+}
+
+#[test]
+fn read_columns_csc_row_intersection_reordered() -> anyhow::Result<()> {
+    // Same row name set in both backends but stored in different order
+    // — exercises the l2g + g2c remap, which can produce unsorted compact
+    // row indices that the new code must detect and sort.
+    let rows_a = str_vec(5, "g");
+    let mut rows_b = str_vec(5, "g");
+    rows_b.swap(0, 4);
+    rows_b.swap(1, 3);
+
+    let raw_a = Array2::<f32>::runif(5, 3);
+    let raw_b = Array2::<f32>::runif(5, 4);
+    let sp_a = make_named_sparse(&raw_a, &rows_a, &str_vec(3, "a"));
+    let sp_b = make_named_sparse(&raw_b, &rows_b, &str_vec(4, "b"));
+
+    let mut vec = SparseIoVec::new();
+    vec.push(sp_a, Some("A".into()))?;
+    vec.push(sp_b, Some("B".into()))?;
+
+    // Read every column and confirm the result matches the ndarray reader,
+    // which goes through the existing triplet path — cross-validation.
+    let csc = vec.read_columns_csc(0..vec.num_columns())?;
+    let dense_csc = csc_to_dense(&csc);
+    let dense_ref = vec.read_columns_ndarray(0..vec.num_columns())?;
+    assert_eq!(dense_csc, dense_ref);
+    Ok(())
+}
+
+#[test]
+fn read_columns_csc_no_preload_fallback() -> anyhow::Result<()> {
+    let nrow = 7;
+    let ncol = 9;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let sp = make_named_sparse_no_preload(&raw, &str_vec(nrow, "r"), &str_vec(ncol, "c"));
+    let mut vec = SparseIoVec::new();
+    vec.push(sp, None)?;
+
+    let csc = vec.read_columns_csc(0..ncol)?;
+    let dense_csc = csc_to_dense(&csc);
+    let dense_ref = vec.read_columns_ndarray(0..ncol)?;
+    assert_eq!(dense_csc, dense_ref);
+    Ok(())
+}
+
+#[test]
+fn read_columns_csc_matches_old_triplet_path() -> anyhow::Result<()> {
+    // The new direct-slice path must produce a CSC matrix identical to
+    // what the old `from_nonzero_triplets` route would yield. We compare
+    // against the dense reader (which still uses triplets) and against a
+    // hand-built CSC from the same triplets.
+    let nrow = 10;
+    let ncol = 25;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let sp = make_named_sparse(&raw, &str_vec(nrow, "r"), &str_vec(ncol, "c"));
+    let mut vec = SparseIoVec::new();
+    vec.push(sp, None)?;
+
+    let cells: Vec<usize> = vec![24, 0, 13, 7, 2, 19, 4];
+    let csc_new = vec.read_columns_csc(cells.iter().copied())?;
+    let dense_ref = vec.read_columns_ndarray(cells.iter().copied())?;
+
+    assert_eq!(csc_new.nrows(), nrow);
+    assert_eq!(csc_new.ncols(), cells.len());
+    assert_eq!(csc_to_dense(&csc_new), dense_ref);
+
+    // Check that within each column, row indices are strictly increasing
+    // (canonical CSC form, required by `try_from_csc_data`).
+    for col in csc_new.col_iter() {
+        let rs = col.row_indices();
+        for w in rs.windows(2) {
+            assert!(w[0] < w[1], "row indices must be strictly increasing");
+        }
+    }
+    Ok(())
+}

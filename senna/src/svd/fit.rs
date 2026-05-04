@@ -1,6 +1,6 @@
 use crate::embed_common::*;
-use crate::hvg::{select_hvg_streaming, HvgCliArgs, HvgSelection};
-use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
+use crate::hvg::HvgCliArgs;
+use crate::topic::common::{load_and_project, LoadProjectArgs, ProjectedData};
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 
 #[derive(Args, Debug)]
@@ -165,84 +165,23 @@ pub struct SvdArgs {
 pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
-    // 1. Read the data with batch membership
-    let SparseDataWithBatch {
-        data: mut data_vec,
-        batch: mut batch_membership,
-        ..
-    } = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: args.data_files.clone(),
-        batch_files: args.batch_files.clone(),
+    let proj_dim = args.proj_dim.max(args.n_latent_topics);
+    let ProjectedData {
+        mut data_vec,
+        batch_membership,
+        proj_kn,
+        selected_features,
+    } = load_and_project(&LoadProjectArgs {
+        data_files: &args.data_files,
+        batch_files: &args.batch_files,
         preload: args.preload_data,
+        warm_start_proj_file: args.warm_start_proj_file.as_deref(),
+        proj_dim,
+        block_size: args.block_size,
+        max_features: args.hvg.n_hvg,
+        feature_list_file: args.hvg.feature_list_file.as_deref(),
+        ignore_batch: args.ignore_batch,
     })?;
-    if args.ignore_batch {
-        info!("--ignore-batch: collapsing all cells to a single batch");
-        crate::senna_input::collapse_to_single_batch(&mut batch_membership);
-    }
-
-    // HVG selection (skipped with --warm-start for compatibility)
-    let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
-    let selected_features: Option<HvgSelection> = if args.warm_start_proj_file.is_some() {
-        if hvg_enabled {
-            info!("Warm-start provided: skipping HVG selection (may be incompatible)");
-        }
-        None
-    } else if hvg_enabled {
-        Some(select_hvg_streaming(
-            &data_vec,
-            (args.hvg.n_hvg > 0).then_some(args.hvg.n_hvg),
-            args.hvg.feature_list_file.as_deref(),
-            args.block_size,
-        )?)
-    } else {
-        None
-    };
-
-    // 2. Random projection
-    let proj_kn = if let Some(proj_file) = args.warm_start_proj_file.as_deref() {
-        use matrix_util::common_io::file_ext;
-        let ext = file_ext(proj_file)?;
-
-        let MatWithNames {
-            rows: cell_names,
-            cols: _,
-            mat: proj_nk,
-        } = match ext.as_ref() {
-            "parquet" => Mat::from_parquet_with_row_names(proj_file, Some(0))?,
-            _ => Mat::read_data_with_names(proj_file, &['\t', ',', ' '], Some(0), Some(0))?,
-        };
-
-        if data_vec.column_names()? != cell_names {
-            return Err(anyhow::anyhow!(
-                "warm start projection rows don't match with the data"
-            ));
-        }
-
-        proj_nk.transpose()
-    } else {
-        let proj_dim = args.proj_dim.max(args.n_latent_topics);
-        let n_rows = data_vec.num_rows();
-
-        let proj_out = if let Some(sel) = selected_features.as_ref() {
-            let weights = sel.row_weights(n_rows);
-            data_vec.project_columns_weighted(
-                proj_dim,
-                args.block_size,
-                Some(&batch_membership),
-                &weights,
-            )?
-        } else {
-            data_vec.project_columns_with_batch_correction(
-                proj_dim,
-                args.block_size,
-                Some(&batch_membership),
-            )?
-        };
-
-        proj_out.proj
-    };
-
-    info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
     // 3. Batch-adjusted collapsing (pseudobulk)
     let collapse_out = data_vec.collapse_columns_multilevel(
@@ -330,30 +269,16 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     // SVD reuses the topic models' `T{c}` convention so `senna plot
     // --colour-by topic` reads the latent.parquet identically regardless
     // of upstream (`senna topic` or `senna svd`).
-    let component_col_names = axis_id_names("T", nystrom_out.latent_nk.ncols());
-    nystrom_out.latent_nk.to_parquet_with_names(
-        &(args.out.to_string() + ".latent.parquet"),
-        (Some(&cell_names), Some("cell")),
-        Some(&component_col_names),
-    )?;
-
-    nystrom_out.dictionary_dk.to_parquet_with_names(
-        &(args.out.to_string() + ".dictionary.parquet"),
-        (Some(&output_gene_names), Some("gene")),
-        Some(&component_col_names),
+    crate::output_helpers::save_latent(&args.out, &nystrom_out.latent_nk, &cell_names)?;
+    crate::output_helpers::save_dictionary(
+        &args.out,
+        &nystrom_out.dictionary_dk,
+        &output_gene_names,
     )?;
 
     {
         let pb_gene_gp: Mat = x_dn.posterior_mean().clone();
-        let n_pb = pb_gene_gp.ncols();
-        let pb_names: Vec<Box<str>> = (0..n_pb)
-            .map(|i| format!("PB_{i}").into_boxed_str())
-            .collect();
-        pb_gene_gp.to_parquet_with_names(
-            &format!("{}.pb_gene.parquet", args.out),
-            (Some(&output_gene_names), Some("gene")),
-            Some(&pb_names),
-        )?;
+        crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &output_gene_names)?;
     }
 
     // Save selected feature list if feature selection was applied

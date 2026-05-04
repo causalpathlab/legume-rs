@@ -90,7 +90,7 @@ pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
             args.n_hvg,
             prep.pb_features.ncols()
         );
-        data_beans_alg::hvg_selection::select_hvg(&prep.pb_features, args.n_hvg)
+        data_beans_alg::hvg::select_hvg(&prep.pb_features, args.n_hvg)
     } else {
         prep.pb_features.clone()
     };

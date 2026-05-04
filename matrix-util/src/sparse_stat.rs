@@ -107,6 +107,23 @@ where
             self.add_sparse_column(rows, vals);
         }
     }
+
+    /// Combine another `SparseRunningStatistics` into this one. Used to
+    /// reduce per-thread accumulators back to a single result without
+    /// holding a global lock during the streaming pass.
+    pub fn merge(&mut self, other: &Self) {
+        debug_assert_eq!(self.nrows, other.nrows);
+        for (a, b) in self.npos.iter_mut().zip(other.npos.iter()) {
+            *a += *b;
+        }
+        for (a, b) in self.s1.iter_mut().zip(other.s1.iter()) {
+            *a += *b;
+        }
+        for (a, b) in self.s2.iter_mut().zip(other.s2.iter()) {
+            *a += *b;
+        }
+        self.ncols_processed += other.ncols_processed;
+    }
 }
 
 impl<T> SparseRunningStatistics<T>

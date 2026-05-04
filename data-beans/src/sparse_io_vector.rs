@@ -429,12 +429,102 @@ impl SparseIoVec {
         DMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
     }
 
+    /// Direct-slice CSC read: bypasses the `triplet → COO → CSC` roundtrip
+    /// when the underlying backends have preloaded column arrays.
+    ///
+    /// For each cell, we slice `(indices, values)` straight out of the
+    /// backend's preloaded `by_column_indices` / `by_column_data`, remap
+    /// row indices through `l2g` then `g2c` once, drop entries that fall
+    /// outside the row intersection, and assemble final CSC arrays in one
+    /// pass per column. Backends that aren't preloaded fall back to
+    /// per-column triplet reads, which still avoids the global triplet
+    /// vec and the column-major sort inside `CscMatrix::from(&coo)`.
     pub fn read_columns_csc<I>(&self, cells: I) -> anyhow::Result<CscMatrix<f32>>
     where
         I: Iterator<Item = usize>,
     {
-        let ((nrow, ncol), triplets) = self.columns_triplets(cells)?;
-        nalgebra_sparse::CscMatrix::<f32>::from_nonzero_triplets(nrow, ncol, &triplets)
+        let cells: Vec<usize> = cells.collect();
+        let nrow = self.num_rows();
+        let ncol = cells.len();
+
+        // Group cells by backend, carrying the output column index so we
+        // can scatter directly into the final per-column buckets.
+        let mut backend_groups: Vec<Vec<(usize, usize)>> =
+            (0..self.data_vec.len()).map(|_| Vec::new()).collect();
+        for (out_col, &glob) in cells.iter().enumerate() {
+            let didx = self.col_to_data[glob];
+            let loc = self.col_glob_to_loc[glob];
+            backend_groups[didx].push((loc, out_col));
+        }
+
+        // Per-output-column buckets of (compact_row, value).
+        let mut buckets: Vec<Vec<(u32, f32)>> = (0..ncol).map(|_| Vec::new()).collect();
+        let g2c = self.global_to_compact_row.as_slice();
+
+        for (didx, group) in backend_groups.iter().enumerate() {
+            if group.is_empty() {
+                continue;
+            }
+            let l2g = self.data_local_to_global_row[didx].as_slice();
+
+            if let Some((indptr, indices, values)) = self.data_vec[didx].csc_column_arrays() {
+                // Fast path: zero-copy slicing into preloaded arrays.
+                for &(loc, out_col) in group {
+                    if loc + 1 >= indptr.len() {
+                        continue;
+                    }
+                    let s = indptr[loc] as usize;
+                    let e = indptr[loc + 1] as usize;
+                    let bucket = &mut buckets[out_col];
+                    bucket.reserve(e - s);
+                    for k in s..e {
+                        let local_row = indices[k] as usize;
+                        if let Some(c) = g2c[l2g[local_row]] {
+                            bucket.push((c as u32, values[k]));
+                        }
+                    }
+                }
+            } else {
+                // Fallback: read one column at a time. Still avoids the
+                // global triplet vec and the COO sort.
+                for &(loc, out_col) in group {
+                    let (_, _, trip) = self.data_vec[didx].read_triplets_by_single_column(loc)?;
+                    let bucket = &mut buckets[out_col];
+                    bucket.reserve(trip.len());
+                    for (i, _, v) in trip {
+                        if let Some(c) = g2c[l2g[i as usize]] {
+                            bucket.push((c as u32, v));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Assemble final CSC arrays in one pass.
+        let total_nnz: usize = buckets.iter().map(|b| b.len()).sum();
+        let mut col_offsets: Vec<usize> = Vec::with_capacity(ncol + 1);
+        let mut row_indices: Vec<usize> = Vec::with_capacity(total_nnz);
+        let mut values: Vec<f32> = Vec::with_capacity(total_nnz);
+        col_offsets.push(0);
+
+        for bucket in &mut buckets {
+            // Canonical CSC requires within-column row indices sorted
+            // ascending. On-disk indices are sorted by local row; the
+            // l2g + g2c remap stays sorted iff that composition is
+            // monotonic. Detect cheaply, sort only when it isn't.
+            let needs_sort = bucket.windows(2).any(|w| w[0].0 >= w[1].0);
+            if needs_sort {
+                bucket.sort_by_key(|&(r, _)| r);
+            }
+            for &(r, v) in bucket.iter() {
+                row_indices.push(r as usize);
+                values.push(v);
+            }
+            col_offsets.push(row_indices.len());
+        }
+
+        CscMatrix::try_from_csc_data(nrow, ncol, col_offsets, row_indices, values)
+            .map_err(|e| anyhow::anyhow!("CSC construction failed: {:?}", e))
     }
 
     pub fn read_columns_csr<I>(&self, cells: I) -> anyhow::Result<CsrMatrix<f32>>

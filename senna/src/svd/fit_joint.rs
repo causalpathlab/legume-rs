@@ -223,18 +223,8 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     let cell_names = data_stack.column_names()?;
     let gene_names = data_stack.row_names()?;
 
-    let component_col_names = axis_id_names("T", nystrom_out.latent_nk.ncols());
-    nystrom_out.latent_nk.to_parquet_with_names(
-        &(args.out.to_string() + ".latent.parquet"),
-        (Some(&cell_names), Some("cell")),
-        Some(&component_col_names),
-    )?;
-
-    nystrom_out.dictionary_dk.to_parquet_with_names(
-        &(args.out.to_string() + ".dictionary.parquet"),
-        (Some(&gene_names), Some("gene")),
-        Some(&component_col_names),
-    )?;
+    crate::output_helpers::save_latent(&args.out, &nystrom_out.latent_nk, &cell_names)?;
+    crate::output_helpers::save_dictionary(&args.out, &nystrom_out.dictionary_dk, &gene_names)?;
 
     // Modality-0 only — joint multi-modality annotation is a follow-up.
     {
@@ -243,16 +233,8 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
             None => &collapsed_data_vec[0].mu_observed,
         };
         let pb_gene_gp: Mat = x_dn.posterior_mean().clone();
-        let n_pb = pb_gene_gp.ncols();
-        let pb_names: Vec<Box<str>> = (0..n_pb)
-            .map(|i| format!("PB_{i}").into_boxed_str())
-            .collect();
         let gene_names_0: Vec<Box<str>> = data_stack.stack[0].row_names()?;
-        pb_gene_gp.to_parquet_with_names(
-            &format!("{}.pb_gene.parquet", args.out),
-            (Some(&gene_names_0), Some("gene")),
-            Some(&pb_names),
-        )?;
+        crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names_0)?;
     }
 
     crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
