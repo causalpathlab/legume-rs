@@ -23,7 +23,6 @@ use matrix_util::traits::RunningStatOps;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use std::time::Instant;
 
 /// Select top N highly variable genes by NB excess dispersion.
 ///
@@ -164,19 +163,7 @@ pub fn select_hvg_streaming(
         return Err(anyhow::anyhow!("max_features must be >= 1"));
     }
 
-    info!(
-        "starting HVG streaming pass: D={}, N={}, block_size={:?}",
-        data_vec.num_rows(),
-        data_vec.num_columns(),
-        block_size,
-    );
-    let hvg_t0 = Instant::now();
     let stat = streaming_sparse_running_stats(data_vec, block_size, "HVG")?;
-    info!(
-        "finished HVG streaming pass in {:.2?} ({} cells)",
-        hvg_t0.elapsed(),
-        stat.ncols_processed()
-    );
 
     let means = stat.mean();
     let vars = stat.variance();
