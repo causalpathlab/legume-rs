@@ -1,8 +1,20 @@
 use crate::candle_data_loader_util::Minibatches;
 
 use candle_core::{Device, Tensor};
+use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
 use matrix_util::traits::CandleDataLoaderOps;
 use rayon::prelude::*;
+
+fn labeled_bar(label: &str, len: u64) -> ProgressBar {
+    ProgressBar::new(len).with_style(
+        ProgressStyle::with_template(&format!(
+            "{} {{bar:40}} {{pos}}/{{len}} ({{eta}})",
+            label
+        ))
+        .unwrap()
+        .progress_chars("##-"),
+    )
+}
 
 /// Per-sample: top-K features selected from dense data
 #[derive(Clone)]
@@ -185,15 +197,20 @@ fn build_indexed_samples<D: CandleDataLoaderOps + Sync>(
     n_samples: usize,
     context_size: usize,
     shortlist_weights: &[f32],
+    label: &str,
 ) -> Vec<IndexedSample> {
-    (0..n_samples)
+    let pb = labeled_bar(label, n_samples as u64);
+    let out = (0..n_samples)
         .into_par_iter()
+        .progress_with(pb.clone())
         .map(|i| {
             let row = data.row_to_f32_vec(i);
             let (indices, values) = top_k_indices_weighted(&row, shortlist_weights, context_size);
             IndexedSample { indices, values }
         })
-        .collect()
+        .collect();
+    pb.finish_and_clear();
+    out
 }
 
 /// Compute log selection frequency for each feature from indexed samples.
@@ -235,12 +252,14 @@ impl IndexedInMemoryData {
             n_samples,
             input_context_size,
             args.input_shortlist_weights,
+            "Top-K (encoder)",
         );
         let output_samples = build_indexed_samples(
             args.output,
             n_samples,
             output_context_size,
             args.output_shortlist_weights,
+            "Top-K (decoder)",
         );
 
         let output_log_q = compute_log_selection_freq(&output_samples, n_output_features);
@@ -248,10 +267,14 @@ impl IndexedInMemoryData {
         // Pre-extract null rows in parallel
         let null_rows: Option<Vec<Vec<f32>>> = args.input_null.map(|d| {
             let (n, _) = d.data_shape();
-            (0..n)
+            let pb = labeled_bar("Null rows", n as u64);
+            let rows: Vec<Vec<f32>> = (0..n)
                 .into_par_iter()
+                .progress_with(pb.clone())
                 .map(|i| d.row_to_f32_vec(i))
-                .collect()
+                .collect();
+            pb.finish_and_clear();
+            rows
         });
 
         let rows: Vec<usize> = (0..n_samples).collect();
@@ -315,12 +338,16 @@ impl IndexedInMemoryData {
     /// Call this once after `shuffle_minibatch` to avoid rebuilding
     /// union+scatter on every `minibatch_cached` call within an epoch.
     pub fn precompute_all_minibatches(&mut self, target_device: &Device) -> anyhow::Result<()> {
-        self.cached_batches = (0..self.minibatches.chunks.len())
-            .map(|b| {
-                let sample_indices = &self.minibatches.chunks[b];
-                self.build_minibatch(sample_indices, target_device)
-            })
+        let n_chunks = self.minibatches.chunks.len() as u64;
+        let pb = labeled_bar("Minibatch precompute", n_chunks);
+        self.cached_batches = self
+            .minibatches
+            .chunks
+            .par_iter()
+            .progress_with(pb.clone())
+            .map(|sample_indices| self.build_minibatch(sample_indices, target_device))
             .collect::<anyhow::Result<Vec<_>>>()?;
+        pb.finish_and_clear();
         Ok(())
     }
 
@@ -362,38 +389,46 @@ impl IndexedInMemoryData {
     ) -> anyhow::Result<IndexedMinibatchData> {
         let n_batch = sample_indices.len();
 
-        // Build input side (encoder)
-        let input_out = build_union_scatter(
-            &self.input_samples,
-            sample_indices,
-            self.n_input_features,
-            target_device,
-        )?;
-
-        // Scatter null data at input union positions
-        let input_indexed_x_null = if let Some(ref null_data) = self.input_null_rows {
-            let s = input_out.union_vec.len();
-            let mut buf = vec![0.0f32; n_batch * s];
-            for (row, &si) in sample_indices.iter().enumerate() {
-                let null_row = &null_data[si];
-                let row_offset = row * s;
-                for &feat_idx in &input_out.union_vec {
-                    let col = input_out.pos_lookup[feat_idx as usize];
-                    buf[row_offset + col] = null_row[feat_idx as usize];
-                }
-            }
-            Some(Tensor::from_vec(buf, (n_batch, s), target_device)?)
-        } else {
-            None
-        };
-
-        // Build output side (decoder)
-        let output_out = build_union_scatter(
-            &self.output_samples,
-            sample_indices,
-            self.n_output_features,
-            target_device,
-        )?;
+        // Input + null scatter run independently of the output scatter, so
+        // build them concurrently. `rayon::join` collapses to sequential when
+        // no worker thread is free (e.g. when the outer minibatch loop is
+        // already saturating the pool), so this is a free win at low cost.
+        let (input_result, output_result) = rayon::join(
+            || -> anyhow::Result<(UnionScatterOut, Option<Tensor>)> {
+                let input_out = build_union_scatter(
+                    &self.input_samples,
+                    sample_indices,
+                    self.n_input_features,
+                    target_device,
+                )?;
+                let input_indexed_x_null = if let Some(ref null_data) = self.input_null_rows {
+                    let s = input_out.union_vec.len();
+                    let mut buf = vec![0.0f32; n_batch * s];
+                    for (row, &si) in sample_indices.iter().enumerate() {
+                        let null_row = &null_data[si];
+                        let row_offset = row * s;
+                        for &feat_idx in &input_out.union_vec {
+                            let col = input_out.pos_lookup[feat_idx as usize];
+                            buf[row_offset + col] = null_row[feat_idx as usize];
+                        }
+                    }
+                    Some(Tensor::from_vec(buf, (n_batch, s), target_device)?)
+                } else {
+                    None
+                };
+                Ok((input_out, input_indexed_x_null))
+            },
+            || {
+                build_union_scatter(
+                    &self.output_samples,
+                    sample_indices,
+                    self.n_output_features,
+                    target_device,
+                )
+            },
+        );
+        let (input_out, input_indexed_x_null) = input_result?;
+        let output_out = output_result?;
 
         // Slice log selection frequency at output union positions
         let log_q_s: Vec<f32> = output_out
