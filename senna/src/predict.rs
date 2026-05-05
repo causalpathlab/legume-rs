@@ -26,6 +26,7 @@ use crate::topic::predict_common::{
     predictive_llik_dense, predictive_llik_indexed, LatentMode,
 };
 
+use crate::logging::new_progress_bar;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_core::{Device, Tensor};
 use candle_util::candle_decoder_indexed_topic::IndexedTopicDecoder;
@@ -443,7 +444,7 @@ where
 
     let chunks: Vec<(usize, Mat, Vec<f32>, Vec<f32>)> = jobs
         .par_iter()
-        .progress_count(njobs)
+        .progress_with(new_progress_bar(njobs))
         .map(
             |&(lb, ub)| -> anyhow::Result<(usize, Mat, Vec<f32>, Vec<f32>)> {
                 predict_block_dense::<Dec>(PredictBlockDenseArgs {
@@ -739,7 +740,7 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
 
     let chunks: Vec<(usize, Mat, Vec<f32>, Vec<f32>)> = jobs
         .par_iter()
-        .progress_count(njobs)
+        .progress_with(new_progress_bar(njobs))
         .map(
             |&(lb, ub)| -> anyhow::Result<(usize, Mat, Vec<f32>, Vec<f32>)> {
                 predict_block_indexed(PredictBlockIndexedArgs {

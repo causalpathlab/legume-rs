@@ -20,6 +20,7 @@ use crate::topic::eval::GeneRemap;
 use crate::topic::eval_indexed::dense_to_indexed;
 use crate::topic::predict_common::{nb_fisher_weight, solve_delta_from_sums, DeltaSums};
 
+use crate::logging::new_progress_bar;
 use candle_core::{Device, Tensor};
 use candle_util::candle_encoder_indexed::IndexedEmbeddingEncoder;
 use candle_util::candle_encoder_softmax::LogSoftmaxEncoder;
@@ -167,7 +168,7 @@ pub fn iterate_delta_dense(
 
         let chunk_sums: Vec<DeltaSums> = jobs
             .par_iter()
-            .progress_count(njobs)
+            .progress_with(new_progress_bar(njobs))
             .map(|&block| {
                 accumulate_block_dense(
                     block,
@@ -315,7 +316,7 @@ pub fn iterate_delta_indexed(
 
         let chunk_sums: Vec<DeltaSums> = jobs
             .par_iter()
-            .progress_count(njobs)
+            .progress_with(new_progress_bar(njobs))
             .map(|&block| {
                 accumulate_block_indexed(
                     block,

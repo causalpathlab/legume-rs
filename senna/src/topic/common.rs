@@ -27,24 +27,22 @@ where
     let jobs = create_jobs(ntot, 0, Some(block_size));
     let njobs = jobs.len() as u64;
 
+    let pb = new_progress_bar(njobs);
     let mut chunks: Vec<(usize, Mat)> = if dev.is_cpu() {
         jobs.par_iter()
-            .progress_count(njobs)
+            .progress_with(pb.clone())
             .map(|&block| eval_block(block))
             .collect::<anyhow::Result<Vec<_>>>()?
     } else {
-        let pb = new_progress_bar(njobs);
-        let result = jobs
-            .iter()
+        jobs.iter()
             .map(|&block| {
                 let r = eval_block(block);
                 pb.inc(1);
                 r
             })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        pb.finish_and_clear();
-        result
+            .collect::<anyhow::Result<Vec<_>>>()?
     };
+    pb.finish_and_clear();
 
     chunks.sort_by_key(|&(lb, _)| lb);
 
