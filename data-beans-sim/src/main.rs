@@ -25,10 +25,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     match &cli.commands {
-        Commands::Simulate(args) => run_simulate(args)?,
-        Commands::SimulateConv(args) => generate_convoluted_data(args)?,
-        Commands::SimulateMultimodal(args) => run_simulate_multimodal(args)?,
-        Commands::CopulaSim(args) => run_copula_sim(args)?,
+        Commands::Topic(args) => run_simulate(args)?,
+        Commands::Bulk(args) => generate_convoluted_data(args)?,
+        Commands::Multimodal(args) => run_simulate_multimodal(args)?,
+        Commands::Copula(args) => run_copula_sim(args)?,
     }
 
     Ok(())
@@ -63,27 +63,26 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     #[command(
-        about = "Simulate matrix with Gamma topic",
+        about = "Gamma topic factor model",
         long_about = "`Y(i,j) ~ δ(i,B(j)) Σ β(i,k) θ(j,k)` with β,θ ~ Gamma topic;\n\
 		      B(j)`=batch; `ln δ`~N(0,1)"
     )]
-    Simulate(RunSimulateArgs),
+    Topic(RunSimulateArgs),
 
     #[command(
-        about = "Simulate convoluted (bulk) data matrix from real SC reference (experimental)"
+        about = "Bulk (convoluted) data matrix from real SC reference (experimental)"
     )]
-    SimulateConv(SimConvArgs),
+    Bulk(SimConvArgs),
 
     #[command(
-        about = "Simulate multimodal count data with shared base + delta dictionaries",
+        about = "Multimodal count data with shared base + delta dictionaries",
         long_about = "Generate M count matrices from shared latent topics with modality-specific\n\
                       dictionaries: reference = softmax(W_base), others = softmax(W_base + W_delta_m).\n\
                       Delta is sparse (spike-and-slab): n_delta_features genes per topic are perturbed."
     )]
-    SimulateMultimodal(RunSimulateMultimodalArgs),
+    Multimodal(RunSimulateMultimodalArgs),
 
     #[command(
-        name = "copula-sim",
         about = "Reference-conditioned copula simulator (scDesign / scDesign2 / scDesign3 style)",
         long_about = "Fit per-gene NB marginals + a Gaussian copula on a real reference dataset,\n\
                       then sample synthetic counts that preserve gene-gene dependence. Optionally\n\
@@ -95,5 +94,5 @@ enum Commands {
                       - Sun, Song, Li & Li 2021, Genome Biology 22:163 (scDesign2)\n\
                       - Song et al. 2024, Nat Biotechnology 42(2):247-252 (scDesign3)"
     )]
-    CopulaSim(CopulaSimArgs),
+    Copula(CopulaSimArgs),
 }
