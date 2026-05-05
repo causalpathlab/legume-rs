@@ -2,8 +2,7 @@ use clap::{Parser, Subcommand};
 
 use data_beans_sim::deconv::{generate_convoluted_data, SimConvArgs};
 use data_beans_sim::handlers::{
-    run_copula_sim, run_simulate, run_simulate_multimodal, CopulaSimArgs, RunSimulateArgs,
-    RunSimulateMultimodalArgs,
+    run_simulate, run_simulate_multimodal, RunSimulateArgs, RunSimulateMultimodalArgs,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -28,7 +27,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Topic(args) => run_simulate(args)?,
         Commands::Bulk(args) => generate_convoluted_data(args)?,
         Commands::Multimodal(args) => run_simulate_multimodal(args)?,
-        Commands::Copula(args) => run_copula_sim(args)?,
     }
 
     Ok(())
@@ -63,9 +61,14 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     #[command(
-        about = "Gamma topic factor model",
+        about = "Gamma topic factor model (with optional reference-conditioned copula+NB sampling)",
         long_about = "`Y(i,j) ~ δ(i,B(j)) Σ β(i,k) θ(j,k)` with β,θ ~ Gamma topic;\n\
-		      B(j)`=batch; `ln δ`~N(0,1)"
+                      B(j)=batch; ln δ ~ N(0,1).\n\
+                      \n\
+                      Pass `--reference <h5/zarr>` to keep the GLM identical but swap the\n\
+                      Poisson count step for a copula-coupled NB draw (per-gene dispersion\n\
+                      r̂ and a global gene-gene Σ̂ fitted from the reference; scDesign /\n\
+                      scDesign2 / scDesign3 lineage)."
     )]
     Topic(RunSimulateArgs),
 
@@ -79,18 +82,4 @@ enum Commands {
                       Delta is sparse (spike-and-slab): n_delta_features genes per topic are perturbed."
     )]
     Multimodal(RunSimulateMultimodalArgs),
-
-    #[command(
-        about = "Reference-conditioned copula simulator (scDesign / scDesign2 / scDesign3 style)",
-        long_about = "Fit per-gene NB marginals + a Gaussian copula on a real reference dataset,\n\
-                      then sample synthetic counts that preserve gene-gene dependence. Optionally\n\
-                      partition cells via SVD + leiden (or an external label file) and layer batch,\n\
-                      CNV (clonal tree), and housekeeping effects on top of the copula draws.\n\
-                      \n\
-                      References:\n\
-                      - Li & Li 2019, Bioinformatics 35(14):i41-i50 (scDesign)\n\
-                      - Sun, Song, Li & Li 2021, Genome Biology 22:163 (scDesign2)\n\
-                      - Song et al. 2024, Nat Biotechnology 42(2):247-252 (scDesign3)"
-    )]
-    Copula(CopulaSimArgs),
 }
