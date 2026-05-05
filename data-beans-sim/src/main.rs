@@ -69,9 +69,7 @@ enum Commands {
     )]
     Topic(RunSimulateArgs),
 
-    #[command(
-        about = "Bulk (convoluted) data matrix from real SC reference (experimental)"
-    )]
+    #[command(about = "Bulk (convoluted) data matrix from real SC reference (experimental)")]
     Bulk(SimConvArgs),
 
     #[command(
