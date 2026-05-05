@@ -4,15 +4,13 @@ use candle_core::{Device, Tensor};
 use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
 use matrix_util::traits::CandleDataLoaderOps;
 use rayon::prelude::*;
+use std::cell::RefCell;
 
 fn labeled_bar(label: &str, len: u64) -> ProgressBar {
     ProgressBar::new(len).with_style(
-        ProgressStyle::with_template(&format!(
-            "{} {{bar:40}} {{pos}}/{{len}} ({{eta}})",
-            label
-        ))
-        .unwrap()
-        .progress_chars("##-"),
+        ProgressStyle::with_template(&format!("{} {{bar:40}} {{pos}}/{{len}} ({{eta}})", label))
+            .unwrap()
+            .progress_chars("##-"),
     )
 }
 
@@ -135,12 +133,40 @@ struct UnionScatterOut {
     union_indices: Tensor,
     indexed_x: Tensor,
     union_vec: Vec<u32>,
-    /// Lookup table: feature_id -> position in union_vec. Indexed by feature_id,
-    /// entries are usize::MAX for features not in the union.
-    pos_lookup: Vec<usize>,
+}
+
+/// Per-feature lookup slot. `gen` carries the call generation that wrote
+/// `pos`; a slot is "in the current union" iff its `gen` matches the call's
+/// generation. Reusing entries via a generation tag instead of a sentinel
+/// reset means a panic mid-call cannot leak stale state into the next call
+/// on the same rayon worker — the next call simply bumps the generation and
+/// every prior write is invalidated.
+#[derive(Default, Clone, Copy)]
+struct PosSlot {
+    gen: u32,
+    pos: u32,
+}
+
+#[derive(Default)]
+struct PosLookup {
+    entries: Vec<PosSlot>,
+    current_gen: u32,
+}
+
+thread_local! {
+    /// Per-thread `feature_id -> position` lookup. Grows monotonically to the
+    /// largest `n_features` seen on this thread; never resets between calls.
+    static POS_LOOKUP: RefCell<PosLookup> = const {
+        RefCell::new(PosLookup { entries: Vec::new(), current_gen: 0 })
+    };
 }
 
 /// Build union indices and scattered [N, S] matrix from IndexedSamples.
+///
+/// Union order is the discovery order across `sample_indices` × per-sample
+/// `indices`. Consumers gather feature-axis tensors via `index_select` against
+/// `union_indices`, so column positions in `indexed_x` align by construction —
+/// the order itself is not load-bearing.
 fn build_union_scatter(
     samples: &[IndexedSample],
     sample_indices: &[usize],
@@ -149,45 +175,60 @@ fn build_union_scatter(
 ) -> anyhow::Result<UnionScatterOut> {
     let n_batch = sample_indices.len();
 
-    // Single-pass: build position lookup and sorted union vec together
-    let mut pos_lookup = vec![usize::MAX; n_features];
-    let mut union_vec = Vec::new();
-    for &si in sample_indices {
-        for &idx in &samples[si].indices {
-            let fi = idx as usize;
-            if pos_lookup[fi] == usize::MAX {
-                pos_lookup[fi] = union_vec.len();
-                union_vec.push(idx);
+    POS_LOOKUP.with(|cell| {
+        let mut lookup = cell.borrow_mut();
+        let PosLookup {
+            entries,
+            current_gen,
+        } = &mut *lookup;
+        if entries.len() < n_features {
+            entries.resize(n_features, PosSlot::default());
+        }
+        let mut gen = current_gen.wrapping_add(1);
+        if gen == 0 {
+            // Wrapped past u32::MAX — zero all gens and restart at 1 so
+            // entries written before the wrap are correctly invalidated.
+            for slot in entries.iter_mut() {
+                slot.gen = 0;
+            }
+            gen = 1;
+        }
+        *current_gen = gen;
+
+        let mut union_vec: Vec<u32> = Vec::new();
+        for &si in sample_indices {
+            for &idx in &samples[si].indices {
+                let fi = idx as usize;
+                if entries[fi].gen != gen {
+                    entries[fi] = PosSlot {
+                        gen,
+                        pos: union_vec.len() as u32,
+                    };
+                    union_vec.push(idx);
+                }
             }
         }
-    }
-    // Sort union by feature index for deterministic output
-    union_vec.sort_unstable();
-    for (pos, &idx) in union_vec.iter().enumerate() {
-        pos_lookup[idx as usize] = pos;
-    }
-    let s = union_vec.len();
+        let s = union_vec.len();
 
-    // Scatter values into [N, S] buffer
-    let mut x_data = vec![0.0f32; n_batch * s];
-    for (row, &si) in sample_indices.iter().enumerate() {
-        let sample = &samples[si];
-        let row_offset = row * s;
-        for (k, &feat_idx) in sample.indices.iter().enumerate() {
-            let col = pos_lookup[feat_idx as usize];
-            x_data[row_offset + col] = sample.values[k];
+        let mut x_data = vec![0.0f32; n_batch * s];
+        for (row, &si) in sample_indices.iter().enumerate() {
+            let sample = &samples[si];
+            let row_offset = row * s;
+            for (k, &feat_idx) in sample.indices.iter().enumerate() {
+                let col = entries[feat_idx as usize].pos as usize;
+                x_data[row_offset + col] = sample.values[k];
+            }
         }
-    }
 
-    let union_indices = Tensor::from_vec(union_vec.clone(), (s,), target_device)?
-        .to_dtype(candle_core::DType::U32)?;
-    let indexed_x = Tensor::from_vec(x_data, (n_batch, s), target_device)?;
+        let union_indices = Tensor::from_slice(&union_vec, (s,), target_device)?
+            .to_dtype(candle_core::DType::U32)?;
+        let indexed_x = Tensor::from_vec(x_data, (n_batch, s), target_device)?;
 
-    Ok(UnionScatterOut {
-        union_indices,
-        indexed_x,
-        union_vec,
-        pos_lookup,
+        Ok(UnionScatterOut {
+            union_indices,
+            indexed_x,
+            union_vec,
+        })
     })
 }
 
@@ -407,8 +448,7 @@ impl IndexedInMemoryData {
                     for (row, &si) in sample_indices.iter().enumerate() {
                         let null_row = &null_data[si];
                         let row_offset = row * s;
-                        for &feat_idx in &input_out.union_vec {
-                            let col = input_out.pos_lookup[feat_idx as usize];
+                        for (col, &feat_idx) in input_out.union_vec.iter().enumerate() {
                             buf[row_offset + col] = null_row[feat_idx as usize];
                         }
                     }
@@ -482,6 +522,19 @@ impl IndexedInMemoryData {
 mod tests {
     use super::*;
     use nalgebra::DMatrix;
+
+    fn assert_union_eq_set(union: &[u32], expected: &[u32]) {
+        let mut sorted = union.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(sorted, expected);
+    }
+
+    fn pos_of(union: &[u32], feat: u32) -> usize {
+        union
+            .iter()
+            .position(|&x| x == feat)
+            .unwrap_or_else(|| panic!("feature {feat} not in union {union:?}"))
+    }
 
     #[test]
     fn test_top_k_indices() {
@@ -581,20 +634,14 @@ mod tests {
         // Use ordered minibatch with all 3 samples
         let mb = indexed.minibatch_ordered(0, 3, &Device::Cpu).unwrap();
 
-        // Union of {3,5}, {0,4}, {1,4} = {0,1,3,4,5} => S=5
         let union: Vec<u32> = mb.input_union_indices.to_vec1().unwrap();
-        assert_eq!(union, vec![0, 1, 3, 4, 5]);
-
-        // input_indexed_x shape should be [3, 5]
+        assert_union_eq_set(&union, &[0, 1, 3, 4, 5]);
         assert_eq!(mb.input_indexed_x.dims(), &[3, 5]);
 
-        // Verify values: sample 0 has features 3,5 active with values 0.9, 0.7
         let x_vals: Vec<Vec<f32>> = mb.input_indexed_x.to_vec2().unwrap();
-        // union positions: 0->0, 1->1, 3->2, 4->3, 5->4
-        // sample 0: feat 3 at pos 2 = 0.9, feat 5 at pos 4 = 0.7, rest = 0
-        assert!((x_vals[0][2] - 0.9).abs() < 1e-6); // feat 3
-        assert!((x_vals[0][4] - 0.7).abs() < 1e-6); // feat 5
-        assert!((x_vals[0][0]).abs() < 1e-6); // feat 0 not selected
+        assert!((x_vals[0][pos_of(&union, 3)] - 0.9).abs() < 1e-6);
+        assert!((x_vals[0][pos_of(&union, 5)] - 0.7).abs() < 1e-6);
+        assert!(x_vals[0][pos_of(&union, 0)].abs() < 1e-6); // feat 0 not selected by sample 0
     }
 
     #[test]
@@ -630,21 +677,17 @@ mod tests {
         let indexed = IndexedInMemoryData::from_dense(args).unwrap();
         let mb = indexed.minibatch_ordered(0, 2, &Device::Cpu).unwrap();
 
-        // Input union: {0,2} ∪ {1,3} = {0,1,2,3} => S_in=4
         let input_union: Vec<u32> = mb.input_union_indices.to_vec1().unwrap();
-        assert_eq!(input_union, vec![0, 1, 2, 3]);
+        assert_union_eq_set(&input_union, &[0, 1, 2, 3]);
 
-        // Output union: {2,3} ∪ {2,3} = {2,3} => S_out=2
         let output_union: Vec<u32> = mb.output_union_indices.to_vec1().unwrap();
-        assert_eq!(output_union, vec![2, 3]);
+        assert_union_eq_set(&output_union, &[2, 3]);
 
-        // Output values: sample 0 at positions {2,3} = [30.0, 40.0]
         let y_vals: Vec<Vec<f32>> = mb.output_indexed_x.to_vec2().unwrap();
-        assert!((y_vals[0][0] - 30.0).abs() < 1e-6);
-        assert!((y_vals[0][1] - 40.0).abs() < 1e-6);
-        // sample 1 at positions {2,3} = [70.0, 80.0]
-        assert!((y_vals[1][0] - 70.0).abs() < 1e-6);
-        assert!((y_vals[1][1] - 80.0).abs() < 1e-6);
+        assert!((y_vals[0][pos_of(&output_union, 2)] - 30.0).abs() < 1e-6);
+        assert!((y_vals[0][pos_of(&output_union, 3)] - 40.0).abs() < 1e-6);
+        assert!((y_vals[1][pos_of(&output_union, 2)] - 70.0).abs() < 1e-6);
+        assert!((y_vals[1][pos_of(&output_union, 3)] - 80.0).abs() < 1e-6);
     }
 
     #[test]
@@ -680,5 +723,55 @@ mod tests {
 
         // Output union: {3} ∪ {4} = {3,4} => S_out=2
         assert_eq!(mb.output_indexed_x.dims()[1], 2);
+    }
+
+    /// A panic mid-`build_union_scatter` must not poison the thread-local
+    /// `POS_LOOKUP` for subsequent calls on the same thread. Drive both
+    /// calls directly (no rayon dispatch) so the second call provably runs
+    /// on the same thread that dirtied the lookup.
+    #[test]
+    fn test_pos_lookup_panic_recovery() {
+        use std::panic;
+
+        // Sample 0 dirties slots 0 and 1; sample 1 dirties slot 2 then OOBs
+        // on idx=99 — leaving entries[0..=2] with the panicking call's gen.
+        let bad_samples = vec![
+            IndexedSample {
+                indices: vec![0, 1],
+                values: vec![1.0, 1.0],
+            },
+            IndexedSample {
+                indices: vec![2, 99],
+                values: vec![1.0, 1.0],
+            },
+        ];
+        let bad_indices = [0usize, 1];
+        let result = panic::catch_unwind(|| {
+            let _ = build_union_scatter(&bad_samples, &bad_indices, 6, &Device::Cpu);
+        });
+        assert!(result.is_err(), "expected the OOB sample to panic");
+
+        // Clean call on the same thread: every feature in `good_samples`
+        // must end up in the union. With sentinel-reset semantics the stale
+        // entries 0/1/2 would be misread as "already in union" and silently
+        // dropped; the generation bump must invalidate them.
+        let good_samples = vec![
+            IndexedSample {
+                indices: vec![0, 1],
+                values: vec![10.0, 11.0],
+            },
+            IndexedSample {
+                indices: vec![2, 3],
+                values: vec![12.0, 13.0],
+            },
+        ];
+        let out = build_union_scatter(&good_samples, &[0, 1], 6, &Device::Cpu).unwrap();
+        let union: Vec<u32> = out.union_indices.to_vec1().unwrap();
+        assert_union_eq_set(&union, &[0, 1, 2, 3]);
+
+        // Spot-check the scatter: stale `pos` values must not steer writes.
+        let x_vals: Vec<Vec<f32>> = out.indexed_x.to_vec2().unwrap();
+        assert!((x_vals[0][pos_of(&union, 0)] - 10.0).abs() < 1e-6);
+        assert!((x_vals[1][pos_of(&union, 3)] - 13.0).abs() < 1e-6);
     }
 }
