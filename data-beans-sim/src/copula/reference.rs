@@ -1,16 +1,11 @@
-//! Reference loading, per-gene stats, HVG selection, and SVD+leiden cell-type
-//! inference for the copula simulator.
+//! Reference loading, per-gene stats, HVG selection, and PIT z-build for the
+//! global copula structure used by `run_simulate --reference`.
 
 use crate::copula::marginals::NbFit;
 use data_beans::sparse_io::*;
-use log::info;
-use matrix_util::common_io::{file_ext, open_buf_reader};
-use matrix_util::knn_graph::{self, KnnGraph, KnnGraphArgs};
+use matrix_util::common_io::file_ext;
 use matrix_util::sparse_stat::SparseRunningStatistics;
-use matrix_util::traits::{MatOps, RandomizedAlgs};
 use nalgebra::DMatrix;
-use rustc_hash::FxHashMap;
-use std::io::BufRead;
 
 /// Boxed dyn handle to whatever sparse backend the reference lives in.
 pub type SparseRef = Box<dyn SparseIo<IndexIter = Vec<usize>>>;
@@ -80,8 +75,8 @@ pub fn per_gene_stats(
 }
 
 /// Combined per-gene stats + NB MoM fits — produces both from a single CSC
-/// pass. The per-cluster fit needs both, and reading the CSC twice was the
-/// dominant `fit_copula` cost on large references.
+/// pass. The copula fit needs both, and reading the CSC twice was the
+/// dominant cost on large references.
 pub fn per_gene_stats_and_marginals(
     sc: &SparseRef,
     cells: &[usize],
@@ -124,148 +119,8 @@ pub fn select_hvg(stats: &[GeneStats], n_hvg: usize) -> Vec<usize> {
     data_beans_alg::hvg::select_hvg_by_stats(&means, &vars, n_hvg)
 }
 
-/// Build a (n_cells × |hvg|) dense embedding: `log1p(X[hvg, :])ᵀ` then column
-/// z-score, then RSVD to `rank` components projected as `U · diag(σ)`.
-pub fn cell_embedding(sc: &SparseRef, hvg: &[usize], rank: usize) -> anyhow::Result<DMatrix<f32>> {
-    let csc = sc.read_rows_csc(hvg.to_vec())?;
-    let n_hvg = csc.nrows();
-    let n_cells = csc.ncols();
-    let row_idx = csc.row_indices();
-    let col_off = csc.col_offsets();
-    let vals = csc.values();
-    let mut dense = DMatrix::<f32>::zeros(n_cells, n_hvg);
-    for c in 0..n_cells {
-        let s = col_off[c];
-        let e = col_off[c + 1];
-        for k in s..e {
-            let r = row_idx[k];
-            dense[(c, r)] = (vals[k] + 1.0).ln();
-        }
-    }
-    dense.scale_columns_inplace();
-    let (u, sigmas, _vt) = dense.rsvd(rank)?;
-    let r_eff = u.ncols().min(sigmas.len());
-    let mut emb = u;
-    for r in 0..r_eff {
-        let s = sigmas[r];
-        for i in 0..emb.nrows() {
-            emb[(i, r)] *= s;
-        }
-    }
-    Ok(emb)
-}
-
-/// Cluster cells with KNN-graph leiden on the embedding. `target_clusters`
-/// is the requested cluster count — the leiden resolution is binary-searched
-/// to land near it (matches `senna::cluster::leiden_clustering`'s convention).
-pub fn cluster_cells(
-    embedding: &DMatrix<f32>,
-    knn: usize,
-    target_clusters: usize,
-    seed: u64,
-) -> anyhow::Result<Vec<usize>> {
-    let mut e = embedding.clone();
-    e.scale_columns_inplace();
-    let n = e.nrows();
-    let graph = KnnGraph::from_rows(
-        &e,
-        KnnGraphArgs {
-            knn,
-            block_size: 1000,
-            reciprocal: false,
-        },
-    )?;
-    let (network, total_edge_weight) = graph.to_leiden_network();
-    let starting = knn_graph::modularity_to_cpm_resolution(1.0, total_edge_weight);
-    info!(
-        "KNN graph: {} nodes, {} edges; tuning leiden to ~{} clusters",
-        graph.num_nodes(),
-        graph.num_edges(),
-        target_clusters
-    );
-    let mut labels = if target_clusters > 0 {
-        knn_graph::tune_leiden_resolution(
-            &network,
-            n,
-            target_clusters,
-            starting,
-            Some(seed as usize),
-        )
-    } else {
-        knn_graph::run_leiden(&network, n, starting, Some(seed as usize))
-    };
-    knn_graph::compact_labels(&mut labels);
-    Ok(labels)
-}
-
-/// Read a per-cell label file (`barcode<TAB>label`, optionally gzipped) and
-/// align it to the reference's column names. Cells absent from the file get
-/// `usize::MAX` and are dropped from downstream fits.
-pub fn load_cell_type_labels(
-    path: &str,
-    column_names: &[Box<str>],
-) -> anyhow::Result<(Vec<usize>, Vec<Box<str>>)> {
-    let mut barcode_to_label: FxHashMap<Box<str>, Box<str>> = FxHashMap::default();
-    let reader = open_buf_reader(path)?;
-    for line in reader.lines() {
-        let line = line?;
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut it = line.splitn(2, '\t');
-        let bc = it.next().unwrap_or("").trim().to_string();
-        let lab = it.next().unwrap_or("").trim().to_string();
-        if bc.is_empty() || lab.is_empty() {
-            continue;
-        }
-        barcode_to_label.insert(bc.into_boxed_str(), lab.into_boxed_str());
-    }
-    let mut label_id: FxHashMap<Box<str>, usize> = FxHashMap::default();
-    let mut label_order: Vec<Box<str>> = Vec::new();
-    let mut labels = Vec::with_capacity(column_names.len());
-    let mut matched = 0usize;
-    for bc in column_names {
-        if let Some(lab) = barcode_to_label.get(bc) {
-            let id = if let Some(&id) = label_id.get(lab) {
-                id
-            } else {
-                let id = label_order.len();
-                label_order.push(lab.clone());
-                label_id.insert(lab.clone(), id);
-                id
-            };
-            labels.push(id);
-            matched += 1;
-        } else {
-            labels.push(usize::MAX);
-        }
-    }
-    info!(
-        "cell-type labels: {} / {} cells matched ({} clusters)",
-        matched,
-        column_names.len(),
-        label_order.len()
-    );
-    Ok((labels, label_order))
-}
-
-/// Group cells by label, dropping any with `usize::MAX`. Returns
-/// `Vec<(label_id, Vec<cell_indices>)>`.
-pub fn partition_by_label(labels: &[usize]) -> Vec<(usize, Vec<usize>)> {
-    let mut groups: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
-    for (i, &l) in labels.iter().enumerate() {
-        if l == usize::MAX {
-            continue;
-        }
-        groups.entry(l).or_default().push(i);
-    }
-    let mut out: Vec<(usize, Vec<usize>)> = groups.into_iter().collect();
-    out.sort_by_key(|(l, _)| *l);
-    out
-}
-
-/// Build the (|hvg| × |cells|) PIT-then-`Φ⁻¹` Z matrix for a cluster.
+/// Build the (|hvg| × |cells|) PIT-then-`Φ⁻¹` Z matrix used to fit the
+/// gene-gene Gaussian copula on the reference.
 pub fn build_z_matrix(
     sc: &SparseRef,
     cells: &[usize],
