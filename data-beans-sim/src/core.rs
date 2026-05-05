@@ -8,7 +8,15 @@ use rand::{RngExt, SeedableRng};
 use rand_distr::{Distribution, Normal, Poisson, Uniform};
 use rayon::prelude::*;
 
-/// Sample topic proportions [K, N] with hard assignments softened by PVE.
+/// Sample topic proportions `[K, N]` with hard assignments softened by PVE.
+///
+/// Each cell is hard-assigned to a topic `k*`, then mixed with a uniform
+/// background:
+///   `θ[k*] = pve_topic + (1 - pve_topic)/K`,
+///   `θ[k]  =             (1 - pve_topic)/K`   for `k ≠ k*`.
+/// Columns sum to `1` for every value of `pve_topic ∈ [0, 1]`. At
+/// `pve_topic = 0` every column is uniform `1/K` (no topic structure);
+/// at `pve_topic = 1` every column is one-hot.
 pub(crate) fn sample_theta_kn(
     kk: usize,
     nn: usize,
@@ -21,8 +29,7 @@ pub(crate) fn sample_theta_kn(
 
     let pve_topic = pve_topic.clamp(0., 1.);
     if kk > 1 && pve_topic < 1. {
-        let denom = (kk - 1) as f32;
-        let p_background = (1.0 - pve_topic) / denom;
+        let p_background = (1.0 - pve_topic) / kk as f32;
         let theta_null = DMatrix::<f32>::from_element(kk, nn, p_background);
         theta_kn = (theta_kn * pve_topic) + theta_null;
     }

@@ -61,14 +61,21 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     #[command(
-        about = "Gamma topic factor model (with optional reference-conditioned copula+NB sampling)",
-        long_about = "`Y(i,j) ~ δ(i,B(j)) Σ β(i,k) θ(j,k)` with β,θ ~ Gamma topic;\n\
-                      B(j)=batch; ln δ ~ N(0,1).\n\
+        about = "Gamma topic factor model (with optional reference-conditioned two-stage NB+copula sampling)",
+        long_about = "Synthetic mode (no `--reference`):\n\
+                      `Y(i,j) ~ Poisson(depth · δ(i,B(j)) · Σ_k β(i,k) θ(j,k))`\n\
+                      with β,θ ~ Gamma; ln δ ~ N(0,1) z-scored per batch.\n\
                       \n\
-                      Pass `--reference <h5/zarr>` to keep the GLM identical but swap the\n\
-                      Poisson count step for a copula-coupled NB draw (per-gene dispersion\n\
-                      r̂ and a global gene-gene Σ̂ fitted from the reference; scDesign /\n\
-                      scDesign2 / scDesign3 lineage)."
+                      Reference mode (`--reference <h5/zarr>`): two-stage GLM —\n\
+                        stage 1:  log λ⁰ = log μ̂_g + √pve_topic·t + √pve_noise·ε\n\
+                        stage 2:  log λ  = log λ⁰ + √pve_batch·δ_{g,b}\n\
+                        sample :  y ~ NB(λ, r̂_g)  via  u=Φ(z*),  F⁻¹_NB(u; λ, r̂)\n\
+                      where t is z-scored log(β·θ) per cell, ε iid N(0,1), and δ has unit\n\
+                      per-gene variance under a low-rank-plus-residual covariance whose\n\
+                      rank is `--batch-rank` (0=Splatter-style iid; 2-3=structured batch\n\
+                      program along axes chosen by `--batch-program {random,biology}`).\n\
+                      `--depth` is reinterpreted as a multiplicative scale so library size\n\
+                      matches the reference's mean. scDesign / scDesign2 / scDesign3 lineage."
     )]
     Topic(RunSimulateArgs),
 

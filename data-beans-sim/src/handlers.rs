@@ -1,6 +1,4 @@
-use crate::copula::marginals::{
-    nb_cdf_table, nb_inverse_cdf_from_table, nb_table_cap, phi, sample_nb, NbFit,
-};
+use crate::copula::marginals::{nb_cdf_table, nb_inverse_cdf_from_table, nb_table_cap, phi, NbFit};
 use crate::copula::reference::open_reference;
 use crate::copula::{fit_global_copula, GlobalCopulaArgs};
 use crate::core as simulate;
@@ -9,15 +7,33 @@ use data_beans::hdf5_io::*;
 use data_beans::sparse_io::*;
 use data_beans::zarr_io::{apply_zip_flag, finalize_zarr_output};
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use indicatif::ParallelProgressIterator;
 use log::info;
 use matrix_util::common_io::*;
 use matrix_util::mtx_io;
 use matrix_util::traits::*;
-use nalgebra::DMatrix;
+use nalgebra::{DMatrix, DVector};
 use rand::SeedableRng;
+use rand_distr::{Distribution, Normal};
 use rayon::prelude::*;
+
+use crate::copula::gaussian::CopulaCovariance;
+
+/// How the batch-program covariance `F_batch` is constructed.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum BatchProgram {
+    /// `F_batch` is a fresh `(D, batch_rank)` random factor independent of
+    /// the gene-gene biology. Batch shifts ride an arbitrary low-dim
+    /// subspace — easier to disentangle from biology, useful as a sanity
+    /// baseline.
+    Random,
+    /// `F_batch` reuses the top `batch_rank` columns of the reference's
+    /// gene-gene copula factor `Σ̂_gene`. Batch shifts mimic biological
+    /// co-expression axes — the worst-case stress test for batch-correction
+    /// methods, since batch programs look like cell-state programs.
+    Biology,
+}
 
 #[derive(Args, Debug)]
 pub struct RunSimulateArgs {
@@ -61,7 +77,10 @@ pub struct RunSimulateArgs {
     #[arg(
         long,
         default_value_t = 1000,
-        help = "Depth per column (expected non-zero genes per cell)"
+        help = "Depth per column. Synthetic mode: target library size. \
+                Reference mode: multiplicative scale on μ̂_g (set to the \
+                reference's mean library size to match it; default 1000 \
+                roughly matches typical 10x scRNA-seq depth)."
     )]
     pub depth: usize,
 
@@ -89,6 +108,28 @@ pub struct RunSimulateArgs {
         help = "Proportion of variance explained by batch effects"
     )]
     pub pve_batch: f32,
+
+    /// PVE-style magnitude for the per-cell residual log-mean noise term
+    /// in stage 1 of the reference-mode two-stage simulator. Setting this
+    /// \> 0 adds `√pve_noise · ε_{g,j}` (`ε ~ N(0,1)` iid per gene per cell)
+    /// on top of the topic perturbation, before batch is applied. Default
+    /// 0 keeps stage 1 fully topic + reference-baseline driven.
+    #[arg(long, default_value_t = 0.0)]
+    pub pve_noise: f32,
+
+    /// Rank of the batch-program subspace (reference mode). `0` = each
+    /// gene's batch shift is iid log-normal (Splatter-style). `2-3` =
+    /// genes co-shift along a low-dim subspace ("batch program"). Higher
+    /// ranks make batch effects look more like biology.
+    #[arg(long, default_value_t = 2)]
+    pub batch_rank: usize,
+
+    /// Where the batch-program subspace comes from when `--batch-rank > 0`.
+    /// `random` = fresh low-dim random factor (default; arbitrary subspace).
+    /// `biology` = top columns of the reference's gene-gene copula
+    /// factor (worst case: batch shifts mimic biological axes).
+    #[arg(long, value_enum, default_value_t = BatchProgram::Random)]
+    pub batch_program: BatchProgram,
 
     #[arg(short, long, help = "Output file header")]
     pub output: Box<str>,
@@ -469,11 +510,25 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Reference-conditioned variant of [`run_simulate`]. The GLM pipeline
-/// (`β·θ·δ` + housekeeping) mirrors the synthetic path verbatim, but
-/// the final count step samples from a copula-coupled NB instead of
-/// independent Poisson draws. Called from `run_simulate` when
-/// `--reference` is set.
+/// Reference-conditioned variant of [`run_simulate`]. Two-stage
+/// architecture:
+///
+/// **Stage 1 (clean cell, topic-only):**
+/// `log λ⁰_{g,j} = log μ̂_g + √pve_topic · t_{g,j} + √pve_noise · ε_{g,j}`
+/// where `t = log(β·θ)` z-scored across genes per cell (unit log-variance
+/// per cell) and `ε ~ N(0, 1)` iid per gene per cell.
+///
+/// **Stage 2 (batch perturbation, post-hoc):**
+/// `log λ_{g,j} = log λ⁰_{g,j} + √pve_batch · δ_{g, b(j)}`
+/// where `δ_{:,b} ~ N(0, F_b · F_bᵀ + diag(1 − ‖F_b‖²))` has unit per-gene
+/// variance by construction. `F_b`'s rank is `--batch-rank`; its construction
+/// is controlled by `--batch-program` (`random` = fresh low-rank factor,
+/// `biology` = top columns of the gene-gene copula `Σ̂`).
+///
+/// Counts are sampled via a unified copula PIT pipeline:
+/// `u = Φ(z*)`, `y = F⁻¹_NB(u; λ, r̂_g)`, with `z*` drawn from the gene-gene
+/// copula for HVGs and iid `N(0, 1)` for non-HVGs. No per-cell depth
+/// renormalization — library size emerges from `μ̂_g · exp(stage-1 + stage-2)`.
 fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     let reference_path = cmd_args
         .reference
@@ -509,32 +564,65 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
     };
     let pve_topic = cmd_args.pve_topic.clamp(0.0, 1.0);
     let pve_batch = cmd_args.pve_batch.clamp(0.0, 1.0);
+    let pve_noise = cmd_args.pve_noise.clamp(0.0, 1.0);
+    let alpha_topic = pve_topic.sqrt();
+    let alpha_batch = pve_batch.sqrt();
+    let alpha_noise = pve_noise.sqrt();
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(cmd_args.rseed);
 
     let runif = rand_distr::Uniform::new(0, bb).expect("unif [0 .. bb)");
-    let batch_membership: Vec<usize> = {
-        use rand_distr::Distribution;
-        (0..nn).map(|_| runif.sample(&mut rng)).collect()
+    let batch_membership: Vec<usize> = (0..nn).map(|_| runif.sample(&mut rng)).collect();
+
+    // Stage-1 baseline: log μ̂_g rescaled so the reference's mean library size
+    // matches `--depth`. log_mu_hat[g] = log μ̂_g + log(depth / Σ_g μ̂_g).
+    let lib_ref: f32 = fit.mu_hat.iter().sum::<f32>().max(1e-30);
+    let depth_log_offset = ((cmd_args.depth as f32).max(1.0) / lib_ref).ln();
+    let log_mu_hat: DVector<f32> = DVector::from_iterator(
+        dd,
+        fit.mu_hat
+            .iter()
+            .map(|&m| m.max(1e-30).ln() + depth_log_offset),
+    );
+    info!(
+        "stage-1 baseline: μ̂ rescaled by depth/lib_ref = {}/{:.0} = {:.4}",
+        cmd_args.depth,
+        lib_ref,
+        (cmd_args.depth as f32) / lib_ref
+    );
+
+    // Stage-2 batch covariance. rank=0 → all-isotropic (Splatter-style);
+    // rank>0 → low-rank factor + iid residual.
+    let batch_cov: CopulaCovariance = if cmd_args.batch_rank == 0 {
+        CopulaCovariance::random_low_rank(dd, 0, &mut rng)
+    } else {
+        match cmd_args.batch_program {
+            BatchProgram::Biology => fit.copula.truncate_rank(cmd_args.batch_rank),
+            BatchProgram::Random => {
+                CopulaCovariance::random_low_rank(dd, cmd_args.batch_rank, &mut rng)
+            }
+        }
     };
+    info!(
+        "stage-2 batch program: rank={} ({:?}), {} batches",
+        batch_cov.rank(),
+        cmd_args.batch_program,
+        bb
+    );
+    // Pre-sample δ_{:, b} per batch and fold α_batch in once so the per-cell
+    // hot loop only adds (no per-gene multiply by α_batch).
+    let batch_delta: Vec<DVector<f32>> = (0..bb)
+        .map(|_| batch_cov.sample(&mut rng).scale(alpha_batch))
+        .collect();
 
-    // ln δ_{g,b} = √pve_batch · z₁(g,b) + √(1-pve_batch) · z₀(g),
-    // both column-standardized standard normals — matches `core::generate_factored_poisson_gamma_data`.
-    let mut ln_delta_db = DMatrix::<f32>::rnorm(dd, bb);
-    ln_delta_db.scale_columns_inplace();
-    ln_delta_db *= pve_batch.sqrt();
-    let mut ln_null_d = DMatrix::<f32>::rnorm(dd, 1);
-    ln_null_d.scale_columns_inplace();
-    ln_null_d *= (1.0 - pve_batch).sqrt();
-    for col in 0..ln_delta_db.ncols() {
-        let mut ln_delta_d = ln_delta_db.column_mut(col);
-        ln_delta_d += &ln_null_d.column(0);
-    }
-    let delta_db = ln_delta_db.map(|x| x.exp());
-
+    // Topic dictionary β (Gamma-drawn or hierarchical) + housekeeping injection.
     let (beta_dk, hierarchy_node_probs) = if let Some(tree_depth) = cmd_args.hierarchical_depth {
-        let (beta, node_probs) =
-            crate::core::generate_hierarchical_dictionary(dd, tree_depth, cmd_args.overdisp, &mut rng);
+        let (beta, node_probs) = crate::core::generate_hierarchical_dictionary(
+            dd,
+            tree_depth,
+            cmd_args.overdisp,
+            &mut rng,
+        );
         info!(
             "generated hierarchical dictionary: depth={}, K={} leaves",
             tree_depth,
@@ -542,17 +630,11 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
         );
         (beta, Some(node_probs))
     } else {
-        let (a, b) = (1.0 / cmd_args.overdisp, (kk as f32).sqrt() * cmd_args.overdisp);
-        let mut beta_dk = DMatrix::<f32>::rgamma(dd, kk, (a, b));
-        if kk > 1 && pve_topic < 1.0 {
-            let beta_null =
-                DMatrix::<f32>::rgamma(dd, 1, (a, b)).scale(((1.0 - pve_topic) / kk as f32).sqrt());
-            for k in 0..kk {
-                let x = beta_dk.column(k).scale(pve_topic.sqrt()) + &beta_null;
-                beta_dk.column_mut(k).copy_from(&x);
-            }
-        }
-        (beta_dk, None)
+        let (a, b) = (
+            1.0 / cmd_args.overdisp,
+            (kk as f32).sqrt() * cmd_args.overdisp,
+        );
+        (DMatrix::<f32>::rgamma(dd, kk, (a, b)), None)
     };
 
     let beta_dk = if cmd_args.n_housekeeping > 0 && cmd_args.n_housekeeping < dd {
@@ -561,7 +643,6 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
         let hk_shape = 2.0_f32;
         let hk_rate = hk_shape / hk_mean;
         let hk_dist = rand_distr::Gamma::new(hk_shape, 1.0 / hk_rate).expect("housekeeping gamma");
-        use rand_distr::Distribution;
         let mut beta = beta_dk;
         for g in 0..cmd_args.n_housekeeping {
             let base = hk_dist.sample(&mut rng);
@@ -580,9 +661,6 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
 
     let theta_kn = crate::core::sample_theta_kn(kk, nn, pve_topic, &mut rng)?;
 
-    // Copula+NB sampling: λ_{g, j} = depth · scale_j · (β θ)_{g, j} · δ_{g, b(j)}.
-    let depth = cmd_args.depth;
-
     let triplets: Vec<(u64, u64, f32)> = (0..nn)
         .into_par_iter()
         .progress_count(nn as u64)
@@ -593,24 +671,44 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
                     .wrapping_add(0x5a5a_5a5a)
                     .wrapping_add(j as u64),
             );
-            let theta_j = theta_kn.column(j);
+            let normal = Normal::new(0.0_f32, 1.0_f32).unwrap();
+
+            // Stage 1: t = z-scored log(β·θ); ε iid per gene.
+            let bt = &beta_dk * theta_kn.column(j);
+            let mut t_z: DVector<f32> = bt.map(|x| x.max(1e-30).ln());
+            let m_t = t_z.mean();
+            let s_t = {
+                let mut s2 = 0.0_f32;
+                for v in t_z.iter() {
+                    let d = *v - m_t;
+                    s2 += d * d;
+                }
+                (s2 / dd as f32).sqrt().max(1e-12)
+            };
+            for v in t_z.iter_mut() {
+                *v = (*v - m_t) / s_t;
+            }
+
             let b = batch_membership[j];
-            let mut lambda = &beta_dk * theta_j;
+            let mut log_lambda = log_mu_hat.clone();
             for g in 0..dd {
-                lambda[g] *= delta_db[(g, b)];
-            }
-            let total = lambda.sum().max(1e-30);
-            let scale = (depth as f32) / total;
-            for g in 0..dd {
-                lambda[g] = (lambda[g] * scale).max(1e-8);
+                let topic_term = alpha_topic * t_z[g];
+                let noise_term = if alpha_noise > 0.0 {
+                    alpha_noise * normal.sample(&mut local_rng)
+                } else {
+                    0.0
+                };
+                log_lambda[g] += topic_term + noise_term + batch_delta[b][g];
             }
 
-            // Copula z* lives only in HVG space (the only dimension Σ̂ models).
-            let z_star = fit.copula.sample(&mut local_rng);
-            let mut counts: Vec<(u64, u64, f32)> = Vec::with_capacity(dd / 8);
-
-            for g in 0..dd {
-                let mu_g = lambda[g];
+            // Unified PIT sampling: u = Φ(z*), y = F⁻¹_NB(u; λ, r̂).
+            // z* from gene-gene copula for HVGs, iid N(0,1) for non-HVGs.
+            // Iterate only active genes (μ̂ ≥ threshold); undetectable genes
+            // can't produce a nonzero count even at maximum perturbation.
+            let z_hvg = fit.copula.sample(&mut local_rng);
+            let mut counts: Vec<(u64, u64, f32)> = Vec::with_capacity(fit.active_genes.len() / 8);
+            for &g in &fit.active_genes {
+                let mu_g = log_lambda[g].exp();
                 if !mu_g.is_finite() || mu_g <= 0.0 {
                     continue;
                 }
@@ -618,16 +716,16 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
                     mu: mu_g,
                     r: fit.r_hat[g],
                 };
-                let x = if let Some(h) = fit.hvg_pos[g] {
-                    let table = nb_cdf_table(nb, nb_table_cap(nb));
-                    if table.is_empty() {
-                        0
-                    } else {
-                        let u = phi(z_star[h as usize] as f64).clamp(1e-7, 1.0 - 1e-7);
-                        nb_inverse_cdf_from_table(u, &table)
-                    }
+                let z_g = match fit.hvg_pos[g] {
+                    Some(h) => z_hvg[h as usize],
+                    None => normal.sample(&mut local_rng),
+                };
+                let u = phi(z_g as f64).clamp(1e-7, 1.0 - 1e-7);
+                let table = nb_cdf_table(nb, nb_table_cap(nb));
+                let x = if table.is_empty() {
+                    0
                 } else {
-                    sample_nb(nb, &mut local_rng)
+                    nb_inverse_cdf_from_table(u, &table)
                 };
                 if x > 0 {
                     counts.push((g as u64, j as u64, x as f32));
@@ -639,13 +737,13 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
         .collect();
 
     info!(
-        "sampled {} cells producing {} nonzero triplets via copula+NB",
+        "sampled {} cells producing {} nonzero triplets via two-stage NB+copula",
         nn,
         triplets.len()
     );
 
-    // 7. Output: same companion files as the synthetic path, plus
-    //    reference-only `.r.parquet` and `.hvg.gz`.
+    // Output: same companion files as before. `.ln_batch.parquet` now stores
+    // `α_batch · δ_{g, b}` — the actual log-shift applied per gene per batch.
     let mtx_file = output.to_string() + ".mtx.gz";
     let row_file = output.to_string() + ".rows.gz";
     let col_file = output.to_string() + ".cols.gz";
@@ -683,11 +781,12 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
     write_lines(&batch_lines, &batch_memb_file)?;
     info!("batch membership: {}", batch_memb_file);
 
-    ln_delta_db.to_parquet_with_names(
-        &ln_batch_file,
-        (Some(&row_names), Some("feature")),
-        None,
-    )?;
+    // batch_delta is already α_batch-scaled. Stack into D × B for parquet.
+    let mut ln_delta_db = DMatrix::<f32>::zeros(dd, bb);
+    for (b, col) in batch_delta.iter().enumerate() {
+        ln_delta_db.set_column(b, col);
+    }
+    ln_delta_db.to_parquet_with_names(&ln_batch_file, (Some(&row_names), Some("feature")), None)?;
     theta_kn.transpose().to_parquet_with_names(
         &prop_file,
         (Some(&col_names), Some("cell")),
@@ -738,12 +837,8 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
     }
 
     let mtx_shape = (dd, nn, triplets.len());
-    let mut data = create_sparse_from_triplets(
-        &triplets,
-        mtx_shape,
-        Some(&backend_file),
-        Some(&backend),
-    )?;
+    let mut data =
+        create_sparse_from_triplets(&triplets, mtx_shape, Some(&backend_file), Some(&backend))?;
     data.register_row_names_vec(&row_names);
     data.register_column_names_vec(&col_names);
     finalize_zarr_output(&backend_file, &effective_output)?;
@@ -865,4 +960,3 @@ pub fn run_simulate_multimodal(cmd_args: &RunSimulateMultimodalArgs) -> anyhow::
     info!("done");
     Ok(())
 }
-
