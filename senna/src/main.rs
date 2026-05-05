@@ -122,10 +122,22 @@ fn print_logo() {
 #[derive(Parser, Debug)]
 #[command(
     version,
-    about = "SENNA — Stochastic data Embedding with Nearest Neighbourhood Adjustment",
+    about = "SENNA — single-cell embedding (SVD / topic), annotation, trajectory, and plotting.",
     long_about = "SENNA — Stochastic data Embedding with Nearest Neighbourhood Adjustment.\n\n\
-                  Input: sparse backends in `.zarr` or `.h5` format.\n\
-                  Convert from Matrix Market with `data-beans from-mtx`."
+                  Input: sparse backends in `.zarr` or `.h5` (convert from Matrix Market\n\
+                  with `data-beans from-mtx`).\n\n\
+                  Pipeline (each step writes its outputs back to the run manifest\n\
+                  `{prefix}.senna.json`, so downstream commands need no extra flags):\n\n  \
+                  1. Train embedding   senna topic | indexed-topic | svd\n                       \
+                                       senna joint-topic | joint-svd       (multi-modality)\n  \
+                  2. Held-out inference senna predict                       (apply trained model)\n  \
+                  3. Cluster cells     senna clustering --from run.senna.json\n  \
+                  4. Annotate cells    senna annotate   --from run.senna.json -m markers.tsv\n  \
+                  5. Trajectory        senna pseudotime --from run.senna.json\n  \
+                  6. 2D layout         senna layout {phate|tsne|umap} --from run.senna.json\n  \
+                  7. Scatter plot      senna plot       --from run.senna.json\n  \
+                  8. Topic diagnostics senna plot-topic --from run.senna.json\n\n\
+                  `senna plot` auto-runs steps 3 + 6 on demand."
 )]
 struct Cli {
     #[arg(short = 'v', long, global = true, help = "Verbose logging")]
@@ -137,106 +149,120 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    // ─────────── 1. Train embedding (writes the run manifest) ───────────
     #[command(
-        about = "Embed cells by Nyström SVD with batch-aware pseudobulk collapsing",
-        long_about = "Nyström SVD embedding in three stages:\n\
-                      (1) batch-aware multi-level pseudobulk collapsing,\n\
-                      (2) randomized SVD on the collapsed matrix,\n\
-                      (3) projection of every cell onto the learned basis."
-    )]
-    Svd(SvdArgs),
-
-    #[command(
-        about = "Embed cells by probabilistic topic modelling (VAE, multi-decoder)",
-        long_about = "Topic-model embedding in three stages:\n\
-                      (1) batch-aware multi-level pseudobulk collapsing,\n\
-                      (2) encoder-decoder VAE training via SGD,\n\
-                      (3) encoder inference of per-cell latent topic proportions.\n\n\
-                      Supports multinomial, negative-binomial, and vMF decoders\n\
-                      (jointly when comma-separated via --decoder)."
+        about = "Train: topic-model embedding (VAE).",
+        long_about = "Probabilistic topic-model embedding.\n\n\
+                      Stages: (1) batch-aware pseudobulk collapsing, (2) encoder-decoder\n\
+                      VAE via SGD, (3) per-cell topic inference. Decoders: multinomial,\n\
+                      negative-binomial, vMF (combine via comma-separated --decoder).\n\n\
+                      Writes {out}.{latent,dictionary}.parquet, {out}.safetensors,\n\
+                      {out}.metadata.json, {out}.senna.json (run manifest)."
     )]
     Topic(TopicArgs),
 
     #[command(
-        about = "Topic model with adaptive top-K feature windows (~4-7× faster decoder)",
-        long_about = "Same three-stage pipeline as `topic`, but the encoder and\n\
-                      decoder operate on a per-cell top-K feature window instead\n\
-                      of the dense D × K dictionary. Useful for very large gene sets.",
+        about = "Train: topic-model with adaptive top-K feature windows (~4-7× faster).",
+        long_about = "Same pipeline as `topic`, but encoder/decoder operate on a per-cell\n\
+                      top-K feature window instead of the full D × K dictionary.\n\
+                      Useful for very large gene sets.\n\n\
+                      Writes the same artifacts as `topic`.",
         visible_alias = "itopic"
     )]
     IndexedTopic(IndexedTopicArgs),
 
     #[command(
-        about = "Annotate cells via cluster-level marker enrichment",
-        long_about = "Cluster cells (Leiden on cosine-KNN of the manifest's latent),\n\
-                      compute NB-Fisher-adjusted per-cluster mean expression by\n\
-                      streaming raw counts from the manifest's zarr, then run a\n\
-                      weighted-KS marker enrichment with cross-cluster simplex\n\
-                      normalization for housekeeping suppression. The FDR-sparse\n\
-                      nClusters × C Q matrix is softmax-normalized per cluster;\n\
-                      per-cell labels come from cluster-broadcast Q.\n\n\
-                      Usage: senna annotate --from run.senna.json -m markers.tsv -o out\n\n\
-                      Provide --clusters <PATH> (or run `senna cluster --from ...`\n\
-                      first) to skip the internal Leiden pass."
+        about = "Train: Nyström SVD embedding.",
+        long_about = "Three stages: (1) batch-aware pseudobulk collapsing, (2) randomized SVD,\n\
+                      (3) per-cell Nyström projection.\n\n\
+                      Writes {out}.{latent,dictionary}.parquet, {out}.senna.json."
     )]
-    Annotate(AnnotateArgs),
+    Svd(SvdArgs),
 
     #[command(
-        about = "Apply a trained topic / indexed-topic model to held-out data",
-        long_about = "Run latent inference + per-cell predictive log-likelihood\n\
-                      on a separate held-out backend file. Auto-dispatches between\n\
-                      the dense (`topic`) and indexed (`indexed-topic`) paths via\n\
-                      the model.json metadata. Handles gene-set misalignment via\n\
-                      flexible name matching, re-estimates per-batch delta from\n\
-                      the frozen dictionary, and supports three latent modes:\n\
-                      encoder-only (default), encoder+refine, and decoder-only."
-    )]
-    Predict(PredictArgs),
-
-    #[command(
-        about = "[deprecated] Use `senna predict`",
-        long_about = "Deprecated alias for `senna predict`. The new `predict`\n\
-                      subcommand handles both `topic` and `indexed-topic` models\n\
-                      and additionally computes per-cell predictive log-likelihood."
-    )]
-    EvalTopic(EvalTopicArgs),
-
-    #[command(
-        about = "Joint Nyström SVD across multiple modalities",
-        long_about = "Nyström SVD on a stack of modalities sharing the same cells.\n\
-                      Data files are arranged row-major as a (modality × batch) table;\n\
-                      use -m to set the number of modality rows."
-    )]
-    JointSvd(JointSvdArgs),
-
-    #[command(
-        about = "Joint topic model across multiple modalities (independent or delta decoder)",
-        long_about = "Joint topic-model embedding across a stack of modalities.\n\n\
-                      Data files are arranged row-major as a (modality × batch) table;\n\
-                      use -m to set the number of modality rows.\n\n\
-                      Decoder types:\n\
-                        independent — each modality has its own topic dictionary;\n\
-                                      features may differ across modalities.\n\
-                        delta       — shared base dictionary + cumulative chain deltas;\n\
-                                      modality m = softmax(z @ (W_base + Σ δ_1..m)).\n\
-                                      Requires shared features across all modalities."
+        about = "Train: joint topic model across modalities (independent or delta decoder).",
+        long_about = "Joint topic-model embedding over a stack of modalities sharing cells.\n\
+                      Data files are a row-major (modality × batch) table; -m sets the\n\
+                      modality-row count.\n\n\
+                      Decoder types:\n  \
+                      independent — each modality keeps its own dictionary; features may differ.\n  \
+                      delta       — shared base + cumulative chain deltas\n              \
+                                    (modality m = softmax(z @ (W_base + Σ δ_1..m));\n              \
+                                    requires shared features across modalities).\n\n\
+                      Writes {out}.latent.parquet, {out}.senna.json."
     )]
     JointTopic(JointTopicArgs),
 
     #[command(
-        about = "Compute 2D layout in raw-gene-space (tsne or phate)",
-        long_about = "Topic-agnostic 2D layout: build PBs via batch-corrected\n\
-                      multi-level collapsing, compute PB-PB cosine similarity on\n\
-                      log1p-CPM gene vectors, then lay out via t-SNE or PHATE.\n\
-                      Cells placed by cheap Nyström in random-projection space.\n\n\
-                      Preferred invocation uses a run manifest produced by\n\
-                      `senna topic` (or svd / itopic / joint-*):\n    \
-                      senna layout phate --from run.senna.json\n\
-                      The manifest supplies data files + output prefix, and is\n\
-                      updated in place with `layout.cell_coords`, `layout.pb_coords`,\n\
-                      and `layout.pb_gene_mean` paths — downstream\n\
-                      `senna plot --from run.senna.json` then just works.\n\n\
-                      Pick a method: `senna layout tsne ...` or `senna layout phate ...`.",
+        about = "Train: joint Nyström SVD across modalities.",
+        long_about = "Joint SVD over a stack of modalities sharing cells. Data files form\n\
+                      a row-major (modality × batch) table; -m sets the modality-row count.\n\
+                      Cells must be shared; features may differ.\n\n\
+                      Writes {out}.latent.parquet, {out}.senna.json."
+    )]
+    JointSvd(JointSvdArgs),
+
+    // ─────────── 2. Held-out inference ───────────
+    #[command(
+        about = "Apply a trained topic / indexed-topic model to held-out data.",
+        long_about = "Latent inference + per-cell predictive log-likelihood on a separate\n\
+                      backend file. Auto-dispatches dense vs indexed via metadata.json.\n\
+                      Handles gene-set misalignment via flexible name matching and\n\
+                      re-estimates per-batch delta from the frozen dictionary.\n\n\
+                      Latent modes: encoder-only (default), encoder+refine, decoder-only."
+    )]
+    Predict(PredictArgs),
+
+    #[command(about = "[deprecated] Alias for `senna predict`.")]
+    EvalTopic(EvalTopicArgs),
+
+    // ─────────── 3. Cluster / annotate / trajectory (run on a manifest) ───────────
+    #[command(
+        about = "Cluster cells on the manifest's latent (kmeans / leiden / hsblock).",
+        long_about = "Cluster cells using `manifest.outputs.latent`.\n\n\
+                      Algorithms:\n  \
+                      kmeans  — requires -k.\n  \
+                      leiden  — graph-based, auto-k.\n  \
+                      hsblock — hierarchical SBM (2^(depth-1) clusters).\n\n\
+                      Writes {out}.clusters.parquet and updates `manifest.cluster.clusters`."
+    )]
+    Clustering(ClusteringArgs),
+
+    #[command(
+        about = "Annotate cells via cluster-level marker enrichment.",
+        long_about = "Pipeline: (re)cluster on the manifest's latent (Leiden if no clusters\n\
+                      exist) → NB-Fisher-adjusted per-cluster mean expression (streamed\n\
+                      from raw counts) → weighted-KS marker enrichment with cross-cluster\n\
+                      simplex normalization (housekeeping suppression) → softmax-normalized\n\
+                      per-cluster Q matrix → cluster-broadcast per-cell labels.\n\n\
+                      Usage: senna annotate --from run.senna.json -m markers.tsv -o out\n\n\
+                      Updates `manifest.annotate.{argmax,annotation,...}` so subsequent\n\
+                      `senna plot` runs colour cells by predicted cell type by default.\n\
+                      Writes {out}.argmax.tsv, {out}.annotation.parquet, {out}.cluster_*.parquet."
+    )]
+    Annotate(AnnotateArgs),
+
+    #[command(
+        about = "Pseudotime via Monocle-3-style principal graph (SimplePPT) on the latent.",
+        long_about = "Port of Mao et al. 2015 SimplePPT applied to `manifest.outputs.latent`.\n\n\
+                      (1) k-means init K centroids,\n\
+                      (2) iterate: soft-assign cells → MST over centroids → solve\n    \
+                          (D_R + γL) Y = R^T Z for centroid coords,\n\
+                      (3) project each cell onto its nearest tree edge,\n\
+                      (4) Dijkstra geodesic from a chosen root → pseudotime.\n\n\
+                      Outputs {out}.pseudotime.parquet and {out}.principal_graph.{nodes,edges}.parquet."
+    )]
+    Pseudotime(PseudotimeArgs),
+
+    // ─────────── 4. Layout + plotting ───────────
+    #[command(
+        about = "2D layout of cells (tsne / umap / phate) over batch-corrected pseudobulks.",
+        long_about = "Builds PBs via batch-corrected multi-level collapsing, computes\n\
+                      PB-PB cosine similarity on log1p-CPM gene vectors, lays out via\n\
+                      the chosen method, and projects every cell via Nyström.\n\n\
+                      Updates `manifest.layout.{cell_coords, pb_coords, pb_gene_mean}` so\n\
+                      `senna plot --from ...` picks the layout up automatically.\n\n\
+                      Pick a method: `senna layout {phate|tsne|umap} --from run.senna.json`.",
         visible_alias = "lay",
         subcommand_required = true,
         arg_required_else_help = true
@@ -247,78 +273,42 @@ enum Commands {
     },
 
     #[command(
-        about = "Publication scatter plot from `senna layout` coords (SVG/PNG/PDF)",
-        long_about = "Render a publication-quality scatter: per-group rasterized\n\
-                      layers (tiny-skia, 300 dpi) with transparent background,\n\
-                      optional convex hull polygons, and vector text labels at\n\
-                      per-group medians (fully editable in Illustrator/Inkscape).\n\n\
-                      Preferred invocation uses a run manifest from\n\
-                      `senna topic` (and optionally `senna annotate`):\n    \
-                      senna plot --from run.senna.json\n\
-                      If the manifest has no `layout.cell_coords` yet, plot will\n\
-                      auto-run `senna layout phate` against it first. Everything\n\
-                      else (cell_coords, topics, annotation, labels, colour_by,\n\
-                      palette) is read from the manifest; individual CLI flags\n\
-                      still override when passed.\n\n\
-                      Group source selectable via\n\
-                      --colour-by cluster|pb-id|topic|annotation. When\n\
-                      `senna annotate` has populated the manifest and no\n\
-                      explicit --colour-by is given, `annotation` is the default\n\
-                      so cells are coloured + labelled by predicted cell type.\n\
-                      Hull polygons are off by default (scRNA groups are rarely\n\
-                      separable in 2D); enable with --hull for debugging.\n\
-                      Outputs: {out}.plot.svg, {out}.plot.png, {out}.plot.pdf."
+        about = "Publication scatter plot from a run manifest (SVG/PNG/PDF).",
+        long_about = "`senna plot --from run.senna.json` reads cell_coords, topics,\n\
+                      annotation, clusters, labels, and palette from the manifest and\n\
+                      renders a 300-dpi rasterized scatter with vector text labels.\n\n\
+                      Auto-fills missing pieces:\n  \
+                      • no `layout.cell_coords` → runs `senna layout phate` first.\n  \
+                      • `--colour-by cluster` but no clusters → runs Leiden on the latent.\n\n\
+                      --colour-by cluster (default) | annotation | topic | pb-id | pseudotime.\n\
+                      Default flips to `annotation` once `senna annotate` populates the\n\
+                      manifest, so cells are coloured + labelled by predicted cell type.\n\n\
+                      Outputs: {out}.plot.{svg,png,pdf} (PDF default; pass --svg / --png\n\
+                      for those formats)."
     )]
     Plot(PlotArgs),
 
     #[command(
-        about = "Topic structure-bar (per batch) + gene × topic dictionary plots",
-        long_about = "Admixture-style stacked-bar structure plots per batch (panel\n\
-                      width ∝ #cells), plus a gene × topic dictionary summary\n\
-                      (Hinton ≤ 100 genes; viridis-bin heatmap above).\n\n\
-                      Preferred invocation:\n    \
-                      senna plot-topic --from run.senna.json\n\
-                      Defaults to PDF only — pass --svg / --png to also emit those.\n\
+        about = "Topic-model diagnostics: per-batch structure bars + gene × topic dictionary.",
+        long_about = "Admixture-style stacked-bar structure plots per batch (panel width\n\
+                      ∝ #cells), plus a gene × topic dictionary summary (Hinton ≤ 100\n\
+                      genes; viridis heatmap above).\n\n\
+                      Usage: senna plot-topic --from run.senna.json\n\n\
+                      PDF only by default; pass --svg / --png to also emit those.\n\
                       Outputs land under {out}.plots/{struct,dict}/.",
         visible_alias = "pt"
     )]
     PlotTopic(PlotTopicArgs),
-
-    #[command(
-        about = "Cluster cells on latent topic / SVD representations",
-        long_about = "Cluster cells using a latent matrix from `senna topic` or `senna svd`.\n\n\
-                      Algorithms:\n\
-                        kmeans  — k-means (default; requires -k)\n\
-                        leiden  — graph-based community detection (auto-k)\n\
-                        hsblock — hierarchical stochastic block model (2^(depth-1) clusters)"
-    )]
-    Clustering(ClusteringArgs),
-
-    #[command(
-        about = "Pseudotime via Monocle-style principal graph (SimplePPT) on latent topics",
-        long_about = "Faithful port of the principal-tree fitter Monocle 3 uses\n\
-                      (Mao et al. 2015, SimplePPT) operating on senna's cell-level\n\
-                      latent matrix (topic θ or SVD components).\n\n\
-                      Pipeline:\n  \
-                      (1) k-means initialize K centroids in latent space,\n  \
-                      (2) iterate: soft-assign cells → recompute MST over centroids\n      \
-                          → solve (D_R + γL) Y = R^T Z for centroid coordinates,\n  \
-                      (3) project each cell onto its nearest tree edge,\n  \
-                      (4) Dijkstra geodesic from a chosen root → pseudotime.\n\n\
-                      Outputs:\n  \
-                      {out}.pseudotime.parquet, {out}.principal_graph.{{nodes,edges}}.parquet"
-    )]
-    Pseudotime(PseudotimeArgs),
 }
 
 #[derive(Subcommand, Debug)]
 enum LayoutCmd {
-    #[command(about = "PB landmarks laid out by t-SNE on raw-gene similarity (random init)")]
-    Tsne(LayoutTsneArgs),
-    #[command(about = "PB landmarks laid out by UMAP-style SGD on the fuzzy kNN graph")]
-    Umap(LayoutUmapArgs),
-    #[command(about = "PB landmarks laid out by PHATE diffusion on raw-gene features")]
+    #[command(about = "PHATE diffusion embedding of pseudobulks (recommended default).")]
     Phate(LayoutPhateArgs),
+    #[command(about = "t-SNE of pseudobulks on raw-gene similarity (random init).")]
+    Tsne(LayoutTsneArgs),
+    #[command(about = "UMAP-style SGD of pseudobulks over the fuzzy kNN graph.")]
+    Umap(LayoutUmapArgs),
 }
 
 fn main() -> anyhow::Result<()> {

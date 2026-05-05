@@ -232,7 +232,7 @@ pub struct PlotArgs {
 }
 
 pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
-    let resolved = resolve_inputs(args)?;
+    let mut resolved = resolve_inputs(args)?;
     mkdir_parent(&resolved.out)?;
     let (cell_names, coords_by_name) = read_cell_coords(&resolved.cell_coords)?;
     let x = coords_by_name
@@ -259,17 +259,24 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     let mut pseudotime_norm: Option<Vec<f32>> = None;
 
     let group_ids = match resolved.colour_by {
-        ColorBy::Cluster => coords_by_name
-            .get("cluster")
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--colour-by cluster but cell_coords has no 'cluster' column; \
-                     re-run `senna viz` with --clusters or pick a different --colour-by"
-                )
-            })?
-            .iter()
-            .map(|&v| v as i64)
-            .collect::<Vec<_>>(),
+        ColorBy::Cluster => {
+            let ids = match coords_by_name.get("cluster") {
+                Some(col) => col
+                    .iter()
+                    .map(|&v| if v.is_nan() || v < 0.0 { -1 } else { v as i64 })
+                    .collect::<Vec<_>>(),
+                None => resolve_cluster_ids_for_plot(&mut resolved, &cell_names)?,
+            };
+            // Label cluster groups as `C{g}` so a downstream `--labels` TSV
+            // can still rename them by id, but the default isn't the
+            // topic-style `T{g}`.
+            for &g in &ids {
+                if g >= 0 {
+                    auto_label_map.entry(g).or_insert_with(|| format!("C{g}"));
+                }
+            }
+            ids
+        }
         ColorBy::PbId => coords_by_name
             .get("pb_id")
             .ok_or_else(|| anyhow::anyhow!("cell_coords missing 'pb_id' column"))?
@@ -401,16 +408,13 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     // The per-cell normalized float is sampled directly through the
     // blue→red ramp — no quantization, smooth gradient.
     let mut layers: Vec<TopicLayer> = if let Some(norm) = pseudotime_norm.as_deref() {
-        vec![rasterize_continuous_layer(
-            n_cells,
-            x,
-            y,
-            norm,
-            &bounds,
-            ext,
+        let style = PointStyle {
             radius_px,
-            args.alpha,
-            args.point_shape,
+            alpha: args.alpha,
+            shape: args.point_shape,
+        };
+        vec![rasterize_continuous_layer(
+            x, y, norm, &bounds, ext, &style,
         )?]
     } else {
         unique
@@ -541,6 +545,11 @@ struct ResolvedInputs {
     cell_coords: String,
     topics: Option<String>,
     annotation: Option<String>,
+    /// Cluster assignments parquet path (cells × 1, "cluster" column).
+    /// Used by the `ColorBy::Cluster` fallback when `cell_coords` lacks
+    /// a `cluster` column. Populated from `manifest.cluster.clusters`
+    /// when `--from` is in effect.
+    clusters: Option<String>,
     labels: Option<String>,
     pseudotime: Option<String>,
     /// Principal-graph node 2D coordinates parquet (K × 2) — drawn as a
@@ -551,6 +560,12 @@ struct ResolvedInputs {
     out: String,
     colour_by: ColorBy,
     palette: Palette,
+    /// Loaded manifest (when `--from` is in effect). The cluster fallback
+    /// may write back to it (`cluster.clusters` field) and persist to
+    /// `manifest_path`.
+    manifest: Option<RunManifest>,
+    manifest_path: Option<String>,
+    manifest_dir: PathBuf,
 }
 
 fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
@@ -642,6 +657,11 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
             .map(resolve_opt)
     });
 
+    let clusters = manifest
+        .as_ref()
+        .and_then(|m| m.cluster.clusters.as_deref())
+        .map(resolve_opt);
+
     let pseudotime = args.pseudotime.as_deref().map(String::from).or_else(|| {
         manifest
             .as_ref()
@@ -717,6 +737,7 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
         cell_coords,
         topics,
         annotation,
+        clusters,
         labels,
         pseudotime,
         principal_graph_nodes_2d,
@@ -724,6 +745,9 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
         out,
         colour_by,
         palette,
+        manifest,
+        manifest_path: args.from.as_deref().map(String::from),
+        manifest_dir,
     })
 }
 
@@ -797,20 +821,25 @@ fn read_pseudotime_normalized(path: &str, n_cells_expected: usize) -> anyhow::Re
         .collect())
 }
 
+/// Per-point style shared by the rasterizers in this file.
+struct PointStyle {
+    radius_px: f32,
+    alpha: f32,
+    shape: PointShape,
+}
+
 /// Pack every cell into one PNG with per-cell colors sampled from the
 /// blue→red ramp. One raster layer instead of one-per-bin keeps the
 /// SVG/PDF small even at 10k+ cells.
 fn rasterize_continuous_layer(
-    n_cells: usize,
     x: &[f32],
     y: &[f32],
     norm: &[f32],
     bounds: &DataBounds,
     ext: Extent,
-    radius_px: f32,
-    alpha: f32,
-    shape: PointShape,
+    style: &PointStyle,
 ) -> anyhow::Result<TopicLayer> {
+    let n_cells = x.len();
     let mut pts_px: Vec<(f32, f32)> = Vec::with_capacity(n_cells);
     let mut colors: Vec<plot_utils::palette::Rgb> = Vec::with_capacity(n_cells);
     for i in 0..n_cells {
@@ -822,7 +851,12 @@ fn rasterize_continuous_layer(
         colors.push(palette::sample_blue_red(t));
     }
     let png = plot_utils::rasterize::rasterize_per_point_png(
-        &pts_px, &colors, ext, radius_px, alpha, shape,
+        &pts_px,
+        &colors,
+        ext,
+        style.radius_px,
+        style.alpha,
+        style.shape,
     )?;
     Ok(TopicLayer {
         label: String::new(),
@@ -946,6 +980,99 @@ fn argmax_topics(path: &str, n_cells_expected: usize) -> anyhow::Result<Vec<i64>
         out.push(topic_ids[best_j]);
     }
     Ok(out)
+}
+
+/// Cluster fallback for `ColorBy::Cluster` when the `cell_coords`
+/// parquet has no `cluster` column. Mirrors `senna annotate`'s strategy:
+///   1. If `manifest.cluster.clusters` is set, load that parquet.
+///   2. Otherwise run Leiden against `manifest.outputs.latent`, write
+///      `{out}.clusters.parquet`, and update the manifest in place.
+///
+/// Returns per-cell ids aligned to `cell_names` (cell_coords row order),
+/// with `-1` for unassigned/missing cells.
+fn resolve_cluster_ids_for_plot(
+    resolved: &mut ResolvedInputs,
+    cell_names: &[Box<str>],
+) -> anyhow::Result<Vec<i64>> {
+    let Some(manifest) = resolved.manifest.as_mut() else {
+        anyhow::bail!(
+            "--colour-by cluster but cell_coords has no 'cluster' column \
+             and no manifest is loaded; re-run `senna layout` with --clusters \
+             or pass --from <manifest>"
+        );
+    };
+
+    // Path 1: manifest already has a cluster parquet.
+    if let Some(path) = resolved.clusters.as_deref() {
+        info!("Loading clusters from {path}");
+        let (labels_usize, n_clusters) =
+            crate::annotate::inputs::load_cluster_labels(path, cell_names)?;
+        info!("Loaded {n_clusters} clusters from manifest.cluster.clusters");
+        return Ok(usize_to_signed(&labels_usize));
+    }
+
+    // Path 2: leiden on the manifest's latent. Defaults mirror annotate.
+    let leiden_args = crate::annotate::inputs::LeidenArgs {
+        knn: 15,
+        resolution: 1.0,
+        num_clusters: None,
+        min_cluster_size: 2,
+        seed: Some(42),
+    };
+    let manifest_dir = resolved.manifest_dir.clone();
+    let resolve = |rel: &str| -> String {
+        run_manifest::resolve(&manifest_dir, rel)
+            .to_string_lossy()
+            .into_owned()
+    };
+    info!(
+        "No 'cluster' column in cell_coords and manifest.cluster.clusters is unset; \
+         running internal Leiden on the manifest latent"
+    );
+    let (labels_usize, n_clusters) = crate::annotate::inputs::compute_clusters_from_latent(
+        manifest,
+        &resolve,
+        cell_names,
+        &leiden_args,
+    )?;
+    info!("Internal Leiden produced {n_clusters} clusters");
+
+    // Persist `{out}.clusters.parquet` next to the plot output and patch
+    // the manifest so future runs (annotate/plot) reuse it.
+    let parquet_path = format!("{}.clusters.parquet", resolved.out);
+    write_cluster_assignments_parquet(&parquet_path, cell_names, &labels_usize)?;
+    info!("Wrote {parquet_path}");
+
+    if let Some(manifest_path) = resolved.manifest_path.as_deref() {
+        let rel = run_manifest::rel_to_manifest(&resolved.manifest_dir, &parquet_path);
+        manifest.cluster.clusters = Some(rel);
+        manifest.save(Path::new(manifest_path))?;
+    }
+    resolved.clusters = Some(parquet_path);
+
+    Ok(usize_to_signed(&labels_usize))
+}
+
+fn usize_to_signed(labels: &[usize]) -> Vec<i64> {
+    labels
+        .iter()
+        .map(|&v| if v == usize::MAX { -1 } else { v as i64 })
+        .collect()
+}
+
+fn write_cluster_assignments_parquet(
+    path: &str,
+    cell_names: &[Box<str>],
+    labels: &[usize],
+) -> anyhow::Result<()> {
+    use matrix_util::traits::IoOps;
+    let mut data = Mat::zeros(cell_names.len(), 1);
+    for (i, &c) in labels.iter().enumerate() {
+        data[(i, 0)] = if c == usize::MAX { f32::NAN } else { c as f32 };
+    }
+    let cols: Vec<Box<str>> = vec!["cluster".into()];
+    data.to_parquet_with_names(path, (Some(cell_names), Some("cell")), Some(&cols))?;
+    Ok(())
 }
 
 /// Read `senna annotate`'s argmax TSV and produce per-cell integer

@@ -164,7 +164,7 @@ pub fn load_from_manifest(
 /// Run Leiden on the manifest's latent matrix. For topic kinds, log-space
 /// latents are exponentiated to probabilities first. Aligns labels back to
 /// the data column order.
-fn compute_clusters_from_latent<F>(
+pub fn compute_clusters_from_latent<F>(
     manifest: &RunManifest,
     resolve: &F,
     cell_names: &[Box<str>],
@@ -240,7 +240,7 @@ where
 
 /// Read the cluster parquet (cells × 1 cluster column, NaN for unassigned)
 /// and align to the `cell_names` order from the data backend.
-fn load_cluster_labels(
+pub fn load_cluster_labels(
     clusters_path: &str,
     cell_names: &[Box<str>],
 ) -> anyhow::Result<(Vec<usize>, usize)> {
