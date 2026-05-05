@@ -1,5 +1,8 @@
-use crate::copula::reference::{load_cell_type_labels, open_reference};
-use crate::copula::{fit_copula, sample_copula, CopulaFitArgs, CopulaModel, PartitionMode};
+use crate::copula::marginals::{
+    nb_cdf_table, nb_inverse_cdf_from_table, nb_table_cap, phi, sample_nb, NbFit,
+};
+use crate::copula::reference::open_reference;
+use crate::copula::{fit_global_copula, GlobalCopulaArgs};
 use crate::core as simulate;
 use crate::multimodal as simulate_multimodal;
 use data_beans::hdf5_io::*;
@@ -7,19 +10,53 @@ use data_beans::sparse_io::*;
 use data_beans::zarr_io::{apply_zip_flag, finalize_zarr_output};
 
 use clap::Args;
+use indicatif::ParallelProgressIterator;
 use log::info;
 use matrix_util::common_io::*;
 use matrix_util::mtx_io;
-use matrix_util::traits::IoOps;
+use matrix_util::traits::*;
+use nalgebra::DMatrix;
+use rand::SeedableRng;
 use rayon::prelude::*;
 
 #[derive(Args, Debug)]
 pub struct RunSimulateArgs {
-    #[arg(short, long, help = "Number of rows, genes, or features")]
-    pub rows: usize,
+    #[arg(
+        short,
+        long,
+        help = "Number of rows, genes, or features (ignored when --reference is set)"
+    )]
+    pub rows: Option<usize>,
 
     #[arg(short, long, help = "Number of columns or cells")]
     pub cols: usize,
+
+    /// Real single-cell reference (`.h5`, `.zarr`, `.zarr.zip`). When set,
+    /// the GLM pipeline is unchanged, but the final count generation step
+    /// swaps `Poisson(λ)` for a copula-coupled NB draw using per-gene
+    /// dispersion `r̂_g` and a global Σ̂ fitted from this reference.
+    #[arg(long)]
+    pub reference: Option<Box<str>>,
+
+    /// HVG count for the gene-gene copula. Genes outside the HVG set are
+    /// sampled independently from `NB(λ_{g,j}, r̂_g)`. Used only with `--reference`.
+    #[arg(long, default_value_t = 2000)]
+    pub n_hvg: usize,
+
+    /// Maximum rank of the low-rank `Σ̂` factor `F = U·diag(σ)/√N`. Effective
+    /// rank is `min(rank, n_hvg, n_reference_cells)`. Used only with `--reference`.
+    #[arg(long, default_value_t = 100)]
+    pub copula_rank: usize,
+
+    /// Per-gene isotropic ridge variance added at sample time on top of `Σ̂`.
+    /// Used only with `--reference`.
+    #[arg(long, default_value_t = 1e-3)]
+    pub regularization: f32,
+
+    /// Lower bound on the NB size parameter `r̂_g`. Tames runaway dispersion
+    /// when MoM yields a near-zero `r` for noisy genes. Used only with `--reference`.
+    #[arg(long, default_value_t = 1e-2)]
+    pub r_floor: f32,
 
     #[arg(
         long,
@@ -198,13 +235,37 @@ pub struct RunSimulateMultimodalArgs {
     pub zip: bool,
 }
 
-/// Simulate factored Poisson-Gamma data
+/// Simulate factored count data.
 ///
-/// This function generates simulated single-cell RNA-seq data using a factored
-/// Poisson-Gamma model. The simulated data includes batch effects and topic
-/// (cell type) structure. Output is saved in the specified backend format
-/// (.zarr or .h5) along with parameter files.
+/// Without `--reference`: factored Poisson-Gamma model
+/// (`y_{g,j} ~ Poisson(λ_{g,j})`, `λ = depth · β·θ · δ`) with optional CNV
+/// and housekeeping injection.
+///
+/// With `--reference`: identical GLM through `λ_{g,j}`, but the final count
+/// step swaps `Poisson(λ)` for a copula-coupled NB draw using per-gene
+/// dispersion `r̂_g` and a global Σ̂ fitted from the reference. CNV is
+/// disabled in this mode (passing `--n-chromosomes > 0` is a hard error).
 pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
+    if cmd_args.reference.is_some() && cmd_args.n_chromosomes > 0 {
+        anyhow::bail!(
+            "`--reference` and `--n-chromosomes > 0` are mutually exclusive. \
+             CNV synthesis is not supported in copula+NB sampling mode."
+        );
+    }
+    if cmd_args.reference.is_some() && cmd_args.rows.is_some() {
+        anyhow::bail!(
+            "`--rows` and `--reference` are mutually exclusive. \
+             Under `--reference` the gene count is taken from the reference."
+        );
+    }
+    if cmd_args.reference.is_some() {
+        return run_simulate_with_reference(cmd_args);
+    }
+
+    let rows = cmd_args
+        .rows
+        .ok_or_else(|| anyhow::anyhow!("--rows is required when --reference is not set"))?;
+
     let effective_output = apply_zip_flag(&cmd_args.output, cmd_args.zip);
     let output: Box<str> = strip_backend_suffix(&effective_output).into();
 
@@ -233,7 +294,7 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     .expect("failed to clean up existing output files");
 
     let sim_args = simulate::SimArgs {
-        rows: cmd_args.rows,
+        rows,
         cols: cmd_args.cols,
         depth: cmd_args.depth,
         factors: cmd_args.factors,
@@ -266,7 +327,7 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 
     let mtx_shape = (sim_args.rows, sim_args.cols, sim.triplets.len());
 
-    let rows: Vec<Box<str>> = (0..cmd_args.rows)
+    let rows: Vec<Box<str>> = (0..sim_args.rows)
         .map(|i| i.to_string().into_boxed_str())
         .collect();
 
@@ -408,6 +469,290 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reference-conditioned variant of [`run_simulate`]. The GLM pipeline
+/// (`β·θ·δ` + housekeeping) mirrors the synthetic path verbatim, but
+/// the final count step samples from a copula-coupled NB instead of
+/// independent Poisson draws. Called from `run_simulate` when
+/// `--reference` is set.
+fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
+    let reference_path = cmd_args
+        .reference
+        .as_ref()
+        .expect("run_simulate_with_reference called without --reference");
+
+    let effective_output = apply_zip_flag(&cmd_args.output, cmd_args.zip);
+    let output: Box<str> = strip_backend_suffix(&effective_output).into();
+    dirname(&output).as_deref().map(mkdir).transpose()?;
+
+    let backend = cmd_args.backend.clone();
+    let (_, backend_file) = resolve_backend_file(&effective_output, Some(backend.clone()))?;
+
+    info!("opening reference: {}", reference_path);
+    let sc = open_reference(reference_path)?;
+
+    let global_args = GlobalCopulaArgs {
+        sc: &sc,
+        n_hvg: cmd_args.n_hvg,
+        copula_rank: cmd_args.copula_rank,
+        regularization: cmd_args.regularization,
+        r_floor: cmd_args.r_floor,
+    };
+    let fit = fit_global_copula(&global_args)?;
+
+    let dd = fit.n_genes;
+    let nn = cmd_args.cols;
+    let bb = cmd_args.batches.max(1);
+    let kk = if let Some(depth) = cmd_args.hierarchical_depth {
+        1usize << (depth - 1)
+    } else {
+        cmd_args.factors.max(1)
+    };
+    let pve_topic = cmd_args.pve_topic.clamp(0.0, 1.0);
+    let pve_batch = cmd_args.pve_batch.clamp(0.0, 1.0);
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(cmd_args.rseed);
+
+    let runif = rand_distr::Uniform::new(0, bb).expect("unif [0 .. bb)");
+    let batch_membership: Vec<usize> = {
+        use rand_distr::Distribution;
+        (0..nn).map(|_| runif.sample(&mut rng)).collect()
+    };
+
+    // ln δ_{g,b} = √pve_batch · z₁(g,b) + √(1-pve_batch) · z₀(g),
+    // both column-standardized standard normals — matches `core::generate_factored_poisson_gamma_data`.
+    let mut ln_delta_db = DMatrix::<f32>::rnorm(dd, bb);
+    ln_delta_db.scale_columns_inplace();
+    ln_delta_db *= pve_batch.sqrt();
+    let mut ln_null_d = DMatrix::<f32>::rnorm(dd, 1);
+    ln_null_d.scale_columns_inplace();
+    ln_null_d *= (1.0 - pve_batch).sqrt();
+    for col in 0..ln_delta_db.ncols() {
+        let mut ln_delta_d = ln_delta_db.column_mut(col);
+        ln_delta_d += &ln_null_d.column(0);
+    }
+    let delta_db = ln_delta_db.map(|x| x.exp());
+
+    let (beta_dk, hierarchy_node_probs) = if let Some(tree_depth) = cmd_args.hierarchical_depth {
+        let (beta, node_probs) =
+            crate::core::generate_hierarchical_dictionary(dd, tree_depth, cmd_args.overdisp, &mut rng);
+        info!(
+            "generated hierarchical dictionary: depth={}, K={} leaves",
+            tree_depth,
+            beta.ncols()
+        );
+        (beta, Some(node_probs))
+    } else {
+        let (a, b) = (1.0 / cmd_args.overdisp, (kk as f32).sqrt() * cmd_args.overdisp);
+        let mut beta_dk = DMatrix::<f32>::rgamma(dd, kk, (a, b));
+        if kk > 1 && pve_topic < 1.0 {
+            let beta_null =
+                DMatrix::<f32>::rgamma(dd, 1, (a, b)).scale(((1.0 - pve_topic) / kk as f32).sqrt());
+            for k in 0..kk {
+                let x = beta_dk.column(k).scale(pve_topic.sqrt()) + &beta_null;
+                beta_dk.column_mut(k).copy_from(&x);
+            }
+        }
+        (beta_dk, None)
+    };
+
+    let beta_dk = if cmd_args.n_housekeeping > 0 && cmd_args.n_housekeeping < dd {
+        let mean_val = beta_dk.mean();
+        let hk_mean = mean_val * cmd_args.housekeeping_fold;
+        let hk_shape = 2.0_f32;
+        let hk_rate = hk_shape / hk_mean;
+        let hk_dist = rand_distr::Gamma::new(hk_shape, 1.0 / hk_rate).expect("housekeeping gamma");
+        use rand_distr::Distribution;
+        let mut beta = beta_dk;
+        for g in 0..cmd_args.n_housekeeping {
+            let base = hk_dist.sample(&mut rng);
+            for k in 0..kk {
+                beta[(g, k)] = base;
+            }
+        }
+        info!(
+            "injected {} housekeeping genes (mean={:.4}, fold={:.1}× synthetic mean {:.4})",
+            cmd_args.n_housekeeping, hk_mean, cmd_args.housekeeping_fold, mean_val
+        );
+        beta
+    } else {
+        beta_dk
+    };
+
+    let theta_kn = crate::core::sample_theta_kn(kk, nn, pve_topic, &mut rng)?;
+
+    // Copula+NB sampling: λ_{g, j} = depth · scale_j · (β θ)_{g, j} · δ_{g, b(j)}.
+    let depth = cmd_args.depth;
+
+    let triplets: Vec<(u64, u64, f32)> = (0..nn)
+        .into_par_iter()
+        .progress_count(nn as u64)
+        .map(|j| -> Vec<(u64, u64, f32)> {
+            let mut local_rng = rand::rngs::StdRng::seed_from_u64(
+                cmd_args
+                    .rseed
+                    .wrapping_add(0x5a5a_5a5a)
+                    .wrapping_add(j as u64),
+            );
+            let theta_j = theta_kn.column(j);
+            let b = batch_membership[j];
+            let mut lambda = &beta_dk * theta_j;
+            for g in 0..dd {
+                lambda[g] *= delta_db[(g, b)];
+            }
+            let total = lambda.sum().max(1e-30);
+            let scale = (depth as f32) / total;
+            for g in 0..dd {
+                lambda[g] = (lambda[g] * scale).max(1e-8);
+            }
+
+            // Copula z* lives only in HVG space (the only dimension Σ̂ models).
+            let z_star = fit.copula.sample(&mut local_rng);
+            let mut counts: Vec<(u64, u64, f32)> = Vec::with_capacity(dd / 8);
+
+            for g in 0..dd {
+                let mu_g = lambda[g];
+                if !mu_g.is_finite() || mu_g <= 0.0 {
+                    continue;
+                }
+                let nb = NbFit {
+                    mu: mu_g,
+                    r: fit.r_hat[g],
+                };
+                let x = if let Some(h) = fit.hvg_pos[g] {
+                    let table = nb_cdf_table(nb, nb_table_cap(nb));
+                    if table.is_empty() {
+                        0
+                    } else {
+                        let u = phi(z_star[h as usize] as f64).clamp(1e-7, 1.0 - 1e-7);
+                        nb_inverse_cdf_from_table(u, &table)
+                    }
+                } else {
+                    sample_nb(nb, &mut local_rng)
+                };
+                if x > 0 {
+                    counts.push((g as u64, j as u64, x as f32));
+                }
+            }
+            counts
+        })
+        .flatten()
+        .collect();
+
+    info!(
+        "sampled {} cells producing {} nonzero triplets via copula+NB",
+        nn,
+        triplets.len()
+    );
+
+    // 7. Output: same companion files as the synthetic path, plus
+    //    reference-only `.r.parquet` and `.hvg.gz`.
+    let mtx_file = output.to_string() + ".mtx.gz";
+    let row_file = output.to_string() + ".rows.gz";
+    let col_file = output.to_string() + ".cols.gz";
+    let dict_file = format!("{}.dict.parquet", output);
+    let prop_file = format!("{}.prop.parquet", output);
+    let batch_memb_file = format!("{}.batch.gz", output);
+    let ln_batch_file = format!("{}.ln_batch.parquet", output);
+    let r_file = format!("{}.r.parquet", output);
+    let hvg_file = format!("{}.hvg.gz", output);
+
+    remove_all_files(&vec![
+        backend_file.clone(),
+        mtx_file.clone().into_boxed_str(),
+        dict_file.clone().into_boxed_str(),
+        prop_file.clone().into_boxed_str(),
+        batch_memb_file.clone().into_boxed_str(),
+        ln_batch_file.clone().into_boxed_str(),
+        r_file.clone().into_boxed_str(),
+        hvg_file.clone().into_boxed_str(),
+    ])
+    .expect("failed to clean up existing output files");
+
+    let row_names: Vec<Box<str>> = fit.gene_names.clone();
+    let col_names: Vec<Box<str>> = (0..nn)
+        .map(|j| {
+            let argmax_k = theta_kn.column(j).imax();
+            format!("synthetic_{}_{}@{}", j, argmax_k, batch_membership[j]).into_boxed_str()
+        })
+        .collect();
+
+    let batch_lines: Vec<Box<str>> = batch_membership
+        .iter()
+        .map(|b: &usize| b.to_string().into_boxed_str())
+        .collect();
+    write_lines(&batch_lines, &batch_memb_file)?;
+    info!("batch membership: {}", batch_memb_file);
+
+    ln_delta_db.to_parquet_with_names(
+        &ln_batch_file,
+        (Some(&row_names), Some("feature")),
+        None,
+    )?;
+    theta_kn.transpose().to_parquet_with_names(
+        &prop_file,
+        (Some(&col_names), Some("cell")),
+        None,
+    )?;
+    beta_dk.to_parquet_with_names(&dict_file, (Some(&row_names), Some("feature")), None)?;
+
+    if let Some(node_probs) = hierarchy_node_probs.as_ref() {
+        let hierarchy_file = format!("{}.hierarchy.parquet", output);
+        node_probs.to_parquet_with_names(
+            &hierarchy_file,
+            (Some(&row_names), Some("feature")),
+            None,
+        )?;
+        info!("hierarchy node probabilities: {}", hierarchy_file);
+    }
+
+    // Poisson collapses (`r = ∞`) are encoded as a large finite sentinel
+    // so parquet readers don't choke on infinity.
+    let mut r_col = DMatrix::<f32>::zeros(dd, 1);
+    for g in 0..dd {
+        let r = fit.r_hat[g];
+        r_col[(g, 0)] = if r.is_finite() { r } else { 1e9 };
+    }
+    let r_label = ["r_hat".to_string().into_boxed_str()];
+    r_col.to_parquet_with_names(&r_file, (Some(&row_names), Some("feature")), Some(&r_label))?;
+    info!("per-gene NB dispersion r̂: {}", r_file);
+
+    let hvg_lines: Vec<Box<str>> = fit
+        .hvg_indices
+        .iter()
+        .map(|&g| row_names[g].clone())
+        .collect();
+    write_lines(&hvg_lines, &hvg_file)?;
+    info!("HVGs used by copula: {}", hvg_file);
+
+    let mut triplets = triplets;
+    if cmd_args.save_mtx {
+        triplets.par_sort_by_key(|&(row, _, _)| row);
+        triplets.par_sort_by_key(|&(_, col, _)| col);
+        mtx_io::write_mtx_triplets(&triplets, dd, nn, &mtx_file)?;
+        write_lines(&row_names, &row_file)?;
+        write_lines(&col_names, &col_file)?;
+        info!(
+            "save mtx, row, and column files:\n{}\n{}\n{}",
+            mtx_file, row_file, col_file
+        );
+    }
+
+    let mtx_shape = (dd, nn, triplets.len());
+    let mut data = create_sparse_from_triplets(
+        &triplets,
+        mtx_shape,
+        Some(&backend_file),
+        Some(&backend),
+    )?;
+    data.register_row_names_vec(&row_names);
+    data.register_column_names_vec(&col_names);
+    finalize_zarr_output(&backend_file, &effective_output)?;
+    info!("wrote sparse backend: {}", backend_file);
+
+    info!("done");
+    Ok(())
+}
+
 /// Run multimodal simulation with shared base + delta dictionaries.
 pub fn run_simulate_multimodal(cmd_args: &RunSimulateMultimodalArgs) -> anyhow::Result<()> {
     let output = cmd_args.output.clone();
@@ -521,358 +866,3 @@ pub fn run_simulate_multimodal(cmd_args: &RunSimulateMultimodalArgs) -> anyhow::
     Ok(())
 }
 
-/// CLI arguments for the scDesign-style copula simulator.
-#[derive(Args, Debug)]
-pub struct CopulaSimArgs {
-    /// Reference single-cell dataset (`.h5`, `.zarr`, or `.zarr.zip`).
-    /// Per-gene NB marginals and the Gaussian copula `Σ̂` are estimated from
-    /// this matrix.
-    #[arg(short = 'r', long, required = true)]
-    pub reference: Box<str>,
-
-    /// Number of synthetic cells generated per cluster.
-    #[arg(short = 'n', long, default_value_t = 1000)]
-    pub n_cells: usize,
-
-    /// Number of HVGs included in the copula dependence structure. Genes
-    /// outside the HVG set are sampled independently from their NB fits.
-    #[arg(long, default_value_t = 2000)]
-    pub n_hvg: usize,
-
-    /// Target cluster count for the SVD+leiden cell-type inference step.
-    /// `0` ⇒ skip clustering, fit a single global copula.
-    #[arg(long, default_value_t = 0)]
-    pub n_clusters: usize,
-
-    /// Optional `barcode<TAB>label` file (.tsv / .tsv.gz). When supplied,
-    /// overrides `--n-clusters` and uses the file's labels directly.
-    #[arg(long)]
-    pub cell_type_file: Option<Box<str>>,
-
-    /// k for the cell-cell KNN graph used by leiden during cluster inference.
-    #[arg(long, default_value_t = 15)]
-    pub knn: usize,
-
-    /// RSVD rank used for the cluster-inference embedding.
-    #[arg(long, default_value_t = 30)]
-    pub rsvd_rank: usize,
-
-    /// HVG count used for the clustering step; defaults to `--n-hvg` when 0.
-    #[arg(long, default_value_t = 0)]
-    pub hvg_for_clustering: usize,
-
-    /// Number of synthetic batches. Cells are assigned round-robin within
-    /// each cluster. Batch 0 is the reference (δ_batch = 1).
-    #[arg(long, default_value_t = 1)]
-    pub n_batches: usize,
-
-    /// Standard deviation of the per-gene log-normal batch shift.
-    #[arg(long, default_value_t = 1.0)]
-    pub batch_effect_sigma: f32,
-
-    /// Number of synthetic chromosomes for CNV. `0` disables CNV. Clone
-    /// index ≡ batch index — matches the convention from `data-beans-sim simulate`.
-    #[arg(long, default_value_t = 0)]
-    pub n_chromosomes: usize,
-
-    /// Expected CNV events per chromosome (Poisson rate).
-    #[arg(long, default_value_t = 0.5)]
-    pub cnv_events_per_chr: f32,
-
-    /// CNV block size as fraction of genes per chromosome.
-    #[arg(long, default_value_t = 0.15)]
-    pub cnv_block_frac: f32,
-
-    /// Fold-change for CNV gain events.
-    #[arg(long, default_value_t = 2.0)]
-    pub cnv_gain_fold: f32,
-
-    /// Fold-change for CNV loss events.
-    #[arg(long, default_value_t = 0.5)]
-    pub cnv_loss_fold: f32,
-
-    /// Number of housekeeping genes (top-K by reference mean) inflated by
-    /// `--housekeeping-fold` during sampling. Default 0 ⇒ no inflation.
-    #[arg(long, default_value_t = 0)]
-    pub n_housekeeping: usize,
-
-    /// Multiplicative fold change applied to the housekeeping-gene mean.
-    /// `1.0` keeps the reference fit (no inflation).
-    #[arg(long, default_value_t = 1.0)]
-    pub housekeeping_fold: f32,
-
-    /// Maximum rank of the low-rank `Σ̂` factor `F = U·diag(σ)/√N`. Effective
-    /// rank is `min(rank, n_hvg, n_cells_in_cluster)`. Default 100 captures
-    /// most of the gene-gene dependence in single-cell data; raise for
-    /// higher-fidelity copulas (cost is `O(g · rank)` memory and CPU).
-    #[arg(long, default_value_t = 100)]
-    pub copula_rank: usize,
-
-    /// Per-gene isotropic ridge variance added at sample time. Plays the role
-    /// of the previous `(1-λ)Σ̂ + λI` regularization but does not require
-    /// densifying Σ̂.
-    #[arg(long, default_value_t = 1e-3)]
-    pub regularization: f32,
-
-    /// Lower bound on the NB size parameter `r̂`. Tames runaway dispersion
-    /// when MoM yields a near-zero `r` for noisy genes.
-    #[arg(long, default_value_t = 1e-2)]
-    pub r_floor: f32,
-
-    /// Random seed.
-    #[arg(long, default_value_t = 42)]
-    pub rseed: u64,
-
-    /// Output prefix (no extension; the backend suffix is added automatically).
-    #[arg(short, long, required = true)]
-    pub output: Box<str>,
-
-    #[arg(long, value_enum, default_value = "zarr")]
-    pub backend: SparseIoBackend,
-
-    /// Produce a `.zarr.zip` archive instead of a `.zarr` directory.
-    #[arg(long, default_value_t = false)]
-    pub zip: bool,
-}
-
-/// Reference-conditioned copula simulator (scDesign / scDesign2 / scDesign3).
-pub fn run_copula_sim(cmd: &CopulaSimArgs) -> anyhow::Result<()> {
-    let effective_output = apply_zip_flag(&cmd.output, cmd.zip);
-    let output: Box<str> = strip_backend_suffix(&effective_output).into();
-
-    dirname(&output).as_deref().map(mkdir).transpose()?;
-
-    let backend = cmd.backend.clone();
-    let (_, backend_file) = resolve_backend_file(&effective_output, Some(backend.clone()))?;
-
-    info!("opening reference: {}", &cmd.reference);
-    let sc = open_reference(&cmd.reference)?;
-    let column_names = sc.column_names()?;
-    let row_names = sc.row_names()?;
-
-    let partition = match (&cmd.cell_type_file, cmd.n_clusters) {
-        (Some(path), _) => {
-            let (labels, label_names) = load_cell_type_labels(path, &column_names)?;
-            PartitionMode::Labels {
-                labels,
-                label_names,
-            }
-        }
-        (None, k) if k > 0 => PartitionMode::AutoCluster {
-            n_clusters: k,
-            knn: cmd.knn,
-            rsvd_rank: cmd.rsvd_rank,
-            hvg_for_clustering: if cmd.hvg_for_clustering > 0 {
-                cmd.hvg_for_clustering
-            } else {
-                cmd.n_hvg
-            },
-        },
-        _ => PartitionMode::Single,
-    };
-
-    let fit_args = CopulaFitArgs {
-        sc: &sc,
-        partition,
-        n_hvg: cmd.n_hvg,
-        copula_rank: cmd.copula_rank,
-        regularization: cmd.regularization,
-        r_floor: cmd.r_floor,
-        n_batches: cmd.n_batches,
-        batch_effect_sigma: cmd.batch_effect_sigma,
-        n_chromosomes: cmd.n_chromosomes,
-        cnv_events_per_chr: cmd.cnv_events_per_chr,
-        cnv_block_frac: cmd.cnv_block_frac,
-        cnv_gain_fold: cmd.cnv_gain_fold,
-        cnv_loss_fold: cmd.cnv_loss_fold,
-        n_housekeeping: cmd.n_housekeeping,
-        housekeeping_fold: cmd.housekeeping_fold,
-        rseed: cmd.rseed,
-    };
-
-    let model = fit_copula(&fit_args)?;
-    let sample = sample_copula(&model, cmd.n_cells, cmd.rseed)?;
-    info!(
-        "sampled {} cells producing {} nonzero triplets",
-        sample.n_cells_total,
-        sample.triplets.len()
-    );
-
-    // Output sparse backend.
-    let cols: Vec<Box<str>> = (0..sample.n_cells_total)
-        .map(|j| {
-            let cluster = sample.cluster_assignment[j];
-            let batch = sample.batch_assignment[j];
-            format!(
-                "synthetic_{}_{}_{}",
-                model.clusters[cluster].label_name, batch, j
-            )
-            .into_boxed_str()
-        })
-        .collect();
-    let mtx_shape = (model.n_genes, sample.n_cells_total, sample.triplets.len());
-    let mut data = create_sparse_from_triplets(
-        &sample.triplets,
-        mtx_shape,
-        Some(&backend_file),
-        Some(&backend),
-    )?;
-    data.register_row_names_vec(&row_names);
-    data.register_column_names_vec(&cols);
-    finalize_zarr_output(&backend_file, &effective_output)?;
-    info!("wrote sparse backend: {}", &backend_file);
-
-    write_companion_files(&model, &sample, &output, &cols)?;
-
-    info!("done");
-    Ok(())
-}
-
-fn write_companion_files(
-    model: &CopulaModel,
-    sample: &crate::copula::SampleOut,
-    output: &str,
-    cols: &[Box<str>],
-) -> anyhow::Result<()> {
-    let cluster_file = format!("{}.cluster_membership.tsv.gz", output);
-    let mut cluster_lines: Vec<Box<str>> = vec!["cell\tcluster\tbatch".into()];
-    for (j, name) in cols.iter().enumerate() {
-        let c = sample.cluster_assignment[j];
-        let b = sample.batch_assignment[j];
-        cluster_lines
-            .push(format!("{}\t{}\t{}", name, model.clusters[c].label_name, b).into_boxed_str());
-    }
-    write_lines(&cluster_lines, &cluster_file)?;
-    info!("cluster membership: {}", cluster_file);
-
-    let marg_file = format!("{}.marginals.tsv.gz", output);
-    let mut marg_lines: Vec<Box<str>> = vec!["cluster\tgene\tmu\tr\tis_hvg".into()];
-    for cluster in &model.clusters {
-        let mut hvg_set = vec![false; model.n_genes];
-        for &h in &cluster.hvg_indices {
-            hvg_set[h] = true;
-        }
-        for (g, fit) in cluster.marginals.iter().enumerate() {
-            let r_str = if fit.r.is_finite() {
-                format!("{:.6}", fit.r)
-            } else {
-                "inf".to_string()
-            };
-            marg_lines.push(
-                format!(
-                    "{}\t{}\t{:.6}\t{}\t{}",
-                    cluster.label_name, model.gene_names[g], fit.mu, r_str, hvg_set[g] as u8,
-                )
-                .into_boxed_str(),
-            );
-        }
-    }
-    write_lines(&marg_lines, &marg_file)?;
-    info!("per-gene marginals: {}", marg_file);
-
-    let n_batches = model.effects.n_batches();
-    if n_batches > 1 {
-        let ln_batch_file = format!("{}.ln_batch.parquet", output);
-        let batch_names: Vec<Box<str>> = (0..n_batches)
-            .map(|b| format!("batch_{}", b).into_boxed_str())
-            .collect();
-        model.effects.ln_batch_delta.to_parquet_with_names(
-            &ln_batch_file,
-            (Some(&model.gene_names), Some("feature")),
-            Some(&batch_names),
-        )?;
-        info!("batch shifts: {}", ln_batch_file);
-    }
-
-    if let Some(cnv) = &model.effects.cnv {
-        let state_labels = ["loss", "neutral", "gain"];
-
-        let cnv_file = format!("{}.cnv_ground_truth.tsv.gz", output);
-        let cnv_lines: Vec<Box<str>> = std::iter::once("gene\tchromosome\tposition\tstate".into())
-            .chain(
-                model
-                    .gene_names
-                    .iter()
-                    .zip(cnv.chromosomes.iter())
-                    .zip(cnv.positions.iter())
-                    .zip(cnv.cnv_states.iter())
-                    .map(|(((g, chr), pos), &st)| {
-                        format!("{}\t{}\t{}\t{}", g, chr, pos, state_labels[st as usize])
-                            .into_boxed_str()
-                    }),
-            )
-            .collect();
-        write_lines(&cnv_lines, &cnv_file)?;
-        info!("CNV ground truth: {}", cnv_file);
-
-        let per_batch_file = format!("{}.cnv_per_batch_ground_truth.tsv.gz", output);
-        let mut per_batch_lines: Vec<Box<str>> =
-            vec!["gene\tchromosome\tposition\tbatch\tstate".into()];
-        for (b, batch_states) in cnv.cnv_states_db.iter().enumerate() {
-            for (g, &st) in batch_states.iter().enumerate() {
-                if st != 1 {
-                    per_batch_lines.push(
-                        format!(
-                            "{}\t{}\t{}\t{}\t{}",
-                            model.gene_names[g],
-                            cnv.chromosomes[g],
-                            cnv.positions[g],
-                            b,
-                            state_labels[st as usize],
-                        )
-                        .into_boxed_str(),
-                    );
-                }
-            }
-        }
-        write_lines(&per_batch_lines, &per_batch_file)?;
-        info!("per-batch CNV ground truth: {}", per_batch_file);
-
-        let tree_file = format!("{}.cnv_clone_tree.tsv.gz", output);
-        let tree_lines: Vec<Box<str>> = std::iter::once("clone\tparent".into())
-            .chain(
-                cnv.clone_parent
-                    .iter()
-                    .enumerate()
-                    .map(|(b, &p)| format!("{}\t{}", b, p).into_boxed_str()),
-            )
-            .collect();
-        write_lines(&tree_lines, &tree_file)?;
-        info!("clone tree: {}", tree_file);
-
-        let gff_file = format!("{}.genes.gff.gz", output);
-        let gff_lines: Vec<Box<str>> = std::iter::once("##gff-version 3".into())
-            .chain(
-                model
-                    .gene_names
-                    .iter()
-                    .zip(cnv.chromosomes.iter())
-                    .zip(cnv.positions.iter())
-                    .map(|((gene_name, chr), &pos)| {
-                        let start = pos + 1;
-                        let end = start + 1000;
-                        format!(
-                            "{}\tsimulation\tgene\t{}\t{}\t.\t+\t.\tgene_name={}",
-                            chr, start, end, gene_name,
-                        )
-                        .into_boxed_str()
-                    }),
-            )
-            .collect();
-        write_lines(&gff_lines, &gff_file)?;
-        info!("synthetic gene annotations: {}", gff_file);
-    }
-
-    if !model.effects.hk_indices.is_empty() {
-        let hk_file = format!("{}.housekeeping.tsv.gz", output);
-        let hk_lines: Vec<Box<str>> = std::iter::once("gene\tfold".into())
-            .chain(model.effects.hk_indices.iter().map(|&g| {
-                format!("{}\t{:.4}", model.gene_names[g], model.effects.hk_fold).into_boxed_str()
-            }))
-            .collect();
-        write_lines(&hk_lines, &hk_file)?;
-        info!("housekeeping genes: {}", hk_file);
-    }
-
-    Ok(())
-}
