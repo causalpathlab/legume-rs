@@ -14,7 +14,7 @@
 //! the newly-written artifacts.
 
 mod args;
-mod inputs;
+pub mod inputs;
 mod run;
 
 pub use args::AnnotateArgs;

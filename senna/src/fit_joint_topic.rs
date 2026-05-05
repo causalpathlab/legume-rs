@@ -518,7 +518,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         pb_gene_suffix: Some("pb_gene.parquet"),
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
-        default_colour_by: "topic",
+        default_colour_by: "cluster",
     })?;
 
     info!("Done");

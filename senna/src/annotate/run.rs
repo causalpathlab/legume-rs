@@ -236,6 +236,7 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
     manifest.annotate.cluster_celltype_es = Some(rel(&es_path));
     manifest.annotate.cluster_expression = Some(rel(&cell_expr_path));
     manifest.annotate.markers = Some(args.markers.to_string());
+    manifest.defaults.colour_by = Some("annotation".into());
     manifest.save(Path::new(args.from.as_ref()))?;
 
     info!("senna annotate complete");
