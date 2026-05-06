@@ -102,6 +102,27 @@ pub fn preferred_posterior_log_mean(collapsed: &CollapsedOut) -> &Mat {
     )
 }
 
+/// Build per-level feature coarsenings via the multilevel pipeline:
+/// shared KNN + bottom-up union-find init + top-down DC-Poisson refinement.
+/// Used by every senna fit pipeline that exposes `--max-coarse-features`.
+/// Defaults: `knn_k = 16`, `feature_weighting = None`.
+pub fn coarsen_features_multilevel(
+    sketch_ds: &Mat,
+    level_targets: &[usize],
+    dc_poisson: data_beans_alg::dc_poisson::RefineParams,
+) -> anyhow::Result<Vec<FeatureCoarsening>> {
+    let knn = FeatureKnnContext::from_sketch(sketch_ds, 16)?;
+    let init = compute_multilevel_feature_coarsening(sketch_ds, level_targets, &knn)?;
+    let params = MultilevelRefineParams {
+        dc_poisson: data_beans_alg::dc_poisson::RefineParams {
+            feature_weighting: data_beans_alg::dc_poisson::FeatureWeighting::None,
+            ..dc_poisson
+        },
+    };
+    let refined = refine_multilevel_feature_coarsening(sketch_ds, init, &knn, &params)?;
+    Ok(refined.levels)
+}
+
 /// Compute per-level epoch allocation for progressive training.
 ///
 /// Coarser levels (lower index) get more epochs: `w[i] = num_levels - i`.

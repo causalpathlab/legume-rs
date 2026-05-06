@@ -672,7 +672,7 @@ pub fn graph_coarsen_multilevel(
                     cell_to_entity,
                     n_coarsen,
                     cfg.num_genes,
-                    cfg.params.gene_weighting,
+                    cfg.params.feature_weighting,
                 )
                 .expect("DC-Poisson context build failed"),
             )

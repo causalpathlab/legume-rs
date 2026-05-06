@@ -15,7 +15,7 @@ use crate::util::common::*;
 use crate::util::knn_graph::KnnGraph;
 use data_beans_alg::dc_poisson::{
     compact_labels, intersect_with_siblings_fallback, refine_with_proposer_guarded,
-    CandidateProposer, GeneWeighting, MoveGuard, Profiles, RefineParams,
+    CandidateProposer, FeatureWeighting, MoveGuard, Profiles, RefineParams,
 };
 use matrix_util::utils::generate_minibatch_intervals;
 use rand::rngs::SmallRng;
@@ -323,8 +323,8 @@ pub struct DcPoissonContext<'a> {
 }
 
 impl<'a> DcPoissonContext<'a> {
-    /// Build the per-axis state once. `gene_weighting` matches
-    /// [`RefineParams::gene_weighting`] — kept explicit here so a context
+    /// Build the per-axis state once. `feature_weighting` matches
+    /// [`RefineParams::feature_weighting`] — kept explicit here so a context
     /// can be constructed without a full [`RefineParams`].
     pub fn build(
         data: &SparseIoVec,
@@ -332,12 +332,12 @@ impl<'a> DcPoissonContext<'a> {
         cell_to_entity: Vec<usize>,
         num_entities: usize,
         num_genes: usize,
-        gene_weighting: GeneWeighting,
+        feature_weighting: FeatureWeighting,
     ) -> anyhow::Result<Self> {
         let gene_sums =
             build_entity_gene_sums(data, &cell_to_entity, num_entities, num_genes, None)?;
         let mut profiles = Profiles::from_gene_sums(&gene_sums, num_genes);
-        profiles.apply_gene_weighting(gene_weighting);
+        profiles.apply_feature_weighting(feature_weighting);
         let guard = ConnectivityGuard::new(graph, &cell_to_entity, num_entities);
         Ok(Self {
             graph,

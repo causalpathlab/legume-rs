@@ -32,6 +32,10 @@ pub use matrix_util::dmatrix_util::concatenate_horizontal;
 
 pub use data_beans_alg::collapse_data::*;
 pub use data_beans_alg::feature_coarsening::*;
+pub use data_beans_alg::feature_coarsening_multilevel::{
+    compute_multilevel_feature_coarsening, refine_multilevel_feature_coarsening, FeatureKnnContext,
+    MultilevelRefineParams,
+};
 pub use data_beans_alg::random_projection::*;
 
 /// Build `{prefix}0..{prefix}{k-1}` axis-id column names — the explicit

@@ -270,7 +270,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 params: data_beans_alg::dc_poisson::RefineParams {
                     num_gibbs: 10,
                     num_greedy: 5,
-                    gene_weighting: data_beans_alg::dc_poisson::GeneWeighting::FisherInfoNb,
+                    feature_weighting: data_beans_alg::dc_poisson::FeatureWeighting::FisherInfoNb,
                     seed: c.seed,
                     gibbs_stagnation: 0.005,
                     profile_source: data_beans_alg::dc_poisson::ProfileSource::Raw,

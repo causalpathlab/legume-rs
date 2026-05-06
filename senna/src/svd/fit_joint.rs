@@ -174,7 +174,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,
             refine: Some(data_beans_alg::refine_multilevel::RefineParams {
-                gene_weighting: args.refine_weighting.into(),
+                feature_weighting: args.refine_weighting.into(),
                 ..data_beans_alg::refine_multilevel::RefineParams::default()
             }),
         },
