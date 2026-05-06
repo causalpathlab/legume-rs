@@ -112,7 +112,7 @@ impl CopulaCovariance {
 
     /// Take the top `new_rank` columns of `self.factor` and re-fill the
     /// per-row residual to keep `‖F[h,:]‖² + ridge_sd[h]² = 1`. Used by
-    /// the two-stage simulator's `--batch-program biology` mode: batch
+    /// the two-stage simulator's `--batch-program empirical` mode: batch
     /// shifts ride the dominant gene-gene correlation axes from the
     /// reference-fitted copula.
     pub fn truncate_rank(&self, new_rank: usize) -> Self {
@@ -135,7 +135,7 @@ impl CopulaCovariance {
     /// per-row-rescale so each gene has unit marginal variance under
     /// `Var(z*[h]) = ‖F[h,:]‖² + ridge_sd[h]² = 1`. Used by the two-stage
     /// simulator's `--batch-program random` mode: batch shifts live on a
-    /// random `rank`-dim subspace independent of biology.
+    /// random `rank`-dim subspace independent of the reference's structure.
     ///
     /// `rank = 0` produces an isotropic sampler (`F` empty, all weight on
     /// the per-gene ridge), equivalent to Splatter-style iid log-normal
@@ -394,7 +394,7 @@ mod tests {
 
     /// `truncate_rank` keeps the top-r columns of an existing rank-R fit
     /// and refills the per-row residual to maintain unit marginal variance.
-    /// Used by the simulator's `--batch-program biology` mode.
+    /// Used by the simulator's `--batch-program empirical` mode.
     #[test]
     fn truncate_rank_preserves_unit_variance() {
         let g = 25;

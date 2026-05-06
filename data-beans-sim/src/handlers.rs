@@ -26,15 +26,16 @@ use crate::copula::gaussian::CopulaCovariance;
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum BatchProgram {
     /// `F_batch` is a fresh `(D, batch_rank)` random factor independent of
-    /// the gene-gene biology. Batch shifts ride an arbitrary low-dim
-    /// subspace — easier to disentangle from biology, useful as a sanity
-    /// baseline.
+    /// the reference's gene-gene structure. Batch shifts ride an arbitrary
+    /// low-dim subspace — easier to disentangle from real co-expression,
+    /// useful as a sanity baseline.
     Random,
     /// `F_batch` reuses the top `batch_rank` columns of the reference's
-    /// gene-gene copula factor `Σ̂_gene`. Batch shifts mimic biological
-    /// co-expression axes — the worst-case stress test for batch-correction
-    /// methods, since batch programs look like cell-state programs.
-    Biology,
+    /// fitted gene-gene copula factor `Σ̂_gene` — i.e. the leading PCs of
+    /// the *empirical* gene-gene correlation in the reference. Batch shifts
+    /// align with the same axes as real co-expression, the worst-case
+    /// stress test for batch-correction methods.
+    Empirical,
 }
 
 #[derive(Args, Debug)]
@@ -130,14 +131,15 @@ pub struct RunSimulateArgs {
     /// Rank of the batch-program subspace (reference mode). `0` = each
     /// gene's batch shift is iid log-normal (Splatter-style). `2-3` =
     /// genes co-shift along a low-dim subspace ("batch program"). Higher
-    /// ranks make batch effects look more like biology.
+    /// ranks make batch effects look more structured.
     #[arg(long, default_value_t = 2)]
     pub batch_rank: usize,
 
     /// Where the batch-program subspace comes from when `--batch-rank > 0`.
     /// `random` = fresh low-dim random factor (default; arbitrary subspace).
-    /// `biology` = top columns of the reference's gene-gene copula
-    /// factor (worst case: batch shifts mimic biological axes).
+    /// `empirical` = top columns of the reference's fitted gene-gene copula
+    /// factor (worst case: batch shifts ride the reference's real
+    /// co-expression PCs).
     #[arg(long, value_enum, default_value_t = BatchProgram::Random)]
     pub batch_program: BatchProgram,
 
@@ -446,7 +448,7 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 /// where `δ_{:,b} ~ N(0, F_b · F_bᵀ + diag(1 − ‖F_b‖²))` has unit per-gene
 /// variance by construction. `F_b`'s rank is `--batch-rank`; its construction
 /// is controlled by `--batch-program` (`random` = fresh low-rank factor,
-/// `biology` = top columns of the gene-gene copula `Σ̂`).
+/// `empirical` = top PCs of the reference's fitted gene-gene copula `Σ̂`).
 ///
 /// Counts are sampled via a unified copula PIT pipeline:
 /// `u = Φ(z*)`, `y = F⁻¹_NB(u; λ, r̂_g)`, with `z*` drawn from the gene-gene
@@ -520,7 +522,7 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
         CopulaCovariance::random_low_rank(dd, 0, &mut rng)
     } else {
         match cmd_args.batch_program {
-            BatchProgram::Biology => fit.copula.truncate_rank(cmd_args.batch_rank),
+            BatchProgram::Empirical => fit.copula.truncate_rank(cmd_args.batch_rank),
             BatchProgram::Random => {
                 CopulaCovariance::random_low_rank(dd, cmd_args.batch_rank, &mut rng)
             }
