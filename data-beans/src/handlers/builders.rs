@@ -3,7 +3,7 @@ use crate::hdf5_io::*;
 use crate::sparse_io::*;
 use crate::sparse_util::*;
 use crate::utilities::name_matching::{
-    compose_id_name, filter_row_indices_by_type, make_names_unique,
+    compose_id_name, filter_row_indices_by_type, make_names_unique, RowTypeFilter,
 };
 use data_beans::zarr_io::*;
 
@@ -44,10 +44,11 @@ pub struct FromMtxArgs {
     #[arg(long, default_value_t = 2)]
     pub row_name_columns: usize,
 
-    /// Keep only rows whose feature_type (column 3 of `--row`) contains this
-    /// string. Default `Gene Expression` matches the 10x mtx default. Set to
-    /// empty to keep everything.
-    #[arg(long, default_value = "Gene Expression")]
+    /// Comma-separated patterns; row is kept if its feature_type (column 3
+    /// of `--row`) contains ANY of them (case-insensitive). Default
+    /// `Gene Expression,Peaks` covers both 10x scRNA and 10x ATAC.
+    /// Set to empty to keep everything.
+    #[arg(long, default_value = "Gene Expression,Peaks")]
     pub select_row_type: Box<str>,
 
     /// Drop rows whose feature_type contains this string. Applied after
@@ -193,17 +194,19 @@ pub struct From10xMatrixArgs {
 
     #[arg(
         long,
-        default_value = "gene",
-        help = "Select row type",
-        long_help = "Select row type for inclusion. Rows are included if their type contains this value."
+        default_value = "gene,peak",
+        help = "Select row type (comma-separated patterns; ANY match keeps the row)",
+        long_help = "Select row type for inclusion. Comma-separated case-insensitive substrings; \n\
+		     a row is kept if its type contains any pattern. Default 'gene,peak' \n\
+		     keeps both Gene Expression and ATAC Peaks."
     )]
     pub select_row_type: Box<str>,
 
     #[arg(
         long,
         default_value = "aggregate",
-        help = "Remove row type",
-        long_help = "Remove rows if their type contains this value."
+        help = "Remove row type (comma-separated patterns; ANY match drops the row)",
+        long_help = "Remove rows if their type contains any of these comma-separated patterns."
     )]
     pub remove_row_type: Box<str>,
 
@@ -569,17 +572,19 @@ pub struct FromZarrArgs {
 
     #[arg(
         long,
-        default_value = "gene",
-        help = "Select row type",
-        long_help = "Select row type for inclusion. Rows are included if their type contains this value."
+        default_value = "gene,peak",
+        help = "Select row type (comma-separated patterns; ANY match keeps the row)",
+        long_help = "Select row type for inclusion. Comma-separated case-insensitive substrings; \n\
+		     a row is kept if its type contains any pattern. Default 'gene,peak' \n\
+		     keeps both Gene Expression and ATAC Peaks."
     )]
     pub select_row_type: Box<str>,
 
     #[arg(
         long,
         default_value = "aggregate",
-        help = "Remove row type",
-        long_help = "Remove rows if their type contains this value."
+        help = "Remove row type (comma-separated patterns; ANY match drops the row)",
+        long_help = "Remove rows if their type contains any of these comma-separated patterns."
     )]
     pub remove_row_type: Box<str>,
 
@@ -679,22 +684,20 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
         if let Some(row_types) = rows.types.as_ref() {
             log_feature_type_histogram(mtx_file, row_types);
 
-            // Single pass: classify each row as HTO, keep, or drop.
-            let sel_lc = args.select_row_type.to_ascii_lowercase();
-            let rem_lc = args.remove_row_type.to_ascii_lowercase();
-            let hto_lc = args.hto_row_type.to_ascii_lowercase();
-            let hto_enabled = !hto_lc.is_empty();
+            let sel = RowTypeFilter::parse(&args.select_row_type);
+            let rem = RowTypeFilter::parse(&args.remove_row_type);
+            let hto = RowTypeFilter::parse(&args.hto_row_type);
+            let hto_enabled = !hto.is_empty();
 
             let mut keep_rows: Vec<usize> = Vec::new();
             let mut hto_rows: Vec<usize> = Vec::new();
             for (i, t) in row_types.iter().enumerate() {
-                let low = t.to_ascii_lowercase();
-                if hto_enabled && low.contains(&hto_lc) {
+                if hto_enabled && hto.matches(t) {
                     hto_rows.push(i);
                     continue;
                 }
-                let selected = sel_lc.is_empty() || low.contains(&sel_lc);
-                let removed = !rem_lc.is_empty() && low.contains(&rem_lc);
+                let selected = sel.is_empty() || sel.matches(t);
+                let removed = !rem.is_empty() && rem.matches(t);
                 if selected && !removed {
                     keep_rows.push(i);
                 }
@@ -903,12 +906,72 @@ fn read_mtx_feature_rows(
         types.push(ty);
     }
 
+    // BED-shaped peaks file (e.g. 10x ATAC `peaks.bed`): col1 is a chromosome
+    // and cols 2/3 are integer start/end coordinates. Reshape so display
+    // names come out as `chr:start-end` and feature_type filtering is
+    // bypassed (BED has no feature_type column).
+    if any_type && looks_like_bed(&ids, &names, &types) {
+        info!(
+            "{}: detected BED-shaped peaks file; row names will be formatted as chr:start-end",
+            row_file
+        );
+        let n = ids.len();
+        let mut new_ids = Vec::with_capacity(n);
+        for i in 0..n {
+            new_ids.push(format!("{}:{}-{}", ids[i], names[i], types[i]).into_boxed_str());
+        }
+        return Ok(MtxFeatureRows {
+            ids: new_ids,
+            names: vec![Box::from(""); n],
+            types: None,
+            row_name_columns,
+        });
+    }
+
     Ok(MtxFeatureRows {
         ids,
         names,
         types: any_type.then_some(types),
         row_name_columns,
     })
+}
+
+/// Heuristic: rows look like BED when col1 is a chromosome name and cols 2/3
+/// parse as non-negative integers. We sample up to the first 16 non-empty
+/// rows (so a stray header line doesn't fool us) and require ALL of them to
+/// pass — one mismatch flips the file to "not BED".
+fn looks_like_bed(ids: &[Box<str>], starts: &[Box<str>], ends: &[Box<str>]) -> bool {
+    let mut checked = 0usize;
+    let mut matched = 0usize;
+    for ((id, start), end) in ids.iter().zip(starts).zip(ends) {
+        if checked >= 16 {
+            break;
+        }
+        let (id, start, end) = (id.as_ref(), start.as_ref(), end.as_ref());
+        if id.is_empty() || start.is_empty() || end.is_empty() {
+            continue;
+        }
+        checked += 1;
+        if is_chromosome_name(id) && start.parse::<u64>().is_ok() && end.parse::<u64>().is_ok() {
+            matched += 1;
+        }
+    }
+    checked >= 1 && matched == checked
+}
+
+/// Accepts `chr1`/`chr10`/`chrX` (UCSC) and bare `1`/`X`/`MT` (Ensembl).
+fn is_chromosome_name(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 3 && bytes[..3].eq_ignore_ascii_case(b"chr") {
+        return true;
+    }
+    if matches!(
+        bytes,
+        b"X" | b"x" | b"Y" | b"y" | b"M" | b"m" | b"MT" | b"Mt" | b"mt"
+    ) {
+        return true;
+    }
+    s.parse::<u32>().is_ok()
 }
 
 pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
