@@ -19,10 +19,10 @@ use rustc_hash::FxHashMap as HashMap;
 pub struct DiffArgs {
     #[arg(
         required = true,
-        help = "Data files of either `.zarr` `.h` format",
-        long_help = "Data files of either `.zarr` or `.h5` format. \n\
-		     All the formats in the given list should be identical. \n\
-		     You can convert `.mtx` to `.zarr` or `.h5` using the `data-beans`"
+        help = "Single-cell data files (.zarr / .h5)",
+        long_help = "Single-cell sparse data files in `.zarr` or `.h5` format.\n\
+                     All files in the list must share the same format and gene order.\n\
+                     Convert `.mtx` to `.zarr` / `.h5` with the `data-beans` CLI."
     )]
     data_files: Vec<Box<str>>,
 
@@ -31,11 +31,10 @@ pub struct DiffArgs {
         long,
         value_delimiter = ',',
         required = true,
-        help = "Individual membership file names (comma-separated).",
-        long_help = "Individual membership files (comma-separated file names). \n\
-		     Each line in each file can specify: \n\
-		     * just  individual ID or\n\
-		     * (1) Cell and (2) individual ID pair."
+        help = "Individual membership files (comma-separated)",
+        long_help = "Individual membership files (comma-separated). Each line is either:\n  \
+                     * an individual ID (one per cell, in cell order), or\n  \
+                     * a (cell, individual ID) pair."
     )]
     indv_files: Vec<Box<str>>,
 
@@ -43,21 +42,19 @@ pub struct DiffArgs {
         short = 'e',
         long,
         required = true,
-        help = "Exposure assignment file.",
-        long_help = "Each line corresponds to: \n\
-		     (1) individual name and (2) exposure name."
+        help = "Exposure assignment file",
+        long_help = "Each line is a (individual name, exposure name) pair."
     )]
     exposure_assignment_file: Box<str>,
 
     #[arg(
         short = 't',
-        long = "topic-assignment-files",
+        long,
         value_delimiter = ',',
-        help = "Latent topic assignment file names (comma-separated).",
-        long_help = "Latent topic assignment files (comma-separated file names). \n\
-		     Each line in each file can specify:\n\
-		     * just topic name or \n\
-		     * (1) cell and (2) topic name pair."
+        help = "Latent topic assignment files (comma-separated)",
+        long_help = "Latent topic assignment files (comma-separated). Each line is either:\n  \
+                     * a topic name (one per cell, in cell order), or\n  \
+                     * a (cell, topic name) pair."
     )]
     topic_assignment_files: Option<Vec<Box<str>>>,
 
@@ -65,18 +62,16 @@ pub struct DiffArgs {
         short = 'r',
         long,
         value_delimiter = ',',
-        help = "Latent topic proportion file names (comma-separated).",
-        long_help = "Latent topic proportion files (comma-separated file names). \n\
-		     Each file contains a full `cell x topic` matrix."
+        help = "Latent topic proportion files (comma-separated)",
+        long_help = "Latent topic proportion files (comma-separated). Each file is a full\n\
+                     `cell × topic` matrix."
     )]
     topic_proportion_files: Option<Vec<Box<str>>>,
 
     #[arg(
         long,
         default_value = "logit",
-        help = "Is topic proportion matrix of probability?",
-        long_help = "Specify if the topic proportion matrix is of probability type. \n\
-		     Default is `logit`-valued."
+        help = "Scale of the topic-proportion matrix (logit or prob)"
     )]
     topic_proportion_value: TopicValue,
 
@@ -84,8 +79,7 @@ pub struct DiffArgs {
         short = 'n',
         long,
         default_value_t = 10,
-        help = "Number of k-nearest neighbours within each condition.",
-        long_help = "Specify the number of k-nearest neighbours within each condition."
+        help = "Number of k-nearest neighbours within each condition"
     )]
     knn: usize,
 
@@ -93,39 +87,31 @@ pub struct DiffArgs {
         short = 'p',
         long,
         default_value_t = 10,
-        help = "Projection dimension to account for confounding factors.",
-        long_help = "Projection dimension to account for confounding factors."
+        help = "Projection dimension for confounder factors"
     )]
     proj_dim: usize,
 
     #[arg(
         long,
         default_value_t = 100,
-        help = "Block size for parallel processing.",
-        long_help = "Block size for parallel processing."
+        help = "Block size for parallel column reads"
     )]
     block_size: usize,
 
-    #[arg(
-        long,
-        help = "Number of iterations for optimization.",
-        long_help = "Number of iterations for optimization."
-    )]
+    #[arg(long, help = "Number of iterations for optimization")]
     num_opt_iter: Option<usize>,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Hyperparameter a0 in Gamma(a0, b0).",
-        long_help = "Hyperparameter a0 in Gamma(a0, b0)."
+        help = "Hyperparameter a0 in Gamma(a0, b0)"
     )]
     a0: f32,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Hyperparameter b0 in Gamma(a0, b0).",
-        long_help = "Hyperparameter b0 in Gamma(a0, b0)."
+        help = "Hyperparameter b0 in Gamma(a0, b0)"
     )]
     b0: f32,
 
@@ -133,36 +119,35 @@ pub struct DiffArgs {
         short,
         long,
         required = true,
-        help = "Output directory.",
-        long_help = "Output directory."
+        value_name = "PREFIX",
+        help = "Output file name prefix"
     )]
-    out: Box<str>,
+    output: Box<str>,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "Number of exposure-label permutations for empirical p-values."
+        help = "Number of exposure-label permutations for empirical p-values"
     )]
     n_permutations: usize,
 
     #[arg(
         long,
         default_value_t = 42,
-        help = "Random seed for permutation testing."
+        help = "Random seed for permutation testing"
     )]
     permutation_seed: u64,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Preload all the columns data.",
-        long_help = "Preload all the columns data."
+        help = "Preload all column (cell) data into memory before fitting"
     )]
     preload_data: bool,
 
     #[arg(
         long,
-        help = "Known covariate matrix file (tsv.gz, n_indv x n_covar).",
+        help = "Known covariate matrix file (tsv.gz, n_indv × n_covar)",
         long_help = "Provide a known individual-level covariate matrix V instead of\n\
                      discovering confounders by random projection. The file should be\n\
                      a tab-delimited matrix (n_indv x n_covar) in .tsv.gz format.\n\
@@ -174,7 +159,7 @@ pub struct DiffArgs {
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Separate SC data files (.zarr/.h5) for confounder adjustment.",
+        help = "Separate SC data files (.zarr/.h5) for confounder adjustment",
         long_help = "Provide separate single-cell data (e.g., scRNA-seq) for computing\n\
                      the confounder-adjustment projection. KNN matching will be based on\n\
                      these data, while y1/y0 counts come from the primary data files.\n\
@@ -185,7 +170,7 @@ pub struct DiffArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Disable residual collider adjustment of topic proportions.",
+        help = "Disable residual collider adjustment of topic proportions",
         long_help = "By default, the exposure-driven shift is removed from topic logits\n\
                      before analysis to break collider bias (X -> A <- U). Use this flag\n\
                      to disable this adjustment, e.g. when cell type is known not to be\n\
@@ -197,9 +182,9 @@ pub struct DiffArgs {
     no_residualize_topics: bool,
 
     #[arg(
-        long = "no-adjust-housekeeping",
+        long,
         default_value_t = false,
-        help = "Disable NB-Fisher housekeeping gene adjustment.",
+        help = "Disable NB-Fisher housekeeping gene adjustment",
         long_help = "By default, y1/y0 sufficient statistics are row-scaled by NB-Fisher\n\
                      weights w_g = 1 / (1 + π_g · s̄ · φ(μ_g)) after accumulation, so\n\
                      τ, μ, γ posteriors contract toward the prior for housekeeping\n\
@@ -208,9 +193,9 @@ pub struct DiffArgs {
     no_adjust_housekeeping: bool,
 
     #[arg(
-        long = "refine",
+        long,
         default_value_t = false,
-        help = "Refine cell→pseudobulk membership via senna's multilevel DC-Poisson pass.",
+        help = "Refine cell → pseudobulk membership via senna's multilevel DC-Poisson pass",
         long_help = "When set, cocoa routes pseudobulk assignment through the same\n\
                      multilevel path senna uses (collapse_columns_multilevel_vec with\n\
                      BBKNN + DC-Poisson refinement). Cells are reassigned across\n\
@@ -222,16 +207,16 @@ pub struct DiffArgs {
     refine: bool,
 
     #[arg(
-        long = "refine-num-levels",
+        long,
         default_value_t = 2,
-        help = "Number of coarsening levels for multilevel refinement."
+        help = "Number of coarsening levels for multilevel refinement"
     )]
     refine_num_levels: usize,
 
     #[arg(
-        long = "refine-knn-super-cells",
+        long,
         default_value_t = 10,
-        help = "BBKNN fan-out for multilevel refinement."
+        help = "BBKNN fan-out for multilevel refinement"
     )]
     refine_knn_super_cells: usize,
 
@@ -244,7 +229,7 @@ pub struct DiffArgs {
 /////////////////////////////////////
 
 pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
-    mkdir_parent(&args.out)?;
+    mkdir_parent(&args.output)?;
 
     let mut data = read_input_data(InputDataArgs {
         data_files: args.data_files,
@@ -447,7 +432,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         &indv_names,
         &topic_names,
         &gene_names,
-        &args.out,
+        &args.output,
     )?;
 
     // Compute real contrast before consuming parameters
@@ -474,7 +459,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         (Some(&gene_names), Some("gene")),
         (Some(&indv_exposure_names), Some("individual_exposure")),
         Some(&topic_names),
-        &format!("{}.effect.parquet", args.out),
+        &format!("{}.effect.parquet", args.output),
     )?;
 
     // Permutation testing
@@ -578,7 +563,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
             ));
         }
         let perm_mat = Mat::from_columns(&columns);
-        let perm_file = format!("{}.perm.parquet", args.out);
+        let perm_file = format!("{}.perm.parquet", args.output);
         perm_mat.to_parquet_with_names(
             &perm_file,
             (Some(&gene_names), Some("gene")),
