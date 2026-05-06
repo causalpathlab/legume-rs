@@ -26,30 +26,81 @@ pub fn make_names_unique(names: &mut [Box<str>]) -> usize {
 }
 
 /// Combine feature IDs and names into composite `id_name` strings.
-/// If a name is empty, the ID is used as-is.
+/// If a name is empty or already equals the ID (e.g. 10x ATAC peaks where
+/// both `features/id` and `features/name` are `chr1:1000-2000`), the ID is
+/// used as-is to avoid `chr1:1000-2000_chr1:1000-2000` duplication.
 pub fn compose_id_name(ids: Vec<Box<str>>, names: Vec<Box<str>>) -> Vec<Box<str>> {
     ids.into_iter()
         .zip(names)
         .map(|(id, name)| {
-            if !name.is_empty() {
-                format!("{}_{}", id, name).into_boxed_str()
-            } else {
+            if name.is_empty() || name.as_ref() == id.as_ref() {
                 id
+            } else {
+                format!("{}_{}", id, name).into_boxed_str()
             }
         })
         .collect()
 }
 
+/// Comma-separated case-insensitive substring filter, parsed once and matched
+/// many times. Used by `--select-row-type` / `--remove-row-type` /
+/// `--hto-row-type` so callers can pass e.g. `"gene,peak"` to match either
+/// "Gene Expression" or "Peaks".
+pub struct RowTypeFilter {
+    patterns: Vec<Box<str>>,
+}
+
+impl RowTypeFilter {
+    pub fn parse(s: &str) -> Self {
+        let patterns = s
+            .split(',')
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(|p| p.to_ascii_lowercase().into_boxed_str())
+            .collect();
+        Self { patterns }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    /// True if any pattern is an ASCII-case-insensitive substring of `s`.
+    /// Bytewise scan — does not allocate, so callers can pass row types
+    /// straight from the backend without an intermediate lowercase copy.
+    pub fn matches(&self, s: &str) -> bool {
+        self.patterns
+            .iter()
+            .any(|p| contains_ignore_ascii_case(s, p))
+    }
+}
+
+/// Bytewise case-insensitive substring search. ASCII only; non-ASCII bytes
+/// compare verbatim. Allocation-free.
+pub fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let n = needle.len();
+    if n == 0 {
+        return true;
+    }
+    let h = haystack.as_bytes();
+    if h.len() < n {
+        return false;
+    }
+    h.windows(n)
+        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 /// Return indices of rows whose type passes select/remove filtering.
-/// - `select`: if empty, all rows pass; otherwise row type must contain the pattern (case-insensitive)
-/// - `remove`: if empty, nothing excluded; otherwise row type must NOT contain the pattern (case-insensitive)
+/// - `select`: comma-separated patterns; row passes if any pattern is a
+///   case-insensitive substring of the row type. Empty keeps all rows.
+/// - `remove`: comma-separated patterns; row is dropped if any pattern matches.
 pub fn filter_row_indices_by_type(
     row_types: &[Box<str>],
     select: &str,
     remove: &str,
 ) -> Vec<usize> {
-    let sel = select.to_ascii_lowercase();
-    let rem = remove.to_ascii_lowercase();
+    let sel = RowTypeFilter::parse(select);
+    let rem = RowTypeFilter::parse(remove);
     if sel.is_empty() && rem.is_empty() {
         return (0..row_types.len()).collect();
     }
@@ -57,9 +108,8 @@ pub fn filter_row_indices_by_type(
         .iter()
         .enumerate()
         .filter_map(|(i, x)| {
-            let low = x.to_ascii_lowercase();
-            let selected = sel.is_empty() || low.contains(&sel);
-            let removed = !rem.is_empty() && low.contains(&rem);
+            let selected = sel.is_empty() || sel.matches(x);
+            let removed = !rem.is_empty() && rem.matches(x);
             if selected && !removed {
                 Some(i)
             } else {
