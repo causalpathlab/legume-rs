@@ -18,11 +18,12 @@ const DEFAULT_EFFECT_SIZE: f32 = 10.0;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SimColliderArgs {
-    #[arg(short = 'r', required = true, help = "Number of genes (G)")]
+    #[arg(short = 'r', long, required = true, help = "Number of genes (G)")]
     n_genes: usize,
 
     #[arg(
         short = 'c',
+        long,
         required = true,
         help = "Total number of cells (distributed across individuals via Poisson)"
     )]
@@ -30,41 +31,22 @@ pub struct SimColliderArgs {
 
     #[arg(
         short = 'a',
+        long,
         required = true,
-        help = "Number of causal genes with X -> Y effect (each assigned a random exposure category)"
+        help = "Number of causal genes with X → Y (each assigned a random exposure category)"
     )]
     n_causal_genes: usize,
 
     #[arg(
         short = 't',
+        long,
         required = true,
         help = "Number of cell types (K) for collider variable A"
     )]
     n_cell_types: usize,
 
     #[arg(
-        long,
-        default_value_t = 1,
-        help = "Dimensions of V_i, the individual-level confounder (V -> X and V -> Y)"
-    )]
-    n_covariates: usize,
-
-    #[arg(
-        long,
-        default_value_t = 1,
-        help = "Dimensions of U_j, the cell-level confounder (U -> A and U -> Y)"
-    )]
-    n_cell_covariates: usize,
-
-    #[arg(
-        long,
-        default_value_t = 5,
-        help = "Individuals per exposure group (total N = n_exposure * n_samples_per_exposure)"
-    )]
-    n_samples_per_exposure: usize,
-
-    #[arg(
-        short,
+        short = 'n',
         long,
         default_value_t = 2,
         help = "Number of exposure categories for X_i"
@@ -73,50 +55,71 @@ pub struct SimColliderArgs {
 
     #[arg(
         long,
+        default_value_t = 5,
+        help = "Individuals per exposure group (total N = n_exposure × n_samples_per_exposure)"
+    )]
+    n_samples_per_exposure: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Dimension of V_i, the individual-level confounder (V → X and V → Y)"
+    )]
+    n_covariates: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Dimension of U_j, the cell-level confounder (U → A and U → Y)"
+    )]
+    n_cell_covariates: usize,
+
+    #[arg(
+        long,
         default_value_t = 0.5,
-        help = "PVE for V -> X edge: how strongly V confounds exposure assignment"
+        help = "PVE on V → X: strength with which V confounds exposure assignment"
     )]
     pve_covar_exposure: f32,
 
     #[arg(
         long,
         default_value_t = 0.3,
-        help = "PVE for X -> A edge: exposure influence on cell type (creates collider)"
+        help = "PVE on X → A: exposure influence on cell-type assignment (creates collider)"
     )]
     pve_exposure_celltype: f32,
 
     #[arg(
         long,
         default_value_t = 0.3,
-        help = "PVE for U -> A edge: cell confounder influence on cell type (creates collider)"
+        help = "PVE on U → A: cell-confounder influence on cell-type assignment (creates collider)"
     )]
     pve_cell_covar_celltype: f32,
 
     #[arg(
         long,
         default_value_t = 0.3,
-        help = "PVE for X -> Y edge: causal effect of exposure on gene expression (causal genes only)"
+        help = "PVE on X → Y: causal effect of exposure on gene expression (causal genes only)"
     )]
     pve_exposure_gene: f32,
 
     #[arg(
         long,
         default_value_t = 0.3,
-        help = "PVE for V -> Y edge: individual confounder effect on gene expression"
+        help = "PVE on V → Y: individual confounder effect on gene expression"
     )]
     pve_covar_gene: f32,
 
     #[arg(
         long,
         default_value_t = 0.2,
-        help = "PVE for U -> Y edge: cell confounder effect on gene expression (source of collider bias)"
+        help = "PVE on U → Y: cell confounder effect on gene expression (source of collider bias)"
     )]
     pve_cell_covar_gene: f32,
 
     #[arg(
         long,
         default_value_t = DEFAULT_EFFECT_SIZE,
-        help = "Standardized effect size for causal genes (+effect if matching category, -effect otherwise)"
+        help = "Standardized effect size for causal genes (+effect for matching category, −effect otherwise)"
     )]
     effect_size: f32,
 
@@ -124,7 +127,8 @@ pub struct SimColliderArgs {
         long,
         value_delimiter = ',',
         default_value = "1.0,1.0",
-        help = "Gamma(shape,rate) hyperparameters for cell depth factor ρ_j"
+        value_name = "SHAPE,RATE",
+        help = "Gamma(shape, rate) hyperparameters for the per-cell depth factor ρ_j"
     )]
     gamma_hyperparam: Vec<f32>,
 
@@ -146,8 +150,14 @@ pub struct SimColliderArgs {
     )]
     save_mtx: bool,
 
-    #[arg(long, short, required = true, help = "Output file path prefix")]
-    out: Box<str>,
+    #[arg(
+        short,
+        long,
+        required = true,
+        value_name = "PREFIX",
+        help = "Output file name prefix"
+    )]
+    output: Box<str>,
 }
 
 struct ColliderSimulator {
@@ -508,7 +518,7 @@ pub fn run_sim_collider_data(args: SimColliderArgs) -> anyhow::Result<()> {
         ));
     }
 
-    mkdir_parent(&args.out)?;
+    mkdir_parent(&args.output)?;
 
     let depth_gamma_hyperparam = (args.gamma_hyperparam[0], args.gamma_hyperparam[1]);
     let n_indv = args.n_exposure * args.n_samples_per_exposure;
@@ -547,7 +557,7 @@ pub fn run_sim_collider_data(args: SimColliderArgs) -> anyhow::Result<()> {
     info!("Successfully simulated");
 
     // Write output files
-    let output = args.out.clone();
+    let output = args.output.clone();
 
     let backend = args.backend.clone();
     let backend_file = match backend {

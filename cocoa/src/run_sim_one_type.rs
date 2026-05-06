@@ -5,7 +5,6 @@ use rustc_hash::FxHashMap as HashMap;
 use std::ops::Div;
 
 use clap::Parser;
-use data_beans_sim::core::{sample_cnv_blocks, CnvSimOut, CnvSimParams};
 use indicatif::ParallelProgressIterator;
 use log::info;
 use matrix_util::common_io::{mkdir_parent, write_lines, write_types};
@@ -240,11 +239,12 @@ impl GlmSimulator {
 
 #[derive(Parser, Debug, Clone)]
 pub struct SimOneTypeArgs {
-    #[arg(short = 'r', required = true, help = "Number of genes (G)")]
+    #[arg(short = 'r', long, required = true, help = "Number of genes (G)")]
     n_genes: usize,
 
     #[arg(
         short = 'c',
+        long,
         required = true,
         help = "Total number of cells (distributed across individuals via Poisson)"
     )]
@@ -252,27 +252,14 @@ pub struct SimOneTypeArgs {
 
     #[arg(
         short = 'a',
+        long,
         required = true,
-        help = "Number of causal genes with X -> Y effect (each assigned a random exposure category)"
+        help = "Number of causal genes with X → Y (each assigned a random exposure category)"
     )]
     n_causal_genes: usize,
 
     #[arg(
-        long,
-        default_value_t = 1,
-        help = "Dimensions of W_i, the individual-level confounder (W -> X and W -> Y)"
-    )]
-    n_covariates: usize,
-
-    #[arg(
-        long,
-        default_value_t = 5,
-        help = "Individuals per exposure group (total N = n_exposure * n_samples_per_exposure)"
-    )]
-    n_samples_per_exposure: usize,
-
-    #[arg(
-        short,
+        short = 'n',
         long,
         default_value_t = 2,
         help = "Number of exposure categories for X_i"
@@ -281,29 +268,43 @@ pub struct SimOneTypeArgs {
 
     #[arg(
         long,
+        default_value_t = 5,
+        help = "Individuals per exposure group (total N = n_exposure × n_samples_per_exposure)"
+    )]
+    n_samples_per_exposure: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Dimension of W_i, the individual-level confounder (W → X and W → Y)"
+    )]
+    n_covariates: usize,
+
+    #[arg(
+        long,
         default_value_t = 0.5,
-        help = "PVE for W -> X edge: how strongly W confounds exposure assignment"
+        help = "PVE on W → X: strength with which W confounds exposure assignment"
     )]
     pve_covar_exposure: f32,
 
     #[arg(
         long,
         default_value_t = 0.3,
-        help = "PVE for X -> Y edge: causal effect of exposure on gene expression (causal genes only)"
+        help = "PVE on X → Y: causal effect of exposure on gene expression (causal genes only)"
     )]
     pve_exposure_gene: f32,
 
     #[arg(
         long,
         default_value_t = 0.5,
-        help = "PVE for W -> Y edge: confounder effect on gene expression"
+        help = "PVE on W → Y: confounder effect on gene expression"
     )]
     pve_covar_gene: f32,
 
     #[arg(
         long,
         default_value_t = DEFAULT_EFFECT_SIZE,
-        help = "Standardized effect size for causal genes (+effect if matching category, -effect otherwise)"
+        help = "Standardized effect size for causal genes (+effect for matching category, −effect otherwise)"
     )]
     effect_size: f32,
 
@@ -311,7 +312,8 @@ pub struct SimOneTypeArgs {
         long,
         value_delimiter = ',',
         default_value = "1.0,1.0",
-        help = "Gamma(shape,rate) hyperparameters for cell depth factor ρ_j"
+        value_name = "SHAPE,RATE",
+        help = "Gamma(shape, rate) hyperparameters for the per-cell depth factor ρ_j"
     )]
     gamma_hyperparam: Vec<f32>,
 
@@ -333,46 +335,14 @@ pub struct SimOneTypeArgs {
     )]
     save_mtx: bool,
 
-    #[arg(long, short, required = true, help = "Output file path prefix")]
-    out: Box<str>,
-
     #[arg(
+        short,
         long,
-        default_value_t = 0,
-        help = "CNV: number of chromosomes (0 disables CNV simulation).",
-        long_help = "When > 0, distributes genes evenly across this many chromosomes\n\
-                     and samples a clonal CN profile per individual. Each individual\n\
-                     is treated as a clone in a binary tree (clone 0 = neutral root)."
+        required = true,
+        value_name = "PREFIX",
+        help = "Output file name prefix"
     )]
-    cnv_n_chromosomes: usize,
-
-    #[arg(
-        long,
-        default_value_t = 0.5,
-        help = "CNV: expected number of CN events per chromosome per clone."
-    )]
-    cnv_events_per_chr: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0.15,
-        help = "CNV: mean block size as fraction of genes per chromosome."
-    )]
-    cnv_block_frac: f32,
-
-    #[arg(
-        long,
-        default_value_t = 2.0,
-        help = "CNV: fold-change for gain events."
-    )]
-    cnv_gain_fold: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0.5,
-        help = "CNV: fold-change for loss events."
-    )]
-    cnv_loss_fold: f32,
+    output: Box<str>,
 }
 
 pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
@@ -388,7 +358,7 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
         ));
     }
 
-    mkdir_parent(&args.out)?;
+    mkdir_parent(&args.output)?;
 
     let depth_gamma_hyperparam = (args.gamma_hyperparam[0], args.gamma_hyperparam[1]);
 
@@ -410,38 +380,13 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
     };
 
     info!("Simulating underlying individual-level data...");
-    let mut glm = sim.generate_individual_glm()?;
-
-    // CNV: clonal per-individual CN events (each individual = a clone)
-    let cnv_out: Option<CnvSimOut> = if args.cnv_n_chromosomes > 0 {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(args.rseed.wrapping_add(1));
-        let params = CnvSimParams {
-            n_genes: args.n_genes,
-            n_batches: n_indv,
-            n_chr: args.cnv_n_chromosomes,
-            events_per_chr: args.cnv_events_per_chr,
-            block_frac: args.cnv_block_frac,
-            gain_fold: args.cnv_gain_fold,
-            loss_fold: args.cnv_loss_fold,
-        };
-        let out = sample_cnv_blocks(&params, &mut rng);
-        // Add ln(CN multiplier) to log μ_{g,i}
-        for i in 0..n_indv {
-            for g in 0..args.n_genes {
-                let m = out.cnv_multiplier_db[(g, i)].max(1e-12);
-                glm.data_mn[(g, i)] += m.ln();
-            }
-        }
-        Some(out)
-    } else {
-        None
-    };
+    let glm = sim.generate_individual_glm()?;
 
     info!("Populating triplets...");
     let sim_out = sim.generate_triplets(&glm.data_mn)?;
     info!("Successfully simulated");
 
-    let output = args.out.clone();
+    let output = args.output.clone();
 
     let backend = args.backend.clone();
     let backend_file = match backend {
@@ -476,50 +421,6 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
     )?;
     glm.confounder_nk.to_tsv(&conf_file)?;
     glm.data_mn.to_tsv(&data_file)?;
-
-    // CNV ground truth (matches schema cnv::detect::read_gene_positions_from_cnv_tsv reads)
-    if let Some(ref cnv_out) = cnv_out {
-        let cnv_file = output.to_string() + ".cnv_ground_truth.tsv.gz";
-        let state_labels = ["loss", "neutral", "gain"];
-        let mut lines: Vec<Box<str>> = vec!["gene\tchromosome\tposition\tstate".into()];
-        for g in 0..args.n_genes {
-            lines.push(
-                format!(
-                    "{}\t{}\t{}\t{}",
-                    g,
-                    cnv_out.chromosomes[g],
-                    cnv_out.positions[g],
-                    state_labels[cnv_out.cnv_states[g] as usize]
-                )
-                .into(),
-            );
-        }
-        write_lines(&lines, &cnv_file)?;
-        info!("wrote CNV ground truth (union): {}", cnv_file);
-
-        let per_indv_file = output.to_string() + ".cnv_per_indv_ground_truth.tsv.gz";
-        let mut lines2: Vec<Box<str>> =
-            vec!["gene\tchromosome\tposition\tindividual\tstate".into()];
-        for (b, batch_states) in cnv_out.cnv_states_db.iter().enumerate() {
-            for (g, &st) in batch_states.iter().enumerate() {
-                if st != 1 {
-                    lines2.push(
-                        format!(
-                            "{}\t{}\t{}\t{}\t{}",
-                            g,
-                            cnv_out.chromosomes[g],
-                            cnv_out.positions[g],
-                            b,
-                            state_labels[st as usize]
-                        )
-                        .into(),
-                    );
-                }
-            }
-        }
-        write_lines(&lines2, &per_indv_file)?;
-        info!("wrote per-individual CNV ground truth: {}", per_indv_file);
-    }
 
     info!("registering triplets ...");
     let mtx_shape = sim_out.mtx_shape;
