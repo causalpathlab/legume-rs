@@ -374,7 +374,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         refine: Some(data_beans_alg::refine_multilevel::RefineParams {
             num_gibbs: args.refine_gibbs,
             num_greedy: args.refine_greedy,
-            gene_weighting: args.refine_weighting.into(),
+            feature_weighting: args.refine_weighting.into(),
             seed: args.refine_seed,
             ..data_beans_alg::refine_multilevel::RefineParams::default()
         }),
@@ -395,7 +395,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         let sketch_ds = finest_collapsed.mu_observed.posterior_mean().clone();
         let finest_target = args.max_coarse_features;
         let min_target = (finest_target / num_levels).max(50);
-        (0..num_levels)
+        let level_targets: Vec<usize> = (0..num_levels)
             .map(|i| {
                 let frac = if num_levels > 1 {
                     i as f64 / (num_levels - 1) as f64
@@ -405,9 +405,19 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
                 let log_min = (min_target as f64).ln();
                 let log_max = (finest_target as f64).ln();
                 let target = (log_min + frac * (log_max - log_min)).exp().round() as usize;
-                let target = target.clamp(min_target, finest_target);
-                Some(compute_feature_coarsening(&sketch_ds, target).expect("feature coarsening"))
+                target.clamp(min_target, finest_target)
             })
+            .collect();
+
+        let dc_params = data_beans_alg::dc_poisson::RefineParams {
+            num_gibbs: args.refine_gibbs,
+            num_greedy: args.refine_greedy,
+            seed: args.refine_seed,
+            ..data_beans_alg::dc_poisson::RefineParams::default()
+        };
+        crate::topic::common::coarsen_features_multilevel(&sketch_ds, &level_targets, dc_params)?
+            .into_iter()
+            .map(Some)
             .collect()
     } else {
         vec![None; num_levels]

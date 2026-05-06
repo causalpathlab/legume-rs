@@ -1,11 +1,11 @@
-//! CLI-facing enum for the DC-Poisson gene-weighting scheme.
+//! CLI-facing enum for the DC-Poisson feature-weighting scheme.
 //!
-//! Maps one-to-one to [`data_beans_alg::dc_poisson::GeneWeighting`]. Kept
+//! Maps one-to-one to [`data_beans_alg::dc_poisson::FeatureWeighting`]. Kept
 //! in its own module so every subcommand that exposes the `--weighting`
 //! flag imports the same enum and `help` string.
 
 use clap::ValueEnum;
-use data_beans_alg::dc_poisson::GeneWeighting;
+use data_beans_alg::dc_poisson::FeatureWeighting;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
@@ -17,11 +17,11 @@ pub(crate) enum WeightingArg {
     None,
 }
 
-impl From<WeightingArg> for GeneWeighting {
+impl From<WeightingArg> for FeatureWeighting {
     fn from(value: WeightingArg) -> Self {
         match value {
-            WeightingArg::NbFisherInfo => GeneWeighting::FisherInfoNb,
-            WeightingArg::None => GeneWeighting::None,
+            WeightingArg::NbFisherInfo => FeatureWeighting::FisherInfoNb,
+            WeightingArg::None => FeatureWeighting::None,
         }
     }
 }
@@ -29,4 +29,4 @@ impl From<WeightingArg> for GeneWeighting {
 /// The `help` string reused by every `--weighting` arg across senna
 /// subcommands; keeps the CLI self-consistent.
 pub(crate) const WEIGHTING_HELP: &str =
-    "DC-Poisson gene weighting: nb-fisher-info (default, NB mean-variance), none (raw)";
+    "DC-Poisson feature weighting: nb-fisher-info (default, NB mean-variance), none (raw)";

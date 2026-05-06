@@ -304,7 +304,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
         refine: Some(data_beans_alg::refine_multilevel::RefineParams {
-            gene_weighting: args.refine_weighting.into(),
+            feature_weighting: args.refine_weighting.into(),
             ..data_beans_alg::refine_multilevel::RefineParams::default()
         }),
         ignore_batch: args.ignore_batch,
