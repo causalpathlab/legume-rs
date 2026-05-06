@@ -3,8 +3,7 @@ use log::info;
 use matrix_util::dmatrix_io::*;
 use matrix_util::dmatrix_util::row_membership_matrix;
 use matrix_util::traits::*;
-use nalgebra::ComplexField;
-use rand::{RngExt, SeedableRng};
+use rand::SeedableRng;
 use rand_distr::{Distribution, Normal, Poisson, Uniform};
 use rayon::prelude::*;
 
@@ -37,15 +36,128 @@ pub(crate) fn sample_theta_kn(
     Ok(theta_kn)
 }
 
-/// Sample Poisson count triplets from `Y(i,j) ~ Poisson(depth * delta(i,B(j)) * sum_k beta(i,k) * theta(k,j))`.
+/// Sample a log-normal dictionary `β[D, K]` with explicit topic-PVE
+/// decomposition:
 ///
-/// CNV effects should be pre-multiplied into `beta_dk` before calling.
+/// ```text
+/// log β_{g,k} = σ_β · [√π_topic · u_{g,k} + √(1−π_topic) · v_g] − σ_β² / 2
+/// ```
+///
+/// with `u_{g,k}, v_g ~ N(0, 1)` iid. By construction:
+///   - `Var(log β_{g,k}) = σ_β²` independent of `π_topic`,
+///   - `E[β_{g,k}] = 1` (multiplicative-perturbation interpretation, so a
+///     downstream `(depth/G)·β·θ` makes `depth` an emergent library size),
+///   - `π_topic = 0` ⇒ β purely per-gene (no topic structure),
+///   - `π_topic = 1` ⇒ β purely per-(gene, topic) (no shared baseline).
+pub(crate) fn sample_lognormal_dictionary(
+    dd: usize,
+    kk: usize,
+    pve_topic: f32,
+    beta_scale: f32,
+    rng: &mut impl rand::Rng,
+) -> DMatrix<f32> {
+    let pve = pve_topic.clamp(0.0, 1.0);
+    let a_topic = pve.sqrt();
+    let a_invariant = (1.0 - pve).sqrt();
+    let center = 0.5 * beta_scale * beta_scale;
+    let normal = Normal::new(0.0_f32, 1.0_f32).expect("standard normal");
+
+    let v: Vec<f32> = (0..dd).map(|_| normal.sample(rng)).collect();
+
+    let mut beta = DMatrix::<f32>::zeros(dd, kk);
+    for g in 0..dd {
+        for k in 0..kk {
+            let u: f32 = normal.sample(rng);
+            let log_b = beta_scale * (a_topic * u + a_invariant * v[g]) - center;
+            beta[(g, k)] = log_b.exp();
+        }
+    }
+    beta
+}
+
+/// Sample batch-effect log-shifts `log δ ∈ ℝ^{D × B}` with explicit
+/// log-space variance decomposition:
+///
+/// ```text
+/// log δ_{g, b} = √π_batch · z_{g, b} + √(1 − π_batch) · w_g
+/// ```
+///
+/// `z` iid N(0, 1) per (gene, batch), z-scored per column to unit variance,
+/// scaled by √π_batch. `w` iid N(0, 1) per gene, z-scored to unit variance,
+/// scaled by √(1 − π_batch). By construction `Var(log δ_{g, b}) = 1`
+/// independent of `π_batch`. Caller exponentiates if mean-space δ is needed.
+pub(crate) fn sample_log_batch_effects(
+    dd: usize,
+    bb: usize,
+    pve_batch: f32,
+    rng: &mut impl rand::Rng,
+) -> DMatrix<f32> {
+    let pve = pve_batch.clamp(0.0, 1.0);
+    let normal = Normal::new(0.0_f32, 1.0_f32).expect("standard normal");
+
+    let mut ln_delta_db = DMatrix::from_fn(dd, bb, |_, _| normal.sample(rng));
+    ln_delta_db.scale_columns_inplace();
+    ln_delta_db *= pve.sqrt();
+
+    let mut ln_null_d = DMatrix::from_fn(dd, 1, |_, _| normal.sample(rng));
+    ln_null_d.scale_columns_inplace();
+    ln_null_d *= (1.0 - pve).sqrt();
+
+    for col in 0..ln_delta_db.ncols() {
+        let mut col_mut = ln_delta_db.column_mut(col);
+        col_mut += &ln_null_d.column(0);
+    }
+
+    ln_delta_db
+}
+
+/// Inject housekeeping genes (first `n_housekeeping` rows) with high,
+/// approximately-uniform-across-topics expression. Each housekeeping gene
+/// `g` gets a single log-normal draw `β_g ~ LN(log(fold·median(β)), σ_hk²)`
+/// shared across all `K` topics — the per-gene baseline is correlated, the
+/// per-topic noise is gone (these are by-design topic-invariant genes).
+pub(crate) fn inject_housekeeping(
+    beta_dk: &mut DMatrix<f32>,
+    n_housekeeping: usize,
+    fold: f32,
+    rng: &mut impl rand::Rng,
+) {
+    if n_housekeeping == 0 || n_housekeeping >= beta_dk.nrows() {
+        return;
+    }
+    let kk = beta_dk.ncols();
+    // Pivot: per-gene mean (across topics) — robust enough for a baseline.
+    let mean_val = beta_dk.mean().max(1e-30);
+    let hk_mean = mean_val * fold;
+    const HK_SIGMA: f32 = 0.3;
+    let log_mean = hk_mean.ln() - 0.5 * HK_SIGMA * HK_SIGMA;
+    let normal = Normal::new(0.0_f32, 1.0_f32).expect("standard normal");
+    for g in 0..n_housekeeping {
+        let u: f32 = normal.sample(rng);
+        let val = (log_mean + HK_SIGMA * u).exp();
+        for k in 0..kk {
+            beta_dk[(g, k)] = val;
+        }
+    }
+    info!(
+        "injected {} housekeeping genes (LN(log {:.4}, {:.2}), fold={:.1}× mean {:.4})",
+        n_housekeeping, hk_mean, HK_SIGMA, fold, mean_val
+    );
+}
+
+/// Sample Poisson count triplets from
+/// `Y(g,j) ~ Poisson( λ_scale · δ(g,B(j)) · Σ_k β(g,k) θ(k,j) )`.
+///
+/// `lambda_scale` should be `depth / G` so that `E[Σ_g λ_{g,j}] ≈ depth`
+/// when `E[β] = E[δ] = 1` (the log-normal+PVE samplers in this module
+/// guarantee this). Library size is **emergent**, not enforced — there is
+/// no per-cell rescaling.
 pub(crate) fn sample_poisson_triplets(
     beta_dk: &DMatrix<f32>,
     theta_kn: &DMatrix<f32>,
     delta_db: Option<&DMatrix<f32>>,
     batch_membership: &[usize],
-    depth: usize,
+    lambda_scale: f32,
     rseed: u64,
     seed_offset: u64,
 ) -> Vec<(u64, u64, f32)> {
@@ -68,14 +180,11 @@ pub(crate) fn sample_poisson_triplets(
                 beta_dk * theta_j
             };
 
-            let tot = lambda_j.sum();
-            let scale = (depth as f32) / tot;
-
             lambda_j
                 .iter()
                 .enumerate()
                 .filter_map(|(i, &l_ij)| {
-                    let l_ij = (l_ij * scale).max(eps);
+                    let l_ij = (l_ij * lambda_scale).max(eps);
                     if let Ok(rpois) = Poisson::new(l_ij) {
                         let y_ij: f32 = rpois.sample(&mut rng);
                         if y_ij > threshold {
@@ -99,7 +208,10 @@ pub struct SimArgs {
     pub depth: usize,
     pub factors: usize,
     pub batches: usize,
-    pub overdisp: f32,
+    /// Log-normal scale parameter `σ_β` for the dictionary. Replaces the
+    /// old `overdisp` knob. Higher = more variable expression across genes
+    /// and topics. Default 1.0.
+    pub beta_scale: f32,
     pub pve_topic: f32,
     pub pve_batch: f32,
     pub rseed: u64,
@@ -107,28 +219,13 @@ pub struct SimArgs {
     /// gates on a binary tree of this depth. K = 2^(depth-1) leaf topics.
     /// Overrides `factors` when set.
     pub hierarchical_depth: Option<usize>,
-    /// Number of housekeeping genes with high uniform expression across all topics.
-    /// These genes get a large, equal dictionary value in every topic, simulating
-    /// ubiquitous genes like B2M, EEF1A1, ribosomal proteins.
+    /// Number of housekeeping genes with high uniform expression across all
+    /// topics. These genes get a single log-normal value broadcast across
+    /// all topics, simulating ubiquitous genes (B2M, EEF1A1, ribosomal).
     pub n_housekeeping: usize,
     /// Expression fold-change of housekeeping genes relative to the mean
     /// topic-specific gene. Default: 10.0
     pub housekeeping_fold: f32,
-    /// CNV simulation: number of chromosomes to distribute genes across.
-    /// Set to 0 to disable CNV simulation. Default: 0.
-    pub n_chromosomes: usize,
-    /// CNV simulation: expected number of CNV events per chromosome.
-    /// Default: 0.5
-    pub cnv_events_per_chr: f32,
-    /// CNV simulation: mean block size as fraction of genes per chromosome.
-    /// Default: 0.15
-    pub cnv_block_frac: f32,
-    /// CNV simulation: fold-change for gain events (e.g., 2.0 = 2x expression).
-    /// Default: 2.0
-    pub cnv_gain_fold: f32,
-    /// CNV simulation: fold-change for loss events (e.g., 0.5 = half expression).
-    /// Default: 0.5
-    pub cnv_loss_fold: f32,
 }
 
 pub struct SimOut {
@@ -139,210 +236,31 @@ pub struct SimOut {
     pub triplets: Vec<(u64, u64, f32)>,
     /// If hierarchical: all node probabilities [D, num_nodes] (1-indexed by column)
     pub hierarchy_node_probs: Option<DMatrix<f32>>,
-    /// CNV: per-gene chromosome assignment (length D). None if n_chromosomes == 0.
-    pub gene_chromosomes: Option<Vec<Box<str>>>,
-    /// CNV: per-gene position within chromosome (length D). None if n_chromosomes == 0.
-    pub gene_positions: Option<Vec<u64>>,
-    /// CNV: per-gene CN state union across batches (0=loss, 1=neutral, 2=gain).
-    pub cnv_states: Option<Vec<u8>>,
-    /// CNV: per-batch, per-gene CN states. `cnv_states_per_batch[b][g]`.
-    pub cnv_states_per_batch: Option<Vec<Vec<u8>>>,
-    /// CNV: clone tree parent indices. `clone_parent[b]` = parent of clone b.
-    pub cnv_clone_parent: Option<Vec<usize>>,
 }
 
-/// CNV block simulation output.
-pub struct CnvSimOut {
-    /// Per-gene, per-batch CN multiplier `[D × B]`.
-    pub cnv_multiplier_db: DMatrix<f32>,
-    /// Per-gene, per-batch CN state: `cnv_states_db[b][g]` (0=loss, 1=neutral, 2=gain).
-    pub cnv_states_db: Vec<Vec<u8>>,
-    /// Clone tree: `clone_parent[b]` = parent clone index for batch b.
-    pub clone_parent: Vec<usize>,
-    /// Union across batches (for backwards compat ground truth).
-    pub cnv_states: Vec<u8>,
-    pub chromosomes: Vec<Box<str>>,
-    pub positions: Vec<u64>,
-}
-
-pub struct CnvSimParams {
-    pub n_genes: usize,
-    pub n_batches: usize,
-    pub n_chr: usize,
-    pub events_per_chr: f32,
-    pub block_frac: f32,
-    pub gain_fold: f32,
-    pub loss_fold: f32,
-}
-
-/// Generate clonal CNV blocks with a binary clonal tree.
-///
-/// - Clone 0 (batch 0) = normal reference (CN=2, no CNV events)
-/// - Each subsequent clone inherits its parent's CN profile + adds new events
-/// - Binary tree: parent of clone `b` = `(b - 1) / 2`
-///
-/// This mirrors the COMPASS simulation design: a clonal tree where deeper
-/// clones accumulate more CNV events, and related clones share ancestral events.
-pub fn sample_cnv_blocks(params: &CnvSimParams, rng: &mut impl rand::Rng) -> CnvSimOut {
-    let dd = params.n_genes;
-    let bb = params.n_batches.max(1);
-    let n_chr = params.n_chr;
-    let genes_per_chr = dd / n_chr;
-    let spacing = 10_000u64;
-
-    // 1. Gene coordinates (shared across all clones/batches)
-    let mut chromosomes = Vec::with_capacity(dd);
-    let mut positions = Vec::with_capacity(dd);
-    for chr_idx in 0..n_chr {
-        let chr_name: Box<str> = format!("chr{}", chr_idx + 1).into();
-        let chr_start = chr_idx * genes_per_chr;
-        let chr_end = if chr_idx == n_chr - 1 {
-            dd
-        } else {
-            (chr_idx + 1) * genes_per_chr
-        };
-        for g in chr_start..chr_end {
-            chromosomes.push(chr_name.clone());
-            positions.push((g - chr_start) as u64 * spacing);
-        }
-    }
-
-    // 2. Binary clonal tree: clone 0 = normal root
-    let clone_parent: Vec<usize> = (0..bb)
-        .map(|b| if b == 0 { 0 } else { (b - 1) / 2 })
-        .collect();
-
-    // 3. Build CN profiles by traversing the tree top-down
-    let mut cnv_multiplier_db = DMatrix::<f32>::from_element(dd, bb, 1.0);
-
-    let poisson_events =
-        Poisson::new(params.events_per_chr as f64).unwrap_or_else(|_| Poisson::new(0.5).unwrap());
-
-    let mut total_gain = 0usize;
-    let mut total_loss = 0usize;
-
-    // Clone 0 stays all-neutral (normal reference). Process clones 1..bb.
-    for b in 1..bb {
-        // Inherit parent's profile
-        let parent = clone_parent[b];
-        let parent_col = cnv_multiplier_db.column(parent).clone_owned();
-        cnv_multiplier_db.column_mut(b).copy_from(&parent_col);
-
-        // Add new CNV events for this clone
-        for chr_idx in 0..n_chr {
-            let chr_start = chr_idx * genes_per_chr;
-            let chr_end = if chr_idx == n_chr - 1 {
-                dd
-            } else {
-                (chr_idx + 1) * genes_per_chr
-            };
-            let chr_len = chr_end - chr_start;
-
-            let n_events = poisson_events.sample(rng) as usize;
-            let block_size = ((chr_len as f32 * params.block_frac) as usize).max(3);
-
-            for _ in 0..n_events {
-                let start = rng.random_range(0..chr_len);
-                let end = (start + block_size).min(chr_len);
-                let is_gain: bool = rng.random_bool(0.5);
-                let mult = if is_gain {
-                    total_gain += end - start;
-                    params.gain_fold
-                } else {
-                    total_loss += end - start;
-                    params.loss_fold
-                };
-
-                for g in (chr_start + start)..(chr_start + end) {
-                    // Multiply on top of inherited profile (allows compound events)
-                    cnv_multiplier_db[(g, b)] *= mult;
-                }
-            }
-        }
-    }
-
-    // 4. Per-batch CN states from multipliers
-    let cnv_states_db: Vec<Vec<u8>> = (0..bb)
-        .map(|b| {
-            (0..dd)
-                .map(|g| {
-                    let m = cnv_multiplier_db[(g, b)];
-                    if m > 1.0 + 1e-6 {
-                        2u8 // gain
-                    } else if m < 1.0 - 1e-6 {
-                        0u8 // loss
-                    } else {
-                        1u8 // neutral
-                    }
-                })
-                .collect()
-        })
-        .collect();
-
-    // Union across batches (backwards compat)
-    let cnv_states: Vec<u8> = (0..dd)
-        .map(|g| {
-            let has_gain = (0..bb).any(|b| cnv_states_db[b][g] == 2);
-            let has_loss = (0..bb).any(|b| cnv_states_db[b][g] == 0);
-            if has_gain {
-                2u8
-            } else if has_loss {
-                0u8
-            } else {
-                1u8
-            }
-        })
-        .collect();
-
-    info!(
-        "CNV simulation: {} genes × {} batches (clonal tree), {} chromosomes, ~{} gain, ~{} loss gene-events",
-        dd, bb, n_chr, total_gain, total_loss,
-    );
-    info!(
-        "Clone tree: {:?}",
-        clone_parent
-            .iter()
-            .enumerate()
-            .map(|(b, &p)| format!("{}←{}", b, p))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
-    CnvSimOut {
-        cnv_multiplier_db,
-        cnv_states_db,
-        clone_parent,
-        cnv_states,
-        chromosomes,
-        positions,
-    }
-}
-
-/// Generate a simulated dataset with a factored gamma model
-/// * `args`: SimulateArgs
-/// * `mtx_file`: output data mtx file (.gz recommended)
-/// * `dict_file`: true dictionary file
-/// * `prop_file`: true proportion file
-/// * `ln_batch_file`: log batch effect file
-/// * `batch_file`: true batch membership file
+/// Generate a simulated dataset with a log-normal factored model.
 ///
 /// ```text
-/// Y(i,j) ~ Poisson( delta(i, B(j)) * sum_k beta(i,k) * theta(k,j) )
+/// log β_{g,k} = σ_β · [√π_topic · u_{g,k} + √(1−π_topic) · v_g] − σ_β² / 2
+/// log δ_{g,b} = √π_batch · z_{g,b} + √(1−π_batch) · w_g
+/// λ_{g,j}    = (depth / G) · δ_{g, B(j)} · Σ_k β_{g,k} θ_{k,j}
+/// y_{g,j}    ~ Poisson(λ_{g,j})
 /// ```
 ///
+/// `depth` is the **expected** library size (emergent — no per-cell
+/// rescaling). `pve_topic` and `pve_batch` are independent variance shares
+/// in log space — both can be 1 simultaneously.
 pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<SimOut> {
     let nn = args.cols;
     let dd = args.rows;
-    // When hierarchical, K is determined by tree depth
     let kk = if let Some(depth) = args.hierarchical_depth {
         1usize << (depth - 1)
     } else {
         args.factors
     };
     let bb = args.batches;
-    let nnz = args.depth;
     let rseed = args.rseed;
-    let overdisp = args.overdisp;
+    let beta_scale = args.beta_scale;
     let pve_topic = args.pve_topic.clamp(0., 1.);
     let pve_batch = args.pve_batch.clamp(0., 1.);
 
@@ -352,26 +270,14 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
     let runif = Uniform::new(0, bb).expect("unif [0 .. bb)");
     let batch_membership: Vec<usize> = (0..nn).map(|_| runif.sample(&mut rng)).collect();
 
-    // 2. batch effect matrix
-    let mut ln_delta_db = DMatrix::<f32>::rnorm(dd, bb);
-    ln_delta_db.scale_columns_inplace();
-    ln_delta_db *= pve_batch.clamp(0., 1.).sqrt();
-    let mut ln_null_d = DMatrix::<f32>::rnorm(dd, 1);
-    ln_null_d.scale_columns_inplace();
-    ln_null_d *= (1.0 - pve_batch).clamp(0., 1.).sqrt();
+    let ln_delta_db = sample_log_batch_effects(dd, bb, pve_batch, &mut rng);
+    let delta_db = ln_delta_db.map(|x| x.exp());
+    info!("simulated batch effects (log-variance decomposition)");
 
-    for col in 0..ln_delta_db.ncols() {
-        let mut ln_delta_d = ln_delta_db.column_mut(col);
-        ln_delta_d += &ln_null_d.column(0);
-    }
-
-    let mut delta_db = ln_delta_db.map(|x| x.exp());
-    info!("simulated batch effects");
-
-    // 3. factorization model
-    let (beta_dk, hierarchy_node_probs) = if let Some(tree_depth) = args.hierarchical_depth {
+    // 3. dictionary β
+    let (mut beta_dk, hierarchy_node_probs) = if let Some(tree_depth) = args.hierarchical_depth {
         let (beta, node_probs) =
-            generate_hierarchical_dictionary(dd, tree_depth, overdisp, &mut rng);
+            generate_hierarchical_dictionary(dd, tree_depth, beta_scale, &mut rng);
         info!(
             "generated hierarchical dictionary: depth={}, K={} leaves, {} nodes",
             tree_depth,
@@ -380,102 +286,40 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
         );
         (beta, Some(node_probs))
     } else {
-        let (a, b) = (1. / overdisp, (kk as f32).sqrt() * overdisp);
-        let mut beta_dk = DMatrix::<f32>::rgamma(dd, kk, (a, b));
-
-        if kk > 1 && pve_topic < 1. {
-            let beta_null = DMatrix::<f32>::rgamma(dd, 1, (a, b))
-                .scale((1.0 - pve_topic).clamp(0., 1.).unscale(kk as f32).sqrt());
-            for k in 0..kk {
-                let x = beta_dk.column(k).scale(pve_topic.clamp(0., 1.).sqrt()) + &beta_null;
-                beta_dk.column_mut(k).copy_from(&x);
-            }
-        }
-        (beta_dk, None)
+        (
+            sample_lognormal_dictionary(dd, kk, pve_topic, beta_scale, &mut rng),
+            None,
+        )
     };
 
-    // Inject housekeeping genes: first n_housekeeping rows get high expression
-    // across all topics, drawn from Gamma with mean = housekeeping_fold * mean_beta
-    let beta_dk = if args.n_housekeeping > 0 && args.n_housekeeping < dd {
-        let mean_val = beta_dk.mean();
-        let hk_mean = mean_val * args.housekeeping_fold;
-        // Gamma(shape, rate) with mean = shape/rate = hk_mean, CV ~ 1/sqrt(shape)
-        let hk_shape = 2.0_f32; // moderate variability across housekeeping genes
-        let hk_rate = hk_shape / hk_mean;
-        let hk_dist = rand_distr::Gamma::new(hk_shape, 1.0 / hk_rate).expect("housekeeping gamma");
-        let mut beta = beta_dk;
-        for g in 0..args.n_housekeeping {
-            let base = hk_dist.sample(&mut rng);
-            for k in 0..kk {
-                beta[(g, k)] = base;
-            }
-        }
-        info!(
-            "injected {} housekeeping genes: Gamma(shape={:.1}, mean={:.4}) (fold={:.1}x mean {:.4})",
-            args.n_housekeeping, hk_shape, hk_mean, args.housekeeping_fold, mean_val
-        );
-        beta
-    } else {
-        beta_dk
-    };
+    // 4. housekeeping injection (log-normal, topic-invariant per gene)
+    inject_housekeeping(
+        &mut beta_dk,
+        args.n_housekeeping,
+        args.housekeeping_fold,
+        &mut rng,
+    );
 
     let theta_kn = sample_theta_kn(kk, nn, pve_topic, &mut rng)?;
 
-    // 4. CNV simulation (optional) — per-batch CNV folded into delta
-    let cnv_out = if args.n_chromosomes > 0 {
-        Some(sample_cnv_blocks(
-            &CnvSimParams {
-                n_genes: dd,
-                n_batches: bb,
-                n_chr: args.n_chromosomes,
-                events_per_chr: args.cnv_events_per_chr,
-                block_frac: args.cnv_block_frac,
-                gain_fold: args.cnv_gain_fold,
-                loss_fold: args.cnv_loss_fold,
-            },
-            &mut rng,
-        ))
-    } else {
-        None
-    };
-    // Fold per-batch CNV multiplier into delta (batch effect)
-    // delta_effective[g,b] = delta[g,b] * cnv[g,b]
-    if let Some(ref cnv) = cnv_out {
-        for b in 0..bb {
-            for g in 0..dd {
-                delta_db[(g, b)] *= cnv.cnv_multiplier_db[(g, b)];
-            }
-        }
-    }
-
-    // 5. putting them all together
+    // 5. emergent-library Poisson sampling
+    let lambda_scale = (args.depth as f32) / (dd as f32);
     let delta_ref = if bb > 1 { Some(&delta_db) } else { None };
     let triplets = sample_poisson_triplets(
         &beta_dk,
         &theta_kn,
         delta_ref,
         &batch_membership,
-        nnz,
+        lambda_scale,
         rseed,
         0,
     );
 
     info!(
-        "sampled Poisson data with {} non-zero elements",
-        triplets.len()
+        "sampled Poisson data with {} non-zero elements (λ_scale = depth/G = {:.4})",
+        triplets.len(),
+        lambda_scale,
     );
-
-    let (gene_chromosomes, gene_positions, cnv_states, cnv_states_per_batch, cnv_clone_parent) =
-        match cnv_out {
-            Some(cnv) => (
-                Some(cnv.chromosomes),
-                Some(cnv.positions),
-                Some(cnv.cnv_states),
-                Some(cnv.cnv_states_db),
-                Some(cnv.clone_parent),
-            ),
-            None => (None, None, None, None, None),
-        };
 
     Ok(SimOut {
         ln_delta_db,
@@ -484,11 +328,6 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
         batch_membership,
         triplets,
         hierarchy_node_probs,
-        gene_chromosomes,
-        gene_positions,
-        cnv_states,
-        cnv_states_per_batch,
-        cnv_clone_parent,
     })
 }
 
@@ -497,16 +336,22 @@ pub fn generate_factored_poisson_gamma_data(args: &SimArgs) -> anyhow::Result<Si
 ///
 /// * `dd` - number of genes (D)
 /// * `tree_depth` - tree depth (>= 2), K = 2^(depth-1) leaf topics
-/// * `overdisp` - overdispersion parameter (controls gate sharpness)
+/// * `beta_scale` - log-normal scale `σ_β` for the root distribution; gate
+///   logits use a fixed `N(0, 1)` scale (sharper subtrees come from larger
+///   `σ_β` driving the root, not from this gate scale).
 /// * `rng` - random number generator
 ///
 /// Returns `(beta_dk, node_probs_d_by_numnodes)`:
-/// - `beta_dk`: [D, K] leaf dictionary (each column sums to ~1)
+/// - `beta_dk`: [D, K] leaf dictionary (each row sums to ~1)
 /// - `node_probs`: [D, num_nodes] all node probabilities (col 0 = root, etc.)
+///
+/// Note: the tree's stick-breaking already encodes topic structure by
+/// construction, so `pve_topic` does NOT additionally blend β here — only
+/// θ blends. (Flat mode applies the explicit log-space topic-PVE blend.)
 pub(crate) fn generate_hierarchical_dictionary(
     dd: usize,
     tree_depth: usize,
-    overdisp: f32,
+    beta_scale: f32,
     rng: &mut impl rand::Rng,
 ) -> (DMatrix<f32>, DMatrix<f32>) {
     assert!(tree_depth >= 2, "Tree depth must be at least 2");
@@ -515,32 +360,32 @@ pub(crate) fn generate_hierarchical_dictionary(
     let num_nodes = (1usize << tree_depth) - 1; // 2^depth - 1
     let num_internal = num_leaves - 1;
 
-    // 1. Root distribution: Gamma-drawn then normalized to probability simplex
-    let (a, b) = (1. / overdisp, (num_leaves as f32).sqrt() * overdisp);
-    let root_raw = DMatrix::<f32>::rgamma(dd, 1, (a, b));
-    let root_sum: f32 = root_raw.sum();
+    let normal = Normal::new(0.0_f32, 1.0_f32).expect("standard normal");
+
+    // 1. Root distribution: log-normal then normalized to probability simplex
+    let center = 0.5 * beta_scale * beta_scale;
+    let root_raw: Vec<f32> = (0..dd)
+        .map(|_| (beta_scale * normal.sample(rng) - center).exp())
+        .collect();
+    let root_sum: f32 = root_raw.iter().sum::<f32>().max(1e-30);
     let root_prob: Vec<f32> = root_raw.iter().map(|&x| x / root_sum).collect();
 
-    // 2. Gate logits: Normal(0, overdisp_scale) → sigmoid gives gates in (0,1)
-    // Higher overdisp → sharper gates → more distinct subtrees
-    let gate_scale = (overdisp / 10.0).clamp(0.1, 5.0);
-    let normal = Normal::new(0.0f32, gate_scale).expect("normal distribution");
+    // 2. Gate logits ~ N(0, 1) → sigmoid gives gates in (0, 1).
     let gate_logits: Vec<Vec<f32>> = (0..num_internal)
         .map(|_| (0..dd).map(|_| normal.sample(rng)).collect())
         .collect();
 
-    // 3. Top-down propagation: compute node probabilities
-    // node_probs[h] is a Vec<f32> of length dd, 1-indexed (index 0 = node 1)
+    // 3. Top-down propagation: compute node probabilities (1-indexed: 0 = unused).
     let mut node_probs: Vec<Vec<f32>> = vec![vec![0.0; dd]; num_nodes + 1];
     node_probs[1] = root_prob;
 
     for h in 1..num_leaves {
-        let gate_idx = h - 1; // gate_logits index
+        let gate_idx = h - 1;
         let left_child = 2 * h;
         let right_child = 2 * h + 1;
 
-        let mut left = vec![0.0f32; dd];
-        let mut right = vec![0.0f32; dd];
+        let mut left = vec![0.0_f32; dd];
+        let mut right = vec![0.0_f32; dd];
 
         for d in 0..dd {
             let gate = sigmoid(gate_logits[gate_idx][d]);
@@ -552,20 +397,20 @@ pub(crate) fn generate_hierarchical_dictionary(
         node_probs[right_child] = right;
     }
 
-    // 4. Extract leaf dictionary: [D, K]
+    // 4. Extract leaf dictionary [D, K]
     let mut beta_dk = DMatrix::<f32>::zeros(dd, num_leaves);
     for k in 0..num_leaves {
-        let leaf_node = num_leaves + k; // 1-indexed leaf
+        let leaf_node = num_leaves + k;
         for d in 0..dd {
             beta_dk[(d, k)] = node_probs[leaf_node][d];
         }
     }
 
-    // 5. Pack all node probabilities into [D, num_nodes] matrix
+    // 5. Pack all node probabilities into [D, num_nodes]
     let mut all_node_probs = DMatrix::<f32>::zeros(dd, num_nodes);
     for h in 0..num_nodes {
         for d in 0..dd {
-            all_node_probs[(d, h)] = node_probs[h + 1][d]; // 1-indexed → 0-indexed column
+            all_node_probs[(d, h)] = node_probs[h + 1][d];
         }
     }
 
