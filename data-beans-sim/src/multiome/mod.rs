@@ -659,7 +659,7 @@ fn sample_with_reference(
         CopulaCovariance::random_low_rank(dd, 0, &mut rng)
     } else {
         match batch_program {
-            BatchProgram::Biology => fit.copula.truncate_rank(batch_rank),
+            BatchProgram::Empirical => fit.copula.truncate_rank(batch_rank),
             BatchProgram::Random => CopulaCovariance::random_low_rank(dd, batch_rank, &mut rng),
         }
     };

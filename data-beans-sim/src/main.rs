@@ -79,7 +79,7 @@ enum Commands {
                         sample :  y ~ NB(λ, r̂_g)  via  u=Φ(z*),  F⁻¹_NB(u; λ, r̂)\n\
                       where t is z-scored log(β·θ) per cell with β drawn the same way as in\n\
                       synthetic mode; ε iid N(0, 1); z_{g,b} from the gene-gene copula factor\n\
-                      (rank `--batch-rank`, axes chosen by `--batch-program {random,biology}`);\n\
+                      (rank `--batch-rank`, axes chosen by `--batch-program {random,empirical}`);\n\
                       w_g iid N(0, 1) gives the batch-invariant per-gene shift. `--depth` is\n\
                       reinterpreted as a multiplicative scale so library size matches the\n\
                       reference's mean. scDesign / scDesign2 / scDesign3 lineage."
