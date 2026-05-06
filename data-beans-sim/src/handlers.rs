@@ -18,6 +18,8 @@ use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
 use rayon::prelude::*;
 
+use crate::core::{inject_housekeeping, sample_lognormal_dictionary};
+
 use crate::copula::gaussian::CopulaCovariance;
 
 /// How the batch-program covariance `F_batch` is constructed.
@@ -77,10 +79,9 @@ pub struct RunSimulateArgs {
     #[arg(
         long,
         default_value_t = 1000,
-        help = "Depth per column. Synthetic mode: target library size. \
-                Reference mode: multiplicative scale on μ̂_g (set to the \
-                reference's mean library size to match it; default 1000 \
-                roughly matches typical 10x scRNA-seq depth)."
+        help = "Expected library size E[Σ_g Y(g,j)] per cell (emergent — no per-cell rescaling). \
+                Synthetic mode: enters as λ_scale = depth/G. Reference mode: multiplicative \
+                scale on the reference's per-gene mean μ̂_g."
     )]
     pub depth: usize,
 
@@ -88,24 +89,33 @@ pub struct RunSimulateArgs {
         short,
         long,
         default_value_t = 1,
-        help = "Number of factors (cell types, topics, states, etc.)"
+        help = "Number of factors K (cell types / topics / states); width of β and θ"
     )]
     pub factors: usize,
 
-    #[arg(short, long, default_value_t = 1, help = "Number of batches")]
+    #[arg(short, long, default_value_t = 1, help = "Number of batches B")]
     pub batches: usize,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Proportion of variance explained by topic membership"
+        help = "Topic-PVE π_topic ∈ [0, 1]. Variance share between topic-specific and \
+                topic-invariant components in log β: \
+                log β(g,k) = σ_β·[√π_topic · u(g,k) + √(1−π_topic) · v(g)] − σ_β²/2. \
+                Also softens θ from one-hot toward uniform: θ(k*,j) = π_topic + (1−π_topic)/K. \
+                π_topic = 0 ⇒ no topic structure; π_topic = 1 ⇒ pure topic structure. \
+                Independent of pve_batch (both can be 1)."
     )]
     pub pve_topic: f32,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Proportion of variance explained by batch effects"
+        help = "Batch-PVE π_batch ∈ [0, 1]. Variance share between batch-specific and \
+                batch-invariant components in log δ: \
+                log δ(g,b) = √π_batch · z(g,b) + √(1−π_batch) · w(g). \
+                π_batch = 0 ⇒ batches share a single per-gene shift exp(w); \
+                π_batch = 1 ⇒ fully batch-specific. Independent of pve_topic."
     )]
     pub pve_batch: f32,
 
@@ -136,10 +146,12 @@ pub struct RunSimulateArgs {
 
     #[arg(
         long,
-        default_value_t = 10.0,
-        help = "Overdispersion parameter for Gamma dictionary"
+        default_value_t = 1.0,
+        help = "Log-normal scale σ_β. Total log-variance per gene-topic entry is σ_β² \
+                (independent of pve_topic); E[β(g,k)] = 1 by centering. Higher = more \
+                variable expression across genes and topics."
     )]
-    pub overdisp: f32,
+    pub beta_scale: f32,
 
     #[arg(long, default_value_t = 42, help = "Random seed")]
     pub rseed: u64,
@@ -152,33 +164,6 @@ pub struct RunSimulateArgs {
 
     #[arg(long, default_value_t = 10.0, help = "Housekeeping fold change")]
     pub housekeeping_fold: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "Number of chromosomes for CNV simulation (0 = disabled)"
-    )]
-    pub n_chromosomes: usize,
-
-    #[arg(
-        long,
-        default_value_t = 0.5,
-        help = "Expected CNV events per chromosome"
-    )]
-    pub cnv_events_per_chr: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0.15,
-        help = "CNV block size as fraction of genes per chromosome"
-    )]
-    pub cnv_block_frac: f32,
-
-    #[arg(long, default_value_t = 2.0, help = "Fold-change for CNV gain events")]
-    pub cnv_gain_fold: f32,
-
-    #[arg(long, default_value_t = 0.5, help = "Fold-change for CNV loss events")]
-    pub cnv_loss_fold: f32,
 
     #[arg(long, default_value_t = false, help = "Save output in MTX format")]
     pub save_mtx: bool,
@@ -207,33 +192,60 @@ pub struct RunSimulateMultimodalArgs {
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Depth per modality (comma-separated, e.g., 1000,500)"
+        help = "Expected library size per modality, comma-separated (e.g. 1000,500). \
+                One entry per modality; length defines M. Each modality's β columns are \
+                softmax-normalized over genes, so depth_m directly sets E[lib(j)|m]."
     )]
     pub depth: Vec<usize>,
 
-    #[arg(short, long, default_value_t = 5, help = "Number of topics")]
+    #[arg(
+        short,
+        long,
+        default_value_t = 5,
+        help = "Number of topics K (shared across modalities)"
+    )]
     pub factors: usize,
 
-    #[arg(short, long, default_value_t = 1, help = "Number of batches")]
+    #[arg(short, long, default_value_t = 1, help = "Number of batches B")]
     pub batches: usize,
 
-    #[arg(long, default_value_t = 1.0, help = "Scale of base dictionary logits")]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Scale σ_base of base-dictionary logits W_base ~ N(0, σ_base²) when \
+                hierarchical mode is off."
+    )]
     pub base_scale: f32,
 
-    #[arg(long, default_value_t = 1.0, help = "Scale of non-zero delta entries")]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Scale σ_Δ of non-zero spike entries Δ_m[k,g] ~ N(0, σ_Δ²)"
+    )]
     pub delta_scale: f32,
 
     #[arg(
         long,
         default_value_t = 5,
-        help = "Number of non-zero delta genes per topic"
+        help = "Spike-and-slab support: number of non-zero genes per topic in each Δ_m"
     )]
     pub n_delta_features: usize,
 
-    #[arg(long, default_value_t = 1.0, help = "PVE by topic membership")]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Topic-PVE π_topic ∈ [0, 1]. Softens θ from one-hot toward uniform: \
+                θ(k*,j) = π_topic + (1−π_topic)/K. Independent of pve_batch."
+    )]
     pub pve_topic: f32,
 
-    #[arg(long, default_value_t = 1.0, help = "PVE by batch effects")]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Batch-PVE π_batch ∈ [0, 1]. Variance share in log δ: \
+                log δ_m(g,b) = √π_batch · z(g,b) + √(1−π_batch) · w(g). \
+                Independent of pve_topic."
+    )]
     pub pve_batch: f32,
 
     #[arg(long, default_value_t = 42, help = "Random seed")]
@@ -251,10 +263,10 @@ pub struct RunSimulateMultimodalArgs {
 
     #[arg(
         long,
-        default_value_t = 10.0,
-        help = "Overdispersion for hierarchical dictionary"
+        default_value_t = 1.0,
+        help = "Log-normal scale σ_β for the hierarchical-base dictionary"
     )]
-    pub overdisp: f32,
+    pub beta_scale: f32,
 
     #[arg(long, default_value_t = 0, help = "Number of housekeeping genes")]
     pub n_housekeeping: usize,
@@ -276,23 +288,18 @@ pub struct RunSimulateMultimodalArgs {
     pub zip: bool,
 }
 
-/// Simulate factored count data.
+/// Simulate log-normal factored count data.
 ///
-/// Without `--reference`: factored Poisson-Gamma model
-/// (`y_{g,j} ~ Poisson(λ_{g,j})`, `λ = depth · β·θ · δ`) with optional CNV
-/// and housekeeping injection.
+/// Without `--reference`: pure log-normal · Poisson model
+/// `y(g,j) ~ Poisson( (depth/G) · δ(g,B(j)) · Σ_k β(g,k) θ(k,j) )` with
+/// log β decomposed into topic-specific + topic-invariant components by
+/// `pve_topic`, and log δ decomposed into batch-specific + batch-invariant
+/// by `pve_batch`. Library size is emergent.
 ///
-/// With `--reference`: identical GLM through `λ_{g,j}`, but the final count
-/// step swaps `Poisson(λ)` for a copula-coupled NB draw using per-gene
-/// dispersion `r̂_g` and a global Σ̂ fitted from the reference. CNV is
-/// disabled in this mode (passing `--n-chromosomes > 0` is a hard error).
+/// With `--reference`: same β / θ / δ structure, but counts are sampled
+/// via NB(λ, r̂_g) coupled across HVGs by the reference-fitted gene-gene
+/// copula Σ̂. Per-gene baseline becomes log μ̂_g (replacing log(depth/G)).
 pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
-    if cmd_args.reference.is_some() && cmd_args.n_chromosomes > 0 {
-        anyhow::bail!(
-            "`--reference` and `--n-chromosomes > 0` are mutually exclusive. \
-             CNV synthesis is not supported in copula+NB sampling mode."
-        );
-    }
     if cmd_args.reference.is_some() && cmd_args.rows.is_some() {
         anyhow::bail!(
             "`--rows` and `--reference` are mutually exclusive. \
@@ -340,22 +347,17 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         depth: cmd_args.depth,
         factors: cmd_args.factors,
         batches: cmd_args.batches,
-        overdisp: cmd_args.overdisp,
+        beta_scale: cmd_args.beta_scale,
         pve_topic: cmd_args.pve_topic,
         pve_batch: cmd_args.pve_batch,
         rseed: cmd_args.rseed,
         hierarchical_depth: cmd_args.hierarchical_depth,
         n_housekeeping: cmd_args.n_housekeeping,
         housekeeping_fold: cmd_args.housekeeping_fold,
-        n_chromosomes: cmd_args.n_chromosomes,
-        cnv_events_per_chr: cmd_args.cnv_events_per_chr,
-        cnv_block_frac: cmd_args.cnv_block_frac,
-        cnv_gain_fold: cmd_args.cnv_gain_fold,
-        cnv_loss_fold: cmd_args.cnv_loss_fold,
     };
 
     let sim = simulate::generate_factored_poisson_gamma_data(&sim_args)?;
-    info!("successfully generated factored Poisson-Gamma data");
+    info!("successfully generated log-normal factored Poisson data");
 
     let batch_out: Vec<Box<str>> = sim
         .batch_membership
@@ -390,85 +392,6 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         let hierarchy_file = mtx_file.replace(".mtx.gz", ".hierarchy.parquet");
         node_probs.to_parquet_with_names(&hierarchy_file, (Some(&rows), Some("feature")), None)?;
         info!("wrote hierarchy node probabilities: {:?}", &hierarchy_file);
-    }
-
-    if let (Some(ref chromosomes), Some(ref positions), Some(ref states)) =
-        (&sim.gene_chromosomes, &sim.gene_positions, &sim.cnv_states)
-    {
-        let cnv_file = mtx_file.replace(".mtx.gz", ".cnv_ground_truth.tsv.gz");
-        let state_labels = ["loss", "neutral", "gain"];
-        let cnv_lines: Vec<Box<str>> = std::iter::once("gene\tchromosome\tposition\tstate".into())
-            .chain(
-                rows.iter()
-                    .zip(chromosomes.iter())
-                    .zip(positions.iter())
-                    .zip(states.iter())
-                    .map(|(((g, chr), pos), &st)| {
-                        format!("{}\t{}\t{}\t{}", g, chr, pos, state_labels[st as usize]).into()
-                    }),
-            )
-            .collect();
-        write_lines(&cnv_lines, &cnv_file)?;
-        info!("wrote CNV ground truth (union): {:?}", &cnv_file);
-
-        // Per-batch ground truth (for CNV detection validation)
-        if let (Some(ref states_db), Some(ref clone_parent)) =
-            (&sim.cnv_states_per_batch, &sim.cnv_clone_parent)
-        {
-            let per_batch_file = mtx_file.replace(".mtx.gz", ".cnv_per_batch_ground_truth.tsv.gz");
-            let mut lines: Vec<Box<str>> = vec!["gene\tchromosome\tposition\tbatch\tstate".into()];
-            for (b, batch_states) in states_db.iter().enumerate() {
-                for (g, &st) in batch_states.iter().enumerate() {
-                    if st != 1 {
-                        // Only write non-neutral entries (sparse)
-                        lines.push(
-                            format!(
-                                "{}\t{}\t{}\t{}\t{}",
-                                g, chromosomes[g], positions[g], b, state_labels[st as usize]
-                            )
-                            .into(),
-                        );
-                    }
-                }
-            }
-            write_lines(&lines, &per_batch_file)?;
-            info!("wrote per-batch CNV ground truth: {:?}", &per_batch_file);
-
-            // Clone tree
-            let tree_file = mtx_file.replace(".mtx.gz", ".cnv_clone_tree.tsv.gz");
-            let tree_lines: Vec<Box<str>> = std::iter::once("clone\tparent".into())
-                .chain(
-                    clone_parent
-                        .iter()
-                        .enumerate()
-                        .map(|(b, &p)| format!("{}\t{}", b, p).into()),
-                )
-                .collect();
-            write_lines(&tree_lines, &tree_file)?;
-            info!("wrote clone tree: {:?}", &tree_file);
-        }
-
-        // Write minimal GFF for gene coordinates (so --gff works with simulated data)
-        let gff_file = mtx_file.replace(".mtx.gz", ".genes.gff.gz");
-        let gff_lines: Vec<Box<str>> = std::iter::once("##gff-version 3".into())
-            .chain(
-                rows.iter()
-                    .zip(chromosomes.iter())
-                    .zip(positions.iter())
-                    .map(|((gene_name, chr), &pos)| {
-                        // GFF3: seqname source feature start end score strand frame attributes
-                        let start = pos + 1; // GFF is 1-based
-                        let end = start + 1000; // dummy gene length
-                        format!(
-                            "{}\tsimulation\tgene\t{}\t{}\t.\t+\t.\tgene_name={}",
-                            chr, start, end, gene_name,
-                        )
-                        .into()
-                    }),
-            )
-            .collect();
-        write_lines(&gff_lines, &gff_file)?;
-        info!("wrote gene annotations: {:?}", &gff_file);
     }
 
     info!(
@@ -609,18 +532,28 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
         cmd_args.batch_program,
         bb
     );
-    // Pre-sample δ_{:, b} per batch and fold α_batch in once so the per-cell
-    // hot loop only adds (no per-gene multiply by α_batch).
+    // Pre-sample δ_{:, b} per batch with explicit log-space variance
+    // decomposition mirroring the synthetic-mode batch effects:
+    //   log δ_{g,b} = √π_batch · z_{g,b} + √(1−π_batch) · w_g
+    // z_{g,b} from the (gene-gene-correlated) copula, w_g iid N(0,1) shared
+    // across batches (the batch-invariant per-gene shift).
+    let alpha_invariant_batch = (1.0 - pve_batch).sqrt();
+    let normal01 = Normal::new(0.0_f32, 1.0_f32).expect("standard normal");
+    let w_invariant: DVector<f32> =
+        DVector::from_fn(dd, |_, _| normal01.sample(&mut rng) * alpha_invariant_batch);
     let batch_delta: Vec<DVector<f32>> = (0..bb)
-        .map(|_| batch_cov.sample(&mut rng).scale(alpha_batch))
+        .map(|_| batch_cov.sample(&mut rng).scale(alpha_batch) + &w_invariant)
         .collect();
 
-    // Topic dictionary β (Gamma-drawn or hierarchical) + housekeeping injection.
-    let (beta_dk, hierarchy_node_probs) = if let Some(tree_depth) = cmd_args.hierarchical_depth {
+    // Topic dictionary β: log-normal with explicit topic-PVE decomposition,
+    // matching synthetic mode. Hierarchical mode uses the stick-breaking
+    // tree (which encodes topic structure by construction; no extra blend).
+    let (mut beta_dk, hierarchy_node_probs) = if let Some(tree_depth) = cmd_args.hierarchical_depth
+    {
         let (beta, node_probs) = crate::core::generate_hierarchical_dictionary(
             dd,
             tree_depth,
-            cmd_args.overdisp,
+            cmd_args.beta_scale,
             &mut rng,
         );
         info!(
@@ -630,34 +563,18 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
         );
         (beta, Some(node_probs))
     } else {
-        let (a, b) = (
-            1.0 / cmd_args.overdisp,
-            (kk as f32).sqrt() * cmd_args.overdisp,
-        );
-        (DMatrix::<f32>::rgamma(dd, kk, (a, b)), None)
+        (
+            sample_lognormal_dictionary(dd, kk, pve_topic, cmd_args.beta_scale, &mut rng),
+            None,
+        )
     };
 
-    let beta_dk = if cmd_args.n_housekeeping > 0 && cmd_args.n_housekeeping < dd {
-        let mean_val = beta_dk.mean();
-        let hk_mean = mean_val * cmd_args.housekeeping_fold;
-        let hk_shape = 2.0_f32;
-        let hk_rate = hk_shape / hk_mean;
-        let hk_dist = rand_distr::Gamma::new(hk_shape, 1.0 / hk_rate).expect("housekeeping gamma");
-        let mut beta = beta_dk;
-        for g in 0..cmd_args.n_housekeeping {
-            let base = hk_dist.sample(&mut rng);
-            for k in 0..kk {
-                beta[(g, k)] = base;
-            }
-        }
-        info!(
-            "injected {} housekeeping genes (mean={:.4}, fold={:.1}× synthetic mean {:.4})",
-            cmd_args.n_housekeeping, hk_mean, cmd_args.housekeeping_fold, mean_val
-        );
-        beta
-    } else {
-        beta_dk
-    };
+    inject_housekeeping(
+        &mut beta_dk,
+        cmd_args.n_housekeeping,
+        cmd_args.housekeeping_fold,
+        &mut rng,
+    );
 
     let theta_kn = crate::core::sample_theta_kn(kk, nn, pve_topic, &mut rng)?;
 
@@ -867,7 +784,7 @@ pub fn run_simulate_multimodal(cmd_args: &RunSimulateMultimodalArgs) -> anyhow::
         rseed: cmd_args.rseed,
         shared_batch_effects: cmd_args.shared_batch_effects,
         hierarchical_depth: cmd_args.hierarchical_depth,
-        overdisp: cmd_args.overdisp,
+        beta_scale: cmd_args.beta_scale,
         n_housekeeping: cmd_args.n_housekeeping,
         housekeeping_fold: cmd_args.housekeeping_fold,
     };

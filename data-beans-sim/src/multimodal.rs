@@ -5,7 +5,10 @@ use rand::seq::index::sample;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal, Uniform};
 
-use super::core::{generate_hierarchical_dictionary, sample_poisson_triplets, sample_theta_kn};
+use super::core::{
+    generate_hierarchical_dictionary, sample_log_batch_effects, sample_poisson_triplets,
+    sample_theta_kn,
+};
 
 pub struct MultimodalSimArgs {
     /// Number of features (genes), shared across modalities
@@ -35,8 +38,8 @@ pub struct MultimodalSimArgs {
     pub shared_batch_effects: bool,
     /// Optional hierarchical tree depth for W_base
     pub hierarchical_depth: Option<usize>,
-    /// Overdispersion for hierarchical dictionary
-    pub overdisp: f32,
+    /// Log-normal scale σ_β for the hierarchical-base dictionary
+    pub beta_scale: f32,
     /// Number of housekeeping genes
     pub n_housekeeping: usize,
     /// Housekeeping fold change
@@ -62,7 +65,8 @@ pub struct MultimodalSimOut {
     pub triplets: Vec<Vec<(u64, u64, f32)>>,
 }
 
-/// Generate batch effects [D, B], reusing the pattern from simulate.rs.
+/// Generate batch effect log-shifts [D, B] via the shared core helper.
+/// `bb <= 1` short-circuits to a zero matrix (no batch structure).
 fn generate_batch_effects(
     dd: usize,
     bb: usize,
@@ -72,23 +76,7 @@ fn generate_batch_effects(
     if bb <= 1 {
         return DMatrix::<f32>::zeros(dd, bb.max(1));
     }
-    let pve_batch = pve_batch.clamp(0., 1.);
-    let normal = Normal::new(0.0f32, 1.0).expect("standard normal");
-
-    let mut ln_delta_db = DMatrix::from_fn(dd, bb, |_, _| normal.sample(rng));
-    ln_delta_db.scale_columns_inplace();
-    ln_delta_db *= pve_batch.sqrt();
-
-    let mut ln_null_d = DMatrix::from_fn(dd, 1, |_, _| normal.sample(rng));
-    ln_null_d.scale_columns_inplace();
-    ln_null_d *= (1.0 - pve_batch).clamp(0., 1.).sqrt();
-
-    for col in 0..ln_delta_db.ncols() {
-        let mut col_mut = ln_delta_db.column_mut(col);
-        col_mut += &ln_null_d.column(0);
-    }
-
-    ln_delta_db
+    sample_log_batch_effects(dd, bb, pve_batch, rng)
 }
 
 pub fn generate_multimodal_data(args: &MultimodalSimArgs) -> anyhow::Result<MultimodalSimOut> {
@@ -131,7 +119,7 @@ pub fn generate_multimodal_data(args: &MultimodalSimArgs) -> anyhow::Result<Mult
     // 3. W_base [K, D]
     let w_base_kd = if let Some(tree_depth) = args.hierarchical_depth {
         let (beta_dk, _node_probs) =
-            generate_hierarchical_dictionary(dd, tree_depth, args.overdisp, &mut rng);
+            generate_hierarchical_dictionary(dd, tree_depth, args.beta_scale, &mut rng);
         info!(
             "hierarchical base dictionary: depth={}, K={} leaves",
             tree_depth,
@@ -220,22 +208,28 @@ pub fn generate_multimodal_data(args: &MultimodalSimArgs) -> anyhow::Result<Mult
     for (m, &depth_m) in args.depth_per_modality.iter().enumerate() {
         let delta_ref = if bb > 1 { Some(&delta_exp[m]) } else { None };
         let seed_offset = (m as u64) * (nn as u64);
+        // β columns here are softmax-normalized over genes (each topic sums to 1),
+        // so Σ_g (β·θ)_{g,j} = 1 deterministically and λ_scale = depth makes
+        // E[lib(j)] ≈ depth_m. (Synthetic-mode β has E[β_{g,k}] = 1 instead, so
+        // there λ_scale = depth/G — different normalization, same target.)
+        let lambda_scale = depth_m as f32;
 
         let trips = sample_poisson_triplets(
             &beta_dk[m],
             &theta_kn,
             delta_ref,
             &batch_membership,
-            depth_m,
+            lambda_scale,
             rseed,
             seed_offset,
         );
 
         info!(
-            "modality {}: {} non-zero triplets (depth={})",
+            "modality {}: {} non-zero triplets (depth={}, λ_scale={:.1})",
             m,
             trips.len(),
-            depth_m
+            depth_m,
+            lambda_scale,
         );
         triplets.push(trips);
     }
