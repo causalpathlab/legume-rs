@@ -13,10 +13,10 @@ use rustc_hash::FxHashMap as HashMap;
 pub struct CollapseArgs {
     #[arg(
         required = true,
-        help = "Data files of either `.zarr` `.h` format",
-        long_help = "Data files of either `.zarr` or `.h5` format. \n\
-		     All the formats in the given list should be identical. \n\
-		     You can convert `.mtx` to `.zarr` or `.h5` using the `data-beans`"
+        help = "Single-cell data files (.zarr / .h5)",
+        long_help = "Single-cell sparse data files in `.zarr` or `.h5` format.\n\
+                     All files in the list must share the same format and gene order.\n\
+                     Convert `.mtx` to `.zarr` / `.h5` with the `data-beans` CLI."
     )]
     data_files: Vec<Box<str>>,
 
@@ -24,73 +24,75 @@ pub struct CollapseArgs {
         short = 'i',
         long,
         value_delimiter = ',',
-        help = "Individual membership file names (comma-separated).",
-        long_help = "Individual membership files (comma-separated file names). \n\
-		     Each line in each file can specify: \n\
-		     * just  individual ID or\n\
-		     * (1) Cell and (2) individual ID pair."
+        help = "Individual membership files (comma-separated)",
+        long_help = "Individual membership files (comma-separated). Each line is either:\n  \
+                     * an individual ID (one per cell, in cell order), or\n  \
+                     * a (cell, individual ID) pair."
     )]
     indv_files: Option<Vec<Box<str>>>,
 
     #[arg(
         short = 't',
-        long = "topic-assignment-files",
+        long,
         value_delimiter = ',',
-        help = "Latent topic assignment file names (comma-separated).",
-        long_help = "Latent topic assignment files (comma-separated file names). \n\
-		     Each line in each file can specify:\n\
-		     * just topic name or \n\
-		     * (1) cell and (2) topic name pair."
+        help = "Latent topic assignment files (comma-separated)",
+        long_help = "Latent topic assignment files (comma-separated). Each line is either:\n  \
+                     * a topic name (one per cell, in cell order), or\n  \
+                     * a (cell, topic name) pair."
     )]
     topic_assignment_files: Option<Vec<Box<str>>>,
 
     #[arg(
         short = 'r',
-        long = "topic-proportion-files",
+        long,
         value_delimiter = ',',
-        help = "Latent topic proportion file names (comma-separated).",
-        long_help = "Latent topic proportion files (comma-separated file names). \n\
-		     Each file contains a full `cell x topic` matrix."
+        help = "Latent topic proportion files (comma-separated)",
+        long_help = "Latent topic proportion files (comma-separated). Each file is a full\n\
+                     `cell × topic` matrix."
     )]
     topic_proportion_files: Option<Vec<Box<str>>>,
 
     #[arg(
-        long = "topic-proportion-value",
+        long,
         default_value = "logit",
-        help = "Is topic proportion matrix of probability?",
-        long_help = "Specify if the topic proportion matrix is of probability type. \n\
-		     Default is `logit`-valued."
+        help = "Scale of the topic-proportion matrix (logit or prob)"
     )]
     topic_proportion_value: TopicValue,
 
     #[arg(
-        long = "a0",
+        long,
         default_value_t = 1.0,
-        help = "Hyperparameter a0 in Gamma(a0, b0)."
+        help = "Hyperparameter a0 in Gamma(a0, b0)"
     )]
     a0: f32,
 
     #[arg(
-        long = "b0",
+        long,
         default_value_t = 1.0,
-        help = "Hyperparameter b0 in Gamma(a0, b0)."
+        help = "Hyperparameter b0 in Gamma(a0, b0)"
     )]
     b0: f32,
 
-    #[arg(short, long = "out", required = true, help = "Output file name.")]
-    out: Box<str>,
+    #[arg(
+        short,
+        long,
+        required = true,
+        value_name = "PREFIX",
+        help = "Output file name prefix"
+    )]
+    output: Box<str>,
 
     #[arg(
-        long = "preload-data",
+        long,
         default_value_t = false,
-        help = "Preload all the columns data."
+        help = "Preload all column (cell) data into memory before fitting"
     )]
     preload_data: bool,
 
     #[arg(
-        long = "no-adjust-housekeeping",
+        long,
         default_value_t = false,
-        help = "Disable NB-Fisher housekeeping gene adjustment.",
+        help = "Disable NB-Fisher housekeeping gene adjustment",
         long_help = "By default, per-(individual, cell_type) count sums are row-scaled by\n\
                      NB-Fisher weights w_g = 1 / (1 + π_g · s̄ · φ(μ_g)) before the\n\
                      Gamma posterior update. High-mean / high-dispersion housekeeping\n\
@@ -100,15 +102,15 @@ pub struct CollapseArgs {
     no_adjust_housekeeping: bool,
 
     #[arg(
-        long = "block-size",
+        long,
         default_value_t = 1000,
-        help = "Block size for reading cells when fitting the NB trend."
+        help = "Block size for parallel column reads when fitting the NB trend"
     )]
     block_size: usize,
 }
 
 pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
-    mkdir_parent(&args.out)?;
+    mkdir_parent(&args.output)?;
 
     let data = read_input_data(InputDataArgs {
         data_files: args.data_files,
@@ -147,7 +149,7 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
             wmin,
             wmax
         );
-        let gw_path = format!("{}.gene_weights.tsv.gz", args.out);
+        let gw_path = format!("{}.gene_weights.tsv.gz", args.output);
         let gene_names_w = data.sparse_data.row_names()?;
         let gw_lines: Vec<Box<str>> = std::iter::once("gene\tweight".into())
             .chain(
@@ -174,7 +176,7 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
 
     // Write per cell type
     for (ct_idx, ct_name) in collapsed.cell_type_names.iter().enumerate() {
-        let out_path = format!("{}.{}.parquet", args.out, ct_name);
+        let out_path = format!("{}.{}.parquet", args.output, ct_name);
         info!("Writing {} to {}", ct_name, out_path);
 
         collapsed.gamma_params[ct_idx].to_melted_parquet(
