@@ -4,7 +4,6 @@ mod coarsening;
 mod common;
 mod fit_topic;
 mod linkage;
-mod simulation;
 mod topic;
 
 use crate::common::*;
@@ -46,7 +45,7 @@ fn print_logo() {
         Discovers cis-regulatory peak-gene links from paired single-cell\n\
         RNA + ATAC data via topic model with SuSiE fine-mapping.\n\n\
         Usage:\n\
-          chickpea sim-link -o sim --n-topics 10\n\
+          data-beans-sim multiome -o sim --n-topics 10\n\
           chickpea fit-topic --rna-files sim.rna.zarr --atac-files sim.atac.zarr -o out",
     term_width = 80
 )]
@@ -67,18 +66,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Simulate paired RNA + ATAC data with ground-truth peak-gene links
-    #[command(
-        long_about = "Simulate paired RNA + ATAC with ground-truth peak-gene links.\n\n\
-            Supports nested hierarchical topics: K coarse (ATAC-visible) × K_sub\n\
-            subtypes (RNA-only, via linkage). Causal peaks are placed near genes.\n\n\
-            Outputs: {out}.rna.zarr, {out}.atac.zarr, {out}.ground_truth.tsv.gz,\n\
-            {out}.gene_coords.tsv.gz, {out}.dict.parquet, {out}.prop.parquet",
-        after_long_help = ENV_HELP,
-	alias = "simulate"
-    )]
-    SimLink(simulation::SimLinkArgs),
-
     /// Fit joint topic model to paired RNA + ATAC data
     #[command(
         long_about = "Fit topic model with SuSiE peak-gene linkage.\n\n\
@@ -109,7 +96,6 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     match &cli.commands {
-        Commands::SimLink(args) => simulation::run_sim_link(args),
         Commands::FitTopic(args) => fit_topic::fit_topic_model(args),
     }
 }
