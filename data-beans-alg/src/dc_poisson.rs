@@ -39,29 +39,30 @@ pub const LOG_EPS: f64 = 1e-9;
 /// Feature representation used to score entity → block moves.
 #[derive(Clone, Debug)]
 pub enum ProfileSource {
-    /// Sparse entity × gene counts (the existing `gene_sums` format).
-    /// [`GeneWeighting`] is applied per-gene on the sparse profile.
+    /// Sparse entity × feature counts (the existing `gene_sums` format —
+    /// the field name is historical; the axis is generic).
+    /// [`FeatureWeighting`] is applied per-feature on the sparse profile.
     Raw,
     /// Dense projection: `basis * indicator(entity)` per entity. `basis` is
     /// `proj_dim × num_cells`-shaped; the per-entity profile is the sum over
-    /// its member cells' projection columns. [`GeneWeighting`] is skipped
-    /// because the feature axis is no longer "genes".
+    /// its member cells' projection columns. [`FeatureWeighting`] is skipped
+    /// because the feature axis is no longer count-distributed.
     Projected { basis: DMatrix<f32> },
 }
 
-/// Per-feature (gene) weighting applied to the sparse profile before DC-Poisson
-/// scoring. All variants multiply each nonzero entry `y_{e,g}` by a scalar
-/// `w_g` and recompute per-row size factors; only the formula for `w_g`
+/// Per-feature weighting applied to the sparse profile before DC-Poisson
+/// scoring. All variants multiply each nonzero entry `y_{e,f}` by a scalar
+/// `w_f` and recompute per-row size factors; only the formula for `w_f`
 /// differs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GeneWeighting {
-    /// No reweighting: `w_g = 1`. Recovers proper DC-Poisson with entity-level
+pub enum FeatureWeighting {
+    /// No reweighting: `w_f = 1`. Recovers proper DC-Poisson with entity-level
     /// degree correction (Karrer–Newman MAP under `Gamma(α, 0)` on `θ`).
     None,
-    /// Fisher-information weight under the fitted NB trend:
-    /// `w_g = 1 / (1 + π_g · s̄ · φ(μ_g))`. Bounded in `(0, 1]`,
+    /// Fisher-information weight under the fitted NB trend (genes-as-features
+    /// case): `w_f = 1 / (1 + π_f · s̄ · φ(μ_f))`. Bounded in `(0, 1]`,
     /// attenuates high-mean / high-dispersion features, recovers
-    /// `w_g = 1` in the Poisson limit (`φ → 0`). Current default.
+    /// `w_f = 1` in the Poisson limit (`φ → 0`).
     FisherInfoNb,
 }
 
@@ -73,7 +74,7 @@ pub struct RefineParams {
     /// Greedy sweeps per level (early-exits on zero moves).
     pub num_greedy: usize,
     /// Per-feature weighting scheme (only meaningful for `Raw` profile source).
-    pub gene_weighting: GeneWeighting,
+    pub feature_weighting: FeatureWeighting,
     /// Seed for Gibbs RNG.
     pub seed: u64,
     /// Gibbs stagnation threshold (fraction of entities moving per sweep).
@@ -89,7 +90,7 @@ impl Default for RefineParams {
         Self {
             num_gibbs: 20,
             num_greedy: 10,
-            gene_weighting: GeneWeighting::FisherInfoNb,
+            feature_weighting: FeatureWeighting::FisherInfoNb,
             seed: 42,
             gibbs_stagnation: 0.005,
             profile_source: ProfileSource::Raw,
@@ -175,7 +176,7 @@ impl Profiles {
     }
 
     /// In-place reweighting by a caller-supplied per-feature weight vector.
-    /// Used by [`Profiles::apply_gene_weighting`] for the NB Fisher-info path.
+    /// Used by [`Profiles::apply_feature_weighting`] for the NB Fisher-info path.
     pub fn weight_by_vec(&mut self, w: &[f32]) {
         debug_assert_eq!(w.len(), self.num_features);
         for (row, sf) in self.rows.iter_mut().zip(self.size_factor.iter_mut()) {
@@ -188,15 +189,15 @@ impl Profiles {
         }
     }
 
-    /// Apply the chosen gene weighting in place.
+    /// Apply the chosen feature weighting in place.
     ///
-    /// [`GeneWeighting::None`] is a no-op; [`GeneWeighting::FisherInfoNb`] fits
-    /// an NB dispersion trend from the current profiles and reweights each
-    /// feature by `1 / (1 + π_g · s̄ · φ(μ_g))`.
-    pub fn apply_gene_weighting(&mut self, method: GeneWeighting) {
+    /// [`FeatureWeighting::None`] is a no-op; [`FeatureWeighting::FisherInfoNb`]
+    /// fits an NB dispersion trend from the current profiles and reweights each
+    /// feature by `1 / (1 + π_f · s̄ · φ(μ_f))`.
+    pub fn apply_feature_weighting(&mut self, method: FeatureWeighting) {
         match method {
-            GeneWeighting::None => {}
-            GeneWeighting::FisherInfoNb => {
+            FeatureWeighting::None => {}
+            FeatureWeighting::FisherInfoNb => {
                 let w = self.nb_fisher_weights();
                 self.weight_by_vec(&w);
             }
@@ -628,12 +629,16 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
     let max_sweeps = (params.num_gibbs + params.num_greedy) as u64;
     let pb = ProgressBar::new(max_sweeps).with_style(
         ProgressStyle::with_template(&format!(
-            "{} {{bar:40}} {{pos}}/{{len}} sweeps ({{eta}})",
+            "{} {{bar:40}} {{pos}}/{{len}} sweeps ({{elapsed}}/{{eta}})",
             level_label
         ))
         .unwrap()
         .progress_chars("##-"),
     );
+    // Refresh on a timer so the bar visibly animates between sweep ticks
+    // (a single sweep at large D can take several seconds — without this
+    // the bar is silent until the next inc(1)).
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
     if params.num_gibbs > 0 {
         let mut order: Vec<usize> = (0..num_entities).collect();

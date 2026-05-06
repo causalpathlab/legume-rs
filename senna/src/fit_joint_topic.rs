@@ -303,7 +303,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,
             refine: Some(data_beans_alg::refine_multilevel::RefineParams {
-                gene_weighting: args.refine_weighting.into(),
+                feature_weighting: args.refine_weighting.into(),
                 ..data_beans_alg::refine_multilevel::RefineParams::default()
             }),
         },
@@ -321,6 +321,17 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         .map(|x| x.mu_observed.nrows())
         .collect();
 
+    // Joint-topic uses a single-level coarsening per modality; the multilevel
+    // helper still wins us the bottom-up KNN init + DC-Poisson refinement.
+    let coarsen_one = |sketch: &nalgebra::DMatrix<f32>| -> anyhow::Result<FeatureCoarsening> {
+        let mut levels = crate::topic::common::coarsen_features_multilevel(
+            sketch,
+            &[args.max_coarse_features],
+            data_beans_alg::dc_poisson::RefineParams::default(),
+        )?;
+        Ok(levels.remove(0))
+    };
+
     let coarsenings: Vec<Option<FeatureCoarsening>> =
         if args.max_coarse_features > 0 && args.decoder_type == JointDecoderType::Delta {
             // Delta mode: shared coarsening from reference modality
@@ -328,7 +339,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             if n_full > args.max_coarse_features {
                 let collapsed_ref = &collapsed_data_vec[0];
                 let sketch = collapsed_ref.mu_observed.posterior_mean().clone();
-                let fc = compute_feature_coarsening(&sketch, args.max_coarse_features)?;
+                let fc = coarsen_one(&sketch)?;
                 info!(
                     "Shared coarsening: {} → {} meta-features",
                     n_full, fc.num_coarse
@@ -347,7 +358,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
                     |(d, (collapsed, &n_full))| -> anyhow::Result<Option<FeatureCoarsening>> {
                         if n_full > args.max_coarse_features {
                             let sketch = collapsed.mu_observed.posterior_mean().clone();
-                            let fc = compute_feature_coarsening(&sketch, args.max_coarse_features)?;
+                            let fc = coarsen_one(&sketch)?;
                             info!(
                                 "Modality {}: coarsened {} → {} meta-features",
                                 d, n_full, fc.num_coarse
