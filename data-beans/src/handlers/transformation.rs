@@ -464,7 +464,7 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         info!("Processing file: {}", data_file_arg);
         let (backend, data_file) = resolve_backend_file(data_file_arg, None)?;
 
-        // Determine target file
+        // Resolve target path (do not stage yet — defer until after user confirm)
         let target_file = if let Some(output_prefix) = &cmd_args.output {
             let (_, output_file) = resolve_backend_file(output_prefix, Some(backend.clone()))?;
             if std::path::Path::new(output_file.as_ref()).exists() {
@@ -473,8 +473,6 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
                     output_file
                 ));
             }
-            info!("Staging {} -> {}", data_file, output_file);
-            materialize_writable_backend(&data_file, &output_file)?;
             output_file
         } else {
             if data_file.ends_with(".zarr.zip") {
@@ -485,7 +483,8 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
             data_file.clone()
         };
 
-        let data = open_sparse_matrix(&target_file, &backend)?;
+        // Open source for stats — staging hasn't happened, so read from input directly
+        let data = open_sparse_matrix(&data_file, &backend)?;
 
         let nrow = data.num_rows().unwrap();
         let ncol = data.num_columns().unwrap();
@@ -502,7 +501,7 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         // Show/save histogram if requested or in interactive mode
         if cmd_args.show_histogram || cmd_args.save_histogram.is_some() || cmd_args.interactive {
             display_nnz_histogram(
-                &target_file,
+                &data_file,
                 &row_nnz_vec,
                 &col_nnz_vec,
                 row_nnz_cutoff,
@@ -514,49 +513,45 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
 
         // Interactive mode: prompt user for action
         if cmd_args.interactive {
-            match prompt_user_action(&row_nnz_vec, &col_nnz_vec, row_nnz_cutoff, col_nnz_cutoff)? {
-                UserAction::Proceed => {
-                    info!("Proceeding with squeeze operation...");
-                }
-                UserAction::AdjustCutoffs(new_row, new_col) => {
-                    row_nnz_cutoff = new_row;
-                    col_nnz_cutoff = new_col;
-                    info!(
-                        "Updated cutoffs: row={}, column={}",
-                        row_nnz_cutoff, col_nnz_cutoff
-                    );
+            let proceed = loop {
+                match prompt_user_action(
+                    &row_nnz_vec,
+                    &col_nnz_vec,
+                    row_nnz_cutoff,
+                    col_nnz_cutoff,
+                )? {
+                    UserAction::Proceed => {
+                        info!("Proceeding with squeeze operation...");
+                        break true;
+                    }
+                    UserAction::AdjustCutoffs(new_row, new_col) => {
+                        row_nnz_cutoff = new_row;
+                        col_nnz_cutoff = new_col;
+                        info!(
+                            "Updated cutoffs: row={}, column={}",
+                            row_nnz_cutoff, col_nnz_cutoff
+                        );
 
-                    // Show updated histogram with new cutoffs
-                    display_nnz_histogram(
-                        &target_file,
-                        &row_nnz_vec,
-                        &col_nnz_vec,
-                        row_nnz_cutoff,
-                        col_nnz_cutoff,
-                        true,
-                        None,
-                    )?;
-
-                    // Ask again with new cutoffs
-                    match prompt_user_action(
-                        &row_nnz_vec,
-                        &col_nnz_vec,
-                        row_nnz_cutoff,
-                        col_nnz_cutoff,
-                    )? {
-                        UserAction::Proceed => {
-                            info!("Proceeding with squeeze operation...");
-                        }
-                        _ => {
-                            info!("Cancelled squeeze operation");
-                            continue;
-                        }
+                        // Show updated histogram with new cutoffs
+                        display_nnz_histogram(
+                            &data_file,
+                            &row_nnz_vec,
+                            &col_nnz_vec,
+                            row_nnz_cutoff,
+                            col_nnz_cutoff,
+                            true,
+                            None,
+                        )?;
+                    }
+                    UserAction::Cancel => {
+                        info!("Cancelled squeeze operation");
+                        break false;
                     }
                 }
-                UserAction::Cancel => {
-                    info!("Cancelled squeeze operation");
-                    continue;
-                }
+            };
+
+            if !proceed {
+                continue;
             }
 
             // Confirm in-place modification if no output
@@ -577,6 +572,14 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
             info!("Dry run mode - skipping squeeze operation");
             continue;
         }
+
+        // Stage now (only when we'll actually perform the squeeze)
+        drop(data);
+        if cmd_args.output.is_some() {
+            info!("Staging {} -> {}", data_file, target_file);
+            materialize_writable_backend(&data_file, &target_file)?;
+        }
+        let data = open_sparse_matrix(&target_file, &backend)?;
 
         // Perform squeeze
         squeeze_by_nnz(
@@ -643,21 +646,39 @@ fn run_squeeze_and_merge(
         )?;
 
         if cmd_args.interactive {
-            match prompt_user_action(&row_nnz_vec, &col_nnz_vec, row_nnz_cutoff, col_nnz_cutoff)? {
-                UserAction::Proceed => {
-                    info!("Proceeding with squeeze and merge...");
-                }
-                UserAction::AdjustCutoffs(new_row, new_col) => {
-                    row_nnz_cutoff = new_row;
-                    col_nnz_cutoff = new_col;
-                    info!(
-                        "Updated cutoffs: row={}, column={}",
-                        row_nnz_cutoff, col_nnz_cutoff
-                    );
-                }
-                UserAction::Cancel => {
-                    info!("Operation cancelled");
-                    return Ok(());
+            loop {
+                match prompt_user_action(
+                    &row_nnz_vec,
+                    &col_nnz_vec,
+                    row_nnz_cutoff,
+                    col_nnz_cutoff,
+                )? {
+                    UserAction::Proceed => {
+                        info!("Proceeding with squeeze and merge...");
+                        break;
+                    }
+                    UserAction::AdjustCutoffs(new_row, new_col) => {
+                        row_nnz_cutoff = new_row;
+                        col_nnz_cutoff = new_col;
+                        info!(
+                            "Updated cutoffs: row={}, column={}",
+                            row_nnz_cutoff, col_nnz_cutoff
+                        );
+
+                        display_nnz_histogram(
+                            &data_file,
+                            &row_nnz_vec,
+                            &col_nnz_vec,
+                            row_nnz_cutoff,
+                            col_nnz_cutoff,
+                            true,
+                            None,
+                        )?;
+                    }
+                    UserAction::Cancel => {
+                        info!("Operation cancelled");
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -1081,17 +1102,24 @@ fn print_nnz_summary(label: &str, nnz: &[f32], cutoff: usize) {
     // Create histogram with log10(nnz+1) bins
     let hist = create_log_histogram(nnz, cutoff);
 
-    // Find max count for proportional scaling
-    let max_count = hist.iter().map(|(_, count, _)| *count).max().unwrap_or(1);
+    // Scale bar width on log10(count+1) so a few outlier bins don't flatten the rest
+    let max_log_count = hist
+        .iter()
+        .map(|(_, count, _)| ((*count as f64) + 1.0).log10())
+        .fold(0.0_f64, f64::max)
+        .max(1e-9);
 
-    println!("  Histogram (log10(nnz+1) scale):");
+    println!("  Histogram (x: log10(nnz+1) bin, bar: log10(count+1)):");
     for (bin_label, count, is_cutoff_bin) in hist {
         let marker = if is_cutoff_bin { " <-- CUTOFF" } else { "" };
-        // Scale bar width proportionally to fit within MAX_BAR_WIDTH
-        let bar_width = ((count as f64 / max_count as f64) * MAX_BAR_WIDTH as f64).round() as usize;
-        let bar_width = bar_width.max(1); // Ensure at least 1 char for non-zero counts
+        let log_count = ((count as f64) + 1.0).log10();
+        let bar_width = ((log_count / max_log_count) * MAX_BAR_WIDTH as f64).round() as usize;
+        let bar_width = if count > 0 { bar_width.max(1) } else { 0 };
         let bar = "█".repeat(bar_width);
-        println!("    {:>8}: {:>6} {}{}", bin_label, count, bar, marker);
+        println!(
+            "    {:>8}: {:>6} (log10 {:>5.2}) {}{}",
+            bin_label, count, log_count, bar, marker
+        );
     }
 }
 
@@ -1107,13 +1135,16 @@ fn create_log_histogram(nnz: &[f32], cutoff: usize) -> Vec<(String, usize, bool)
         *bins.entry(log_val).or_insert(0) += 1;
     }
 
-    // Convert to output format with labels
+    // Mark the first bin at or above the cutoff so the arrow always renders,
+    // even when no value's log bucket exactly matches cutoff_log.
+    let cutoff_bin = bins.keys().copied().find(|&b| b >= cutoff_log);
+
     bins.into_iter()
         .map(|(bin, count)| {
             let bin_float = bin as f64 / 10.0;
             let nnz_approx = (10.0_f64.powf(bin_float) - 1.0).round() as usize;
             let label = format!("~{}", nnz_approx);
-            let is_cutoff = bin == cutoff_log;
+            let is_cutoff = Some(bin) == cutoff_bin;
             (label, count, is_cutoff)
         })
         .collect()
