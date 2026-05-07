@@ -1,7 +1,7 @@
 use crate::candle_aux_layers::*;
 use crate::candle_batch_norm;
 use crate::candle_indexed_model_traits::*;
-use crate::candle_loss_functions::gaussian_kl_loss;
+use crate::candle_loss_functions::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::candle_value_transform::anscombe_residual;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
@@ -105,15 +105,6 @@ impl IndexedEmbeddingEncoder {
         let r_ns = anscombe_residual(indexed_x, indexed_x_null)?;
         r_ns.matmul(&e_sh)
     }
-
-    pub fn reparameterize(&self, z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {
-        if train {
-            let eps = Tensor::randn_like(z_mean, 0., 1.)?;
-            z_mean + (z_lnvar * 0.5)?.exp()? * eps
-        } else {
-            Ok(z_mean.clone())
-        }
-    }
 }
 
 impl IndexedEmbeddingEncoder {
@@ -158,7 +149,7 @@ impl IndexedEncoderT for IndexedEmbeddingEncoder {
         let (z_mean_nk, z_lnvar_nk) =
             self.latent_gaussian_params_indexed(union_indices, indexed_x, indexed_x_null, train)?;
 
-        let z_nk = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
+        let z_nk = gaussian_reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
         let log_prob = ops::log_softmax(&z_nk, 1)?;
 
         Ok((log_prob, gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?))

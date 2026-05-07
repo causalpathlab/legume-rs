@@ -17,6 +17,19 @@ pub fn gaussian_kl_loss(z_mean: &Tensor, z_lnvar: &Tensor) -> Result<Tensor> {
     (z_var - 1. + z_mean.powf(2.)? - z_lnvar)?.sum(z_mean.rank() - 1)? * 0.5
 }
 
+/// Reparameterize z ~ N(mean, diag(exp(lnvar))) for VAE-style training.
+///
+/// At train time draws ε ~ N(0, I) and returns mean + exp(lnvar/2) * ε.
+/// At eval time returns mean (the posterior mode) without sampling.
+pub fn gaussian_reparameterize(z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {
+    if train {
+        let eps = Tensor::randn_like(z_mean, 0., 1.)?;
+        z_mean + (z_lnvar * 0.5)?.exp()? * eps
+    } else {
+        Ok(z_mean.clone())
+    }
+}
+
 /// Negative log-probability of z under N(mean, diag(exp(lnvar))), up to constant.
 ///
 /// Returns 0.5 * Σ_k [(z_k - μ_k)² / σ²_k + log σ²_k] per sample.
