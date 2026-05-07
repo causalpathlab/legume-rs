@@ -1,5 +1,5 @@
 use crate::candle_aux_layers::*;
-use crate::candle_loss_functions::gaussian_kl_loss;
+use crate::candle_loss_functions::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::candle_model_traits::*;
 use crate::candle_value_transform::anscombe_residual;
 use candle_core::{Result, Tensor};
@@ -72,7 +72,7 @@ impl LogSoftmaxJointEncoder {
             .map(|(m, hh)| -> Result<(Tensor, Tensor)> {
                 let z_mean_nk = self.z_mean[m].forward(&hh)?;
                 let z_lnvar_nk = self.z_lnvar[m].forward(&hh)?;
-                let z = self.reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
+                let z = gaussian_reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
                 let kl = gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?;
 
                 Ok((z, kl))
@@ -101,22 +101,6 @@ impl LogSoftmaxJointEncoder {
         .sum(kl_aux_dim)?;
 
         Ok((z, kl))
-    }
-
-    ///
-    /// z = mu + sigma * eps
-    /// where eps ~ N(0, 1)
-    ///
-    /// # Arguments
-    /// * `z_mean` - mean of Gaussian distribution
-    /// * `z_lnvar` - log variance of Gaussian distribution
-    fn reparameterize(&self, z_mean: &Tensor, z_lnvar: &Tensor, train: bool) -> Result<Tensor> {
-        if train {
-            let eps = Tensor::randn_like(z_mean, 0., 1.)?;
-            z_mean + (z_lnvar * 0.5)?.exp()? * eps
-        } else {
-            Ok(z_mean.clone())
-        }
     }
 
     /// Will create a new non-negative encoder module
