@@ -231,7 +231,7 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 128,
+        default_value_t = 16,
         help = "Per-feature embedding dimension",
         long_help = "Features are pooled via [N,S] × [S,H] instead of the dense\n\
                      [N,D] × [D,M] used by the standard encoder."
