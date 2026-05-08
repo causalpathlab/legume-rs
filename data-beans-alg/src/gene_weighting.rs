@@ -84,24 +84,7 @@ pub fn compute_nb_fisher_weights_coarsened(
             |mut acc, &(lb, ub)| -> anyhow::Result<SparseRunningStatistics<f32>> {
                 let chunk = data_vec.read_columns_csc(lb..ub)?;
                 let coarse = coarsening.aggregate_sparse_csc(&chunk);
-                // Add each coarsened cell column as a sparse column
-                // (most coarse groups will be non-empty, but skipping
-                // zeros keeps `n_pos` accurate per coarse feature).
-                let n_block = ub - lb;
-                let mut row_idx: Vec<usize> = Vec::with_capacity(n_features_coarse);
-                let mut row_val: Vec<f32> = Vec::with_capacity(n_features_coarse);
-                for j in 0..n_block {
-                    row_idx.clear();
-                    row_val.clear();
-                    for c in 0..n_features_coarse {
-                        let v = coarse[(c, j)];
-                        if v > 0.0 {
-                            row_idx.push(c);
-                            row_val.push(v);
-                        }
-                    }
-                    acc.add_sparse_column(&row_idx, &row_val);
-                }
+                acc.add_dense_columns(&coarse);
                 Ok(acc)
             },
         )

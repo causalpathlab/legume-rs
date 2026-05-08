@@ -541,9 +541,11 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         stop: &stop,
         anchor_prior: Some(&anchor_prior),
         anchor_prior_per_level: Some(&anchor_tensors),
-        feature_mean: &feature_mean,
-        feature_mean_full: &feature_mean_full,
-        feature_fisher_per_level: &feature_fisher_per_level,
+        feature_stats: FeatureStats {
+            mean: &feature_mean,
+            mean_full: &feature_mean_full,
+            fisher_per_level: &feature_fisher_per_level,
+        },
     };
 
     let mut encoder = LogSoftmaxEncoder::new(
@@ -694,20 +696,31 @@ struct PipelineCtx<'a> {
     anchor_prior: Option<&'a crate::topic::anchor_prior::AnchorPrior>,
     /// Per-level `[D_l, K]` anchor tensors pre-built on `dev`.
     anchor_prior_per_level: Option<&'a [candle_core::Tensor]>,
-    /// Per-feature mean rate `μ_d` at the encoder's `D_coarse` (or
+    /// Per-feature statistics computed once, threaded through every
+    /// stage that needs them (encoder construction, decoder Fisher
+    /// weighting, model save).
+    feature_stats: FeatureStats<'a>,
+}
+
+/// Per-feature statistics derived from the finest-level pseudobulk
+/// posterior + a streaming pass over coarsened cells. Bundled together
+/// because all three flow as a unit through `PipelineCtx` and the
+/// save/predict path.
+struct FeatureStats<'a> {
+    /// Per-gene mean rate `μ_d` at the encoder's `D_coarse` (or
     /// `D_full` when no coarsening) — what the encoder actually divides
     /// by during forward.
-    feature_mean: &'a [f32],
-    /// Same quantity at full `D_full`, gene-name aligned. Saved to disk
+    mean: &'a [f32],
+    /// Same `μ_d` at full `D_full`, gene-name aligned. Saved to disk
     /// so predict can re-aggregate via the loaded coarsening matrix.
-    feature_mean_full: &'a [f32],
+    mean_full: &'a [f32],
     /// Per-level NB-Fisher weights `w_d ∈ (0, 1]` at each decoder's `D_l`,
     /// computed *after* feature coarsening (so the dispersion trend is
     /// fit at the resolution the decoder actually sees). Multiplicative
     /// per-gene weight on the multinomial loss term — housekeeping
     /// observations contribute less to β's gradient. Per-level vectors
     /// align with `level_decoder_dims`.
-    feature_fisher_per_level: &'a [Vec<f32>],
+    fisher_per_level: &'a [Vec<f32>],
 }
 
 fn run_topic_pipeline<Enc, Dec>(
@@ -731,7 +744,7 @@ where
         dec.configure(ctx.args);
         // Attach per-level NB-Fisher weights (coarse-resolution). No-op
         // for decoders that don't use them.
-        dec.attach_feature_weights(&ctx.feature_fisher_per_level[level], ctx.dev)?;
+        dec.attach_feature_weights(&ctx.feature_stats.fisher_per_level[level], ctx.dev)?;
     }
 
     // β init from anchor prior is disabled — random (Kaiming) initialisation
@@ -919,14 +932,14 @@ where
     // Persist `μ_d` at `D_full` (gene-name aligned). At predict time we
     // reload it and aggregate through the saved coarsening matrix to
     // get the encoder's `D_coarse` view.
-    save_feature_mean(ctx.feature_mean_full, ctx.gene_names, &ctx.args.out)?;
+    save_feature_mean(ctx.feature_stats.mean_full, ctx.gene_names, &ctx.args.out)?;
     // Persist NB-Fisher weights at the *finest* level's `D_l` (= what
     // `MultinomTopicDecoder` actually applies). Predict reloads it and
     // attaches to the rebuilt decoder. We only save the finest level
     // because predict only uses the finest decoder.
     {
-        let finest_idx = ctx.feature_fisher_per_level.len().saturating_sub(1);
-        let finest_w = &ctx.feature_fisher_per_level[finest_idx];
+        let finest_idx = ctx.feature_stats.fisher_per_level.len().saturating_sub(1);
+        let finest_w = &ctx.feature_stats.fisher_per_level[finest_idx];
         data_beans_alg::gene_weighting::save_fisher_weights_coarse(&ctx.args.out, finest_w)?;
     }
 
@@ -972,7 +985,7 @@ where
             n_features: n_features_encoder,
             n_topics: ctx.n_topics,
             layers: &ctx.args.encoder_layers,
-            feature_mean: Some(ctx.feature_mean),
+            feature_mean: Some(ctx.feature_stats.mean),
         },
         ctx.parameters,
         cpu_vb.clone(),
@@ -1003,7 +1016,7 @@ where
         )?;
         // Re-attach the finest level's NB-Fisher weights so predictive llik
         // uses the same loss as training.
-        d.attach_feature_weights(&ctx.feature_fisher_per_level[finest_dec_idx], &cpu_dev)?;
+        d.attach_feature_weights(&ctx.feature_stats.fisher_per_level[finest_dec_idx], &cpu_dev)?;
         Some(d)
     } else {
         None
