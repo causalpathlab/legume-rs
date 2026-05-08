@@ -11,6 +11,9 @@ pub struct LogSoftmaxJointEncoder {
     bn_z: Vec<BatchNorm>,
     z_mean: Vec<Linear>,
     z_lnvar: Vec<Linear>,
+    /// Per-modality `[1, D_m]` non-trainable mean rate, broadcast inside
+    /// `anscombe_residual` as a multiplicative count-rate divisor.
+    feature_mean: Vec<Option<Tensor>>,
 }
 
 impl JointEncoderModuleT for LogSoftmaxJointEncoder {
@@ -41,7 +44,8 @@ impl LogSoftmaxJointEncoder {
         x_nd_vec
             .iter()
             .zip(x0_nd_vec)
-            .map(|(x_nd, x0_nd)| anscombe_residual(x_nd, x0_nd.as_ref()))
+            .zip(&self.feature_mean)
+            .map(|((x_nd, x0_nd), mu_f)| anscombe_residual(x_nd, x0_nd.as_ref(), mu_f.as_ref()))
             .collect()
     }
 
@@ -158,12 +162,32 @@ impl LogSoftmaxJointEncoder {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        let dev = vb.device();
+        let feature_mean: Vec<Option<Tensor>> = match &args.feature_mean {
+            Some(per_mod) => {
+                debug_assert_eq!(per_mod.len(), n_modalities);
+                per_mod
+                    .iter()
+                    .zip(&n_features)
+                    .map(|(opt, &d)| match opt {
+                        Some(s) => {
+                            debug_assert_eq!(s.len(), d);
+                            Tensor::from_slice(s, (1, d), dev).map(Some)
+                        }
+                        None => Ok(None),
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            }
+            None => vec![None; n_modalities],
+        };
+
         Ok(Self {
             n_topics: args.n_topics,
             fc,
             bn_z,
             z_mean,
             z_lnvar,
+            feature_mean,
         })
     }
 }
@@ -172,4 +196,7 @@ pub struct LogSoftmaxJointEncoderArgs<'a> {
     pub n_features: Vec<usize>,
     pub n_topics: usize,
     pub layers: &'a [usize],
+    /// Optional per-modality mean rates `μ_d` (each length = `n_features[m]`).
+    /// Outer `Option` for "no means at all"; inner `Option` per modality.
+    pub feature_mean: Option<Vec<Option<&'a [f32]>>>,
 }

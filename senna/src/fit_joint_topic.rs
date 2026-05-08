@@ -409,6 +409,10 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             n_features: n_features.clone(),
             n_topics,
             layers: &args.encoder_layers,
+            // Joint encoder doesn't currently plumb per-modality means;
+            // falls back to live per-feature batch centering inside
+            // `anscombe_residual`.
+            feature_mean: None,
         },
         param_builder.clone(),
     )?;

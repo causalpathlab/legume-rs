@@ -57,20 +57,32 @@ const EPS_DIV: f64 = 0.1;
 /// Apply the unified value transform. Output shape matches `y_nf`.
 ///
 /// `y_nf` is non-negative count-space (raw PB counts or indexed subset).
-/// `x0_nf`, when `Some`, is the multiplicative batch residual `μ_residual`
-/// (ratio-space, centered at ~1) with the same shape as `y_nf`. Division
-/// is floored at `EPS_DIV` to prevent blowup on rare genes.
-pub fn anscombe_residual(y_nf: &Tensor, x0_nf: Option<&Tensor>) -> Result<Tensor> {
+/// `x0_nf`, when `Some`, is the per-cell multiplicative batch residual
+/// `μ_residual` (ratio-space, centered at ~1) with the same shape as
+/// `y_nf`. `mu_f`, when `Some`, is the per-feature mean expression rate
+/// `μ_d`, broadcast across rows (shape `[1, D]` or `[D]`). When both
+/// are supplied they compose multiplicatively in the same divisive
+/// step under `E[y] = batch_effect · gene_mean · biological_deviation`,
+/// so the transform sees the cell's biological deviation. Division is
+/// floored at `EPS_DIV` to prevent blowup on rare genes.
+pub fn anscombe_residual(
+    y_nf: &Tensor,
+    x0_nf: Option<&Tensor>,
+    mu_f: Option<&Tensor>,
+) -> Result<Tensor> {
     debug_assert_eq!(y_nf.dims().len(), 2);
     if let Some(x0) = x0_nf {
         debug_assert_eq!(x0.dims(), y_nf.dims());
     }
 
-    let clean = match x0_nf {
-        Some(x0) => {
-            let x0_safe = x0.clamp(EPS_DIV, f64::INFINITY)?;
-            y_nf.broadcast_div(&x0_safe)?
-        }
+    let divisor = match (x0_nf, mu_f) {
+        (Some(x0), Some(m)) => Some(x0.broadcast_mul(m)?),
+        (Some(x0), None) => Some(x0.clone()),
+        (None, Some(m)) => Some(m.clone()),
+        (None, None) => None,
+    };
+    let clean = match divisor {
+        Some(d) => y_nf.broadcast_div(&d.clamp(EPS_DIV, f64::INFINITY)?)?,
         None => y_nf.clone(),
     };
     let a = anscombe(&clean)?;

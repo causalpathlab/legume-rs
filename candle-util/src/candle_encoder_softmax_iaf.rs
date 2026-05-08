@@ -12,6 +12,9 @@ pub struct LogSoftmaxIAFEncoder {
     fc: StackLayers<Linear>,
     bn_z: BatchNorm,
     iaf_layers: IAFLayers<Linear, StackLayers<Linear>>,
+    /// `[1, D]` non-trainable mean rate; broadcast inside
+    /// `anscombe_residual` as a multiplicative count-rate divisor.
+    feature_mean: Option<Tensor>,
 }
 
 impl EncoderModuleT for LogSoftmaxIAFEncoder {
@@ -47,7 +50,7 @@ impl LogSoftmaxIAFEncoder {
         x0_nd: Option<&Tensor>,
         _train: bool,
     ) -> Result<Tensor> {
-        let r_nd = anscombe_residual(x_nd, x0_nd)?;
+        let r_nd = anscombe_residual(x_nd, x0_nd, self.feature_mean.as_ref())?;
         self.feature_module.forward(&r_nd)
     }
 
@@ -103,6 +106,14 @@ impl LogSoftmaxIAFEncoder {
             vb.pp("iaf"),
         )?;
 
+        let feature_mean = match args.feature_mean {
+            Some(slice) => {
+                debug_assert_eq!(slice.len(), args.n_features);
+                Some(Tensor::from_slice(slice, (1, args.n_features), vb.device())?)
+            }
+            None => None,
+        };
+
         Ok(Self {
             n_topics: args.n_topics,
             n_modules: args.n_modules,
@@ -110,6 +121,7 @@ impl LogSoftmaxIAFEncoder {
             fc,
             bn_z,
             iaf_layers,
+            feature_mean,
         })
     }
 }
@@ -120,4 +132,6 @@ pub struct LogSoftmaxIAFEncoderArgs<'a> {
     pub n_modules: usize,
     pub layers: &'a [usize],
     pub n_transforms: usize,
+    /// Optional per-feature mean rate `μ_d` (length = n_features).
+    pub feature_mean: Option<&'a [f32]>,
 }
