@@ -196,6 +196,37 @@ pub fn load_fisher_weights(prefix: &str) -> anyhow::Result<Option<GeneWeights>> 
     Ok(Some(load_per_gene_weights(&path)?))
 }
 
+/// Save coarse-resolution NB-Fisher weights computed at the encoder/
+/// decoder's `D_coarse` (post-feature-coarsening). Stored at
+/// `{prefix}.fisher_weights_coarse.parquet` keyed on synthetic
+/// `coarse_<i>` axis ids since coarse meta-genes have no biological
+/// names. Loaded by `senna predict` / `senna eval-topic` to re-attach
+/// the same per-feature multinomial-loss weights at inference.
+pub fn save_fisher_weights_coarse(
+    out_prefix: &str,
+    weights: &[f32],
+) -> anyhow::Result<()> {
+    let axis_names: Vec<Box<str>> = (0..weights.len())
+        .map(|i| format!("coarse_{i}").into_boxed_str())
+        .collect();
+    save_per_gene_weights(
+        weights,
+        &axis_names,
+        &format!("{out_prefix}.fisher_weights_coarse.parquet"),
+    )
+}
+
+/// Convenience wrapper: load `{prefix}.fisher_weights_coarse.parquet`.
+/// Returns `Ok(None)` when the file doesn't exist (older models trained
+/// before coarse weights were saved).
+pub fn load_fisher_weights_coarse(prefix: &str) -> anyhow::Result<Option<GeneWeights>> {
+    let path = format!("{prefix}.fisher_weights_coarse.parquet");
+    if !std::path::Path::new(&path).exists() {
+        return Ok(None);
+    }
+    Ok(Some(load_per_gene_weights(&path)?))
+}
+
 /// Scale each row of `sum_gk` by its corresponding entry of `weights`.
 /// `weights.len()` must equal `sum_gk.nrows()`.
 pub fn apply_gene_weights(sum_gk: &mut nalgebra::DMatrix<f32>, weights: &[f32]) {

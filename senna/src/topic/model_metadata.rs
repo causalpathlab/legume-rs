@@ -17,7 +17,7 @@ pub const MODEL_TYPE_INDEXED: &str = "indexed_topic_packed";
 pub struct TopicModelMetadata {
     /// Model variant: `topic`, `indexed_topic_packed`, `joint_topic`
     pub model_type: Box<str>,
-    /// Decoder types used (e.g. `["multinom"]`, `["multinom", "vmf"]`)
+    /// Decoder types used (e.g. `["multinom"]`, `["multinom", "nb"]`)
     pub decoder_types: Vec<Box<str>>,
     /// Per-decoder loss weights (sum to 1.0)
     pub decoder_weights: Vec<f64>,

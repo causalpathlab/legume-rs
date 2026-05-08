@@ -427,9 +427,9 @@ where
     // Attach finest-level NB-Fisher weights to the finest decoder so
     // predictive llik uses the same loss as training. Older models
     // without saved coarse weights fall back to the unweighted form.
-    let coarse_path = format!("{model_prefix}.fisher_weights_coarse.parquet");
-    if std::path::Path::new(&coarse_path).exists() {
-        let (_, coarse_w) = data_beans_alg::gene_weighting::load_per_gene_weights(&coarse_path)?;
+    if let Some((_, coarse_w)) =
+        data_beans_alg::gene_weighting::load_fisher_weights_coarse(model_prefix)?
+    {
         if let Some(finest) = decoders.last_mut() {
             finest.attach_feature_weights(&coarse_w, cpu_dev)?;
         }
