@@ -135,8 +135,7 @@ pub fn nce_loss(
 
     // Pool unique blocks via the unified feature axis.
     let (e_cell_u, b_cell_u) = model.pool_cells(&unique_cells, cell_coarse_to_fine, dev)?;
-    let (e_feat_u, b_feat_u) =
-        model.pool_features(&unique_feats, feat_coarse_to_fine, dev)?;
+    let (e_feat_u, b_feat_u) = model.pool_features(&unique_feats, feat_coarse_to_fine, dev)?;
 
     // Gather per-position pooled embeddings.
     let cell_idx_t = Tensor::from_vec(cell_pos_idx, b, dev)?;
@@ -217,7 +216,9 @@ pub fn build_edge_sampler(
     let weights: Vec<f32> = triplets
         .iter()
         .map(|t| {
-            let w = fisher_weights.map(|fw| fw[t.feature as usize]).unwrap_or(1.0);
+            let w = fisher_weights
+                .map(|fw| fw[t.feature as usize])
+                .unwrap_or(1.0);
             (t.count * w).max(1e-8)
         })
         .collect();

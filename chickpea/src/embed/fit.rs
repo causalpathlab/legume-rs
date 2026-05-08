@@ -8,15 +8,15 @@ use crate::embed::coarsen::{
     UnifiedFeatureCoarseningArgs,
 };
 use crate::embed::data::load_unified_data;
-use crate::embed::eval::{save_outputs, OutputContext};
 use crate::embed::data::Triplet;
+use crate::embed::eval::{save_outputs, OutputContext};
 use crate::embed::loss::build_negative_sampler;
-use rand_distr::weighted::WeightedIndex;
 use crate::embed::model::{BiasInit, JointEmbedModel, ModelArgs};
 use crate::embed::training::{train, TrainingContext, TrainingParams};
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
+use rand_distr::weighted::WeightedIndex;
 
 #[derive(Args, Debug)]
 pub struct EmbedGraphArgs {
