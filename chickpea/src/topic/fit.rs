@@ -1,8 +1,8 @@
-use crate::chickpea_input::load_paired_data;
-use crate::cis_mask::*;
-use crate::coarsening::{log_spaced_coarsenings, log_spaced_genomic_coarsenings};
 use crate::common::*;
+use crate::topic::cis_mask::*;
+use crate::topic::coarsening::{log_spaced_coarsenings, log_spaced_genomic_coarsenings};
 use crate::topic::eval::{save_outputs, EvalContext};
+use crate::topic::input::load_paired_data;
 use crate::topic::training::{TrainingContext, TrainingParams};
 use candle_util::candle_core::Device;
 use data_beans_alg::collapse_data::MultilevelParams;
