@@ -1,6 +1,6 @@
 use crate::common::*;
-use crate::topic::linkage::{rna_dictionary_from_m, save_linkage_results, FeatureAnnotations};
 use crate::topic::encoder::EncoderInput;
+use crate::topic::linkage::{rna_dictionary_from_m, save_linkage_results, FeatureAnnotations};
 use crate::topic::training::TrainedModel;
 use candle_util::candle_core::{Device, Tensor};
 use genomic_data::coordinates::PeakCoord;

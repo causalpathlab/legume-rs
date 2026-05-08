@@ -6,10 +6,10 @@ pub mod coarsening;
 pub mod decoder;
 pub mod encoder;
 pub mod eval;
+pub mod fit;
 pub mod input;
 pub mod linkage;
 pub mod susie;
-pub mod fit;
 pub mod training;
 
 pub use decoder::ChickpeaDecoder;

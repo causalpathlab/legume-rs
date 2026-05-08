@@ -1,7 +1,7 @@
 use crate::common::*;
 use crate::topic::coarsening::coarsen_tensor;
-use crate::topic::linkage::{precompute_expand_indices, rna_dictionary_from_m};
 use crate::topic::decoder::DecoderArgs;
+use crate::topic::linkage::{precompute_expand_indices, rna_dictionary_from_m};
 use crate::topic::{ChickpeaDecoder, ChickpeaEncoder, SuSiE};
 use candle_util::candle_core::{DType, Device, Tensor};
 use candle_util::candle_nn::{self, AdamW, Optimizer, ParamsAdamW, VarMap};

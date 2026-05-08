@@ -129,12 +129,7 @@ pub fn train(
         pb.set_message(format!("loss={:.3}", avg));
         pb.inc(1);
         if epoch % 10 == 0 || epoch + 1 == params.epochs {
-            info!(
-                "epoch {}/{}: loss={:.3}",
-                epoch + 1,
-                params.epochs,
-                avg
-            );
+            info!("epoch {}/{}: loss={:.3}", epoch + 1, params.epochs, avg);
         }
     }
     pb.finish_and_clear();
