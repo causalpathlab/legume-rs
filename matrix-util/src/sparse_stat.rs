@@ -108,6 +108,54 @@ where
         }
     }
 
+    /// Add a dense column directly. Skips zero / non-finite entries
+    /// so `npos` stays equivalent to what [`add_sparse_column`] would
+    /// produce — useful when an upstream coarsening step yields a dense
+    /// `[D, n]` intermediate we don't want to re-sparsify.
+    ///
+    /// Loop is structured for autovectorization: hoists the running-sum
+    /// and running-square accumulations through `zip_eq` over independent
+    /// `&mut` slices (no aliasing), and uses a branchless `1/0` mask
+    /// for the `npos` increment so the compiler can emit `cmov` /
+    /// `vmaskmovps` instead of a control-flow branch per element.
+    pub fn add_dense_column(&mut self, values: &[T]) {
+        debug_assert_eq!(values.len(), self.nrows);
+        let zero = T::zero();
+        let one = T::one();
+        for ((v_in, npos), (s1, s2)) in values
+            .iter()
+            .zip(self.npos.iter_mut())
+            .zip(self.s1.iter_mut().zip(self.s2.iter_mut()))
+        {
+            let v = *v_in;
+            // Mask non-finite to zero so finite-only invariant holds
+            // through the rest without branching the `is_finite` check.
+            let v = if v.is_finite() { v } else { zero };
+            // Branchless `+= (v > 0) as T`: compiler emits cmov.
+            let pos = if v > zero { one } else { zero };
+            *npos += pos;
+            *s1 += v;
+            *s2 += v * v;
+        }
+        self.ncols_processed += 1;
+    }
+
+    /// Add every column of a dense `[D, n]` matrix in column-major
+    /// order. Calls [`add_dense_column`] per column so the inner loop
+    /// stays vectorizable; the per-column overhead is negligible
+    /// (one `+= 1` for `ncols_processed`) compared to the per-element
+    /// accumulation work.
+    pub fn add_dense_columns(&mut self, dense: &nalgebra::DMatrix<T>)
+    where
+        T: nalgebra::Scalar,
+    {
+        debug_assert_eq!(dense.nrows(), self.nrows);
+        for j in 0..dense.ncols() {
+            let col = dense.column(j);
+            self.add_dense_column(col.as_slice());
+        }
+    }
+
     /// Combine another `SparseRunningStatistics` into this one. Used to
     /// reduce per-thread accumulators back to a single result without
     /// holding a global lock during the streaming pass.
