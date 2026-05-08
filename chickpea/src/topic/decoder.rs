@@ -18,10 +18,10 @@ pub struct DecoderArgs {
 /// where `α_g = sigmoid(gate_logit)`. NB-Fisher feature weights, when
 /// attached, downweight high-mean / high-dispersion housekeeping features.
 pub struct ChickpeaDecoder {
-    pub log_beta_atac: Tensor, // [d_peaks_l, K]
-    log_beta_rna: Tensor,      // [d_genes_l, K]
-    gate_logit: Tensor,        // [d_genes_l, 1]
-    bias_k: Tensor,            // [1, K]
+    pub log_beta_atac: Tensor,            // [d_peaks_l, K]
+    log_beta_rna: Tensor,                 // [d_genes_l, K]
+    gate_logit: Tensor,                   // [d_genes_l, 1]
+    bias_k: Tensor,                       // [1, K]
     feature_weights_atac: Option<Tensor>, // [1, d_peaks_l]
     feature_weights_rna: Option<Tensor>,  // [1, d_genes_l]
 }
@@ -60,14 +60,12 @@ impl ChickpeaDecoder {
     }
 
     pub fn attach_feature_weights_atac(&mut self, weights: &[f32], dev: &Device) -> Result<()> {
-        self.feature_weights_atac =
-            Some(Tensor::from_slice(weights, (1, weights.len()), dev)?);
+        self.feature_weights_atac = Some(Tensor::from_slice(weights, (1, weights.len()), dev)?);
         Ok(())
     }
 
     pub fn attach_feature_weights_rna(&mut self, weights: &[f32], dev: &Device) -> Result<()> {
-        self.feature_weights_rna =
-            Some(Tensor::from_slice(weights, (1, weights.len()), dev)?);
+        self.feature_weights_rna = Some(Tensor::from_slice(weights, (1, weights.len()), dev)?);
         Ok(())
     }
 
