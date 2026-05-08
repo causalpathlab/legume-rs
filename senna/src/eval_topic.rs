@@ -176,11 +176,21 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
     let mut parameters = candle_nn::VarMap::new();
     let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
 
+    let feature_mean_enc: Option<Vec<f32>> =
+        match crate::topic::model_metadata::load_feature_mean(&args.model) {
+            Ok((_, full)) => Some(crate::predict::aggregate_feature_mean_to_coarse(
+                &full,
+                coarsening.as_ref(),
+            )),
+            Err(_) => None,
+        };
+
     let encoder = LogSoftmaxEncoder::new(
         LogSoftmaxEncoderArgs {
             n_features: metadata.n_features_encoder,
             n_topics: metadata.n_topics,
             layers: &metadata.encoder_hidden,
+            feature_mean: feature_mean_enc.as_deref(),
         },
         &parameters,
         vb.clone(),

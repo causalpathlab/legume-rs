@@ -433,6 +433,39 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // Encoder at finest level's D_coarse (dense ops are O(D))
     let n_features_encoder = finest_coarsening.map_or(n_features_full, |c| c.num_coarse);
 
+    // Per-feature mean rate `μ_d` from the finest-level pseudobulk
+    // posterior. We save it at `D_full` (gene-name aligned) and
+    // aggregate through the coarsening matrix here for the encoder's
+    // own `D_coarse` view. Same correction the indexed encoder gets
+    // via gather — gives the dense encoder a stable per-gene null
+    // beside the per-cell batch null.
+    let feature_mean_full: Vec<f32> = {
+        let mu = finest_collapsed.mu_observed.posterior_mean();
+        let n_pb = mu.ncols().max(1) as f32;
+        (0..n_features_full)
+            .map(|d| mu.row(d).iter().sum::<f32>() / n_pb)
+            .collect()
+    };
+    let feature_mean: Vec<f32> = match finest_coarsening {
+        Some(fc) => {
+            // `aggregate_rows_ds` sums fine rows into coarse rows;
+            // divide by the per-coarse-group size to get mean of
+            // means (each fine gene contributes 1/|group|).
+            let mu_full_ds =
+                nalgebra::DMatrix::<f32>::from_column_slice(n_features_full, 1, &feature_mean_full);
+            let mu_enc = fc.aggregate_rows_ds(&mu_full_ds);
+            let group_sizes: Vec<f32> = fc
+                .coarse_to_fine
+                .iter()
+                .map(|g| g.len().max(1) as f32)
+                .collect();
+            (0..n_features_encoder)
+                .map(|c| mu_enc[(c, 0)] / group_sizes[c])
+                .collect()
+        }
+        None => feature_mean_full.clone(),
+    };
+
     let dev = create_device(&args.device, args.device_no)?;
 
     let parameters = candle_nn::VarMap::new();
@@ -480,6 +513,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         stop: &stop,
         anchor_prior: Some(&anchor_prior),
         anchor_prior_per_level: Some(&anchor_tensors),
+        feature_mean: &feature_mean,
+        feature_mean_full: &feature_mean_full,
     };
 
     let mut encoder = LogSoftmaxEncoder::new(
@@ -487,6 +522,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             n_features: n_features_encoder,
             n_topics,
             layers: &args.encoder_layers,
+            feature_mean: Some(&feature_mean),
         },
         &parameters,
         param_builder.clone(),
@@ -628,6 +664,13 @@ struct PipelineCtx<'a> {
     anchor_prior: Option<&'a crate::topic::anchor_prior::AnchorPrior>,
     /// Per-level `[D_l, K]` anchor tensors pre-built on `dev`.
     anchor_prior_per_level: Option<&'a [candle_core::Tensor]>,
+    /// Per-feature mean rate `μ_d` at the encoder's `D_coarse` (or
+    /// `D_full` when no coarsening) — what the encoder actually divides
+    /// by during forward.
+    feature_mean: &'a [f32],
+    /// Same quantity at full `D_full`, gene-name aligned. Saved to disk
+    /// so predict can re-aggregate via the loaded coarsening matrix.
+    feature_mean_full: &'a [f32],
 }
 
 fn run_topic_pipeline<Enc, Dec>(
@@ -827,10 +870,16 @@ fn save_metadata_and_evaluate<Dec>(
 where
     Dec: DecoderModuleT + NewDecoder + Send + Sync,
 {
-    use crate::topic::model_metadata::{save_coarsening, save_parameters, TopicModelMetadata};
+    use crate::topic::model_metadata::{
+        save_coarsening, save_feature_mean, save_parameters, TopicModelMetadata,
+    };
     use candle_util::candle_topic_refinement::TopicRefinementConfig;
 
     save_parameters(ctx.parameters, &ctx.args.out)?;
+    // Persist `μ_d` at `D_full` (gene-name aligned). At predict time we
+    // reload it and aggregate through the saved coarsening matrix to
+    // get the encoder's `D_coarse` view.
+    save_feature_mean(ctx.feature_mean_full, ctx.gene_names, &ctx.args.out)?;
 
     let mut metadata = TopicModelMetadata {
         model_type: crate::topic::model_metadata::MODEL_TYPE_TOPIC.into(),
@@ -874,6 +923,7 @@ where
             n_features: n_features_encoder,
             n_topics: ctx.n_topics,
             layers: &ctx.args.encoder_layers,
+            feature_mean: Some(ctx.feature_mean),
         },
         ctx.parameters,
         cpu_vb.clone(),
