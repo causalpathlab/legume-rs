@@ -227,33 +227,38 @@ fn build_remap(
     }
 }
 
-/// Aggregate a `[D_full]` per-gene mean to `[D_coarse]` via the same
-/// rule the dense encoder's input went through at training time:
-/// fine-gene means inside each coarse group are averaged. When no
-/// coarsening was used, returns the full-D vector unchanged.
+/// Aggregate a `[D_full]` per-gene mean to `[D_coarse]` so the divisor
+/// is on the same per-fine-gene rate scale as the encoder expects.
+///
+/// The encoder's input `y_coarse` and batch null `x0_coarse` are both
+/// **sum**-coarsened (`aggregate_columns_nd`), giving `y ≈ G·batch·<μ>·bio`
+/// and `x0 ≈ G·batch`. For `clean = y / (x0·μ_coarse)` to recover `bio`,
+/// `μ_coarse` must be at the per-fine-gene rate `<μ>`, not the summed
+/// `Σμ`. So we sum-coarsen first (matching the call sites used for
+/// data and batch null) then divide each coarse cell by its group size.
 pub(crate) fn aggregate_feature_mean_to_coarse(
     full: &[f32],
     coarsening: Option<&FeatureCoarsening>,
 ) -> Vec<f32> {
+    let n_full = full.len();
+    let mu_1d = nalgebra::DMatrix::<f32>::from_row_slice(1, n_full, full);
     match coarsening {
-        Some(fc) => fc
-            .coarse_to_fine
-            .iter()
-            .map(|fines| {
-                if fines.is_empty() {
-                    0.0
-                } else {
-                    fines.iter().map(|&f| full[f]).sum::<f32>() / fines.len() as f32
-                }
-            })
-            .collect(),
-        None => full.to_vec(),
+        Some(fc) => {
+            let mu_summed = fc.aggregate_columns_nd(&mu_1d);
+            mu_summed
+                .row(0)
+                .iter()
+                .zip(fc.coarse_to_fine.iter())
+                .map(|(&s, fines)| s / fines.len().max(1) as f32)
+                .collect()
+        }
+        None => mu_1d.row(0).iter().copied().collect(),
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Dense prediction
-// ─────────────────────────────────────────────────────────────────────────────
+////////////////////////
+// Dense prediction //
+////////////////////////
 
 fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
     let (training_genes, beta_dk) = load_dictionary(&args.model)?;
@@ -632,9 +637,9 @@ fn remap_and_coarsen_dense(
     Ok(nd)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Indexed prediction
-// ─────────────────────────────────────────────────────────────────────────────
+//////////////////////////
+// Indexed prediction //
+//////////////////////////
 
 fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
     let embedding_dim = metadata
@@ -1015,9 +1020,9 @@ fn predict_block_indexed(
     Ok((lb, z_mat, llik, total))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Output writers
-// ─────────────────────────────────────────────────────────────────────────────
+/////////////////////
+// Output writers //
+/////////////////////
 
 fn write_outputs(
     args: &PredictArgs,

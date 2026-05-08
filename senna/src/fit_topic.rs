@@ -446,24 +446,31 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             .map(|d| mu.row(d).iter().sum::<f32>() / n_pb)
             .collect()
     };
-    let feature_mean: Vec<f32> = match finest_coarsening {
-        Some(fc) => {
-            // `aggregate_rows_ds` sums fine rows into coarse rows;
-            // divide by the per-coarse-group size to get mean of
-            // means (each fine gene contributes 1/|group|).
-            let mu_full_ds =
-                nalgebra::DMatrix::<f32>::from_column_slice(n_features_full, 1, &feature_mean_full);
-            let mu_enc = fc.aggregate_rows_ds(&mu_full_ds);
-            let group_sizes: Vec<f32> = fc
-                .coarse_to_fine
+    // `μ_d` at coarse level = **mean** per fine gene within each
+    // group. The data and batch null are sum-coarsened
+    // (`aggregate_columns_nd` on counts/ratios), so `y_coarse ≈
+    // G·batch·<μ>·bio` and `x0_coarse ≈ G·batch`. For the divisive
+    // correction `clean = y / (x0 · μ_coarse)` to recover `bio`
+    // cleanly, `μ_coarse` must be on a per-fine-gene rate scale —
+    // i.e. `<μ>` (mean), not `Σμ` (sum). The asymmetry comes from
+    // `x0` being a ratio (~1) summed to ≈G while `μ` is a count
+    // rate; mean-coarsening `μ` makes the units match.
+    let feature_mean: Vec<f32> = {
+        let mu_1d =
+            nalgebra::DMatrix::<f32>::from_row_slice(1, n_features_full, &feature_mean_full);
+        let mu_summed = match finest_coarsening {
+            Some(fc) => fc.aggregate_columns_nd(&mu_1d),
+            None => mu_1d,
+        };
+        match finest_coarsening {
+            Some(fc) => mu_summed
+                .row(0)
                 .iter()
-                .map(|g| g.len().max(1) as f32)
-                .collect();
-            (0..n_features_encoder)
-                .map(|c| mu_enc[(c, 0)] / group_sizes[c])
-                .collect()
+                .zip(fc.coarse_to_fine.iter())
+                .map(|(&s, fines)| s / fines.len().max(1) as f32)
+                .collect(),
+            None => mu_summed.row(0).iter().copied().collect(),
         }
-        None => feature_mean_full.clone(),
     };
 
     let dev = create_device(&args.device, args.device_no)?;
@@ -639,9 +646,9 @@ impl ConfigureDecoder for NbMixtureTopicDecoder {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Generic topic pipeline
-// ---------------------------------------------------------------------------
+/////////////////////////////
+// Generic topic pipeline //
+/////////////////////////////
 
 struct PipelineCtx<'a> {
     level_decoder_dims: &'a [usize],

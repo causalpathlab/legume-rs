@@ -109,7 +109,11 @@ impl LogSoftmaxIAFEncoder {
         let feature_mean = match args.feature_mean {
             Some(slice) => {
                 debug_assert_eq!(slice.len(), args.n_features);
-                Some(Tensor::from_slice(slice, (1, args.n_features), vb.device())?)
+                Some(Tensor::from_slice(
+                    slice,
+                    (1, args.n_features),
+                    vb.device(),
+                )?)
             }
             None => None,
         };
