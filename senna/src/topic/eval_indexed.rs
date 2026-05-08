@@ -8,49 +8,91 @@ use candle_util::candle_indexed_model_traits::*;
 use candle_util::candle_topic_refinement::TopicRefinementConfig;
 use std::collections::{BTreeSet, HashMap};
 
-/// Convert a dense [N, D] tensor to indexed form: `union_indices` [S] and `indexed_x` [N, S].
+/// Packed top-K representation built from a dense `[N, D]` tensor.
 ///
-/// `shortlist_weights` is the same per-gene weight vector used at training time
-/// (see `IndexedTrainConfig::shortlist_weights`) — required so inference picks
-/// shortlists from the same distribution the encoder was trained on.
+/// Holds both the per-cell `(indices, values)` consumed by the encoder
+/// and the `(union, scatter_pos)` consumed by the decoder, so a single
+/// host pass over the dense rows is enough for both sides. Optional
+/// `values_mean` / `values_weight` carry per-feature constants gathered
+/// at the same per-cell positions, mirroring the loader's training-time
+/// minibatch. Clone is cheap — Tensor is Arc-buffered.
+#[derive(Clone)]
+pub(crate) struct IndexedPack {
+    /// [N, K] u32 — per-cell top-K feature ids
+    pub indices: Tensor,
+    /// [N, K] f32 — per-cell values in id order (= scatter_pos order)
+    pub values: Tensor,
+    /// [S] u32 — sorted-by-discovery union of feature ids
+    pub union_indices: Tensor,
+    /// [N, K] u32 in [0, S) — per-cell positions in the union
+    pub scatter_pos: Tensor,
+    /// [N, K] f32 — per-gene mean expression rate `μ_d` gathered at
+    /// `indices` (encoder side; multiplicative count-rate divisor).
+    pub values_mean: Option<Tensor>,
+    /// [N, K] f32 — per-gene NB-Fisher weight gathered at `indices`
+    /// (decoder side; multiplicative likelihood weight).
+    pub values_weight: Option<Tensor>,
+}
+
+/// Optional per-gene context for `dense_to_indexed*`. Each slice is
+/// length `D` (training-D order); the helpers gather them at the
+/// per-cell top-K positions to produce the `[N, K]` tensors that flow
+/// into the encoder / decoder.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PerGeneContext<'a> {
+    pub feature_mean: Option<&'a [f32]>,
+    pub feature_fisher_weights: Option<&'a [f32]>,
+}
+
+/// Convert a dense `[N, D]` tensor into packed top-K form.
+///
+/// `shortlist_weights` is the same per-gene weight vector used at training
+/// time; required so inference picks shortlists from the same distribution
+/// the encoder was trained on. `ctx` carries optional per-gene baseline
+/// and Fisher weights to gather at the chosen top-K positions.
 pub(crate) fn dense_to_indexed(
     x_nd: &Tensor,
     context_size: usize,
     shortlist_weights: &[f32],
+    ctx: PerGeneContext<'_>,
     dev: &Device,
-) -> anyhow::Result<(Tensor, Tensor)> {
+) -> anyhow::Result<IndexedPack> {
     let rows: Vec<Vec<f32>> = x_nd.to_vec2()?;
-    dense_rows_to_indexed(&rows, context_size, shortlist_weights, dev)
+    dense_rows_to_indexed(&rows, context_size, shortlist_weights, ctx, dev)
 }
 
-/// Convert a dense [N, D] tensor to two indexed forms with a single host copy.
-///
-/// Returns `((enc_union, enc_x), (dec_union, dec_x))` using one `to_vec2()` call.
+/// Convert a dense `[N, D]` tensor into two packed top-K forms (encoder
+/// and decoder windows) with a single host copy of the row data.
 pub(crate) fn dense_to_indexed_pair(
     x_nd: &Tensor,
     enc_context_size: usize,
     dec_context_size: usize,
     shortlist_weights: &[f32],
+    ctx: PerGeneContext<'_>,
     dev: &Device,
-) -> anyhow::Result<((Tensor, Tensor), (Tensor, Tensor))> {
+) -> anyhow::Result<(IndexedPack, IndexedPack)> {
     let rows: Vec<Vec<f32>> = x_nd.to_vec2()?;
-    let enc = dense_rows_to_indexed(&rows, enc_context_size, shortlist_weights, dev)?;
-    let dec = dense_rows_to_indexed(&rows, dec_context_size, shortlist_weights, dev)?;
+    let enc = dense_rows_to_indexed(&rows, enc_context_size, shortlist_weights, ctx, dev)?;
+    let dec = dense_rows_to_indexed(&rows, dec_context_size, shortlist_weights, ctx, dev)?;
     Ok((enc, dec))
 }
 
-/// Build indexed representation from pre-extracted rows (avoids repeated `to_vec2`).
 fn dense_rows_to_indexed(
     rows: &[Vec<f32>],
     context_size: usize,
     shortlist_weights: &[f32],
+    ctx: PerGeneContext<'_>,
     dev: &Device,
-) -> anyhow::Result<(Tensor, Tensor)> {
+) -> anyhow::Result<IndexedPack> {
     let n_batch = rows.len();
+    let k = if rows.is_empty() {
+        context_size
+    } else {
+        context_size.min(rows[0].len())
+    };
 
     let mut union_set = BTreeSet::new();
     let mut all_top_k: Vec<(Vec<u32>, Vec<f32>)> = Vec::with_capacity(n_batch);
-
     for row in rows {
         let (indices, values) = top_k_indices_weighted(row, shortlist_weights, context_size);
         for &idx in &indices {
@@ -61,26 +103,90 @@ fn dense_rows_to_indexed(
 
     let union_vec: Vec<u32> = union_set.into_iter().collect();
     let s = union_vec.len();
-
     let pos_map: HashMap<u32, usize> = union_vec
         .iter()
         .enumerate()
         .map(|(pos, &idx)| (idx, pos))
         .collect();
 
-    let mut x_data = vec![0.0f32; n_batch * s];
+    // Pack per-cell (indices, values) and scatter positions into [N, K].
+    // Short rows (when D < K) get padded with (idx=0, val=0.0, pos=0); the
+    // matching zero value makes the gather + weighted-sum a no-op.
+    let mut idx_buf = vec![0u32; n_batch * k];
+    let mut val_buf = vec![0.0f32; n_batch * k];
+    let mut scat_buf = vec![0u32; n_batch * k];
+    let mut base_buf = ctx.feature_mean.map(|_| vec![0.0f32; n_batch * k]);
+    let mut wt_buf = ctx
+        .feature_fisher_weights
+        .map(|_| vec![0.0f32; n_batch * k]);
     for (row, (indices, values)) in all_top_k.iter().enumerate() {
-        for (k, &feat_idx) in indices.iter().enumerate() {
-            let col = pos_map[&feat_idx];
-            x_data[row * s + col] = values[k];
+        let off = row * k;
+        let take = indices.len().min(k);
+        idx_buf[off..off + take].copy_from_slice(&indices[..take]);
+        val_buf[off..off + take].copy_from_slice(&values[..take]);
+        for (kk, &feat) in indices[..take].iter().enumerate() {
+            scat_buf[off + kk] = pos_map[&feat] as u32;
+            if let (Some(buf), Some(b)) = (base_buf.as_mut(), ctx.feature_mean) {
+                buf[off + kk] = b[feat as usize];
+            }
+            if let (Some(buf), Some(w)) = (wt_buf.as_mut(), ctx.feature_fisher_weights) {
+                buf[off + kk] = w[feat as usize];
+            }
         }
     }
 
+    let indices =
+        Tensor::from_vec(idx_buf, (n_batch, k), dev)?.to_dtype(candle_core::DType::U32)?;
+    let values = Tensor::from_vec(val_buf, (n_batch, k), dev)?;
     let union_indices =
         Tensor::from_vec(union_vec, (s,), dev)?.to_dtype(candle_core::DType::U32)?;
-    let indexed_x = Tensor::from_vec(x_data, (n_batch, s), dev)?;
+    let scatter_pos =
+        Tensor::from_vec(scat_buf, (n_batch, k), dev)?.to_dtype(candle_core::DType::U32)?;
+    let values_mean = base_buf
+        .map(|buf| Tensor::from_vec(buf, (n_batch, k), dev))
+        .transpose()?;
+    let values_weight = wt_buf
+        .map(|buf| Tensor::from_vec(buf, (n_batch, k), dev))
+        .transpose()?;
 
-    Ok((union_indices, indexed_x))
+    Ok(IndexedPack {
+        indices,
+        values,
+        union_indices,
+        scatter_pos,
+        values_mean,
+        values_weight,
+    })
+}
+
+/// Gather a per-cell null `[N, K] f32` from a dense `[N, D]` null tensor at
+/// the encoder's `indices [N, K]`.
+///
+/// The earlier dense-scatter version walked every union slot for every
+/// cell; the packed version pulls only the K positions that the encoder
+/// will actually consume, so cost goes from O(N·S) to O(N·K).
+pub(crate) fn gather_null_at_indices(
+    x0_nd: &Tensor,
+    indices: &Tensor,
+    dev: &Device,
+) -> anyhow::Result<Tensor> {
+    let x0_rows: Vec<Vec<f32>> = x0_nd.to_vec2()?;
+    let idx_vec: Vec<Vec<u32>> = indices.to_vec2()?;
+    let n = idx_vec.len();
+    let k = if idx_vec.is_empty() {
+        0
+    } else {
+        idx_vec[0].len()
+    };
+    let mut buf = vec![0.0f32; n * k];
+    for (i, idx_row) in idx_vec.iter().enumerate() {
+        let null_row = &x0_rows[i];
+        let off = i * k;
+        for (kk, &feat) in idx_row.iter().enumerate() {
+            buf[off + kk] = null_row[feat as usize];
+        }
+    }
+    Ok(Tensor::from_vec(buf, (n, k), dev)?)
 }
 
 pub(crate) struct EvaluateLatentConfig<'a, Dec> {
@@ -93,6 +199,12 @@ pub(crate) struct EvaluateLatentConfig<'a, Dec> {
     pub refine_config: Option<&'a TopicRefinementConfig>,
     /// Same shortlist weights used during training.
     pub shortlist_weights: &'a [f32],
+    /// Per-gene Anscombe baseline + NB-Fisher weights, in training-D
+    /// order. The encoder subtracts the baseline at top-K positions
+    /// before pooling; the decoder multiplies the Fisher weights into
+    /// the per-position likelihood weight.
+    pub feature_mean: &'a [f32],
+    pub feature_fisher_weights: &'a [f32],
 }
 
 pub(crate) fn evaluate_latent_by_indexed_encoder<Enc, Dec>(
@@ -133,6 +245,8 @@ where
         decoder: config.decoder,
         refine_config: config.refine_config,
         shortlist_weights: config.shortlist_weights,
+        feature_mean: config.feature_mean,
+        feature_fisher_weights: config.feature_fisher_weights,
     };
 
     process_blocks(ntot, kk, config.minibatch_size, config.dev, |block| {
@@ -149,6 +263,8 @@ struct EvaluateBlockConfig<'a, Dec> {
     decoder: &'a Dec,
     refine_config: Option<&'a TopicRefinementConfig>,
     shortlist_weights: &'a [f32],
+    feature_mean: &'a [f32],
+    feature_fisher_weights: &'a [f32],
 }
 
 fn evaluate_indexed_block<Enc, Dec>(
@@ -175,61 +291,60 @@ where
         })
         .transpose()?;
 
-    // Convert dense to indexed: single host copy when refinement needs both
+    // Convert dense to packed top-K. Single host copy when refinement also
+    // needs decoder packing.
+    let ctx = PerGeneContext {
+        feature_mean: Some(config.feature_mean),
+        feature_fisher_weights: Some(config.feature_fisher_weights),
+    };
     let need_decoder = config.refine_config.is_some();
-    let (enc_result, dec_result) = if need_decoder {
-        let ((eu, ex), (du, dx)) = dense_to_indexed_pair(
+    let (enc_pack, dec_pack) = if need_decoder {
+        let (enc, dec) = dense_to_indexed_pair(
             &x_nd,
             config.enc_context_size,
             config.dec_context_size,
             config.shortlist_weights,
+            ctx,
             config.dev,
         )?;
-        ((eu, ex), Some((du, dx)))
+        (enc, Some(dec))
     } else {
         let enc = dense_to_indexed(
             &x_nd,
             config.enc_context_size,
             config.shortlist_weights,
+            ctx,
             config.dev,
         )?;
         (enc, None)
     };
-    let (enc_union, enc_indexed_x) = enc_result;
 
-    // Scatter batch correction at encoder union positions if available
-    let enc_indexed_x_null = if let Some(x0) = &x0_nd {
-        let union_vec: Vec<u32> = enc_union.to_vec1()?;
-        let s = union_vec.len();
-        let n_batch = ub - lb;
-        let x0_vec: Vec<Vec<f32>> = x0.to_vec2()?;
-        let mut x0_data = vec![0.0f32; n_batch * s];
-        for (row, x0_row) in x0_vec.iter().enumerate() {
-            for (col, &feat_idx) in union_vec.iter().enumerate() {
-                x0_data[row * s + col] = x0_row[feat_idx as usize];
-            }
-        }
-        Some(Tensor::from_vec(x0_data, (n_batch, s), config.dev)?)
-    } else {
-        None
+    // Gather batch correction at the encoder's per-cell ids — O(N·K), no
+    // host-side `[N, S]` scatter.
+    let enc_values_null = match x0_nd.as_ref() {
+        Some(x0) => Some(gather_null_at_indices(x0, &enc_pack.indices, config.dev)?),
+        None => None,
     };
 
     let (log_z_nk, _) = encoder.forward_indexed_t(
-        &enc_union,
-        &enc_indexed_x,
-        enc_indexed_x_null.as_ref(),
+        &enc_pack.indices,
+        &enc_pack.values,
+        enc_values_null.as_ref(),
+        enc_pack.values_mean.as_ref(),
         false,
     )?;
 
     // Decoder refinement (inference — uniform log_q_s)
     let log_z_nk = if let Some(cfg) = config.refine_config {
-        let (dec_union, dec_indexed_x) = dec_result.unwrap();
-        let s = dec_union.dim(0)?;
+        let dec = dec_pack.unwrap();
+        let s = dec.union_indices.dim(0)?;
         let log_q_s = Tensor::zeros((1, s), candle_core::DType::F32, config.dev)?;
         refine_indexed_topic_proportions(
             &log_z_nk,
-            &dec_union,
-            &dec_indexed_x,
+            &dec.union_indices,
+            &dec.scatter_pos,
+            &dec.values,
+            dec.values_weight.as_ref(),
             &log_q_s,
             config.decoder,
             cfg,
@@ -242,11 +357,15 @@ where
     Ok((lb, Mat::from_tensor(&z_nk)?))
 }
 
-/// Refine per-cell topic proportions by gradient descent against the frozen indexed decoder.
+/// Refine per-cell topic proportions by gradient descent against the frozen
+/// indexed decoder. Consumes packed decoder inputs.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn refine_indexed_topic_proportions<Dec: IndexedDecoderT>(
     log_z_nk: &Tensor,
     union_indices: &Tensor,
-    indexed_x: &Tensor,
+    scatter_pos: &Tensor,
+    values: &Tensor,
+    values_weight: Option<&Tensor>,
     log_q_s: &Tensor,
     decoder: &Dec,
     config: &TopicRefinementConfig,
@@ -256,7 +375,14 @@ pub(crate) fn refine_indexed_topic_proportions<Dec: IndexedDecoderT>(
 
     for _step in 0..config.num_steps {
         let log_z = ops::log_softmax(z_var.as_tensor(), 1)?;
-        let (_, llik) = decoder.forward_indexed(&log_z, union_indices, indexed_x, log_q_s)?;
+        let llik = decoder.forward_indexed(
+            &log_z,
+            union_indices,
+            scatter_pos,
+            values,
+            values_weight,
+            log_q_s,
+        )?;
 
         let diff = (z_var.as_tensor() - &z_logits_init)?;
         let reg = (&diff * &diff)?.sum_all()?;

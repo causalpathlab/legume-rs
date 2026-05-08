@@ -2,16 +2,16 @@ use crate::candle_aux_layers::*;
 use crate::candle_batch_norm;
 use crate::candle_indexed_model_traits::*;
 use crate::candle_loss_functions::{gaussian_kl_loss, gaussian_reparameterize};
-use crate::candle_value_transform::anscombe_residual;
+use crate::candle_value_transform::anscombe_lite;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 
-/// Indexed embedding encoder.
+/// Indexed embedding encoder over packed top-K input.
 ///
-/// Replaces the dense `AggregateLinear [D×M]` matmul with embedding lookup
-/// on selected features. The feature embeddings [D, H] are indexed via
-/// `index_select` to [S, H], then combined with normalized input values
-/// via matmul [N, S] × [S, H] → [N, H].
+/// Consumes `(indices [N, K], values [N, K], values_null [N, K]?)` directly:
+/// gathers feature embeddings by id, weights them by Anscombe-stabilized
+/// values, and pools across the K positions per cell. No `[N, S]` is ever
+/// materialized.
 pub struct IndexedEmbeddingEncoder {
     n_features: usize,
     n_topics: usize,
@@ -89,39 +89,59 @@ impl IndexedEmbeddingEncoder {
         &self.feature_embeddings
     }
 
-    /// Preprocess indexed input into embedding space.
+    /// Pool packed top-K input into `[N, H]`.
     ///
-    /// 1. E_sh = feature_embeddings.index_select(union_indices, 0) → [S, H]
-    /// 2. r_ns = anscombe_residual(indexed_x, indexed_x_null) → [N, S]
-    ///    (variance-stabilized, library-size-matched, outlier-winsorized)
-    /// 3. h_nh = r_ns @ E_sh → [N, H]
+    /// 1. v_norm = anscombe_lite(values, values_null, values_mean)  → [N, K]
+    ///    (both nulls applied as multiplicative count-rate corrections
+    ///    in the same divisive step before Anscombe — see [`anscombe_lite`])
+    /// 2. E_nkh  = feature_embeddings.index_select(idx_flat)        → [N, K, H]
+    /// 3. h_nh   = Σ_k v_norm[i, k] · E_nkh[i, k, :]                → [N, H]
+    ///
+    /// With `values_mean` supplied (per-gene μ_d gathered at indices),
+    /// housekeeping genes expressed at typical levels divide out to ≈1
+    /// → Anscombe(1) ≈ 2.35, a constant absorbed by `bn_z`. Markers
+    /// expressed at unusual levels survive as fold-change deviations.
     fn preprocess_indexed(
         &self,
-        union_indices: &Tensor,
-        indexed_x: &Tensor,
-        indexed_x_null: Option<&Tensor>,
+        indices: &Tensor,
+        values: &Tensor,
+        values_null: Option<&Tensor>,
+        values_mean: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let e_sh = self.feature_embeddings.index_select(union_indices, 0)?;
-        let r_ns = anscombe_residual(indexed_x, indexed_x_null)?;
-        r_ns.matmul(&e_sh)
+        let v_norm = anscombe_lite(values, values_null, values_mean)?; // [N, K]
+
+        let n = indices.dim(0)?;
+        let k = indices.dim(1)?;
+        let h = self.embedding_dim;
+
+        let flat_idx = indices.flatten_all()?; // [N*K]
+        let e_nk_h = self
+            .feature_embeddings
+            .index_select(&flat_idx, 0)?
+            .reshape((n, k, h))?; // [N, K, H]
+
+        // Value-weighted pool: broadcast v_norm[N, K] → [N, K, 1] and reduce
+        // along K. `e_nk_h` is contiguous from index_select+reshape.
+        let v = v_norm.unsqueeze(2)?; // [N, K, 1]
+        let weighted = e_nk_h.broadcast_mul(&v)?; // [N, K, H]
+        weighted.sum(1) // [N, H]
     }
 }
 
 impl IndexedEmbeddingEncoder {
-    /// Compute latent Gaussian parameters from indexed input.
-    ///
-    /// Returns (z_mean [N, K], z_lnvar [N, K]).
+    /// Compute latent Gaussian parameters from packed indexed input.
     pub fn latent_gaussian_params_indexed(
         &self,
-        union_indices: &Tensor,
-        indexed_x: &Tensor,
-        indexed_x_null: Option<&Tensor>,
+        indices: &Tensor,
+        values: &Tensor,
+        values_null: Option<&Tensor>,
+        values_mean: Option<&Tensor>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
         let clamp_lo = -8.;
         let clamp_hi = 8.;
 
-        let h_nh = self.preprocess_indexed(union_indices, indexed_x, indexed_x_null)?;
+        let h_nh = self.preprocess_indexed(indices, values, values_null, values_mean)?;
         let fc_nl = self.fc.forward_t(&h_nh, train)?;
         let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
 
@@ -141,13 +161,14 @@ impl IndexedEmbeddingEncoder {
 impl IndexedEncoderT for IndexedEmbeddingEncoder {
     fn forward_indexed_t(
         &self,
-        union_indices: &Tensor,
-        indexed_x: &Tensor,
-        indexed_x_null: Option<&Tensor>,
+        indices: &Tensor,
+        values: &Tensor,
+        values_null: Option<&Tensor>,
+        values_mean: Option<&Tensor>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
         let (z_mean_nk, z_lnvar_nk) =
-            self.latent_gaussian_params_indexed(union_indices, indexed_x, indexed_x_null, train)?;
+            self.latent_gaussian_params_indexed(indices, values, values_null, values_mean, train)?;
 
         let z_nk = gaussian_reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
         let log_prob = ops::log_softmax(&z_nk, 1)?;
@@ -157,5 +178,75 @@ impl IndexedEncoderT for IndexedEmbeddingEncoder {
 
     fn dim_latent(&self) -> usize {
         self.n_topics
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+
+    /// Hand-build a tiny encoder, feed two cells with disjoint indices and
+    /// known values, and verify the Anscombe-lite + weighted-sum pool
+    /// matches a from-scratch host computation.
+    #[test]
+    fn test_anscombe_lite_pool() {
+        let device = Device::Cpu;
+        let n_features = 6;
+        let embedding_dim = 4;
+
+        let varmap = VarMap::new();
+        let vb = candle_nn::VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
+        let layers = vec![embedding_dim, embedding_dim];
+        let enc = IndexedEmbeddingEncoder::new(
+            IndexedEmbeddingEncoderArgs {
+                n_features,
+                n_topics: 2,
+                embedding_dim,
+                layers: &layers,
+            },
+            &varmap,
+            vb,
+        )
+        .unwrap();
+
+        // Two cells: cell 0 selects features {0,1}, cell 1 selects {2,3}.
+        let indices = Tensor::from_vec(vec![0u32, 1, 2, 3], (2, 2), &device).unwrap();
+        let values = Tensor::from_vec(vec![4.0f32, 9.0, 16.0, 25.0], (2, 2), &device).unwrap();
+
+        // Reference: anscombe-lite (no null, no per-gene mean) →
+        // bare Anscombe of values, then weighted-sum pool against the
+        // encoder's own embedding table.
+        let e_dh: Vec<Vec<f32>> = enc.feature_embeddings.to_vec2().unwrap();
+        let raw = [[4.0f32, 9.0], [16.0, 25.0]];
+        let mut v_norm = [[0f32; 2]; 2];
+        for (i, row) in raw.iter().enumerate() {
+            for (k, &x) in row.iter().enumerate() {
+                v_norm[i][k] = 2.0 * (x + 0.375).sqrt();
+            }
+        }
+        let mut h_ref = vec![vec![0f32; embedding_dim]; 2];
+        for (i, row) in v_norm.iter().enumerate() {
+            for (k, &v) in row.iter().enumerate() {
+                let feat = if i == 0 { k } else { 2 + k };
+                for h in 0..embedding_dim {
+                    h_ref[i][h] += v * e_dh[feat][h];
+                }
+            }
+        }
+
+        let h = enc
+            .preprocess_indexed(&indices, &values, None, None)
+            .unwrap();
+        let h_vec: Vec<Vec<f32>> = h.to_vec2().unwrap();
+        for (i, row) in h_vec.iter().enumerate() {
+            for (hh, &got) in row.iter().enumerate() {
+                let want = h_ref[i][hh];
+                assert!(
+                    (got - want).abs() < 1e-4,
+                    "row {i} dim {hh}: got {got} want {want}"
+                );
+            }
+        }
     }
 }

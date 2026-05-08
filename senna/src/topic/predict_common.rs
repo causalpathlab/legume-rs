@@ -64,11 +64,13 @@ pub fn decoder_only_inference_dense<Dec: DecoderModuleT>(
     ops::log_softmax(z_var.as_tensor(), 1)
 }
 
-/// Bundled inputs for the indexed decoder forward at a single block.
-/// Used to keep the decoder-only inference and predictive-llik APIs slim.
+/// Bundled packed inputs for the indexed decoder forward at a single block.
 pub struct IndexedDecoderInput<'a> {
     pub union_indices: &'a Tensor,
-    pub indexed_x: &'a Tensor,
+    pub scatter_pos: &'a Tensor,
+    pub values: &'a Tensor,
+    /// Optional NB-Fisher per-position weight (gathered at decoder ids).
+    pub values_weight: Option<&'a Tensor>,
     pub log_q_s: &'a Tensor,
 }
 
@@ -81,14 +83,20 @@ pub fn decoder_only_inference_indexed<Dec: IndexedDecoderT>(
     num_steps: usize,
     dev: &Device,
 ) -> CandleResult<Tensor> {
-    let n = input.indexed_x.dim(0)?;
+    let n = input.values.dim(0)?;
     let z_init = Tensor::zeros((n, n_topics), candle_core::DType::F32, dev)?;
     let z_var = Var::from_tensor(&z_init)?;
 
     for _step in 0..num_steps {
         let log_z = ops::log_softmax(z_var.as_tensor(), 1)?;
-        let (_recon, llik) =
-            decoder.forward_indexed(&log_z, input.union_indices, input.indexed_x, input.log_q_s)?;
+        let llik = decoder.forward_indexed(
+            &log_z,
+            input.union_indices,
+            input.scatter_pos,
+            input.values,
+            input.values_weight,
+            input.log_q_s,
+        )?;
         let loss = llik.mean_all()?.neg()?;
         let grad = loss.backward()?;
         let z_grad = grad.get(z_var.as_tensor()).unwrap();
@@ -110,15 +118,24 @@ pub fn predictive_llik_dense<Dec: DecoderModuleT>(
 }
 
 /// Per-cell predictive log-likelihood for the indexed topic model.
+#[allow(clippy::too_many_arguments)]
 pub fn predictive_llik_indexed<Dec: IndexedDecoderT>(
     decoder: &Dec,
     log_z_nk: &Tensor,
     union_indices: &Tensor,
-    indexed_x: &Tensor,
+    scatter_pos: &Tensor,
+    values: &Tensor,
+    values_weight: Option<&Tensor>,
     log_q_s: &Tensor,
 ) -> CandleResult<Tensor> {
-    let (_, llik) = decoder.forward_indexed(log_z_nk, union_indices, indexed_x, log_q_s)?;
-    Ok(llik)
+    decoder.forward_indexed(
+        log_z_nk,
+        union_indices,
+        scatter_pos,
+        values,
+        values_weight,
+        log_q_s,
+    )
 }
 
 /// Per-batch sums accumulated across blocks during one TMLE iteration.

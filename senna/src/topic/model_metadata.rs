@@ -6,12 +6,16 @@ use serde::{Deserialize, Serialize};
 /// of inline `"topic"` / `"indexed_topic"` literals so a typo doesn't silently
 /// break warm-start or predict dispatch.
 pub const MODEL_TYPE_TOPIC: &str = "topic";
-pub const MODEL_TYPE_INDEXED: &str = "indexed_topic";
+// Bumped from "indexed_topic" to "indexed_topic_packed" with the
+// packed top-K cutover: old safetensors+model.json files fail load
+// here with a clean model-type mismatch instead of silently loading
+// against an incompatible runtime.
+pub const MODEL_TYPE_INDEXED: &str = "indexed_topic_packed";
 
 /// Metadata needed to reconstruct a trained topic model for inference.
 #[derive(Serialize, Deserialize)]
 pub struct TopicModelMetadata {
-    /// Model variant: `topic`, `indexed_topic`, `joint_topic`
+    /// Model variant: `topic`, `indexed_topic_packed`, `joint_topic`
     pub model_type: Box<str>,
     /// Decoder types used (e.g. `["multinom"]`, `["multinom", "vmf"]`)
     pub decoder_types: Vec<Box<str>>,
@@ -143,6 +147,42 @@ pub fn save_shortlist_weights(
     mat.to_parquet_with_names(&path, (Some(gene_names), Some("gene")), Some(&cols))?;
     log::info!("Saved shortlist weights to {path}");
     Ok(())
+}
+
+/// Save per-gene mean expression rate `μ_d` used by the indexed encoder.
+///
+/// `μ_d` = per-gene mean across pseudobulks at the finest level. The
+/// indexed encoder gathers `μ_d` at each cell's top-K positions and
+/// composes it with the per-cell batch null as a multiplicative
+/// count-rate divisor before Anscombe stabilization — joint
+/// correction for `E[y] = batch_effect · gene_mean · biological_deviation`,
+/// leaving the cell's biological deviation as the encoder input.
+pub fn save_feature_mean(
+    feature_mean: &[f32],
+    gene_names: &[Box<str>],
+    prefix: &str,
+) -> anyhow::Result<()> {
+    use matrix_util::traits::IoOps;
+    let path = format!("{prefix}.feature_mean.parquet");
+    let mat = nalgebra::DMatrix::<f32>::from_column_slice(feature_mean.len(), 1, feature_mean);
+    let cols: Vec<Box<str>> = vec!["mean".into()];
+    mat.to_parquet_with_names(&path, (Some(gene_names), Some("gene")), Some(&cols))?;
+    log::info!("Saved feature mean to {path}");
+    Ok(())
+}
+
+/// Load per-gene mean expression rate; returns (gene_names, μ_d).
+pub fn load_feature_mean(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32>)> {
+    use matrix_util::traits::IoOps;
+    let path = format!("{prefix}.feature_mean.parquet");
+    let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))?;
+    anyhow::ensure!(
+        result.mat.ncols() >= 1,
+        "feature_mean parquet missing column at {path}"
+    );
+    let feature_mean: Vec<f32> = result.mat.column(0).iter().copied().collect();
+    log::info!("Loaded {} feature means from {path}", feature_mean.len());
+    Ok((result.rows, feature_mean))
 }
 
 /// Load NB-Fisher shortlist weights from disk; returns (gene_names, weights).
