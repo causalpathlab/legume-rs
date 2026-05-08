@@ -314,7 +314,7 @@ pub struct TopicArgs {
         help = "Cross-entropy penalty λ on β toward anchor prior (0 = off)",
         long_help = "Pulls the decoder dictionary toward anchor PB expression\n\
                      profiles during training. β starts from random init;\n\
-                     the penalty guides it. Ignored by vMF decoder."
+                     the penalty guides it."
     )]
     pub(crate) anchor_penalty: f32,
 
@@ -927,20 +927,7 @@ where
     {
         let finest_idx = ctx.feature_fisher_per_level.len().saturating_sub(1);
         let finest_w = &ctx.feature_fisher_per_level[finest_idx];
-        let finest_d = *ctx
-            .level_decoder_dims
-            .last()
-            .unwrap_or(&ctx.n_features_full);
-        let coarse_axis_names = axis_id_names("coarse_", finest_d);
-        let mat = nalgebra::DMatrix::<f32>::from_column_slice(finest_d, 1, finest_w);
-        let cols: Vec<Box<str>> = vec!["weight".into()];
-        let path = format!("{}.fisher_weights_coarse.parquet", ctx.args.out);
-        mat.to_parquet_with_names(
-            &path,
-            (Some(&coarse_axis_names), Some("coarse")),
-            Some(&cols),
-        )?;
-        log::info!("Saved coarse NB-Fisher weights to {path}");
+        data_beans_alg::gene_weighting::save_fisher_weights_coarse(&ctx.args.out, finest_w)?;
     }
 
     let mut metadata = TopicModelMetadata {
