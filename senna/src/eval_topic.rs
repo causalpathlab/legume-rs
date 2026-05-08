@@ -9,7 +9,6 @@ use candle_util::candle_decoder_nb_mixture::{
     NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME,
 };
 use candle_util::candle_decoder_topic::*;
-use candle_util::candle_decoder_vmf_topic::VmfTopicDecoder;
 use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_model_traits::*;
 use candle_util::candle_topic_refinement::TopicRefinementConfig;
@@ -236,7 +235,6 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
         "multinom" => eval_with_decoder::<MultinomTopicDecoder>(eval_inputs)?,
         "nb" => eval_with_decoder::<NbTopicDecoder>(eval_inputs)?,
         name if name == NBMIXTURE_NAME => eval_with_decoder::<NbMixtureTopicDecoder>(eval_inputs)?,
-        "vmf" => eval_with_decoder::<VmfTopicDecoder>(eval_inputs)?,
         other => anyhow::bail!("unsupported decoder type in metadata: {other}"),
     };
 
@@ -300,6 +298,16 @@ where
     let safetensors_path = format!("{model_prefix}.safetensors");
     info!("Loading weights from {safetensors_path}");
     parameters.load(&safetensors_path)?;
+
+    // Same Fisher weight reattachment as `predict_dense_with_decoder` —
+    // ensures refinement-time likelihood matches training.
+    let coarse_path = format!("{model_prefix}.fisher_weights_coarse.parquet");
+    if std::path::Path::new(&coarse_path).exists() {
+        let (_, coarse_w) = data_beans_alg::gene_weighting::load_per_gene_weights(&coarse_path)?;
+        if let Some(finest) = decoders.last_mut() {
+            finest.attach_feature_weights(&coarse_w, cpu_dev)?;
+        }
+    }
 
     let decoder_ref = if refine_config.is_some() {
         decoders.last()

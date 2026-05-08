@@ -14,6 +14,12 @@ pub struct MultinomTopicDecoder {
     n_features: usize,
     n_topics: usize,
     dictionary: SoftmaxLinear,
+    /// Per-feature multiplicative weight on the per-gene log-likelihood
+    /// term (NB-Fisher info, gathered/computed at the same `D` the
+    /// decoder operates on). Stored as a `[1, D]` non-trainable tensor
+    /// so it broadcasts over rows; `None` recovers the unweighted
+    /// `(x+1).log() · log_recon` form.
+    feature_weights: Option<Tensor>,
 }
 
 impl MultinomTopicDecoder {
@@ -26,11 +32,27 @@ impl MultinomTopicDecoder {
             n_features,
             n_topics,
             dictionary,
+            feature_weights: None,
         })
     }
 
     pub fn dictionary(&self) -> &SoftmaxLinear {
         &self.dictionary
+    }
+
+    /// Attach NB-Fisher (or any) per-feature weights `w_d ∈ (0, 1]`.
+    /// `weights.len()` must equal `self.n_features`. Stored as a
+    /// `[1, D]` tensor on `dev`. Pass after construction; weights are
+    /// not part of the trained varmap.
+    pub fn set_feature_weights(
+        &mut self,
+        weights: &[f32],
+        dev: &candle_core::Device,
+    ) -> Result<()> {
+        debug_assert_eq!(weights.len(), self.n_features);
+        let t = Tensor::from_slice(weights, (1, self.n_features), dev)?;
+        self.feature_weights = Some(t);
+        Ok(())
     }
 }
 
@@ -62,14 +84,22 @@ impl DecoderModuleT for MultinomTopicDecoder {
         let log_recon_nd = self.dictionary.forward_log(z_nk)?;
         let recon_nd = log_recon_nd.exp()?;
 
-        // Log1p-weighted likelihood: llik = Σ_d log(1 + x_d) * log(recon_d)
-        // Compresses dynamic range so marker genes (count ~1) contribute
-        // comparably to housekeeping (count ~1000), improving topic
-        // differentiation on sparse single-cell data.
-        let llik = (x_nd + 1.0)?
-            .log()?
-            .mul(&log_recon_nd)?
-            .sum(x_nd.rank() - 1)?;
+        // Multinomial log-likelihood with NB-Fisher per-gene weighting:
+        //
+        //   llik = Σ_d w_d · x_d · log(p_d)
+        //
+        // The proper multinomial NLL is `Σ_d x_d · log(p_d)`, which lets
+        // high-count housekeeping dominate. NB-Fisher weights `w_d` (sub-
+        // linear in μ_d) carry the outlier adjustment that earlier code
+        // approximated with `log(x+1)` — but principled: `w_d` is
+        // calibrated by the fitted dispersion trend, not a fixed shape.
+        // When `feature_weights` is `None`, this reduces to the raw
+        // multinomial NLL.
+        let weighted_x = match &self.feature_weights {
+            Some(w) => x_nd.broadcast_mul(w)?,
+            None => x_nd.clone(),
+        };
+        let llik = weighted_x.mul(&log_recon_nd)?.sum(x_nd.rank() - 1)?;
 
         Ok((recon_nd, llik))
     }
@@ -80,6 +110,10 @@ impl DecoderModuleT for MultinomTopicDecoder {
 
     fn dim_latent(&self) -> usize {
         self.n_topics
+    }
+
+    fn attach_feature_weights(&mut self, weights: &[f32], dev: &candle_core::Device) -> Result<()> {
+        MultinomTopicDecoder::set_feature_weights(self, weights, dev)
     }
 }
 

@@ -82,16 +82,18 @@ pub trait IndexedDecoderT {
         let recon_ns = z_nk.matmul(&beta_ks)?; // [N, S]
         let log_recon_ns = (recon_ns + 1e-8)?.log()?;
         let log_recon_at = log_recon_ns.gather(scatter_pos, 1)?; // [N, K]
-                                                                 // Log1p-weighted likelihood: log(1+x) compresses dynamic range so
-                                                                 // marker counts contribute comparably to housekeeping. NB-Fisher
-                                                                 // weights, when supplied, further attenuate housekeeping
-                                                                 // observations so β doesn't get pulled toward modeling them.
-        let weight = (values + 1.0)?.log()?;
-        let weight = match values_weight {
-            Some(w) => weight.mul(w)?,
-            None => weight,
+                                                                 // Fisher-weighted multinomial NLL: `Σ_k w_k · v_k · log_recon_at`.
+                                                                 // The proper form (no log1p), matching the dense path. NB-Fisher
+                                                                 // weights `w_k` carry the outlier adjustment that earlier code
+                                                                 // approximated with `log(v+1)`. Three other suppressors keep
+                                                                 // housekeeping out of the top-K to begin with: log1p-weighted
+                                                                 // selection, encoder μ_d null, and the Jean conditional softmax
+                                                                 // partition.
+        let weighted_v = match values_weight {
+            Some(w) => values.mul(w)?,
+            None => values.clone(),
         };
-        let llik = weight.mul(&log_recon_at)?.sum(values.rank() - 1)?;
+        let llik = weighted_v.mul(&log_recon_at)?.sum(values.rank() - 1)?;
         Ok(llik)
     }
 

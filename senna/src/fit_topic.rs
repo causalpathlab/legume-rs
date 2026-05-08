@@ -10,7 +10,6 @@ use candle_util::candle_decoder_nb_mixture::{
     NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME,
 };
 use candle_util::candle_decoder_topic::*;
-use candle_util::candle_decoder_vmf_topic::VmfTopicDecoder;
 use candle_util::candle_encoder_softmax::*;
 use candle_util::candle_model_traits::*;
 use log::warn;
@@ -22,8 +21,6 @@ pub(crate) enum DecoderType {
     Multinom,
     /// Negative binomial with per-gene dispersion and library size
     Nb,
-    /// Von Mises-Fisher mixture on unit hypersphere
-    Vmf,
     /// NB with an ambient-RNA mixture (`α_g`) and per-sample ρ from library size
     NbMixture,
 }
@@ -33,7 +30,6 @@ impl DecoderType {
         match self {
             DecoderType::Multinom => "multinom",
             DecoderType::Nb => "nb",
-            DecoderType::Vmf => "vmf",
             DecoderType::NbMixture => NBMIXTURE_NAME,
         }
     }
@@ -271,13 +267,12 @@ pub struct TopicArgs {
         long,
         value_enum,
         value_delimiter = ',',
-        default_value = "nbmixture",
-        help = "Decoder type(s) [multinom|nb|vmf|nbmixture], comma-separated",
-        long_help = "nbmixture — NB with ambient-RNA mixture α and per-sample ρ (default).\n\
+        default_value = "multinom",
+        help = "Decoder type(s) [multinom|nb|nbmixture], comma-separated",
+        long_help = "multinom  — NB-Fisher-weighted multinomial (default).\n\
                      nb        — negative binomial with per-gene dispersion.\n\
-                     multinom  — softmax dictionary with log1p-weighted likelihood.\n\
-                     vmf       — von Mises-Fisher mixture on the unit hypersphere.\n\n\
-                     Multiple types (e.g. --decoder multinom,vmf) train jointly with\n\
+                     nbmixture — NB with ambient-RNA mixture α and per-sample ρ.\n\n\
+                     Multiple types (e.g. --decoder multinom,nb) train jointly with\n\
                      a shared encoder; see --decoder-weights for loss weighting."
     )]
     pub(crate) decoder: Vec<DecoderType>,
@@ -491,6 +486,32 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     let gene_names = data_vec.row_names()?;
 
+    // Per-level NB-Fisher weights at the *coarse* feature resolution
+    // each decoder operates on. Computed via a fresh streaming pass
+    // over coarsened cells so the dispersion trend matches the data
+    // the decoder actually sees. Used by `MultinomTopicDecoder` to
+    // multiplicatively weight the per-gene log-likelihood term.
+    let feature_fisher_per_level: Vec<Vec<f32>> = {
+        info!(
+            "Computing per-level NB-Fisher weights at coarse resolution ({} levels)",
+            level_coarsenings.len()
+        );
+        level_coarsenings
+            .iter()
+            .map(|fc_opt| match fc_opt.as_ref() {
+                Some(fc) => data_beans_alg::gene_weighting::compute_nb_fisher_weights_coarsened(
+                    &data_vec,
+                    fc,
+                    args.block_size,
+                ),
+                None => data_beans_alg::gene_weighting::compute_nb_fisher_weights(
+                    &data_vec,
+                    args.block_size,
+                ),
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+    };
+
     let stop = setup_stop_handler();
 
     let anchor_prior = crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(
@@ -522,6 +543,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         anchor_prior_per_level: Some(&anchor_tensors),
         feature_mean: &feature_mean,
         feature_mean_full: &feature_mean_full,
+        feature_fisher_per_level: &feature_fisher_per_level,
     };
 
     let mut encoder = LogSoftmaxEncoder::new(
@@ -541,7 +563,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             DecoderType::Multinom => {
                 run_topic_pipeline::<_, MultinomTopicDecoder>(&ctx, &mut encoder)?
             }
-            DecoderType::Vmf => run_topic_pipeline::<_, VmfTopicDecoder>(&ctx, &mut encoder)?,
             DecoderType::NbMixture => {
                 run_topic_pipeline::<_, NbMixtureTopicDecoder>(&ctx, &mut encoder)?
             }
@@ -628,14 +649,16 @@ fn write_topic_manifest(
 use crate::topic::decoder_output::{write_dictionary_tensor, DecoderExtras};
 
 /// Trait for optional per-run hyperparameter configuration from CLI args.
-/// Default is no-op; `NbMixtureTopicDecoder` overrides to set Beta(ρ) prior.
+/// Default is no-op; specific decoders override to set their own knobs.
+/// Per-feature Fisher weights flow through `DecoderModuleT::attach_feature_weights`
+/// (declared in `candle-util`) rather than this trait, so callers outside
+/// senna (e.g. `predict`) can attach weights without importing this.
 trait ConfigureDecoder {
     fn configure(&mut self, _args: &TopicArgs) {}
 }
 
 impl ConfigureDecoder for MultinomTopicDecoder {}
 impl ConfigureDecoder for NbTopicDecoder {}
-impl ConfigureDecoder for VmfTopicDecoder {}
 impl ConfigureDecoder for NbMixtureTopicDecoder {
     fn configure(&mut self, args: &TopicArgs) {
         self.set_rho_prior(
@@ -678,6 +701,13 @@ struct PipelineCtx<'a> {
     /// Same quantity at full `D_full`, gene-name aligned. Saved to disk
     /// so predict can re-aggregate via the loaded coarsening matrix.
     feature_mean_full: &'a [f32],
+    /// Per-level NB-Fisher weights `w_d ∈ (0, 1]` at each decoder's `D_l`,
+    /// computed *after* feature coarsening (so the dispersion trend is
+    /// fit at the resolution the decoder actually sees). Multiplicative
+    /// per-gene weight on the multinomial loss term — housekeeping
+    /// observations contribute less to β's gradient. Per-level vectors
+    /// align with `level_decoder_dims`.
+    feature_fisher_per_level: &'a [Vec<f32>],
 }
 
 fn run_topic_pipeline<Enc, Dec>(
@@ -697,8 +727,11 @@ where
                 .expect("decoder creation")
         })
         .collect();
-    for dec in &mut decoders {
+    for (level, dec) in decoders.iter_mut().enumerate() {
         dec.configure(ctx.args);
+        // Attach per-level NB-Fisher weights (coarse-resolution). No-op
+        // for decoders that don't use them.
+        dec.attach_feature_weights(&ctx.feature_fisher_per_level[level], ctx.dev)?;
     }
 
     // β init from anchor prior is disabled — random (Kaiming) initialisation
@@ -875,7 +908,7 @@ fn save_metadata_and_evaluate<Dec>(
     decoder_weights: &[f64],
 ) -> anyhow::Result<Mat>
 where
-    Dec: DecoderModuleT + NewDecoder + Send + Sync,
+    Dec: DecoderModuleT + NewDecoder + ConfigureDecoder + Send + Sync,
 {
     use crate::topic::model_metadata::{
         save_coarsening, save_feature_mean, save_parameters, TopicModelMetadata,
@@ -887,6 +920,28 @@ where
     // reload it and aggregate through the saved coarsening matrix to
     // get the encoder's `D_coarse` view.
     save_feature_mean(ctx.feature_mean_full, ctx.gene_names, &ctx.args.out)?;
+    // Persist NB-Fisher weights at the *finest* level's `D_l` (= what
+    // `MultinomTopicDecoder` actually applies). Predict reloads it and
+    // attaches to the rebuilt decoder. We only save the finest level
+    // because predict only uses the finest decoder.
+    {
+        let finest_idx = ctx.feature_fisher_per_level.len().saturating_sub(1);
+        let finest_w = &ctx.feature_fisher_per_level[finest_idx];
+        let finest_d = *ctx
+            .level_decoder_dims
+            .last()
+            .unwrap_or(&ctx.n_features_full);
+        let coarse_axis_names = axis_id_names("coarse_", finest_d);
+        let mat = nalgebra::DMatrix::<f32>::from_column_slice(finest_d, 1, finest_w);
+        let cols: Vec<Box<str>> = vec!["weight".into()];
+        let path = format!("{}.fisher_weights_coarse.parquet", ctx.args.out);
+        mat.to_parquet_with_names(
+            &path,
+            (Some(&coarse_axis_names), Some("coarse")),
+            Some(&cols),
+        )?;
+        log::info!("Saved coarse NB-Fisher weights to {path}");
+    }
 
     let mut metadata = TopicModelMetadata {
         model_type: crate::topic::model_metadata::MODEL_TYPE_TOPIC.into(),
@@ -954,11 +1009,15 @@ where
     let refine_decoder = if refine_config.is_some() {
         let cpu_vb =
             candle_nn::VarBuilder::from_varmap(ctx.parameters, candle_core::DType::F32, &cpu_dev);
-        Some(Dec::new(
+        let mut d = Dec::new(
             finest_dec_dim,
             ctx.n_topics,
             cpu_vb.pp(format!("dec_{finest_dec_idx}")),
-        )?)
+        )?;
+        // Re-attach the finest level's NB-Fisher weights so predictive llik
+        // uses the same loss as training.
+        d.attach_feature_weights(&ctx.feature_fisher_per_level[finest_dec_idx], &cpu_dev)?;
+        Some(d)
     } else {
         None
     };
