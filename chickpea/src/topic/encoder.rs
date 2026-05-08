@@ -79,10 +79,13 @@ impl ChickpeaEncoder {
         // Select top-K genes and derive their cis-peak union
         let sel = select_genes_and_peaks(inp, self.context_size)?;
 
+        let n = inp.x_rna.dim(0)?;
+
         // Gene expert: fused RNA+ATAC for selected genes only
         let (gene_values, gene_null) = self.prepare_gene_values(inp, &sel)?;
+        let gene_idx_ns = broadcast_idx_to_rows(&sel.gene_idx, n)?;
         let (z_gene_mean, z_gene_lnvar) = self.gene_expert.latent_gaussian_params_indexed(
-            &sel.gene_idx,
+            &gene_idx_ns,
             &gene_values,
             gene_null.as_ref(),
             None,
@@ -95,8 +98,9 @@ impl ChickpeaEncoder {
             .batch_atac
             .map(|b| b.index_select(&sel.peak_idx, 1))
             .transpose()?;
+        let peak_idx_ns = broadcast_idx_to_rows(&sel.peak_idx, n)?;
         let (z_atac_mean, z_atac_lnvar) = self.atac_expert.latent_gaussian_params_indexed(
-            &sel.peak_idx,
+            &peak_idx_ns,
             &atac_values,
             atac_null.as_ref(),
             None,
@@ -174,6 +178,12 @@ impl ChickpeaEncoder {
 
         Ok((fused, null))
     }
+}
+
+/// Broadcast 1D union index `[S]` to `[N, S]` for the packed indexed encoder.
+fn broadcast_idx_to_rows(idx: &Tensor, n: usize) -> Result<Tensor> {
+    let s = idx.dim(0)?;
+    idx.unsqueeze(0)?.broadcast_as((n, s))?.contiguous()
 }
 
 /// Precomputed gene and peak selections for the encoder.
