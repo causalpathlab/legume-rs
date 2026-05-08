@@ -620,6 +620,16 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
         sw_genes.len(),
         training_genes.len(),
     );
+    let (fb_genes, feature_mean) = crate::topic::model_metadata::load_feature_mean(&args.model)?;
+    anyhow::ensure!(
+        fb_genes.len() == training_genes.len(),
+        "feature_mean gene count ({}) != dictionary gene count ({})",
+        fb_genes.len(),
+        training_genes.len(),
+    );
+    // The decoder's NB-Fisher loss weights are the same NB-Fisher per-gene
+    // weights used for selection — the data on disk is one vector.
+    let feature_fisher_weights = shortlist_weights.clone();
 
     let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: args.data_files.clone(),
@@ -711,6 +721,7 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
                 &beta_dk,
                 phi_for_iter,
                 &shortlist_weights,
+                &feature_mean,
                 enc_context_size,
                 args.minibatch_size,
                 &cpu_dev,
@@ -752,6 +763,8 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
                     delta_tensor: delta_tensor.as_ref(),
                     gene_remap: gene_remap.as_ref(),
                     shortlist_weights: &shortlist_weights,
+                    feature_mean: &feature_mean,
+                    feature_fisher_weights: &feature_fisher_weights,
                     enc_context_size,
                     dec_context_size,
                     dev: &cpu_dev,
@@ -791,6 +804,8 @@ struct PredictBlockIndexedArgs<'a> {
     delta_tensor: Option<&'a Tensor>,
     gene_remap: Option<&'a GeneRemap>,
     shortlist_weights: &'a [f32],
+    feature_mean: &'a [f32],
+    feature_fisher_weights: &'a [f32],
     enc_context_size: usize,
     dec_context_size: usize,
     dev: &'a Device,
@@ -814,6 +829,8 @@ fn predict_block_indexed(
         delta_tensor,
         gene_remap,
         shortlist_weights,
+        feature_mean,
+        feature_fisher_weights,
         enc_context_size,
         dec_context_size,
         dev,
@@ -822,6 +839,10 @@ fn predict_block_indexed(
         refine_config,
         n_topics,
     } = a;
+    let ctx = crate::topic::eval_indexed::PerGeneContext {
+        feature_mean: Some(feature_mean),
+        feature_fisher_weights: Some(feature_fisher_weights),
+    };
 
     // Read held-out CSC and scatter to training gene order at full D.
     let csc = data_vec.read_columns_csc(lb..ub)?;
@@ -857,65 +878,64 @@ fn predict_block_indexed(
         .map(|delta_bm| expand_delta_for_block(data_vec, delta_bm, adj_method, lb, ub, dev))
         .transpose()?;
 
-    // Indexed conversion: encoder shortlist (top-K_enc) and decoder shortlist
-    // (top-K_dec) — share host copies when possible.
-    let need_dec_separate = dec_context_size != enc_context_size;
-    let ((enc_union, enc_indexed_x), (dec_union, dec_indexed_x)) = if need_dec_separate {
+    // Packed top-K representation: encoder window and decoder window.
+    // When the two contexts match, the decoder pack is identical to the
+    // encoder pack — clone (cheap; Tensor is Arc-buffered) instead of
+    // re-walking the dense rows.
+    let (enc_pack, dec_pack) = if dec_context_size != enc_context_size {
         dense_to_indexed_pair(
             &x_nd,
             enc_context_size,
             dec_context_size,
             shortlist_weights,
+            ctx,
             dev,
         )?
     } else {
-        let (eu, ex) = dense_to_indexed(&x_nd, enc_context_size, shortlist_weights, dev)?;
-        let dec = (eu.clone(), ex.clone());
-        ((eu, ex), dec)
+        let enc = dense_to_indexed(&x_nd, enc_context_size, shortlist_weights, ctx, dev)?;
+        let dec = enc.clone();
+        (enc, dec)
     };
 
-    // Encoder-side null at the encoder's union positions
-    let enc_indexed_x_null = if let Some(x0) = &x0_nd {
-        let union_vec: Vec<u32> = enc_union.to_vec1()?;
-        let s = union_vec.len();
-        let n_batch = ub - lb;
-        let x0_vec: Vec<Vec<f32>> = x0.to_vec2()?;
-        let mut x0_data = vec![0.0f32; n_batch * s];
-        for (rr, x0_row) in x0_vec.iter().enumerate() {
-            for (col, &feat_idx) in union_vec.iter().enumerate() {
-                x0_data[rr * s + col] = x0_row[feat_idx as usize];
-            }
-        }
-        Some(Tensor::from_vec(x0_data, (n_batch, s), dev)?)
-    } else {
-        None
+    // Encoder-side null gathered at the encoder's per-cell ids — O(N·K).
+    let enc_values_null = match x0_nd.as_ref() {
+        Some(x0) => Some(crate::topic::eval_indexed::gather_null_at_indices(
+            x0,
+            &enc_pack.indices,
+            dev,
+        )?),
+        None => None,
     };
 
     // Decoder-side log_q_s = uniform (zeros) at inference time.
-    let s_dec = dec_union.dim(0)?;
+    let s_dec = dec_pack.union_indices.dim(0)?;
     let dec_log_q_s = Tensor::zeros((1, s_dec), candle_core::DType::F32, dev)?;
 
     let log_z_nk = match mode {
         LatentMode::Encoder => {
             let (log_z, _) = encoder.forward_indexed_t(
-                &enc_union,
-                &enc_indexed_x,
-                enc_indexed_x_null.as_ref(),
+                &enc_pack.indices,
+                &enc_pack.values,
+                enc_values_null.as_ref(),
+                enc_pack.values_mean.as_ref(),
                 false,
             )?;
             log_z
         }
         LatentMode::EncoderRefine => {
             let (log_z, _) = encoder.forward_indexed_t(
-                &enc_union,
-                &enc_indexed_x,
-                enc_indexed_x_null.as_ref(),
+                &enc_pack.indices,
+                &enc_pack.values,
+                enc_values_null.as_ref(),
+                enc_pack.values_mean.as_ref(),
                 false,
             )?;
             refine_indexed_topic_proportions(
                 &log_z,
-                &dec_union,
-                &dec_indexed_x,
+                &dec_pack.union_indices,
+                &dec_pack.scatter_pos,
+                &dec_pack.values,
+                dec_pack.values_weight.as_ref(),
                 &dec_log_q_s,
                 decoder,
                 refine_config,
@@ -924,8 +944,10 @@ fn predict_block_indexed(
         LatentMode::DecoderOnly => decoder_only_inference_indexed(
             decoder,
             &crate::topic::predict_common::IndexedDecoderInput {
-                union_indices: &dec_union,
-                indexed_x: &dec_indexed_x,
+                union_indices: &dec_pack.union_indices,
+                scatter_pos: &dec_pack.scatter_pos,
+                values: &dec_pack.values,
+                values_weight: dec_pack.values_weight.as_ref(),
                 log_q_s: &dec_log_q_s,
             },
             n_topics,
@@ -935,14 +957,21 @@ fn predict_block_indexed(
         )?,
     };
 
-    // Predictive lik at the decoder shortlist (S_dec features per cell).
-    let llik_t =
-        predictive_llik_indexed(decoder, &log_z_nk, &dec_union, &dec_indexed_x, &dec_log_q_s)?;
+    // Predictive lik at the decoder shortlist (K_dec features per cell).
+    let llik_t = predictive_llik_indexed(
+        decoder,
+        &log_z_nk,
+        &dec_pack.union_indices,
+        &dec_pack.scatter_pos,
+        &dec_pack.values,
+        dec_pack.values_weight.as_ref(),
+        &dec_log_q_s,
+    )?;
     let llik: Vec<f32> = llik_t.to_device(&Device::Cpu)?.to_vec1()?;
 
     // Total counts at the decoder shortlist (denominator for llik_per_count).
     let total: Vec<f32> = {
-        let summed = dec_indexed_x.sum(1)?.to_device(&Device::Cpu)?;
+        let summed = dec_pack.values.sum(1)?.to_device(&Device::Cpu)?;
         summed.to_vec1()?
     };
 

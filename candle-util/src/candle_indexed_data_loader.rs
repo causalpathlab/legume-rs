@@ -21,27 +21,50 @@ pub struct IndexedSample {
     pub values: Vec<f32>,
 }
 
-/// Batched minibatch with separate input (encoder) and output (decoder) windows.
+/// Packed top-K minibatch.
+///
+/// Encoder side is fully packed `[N, K]` — no union, no host `[N, S]`.
+/// Decoder side keeps the union for the importance-weighted conditional
+/// softmax denominator and a per-cell `scatter_pos` so the per-cell
+/// likelihood can be gathered without ever returning a dense `[N, S]`.
+///
+/// Padding when a sample has fewer than `K` features: indices and
+/// scatter positions are filled with `0`, values with `0.0`. Gathers
+/// and weighted sums against zero values are no-ops and pass silently.
 pub struct IndexedMinibatchData {
-    /// [S_in] u32 — sorted union of per-sample top-K indices for encoder
-    pub input_union_indices: Tensor,
-    /// [N, S_in] f32 — encoder input values at union positions
-    pub input_indexed_x: Tensor,
-    /// [N, S_in] f32 — encoder null/batch correction at union positions
-    pub input_indexed_x_null: Option<Tensor>,
-    /// [S_out] u32 — sorted union of per-sample top-K indices for decoder
+    /// [N, K_in] u32 in [0, D_in) — encoder feature ids
+    pub input_indices: Tensor,
+    /// [N, K_in] f32 — encoder feature values
+    pub input_values: Tensor,
+    /// [N, K_in] f32 — encoder null (μ_residual) gathered at `input_indices`
+    pub input_values_null: Option<Tensor>,
+    /// [N, K_in] f32 — per-gene mean expression rate `μ_d` gathered at
+    /// `input_indices` (when an `input_mean` was supplied). The encoder
+    /// composes it with `input_values_null` as a multiplicative count-rate
+    /// divisor before Anscombe — joint correction for batch effect ×
+    /// gene-typical-rate, leaving the cell's biological deviation.
+    pub input_values_mean: Option<Tensor>,
+    /// [S] u32 in [0, D_out) — sorted union of decoder per-cell top-K ids
     pub output_union_indices: Tensor,
-    /// [N, S_out] f32 — decoder target values at union positions
-    pub output_indexed_x: Tensor,
-    /// [S_out] f32 — log selection frequency at union positions for importance weighting
+    /// [N, K_out] u32 in [0, S) — per-cell positions of decoder values in the union
+    pub output_scatter_pos: Tensor,
+    /// [N, K_out] f32 — decoder feature values (unpacked, in per-cell index order)
+    pub output_values: Tensor,
+    /// [N, K_out] f32 — per-gene NB-Fisher info weight gathered at the
+    /// decoder's per-cell ids (when an `output_fisher_weights` was supplied).
+    /// The decoder multiplies this into the `(value+1).log()` likelihood
+    /// weight so housekeeping observations contribute less to β's gradient.
+    pub output_values_weight: Option<Tensor>,
+    /// [1, S] f32 — log selection frequency at union positions
     pub output_log_q_s: Tensor,
 }
 
 /// Adaptive feature window data loader with decoupled encoder/decoder windows.
 ///
 /// Each sample keeps its top-K features by value independently for input (encoder)
-/// and output (decoder) sides. Batches use the union of selected indices within
-/// each side, producing separate [N, S_in] and [N, S_out] tensors.
+/// and output (decoder) sides. Encoder consumes packed `[N, K_in]` (indices,
+/// values); decoder consumes the per-batch union plus per-cell scatter
+/// positions into that union.
 ///
 /// Call `precompute_all_minibatches` after `shuffle_minibatch` to cache all
 /// minibatch tensors. Use `minibatch_cached` to retrieve.
@@ -56,6 +79,12 @@ pub struct IndexedInMemoryData {
     /// Per-feature log selection frequency: log(q_d) where q_d = P(feature d in top-K).
     /// Used for importance-weighted conditional softmax (Jean et al., 2015).
     output_log_q: Vec<f32>,
+    /// Per-feature mean expression rate `μ_d` (encoder side) gathered
+    /// into `input_values_mean [N, K]` at minibatch build time.
+    input_mean: Option<Vec<f32>>,
+    /// Per-feature NB-Fisher weight (decoder side) gathered into
+    /// `output_values_weight [N, K]` at minibatch build time.
+    output_fisher_weights: Option<Vec<f32>>,
     minibatches: Minibatches,
     cached_batches: Vec<IndexedMinibatchData>,
 }
@@ -75,6 +104,17 @@ where
     pub input_shortlist_weights: &'a [f32],
     /// Same role on the decoder (output) side.
     pub output_shortlist_weights: &'a [f32],
+    /// Optional per-feature mean expression rate `μ_d` (encoder side,
+    /// length = D_in). When supplied, the loader gathers it for each
+    /// per-cell top-K position and packs it as `input_values_mean [N, K]`,
+    /// which the encoder composes with the batch null as a multiplicative
+    /// count-rate divisor before Anscombe.
+    pub input_mean: Option<&'a [f32]>,
+    /// Optional per-feature NB-Fisher weight (decoder side, length = D_out).
+    /// When supplied, the loader gathers `output_fisher_weights[idx]` and
+    /// packs it as `output_values_weight [N, K]` for the decoder to apply
+    /// as a multiplicative loss-term weight.
+    pub output_fisher_weights: Option<&'a [f32]>,
 }
 
 /// Select top-K indices by value from a dense row.
@@ -103,10 +143,17 @@ pub fn top_k_indices(row: &[f32], k: usize) -> (Vec<u32>, Vec<f32>) {
     (indices, values)
 }
 
-/// Like [`top_k_indices`] but ranks candidates by `row[i] * weights[i]` while
-/// returning the raw `row[i]` for the selected indices. Used to bias shortlist
-/// selection against high-mean / low-information genes (e.g. via NB-Fisher
-/// weights) without distorting the values fed to the model.
+/// Like [`top_k_indices`] but ranks candidates by `log(row[i] + 1) · weights[i]`
+/// while returning the **raw** `row[i]` for the selected indices.
+///
+/// The `log1p` compression on the scoring side is essential when
+/// `weights` are NB-Fisher info: without it, a housekeeping gene with raw
+/// count `v=200` and `w=0.04` scores `8`, beating a marker with `v=10`,
+/// `w=0.24` (score `2.4`), so housekeeping dominates top-K selection
+/// despite Fisher attenuation. With `log1p`, the same pair scores
+/// `0.21` (housekeeping) vs `0.58` (marker) — markers win, and
+/// housekeeping is crowded out of top-K. The values returned remain
+/// raw counts so the encoder/decoder math is unchanged.
 pub fn top_k_indices_weighted(row: &[f32], weights: &[f32], k: usize) -> (Vec<u32>, Vec<f32>) {
     debug_assert_eq!(row.len(), weights.len());
     let k = k.min(row.len());
@@ -115,7 +162,13 @@ pub fn top_k_indices_weighted(row: &[f32], weights: &[f32], k: usize) -> (Vec<u3
         .iter()
         .zip(weights.iter())
         .enumerate()
-        .map(|(i, (&v, &w))| (v * w, i as u32))
+        .map(|(i, (&v, &w))| {
+            // log1p on the score, not the value — keeps the per-cell K
+            // raw values untouched while the *ranking* compresses
+            // dynamic range so high-mean genes don't auto-win.
+            let score = v.max(0.0).ln_1p() * w;
+            (score, i as u32)
+        })
         .collect();
 
     scored.select_nth_unstable_by(k.saturating_sub(1), |a, b| {
@@ -127,12 +180,6 @@ pub fn top_k_indices_weighted(row: &[f32], weights: &[f32], k: usize) -> (Vec<u3
 
     let values: Vec<f32> = idx.iter().map(|&i| row[i as usize]).collect();
     (idx, values)
-}
-
-struct UnionScatterOut {
-    union_indices: Tensor,
-    indexed_x: Tensor,
-    union_vec: Vec<u32>,
 }
 
 /// Per-feature lookup slot. `gen` carries the call generation that wrote
@@ -161,18 +208,115 @@ thread_local! {
     };
 }
 
-/// Build union indices and scattered [N, S] matrix from IndexedSamples.
+/// Walk every cell's top-K positions and fill an `[N, K]` `f32` buffer.
 ///
-/// Union order is the discovery order across `sample_indices` × per-sample
-/// `indices`. Consumers gather feature-axis tensors via `index_select` against
-/// `union_indices`, so column positions in `indexed_x` align by construction —
-/// the order itself is not load-bearing.
-fn build_union_scatter(
+/// `fill(row, kk, sample_index, feature_id) -> value` is invoked once per
+/// observed slot; padded slots (when the sample has fewer than `k`
+/// indices) keep the buffer's initial `0.0`. Pad indices are harmless
+/// because every consumer either pairs them with a zero value side or
+/// only multiplies them in (zero · anything = 0).
+fn pack_at_indices<F>(
+    samples: &[IndexedSample],
+    sample_indices: &[usize],
+    k: usize,
+    target_device: &Device,
+    mut fill: F,
+) -> anyhow::Result<Tensor>
+where
+    F: FnMut(usize, usize, usize, u32) -> f32,
+{
+    let n = sample_indices.len();
+    let mut buf = vec![0.0f32; n * k];
+    for (row, &si) in sample_indices.iter().enumerate() {
+        let s = &samples[si];
+        let off = row * k;
+        let take = s.indices.len().min(k);
+        for (kk, &feat) in s.indices[..take].iter().enumerate() {
+            buf[off + kk] = fill(row, kk, si, feat);
+        }
+    }
+    Ok(Tensor::from_vec(buf, (n, k), target_device)?)
+}
+
+/// Pack per-cell `(indices, values)` into `[N, K]` u32/f32 tensors. Both
+/// share the same loop walk; the index buffer is built directly so we
+/// can also dtype-cast it to u32 in one shot.
+fn pack_indices_values(
+    samples: &[IndexedSample],
+    sample_indices: &[usize],
+    k: usize,
+    target_device: &Device,
+) -> anyhow::Result<(Tensor, Tensor)> {
+    let n = sample_indices.len();
+    let mut idx_buf = vec![0u32; n * k];
+    let mut val_buf = vec![0.0f32; n * k];
+    for (row, &si) in sample_indices.iter().enumerate() {
+        let s = &samples[si];
+        let off = row * k;
+        let take = s.indices.len().min(k);
+        idx_buf[off..off + take].copy_from_slice(&s.indices[..take]);
+        val_buf[off..off + take].copy_from_slice(&s.values[..take]);
+    }
+    let indices =
+        Tensor::from_vec(idx_buf, (n, k), target_device)?.to_dtype(candle_core::DType::U32)?;
+    let values = Tensor::from_vec(val_buf, (n, k), target_device)?;
+    Ok((indices, values))
+}
+
+/// Pack a per-cell row `(per_sample[si][feat])` at `samples[si].indices`
+/// into `[N, K] f32`. Used for the encoder's μ_residual batch null.
+fn pack_null_at_indices(
+    samples: &[IndexedSample],
+    null_rows: &[Vec<f32>],
+    sample_indices: &[usize],
+    k: usize,
+    target_device: &Device,
+) -> anyhow::Result<Tensor> {
+    pack_at_indices(
+        samples,
+        sample_indices,
+        k,
+        target_device,
+        |_, _, si, feat| null_rows[si][feat as usize],
+    )
+}
+
+/// Gather a per-feature `[D]` slice at each cell's top-K positions into
+/// `[N, K] f32`. Used for both encoder gene-mean (`μ_d`) and decoder
+/// NB-Fisher weights — each cell sees the same constant per feature.
+fn gather_per_feature_at_indices(
+    samples: &[IndexedSample],
+    sample_indices: &[usize],
+    per_feature: &[f32],
+    k: usize,
+    target_device: &Device,
+) -> anyhow::Result<Tensor> {
+    pack_at_indices(
+        samples,
+        sample_indices,
+        k,
+        target_device,
+        |_, _, _, feat| per_feature[feat as usize],
+    )
+}
+
+/// Decoder-side union + per-cell scatter positions.
+///
+/// Returns:
+/// - `union_indices [S] u32` — sorted-by-discovery union of feature ids
+///   appearing in any selected cell's top-K.
+/// - `scatter_pos   [N, K] u32 in [0, S)` — for each cell row and slot k,
+///   the position of `samples[si].indices[k]` in `union_indices`. Padded
+///   slots get position `0` (matched by zero values, harmless).
+/// - `union_vec` — the same `[S]` ids as a host `Vec<u32>` for downstream
+///   indexing into per-feature arrays (e.g. `output_log_q`).
+fn build_union_and_scatter_pos(
     samples: &[IndexedSample],
     sample_indices: &[usize],
     n_features: usize,
+    k: usize,
     target_device: &Device,
-) -> anyhow::Result<UnionScatterOut> {
+) -> anyhow::Result<(Tensor, Tensor, Vec<u32>)> {
     let n_batch = sample_indices.len();
 
     POS_LOOKUP.with(|cell| {
@@ -196,39 +340,32 @@ fn build_union_scatter(
         *current_gen = gen;
 
         let mut union_vec: Vec<u32> = Vec::new();
-        for &si in sample_indices {
-            for &idx in &samples[si].indices {
-                let fi = idx as usize;
+        let mut scatter = vec![0u32; n_batch * k];
+        for (row, &si) in sample_indices.iter().enumerate() {
+            let s = &samples[si];
+            let off = row * k;
+            let take = s.indices.len().min(k);
+            for (kk, &feat) in s.indices[..take].iter().enumerate() {
+                let fi = feat as usize;
                 if entries[fi].gen != gen {
                     entries[fi] = PosSlot {
                         gen,
                         pos: union_vec.len() as u32,
                     };
-                    union_vec.push(idx);
+                    union_vec.push(feat);
                 }
+                scatter[off + kk] = entries[fi].pos;
             }
+            // Padded slots [take..k] keep scatter=0 (matches zero value).
         }
         let s = union_vec.len();
 
-        let mut x_data = vec![0.0f32; n_batch * s];
-        for (row, &si) in sample_indices.iter().enumerate() {
-            let sample = &samples[si];
-            let row_offset = row * s;
-            for (k, &feat_idx) in sample.indices.iter().enumerate() {
-                let col = entries[feat_idx as usize].pos as usize;
-                x_data[row_offset + col] = sample.values[k];
-            }
-        }
-
         let union_indices = Tensor::from_slice(&union_vec, (s,), target_device)?
             .to_dtype(candle_core::DType::U32)?;
-        let indexed_x = Tensor::from_vec(x_data, (n_batch, s), target_device)?;
+        let scatter_pos = Tensor::from_vec(scatter, (n_batch, k), target_device)?
+            .to_dtype(candle_core::DType::U32)?;
 
-        Ok(UnionScatterOut {
-            union_indices,
-            indexed_x,
-            union_vec,
-        })
+        Ok((union_indices, scatter_pos, union_vec))
     })
 }
 
@@ -320,6 +457,25 @@ impl IndexedInMemoryData {
 
         let rows: Vec<usize> = (0..n_samples).collect();
 
+        let input_mean = args.input_mean.map(|s| s.to_vec());
+        let output_fisher_weights = args.output_fisher_weights.map(|s| s.to_vec());
+        if let Some(ref b) = input_mean {
+            anyhow::ensure!(
+                b.len() == n_input_features,
+                "input_mean length {} != n_input_features {}",
+                b.len(),
+                n_input_features
+            );
+        }
+        if let Some(ref w) = output_fisher_weights {
+            anyhow::ensure!(
+                w.len() == n_output_features,
+                "output_fisher_weights length {} != n_output_features {}",
+                w.len(),
+                n_output_features
+            );
+        }
+
         Ok(IndexedInMemoryData {
             input_samples,
             input_null_rows: null_rows,
@@ -329,6 +485,8 @@ impl IndexedInMemoryData {
             input_context_size,
             output_context_size,
             output_log_q,
+            input_mean,
+            output_fisher_weights,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -347,8 +505,6 @@ impl IndexedInMemoryData {
     ) -> Self {
         let n = samples.len();
         let rows: Vec<usize> = (0..n).collect();
-        // Split: output gets the original, input gets a clone.
-        // Both are needed because the struct stores two separate Vecs.
         let output_samples = samples;
         let input_samples = output_samples.clone();
         let output_log_q = compute_log_selection_freq(&output_samples, n_features);
@@ -361,6 +517,8 @@ impl IndexedInMemoryData {
             input_context_size: context_size,
             output_context_size: context_size,
             output_log_q,
+            input_mean: None,
+            output_fisher_weights: None,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -422,69 +580,119 @@ impl IndexedInMemoryData {
         self.n_output_features
     }
 
-    /// Build an indexed minibatch with separate input/output unions.
+    /// Build a packed minibatch.
+    ///
+    /// Encoder side packs `(indices, values)` directly into `[N, K_in]` —
+    /// no union and no `[N, S_in]`. Decoder side builds the union and
+    /// per-cell scatter positions; values are packed in per-cell index
+    /// order into `[N, K_out]`. Nothing is materialized at `[N, S]` shape
+    /// on host or device.
+    #[allow(clippy::type_complexity)]
     fn build_minibatch(
         &self,
         sample_indices: &[usize],
         target_device: &Device,
     ) -> anyhow::Result<IndexedMinibatchData> {
-        let n_batch = sample_indices.len();
+        let k_in = self.input_context_size;
+        let k_out = self.output_context_size;
 
-        // Input + null scatter run independently of the output scatter, so
-        // build them concurrently. `rayon::join` collapses to sequential when
-        // no worker thread is free (e.g. when the outer minibatch loop is
-        // already saturating the pool), so this is a free win at low cost.
         let (input_result, output_result) = rayon::join(
-            || -> anyhow::Result<(UnionScatterOut, Option<Tensor>)> {
-                let input_out = build_union_scatter(
-                    &self.input_samples,
-                    sample_indices,
-                    self.n_input_features,
-                    target_device,
-                )?;
-                let input_indexed_x_null = if let Some(ref null_data) = self.input_null_rows {
-                    let s = input_out.union_vec.len();
-                    let mut buf = vec![0.0f32; n_batch * s];
-                    for (row, &si) in sample_indices.iter().enumerate() {
-                        let null_row = &null_data[si];
-                        let row_offset = row * s;
-                        for (col, &feat_idx) in input_out.union_vec.iter().enumerate() {
-                            buf[row_offset + col] = null_row[feat_idx as usize];
-                        }
-                    }
-                    Some(Tensor::from_vec(buf, (n_batch, s), target_device)?)
-                } else {
-                    None
+            || -> anyhow::Result<(Tensor, Tensor, Option<Tensor>, Option<Tensor>)> {
+                let (input_indices, input_values) =
+                    pack_indices_values(&self.input_samples, sample_indices, k_in, target_device)?;
+                let input_values_null = match self.input_null_rows.as_ref() {
+                    Some(rows) => Some(pack_null_at_indices(
+                        &self.input_samples,
+                        rows,
+                        sample_indices,
+                        k_in,
+                        target_device,
+                    )?),
+                    None => None,
                 };
-                Ok((input_out, input_indexed_x_null))
+                let input_values_mean = match self.input_mean.as_ref() {
+                    Some(b) => Some(gather_per_feature_at_indices(
+                        &self.input_samples,
+                        sample_indices,
+                        b,
+                        k_in,
+                        target_device,
+                    )?),
+                    None => None,
+                };
+                Ok((
+                    input_indices,
+                    input_values,
+                    input_values_null,
+                    input_values_mean,
+                ))
             },
-            || {
-                build_union_scatter(
+            || -> anyhow::Result<(Tensor, Tensor, Tensor, Vec<u32>, Option<Tensor>)> {
+                // Decoder side: union + per-cell scatter positions, plus
+                // values packed in per-cell index order. The decoder never
+                // needs the raw feature ids — only their positions in the
+                // union — so we don't keep an `indices [N, K_out]` tensor.
+                let (union_indices, scatter_pos, union_vec) = build_union_and_scatter_pos(
                     &self.output_samples,
                     sample_indices,
                     self.n_output_features,
+                    k_out,
                     target_device,
-                )
+                )?;
+                let n_batch = sample_indices.len();
+                let mut val_buf = vec![0.0f32; n_batch * k_out];
+                for (row, &si) in sample_indices.iter().enumerate() {
+                    let s = &self.output_samples[si];
+                    let off = row * k_out;
+                    let take = s.values.len().min(k_out);
+                    val_buf[off..off + take].copy_from_slice(&s.values[..take]);
+                }
+                let values = Tensor::from_vec(val_buf, (n_batch, k_out), target_device)?;
+                let output_values_weight = match self.output_fisher_weights.as_ref() {
+                    Some(w) => Some(gather_per_feature_at_indices(
+                        &self.output_samples,
+                        sample_indices,
+                        w,
+                        k_out,
+                        target_device,
+                    )?),
+                    None => None,
+                };
+                Ok((
+                    union_indices,
+                    scatter_pos,
+                    values,
+                    union_vec,
+                    output_values_weight,
+                ))
             },
         );
-        let (input_out, input_indexed_x_null) = input_result?;
-        let output_out = output_result?;
+        let (input_indices, input_values, input_values_null, input_values_mean) = input_result?;
+        let (
+            output_union_indices,
+            output_scatter_pos,
+            output_values,
+            output_union_vec,
+            output_values_weight,
+        ) = output_result?;
 
-        // Slice log selection frequency at output union positions
-        let log_q_s: Vec<f32> = output_out
-            .union_vec
+        // Slice log selection frequency at output union positions.
+        let log_q_s: Vec<f32> = output_union_vec
             .iter()
             .map(|&idx| self.output_log_q[idx as usize])
             .collect();
-        let s_out = output_out.union_vec.len();
+        let s_out = output_union_vec.len();
         let output_log_q_s = Tensor::from_vec(log_q_s, (1, s_out), target_device)?;
 
         Ok(IndexedMinibatchData {
-            input_union_indices: input_out.union_indices,
-            input_indexed_x: input_out.indexed_x,
-            input_indexed_x_null,
-            output_union_indices: output_out.union_indices,
-            output_indexed_x: output_out.indexed_x,
+            input_indices,
+            input_values,
+            input_values_null,
+            input_values_mean,
+            output_union_indices,
+            output_scatter_pos,
+            output_values,
+            output_values_weight,
             output_log_q_s,
         })
     }
@@ -540,8 +748,6 @@ mod tests {
     fn test_top_k_indices() {
         let row = vec![0.1, 0.5, 0.3, 0.9, 0.2, 0.7];
         let (indices, values) = top_k_indices(&row, 3);
-        // Top-3 by value: 0.9 (idx=3), 0.7 (idx=5), 0.5 (idx=1)
-        // Sorted by index: 1, 3, 5
         assert_eq!(indices, vec![1, 3, 5]);
         assert_eq!(values, vec![0.5, 0.9, 0.7]);
     }
@@ -549,7 +755,7 @@ mod tests {
     #[test]
     fn test_top_k_all_features() {
         let row = vec![0.1, 0.5, 0.3];
-        let (indices, values) = top_k_indices(&row, 10); // K > D
+        let (indices, values) = top_k_indices(&row, 10);
         assert_eq!(indices, vec![0, 1, 2]);
         assert_eq!(values, vec![0.1, 0.5, 0.3]);
     }
@@ -558,18 +764,25 @@ mod tests {
     fn test_top_k_indices_weighted() {
         // raw row top-3 by value would be {3,5,1} (0.9, 0.7, 0.5).
         // Down-weight idx 3 and 5 ("housekeeping"); idx 0,2,4 should win.
+        // Scoring is log1p(v) * w — same ordering on this small example.
         let row = vec![0.1, 0.5, 0.3, 0.9, 0.2, 0.7];
         let weights = vec![1.0, 0.1, 1.0, 0.01, 1.0, 0.05];
         let (indices, values) = top_k_indices_weighted(&row, &weights, 3);
-        // Scored: [0.1, 0.05, 0.3, 0.009, 0.2, 0.035] → top-3 = {2,4,0}
+        // log1p scores:
+        //   0: ln1p(0.1)*1.0  ≈ 0.0953
+        //   1: ln1p(0.5)*0.1  ≈ 0.0405
+        //   2: ln1p(0.3)*1.0  ≈ 0.2624
+        //   3: ln1p(0.9)*0.01 ≈ 0.0064
+        //   4: ln1p(0.2)*1.0  ≈ 0.1823
+        //   5: ln1p(0.7)*0.05 ≈ 0.0265
+        // Top-3 = {2, 4, 0}, sorted by index → {0, 2, 4}.
         assert_eq!(indices, vec![0, 2, 4]);
-        // Values returned must be raw row entries, not weighted.
+        // Values returned must be the raw row entries — log1p only re-ranks.
         assert_eq!(values, vec![0.1, 0.3, 0.2]);
     }
 
     #[test]
     fn test_indexed_from_dense() {
-        // 4 samples, 6 features, context_size=3
         let data = DMatrix::<f32>::from_row_slice(
             4,
             6,
@@ -590,6 +803,8 @@ mod tests {
             output_context_size: 3,
             input_shortlist_weights: &w,
             output_shortlist_weights: &w,
+            input_mean: None,
+            output_fisher_weights: None,
         };
 
         let indexed = IndexedInMemoryData::from_dense(args).unwrap();
@@ -597,17 +812,15 @@ mod tests {
         assert_eq!(indexed.n_input_features(), 6);
         assert_eq!(indexed.input_context_size(), 3);
 
-        // Verify input sample 0: top-3 should be indices 1, 3, 5
         assert_eq!(indexed.input_samples[0].indices, vec![1, 3, 5]);
         assert_eq!(indexed.input_samples[0].values, vec![0.5, 0.9, 0.7]);
 
-        // Verify input sample 1: top-3 should be indices 0, 2, 4
         assert_eq!(indexed.input_samples[1].indices, vec![0, 2, 4]);
         assert_eq!(indexed.input_samples[1].values, vec![0.8, 0.6, 0.9]);
     }
 
     #[test]
-    fn test_indexed_minibatch_union() {
+    fn test_packed_minibatch_shapes() {
         let data = DMatrix::<f32>::from_row_slice(
             3,
             6,
@@ -627,25 +840,42 @@ mod tests {
             output_context_size: 2,
             input_shortlist_weights: &w,
             output_shortlist_weights: &w,
+            input_mean: None,
+            output_fisher_weights: None,
         };
 
         let indexed = IndexedInMemoryData::from_dense(args).unwrap();
-
-        // Use ordered minibatch with all 3 samples
         let mb = indexed.minibatch_ordered(0, 3, &Device::Cpu).unwrap();
 
-        let union: Vec<u32> = mb.input_union_indices.to_vec1().unwrap();
-        assert_union_eq_set(&union, &[0, 1, 3, 4, 5]);
-        assert_eq!(mb.input_indexed_x.dims(), &[3, 5]);
+        // Encoder side: packed [N, K_in].
+        assert_eq!(mb.input_indices.dims(), &[3, 2]);
+        assert_eq!(mb.input_values.dims(), &[3, 2]);
 
-        let x_vals: Vec<Vec<f32>> = mb.input_indexed_x.to_vec2().unwrap();
-        assert!((x_vals[0][pos_of(&union, 3)] - 0.9).abs() < 1e-6);
-        assert!((x_vals[0][pos_of(&union, 5)] - 0.7).abs() < 1e-6);
-        assert!(x_vals[0][pos_of(&union, 0)].abs() < 1e-6); // feat 0 not selected by sample 0
+        let in_idx: Vec<Vec<u32>> = mb.input_indices.to_vec2().unwrap();
+        let in_val: Vec<Vec<f32>> = mb.input_values.to_vec2().unwrap();
+        assert_eq!(in_idx[0], vec![3, 5]);
+        assert!((in_val[0][0] - 0.9).abs() < 1e-6);
+        assert!((in_val[0][1] - 0.7).abs() < 1e-6);
+
+        // Decoder side: union + scatter_pos + values [N, K_out].
+        let union: Vec<u32> = mb.output_union_indices.to_vec1().unwrap();
+        assert_union_eq_set(&union, &[0, 1, 3, 4, 5]);
+        assert_eq!(mb.output_scatter_pos.dims(), &[3, 2]);
+        assert_eq!(mb.output_values.dims(), &[3, 2]);
+
+        let scat: Vec<Vec<u32>> = mb.output_scatter_pos.to_vec2().unwrap();
+        let vals: Vec<Vec<f32>> = mb.output_values.to_vec2().unwrap();
+
+        // For sample 0, the per-cell ids are [3, 5]; their scatter positions
+        // must point at exactly those entries in the union.
+        assert_eq!(union[scat[0][0] as usize], 3);
+        assert_eq!(union[scat[0][1] as usize], 5);
+        assert!((vals[0][0] - 0.9).abs() < 1e-6);
+        assert!((vals[0][1] - 0.7).abs() < 1e-6);
     }
 
     #[test]
-    fn test_indexed_with_separate_output() {
+    fn test_packed_minibatch_separate_output() {
         let input = DMatrix::<f32>::from_row_slice(
             2,
             4,
@@ -658,8 +888,8 @@ mod tests {
             2,
             4,
             &[
-                10.0, 20.0, 30.0, 40.0, // top-2 = {30,40} -> {2,3}
-                50.0, 60.0, 70.0, 80.0, // top-2 = {70,80} -> {2,3}
+                10.0, 20.0, 30.0, 40.0, // top-2 = {2,3}
+                50.0, 60.0, 70.0, 80.0, // top-2 = {2,3}
             ],
         );
 
@@ -672,26 +902,37 @@ mod tests {
             output_context_size: 2,
             input_shortlist_weights: &w,
             output_shortlist_weights: &w,
+            input_mean: None,
+            output_fisher_weights: None,
         };
 
         let indexed = IndexedInMemoryData::from_dense(args).unwrap();
         let mb = indexed.minibatch_ordered(0, 2, &Device::Cpu).unwrap();
 
-        let input_union: Vec<u32> = mb.input_union_indices.to_vec1().unwrap();
-        assert_union_eq_set(&input_union, &[0, 1, 2, 3]);
+        let in_idx: Vec<Vec<u32>> = mb.input_indices.to_vec2().unwrap();
+        assert_eq!(in_idx[0], vec![0, 2]);
+        assert_eq!(in_idx[1], vec![1, 3]);
 
         let output_union: Vec<u32> = mb.output_union_indices.to_vec1().unwrap();
         assert_union_eq_set(&output_union, &[2, 3]);
 
-        let y_vals: Vec<Vec<f32>> = mb.output_indexed_x.to_vec2().unwrap();
-        assert!((y_vals[0][pos_of(&output_union, 2)] - 30.0).abs() < 1e-6);
-        assert!((y_vals[0][pos_of(&output_union, 3)] - 40.0).abs() < 1e-6);
-        assert!((y_vals[1][pos_of(&output_union, 2)] - 70.0).abs() < 1e-6);
-        assert!((y_vals[1][pos_of(&output_union, 3)] - 80.0).abs() < 1e-6);
+        let vals: Vec<Vec<f32>> = mb.output_values.to_vec2().unwrap();
+        assert!((vals[0][0] - 30.0).abs() < 1e-6);
+        assert!((vals[0][1] - 40.0).abs() < 1e-6);
+        assert!((vals[1][0] - 70.0).abs() < 1e-6);
+        assert!((vals[1][1] - 80.0).abs() < 1e-6);
+
+        let scat: Vec<Vec<u32>> = mb.output_scatter_pos.to_vec2().unwrap();
+        for row in &scat {
+            for (kk, &pos) in row.iter().enumerate() {
+                let expected_feat = if kk == 0 { 2u32 } else { 3u32 };
+                assert_eq!(output_union[pos as usize], expected_feat);
+            }
+        }
     }
 
     #[test]
-    fn test_indexed_different_context_sizes() {
+    fn test_packed_minibatch_different_context_sizes() {
         let data = DMatrix::<f32>::from_row_slice(
             2,
             6,
@@ -710,6 +951,8 @@ mod tests {
             output_context_size: 1,
             input_shortlist_weights: &w,
             output_shortlist_weights: &w,
+            input_mean: None,
+            output_fisher_weights: None,
         };
 
         let indexed = IndexedInMemoryData::from_dense(args).unwrap();
@@ -718,23 +961,24 @@ mod tests {
 
         let mb = indexed.minibatch_ordered(0, 2, &Device::Cpu).unwrap();
 
-        // Input union: {1,3,5} ∪ {0,2,4} = {0,1,2,3,4,5} => S_in=6
-        assert_eq!(mb.input_indexed_x.dims()[1], 6);
+        // Encoder packed at K_in=3.
+        assert_eq!(mb.input_indices.dims(), &[2, 3]);
+        assert_eq!(mb.input_values.dims(), &[2, 3]);
 
-        // Output union: {3} ∪ {4} = {3,4} => S_out=2
-        assert_eq!(mb.output_indexed_x.dims()[1], 2);
+        // Decoder packed at K_out=1; union {3,4} → S=2.
+        assert_eq!(mb.output_scatter_pos.dims(), &[2, 1]);
+        assert_eq!(mb.output_values.dims(), &[2, 1]);
+        let union: Vec<u32> = mb.output_union_indices.to_vec1().unwrap();
+        assert_union_eq_set(&union, &[3, 4]);
     }
 
-    /// A panic mid-`build_union_scatter` must not poison the thread-local
-    /// `POS_LOOKUP` for subsequent calls on the same thread. Drive both
-    /// calls directly (no rayon dispatch) so the second call provably runs
-    /// on the same thread that dirtied the lookup.
+    /// A panic mid-`build_union_and_scatter_pos` must not poison the
+    /// thread-local `POS_LOOKUP` for subsequent calls on the same thread.
     #[test]
     fn test_pos_lookup_panic_recovery() {
         use std::panic;
 
-        // Sample 0 dirties slots 0 and 1; sample 1 dirties slot 2 then OOBs
-        // on idx=99 — leaving entries[0..=2] with the panicking call's gen.
+        // First call OOBs on idx=99, leaving slots 0..=2 with a dirty gen.
         let bad_samples = vec![
             IndexedSample {
                 indices: vec![0, 1],
@@ -747,14 +991,13 @@ mod tests {
         ];
         let bad_indices = [0usize, 1];
         let result = panic::catch_unwind(|| {
-            let _ = build_union_scatter(&bad_samples, &bad_indices, 6, &Device::Cpu);
+            let _ = build_union_and_scatter_pos(&bad_samples, &bad_indices, 6, 2, &Device::Cpu);
         });
         assert!(result.is_err(), "expected the OOB sample to panic");
 
         // Clean call on the same thread: every feature in `good_samples`
-        // must end up in the union. With sentinel-reset semantics the stale
-        // entries 0/1/2 would be misread as "already in union" and silently
-        // dropped; the generation bump must invalidate them.
+        // must end up in the union — the gen bump invalidates the dirty
+        // slots from the panicking call.
         let good_samples = vec![
             IndexedSample {
                 indices: vec![0, 1],
@@ -765,13 +1008,21 @@ mod tests {
                 values: vec![12.0, 13.0],
             },
         ];
-        let out = build_union_scatter(&good_samples, &[0, 1], 6, &Device::Cpu).unwrap();
-        let union: Vec<u32> = out.union_indices.to_vec1().unwrap();
+        let (union_t, scatter_t, union_vec) =
+            build_union_and_scatter_pos(&good_samples, &[0, 1], 6, 2, &Device::Cpu).unwrap();
+        let union: Vec<u32> = union_t.to_vec1().unwrap();
         assert_union_eq_set(&union, &[0, 1, 2, 3]);
+        assert_eq!(union_vec, union);
 
-        // Spot-check the scatter: stale `pos` values must not steer writes.
-        let x_vals: Vec<Vec<f32>> = out.indexed_x.to_vec2().unwrap();
-        assert!((x_vals[0][pos_of(&union, 0)] - 10.0).abs() < 1e-6);
-        assert!((x_vals[1][pos_of(&union, 3)] - 13.0).abs() < 1e-6);
+        let scat: Vec<Vec<u32>> = scatter_t.to_vec2().unwrap();
+        // sample 0 → ids [0,1]; positions must point at those features.
+        assert_eq!(union[scat[0][0] as usize], 0);
+        assert_eq!(union[scat[0][1] as usize], 1);
+        assert_eq!(union[scat[1][0] as usize], 2);
+        assert_eq!(union[scat[1][1] as usize], 3);
+
+        // A fresh union value lookup at scatter position 0 must read the
+        // first union entry, not stale state from the panicking call.
+        let _ = pos_of(&union, 0);
     }
 }

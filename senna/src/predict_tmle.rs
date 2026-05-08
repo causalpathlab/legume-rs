@@ -216,6 +216,7 @@ fn accumulate_block_indexed(
     exp_beta_dk: &Mat,
     phi: Option<&[f32]>,
     shortlist_weights: &[f32],
+    feature_mean: &[f32],
     enc_context_size: usize,
     n_batches: usize,
     dev: &Device,
@@ -233,29 +234,28 @@ fn accumulate_block_indexed(
         .map(|delta_bm| expand_delta_for_block(data_vec, delta_bm, adj_method, lb, ub, dev))
         .transpose()?;
 
-    // Indexed shortlist for encoder
-    let (enc_union, enc_indexed_x) =
-        dense_to_indexed(&x_nd_t, enc_context_size, shortlist_weights, dev)?;
-
-    let enc_indexed_x_null = if let Some(x0) = &x0_nd {
-        let union_vec: Vec<u32> = enc_union.to_vec1()?;
-        let s = union_vec.len();
-        let x0_vec: Vec<Vec<f32>> = x0.to_vec2()?;
-        let mut x0_data = vec![0.0f32; n_block * s];
-        for (rr, x0_row) in x0_vec.iter().enumerate() {
-            for (col, &feat_idx) in union_vec.iter().enumerate() {
-                x0_data[rr * s + col] = x0_row[feat_idx as usize];
-            }
-        }
-        Some(Tensor::from_vec(x0_data, (n_block, s), dev)?)
-    } else {
-        None
+    // Packed top-K shortlist for encoder.
+    let ctx = crate::topic::eval_indexed::PerGeneContext {
+        feature_mean: Some(feature_mean),
+        feature_fisher_weights: None,
     };
+    let enc_pack = dense_to_indexed(&x_nd_t, enc_context_size, shortlist_weights, ctx, dev)?;
+
+    let enc_values_null = match x0_nd.as_ref() {
+        Some(x0) => Some(crate::topic::eval_indexed::gather_null_at_indices(
+            x0,
+            &enc_pack.indices,
+            dev,
+        )?),
+        None => None,
+    };
+    let _ = n_block;
 
     let (log_z_nk, _) = encoder.forward_indexed_t(
-        &enc_union,
-        &enc_indexed_x,
-        enc_indexed_x_null.as_ref(),
+        &enc_pack.indices,
+        &enc_pack.values,
+        enc_values_null.as_ref(),
+        enc_pack.values_mean.as_ref(),
         false,
     )?;
     let theta_nk_t = log_z_nk.exp()?.to_device(&Device::Cpu)?;
@@ -293,6 +293,7 @@ pub fn iterate_delta_indexed(
     beta_dk_full: &Mat,
     phi: Option<&[f32]>,
     shortlist_weights: &[f32],
+    feature_mean: &[f32],
     enc_context_size: usize,
     minibatch_size: usize,
     dev: &Device,
@@ -327,6 +328,7 @@ pub fn iterate_delta_indexed(
                     &exp_beta_dk,
                     phi,
                     shortlist_weights,
+                    feature_mean,
                     enc_context_size,
                     n_batches,
                     dev,
