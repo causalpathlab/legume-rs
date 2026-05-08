@@ -38,10 +38,6 @@ pub struct TrainingParams {
     pub sort_dim: usize,
     pub embedding_dim: usize,
     pub context_size: usize,
-    pub rna_ambient: bool,
-    pub rho_prior_weight: f32,
-    pub rho_prior_alpha: f32,
-    pub rho_prior_beta: f32,
 }
 
 pub struct TrainedModel {
@@ -155,11 +151,11 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
     let varmap = VarMap::new();
     let vs = candle_nn::VarBuilder::from_varmap(&varmap, DType::F32, dev);
 
-    let decoders: Vec<ChickpeaDecoder> = level_dims
+    let mut decoders: Vec<ChickpeaDecoder> = level_dims
         .iter()
         .enumerate()
         .map(|(i, &(dg, dp))| {
-            let mut dec = ChickpeaDecoder::new(
+            ChickpeaDecoder::new(
                 DecoderArgs {
                     n_features_atac: dp,
                     n_features_rna: dg,
@@ -167,16 +163,18 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
                 },
                 vs.pp(format!("dec_{i}")),
             )
-            .expect("decoder creation");
-            dec.set_ambient(params.rna_ambient);
-            dec.set_rho_prior(
-                params.rho_prior_weight,
-                params.rho_prior_alpha,
-                params.rho_prior_beta,
-            );
-            dec
+            .expect("decoder creation")
         })
         .collect();
+
+    for (i, dec) in decoders.iter_mut().enumerate() {
+        let w_rna =
+            fisher_weights_from_collapsed(&ctx.collapsed[i][0], ctx.rna_coarsenings[i].as_ref());
+        let w_atac =
+            fisher_weights_from_collapsed(&ctx.collapsed[i][1], ctx.atac_coarsenings[i].as_ref());
+        dec.attach_feature_weights_rna(&w_rna, dev)?;
+        dec.attach_feature_weights_atac(&w_atac, dev)?;
+    }
 
     let susies: Vec<SuSiE> = level_dims
         .iter()
@@ -481,6 +479,32 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
 }
 
 /* ---- Helpers ---- */
+
+/// Fit NB dispersion trend on a single modality's coarsened pseudobulk
+/// posterior means and return per-feature Fisher weights `w_d ∈ (0, 1]`.
+fn fisher_weights_from_collapsed(
+    co: &CollapsedOut,
+    fc: Option<&FeatureCoarsening>,
+) -> Vec<f32> {
+    use data_beans_alg::gene_weighting::fisher_weights_from_stats;
+    use matrix_util::sparse_stat::SparseRunningStatistics;
+
+    let mu_dn = co.mu_observed.posterior_mean();
+    let mut stats = SparseRunningStatistics::<f32>::new(mu_dn.nrows());
+    let n_pb = match fc {
+        Some(c) => {
+            let coarse = c.aggregate_rows_ds(mu_dn);
+            stats = SparseRunningStatistics::<f32>::new(coarse.nrows());
+            stats.add_dense_columns(&coarse);
+            coarse.ncols()
+        }
+        None => {
+            stats.add_dense_columns(mu_dn);
+            mu_dn.ncols()
+        }
+    };
+    fisher_weights_from_stats(&stats, n_pb)
+}
 
 fn n_batches(n: usize, mb: usize) -> usize {
     n.div_ceil(mb)

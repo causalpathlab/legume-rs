@@ -21,22 +21,20 @@ use matrix_util::traits::{IoOps, RunningStatOps};
 use matrix_util::utils::generate_minibatch_intervals;
 use rayon::prelude::*;
 
-/// Fit the NB mean-variance trend on `data_vec` and return per-gene
-/// Fisher-info weights in row order (same as `data_vec.row_names()`).
-pub fn compute_nb_fisher_weights(
-    data_vec: &SparseIoVec,
-    block_size: Option<usize>,
-) -> anyhow::Result<Vec<f32>> {
-    let n_genes = data_vec.num_rows();
-    let n_cells = data_vec.num_columns();
-    let stats = streaming_sparse_running_stats(data_vec, block_size, "NB-Fisher")?;
-
-    let trend = DispersionTrend::from_sparse_stats(&stats);
+/// Fit a fresh NB dispersion trend on `stats` and return per-feature
+/// Fisher-info weights `w_d ∈ (0, 1]`. `n_entities` is the count divisor
+/// used to compute the mean entity size factor `s̄` (typically the
+/// number of cells or pseudobulks the stats were accumulated over).
+pub fn fisher_weights_from_stats(
+    stats: &SparseRunningStatistics<f32>,
+    n_entities: usize,
+) -> Vec<f32> {
+    let trend = DispersionTrend::from_sparse_stats(stats);
     let means = stats.mean();
     let sums = stats.sum();
     let total_mass: f64 = sums.iter().map(|&s| s as f64).sum();
-    let avg_s = if n_cells > 0 {
-        (total_mass / n_cells as f64) as f32
+    let avg_s = if n_entities > 0 {
+        (total_mass / n_entities as f64) as f32
     } else {
         1.0
     };
@@ -45,10 +43,20 @@ pub fn compute_nb_fisher_weights(
     } else {
         0.0
     };
-
-    Ok((0..n_genes)
+    (0..means.len())
         .map(|g| trend.fisher_weight(sums[g] * inv_total, avg_s, means[g]))
-        .collect())
+        .collect()
+}
+
+/// Fit the NB mean-variance trend on `data_vec` and return per-gene
+/// Fisher-info weights in row order (same as `data_vec.row_names()`).
+pub fn compute_nb_fisher_weights(
+    data_vec: &SparseIoVec,
+    block_size: Option<usize>,
+) -> anyhow::Result<Vec<f32>> {
+    let n_cells = data_vec.num_columns();
+    let stats = streaming_sparse_running_stats(data_vec, block_size, "NB-Fisher")?;
+    Ok(fisher_weights_from_stats(&stats, n_cells))
 }
 
 /// Same as [`compute_nb_fisher_weights`], but at the *coarse* feature
@@ -97,24 +105,7 @@ pub fn compute_nb_fisher_weights_coarsened(
         )?;
     pb.finish_and_clear();
 
-    let trend = DispersionTrend::from_sparse_stats(&stats);
-    let means = stats.mean();
-    let sums = stats.sum();
-    let total_mass: f64 = sums.iter().map(|&s| s as f64).sum();
-    let avg_s = if n_total > 0 {
-        (total_mass / n_total as f64) as f32
-    } else {
-        1.0
-    };
-    let inv_total = if total_mass > 0.0 {
-        1.0 / total_mass as f32
-    } else {
-        0.0
-    };
-
-    Ok((0..n_features_coarse)
-        .map(|c| trend.fisher_weight(sums[c] * inv_total, avg_s, means[c]))
-        .collect())
+    Ok(fisher_weights_from_stats(&stats, n_total))
 }
 
 /// Save a per-gene weight vector as a single-column parquet keyed on
@@ -185,10 +176,7 @@ pub fn load_fisher_weights(prefix: &str) -> anyhow::Result<Option<GeneWeights>> 
 /// `coarse_<i>` axis ids since coarse meta-genes have no biological
 /// names. Loaded by `senna predict` / `senna eval-topic` to re-attach
 /// the same per-feature multinomial-loss weights at inference.
-pub fn save_fisher_weights_coarse(
-    out_prefix: &str,
-    weights: &[f32],
-) -> anyhow::Result<()> {
+pub fn save_fisher_weights_coarse(out_prefix: &str, weights: &[f32]) -> anyhow::Result<()> {
     let axis_names: Vec<Box<str>> = (0..weights.len())
         .map(|i| format!("coarse_{i}").into_boxed_str())
         .collect();
