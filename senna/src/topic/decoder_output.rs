@@ -10,7 +10,6 @@
 use crate::embed_common::*;
 use candle_util::candle_decoder_nb_mixture::NbMixtureTopicDecoder;
 use candle_util::candle_decoder_topic::{MultinomTopicDecoder, NbTopicDecoder};
-use candle_util::candle_decoder_vmf_topic::VmfTopicDecoder;
 use candle_util::candle_model_traits::*;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use matrix_util::traits::IoOps;
@@ -184,65 +183,6 @@ impl DecoderExtras for NbMixtureTopicDecoder {
         info!(
             "Saved ambient parameters: {out_prefix}.dispersion.parquet, {out_prefix}.alpha.parquet, {out_prefix}.rho.parquet (a={rho_a:.3}, b={rho_b:.3})"
         );
-        Ok(())
-    }
-}
-
-impl DecoderExtras for VmfTopicDecoder {
-    /// vMF dictionary: expand coarse directions to full resolution and re-normalize.
-    fn write_dictionary(
-        &self,
-        coarsening: Option<&FeatureCoarsening>,
-        n_features_full: usize,
-        gene_names: &[Box<str>],
-        out_prefix: &str,
-    ) -> anyhow::Result<()> {
-        let dict_tensor = self
-            .get_dictionary()?
-            .to_device(&candle_core::Device::Cpu)?;
-        let dict_dk: Mat = Mat::from_tensor(&dict_tensor)?;
-
-        let out_dk = if let Some(fc) = coarsening {
-            let k = dict_dk.ncols();
-            let mut expanded = Mat::zeros(n_features_full, k);
-            for (c, fine_indices) in fc.coarse_to_fine.iter().enumerate() {
-                for &f in fine_indices {
-                    for kk in 0..k {
-                        expanded[(f, kk)] = dict_dk[(c, kk)];
-                    }
-                }
-            }
-            // Re-normalize each column to unit length
-            for kk in 0..k {
-                let col = expanded.column(kk);
-                let norm = col.dot(&col).sqrt();
-                if norm > 1e-12 {
-                    expanded.column_mut(kk).scale_mut(1.0 / norm);
-                }
-            }
-            expanded
-        } else {
-            dict_dk
-        };
-
-        out_dk.to_parquet_with_names(
-            &(out_prefix.to_string() + ".dictionary.parquet"),
-            (Some(gene_names), Some("gene")),
-            Some(&axis_id_names("T", out_dk.ncols())),
-        )?;
-        Ok(())
-    }
-
-    fn write_extras(
-        &self,
-        _coarsening: Option<&FeatureCoarsening>,
-        _n_features_full: usize,
-        _gene_names: &[Box<str>],
-        _out_prefix: &str,
-    ) -> anyhow::Result<()> {
-        let kappas = self.kappa_vec()?;
-        let kappa_strs: Vec<String> = kappas.iter().map(|k| format!("{k:.2}")).collect();
-        info!("vMF concentration κ = [{}]", kappa_strs.join(", "));
         Ok(())
     }
 }

@@ -11,10 +11,15 @@
 //! Originally lived in `pinto/src/util/common.rs`; moved here so senna /
 //! chickpea / other consumers don't have to duplicate the implementation.
 
+use crate::feature_coarsening::FeatureCoarsening;
 use crate::nb_dispersion::DispersionTrend;
 use crate::sparse_streaming::streaming_sparse_running_stats;
 use data_beans::sparse_io_vector::SparseIoVec;
+use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
+use matrix_util::sparse_stat::SparseRunningStatistics;
 use matrix_util::traits::{IoOps, RunningStatOps};
+use matrix_util::utils::generate_minibatch_intervals;
+use rayon::prelude::*;
 
 /// Fit the NB mean-variance trend on `data_vec` and return per-gene
 /// Fisher-info weights in row order (same as `data_vec.row_names()`).
@@ -43,6 +48,89 @@ pub fn compute_nb_fisher_weights(
 
     Ok((0..n_genes)
         .map(|g| trend.fisher_weight(sums[g] * inv_total, avg_s, means[g]))
+        .collect())
+}
+
+/// Same as [`compute_nb_fisher_weights`], but at the *coarse* feature
+/// level after `FeatureCoarsening` aggregation. Streams cells, coarsens
+/// each block via `aggregate_sparse_csc` (sum within group), then fits
+/// a fresh NB dispersion trend at `D_coarse` and computes per-meta-gene
+/// Fisher weights.
+///
+/// Use this when the encoder/decoder operate at a coarsened feature
+/// resolution: the data the model actually sees is summed-coarsened
+/// counts, so the dispersion trend (and hence Fisher info) must be
+/// fit at that scale — not aggregated from fine-level weights.
+pub fn compute_nb_fisher_weights_coarsened(
+    data_vec: &SparseIoVec,
+    coarsening: &FeatureCoarsening,
+    block_size: Option<usize>,
+) -> anyhow::Result<Vec<f32>> {
+    let n_features_coarse = coarsening.num_coarse;
+    let n_total = data_vec.num_columns();
+    let jobs = generate_minibatch_intervals(n_total, n_features_coarse, block_size);
+
+    let pb = ProgressBar::new(jobs.len() as u64).with_style(
+        ProgressStyle::with_template("NB-Fisher (coarse) {bar:40} {pos}/{len} blocks ({eta})")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+
+    let stats: SparseRunningStatistics<f32> = jobs
+        .par_iter()
+        .progress_with(pb.clone())
+        .try_fold(
+            || SparseRunningStatistics::<f32>::new(n_features_coarse),
+            |mut acc, &(lb, ub)| -> anyhow::Result<SparseRunningStatistics<f32>> {
+                let chunk = data_vec.read_columns_csc(lb..ub)?;
+                let coarse = coarsening.aggregate_sparse_csc(&chunk);
+                // Add each coarsened cell column as a sparse column
+                // (most coarse groups will be non-empty, but skipping
+                // zeros keeps `n_pos` accurate per coarse feature).
+                let n_block = ub - lb;
+                let mut row_idx: Vec<usize> = Vec::with_capacity(n_features_coarse);
+                let mut row_val: Vec<f32> = Vec::with_capacity(n_features_coarse);
+                for j in 0..n_block {
+                    row_idx.clear();
+                    row_val.clear();
+                    for c in 0..n_features_coarse {
+                        let v = coarse[(c, j)];
+                        if v > 0.0 {
+                            row_idx.push(c);
+                            row_val.push(v);
+                        }
+                    }
+                    acc.add_sparse_column(&row_idx, &row_val);
+                }
+                Ok(acc)
+            },
+        )
+        .try_reduce(
+            || SparseRunningStatistics::<f32>::new(n_features_coarse),
+            |mut a, b| {
+                a.merge(&b);
+                Ok(a)
+            },
+        )?;
+    pb.finish_and_clear();
+
+    let trend = DispersionTrend::from_sparse_stats(&stats);
+    let means = stats.mean();
+    let sums = stats.sum();
+    let total_mass: f64 = sums.iter().map(|&s| s as f64).sum();
+    let avg_s = if n_total > 0 {
+        (total_mass / n_total as f64) as f32
+    } else {
+        1.0
+    };
+    let inv_total = if total_mass > 0.0 {
+        1.0 / total_mass as f32
+    } else {
+        0.0
+    };
+
+    Ok((0..n_features_coarse)
+        .map(|c| trend.fisher_weight(sums[c] * inv_total, avg_s, means[c]))
         .collect())
 }
 

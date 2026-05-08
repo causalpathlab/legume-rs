@@ -72,6 +72,18 @@ pub trait DecoderModuleT {
 
     fn dim_latent(&self) -> usize;
 
+    /// Attach per-feature weights `w_d ∈ (0, 1]` (e.g. NB-Fisher info)
+    /// to the decoder loss. Must be at the decoder's `D` resolution.
+    /// Default is no-op for decoders that don't support per-feature
+    /// reweighting; `MultinomTopicDecoder` overrides.
+    fn attach_feature_weights(
+        &mut self,
+        _weights: &[f32],
+        _dev: &candle_core::Device,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Build a lightweight log-likelihood closure for ESS evaluation.
     ///
     /// Returns a boxed closure `|z_nk [N,K]| -> llik [N]` that uses

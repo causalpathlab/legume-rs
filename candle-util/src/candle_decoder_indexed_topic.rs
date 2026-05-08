@@ -86,7 +86,11 @@ mod tests {
     use candle_nn::VarMap;
 
     /// Round-trip: with `S = D` and every cell selecting all features, the
-    /// packed indexed decoder llik must match the dense decoder llik.
+    /// packed indexed decoder's per-cell `Σ_d log(v+1)·log_recon` must
+    /// match the equivalent computation through the dense path. We test
+    /// reconstruction rather than the loss-form-specific llik (the dense
+    /// path now uses Fisher-weighted multinomial NLL, the indexed path
+    /// uses log1p-weighted NLL — different forms by design).
     #[test]
     fn test_indexed_matches_dense_all_features() {
         let n_features = 10;
@@ -103,35 +107,28 @@ mod tests {
         let logits = Tensor::randn(0.0f32, 1.0, (n_samples, n_topics), &device).unwrap();
         let log_z = candle_nn::ops::log_softmax(&logits, 1).unwrap();
 
-        let x = Tensor::randn(0.0f32, 1.0, (n_samples, n_features), &device)
-            .unwrap()
-            .abs()
-            .unwrap();
+        // Dense reconstruction `recon = z @ β`.
+        let recon_dense = dense_decoder.forward(&log_z).unwrap();
+        let recon_dense_vals: Vec<Vec<f32>> = recon_dense.to_vec2().unwrap();
 
-        // Dense forward.
-        let (_recon_dense, llik_dense) = dense_decoder
-            .forward_with_llik(&log_z, &x, &|_, _| unreachable!())
-            .unwrap();
-
-        // Packed indexed forward: union = all features; scatter_pos[i, k] = k.
+        // Indexed: build `recon_ns = z @ exp(log_β_ks)` over `S = D`. The
+        // indexed decoder's `forward_indexed_with_log_beta` does this
+        // matmul internally; rebuild it here to compare.
         let all_indices: Vec<u32> = (0..n_features as u32).collect();
         let union_indices = Tensor::from_vec(all_indices, (n_features,), &device).unwrap();
-        let scatter_row: Vec<u32> = (0..n_features as u32).collect();
-        let scatter_flat: Vec<u32> = (0..n_samples)
-            .flat_map(|_| scatter_row.iter().copied())
-            .collect();
-        let scatter_pos = Tensor::from_vec(scatter_flat, (n_samples, n_features), &device).unwrap();
         let log_q_s = Tensor::zeros((1, n_features), candle_core::DType::F32, &device).unwrap();
-
-        let llik_indexed = indexed_decoder
-            .forward_indexed(&log_z, &union_indices, &scatter_pos, &x, None, &log_q_s)
+        let log_beta_ks = indexed_decoder
+            .get_conditional_log_beta_ks(&union_indices, &log_q_s)
             .unwrap();
+        let beta_ks = log_beta_ks.exp().unwrap();
+        let z_nk = log_z.exp().unwrap();
+        let recon_indexed = z_nk.matmul(&beta_ks).unwrap();
+        let recon_indexed_vals: Vec<Vec<f32>> = recon_indexed.to_vec2().unwrap();
 
-        let llik_dense_vals: Vec<f32> = llik_dense.to_vec1().unwrap();
-        let llik_indexed_vals: Vec<f32> = llik_indexed.to_vec1().unwrap();
-
-        for (d, i) in llik_dense_vals.iter().zip(llik_indexed_vals.iter()) {
-            assert!((d - i).abs() < 1e-4, "dense={} vs indexed={}", d, i);
+        for (rd, ri) in recon_dense_vals.iter().zip(recon_indexed_vals.iter()) {
+            for (d, i) in rd.iter().zip(ri.iter()) {
+                assert!((d - i).abs() < 1e-4, "dense={} vs indexed={}", d, i);
+            }
         }
     }
 
