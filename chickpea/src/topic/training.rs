@@ -482,10 +482,7 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
 
 /// Fit NB dispersion trend on a single modality's coarsened pseudobulk
 /// posterior means and return per-feature Fisher weights `w_d ∈ (0, 1]`.
-fn fisher_weights_from_collapsed(
-    co: &CollapsedOut,
-    fc: Option<&FeatureCoarsening>,
-) -> Vec<f32> {
+fn fisher_weights_from_collapsed(co: &CollapsedOut, fc: Option<&FeatureCoarsening>) -> Vec<f32> {
     use data_beans_alg::gene_weighting::fisher_weights_from_stats;
     use matrix_util::sparse_stat::SparseRunningStatistics;
 
