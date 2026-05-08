@@ -1,5 +1,5 @@
 use super::common::{apply_column_delta, sample_collapsed_data};
-use super::eval_indexed::{dense_to_indexed, refine_indexed_topic_proportions};
+use super::eval_indexed::{dense_to_indexed, refine_indexed_topic_proportions, PerGeneContext};
 use crate::embed_common::*;
 use crate::logging::new_progress_bar;
 
@@ -26,10 +26,20 @@ pub(crate) struct IndexedTrainConfig<'a> {
     pub anchor_prior_per_level: Option<&'a [Tensor]>,
     /// Cross-entropy penalty strength λ applied per minibatch.
     pub anchor_penalty: f32,
-    /// Per-gene weights used only to *score* candidates during top-K
-    /// shortlist selection (encoder + decoder). Stored values are the raw
-    /// pseudobulk row entries — these weights do not enter the likelihood.
+    /// Per-gene weights used to *score* candidates during top-K shortlist
+    /// selection (encoder + decoder). Stored values remain raw counts.
     pub shortlist_weights: &'a [f32],
+    /// Per-gene Anscombe baseline (length = D_full). When supplied, the
+    /// loader gathers it at each cell's encoder top-K positions; the
+    /// encoder subtracts it from Anscombe-stabilized values before pooling
+    /// — per-gene equivalent of dense `anscombe_residual`'s per-feature
+    /// batch centering.
+    pub feature_mean: &'a [f32],
+    /// Per-gene NB-Fisher info weight (length = D_full). When supplied,
+    /// the loader gathers it at each cell's decoder top-K positions; the
+    /// decoder multiplies it into the `(value+1).log()` likelihood term
+    /// so housekeeping observations contribute less to β's gradient.
+    pub feature_fisher_weights: &'a [f32],
     /// Global L2 gradient norm clip per minibatch (0 = off).
     pub grad_clip: f32,
 }
@@ -98,6 +108,8 @@ fn build_indexed_loaders(
                 output_context_size: config.dec_context_size,
                 input_shortlist_weights: config.shortlist_weights,
                 output_shortlist_weights: config.shortlist_weights,
+                input_mean: Some(config.feature_mean),
+                output_fisher_weights: Some(config.feature_fisher_weights),
             })
         })
         .collect()
@@ -165,6 +177,8 @@ where
                 output_context_size: config.dec_context_size,
                 input_shortlist_weights: config.shortlist_weights,
                 output_shortlist_weights: config.shortlist_weights,
+                input_mean: Some(config.feature_mean),
+                output_fisher_weights: Some(config.feature_fisher_weights),
             })?)
         } else {
             None
@@ -191,17 +205,20 @@ where
                 let mb = loader.minibatch_cached(b);
 
                 let (log_z_nk, kl) = encoder.forward_indexed_t(
-                    &mb.input_union_indices,
-                    &mb.input_indexed_x,
-                    mb.input_indexed_x_null.as_ref(),
+                    &mb.input_indices,
+                    &mb.input_values,
+                    mb.input_values_null.as_ref(),
+                    mb.input_values_mean.as_ref(),
                     true,
                 )?;
                 let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
 
-                let (_, llik) = decoder.forward_indexed(
+                let llik = decoder.forward_indexed(
                     &log_z_nk,
                     &mb.output_union_indices,
-                    &mb.output_indexed_x,
+                    &mb.output_scatter_pos,
+                    &mb.output_values,
+                    mb.output_values_weight.as_ref(),
                     &mb.output_log_q_s,
                 )?;
                 let loss = (&kl - &llik)?.mean_all()?;
@@ -211,7 +228,7 @@ where
 
                 llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
                 kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
-                count_tot += mb.output_indexed_x.sum_all()?.to_scalar::<f32>()?;
+                count_tot += mb.output_values.sum_all()?.to_scalar::<f32>()?;
 
                 if config.stop.load(Ordering::Relaxed) {
                     break;
@@ -227,16 +244,19 @@ where
             for b in 0..bulk_loader.num_minibatch() {
                 let mb = bulk_loader.minibatch_cached(b);
                 let (log_z_nk, kl) = encoder.forward_indexed_t(
-                    &mb.input_union_indices,
-                    &mb.input_indexed_x,
+                    &mb.input_indices,
+                    &mb.input_values,
                     None,
+                    mb.input_values_mean.as_ref(),
                     true,
                 )?;
                 let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
-                let (_, llik) = finest_decoder.forward_indexed(
+                let llik = finest_decoder.forward_indexed(
                     &log_z_nk,
                     &mb.output_union_indices,
-                    &mb.output_indexed_x,
+                    &mb.output_scatter_pos,
+                    &mb.output_values,
+                    mb.output_values_weight.as_ref(),
                     &mb.output_log_q_s,
                 )?;
                 let loss = (&kl - &llik)?.mean_all()?;
@@ -245,7 +265,7 @@ where
 
                 llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
                 kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
-                count_tot += mb.output_indexed_x.sum_all()?.to_scalar::<f32>()?;
+                count_tot += mb.output_values.sum_all()?.to_scalar::<f32>()?;
 
                 if config.stop.load(Ordering::Relaxed) {
                     break;
@@ -292,6 +312,8 @@ pub(crate) struct BulkEvalConfig<'a, Dec> {
     pub gene_names: &'a [Box<str>],
     pub out_prefix: &'a str,
     pub shortlist_weights: &'a [f32],
+    pub feature_mean: &'a [f32],
+    pub feature_fisher_weights: &'a [f32],
 }
 
 /// Evaluate bulk samples using the given encoder/decoder and write results.
@@ -313,33 +335,47 @@ where
     let delta_row = delta_mean.transpose();
     let bulk_corrected = apply_column_delta(&bulk_nd, &delta_row, 1e-8);
 
+    let ctx = PerGeneContext {
+        feature_mean: Some(config.feature_mean),
+        feature_fisher_weights: Some(config.feature_fisher_weights),
+    };
     let bulk_tensor = bulk_nd
         .to_tensor(config.dev)?
         .to_dtype(candle_core::DType::F32)?;
-    let (enc_union, enc_indexed_x) = dense_to_indexed(
+    let enc_pack = dense_to_indexed(
         &bulk_tensor,
         config.enc_context_size,
         config.shortlist_weights,
+        ctx,
         config.dev,
     )?;
-    let (log_z_nk, _) = encoder.forward_indexed_t(&enc_union, &enc_indexed_x, None, false)?;
+    let (log_z_nk, _) = encoder.forward_indexed_t(
+        &enc_pack.indices,
+        &enc_pack.values,
+        None,
+        enc_pack.values_mean.as_ref(),
+        false,
+    )?;
 
     let log_z_nk = if let Some(cfg) = config.refine_config {
         let corrected_tensor = bulk_corrected
             .to_tensor(config.dev)?
             .to_dtype(candle_core::DType::F32)?;
-        let (dec_union, dec_indexed_x) = dense_to_indexed(
+        let dec_pack = dense_to_indexed(
             &corrected_tensor,
             config.dec_context_size,
             config.shortlist_weights,
+            ctx,
             config.dev,
         )?;
-        let s = dec_union.dim(0)?;
+        let s = dec_pack.union_indices.dim(0)?;
         let log_q_s = Tensor::zeros((1, s), candle_core::DType::F32, config.dev)?;
         refine_indexed_topic_proportions(
             &log_z_nk,
-            &dec_union,
-            &dec_indexed_x,
+            &dec_pack.union_indices,
+            &dec_pack.scatter_pos,
+            &dec_pack.values,
+            dec_pack.values_weight.as_ref(),
             &log_q_s,
             config.decoder,
             cfg,

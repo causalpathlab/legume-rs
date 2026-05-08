@@ -89,8 +89,63 @@ pub fn anscombe_residual(y_nf: &Tensor, x0_nf: Option<&Tensor>) -> Result<Tensor
     r_tanh.broadcast_mul(&scale_1f)
 }
 
-fn anscombe(t: &Tensor) -> Result<Tensor> {
+/// Anscombe variance-stabilizing transform: `2√(t + 3/8)`. Standardizes
+/// Poisson-like counts to ~unit variance; works elementwise.
+pub fn anscombe(t: &Tensor) -> Result<Tensor> {
     let shifted = (t + 0.375)?;
     let root = shifted.sqrt()?;
     root * 2.0
+}
+
+/// Batch- and gene-mean-corrected, Anscombe-stabilized values for the
+/// packed indexed encoder.
+///
+/// Both `values_null` (per-cell μ_residual = batch effect) and
+/// `values_mean` (per-gene μ_d = typical expression rate) are
+/// **multiplicative** count-rate corrections under the generative model
+/// `E[y] = batch_effect · gene_mean · biological_deviation`. We compose
+/// them in the same divisive step so the value transform recovers the
+/// pure biological-deviation rate before Anscombe stabilization. With
+/// only batch correction this reduces to the original behaviour;
+/// adding the per-gene mean places housekeeping observations near `1.0`
+/// (so cells expressing housekeeping at typical levels contribute a
+/// constant Anscombe(1) ≈ 2.35 to the encoder pool, which `bn_z`
+/// absorbs as a constant offset).
+///
+/// Formula:
+/// ```text
+/// clean_ik = values_ik / max(values_null_ik, ε)
+///                      / max(values_mean_ik, ε)    (each null floored)
+/// out_ik   = 2√(clean_ik + 3/8)                    Anscombe
+/// ```
+pub fn anscombe_lite(
+    values: &Tensor,
+    values_null: Option<&Tensor>,
+    values_mean: Option<&Tensor>,
+) -> Result<Tensor> {
+    debug_assert_eq!(values.dims().len(), 2);
+    if let Some(x0) = values_null {
+        debug_assert_eq!(x0.dims(), values.dims());
+    }
+    if let Some(m) = values_mean {
+        debug_assert_eq!(m.dims(), values.dims());
+    }
+
+    // Fuse both nulls into a single divisor when present, so the value
+    // tensor only goes through one broadcast_div regardless of how many
+    // multiplicative corrections are active. The clamp lives on the
+    // joint divisor so its floor (`EPS_DIV ≈ 0.1`) is what really
+    // controls amplification — caps at `1/EPS_DIV ≈ 10×` no matter
+    // which factor is small.
+    let divisor = match (values_null, values_mean) {
+        (Some(n), Some(m)) => Some(n.mul(m)?),
+        (Some(n), None) => Some(n.clone()),
+        (None, Some(m)) => Some(m.clone()),
+        (None, None) => None,
+    };
+    let clean = match divisor {
+        Some(d) => values.broadcast_div(&d.clamp(EPS_DIV, f64::INFINITY)?)?,
+        None => values.clone(),
+    };
+    anscombe(&clean)
 }

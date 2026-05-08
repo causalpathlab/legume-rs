@@ -417,6 +417,23 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let shortlist_weights: Vec<f32> =
         crate::empirical_dict::compute_nb_fisher_weights(&data_vec, args.block_size)?;
 
+    // Per-gene mean expression rate `μ_d` from the finest-level pseudobulk
+    // posterior. The encoder composes it with the per-cell batch null as a
+    // multiplicative count-rate divisor before Anscombe — joint correction
+    // for batch effect × gene-typical-rate, leaving the cell's biological
+    // deviation. Stored as the raw mean; Anscombe is applied inside the
+    // encoder via `anscombe_lite`.
+    let feature_mean: Vec<f32> = {
+        let mu = finest_collapsed.mu_observed.posterior_mean();
+        let n_pb = mu.ncols().max(1) as f32;
+        (0..n_features_full)
+            .map(|d| mu.row(d).iter().sum::<f32>() / n_pb)
+            .collect()
+    };
+    // Decoder Fisher loss weights are the same NB-Fisher per-gene quantity
+    // already computed for shortlist selection.
+    let feature_fisher_weights = shortlist_weights.clone();
+
     let train_config = IndexedTrainConfig {
         parameters: &parameters,
         dev: &dev,
@@ -430,6 +447,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         anchor_prior_per_level: Some(&anchor_tensors),
         anchor_penalty: args.anchor_penalty,
         shortlist_weights: &shortlist_weights,
+        feature_mean: &feature_mean,
+        feature_fisher_weights: &feature_fisher_weights,
         grad_clip: args.grad_clip,
     };
 
@@ -455,7 +474,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // Persist trainable weights, model architecture, and shortlist weights
     // so `senna predict` (and `--warm-start` re-runs) can rebuild this model.
     use crate::topic::model_metadata::{
-        save_parameters, save_shortlist_weights, TopicModelMetadata,
+        save_feature_mean, save_parameters, save_shortlist_weights, TopicModelMetadata,
     };
     save_parameters(&parameters, &args.out)?;
     let mut metadata = TopicModelMetadata {
@@ -477,6 +496,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     };
     metadata.save(&args.out)?;
     save_shortlist_weights(&shortlist_weights, &gene_names, &args.out)?;
+    save_feature_mean(&feature_mean, &gene_names, &args.out)?;
 
     // Move VarMap to CPU, then rebuild encoder + finest-level decoder from the
     // CPU Vars. The original structs still hold CUDA/Metal tensors internally
@@ -525,6 +545,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         decoder: &cpu_finest_decoder,
         refine_config: refine_config.as_ref(),
         shortlist_weights: &shortlist_weights,
+        feature_mean: &feature_mean,
+        feature_fisher_weights: &feature_fisher_weights,
     };
     let z_nk = evaluate_latent_by_indexed_encoder(
         &data_vec,
@@ -546,6 +568,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             gene_names: &gene_names,
             out_prefix: &args.out,
             shortlist_weights: &shortlist_weights,
+            feature_mean: &feature_mean,
+            feature_fisher_weights: &feature_fisher_weights,
         };
         evaluate_bulk_samples(bulk, bulk_deltas, &cpu_encoder, &bulk_config)?;
     }
