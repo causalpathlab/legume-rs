@@ -227,6 +227,30 @@ fn build_remap(
     }
 }
 
+/// Aggregate a `[D_full]` per-gene mean to `[D_coarse]` via the same
+/// rule the dense encoder's input went through at training time:
+/// fine-gene means inside each coarse group are averaged. When no
+/// coarsening was used, returns the full-D vector unchanged.
+pub(crate) fn aggregate_feature_mean_to_coarse(
+    full: &[f32],
+    coarsening: Option<&FeatureCoarsening>,
+) -> Vec<f32> {
+    match coarsening {
+        Some(fc) => fc
+            .coarse_to_fine
+            .iter()
+            .map(|fines| {
+                if fines.is_empty() {
+                    0.0
+                } else {
+                    fines.iter().map(|&f| full[f]).sum::<f32>() / fines.len() as f32
+                }
+            })
+            .collect(),
+        None => full.to_vec(),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Dense prediction
 // ─────────────────────────────────────────────────────────────────────────────
@@ -238,6 +262,16 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
     } else {
         None
     };
+
+    // Reload `μ_d` at D_full and aggregate via the (optional) coarsening
+    // matrix to the encoder's D_coarse. Saved by `senna topic` at
+    // training time; absent for older models, where the encoder falls
+    // back to live per-feature batch centering inside `anscombe_residual`.
+    let feature_mean_enc: Option<Vec<f32>> =
+        match crate::topic::model_metadata::load_feature_mean(&args.model) {
+            Ok((_, full)) => Some(aggregate_feature_mean_to_coarse(&full, coarsening.as_ref())),
+            Err(_) => None,
+        };
 
     let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: args.data_files.clone(),
@@ -272,6 +306,7 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
             n_features: metadata.n_features_encoder,
             n_topics: metadata.n_topics,
             layers: &metadata.encoder_hidden,
+            feature_mean: feature_mean_enc.as_deref(),
         },
         &parameters,
         vb.clone(),

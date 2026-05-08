@@ -3,7 +3,7 @@ use crate::candle_batch_norm;
 use crate::candle_loss_functions::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::candle_model_traits::*;
 use crate::candle_value_transform::anscombe_residual;
-use candle_core::{Result, Tensor};
+use candle_core::{Device, Result, Tensor};
 use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 
 pub struct LogSoftmaxEncoder {
@@ -12,6 +12,11 @@ pub struct LogSoftmaxEncoder {
     bn_z: candle_batch_norm::BatchNorm,
     z_mean: Linear,
     z_lnvar: Linear,
+    /// Per-feature mean rate `μ_d` as a `[1, D]` non-trainable tensor.
+    /// Composed with the per-cell batch null inside `anscombe_residual`
+    /// as a joint multiplicative count-rate divisor — same correction
+    /// the indexed encoder applies via gather.
+    feature_mean: Option<Tensor>,
 }
 
 impl EncoderModuleT for LogSoftmaxEncoder {
@@ -41,7 +46,7 @@ impl LogSoftmaxEncoder {
         x0_nd: Option<&Tensor>,
         _train: bool,
     ) -> Result<Tensor> {
-        anscombe_residual(x_nd, x0_nd)
+        anscombe_residual(x_nd, x0_nd, self.feature_mean.as_ref())
     }
 
     ///
@@ -99,18 +104,43 @@ impl LogSoftmaxEncoder {
         let z_mean = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.mean"))?;
         let z_lnvar = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.lnvar"))?;
 
+        let feature_mean = match args.feature_mean {
+            Some(slice) => {
+                debug_assert_eq!(
+                    slice.len(),
+                    args.n_features,
+                    "feature_mean length must equal n_features"
+                );
+                Some(host_to_row_tensor(slice, vb.device())?)
+            }
+            None => None,
+        };
+
         Ok(Self {
             n_topics: args.n_topics,
             fc,
             bn_z,
             z_mean,
             z_lnvar,
+            feature_mean,
         })
     }
+}
+
+/// Move a host `[D]` slice to a `[1, D]` device tensor for row-broadcast.
+fn host_to_row_tensor(slice: &[f32], dev: &Device) -> Result<Tensor> {
+    let d = slice.len();
+    Tensor::from_slice(slice, (1, d), dev)
 }
 
 pub struct LogSoftmaxEncoderArgs<'a> {
     pub n_features: usize,
     pub n_topics: usize,
     pub layers: &'a [usize],
+    /// Optional per-feature mean rate `μ_d` (length = n_features).
+    /// Composed with the per-cell batch null inside `anscombe_residual`
+    /// as a multiplicative count-rate divisor before Anscombe — gives
+    /// the dense path the same gene-mean correction the indexed
+    /// encoder gets via `values_mean`.
+    pub feature_mean: Option<&'a [f32]>,
 }
