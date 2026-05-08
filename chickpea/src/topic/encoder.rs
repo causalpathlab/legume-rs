@@ -85,6 +85,7 @@ impl ChickpeaEncoder {
             &sel.gene_idx,
             &gene_values,
             gene_null.as_ref(),
+            None,
             train,
         )?;
 
@@ -98,6 +99,7 @@ impl ChickpeaEncoder {
             &sel.peak_idx,
             &atac_values,
             atac_null.as_ref(),
+            None,
             train,
         )?;
 

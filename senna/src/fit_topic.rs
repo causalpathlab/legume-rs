@@ -1016,7 +1016,10 @@ where
         )?;
         // Re-attach the finest level's NB-Fisher weights so predictive llik
         // uses the same loss as training.
-        d.attach_feature_weights(&ctx.feature_stats.fisher_per_level[finest_dec_idx], &cpu_dev)?;
+        d.attach_feature_weights(
+            &ctx.feature_stats.fisher_per_level[finest_dec_idx],
+            &cpu_dev,
+        )?;
         Some(d)
     } else {
         None
