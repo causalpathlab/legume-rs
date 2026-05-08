@@ -136,8 +136,7 @@ fn concat_modality_coarsenings(
         fine_to_coarse.push(c + g_coarse);
     }
 
-    let mut coarse_to_fine =
-        Vec::with_capacity(g_coarse + peak_fc.num_coarse);
+    let mut coarse_to_fine = Vec::with_capacity(g_coarse + peak_fc.num_coarse);
     for fines in &gene_fc.coarse_to_fine {
         coarse_to_fine.push(fines.clone());
     }
