@@ -34,7 +34,6 @@ use candle_util::candle_decoder_nb_mixture::{
     NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME,
 };
 use candle_util::candle_decoder_topic::{MultinomTopicDecoder, NbTopicDecoder};
-use candle_util::candle_decoder_vmf_topic::VmfTopicDecoder;
 use candle_util::candle_encoder_indexed::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
 use candle_util::candle_encoder_softmax::{LogSoftmaxEncoder, LogSoftmaxEncoderArgs};
 use candle_util::candle_indexed_model_traits::IndexedEncoderT;
@@ -364,7 +363,6 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
         name if name == NBMIXTURE_NAME => {
             predict_dense_with_decoder::<NbMixtureTopicDecoder>(inputs)?
         }
-        "vmf" => predict_dense_with_decoder::<VmfTopicDecoder>(inputs)?,
         other => anyhow::bail!("unsupported decoder type in metadata: {other}"),
     };
 
@@ -425,6 +423,17 @@ where
     let safetensors_path = format!("{model_prefix}.safetensors");
     info!("Loading weights from {safetensors_path}");
     parameters.load(&safetensors_path)?;
+
+    // Attach finest-level NB-Fisher weights to the finest decoder so
+    // predictive llik uses the same loss as training. Older models
+    // without saved coarse weights fall back to the unweighted form.
+    let coarse_path = format!("{model_prefix}.fisher_weights_coarse.parquet");
+    if std::path::Path::new(&coarse_path).exists() {
+        let (_, coarse_w) = data_beans_alg::gene_weighting::load_per_gene_weights(&coarse_path)?;
+        if let Some(finest) = decoders.last_mut() {
+            finest.attach_feature_weights(&coarse_w, cpu_dev)?;
+        }
+    }
     let decoder = decoders.last().expect("at least one decoder level");
 
     // Iterative TMLE δ refinement: replaces the single-pass plug-in with a
