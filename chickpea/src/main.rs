@@ -1,5 +1,7 @@
+mod cluster;
 mod common;
 mod embed;
+mod manifest;
 mod topic;
 
 use crate::common::*;
@@ -75,19 +77,13 @@ enum Commands {
     )]
     FitTopic(topic::fit::FitTopicArgs),
 
-    /// SIMBA-inspired joint multiome graph embedding (count-NCE)
-    #[command(
-        long_about = "Joint embedding of genes, peaks, cells in a single H-dim space.\n\n\
-            Discriminative count-NCE objective on sketch-coarsened pseudobulk\n\
-            pseudographs. Two relations: (gene, cell) from RNA, (peak, cell)\n\
-            from ATAC. Cell barcode is the primary key — paired and unpaired\n\
-            multiome are handled identically.\n\n\
-            Outputs: {out}.e_gene.tsv.gz, {out}.e_peak.tsv.gz, {out}.e_cell.tsv.gz,\n\
-            {out}.b_gene.tsv, {out}.b_peak.tsv, {out}.b_cell.tsv",
-        after_long_help = ENV_HELP,
-        alias = "embed"
-    )]
+    /// SIMBA-inspired joint multi-modal graph embedding (count-NCE)
+    #[command(after_long_help = ENV_HELP, alias = "embed")]
     EmbedGraph(embed::fit::EmbedGraphArgs),
+
+    /// kNN + Leiden clustering on a cell embedding (e.g. embed-graph's e_cell)
+    #[command(after_long_help = ENV_HELP)]
+    Cluster(cluster::ClusterArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -108,5 +104,6 @@ fn main() -> anyhow::Result<()> {
     match &cli.commands {
         Commands::FitTopic(args) => topic::fit::fit_topic_model(args),
         Commands::EmbedGraph(args) => embed::fit::embed_graph(args),
+        Commands::Cluster(args) => cluster::cluster(args),
     }
 }

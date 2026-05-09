@@ -195,6 +195,17 @@ pub struct FitTopicArgs {
     )]
     out: Box<str>,
 
+    #[arg(
+        long,
+        help = "Warm-start encoder feature embeddings from chickpea embed-graph",
+        long_help = "Prefix of a prior `chickpea embed-graph` run. Loads \
+                     {prefix}.e_feat.parquet and seeds the indexed encoder's \
+                     gene_expert + atac_expert feature embedding tables. \
+                     The parquet's H must equal --embedding-dim. Names not \
+                     found keep their default Kaiming init."
+    )]
+    init_from: Option<Box<str>>,
+
     /* HVG gating of the random projection (RNA modality only). ATAC peaks
      * always get weight 1.0, since per-peak variability is dominated by
      * sparsity rather than housekeeping signal. */
@@ -338,6 +349,8 @@ pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
         atac_coarsenings: &atac_coarsenings,
         cis_mask: &cis_mask,
         flat_cis_indices: &flat_cis_indices,
+        gene_names: &gene_names,
+        peak_names: &peak_names,
         n_genes,
         n_peaks,
         c_max,
@@ -358,6 +371,7 @@ pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
         sort_dim: args.sort_dim,
         embedding_dim: args.embedding_dim,
         context_size: args.context_size,
+        init_from: args.init_from.clone(),
     };
 
     let model = crate::topic::training::train(&ctx, &params)?;
