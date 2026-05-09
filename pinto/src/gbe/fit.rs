@@ -1,14 +1,10 @@
 //! `pinto gbe` — graph-based embedding for spatial transcriptomics.
 //!
-//! Loads SRT data with coordinates, builds a spatial KNN as a side
-//! output (persisted to `{out}.spatial_knn.parquet` for downstream
-//! consumers), then runs `graph-embedding-util` on the bipartite
-//! (cell, feature) edge stream.
-//!
-//! The spatial KNN is *not yet* fed into the embedding loss — that's
-//! a planned extension. Persisting it now lets downstream tools (and
-//! the eventual cell-cell-loss pipeline) consume it without re-running
-//! KNN construction.
+//! Loads SRT data with coordinates, builds a spatial KNN, persists it
+//! to `{out}.spatial_knn.parquet` for downstream consumers, and (when
+//! `--cell-cell-lambda > 0`, the default) feeds the same edge list
+//! into `graph-embedding-util`'s cell-cell NCE loss term so spatial
+//! coherence shows up directly in the cell embedding.
 
 use crate::gbe::args::SrtGbeArgs;
 use crate::util::cell_pairs::{build_spatial_graph, SrtCellPairs, SrtCellPairsArgs};
@@ -27,16 +23,25 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
     info!("Loading data files...");
     let has_coords = c.has_coordinates();
 
+    let mut read_args = c.to_read_args();
+    read_args.feature_kind = if args.feature_name_exact {
+        ge::FeatureNameKind::Exact
+    } else {
+        ge::FeatureNameKind::Gene {
+            delim: args.feature_name_delim,
+        }
+    };
+
     let SRTData {
         data: data_vec,
         coordinates,
         coordinate_names,
         batches: batch_membership,
     } = if has_coords {
-        read_data_with_coordinates(c.to_read_args())?
+        read_data_with_coordinates(read_args)?
     } else {
         info!("No coordinate files provided — using expression mode");
-        read_data_without_coordinates(c.to_read_args())?
+        read_data_without_coordinates(read_args)?
     };
 
     let n_cells = data_vec.num_columns();
@@ -47,6 +52,19 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
         c.knn_spatial,
         n_cells
     );
+    anyhow::ensure!(
+        args.cell_cell_lambda >= 0.0,
+        "--cell-cell-lambda must be >= 0 (got {})",
+        args.cell_cell_lambda
+    );
+    if args.cell_cell_lambda > 0.0 && !has_coords {
+        anyhow::bail!(
+            "--cell-cell-lambda > 0 requires --coord (cell-cell positives come from \
+             the spatial KNN). Pass --cell-cell-lambda 0 to disable the term."
+        );
+    }
+
+    let mut cell_cell_edges: Option<Vec<(u32, u32)>> = None;
 
     if has_coords {
         info!(
@@ -61,6 +79,15 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
                 reciprocal: c.reciprocal,
             },
         )?;
+        if args.cell_cell_lambda > 0.0 {
+            cell_cell_edges = Some(
+                graph
+                    .edges
+                    .iter()
+                    .map(|&(i, j)| (i as u32, j as u32))
+                    .collect(),
+            );
+        }
         let cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, graph);
         cell_pairs.to_parquet(
             &format!("{}.spatial_knn.parquet", c.out),
@@ -89,6 +116,12 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
         })
         .transpose()?;
 
+    let cell_cell = cell_cell_edges.map(|edges| ge::CellCellConfig {
+        edges,
+        lambda: args.cell_cell_lambda,
+        n_negatives: args.cell_cell_negatives,
+    });
+
     let config = ge::FitConfig {
         embedding_dim: args.embedding_dim,
         num_coarsen_seeds: args.num_coarsen_seeds,
@@ -102,6 +135,7 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
         seed: c.seed,
         device: dev,
         feature_network,
+        cell_cell,
         stop: None,
     };
 

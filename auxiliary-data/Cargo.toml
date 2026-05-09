@@ -3,8 +3,9 @@ name = "auxiliary-data"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-version.workspace = true
 description = "Auxiliary data types: cell annotations, batch metadata, and pseudobulk routines"
+
+version = "0.1.1"
 
 [dependencies]
 data-beans = { workspace = true }

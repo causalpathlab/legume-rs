@@ -210,3 +210,214 @@ fn log_sigmoid(x: &Tensor) -> Result<Tensor> {
     let softplus = stacked.log_sum_exp(0)?;
     x - softplus
 }
+
+// =================================================================
+// Cell-cell NCE — symmetric bilinear loss on cell pairs from a
+// caller-provided graph (e.g. spatial KNN). Negatives drawn within
+// the positive pair's batch.
+// =================================================================
+
+pub struct CellEdgeBatch {
+    pub left_cells: Vec<u32>,  // [B] fine cell ids
+    pub right_cells: Vec<u32>, // [B]
+    /// `[B*K]` row-major: negatives for positive `b` are at `[b*K..(b+1)*K]`.
+    pub neg_cells: Vec<u32>,
+    pub n_negatives: usize,
+}
+
+pub struct PerBatchCellSampler {
+    pub pos: WeightedIndex<f32>,
+    pub neg: WeightedIndex<f32>,
+    /// Indices into the global cell-cell `edges` slice for this batch's
+    /// retained (within-batch) positives.
+    pub edge_indices: Vec<u32>,
+    /// Global cell ids that constitute this batch's negative pool
+    /// (every cell in this batch).
+    pub cell_pool: Vec<u32>,
+}
+
+pub struct CellEdgeBatchArgs<'a> {
+    pub edges: &'a [(u32, u32)],
+    pub batch_sampler: &'a PerBatchCellSampler,
+    pub batch_size: usize,
+    pub n_negatives: usize,
+}
+
+pub fn sample_cell_edge_batch(args: CellEdgeBatchArgs, rng: &mut impl Rng) -> CellEdgeBatch {
+    let mut left_cells = Vec::with_capacity(args.batch_size);
+    let mut right_cells = Vec::with_capacity(args.batch_size);
+
+    let s = args.batch_sampler;
+    for _ in 0..args.batch_size {
+        let local = s.pos.sample(rng);
+        let global = s.edge_indices[local] as usize;
+        let (i, j) = args.edges[global];
+        left_cells.push(i);
+        right_cells.push(j);
+    }
+
+    let mut neg_cells = Vec::with_capacity(args.batch_size * args.n_negatives);
+    for _ in 0..(args.batch_size * args.n_negatives) {
+        let local = s.neg.sample(rng);
+        neg_cells.push(s.cell_pool[local]);
+    }
+
+    CellEdgeBatch {
+        left_cells,
+        right_cells,
+        neg_cells,
+        n_negatives: args.n_negatives,
+    }
+}
+
+/// Build a per-batch cell-pair sampler. Cross-batch edges (endpoints in
+/// different batches) are dropped — negatives drawn within-batch make
+/// no sense for them. Returns one entry per batch; `None` for batches
+/// that retained no within-batch edges.
+///
+/// `cell_degrees` is the per-cell within-batch positive degree (counts
+/// retained edges where the cell appears as either endpoint), used to
+/// build the count^α negative distribution analogous to the bipartite
+/// sampler's count^α over feature marginals.
+pub fn build_per_batch_cell_samplers(
+    edges: &[(u32, u32)],
+    batch_membership: &[u32],
+    n_batches: usize,
+    n_cells: usize,
+    alpha_neg: f32,
+) -> (Vec<Option<PerBatchCellSampler>>, usize) {
+    // First pass: bucket retained edges by batch + accumulate per-cell degree
+    // (within retained edges) for the negative weight.
+    let mut per_batch_edge_indices: Vec<Vec<u32>> = vec![Vec::new(); n_batches];
+    let mut degree: Vec<f32> = vec![0.0; n_cells];
+    let mut cross_batch = 0usize;
+
+    for (i, &(u, v)) in edges.iter().enumerate() {
+        let bu = batch_membership[u as usize];
+        let bv = batch_membership[v as usize];
+        if bu != bv {
+            cross_batch += 1;
+            continue;
+        }
+        per_batch_edge_indices[bu as usize].push(i as u32);
+        degree[u as usize] += 1.0;
+        degree[v as usize] += 1.0;
+    }
+
+    let samplers = per_batch_edge_indices
+        .into_par_iter()
+        .enumerate()
+        .map(|(b, edge_indices)| {
+            if edge_indices.is_empty() {
+                return None;
+            }
+
+            // Uniform positive sampling — every retained edge equally likely.
+            // (Edge weights could be learned per-edge later; today they're 1.0.)
+            let pos_w: Vec<f32> = vec![1.0; edge_indices.len()];
+            let pos = WeightedIndex::new(pos_w).expect("non-empty edge list");
+
+            // Negative pool = every cell in this batch, weighted by retained
+            // within-batch degree^α (cells with no edges still get a small
+            // weight via the .max(1e-8) floor so rare cells aren't excluded).
+            let cell_pool: Vec<u32> = batch_membership
+                .iter()
+                .enumerate()
+                .filter_map(|(c, &bb)| (bb as usize == b).then_some(c as u32))
+                .collect();
+            let neg_w: Vec<f32> = cell_pool
+                .iter()
+                .map(|&c| degree[c as usize].max(1e-8).powf(alpha_neg))
+                .collect();
+            let neg = WeightedIndex::new(neg_w).expect("non-empty cell pool");
+
+            Some(PerBatchCellSampler {
+                pos,
+                neg,
+                edge_indices,
+                cell_pool,
+            })
+        })
+        .collect();
+
+    (samplers, cross_batch)
+}
+
+/// Symmetric bilinear NCE on cell pairs. Reuses `score_diag` /
+/// `score_negatives` — those functions are algebraically type-agnostic;
+/// here both arguments come from the cell embedding table. Scoring is
+/// on **fine-resolution** embeddings (no `pool_cells`).
+pub fn cell_cell_nce_loss(
+    model: &JointEmbedModel,
+    batch: CellEdgeBatch,
+    dev: &Device,
+) -> Result<Tensor> {
+    let b = batch.left_cells.len();
+    if b == 0 {
+        return Tensor::zeros((), candle_util::candle_core::DType::F32, dev);
+    }
+    let k = batch.n_negatives;
+
+    let left_idx = Tensor::from_vec(batch.left_cells, b, dev)?;
+    let right_idx = Tensor::from_vec(batch.right_cells, b, dev)?;
+    let neg_idx = Tensor::from_vec(batch.neg_cells, b * k, dev)?;
+
+    let e_left = model.e_cell.index_select(&left_idx, 0)?;
+    let b_left = model.b_cell.index_select(&left_idx, 0)?;
+    let e_right = model.e_cell.index_select(&right_idx, 0)?;
+    let b_right = model.b_cell.index_select(&right_idx, 0)?;
+
+    let e_neg_flat = model.e_cell.index_select(&neg_idx, 0)?;
+    let b_neg_flat = model.b_cell.index_select(&neg_idx, 0)?;
+    let h = e_neg_flat.dim(1)?;
+    // For each positive `b`, the K negatives replace the *right* endpoint —
+    // we score (left vs neg right) so the model learns to discriminate true
+    // neighbours from random within-batch cells, not vice-versa. Symmetry of
+    // the bilinear form means scoring the other side is redundant.
+    let e_neg = e_neg_flat.reshape((b, k, h))?;
+    let b_neg = b_neg_flat.reshape((b, k))?;
+
+    let pos_score = JointEmbedModel::score_diag(&e_left, &e_right, &b_left, &b_right)?;
+    let neg_score = JointEmbedModel::score_negatives(&e_neg, &e_left, &b_neg, &b_left)?;
+
+    let per_edge = (log_sigmoid(&pos_score)? + log_sigmoid(&neg_score.neg()?)?.sum(1)?)?.neg()?;
+    per_edge.mean(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cell_cell_sampler_skips_cross_batch_edges() {
+        // 4 cells, 2 batches. Edges: (0,1) within batch 0, (2,3) within
+        // batch 1, (1,2) cross-batch.
+        let edges = vec![(0u32, 1), (2, 3), (1, 2)];
+        let batch_membership = vec![0u32, 0, 1, 1];
+        let (samplers, cross_batch) =
+            build_per_batch_cell_samplers(&edges, &batch_membership, 2, 4, 0.75);
+
+        assert_eq!(cross_batch, 1, "expected one cross-batch edge dropped");
+        let s0 = samplers[0]
+            .as_ref()
+            .expect("batch 0 has within-batch edges");
+        let s1 = samplers[1]
+            .as_ref()
+            .expect("batch 1 has within-batch edges");
+        assert_eq!(s0.edge_indices, vec![0]);
+        assert_eq!(s1.edge_indices, vec![1]);
+        assert_eq!(s0.cell_pool, vec![0, 1]);
+        assert_eq!(s1.cell_pool, vec![2, 3]);
+    }
+
+    #[test]
+    fn cell_cell_sampler_empty_batch_returns_none() {
+        let edges = vec![(0u32, 1)];
+        let batch_membership = vec![0u32, 0, 1, 1];
+        let (samplers, cross_batch) =
+            build_per_batch_cell_samplers(&edges, &batch_membership, 2, 4, 0.75);
+        assert_eq!(cross_batch, 0);
+        assert!(samplers[0].is_some());
+        assert!(samplers[1].is_none(), "batch 1 has no edges → None");
+    }
+}

@@ -4,7 +4,10 @@
 use crate::coarsen::AxisCoarsenings;
 use crate::data::UnifiedData;
 use crate::feature_network::FeatureNetworkSmoother;
-use crate::loss::{nce_loss, sample_edge_batch, EdgeBatchArgs, PerBatchSampler};
+use crate::loss::{
+    cell_cell_nce_loss, nce_loss, sample_cell_edge_batch, sample_edge_batch, CellEdgeBatchArgs,
+    EdgeBatchArgs, PerBatchCellSampler, PerBatchSampler,
+};
 use crate::model::JointEmbedModel;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer};
@@ -21,8 +24,21 @@ pub struct TrainingContext<'a> {
     /// Active (non-empty) per-batch samplers — a minibatch picks one
     /// uniformly so every batch contributes equally regardless of size.
     pub batch_samplers: &'a [PerBatchSampler],
+    /// Optional per-batch cell-cell samplers, indexed in lockstep with
+    /// `batch_samplers`. `None` for the whole field disables the
+    /// cell-cell loss term; an inner `None` for a specific batch means
+    /// that batch had no within-batch cell-cell edges and the loss for
+    /// that batch falls back to bipartite-only.
+    pub cell_cell: Option<CellCellTraining<'a>>,
     pub dev: &'a Device,
     pub stop: &'a Arc<AtomicBool>,
+}
+
+pub struct CellCellTraining<'a> {
+    pub samplers: &'a [Option<PerBatchCellSampler>],
+    pub edges: &'a [(u32, u32)],
+    pub lambda: f32,
+    pub n_negatives: usize,
 }
 
 pub struct TrainingParams {
@@ -84,13 +100,33 @@ pub fn train(
                 &mut rng,
             );
 
-            let loss = nce_loss(
+            let bip_loss = nce_loss(
                 model,
                 batch,
                 &cc.coarse_to_fine,
                 smoother.as_deref(),
                 ctx.dev,
             )?;
+
+            let loss = match ctx.cell_cell.as_ref() {
+                Some(cc_ctx) => match cc_ctx.samplers[batch_id].as_ref() {
+                    Some(cc_sampler) => {
+                        let cc_batch = sample_cell_edge_batch(
+                            CellEdgeBatchArgs {
+                                edges: cc_ctx.edges,
+                                batch_sampler: cc_sampler,
+                                batch_size: params.batch_size,
+                                n_negatives: cc_ctx.n_negatives,
+                            },
+                            &mut rng,
+                        );
+                        let cc_loss = cell_cell_nce_loss(model, cc_batch, ctx.dev)?;
+                        (bip_loss + (cc_loss * cc_ctx.lambda as f64)?)?
+                    }
+                    None => bip_loss,
+                },
+                None => bip_loss,
+            };
 
             opt.backward_step(&loss)?;
             loss_sum += loss.to_scalar::<f32>()?;

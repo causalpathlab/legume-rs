@@ -41,6 +41,7 @@ pub fn load_paired_data(
         data_files: rna_files.to_vec(),
         batch_files: rna_batch,
         preload: false,
+        ..Default::default()
     })?;
 
     // Load ATAC
@@ -49,6 +50,7 @@ pub fn load_paired_data(
         data_files: atac_files.to_vec(),
         batch_files: atac_batch,
         preload: false,
+        ..Default::default()
     })?;
 
     // Validate cell names match exactly

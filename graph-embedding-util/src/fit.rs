@@ -5,10 +5,10 @@
 use crate::coarsen::{build_cell_coarsenings, AxisCoarsenings, CellCoarseningArgs};
 use crate::data::UnifiedData;
 use crate::feature_network::FeatureNetworkSmoother;
-use crate::loss::{build_per_batch_samplers, PerBatchSampler};
+use crate::loss::{build_per_batch_cell_samplers, build_per_batch_samplers, PerBatchSampler};
 use crate::model::{BiasInit, JointEmbedModel, ModelArgs};
 use crate::stop::setup_stop_handler;
-use crate::training::{train, TrainingContext, TrainingParams};
+use crate::training::{train, CellCellTraining, TrainingContext, TrainingParams};
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
@@ -33,12 +33,30 @@ pub struct FitConfig {
     pub seed: u64,
     pub device: Device,
     pub feature_network: Option<FeatureNetworkConfig>,
+    /// Optional cell-cell loss term — positive cell pairs from a
+    /// caller-provided graph (e.g. spatial KNN), with negatives drawn
+    /// within each pair's batch. Combined with the bipartite loss
+    /// additively: `L = L_bip + λ · L_cc`. `None` (or `lambda == 0`)
+    /// disables the term.
+    pub cell_cell: Option<CellCellConfig>,
     /// Optional caller-provided stop flag (so a single SIGINT handler
     /// can be shared with surrounding orchestration). When `None`,
     /// [`fit`] installs its own. Callers running `fit` more than once
     /// in the same process MUST pass `Some(...)` with a single shared
     /// flag — `ctrlc::set_handler` panics on the second registration.
     pub stop: Option<Arc<AtomicBool>>,
+}
+
+/// Cell-cell NCE configuration. Positives = neighbor pairs from a
+/// caller-provided graph; negatives = within-batch random non-neighbors.
+pub struct CellCellConfig {
+    /// Positive cell pairs as global cell ids (canonical (i, j) with i < j).
+    pub edges: Vec<(u32, u32)>,
+    /// Loss mixing weight λ. 0.0 → bipartite-only (term skipped);
+    /// 1.0 → equal weight with the bipartite loss; > 1 emphasizes cell-cell.
+    pub lambda: f32,
+    /// Negative cells per positive pair.
+    pub n_negatives: usize,
 }
 
 /// Optional SGC feature-network smoother configuration. The graph is
@@ -230,11 +248,69 @@ pub fn fit(unified: &UnifiedData, config: FitConfig) -> anyhow::Result<FitOutput
 
     let stop = config.stop.unwrap_or_else(setup_stop_handler);
 
+    // Bundle samplers + their backing data so they outlive the training
+    // context borrow (`CellCellTraining` below holds references into this).
+    struct CellCellPrepared {
+        samplers: Vec<Option<crate::loss::PerBatchCellSampler>>,
+        edges: Vec<(u32, u32)>,
+        lambda: f32,
+        n_negatives: usize,
+    }
+
+    let cell_cell_built: Option<CellCellPrepared> = match config.cell_cell {
+        Some(cc) if cc.lambda > 0.0 && !cc.edges.is_empty() => {
+            let (samplers, cross_batch) = build_per_batch_cell_samplers(
+                &cc.edges,
+                &unified.batch_membership,
+                unified.n_batches(),
+                n_cells,
+                alpha_neg,
+            );
+            let n_active = samplers.iter().filter(|s| s.is_some()).count();
+            if cross_batch > 0 {
+                info!(
+                    "Cell-cell loss: dropped {} cross-batch edges; {} batch(es) have within-batch edges",
+                    cross_batch, n_active
+                );
+            }
+            if n_active == 0 {
+                warn!(
+                    "Cell-cell loss requested (λ={}) but no batch retained any \
+                     within-batch edges — falling back to bipartite-only.",
+                    cc.lambda
+                );
+                None
+            } else {
+                info!(
+                    "Cell-cell loss enabled: λ={}, K={}, {} active batch(es), {} edges total",
+                    cc.lambda,
+                    cc.n_negatives,
+                    n_active,
+                    cc.edges.len()
+                );
+                Some(CellCellPrepared {
+                    samplers,
+                    edges: cc.edges,
+                    lambda: cc.lambda,
+                    n_negatives: cc.n_negatives,
+                })
+            }
+        }
+        _ => None,
+    };
+    let cell_cell_training = cell_cell_built.as_ref().map(|p| CellCellTraining {
+        samplers: &p.samplers,
+        edges: &p.edges,
+        lambda: p.lambda,
+        n_negatives: p.n_negatives,
+    });
+
     let train_ctx = TrainingContext {
         unified,
         cell_axis: &cell_axis,
         feat_weights: &feat_weights,
         batch_samplers: &batch_samplers,
+        cell_cell: cell_cell_training,
         dev: &config.device,
         stop: &stop,
     };

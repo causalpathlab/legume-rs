@@ -511,6 +511,7 @@ fn preprocess_layout_data_from_latent(
             data_files: resolved.data_files.clone(),
             batch_files: resolved.batch_files.clone(),
             preload: args.preload_data,
+            ..Default::default()
         })?;
 
     let MatWithNames {
@@ -736,6 +737,7 @@ fn preprocess_layout_data_from_cache(
             data_files: resolved.data_files.clone(),
             batch_files: resolved.batch_files.clone(),
             preload: args.preload_data,
+            ..Default::default()
         })?;
 
     // 2. Load the cached projection (written as cells × proj_dim). The
