@@ -1,5 +1,5 @@
 use crate::random_projection::binary_sort_columns;
-use log::info;
+use log::debug;
 use matrix_util::dmatrix_util::build_columns_par;
 use nalgebra::DMatrix;
 use serde::{Deserialize, Serialize};
@@ -96,8 +96,11 @@ pub fn compute_feature_coarsening(
     let sort_dim = (max_features as f64).log2().ceil() as usize;
     let sort_dim = sort_dim.min(s); // can't use more dimensions than samples
 
-    info!(
-        "Feature coarsening: {} features, {} samples, sort_dim={}",
+    // Generic helper — also used for cell coarsening etc. Keep at debug;
+    // callers (cell coarsening, multilevel, chickpea topic) emit their own
+    // axis-specific log line.
+    debug!(
+        "binary-sort coarsening: {} items, {} sketch dims, sort_dim={}",
         d, s, sort_dim
     );
 
@@ -125,8 +128,8 @@ pub fn compute_feature_coarsening(
         }
     }
 
-    info!(
-        "Feature coarsening: {} → {} meta-features (target {})",
+    debug!(
+        "binary-sort coarsening: {} → {} groups (target {})",
         d, num_coarse, max_features
     );
 

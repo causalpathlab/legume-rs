@@ -6,8 +6,6 @@ use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDat
 use candle_core::{Device, Tensor};
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 /// Run a block-processing closure over `ntot` items in blocks of `block_size`,
 /// dispatching in parallel on CPU or sequentially on GPU.
@@ -405,24 +403,8 @@ pub(crate) fn move_varmap_to_cpu(parameters: &candle_nn::VarMap) -> anyhow::Resu
     Ok(())
 }
 
-/// Set up a graceful stop flag for SIGINT/SIGTERM.
-/// First Ctrl+C sets the flag for graceful exit after the current
-/// minibatch. Second Ctrl+C forces an immediate abort.
-pub(crate) fn setup_stop_handler() -> Arc<AtomicBool> {
-    let stop = Arc::new(AtomicBool::new(false));
-    {
-        let stop = Arc::clone(&stop);
-        ctrlc::set_handler(move || {
-            if stop.load(Ordering::SeqCst) {
-                eprintln!("\nSecond interrupt — aborting immediately");
-                std::process::exit(1);
-            }
-            // Use eprintln, not info! — log macros hold internal locks
-            // and will deadlock if the main thread is mid-log.
-            eprintln!("\nInterrupt received — stopping after current minibatch (Ctrl+C again to force)...");
-            stop.store(true, Ordering::SeqCst);
-        })
-        .expect("failed to set signal handler");
-    }
-    stop
-}
+/// Set up a graceful stop flag for SIGINT/SIGTERM. Re-exported from
+/// `graph-embedding-util` so senna's topic models share the same
+/// handler (and behavior — first Ctrl+C → graceful, second → abort)
+/// as `senna gbe` and `pinto gbe`.
+pub(crate) use graph_embedding_util::setup_stop_handler;
