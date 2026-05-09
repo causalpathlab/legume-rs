@@ -1,6 +1,7 @@
 use crate::util::cell_pairs::connected_components;
 use crate::util::common::*;
 use crate::util::knn_graph::KnnGraph;
+use auxiliary_data::feature_names::FeatureNameKind;
 use clap::Parser;
 use data_beans::convert::try_open_or_convert;
 
@@ -241,6 +242,7 @@ impl SrtInputArgs {
             coord_column_names: self.coord_column_names.clone(),
             batch_files: self.batch_files.clone(),
             header_in_coord: self.coord_header_row,
+            feature_kind: FeatureNameKind::Exact,
         }
     }
 }
@@ -253,6 +255,13 @@ pub struct SRTReadArgs {
     pub coord_column_names: Vec<Box<str>>,
     pub batch_files: Option<Vec<Box<str>>>,
     pub header_in_coord: Option<usize>,
+    /// Optional row-name canonicalizer for fuzzy cross-file gene/locus
+    /// alignment. Default = `Exact` keeps the strict row-name equality
+    /// check in [`read_data_with_coordinates`] (used by `pinto lc` and
+    /// friends). When non-Exact, canonicalization runs through
+    /// [`SparseIoVec::with_row_canonicalizer`] and the strict check is
+    /// skipped — `SparseIoVec`'s intersection logic handles alignment.
+    pub feature_kind: FeatureNameKind,
 }
 
 pub struct SRTData {
@@ -290,6 +299,12 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
 
     let attach_data_name = args.data_files.len() > 1;
     let mut data_vec = SparseIoVec::new();
+    let canonicalize_rows = !args.feature_kind.is_exact();
+    if let Some(canon) = args.feature_kind.clone().into_canonicalizer() {
+        data_vec = data_vec
+            .with_row_canonicalizer(move |name| canon(name))
+            .expect("with_row_canonicalizer on empty SparseIoVec");
+    }
 
     for data_file in args.data_files.iter() {
         info!("Importing data file: {}", data_file);
@@ -304,13 +319,17 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
         data_vec.push(Arc::from(data), data_name)?;
     }
 
-    // check if row names are the same across data
-    let row_names = data_vec[0].row_names()?;
-
-    for j in 1..data_vec.len() {
-        let row_names_j = data_vec[j].row_names()?;
-        if row_names != row_names_j {
-            return Err(anyhow::anyhow!("Row names are not the same"));
+    // Strict row-name equality check is only meaningful for exact-match
+    // mode; when canonicalization is enabled, SparseIoVec's intersection
+    // already aligns rows and a per-backend equality check would fail on
+    // the very inputs the canonicalizer is meant to handle.
+    if !canonicalize_rows {
+        let row_names = data_vec[0].row_names()?;
+        for j in 1..data_vec.len() {
+            let row_names_j = data_vec[j].row_names()?;
+            if row_names != row_names_j {
+                return Err(anyhow::anyhow!("Row names are not the same"));
+            }
         }
     }
 
@@ -441,6 +460,12 @@ pub fn read_data_with_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> 
 pub fn read_data_without_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTData> {
     let attach_data_name = args.data_files.len() > 1;
     let mut data_vec = SparseIoVec::new();
+    let canonicalize_rows = !args.feature_kind.is_exact();
+    if let Some(canon) = args.feature_kind.clone().into_canonicalizer() {
+        data_vec = data_vec
+            .with_row_canonicalizer(move |name| canon(name))
+            .expect("with_row_canonicalizer on empty SparseIoVec");
+    }
 
     for data_file in args.data_files.iter() {
         info!("Importing data file: {}", data_file);
@@ -455,12 +480,15 @@ pub fn read_data_without_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTDat
         data_vec.push(Arc::from(data), data_name)?;
     }
 
-    // check if row names are the same across data
-    let row_names = data_vec[0].row_names()?;
-    for j in 1..data_vec.len() {
-        let row_names_j = data_vec[j].row_names()?;
-        if row_names != row_names_j {
-            return Err(anyhow::anyhow!("Row names are not the same"));
+    // Strict row-name equality only in exact-match mode (see
+    // `read_data_with_coordinates` for the same rationale).
+    if !canonicalize_rows {
+        let row_names = data_vec[0].row_names()?;
+        for j in 1..data_vec.len() {
+            let row_names_j = data_vec[j].row_names()?;
+            if row_names != row_names_j {
+                return Err(anyhow::anyhow!("Row names are not the same"));
+            }
         }
     }
 

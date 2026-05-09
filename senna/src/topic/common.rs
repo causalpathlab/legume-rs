@@ -222,6 +222,7 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         data_files: args.data_files.to_vec(),
         batch_files: args.batch_files.clone(),
         preload: args.preload,
+        ..Default::default()
     })?;
     if args.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch");

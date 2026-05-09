@@ -6,11 +6,28 @@ use data_beans::convert::try_open_or_convert;
 use data_beans::sparse_io_vector::SparseIoVec;
 use matrix_util::common_io::{self, basename, read_lines};
 
+use crate::feature_names::FeatureNameKind;
+
 /// Arguments for loading multiple sparse data files with shared row names.
 pub struct ReadSharedRowsArgs {
     pub data_files: Vec<Box<str>>,
     pub batch_files: Option<Vec<Box<str>>>,
     pub preload: bool,
+    /// Optional row-name canonicalization for fuzzy cross-file
+    /// alignment. Default = [`FeatureNameKind::Exact`] preserves prior
+    /// exact-match behavior.
+    pub feature_kind: FeatureNameKind,
+}
+
+impl Default for ReadSharedRowsArgs {
+    fn default() -> Self {
+        Self {
+            data_files: Vec::new(),
+            batch_files: None,
+            preload: false,
+            feature_kind: FeatureNameKind::Exact,
+        }
+    }
 }
 
 /// Sparse data with per-cell batch labels.
@@ -30,6 +47,18 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
     let attach_data_name = args.data_files.len() > 1;
 
     let mut data_vec = SparseIoVec::new();
+    if let Some(canon) = args.feature_kind.clone().into_canonicalizer() {
+        info!(
+            "Row alignment: applying {:?} canonicalizer across {} file(s)",
+            args.feature_kind,
+            args.data_files.len()
+        );
+        // SAFETY: data_vec is empty here; with_row_canonicalizer only
+        // errors if backends were already pushed.
+        data_vec = data_vec
+            .with_row_canonicalizer(move |name| canon(name))
+            .expect("with_row_canonicalizer on empty SparseIoVec");
+    }
     for data_file in args.data_files.iter() {
         info!("Importing data file: {}", data_file);
 

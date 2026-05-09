@@ -1,10 +1,11 @@
 [package]
 name = "hsblock"
-version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Hierarchical Stochastic Block Model for graph community detection"
+
+version = "0.1.1"
 
 [dependencies]
 leiden = { workspace = true }

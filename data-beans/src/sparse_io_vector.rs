@@ -15,6 +15,14 @@ use std::sync::Arc;
 
 type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 
+/// Optional canonicalizer applied to every backend row name during
+/// `push`. Two raw names that produce the same canonical form are
+/// treated as the same row. The displayed `row_names_by_global` stores
+/// the canonical form, so downstream readers see a single consistent
+/// label for each row across all backends. Default = `None` preserves
+/// exact-match behavior.
+pub type RowNameCanonicalizer = Arc<dyn Fn(&str) -> Box<str> + Send + Sync>;
+
 pub struct SparseIoVec {
     data_vec: Vec<Arc<SparseData>>,
     col_to_data: Vec<usize>,
@@ -25,6 +33,7 @@ pub struct SparseIoVec {
     // different subset/ordering of rows; we keep only the intersection
     // and remap local indices through `data_local_to_global_row` and
     // `global_to_compact_row` at read time.
+    row_canonicalizer: Option<RowNameCanonicalizer>,
     row_name_position: HashMap<Box<str>, usize>,
     row_names_by_global: Vec<Box<str>>,
     data_local_to_global_row: Vec<Vec<usize>>,
@@ -82,6 +91,7 @@ impl SparseIoVec {
             data_to_cols: HashMap::default(),
             col_glob_to_loc: vec![],
             offset: 0,
+            row_canonicalizer: None,
             row_name_position: HashMap::default(),
             row_names_by_global: vec![],
             data_local_to_global_row: vec![],
@@ -101,6 +111,28 @@ impl SparseIoVec {
             cached_num_rows: 0,
             cached_num_columns: 0,
         }
+    }
+
+    /// Install a row-name canonicalizer for fuzzy cross-backend row
+    /// alignment. Must be called BEFORE the first [`push`](Self::push) —
+    /// returns an error if any backend has already been added (the
+    /// existing `row_names_by_global` would otherwise mix raw and
+    /// canonicalized forms).
+    ///
+    /// Typical use: pass a `GeneIndexResolver`-style canonicalizer so
+    /// `ENSG00000000003_TSPAN6` (file A) and `TSPAN6` (file B) collapse
+    /// to a single row, instead of being silently dropped from the
+    /// shared-row intersection.
+    pub fn with_row_canonicalizer(
+        mut self,
+        canon: impl Fn(&str) -> Box<str> + Send + Sync + 'static,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.data_vec.is_empty(),
+            "row canonicalizer must be set before any push"
+        );
+        self.row_canonicalizer = Some(Arc::new(canon));
+        Ok(self)
     }
 
     /// number of data sets
@@ -251,12 +283,16 @@ impl SparseIoVec {
             let row_names = data.row_names()?;
             let mut local_to_global = Vec::with_capacity(row_names.len());
             for row in row_names.iter() {
-                let glob_row = match self.row_name_position.get(row) {
+                let key: Box<str> = match self.row_canonicalizer.as_ref() {
+                    Some(canon) => canon(row),
+                    None => row.clone(),
+                };
+                let glob_row = match self.row_name_position.get(&key) {
                     Some(&g) => g,
                     None => {
                         let next_global = self.row_names_by_global.len();
-                        self.row_name_position.insert(row.clone(), next_global);
-                        self.row_names_by_global.push(row.clone());
+                        self.row_name_position.insert(key.clone(), next_global);
+                        self.row_names_by_global.push(key);
                         self.row_count_by_global.push(0);
                         next_global
                     }

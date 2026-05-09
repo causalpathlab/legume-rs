@@ -281,6 +281,7 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
         preload: args.preload_data,
+        ..Default::default()
     })?;
     let mut data_vec = loaded.data;
     data_vec.register_batch_membership(&loaded.batch);
@@ -684,6 +685,7 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
         preload: args.preload_data,
+        ..Default::default()
     })?;
     let mut data_vec = loaded.data;
     data_vec.register_batch_membership(&loaded.batch);

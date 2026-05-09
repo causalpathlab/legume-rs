@@ -8,6 +8,8 @@
 
 use crate::embed_common::*;
 use graph_embedding_util as ge;
+use rustc_hash::FxHashMap;
+use std::io::BufRead;
 
 #[derive(Args, Debug)]
 pub struct GbeArgs {
@@ -112,6 +114,50 @@ pub struct GbeArgs {
     )]
     feature_network_refresh: usize,
 
+    #[arg(
+        long,
+        default_value_t = '_',
+        help = "Delimiter for fuzzy gene-name matching across input files. The last \
+                token after splitting on this char is used as the canonical row name, \
+                so `ENSG00000000003_TSPAN6` (file A) and `TSPAN6` (file B) merge into \
+                a single row. Pass an empty string (currently unsupported by clap; \
+                set --feature-name-kind to override) to fall back to exact matching."
+    )]
+    feature_name_delim: char,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable fuzzy gene-name matching (use exact row-name match across files)"
+    )]
+    feature_name_exact: bool,
+
+    #[arg(
+        long,
+        help = "Optional cell-cell edge list (whitespace-separated, two cell-barcode \
+                columns per line; lines starting with `#` are ignored). When provided, \
+                activates the cell-cell NCE term — positives are these edges, negatives \
+                are within-batch random non-neighbor cells. Use a precomputed graph \
+                (e.g. pinto's spatial KNN, exported to TSV)."
+    )]
+    cell_cell_edges: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Cell-cell loss weight λ; final loss = L_bipartite + λ · L_cell_cell. \
+                Default 1.0 weights cell-cell equal to cell-feature. Set to 0 to disable. \
+                Ignored if --cell-cell-edges is not provided."
+    )]
+    cell_cell_lambda: f32,
+
+    #[arg(
+        long,
+        default_value_t = 16,
+        help = "Negative cells per positive cell-pair (cell-cell loss only)"
+    )]
+    cell_cell_negatives: usize,
+
     #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
     device: ComputeDevice,
 
@@ -133,7 +179,18 @@ pub struct GbeArgs {
 pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
-    let unified = ge::load_unified_data(&args.data_files, args.batch_files.as_deref())?;
+    let feature_kind = if args.feature_name_exact {
+        ge::FeatureNameKind::Exact
+    } else {
+        ge::FeatureNameKind::Gene {
+            delim: args.feature_name_delim,
+        }
+    };
+    let unified = ge::load_unified_data(
+        &args.data_files,
+        args.batch_files.as_deref(),
+        feature_kind,
+    )?;
 
     let feature_network = args
         .feature_network
@@ -151,6 +208,19 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         })
         .transpose()?;
 
+    let cell_cell = args
+        .cell_cell_edges
+        .as_deref()
+        .map(|path| {
+            let edges = load_cell_cell_edges(path, &unified.barcodes)?;
+            anyhow::Ok(ge::CellCellConfig {
+                edges,
+                lambda: args.cell_cell_lambda,
+                n_negatives: args.cell_cell_negatives,
+            })
+        })
+        .transpose()?;
+
     let config = ge::FitConfig {
         embedding_dim: args.embedding_dim,
         num_coarsen_seeds: args.num_coarsen_seeds,
@@ -164,6 +234,7 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         seed: args.seed,
         device: args.device.to_device(args.device_no)?,
         feature_network,
+        cell_cell,
         stop: None,
     };
 
@@ -205,4 +276,67 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
     );
 
     Ok(())
+}
+
+/// Read a whitespace-separated two-column edge list of cell barcodes,
+/// resolve each barcode to its global cell id via `barcodes`. Edges
+/// with either endpoint unmatched are skipped (warned on count).
+/// Self-loops (i == j) are dropped silently.
+fn load_cell_cell_edges(path: &str, barcodes: &[Box<str>]) -> anyhow::Result<Vec<(u32, u32)>> {
+    info!("Loading cell-cell edge list from {}...", path);
+    let bc_to_id: FxHashMap<&str, u32> = barcodes
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.as_ref(), i as u32))
+        .collect();
+
+    let file =
+        std::fs::File::open(path).map_err(|e| anyhow::anyhow!("failed to open {}: {}", path, e))?;
+    let reader = std::io::BufReader::new(file);
+
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    let mut unmatched = 0usize;
+    let mut malformed = 0usize;
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut toks = trimmed.split_whitespace();
+        let (Some(a), Some(b)) = (toks.next(), toks.next()) else {
+            malformed += 1;
+            continue;
+        };
+        match (bc_to_id.get(a), bc_to_id.get(b)) {
+            (Some(&i), Some(&j)) if i != j => {
+                let (lo, hi) = if i < j { (i, j) } else { (j, i) };
+                edges.push((lo, hi));
+            }
+            (Some(_), Some(_)) => {} // self-loop, drop silently
+            _ => unmatched += 1,
+        }
+    }
+
+    if malformed > 0 {
+        log::warn!(
+            "{} malformed line(s) in {} (need ≥2 whitespace-separated tokens)",
+            malformed,
+            path
+        );
+    }
+    if unmatched > 0 {
+        log::warn!(
+            "{} edge(s) had at least one barcode not present in the data — skipped",
+            unmatched
+        );
+    }
+    if edges.is_empty() {
+        anyhow::bail!(
+            "cell-cell edge file {} produced 0 usable edges (after barcode resolution)",
+            path
+        );
+    }
+    info!("Cell-cell edges loaded: {} retained", edges.len());
+    Ok(edges)
 }
