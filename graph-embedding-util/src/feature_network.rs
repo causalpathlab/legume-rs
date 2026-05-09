@@ -1,4 +1,4 @@
-//! Frozen-snapshot SGC smoothing for `senna gbe`.
+//! Frozen-snapshot SGC smoothing for `graph-embedding`.
 //!
 //! Given a `FeaturePairGraph` G over the same feature axis as the model,
 //! we approximate Wu et al. 2019 Simplifying Graph Convolutions by
@@ -6,9 +6,11 @@
 //! K-hop normalized adjacency, freezing the result, and applying it as
 //! a network-coherent bias on the bilinear score:
 //!
-//!     Â  = D^{-1/2} A D^{-1/2}                  (no self-loop)
-//!     T  = ((1-α) I + α Â)^K
-//!     Ẽ  = T · E
+//! ```text
+//! Â  = D^{-1/2} A D^{-1/2}                  (no self-loop)
+//! T  = ((1-α) I + α Â)^K
+//! Ẽ  = T · E
+//! ```
 //!
 //! Splitting `Ẽ = (1-α)^K · E + R(E)` lets us treat the residual `R(E)`
 //! as a frozen tensor refreshed every `refresh_epochs` epochs (computed
@@ -180,7 +182,6 @@ mod tests {
 
         // Â on triangle (deg=2 each): Â[u,v] = 1/sqrt(4) = 0.5 off-diag, 0 self.
         // K=1: Ẽ_i = 0.5 E_i + 0.5 (0.5 E_j + 0.5 E_k) = 0.5 E_i + 0.25 (E_j + E_k)
-        // Expected for row 0: 0.5*(1,0) + 0.25*((0,1)+(1,1)) = (0.5+0.25, 0+0.5) = (0.75, 0.5)
         let idx = Tensor::from_vec(vec![0u32, 1, 2], 3, &dev).unwrap();
         let out = sm.apply_select(&e, &idx).unwrap();
         let v: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
@@ -205,9 +206,6 @@ mod tests {
         let idx = Tensor::from_vec(vec![3u32], 1, &dev).unwrap();
         let out = sm.apply_select(&e, &idx).unwrap();
         let v: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
-        // Â · row3 = 0, so Ẽ_3 = (1-α) E_3 = 0.5 * (7,8) ... wait
-        // Ẽ = (1-α)^1 E + R, R = T·E - (1-α)·E for isolated row, T = (1-α)I + αÂ
-        // For isolated row: Ẽ = (1-α) E + 0 = 0.5*(7,8) = (3.5, 4)
         assert!((v[0] - 3.5).abs() < 1e-5);
         assert!((v[1] - 4.0).abs() < 1e-5);
     }
@@ -252,11 +250,6 @@ mod tests {
             .to_vec1()
             .unwrap();
 
-        // Node 0: K=1 reaches only node 1 (which is 0 in the second column),
-        // so col-1 of row 0 stays 0. K=2 reaches node 2 (also 0) but path
-        // toward col-1 mass at node 3 still requires K=3 — both should be 0
-        // at col-1. Sanity: the row-0 col-0 attenuation differs because K=2
-        // has more (1-α)^k weight elsewhere. Just check K=2 differs from K=1.
         assert!(
             (r1[0] - r2[0]).abs() > 1e-5 || (r1[1] - r2[1]).abs() > 1e-5,
             "K=1 vs K=2 should produce different smoothings"

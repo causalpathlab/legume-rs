@@ -1,3 +1,4 @@
+mod gbe;
 mod gene_network;
 mod link_community;
 mod lr_activity;
@@ -11,6 +12,7 @@ mod test_support;
 
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use gbe::{fit_srt_gbe, SrtGbeArgs};
 use link_community::fit::*;
 use lr_activity::{fit_srt_lr_activity, SrtLrActivityArgs};
 use plot::{make_srt_plot, SrtPlotArgs};
@@ -388,6 +390,25 @@ enum Commands {
                       \x20             still bucketed per (batch, propensity-bin)."
     )]
     LrActivity(SrtLrActivityArgs),
+
+    #[command(
+        about = "Train: graph-based embedding (count-NCE, modality-agnostic) on SRT data",
+        long_about = "Joint embedding of features and cells in a single H-dim space \
+                      via discriminative count-noise-contrastive estimation on the \
+                      sketch-coarsened (cell, feature) bipartite graph (engine: \
+                      `graph-embedding-util`).\n\n\
+                      Loads SRT data with coordinates and writes a spatial KNN as \
+                      a side output ({out}.spatial_knn.parquet) for downstream \
+                      consumers; the cell-cell graph is *not yet* used in the loss \
+                      (planned extension).\n\n\
+                      Outputs (consumable by `senna {clustering, annotate, layout, plot}`):\n\
+                      \x20 {out}.latent.parquet         cell embedding (cell × H)\n\
+                      \x20 {out}.dictionary.parquet     feature embedding (feature × H)\n\
+                      \x20 {out}.cell_bias.parquet      per-cell bias\n\
+                      \x20 {out}.feature_bias.parquet   per-feature bias\n\
+                      \x20 {out}.spatial_knn.parquet    spatial KNN edges + distances (with --coord)"
+    )]
+    Gbe(SrtGbeArgs),
 }
 
 /// Expand `pinto lra --from <metadata.json>` into the full positional /
@@ -524,6 +545,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::LrActivity(args) => {
             fit_srt_lr_activity(args)?;
+        }
+        Commands::Gbe(args) => {
+            fit_srt_gbe(args)?;
         }
     }
 

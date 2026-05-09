@@ -1,0 +1,32 @@
+[package]
+name = "graph-embedding-util"
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "graph_embedding_util"
+path = "src/lib.rs"
+
+[dependencies]
+auxiliary-data = { workspace = true }
+data-beans = { workspace = true }
+data-beans-alg = { workspace = true }
+candle-util = { workspace = true }
+matrix-util = { workspace = true }
+
+anyhow = { workspace = true }
+ctrlc = { workspace = true }
+indicatif = { workspace = true }
+log = { workspace = true }
+nalgebra = { workspace = true }
+nalgebra-sparse = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+rayon = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
