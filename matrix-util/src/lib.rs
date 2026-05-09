@@ -12,6 +12,7 @@ pub mod ndarray_io;
 // pub mod ndarray_rsvd;
 pub mod ndarray_stat;
 pub mod ndarray_util;
+pub mod pair_graph;
 pub mod parquet;
 pub mod sparse_stat;
 pub mod tensor_io;
