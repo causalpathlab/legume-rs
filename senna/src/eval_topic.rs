@@ -122,6 +122,7 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
         preload: args.preload_data,
+        ..Default::default()
     })?;
     let mut data_vec = loaded.data;
     data_vec.register_batch_membership(&loaded.batch);

@@ -6,7 +6,7 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version.workspace = true
+version = "0.3.0"
 
 [[bin]]
 name = "pinto"
@@ -16,6 +16,7 @@ path = "src/main.rs"
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
 candle-util = { workspace = true }
+auxiliary-data = { workspace = true }
 graph-embedding-util = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }

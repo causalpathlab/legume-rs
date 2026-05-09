@@ -404,6 +404,91 @@ impl GeneIndexResolver {
     }
 }
 
+/// Genomic-locus → row-index resolver, sibling of [`GeneIndexResolver`].
+///
+/// Locus row names appear in many flavors across pipelines:
+///
+/// - `chr1:1000-2000`, `1:1000-2000` (UCSC-style with optional `chr`)
+/// - `chr1_1000_2000`, `1_1000_2000` (filename-safe underscore form)
+/// - `chr1-1000-2000` (dash form some tools emit)
+///
+/// We canonicalize on read by stripping the `chr` prefix and folding any
+/// of `:`, `_`, `-` to a single `_`, so `chr1:1000-2000` and `1_1000_2000`
+/// both resolve to the same locus. Strand suffixes (`:+`, `:-`) attached
+/// after the second coordinate get folded into the same separator scheme;
+/// callers that care about strand should keep it out of the row name.
+///
+/// Ambiguity behavior: identical to [`GeneIndexResolver`] — last
+/// registered wins on collision (consistent with `HashMap::insert`).
+#[derive(Clone)]
+pub struct LocusIndexResolver {
+    mem: Membership,
+    n_loci: usize,
+}
+
+/// Canonicalize a locus string: strip leading `chr` (case-insensitive)
+/// and fold `:`, `-` to `_`. Empty strings pass through unchanged.
+/// Allocations are avoided when the input is already canonical.
+pub fn canon_locus(name: &str) -> Box<str> {
+    if name.is_empty() {
+        return name.into();
+    }
+    let stripped = name
+        .strip_prefix("chr")
+        .or_else(|| name.strip_prefix("CHR"))
+        .or_else(|| name.strip_prefix("Chr"))
+        .unwrap_or(name);
+    if !stripped.contains(':') && !stripped.contains('-') {
+        // Hot-path skip: most peak names already use `_`, so a per-row
+        // canonicalize call (~36k × N files) avoids the chars/collect
+        // allocation entirely.
+        return stripped.into();
+    }
+    let folded: String = stripped
+        .chars()
+        .map(|c| if c == ':' || c == '-' { '_' } else { c })
+        .collect();
+    folded.into_boxed_str()
+}
+
+impl LocusIndexResolver {
+    /// Build a resolver over `loci`. Each input name is registered both
+    /// raw and in canonical form; lookups are tried raw first, then
+    /// canonical. `allow_prefix` enables the same forward / reverse
+    /// prefix fallback that [`GeneIndexResolver`] uses.
+    pub fn build(loci: &[Box<str>], allow_prefix: bool) -> Self {
+        let mut pairs: Vec<(Box<str>, Box<str>)> = Vec::with_capacity(loci.len() * 2);
+        for (i, name) in loci.iter().enumerate() {
+            let idx_str: Box<str> = i.to_string().into_boxed_str();
+            pairs.push((name.clone(), idx_str.clone()));
+            let canon = canon_locus(name);
+            if canon.as_ref() != name.as_ref() {
+                pairs.push((canon, idx_str));
+            }
+        }
+        Self {
+            mem: Membership::from_pairs(pairs, allow_prefix),
+            n_loci: loci.len(),
+        }
+    }
+
+    /// Resolve a query locus to its 0-based row index, if any. Tries
+    /// raw match first, then canonical (chr-stripped + separator-folded).
+    pub fn resolve(&self, query: &str) -> Option<usize> {
+        if let Some(s) = self.mem.get(query) {
+            if let Ok(i) = s.parse::<usize>() {
+                return Some(i);
+            }
+        }
+        let canon = canon_locus(query);
+        self.mem.get(canon.as_ref())?.parse::<usize>().ok()
+    }
+
+    pub fn n_loci(&self) -> usize {
+        self.n_loci
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,5 +576,37 @@ mod tests {
         let r = GeneIndexResolver::build(&names, None, false);
         assert_eq!(r.resolve("ENSG00000105329_TGFB1"), Some(0));
         assert_eq!(r.resolve("TGFB1"), None);
+    }
+
+    #[test]
+    fn locus_resolver_handles_chr_prefix_and_separators() {
+        let loci: Vec<Box<str>> = vec![
+            "chr1:1000-2000".into(),
+            "chr2_3000_4000".into(),
+            "X:5000-6000".into(),
+        ];
+        let r = LocusIndexResolver::build(&loci, false);
+        // Exact match still wins.
+        assert_eq!(r.resolve("chr1:1000-2000"), Some(0));
+        assert_eq!(r.resolve("chr2_3000_4000"), Some(1));
+        // chr-stripped + dash → underscore canonical form.
+        assert_eq!(r.resolve("1_1000_2000"), Some(0));
+        // Already-canonical query against a chr-prefixed row.
+        assert_eq!(r.resolve("2_3000_4000"), Some(1));
+        // X chromosome (no chr prefix in the row name).
+        assert_eq!(r.resolve("X_5000_6000"), Some(2));
+        assert_eq!(r.resolve("chrX_5000_6000"), Some(2));
+        // Unknown locus.
+        assert_eq!(r.resolve("Y:1-100"), None);
+    }
+
+    #[test]
+    fn locus_resolver_case_variants_of_chr() {
+        let loci: Vec<Box<str>> = vec!["CHR1:100-200".into()];
+        let r = LocusIndexResolver::build(&loci, false);
+        // All chr/CHR/Chr variants strip identically.
+        assert_eq!(r.resolve("chr1:100-200"), Some(0));
+        assert_eq!(r.resolve("Chr1_100_200"), Some(0));
+        assert_eq!(r.resolve("1:100-200"), Some(0));
     }
 }

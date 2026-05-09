@@ -397,10 +397,11 @@ enum Commands {
                       via discriminative count-noise-contrastive estimation on the \
                       sketch-coarsened (cell, feature) bipartite graph (engine: \
                       `graph-embedding-util`).\n\n\
-                      Loads SRT data with coordinates and writes a spatial KNN as \
-                      a side output ({out}.spatial_knn.parquet) for downstream \
-                      consumers; the cell-cell graph is *not yet* used in the loss \
-                      (planned extension).\n\n\
+                      Loads SRT data with coordinates, builds a spatial KNN, and \
+                      (by default, --cell-cell-lambda > 0) uses it as positives for \
+                      a second NCE term so spatial coherence shows up directly in the \
+                      cell embedding. The KNN is also persisted as a side output \
+                      ({out}.spatial_knn.parquet) for downstream consumers.\n\n\
                       Outputs (consumable by `senna {clustering, annotate, layout, plot}`):\n\
                       \x20 {out}.latent.parquet         cell embedding (cell × H)\n\
                       \x20 {out}.dictionary.parquet     feature embedding (feature × H)\n\

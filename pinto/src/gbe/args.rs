@@ -103,6 +103,38 @@ pub struct SrtGbeArgs {
     )]
     pub feature_network_refresh: usize,
 
+    #[arg(
+        long,
+        default_value_t = '_',
+        help = "Delimiter for fuzzy gene-name matching across input files. The last \
+                token after splitting on this char is the canonical row name, so \
+                `ENSG00000000003_TSPAN6` and `TSPAN6` align across files."
+    )]
+    pub feature_name_delim: char,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable fuzzy gene-name matching (use exact row-name match across files)"
+    )]
+    pub feature_name_exact: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Cell-cell loss weight λ; final loss = L_bipartite + λ · L_cell_cell. \
+                Default 1.0 weights cell-cell equal to cell-feature. Set to 0 to \
+                disable. Requires --coord (cell pairs come from the spatial KNN)."
+    )]
+    pub cell_cell_lambda: f32,
+
+    #[arg(
+        long,
+        default_value_t = 16,
+        help = "Negative cells per positive cell-pair (cell-cell loss only)"
+    )]
+    pub cell_cell_negatives: usize,
+
     #[arg(long, default_value_t = GbeDevice::Cpu, value_enum, help = "Compute device")]
     pub device: GbeDevice,
 

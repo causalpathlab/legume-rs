@@ -34,10 +34,12 @@ pub mod model;
 pub mod stop;
 pub mod training;
 
+pub use auxiliary_data::feature_names::FeatureNameKind;
 pub use data::{load_unified_data, Triplet, UnifiedData};
 pub use eval::{save_outputs, OutputContext};
 pub use fit::{
-    fit, load_feature_network, FeatureNetworkArgs, FeatureNetworkConfig, FitConfig, FitOutput,
+    fit, load_feature_network, CellCellConfig, FeatureNetworkArgs, FeatureNetworkConfig, FitConfig,
+    FitOutput,
 };
 pub use model::{BiasInit, JointEmbedModel, ModelArgs};
 pub use stop::setup_stop_handler;
