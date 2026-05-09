@@ -1,23 +1,19 @@
-//! `chickpea embed-graph` entry point: parse args, load data, build
-//! coarsenings + bias initializations, construct model, dispatch to
-//! [`crate::embed::training::train`], save outputs.
+//! `senna embed-graph` entry point.
 
-use crate::common::*;
-use crate::embed::coarsen::{build_cell_coarsenings, CellCoarseningArgs};
-use crate::embed::data::load_unified_data;
-use crate::embed::eval::{save_outputs, OutputContext};
-use crate::embed::loss::build_per_file_samplers;
-use crate::embed::model::{BiasInit, JointEmbedModel, ModelArgs};
-use crate::embed::training::{train, TrainingContext, TrainingParams};
+use crate::embed_common::*;
+use crate::embed_graph::coarsen::{build_cell_coarsenings, CellCoarseningArgs};
+use crate::embed_graph::data::load_unified_data;
+use crate::embed_graph::eval::{save_outputs, OutputContext};
+use crate::embed_graph::loss::build_per_file_samplers;
+use crate::embed_graph::model::{BiasInit, JointEmbedModel, ModelArgs};
+use crate::embed_graph::training::{train, TrainingContext, TrainingParams};
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
 
 #[derive(Args, Debug)]
 pub struct EmbedGraphArgs {
-    /* Input */
     #[arg(
-        long,
         required = true,
         value_delimiter = ',',
         help = "Sparse count matrices (zarr/h5), comma-separated. Each \
@@ -33,11 +29,9 @@ pub struct EmbedGraphArgs {
     )]
     batch_files: Option<Vec<Box<str>>>,
 
-    /* Model */
     #[arg(long, default_value_t = 64, help = "Embedding dimension H")]
     embedding_dim: usize,
 
-    /* Coarsening */
     #[arg(long, default_value_t = 8, help = "Number of coarsening seeds")]
     num_coarsen_seeds: usize,
 
@@ -51,7 +45,6 @@ pub struct EmbedGraphArgs {
     #[arg(long, default_value_t = 32, help = "Sketch dim for coarsening RP")]
     sketch_dim: usize,
 
-    /* Training */
     #[arg(long, default_value_t = 200, help = "Training epochs")]
     epochs: usize,
 
@@ -75,27 +68,25 @@ pub struct EmbedGraphArgs {
     #[arg(long, default_value_t = 1, help = "Random seed (base)")]
     seed: u64,
 
-    /* Device */
     #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
     device: ComputeDevice,
 
     #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
     device_no: usize,
 
-    /* Output */
     #[arg(
         long,
         short,
         required = true,
         help = "Output prefix",
-        long_help = "Output prefix; produces {out}.e_feat.parquet, \
-                     {out}.e_cell.parquet, {out}.b_feat.parquet, \
-                     {out}.b_cell.parquet"
+        long_help = "Output prefix; produces {out}.latent.parquet, \
+                     {out}.dictionary.parquet, {out}.cell_bias.parquet, \
+                     {out}.feature_bias.parquet, {out}.senna.json"
     )]
     out: Box<str>,
 }
 
-pub fn embed_graph(args: &EmbedGraphArgs) -> anyhow::Result<()> {
+pub fn fit_embed_graph(args: &EmbedGraphArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     let dev = match args.device {
@@ -202,62 +193,28 @@ pub fn embed_graph(args: &EmbedGraphArgs) -> anyhow::Result<()> {
         &args.out,
     )?;
 
-    write_manifest(&args.out, &args.data_files, args.batch_files.as_deref())?;
+    let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
+    let batch: Vec<String> = args
+        .batch_files
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        kind: crate::run_manifest::RunKind::EmbedGraph,
+        prefix: &args.out,
+        data_input: &input,
+        data_batch: &batch,
+        data_input_null: &[],
+        dictionary_suffix: Some("dictionary.parquet"),
+        has_model: false,
+        has_cell_proj: false,
+        pb_gene_suffix: None,
+        pb_latent_suffix: None,
+        dictionary_empirical_suffix: None,
+        default_colour_by: "cluster",
+    })?;
 
-    info!(
-        "Done — outputs at {}.{{e,b}}_{{feat,cell}}.parquet (+ {}.senna.json)",
-        args.out, args.out
-    );
+    info!("Done — outputs at {}.{{latent,dictionary,*_bias}}.parquet", args.out);
 
-    Ok(())
-}
-
-fn write_manifest(
-    out_prefix: &str,
-    data_files: &[Box<str>],
-    batch_files: Option<&[Box<str>]>,
-) -> anyhow::Result<()> {
-    use crate::manifest::*;
-    let manifest_path_str = manifest_path(out_prefix);
-    let manifest_dir = std::path::Path::new(&manifest_path_str)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-
-    let m = RunManifest {
-        version: MANIFEST_VERSION,
-        kind: "svd".to_string(),
-        prefix: out_prefix.to_string(),
-        data: RunData {
-            input: data_files
-                .iter()
-                .map(|p| rel_to_manifest(&manifest_dir, p))
-                .collect(),
-            batch: batch_files
-                .map(|b| {
-                    b.iter()
-                        .map(|p| rel_to_manifest(&manifest_dir, p))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        },
-        outputs: RunOutputs {
-            latent: Some(rel_to_manifest(
-                &manifest_dir,
-                &format!("{out_prefix}.e_cell.parquet"),
-            )),
-            dictionary: Some(rel_to_manifest(
-                &manifest_dir,
-                &format!("{out_prefix}.e_feat.parquet"),
-            )),
-        },
-        layout: serde_json::json!({}),
-        cluster: RunCluster::default(),
-        annotate: RunAnnotate::default(),
-        pseudotime: serde_json::json!({}),
-        defaults: serde_json::json!({"colour_by": "cluster"}),
-    };
-    save(&m, &manifest_path_str)?;
-    info!("Wrote run manifest {manifest_path_str}");
     Ok(())
 }
