@@ -1,6 +1,6 @@
 //! Warm-start the indexed encoder's per-feature embeddings from a
-//! `chickpea embed-graph` parquet. Names missing from the parquet
-//! keep their Kaiming init, so partial overlap is fine.
+//! `senna embed-graph` dictionary parquet. Names missing keep their
+//! Kaiming init, so partial overlap is fine.
 
 use crate::common::*;
 use candle_util::candle_core::{Device, Tensor};
@@ -10,19 +10,19 @@ use rustc_hash::FxHashMap;
 
 pub fn init_feature_embeddings_from_parquet(
     varmap: &VarMap,
-    e_feat_path: &str,
+    dictionary_path: &str,
     encoder_prefix: &str,
     gene_names: &[Box<str>],
     peak_names: &[Box<str>],
     embedding_dim: usize,
     dev: &Device,
 ) -> anyhow::Result<()> {
-    info!("Warm-starting encoder feature embeddings from {e_feat_path}");
-    let loaded = nalgebra::DMatrix::<f32>::from_parquet(e_feat_path)?;
+    info!("Warm-starting encoder feature embeddings from {dictionary_path}");
+    let loaded = nalgebra::DMatrix::<f32>::from_parquet(dictionary_path)?;
     let h = loaded.cols.len();
     if h != embedding_dim {
         anyhow::bail!(
-            "embedding_dim mismatch: {e_feat_path} has H={h}, fit-topic --embedding-dim={embedding_dim}"
+            "embedding_dim mismatch: {dictionary_path} has H={h}, fit-topic --embedding-dim={embedding_dim}"
         );
     }
 

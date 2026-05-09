@@ -197,12 +197,12 @@ pub struct FitTopicArgs {
 
     #[arg(
         long,
-        help = "Warm-start encoder feature embeddings from chickpea embed-graph",
-        long_help = "Prefix of a prior `chickpea embed-graph` run. Loads \
-                     {prefix}.e_feat.parquet and seeds the indexed encoder's \
-                     gene_expert + atac_expert feature embedding tables. \
-                     The parquet's H must equal --embedding-dim. Names not \
-                     found keep their default Kaiming init."
+        help = "Warm-start encoder feature embeddings from senna embed-graph",
+        long_help = "Prefix of a prior `senna embed-graph` run. Loads \
+                     {prefix}.dictionary.parquet and seeds the indexed \
+                     encoder's gene_expert + atac_expert feature embedding \
+                     tables. The parquet's H must equal --embedding-dim. \
+                     Names not found keep their default Kaiming init."
     )]
     init_from: Option<Box<str>>,
 
