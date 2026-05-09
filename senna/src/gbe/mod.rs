@@ -1,4 +1,5 @@
-//! `senna embed-graph` — joint multi-modal graph-embedding (count-NCE).
+//! `senna gbe` — graph-based embedding (count-NCE) over the
+//! (cell, feature) bipartite graph.
 //!
 //! Modality-agnostic discriminative embedding: each input file
 //! contributes its rows to a unified feature axis; cell barcodes
@@ -16,4 +17,4 @@ pub mod loss;
 pub mod model;
 pub mod training;
 
-pub use fit::{fit_embed_graph, EmbedGraphArgs};
+pub use fit::{fit_gbe, GbeArgs};

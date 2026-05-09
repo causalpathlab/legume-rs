@@ -41,7 +41,7 @@ pub enum RunKind {
     JointTopic,
     Svd,
     JointSvd,
-    EmbedGraph,
+    Gbe,
 }
 
 impl RunKind {
@@ -53,7 +53,7 @@ impl RunKind {
             RunKind::JointTopic => "joint-topic",
             RunKind::Svd => "svd",
             RunKind::JointSvd => "joint-svd",
-            RunKind::EmbedGraph => "embed-graph",
+            RunKind::Gbe => "gbe",
         }
     }
 
