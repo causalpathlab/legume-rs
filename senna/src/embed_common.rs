@@ -77,6 +77,16 @@ pub enum ComputeDevice {
     Metal,
 }
 
+impl ComputeDevice {
+    pub fn to_device(&self, device_no: usize) -> anyhow::Result<candle_core::Device> {
+        Ok(match self {
+            ComputeDevice::Cpu => candle_core::Device::Cpu,
+            ComputeDevice::Cuda => candle_core::Device::new_cuda(device_no)?,
+            ComputeDevice::Metal => candle_core::Device::new_metal(device_no)?,
+        })
+    }
+}
+
 /// Batch adjustment method
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]

@@ -1,11 +1,13 @@
-//! Output writers for `senna gbe`.
+//! Output writers shared by all callers.
 //!
-//! Conforms to senna's parquet conventions:
+//! Conforms to senna's parquet conventions (so `senna {clustering,
+//! annotate, layout, plot} --from` work directly on outputs from any
+//! caller):
 //! - `{out}.latent.parquet` (cell × H), col prefix `h`
 //! - `{out}.dictionary.parquet` (feature × H), col prefix `h`
 //! - `{out}.cell_bias.parquet` / `{out}.feature_bias.parquet`
 
-use crate::gbe::model::JointEmbedModel;
+use crate::model::JointEmbedModel;
 use candle_util::candle_core::Tensor;
 use matrix_util::traits::IoOps;
 

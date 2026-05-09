@@ -1,9 +1,14 @@
 //! Count-NCE loss: NEG-style binary logistic over count-weighted
-//! positive (cell, feature) edges vs same-file marginal^α negatives.
+//! positive (cell, feature) edges vs within-batch marginal^α negatives.
+//!
+//! Negatives are drawn from features observed *in the positive cell's
+//! batch*, so the model can't earn signal by separating cells along
+//! technical-batch confounders — features that distinguish batches are
+//! also exactly the candidate negatives for cells in those batches.
 
-use crate::gbe::data::Triplet;
-use crate::gbe::feature_network::{select_feat_emb, FeatureNetworkSmoother};
-use crate::gbe::model::JointEmbedModel;
+use crate::data::Triplet;
+use crate::feature_network::{select_feat_emb, FeatureNetworkSmoother};
+use crate::model::JointEmbedModel;
 use candle_util::candle_core::{Device, Result, Tensor};
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use rand::Rng;
@@ -21,16 +26,19 @@ pub struct EdgeBatch {
     pub n_negatives: usize,
 }
 
-pub struct PerFileSampler {
+pub struct PerBatchSampler {
     pub pos: WeightedIndex<f32>,
     pub neg: WeightedIndex<f32>,
-    pub triplet_start: usize,
-    pub feature_start: u32,
+    /// Indices into the global `triplets` slice for this batch's positives.
+    pub triplet_indices: Vec<u32>,
+    /// Global feature ids that constitute this batch's negative pool
+    /// (features observed in any cell of this batch).
+    pub feature_pool: Vec<u32>,
 }
 
 pub struct EdgeBatchArgs<'a> {
     pub triplets: &'a [Triplet],
-    pub file_sampler: &'a PerFileSampler,
+    pub batch_sampler: &'a PerBatchSampler,
     pub cell_coarsening: &'a FeatureCoarsening,
     pub fine_feature_weights: Option<&'a [f32]>,
     pub batch_size: usize,
@@ -42,12 +50,12 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
     let mut fine_feats = Vec::with_capacity(args.batch_size);
     let mut weights = Vec::with_capacity(args.batch_size);
 
-    let trip_off = args.file_sampler.triplet_start;
-    let feat_off = args.file_sampler.feature_start;
+    let sampler = args.batch_sampler;
 
     for _ in 0..args.batch_size {
-        let local_idx = args.file_sampler.pos.sample(rng);
-        let t = &args.triplets[trip_off + local_idx];
+        let local_idx = sampler.pos.sample(rng);
+        let global_idx = sampler.triplet_indices[local_idx] as usize;
+        let t = &args.triplets[global_idx];
         let c_coarse = args.cell_coarsening.fine_to_coarse[t.cell as usize] as u32;
         coarse_cells.push(c_coarse);
         fine_feats.push(t.feature);
@@ -60,8 +68,8 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
 
     let mut neg_feats = Vec::with_capacity(args.batch_size * args.n_negatives);
     for _ in 0..(args.batch_size * args.n_negatives) {
-        let local = args.file_sampler.neg.sample(rng) as u32;
-        neg_feats.push(local + feat_off);
+        let local = sampler.neg.sample(rng);
+        neg_feats.push(sampler.feature_pool[local]);
     }
 
     EdgeBatch {
@@ -73,45 +81,63 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
     }
 }
 
-pub fn build_per_file_samplers(
+/// Build a per-batch sampler. Each batch contributes the positive triplets
+/// whose cells belong to that batch, and a negative pool restricted to the
+/// features observed in those cells. Batches with zero observed edges are
+/// returned as `None` (caller filters).
+pub fn build_per_batch_samplers(
     triplets: &[Triplet],
-    file_triplet_ranges: &[std::ops::Range<usize>],
-    file_feature_ranges: &[std::ops::Range<u32>],
+    batch_membership: &[u32],
+    n_batches: usize,
+    n_features: usize,
     fisher_weights: &[f32],
     alpha_neg: f32,
-) -> Vec<PerFileSampler> {
-    assert_eq!(file_triplet_ranges.len(), file_feature_ranges.len());
+) -> Vec<Option<PerBatchSampler>> {
+    let mut per_batch_indices: Vec<Vec<u32>> = vec![Vec::new(); n_batches];
+    for (i, t) in triplets.iter().enumerate() {
+        let b = batch_membership[t.cell as usize] as usize;
+        per_batch_indices[b].push(i as u32);
+    }
 
-    file_triplet_ranges
-        .par_iter()
-        .zip(file_feature_ranges.par_iter())
-        .map(|(trip_range, feat_range)| {
-            let pos_w: Vec<f32> = triplets[trip_range.clone()]
+    per_batch_indices
+        .into_par_iter()
+        .map(|trip_indices| {
+            if trip_indices.is_empty() {
+                return None;
+            }
+
+            let pos_w: Vec<f32> = trip_indices
                 .iter()
-                .map(|t| {
+                .map(|&i| {
+                    let t = &triplets[i as usize];
                     let w = fisher_weights[t.feature as usize];
                     (t.count * w).max(1e-8)
                 })
                 .collect();
-            let pos = WeightedIndex::new(pos_w).expect("non-empty file triplet stream");
+            let pos = WeightedIndex::new(pos_w).expect("non-empty batch positives");
 
-            let n_local = (feat_range.end - feat_range.start) as usize;
-            let mut neg_w = vec![0f32; n_local];
-            for t in &triplets[trip_range.clone()] {
-                let local = (t.feature - feat_range.start) as usize;
-                neg_w[local] += t.count;
+            // Per-batch feature marginal (count-weighted), then α-smoothed.
+            // Dense scratch is cheaper than a HashMap at our feature counts.
+            let mut feat_count = vec![0f32; n_features];
+            for &i in &trip_indices {
+                let t = &triplets[i as usize];
+                feat_count[t.feature as usize] += t.count;
             }
-            for w in neg_w.iter_mut() {
-                *w = w.max(1e-8).powf(alpha_neg);
-            }
-            let neg = WeightedIndex::new(neg_w).expect("non-empty file feature axis");
+            let feature_pool: Vec<u32> = (0..n_features as u32)
+                .filter(|&f| feat_count[f as usize] > 0.0)
+                .collect();
+            let neg_w: Vec<f32> = feature_pool
+                .iter()
+                .map(|&f| feat_count[f as usize].powf(alpha_neg))
+                .collect();
+            let neg = WeightedIndex::new(neg_w).expect("non-empty batch feature pool");
 
-            PerFileSampler {
+            Some(PerBatchSampler {
                 pos,
                 neg,
-                triplet_start: trip_range.start,
-                feature_start: feat_range.start,
-            }
+                triplet_indices: trip_indices,
+                feature_pool,
+            })
         })
         .collect()
 }

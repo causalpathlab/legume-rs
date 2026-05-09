@@ -1,7 +1,7 @@
 //! Joint multiome embedding tables + bias terms + bilinear scoring.
 //!
-//! Two free embedding tables (`E_feat` over genes ∪ peaks, `E_cell`)
-//! plus two bias vectors (`b_feat`, `b_cell`). Score for a
+//! Two free embedding tables (`E_feat` over the unified feature axis,
+//! `E_cell`) plus two bias vectors (`b_feat`, `b_cell`). Score for a
 //! `(feature, cell)` edge under a Poisson rate model:
 //!
 //!   `score(f, c) = E_feat[f] · E_cell[c] + b_feat[f] + b_cell[c]`

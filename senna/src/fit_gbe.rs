@@ -1,17 +1,13 @@
-//! `senna gbe` entry point.
+//! `senna gbe` — thin clap + run-manifest wrapper around the
+//! `graph-embedding-util` engine.
+//!
+//! All algorithmic work lives in `graph_embedding_util`. This file
+//! exists only to translate `GbeArgs` → `FitConfig`, resolve the
+//! optional feature-network edge file against the unified feature
+//! axis, and write senna's run manifest after training.
 
 use crate::embed_common::*;
-use crate::gbe::coarsen::{build_cell_coarsenings, CellCoarseningArgs};
-use crate::gbe::data::load_unified_data;
-use crate::gbe::eval::{save_outputs, OutputContext};
-use crate::gbe::feature_network::FeatureNetworkSmoother;
-use crate::gbe::loss::build_per_file_samplers;
-use crate::gbe::model::{BiasInit, JointEmbedModel, ModelArgs};
-use crate::gbe::training::{train, TrainingContext, TrainingParams};
-use candle_util::candle_core::Device;
-use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
-use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
-use matrix_util::pair_graph::FeaturePairGraph;
+use graph_embedding_util as ge;
 
 #[derive(Args, Debug)]
 pub struct GbeArgs {
@@ -137,143 +133,45 @@ pub struct GbeArgs {
 pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
-    let dev = match args.device {
-        ComputeDevice::Cpu => Device::Cpu,
-        ComputeDevice::Cuda => Device::new_cuda(args.device_no)?,
-        ComputeDevice::Metal => Device::new_metal(args.device_no)?,
-    };
+    let unified = ge::load_unified_data(&args.data_files, args.batch_files.as_deref())?;
 
-    let unified = load_unified_data(&args.data_files, args.batch_files.as_deref())?;
+    let feature_network = args
+        .feature_network
+        .as_deref()
+        .map(|path| {
+            ge::load_feature_network(ge::FeatureNetworkArgs {
+                path,
+                feature_names: &unified.feature_names,
+                prefix_match: args.feature_network_prefix_match,
+                delim: args.feature_network_delim,
+                k_hops: args.feature_network_k,
+                alpha: args.feature_network_alpha,
+                refresh_epochs: args.feature_network_refresh,
+            })
+        })
+        .transpose()?;
 
-    let n_cells = unified.n_cells();
-    let n_features = unified.n_features();
-
-    info!(
-        "Building cell coarsenings (K={} seeds, target ~{} super-cells)",
-        args.num_coarsen_seeds, args.super_cells
-    );
-
-    let cell_axis = build_cell_coarsenings(CellCoarseningArgs {
-        triplets: &unified.triplets,
-        n_cells,
-        n_features,
-        target_blocks: args.super_cells,
+    let config = ge::FitConfig {
+        embedding_dim: args.embedding_dim,
+        num_coarsen_seeds: args.num_coarsen_seeds,
+        super_cells: args.super_cells,
         sketch_dim: args.sketch_dim,
-        n_seeds: args.num_coarsen_seeds,
-        base_seed: args.seed.wrapping_add(0xC347),
-    })?;
-
-    info!("Avg coarse blocks: cells {:.0}", cell_axis.avg_n_coarse());
-
-    info!("Computing NB-Fisher weights per file...");
-    let mut feat_weights: Vec<f32> = Vec::with_capacity(n_features);
-    for (i, data) in unified.per_file_data.iter().enumerate() {
-        let w = compute_nb_fisher_weights(data, None)?;
-        info!(
-            "  file {}: {} features, mean Fisher weight {:.3}",
-            i,
-            w.len(),
-            w.iter().sum::<f32>() / w.len().max(1) as f32
-        );
-        feat_weights.extend(w);
-    }
-
-    let zeros_feat = vec![0f32; n_features];
-    let zeros_cell = vec![0f32; n_cells];
-
-    let varmap = VarMap::new();
-    let vs = VarBuilder::from_varmap(&varmap, candle_util::candle_core::DType::F32, &dev);
-    let model = JointEmbedModel::new(
-        ModelArgs {
-            n_features,
-            n_cells,
-            embedding_dim: args.embedding_dim,
-        },
-        &BiasInit {
-            b_feat: &zeros_feat,
-            b_cell: &zeros_cell,
-        },
-        &varmap,
-        vs,
-        &dev,
-    )?;
-
-    let mut opt = AdamW::new(
-        varmap.all_vars(),
-        ParamsAdamW {
-            lr: args.learning_rate,
-            ..Default::default()
-        },
-    )?;
-
-    info!("Building per-file edge samplers...");
-    let alpha_neg = 0.75_f32;
-    let file_samplers = build_per_file_samplers(
-        &unified.triplets,
-        &unified.file_triplet_ranges,
-        &unified.file_feature_ranges,
-        &feat_weights,
-        alpha_neg,
-    );
-
-    let mut smoother = if let Some(path) = args.feature_network.as_deref() {
-        info!("Loading feature network from {}...", path);
-        let graph = FeaturePairGraph::from_edge_list(
-            path,
-            unified.feature_names.to_vec(),
-            args.feature_network_prefix_match,
-            args.feature_network_delim,
-        )?;
-        if graph.num_edges() == 0 {
-            anyhow::bail!(
-                "Feature network has 0 matched edges — check name resolution \
-                 (--feature-network-delim / --feature-network-prefix-match)."
-            );
-        }
-        info!(
-            "SGC smoothing: K={}, α={}, refresh={} epochs over {} edges",
-            args.feature_network_k,
-            args.feature_network_alpha,
-            args.feature_network_refresh,
-            graph.num_edges()
-        );
-        Some(FeatureNetworkSmoother::new(
-            &graph,
-            n_features,
-            args.embedding_dim,
-            args.feature_network_alpha,
-            args.feature_network_k,
-            args.feature_network_refresh,
-        )?)
-    } else {
-        None
-    };
-
-    let train_ctx = TrainingContext {
-        unified: &unified,
-        cell_axis: &cell_axis,
-        feat_weights: &feat_weights,
-        file_samplers: &file_samplers,
-        dev: &dev,
-    };
-    let train_params = TrainingParams {
         epochs: args.epochs,
         batches_per_epoch: args.batches_per_epoch,
         batch_size: args.batch_size,
         num_negatives: args.num_negatives,
+        learning_rate: args.learning_rate,
         seed: args.seed,
+        device: args.device.to_device(args.device_no)?,
+        feature_network,
+        stop: None,
     };
-    train(
-        &model,
-        &mut opt,
-        &train_ctx,
-        &train_params,
-        smoother.as_mut(),
-    )?;
 
-    save_outputs(
-        &model,
-        &OutputContext {
+    let out = ge::fit(&unified, config)?;
+
+    ge::save_outputs(
+        &out.model,
+        &ge::OutputContext {
             feature_names: &unified.feature_names,
             barcodes: &unified.barcodes,
         },
