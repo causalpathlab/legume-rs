@@ -196,7 +196,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         let module_of_gene =
             leiden_gene_modules(&gene_graph, &keep, args.gene_modules_resolution, c.seed);
 
-        gene_graph.to_parquet(&(c.out.to_string() + ".gene_graph.parquet"))?;
+        gene_graph.to_parquet(
+            &(c.out.to_string() + ".gene_graph.parquet"),
+            ("gene1", "gene2"),
+        )?;
 
         let basis = ModulePairBasis::build(&gene_graph, module_of_gene);
         anyhow::ensure!(
