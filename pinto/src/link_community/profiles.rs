@@ -631,7 +631,7 @@ impl ModulePairBasis {
         // Canonical module-pair weights via sorted (a, b).
         let mut pair_weights: HashMap<(u32, u32), f64> = Default::default();
         let mut deg = vec![0.0f64; n_modules];
-        for &(u, v) in &graph.gene_edges {
+        for &(u, v) in &graph.feature_edges {
             let (Some(mu), Some(mv)) = (module_of_gene[u], module_of_gene[v]) else {
                 continue;
             };

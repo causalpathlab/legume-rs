@@ -15,8 +15,8 @@ use log::info;
 /// Per-gene degree within the subgraph induced by `keep` (count only edges
 /// with both endpoints kept).
 fn subgraph_degrees(graph: &GenePairGraph, keep: &[bool]) -> Vec<usize> {
-    let mut deg = vec![0usize; graph.n_genes];
-    for &(u, v) in &graph.gene_edges {
+    let mut deg = vec![0usize; graph.n_features];
+    for &(u, v) in &graph.feature_edges {
         if keep[u] && keep[v] {
             deg[u] += 1;
             deg[v] += 1;
@@ -27,10 +27,10 @@ fn subgraph_degrees(graph: &GenePairGraph, keep: &[bool]) -> Vec<usize> {
 
 /// Iteratively trim genes with in-subgraph degree below `min_degree`.
 ///
-/// Returns a boolean mask of length `graph.n_genes`: `true` means the gene
+/// Returns a boolean mask of length `graph.n_features`: `true` means the gene
 /// survives, `false` means it was dropped in some round.
 pub fn kcore_trim(graph: &GenePairGraph, min_degree: usize) -> Vec<bool> {
-    let n = graph.n_genes;
+    let n = graph.n_features;
     let mut alive = vec![true; n];
     if min_degree == 0 {
         return alive;
@@ -72,16 +72,16 @@ pub fn leiden_gene_modules(
     resolution: f64,
     seed: u64,
 ) -> Vec<Option<usize>> {
-    assert_eq!(keep.len(), graph.n_genes);
+    assert_eq!(keep.len(), graph.n_features);
 
     // Restrict to non-isolated kept genes: a kept gene with all its
     // neighbors trimmed away would produce a singleton Leiden module with
     // no signal — drop those to None for cleaner output.
     let sub_degrees = subgraph_degrees(graph, keep);
     let sub_of: Vec<Option<usize>> = {
-        let mut out = vec![None; graph.n_genes];
+        let mut out = vec![None; graph.n_features];
         let mut next = 0usize;
-        for g in 0..graph.n_genes {
+        for g in 0..graph.n_features {
             if keep[g] && sub_degrees[g] > 0 {
                 out[g] = Some(next);
                 next += 1;
@@ -93,18 +93,18 @@ pub fn leiden_gene_modules(
 
     if n_sub == 0 {
         info!("leiden_gene_modules: empty subgraph");
-        return vec![None; graph.n_genes];
+        return vec![None; graph.n_features];
     }
 
     // Build leiden::Network: node weights = subgraph degree, edge weights = 1.0.
     let mut total_edge_weight = 0.0f64;
     let mut network = leiden::Network::with_capacity(n_sub);
-    for g in 0..graph.n_genes {
+    for g in 0..graph.n_features {
         if sub_of[g].is_some() {
             network.add_node(sub_degrees[g] as f32);
         }
     }
-    for &(u, v) in &graph.gene_edges {
+    for &(u, v) in &graph.feature_edges {
         if let (Some(su), Some(sv)) = (sub_of[u], sub_of[v]) {
             network.add_edge(su, sv, 1.0);
             total_edge_weight += 1.0;
@@ -122,8 +122,8 @@ pub fn leiden_gene_modules(
     matrix_util::knn_graph::compact_labels(&mut compact);
     let n_modules = compact.iter().copied().max().map_or(0, |m| m + 1);
 
-    let mut out = vec![None; graph.n_genes];
-    for g in 0..graph.n_genes {
+    let mut out = vec![None; graph.n_features];
+    for g in 0..graph.n_features {
         if let Some(sub) = sub_of[g] {
             out[g] = Some(compact[sub]);
         }
