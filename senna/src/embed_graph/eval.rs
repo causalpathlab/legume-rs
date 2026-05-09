@@ -1,9 +1,11 @@
-//! Output writers for trained joint multi-modal embeddings.
+//! Output writers for `senna embed-graph`.
 //!
-//! Parquet outputs consistent with senna / chickpea topic conventions
-//! (`to_parquet_with_names` keyed on row names + `H{i}` column ids).
+//! Conforms to senna's parquet conventions:
+//! - `{out}.latent.parquet` (cell × H), col prefix `h`
+//! - `{out}.dictionary.parquet` (feature × H), col prefix `h`
+//! - `{out}.cell_bias.parquet` / `{out}.feature_bias.parquet`
 
-use crate::embed::model::JointEmbedModel;
+use crate::embed_graph::model::JointEmbedModel;
 use candle_util::candle_core::Tensor;
 use matrix_util::traits::IoOps;
 
@@ -18,28 +20,28 @@ pub fn save_outputs(
     out_prefix: &str,
 ) -> anyhow::Result<()> {
     save_embedding(
-        &format!("{out_prefix}.e_feat.parquet"),
-        &model.e_feat,
-        ctx.feature_names,
-        "feature",
-    )?;
-    save_embedding(
-        &format!("{out_prefix}.e_cell.parquet"),
+        &format!("{out_prefix}.latent.parquet"),
         &model.e_cell,
         ctx.barcodes,
         "cell",
     )?;
-    save_bias(
-        &format!("{out_prefix}.b_feat.parquet"),
-        &model.b_feat,
+    save_embedding(
+        &format!("{out_prefix}.dictionary.parquet"),
+        &model.e_feat,
         ctx.feature_names,
         "feature",
     )?;
     save_bias(
-        &format!("{out_prefix}.b_cell.parquet"),
+        &format!("{out_prefix}.cell_bias.parquet"),
         &model.b_cell,
         ctx.barcodes,
         "cell",
+    )?;
+    save_bias(
+        &format!("{out_prefix}.feature_bias.parquet"),
+        &model.b_feat,
+        ctx.feature_names,
+        "feature",
     )?;
     Ok(())
 }

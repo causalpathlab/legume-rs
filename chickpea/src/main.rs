@@ -1,7 +1,4 @@
-mod cluster;
 mod common;
-mod embed;
-mod manifest;
 mod topic;
 
 use crate::common::*;
@@ -76,14 +73,6 @@ enum Commands {
         alias = "topic"
     )]
     FitTopic(topic::fit::FitTopicArgs),
-
-    /// SIMBA-inspired joint multi-modal graph embedding (count-NCE)
-    #[command(after_long_help = ENV_HELP, alias = "embed")]
-    EmbedGraph(embed::fit::EmbedGraphArgs),
-
-    /// kNN + Leiden clustering on a cell embedding (e.g. embed-graph's e_cell)
-    #[command(after_long_help = ENV_HELP)]
-    Cluster(cluster::ClusterArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -103,7 +92,5 @@ fn main() -> anyhow::Result<()> {
 
     match &cli.commands {
         Commands::FitTopic(args) => topic::fit::fit_topic_model(args),
-        Commands::EmbedGraph(args) => embed::fit::embed_graph(args),
-        Commands::Cluster(args) => cluster::cluster(args),
     }
 }

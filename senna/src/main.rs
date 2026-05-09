@@ -37,6 +37,7 @@ mod cluster_aggregation;
 mod cluster_bhc;
 mod cnv_pseudobulk;
 mod embed_common;
+mod embed_graph;
 mod empirical_dict;
 mod eval_topic;
 mod fit_clustering;
@@ -62,6 +63,7 @@ mod tree_layout;
 
 use annotate::{annotate_run, AnnotateArgs};
 use embed_common::*;
+use embed_graph::{fit_embed_graph, EmbedGraphArgs};
 use eval_topic::*;
 use fit_clustering::*;
 use fit_indexed_topic::*;
@@ -202,6 +204,21 @@ enum Commands {
     )]
     JointSvd(JointSvdArgs),
 
+    #[command(
+        about = "Train: SIMBA-inspired count-NCE graph embedding (modality-agnostic).",
+        long_about = "Joint embedding of features and cells in a single H-dim space \
+                      via discriminative count-noise-contrastive estimation on a \
+                      sketch-coarsened pseudobulk graph. Each input file contributes \
+                      its rows to a shared feature axis; cell barcodes union across \
+                      files. Modality-agnostic — works for any number of count panels \
+                      (RNA, ATAC, protein, …). Bilinear `E_f · E_c` scoring with \
+                      per-file rebalanced sampling and same-file hard negatives.\n\n\
+                      Writes {out}.{latent,dictionary,cell_bias,feature_bias}.parquet, \
+                      {out}.senna.json.",
+        alias = "embed"
+    )]
+    EmbedGraph(EmbedGraphArgs),
+
     // ─────────── 2. Held-out inference ───────────
     #[command(
         about = "Apply a trained topic / indexed-topic model to held-out data.",
@@ -324,6 +341,9 @@ fn main() -> anyhow::Result<()> {
     match &cli.commands {
         Commands::Svd(args) => {
             fit_svd(args)?;
+        }
+        Commands::EmbedGraph(args) => {
+            fit_embed_graph(args)?;
         }
         Commands::Topic(args) => {
             fit_topic_model(args)?;

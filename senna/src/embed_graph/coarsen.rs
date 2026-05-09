@@ -1,8 +1,8 @@
 //! Multi-seed sketch coarsening for cells. K `FeatureCoarsening`s
 //! built from random-projection sketches over the triplet stream.
 
-use crate::common::*;
-use crate::embed::data::Triplet;
+use crate::embed_common::*;
+use crate::embed_graph::data::Triplet;
 use data_beans_alg::feature_coarsening::compute_feature_coarsening;
 use nalgebra::DMatrix;
 use rand::{rngs::StdRng, RngExt, SeedableRng};

@@ -227,7 +227,7 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
     if let Some(prefix) = params.init_from.as_deref() {
         crate::topic::init::init_feature_embeddings_from_parquet(
             &varmap,
-            &format!("{prefix}.e_feat.parquet"),
+            &format!("{prefix}.dictionary.parquet"),
             "encoder",
             ctx.gene_names,
             ctx.peak_names,

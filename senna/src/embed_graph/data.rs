@@ -2,7 +2,7 @@
 //! file contributes its rows to a unified feature axis; cells (barcodes)
 //! are unioned across files.
 
-use crate::common::*;
+use crate::embed_common::*;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use rustc_hash::FxHashMap;
 
