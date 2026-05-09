@@ -12,6 +12,7 @@
 pub mod coarsen;
 pub mod data;
 pub mod eval;
+pub mod feature_network;
 pub mod fit;
 pub mod loss;
 pub mod model;

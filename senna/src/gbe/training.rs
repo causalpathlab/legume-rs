@@ -3,6 +3,7 @@
 use crate::embed_common::*;
 use crate::gbe::coarsen::AxisCoarsenings;
 use crate::gbe::data::UnifiedData;
+use crate::gbe::feature_network::FeatureNetworkSmoother;
 use crate::gbe::loss::{nce_loss, sample_edge_batch, EdgeBatchArgs, PerFileSampler};
 use crate::gbe::model::JointEmbedModel;
 use candle_util::candle_core::Device;
@@ -31,6 +32,7 @@ pub fn train(
     opt: &mut AdamW,
     ctx: &TrainingContext,
     params: &TrainingParams,
+    smoother: Option<&mut FeatureNetworkSmoother>,
 ) -> anyhow::Result<()> {
     let pb = ProgressBar::new(params.epochs as u64);
     pb.set_style(
@@ -44,7 +46,16 @@ pub fn train(
     let n_files = ctx.file_samplers.len();
     assert!(n_files > 0, "no input files");
 
+    let refresh_every = smoother.as_ref().map(|s| s.refresh_epochs).unwrap_or(0);
+    let mut smoother = smoother;
+
     for epoch in 0..params.epochs {
+        if let Some(sm) = smoother.as_deref_mut() {
+            if epoch % refresh_every == 0 {
+                sm.refresh(&model.e_feat, ctx.dev)?;
+            }
+        }
+
         let mut loss_sum = 0f32;
         let mut n_steps = 0usize;
 
@@ -67,7 +78,13 @@ pub fn train(
                 &mut rng,
             );
 
-            let loss = nce_loss(model, batch, &cc.coarse_to_fine, ctx.dev)?;
+            let loss = nce_loss(
+                model,
+                batch,
+                &cc.coarse_to_fine,
+                smoother.as_deref(),
+                ctx.dev,
+            )?;
 
             opt.backward_step(&loss)?;
             loss_sum += loss.to_scalar::<f32>()?;

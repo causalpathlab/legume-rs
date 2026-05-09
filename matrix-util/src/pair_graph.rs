@@ -10,12 +10,10 @@
 use crate::common_io::read_lines_of_words_delim;
 use crate::graph::AdjListGraph;
 use crate::membership::{detect_delimiter, GeneIndexResolver};
-use crate::parquet::{
-    parquet_add_bytearray, parquet_add_string_column, ParquetWriter,
-};
+use crate::parquet::{parquet_add_bytearray, parquet_add_string_column, ParquetWriter};
 use log::info;
-use rustc_hash::FxHashSet as HashSet;
 use parquet::basic::Type as ParquetType;
+use rustc_hash::FxHashSet as HashSet;
 
 pub struct FeaturePairGraph {
     pub feature_names: Vec<Box<str>>,
@@ -137,8 +135,7 @@ impl FeaturePairGraph {
             neighbor_set[v].insert(u);
         }
 
-        let mut existing: HashSet<(usize, usize)> =
-            self.feature_edges.iter().copied().collect();
+        let mut existing: HashSet<(usize, usize)> = self.feature_edges.iter().copied().collect();
 
         let mut added = 0usize;
         for u in 0..self.n_features {
@@ -192,14 +189,9 @@ impl FeaturePairGraph {
     /// Write the canonical edge list (two columns of feature names) to
     /// parquet. `col_names` lets callers pick `("gene1","gene2")`,
     /// `("peak1","peak2")`, etc.
-    pub fn to_parquet(
-        &self,
-        file_path: &str,
-        col_names: (&str, &str),
-    ) -> anyhow::Result<()> {
+    pub fn to_parquet(&self, file_path: &str, col_names: (&str, &str)) -> anyhow::Result<()> {
         let n_edges = self.feature_edges.len();
-        let column_names: Vec<Box<str>> =
-            vec![col_names.0.into(), col_names.1.into()];
+        let column_names: Vec<Box<str>> = vec![col_names.0.into(), col_names.1.into()];
         let column_types = vec![ParquetType::BYTE_ARRAY, ParquetType::BYTE_ARRAY];
 
         let shape = (n_edges, column_names.len());
@@ -238,13 +230,8 @@ impl FeaturePairGraph {
 
 /// Synthetic test graph with feature names `g0..g{n-1}` from an unordered
 /// edge list. Public so downstream test modules can reuse it.
-pub fn test_graph_from_edges(
-    edges: &[(usize, usize)],
-    n_features: usize,
-) -> FeaturePairGraph {
-    let names: Vec<Box<str>> = (0..n_features)
-        .map(|i| format!("g{}", i).into())
-        .collect();
+pub fn test_graph_from_edges(edges: &[(usize, usize)], n_features: usize) -> FeaturePairGraph {
+    let names: Vec<Box<str>> = (0..n_features).map(|i| format!("g{}", i).into()).collect();
     let mut canonical: Vec<(usize, usize)> = edges
         .iter()
         .map(|&(a, b)| if a < b { (a, b) } else { (b, a) })
@@ -281,13 +268,8 @@ mod tests {
     fn from_edge_list_exact_match() {
         let file = write_edge_file(&["TP53\tBRCA1", "BRCA1\tEGFR", "TP53\tEGFR"]);
         let names = names_of(&["TP53", "BRCA1", "EGFR", "MYC"]);
-        let g = FeaturePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let g = FeaturePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+            .unwrap();
         assert_eq!(g.num_features(), 4);
         assert_eq!(g.num_edges(), 3);
         assert_eq!(g.feature_edges, vec![(0, 1), (0, 2), (1, 2)]);
@@ -297,13 +279,8 @@ mod tests {
     fn from_edge_list_dedup_and_self_loop() {
         let file = write_edge_file(&["A\tB", "B\tA", "A\tB", "A\tA"]);
         let names = names_of(&["A", "B", "C"]);
-        let g = FeaturePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let g = FeaturePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+            .unwrap();
         assert_eq!(g.feature_edges, vec![(0, 1)]);
     }
 
@@ -311,13 +288,8 @@ mod tests {
     fn from_edge_list_unmatched_skipped() {
         let file = write_edge_file(&["TP53\tBRCA1", "UNK\tBRCA1", "TP53\tUNK2"]);
         let names = names_of(&["TP53", "BRCA1"]);
-        let g = FeaturePairGraph::from_edge_list(
-            file.path().to_str().unwrap(),
-            names,
-            false,
-            None,
-        )
-        .unwrap();
+        let g = FeaturePairGraph::from_edge_list(file.path().to_str().unwrap(), names, false, None)
+            .unwrap();
         assert_eq!(g.feature_edges, vec![(0, 1)]);
     }
 

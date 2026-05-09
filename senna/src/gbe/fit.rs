@@ -4,12 +4,14 @@ use crate::embed_common::*;
 use crate::gbe::coarsen::{build_cell_coarsenings, CellCoarseningArgs};
 use crate::gbe::data::load_unified_data;
 use crate::gbe::eval::{save_outputs, OutputContext};
+use crate::gbe::feature_network::FeatureNetworkSmoother;
 use crate::gbe::loss::build_per_file_samplers;
 use crate::gbe::model::{BiasInit, JointEmbedModel, ModelArgs};
 use crate::gbe::training::{train, TrainingContext, TrainingParams};
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
+use matrix_util::pair_graph::FeaturePairGraph;
 
 #[derive(Args, Debug)]
 pub struct GbeArgs {
@@ -67,6 +69,52 @@ pub struct GbeArgs {
 
     #[arg(long, default_value_t = 1, help = "Random seed (base)")]
     seed: u64,
+
+    #[arg(
+        long,
+        help = "Optional feature-feature edge list (TSV/CSV; e.g. \
+                BioGRID, STRING, synthetic-lethality). Activates SGC \
+                smoothing of E_feat through the K-hop normalized \
+                adjacency."
+    )]
+    feature_network: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Allow prefix matching when resolving feature-network names"
+    )]
+    feature_network_prefix_match: bool,
+
+    #[arg(
+        long,
+        help = "Optional name-stripping delimiter for feature-network resolution \
+                (e.g. '.' to match `TP53.1` → `TP53`)"
+    )]
+    feature_network_delim: Option<char>,
+
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "SGC propagation hops K (default 2 — useful for sparse synthetic-\
+                lethality / regulatory networks). K=2 already reaches all \
+                shared-neighbor pairs, so no separate SNN augmentation is needed."
+    )]
+    feature_network_k: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.1,
+        help = "SGC neighbor-mix coefficient α ∈ [0, 1]; smaller = gentler nudge"
+    )]
+    feature_network_alpha: f32,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Re-propagate the frozen network residual every N epochs"
+    )]
+    feature_network_refresh: usize,
 
     #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
     device: ComputeDevice,
@@ -168,6 +216,39 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         alpha_neg,
     );
 
+    let mut smoother = if let Some(path) = args.feature_network.as_deref() {
+        info!("Loading feature network from {}...", path);
+        let graph = FeaturePairGraph::from_edge_list(
+            path,
+            unified.feature_names.to_vec(),
+            args.feature_network_prefix_match,
+            args.feature_network_delim,
+        )?;
+        if graph.num_edges() == 0 {
+            anyhow::bail!(
+                "Feature network has 0 matched edges — check name resolution \
+                 (--feature-network-delim / --feature-network-prefix-match)."
+            );
+        }
+        info!(
+            "SGC smoothing: K={}, α={}, refresh={} epochs over {} edges",
+            args.feature_network_k,
+            args.feature_network_alpha,
+            args.feature_network_refresh,
+            graph.num_edges()
+        );
+        Some(FeatureNetworkSmoother::new(
+            &graph,
+            n_features,
+            args.embedding_dim,
+            args.feature_network_alpha,
+            args.feature_network_k,
+            args.feature_network_refresh,
+        )?)
+    } else {
+        None
+    };
+
     let train_ctx = TrainingContext {
         unified: &unified,
         cell_axis: &cell_axis,
@@ -182,7 +263,13 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         num_negatives: args.num_negatives,
         seed: args.seed,
     };
-    train(&model, &mut opt, &train_ctx, &train_params)?;
+    train(
+        &model,
+        &mut opt,
+        &train_ctx,
+        &train_params,
+        smoother.as_mut(),
+    )?;
 
     save_outputs(
         &model,

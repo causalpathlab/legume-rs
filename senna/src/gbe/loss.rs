@@ -2,6 +2,7 @@
 //! positive (cell, feature) edges vs same-file marginal^α negatives.
 
 use crate::gbe::data::Triplet;
+use crate::gbe::feature_network::{select_feat_emb, FeatureNetworkSmoother};
 use crate::gbe::model::JointEmbedModel;
 use candle_util::candle_core::{Device, Result, Tensor};
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
@@ -119,6 +120,7 @@ pub fn nce_loss(
     model: &JointEmbedModel,
     batch: EdgeBatch,
     cell_coarse_to_fine: &[Vec<usize>],
+    smoother: Option<&FeatureNetworkSmoother>,
     dev: &Device,
 ) -> Result<Tensor> {
     let b = batch.coarse_cells.len();
@@ -135,11 +137,11 @@ pub fn nce_loss(
     let b_cell_pos = b_cell_u.index_select(&cell_idx_t, 0)?;
 
     let pos_feat_idx_t = Tensor::from_vec(batch.fine_feats, b, dev)?;
-    let e_feat_pos = model.e_feat.index_select(&pos_feat_idx_t, 0)?;
+    let e_feat_pos = select_feat_emb(smoother, &model.e_feat, &pos_feat_idx_t)?;
     let b_feat_pos = model.b_feat.index_select(&pos_feat_idx_t, 0)?;
 
     let neg_feat_idx_t = Tensor::from_vec(batch.neg_feats, b * k, dev)?;
-    let e_feat_neg_flat = model.e_feat.index_select(&neg_feat_idx_t, 0)?;
+    let e_feat_neg_flat = select_feat_emb(smoother, &model.e_feat, &neg_feat_idx_t)?;
     let b_feat_neg_flat = model.b_feat.index_select(&neg_feat_idx_t, 0)?;
     let h = e_feat_neg_flat.dim(1)?;
     let e_feat_neg = e_feat_neg_flat.reshape((b, k, h))?;
