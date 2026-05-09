@@ -7,6 +7,7 @@ pub mod decoder;
 pub mod encoder;
 pub mod eval;
 pub mod fit;
+pub mod init;
 pub mod input;
 pub mod linkage;
 pub mod susie;

@@ -1,21 +1,21 @@
 //! Joint multiome embedding tables + bias terms + bilinear scoring.
 //!
-//! Three free embedding tables (`E_gene`, `E_peak`, `E_cell`) plus three
-//! bias vectors (`b_gene`, `b_peak`, `b_cell`). Score for a `(feature, cell)`
-//! edge under a Poisson rate model:
+//! Two free embedding tables (`E_feat` over genes ∪ peaks, `E_cell`)
+//! plus two bias vectors (`b_feat`, `b_cell`). Score for a
+//! `(feature, cell)` edge under a Poisson rate model:
 //!
 //!   `score(f, c) = E_feat[f] · E_cell[c] + b_feat[f] + b_cell[c]`
 //!
-//! At training time the model operates on coarsened nodes: fine
-//! embeddings are mean-pooled (per the batch's chosen seed coarsening)
-//! over the fine children of each touched coarse block.
+//! Features are addressed at fine resolution. The cell axis is
+//! coarsened: cell embeddings are mean-pooled (per the batch's chosen
+//! seed coarsening) over the fine children of each touched super-cell.
 
 use candle_util::candle_core::{DType, Device, Result, Tensor};
 use candle_util::candle_nn::{self, VarBuilder, VarMap};
 
 /// Hyperparameters for `JointEmbedModel::new`.
 pub struct ModelArgs {
-    /// Total feature cardinality `n_genes + n_peaks` (unified axis).
+    /// Total feature cardinality (unified across all input files).
     pub n_features: usize,
     pub n_cells: usize,
     pub embedding_dim: usize,
@@ -76,22 +76,6 @@ impl JointEmbedModel {
         pool_axis(
             &self.e_cell,
             &self.b_cell,
-            coarse_blocks,
-            coarse_to_fine,
-            dev,
-        )
-    }
-
-    /// Mean-pool the unified feature embedding table.
-    pub fn pool_features(
-        &self,
-        coarse_blocks: &[u32],
-        coarse_to_fine: &[Vec<usize>],
-        dev: &Device,
-    ) -> Result<(Tensor, Tensor)> {
-        pool_axis(
-            &self.e_feat,
-            &self.b_feat,
             coarse_blocks,
             coarse_to_fine,
             dev,
