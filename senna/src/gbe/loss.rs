@@ -1,8 +1,8 @@
 //! Count-NCE loss: NEG-style binary logistic over count-weighted
 //! positive (cell, feature) edges vs same-file marginal^α negatives.
 
-use crate::embed_graph::data::Triplet;
-use crate::embed_graph::model::JointEmbedModel;
+use crate::gbe::data::Triplet;
+use crate::gbe::model::JointEmbedModel;
 use candle_util::candle_core::{Device, Result, Tensor};
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use rand::Rng;

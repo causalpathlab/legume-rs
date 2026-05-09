@@ -37,7 +37,6 @@ mod cluster_aggregation;
 mod cluster_bhc;
 mod cnv_pseudobulk;
 mod embed_common;
-mod embed_graph;
 mod empirical_dict;
 mod eval_topic;
 mod fit_clustering;
@@ -45,6 +44,7 @@ mod fit_indexed_topic;
 mod fit_joint_topic;
 mod fit_pseudotime;
 mod fit_topic;
+mod gbe;
 mod geometry;
 mod hvg;
 mod logging;
@@ -63,13 +63,13 @@ mod tree_layout;
 
 use annotate::{annotate_run, AnnotateArgs};
 use embed_common::*;
-use embed_graph::{fit_embed_graph, EmbedGraphArgs};
 use eval_topic::*;
 use fit_clustering::*;
 use fit_indexed_topic::*;
 use fit_joint_topic::*;
 use fit_pseudotime::{run_pseudotime, PseudotimeArgs};
 use fit_topic::*;
+use gbe::{fit_gbe, GbeArgs};
 use postprocess::*;
 use predict::{predict_model, PredictArgs};
 use svd::*;
@@ -205,19 +205,20 @@ enum Commands {
     JointSvd(JointSvdArgs),
 
     #[command(
-        about = "Train: SIMBA-inspired count-NCE graph embedding (modality-agnostic).",
+        about = "Train: graph-based embedding (count-NCE, modality-agnostic).",
         long_about = "Joint embedding of features and cells in a single H-dim space \
                       via discriminative count-noise-contrastive estimation on a \
-                      sketch-coarsened pseudobulk graph. Each input file contributes \
-                      its rows to a shared feature axis; cell barcodes union across \
-                      files. Modality-agnostic — works for any number of count panels \
-                      (RNA, ATAC, protein, …). Bilinear `E_f · E_c` scoring with \
-                      per-file rebalanced sampling and same-file hard negatives.\n\n\
+                      sketch-coarsened pseudobulk (cell, feature) bipartite graph. \
+                      Each input file contributes its rows to a shared feature axis; \
+                      cell barcodes union across files. Modality-agnostic — works \
+                      for any number of count panels (RNA, ATAC, protein, …). \
+                      Bilinear `E_f · E_c` scoring with per-file rebalanced \
+                      sampling and same-file hard negatives.\n\n\
                       Writes {out}.{latent,dictionary,cell_bias,feature_bias}.parquet, \
                       {out}.senna.json.",
-        alias = "embed"
+        alias = "embed-graph"
     )]
-    EmbedGraph(EmbedGraphArgs),
+    Gbe(GbeArgs),
 
     // ─────────── 2. Held-out inference ───────────
     #[command(
@@ -342,8 +343,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Svd(args) => {
             fit_svd(args)?;
         }
-        Commands::EmbedGraph(args) => {
-            fit_embed_graph(args)?;
+        Commands::Gbe(args) => {
+            fit_gbe(args)?;
         }
         Commands::Topic(args) => {
             fit_topic_model(args)?;

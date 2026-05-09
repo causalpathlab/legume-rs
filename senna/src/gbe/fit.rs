@@ -1,18 +1,18 @@
-//! `senna embed-graph` entry point.
+//! `senna gbe` entry point.
 
 use crate::embed_common::*;
-use crate::embed_graph::coarsen::{build_cell_coarsenings, CellCoarseningArgs};
-use crate::embed_graph::data::load_unified_data;
-use crate::embed_graph::eval::{save_outputs, OutputContext};
-use crate::embed_graph::loss::build_per_file_samplers;
-use crate::embed_graph::model::{BiasInit, JointEmbedModel, ModelArgs};
-use crate::embed_graph::training::{train, TrainingContext, TrainingParams};
+use crate::gbe::coarsen::{build_cell_coarsenings, CellCoarseningArgs};
+use crate::gbe::data::load_unified_data;
+use crate::gbe::eval::{save_outputs, OutputContext};
+use crate::gbe::loss::build_per_file_samplers;
+use crate::gbe::model::{BiasInit, JointEmbedModel, ModelArgs};
+use crate::gbe::training::{train, TrainingContext, TrainingParams};
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
 
 #[derive(Args, Debug)]
-pub struct EmbedGraphArgs {
+pub struct GbeArgs {
     #[arg(
         required = true,
         value_delimiter = ',',
@@ -86,7 +86,7 @@ pub struct EmbedGraphArgs {
     out: Box<str>,
 }
 
-pub fn fit_embed_graph(args: &EmbedGraphArgs) -> anyhow::Result<()> {
+pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     let dev = match args.device {
@@ -200,7 +200,7 @@ pub fn fit_embed_graph(args: &EmbedGraphArgs) -> anyhow::Result<()> {
         .map(|v| v.iter().map(|s| s.to_string()).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        kind: crate::run_manifest::RunKind::EmbedGraph,
+        kind: crate::run_manifest::RunKind::Gbe,
         prefix: &args.out,
         data_input: &input,
         data_batch: &batch,
@@ -214,7 +214,10 @@ pub fn fit_embed_graph(args: &EmbedGraphArgs) -> anyhow::Result<()> {
         default_colour_by: "cluster",
     })?;
 
-    info!("Done — outputs at {}.{{latent,dictionary,*_bias}}.parquet", args.out);
+    info!(
+        "Done — outputs at {}.{{latent,dictionary,*_bias}}.parquet",
+        args.out
+    );
 
     Ok(())
 }

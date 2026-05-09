@@ -1,10 +1,10 @@
 //! Inner count-NCE training loop for `chickpea embed-graph`.
 
 use crate::embed_common::*;
-use crate::embed_graph::coarsen::AxisCoarsenings;
-use crate::embed_graph::data::UnifiedData;
-use crate::embed_graph::loss::{nce_loss, sample_edge_batch, EdgeBatchArgs, PerFileSampler};
-use crate::embed_graph::model::JointEmbedModel;
+use crate::gbe::coarsen::AxisCoarsenings;
+use crate::gbe::data::UnifiedData;
+use crate::gbe::loss::{nce_loss, sample_edge_batch, EdgeBatchArgs, PerFileSampler};
+use crate::gbe::model::JointEmbedModel;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer};
 use indicatif::{ProgressBar, ProgressStyle};

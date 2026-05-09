@@ -1,11 +1,11 @@
-//! Output writers for `senna embed-graph`.
+//! Output writers for `senna gbe`.
 //!
 //! Conforms to senna's parquet conventions:
 //! - `{out}.latent.parquet` (cell × H), col prefix `h`
 //! - `{out}.dictionary.parquet` (feature × H), col prefix `h`
 //! - `{out}.cell_bias.parquet` / `{out}.feature_bias.parquet`
 
-use crate::embed_graph::model::JointEmbedModel;
+use crate::gbe::model::JointEmbedModel;
 use candle_util::candle_core::Tensor;
 use matrix_util::traits::IoOps;
 
