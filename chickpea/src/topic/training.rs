@@ -18,6 +18,8 @@ pub struct TrainingContext<'a> {
     pub atac_coarsenings: &'a [Option<FeatureCoarsening>],
     pub cis_mask: &'a Tensor,
     pub flat_cis_indices: &'a Tensor,
+    pub gene_names: &'a [Box<str>],
+    pub peak_names: &'a [Box<str>],
     pub n_genes: usize,
     pub n_peaks: usize,
     pub c_max: usize,
@@ -38,6 +40,7 @@ pub struct TrainingParams {
     pub sort_dim: usize,
     pub embedding_dim: usize,
     pub context_size: usize,
+    pub init_from: Option<Box<str>>,
 }
 
 pub struct TrainedModel {
@@ -220,6 +223,18 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
         &varmap,
         vs.pp("encoder"),
     )?;
+
+    if let Some(prefix) = params.init_from.as_deref() {
+        crate::topic::init::init_feature_embeddings_from_parquet(
+            &varmap,
+            &format!("{prefix}.e_feat.parquet"),
+            "encoder",
+            ctx.gene_names,
+            ctx.peak_names,
+            params.embedding_dim,
+            ctx.dev,
+        )?;
+    }
 
     let mut adam = AdamW::new(
         varmap.all_vars(),
