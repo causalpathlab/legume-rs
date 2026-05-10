@@ -324,12 +324,15 @@ pub fn sample_chain_batch(args: ChainBatchArgs, rng: &mut impl Rng) -> ChainBatc
 }
 
 /// One axis's cell-side resolution for chain scoring. The chain loss
-/// gathers `e_cell.index_select(indices)` and scores against the
-/// shared (already-gathered) feature side.
+/// gathers `e_cell.index_select(&indices)` and scores against the
+/// shared (already-gathered) feature side. `indices` is a pre-built
+/// `[B] u32` index tensor — building it in the caller (once per axis
+/// per step) avoids a second `Vec<u32> → Tensor` round-trip inside the
+/// loss.
 pub struct ChainAxis<'a> {
     pub e_cell: &'a Tensor,
     pub b_cell: &'a Tensor,
-    pub indices: &'a [u32],
+    pub indices: &'a Tensor,
     pub lambda: f32,
     /// Used in `nce_loss_chain`'s error diagnostics.
     pub label: &'a str,
@@ -378,16 +381,14 @@ pub fn nce_loss_chain(
 
     let mut total: Option<Tensor> = None;
     for axis in axes {
+        let n = axis.indices.dims1()?;
         anyhow::ensure!(
-            axis.indices.len() == b,
-            "chain axis {} indices ({}) != batch_size ({})",
+            n == b,
+            "chain axis {} indices ({n}) != batch_size ({b})",
             axis.label,
-            axis.indices.len(),
-            b
         );
-        let cell_idx = Tensor::from_vec(axis.indices.to_vec(), b, dev)?;
-        let e_cell_pos = axis.e_cell.index_select(&cell_idx, 0)?;
-        let b_cell_pos = axis.b_cell.index_select(&cell_idx, 0)?;
+        let e_cell_pos = axis.e_cell.index_select(axis.indices, 0)?;
+        let b_cell_pos = axis.b_cell.index_select(axis.indices, 0)?;
 
         let pos_score =
             JointEmbedModel::score_diag(&e_feat_pos, &e_cell_pos, &b_feat_pos, &b_cell_pos)?;
