@@ -134,6 +134,12 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
         learning_rate: args.learning_rate,
         seed: c.seed,
         device: dev,
+        block_size: c.block_size,
+        fisher_weights_cache: if args.no_fisher_cache {
+            None
+        } else {
+            Some(format!("{}.fisher_weights.parquet", c.out).into_boxed_str())
+        },
         feature_network,
         cell_cell,
         stop: None,
