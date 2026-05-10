@@ -19,7 +19,7 @@ use plot_utils::palette::{self, Palette, Rgb};
 use plot_utils::rasterize::{
     rasterize_group_png, rasterize_segment_layer_png, DataBounds, Extent, PointShape, RadiusSpec,
 };
-use plot_utils::svg_emit::{emit_svg, SvgOpts, TopicLayer};
+use plot_utils::svg_emit::{emit_svg, flatten_raster_layers, SvgOpts, TopicLayer};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 
@@ -88,26 +88,19 @@ fn compute_adaptive_params(core: &CoreSpec, args: &SrtPlotArgs) -> (f32, u32, f3
     let adaptive_point_size =
         (base_point_size / density_ratio.powf(0.85)).clamp(0.05, base_point_size * 2.0);
 
-    // DPI: proportional to cbrt(density) to handle extreme densities gracefully
-    // At low density (100 cells/sqin), DPI stays at base
-    // At medium density (1k cells/sqin), DPI = base
-    // At high density (10k cells/sqin), DPI increases ~2.15x
-    // At very high density (100k cells/sqin), DPI increases ~4.64x
-    let base_dpi = args.dpi;
-    let adaptive_dpi = if density_ratio > 1.0 {
-        (base_dpi as f32 * density_ratio.cbrt()).round() as u32
-    } else {
-        base_dpi
-    };
-    let adaptive_dpi = adaptive_dpi.clamp(150, 1200);
+    // User's --dpi is the hard ceiling (default 300). The previous
+    // cbrt(density) auto-upscale (cap 1200) made multi-layer PDFs slow on
+    // dense cores without buying much: adaptive_point_size shrinks faster
+    // than DPI grew, so cells were already sub-pixel either way. To opt
+    // back into dense mode pass a higher --dpi explicitly.
+    let adaptive_dpi = args.dpi.max(150);
 
     log::debug!(
-        "density-based adaptive params: {:.0} cells/in² → point_size={:.3}pt (base={:.3}), dpi={} (base={})",
+        "density-based adaptive params: {:.0} cells/in² → point_size={:.3}pt (base={:.3}), dpi={}",
         density,
         adaptive_point_size,
         base_point_size,
         adaptive_dpi,
-        base_dpi
     );
 
     (adaptive_point_size, adaptive_dpi, raw_ar)
@@ -180,19 +173,16 @@ pub fn emit_figure(
     // Auto-enable hulls when any layer carries hull points; thin stroke
     // (~0.5 px) so they read as outlines, not visual noise.
     let any_hull = kept.iter().any(|l| l.hull_px.len() >= 3);
-    let svg = emit_svg(
-        &kept,
-        &SvgOpts {
-            width_px: frame.extent.w,
-            height_px: frame.extent.h,
-            draw_hulls: any_hull,
-            draw_labels: !layers.iter().all(|l| l.label.is_empty()),
-            label_font_size_px: frame.label_font_px,
-            hull_stroke_px: 0.5,
-            hull_fill_alpha: 0.0,
-            frame_stroke_px: if draw_frame { 0.1 } else { 0.0 },
-        },
-    );
+    let opts = SvgOpts {
+        width_px: frame.extent.w,
+        height_px: frame.extent.h,
+        draw_hulls: any_hull,
+        draw_labels: !layers.iter().all(|l| l.label.is_empty()),
+        label_font_size_px: frame.label_font_px,
+        hull_stroke_px: 0.5,
+        hull_fill_alpha: 0.0,
+        frame_stroke_px: if draw_frame { 0.1 } else { 0.0 },
+    };
 
     let with_ext = |ext: &str| -> PathBuf {
         // out_base is a "stub" like `…coreall.community`; filenames may
@@ -201,24 +191,39 @@ pub fn emit_figure(
         PathBuf::from(format!("{}.{ext}", out_base.display()))
     };
 
+    // SVG output keeps the multi-layer form so each topic is a toggleable
+    // group in Illustrator/Inkscape. PDF/PNG composite the per-topic
+    // rasters into a single image stream — same pixels, but the PDF
+    // carries one image instead of K, so files are ~K× smaller and viewers
+    // open them instantly.
     if args.svg {
+        let svg_multi = emit_svg(&kept, &opts);
         let p = with_ext("svg");
-        std::fs::write(&p, svg.as_bytes())?;
+        std::fs::write(&p, svg_multi.as_bytes())?;
         emitted.push(p);
     }
 
     let png_task = args.png.then(|| with_ext("png"));
     let pdf_task = (!args.no_pdf).then(|| with_ext("pdf"));
 
+    let svg_flat = if png_task.is_some() || pdf_task.is_some() {
+        let flat = flatten_raster_layers(&kept, frame.extent.w, frame.extent.h)?;
+        Some(emit_svg(&flat, &opts))
+    } else {
+        None
+    };
+
     let (png_res, pdf_res) = rayon::join(
-        || match &png_task {
-            Some(p) => plot_utils::render_png(&svg, frame.extent.w, frame.extent.h, p)
-                .map(|()| Some(p.clone())),
-            None => Ok(None),
+        || match (&png_task, svg_flat.as_ref()) {
+            (Some(p), Some(svg)) => {
+                plot_utils::render_png(svg, frame.extent.w, frame.extent.h, p)
+                    .map(|()| Some(p.clone()))
+            }
+            _ => Ok(None),
         },
-        || match &pdf_task {
-            Some(p) => plot_utils::render_pdf(&svg, p).map(|()| Some(p.clone())),
-            None => Ok(None),
+        || match (&pdf_task, svg_flat.as_ref()) {
+            (Some(p), Some(svg)) => plot_utils::render_pdf(svg, p).map(|()| Some(p.clone())),
+            _ => Ok(None),
         },
     );
     if let Some(p) = png_res? {
