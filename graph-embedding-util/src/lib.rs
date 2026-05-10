@@ -41,5 +41,5 @@ pub use fit::{
     fit, load_feature_network, CellCellConfig, FeatureNetworkArgs, FeatureNetworkConfig, FitConfig,
     FitOutput,
 };
-pub use model::{BiasInit, JointEmbedModel, ModelArgs};
+pub use model::{JointEmbedModel, ModelArgs, ModelInit, WarmStartArgs};
 pub use stop::setup_stop_handler;

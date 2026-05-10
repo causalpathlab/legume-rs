@@ -13,18 +13,33 @@
 use candle_util::candle_core::{DType, Device, Result, Tensor};
 use candle_util::candle_nn::{self, VarBuilder, VarMap};
 
-/// Hyperparameters for `JointEmbedModel::new`.
+/// Shape of the embedding tables.
 pub struct ModelArgs {
-    /// Total feature cardinality (unified across all input files).
     pub n_features: usize,
     pub n_cells: usize,
     pub embedding_dim: usize,
 }
 
-/// Initialization vectors for bias terms.
-pub struct BiasInit<'a> {
-    pub b_feat: &'a [f32], // length n_features
-    pub b_cell: &'a [f32], // length n_cells
+/// Initial values for [`JointEmbedModel::new_with_init`]. `None` for
+/// either embedding falls back to randn; bias slices must be
+/// dimensionally consistent with [`ModelArgs`].
+pub struct ModelInit<'a> {
+    pub e_feat: Option<&'a nalgebra::DMatrix<f32>>,
+    pub e_cell: Option<&'a nalgebra::DMatrix<f32>>,
+    pub b_feat: &'a [f32],
+    pub b_cell: &'a [f32],
+}
+
+/// Stage-2 inputs for [`JointEmbedModel::new_with_warm_start`]. Frozen
+/// feature side comes in as already-on-device tensors (no `VarMap`
+/// registration); cell side is the only learnable.
+pub struct WarmStartArgs<'a> {
+    pub n_cells: usize,
+    pub embedding_dim: usize,
+    pub frozen_e_feat: Tensor,
+    pub frozen_b_feat: Tensor,
+    pub e_cell_init: Option<&'a nalgebra::DMatrix<f32>>,
+    pub b_cell_init: &'a [f32],
 }
 
 pub struct JointEmbedModel {
@@ -38,29 +53,98 @@ pub struct JointEmbedModel {
 }
 
 impl JointEmbedModel {
-    pub fn new(
+    /// Construct with optional warm-start values for either embedding.
+    /// Used by stage 1 across the multi-level curriculum so each level
+    /// inherits `E_feat` from the previous level instead of restarting
+    /// from randn.
+    pub fn new_with_init(
         args: ModelArgs,
-        bias_init: &BiasInit,
+        init: &ModelInit,
         varmap: &VarMap,
         vs: VarBuilder,
         dev: &Device,
     ) -> Result<Self> {
-        let init = candle_nn::Init::Randn {
+        let randn = candle_nn::Init::Randn {
             mean: 0.0,
             stdev: 0.1,
         };
-        let e_feat = vs.get_with_hints((args.n_features, args.embedding_dim), "e_feat", init)?;
-        let e_cell = vs.get_with_hints((args.n_cells, args.embedding_dim), "e_cell", init)?;
-
-        let b_feat = register_var_from_slice(varmap, dev, "b_feat", bias_init.b_feat)?;
-        let b_cell = register_var_from_slice(varmap, dev, "b_cell", bias_init.b_cell)?;
-
+        let e_feat = match init.e_feat {
+            Some(m) => register_var_from_mat(varmap, dev, "e_feat", m)?,
+            None => vs.get_with_hints((args.n_features, args.embedding_dim), "e_feat", randn)?,
+        };
+        let e_cell = match init.e_cell {
+            Some(m) => register_var_from_mat(varmap, dev, "e_cell", m)?,
+            None => vs.get_with_hints((args.n_cells, args.embedding_dim), "e_cell", randn)?,
+        };
+        let b_feat = register_var_from_slice(varmap, dev, "b_feat", init.b_feat)?;
+        let b_cell = register_var_from_slice(varmap, dev, "b_cell", init.b_cell)?;
         Ok(Self {
             e_feat,
             e_cell,
             b_feat,
             b_cell,
             embedding_dim: args.embedding_dim,
+        })
+    }
+
+    /// Stage-2 constructor: feature side is **frozen** (held as plain
+    /// `Tensor`s, not registered in `VarMap`), so AdamW only updates
+    /// `e_cell` / `b_cell`. `e_cell` is initialized from
+    /// `args.e_cell_init` (typically `e_pseudobulk[cell→pb_map[c]]`
+    /// from stage 1) — passing `None` falls back to randn.
+    pub fn new_with_warm_start(
+        args: WarmStartArgs,
+        varmap: &VarMap,
+        vs: VarBuilder,
+        dev: &Device,
+    ) -> Result<Self> {
+        let WarmStartArgs {
+            n_cells,
+            embedding_dim,
+            frozen_e_feat,
+            frozen_b_feat,
+            e_cell_init,
+            b_cell_init,
+        } = args;
+        let e_cell = match e_cell_init {
+            Some(init_mat) => {
+                debug_assert_eq!(init_mat.nrows(), n_cells);
+                debug_assert_eq!(init_mat.ncols(), embedding_dim);
+                let mut row_major = Vec::with_capacity(n_cells * embedding_dim);
+                for i in 0..n_cells {
+                    for j in 0..embedding_dim {
+                        row_major.push(init_mat[(i, j)]);
+                    }
+                }
+                let var = candle_util::candle_core::Var::from_tensor(&Tensor::from_vec(
+                    row_major,
+                    (n_cells, embedding_dim),
+                    dev,
+                )?)?;
+                varmap
+                    .data()
+                    .lock()
+                    .unwrap()
+                    .insert("e_cell".to_string(), var.clone());
+                var.as_tensor().clone()
+            }
+            None => {
+                let init = candle_nn::Init::Randn {
+                    mean: 0.0,
+                    stdev: 0.1,
+                };
+                vs.get_with_hints((n_cells, embedding_dim), "e_cell", init)?
+            }
+        };
+
+        let b_cell = register_var_from_slice(varmap, dev, "b_cell", b_cell_init)?;
+
+        Ok(Self {
+            e_feat: frozen_e_feat,
+            e_cell,
+            b_feat: frozen_b_feat,
+            b_cell,
+            embedding_dim,
         })
     }
 
@@ -123,6 +207,36 @@ fn register_var_from_slice(
     values: &[f32],
 ) -> Result<Tensor> {
     let var = candle_util::candle_core::Var::from_slice(values, values.len(), dev)?;
+    {
+        let mut data = varmap.data().lock().unwrap();
+        data.insert(name.to_string(), var.clone());
+    }
+    Ok(var.as_tensor().clone())
+}
+
+/// Register a 2D learnable parameter initialized from a host matrix
+/// (row-major flatten). `nalgebra::DMatrix` is column-major, so we
+/// emit row-by-row; the resulting tensor matches candle's `[rows, cols]`
+/// row-major layout.
+fn register_var_from_mat(
+    varmap: &VarMap,
+    dev: &Device,
+    name: &str,
+    mat: &nalgebra::DMatrix<f32>,
+) -> Result<Tensor> {
+    let rows = mat.nrows();
+    let cols = mat.ncols();
+    let mut row_major = Vec::with_capacity(rows * cols);
+    for i in 0..rows {
+        for j in 0..cols {
+            row_major.push(mat[(i, j)]);
+        }
+    }
+    let var = candle_util::candle_core::Var::from_tensor(&Tensor::from_vec(
+        row_major,
+        (rows, cols),
+        dev,
+    )?)?;
     {
         let mut data = varmap.data().lock().unwrap();
         data.insert(name.to_string(), var.clone());
