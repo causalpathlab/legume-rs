@@ -267,6 +267,14 @@ pub struct ChainBatch {
     /// at the call site — not stored on the batch to avoid the per-step
     /// `Vec<Vec<u32>>` allocation.
     pub leaf_cells: Vec<u32>,
+    /// Shared feature side: one positive + K negatives per chain.
+    /// Lifted into its own struct so [`nce_loss_chain`] can take it by
+    /// value while the caller still borrows `leaf_cells` for the
+    /// cell-axis [`ChainAxis`] entry.
+    pub feats: ChainFeatureSide,
+}
+
+pub struct ChainFeatureSide {
     /// Length B; one positive feature per chain (shared across all axes).
     pub fine_feats: Vec<u32>,
     /// Length B*K row-major; shared negatives across all axes.
@@ -306,10 +314,12 @@ pub fn sample_chain_batch(args: ChainBatchArgs, rng: &mut impl Rng) -> ChainBatc
 
     ChainBatch {
         leaf_cells,
-        fine_feats,
-        neg_feats,
-        edge_weights: weights,
-        n_negatives: args.n_negatives,
+        feats: ChainFeatureSide {
+            fine_feats,
+            neg_feats,
+            edge_weights: weights,
+            n_negatives: args.n_negatives,
+        },
     }
 }
 
@@ -330,27 +340,18 @@ pub struct ChainAxis<'a> {
 /// **shared** across axes (same Var); each axis differs only in its
 /// cell-side embeddings table and the per-chain indices into it.
 ///
-/// Takes the chain's feature-side fields by value (consumed by tensor
-/// construction) and `axes` borrows the per-axis indices from outside
-/// — typically from `ChainBatch.leaf_cells` and `ChainBatch.pb_paths`,
-/// destructured by the caller.
-///
 /// Returns the λ-weighted sum across axes. The per-edge weight uses
 /// the cell-axis NCE's `Σw` normalization (Fisher-info-aware) so the
 /// gradient magnitude is consistent with the existing per-axis losses.
-#[allow(clippy::too_many_arguments)]
 pub fn nce_loss_chain(
     e_feat: &Tensor,
     b_feat: &Tensor,
-    fine_feats: Vec<u32>,
-    neg_feats: Vec<u32>,
-    edge_weights: Vec<f32>,
-    n_negatives: usize,
+    feats: ChainFeatureSide,
     axes: &[ChainAxis],
     smoother: Option<&FeatureNetworkSmoother>,
     dev: &Device,
 ) -> anyhow::Result<Tensor> {
-    let b = fine_feats.len();
+    let b = feats.fine_feats.len();
     if b == 0 || axes.is_empty() {
         return Ok(Tensor::zeros(
             (),
@@ -358,22 +359,22 @@ pub fn nce_loss_chain(
             dev,
         )?);
     }
-    let k = n_negatives;
+    let k = feats.n_negatives;
 
     // Feature side gathered once for the whole chain step.
-    let pos_feat_idx = Tensor::from_vec(fine_feats, b, dev)?;
+    let pos_feat_idx = Tensor::from_vec(feats.fine_feats, b, dev)?;
     let e_feat_pos = select_feat_emb(smoother, e_feat, &pos_feat_idx)?;
     let b_feat_pos = b_feat.index_select(&pos_feat_idx, 0)?;
 
-    let neg_feat_idx = Tensor::from_vec(neg_feats, b * k, dev)?;
+    let neg_feat_idx = Tensor::from_vec(feats.neg_feats, b * k, dev)?;
     let e_feat_neg_flat = select_feat_emb(smoother, e_feat, &neg_feat_idx)?;
     let b_feat_neg_flat = b_feat.index_select(&neg_feat_idx, 0)?;
     let h = e_feat_neg_flat.dim(1)?;
     let e_feat_neg = e_feat_neg_flat.reshape((b, k, h))?;
     let b_feat_neg = b_feat_neg_flat.reshape((b, k))?;
 
-    let w_sum: f32 = edge_weights.iter().sum::<f32>().max(1e-8);
-    let w_t = Tensor::from_vec(edge_weights, b, dev)?;
+    let w_sum: f32 = feats.edge_weights.iter().sum::<f32>().max(1e-8);
+    let w_t = Tensor::from_vec(feats.edge_weights, b, dev)?;
 
     let mut total: Option<Tensor> = None;
     for axis in axes {
