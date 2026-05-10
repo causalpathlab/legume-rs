@@ -11,7 +11,9 @@ use crate::stop::setup_stop_handler;
 use crate::training::{train, CellCellTraining, TrainingContext, TrainingParams};
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
-use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
+use data_beans_alg::gene_weighting::{
+    compute_nb_fisher_weights, load_per_gene_weights, save_per_gene_weights,
+};
 use log::{info, warn};
 use matrix_util::pair_graph::FeaturePairGraph;
 use std::sync::atomic::AtomicBool;
@@ -32,6 +34,20 @@ pub struct FitConfig {
     pub learning_rate: f64,
     pub seed: u64,
     pub device: Device,
+    /// Streaming block size for the per-feature NB-Fisher pass and
+    /// other column-block I/O. `None` falls back to
+    /// `matrix_util::utils::default_block_size(n_features)` which
+    /// clamps to 100 for large feature counts — that's tiny on
+    /// rotational disks. Pass `Some(1024)` or higher when you have
+    /// the RAM, especially without `--preload-data`.
+    pub block_size: Option<usize>,
+    /// Optional path for caching the NB-Fisher per-gene weights as
+    /// parquet (one row per gene). When set, [`fit`] looks for an
+    /// existing file and reuses it (skipping the streaming pass)
+    /// when its gene names line up with the unified feature axis;
+    /// otherwise it computes the weights and writes them to this
+    /// path so subsequent runs are instant. `None` always recomputes.
+    pub fisher_weights_cache: Option<Box<str>>,
     pub feature_network: Option<FeatureNetworkConfig>,
     /// Optional cell-cell loss term — positive cell pairs from a
     /// caller-provided graph (e.g. spatial KNN), with negatives drawn
@@ -82,6 +98,64 @@ pub struct FeatureNetworkArgs<'a> {
     pub k_hops: usize,
     pub alpha: f32,
     pub refresh_epochs: usize,
+}
+
+/// Load NB-Fisher per-gene weights from the cache parquet when its
+/// gene names match the unified feature axis byte-for-byte; otherwise
+/// stream-compute them and (if a cache path was provided) save them
+/// for next time. Caches that don't match are warned about and
+/// recomputed (typical cause: feature axis changed because of a
+/// different `--feature-name-delim` or a different file set).
+fn load_or_compute_fisher_weights(
+    unified: &UnifiedData,
+    block_size: Option<usize>,
+    cache_path: Option<&str>,
+) -> anyhow::Result<Vec<f32>> {
+    if let Some(path) = cache_path {
+        if std::path::Path::new(path).exists() {
+            match load_per_gene_weights(path) {
+                Ok((cached_names, cached_weights))
+                    if cached_names == unified.feature_names
+                        && cached_weights.len() == unified.n_features() =>
+                {
+                    info!("Reusing cached NB-Fisher weights from {}", path);
+                    return Ok(cached_weights);
+                }
+                Ok((cached_names, _)) => {
+                    warn!(
+                        "Fisher cache {} is stale ({} cached genes vs {} unified) — recomputing",
+                        path,
+                        cached_names.len(),
+                        unified.n_features()
+                    );
+                }
+                Err(e) => warn!("Failed to load Fisher cache {} ({}); recomputing", path, e),
+            }
+        }
+    }
+
+    info!("Computing NB-Fisher weights (block_size={:?})...", block_size);
+    let mut feat_weights: Vec<f32> = Vec::with_capacity(unified.n_features());
+    for (i, data) in unified.per_file_data.iter().enumerate() {
+        let w = compute_nb_fisher_weights(data, block_size)?;
+        info!(
+            "  backend {}: {} features, mean Fisher weight {:.3}",
+            i,
+            w.len(),
+            w.iter().sum::<f32>() / w.len().max(1) as f32
+        );
+        feat_weights.extend(w);
+    }
+
+    if let Some(path) = cache_path {
+        if let Err(e) = save_per_gene_weights(&feat_weights, &unified.feature_names, path) {
+            warn!("Failed to save Fisher cache to {}: {}", path, e);
+        } else {
+            info!("Saved NB-Fisher weights to {}", path);
+        }
+    }
+
+    Ok(feat_weights)
 }
 
 pub fn load_feature_network(args: FeatureNetworkArgs) -> anyhow::Result<FeatureNetworkConfig> {
@@ -135,18 +209,8 @@ pub fn fit(unified: &UnifiedData, config: FitConfig) -> anyhow::Result<FitOutput
 
     info!("Avg coarse blocks: cells {:.0}", cell_axis.avg_n_coarse());
 
-    info!("Computing NB-Fisher weights per file...");
-    let mut feat_weights: Vec<f32> = Vec::with_capacity(n_features);
-    for (i, data) in unified.per_file_data.iter().enumerate() {
-        let w = compute_nb_fisher_weights(data, None)?;
-        info!(
-            "  file {}: {} features, mean Fisher weight {:.3}",
-            i,
-            w.len(),
-            w.iter().sum::<f32>() / w.len().max(1) as f32
-        );
-        feat_weights.extend(w);
-    }
+    let feat_weights =
+        load_or_compute_fisher_weights(unified, config.block_size, config.fisher_weights_cache.as_deref())?;
 
     let zeros_feat = vec![0f32; n_features];
     let zeros_cell = vec![0f32; n_cells];

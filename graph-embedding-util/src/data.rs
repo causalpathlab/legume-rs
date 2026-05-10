@@ -128,6 +128,7 @@ pub fn load_unified_data(
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,
     feature_kind: FeatureNameKind,
+    preload: bool,
 ) -> anyhow::Result<UnifiedData> {
     if let Some(bf) = batch_files {
         anyhow::ensure!(
@@ -141,7 +142,7 @@ pub fn load_unified_data(
     let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: data_files.to_vec(),
         batch_files: batch_files.map(<[Box<str>]>::to_vec),
-        preload: false,
+        preload,
         feature_kind,
     })?;
 

@@ -158,6 +158,32 @@ pub struct GbeArgs {
     )]
     cell_cell_negatives: usize,
 
+    #[arg(
+        long,
+        help = "Cells per parallel block for the streaming NB-Fisher pass and \
+                column-block I/O. Omit for auto-scaling (clamps to 100 for large \
+                feature counts — slow on rotational disks). Pass 1024+ when you \
+                have RAM, especially without --preload-data."
+    )]
+    block_size: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Preload all sparse column data into memory before any pass over \
+                cells. Faster when data fits in RAM; required on slow disks."
+    )]
+    preload_data: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Always recompute NB-Fisher weights and overwrite the cache. By \
+                default `{out}.fisher_weights.parquet` is loaded if it exists \
+                with matching gene names, otherwise computed and written."
+    )]
+    no_fisher_cache: bool,
+
     #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
     device: ComputeDevice,
 
@@ -190,6 +216,7 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         &args.data_files,
         args.batch_files.as_deref(),
         feature_kind,
+        args.preload_data,
     )?;
 
     let feature_network = args
@@ -233,6 +260,12 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         learning_rate: args.learning_rate,
         seed: args.seed,
         device: args.device.to_device(args.device_no)?,
+        block_size: args.block_size,
+        fisher_weights_cache: if args.no_fisher_cache {
+            None
+        } else {
+            Some(format!("{}.fisher_weights.parquet", args.out).into_boxed_str())
+        },
         feature_network,
         cell_cell,
         stop: None,
