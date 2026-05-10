@@ -321,19 +321,27 @@ fn chain_step(
         rng,
     );
     let crate::loss::ChainBatch { leaf_cells, feats } = chain;
+    let b = leaf_cells.len();
 
-    // Derive each pb level's per-chain indices on the fly from the
-    // leaf cells: `pb_id_at_level[b] = cell_to_pb[level][leaf_cells[b]]`.
-    let pb_indices_per_level: Vec<Vec<u32>> = cell_to_pb
-        .iter()
-        .map(|c2p| leaf_cells.iter().map(|&c| c2p[c as usize] as u32).collect())
-        .collect();
+    // Build all per-axis cell-side index tensors up front. The cell
+    // axis uses leaf_cells directly; each pb axis derives its indices
+    // by mapping leaf_cells through that level's cell→pb on host
+    // *before* moving leaf_cells into a tensor (avoids a `to_vec1`
+    // round-trip back from device). One Vec→Tensor allocation per
+    // axis per step instead of two (the loss function used to clone
+    // again to call `Tensor::from_vec` itself).
+    let mut idx_tensors: Vec<Tensor> = Vec::with_capacity(ctx.axes.len());
+    for c2p in cell_to_pb {
+        let pb_ids: Vec<u32> = leaf_cells.iter().map(|&c| c2p[c as usize] as u32).collect();
+        idx_tensors.push(Tensor::from_vec(pb_ids, b, ctx.dev)?);
+    }
+    let cell_idx_tensor = Tensor::from_vec(leaf_cells, b, ctx.dev)?;
 
     let mut chain_axes: Vec<ChainAxis> = Vec::with_capacity(ctx.axes.len());
     chain_axes.push(ChainAxis {
         e_cell: &cell_axis.model.e_cell,
         b_cell: &cell_axis.model.b_cell,
-        indices: leaf_cells.as_slice(),
+        indices: &cell_idx_tensor,
         lambda: cell_axis.lambda,
         label: cell_axis.label,
     });
@@ -341,7 +349,7 @@ fn chain_step(
         chain_axes.push(ChainAxis {
             e_cell: &axis.model.e_cell,
             b_cell: &axis.model.b_cell,
-            indices: pb_indices_per_level[i].as_slice(),
+            indices: &idx_tensors[i],
             lambda: axis.lambda,
             label: axis.label,
         });
