@@ -201,6 +201,61 @@ fn emit_halo_text(
     );
 }
 
+/// Composite all per-layer raster PNGs into a single PNG and return a new
+/// layer set with one composite raster + the original hulls/labels
+/// preserved (raster-empty). Used by PDF/PNG emit so the output carries
+/// one image stream instead of K stacked full-canvas rasters — drops PDF
+/// size roughly K× on multi-community plots and lets viewers open them
+/// instantly. Multi-layer SVG is still produced when `--svg` is on so
+/// Illustrator/Inkscape can toggle per-topic groups.
+pub fn flatten_raster_layers(
+    layers: &[TopicLayer],
+    width_px: u32,
+    height_px: u32,
+) -> anyhow::Result<Vec<TopicLayer>> {
+    use tiny_skia::{Pixmap, PixmapPaint, Transform};
+
+    let mut canvas = Pixmap::new(width_px, height_px)
+        .ok_or_else(|| anyhow::anyhow!("pixmap alloc failed ({width_px}x{height_px})"))?;
+    let paint = PixmapPaint::default();
+    let mut any_raster = false;
+    for layer in layers {
+        if layer.png.is_empty() {
+            continue;
+        }
+        let pm = Pixmap::decode_png(&layer.png)
+            .map_err(|e| anyhow::anyhow!("layer PNG decode failed: {e}"))?;
+        canvas.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::identity(), None);
+        any_raster = true;
+    }
+
+    let mut out = Vec::with_capacity(layers.len() + 1);
+    if any_raster {
+        let composite = canvas
+            .encode_png()
+            .map_err(|e| anyhow::anyhow!("composite PNG encode failed: {e}"))?;
+        out.push(TopicLayer {
+            label: String::new(),
+            png: composite,
+            hull_px: Vec::new(),
+            label_xy_px: (f32::NAN, f32::NAN),
+            color: (0, 0, 0),
+        });
+    }
+    for layer in layers {
+        if !layer.hull_px.is_empty() || !layer.label.is_empty() {
+            out.push(TopicLayer {
+                label: layer.label.clone(),
+                png: Vec::new(),
+                hull_px: layer.hull_px.clone(),
+                label_xy_px: layer.label_xy_px,
+                color: layer.color,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Escape the XML-significant characters (`& < > " '`). Use anywhere SVG
 /// element text or attribute strings are built from arbitrary input.
 #[must_use]
