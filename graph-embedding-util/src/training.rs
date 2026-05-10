@@ -196,14 +196,15 @@ pub fn train_composite(
         let avg = loss_sum / n_steps.max(1) as f32;
         pb.set_message(format!("loss={:.3}", avg));
         pb.inc(1);
-        if epoch % 10 == 0 || epoch + 1 == params.epochs {
-            info!(
-                "epoch {}/{}: composite loss={:.3}",
-                epoch + 1,
-                params.epochs,
-                avg
-            );
-        }
+        // Every-epoch info; senna/pinto's `--verbose` flag raises the
+        // log level to `info`, so this is gated by the user's choice
+        // there. Quiet runs (warn level) suppress it.
+        info!(
+            "epoch {}/{}: composite loss={:.3}",
+            epoch + 1,
+            params.epochs,
+            avg
+        );
 
         if ctx.stop.load(Ordering::SeqCst) {
             pb.finish_and_clear();
