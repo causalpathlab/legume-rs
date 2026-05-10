@@ -137,7 +137,11 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
         specificity: SpecificityMode::Simplex,
         num_row_randomization: args.num_draws,
         num_sample_perm: args.num_perm,
-        batch_labels: (n_batches >= 2).then(|| loaded.batch_labels.clone()),
+        // pb_membership_pk's rows ARE batches (one pseudobulk per batch),
+        // so the sample-permutation null shuffles batches directly with no
+        // inner stratification. Cell-level labels would be the wrong length
+        // (caused a panic in `permute_indices`).
+        batch_labels: None,
         fdr_alpha: args.fdr_alpha,
         q_softmax_temperature: args.q_temperature,
         min_confidence: args.min_confidence,
