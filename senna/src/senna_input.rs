@@ -63,7 +63,7 @@ pub fn read_data_on_shared_columns(
         let mut data_vec = SparseIoVec::new();
         let attach_data_name = files.len() > 1;
 
-        for (data_idx, data_file) in files.iter().enumerate() {
+        for data_file in files.iter() {
             info!("Importing data file: {data_file}");
 
             let mut data = try_open_or_convert(data_file)?;
@@ -71,7 +71,17 @@ pub fn read_data_on_shared_columns(
             if args.preload {
                 data.preload_columns()?;
             }
-            let data_name = attach_data_name.then(|| data_idx.to_string().into_boxed_str());
+            // Use basename (not file index) so the `@<basename>` suffix
+            // appended to disambiguate barcodes matches what
+            // `auxiliary_data::data_loading::read_data_on_shared_rows`
+            // produces (used by gbe / topic / svd loaders). Without
+            // this, multi-file annotate runs see `AAA@0` while the
+            // training pipeline wrote `AAA@Control0004`, every cell
+            // misses the latent lookup, and downstream cluster /
+            // enrichment outputs are empty.
+            let data_name = attach_data_name
+                .then(|| matrix_util::common_io::basename(data_file))
+                .transpose()?;
             data_vec.push(Arc::from(data), data_name)?;
         }
 

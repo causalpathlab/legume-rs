@@ -128,8 +128,18 @@ pub fn load_from_manifest(
         None => manifest.cluster.clusters.as_deref().map(&resolve),
     };
     let (cluster_labels, n_clusters) = match clusters_path {
-        Some(path) => load_cluster_labels(&path, &cell_names)?,
-        None => compute_clusters_from_latent(&manifest, &resolve, &cell_names, leiden_args)?,
+        Some(path) => {
+            log::info!("Resolving cluster source: parquet {path}");
+            load_cluster_labels(&path, &cell_names)
+                .map_err(|e| anyhow::anyhow!("failed to load cluster parquet {path}: {e}"))?
+        }
+        None => {
+            log::info!(
+                "Resolving cluster source: internal Leiden on manifest's latent ({:?})",
+                manifest.outputs.latent
+            );
+            compute_clusters_from_latent(&manifest, &resolve, &cell_names, leiden_args)?
+        }
     };
 
     // Build per-cell batch ids (u32) for permutation null.
@@ -179,7 +189,8 @@ where
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("manifest missing outputs.latent"))?;
     let latent_path = resolve(latent_rel);
-    let mut latent = Mat::from_parquet_with_row_names(&latent_path, Some(0))?;
+    let mut latent = Mat::from_parquet_with_row_names(&latent_path, Some(0))
+        .map_err(|e| anyhow::anyhow!("failed to load latent {latent_path}: {e}"))?;
     log::info!(
         "Loaded latent {latent_path}: {}×{}",
         latent.mat.nrows(),
