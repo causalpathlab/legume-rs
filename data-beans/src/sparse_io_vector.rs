@@ -521,16 +521,18 @@ impl SparseIoVec {
                     }
                 }
             } else {
-                // Fallback: read one column at a time. Still avoids the
-                // global triplet vec and the COO sort.
-                for &(loc, out_col) in group {
-                    let (_, _, trip) = self.data_vec[didx].read_triplets_by_single_column(loc)?;
-                    let bucket = &mut buckets[out_col];
-                    bucket.reserve(trip.len());
-                    for (i, _, v) in trip {
-                        if let Some(c) = g2c[l2g[i as usize]] {
-                            bucket.push((c as u32, v));
-                        }
+                // Cold path: route through `read_triplets_by_columns` so the
+                // backend can coalesce abutting indptr ranges into a single
+                // zarr/hdf5 retrieval (zarr uses `coalesce_and_emit` + chunk
+                // LRU cache). For a contiguous block of N cells this becomes
+                // ONE retrieval instead of N — the dominant win on cold reads
+                // from `.zarr.zip` over a slow disk.
+                let cols: Vec<usize> = group.iter().map(|&(loc, _)| loc).collect();
+                let (_, _, trip) = self.data_vec[didx].read_triplets_by_columns(cols)?;
+                for (i, jj, v) in trip {
+                    let (_, out_col) = group[jj as usize];
+                    if let Some(c) = g2c[l2g[i as usize]] {
+                        buckets[out_col].push((c as u32, v));
                     }
                 }
             }

@@ -121,6 +121,15 @@ pub struct SrtGbeArgs {
 
     #[arg(
         long,
+        default_value_t = false,
+        help = "Always recompute NB-Fisher weights and overwrite the cache. By \
+                default `{out}.fisher_weights.parquet` is loaded if it exists \
+                with matching gene names, otherwise computed and written."
+    )]
+    pub no_fisher_cache: bool,
+
+    #[arg(
+        long,
         default_value_t = 1.0,
         help = "Cell-cell loss weight λ; final loss = L_bipartite + λ · L_cell_cell. \
                 Default 1.0 weights cell-cell equal to cell-feature. Set to 0 to \

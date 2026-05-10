@@ -633,32 +633,61 @@ impl SparseIo for SparseMtxData {
 
             Ok((nrow, ncol_out, ret))
         } else {
+            // Cold path: coalesce abutting/overlapping indptr ranges into a
+            // single `read_slice_1d` call. For a contiguous block of N cells
+            // this collapses N HDF5 retrievals into 1 — same idea zarr's
+            // `coalesce_and_emit` uses for the chunked store.
             let data = by_column.dataset("data")?;
             let indices = by_column.dataset("indices")?;
 
             let ncol_out = columns_vec.len();
 
-            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity((max_end - min_start) as usize);
+            let mut tagged: Vec<(u64, u64, u64)> = columns_vec
+                .iter()
+                .enumerate()
+                .filter_map(|(jj, &j_data)| {
+                    if j_data >= ncol {
+                        return None;
+                    }
+                    let start = indptr[j_data];
+                    let end = indptr[j_data + 1];
+                    (start < end).then_some((jj as u64, start, end))
+                })
+                .collect();
+            tagged.sort_by_key(|&(_, start, _)| start);
 
-            for (jj, &j_data) in columns_vec.iter().enumerate() {
-                let jj = jj as u64;
-                if j_data < ncol {
-                    // [start, end)
-                    let start = indptr[j_data] as usize;
-                    let end = indptr[j_data + 1] as usize;
+            let total: u64 = tagged.iter().map(|&(_, s, e)| e - s).sum();
+            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity(total as usize);
 
-                    if start < end {
-                        let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-                        let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
+            let mut i = 0;
+            while i < tagged.len() {
+                let merged_start = tagged[i].1;
+                let mut merged_end = tagged[i].2;
+                let mut j = i + 1;
+                while j < tagged.len() && tagged[j].1 <= merged_end {
+                    merged_end = merged_end.max(tagged[j].2);
+                    j += 1;
+                }
 
-                        for k in 0..(end - start) {
-                            let x_ij = data_slice[k];
-                            let ii = indices_slice[k];
-                            debug_assert!((ii as usize) < nrow);
-                            ret.push((ii, jj, x_ij));
-                        }
+                let data_buf = data.read_slice_1d::<f32, _>(
+                    (merged_start as usize)..(merged_end as usize),
+                )?;
+                let indices_buf = indices.read_slice_1d::<u64, _>(
+                    (merged_start as usize)..(merged_end as usize),
+                )?;
+
+                for &(jj, start, end) in &tagged[i..j] {
+                    let off = (start - merged_start) as usize;
+                    let len = (end - start) as usize;
+                    for k in 0..len {
+                        let ii = indices_buf[off + k];
+                        let val = data_buf[off + k];
+                        debug_assert!((ii as usize) < nrow);
+                        ret.push((ii, jj, val));
                     }
                 }
+
+                i = j;
             }
             Ok((nrow, ncol_out, ret))
         }
