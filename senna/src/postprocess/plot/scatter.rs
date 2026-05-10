@@ -579,7 +579,7 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
     };
 
     // Auto-layout: when the user passed --from but the manifest has no
-    // layout yet, drive `senna layout phate` against it (defaults) so
+    // layout yet, drive `senna layout umap` against it (defaults) so
     // the natural workflow `train → annotate → plot` works without an
     // explicit layout step. CLI --cell-coords still wins; only kick in
     // when both manifest and user are silent on cell_coords.
@@ -590,10 +590,10 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
             .is_some();
         if args.cell_coords.is_none() && !manifest_has_coords {
             info!(
-                "manifest {} has no layout.cell_coords; running `senna layout phate` first",
+                "manifest {} has no layout.cell_coords; running `senna layout umap` first",
                 from_path
             );
-            crate::postprocess::run_default_phate_layout(from_path, args.preload_data)?;
+            crate::postprocess::run_default_umap_layout(from_path, args.preload_data)?;
             // layout rewrote the manifest in place — reload to pick up
             // the freshly-populated layout.cell_coords / pb_coords.
             let (m, dir) = RunManifest::load(Path::new(from_path))?;
