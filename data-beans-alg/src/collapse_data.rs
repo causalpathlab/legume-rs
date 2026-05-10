@@ -28,6 +28,18 @@ pub type GeneSums = Vec<Vec<(usize, f32)>>;
 pub const DEFAULT_KNN: usize = 10;
 pub const DEFAULT_OPT_ITER: usize = 100;
 
+/// Per-level collapse output plus the partition hierarchy across levels.
+///
+/// Returned by [`collapse_columns_multilevel_with_hierarchy`] for
+/// consumers (e.g. `graph-embedding-util`'s nested chain sampler) that
+/// need parent/child maps between super-cells at adjacent levels.
+/// `cell_to_pb_per_level` is finest-first, parallel to `levels`:
+/// `cell_to_pb_per_level[k][c] = pb_id at level k for cell c`.
+pub struct MultilevelCollapseOut {
+    pub levels: Vec<CollapsedOut>,
+    pub cell_to_pb_per_level: Vec<Vec<usize>>,
+}
+
 /// Configuration for multi-level collapsing.
 pub struct MultilevelParams {
     pub knn_super_cells: usize,
@@ -1158,12 +1170,16 @@ struct RefineCollectCtx<'a> {
 /// Walks each level of the hash-initialized hierarchy, runs
 /// `refine_multilevel::refine_assignments` over super-cells, then rebuilds
 /// `CollapsedStat` per level from the refined cell → group assignment and
-/// emits `CollapsedOut` with identical shape to the legacy path.
+/// emits `CollapsedOut` with identical shape to the legacy path. Also
+/// surfaces the per-level cell → pb mapping (finest-first, matching
+/// `levels`) so consumers — e.g. `graph-embedding-util`'s nested chain
+/// sampler — can build pb-tree parent/child maps without rerunning the
+/// collapse internals.
 fn refine_and_collect_single_layer(
     data_vec: &mut SparseIoVec,
     proj_kn: &DMatrix<f32>,
     ctx: &RefineCollectCtx<'_>,
-) -> anyhow::Result<Vec<CollapsedOut>> {
+) -> anyhow::Result<MultilevelCollapseOut> {
     let RefineCollectCtx {
         fine_codes,
         group_to_cols_finest,
@@ -1300,7 +1316,24 @@ fn refine_and_collect_single_layer(
         prev_stat = coarse_stat;
     }
 
-    Ok(results)
+    // Build per-level cell → pb mapping (finest-first) by walking
+    // refined.sc_to_group[level] through super_cell_to_cells.
+    let mut cell_to_pb_per_level: Vec<Vec<usize>> = Vec::with_capacity(num_levels);
+    for level in 0..num_levels {
+        let mut c2g = vec![0usize; ncols];
+        for (sc, cells) in super_cell_to_cells.iter().enumerate() {
+            let g = refined.sc_to_group[level][sc];
+            for &c in cells {
+                c2g[c] = g;
+            }
+        }
+        cell_to_pb_per_level.push(c2g);
+    }
+
+    Ok(MultilevelCollapseOut {
+        levels: results,
+        cell_to_pb_per_level,
+    })
 }
 
 /// Refinement integration path for `SparseIoStack`.
@@ -1605,6 +1638,67 @@ pub trait MultilevelCollapsingOps {
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 }
 
+/// Same as `SparseIoVec::collapse_columns_multilevel_vec`, but also returns
+/// the per-level cell → pb mapping needed for hierarchical / nested
+/// chain sampling in downstream consumers (currently
+/// `graph-embedding-util`). Requires `MultilevelParams.refine` to be
+/// `Some(..)` — the legacy non-refinement path doesn't currently
+/// surface the per-level partition structure. Rather than silently
+/// returning an empty hierarchy, we error so callers can't be misled
+/// into walking an empty tree.
+pub fn collapse_columns_multilevel_with_hierarchy<T>(
+    data_vec: &mut SparseIoVec,
+    proj_kn: &DMatrix<f32>,
+    batch_membership: &[T],
+    params: &MultilevelParams,
+) -> anyhow::Result<MultilevelCollapseOut>
+where
+    T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+{
+    let sort_dim = params.sort_dim;
+    let knn = params.knn_super_cells;
+    let opt_iter = params.num_opt_iter;
+
+    data_vec.register_batch_membership(batch_membership);
+    let num_features = data_vec.num_rows();
+    let num_batches = data_vec.num_batches();
+    if num_batches >= 2 {
+        data_vec.build_hnsw_per_batch(proj_kn, batch_membership)?;
+    }
+
+    let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
+    let finest_dim = level_dims[0];
+    let nn = proj_kn.ncols();
+    let kk = proj_kn.nrows().min(finest_dim).min(nn);
+    let fine_codes = binary_sort_columns(proj_kn, kk)?;
+    data_vec.assign_groups(&fine_codes, None);
+
+    let group_to_cols = data_vec
+        .take_grouped_columns()
+        .ok_or_else(|| anyhow::anyhow!("columns not assigned"))?
+        .clone();
+
+    let refine_params = params.refine.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "collapse_columns_multilevel_with_hierarchy requires \
+             MultilevelParams.refine = Some(..); the legacy non-refinement path \
+             doesn't surface per-level cell→pb mappings"
+        )
+    })?;
+
+    let ctx = RefineCollectCtx {
+        fine_codes: &fine_codes,
+        group_to_cols_finest: &group_to_cols,
+        level_dims: &level_dims,
+        num_features,
+        num_batches,
+        knn,
+        opt_iter,
+        refine_params,
+    };
+    refine_and_collect_single_layer(data_vec, proj_kn, &ctx)
+}
+
 impl MultilevelCollapsingOps for SparseIoVec {
     type LevelOutput = CollapsedOut;
 
@@ -1685,7 +1779,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 opt_iter,
                 refine_params,
             };
-            return refine_and_collect_single_layer(self, proj_kn, &ctx);
+            return refine_and_collect_single_layer(self, proj_kn, &ctx).map(|out| out.levels);
         }
 
         // Collect statistics at finest level

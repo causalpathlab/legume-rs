@@ -10,7 +10,7 @@
 //! coarsened: cell embeddings are mean-pooled (per the batch's chosen
 //! seed coarsening) over the fine children of each touched super-cell.
 
-use candle_util::candle_core::{DType, Device, Result, Tensor};
+use candle_util::candle_core::{DType, Device, Result, Tensor, Var};
 use candle_util::candle_nn::{self, VarBuilder, VarMap};
 
 /// Shape of the embedding tables.
@@ -30,16 +30,19 @@ pub struct ModelInit<'a> {
     pub b_cell: &'a [f32],
 }
 
-/// Stage-2 inputs for [`JointEmbedModel::new_with_warm_start`]. Frozen
-/// feature side comes in as already-on-device tensors (no `VarMap`
-/// registration); cell side is the only learnable.
-pub struct WarmStartArgs<'a> {
+/// Inputs for [`JointEmbedModel::new_sharing_features`]. The feature
+/// side (`e_feat` / `b_feat`) is provided pre-allocated and registered
+/// in the shared `VarMap` so multiple heads can co-train it. Only the
+/// cell side gets new Vars, namespaced by `var_prefix` so multiple
+/// heads can coexist in one VarMap (e.g. `pb_l0`, `pb_l1`, ..., `cell`).
+pub struct ShareFeaturesArgs<'a> {
     pub n_cells: usize,
     pub embedding_dim: usize,
-    pub frozen_e_feat: Tensor,
-    pub frozen_b_feat: Tensor,
+    pub shared_e_feat: Tensor,
+    pub shared_b_feat: Tensor,
     pub e_cell_init: Option<&'a nalgebra::DMatrix<f32>>,
     pub b_cell_init: &'a [f32],
+    pub var_prefix: &'a str,
 }
 
 pub struct JointEmbedModel {
@@ -87,62 +90,43 @@ impl JointEmbedModel {
         })
     }
 
-    /// Stage-2 constructor: feature side is **frozen** (held as plain
-    /// `Tensor`s, not registered in `VarMap`), so AdamW only updates
-    /// `e_cell` / `b_cell`. `e_cell` is initialized from
-    /// `args.e_cell_init` (typically `e_pseudobulk[cell→pb_map[c]]`
-    /// from stage 1) — passing `None` falls back to randn.
-    pub fn new_with_warm_start(
-        args: WarmStartArgs,
+    /// Composite-training constructor: reuse pre-existing
+    /// `shared_e_feat` / `shared_b_feat` Tensors (already registered as
+    /// Vars in `varmap` by an earlier call to `new_with_init`) and
+    /// allocate fresh cell-side Vars under `args.var_prefix` so multiple
+    /// heads coexist in one VarMap. AdamW over `varmap.all_vars()` then
+    /// updates the shared feature side once and each head's cell side
+    /// independently.
+    pub fn new_sharing_features(
+        args: ShareFeaturesArgs,
         varmap: &VarMap,
-        vs: VarBuilder,
         dev: &Device,
     ) -> Result<Self> {
-        let WarmStartArgs {
+        let ShareFeaturesArgs {
             n_cells,
             embedding_dim,
-            frozen_e_feat,
-            frozen_b_feat,
+            shared_e_feat,
+            shared_b_feat,
             e_cell_init,
             b_cell_init,
+            var_prefix,
         } = args;
+        let e_name = format!("{}_e_cell", var_prefix);
+        let b_name = format!("{}_b_cell", var_prefix);
         let e_cell = match e_cell_init {
-            Some(init_mat) => {
-                debug_assert_eq!(init_mat.nrows(), n_cells);
-                debug_assert_eq!(init_mat.ncols(), embedding_dim);
-                let mut row_major = Vec::with_capacity(n_cells * embedding_dim);
-                for i in 0..n_cells {
-                    for j in 0..embedding_dim {
-                        row_major.push(init_mat[(i, j)]);
-                    }
-                }
-                let var = candle_util::candle_core::Var::from_tensor(&Tensor::from_vec(
-                    row_major,
-                    (n_cells, embedding_dim),
-                    dev,
-                )?)?;
-                varmap
-                    .data()
-                    .lock()
-                    .unwrap()
-                    .insert("e_cell".to_string(), var.clone());
+            Some(m) => register_var_from_mat(varmap, dev, &e_name, m)?,
+            None => {
+                let randn = Tensor::randn(0.0_f32, 0.1, (n_cells, embedding_dim), dev)?;
+                let var = Var::from_tensor(&randn)?;
+                varmap.data().lock().unwrap().insert(e_name, var.clone());
                 var.as_tensor().clone()
             }
-            None => {
-                let init = candle_nn::Init::Randn {
-                    mean: 0.0,
-                    stdev: 0.1,
-                };
-                vs.get_with_hints((n_cells, embedding_dim), "e_cell", init)?
-            }
         };
-
-        let b_cell = register_var_from_slice(varmap, dev, "b_cell", b_cell_init)?;
-
+        let b_cell = register_var_from_slice(varmap, dev, &b_name, b_cell_init)?;
         Ok(Self {
-            e_feat: frozen_e_feat,
+            e_feat: shared_e_feat,
             e_cell,
-            b_feat: frozen_b_feat,
+            b_feat: shared_b_feat,
             b_cell,
             embedding_dim,
         })
