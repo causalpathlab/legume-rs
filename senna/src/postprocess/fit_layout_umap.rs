@@ -50,6 +50,44 @@ pub struct LayoutUmapArgs {
     umap_finetune_knn: usize,
 }
 
+impl Default for LayoutUmapArgs {
+    fn default() -> Self {
+        Self {
+            common: LayoutCommonArgs::default(),
+            umap_epochs: 500,
+            umap_negative_rate: 20,
+            umap_lr: 1.0,
+            umap_finetune_epochs: 100,
+            umap_finetune_knn: 15,
+        }
+    }
+}
+
+/// Run `senna layout umap` against an existing manifest with all
+/// defaults — exactly equivalent to `senna layout umap --from PATH`
+/// from the CLI. Used as the auto-layout for `senna plot --from PATH`
+/// when no `layout.cell_coords` is populated yet. Mirrors
+/// [`crate::postprocess::run_default_phate_layout`] in scope and
+/// behavior; differs only in the layout algorithm.
+pub fn run_default_umap_layout(manifest_path: &str, preload: bool) -> anyhow::Result<()> {
+    use crate::run_manifest::RunManifest;
+    use std::path::Path;
+
+    let mut args = LayoutUmapArgs::default();
+    args.common.from = Some(Box::from(manifest_path));
+    args.common.preload_data = preload;
+
+    let (manifest, manifest_dir) = RunManifest::load(Path::new(manifest_path))?;
+    let prefix_base = Path::new(&manifest.prefix)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| manifest.prefix.clone());
+    let abs_out = manifest_dir.join(prefix_base);
+    args.common.out = Some(abs_out.to_string_lossy().into_owned().into_boxed_str());
+
+    fit_layout_umap(&args)
+}
+
 pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
     let prep = preprocess_layout_data(&args.common, &resolved)?;
