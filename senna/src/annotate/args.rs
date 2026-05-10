@@ -43,9 +43,11 @@ pub struct AnnotateArgs {
     #[arg(short = 'm', long = "markers", required = true)]
     pub markers: Box<str>,
 
-    /// Output prefix for annotation artifacts.
-    #[arg(short = 'o', long = "out", required = true)]
-    pub out: Box<str>,
+    /// Output prefix for annotation artifacts. When omitted, derived
+    /// from `--from` by stripping `.senna.json` (or `.json`) — e.g.
+    /// `--from temp.senna.json` → `--out temp`.
+    #[arg(short = 'o', long = "out")]
+    pub out: Option<Box<str>>,
 
     /// Verbose logging.
     #[arg(short = 'v', long)]

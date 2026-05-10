@@ -17,7 +17,11 @@ use std::io::Write;
 use std::path::Path;
 
 pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
-    mkdir_parent(&args.out)?;
+    let out: Box<str> = match args.out.as_deref() {
+        Some(o) => Box::from(o),
+        None => derive_out_prefix(&args.from),
+    };
+    mkdir_parent(&out)?;
 
     let leiden_args = LeidenArgs {
         knn: args.knn,
@@ -176,7 +180,7 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
     } = annotate(&group, &markers_gc, &loaded.celltype_names, &config)?;
 
     // ----- Outputs -----
-    let cell_expr_path = format!("{}.cluster_expression.parquet", args.out);
+    let cell_expr_path = format!("{}.cluster_expression.parquet", out);
     profile_gk.to_parquet_with_names(
         &cell_expr_path,
         (Some(&loaded.gene_names), Some("gene")),
@@ -184,7 +188,7 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
     )?;
     info!("wrote {cell_expr_path}");
 
-    let annotation_path = format!("{}.annotation.parquet", args.out);
+    let annotation_path = format!("{}.annotation.parquet", out);
     cell_annotation_nc.to_parquet_with_names(
         &annotation_path,
         (Some(&loaded.cell_names), Some("cell")),
@@ -192,7 +196,7 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
     )?;
     info!("wrote {annotation_path}");
 
-    let argmax_path = format!("{}.argmax.tsv", args.out);
+    let argmax_path = format!("{}.argmax.tsv", out);
     {
         let mut f = File::create(&argmax_path)?;
         writeln!(f, "cell\tcell_type\tprobability")?;
@@ -202,7 +206,7 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
     }
     info!("wrote {argmax_path}");
 
-    let q_path = format!("{}.cluster_celltype_q.parquet", args.out);
+    let q_path = format!("{}.cluster_celltype_q.parquet", out);
     q_kc.to_parquet_with_names(
         &q_path,
         (Some(&cluster_names), Some("cluster")),
@@ -210,7 +214,7 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
     )?;
     info!("wrote {q_path}");
 
-    let es_path = format!("{}.cluster_celltype_es.parquet", args.out);
+    let es_path = format!("{}.cluster_celltype_es.parquet", out);
     es_kc.to_parquet_with_names(
         &es_path,
         (Some(&cluster_names), Some("cluster")),
@@ -218,21 +222,21 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
     )?;
     info!("wrote {es_path}");
 
-    let es_std_path = format!("{}.cluster_celltype_es_std.parquet", args.out);
+    let es_std_path = format!("{}.cluster_celltype_es_std.parquet", out);
     es_restandardized_kc.to_parquet_with_names(
         &es_std_path,
         (Some(&cluster_names), Some("cluster")),
         Some(&loaded.celltype_names),
     )?;
 
-    let p_path = format!("{}.cluster_celltype_p.parquet", args.out);
+    let p_path = format!("{}.cluster_celltype_p.parquet", out);
     pvalue_kc.to_parquet_with_names(
         &p_path,
         (Some(&cluster_names), Some("cluster")),
         Some(&loaded.celltype_names),
     )?;
 
-    let q_val_path = format!("{}.cluster_celltype_q_values.parquet", args.out);
+    let q_val_path = format!("{}.cluster_celltype_q_values.parquet", out);
     qvalue_kc.to_parquet_with_names(
         &q_val_path,
         (Some(&cluster_names), Some("cluster")),
@@ -451,4 +455,18 @@ fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
         );
     }
     eprintln!();
+}
+
+/// Derive an output prefix from the manifest path when `--out` was
+/// omitted. Strips `.senna.json` (preferred suffix) or any trailing
+/// `.json`, leaving the user with the same basename pattern as the
+/// training run.
+fn derive_out_prefix(from: &str) -> Box<str> {
+    if let Some(stem) = from.strip_suffix(".senna.json") {
+        return Box::from(stem);
+    }
+    if let Some(stem) = from.strip_suffix(".json") {
+        return Box::from(stem);
+    }
+    Box::from(from)
 }
