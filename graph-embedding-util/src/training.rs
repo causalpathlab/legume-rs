@@ -319,13 +319,7 @@ fn chain_step(
         },
         rng,
     );
-    let crate::loss::ChainBatch {
-        leaf_cells,
-        fine_feats,
-        neg_feats,
-        edge_weights,
-        n_negatives,
-    } = chain;
+    let crate::loss::ChainBatch { leaf_cells, feats } = chain;
 
     // Derive each pb level's per-chain indices on the fly from the
     // leaf cells: `pb_id_at_level[b] = cell_to_pb[level][leaf_cells[b]]`.
@@ -377,10 +371,7 @@ fn chain_step(
     let chain_loss = nce_loss_chain(
         &cell_axis.model.e_feat,
         &cell_axis.model.b_feat,
-        fine_feats,
-        neg_feats,
-        edge_weights,
-        n_negatives,
+        feats,
         &chain_axes,
         smoother,
         ctx.dev,
