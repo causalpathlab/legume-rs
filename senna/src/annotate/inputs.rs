@@ -215,7 +215,9 @@ where
     }
 
     // Align by name. The training pipeline writes latents in data column
-    // order, so name-mismatched cases are rare but worth a warning.
+    // order, so name-mismatched cases are rare but worth diagnosing
+    // loudly — silent misalignment makes every downstream cluster
+    // statistic empty.
     let mut idx: HashMap<&str, usize> = HashMap::default();
     idx.reserve(latent.rows.len());
     for (i, name) in latent.rows.iter().enumerate() {
@@ -223,17 +225,45 @@ where
     }
     let mut labels = Vec::with_capacity(cell_names.len());
     let mut missing = 0usize;
+    let mut pruned = 0usize;
     for cell in cell_names {
         match idx.get(cell.as_ref()) {
-            Some(&i) => labels.push(result.labels[i]),
+            Some(&i) => {
+                let lab = result.labels[i];
+                if lab == usize::MAX {
+                    pruned += 1;
+                }
+                labels.push(lab);
+            }
             None => {
                 labels.push(usize::MAX);
                 missing += 1;
             }
         }
     }
+    let assigned = cell_names.len() - missing - pruned;
+    log::info!(
+        "Cluster alignment: {assigned} assigned, {pruned} pruned by min_cluster_size, \
+         {missing} missing from latent (n_clusters={})",
+        result.n_clusters
+    );
     if missing > 0 {
-        log::warn!("{missing} cells missing from latent — marked unassigned");
+        let preview_data: Vec<&str> = cell_names.iter().take(3).map(|s| s.as_ref()).collect();
+        let preview_latent: Vec<&str> = latent.rows.iter().take(3).map(|s| s.as_ref()).collect();
+        log::warn!(
+            "{missing}/{} cells missing from latent (data examples: {:?}; latent examples: {:?}). \
+             Likely cause: latent.parquet was written by a different pipeline run with \
+             different barcode formatting (e.g. with vs. without `@<basename>` suffix).",
+            cell_names.len(),
+            preview_data,
+            preview_latent,
+        );
+    }
+    if assigned == 0 {
+        anyhow::bail!(
+            "Internal Leiden produced 0 assigned cells (missing={missing}, pruned={pruned}). \
+             Check that the latent.parquet matches the data backend's cell barcodes."
+        );
     }
     Ok((labels, result.n_clusters))
 }
@@ -304,11 +334,15 @@ pub fn load_cluster_labels(
     );
 
     let n_clusters = (max_label + 1).max(0) as usize;
+    let assigned = cell_names.len() - unassigned - missing;
     log::info!(
-        "Clusters: {n_clusters} (assigned: {}, unassigned: {}, missing-from-parquet: {})",
-        cell_names.len() - unassigned - missing,
-        unassigned,
-        missing
+        "Clusters: {n_clusters} (assigned: {assigned}, unassigned: {unassigned}, \
+         missing-from-parquet: {missing})"
+    );
+    anyhow::ensure!(
+        assigned > 0,
+        "cluster parquet aligned but every entry is NaN/missing — every cell is unassigned. \
+         Check the parquet's `cluster` column actually contains integer cluster ids."
     );
     Ok((labels, n_clusters))
 }
