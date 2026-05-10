@@ -17,6 +17,7 @@ auxiliary-data = { workspace = true }
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
 candle-util = { workspace = true }
+matrix-param = { workspace = true }
 matrix-util = { workspace = true }
 
 anyhow = { workspace = true }

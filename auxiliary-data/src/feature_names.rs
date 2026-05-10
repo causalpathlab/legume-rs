@@ -83,7 +83,10 @@ mod tests {
     #[test]
     fn exact_passthrough() {
         let k = FeatureNameKind::Exact;
-        assert_eq!(k.canonicalize("ENSG00000000003_TSPAN6").as_ref(), "ENSG00000000003_TSPAN6");
+        assert_eq!(
+            k.canonicalize("ENSG00000000003_TSPAN6").as_ref(),
+            "ENSG00000000003_TSPAN6"
+        );
         assert!(k.is_exact());
         assert!(k.into_canonicalizer().is_none());
     }

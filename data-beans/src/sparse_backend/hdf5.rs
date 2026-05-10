@@ -669,12 +669,10 @@ impl SparseIo for SparseMtxData {
                     j += 1;
                 }
 
-                let data_buf = data.read_slice_1d::<f32, _>(
-                    (merged_start as usize)..(merged_end as usize),
-                )?;
-                let indices_buf = indices.read_slice_1d::<u64, _>(
-                    (merged_start as usize)..(merged_end as usize),
-                )?;
+                let data_buf =
+                    data.read_slice_1d::<f32, _>((merged_start as usize)..(merged_end as usize))?;
+                let indices_buf = indices
+                    .read_slice_1d::<u64, _>((merged_start as usize)..(merged_end as usize))?;
 
                 for &(jj, start, end) in &tagged[i..j] {
                     let off = (start - merged_start) as usize;
