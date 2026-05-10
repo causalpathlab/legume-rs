@@ -121,31 +121,31 @@ pub fn load_from_manifest(
     let gene_names = data_vec.row_names()?;
     log::info!("Raw counts: {n_genes} genes × {n_cells} cells");
 
-    // Resolve cluster parquet path; fall back to internal Leiden on the
-    // manifest's latent matrix when no path is given OR when the
-    // referenced parquet doesn't exist on disk (a stale or relocated
-    // manifest entry shouldn't make annotate unrunnable when we can
-    // re-cluster from the same latent the manifest already points at).
-    let clusters_path: Option<String> = match clusters_override {
-        Some(p) => Some(p.to_string()),
-        None => manifest.cluster.clusters.as_deref().map(&resolve),
-    };
-    let resolved_path: Option<String> = clusters_path.and_then(|p| {
-        if Path::new(&p).is_file() {
-            Some(p)
-        } else {
-            log::warn!(
-                "Cluster parquet {p} not found — falling back to internal Leiden \
-                 on the manifest's latent."
-            );
-            None
-        }
+    // Cluster source priority:
+    //   1. `--clusters <path>` — user-explicit, hard-fail on missing.
+    //   2. `manifest.cluster.clusters` if it exists on disk — softly
+    //      fall back to internal Leiden when stale / relocated, since
+    //      we can re-cluster from the same latent the manifest points at.
+    //   3. Internal Leiden on `manifest.outputs.latent`.
+    use anyhow::Context;
+    let manifest_cluster_path = manifest.cluster.clusters.as_deref().map(&resolve);
+    let resolved_path = clusters_override.map(String::from).or_else(|| {
+        manifest_cluster_path.filter(|p| {
+            let exists = Path::new(p).is_file();
+            if !exists {
+                log::warn!(
+                    "Cluster parquet {p} not found — falling back to internal Leiden \
+                     on the manifest's latent."
+                );
+            }
+            exists
+        })
     });
     let (cluster_labels, n_clusters) = match resolved_path {
         Some(path) => {
             log::info!("Resolving cluster source: parquet {path}");
             load_cluster_labels(&path, &cell_names)
-                .map_err(|e| anyhow::anyhow!("failed to load cluster parquet {path}: {e}"))?
+                .with_context(|| format!("failed to load cluster parquet {path}"))?
         }
         None => {
             log::info!(
@@ -202,9 +202,10 @@ where
         .latent
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("manifest missing outputs.latent"))?;
+    use anyhow::Context;
     let latent_path = resolve(latent_rel);
     let mut latent = Mat::from_parquet_with_row_names(&latent_path, Some(0))
-        .map_err(|e| anyhow::anyhow!("failed to load latent {latent_path}: {e}"))?;
+        .with_context(|| format!("failed to load latent {latent_path}"))?;
     log::info!(
         "Loaded latent {latent_path}: {}×{}",
         latent.mat.nrows(),
