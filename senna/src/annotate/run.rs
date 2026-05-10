@@ -96,6 +96,14 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
     let pb_gene_gp = weighted_mean_profile(&gene_sum_pg, n_batches, g, &nb_fisher);
     let cluster_names = axis_id_names("K", n_clusters);
     info!("Cluster expression: {} genes × {} clusters", g, n_clusters);
+    let profile_max = profile_gk.iter().fold(0f32, |m, &v| m.max(v));
+    if profile_max <= 1e-12 {
+        anyhow::bail!(
+            "Cluster expression matrix is all zero — every cell-axis cluster_label is \
+             out of range (>= n_clusters). Check the cluster file's barcodes match the \
+             data backend, or that the manifest's `clusters` path resolves correctly."
+        );
+    }
 
     // pb_membership[batch, cluster] = (# cells in batch with cluster id) / batch_size.
     let pb_membership_pk = build_pb_membership(
@@ -296,6 +304,23 @@ fn apply_empirical_specificity_weights(markers_gc: &mut Mat, profile_gk: &Mat) {
         mx,
         sm / g as f32
     );
+
+    // Defensive guard: if the cluster expression matrix has no specificity
+    // signal at all (every gene's row is uniform across clusters or all-zero
+    // — typically because cluster_labels are misaligned and gene_sum_kg
+    // ended up empty), multiplying by these all-zero scores would silently
+    // zero the marker matrix, killing every enrichment downstream and
+    // leaving every cell unassigned. Warn loudly and leave `markers_gc`
+    // untouched so the caller can still get IDF-weighted enrichment.
+    if mx <= 1e-6 {
+        log::warn!(
+            "Empirical specificity scores are all ~0 — likely cluster_labels misaligned or \
+             gene_sum_kg is empty. Falling back to IDF-weighted markers without empirical \
+             reweighting. Re-check that the cluster file's cell barcodes match the data, \
+             or pass --no-empirical-specificity to silence this fallback."
+        );
+        return;
+    }
 
     for gi in 0..g {
         let s = scores[gi];
