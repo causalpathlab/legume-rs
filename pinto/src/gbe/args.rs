@@ -142,7 +142,7 @@ pub struct SrtGbeArgs {
     #[arg(long, default_value_t = 32, help = "Sketch dim for coarsening RP")]
     pub sketch_dim: usize,
 
-    #[arg(long, default_value_t = 200, help = "Training epochs")]
+    #[arg(short = 'i', long, default_value_t = 200, help = "Training epochs")]
     pub epochs: usize,
 
     #[arg(long, default_value_t = 100, help = "Batches per epoch")]

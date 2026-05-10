@@ -54,6 +54,7 @@ pub struct GbeArgs {
     data_files: Vec<Box<str>>,
 
     #[arg(
+        short = 'b',
         long,
         value_delimiter = ',',
         help = "Batch label files, one per data file"
