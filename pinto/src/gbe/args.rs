@@ -4,6 +4,7 @@
 use crate::util::input::SrtInputArgs;
 use candle_util::candle_core::Device;
 use clap::{Args, ValueEnum};
+use data_beans_alg::dc_poisson::FeatureWeighting;
 use data_beans_alg::hvg::HvgCliArgs;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -12,6 +13,49 @@ pub enum GbeDevice {
     Cpu,
     Cuda,
     Metal,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum RefineWeightingArg {
+    /// Fisher-info weight from the fitted NB mean-variance trend.
+    #[default]
+    NbFisherInfo,
+    /// No per-feature weighting (raw DC-Poisson with entity-level degree correction).
+    None,
+}
+
+impl From<RefineWeightingArg> for FeatureWeighting {
+    fn from(value: RefineWeightingArg) -> Self {
+        match value {
+            RefineWeightingArg::NbFisherInfo => FeatureWeighting::FisherInfoNb,
+            RefineWeightingArg::None => FeatureWeighting::None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum CompositeModeArg {
+    /// Per step, sample a coordinated bottom-up chain. All axes share
+    /// the same positive feature and negatives per chain. Lowest
+    /// variance per step. Default.
+    #[default]
+    Chain,
+    /// Per step, sum NCE losses across every axis (independent draws).
+    Sum,
+    /// Per step, pick one axis weighted by λ.
+    Sample,
+}
+
+impl From<CompositeModeArg> for graph_embedding_util::CompositeMode {
+    fn from(value: CompositeModeArg) -> Self {
+        match value {
+            CompositeModeArg::Sum => graph_embedding_util::CompositeMode::Sum,
+            CompositeModeArg::Sample => graph_embedding_util::CompositeMode::Sample,
+            CompositeModeArg::Chain => graph_embedding_util::CompositeMode::Chain,
+        }
+    }
 }
 
 impl GbeDevice {
@@ -37,6 +81,56 @@ pub struct SrtGbeArgs {
 
     #[arg(long, default_value_t = 8, help = "Number of coarsening seeds")]
     pub num_coarsen_seeds: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Target supergene count (0 disables). When > 0, groups co-expressed genes \
+                into this many supergenes and trains E_feat at supergene resolution. \
+                Mirrors senna topic's --max-coarse-features."
+    )]
+    pub max_coarse_features: usize,
+
+    #[arg(
+        long = "composite-mode",
+        value_enum,
+        default_value_t = CompositeModeArg::Chain,
+        help = "How to mix per-axis NCE losses each step. `chain` (default) samples a \
+                coordinated bottom-up chain — all axes share the same positive feature \
+                and negatives per chain (lowest variance). `sum` runs every axis with \
+                independent minibatches per step. `sample` picks one axis per step \
+                weighted by λ (~n_axes× faster epochs, needs more epochs to converge)."
+    )]
+    pub composite_mode: CompositeModeArg,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable BBKNN + DC-Poisson refinement of the multi-level pseudobulk \
+                partition. Default: enabled."
+    )]
+    pub no_refine: bool,
+
+    #[arg(long, default_value_t = 20, help = "Gibbs sweeps per refinement level")]
+    pub refine_gibbs: usize,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Greedy sweeps per refinement level"
+    )]
+    pub refine_greedy: usize,
+
+    #[arg(
+        long = "refine-weighting",
+        value_enum,
+        default_value_t = RefineWeightingArg::NbFisherInfo,
+        help = "DC-Poisson feature weighting: nb-fisher-info (default), none"
+    )]
+    pub refine_weighting: RefineWeightingArg,
+
+    #[arg(long, default_value_t = 42, help = "Seed for refinement Gibbs sampler")]
+    pub refine_seed: u64,
 
     #[arg(
         long,

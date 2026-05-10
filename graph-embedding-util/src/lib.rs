@@ -36,10 +36,13 @@ pub mod training;
 
 pub use auxiliary_data::feature_names::FeatureNameKind;
 pub use data::{load_unified_data, Triplet, UnifiedData};
-pub use eval::{save_outputs, OutputContext};
+pub use data_beans_alg::dc_poisson::FeatureWeighting;
+pub use data_beans_alg::refine_multilevel::RefineParams;
+pub use eval::{save_outputs, GeneAxisMapping, OutputContext};
 pub use fit::{
     fit, load_feature_network, CellCellConfig, FeatureNetworkArgs, FeatureNetworkConfig, FitConfig,
-    FitOutput,
+    FitOutput, GeneAxisInfo,
 };
-pub use model::{JointEmbedModel, ModelArgs, ModelInit, WarmStartArgs};
+pub use model::{JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
 pub use stop::setup_stop_handler;
+pub use training::{AxisSampler, CompositeMode};

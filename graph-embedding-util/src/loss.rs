@@ -81,6 +81,330 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
     }
 }
 
+////////////////////////////////
+// Stratified positive sampler //
+////////////////////////////////
+
+/// Two-stage stratified sampler for pseudobulk axes. Stage 1 picks a
+/// pb (stratum) by `q(p) ∝ pb_size(p)^alpha_pb`; stage 2 picks a
+/// feature within that pb weighted by `μ_pf · fisher(f)`. Compared to
+/// flat `WeightedIndex` over all super-edges, this guarantees every pb
+/// gets training coverage proportional to `q(p)` (uniform when
+/// `alpha_pb = 0`, count-proportional when `alpha_pb = 1`), instead of
+/// being dominated by housekeeping-gene super-edges.
+///
+/// Negatives come from a single global pb-level feature marginal
+/// (count^`alpha_neg`), since `pb_unified` collapses all pseudobulks
+/// into one synthetic "all" batch.
+pub struct StratifiedSampler {
+    /// Picks a local pb index into `active_pbs`. Weights = `q(p)`.
+    pub pb_picker: WeightedIndex<f32>,
+    /// Global pb ids that have ≥ 1 expressed feature, in stable order.
+    pub active_pbs: Vec<u32>,
+    /// Per-active-pb feature sampler; aligned with `active_pbs`.
+    pub per_pb: Vec<PbFeatureSampler>,
+    /// Negative pool: features with any nonzero pb-level count.
+    pub neg: WeightedIndex<f32>,
+    pub feature_pool: Vec<u32>,
+}
+
+pub struct PbFeatureSampler {
+    /// Global feature ids expressed in this pb.
+    pub features: Vec<u32>,
+    /// `WeightedIndex` over `features`; weights = `μ_pf · fisher(f)`.
+    pub picker: WeightedIndex<f32>,
+}
+
+/// Build a stratified sampler for a pseudobulk axis. Returns `None`
+/// when the axis has zero positives or fewer than two active pb's
+/// (degenerate stratum).
+pub fn build_stratified_sampler(
+    triplets: &[Triplet],
+    n_pb: usize,
+    n_features: usize,
+    fisher_weights: &[f32],
+    alpha_pb: f32,
+    alpha_neg: f32,
+) -> Option<StratifiedSampler> {
+    if triplets.is_empty() {
+        return None;
+    }
+
+    // Bucket triplets by pb; accumulate per-pb size and global feature marginal.
+    let mut per_pb: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_pb];
+    let mut pb_size = vec![0f32; n_pb];
+    let mut feat_count = vec![0f32; n_features];
+    for t in triplets {
+        per_pb[t.cell as usize].push((t.feature, t.count));
+        pb_size[t.cell as usize] += t.count;
+        feat_count[t.feature as usize] += t.count;
+    }
+
+    let mut active_pbs: Vec<u32> = Vec::new();
+    let mut per_pb_samplers: Vec<PbFeatureSampler> = Vec::new();
+    let mut pb_q: Vec<f32> = Vec::new();
+    for (p, edges) in per_pb.into_iter().enumerate() {
+        if edges.is_empty() {
+            continue;
+        }
+        let features: Vec<u32> = edges.iter().map(|&(f, _)| f).collect();
+        let weights: Vec<f32> = edges
+            .iter()
+            .map(|&(f, c)| (c * fisher_weights[f as usize]).max(1e-8))
+            .collect();
+        let picker = WeightedIndex::new(weights).expect("non-empty pb feature weights");
+        per_pb_samplers.push(PbFeatureSampler { features, picker });
+        active_pbs.push(p as u32);
+        pb_q.push(pb_size[p].max(1e-8).powf(alpha_pb));
+    }
+
+    if active_pbs.is_empty() {
+        return None;
+    }
+    let pb_picker = WeightedIndex::new(pb_q).expect("non-empty pb weights");
+
+    let feature_pool: Vec<u32> = (0..n_features as u32)
+        .filter(|&f| feat_count[f as usize] > 0.0)
+        .collect();
+    if feature_pool.is_empty() {
+        return None;
+    }
+    let neg_w: Vec<f32> = feature_pool
+        .iter()
+        .map(|&f| feat_count[f as usize].powf(alpha_neg))
+        .collect();
+    let neg = WeightedIndex::new(neg_w).expect("non-empty negative pool");
+
+    Some(StratifiedSampler {
+        pb_picker,
+        active_pbs,
+        per_pb: per_pb_samplers,
+        neg,
+        feature_pool,
+    })
+}
+
+pub struct StratifiedEdgeBatchArgs<'a> {
+    pub sampler: &'a StratifiedSampler,
+    pub fine_feature_weights: &'a [f32],
+    pub batch_size: usize,
+    pub n_negatives: usize,
+}
+
+/// Two-stage draw: pick pb by `q(p)`, then feature within pb. Output
+/// `EdgeBatch` is interchangeable with [`sample_edge_batch`]'s — the
+/// downstream NCE loss doesn't care how the batch was sampled.
+pub fn sample_stratified_edge_batch(
+    args: StratifiedEdgeBatchArgs,
+    rng: &mut impl Rng,
+) -> EdgeBatch {
+    let s = args.sampler;
+    let mut coarse_cells = Vec::with_capacity(args.batch_size);
+    let mut fine_feats = Vec::with_capacity(args.batch_size);
+    let mut weights = Vec::with_capacity(args.batch_size);
+
+    for _ in 0..args.batch_size {
+        let local_pb = s.pb_picker.sample(rng);
+        let p = s.active_pbs[local_pb];
+        let pf = &s.per_pb[local_pb];
+        let local_f = pf.picker.sample(rng);
+        let f = pf.features[local_f];
+        coarse_cells.push(p);
+        fine_feats.push(f);
+        weights.push(args.fine_feature_weights[f as usize]);
+    }
+
+    let mut neg_feats = Vec::with_capacity(args.batch_size * args.n_negatives);
+    for _ in 0..(args.batch_size * args.n_negatives) {
+        let local = s.neg.sample(rng);
+        neg_feats.push(s.feature_pool[local]);
+    }
+
+    EdgeBatch {
+        coarse_cells,
+        fine_feats,
+        neg_feats,
+        edge_weights: weights,
+        n_negatives: args.n_negatives,
+    }
+}
+
+////////////////////////////////
+// Nested chain sampler (MVP) //
+////////////////////////////////
+
+/// Bottom-up nested chain sampler. Each chain starts from a real
+/// `(cell, feature)` super-edge drawn by the existing per-batch
+/// sampler, then walks **up** the pb-tree via stored parent maps to
+/// derive a coordinated `pb_path` across every coarser level. The
+/// resulting chain produces:
+///
+/// - one positive `(leaf_cell, leaf_feature)` for the cell axis;
+/// - one positive `(P_k, leaf_feature)` for each pb level k via
+///   `P_k = ancestor of leaf_cell at level k`;
+/// - shared feature negatives drawn from the cell axis's batch pool.
+///
+/// All axes therefore share the same positive feature (and negatives)
+/// per chain. The chain's per-axis cell-side index is the cell itself
+/// (cell axis) or the cell's pb at that level (pb axes). One backward
+/// step over the summed loss updates `E_feat` once with coherent
+/// gradient contributions from every level — that's the variance-
+/// reduction win versus independently sampling each axis.
+///
+/// MVP scope: single-level supergene (no gene-tree yet); pb-tree only.
+/// Hard negatives via siblings are a future extension.
+pub struct ChainSampler<'a> {
+    pub batch_sampler: &'a PerBatchSampler,
+    /// `cell_to_pb_per_level[k][cell] = pb id at level k`. Finest-first
+    /// (matches the gbe convention after `collapsed_levels.reverse()`),
+    /// so `pb_path[level=0]` is coarsest and `pb_path.last()` is finest.
+    pub cell_to_pb_per_level: &'a [Vec<usize>],
+}
+
+pub struct ChainBatch {
+    /// Length B; one leaf cell per chain. Pb-tree ancestors at each
+    /// level are derived by indexing `cell_to_pb_per_level[level][cell]`
+    /// at the call site — not stored on the batch to avoid the per-step
+    /// `Vec<Vec<u32>>` allocation.
+    pub leaf_cells: Vec<u32>,
+    /// Length B; one positive feature per chain (shared across all axes).
+    pub fine_feats: Vec<u32>,
+    /// Length B*K row-major; shared negatives across all axes.
+    pub neg_feats: Vec<u32>,
+    pub edge_weights: Vec<f32>,
+    pub n_negatives: usize,
+}
+
+pub struct ChainBatchArgs<'a> {
+    pub triplets: &'a [Triplet],
+    pub sampler: &'a ChainSampler<'a>,
+    pub fine_feature_weights: &'a [f32],
+    pub batch_size: usize,
+    pub n_negatives: usize,
+}
+
+pub fn sample_chain_batch(args: ChainBatchArgs, rng: &mut impl Rng) -> ChainBatch {
+    let bs = args.sampler.batch_sampler;
+    let mut leaf_cells = Vec::with_capacity(args.batch_size);
+    let mut fine_feats = Vec::with_capacity(args.batch_size);
+    let mut weights = Vec::with_capacity(args.batch_size);
+
+    for _ in 0..args.batch_size {
+        let local_idx = bs.pos.sample(rng);
+        let global_idx = bs.triplet_indices[local_idx] as usize;
+        let t = &args.triplets[global_idx];
+        leaf_cells.push(t.cell);
+        fine_feats.push(t.feature);
+        weights.push(args.fine_feature_weights[t.feature as usize]);
+    }
+
+    let mut neg_feats = Vec::with_capacity(args.batch_size * args.n_negatives);
+    for _ in 0..(args.batch_size * args.n_negatives) {
+        let local = bs.neg.sample(rng);
+        neg_feats.push(bs.feature_pool[local]);
+    }
+
+    ChainBatch {
+        leaf_cells,
+        fine_feats,
+        neg_feats,
+        edge_weights: weights,
+        n_negatives: args.n_negatives,
+    }
+}
+
+/// One axis's cell-side resolution for chain scoring. The chain loss
+/// gathers `e_cell.index_select(indices)` and scores against the
+/// shared (already-gathered) feature side.
+pub struct ChainAxis<'a> {
+    pub e_cell: &'a Tensor,
+    pub b_cell: &'a Tensor,
+    pub indices: &'a [u32],
+    pub lambda: f32,
+    /// Used in `nce_loss_chain`'s error diagnostics.
+    pub label: &'a str,
+}
+
+/// Score one chain batch across every axis using a single shared
+/// positive/negative feature gather. `e_feat` / `b_feat` are
+/// **shared** across axes (same Var); each axis differs only in its
+/// cell-side embeddings table and the per-chain indices into it.
+///
+/// Takes the chain's feature-side fields by value (consumed by tensor
+/// construction) and `axes` borrows the per-axis indices from outside
+/// — typically from `ChainBatch.leaf_cells` and `ChainBatch.pb_paths`,
+/// destructured by the caller.
+///
+/// Returns the λ-weighted sum across axes. The per-edge weight uses
+/// the cell-axis NCE's `Σw` normalization (Fisher-info-aware) so the
+/// gradient magnitude is consistent with the existing per-axis losses.
+#[allow(clippy::too_many_arguments)]
+pub fn nce_loss_chain(
+    e_feat: &Tensor,
+    b_feat: &Tensor,
+    fine_feats: Vec<u32>,
+    neg_feats: Vec<u32>,
+    edge_weights: Vec<f32>,
+    n_negatives: usize,
+    axes: &[ChainAxis],
+    smoother: Option<&FeatureNetworkSmoother>,
+    dev: &Device,
+) -> anyhow::Result<Tensor> {
+    let b = fine_feats.len();
+    if b == 0 || axes.is_empty() {
+        return Ok(Tensor::zeros(
+            (),
+            candle_util::candle_core::DType::F32,
+            dev,
+        )?);
+    }
+    let k = n_negatives;
+
+    // Feature side gathered once for the whole chain step.
+    let pos_feat_idx = Tensor::from_vec(fine_feats, b, dev)?;
+    let e_feat_pos = select_feat_emb(smoother, e_feat, &pos_feat_idx)?;
+    let b_feat_pos = b_feat.index_select(&pos_feat_idx, 0)?;
+
+    let neg_feat_idx = Tensor::from_vec(neg_feats, b * k, dev)?;
+    let e_feat_neg_flat = select_feat_emb(smoother, e_feat, &neg_feat_idx)?;
+    let b_feat_neg_flat = b_feat.index_select(&neg_feat_idx, 0)?;
+    let h = e_feat_neg_flat.dim(1)?;
+    let e_feat_neg = e_feat_neg_flat.reshape((b, k, h))?;
+    let b_feat_neg = b_feat_neg_flat.reshape((b, k))?;
+
+    let w_sum: f32 = edge_weights.iter().sum::<f32>().max(1e-8);
+    let w_t = Tensor::from_vec(edge_weights, b, dev)?;
+
+    let mut total: Option<Tensor> = None;
+    for axis in axes {
+        anyhow::ensure!(
+            axis.indices.len() == b,
+            "chain axis {} indices ({}) != batch_size ({})",
+            axis.label,
+            axis.indices.len(),
+            b
+        );
+        let cell_idx = Tensor::from_vec(axis.indices.to_vec(), b, dev)?;
+        let e_cell_pos = axis.e_cell.index_select(&cell_idx, 0)?;
+        let b_cell_pos = axis.b_cell.index_select(&cell_idx, 0)?;
+
+        let pos_score =
+            JointEmbedModel::score_diag(&e_feat_pos, &e_cell_pos, &b_feat_pos, &b_cell_pos)?;
+        let neg_score =
+            JointEmbedModel::score_negatives(&e_feat_neg, &e_cell_pos, &b_feat_neg, &b_cell_pos)?;
+        let per_edge =
+            (log_sigmoid(&pos_score)? + log_sigmoid(&neg_score.neg()?)?.sum(1)?)?.neg()?;
+        let weighted = (per_edge * w_t.clone())?;
+        let axis_loss = (weighted.sum(0)? / (w_sum as f64))?;
+        let scaled = (axis_loss * axis.lambda as f64)?;
+        total = Some(match total {
+            Some(prev) => (prev + scaled)?,
+            None => scaled,
+        });
+    }
+    Ok(total.unwrap())
+}
+
 /// Build a per-batch sampler. Each batch contributes the positive triplets
 /// whose cells belong to that batch, and a negative pool restricted to the
 /// features observed in those cells. Batches with zero observed edges are
@@ -153,14 +477,53 @@ pub fn nce_loss(
     if b == 0 {
         return Tensor::zeros((), candle_util::candle_core::DType::F32, dev);
     }
-    let k = batch.n_negatives;
-
     let (unique_cells, cell_pos_idx) = unique_with_index(&batch.coarse_cells);
     let (e_cell_u, b_cell_u) = model.pool_cells(&unique_cells, cell_coarse_to_fine, dev)?;
 
     let cell_idx_t = Tensor::from_vec(cell_pos_idx, b, dev)?;
     let e_cell_pos = e_cell_u.index_select(&cell_idx_t, 0)?;
     let b_cell_pos = b_cell_u.index_select(&cell_idx_t, 0)?;
+
+    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, smoother, dev)
+}
+
+/// Fast path for the identity-coarsening case (every "super-cell" is
+/// its own row). Skips `unique_with_index`, `pool_cells`, and the
+/// scatter-add — a single `index_select` directly off `model.e_cell` /
+/// `model.b_cell` is mathematically equivalent because each block has
+/// exactly one fine child and `mean([x]) == x`. Composite training
+/// hits this path on every axis (cell axis + every pseudobulk level
+/// use [`crate::coarsen::identity_axis`]).
+pub fn nce_loss_identity(
+    model: &JointEmbedModel,
+    batch: EdgeBatch,
+    smoother: Option<&FeatureNetworkSmoother>,
+    dev: &Device,
+) -> Result<Tensor> {
+    let b = batch.coarse_cells.len();
+    if b == 0 {
+        return Tensor::zeros((), candle_util::candle_core::DType::F32, dev);
+    }
+    let cell_idx_t = Tensor::from_vec(batch.coarse_cells.clone(), b, dev)?;
+    let e_cell_pos = model.e_cell.index_select(&cell_idx_t, 0)?;
+    let b_cell_pos = model.b_cell.index_select(&cell_idx_t, 0)?;
+    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, smoother, dev)
+}
+
+/// Shared tail of [`nce_loss`] / [`nce_loss_identity`]: feature-side
+/// gathers, bilinear scoring, count-weighted log-σ aggregation. The
+/// cell-side embeddings come pre-resolved (pooled or directly
+/// gathered) so we don't pay the path-selection cost twice.
+fn nce_loss_with_cell_side(
+    model: &JointEmbedModel,
+    batch: EdgeBatch,
+    e_cell_pos: Tensor,
+    b_cell_pos: Tensor,
+    smoother: Option<&FeatureNetworkSmoother>,
+    dev: &Device,
+) -> Result<Tensor> {
+    let b = batch.coarse_cells.len();
+    let k = batch.n_negatives;
 
     let pos_feat_idx_t = Tensor::from_vec(batch.fine_feats, b, dev)?;
     let e_feat_pos = select_feat_emb(smoother, &model.e_feat, &pos_feat_idx_t)?;

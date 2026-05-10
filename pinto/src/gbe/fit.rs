@@ -101,15 +101,17 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
     let mut unified = ge::UnifiedData::from_sparse_io(data_vec, &batch_membership)?;
 
     let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
-    if hvg_enabled {
+    let hvg_weights: Option<Vec<f32>> = if hvg_enabled {
         let hvg = data_beans_alg::hvg::select_hvg_streaming(
             &unified.per_file_data[0],
             (args.hvg.n_hvg > 0).then_some(args.hvg.n_hvg),
             args.hvg.feature_list_file.as_deref(),
             c.block_size,
         )?;
-        unified.subset_features(&hvg.selected_indices);
-    }
+        Some(hvg.row_weights(unified.n_features()))
+    } else {
+        None
+    };
 
     let feature_network = args
         .feature_network
@@ -133,9 +135,25 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
         n_negatives: args.cell_cell_negatives,
     });
 
+    let refine = if args.no_refine {
+        None
+    } else {
+        Some(ge::RefineParams {
+            num_gibbs: args.refine_gibbs,
+            num_greedy: args.refine_greedy,
+            feature_weighting: args.refine_weighting.into(),
+            seed: args.refine_seed,
+            ..ge::RefineParams::default()
+        })
+    };
+
     let config = ge::FitConfig {
         embedding_dim: args.embedding_dim,
         num_coarsen_seeds: args.num_coarsen_seeds,
+        max_coarse_features: args.max_coarse_features,
+        hvg_weights,
+        composite_mode: args.composite_mode.into(),
+        refine,
         super_cells: args.super_cells,
         sketch_dim: args.sketch_dim,
         epochs: args.epochs,
@@ -163,6 +181,10 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
         &ge::OutputContext {
             feature_names: &unified.feature_names,
             barcodes: &unified.barcodes,
+            gene_axis: out.gene_axis.as_ref().map(|g| ge::GeneAxisMapping {
+                names: g.gene_names.as_slice(),
+                to_supergene: g.gene_to_supergene.as_slice(),
+            }),
         },
         &c.out,
     )?;
