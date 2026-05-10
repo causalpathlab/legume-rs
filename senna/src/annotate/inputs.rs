@@ -122,12 +122,26 @@ pub fn load_from_manifest(
     log::info!("Raw counts: {n_genes} genes × {n_cells} cells");
 
     // Resolve cluster parquet path; fall back to internal Leiden on the
-    // manifest's latent matrix when no path is given.
+    // manifest's latent matrix when no path is given OR when the
+    // referenced parquet doesn't exist on disk (a stale or relocated
+    // manifest entry shouldn't make annotate unrunnable when we can
+    // re-cluster from the same latent the manifest already points at).
     let clusters_path: Option<String> = match clusters_override {
         Some(p) => Some(p.to_string()),
         None => manifest.cluster.clusters.as_deref().map(&resolve),
     };
-    let (cluster_labels, n_clusters) = match clusters_path {
+    let resolved_path: Option<String> = clusters_path.and_then(|p| {
+        if Path::new(&p).is_file() {
+            Some(p)
+        } else {
+            log::warn!(
+                "Cluster parquet {p} not found — falling back to internal Leiden \
+                 on the manifest's latent."
+            );
+            None
+        }
+    });
+    let (cluster_labels, n_clusters) = match resolved_path {
         Some(path) => {
             log::info!("Resolving cluster source: parquet {path}");
             load_cluster_labels(&path, &cell_names)
