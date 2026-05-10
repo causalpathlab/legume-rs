@@ -215,10 +215,8 @@ pub fn emit_figure(
 
     let (png_res, pdf_res) = rayon::join(
         || match (&png_task, svg_flat.as_ref()) {
-            (Some(p), Some(svg)) => {
-                plot_utils::render_png(svg, frame.extent.w, frame.extent.h, p)
-                    .map(|()| Some(p.clone()))
-            }
+            (Some(p), Some(svg)) => plot_utils::render_png(svg, frame.extent.w, frame.extent.h, p)
+                .map(|()| Some(p.clone())),
             _ => Ok(None),
         },
         || match (&pdf_task, svg_flat.as_ref()) {

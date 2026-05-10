@@ -4,6 +4,7 @@
 use crate::util::input::SrtInputArgs;
 use candle_util::candle_core::Device;
 use clap::{Args, ValueEnum};
+use data_beans_alg::hvg::HvgCliArgs;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
@@ -27,6 +28,9 @@ impl GbeDevice {
 pub struct SrtGbeArgs {
     #[command(flatten)]
     pub common: SrtInputArgs,
+
+    #[command(flatten)]
+    pub hvg: HvgCliArgs,
 
     #[arg(long, default_value_t = 64, help = "Embedding dimension H")]
     pub embedding_dim: usize,

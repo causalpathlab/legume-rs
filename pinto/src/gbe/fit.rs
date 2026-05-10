@@ -98,7 +98,18 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
     }
 
     info!("Constructing unified bipartite stream...");
-    let unified = ge::UnifiedData::from_sparse_io(data_vec, &batch_membership)?;
+    let mut unified = ge::UnifiedData::from_sparse_io(data_vec, &batch_membership)?;
+
+    let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
+    if hvg_enabled {
+        let hvg = data_beans_alg::hvg::select_hvg_streaming(
+            &unified.per_file_data[0],
+            (args.hvg.n_hvg > 0).then_some(args.hvg.n_hvg),
+            args.hvg.feature_list_file.as_deref(),
+            c.block_size,
+        )?;
+        unified.subset_features(&hvg.selected_indices);
+    }
 
     let feature_network = args
         .feature_network
@@ -145,7 +156,7 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
         stop: None,
     };
 
-    let out = ge::fit(&unified, config)?;
+    let out = ge::fit(&mut unified, config)?;
 
     ge::save_outputs(
         &out.model,

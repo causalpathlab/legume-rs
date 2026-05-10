@@ -7,6 +7,7 @@
 //! axis, and write senna's run manifest after training.
 
 use crate::embed_common::*;
+use data_beans_alg::hvg::{select_hvg_streaming, HvgCliArgs};
 use graph_embedding_util as ge;
 use rustc_hash::FxHashMap;
 use std::io::BufRead;
@@ -28,6 +29,9 @@ pub struct GbeArgs {
         help = "Batch label files, one per data file"
     )]
     batch_files: Option<Vec<Box<str>>>,
+
+    #[command(flatten)]
+    hvg: HvgCliArgs,
 
     #[arg(long, default_value_t = 64, help = "Embedding dimension H")]
     embedding_dim: usize,
@@ -212,12 +216,25 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
             delim: args.feature_name_delim,
         }
     };
-    let unified = ge::load_unified_data(
+    let mut unified = ge::load_unified_data(
         &args.data_files,
         args.batch_files.as_deref(),
         feature_kind,
         args.preload_data,
     )?;
+
+    // HVG subset (reuses senna topic / chickpea fit-topic logic via
+    // data_beans_alg::hvg). 0 disables; --feature-list-file overrides.
+    let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
+    if hvg_enabled {
+        let hvg = select_hvg_streaming(
+            &unified.per_file_data[0],
+            (args.hvg.n_hvg > 0).then_some(args.hvg.n_hvg),
+            args.hvg.feature_list_file.as_deref(),
+            args.block_size,
+        )?;
+        unified.subset_features(&hvg.selected_indices);
+    }
 
     let feature_network = args
         .feature_network
@@ -271,7 +288,7 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         stop: None,
     };
 
-    let out = ge::fit(&unified, config)?;
+    let out = ge::fit(&mut unified, config)?;
 
     ge::save_outputs(
         &out.model,
