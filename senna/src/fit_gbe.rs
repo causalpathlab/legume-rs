@@ -12,6 +12,36 @@ use graph_embedding_util as ge;
 use rustc_hash::FxHashMap;
 use std::io::BufRead;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub(crate) enum CompositeModeArg {
+    /// Per step, sample a coordinated bottom-up chain — one real
+    /// (cell, feature) edge whose pb ancestors at each level come from
+    /// the cell→pb_per_level map. All axes share the same positive
+    /// feature and negatives per chain. Lowest variance per step;
+    /// per-step compute close to `sum`. Default.
+    #[default]
+    Chain,
+    /// Per step, sum NCE losses across every axis. Higher variance and
+    /// O(n_axes) per-step cost than `chain`, but axes draw independent
+    /// minibatches (no shared-positive correlation).
+    Sum,
+    /// Per step, pick one axis weighted by λ. Same expected gradient as
+    /// `sum`, ~n_axes× faster epochs, higher per-step variance — needs
+    /// proportionally more epochs to reach the same loss.
+    Sample,
+}
+
+impl From<CompositeModeArg> for ge::CompositeMode {
+    fn from(value: CompositeModeArg) -> Self {
+        match value {
+            CompositeModeArg::Sum => ge::CompositeMode::Sum,
+            CompositeModeArg::Sample => ge::CompositeMode::Sample,
+            CompositeModeArg::Chain => ge::CompositeMode::Chain,
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct GbeArgs {
     #[arg(
@@ -33,11 +63,65 @@ pub struct GbeArgs {
     #[command(flatten)]
     hvg: HvgCliArgs,
 
-    #[arg(long, default_value_t = 64, help = "Embedding dimension H")]
+    #[arg(long, default_value_t = 16, help = "Embedding dimension H")]
     embedding_dim: usize,
 
     #[arg(long, default_value_t = 8, help = "Number of coarsening seeds")]
     num_coarsen_seeds: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Target supergene count (0 disables). When > 0 and less than the number of \
+                features after HVG, group co-expressed genes into this many supergenes via \
+                nested feature coarsening + DC-Poisson refinement, then train E_feat at \
+                supergene resolution. All genes contribute via their group, instead of being \
+                clipped further by HVG. Mirrors senna topic's --max-coarse-features."
+    )]
+    max_coarse_features: usize,
+
+    #[arg(
+        long = "composite-mode",
+        value_enum,
+        default_value_t = CompositeModeArg::Chain,
+        help = "How to mix per-axis NCE losses each step. `chain` (default) samples a \
+                coordinated bottom-up chain (one real cell-feature edge whose pb ancestors \
+                at each level come from the cell→pb_per_level map). All axes share the \
+                same positive feature and negatives per chain — lowest variance per step. \
+                `sum` runs every axis with independent minibatches per step. `sample` picks \
+                one axis per step weighted by λ (~n_axes× faster epochs, more epochs needed \
+                to converge)."
+    )]
+    composite_mode: CompositeModeArg,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Disable BBKNN + DC-Poisson refinement of the multi-level pseudobulk \
+                partition. Default: enabled (parity with senna topic / svd)."
+    )]
+    no_refine: bool,
+
+    #[arg(long, default_value_t = 20, help = "Gibbs sweeps per refinement level")]
+    refine_gibbs: usize,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Greedy sweeps per refinement level"
+    )]
+    refine_greedy: usize,
+
+    #[arg(
+        long = "refine-weighting",
+        value_enum,
+        default_value_t = crate::refine_weighting::WeightingArg::NbFisherInfo,
+        help = crate::refine_weighting::WEIGHTING_HELP,
+    )]
+    refine_weighting: crate::refine_weighting::WeightingArg,
+
+    #[arg(long, default_value_t = 42, help = "Seed for refinement Gibbs sampler")]
+    refine_seed: u64,
 
     #[arg(
         long,
@@ -46,10 +130,10 @@ pub struct GbeArgs {
     )]
     super_cells: usize,
 
-    #[arg(long, default_value_t = 32, help = "Sketch dim for coarsening RP")]
+    #[arg(long, default_value_t = 10, help = "Sketch dim for coarsening RP")]
     sketch_dim: usize,
 
-    #[arg(long, default_value_t = 200, help = "Training epochs")]
+    #[arg(short = 'i', long, default_value_t = 200, help = "Training epochs")]
     epochs: usize,
 
     #[arg(long, default_value_t = 100, help = "Batches per epoch")]
@@ -58,7 +142,7 @@ pub struct GbeArgs {
     #[arg(long, default_value_t = 1024, help = "Positive edges per batch")]
     batch_size: usize,
 
-    #[arg(long, default_value_t = 16, help = "Negative samples per positive")]
+    #[arg(long, default_value_t = 4, help = "Negative samples per positive")]
     num_negatives: usize,
 
     #[arg(
@@ -157,7 +241,7 @@ pub struct GbeArgs {
 
     #[arg(
         long,
-        default_value_t = 16,
+        default_value_t = 4,
         help = "Negative cells per positive cell-pair (cell-cell loss only)"
     )]
     cell_cell_negatives: usize,
@@ -223,18 +307,23 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         args.preload_data,
     )?;
 
-    // HVG subset (reuses senna topic / chickpea fit-topic logic via
-    // data_beans_alg::hvg). 0 disables; --feature-list-file overrides.
+    // HVG → projection weights (no longer subsets the feature axis).
+    // Mirrors senna topic: HVG down-weights uninformative genes for the
+    // random projection / pb sketching only; collapse + supergene
+    // coarsening + training read all genes. Caller passes the weights
+    // through `FitConfig.hvg_weights`.
     let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
-    if hvg_enabled {
+    let hvg_weights: Option<Vec<f32>> = if hvg_enabled {
         let hvg = select_hvg_streaming(
             &unified.per_file_data[0],
             (args.hvg.n_hvg > 0).then_some(args.hvg.n_hvg),
             args.hvg.feature_list_file.as_deref(),
             args.block_size,
         )?;
-        unified.subset_features(&hvg.selected_indices);
-    }
+        Some(hvg.row_weights(unified.n_features()))
+    } else {
+        None
+    };
 
     let feature_network = args
         .feature_network
@@ -265,9 +354,25 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         })
         .transpose()?;
 
+    let refine = if args.no_refine {
+        None
+    } else {
+        Some(ge::RefineParams {
+            num_gibbs: args.refine_gibbs,
+            num_greedy: args.refine_greedy,
+            feature_weighting: args.refine_weighting.into(),
+            seed: args.refine_seed,
+            ..ge::RefineParams::default()
+        })
+    };
+
     let config = ge::FitConfig {
         embedding_dim: args.embedding_dim,
         num_coarsen_seeds: args.num_coarsen_seeds,
+        max_coarse_features: args.max_coarse_features,
+        hvg_weights,
+        composite_mode: args.composite_mode.into(),
+        refine,
         super_cells: args.super_cells,
         sketch_dim: args.sketch_dim,
         epochs: args.epochs,
@@ -295,6 +400,10 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         &ge::OutputContext {
             feature_names: &unified.feature_names,
             barcodes: &unified.barcodes,
+            gene_axis: out.gene_axis.as_ref().map(|g| ge::GeneAxisMapping {
+                names: g.gene_names.as_slice(),
+                to_supergene: g.gene_to_supergene.as_slice(),
+            }),
         },
         &args.out,
     )?;

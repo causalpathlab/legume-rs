@@ -7,6 +7,7 @@
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use auxiliary_data::feature_names::FeatureNameKind;
 use data_beans::sparse_io_vector::SparseIoVec;
+use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use log::info;
 use rustc_hash::FxHashMap;
 
@@ -163,6 +164,84 @@ impl UnifiedData {
         );
         self.feature_names = new_feature_names;
         self.feature_to_backend_row = new_feature_to_backend_row;
+    }
+
+    /// Coarsen the feature axis by a [`FeatureCoarsening`] grouping:
+    /// every triplet `(c, g, μ)` becomes `(c, fc.fine_to_coarse[g], μ)`,
+    /// then triplets sharing the same `(c, supergene)` are summed.
+    /// Compacts `feature_names` to one entry per supergene (joining
+    /// member gene names with `+`, truncated for readability), and
+    /// resets `feature_to_backend_row` to identity since supergenes
+    /// don't map 1:1 to backend rows.
+    ///
+    /// Used by `gbe::fit` when `max_coarse_features > 0` so that all
+    /// genes participate in training via their supergene group instead
+    /// of being clipped by HVG. The original gene→supergene mapping is
+    /// returned so the output writer can replicate `E_feat[supergene]`
+    /// back to per-gene rows for downstream consumers.
+    pub fn coarsen_features(&mut self, fc: &FeatureCoarsening) -> Vec<Box<str>> {
+        let n_fine = self.n_features();
+        debug_assert_eq!(fc.fine_to_coarse.len(), n_fine);
+        let n_coarse = fc.num_coarse;
+
+        // Sum (cell, supergene) → count via a HashMap keyed on (c, sg).
+        // Using a plain Vec<HashMap> per cell would be cache-friendlier
+        // but the workspace already prefers FxHashMap for u64-key dedup.
+        let mut bucket: FxHashMap<(u32, u32), f32> = FxHashMap::default();
+        for t in &self.triplets {
+            let sg = fc.fine_to_coarse[t.feature as usize] as u32;
+            *bucket.entry((t.cell, sg)).or_insert(0.0) += t.count;
+        }
+        let mut new_triplets: Vec<Triplet> = bucket
+            .into_iter()
+            .map(|((cell, sg), count)| Triplet {
+                cell,
+                feature: sg,
+                count,
+            })
+            .collect();
+        new_triplets.sort_unstable_by_key(|t| (t.cell, t.feature));
+
+        // Build supergene names by concatenating member gene names
+        // (truncated). Keeps downstream parquet output readable when a
+        // user inspects `dictionary.parquet` directly.
+        let original_names = self.feature_names.clone();
+        let new_names: Vec<Box<str>> = (0..n_coarse)
+            .map(|c| {
+                let members = &fc.coarse_to_fine[c];
+                if members.len() == 1 {
+                    original_names[members[0]].clone()
+                } else {
+                    let mut joined = String::new();
+                    for (i, &g) in members.iter().take(3).enumerate() {
+                        if i > 0 {
+                            joined.push('+');
+                        }
+                        joined.push_str(&original_names[g]);
+                    }
+                    if members.len() > 3 {
+                        joined.push_str(&format!("+{}more", members.len() - 3));
+                    }
+                    joined.into_boxed_str()
+                }
+            })
+            .collect();
+
+        log::info!(
+            "Supergene coarsening: {} fine genes → {} supergenes ({} → {} edges)",
+            n_fine,
+            n_coarse,
+            self.triplets.len(),
+            new_triplets.len()
+        );
+
+        self.triplets = new_triplets;
+        self.feature_names = new_names;
+        // feature_to_backend_row no longer 1:1 with rows; reset to identity
+        // (supergenes don't address backend rows directly — Fisher cache
+        // and any other backend-keyed pass becomes invalid for the new axis).
+        self.feature_to_backend_row = (0..n_coarse).collect();
+        original_names
     }
 
     /// Build a `UnifiedData` from a single in-memory `SparseIoVec` plus
