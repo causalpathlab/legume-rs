@@ -455,31 +455,31 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         SparseIoBackend::HDF5 => "h5",
     };
 
-    let atac_target = format!("{}.atac.{}", args.out, backend_suffix);
-    let atac_effective = apply_zip_flag(&atac_target, args.zip);
+    let atac_dir = format!("{}.atac.{}", args.out, backend_suffix);
+    let atac_final = apply_zip_flag(&atac_dir, args.zip);
     let mut atac_data = create_sparse_from_triplets(
         &atac_triplets,
         (p, nn, atac_triplets.len()),
-        Some(&atac_effective),
+        Some(&atac_dir),
         Some(&backend),
     )?;
     atac_data.register_row_names_vec(&peak_names);
     atac_data.register_column_names_vec(&cell_names);
-    finalize_zarr_output(&atac_effective, &atac_target)?;
-    info!("wrote ATAC sparse backend: {}", atac_effective);
+    finalize_zarr_output(&atac_dir, &atac_final)?;
+    info!("wrote ATAC sparse backend: {}", atac_final);
 
-    let rna_target = format!("{}.rna.{}", args.out, backend_suffix);
-    let rna_effective = apply_zip_flag(&rna_target, args.zip);
+    let rna_dir = format!("{}.rna.{}", args.out, backend_suffix);
+    let rna_final = apply_zip_flag(&rna_dir, args.zip);
     let mut rna_data = create_sparse_from_triplets(
         &rna_triplets,
         (g, nn, rna_triplets.len()),
-        Some(&rna_effective),
+        Some(&rna_dir),
         Some(&backend),
     )?;
     rna_data.register_row_names_vec(&gene_names);
     rna_data.register_column_names_vec(&cell_names);
-    finalize_zarr_output(&rna_effective, &rna_target)?;
-    info!("wrote RNA sparse backend: {}", rna_effective);
+    finalize_zarr_output(&rna_dir, &rna_final)?;
+    info!("wrote RNA sparse backend: {}", rna_final);
 
     // ---- Companion parquet / TSV files -------------------------------------------------
     let dict_file = format!("{}.dict.parquet", args.out);
