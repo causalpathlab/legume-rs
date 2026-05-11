@@ -164,19 +164,41 @@ pub fn materialize_writable_backend(src: &str, dst: &str) -> anyhow::Result<()> 
 /// If `target_path` ends with `.zarr.zip`, zip the `zarr_dir` into it and
 /// remove the directory. Otherwise this is a no-op (the directory IS the target).
 ///
-/// To keep in-zip entry names compact, the directory is renamed to drop a
-/// trailing `.zarr` before zipping (so entries are prefixed `foo/...` rather
-/// than `foo.zarr/...`).
+/// To keep in-zip entry names compact, the directory is staged into a temp
+/// directory under its short stem (e.g. `atac.zarr` → `<tmp>/atac`) before
+/// zipping, so entries are prefixed `foo/...` rather than `foo.zarr/...`.
+/// Staging in a tempdir avoids collisions when a sibling file or directory
+/// already uses the short stem (e.g. an input dir named `atac/` next to
+/// `atac.zarr`).
 pub fn finalize_zarr_output(zarr_dir: &str, target_path: &str) -> anyhow::Result<()> {
-    if target_path.ends_with(".zarr.zip") {
-        let clean_dir = zarr_dir.strip_suffix(".zarr").unwrap_or(zarr_dir);
-        if clean_dir != zarr_dir {
-            std::fs::rename(zarr_dir, clean_dir)?;
-        }
-        info!("Zipping zarr output: {} → {}", clean_dir, target_path);
-        matrix_util::common_io::zip_dir(clean_dir, target_path)?;
-        std::fs::remove_dir_all(clean_dir)?;
+    if !target_path.ends_with(".zarr.zip") {
+        return Ok(());
     }
+
+    let zarr_path = std::path::Path::new(zarr_dir);
+    let stem = zarr_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.strip_suffix(".zarr").unwrap_or(s))
+        .ok_or_else(|| anyhow::anyhow!("invalid zarr_dir: {}", zarr_dir))?;
+    let parent = zarr_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let staging = tempfile::Builder::new()
+        .prefix(".zarr_zip_staging_")
+        .tempdir_in(&parent)?;
+    let staged = staging.path().join(stem);
+    std::fs::rename(zarr_dir, &staged)?;
+
+    let staged_str = staged
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-UTF8 staging path: {:?}", staged))?;
+    info!("Zipping zarr output: {} → {}", staged_str, target_path);
+    matrix_util::common_io::zip_dir(staged_str, target_path)?;
+    // `staging` TempDir removes the staged contents on drop.
     Ok(())
 }
 
