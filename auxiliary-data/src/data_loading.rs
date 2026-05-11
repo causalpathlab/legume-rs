@@ -7,27 +7,25 @@ use data_beans::sparse_io_vector::SparseIoVec;
 use matrix_util::common_io::{self, basename, read_lines};
 
 use crate::feature_names::FeatureNameKind;
+use data_beans::sparse_io_vector::RowAlignment;
 
 /// Arguments for loading multiple sparse data files with shared row names.
+#[derive(Default)]
 pub struct ReadSharedRowsArgs {
     pub data_files: Vec<Box<str>>,
     pub batch_files: Option<Vec<Box<str>>>,
     pub preload: bool,
-    /// Optional row-name canonicalization for fuzzy cross-file
-    /// alignment. Default = [`FeatureNameKind::Exact`] preserves prior
-    /// exact-match behavior.
-    pub feature_kind: FeatureNameKind,
-}
-
-impl Default for ReadSharedRowsArgs {
-    fn default() -> Self {
-        Self {
-            data_files: Vec::new(),
-            batch_files: None,
-            preload: false,
-            feature_kind: FeatureNameKind::Exact,
-        }
-    }
+    /// Cross-file row-name canonicalization rule. `None` = auto-detect
+    /// via [`FeatureNameKind::auto_detect`] once row names are in hand.
+    /// `Some(kind)` skips detection and uses the caller's choice.
+    /// Default = `None` (auto).
+    pub feature_kind: Option<FeatureNameKind>,
+    /// How to align row names across input files. Default
+    /// [`RowAlignment::Intersect`] preserves single-modality semantics
+    /// (keep only common rows). Switch to [`RowAlignment::Union`] for
+    /// multi-modal load (e.g. paired RNA + ATAC) where features are
+    /// disjoint and the modalities are glued via cells, not features.
+    pub row_alignment: RowAlignment,
 }
 
 /// Sparse data with per-cell batch labels.
@@ -46,29 +44,116 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
     // to avoid duplicate barcodes in the column names
     let attach_data_name = args.data_files.len() > 1;
 
-    let mut data_vec = SparseIoVec::new();
-    if let Some(canon) = args.feature_kind.clone().into_canonicalizer() {
-        info!(
-            "Row alignment: applying {:?} canonicalizer across {} file(s)",
-            args.feature_kind,
-            args.data_files.len()
-        );
-        // SAFETY: data_vec is empty here; with_row_canonicalizer only
-        // errors if backends were already pushed.
-        data_vec = data_vec
-            .with_row_canonicalizer(move |name| canon(name))
-            .expect("with_row_canonicalizer on empty SparseIoVec");
-    }
+    // Open every backend first (preserving order). For LocusOverlap we
+    // need to peek all row names before installing the canonicalizer.
+    type OpenedBackend = Box<dyn data_beans::sparse_io::SparseIo<IndexIter = Vec<usize>>>;
+    let mut opened: Vec<(Box<str>, OpenedBackend)> = Vec::with_capacity(args.data_files.len());
     for data_file in args.data_files.iter() {
         info!("Importing data file: {}", data_file);
-
         let mut data = try_open_or_convert(data_file)?;
-
         if args.preload {
             data.preload_columns()?;
         }
+        opened.push((data_file.clone(), data));
+    }
 
-        let data_name = attach_data_name.then(|| basename(data_file)).transpose()?;
+    let mut data_vec = SparseIoVec::new()
+        .with_row_alignment(args.row_alignment)
+        .expect("with_row_alignment on empty SparseIoVec");
+
+    use crate::feature_names::FeatureNameKind;
+
+    // Peek row names once if auto-detect needs them, or if the
+    // caller-specified kind needs a global cross-name pass.
+    let needs_names = args.feature_kind.is_none()
+        || args
+            .feature_kind
+            .as_ref()
+            .is_some_and(|k| k.needs_global_pass());
+    let all_names: Option<Vec<Box<str>>> = if needs_names {
+        let mut acc: Vec<Box<str>> = Vec::new();
+        for (_, d) in opened.iter() {
+            acc.extend(d.row_names()?);
+        }
+        Some(acc)
+    } else {
+        None
+    };
+
+    let resolved_kind: FeatureNameKind = match args.feature_kind.clone() {
+        Some(k) => k,
+        None => {
+            let names = all_names.as_ref().expect("peeked when auto");
+            let k = FeatureNameKind::auto_detect(names);
+            info!(
+                "Row alignment: auto-detected feature name kind → {:?} ({} rows)",
+                k,
+                names.len()
+            );
+            k
+        }
+    };
+
+    // Install canonicalizer. Three paths:
+    //   * Mixed                            → per-name dispatcher (needs names).
+    //   * Locus { merge_overlapping: true } → overlap cluster map (needs names).
+    //   * Anything else                    → pure per-name closure from `canonicalize`.
+    match &resolved_kind {
+        FeatureNameKind::Mixed => {
+            let names = all_names.as_ref().expect("peeked for Mixed").clone();
+            info!(
+                "Row alignment: building MIXED-kind canonical map over {} names \
+                 across {} file(s)",
+                names.len(),
+                opened.len()
+            );
+            let canon = crate::feature_names::build_mixed_kind_canonicalizer(&names);
+            data_vec = data_vec
+                .with_row_canonicalizer(move |name| canon(name))
+                .expect("with_row_canonicalizer on empty SparseIoVec");
+        }
+        FeatureNameKind::Locus {
+            merge_overlapping: true,
+        } => {
+            let names = all_names
+                .as_ref()
+                .expect("peeked for Locus merge_overlapping")
+                .clone();
+            info!(
+                "Row alignment: building locus-overlap canonical map over {} names \
+                 across {} file(s)",
+                names.len(),
+                opened.len()
+            );
+            let canon = crate::feature_names::build_locus_overlap_canonicalizer(&names);
+            data_vec = data_vec
+                .with_row_canonicalizer(move |name| canon(name))
+                .expect("with_row_canonicalizer on empty SparseIoVec");
+        }
+        kind => {
+            if let Some(canon) = kind.clone().into_canonicalizer() {
+                info!(
+                    "Row alignment: applying {:?} canonicalizer across {} file(s)",
+                    kind,
+                    opened.len()
+                );
+                // SAFETY: data_vec is empty; with_row_canonicalizer only errors
+                // if backends were already pushed.
+                data_vec = data_vec
+                    .with_row_canonicalizer(move |name| canon(name))
+                    .expect("with_row_canonicalizer on empty SparseIoVec");
+            }
+        }
+    }
+    if args.row_alignment == RowAlignment::Union {
+        info!(
+            "Row alignment: UNION across {} file(s) — features from each \
+             backend retained, non-observing backends pad with zero",
+            opened.len()
+        );
+    }
+    for (data_file, data) in opened.into_iter() {
+        let data_name = attach_data_name.then(|| basename(&data_file)).transpose()?;
         data_vec.push(Arc::from(data), data_name)?;
     }
 

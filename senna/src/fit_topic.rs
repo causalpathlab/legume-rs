@@ -374,6 +374,9 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             ..data_beans_alg::refine_multilevel::RefineParams::default()
         }),
         ignore_batch: args.ignore_batch,
+        feature_mask_fn: None,
+        row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
+        feature_kind: None,
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();

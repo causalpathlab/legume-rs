@@ -181,6 +181,9 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
         ignore_batch: args.ignore_batch,
+        feature_mask_fn: None,
+        row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
+        feature_kind: None,
     })?;
 
     // 3. Batch-adjusted collapsing (pseudobulk)

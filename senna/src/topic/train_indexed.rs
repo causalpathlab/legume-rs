@@ -3,6 +3,7 @@ use super::eval_indexed::{dense_to_indexed, refine_indexed_topic_proportions, Pe
 use crate::embed_common::*;
 use crate::logging::new_progress_bar;
 
+use super::graph_likelihood::{graph_loss, PoissonGraphConfig};
 use candle_core::{Device, Tensor};
 use candle_nn::AdamW;
 use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
@@ -147,6 +148,7 @@ pub(crate) fn train_mixed(
     decoders: &[EmbeddedTopicDecoder],
     config: &IndexedTrainConfig,
     bulk_with_deltas: Option<(&Mat, &[GammaMatrix])>,
+    graph_cfg: Option<&PoissonGraphConfig>,
 ) -> anyhow::Result<TrainScores> {
     let num_levels = collapsed_levels.len();
     let total_epochs = config.epochs;
@@ -285,6 +287,22 @@ pub(crate) fn train_mixed(
                     break;
                 }
             }
+        }
+
+        // Once-per-epoch BKN graph-likelihood gradient step (Poisson on
+        // observed feature-pair edges, closed-form non-edge partition).
+        // Cheap: O(|E|·H + D·H). Operates on the *full* ρ [D, H] — the
+        // global degree-weighted partition Σ_u d̂_u · ρ̃_{u,h} can't be
+        // restricted to the minibatch's top-K slice.
+        if let Some(cfg) = graph_cfg {
+            let g_loss = graph_loss(encoder.feature_embeddings(), cfg)?;
+            clip_grads_and_step(&mut adam, &g_loss, f64::from(config.grad_clip))?;
+            let d = encoder.feature_embeddings().dim(0)? as f32;
+            info!(
+                "[epoch {}] graph_nll/gene={:.4}",
+                epoch,
+                g_loss.to_scalar::<f32>()? / d.max(1.0)
+            );
         }
 
         llik_trace.push(llik_tot / count_tot);
