@@ -9,7 +9,7 @@ use matrix_util::knn_match::MakeVecPoint;
 use matrix_util::traits::*;
 use matrix_util::utils::*;
 use rayon::prelude::*;
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::ops::Index;
 use std::sync::Arc;
 
@@ -67,6 +67,12 @@ pub struct SparseIoVec {
     /// Built once at `push` time, never mutated thereafter, so row reads
     /// don't have to rebuild it per call.
     data_global_to_local_row: Vec<HashMap<usize, usize>>,
+    /// `true` for datasets where `local_to_global` is non-injective —
+    /// i.e. the canonicalizer collapsed two or more local rows to the
+    /// same global row. Read paths use this to switch from a fast
+    /// pass-through emit to a `(row, col) → sum` merge so the resulting
+    /// COO doesn't carry duplicate entries (which break CSC builders).
+    data_has_intra_row_merges: Vec<bool>,
     row_count_by_global: Vec<usize>,
     global_to_compact_row: Vec<Option<usize>>,
     /// Inverse of `global_to_compact_row` restricted to compact rows.
@@ -178,6 +184,7 @@ impl SparseIoVec {
             row_names_by_global: vec![],
             data_local_to_global_row: vec![],
             data_global_to_local_row: vec![],
+            data_has_intra_row_merges: vec![],
             row_count_by_global: vec![],
             global_to_compact_row: vec![],
             compact_to_global_row: vec![],
@@ -511,9 +518,23 @@ impl SparseIoVec {
             };
             local_to_global.push(glob_row);
         }
+        // Count per-dataset *presence*, not per-local-row hits: when the
+        // row canonicalizer collapses several local rows in one file to
+        // the same global key, this dataset should still contribute
+        // exactly 1 to that global's count. Otherwise the
+        // `RowAlignment::Intersect` admit-rule (`count >= n_datasets`)
+        // silently excludes every collapsed row.
+        let mut counted: HashSet<usize> = HashSet::default();
         for &g in &local_to_global {
-            self.row_count_by_global[g] += 1;
+            if counted.insert(g) {
+                self.row_count_by_global[g] += 1;
+            }
         }
+        // Flag canonicalizer-induced intra-file row merges so the read
+        // paths can sum duplicate (row, col) entries instead of emitting
+        // them twice (which breaks `from_nonzero_triplets` strictness).
+        let has_intra_merges = counted.len() != local_to_global.len();
+        self.data_has_intra_row_merges.push(has_intra_merges);
         let mut g2l: HashMap<usize, usize> =
             HashMap::with_capacity_and_hasher(local_to_global.len(), Default::default());
         for (l, &g) in local_to_global.iter().enumerate() {
@@ -683,10 +704,24 @@ impl SparseIoVec {
                 self.data_vec[didx].read_triplets_by_columns(local_cols)?;
 
             let l2g = self.data_local_to_global_row[didx].as_slice();
-            for (i, j, v) in group_triplets {
-                if let Some(c) = g2c[l2g[i as usize]] {
-                    let out_col = group[j as usize].1 as u64;
-                    triplets.push((c as u64, out_col, v));
+            if self.data_has_intra_row_merges[didx] {
+                // Canonicalizer collapsed >=2 local rows in this dataset to
+                // the same global. Sum into a HashMap so downstream CSC
+                // builders don't see duplicate (row, col) entries.
+                let mut acc: HashMap<(u64, u64), f32> = HashMap::default();
+                for (i, j, v) in group_triplets {
+                    if let Some(c) = g2c[l2g[i as usize]] {
+                        let out_col = group[j as usize].1 as u64;
+                        *acc.entry((c as u64, out_col)).or_insert(0.0) += v;
+                    }
+                }
+                triplets.extend(acc.into_iter().map(|((r, c), v)| (r, c, v)));
+            } else {
+                for (i, j, v) in group_triplets {
+                    if let Some(c) = g2c[l2g[i as usize]] {
+                        let out_col = group[j as usize].1 as u64;
+                        triplets.push((c as u64, out_col, v));
+                    }
                 }
             }
         }
