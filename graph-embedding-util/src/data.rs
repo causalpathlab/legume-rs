@@ -279,14 +279,28 @@ pub fn load_unified_data(
     batch_files: Option<&[Box<str>]>,
     feature_kind: FeatureNameKind,
     preload: bool,
+    column_alignment: data_beans::sparse_io_vector::ColumnAlignment,
 ) -> anyhow::Result<UnifiedData> {
+    use data_beans::sparse_io_vector::ColumnAlignment;
     if let Some(bf) = batch_files {
-        anyhow::ensure!(
-            bf.len() == data_files.len(),
-            "batch_files length {} != data_files length {}",
-            bf.len(),
-            data_files.len()
-        );
+        // Under `ColumnAlignment::Union` a single barcode can be in
+        // multiple files, so per-file batch lists no longer compose;
+        // the loader requires exactly one batch file in that mode.
+        // Mirror the same expectation here.
+        match column_alignment {
+            ColumnAlignment::Disjoint => anyhow::ensure!(
+                bf.len() == data_files.len(),
+                "batch_files length {} != data_files length {}",
+                bf.len(),
+                data_files.len()
+            ),
+            ColumnAlignment::Union => anyhow::ensure!(
+                bf.len() == 1,
+                "ColumnAlignment::Union requires exactly one --batch-files file \
+                 (one label per unified cell); got {}",
+                bf.len()
+            ),
+        }
     }
 
     let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
@@ -294,6 +308,7 @@ pub fn load_unified_data(
         batch_files: batch_files.map(<[Box<str>]>::to_vec),
         preload,
         feature_kind: Some(feature_kind),
+        column_alignment,
         ..Default::default()
     })?;
 

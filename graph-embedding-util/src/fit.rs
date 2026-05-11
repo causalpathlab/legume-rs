@@ -237,7 +237,11 @@ fn load_or_compute_fisher_weights(
 /// [`UnifiedData::subset_features`] and the returned weight vector
 /// in lockstep, so downstream sampler/collapse builds see a single
 /// compact axis.
-fn maybe_cap_features(unified: &mut UnifiedData, feat_weights: Vec<f32>, max_features: usize) -> Vec<f32> {
+fn maybe_cap_features(
+    unified: &mut UnifiedData,
+    feat_weights: Vec<f32>,
+    max_features: usize,
+) -> Vec<f32> {
     if max_features == 0 {
         return feat_weights;
     }
