@@ -151,6 +151,12 @@ pub struct RunOutputs {
     /// when present; falls back to `dictionary` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dictionary_empirical: Option<String>,
+    /// `{out}.feature_embedding.parquet` — D × H learned per-gene embedding
+    /// ρ (indexed-topic only). Shared between encoder and decoder under the
+    /// ETM factorization β = log_softmax_d(α · ρᵀ); each gene's row is its
+    /// learned coordinate in the topic-model embedding space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_embedding: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -367,6 +373,10 @@ pub struct RunDescription<'a> {
     /// dictionary parquet, e.g. `"dictionary_empirical.parquet"`. `None`
     /// to omit.
     pub dictionary_empirical_suffix: Option<&'a str>,
+    /// Suffix after `{basename}.` for the per-gene feature embedding ρ
+    /// parquet (indexed-topic only), e.g. `"feature_embedding.parquet"`.
+    /// `None` to omit.
+    pub feature_embedding_suffix: Option<&'a str>,
     /// Default `--colour-by` for downstream plot / layout.
     pub default_colour_by: &'a str,
 }
@@ -407,6 +417,9 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     }
     if let Some(suf) = desc.dictionary_empirical_suffix {
         m.outputs.dictionary_empirical = Some(format!("{basename}.{suf}"));
+    }
+    if let Some(suf) = desc.feature_embedding_suffix {
+        m.outputs.feature_embedding = Some(format!("{basename}.{suf}"));
     }
     m.defaults.colour_by = Some(desc.default_colour_by.into());
 

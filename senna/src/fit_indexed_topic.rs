@@ -5,11 +5,11 @@ use crate::topic::common::{
 };
 use crate::topic::eval_indexed::{evaluate_latent_by_indexed_encoder, EvaluateLatentConfig};
 use crate::topic::train_indexed::{
-    estimate_bulk_delta, evaluate_bulk_samples, train_mixed, write_indexed_dictionary,
-    BulkEvalConfig, IndexedTrainConfig,
+    estimate_bulk_delta, evaluate_bulk_samples, train_mixed, write_feature_embedding,
+    write_indexed_dictionary, BulkEvalConfig, IndexedTrainConfig,
 };
 
-use candle_util::candle_decoder_indexed_topic::IndexedTopicDecoder;
+use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
 use candle_util::candle_encoder_indexed::*;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 
@@ -232,9 +232,13 @@ pub struct IndexedTopicArgs {
     #[arg(
         long,
         default_value_t = 16,
-        help = "Per-feature embedding dimension",
-        long_help = "Features are pooled via [N,S] × [S,H] instead of the dense\n\
-                     [N,D] × [D,M] used by the standard encoder."
+        help = "Per-feature embedding dimension H (shared by encoder and decoder)",
+        long_help = "Dimension H of the per-gene embedding ρ ∈ ℝ^{D×H}. ρ is shared\n\
+                     between encoder (value-weighted pool over each cell's top-K\n\
+                     features) and decoder (β_kd = log_softmax_d(α_k · ρ_dᵀ), with\n\
+                     α ∈ ℝ^{K×H} as topic embeddings). Smaller H ⇒ stronger\n\
+                     regularization of β through a lower-rank shared space; larger H\n\
+                     ⇒ more expressive but risk of mode collapse."
     )]
     embedding_dim: usize,
 
@@ -340,12 +344,15 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         param_builder.pp("enc"),
     )?;
 
-    // Per-level decoders: all at D_full, levels differ in N (sample coarsening)
-    let decoders: Vec<IndexedTopicDecoder> = (0..num_levels)
+    // Per-level decoders: all at D_full, levels differ in N (sample coarsening).
+    // ETM-factorized — each decoder shares the encoder's feature embeddings ρ,
+    // and learns only its own topic embeddings α_{level} [K, H].
+    let shared_rho = base_encoder.feature_embeddings().clone();
+    let decoders: Vec<EmbeddedTopicDecoder> = (0..num_levels)
         .map(|i| {
-            IndexedTopicDecoder::new(
-                n_features_full,
+            EmbeddedTopicDecoder::new(
                 n_topics,
+                shared_rho.clone(),
                 param_builder.pp(format!("dec_{i}")),
             )
             .expect("decoder creation")
@@ -470,6 +477,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // Use finest-level decoder for output
     let finest_decoder = decoders.last().unwrap();
     write_indexed_dictionary(finest_decoder, &gene_names, &args.out)?;
+    write_feature_embedding(base_encoder.feature_embeddings(), &gene_names, &args.out)?;
 
     // Persist trainable weights, model architecture, and shortlist weights
     // so `senna predict` (and `--warm-start` re-runs) can rebuild this model.
@@ -517,9 +525,9 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         cpu_vb.pp("enc"),
     )?;
     let finest_dec_idx = decoders.len().saturating_sub(1);
-    let cpu_finest_decoder = IndexedTopicDecoder::new(
-        n_features_full,
+    let cpu_finest_decoder = EmbeddedTopicDecoder::new(
         n_topics,
+        cpu_encoder.feature_embeddings().clone(),
         cpu_vb.pp(format!("dec_{finest_dec_idx}")),
     )?;
 
@@ -630,6 +638,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         pb_gene_suffix: Some("pb_gene.parquet"),
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
+        feature_embedding_suffix: Some("feature_embedding.parquet"),
         default_colour_by: "cluster",
     })?;
 
