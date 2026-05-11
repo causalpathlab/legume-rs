@@ -882,6 +882,9 @@ fn preprocess_layout_data_recompute(
             ..data_beans_alg::refine_multilevel::RefineParams::default()
         }),
         ignore_batch: false,
+        feature_mask_fn: None,
+        row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
+        feature_kind: None,
     })?;
 
     let finest = collapsed_levels

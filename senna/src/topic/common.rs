@@ -207,7 +207,30 @@ pub struct LoadProjectArgs<'a> {
     pub max_features: usize,
     pub feature_list_file: Option<&'a str>,
     pub ignore_batch: bool,
+    /// Optional row-subset hook. Called once with the loaded data's row
+    /// names; returns `keep[d]` per feature. Applied via
+    /// `SparseIoVec::mask_rows` before projection. Use this to restrict
+    /// the model to features covered by a feature network / curated list.
+    pub feature_mask_fn: Option<&'a FeatureMaskFn>,
+    /// Row-alignment strategy when multiple `data_files` are passed.
+    /// Default Intersect (single-modality cohorts); switch to Union for
+    /// multi-modal load (e.g. paired RNA + ATAC backends with disjoint
+    /// feature axes glued by cells).
+    pub row_alignment: data_beans::sparse_io_vector::RowAlignment,
+    /// Per-name canonicalization rule applied to row names across
+    /// backends. Default Exact = strict string match. Gene picks the
+    /// last token after a delimiter so `ENSG000_TGFB1` and `TGFB1`
+    /// resolve to the same row. Locus normalizes `chr1:1000-2000`,
+    /// `1:1000-2000`, etc. LocusOverlap additionally merges overlapping
+    /// intervals on the same chromosome into one cluster.
+    pub feature_kind: Option<auxiliary_data::feature_names::FeatureNameKind>,
 }
+
+/// Callback that, given the loaded data's row names, returns a boolean
+/// keep-mask of the same length. Used by [`LoadProjectArgs::feature_mask_fn`]
+/// and [`LoadCollapseArgs::feature_mask_fn`] to physically subset rows
+/// (via `SparseIoVec::mask_rows`) before projection / collapse / training.
+pub type FeatureMaskFn = dyn Fn(&[Box<str>]) -> anyhow::Result<Vec<bool>>;
 
 /// Read sparse files, resolve batch membership, optionally pick HVGs,
 /// then run the random projection (or load a warm-start projection).
@@ -215,18 +238,39 @@ pub struct LoadProjectArgs<'a> {
 /// pipeline is identical across routines.
 pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData> {
     let SparseDataWithBatch {
-        data: data_vec,
+        data: mut data_vec,
         batch: mut batch_membership,
         ..
     } = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: args.data_files.to_vec(),
         batch_files: args.batch_files.clone(),
         preload: args.preload,
-        ..Default::default()
+        row_alignment: args.row_alignment,
+        feature_kind: args.feature_kind.clone(),
     })?;
     if args.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch");
         crate::senna_input::collapse_to_single_batch(&mut batch_membership);
+    }
+
+    // Optional row-subset (e.g. restrict to features covered by a feature
+    // network). Applied before projection so all downstream stages
+    // (projection, collapse, training, inference) see the smaller axis.
+    if let Some(mask_fn) = args.feature_mask_fn {
+        let row_names = data_vec.row_names()?;
+        let keep = mask_fn(&row_names)?;
+        anyhow::ensure!(
+            keep.len() == row_names.len(),
+            "feature_mask_fn returned {} bools but data has {} rows",
+            keep.len(),
+            row_names.len(),
+        );
+        let n_keep = keep.iter().filter(|&&k| k).count();
+        anyhow::ensure!(
+            n_keep > 0,
+            "feature_mask_fn dropped every feature — check name resolution"
+        );
+        data_vec.mask_rows(&keep)?;
     }
 
     let mut selected_features: Option<HvgSelection> = None;
@@ -316,6 +360,12 @@ pub struct LoadCollapseArgs<'a> {
     pub refine: Option<data_beans_alg::refine_multilevel::RefineParams>,
     /// Treat all cells as a single batch — no per-batch δ estimation.
     pub ignore_batch: bool,
+    /// Optional row-subset hook — see [`LoadProjectArgs::feature_mask_fn`].
+    pub feature_mask_fn: Option<&'a FeatureMaskFn>,
+    /// Row-alignment strategy — see [`LoadProjectArgs::row_alignment`].
+    pub row_alignment: data_beans::sparse_io_vector::RowAlignment,
+    /// Per-name canonicalization — see [`LoadProjectArgs::feature_kind`].
+    pub feature_kind: Option<auxiliary_data::feature_names::FeatureNameKind>,
 }
 
 /// Load sparse data, project, multi-level collapse, and write delta output.
@@ -339,6 +389,9 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         max_features: args.max_features,
         feature_list_file: args.feature_list_file,
         ignore_batch: args.ignore_batch,
+        feature_mask_fn: args.feature_mask_fn,
+        row_alignment: args.row_alignment,
+        feature_kind: args.feature_kind.clone(),
     })?;
 
     info!("Multi-level collapsing with super-cells ...");
