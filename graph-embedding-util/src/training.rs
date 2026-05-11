@@ -19,9 +19,10 @@ use crate::data::UnifiedData;
 use crate::feature_network::FeatureNetworkSmoother;
 use crate::loss::{
     cell_cell_nce_loss, nce_loss, nce_loss_chain, nce_loss_identity, sample_cell_edge_batch,
-    sample_chain_batch, sample_edge_batch, sample_stratified_edge_batch, CellEdgeBatchArgs,
-    ChainAxis, ChainBatchArgs, ChainSampler, EdgeBatch, EdgeBatchArgs, PerBatchCellSampler,
-    PerBatchSampler, StratifiedEdgeBatchArgs, StratifiedSampler,
+    sample_chain_batch, sample_edge_batch, sample_per_batch_stratified_edge_batch,
+    sample_stratified_edge_batch, CellEdgeBatchArgs, ChainAxis, ChainBatchArgs, ChainSampler,
+    EdgeBatch, EdgeBatchArgs, PerBatchCellSampler, PerBatchSampler, PerBatchStratifiedCellSampler,
+    PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
 };
 use crate::model::JointEmbedModel;
 use candle_util::candle_core::{Device, Tensor};
@@ -77,13 +78,18 @@ pub struct CompositeAxis<'a> {
     pub label: &'a str,
 }
 
-/// Bipartite sampler attached to a composite axis. The cell axis uses
-/// `PerBatch` (one sampler per batch, picked uniformly at step time);
-/// pb axes use `Stratified` (single sampler, two-stage draw — pb then
-/// feature — that equalizes per-pb coverage and avoids housekeeping-
-/// gene domination).
+/// Bipartite sampler attached to a composite axis. Three variants:
+/// - `PerBatch`: flat per-batch positive draw weighted by `count·fisher`.
+/// - `PerBatchStratified`: per-batch two-stage draw — cell by
+///   `degree^α_cell`, feature within cell by `count·fisher`. Guarantees
+///   per-cell coverage so rare/shallow cells aren't drowned by deeply
+///   sequenced ones. Used by the cell axis by default.
+/// - `Stratified`: single-sampler two-stage draw over pb's — pb by
+///   `pb_size^α_pb`, feature within pb by `count·fisher`. Used by the
+///   pb axes (one synthetic batch each).
 pub enum AxisSampler<'a> {
     PerBatch(&'a [PerBatchSampler]),
+    PerBatchStratified(&'a [PerBatchStratifiedCellSampler]),
     Stratified(&'a StratifiedSampler),
 }
 
@@ -91,6 +97,7 @@ impl<'a> AxisSampler<'a> {
     fn is_empty(&self) -> bool {
         match self {
             Self::PerBatch(s) => s.is_empty(),
+            Self::PerBatchStratified(s) => s.is_empty(),
             Self::Stratified(_) => false,
         }
     }
@@ -292,34 +299,54 @@ fn chain_step(
         cell_to_pb.len()
     );
 
-    let samplers = match cell_axis.sampler {
-        AxisSampler::PerBatch(s) => s,
+    // Chain mode accepts either flat per-batch or stratified per-batch
+    // cell samplers — both produce real `(cell, feature)` positives that
+    // can be walked up the pb tree. Stratified is the recommended default.
+    let (chain, batch_id) = match cell_axis.sampler {
+        AxisSampler::PerBatch(samplers) => {
+            if samplers.is_empty() {
+                return Ok(None);
+            }
+            let id = rng.random_range(0..samplers.len());
+            let bs = &samplers[id];
+            let chain_sampler = ChainSampler {
+                batch_sampler: bs,
+                cell_to_pb_per_level: cell_to_pb,
+            };
+            let chain = sample_chain_batch(
+                ChainBatchArgs {
+                    triplets: &cell_axis.unified.triplets,
+                    sampler: &chain_sampler,
+                    fine_feature_weights: ctx.feat_weights,
+                    batch_size: params.batch_size,
+                    n_negatives: params.num_negatives,
+                },
+                rng,
+            );
+            (chain, id)
+        }
+        AxisSampler::PerBatchStratified(samplers) => {
+            if samplers.is_empty() {
+                return Ok(None);
+            }
+            let id = rng.random_range(0..samplers.len());
+            let bs = &samplers[id];
+            let chain = sample_chain_batch_stratified(
+                bs,
+                ctx.feat_weights,
+                params.batch_size,
+                params.num_negatives,
+                rng,
+            );
+            (chain, id)
+        }
         AxisSampler::Stratified(_) => {
             anyhow::bail!(
-                "Chain mode: cell axis must use PerBatch sampler (real triplets). Got Stratified."
+                "Chain mode: cell axis must use PerBatch or PerBatchStratified \
+                 (need real triplets). Got Stratified (pb-only)."
             );
         }
     };
-    if samplers.is_empty() {
-        return Ok(None);
-    }
-    let batch_id = rng.random_range(0..samplers.len());
-    let bs = &samplers[batch_id];
-
-    let chain_sampler = ChainSampler {
-        batch_sampler: bs,
-        cell_to_pb_per_level: cell_to_pb,
-    };
-    let chain = sample_chain_batch(
-        ChainBatchArgs {
-            triplets: &cell_axis.unified.triplets,
-            sampler: &chain_sampler,
-            fine_feature_weights: ctx.feat_weights,
-            batch_size: params.batch_size,
-            n_negatives: params.num_negatives,
-        },
-        rng,
-    );
     let crate::loss::ChainBatch { leaf_cells, feats } = chain;
     let b = leaf_cells.len();
 
@@ -392,6 +419,51 @@ fn chain_step(
     Ok(Some(total))
 }
 
+/// Chain-batch sampler for the stratified per-batch cell sampler.
+/// Mirrors `loss::sample_chain_batch` but draws each leaf
+/// `(cell, feature)` via the two-stage `cell_picker` → `per_cell` path
+/// instead of a flat triplet pick. Shared negatives come from the same
+/// per-batch feature pool, so downstream `nce_loss_chain` consumes the
+/// same `ChainBatch` shape regardless of which sampler produced it.
+fn sample_chain_batch_stratified(
+    bs: &PerBatchStratifiedCellSampler,
+    fine_feature_weights: &[f32],
+    batch_size: usize,
+    n_negatives: usize,
+    rng: &mut StdRng,
+) -> crate::loss::ChainBatch {
+    let mut leaf_cells = Vec::with_capacity(batch_size);
+    let mut fine_feats = Vec::with_capacity(batch_size);
+    let mut weights = Vec::with_capacity(batch_size);
+
+    for _ in 0..batch_size {
+        let lc = bs.cell_picker.sample(rng);
+        let c = bs.active_cells[lc];
+        let pf = &bs.per_cell[lc];
+        let lf = pf.picker.sample(rng);
+        let f = pf.features[lf];
+        leaf_cells.push(c);
+        fine_feats.push(f);
+        weights.push(fine_feature_weights[f as usize]);
+    }
+
+    let mut neg_feats = Vec::with_capacity(batch_size * n_negatives);
+    for _ in 0..(batch_size * n_negatives) {
+        let local = bs.neg.sample(rng);
+        neg_feats.push(bs.feature_pool[local]);
+    }
+
+    crate::loss::ChainBatch {
+        leaf_cells,
+        feats: crate::loss::ChainFeatureSide {
+            fine_feats,
+            neg_feats,
+            edge_weights: weights,
+            n_negatives,
+        },
+    }
+}
+
 /// Sample a minibatch from a single axis, compute its bipartite NCE
 /// loss (taking the identity fast path when the axis has identity
 /// coarsening), and add the optional cell-cell term. Returns `None`
@@ -428,6 +500,21 @@ fn single_axis_step(
                     batch_sampler: bs,
                     cell_coarsening: cc,
                     fine_feature_weights: Some(feat_weights),
+                    batch_size: params.batch_size,
+                    n_negatives: params.num_negatives,
+                },
+                rng,
+            );
+            (batch, Some(id))
+        }
+        AxisSampler::PerBatchStratified(samplers) => {
+            let id = rng.random_range(0..samplers.len());
+            let bs = &samplers[id];
+            let batch = sample_per_batch_stratified_edge_batch(
+                PerBatchStratifiedEdgeBatchArgs {
+                    sampler: bs,
+                    cell_coarsening: cc,
+                    fine_feature_weights: feat_weights,
                     batch_size: params.batch_size,
                     n_negatives: params.num_negatives,
                 },

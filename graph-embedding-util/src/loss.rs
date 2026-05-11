@@ -9,8 +9,10 @@
 use crate::data::Triplet;
 use crate::feature_network::{select_feat_emb, FeatureNetworkSmoother};
 use crate::model::JointEmbedModel;
+use crate::progress::new_progress_bar;
 use candle_util::candle_core::{Device, Result, Tensor};
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
+use indicatif::ParallelProgressIterator;
 use rand::Rng;
 use rand_distr::weighted::WeightedIndex;
 use rand_distr::Distribution;
@@ -81,6 +83,190 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
     }
 }
 
+///////////////////////////////////////////////////
+// Per-batch stratified cell sampler (cell axis) //
+///////////////////////////////////////////////////
+
+/// Two-stage per-batch sampler for the cell axis. Stage 1 picks a cell
+/// (within this batch) with `q(c) ∝ degree(c)^alpha_cell`; stage 2
+/// picks a feature within that cell weighted by `count · fisher(f)`.
+/// Mirrors [`StratifiedSampler`] but the outer stratum is fine cells
+/// (not pseudobulks), and one sampler exists per batch. Negatives use
+/// the same per-batch feature marginal (`count^alpha_neg`) as
+/// [`PerBatchSampler`]. With `alpha_cell = 1`, this is approximately
+/// equivalent to the flat sampler; with `alpha_cell = 0`, every cell
+/// in the batch gets uniform coverage regardless of sequencing depth.
+pub struct PerBatchStratifiedCellSampler {
+    /// Local-index picker into `active_cells`. Weights = `q(c)`.
+    pub cell_picker: WeightedIndex<f32>,
+    /// Global cell ids with ≥ 1 expressed feature in this batch, in
+    /// stable order.
+    pub active_cells: Vec<u32>,
+    /// Per-active-cell feature sampler; aligned with `active_cells`.
+    pub per_cell: Vec<CellFeatureSampler>,
+    /// Negative pool: features with any nonzero count in this batch.
+    pub neg: WeightedIndex<f32>,
+    pub feature_pool: Vec<u32>,
+}
+
+pub struct CellFeatureSampler {
+    /// Global feature ids expressed in this cell.
+    pub features: Vec<u32>,
+    /// `WeightedIndex` over `features`; weights = `count · fisher(f)`.
+    pub picker: WeightedIndex<f32>,
+}
+
+/// Build one stratified cell sampler per batch. Returns one entry per
+/// original batch id (`None` for batches with zero positives). Caller
+/// filters to the active subset before wiring into `AxisSampler`.
+pub fn build_per_batch_stratified_cell_samplers(
+    triplets: &[Triplet],
+    batch_membership: &[u32],
+    n_batches: usize,
+    n_features: usize,
+    fisher_weights: &[f32],
+    alpha_cell: f32,
+    alpha_neg: f32,
+) -> Vec<Option<PerBatchStratifiedCellSampler>> {
+    let bucket_bar = new_progress_bar(triplets.len() as u64);
+    bucket_bar.set_message("bucketing triplets by batch (strat-cell)");
+    let per_batch_indices: Vec<Vec<u32>> = triplets
+        .par_iter()
+        .enumerate()
+        .progress_with(bucket_bar.clone())
+        .fold(
+            || vec![Vec::new(); n_batches],
+            |mut acc, (i, t)| {
+                let b = batch_membership[t.cell as usize] as usize;
+                acc[b].push(i as u32);
+                acc
+            },
+        )
+        .reduce(
+            || vec![Vec::new(); n_batches],
+            |mut a, b| {
+                for (av, bv) in a.iter_mut().zip(b.into_iter()) {
+                    av.extend(bv);
+                }
+                a
+            },
+        );
+    bucket_bar.finish_and_clear();
+
+    let build_bar = new_progress_bar(n_batches as u64);
+    build_bar.set_message("per-batch strat-cell sampler build");
+    let samplers = per_batch_indices
+        .into_par_iter()
+        .progress_with(build_bar.clone())
+        .map(|trip_indices| {
+            if trip_indices.is_empty() {
+                return None;
+            }
+
+            // Bucket triplets in this batch by cell. FxHashMap keyed on
+            // global cell id; values are (feature, count) lists. Dense
+            // n_cells scratch is wasteful here because each batch only
+            // touches a fraction of the global cell axis.
+            let mut per_cell_map: FxHashMap<u32, Vec<(u32, f32)>> = FxHashMap::default();
+            let mut cell_degree: FxHashMap<u32, f32> = FxHashMap::default();
+            let mut feat_count = vec![0f32; n_features];
+            for &i in &trip_indices {
+                let t = &triplets[i as usize];
+                per_cell_map
+                    .entry(t.cell)
+                    .or_default()
+                    .push((t.feature, t.count));
+                *cell_degree.entry(t.cell).or_insert(0.0) += t.count;
+                feat_count[t.feature as usize] += t.count;
+            }
+
+            let mut active_cells: Vec<u32> = per_cell_map.keys().copied().collect();
+            active_cells.sort_unstable();
+
+            let mut per_cell: Vec<CellFeatureSampler> = Vec::with_capacity(active_cells.len());
+            let mut cell_w: Vec<f32> = Vec::with_capacity(active_cells.len());
+            for &c in &active_cells {
+                let edges = &per_cell_map[&c];
+                let features: Vec<u32> = edges.iter().map(|&(f, _)| f).collect();
+                let weights: Vec<f32> = edges
+                    .iter()
+                    .map(|&(f, cnt)| (cnt * fisher_weights[f as usize]).max(1e-8))
+                    .collect();
+                let picker = WeightedIndex::new(weights).expect("non-empty cell-feature weights");
+                per_cell.push(CellFeatureSampler { features, picker });
+                cell_w.push(cell_degree[&c].max(1e-8).powf(alpha_cell));
+            }
+            let cell_picker = WeightedIndex::new(cell_w).expect("non-empty cell weights");
+
+            let feature_pool: Vec<u32> = (0..n_features as u32)
+                .filter(|&f| feat_count[f as usize] > 0.0)
+                .collect();
+            let neg_w: Vec<f32> = feature_pool
+                .iter()
+                .map(|&f| feat_count[f as usize].powf(alpha_neg))
+                .collect();
+            let neg = WeightedIndex::new(neg_w).expect("non-empty batch feature pool");
+
+            Some(PerBatchStratifiedCellSampler {
+                cell_picker,
+                active_cells,
+                per_cell,
+                neg,
+                feature_pool,
+            })
+        })
+        .collect();
+    build_bar.finish_and_clear();
+    samplers
+}
+
+pub struct PerBatchStratifiedEdgeBatchArgs<'a> {
+    pub sampler: &'a PerBatchStratifiedCellSampler,
+    pub cell_coarsening: &'a FeatureCoarsening,
+    pub fine_feature_weights: &'a [f32],
+    pub batch_size: usize,
+    pub n_negatives: usize,
+}
+
+/// Two-stage draw: pick cell by `degree^alpha_cell`, then feature
+/// within cell by `count · fisher`. Output `EdgeBatch` shape matches
+/// the flat and stratified pb samplers — downstream NCE doesn't care.
+pub fn sample_per_batch_stratified_edge_batch(
+    args: PerBatchStratifiedEdgeBatchArgs,
+    rng: &mut impl Rng,
+) -> EdgeBatch {
+    let s = args.sampler;
+    let mut coarse_cells = Vec::with_capacity(args.batch_size);
+    let mut fine_feats = Vec::with_capacity(args.batch_size);
+    let mut weights = Vec::with_capacity(args.batch_size);
+
+    for _ in 0..args.batch_size {
+        let lc = s.cell_picker.sample(rng);
+        let c = s.active_cells[lc];
+        let pf = &s.per_cell[lc];
+        let lf = pf.picker.sample(rng);
+        let f = pf.features[lf];
+        let c_coarse = args.cell_coarsening.fine_to_coarse[c as usize] as u32;
+        coarse_cells.push(c_coarse);
+        fine_feats.push(f);
+        weights.push(args.fine_feature_weights[f as usize]);
+    }
+
+    let mut neg_feats = Vec::with_capacity(args.batch_size * args.n_negatives);
+    for _ in 0..(args.batch_size * args.n_negatives) {
+        let local = s.neg.sample(rng);
+        neg_feats.push(s.feature_pool[local]);
+    }
+
+    EdgeBatch {
+        coarse_cells,
+        fine_feats,
+        neg_feats,
+        edge_weights: weights,
+        n_negatives: args.n_negatives,
+    }
+}
+
 ////////////////////////////////
 // Stratified positive sampler //
 ////////////////////////////////
@@ -130,36 +316,91 @@ pub fn build_stratified_sampler(
         return None;
     }
 
-    // Bucket triplets by pb; accumulate per-pb size and global feature marginal.
-    let mut per_pb: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_pb];
-    let mut pb_size = vec![0f32; n_pb];
-    let mut feat_count = vec![0f32; n_features];
-    for t in triplets {
-        per_pb[t.cell as usize].push((t.feature, t.count));
-        pb_size[t.cell as usize] += t.count;
-        feat_count[t.feature as usize] += t.count;
+    // Parallel bucket triplets by pb; per-thread local accumulators
+    // (per_pb / pb_size / feat_count) then reduce. Per-pb edge lists
+    // concat across threads; pb_size and feat_count sum elementwise.
+    let bucket_bar = new_progress_bar(triplets.len() as u64);
+    bucket_bar.set_message("bucketing triplets by pb");
+    struct Bucket {
+        per_pb: Vec<Vec<(u32, f32)>>,
+        pb_size: Vec<f32>,
+        feat_count: Vec<f32>,
     }
+    let Bucket {
+        per_pb,
+        pb_size,
+        feat_count,
+    } = triplets
+        .par_iter()
+        .progress_with(bucket_bar.clone())
+        .fold(
+            || Bucket {
+                per_pb: vec![Vec::new(); n_pb],
+                pb_size: vec![0f32; n_pb],
+                feat_count: vec![0f32; n_features],
+            },
+            |mut acc, t| {
+                acc.per_pb[t.cell as usize].push((t.feature, t.count));
+                acc.pb_size[t.cell as usize] += t.count;
+                acc.feat_count[t.feature as usize] += t.count;
+                acc
+            },
+        )
+        .reduce(
+            || Bucket {
+                per_pb: vec![Vec::new(); n_pb],
+                pb_size: vec![0f32; n_pb],
+                feat_count: vec![0f32; n_features],
+            },
+            |mut a, b| {
+                for (av, bv) in a.per_pb.iter_mut().zip(b.per_pb.into_iter()) {
+                    av.extend(bv);
+                }
+                for (av, bv) in a.pb_size.iter_mut().zip(b.pb_size.into_iter()) {
+                    *av += bv;
+                }
+                for (av, bv) in a.feat_count.iter_mut().zip(b.feat_count.into_iter()) {
+                    *av += bv;
+                }
+                a
+            },
+        );
+    bucket_bar.finish_and_clear();
 
-    let mut active_pbs: Vec<u32> = Vec::new();
-    let mut per_pb_samplers: Vec<PbFeatureSampler> = Vec::new();
-    let mut pb_q: Vec<f32> = Vec::new();
-    for (p, edges) in per_pb.into_iter().enumerate() {
-        if edges.is_empty() {
-            continue;
-        }
-        let features: Vec<u32> = edges.iter().map(|&(f, _)| f).collect();
-        let weights: Vec<f32> = edges
-            .iter()
-            .map(|&(f, c)| (c * fisher_weights[f as usize]).max(1e-8))
-            .collect();
-        let picker = WeightedIndex::new(weights).expect("non-empty pb feature weights");
-        per_pb_samplers.push(PbFeatureSampler { features, picker });
-        active_pbs.push(p as u32);
-        pb_q.push(pb_size[p].max(1e-8).powf(alpha_pb));
-    }
-
-    if active_pbs.is_empty() {
+    // Per-pb sampler build is embarrassingly parallel.
+    let active_idx: Vec<usize> = (0..n_pb).filter(|&p| !per_pb[p].is_empty()).collect();
+    if active_idx.is_empty() {
         return None;
+    }
+    let build_bar = new_progress_bar(active_idx.len() as u64);
+    build_bar.set_message("per-pb sampler build");
+    let built: Vec<(u32, PbFeatureSampler, f32)> = active_idx
+        .par_iter()
+        .progress_with(build_bar.clone())
+        .map(|&p| {
+            let edges = &per_pb[p];
+            let features: Vec<u32> = edges.iter().map(|&(f, _)| f).collect();
+            let weights: Vec<f32> = edges
+                .iter()
+                .map(|&(f, c)| (c * fisher_weights[f as usize]).max(1e-8))
+                .collect();
+            let picker = WeightedIndex::new(weights).expect("non-empty pb feature weights");
+            (
+                p as u32,
+                PbFeatureSampler { features, picker },
+                pb_size[p].max(1e-8).powf(alpha_pb),
+            )
+        })
+        .collect();
+    build_bar.finish_and_clear();
+
+    let mut active_pbs: Vec<u32> = Vec::with_capacity(built.len());
+    let mut per_pb_samplers: Vec<PbFeatureSampler> = Vec::with_capacity(built.len());
+    let mut pb_q: Vec<f32> = Vec::with_capacity(built.len());
+    for (p, s, q) in built {
+        active_pbs.push(p);
+        per_pb_samplers.push(s);
+        pb_q.push(q);
     }
     let pb_picker = WeightedIndex::new(pb_q).expect("non-empty pb weights");
 
@@ -419,14 +660,38 @@ pub fn build_per_batch_samplers(
     fisher_weights: &[f32],
     alpha_neg: f32,
 ) -> Vec<Option<PerBatchSampler>> {
-    let mut per_batch_indices: Vec<Vec<u32>> = vec![Vec::new(); n_batches];
-    for (i, t) in triplets.iter().enumerate() {
-        let b = batch_membership[t.cell as usize] as usize;
-        per_batch_indices[b].push(i as u32);
-    }
+    // Parallel bucketing of triplet indices by batch. Each worker folds
+    // its chunk into per-batch local Vecs, then reduce concats per batch.
+    let bucket_bar = new_progress_bar(triplets.len() as u64);
+    bucket_bar.set_message("bucketing triplets by batch");
+    let per_batch_indices: Vec<Vec<u32>> = triplets
+        .par_iter()
+        .enumerate()
+        .progress_with(bucket_bar.clone())
+        .fold(
+            || vec![Vec::new(); n_batches],
+            |mut acc, (i, t)| {
+                let b = batch_membership[t.cell as usize] as usize;
+                acc[b].push(i as u32);
+                acc
+            },
+        )
+        .reduce(
+            || vec![Vec::new(); n_batches],
+            |mut a, b| {
+                for (av, bv) in a.iter_mut().zip(b.into_iter()) {
+                    av.extend(bv);
+                }
+                a
+            },
+        );
+    bucket_bar.finish_and_clear();
 
-    per_batch_indices
+    let build_bar = new_progress_bar(n_batches as u64);
+    build_bar.set_message("per-batch sampler build");
+    let samplers = per_batch_indices
         .into_par_iter()
+        .progress_with(build_bar.clone())
         .map(|trip_indices| {
             if trip_indices.is_empty() {
                 return None;
@@ -465,7 +730,9 @@ pub fn build_per_batch_samplers(
                 feature_pool,
             })
         })
-        .collect()
+        .collect();
+    build_bar.finish_and_clear();
+    samplers
 }
 
 pub fn nce_loss(

@@ -6,8 +6,8 @@ use crate::coarsen::{identity_axis, AxisCoarsenings};
 use crate::data::UnifiedData;
 use crate::feature_network::FeatureNetworkSmoother;
 use crate::loss::{
-    build_per_batch_cell_samplers, build_per_batch_samplers, build_stratified_sampler,
-    PerBatchSampler, StratifiedSampler,
+    build_per_batch_cell_samplers, build_per_batch_stratified_cell_samplers,
+    build_stratified_sampler, PerBatchStratifiedCellSampler, StratifiedSampler,
 };
 use crate::model::{JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
 use crate::stop::setup_stop_handler;
@@ -18,11 +18,6 @@ use crate::training::{
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, MultilevelParams};
-use data_beans_alg::feature_coarsening::FeatureCoarsening;
-use data_beans_alg::feature_coarsening_multilevel::{
-    compute_multilevel_feature_coarsening, refine_multilevel_feature_coarsening, FeatureKnnContext,
-    MultilevelRefineParams,
-};
 use data_beans_alg::gene_weighting::{
     compute_nb_fisher_weights, load_per_gene_weights, save_per_gene_weights,
 };
@@ -47,6 +42,12 @@ const DEFAULT_AXIS_LAMBDA: f32 = 1.0;
 /// rare cell types meaningful coverage without starving the dominant
 /// strata.
 const DEFAULT_STRATIFY_ALPHA_PB: f32 = 0.5;
+
+/// Stratification exponent for cell-axis positive sampling: outer pick
+/// is `q(c) ∝ degree(c)^alpha_cell` within each batch. Same shape as
+/// `alpha_pb`. `0.5` gives rare/shallow cells real coverage without
+/// starving deeply sequenced cells.
+const DEFAULT_STRATIFY_ALPHA_CELL: f32 = 0.5;
 
 /// Hyperparameter / configuration bundle for [`fit`]. Constructed by
 /// each caller from its own CLI arguments — this crate doesn't import
@@ -96,18 +97,16 @@ pub struct FitConfig {
     /// `project_columns_weighted` with these weights — uninformative
     /// genes are down-weighted but still contribute to the sketch and
     /// every downstream pass. When `None`, falls back to plain batch-
-    /// corrected RP (every gene weight = 1). HVG no longer subsets the
-    /// feature axis: all genes participate via supergene grouping.
+    /// corrected RP (every gene weight = 1).
     pub hvg_weights: Option<Vec<f32>>,
-    /// Target supergene count at the finest level. `0` disables
-    /// coarsening (every gene is its own row of `E_feat`); when `> 0`
-    /// and less than `n_features`, builds a single nested feature
-    /// coarsening at this resolution and remaps every (cell/pb,
-    /// gene) triplet to (cell/pb, supergene). Mirrors senna topic's
-    /// `--max-coarse-features` knob — preserves all genes in the loss
-    /// (each gene contributes via its supergene group) instead of
-    /// dropping low-variance genes.
-    pub max_coarse_features: usize,
+    /// Hard cap on the number of features trained. When `> 0` and less
+    /// than `n_features`, keeps the top-`max_features` genes by
+    /// NB-Fisher weight and drops the rest before the multilevel
+    /// collapse. Shrinks `E_feat`, the triplet vec, every per-batch
+    /// sampler, and pb-blob storage proportionally — the dominant
+    /// large-data speed knob now that supergene coarsening is gone.
+    /// `0` keeps every gene.
+    pub max_features: usize,
     /// BBKNN + DC-Poisson refinement on the multi-level pseudobulk
     /// partition. `Some(RefineParams::default())` enables it (parity
     /// with senna topic / svd / postprocess); `None` falls back to the
@@ -232,6 +231,41 @@ fn load_or_compute_fisher_weights(
     Ok(feat_weights)
 }
 
+/// Cap `unified.n_features()` at `max_features` by Fisher rank (largest
+/// kept). No-op when `max_features == 0` or already <= cap. Subsets
+/// triplets + feature_names + feature_to_backend_row via
+/// [`UnifiedData::subset_features`] and the returned weight vector
+/// in lockstep, so downstream sampler/collapse builds see a single
+/// compact axis.
+fn maybe_cap_features(unified: &mut UnifiedData, feat_weights: Vec<f32>, max_features: usize) -> Vec<f32> {
+    if max_features == 0 {
+        return feat_weights;
+    }
+    let n = unified.n_features();
+    if n <= max_features {
+        return feat_weights;
+    }
+    // Argsort descending by Fisher, then take top-N. Ties broken by
+    // ascending gene id for determinism across runs / re-cached weights.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_unstable_by(|&a, &b| {
+        feat_weights[b]
+            .partial_cmp(&feat_weights[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.cmp(&b))
+    });
+    let mut selected: Vec<usize> = order.into_iter().take(max_features).collect();
+    selected.sort_unstable(); // subset_features remaps in old-axis order
+    info!(
+        "Feature cap: {} → {} genes (top by NB-Fisher)",
+        n,
+        selected.len()
+    );
+    let new_weights: Vec<f32> = selected.iter().map(|&i| feat_weights[i]).collect();
+    unified.subset_features(&selected);
+    new_weights
+}
+
 pub fn load_feature_network(args: FeatureNetworkArgs) -> anyhow::Result<FeatureNetworkConfig> {
     info!("Loading feature network from {}...", args.path);
     let graph = FeaturePairGraph::from_edge_list(
@@ -257,23 +291,9 @@ pub fn load_feature_network(args: FeatureNetworkArgs) -> anyhow::Result<FeatureN
 /// Trained model + its `VarMap`. The varmap is exposed so callers can
 /// save checkpoints or re-run inference; current callers (`senna gbe`,
 /// `pinto gbe`) only consume `model`, so it sits unused but kept alive.
-///
-/// `gene_axis` carries the mapping needed to replicate the supergene-
-/// keyed `model.e_feat` back to per-gene rows at output time. `None`
-/// when no supergene coarsening was applied (callers can pass
-/// `unified.feature_names` directly to `OutputContext`).
 pub struct FitOutput {
     pub model: JointEmbedModel,
     pub varmap: VarMap,
-    pub gene_axis: Option<GeneAxisInfo>,
-}
-
-/// Pre-coarsening gene axis snapshot kept on `FitOutput` so callers
-/// can save a per-gene dictionary by replicating each supergene row.
-pub struct GeneAxisInfo {
-    pub gene_names: Vec<Box<str>>,
-    /// `gene_to_supergene[g] = supergene id ∈ 0..n_supergenes`.
-    pub gene_to_supergene: Vec<usize>,
 }
 
 /// Composite-objective gbe fit.
@@ -342,6 +362,15 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         config.fisher_weights_cache.as_deref(),
     )?;
 
+    // ---- Optional hard cap on feature count ----
+    // Picks the top-`max_features` genes by Fisher (ties broken by id
+    // for determinism), prunes `unified` + `feat_weights` to that axis.
+    // Runs after Fisher so the ranking is final; runs before the
+    // multilevel collapse so every downstream pass sees the smaller
+    // axis (smaller pb matrices, smaller sampler prefix sums, smaller
+    // E_feat).
+    let feat_weights = maybe_cap_features(unified, feat_weights, config.max_features);
+
     // ---- Multilevel collapse → batch-corrected pseudobulks ----
     info!(
         "Multilevel collapse (target {} super-cells, {} levels)...",
@@ -371,95 +400,17 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     cell_to_pb_per_level.reverse();
     let num_levels = collapsed_levels.len();
 
-    /////////////////////////////
-    // Supergene coarsening    //
-    /////////////////////////////
-    //
-    // When `max_coarse_features > 0` and the (HVG'd) feature axis has
-    // more rows, build a single nested feature coarsening from the
-    // finest pb's posterior mean and rewrite all downstream data
-    // (cell-axis triplets, pb counts, Fisher weights) in terms of
-    // supergene ids. Mirrors senna topic's `coarsen_features_multilevel`
-    // pattern but at one resolution: every axis trains on the same
-    // n_supergenes feature space, so `E_feat` stays a single shared
-    // table without per-axis pooling.
-    let n_features_pre = unified.n_features();
-    let pre_coarsen_feature_to_backend: Vec<usize> = unified.feature_to_backend_row.clone();
-    let supergene_fc: Option<FeatureCoarsening> = if config.max_coarse_features > 0
-        && n_features_pre > config.max_coarse_features
-    {
-        let finest = collapsed_levels.last().expect("at least one level");
-        let pb_full = finest.mu_observed.posterior_mean();
-        let n_pb = pb_full.ncols();
-        let sketch_unified: DMatrix<f32> = if pb_full.nrows() == n_features_pre {
-            pb_full.clone()
-        } else {
-            let mut sub = DMatrix::<f32>::zeros(n_features_pre, n_pb);
-            for (new_i, &old_i) in pre_coarsen_feature_to_backend.iter().enumerate() {
-                for s in 0..n_pb {
-                    sub[(new_i, s)] = pb_full[(old_i, s)];
-                }
-            }
-            sub
-        };
-        info!(
-            "Building supergene coarsening: {} features → target {} supergenes...",
-            n_features_pre, config.max_coarse_features
-        );
-        let knn = FeatureKnnContext::from_sketch(&sketch_unified, 16)?;
-        let level_targets = vec![config.max_coarse_features];
-        let init = compute_multilevel_feature_coarsening(&sketch_unified, &level_targets, &knn)?;
-        let refined = refine_multilevel_feature_coarsening(
-            &sketch_unified,
-            init,
-            &knn,
-            &MultilevelRefineParams::default(),
-        )?;
-        Some(
-            refined
-                .levels
-                .into_iter()
-                .next()
-                .expect("one level requested"),
-        )
-    } else {
-        None
-    };
-
-    let gene_axis: Option<GeneAxisInfo> = if let Some(fc) = &supergene_fc {
-        let original_names = unified.coarsen_features(fc);
-        Some(GeneAxisInfo {
-            gene_names: original_names,
-            gene_to_supergene: fc.fine_to_coarse.clone(),
-        })
-    } else {
-        None
-    };
     let n_features = unified.n_features();
-
-    // Aggregate Fisher weights into supergene resolution by mean within group.
-    let feat_weights: Vec<f32> = if let Some(fc) = &supergene_fc {
-        let mut w = vec![0f32; fc.num_coarse];
-        let mut counts = vec![0u32; fc.num_coarse];
-        for (g, &c) in fc.fine_to_coarse.iter().enumerate() {
-            w[c] += feat_weights[g];
-            counts[c] += 1;
-        }
-        for i in 0..fc.num_coarse {
-            w[i] = if counts[i] > 0 {
-                w[i] / counts[i] as f32
-            } else {
-                1.0
-            };
-        }
-        w
-    } else {
-        feat_weights
-    };
+    let feature_to_backend = unified.feature_to_backend_row.clone();
 
     ///////////////////////////////
     // Pseudobulk data per level //
     ///////////////////////////////
+    //
+    // pb counts live on the unified feature axis directly. If the
+    // backend (per_file_data[0]) holds more rows than the unified axis
+    // — e.g. an HVG mask narrowed `unified.feature_names` — gather the
+    // unified rows out of the backend's pb matrix. Otherwise reuse it.
     let mut pb_blobs: Vec<UnifiedData> = Vec::with_capacity(num_levels);
     for collapsed in collapsed_levels.iter() {
         let pb_full: &DMatrix<f32> = match &collapsed.mu_adjusted {
@@ -467,24 +418,16 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             None => collapsed.mu_observed.posterior_mean(),
         };
         let n_pb = pb_full.ncols();
-        // Step 1: gather to the pre-coarsening unified feature axis
-        // (handles the HVG-subsetted backend → unified row mapping).
-        let pb_unified_axis: DMatrix<f32> = if pb_full.nrows() == n_features_pre {
+        let pb_count_ds: DMatrix<f32> = if pb_full.nrows() == n_features {
             pb_full.clone()
         } else {
-            let mut subset = DMatrix::<f32>::zeros(n_features_pre, n_pb);
-            for (new_i, &old_i) in pre_coarsen_feature_to_backend.iter().enumerate() {
+            let mut subset = DMatrix::<f32>::zeros(n_features, n_pb);
+            for (new_i, &old_i) in feature_to_backend.iter().enumerate() {
                 for s in 0..n_pb {
                     subset[(new_i, s)] = pb_full[(old_i, s)];
                 }
             }
             subset
-        };
-        // Step 2: aggregate to supergene resolution if coarsening is on.
-        let pb_count_ds: DMatrix<f32> = if let Some(fc) = &supergene_fc {
-            fc.aggregate_rows_ds(&pb_unified_axis)
-        } else {
-            pb_unified_axis
         };
         pb_blobs.push(UnifiedData::from_pseudobulks(
             &pb_count_ds,
@@ -548,7 +491,19 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // Composite axes and trainer //
     ////////////////////////////////
     let cell_axis_coarsening = identity_axis(n_cells);
-    let cell_samplers = build_active_samplers(unified, &feat_weights, alpha_neg)?;
+    let cell_samplers = build_active_samplers(
+        unified,
+        &feat_weights,
+        DEFAULT_STRATIFY_ALPHA_CELL,
+        alpha_neg,
+    )?;
+    info!(
+        "Composite axis cell ({} cells × {} features, strat-cell α={}, {} active batch(es))",
+        n_cells,
+        n_features,
+        DEFAULT_STRATIFY_ALPHA_CELL,
+        cell_samplers.len()
+    );
 
     let mut level_axes_data: Vec<(AxisCoarsenings, StratifiedSampler)> =
         Vec::with_capacity(num_levels);
@@ -606,7 +561,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         model: &cell_model,
         unified,
         cell_axis: &cell_axis_coarsening,
-        sampler: AxisSampler::PerBatch(&cell_samplers),
+        sampler: AxisSampler::PerBatchStratified(&cell_samplers),
         lambda: DEFAULT_AXIS_LAMBDA,
         cell_cell: cell_cell_training,
         label: "cell",
@@ -648,7 +603,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     Ok(FitOutput {
         model: cell_model,
         varmap,
-        gene_axis,
     })
 }
 
@@ -706,21 +660,28 @@ fn build_cell_cell_training(
     })
 }
 
+/// Build the stratified per-batch cell samplers and filter out empty
+/// batches. Mirrors the previous `build_active_samplers` (flat) but
+/// uses the two-stage `cell_picker` → `per_cell` draw — every cell in
+/// a batch gets coverage proportional to `degree^alpha_cell` instead
+/// of being drowned by deeply sequenced cells.
 fn build_active_samplers(
     unified: &UnifiedData,
     feat_weights: &[f32],
+    alpha_cell: f32,
     alpha_neg: f32,
-) -> anyhow::Result<Vec<PerBatchSampler>> {
-    let samplers_all = build_per_batch_samplers(
+) -> anyhow::Result<Vec<PerBatchStratifiedCellSampler>> {
+    let samplers_all = build_per_batch_stratified_cell_samplers(
         &unified.triplets,
         &unified.batch_membership,
         unified.n_batches(),
         unified.n_features(),
         feat_weights,
+        alpha_cell,
         alpha_neg,
     );
     let mut empty: Vec<&str> = Vec::new();
-    let active: Vec<PerBatchSampler> = samplers_all
+    let active: Vec<PerBatchStratifiedCellSampler> = samplers_all
         .into_iter()
         .enumerate()
         .filter_map(|(b, s)| {

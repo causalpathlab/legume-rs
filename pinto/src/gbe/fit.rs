@@ -150,7 +150,7 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
     let config = ge::FitConfig {
         embedding_dim: args.embedding_dim,
         num_coarsen_seeds: args.num_coarsen_seeds,
-        max_coarse_features: args.max_coarse_features,
+        max_features: args.max_features,
         hvg_weights,
         composite_mode: args.composite_mode.into(),
         refine,
@@ -181,10 +181,6 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
         &ge::OutputContext {
             feature_names: &unified.feature_names,
             barcodes: &unified.barcodes,
-            gene_axis: out.gene_axis.as_ref().map(|g| ge::GeneAxisMapping {
-                names: g.gene_names.as_slice(),
-                to_supergene: g.gene_to_supergene.as_slice(),
-            }),
         },
         &c.out,
     )?;
