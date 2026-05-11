@@ -73,13 +73,13 @@ pub struct GbeArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "Target supergene count (0 disables). When > 0 and less than the number of \
-                features after HVG, group co-expressed genes into this many supergenes via \
-                nested feature coarsening + DC-Poisson refinement, then train E_feat at \
-                supergene resolution. All genes contribute via their group, instead of being \
-                clipped further by HVG. Mirrors senna topic's --max-coarse-features."
+        help = "Cap on the number of genes trained (0 = keep all). When > 0 and \
+                less than the feature axis, keeps the top-N genes by NB-Fisher \
+                weight and drops the rest before the multilevel collapse. Shrinks \
+                E_feat, triplets, and per-batch samplers proportionally — the main \
+                large-data speed knob."
     )]
-    max_coarse_features: usize,
+    max_features: usize,
 
     #[arg(
         long = "composite-mode",
@@ -370,7 +370,7 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
     let config = ge::FitConfig {
         embedding_dim: args.embedding_dim,
         num_coarsen_seeds: args.num_coarsen_seeds,
-        max_coarse_features: args.max_coarse_features,
+        max_features: args.max_features,
         hvg_weights,
         composite_mode: args.composite_mode.into(),
         refine,
@@ -401,10 +401,6 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         &ge::OutputContext {
             feature_names: &unified.feature_names,
             barcodes: &unified.barcodes,
-            gene_axis: out.gene_axis.as_ref().map(|g| ge::GeneAxisMapping {
-                names: g.gene_names.as_slice(),
-                to_supergene: g.gene_to_supergene.as_slice(),
-            }),
         },
         &args.out,
     )?;

@@ -11,24 +11,12 @@ use crate::model::JointEmbedModel;
 use candle_util::candle_core::Tensor;
 use matrix_util::traits::IoOps;
 
-/// Replicate supergene-trained `E_feat` / `b_feat` back to per-gene
-/// rows at output time, so downstream tools (senna annotate, pinto
-/// cell-community) stay gene-keyed. Both fields are required when this
-/// is `Some`; modeled together so the "missing means absent" coupling
-/// can't be split.
-pub struct GeneAxisMapping<'a> {
-    pub names: &'a [Box<str>],
-    pub to_supergene: &'a [usize],
-}
-
 pub struct OutputContext<'a> {
-    /// Names for the rows of `model.e_feat` / `model.b_feat` AS-TRAINED.
-    /// When `gene_axis` is `Some`, the dictionary parquet is keyed on
-    /// `gene_axis.names` instead and this field applies only to
-    /// `feature_bias.parquet` row labels for the supergene axis.
+    /// Names for the rows of `model.e_feat` / `model.b_feat`. The
+    /// dictionary parquet is keyed directly on these — gbe trains
+    /// `E_feat` at fine gene resolution, so no replication is needed.
     pub feature_names: &'a [Box<str>],
     pub barcodes: &'a [Box<str>],
-    pub gene_axis: Option<GeneAxisMapping<'a>>,
 }
 
 pub fn save_outputs(
@@ -48,65 +36,18 @@ pub fn save_outputs(
         ctx.barcodes,
         "cell",
     )?;
-
-    if let Some(g) = ctx.gene_axis.as_ref() {
-        anyhow::ensure!(
-            g.names.len() == g.to_supergene.len(),
-            "gene names {} != gene_to_supergene {}",
-            g.names.len(),
-            g.to_supergene.len()
-        );
-        let dev = model.e_feat.device();
-        let idx: Vec<u32> = g.to_supergene.iter().map(|&sg| sg as u32).collect();
-        let idx_t = Tensor::from_vec(idx, g.names.len(), dev)?;
-        let e_feat_genes = model.e_feat.index_select(&idx_t, 0)?;
-        let b_feat_genes = model.b_feat.index_select(&idx_t, 0)?;
-        save_embedding(
-            &format!("{out_prefix}.dictionary.parquet"),
-            &e_feat_genes,
-            g.names,
-            "feature",
-        )?;
-        save_bias(
-            &format!("{out_prefix}.feature_bias.parquet"),
-            &b_feat_genes,
-            g.names,
-            "feature",
-        )?;
-        save_gene_to_supergene_csv(
-            &format!("{out_prefix}.gene_groups.csv"),
-            g.names,
-            g.to_supergene,
-        )?;
-    } else {
-        save_embedding(
-            &format!("{out_prefix}.dictionary.parquet"),
-            &model.e_feat,
-            ctx.feature_names,
-            "feature",
-        )?;
-        save_bias(
-            &format!("{out_prefix}.feature_bias.parquet"),
-            &model.b_feat,
-            ctx.feature_names,
-            "feature",
-        )?;
-    }
-    Ok(())
-}
-
-fn save_gene_to_supergene_csv(
-    path: &str,
-    gene_names: &[Box<str>],
-    g2sg: &[usize],
-) -> anyhow::Result<()> {
-    use std::fs::File;
-    use std::io::{BufWriter, Write};
-    let mut w = BufWriter::new(File::create(path)?);
-    writeln!(w, "gene,supergene")?;
-    for (g, sg) in gene_names.iter().zip(g2sg.iter()) {
-        writeln!(w, "{},{}", g, sg)?;
-    }
+    save_embedding(
+        &format!("{out_prefix}.dictionary.parquet"),
+        &model.e_feat,
+        ctx.feature_names,
+        "feature",
+    )?;
+    save_bias(
+        &format!("{out_prefix}.feature_bias.parquet"),
+        &model.b_feat,
+        ctx.feature_names,
+        "feature",
+    )?;
     Ok(())
 }
 
