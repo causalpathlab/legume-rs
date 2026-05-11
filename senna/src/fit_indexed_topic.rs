@@ -208,6 +208,26 @@ pub struct IndexedTopicArgs {
     )]
     preload_data: bool,
 
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Treat input files as modalities of the same cells, glued by raw barcode.",
+        long_help = "Patchy multi-modal (multiome) load. Each file keeps its own \
+                     feature space (no cross-file barcode suffixing); cells are \
+                     unioned across files by raw barcode — a cell observed only in \
+                     RNA contributes triplets just to the RNA row block, ATAC-only \
+                     cells just to the ATAC block, and shared cells get both. \
+                     Disables `@<basename>` suffixing on cell names. Maps to \
+                     `ColumnAlignment::Union` in the loader.\n\
+                     \n\
+                     With --multiome, batch resolution is constrained: a single \
+                     --batch-files file is allowed (one label per unified cell), or \
+                     embedded `@batch` tags in raw column names that AGREE across \
+                     modalities. The default `@<filename>` fallback is disabled — a \
+                     cell can come from multiple files and cannot carry two labels."
+    )]
+    multiome: bool,
+
     #[command(flatten)]
     hvg: crate::hvg::HvgCliArgs,
 
@@ -438,6 +458,9 @@ fn remap_graph_to_subset(
 pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
+    let (effective_multiome, effective_hvg_n, effective_hvg_list) =
+        crate::hvg::resolve_multiome_with_hvg(args.multiome, args.data_files.len(), &args.hvg);
+
     // When --feature-network-restrict is set, parse the network once
     // inside the row-mask callback. The cached graph carries pre-mask
     // indices; after mask_rows physically drops dropped-degree features,
@@ -496,10 +519,15 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         iter_opt: args.iter_opt,
         block_size: args.block_size,
         out: &args.out,
-        max_features: args.hvg.n_hvg,
-        feature_list_file: args.hvg.feature_list_file.as_deref(),
+        max_features: effective_hvg_n,
+        feature_list_file: effective_hvg_list,
         feature_mask_fn,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
+        column_alignment: if effective_multiome {
+            data_beans::sparse_io_vector::ColumnAlignment::Union
+        } else {
+            data_beans::sparse_io_vector::ColumnAlignment::Disjoint
+        },
         feature_kind: args.feature_name_kind.clone().into(),
         refine: Some(data_beans_alg::refine_multilevel::RefineParams {
             feature_weighting: args.refine_weighting.into(),

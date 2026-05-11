@@ -13,9 +13,9 @@ mod zarr_io;
 
 use crate::handlers::analysis::{run_stat, RunStatArgs};
 use crate::handlers::builders::{
-    run_build_from_10x_matrix, run_build_from_10x_molecule, run_build_from_h5ad,
-    run_build_from_mtx, run_build_from_zarr_triplets, From10xMatrixArgs, From10xMoleculeArgs,
-    FromH5adArgs, FromMtxArgs, FromZarrArgs,
+    run_build_from_10x_matrix, run_build_from_10x_molecule, run_build_from_fragments,
+    run_build_from_h5ad, run_build_from_mtx, run_build_from_zarr_triplets, From10xMatrixArgs,
+    From10xMoleculeArgs, FromFragmentsArgs, FromH5adArgs, FromMtxArgs, FromZarrArgs,
 };
 use crate::handlers::inspection::{
     show_info, take_column_names, take_columns, take_row_names, take_rows, InfoArgs,
@@ -71,6 +71,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::From10xMolecule(args) => {
             run_build_from_10x_molecule(args)?;
+        }
+        Commands::FromFragments(args) => {
+            run_build_from_fragments(args)?;
         }
         Commands::Info(args) => {
             show_info(args)?;
@@ -218,6 +221,25 @@ enum Commands {
 		      Supports conversion and indexing for fast access."
     )]
     FromZarr(FromZarrArgs),
+
+    #[command(
+        name = "from-fragments",
+        about = "Build ATAC/histone backend from a fragments TSV file",
+        long_about = "Build a (feature x cell) sparse backend by streaming an scATAC /\n\
+                      histone fragments TSV file.\n\
+                      \n\
+                      Expected format (tab-separated, one fragment per line):\n\
+                        chr<TAB>start<TAB>end<TAB>barcode[<TAB>count]\n\
+                      \n\
+                      Both plain gzip and bgzipped files are accepted; '#' header lines\n\
+                      (e.g. cellranger-arc metadata) are skipped.\n\
+                      \n\
+                      Features are either user-supplied peaks (--peaks <bed>) or\n\
+                      fixed-width genome tiles discovered on the fly (--bin-size, default 5000).\n\
+                      Each fragment contributes 1 (or its column-5 count with --use-count)\n\
+                      to every feature it overlaps."
+    )]
+    FromFragments(FromFragmentsArgs),
 
     #[command(
         about = "List contents of `h5` file",

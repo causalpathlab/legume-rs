@@ -220,6 +220,22 @@ pub struct MultiomeArgs {
     /// Proportion of variance explained by batch effects (reference mode).
     #[arg(long, default_value_t = 1.0)]
     pub pve_batch: f32,
+
+    /// Fraction of cells observed in BOTH modalities. `1.0` (default)
+    /// keeps the historical paired-multiome behavior — ATAC and RNA
+    /// share `--n-cells` barcodes one-to-one. `0.0` makes the two
+    /// modalities fully disjoint (each gets `--n-cells` unique
+    /// barcodes; no cell is in both files). In-between gives **patchy
+    /// multiome**: `floor(n_cells * fraction)` shared cells plus
+    /// `n_cells - floor(...)` modality-only cells per modality.
+    ///
+    /// Shared cells are named `cell_<i>` and appear identically in
+    /// both files. Modality-only cells are named `atac_cell_<i>` or
+    /// `rna_cell_<i>` and appear only in their file. Use to drive
+    /// `senna gbe --multiome` / `senna itopic --multiome` integration
+    /// tests at known overlap fractions.
+    #[arg(long, default_value_t = 1.0)]
+    pub cell_overlap_fraction: f32,
 }
 
 pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
@@ -230,6 +246,37 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     let kk = args.n_topics;
     let k_sub = args.n_sub_topics.max(1);
     let k_total = kk * k_sub;
+
+    //////////////////////////////////////
+    // Patchy multiome cell partition //
+    //////////////////////////////////////
+    // `cell_overlap_fraction = 1.0` keeps today's matched behavior
+    // (nn cells shared between ATAC and RNA, identical barcodes).
+    // `0.0` makes the two modalities fully disjoint. Anything in
+    // between gives partial overlap — drives the `--multiome`
+    // integration test path.
+    let overlap = args.cell_overlap_fraction.clamp(0.0, 1.0);
+    let nn_shared: usize = ((nn as f32) * overlap).round() as usize;
+    let nn_atac_only: usize = nn.saturating_sub(nn_shared);
+    let nn_rna_only: usize = nn.saturating_sub(nn_shared);
+    let nn_total: usize = nn_shared + nn_atac_only + nn_rna_only;
+    if overlap < 1.0 {
+        info!(
+            "patchy multiome: {} shared cells, {} ATAC-only, {} RNA-only \
+             (total unique = {})",
+            nn_shared, nn_atac_only, nn_rna_only, nn_total
+        );
+    }
+    // Global cell indices [0, nn_total): the layout is
+    //   [0, nn_shared)                      → shared "cell_<i>"
+    //   [nn_shared, nn_shared + nn_atac_only) → "atac_cell_<i>"
+    //   [nn_shared + nn_atac_only, nn_total)  → "rna_cell_<i>"
+    let atac_indices: Vec<usize> = (0..(nn_shared + nn_atac_only)).collect();
+    let rna_indices: Vec<usize> = (0..nn_shared)
+        .chain((nn_shared + nn_atac_only)..nn_total)
+        .collect();
+    debug_assert_eq!(atac_indices.len(), nn);
+    debug_assert_eq!(rna_indices.len(), nn);
 
     // ---- Open references (if any) and resolve modality dims --------------------------------
     let atac_fit: Option<GlobalCopulaFit> = if let Some(path) = args.reference_atac.as_ref() {
@@ -267,15 +314,20 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     );
 
     // ---- Topic proportions (nested) -----------------------------------------------------
+    // Sample for all `nn_total` unique cells; slice per modality below.
     let theta_seed = rng.next_u64();
     let (theta_full, theta_coarse) = sample::sample_nested_topic_proportions(
         kk,
         k_sub,
-        nn,
+        nn_total,
         args.pve_topic,
         args.pve_sub_topic,
         theta_seed,
     );
+    // ATAC consumes the coarse topic axis (K), RNA the full nested
+    // axis (K * K_sub). Slice per modality.
+    let theta_coarse_atac = theta_coarse.select_columns(&atac_indices);
+    let theta_full_rna = theta_full.select_columns(&rna_indices);
 
     // ---- Dictionaries -------------------------------------------------------------------
     let beta_ext = sample::sample_dictionary(p, k_total, &mut rng);
@@ -290,7 +342,23 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(|f| f.gene_names.clone())
         .unwrap_or_else(|| generate_indexed_names(g, "gene"));
-    let cell_names = generate_indexed_names(nn, "cell");
+    // Unified cell-name index — keyed to the `theta_*` layout above.
+    // Used for ground-truth parquets (theta, proportions, etc.). Per-
+    // modality cell name vectors below are what gets registered on
+    // each .zarr backend (which is what `senna gbe`/`itopic` will see).
+    let cell_names: Vec<Box<str>> = {
+        let mut v: Vec<Box<str>> = Vec::with_capacity(nn_total);
+        v.extend(generate_indexed_names(nn_shared, "cell"));
+        v.extend(generate_indexed_names(nn_atac_only, "atac_cell"));
+        v.extend(generate_indexed_names(nn_rna_only, "rna_cell"));
+        v
+    };
+    let atac_cell_names: Vec<Box<str>> = atac_indices
+        .iter()
+        .map(|&i| cell_names[i].clone())
+        .collect();
+    let rna_cell_names: Vec<Box<str>> =
+        rna_indices.iter().map(|&i| cell_names[i].clone()).collect();
     let gene_coords = generate_gene_coords(g);
 
     // ---- Indicator matrix M[G × P] -------------------------------------------------------
@@ -324,10 +392,14 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         None
     };
 
-    // ---- Batch membership (shared across modalities) ----------------------------------
+    // ---- Batch membership (per unified cell; per-modality slices below) -----------------
     let bb = args.batches.max(1);
     let runif = rand_distr::Uniform::new(0, bb).expect("unif [0 .. bb)");
-    let batch_membership: Vec<usize> = (0..nn).map(|_| runif.sample(&mut rng)).collect();
+    let batch_membership: Vec<usize> = (0..nn_total).map(|_| runif.sample(&mut rng)).collect();
+    let batch_membership_atac: Vec<usize> =
+        atac_indices.iter().map(|&i| batch_membership[i]).collect();
+    let batch_membership_rna: Vec<usize> =
+        rna_indices.iter().map(|&i| batch_membership[i]).collect();
 
     // ---- Synthetic-mode batch effects (per modality, log-space PVE decomposition) -------
     // Mirrors the topic / multimodal subcommands:
@@ -352,10 +424,10 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     let (atac_triplets, atac_batch_delta) = if let Some(fit) = atac_fit.as_ref() {
         let (trips, batch_delta) = sample_with_reference(
             &beta_atac,
-            &theta_coarse,
+            &theta_coarse_atac,
             None,
             fit,
-            &batch_membership,
+            &batch_membership_atac,
             bb,
             args.pve_topic,
             args.pve_noise,
@@ -383,10 +455,10 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         let atac_seed = rng.next_u64();
         let memb_ref = synth_atac_delta
             .as_ref()
-            .map(|_| batch_membership.as_slice());
+            .map(|_| batch_membership_atac.as_slice());
         let trips = sample::sample_poisson_counts(
             &beta_atac,
-            &theta_coarse,
+            &theta_coarse_atac,
             &rho,
             None,
             synth_atac_delta.as_ref(),
@@ -403,10 +475,10 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     let (rna_triplets, rna_batch_delta) = if let Some(fit) = rna_fit.as_ref() {
         let (trips, batch_delta) = sample_with_reference(
             &w_gk,
-            &theta_full,
+            &theta_full_rna,
             gamma_gk.as_ref(),
             fit,
-            &batch_membership,
+            &batch_membership_rna,
             bb,
             args.pve_topic,
             args.pve_noise,
@@ -434,10 +506,10 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         let rna_seed = rng.next_u64();
         let memb_ref = synth_rna_delta
             .as_ref()
-            .map(|_| batch_membership.as_slice());
+            .map(|_| batch_membership_rna.as_slice());
         let trips = sample::sample_poisson_counts(
             &w_gk,
-            &theta_full,
+            &theta_full_rna,
             &tau,
             gamma_gk.as_ref(),
             synth_rna_delta.as_ref(),
@@ -464,7 +536,7 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         Some(&backend),
     )?;
     atac_data.register_row_names_vec(&peak_names);
-    atac_data.register_column_names_vec(&cell_names);
+    atac_data.register_column_names_vec(&atac_cell_names);
     finalize_zarr_output(&atac_dir, &atac_final)?;
     info!("wrote ATAC sparse backend: {}", atac_final);
 
@@ -477,7 +549,7 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         Some(&backend),
     )?;
     rna_data.register_row_names_vec(&gene_names);
-    rna_data.register_column_names_vec(&cell_names);
+    rna_data.register_column_names_vec(&rna_cell_names);
     finalize_zarr_output(&rna_dir, &rna_final)?;
     info!("wrote RNA sparse backend: {}", rna_final);
 
