@@ -29,7 +29,7 @@ use crate::topic::predict_common::{
 use crate::logging::new_progress_bar;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_core::{Device, Tensor};
-use candle_util::candle_decoder_indexed_topic::IndexedTopicDecoder;
+use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
 use candle_util::candle_decoder_nb_mixture::{
     NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME,
 };
@@ -723,13 +723,15 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
     )?;
 
     // Register decoders at every level so safetensors keys match training.
-    // Predict only uses the finest-level decoder.
+    // Predict only uses the finest-level decoder. Each ETM decoder shares
+    // the encoder's feature embeddings ρ — only α_{level} is per-decoder.
     let num_levels = metadata.level_decoder_dims.len().max(1);
-    let mut decoders: Vec<IndexedTopicDecoder> = Vec::with_capacity(num_levels);
+    let shared_rho = encoder.feature_embeddings().clone();
+    let mut decoders: Vec<EmbeddedTopicDecoder> = Vec::with_capacity(num_levels);
     for i in 0..num_levels {
-        decoders.push(IndexedTopicDecoder::new(
-            n_features_full,
+        decoders.push(EmbeddedTopicDecoder::new(
             metadata.n_topics,
+            shared_rho.clone(),
             vb.pp(format!("dec_{i}")),
         )?);
     }
@@ -851,7 +853,7 @@ struct PredictBlockIndexedArgs<'a> {
     ub: usize,
     data_vec: &'a SparseIoVec,
     encoder: &'a IndexedEmbeddingEncoder,
-    decoder: &'a IndexedTopicDecoder,
+    decoder: &'a EmbeddedTopicDecoder,
     delta_tensor: Option<&'a Tensor>,
     gene_remap: Option<&'a GeneRemap>,
     shortlist_weights: &'a [f32],

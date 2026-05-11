@@ -148,34 +148,19 @@ impl AnchorPrior {
     }
 }
 
-/// Apply the β prior cross-entropy penalty for one decoder level to an
-/// existing loss. No-op when the prior isn't attached, when λ ≤ 0, or when
-/// the level's decoder doesn't register its dictionary under
-/// `dec_{level}.dictionary.logits` (e.g. the vMF decoder).
+/// Cross-entropy penalty `−λ · mean(Σ prior · log softmax(logits))` for a
+/// named Var at level `level`. Shared between anchor β and ambient α: both
+/// are `−Σ prior · log softmax(var_logits)` against a simplex prior.
 ///
 /// **Batch-size semantics**: the penalty is a fixed scalar per minibatch
-/// step — it does not depend on the minibatch's sample count. The main
-/// VAE loss uses `mean_all()` over the minibatch, so both terms are
-/// dimensionally "per-sample-averaged" and their ratio is batch-size
-/// invariant within a step. Over an epoch, however, the penalty is
-/// applied once per minibatch, so its cumulative gradient contribution
-/// scales with the number of minibatches (M = `N_total` / `N_batch`). If you
-/// change `--minibatch-size`, you will typically want to rescale
-/// `--anchor-penalty` in inverse proportion (or rely on Adam's adaptive
-/// step size plus linear-LR scaling to absorb the difference).
-/// Cross-entropy penalty `−λ · mean(Σ · log softmax(logits))` for a
-/// named Var at level `level`. Shared between anchor β and ambient α:
-/// both are `−Σ prior · log softmax(var_logits)` against a simplex prior.
-///
-/// **Batch-size semantics** (same for anchor and ambient): the penalty is
-/// a fixed scalar per minibatch step — it does not depend on the sample
-/// count. The main VAE loss uses `mean_all()` over the minibatch, so both
-/// terms are per-sample-averaged within a step and their ratio is
-/// batch-size invariant. Over an epoch the penalty is applied once per
-/// minibatch, so its cumulative gradient contribution scales with
-/// `M = N_total / N_batch`; rescale `--anchor-penalty` /
-/// `--ambient-penalty` inversely with `--minibatch-size` if you change it
-/// (or rely on Adam's adaptive step to absorb the difference).
+/// step — it does not depend on the sample count. The main VAE loss uses
+/// `mean_all()` over the minibatch, so both terms are per-sample-averaged
+/// within a step and their ratio is batch-size invariant. Over an epoch
+/// the penalty is applied once per minibatch, so its cumulative gradient
+/// contribution scales with `M = N_total / N_batch`; rescale
+/// `--anchor-penalty` / `--ambient-penalty` inversely with
+/// `--minibatch-size` if you change it (or rely on Adam's adaptive step
+/// to absorb the difference).
 fn ce_penalty_at_level(
     loss: Tensor,
     parameters: &VarMap,
@@ -200,8 +185,21 @@ fn ce_penalty_at_level(
             None => return Ok(loss),
         }
     };
-    let prior = &priors[level];
-    let log_prob = candle_nn::ops::log_softmax(&logits, logits.rank() - 1)?;
+    apply_ce_penalty(loss, &logits, &priors[level], lambda, reduce_dim)
+}
+
+/// Apply `−λ · mean(Σ prior · log softmax(logits))` to `loss`. Same math as
+/// [`ce_penalty_at_level`], but takes the logits tensor directly — for
+/// decoders that compute their full `[K, D]` logits on the fly (ETM) and
+/// therefore can't be looked up by Var name.
+fn apply_ce_penalty(
+    loss: Tensor,
+    logits: &Tensor,
+    prior: &Tensor,
+    lambda: f32,
+    reduce_dim: usize,
+) -> anyhow::Result<Tensor> {
+    let log_prob = candle_nn::ops::log_softmax(logits, logits.rank() - 1)?;
     let ce = (prior * &log_prob)?.sum(reduce_dim)?.neg()?;
     let pen = (ce.mean_all()? * f64::from(lambda))?;
     Ok((loss + pen)?)
@@ -228,6 +226,28 @@ pub(crate) fn anchor_penalty_at_level(
         &decoder_logits_var_path(level),
         1,
     )
+}
+
+/// Variant of [`anchor_penalty_at_level`] that takes the decoder's full
+/// `[K, D]` logits tensor directly. Use this for decoders that factorize
+/// the dictionary (ETM-style β = log_softmax(α · ρᵀ)) where there is no
+/// single Var to look up by name — the caller computes the logits via
+/// `decoder.full_logits_kd()` and hands them here. No-op when the prior
+/// isn't attached or `λ ≤ 0`.
+pub(crate) fn anchor_penalty_at_level_with_logits(
+    loss: Tensor,
+    logits_kd: &Tensor,
+    anchor_prior_per_level: Option<&[Tensor]>,
+    lambda: f32,
+    level: usize,
+) -> anyhow::Result<Tensor> {
+    let Some(priors) = anchor_prior_per_level else {
+        return Ok(loss);
+    };
+    if lambda <= 0.0 {
+        return Ok(loss);
+    }
+    apply_ce_penalty(loss, logits_kd, &priors[level], lambda, 1)
 }
 
 // ---------------------------------------------------------------------------

@@ -164,11 +164,19 @@ enum Commands {
     Topic(TopicArgs),
 
     #[command(
-        about = "Train: topic-model with adaptive top-K feature windows (~4-7× faster).",
-        long_about = "Same pipeline as `topic`, but encoder/decoder operate on a per-cell\n\
-                      top-K feature window instead of the full D × K dictionary.\n\
-                      Useful for very large gene sets.\n\n\
-                      Writes the same artifacts as `topic`.",
+        about = "Train: embedded topic model with adaptive top-K feature windows (~4-7× faster).",
+        long_about = "Same pipeline as `topic`, but encoder and decoder share a learned\n\
+                      per-gene embedding ρ ∈ ℝ^{D×H} and both operate on a per-cell\n\
+                      top-K feature window.\n\n\
+                      β factorizes as:    β_kd = log_softmax_d(α_k · ρ_dᵀ)\n\
+                      where α ∈ ℝ^{K×H} are the learned topic embeddings and ρ is the\n\
+                      *same* feature-embedding table the encoder uses to pool per-cell\n\
+                      counts. No D × K dictionary is materialized — the per-batch slice\n\
+                      goes ρ[union, :] [S, H] → α · ρ_Sᵀ [K, S] and uses the Jean et al.\n\
+                      (2015) importance correction on the conditional softmax. Tying ρ\n\
+                      between encoder and decoder follows Dieng et al. (2020, ETM).\n\n\
+                      Writes the same artifacts as `topic`, plus\n\
+                      `{out}.feature_embedding.parquet` (ρ at full gene resolution).",
         visible_alias = "itopic"
     )]
     IndexedTopic(IndexedTopicArgs),

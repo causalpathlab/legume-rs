@@ -423,6 +423,7 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         pb_gene_suffix: None,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
+        feature_embedding_suffix: None,
         default_colour_by: "cluster",
     })?;
 

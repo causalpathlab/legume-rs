@@ -6,7 +6,7 @@ pub mod candle_bipartite_decoder;
 pub mod candle_data_loader;
 pub mod candle_data_loader_util;
 pub mod candle_decoder_delta_topic;
-pub mod candle_decoder_indexed_topic;
+pub mod candle_decoder_embedded_topic;
 pub mod candle_decoder_joint_topic;
 pub mod candle_decoder_nb_mixture;
 pub mod candle_decoder_poisson;
