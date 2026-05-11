@@ -35,7 +35,7 @@ pub struct EvalTopicArgs {
         help = "Trained model prefix",
         long_help = "Prefix passed to `senna topic -o`. Loads:\n  \
                      {model}.dictionary.parquet   frozen gene × topic dictionary\n  \
-                     {model}.metadata.json        model architecture metadata\n  \
+                     {model}.model.json           model architecture metadata\n  \
                      {model}.safetensors          encoder+decoder weights\n  \
                      {model}.coarsening.json      feature coarsening (if used)"
     )]

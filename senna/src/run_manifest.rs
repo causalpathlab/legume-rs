@@ -128,7 +128,7 @@ pub struct RunOutputs {
     /// joint-topic only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// `{out}.metadata.json` — topic-model metadata for `senna
+    /// `{out}.model.json` — topic-model metadata for `senna
     /// eval-topic` (topic / itopic / joint-topic only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<String>,
@@ -355,7 +355,7 @@ pub struct RunDescription<'a> {
     /// `None` to omit — SVD runs still produce one, topic runs always do.
     pub dictionary_suffix: Option<&'a str>,
     /// True if the run emits `{basename}.safetensors` +
-    /// `{basename}.metadata.json` (topic + itopic; not joint-topic, not
+    /// `{basename}.model.json` (topic + itopic; not joint-topic, not
     /// SVD).
     pub has_model: bool,
     /// True if the run emits `{basename}.cell_proj.parquet` — the
@@ -404,7 +404,7 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     }
     if desc.has_model {
         m.outputs.model = Some(format!("{basename}.safetensors"));
-        m.outputs.metadata = Some(format!("{basename}.metadata.json"));
+        m.outputs.metadata = Some(format!("{basename}.model.json"));
     }
     if desc.has_cell_proj {
         m.outputs.cell_proj = Some(format!("{basename}.cell_proj.parquet"));
