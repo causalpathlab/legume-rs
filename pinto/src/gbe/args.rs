@@ -85,11 +85,11 @@ pub struct SrtGbeArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "Target supergene count (0 disables). When > 0, groups co-expressed genes \
-                into this many supergenes and trains E_feat at supergene resolution. \
-                Mirrors senna topic's --max-coarse-features."
+        help = "Cap on the number of genes trained (0 = keep all). When > 0 and \
+                less than the feature axis, keeps the top-N genes by NB-Fisher \
+                weight before training. Main large-data speed knob."
     )]
-    pub max_coarse_features: usize,
+    pub max_features: usize,
 
     #[arg(
         long = "composite-mode",

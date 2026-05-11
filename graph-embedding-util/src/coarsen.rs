@@ -1,11 +1,8 @@
-//! Cell-axis coarsening for the gbe training loop. With the two-stage
-//! design (stage-1 pseudobulks, stage-2 per-cell), both stages embed
-//! the underlying entities directly — every minibatch picks a "super-
-//! cell" that maps to exactly one entity. So the coarsening here is
-//! always the identity partition; the type stays around because
-//! `nce_loss` / `pool_cells` are written generically over coarse →
-//! fine maps and an identity partition is a 1-line zero-cost path
-//! through the same code.
+//! Cell-axis coarsening for the gbe training loop. Every axis (per-cell
+//! and each pb level) embeds its entities directly, so the coarsening
+//! here is always identity. Kept only so `nce_loss` / `pool_cells` stay
+//! generic over coarse→fine maps — identity is a zero-cost fast path
+//! (see `is_identity` short-circuit in `loss.rs`).
 
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 
