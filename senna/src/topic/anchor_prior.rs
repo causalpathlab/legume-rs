@@ -6,12 +6,14 @@
 //! both for β initialization and as an optional training-time cross-entropy
 //! penalty.
 //!
-//! **Coupling constraint**: the module assumes softmax-based decoders
-//! register their pre-softmax logits under the `VarMap` path
-//! `dec_{level}.dictionary.logits` — the convention used by
-//! `candle_util::candle_aux_linear::log_softmax_linear`. vMF decoders use a
-//! different path and are silently skipped by `init_decoder_dictionary` /
-//! `anchor_penalty_at_level`.
+//! **Two penalty paths**:
+//! - [`anchor_penalty_at_level`] looks up `dec_{level}.dictionary.logits` by
+//!   name and is used by softmax-linear decoders (dense `senna topic`).
+//!   Silently no-ops for decoders that don't register that Var (e.g. vMF).
+//! - [`anchor_penalty_at_level_with_logits`] takes the `[K, D]` logits
+//!   tensor directly — for decoders that compute β on the fly without
+//!   storing the logits as a single Var (e.g. ETM-factorized
+//!   `indexed-topic`, where `[K, D] = α · ρᵀ`).
 
 use crate::anchor_common::{gram_schmidt_anchors, softmax_col_into, zscore_columns};
 use crate::embed_common::*;
