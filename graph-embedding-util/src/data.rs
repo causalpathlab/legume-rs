@@ -293,7 +293,8 @@ pub fn load_unified_data(
         data_files: data_files.to_vec(),
         batch_files: batch_files.map(<[Box<str>]>::to_vec),
         preload,
-        feature_kind,
+        feature_kind: Some(feature_kind),
+        ..Default::default()
     })?;
 
     UnifiedData::from_sparse_io(loaded.data, &loaded.batch)

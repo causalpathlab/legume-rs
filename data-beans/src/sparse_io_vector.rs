@@ -58,6 +58,28 @@ pub struct SparseIoVec {
     between_batch_proximity: Option<Vec<Vec<usize>>>,
     cached_num_rows: usize,
     cached_num_columns: usize,
+    /// How row names align across pushed backends. Default
+    /// [`RowAlignment::Intersect`] preserves the historical "common rows
+    /// only" semantics. [`RowAlignment::Union`] keeps every row from any
+    /// backend, with cells from a backend that doesn't contain row `g`
+    /// implicitly observing zero at that position — used for multi-modal
+    /// data where features (e.g. peaks vs genes) are disjoint.
+    row_alignment: RowAlignment,
+}
+
+/// Strategy for aligning row names across multiple pushed backends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RowAlignment {
+    /// Keep every row from any backend; non-observing backends emit zero
+    /// at that position. The default — strictly more permissive than
+    /// intersection: it reduces to the same result when all files share
+    /// their row set, and enables multi-modal load (e.g. peaks ∪ genes)
+    /// when they don't.
+    #[default]
+    Union,
+    /// Keep only rows present in every backend. Opt-in for callers that
+    /// want strict single-modality semantics.
+    Intersect,
 }
 
 pub struct TripletsMatched {
@@ -110,7 +132,21 @@ impl SparseIoVec {
             between_batch_proximity: None,
             cached_num_rows: 0,
             cached_num_columns: 0,
+            row_alignment: RowAlignment::default(),
         }
+    }
+
+    /// Switch row-name alignment between intersection (default) and union.
+    /// Must be called BEFORE any push — the row-mapping recompute uses
+    /// the current value of `row_alignment`. Errors if any backend has
+    /// already been added.
+    pub fn with_row_alignment(mut self, mode: RowAlignment) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.data_vec.is_empty(),
+            "row alignment must be set before any push"
+        );
+        self.row_alignment = mode;
+        Ok(self)
     }
 
     /// Install a row-name canonicalizer for fuzzy cross-backend row
@@ -314,11 +350,16 @@ impl SparseIoVec {
             self.offset += ncol_data;
 
             self.cached_num_columns += ncol_data;
-            self.recompute_intersection_rows();
+            self.recompute_row_mapping();
 
             info!(
-                "Added {} columns; row intersection = {}",
-                self.offset, self.cached_num_rows
+                "Added {} columns; row {} = {}",
+                self.offset,
+                match self.row_alignment {
+                    RowAlignment::Intersect => "intersection",
+                    RowAlignment::Union => "union",
+                },
+                self.cached_num_rows
             );
         } else {
             return Err(anyhow::anyhow!("data file has no columns"));
@@ -326,12 +367,18 @@ impl SparseIoVec {
         Ok(())
     }
 
-    /// Recompute the intersection of row names across all currently
-    /// pushed backends. Rows present in every backend get a compact
-    /// index in raw-global order; everything else maps to `None`.
-    fn recompute_intersection_rows(&mut self) {
+    /// Recompute the global → compact row mapping under the current
+    /// [`RowAlignment`] mode. Intersection keeps only rows present in
+    /// every backend; Union keeps every row that any backend contains.
+    /// Surviving rows get a compact index in raw-global order;
+    /// everything else maps to `None`.
+    fn recompute_row_mapping(&mut self) {
         let n_datasets = self.data_local_to_global_row.len();
         let n_global = self.row_names_by_global.len();
+        let min_count = match self.row_alignment {
+            RowAlignment::Intersect => n_datasets,
+            RowAlignment::Union => 1,
+        };
 
         self.global_to_compact_row.clear();
         self.global_to_compact_row.resize(n_global, None);
@@ -339,7 +386,7 @@ impl SparseIoVec {
 
         let mut next_compact = 0usize;
         for g in 0..n_global {
-            if self.row_count_by_global[g] == n_datasets {
+            if self.row_count_by_global[g] >= min_count {
                 self.global_to_compact_row[g] = Some(next_compact);
                 self.compact_to_global_row.push(g);
                 next_compact += 1;

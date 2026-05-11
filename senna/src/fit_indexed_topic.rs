@@ -282,12 +282,203 @@ pub struct IndexedTopicArgs {
     )]
     anchor_penalty: f32,
 
+    #[arg(
+        long,
+        help = "Optional feature-feature edge list (TSV/CSV) — activates a \
+                Ball-Karrer-Newman degree-corrected Poisson graph \
+                likelihood on ρ. Edges may be intra- or cross-modal \
+                (e.g. gene-gene PPI, peak-gene ABC); the model is \
+                geometry-only. Edge names are resolved against the loaded \
+                gene axis."
+    )]
+    feature_network: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Also try forward/reverse prefix matching when resolving \
+                feature-network names against the gene axis"
+    )]
+    feature_network_prefix_match: bool,
+
+    #[arg(
+        long,
+        help = "Alias-splitting delimiter for feature-network name resolution. \
+                When set (e.g. '_'), each row name is registered under its \
+                full form AND every split component, so a row like \
+                `ENSG00000105329_TGFB1` matches network edges that name \
+                *either* `ENSG00000105329` *or* `TGFB1` (via matrix-util's \
+                GeneIndexResolver — both aliases point to the same row)"
+    )]
+    feature_network_delim: Option<char>,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Relative weight λ_G of the graph Poisson log-likelihood. \
+                Lower = treat the graph as a soft prior (robust to noisy/\
+                incomplete edges); higher = strict reconstruction. Ignored \
+                without --feature-network."
+    )]
+    graph_loss_weight: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Shared-neighbor edge augmentation threshold (0 disables). \
+                Adds a synthetic edge between any pair that share ≥ N \
+                neighbors in the raw network. Densifies incomplete graphs \
+                before the Poisson likelihood sees them — same machinery \
+                as pinto's `--snn-min-shared`. Set 2–3 for sparse networks; \
+                BioGRID-scale dense PPIs usually don't need it."
+    )]
+    feature_network_snn_min_shared: usize,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Restrict the model to features covered by --feature-network. \
+                Features with zero edges in the network (after alias \
+                resolution + optional SNN augmentation) are physically \
+                dropped from the data axis before projection, collapse, \
+                and training. Useful when the network defines the in-scope \
+                feature set (e.g. PPI-restricted topics)."
+    )]
+    feature_network_restrict: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        help = "Per-name canonicalization across input backends",
+        long_help = "How row names align across `--data-files`. \
+                     `auto` — sniff sampled row names and pick: \
+                     locus-overlap if ≥50% parse as `chr:start-end`, \
+                     gene if ≥50% contain `_`, exact otherwise (default). \
+                     `exact` — strict string match. \
+                     `gene` — also register each `_`-split component as an \
+                     alias (so `ENSG000_TGFB1` and `TGFB1` resolve to the \
+                     same row). \
+                     `locus` — normalize `chr1:1000-2000`, `1:1000-2000`, \
+                     etc. to a canonical form. \
+                     `locus-overlap` — same as `locus` plus cluster any \
+                     intervals that overlap on the same chromosome \
+                     (useful for cross-dataset ATAC peak sets called \
+                     independently)."
+    )]
+    feature_name_kind: FeatureNameKindArg,
+
     #[command(flatten)]
     cnv: CnvArgs,
 }
 
+#[derive(clap::ValueEnum, Clone, Debug, Default)]
+pub enum FeatureNameKindArg {
+    #[default]
+    Auto,
+    Exact,
+    Gene,
+    Locus,
+    LocusOverlap,
+    Mixed,
+}
+
+impl From<FeatureNameKindArg> for Option<auxiliary_data::feature_names::FeatureNameKind> {
+    fn from(arg: FeatureNameKindArg) -> Self {
+        use auxiliary_data::feature_names::FeatureNameKind;
+        match arg {
+            FeatureNameKindArg::Auto => None,
+            FeatureNameKindArg::Exact => Some(FeatureNameKind::Exact),
+            FeatureNameKindArg::Gene => Some(FeatureNameKind::Gene { delim: '_' }),
+            FeatureNameKindArg::Locus => Some(FeatureNameKind::Locus {
+                merge_overlapping: false,
+            }),
+            FeatureNameKindArg::LocusOverlap => Some(FeatureNameKind::Locus {
+                merge_overlapping: true,
+            }),
+            FeatureNameKindArg::Mixed => Some(FeatureNameKind::Mixed),
+        }
+    }
+}
+
+/// Renumber a `FeaturePairGraph`'s edges + names from a pre-mask axis to
+/// the post-mask one defined by `keep`. Used to avoid re-parsing the same
+/// edge list twice when `--feature-network-restrict` is set.
+fn remap_graph_to_subset(
+    pre: matrix_util::pair_graph::FeaturePairGraph,
+    keep: &[bool],
+) -> matrix_util::pair_graph::FeaturePairGraph {
+    debug_assert_eq!(keep.len(), pre.n_features);
+    let mut old_to_new: Vec<Option<usize>> = vec![None; keep.len()];
+    let mut next = 0usize;
+    for (i, &k) in keep.iter().enumerate() {
+        if k {
+            old_to_new[i] = Some(next);
+            next += 1;
+        }
+    }
+    let feature_names: Vec<Box<str>> = pre
+        .feature_names
+        .into_iter()
+        .zip(keep.iter())
+        .filter_map(|(n, &k)| k.then_some(n))
+        .collect();
+    let feature_edges: Vec<(usize, usize)> = pre
+        .feature_edges
+        .into_iter()
+        .map(|(u, v)| (old_to_new[u].expect("kept"), old_to_new[v].expect("kept")))
+        .collect();
+    matrix_util::pair_graph::FeaturePairGraph {
+        feature_names,
+        n_features: next,
+        feature_edges,
+    }
+}
+
 pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
+
+    // When --feature-network-restrict is set, parse the network once
+    // inside the row-mask callback. The cached graph carries pre-mask
+    // indices; after mask_rows physically drops dropped-degree features,
+    // we remap to the post-mask axis (rather than parse the file again).
+    let restrict_path: Option<&str> = if args.feature_network_restrict {
+        args.feature_network.as_deref()
+    } else {
+        None
+    };
+    let net_prefix = args.feature_network_prefix_match;
+    let net_delim = args.feature_network_delim;
+    let net_snn = args.feature_network_snn_min_shared;
+    use matrix_util::pair_graph::FeaturePairGraph;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let cached_graph: Rc<RefCell<Option<FeaturePairGraph>>> = Rc::new(RefCell::new(None));
+    let cached_keep: Rc<RefCell<Option<Vec<bool>>>> = Rc::new(RefCell::new(None));
+    let mask_fn_box: Option<Box<crate::topic::common::FeatureMaskFn>> = restrict_path.map(|p| {
+        // Own the path so the closure satisfies `'static`.
+        let path: String = p.to_string();
+        let cached_graph = Rc::clone(&cached_graph);
+        let cached_keep = Rc::clone(&cached_keep);
+        let f: Box<crate::topic::common::FeatureMaskFn> = Box::new(move |row_names| {
+            let mut graph =
+                FeaturePairGraph::from_edge_list(&path, row_names.to_vec(), net_prefix, net_delim)?;
+            graph.augment_with_snn(net_snn);
+            let keep: Vec<bool> = graph.feature_degrees().iter().map(|&d| d > 0).collect();
+            let n_keep = keep.iter().filter(|&&k| k).count();
+            info!(
+                "--feature-network-restrict: keeping {} / {} features with ≥1 \
+                     edge in the network",
+                n_keep,
+                row_names.len()
+            );
+            *cached_keep.borrow_mut() = Some(keep.clone());
+            *cached_graph.borrow_mut() = Some(graph);
+            Ok(keep)
+        });
+        f
+    });
+    let feature_mask_fn: Option<&crate::topic::common::FeatureMaskFn> = mask_fn_box.as_deref();
 
     let PreparedData {
         data_vec,
@@ -307,6 +498,9 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         out: &args.out,
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
+        feature_mask_fn,
+        row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
+        feature_kind: args.feature_name_kind.clone().into(),
         refine: Some(data_beans_alg::refine_multilevel::RefineParams {
             feature_weighting: args.refine_weighting.into(),
             ..data_beans_alg::refine_multilevel::RefineParams::default()
@@ -441,6 +635,42 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // already computed for shortlist selection.
     let feature_fisher_weights = shortlist_weights.clone();
 
+    // Optional Ball-Karrer-Newman feature-graph likelihood (Poisson on
+    // observed edges, closed-form non-edge partition). Edges may be intra-
+    // or cross-modal on the gene axis; the model is geometry-only.
+    // Reuses the pre-mask graph cached by the row-mask callback when
+    // --feature-network-restrict is set (one parse total instead of two).
+    let cached_pre_mask = cached_graph.borrow_mut().take();
+    let cached_pre_mask_keep = cached_keep.borrow_mut().take();
+    let graph_for_bkn: Option<FeaturePairGraph> = match (cached_pre_mask, cached_pre_mask_keep) {
+        (Some(pre_graph), Some(keep)) => Some(remap_graph_to_subset(pre_graph, &keep)),
+        _ => args
+            .feature_network
+            .as_deref()
+            .map(|path| -> anyhow::Result<_> {
+                let mut g = FeaturePairGraph::from_edge_list(
+                    path,
+                    gene_names.to_vec(),
+                    args.feature_network_prefix_match,
+                    args.feature_network_delim,
+                )?;
+                g.augment_with_snn(args.feature_network_snn_min_shared);
+                Ok(g)
+            })
+            .transpose()?,
+    };
+    let graph_cfg: Option<crate::topic::graph_likelihood::PoissonGraphConfig> = graph_for_bkn
+        .as_ref()
+        .map(|g| {
+            crate::topic::graph_likelihood::PoissonGraphConfig::build(
+                g,
+                n_features_full,
+                args.graph_loss_weight,
+                &dev,
+            )
+        })
+        .transpose()?;
+
     let train_config = IndexedTrainConfig {
         parameters: &parameters,
         dev: &dev,
@@ -470,6 +700,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         &decoders,
         &train_config,
         bulk_with_deltas,
+        graph_cfg.as_ref(),
     )?;
 
     info!("Writing down the model parameters");
