@@ -1268,6 +1268,68 @@ fn disjoint_default_preserves_at_basename_suffix() -> anyhow::Result<()> {
 }
 
 #[test]
+fn intra_file_canonicalizer_collisions_sum_into_one_row() -> anyhow::Result<()> {
+    // Cell Ranger 10x HDF5 commonly carries duplicate ENSG records that
+    // resolve to the same gene symbol after canonicalization (TBCE,
+    // HSPA14, TMSB15B in the user's GBM dataset). The canonicalizer
+    // collapses both rows to one global; downstream reads must
+    // (a) admit the merged row to the intersection, (b) sum the
+    // collided locals' counts per cell, not double-emit them.
+    let rows: Vec<Box<str>> = vec![
+        "ENSG_A_TBCE".into(), // both canon → "TBCE"
+        "ENSG_B_TBCE".into(),
+        "ENSG_C_OTHER".into(),
+    ];
+    let cells = str_vec(4, "cell");
+    // Simple values so the sum is checkable by eye:
+    //   row0 (TBCE-A): [1, 0, 3, 0]
+    //   row1 (TBCE-B): [4, 5, 0, 0]
+    //   row2 (OTHER) : [0, 0, 0, 7]
+    // Merged TBCE row should be [5, 5, 3, 0].
+    let raw =
+        Array2::from_shape_vec((3, 4), vec![1.0, 0.0, 3.0, 0.0, 4.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0])?;
+
+    let sp = make_named_sparse(&raw, &rows, &cells);
+
+    let mut vec = SparseIoVec::new()
+        .with_row_canonicalizer(|name: &str| {
+            // Mirror FeatureNameKind::Gene { delim: '_' }: take the last
+            // underscore-separated token.
+            name.rsplit('_').next().unwrap_or(name).into()
+        })
+        .expect("install canonicalizer on empty vec");
+    vec.push(sp, Some("A".into()))?;
+
+    // Two distinct compact rows survive: TBCE (merged) and OTHER.
+    assert_eq!(vec.num_rows(), 2, "intersection must include merged row");
+
+    // Materialize all four cells and verify the merged TBCE column sums.
+    let dense = vec.read_columns_ndarray(0..4)?;
+    assert_eq!(dense.shape(), &[2, 4]);
+
+    // Find the row index whose name canonicalizes to "TBCE" — it's whichever
+    // compact row is NOT "OTHER".
+    let names = vec.row_names()?;
+    let tbce_row = names
+        .iter()
+        .position(|n| n.as_ref() == "TBCE")
+        .expect("merged row should be named TBCE");
+    let other_row = 1 - tbce_row;
+
+    assert_eq!(
+        dense.row(tbce_row).to_vec(),
+        vec![5.0, 5.0, 3.0, 0.0],
+        "TBCE row should be the per-cell SUM of the two ENSG records"
+    );
+    assert_eq!(
+        dense.row(other_row).to_vec(),
+        vec![0.0, 0.0, 0.0, 7.0],
+        "non-collided row passes through unchanged"
+    );
+    Ok(())
+}
+
+#[test]
 fn num_rows_in_at_least_basic() -> anyhow::Result<()> {
     // A has rows g0..g2, B has g1..g3. row_count_by_global per name:
     //   g0=1, g1=2, g2=2, g3=1 → at_least(1)=4, at_least(2)=2.

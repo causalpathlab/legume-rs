@@ -63,13 +63,13 @@ impl FeatureNameKind {
     pub fn canonicalize(&self, name: &str) -> Box<str> {
         match self {
             FeatureNameKind::Exact => name.into(),
-            FeatureNameKind::Gene { delim } => name.rsplit(*delim).next().unwrap_or(name).into(),
+            FeatureNameKind::Gene { delim } => gene_canonicalize(name, *delim),
             FeatureNameKind::Locus { .. } => canon_locus(name),
             FeatureNameKind::Mixed => {
                 if parse_locus(name).is_some() {
                     canon_locus(name)
                 } else if name.contains('_') {
-                    name.rsplit('_').next().unwrap_or(name).into()
+                    gene_canonicalize(name, '_')
                 } else {
                     name.into()
                 }
@@ -271,11 +271,56 @@ pub fn build_mixed_kind_canonicalizer(names: &[Box<str>]) -> RowNameCanonicalize
         } else if parse_locus(name).is_some() {
             canon_locus(name)
         } else if name.contains('_') {
-            name.rsplit('_').next().unwrap_or(name).into()
+            gene_canonicalize(name, '_')
         } else {
             name.into()
         }
     })
+}
+
+/// Gene-symbol canonicalization with Cell Ranger feature-type suffix
+/// awareness. 10x Cell Ranger HDF5 row names commonly arrive as
+/// `ENSG..._SYMBOL_<feature_type>` where the third component is a
+/// sanitized `feature_type` tag (e.g. `Gene` for `Gene Expression`).
+/// A naive `rsplit(delim).next()` would return that constant tag,
+/// canonicalizing *every* row to the same string and collapsing the
+/// row intersection to one global key. Strip the known tag suffix
+/// first so the actual symbol becomes the rsplit target.
+fn gene_canonicalize(name: &str, delim: char) -> Box<str> {
+    let stripped = strip_feature_type_suffix(name, delim);
+    stripped.rsplit(delim).next().unwrap_or(stripped).into()
+}
+
+/// Cell Ranger sanitizes `features/feature_type` into the row name as
+/// the trailing component. Strip the known tags so the actual gene
+/// symbol becomes the rsplit target. Conservative list — only the
+/// shapes we've actually seen in the wild — so an unknown tag falls
+/// through untouched rather than corrupting a real symbol.
+fn strip_feature_type_suffix(name: &str, delim: char) -> &str {
+    // Names come pre-sanitized in different ways depending on the
+    // producer (Cell Ranger's own h5, scanpy/anndata exports, R-side
+    // tools), so accept both `_Gene` and `_Gene_Expression` plus the
+    // common companion tags.
+    const TAGS: &[&str] = &[
+        "Gene_Expression",
+        "Gene",
+        "Antibody_Capture",
+        "CRISPR_Guide_Capture",
+        "Multiplexing_Capture",
+        "Custom",
+        "Peaks",
+    ];
+    for tag in TAGS {
+        // Only strip if the suffix sits behind `delim` (otherwise we'd
+        // mangle a real symbol that happens to end in "Gene").
+        let mut suffix = String::with_capacity(tag.len() + 1);
+        suffix.push(delim);
+        suffix.push_str(tag);
+        if let Some(rest) = name.strip_suffix(suffix.as_str()) {
+            return rest;
+        }
+    }
+    name
 }
 
 #[cfg(test)]
@@ -299,11 +344,30 @@ mod tests {
         assert_eq!(k.canonicalize("ENSG00000000003_TSPAN6").as_ref(), "TSPAN6");
         // Symbol-only inputs survive unchanged.
         assert_eq!(k.canonicalize("TSPAN6").as_ref(), "TSPAN6");
-        // Multi-underscore: still take the last token (caller's responsibility
-        // to pick a sensible delim if ambiguity matters).
+        // Unknown trailing tokens still get rsplit — caller's responsibility
+        // to pick a sensible delim if a non-feature-type trailing token matters.
         assert_eq!(k.canonicalize("A_B_C").as_ref(), "C");
         assert!(!k.is_exact());
         assert!(k.into_canonicalizer().is_some());
+    }
+
+    #[test]
+    fn gene_strips_cell_ranger_feature_type_suffix() {
+        let k = FeatureNameKind::Gene { delim: '_' };
+        // 10x Cell Ranger HDF5: `ENSG..._SYMBOL_Gene`. Trailing `_Gene`
+        // would otherwise collapse every gene to the literal "Gene".
+        assert_eq!(
+            k.canonicalize("ENSG00000187634_SAMD11_Gene").as_ref(),
+            "SAMD11"
+        );
+        // Full `Gene_Expression` tag variant.
+        assert_eq!(
+            k.canonicalize("ENSG00000187634_SAMD11_Gene_Expression").as_ref(),
+            "SAMD11"
+        );
+        // A real gene whose name happens to end in "Gene" *without* the
+        // delimiter shouldn't be stripped (no underscore in front of "Gene").
+        assert_eq!(k.canonicalize("FakeGene").as_ref(), "FakeGene");
     }
 
     #[test]
