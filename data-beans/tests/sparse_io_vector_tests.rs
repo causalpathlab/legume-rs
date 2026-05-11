@@ -1,5 +1,5 @@
 use data_beans::sparse_io::*;
-use data_beans::sparse_io_vector::SparseIoVec;
+use data_beans::sparse_io_vector::{ColumnAlignment, RowAlignment, SparseIoVec};
 use matrix_util::traits::SampleOps;
 use ndarray::Array2;
 use std::sync::Arc;
@@ -122,7 +122,7 @@ fn push_disjoint_rows_uses_intersection() -> anyhow::Result<()> {
     let sp_a = make_named_sparse(&raw_a, &rows_a, &str_vec(3, "a"));
     let sp_b = make_named_sparse(&raw_b, &rows_b, &str_vec(2, "b"));
 
-    let mut vec = SparseIoVec::new();
+    let mut vec = SparseIoVec::new().with_row_alignment(RowAlignment::Intersect)?;
     vec.push(sp_a, Some("A".into()))?;
     vec.push(sp_b, Some("B".into()))?;
     assert_eq!(vec.num_rows(), 2);
@@ -793,7 +793,7 @@ fn rows_triplets_disjoint_intersection() -> anyhow::Result<()> {
     let sp_a = make_named_sparse(&raw_a, &rows_a, &str_vec(3, "a"));
     let sp_b = make_named_sparse(&raw_b, &rows_b, &str_vec(2, "b"));
 
-    let mut vec = SparseIoVec::new();
+    let mut vec = SparseIoVec::new().with_row_alignment(RowAlignment::Intersect)?;
     vec.push(sp_a, Some("A".into()))?;
     vec.push(sp_b, Some("B".into()))?;
     assert_eq!(vec.num_rows(), 2);
@@ -1143,5 +1143,145 @@ fn read_columns_csc_matches_old_triplet_path() -> anyhow::Result<()> {
             assert!(w[0] < w[1], "row indices must be strictly increasing");
         }
     }
+    Ok(())
+}
+
+//////////////////////////////////////////////////////
+// ColumnAlignment::Union — patchy multiome glue //
+//////////////////////////////////////////////////////
+
+#[test]
+fn union_push_glues_shared_barcodes() -> anyhow::Result<()> {
+    // ATAC: peaks p0..p2, cells c0, c1, c2.
+    // RNA:  genes g0..g1, cells c1, c2, c3.
+    // Under Union, c1 and c2 are shared (2 backends each).
+    let peak_rows: Vec<Box<str>> = (0..3).map(|i| format!("p{i}").into()).collect();
+    let gene_rows: Vec<Box<str>> = (0..2).map(|i| format!("g{i}").into()).collect();
+    let atac_cells: Vec<Box<str>> = vec!["c0".into(), "c1".into(), "c2".into()];
+    let rna_cells: Vec<Box<str>> = vec!["c1".into(), "c2".into(), "c3".into()];
+
+    let atac = Array2::<f32>::runif(3, 3); // 3 peaks × 3 cells
+    let rna = Array2::<f32>::runif(2, 3); // 2 genes × 3 cells
+    let sp_atac = make_named_sparse(&atac, &peak_rows, &atac_cells);
+    let sp_rna = make_named_sparse(&rna, &gene_rows, &rna_cells);
+
+    let mut vec = SparseIoVec::new().with_column_alignment(ColumnAlignment::Union)?;
+    vec.push(sp_atac, Some("atac".into()))?;
+    vec.push(sp_rna, Some("rna".into()))?;
+
+    // Cell pool: c0, c1, c2, c3 — 4 unified cells.
+    assert_eq!(vec.num_columns(), 4);
+    let names = vec.column_names()?;
+    assert_eq!(
+        names.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+        vec!["c0", "c1", "c2", "c3"]
+    );
+    // No @<basename> suffix in Union mode.
+    for n in names.iter() {
+        assert!(!n.contains('@'), "Union must not suffix barcodes: {}", n);
+    }
+    // Feature axis = peaks ∪ genes = 5 rows.
+    assert_eq!(vec.num_rows(), 5);
+    Ok(())
+}
+
+#[test]
+fn union_read_merges_modalities_into_one_column() -> anyhow::Result<()> {
+    // Same setup as above. Shared cell c1 (= ATAC col 1 + RNA col 0)
+    // should contribute peak rows AND gene rows on one output column.
+    let peak_rows: Vec<Box<str>> = (0..3).map(|i| format!("p{i}").into()).collect();
+    let gene_rows: Vec<Box<str>> = (0..2).map(|i| format!("g{i}").into()).collect();
+    let atac_cells: Vec<Box<str>> = vec!["c0".into(), "c1".into(), "c2".into()];
+    let rna_cells: Vec<Box<str>> = vec!["c1".into(), "c2".into(), "c3".into()];
+
+    let mut atac = Array2::<f32>::zeros((3, 3));
+    atac[(0, 1)] = 7.0; // peak 0, cell c1
+    atac[(2, 1)] = 9.0; // peak 2, cell c1
+    let mut rna = Array2::<f32>::zeros((2, 3));
+    rna[(0, 0)] = 5.0; // gene 0, cell c1 (= rna col 0)
+    rna[(1, 0)] = 3.0; // gene 1, cell c1
+
+    let sp_atac = make_named_sparse(&atac, &peak_rows, &atac_cells);
+    let sp_rna = make_named_sparse(&rna, &gene_rows, &rna_cells);
+
+    let mut vec = SparseIoVec::new().with_column_alignment(ColumnAlignment::Union)?;
+    vec.push(sp_atac, Some("atac".into()))?;
+    vec.push(sp_rna, Some("rna".into()))?;
+
+    let names = vec.column_names()?;
+    let c1_global = names.iter().position(|n| n.as_ref() == "c1").unwrap();
+    let dense = vec.read_columns_ndarray(c1_global..c1_global + 1)?;
+    // Compact row ordering follows `row_names()`. Find each row by name.
+    let row_names = vec.row_names()?;
+    let row_pos = |name: &str| row_names.iter().position(|r| r.as_ref() == name).unwrap();
+    assert!((dense[(row_pos("p0"), 0)] - 7.0).abs() < 1e-5);
+    assert!((dense[(row_pos("p2"), 0)] - 9.0).abs() < 1e-5);
+    assert!((dense[(row_pos("g0"), 0)] - 5.0).abs() < 1e-5);
+    assert!((dense[(row_pos("g1"), 0)] - 3.0).abs() < 1e-5);
+    Ok(())
+}
+
+#[test]
+fn union_rejects_within_backend_duplicate_barcode() -> anyhow::Result<()> {
+    // A single backend listing the same barcode twice cannot be folded
+    // by Union (it would create two `(didx, loc)` entries from the same
+    // backend on one global col).
+    let rows: Vec<Box<str>> = (0..2).map(|i| format!("g{i}").into()).collect();
+    let cells: Vec<Box<str>> = vec!["c0".into(), "c0".into()];
+    let raw = Array2::<f32>::runif(2, 2);
+    let sp = make_named_sparse(&raw, &rows, &cells);
+
+    let mut vec = SparseIoVec::new().with_column_alignment(ColumnAlignment::Union)?;
+    let err = vec
+        .push(sp, None)
+        .expect_err("duplicate barcode must error");
+    assert!(
+        err.to_string().contains("duplicate canonical barcode"),
+        "unexpected error: {}",
+        err
+    );
+    Ok(())
+}
+
+#[test]
+fn disjoint_default_preserves_at_basename_suffix() -> anyhow::Result<()> {
+    // Disjoint (today's default) keeps the @<basename> suffix when
+    // n_files > 1 — regression guard so single-modality saved manifests
+    // remain readable.
+    let rows: Vec<Box<str>> = (0..2).map(|i| format!("g{i}").into()).collect();
+    let cells: Vec<Box<str>> = vec!["c0".into(), "c1".into()];
+    let raw_a = Array2::<f32>::runif(2, 2);
+    let raw_b = Array2::<f32>::runif(2, 2);
+    let sp_a = make_named_sparse(&raw_a, &rows, &cells);
+    let sp_b = make_named_sparse(&raw_b, &rows, &cells);
+
+    let mut vec = SparseIoVec::new();
+    vec.push(sp_a, Some("A".into()))?;
+    vec.push(sp_b, Some("B".into()))?;
+    let names = vec.column_names()?;
+    assert_eq!(
+        names.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+        vec!["c0@A", "c1@A", "c0@B", "c1@B"]
+    );
+    assert_eq!(vec.num_columns(), 4);
+    Ok(())
+}
+
+#[test]
+fn num_rows_in_at_least_basic() -> anyhow::Result<()> {
+    // A has rows g0..g2, B has g1..g3. row_count_by_global per name:
+    //   g0=1, g1=2, g2=2, g3=1 → at_least(1)=4, at_least(2)=2.
+    let rows_a: Vec<Box<str>> = (0..3).map(|i| format!("g{i}").into()).collect();
+    let rows_b: Vec<Box<str>> = (1..4).map(|i| format!("g{i}").into()).collect();
+    let raw = Array2::<f32>::runif(3, 2);
+    let sp_a = make_named_sparse(&raw, &rows_a, &str_vec(2, "a"));
+    let sp_b = make_named_sparse(&raw, &rows_b, &str_vec(2, "b"));
+
+    let mut vec = SparseIoVec::new();
+    vec.push(sp_a, Some("A".into()))?;
+    vec.push(sp_b, Some("B".into()))?;
+    assert_eq!(vec.num_rows_in_at_least(1), 4);
+    assert_eq!(vec.num_rows_in_at_least(2), 2);
+    assert_eq!(vec.num_rows_in_at_least(3), 0);
     Ok(())
 }

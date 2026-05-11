@@ -13,6 +13,19 @@ use rustc_hash::FxHashMap as HashMap;
 use std::ops::Index;
 use std::sync::Arc;
 
+/// Where a single global cell's nonzeros come from in one of the
+/// underlying [`SparseIo`] backends. Under
+/// [`ColumnAlignment::Disjoint`] each global column has exactly one
+/// `BackendLocation`. Under [`ColumnAlignment::Union`] a global column
+/// can carry one entry per backend that observed the cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackendLocation {
+    /// Index into [`SparseIoVec::data_vec`].
+    pub backend: u32,
+    /// Local column index within that backend.
+    pub local_col: u32,
+}
+
 type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 
 /// Optional canonicalizer applied to every backend row name during
@@ -23,11 +36,24 @@ type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 /// exact-match behavior.
 pub type RowNameCanonicalizer = Arc<dyn Fn(&str) -> Box<str> + Send + Sync>;
 
+/// Optional canonicalizer applied to every backend *column* (barcode)
+/// name during `push` under [`ColumnAlignment::Union`]. Mirror of
+/// [`RowNameCanonicalizer`]. Two raw barcodes whose canonical forms
+/// match are treated as the same biological cell — backends share a
+/// single global column id, and `read_columns_*` merges their nonzeros
+/// into one output column. Default = `None` preserves exact-match
+/// behavior.
+pub type ColumnNameCanonicalizer = Arc<dyn Fn(&str) -> Box<str> + Send + Sync>;
+
 pub struct SparseIoVec {
     data_vec: Vec<Arc<SparseData>>,
-    col_to_data: Vec<usize>,
+    /// Per global column → one or more [`BackendLocation`] entries.
+    /// Under [`ColumnAlignment::Disjoint`] each inner `Vec` always
+    /// has length 1. Under [`ColumnAlignment::Union`] a global
+    /// column can be observed by multiple backends — one entry per
+    /// backend that contributes triplets for that cell.
+    col_to_data: Vec<Vec<BackendLocation>>,
     data_to_cols: HashMap<usize, Vec<usize>>,
-    col_glob_to_loc: Vec<usize>,
     offset: usize,
     // Row-name alignment across backends. Each backend may have a
     // different subset/ordering of rows; we keep only the intersection
@@ -48,6 +74,10 @@ pub struct SparseIoVec {
     /// Kept in sync with `global_to_compact_row` whenever it changes.
     compact_to_global_row: Vec<usize>,
     column_names_with_data_tag: Vec<Box<str>>,
+    /// `Union` mode only: canonical barcode → global column id. Populated
+    /// at push time so subsequent pushes can match cells across backends.
+    /// Unused (empty) under `Disjoint`.
+    col_name_position: HashMap<Box<str>, u32>,
     col_to_group: Option<HashMap<usize, usize>>,
     group_to_cols: Option<Vec<Vec<usize>>>,
     group_keys: Option<Vec<Box<str>>>,
@@ -59,12 +89,24 @@ pub struct SparseIoVec {
     cached_num_rows: usize,
     cached_num_columns: usize,
     /// How row names align across pushed backends. Default
-    /// [`RowAlignment::Intersect`] preserves the historical "common rows
-    /// only" semantics. [`RowAlignment::Union`] keeps every row from any
-    /// backend, with cells from a backend that doesn't contain row `g`
-    /// implicitly observing zero at that position — used for multi-modal
-    /// data where features (e.g. peaks vs genes) are disjoint.
+    /// [`RowAlignment::Union`] keeps every row from any backend, with
+    /// cells from a backend that doesn't contain row `g` implicitly
+    /// observing zero at that position — used for multi-modal data
+    /// where features (e.g. peaks vs genes) are disjoint.
+    /// [`RowAlignment::Intersect`] reverts to the historical
+    /// "common rows only" semantics.
     row_alignment: RowAlignment,
+    /// How column (cell) names align across pushed backends. Default
+    /// [`ColumnAlignment::Disjoint`] preserves the historical
+    /// concatenate-cells semantics, with `@<basename>` suffixing when
+    /// multiple files are loaded. [`ColumnAlignment::Union`] matches
+    /// cells by canonical barcode across backends and lets one global
+    /// column carry triplets from multiple backends — the foundation
+    /// for patchy multi-modal (multiome) integration.
+    column_alignment: ColumnAlignment,
+    /// Optional canonicalizer for barcode matching under `Union` mode.
+    /// See [`ColumnNameCanonicalizer`].
+    column_canonicalizer: Option<ColumnNameCanonicalizer>,
 }
 
 /// Strategy for aligning row names across multiple pushed backends.
@@ -80,6 +122,25 @@ pub enum RowAlignment {
     /// Keep only rows present in every backend. Opt-in for callers that
     /// want strict single-modality semantics.
     Intersect,
+}
+
+/// Strategy for aligning column (cell) names across multiple pushed
+/// backends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColumnAlignment {
+    /// Today's behavior. Each push appends `ncol_data` brand-new global
+    /// cells; raw barcodes get `@<basename>` suffixed for disambiguation
+    /// when more than one backend is pushed. Two backends naming the
+    /// same biological cell stay disjoint.
+    #[default]
+    Disjoint,
+    /// Match each pushed column's canonical barcode against existing
+    /// global cells. New barcodes extend the cell pool; matched barcodes
+    /// share one global column across backends (the column carries
+    /// triplets from every backend that observes the cell). No
+    /// `@<basename>` suffix. Foundation for patchy multi-modal
+    /// (multiome) integration.
+    Union,
 }
 
 pub struct TripletsMatched {
@@ -111,7 +172,6 @@ impl SparseIoVec {
             data_vec: vec![],
             col_to_data: vec![],
             data_to_cols: HashMap::default(),
-            col_glob_to_loc: vec![],
             offset: 0,
             row_canonicalizer: None,
             row_name_position: HashMap::default(),
@@ -122,6 +182,7 @@ impl SparseIoVec {
             global_to_compact_row: vec![],
             compact_to_global_row: vec![],
             column_names_with_data_tag: vec![],
+            col_name_position: HashMap::default(),
             col_to_group: None,
             group_to_cols: None,
             group_keys: None,
@@ -133,6 +194,8 @@ impl SparseIoVec {
             cached_num_rows: 0,
             cached_num_columns: 0,
             row_alignment: RowAlignment::default(),
+            column_alignment: ColumnAlignment::default(),
+            column_canonicalizer: None,
         }
     }
 
@@ -168,6 +231,37 @@ impl SparseIoVec {
             "row canonicalizer must be set before any push"
         );
         self.row_canonicalizer = Some(Arc::new(canon));
+        Ok(self)
+    }
+
+    /// Switch column (cell) alignment between disjoint concatenation
+    /// (default) and barcode-keyed union. Must be called BEFORE any
+    /// push — the push branches off the current value. Errors if any
+    /// backend has already been added.
+    pub fn with_column_alignment(mut self, mode: ColumnAlignment) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.data_vec.is_empty(),
+            "column alignment must be set before any push"
+        );
+        self.column_alignment = mode;
+        Ok(self)
+    }
+
+    /// Install a column-name canonicalizer for fuzzy cross-backend
+    /// barcode matching under [`ColumnAlignment::Union`]. Must be
+    /// called BEFORE the first [`push`](Self::push) — returns an error
+    /// if any backend has already been added. Has no effect under
+    /// [`ColumnAlignment::Disjoint`] (barcodes are never compared
+    /// across backends in that mode).
+    pub fn with_column_canonicalizer(
+        mut self,
+        canon: impl Fn(&str) -> Box<str> + Send + Sync + 'static,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.data_vec.is_empty(),
+            "column canonicalizer must be set before any push"
+        );
+        self.column_canonicalizer = Some(Arc::new(canon));
         Ok(self)
     }
 
@@ -290,80 +384,159 @@ impl SparseIoVec {
         data: Arc<SparseData>,
         data_name: Option<Box<str>>,
     ) -> anyhow::Result<()> {
-        if let Some(ncol_data) = data.num_columns() {
-            debug_assert!(self.col_glob_to_loc.len() == self.offset);
-            debug_assert!(self.col_to_data.len() == self.offset);
-            let didx = self.data_vec.len();
-            let data_to_cells = self.data_to_cols.entry(didx).or_default();
-
-            for loc in 0..ncol_data {
-                let glob = loc + self.offset;
-                self.col_glob_to_loc.push(loc);
-                self.col_to_data.push(didx);
-                data_to_cells.push(glob);
-                debug_assert!(glob == self.col_to_data.len() - 1);
-            }
-
-            let data_tag = match data_name {
-                Some(x) => COLUMN_SEP.to_string() + x.as_ref(),
-                _ => "".to_string(),
-            };
-
-            self.column_names_with_data_tag.extend(
-                data.column_names()?
-                    .into_iter()
-                    .map(|x| (x.to_string() + &data_tag).into_boxed_str())
-                    .collect::<Vec<_>>(),
-            );
-
-            let row_names = data.row_names()?;
-            let mut local_to_global = Vec::with_capacity(row_names.len());
-            for row in row_names.iter() {
-                let key: Box<str> = match self.row_canonicalizer.as_ref() {
-                    Some(canon) => canon(row),
-                    None => row.clone(),
-                };
-                let glob_row = match self.row_name_position.get(&key) {
-                    Some(&g) => g,
-                    None => {
-                        let next_global = self.row_names_by_global.len();
-                        self.row_name_position.insert(key.clone(), next_global);
-                        self.row_names_by_global.push(key);
-                        self.row_count_by_global.push(0);
-                        next_global
-                    }
-                };
-                local_to_global.push(glob_row);
-            }
-            for &g in &local_to_global {
-                self.row_count_by_global[g] += 1;
-            }
-            let mut g2l: HashMap<usize, usize> =
-                HashMap::with_capacity_and_hasher(local_to_global.len(), Default::default());
-            for (l, &g) in local_to_global.iter().enumerate() {
-                g2l.insert(g, l);
-            }
-            self.data_global_to_local_row.push(g2l);
-            self.data_local_to_global_row.push(local_to_global);
-
-            self.data_vec.push(data.clone());
-            self.offset += ncol_data;
-
-            self.cached_num_columns += ncol_data;
-            self.recompute_row_mapping();
-
-            info!(
-                "Added {} columns; row {} = {}",
-                self.offset,
-                match self.row_alignment {
-                    RowAlignment::Intersect => "intersection",
-                    RowAlignment::Union => "union",
-                },
-                self.cached_num_rows
-            );
-        } else {
+        let Some(ncol_data) = data.num_columns() else {
             return Err(anyhow::anyhow!("data file has no columns"));
+        };
+        debug_assert_eq!(self.col_to_data.len(), self.offset);
+        let didx = self.data_vec.len();
+        let didx_u32: u32 = didx
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("backend count overflows u32"))?;
+        let raw_col_names = data.column_names()?;
+        debug_assert_eq!(raw_col_names.len(), ncol_data);
+
+        // `Disjoint`: every push appends fresh global columns + the
+        // `@<basename>` disambiguator. `Union`: match each pushed
+        // barcode against the existing global cell pool by canonical
+        // name so matched barcodes share a global column across
+        // backends (reads merge their nonzeros into one output col).
+        let data_to_cells_loc_to_glob: Vec<usize> = match self.column_alignment {
+            ColumnAlignment::Disjoint => {
+                let mut local_to_glob = Vec::with_capacity(ncol_data);
+                for loc in 0..ncol_data {
+                    let glob = self.offset + loc;
+                    let loc_u32: u32 = loc
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("local col overflows u32"))?;
+                    self.col_to_data.push(vec![BackendLocation {
+                        backend: didx_u32,
+                        local_col: loc_u32,
+                    }]);
+                    local_to_glob.push(glob);
+                }
+                let data_tag = match data_name.as_deref() {
+                    Some(x) => COLUMN_SEP.to_string() + x,
+                    None => String::new(),
+                };
+                self.column_names_with_data_tag.extend(
+                    raw_col_names
+                        .iter()
+                        .map(|x| (x.to_string() + &data_tag).into_boxed_str()),
+                );
+                self.offset += ncol_data;
+                local_to_glob
+            }
+            ColumnAlignment::Union => {
+                // First pass: detect within-backend duplicate barcodes
+                // (would create a malformed global col with two entries
+                // from the same backend).
+                let mut seen_in_this_push: HashMap<Box<str>, usize> =
+                    HashMap::with_capacity_and_hasher(ncol_data, Default::default());
+                let mut local_to_glob = Vec::with_capacity(ncol_data);
+                for (loc, raw) in raw_col_names.iter().enumerate() {
+                    let canon: Box<str> = match self.column_canonicalizer.as_ref() {
+                        Some(c) => c(raw),
+                        None => raw.clone(),
+                    };
+                    if let Some(&prev_loc) = seen_in_this_push.get(&canon) {
+                        return Err(anyhow::anyhow!(
+                            "ColumnAlignment::Union: backend {} has duplicate canonical \
+                             barcode `{}` (local cols {} and {}) — Union cannot fold a \
+                             cell with itself within one backend",
+                            didx,
+                            canon,
+                            prev_loc,
+                            loc,
+                        ));
+                    }
+                    seen_in_this_push.insert(canon.clone(), loc);
+
+                    let loc_u32: u32 = loc
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("local col overflows u32"))?;
+                    let glob = match self.col_name_position.get(&canon).copied() {
+                        Some(g) => {
+                            self.col_to_data[g as usize].push(BackendLocation {
+                                backend: didx_u32,
+                                local_col: loc_u32,
+                            });
+                            g as usize
+                        }
+                        None => {
+                            let new_g = self.offset;
+                            let new_g_u32: u32 = new_g
+                                .try_into()
+                                .map_err(|_| anyhow::anyhow!("global col overflows u32"))?;
+                            self.col_name_position.insert(canon, new_g_u32);
+                            self.col_to_data.push(vec![BackendLocation {
+                                backend: didx_u32,
+                                local_col: loc_u32,
+                            }]);
+                            // Raw barcode (no @<basename> suffix) becomes
+                            // the displayed name; subsequent backends
+                            // contributing to this cell don't relabel it.
+                            self.column_names_with_data_tag.push(raw.clone());
+                            self.offset += 1;
+                            new_g
+                        }
+                    };
+                    local_to_glob.push(glob);
+                }
+                local_to_glob
+            }
+        };
+
+        // `data_to_cols[didx][loc] = glob`. Stored separately from
+        // `col_to_data` because callers (e.g. `rows_triplets`) need the
+        // forward map per backend.
+        let entry = self.data_to_cols.entry(didx).or_default();
+        entry.extend(data_to_cells_loc_to_glob.iter().copied());
+
+        let row_names = data.row_names()?;
+        let mut local_to_global = Vec::with_capacity(row_names.len());
+        for row in row_names.iter() {
+            let key: Box<str> = match self.row_canonicalizer.as_ref() {
+                Some(canon) => canon(row),
+                None => row.clone(),
+            };
+            let glob_row = match self.row_name_position.get(&key) {
+                Some(&g) => g,
+                None => {
+                    let next_global = self.row_names_by_global.len();
+                    self.row_name_position.insert(key.clone(), next_global);
+                    self.row_names_by_global.push(key);
+                    self.row_count_by_global.push(0);
+                    next_global
+                }
+            };
+            local_to_global.push(glob_row);
         }
+        for &g in &local_to_global {
+            self.row_count_by_global[g] += 1;
+        }
+        let mut g2l: HashMap<usize, usize> =
+            HashMap::with_capacity_and_hasher(local_to_global.len(), Default::default());
+        for (l, &g) in local_to_global.iter().enumerate() {
+            g2l.insert(g, l);
+        }
+        self.data_global_to_local_row.push(g2l);
+        self.data_local_to_global_row.push(local_to_global);
+
+        self.data_vec.push(data.clone());
+
+        self.cached_num_columns = self.offset;
+        self.recompute_row_mapping();
+
+        info!(
+            "Added {} columns ({} total); row {} = {}",
+            ncol_data,
+            self.offset,
+            match self.row_alignment {
+                RowAlignment::Intersect => "intersection",
+                RowAlignment::Union => "union",
+            },
+            self.cached_num_rows
+        );
         Ok(())
     }
 
@@ -414,6 +587,20 @@ impl SparseIoVec {
         self.cached_num_rows
     }
 
+    /// Number of canonical rows observed by **at least** `k` of the
+    /// pushed backends. Useful for detecting multi-modal-shaped inputs
+    /// (`num_rows_in_at_least(n_backends)` is the strict intersection
+    /// size; comparing it against per-backend row counts reveals how
+    /// disjoint the feature axes are).
+    pub fn num_rows_in_at_least(&self, k: usize) -> usize {
+        self.row_count_by_global.iter().filter(|&&c| c >= k).count()
+    }
+
+    /// Current column-alignment mode. Mirrors [`Self::row_alignment`].
+    pub fn column_alignment(&self) -> ColumnAlignment {
+        self.column_alignment
+    }
+
     pub fn num_non_zeros(&self) -> anyhow::Result<usize> {
         let mut ret = 0;
         for dat in self.data_vec.iter() {
@@ -434,26 +621,30 @@ impl SparseIoVec {
     // access columns //
     ////////////////////
 
-    /// Read a single column by global index and append offset triplets
+    /// Read a single column by global index and append offset triplets.
+    /// Under [`ColumnAlignment::Union`] one global column can be backed
+    /// by multiple `(didx, loc)` pairs — their triplets all land in the
+    /// same output column and `col_offset` advances by 1.
     fn read_column_offset(
         &self,
         glob: usize,
         col_offset: &mut usize,
         triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
-        let didx = self.col_to_data[glob];
-        let loc = self.col_glob_to_loc[glob];
-        let (_, loc_ncol, loc_triplets) =
-            self.data_vec[didx].read_triplets_by_single_column(loc)?;
         let off = *col_offset as u64;
-        let l2g = self.data_local_to_global_row[didx].as_slice();
         let g2c = self.global_to_compact_row.as_slice();
-        for (i, j, v) in loc_triplets {
-            if let Some(c) = g2c[l2g[i as usize]] {
-                triplets.push((c as u64, j + off, v));
+        for source in self.col_to_data[glob].iter() {
+            let didx = source.backend as usize;
+            let loc = source.local_col as usize;
+            let (_, _, loc_triplets) = self.data_vec[didx].read_triplets_by_single_column(loc)?;
+            let l2g = self.data_local_to_global_row[didx].as_slice();
+            for (i, _j, v) in loc_triplets {
+                if let Some(c) = g2c[l2g[i as usize]] {
+                    triplets.push((c as u64, off, v));
+                }
             }
         }
-        *col_offset += loc_ncol;
+        *col_offset += 1;
         Ok(())
     }
 
@@ -469,12 +660,19 @@ impl SparseIoVec {
         let cells: Vec<usize> = cells.collect();
         let ncol = cells.len();
 
-        // Group cells by backend, tracking (local_col, output_col)
+        // Group cells by backend, tracking (local_col, output_col).
+        // Under `ColumnAlignment::Union` one global cell can contribute
+        // entries to multiple backend groups (one per backend that
+        // observed the cell); all those reads target the same output
+        // column.
         let mut backend_groups: HashMap<usize, Vec<(usize, usize)>> = HashMap::default();
         for (out_col, &glob) in cells.iter().enumerate() {
-            let didx = self.col_to_data[glob];
-            let loc = self.col_glob_to_loc[glob];
-            backend_groups.entry(didx).or_default().push((loc, out_col));
+            for source in self.col_to_data[glob].iter() {
+                backend_groups
+                    .entry(source.backend as usize)
+                    .or_default()
+                    .push((source.local_col as usize, out_col));
+            }
         }
 
         let mut triplets = Vec::new();
@@ -531,13 +729,17 @@ impl SparseIoVec {
         let ncol = cells.len();
 
         // Group cells by backend, carrying the output column index so we
-        // can scatter directly into the final per-column buckets.
+        // can scatter directly into the final per-column buckets. Under
+        // `ColumnAlignment::Union` one global cell can be observed by
+        // multiple backends — the loop visits every `(didx, loc)` for
+        // the same `out_col`, so the bucket accumulates contributions
+        // from all observing backends.
         let mut backend_groups: Vec<Vec<(usize, usize)>> =
             (0..self.data_vec.len()).map(|_| Vec::new()).collect();
         for (out_col, &glob) in cells.iter().enumerate() {
-            let didx = self.col_to_data[glob];
-            let loc = self.col_glob_to_loc[glob];
-            backend_groups[didx].push((loc, out_col));
+            for source in self.col_to_data[glob].iter() {
+                backend_groups[source.backend as usize].push((source.local_col as usize, out_col));
+            }
         }
 
         // Per-output-column buckets of (compact_row, value).
@@ -594,12 +796,33 @@ impl SparseIoVec {
 
         for bucket in &mut buckets {
             // Canonical CSC requires within-column row indices sorted
-            // ascending. On-disk indices are sorted by local row; the
-            // l2g + g2c remap stays sorted iff that composition is
-            // monotonic. Detect cheaply, sort only when it isn't.
-            let needs_sort = bucket.windows(2).any(|w| w[0].0 >= w[1].0);
-            if needs_sort {
+            // ascending AND unique. On-disk indices are sorted by local
+            // row, but two sources can land on the same compact row:
+            //   (a) a row canonicalizer that maps two local rows in the
+            //       same backend to one global row;
+            //   (b) `ColumnAlignment::Union` where multiple backends
+            //       contribute to one output column.
+            // The composition `l2g[g2c[..]]` is monotonic in the
+            // single-source, no-canonicalizer case (the historical
+            // fast path) — detect it cheaply and skip the rebuild;
+            // otherwise sort and fold duplicates by summing.
+            let strictly_sorted_unique = bucket.windows(2).all(|w| w[0].0 < w[1].0);
+            if !strictly_sorted_unique {
                 bucket.sort_by_key(|&(r, _)| r);
+                // Compact duplicates in-place: sum values for equal rows.
+                let mut write = 0usize;
+                let mut read = 0usize;
+                while read < bucket.len() {
+                    let (r, mut v) = bucket[read];
+                    read += 1;
+                    while read < bucket.len() && bucket[read].0 == r {
+                        v += bucket[read].1;
+                        read += 1;
+                    }
+                    bucket[write] = (r, v);
+                    write += 1;
+                }
+                bucket.truncate(write);
             }
             for &(r, v) in bucket.iter() {
                 row_indices.push(r as usize);

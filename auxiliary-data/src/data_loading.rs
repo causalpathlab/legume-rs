@@ -1,13 +1,23 @@
 use std::sync::Arc;
 
-use log::info;
+use log::{info, warn};
 
 use data_beans::convert::try_open_or_convert;
 use data_beans::sparse_io_vector::SparseIoVec;
 use matrix_util::common_io::{self, basename, read_lines};
+use rustc_hash::FxHashMap;
+use rustc_hash::FxHashSet;
 
 use crate::feature_names::FeatureNameKind;
-use data_beans::sparse_io_vector::RowAlignment;
+use data_beans::sparse_io_vector::{ColumnAlignment, RowAlignment};
+
+/// When `RowAlignment::Disjoint` (the historical default) and multiple
+/// files share most of their feature axis, the loader silently does the
+/// horizontal-stack thing. When the axes are *mostly disjoint* AND raw
+/// barcodes overlap, the inputs look multi-modal-shaped and the user
+/// probably meant `--multiome`. This threshold (intersection size /
+/// smallest per-backend row count) decides "mostly disjoint."
+const MULTIMODAL_HINT_DISJOINTNESS_FRACTION: f64 = 0.5;
 
 /// Arguments for loading multiple sparse data files with shared row names.
 #[derive(Default)]
@@ -21,11 +31,22 @@ pub struct ReadSharedRowsArgs {
     /// Default = `None` (auto).
     pub feature_kind: Option<FeatureNameKind>,
     /// How to align row names across input files. Default
-    /// [`RowAlignment::Intersect`] preserves single-modality semantics
-    /// (keep only common rows). Switch to [`RowAlignment::Union`] for
-    /// multi-modal load (e.g. paired RNA + ATAC) where features are
-    /// disjoint and the modalities are glued via cells, not features.
+    /// [`RowAlignment::Union`] keeps every row from any backend — the
+    /// strictly more permissive option that reduces to single-modality
+    /// semantics when all files share their row set, and supports
+    /// multi-modal load (e.g. paired RNA + ATAC) when they don't.
+    /// Switch to [`RowAlignment::Intersect`] for strict "common rows
+    /// only" behavior.
     pub row_alignment: RowAlignment,
+    /// How to align column (cell / barcode) names across input files.
+    /// Default [`ColumnAlignment::Disjoint`] concatenates cells with
+    /// `@<basename>` disambiguation, preserving single-modality
+    /// semantics. Switch to [`ColumnAlignment::Union`] for **patchy
+    /// multi-modal (multiome) load**: cells are glued by raw barcode
+    /// across backends, a cell observed in only one modality
+    /// contributes triplets only on that modality's row block, and no
+    /// `@<basename>` suffix is added.
+    pub column_alignment: ColumnAlignment,
 }
 
 /// Sparse data with per-cell batch labels.
@@ -57,9 +78,19 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         opened.push((data_file.clone(), data));
     }
 
+    // `Disjoint` keeps today's @<basename>-suffix semantics; `Union`
+    // glues cells by raw barcode (no suffix). Affects `SparseIoVec::push`
+    // *and* the batch-resolution branch below — per-file batch labels
+    // become ambiguous under Union (one cell can be in two files) so we
+    // require either a single unified batch file or per-cell embedded
+    // tags that agree across backends.
+    let attach_data_name = attach_data_name && args.column_alignment == ColumnAlignment::Disjoint;
+
     let mut data_vec = SparseIoVec::new()
         .with_row_alignment(args.row_alignment)
-        .expect("with_row_alignment on empty SparseIoVec");
+        .expect("with_row_alignment on empty SparseIoVec")
+        .with_column_alignment(args.column_alignment)
+        .expect("with_column_alignment on empty SparseIoVec");
 
     use crate::feature_names::FeatureNameKind;
 
@@ -171,14 +202,117 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         }
     }
 
-    // check batch membership
-    let mut batch_membership = Vec::with_capacity(data_vec.len());
+    // Soft guard: when running with the default Disjoint cell-stacking
+    // and the feature axes are mostly disjoint AND raw barcodes overlap,
+    // the inputs look multi-modal-shaped and the user probably meant
+    // `--multiome`. Print a hint, don't error — a single-modality user
+    // with quirky inputs should still get through.
+    if args.column_alignment == ColumnAlignment::Disjoint && data_vec.len() >= 2 {
+        maybe_warn_multimodal_pattern(&data_vec);
+    }
 
-    if let Some(batch_files) = &args.batch_files {
-        if batch_files.len() != args.data_files.len() {
+    // check batch membership
+    let n_cells = data_vec.num_columns();
+    let batch_membership: Vec<Box<str>> = match args.column_alignment {
+        ColumnAlignment::Disjoint => resolve_batch_disjoint(
+            &args.data_files,
+            &data_vec,
+            args.batch_files.as_deref(),
+            attach_data_name,
+        )?,
+        ColumnAlignment::Union => resolve_batch_union(
+            &args.data_files,
+            &data_vec,
+            args.batch_files.as_deref(),
+            n_cells,
+        )?,
+    };
+
+    if batch_membership.len() != data_vec.num_columns() {
+        return Err(anyhow::anyhow!(
+            "# batch membership {} != # of columns {}",
+            batch_membership.len(),
+            data_vec.num_columns()
+        ));
+    }
+
+    Ok(SparseDataWithBatch {
+        data: data_vec,
+        batch: batch_membership,
+    })
+}
+
+/// Soft hint when running with `ColumnAlignment::Disjoint` and inputs
+/// look like patchy multi-modal data. Logs once at WARN level; never
+/// errors.
+fn maybe_warn_multimodal_pattern(data_vec: &SparseIoVec) {
+    let n_backends = data_vec.len();
+    if n_backends < 2 {
+        return;
+    }
+    let intersection = data_vec.num_rows_in_at_least(n_backends);
+    let min_backend_rows = (0..n_backends)
+        .map(|j| data_vec[j].num_rows().unwrap_or(0))
+        .min()
+        .unwrap_or(0);
+    if min_backend_rows == 0 {
+        return;
+    }
+    let disjointness = 1.0_f64 - (intersection as f64) / (min_backend_rows as f64);
+    if disjointness < MULTIMODAL_HINT_DISJOINTNESS_FRACTION {
+        return;
+    }
+
+    // Cheap raw-barcode set-intersection across backends. `retain`
+    // shrinks the accumulator in place — no per-entry `Box<str>` clone,
+    // and an empty intersection short-circuits the remaining backends.
+    let mut shared: Option<FxHashSet<Box<str>>> = None;
+    for j in 0..n_backends {
+        let names = match data_vec[j].column_names() {
+            Ok(n) => n,
+            Err(_) => return, // backend can't list columns; skip the hint
+        };
+        let set: FxHashSet<Box<str>> = names.into_iter().collect();
+        match shared.as_mut() {
+            None => shared = Some(set),
+            Some(prev) => {
+                prev.retain(|k| set.contains(k));
+                if prev.is_empty() {
+                    return;
+                }
+            }
+        }
+    }
+    let shared_count = shared.map(|s| s.len()).unwrap_or(0);
+    if shared_count == 0 {
+        return;
+    }
+
+    warn!(
+        "Inputs look multi-modal-shaped (feature-axis disjointness {:.0}% across {} \
+         backends) and {} barcode(s) overlap across files. To glue cells across \
+         modalities, pass `--multiome` (or the equivalent ColumnAlignment::Union). \
+         Continuing with default Disjoint stacking — cells with shared barcodes \
+         will be treated as distinct.",
+        disjointness * 100.0,
+        n_backends,
+        shared_count
+    );
+}
+
+/// Existing behavior: one batch label per cell, per-file slicing.
+fn resolve_batch_disjoint(
+    data_files: &[Box<str>],
+    data_vec: &SparseIoVec,
+    batch_files: Option<&[Box<str>]>,
+    attach_data_name: bool,
+) -> anyhow::Result<Vec<Box<str>>> {
+    let mut batch_membership: Vec<Box<str>> = Vec::with_capacity(data_vec.num_columns());
+
+    if let Some(batch_files) = batch_files {
+        if batch_files.len() != data_files.len() {
             return Err(anyhow::anyhow!("# batch files != # of data files"));
         }
-
         for batch_file in batch_files.iter() {
             info!("Reading batch file: {}", batch_file);
             for s in read_lines(batch_file)? {
@@ -191,9 +325,8 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         let mut col_start = 0usize;
 
         for (file_idx, &ncols) in column_counts.iter().enumerate() {
-            let data_file = args.data_files[file_idx].clone();
+            let data_file = data_files[file_idx].clone();
             let (_dir, file_base, _ext) = common_io::dir_base_ext(&data_file)?;
-
             let col_end = col_start + ncols;
             let file_columns = &column_names[col_start..col_end];
 
@@ -219,19 +352,119 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
             col_start = col_end;
         }
     }
+    Ok(batch_membership)
+}
 
-    if batch_membership.len() != data_vec.num_columns() {
-        return Err(anyhow::anyhow!(
-            "# batch membership {} != # of columns {}",
-            batch_membership.len(),
-            data_vec.num_columns()
-        ));
+/// Union-mode batch resolution. A cell can be in multiple backends, so
+/// per-file batch labels don't compose: a barcode shared across two
+/// files cannot have two batch labels. Rules:
+///
+/// - `batch_files`: must have exactly one file, listing one label per
+///   unified cell in `data_vec.column_names()` order.
+/// - Embedded `@batch` tag in raw column names (no `@<basename>`
+///   suffix is added under Union): each backend independently infers
+///   tags; conflicts (same barcode, different tag in two backends)
+///   are an error.
+/// - Fallback: constant `"all"` for cells whose backends don't agree
+///   on an embedded tag. (File-name fallback from the Disjoint path
+///   doesn't apply — a cell can come from many files.)
+fn resolve_batch_union(
+    data_files: &[Box<str>],
+    data_vec: &SparseIoVec,
+    batch_files: Option<&[Box<str>]>,
+    n_cells: usize,
+) -> anyhow::Result<Vec<Box<str>>> {
+    if let Some(batch_files) = batch_files {
+        if batch_files.len() != 1 {
+            return Err(anyhow::anyhow!(
+                "Under ColumnAlignment::Union, --batch-files must have exactly one \
+                 file listing one label per unified cell (got {} files for {} \
+                 unified cells). A cell shared across modalities cannot carry two \
+                 batch labels.",
+                batch_files.len(),
+                n_cells
+            ));
+        }
+        info!("Reading unified batch file: {}", batch_files[0]);
+        let labels: Vec<Box<str>> = read_lines(&batch_files[0])?;
+        if labels.len() != n_cells {
+            return Err(anyhow::anyhow!(
+                "Unified batch file {} has {} lines but data has {} unified cells",
+                batch_files[0],
+                labels.len(),
+                n_cells
+            ));
+        }
+        return Ok(labels);
     }
 
-    Ok(SparseDataWithBatch {
-        data: data_vec,
-        batch: batch_membership,
-    })
+    // No batch_files: try embedded @batch tags per backend, then
+    // reconcile across backends (a barcode that appears in two files
+    // must agree on its tag).
+    let unified_names = data_vec.column_names()?;
+    let name_to_global: FxHashMap<Box<str>, usize> = unified_names
+        .iter()
+        .enumerate()
+        .map(|(g, n)| (n.clone(), g))
+        .collect();
+    let mut tags: Vec<Option<Box<str>>> = vec![None; n_cells];
+    let mut any_embedded = false;
+    let n_backends = data_vec.len();
+    for didx in 0..n_backends {
+        let raw_names = data_vec[didx].column_names()?;
+        let (_dir, file_base, _ext) = common_io::dir_base_ext(&data_files[didx])?;
+        // Union mode never appends `@<basename>`, so pass `None` for
+        // the suffix arg — `infer_batch_from_columns` returns the raw
+        // embedded tags or the file-name fallback (which we discard).
+        let (per_cell_tags, used_embedded) =
+            infer_batch_from_columns(&raw_names, file_base.as_ref(), None);
+        if !used_embedded {
+            continue;
+        }
+        any_embedded = true;
+        info!(
+            "File {} ('{}'): using embedded @batch tag (Union mode, per-barcode merge)",
+            didx, file_base
+        );
+        for (raw, label) in raw_names.iter().zip(per_cell_tags.into_iter()) {
+            let glob = *name_to_global.get(raw).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "barcode `{}` from backend {} not found in unified cell index — \
+                     this indicates a bug in SparseIoVec::push under Union mode",
+                    raw,
+                    didx,
+                )
+            })?;
+            match tags[glob].as_ref() {
+                None => tags[glob] = Some(label),
+                Some(existing) if existing.as_ref() == label.as_ref() => {}
+                Some(existing) => {
+                    return Err(anyhow::anyhow!(
+                        "Union batch conflict for barcode `{}`: backend {} says `{}`, \
+                         earlier backend said `{}`. Either fix the embedded @batch \
+                         tags so they agree across modalities, or pass a single \
+                         --batch-files file listing one label per unified cell.",
+                        raw,
+                        didx,
+                        label,
+                        existing,
+                    ));
+                }
+            }
+        }
+    }
+
+    if !any_embedded {
+        info!(
+            "No --batch-files and no embedded @batch tags — falling back to single \
+             batch 'all' (Union mode: per-file batch fallback is ambiguous)."
+        );
+    }
+    let all_box: Box<str> = "all".to_string().into_boxed_str();
+    Ok(tags
+        .into_iter()
+        .map(|t| t.unwrap_or_else(|| all_box.clone()))
+        .collect())
 }
 
 /// Infer per-cell batch labels for one file's column names.

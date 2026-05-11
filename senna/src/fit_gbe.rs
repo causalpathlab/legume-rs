@@ -267,6 +267,26 @@ pub struct GbeArgs {
     #[arg(
         long,
         default_value_t = false,
+        help = "Treat input files as modalities of the same cells, glued by raw barcode.",
+        long_help = "Patchy multi-modal (multiome) load. Each file keeps its own \
+                     feature space (no cross-file barcode suffixing); cells are \
+                     unioned across files by raw barcode — a cell observed only in \
+                     RNA contributes triplets just to the RNA row block, ATAC-only \
+                     cells just to the ATAC block, and shared cells get both. \
+                     Disables `@<basename>` suffixing on cell names. Maps to \
+                     `ColumnAlignment::Union` in the loader.\n\
+                     \n\
+                     With --multiome, batch resolution is constrained: a single \
+                     --batch-files file is allowed (one label per unified cell), or \
+                     embedded `@batch` tags that agree across modalities. The \
+                     default `@<filename>` fallback is disabled — a cell can come \
+                     from multiple files and cannot carry two labels."
+    )]
+    multiome: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
         help = "Always recompute NB-Fisher weights and overwrite the cache. By \
                 default `{out}.fisher_weights.parquet` is loaded if it exists \
                 with matching gene names, otherwise computed and written."
@@ -301,11 +321,21 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
             delim: args.feature_name_delim,
         }
     };
+
+    let (effective_multiome, effective_hvg_n, effective_hvg_list) =
+        crate::hvg::resolve_multiome_with_hvg(args.multiome, args.data_files.len(), &args.hvg);
+    let column_alignment = if effective_multiome {
+        data_beans::sparse_io_vector::ColumnAlignment::Union
+    } else {
+        data_beans::sparse_io_vector::ColumnAlignment::Disjoint
+    };
+
     let mut unified = ge::load_unified_data(
         &args.data_files,
         args.batch_files.as_deref(),
         feature_kind,
         args.preload_data,
+        column_alignment,
     )?;
 
     // HVG → projection weights (no longer subsets the feature axis).
@@ -313,12 +343,12 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
     // random projection / pb sketching only; collapse + supergene
     // coarsening + training read all genes. Caller passes the weights
     // through `FitConfig.hvg_weights`.
-    let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
+    let hvg_enabled = effective_hvg_n > 0 || effective_hvg_list.is_some();
     let hvg_weights: Option<Vec<f32>> = if hvg_enabled {
         let hvg = select_hvg_streaming(
             &unified.per_file_data[0],
-            (args.hvg.n_hvg > 0).then_some(args.hvg.n_hvg),
-            args.hvg.feature_list_file.as_deref(),
+            (effective_hvg_n > 0).then_some(effective_hvg_n),
+            effective_hvg_list,
             args.block_size,
         )?;
         Some(hvg.row_weights(unified.n_features()))

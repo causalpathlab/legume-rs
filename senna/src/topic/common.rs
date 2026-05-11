@@ -213,10 +213,15 @@ pub struct LoadProjectArgs<'a> {
     /// the model to features covered by a feature network / curated list.
     pub feature_mask_fn: Option<&'a FeatureMaskFn>,
     /// Row-alignment strategy when multiple `data_files` are passed.
-    /// Default Intersect (single-modality cohorts); switch to Union for
-    /// multi-modal load (e.g. paired RNA + ATAC backends with disjoint
-    /// feature axes glued by cells).
+    /// Default Union — keep every row from any backend (single-
+    /// modality cohorts unchanged because all backends share the same
+    /// row set). Switch to Intersect for strict "common rows only".
     pub row_alignment: data_beans::sparse_io_vector::RowAlignment,
+    /// Cell-axis alignment strategy. Default Disjoint preserves the
+    /// historical concatenate-cells-with-`@<basename>` semantics.
+    /// Set to Union to glue cells across files by raw barcode — the
+    /// `senna itopic --multiome` path.
+    pub column_alignment: data_beans::sparse_io_vector::ColumnAlignment,
     /// Per-name canonicalization rule applied to row names across
     /// backends. Default Exact = strict string match. Gene picks the
     /// last token after a delimiter so `ENSG000_TGFB1` and `TGFB1`
@@ -246,6 +251,7 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         batch_files: args.batch_files.clone(),
         preload: args.preload,
         row_alignment: args.row_alignment,
+        column_alignment: args.column_alignment,
         feature_kind: args.feature_kind.clone(),
     })?;
     if args.ignore_batch {
@@ -364,6 +370,8 @@ pub struct LoadCollapseArgs<'a> {
     pub feature_mask_fn: Option<&'a FeatureMaskFn>,
     /// Row-alignment strategy — see [`LoadProjectArgs::row_alignment`].
     pub row_alignment: data_beans::sparse_io_vector::RowAlignment,
+    /// Column-alignment strategy — see [`LoadProjectArgs::column_alignment`].
+    pub column_alignment: data_beans::sparse_io_vector::ColumnAlignment,
     /// Per-name canonicalization — see [`LoadProjectArgs::feature_kind`].
     pub feature_kind: Option<auxiliary_data::feature_names::FeatureNameKind>,
 }
@@ -391,6 +399,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         ignore_batch: args.ignore_batch,
         feature_mask_fn: args.feature_mask_fn,
         row_alignment: args.row_alignment,
+        column_alignment: args.column_alignment,
         feature_kind: args.feature_kind.clone(),
     })?;
 
