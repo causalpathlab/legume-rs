@@ -58,7 +58,7 @@ pub struct TopicArgs {
                      {out}.delta.parquet            per-batch effects (if --batch-files)\n  \
                      {out}.log_likelihood.parquet   training loss trace\n  \
                      {out}.safetensors              encoder+decoder weights\n  \
-                     {out}.metadata.json            model metadata (for `senna eval-topic`)\n  \
+                     {out}.model.json               model metadata (for `senna eval-topic`)\n  \
                      {out}.dispersion.parquet       NB dispersion (nb / nbmixture)\n  \
                      {out}.alpha.parquet            ambient gene profile (nbmixture)\n  \
                      {out}.rho.parquet              ρ sigmoid coefficients (nbmixture)\n  \

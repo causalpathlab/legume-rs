@@ -159,7 +159,7 @@ enum Commands {
                       VAE via SGD, (3) per-cell topic inference. Decoders: multinomial,\n\
                       negative-binomial, vMF (combine via comma-separated --decoder).\n\n\
                       Writes {out}.{latent,dictionary}.parquet, {out}.safetensors,\n\
-                      {out}.metadata.json, {out}.senna.json (run manifest)."
+                      {out}.model.json, {out}.senna.json (run manifest)."
     )]
     Topic(TopicArgs),
 
@@ -177,7 +177,7 @@ enum Commands {
                       between encoder and decoder follows Dieng et al. (2020, ETM).\n\n\
                       Writes the same artifacts as `topic`, plus\n\
                       `{out}.feature_embedding.parquet` (ρ at full gene resolution).",
-        visible_alias = "itopic"
+        visible_aliases = ["itopic", "etm"]
     )]
     IndexedTopic(IndexedTopicArgs),
 
@@ -232,7 +232,7 @@ enum Commands {
     #[command(
         about = "Apply a trained topic / indexed-topic model to held-out data.",
         long_about = "Latent inference + per-cell predictive log-likelihood on a separate\n\
-                      backend file. Auto-dispatches dense vs indexed via metadata.json.\n\
+                      backend file. Auto-dispatches dense vs indexed via model.json.\n\
                       Handles gene-set misalignment via flexible name matching and\n\
                       re-estimates per-batch delta from the frozen dictionary.\n\n\
                       Latent modes: encoder-only (default), encoder+refine, decoder-only."
