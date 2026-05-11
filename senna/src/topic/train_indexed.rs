@@ -5,6 +5,7 @@ use crate::logging::new_progress_bar;
 
 use candle_core::{Device, Tensor};
 use candle_nn::AdamW;
+use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
 use candle_util::candle_encoder_indexed::IndexedEmbeddingEncoder;
 use candle_util::candle_indexed_data_loader::*;
 use candle_util::candle_indexed_model_traits::*;
@@ -45,11 +46,27 @@ pub(crate) struct IndexedTrainConfig<'a> {
 }
 
 impl IndexedTrainConfig<'_> {
+    /// Anchor-prior CE penalty for the ETM-factorized indexed decoder. The
+    /// full `[K, D]` logits don't live as a single Var — they're
+    /// `α · ρᵀ` — so the caller passes the decoder and we materialize the
+    /// logits once per minibatch.
     #[inline]
-    fn add_anchor_penalty(&self, loss: Tensor, level: usize) -> anyhow::Result<Tensor> {
-        crate::topic::anchor_prior::anchor_penalty_at_level(
+    fn add_anchor_penalty(
+        &self,
+        loss: Tensor,
+        decoder: &EmbeddedTopicDecoder,
+        level: usize,
+    ) -> anyhow::Result<Tensor> {
+        // Skip `full_logits_kd()` ([K, H]·[H, D] matmul on the AD tape)
+        // when there's no penalty to apply. `anchor_penalty_at_level_with_logits`
+        // re-checks defensively, but this guard is the load-bearing one.
+        if self.anchor_prior_per_level.is_none() || self.anchor_penalty <= 0.0 {
+            return Ok(loss);
+        }
+        let logits_kd = decoder.full_logits_kd()?;
+        crate::topic::anchor_prior::anchor_penalty_at_level_with_logits(
             loss,
-            self.parameters,
+            &logits_kd,
             self.anchor_prior_per_level,
             self.anchor_penalty,
             level,
@@ -124,16 +141,13 @@ fn shuffle_and_precompute(
     loader.precompute_all_minibatches(dev)
 }
 
-pub(crate) fn train_mixed<Dec>(
+pub(crate) fn train_mixed(
     collapsed_levels: &[CollapsedOut],
     encoder: &IndexedEmbeddingEncoder,
-    decoders: &[Dec],
+    decoders: &[EmbeddedTopicDecoder],
     config: &IndexedTrainConfig,
     bulk_with_deltas: Option<(&Mat, &[GammaMatrix])>,
-) -> anyhow::Result<TrainScores>
-where
-    Dec: IndexedDecoderT,
-{
+) -> anyhow::Result<TrainScores> {
     let num_levels = collapsed_levels.len();
     let total_epochs = config.epochs;
 
@@ -222,7 +236,7 @@ where
                     &mb.output_log_q_s,
                 )?;
                 let loss = (&kl - &llik)?.mean_all()?;
-                let loss = config.add_anchor_penalty(loss, level)?;
+                let loss = config.add_anchor_penalty(loss, decoder, level)?;
 
                 clip_grads_and_step(&mut adam, &loss, f64::from(config.grad_clip))?;
 
@@ -260,7 +274,7 @@ where
                     &mb.output_log_q_s,
                 )?;
                 let loss = (&kl - &llik)?.mean_all()?;
-                let loss = config.add_anchor_penalty(loss, finest_idx)?;
+                let loss = config.add_anchor_penalty(loss, finest_decoder, finest_idx)?;
                 clip_grads_and_step(&mut adam, &loss, f64::from(config.grad_clip))?;
 
                 llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
@@ -401,21 +415,58 @@ where
     Ok(())
 }
 
+/// Pull `tensor` to host and write it to `{out_prefix}.{suffix}.parquet`,
+/// labelling its last-dim columns with `{col_prefix}0..H` and rows with
+/// `row_names` under the column name `row_axis`.
+fn write_tensor_parquet(
+    tensor: &Tensor,
+    out_prefix: &str,
+    suffix: &str,
+    row_names: &[Box<str>],
+    row_axis: &str,
+    col_prefix: &str,
+) -> anyhow::Result<()> {
+    let host = tensor.to_device(&candle_core::Device::Cpu)?;
+    let n_cols = host.dims().last().copied().unwrap_or(0);
+    host.to_parquet_with_names(
+        &format!("{out_prefix}.{suffix}"),
+        (Some(row_names), Some(row_axis)),
+        Some(&axis_id_names(col_prefix, n_cols)),
+    )?;
+    Ok(())
+}
+
 /// Write dictionary at full resolution (no coarsening for indexed model).
 pub(crate) fn write_indexed_dictionary<Dec: IndexedDecoderT>(
     decoder: &Dec,
     gene_names: &[Box<str>],
     out_prefix: &str,
 ) -> anyhow::Result<()> {
-    let dict_tensor = decoder
-        .get_dictionary()?
-        .to_device(&candle_core::Device::Cpu)?;
+    write_tensor_parquet(
+        &decoder.get_dictionary()?,
+        out_prefix,
+        "dictionary.parquet",
+        gene_names,
+        "gene",
+        "T",
+    )
+}
 
-    let k_topics = dict_tensor.dims().last().copied().unwrap_or(0);
-    dict_tensor.to_parquet_with_names(
-        &(out_prefix.to_string() + ".dictionary.parquet"),
-        (Some(gene_names), Some("gene")),
-        Some(&axis_id_names("T", k_topics)),
-    )?;
-    Ok(())
+/// Write the learned per-gene feature embedding ρ `[D, H]` as a parquet.
+/// In the ETM factorization this is shared between encoder and decoder, so
+/// it's the model's gene-level representation — directly usable for gene-gene
+/// similarity, clustering into programs, or initializing downstream models.
+pub(crate) fn write_feature_embedding(
+    feature_embeddings: &Tensor,
+    gene_names: &[Box<str>],
+    out_prefix: &str,
+) -> anyhow::Result<()> {
+    write_tensor_parquet(
+        feature_embeddings,
+        out_prefix,
+        "feature_embedding.parquet",
+        gene_names,
+        "gene",
+        "H",
+    )
 }

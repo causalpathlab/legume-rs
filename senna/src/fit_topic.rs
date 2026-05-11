@@ -640,6 +640,7 @@ fn write_topic_manifest(
         pb_gene_suffix: Some("pb_gene.parquet"),
         pb_latent_suffix: Some("pb_latent.parquet"),
         dictionary_empirical_suffix: Some("dictionary_empirical.parquet"),
+        feature_embedding_suffix: None,
         default_colour_by: "cluster",
     })
 }
