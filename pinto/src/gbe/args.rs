@@ -76,7 +76,12 @@ pub struct SrtGbeArgs {
     #[command(flatten)]
     pub hvg: HvgCliArgs,
 
-    #[arg(long, default_value_t = 64, help = "Embedding dimension H")]
+    #[arg(
+        short = 'e',
+        long,
+        default_value_t = 16,
+        help = "Embedding dimension H"
+    )]
     pub embedding_dim: usize,
 
     #[arg(long, default_value_t = 8, help = "Number of coarsening seeds")]
@@ -151,7 +156,7 @@ pub struct SrtGbeArgs {
     #[arg(long, default_value_t = 1024, help = "Positive edges per batch")]
     pub batch_size: usize,
 
-    #[arg(long, default_value_t = 16, help = "Negative samples per positive")]
+    #[arg(long, default_value_t = 4, help = "Negative samples per positive")]
     pub num_negatives: usize,
 
     #[arg(
@@ -242,9 +247,87 @@ pub struct SrtGbeArgs {
     )]
     pub cell_cell_negatives: usize,
 
+    #[arg(
+        long,
+        default_value = "all",
+        help = "Pseudobulk levels to chain the cell-cell loss over. \
+                `all` (default) uses every level produced by the multilevel \
+                collapse; a comma list like `0,2,4` picks specific levels \
+                (0 = coarsest, last = finest). Positives are restricted to \
+                spatial edges whose endpoints share pb at every selected \
+                level; per-level negatives are siblings under the same pb \
+                parent, giving the cell embedding a multi-resolution \
+                classification signal. To disable the cell-cell term \
+                entirely, pass `--cell-cell-lambda 0`."
+    )]
+    pub cell_cell_pb_levels: String,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Per-level λ for the cell-cell chain (comma list, same length \
+                as `--cell-cell-pb-levels` once resolved). Default = uniform \
+                1.0 per level. The outer `--cell-cell-lambda` still scales \
+                the whole cell-cell term."
+    )]
+    pub cell_cell_lambda_per_level: Option<Vec<f32>>,
+
     #[arg(long, default_value_t = GbeDevice::Cpu, value_enum, help = "Compute device")]
     pub device: GbeDevice,
 
     #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
     pub device_no: usize,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Run downstream clustering on the latent after fit. \
+                Omit to skip. Writes {out}.clusters.parquet."
+    )]
+    pub cluster: Option<ClusterMethodArg>,
+
+    #[arg(
+        long,
+        default_value_t = 15,
+        help = "k for Leiden kNN graph on the latent"
+    )]
+    pub cluster_knn: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Leiden modularity resolution (higher = more clusters)"
+    )]
+    pub cluster_resolution: f64,
+
+    #[arg(
+        long,
+        help = "Target cluster count: when set with --cluster leiden, the \
+                resolution is auto-tuned to approximate this k; when set \
+                with --cluster kmeans, this is the exact k."
+    )]
+    pub num_clusters: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Max k-means iterations (--cluster kmeans only)"
+    )]
+    pub kmeans_max_iter: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum ClusterMethodArg {
+    Leiden,
+    Kmeans,
+}
+
+impl ClusterMethodArg {
+    pub fn to_method(self) -> crate::gbe::cluster::ClusterMethod {
+        match self {
+            ClusterMethodArg::Leiden => crate::gbe::cluster::ClusterMethod::Leiden,
+            ClusterMethodArg::Kmeans => crate::gbe::cluster::ClusterMethod::Kmeans,
+        }
+    }
 }

@@ -12,8 +12,8 @@ use crate::loss::{
 use crate::model::{JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
 use crate::stop::setup_stop_handler;
 use crate::training::{
-    train_composite, AxisSampler, CellCellTraining, CompositeAxis, CompositeMode,
-    CompositeTrainContext, TrainingParams,
+    train_composite, AxisSampler, CellCellPbChainTraining, CellCellTraining, CompositeAxis,
+    CompositeMode, CompositeTrainContext, TrainingParams,
 };
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
@@ -122,15 +122,32 @@ pub struct FitConfig {
 }
 
 /// Cell-cell NCE configuration. Positives = neighbor pairs from a
-/// caller-provided graph; negatives = within-batch random non-neighbors.
+/// caller-provided graph, gated by pb co-membership at every chain
+/// level; per-chain-position sibling negatives drive the loss across
+/// pb-tree resolutions. Set `lambda = 0` to disable the cell-cell
+/// term entirely.
 pub struct CellCellConfig {
     /// Positive cell pairs as global cell ids (canonical (i, j) with i < j).
     pub edges: Vec<(u32, u32)>,
-    /// Loss mixing weight λ. 0.0 → bipartite-only (term skipped);
-    /// 1.0 → equal weight with the bipartite loss; > 1 emphasizes cell-cell.
+    /// Loss mixing weight λ. 0.0 → cell-cell term skipped; 1.0 → equal
+    /// weight with the bipartite loss; > 1 emphasizes cell-cell.
     pub lambda: f32,
     /// Negative cells per positive pair.
     pub n_negatives: usize,
+    /// Which collapse levels to chain over. `None` = every level
+    /// produced by the multilevel collapse inside [`fit`]. Indices
+    /// refer to the coarsest-first `cell_to_pb_per_level`, so `0` =
+    /// coarsest, `last` = finest. Out-of-range entries are dropped
+    /// with a warning. Levels whose pb count is close to `n_cells`
+    /// (per-cell partitions, no useful classification signal) are
+    /// auto-pruned by [`resolve_pb_chain`].
+    pub pb_levels: Option<Vec<usize>>,
+    /// Per-level λ; same length as the resolved `pb_levels`. `None` =
+    /// uniform 1.0. User-supplied values pass through as-is — they
+    /// are not normalized by the number of levels, so adjust the
+    /// global `CellCellConfig::lambda` accordingly when chaining many
+    /// levels.
+    pub lambda_per_level: Option<Vec<f32>>,
 }
 
 /// Optional SGC feature-network smoother configuration. The graph is
@@ -376,9 +393,21 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     let feat_weights = maybe_cap_features(unified, feat_weights, config.max_features);
 
     // ---- Multilevel collapse → batch-corrected pseudobulks ----
+    //
+    // `sort_dim` controls how many bits of the binary-sketched projection
+    // are used to hash cells into the *finest* super-cell partition (so
+    // `2^sort_dim` is the max number of distinct codes / super-cells at
+    // that level). Previously this was hard-wired to `config.sketch_dim`
+    // (=32 by default) — way too high, every cell ended up alone in its
+    // own super-cell and `--super-cells` was silently ignored. Now we
+    // derive `sort_dim` from the user's target super-cell count so the
+    // flag actually works.
+    let sort_dim_finest = ((config.super_cells.max(2) as f32).log2().ceil() as usize)
+        .max(2)
+        .min(config.sketch_dim.max(2));
     info!(
-        "Multilevel collapse (target {} super-cells, {} levels)...",
-        config.super_cells, config.num_coarsen_seeds
+        "Multilevel collapse (target ~{} super-cells → sort_dim={}, {} levels requested)...",
+        config.super_cells, sort_dim_finest, config.num_coarsen_seeds
     );
     let collapse_out = collapse_columns_multilevel_with_hierarchy(
         &mut unified.per_file_data[0],
@@ -387,7 +416,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         &MultilevelParams {
             knn_super_cells: 10,
             num_levels: config.num_coarsen_seeds.max(1),
-            sort_dim: config.sketch_dim,
+            sort_dim: sort_dim_finest,
             num_opt_iter: 100,
             refine: config.refine.clone(),
         },
@@ -540,8 +569,13 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     }
 
     // Cell-cell loss prep (attaches only to the per-cell axis).
-    let cell_cell_built =
-        build_cell_cell_training(unified, n_cells, alpha_neg, config.cell_cell.take());
+    let cell_cell_built = build_cell_cell_training(
+        unified,
+        n_cells,
+        alpha_neg,
+        config.cell_cell.take(),
+        &cell_to_pb_per_level,
+    );
 
     let mut smoother = build_smoother(config.feature_network.take(), n_features, h)?;
 
@@ -558,6 +592,11 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         edges: &p.edges,
         lambda: p.lambda,
         n_negatives: p.n_negatives,
+        pb_chain: CellCellPbChainTraining {
+            levels: &p.chain.levels,
+            lambdas: &p.chain.lambdas,
+            cell_to_pb_per_level: &cell_to_pb_per_level,
+        },
     });
 
     let mut axes: Vec<CompositeAxis> = Vec::with_capacity(num_levels + 1);
@@ -615,6 +654,15 @@ struct CellCellPrepared {
     edges: Vec<(u32, u32)>,
     lambda: f32,
     n_negatives: usize,
+    chain: CellCellPreparedChain,
+}
+
+struct CellCellPreparedChain {
+    /// Indexes into `cell_to_pb_per_level` (coarsest-first); kept owned
+    /// so [`CellCellTraining`] can hand out `&[usize]`.
+    levels: Vec<usize>,
+    /// Same length as `levels`; user-supplied or uniform 1.0.
+    lambdas: Vec<f32>,
 }
 
 fn build_cell_cell_training(
@@ -622,23 +670,44 @@ fn build_cell_cell_training(
     n_cells: usize,
     alpha_neg: f32,
     cell_cell: Option<CellCellConfig>,
+    cell_to_pb_per_level: &[Vec<usize>],
 ) -> Option<CellCellPrepared> {
     let cc = match cell_cell {
         Some(cc) if cc.lambda > 0.0 && !cc.edges.is_empty() => cc,
         _ => return None,
     };
-    let (samplers, cross_batch) = build_per_batch_cell_samplers(
+
+    let chain = resolve_pb_chain(
+        cc.pb_levels.as_deref(),
+        cc.lambda_per_level.as_deref(),
+        cell_to_pb_per_level,
+        n_cells,
+    );
+
+    let pb_filter = crate::loss::PbChainFilter {
+        cell_to_pb_per_level,
+        levels: &chain.levels,
+    };
+
+    let (samplers, stats) = build_per_batch_cell_samplers(
         &cc.edges,
         &unified.batch_membership,
         unified.n_batches(),
         n_cells,
         alpha_neg,
+        Some(pb_filter),
     );
     let n_active = samplers.iter().filter(|s| s.is_some()).count();
-    if cross_batch > 0 {
+    if stats.cross_batch_dropped > 0 {
         info!(
             "Cell-cell loss: dropped {} cross-batch edges; {} batch(es) have within-batch edges",
-            cross_batch, n_active
+            stats.cross_batch_dropped, n_active
+        );
+    }
+    if stats.pb_mismatch_dropped > 0 {
+        info!(
+            "Cell-cell loss: dropped {} edges whose endpoints disagree on pb at one of the chain levels",
+            stats.pb_mismatch_dropped
         );
     }
     if n_active == 0 {
@@ -650,19 +719,112 @@ fn build_cell_cell_training(
         return None;
     }
     info!(
-        "Cell-cell loss enabled: λ={}, K={}, {} active batch(es), {} edges total",
+        "Cell-cell chain enabled: λ={}, K={}, levels={:?}, λ_per_level={:?}, {} active batch(es), {} edges total",
         cc.lambda,
         cc.n_negatives,
+        chain.levels,
+        chain.lambdas,
         n_active,
-        cc.edges.len()
+        cc.edges.len(),
     );
     Some(CellCellPrepared {
         samplers,
         edges: cc.edges,
         lambda: cc.lambda,
         n_negatives: cc.n_negatives,
+        chain,
     })
 }
+
+/// Resolve caller-facing `(pb_levels, lambda_per_level)` into owned
+/// `CellCellPreparedChain`. `pb_levels: None` expands to every
+/// available level (coarsest-first, matching `cell_to_pb_per_level`).
+/// Out-of-range indices are dropped with a warning.
+///
+/// Levels that are effectively per-cell partitions (pb count >
+/// `DEGENERATE_PB_RATIO * n_cells`) are also dropped — at those levels
+/// `pb(u) == pb(v)` implies `u == v`, so requiring positives to share
+/// pb wipes out the entire edge set and yields no useful signal.
+fn resolve_pb_chain(
+    user_levels: Option<&[usize]>,
+    user_lambdas: Option<&[f32]>,
+    cell_to_pb_per_level: &[Vec<usize>],
+    n_cells: usize,
+) -> CellCellPreparedChain {
+    let n_levels = cell_to_pb_per_level.len();
+    let raw_levels: Vec<usize> = match user_levels {
+        Some(ls) => ls.to_vec(),
+        None => (0..n_levels).collect(),
+    };
+
+    let mut levels: Vec<usize> = Vec::with_capacity(raw_levels.len());
+    let mut keep_mask: Vec<bool> = Vec::with_capacity(raw_levels.len());
+    let mut out_of_range: Vec<usize> = Vec::new();
+    let mut degenerate: Vec<(usize, usize)> = Vec::new();
+
+    for l in raw_levels {
+        if l >= n_levels {
+            out_of_range.push(l);
+            keep_mask.push(false);
+            continue;
+        }
+        let n_pbs = pb_count(&cell_to_pb_per_level[l]);
+        if (n_pbs as f32) > DEGENERATE_PB_RATIO * (n_cells.max(1) as f32) {
+            degenerate.push((l, n_pbs));
+            keep_mask.push(false);
+            continue;
+        }
+        levels.push(l);
+        keep_mask.push(true);
+    }
+    if !out_of_range.is_empty() {
+        warn!(
+            "Cell-cell chain: dropping out-of-range pb-level indices {:?} (have {} levels)",
+            out_of_range, n_levels
+        );
+    }
+    if !degenerate.is_empty() {
+        warn!(
+            "Cell-cell chain: dropping degenerate pb levels (pb count > {:.0}% of {} cells, \
+             so pb membership ≈ identity): {:?}. Lower --super-cells to produce chunkier pb's, \
+             or pick specific coarser levels via --cell-cell-pb-levels.",
+            DEGENERATE_PB_RATIO * 100.0,
+            n_cells,
+            degenerate
+        );
+    }
+
+    let lambdas: Vec<f32> = match user_lambdas {
+        Some(ls) if ls.len() == keep_mask.len() => ls
+            .iter()
+            .zip(keep_mask.iter())
+            .filter_map(|(&l, &k)| k.then_some(l))
+            .collect(),
+        Some(ls) => {
+            warn!(
+                "Cell-cell chain: lambda_per_level length {} doesn't match input levels {} — using uniform 1.0",
+                ls.len(),
+                keep_mask.len()
+            );
+            vec![1.0; levels.len()]
+        }
+        None => vec![1.0; levels.len()],
+    };
+    CellCellPreparedChain { levels, lambdas }
+}
+
+/// Distinct pb count in a compacted `cell_to_pb` map. The multilevel
+/// collapse runs `compact_labels` so ids are dense `0..k`; we still
+/// take the `max + 1` rather than trust the contract.
+fn pb_count(cell_to_pb: &[usize]) -> usize {
+    cell_to_pb.iter().copied().max().map(|m| m + 1).unwrap_or(0)
+}
+
+/// Threshold above which a pb level is treated as a per-cell partition
+/// and pruned from the chain. `n_pbs / n_cells > 0.5` means avg pb size
+/// < 2 — even if a few edges survive the pb-mismatch filter at that
+/// level, the loss carries near-zero training signal.
+const DEGENERATE_PB_RATIO: f32 = 0.5;
 
 /// Build the stratified per-batch cell samplers and filter out empty
 /// batches. Mirrors the previous `build_active_samplers` (flat) but
