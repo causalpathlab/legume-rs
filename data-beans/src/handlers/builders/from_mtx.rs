@@ -1,9 +1,7 @@
 use super::{log_feature_type_histogram, run_squeeze_if_needed};
 use crate::hdf5_io::*;
 use crate::sparse_io::*;
-use crate::utilities::name_matching::{
-    make_names_unique, RowTypeFilter,
-};
+use crate::utilities::name_matching::{make_names_unique, RowTypeFilter};
 use data_beans::zarr_io::*;
 
 use clap::Args;
