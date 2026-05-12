@@ -611,6 +611,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let gene_names = data_vec.row_names()?;
 
     // Indexed decoders run at D_full, so no finest-level coarsening.
+    info!("Building anchor prior (K={n_topics}) from pseudobulks");
     let anchor_prior =
         crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(finest_collapsed, n_topics, None)?;
 
