@@ -5,6 +5,7 @@
 
 use super::fit_layout_common::{
     finalize_viz, preprocess_layout_data, random_init_2d, resolve_inputs, LayoutCommonArgs,
+    LayoutPrep,
 };
 use super::viz_prep::apply_svd_preprocessing;
 use crate::embed_common::*;
@@ -45,7 +46,15 @@ pub struct LayoutTsneArgs {
 
 pub fn fit_layout_tsne(args: &LayoutTsneArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
-    let prep = preprocess_layout_data(&args.common, &resolved)?;
+    // t-SNE here is PB-level (PB-PB similarity → 2D); DirectCells
+    // manifests (RunKind::Gbe) have no PB scaffolding so we redirect.
+    let LayoutPrep::PbThenNystrom(prep) = preprocess_layout_data(&args.common, &resolved)? else {
+        anyhow::bail!(
+            "`senna layout tsne` does not support DirectCells manifests \
+             (e.g. RunKind::Gbe). Use `senna layout umap --from <manifest>` instead — \
+             UMAP runs cell-level directly on the GBE embedding."
+        );
+    };
 
     // HVG selection: keep top N genes by residual variance (mean-variance corrected)
     let features = if args.n_hvg > 0 && args.n_hvg < prep.pb_features.ncols() {
