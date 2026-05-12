@@ -89,8 +89,11 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
             );
         }
         let cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, graph);
+        // Named `coord_pairs.parquet` to match what `pinto plot` /
+        // `pinto lc` expect — same schema, same file, single source of
+        // truth across pinto subcommands.
         cell_pairs.to_parquet(
-            &format!("{}.spatial_knn.parquet", c.out),
+            &format!("{}.coord_pairs.parquet", c.out),
             Some(coordinate_names.clone()),
         )?;
     } else {
@@ -133,6 +136,8 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
         edges,
         lambda: args.cell_cell_lambda,
         n_negatives: args.cell_cell_negatives,
+        pb_levels: parse_pb_levels(&args.cell_cell_pb_levels),
+        lambda_per_level: args.cell_cell_lambda_per_level.clone(),
     });
 
     let refine = if args.no_refine {
@@ -185,15 +190,89 @@ pub fn fit_srt_gbe(args: &SrtGbeArgs) -> anyhow::Result<()> {
         &c.out,
     )?;
 
+    let cluster_labels: Option<Vec<usize>> = match args.cluster {
+        Some(_) => Some(run_post_fit_clustering(
+            args,
+            &out.model,
+            &unified.barcodes,
+        )?),
+        None => None,
+    };
+
     info!(
-        "Done — outputs at {}.{{latent,dictionary,*_bias}}.parquet{}",
+        "Done — outputs at {}.{{latent,dictionary,*_bias}}.parquet{}{}",
         c.out,
         if has_coords {
-            ", plus .spatial_knn.parquet"
+            ", plus .coord_pairs.parquet"
+        } else {
+            ""
+        },
+        if cluster_labels.is_some() {
+            ", plus .clusters.parquet"
         } else {
             ""
         }
     );
 
     Ok(())
+}
+
+/// Run leiden / kmeans on the fitted cell embedding and write
+/// `{out}.clusters.parquet`. Returns the label vector for downstream
+/// use (e.g. the spatial scatter plot).
+fn run_post_fit_clustering(
+    args: &SrtGbeArgs,
+    model: &ge::JointEmbedModel,
+    barcodes: &[Box<str>],
+) -> anyhow::Result<Vec<usize>> {
+    let method = args
+        .cluster
+        .expect("caller guarded on args.cluster.is_some()")
+        .to_method();
+    let latent = Mat::from_tensor(&model.e_cell)?;
+    let labels = match method {
+        crate::gbe::cluster::ClusterMethod::Leiden => crate::gbe::cluster::leiden_clusters(
+            &latent,
+            &crate::gbe::cluster::LeidenParams {
+                knn: args.cluster_knn,
+                resolution: args.cluster_resolution,
+                target_clusters: args.num_clusters,
+                seed: Some(args.common.seed),
+            },
+        )?,
+        crate::gbe::cluster::ClusterMethod::Kmeans => {
+            let k = args.num_clusters.unwrap_or_else(|| {
+                let default_k = model.e_cell.dim(1).unwrap_or(8);
+                info!("K-means: --num-clusters not set, defaulting to embedding dim ({default_k})");
+                default_k
+            });
+            crate::gbe::cluster::kmeans_clusters(&latent, k, args.kmeans_max_iter)?
+        }
+    };
+    let out_path = format!("{}.clusters.parquet", args.common.out);
+    crate::gbe::cluster::write_clusters_parquet(&labels, barcodes, &out_path)?;
+    info!("Wrote cluster assignments → {out_path}");
+    Ok(labels)
+}
+
+/// Translate `--cell-cell-pb-levels` into the optional level list
+/// passed to [`ge::CellCellConfig::pb_levels`]. `all` (or empty) →
+/// `None` (every collapse level); a comma list like `0,2,4` →
+/// `Some(vec![0,2,4])`. Disabling the cell-cell loss entirely is
+/// controlled by `--cell-cell-lambda 0`, not this flag.
+fn parse_pb_levels(levels_arg: &str) -> Option<Vec<usize>> {
+    let trimmed = levels_arg.trim();
+    if trimmed.eq_ignore_ascii_case("all") || trimmed.is_empty() {
+        return None;
+    }
+    Some(
+        trimmed
+            .split(',')
+            .filter_map(|s| {
+                let t = s.trim();
+                (!t.is_empty()).then(|| t.parse::<usize>())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("invalid --cell-cell-pb-levels: expected `all` or a comma list of non-negative integers"),
+    )
 }

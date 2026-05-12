@@ -381,6 +381,8 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
                 edges,
                 lambda: args.cell_cell_lambda,
                 n_negatives: args.cell_cell_negatives,
+                pb_levels: None,
+                lambda_per_level: None,
             })
         })
         .transpose()?;

@@ -18,11 +18,11 @@ use crate::coarsen::AxisCoarsenings;
 use crate::data::UnifiedData;
 use crate::feature_network::FeatureNetworkSmoother;
 use crate::loss::{
-    cell_cell_nce_loss, nce_loss, nce_loss_chain, nce_loss_identity, sample_cell_edge_batch,
-    sample_chain_batch, sample_edge_batch, sample_per_batch_stratified_edge_batch,
-    sample_stratified_edge_batch, CellEdgeBatchArgs, ChainAxis, ChainBatchArgs, ChainSampler,
-    EdgeBatch, EdgeBatchArgs, PerBatchCellSampler, PerBatchSampler, PerBatchStratifiedCellSampler,
-    PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
+    nce_loss, nce_loss_chain, nce_loss_identity, sample_chain_batch, sample_edge_batch,
+    sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, ChainAxis,
+    ChainBatchArgs, ChainSampler, EdgeBatch, EdgeBatchArgs, PerBatchCellSampler, PerBatchSampler,
+    PerBatchStratifiedCellSampler, PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs,
+    StratifiedSampler,
 };
 use crate::model::JointEmbedModel;
 use candle_util::candle_core::{Device, Tensor};
@@ -108,6 +108,22 @@ pub struct CellCellTraining<'a> {
     pub edges: &'a [(u32, u32)],
     pub lambda: f32,
     pub n_negatives: usize,
+    /// Multi-level chain over pseudobulk resolutions: each level scores
+    /// the same `(left, right)` positive pair against per-level sibling
+    /// negatives summed with `lambdas`.
+    pub pb_chain: CellCellPbChainTraining<'a>,
+}
+
+/// Resolved per-step view of the cell-cell chain. Owned slices live in
+/// [`crate::fit::CellCellPrepared`] so this struct only borrows.
+pub struct CellCellPbChainTraining<'a> {
+    /// Resolved level indices into `cell_to_pb_per_level` (coarsest-first).
+    pub levels: &'a [usize],
+    /// Same length as `levels`; per-level mixing weight inside the chain
+    /// sum. Multiplied by the outer cell-cell `lambda` at loss time.
+    pub lambdas: &'a [f32],
+    /// `cell_to_pb_per_level[L][cell] = pb id at level L`, coarsest-first.
+    pub cell_to_pb_per_level: &'a [Vec<usize>],
 }
 
 pub struct TrainingParams {
@@ -386,19 +402,14 @@ fn chain_step(
     // PerBatchCellSampler logic — independent draw, summed in.
     let cc_loss: Option<Tensor> = match cell_axis.cell_cell.as_ref() {
         Some(cc_ctx) => match cc_ctx.samplers[batch_id].as_ref() {
-            Some(cc_sampler) => {
-                let cc_batch = sample_cell_edge_batch(
-                    CellEdgeBatchArgs {
-                        edges: cc_ctx.edges,
-                        batch_sampler: cc_sampler,
-                        batch_size: params.batch_size,
-                        n_negatives: cc_ctx.n_negatives,
-                    },
-                    rng,
-                );
-                let l = cell_cell_nce_loss(cell_axis.model, cc_batch, ctx.dev)?;
-                Some((l * cc_ctx.lambda as f64)?)
-            }
+            Some(cc_sampler) => Some(compute_cell_cell_loss(
+                cell_axis.model,
+                cc_ctx,
+                cc_sampler,
+                params,
+                rng,
+                ctx.dev,
+            )?),
             None => None,
         },
         None => None,
@@ -545,18 +556,40 @@ fn single_axis_step(
 
     if let (Some(cc_ctx), Some(batch_id)) = (axis.cell_cell.as_ref(), batch_id) {
         if let Some(cc_sampler) = cc_ctx.samplers[batch_id].as_ref() {
-            let cc_batch = sample_cell_edge_batch(
-                CellEdgeBatchArgs {
-                    edges: cc_ctx.edges,
-                    batch_sampler: cc_sampler,
-                    batch_size: params.batch_size,
-                    n_negatives: cc_ctx.n_negatives,
-                },
-                rng,
-            );
-            let cc_loss = cell_cell_nce_loss(axis.model, cc_batch, dev)?;
-            axis_loss = (axis_loss + (cc_loss * cc_ctx.lambda as f64)?)?;
+            let cc_loss = compute_cell_cell_loss(axis.model, cc_ctx, cc_sampler, params, rng, dev)?;
+            axis_loss = (axis_loss + cc_loss)?;
         }
     }
     Ok(Some(axis_loss))
+}
+
+/// Cell-cell loss step. Runs the multi-level chain with per-level
+/// sibling negatives and returns the loss already scaled by
+/// `cc_ctx.lambda`.
+fn compute_cell_cell_loss(
+    model: &JointEmbedModel,
+    cc_ctx: &CellCellTraining<'_>,
+    cc_sampler: &PerBatchCellSampler,
+    params: &TrainingParams,
+    rng: &mut StdRng,
+    dev: &Device,
+) -> anyhow::Result<Tensor> {
+    let chain = &cc_ctx.pb_chain;
+    let pb_maps: Vec<&[usize]> = chain
+        .levels
+        .iter()
+        .map(|&l| chain.cell_to_pb_per_level[l].as_slice())
+        .collect();
+    let (batch, _stats) = crate::loss::sample_cell_chain_batch(
+        crate::loss::CellChainBatchArgs {
+            edges: cc_ctx.edges,
+            batch_sampler: cc_sampler,
+            batch_size: params.batch_size,
+            n_negatives: cc_ctx.n_negatives,
+            pb_maps: &pb_maps,
+        },
+        rng,
+    );
+    let raw = crate::loss::cell_cell_nce_loss_chain(model, batch, chain.lambdas, dev)?;
+    Ok((raw * cc_ctx.lambda as f64)?)
 }

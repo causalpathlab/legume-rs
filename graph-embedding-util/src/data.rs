@@ -164,7 +164,7 @@ impl UnifiedData {
             .progress_with(pb_bar.clone())
             .filter_map(|t| {
                 let new_id = old_to_new[t.feature as usize];
-                (new_id >= 0).then(|| Triplet {
+                (new_id >= 0).then_some(Triplet {
                     cell: t.cell,
                     feature: new_id as u32,
                     count: t.count,
