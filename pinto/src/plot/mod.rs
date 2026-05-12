@@ -102,6 +102,18 @@ use render::{
     build_propensity_community_heatmap_layers, emit_figure, ColorBook, Frame,
 };
 
+/// Per-point fill opacity for propensity / marker scatters. Hard-wired
+/// after empirically determining that user-supplied alphas almost
+/// always make the figure worse: lower α washes large datasets out
+/// further, and 1.0 keeps colours saturated where the rasterizer's
+/// per-point antialiasing already gives a soft edge.
+const POINT_ALPHA: f32 = 1.0;
+
+/// Mesh-edge opacity. Kept low so dense kNN graphs don't drown the
+/// underlying community colours; tuned once and frozen rather than
+/// exposed as a flag.
+const MESH_ALPHA: f32 = 0.3;
+
 /// Entry point: auto-discover outputs, partition, emit figures, write
 /// a JSON manifest listing everything produced.
 pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
@@ -350,7 +362,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                         &aligned_propensity,
                         &colors,
                         args.point_shape,
-                        args.alpha,
+                        POINT_ALPHA,
                         args.size_scale,
                     )?;
                     emit_figure(
@@ -376,7 +388,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                             &aligned_propensity,
                             kk,
                             args.heat_bins,
-                            args.alpha,
+                            POINT_ALPHA,
                             args.point_shape,
                             args.size_scale,
                         )?;
@@ -399,13 +411,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     if let Some((edges, community)) = &lc_pair {
                         let core_set: HashSet<usize> = core.cell_ixs.iter().copied().collect();
                         let layers = build_mesh_layers(
-                            &frame,
-                            &cells,
-                            &core_set,
-                            edges,
-                            community,
-                            &colors,
-                            args.mesh_alpha,
+                            &frame, &cells, &core_set, edges, community, &colors, MESH_ALPHA,
                         )?;
                         emit_figure(
                             &layers,
@@ -450,52 +456,49 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                 }
 
                 // Marker genes — final + draft only (intermediate skips per LevelKind).
+                // `continue` here would discard the propensity + mesh files
+                // already pushed into `local_emitted` earlier in this
+                // iteration, so missing-prereq cases use match + skip
+                // instead. The `extend` after this block then runs
+                // unconditionally and never loses figures.
                 if !lra_only && level_kind != LevelKind::Intermediate && args.top_markers > 0 {
-                    let (gt, gene_names) = match &gene_community {
-                        Some(x) => x,
-                        None => {
-                            log::warn!(
-                                "[{}] no gene_community parquet — skipping markers",
-                                level.tag,
-                            );
-                            continue;
+                    match (gene_community.as_ref(), expr_data.as_ref()) {
+                        (None, _) => log::warn!(
+                            "[{}] no gene_community parquet — skipping markers",
+                            level.tag,
+                        ),
+                        (_, None) => log::warn!(
+                            "[{}] --data not supplied — skipping markers \
+                             (pass `--data <expr.h5/.zarr>` to enable)",
+                            level.tag,
+                        ),
+                        (Some((gt, gene_names)), Some(data)) => {
+                            let ccol_ix = cell_col_index
+                                .as_ref()
+                                .expect("cell index built alongside data");
+                            let marker_hulls_by_c: HashMap<
+                                i64,
+                                Vec<plot_utils::svg_emit::TopicLayer>,
+                            > = HashMap::default();
+                            emit_marker_figures(
+                                args,
+                                &frame,
+                                &cells,
+                                core,
+                                &aligned_dominant,
+                                &colors,
+                                gt,
+                                gene_names,
+                                data,
+                                ccol_ix,
+                                &marker_hulls_by_c,
+                                &kept_communities,
+                                &level.tag,
+                                &out_prefix,
+                                &mut local_emitted,
+                            )?;
                         }
-                    };
-                    let data = match &expr_data {
-                        Some(d) => d,
-                        None => {
-                            log::warn!(
-                                "[{}] --data not supplied — skipping markers \
-                                 (pass `--data <expr.h5/.zarr>` to enable)",
-                                level.tag,
-                            );
-                            continue;
-                        }
-                    };
-                    let ccol_ix = cell_col_index
-                        .as_ref()
-                        .expect("cell index built alongside data");
-
-                    let marker_hulls_by_c: HashMap<i64, Vec<plot_utils::svg_emit::TopicLayer>> =
-                        HashMap::default();
-
-                    emit_marker_figures(
-                        args,
-                        &frame,
-                        &cells,
-                        core,
-                        &aligned_dominant,
-                        &colors,
-                        gt,
-                        gene_names,
-                        data,
-                        ccol_ix,
-                        &marker_hulls_by_c,
-                        &kept_communities,
-                        &level.tag,
-                        &out_prefix,
-                        &mut local_emitted,
-                    )?;
+                    }
                 }
 
                 info!("[{}] wrote {} files", level.tag, local_emitted.len());
@@ -954,7 +957,7 @@ fn emit_marker_figures(
             core,
             expr,
             args.heat_bins,
-            args.alpha,
+            POINT_ALPHA,
             args.point_shape,
             args.expr_clip,
         )?;

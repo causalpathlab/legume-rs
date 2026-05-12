@@ -91,9 +91,6 @@ pub struct SrtPlotArgs {
     #[arg(long, default_value_t = 1.6, help = "Base point size (pt)")]
     pub point_size: f32,
 
-    #[arg(long, default_value_t = 1.0, help = "Point alpha (0..=1)")]
-    pub alpha: f32,
-
     #[arg(
         long,
         default_value_t = 3.0,
@@ -110,13 +107,6 @@ pub struct SrtPlotArgs {
     // ─── Mesh plot ────────────────────────────────────────────────────────
     #[arg(long, default_value_t = 0.5, help = "Mesh edge stroke width (pt)")]
     pub mesh_stroke: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0.3,
-        help = "Mesh edge alpha (0..=1; dense graphs → keep low)"
-    )]
-    pub mesh_alpha: f32,
 
     #[arg(long, help = "Skip the mesh (cell-cell edge) plot")]
     pub no_mesh: bool,
