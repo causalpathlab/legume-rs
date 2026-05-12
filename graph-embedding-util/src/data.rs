@@ -186,9 +186,9 @@ impl UnifiedData {
     }
 
     /// Build a `UnifiedData` from a single in-memory `SparseIoVec` plus
-    /// per-cell batch labels. Used by callers (e.g. `pinto gbe`) whose
-    /// own SRT loaders already produced a concatenated `SparseIoVec` and
-    /// shouldn't re-route through [`load_unified_data`].
+    /// per-cell batch labels. Used by callers whose own SRT loaders
+    /// already produced a concatenated `SparseIoVec` and shouldn't
+    /// re-route through [`load_unified_data`].
     pub fn from_sparse_io(data: SparseIoVec, batch_labels: &[Box<str>]) -> anyhow::Result<Self> {
         let feature_names = data.row_names()?;
         let barcodes = data.column_names()?;

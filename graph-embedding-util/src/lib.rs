@@ -7,9 +7,9 @@
 //! drawn within each batch so the model can't earn signal by separating
 //! cells along technical-batch confounders.
 //!
-//! Consumed by the `senna gbe` and `pinto gbe` subcommands. The library
-//! has no clap or run-manifest deps — callers translate their CLI
-//! arguments into [`FitConfig`] and own the output naming.
+//! Consumed by the `senna gbe` subcommand. The library has no clap or
+//! run-manifest deps — callers translate their CLI arguments into
+//! [`FitConfig`] and own the output naming.
 
 #![allow(
     clippy::cast_precision_loss,
