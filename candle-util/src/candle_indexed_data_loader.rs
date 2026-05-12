@@ -154,24 +154,38 @@ pub fn top_k_indices(row: &[f32], k: usize) -> (Vec<u32>, Vec<f32>) {
 /// `0.21` (housekeeping) vs `0.58` (marker) — markers win, and
 /// housekeeping is crowded out of top-K. The values returned remain
 /// raw counts so the encoder/decoder math is unchanged.
+///
+/// Returns at most `k` indices: features whose score is non-positive
+/// (`v == 0` or `w == 0`) are dropped before selection, so a cell with
+/// fewer non-zero, positively-weighted features than `k` returns a short
+/// vector. Every downstream consumer already uses `s.indices.len().min(k)`
+/// when packing into `[N, K]` buffers and leaves the rest at the
+/// zero-initialized `(idx=0, val=0)`, so the loss `Σ_k v_k · log_recon_at_k`
+/// is unaffected by the missing slots, the encoder weighted-sum is
+/// unaffected, and the per-batch union skips features no cell actually
+/// observed.
 pub fn top_k_indices_weighted(row: &[f32], weights: &[f32], k: usize) -> (Vec<u32>, Vec<f32>) {
     debug_assert_eq!(row.len(), weights.len());
-    let k = k.min(row.len());
 
     let mut scored: Vec<(f32, u32)> = row
         .iter()
         .zip(weights.iter())
         .enumerate()
-        .map(|(i, (&v, &w))| {
+        .filter_map(|(i, (&v, &w))| {
             // log1p on the score, not the value — keeps the per-cell K
             // raw values untouched while the *ranking* compresses
             // dynamic range so high-mean genes don't auto-win.
             let score = v.max(0.0).ln_1p() * w;
-            (score, i as u32)
+            (score > 0.0).then_some((score, i as u32))
         })
         .collect();
 
-    scored.select_nth_unstable_by(k.saturating_sub(1), |a, b| {
+    let k = k.min(scored.len());
+    if k == 0 {
+        return (Vec::new(), Vec::new());
+    }
+
+    scored.select_nth_unstable_by(k - 1, |a, b| {
         b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -779,6 +793,32 @@ mod tests {
         assert_eq!(indices, vec![0, 2, 4]);
         // Values returned must be the raw row entries — log1p only re-ranks.
         assert_eq!(values, vec![0.1, 0.3, 0.2]);
+    }
+
+    #[test]
+    fn test_top_k_drops_zero_valued_features() {
+        // Only 2 of 6 features are non-zero; with k=5, the result must be
+        // length 2 (no zero-padding into top-K). Downstream packers handle
+        // the short vec via `s.indices.len().min(k)`.
+        let row = vec![0.0, 0.4, 0.0, 0.0, 0.7, 0.0];
+        let weights = vec![1.0; 6];
+        let (indices, values) = top_k_indices_weighted(&row, &weights, 5);
+        assert_eq!(indices, vec![1, 4]);
+        assert_eq!(values, vec![0.4, 0.7]);
+
+        // All-zero row → empty result.
+        let zero_row = vec![0.0; 6];
+        let (idx0, val0) = top_k_indices_weighted(&zero_row, &weights, 3);
+        assert!(idx0.is_empty());
+        assert!(val0.is_empty());
+
+        // Zero-weight features are also dropped even when their value is
+        // positive (score = log1p(v) * 0 = 0).
+        let row_wz = vec![0.4, 0.7, 0.3];
+        let w_wz = vec![0.0, 1.0, 0.0];
+        let (idx_wz, val_wz) = top_k_indices_weighted(&row_wz, &w_wz, 3);
+        assert_eq!(idx_wz, vec![1]);
+        assert_eq!(val_wz, vec![0.7]);
     }
 
     #[test]
