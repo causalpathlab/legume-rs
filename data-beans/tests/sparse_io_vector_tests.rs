@@ -1286,8 +1286,10 @@ fn intra_file_canonicalizer_collisions_sum_into_one_row() -> anyhow::Result<()> 
     //   row1 (TBCE-B): [4, 5, 0, 0]
     //   row2 (OTHER) : [0, 0, 0, 7]
     // Merged TBCE row should be [5, 5, 3, 0].
-    let raw =
-        Array2::from_shape_vec((3, 4), vec![1.0, 0.0, 3.0, 0.0, 4.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0])?;
+    let raw = Array2::from_shape_vec(
+        (3, 4),
+        vec![1.0, 0.0, 3.0, 0.0, 4.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0],
+    )?;
 
     let sp = make_named_sparse(&raw, &rows, &cells);
 
