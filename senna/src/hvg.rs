@@ -14,11 +14,11 @@ pub use data_beans_alg::hvg::{select_hvg_streaming, HvgCliArgs, HvgSelection};
 ///   ATAC peak counts) → HVG is disabled.
 ///
 /// Returns `(effective_multiome, effective_hvg_n, effective_hvg_list)`.
-pub fn resolve_multiome_with_hvg<'a>(
+pub fn resolve_multiome_with_hvg(
     multiome: bool,
     n_files: usize,
-    hvg: &'a HvgCliArgs,
-) -> (bool, usize, Option<&'a str>) {
+    hvg: &HvgCliArgs,
+) -> (bool, usize, Option<&str>) {
     let mut effective_multiome = multiome;
     let mut effective_hvg_n = hvg.n_hvg;
     let mut effective_hvg_list: Option<&str> = hvg.feature_list_file.as_deref();

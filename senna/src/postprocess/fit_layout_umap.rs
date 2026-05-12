@@ -2,14 +2,20 @@
 //! Same prep/finalize pipeline as `layout tsne`; differs only in the
 //! 2D layout algorithm. Optionally runs a cell-level SGD pass after
 //! Nyström to resolve intra-PB structure (`--umap-finetune-epochs > 0`).
+//!
+//! For `RunKind::Gbe` manifests, `preprocess_layout_data` returns
+//! `LayoutMode::DirectCells` and we skip the PB pass entirely — build
+//! a cell-cell fuzzy kNN graph straight from the L2-normalized latent
+//! and run UMAP SGD on cells directly. No Nyström, no PB output.
 
 use super::fit_layout_common::{
-    nystrom_cell_coords, preprocess_layout_data, random_init_2d, resolve_inputs, write_viz_outputs,
-    LayoutCommonArgs,
+    nystrom_cell_coords, preprocess_layout_data, random_init_2d, resolve_inputs,
+    write_viz_outputs_direct, write_viz_outputs_pb, DirectLayoutPrep, LayoutCommonArgs, LayoutPrep,
+    PbLayoutPrep, ResolvedViz,
 };
 use crate::embed_common::*;
 use crate::geometry::umap::Umap;
-use std::collections::HashMap;
+use rayon::prelude::*;
 
 #[derive(Args, Debug)]
 pub struct LayoutUmapArgs {
@@ -88,10 +94,25 @@ pub fn run_default_umap_layout(manifest_path: &str, preload: bool) -> anyhow::Re
     fit_layout_umap(&args)
 }
 
+/// UMAP reference inits in [-10, 10] so gradient clamps at ±4 don't
+/// dominate the layout scale. `random_init_2d` returns [-1, 1].
+const INIT_SCALE: f32 = 10.0;
+
 pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
     let prep = preprocess_layout_data(&args.common, &resolved)?;
 
+    match &prep {
+        LayoutPrep::PbThenNystrom(p) => fit_layout_umap_pb(args, &mut resolved, p),
+        LayoutPrep::DirectCells(p) => fit_layout_umap_direct(args, &mut resolved, p),
+    }
+}
+
+fn fit_layout_umap_pb(
+    args: &LayoutUmapArgs,
+    resolved: &mut ResolvedViz,
+    prep: &PbLayoutPrep,
+) -> anyhow::Result<()> {
     let n = prep.pb_similarity.nrows();
     let edges = extract_upper_edges(&prep.pb_similarity);
     info!(
@@ -101,9 +122,6 @@ pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
         2.0 * edges.len() as f32 / n.max(1) as f32
     );
 
-    // UMAP reference inits in [-10, 10] so gradient clamps at ±4 don't
-    // dominate the layout scale. random_init_2d returns [-1, 1].
-    const INIT_SCALE: f32 = 10.0;
     let init = random_init_2d(n, args.common.seed);
     let mut init_flat = Vec::with_capacity(n * 2);
     for i in 0..n {
@@ -130,41 +148,74 @@ pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
     }
     info!("UMAP done");
 
-    let mut cell_coords = nystrom_cell_coords(&args.common, &prep, &pb_coords);
+    let mut cell_coords = nystrom_cell_coords(&args.common, prep, &pb_coords);
     if args.umap_finetune_epochs > 0 {
-        finetune_cells_umap(
-            &mut cell_coords,
+        let edges = build_cell_cell_fuzzy_edges(
             &prep.cell_proj_kn,
             args.umap_finetune_knn,
+            args.common.block_size.unwrap_or(1000),
+        )?;
+        run_cell_level_umap_in_place(
+            &mut cell_coords,
+            &edges,
             args.umap_finetune_epochs,
             args.umap_negative_rate,
             args.umap_lr,
-            args.common.seed,
-            args.common.block_size.unwrap_or(1000),
-        )?;
+            args.common.seed.wrapping_add(1),
+        );
     }
 
-    write_viz_outputs(&args.common, &mut resolved, &prep, &pb_coords, &cell_coords)
+    write_viz_outputs_pb(&args.common, resolved, prep, &pb_coords, &cell_coords)
 }
 
-/// Cell-level UMAP fine-tune. Builds a cell-cell fuzzy kNN graph on the
-/// same latent features used for Nyström, warm-starts from `coords`,
-/// runs `Umap::fit`, and writes back.
-#[allow(clippy::too_many_arguments)]
-fn finetune_cells_umap(
-    coords: &mut Mat,
+/// Direct cell-level UMAP for `RunKind::Gbe` (and any future kind that
+/// returns `LayoutPrep::DirectCells`). Skips landmark sampling, fuzzy
+/// kNN on PB centroids, and Nyström — the GBE latent is already
+/// manifold-aware, so we put cells straight on the cell-cell fuzzy kNN
+/// graph and run UMAP SGD there. Output: only `cell_coords.parquet`,
+/// no `pb_coords`.
+fn fit_layout_umap_direct(
+    args: &LayoutUmapArgs,
+    resolved: &mut ResolvedViz,
+    prep: &DirectLayoutPrep,
+) -> anyhow::Result<()> {
+    let n = prep.cell_proj_kn.ncols();
+    info!("UMAP direct cell-level mode: {n} cells");
+
+    let edges = build_cell_cell_fuzzy_edges(
+        &prep.cell_proj_kn,
+        args.umap_finetune_knn,
+        args.common.block_size.unwrap_or(1000),
+    )?;
+
+    // RNG-determined init in [-INIT_SCALE, INIT_SCALE]² — keep sequential
+    // so the seed contract matches `random_init_2d`'s elsewhere.
+    let mut cell_coords = random_init_2d(n, args.common.seed);
+    cell_coords *= INIT_SCALE;
+
+    run_cell_level_umap_in_place(
+        &mut cell_coords,
+        &edges,
+        args.umap_epochs,
+        args.umap_negative_rate,
+        args.umap_lr,
+        args.common.seed,
+    );
+
+    write_viz_outputs_direct(&args.common, resolved, prep, &cell_coords)
+}
+
+/// Build the undirected cell-cell fuzzy kNN edge list used by both the
+/// `PbThenNystrom` fine-tune pass and the `DirectCells` cell-level UMAP.
+/// `KnnGraph::edges` is already canonical (`i < j`, sorted, deduped)
+/// and `fuzzy_kernel_weights` returns one weight per edge.
+fn build_cell_cell_fuzzy_edges(
     feat_kn: &Mat,
     knn: usize,
-    epochs: usize,
-    negative_rate: usize,
-    learning_rate: f32,
-    seed: u64,
     block_size: usize,
-) -> anyhow::Result<()> {
-    let n = coords.nrows();
-    assert_eq!(feat_kn.ncols(), n, "feat_kn cols must match cell count");
-
-    info!("Cell fine-tune: building fuzzy kNN (n={n}, knn={knn}) ...");
+) -> anyhow::Result<Vec<(usize, usize, f32)>> {
+    let n = feat_kn.ncols();
+    info!("Cell-cell fuzzy kNN (n={n}, knn={knn}) ...");
     let graph = matrix_util::knn_graph::KnnGraph::from_columns(
         feat_kn,
         matrix_util::knn_graph::KnnGraphArgs {
@@ -175,49 +226,51 @@ fn finetune_cells_umap(
     )?;
     let fuzzy = graph.fuzzy_kernel_weights();
 
-    // The graph may emit both (i,j) and (j,i); collapse to undirected
-    // edges keyed by (min,max) with the max weight (fuzzy-union semantics).
-    let mut edge_map: HashMap<(usize, usize), f32> = HashMap::with_capacity(graph.edges.len());
-    for (&(i, j), &w) in graph.edges.iter().zip(fuzzy.iter()) {
-        if i == j || w <= 0.0 {
-            continue;
-        }
-        let key = if i < j { (i, j) } else { (j, i) };
-        let slot = edge_map.entry(key).or_insert(0.0);
-        if w > *slot {
-            *slot = w;
-        }
-    }
-    let edges: Vec<(usize, usize, f32)> =
-        edge_map.into_iter().map(|((i, j), w)| (i, j, w)).collect();
+    let edges: Vec<(usize, usize, f32)> = graph
+        .edges
+        .par_iter()
+        .zip(fuzzy.par_iter())
+        .filter_map(|(&(i, j), &w)| (w > 0.0).then_some((i, j, w)))
+        .collect();
     info!(
-        "Cell fine-tune: {} cells, {} undirected edges (mean deg = {:.1})",
+        "Cell-cell fuzzy kNN: {} cells, {} edges (mean deg = {:.1})",
         n,
         edges.len(),
         2.0 * edges.len() as f32 / n.max(1) as f32
     );
+    Ok(edges)
+}
 
-    let mut init_flat = Vec::with_capacity(n * 2);
-    for i in 0..n {
-        init_flat.push(coords[(i, 0)]);
-        init_flat.push(coords[(i, 1)]);
-    }
+/// Run cell-level UMAP SGD, mutating `coords` in place. Common back-end
+/// for both the PB-mode fine-tune pass and (via the shared edge
+/// builder) the DirectCells path.
+fn run_cell_level_umap_in_place(
+    coords: &mut Mat,
+    edges: &[(usize, usize, f32)],
+    epochs: usize,
+    negative_rate: usize,
+    learning_rate: f32,
+    seed: u64,
+) {
+    let n = coords.nrows();
+    let init_flat: Vec<f32> = (0..n)
+        .flat_map(|i| [coords[(i, 0)], coords[(i, 1)]])
+        .collect();
 
     let umap = Umap {
         n_epochs: epochs,
         negative_sample_rate: negative_rate,
         learning_rate,
-        seed: seed.wrapping_add(1),
+        seed,
     };
-    info!("Cell fine-tune: UMAP SGD (epochs={epochs}) ...");
-    let refined = umap.fit(&edges, n, &init_flat);
+    info!("Cell-level UMAP SGD (epochs={epochs}) ...");
+    let refined = umap.fit(edges, n, &init_flat);
 
     for i in 0..n {
         coords[(i, 0)] = refined[i * 2];
         coords[(i, 1)] = refined[i * 2 + 1];
     }
-    info!("Cell fine-tune done");
-    Ok(())
+    info!("Cell-level UMAP done");
 }
 
 /// Collect upper-triangle non-zero entries as `(i, j, w)` with `i < j`.

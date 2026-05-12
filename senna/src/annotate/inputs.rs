@@ -4,7 +4,7 @@
 //! `manifest.data.input`), aligns cluster labels from a `senna cluster`
 //! parquet to the data column order, and parses the marker TSV.
 
-use crate::cluster::leiden_clustering;
+use crate::cluster::{leiden_clustering_with_metric, LatentMetric};
 use crate::embed_common::{read_mat, MatWithNames};
 use crate::marker_support::build_annotation_matrix;
 use crate::run_manifest::{self, RunKind, RunManifest};
@@ -221,20 +221,29 @@ where
         latent.mat = latent.mat.map(f32::exp);
     }
 
+    // GBE is trained with a dot-product / cosine-style objective, so the
+    // kNN graph fed to Leiden should reflect angular distance — not the
+    // default per-dim z-scored Euclidean we use for topic / SVD latents.
+    let metric = match manifest.kind {
+        RunKind::Gbe => LatentMetric::Cosine,
+        _ => LatentMetric::ZScoreEuclidean,
+    };
+
     log::info!(
-        "Internal Leiden: knn={}, resolution={:.3}, target_k={:?}, min_cluster_size={}",
+        "Internal Leiden: knn={}, resolution={:.3}, target_k={:?}, min_cluster_size={}, metric={metric:?}",
         args.knn,
         args.resolution,
         args.num_clusters,
         args.min_cluster_size
     );
 
-    let mut result = leiden_clustering(
+    let mut result = leiden_clustering_with_metric(
         &latent.mat,
         args.knn,
         args.resolution,
         args.num_clusters,
         args.seed,
+        metric,
     )?;
     if args.min_cluster_size > 1 {
         result.remove_small_clusters(args.min_cluster_size);

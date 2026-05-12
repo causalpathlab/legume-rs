@@ -420,29 +420,56 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
     })
 }
 
-/// Everything the layout subcommands need after PB prep.
-pub(crate) struct LayoutPrep {
+/// Shape of the per-PB feature matrix carried by `PbLayoutPrep`.
+/// `Gene` = log1p-CPM in gene space (consumed by `senna annotate`);
+/// `Proj` = proj-space centroids (diagnostic only). Drives output
+/// filename + column naming and whether `manifest.layout.pb_gene_mean`
+/// is populated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PbFeatureKind {
+    Gene,
+    Proj,
+}
+
+/// Output of `preprocess_layout_data`. `PbThenNystrom` is the classic
+/// two-stage pipeline (pseudobulks → PB layout → Nyström cell
+/// placement) used for topic / SVD / cached / recompute paths.
+/// `DirectCells` skips PB summarization entirely — used by
+/// `RunKind::Gbe`, whose embedding is already manifold-aware — and
+/// drives cell-level layout straight off `cell_proj_kn`.
+///
+/// Carrying these as separate variants instead of one struct + sentinel
+/// fields lets each subcommand pattern-match against the exact shape
+/// it can handle; tsne / phate take `&PbLayoutPrep` directly and bail
+/// at the call site for `DirectCells`.
+pub(crate) enum LayoutPrep {
+    PbThenNystrom(PbLayoutPrep),
+    DirectCells(DirectLayoutPrep),
+}
+
+pub(crate) struct PbLayoutPrep {
     pub data_vec: SparseIoVec,
     pub pb_size: Vec<usize>,
     pub pb_membership_kept: Vec<usize>,
-    /// `(n_pb × D)` per-PB feature matrix in row-per-PB convention,
-    /// used for the diagnostic output parquet. Content depends on
-    /// `pb_feature_kind`: log1p-CPM gene-space in the recompute path,
-    /// proj-space PB centroids in the cached fast path.
+    /// `(n_pb × D)` per-PB feature matrix, row-per-PB. Content depends
+    /// on `pb_feature_kind`.
     pub pb_features: Mat,
-    /// Either `"gene"` (D = n_genes, rows are log1p-CPM per PB) or
-    /// `"proj"` (D = proj_dim, rows are mean-projection per PB).
-    /// Controls output filename + column naming in `finalize_viz` and
-    /// whether `manifest.layout.pb_gene_mean` is populated.
-    pub pb_feature_kind: &'static str,
+    pub pb_feature_kind: PbFeatureKind,
     /// `(n_pb × n_pb)` PB-PB similarity, post threshold / local scaling
     /// / diagonal regularization.
     pub pb_similarity: Mat,
-    /// `(proj_dim × n_cells)` per-cell projection features, kept
-    /// column-major so each cell is a contiguous slice (SIMD-friendly).
+    /// `(D × n_cells)` per-cell feature matrix, column-per-cell.
     pub cell_proj_kn: Mat,
-    /// `(proj_dim × n_pb)` PB centroid features, matched to `pb_features` order.
+    /// `(proj_dim × n_pb)` PB centroid features, matched to
+    /// `pb_features` order.
     pub pb_proj_kp: Mat,
+}
+
+pub(crate) struct DirectLayoutPrep {
+    pub data_vec: SparseIoVec,
+    /// L2-normalized latent embedding, column-per-cell, fed straight to
+    /// the cell-level kNN graph.
+    pub cell_proj_kn: Mat,
 }
 
 pub(crate) fn preprocess_layout_data(
@@ -528,35 +555,47 @@ fn preprocess_layout_data_from_latent(
     );
 
     let tau = args.theta_temperature.max(1e-6);
-    let feat_kn: Mat = if kind.is_topic_family() {
+    let mut feat_kn: Mat = latent_nk.transpose();
+    let latent_desc: String = if kind.is_topic_family() {
         // softmax(log_θ / τ) per cell → Hellinger sqrt. τ=1 reduces to
         // sqrt(exp(log_θ)); τ<1 sharpens, τ>1 softens.
-        let mut m = latent_nk.transpose();
         if (tau - 1.0).abs() > 1e-6 {
-            m.apply(|v| *v /= tau);
+            feat_kn.apply(|v| *v /= tau);
         }
-        m.normalize_exp_logits_columns_inplace();
-        m.apply(|v| *v = v.sqrt());
-        m
+        feat_kn.normalize_exp_logits_columns_inplace();
+        feat_kn.apply(|v| *v = v.sqrt());
+        if (tau - 1.0).abs() < 1e-6 {
+            "Hellinger-θ".into()
+        } else {
+            format!("Hellinger-θ, τ={tau:.3}")
+        }
+    } else if matches!(kind, crate::run_manifest::RunKind::Gbe) {
+        // GBE was trained with a dot-product loss; unit-sphere geometry
+        // makes Euclidean kNN match cosine ordering downstream.
+        feat_kn.normalize_columns_inplace();
+        "unit-sphere (cosine)".into()
     } else {
-        let mut m = latent_nk.transpose();
-        m.scale_rows_inplace();
-        m
+        feat_kn.scale_rows_inplace();
+        "z-scored scores".into()
     };
     let n_cells = feat_kn.ncols();
     info!(
-        "Loaded latent: {n_cells} cells × {} dims ({})",
+        "Loaded latent: {n_cells} cells × {} dims ({latent_desc})",
         feat_kn.nrows(),
-        if kind.is_topic_family() {
-            if (tau - 1.0).abs() < 1e-6 {
-                "Hellinger-θ".to_string()
-            } else {
-                format!("Hellinger-θ, τ={tau:.3}")
-            }
-        } else {
-            "z-scored scores".to_string()
-        }
     );
+
+    // GBE embeddings are already manifold-aware (trained on a graph
+    // objective). Skip the PB landmarks / fuzzy-kNN-on-centroids step
+    // entirely and let the layout subcommand work cell-level directly.
+    // Topic / SVD latents are noisier and still benefit from the PB
+    // summarization, so they fall through to the landmark path below.
+    if matches!(kind, crate::run_manifest::RunKind::Gbe) {
+        info!("Gbe latent → DirectCells mode: skipping PB landmark sampling");
+        return Ok(LayoutPrep::DirectCells(DirectLayoutPrep {
+            data_vec,
+            cell_proj_kn: feat_kn,
+        }));
+    }
 
     let n_pb_target = args.n_landmarks.min(n_cells).max(1);
     let use_per_topic =
@@ -706,16 +745,16 @@ fn preprocess_layout_data_from_latent(
     }
     let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
 
-    Ok(LayoutPrep {
+    Ok(LayoutPrep::PbThenNystrom(PbLayoutPrep {
         data_vec,
         pb_size,
         pb_membership_kept,
         pb_features: pb_centroids_kp.transpose(),
-        pb_feature_kind: "proj",
+        pb_feature_kind: PbFeatureKind::Proj,
         pb_similarity,
         cell_proj_kn: feat_kn,
         pb_proj_kp: pb_centroids_kp,
-    })
+    }))
 }
 
 /// Fast path: given a cached `cell_proj.parquet` from a prior training
@@ -837,16 +876,16 @@ fn preprocess_layout_data_from_cache(
     };
     let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
 
-    Ok(LayoutPrep {
+    Ok(LayoutPrep::PbThenNystrom(PbLayoutPrep {
         data_vec,
         pb_size,
         pb_membership_kept,
         pb_features: pb_centroids_kp.transpose(),
-        pb_feature_kind: "proj",
+        pb_feature_kind: PbFeatureKind::Proj,
         pb_similarity,
         cell_proj_kn: proj_kn,
         pb_proj_kp: pb_centroids_kp,
-    })
+    }))
 }
 
 /// Slow path (fallback): the original full pipeline. Runs when no
@@ -966,16 +1005,16 @@ fn preprocess_layout_data_recompute(
     };
     let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
 
-    Ok(LayoutPrep {
+    Ok(LayoutPrep::PbThenNystrom(PbLayoutPrep {
         data_vec,
         pb_size,
         pb_membership_kept,
         pb_features: log_expr_dp.transpose(),
-        pb_feature_kind: "gene",
+        pb_feature_kind: PbFeatureKind::Gene,
         pb_similarity,
         cell_proj_kn: proj_kn,
         pb_proj_kp: pb_centroids_kn,
-    })
+    }))
 }
 
 /// Canonicalize raw bucket codes from `binary_sort_columns` into
@@ -1038,7 +1077,7 @@ pub(crate) fn random_init_2d(n: usize, seed: u64) -> Mat {
 /// refined result to [`write_viz_outputs`] directly.
 pub(crate) fn nystrom_cell_coords(
     args: &LayoutCommonArgs,
-    prep: &LayoutPrep,
+    prep: &PbLayoutPrep,
     pb_coords: &Mat,
 ) -> Mat {
     let coords = project_cells_nystrom(
@@ -1052,27 +1091,26 @@ pub(crate) fn nystrom_cell_coords(
     coords
 }
 
-/// Finalize: place cells via cheap Nyström, write the three output
-/// parquet files, and — when a manifest was loaded via `--from` —
-/// update its `viz{}` section and save it back in place.
+/// Finalize the `PbThenNystrom` path: place cells via cheap Nyström,
+/// write the three output parquet files, and — when a manifest was
+/// loaded via `--from` — update its `viz{}` section and save it back
+/// in place.
 ///
-/// `pb_coords` comes from the layout subcommand.
+/// `DirectCells` outputs go directly through [`write_viz_outputs`].
 pub(crate) fn finalize_viz(
     args: &LayoutCommonArgs,
     resolved: &mut ResolvedViz,
-    prep: &LayoutPrep,
+    prep: &PbLayoutPrep,
     pb_coords: &Mat,
 ) -> anyhow::Result<()> {
     let cell_coords = nystrom_cell_coords(args, prep, pb_coords);
-    write_viz_outputs(args, resolved, prep, pb_coords, &cell_coords)
+    write_viz_outputs_pb(args, resolved, prep, pb_coords, &cell_coords)
 }
 
-/// Write the three layout parquet files + update manifest. Split out so
-/// a caller can supply custom `cell_coords` (e.g. post-refinement).
-pub(crate) fn write_viz_outputs(
+pub(crate) fn write_viz_outputs_pb(
     args: &LayoutCommonArgs,
     resolved: &mut ResolvedViz,
-    prep: &LayoutPrep,
+    prep: &PbLayoutPrep,
     pb_coords: &Mat,
     cell_coords: &Mat,
 ) -> anyhow::Result<()> {
@@ -1092,14 +1130,12 @@ pub(crate) fn write_viz_outputs(
         Some(&coord_cols),
     )?;
 
-    // PB feature matrix lands in one of two files depending on prep
-    // origin: gene-space log1p-CPM (slow path, consumed by
-    // `senna annotate`) or proj-space centroids (fast path, diagnostic).
-    // Only the gene-space output populates `manifest.layout.pb_gene_mean`.
+    // Only the gene-space recompute path produces a pb_gene_mean that
+    // `senna annotate` can consume; the fast path emits diagnostic
+    // proj-space centroids that are not advertised in the manifest.
     let (pb_feat_path, pb_feat_is_gene) = match prep.pb_feature_kind {
-        "gene" => (format!("{out}.pb_gene_mean.parquet"), true),
-        "proj" => (format!("{out}.pb_proj_mean.parquet"), false),
-        other => anyhow::bail!("unexpected pb_feature_kind {other:?}"),
+        PbFeatureKind::Gene => (format!("{out}.pb_gene_mean.parquet"), true),
+        PbFeatureKind::Proj => (format!("{out}.pb_proj_mean.parquet"), false),
     };
     let feat_col_names: Vec<Box<str>> = if pb_feat_is_gene {
         prep.data_vec.row_names()?
@@ -1155,13 +1191,57 @@ pub(crate) fn write_viz_outputs(
     update_manifest_viz(
         resolved,
         &cell_coords_path,
-        &pb_coords_path,
-        if pb_feat_is_gene {
-            Some(&pb_feat_path)
-        } else {
-            None
-        },
+        Some(&pb_coords_path),
+        pb_feat_is_gene.then_some(pb_feat_path.as_str()),
     )?;
+
+    Ok(())
+}
+
+pub(crate) fn write_viz_outputs_direct(
+    args: &LayoutCommonArgs,
+    resolved: &mut ResolvedViz,
+    prep: &DirectLayoutPrep,
+    cell_coords: &Mat,
+) -> anyhow::Result<()> {
+    let cell_names = prep.data_vec.column_names()?;
+    let n_cells = cell_coords.nrows();
+    anyhow::ensure!(
+        cell_names.len() == n_cells,
+        "DirectCells: cell_coords rows ({n_cells}) ≠ data columns ({})",
+        cell_names.len()
+    );
+
+    let out = &resolved.out;
+    let cell_coords_path = format!("{out}.cell_coords.parquet");
+
+    let cluster_ids = match &args.clusters {
+        Some(path) => Some(load_cluster_assignments(path, n_cells)?),
+        None => None,
+    };
+
+    let n_extra = cluster_ids.as_ref().map_or(0, |_| 1);
+    let mut cell_out = Mat::zeros(n_cells, 2 + n_extra);
+    cell_out.column_mut(0).copy_from(&cell_coords.column(0));
+    cell_out.column_mut(1).copy_from(&cell_coords.column(1));
+
+    let mut col_names: Vec<Box<str>> = vec!["x".into(), "y".into()];
+    if let Some(ref clusters) = cluster_ids {
+        for (i, &c) in clusters.iter().enumerate() {
+            cell_out[(i, 2)] = c as f32;
+        }
+        col_names.push("cluster".into());
+    }
+
+    cell_out.to_parquet_with_names(
+        &cell_coords_path,
+        (Some(&cell_names), Some("cell")),
+        Some(&col_names),
+    )?;
+
+    info!("Saved {cell_coords_path} (DirectCells; no pb_coords)");
+
+    update_manifest_viz(resolved, &cell_coords_path, None, None)?;
 
     Ok(())
 }
@@ -1173,7 +1253,7 @@ pub(crate) fn write_viz_outputs(
 fn update_manifest_viz(
     resolved: &mut ResolvedViz,
     cell_coords_path: &str,
-    pb_coords_path: &str,
+    pb_coords_path: Option<&str>,
     pb_gene_mean_path: Option<&str>,
 ) -> anyhow::Result<()> {
     let (Some(manifest), Some(manifest_path)) =
@@ -1187,7 +1267,9 @@ fn update_manifest_viz(
         .unwrap_or_else(|| Path::new("."));
 
     manifest.layout.cell_coords = Some(rel_to_manifest(manifest_dir, cell_coords_path));
-    manifest.layout.pb_coords = Some(rel_to_manifest(manifest_dir, pb_coords_path));
+    // DirectCells mode emits no pb_coords, so the manifest field stays
+    // None — callers that need PB-level coords must branch on `kind`.
+    manifest.layout.pb_coords = pb_coords_path.map(|p| rel_to_manifest(manifest_dir, p));
     // Only the gene-space recompute path produces a proper pb_gene_mean;
     // the fast path writes a proj-space file that `senna annotate`
     // would misread, so don't advertise it.
