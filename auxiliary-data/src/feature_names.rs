@@ -362,7 +362,8 @@ mod tests {
         );
         // Full `Gene_Expression` tag variant.
         assert_eq!(
-            k.canonicalize("ENSG00000187634_SAMD11_Gene_Expression").as_ref(),
+            k.canonicalize("ENSG00000187634_SAMD11_Gene_Expression")
+                .as_ref(),
             "SAMD11"
         );
         // A real gene whose name happens to end in "Gene" *without* the
