@@ -186,10 +186,11 @@ impl UnifiedData {
     }
 
     /// Build a `UnifiedData` from a single in-memory `SparseIoVec` plus
-    /// per-cell batch labels. Used by callers whose own SRT loaders
-    /// already produced a concatenated `SparseIoVec` and shouldn't
-    /// re-route through [`load_unified_data`].
-    pub fn from_sparse_io(data: SparseIoVec, batch_labels: &[Box<str>]) -> anyhow::Result<Self> {
+    /// per-cell batch labels. Internal helper for [`load_unified_data`].
+    pub(crate) fn from_sparse_io(
+        data: SparseIoVec,
+        batch_labels: &[Box<str>],
+    ) -> anyhow::Result<Self> {
         let feature_names = data.row_names()?;
         let barcodes = data.column_names()?;
         anyhow::ensure!(
@@ -272,8 +273,7 @@ impl UnifiedData {
 /// Cells with the same raw barcode in two files are therefore treated
 /// as **distinct** cells (matching the rest of senna). True multimodal
 /// stacking — different feature schemas per file with shared cells —
-/// is out of scope for this loader; build a `UnifiedData` by hand via
-/// [`UnifiedData::from_sparse_io`] (or a future helper) for that case.
+/// is out of scope for this loader.
 pub fn load_unified_data(
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,
