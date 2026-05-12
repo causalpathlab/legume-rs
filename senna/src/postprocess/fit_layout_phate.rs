@@ -3,7 +3,8 @@
 //! Cells placed by cheap Nyström in proj space.
 
 use super::fit_layout_common::{
-    finalize_viz, preprocess_layout_data, resolve_inputs, LayoutCommonArgs, PhateCliArgs,
+    finalize_viz, preprocess_layout_data, resolve_inputs, LayoutCommonArgs, LayoutPrep,
+    PhateCliArgs,
 };
 use super::viz_prep::apply_svd_preprocessing;
 use crate::embed_common::*;
@@ -48,7 +49,16 @@ impl Default for LayoutPhateArgs {
 
 pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
-    let prep = preprocess_layout_data(&args.common, &resolved)?;
+    // PHATE here is PB-level (diffusion-MDS over PB features → 2D);
+    // DirectCells manifests (RunKind::Gbe) have no PB scaffolding so
+    // we redirect.
+    let LayoutPrep::PbThenNystrom(prep) = preprocess_layout_data(&args.common, &resolved)? else {
+        anyhow::bail!(
+            "`senna layout phate` does not support DirectCells manifests \
+             (e.g. RunKind::Gbe). Use `senna layout umap --from <manifest>` instead — \
+             UMAP runs cell-level directly on the GBE embedding."
+        );
+    };
 
     // HVG selection: keep top N genes by residual variance (mean-variance corrected)
     let features = if args.n_hvg > 0 && args.n_hvg < prep.pb_features.ncols() {

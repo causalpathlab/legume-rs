@@ -165,10 +165,27 @@ pub fn kmeans_clustering(latent: &Mat, k: usize, max_iter: usize) -> anyhow::Res
     Ok(result)
 }
 
+/// Latent-space metric for kNN graph construction.
+///
+/// `ZScoreEuclidean` (default) column-wise z-scores then runs Euclidean
+/// kNN — the right choice when latent dims have heterogeneous scales
+/// (raw SVD scores, signed embeddings). `Cosine` row-L2-normalizes
+/// instead: distances on the unit sphere are monotonic in cosine, so
+/// the resulting kNN is angular. Use this when the embedding was
+/// trained with a dot-product / cosine objective (e.g. `RunKind::Gbe`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LatentMetric {
+    ZScoreEuclidean,
+    Cosine,
+}
+
 /// Run Leiden community detection on latent representation (cells × features)
 ///
 /// * `target_clusters` - if Some, binary-search resolution to approximate this count
 /// * `resolution` - starting (or fixed) resolution for CPM
+///
+/// Back-compat shim: uses `LatentMetric::ZScoreEuclidean`. New callers
+/// that care about the metric should use [`leiden_clustering_with_metric`].
 pub fn leiden_clustering(
     latent: &Mat,
     knn: usize,
@@ -176,21 +193,52 @@ pub fn leiden_clustering(
     target_clusters: Option<usize>,
     seed: Option<u64>,
 ) -> anyhow::Result<ClusterResult> {
+    leiden_clustering_with_metric(
+        latent,
+        knn,
+        resolution,
+        target_clusters,
+        seed,
+        LatentMetric::ZScoreEuclidean,
+    )
+}
+
+/// Same as [`leiden_clustering`] but lets the caller pick the latent-space
+/// metric used by the kNN graph.
+pub fn leiden_clustering_with_metric(
+    latent: &Mat,
+    knn: usize,
+    resolution: f64,
+    target_clusters: Option<usize>,
+    seed: Option<u64>,
+    metric: LatentMetric,
+) -> anyhow::Result<ClusterResult> {
     let n = latent.nrows();
     let d = latent.ncols();
     if n < 2 {
         anyhow::bail!("Need at least 2 cells for Leiden clustering");
     }
 
-    info!("Leiden: {n} cells x {d} features, knn={knn}, seed={seed:?}");
+    info!("Leiden: {n} cells x {d} features, knn={knn}, seed={seed:?}, metric={metric:?}");
 
-    // Step 1: Column-wise z-score standardization then build KNN graph
-    let mut latent_z = latent.clone();
-    latent_z.scale_columns_inplace();
+    // Metric-dependent preprocessing. ZScoreEuclidean: per-dim
+    // standardize so heterogeneous-scale dims don't dominate.
+    // Cosine: per-cell L2 normalize so Euclidean on the unit sphere
+    // matches angular ordering.
+    let mut latent_pre = latent.clone();
+    match metric {
+        LatentMetric::ZScoreEuclidean => latent_pre.scale_columns_inplace(),
+        LatentMetric::Cosine => {
+            for mut row in latent_pre.row_iter_mut() {
+                let denom = row.norm().max(1e-8);
+                row /= denom;
+            }
+        }
+    }
 
     info!("Building KNN graph (k={knn}) for {n} cells ...");
     let graph = KnnGraph::from_rows(
-        &latent_z,
+        &latent_pre,
         KnnGraphArgs {
             knn,
             block_size: 1000,
@@ -472,6 +520,66 @@ mod tests {
             low_res.n_clusters,
             high_res.n_clusters
         );
+    }
+
+    /// Direction-only clusters: points share angular position but live
+    /// at very different radii. Euclidean (default) collapses them onto
+    /// the radius axis and loses the cluster structure; cosine recovers
+    /// it. Concrete check that `LatentMetric::Cosine` exercises the
+    /// L2-normalize branch and produces a different graph than the
+    /// default metric.
+    #[test]
+    fn test_leiden_cosine_metric_recovers_angular_clusters() {
+        use rand::rngs::SmallRng;
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, Normal};
+
+        let mut rng = SmallRng::seed_from_u64(7);
+        let dir_noise = Normal::new(0.0f32, 0.02).unwrap();
+        let radii = [0.5f32, 5.0, 50.0];
+        let directions: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+        let n_per = 50;
+        let n = directions.len() * n_per;
+        let mut latent = Mat::zeros(n, 3);
+        for (c, dir) in directions.iter().enumerate() {
+            for i in 0..n_per {
+                let row = c * n_per + i;
+                let r = radii[i % radii.len()];
+                for (d, &val) in dir.iter().enumerate() {
+                    latent[(row, d)] = r * val + dir_noise.sample(&mut rng);
+                }
+            }
+        }
+
+        let result = leiden_clustering_with_metric(
+            &latent,
+            TEST_KNN,
+            1.0,
+            None,
+            Some(0),
+            LatentMetric::Cosine,
+        )
+        .unwrap();
+
+        // Per-direction label sets must be disjoint when metric is angular.
+        let mut group_labels: Vec<rustc_hash::FxHashSet<usize>> = Vec::new();
+        for c in 0..directions.len() {
+            let start = c * n_per;
+            let end = start + n_per;
+            let labels: rustc_hash::FxHashSet<usize> =
+                result.labels[start..end].iter().copied().collect();
+            group_labels.push(labels);
+        }
+        for i in 0..directions.len() {
+            for j in (i + 1)..directions.len() {
+                let overlap: Vec<_> = group_labels[i].intersection(&group_labels[j]).collect();
+                assert!(
+                    overlap.is_empty(),
+                    "cosine kNN should keep direction-{i} and direction-{j} separate, got shared labels {overlap:?}"
+                );
+            }
+        }
     }
 
     #[test]
