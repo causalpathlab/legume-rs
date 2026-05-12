@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use data_beans::convert::try_open_or_convert;
 use data_beans::sparse_io_vector::SparseIoVec;
@@ -111,12 +111,13 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         None
     };
 
+    let kind_was_auto = args.feature_kind.is_none();
     let resolved_kind: FeatureNameKind = match args.feature_kind.clone() {
         Some(k) => k,
         None => {
             let names = all_names.as_ref().expect("peeked when auto");
             let k = FeatureNameKind::auto_detect(names);
-            info!(
+            debug!(
                 "Row alignment: auto-detected feature name kind → {:?} ({} rows)",
                 k,
                 names.len()
@@ -132,7 +133,7 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
     match &resolved_kind {
         FeatureNameKind::Mixed => {
             let names = all_names.as_ref().expect("peeked for Mixed").clone();
-            info!(
+            debug!(
                 "Row alignment: building MIXED-kind canonical map over {} names \
                  across {} file(s)",
                 names.len(),
@@ -150,7 +151,7 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
                 .as_ref()
                 .expect("peeked for Locus merge_overlapping")
                 .clone();
-            info!(
+            debug!(
                 "Row alignment: building locus-overlap canonical map over {} names \
                  across {} file(s)",
                 names.len(),
@@ -163,7 +164,7 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         }
         kind => {
             if let Some(canon) = kind.clone().into_canonicalizer() {
-                info!(
+                debug!(
                     "Row alignment: applying {:?} canonicalizer across {} file(s)",
                     kind,
                     opened.len()
@@ -176,13 +177,13 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
             }
         }
     }
-    if args.row_alignment == RowAlignment::Union {
-        info!(
-            "Row alignment: UNION across {} file(s) — features from each \
-             backend retained, non-observing backends pad with zero",
-            opened.len()
-        );
-    }
+    info!(
+        "Row alignment: {:?} · {:?} canon{} · {} file(s)",
+        args.row_alignment,
+        resolved_kind,
+        if kind_was_auto { " (auto)" } else { "" },
+        opened.len(),
+    );
     for (data_file, data) in opened.into_iter() {
         let data_name = attach_data_name.then(|| basename(&data_file)).transpose()?;
         data_vec.push(Arc::from(data), data_name)?;
