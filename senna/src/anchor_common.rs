@@ -13,6 +13,9 @@
 //! graph.
 
 use crate::embed_common::Mat;
+use crate::logging::new_progress_bar;
+use nalgebra::DVector;
+use rayon::prelude::*;
 
 /// Write `softmax(col)` from a source column view into a destination column
 /// view of the same length. Used per anchor when building anchor simplex
@@ -61,8 +64,10 @@ pub(crate) fn zscore_columns(x_pg: &Mat) -> Mat {
 /// `x_pg` (PB rows × gene columns) chosen to maximize residual norm at
 /// each step. Rows are projected out of all remaining rows after each pick.
 ///
-/// Uses nalgebra's vectorized row operations so the inner loop stays dense
-/// and cache-friendly even at D≈36k.
+/// Parallelized over rows: residual is stored as a contiguous row-vector
+/// list so the per-iteration argmax-norm and projection both run with
+/// `rayon` over the row axis. The K-anchor outer loop stays sequential —
+/// each pick depends on the prior projection.
 pub(crate) fn gram_schmidt_anchors(x_pg: &Mat, k: usize) -> Vec<usize> {
     let n = x_pg.nrows();
     let k = k.min(n);
@@ -70,52 +75,52 @@ pub(crate) fn gram_schmidt_anchors(x_pg: &Mat, k: usize) -> Vec<usize> {
         return Vec::new();
     }
 
-    // Residual copy. Rows get orthogonalized against the chosen anchors.
-    let mut residual = x_pg.clone();
+    // `x_pg` is column-major (nalgebra `DMatrix`), so reading rows strides
+    // by `n` and trashes cache at D≈36k. One transpose puts each original
+    // row into a contiguous column of `xt`, after which extracting rows is
+    // a sequential read per worker.
+    let xt = x_pg.transpose();
+    let mut residual: Vec<DVector<f32>> = (0..n)
+        .into_par_iter()
+        .map(|i| xt.column(i).into_owned())
+        .collect();
     let mut picked: Vec<usize> = Vec::with_capacity(k);
     let mut available: Vec<usize> = (0..n).collect();
 
+    let pb = new_progress_bar(k as u64);
+    pb.set_message("Anchor selection");
+
     for _ in 0..k {
-        // Argmax residual L2 norm over still-available rows.
-        let (best_pos, &best_row) = available
-            .iter()
+        let (best_pos, best_row) = available
+            .par_iter()
             .enumerate()
-            .max_by(|(_, &a), (_, &b)| {
-                let na: f32 = residual.row(a).iter().map(|&v| v * v).sum();
-                let nb: f32 = residual.row(b).iter().map(|&v| v * v).sum();
-                na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .map(|(pos, &row)| (pos, row, residual[row].norm_squared()))
+            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(pos, row, _)| (pos, row))
             .expect("non-empty available");
         picked.push(best_row);
         available.swap_remove(best_pos);
 
-        // Normalize the picked anchor row, then project it out of every
-        // other row: r_j ← r_j - (r_j · u) · u, where u is the unit-length
-        // anchor direction.
-        let anchor_row = residual.row(best_row).clone_owned();
-        let norm2: f32 = anchor_row.iter().map(|&v| v * v).sum();
+        // Project the anchor out of every row: r_j ← r_j − (r_j · v) v / ‖v‖²,
+        // where v = residual[best_row]. We fold the normalization into the
+        // axpy scalar (`-dot/norm2`) to skip the per-iteration `DVector`
+        // allocation for the unit vector.
+        let norm2 = residual[best_row].norm_squared();
         if norm2 < 1e-12 {
+            pb.inc(1);
             continue;
         }
-        let norm = norm2.sqrt();
-        let unit = anchor_row / norm;
-        for i in 0..n {
-            if i == best_row {
-                continue;
-            }
-            let dot: f32 = residual
-                .row(i)
-                .iter()
-                .zip(unit.iter())
-                .map(|(a, b)| a * b)
-                .sum();
-            let mut row_i = residual.row_mut(i);
-            for (v, &u) in row_i.iter_mut().zip(unit.iter()) {
-                *v -= dot * u;
-            }
-        }
-        residual.row_mut(best_row).fill(0.0);
+        let anchor = residual[best_row].clone();
+        residual.par_iter_mut().for_each(|r| {
+            let dot = r.dot(&anchor);
+            r.axpy(-dot / norm2, &anchor, 1.0);
+        });
+        // `axpy` leaves the anchor row at ~0 (modulo round-off); pin it to
+        // exact zero so future projections stay clean.
+        residual[best_row].fill(0.0);
+        pb.inc(1);
     }
+    pb.finish_and_clear();
 
     picked
 }
