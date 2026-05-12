@@ -1,6 +1,6 @@
-//! Graceful stop handler shared by `senna gbe`, `pinto gbe`, and the
-//! senna topic models. First Ctrl+C sets the flag for graceful exit
-//! after the current minibatch; second Ctrl+C forces an immediate abort.
+//! Graceful stop handler shared by `senna gbe` and the senna topic
+//! models. First Ctrl+C sets the flag for graceful exit after the
+//! current minibatch; second Ctrl+C forces an immediate abort.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

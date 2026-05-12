@@ -162,9 +162,8 @@ pub struct FeatureNetworkConfig {
 
 /// CLI-flag-shaped helper that resolves an edge-list file against the
 /// unified feature axis and packages it as a [`FeatureNetworkConfig`].
-/// Both `senna gbe` and `pinto gbe` reach this with identical args, so
-/// the resolution + zero-edge guard live here to keep error messages
-/// consistent.
+/// `senna gbe` reaches this so the resolution + zero-edge guard live
+/// here to keep error messages consistent.
 pub struct FeatureNetworkArgs<'a> {
     pub path: &'a str,
     pub feature_names: &'a [Box<str>],
@@ -310,8 +309,8 @@ pub fn load_feature_network(args: FeatureNetworkArgs) -> anyhow::Result<FeatureN
 }
 
 /// Trained model + its `VarMap`. The varmap is exposed so callers can
-/// save checkpoints or re-run inference; current callers (`senna gbe`,
-/// `pinto gbe`) only consume `model`, so it sits unused but kept alive.
+/// save checkpoints or re-run inference; the current caller (`senna
+/// gbe`) only consumes `model`, so it sits unused but kept alive.
 pub struct FitOutput {
     pub model: JointEmbedModel,
     pub varmap: VarMap,
