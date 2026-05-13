@@ -335,6 +335,14 @@ enum LayoutCmd {
     Tsne(LayoutTsneArgs),
     #[command(about = "UMAP-style SGD of pseudobulks over the fuzzy kNN graph.")]
     Umap(LayoutUmapArgs),
+    #[command(
+        about = "Reingold-Tilford tree layout from a pseudotime run.",
+        long_about = "Reads the principal graph + root node from `manifest.pseudotime`\n\
+                      (written by `senna fit-pseudotime`), then produces a top-down tree\n\
+                      layout where y is geodesic pseudotime and x is sibling order.\n\n\
+                      Writes manifest.pseudotime.tree_{cell_coords,nodes_2d}."
+    )]
+    Tree(LayoutTreeArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -385,6 +393,9 @@ fn main() -> anyhow::Result<()> {
             }
             LayoutCmd::Phate(args) => {
                 fit_layout_phate(args)?;
+            }
+            LayoutCmd::Tree(args) => {
+                fit_layout_tree(args)?;
             }
         },
         Commands::Clustering(args) => {
