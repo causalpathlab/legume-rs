@@ -38,7 +38,7 @@ pub struct IndexedTopicArgs {
                      {out}.log_likelihood.parquet   training loss trace\n  \
                      {out}.safetensors              encoder+decoder weights\n  \
                      {out}.cell_proj.parquet        cached random projection (consumed by `senna layout`)\n  \
-                     {out}.senna.json               run manifest consumed by `senna viz --from` and `senna plot --from`\n\n\
+                     {out}.senna.json               run manifest consumed by `senna layout --from` and `senna plot --from`\n\n\
                      With -x bulk files: {out}.bulk_latent.parquet additionally."
     )]
     out: Box<str>,

@@ -58,12 +58,12 @@ pub struct TopicArgs {
                      {out}.delta.parquet            per-batch effects (if --batch-files)\n  \
                      {out}.log_likelihood.parquet   training loss trace\n  \
                      {out}.safetensors              encoder+decoder weights\n  \
-                     {out}.model.json               model metadata (for `senna eval-topic`)\n  \
+                     {out}.model.json               model metadata (for `senna predict`)\n  \
                      {out}.dispersion.parquet       NB dispersion (nb / nbmixture)\n  \
                      {out}.alpha.parquet            ambient gene profile (nbmixture)\n  \
                      {out}.rho.parquet              ρ sigmoid coefficients (nbmixture)\n  \
                      {out}.cell_proj.parquet        cached random projection (consumed by `senna layout`)\n  \
-                     {out}.senna.json               run manifest consumed by `senna viz --from` and `senna plot --from`\n\n\
+                     {out}.senna.json               run manifest consumed by `senna layout --from` and `senna plot --from`\n\n\
                      With --decoder a,b,c: per-decoder dictionaries written as {out}.{name}.dictionary.parquet."
     )]
     pub(crate) out: Box<str>,

@@ -37,7 +37,7 @@ pub struct JointSvdArgs {
                      {out}.latent.parquet      cell × component scores\n  \
                      {out}.cell_proj.parquet   cached random projection (consumed by `senna layout`)\n  \
                      {out}_{d}.delta.parquet   per-batch effects for modality d\n  \
-                     {out}.senna.json          run manifest consumed by `senna viz --from` and `senna plot --from`"
+                     {out}.senna.json          run manifest consumed by `senna layout --from` and `senna plot --from`"
     )]
     out: Box<str>,
 

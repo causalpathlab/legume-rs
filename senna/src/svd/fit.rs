@@ -27,7 +27,7 @@ pub struct SvdArgs {
                      {out}.adjusted.zarr              batch-adjusted backend (if --save-adjusted)\n  \
                      {out}.selected_features.txt      selected HVG names (if HVG enabled)\n  \
                      {out}.cell_proj.parquet          cached random projection (consumed by `senna layout`)\n  \
-                     {out}.senna.json                 run manifest consumed by `senna viz --from` and `senna plot --from`"
+                     {out}.senna.json                 run manifest consumed by `senna layout --from` and `senna plot --from`"
     )]
     out: Box<str>,
 
