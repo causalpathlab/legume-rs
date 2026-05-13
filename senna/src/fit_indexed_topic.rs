@@ -321,11 +321,23 @@ pub struct IndexedTopicArgs {
         long,
         default_value_t = 1.0,
         help = "Relative weight λ_G of the graph Poisson log-likelihood. \
-                Lower = treat the graph as a soft prior (robust to noisy/\
-                incomplete edges); higher = strict reconstruction. Ignored \
-                without --feature-network."
+                Operates on a decoupled ρ_graph — gradients do **not** \
+                touch the encoder's ρ in this revision (pure decoupling). \
+                Lower = soft prior; higher = strict reconstruction. \
+                Ignored without --feature-network."
     )]
     graph_loss_weight: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Run the graph Poisson likelihood only for the first N \
+                epochs, then drop it (0 = never drop, current default). \
+                Useful when the graph keeps pulling ρ_graph into a low-rank \
+                attractor; freezing it early preserves the best-informed \
+                snapshot. Ignored without --feature-network."
+    )]
+    graph_warmup_epochs: usize,
 
     #[arg(
         long,
@@ -702,7 +714,9 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             crate::topic::graph_likelihood::PoissonGraphConfig::build(
                 g,
                 n_features_full,
+                h,
                 args.graph_loss_weight,
+                &param_builder,
                 &dev,
             )
         })
@@ -724,6 +738,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         feature_mean: &feature_mean,
         feature_fisher_weights: &feature_fisher_weights,
         grad_clip: args.grad_clip,
+        graph_warmup_epochs: args.graph_warmup_epochs,
     };
 
     let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_full, &bulk_deltas) {
