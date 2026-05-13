@@ -87,8 +87,8 @@ pub(crate) fn gram_schmidt_anchors(x_pg: &Mat, k: usize) -> Vec<usize> {
     let mut picked: Vec<usize> = Vec::with_capacity(k);
     let mut available: Vec<usize> = (0..n).collect();
 
-    let pb = new_progress_bar(k as u64);
-    pb.set_message("Anchor selection");
+    let prog_bar = new_progress_bar(k as u64);
+    prog_bar.set_message("Anchor selection");
 
     for _ in 0..k {
         let (best_pos, best_row) = available
@@ -107,7 +107,7 @@ pub(crate) fn gram_schmidt_anchors(x_pg: &Mat, k: usize) -> Vec<usize> {
         // allocation for the unit vector.
         let norm2 = residual[best_row].norm_squared();
         if norm2 < 1e-12 {
-            pb.inc(1);
+            prog_bar.inc(1);
             continue;
         }
         let anchor = residual[best_row].clone();
@@ -118,9 +118,9 @@ pub(crate) fn gram_schmidt_anchors(x_pg: &Mat, k: usize) -> Vec<usize> {
         // `axpy` leaves the anchor row at ~0 (modulo round-off); pin it to
         // exact zero so future projections stay clean.
         residual[best_row].fill(0.0);
-        pb.inc(1);
+        prog_bar.inc(1);
     }
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     picked
 }

@@ -104,9 +104,9 @@ pub struct IndexedTopicArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "In-batch k-NN for super-cell merging",
+        help = "In-batch k-NN for pb-sample merging",
         long_help = "Number of within-batch nearest neighbours used when\n\
-                     aggregating cells into pseudobulk super-cells."
+                     aggregating cells into pseudobulk pb-samples."
     )]
     knn_cells: usize,
 

@@ -756,7 +756,7 @@ pub fn nce_loss(
     nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, smoother, dev)
 }
 
-/// Fast path for the identity-coarsening case (every "super-cell" is
+/// Fast path for the identity-coarsening case (every "pb-sample" is
 /// its own row). Skips `unique_with_index`, `pool_cells`, and the
 /// scatter-add — a single `index_select` directly off `model.e_cell` /
 /// `model.b_cell` is mathematically equivalent because each block has

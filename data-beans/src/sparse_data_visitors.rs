@@ -44,15 +44,18 @@ pub trait VisitColumnsOps {
 
 /// Shared bar template used by every par-over-column visitor so progress
 /// shows the same `Label {bar:40} {pos}/{len} units ({eta})` format across
-/// random projection, collapsing, and downstream column scans.
-fn styled_progress_bar(total: u64, unit_label: &str) -> indicatif::ProgressBar {
+/// random projection, collapsing, and downstream column scans. Exported so
+/// downstream crates (data-beans-alg, senna) can reuse the same look.
+pub fn styled_progress_bar(total: u64, unit_label: &str) -> indicatif::ProgressBar {
     use indicatif::{ProgressBar, ProgressStyle};
     let tmpl = format!("{{bar:40}} {{pos}}/{{len}} {} ({{eta}})", unit_label);
-    ProgressBar::new(total).with_style(
+    let prog_bar = ProgressBar::new(total).with_style(
         ProgressStyle::with_template(&tmpl)
             .unwrap()
             .progress_chars("##-"),
-    )
+    );
+    prog_bar.enable_steady_tick(std::time::Duration::from_millis(500));
+    prog_bar
 }
 
 impl VisitColumnsOps for SparseIoVec {
@@ -75,14 +78,14 @@ impl VisitColumnsOps for SparseIoVec {
         let jobs = create_jobs(ntot, num_features, block_size);
 
         let arc_shared_out = Arc::new(Mutex::new(shared_out));
-        let pb = styled_progress_bar(jobs.len() as u64, "blocks");
+        let prog_bar = styled_progress_bar(jobs.len() as u64, "blocks");
 
         let result = jobs
             .par_iter()
-            .progress_with(pb.clone())
+            .progress_with(prog_bar.clone())
             .map(|&(lb, ub)| visitor((lb, ub), self, shared_in, arc_shared_out.clone()))
             .collect();
-        pb.finish_and_clear();
+        prog_bar.finish_and_clear();
         result
     }
 
@@ -105,16 +108,15 @@ impl VisitColumnsOps for SparseIoVec {
 
         let arc_shared_out = Arc::new(Mutex::new(shared_out));
         let num_samples = group_to_cols.len();
-        let pb = styled_progress_bar(num_samples as u64, "groups");
+        let prog_bar = styled_progress_bar(num_samples as u64, "groups");
 
         let result = group_to_cols
-            .iter()
+            .par_iter()
             .enumerate()
-            .par_bridge()
-            .progress_with(pb.clone())
+            .progress_with(prog_bar.clone())
             .map(|(sample, cells)| visitor(sample, cells, self, shared_in, arc_shared_out.clone()))
             .collect();
-        pb.finish_and_clear();
+        prog_bar.finish_and_clear();
         result
     }
 }

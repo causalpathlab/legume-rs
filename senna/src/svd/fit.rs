@@ -84,9 +84,9 @@ pub struct SvdArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "In-batch k-NN for super-cell merging",
+        help = "In-batch k-NN for pb-sample merging",
         long_help = "Number of within-batch nearest neighbours used when\n\
-                     aggregating cells into pseudobulk super-cells."
+                     aggregating cells into pseudobulk pb-samples."
     )]
     knn_cells: usize,
 
@@ -192,7 +192,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         &proj_kn,
         &batch_membership,
         &MultilevelParams {
-            knn_super_cells: args.knn_cells,
+            knn_pb_samples: args.knn_cells,
             num_levels: args.num_levels,
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,

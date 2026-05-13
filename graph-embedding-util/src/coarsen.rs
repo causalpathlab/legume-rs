@@ -9,7 +9,7 @@ use data_beans_alg::feature_coarsening::FeatureCoarsening;
 pub struct AxisCoarsenings {
     pub coarsenings: Vec<FeatureCoarsening>,
     /// Set when every coarsening in `coarsenings` is the identity
-    /// partition (each fine row is its own super-cell). Lets the
+    /// partition (each fine row is its own pb-sample). Lets the
     /// training loop bypass `pool_cells`'s gather/scatter and use a
     /// single `index_select` per side. Set by [`identity_axis`].
     pub is_identity: bool,
@@ -26,7 +26,7 @@ impl AxisCoarsenings {
 }
 
 /// One identity coarsening over `n` items. Each item is its own
-/// super-cell; `pool_cells` becomes a no-op (mean of one row = that
+/// pb-sample; `pool_cells` becomes a no-op (mean of one row = that
 /// row) and `sample_edge_batch` resolves `coarse_cell == fine_cell`.
 pub fn identity_axis(n: usize) -> AxisCoarsenings {
     let fine_to_coarse: Vec<usize> = (0..n).collect();

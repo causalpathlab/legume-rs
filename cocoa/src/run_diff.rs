@@ -218,7 +218,7 @@ pub struct DiffArgs {
         default_value_t = 10,
         help = "BBKNN fan-out for multilevel refinement"
     )]
-    refine_knn_super_cells: usize,
+    refine_knn_pb_samples: usize,
 
     #[command(flatten)]
     cnv: CnvArgs,
@@ -340,13 +340,13 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         )?;
     } else if args.refine {
         info!(
-            "Refining pseudobulk assignment via multilevel DC-Poisson (num_levels={}, knn_super_cells={})",
-            args.refine_num_levels, args.refine_knn_super_cells
+            "Refining pseudobulk assignment via multilevel DC-Poisson (num_levels={}, knn_pb_samples={})",
+            args.refine_num_levels, args.refine_knn_pb_samples
         );
         let mut refine_settings =
             crate::randomly_partition_data::RefineSettings::with_proj_dim(args.proj_dim);
         refine_settings.num_levels = args.refine_num_levels;
-        refine_settings.knn_super_cells = args.refine_knn_super_cells;
+        refine_settings.knn_pb_samples = args.refine_knn_pb_samples;
         data.sparse_data.assign_pseudobulk_individuals_refined(
             args.proj_dim,
             args.block_size,

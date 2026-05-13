@@ -30,7 +30,7 @@ pub fn streaming_sparse_running_stats(
     let jobs = generate_minibatch_intervals(n_total, n_features, block_size);
 
     let tmpl = format!("{progress_label} {{bar:40}} {{pos}}/{{len}} blocks ({{eta}})");
-    let pb = ProgressBar::new(jobs.len() as u64).with_style(
+    let prog_bar = ProgressBar::new(jobs.len() as u64).with_style(
         ProgressStyle::with_template(&tmpl)
             .unwrap()
             .progress_chars("##-"),
@@ -38,7 +38,7 @@ pub fn streaming_sparse_running_stats(
 
     let stats: SparseRunningStatistics<f32> = jobs
         .par_iter()
-        .progress_with(pb.clone())
+        .progress_with(prog_bar.clone())
         .try_fold(
             || SparseRunningStatistics::<f32>::new(n_features),
             |mut acc, &(lb, ub)| -> anyhow::Result<SparseRunningStatistics<f32>> {
@@ -54,7 +54,7 @@ pub fn streaming_sparse_running_stats(
                 Ok(a)
             },
         )?;
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     Ok(stats)
 }

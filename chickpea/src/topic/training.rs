@@ -280,16 +280,16 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
     let verbose = log::log_enabled!(log::Level::Info);
     info!("Training: {} epochs, jitter={}", n_epochs, jitter);
 
-    let pb = if verbose {
+    let prog_bar = if verbose {
         ProgressBar::hidden()
     } else {
-        let pb = ProgressBar::new(n_epochs as u64);
-        pb.set_style(
+        let prog_bar = ProgressBar::new(n_epochs as u64);
+        prog_bar.set_style(
             ProgressStyle::default_bar()
                 .template("{bar:40.green/dim} {pos}/{len} [{elapsed}<{eta}] {msg}")
                 .unwrap(),
         );
-        pb
+        prog_bar
     };
 
     /* Row budgets: default 2^sort_dim per level */
@@ -471,8 +471,8 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
             if verbose {
                 info!("  {}/{}: {}", epoch_counter + 1, n_epochs, msg);
             } else {
-                pb.set_message(msg);
-                pb.inc(1);
+                prog_bar.set_message(msg);
+                prog_bar.inc(1);
             }
 
             epoch_counter += 1;
@@ -482,7 +482,7 @@ pub fn train(ctx: &TrainingContext, params: &TrainingParams) -> anyhow::Result<T
             }
         }
     }
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     Ok(TrainedModel {
         decoders,

@@ -26,13 +26,13 @@ pub fn init_logger(verbose: bool) {
 /// Create a progress bar registered with the shared `MULTI_PROGRESS` and
 /// styled with senna's standard template (`[elapsed] bar pos/len (eta)`).
 pub fn new_progress_bar(len: u64) -> ProgressBar {
-    let pb = MULTI_PROGRESS.add(ProgressBar::new(len));
-    pb.set_style(
+    let prog_bar = MULTI_PROGRESS.add(ProgressBar::new(len));
+    prog_bar.set_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({eta}) {msg}",
         )
         .unwrap()
         .progress_chars("##-"),
     );
-    pb
+    prog_bar
 }
