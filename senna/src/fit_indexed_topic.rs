@@ -11,6 +11,7 @@ use crate::topic::train_indexed::{
 
 use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
 use candle_util::candle_encoder_indexed::*;
+use log::warn;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 
 #[derive(Args, Debug)]
@@ -170,7 +171,7 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
+        default_value_t = 5.0,
         help = "Global L2 gradient norm clip per minibatch (0 = off; typical 0.5–5.0)"
     )]
     grad_clip: f32,
@@ -246,14 +247,15 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 16,
-        help = "Per-feature embedding dimension H (shared by encoder and decoder)",
+        default_value_t = 0,
+        help = "Per-feature embedding dimension H (0 = auto = 2 × n-latent-topics)",
         long_help = "Dimension H of the per-gene embedding ρ ∈ ℝ^{D×H}. ρ is shared\n\
                      between encoder (value-weighted pool over each cell's top-K\n\
                      features) and decoder (β_kd = log_softmax_d(α_k · ρ_dᵀ), with\n\
-                     α ∈ ℝ^{K×H} as topic embeddings). Smaller H ⇒ stronger\n\
-                     regularization of β through a lower-rank shared space; larger H\n\
-                     ⇒ more expressive but risk of mode collapse."
+                     α ∈ ℝ^{K×H} as topic embeddings). β is rank ≤ H, so H must be\n\
+                     ≥ K (--n-latent-topics) for K independent topics to be\n\
+                     representable. Default 0 resolves to 2K for headroom. Set\n\
+                     explicitly to override; H < K errors at startup."
     )]
     embedding_dim: usize,
 
@@ -441,6 +443,32 @@ fn remap_graph_to_subset(
 pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
+    let k = args.n_latent_topics;
+    let h = if args.embedding_dim == 0 {
+        let auto = 2 * k;
+        info!("--embedding-dim not set; defaulting to 2 × K = {auto}");
+        auto
+    } else {
+        args.embedding_dim
+    };
+    if h < k {
+        anyhow::bail!(
+            "--embedding-dim ({h}) < --n-latent-topics ({k}). β = softmax(α·ρᵀ) is rank ≤ H, \
+             so at most {h} linearly independent topics can be represented — the remaining \
+             {} would collapse onto linear combinations. Pass --embedding-dim >= {k} \
+             (recommended: {} for headroom), or omit --embedding-dim to use the 2K default.",
+            k - h,
+            k * 2,
+        );
+    }
+    if h < 2 * k {
+        warn!(
+            "--embedding-dim ({h}) is at the β-rank limit for --n-latent-topics ({k}); \
+             topics may collapse during training. Recommend --embedding-dim >= {} for headroom.",
+            k * 2,
+        );
+    }
+
     let (effective_multiome, effective_hvg_n, effective_hvg_list) =
         crate::hvg::resolve_multiome_with_hvg(args.multiome, args.data_files.len(), &args.hvg);
 
@@ -539,7 +567,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         IndexedEmbeddingEncoderArgs {
             n_features: n_features_full,
             n_topics,
-            embedding_dim: args.embedding_dim,
+            embedding_dim: h,
             layers: &args.encoder_layers,
         },
         &parameters,
@@ -573,7 +601,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
                 n_features_encoder: n_features_full,
                 encoder_hidden: &args.encoder_layers,
                 level_decoder_dims: &vec![n_features_full; num_levels],
-                embedding_dim: Some(args.embedding_dim),
+                embedding_dim: Some(h),
             },
         )?;
     }
@@ -581,7 +609,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     info!(
         "input: {} -> indexed encoder (emb={}, ctx={}) -> {} decoders (D={}, ctx={})",
         n_features_full,
-        args.embedding_dim,
+        h,
         args.context_size,
         num_levels,
         n_features_full,
@@ -737,7 +765,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         level_decoder_dims: vec![n_features_full; num_levels],
         adj_method: args.adj_method.as_str().into(),
         has_coarsening: false,
-        embedding_dim: Some(args.embedding_dim),
+        embedding_dim: Some(h),
         enc_context_size: Some(args.context_size),
         dec_context_size: Some(dec_context_size),
         theta_mean: None,
@@ -758,7 +786,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         IndexedEmbeddingEncoderArgs {
             n_features: n_features_full,
             n_topics,
-            embedding_dim: args.embedding_dim,
+            embedding_dim: h,
             layers: &args.encoder_layers,
         },
         &parameters,
