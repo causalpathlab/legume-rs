@@ -6,6 +6,7 @@
 //! helpers like `topic::anchor_prior`.
 
 pub(crate) mod cell_layout;
+pub(crate) mod orient;
 pub(crate) mod phate;
 pub(crate) mod similarity;
 pub(crate) mod tsne;
