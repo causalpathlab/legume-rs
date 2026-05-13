@@ -277,6 +277,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                     seed: c.seed,
                     gibbs_stagnation: 0.005,
                     profile_source: data_beans_alg::dc_poisson::ProfileSource::Raw,
+                    ..Default::default()
                 },
                 data: &data_vec,
                 num_genes: n_genes,

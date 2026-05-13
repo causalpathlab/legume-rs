@@ -205,18 +205,6 @@ pub fn refine_assignments(
         }
     }
 
-    // Build profiles once.
-    let mut profiles = match &params.profile_source {
-        ProfileSource::Raw => Profiles::from_gene_sums(gene_sums, num_genes),
-        ProfileSource::Projected { basis } => Profiles::from_projection(basis, pb_sample_to_cells),
-    };
-    if matches!(params.profile_source, ProfileSource::Raw) {
-        profiles.apply_feature_weighting(params.feature_weighting);
-    }
-
-    // BBKNN proposals via the shared per-batch cell HNSW.
-    let bbknn = build_bbknn_neighbors(layout, batch_knn_lookup, k_per_batch)?;
-
     // Compact each level's initial labels to a dense 0..K range.
     let mut refined: Vec<Vec<usize>> = Vec::with_capacity(num_levels);
     let mut ks: Vec<usize> = Vec::with_capacity(num_levels);
@@ -225,6 +213,43 @@ pub fn refine_assignments(
         refined.push(compact);
         ks.push(k);
     }
+
+    // Both sweep counts zero ⇒ no DC-Poisson moves can happen; skip the
+    // (expensive) profile build, NB-Fisher weighting, and BBKNN construction
+    // and return the compacted initial labels.
+    if params.num_gibbs == 0 && params.num_greedy == 0 {
+        info!("Skipping DC-Poisson refinement: --pb-refine-gibbs=0 and --pb-refine-greedy=0");
+        return Ok(RefinedAssignment {
+            pbsamp_to_group: refined,
+            num_groups_per_level: ks,
+        });
+    }
+
+    // Build profiles once.
+    info!(
+        "Building DC-Poisson profiles ({} pb-samples × {} genes) ...",
+        num_pb, num_genes
+    );
+    let mut profiles = match &params.profile_source {
+        ProfileSource::Raw => Profiles::from_gene_sums(gene_sums, num_genes),
+        ProfileSource::Projected { basis } => Profiles::from_projection(basis, pb_sample_to_cells),
+    };
+    if matches!(params.profile_source, ProfileSource::Raw)
+        && !matches!(
+            params.feature_weighting,
+            crate::dc_poisson::FeatureWeighting::None
+        )
+    {
+        info!("Computing NB Fisher-info feature weights ...");
+        profiles.apply_feature_weighting(params.feature_weighting);
+    }
+
+    // BBKNN proposals via the shared per-batch cell HNSW.
+    info!(
+        "Building BBKNN candidate sets (knn={} per non-own batch) ...",
+        k_per_batch
+    );
+    let bbknn = build_bbknn_neighbors(layout, batch_knn_lookup, k_per_batch)?;
 
     let mut rng = SmallRng::seed_from_u64(params.seed);
 
