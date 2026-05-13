@@ -675,56 +675,33 @@ fn apply_proposals<G: MoveGuard>(
     sc
 }
 
-/// Gauss–Seidel Gibbs sweep: each entity scores against the live (mutated)
-/// stats. Single-threaded.
-fn gibbs_sweep_sequential<G: MoveGuard>(
+/// Gauss–Seidel sequential sweep. For each entity visited in `order`, scores
+/// the candidate destinations under the live (mutated) stats, picks one via
+/// `pick(log_probs, candidates)`, and applies the move through the guard.
+/// Gibbs callers shuffle `order` and pass a categorical-sampling closure;
+/// greedy callers pass `0..n` and an argmax closure.
+fn sweep_sequential<G, F, I>(
     candidates: &[Vec<usize>],
     stats: &mut DcPoissonStats,
     profiles: &Profiles,
     guard: &G,
-    rng: &mut SmallRng,
     log_probs: &mut [f64],
-) -> SweepCounts {
-    let n = candidates.len();
-    let mut order: Vec<usize> = (0..n).collect();
-    order.shuffle(rng);
+    order: I,
+    mut pick: F,
+) -> SweepCounts
+where
+    G: MoveGuard,
+    F: FnMut(&[f64], &[usize]) -> usize,
+    I: IntoIterator<Item = usize>,
+{
     let mut sc = SweepCounts::default();
-    for &e in &order {
+    for e in order {
         let cand = &candidates[e];
         if cand.len() < 2 {
             continue;
         }
         compute_log_probs_restricted(e, stats, profiles, cand, log_probs);
-        let new = sample_categorical_log(log_probs, rng);
-        let old = stats.membership[e];
-        if new == old {
-            continue;
-        }
-        if guard.accept_move(e, old, &stats.membership) {
-            stats.delta_move(e, old, new, profiles);
-            sc.moves += 1;
-        } else {
-            sc.vetoed += 1;
-        }
-    }
-    sc
-}
-
-/// Gauss–Seidel greedy sweep.
-fn greedy_sweep_sequential<G: MoveGuard>(
-    candidates: &[Vec<usize>],
-    stats: &mut DcPoissonStats,
-    profiles: &Profiles,
-    guard: &G,
-    log_probs: &mut [f64],
-) -> SweepCounts {
-    let mut sc = SweepCounts::default();
-    for (e, cand) in candidates.iter().enumerate() {
-        if cand.len() < 2 {
-            continue;
-        }
-        compute_log_probs_restricted(e, stats, profiles, cand, log_probs);
-        let new = argmax_log_restricted(log_probs, cand);
+        let new = pick(log_probs, cand);
         let old = stats.membership[e];
         if new == old {
             continue;
@@ -821,6 +798,14 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
         Vec::new()
     };
 
+    // Reusable shuffled-order buffer for sequential Gibbs sweeps. Greedy
+    // sequential iterates `0..num_entities` directly and ignores this.
+    let mut order: Vec<usize> = if !params.parallel {
+        (0..num_entities).collect()
+    } else {
+        Vec::new()
+    };
+
     let max_sweeps = (params.num_gibbs + params.num_greedy) as u64;
     let prog_bar = ProgressBar::new(max_sweeps).with_style(
         ProgressStyle::with_template(&format!(
@@ -859,7 +844,16 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
                     },
                 )
             } else {
-                gibbs_sweep_sequential(candidates, &mut stats, profiles, guard, rng, &mut log_probs)
+                order.shuffle(rng);
+                sweep_sequential(
+                    candidates,
+                    &mut stats,
+                    profiles,
+                    guard,
+                    &mut log_probs,
+                    order.iter().copied(),
+                    |log_probs, _cand| sample_categorical_log(log_probs, rng),
+                )
             };
             total_moves += sc.moves;
             total_vetoed += sc.vetoed;
@@ -889,7 +883,15 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
                 |log_probs, cand, _e| argmax_log_restricted(log_probs, cand),
             )
         } else {
-            greedy_sweep_sequential(candidates, &mut stats, profiles, guard, &mut log_probs)
+            sweep_sequential(
+                candidates,
+                &mut stats,
+                profiles,
+                guard,
+                &mut log_probs,
+                0..num_entities,
+                |log_probs, cand| argmax_log_restricted(log_probs, cand),
+            )
         };
         total_moves += sc.moves;
         total_vetoed += sc.vetoed;
