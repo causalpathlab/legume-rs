@@ -627,7 +627,7 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
     let mut total_vetoed = 0usize;
 
     let max_sweeps = (params.num_gibbs + params.num_greedy) as u64;
-    let pb = ProgressBar::new(max_sweeps).with_style(
+    let prog_bar = ProgressBar::new(max_sweeps).with_style(
         ProgressStyle::with_template(&format!(
             "{} {{bar:40}} {{pos}}/{{len}} sweeps ({{elapsed}}/{{eta}})",
             level_label
@@ -638,7 +638,7 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
     // Refresh on a timer so the bar visibly animates between sweep ticks
     // (a single sweep at large D can take several seconds — without this
     // the bar is silent until the next inc(1)).
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    prog_bar.enable_steady_tick(std::time::Duration::from_millis(100));
 
     if params.num_gibbs > 0 {
         let mut order: Vec<usize> = (0..num_entities).collect();
@@ -664,7 +664,7 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
                 }
             }
             total_moves += moves;
-            pb.inc(1);
+            prog_bar.inc(1);
             if params.gibbs_stagnation > 0.0 {
                 if (moves as f64) < params.gibbs_stagnation * (num_entities as f64) {
                     low_sweeps += 1;
@@ -697,12 +697,12 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
             }
         }
         total_moves += moves;
-        pb.inc(1);
+        prog_bar.inc(1);
         if moves == 0 {
             break;
         }
     }
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     if total_vetoed > 0 {
         log::debug!(

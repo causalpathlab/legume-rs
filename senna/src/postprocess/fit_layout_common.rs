@@ -115,7 +115,7 @@ pub struct LayoutCommonArgs {
     )]
     pub sort_dim: usize,
 
-    #[arg(long, default_value_t = DEFAULT_KNN, help = "kNN for super-cell matching")]
+    #[arg(long, default_value_t = DEFAULT_KNN, help = "kNN for pb-sample matching")]
     pub knn_cells: usize,
 
     #[arg(
@@ -760,7 +760,7 @@ fn preprocess_layout_data_from_latent(
 /// Fast path: given a cached `cell_proj.parquet` from a prior training
 /// run, open the sparse backends lightly (no projection, no collapse),
 /// partition cells by hashing the cached projection, and build PB
-/// features + similarity directly in projection space. Skips super-cell
+/// features + similarity directly in projection space. Skips pb-sample
 /// matching and the Gamma posterior optimization that the recompute
 /// path runs — those are training-side concerns the layout doesn't need.
 fn preprocess_layout_data_from_cache(

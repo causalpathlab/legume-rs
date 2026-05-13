@@ -117,14 +117,14 @@ pub fn build_projection_profiles_for_edges(
 
     let jobs = generate_minibatch_intervals(n_edges, data.num_rows(), block_size);
 
-    let pb = new_progress_bar(
+    let prog_bar = new_progress_bar(
         jobs.len() as u64,
         "Building edges {bar:40} {pos}/{len} blocks ({eta})",
     );
 
     let partial_results: Vec<(usize, Vec<f32>)> = jobs
         .par_iter()
-        .progress_with(pb.clone())
+        .progress_with(prog_bar.clone())
         .map(|&(lb, ub)| -> anyhow::Result<(usize, Vec<f32>)> {
             let chunk_edges = &edges[lb..ub];
             let chunk_size = ub - lb;
@@ -169,7 +169,7 @@ pub fn build_projection_profiles_for_edges(
             Ok((lb, chunk_profiles))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     let mut profiles = vec![0.0f32; n_edges * m];
     for (lb, chunk) in partial_results {
@@ -180,20 +180,20 @@ pub fn build_projection_profiles_for_edges(
     Ok(LinkProfileStore::new(profiles, n_edges, m))
 }
 
-/// Coarsen fine-cell raw expression to super-cells.
+/// Coarsen fine-cell raw expression to pb-samples.
 ///
-/// Returns an `[n_genes × n_super_cells]` dense matrix whose column `c`
+/// Returns an `[n_genes × n_pb_samples]` dense matrix whose column `c`
 /// holds `Σ_{i: cell_labels[i] == c} x_fine[:, i]` — i.e. the total
-/// gene counts pooled across every fine cell assigned to super-cell `c`.
+/// gene counts pooled across every fine cell assigned to pb-sample `c`.
 ///
 /// Streams fine cells in blocks for memory efficiency. The return buffer
-/// is dense (not sparse) because the super-cell expression is dense by
+/// is dense (not sparse) because the pb-sample expression is dense by
 /// construction: any gene expressed in any fine cell within a cluster
 /// contributes to that cluster's column.
 pub fn coarsen_cell_expression_dense(
     data: &SparseIoVec,
     cell_labels: &[usize],
-    n_super_cells: usize,
+    n_pb_samples: usize,
     block_size: Option<usize>,
 ) -> anyhow::Result<Mat> {
     let n_genes = data.num_rows();
@@ -206,7 +206,7 @@ pub fn coarsen_cell_expression_dense(
         .par_iter()
         .map(|&(lb, ub)| -> anyhow::Result<Mat> {
             let x = data.read_columns_csc(lb..ub)?;
-            let mut local = Mat::zeros(n_genes, n_super_cells);
+            let mut local = Mat::zeros(n_genes, n_pb_samples);
             for col in 0..x.ncols() {
                 let sc = cell_labels[lb + col];
                 let s = x.col(col);
@@ -218,21 +218,21 @@ pub fn coarsen_cell_expression_dense(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let mut super_expr = Mat::zeros(n_genes, n_super_cells);
+    let mut super_expr = Mat::zeros(n_genes, n_pb_samples);
     for local in partials {
         super_expr += local;
     }
     Ok(super_expr)
 }
 
-/// Build projection profiles for super-edges from pre-coarsened super-cell
+/// Build projection profiles for super-edges from pre-coarsened pb-sample
 /// expression: `y_e = basis^T · (x_super[:, a] + x_super[:, b])`, with
 /// negative entries clamped to 0.
 ///
 /// Used inside the V-cycle cascade when the profile mode is `Projection`.
 /// The alternative is to (incorrectly) read fine-cell columns at indices
 /// equal to cluster labels — which gave arbitrary fine cells as
-/// "super-cells". This function replaces that path.
+/// "pb-samples". This function replaces that path.
 pub fn build_super_edge_projection_profiles(
     super_expr: &Mat,
     super_edges: &[(usize, usize)],
@@ -405,13 +405,13 @@ pub fn fit_gene_community_param(
     let prop_kn = cell_propensity.transpose();
     let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
 
-    let pb = new_progress_bar(
+    let prog_bar = new_progress_bar(
         jobs.len() as u64,
         "Gene-community {bar:40} {pos}/{len} blocks ({eta})",
     );
     let partial_stats: Vec<(Mat, DVec)> = jobs
         .par_iter()
-        .progress_with(pb.clone())
+        .progress_with(prog_bar.clone())
         .map(|&(lb, ub)| -> anyhow::Result<(Mat, DVec)> {
             let x_gn = data_vec.read_columns_csc(lb..ub)?;
             let block_len = ub - lb;
@@ -424,7 +424,7 @@ pub fn fit_gene_community_param(
             Ok((sum_gk, n_k))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     let mut sum_gk = Mat::zeros(n_genes, k);
     let mut n_1k = Mat::zeros(1, k);
@@ -720,14 +720,14 @@ pub fn build_module_expression(
     // Dense column-major: rows = modules, columns = cells. Small compared
     // to the raw matrix (typical n_modules is 10² range).
     let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
-    let pb = new_progress_bar(
+    let prog_bar = new_progress_bar(
         jobs.len() as u64,
         "Module expression {bar:40} {pos}/{len} blocks ({eta})",
     );
 
     let partials: Vec<(usize, Mat, Vec<f32>)> = jobs
         .par_iter()
-        .progress_with(pb.clone())
+        .progress_with(prog_bar.clone())
         .map(|&(lb, ub)| -> anyhow::Result<(usize, Mat, Vec<f32>)> {
             let x = data.read_columns_csc(lb..ub)?;
             let block_len = ub - lb;
@@ -749,7 +749,7 @@ pub fn build_module_expression(
             Ok((lb, block_expr, block_totals))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     let mut module_expr = Mat::zeros(n_modules, n_cells);
     let mut cell_totals = vec![0.0f32; n_cells];
@@ -765,22 +765,22 @@ pub fn build_module_expression(
     Ok((module_expr, cell_totals))
 }
 
-/// Aggregate fine-cell module expression to super-cell module expression.
+/// Aggregate fine-cell module expression to pb-sample module expression.
 ///
-/// For each fine cell `c` with super-cell label `cell_labels[c] = sc`:
+/// For each fine cell `c` with pb-sample label `cell_labels[c] = sc`:
 ///   `super_expr[m, sc] += module_expr[m, c]`
-/// Also returns per-super-cell totals.
+/// Also returns per-pb-sample totals.
 pub fn coarsen_module_expression(
     module_expr: &Mat,
     cell_labels: &[usize],
-    n_super_cells: usize,
+    n_pb_samples: usize,
 ) -> (Mat, Vec<f32>) {
     let n_modules = module_expr.nrows();
     let n_cells = module_expr.ncols();
     debug_assert_eq!(cell_labels.len(), n_cells);
 
-    let mut super_expr = Mat::zeros(n_modules, n_super_cells);
-    let mut super_totals = vec![0.0f32; n_super_cells];
+    let mut super_expr = Mat::zeros(n_modules, n_pb_samples);
+    let mut super_totals = vec![0.0f32; n_pb_samples];
     for c in 0..n_cells {
         let sc = cell_labels[c];
         for m in 0..n_modules {

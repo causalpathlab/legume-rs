@@ -75,7 +75,7 @@ impl LinkGibbsSampler {
 
         let mut total_moves = 0;
 
-        let pb = new_progress_bar(
+        let prog_bar = new_progress_bar(
             num_sweeps as u64,
             "Gibbs {bar:40} {pos}/{len} sweeps ({eta})",
         );
@@ -93,9 +93,9 @@ impl LinkGibbsSampler {
                     total_moves += 1;
                 }
             }
-            pb.inc(1);
+            prog_bar.inc(1);
         }
-        pb.finish_and_clear();
+        prog_bar.finish_and_clear();
 
         total_moves
     }
@@ -150,7 +150,7 @@ impl LinkGibbsSampler {
         let edge_order: Vec<usize> = (0..n).collect();
         let chunk_size = std::cmp::max(256, n / rayon::current_num_threads().max(1));
 
-        let pb = new_progress_bar(
+        let prog_bar = new_progress_bar(
             num_sweeps as u64,
             "Gibbs {bar:40} {pos}/{len} sweeps ({eta})",
         );
@@ -192,9 +192,9 @@ impl LinkGibbsSampler {
                 }
             }
             observer(sweep, stats);
-            pb.inc(1);
+            prog_bar.inc(1);
         }
-        pb.finish_and_clear();
+        prog_bar.finish_and_clear();
 
         total_moves
     }
@@ -243,7 +243,7 @@ impl LinkGibbsSampler {
 
         let mut total_moves = 0;
 
-        let pb = new_progress_bar(
+        let prog_bar = new_progress_bar(
             max_sweeps as u64,
             "Greedy {bar:40} {pos}/{len} sweeps ({eta})",
         );
@@ -267,12 +267,12 @@ impl LinkGibbsSampler {
             }
             total_moves += sweep_moves;
             observer(sweep, stats);
-            pb.inc(1);
+            prog_bar.inc(1);
             if sweep_moves == 0 {
                 break;
             }
         }
-        pb.finish_and_clear();
+        prog_bar.finish_and_clear();
 
         total_moves
     }
@@ -355,7 +355,7 @@ impl LinkGibbsSampler {
         let mut total_moves = 0usize;
         let base_seed = self.rng.random::<u64>() | 1;
 
-        let pb = new_progress_bar(
+        let prog_bar = new_progress_bar(
             (num_sweeps * n_parts) as u64,
             &format!("{label} {{bar:40}} {{pos}}/{{len}} jobs ({{eta}})"),
         );
@@ -381,7 +381,7 @@ impl LinkGibbsSampler {
                 .map(|c| {
                     let indices = &comp_edges[c];
                     if indices.is_empty() {
-                        pb.inc(1);
+                        prog_bar.inc(1);
                         return ComponentResult::empty(k, profiles.m);
                     }
 
@@ -434,7 +434,7 @@ impl LinkGibbsSampler {
                     let new_comp_stats =
                         LinkCommunityStats::local_stats(&sub_stores[c], k, &local_stats.membership);
 
-                    pb.inc(1);
+                    prog_bar.inc(1);
 
                     ComponentResult {
                         membership: local_stats.membership,
@@ -471,7 +471,7 @@ impl LinkGibbsSampler {
                 break;
             }
         }
-        pb.finish_and_clear();
+        prog_bar.finish_and_clear();
 
         total_moves
     }

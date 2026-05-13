@@ -1725,8 +1725,8 @@ impl SparseIoVec {
             }
         );
 
-        let pb = ProgressBar::new(batches.len() as u64);
-        pb.set_style(
+        let prog_bar = ProgressBar::new(batches.len() as u64);
+        prog_bar.set_style(
             ProgressStyle::with_template(
                 "[{elapsed_precise}] {bar:30.cyan/blue} {pos}/{len} batches HNSW",
             )
@@ -1738,7 +1738,7 @@ impl SparseIoVec {
         let mut idx_name_glob_dict: Vec<_> = if outer_parallel {
             enumerated
                 .into_par_iter()
-                .progress_with(pb.clone())
+                .progress_with(prog_bar.clone())
                 .map(|(batch_index, (batch_name, batch_glob_indices))| {
                     (
                         batch_index,
@@ -1751,7 +1751,7 @@ impl SparseIoVec {
         } else {
             enumerated
                 .into_iter()
-                .progress_with(pb.clone())
+                .progress_with(prog_bar.clone())
                 .map(|(batch_index, (batch_name, batch_glob_indices))| {
                     (
                         batch_index,
@@ -1762,7 +1762,7 @@ impl SparseIoVec {
                 })
                 .collect()
         };
-        pb.finish_and_clear();
+        prog_bar.finish_and_clear();
 
         idx_name_glob_dict.sort_by_key(|&(idx, _, _, _)| idx);
 
@@ -1872,7 +1872,7 @@ impl SparseIoVec {
 
     /// Register batch membership information without building HNSW
     /// indices. This is a lightweight alternative to `register_batches_dmatrix`
-    /// for use with super-cell based batch correction.
+    /// for use with pb-sample based batch correction.
     pub fn register_batch_membership<T>(&mut self, batch_membership: &[T])
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,

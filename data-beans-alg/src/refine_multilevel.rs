@@ -1,8 +1,8 @@
-//! BBKNN-based Poisson refinement over multi-level super-cell partitions.
+//! BBKNN-based Poisson refinement over multi-level pb-sample partitions.
 //!
-//! Given a hash-initialized hierarchy of super-cell → group mappings and a
-//! `SuperCellLayout` (HNSW over centroids, batch assignments), refine each
-//! level from coarsest to finest by proposing moves that keep each super-cell
+//! Given a hash-initialized hierarchy of pb-sample → group mappings and a
+//! `PbSampleLayout` (HNSW over centroids, batch assignments), refine each
+//! level from coarsest to finest by proposing moves that keep each pb-sample
 //! under the same parent group (sibling-constrained) and are drawn from the
 //! batch-balanced KNN neighborhood. Moves are scored by a DC-Poisson
 //! log-likelihood with NB Fisher-info feature weighting (see
@@ -16,7 +16,7 @@
 
 #![allow(dead_code)]
 
-use crate::collapse_data::SuperCellLayout;
+use crate::collapse_data::PbSampleLayout;
 use crate::dc_poisson::{
     compute_sibling_sets, intersect_with_siblings_fallback, refine_with_proposer,
     CandidateProposer, ProfileSource, Profiles, RefineContext,
@@ -35,13 +35,13 @@ pub use crate::dc_poisson::{compact_labels, RefineParams};
 // Public configuration
 ////////////////////////////////////////////////////////////////////////////////
 
-/// Per-level refined super-cell → group mapping.
+/// Per-level refined pb-sample → group mapping.
 ///
-/// `sc_to_group[level][sc_idx] = refined group id at that level`. Level order
+/// `pbsamp_to_group[level][pbsamp_idx] = refined group id at that level`. Level order
 /// matches the existing collapse convention (`level_dims[0]` = finest).
 #[derive(Debug, Clone)]
 pub struct RefinedAssignment {
-    pub sc_to_group: Vec<Vec<usize>>,
+    pub pbsamp_to_group: Vec<Vec<usize>>,
     pub num_groups_per_level: Vec<usize>,
 }
 
@@ -49,42 +49,42 @@ pub struct RefinedAssignment {
 // Candidate set construction (siblings ∩ BBKNN with sibling fallback)
 ////////////////////////////////////////////////////////////////////////////////
 
-/// Per-super-cell BBKNN proposals: for every non-own batch, query that
+/// Per-pb-sample BBKNN proposals: for every non-own batch, query that
 /// batch's cell-level HNSW (`SparseIoVec::batch_knn_lookup`) with the
-/// super-cell's centroid, dedup returned cells to their owning super-cells
-/// via `layout.cell_to_sc`, and keep up to `knn` distinct super-cells per
+/// pb-sample's centroid, dedup returned cells to their owning pb-samples
+/// via `layout.cell_to_pbsamp`, and keep up to `knn` distinct pb-samples per
 /// other batch.
 ///
-/// Total candidate set per super-cell is up to `knn · (num_batches − 1)`.
+/// Total candidate set per pb-sample is up to `knn · (num_batches − 1)`.
 fn build_bbknn_neighbors(
-    layout: &SuperCellLayout,
+    layout: &PbSampleLayout,
     batch_knn_lookup: &[matrix_util::knn_match::ColumnDict<usize>],
     knn: usize,
 ) -> anyhow::Result<Vec<Vec<usize>>> {
     use matrix_util::knn_match::MakeVecPoint;
     use rayon::prelude::*;
-    let num_sc = layout.cell_counts.len();
+    let num_pb = layout.cell_counts.len();
     let cell_oversample = (knn * 4 + 1).max(knn);
 
-    (0..num_sc)
+    (0..num_pb)
         .into_par_iter()
-        .map(|sc| -> anyhow::Result<Vec<usize>> {
-            let sc_batch = layout.super_cell_to_batch[sc];
-            let centroid = layout.centroids.column(sc).to_vp();
+        .map(|pbsamp| -> anyhow::Result<Vec<usize>> {
+            let pbsamp_batch = layout.pb_sample_to_batch[pbsamp];
+            let centroid = layout.centroids.column(pbsamp).to_vp();
             let mut all_scs: Vec<usize> = Vec::new();
             for (b, bknn) in batch_knn_lookup.iter().enumerate() {
-                if b == sc_batch {
+                if b == pbsamp_batch {
                     continue;
                 }
                 let (cells, _dists) = bknn.search_by_query_data(&centroid, cell_oversample)?;
                 let mut seen: Vec<usize> = Vec::new();
                 for &c in &cells {
-                    let other_sc = layout.cell_to_sc[c];
-                    if other_sc == usize::MAX || other_sc == sc {
+                    let other_pbsamp = layout.cell_to_pbsamp[c];
+                    if other_pbsamp == usize::MAX || other_pbsamp == pbsamp {
                         continue;
                     }
-                    if !seen.contains(&other_sc) {
-                        seen.push(other_sc);
+                    if !seen.contains(&other_pbsamp) {
+                        seen.push(other_pbsamp);
                         if seen.len() >= knn {
                             break;
                         }
@@ -97,22 +97,28 @@ fn build_bbknn_neighbors(
         .collect()
 }
 
-/// Candidate set per super-cell = siblings ∩ (groups of BBKNN neighbors),
+/// Candidate set per pb-sample = siblings ∩ (groups of BBKNN neighbors),
 /// via the shared [`intersect_with_siblings_fallback`] helper.
 fn build_candidate_sets(
     siblings: &[Vec<usize>],
     bbknn: &[Vec<usize>],
-    sc_to_group_at_level: &[usize],
+    pbsamp_to_group_at_level: &[usize],
 ) -> Vec<Vec<usize>> {
     siblings
         .iter()
         .enumerate()
-        .map(|(sc, sib)| {
-            let mut neighbor_groups: Vec<usize> =
-                bbknn[sc].iter().map(|&j| sc_to_group_at_level[j]).collect();
+        .map(|(pbsamp, sib)| {
+            let mut neighbor_groups: Vec<usize> = bbknn[pbsamp]
+                .iter()
+                .map(|&j| pbsamp_to_group_at_level[j])
+                .collect();
             neighbor_groups.sort_unstable();
             neighbor_groups.dedup();
-            intersect_with_siblings_fallback(sib, &neighbor_groups, sc_to_group_at_level[sc])
+            intersect_with_siblings_fallback(
+                sib,
+                &neighbor_groups,
+                pbsamp_to_group_at_level[pbsamp],
+            )
         })
         .collect()
 }
@@ -121,11 +127,11 @@ fn build_candidate_sets(
 // BBKNN-based CandidateProposer
 ////////////////////////////////////////////////////////////////////////////////
 
-/// Proposes move candidates for super-cells via cross-batch BBKNN.
+/// Proposes move candidates for pb-samples via cross-batch BBKNN.
 ///
-/// For each super-cell, the candidate set is
+/// For each pb-sample, the candidate set is
 /// `siblings ∩ (groups of BBKNN neighbors)`, with sibling fallback when
-/// the intersection is empty. Siblings are the other super-cells sharing
+/// the intersection is empty. Siblings are the other pb-samples sharing
 /// the same parent group at the next-coarser level (passed in at
 /// construction).
 pub struct BbknnProposer<'a> {
@@ -153,13 +159,13 @@ impl<'a> CandidateProposer for BbknnProposer<'a> {
 /// per-batch HNSW over cells, typically obtained from
 /// `SparseIoVec::batch_knn_lookup()` after `build_hnsw_per_batch`.
 /// `k_per_batch` is the BBKNN fan-out — up to this many distinct
-/// super-cells are drawn from **each** non-own batch as move candidates.
+/// pb-samples are drawn from **each** non-own batch as move candidates.
 #[derive(Clone, Copy)]
 pub struct RefineInputs<'a> {
-    pub layout: &'a SuperCellLayout,
+    pub layout: &'a PbSampleLayout,
     pub gene_sums: &'a GeneSums,
     pub num_genes: usize,
-    pub super_cell_to_cells: &'a [Vec<usize>],
+    pub pb_sample_to_cells: &'a [Vec<usize>],
     pub batch_knn_lookup: &'a [matrix_util::knn_match::ColumnDict<usize>],
     pub k_per_batch: usize,
     pub initial_sc_to_group_per_level: &'a [Vec<usize>],
@@ -178,7 +184,7 @@ pub fn refine_assignments(
         layout,
         gene_sums,
         num_genes,
-        super_cell_to_cells,
+        pb_sample_to_cells,
         batch_knn_lookup,
         k_per_batch,
         initial_sc_to_group_per_level,
@@ -187,14 +193,14 @@ pub fn refine_assignments(
     if num_levels == 0 {
         return Err(anyhow::anyhow!("no levels"));
     }
-    let num_sc = layout.cell_counts.len();
+    let num_pb = layout.cell_counts.len();
     for (i, lvl) in initial_sc_to_group_per_level.iter().enumerate() {
-        if lvl.len() != num_sc {
+        if lvl.len() != num_pb {
             return Err(anyhow::anyhow!(
                 "level {} has {} entries, expected {}",
                 i,
                 lvl.len(),
-                num_sc
+                num_pb
             ));
         }
     }
@@ -202,7 +208,7 @@ pub fn refine_assignments(
     // Build profiles once.
     let mut profiles = match &params.profile_source {
         ProfileSource::Raw => Profiles::from_gene_sums(gene_sums, num_genes),
-        ProfileSource::Projected { basis } => Profiles::from_projection(basis, super_cell_to_cells),
+        ProfileSource::Projected { basis } => Profiles::from_projection(basis, pb_sample_to_cells),
     };
     if matches!(params.profile_source, ProfileSource::Raw) {
         profiles.apply_feature_weighting(params.feature_weighting);
@@ -225,15 +231,15 @@ pub fn refine_assignments(
     // Walk coarsest → finest (highest level index down to 0).
     for level in (0..num_levels).rev() {
         let k = ks[level];
-        debug!("refining level {} (k={}, num_sc={})", level, k, num_sc);
+        debug!("refining level {} (k={}, num_pb={})", level, k, num_pb);
         let siblings = compute_sibling_sets(&refined, level, k);
 
         let proposer = BbknnProposer::new(siblings, &bbknn);
 
-        let sc_to_group = &mut refined[level];
+        let pbsamp_to_group = &mut refined[level];
         let label = format!("Refine L{}/{}", num_levels - level, num_levels);
         let moves = refine_with_proposer(
-            sc_to_group,
+            pbsamp_to_group,
             &proposer,
             &mut rng,
             &RefineContext {
@@ -246,13 +252,13 @@ pub fn refine_assignments(
         info!("  level {} refined: {} moves; k={} groups", level, moves, k);
 
         // Compact in case greedy emptied groups (keeps K monotone without gaps).
-        let (compact, new_k) = compact_labels(sc_to_group);
-        *sc_to_group = compact;
+        let (compact, new_k) = compact_labels(pbsamp_to_group);
+        *pbsamp_to_group = compact;
         ks[level] = new_k;
     }
 
     Ok(RefinedAssignment {
-        sc_to_group: refined,
+        pbsamp_to_group: refined,
         num_groups_per_level: ks,
     })
 }
@@ -267,13 +273,13 @@ mod tests {
 
     #[test]
     fn test_build_candidate_sets_fallback() {
-        // sc 0 has siblings [0,1] but BBKNN lands only on a non-sibling group.
+        // pbsamp 0 has siblings [0,1] but BBKNN lands only on a non-sibling group.
         let siblings = vec![vec![0usize, 1], vec![0, 1]];
         let bbknn = vec![vec![1usize], vec![0]];
-        let sc_to_group = vec![0usize, 1];
+        let pbsamp_to_group = vec![0usize, 1];
         // Neighbor of sc0 is sc1 (group 1) → intersection {1}.
         // sc0 is in group 0; intersection lacks 0 so 0 is appended.
-        let cand = build_candidate_sets(&siblings, &bbknn, &sc_to_group);
+        let cand = build_candidate_sets(&siblings, &bbknn, &pbsamp_to_group);
         assert_eq!(cand[0], vec![0, 1]);
         assert_eq!(cand[1], vec![0, 1]);
     }

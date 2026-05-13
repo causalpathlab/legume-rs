@@ -127,9 +127,9 @@ pub struct GbeArgs {
     #[arg(
         long,
         default_value_t = 200,
-        help = "Target super-cell blocks (cell axis)"
+        help = "Target pb-sample blocks (cell axis)"
     )]
-    super_cells: usize,
+    pb_samples: usize,
 
     #[arg(long, default_value_t = 10, help = "Sketch dim for coarsening RP")]
     sketch_dim: usize,
@@ -406,7 +406,7 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         hvg_weights,
         composite_mode: args.composite_mode.into(),
         refine,
-        super_cells: args.super_cells,
+        pb_samples: args.pb_samples,
         sketch_dim: args.sketch_dim,
         epochs: args.epochs,
         batches_per_epoch: args.batches_per_epoch,

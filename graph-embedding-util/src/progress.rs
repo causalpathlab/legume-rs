@@ -6,13 +6,13 @@
 use indicatif::{ProgressBar, ProgressStyle};
 
 pub fn new_progress_bar(len: u64) -> ProgressBar {
-    let pb = ProgressBar::new(len);
-    pb.set_style(
+    let prog_bar = ProgressBar::new(len);
+    prog_bar.set_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({eta}) {msg}",
         )
         .unwrap()
         .progress_chars("##-"),
     );
-    pb
+    prog_bar
 }

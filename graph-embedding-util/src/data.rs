@@ -52,7 +52,7 @@ impl UnifiedData {
     }
 
     /// Build a synthetic `UnifiedData` whose "cells" are pseudobulks
-    /// (super-cells from `collapse_columns_multilevel_vec`). Used by
+    /// (pb-samples from `collapse_columns_multilevel_vec`). Used by
     /// the two-stage fit: stage 1 trains `E_feat` on this batch-
     /// corrected pseudobulk count matrix, then freezes it for the
     /// per-cell stage-2 pass.

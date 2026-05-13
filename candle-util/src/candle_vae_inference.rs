@@ -81,10 +81,10 @@ where
             train_config.learning_rate.into(),
         )?;
 
-        let pb = ProgressBar::new(train_config.num_pretrain_epochs as u64);
+        let prog_bar = ProgressBar::new(train_config.num_pretrain_epochs as u64);
 
         if !train_config.show_progress || train_config.verbose {
-            pb.set_draw_target(ProgressDrawTarget::hidden());
+            prog_bar.set_draw_target(ProgressDrawTarget::hidden());
         }
 
         let mut llik_trace = vec![];
@@ -118,7 +118,7 @@ where
                     adam.backward_step(&loss)?;
                 }
             }
-            pb.inc(1);
+            prog_bar.inc(1);
             llik_trace.push(llik_tot / data.num_minibatch() as f32);
             if train_config.verbose {
                 info!(
@@ -128,7 +128,7 @@ where
                 );
             }
         }
-        pb.finish_and_clear();
+        prog_bar.finish_and_clear();
         Ok(llik_trace)
     }
 
@@ -148,10 +148,10 @@ where
             train_config.learning_rate.into(),
         )?;
 
-        let pb = ProgressBar::new(train_config.num_epochs as u64);
+        let prog_bar = ProgressBar::new(train_config.num_epochs as u64);
 
         if !train_config.show_progress || train_config.verbose {
-            pb.set_draw_target(ProgressDrawTarget::hidden());
+            prog_bar.set_draw_target(ProgressDrawTarget::hidden());
         }
 
         let mut llik_trace = vec![];
@@ -189,7 +189,7 @@ where
                 llik_tot += llik_val;
             }
             llik_trace.push(llik_tot / data.num_minibatch() as f32);
-            pb.inc(1);
+            prog_bar.inc(1);
 
             if train_config.verbose {
                 info!(
@@ -200,7 +200,7 @@ where
             }
         } // each epoch
 
-        pb.finish_and_clear();
+        prog_bar.finish_and_clear();
         Ok(llik_trace)
     }
 
@@ -264,7 +264,7 @@ where
 //             *llik_tot += llik_val;
 //         }
 //     });
-//     pb.inc(1);
+//     prog_bar.inc(1);
 //     {
 //         let llik_tot = arc_llik_tot.lock().expect("llik lock");
 //         llik_trace.push(*llik_tot / data.num_minibatch() as f32);

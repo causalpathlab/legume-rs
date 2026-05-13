@@ -208,10 +208,10 @@ fn smacof_2d(delta: &Mat, y_init: &Mat, max_iter: usize, tol: f32) -> Mat {
     let mut prev_stress = f32::INFINITY;
     let inv_n = 1.0 / n as f32;
 
-    let pb = new_progress_bar(max_iter as u64);
-    pb.set_message("SMACOF");
+    let prog_bar = new_progress_bar(max_iter as u64);
+    prog_bar.set_message("SMACOF");
     for _ in 0..max_iter {
-        pb.inc(1);
+        prog_bar.inc(1);
         // Pairwise distances in the current 2D configuration (column-parallel).
         let dy = build_nn_matrix(n, |j| {
             let (yj0, yj1) = (y[(j, 0)], y[(j, 1)]);
@@ -242,11 +242,11 @@ fn smacof_2d(delta: &Mat, y_init: &Mat, max_iter: usize, tol: f32) -> Mat {
 
         let denom = prev_stress.max(1.0);
         if (prev_stress - stress).abs() / denom < tol {
-            pb.set_message(format!("SMACOF converged (stress={stress:.3e})"));
+            prog_bar.set_message(format!("SMACOF converged (stress={stress:.3e})"));
             break;
         }
         prev_stress = stress;
-        pb.set_message(format!("SMACOF stress={stress:.3e}"));
+        prog_bar.set_message(format!("SMACOF stress={stress:.3e}"));
 
         // B(Y_k) column-parallel. Diagonal = -Σ off-diagonal in the column
         // (B is symmetric, so column and row sums match).
@@ -277,7 +277,7 @@ fn smacof_2d(delta: &Mat, y_init: &Mat, max_iter: usize, tol: f32) -> Mat {
         }
         y = y_new;
     }
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     y
 }

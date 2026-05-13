@@ -39,13 +39,13 @@ pub fn init_logger(verbose: bool) {
 
 /// Create a new `ProgressBar` registered with the global `MULTI_PROGRESS`.
 pub fn new_progress_bar(len: u64, template: &str) -> ProgressBar {
-    let pb = MULTI_PROGRESS.add(ProgressBar::new(len));
-    pb.set_style(
+    let prog_bar = MULTI_PROGRESS.add(ProgressBar::new(len));
+    prog_bar.set_style(
         ProgressStyle::with_template(template)
             .unwrap()
             .progress_chars("##-"),
     );
-    pb
+    prog_bar
 }
 
 pub struct Pair {

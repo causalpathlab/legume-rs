@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap as HashMap;
 #[derive(Clone)]
 pub struct RefineSettings {
     pub num_levels: usize,
-    pub knn_super_cells: usize,
+    pub knn_pb_samples: usize,
     pub sort_dim: usize,
     pub num_opt_iter: usize,
     pub refine_params: RefineParams,
@@ -24,7 +24,7 @@ impl RefineSettings {
     pub fn with_proj_dim(proj_dim: usize) -> Self {
         Self {
             num_levels: 2,
-            knn_super_cells: DEFAULT_KNN,
+            knn_pb_samples: DEFAULT_KNN,
             sort_dim: proj_dim.min(12),
             num_opt_iter: DEFAULT_OPT_ITER,
             refine_params: RefineParams::default(),
@@ -154,7 +154,7 @@ impl RandPartitionOps for SparseIoVec {
         )?;
 
         let params = MultilevelParams {
-            knn_super_cells: refine.knn_super_cells,
+            knn_pb_samples: refine.knn_pb_samples,
             num_levels: refine.num_levels.max(1),
             sort_dim: refine.sort_dim,
             num_opt_iter: refine.num_opt_iter,

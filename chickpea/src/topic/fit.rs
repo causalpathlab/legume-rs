@@ -275,7 +275,7 @@ pub fn fit_topic_model(args: &FitTopicArgs) -> anyhow::Result<()> {
             &proj.proj,
             &paired.batch_membership,
             &MultilevelParams {
-                knn_super_cells: DEFAULT_KNN,
+                knn_pb_samples: DEFAULT_KNN,
                 num_levels: args.num_levels,
                 sort_dim: args.sort_dim,
                 num_opt_iter: DEFAULT_OPT_ITER,

@@ -160,9 +160,9 @@ pub struct SrtInputArgs {
         long = "batch-knn",
         default_value_t = 10,
         help = "KNN for cross-batch matching during batch correction",
-        long_help = "Number of nearest neighbours for cross-batch super-cell matching.\n\
-                       During batch effect estimation, cells are coarsened into super-cells.\n\
-                       Each super-cell finds its K nearest neighbors from other batches via\n\
+        long_help = "Number of nearest neighbours for cross-batch pb-sample matching.\n\
+                       During batch effect estimation, cells are coarsened into pb-samples.\n\
+                       Each pb-sample finds its K nearest neighbors from other batches via\n\
                        HNSW on centroids. These cross-batch matches provide counterfactual\n\
                        expression estimates for batch effect decomposition.\n\
                        Only used when multiple batches are present."

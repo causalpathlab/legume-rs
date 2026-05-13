@@ -78,7 +78,7 @@ pub fn compute_nb_fisher_weights_coarsened(
     let n_total = data_vec.num_columns();
     let jobs = generate_minibatch_intervals(n_total, n_features_coarse, block_size);
 
-    let pb = ProgressBar::new(jobs.len() as u64).with_style(
+    let prog_bar = ProgressBar::new(jobs.len() as u64).with_style(
         ProgressStyle::with_template("NB-Fisher (coarse) {bar:40} {pos}/{len} blocks ({eta})")
             .unwrap()
             .progress_chars("##-"),
@@ -86,7 +86,7 @@ pub fn compute_nb_fisher_weights_coarsened(
 
     let stats: SparseRunningStatistics<f32> = jobs
         .par_iter()
-        .progress_with(pb.clone())
+        .progress_with(prog_bar.clone())
         .try_fold(
             || SparseRunningStatistics::<f32>::new(n_features_coarse),
             |mut acc, &(lb, ub)| -> anyhow::Result<SparseRunningStatistics<f32>> {
@@ -103,7 +103,7 @@ pub fn compute_nb_fisher_weights_coarsened(
                 Ok(a)
             },
         )?;
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     Ok(fisher_weights_from_stats(&stats, n_total))
 }

@@ -186,12 +186,12 @@ impl<'a> SrtCellPairs<'a> {
         let jobs = generate_minibatch_intervals(ntot, self.data.num_rows(), block_size);
         let arc_shared_out = Arc::new(Mutex::new(shared_out));
 
-        let pb = new_progress_bar(
+        let prog_bar = new_progress_bar(
             jobs.len() as u64,
             "Processing {bar:40} {pos}/{len} blocks ({eta})",
         );
         jobs.par_iter()
-            .progress_with(pb)
+            .progress_with(prog_bar)
             .map(|&(lb, ub)| -> anyhow::Result<()> {
                 visitor((lb, ub), self, shared_in, arc_shared_out.clone())
             })

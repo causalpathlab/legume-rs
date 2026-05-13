@@ -55,7 +55,7 @@ const DEFAULT_STRATIFY_ALPHA_CELL: f32 = 0.5;
 pub struct FitConfig {
     pub embedding_dim: usize,
     pub num_coarsen_seeds: usize,
-    pub super_cells: usize,
+    pub pb_samples: usize,
     pub sketch_dim: usize,
     pub epochs: usize,
     pub batches_per_epoch: usize,
@@ -394,26 +394,26 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // ---- Multilevel collapse → batch-corrected pseudobulks ----
     //
     // `sort_dim` controls how many bits of the binary-sketched projection
-    // are used to hash cells into the *finest* super-cell partition (so
-    // `2^sort_dim` is the max number of distinct codes / super-cells at
+    // are used to hash cells into the *finest* pb-sample partition (so
+    // `2^sort_dim` is the max number of distinct codes / pb-samples at
     // that level). Previously this was hard-wired to `config.sketch_dim`
     // (=32 by default) — way too high, every cell ended up alone in its
-    // own super-cell and `--super-cells` was silently ignored. Now we
-    // derive `sort_dim` from the user's target super-cell count so the
+    // own pb-sample and `--pb-samples` was silently ignored. Now we
+    // derive `sort_dim` from the user's target pb-sample count so the
     // flag actually works.
-    let sort_dim_finest = ((config.super_cells.max(2) as f32).log2().ceil() as usize)
+    let sort_dim_finest = ((config.pb_samples.max(2) as f32).log2().ceil() as usize)
         .max(2)
         .min(config.sketch_dim.max(2));
     info!(
-        "Multilevel collapse (target ~{} super-cells → sort_dim={}, {} levels requested)...",
-        config.super_cells, sort_dim_finest, config.num_coarsen_seeds
+        "Multilevel collapse (target ~{} pb-samples → sort_dim={}, {} levels requested)...",
+        config.pb_samples, sort_dim_finest, config.num_coarsen_seeds
     );
     let collapse_out = collapse_columns_multilevel_with_hierarchy(
         &mut unified.per_file_data[0],
         &proj_out.proj,
         &batch_labels,
         &MultilevelParams {
-            knn_super_cells: 10,
+            knn_pb_samples: 10,
             num_levels: config.num_coarsen_seeds.max(1),
             sort_dim: sort_dim_finest,
             num_opt_iter: 100,
@@ -785,7 +785,7 @@ fn resolve_pb_chain(
     if !degenerate.is_empty() {
         warn!(
             "Cell-cell chain: dropping degenerate pb levels (pb count > {:.0}% of {} cells, \
-             so pb membership ≈ identity): {:?}. Lower --super-cells to produce chunkier pb's, \
+             so pb membership ≈ identity): {:?}. Lower --pb-samples to produce chunkier pb's, \
              or pick specific coarser levels via --cell-cell-pb-levels.",
             DEGENERATE_PB_RATIO * 100.0,
             n_cells,

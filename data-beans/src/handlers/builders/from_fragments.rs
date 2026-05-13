@@ -266,7 +266,7 @@ pub fn run_build_from_fragments(args: &FromFragmentsArgs) -> anyhow::Result<()> 
     } else {
         info!("Streaming fragments from {}", args.fragments);
         let reader = open_fragments_reader(args.fragments.as_ref())?;
-        let pb = streaming_fragments_progress();
+        let prog_bar = streaming_fragments_progress();
 
         for line in reader.lines() {
             let line = line?;
@@ -316,7 +316,7 @@ pub fn run_build_from_fragments(args: &FromFragmentsArgs) -> anyhow::Result<()> 
 
             n_total += 1;
             if n_total.is_multiple_of(1_000_000) {
-                pb.set_position(n_total);
+                prog_bar.set_position(n_total);
             }
 
             // resolve barcode -> column index
@@ -386,7 +386,7 @@ pub fn run_build_from_fragments(args: &FromFragmentsArgs) -> anyhow::Result<()> 
                 }
             }
         }
-        pb.finish_with_message(format!("{} fragments", n_total));
+        prog_bar.finish_with_message(format!("{} fragments", n_total));
     }
 
     info!(
@@ -662,14 +662,14 @@ fn process_fragments_chunk(
 /// streaming path (unknown total → spinner with fragment count).
 fn streaming_fragments_progress() -> indicatif::ProgressBar {
     use indicatif::{ProgressBar, ProgressStyle};
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
+    let prog_bar = ProgressBar::new_spinner();
+    prog_bar.set_style(
         ProgressStyle::with_template("{spinner} streamed {pos} fragments ({per_sec})")
             .unwrap()
             .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
     );
-    pb.enable_steady_tick(std::time::Duration::from_millis(200));
-    pb
+    prog_bar.enable_steady_tick(std::time::Duration::from_millis(200));
+    prog_bar
 }
 
 /// Preload-and-parse path: read decompressed bytes into memory, split
@@ -736,14 +736,14 @@ fn run_fragments_preload_parallel(
         n_threads
     );
     let pb_tmpl = "{bar:40} {pos}/{len} chunks ({eta})";
-    let pb = ProgressBar::new(ranges.len() as u64).with_style(
+    let prog_bar = ProgressBar::new(ranges.len() as u64).with_style(
         ProgressStyle::with_template(pb_tmpl)
             .unwrap()
             .progress_chars("##-"),
     );
     let locals: Vec<FragLocalAccum> = ranges
         .par_iter()
-        .progress_with(pb.clone())
+        .progress_with(prog_bar.clone())
         .map(|&(lo, hi)| {
             process_fragments_chunk(
                 &buf[lo..hi],
@@ -758,7 +758,7 @@ fn run_fragments_preload_parallel(
             )
         })
         .collect();
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
     drop(buf);
 
     /////////////////////////////////

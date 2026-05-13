@@ -391,17 +391,17 @@ fn build_indexed_samples<D: CandleDataLoaderOps + Sync>(
     shortlist_weights: &[f32],
     label: &str,
 ) -> Vec<IndexedSample> {
-    let pb = labeled_bar(label, n_samples as u64);
+    let prog_bar = labeled_bar(label, n_samples as u64);
     let out = (0..n_samples)
         .into_par_iter()
-        .progress_with(pb.clone())
+        .progress_with(prog_bar.clone())
         .map(|i| {
             let row = data.row_to_f32_vec(i);
             let (indices, values) = top_k_indices_weighted(&row, shortlist_weights, context_size);
             IndexedSample { indices, values }
         })
         .collect();
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
     out
 }
 
@@ -459,13 +459,13 @@ impl IndexedInMemoryData {
         // Pre-extract null rows in parallel
         let null_rows: Option<Vec<Vec<f32>>> = args.input_null.map(|d| {
             let (n, _) = d.data_shape();
-            let pb = labeled_bar("Null rows", n as u64);
+            let prog_bar = labeled_bar("Null rows", n as u64);
             let rows: Vec<Vec<f32>> = (0..n)
                 .into_par_iter()
-                .progress_with(pb.clone())
+                .progress_with(prog_bar.clone())
                 .map(|i| d.row_to_f32_vec(i))
                 .collect();
-            pb.finish_and_clear();
+            prog_bar.finish_and_clear();
             rows
         });
 
@@ -552,15 +552,15 @@ impl IndexedInMemoryData {
     /// union+scatter on every `minibatch_cached` call within an epoch.
     pub fn precompute_all_minibatches(&mut self, target_device: &Device) -> anyhow::Result<()> {
         let n_chunks = self.minibatches.chunks.len() as u64;
-        let pb = labeled_bar("Minibatch precompute", n_chunks);
+        let prog_bar = labeled_bar("Minibatch precompute", n_chunks);
         self.cached_batches = self
             .minibatches
             .chunks
             .par_iter()
-            .progress_with(pb.clone())
+            .progress_with(prog_bar.clone())
             .map(|sample_indices| self.build_minibatch(sample_indices, target_device))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        pb.finish_and_clear();
+        prog_bar.finish_and_clear();
         Ok(())
     }
 

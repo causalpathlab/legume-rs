@@ -289,7 +289,7 @@ where
     )?;
 
     let total_actual_epochs: usize = level_epochs.iter().sum();
-    let pb = new_progress_bar(total_actual_epochs as u64);
+    let prog_bar = new_progress_bar(total_actual_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_actual_epochs);
     let mut kl_trace = Vec::with_capacity(total_actual_epochs);
@@ -429,7 +429,7 @@ where
             kl_trace.push(kl_tot / n_mb);
             llik_trace.push(llik_tot / n_mb);
 
-            pb.inc(1);
+            prog_bar.inc(1);
 
             info!(
                 "[level {}/{}][{}] {} {}",
@@ -441,7 +441,7 @@ where
             );
 
             if config.stop.load(Ordering::SeqCst) {
-                pb.finish_and_clear();
+                prog_bar.finish_and_clear();
                 info!(
                     "Stopping training early at level {}/{}, epoch {}",
                     level + 1,
@@ -455,7 +455,7 @@ where
             }
         }
     }
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     info!("done model training");
     Ok(TrainScores {

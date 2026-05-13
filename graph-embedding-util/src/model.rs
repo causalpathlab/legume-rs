@@ -8,7 +8,7 @@
 //!
 //! Features are addressed at fine resolution. The cell axis is
 //! coarsened: cell embeddings are mean-pooled (per the batch's chosen
-//! seed coarsening) over the fine children of each touched super-cell.
+//! seed coarsening) over the fine children of each touched pb-sample.
 
 use candle_util::candle_core::{DType, Device, Result, Tensor, Var};
 use candle_util::candle_nn::{self, VarBuilder, VarMap};

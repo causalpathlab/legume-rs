@@ -20,7 +20,7 @@ use crate::util::common::*;
 /// Per-cell module-pair state carried across cascade levels.
 ///
 /// Computed once at setup (fit.rs step 4-pre) and referenced by the
-/// module-pair profile builder at every level. Super-cell expression is
+/// module-pair profile builder at every level. pb-sample expression is
 /// aggregated from `module_expr` per level via [`coarsen_module_expression`].
 pub struct ModulePairContext {
     pub basis: ModulePairBasis,
@@ -33,7 +33,7 @@ pub struct ModulePairContext {
 /// Which basis to use when building edge profiles.
 ///
 /// - `ModulePair` is the gene-network path: per-cell module expression plus
-///   a precomputed module-pair basis. Per-level super-cell expression is
+///   a precomputed module-pair basis. Per-level pb-sample expression is
 ///   rebuilt from the fine-cell matrix (fast column-sum aggregation) and
 ///   fed to [`build_module_pair_profiles_for_edges`].
 /// - `Projection` is the no-network default: Gaussian random projection
@@ -275,7 +275,7 @@ fn build_level_profiles(
     super_edge_indices: &[usize],
     mode: &ProfileMode<'_>,
     cell_labels: &[usize],
-    n_super_cells: usize,
+    n_pb_samples: usize,
     block_size: Option<usize>,
 ) -> anyhow::Result<LinkProfileStore> {
     match *mode {
@@ -284,11 +284,11 @@ fn build_level_profiles(
             module_expr,
             cell_totals: _,
         } => {
-            // Aggregate fine-cell module expression to super-cells. Each
-            // super-edge connects two super-cells; feed the aggregated
+            // Aggregate fine-cell module expression to pb-samples. Each
+            // super-edge connects two pb-samples; feed the aggregated
             // module expression directly to the module-pair builder.
             let (super_expr, super_totals) =
-                coarsen_module_expression(module_expr, cell_labels, n_super_cells);
+                coarsen_module_expression(module_expr, cell_labels, n_pb_samples);
             Ok(build_module_pair_profiles_for_edges(
                 &super_expr,
                 &super_totals,
@@ -298,13 +298,13 @@ fn build_level_profiles(
             ))
         }
         ProfileMode::Projection { basis } => {
-            // Coarsen fine-cell raw expression to super-cells, then project
-            // super-cell aggregates through the basis. Previously this path
+            // Coarsen fine-cell raw expression to pb-samples, then project
+            // pb-sample aggregates through the basis. Previously this path
             // passed fine-cell data with cluster-label indices, which read
-            // arbitrary fine cells as if they were super-cells — a bug that
-            // made super-edge profiles decoupled from super-cell biology.
+            // arbitrary fine cells as if they were pb-samples — a bug that
+            // made super-edge profiles decoupled from pb-sample biology.
             let super_expr =
-                coarsen_cell_expression_dense(data, cell_labels, n_super_cells, block_size)?;
+                coarsen_cell_expression_dense(data, cell_labels, n_pb_samples, block_size)?;
             Ok(build_super_edge_projection_profiles(
                 &super_expr,
                 super_edges,

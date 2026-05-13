@@ -83,9 +83,9 @@ pub(crate) fn estimate_bulk_delta(bulk_dm: &Mat, collapsed: &CollapsedOut) -> Ga
         .unwrap_or(&collapsed.mu_observed);
     let mu_adj_mean = mu_adj.posterior_mean();
 
-    let n_sc = mu_adj_mean.ncols() as f32;
+    let n_pbsamp = mu_adj_mean.ncols() as f32;
     let mu_gene_mean: Mat = Mat::from_fn(mu_adj_mean.nrows(), 1, |i, _| {
-        mu_adj_mean.row(i).iter().sum::<f32>() / n_sc
+        mu_adj_mean.row(i).iter().sum::<f32>() / n_pbsamp
     });
 
     let m = bulk_dm.ncols() as f32;
@@ -169,7 +169,7 @@ pub(crate) fn train_mixed(
         config.parameters.all_vars(),
         f64::from(config.learning_rate),
     )?;
-    let pb = new_progress_bar(total_epochs as u64);
+    let prog_bar = new_progress_bar(total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);
     let mut kl_trace = Vec::with_capacity(total_epochs);
@@ -308,7 +308,7 @@ pub(crate) fn train_mixed(
         llik_trace.push(llik_tot / count_tot);
         kl_trace.push(kl_tot / n_tot as f32);
 
-        pb.inc(1);
+        prog_bar.inc(1);
 
         info!(
             "[epoch {}] llik={} kl={}",
@@ -318,7 +318,7 @@ pub(crate) fn train_mixed(
         );
 
         if config.stop.load(Ordering::SeqCst) {
-            pb.finish_and_clear();
+            prog_bar.finish_and_clear();
             info!("Stopping early at epoch {epoch}");
             return Ok(TrainScores {
                 llik: llik_trace,
@@ -327,7 +327,7 @@ pub(crate) fn train_mixed(
         }
     }
 
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
     info!("done mixed multi-level training");
     Ok(TrainScores {
         llik: llik_trace,

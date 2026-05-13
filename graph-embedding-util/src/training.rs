@@ -155,8 +155,8 @@ pub fn train_composite(
 ) -> anyhow::Result<()> {
     assert!(!ctx.axes.is_empty(), "composite training needs >= 1 axis");
 
-    let pb = ProgressBar::new(params.epochs as u64);
-    pb.set_style(
+    let prog_bar = ProgressBar::new(params.epochs as u64);
+    prog_bar.set_style(
         ProgressStyle::with_template("{bar:30} {pos}/{len} {msg}")
             .unwrap()
             .progress_chars("##-"),
@@ -217,8 +217,8 @@ pub fn train_composite(
         }
 
         let avg = loss_sum / n_steps.max(1) as f32;
-        pb.set_message(format!("loss={:.3}", avg));
-        pb.inc(1);
+        prog_bar.set_message(format!("loss={:.3}", avg));
+        prog_bar.inc(1);
         // Every-epoch info; senna/pinto's `--verbose` flag raises the
         // log level to `info`, so this is gated by the user's choice
         // there. Quiet runs (warn level) suppress it.
@@ -230,7 +230,7 @@ pub fn train_composite(
         );
 
         if ctx.stop.load(Ordering::SeqCst) {
-            pb.finish_and_clear();
+            prog_bar.finish_and_clear();
             info!(
                 "Stopping early at epoch {}/{} — finalizing outputs",
                 epoch + 1,
@@ -239,7 +239,7 @@ pub fn train_composite(
             return Ok(());
         }
     }
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     Ok(())
 }
