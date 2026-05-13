@@ -86,7 +86,7 @@ pub fn graph_coarsen(
     let max_merges = n.saturating_sub(1);
     let mut merges = Vec::with_capacity(max_merges);
 
-    let pb = new_progress_bar(
+    let prog_bar = new_progress_bar(
         max_merges as u64,
         "Coarsening {bar:40} {pos}/{len} merges ({eta})",
     );
@@ -194,7 +194,7 @@ pub fn graph_coarsen(
         // UF merges + feature updates (sequential)
         for &(a, b) in &round_merges {
             merges.push((a, b));
-            pb.inc(1);
+            prog_bar.inc(1);
 
             let size_a = uf.size(a) as f32;
             let size_b = uf.size(b) as f32;
@@ -247,7 +247,7 @@ pub fn graph_coarsen(
         n_rounds += 1;
     }
 
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
     if veto.is_some() {
         info!(
             "Graph coarsening: {} nodes, {} merges in {} rounds ({} proposals vetoed)",

@@ -9,15 +9,15 @@
 //!    random projection coordinates (at progressively finer `sort_dim`
 //!    per level).
 //!
-//! 2. **Build super-cells**: each (batch, group) intersection becomes
-//!    a super-cell with a centroid (mean projection vector) and
+//! 2. **Build pb-samples**: each (batch, group) intersection becomes
+//!    a pb-sample with a centroid (mean projection vector) and
 //!    aggregated gene sums. This is a small set — typically
 //!    O(n_batches * n_groups) entries.
 //!
 //! 3. **Cross-batch KNN matching** (`--batch-knn`): for each
-//!    super-cell, find its `batch_knn` nearest neighbors among
-//!    super-cells from *other* batches using HNSW on centroids.
-//!    Because we search over coarsened super-cells (not individual
+//!    pb-sample, find its `batch_knn` nearest neighbors among
+//!    pb-samples from *other* batches using HNSW on centroids.
+//!    Because we search over coarsened pb-samples (not individual
 //!    cells), this is fast even with many cells.
 //!
 //! 4. **Counterfactual imputation**: the matched neighbors provide a
@@ -35,7 +35,7 @@
 //!    increasing `sort_dim` (coarse → fine). Coarser levels capture
 //!    large-scale batch effects; finer levels refine them.
 //!
-//! The key insight: because KNN matching operates on super-cell
+//! The key insight: because KNN matching operates on pb-sample
 //! centroids (not individual cells), `batch_knn` remains small
 //! (default 10) regardless of dataset size. The hierarchical levels
 //! ensure both coarse global corrections and fine-grained local
@@ -52,8 +52,8 @@ pub struct EstimateBatchArgs {
     pub proj_dim: usize,
     pub sort_dim: usize,
     pub block_size: Option<usize>,
-    /// KNN for cross-batch super-cell matching during hierarchical
-    /// collapsing. Searches are over coarsened super-cell centroids,
+    /// KNN for cross-batch pb-sample matching during hierarchical
+    /// collapsing. Searches are over coarsened pb-sample centroids,
     /// not individual cells, so this stays small.
     pub batch_knn: usize,
     pub num_levels: usize,
@@ -87,7 +87,7 @@ pub fn estimate_batch(
         &proj_kn,
         batch_membership,
         &MultilevelParams {
-            knn_super_cells: args.batch_knn,
+            knn_pb_samples: args.batch_knn,
             sort_dim: args.sort_dim,
             num_levels: args.num_levels,
             ..MultilevelParams::new(proj_kn.nrows())

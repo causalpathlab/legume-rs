@@ -25,22 +25,22 @@ where
     let jobs = create_jobs(ntot, 0, Some(block_size));
     let njobs = jobs.len() as u64;
 
-    let pb = new_progress_bar(njobs);
+    let prog_bar = new_progress_bar(njobs);
     let mut chunks: Vec<(usize, Mat)> = if dev.is_cpu() {
         jobs.par_iter()
-            .progress_with(pb.clone())
+            .progress_with(prog_bar.clone())
             .map(|&block| eval_block(block))
             .collect::<anyhow::Result<Vec<_>>>()?
     } else {
         jobs.iter()
             .map(|&block| {
                 let r = eval_block(block);
-                pb.inc(1);
+                prog_bar.inc(1);
                 r
             })
             .collect::<anyhow::Result<Vec<_>>>()?
     };
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     chunks.sort_by_key(|&(lb, _)| lb);
 
@@ -403,12 +403,12 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         feature_kind: args.feature_kind.clone(),
     })?;
 
-    info!("Multi-level collapsing with super-cells ...");
+    info!("Multi-level collapsing with pb-samples ...");
     let mut collapsed_levels: Vec<CollapsedOut> = data_vec.collapse_columns_multilevel_vec(
         &proj_kn,
         &batch_membership,
         &MultilevelParams {
-            knn_super_cells: args.knn_cells,
+            knn_pb_samples: args.knn_cells,
             num_levels: args.num_levels,
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,

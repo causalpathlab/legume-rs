@@ -20,8 +20,8 @@ use crate::random_projection::binary_sort_columns;
 use rustc_hash::FxHashMap as HashMap;
 type CscMat = nalgebra_sparse::CscMatrix<f32>;
 
-/// Sparse super-cell gene profile: `rows[sc] = Vec<(gene_idx, sum)>` sorted
-/// by `gene_idx`, as produced by `collect_super_cell_gene_sums` and
+/// Sparse pb-sample gene profile: `rows[pbsamp] = Vec<(gene_idx, sum)>` sorted
+/// by `gene_idx`, as produced by `collect_pb_sample_gene_sums` and
 /// consumed by `collect_matched_stat_coarse` and the refinement pass.
 pub type GeneSums = Vec<Vec<(usize, f32)>>;
 
@@ -32,7 +32,7 @@ pub const DEFAULT_OPT_ITER: usize = 100;
 ///
 /// Returned by [`collapse_columns_multilevel_with_hierarchy`] for
 /// consumers (e.g. `graph-embedding-util`'s nested chain sampler) that
-/// need parent/child maps between super-cells at adjacent levels.
+/// need parent/child maps between pb-samples at adjacent levels.
 /// `cell_to_pb_per_level` is finest-first, parallel to `levels`:
 /// `cell_to_pb_per_level[k][c] = pb_id at level k for cell c`.
 pub struct MultilevelCollapseOut {
@@ -42,7 +42,7 @@ pub struct MultilevelCollapseOut {
 
 /// Configuration for multi-level collapsing.
 pub struct MultilevelParams {
-    pub knn_super_cells: usize,
+    pub knn_pb_samples: usize,
     pub num_levels: usize,
     pub sort_dim: usize,
     pub num_opt_iter: usize,
@@ -54,7 +54,7 @@ pub struct MultilevelParams {
 impl MultilevelParams {
     pub fn new(proj_dim: usize) -> Self {
         Self {
-            knn_super_cells: DEFAULT_KNN,
+            knn_pb_samples: DEFAULT_KNN,
             num_levels: DEFAULT_NUM_LEVELS,
             sort_dim: proj_dim.min(12),
             num_opt_iter: DEFAULT_OPT_ITER,
@@ -441,7 +441,7 @@ fn optimize(
             mu_resid_param.calibrate();
         };
 
-        let pb = ProgressBar::new(num_iter as u64).with_style(
+        let prog_bar = ProgressBar::new(num_iter as u64).with_style(
             ProgressStyle::with_template(&format!(
                 "{} {{bar:40}} {{pos}}/{{len}} iterations ({{eta}})",
                 label
@@ -450,7 +450,7 @@ fn optimize(
             .progress_chars("##-"),
         );
         (0..num_iter)
-            .progress_with(pb.clone())
+            .progress_with(prog_bar.clone())
             .for_each(|_opt_iter| {
                 #[cfg(debug_assertions)]
                 {
@@ -486,7 +486,7 @@ fn optimize(
                 gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
                 gamma_param.calibrate_with(CalibrateTarget::MeanOnly);
             });
-        pb.finish_and_clear();
+        prog_bar.finish_and_clear();
 
         // Full calibration after loop for output/export
         mu_adj_param.calibrate();
@@ -640,47 +640,47 @@ pub fn resample_and_optimize(
 const DEFAULT_NUM_LEVELS: usize = 2;
 const DEFAULT_COARSEST_SORT_DIM: usize = 7;
 
-/// Shared layout for super-cells (batch × group intersections).
+/// Shared layout for pb-samples (batch × group intersections).
 /// Reusable across multiple layers in a `SparseIoStack`.
 ///
 /// Cross-batch neighbor queries go through `SparseIoVec::batch_knn_lookup`
-/// (the per-batch HNSW over cells), not a super-cell-level index: the
-/// centroid of a super-cell is used as the query point, results are
-/// deduped to super-cells via `cell_to_sc`.
-pub struct SuperCellLayout {
-    /// Centroid matrix: proj_dim x num_super_cells
+/// (the per-batch HNSW over cells), not a pb-sample-level index: the
+/// centroid of a pb-sample is used as the query point, results are
+/// deduped to pb-samples via `cell_to_pbsamp`.
+pub struct PbSampleLayout {
+    /// Centroid matrix: proj_dim x num_pb_samples
     pub centroids: DMatrix<f32>,
-    /// Number of cells in each super-cell
+    /// Number of cells in each pb-sample
     pub cell_counts: Vec<f32>,
-    /// Batch index for each super-cell
-    pub super_cell_to_batch: Vec<usize>,
-    /// Sample/group index for each super-cell
-    pub super_cell_to_group: Vec<usize>,
-    /// Maps (batch, group) → super-cell index
-    pub bg_to_sc: HashMap<(usize, usize), usize>,
-    /// Global cell index → owning super-cell index.
-    pub cell_to_sc: Vec<usize>,
+    /// Batch index for each pb-sample
+    pub pb_sample_to_batch: Vec<usize>,
+    /// Sample/group index for each pb-sample
+    pub pb_sample_to_group: Vec<usize>,
+    /// Maps (batch, group) → pb-sample index
+    pub bg_to_pbsamp: HashMap<(usize, usize), usize>,
+    /// Global cell index → owning pb-sample index.
+    pub cell_to_pbsamp: Vec<usize>,
 }
 
-/// Pre-aggregated super-cell data for fast cross-batch matching.
-/// Each super-cell is the intersection of a (batch, sample) pair.
-pub struct SuperCellCollection {
-    pub layout: SuperCellLayout,
-    /// Sparse gene sums per super-cell: Vec of (gene_index, sum)
+/// Pre-aggregated pb-sample data for fast cross-batch matching.
+/// Each pb-sample is the intersection of a (batch, sample) pair.
+pub struct PbSampleCollection {
+    pub layout: PbSampleLayout,
+    /// Sparse gene sums per pb-sample: Vec of (gene_index, sum)
     pub gene_sums: Vec<Vec<(usize, f32)>>,
     /// Number of genes
     pub num_genes: usize,
 }
 
-/// Intermediate per-batch accumulator used during super-cell construction.
+/// Intermediate per-batch accumulator used during pb-sample construction.
 struct BatchAccumulator {
     centroid_sum: Vec<f32>,
     gene_sum: HashMap<usize, f32>,
     count: usize,
 }
 
-/// A single super-cell produced from a (batch, group) intersection.
-struct SuperCellData {
+/// A single pb-sample produced from a (batch, group) intersection.
+struct PbSampleData {
     centroid: Vec<f32>,
     gene_sums: Vec<(usize, f32)>,
     cell_count: f32,
@@ -688,18 +688,18 @@ struct SuperCellData {
     group: usize,
 }
 
-/// Build the shared super-cell layout from (batch, group) intersections.
+/// Build the shared pb-sample layout from (batch, group) intersections.
 ///
 /// For each non-empty (batch, group) block:
 /// - Centroid = mean of projection vectors
 /// - Cell count = number of cells in block
 ///
 /// This only uses `proj_kn` (no CSC reads), so it can be shared across layers.
-fn build_super_cell_layout(
+fn build_pb_sample_layout(
     group_to_cols: &[Vec<usize>],
     col_to_batch: &[usize],
     proj_kn: &DMatrix<f32>,
-) -> anyhow::Result<SuperCellLayout> {
+) -> anyhow::Result<PbSampleLayout> {
     let proj_dim = proj_kn.nrows();
 
     /// Intermediate per-batch accumulator for centroid computation.
@@ -742,74 +742,70 @@ fn build_super_cell_layout(
         .collect();
 
     // Flatten into a single list
-    let all_sc: Vec<_> = per_group_results.into_iter().flatten().collect();
-    let num_sc = all_sc.len();
+    let all_pbsamp: Vec<_> = per_group_results.into_iter().flatten().collect();
+    let num_pb = all_pbsamp.len();
 
-    if num_sc == 0 {
-        return Err(anyhow::anyhow!("no super-cells built"));
+    if num_pb == 0 {
+        return Err(anyhow::anyhow!("no pb-samples built"));
     }
 
     // Build centroid matrix and metadata
-    let mut centroids = DMatrix::<f32>::zeros(proj_dim, num_sc);
-    let mut cell_counts = Vec::with_capacity(num_sc);
-    let mut sc_to_batch = Vec::with_capacity(num_sc);
-    let mut sc_to_group = Vec::with_capacity(num_sc);
-    let mut bg_to_sc = HashMap::default();
+    let mut centroids = DMatrix::<f32>::zeros(proj_dim, num_pb);
+    let mut cell_counts = Vec::with_capacity(num_pb);
+    let mut pbsamp_to_batch = Vec::with_capacity(num_pb);
+    let mut pbsamp_to_group = Vec::with_capacity(num_pb);
+    let mut bg_to_pbsamp = HashMap::default();
 
-    for (i, (batch, group, centroid, count)) in all_sc.into_iter().enumerate() {
+    for (i, (batch, group, centroid, count)) in all_pbsamp.into_iter().enumerate() {
         for (d, &v) in centroid.iter().enumerate() {
             centroids[(d, i)] = v;
         }
         cell_counts.push(count);
-        sc_to_batch.push(batch);
-        sc_to_group.push(group);
-        bg_to_sc.insert((batch, group), i);
+        pbsamp_to_batch.push(batch);
+        pbsamp_to_group.push(group);
+        bg_to_pbsamp.insert((batch, group), i);
     }
 
-    // Cell → super-cell inversion (each cell belongs to exactly one sc via
+    // Cell → pb-sample inversion (each cell belongs to exactly one pbsamp via
     // (batch, group)).
     let ncols = col_to_batch.len();
-    let mut cell_to_sc = vec![usize::MAX; ncols];
+    let mut cell_to_pbsamp = vec![usize::MAX; ncols];
     for (group, cells) in group_to_cols.iter().enumerate() {
         for &c in cells {
             let b = col_to_batch[c];
-            if let Some(&sc) = bg_to_sc.get(&(b, group)) {
-                cell_to_sc[c] = sc;
+            if let Some(&pbsamp) = bg_to_pbsamp.get(&(b, group)) {
+                cell_to_pbsamp[c] = pbsamp;
             }
         }
     }
 
-    Ok(SuperCellLayout {
+    Ok(PbSampleLayout {
         centroids,
         cell_counts,
-        super_cell_to_batch: sc_to_batch,
-        super_cell_to_group: sc_to_group,
-        bg_to_sc,
-        cell_to_sc,
+        pb_sample_to_batch: pbsamp_to_batch,
+        pb_sample_to_group: pbsamp_to_group,
+        bg_to_pbsamp,
+        cell_to_pbsamp,
     })
 }
 
-/// Collect gene sums for each super-cell from a single `SparseIoVec` layer.
+/// Collect gene sums for each pb-sample from a single `SparseIoVec` layer.
 ///
-/// Uses the `bg_to_sc` mapping from the layout to accumulate gene expression
-/// per super-cell, parallelized over groups.
-fn collect_super_cell_gene_sums(
+/// Uses the `bg_to_pbsamp` mapping from the layout to accumulate gene expression
+/// per pb-sample, parallelized over groups.
+fn collect_pb_sample_gene_sums(
     data_vec: &SparseIoVec,
     group_to_cols: &[Vec<usize>],
     col_to_batch: &[usize],
-    bg_to_sc: &HashMap<(usize, usize), usize>,
-    num_sc: usize,
+    bg_to_pbsamp: &HashMap<(usize, usize), usize>,
+    num_pb: usize,
 ) -> anyhow::Result<Vec<Vec<(usize, f32)>>> {
     use indicatif::ParallelProgressIterator;
-    let pb = ProgressBar::new(group_to_cols.len() as u64).with_style(
-        ProgressStyle::with_template("Super-cell gene sums {bar:40} {pos}/{len} groups ({eta})")
-            .unwrap()
-            .progress_chars("##-"),
-    );
+    let prog_bar = styled_progress_bar(group_to_cols.len() as u64, "groups (pb-sample gene sums)");
     let gene_sum_maps: Vec<(usize, HashMap<usize, f32>)> = group_to_cols
         .par_iter()
         .enumerate()
-        .progress_with(pb.clone())
+        .progress_with(prog_bar.clone())
         .flat_map(|(group, cells)| {
             let yy = data_vec
                 .read_columns_csc(cells.iter().cloned())
@@ -828,30 +824,30 @@ fn collect_super_cell_gene_sums(
             batch_gene_sums
                 .into_iter()
                 .filter_map(|(batch, gene_map)| {
-                    bg_to_sc
+                    bg_to_pbsamp
                         .get(&(batch, group))
-                        .map(|&sc_idx| (sc_idx, gene_map))
+                        .map(|&pbsamp_idx| (pbsamp_idx, gene_map))
                 })
                 .collect::<Vec<_>>()
         })
         .collect();
 
-    let mut gene_sums: Vec<Vec<(usize, f32)>> = vec![vec![]; num_sc];
-    for (sc_idx, gene_map) in gene_sum_maps {
+    let mut gene_sums: Vec<Vec<(usize, f32)>> = vec![vec![]; num_pb];
+    for (pbsamp_idx, gene_map) in gene_sum_maps {
         let mut sorted: Vec<(usize, f32)> = gene_map.into_iter().collect();
         sorted.sort_unstable_by_key(|&(g, _)| g);
-        gene_sums[sc_idx] = sorted;
+        gene_sums[pbsamp_idx] = sorted;
     }
 
     Ok(gene_sums)
 }
 
-/// Build super-cells (layout + gene sums) from a single `SparseIoVec`.
-fn build_super_cells(
+/// Build pb-samples (layout + gene sums) from a single `SparseIoVec`.
+fn build_pb_samples(
     data_vec: &SparseIoVec,
     proj_kn: &DMatrix<f32>,
     num_genes: usize,
-) -> anyhow::Result<SuperCellCollection> {
+) -> anyhow::Result<PbSampleCollection> {
     let group_to_cols = data_vec
         .take_grouped_columns()
         .ok_or(anyhow::anyhow!("columns not assigned to groups"))?;
@@ -859,67 +855,63 @@ fn build_super_cells(
         .map(|c| data_vec.get_batch_membership(std::iter::once(c))[0])
         .collect();
 
-    let layout = build_super_cell_layout(group_to_cols, &col_to_batch, proj_kn)?;
-    let num_sc = layout.cell_counts.len();
-    let gene_sums = collect_super_cell_gene_sums(
+    let layout = build_pb_sample_layout(group_to_cols, &col_to_batch, proj_kn)?;
+    let num_pb = layout.cell_counts.len();
+    let gene_sums = collect_pb_sample_gene_sums(
         data_vec,
         group_to_cols,
         &col_to_batch,
-        &layout.bg_to_sc,
-        num_sc,
+        &layout.bg_to_pbsamp,
+        num_pb,
     )?;
 
-    Ok(SuperCellCollection {
+    Ok(PbSampleCollection {
         layout,
         gene_sums,
         num_genes,
     })
 }
 
-/// Per-super-cell, for each non-own batch return up to `knn` distinct
-/// super-cells whose member cells are closest to `sc`'s centroid.
+/// Per-pb-sample, for each non-own batch return up to `knn` distinct
+/// pb-samples whose member cells are closest to `pbsamp`'s centroid.
 ///
 /// Queries `SparseIoVec::batch_knn_lookup` (per-batch HNSW over cells),
-/// then dedups hits to super-cells via `layout.cell_to_sc`. Distances come
-/// back as the minimum over collapsed cells for each super-cell.
+/// then dedups hits to pb-samples via `layout.cell_to_pbsamp`. Distances come
+/// back as the minimum over collapsed cells for each pb-sample.
 ///
-/// Returns: `result[sc] = Vec<(other_sc, distance)>` flattened across all
+/// Returns: `result[pbsamp] = Vec<(other_pbsamp, distance)>` flattened across all
 /// non-own batches.
 fn per_batch_sc_neighbors(
-    layout: &SuperCellLayout,
+    layout: &PbSampleLayout,
     batch_knn_lookup: &[ColumnDict<usize>],
     knn: usize,
 ) -> anyhow::Result<Vec<Vec<(usize, f32)>>> {
     use indicatif::ParallelProgressIterator;
     use matrix_util::knn_match::MakeVecPoint;
-    let num_sc = layout.cell_counts.len();
-    // Oversample cells per batch so dedup-to-sc still yields ~knn uniques.
+    let num_pb = layout.cell_counts.len();
+    // Oversample cells per batch so dedup-to-pbsamp still yields ~knn uniques.
     let cell_oversample = (knn * 4 + 1).max(knn);
 
-    let pb = ProgressBar::new(num_sc as u64).with_style(
-        ProgressStyle::with_template("BBKNN match {bar:40} {pos}/{len} super-cells ({eta})")
-            .unwrap()
-            .progress_chars("##-"),
-    );
-    let result: anyhow::Result<Vec<Vec<(usize, f32)>>> = (0..num_sc)
+    let prog_bar = styled_progress_bar(num_pb as u64, "pb-samples (BBKNN match)");
+    let result: anyhow::Result<Vec<Vec<(usize, f32)>>> = (0..num_pb)
         .into_par_iter()
-        .progress_with(pb.clone())
-        .map(|sc| -> anyhow::Result<Vec<(usize, f32)>> {
-            let sc_batch = layout.super_cell_to_batch[sc];
-            let centroid = layout.centroids.column(sc).to_vp();
+        .progress_with(prog_bar.clone())
+        .map(|pbsamp| -> anyhow::Result<Vec<(usize, f32)>> {
+            let pbsamp_batch = layout.pb_sample_to_batch[pbsamp];
+            let centroid = layout.centroids.column(pbsamp).to_vp();
             let mut all_hits: Vec<(usize, f32)> = Vec::new();
             for (b, bknn) in batch_knn_lookup.iter().enumerate() {
-                if b == sc_batch {
+                if b == pbsamp_batch {
                     continue;
                 }
                 let (cell_ids, dists) = bknn.search_by_query_data(&centroid, cell_oversample)?;
                 let mut best: HashMap<usize, f32> = HashMap::default();
                 for (&c, &d) in cell_ids.iter().zip(dists.iter()) {
-                    let other_sc = layout.cell_to_sc[c];
-                    if other_sc == usize::MAX || other_sc == sc {
+                    let other_pbsamp = layout.cell_to_pbsamp[c];
+                    if other_pbsamp == usize::MAX || other_pbsamp == pbsamp {
                         continue;
                     }
-                    best.entry(other_sc)
+                    best.entry(other_pbsamp)
                         .and_modify(|old| {
                             if d < *old {
                                 *old = d;
@@ -939,43 +931,43 @@ fn per_batch_sc_neighbors(
             Ok(all_hits)
         })
         .collect();
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
     result
 }
 
-/// Match super-cells across batches and accumulate counterfactual
+/// Match pb-samples across batches and accumulate counterfactual
 /// statistics into `stat.imputed_sum_ds` and `stat.residual_sum_ds`.
 ///
-/// `sc_to_group` is the per-super-cell group assignment to use when writing
-/// into stat columns; callers pass `&layout.super_cell_to_group` for the
+/// `pbsamp_to_group` is the per-pb-sample group assignment to use when writing
+/// into stat columns; callers pass `&layout.pb_sample_to_group` for the
 /// hash-partition mapping, or a refined mapping from
 /// `refine_multilevel::refine_assignments`.
 ///
-/// `knn` is now the per-other-batch neighbour count: each super-cell draws
-/// up to `knn` distinct foreign super-cells from **each** non-own batch, so
+/// `knn` is now the per-other-batch neighbour count: each pb-sample draws
+/// up to `knn` distinct foreign pb-samples from **each** non-own batch, so
 /// the total match set is up to `knn · (num_batches − 1)`.
 fn collect_matched_stat_coarse(
-    layout: &SuperCellLayout,
+    layout: &PbSampleLayout,
     gene_sums: &[Vec<(usize, f32)>],
-    sc_to_group: &[usize],
+    pbsamp_to_group: &[usize],
     batch_knn_lookup: &[ColumnDict<usize>],
     knn: usize,
     stat: &mut CollapsedStat,
 ) -> anyhow::Result<()> {
-    let num_sc = layout.cell_counts.len();
-    debug_assert_eq!(sc_to_group.len(), num_sc);
+    let num_pb = layout.cell_counts.len();
+    debug_assert_eq!(pbsamp_to_group.len(), num_pb);
 
     let neighbors_per_sc = per_batch_sc_neighbors(layout, batch_knn_lookup, knn)?;
 
-    for sc_idx in 0..num_sc {
-        let sc_group = sc_to_group[sc_idx];
-        let sc_count = layout.cell_counts[sc_idx];
+    for pbsamp_idx in 0..num_pb {
+        let pbsamp_group = pbsamp_to_group[pbsamp_idx];
+        let sc_count = layout.cell_counts[pbsamp_idx];
 
         if sc_count < 1.0 {
             continue;
         }
 
-        let filtered: Vec<(usize, f32)> = neighbors_per_sc[sc_idx].clone();
+        let filtered: Vec<(usize, f32)> = neighbors_per_sc[pbsamp_idx].clone();
 
         if filtered.is_empty() {
             continue;
@@ -995,7 +987,7 @@ fn collect_matched_stat_coarse(
             weights.iter_mut().for_each(|w| *w /= w_sum);
         }
 
-        // Counterfactual: weighted average of matched super-cells'
+        // Counterfactual: weighted average of matched pb-samples'
         // per-cell gene expression
         // y_hat[g] = sum_k w[k] * gene_sums[k][g] / cell_counts[k]
         let mut y_hat: HashMap<usize, f32> = HashMap::default();
@@ -1010,20 +1002,20 @@ fn collect_matched_stat_coarse(
             }
         }
 
-        // Accumulate imputed_sum_ds[g, s] += cell_counts[sc] * y_hat[g]
+        // Accumulate imputed_sum_ds[g, s] += cell_counts[pbsamp] * y_hat[g]
         for (&gene, &y) in &y_hat {
-            stat.imputed_sum_ds[(gene, sc_group)] += sc_count * y;
+            stat.imputed_sum_ds[(gene, pbsamp_group)] += sc_count * y;
         }
 
         // Accumulate residual_sum_ds[g, s] += y_obs[g] / y_hat[g]
-        // where y_obs[g] = gene_sums[sc][g] / cell_counts[sc]
-        // -> residual_sum_ds[g, s] += gene_sums[sc][g] / (cell_counts[sc] * y_hat[g])
-        //    then × cell_counts[sc] to match original scaling
-        // = gene_sums[sc][g] / y_hat[g]
-        for &(gene, val) in &gene_sums[sc_idx] {
+        // where y_obs[g] = gene_sums[pbsamp][g] / cell_counts[pbsamp]
+        // -> residual_sum_ds[g, s] += gene_sums[pbsamp][g] / (cell_counts[pbsamp] * y_hat[g])
+        //    then × cell_counts[pbsamp] to match original scaling
+        // = gene_sums[pbsamp][g] / y_hat[g]
+        for &(gene, val) in &gene_sums[pbsamp_idx] {
             if let Some(&y_h) = y_hat.get(&gene) {
                 if y_h > 0.0 {
-                    stat.residual_sum_ds[(gene, sc_group)] += val / y_h;
+                    stat.residual_sum_ds[(gene, pbsamp_group)] += val / y_h;
                 }
             }
         }
@@ -1054,22 +1046,22 @@ fn pad_numeric_labels(cell_to_group: &[usize], k: usize) -> Vec<String> {
 /// Derive a fine→coarse group mapping from two consecutive refined levels.
 ///
 /// The refinement pass enforces hierarchy (sibling-constrained moves), so
-/// all super-cells sharing a level-`fine` group also share the same
-/// level-`coarse` group. This picks the first super-cell of each fine group
+/// all pb-samples sharing a level-`fine` group also share the same
+/// level-`coarse` group. This picks the first pb-sample of each fine group
 /// to read the coarse label.
 fn fine_to_coarse_from_refined(
-    sc_to_fine: &[usize],
-    sc_to_coarse: &[usize],
+    pbsamp_to_fine: &[usize],
+    pbsamp_to_coarse: &[usize],
     num_fine: usize,
 ) -> Vec<usize> {
     let mut mapping = vec![usize::MAX; num_fine];
-    for sc in 0..sc_to_fine.len() {
-        let f = sc_to_fine[sc];
+    for pbsamp in 0..pbsamp_to_fine.len() {
+        let f = pbsamp_to_fine[pbsamp];
         if mapping[f] == usize::MAX {
-            mapping[f] = sc_to_coarse[sc];
+            mapping[f] = pbsamp_to_coarse[pbsamp];
         } else {
             debug_assert_eq!(
-                mapping[f], sc_to_coarse[sc],
+                mapping[f], pbsamp_to_coarse[pbsamp],
                 "refinement broke hierarchy at fine group {}",
                 f
             );
@@ -1078,16 +1070,16 @@ fn fine_to_coarse_from_refined(
     mapping
 }
 
-/// Per-level initial super-cell → group, derived from the finest binary
+/// Per-level initial pb-sample → group, derived from the finest binary
 /// hash codes by bit-masking each level's sort dim and compacting labels to
-/// `0..k_level`. Each super-cell's finest hash code is read from any of its
-/// member cells (all cells in a super-cell share the same finest group).
+/// `0..k_level`. Each pb-sample's finest hash code is read from any of its
+/// member cells (all cells in a pb-sample share the same finest group).
 fn initial_per_level_from_hash(
     fine_codes: &[usize],
-    super_cell_to_cells: &[Vec<usize>],
+    pb_sample_to_cells: &[Vec<usize>],
     level_dims: &[usize],
 ) -> Vec<Vec<usize>> {
-    let num_sc = super_cell_to_cells.len();
+    let num_pb = pb_sample_to_cells.len();
     level_dims
         .iter()
         .map(|&d| {
@@ -1096,8 +1088,8 @@ fn initial_per_level_from_hash(
             } else {
                 (1_usize << d).wrapping_sub(1)
             };
-            let codes: Vec<usize> = (0..num_sc)
-                .map(|sc| fine_codes[super_cell_to_cells[sc][0]] & mask)
+            let codes: Vec<usize> = (0..num_pb)
+                .map(|pbsamp| fine_codes[pb_sample_to_cells[pbsamp][0]] & mask)
                 .collect();
             crate::refine_multilevel::compact_labels(&codes).0
         })
@@ -1114,36 +1106,36 @@ fn refine_or_identity(
     if allow_refine {
         crate::refine_multilevel::refine_assignments(inputs, refine_params)
     } else {
-        let mut sc_to_group: Vec<Vec<usize>> =
+        let mut pbsamp_to_group: Vec<Vec<usize>> =
             Vec::with_capacity(inputs.initial_sc_to_group_per_level.len());
         let mut num_groups_per_level =
             Vec::with_capacity(inputs.initial_sc_to_group_per_level.len());
         for lvl in inputs.initial_sc_to_group_per_level {
             let (compact, k) = crate::refine_multilevel::compact_labels(lvl);
             num_groups_per_level.push(k);
-            sc_to_group.push(compact);
+            pbsamp_to_group.push(compact);
         }
         Ok(crate::refine_multilevel::RefinedAssignment {
-            sc_to_group,
+            pbsamp_to_group,
             num_groups_per_level,
         })
     }
 }
 
-/// Build per-super-cell cell lists from the finest hash partition and batch
-/// membership: sc → list of raw cell indices contained in that super-cell.
-fn build_super_cell_to_cells(
-    layout: &SuperCellLayout,
+/// Build per-pb-sample cell lists from the finest hash partition and batch
+/// membership: pbsamp → list of raw cell indices contained in that pb-sample.
+fn build_pb_sample_to_cells(
+    layout: &PbSampleLayout,
     group_to_cols_finest: &[Vec<usize>],
     col_to_batch: &[usize],
 ) -> Vec<Vec<usize>> {
-    let num_sc = layout.cell_counts.len();
-    let mut out: Vec<Vec<usize>> = vec![vec![]; num_sc];
+    let num_pb = layout.cell_counts.len();
+    let mut out: Vec<Vec<usize>> = vec![vec![]; num_pb];
     for (group, cells) in group_to_cols_finest.iter().enumerate() {
         for &c in cells {
             let batch = col_to_batch[c];
-            if let Some(&sc) = layout.bg_to_sc.get(&(batch, group)) {
-                out[sc].push(c);
+            if let Some(&pbsamp) = layout.bg_to_pbsamp.get(&(batch, group)) {
+                out[pbsamp].push(c);
             }
         }
     }
@@ -1168,7 +1160,7 @@ struct RefineCollectCtx<'a> {
 /// Refinement integration path for `SparseIoVec`.
 ///
 /// Walks each level of the hash-initialized hierarchy, runs
-/// `refine_multilevel::refine_assignments` over super-cells, then rebuilds
+/// `refine_multilevel::refine_assignments` over pb-samples, then rebuilds
 /// `CollapsedStat` per level from the refined cell → group assignment and
 /// emits `CollapsedOut` with identical shape to the legacy path. Also
 /// surfaces the per-level cell → pb mapping (finest-first, matching
@@ -1195,33 +1187,33 @@ fn refine_and_collect_single_layer(
         level_dims.len()
     );
 
-    // 1. Build super-cells (layout + gene sums) from the finest partition.
-    let super_cells = build_super_cells(data_vec, proj_kn, num_features)?;
-    let num_sc = super_cells.layout.cell_counts.len();
+    // 1. Build pb-samples (layout + gene sums) from the finest partition.
+    let pb_samples = build_pb_samples(data_vec, proj_kn, num_features)?;
+    let num_pb = pb_samples.layout.cell_counts.len();
     let ncells_dbg = proj_kn.ncols();
     info!(
-        "Built {} super-cells from {} cells (ratio {:.2}; knn={})",
-        num_sc,
+        "Built {} pb-samples from {} cells (ratio {:.2}; knn={})",
+        num_pb,
         ncells_dbg,
-        num_sc as f32 / ncells_dbg.max(1) as f32,
+        num_pb as f32 / ncells_dbg.max(1) as f32,
         knn
     );
-    if num_sc as f32 > 0.8 * ncells_dbg as f32 {
+    if num_pb as f32 > 0.8 * ncells_dbg as f32 {
         warn!(
-            "super-cell count ({}) is close to cell count ({}) — hash partition is too fine \
-             (many 1-cell super-cells). Consider lowering --sort-dim.",
-            num_sc, ncells_dbg
+            "pb-sample count ({}) is close to cell count ({}) — hash partition is too fine \
+             (many 1-cell pb-samples). Consider lowering --sort-dim.",
+            num_pb, ncells_dbg
         );
     }
 
-    // 2. sc → cells and col → batch.
+    // 2. pbsamp → cells and col → batch.
     let ncols = proj_kn.ncols();
     let col_to_batch: Vec<usize> = data_vec.get_batch_membership(0..ncols);
-    let super_cell_to_cells =
-        build_super_cell_to_cells(&super_cells.layout, group_to_cols_finest, &col_to_batch);
+    let pb_sample_to_cells =
+        build_pb_sample_to_cells(&pb_samples.layout, group_to_cols_finest, &col_to_batch);
 
     let initial_per_level =
-        initial_per_level_from_hash(fine_codes, &super_cell_to_cells, level_dims);
+        initial_per_level_from_hash(fine_codes, &pb_sample_to_cells, level_dims);
     let empty: [ColumnDict<usize>; 0] = [];
     let batch_knn: &[ColumnDict<usize>] = if num_batches >= 2 {
         data_vec
@@ -1232,10 +1224,10 @@ fn refine_and_collect_single_layer(
         &empty
     };
     let inputs = crate::refine_multilevel::RefineInputs {
-        layout: &super_cells.layout,
-        gene_sums: &super_cells.gene_sums,
+        layout: &pb_samples.layout,
+        gene_sums: &pb_samples.gene_sums,
         num_genes: num_features,
-        super_cell_to_cells: &super_cell_to_cells,
+        pb_sample_to_cells: &pb_sample_to_cells,
         batch_knn_lookup: batch_knn,
         k_per_batch: knn,
         initial_sc_to_group_per_level: &initial_per_level,
@@ -1248,27 +1240,41 @@ fn refine_and_collect_single_layer(
     let num_levels = level_dims.len();
     let k_finest = refined.num_groups_per_level[0];
     let mut cell_to_group_finest = vec![0usize; ncols];
-    for (sc, cells) in super_cell_to_cells.iter().enumerate() {
-        let g = refined.sc_to_group[0][sc];
+    for (pbsamp, cells) in pb_sample_to_cells.iter().enumerate() {
+        let g = refined.pbsamp_to_group[0][pbsamp];
         for &c in cells {
             cell_to_group_finest[c] = g;
         }
     }
     let finest_str = pad_numeric_labels(&cell_to_group_finest, k_finest);
+    let nthreads = rayon::current_num_threads();
+    info!(
+        "Assigning {} cells to {} finest pb-sample groups ({} rayon threads) ...",
+        ncols, k_finest, nthreads
+    );
     data_vec.assign_groups(&finest_str, None);
     debug_assert_eq!(data_vec.num_groups(), k_finest);
 
     let mut fine_stat = CollapsedStat::new(num_features, k_finest, num_batches);
+    info!("Collecting basic stats over {} groups ...", k_finest);
     data_vec.collect_basic_stat(&mut fine_stat)?;
     if num_batches >= 2 {
+        info!(
+            "Collecting per-batch stats over {} groups × {} batches ...",
+            k_finest, num_batches
+        );
         data_vec.collect_batch_stat(&mut fine_stat)?;
         let batch_knn = data_vec
             .batch_knn_lookup()
             .ok_or_else(|| anyhow::anyhow!("batch_knn_lookup not built"))?;
+        info!(
+            "Collecting cross-batch matched stats (knn={}) over {} pb-samples ...",
+            knn, num_pb
+        );
         collect_matched_stat_coarse(
-            &super_cells.layout,
-            &super_cells.gene_sums,
-            &refined.sc_to_group[0],
+            &pb_samples.layout,
+            &pb_samples.gene_sums,
+            &refined.pbsamp_to_group[0],
             batch_knn.as_slice(),
             knn,
             &mut fine_stat,
@@ -1293,8 +1299,8 @@ fn refine_and_collect_single_layer(
         let k_prev = refined.num_groups_per_level[level - 1];
         let k_level = refined.num_groups_per_level[level];
         let fine_to_coarse = fine_to_coarse_from_refined(
-            &refined.sc_to_group[level - 1],
-            &refined.sc_to_group[level],
+            &refined.pbsamp_to_group[level - 1],
+            &refined.pbsamp_to_group[level],
             k_prev,
         );
         let coarse_stat = merge_stat(&prev_stat, &fine_to_coarse, k_level);
@@ -1317,12 +1323,12 @@ fn refine_and_collect_single_layer(
     }
 
     // Build per-level cell → pb mapping (finest-first) by walking
-    // refined.sc_to_group[level] through super_cell_to_cells.
+    // refined.pbsamp_to_group[level] through pb_sample_to_cells.
     let mut cell_to_pb_per_level: Vec<Vec<usize>> = Vec::with_capacity(num_levels);
     for level in 0..num_levels {
         let mut c2g = vec![0usize; ncols];
-        for (sc, cells) in super_cell_to_cells.iter().enumerate() {
-            let g = refined.sc_to_group[level][sc];
+        for (pbsamp, cells) in pb_sample_to_cells.iter().enumerate() {
+            let g = refined.pbsamp_to_group[level][pbsamp];
             for &c in cells {
                 c2g[c] = g;
             }
@@ -1366,26 +1372,25 @@ fn refine_and_collect_stack(
     let ncols = proj_kn.ncols();
     let col_to_batch: Vec<usize> = stack.stack[0].get_batch_membership(0..ncols);
 
-    // Build shared super-cell layout from layer[0]'s row count and the shared
+    // Build shared pb-sample layout from layer[0]'s row count and the shared
     // projection. The layout only uses `proj_kn` + grouping, no raw reads.
-    let layout = build_super_cell_layout(group_to_cols_finest, &col_to_batch, proj_kn)?;
-    let num_sc = layout.cell_counts.len();
+    let layout = build_pb_sample_layout(group_to_cols_finest, &col_to_batch, proj_kn)?;
+    let num_pb = layout.cell_counts.len();
 
     // Gene sums for layer[0] drive the refinement (first-layer-owns).
     let owner_num_features = stack.stack[0].num_rows();
-    let gene_sums_owner = collect_super_cell_gene_sums(
+    let gene_sums_owner = collect_pb_sample_gene_sums(
         &stack.stack[0],
         group_to_cols_finest,
         &col_to_batch,
-        &layout.bg_to_sc,
-        num_sc,
+        &layout.bg_to_pbsamp,
+        num_pb,
     )?;
 
-    let super_cell_to_cells =
-        build_super_cell_to_cells(&layout, group_to_cols_finest, &col_to_batch);
+    let pb_sample_to_cells = build_pb_sample_to_cells(&layout, group_to_cols_finest, &col_to_batch);
 
     let initial_per_level =
-        initial_per_level_from_hash(fine_codes, &super_cell_to_cells, level_dims);
+        initial_per_level_from_hash(fine_codes, &pb_sample_to_cells, level_dims);
     let empty: [ColumnDict<usize>; 0] = [];
     let batch_knn: &[ColumnDict<usize>] = if num_batches >= 2 {
         stack.stack[0]
@@ -1399,7 +1404,7 @@ fn refine_and_collect_stack(
         layout: &layout,
         gene_sums: &gene_sums_owner,
         num_genes: owner_num_features,
-        super_cell_to_cells: &super_cell_to_cells,
+        pb_sample_to_cells: &pb_sample_to_cells,
         batch_knn_lookup: batch_knn,
         k_per_batch: knn,
         initial_sc_to_group_per_level: &initial_per_level,
@@ -1412,12 +1417,12 @@ fn refine_and_collect_stack(
         if d == 0 {
             per_layer_gene_sums.push(gene_sums_owner.clone());
         } else {
-            per_layer_gene_sums.push(collect_super_cell_gene_sums(
+            per_layer_gene_sums.push(collect_pb_sample_gene_sums(
                 layer,
                 group_to_cols_finest,
                 &col_to_batch,
-                &layout.bg_to_sc,
-                num_sc,
+                &layout.bg_to_pbsamp,
+                num_pb,
             )?);
         }
     }
@@ -1427,13 +1432,18 @@ fn refine_and_collect_stack(
     let num_levels = level_dims.len();
     let k_finest = refined.num_groups_per_level[0];
     let mut cell_to_group_finest = vec![0usize; ncols];
-    for (sc, cells) in super_cell_to_cells.iter().enumerate() {
-        let g = refined.sc_to_group[0][sc];
+    for (pbsamp, cells) in pb_sample_to_cells.iter().enumerate() {
+        let g = refined.pbsamp_to_group[0][pbsamp];
         for &c in cells {
             cell_to_group_finest[c] = g;
         }
     }
     let finest_str = pad_numeric_labels(&cell_to_group_finest, k_finest);
+    let nthreads = rayon::current_num_threads();
+    info!(
+        "Assigning {} cells to {} finest pb-sample groups across {} layers ({} rayon threads) ...",
+        ncols, k_finest, num_layers, nthreads
+    );
     for layer in stack.stack.iter_mut() {
         layer.assign_groups(&finest_str, None);
     }
@@ -1443,16 +1453,35 @@ fn refine_and_collect_stack(
     for (d, layer) in stack.stack.iter().enumerate() {
         let num_features = layer.num_rows();
         let mut stat = CollapsedStat::new(num_features, k_finest, num_batches);
+        info!(
+            "Layer {}/{}: collecting basic stats over {} groups ...",
+            d + 1,
+            num_layers,
+            k_finest
+        );
         layer.collect_basic_stat(&mut stat)?;
         if num_batches >= 2 {
+            info!(
+                "Layer {}/{}: collecting per-batch stats ({} batches) ...",
+                d + 1,
+                num_layers,
+                num_batches
+            );
             layer.collect_batch_stat(&mut stat)?;
             let batch_knn = layer
                 .batch_knn_lookup()
                 .ok_or_else(|| anyhow::anyhow!("batch_knn_lookup not built"))?;
+            info!(
+                "Layer {}/{}: collecting cross-batch matched stats (knn={}) over {} pb-samples ...",
+                d + 1,
+                num_layers,
+                knn,
+                num_pb
+            );
             collect_matched_stat_coarse(
                 &layout,
                 &per_layer_gene_sums[d],
-                &refined.sc_to_group[0],
+                &refined.pbsamp_to_group[0],
                 batch_knn.as_slice(),
                 knn,
                 &mut stat,
@@ -1479,8 +1508,8 @@ fn refine_and_collect_stack(
         let k_prev = refined.num_groups_per_level[level - 1];
         let k_level = refined.num_groups_per_level[level];
         let fine_to_coarse = fine_to_coarse_from_refined(
-            &refined.sc_to_group[level - 1],
-            &refined.sc_to_group[level],
+            &refined.pbsamp_to_group[level - 1],
+            &refined.pbsamp_to_group[level],
             k_prev,
         );
         let level_opt_iter = (opt_iter / 2).max(10);
@@ -1656,7 +1685,7 @@ where
     T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
 {
     let sort_dim = params.sort_dim;
-    let knn = params.knn_super_cells;
+    let knn = params.knn_pb_samples;
     let opt_iter = params.num_opt_iter;
 
     data_vec.register_batch_membership(batch_membership);
@@ -1729,7 +1758,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
         let sort_dim = params.sort_dim;
-        let knn = params.knn_super_cells;
+        let knn = params.knn_pb_samples;
         let opt_iter = params.num_opt_iter;
 
         self.register_batch_membership(batch_membership);
@@ -1765,7 +1794,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
         let num_groups = group_to_cols.len();
 
         //////////////////////////////////////////////////////////////////
-        // Opt-in refinement path: BBKNN + Poisson DC-SBM over super-cells
+        // Opt-in refinement path: BBKNN + Poisson DC-SBM over pb-samples
         //////////////////////////////////////////////////////////////////
 
         if let Some(refine_params) = params.refine.as_ref() {
@@ -1793,24 +1822,24 @@ impl MultilevelCollapsingOps for SparseIoVec {
         );
         self.collect_basic_stat(&mut fine_stat)?;
 
-        // Batch correction: super-cell matching across batches
+        // Batch correction: pb-sample matching across batches
         if num_batches >= 2 {
             self.collect_batch_stat(&mut fine_stat)?;
 
-            info!("Building super-cells ...");
-            let super_cells = build_super_cells(self, proj_kn, num_features)?;
+            info!("Building pb-samples ...");
+            let pb_samples = build_pb_samples(self, proj_kn, num_features)?;
             info!(
-                "Built {} super-cells, matching with knn={} ...",
-                super_cells.layout.cell_counts.len(),
+                "Built {} pb-samples, matching with knn={} ...",
+                pb_samples.layout.cell_counts.len(),
                 knn
             );
             let batch_knn = self
                 .batch_knn_lookup()
                 .ok_or_else(|| anyhow::anyhow!("batch_knn_lookup not built"))?;
             collect_matched_stat_coarse(
-                &super_cells.layout,
-                &super_cells.gene_sums,
-                &super_cells.layout.super_cell_to_group,
+                &pb_samples.layout,
+                &pb_samples.gene_sums,
+                &pb_samples.layout.pb_sample_to_group,
                 batch_knn.as_slice(),
                 knn,
                 &mut fine_stat,
@@ -1903,7 +1932,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
         }
 
         let sort_dim = params.sort_dim;
-        let knn = params.knn_super_cells;
+        let knn = params.knn_pb_samples;
         let opt_iter = params.num_opt_iter;
 
         self.register_batch_membership(batch_membership);
@@ -2061,19 +2090,16 @@ impl MultilevelCollapsingOps for SparseIoStack {
             .ok_or(anyhow::anyhow!("columns not assigned"))?;
         let num_groups = group_to_cols.len();
 
-        // Build shared super-cell layout ONCE at finest level
+        // Build shared pb-sample layout ONCE at finest level
         info!(
             "Level 1/{}: sort_dim={}, {} groups (finest — full computation)",
             level_dims.len(),
             finest_dim,
             num_groups
         );
-        let layout = build_super_cell_layout(group_to_cols, &col_to_batch, proj_kn)?;
-        let num_sc = layout.cell_counts.len();
-        info!(
-            "Built {} super-cells, matching with knn={} ...",
-            num_sc, knn
-        );
+        let layout = build_pb_sample_layout(group_to_cols, &col_to_batch, proj_kn)?;
+        let num_pb = layout.cell_counts.len();
+        info!("Built {} pb-samples, matching with knn={} ...", num_pb, knn);
 
         // Collect per-layer stats at finest level (reads all cells ONCE)
         let mut fine_stats: Vec<CollapsedStat> = Vec::with_capacity(num_layers);
@@ -2088,12 +2114,12 @@ impl MultilevelCollapsingOps for SparseIoStack {
             layer.collect_batch_stat(&mut stat)?;
 
             // Collect layer-specific gene sums
-            let gene_sums = collect_super_cell_gene_sums(
+            let gene_sums = collect_pb_sample_gene_sums(
                 layer,
                 group_to_cols,
                 &col_to_batch,
-                &layout.bg_to_sc,
-                num_sc,
+                &layout.bg_to_pbsamp,
+                num_pb,
             )?;
 
             // Match across batches using shared layout + layer gene sums
@@ -2103,7 +2129,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
             collect_matched_stat_coarse(
                 &layout,
                 &gene_sums,
-                &layout.super_cell_to_group,
+                &layout.pb_sample_to_group,
                 batch_knn.as_slice(),
                 knn,
                 &mut stat,

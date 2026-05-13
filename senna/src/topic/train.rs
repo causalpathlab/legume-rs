@@ -138,7 +138,7 @@ where
         f64::from(config.args.learning_rate),
     )?;
 
-    let pb = new_progress_bar(total_epochs as u64);
+    let prog_bar = new_progress_bar(total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);
     let mut kl_trace = Vec::with_capacity(total_epochs);
@@ -188,12 +188,12 @@ where
         llik_trace.push(llik_avg);
         kl_trace.push(kl_avg);
 
-        pb.inc(1);
+        prog_bar.inc(1);
 
         info!("[epoch {}] llik={} kl={}", epoch, llik_avg, kl_avg);
 
         if config.stop.load(Ordering::SeqCst) {
-            pb.finish_and_clear();
+            prog_bar.finish_and_clear();
             info!("Stopping early at epoch {epoch}");
             return Ok(TrainScores {
                 llik: llik_trace,
@@ -202,7 +202,7 @@ where
         }
     }
 
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
     info!("done mixed multi-level training");
     Ok(TrainScores {
         llik: llik_trace,
@@ -258,7 +258,7 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
         f64::from(config.args.learning_rate),
     )?;
 
-    let pb = new_progress_bar(total_epochs as u64);
+    let prog_bar = new_progress_bar(total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);
     let mut kl_trace = Vec::with_capacity(total_epochs);
@@ -309,12 +309,12 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
         llik_trace.push(llik_avg);
         kl_trace.push(kl_avg);
 
-        pb.inc(1);
+        prog_bar.inc(1);
 
         info!("[epoch {}] llik={} kl={}", epoch, llik_avg, kl_avg);
 
         if config.stop.load(Ordering::SeqCst) {
-            pb.finish_and_clear();
+            prog_bar.finish_and_clear();
             info!("Stopping early at epoch {epoch}");
             return Ok(TrainScores {
                 llik: llik_trace,
@@ -323,7 +323,7 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
         }
     }
 
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
     info!("done mixed multi-decoder multi-level training");
     Ok(TrainScores {
         llik: llik_trace,

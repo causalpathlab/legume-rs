@@ -347,7 +347,7 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     let mut out = create_sparse_streaming_empty(Some(&backend_file), Some(&backend))?;
     out.begin_streaming_csc((total_nrow, total_ncol, total_nnz))?;
 
-    let pb = ProgressBar::new(num_batches as u64);
+    let prog_bar = ProgressBar::new(num_batches as u64);
     for h in &batches {
         let src = open_sparse_matrix(&h.path, &h.backend)?;
         let jobs = create_jobs(h.ncol, total_nrow, args.block_size);
@@ -375,9 +375,9 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
             &values,
         )?;
 
-        pb.inc(1);
+        prog_bar.inc(1);
     }
-    pb.finish_and_clear();
+    prog_bar.finish_and_clear();
 
     out.finalize_streaming_csc()?;
     info!("transposing CSC → CSR on disk");

@@ -4,7 +4,7 @@
 //! these exercise the public end-to-end entry point against a synthetic
 //! layout + per-batch HNSW fixture.
 
-use data_beans_alg::collapse_data::SuperCellLayout;
+use data_beans_alg::collapse_data::PbSampleLayout;
 use data_beans_alg::refine_multilevel::{
     compact_labels, refine_assignments, RefineInputs, RefineParams,
 };
@@ -15,24 +15,24 @@ use rand::{RngExt, SeedableRng};
 use rustc_hash::FxHashMap as HashMap;
 
 /// Handle returned by `make_toy_layout_and_profiles` bundling the layout
-/// and the auxiliary per-super-cell data needed to call `refine_assignments`.
+/// and the auxiliary per-pb-sample data needed to call `refine_assignments`.
 struct ToyFixture {
-    layout: SuperCellLayout,
+    layout: PbSampleLayout,
     gene_sums: Vec<Vec<(usize, f32)>>,
-    super_cell_to_cells: Vec<Vec<usize>>,
+    pb_sample_to_cells: Vec<Vec<usize>>,
     true_cluster: Vec<usize>,
     batch_knn: Vec<ColumnDict<usize>>,
 }
 
 /// Build a synthetic refinement fixture.
 ///
-/// - `num_batches` batches × `num_clusters` true clusters → one super-cell
+/// - `num_batches` batches × `num_clusters` true clusters → one pb-sample
 ///   per (batch, cluster).
-/// - `cells_per_cluster_per_batch` cells per super-cell, each carrying a
-///   jittered copy of the super-cell's indicator centroid. Per-batch HNSWs
+/// - `cells_per_cluster_per_batch` cells per pb-sample, each carrying a
+///   jittered copy of the pb-sample's indicator centroid. Per-batch HNSWs
 ///   are built over these cell features, so a centroid-query in a foreign
-///   batch returns the matching-cluster super-cell first.
-/// - Initial `super_cell_to_group` labels are a noisy hash partition (70%
+///   batch returns the matching-cluster pb-sample first.
+/// - Initial `pb_sample_to_group` labels are a noisy hash partition (70%
 ///   aligned with truth) so refinement has something to correct.
 fn make_toy_layout_and_profiles(
     num_batches: usize,
@@ -41,36 +41,36 @@ fn make_toy_layout_and_profiles(
     num_features: usize,
     noise_seed: u64,
 ) -> ToyFixture {
-    let num_sc = num_batches * num_clusters;
+    let num_pb = num_batches * num_clusters;
     let proj_dim = num_clusters.max(2);
-    let mut centroids = DMatrix::<f32>::zeros(proj_dim, num_sc);
-    let mut sc_to_batch = Vec::with_capacity(num_sc);
-    let mut sc_to_group = Vec::with_capacity(num_sc);
-    let mut bg_to_sc: HashMap<(usize, usize), usize> = HashMap::default();
-    let mut true_cluster = Vec::with_capacity(num_sc);
-    let mut cell_counts = Vec::with_capacity(num_sc);
+    let mut centroids = DMatrix::<f32>::zeros(proj_dim, num_pb);
+    let mut pbsamp_to_batch = Vec::with_capacity(num_pb);
+    let mut pbsamp_to_group = Vec::with_capacity(num_pb);
+    let mut bg_to_pbsamp: HashMap<(usize, usize), usize> = HashMap::default();
+    let mut true_cluster = Vec::with_capacity(num_pb);
+    let mut cell_counts = Vec::with_capacity(num_pb);
 
-    let mut gene_sums: Vec<Vec<(usize, f32)>> = Vec::with_capacity(num_sc);
-    let mut super_cell_to_cells: Vec<Vec<usize>> = Vec::with_capacity(num_sc);
+    let mut gene_sums: Vec<Vec<(usize, f32)>> = Vec::with_capacity(num_pb);
+    let mut pb_sample_to_cells: Vec<Vec<usize>> = Vec::with_capacity(num_pb);
     let per_block = num_features / num_clusters;
 
     let mut rng = SmallRng::seed_from_u64(noise_seed);
     let mut next_cell = 0usize;
     let mut per_batch_cells: Vec<Vec<(usize, Vec<f32>)>> = vec![Vec::new(); num_batches];
-    let mut cell_to_sc_vec: Vec<usize> = Vec::new();
+    let mut cell_to_pbsamp_vec: Vec<usize> = Vec::new();
 
     for (batch, batch_cells) in per_batch_cells.iter_mut().enumerate() {
         for cluster in 0..num_clusters {
-            let sc = batch * num_clusters + cluster;
-            centroids[(cluster.min(proj_dim - 1), sc)] = 1.0;
-            sc_to_batch.push(batch);
+            let pbsamp = batch * num_clusters + cluster;
+            centroids[(cluster.min(proj_dim - 1), pbsamp)] = 1.0;
+            pbsamp_to_batch.push(batch);
             let hash_group = if rng.random_range(0.0..1.0_f32) < 0.7 {
                 cluster
             } else {
                 (cluster + 1) % num_clusters
             };
-            sc_to_group.push(hash_group);
-            bg_to_sc.insert((batch, hash_group), sc);
+            pbsamp_to_group.push(hash_group);
+            bg_to_pbsamp.insert((batch, hash_group), pbsamp);
             true_cluster.push(cluster);
             cell_counts.push(cells_per_cluster_per_batch as f32);
 
@@ -93,12 +93,12 @@ fn make_toy_layout_and_profiles(
                 let c = next_cell;
                 next_cell += 1;
                 cells_here.push(c);
-                cell_to_sc_vec.push(sc);
+                cell_to_pbsamp_vec.push(pbsamp);
                 let mut feat = vec![0.0f32; proj_dim];
                 feat[cluster.min(proj_dim - 1)] = 1.0 + rng.random_range(-0.02..0.02_f32);
                 batch_cells.push((c, feat));
             }
-            super_cell_to_cells.push(cells_here);
+            pb_sample_to_cells.push(cells_here);
         }
     }
 
@@ -119,18 +119,18 @@ fn make_toy_layout_and_profiles(
         })
         .collect();
 
-    let layout = SuperCellLayout {
+    let layout = PbSampleLayout {
         centroids,
         cell_counts,
-        super_cell_to_batch: sc_to_batch,
-        super_cell_to_group: sc_to_group,
-        bg_to_sc,
-        cell_to_sc: cell_to_sc_vec,
+        pb_sample_to_batch: pbsamp_to_batch,
+        pb_sample_to_group: pbsamp_to_group,
+        bg_to_pbsamp,
+        cell_to_pbsamp: cell_to_pbsamp_vec,
     };
     ToyFixture {
         layout,
         gene_sums,
-        super_cell_to_cells,
+        pb_sample_to_cells,
         true_cluster,
         batch_knn: batch_knn_lookup,
     }
@@ -165,13 +165,13 @@ fn refine_assignments_is_deterministic() {
     let ToyFixture {
         layout,
         gene_sums,
-        super_cell_to_cells: sc_to_cells,
+        pb_sample_to_cells: pbsamp_to_cells,
         batch_knn,
         ..
     } = make_toy_layout_and_profiles(2, 5, 4, 16, 42);
     let num_genes = 16;
 
-    let initial_finest = layout.super_cell_to_group.clone();
+    let initial_finest = layout.pb_sample_to_group.clone();
     let initial_coarse: Vec<usize> = initial_finest.iter().map(|&g| g / 2).collect();
     let (initial_coarse_compact, _k) = compact_labels(&initial_coarse);
     let initial_per_level = vec![initial_finest, initial_coarse_compact];
@@ -186,14 +186,14 @@ fn refine_assignments_is_deterministic() {
         layout: &layout,
         gene_sums: &gene_sums,
         num_genes,
-        super_cell_to_cells: &sc_to_cells,
+        pb_sample_to_cells: &pbsamp_to_cells,
         batch_knn_lookup: &batch_knn,
         k_per_batch: 4,
         initial_sc_to_group_per_level: &initial_per_level,
     };
     let a = refine_assignments(&inputs, &params).unwrap();
     let b = refine_assignments(&inputs, &params).unwrap();
-    assert_eq!(a.sc_to_group, b.sc_to_group);
+    assert_eq!(a.pbsamp_to_group, b.pbsamp_to_group);
     assert_eq!(a.num_groups_per_level, b.num_groups_per_level);
 }
 
@@ -202,12 +202,12 @@ fn refine_assignments_preserves_hierarchy() {
     let ToyFixture {
         layout,
         gene_sums,
-        super_cell_to_cells: sc_to_cells,
+        pb_sample_to_cells: pbsamp_to_cells,
         batch_knn,
         ..
     } = make_toy_layout_and_profiles(2, 5, 4, 16, 7);
     let num_genes = 16;
-    let initial_finest = layout.super_cell_to_group.clone();
+    let initial_finest = layout.pb_sample_to_group.clone();
     let initial_coarse: Vec<usize> = initial_finest.iter().map(|&g| g / 2).collect();
     let (initial_coarse_compact, _k) = compact_labels(&initial_coarse);
     let initial_per_level = vec![initial_finest, initial_coarse_compact];
@@ -216,7 +216,7 @@ fn refine_assignments_preserves_hierarchy() {
         layout: &layout,
         gene_sums: &gene_sums,
         num_genes,
-        super_cell_to_cells: &sc_to_cells,
+        pb_sample_to_cells: &pbsamp_to_cells,
         batch_knn_lookup: &batch_knn,
         k_per_batch: 4,
         initial_sc_to_group_per_level: &initial_per_level,
@@ -225,9 +225,9 @@ fn refine_assignments_preserves_hierarchy() {
 
     // Every fine group should have a single parent group at the coarser level.
     let mut parent_of_fine: HashMap<usize, usize> = HashMap::default();
-    for sc in 0..refined.sc_to_group[0].len() {
-        let fine = refined.sc_to_group[0][sc];
-        let coarse = refined.sc_to_group[1][sc];
+    for pbsamp in 0..refined.pbsamp_to_group[0].len() {
+        let fine = refined.pbsamp_to_group[0][pbsamp];
+        let coarse = refined.pbsamp_to_group[1][pbsamp];
         if let Some(&p) = parent_of_fine.get(&fine) {
             assert_eq!(
                 p, coarse,
@@ -245,12 +245,12 @@ fn refine_assignments_does_not_hurt_ari_on_planted() {
     let ToyFixture {
         layout,
         gene_sums,
-        super_cell_to_cells: sc_to_cells,
+        pb_sample_to_cells: pbsamp_to_cells,
         true_cluster: truth,
         batch_knn,
     } = make_toy_layout_and_profiles(2, 6, 4, 24, 11);
     let num_genes = 24;
-    let initial_finest = layout.super_cell_to_group.clone();
+    let initial_finest = layout.pb_sample_to_group.clone();
     let initial_per_level = vec![initial_finest.clone()];
 
     let params = RefineParams {
@@ -263,7 +263,7 @@ fn refine_assignments_does_not_hurt_ari_on_planted() {
         layout: &layout,
         gene_sums: &gene_sums,
         num_genes,
-        super_cell_to_cells: &sc_to_cells,
+        pb_sample_to_cells: &pbsamp_to_cells,
         batch_knn_lookup: &batch_knn,
         k_per_batch: 4,
         initial_sc_to_group_per_level: &initial_per_level,
@@ -271,7 +271,7 @@ fn refine_assignments_does_not_hurt_ari_on_planted() {
     let refined = refine_assignments(&inputs, &params).unwrap();
 
     let ari_before = adjusted_rand_index(&initial_finest, &truth);
-    let ari_after = adjusted_rand_index(&refined.sc_to_group[0], &truth);
+    let ari_after = adjusted_rand_index(&refined.pbsamp_to_group[0], &truth);
     assert!(
         ari_after >= ari_before,
         "refinement should not hurt ARI: before={:.3}, after={:.3}",
