@@ -24,7 +24,7 @@ use log::info;
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
-use rand::RngExt;
+use rand::{RngExt, SeedableRng};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
@@ -83,6 +83,22 @@ pub struct RefineParams {
     pub gibbs_stagnation: f64,
     /// Feature source. Defaults to `Raw`.
     pub profile_source: ProfileSource,
+    /// Jacobi-style parallel sweeps (default `true`).
+    ///
+    /// When `true`, every entity proposes its move against a frozen pre-sweep
+    /// snapshot of the sufficient stats (rayon `par_iter`); proposals are
+    /// then applied sequentially with the move guard. Per-entity RNG seeds
+    /// are derived from `(sweep_seed, entity_idx)`, so the result is
+    /// deterministic given `seed` and independent of thread count.
+    ///
+    /// When `false`, runs the classic Gauss–Seidel loop: each entity scores
+    /// against the live stats (updated by every accepted move so far in the
+    /// sweep), single-threaded.
+    ///
+    /// Jacobi is biased — within a sweep, entities can't see each other's
+    /// moves — but converges fine for the multilevel DC-Poisson use case
+    /// and is roughly P× faster on large pb-sample counts.
+    pub parallel: bool,
 }
 
 impl Default for RefineParams {
@@ -94,6 +110,7 @@ impl Default for RefineParams {
             seed: 42,
             gibbs_stagnation: 0.005,
             profile_source: ProfileSource::Raw,
+            parallel: true,
         }
     }
 }
@@ -118,19 +135,19 @@ pub struct Profiles {
 impl Profiles {
     pub fn from_gene_sums(gene_sums: &[Vec<(usize, f32)>], num_features: usize) -> Self {
         let num_entities = gene_sums.len();
-        let mut rows: Vec<Vec<(u32, f32)>> = Vec::with_capacity(num_entities);
-        let mut size_factor = Vec::with_capacity(num_entities);
-        for row in gene_sums {
-            let mut out: Vec<(u32, f32)> = row
-                .iter()
-                .filter(|(_, v)| *v > 0.0)
-                .map(|(g, v)| (*g as u32, *v))
-                .collect();
-            out.sort_unstable_by_key(|&(g, _)| g);
-            let sf = out.iter().map(|(_, v)| *v).sum();
-            rows.push(out);
-            size_factor.push(sf);
-        }
+        let (rows, size_factor): (Vec<Vec<(u32, f32)>>, Vec<f32>) = gene_sums
+            .par_iter()
+            .map(|row| {
+                let mut out: Vec<(u32, f32)> = row
+                    .iter()
+                    .filter(|(_, v)| *v > 0.0)
+                    .map(|(g, v)| (*g as u32, *v))
+                    .collect();
+                out.sort_unstable_by_key(|&(g, _)| g);
+                let sf: f32 = out.iter().map(|(_, v)| *v).sum();
+                (out, sf)
+            })
+            .unzip();
         Self {
             rows,
             size_factor,
@@ -179,14 +196,17 @@ impl Profiles {
     /// Used by [`Profiles::apply_feature_weighting`] for the NB Fisher-info path.
     pub fn weight_by_vec(&mut self, w: &[f32]) {
         debug_assert_eq!(w.len(), self.num_features);
-        for (row, sf) in self.rows.iter_mut().zip(self.size_factor.iter_mut()) {
-            let mut new_sf = 0f32;
-            for (g, v) in row.iter_mut() {
-                *v *= w[*g as usize];
-                new_sf += *v;
-            }
-            *sf = new_sf;
-        }
+        self.rows
+            .par_iter_mut()
+            .zip(self.size_factor.par_iter_mut())
+            .for_each(|(row, sf)| {
+                let mut new_sf = 0f32;
+                for (g, v) in row.iter_mut() {
+                    *v *= w[*g as usize];
+                    new_sf += *v;
+                }
+                *sf = new_sf;
+            });
     }
 
     /// Apply the chosen feature weighting in place.
@@ -212,20 +232,40 @@ impl Profiles {
         use matrix_util::sparse_stat::SparseRunningStatistics;
         use matrix_util::traits::RunningStatOps;
 
-        // One pass: accumulate per-feature sum and sum-of-squares over all
-        // entities. Reuses one scratch buffer per row.
-        let mut stats = SparseRunningStatistics::<f32>::new(self.num_features);
-        let mut col_rows: Vec<usize> = Vec::new();
-        let mut col_vals: Vec<f32> = Vec::new();
-        for row in &self.rows {
-            col_rows.clear();
-            col_vals.clear();
-            for &(g, v) in row {
-                col_rows.push(g as usize);
-                col_vals.push(v);
-            }
-            stats.add_sparse_column(&col_rows, &col_vals);
-        }
+        // Parallel fold over rows: each worker accumulates into its own
+        // `SparseRunningStatistics`, then we reduce via `merge`. Avoids the
+        // single-threaded `for row in &self.rows` over ~10⁴–10⁵ pb-samples.
+        let num_features = self.num_features;
+        let stats = self
+            .rows
+            .par_iter()
+            .fold(
+                || {
+                    (
+                        SparseRunningStatistics::<f32>::new(num_features),
+                        Vec::<usize>::new(),
+                        Vec::<f32>::new(),
+                    )
+                },
+                |(mut acc, mut col_rows, mut col_vals), row| {
+                    col_rows.clear();
+                    col_vals.clear();
+                    for &(g, v) in row {
+                        col_rows.push(g as usize);
+                        col_vals.push(v);
+                    }
+                    acc.add_sparse_column(&col_rows, &col_vals);
+                    (acc, col_rows, col_vals)
+                },
+            )
+            .map(|(acc, _, _)| acc)
+            .reduce(
+                || SparseRunningStatistics::<f32>::new(num_features),
+                |mut a, b| {
+                    a.merge(&b);
+                    a
+                },
+            );
 
         // `π_g = sum[g] / Σ sum` is derived directly from the stats without
         // a second sparse traversal. `mean_g` uses the entity-count denominator
@@ -602,10 +642,157 @@ pub struct RefineContext<'a> {
     pub level_label: &'a str,
 }
 
+/// Outcome of one sweep over all entities.
+#[derive(Default, Clone, Copy)]
+struct SweepCounts {
+    moves: usize,
+    vetoed: usize,
+}
+
+/// Apply a precomputed `proposals` vector to `stats` sequentially, consulting
+/// the move guard. Shared by both Jacobi sweeps after the parallel proposal
+/// phase. The guard sees the membership-being-updated, matching the
+/// sequential semantics.
+fn apply_proposals<G: MoveGuard>(
+    proposals: &[usize],
+    stats: &mut DcPoissonStats,
+    profiles: &Profiles,
+    guard: &G,
+) -> SweepCounts {
+    let mut sc = SweepCounts::default();
+    for (e, &new) in proposals.iter().enumerate() {
+        let old = stats.membership[e];
+        if new == old {
+            continue;
+        }
+        if guard.accept_move(e, old, &stats.membership) {
+            stats.delta_move(e, old, new, profiles);
+            sc.moves += 1;
+        } else {
+            sc.vetoed += 1;
+        }
+    }
+    sc
+}
+
+/// Gauss–Seidel Gibbs sweep: each entity scores against the live (mutated)
+/// stats. Single-threaded.
+fn gibbs_sweep_sequential<G: MoveGuard>(
+    candidates: &[Vec<usize>],
+    stats: &mut DcPoissonStats,
+    profiles: &Profiles,
+    guard: &G,
+    rng: &mut SmallRng,
+    log_probs: &mut [f64],
+) -> SweepCounts {
+    let n = candidates.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.shuffle(rng);
+    let mut sc = SweepCounts::default();
+    for &e in &order {
+        let cand = &candidates[e];
+        if cand.len() < 2 {
+            continue;
+        }
+        compute_log_probs_restricted(e, stats, profiles, cand, log_probs);
+        let new = sample_categorical_log(log_probs, rng);
+        let old = stats.membership[e];
+        if new == old {
+            continue;
+        }
+        if guard.accept_move(e, old, &stats.membership) {
+            stats.delta_move(e, old, new, profiles);
+            sc.moves += 1;
+        } else {
+            sc.vetoed += 1;
+        }
+    }
+    sc
+}
+
+/// Gauss–Seidel greedy sweep.
+fn greedy_sweep_sequential<G: MoveGuard>(
+    candidates: &[Vec<usize>],
+    stats: &mut DcPoissonStats,
+    profiles: &Profiles,
+    guard: &G,
+    log_probs: &mut [f64],
+) -> SweepCounts {
+    let mut sc = SweepCounts::default();
+    for (e, cand) in candidates.iter().enumerate() {
+        if cand.len() < 2 {
+            continue;
+        }
+        compute_log_probs_restricted(e, stats, profiles, cand, log_probs);
+        let new = argmax_log_restricted(log_probs, cand);
+        let old = stats.membership[e];
+        if new == old {
+            continue;
+        }
+        if guard.accept_move(e, old, &stats.membership) {
+            stats.delta_move(e, old, new, profiles);
+            sc.moves += 1;
+        } else {
+            sc.vetoed += 1;
+        }
+    }
+    sc
+}
+
+/// Jacobi sweep: every entity computes its proposal against a frozen pre-sweep
+/// snapshot of `stats` (rayon `par_iter`); proposals are then applied
+/// sequentially with the move guard.
+///
+/// `pick(log_probs, cand, e)` chooses the destination given the restricted
+/// log-likelihoods. For Gibbs it derives a per-entity RNG from `(sweep_seed,
+/// e)` and samples categorically; for greedy it ignores `e` and argmaxes.
+/// `proposals` is a reusable scratch buffer of length `candidates.len()` —
+/// hoisted by the driver across sweeps to avoid re-allocating.
+fn sweep_jacobi<G: MoveGuard, F>(
+    candidates: &[Vec<usize>],
+    stats: &mut DcPoissonStats,
+    profiles: &Profiles,
+    guard: &G,
+    k: usize,
+    proposals: &mut [usize],
+    pick: F,
+) -> SweepCounts
+where
+    F: Fn(&[f64], &[usize], usize) -> usize + Sync,
+{
+    debug_assert_eq!(proposals.len(), candidates.len());
+    {
+        // Immutable reborrow so the rayon closure can capture `&stats: Sync`
+        // while the outer `&mut` is held across the propose / apply phases.
+        let stats: &DcPoissonStats = stats;
+        proposals
+            .par_iter_mut()
+            .enumerate()
+            .with_min_len(256)
+            .for_each_init(
+                || vec![f64::NEG_INFINITY; k],
+                |log_probs, (e, prop)| {
+                    let cand = &candidates[e];
+                    if cand.len() < 2 {
+                        *prop = stats.membership[e];
+                        return;
+                    }
+                    compute_log_probs_restricted(e, stats, profiles, cand, log_probs);
+                    *prop = pick(log_probs, cand, e);
+                },
+            );
+    }
+    apply_proposals(proposals, stats, profiles, guard)
+}
+
 /// This is the lowest-level driver. Pass [`NoGuard`] to get the unguarded
 /// behavior; most callers should prefer the convenience wrappers
 /// [`refine_with_candidates`] / [`refine_with_proposer`] /
 /// [`refine_with_proposer_guarded`].
+///
+/// Sweep dispatch follows `ctx.params.parallel`: Jacobi (parallel proposal,
+/// sequential apply) when true, Gauss–Seidel (single-threaded) when false.
+/// See [`RefineParams::parallel`] for trade-offs.
 pub fn refine_with_candidates_guarded<G: MoveGuard>(
     labels: &mut [usize],
     candidates: &[Vec<usize>],
@@ -626,6 +813,14 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
     let mut total_moves = 0usize;
     let mut total_vetoed = 0usize;
 
+    // Reusable proposal scratch for Jacobi sweeps — hoisted so the
+    // num_sweeps × num_entities allocation isn't repeated each sweep.
+    let mut proposals: Vec<usize> = if params.parallel {
+        vec![0usize; num_entities]
+    } else {
+        Vec::new()
+    };
+
     let max_sweeps = (params.num_gibbs + params.num_greedy) as u64;
     let prog_bar = ProgressBar::new(max_sweeps).with_style(
         ProgressStyle::with_template(&format!(
@@ -640,33 +835,37 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
     // the bar is silent until the next inc(1)).
     prog_bar.enable_steady_tick(std::time::Duration::from_millis(100));
 
+    // Jacobi per-sweep seed base: draw a single odd u64 from `rng` so the
+    // sweep loop is reproducible given `params.seed` regardless of how many
+    // cells `shuffle` would have consumed in the sequential path.
+    let jacobi_base_seed = rng.random::<u64>() | 1;
+
     if params.num_gibbs > 0 {
-        let mut order: Vec<usize> = (0..num_entities).collect();
         let mut low_sweeps = 0usize;
-        for _sweep in 0..params.num_gibbs {
-            order.shuffle(rng);
-            let mut moves = 0usize;
-            for &e in &order {
-                let cand = &candidates[e];
-                if cand.len() < 2 {
-                    continue;
-                }
-                compute_log_probs_restricted(e, &stats, profiles, cand, &mut log_probs);
-                let new = sample_categorical_log(&log_probs, rng);
-                let old = stats.membership[e];
-                if new != old {
-                    if guard.accept_move(e, old, &stats.membership) {
-                        stats.delta_move(e, old, new, profiles);
-                        moves += 1;
-                    } else {
-                        total_vetoed += 1;
-                    }
-                }
-            }
-            total_moves += moves;
+        for sweep in 0..params.num_gibbs {
+            let sc = if params.parallel {
+                let sweep_seed = jacobi_base_seed.wrapping_mul(sweep as u64 + 1);
+                sweep_jacobi(
+                    candidates,
+                    &mut stats,
+                    profiles,
+                    guard,
+                    k,
+                    &mut proposals,
+                    |log_probs, _cand, e| {
+                        let vertex_seed = sweep_seed ^ (e as u64).wrapping_mul(2654435761);
+                        let mut rng = SmallRng::seed_from_u64(vertex_seed);
+                        sample_categorical_log(log_probs, &mut rng)
+                    },
+                )
+            } else {
+                gibbs_sweep_sequential(candidates, &mut stats, profiles, guard, rng, &mut log_probs)
+            };
+            total_moves += sc.moves;
+            total_vetoed += sc.vetoed;
             prog_bar.inc(1);
             if params.gibbs_stagnation > 0.0 {
-                if (moves as f64) < params.gibbs_stagnation * (num_entities as f64) {
+                if (sc.moves as f64) < params.gibbs_stagnation * (num_entities as f64) {
                     low_sweeps += 1;
                     if low_sweeps >= 3 {
                         break;
@@ -679,26 +878,23 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
     }
 
     for _sweep in 0..params.num_greedy {
-        let mut moves = 0usize;
-        for (e, cand) in candidates.iter().enumerate() {
-            if cand.len() < 2 {
-                continue;
-            }
-            compute_log_probs_restricted(e, &stats, profiles, cand, &mut log_probs);
-            let new = argmax_log_restricted(&log_probs, cand);
-            let old = stats.membership[e];
-            if new != old {
-                if guard.accept_move(e, old, &stats.membership) {
-                    stats.delta_move(e, old, new, profiles);
-                    moves += 1;
-                } else {
-                    total_vetoed += 1;
-                }
-            }
-        }
-        total_moves += moves;
+        let sc = if params.parallel {
+            sweep_jacobi(
+                candidates,
+                &mut stats,
+                profiles,
+                guard,
+                k,
+                &mut proposals,
+                |log_probs, cand, _e| argmax_log_restricted(log_probs, cand),
+            )
+        } else {
+            greedy_sweep_sequential(candidates, &mut stats, profiles, guard, &mut log_probs)
+        };
+        total_moves += sc.moves;
+        total_vetoed += sc.vetoed;
         prog_bar.inc(1);
-        if moves == 0 {
+        if sc.moves == 0 {
             break;
         }
     }
