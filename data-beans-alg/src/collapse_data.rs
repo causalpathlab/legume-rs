@@ -959,68 +959,77 @@ fn collect_matched_stat_coarse(
 
     let neighbors_per_sc = per_batch_sc_neighbors(layout, batch_knn_lookup, knn)?;
 
-    for pbsamp_idx in 0..num_pb {
-        let pbsamp_group = pbsamp_to_group[pbsamp_idx];
-        let sc_count = layout.cell_counts[pbsamp_idx];
+    use indicatif::ParallelProgressIterator;
+    let prog_bar = styled_progress_bar(num_pb as u64, "pb-samples (matched stats)");
+    let arc_stat = Arc::new(Mutex::new(stat));
 
-        if sc_count < 1.0 {
-            continue;
-        }
+    (0..num_pb)
+        .into_par_iter()
+        .progress_with(prog_bar.clone())
+        .for_each(|pbsamp_idx| {
+            let pbsamp_group = pbsamp_to_group[pbsamp_idx];
+            let sc_count = layout.cell_counts[pbsamp_idx];
 
-        let filtered: Vec<(usize, f32)> = neighbors_per_sc[pbsamp_idx].clone();
-
-        if filtered.is_empty() {
-            continue;
-        }
-
-        // Softmax weights from negative distances
-        let max_neg_d = filtered
-            .iter()
-            .map(|(_, d)| -d)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let mut weights: Vec<f32> = filtered
-            .iter()
-            .map(|(_, d)| (-d - max_neg_d).exp())
-            .collect();
-        let w_sum: f32 = weights.iter().sum();
-        if w_sum > 0.0 {
-            weights.iter_mut().for_each(|w| *w /= w_sum);
-        }
-
-        // Counterfactual: weighted average of matched pb-samples'
-        // per-cell gene expression
-        // y_hat[g] = sum_k w[k] * gene_sums[k][g] / cell_counts[k]
-        let mut y_hat: HashMap<usize, f32> = HashMap::default();
-        for ((matched_sc, _), &w) in filtered.iter().zip(weights.iter()) {
-            let matched_count = layout.cell_counts[*matched_sc];
-            if matched_count < 1.0 {
-                continue;
+            if sc_count < 1.0 {
+                return;
             }
-            let inv_count = 1.0 / matched_count;
-            for &(gene, val) in &gene_sums[*matched_sc] {
-                *y_hat.entry(gene).or_default() += w * val * inv_count;
+
+            let filtered = &neighbors_per_sc[pbsamp_idx];
+            if filtered.is_empty() {
+                return;
             }
-        }
 
-        // Accumulate imputed_sum_ds[g, s] += cell_counts[pbsamp] * y_hat[g]
-        for (&gene, &y) in &y_hat {
-            stat.imputed_sum_ds[(gene, pbsamp_group)] += sc_count * y;
-        }
+            // Softmax weights from negative distances
+            let max_neg_d = filtered
+                .iter()
+                .map(|(_, d)| -d)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let mut weights: Vec<f32> = filtered
+                .iter()
+                .map(|(_, d)| (-d - max_neg_d).exp())
+                .collect();
+            let w_sum: f32 = weights.iter().sum();
+            if w_sum > 0.0 {
+                weights.iter_mut().for_each(|w| *w /= w_sum);
+            }
 
-        // Accumulate residual_sum_ds[g, s] += y_obs[g] / y_hat[g]
-        // where y_obs[g] = gene_sums[pbsamp][g] / cell_counts[pbsamp]
-        // -> residual_sum_ds[g, s] += gene_sums[pbsamp][g] / (cell_counts[pbsamp] * y_hat[g])
-        //    then × cell_counts[pbsamp] to match original scaling
-        // = gene_sums[pbsamp][g] / y_hat[g]
-        for &(gene, val) in &gene_sums[pbsamp_idx] {
-            if let Some(&y_h) = y_hat.get(&gene) {
-                if y_h > 0.0 {
-                    stat.residual_sum_ds[(gene, pbsamp_group)] += val / y_h;
+            // Counterfactual: weighted average of matched pb-samples'
+            // per-cell gene expression
+            // y_hat[g] = sum_k w[k] * gene_sums[k][g] / cell_counts[k]
+            let mut y_hat: HashMap<usize, f32> = HashMap::default();
+            for ((matched_sc, _), &w) in filtered.iter().zip(weights.iter()) {
+                let matched_count = layout.cell_counts[*matched_sc];
+                if matched_count < 1.0 {
+                    continue;
+                }
+                let inv_count = 1.0 / matched_count;
+                for &(gene, val) in &gene_sums[*matched_sc] {
+                    *y_hat.entry(gene).or_default() += w * val * inv_count;
                 }
             }
-        }
-    }
 
+            let mut stat = arc_stat.lock().expect("lock stat");
+
+            // Accumulate imputed_sum_ds[g, s] += cell_counts[pbsamp] * y_hat[g]
+            for (&gene, &y) in &y_hat {
+                stat.imputed_sum_ds[(gene, pbsamp_group)] += sc_count * y;
+            }
+
+            // Accumulate residual_sum_ds[g, s] += y_obs[g] / y_hat[g]
+            // where y_obs[g] = gene_sums[pbsamp][g] / cell_counts[pbsamp]
+            // -> residual_sum_ds[g, s] += gene_sums[pbsamp][g] / (cell_counts[pbsamp] * y_hat[g])
+            //    then × cell_counts[pbsamp] to match original scaling
+            // = gene_sums[pbsamp][g] / y_hat[g]
+            for &(gene, val) in &gene_sums[pbsamp_idx] {
+                if let Some(&y_h) = y_hat.get(&gene) {
+                    if y_h > 0.0 {
+                        stat.residual_sum_ds[(gene, pbsamp_group)] += val / y_h;
+                    }
+                }
+            }
+        });
+
+    prog_bar.finish_and_clear();
     Ok(())
 }
 
