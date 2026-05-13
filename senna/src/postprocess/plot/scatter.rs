@@ -2,7 +2,7 @@
 //! labels over transparent background.
 //!
 //! Preferred invocation is `senna plot --from {prefix}.senna.json`
-//! (manifest produced by `senna topic` + enriched by `senna viz`); it
+//! (manifest produced by `senna topic` + enriched by `senna layout`); it
 //! fills in cell-coords / topics / labels / colour-by / palette from
 //! the manifest's `viz{}`, `outputs{}`, and `defaults{}` sections.
 //! Explicit CLI flags still override whatever the manifest provides.
@@ -63,7 +63,7 @@ pub struct PlotArgs {
     #[arg(
         long,
         short = 'f',
-        help = "Run manifest JSON from `senna topic`/`itopic`/`joint-topic` (+ updated by `senna viz`)",
+        help = "Run manifest JSON from `senna topic`/`itopic`/`joint-topic` (+ updated by `senna layout`)",
         long_help = "If set, fills in --cell-coords, --topics, --labels, --colour-by, \
                      and --palette from the manifest's viz/outputs/defaults sections. \
                      Any explicit CLI flag still overrides the manifest value. Paths \
@@ -75,7 +75,7 @@ pub struct PlotArgs {
     #[arg(
         long,
         short = 'c',
-        help = "Cell coordinates parquet (from `senna viz`); required unless --from provides it"
+        help = "Cell coordinates parquet (from `senna layout`); required unless --from provides it"
     )]
     pub cell_coords: Option<Box<str>>,
 
