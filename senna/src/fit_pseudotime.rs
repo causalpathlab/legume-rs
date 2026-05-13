@@ -14,8 +14,93 @@ use crate::principal_graph::{
     CellProjection, PrincipalGraph, PrincipalGraphArgs,
 };
 use crate::run_manifest::{rel_to_manifest, resolve, RunManifest};
-use crate::tree_layout::{place_cells_on_tree, reingold_tilford_layout};
 use std::path::PathBuf;
+
+////////////////////////////////////////////////////////////////////////////////
+// Pure pseudotime core
+////////////////////////////////////////////////////////////////////////////////
+
+/// How the pseudotime origin is specified. Cells/nodes are resolved against
+/// the principal graph after it is fit, so any variant is valid here.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RootSpec<'a> {
+    /// Look up `cell_name` in the latent's row names, then snap to the
+    /// closest principal-graph node.
+    Cell(&'a str),
+    /// Use this principal-graph node id directly.
+    Node(usize),
+    /// No root supplied — snap to the centroid closest to the first cell.
+    /// `run_pseudotime` warns when it falls back to this variant.
+    DefaultFirstCell,
+}
+
+/// Output of [`compute_pseudotime`]: everything needed both to write
+/// parquet artifacts and to drive downstream consumers (orient-by-root,
+/// tree layout, …) in-memory.
+pub(crate) struct PseudotimeArtifacts {
+    pub graph: PrincipalGraph,
+    pub projections: Vec<CellProjection>,
+    pub root: usize,
+    pub pseudotime: Vec<f32>,
+}
+
+/// Pure core: fit the principal graph on `latent`, project cells, resolve
+/// the root, and compute per-cell pseudotime. No I/O. Shared by
+/// `run_pseudotime` and by `senna layout phate --orient-by-root`.
+pub(crate) fn compute_pseudotime(
+    latent: &Mat,
+    cell_names: &[Box<str>],
+    pg_args: &PrincipalGraphArgs,
+    root: RootSpec<'_>,
+) -> anyhow::Result<PseudotimeArtifacts> {
+    anyhow::ensure!(
+        latent.nrows() >= 5,
+        "need at least 5 cells to fit a principal graph"
+    );
+    let graph = fit_principal_graph(latent, pg_args)?;
+    let projections = project_cells_to_graph(latent, &graph);
+    let root = resolve_root_node_spec(root, cell_names, latent, &graph)?;
+    let pseudotime = pseudotime_from_root(&graph, &projections, root);
+    Ok(PseudotimeArtifacts {
+        graph,
+        projections,
+        root,
+        pseudotime,
+    })
+}
+
+fn resolve_root_node_spec(
+    spec: RootSpec<'_>,
+    cell_names: &[Box<str>],
+    latent: &Mat,
+    graph: &PrincipalGraph,
+) -> anyhow::Result<usize> {
+    match spec {
+        RootSpec::Node(id) => {
+            anyhow::ensure!(
+                id < graph.n_nodes(),
+                "--root-node {id} out of range (graph has {} nodes)",
+                graph.n_nodes()
+            );
+            Ok(id)
+        }
+        RootSpec::Cell(name) => {
+            let idx = cell_names
+                .iter()
+                .position(|c| c.as_ref() == name)
+                .ok_or_else(|| anyhow::anyhow!("--root-cell '{name}' not found in latent rows"))?;
+            Ok(closest_node_to_row(latent, idx, graph))
+        }
+        RootSpec::DefaultFirstCell => {
+            log::warn!(
+                "no --root-cell or --root-node given; defaulting to the centroid \
+                 closest to the first cell in --latent (use --root-cell or --root-node \
+                 to set an explicit origin)"
+            );
+            Ok(closest_node_to_row(latent, 0, graph))
+        }
+    }
+}
 
 #[derive(Args, Debug)]
 pub struct PseudotimeArgs {
@@ -96,31 +181,16 @@ pub struct PseudotimeArgs {
 
     #[arg(
         long,
-        default_value_t = 0.08,
-        help = "Tree-layout jitter (fraction of edge length, 0 = no jitter)",
-        long_help = "Per-cell perpendicular Gaussian jitter applied when placing\n\
-                     cells along principal-graph edges in the tree layout. Scaled\n\
-                     by edge length so dense branches don't collapse to a thin\n\
-                     line. 0 disables jitter (cells stack on the line)."
-    )]
-    tree_jitter: f32,
-
-    #[arg(
-        long,
-        default_value_t = 42,
-        help = "RNG seed for tree-layout cell jitter (reproducibility)"
-    )]
-    tree_jitter_seed: u64,
-
-    #[arg(
-        long,
         short = 'o',
         required = true,
         help = "Output file prefix",
         long_help = "Output prefix. Generates:\n  \
                      {out}.pseudotime.parquet           — cells × 1 pseudotime\n  \
                      {out}.principal_graph.nodes.parquet — K × D centroid coordinates\n  \
-                     {out}.principal_graph.edges.parquet — E × 3 (from, to, weight)"
+                     {out}.principal_graph.edges.parquet — E × 3 (from, to, weight)\n\n\
+                     The Reingold-Tilford tree layout is no longer written here.\n\
+                     Run `senna layout tree --from <manifest>` after this command\n\
+                     to produce {out}.tree_layout.{cell_coords,nodes_2d}.parquet."
     )]
     out: Box<str>,
 }
@@ -142,10 +212,6 @@ pub fn run_pseudotime(args: &PseudotimeArgs) -> anyhow::Result<()> {
         "Loaded latent: {} cells × {} dims",
         latent.nrows(),
         latent.ncols()
-    );
-    anyhow::ensure!(
-        latent.nrows() >= 5,
-        "need at least 5 cells to fit a principal graph"
     );
 
     let n_centroids = args
@@ -172,7 +238,21 @@ pub fn run_pseudotime(args: &PseudotimeArgs) -> anyhow::Result<()> {
         kmeans_max_iter: args.kmeans_iter,
     };
 
-    let graph = fit_principal_graph(&latent, &pg_args)?;
+    let root_spec = if let Some(id) = args.root_node {
+        RootSpec::Node(id)
+    } else if let Some(name) = args.root_cell.as_deref() {
+        RootSpec::Cell(name)
+    } else {
+        RootSpec::DefaultFirstCell
+    };
+
+    let PseudotimeArtifacts {
+        graph,
+        projections,
+        root,
+        pseudotime,
+    } = compute_pseudotime(&latent, &cell_names, &pg_args, root_spec)?;
+
     info!(
         "Fitted principal graph: {} nodes, {} edges, {} iter(s), final obj = {:.4}",
         graph.n_nodes(),
@@ -180,8 +260,6 @@ pub fn run_pseudotime(args: &PseudotimeArgs) -> anyhow::Result<()> {
         graph.n_iters,
         graph.final_objective
     );
-
-    let projections = project_cells_to_graph(&latent, &graph);
     let mean_sd: f32 =
         projections.iter().map(|p| p.sqdist).sum::<f32>() / projections.len().max(1) as f32;
     info!(
@@ -189,11 +267,7 @@ pub fn run_pseudotime(args: &PseudotimeArgs) -> anyhow::Result<()> {
         projections.len(),
         mean_sd
     );
-
-    let root = resolve_root_node(args, &cell_names, &latent, &graph)?;
     info!("Pseudotime root: node {root}");
-
-    let pseudotime = pseudotime_from_root(&graph, &projections, root);
 
     let pseudotime_path = format!("{}.pseudotime.parquet", args.out);
     let nodes_latent_path = format!("{}.principal_graph.nodes.parquet", args.out);
@@ -208,18 +282,6 @@ pub fn run_pseudotime(args: &PseudotimeArgs) -> anyhow::Result<()> {
         None => None,
     };
 
-    let tree_paths = write_tree_layout(
-        &graph,
-        &projections,
-        root,
-        &cell_names,
-        TreeJitter {
-            frac: args.tree_jitter,
-            seed: args.tree_jitter_seed,
-        },
-        &args.out,
-    )?;
-
     if let Some(ctx) = manifest_ctx {
         update_manifest(
             ctx,
@@ -229,19 +291,16 @@ pub fn run_pseudotime(args: &PseudotimeArgs) -> anyhow::Result<()> {
                 nodes_2d: nodes_2d_path.as_deref(),
                 edges: &edges_path,
                 root,
-                tree: tree_paths.as_ref(),
             },
         )?;
     }
 
-    Ok(())
-}
+    info!(
+        "Run `senna layout tree --from <manifest>` to produce the Reingold-Tilford \
+         tree layout from this pseudotime run."
+    );
 
-/// Per-cell jitter knob for [`write_tree_layout`].
-#[derive(Debug, Clone, Copy)]
-struct TreeJitter {
-    frac: f32,
-    seed: u64,
+    Ok(())
 }
 
 /// Bundle of artifact paths handed to [`update_manifest`]. All paths are
@@ -253,72 +312,6 @@ struct PseudotimeManifestUpdate<'a> {
     nodes_2d: Option<&'a str>,
     edges: &'a str,
     root: usize,
-    tree: Option<&'a TreeLayoutPaths>,
-}
-
-struct TreeLayoutPaths {
-    cell_coords: String,
-    nodes_2d: String,
-}
-
-/// Compute the Reingold-Tilford tree layout, place cells on edges with
-/// jitter, and write `{out}.tree_layout.{cell_coords,nodes_2d}.parquet`.
-/// Returns `None` if no node ended up with a finite (x, y) — e.g. the
-/// principal graph is empty.
-fn write_tree_layout(
-    graph: &PrincipalGraph,
-    projections: &[CellProjection],
-    root: usize,
-    cell_names: &[Box<str>],
-    jitter: TreeJitter,
-    out: &str,
-) -> anyhow::Result<Option<TreeLayoutPaths>> {
-    let layout = reingold_tilford_layout(graph, root);
-    let n_finite_nodes = layout
-        .node_xy
-        .iter()
-        .filter(|(x, y)| x.is_finite() && y.is_finite())
-        .count();
-    if n_finite_nodes == 0 {
-        info!("tree layout: no finite nodes after RT — skipping tree-layout outputs");
-        return Ok(None);
-    }
-    info!("tree layout: {n_finite_nodes} reachable nodes, root = node {root}");
-
-    let cell_xy = place_cells_on_tree(graph, projections, &layout, jitter.frac, jitter.seed);
-
-    // Match the layout.cell_coords schema (`x`, `y`) so `senna plot`'s
-    // existing reader picks this up unchanged.
-    let cell_coords_path = format!("{out}.tree_layout.cell_coords.parquet");
-    let cell_cols: Vec<Box<str>> = vec!["x".into(), "y".into()];
-    cell_xy.to_parquet_with_names(
-        &cell_coords_path,
-        (Some(cell_names), Some("cell")),
-        Some(&cell_cols),
-    )?;
-    info!("Wrote {cell_coords_path}");
-
-    let nodes_2d_path = format!("{out}.tree_layout.nodes_2d.parquet");
-    let mut node_mat = Mat::zeros(graph.n_nodes(), 2);
-    for (i, &(x, y)) in layout.node_xy.iter().enumerate() {
-        node_mat[(i, 0)] = x;
-        node_mat[(i, 1)] = y;
-    }
-    let node_row_names: Vec<Box<str>> = (0..graph.n_nodes())
-        .map(|i| format!("node_{i}").into_boxed_str())
-        .collect();
-    let node_col_names: Vec<Box<str>> = vec!["x".into(), "y".into()];
-    node_mat.to_parquet_with_names(
-        &nodes_2d_path,
-        (Some(&node_row_names), Some("node")),
-        Some(&node_col_names),
-    )?;
-    info!("Wrote {nodes_2d_path}");
-
-    Ok(Some(TreeLayoutPaths {
-        cell_coords: cell_coords_path,
-        nodes_2d: nodes_2d_path,
-    }))
 }
 
 fn default_k(n_cells: usize) -> usize {
@@ -450,42 +443,14 @@ fn update_manifest(
     ctx.manifest.pseudotime.nodes_2d = update.nodes_2d.map(rel);
     ctx.manifest.pseudotime.edges = Some(rel(update.edges));
     ctx.manifest.pseudotime.root_node = Some(update.root);
-    ctx.manifest.pseudotime.tree_cell_coords = update.tree.map(|t| rel(&t.cell_coords));
-    ctx.manifest.pseudotime.tree_nodes_2d = update.tree.map(|t| rel(&t.nodes_2d));
+    // Tree layout is now produced by `senna layout tree`; clear any stale
+    // paths from a previous run so downstream readers don't pick up a
+    // tree that no longer matches this pseudotime fit.
+    ctx.manifest.pseudotime.tree_cell_coords = None;
+    ctx.manifest.pseudotime.tree_nodes_2d = None;
     ctx.manifest.save(&ctx.path)?;
     info!("Updated manifest {}", ctx.path.display());
     Ok(())
-}
-
-fn resolve_root_node(
-    args: &PseudotimeArgs,
-    cell_names: &[Box<str>],
-    latent: &Mat,
-    graph: &crate::principal_graph::PrincipalGraph,
-) -> anyhow::Result<usize> {
-    if let Some(id) = args.root_node {
-        anyhow::ensure!(
-            id < graph.n_nodes(),
-            "--root-node {id} out of range (graph has {} nodes)",
-            graph.n_nodes()
-        );
-        return Ok(id);
-    }
-    if let Some(name) = args.root_cell.as_deref() {
-        let idx = cell_names
-            .iter()
-            .position(|c| c.as_ref() == name)
-            .ok_or_else(|| anyhow::anyhow!("--root-cell '{name}' not found in latent rows"))?;
-        return Ok(closest_node_to_row(latent, idx, graph));
-    }
-    // Default: pick the centroid closest to the first cell. Documented as
-    // arbitrary so users always have a deterministic fallback.
-    log::warn!(
-        "no --root-cell or --root-node given; defaulting to the centroid \
-         closest to the first cell in --latent (use --root-cell or --root-node \
-         to set an explicit origin)"
-    );
-    Ok(closest_node_to_row(latent, 0, graph))
 }
 
 fn write_pseudotime(pseudotime: &[f32], cell_names: &[Box<str>], path: &str) -> anyhow::Result<()> {
