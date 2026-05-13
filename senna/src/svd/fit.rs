@@ -113,13 +113,8 @@ pub struct SvdArgs {
     )]
     block_size: Option<usize>,
 
-    #[arg(
-        long = "weighting",
-        value_enum,
-        default_value_t = crate::refine_weighting::WeightingArg::NbFisherInfo,
-        help = crate::refine_weighting::WEIGHTING_HELP,
-    )]
-    refine_weighting: crate::refine_weighting::WeightingArg,
+    #[command(flatten)]
+    pb_refine: crate::refine_weighting::PbRefineArgs,
 
     #[arg(
         short = 'c',
@@ -196,10 +191,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             num_levels: args.num_levels,
             sort_dim: args.sort_dim,
             num_opt_iter: args.iter_opt,
-            refine: Some(data_beans_alg::refine_multilevel::RefineParams {
-                feature_weighting: args.refine_weighting.into(),
-                ..data_beans_alg::refine_multilevel::RefineParams::default()
-            }),
+            refine: Some(args.pb_refine.to_params()),
         },
     )?;
 
