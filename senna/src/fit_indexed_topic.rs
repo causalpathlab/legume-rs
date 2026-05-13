@@ -133,13 +133,8 @@ pub struct IndexedTopicArgs {
     )]
     block_size: Option<usize>,
 
-    #[arg(
-        long = "weighting",
-        value_enum,
-        default_value_t = crate::refine_weighting::WeightingArg::NbFisherInfo,
-        help = crate::refine_weighting::WEIGHTING_HELP,
-    )]
-    refine_weighting: crate::refine_weighting::WeightingArg,
+    #[command(flatten)]
+    pb_refine: crate::refine_weighting::PbRefineArgs,
 
     #[arg(
         short = 't',
@@ -262,20 +257,8 @@ pub struct IndexedTopicArgs {
     )]
     embedding_dim: usize,
 
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "Per-cell refinement steps at inference (0 = off)",
-        long_help = "Gradient steps that optimize topic logits against the frozen\n\
-                     decoder likelihood, anchored to the encoder output by L2."
-    )]
-    refine_steps: usize,
-
-    #[arg(long, default_value_t = 0.01, help = "Refinement learning rate")]
-    refine_lr: f64,
-
-    #[arg(long, default_value_t = 1.0, help = "Refinement L2 regularization")]
-    refine_reg: f64,
+    #[command(flatten)]
+    amort_refine: crate::refine_weighting::AmortRefineArgs,
 
     #[arg(
         long,
@@ -529,10 +512,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             data_beans::sparse_io_vector::ColumnAlignment::Disjoint
         },
         feature_kind: args.feature_name_kind.clone().into(),
-        refine: Some(data_beans_alg::refine_multilevel::RefineParams {
-            feature_weighting: args.refine_weighting.into(),
-            ..data_beans_alg::refine_multilevel::RefineParams::default()
-        }),
+        refine: Some(args.pb_refine.to_params()),
         ignore_batch: args.ignore_batch,
     })?;
 
@@ -791,17 +771,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         cpu_vb.pp(format!("dec_{finest_dec_idx}")),
     )?;
 
-    let refine_config = if args.refine_steps > 0 {
-        Some(
-            candle_util::candle_topic_refinement::TopicRefinementConfig {
-                num_steps: args.refine_steps,
-                learning_rate: args.refine_lr,
-                regularization: args.refine_reg,
-            },
-        )
-    } else {
-        None
-    };
+    let refine_config = args.amort_refine.to_config();
 
     info!("Writing down the latent states");
     let eval_config = EvaluateLatentConfig {
