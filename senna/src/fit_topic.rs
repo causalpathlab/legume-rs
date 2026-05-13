@@ -148,26 +148,8 @@ pub struct TopicArgs {
     )]
     pub(crate) num_levels: usize,
 
-    #[arg(long, default_value_t = 20, help = "Gibbs sweeps per refinement level")]
-    pub(crate) refine_gibbs: usize,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Greedy sweeps per refinement level"
-    )]
-    pub(crate) refine_greedy: usize,
-
-    #[arg(
-        long = "weighting",
-        value_enum,
-        default_value_t = crate::refine_weighting::WeightingArg::NbFisherInfo,
-        help = crate::refine_weighting::WEIGHTING_HELP,
-    )]
-    pub(crate) refine_weighting: crate::refine_weighting::WeightingArg,
-
-    #[arg(long, default_value_t = 42, help = "Seed for refinement Gibbs sampler")]
-    pub(crate) refine_seed: u64,
+    #[command(flatten)]
+    pub(crate) pb_refine: crate::refine_weighting::PbRefineArgs,
 
     #[arg(
         long,
@@ -293,20 +275,8 @@ pub struct TopicArgs {
     )]
     pub(crate) topic_smoothing: f64,
 
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "Per-cell refinement steps at inference (0 = off)",
-        long_help = "Gradient steps that optimize topic logits against the frozen\n\
-                     decoder likelihood, anchored to the encoder output by L2."
-    )]
-    pub(crate) refine_steps: usize,
-
-    #[arg(long, default_value_t = 0.01, help = "Refinement learning rate")]
-    pub(crate) refine_lr: f64,
-
-    #[arg(long, default_value_t = 1.0, help = "Refinement L2 regularization")]
-    pub(crate) refine_reg: f64,
+    #[command(flatten)]
+    pub(crate) amort_refine: crate::refine_weighting::AmortRefineArgs,
 
     #[arg(
         long,
@@ -366,13 +336,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         out: &args.out,
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
-        refine: Some(data_beans_alg::refine_multilevel::RefineParams {
-            num_gibbs: args.refine_gibbs,
-            num_greedy: args.refine_greedy,
-            feature_weighting: args.refine_weighting.into(),
-            seed: args.refine_seed,
-            ..data_beans_alg::refine_multilevel::RefineParams::default()
-        }),
+        refine: Some(args.pb_refine.to_params()),
         ignore_batch: args.ignore_batch,
         feature_mask_fn: None,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
@@ -408,12 +372,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             })
             .collect();
 
-        let dc_params = data_beans_alg::dc_poisson::RefineParams {
-            num_gibbs: args.refine_gibbs,
-            num_greedy: args.refine_greedy,
-            seed: args.refine_seed,
-            ..data_beans_alg::dc_poisson::RefineParams::default()
-        };
+        let dc_params = args.pb_refine.to_params();
         crate::topic::common::coarsen_features_multilevel(&sketch_ds, &level_targets, dc_params)?
             .into_iter()
             .map(Some)
@@ -919,8 +878,8 @@ fn compute_decoder_weights(decoders: &[DecoderType], user_weights: Option<&Vec<f
 
 /// Save model metadata/weights, move parameters to CPU, and evaluate latent states.
 ///
-/// When `--refine-steps > 0`, rebuilds the finest-level decoder on CPU and
-/// uses it for per-cell likelihood refinement during evaluation.
+/// When `--amort-refine-steps > 0`, rebuilds the finest-level decoder on CPU
+/// and uses it for per-cell likelihood refinement during evaluation.
 fn save_metadata_and_evaluate<Dec>(
     ctx: &PipelineCtx,
     decoder_weights: &[f64],
@@ -931,8 +890,6 @@ where
     use crate::topic::model_metadata::{
         save_coarsening, save_feature_mean, save_parameters, TopicModelMetadata,
     };
-    use candle_util::candle_topic_refinement::TopicRefinementConfig;
-
     save_parameters(ctx.parameters, &ctx.args.out)?;
     // Persist `μ_d` at `D_full` (gene-name aligned). At predict time we
     // reload it and aggregate through the saved coarsening matrix to
@@ -996,15 +953,7 @@ where
         cpu_vb.clone(),
     )?;
 
-    let refine_config = if ctx.args.refine_steps > 0 {
-        Some(TopicRefinementConfig {
-            num_steps: ctx.args.refine_steps,
-            learning_rate: ctx.args.refine_lr,
-            regularization: ctx.args.refine_reg,
-        })
-    } else {
-        None
-    };
+    let refine_config = ctx.args.amort_refine.to_config();
 
     let finest_dec_dim = *ctx
         .level_decoder_dims
