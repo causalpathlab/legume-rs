@@ -199,7 +199,7 @@ pub struct ProjectedData {
     /// `PreparedData::proj_kn`.
     pub proj_kn: Mat,
     /// HVG selection used to weight the basis, if any. `None` when HVG
-    /// is disabled or when warm-starting from a saved projection.
+    /// is disabled.
     pub selected_features: Option<HvgSelection>,
 }
 
@@ -209,7 +209,6 @@ pub struct LoadProjectArgs<'a> {
     pub data_files: &'a [Box<str>],
     pub batch_files: &'a Option<Vec<Box<str>>>,
     pub preload: bool,
-    pub warm_start_proj_file: Option<&'a str>,
     pub proj_dim: usize,
     pub block_size: Option<usize>,
     pub max_features: usize,
@@ -246,9 +245,8 @@ pub struct LoadProjectArgs<'a> {
 pub type FeatureMaskFn = dyn Fn(&[Box<str>]) -> anyhow::Result<Vec<bool>>;
 
 /// Read sparse files, resolve batch membership, optionally pick HVGs,
-/// then run the random projection (or load a warm-start projection).
-/// Used by `load_and_collapse` and by `senna svd` so the pre-collapse
-/// pipeline is identical across routines.
+/// then run the random projection. Used by `load_and_collapse` and by
+/// `senna svd` so the pre-collapse pipeline is identical across routines.
 pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData> {
     let SparseDataWithBatch {
         data: mut data_vec,
@@ -289,57 +287,37 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
 
     let mut selected_features: Option<HvgSelection> = None;
 
-    let proj_kn = if let Some(proj_file) = args.warm_start_proj_file {
-        use matrix_util::common_io::file_ext;
-        let ext = file_ext(proj_file)?;
+    // HVG-weighted projection: down-weight uninformative genes so the
+    // random sketch (and hence the PB partitioning + cached cell_proj)
+    // reflects variable biology. Collapsing still reads all genes.
+    let hvg_enabled = args.max_features > 0 || args.feature_list_file.is_some();
+    if hvg_enabled {
+        selected_features = Some(select_hvg_streaming(
+            &data_vec,
+            (args.max_features > 0).then_some(args.max_features),
+            args.feature_list_file,
+            args.block_size,
+        )?);
+    }
 
-        let MatWithNames {
-            rows: cell_names,
-            cols: _,
-            mat: proj_nk,
-        } = match ext.as_ref() {
-            "parquet" => Mat::from_parquet_with_row_names(proj_file, Some(0))?,
-            _ => Mat::read_data_with_names(proj_file, &['\t', ',', ' '], Some(0), Some(0))?,
-        };
-
-        if data_vec.column_names()? != cell_names {
-            return Err(anyhow::anyhow!(
-                "warm start projection rows don't match with the data"
-            ));
-        }
-
-        proj_nk.transpose()
-    } else {
-        // HVG-weighted projection: down-weight uninformative genes so the
-        // random sketch (and hence the PB partitioning + cached cell_proj)
-        // reflects variable biology. Collapsing still reads all genes.
-        let hvg_enabled = args.max_features > 0 || args.feature_list_file.is_some();
-        if hvg_enabled {
-            selected_features = Some(select_hvg_streaming(
-                &data_vec,
-                (args.max_features > 0).then_some(args.max_features),
-                args.feature_list_file,
-                args.block_size,
-            )?);
-        }
-
-        let proj_out = if let Some(sel) = selected_features.as_ref() {
-            let weights = sel.row_weights(data_vec.num_rows());
-            data_vec.project_columns_weighted(
+    let proj_kn = if let Some(sel) = selected_features.as_ref() {
+        let weights = sel.row_weights(data_vec.num_rows());
+        data_vec
+            .project_columns_weighted(
                 args.proj_dim,
                 args.block_size,
                 Some(&batch_membership),
                 &weights,
             )?
-        } else {
-            data_vec.project_columns_with_batch_correction(
+            .proj
+    } else {
+        data_vec
+            .project_columns_with_batch_correction(
                 args.proj_dim,
                 args.block_size,
                 Some(&batch_membership),
             )?
-        };
-
-        proj_out.proj
+            .proj
     };
 
     info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
@@ -356,7 +334,6 @@ pub struct LoadCollapseArgs<'a> {
     pub data_files: &'a [Box<str>],
     pub batch_files: &'a Option<Vec<Box<str>>>,
     pub preload: bool,
-    pub warm_start_proj_file: Option<&'a str>,
     pub proj_dim: usize,
     pub sort_dim: usize,
     pub knn_cells: usize,
@@ -405,7 +382,6 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         data_files: args.data_files,
         batch_files: args.batch_files,
         preload: args.preload,
-        warm_start_proj_file: args.warm_start_proj_file,
         proj_dim: args.proj_dim,
         block_size: args.block_size,
         max_features: args.max_features,

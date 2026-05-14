@@ -67,8 +67,8 @@ pub struct GbeArgs {
     #[arg(long, default_value_t = 16, help = "Embedding dimension H")]
     embedding_dim: usize,
 
-    #[arg(long, default_value_t = 8, help = "Number of coarsening seeds")]
-    num_coarsen_seeds: usize,
+    #[command(flatten)]
+    collapse: crate::refine_weighting::CollapseArgs,
 
     #[arg(
         long,
@@ -102,37 +102,6 @@ pub struct GbeArgs {
                 partition. Default: enabled (parity with senna topic / svd)."
     )]
     no_refine: bool,
-
-    #[arg(long, default_value_t = 20, help = "Gibbs sweeps per refinement level")]
-    refine_gibbs: usize,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Greedy sweeps per refinement level"
-    )]
-    refine_greedy: usize,
-
-    #[arg(
-        long = "refine-weighting",
-        value_enum,
-        default_value_t = crate::refine_weighting::WeightingArg::NbFisherInfo,
-        help = crate::refine_weighting::WEIGHTING_HELP,
-    )]
-    refine_weighting: crate::refine_weighting::WeightingArg,
-
-    #[arg(long, default_value_t = 42, help = "Seed for refinement Gibbs sampler")]
-    refine_seed: u64,
-
-    #[arg(
-        long,
-        default_value_t = 200,
-        help = "Target pb-sample blocks (cell axis)"
-    )]
-    pb_samples: usize,
-
-    #[arg(long, default_value_t = 10, help = "Sketch dim for coarsening RP")]
-    sketch_dim: usize,
 
     #[arg(short = 'i', long, default_value_t = 200, help = "Training epochs")]
     epochs: usize,
@@ -330,9 +299,20 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         data_beans::sparse_io_vector::ColumnAlignment::Disjoint
     };
 
+    // `--ignore-batch` drops the batch labels entirely, so the projection
+    // and multilevel collapse run as if every cell shared one batch.
+    let batch_files = if args.collapse.ignore_batch {
+        if args.batch_files.is_some() {
+            info!("--ignore-batch: dropping batch labels; treating all cells as one batch");
+        }
+        None
+    } else {
+        args.batch_files.as_deref()
+    };
+
     let mut unified = ge::load_unified_data(
         &args.data_files,
-        args.batch_files.as_deref(),
+        batch_files,
         feature_kind,
         args.preload_data,
         column_alignment,
@@ -387,27 +367,25 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         })
         .transpose()?;
 
+    // `--no-refine` is gbe-specific (the other subcommands always refine);
+    // otherwise the shared `--pb-refine-*` flags drive RefineParams.
     let refine = if args.no_refine {
         None
     } else {
-        Some(ge::RefineParams {
-            num_gibbs: args.refine_gibbs,
-            num_greedy: args.refine_greedy,
-            feature_weighting: args.refine_weighting.into(),
-            seed: args.refine_seed,
-            ..ge::RefineParams::default()
-        })
+        Some(args.collapse.pb_refine.to_params())
     };
 
     let config = ge::FitConfig {
         embedding_dim: args.embedding_dim,
-        num_coarsen_seeds: args.num_coarsen_seeds,
+        num_levels: args.collapse.num_levels,
+        sort_dim: args.collapse.sort_dim,
+        knn_pb_samples: args.collapse.knn_cells,
+        num_opt_iter: args.collapse.iter_opt,
+        proj_dim: args.collapse.proj_dim,
         max_features: args.max_features,
         hvg_weights,
         composite_mode: args.composite_mode.into(),
         refine,
-        pb_samples: args.pb_samples,
-        sketch_dim: args.sketch_dim,
         epochs: args.epochs,
         batches_per_epoch: args.batches_per_epoch,
         batch_size: args.batch_size,

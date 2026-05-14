@@ -46,26 +46,6 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        short = 'p',
-        default_value_t = 50,
-        help = "Random projection dimension",
-        long_help = "Target rank of the initial random sketch used to seed\n\
-                     batch correction and multi-level pseudobulk collapsing."
-    )]
-    proj_dim: usize,
-
-    #[arg(
-        long,
-        short = 'd',
-        default_value_t = 10,
-        help = "Partition depth: ≤ 2^d + 1 pseudobulk groups",
-        long_help = "Binary-tree partitioning over the top d projection components.\n\
-                     Produces at most 2^d + 1 pseudobulk leaves."
-    )]
-    sort_dim: usize,
-
-    #[arg(
-        long,
         short,
         value_delimiter(','),
         help = "Batch membership files, one per data file",
@@ -74,23 +54,8 @@ pub struct IndexedTopicArgs {
     )]
     batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(
-        long,
-        help = "Skip per-batch correction; treat all cells as a single batch",
-        long_help = "Collapses batch membership to a single label so the projection,\n\
-                     multilevel collapsing, and δ estimation all run as if there\n\
-                     were no batch structure."
-    )]
-    ignore_batch: bool,
-
-    #[arg(
-        short = 'w',
-        long = "warm-start",
-        help = "Warm-start projection file (cell × k)",
-        long_help = "Skip random projection and use this matrix instead.\n\
-                     Rows must match the concatenated cell order of the inputs."
-    )]
-    warm_start_proj_file: Option<Box<str>>,
+    #[command(flatten)]
+    collapse: crate::refine_weighting::CollapseArgs,
 
     #[arg(
         long = "init-from",
@@ -105,38 +70,9 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 10,
-        help = "In-batch k-NN for pb-sample merging",
-        long_help = "Number of within-batch nearest neighbours used when\n\
-                     aggregating cells into pseudobulk pb-samples."
-    )]
-    knn_cells: usize,
-
-    #[arg(
-        long,
-        default_value_t = 3,
-        help = "Multi-level coarsening levels",
-        long_help = "Hierarchical pseudobulk refinement passes. Level sort dims are\n\
-                     linearly spaced from 4 to --sort-dim. Set to 1 to disable."
-    )]
-    num_levels: usize,
-
-    #[arg(
-        long,
-        default_value_t = 30,
-        help = "Batch-correction optimizer iterations",
-        long_help = "Coordinate-descent steps when fitting the per-batch delta."
-    )]
-    iter_opt: usize,
-
-    #[arg(
-        long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)"
     )]
     block_size: Option<usize>,
-
-    #[command(flatten)]
-    pb_refine: crate::refine_weighting::PbRefineArgs,
 
     #[arg(
         short = 't',
@@ -538,12 +474,11 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
         preload: args.preload_data,
-        warm_start_proj_file: args.warm_start_proj_file.as_deref(),
-        proj_dim: args.proj_dim.max(args.n_latent_topics),
-        sort_dim: args.sort_dim,
-        knn_cells: args.knn_cells,
-        num_levels: args.num_levels,
-        iter_opt: args.iter_opt,
+        proj_dim: args.collapse.proj_dim.max(args.n_latent_topics),
+        sort_dim: args.collapse.sort_dim,
+        knn_cells: args.collapse.knn_cells,
+        num_levels: args.collapse.num_levels,
+        iter_opt: args.collapse.iter_opt,
         block_size: args.block_size,
         out: &args.out,
         max_features: effective_hvg_n,
@@ -556,8 +491,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             data_beans::sparse_io_vector::ColumnAlignment::Disjoint
         },
         feature_kind: args.feature_name_kind.clone().into(),
-        refine: Some(args.pb_refine.to_params()),
-        ignore_batch: args.ignore_batch,
+        refine: Some(args.collapse.pb_refine.to_params()),
+        ignore_batch: args.collapse.ignore_batch,
         want_hierarchy: false,
     })?;
 
@@ -760,7 +695,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     write_feature_embedding(base_encoder.feature_embeddings(), &gene_names, &args.out)?;
 
     // Persist trainable weights, model architecture, and shortlist weights
-    // so `senna predict` (and `--warm-start` re-runs) can rebuild this model.
+    // so `senna predict` (and `--init-from` re-runs) can rebuild this model.
     use crate::topic::model_metadata::{
         save_feature_mean, save_parameters, save_shortlist_weights, TopicModelMetadata,
     };

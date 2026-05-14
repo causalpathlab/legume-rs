@@ -70,26 +70,6 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        short = 'p',
-        default_value_t = 50,
-        help = "Random projection dimension",
-        long_help = "Target rank of the initial random sketch used to seed\n\
-                     batch correction and multi-level pseudobulk collapsing."
-    )]
-    pub(crate) proj_dim: usize,
-
-    #[arg(
-        long,
-        short = 'd',
-        default_value_t = 10,
-        help = "Partition depth: ≤ 2^d + 1 pseudobulk groups",
-        long_help = "Binary-tree partitioning over the top d projection components.\n\
-                     Produces at most 2^d + 1 pseudobulk leaves."
-    )]
-    pub(crate) sort_dim: usize,
-
-    #[arg(
-        long,
         short,
         value_delimiter(','),
         help = "Batch membership files, one per data file",
@@ -98,24 +78,8 @@ pub struct TopicArgs {
     )]
     pub(crate) batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(
-        long,
-        help = "Skip per-batch correction; treat all cells as a single batch",
-        long_help = "Collapses batch membership to a single label so the projection,\n\
-                     multilevel collapsing, and δ estimation all run as if there were\n\
-                     no batch structure. Useful for homogeneous datasets or as a\n\
-                     reference baseline."
-    )]
-    pub(crate) ignore_batch: bool,
-
-    #[arg(
-        short = 'w',
-        long = "warm-start",
-        help = "Warm-start projection file (cell × k)",
-        long_help = "Skip random projection and use this matrix instead.\n\
-                     Rows must match the concatenated cell order of the inputs."
-    )]
-    pub(crate) warm_start_proj_file: Option<Box<str>>,
+    #[command(flatten)]
+    pub(crate) collapse: crate::refine_weighting::CollapseArgs,
 
     #[arg(
         long = "init-from",
@@ -124,40 +88,9 @@ pub struct TopicArgs {
                      {prefix}.model.json + {prefix}.safetensors). Architecture must\n\
                      match: same K, encoder layers, level_decoder_dims, and\n\
                      n_features_full / n_features_encoder. Cross-gene-set\n\
-                     warm-start is not supported — train on the same gene set.\n\
-                     Independent of `--warm-start` (which seeds the random\n\
-                     projection)."
+                     warm-start is not supported — train on the same gene set."
     )]
     pub(crate) init_from: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "In-batch k-NN for pb-sample merging",
-        long_help = "Number of within-batch nearest neighbours used when\n\
-                     aggregating cells into pseudobulk pb-samples."
-    )]
-    pub(crate) knn_cells: usize,
-
-    #[arg(
-        long,
-        default_value_t = 3,
-        help = "Multi-level coarsening levels",
-        long_help = "Hierarchical pseudobulk refinement passes. Level sort dims are\n\
-                     linearly spaced from 4 to --sort-dim. Set to 1 to disable."
-    )]
-    pub(crate) num_levels: usize,
-
-    #[command(flatten)]
-    pub(crate) pb_refine: crate::refine_weighting::PbRefineArgs,
-
-    #[arg(
-        long,
-        default_value_t = 30,
-        help = "Batch-correction optimizer iterations",
-        long_help = "Coordinate-descent steps when fitting the per-batch delta."
-    )]
-    pub(crate) iter_opt: usize,
 
     #[arg(
         long,
@@ -327,18 +260,17 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
         preload: args.preload_data,
-        warm_start_proj_file: args.warm_start_proj_file.as_deref(),
-        proj_dim: args.proj_dim.max(args.n_latent_topics),
-        sort_dim: args.sort_dim,
-        knn_cells: args.knn_cells,
-        num_levels: args.num_levels,
-        iter_opt: args.iter_opt,
+        proj_dim: args.collapse.proj_dim.max(args.n_latent_topics),
+        sort_dim: args.collapse.sort_dim,
+        knn_cells: args.collapse.knn_cells,
+        num_levels: args.collapse.num_levels,
+        iter_opt: args.collapse.iter_opt,
         block_size: args.block_size,
         out: &args.out,
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
-        refine: Some(args.pb_refine.to_params()),
-        ignore_batch: args.ignore_batch,
+        refine: Some(args.collapse.pb_refine.to_params()),
+        ignore_batch: args.collapse.ignore_batch,
         feature_mask_fn: None,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
@@ -374,7 +306,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             })
             .collect();
 
-        let dc_params = args.pb_refine.to_params();
+        let dc_params = args.collapse.pb_refine.to_params();
         crate::topic::common::coarsen_features_multilevel(&sketch_ds, &level_targets, dc_params)?
             .into_iter()
             .map(Some)

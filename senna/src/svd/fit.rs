@@ -33,26 +33,6 @@ pub struct SvdArgs {
 
     #[arg(
         long,
-        short = 'p',
-        default_value_t = 50,
-        help = "Random projection dimension",
-        long_help = "Target rank of the initial random sketch used to seed\n\
-                     batch correction and multi-level pseudobulk collapsing."
-    )]
-    proj_dim: usize,
-
-    #[arg(
-        long,
-        short = 'd',
-        default_value_t = 10,
-        help = "Partition depth: ≤ 2^d + 1 pseudobulk groups",
-        long_help = "Binary-tree partitioning over the top d projection components.\n\
-                     Produces at most 2^d + 1 pseudobulk leaves."
-    )]
-    sort_dim: usize,
-
-    #[arg(
-        long,
         short,
         value_delimiter(','),
         help = "Batch membership files, one per data file",
@@ -61,60 +41,14 @@ pub struct SvdArgs {
     )]
     batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(
-        long,
-        help = "Skip per-batch correction; treat all cells as a single batch",
-        long_help = "Collapses batch membership to a single label so the random\n\
-                     projection, multilevel collapsing, and δ estimation are all\n\
-                     run as if there were no batch structure. Useful when batches\n\
-                     are believed homogeneous, or for reference-only baselines."
-    )]
-    ignore_batch: bool,
-
-    #[arg(
-        short = 'w',
-        long = "warm-start",
-        help = "Warm-start projection file (cell × k)",
-        long_help = "Skip random projection and use this matrix instead.\n\
-                     Rows must match the concatenated cell order of the inputs.\n\
-                     Disables feature selection."
-    )]
-    warm_start_proj_file: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "In-batch k-NN for pb-sample merging",
-        long_help = "Number of within-batch nearest neighbours used when\n\
-                     aggregating cells into pseudobulk pb-samples."
-    )]
-    knn_cells: usize,
-
-    #[arg(
-        long,
-        default_value_t = 3,
-        help = "Multi-level coarsening levels",
-        long_help = "Hierarchical pseudobulk refinement passes. Level sort dims are\n\
-                     linearly spaced from 4 to --sort-dim. Set to 1 to disable."
-    )]
-    num_levels: usize,
-
-    #[arg(
-        long,
-        default_value_t = 30,
-        help = "Batch-correction optimizer iterations",
-        long_help = "Coordinate-descent steps when fitting the per-batch delta."
-    )]
-    iter_opt: usize,
+    #[command(flatten)]
+    collapse: crate::refine_weighting::CollapseArgs,
 
     #[arg(
         long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)"
     )]
     block_size: Option<usize>,
-
-    #[command(flatten)]
-    pb_refine: crate::refine_weighting::PbRefineArgs,
 
     #[arg(
         short = 'c',
@@ -160,7 +94,7 @@ pub struct SvdArgs {
 pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
-    let proj_dim = args.proj_dim.max(args.n_latent_topics);
+    let proj_dim = args.collapse.proj_dim.max(args.n_latent_topics);
     let ProjectedData {
         mut data_vec,
         batch_membership,
@@ -170,12 +104,11 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
         preload: args.preload_data,
-        warm_start_proj_file: args.warm_start_proj_file.as_deref(),
         proj_dim,
         block_size: args.block_size,
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
-        ignore_batch: args.ignore_batch,
+        ignore_batch: args.collapse.ignore_batch,
         feature_mask_fn: None,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
@@ -187,11 +120,11 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         &proj_kn,
         &batch_membership,
         &MultilevelParams {
-            knn_pb_samples: args.knn_cells,
-            num_levels: args.num_levels,
-            sort_dim: args.sort_dim,
-            num_opt_iter: args.iter_opt,
-            refine: Some(args.pb_refine.to_params()),
+            knn_pb_samples: args.collapse.knn_cells,
+            num_levels: args.collapse.num_levels,
+            sort_dim: args.collapse.sort_dim,
+            num_opt_iter: args.collapse.iter_opt,
+            refine: Some(args.collapse.pb_refine.to_params()),
         },
     )?;
 

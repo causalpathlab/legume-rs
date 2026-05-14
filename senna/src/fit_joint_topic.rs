@@ -59,26 +59,6 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
-        short = 'p',
-        default_value_t = 50,
-        help = "Random projection dimension",
-        long_help = "Target rank of the initial random sketch used to seed\n\
-                     batch correction and multi-level pseudobulk collapsing."
-    )]
-    pub(crate) proj_dim: usize,
-
-    #[arg(
-        long,
-        short = 'd',
-        default_value_t = 10,
-        help = "Partition depth: ≤ 2^d + 1 pseudobulk groups",
-        long_help = "Binary-tree partitioning over the top d projection components.\n\
-                     Produces at most 2^d + 1 pseudobulk leaves."
-    )]
-    pub(crate) sort_dim: usize,
-
-    #[arg(
-        long,
         short,
         value_delimiter(','),
         help = "Batch membership files, one per data file",
@@ -87,14 +67,8 @@ pub struct JointTopicArgs {
     )]
     pub(crate) batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(
-        long,
-        help = "Skip per-batch correction; treat all cells as a single batch",
-        long_help = "Collapses batch membership to a single label across all\n\
-                     modalities so the joint pipeline runs as if there were no\n\
-                     batch structure."
-    )]
-    pub(crate) ignore_batch: bool,
+    #[command(flatten)]
+    pub(crate) collapse: crate::refine_weighting::CollapseArgs,
 
     #[arg(
         short = 'c',
@@ -107,29 +81,9 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 10,
-        help = "In-batch k-NN for pb-sample merging",
-        long_help = "Number of within-batch nearest neighbours used when\n\
-                     aggregating cells into pseudobulk pb-samples."
-    )]
-    pub(crate) knn_cells: usize,
-
-    #[arg(
-        long,
-        default_value_t = 30,
-        help = "Batch-correction optimizer iterations",
-        long_help = "Coordinate-descent steps when fitting the per-batch delta."
-    )]
-    pub(crate) iter_opt: usize,
-
-    #[arg(
-        long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)"
     )]
     pub(crate) block_size: Option<usize>,
-
-    #[command(flatten)]
-    pub(crate) pb_refine: crate::refine_weighting::PbRefineArgs,
 
     #[arg(
         short = 't',
@@ -193,14 +147,6 @@ pub struct JointTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 2,
-        help = "Multi-level coarsening levels",
-        long_help = "Hierarchical pseudobulk refinement passes. Set to 1 to disable."
-    )]
-    pub(crate) num_levels: usize,
-
-    #[arg(
-        long,
         default_value_t = 5000,
         help = "Cap feature dim by meta-feature coarsening (0 to disable)",
         long_help = "Groups co-expressed features into ≤N meta-features so the model\n\
@@ -247,7 +193,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         num_types: args.num_modalities,
         preload: args.preload_data,
     })?;
-    if args.ignore_batch {
+    if args.collapse.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch (per modality)");
         for batch in batch_stack.iter_mut() {
             crate::senna_input::collapse_to_single_batch(batch);
@@ -275,7 +221,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     }
 
     // 2. Concatenate projections
-    let proj_dim = args.proj_dim.max(args.n_latent_topics);
+    let proj_dim = args.collapse.proj_dim.max(args.n_latent_topics);
     let proj_out = data_stack.project_columns_with_batch_correction(
         proj_dim,
         args.block_size,
@@ -293,11 +239,11 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         &proj_kn,
         batch_stack[0].as_ref(),
         &MultilevelParams {
-            knn_pb_samples: args.knn_cells,
-            num_levels: args.num_levels,
-            sort_dim: args.sort_dim,
-            num_opt_iter: args.iter_opt,
-            refine: Some(args.pb_refine.to_params()),
+            knn_pb_samples: args.collapse.knn_cells,
+            num_levels: args.collapse.num_levels,
+            sort_dim: args.collapse.sort_dim,
+            num_opt_iter: args.collapse.iter_opt,
+            refine: Some(args.collapse.pb_refine.to_params()),
         },
     )?;
     // Reverse so training goes coarse→fine: coarsest (fewest samples)
