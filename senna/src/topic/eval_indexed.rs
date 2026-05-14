@@ -3,7 +3,9 @@ use crate::embed_common::*;
 
 use candle_core::{Device, Tensor, Var};
 use candle_nn::ops;
-use candle_util::candle_indexed_data_loader::top_k_indices_weighted;
+use candle_util::candle_indexed_data_loader::{
+    csc_columns_to_indexed_samples, top_k_indices_weighted,
+};
 use candle_util::candle_indexed_model_traits::*;
 use candle_util::candle_topic_refinement::TopicRefinementConfig;
 use std::collections::{BTreeSet, HashMap};
@@ -84,21 +86,74 @@ fn dense_rows_to_indexed(
     ctx: PerGeneContext<'_>,
     dev: &Device,
 ) -> anyhow::Result<IndexedPack> {
-    let n_batch = rows.len();
     let k = if rows.is_empty() {
         context_size
     } else {
         context_size.min(rows[0].len())
     };
 
+    // Sequential per-row: `dense_rows_to_indexed`'s callers
+    // (`evaluate_indexed_block`) already run inside `process_blocks`'
+    // block-level rayon map, so a nested par_iter here would just add
+    // task-splitting overhead.
+    let all_top_k: Vec<(Vec<u32>, Vec<f32>)> = rows
+        .iter()
+        .map(|row| top_k_indices_weighted(row, shortlist_weights, context_size))
+        .collect();
+
+    pack_top_k_to_indexed(&all_top_k, k, ctx, dev)
+}
+
+/// Build an [`IndexedPack`] directly from a sparse `[D, N]` CSC matrix —
+/// columns are cells. Skips the dense `[N, D]` materialization the
+/// `dense_*` helpers need; only the stored nonzeros are visited.
+pub(crate) fn csc_to_indexed(
+    x_dn: &nalgebra_sparse::CscMatrix<f32>,
+    context_size: usize,
+    shortlist_weights: &[f32],
+    ctx: PerGeneContext<'_>,
+    dev: &Device,
+) -> anyhow::Result<IndexedPack> {
+    let k = context_size.min(x_dn.nrows());
+    let samples = csc_columns_to_indexed_samples(x_dn, shortlist_weights, context_size);
+    let all_top_k: Vec<(Vec<u32>, Vec<f32>)> = samples
+        .into_iter()
+        .map(|s| (s.indices, s.values))
+        .collect();
+    pack_top_k_to_indexed(&all_top_k, k, ctx, dev)
+}
+
+/// Like [`csc_to_indexed`] but produces both encoder and decoder windows
+/// from a single sparse pass' worth of column scans.
+pub(crate) fn csc_to_indexed_pair(
+    x_dn: &nalgebra_sparse::CscMatrix<f32>,
+    enc_context_size: usize,
+    dec_context_size: usize,
+    shortlist_weights: &[f32],
+    ctx: PerGeneContext<'_>,
+    dev: &Device,
+) -> anyhow::Result<(IndexedPack, IndexedPack)> {
+    let enc = csc_to_indexed(x_dn, enc_context_size, shortlist_weights, ctx, dev)?;
+    let dec = csc_to_indexed(x_dn, dec_context_size, shortlist_weights, ctx, dev)?;
+    Ok((enc, dec))
+}
+
+/// Pack per-cell top-K `(indices, values)` into the `[N, K]` / `[S]`
+/// tensors of an [`IndexedPack`]. Shared by the dense and sparse
+/// front-ends.
+fn pack_top_k_to_indexed(
+    all_top_k: &[(Vec<u32>, Vec<f32>)],
+    k: usize,
+    ctx: PerGeneContext<'_>,
+    dev: &Device,
+) -> anyhow::Result<IndexedPack> {
+    let n_batch = all_top_k.len();
+
     let mut union_set = BTreeSet::new();
-    let mut all_top_k: Vec<(Vec<u32>, Vec<f32>)> = Vec::with_capacity(n_batch);
-    for row in rows {
-        let (indices, values) = top_k_indices_weighted(row, shortlist_weights, context_size);
-        for &idx in &indices {
+    for (indices, _) in all_top_k {
+        for &idx in indices {
             union_set.insert(idx);
         }
-        all_top_k.push((indices, values));
     }
 
     let union_vec: Vec<u32> = union_set.into_iter().collect();
@@ -279,9 +334,10 @@ where
 {
     let (lb, ub) = block;
 
-    // Read sparse -> dense [D, N], all at full D (no feature coarsening)
+    // Read sparse [D, N] at full D (no feature coarsening). Kept sparse:
+    // the top-K packer only ever visits stored nonzeros, so the dense
+    // `[N, D]` matrix is never materialized.
     let x_dn = data_vec.read_columns_csc(lb..ub)?;
-    let x_nd = x_dn.to_tensor(config.dev)?.transpose(0, 1)?;
 
     // Get batch/residual correction if available
     let x0_nd = config
@@ -291,16 +347,15 @@ where
         })
         .transpose()?;
 
-    // Convert dense to packed top-K. Single host copy when refinement also
-    // needs decoder packing.
+    // Convert sparse columns to packed top-K directly.
     let ctx = PerGeneContext {
         feature_mean: Some(config.feature_mean),
         feature_fisher_weights: Some(config.feature_fisher_weights),
     };
     let need_decoder = config.refine_config.is_some();
     let (enc_pack, dec_pack) = if need_decoder {
-        let (enc, dec) = dense_to_indexed_pair(
-            &x_nd,
+        let (enc, dec) = csc_to_indexed_pair(
+            &x_dn,
             config.enc_context_size,
             config.dec_context_size,
             config.shortlist_weights,
@@ -309,8 +364,8 @@ where
         )?;
         (enc, Some(dec))
     } else {
-        let enc = dense_to_indexed(
-            &x_nd,
+        let enc = csc_to_indexed(
+            &x_dn,
             config.enc_context_size,
             config.shortlist_weights,
             ctx,

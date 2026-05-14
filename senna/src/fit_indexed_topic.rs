@@ -282,10 +282,12 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Cross-entropy penalty λ on β toward anchor prior (0 = off)"
+        default_value_t = false,
+        help = "Use dense AdamW over the full ρ [D,H] table every \
+                minibatch instead of the lazy touched-row-only optimizer. \
+                Slower at large embedding dim; kept for A/B benchmarking."
     )]
-    anchor_penalty: f32,
+    dense_rho_update: bool,
 
     #[arg(
         long,
@@ -586,6 +588,16 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         param_builder.pp("enc"),
     )?;
 
+    // Resolve the ρ `Var` backing the encoder's feature-embedding table —
+    // matched by tensor id in the VarMap — so the lazy optimizer can step
+    // it sparsely and the stock AdamW can exclude it.
+    let rho_tid = base_encoder.feature_embeddings().id();
+    let rho_var = parameters
+        .all_vars()
+        .into_iter()
+        .find(|v| v.id() == rho_tid)
+        .ok_or_else(|| anyhow::anyhow!("ρ feature-embedding Var not found in VarMap"))?;
+
     // Per-level decoders: all at D_full, levels differ in N (sample coarsening).
     // ETM-factorized — each decoder shares the encoder's feature embeddings ρ,
     // and learns only its own topic embeddings α_{level} [K, H].
@@ -629,19 +641,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     );
 
     let gene_names = data_vec.row_names()?;
-
-    // Indexed decoders run at D_full, so no finest-level coarsening.
-    info!("Building anchor prior (K={n_topics}) from pseudobulks");
-    let anchor_prior =
-        crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(finest_collapsed, n_topics, None)?;
-
-    // Per-level anchor tensors. Indexed decoders all run at D_full, so
-    // no feature coarsening applies — one `None` per level.
-    let level_coarsenings_none: Vec<Option<FeatureCoarsening>> =
-        (0..num_levels).map(|_| None).collect();
-    let anchor_tensors = anchor_prior.per_level_device_tensors(&level_coarsenings_none, &dev)?;
-    // β init from anchor prior disabled — random init + anchor penalty
-    // during training avoids locking the dictionary too early.
 
     // Read bulk data aligned to SC genes
     let bulk = args
@@ -732,13 +731,13 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         enc_context_size: args.context_size,
         dec_context_size,
         stop: &stop,
-        anchor_prior_per_level: Some(&anchor_tensors),
-        anchor_penalty: args.anchor_penalty,
         shortlist_weights: &shortlist_weights,
         feature_mean: &feature_mean,
         feature_fisher_weights: &feature_fisher_weights,
         grad_clip: args.grad_clip,
         graph_warmup_epochs: args.graph_warmup_epochs,
+        rho_var: &rho_var,
+        lazy_rho: !args.dense_rho_update,
     };
 
     let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_full, &bulk_deltas) {
