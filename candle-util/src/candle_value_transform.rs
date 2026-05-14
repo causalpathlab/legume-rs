@@ -48,7 +48,8 @@
 //! amplification at ~10×, which is far beyond any plausible biological
 //! batch effect and easily handled by the downstream tanh clip.
 
-use candle_core::{Result, Tensor};
+use candle_core::{DType, Result, Tensor};
+use candle_nn::{ops, Embedding, Module, VarBuilder};
 
 const TANH_K: f64 = 4.0;
 const EPS: f64 = 1e-6;
@@ -135,6 +136,24 @@ pub fn anscombe_lite(
     values_null: Option<&Tensor>,
     values_mean: Option<&Tensor>,
 ) -> Result<Tensor> {
+    anscombe(&count_rate_clean(values, values_null, values_mean)?)
+}
+
+/// The count-rate **"clean"** value: `values` divided by the composed
+/// multiplicative null (`values_null · values_mean`), floored at `EPS_DIV`.
+///
+/// This is the divisive correction at the heart of [`anscombe_lite`] —
+/// factored out so the learned [`ValueEmbedding`] path can bin the same
+/// biological-deviation rate the Anscombe path stabilizes. Both nulls are
+/// fused into one divisor, so the value tensor goes through a single
+/// `broadcast_div` regardless of how many corrections are active; the
+/// clamp lives on the joint divisor so its floor (`EPS_DIV ≈ 0.1`) caps
+/// amplification at `1/EPS_DIV ≈ 10×` no matter which factor is small.
+pub fn count_rate_clean(
+    values: &Tensor,
+    values_null: Option<&Tensor>,
+    values_mean: Option<&Tensor>,
+) -> Result<Tensor> {
     debug_assert_eq!(values.dims().len(), 2);
     if let Some(x0) = values_null {
         debug_assert_eq!(x0.dims(), values.dims());
@@ -143,21 +162,106 @@ pub fn anscombe_lite(
         debug_assert_eq!(m.dims(), values.dims());
     }
 
-    // Fuse both nulls into a single divisor when present, so the value
-    // tensor only goes through one broadcast_div regardless of how many
-    // multiplicative corrections are active. The clamp lives on the
-    // joint divisor so its floor (`EPS_DIV ≈ 0.1`) is what really
-    // controls amplification — caps at `1/EPS_DIV ≈ 10×` no matter
-    // which factor is small.
     let divisor = match (values_null, values_mean) {
         (Some(n), Some(m)) => Some(n.mul(m)?),
         (Some(n), None) => Some(n.clone()),
         (None, Some(m)) => Some(m.clone()),
         (None, None) => None,
     };
-    let clean = match divisor {
-        Some(d) => values.broadcast_div(&d.clamp(EPS_DIV, f64::INFINITY)?)?,
-        None => values.clone(),
-    };
-    anscombe(&clean)
+    match divisor {
+        Some(d) => values.broadcast_div(&d.clamp(EPS_DIV, f64::INFINITY)?),
+        None => Ok(values.clone()),
+    }
+}
+
+////////////////////////////////////////////////////////////////////////
+// Learned intensity-embedding value transform
+////////////////////////////////////////////////////////////////////////
+
+/// Per-row min-max whiten → floor → `u32` bin id, over the last axis.
+///
+/// Each row (a cell, or a pseudobulk) is whitened to `[0, 1)` against its
+/// own min/max so every data point lands on the same bin scale; the `+1`
+/// in the denominator keeps a constant row from dividing by zero. Output
+/// indices are in `[0, n_vocab - 1)` and keep `x`'s shape. Non-differentiable
+/// (the value is data, not a parameter) — gradients reach the embedding
+/// tables through the lookup, exactly as in a normal `Embedding`.
+///
+/// Shared with `candle_aux_module`'s `AggregateEmbedding`, which flattens
+/// the result.
+pub(crate) fn discretize_whitened(x: &Tensor, n_vocab: usize) -> Result<Tensor> {
+    let last = x.rank() - 1;
+    let min_val = x.min_keepdim(last)?;
+    let max_val = x.max_keepdim(last)?;
+    let div_val = ((max_val - &min_val)? + 1.0)?;
+    let whitened = x.broadcast_sub(&min_val)?.broadcast_div(&div_val)?;
+    (whitened * (n_vocab as f64 - 1.0))?
+        .floor()?
+        .to_dtype(DType::U32)?
+        .contiguous()
+}
+
+/// Construction config for the learned [`ValueEmbedding`] transform.
+#[derive(Clone, Copy, Debug)]
+pub struct ValueEmbeddingConfig {
+    /// Number of value bins per scale. This is a *resolution* knob (a
+    /// lookup-table size — gather cost is independent of it), not a
+    /// performance one. The per-bin vector width is the feature embedding
+    /// dim `H` itself: the value embedding produces the gate on ρ
+    /// directly, with no projection.
+    pub n_vocab: usize,
+}
+
+/// Learned intensity-embedding value transform — a *learned* alternative
+/// to the fixed [`anscombe_lite`] scalar, shared by the indexed and
+/// cell-embedded encoders.
+///
+/// The normalized value is binned at two scales (linear and `log1p`),
+/// each bin looked up in an `[n_vocab, H]` table; the two are summed and
+/// sigmoid'd into a per-dimension **gate** `[*, K, H]` on the feature
+/// embedding ρ. The lookup width is `H`, so the sum *is* the pre-gate
+/// logit — no projection layer, no matmul (the only real compute is the
+/// `[*, K]` whitening + two gathers). Revives the "intensity embedding"
+/// once dropped from the dense softmax encoder for speed — cheap here
+/// because both encoders run on the packed `[*, K]` slab, not a dense
+/// `[N, D]`.
+pub struct ValueEmbedding {
+    n_vocab: usize,
+    emb_x: Embedding,
+    emb_logx: Embedding,
+}
+
+impl ValueEmbedding {
+    /// Build the two `[n_vocab, H]` lookup tables. `vb` should already be
+    /// scoped (callers pass `vb.pp("nn.enc.value")` so safetensors keys
+    /// are consistent across encoders).
+    pub fn new(
+        cfg: ValueEmbeddingConfig,
+        embedding_dim: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let emb_x = candle_nn::embedding(cfg.n_vocab, embedding_dim, vb.pp("embed_x"))?;
+        let emb_logx = candle_nn::embedding(cfg.n_vocab, embedding_dim, vb.pp("embed_logx"))?;
+        Ok(Self {
+            n_vocab: cfg.n_vocab,
+            emb_x,
+            emb_logx,
+        })
+    }
+
+    /// Dual binned lookup of the `1e4`-scaled normalized value → a
+    /// per-dimension sigmoid gate `[*, K, H]`, broadcastable onto ρ.
+    ///
+    /// `norm_values [*, K]` is the per-sample-normalized value (e.g. the
+    /// count-rate "clean" value, or `y / s_c`). The `1e4` scale puts it in
+    /// a range where the `+1` in `discretize_whitened`'s denominator is
+    /// negligible against the dynamic range, so bins spread properly.
+    pub fn gate(&self, norm_values: &Tensor) -> Result<Tensor> {
+        let x = (norm_values * 1e4)?;
+        let log_x = (&x + 1.0)?.log()?;
+        let bin_reg = discretize_whitened(&x, self.n_vocab)?;
+        let bin_log = discretize_whitened(&log_x, self.n_vocab)?;
+        let logit = (self.emb_x.forward(&bin_reg)? + self.emb_logx.forward(&bin_log)?)?; // [*, K, H]
+        ops::sigmoid(&logit) // [*, K, H]
+    }
 }

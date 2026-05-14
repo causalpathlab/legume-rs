@@ -7,6 +7,7 @@ pub(crate) mod graph_likelihood;
 pub(crate) mod model_metadata;
 pub(crate) mod predict_common;
 pub(crate) mod train;
+pub(crate) mod train_cell_embedded;
 pub(crate) mod train_indexed;
 pub(crate) mod train_joint;
 pub(crate) mod warm_start;

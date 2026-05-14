@@ -900,6 +900,7 @@ fn preprocess_layout_data_recompute(
         data_vec,
         collapsed_levels,
         proj_kn,
+        cell_to_pb_per_level: _,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &resolved.data_files,
         batch_files: &resolved.batch_files,
@@ -925,6 +926,7 @@ fn preprocess_layout_data_recompute(
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: None,
+        want_hierarchy: false,
     })?;
 
     let finest = collapsed_levels

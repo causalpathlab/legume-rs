@@ -255,6 +255,20 @@ pub fn refine_assignments(
 
     // Walk coarsest → finest (highest level index down to 0).
     for level in (0..num_levels).rev() {
+        // Refining the coarser level moves individual pb-samples across
+        // parents, which can leave this (not-yet-refined) finer level's
+        // initial groups straddling two *refined* parents. Re-project the
+        // level against its already-refined parent so it is a strict
+        // refinement before sibling sets are computed — otherwise a
+        // straddling group lands in two parents' sibling sets, both
+        // halves are then free to stay put, and the refined hierarchy is
+        // broken (violating `fine_to_coarse_from_refined`'s invariant).
+        if level + 1 < num_levels {
+            let (reprojected, new_k) =
+                project_to_refinement(&refined[level], &refined[level + 1]);
+            refined[level] = reprojected;
+            ks[level] = new_k;
+        }
         let k = ks[level];
         debug!("refining level {} (k={}, num_pb={})", level, k, num_pb);
         let siblings = compute_sibling_sets(&refined, level, k);
@@ -288,6 +302,18 @@ pub fn refine_assignments(
     })
 }
 
+/// Re-label `child` so it is a strict refinement of `parent`: two entities
+/// share an output label iff they agree on **both** their current child
+/// label and their parent label. Any child group that straddles multiple
+/// parents is split. Returns the relabeled vector and its group count
+/// (already compact `0..k` — `compact_labels` over the `(child, parent)`
+/// key does the first-appearance dense relabel).
+fn project_to_refinement(child: &[usize], parent: &[usize]) -> (Vec<usize>, usize) {
+    debug_assert_eq!(child.len(), parent.len());
+    let pairs: Vec<(usize, usize)> = child.iter().copied().zip(parent.iter().copied()).collect();
+    compact_labels(&pairs)
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Tests (BBKNN-specific)
 ////////////////////////////////////////////////////////////////////////////////
@@ -307,5 +333,29 @@ mod tests {
         let cand = build_candidate_sets(&siblings, &bbknn, &pbsamp_to_group);
         assert_eq!(cand[0], vec![0, 1]);
         assert_eq!(cand[1], vec![0, 1]);
+    }
+
+    #[test]
+    fn test_project_to_refinement_splits_straddling_groups() {
+        // child group 0 straddles parents A=0 and B=1; group 1 sits wholly
+        // under parent B. Re-projection must split group 0 into two and
+        // produce a strict refinement of `parent`.
+        let child = vec![0usize, 0, 0, 1, 1];
+        let parent = vec![0usize, 0, 1, 1, 1];
+        let (reproj, k) = project_to_refinement(&child, &parent);
+
+        // 3 distinct (child, parent) pairs: (0,0), (0,1), (1,1).
+        assert_eq!(k, 3);
+        // Entities 0,1 → (0,0); entity 2 → (0,1); entities 3,4 → (1,1).
+        assert_eq!(reproj[0], reproj[1]);
+        assert_ne!(reproj[0], reproj[2]);
+        assert_eq!(reproj[3], reproj[4]);
+        assert_ne!(reproj[2], reproj[3]);
+
+        // Strict refinement: every reprojected group maps to one parent.
+        let mut group_parent = std::collections::HashMap::new();
+        for (&g, &p) in reproj.iter().zip(parent.iter()) {
+            assert_eq!(*group_parent.entry(g).or_insert(p), p);
+        }
     }
 }

@@ -11,6 +11,9 @@ pub const MODEL_TYPE_TOPIC: &str = "topic";
 // here with a clean model-type mismatch instead of silently loading
 // against an incompatible runtime.
 pub const MODEL_TYPE_INDEXED: &str = "indexed_topic_packed";
+/// `senna cell-embedded-topic` — hierarchical cell→PB pooling encoder
+/// over the same shared-ρ ETM decoder as `indexed_topic_packed`.
+pub const MODEL_TYPE_CELL_EMBEDDED: &str = "cell_embedded_topic";
 
 /// Metadata needed to reconstruct a trained topic model for inference.
 #[derive(Serialize, Deserialize)]
@@ -46,6 +49,13 @@ pub struct TopicModelMetadata {
     /// Top-K shortlist size at decoder (indexed_topic only)
     #[serde(default)]
     pub dec_context_size: Option<usize>,
+    /// Learned intensity-embedding vocabulary size (value bins per scale,
+    /// indexed / cell-embedded only). `None` = the fixed Anscombe scalar
+    /// transform; `Some` = the dual-binned learned value gate (per-bin
+    /// width is the feature embedding dim `H`). Required to reconstruct
+    /// the encoder at predict time.
+    #[serde(default)]
+    pub value_vocab_size: Option<usize>,
     /// Mean training topic proportions θ̄ ∈ ℝ^K. Used at predict time as the
     /// mixture weights for the training-implied gene marginal in
     /// per-batch δ estimation. Falls back to uniform 1/K when absent.

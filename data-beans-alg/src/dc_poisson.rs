@@ -486,10 +486,15 @@ pub fn argmax_log_restricted(log_probs: &[f64], allowed: &[usize]) -> usize {
 // Hierarchy / relabeling helpers
 ////////////////////////////////////////////////////////////////////////////////
 
-/// Compact a group-index vector to 0..K (preserving relative order of first
-/// appearance). Returns the new labels and the new K.
-pub fn compact_labels(labels: &[usize]) -> (Vec<usize>, usize) {
-    let mut map: HashMap<usize, usize> = HashMap::default();
+/// Compact a label vector to dense `0..K` ids, preserving relative order of
+/// first appearance. Returns the new labels and the new `K`. Generic over
+/// the key type so it serves both plain group ids (`usize`) and composite
+/// keys (e.g. `(child, parent)` pairs in `project_to_refinement`).
+pub fn compact_labels<K>(labels: &[K]) -> (Vec<usize>, usize)
+where
+    K: Copy + Eq + std::hash::Hash,
+{
+    let mut map: HashMap<K, usize> = HashMap::default();
     let mut next = 0usize;
     let mut out = Vec::with_capacity(labels.len());
     for &g in labels {

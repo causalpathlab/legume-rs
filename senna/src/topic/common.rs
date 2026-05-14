@@ -178,6 +178,11 @@ pub struct PreparedData {
     /// downstream steps (e.g. viz cell placement) can reuse it without
     /// recomputing.
     pub proj_kn: Mat,
+    /// Per-level cell → pb membership, finest-last (parallel to
+    /// `collapsed_levels`). `Some` only when `LoadCollapseArgs.want_hierarchy`
+    /// was set — the `senna cell-embedded-topic` path needs it to pool
+    /// member cells inside the encoder. `None` for `indexed-topic` etc.
+    pub cell_to_pb_per_level: Option<Vec<Vec<usize>>>,
 }
 
 /// Result of the read + batch + HVG + project pipeline. Shared by
@@ -374,6 +379,12 @@ pub struct LoadCollapseArgs<'a> {
     pub column_alignment: data_beans::sparse_io_vector::ColumnAlignment,
     /// Per-name canonicalization — see [`LoadProjectArgs::feature_kind`].
     pub feature_kind: Option<auxiliary_data::feature_names::FeatureNameKind>,
+    /// Retain the per-level cell → pb membership hierarchy. When `true`,
+    /// `load_and_collapse` routes through
+    /// [`collapse_columns_multilevel_with_hierarchy`] (which requires
+    /// `refine = Some(..)`) and populates `PreparedData.cell_to_pb_per_level`.
+    /// Default `false` keeps the legacy `indexed-topic` behavior.
+    pub want_hierarchy: bool,
 }
 
 /// Load sparse data, project, multi-level collapse, and write delta output.
@@ -404,17 +415,39 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
     })?;
 
     info!("Multi-level collapsing with pb-samples ...");
-    let mut collapsed_levels: Vec<CollapsedOut> = data_vec.collapse_columns_multilevel_vec(
-        &proj_kn,
-        &batch_membership,
-        &MultilevelParams {
-            knn_pb_samples: args.knn_cells,
-            num_levels: args.num_levels,
-            sort_dim: args.sort_dim,
-            num_opt_iter: args.iter_opt,
-            refine: args.refine.clone(),
-        },
-    )?;
+    let ml_params = MultilevelParams {
+        knn_pb_samples: args.knn_cells,
+        num_levels: args.num_levels,
+        sort_dim: args.sort_dim,
+        num_opt_iter: args.iter_opt,
+        refine: args.refine.clone(),
+    };
+
+    // Both `collapse_columns_multilevel_vec` and the with-hierarchy
+    // variant return levels finest-first; `reverse()` makes them
+    // finest-last. `cell_to_pb_per_level` is parallel to `levels`, so it
+    // gets the same reversal to stay aligned with `collapsed_levels`.
+    let (mut collapsed_levels, cell_to_pb_per_level): (
+        Vec<CollapsedOut>,
+        Option<Vec<Vec<usize>>>,
+    ) = if args.want_hierarchy {
+        let MultilevelCollapseOut {
+            levels,
+            mut cell_to_pb_per_level,
+        } = collapse_columns_multilevel_with_hierarchy(
+            &mut data_vec,
+            &proj_kn,
+            &batch_membership,
+            &ml_params,
+        )?;
+        cell_to_pb_per_level.reverse();
+        (levels, Some(cell_to_pb_per_level))
+    } else {
+        (
+            data_vec.collapse_columns_multilevel_vec(&proj_kn, &batch_membership, &ml_params)?,
+            None,
+        )
+    };
     collapsed_levels.reverse();
 
     // 4. Write delta output from finest level
@@ -434,6 +467,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         data_vec,
         collapsed_levels,
         proj_kn,
+        cell_to_pb_per_level,
     })
 }
 

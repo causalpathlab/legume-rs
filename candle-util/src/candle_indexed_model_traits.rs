@@ -1,5 +1,26 @@
+use crate::candle_cell_grouped_data_loader::CellGroupedMinibatchData;
 use crate::candle_model_traits::EssLlikFn;
 use candle_core::{Result, Tensor};
+
+/// Cell-embedded encoder: pools genuinely sparse single-cell atoms into
+/// PB-level latent topics via a two-level gene→cell→PB embedding pool,
+/// concatenated with a PB-level background pool. Consumes a whole
+/// [`CellGroupedMinibatchData`] (FG cell pack + BG PB pack + decoder pack).
+pub trait CellEncoderT {
+    /// Forward pass over a cell-grouped minibatch.
+    ///
+    /// # Returns `(log_z_nk, kl_loss_n)`
+    /// * `log_z_nk` - [N, K_topics] log-probabilities on the simplex
+    ///   (N = pseudobulk samples in the minibatch)
+    /// * `kl_loss_n` - [N] per-sample KL divergence
+    fn forward_cells_t(
+        &self,
+        mb: &CellGroupedMinibatchData,
+        train: bool,
+    ) -> Result<(Tensor, Tensor)>;
+
+    fn dim_latent(&self) -> usize;
+}
 
 /// Indexed encoder: takes packed `(indices, values)` from the adaptive feature
 /// window. Each cell carries its own top-K feature ids and values; the
