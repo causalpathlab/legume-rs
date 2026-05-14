@@ -262,12 +262,12 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        help = "Intensity-embedding vocabulary size (value bins per scale; \
-                default: --embedding-dim). A resolution knob, not a perf one \
-                — the per-bin width is H and the lookup cost is independent \
-                of vocab size."
+        default_value_t = 16,
+        help = "Intensity-embedding vocabulary size (log1p-scale value bins). \
+                A resolution knob, not a perf one — the per-bin width is H and \
+                the lookup cost is independent of vocab size."
     )]
-    value_vocab_size: Option<usize>,
+    value_vocab_size: usize,
 
     #[command(flatten)]
     amort_refine: crate::refine_weighting::AmortRefineArgs,
@@ -289,15 +289,6 @@ pub struct IndexedTopicArgs {
                      Bulk samples are embedded using the trained encoder/decoder."
     )]
     bulk_data_files: Option<Vec<Box<str>>>,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Use dense AdamW over the full ρ [D,H] table every \
-                minibatch instead of the lazy touched-row-only optimizer. \
-                Slower at large embedding dim; kept for A/B benchmarking."
-    )]
-    dense_rho_update: bool,
 
     #[arg(
         long,
@@ -590,10 +581,9 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let dec_context_size = args.decoder_context_size.unwrap_or(args.context_size);
 
     // Value transform: the learned dual-binned intensity-embedding gate
-    // (Anscombe retired). Vocab size defaults to the feature embedding
-    // dim H — one model-scale knob instead of an arbitrary constant.
+    // (Anscombe retired). Vocab is the number of log1p-scale value bins.
     let value_embedding = ValueEmbeddingConfig {
-        n_vocab: args.value_vocab_size.unwrap_or(h),
+        n_vocab: args.value_vocab_size,
     };
     info!(
         "intensity-embedding value transform: vocab={} (per-bin width H={})",
@@ -611,16 +601,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         &parameters,
         param_builder.pp("enc"),
     )?;
-
-    // Resolve the ρ `Var` backing the encoder's feature-embedding table —
-    // matched by tensor id in the VarMap — so the lazy optimizer can step
-    // it sparsely and the stock AdamW can exclude it.
-    let rho_tid = base_encoder.feature_embeddings().id();
-    let rho_var = parameters
-        .all_vars()
-        .into_iter()
-        .find(|v| v.id() == rho_tid)
-        .ok_or_else(|| anyhow::anyhow!("ρ feature-embedding Var not found in VarMap"))?;
 
     // Per-level decoders: all at D_full, levels differ in N (sample coarsening).
     // ETM-factorized — each decoder shares the encoder's feature embeddings ρ,
@@ -657,12 +637,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
 
     info!(
         "input: {} -> indexed encoder (emb={}, ctx={}) -> {} decoders (D={}, ctx={})",
-        n_features_full,
-        h,
-        args.context_size,
-        num_levels,
-        n_features_full,
-        dec_context_size,
+        n_features_full, h, args.context_size, num_levels, n_features_full, dec_context_size,
     );
 
     let gene_names = data_vec.row_names()?;
@@ -761,8 +736,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         feature_fisher_weights: &feature_fisher_weights,
         grad_clip: args.grad_clip,
         graph_warmup_epochs: args.graph_warmup_epochs,
-        rho_var: &rho_var,
-        lazy_rho: !args.dense_rho_update,
     };
 
     let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_full, &bulk_deltas) {

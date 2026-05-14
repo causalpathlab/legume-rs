@@ -2,6 +2,7 @@ pub(crate) mod anchor_prior;
 pub(crate) mod common;
 pub(crate) mod decoder_output;
 pub(crate) mod eval;
+pub(crate) mod eval_cell_embedded;
 pub(crate) mod eval_indexed;
 pub(crate) mod graph_likelihood;
 pub(crate) mod model_metadata;

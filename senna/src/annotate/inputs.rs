@@ -214,7 +214,7 @@ where
 
     let is_topic = matches!(
         manifest.kind,
-        RunKind::Topic | RunKind::Itopic | RunKind::JointTopic
+        RunKind::Topic | RunKind::Itopic | RunKind::CellEmbeddedTopic | RunKind::JointTopic
     );
     if is_topic && latent.mat.max() <= 0.0 {
         log::info!("Detected log-space latent (max ≤ 0); exponentiating to probabilities");

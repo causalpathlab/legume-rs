@@ -70,8 +70,11 @@ impl CellEmbeddedEncoder {
             init_ws,
         )?;
 
-        let value_embedding =
-            ValueEmbedding::new(args.value_embedding, args.embedding_dim, vb.pp("nn.enc.value"))?;
+        let value_embedding = ValueEmbedding::new(
+            args.value_embedding,
+            args.embedding_dim,
+            vb.pp("nn.enc.value"),
+        )?;
 
         // FC stack: 2H -> ... -> final_hidden (the [fg, bg] concat is 2H).
         let fc_dims = args.layers[..args.layers.len() - 1].to_vec();
@@ -79,8 +82,7 @@ impl CellEmbeddedEncoder {
         let out_dim = *args.layers.last().unwrap();
         let fc = stack_relu_linear(in_dim, out_dim, &fc_dims, vb.pp("nn.enc.fc"))?;
 
-        let bn_z =
-            candle_batch_norm::batch_norm(out_dim, bn_config, varmap, vb.pp("nn.enc.bn_z"))?;
+        let bn_z = candle_batch_norm::batch_norm(out_dim, bn_config, varmap, vb.pp("nn.enc.bn_z"))?;
 
         let z_mean = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.mean"))?;
         let z_lnvar = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.lnvar"))?;
@@ -161,7 +163,11 @@ impl CellEmbeddedEncoder {
         // normalization already removed depth, so summing accumulates
         // evidence (DC-Poisson semantics). PBs with no member cells stay 0.
         let zeros = Tensor::zeros((n_pb, h), DType::F32, h_m.device())?;
-        zeros.index_add(&mb.cell_to_pb, &h_m, 0)
+        let pooled = zeros.index_add(&mb.cell_to_pb, &h_m, 0)?; // [N_pb, H]
+                                                                // The FG pool sums only an S-cell random subsample of each PB;
+                                                                // `fg_pb_rescale = |PB|/S` ([N_pb, 1]) upscales the segment-sum to an
+                                                                // unbiased estimate of the full-PB sum (1.0 when sampled in full).
+        pooled.broadcast_mul(&mb.fg_pb_rescale)
     }
 
     /// Background pool — single-level PB-profile value-weighted pool → `[N, H]`.

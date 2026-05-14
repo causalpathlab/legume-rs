@@ -63,22 +63,6 @@ pub(crate) fn dense_to_indexed(
     dense_rows_to_indexed(&rows, context_size, shortlist_weights, ctx, dev)
 }
 
-/// Convert a dense `[N, D]` tensor into two packed top-K forms (encoder
-/// and decoder windows) with a single host copy of the row data.
-pub(crate) fn dense_to_indexed_pair(
-    x_nd: &Tensor,
-    enc_context_size: usize,
-    dec_context_size: usize,
-    shortlist_weights: &[f32],
-    ctx: PerGeneContext<'_>,
-    dev: &Device,
-) -> anyhow::Result<(IndexedPack, IndexedPack)> {
-    let rows: Vec<Vec<f32>> = x_nd.to_vec2()?;
-    let enc = dense_rows_to_indexed(&rows, enc_context_size, shortlist_weights, ctx, dev)?;
-    let dec = dense_rows_to_indexed(&rows, dec_context_size, shortlist_weights, ctx, dev)?;
-    Ok((enc, dec))
-}
-
 fn dense_rows_to_indexed(
     rows: &[Vec<f32>],
     context_size: usize,
@@ -107,19 +91,22 @@ fn dense_rows_to_indexed(
 /// Build an [`IndexedPack`] directly from a sparse `[D, N]` CSC matrix —
 /// columns are cells. Skips the dense `[N, D]` materialization the
 /// `dense_*` helpers need; only the stored nonzeros are visited.
+/// `gene_remap` (`Some(new_to_train)`) maps held-out → training gene
+/// indices for `predict` on a differing gene set; the top-K is built over
+/// the remapped, training-space ids. `None` when the CSC is already on the
+/// training axis (fit-time eval).
 pub(crate) fn csc_to_indexed(
     x_dn: &nalgebra_sparse::CscMatrix<f32>,
     context_size: usize,
     shortlist_weights: &[f32],
+    gene_remap: Option<&[Option<usize>]>,
     ctx: PerGeneContext<'_>,
     dev: &Device,
 ) -> anyhow::Result<IndexedPack> {
     let k = context_size.min(x_dn.nrows());
-    let samples = csc_columns_to_indexed_samples(x_dn, shortlist_weights, context_size);
-    let all_top_k: Vec<(Vec<u32>, Vec<f32>)> = samples
-        .into_iter()
-        .map(|s| (s.indices, s.values))
-        .collect();
+    let samples = csc_columns_to_indexed_samples(x_dn, shortlist_weights, context_size, gene_remap);
+    let all_top_k: Vec<(Vec<u32>, Vec<f32>)> =
+        samples.into_iter().map(|s| (s.indices, s.values)).collect();
     pack_top_k_to_indexed(&all_top_k, k, ctx, dev)
 }
 
@@ -130,11 +117,26 @@ pub(crate) fn csc_to_indexed_pair(
     enc_context_size: usize,
     dec_context_size: usize,
     shortlist_weights: &[f32],
+    gene_remap: Option<&[Option<usize>]>,
     ctx: PerGeneContext<'_>,
     dev: &Device,
 ) -> anyhow::Result<(IndexedPack, IndexedPack)> {
-    let enc = csc_to_indexed(x_dn, enc_context_size, shortlist_weights, ctx, dev)?;
-    let dec = csc_to_indexed(x_dn, dec_context_size, shortlist_weights, ctx, dev)?;
+    let enc = csc_to_indexed(
+        x_dn,
+        enc_context_size,
+        shortlist_weights,
+        gene_remap,
+        ctx,
+        dev,
+    )?;
+    let dec = csc_to_indexed(
+        x_dn,
+        dec_context_size,
+        shortlist_weights,
+        gene_remap,
+        ctx,
+        dev,
+    )?;
     Ok((enc, dec))
 }
 
@@ -359,6 +361,7 @@ where
             config.enc_context_size,
             config.dec_context_size,
             config.shortlist_weights,
+            None,
             ctx,
             config.dev,
         )?;
@@ -368,6 +371,7 @@ where
             &x_dn,
             config.enc_context_size,
             config.shortlist_weights,
+            None,
             ctx,
             config.dev,
         )?;

@@ -184,20 +184,24 @@ enum Commands {
     IndexedTopic(IndexedTopicArgs),
 
     #[command(
-        about = "Train: hierarchical cell→PB pooling topic model (lazy-ρ end-to-end).",
+        about = "Train: hierarchical cell→PB pooling topic model.",
         long_about = "Same model type as `indexed-topic` (shared ρ ∈ ℝ^{D×H}, ETM-factorized\n\
-                      decoder, multi-level PB training, lazy-ρ optimizer), but the cell→PB\n\
-                      pooling is moved INTO the encoder as a two-level gene→cell→PB\n\
-                      EmbeddingBag. A PB sample is a pool of its member cells; because\n\
-                      single cells are the genuinely sparse atoms, the per-minibatch\n\
-                      touched ρ-row set shrinks to single-digit % of D and the lazy-ρ\n\
-                      optimizer pays off end-to-end.\n\n\
+                      decoder, multi-level PB training), but the cell→PB pooling is\n\
+                      moved INTO the encoder as a two-level gene→cell→PB EmbeddingBag.\n\
+                      A PB sample is a pool of its member cells.\n\n\
+                      A coarse-level PB can pool hundreds of cells, so each minibatch\n\
+                      draws an S = min(--fg-cells-per-pb, |PB|)-cell random subsample\n\
+                      per PB (rescaled by |PB|/S to stay an unbiased full-PB-sum\n\
+                      estimate). That bounds the per-minibatch member-cell count — so\n\
+                      encoder memory stays flat at coarse PB levels — and the fresh\n\
+                      per-epoch subsample is the within-PB SGD stochasticity.\n\n\
                       The encoder produces a foreground pool (member cells, DC-Poisson\n\
                       degree-corrected + housekeeping-weighted) and a background pool\n\
                       (PB μ_residual), concatenated [N,2H] into the latent head.\n\n\
-                      v1 writes {out}.{dictionary,feature_embedding,log_likelihood}.parquet\n\
-                      + {out}.safetensors + {out}.model.json. Latent inference / predict\n\
-                      are not wired yet.",
+                      Trains, runs per-cell latent inference, and writes the full\n\
+                      topic-family artifact set (latent / pb_gene / cell_proj /\n\
+                      manifest / CNV); `senna predict` applies the trained model to\n\
+                      held-out data.",
         visible_aliases = ["cetopic", "cell-etm"]
     )]
     CellEmbeddedTopic(CellEmbeddedTopicArgs),
@@ -251,11 +255,12 @@ enum Commands {
 
     // ─────────── 2. Held-out inference ───────────
     #[command(
-        about = "Apply a trained topic / indexed-topic model to held-out data.",
+        about = "Apply a trained topic / indexed-topic / cell-embedded-topic model to held-out data.",
         long_about = "Latent inference + per-cell predictive log-likelihood on a separate\n\
-                      backend file. Auto-dispatches dense vs indexed via model.json.\n\
-                      Handles gene-set misalignment via flexible name matching and\n\
-                      re-estimates per-batch delta from the frozen dictionary.\n\n\
+                      backend file. Auto-dispatches dense / indexed / cell-embedded via\n\
+                      model.json. Handles gene-set misalignment via flexible name\n\
+                      matching and re-estimates per-batch delta from the frozen\n\
+                      dictionary.\n\n\
                       Latent modes: encoder-only (default), encoder+refine, decoder-only."
     )]
     Predict(PredictArgs),

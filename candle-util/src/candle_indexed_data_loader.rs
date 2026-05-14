@@ -58,12 +58,6 @@ pub struct IndexedMinibatchData {
     pub output_values_weight: Option<Tensor>,
     /// [1, S] f32 — log selection frequency at union positions
     pub output_log_q_s: Tensor,
-    /// [T] u32 — sorted-unique union of every feature id this minibatch
-    /// touches on *either* side (encoder per-cell ids ∪ decoder union).
-    /// These are exactly the rows of the shared ρ `[D, H]` table that
-    /// receive a nonzero gradient, so a lazy/sparse optimizer can restrict
-    /// its update to `touched_rho_indices` instead of sweeping all of D.
-    pub touched_rho_indices: Tensor,
 }
 
 impl IndexedMinibatchData {
@@ -74,7 +68,10 @@ impl IndexedMinibatchData {
     /// `dev` is already CPU.
     pub fn to_device(&self, dev: &Device) -> anyhow::Result<IndexedMinibatchData> {
         let opt = |t: &Option<Tensor>| -> anyhow::Result<Option<Tensor>> {
-            t.as_ref().map(|x| x.to_device(dev)).transpose().map_err(Into::into)
+            t.as_ref()
+                .map(|x| x.to_device(dev))
+                .transpose()
+                .map_err(Into::into)
         };
         Ok(IndexedMinibatchData {
             input_indices: self.input_indices.to_device(dev)?,
@@ -86,7 +83,6 @@ impl IndexedMinibatchData {
             output_values: self.output_values.to_device(dev)?,
             output_values_weight: opt(&self.output_values_weight)?,
             output_log_q_s: self.output_log_q_s.to_device(dev)?,
-            touched_rho_indices: self.touched_rho_indices.to_device(dev)?,
         })
     }
 }
@@ -255,24 +251,41 @@ where
 /// `context_size` are kept. Avoids ever materializing the dense `[N, D]`
 /// matrix the dense path needs.
 ///
-/// Sequential over columns by design: the caller (`evaluate_indexed_block`)
-/// already runs inside a block-level rayon map, so a nested par_iter here
-/// would only add task-splitting overhead.
+/// `gene_remap = Some(new_to_train)` remaps each stored row index from a
+/// held-out gene axis to the training axis before scoring (rows that
+/// don't map are dropped) — for `predict` on a differing gene set, where
+/// `shortlist_weights` is indexed in training-gene space. `None` when the
+/// CSC is already on the training axis.
+///
+/// Sequential over columns by design: callers already run inside a
+/// block-level rayon map, so a nested par_iter here would only add
+/// task-splitting overhead.
 pub fn csc_columns_to_indexed_samples(
     x_dn: &CscMatrix<f32>,
     shortlist_weights: &[f32],
     context_size: usize,
+    gene_remap: Option<&[Option<usize>]>,
 ) -> Vec<IndexedSample> {
-    debug_assert_eq!(x_dn.nrows(), shortlist_weights.len());
+    debug_assert_eq!(
+        x_dn.nrows(),
+        gene_remap.map_or(shortlist_weights.len(), <[_]>::len)
+    );
     (0..x_dn.ncols())
         .map(|j| {
             let col = x_dn.col(j);
-            let entries = col
-                .row_indices()
-                .iter()
-                .zip(col.values().iter())
-                .map(|(&r, &v)| (r as u32, v, shortlist_weights[r]));
-            let (indices, values) = top_k_from_entries(entries, context_size);
+            let pairs = col.row_indices().iter().zip(col.values().iter());
+            let (indices, values) = match gene_remap {
+                Some(rm) => top_k_from_entries(
+                    pairs.filter_map(|(&r, &v)| {
+                        rm[r].map(|rt| (rt as u32, v, shortlist_weights[rt]))
+                    }),
+                    context_size,
+                ),
+                None => top_k_from_entries(
+                    pairs.map(|(&r, &v)| (r as u32, v, shortlist_weights[r])),
+                    context_size,
+                ),
+            };
             IndexedSample { indices, values }
         })
         .collect()
@@ -528,23 +541,11 @@ pub(crate) fn slice_log_q_at_union(
         .iter()
         .map(|&idx| output_log_q[idx as usize])
         .collect();
-    Ok(Tensor::from_vec(log_q_s, (1, union_vec.len()), target_device)?)
-}
-
-/// Sorted-unique union of every ρ row this minibatch touches: the decoder
-/// union plus any `extra` feature ids the encoder side selected. Returned
-/// as a `[T]` tensor so a lazy optimizer can `index_select`/`index_add`
-/// against exactly the touched rows.
-pub(crate) fn touched_rho_tensor(
-    union_vec: &[u32],
-    extra: impl Iterator<Item = u32>,
-    target_device: &Device,
-) -> anyhow::Result<Tensor> {
-    let mut touched: std::collections::BTreeSet<u32> = union_vec.iter().copied().collect();
-    touched.extend(extra);
-    let touched_vec: Vec<u32> = touched.into_iter().collect();
-    let n_touched = touched_vec.len();
-    Ok(Tensor::from_vec(touched_vec, (n_touched,), target_device)?)
+    Ok(Tensor::from_vec(
+        log_q_s,
+        (1, union_vec.len()),
+        target_device,
+    )?)
 }
 
 impl IndexedInMemoryData {
@@ -829,15 +830,6 @@ impl IndexedInMemoryData {
         let output_log_q_s =
             slice_log_q_at_union(&self.output_log_q, &output_union_vec, target_device)?;
 
-        // Touched ρ rows: encoder per-cell ids ∪ decoder union.
-        let touched_rho_indices = touched_rho_tensor(
-            &output_union_vec,
-            sample_indices
-                .iter()
-                .flat_map(|&si| self.input_samples[si].indices.iter().copied()),
-            target_device,
-        )?;
-
         Ok(IndexedMinibatchData {
             input_indices,
             input_values,
@@ -848,7 +840,6 @@ impl IndexedInMemoryData {
             output_values,
             output_values_weight,
             output_log_q_s,
-            touched_rho_indices,
         })
     }
 
@@ -986,7 +977,7 @@ mod tests {
         }
         let csc = CscMatrix::from(&coo);
 
-        let from_csc = csc_columns_to_indexed_samples(&csc, &weights, 3);
+        let from_csc = csc_columns_to_indexed_samples(&csc, &weights, 3, None);
         assert_eq!(from_csc.len(), n);
         for (j, row) in dense.iter().enumerate() {
             let (exp_idx, exp_val) = top_k_indices_weighted(row, &weights, 3);

@@ -54,6 +54,20 @@ where
     Ok(ret)
 }
 
+/// Per-cell batch (`Batch`) or pseudobulk-group (`Residual`) id for the
+/// block `lb..ub`, selecting the membership axis by `adj_method`.
+pub(crate) fn block_membership(
+    data_vec: &SparseIoVec,
+    adj_method: &AdjMethod,
+    lb: usize,
+    ub: usize,
+) -> anyhow::Result<Vec<usize>> {
+    Ok(match adj_method {
+        AdjMethod::Batch => data_vec.get_batch_membership(lb..ub),
+        AdjMethod::Residual => data_vec.get_group_membership(lb..ub)?,
+    })
+}
+
 /// Expand a precomputed delta tensor `[B, D]` to `[N, D]` using per-sample
 /// batch or group membership indices for the block `lb..ub`.
 pub(crate) fn expand_delta_for_block(
@@ -64,19 +78,8 @@ pub(crate) fn expand_delta_for_block(
     ub: usize,
     dev: &Device,
 ) -> anyhow::Result<Tensor> {
-    let membership: Vec<u32> = match adj_method {
-        AdjMethod::Batch => data_vec
-            .get_batch_membership(lb..ub)
-            .into_iter()
-            .map(|x| x as u32)
-            .collect(),
-        AdjMethod::Residual => data_vec
-            .get_group_membership(lb..ub)?
-            .into_iter()
-            .map(|x| x as u32)
-            .collect(),
-    };
-    let indices = Tensor::from_iter(membership.into_iter(), dev)?;
+    let membership = block_membership(data_vec, adj_method, lb, ub)?;
+    let indices = Tensor::from_iter(membership.into_iter().map(|x| x as u32), dev)?;
     Ok(delta_bd.index_select(&indices, 0)?)
 }
 
@@ -427,27 +430,29 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
     // variant return levels finest-first; `reverse()` makes them
     // finest-last. `cell_to_pb_per_level` is parallel to `levels`, so it
     // gets the same reversal to stay aligned with `collapsed_levels`.
-    let (mut collapsed_levels, cell_to_pb_per_level): (
-        Vec<CollapsedOut>,
-        Option<Vec<Vec<usize>>>,
-    ) = if args.want_hierarchy {
-        let MultilevelCollapseOut {
-            levels,
-            mut cell_to_pb_per_level,
-        } = collapse_columns_multilevel_with_hierarchy(
-            &mut data_vec,
-            &proj_kn,
-            &batch_membership,
-            &ml_params,
-        )?;
-        cell_to_pb_per_level.reverse();
-        (levels, Some(cell_to_pb_per_level))
-    } else {
-        (
-            data_vec.collapse_columns_multilevel_vec(&proj_kn, &batch_membership, &ml_params)?,
-            None,
-        )
-    };
+    let (mut collapsed_levels, cell_to_pb_per_level): (Vec<CollapsedOut>, Option<Vec<Vec<usize>>>) =
+        if args.want_hierarchy {
+            let MultilevelCollapseOut {
+                levels,
+                mut cell_to_pb_per_level,
+            } = collapse_columns_multilevel_with_hierarchy(
+                &mut data_vec,
+                &proj_kn,
+                &batch_membership,
+                &ml_params,
+            )?;
+            cell_to_pb_per_level.reverse();
+            (levels, Some(cell_to_pb_per_level))
+        } else {
+            (
+                data_vec.collapse_columns_multilevel_vec(
+                    &proj_kn,
+                    &batch_membership,
+                    &ml_params,
+                )?,
+                None,
+            )
+        };
     collapsed_levels.reverse();
 
     // 4. Write delta output from finest level
