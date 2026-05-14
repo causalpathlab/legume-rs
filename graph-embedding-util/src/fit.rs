@@ -54,9 +54,22 @@ const DEFAULT_STRATIFY_ALPHA_CELL: f32 = 0.5;
 /// `clap`.
 pub struct FitConfig {
     pub embedding_dim: usize,
-    pub num_coarsen_seeds: usize,
-    pub pb_samples: usize,
-    pub sketch_dim: usize,
+    /// Number of multilevel-collapse levels (coarse → fine). Maps
+    /// directly to [`MultilevelParams::num_levels`].
+    pub num_levels: usize,
+    /// Binary-tree partition depth at the finest level — at most
+    /// `2^sort_dim + 1` pseudobulk leaves. Maps to
+    /// [`MultilevelParams::sort_dim`].
+    pub sort_dim: usize,
+    /// In-batch k-NN used when merging cells into pseudobulk samples.
+    /// Maps to [`MultilevelParams::knn_pb_samples`].
+    pub knn_pb_samples: usize,
+    /// Coordinate-descent iterations for the per-batch δ correction
+    /// inside the collapse. Maps to [`MultilevelParams::num_opt_iter`].
+    pub num_opt_iter: usize,
+    /// Target rank of the random-projection sketch that seeds batch
+    /// correction and the multilevel collapse.
+    pub proj_dim: usize,
     pub epochs: usize,
     pub batches_per_epoch: usize,
     pub batch_size: usize,
@@ -340,8 +353,8 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
 
     // ---- Shared upstream: batch-corrected projection + Fisher weights ----
     info!(
-        "Batch-corrected projection (sketch_dim={}, {} batches)...",
-        config.sketch_dim,
+        "Batch-corrected projection (proj_dim={}, {} batches)...",
+        config.proj_dim,
         unified.n_batches()
     );
     let batch_labels: Vec<Box<str>> = unified
@@ -363,14 +376,14 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             w.iter().filter(|&&x| x > 0.0).count()
         );
         unified.per_file_data[0].project_columns_weighted(
-            config.sketch_dim,
+            config.proj_dim,
             config.block_size,
             batch_arg,
             w,
         )?
     } else {
         unified.per_file_data[0].project_columns_with_batch_correction(
-            config.sketch_dim,
+            config.proj_dim,
             config.block_size,
             batch_arg,
         )?
@@ -396,27 +409,21 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // `sort_dim` controls how many bits of the binary-sketched projection
     // are used to hash cells into the *finest* pb-sample partition (so
     // `2^sort_dim` is the max number of distinct codes / pb-samples at
-    // that level). Previously this was hard-wired to `config.sketch_dim`
-    // (=32 by default) — way too high, every cell ended up alone in its
-    // own pb-sample and `--pb-samples` was silently ignored. Now we
-    // derive `sort_dim` from the user's target pb-sample count so the
-    // flag actually works.
-    let sort_dim_finest = ((config.pb_samples.max(2) as f32).log2().ceil() as usize)
-        .max(2)
-        .min(config.sketch_dim.max(2));
+    // that level). Exposed directly via `FitConfig.sort_dim` for parity
+    // with `senna topic` / `svd` rather than derived from a target count.
     info!(
-        "Multilevel collapse (target ~{} pb-samples → sort_dim={}, {} levels requested)...",
-        config.pb_samples, sort_dim_finest, config.num_coarsen_seeds
+        "Multilevel collapse (sort_dim={}, {} levels requested)...",
+        config.sort_dim, config.num_levels
     );
     let collapse_out = collapse_columns_multilevel_with_hierarchy(
         &mut unified.per_file_data[0],
         &proj_out.proj,
         &batch_labels,
         &MultilevelParams {
-            knn_pb_samples: 10,
-            num_levels: config.num_coarsen_seeds.max(1),
-            sort_dim: sort_dim_finest,
-            num_opt_iter: 100,
+            knn_pb_samples: config.knn_pb_samples,
+            num_levels: config.num_levels.max(1),
+            sort_dim: config.sort_dim,
+            num_opt_iter: config.num_opt_iter,
             refine: config.refine.clone(),
         },
     )?;

@@ -71,40 +71,14 @@ pub struct CellEmbeddedTopicArgs {
 
     #[arg(
         long,
-        short = 'p',
-        default_value_t = 50,
-        help = "Random projection dimension"
-    )]
-    proj_dim: usize,
-
-    #[arg(
-        long,
-        short = 'd',
-        default_value_t = 10,
-        help = "Partition depth: ≤ 2^d + 1 pseudobulk groups"
-    )]
-    sort_dim: usize,
-
-    #[arg(
-        long,
         short,
         value_delimiter(','),
         help = "Batch membership files, one per data file"
     )]
     batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(
-        long,
-        help = "Skip per-batch correction; treat all cells as a single batch"
-    )]
-    ignore_batch: bool,
-
-    #[arg(
-        short = 'w',
-        long = "warm-start",
-        help = "Warm-start projection file (cell × k)"
-    )]
-    warm_start_proj_file: Option<Box<str>>,
+    #[command(flatten)]
+    collapse: crate::refine_weighting::CollapseArgs,
 
     #[arg(
         long = "init-from",
@@ -116,29 +90,9 @@ pub struct CellEmbeddedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 10,
-        help = "In-batch k-NN for pb-sample merging"
-    )]
-    knn_cells: usize,
-
-    #[arg(long, default_value_t = 3, help = "Multi-level coarsening levels")]
-    num_levels: usize,
-
-    #[arg(
-        long,
-        default_value_t = 30,
-        help = "Batch-correction optimizer iterations"
-    )]
-    iter_opt: usize,
-
-    #[arg(
-        long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)"
     )]
     block_size: Option<usize>,
-
-    #[command(flatten)]
-    pb_refine: crate::refine_weighting::PbRefineArgs,
 
     #[arg(
         short = 't',
@@ -420,12 +374,11 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         data_files: &args.data_files,
         batch_files: &args.batch_files,
         preload: args.preload_data,
-        warm_start_proj_file: args.warm_start_proj_file.as_deref(),
-        proj_dim: args.proj_dim.max(args.n_latent_topics),
-        sort_dim: args.sort_dim,
-        knn_cells: args.knn_cells,
-        num_levels: args.num_levels,
-        iter_opt: args.iter_opt,
+        proj_dim: args.collapse.proj_dim.max(args.n_latent_topics),
+        sort_dim: args.collapse.sort_dim,
+        knn_cells: args.collapse.knn_cells,
+        num_levels: args.collapse.num_levels,
+        iter_opt: args.collapse.iter_opt,
         block_size: args.block_size,
         out: &args.out,
         max_features: effective_hvg_n,
@@ -438,8 +391,8 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
             data_beans::sparse_io_vector::ColumnAlignment::Disjoint
         },
         feature_kind: args.feature_name_kind.clone().into(),
-        refine: Some(args.pb_refine.to_params()),
-        ignore_batch: args.ignore_batch,
+        refine: Some(args.collapse.pb_refine.to_params()),
+        ignore_batch: args.collapse.ignore_batch,
         want_hierarchy: true,
     })?;
 

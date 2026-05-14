@@ -905,7 +905,6 @@ fn preprocess_layout_data_recompute(
         data_files: &resolved.data_files,
         batch_files: &resolved.batch_files,
         preload: args.preload_data,
-        warm_start_proj_file: None,
         proj_dim: args.proj_dim,
         sort_dim: args.sort_dim,
         knn_cells: args.knn_cells,

@@ -43,26 +43,6 @@ pub struct JointSvdArgs {
 
     #[arg(
         long,
-        short = 'p',
-        default_value_t = 50,
-        help = "Random projection dimension",
-        long_help = "Target rank of the initial random sketch used to seed\n\
-                     batch correction and multi-level pseudobulk collapsing."
-    )]
-    proj_dim: usize,
-
-    #[arg(
-        long,
-        short = 'd',
-        default_value_t = 10,
-        help = "Partition depth: ≤ 2^d + 1 pseudobulk groups",
-        long_help = "Binary-tree partitioning over the top d projection components.\n\
-                     Produces at most 2^d + 1 pseudobulk leaves."
-    )]
-    sort_dim: usize,
-
-    #[arg(
-        long,
         short,
         value_delimiter(','),
         help = "Batch membership files, one per data file",
@@ -70,6 +50,9 @@ pub struct JointSvdArgs {
                      matching data file. Example: batch1.tsv,batch2.tsv"
     )]
     batch_files: Option<Vec<Box<str>>>,
+
+    #[command(flatten)]
+    collapse: crate::refine_weighting::CollapseArgs,
 
     #[arg(
         short = 'c',
@@ -82,29 +65,9 @@ pub struct JointSvdArgs {
 
     #[arg(
         long,
-        default_value_t = 10,
-        help = "In-batch k-NN for pb-sample merging",
-        long_help = "Number of within-batch nearest neighbours used when\n\
-                     aggregating cells into pseudobulk pb-samples."
-    )]
-    knn_cells: usize,
-
-    #[arg(
-        long,
-        default_value_t = 30,
-        help = "Batch-correction optimizer iterations",
-        long_help = "Coordinate-descent steps when fitting the per-batch delta."
-    )]
-    iter_opt: usize,
-
-    #[arg(
-        long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)"
     )]
     block_size: Option<usize>,
-
-    #[command(flatten)]
-    pb_refine: crate::refine_weighting::PbRefineArgs,
 
     #[arg(
         short = 't',
@@ -113,15 +76,6 @@ pub struct JointSvdArgs {
         help = "Number of latent components (K)"
     )]
     n_latent_topics: usize,
-
-    #[arg(
-        long,
-        default_value_t = 3,
-        help = "Multi-level coarsening levels",
-        long_help = "Hierarchical pseudobulk refinement passes. Level sort dims are\n\
-                     linearly spaced from 4 to --sort-dim. Set to 1 to disable."
-    )]
-    num_levels: usize,
 
     #[arg(
         long,
@@ -137,16 +91,22 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     // 1. Read the data with batch membership
     let SparseStackWithBatch {
         mut data_stack,
-        batch_stack,
+        mut batch_stack,
     } = read_data_on_shared_columns(ReadSharedColumnsArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
         num_types: args.num_modalities,
         preload: args.preload_data,
     })?;
+    if args.collapse.ignore_batch {
+        info!("--ignore-batch: collapsing all cells to a single batch (per modality)");
+        for batch in batch_stack.iter_mut() {
+            crate::senna_input::collapse_to_single_batch(batch);
+        }
+    }
 
     // 2. Concatenate projections
-    let proj_dim = args.proj_dim.max(args.n_latent_topics);
+    let proj_dim = args.collapse.proj_dim.max(args.n_latent_topics);
     let proj_out = data_stack.project_columns_with_batch_correction(
         proj_dim,
         args.block_size,
@@ -164,11 +124,11 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         &proj_kn,
         batch_stack[0].as_ref(),
         &MultilevelParams {
-            knn_pb_samples: args.knn_cells,
-            num_levels: args.num_levels,
-            sort_dim: args.sort_dim,
-            num_opt_iter: args.iter_opt,
-            refine: Some(args.pb_refine.to_params()),
+            knn_pb_samples: args.collapse.knn_cells,
+            num_levels: args.collapse.num_levels,
+            sort_dim: args.collapse.sort_dim,
+            num_opt_iter: args.collapse.iter_opt,
+            refine: Some(args.collapse.pb_refine.to_params()),
         },
     )?;
 
