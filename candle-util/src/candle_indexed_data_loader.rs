@@ -3,6 +3,7 @@ use crate::candle_data_loader_util::Minibatches;
 use candle_core::{Device, Tensor};
 use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
 use matrix_util::traits::CandleDataLoaderOps;
+use nalgebra_sparse::CscMatrix;
 use rayon::prelude::*;
 use std::cell::RefCell;
 
@@ -57,6 +58,37 @@ pub struct IndexedMinibatchData {
     pub output_values_weight: Option<Tensor>,
     /// [1, S] f32 — log selection frequency at union positions
     pub output_log_q_s: Tensor,
+    /// [T] u32 — sorted-unique union of every feature id this minibatch
+    /// touches on *either* side (encoder per-cell ids ∪ decoder union).
+    /// These are exactly the rows of the shared ρ `[D, H]` table that
+    /// receive a nonzero gradient, so a lazy/sparse optimizer can restrict
+    /// its update to `touched_rho_indices` instead of sweeping all of D.
+    pub touched_rho_indices: Tensor,
+}
+
+impl IndexedMinibatchData {
+    /// Upload every tensor field to `dev`. Cached minibatches are built
+    /// host-side by `precompute_all_minibatches`; the training loop calls
+    /// this once per minibatch so a GPU run uploads incrementally instead
+    /// of holding the whole epoch resident on device. A no-op copy when
+    /// `dev` is already CPU.
+    pub fn to_device(&self, dev: &Device) -> anyhow::Result<IndexedMinibatchData> {
+        let opt = |t: &Option<Tensor>| -> anyhow::Result<Option<Tensor>> {
+            t.as_ref().map(|x| x.to_device(dev)).transpose().map_err(Into::into)
+        };
+        Ok(IndexedMinibatchData {
+            input_indices: self.input_indices.to_device(dev)?,
+            input_values: self.input_values.to_device(dev)?,
+            input_values_null: opt(&self.input_values_null)?,
+            input_values_mean: opt(&self.input_values_mean)?,
+            output_union_indices: self.output_union_indices.to_device(dev)?,
+            output_scatter_pos: self.output_scatter_pos.to_device(dev)?,
+            output_values: self.output_values.to_device(dev)?,
+            output_values_weight: opt(&self.output_values_weight)?,
+            output_log_q_s: self.output_log_q_s.to_device(dev)?,
+            touched_rho_indices: self.touched_rho_indices.to_device(dev)?,
+        })
+    }
 }
 
 /// Adaptive feature window data loader with decoupled encoder/decoder windows.
@@ -85,6 +117,11 @@ pub struct IndexedInMemoryData {
     /// Per-feature NB-Fisher weight (decoder side) gathered into
     /// `output_values_weight [N, K]` at minibatch build time.
     output_fisher_weights: Option<Vec<f32>>,
+    /// Sum of all `output_samples` values across every sample — the
+    /// per-epoch total decoder count, invariant to minibatch shuffling.
+    /// Cached so the training loop's llik/count trace doesn't re-sum
+    /// `output_values` on every minibatch.
+    total_output_count: f32,
     minibatches: Minibatches,
     cached_batches: Vec<IndexedMinibatchData>,
 }
@@ -166,17 +203,32 @@ pub fn top_k_indices(row: &[f32], k: usize) -> (Vec<u32>, Vec<f32>) {
 /// observed.
 pub fn top_k_indices_weighted(row: &[f32], weights: &[f32], k: usize) -> (Vec<u32>, Vec<f32>) {
     debug_assert_eq!(row.len(), weights.len());
+    top_k_from_entries(
+        row.iter()
+            .zip(weights.iter())
+            .enumerate()
+            .map(|(i, (&v, &w))| (i as u32, v, w)),
+        k,
+    )
+}
 
-    let mut scored: Vec<(f32, u32)> = row
-        .iter()
-        .zip(weights.iter())
-        .enumerate()
-        .filter_map(|(i, (&v, &w))| {
-            // log1p on the score, not the value — keeps the per-cell K
-            // raw values untouched while the *ranking* compresses
-            // dynamic range so high-mean genes don't auto-win.
+/// Shared top-K core for [`top_k_indices_weighted`] and the sparse
+/// [`csc_columns_to_indexed_samples`].
+///
+/// `entries` yields `(feature_id, raw_value, weight)` triples — for the
+/// sparse path only the column's stored nonzeros need be supplied.
+/// Selection ranks by `log1p(value) · weight` (see
+/// [`top_k_indices_weighted`] for why `log1p` is on the score), drops
+/// non-positive scores, keeps the top `k`, and returns indices sorted
+/// ascending with their **raw** values.
+fn top_k_from_entries<I>(entries: I, k: usize) -> (Vec<u32>, Vec<f32>)
+where
+    I: Iterator<Item = (u32, f32, f32)>,
+{
+    let mut scored: Vec<(f32, u32, f32)> = entries
+        .filter_map(|(i, v, w)| {
             let score = v.max(0.0).ln_1p() * w;
-            (score > 0.0).then_some((score, i as u32))
+            (score > 0.0).then_some((score, i, v))
         })
         .collect();
 
@@ -189,11 +241,41 @@ pub fn top_k_indices_weighted(row: &[f32], weights: &[f32], k: usize) -> (Vec<u3
         b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let mut idx: Vec<u32> = scored[..k].iter().map(|&(_, i)| i).collect();
-    idx.sort_unstable();
+    let mut top: Vec<(u32, f32)> = scored[..k].iter().map(|&(_, i, v)| (i, v)).collect();
+    top.sort_unstable_by_key(|&(i, _)| i);
 
-    let values: Vec<f32> = idx.iter().map(|&i| row[i as usize]).collect();
+    let idx: Vec<u32> = top.iter().map(|&(i, _)| i).collect();
+    let values: Vec<f32> = top.iter().map(|&(_, v)| v).collect();
     (idx, values)
+}
+
+/// Build [`IndexedSample`]s straight from a sparse `[D, N]` CSC matrix —
+/// columns are samples (cells), rows are features. Each column's stored
+/// nonzeros are scored with `log1p(value) · weight` and the top
+/// `context_size` are kept. Avoids ever materializing the dense `[N, D]`
+/// matrix the dense path needs.
+///
+/// Sequential over columns by design: the caller (`evaluate_indexed_block`)
+/// already runs inside a block-level rayon map, so a nested par_iter here
+/// would only add task-splitting overhead.
+pub fn csc_columns_to_indexed_samples(
+    x_dn: &CscMatrix<f32>,
+    shortlist_weights: &[f32],
+    context_size: usize,
+) -> Vec<IndexedSample> {
+    debug_assert_eq!(x_dn.nrows(), shortlist_weights.len());
+    (0..x_dn.ncols())
+        .map(|j| {
+            let col = x_dn.col(j);
+            let entries = col
+                .row_indices()
+                .iter()
+                .zip(col.values().iter())
+                .map(|(&r, &v)| (r as u32, v, shortlist_weights[r]));
+            let (indices, values) = top_k_from_entries(entries, context_size);
+            IndexedSample { indices, values }
+        })
+        .collect()
 }
 
 /// Per-feature lookup slot. `gen` carries the call generation that wrote
@@ -426,6 +508,15 @@ fn compute_log_selection_freq(samples: &[IndexedSample], n_features: usize) -> V
         .collect()
 }
 
+/// Sum of every value across all samples — the per-epoch decoder count
+/// total. Invariant to minibatch shuffling, so it can be cached once.
+fn sum_sample_values(samples: &[IndexedSample]) -> f32 {
+    samples
+        .par_iter()
+        .map(|s| s.values.iter().sum::<f32>())
+        .sum()
+}
+
 impl IndexedInMemoryData {
     /// Build indexed data from dense matrices.
     ///
@@ -455,6 +546,7 @@ impl IndexedInMemoryData {
         );
 
         let output_log_q = compute_log_selection_freq(&output_samples, n_output_features);
+        let total_output_count = sum_sample_values(&output_samples);
 
         // Pre-extract null rows in parallel
         let null_rows: Option<Vec<Vec<f32>>> = args.input_null.map(|d| {
@@ -501,6 +593,7 @@ impl IndexedInMemoryData {
             output_log_q,
             input_mean,
             output_fisher_weights,
+            total_output_count,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -522,6 +615,7 @@ impl IndexedInMemoryData {
         let output_samples = samples;
         let input_samples = output_samples.clone();
         let output_log_q = compute_log_selection_freq(&output_samples, n_features);
+        let total_output_count = sum_sample_values(&output_samples);
         IndexedInMemoryData {
             input_samples,
             input_null_rows: None,
@@ -533,6 +627,7 @@ impl IndexedInMemoryData {
             output_log_q,
             input_mean: None,
             output_fisher_weights: None,
+            total_output_count,
             minibatches: Minibatches {
                 samples: rows,
                 chunks: vec![],
@@ -550,7 +645,12 @@ impl IndexedInMemoryData {
     ///
     /// Call this once after `shuffle_minibatch` to avoid rebuilding
     /// union+scatter on every `minibatch_cached` call within an epoch.
-    pub fn precompute_all_minibatches(&mut self, target_device: &Device) -> anyhow::Result<()> {
+    ///
+    /// Cached batches are always built host-side (`Device::Cpu`). The
+    /// consumer uploads each minibatch to its compute device on demand
+    /// via [`IndexedMinibatchData::to_device`], so a GPU run never holds
+    /// the whole epoch resident on device at once.
+    pub fn precompute_all_minibatches(&mut self) -> anyhow::Result<()> {
         let n_chunks = self.minibatches.chunks.len() as u64;
         let prog_bar = labeled_bar("Minibatch precompute", n_chunks);
         self.cached_batches = self
@@ -558,7 +658,7 @@ impl IndexedInMemoryData {
             .chunks
             .par_iter()
             .progress_with(prog_bar.clone())
-            .map(|sample_indices| self.build_minibatch(sample_indices, target_device))
+            .map(|sample_indices| self.build_minibatch(sample_indices, &Device::Cpu))
             .collect::<anyhow::Result<Vec<_>>>()?;
         prog_bar.finish_and_clear();
         Ok(())
@@ -592,6 +692,12 @@ impl IndexedInMemoryData {
 
     pub fn n_output_features(&self) -> usize {
         self.n_output_features
+    }
+
+    /// Sum of all decoder-side values across every sample — the per-epoch
+    /// count total, invariant to minibatch shuffling.
+    pub fn total_output_count(&self) -> f32 {
+        self.total_output_count
     }
 
     /// Build a packed minibatch.
@@ -698,6 +804,20 @@ impl IndexedInMemoryData {
         let s_out = output_union_vec.len();
         let output_log_q_s = Tensor::from_vec(log_q_s, (1, s_out), target_device)?;
 
+        // Rows of the shared ρ table touched this minibatch: encoder
+        // per-cell ids ∪ decoder union. Sorted-unique so a lazy optimizer
+        // can `index_select`/`index_add` against it directly.
+        let mut touched_set: std::collections::BTreeSet<u32> =
+            output_union_vec.iter().copied().collect();
+        for &si in sample_indices {
+            for &idx in &self.input_samples[si].indices {
+                touched_set.insert(idx);
+            }
+        }
+        let touched_vec: Vec<u32> = touched_set.into_iter().collect();
+        let n_touched = touched_vec.len();
+        let touched_rho_indices = Tensor::from_vec(touched_vec, (n_touched,), target_device)?;
+
         Ok(IndexedMinibatchData {
             input_indices,
             input_values,
@@ -708,6 +828,7 @@ impl IndexedInMemoryData {
             output_values,
             output_values_weight,
             output_log_q_s,
+            touched_rho_indices,
         })
     }
 
@@ -819,6 +940,39 @@ mod tests {
         let (idx_wz, val_wz) = top_k_indices_weighted(&row_wz, &w_wz, 3);
         assert_eq!(idx_wz, vec![1]);
         assert_eq!(val_wz, vec![0.7]);
+    }
+
+    #[test]
+    fn test_csc_columns_match_dense_top_k() {
+        // Dense [N, D] reference; CSC is [D, N] (cols = samples).
+        let n = 4;
+        let d = 6;
+        let dense = [
+            [0.1f32, 0.5, 0.3, 0.9, 0.2, 0.7],
+            [0.8, 0.1, 0.6, 0.2, 0.9, 0.3],
+            [0.0, 0.7, 0.0, 0.4, 0.6, 0.0],
+            [0.2, 0.3, 0.8, 0.1, 0.5, 0.9],
+        ];
+        let weights = vec![1.0f32, 0.1, 1.0, 0.01, 1.0, 0.05];
+
+        // Build CSC [D, N] from a COO of the nonzeros.
+        let mut coo = nalgebra_sparse::CooMatrix::<f32>::new(d, n);
+        for (j, row) in dense.iter().enumerate() {
+            for (i, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    coo.push(i, j, v);
+                }
+            }
+        }
+        let csc = CscMatrix::from(&coo);
+
+        let from_csc = csc_columns_to_indexed_samples(&csc, &weights, 3);
+        assert_eq!(from_csc.len(), n);
+        for (j, row) in dense.iter().enumerate() {
+            let (exp_idx, exp_val) = top_k_indices_weighted(row, &weights, 3);
+            assert_eq!(from_csc[j].indices, exp_idx, "sample {j} indices");
+            assert_eq!(from_csc[j].values, exp_val, "sample {j} values");
+        }
     }
 
     #[test]

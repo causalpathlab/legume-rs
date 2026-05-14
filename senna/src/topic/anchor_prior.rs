@@ -6,14 +6,10 @@
 //! both for β initialization and as an optional training-time cross-entropy
 //! penalty.
 //!
-//! **Two penalty paths**:
-//! - [`anchor_penalty_at_level`] looks up `dec_{level}.dictionary.logits` by
-//!   name and is used by softmax-linear decoders (dense `senna topic`).
-//!   Silently no-ops for decoders that don't register that Var (e.g. vMF).
-//! - [`anchor_penalty_at_level_with_logits`] takes the `[K, D]` logits
-//!   tensor directly — for decoders that compute β on the fly without
-//!   storing the logits as a single Var (e.g. ETM-factorized
-//!   `indexed-topic`, where `[K, D] = α · ρᵀ`).
+//! **Penalty path**: [`anchor_penalty_at_level`] looks up
+//! `dec_{level}.dictionary.logits` by name and is used by softmax-linear
+//! decoders (dense `senna topic`). Silently no-ops for decoders that
+//! don't register that Var (e.g. vMF).
 
 use crate::anchor_common::{gram_schmidt_anchors, softmax_col_into, zscore_columns};
 use crate::embed_common::*;
@@ -228,28 +224,6 @@ pub(crate) fn anchor_penalty_at_level(
         &decoder_logits_var_path(level),
         1,
     )
-}
-
-/// Variant of [`anchor_penalty_at_level`] that takes the decoder's full
-/// `[K, D]` logits tensor directly. Use this for decoders that factorize
-/// the dictionary (ETM-style β = log_softmax(α · ρᵀ)) where there is no
-/// single Var to look up by name — the caller computes the logits via
-/// `decoder.full_logits_kd()` and hands them here. No-op when the prior
-/// isn't attached or `λ ≤ 0`.
-pub(crate) fn anchor_penalty_at_level_with_logits(
-    loss: Tensor,
-    logits_kd: &Tensor,
-    anchor_prior_per_level: Option<&[Tensor]>,
-    lambda: f32,
-    level: usize,
-) -> anyhow::Result<Tensor> {
-    let Some(priors) = anchor_prior_per_level else {
-        return Ok(loss);
-    };
-    if lambda <= 0.0 {
-        return Ok(loss);
-    }
-    apply_ce_penalty(loss, logits_kd, &priors[level], lambda, 1)
 }
 
 // ---------------------------------------------------------------------------
