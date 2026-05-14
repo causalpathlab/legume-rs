@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::candle_value_transform::discretize_whitened;
 use candle_core::{Result, Tensor};
 use candle_nn::Module;
 
@@ -83,16 +84,7 @@ impl AggregateEmbedding {
     }
 
     fn whitened_discretize_flatten(&self, x_n_hk: &Tensor) -> Result<Tensor> {
-        let d = x_n_hk.rank() - 1;
-        let min_val = x_n_hk.min_keepdim(d)?;
-        let max_val = x_n_hk.max_keepdim(d)?;
-        let div_val = ((max_val - &min_val)? + 1.0)?;
-        let x_n_hk = x_n_hk.broadcast_sub(&min_val)?.broadcast_div(&div_val)?;
-
-        // discretize
-        (x_n_hk.flatten_all()? * (self.n_vocab as f64 - 1.0))?
-            .floor()?
-            .to_dtype(candle_core::DType::U32)
+        discretize_whitened(x_n_hk, self.n_vocab)?.flatten_all()
     }
 }
 

@@ -322,6 +322,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         data_vec,
         collapsed_levels,
         proj_kn,
+        cell_to_pb_per_level: _,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
@@ -342,6 +343,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: None,
+        want_hierarchy: false,
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
@@ -735,6 +737,7 @@ where
                 encoder_hidden: &ctx.args.encoder_layers,
                 level_decoder_dims: ctx.level_decoder_dims,
                 embedding_dim: None,
+                value_embedding: None,
             },
         )?;
     }
@@ -923,6 +926,7 @@ where
         embedding_dim: None,
         enc_context_size: None,
         dec_context_size: None,
+        value_vocab_size: None,
         theta_mean: None,
     };
     metadata.save(&ctx.args.out)?;
@@ -1049,6 +1053,7 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
                 encoder_hidden: &ctx.args.encoder_layers,
                 level_decoder_dims: ctx.level_decoder_dims,
                 embedding_dim: None,
+                value_embedding: None,
             },
         )?;
     }

@@ -22,16 +22,16 @@ use std::time::{Duration, Instant};
 /// empirically whether the large-`H` bottleneck is the forward pass
 /// (→ pooling restructure) or the optimizer step (→ lazy ρ update).
 #[derive(Default)]
-struct PhaseTimers {
-    precompute: Duration,
-    encoder_fwd: Duration,
-    decoder_fwd: Duration,
-    backward: Duration,
-    optimize: Duration,
+pub(crate) struct PhaseTimers {
+    pub(crate) precompute: Duration,
+    pub(crate) encoder_fwd: Duration,
+    pub(crate) decoder_fwd: Duration,
+    pub(crate) backward: Duration,
+    pub(crate) optimize: Duration,
 }
 
 impl PhaseTimers {
-    fn log_summary(&self) {
+    pub(crate) fn log_summary(&self) {
         let total = self.precompute
             + self.encoder_fwd
             + self.decoder_fwd
@@ -109,7 +109,7 @@ pub(crate) struct IndexedTrainConfig<'a> {
 ///  - momentum on untouched rows is not advanced — no `beta^gap`
 ///    catch-up — so a long-dormant row carries slightly larger momentum
 ///    when next touched. Negligible for rows touched every few steps.
-struct LazyRhoAdamW {
+pub(crate) struct LazyRhoAdamW {
     rho: Var,
     first_moment: Tensor,
     second_moment: Tensor,
@@ -118,7 +118,7 @@ struct LazyRhoAdamW {
 }
 
 impl LazyRhoAdamW {
-    fn new(rho: Var, learning_rate: f32) -> anyhow::Result<Self> {
+    pub(crate) fn new(rho: Var, learning_rate: f32) -> anyhow::Result<Self> {
         let first_moment = Tensor::zeros(rho.shape(), rho.dtype(), rho.device())?;
         let second_moment = Tensor::zeros(rho.shape(), rho.dtype(), rho.device())?;
         let params = ParamsAdamW {
@@ -189,7 +189,7 @@ impl LazyRhoAdamW {
 /// Global-L2-norm clip + dense `AdamW` step from a precomputed `GradStore`.
 /// Mirrors [`crate::embed_common::clip_grads_and_step`] but takes the
 /// already-computed grads so the caller can time `backward()` separately.
-fn clip_and_step_dense(
+pub(crate) fn clip_and_step_dense(
     adam: &mut AdamW,
     mut grads: candle_core::backprop::GradStore,
     max_norm: f64,
@@ -232,7 +232,7 @@ fn clip_and_step_dense(
 /// still includes ρ's contribution, computed from the touched rows only
 /// (`O(T·H)`) — the untouched rows of ρ's dense grad are exactly zero, so
 /// the sum-of-squares is identical to the dense computation.
-fn clip_and_step_lazy_rho(
+pub(crate) fn clip_and_step_lazy_rho(
     adam: &mut AdamW,
     lazy_rho: &mut LazyRhoAdamW,
     mut grads: candle_core::backprop::GradStore,

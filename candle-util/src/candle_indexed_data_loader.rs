@@ -7,7 +7,7 @@ use nalgebra_sparse::CscMatrix;
 use rayon::prelude::*;
 use std::cell::RefCell;
 
-fn labeled_bar(label: &str, len: u64) -> ProgressBar {
+pub(crate) fn labeled_bar(label: &str, len: u64) -> ProgressBar {
     ProgressBar::new(len).with_style(
         ProgressStyle::with_template(&format!("{} {{bar:40}} {{pos}}/{{len}} ({{eta}})", label))
             .unwrap()
@@ -311,7 +311,7 @@ thread_local! {
 /// indices) keep the buffer's initial `0.0`. Pad indices are harmless
 /// because every consumer either pairs them with a zero value side or
 /// only multiplies them in (zero · anything = 0).
-fn pack_at_indices<F>(
+pub(crate) fn pack_at_indices<F>(
     samples: &[IndexedSample],
     sample_indices: &[usize],
     k: usize,
@@ -337,7 +337,7 @@ where
 /// Pack per-cell `(indices, values)` into `[N, K]` u32/f32 tensors. Both
 /// share the same loop walk; the index buffer is built directly so we
 /// can also dtype-cast it to u32 in one shot.
-fn pack_indices_values(
+pub(crate) fn pack_indices_values(
     samples: &[IndexedSample],
     sample_indices: &[usize],
     k: usize,
@@ -380,7 +380,7 @@ fn pack_null_at_indices(
 /// Gather a per-feature `[D]` slice at each cell's top-K positions into
 /// `[N, K] f32`. Used for both encoder gene-mean (`μ_d`) and decoder
 /// NB-Fisher weights — each cell sees the same constant per feature.
-fn gather_per_feature_at_indices(
+pub(crate) fn gather_per_feature_at_indices(
     samples: &[IndexedSample],
     sample_indices: &[usize],
     per_feature: &[f32],
@@ -406,7 +406,7 @@ fn gather_per_feature_at_indices(
 ///   slots get position `0` (matched by zero values, harmless).
 /// - `union_vec` — the same `[S]` ids as a host `Vec<u32>` for downstream
 ///   indexing into per-feature arrays (e.g. `output_log_q`).
-fn build_union_and_scatter_pos(
+pub(crate) fn build_union_and_scatter_pos(
     samples: &[IndexedSample],
     sample_indices: &[usize],
     n_features: usize,
@@ -466,7 +466,7 @@ fn build_union_and_scatter_pos(
 }
 
 /// Build IndexedSamples from a data source in parallel.
-fn build_indexed_samples<D: CandleDataLoaderOps + Sync>(
+pub(crate) fn build_indexed_samples<D: CandleDataLoaderOps + Sync>(
     data: &D,
     n_samples: usize,
     context_size: usize,
@@ -494,7 +494,7 @@ fn build_indexed_samples<D: CandleDataLoaderOps + Sync>(
 ///
 /// Used for importance-weighted conditional softmax (Jean et al., 2015,
 /// "On Using Very Large Target Vocabulary for Neural Machine Translation").
-fn compute_log_selection_freq(samples: &[IndexedSample], n_features: usize) -> Vec<f32> {
+pub(crate) fn compute_log_selection_freq(samples: &[IndexedSample], n_features: usize) -> Vec<f32> {
     let n = samples.len().max(1) as f32;
     let mut counts = vec![0u32; n_features];
     for sample in samples {
@@ -510,11 +510,41 @@ fn compute_log_selection_freq(samples: &[IndexedSample], n_features: usize) -> V
 
 /// Sum of every value across all samples — the per-epoch decoder count
 /// total. Invariant to minibatch shuffling, so it can be cached once.
-fn sum_sample_values(samples: &[IndexedSample]) -> f32 {
+pub(crate) fn sum_sample_values(samples: &[IndexedSample]) -> f32 {
     samples
         .par_iter()
         .map(|s| s.values.iter().sum::<f32>())
         .sum()
+}
+
+/// Slice the per-feature log selection frequency at the decoder union
+/// positions into a `[1, S]` tensor.
+pub(crate) fn slice_log_q_at_union(
+    output_log_q: &[f32],
+    union_vec: &[u32],
+    target_device: &Device,
+) -> anyhow::Result<Tensor> {
+    let log_q_s: Vec<f32> = union_vec
+        .iter()
+        .map(|&idx| output_log_q[idx as usize])
+        .collect();
+    Ok(Tensor::from_vec(log_q_s, (1, union_vec.len()), target_device)?)
+}
+
+/// Sorted-unique union of every ρ row this minibatch touches: the decoder
+/// union plus any `extra` feature ids the encoder side selected. Returned
+/// as a `[T]` tensor so a lazy optimizer can `index_select`/`index_add`
+/// against exactly the touched rows.
+pub(crate) fn touched_rho_tensor(
+    union_vec: &[u32],
+    extra: impl Iterator<Item = u32>,
+    target_device: &Device,
+) -> anyhow::Result<Tensor> {
+    let mut touched: std::collections::BTreeSet<u32> = union_vec.iter().copied().collect();
+    touched.extend(extra);
+    let touched_vec: Vec<u32> = touched.into_iter().collect();
+    let n_touched = touched_vec.len();
+    Ok(Tensor::from_vec(touched_vec, (n_touched,), target_device)?)
 }
 
 impl IndexedInMemoryData {
@@ -796,27 +826,17 @@ impl IndexedInMemoryData {
             output_values_weight,
         ) = output_result?;
 
-        // Slice log selection frequency at output union positions.
-        let log_q_s: Vec<f32> = output_union_vec
-            .iter()
-            .map(|&idx| self.output_log_q[idx as usize])
-            .collect();
-        let s_out = output_union_vec.len();
-        let output_log_q_s = Tensor::from_vec(log_q_s, (1, s_out), target_device)?;
+        let output_log_q_s =
+            slice_log_q_at_union(&self.output_log_q, &output_union_vec, target_device)?;
 
-        // Rows of the shared ρ table touched this minibatch: encoder
-        // per-cell ids ∪ decoder union. Sorted-unique so a lazy optimizer
-        // can `index_select`/`index_add` against it directly.
-        let mut touched_set: std::collections::BTreeSet<u32> =
-            output_union_vec.iter().copied().collect();
-        for &si in sample_indices {
-            for &idx in &self.input_samples[si].indices {
-                touched_set.insert(idx);
-            }
-        }
-        let touched_vec: Vec<u32> = touched_set.into_iter().collect();
-        let n_touched = touched_vec.len();
-        let touched_rho_indices = Tensor::from_vec(touched_vec, (n_touched,), target_device)?;
+        // Touched ρ rows: encoder per-cell ids ∪ decoder union.
+        let touched_rho_indices = touched_rho_tensor(
+            &output_union_vec,
+            sample_indices
+                .iter()
+                .flat_map(|&si| self.input_samples[si].indices.iter().copied()),
+            target_device,
+        )?;
 
         Ok(IndexedMinibatchData {
             input_indices,

@@ -11,6 +11,7 @@ use crate::topic::train_indexed::{
 
 use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
 use candle_util::candle_encoder_indexed::*;
+use candle_util::candle_value_transform::ValueEmbeddingConfig;
 use log::warn;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 
@@ -259,6 +260,15 @@ pub struct IndexedTopicArgs {
     )]
     embedding_dim: usize,
 
+    #[arg(
+        long,
+        help = "Intensity-embedding vocabulary size (value bins per scale; \
+                default: --embedding-dim). A resolution knob, not a perf one \
+                — the per-bin width is H and the lookup cost is independent \
+                of vocab size."
+    )]
+    value_vocab_size: Option<usize>,
+
     #[command(flatten)]
     amort_refine: crate::refine_weighting::AmortRefineArgs,
 
@@ -423,7 +433,7 @@ impl From<FeatureNameKindArg> for Option<auxiliary_data::feature_names::FeatureN
 /// Renumber a `FeaturePairGraph`'s edges + names from a pre-mask axis to
 /// the post-mask one defined by `keep`. Used to avoid re-parsing the same
 /// edge list twice when `--feature-network-restrict` is set.
-fn remap_graph_to_subset(
+pub(crate) fn remap_graph_to_subset(
     pre: matrix_util::pair_graph::FeaturePairGraph,
     keep: &[bool],
 ) -> matrix_util::pair_graph::FeaturePairGraph {
@@ -532,6 +542,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         data_vec,
         collapsed_levels,
         proj_kn,
+        cell_to_pb_per_level: _,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
@@ -556,6 +567,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         feature_kind: args.feature_name_kind.clone().into(),
         refine: Some(args.pb_refine.to_params()),
         ignore_batch: args.ignore_batch,
+        want_hierarchy: false,
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
@@ -577,12 +589,24 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
 
     let dec_context_size = args.decoder_context_size.unwrap_or(args.context_size);
 
+    // Value transform: the learned dual-binned intensity-embedding gate
+    // (Anscombe retired). Vocab size defaults to the feature embedding
+    // dim H — one model-scale knob instead of an arbitrary constant.
+    let value_embedding = ValueEmbeddingConfig {
+        n_vocab: args.value_vocab_size.unwrap_or(h),
+    };
+    info!(
+        "intensity-embedding value transform: vocab={} (per-bin width H={})",
+        value_embedding.n_vocab, h
+    );
+
     let base_encoder = IndexedEmbeddingEncoder::new(
         IndexedEmbeddingEncoderArgs {
             n_features: n_features_full,
             n_topics,
             embedding_dim: h,
             layers: &args.encoder_layers,
+            value_embedding,
         },
         &parameters,
         param_builder.pp("enc"),
@@ -626,6 +650,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
                 encoder_hidden: &args.encoder_layers,
                 level_decoder_dims: &vec![n_features_full; num_levels],
                 embedding_dim: Some(h),
+                value_embedding: Some(value_embedding.n_vocab),
             },
         )?;
     }
@@ -782,6 +807,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         embedding_dim: Some(h),
         enc_context_size: Some(args.context_size),
         dec_context_size: Some(dec_context_size),
+        value_vocab_size: Some(value_embedding.n_vocab),
         theta_mean: None,
     };
     metadata.save(&args.out)?;
@@ -802,6 +828,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             n_topics,
             embedding_dim: h,
             layers: &args.encoder_layers,
+            value_embedding,
         },
         &parameters,
         cpu_vb.pp("enc"),

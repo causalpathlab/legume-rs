@@ -35,6 +35,7 @@ use candle_util::candle_decoder_nb_mixture::{
 };
 use candle_util::candle_decoder_topic::{MultinomTopicDecoder, NbTopicDecoder};
 use candle_util::candle_encoder_indexed::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
+use candle_util::candle_value_transform::ValueEmbeddingConfig;
 use candle_util::candle_encoder_softmax::{LogSoftmaxEncoder, LogSoftmaxEncoderArgs};
 use candle_util::candle_indexed_model_traits::IndexedEncoderT;
 use candle_util::candle_model_traits::{DecoderModuleT, EncoderModuleT, NewDecoder};
@@ -662,6 +663,14 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
         .dec_context_size
         .ok_or_else(|| anyhow::anyhow!("indexed model metadata missing dec_context_size"))?;
 
+    // Reconstruct the learned intensity-embedding value transform
+    // (per-bin width is `embedding_dim`). `value_vocab_size` is absent
+    // only for pre-value-embedding checkpoints — fall back to the
+    // embedding dim, the current default.
+    let value_embedding = ValueEmbeddingConfig {
+        n_vocab: metadata.value_vocab_size.unwrap_or(embedding_dim),
+    };
+
     let (training_genes, beta_dk) = load_dictionary(&args.model)?;
     let (sw_genes, shortlist_weights) = load_shortlist_weights(&args.model)?;
     anyhow::ensure!(
@@ -717,6 +726,7 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
             n_topics: metadata.n_topics,
             embedding_dim,
             layers: &metadata.encoder_hidden,
+            value_embedding,
         },
         &parameters,
         vb.pp("enc"),

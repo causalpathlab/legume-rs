@@ -2,7 +2,7 @@ use crate::candle_aux_layers::*;
 use crate::candle_batch_norm;
 use crate::candle_indexed_model_traits::*;
 use crate::candle_loss_functions::{gaussian_kl_loss, gaussian_reparameterize};
-use crate::candle_value_transform::anscombe_lite;
+use crate::candle_value_transform::{count_rate_clean, ValueEmbedding, ValueEmbeddingConfig};
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 
@@ -17,6 +17,7 @@ pub struct IndexedEmbeddingEncoder {
     n_topics: usize,
     embedding_dim: usize,
     feature_embeddings: Tensor, // [D, H] learnable
+    value_embedding: ValueEmbedding,
     fc: StackLayers<Linear>,
     bn_z: candle_batch_norm::BatchNorm,
     z_mean: Linear,
@@ -28,6 +29,10 @@ pub struct IndexedEmbeddingEncoderArgs<'a> {
     pub n_topics: usize,
     pub embedding_dim: usize,
     pub layers: &'a [usize],
+    /// The learned intensity-embedding value transform — dual binned
+    /// lookup + per-dimension sigmoid gate on ρ. This is the only value
+    /// transform (the fixed Anscombe scalar has been retired here).
+    pub value_embedding: ValueEmbeddingConfig,
 }
 
 impl IndexedEmbeddingEncoder {
@@ -49,6 +54,9 @@ impl IndexedEmbeddingEncoder {
             init_ws,
         )?;
 
+        let value_embedding =
+            ValueEmbedding::new(args.value_embedding, args.embedding_dim, vb.pp("nn.enc.value"))?;
+
         // FC stack: embedding_dim -> ... -> final_hidden
         let fc_dims = args.layers[..args.layers.len() - 1].to_vec();
         let in_dim = args.embedding_dim;
@@ -65,6 +73,7 @@ impl IndexedEmbeddingEncoder {
             n_topics: args.n_topics,
             embedding_dim: args.embedding_dim,
             feature_embeddings,
+            value_embedding,
             fc,
             bn_z,
             z_mean,
@@ -97,10 +106,12 @@ impl IndexedEmbeddingEncoder {
     /// 2. E_nkh  = feature_embeddings.index_select(idx_flat)        → [N, K, H]
     /// 3. h_nh   = Σ_k v_norm[i, k] · E_nkh[i, k, :]                → [N, H]
     ///
-    /// With `values_mean` supplied (per-gene μ_d gathered at indices),
-    /// housekeeping genes expressed at typical levels divide out to ≈1
-    /// → Anscombe(1) ≈ 2.35, a constant absorbed by `bn_z`. Markers
-    /// expressed at unusual levels survive as fold-change deviations.
+    /// `values_null` (per-cell μ_residual) and `values_mean` (per-gene
+    /// μ_d) are composed into the count-rate "clean" value
+    /// `values / (null · mean)` — the cell's biological-deviation rate.
+    /// That clean value is then run through the learned intensity
+    /// embedding, which bins it at two scales and emits a per-dimension
+    /// sigmoid gate `[N, K, H]` on ρ.
     fn preprocess_indexed(
         &self,
         indices: &Tensor,
@@ -108,8 +119,6 @@ impl IndexedEmbeddingEncoder {
         values_null: Option<&Tensor>,
         values_mean: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let v_norm = anscombe_lite(values, values_null, values_mean)?; // [N, K]
-
         let n = indices.dim(0)?;
         let k = indices.dim(1)?;
         let h = self.embedding_dim;
@@ -120,11 +129,10 @@ impl IndexedEmbeddingEncoder {
             .index_select(&flat_idx, 0)?
             .reshape((n, k, h))?; // [N, K, H]
 
-        // Value-weighted pool: broadcast v_norm[N, K] → [N, K, 1] and reduce
-        // along K. `e_nk_h` is contiguous from index_select+reshape.
-        let v = v_norm.unsqueeze(2)?; // [N, K, 1]
-        let weighted = e_nk_h.broadcast_mul(&v)?; // [N, K, H]
-        weighted.sum(1) // [N, H]
+        // Per-slot learned gate on ρ — [N, K, H], broadcast onto `e_nk_h`.
+        let clean = count_rate_clean(values, values_null, values_mean)?;
+        let w = self.value_embedding.gate(&clean)?;
+        e_nk_h.broadcast_mul(&w)?.sum(1) // [N, H]
     }
 }
 
@@ -186,11 +194,13 @@ mod tests {
     use super::*;
     use candle_core::Device;
 
-    /// Hand-build a tiny encoder, feed two cells with disjoint indices and
-    /// known values, and verify the Anscombe-lite + weighted-sum pool
-    /// matches a from-scratch host computation.
+    /// Hand-build a tiny encoder and verify `preprocess_indexed` pools
+    /// packed top-K input into a finite `[N, H]`. The value transform is
+    /// the learned intensity-embedding gate (random-init tables), so this
+    /// checks shape + finiteness rather than an exact host computation —
+    /// the gate's binning/lookup is unit-tested in `candle_value_transform`.
     #[test]
-    fn test_anscombe_lite_pool() {
+    fn test_preprocess_indexed_shape() {
         let device = Device::Cpu;
         let n_features = 6;
         let embedding_dim = 4;
@@ -204,6 +214,7 @@ mod tests {
                 n_topics: 2,
                 embedding_dim,
                 layers: &layers,
+                value_embedding: ValueEmbeddingConfig { n_vocab: 8 },
             },
             &varmap,
             vb,
@@ -214,38 +225,13 @@ mod tests {
         let indices = Tensor::from_vec(vec![0u32, 1, 2, 3], (2, 2), &device).unwrap();
         let values = Tensor::from_vec(vec![4.0f32, 9.0, 16.0, 25.0], (2, 2), &device).unwrap();
 
-        // Reference: anscombe-lite (no null, no per-gene mean) →
-        // bare Anscombe of values, then weighted-sum pool against the
-        // encoder's own embedding table.
-        let e_dh: Vec<Vec<f32>> = enc.feature_embeddings.to_vec2().unwrap();
-        let raw = [[4.0f32, 9.0], [16.0, 25.0]];
-        let mut v_norm = [[0f32; 2]; 2];
-        for (i, row) in raw.iter().enumerate() {
-            for (k, &x) in row.iter().enumerate() {
-                v_norm[i][k] = 2.0 * (x + 0.375).sqrt();
-            }
-        }
-        let mut h_ref = vec![vec![0f32; embedding_dim]; 2];
-        for (i, row) in v_norm.iter().enumerate() {
-            for (k, &v) in row.iter().enumerate() {
-                let feat = if i == 0 { k } else { 2 + k };
-                for h in 0..embedding_dim {
-                    h_ref[i][h] += v * e_dh[feat][h];
-                }
-            }
-        }
-
         let h = enc
             .preprocess_indexed(&indices, &values, None, None)
             .unwrap();
-        let h_vec: Vec<Vec<f32>> = h.to_vec2().unwrap();
-        for (i, row) in h_vec.iter().enumerate() {
-            for (hh, &got) in row.iter().enumerate() {
-                let want = h_ref[i][hh];
-                assert!(
-                    (got - want).abs() < 1e-4,
-                    "row {i} dim {hh}: got {got} want {want}"
-                );
+        assert_eq!(h.dims(), &[2, embedding_dim]);
+        for row in h.to_vec2::<f32>().unwrap() {
+            for v in row {
+                assert!(v.is_finite(), "non-finite pooled value {v}");
             }
         }
     }

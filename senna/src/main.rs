@@ -39,6 +39,7 @@ mod cnv_pseudobulk;
 mod embed_common;
 mod empirical_dict;
 mod eval_topic;
+mod fit_cell_embedded_topic;
 mod fit_clustering;
 mod fit_gbe;
 mod fit_indexed_topic;
@@ -64,6 +65,7 @@ mod tree_layout;
 use annotate::{annotate_run, AnnotateArgs};
 use embed_common::*;
 use eval_topic::*;
+use fit_cell_embedded_topic::*;
 use fit_clustering::*;
 use fit_gbe::{fit_gbe, GbeArgs};
 use fit_indexed_topic::*;
@@ -180,6 +182,25 @@ enum Commands {
         visible_aliases = ["itopic", "etm"]
     )]
     IndexedTopic(IndexedTopicArgs),
+
+    #[command(
+        about = "Train: hierarchical cell→PB pooling topic model (lazy-ρ end-to-end).",
+        long_about = "Same model type as `indexed-topic` (shared ρ ∈ ℝ^{D×H}, ETM-factorized\n\
+                      decoder, multi-level PB training, lazy-ρ optimizer), but the cell→PB\n\
+                      pooling is moved INTO the encoder as a two-level gene→cell→PB\n\
+                      EmbeddingBag. A PB sample is a pool of its member cells; because\n\
+                      single cells are the genuinely sparse atoms, the per-minibatch\n\
+                      touched ρ-row set shrinks to single-digit % of D and the lazy-ρ\n\
+                      optimizer pays off end-to-end.\n\n\
+                      The encoder produces a foreground pool (member cells, DC-Poisson\n\
+                      degree-corrected + housekeeping-weighted) and a background pool\n\
+                      (PB μ_residual), concatenated [N,2H] into the latent head.\n\n\
+                      v1 writes {out}.{dictionary,feature_embedding,log_likelihood}.parquet\n\
+                      + {out}.safetensors + {out}.model.json. Latent inference / predict\n\
+                      are not wired yet.",
+        visible_aliases = ["cetopic", "cell-etm"]
+    )]
+    CellEmbeddedTopic(CellEmbeddedTopicArgs),
 
     #[command(
         about = "Train: Nyström SVD embedding.",
@@ -367,6 +388,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::IndexedTopic(args) => {
             fit_indexed_topic_model(args)?;
+        }
+        Commands::CellEmbeddedTopic(args) => {
+            fit_cell_embedded_topic_model(args)?;
         }
         Commands::JointTopic(args) => {
             fit_joint_topic_model(args)?;
