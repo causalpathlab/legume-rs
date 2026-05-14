@@ -204,7 +204,7 @@ pub(crate) fn discretize_whitened(x: &Tensor, n_vocab: usize) -> Result<Tensor> 
 /// Construction config for the learned [`ValueEmbedding`] transform.
 #[derive(Clone, Copy, Debug)]
 pub struct ValueEmbeddingConfig {
-    /// Number of value bins per scale. This is a *resolution* knob (a
+    /// Number of `log1p`-scale value bins. A *resolution* knob (a
     /// lookup-table size — gather cost is independent of it), not a
     /// performance one. The per-bin vector width is the feature embedding
     /// dim `H` itself: the value embedding produces the gate on ρ
@@ -216,52 +216,44 @@ pub struct ValueEmbeddingConfig {
 /// to the fixed [`anscombe_lite`] scalar, shared by the indexed and
 /// cell-embedded encoders.
 ///
-/// The normalized value is binned at two scales (linear and `log1p`),
-/// each bin looked up in an `[n_vocab, H]` table; the two are summed and
-/// sigmoid'd into a per-dimension **gate** `[*, K, H]` on the feature
-/// embedding ρ. The lookup width is `H`, so the sum *is* the pre-gate
-/// logit — no projection layer, no matmul (the only real compute is the
-/// `[*, K]` whitening + two gathers). Revives the "intensity embedding"
-/// once dropped from the dense softmax encoder for speed — cheap here
-/// because both encoders run on the packed `[*, K]` slab, not a dense
-/// `[N, D]`.
+/// The normalized value is `log1p`-scaled, binned into `n_vocab` bins,
+/// and the bin looked up in an `[n_vocab, H]` table, sigmoid'd into a
+/// per-dimension **gate** `[*, K, H]` on the feature embedding ρ. The
+/// lookup width is `H`, so the lookup *is* the pre-gate logit — no
+/// projection layer, no matmul (the only real compute is the `[*, K]`
+/// `log1p` + whitening + one gather).
+///
+/// `log1p` scale only: a linear-scale bin table is near dead weight here,
+/// since per-row min-max whitening collapses heavy-tailed count data into
+/// the lowest one or two linear bins.
 pub struct ValueEmbedding {
     n_vocab: usize,
-    emb_x: Embedding,
-    emb_logx: Embedding,
+    emb_log: Embedding,
 }
 
 impl ValueEmbedding {
-    /// Build the two `[n_vocab, H]` lookup tables. `vb` should already be
-    /// scoped (callers pass `vb.pp("nn.enc.value")` so safetensors keys
-    /// are consistent across encoders).
-    pub fn new(
-        cfg: ValueEmbeddingConfig,
-        embedding_dim: usize,
-        vb: VarBuilder,
-    ) -> Result<Self> {
-        let emb_x = candle_nn::embedding(cfg.n_vocab, embedding_dim, vb.pp("embed_x"))?;
-        let emb_logx = candle_nn::embedding(cfg.n_vocab, embedding_dim, vb.pp("embed_logx"))?;
+    /// Build the `[n_vocab, H]` `log1p`-scale lookup table. `vb` should
+    /// already be scoped (callers pass `vb.pp("nn.enc.value")` so
+    /// safetensors keys are consistent across encoders).
+    pub fn new(cfg: ValueEmbeddingConfig, embedding_dim: usize, vb: VarBuilder) -> Result<Self> {
+        let emb_log = candle_nn::embedding(cfg.n_vocab, embedding_dim, vb.pp("embed_log"))?;
         Ok(Self {
             n_vocab: cfg.n_vocab,
-            emb_x,
-            emb_logx,
+            emb_log,
         })
     }
 
-    /// Dual binned lookup of the `1e4`-scaled normalized value → a
-    /// per-dimension sigmoid gate `[*, K, H]`, broadcastable onto ρ.
+    /// `log1p`-scale binned lookup of the `1e4`-scaled normalized value →
+    /// a per-dimension sigmoid gate `[*, K, H]`, broadcastable onto ρ.
     ///
     /// `norm_values [*, K]` is the per-sample-normalized value (e.g. the
     /// count-rate "clean" value, or `y / s_c`). The `1e4` scale puts it in
     /// a range where the `+1` in `discretize_whitened`'s denominator is
     /// negligible against the dynamic range, so bins spread properly.
     pub fn gate(&self, norm_values: &Tensor) -> Result<Tensor> {
-        let x = (norm_values * 1e4)?;
-        let log_x = (&x + 1.0)?.log()?;
-        let bin_reg = discretize_whitened(&x, self.n_vocab)?;
+        let log_x = ((norm_values * 1e4)? + 1.0)?.log()?;
         let bin_log = discretize_whitened(&log_x, self.n_vocab)?;
-        let logit = (self.emb_x.forward(&bin_reg)? + self.emb_logx.forward(&bin_log)?)?; // [*, K, H]
+        let logit = self.emb_log.forward(&bin_log)?; // [*, K, H]
         ops::sigmoid(&logit) // [*, K, H]
     }
 }

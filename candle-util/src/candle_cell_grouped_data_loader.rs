@@ -24,12 +24,13 @@ use crate::candle_data_loader_util::Minibatches;
 use crate::candle_indexed_data_loader::{
     build_indexed_samples, build_union_and_scatter_pos, compute_log_selection_freq,
     gather_per_feature_at_indices, labeled_bar, pack_indices_values, slice_log_q_at_union,
-    sum_sample_values, touched_rho_tensor, IndexedSample,
+    sum_sample_values, IndexedSample,
 };
 
 use candle_core::{Device, Tensor};
 use indicatif::ParallelProgressIterator;
 use matrix_util::traits::CandleDataLoaderOps;
+use rand::seq::IndexedRandom;
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -55,6 +56,10 @@ pub struct CellGroupedMinibatchData {
     pub fg_fisher: Tensor,
     /// [M] u32 in [0, N) — segment map: member cell → its PB row
     pub cell_to_pb: Tensor,
+    /// [N, 1] f32 — per-PB upscale `|PB| / S` restoring the full-PB sum
+    /// scale after the FG pool sums only an `S`-cell random subsample
+    /// (`S = min(fg_cells_per_pb, |PB|)`). 1.0 for PBs sampled in full.
+    pub fg_pb_rescale: Tensor,
     /// [N, K_bg] u32 in [0, D) — PB-level background feature ids
     pub bg_indices: Tensor,
     /// [N, K_bg] f32 — background values (μ_residual / observed PB profile)
@@ -71,10 +76,6 @@ pub struct CellGroupedMinibatchData {
     pub output_values_weight: Tensor,
     /// [1, S] f32 — log selection frequency at union positions
     pub output_log_q_s: Tensor,
-    /// [T] u32 — sorted-unique union of every feature id this minibatch
-    /// touches (FG cell ids ∪ BG ids ∪ decoder union) — the rows of the
-    /// shared ρ `[D, H]` table that receive a nonzero gradient.
-    pub touched_rho_indices: Tensor,
 }
 
 impl CellGroupedMinibatchData {
@@ -87,6 +88,7 @@ impl CellGroupedMinibatchData {
             fg_size_factor: self.fg_size_factor.to_device(dev)?,
             fg_fisher: self.fg_fisher.to_device(dev)?,
             cell_to_pb: self.cell_to_pb.to_device(dev)?,
+            fg_pb_rescale: self.fg_pb_rescale.to_device(dev)?,
             bg_indices: self.bg_indices.to_device(dev)?,
             bg_values: self.bg_values.to_device(dev)?,
             bg_fisher: self.bg_fisher.to_device(dev)?,
@@ -95,7 +97,6 @@ impl CellGroupedMinibatchData {
             output_values: self.output_values.to_device(dev)?,
             output_values_weight: self.output_values_weight.to_device(dev)?,
             output_log_q_s: self.output_log_q_s.to_device(dev)?,
-            touched_rho_indices: self.touched_rho_indices.to_device(dev)?,
         })
     }
 }
@@ -126,6 +127,8 @@ pub struct CellGroupedInMemoryData {
     fg_context_size: usize,
     bg_context_size: usize,
     dec_context_size: usize,
+    /// Cap on member cells sampled per PB per minibatch (0 = use all).
+    fg_cells_per_pb: usize,
     total_output_count: f32,
     minibatches: Minibatches,
     cached_batches: Vec<CellGroupedMinibatchData>,
@@ -150,6 +153,10 @@ where
     pub fg_context_size: usize,
     pub bg_context_size: usize,
     pub dec_context_size: usize,
+    /// Cap on member cells drawn per PB when building a minibatch
+    /// (`S = min(cap, |PB|)`); a fresh subsample is drawn on every
+    /// `build_minibatch` call. 0 disables the cap (use all members).
+    pub fg_cells_per_pb: usize,
     /// Per-feature weights used to score top-K candidates (BG + decoder).
     pub shortlist_weights: &'a [f32],
     /// Per-feature NB-Fisher weight gathered into the FG/BG/decoder packs.
@@ -222,6 +229,7 @@ impl CellGroupedInMemoryData {
             fg_context_size: args.fg_context_size.min(args.n_features),
             bg_context_size,
             dec_context_size,
+            fg_cells_per_pb: args.fg_cells_per_pb,
             total_output_count,
             minibatches: Minibatches {
                 samples: (0..n_pb).collect(),
@@ -298,14 +306,42 @@ impl CellGroupedInMemoryData {
         let k_bg = self.bg_context_size;
         let k_out = self.dec_context_size;
 
-        // FG: flatten every batch PB's member cells into [M] and record
-        // the cell → PB-row segment map.
+        // FG: draw an S-cell random subsample of each PB's members
+        // (S = min(fg_cells_per_pb, |PB|)), flatten into [M], and record
+        // the cell → PB-row segment map plus the per-PB rescale |PB|/S.
+        // The rescale makes the subsampled segment-sum an unbiased
+        // estimate of the full-PB sum; redrawing the subsample every
+        // build is the within-PB SGD stochasticity. cap = 0 → use all.
+        let cap = if self.fg_cells_per_pb == 0 {
+            usize::MAX
+        } else {
+            self.fg_cells_per_pb
+        };
         let mut fg_cell_ids: Vec<usize> = Vec::new();
         let mut cell_to_pb: Vec<u32> = Vec::new();
+        let mut pb_rescale: Vec<f32> = Vec::with_capacity(pb_indices.len());
+        let mut rng = rand::rng();
         for (row, &pb) in pb_indices.iter().enumerate() {
-            for &c in &self.pb_to_cells[pb] {
-                fg_cell_ids.push(c);
-                cell_to_pb.push(row as u32);
+            let members = &self.pb_to_cells[pb];
+            let n_mem = members.len();
+            if n_mem == 0 {
+                // Empty PB: no FG contribution; rescale is irrelevant
+                // (the segment-sum row stays 0).
+                pb_rescale.push(1.0);
+                continue;
+            }
+            let s = cap.min(n_mem);
+            pb_rescale.push(n_mem as f32 / s as f32);
+            if s == n_mem {
+                for &c in members {
+                    fg_cell_ids.push(c);
+                    cell_to_pb.push(row as u32);
+                }
+            } else {
+                for &c in members.sample(&mut rng, s) {
+                    fg_cell_ids.push(c);
+                    cell_to_pb.push(row as u32);
+                }
             }
         }
         let m = fg_cell_ids.len();
@@ -325,10 +361,10 @@ impl CellGroupedInMemoryData {
             .collect();
         let fg_size_factor = Tensor::from_vec(sf_buf, (m, 1), dev)?;
         let cell_to_pb_t = Tensor::from_vec(cell_to_pb, (m,), dev)?;
+        let fg_pb_rescale = Tensor::from_vec(pb_rescale, (pb_indices.len(), 1), dev)?;
 
         // BG: PB-level single-level top-K pack.
-        let (bg_indices, bg_values) =
-            pack_indices_values(&self.bg_samples, pb_indices, k_bg, dev)?;
+        let (bg_indices, bg_values) = pack_indices_values(&self.bg_samples, pb_indices, k_bg, dev)?;
         let bg_fisher = gather_per_feature_at_indices(
             &self.bg_samples,
             pb_indices,
@@ -339,9 +375,14 @@ impl CellGroupedInMemoryData {
 
         // Decoder: union + per-PB scatter positions + values.
         let (output_union_indices, output_scatter_pos, output_union_vec) =
-            build_union_and_scatter_pos(&self.output_samples, pb_indices, self.n_features, k_out, dev)?;
-        let (_, output_values) =
-            pack_indices_values(&self.output_samples, pb_indices, k_out, dev)?;
+            build_union_and_scatter_pos(
+                &self.output_samples,
+                pb_indices,
+                self.n_features,
+                k_out,
+                dev,
+            )?;
+        let (_, output_values) = pack_indices_values(&self.output_samples, pb_indices, k_out, dev)?;
         let output_values_weight = gather_per_feature_at_indices(
             &self.output_samples,
             pb_indices,
@@ -351,26 +392,13 @@ impl CellGroupedInMemoryData {
         )?;
         let output_log_q_s = slice_log_q_at_union(&self.output_log_q, &output_union_vec, dev)?;
 
-        // Touched ρ rows: FG cell ids ∪ BG ids ∪ decoder union.
-        let touched_rho_indices = touched_rho_tensor(
-            &output_union_vec,
-            fg_cell_ids
-                .iter()
-                .flat_map(|&c| self.cell_samples[c].indices.iter().copied())
-                .chain(
-                    pb_indices
-                        .iter()
-                        .flat_map(|&pb| self.bg_samples[pb].indices.iter().copied()),
-                ),
-            dev,
-        )?;
-
         Ok(CellGroupedMinibatchData {
             fg_indices,
             fg_values,
             fg_size_factor,
             fg_fisher,
             cell_to_pb: cell_to_pb_t,
+            fg_pb_rescale,
             bg_indices,
             bg_values,
             bg_fisher,
@@ -379,7 +407,6 @@ impl CellGroupedInMemoryData {
             output_values,
             output_values_weight,
             output_log_q_s,
-            touched_rho_indices,
         })
     }
 
@@ -395,6 +422,129 @@ impl CellGroupedInMemoryData {
         let pb_indices: Vec<usize> = (lb..ub).collect();
         self.build_minibatch(&pb_indices, dev)
     }
+}
+
+////////////////////////////////////////////////////////////////////////
+// Evaluation path (per-cell latent inference)
+////////////////////////////////////////////////////////////////////////
+
+/// Args for [`pack_eval_minibatch`] — one ordered evaluation block.
+///
+/// All three sample slices cover exactly the cells of this block
+/// (length `n`), pre-built by the caller from whatever source is
+/// cheapest — sparse CSC for the observed counts, per-batch-deduped δ
+/// rows for the background, etc. `pack_eval_minibatch` only does tensor
+/// packing: no top-K, no dense `[n, D]` scans.
+pub struct CellEvalPackArgs<'a> {
+    /// Per-cell encoder (FG) top-K samples (length `n`).
+    pub cell_samples: &'a [IndexedSample],
+    /// Per-cell library-size factor `s_c` (floored ≥ 1) (length `n`).
+    pub cell_size_factor: &'a [f32],
+    /// Per-cell background top-K samples (length `n`) — the batch-null
+    /// profile, or the observed profile when no batch effect was fit.
+    pub bg_samples: &'a [IndexedSample],
+    /// Per-cell decoder-target top-K samples (length `n`) — the observed
+    /// profile; only consulted by decoder-side refinement.
+    pub output_samples: &'a [IndexedSample],
+    pub n_features: usize,
+    pub fg_context_size: usize,
+    pub bg_context_size: usize,
+    pub dec_context_size: usize,
+    /// Per-feature NB-Fisher weight gathered into the FG/BG/decoder packs.
+    pub feature_fisher_weights: &'a [f32],
+}
+
+/// Build a single ordered [`CellGroupedMinibatchData`] for per-cell latent
+/// inference: every cell is its own singleton PB (`cell_to_pb` = identity,
+/// `M = N`). Pure tensor packing from the caller's pre-built sample
+/// slices — no shuffling, no top-K, no progress bars.
+///
+/// Mirrors the FG/BG/decoder packing of
+/// [`CellGroupedInMemoryData::build_minibatch`] for the identity grouping.
+pub fn pack_eval_minibatch(
+    args: CellEvalPackArgs,
+    dev: &Device,
+) -> anyhow::Result<CellGroupedMinibatchData> {
+    let n = args.cell_samples.len();
+    anyhow::ensure!(
+        args.cell_size_factor.len() == n
+            && args.bg_samples.len() == n
+            && args.output_samples.len() == n,
+        "eval-pack slice lengths must all equal n_cells {n} \
+         (got size_factor={}, bg={}, output={})",
+        args.cell_size_factor.len(),
+        args.bg_samples.len(),
+        args.output_samples.len(),
+    );
+    anyhow::ensure!(
+        args.feature_fisher_weights.len() == args.n_features,
+        "feature_fisher_weights length {} != n_features {}",
+        args.feature_fisher_weights.len(),
+        args.n_features,
+    );
+
+    let k_fg = args.fg_context_size.min(args.n_features);
+    let k_bg = args.bg_context_size.min(args.n_features);
+    let k_out = args.dec_context_size.min(args.n_features);
+
+    // Identity grouping: cell c → PB c. FG member-cell list is just 0..n.
+    let all: Vec<usize> = (0..n).collect();
+
+    // FG — per-cell encoder pack + library-size factors + segment map.
+    let (fg_indices, fg_values) = pack_indices_values(args.cell_samples, &all, k_fg, dev)?;
+    let fg_fisher = gather_per_feature_at_indices(
+        args.cell_samples,
+        &all,
+        args.feature_fisher_weights,
+        k_fg,
+        dev,
+    )?;
+    let fg_size_factor = Tensor::from_slice(args.cell_size_factor, (n, 1), dev)?;
+    let cell_to_pb = Tensor::from_vec((0..n as u32).collect::<Vec<u32>>(), (n,), dev)?;
+    // Each eval cell is its own singleton PB: |PB| = S = 1, so the FG
+    // segment-sum needs no rescale.
+    let fg_pb_rescale = Tensor::ones((n, 1), candle_core::DType::F32, dev)?;
+
+    // BG — per-cell background pack.
+    let (bg_indices, bg_values) = pack_indices_values(args.bg_samples, &all, k_bg, dev)?;
+    let bg_fisher = gather_per_feature_at_indices(
+        args.bg_samples,
+        &all,
+        args.feature_fisher_weights,
+        k_bg,
+        dev,
+    )?;
+
+    // Decoder — union + per-cell scatter positions + values + weights.
+    let (output_union_indices, output_scatter_pos, output_union_vec) =
+        build_union_and_scatter_pos(args.output_samples, &all, args.n_features, k_out, dev)?;
+    let (_, output_values) = pack_indices_values(args.output_samples, &all, k_out, dev)?;
+    let output_values_weight = gather_per_feature_at_indices(
+        args.output_samples,
+        &all,
+        args.feature_fisher_weights,
+        k_out,
+        dev,
+    )?;
+    let output_log_q = compute_log_selection_freq(args.output_samples, args.n_features);
+    let output_log_q_s = slice_log_q_at_union(&output_log_q, &output_union_vec, dev)?;
+
+    Ok(CellGroupedMinibatchData {
+        fg_indices,
+        fg_values,
+        fg_size_factor,
+        fg_fisher,
+        cell_to_pb,
+        fg_pb_rescale,
+        bg_indices,
+        bg_values,
+        bg_fisher,
+        output_union_indices,
+        output_scatter_pos,
+        output_values,
+        output_values_weight,
+        output_log_q_s,
+    })
 }
 
 #[cfg(test)]
@@ -453,6 +603,9 @@ mod tests {
             fg_context_size: 2,
             bg_context_size: 3,
             dec_context_size: 3,
+            // cap > max |PB| (2) → no subsampling, rescale = 1, so the
+            // hand-pool comparison below stays deterministic.
+            fg_cells_per_pb: 8,
             shortlist_weights: &fisher,
             feature_fisher_weights: &fisher,
         })

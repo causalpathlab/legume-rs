@@ -54,8 +54,11 @@ impl IndexedEmbeddingEncoder {
             init_ws,
         )?;
 
-        let value_embedding =
-            ValueEmbedding::new(args.value_embedding, args.embedding_dim, vb.pp("nn.enc.value"))?;
+        let value_embedding = ValueEmbedding::new(
+            args.value_embedding,
+            args.embedding_dim,
+            vb.pp("nn.enc.value"),
+        )?;
 
         // FC stack: embedding_dim -> ... -> final_hidden
         let fc_dims = args.layers[..args.layers.len() - 1].to_vec();

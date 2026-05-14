@@ -17,13 +17,11 @@
 
 use super::common::sample_collapsed_data;
 use super::graph_likelihood::{graph_loss, PoissonGraphConfig};
-use super::train_indexed::{
-    clip_and_step_dense, clip_and_step_lazy_rho, LazyRhoAdamW, PhaseTimers,
-};
+use super::train_indexed::{clip_and_step_dense, PhaseTimers};
 use crate::embed_common::*;
 use crate::logging::new_progress_bar;
 
-use candle_core::{Device, Var};
+use candle_core::{Device, Tensor, Var};
 use candle_nn::AdamW;
 use candle_util::candle_cell_grouped_data_loader::*;
 use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
@@ -54,6 +52,11 @@ pub(crate) struct CellEmbeddedTrainConfig<'a> {
     pub bg_context_size: usize,
     /// Decoder context window (top-K features per PB).
     pub dec_context_size: usize,
+    /// Cap on member cells sampled per PB per minibatch (0 = use all).
+    /// Bounds `M` (and the touched-ρ union) at coarse PB levels; a fresh
+    /// subsample is drawn every epoch — that resampling is the within-PB
+    /// SGD stochasticity.
+    pub fg_cells_per_pb: usize,
     pub stop: &'a AtomicBool,
     /// Per-gene weights used to score top-K candidates (cell + BG + decoder).
     pub shortlist_weights: &'a [f32],
@@ -63,10 +66,6 @@ pub(crate) struct CellEmbeddedTrainConfig<'a> {
     pub grad_clip: f32,
     /// Run the BKN graph likelihood only for the first N epochs (0 = never drop).
     pub graph_warmup_epochs: usize,
-    /// The shared ρ `[D, H]` feature-embedding `Var`.
-    pub rho_var: &'a Var,
-    /// Use the lazy (touched-row-only) optimizer for ρ.
-    pub lazy_rho: bool,
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -97,7 +96,8 @@ pub(crate) fn extract_cell_samples(
         .progress_with(prog_bar.clone())
         .map(|&(lb, ub)| -> anyhow::Result<_> {
             let csc = data_vec.read_columns_csc(lb..ub)?;
-            let samples = csc_columns_to_indexed_samples(&csc, shortlist_weights, fg_context_size);
+            let samples =
+                csc_columns_to_indexed_samples(&csc, shortlist_weights, fg_context_size, None);
             let sizes: Vec<f32> = (0..csc.ncols())
                 .map(|j| csc.col(j).values().iter().sum::<f32>().max(1.0))
                 .collect();
@@ -165,6 +165,7 @@ fn build_cell_grouped_loaders(
                 fg_context_size: config.fg_context_size,
                 bg_context_size: config.bg_context_size,
                 dec_context_size: config.dec_context_size,
+                fg_cells_per_pb: config.fg_cells_per_pb,
                 shortlist_weights: config.shortlist_weights,
                 feature_fisher_weights: config.feature_fisher_weights,
             })
@@ -215,33 +216,8 @@ pub(crate) fn train_mixed_cell(
     }
     info!("Mixed cell-embedded multi-level training: {num_levels} levels, {total_epochs} epochs");
 
-    // ρ is stepped by `LazyRhoAdamW` when `lazy_rho` is set, so it must be
-    // excluded from the stock optimizer's var set to avoid a double update.
-    let rho_id = config.rho_var.id();
-    let adam_vars: Vec<Var> = if config.lazy_rho {
-        config
-            .parameters
-            .all_vars()
-            .into_iter()
-            .filter(|v| v.id() != rho_id)
-            .collect()
-    } else {
-        config.parameters.all_vars()
-    };
+    let adam_vars: Vec<Var> = config.parameters.all_vars();
     let mut adam = AdamW::new_lr(adam_vars, f64::from(config.learning_rate))?;
-    let mut lazy_rho = if config.lazy_rho {
-        Some(LazyRhoAdamW::new(config.rho_var.clone(), config.learning_rate)?)
-    } else {
-        None
-    };
-    info!(
-        "ρ optimizer: {}",
-        if config.lazy_rho {
-            "lazy (touched-row sparse AdamW)"
-        } else {
-            "dense AdamW"
-        }
-    );
 
     let prog_bar = new_progress_bar(total_epochs as u64);
     let mut llik_trace = Vec::with_capacity(total_epochs);
@@ -265,8 +241,11 @@ pub(crate) fn train_mixed_cell(
         }
         timers.precompute += t_pre.elapsed();
 
-        let mut llik_tot = 0f32;
-        let mut kl_tot = 0f32;
+        // Per-epoch loss accumulators kept on-device: pulling a scalar
+        // every minibatch forces a GPU→CPU sync per step and stalls the
+        // pipeline. Accumulate detached partials, sync once per epoch.
+        let mut llik_acc = Tensor::zeros((), candle_core::DType::F32, config.dev)?;
+        let mut kl_acc = Tensor::zeros((), candle_core::DType::F32, config.dev)?;
         let mut count_tot = 0f32;
         let mut n_tot = 0usize;
 
@@ -274,21 +253,6 @@ pub(crate) fn train_mixed_cell(
             let decoder = &decoders[level];
             n_tot += loader.num_data();
             count_tot += loader.total_output_count();
-
-            // One-time diagnostic: how large is the per-minibatch touched
-            // ρ-row set relative to D? The cell-embedded restructure should
-            // push this to single-digit % (vs ~50% for indexed-topic).
-            if epoch == 0 && loader.num_minibatch() > 0 {
-                let t = loader.minibatch_cached(0).touched_rho_indices.dim(0)?;
-                let d = config.rho_var.dim(0)?;
-                info!(
-                    "level {} mb0: touched {} / {} ρ rows ({:.0}%)",
-                    level + 1,
-                    t,
-                    d,
-                    100.0 * t as f64 / d as f64
-                );
-            }
 
             for b in 0..loader.num_minibatch() {
                 let mb = loader.minibatch_cached(b).to_device(config.dev)?;
@@ -315,20 +279,11 @@ pub(crate) fn train_mixed_cell(
                 timers.backward += t_bwd.elapsed();
 
                 let t_opt = Instant::now();
-                match lazy_rho.as_mut() {
-                    Some(lr) => clip_and_step_lazy_rho(
-                        &mut adam,
-                        lr,
-                        grads,
-                        f64::from(config.grad_clip),
-                        &mb.touched_rho_indices,
-                    )?,
-                    None => clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))?,
-                }
+                clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))?;
                 timers.optimize += t_opt.elapsed();
 
-                llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
-                kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
+                llik_acc = (llik_acc + llik.sum_all()?.detach())?;
+                kl_acc = (kl_acc + kl.sum_all()?.detach())?;
 
                 if config.stop.load(Ordering::Relaxed) {
                     break;
@@ -359,6 +314,9 @@ pub(crate) fn train_mixed_cell(
             );
         }
 
+        // Single GPU→CPU sync per epoch (vs one per minibatch).
+        let llik_tot = llik_acc.to_scalar::<f32>()?;
+        let kl_tot = kl_acc.to_scalar::<f32>()?;
         llik_trace.push(llik_tot / count_tot);
         kl_trace.push(kl_tot / n_tot as f32);
 

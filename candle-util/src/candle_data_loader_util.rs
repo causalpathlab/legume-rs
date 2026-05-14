@@ -29,16 +29,24 @@ where
         .collect()
 }
 
+/// Minibatch index bookkeeping.
 ///
-/// A helper `struct` for shuffling and creating minibatch indexes;
-/// after `shuffle_minibatch` is called, `chunks` partition indexes.
-///
+/// Despite the `shuffle_minibatch` name, [`Minibatches::shuffle_minibatch`]
+/// **bootstrap-resamples with replacement** — `chunks` is a bootstrap
+/// *cover*, not a partition: within one call some indices appear more than
+/// once and others not at all. (`samples` is shuffled but currently
+/// unused by `chunks` construction — kept for callers that read it.)
 pub struct Minibatches {
     pub samples: Vec<usize>,
     pub chunks: Vec<Vec<usize>>,
 }
 
 impl Minibatches {
+    /// Bootstrap-resample the data into `chunks` of `batch_size` indices.
+    ///
+    /// Not a partition: indices are drawn *with replacement* via
+    /// [`bootstrap_indices`], so one pass over `chunks` is a bootstrap
+    /// cover — some samples repeat, some are skipped.
     pub fn shuffle_minibatch(&mut self, batch_size: usize) {
         let mut rng = rand::rng();
         self.samples.shuffle(&mut rng);

@@ -1,22 +1,30 @@
 //! `senna cell-embedded-topic` — hierarchical cell→PB pooling topic model.
 //!
 //! Same model *type* as `senna indexed-topic` (shared ρ `[D, H]` table,
-//! ETM-factorized decoder, multi-level PB training, lazy-ρ optimizer). The
-//! difference is structural and lives in the encoder + loader: a PB sample
-//! is treated as a *pool of cells*, and that pooling is moved **into the
-//! encoder** as a two-level gene→cell→PB `EmbeddingBag`. Because single
-//! cells are the genuinely sparse atoms, the per-minibatch touched ρ-row
-//! set shrinks to single-digit % of D and the lazy-ρ optimizer pays off
-//! end-to-end.
+//! ETM-factorized decoder, multi-level PB training). The difference is
+//! structural and lives in the encoder + loader: a PB sample is treated
+//! as a *pool of cells*, and that pooling is moved **into the encoder**
+//! as a two-level gene→cell→PB `EmbeddingBag`.
 //!
-//! v1 trains and writes the model + training trace only. Latent inference
-//! and `senna predict` are **not** wired yet — see the `warn!` at the end
-//! of [`fit_cell_embedded_topic_model`].
+//! A PB at a coarse level can pool hundreds of cells, so the FG pool draws
+//! an `S = min(--fg-cells-per-pb, |PB|)`-cell random subsample per PB per
+//! minibatch (rescaled by `|PB|/S` to stay an unbiased estimate of the
+//! full-PB sum). That bounds the per-minibatch member-cell count `M` — so
+//! encoder memory stays flat at coarse PB levels — and the fresh
+//! per-epoch subsample is the within-PB SGD stochasticity.
+//!
+//! Trains, runs per-cell latent inference, and writes the full
+//! topic-family artifact set (latent / pb_gene / cell_proj / manifest /
+//! CNV); `senna predict` applies the trained model to held-out data.
 
 use crate::embed_common::*;
 use crate::fit_indexed_topic::{remap_graph_to_subset, FeatureNameKindArg};
 use crate::topic::common::{
-    create_device, load_and_collapse, setup_stop_handler, LoadCollapseArgs, PreparedData,
+    create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
+    PreparedData,
+};
+use crate::topic::eval_cell_embedded::{
+    evaluate_latent_by_cell_embedded_encoder, EvaluateCellLatentConfig,
 };
 use crate::topic::model_metadata::MODEL_TYPE_CELL_EMBEDDED;
 use crate::topic::train_cell_embedded::{
@@ -50,10 +58,14 @@ pub struct CellEmbeddedTopicArgs {
         long_help = "Prefix for generated files:\n  \
                      {out}.dictionary.parquet       gene × topic loadings (log-prob)\n  \
                      {out}.feature_embedding.parquet ρ at full gene resolution\n  \
-                     {out}.delta.parquet            per-batch effects (if --batch-files)\n  \
+                     {out}.latent.parquet           cell × topic log-softmax proportions\n  \
+                     {out}.pb_gene.parquet          pseudobulk × gene posterior mean\n  \
                      {out}.log_likelihood.parquet   training loss trace\n  \
-                     {out}.safetensors              encoder+decoder weights\n\n\
-                     Note: latent / predict are not wired in this revision."
+                     {out}.safetensors              encoder+decoder weights\n  \
+                     {out}.model.json               model architecture metadata\n  \
+                     {out}.cell_proj.parquet        cached random projection (consumed by `senna layout`)\n  \
+                     {out}.senna.json               run manifest consumed by `senna layout --from` and `senna plot --from`\n  \
+                     {out}.shortlist_weights.parquet NB-Fisher per-gene weights (consumed by `senna predict`)"
     )]
     out: Box<str>,
 
@@ -109,11 +121,7 @@ pub struct CellEmbeddedTopicArgs {
     )]
     knn_cells: usize,
 
-    #[arg(
-        long,
-        default_value_t = 3,
-        help = "Multi-level coarsening levels"
-    )]
+    #[arg(long, default_value_t = 3, help = "Multi-level coarsening levels")]
     num_levels: usize,
 
     #[arg(
@@ -154,10 +162,19 @@ pub struct CellEmbeddedTopicArgs {
     #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     epochs: usize,
 
-    #[arg(long, default_value_t = 100, help = "Training minibatch size (pseudobulk samples)")]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Training minibatch size (pseudobulk samples)"
+    )]
     minibatch_size: usize,
 
-    #[arg(long, alias = "lr", default_value_t = 0.05, help = "Adam learning rate")]
+    #[arg(
+        long,
+        alias = "lr",
+        default_value_t = 0.05,
+        help = "Adam learning rate"
+    )]
     learning_rate: f32,
 
     #[arg(
@@ -214,11 +231,25 @@ pub struct CellEmbeddedTopicArgs {
         long,
         default_value_t = 512,
         help = "Encoder foreground context window (top-K features per cell)",
-        long_help = "Each member cell keeps its top-K features by value. Cells are\n\
-                     genuinely sparse, so this is the parameter that drives the\n\
-                     lazy-ρ optimizer's touched-row sparsity."
+        long_help = "Each member cell keeps its top-K features by value — the\n\
+                     per-cell sparse atom the FG pool sums over."
     )]
     fg_context_size: usize,
+
+    #[arg(
+        long,
+        default_value_t = 16,
+        help = "Member cells sampled per PB per minibatch (0 = use all)",
+        long_help = "Each minibatch draws an S = min(cap, |PB|)-cell random\n\
+                     subsample of every pseudobulk's member cells; the FG pool\n\
+                     is then rescaled by |PB|/S to stay an unbiased estimate of\n\
+                     the full-PB sum. This caps encoder memory and keeps the\n\
+                     touched-ρ row set sparse at coarse PB levels, where a\n\
+                     single PB can pool hundreds of cells. A fresh subsample is\n\
+                     drawn every epoch — that resampling is the within-PB SGD\n\
+                     stochasticity. 0 disables the cap (pool all members)."
+    )]
+    fg_cells_per_pb: usize,
 
     #[arg(
         long,
@@ -236,29 +267,18 @@ pub struct CellEmbeddedTopicArgs {
 
     #[arg(
         long,
-        help = "Intensity-embedding vocabulary size (value bins per scale; \
-                default: --embedding-dim). A resolution knob, not a perf one \
-                — the per-bin width is H and the lookup cost is independent \
-                of vocab size."
+        default_value_t = 16,
+        help = "Intensity-embedding vocabulary size (log1p-scale value bins). \
+                A resolution knob, not a perf one — the per-bin width is H and \
+                the lookup cost is independent of vocab size."
     )]
-    value_vocab_size: Option<usize>,
+    value_vocab_size: usize,
 
     #[command(flatten)]
     amort_refine: crate::refine_weighting::AmortRefineArgs,
 
-    #[arg(
-        long,
-        help = "Decoder context window (default: --fg-context-size)"
-    )]
+    #[arg(long, help = "Decoder context window (default: --fg-context-size)")]
     decoder_context_size: Option<usize>,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Use dense AdamW over the full ρ [D,H] table every minibatch \
-                instead of the lazy touched-row-only optimizer."
-    )]
-    dense_rho_update: bool,
 
     #[arg(
         long,
@@ -394,7 +414,7 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     let PreparedData {
         data_vec,
         collapsed_levels,
-        proj_kn: _,
+        proj_kn,
         cell_to_pb_per_level,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &args.data_files,
@@ -423,9 +443,8 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         want_hierarchy: true,
     })?;
 
-    let cell_to_pb_per_level = cell_to_pb_per_level.ok_or_else(|| {
-        anyhow::anyhow!("load_and_collapse did not return the cell→pb hierarchy")
-    })?;
+    let cell_to_pb_per_level = cell_to_pb_per_level
+        .ok_or_else(|| anyhow::anyhow!("load_and_collapse did not return the cell→pb hierarchy"))?;
 
     let n_features_full = data_vec.num_rows();
     let num_levels = collapsed_levels.len();
@@ -442,10 +461,10 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
 
     // Cell-embedded encoder: two value-weighted ρ pools (FG member cells +
     // BG PB residual) concatenated into the latent head. The value
-    // transform is the learned dual-binned intensity-embedding gate
-    // (Anscombe retired); vocab size defaults to the embedding dim H.
+    // transform is the learned log1p-scale intensity-embedding gate
+    // (Anscombe retired).
     let value_embedding = ValueEmbeddingConfig {
-        n_vocab: args.value_vocab_size.unwrap_or(h),
+        n_vocab: args.value_vocab_size,
     };
     info!(
         "intensity-embedding value transform: vocab={} (per-bin width H={})",
@@ -462,15 +481,6 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         &parameters,
         param_builder.pp("enc"),
     )?;
-
-    // Resolve the ρ `Var` backing the encoder's feature-embedding table —
-    // matched by tensor id — so the lazy optimizer can step it sparsely.
-    let rho_tid = base_encoder.feature_embeddings().id();
-    let rho_var = parameters
-        .all_vars()
-        .into_iter()
-        .find(|v| v.id() == rho_tid)
-        .ok_or_else(|| anyhow::anyhow!("ρ feature-embedding Var not found in VarMap"))?;
 
     // Per-level decoders share the encoder's ρ (ETM tying); each learns
     // only its own topic embeddings α_{level} [K, H].
@@ -578,13 +588,12 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         fg_context_size,
         bg_context_size,
         dec_context_size,
+        fg_cells_per_pb: args.fg_cells_per_pb,
         stop: &stop,
         shortlist_weights: &shortlist_weights,
         feature_fisher_weights: &feature_fisher_weights,
         grad_clip: args.grad_clip,
         graph_warmup_epochs: args.graph_warmup_epochs,
-        rho_var: &rho_var,
-        lazy_rho: !args.dense_rho_update,
     };
 
     let scores = train_mixed_cell(
@@ -604,9 +613,11 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     write_indexed_dictionary(finest_decoder, &gene_names, &args.out)?;
     write_feature_embedding(base_encoder.feature_embeddings(), &gene_names, &args.out)?;
 
-    use crate::topic::model_metadata::{save_parameters, save_shortlist_weights, TopicModelMetadata};
+    use crate::topic::model_metadata::{
+        save_parameters, save_shortlist_weights, TopicModelMetadata,
+    };
     save_parameters(&parameters, &args.out)?;
-    let metadata = TopicModelMetadata {
+    let mut metadata = TopicModelMetadata {
         model_type: MODEL_TYPE_CELL_EMBEDDED.into(),
         decoder_types: vec!["multinom".into()],
         decoder_weights: vec![1.0],
@@ -629,15 +640,112 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
 
-    // TODO(cell-embedded-topic): wire latent inference + `senna predict`.
-    // The cell-level eval forward pass would re-run `extract_cell_samples`
-    // + `CellGroupedInMemoryData` over the finest level (no shuffle) and
-    // call `encoder.forward_cells_t(.., false)` per minibatch, then write
-    // {out}.latent.parquet / {out}.senna.json as `indexed-topic` does.
-    warn!(
-        "cell-embedded-topic v1: trained model + trace written; latent inference \
-         and `senna predict` are NOT wired yet (no {{out}}.latent.parquet / .senna.json)"
-    );
+    // Move the VarMap to CPU, then rebuild the encoder + finest-level
+    // decoder from the CPU Vars for multi-threaded per-cell inference.
+    // The training structs still hold CUDA/Metal tensors and must not be
+    // reused on CPU block indices.
+    info!("Moving parameters to CPU for multi-threaded inference");
+    let cpu_dev = candle_core::Device::Cpu;
+    move_varmap_to_cpu(&parameters)?;
+
+    let cpu_vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
+    let cpu_encoder = CellEmbeddedEncoder::new(
+        CellEmbeddedEncoderArgs {
+            n_features: n_features_full,
+            n_topics,
+            embedding_dim: h,
+            layers: &args.encoder_layers,
+            value_embedding,
+        },
+        &parameters,
+        cpu_vb.pp("enc"),
+    )?;
+    let finest_dec_idx = decoders.len().saturating_sub(1);
+    let cpu_finest_decoder = EmbeddedTopicDecoder::new(
+        n_topics,
+        cpu_encoder.feature_embeddings().clone(),
+        cpu_vb.pp(format!("dec_{finest_dec_idx}")),
+    )?;
+
+    let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
+    let refine_config = args.amort_refine.to_config();
+
+    info!("Writing down the latent states");
+    let eval_config = EvaluateCellLatentConfig {
+        dev: &cpu_dev,
+        adj_method: &args.adj_method,
+        minibatch_size: args.minibatch_size,
+        fg_context_size,
+        bg_context_size,
+        dec_context_size,
+        decoder: &cpu_finest_decoder,
+        refine_config: refine_config.as_ref(),
+        shortlist_weights: &shortlist_weights,
+        feature_fisher_weights: &feature_fisher_weights,
+    };
+    let z_nk = evaluate_latent_by_cell_embedded_encoder(
+        &data_vec,
+        &cpu_encoder,
+        finest_collapsed,
+        &eval_config,
+    )?;
+
+    // Re-save metadata with θ̄_train populated — initial δ guess for any
+    // downstream re-embedding, better than uniform 1/K.
+    metadata.populate_theta_mean_and_save(&z_nk, &args.out)?;
+
+    let cell_names = data_vec.column_names()?;
+    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names)?;
+
+    // pb_latent omitted: the cell-embedded encoder's PB-level forward pass
+    // isn't wired here; `annotate` reconstructs θ_PB from pb_gene · β.
+    {
+        let pb_gene_gp: Mat = finest_collapsed.mu_observed.posterior_mean().clone();
+        crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names)?;
+    }
+
+    // CNV detection using topic proportions as cell-type membership.
+    let cnv_positions = crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?;
+    if let Some(positions) = cnv_positions {
+        if let Some(batch_labels) = crate::cnv_pseudobulk::reconstruct_batch_labels(&data_vec) {
+            let topic_probs = z_nk.map(f32::exp);
+            let cnv_config = crate::cnv_pseudobulk::build_cnv_config(&args.cnv);
+            let cnv_result = crate::cnv_pseudobulk::detect_cnv_topic_informed(
+                data_vec,
+                &topic_probs,
+                &batch_labels,
+                &positions,
+                &cnv_config,
+            )?;
+            crate::cnv_pseudobulk::write_cnv_results(&cnv_result, &args.out, &gene_names)?;
+        } else {
+            info!("CNV detection: skipped (no batch information)");
+        }
+    }
+
+    crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+
+    let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
+    let batch: Vec<String> = args
+        .batch_files
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        kind: crate::run_manifest::RunKind::CellEmbeddedTopic,
+        prefix: &args.out,
+        data_input: &input,
+        data_batch: &batch,
+        data_input_null: &[],
+        dictionary_suffix: Some("dictionary.parquet"),
+        has_model: true,
+        has_cell_proj: true,
+        pb_gene_suffix: Some("pb_gene.parquet"),
+        pb_latent_suffix: None,
+        dictionary_empirical_suffix: None,
+        feature_embedding_suffix: Some("feature_embedding.parquet"),
+        default_colour_by: "cluster",
+    })?;
 
     info!("Done");
     Ok(())

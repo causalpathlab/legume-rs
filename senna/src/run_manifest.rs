@@ -38,6 +38,7 @@ pub const MANIFEST_VERSION: u32 = 1;
 pub enum RunKind {
     Topic,
     Itopic,
+    CellEmbeddedTopic,
     JointTopic,
     Svd,
     JointSvd,
@@ -50,6 +51,7 @@ impl RunKind {
         match self {
             RunKind::Topic => "topic",
             RunKind::Itopic => "itopic",
+            RunKind::CellEmbeddedTopic => "cell-embedded-topic",
             RunKind::JointTopic => "joint-topic",
             RunKind::Svd => "svd",
             RunKind::JointSvd => "joint-svd",
@@ -57,11 +59,15 @@ impl RunKind {
         }
     }
 
-    /// Topic-family kinds (topic / itopic / joint-topic) — produce a
-    /// probability-simplex β. SVD-family kinds produce signed loadings.
+    /// Topic-family kinds (topic / itopic / cell-embedded-topic /
+    /// joint-topic) — produce a probability-simplex β. SVD-family kinds
+    /// produce signed loadings.
     #[must_use]
     pub fn is_topic_family(self) -> bool {
-        matches!(self, RunKind::Topic | RunKind::Itopic | RunKind::JointTopic)
+        matches!(
+            self,
+            RunKind::Topic | RunKind::Itopic | RunKind::CellEmbeddedTopic | RunKind::JointTopic
+        )
     }
 }
 
