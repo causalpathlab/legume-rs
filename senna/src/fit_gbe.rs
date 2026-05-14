@@ -123,9 +123,6 @@ pub struct GbeArgs {
     )]
     learning_rate: f64,
 
-    #[arg(long, default_value_t = 1, help = "Random seed (base)")]
-    seed: u64,
-
     #[arg(
         long,
         help = "Optional feature-feature edge list (TSV/CSV; e.g. \
@@ -391,7 +388,9 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         batch_size: args.batch_size,
         num_negatives: args.num_negatives,
         learning_rate: args.learning_rate,
-        seed: args.seed,
+        // gbe training is deterministic w.r.t. the input; the RNG only
+        // drives minibatch/negative sampling, so a fixed seed suffices.
+        seed: 1,
         device: args.device.to_device(args.device_no)?,
         block_size: args.block_size,
         fisher_weights_cache: if args.no_fisher_cache {

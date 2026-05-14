@@ -52,6 +52,7 @@ pub(crate) const WEIGHTING_HELP: &str =
 #[derive(Args, Clone, Debug)]
 pub(crate) struct PbRefineArgs {
     #[arg(
+        id = "pb_refine_gibbs",
         long = "pb-refine-gibbs",
         default_value_t = 20,
         help = "Gibbs sweeps per PB refinement level"
@@ -59,6 +60,7 @@ pub(crate) struct PbRefineArgs {
     pub(crate) gibbs: usize,
 
     #[arg(
+        id = "pb_refine_greedy",
         long = "pb-refine-greedy",
         default_value_t = 10,
         help = "Greedy sweeps per PB refinement level"
@@ -66,6 +68,7 @@ pub(crate) struct PbRefineArgs {
     pub(crate) greedy: usize,
 
     #[arg(
+        id = "pb_refine_weighting",
         long = "pb-refine-weighting",
         value_enum,
         default_value_t = WeightingArg::NbFisherInfo,
@@ -74,6 +77,7 @@ pub(crate) struct PbRefineArgs {
     pub(crate) weighting: WeightingArg,
 
     #[arg(
+        id = "pb_refine_seed",
         long = "pb-refine-seed",
         default_value_t = 42,
         help = "Seed for PB refinement Gibbs sampler"
