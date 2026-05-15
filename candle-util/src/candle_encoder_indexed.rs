@@ -1,5 +1,7 @@
+use crate::candle_aux_gat::GraphAttentionBlock;
 use crate::candle_aux_layers::*;
 use crate::candle_batch_norm;
+use crate::candle_indexed_data_loader::SparseEdgeBatch;
 use crate::candle_indexed_model_traits::*;
 use crate::candle_loss_functions::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::candle_value_transform::{count_rate_clean, ValueEmbedding, ValueEmbeddingConfig};
@@ -18,6 +20,10 @@ pub struct IndexedEmbeddingEncoder {
     embedding_dim: usize,
     feature_embeddings: Tensor, // [D, H] learnable
     value_embedding: ValueEmbedding,
+    /// Optional graph-attention block applied to the per-slot value-gated
+    /// embedding `[N, K, H]` before pooling. Present iff `IndexedEmbeddingEncoderArgs::use_gat`
+    /// was true at construction time.
+    gat: Option<GraphAttentionBlock>,
     fc: StackLayers<Linear>,
     bn_z: candle_batch_norm::BatchNorm,
     z_mean: Linear,
@@ -33,6 +39,12 @@ pub struct IndexedEmbeddingEncoderArgs<'a> {
     /// lookup + per-dimension sigmoid gate on ρ. This is the only value
     /// transform (the fixed Anscombe scalar has been retired here).
     pub value_embedding: ValueEmbeddingConfig,
+    /// When true, construct a `GraphAttentionBlock` on the per-slot
+    /// `[N, K, H]` representation. The caller is responsible for
+    /// providing per-minibatch `(adjacency, pad_mask)` at forward time.
+    /// When the runtime adjacency tensor is missing the GAT branch
+    /// is bypassed and the legacy sum-pool path is taken.
+    pub use_gat: bool,
 }
 
 impl IndexedEmbeddingEncoder {
@@ -60,6 +72,15 @@ impl IndexedEmbeddingEncoder {
             vb.pp("nn.enc.value"),
         )?;
 
+        let gat = if args.use_gat {
+            Some(GraphAttentionBlock::new(
+                args.embedding_dim,
+                vb.pp("nn.enc.gat"),
+            )?)
+        } else {
+            None
+        };
+
         // FC stack: embedding_dim -> ... -> final_hidden
         let fc_dims = args.layers[..args.layers.len() - 1].to_vec();
         let in_dim = args.embedding_dim;
@@ -77,11 +98,18 @@ impl IndexedEmbeddingEncoder {
             embedding_dim: args.embedding_dim,
             feature_embeddings,
             value_embedding,
+            gat,
             fc,
             bn_z,
             z_mean,
             z_lnvar,
         })
+    }
+
+    /// Whether this encoder owns a `GraphAttentionBlock`. Callers can use
+    /// this to decide whether to supply per-cell adjacency tensors.
+    pub fn has_gat(&self) -> bool {
+        self.gat.is_some()
     }
 
     pub fn n_features(&self) -> usize {
@@ -121,6 +149,7 @@ impl IndexedEmbeddingEncoder {
         values: &Tensor,
         values_null: Option<&Tensor>,
         values_mean: Option<&Tensor>,
+        sparse_edges: Option<&SparseEdgeBatch>,
     ) -> Result<Tensor> {
         let n = indices.dim(0)?;
         let k = indices.dim(1)?;
@@ -135,7 +164,16 @@ impl IndexedEmbeddingEncoder {
         // Per-slot learned gate on ρ — [N, K, H], broadcast onto `e_nk_h`.
         let clean = count_rate_clean(values, values_null, values_mean)?;
         let w = self.value_embedding.gate(&clean)?;
-        e_nk_h.broadcast_mul(&w)?.sum(1) // [N, H]
+        let v_nkh = e_nk_h.broadcast_mul(&w)?; // [N, K, H]
+
+        // Graph-diffusion branch: γ-gated sparse GCN. Block is identity
+        // at init (γ=0) so downstream FC+BN sees the no-graph training
+        // distribution; γ grows only as the likelihood needs the graph.
+        let v_pooled_input = match (&self.gat, sparse_edges) {
+            (Some(gat), Some(edges)) => gat.forward(&v_nkh, edges)?,
+            _ => v_nkh,
+        };
+        v_pooled_input.sum(1) // [N, H]
     }
 }
 
@@ -147,12 +185,14 @@ impl IndexedEmbeddingEncoder {
         values: &Tensor,
         values_null: Option<&Tensor>,
         values_mean: Option<&Tensor>,
+        sparse_edges: Option<&SparseEdgeBatch>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
         let clamp_lo = -8.;
         let clamp_hi = 8.;
 
-        let h_nh = self.preprocess_indexed(indices, values, values_null, values_mean)?;
+        let h_nh =
+            self.preprocess_indexed(indices, values, values_null, values_mean, sparse_edges)?;
         let fc_nl = self.fc.forward_t(&h_nh, train)?;
         let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
 
@@ -176,10 +216,17 @@ impl IndexedEncoderT for IndexedEmbeddingEncoder {
         values: &Tensor,
         values_null: Option<&Tensor>,
         values_mean: Option<&Tensor>,
+        sparse_edges: Option<&SparseEdgeBatch>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
-        let (z_mean_nk, z_lnvar_nk) =
-            self.latent_gaussian_params_indexed(indices, values, values_null, values_mean, train)?;
+        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params_indexed(
+            indices,
+            values,
+            values_null,
+            values_mean,
+            sparse_edges,
+            train,
+        )?;
 
         let z_nk = gaussian_reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
         let log_prob = ops::log_softmax(&z_nk, 1)?;
@@ -217,7 +264,8 @@ mod tests {
                 n_topics: 2,
                 embedding_dim,
                 layers: &layers,
-                value_embedding: ValueEmbeddingConfig { n_vocab: 8 },
+                value_embedding: ValueEmbeddingConfig { n_value_bins: 8 },
+                use_gat: false,
             },
             &varmap,
             vb,
@@ -229,7 +277,7 @@ mod tests {
         let values = Tensor::from_vec(vec![4.0f32, 9.0, 16.0, 25.0], (2, 2), &device).unwrap();
 
         let h = enc
-            .preprocess_indexed(&indices, &values, None, None)
+            .preprocess_indexed(&indices, &values, None, None, None)
             .unwrap();
         assert_eq!(h.dims(), &[2, embedding_dim]);
         for row in h.to_vec2::<f32>().unwrap() {

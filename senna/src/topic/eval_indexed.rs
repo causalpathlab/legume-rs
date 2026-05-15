@@ -390,6 +390,7 @@ where
         &enc_pack.values,
         enc_values_null.as_ref(),
         enc_pack.values_mean.as_ref(),
+        None,
         false,
     )?;
 

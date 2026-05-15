@@ -180,6 +180,43 @@ impl FeaturePairGraph {
         }
     }
 
+    /// Iterative k-core-style pruning: drop every feature whose current
+    /// degree is `< min_degree`, then recompute degrees and repeat
+    /// until the surviving subgraph is `(min_degree)`-degenerate. The
+    /// feature axis itself is **kept the same** — only edges incident
+    /// to pruned features are removed — so callers downstream that
+    /// index by feature id (encoder ρ table, gene-name vectors)
+    /// continue to work unchanged.
+    ///
+    /// Useful for trimming long-tail low-degree noise in PPI / ATAC
+    /// graphs before they're fed into the encoder GAT cache —
+    /// per-cell sub-adjacency, edge count `E`, and forward FLOPs all
+    /// scale linearly with the surviving edge count.
+    pub fn prune_by_min_degree(&mut self, min_degree: usize) {
+        if min_degree == 0 || self.feature_edges.is_empty() {
+            return;
+        }
+        let initial = self.feature_edges.len();
+        loop {
+            let degrees = self.feature_degrees();
+            let drop: Vec<bool> = degrees.iter().map(|&d| d > 0 && d < min_degree).collect();
+            if !drop.iter().any(|&x| x) {
+                break;
+            }
+            self.feature_edges.retain(|&(u, v)| !drop[u] && !drop[v]);
+            if self.feature_edges.is_empty() {
+                break;
+            }
+        }
+        let final_n = self.feature_edges.len();
+        if final_n != initial {
+            info!(
+                "k-core pruning (min_degree={}): {} edges → {} edges",
+                min_degree, initial, final_n
+            );
+        }
+    }
+
     /// Symmetric adjacency-list view implementing
     /// `crate::graph::WeightedGraph` (for Leiden, SGC, etc.).
     pub fn to_adj_list(&self) -> AdjListGraph {

@@ -6,6 +6,7 @@ use matrix_util::traits::CandleDataLoaderOps;
 use nalgebra_sparse::CscMatrix;
 use rayon::prelude::*;
 use std::cell::RefCell;
+use std::sync::Arc;
 
 pub(crate) fn labeled_bar(label: &str, len: u64) -> ProgressBar {
     ProgressBar::new(len).with_style(
@@ -87,6 +88,167 @@ impl IndexedMinibatchData {
     }
 }
 
+/// Per-cell, pre-normalised sub-adjacency triples flattened across cells.
+/// Each triple `(kk_u, kk_v, w)` is an edge in slot-space `[0, K)` on the
+/// cell's measured top-K, with `w` already row-normalised so that the
+/// `(kk_u, *)` row (including the self-loop `(kk_u, kk_u)`) sums to 1.
+/// The forward pass needs no row-norm — pure gather + scatter-add.
+struct SubAdjCache {
+    /// Flattened triples for every cell, in cell order.
+    triples: Vec<(u16, u16, f32)>,
+    /// `[n_cells + 1]` offsets into `triples` (CSR-like over cells).
+    offsets: Vec<u32>,
+}
+
+impl SubAdjCache {
+    fn build(samples: &[IndexedSample], graph: &GraphCsr, k: usize) -> Self {
+        // Top-K size fits in u16 in all realistic uses (k ≤ a few thousand);
+        // assert once so the cast is verifiable.
+        assert!(
+            k <= u16::MAX as usize,
+            "encoder top-K {k} exceeds u16; cached adjacency triples would overflow"
+        );
+        let per_cell: Vec<Vec<(u16, u16, f32)>> = samples
+            .par_iter()
+            .map(|s| {
+                let take = s.indices.len().min(k);
+                if take == 0 {
+                    return Vec::new();
+                }
+                let cell_idx = &s.indices[..take];
+                let mut out: Vec<(u16, u16, f32)> = Vec::new();
+                // For each query slot u, collect its (self-loop +
+                // graph-neighbour) targets, then normalise the row to
+                // sum to 1. Self-loop weight 1; graph edge weight as
+                // stored in CSR.
+                let mut row: Vec<(u16, f32)> = Vec::new();
+                for (kk_u, &u) in cell_idx.iter().enumerate() {
+                    row.clear();
+                    row.push((kk_u as u16, 1.0));
+                    let (cols, weights) = graph.row(u);
+                    for (&c, &w) in cols.iter().zip(weights.iter()) {
+                        if let Ok(kk_v) = cell_idx.binary_search(&c) {
+                            row.push((kk_v as u16, w));
+                        }
+                    }
+                    let sum: f32 = row.iter().map(|&(_, w)| w).sum();
+                    let inv = 1.0 / sum.max(1e-6);
+                    for &(kk_v, w) in row.iter() {
+                        out.push((kk_u as u16, kk_v, w * inv));
+                    }
+                }
+                out
+            })
+            .collect();
+        let total: usize = per_cell.iter().map(Vec::len).sum();
+        let mut triples: Vec<(u16, u16, f32)> = Vec::with_capacity(total);
+        let mut offsets: Vec<u32> = Vec::with_capacity(per_cell.len() + 1);
+        offsets.push(0);
+        for cell in per_cell.iter() {
+            triples.extend_from_slice(cell);
+            offsets.push(triples.len() as u32);
+        }
+        Self { triples, offsets }
+    }
+
+    fn cell_triples(&self, cell_idx: usize) -> &[(u16, u16, f32)] {
+        let lo = self.offsets[cell_idx] as usize;
+        let hi = self.offsets[cell_idx + 1] as usize;
+        &self.triples[lo..hi]
+    }
+}
+
+/// Sparse encoding of a minibatch's stacked sub-adjacencies. Replaces
+/// the dense `[B, K, K]` adjacency with three small `[E]` tensors —
+/// `E` is the total number of cell-local edges in the minibatch
+/// (typically a few × 10⁵ for K≈500). Consumed by
+/// [`crate::candle_aux_gat::GraphAttentionBlock::forward`] via
+/// `index_select` + `index_add` instead of a dense matmul.
+pub struct SparseEdgeBatch {
+    /// `[E]` u32 — destination flat index `(b * K + kk_u)`.
+    pub dst_flat: Tensor,
+    /// `[E]` u32 — source flat index `(b * K + kk_v)`.
+    pub src_flat: Tensor,
+    /// `[E]` f32 — row-normalised edge weight (incl. self-loops).
+    pub weight: Tensor,
+}
+
+/// Compressed-sparse-row representation of a (symmetrized) feature-feature
+/// graph over the same feature axis as the encoder input.
+///
+/// Built once when a `--feature-network` edge list is supplied; held on
+/// the `IndexedInMemoryData` so per-minibatch [N, K_in, K_in] sub-adjacency
+/// tensors can be assembled with O(K · avg_degree) lookups per cell.
+#[derive(Debug, Clone)]
+pub struct GraphCsr {
+    pub n_features: usize,
+    /// Length `n_features + 1`; `row_ptr[u..u+1]` slices into `col_idx` /
+    /// `values` to enumerate neighbours of feature `u`.
+    pub row_ptr: Vec<u32>,
+    /// Column indices, sorted ascending within each row.
+    pub col_idx: Vec<u32>,
+    /// Edge weights aligned with `col_idx`.
+    pub values: Vec<f32>,
+}
+
+impl GraphCsr {
+    /// Build a symmetric CSR from a list of `(u, v)` edges with optional
+    /// per-edge weights. Self-loops are dropped; the result is symmetrized
+    /// (both `(u,v)` and `(v,u)` recorded) and each row sorted by column.
+    pub fn from_edges(
+        n_features: usize,
+        edges: &[(usize, usize)],
+        weights: Option<&[f32]>,
+    ) -> Self {
+        debug_assert!(weights.is_none_or(|w| w.len() == edges.len()));
+        let mut per_row: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_features];
+        for (i, &(u, v)) in edges.iter().enumerate() {
+            if u == v || u >= n_features || v >= n_features {
+                continue;
+            }
+            let w = weights.map_or(1.0, |ws| ws[i]);
+            per_row[u].push((v as u32, w));
+            per_row[v].push((u as u32, w));
+        }
+        // Sort + dedup each row in parallel — for PPI-scale graphs (1M+
+        // edges) the per-row sort dominates the build.
+        per_row.par_iter_mut().for_each(|row| {
+            row.sort_unstable_by_key(|&(c, _)| c);
+            row.dedup_by_key(|&mut (c, _)| c);
+        });
+        let total: usize = per_row.iter().map(Vec::len).sum();
+        let mut row_ptr: Vec<u32> = Vec::with_capacity(n_features + 1);
+        row_ptr.push(0);
+        let mut col_idx: Vec<u32> = Vec::with_capacity(total);
+        let mut values: Vec<f32> = Vec::with_capacity(total);
+        for row in per_row.iter() {
+            for &(c, w) in row.iter() {
+                col_idx.push(c);
+                values.push(w);
+            }
+            row_ptr.push(col_idx.len() as u32);
+        }
+        Self {
+            n_features,
+            row_ptr,
+            col_idx,
+            values,
+        }
+    }
+
+    /// Borrow the neighbours of feature `u` as `(col_idx, weights)` slices.
+    pub fn row(&self, u: u32) -> (&[u32], &[f32]) {
+        let lo = self.row_ptr[u as usize] as usize;
+        let hi = self.row_ptr[u as usize + 1] as usize;
+        (&self.col_idx[lo..hi], &self.values[lo..hi])
+    }
+
+    /// Number of stored undirected edges (each contributes two CSR rows).
+    pub fn n_directed_entries(&self) -> usize {
+        self.col_idx.len()
+    }
+}
+
 /// Adaptive feature window data loader with decoupled encoder/decoder windows.
 ///
 /// Each sample keeps its top-K features by value independently for input (encoder)
@@ -113,6 +275,18 @@ pub struct IndexedInMemoryData {
     /// Per-feature NB-Fisher weight (decoder side) gathered into
     /// `output_values_weight [N, K]` at minibatch build time.
     output_fisher_weights: Option<Vec<f32>>,
+    /// Optional feature-feature graph. When set, the indexed encoder's
+    /// graph-diffusion block consumes a per-minibatch
+    /// [`SparseEdgeBatch`] scattered straight from `sub_adj_cache`.
+    graph_csr: Option<Arc<GraphCsr>>,
+    /// Pre-computed *and pre-normalised* per-cell sub-adjacency triples.
+    /// Each entry holds the edges of `graph_csr` whose both endpoints
+    /// land in that cell's measured top-K, expressed in slot-space
+    /// `(kk_u, kk_v, w)`. Self-loops are included and weights have been
+    /// row-normalised so each real slot's outgoing weights (incl.
+    /// self-loop) sum to 1 — graph diffusion at forward time is just
+    /// `index_select` + multiply + `index_add`, no dense `[B, K, K]`.
+    sub_adj_cache: Option<SubAdjCache>,
     /// Sum of all `output_samples` values across every sample — the
     /// per-epoch total decoder count, invariant to minibatch shuffling.
     /// Cached so the training loop's llik/count trace doesn't re-sum
@@ -345,6 +519,103 @@ where
         }
     }
     Ok(Tensor::from_vec(buf, (n, k), target_device)?)
+}
+
+/// Scatter cached per-cell triples (pre-normalised) into the three
+/// `[E]` flat tensors of a [`SparseEdgeBatch`]. `E` is the total
+/// number of edges across the cells in `sample_indices`. No dense
+/// `[B, K, K]` is ever materialised.
+fn scatter_sparse_edges(
+    cache: &SubAdjCache,
+    sample_indices: &[usize],
+    k: usize,
+    target_device: &Device,
+) -> anyhow::Result<SparseEdgeBatch> {
+    let total: usize = sample_indices
+        .iter()
+        .map(|&si| cache.cell_triples(si).len())
+        .sum();
+    let mut dst: Vec<u32> = Vec::with_capacity(total);
+    let mut src: Vec<u32> = Vec::with_capacity(total);
+    let mut w: Vec<f32> = Vec::with_capacity(total);
+    for (row, &si) in sample_indices.iter().enumerate() {
+        let row_off = (row * k) as u32;
+        for &(kk_u, kk_v, weight) in cache.cell_triples(si) {
+            dst.push(row_off + u32::from(kk_u));
+            src.push(row_off + u32::from(kk_v));
+            w.push(weight);
+        }
+    }
+    let dst_flat = Tensor::from_vec(dst, (total,), target_device)?;
+    let src_flat = Tensor::from_vec(src, (total,), target_device)?;
+    let weight = Tensor::from_vec(w, (total,), target_device)?;
+    Ok(SparseEdgeBatch {
+        dst_flat,
+        src_flat,
+        weight,
+    })
+}
+
+/// Build a [`SparseEdgeBatch`] directly from a packed `[N, K]` indices
+/// tensor (the predict-time entry point — at inference we don't keep
+/// the `IndexedSample` vectors around). The CSR walk happens inline;
+/// for repeated predict over the same data, the caller should reuse
+/// the cached path.
+pub fn build_sparse_edges_from_tensor(
+    indices: &Tensor,
+    graph: &GraphCsr,
+    target_device: &Device,
+) -> anyhow::Result<SparseEdgeBatch> {
+    let (_n, k) = indices.dims2()?;
+    let idx_host = indices
+        .to_device(&Device::Cpu)?
+        .to_dtype(candle_core::DType::U32)?
+        .to_vec2::<u32>()?;
+    let mut dst: Vec<u32> = Vec::new();
+    let mut src: Vec<u32> = Vec::new();
+    let mut w: Vec<f32> = Vec::new();
+    let mut row_buf: Vec<(u16, f32)> = Vec::new();
+    for (b, idx_row) in idx_host.iter().enumerate() {
+        let mut t = k;
+        for kk in (1..k).rev() {
+            if idx_row[kk] == 0 {
+                t = kk;
+            } else {
+                break;
+            }
+        }
+        if t == 0 {
+            continue;
+        }
+        let cell_idx = &idx_row[..t];
+        let row_off = (b * k) as u32;
+        for (kk_u, &u) in cell_idx.iter().enumerate() {
+            row_buf.clear();
+            row_buf.push((kk_u as u16, 1.0));
+            let (cols, weights) = graph.row(u);
+            for (&c, &cw) in cols.iter().zip(weights.iter()) {
+                if let Ok(kk_v) = cell_idx.binary_search(&c) {
+                    row_buf.push((kk_v as u16, cw));
+                }
+            }
+            let sum: f32 = row_buf.iter().map(|&(_, w)| w).sum();
+            let inv = 1.0 / sum.max(1e-6);
+            for &(kk_v, ew) in row_buf.iter() {
+                dst.push(row_off + kk_u as u32);
+                src.push(row_off + u32::from(kk_v));
+                w.push(ew * inv);
+            }
+        }
+    }
+    let total = dst.len();
+    let dst_flat = Tensor::from_vec(dst, (total,), target_device)?;
+    let src_flat = Tensor::from_vec(src, (total,), target_device)?;
+    let weight = Tensor::from_vec(w, (total,), target_device)?;
+    Ok(SparseEdgeBatch {
+        dst_flat,
+        src_flat,
+        weight,
+    })
 }
 
 /// Pack per-cell `(indices, values)` into `[N, K]` u32/f32 tensors. Both
@@ -624,6 +895,8 @@ impl IndexedInMemoryData {
             output_log_q,
             input_mean,
             output_fisher_weights,
+            graph_csr: None,
+            sub_adj_cache: None,
             total_output_count,
             minibatches: Minibatches {
                 samples: rows,
@@ -631,6 +904,40 @@ impl IndexedInMemoryData {
             },
             cached_batches: vec![],
         })
+    }
+
+    /// Attach a feature-feature graph to this loader. Builds a one-shot
+    /// per-cell sub-adjacency cache so subsequent epoch shuffles only
+    /// scatter cached triples instead of re-walking the CSR per cell per
+    /// minibatch. Pass `None` to detach and drop the cache.
+    pub fn set_graph_csr(&mut self, graph_csr: Option<Arc<GraphCsr>>) {
+        if let Some(ref g) = graph_csr {
+            assert_eq!(
+                g.n_features, self.n_input_features,
+                "feature graph has {} features but encoder input has {}",
+                g.n_features, self.n_input_features
+            );
+            let cache =
+                SubAdjCache::build(&self.input_samples, g.as_ref(), self.input_context_size);
+            let mb_triples = cache.triples.len();
+            let mb_bytes = mb_triples * std::mem::size_of::<(u16, u16, f32)>();
+            log::info!(
+                "built per-cell adjacency cache: {} cells, {} triples (~{} MB)",
+                self.input_samples.len(),
+                mb_triples,
+                mb_bytes >> 20,
+            );
+            self.sub_adj_cache = Some(cache);
+        } else {
+            self.sub_adj_cache = None;
+        }
+        self.graph_csr = graph_csr;
+        self.cached_batches.clear();
+    }
+
+    /// Whether a feature graph is attached.
+    pub fn has_graph(&self) -> bool {
+        self.graph_csr.is_some()
     }
 
     /// Build indexed data from pre-computed samples (e.g., from sparse I/O).
@@ -658,6 +965,8 @@ impl IndexedInMemoryData {
             output_log_q,
             input_mean: None,
             output_fisher_weights: None,
+            graph_csr: None,
+            sub_adj_cache: None,
             total_output_count,
             minibatches: Minibatches {
                 samples: rows,
@@ -841,6 +1150,34 @@ impl IndexedInMemoryData {
             output_values_weight,
             output_log_q_s,
         })
+    }
+
+    /// Lazy on-demand build of the sparse per-minibatch edge batch
+    /// consumed by the graph-diffusion block. Returns `Ok(None)` when
+    /// no feature graph is attached. Scatters pre-normalised per-cell
+    /// triples directly onto `target_device`, allocating only the
+    /// three `[E]` flat tensors (no `[B, K, K]` dense buffer).
+    pub fn minibatch_sparse_edges(
+        &self,
+        batch_idx: usize,
+        target_device: &Device,
+    ) -> anyhow::Result<Option<SparseEdgeBatch>> {
+        let Some(cache) = self.sub_adj_cache.as_ref() else {
+            return Ok(None);
+        };
+        let sample_indices = self.minibatches.chunks.get(batch_idx).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid minibatch index {batch_idx} vs total {}",
+                self.minibatches.chunks.len()
+            )
+        })?;
+        let edges = scatter_sparse_edges(
+            cache,
+            sample_indices,
+            self.input_context_size,
+            target_device,
+        )?;
+        Ok(Some(edges))
     }
 
     /// Build an indexed minibatch from the shuffled indices.

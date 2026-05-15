@@ -858,8 +858,9 @@ where
         embedding_dim: None,
         enc_context_size: None,
         dec_context_size: None,
-        value_vocab_size: None,
+        n_value_bins: None,
         theta_mean: None,
+        n_graph_edges: None,
     };
     metadata.save(&ctx.args.out)?;
 

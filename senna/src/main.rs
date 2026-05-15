@@ -48,6 +48,7 @@ mod fit_pseudotime;
 mod fit_topic;
 mod geometry;
 mod hvg;
+mod impute;
 mod logging;
 mod marker_support;
 mod output_helpers;
@@ -72,6 +73,7 @@ use fit_indexed_topic::*;
 use fit_joint_topic::*;
 use fit_pseudotime::{run_pseudotime, PseudotimeArgs};
 use fit_topic::*;
+use impute::{impute_model, ImputeArgs};
 use postprocess::*;
 use predict::{predict_model, PredictArgs};
 use svd::*;
@@ -265,6 +267,20 @@ enum Commands {
     )]
     Predict(PredictArgs),
 
+    #[command(
+        about = "Impute full-feature counts on new (sparse-panel) cells via kNN over a reference latent.",
+        long_about = "Two-stage post-hoc imputation:\n  \
+                      1. Project new sparse-panel data through the trained\n  \
+                         indexed-topic encoder → θ_new [N_new, K] (runs the\n  \
+                         predict pipeline internally).\n  \
+                      2. For each new cell, find K nearest reference cells in\n  \
+                         θ-space (L2 over the topic simplex), softmax-weight\n  \
+                         their distances, and accumulate the reference cells'\n  \
+                         full-feature counts.\n\n\
+                      Writes {out}.imputed.parquet (N_new × n_ref_features)."
+    )]
+    Impute(ImputeArgs),
+
     #[command(about = "[deprecated] Alias for `senna predict`.")]
     EvalTopic(EvalTopicArgs),
 
@@ -406,6 +422,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Predict(args) => {
             predict_model(args)?;
+        }
+        Commands::Impute(args) => {
+            impute_model(args)?;
         }
         Commands::EvalTopic(args) => {
             eval_topic_model(args)?;
