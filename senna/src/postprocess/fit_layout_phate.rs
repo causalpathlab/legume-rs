@@ -160,7 +160,9 @@ fn obtain_pseudotime(
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     if let Some(pt_rel) = manifest.pseudotime.pseudotime.as_deref() {
-        let pt_path = resolve(&manifest_dir, pt_rel).to_string_lossy().into_owned();
+        let pt_path = resolve(&manifest_dir, pt_rel)
+            .to_string_lossy()
+            .into_owned();
         info!("Reading cached pseudotime from {pt_path}");
         let MatWithNames {
             rows: pt_cells,

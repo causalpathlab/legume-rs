@@ -164,4 +164,3 @@ pub(crate) fn graph_loss(cfg: &PoissonGraphConfig) -> anyhow::Result<Tensor> {
     let nll = (neg_log_lik + partition)?;
     Ok(nll.affine(f64::from(cfg.loss_weight), 0.0)?)
 }
-
