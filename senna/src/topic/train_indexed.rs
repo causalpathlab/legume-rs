@@ -3,7 +3,6 @@ use super::eval_indexed::{dense_to_indexed, refine_indexed_topic_proportions, Pe
 use crate::embed_common::*;
 use crate::logging::new_progress_bar;
 
-use super::graph_likelihood::{graph_loss, PoissonGraphConfig};
 use candle_core::{Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer};
 use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
@@ -13,6 +12,7 @@ use candle_util::candle_indexed_model_traits::*;
 use candle_util::candle_topic_refinement::TopicRefinementConfig;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Wall-clock breakdown of the indexed-topic training hot loop.
@@ -78,9 +78,10 @@ pub(crate) struct IndexedTrainConfig<'a> {
     pub feature_fisher_weights: &'a [f32],
     /// Global L2 gradient norm clip per minibatch (0 = off).
     pub grad_clip: f32,
-    /// Run the BKN graph likelihood only for the first N epochs, then drop
-    /// it. 0 = never drop (graph term stays active for all epochs).
-    pub graph_warmup_epochs: usize,
+    /// Optional feature-feature graph attached to every level loader so
+    /// that the indexed encoder's GAT block sees per-cell sub-adjacency.
+    /// `None` skips the GAT branch and keeps the legacy sum-pool path.
+    pub feature_graph: Option<Arc<GraphCsr>>,
 }
 
 /// Global-L2-norm clip + dense `AdamW` step from a precomputed `GradStore`.
@@ -164,7 +165,7 @@ fn build_indexed_loaders(
     level_data
         .iter()
         .map(|(mixed, batch, target)| {
-            IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
+            let mut loader = IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
                 input: mixed,
                 input_null: batch.as_ref(),
                 output: target,
@@ -174,7 +175,9 @@ fn build_indexed_loaders(
                 output_shortlist_weights: config.shortlist_weights,
                 input_mean: Some(config.feature_mean),
                 output_fisher_weights: Some(config.feature_fisher_weights),
-            })
+            })?;
+            loader.set_graph_csr(config.feature_graph.clone());
+            Ok(loader)
         })
         .collect()
 }
@@ -193,7 +196,6 @@ pub(crate) fn train_mixed(
     decoders: &[EmbeddedTopicDecoder],
     config: &IndexedTrainConfig,
     bulk_with_deltas: Option<(&Mat, &[GammaMatrix])>,
-    graph_cfg: Option<&PoissonGraphConfig>,
 ) -> anyhow::Result<TrainScores> {
     let num_levels = collapsed_levels.len();
     let total_epochs = config.epochs;
@@ -229,7 +231,7 @@ pub(crate) fn train_mixed(
             let bulk_delta = &bulk_deltas[finest_idx];
             let delta_mean = bulk_delta.posterior_mean().transpose();
             let corrected = apply_column_delta(bulk_full, &delta_mean, 1e-8);
-            Some(IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
+            let mut bulk = IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
                 input: bulk_full,
                 input_null: None,
                 output: &corrected,
@@ -239,7 +241,9 @@ pub(crate) fn train_mixed(
                 output_shortlist_weights: config.shortlist_weights,
                 input_mean: Some(config.feature_mean),
                 output_fisher_weights: Some(config.feature_fisher_weights),
-            })?)
+            })?;
+            bulk.set_graph_csr(config.feature_graph.clone());
+            Some(bulk)
         } else {
             None
         };
@@ -266,6 +270,7 @@ pub(crate) fn train_mixed(
 
             for b in 0..loader.num_minibatch() {
                 let mb = loader.minibatch_cached(b).to_device(config.dev)?;
+                let sparse_edges = loader.minibatch_sparse_edges(b, config.dev)?;
 
                 let t_enc = Instant::now();
                 let (log_z_nk, kl) = encoder.forward_indexed_t(
@@ -273,6 +278,7 @@ pub(crate) fn train_mixed(
                     &mb.input_values,
                     mb.input_values_null.as_ref(),
                     mb.input_values_mean.as_ref(),
+                    sparse_edges.as_ref(),
                     true,
                 )?;
                 let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
@@ -315,12 +321,14 @@ pub(crate) fn train_mixed(
 
             for b in 0..bulk_loader.num_minibatch() {
                 let mb = bulk_loader.minibatch_cached(b).to_device(config.dev)?;
+                let sparse_edges = bulk_loader.minibatch_sparse_edges(b, config.dev)?;
                 let t_enc = Instant::now();
                 let (log_z_nk, kl) = encoder.forward_indexed_t(
                     &mb.input_indices,
                     &mb.input_values,
                     None,
                     mb.input_values_mean.as_ref(),
+                    sparse_edges.as_ref(),
                     true,
                 )?;
                 let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
@@ -353,37 +361,6 @@ pub(crate) fn train_mixed(
                     break;
                 }
             }
-        }
-
-        // Once-per-epoch BKN graph-likelihood gradient step (Poisson on
-        // observed feature-pair edges, closed-form non-edge partition).
-        // Cheap: O(|E|·H + D·H). Operates on the decoupled ρ_graph; the
-        // encoder's ρ feels the graph only via the per-minibatch tether
-        // added inside `add_graph_tether`.
-        //
-        // `graph_warmup_epochs > 0` gates this step alone — after warmup,
-        // ρ_graph is effectively frozen at its best-informed state and the
-        // tether keeps streaming structural information to ρ_enc without
-        // continuing to pull ρ_graph further into a low-rank attractor.
-        let graph_active = match config.graph_warmup_epochs {
-            0 => true,
-            n => epoch < n,
-        };
-        if let (true, Some(cfg)) = (graph_active, graph_cfg) {
-            let g_loss = graph_loss(cfg)?;
-            clip_grads_and_step(&mut adam, &g_loss, f64::from(config.grad_clip))?;
-            let d = cfg.rho_graph.dim(0)? as f32;
-            info!(
-                "[epoch {}] graph_nll/gene={:.4}",
-                epoch,
-                g_loss.to_scalar::<f32>()? / d.max(1.0)
-            );
-        } else if epoch == config.graph_warmup_epochs && graph_cfg.is_some() {
-            info!(
-                "[epoch {}] dropping graph likelihood (warmup={} reached); \
-                 ρ_graph frozen, tether continues",
-                epoch, config.graph_warmup_epochs,
-            );
         }
 
         llik_trace.push(llik_tot / count_tot);
@@ -469,6 +446,7 @@ where
         &enc_pack.values,
         None,
         enc_pack.values_mean.as_ref(),
+        None,
         false,
     )?;
 

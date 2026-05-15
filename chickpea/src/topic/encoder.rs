@@ -6,7 +6,7 @@ use candle_util::candle_value_transform::ValueEmbeddingConfig;
 
 /// log1p-scale value-embedding bins for the indexed experts. Fixed at the
 /// senna default; expose as an `EncoderArgs` knob if chickpea needs it tuned.
-const VALUE_VOCAB_SIZE: usize = 16;
+const N_VALUE_BINS: usize = 16;
 
 /// Inputs for the encoder forward pass.
 pub struct EncoderInput<'a> {
@@ -58,8 +58,9 @@ impl ChickpeaEncoder {
                 embedding_dim,
                 layers: hidden_layers,
                 value_embedding: ValueEmbeddingConfig {
-                    n_vocab: VALUE_VOCAB_SIZE,
+                    n_value_bins: N_VALUE_BINS,
                 },
+                use_gat: false,
             },
             varmap,
             vs.pp("gene_expert"),
@@ -72,8 +73,9 @@ impl ChickpeaEncoder {
                 embedding_dim,
                 layers: hidden_layers,
                 value_embedding: ValueEmbeddingConfig {
-                    n_vocab: VALUE_VOCAB_SIZE,
+                    n_value_bins: N_VALUE_BINS,
                 },
+                use_gat: false,
             },
             varmap,
             vs.pp("atac_expert"),
@@ -100,6 +102,7 @@ impl ChickpeaEncoder {
             &gene_values,
             gene_null.as_ref(),
             None,
+            None,
             train,
         )?;
 
@@ -114,6 +117,7 @@ impl ChickpeaEncoder {
             &peak_idx_ns,
             &atac_values,
             atac_null.as_ref(),
+            None,
             None,
             train,
         )?;

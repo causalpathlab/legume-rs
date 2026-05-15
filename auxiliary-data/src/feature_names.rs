@@ -525,8 +525,8 @@ mod tests {
             "chr1:1-20".to_string().into_boxed_str(),
         ];
         let map = build_locus_overlap_canonical_map(&names);
-        assert!(map.get(&names[0]).is_none());
-        assert!(map.get(&names[1]).is_some());
+        assert!(!map.contains_key(&names[0]));
+        assert!(map.contains_key(&names[1]));
     }
 
     #[test]

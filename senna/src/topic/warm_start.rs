@@ -25,9 +25,9 @@ pub struct WarmStartCheck<'a> {
     pub level_decoder_dims: &'a [usize],
     /// Set only for indexed; ignored for dense.
     pub embedding_dim: Option<usize>,
-    /// Learned intensity-embedding vocabulary size when the value
-    /// transform is the learned gate; `None` for the Anscombe baseline.
-    /// Checked so a warm-start can't silently load mismatched
+    /// Learned intensity-embedding bin count (`n_value_bins`) when the
+    /// value transform is the learned gate; `None` for the Anscombe
+    /// baseline. Checked so a warm-start can't silently load mismatched
     /// value-embedding weights.
     pub value_embedding: Option<usize>,
 }
@@ -89,11 +89,11 @@ pub fn warm_start_load(
     }
     // The value transform must match: a learned intensity-embedding model
     // carries `nn.enc.value.*` tensors an Anscombe model doesn't (and
-    // vice versa), and the vocabulary size must agree.
+    // vice versa), and the bin count must agree.
     anyhow::ensure!(
-        metadata.value_vocab_size == expected.value_embedding,
+        metadata.n_value_bins == expected.value_embedding,
         "warm-start: value-embedding mismatch (saved={:?}, current={:?})",
-        metadata.value_vocab_size,
+        metadata.n_value_bins,
         expected.value_embedding,
     );
 

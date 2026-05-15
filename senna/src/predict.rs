@@ -649,10 +649,10 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
         .ok_or_else(|| anyhow::anyhow!("indexed model metadata missing dec_context_size"))?;
 
     // Reconstruct the learned intensity-embedding value transform.
-    // `value_vocab_size` is absent only for pre-value-embedding indexed
+    // `n_value_bins` is absent only for pre-value-embedding indexed
     // checkpoints — those fall back to `embedding_dim`.
     let value_embedding = ValueEmbeddingConfig {
-        n_vocab: metadata.value_vocab_size.unwrap_or(embedding_dim),
+        n_value_bins: metadata.n_value_bins.unwrap_or(embedding_dim),
     };
 
     let (training_genes, beta_dk) = load_dictionary(&args.model)?;
@@ -711,6 +711,7 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
             embedding_dim,
             layers: &metadata.encoder_hidden,
             value_embedding,
+            use_gat: metadata.has_feature_graph(),
         },
         &parameters,
         vb.pp("enc"),
@@ -724,10 +725,35 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
         num_levels,
     )?;
 
+    // Pre-allocate feature-graph Vars before loading the safetensors file so
+    // VarMap::load can populate them by name.
+    if let Some(n_edges) = metadata.n_graph_edges {
+        crate::topic::model_metadata::allocate_feature_graph_vars(
+            &parameters,
+            &cpu_dev,
+            n_features_full,
+            n_edges,
+        )?;
+    }
+
     let safetensors_path = format!("{}.safetensors", args.model);
     info!("Loading weights from {safetensors_path}");
     parameters.load(&safetensors_path)?;
     let decoder = decoders.last().expect("at least one decoder level");
+
+    // Reconstruct the CSR for adjacency build at prediction time.
+    let feature_graph_csr: Option<
+        std::sync::Arc<candle_util::candle_indexed_data_loader::GraphCsr>,
+    > = if metadata.has_feature_graph() {
+        Some(std::sync::Arc::new(
+            crate::topic::model_metadata::read_feature_graph_from_varmap(
+                &parameters,
+                n_features_full,
+            )?,
+        ))
+    } else {
+        None
+    };
 
     let mode = resolve_mode(args);
     let refine_config = TopicRefinementConfig {
@@ -806,6 +832,7 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
             mode,
             refine_config: &refine_config,
             n_topics: metadata.n_topics,
+            feature_graph: feature_graph_csr.as_deref(),
         })
     })?;
 
@@ -830,6 +857,9 @@ struct PredictBlockIndexedArgs<'a> {
     mode: LatentMode,
     refine_config: &'a TopicRefinementConfig,
     n_topics: usize,
+    /// Feature graph baked into the model. `Some` when the encoder owns a
+    /// GAT block; passed to `build_sparse_edges_from_tensor` per block.
+    feature_graph: Option<&'a candle_util::candle_indexed_data_loader::GraphCsr>,
 }
 
 fn predict_block_indexed(
@@ -855,6 +885,7 @@ fn predict_block_indexed(
         mode,
         refine_config,
         n_topics,
+        feature_graph,
     } = a;
     let ctx = crate::topic::eval_indexed::PerGeneContext {
         feature_mean: Some(feature_mean),
@@ -905,6 +936,18 @@ fn predict_block_indexed(
     let s_dec = dec_pack.union_indices.dim(0)?;
     let dec_log_q_s = Tensor::zeros((1, s_dec), candle_core::DType::F32, dev)?;
 
+    // Build sparse edges for this block if the model carries a graph.
+    let sparse_edges = match feature_graph {
+        Some(g) => Some(
+            candle_util::candle_indexed_data_loader::build_sparse_edges_from_tensor(
+                &enc_pack.indices,
+                g,
+                dev,
+            )?,
+        ),
+        None => None,
+    };
+
     let log_z_nk = match mode {
         LatentMode::Encoder => {
             let (log_z, _) = encoder.forward_indexed_t(
@@ -912,6 +955,7 @@ fn predict_block_indexed(
                 &enc_pack.values,
                 enc_values_null.as_ref(),
                 enc_pack.values_mean.as_ref(),
+                sparse_edges.as_ref(),
                 false,
             )?;
             log_z
@@ -922,6 +966,7 @@ fn predict_block_indexed(
                 &enc_pack.values,
                 enc_values_null.as_ref(),
                 enc_pack.values_mean.as_ref(),
+                sparse_edges.as_ref(),
                 false,
             )?;
             refine_indexed_topic_proportions(
@@ -992,12 +1037,12 @@ fn predict_cell_embedded(args: &PredictArgs, metadata: &TopicModelMetadata) -> a
         .dec_context_size
         .ok_or_else(|| anyhow::anyhow!("cell-embedded model metadata missing dec_context_size"))?;
     let bg_context_size = fg_context_size;
-    // cell-embedded checkpoints always persist `value_vocab_size`
+    // cell-embedded checkpoints always persist `n_value_bins`
     // (there is no pre-value-embedding revision of this model).
     let value_embedding = ValueEmbeddingConfig {
-        n_vocab: metadata.value_vocab_size.ok_or_else(|| {
-            anyhow::anyhow!("cell-embedded model metadata missing value_vocab_size")
-        })?,
+        n_value_bins: metadata
+            .n_value_bins
+            .ok_or_else(|| anyhow::anyhow!("cell-embedded model metadata missing n_value_bins"))?,
     };
 
     let (training_genes, beta_dk) = load_dictionary(&args.model)?;

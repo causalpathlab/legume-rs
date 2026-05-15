@@ -222,11 +222,11 @@ pub struct CellEmbeddedTopicArgs {
     #[arg(
         long,
         default_value_t = 16,
-        help = "Intensity-embedding vocabulary size (log1p-scale value bins). \
+        help = "Intensity-embedding bin count (log1p-scale value bins). \
                 A resolution knob, not a perf one — the per-bin width is H and \
-                the lookup cost is independent of vocab size."
+                the lookup cost is independent of bin count."
     )]
-    value_vocab_size: usize,
+    n_value_bins: usize,
 
     #[command(flatten)]
     amort_refine: crate::refine_weighting::AmortRefineArgs,
@@ -254,22 +254,6 @@ pub struct CellEmbeddedTopicArgs {
         help = "Alias-splitting delimiter for feature-network name resolution."
     )]
     feature_network_delim: Option<char>,
-
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "Relative weight λ_G of the graph Poisson log-likelihood. \
-                Ignored without --feature-network."
-    )]
-    graph_loss_weight: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "Run the graph Poisson likelihood only for the first N epochs, \
-                then drop it (0 = never drop). Ignored without --feature-network."
-    )]
-    graph_warmup_epochs: usize,
 
     #[arg(
         long,
@@ -417,11 +401,11 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     // transform is the learned log1p-scale intensity-embedding gate
     // (Anscombe retired).
     let value_embedding = ValueEmbeddingConfig {
-        n_vocab: args.value_vocab_size,
+        n_value_bins: args.n_value_bins,
     };
     info!(
-        "intensity-embedding value transform: vocab={} (per-bin width H={})",
-        value_embedding.n_vocab, h
+        "intensity-embedding value transform: n_value_bins={} (per-bin width H={})",
+        value_embedding.n_value_bins, h
     );
     let base_encoder = CellEmbeddedEncoder::new(
         CellEmbeddedEncoderArgs {
@@ -462,7 +446,7 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
                 encoder_hidden: &args.encoder_layers,
                 level_decoder_dims: &vec![n_features_full; num_levels],
                 embedding_dim: Some(h),
-                value_embedding: Some(value_embedding.n_vocab),
+                value_embedding: Some(value_embedding.n_value_bins),
             },
         )?;
     }
@@ -482,12 +466,12 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     // quantity already computed for shortlist selection.
     let feature_fisher_weights = shortlist_weights.clone();
 
-    // Optional Ball-Karrer-Newman feature-graph likelihood on ρ_graph.
-    // Reuses the pre-mask graph cached by the row-mask callback when
-    // --feature-network-restrict is set (one parse total instead of two).
+    // Feature-feature graph: parsed for downstream use (restrict mode,
+    // future GAT integration). For now cell-embedded ignores the graph
+    // at training time — only --feature-network-restrict is consumed.
     let cached_pre_mask = cached_graph.borrow_mut().take();
     let cached_pre_mask_keep = cached_keep.borrow_mut().take();
-    let graph_for_bkn: Option<FeaturePairGraph> = match (cached_pre_mask, cached_pre_mask_keep) {
+    let _feature_graph: Option<FeaturePairGraph> = match (cached_pre_mask, cached_pre_mask_keep) {
         (Some(pre_graph), Some(keep)) => Some(remap_graph_to_subset(pre_graph, &keep)),
         _ => args
             .feature_network
@@ -504,19 +488,6 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
             })
             .transpose()?,
     };
-    let graph_cfg: Option<crate::topic::graph_likelihood::PoissonGraphConfig> = graph_for_bkn
-        .as_ref()
-        .map(|g| {
-            crate::topic::graph_likelihood::PoissonGraphConfig::build(
-                g,
-                n_features_full,
-                h,
-                args.graph_loss_weight,
-                &param_builder,
-                &dev,
-            )
-        })
-        .transpose()?;
 
     // Extract the genuinely sparse single-cell atoms once; the per-cell
     // top-K samples + library-size factors are level-independent and
@@ -546,7 +517,6 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         shortlist_weights: &shortlist_weights,
         feature_fisher_weights: &feature_fisher_weights,
         grad_clip: args.grad_clip,
-        graph_warmup_epochs: args.graph_warmup_epochs,
     };
 
     let scores = train_mixed_cell(
@@ -557,7 +527,6 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         &base_encoder,
         &decoders,
         &train_config,
-        graph_cfg.as_ref(),
     )?;
 
     info!("Writing down the model parameters");
@@ -585,8 +554,9 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         embedding_dim: Some(h),
         enc_context_size: Some(fg_context_size),
         dec_context_size: Some(dec_context_size),
-        value_vocab_size: Some(value_embedding.n_vocab),
+        n_value_bins: Some(value_embedding.n_value_bins),
         theta_mean: None,
+        n_graph_edges: None,
     };
     metadata.save(&args.out)?;
     save_shortlist_weights(&shortlist_weights, &gene_names, &args.out)?;

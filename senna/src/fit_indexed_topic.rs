@@ -199,11 +199,11 @@ pub struct IndexedTopicArgs {
     #[arg(
         long,
         default_value_t = 16,
-        help = "Intensity-embedding vocabulary size (log1p-scale value bins). \
+        help = "Intensity-embedding bin count (log1p-scale value bins). \
                 A resolution knob, not a perf one — the per-bin width is H and \
-                the lookup cost is independent of vocab size."
+                the lookup cost is independent of bin count."
     )]
-    value_vocab_size: usize,
+    n_value_bins: usize,
 
     #[command(flatten)]
     amort_refine: crate::refine_weighting::AmortRefineArgs,
@@ -228,12 +228,14 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        help = "Optional feature-feature edge list (TSV/CSV) — activates a \
-                Ball-Karrer-Newman degree-corrected Poisson graph \
-                likelihood on ρ. Edges may be intra- or cross-modal \
-                (e.g. gene-gene PPI, peak-gene ABC); the model is \
-                geometry-only. Edge names are resolved against the loaded \
-                gene axis."
+        help = "Optional feature-feature edge list (TSV/CSV) — wires a \
+                graph-attention layer into the indexed encoder. Per-cell \
+                sub-adjacency on the measured top-K acts as an additive \
+                edge bias in attention so the encoder can pool signal \
+                across functionally related genes. Edges may be intra- \
+                or cross-modal (gene-gene PPI, peak-gene ABC, ATAC- \
+                derived regulatory links). Edge names are resolved \
+                against the loaded gene axis."
     )]
     feature_network: Option<Box<str>>,
 
@@ -258,34 +260,12 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Relative weight λ_G of the graph Poisson log-likelihood. \
-                Operates on a decoupled ρ_graph — gradients do **not** \
-                touch the encoder's ρ in this revision (pure decoupling). \
-                Lower = soft prior; higher = strict reconstruction. \
-                Ignored without --feature-network."
-    )]
-    graph_loss_weight: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "Run the graph Poisson likelihood only for the first N \
-                epochs, then drop it (0 = never drop, current default). \
-                Useful when the graph keeps pulling ρ_graph into a low-rank \
-                attractor; freezing it early preserves the best-informed \
-                snapshot. Ignored without --feature-network."
-    )]
-    graph_warmup_epochs: usize,
-
-    #[arg(
-        long,
         default_value_t = 0,
         help = "Shared-neighbor edge augmentation threshold (0 disables). \
                 Adds a synthetic edge between any pair that share ≥ N \
                 neighbors in the raw network. Densifies incomplete graphs \
-                before the Poisson likelihood sees them — same machinery \
-                as pinto's `--snn-min-shared`. Set 2–3 for sparse networks; \
+                before the GAT sees them — same machinery as pinto's \
+                `--snn-min-shared`. Set 2–3 for sparse networks; \
                 BioGRID-scale dense PPIs usually don't need it."
     )]
     feature_network_snn_min_shared: usize,
@@ -509,21 +489,74 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
 
     let dev = create_device(&args.device, args.device_no)?;
 
-    let parameters = candle_nn::VarMap::new();
+    let mut parameters = candle_nn::VarMap::new();
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
     let dec_context_size = args.decoder_context_size.unwrap_or(args.context_size);
 
     // Value transform: the learned dual-binned intensity-embedding gate
-    // (Anscombe retired). Vocab is the number of log1p-scale value bins.
+    // (Anscombe retired). `n_value_bins` = the number of log1p-scale
+    // value bins.
     let value_embedding = ValueEmbeddingConfig {
-        n_vocab: args.value_vocab_size,
+        n_value_bins: args.n_value_bins,
     };
     info!(
-        "intensity-embedding value transform: vocab={} (per-bin width H={})",
-        value_embedding.n_vocab, h
+        "intensity-embedding value transform: n_value_bins={} (per-bin width H={})",
+        value_embedding.n_value_bins, h
     );
+
+    // Gene names — needed both for feature-graph resolution (below) and
+    // for output artifacts further down.
+    let gene_names = data_vec.row_names()?;
+
+    // Feature-feature graph: parsed once and (when --feature-network was
+    // supplied) plumbed into the indexed encoder's GAT block as additive
+    // attention bias. Reuses the pre-mask graph cached by the row-mask
+    // callback when --feature-network-restrict is set (one parse total).
+    let cached_pre_mask = cached_graph.borrow_mut().take();
+    let cached_pre_mask_keep = cached_keep.borrow_mut().take();
+    let feature_graph: Option<FeaturePairGraph> = match (cached_pre_mask, cached_pre_mask_keep) {
+        (Some(pre_graph), Some(keep)) => Some(remap_graph_to_subset(pre_graph, &keep)),
+        _ => args
+            .feature_network
+            .as_deref()
+            .map(|path| -> anyhow::Result<_> {
+                let mut g = FeaturePairGraph::from_edge_list(
+                    path,
+                    gene_names.to_vec(),
+                    args.feature_network_prefix_match,
+                    args.feature_network_delim,
+                )?;
+                g.augment_with_snn(args.feature_network_snn_min_shared);
+                Ok(g)
+            })
+            .transpose()?,
+    };
+
+    // Convert FeaturePairGraph → GraphCsr at the encoder's feature axis.
+    // The CSR is shared (Arc) across every level's data loader and is
+    // also persisted into the model artifact in safetensors form.
+    let feature_graph_csr: Option<
+        std::sync::Arc<candle_util::candle_indexed_data_loader::GraphCsr>,
+    > = feature_graph.as_ref().map(|g| {
+        let edges: Vec<(usize, usize)> = g.feature_edges.clone();
+        std::sync::Arc::new(
+            candle_util::candle_indexed_data_loader::GraphCsr::from_edges(
+                n_features_full,
+                &edges,
+                None,
+            ),
+        )
+    });
+    if let Some(ref g) = feature_graph_csr {
+        info!(
+            "feature-network: {} undirected entries (directed CSR entries: {}); \
+             GAT enabled on indexed encoder",
+            g.n_directed_entries() / 2,
+            g.n_directed_entries(),
+        );
+    }
 
     let base_encoder = IndexedEmbeddingEncoder::new(
         IndexedEmbeddingEncoderArgs {
@@ -532,6 +565,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             embedding_dim: h,
             layers: &args.encoder_layers,
             value_embedding,
+            use_gat: feature_graph_csr.is_some(),
         },
         &parameters,
         param_builder.pp("enc"),
@@ -565,7 +599,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
                 encoder_hidden: &args.encoder_layers,
                 level_decoder_dims: &vec![n_features_full; num_levels],
                 embedding_dim: Some(h),
-                value_embedding: Some(value_embedding.n_vocab),
+                value_embedding: Some(value_embedding.n_value_bins),
             },
         )?;
     }
@@ -574,8 +608,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         "input: {} -> indexed encoder (emb={}, ctx={}) -> {} decoders (D={}, ctx={})",
         n_features_full, h, args.context_size, num_levels, n_features_full, dec_context_size,
     );
-
-    let gene_names = data_vec.row_names()?;
 
     // Read bulk data aligned to SC genes
     let bulk = args
@@ -618,44 +650,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // already computed for shortlist selection.
     let feature_fisher_weights = shortlist_weights.clone();
 
-    // Optional Ball-Karrer-Newman feature-graph likelihood (Poisson on
-    // observed edges, closed-form non-edge partition). Edges may be intra-
-    // or cross-modal on the gene axis; the model is geometry-only.
-    // Reuses the pre-mask graph cached by the row-mask callback when
-    // --feature-network-restrict is set (one parse total instead of two).
-    let cached_pre_mask = cached_graph.borrow_mut().take();
-    let cached_pre_mask_keep = cached_keep.borrow_mut().take();
-    let graph_for_bkn: Option<FeaturePairGraph> = match (cached_pre_mask, cached_pre_mask_keep) {
-        (Some(pre_graph), Some(keep)) => Some(remap_graph_to_subset(pre_graph, &keep)),
-        _ => args
-            .feature_network
-            .as_deref()
-            .map(|path| -> anyhow::Result<_> {
-                let mut g = FeaturePairGraph::from_edge_list(
-                    path,
-                    gene_names.to_vec(),
-                    args.feature_network_prefix_match,
-                    args.feature_network_delim,
-                )?;
-                g.augment_with_snn(args.feature_network_snn_min_shared);
-                Ok(g)
-            })
-            .transpose()?,
-    };
-    let graph_cfg: Option<crate::topic::graph_likelihood::PoissonGraphConfig> = graph_for_bkn
-        .as_ref()
-        .map(|g| {
-            crate::topic::graph_likelihood::PoissonGraphConfig::build(
-                g,
-                n_features_full,
-                h,
-                args.graph_loss_weight,
-                &param_builder,
-                &dev,
-            )
-        })
-        .transpose()?;
-
     let train_config = IndexedTrainConfig {
         parameters: &parameters,
         dev: &dev,
@@ -670,7 +664,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         feature_mean: &feature_mean,
         feature_fisher_weights: &feature_fisher_weights,
         grad_clip: args.grad_clip,
-        graph_warmup_epochs: args.graph_warmup_epochs,
+        feature_graph: feature_graph_csr.clone(),
     };
 
     let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_full, &bulk_deltas) {
@@ -684,7 +678,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         &decoders,
         &train_config,
         bulk_with_deltas,
-        graph_cfg.as_ref(),
     )?;
 
     info!("Writing down the model parameters");
@@ -697,7 +690,19 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // Persist trainable weights, model architecture, and shortlist weights
     // so `senna predict` (and `--init-from` re-runs) can rebuild this model.
     use crate::topic::model_metadata::{
-        save_feature_mean, save_parameters, save_shortlist_weights, TopicModelMetadata,
+        save_feature_graph_into_varmap, save_feature_mean, save_parameters, save_shortlist_weights,
+        TopicModelMetadata,
+    };
+
+    // Bake the feature graph into the VarMap (non-trainable) before the
+    // safetensors snapshot is written. Adam has already stopped, so adding
+    // Vars at this point doesn't affect optimization.
+    let n_graph_edges: Option<usize> = match feature_graph_csr.as_ref() {
+        Some(g) => {
+            save_feature_graph_into_varmap(&mut parameters, &dev, g)?;
+            Some(g.col_idx.len())
+        }
+        None => None,
     };
     save_parameters(&parameters, &args.out)?;
     let mut metadata = TopicModelMetadata {
@@ -715,8 +720,9 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         embedding_dim: Some(h),
         enc_context_size: Some(args.context_size),
         dec_context_size: Some(dec_context_size),
-        value_vocab_size: Some(value_embedding.n_vocab),
+        n_value_bins: Some(value_embedding.n_value_bins),
         theta_mean: None,
+        n_graph_edges,
     };
     metadata.save(&args.out)?;
     save_shortlist_weights(&shortlist_weights, &gene_names, &args.out)?;
@@ -737,6 +743,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             embedding_dim: h,
             layers: &args.encoder_layers,
             value_embedding,
+            use_gat: feature_graph_csr.is_some(),
         },
         &parameters,
         cpu_vb.pp("enc"),

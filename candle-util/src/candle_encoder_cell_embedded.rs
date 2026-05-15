@@ -26,7 +26,7 @@ use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 ///
 /// The per-slot weighting on ρ is the learned **intensity embedding**: the
 /// normalized value is binned at two scales (linear + log1p), each bin
-/// looked up in an `[n_vocab, H]` table, the two summed and sigmoid'd into
+/// looked up in an `[n_value_bins, H]` table, the two summed and sigmoid'd into
 /// a per-dimension **gate** on ρ — times the `fisher · mask` scalar. The
 /// fixed Anscombe scalar transform has been retired here.
 pub struct CellEmbeddedEncoder {

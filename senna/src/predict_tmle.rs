@@ -256,6 +256,7 @@ fn accumulate_block_indexed(
         &enc_pack.values,
         enc_values_null.as_ref(),
         enc_pack.values_mean.as_ref(),
+        None,
         false,
     )?;
     let theta_nk_t = log_z_nk.exp()?.to_device(&Device::Cpu)?;

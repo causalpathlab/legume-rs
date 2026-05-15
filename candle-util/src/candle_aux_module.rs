@@ -69,7 +69,7 @@ pub struct AggregateEmbedding {
     n_feature: usize,
     n_module: usize,
     n_type: usize,
-    n_vocab: usize,
+    n_value_bins: usize,
 }
 
 impl AggregateEmbedding {
@@ -84,7 +84,7 @@ impl AggregateEmbedding {
     }
 
     fn whitened_discretize_flatten(&self, x_n_hk: &Tensor) -> Result<Tensor> {
-        discretize_whitened(x_n_hk, self.n_vocab)?.flatten_all()
+        discretize_whitened(x_n_hk, self.n_value_bins)?.flatten_all()
     }
 }
 
@@ -120,14 +120,14 @@ pub fn aggregate_embedding(
     n_feature: usize,
     n_module: usize,
     n_type: usize,
-    n_vocab: usize,
+    n_value_bins: usize,
     vb: candle_nn::VarBuilder,
 ) -> Result<AggregateEmbedding> {
     let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
     let weight_dh_k = vb.get_with_hints((n_feature * n_type, n_module), "logits", init_ws)?;
 
     let embeddings = vb.get_with_hints(
-        (n_vocab, 1),
+        (n_value_bins, 1),
         "embedding",
         candle_nn::Init::Randn {
             mean: 0.,
@@ -136,7 +136,7 @@ pub fn aggregate_embedding(
     )?;
 
     let log1p_embeddings = vb.get_with_hints(
-        (n_vocab, 1),
+        (n_value_bins, 1),
         "log1p.embedding",
         candle_nn::Init::Randn {
             mean: 0.,
@@ -151,6 +151,6 @@ pub fn aggregate_embedding(
         n_feature,
         n_module,
         n_type,
-        n_vocab,
+        n_value_bins,
     })
 }

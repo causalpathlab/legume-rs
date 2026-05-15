@@ -16,7 +16,6 @@
 //! is needed for this model.
 
 use super::common::sample_collapsed_data;
-use super::graph_likelihood::{graph_loss, PoissonGraphConfig};
 use super::train_indexed::{clip_and_step_dense, PhaseTimers};
 use crate::embed_common::*;
 use crate::logging::new_progress_bar;
@@ -64,8 +63,6 @@ pub(crate) struct CellEmbeddedTrainConfig<'a> {
     pub feature_fisher_weights: &'a [f32],
     /// Global L2 gradient norm clip per minibatch (0 = off).
     pub grad_clip: f32,
-    /// Run the BKN graph likelihood only for the first N epochs (0 = never drop).
-    pub graph_warmup_epochs: usize,
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -190,7 +187,6 @@ pub(crate) fn train_mixed_cell(
     encoder: &CellEmbeddedEncoder,
     decoders: &[EmbeddedTopicDecoder],
     config: &CellEmbeddedTrainConfig,
-    graph_cfg: Option<&PoissonGraphConfig>,
 ) -> anyhow::Result<TrainScores> {
     let num_levels = collapsed_levels.len();
     anyhow::ensure!(
@@ -289,29 +285,6 @@ pub(crate) fn train_mixed_cell(
                     break;
                 }
             }
-        }
-
-        // Once-per-epoch BKN graph-likelihood gradient step on the
-        // decoupled ρ_graph. Same gating as `train_indexed::train_mixed`.
-        let graph_active = match config.graph_warmup_epochs {
-            0 => true,
-            n => epoch < n,
-        };
-        if let (true, Some(cfg)) = (graph_active, graph_cfg) {
-            let g_loss = graph_loss(cfg)?;
-            clip_grads_and_step(&mut adam, &g_loss, f64::from(config.grad_clip))?;
-            let d = cfg.rho_graph.dim(0)? as f32;
-            info!(
-                "[epoch {}] graph_nll/gene={:.4}",
-                epoch,
-                g_loss.to_scalar::<f32>()? / d.max(1.0)
-            );
-        } else if epoch == config.graph_warmup_epochs && graph_cfg.is_some() {
-            info!(
-                "[epoch {}] dropping graph likelihood (warmup={} reached); \
-                 ρ_graph frozen, tether continues",
-                epoch, config.graph_warmup_epochs,
-            );
         }
 
         // Single GPU→CPU sync per epoch (vs one per minibatch).

@@ -183,19 +183,20 @@ pub fn count_rate_clean(
 /// Each row (a cell, or a pseudobulk) is whitened to `[0, 1)` against its
 /// own min/max so every data point lands on the same bin scale; the `+1`
 /// in the denominator keeps a constant row from dividing by zero. Output
-/// indices are in `[0, n_vocab - 1)` and keep `x`'s shape. Non-differentiable
-/// (the value is data, not a parameter) — gradients reach the embedding
-/// tables through the lookup, exactly as in a normal `Embedding`.
+/// indices are in `[0, n_value_bins - 1)` and keep `x`'s shape.
+/// Non-differentiable (the value is data, not a parameter) — gradients
+/// reach the embedding tables through the lookup, exactly as in a normal
+/// `Embedding`.
 ///
 /// Shared with `candle_aux_module`'s `AggregateEmbedding`, which flattens
 /// the result.
-pub(crate) fn discretize_whitened(x: &Tensor, n_vocab: usize) -> Result<Tensor> {
+pub(crate) fn discretize_whitened(x: &Tensor, n_value_bins: usize) -> Result<Tensor> {
     let last = x.rank() - 1;
     let min_val = x.min_keepdim(last)?;
     let max_val = x.max_keepdim(last)?;
     let div_val = ((max_val - &min_val)? + 1.0)?;
     let whitened = x.broadcast_sub(&min_val)?.broadcast_div(&div_val)?;
-    (whitened * (n_vocab as f64 - 1.0))?
+    (whitened * (n_value_bins as f64 - 1.0))?
         .floor()?
         .to_dtype(DType::U32)?
         .contiguous()
@@ -209,17 +210,17 @@ pub struct ValueEmbeddingConfig {
     /// performance one. The per-bin vector width is the feature embedding
     /// dim `H` itself: the value embedding produces the gate on ρ
     /// directly, with no projection.
-    pub n_vocab: usize,
+    pub n_value_bins: usize,
 }
 
 /// Learned intensity-embedding value transform — a *learned* alternative
 /// to the fixed [`anscombe_lite`] scalar, shared by the indexed and
 /// cell-embedded encoders.
 ///
-/// The normalized value is `log1p`-scaled, binned into `n_vocab` bins,
-/// and the bin looked up in an `[n_vocab, H]` table, sigmoid'd into a
-/// per-dimension **gate** `[*, K, H]` on the feature embedding ρ. The
-/// lookup width is `H`, so the lookup *is* the pre-gate logit — no
+/// The normalized value is `log1p`-scaled, binned into `n_value_bins`
+/// bins, and the bin looked up in an `[n_value_bins, H]` table, sigmoid'd
+/// into a per-dimension **gate** `[*, K, H]` on the feature embedding ρ.
+/// The lookup width is `H`, so the lookup *is* the pre-gate logit — no
 /// projection layer, no matmul (the only real compute is the `[*, K]`
 /// `log1p` + whitening + one gather).
 ///
@@ -227,18 +228,18 @@ pub struct ValueEmbeddingConfig {
 /// since per-row min-max whitening collapses heavy-tailed count data into
 /// the lowest one or two linear bins.
 pub struct ValueEmbedding {
-    n_vocab: usize,
+    n_value_bins: usize,
     emb_log: Embedding,
 }
 
 impl ValueEmbedding {
-    /// Build the `[n_vocab, H]` `log1p`-scale lookup table. `vb` should
-    /// already be scoped (callers pass `vb.pp("nn.enc.value")` so
+    /// Build the `[n_value_bins, H]` `log1p`-scale lookup table. `vb`
+    /// should already be scoped (callers pass `vb.pp("nn.enc.value")` so
     /// safetensors keys are consistent across encoders).
     pub fn new(cfg: ValueEmbeddingConfig, embedding_dim: usize, vb: VarBuilder) -> Result<Self> {
-        let emb_log = candle_nn::embedding(cfg.n_vocab, embedding_dim, vb.pp("embed_log"))?;
+        let emb_log = candle_nn::embedding(cfg.n_value_bins, embedding_dim, vb.pp("embed_log"))?;
         Ok(Self {
-            n_vocab: cfg.n_vocab,
+            n_value_bins: cfg.n_value_bins,
             emb_log,
         })
     }
@@ -252,7 +253,7 @@ impl ValueEmbedding {
     /// negligible against the dynamic range, so bins spread properly.
     pub fn gate(&self, norm_values: &Tensor) -> Result<Tensor> {
         let log_x = ((norm_values * 1e4)? + 1.0)?.log()?;
-        let bin_log = discretize_whitened(&log_x, self.n_vocab)?;
+        let bin_log = discretize_whitened(&log_x, self.n_value_bins)?;
         let logit = self.emb_log.forward(&bin_log)?; // [*, K, H]
         ops::sigmoid(&logit) // [*, K, H]
     }

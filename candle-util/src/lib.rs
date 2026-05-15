@@ -1,3 +1,4 @@
+pub mod candle_aux_gat;
 pub mod candle_aux_layers;
 pub mod candle_aux_linear;
 pub mod candle_aux_module;

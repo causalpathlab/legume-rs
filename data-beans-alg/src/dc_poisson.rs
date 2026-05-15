@@ -895,7 +895,7 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
                 guard,
                 &mut log_probs,
                 0..num_entities,
-                |log_probs, cand| argmax_log_restricted(log_probs, cand),
+                argmax_log_restricted,
             )
         };
         total_moves += sc.moves;
