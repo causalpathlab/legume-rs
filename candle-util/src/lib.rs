@@ -30,6 +30,7 @@ pub mod candle_topic_refinement;
 pub mod candle_vae_inference;
 pub mod candle_value_transform;
 pub mod cli;
+pub mod frozen_features;
 pub mod sgvb;
 
 pub use candle_core;

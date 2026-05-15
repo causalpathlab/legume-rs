@@ -295,6 +295,18 @@ pub struct CellEmbeddedTopicArgs {
     )]
     feature_name_kind: FeatureNameKindArg,
 
+    #[arg(
+        long,
+        help = "Reuse a pre-trained per-gene embedding ρ from a prior senna run. \
+                Loads `{prefix}.feature_embedding.parquet` (topic / cell-embedded-\
+                topic) or `{prefix}.dictionary.parquet` (gbe). Strict-intersects \
+                gene names under `--feature-name-kind`; unmatched genes are \
+                dropped from training. Encoder/decoder ρ stays fixed; the cell- \
+                embedded FC stack, α, and value-embedding train as usual. \
+                Incompatible with `--feature-network`."
+    )]
+    freeze_feature_embedding: Option<Box<str>>,
+
     #[command(flatten)]
     cnv: CnvArgs,
 }
@@ -340,9 +352,32 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     } else {
         args.feature_network.as_deref()
     };
+    let frozen_spec: Option<crate::topic::freeze::FrozenFeatureSpec> =
+        match args.freeze_feature_embedding.as_deref() {
+            None => None,
+            Some(prefix) => {
+                anyhow::ensure!(
+                    args.feature_network.is_none(),
+                    "--freeze-feature-embedding is incompatible with --feature-network"
+                );
+                let kind: Option<auxiliary_data::feature_names::FeatureNameKind> =
+                    args.feature_name_kind.clone().into();
+                let kind = kind
+                    .unwrap_or(auxiliary_data::feature_names::FeatureNameKind::Gene { delim: '_' });
+                Some(crate::topic::freeze::FrozenFeatureSpec::resolve_from_prefix(prefix, kind)?)
+            }
+        };
+
     let feature_network = crate::topic::common::setup_feature_network(restrict_path, net_opts);
-    let feature_mask_fn: Option<&crate::topic::common::FeatureMaskFn> =
-        feature_network.mask_fn.as_deref();
+    let freeze_mask_holder = frozen_spec.as_ref().map(|s| s.mask_fn());
+    let feature_mask_fn: Option<&crate::topic::common::FeatureMaskFn> = match (
+        freeze_mask_holder.as_deref(),
+        feature_network.mask_fn.as_deref(),
+    ) {
+        (Some(fm), _) => Some(fm),
+        (None, Some(nm)) => Some(nm),
+        (None, None) => None,
+    };
 
     let PreparedData {
         data_vec,
@@ -428,6 +463,37 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         })
         .collect();
 
+    let gene_names_for_freeze = data_vec.row_names()?;
+    if let Some(spec) = frozen_spec.as_ref() {
+        anyhow::ensure!(
+            args.init_from.is_none(),
+            "--freeze-feature-embedding is incompatible with --init-from"
+        );
+        let host = spec.materialize(&gene_names_for_freeze)?;
+        anyhow::ensure!(
+            host.h == h,
+            "frozen feature embedding has H={} but --embedding-dim={}",
+            host.h,
+            h
+        );
+        anyhow::ensure!(
+            host.e_feat.nrows() == n_features_full,
+            "frozen ρ has {} rows but the post-mask gene axis has {} (bug)",
+            host.e_feat.nrows(),
+            n_features_full
+        );
+        candle_util::frozen_features::overwrite_var_2d(
+            &parameters,
+            "enc.feature.embeddings",
+            &host.e_feat,
+            &dev,
+        )?;
+        info!(
+            "Freeze mode: ρ seeded from {} (D={}, H={}); FC/α/value-embedding train, ρ stays fixed",
+            spec.dictionary_path, n_features_full, h
+        );
+    }
+
     if let Some(prefix) = args.init_from.as_deref() {
         use crate::topic::warm_start::{warm_start_load, WarmStartCheck};
         warm_start_load(
@@ -494,6 +560,7 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         shortlist_weights: &shortlist_weights,
         feature_fisher_weights: &feature_fisher_weights,
         grad_clip: args.grad_clip,
+        frozen_feature_var: frozen_spec.as_ref().map(|_| "enc.feature.embeddings"),
     };
 
     let scores = train_mixed_cell(

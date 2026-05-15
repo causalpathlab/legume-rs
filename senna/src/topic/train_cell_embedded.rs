@@ -63,6 +63,11 @@ pub(crate) struct CellEmbeddedTrainConfig<'a> {
     pub feature_fisher_weights: &'a [f32],
     /// Global L2 gradient norm clip per minibatch (0 = off).
     pub grad_clip: f32,
+    /// When `Some(name)`, exclude the named `Var` from AdamW (used to
+    /// freeze ρ when its values came from a prior senna run). The
+    /// cell-embedded path has no explicit `rho_l2` term to gate, so this
+    /// only affects optimizer membership.
+    pub frozen_feature_var: Option<&'a str>,
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -212,7 +217,20 @@ pub(crate) fn train_mixed_cell(
     }
     info!("Mixed cell-embedded multi-level training: {num_levels} levels, {total_epochs} epochs");
 
-    let adam_vars: Vec<Var> = config.parameters.all_vars();
+    let adam_vars: Vec<Var> = match config.frozen_feature_var {
+        None => config.parameters.all_vars(),
+        Some(name) => {
+            let trainable =
+                candle_util::frozen_features::trainable_vars(config.parameters, &[name]);
+            log::info!(
+                "Freeze mode: AdamW over {} trainable vars ({} frozen, key='{}')",
+                trainable.len(),
+                config.parameters.all_vars().len() - trainable.len(),
+                name
+            );
+            trainable
+        }
+    };
     let mut adam = AdamW::new_lr(adam_vars, f64::from(config.learning_rate))?;
 
     let prog_bar = new_progress_bar(total_epochs as u64);

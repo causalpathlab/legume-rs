@@ -15,8 +15,10 @@ use crate::training::{
     train_composite, AxisSampler, CellCellPbChainTraining, CellCellTraining, CompositeAxis,
     CompositeMode, CompositeTrainContext, TrainingParams,
 };
+use auxiliary_data::frozen_features::FrozenFeatureHost;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use candle_util::frozen_features::trainable_vars;
 use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, MultilevelParams};
 use data_beans_alg::gene_weighting::{
     compute_nb_fisher_weights, load_per_gene_weights, save_per_gene_weights,
@@ -140,6 +142,20 @@ pub struct FitConfig {
     /// (the shared `E_feat`, `b_feat`, and every per-axis head). Post-
     /// step shrinkage; doesn't enter the backward graph. `0.0` disables.
     pub weight_decay: f64,
+    /// Pre-trained, frozen feature side loaded from a prior gbe / topic
+    /// run. When `Some`:
+    /// - The caller MUST have already called
+    ///   `unified.subset_features(&host.keep_target_indices)` so the
+    ///   feature axis matches `host.e_feat.nrows()` row-for-row.
+    /// - `E_feat` and `b_feat` are still registered in the VarMap (so
+    ///   they round-trip through senna's output), but the optimizer
+    ///   excludes them via [`candle_util::frozen_features::trainable_vars`].
+    /// - `feature_embedding_l2` is forced to 0 (no point regularizing
+    ///   non-trainable weights).
+    /// - `feature_network` MUST be `None` (SGC smoothing of a frozen
+    ///   table has no compensating gradient path).
+    /// - `embedding_dim` MUST equal `host.h`.
+    pub frozen_feature_host: Option<FrozenFeatureHost>,
 }
 
 /// Cell-cell NCE configuration. Positives = neighbor pairs from a
@@ -498,7 +514,35 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // The cell head allocates the canonical "e_feat" / "b_feat" /
     // "e_cell" / "b_cell" Vars; every level head then clones those
     // shared `e_feat` / `b_feat` Tensors and registers its own cell
-    // side under a unique `pb_l{idx}` prefix.
+    // side under a unique `pb_l{idx}` prefix. When `frozen_feature_host`
+    // is set, `e_feat` and `b_feat` are seeded from the host matrix and
+    // later excluded from the AdamW var set (see `opt_vars` below).
+    let frozen_init = config.frozen_feature_host.as_ref();
+    if let Some(host) = frozen_init {
+        anyhow::ensure!(
+            host.h == h,
+            "frozen feature side has H={} but --embedding-dim={}",
+            host.h,
+            h
+        );
+        anyhow::ensure!(
+            host.e_feat.nrows() == n_features,
+            "frozen feature side has {} rows but unified feature axis has {} \
+             — caller must call unified.subset_features(&host.keep_target_indices) first",
+            host.e_feat.nrows(),
+            n_features
+        );
+        anyhow::ensure!(
+            config.feature_network.is_none(),
+            "--feature-network is incompatible with a frozen feature embedding \
+             (SGC smoothing has no learnable parameter to nudge)"
+        );
+        info!(
+            "Freeze mode: E_feat / b_feat seeded from prior run (D={}, H={}); \
+             cell side trains, feature side stays fixed",
+            n_features, h
+        );
+    }
     let cell_model = JointEmbedModel::new_with_init(
         ModelArgs {
             n_features,
@@ -506,9 +550,11 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             embedding_dim: h,
         },
         &ModelInit {
-            e_feat: None,
+            e_feat: frozen_init.map(|host| &host.e_feat),
             e_cell: None,
-            b_feat: &zeros_features,
+            b_feat: frozen_init
+                .map(|host| host.b_feat.as_slice())
+                .unwrap_or(&zeros_features),
             b_cell: &zeros_cells,
         },
         &varmap,
@@ -593,8 +639,21 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
 
     let mut smoother = build_smoother(config.feature_network.take(), n_features, h)?;
 
+    let opt_vars = if config.frozen_feature_host.is_some() {
+        // E_feat / b_feat are seeded from the frozen host but excluded
+        // from gradient steps — see `frozen_feature_host` doc on FitConfig.
+        let trainable = trainable_vars(&varmap, &["e_feat", "b_feat"]);
+        info!(
+            "Freeze mode: AdamW over {} cell-side vars ({} feature-side vars excluded)",
+            trainable.len(),
+            varmap.all_vars().len() - trainable.len()
+        );
+        trainable
+    } else {
+        varmap.all_vars()
+    };
     let mut opt = AdamW::new(
-        varmap.all_vars(),
+        opt_vars,
         ParamsAdamW {
             lr: config.learning_rate,
             weight_decay: config.weight_decay,
@@ -920,6 +979,12 @@ fn build_smoother(
 }
 
 fn stage_params(config: &FitConfig) -> TrainingParams {
+    // No point regularizing the frozen feature side — it doesn't move.
+    let feature_embedding_l2 = if config.frozen_feature_host.is_some() {
+        0.0
+    } else {
+        config.feature_embedding_l2
+    };
     TrainingParams {
         epochs: config.epochs,
         batches_per_epoch: config.batches_per_epoch,
@@ -927,6 +992,6 @@ fn stage_params(config: &FitConfig) -> TrainingParams {
         num_negatives: config.num_negatives,
         seed: config.seed,
         composite_mode: config.composite_mode,
-        feature_embedding_l2: config.feature_embedding_l2,
+        feature_embedding_l2,
     }
 }

@@ -93,6 +93,12 @@ pub(crate) struct IndexedTrainConfig<'a> {
     /// this is a post-step parameter shrinkage that doesn't enter the
     /// loss/backward graph. `0.0` disables.
     pub weight_decay: f32,
+    /// When `Some(name)`, exclude the named `Var` from AdamW (used to
+    /// freeze ρ when its values came from a prior senna run) and skip
+    /// the `rho_l2` term (no point regularizing a non-trainable
+    /// parameter). The encoder/decoder still reference ρ through the
+    /// same `Var`; freezing just keeps the optimizer's hands off.
+    pub frozen_feature_var: Option<&'a str>,
 }
 
 /// Global-L2-norm clip + dense `AdamW` step from a precomputed `GradStore`.
@@ -223,7 +229,20 @@ pub(crate) fn train_mixed(
 
     info!("Mixed multi-level training: {num_levels} levels, {total_epochs} epochs");
 
-    let adam_vars: Vec<Var> = config.parameters.all_vars();
+    let adam_vars: Vec<Var> = match config.frozen_feature_var {
+        None => config.parameters.all_vars(),
+        Some(name) => {
+            let trainable =
+                candle_util::frozen_features::trainable_vars(config.parameters, &[name]);
+            info!(
+                "Freeze mode: AdamW over {} trainable vars ({} frozen, key='{}')",
+                trainable.len(),
+                config.parameters.all_vars().len() - trainable.len(),
+                name
+            );
+            trainable
+        }
+    };
     let mut adam = AdamW::new(
         adam_vars,
         candle_nn::ParamsAdamW {
@@ -312,7 +331,7 @@ pub(crate) fn train_mixed(
                     &mb.output_log_q_s,
                 )?;
                 let mut loss = (&kl - &llik)?.mean_all()?;
-                if config.feature_embedding_l2 > 0.0 {
+                if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
                     // `mean_all` (not `sum_all`) so λ stays scale-invariant
                     // across `D · H`: λ=1 means per-element shrinkage of one
                     // loss unit, not D·H · mean(ρ²).
@@ -373,7 +392,7 @@ pub(crate) fn train_mixed(
                     &mb.output_log_q_s,
                 )?;
                 let mut loss = (&kl - &llik)?.mean_all()?;
-                if config.feature_embedding_l2 > 0.0 {
+                if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
                     // `mean_all` (not `sum_all`) so λ stays scale-invariant
                     // across `D · H`: λ=1 means per-element shrinkage of one
                     // loss unit, not D·H · mean(ρ²).
