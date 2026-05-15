@@ -127,6 +127,22 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
+        help = "Reuse a pre-trained per-gene embedding ρ from a prior senna run. \
+                Loads `{prefix}.feature_embedding.parquet` (topic / cell-embedded-\
+                topic layout) or `{prefix}.dictionary.parquet` (gbe layout). \
+                Gene names are strict-intersected against this dataset's gene \
+                axis under the `--feature-name-kind` rule; unmatched genes are \
+                dropped from training. The encoder/decoder ρ stays fixed; \
+                everything else (α, FC, BN, GCN, value-embedding, decoder \
+                topic embeddings) trains as usual. Incompatible with \
+                `--feature-network` (SGC nudge has no learnable target); \
+                forces `--feature-embedding-l2 0` (frozen ρ doesn't need \
+                shrinkage)."
+    )]
+    freeze_feature_embedding: Option<Box<str>>,
+
+    #[arg(
+        long,
         default_value_t = 0.0,
         help = "AdamW decoupled weight decay applied uniformly to every \
                 parameter (encoder ρ + α + FC + BN + GCN γ + ValueEmbedding). \
@@ -425,9 +441,37 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     } else {
         args.feature_network.as_deref()
     };
+    // Freeze resolution — must happen before we pick the feature_mask_fn
+    // since freeze owns the mask when active.
+    let frozen_spec: Option<crate::topic::freeze::FrozenFeatureSpec> =
+        match args.freeze_feature_embedding.as_deref() {
+            None => None,
+            Some(prefix) => {
+                anyhow::ensure!(
+                    args.feature_network.is_none(),
+                    "--freeze-feature-embedding is incompatible with --feature-network \
+                     (SGC γ-gated graph diffusion has no learnable target when ρ is frozen)"
+                );
+                let kind: Option<auxiliary_data::feature_names::FeatureNameKind> =
+                    args.feature_name_kind.clone().into();
+                // Auto-detect would require row names we don't have yet; default
+                // to Gene { delim: '_' } since freeze inputs are always gene-keyed.
+                let kind = kind
+                    .unwrap_or(auxiliary_data::feature_names::FeatureNameKind::Gene { delim: '_' });
+                Some(crate::topic::freeze::FrozenFeatureSpec::resolve_from_prefix(prefix, kind)?)
+            }
+        };
+
     let feature_network = crate::topic::common::setup_feature_network(restrict_path, net_opts);
-    let feature_mask_fn: Option<&crate::topic::common::FeatureMaskFn> =
-        feature_network.mask_fn.as_deref();
+    let freeze_mask_holder = frozen_spec.as_ref().map(|s| s.mask_fn());
+    let feature_mask_fn: Option<&crate::topic::common::FeatureMaskFn> = match (
+        freeze_mask_holder.as_deref(),
+        feature_network.mask_fn.as_deref(),
+    ) {
+        (Some(fm), _) => Some(fm),
+        (None, Some(nm)) => Some(nm),
+        (None, None) => None,
+    };
 
     let PreparedData {
         data_vec,
@@ -549,6 +593,44 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         })
         .collect();
 
+    // Overwrite ρ in place with the frozen values BEFORE warm-start.
+    // The encoder/decoder both hold a Tensor reference into the same Var,
+    // so a single `var.set(...)` updates everywhere. The Var stays in the
+    // VarMap (round-trips through safetensors); the optimizer excludes it
+    // via `trainable_vars` below — see `train_indexed.rs`.
+    if let Some(spec) = frozen_spec.as_ref() {
+        anyhow::ensure!(
+            args.init_from.is_none(),
+            "--freeze-feature-embedding is incompatible with --init-from \
+             (warm-start would overwrite the frozen ρ from a different checkpoint)"
+        );
+        let host = spec.materialize(&gene_names)?;
+        anyhow::ensure!(
+            host.h == h,
+            "frozen feature embedding has H={} but --embedding-dim={}",
+            host.h,
+            h
+        );
+        anyhow::ensure!(
+            host.e_feat.nrows() == n_features_full,
+            "frozen ρ has {} rows but the post-mask gene axis has {} — \
+             freeze loader and feature-mask disagree (this is a bug, please report)",
+            host.e_feat.nrows(),
+            n_features_full
+        );
+        candle_util::frozen_features::overwrite_var_2d(
+            &parameters,
+            "enc.feature.embeddings",
+            &host.e_feat,
+            &dev,
+        )?;
+        info!(
+            "Freeze mode: ρ seeded from {} (D={}, H={}); encoder/decoders share frozen ρ, \
+             only α + FC + BN (+ GCN γ + value-embedding) train",
+            spec.dictionary_path, n_features_full, h
+        );
+    }
+
     if let Some(prefix) = args.init_from.as_deref() {
         use crate::topic::warm_start::{warm_start_load, WarmStartCheck};
         warm_start_load(
@@ -630,6 +712,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         feature_graph: feature_graph_csr.clone(),
         feature_embedding_l2: args.feature_embedding_l2,
         weight_decay: args.weight_decay,
+        frozen_feature_var: frozen_spec.as_ref().map(|_| "enc.feature.embeddings"),
     };
 
     let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_full, &bulk_deltas) {

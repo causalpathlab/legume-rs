@@ -175,7 +175,7 @@ impl UnifiedData {
         self.triplets = new_triplets;
 
         log::info!(
-            "HVG subset: {} → {} features ({} → {} edges retained)",
+            "Feature subset: {} → {} features ({} → {} edges retained)",
             n_old,
             new_feature_names.len(),
             n_before,
