@@ -79,9 +79,20 @@ pub(crate) struct IndexedTrainConfig<'a> {
     /// Global L2 gradient norm clip per minibatch (0 = off).
     pub grad_clip: f32,
     /// Optional feature-feature graph attached to every level loader so
-    /// that the indexed encoder's GAT block sees per-cell sub-adjacency.
-    /// `None` skips the GAT branch and keeps the legacy sum-pool path.
+    /// that the indexed encoder's GCN block sees per-cell sub-adjacency.
+    /// `None` skips the GCN branch and keeps the legacy sum-pool path.
     pub feature_graph: Option<Arc<GraphCsr>>,
+    /// Explicit L2 penalty `λ_ρ · ‖ρ‖_F²` on the feature embedding
+    /// matrix ρ ∈ ℝ^{D × H}. Added to the per-minibatch loss before
+    /// backward, so the gradient on ρ gets an extra `2 · λ_ρ · ρ`
+    /// shrinkage term. Equivalent to a zero-mean Gaussian prior on ρ
+    /// with precision `2 · λ_ρ`. `0.0` disables.
+    pub feature_embedding_l2: f32,
+    /// AdamW decoupled weight decay applied to *every* parameter
+    /// per-step (not just ρ). Different from `feature_embedding_l2` —
+    /// this is a post-step parameter shrinkage that doesn't enter the
+    /// loss/backward graph. `0.0` disables.
+    pub weight_decay: f32,
 }
 
 /// Global-L2-norm clip + dense `AdamW` step from a precomputed `GradStore`.
@@ -213,7 +224,14 @@ pub(crate) fn train_mixed(
     info!("Mixed multi-level training: {num_levels} levels, {total_epochs} epochs");
 
     let adam_vars: Vec<Var> = config.parameters.all_vars();
-    let mut adam = AdamW::new_lr(adam_vars, f64::from(config.learning_rate))?;
+    let mut adam = AdamW::new(
+        adam_vars,
+        candle_nn::ParamsAdamW {
+            lr: f64::from(config.learning_rate),
+            weight_decay: f64::from(config.weight_decay),
+            ..Default::default()
+        },
+    )?;
     let prog_bar = new_progress_bar(total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);
@@ -293,7 +311,18 @@ pub(crate) fn train_mixed(
                     mb.output_values_weight.as_ref(),
                     &mb.output_log_q_s,
                 )?;
-                let loss = (&kl - &llik)?.mean_all()?;
+                let mut loss = (&kl - &llik)?.mean_all()?;
+                if config.feature_embedding_l2 > 0.0 {
+                    // `mean_all` (not `sum_all`) so λ stays scale-invariant
+                    // across `D · H`: λ=1 means per-element shrinkage of one
+                    // loss unit, not D·H · mean(ρ²).
+                    let rho_l2 = encoder
+                        .feature_embeddings()
+                        .sqr()?
+                        .mean_all()?
+                        .affine(f64::from(config.feature_embedding_l2), 0.0)?;
+                    loss = (loss + rho_l2)?;
+                }
                 timers.decoder_fwd += t_dec.elapsed();
 
                 let t_bwd = Instant::now();
@@ -343,7 +372,18 @@ pub(crate) fn train_mixed(
                     mb.output_values_weight.as_ref(),
                     &mb.output_log_q_s,
                 )?;
-                let loss = (&kl - &llik)?.mean_all()?;
+                let mut loss = (&kl - &llik)?.mean_all()?;
+                if config.feature_embedding_l2 > 0.0 {
+                    // `mean_all` (not `sum_all`) so λ stays scale-invariant
+                    // across `D · H`: λ=1 means per-element shrinkage of one
+                    // loss unit, not D·H · mean(ρ²).
+                    let rho_l2 = encoder
+                        .feature_embeddings()
+                        .sqr()?
+                        .mean_all()?
+                        .affine(f64::from(config.feature_embedding_l2), 0.0)?;
+                    loss = (loss + rho_l2)?;
+                }
                 timers.decoder_fwd += t_dec.elapsed();
 
                 let t_bwd = Instant::now();
@@ -368,12 +408,21 @@ pub(crate) fn train_mixed(
 
         prog_bar.inc(1);
 
-        info!(
-            "[epoch {}] llik={} kl={}",
-            epoch,
-            llik_trace.last().unwrap(),
-            kl_trace.last().unwrap()
-        );
+        if log::log_enabled!(log::Level::Info) {
+            let gamma_str = encoder.gcn_gamma_vec()?.map_or(String::new(), |g| {
+                let l2 = g.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let max_abs = g.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+                let mean = g.iter().sum::<f32>() / (g.len().max(1) as f32);
+                format!(" ‖γ‖={l2:.3e} max|γ|={max_abs:.3e} mean(γ)={mean:+.3e}")
+            });
+            info!(
+                "[epoch {}] llik={} kl={}{}",
+                epoch,
+                llik_trace.last().unwrap(),
+                kl_trace.last().unwrap(),
+                gamma_str,
+            );
+        }
 
         if config.stop.load(Ordering::SeqCst) {
             prog_bar.finish_and_clear();

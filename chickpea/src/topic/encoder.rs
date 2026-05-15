@@ -60,7 +60,7 @@ impl ChickpeaEncoder {
                 value_embedding: ValueEmbeddingConfig {
                     n_value_bins: N_VALUE_BINS,
                 },
-                use_gat: false,
+                use_gcn: false,
             },
             varmap,
             vs.pp("gene_expert"),
@@ -75,7 +75,7 @@ impl ChickpeaEncoder {
                 value_embedding: ValueEmbeddingConfig {
                     n_value_bins: N_VALUE_BINS,
                 },
-                use_gat: false,
+                use_gcn: false,
             },
             varmap,
             vs.pp("atac_expert"),

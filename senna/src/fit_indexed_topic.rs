@@ -115,6 +115,29 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
+        default_value_t = 1.0,
+        help = "L2 penalty λ on the feature embedding matrix ρ ∈ ℝ^{D×H}: \
+                adds λ · mean(ρ²) to the per-minibatch loss (mean-normalized, \
+                so λ stays scale-invariant across D·H). Shrinks β dynamic \
+                range (β = log_softmax(α·ρᵀ)) and can speed ETM convergence \
+                on high-D gene sets. Default 1.0 (mild shrinkage). Set 0.0 \
+                to disable. Typical: 0.1–10.0."
+    )]
+    feature_embedding_l2: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "AdamW decoupled weight decay applied uniformly to every \
+                parameter (encoder ρ + α + FC + BN + GCN γ + ValueEmbedding). \
+                Per-step post-update shrinkage; doesn't enter the backward \
+                graph. Default 0.0 (off, i.e. plain Adam despite the name). \
+                Typical: 1e-5 to 1e-4."
+    )]
+    weight_decay: f32,
+
+    #[arg(
+        long,
         value_enum,
         default_value = "cpu",
         help = "Compute device (cpu|cuda|metal)"
@@ -229,9 +252,9 @@ pub struct IndexedTopicArgs {
     #[arg(
         long,
         help = "Optional feature-feature edge list (TSV/CSV) — wires a \
-                graph-attention layer into the indexed encoder. Per-cell \
-                sub-adjacency on the measured top-K acts as an additive \
-                edge bias in attention so the encoder can pool signal \
+                γ-gated GCN diffusion block into the indexed encoder. \
+                Per-cell sub-adjacency on the measured top-K (pre- \
+                normalised at cache build) lets the encoder pool signal \
                 across functionally related genes. Edges may be intra- \
                 or cross-modal (gene-gene PPI, peak-gene ABC, ATAC- \
                 derived regulatory links). Edge names are resolved \
@@ -260,27 +283,48 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
-        help = "Shared-neighbor edge augmentation threshold (0 disables). \
-                Adds a synthetic edge between any pair that share ≥ N \
-                neighbors in the raw network. Densifies incomplete graphs \
-                before the GAT sees them — same machinery as pinto's \
-                `--snn-min-shared`. Set 2–3 for sparse networks; \
-                BioGRID-scale dense PPIs usually don't need it."
+        default_value_t = 1,
+        help = "Shared-neighbor edge QC: drop edges (u,v) where the \
+                endpoints share fewer than N neighbors in the feature \
+                network. Default 1 drops edges with zero corroboration \
+                — standard PPI/topological-overlap denoising. Set 0 to \
+                keep every parsed edge."
     )]
-    feature_network_snn_min_shared: usize,
+    feature_network_min_shared_neighbors: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Per-node degree cap on the feature network (0 = off). \
+                After shared-neighbor QC, for each feature with degree \
+                > N, rank its neighbors by shared-neighbor count and \
+                keep the top N (union-symmetric: an edge survives iff \
+                either endpoint kept it). Caps PPI hubs whose degree \
+                would otherwise blow up per-cell sub-adjacency."
+    )]
+    feature_network_max_degree: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Iterative k-core pruning threshold on the feature \
+                network (default 0 = off). Drops every feature whose \
+                degree falls below N until the surviving subgraph is \
+                N-degenerate."
+    )]
+    feature_network_min_degree: usize,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Restrict the model to features covered by --feature-network. \
-                Features with zero edges in the network (after alias \
-                resolution + optional SNN augmentation) are physically \
-                dropped from the data axis before projection, collapse, \
-                and training. Useful when the network defines the in-scope \
-                feature set (e.g. PPI-restricted topics)."
+        help = "Disable feature-network feature restriction. By default \
+                when --feature-network is supplied, features with zero \
+                edges after the QC pipeline (shared-neighbor prune → \
+                hub cap → k-core) are dropped from the data axis before \
+                projection, collapse, and training. Pass to keep the \
+                full feature axis (graph diffusion as a soft prior)."
     )]
-    feature_network_restrict: bool,
+    no_feature_network_restrict: bool,
 
     #[arg(
         long,
@@ -337,40 +381,6 @@ impl From<FeatureNameKindArg> for Option<auxiliary_data::feature_names::FeatureN
     }
 }
 
-/// Renumber a `FeaturePairGraph`'s edges + names from a pre-mask axis to
-/// the post-mask one defined by `keep`. Used to avoid re-parsing the same
-/// edge list twice when `--feature-network-restrict` is set.
-pub(crate) fn remap_graph_to_subset(
-    pre: matrix_util::pair_graph::FeaturePairGraph,
-    keep: &[bool],
-) -> matrix_util::pair_graph::FeaturePairGraph {
-    debug_assert_eq!(keep.len(), pre.n_features);
-    let mut old_to_new: Vec<Option<usize>> = vec![None; keep.len()];
-    let mut next = 0usize;
-    for (i, &k) in keep.iter().enumerate() {
-        if k {
-            old_to_new[i] = Some(next);
-            next += 1;
-        }
-    }
-    let feature_names: Vec<Box<str>> = pre
-        .feature_names
-        .into_iter()
-        .zip(keep.iter())
-        .filter_map(|(n, &k)| k.then_some(n))
-        .collect();
-    let feature_edges: Vec<(usize, usize)> = pre
-        .feature_edges
-        .into_iter()
-        .map(|(u, v)| (old_to_new[u].expect("kept"), old_to_new[v].expect("kept")))
-        .collect();
-    matrix_util::pair_graph::FeaturePairGraph {
-        feature_names,
-        n_features: next,
-        feature_edges,
-    }
-}
-
 pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
@@ -403,47 +413,21 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let (effective_multiome, effective_hvg_n, effective_hvg_list) =
         crate::hvg::resolve_multiome_with_hvg(args.multiome, args.data_files.len(), &args.hvg);
 
-    // When --feature-network-restrict is set, parse the network once
-    // inside the row-mask callback. The cached graph carries pre-mask
-    // indices; after mask_rows physically drops dropped-degree features,
-    // we remap to the post-mask axis (rather than parse the file again).
-    let restrict_path: Option<&str> = if args.feature_network_restrict {
-        args.feature_network.as_deref()
-    } else {
-        None
+    let net_opts = crate::topic::common::FeatureNetworkOpts {
+        prefix_match: args.feature_network_prefix_match,
+        delim: args.feature_network_delim,
+        min_shared_neighbors: args.feature_network_min_shared_neighbors,
+        max_degree: args.feature_network_max_degree,
+        min_degree: args.feature_network_min_degree,
     };
-    let net_prefix = args.feature_network_prefix_match;
-    let net_delim = args.feature_network_delim;
-    let net_snn = args.feature_network_snn_min_shared;
-    use matrix_util::pair_graph::FeaturePairGraph;
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    let cached_graph: Rc<RefCell<Option<FeaturePairGraph>>> = Rc::new(RefCell::new(None));
-    let cached_keep: Rc<RefCell<Option<Vec<bool>>>> = Rc::new(RefCell::new(None));
-    let mask_fn_box: Option<Box<crate::topic::common::FeatureMaskFn>> = restrict_path.map(|p| {
-        // Own the path so the closure satisfies `'static`.
-        let path: String = p.to_string();
-        let cached_graph = Rc::clone(&cached_graph);
-        let cached_keep = Rc::clone(&cached_keep);
-        let f: Box<crate::topic::common::FeatureMaskFn> = Box::new(move |row_names| {
-            let mut graph =
-                FeaturePairGraph::from_edge_list(&path, row_names.to_vec(), net_prefix, net_delim)?;
-            graph.augment_with_snn(net_snn);
-            let keep: Vec<bool> = graph.feature_degrees().iter().map(|&d| d > 0).collect();
-            let n_keep = keep.iter().filter(|&&k| k).count();
-            info!(
-                "--feature-network-restrict: keeping {} / {} features with ≥1 \
-                     edge in the network",
-                n_keep,
-                row_names.len()
-            );
-            *cached_keep.borrow_mut() = Some(keep.clone());
-            *cached_graph.borrow_mut() = Some(graph);
-            Ok(keep)
-        });
-        f
-    });
-    let feature_mask_fn: Option<&crate::topic::common::FeatureMaskFn> = mask_fn_box.as_deref();
+    let restrict_path = if args.no_feature_network_restrict {
+        None
+    } else {
+        args.feature_network.as_deref()
+    };
+    let feature_network = crate::topic::common::setup_feature_network(restrict_path, net_opts);
+    let feature_mask_fn: Option<&crate::topic::common::FeatureMaskFn> =
+        feature_network.mask_fn.as_deref();
 
     let PreparedData {
         data_vec,
@@ -510,29 +494,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // for output artifacts further down.
     let gene_names = data_vec.row_names()?;
 
-    // Feature-feature graph: parsed once and (when --feature-network was
-    // supplied) plumbed into the indexed encoder's GAT block as additive
-    // attention bias. Reuses the pre-mask graph cached by the row-mask
-    // callback when --feature-network-restrict is set (one parse total).
-    let cached_pre_mask = cached_graph.borrow_mut().take();
-    let cached_pre_mask_keep = cached_keep.borrow_mut().take();
-    let feature_graph: Option<FeaturePairGraph> = match (cached_pre_mask, cached_pre_mask_keep) {
-        (Some(pre_graph), Some(keep)) => Some(remap_graph_to_subset(pre_graph, &keep)),
-        _ => args
-            .feature_network
-            .as_deref()
-            .map(|path| -> anyhow::Result<_> {
-                let mut g = FeaturePairGraph::from_edge_list(
-                    path,
-                    gene_names.to_vec(),
-                    args.feature_network_prefix_match,
-                    args.feature_network_delim,
-                )?;
-                g.augment_with_snn(args.feature_network_snn_min_shared);
-                Ok(g)
-            })
-            .transpose()?,
-    };
+    let feature_graph: Option<matrix_util::pair_graph::FeaturePairGraph> = feature_network
+        .into_feature_graph(args.feature_network.as_deref(), &gene_names, net_opts)?;
 
     // Convert FeaturePairGraph → GraphCsr at the encoder's feature axis.
     // The CSR is shared (Arc) across every level's data loader and is
@@ -552,7 +515,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     if let Some(ref g) = feature_graph_csr {
         info!(
             "feature-network: {} undirected entries (directed CSR entries: {}); \
-             GAT enabled on indexed encoder",
+             GCN block enabled on indexed encoder",
             g.n_directed_entries() / 2,
             g.n_directed_entries(),
         );
@@ -565,7 +528,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             embedding_dim: h,
             layers: &args.encoder_layers,
             value_embedding,
-            use_gat: feature_graph_csr.is_some(),
+            use_gcn: feature_graph_csr.is_some(),
         },
         &parameters,
         param_builder.pp("enc"),
@@ -665,6 +628,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         feature_fisher_weights: &feature_fisher_weights,
         grad_clip: args.grad_clip,
         feature_graph: feature_graph_csr.clone(),
+        feature_embedding_l2: args.feature_embedding_l2,
+        weight_decay: args.weight_decay,
     };
 
     let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_full, &bulk_deltas) {
@@ -743,7 +708,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             embedding_dim: h,
             layers: &args.encoder_layers,
             value_embedding,
-            use_gat: feature_graph_csr.is_some(),
+            use_gcn: feature_graph_csr.is_some(),
         },
         &parameters,
         cpu_vb.pp("enc"),

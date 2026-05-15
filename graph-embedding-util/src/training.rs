@@ -133,6 +133,11 @@ pub struct TrainingParams {
     pub num_negatives: usize,
     pub seed: u64,
     pub composite_mode: CompositeMode,
+    /// Explicit L2 penalty `λ · ‖E_feat‖_F²` on the shared feature
+    /// embedding, added to the per-step composite loss before backward.
+    /// `0.0` disables. Equivalent to a zero-mean Gaussian prior on
+    /// `E_feat` with precision `2 · λ`.
+    pub feature_embedding_l2: f32,
 }
 
 pub struct CompositeTrainContext<'a> {
@@ -206,7 +211,15 @@ pub fn train_composite(
                 )?,
                 CompositeMode::Chain => chain_step(ctx, &mut rng, params, smoother.as_deref())?,
             };
-            let Some(loss) = loss else { continue };
+            let Some(mut loss) = loss else { continue };
+            if params.feature_embedding_l2 > 0.0 {
+                // `mean_all` keeps λ scale-invariant across `D · H`.
+                let l2 = shared_e_feat
+                    .sqr()?
+                    .mean_all()?
+                    .affine(f64::from(params.feature_embedding_l2), 0.0)?;
+                loss = (loss + l2)?;
+            }
             opt.backward_step(&loss)?;
             loss_sum += loss.to_scalar::<f32>()?;
             n_steps += 1;
