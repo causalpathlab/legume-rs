@@ -264,8 +264,7 @@ pub fn refine_assignments(
         // halves are then free to stay put, and the refined hierarchy is
         // broken (violating `fine_to_coarse_from_refined`'s invariant).
         if level + 1 < num_levels {
-            let (reprojected, new_k) =
-                project_to_refinement(&refined[level], &refined[level + 1]);
+            let (reprojected, new_k) = project_to_refinement(&refined[level], &refined[level + 1]);
             refined[level] = reprojected;
             ks[level] = new_k;
         }

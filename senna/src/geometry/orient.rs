@@ -13,11 +13,7 @@ use crate::embed_common::*;
 ///
 /// Returns a fresh matrix; preserves all relative distances and the
 /// PHATE manifold structure (rigid transform).
-pub(crate) fn rotate_root_to_bottom(
-    pb_coords: &Mat,
-    pb_pt: &[f32],
-    q: f32,
-) -> anyhow::Result<Mat> {
+pub(crate) fn rotate_root_to_bottom(pb_coords: &Mat, pb_pt: &[f32], q: f32) -> anyhow::Result<Mat> {
     anyhow::ensure!(pb_coords.ncols() == 2, "expected 2D coords");
     anyhow::ensure!(
         pb_coords.nrows() == pb_pt.len(),
@@ -30,9 +26,7 @@ pub(crate) fn rotate_root_to_bottom(
         "--orient-tip-quantile must be in (0, 0.5]; got {q}"
     );
 
-    let mut idx: Vec<usize> = (0..pb_pt.len())
-        .filter(|&i| pb_pt[i].is_finite())
-        .collect();
+    let mut idx: Vec<usize> = (0..pb_pt.len()).filter(|&i| pb_pt[i].is_finite()).collect();
     anyhow::ensure!(
         idx.len() >= 2,
         "need ≥ 2 PBs with finite pseudotime for orientation; got {}",

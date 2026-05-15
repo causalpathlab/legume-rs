@@ -388,8 +388,7 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         batch_size: args.batch_size,
         num_negatives: args.num_negatives,
         learning_rate: args.learning_rate,
-        // gbe training is deterministic w.r.t. the input; the RNG only
-        // drives minibatch/negative sampling, so a fixed seed suffices.
+        // gbe no longer exposes a --seed knob; pin the sampling RNG.
         seed: 1,
         device: args.device.to_device(args.device_no)?,
         block_size: args.block_size,
