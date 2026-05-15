@@ -211,6 +211,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: None,
         default_colour_by: "cluster",
+        has_latent: true,
     })?;
 
     Ok(())

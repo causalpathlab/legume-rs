@@ -902,6 +902,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         default_colour_by: "cluster",
+        has_latent: true,
     })?;
 
     info!("Done");

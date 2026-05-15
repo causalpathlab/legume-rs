@@ -172,7 +172,8 @@ pub fn kmeans_clustering(latent: &Mat, k: usize, max_iter: usize) -> anyhow::Res
 /// (raw SVD scores, signed embeddings). `Cosine` row-L2-normalizes
 /// instead: distances on the unit sphere are monotonic in cosine, so
 /// the resulting kNN is angular. Use this when the embedding was
-/// trained with a dot-product / cosine objective (e.g. `RunKind::Gbe`).
+/// trained with a dot-product / cosine objective (e.g. `RunKind::Bge`,
+/// `RunKind::Fne`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LatentMetric {
     ZScoreEuclidean,

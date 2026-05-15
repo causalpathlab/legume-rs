@@ -1,8 +1,14 @@
-//! `senna gbe` — thin clap + run-manifest wrapper around the
-//! `graph-embedding-util` engine.
+//! `senna bge` (Bipartite Graph Embedding) — thin clap + run-manifest
+//! wrapper around the `graph-embedding-util` engine.
+//!
+//! Previously `senna gbe`; renamed to clarify that the bipartite (cell ×
+//! feature) graph is *built* internally from expression counts. The
+//! sibling `senna fne` (Feature Network Embedding) is the graph-input
+//! companion that consumes an explicit feature-feature edge list.
+//! `gbe` remains a clap alias for one release cycle.
 //!
 //! All algorithmic work lives in `graph_embedding_util`. This file
-//! exists only to translate `GbeArgs` → `FitConfig`, resolve the
+//! exists only to translate `BgeArgs` → `FitConfig`, resolve the
 //! optional feature-network edge file against the unified feature
 //! axis, and write senna's run manifest after training.
 
@@ -47,7 +53,7 @@ impl From<CompositeModeArg> for ge::CompositeMode {
 }
 
 #[derive(Args, Debug)]
-pub struct GbeArgs {
+pub struct BgeArgs {
     #[arg(
         required = true,
         value_delimiter = ',',
@@ -316,7 +322,7 @@ pub struct GbeArgs {
     out: Box<str>,
 }
 
-pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
+pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     let feature_kind = if args.feature_name_exact {
@@ -379,7 +385,7 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
                  (the frozen gene set is the selection)"
             );
         }
-        Some(load_frozen_feature_host_for_gbe(
+        Some(load_frozen_feature_host_for_bge(
             prefix,
             &unified.feature_names,
             feature_kind,
@@ -500,7 +506,7 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         .map(|v| v.iter().map(|s| s.to_string()).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        kind: crate::run_manifest::RunKind::Gbe,
+        kind: crate::run_manifest::RunKind::Bge,
         prefix: &args.out,
         data_input: &input,
         data_batch: &batch,
@@ -513,6 +519,7 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: None,
         default_colour_by: "cluster",
+        has_latent: true,
     })?;
 
     info!(
@@ -587,41 +594,49 @@ fn load_cell_cell_edges(path: &str, barcodes: &[Box<str>]) -> anyhow::Result<Vec
 }
 
 /// Probe a senna-run prefix for a frozen feature side. Tries:
-///   1. `{prefix}.dictionary.parquet` + `{prefix}.feature_bias.parquet` (gbe).
-///   2. `{prefix}.feature_embedding.parquet` only (topic / cell-embedded-topic;
-///      bias defaults to zero).
+///   1. `{prefix}.dictionary.parquet` + `{prefix}.feature_bias.parquet` (bge layout).
+///   2. `{prefix}.feature_embedding.parquet` + optional `{prefix}.feature_bias.parquet`
+///      (topic / cell-embedded-topic / fne layout — fne writes a learned bias too).
 ///
 /// Strict-intersects gene names against `target_feature_names` under `kind`.
-fn load_frozen_feature_host_for_gbe(
+fn load_frozen_feature_host_for_bge(
     prefix: &str,
     target_feature_names: &[Box<str>],
     kind: ge::FeatureNameKind,
 ) -> anyhow::Result<FrozenFeatureHost> {
-    let gbe_dict = format!("{prefix}.dictionary.parquet");
-    let gbe_bias = format!("{prefix}.feature_bias.parquet");
+    let bge_dict = format!("{prefix}.dictionary.parquet");
+    let bias_file = format!("{prefix}.feature_bias.parquet");
     let topic_dict = format!("{prefix}.feature_embedding.parquet");
 
-    let (dict_path, bias_path) = if Path::new(&gbe_dict).exists() {
-        let bias = Path::new(&gbe_bias).exists().then_some(gbe_bias.clone());
+    let (dict_path, bias_path) = if Path::new(&bge_dict).exists() {
+        let bias = Path::new(&bias_file).exists().then_some(bias_file.clone());
         if bias.is_none() {
             log::warn!(
                 "{} found but {} missing — loading dictionary only, bias defaults to zero",
-                gbe_dict,
-                gbe_bias
+                bge_dict,
+                bias_file
             );
         }
-        (gbe_dict, bias)
+        (bge_dict, bias)
     } else if Path::new(&topic_dict).exists() {
-        info!(
-            "Frozen feature side: loading topic-style {} (bias = 0)",
-            topic_dict
-        );
-        (topic_dict, None)
+        let bias = Path::new(&bias_file).exists().then_some(bias_file.clone());
+        if bias.is_some() {
+            info!(
+                "Frozen feature side: loading {} + {} (fne-style with learned bias)",
+                topic_dict, bias_file
+            );
+        } else {
+            info!(
+                "Frozen feature side: loading topic-style {} (bias = 0)",
+                topic_dict
+            );
+        }
+        (topic_dict, bias)
     } else {
         anyhow::bail!(
             "--freeze-feature-embedding {prefix}: no {prefix}.dictionary.parquet or \
-             {prefix}.feature_embedding.parquet — pass a prior senna gbe / topic / \
-             cell-embedded-topic output prefix"
+             {prefix}.feature_embedding.parquet — pass a prior senna bge / topic / \
+             cell-embedded-topic / fne output prefix"
         );
     };
 

@@ -42,7 +42,8 @@ pub enum RunKind {
     JointTopic,
     Svd,
     JointSvd,
-    Gbe,
+    Bge,
+    Fne,
 }
 
 impl RunKind {
@@ -55,7 +56,8 @@ impl RunKind {
             RunKind::JointTopic => "joint-topic",
             RunKind::Svd => "svd",
             RunKind::JointSvd => "joint-svd",
-            RunKind::Gbe => "gbe",
+            RunKind::Bge => "bge",
+            RunKind::Fne => "fne",
         }
     }
 
@@ -385,6 +387,10 @@ pub struct RunDescription<'a> {
     pub feature_embedding_suffix: Option<&'a str>,
     /// Default `--colour-by` for downstream plot / layout.
     pub default_colour_by: &'a str,
+    /// True if the run emits `{basename}.latent.parquet` (per-cell K-dim
+    /// latent). All cell-based subcommands set this; `fne` (feature-only)
+    /// sets this `false`.
+    pub has_latent: bool,
 }
 
 /// Write `{prefix}.senna.json` describing the run that just finished.
@@ -404,7 +410,9 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     m.data.input_null = desc.data_input_null.to_vec();
     m.data.batch = desc.data_batch.to_vec();
 
-    m.outputs.latent = Some(format!("{basename}.latent.parquet"));
+    if desc.has_latent {
+        m.outputs.latent = Some(format!("{basename}.latent.parquet"));
+    }
     if let Some(suf) = desc.dictionary_suffix {
         m.outputs.dictionary = Some(format!("{basename}.{suf}"));
     }

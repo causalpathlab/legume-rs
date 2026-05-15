@@ -221,11 +221,12 @@ where
         latent.mat = latent.mat.map(f32::exp);
     }
 
-    // GBE is trained with a dot-product / cosine-style objective, so the
-    // kNN graph fed to Leiden should reflect angular distance — not the
-    // default per-dim z-scored Euclidean we use for topic / SVD latents.
+    // BGE / FNE are trained with a dot-product / cosine-style objective,
+    // so the kNN graph fed to Leiden should reflect angular distance —
+    // not the default per-dim z-scored Euclidean we use for topic / SVD
+    // latents.
     let metric = match manifest.kind {
-        RunKind::Gbe => LatentMetric::Cosine,
+        RunKind::Bge | RunKind::Fne => LatentMetric::Cosine,
         _ => LatentMetric::ZScoreEuclidean,
     };
 

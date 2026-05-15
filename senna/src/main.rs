@@ -39,9 +39,10 @@ mod cnv_pseudobulk;
 mod embed_common;
 mod empirical_dict;
 mod eval_topic;
+mod fit_bge;
 mod fit_cell_embedded_topic;
 mod fit_clustering;
-mod fit_gbe;
+mod fit_fne;
 mod fit_indexed_topic;
 mod fit_joint_topic;
 mod fit_pseudotime;
@@ -66,9 +67,10 @@ mod tree_layout;
 use annotate::{annotate_run, AnnotateArgs};
 use embed_common::*;
 use eval_topic::*;
+use fit_bge::{fit_bge, BgeArgs};
 use fit_cell_embedded_topic::*;
 use fit_clustering::*;
-use fit_gbe::{fit_gbe, GbeArgs};
+use fit_fne::{fit_fne, FneArgs};
 use fit_indexed_topic::*;
 use fit_joint_topic::*;
 use fit_pseudotime::{run_pseudotime, PseudotimeArgs};
@@ -251,9 +253,28 @@ enum Commands {
                       sampling and same-file hard negatives.\n\n\
                       Writes {out}.{latent,dictionary,cell_bias,feature_bias}.parquet, \
                       {out}.senna.json.",
-        alias = "embed-graph"
+        alias = "embed-graph",
+        alias = "gbe"
     )]
-    Gbe(GbeArgs),
+    Bge(BgeArgs),
+
+    #[command(
+        about = "Train a continuous Miller-Griffiths-Jordan-style latent feature model \
+                 on an explicit feature-feature edge list (no expression data).",
+        long_about = "Consumes a TSV/CSV of feature-feature edges (BioGRID, STRING, \
+                      KEGG, synthetic-lethality, regulatory) and learns per-feature \
+                      latent embeddings E ∈ ℝ^{D×H} via a continuous Miller-Griffiths-\
+                      Jordan link-prediction model:\n  \n  \
+                      s(i, j) = (E_i ⊙ γ) · E_j + b_i + b_j\n  \n\
+                      Trains with binary cross-entropy + degree^α negative sampling \
+                      (node2vec convention). Symmetric by construction.\n\n\
+                      Writes {out}.feature_embedding.parquet (+ feature_bias, gamma, \
+                      log_likelihood, senna.json). The output shape matches the freeze \
+                      loader used by `senna {bge, indexed-topic, cell-embedded-topic} \
+                      --freeze-feature-embedding`, so an `fne` run is a direct gene-side \
+                      input to downstream cell-side training."
+    )]
+    Fne(FneArgs),
 
     // ─────────── 2. Held-out inference ───────────
     #[command(
@@ -401,8 +422,11 @@ fn main() -> anyhow::Result<()> {
         Commands::Svd(args) => {
             fit_svd(args)?;
         }
-        Commands::Gbe(args) => {
-            fit_gbe(args)?;
+        Commands::Bge(args) => {
+            fit_bge(args)?;
+        }
+        Commands::Fne(args) => {
+            fit_fne(args)?;
         }
         Commands::Topic(args) => {
             fit_topic_model(args)?;
