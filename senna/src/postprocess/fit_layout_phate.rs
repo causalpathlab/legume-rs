@@ -94,13 +94,13 @@ impl Default for LayoutPhateArgs {
 pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
     // PHATE here is PB-level (diffusion-MDS over PB features → 2D);
-    // DirectCells manifests (RunKind::Gbe) have no PB scaffolding so
-    // we redirect.
+    // DirectCells manifests (RunKind::Bge / Fne) have no PB scaffolding
+    // so we redirect.
     let LayoutPrep::PbThenNystrom(prep) = preprocess_layout_data(&args.common, &resolved)? else {
         anyhow::bail!(
             "`senna layout phate` does not support DirectCells manifests \
-             (e.g. RunKind::Gbe). Use `senna layout umap --from <manifest>` instead — \
-             UMAP runs cell-level directly on the GBE embedding."
+             (e.g. RunKind::Bge or RunKind::Fne). Use `senna layout umap --from <manifest>` \
+             instead — UMAP runs cell-level directly on the graph-trained embedding."
         );
     };
 

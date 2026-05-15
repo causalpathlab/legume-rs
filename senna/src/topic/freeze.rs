@@ -44,28 +44,41 @@ impl FrozenFeatureSpec {
     /// (topic / cell-embedded-topic layout, bias defaults to zero).
     /// Errors if neither layout is present.
     pub fn resolve_from_prefix(prefix: &str, name_kind: FeatureNameKind) -> anyhow::Result<Self> {
-        let gbe_dict = format!("{prefix}.dictionary.parquet");
-        let gbe_bias = format!("{prefix}.feature_bias.parquet");
+        let bge_dict = format!("{prefix}.dictionary.parquet");
+        let bias_file = format!("{prefix}.feature_bias.parquet");
         let topic_dict = format!("{prefix}.feature_embedding.parquet");
 
-        let (dictionary_path, bias_path) = if Path::new(&gbe_dict).exists() {
-            let bias = if Path::new(&gbe_bias).exists() {
-                Some(gbe_bias)
+        let (dictionary_path, bias_path) = if Path::new(&bge_dict).exists() {
+            let bias = if Path::new(&bias_file).exists() {
+                Some(bias_file)
             } else {
                 log::warn!(
                     "{} found but {} missing — loading dictionary only, bias defaults to zero",
-                    gbe_dict,
-                    gbe_bias
+                    bge_dict,
+                    bias_file
                 );
                 None
             };
-            (gbe_dict, bias)
+            (bge_dict, bias)
         } else if Path::new(&topic_dict).exists() {
-            log::info!(
-                "Frozen feature side: loading topic-style {} (bias = 0)",
-                topic_dict
-            );
-            (topic_dict, None)
+            // The topic-style filename is also written by `senna fne`,
+            // which DOES emit a learned per-gene bias. Pick it up when
+            // present; fall back to zero otherwise.
+            let bias = if Path::new(&bias_file).exists() {
+                log::info!(
+                    "Frozen feature side: loading {} + {} (fne-style with learned bias)",
+                    topic_dict,
+                    bias_file
+                );
+                Some(bias_file)
+            } else {
+                log::info!(
+                    "Frozen feature side: loading topic-style {} (bias = 0)",
+                    topic_dict
+                );
+                None
+            };
+            (topic_dict, bias)
         } else {
             anyhow::bail!(
                 "--freeze-feature-embedding {prefix}: neither {prefix}.dictionary.parquet \

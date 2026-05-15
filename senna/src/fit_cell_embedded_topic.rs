@@ -712,6 +712,7 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         default_colour_by: "cluster",
+        has_latent: true,
     })?;
 
     info!("Done");

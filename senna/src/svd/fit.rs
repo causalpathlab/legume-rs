@@ -263,6 +263,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         // typically run `senna clustering` next, so the viz column
         // `cluster` is the natural default.
         default_colour_by: "cluster",
+        has_latent: true,
     })?;
 
     Ok(())

@@ -47,12 +47,12 @@ pub struct LayoutTsneArgs {
 pub fn fit_layout_tsne(args: &LayoutTsneArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
     // t-SNE here is PB-level (PB-PB similarity → 2D); DirectCells
-    // manifests (RunKind::Gbe) have no PB scaffolding so we redirect.
+    // manifests (RunKind::Bge / Fne) have no PB scaffolding so we redirect.
     let LayoutPrep::PbThenNystrom(prep) = preprocess_layout_data(&args.common, &resolved)? else {
         anyhow::bail!(
             "`senna layout tsne` does not support DirectCells manifests \
-             (e.g. RunKind::Gbe). Use `senna layout umap --from <manifest>` instead — \
-             UMAP runs cell-level directly on the GBE embedding."
+             (e.g. RunKind::Bge or RunKind::Fne). Use `senna layout umap --from <manifest>` \
+             instead — UMAP runs cell-level directly on the graph-trained embedding."
         );
     };
 

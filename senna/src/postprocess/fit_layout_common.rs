@@ -435,8 +435,9 @@ pub(crate) enum PbFeatureKind {
 /// two-stage pipeline (pseudobulks → PB layout → Nyström cell
 /// placement) used for topic / SVD / cached / recompute paths.
 /// `DirectCells` skips PB summarization entirely — used by
-/// `RunKind::Gbe`, whose embedding is already manifold-aware — and
-/// drives cell-level layout straight off `cell_proj_kn`.
+/// `RunKind::Bge` / `RunKind::Fne`, whose embeddings are already
+/// manifold-aware — and drives cell-level layout straight off
+/// `cell_proj_kn`.
 ///
 /// Carrying these as separate variants instead of one struct + sentinel
 /// fields lets each subcommand pattern-match against the exact shape
@@ -569,8 +570,11 @@ fn preprocess_layout_data_from_latent(
         } else {
             format!("Hellinger-θ, τ={tau:.3}")
         }
-    } else if matches!(kind, crate::run_manifest::RunKind::Gbe) {
-        // GBE was trained with a dot-product loss; unit-sphere geometry
+    } else if matches!(
+        kind,
+        crate::run_manifest::RunKind::Bge | crate::run_manifest::RunKind::Fne
+    ) {
+        // BGE / FNE were trained with a dot-product loss; unit-sphere geometry
         // makes Euclidean kNN match cosine ordering downstream.
         feat_kn.normalize_columns_inplace();
         "unit-sphere (cosine)".into()
@@ -584,13 +588,16 @@ fn preprocess_layout_data_from_latent(
         feat_kn.nrows(),
     );
 
-    // GBE embeddings are already manifold-aware (trained on a graph
+    // BGE / FNE embeddings are already manifold-aware (trained on a graph
     // objective). Skip the PB landmarks / fuzzy-kNN-on-centroids step
     // entirely and let the layout subcommand work cell-level directly.
     // Topic / SVD latents are noisier and still benefit from the PB
     // summarization, so they fall through to the landmark path below.
-    if matches!(kind, crate::run_manifest::RunKind::Gbe) {
-        info!("Gbe latent → DirectCells mode: skipping PB landmark sampling");
+    if matches!(
+        kind,
+        crate::run_manifest::RunKind::Bge | crate::run_manifest::RunKind::Fne
+    ) {
+        info!("Graph-trained latent → DirectCells mode: skipping PB landmark sampling");
         return Ok(LayoutPrep::DirectCells(DirectLayoutPrep {
             data_vec,
             cell_proj_kn: feat_kn,

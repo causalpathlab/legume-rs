@@ -3,10 +3,10 @@
 //! 2D layout algorithm. Optionally runs a cell-level SGD pass after
 //! Nyström to resolve intra-PB structure (`--umap-finetune-epochs > 0`).
 //!
-//! For `RunKind::Gbe` manifests, `preprocess_layout_data` returns
-//! `LayoutMode::DirectCells` and we skip the PB pass entirely — build
-//! a cell-cell fuzzy kNN graph straight from the L2-normalized latent
-//! and run UMAP SGD on cells directly. No Nyström, no PB output.
+//! For `RunKind::Bge` / `RunKind::Fne` manifests, `preprocess_layout_data`
+//! returns `LayoutMode::DirectCells` and we skip the PB pass entirely —
+//! build a cell-cell fuzzy kNN graph straight from the L2-normalized
+//! latent and run UMAP SGD on cells directly. No Nyström, no PB output.
 
 use super::fit_layout_common::{
     nystrom_cell_coords, preprocess_layout_data, random_init_2d, resolve_inputs,
@@ -168,12 +168,12 @@ fn fit_layout_umap_pb(
     write_viz_outputs_pb(&args.common, resolved, prep, &pb_coords, &cell_coords)
 }
 
-/// Direct cell-level UMAP for `RunKind::Gbe` (and any future kind that
-/// returns `LayoutPrep::DirectCells`). Skips landmark sampling, fuzzy
-/// kNN on PB centroids, and Nyström — the GBE latent is already
-/// manifold-aware, so we put cells straight on the cell-cell fuzzy kNN
-/// graph and run UMAP SGD there. Output: only `cell_coords.parquet`,
-/// no `pb_coords`.
+/// Direct cell-level UMAP for `RunKind::Bge` / `RunKind::Fne` (and any
+/// future kind that returns `LayoutPrep::DirectCells`). Skips landmark
+/// sampling, fuzzy kNN on PB centroids, and Nyström — the graph-trained
+/// latent is already manifold-aware, so we put cells straight on the
+/// cell-cell fuzzy kNN graph and run UMAP SGD there. Output: only
+/// `cell_coords.parquet`, no `pb_coords`.
 fn fit_layout_umap_direct(
     args: &LayoutUmapArgs,
     resolved: &mut ResolvedViz,
