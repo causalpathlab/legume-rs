@@ -35,6 +35,7 @@ use crate::embed_common::*;
 use auxiliary_data::feature_names::FeatureNameKind;
 use candle_core::{Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use graph_embedding_util::stop::setup_stop_handler;
 use matrix_util::common_io::read_lines_of_words_delim;
 use matrix_util::membership::detect_delimiter;
 use matrix_util::pair_graph::FeaturePairGraph;
@@ -43,20 +44,26 @@ use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rustc_hash::FxHashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Args, Debug)]
 pub struct FneArgs {
     #[arg(
-        long,
-        short = 'n',
         required = true,
-        help = "Feature-feature edge list (TSV/CSV; two columns per line)",
-        long_help = "Whitespace-, comma-, or tab-separated. Each line is a pair \
-                     of feature names. Self-loops, duplicates, and edges that \
-                     reference unknown names are dropped silently. Lines starting \
-                     with `#` are skipped."
+        value_delimiter = ',',
+        help = "Feature-feature edge list(s) (TSV/CSV; two columns per line)",
+        long_help = "One or more positional paths, comma-separated or space-\
+                     separated. Each file is whitespace/comma/tab-delimited; \
+                     every line is a pair of feature names. Lines starting \
+                     with `#` are skipped; self-loops and duplicates are \
+                     dropped silently. When multiple files are given, the \
+                     node set is the union of canonical names across all \
+                     files and the edge set is the deduplicated union of \
+                     pair-edges — handy for combining BioGRID + STRING + \
+                     KEGG into a single graph."
     )]
-    network: Box<str>,
+    networks: Vec<Box<str>>,
 
     #[arg(
         long,
@@ -164,16 +171,16 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         }
     };
 
-    let feature_names = discover_features_from_edge_list(&args.network, &name_kind)?;
+    let feature_names = discover_features_across_files(&args.networks, &name_kind)?;
     info!(
-        "fne: {} unique nodes discovered in {}",
+        "fne: {} unique nodes discovered across {} edge file(s)",
         feature_names.len(),
-        args.network
+        args.networks.len()
     );
 
-    let graph = FeaturePairGraph::from_edge_list(
-        &args.network,
-        feature_names.clone(),
+    let graph = load_merged_graph(
+        &args.networks,
+        feature_names,
         args.feature_name_prefix_match,
         if args.feature_name_exact {
             None
@@ -183,10 +190,11 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     )?;
     anyhow::ensure!(
         graph.num_edges() > 0,
-        "fne: {} produced 0 usable edges after name resolution",
-        args.network
+        "fne: 0 usable edges after name resolution across {} file(s)",
+        args.networks.len()
     );
 
+    let stop = setup_stop_handler();
     let dev = args.device.to_device(args.device_no)?;
     let trained = train_fne(
         &graph,
@@ -201,12 +209,13 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
             neg_alpha: args.neg_alpha,
             seed: args.seed,
             dev: &dev,
+            stop: stop.clone(),
         },
     )?;
 
     write_outputs(&trained, &args.out)?;
 
-    let input: Vec<String> = vec![args.network.to_string()];
+    let input: Vec<String> = args.networks.iter().map(|s| s.to_string()).collect();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         kind: crate::run_manifest::RunKind::Fne,
         prefix: &args.out,
@@ -224,10 +233,18 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         has_latent: false,
     })?;
 
-    info!(
-        "Done — outputs at {}.{{feature_embedding,feature_bias,gamma,log_likelihood}}.parquet",
-        args.out
-    );
+    if stop.load(Ordering::SeqCst) {
+        info!(
+            "Stopped early — outputs reflect partial training (epoch {} of {} requested)",
+            trained.loss_trace.len(),
+            args.epochs
+        );
+    } else {
+        info!(
+            "Done — outputs at {}.{{feature_embedding,feature_bias,gamma,log_likelihood}}.parquet",
+            args.out
+        );
+    }
     Ok(())
 }
 
@@ -235,32 +252,70 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
 // Edge-list discovery: union of canonical node names across the file //
 ////////////////////////////////////////////////////////////////////////
 
-fn discover_features_from_edge_list(
-    path: &str,
+fn discover_features_across_files(
+    paths: &[Box<str>],
     name_kind: &FeatureNameKind,
 ) -> anyhow::Result<Vec<Box<str>>> {
-    let delim = detect_delimiter(path);
-    let read_out = read_lines_of_words_delim(path, delim, -1)?;
     let mut set: FxHashSet<Box<str>> = FxHashSet::default();
-    for line in &read_out.lines {
-        if line.len() < 2 {
-            continue;
+    for path in paths {
+        let delim = detect_delimiter(path);
+        let read_out = read_lines_of_words_delim(path, delim, -1)?;
+        for line in &read_out.lines {
+            if line.len() < 2 {
+                continue;
+            }
+            if line[0].starts_with('#') {
+                continue;
+            }
+            set.insert(name_kind.canonicalize(&line[0]));
+            set.insert(name_kind.canonicalize(&line[1]));
         }
-        // Lines whose first token starts with `#` are comments — drop.
-        if line[0].starts_with('#') {
-            continue;
-        }
-        set.insert(name_kind.canonicalize(&line[0]));
-        set.insert(name_kind.canonicalize(&line[1]));
     }
     let mut names: Vec<Box<str>> = set.into_iter().collect();
     names.sort();
     anyhow::ensure!(
         !names.is_empty(),
-        "fne: {} contains no usable feature pairs",
-        path
+        "fne: 0 feature names across {} edge file(s)",
+        paths.len()
     );
     Ok(names)
+}
+
+/// Load each path through `FeaturePairGraph::from_edge_list` against the
+/// shared canonical node set, then merge edges into a single graph.
+/// Per-file dedup happens inside `from_edge_list`; cross-file dedup is a
+/// HashSet pass here so the merged graph carries each undirected pair
+/// exactly once regardless of how many files mentioned it.
+fn load_merged_graph(
+    paths: &[Box<str>],
+    feature_names: Vec<Box<str>>,
+    allow_prefix: bool,
+    delim: Option<char>,
+) -> anyhow::Result<FeaturePairGraph> {
+    let n_features = feature_names.len();
+    let mut all_edges: FxHashSet<(usize, usize)> = FxHashSet::default();
+    let mut per_file_counts: Vec<usize> = Vec::with_capacity(paths.len());
+    for path in paths {
+        let g = FeaturePairGraph::from_edge_list(path, feature_names.clone(), allow_prefix, delim)?;
+        per_file_counts.push(g.feature_edges.len());
+        for e in g.feature_edges {
+            all_edges.insert(e);
+        }
+    }
+    let mut feature_edges: Vec<(usize, usize)> = all_edges.into_iter().collect();
+    feature_edges.sort_unstable();
+    if paths.len() > 1 {
+        info!(
+            "fne: merged edge set has {} unique pairs (per-file: {:?})",
+            feature_edges.len(),
+            per_file_counts
+        );
+    }
+    Ok(FeaturePairGraph {
+        feature_names,
+        n_features,
+        feature_edges,
+    })
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -278,6 +333,10 @@ struct TrainConfig<'a> {
     neg_alpha: f32,
     seed: u64,
     dev: &'a Device,
+    /// First Ctrl-C sets this; the loop checks at minibatch + epoch
+    /// boundaries and finalizes outputs from the current parameter
+    /// state. Caller installs the SIGINT handler before training.
+    stop: Arc<AtomicBool>,
 }
 
 fn train_fne(graph: &FeaturePairGraph, config: &TrainConfig<'_>) -> anyhow::Result<TrainedFne> {
@@ -329,10 +388,13 @@ fn train_fne(graph: &FeaturePairGraph, config: &TrainConfig<'_>) -> anyhow::Resu
         config.neg_alpha
     );
 
-    for epoch in 0..config.epochs {
+    'epochs: for epoch in 0..config.epochs {
         let mut epoch_loss = 0f32;
         let mut n_steps = 0usize;
         for _ in 0..config.batches_per_epoch {
+            if config.stop.load(Ordering::Relaxed) {
+                break;
+            }
             let (i_idx, j_pos, j_neg_flat) = sample_batch(
                 edges,
                 n_edges,
@@ -359,6 +421,14 @@ fn train_fne(graph: &FeaturePairGraph, config: &TrainConfig<'_>) -> anyhow::Resu
         loss_trace.push(avg);
         if epoch == 0 || (epoch + 1) % 10 == 0 || epoch + 1 == config.epochs {
             info!("epoch {}/{}: loss={:.4}", epoch + 1, config.epochs, avg);
+        }
+        if config.stop.load(Ordering::SeqCst) {
+            info!(
+                "Stopping early at epoch {}/{} — finalizing outputs",
+                epoch + 1,
+                config.epochs
+            );
+            break 'epochs;
         }
     }
 
@@ -579,6 +649,7 @@ mod tests {
                 neg_alpha: 0.75,
                 seed: 42,
                 dev: &dev,
+                stop: Arc::new(AtomicBool::new(false)),
             },
         )?;
 
