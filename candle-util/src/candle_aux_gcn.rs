@@ -1,13 +1,26 @@
-//! Sparse residual graph-diffusion block over packed top-K gene
+//! Sparse residual γ-gated GCN block over packed top-K gene
 //! representations.
 //!
 //! Used by `IndexedEmbeddingEncoder` when a feature-feature graph is
-//! supplied. Mathematically this is one GCN step (Kipf & Welling 2017):
+//! supplied. Mathematically this is one Kipf-Welling GCN step (2017)
+//! with a learnable per-dim residual:
 //!
 //! ```text
-//!   Ã      = (A + I) row-normalised over each cell's measured top-K
-//!   out    = v + γ · (Ã · v)                                  [N, K, H]
+//!   Ã[u, v] = (A + I)[u, v] / sqrt(d[u] · d[v])   sym-norm over each
+//!                                                  cell's measured top-K
+//!   out[n, k, h] = v[n, k, h] + γ[h] · (Ã · v)[n, k, h]       [N, K, H]
 //! ```
+//!
+//! where `d[u]` is the row-sum of `(A+I)` restricted to the cell's
+//! local top-K. Each embedding dim `h` has its own learnable γ_h.
+//!
+//! There is no attention — the edge weights are fixed (pre-normalised
+//! at sub-adjacency cache build time). The only learnable parameters
+//! are the per-dimension γ ∈ ℝ^H, init at zero so the block is identity
+//! at training start. Each embedding dim has its own γ_h, so different
+//! dims can use or ignore the graph contribution independently. If you
+//! want learned per-edge weights, that's a different block (GAT proper)
+//! and would need a separate implementation.
 //!
 //! ## Implementation
 //!
@@ -48,29 +61,42 @@ use candle_nn::VarBuilder;
 use crate::candle_indexed_data_loader::SparseEdgeBatch;
 
 /// One γ-gated GCN diffusion step. The only learnable parameter is the
-/// diffusion scalar `γ` (zero-init ⇒ identity at init).
-pub struct GraphAttentionBlock {
+/// per-dimension diffusion vector `γ ∈ ℝ^H` (zero-init ⇒ identity at
+/// init). No attention — edge weights are fixed by the per-cell
+/// pre-normalised sub-adjacency. Per-dim γ lets each embedding axis
+/// pick its own graph mixing weight independently, so the final
+/// trained γ-vector doubles as a diagnostic of *which* dims the graph
+/// helped.
+pub struct GcnBlock {
     d_model: usize,
-    edge_bias_scale: Tensor,
+    /// Learnable per-dim γ ∈ ℝ^H. Shape `(H,)`. Init to all-zeros so
+    /// the forward pass is identity on `v` at training start; the
+    /// optimiser pulls individual dims away from zero only when the
+    /// graph contribution on that dim helps the likelihood.
+    gamma: Tensor,
 }
 
-impl GraphAttentionBlock {
+impl GcnBlock {
     pub fn new(d_model: usize, vb: VarBuilder) -> Result<Self> {
-        let edge_bias_scale = vb.get_with_hints((1,), "edge_bias_scale", candle_nn::init::ZERO)?;
-        Ok(Self {
-            d_model,
-            edge_bias_scale,
-        })
+        let gamma = vb.get_with_hints((d_model,), "gamma", candle_nn::init::ZERO)?;
+        Ok(Self { d_model, gamma })
     }
 
     pub fn d_model(&self) -> usize {
         self.d_model
     }
 
-    /// Apply the sparse diffusion block.
+    /// Current γ vector as a host `Vec<f32>` of length `d_model`.
+    /// Intended for per-epoch training instrumentation — caller derives
+    /// summary stats (L2, max-abs, mean) for logging.
+    pub fn gamma_vec(&self) -> Result<Vec<f32>> {
+        self.gamma.to_vec1::<f32>()
+    }
+
+    /// Apply the γ-gated GCN diffusion step.
     ///
-    /// * `v`       — `[N, K, H]` per-slot gene representation (value-gated embedding)
-    /// * `edges`   — pre-normalised sparse edges scattered from the per-cell cache
+    /// * `v`     — `[N, K, H]` per-slot gene representation (value-gated embedding)
+    /// * `edges` — pre-normalised sparse edges scattered from the per-cell cache
     pub fn forward(&self, v: &Tensor, edges: &SparseEdgeBatch) -> Result<Tensor> {
         let (n, k, h) = v.dims3()?;
         debug_assert_eq!(h, self.d_model);
@@ -85,7 +111,7 @@ impl GraphAttentionBlock {
         )?;
         let smoothed = smoothed_flat.reshape((n, k, h))?;
 
-        let gamma = self.edge_bias_scale.reshape((1, 1, 1))?;
+        let gamma = self.gamma.reshape((1, 1, h))?;
         let delta = smoothed.broadcast_mul(&gamma)?;
         v + delta
     }
@@ -132,12 +158,12 @@ mod tests {
     }
 
     #[test]
-    fn gat_block_forward_shape_and_finite() {
+    fn gcn_block_forward_shape_and_finite() {
         let device = Device::Cpu;
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
         let d = 8usize;
-        let block = GraphAttentionBlock::new(d, vb.pp("gat")).unwrap();
+        let block = GcnBlock::new(d, vb.pp("gcn")).unwrap();
 
         let n = 2usize;
         let k = 3usize;
@@ -153,12 +179,12 @@ mod tests {
 
     /// At init γ=0, so the block must be the exact identity on `v`.
     #[test]
-    fn gat_identity_at_init() {
+    fn gcn_identity_at_init() {
         let device = Device::Cpu;
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
         let d = 4usize;
-        let block = GraphAttentionBlock::new(d, vb.pp("gat")).unwrap();
+        let block = GcnBlock::new(d, vb.pp("gcn")).unwrap();
 
         let v = Tensor::randn(0.0f32, 1.0, (2, 3, d), &device).unwrap();
         let edges = small_edges(&device);

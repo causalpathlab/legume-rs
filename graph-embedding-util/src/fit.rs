@@ -132,6 +132,14 @@ pub struct FitConfig {
     /// in the same process MUST pass `Some(...)` with a single shared
     /// flag — `ctrlc::set_handler` panics on the second registration.
     pub stop: Option<Arc<AtomicBool>>,
+    /// Explicit L2 penalty `λ · ‖E_feat‖_F²` on the shared feature
+    /// embedding, added to the composite loss before backward. `0.0`
+    /// disables.
+    pub feature_embedding_l2: f32,
+    /// AdamW decoupled weight decay applied uniformly to every parameter
+    /// (the shared `E_feat`, `b_feat`, and every per-axis head). Post-
+    /// step shrinkage; doesn't enter the backward graph. `0.0` disables.
+    pub weight_decay: f64,
 }
 
 /// Cell-cell NCE configuration. Positives = neighbor pairs from a
@@ -589,6 +597,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         varmap.all_vars(),
         ParamsAdamW {
             lr: config.learning_rate,
+            weight_decay: config.weight_decay,
             ..Default::default()
         },
     )?;
@@ -918,5 +927,6 @@ fn stage_params(config: &FitConfig) -> TrainingParams {
         num_negatives: config.num_negatives,
         seed: config.seed,
         composite_mode: config.composite_mode,
+        feature_embedding_l2: config.feature_embedding_l2,
     }
 }

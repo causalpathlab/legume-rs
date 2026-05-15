@@ -1,4 +1,4 @@
-use crate::candle_aux_gat::GraphAttentionBlock;
+use crate::candle_aux_gcn::GcnBlock;
 use crate::candle_aux_layers::*;
 use crate::candle_batch_norm;
 use crate::candle_indexed_data_loader::SparseEdgeBatch;
@@ -20,10 +20,10 @@ pub struct IndexedEmbeddingEncoder {
     embedding_dim: usize,
     feature_embeddings: Tensor, // [D, H] learnable
     value_embedding: ValueEmbedding,
-    /// Optional graph-attention block applied to the per-slot value-gated
-    /// embedding `[N, K, H]` before pooling. Present iff `IndexedEmbeddingEncoderArgs::use_gat`
-    /// was true at construction time.
-    gat: Option<GraphAttentionBlock>,
+    /// Optional γ-gated GCN block applied to the per-slot value-gated
+    /// embedding `[N, K, H]` before pooling. Present iff
+    /// `IndexedEmbeddingEncoderArgs::use_gcn` was true at construction.
+    gcn: Option<GcnBlock>,
     fc: StackLayers<Linear>,
     bn_z: candle_batch_norm::BatchNorm,
     z_mean: Linear,
@@ -39,12 +39,12 @@ pub struct IndexedEmbeddingEncoderArgs<'a> {
     /// lookup + per-dimension sigmoid gate on ρ. This is the only value
     /// transform (the fixed Anscombe scalar has been retired here).
     pub value_embedding: ValueEmbeddingConfig,
-    /// When true, construct a `GraphAttentionBlock` on the per-slot
-    /// `[N, K, H]` representation. The caller is responsible for
-    /// providing per-minibatch `(adjacency, pad_mask)` at forward time.
-    /// When the runtime adjacency tensor is missing the GAT branch
-    /// is bypassed and the legacy sum-pool path is taken.
-    pub use_gat: bool,
+    /// When true, construct a [`GcnBlock`] on the per-slot `[N, K, H]`
+    /// representation. The caller is responsible for providing the
+    /// per-minibatch [`SparseEdgeBatch`] at forward time; when no edge
+    /// batch is supplied the GCN branch is bypassed and the legacy
+    /// sum-pool path is taken.
+    pub use_gcn: bool,
 }
 
 impl IndexedEmbeddingEncoder {
@@ -72,11 +72,8 @@ impl IndexedEmbeddingEncoder {
             vb.pp("nn.enc.value"),
         )?;
 
-        let gat = if args.use_gat {
-            Some(GraphAttentionBlock::new(
-                args.embedding_dim,
-                vb.pp("nn.enc.gat"),
-            )?)
+        let gcn = if args.use_gcn {
+            Some(GcnBlock::new(args.embedding_dim, vb.pp("nn.enc.gcn"))?)
         } else {
             None
         };
@@ -98,7 +95,7 @@ impl IndexedEmbeddingEncoder {
             embedding_dim: args.embedding_dim,
             feature_embeddings,
             value_embedding,
-            gat,
+            gcn,
             fc,
             bn_z,
             z_mean,
@@ -106,10 +103,17 @@ impl IndexedEmbeddingEncoder {
         })
     }
 
-    /// Whether this encoder owns a `GraphAttentionBlock`. Callers can use
-    /// this to decide whether to supply per-cell adjacency tensors.
-    pub fn has_gat(&self) -> bool {
-        self.gat.is_some()
+    /// Whether this encoder owns a [`GcnBlock`]. Callers use this to
+    /// decide whether to supply per-minibatch sparse edges.
+    pub fn has_gcn(&self) -> bool {
+        self.gcn.is_some()
+    }
+
+    /// Current per-dim γ ∈ ℝ^H from the GCN block, when wired. Returns
+    /// `None` otherwise. Used for per-epoch training instrumentation —
+    /// caller derives summary stats (L2, max-abs, mean) for logging.
+    pub fn gcn_gamma_vec(&self) -> Result<Option<Vec<f32>>> {
+        self.gcn.as_ref().map(|g| g.gamma_vec()).transpose()
     }
 
     pub fn n_features(&self) -> usize {
@@ -166,11 +170,11 @@ impl IndexedEmbeddingEncoder {
         let w = self.value_embedding.gate(&clean)?;
         let v_nkh = e_nk_h.broadcast_mul(&w)?; // [N, K, H]
 
-        // Graph-diffusion branch: γ-gated sparse GCN. Block is identity
-        // at init (γ=0) so downstream FC+BN sees the no-graph training
+        // γ-gated sparse GCN diffusion. Block is identity at init
+        // (γ=0) so downstream FC+BN sees the no-graph training
         // distribution; γ grows only as the likelihood needs the graph.
-        let v_pooled_input = match (&self.gat, sparse_edges) {
-            (Some(gat), Some(edges)) => gat.forward(&v_nkh, edges)?,
+        let v_pooled_input = match (&self.gcn, sparse_edges) {
+            (Some(gcn), Some(edges)) => gcn.forward(&v_nkh, edges)?,
             _ => v_nkh,
         };
         v_pooled_input.sum(1) // [N, H]
@@ -265,7 +269,7 @@ mod tests {
                 embedding_dim,
                 layers: &layers,
                 value_embedding: ValueEmbeddingConfig { n_value_bins: 8 },
-                use_gat: false,
+                use_gcn: false,
             },
             &varmap,
             vb,

@@ -711,7 +711,7 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
             embedding_dim,
             layers: &metadata.encoder_hidden,
             value_embedding,
-            use_gat: metadata.has_feature_graph(),
+            use_gcn: metadata.has_feature_graph(),
         },
         &parameters,
         vb.pp("enc"),
@@ -858,7 +858,7 @@ struct PredictBlockIndexedArgs<'a> {
     refine_config: &'a TopicRefinementConfig,
     n_topics: usize,
     /// Feature graph baked into the model. `Some` when the encoder owns a
-    /// GAT block; passed to `build_sparse_edges_from_tensor` per block.
+    /// GCN block; passed to `build_sparse_edges_from_tensor` per block.
     feature_graph: Option<&'a candle_util::candle_indexed_data_loader::GraphCsr>,
 }
 

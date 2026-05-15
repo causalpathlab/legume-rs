@@ -18,7 +18,7 @@
 //! CNV); `senna predict` applies the trained model to held-out data.
 
 use crate::embed_common::*;
-use crate::fit_indexed_topic::{remap_graph_to_subset, FeatureNameKindArg};
+use crate::fit_indexed_topic::FeatureNameKindArg;
 use crate::topic::common::{
     create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
     PreparedData,
@@ -257,17 +257,35 @@ pub struct CellEmbeddedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
-        help = "Shared-neighbor edge augmentation threshold (0 disables)."
+        default_value_t = 1,
+        help = "Shared-neighbor edge QC threshold. Default 1 drops edges \
+                with zero corroboration. Set 0 to keep every parsed edge."
     )]
-    feature_network_snn_min_shared: usize,
+    feature_network_min_shared_neighbors: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Per-node degree cap (0 = off). Ranks neighbors by \
+                shared-neighbor count; union-symmetric."
+    )]
+    feature_network_max_degree: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Iterative k-core pruning threshold (0 = off)."
+    )]
+    feature_network_min_degree: usize,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Restrict the model to features covered by --feature-network."
+        help = "Disable feature-network feature restriction. By default, \
+                when --feature-network is supplied, features with zero edges \
+                after the QC pipeline are dropped from the data axis."
     )]
-    feature_network_restrict: bool,
+    no_feature_network_restrict: bool,
 
     #[arg(
         long,
@@ -310,44 +328,21 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     let (effective_multiome, effective_hvg_n, effective_hvg_list) =
         crate::hvg::resolve_multiome_with_hvg(args.multiome, args.data_files.len(), &args.hvg);
 
-    // --feature-network-restrict: parse the network once inside the
-    // row-mask callback, then remap to the post-mask axis. Identical
-    // machinery to `fit_indexed_topic`.
-    let restrict_path: Option<&str> = if args.feature_network_restrict {
-        args.feature_network.as_deref()
-    } else {
-        None
+    let net_opts = crate::topic::common::FeatureNetworkOpts {
+        prefix_match: args.feature_network_prefix_match,
+        delim: args.feature_network_delim,
+        min_shared_neighbors: args.feature_network_min_shared_neighbors,
+        max_degree: args.feature_network_max_degree,
+        min_degree: args.feature_network_min_degree,
     };
-    let net_prefix = args.feature_network_prefix_match;
-    let net_delim = args.feature_network_delim;
-    let net_snn = args.feature_network_snn_min_shared;
-    use matrix_util::pair_graph::FeaturePairGraph;
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    let cached_graph: Rc<RefCell<Option<FeaturePairGraph>>> = Rc::new(RefCell::new(None));
-    let cached_keep: Rc<RefCell<Option<Vec<bool>>>> = Rc::new(RefCell::new(None));
-    let mask_fn_box: Option<Box<crate::topic::common::FeatureMaskFn>> = restrict_path.map(|p| {
-        let path: String = p.to_string();
-        let cached_graph = Rc::clone(&cached_graph);
-        let cached_keep = Rc::clone(&cached_keep);
-        let f: Box<crate::topic::common::FeatureMaskFn> = Box::new(move |row_names| {
-            let mut graph =
-                FeaturePairGraph::from_edge_list(&path, row_names.to_vec(), net_prefix, net_delim)?;
-            graph.augment_with_snn(net_snn);
-            let keep: Vec<bool> = graph.feature_degrees().iter().map(|&d| d > 0).collect();
-            let n_keep = keep.iter().filter(|&&k| k).count();
-            info!(
-                "--feature-network-restrict: keeping {} / {} features with ≥1 edge",
-                n_keep,
-                row_names.len()
-            );
-            *cached_keep.borrow_mut() = Some(keep.clone());
-            *cached_graph.borrow_mut() = Some(graph);
-            Ok(keep)
-        });
-        f
-    });
-    let feature_mask_fn: Option<&crate::topic::common::FeatureMaskFn> = mask_fn_box.as_deref();
+    let restrict_path = if args.no_feature_network_restrict {
+        None
+    } else {
+        args.feature_network.as_deref()
+    };
+    let feature_network = crate::topic::common::setup_feature_network(restrict_path, net_opts);
+    let feature_mask_fn: Option<&crate::topic::common::FeatureMaskFn> =
+        feature_network.mask_fn.as_deref();
 
     let PreparedData {
         data_vec,
@@ -466,28 +461,10 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     // quantity already computed for shortlist selection.
     let feature_fisher_weights = shortlist_weights.clone();
 
-    // Feature-feature graph: parsed for downstream use (restrict mode,
-    // future GAT integration). For now cell-embedded ignores the graph
-    // at training time — only --feature-network-restrict is consumed.
-    let cached_pre_mask = cached_graph.borrow_mut().take();
-    let cached_pre_mask_keep = cached_keep.borrow_mut().take();
-    let _feature_graph: Option<FeaturePairGraph> = match (cached_pre_mask, cached_pre_mask_keep) {
-        (Some(pre_graph), Some(keep)) => Some(remap_graph_to_subset(pre_graph, &keep)),
-        _ => args
-            .feature_network
-            .as_deref()
-            .map(|path| -> anyhow::Result<_> {
-                let mut g = FeaturePairGraph::from_edge_list(
-                    path,
-                    gene_names.to_vec(),
-                    args.feature_network_prefix_match,
-                    args.feature_network_delim,
-                )?;
-                g.augment_with_snn(args.feature_network_snn_min_shared);
-                Ok(g)
-            })
-            .transpose()?,
-    };
+    // Parsed for downstream restrict-mode consumption; cell-embedded
+    // doesn't yet wire the graph into training (GCN integration deferred).
+    let _feature_graph: Option<matrix_util::pair_graph::FeaturePairGraph> = feature_network
+        .into_feature_graph(args.feature_network.as_deref(), &gene_names, net_opts)?;
 
     // Extract the genuinely sparse single-cell atoms once; the per-cell
     // top-K samples + library-size factors are level-independent and

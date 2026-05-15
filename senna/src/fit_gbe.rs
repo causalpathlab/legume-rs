@@ -125,6 +125,27 @@ pub struct GbeArgs {
 
     #[arg(
         long,
+        default_value_t = 1.0,
+        help = "L2 penalty λ on the shared feature embedding E_feat ∈ ℝ^{D×H}: \
+                adds λ · mean(E_feat²) to the per-step composite loss \
+                (mean-normalized, so λ stays scale-invariant across D·H). \
+                Default 1.0 (mild shrinkage). Set 0.0 to disable. \
+                Typical: 0.1–10.0."
+    )]
+    feature_embedding_l2: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "AdamW decoupled weight decay applied uniformly to every \
+                parameter (E_feat, b_feat, per-axis heads). Per-step \
+                post-update shrinkage; doesn't enter the backward graph. \
+                Default 0.0 (off — plain Adam despite the optimizer name)."
+    )]
+    weight_decay: f64,
+
+    #[arg(
+        long,
         help = "Optional feature-feature edge list (TSV/CSV; e.g. \
                 BioGRID, STRING, synthetic-lethality). Activates SGC \
                 smoothing of E_feat through the K-hop normalized \
@@ -400,6 +421,8 @@ pub fn fit_gbe(args: &GbeArgs) -> anyhow::Result<()> {
         feature_network,
         cell_cell,
         stop: None,
+        feature_embedding_l2: args.feature_embedding_l2,
+        weight_decay: args.weight_decay,
     };
 
     let out = ge::fit(&mut unified, config)?;
