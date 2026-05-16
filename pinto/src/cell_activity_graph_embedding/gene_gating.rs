@@ -1,4 +1,4 @@
-//! Per-gene cell activity + per-gene per-level learnable gates.
+//! Per-gene cell activity + per-level per-dim gate in the score function.
 //!
 //! - `CellActivities.gene_active_edges[g]` is the precomputed list of
 //!   global edge ids where gene `g` is active at *both* endpoints.
@@ -8,10 +8,11 @@
 //! - `CellActivities.gene_active_edge_weights[g][i]` = `a_g[u] * a_g[v]`
 //!   for the corresponding edge. The gene-gated sampler rebuilds a
 //!   per-call `WeightedIndex` only over this small list.
-//! - `GeneGating.alpha` is `[G × L]` pre-softplus. `softplus(α[g,:])`
-//!   multiplies the per-level chain-NCE losses in `fit.rs`, giving each
-//!   gene a learnable spatial-scale gating without changing the chain
-//!   sampler's negative-side logic.
+//! - `LevelDimGate.gamma` is `[L × D]` pre-softplus. The per-level
+//!   gated gene direction enters the score function:
+//!   `e_gene[g] ⊙ softplus_floored(γ[ℓ, :])`. Different chain levels
+//!   can emphasize different embedding directions; γ gets gradient
+//!   from every positive and negative pair at level ℓ.
 
 use crate::util::common::*;
 use candle_util::candle_core::{Device, Result as CResult, Tensor};
@@ -174,18 +175,20 @@ fn normalize_rows_inplace(csr: &mut CsrMatrix<f32>, norm: ActivityNorm) {
 
 ////////////////////////////////////////////////////////////////
 //                                                            //
-// GeneGating                                                 //
+// LevelDimGate                                               //
 //                                                            //
 ////////////////////////////////////////////////////////////////
 
-/// Small additive floor on the post-softplus gate. Keeps the gate value
-/// above zero so a per-level loss contribution never fully zeroes out,
-/// but does NOT prevent the *gradient* of softplus from vanishing on
-/// the negative side (`sigmoid(x) → 0` is intrinsic to softplus). If a
-/// gene + level pair drifts deeply negative, the model is effectively
-/// telling us that level is unhelpful — the gradient-vanishing is
-/// consistent with that signal.
-const GATE_EPS: f32 = 1e-4;
+/// Linear-floor coefficient on the positive side of softplus. The
+/// floored softplus is `softplus(x) + GAMMA_EPS · relu(x)`:
+///
+/// - x > 0: `~x + ε·x = (1+ε)·x`, gradient `sigmoid(x) + ε ≥ 0.5 + ε`.
+///   Permanent linear-from-0 gradient so γ keeps moving even when the
+///   sigmoid has saturated.
+/// - x < 0: `~0 + 0 = 0`, gradient `sigmoid(x)` (intrinsic softplus
+///   vanishing on the negative side; consistent with "this direction
+///   is off at this level").
+const GAMMA_EPS: f32 = 1e-2;
 
 /// Numerically stable softplus: `max(x, 0) + log(1 + exp(-|x|))`. The
 /// naive `log(1 + exp(x))` overflows for large positive `x`.
@@ -197,41 +200,47 @@ fn softplus_stable(x: &Tensor) -> CResult<Tensor> {
     relu_x + log_term
 }
 
-/// Per-gene per-level learnable gate `α[G × L]`. Pre-softplus storage
-/// initialized at `ln(e − 1) ≈ 0.5413` so `softplus(α₀) = 1.0`. Owned
-/// by the shared `VarMap`; AdamW over `varmap.all_vars()` picks it up.
-pub struct GeneGating {
-    pub alpha: Tensor, // [G, L]
+/// Stable softplus with a small linear floor on the positive side so
+/// the gradient never falls below `GAMMA_EPS` once γ is active.
+pub fn softplus_floored(x: &Tensor) -> CResult<Tensor> {
+    let sp = softplus_stable(x)?;
+    let floor = x.relu()?.affine(GAMMA_EPS as f64, 0.0)?;
+    sp + floor
 }
 
-impl GeneGating {
-    pub fn new(n_genes: usize, n_levels: usize, varmap: &VarMap, dev: &Device) -> CResult<Self> {
-        let init_val: f32 = (std::f32::consts::E - 1.0).ln(); // softplus -> 1.0
-        let init = Tensor::full(init_val, (n_genes, n_levels), dev)?;
+/// Per-level per-dim learnable gate `γ[L × D]`. Pre-softplus storage
+/// initialized at `0.0` so `softplus_floored(γ₀) = ln(2) ≈ 0.693`
+/// uniformly. Owned by the shared `VarMap`; AdamW over
+/// `varmap.all_vars()` picks it up.
+pub struct LevelDimGate {
+    pub gamma: Tensor, // [L, D]
+}
+
+impl LevelDimGate {
+    pub fn new(
+        n_levels: usize,
+        embedding_dim: usize,
+        varmap: &VarMap,
+        dev: &Device,
+    ) -> CResult<Self> {
+        let init = Tensor::zeros(
+            (n_levels, embedding_dim),
+            candle_util::candle_core::DType::F32,
+            dev,
+        )?;
         let var = candle_util::candle_core::Var::from_tensor(&init)?;
         varmap
             .data()
             .lock()
             .unwrap()
-            .insert("cage_alpha".to_string(), var.clone());
+            .insert("cage_gamma".to_string(), var.clone());
         Ok(Self {
-            alpha: var.as_tensor().clone(),
+            gamma: var.as_tensor().clone(),
         })
     }
 
-    /// Return `softplus(α[genes, :]) + ε` as a `[G, L]` tensor.
-    pub fn gates_batch(&self, genes: &[usize], dev: &Device) -> CResult<Tensor> {
-        let idx_vec: Vec<u32> = genes.iter().map(|&g| g as u32).collect();
-        let g = idx_vec.len();
-        let idx = Tensor::from_vec(idx_vec, g, dev)?;
-        let rows = self.alpha.index_select(&idx, 0)?; // [G, L]
-        let sp = softplus_stable(&rows)?;
-        sp.affine(1.0, GATE_EPS as f64)
-    }
-
-    /// Snapshot the post-softplus gate matrix `[G × L]` for output.
+    /// Snapshot the post-softplus_floored γ matrix `[L × D]` for output.
     pub fn snapshot_gates(&self) -> CResult<Tensor> {
-        let sp = softplus_stable(&self.alpha)?;
-        sp.affine(1.0, GATE_EPS as f64)
+        softplus_floored(&self.gamma)
     }
 }

@@ -91,7 +91,7 @@ pub struct OutputFiles {
 
     /// `pinto cage` per-gene per-level softplus(α) gates `[G × L]`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gene_gates: Option<String>,
+    pub level_dim_gates: Option<String>,
 
     /// `pinto cage` gene embedding `[G × D]` — same shared D-dim space
     /// as `cell_embedding`. Cosine similarity between gene rows is
@@ -237,7 +237,7 @@ pub fn create_lc_metadata(
             lr_activity: None,
             cell_embedding: None,
             cell_bias: None,
-            gene_gates: None,
+            level_dim_gates: None,
             gene_embedding: None,
             gene_bias: None,
         },
@@ -289,7 +289,7 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
             lr_activity: None,
             cell_embedding: None,
             cell_bias: None,
-            gene_gates: None,
+            level_dim_gates: None,
             gene_embedding: None,
             gene_bias: None,
         },
@@ -309,7 +309,7 @@ pub fn create_cage_metadata(inputs: &RunInputs<'_>, has_batch_effects: bool) -> 
         tag: "final".to_string(),
         level_index: 0,
         propensity: format!("{prefix}.cell_embedding.parquet"),
-        link_community: format!("{prefix}.gene_gates.parquet"),
+        link_community: format!("{prefix}.level_dim_gates.parquet"),
         gene_community: None,
         entropy_present: Some(false),
     }];
@@ -337,7 +337,7 @@ pub fn create_cage_metadata(inputs: &RunInputs<'_>, has_batch_effects: bool) -> 
             lr_activity: None,
             cell_embedding: Some(format!("{prefix}.cell_embedding.parquet")),
             cell_bias: Some(format!("{prefix}.cell_bias.parquet")),
-            gene_gates: Some(format!("{prefix}.gene_gates.parquet")),
+            level_dim_gates: Some(format!("{prefix}.level_dim_gates.parquet")),
             gene_embedding: Some(format!("{prefix}.gene_embedding.parquet")),
             gene_bias: Some(format!("{prefix}.gene_bias.parquet")),
         },
@@ -387,7 +387,7 @@ pub fn create_prop_metadata(
             lr_activity: None,
             cell_embedding: None,
             cell_bias: None,
-            gene_gates: None,
+            level_dim_gates: None,
             gene_embedding: None,
             gene_bias: None,
         },
@@ -472,7 +472,7 @@ mod tests {
         assert_eq!(back.n_communities, None);
         assert!(back.outputs.cell_embedding.is_some());
         assert!(back.outputs.cell_bias.is_some());
-        assert!(back.outputs.gene_gates.is_some());
+        assert!(back.outputs.level_dim_gates.is_some());
         assert!(back.outputs.gene_embedding.is_some());
         assert!(back.outputs.gene_bias.is_some());
         assert!(back.outputs.scores.is_some());
