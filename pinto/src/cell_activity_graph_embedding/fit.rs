@@ -548,13 +548,6 @@ fn embedding_col_names(d: usize) -> Vec<Box<str>> {
     (0..d).map(|i| format!("e{i}").into_boxed_str()).collect()
 }
 
-#[allow(dead_code)]
-fn gate_col_names(l: usize) -> Vec<Box<str>> {
-    (0..l)
-        .map(|i| format!("gate_L{i}").into_boxed_str())
-        .collect()
-}
-
 /// Convert a 2-D `[R × C]` candle Tensor into an `nalgebra::DMatrix<f32>`
 /// suitable for `to_parquet_with_names`.
 fn tensor_to_mat(t: &Tensor) -> anyhow::Result<Mat> {

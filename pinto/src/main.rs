@@ -262,7 +262,9 @@ enum Commands {
                       Outputs:\n\
                       \x20 {out}.cell_embedding.parquet  cell × embedding_dim\n\
                       \x20 {out}.cell_bias.parquet       per-cell scalar\n\
-                      \x20 {out}.gene_gates.parquet      gene × chain_levels (softplus α)\n\
+                      \x20 {out}.gene_embedding.parquet  gene × embedding_dim\n\
+                      \x20 {out}.gene_bias.parquet       per-gene scalar\n\
+                      \x20 {out}.level_dim_gates.parquet level × dim (softplus_floored γ)\n\
                       \x20 {out}.coord_pairs.parquet     spatial edge list\n\
                       \x20 {out}.scores.parquet          per-epoch loss trace\n\
                       \x20 {out}.delta.parquet           batch effects (multi-batch only)\n\

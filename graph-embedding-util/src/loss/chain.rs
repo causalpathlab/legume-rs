@@ -373,8 +373,7 @@ pub fn cell_cell_nce_loss_per_level_batched_gated(
         // broadcasts over `G*B`). With no gate the score reduces to
         // the original gene-modulated form.
         let e_gene_lvl = if let Some(g_t) = dim_gates {
-            let idx = Tensor::from_vec(vec![lvl_idx as u32], 1, dev)?;
-            let row = g_t.index_select(&idx, 0)?; // [1, D]
+            let row = g_t.narrow(0, lvl_idx, 1)?;
             let h = e_gene.dim(1)?;
             let bcast = row.broadcast_as((total_b, h))?;
             (e_gene.clone() * bcast)?
