@@ -387,6 +387,7 @@ fn batched_gated_matches_per_gene_gated() {
         batches_for_batched,
         &gene_ids,
         None,
+        None,
         &dev,
     )
     .expect("batched gated")

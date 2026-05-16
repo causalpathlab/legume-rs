@@ -14,7 +14,9 @@ use crate::cell_activity_graph_embedding::args::CellActivityGraphEmbeddingArgs;
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
 };
-use crate::cell_activity_graph_embedding::gene_gating::{build_cell_activities, GeneGating};
+use crate::cell_activity_graph_embedding::gene_gating::{
+    build_cell_activities, softplus_floored, LevelDimGate,
+};
 use crate::util::cell_pairs::SrtCellPairs;
 use crate::util::common::*;
 use crate::util::graph_coarsen::{graph_coarsen_multilevel, CoarsenConfig, SeedingParams};
@@ -269,7 +271,7 @@ pub fn fit_cell_activity_graph_embedding(
         vs,
         &dev,
     )?;
-    let gating = GeneGating::new(n_genes, n_chain_levels, &varmap, &dev)?;
+    let gate = LevelDimGate::new(n_chain_levels, args.embedding_dim, &varmap, &dev)?;
     let mut opt = AdamW::new(
         varmap.all_vars(),
         ParamsAdamW {
@@ -345,18 +347,23 @@ pub fn fit_cell_activity_graph_embedding(
             // with the [G*B] cell-side gathers.
             let gene_ids_u32: Vec<u32> = gene_ids.iter().map(|&g| g as u32).collect();
 
+            // Per-level per-dim gate γ enters the score: rebuilt once
+            // per chunk; the loss applies it per chain level via
+            // `dim_gates`.
+            let dim_gates = softplus_floored(&gate.gamma)?; // [L, D]
+
             // (b) ONE forward / backward over the whole chunk.
-            let alpha_chunk = gating.gates_batch(&gene_ids, &dev)?; // [G, L]
             let per_level_gl = cell_cell_nce_loss_per_level_batched_gated(
                 &model,
                 cb_batches,
                 &gene_ids_u32,
+                Some(&dim_gates),
                 None, // smoother — wired later for --gene-network
                 &dev,
             )?; // [G, L]
-            let loss = (alpha_chunk.clone() * per_level_gl.clone())?.sum_all()?;
+            let loss = per_level_gl.sum_all()?;
             let total = if args.gate_l2 > 0.0 {
-                let reg = (alpha_chunk.sqr()?.sum_all()? * (args.gate_l2 as f64))?;
+                let reg = (dim_gates.sqr()?.sum_all()? * (args.gate_l2 as f64))?;
                 (loss.clone() + reg)?
             } else {
                 loss.clone()
@@ -470,20 +477,17 @@ pub fn fit_cell_activity_graph_embedding(
     // dropped genes.
     let e_gene_mat = tensor_to_mat(&model.e_feat)?;
     let b_gene_mat = tensor_to_mat_1d(&model.b_feat)?;
-    let gates_t = gating.snapshot_gates()?;
-    let gates_mat = tensor_to_mat(&gates_t)?;
 
-    let (e_gene_out, b_gene_out, gates_out, gene_names_out): (Mat, Mat, Mat, Vec<Box<str>>) =
+    let (e_gene_out, b_gene_out, gene_names_out): (Mat, Mat, Vec<Box<str>>) =
         if let Some(sel) = hvg_selected.as_ref() {
             let kept: Vec<usize> = sel.to_vec();
             (
                 subset_rows(&e_gene_mat, kept.iter().copied())?,
                 subset_rows(&b_gene_mat, kept.iter().copied())?,
-                subset_rows(&gates_mat, kept.iter().copied())?,
                 kept.iter().map(|&i| gene_names[i].clone()).collect(),
             )
         } else {
-            (e_gene_mat, b_gene_mat, gates_mat, gene_names.clone())
+            (e_gene_mat, b_gene_mat, gene_names.clone())
         };
 
     e_gene_out.to_parquet_with_names(
@@ -498,10 +502,19 @@ pub fn fit_cell_activity_graph_embedding(
         Some(&[Box::from("b_gene")]),
     )?;
 
-    gates_out.to_parquet_with_names(
-        &(c.out.to_string() + ".gene_gates.parquet"),
-        (Some(&gene_names_out), Some("gene")),
-        Some(&gate_col_names(n_chain_levels)),
+    // Per-level per-dim gate γ [L × D] post-softplus_floored, the
+    // learned "which embedding dim matters at this chain level" map.
+    let gates_t = gate.snapshot_gates()?;
+    let gates_mat = tensor_to_mat(&gates_t)?;
+    let level_names: Vec<Box<str>> = args
+        .chain_levels
+        .iter()
+        .map(|&lvl| format!("level_{lvl}").into_boxed_str())
+        .collect();
+    gates_mat.to_parquet_with_names(
+        &(c.out.to_string() + ".level_dim_gates.parquet"),
+        (Some(&level_names), Some("level")),
+        Some(&embedding_col_names(args.embedding_dim)),
     )?;
 
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
@@ -535,6 +548,7 @@ fn embedding_col_names(d: usize) -> Vec<Box<str>> {
     (0..d).map(|i| format!("e{i}").into_boxed_str()).collect()
 }
 
+#[allow(dead_code)]
 fn gate_col_names(l: usize) -> Vec<Box<str>> {
     (0..l)
         .map(|i| format!("gate_L{i}").into_boxed_str())

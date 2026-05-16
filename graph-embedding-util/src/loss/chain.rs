@@ -300,12 +300,18 @@ pub fn cell_cell_nce_loss_per_level_gated(
 /// losses. cage calls this once per chunk; `gene_ids[g]` is the gene
 /// id corresponding to `batches[g]`.
 ///
-/// All batches must share the same `B`, `L`, and `K`; same contract as
-/// [`cell_cell_nce_loss_per_level_batched`].
+/// Optional `dim_gates: [L, D]` (already passed through `softplus_floored`
+/// or similar positive transform) modulates `e_gene` per chain level
+/// via elementwise multiply with the gate row. Cage uses this to
+/// learn which embedding dimensions matter at each coarsening scale.
+/// `None` recovers the un-gated gene-modulated score.
+///
+/// All batches must share the same `B`, `L`, and `K`.
 pub fn cell_cell_nce_loss_per_level_batched_gated(
     model: &JointEmbedModel,
     batches: Vec<CellChainBatch>,
     gene_ids: &[u32],
+    dim_gates: Option<&Tensor>,
     smoother: Option<&FeatureNetworkSmoother>,
     dev: &Device,
 ) -> Result<Tensor> {
@@ -360,21 +366,43 @@ pub fn cell_cell_nce_loss_per_level_batched_gated(
     let b_right = model.b_cell.index_select(&right_idx, 0)?;
     let e_gene = select_feat_emb(smoother, &model.e_feat, &gene_idx)?; // [G*B, H]
 
-    let pos_score =
-        JointEmbedModel::score_cellcell_gated(&e_gene, &e_left, &e_right, &b_left, &b_right)?; // [G*B]
-    let pos_term = log_sigmoid(&pos_score)?;
-
     let mut per_gene_per_level: Vec<Tensor> = Vec::with_capacity(l);
-    for lvl_neg in all_neg_per_level.into_iter() {
+    for (lvl_idx, lvl_neg) in all_neg_per_level.into_iter().enumerate() {
+        // Optional per-level per-dim gating: modulate `e_gene` by
+        // `dim_gates[ℓ, :]` (already a positive `[L, D]` tensor; row ℓ
+        // broadcasts over `G*B`). With no gate the score reduces to
+        // the original gene-modulated form.
+        let e_gene_lvl = if let Some(g_t) = dim_gates {
+            let idx = Tensor::from_vec(vec![lvl_idx as u32], 1, dev)?;
+            let row = g_t.index_select(&idx, 0)?; // [1, D]
+            let h = e_gene.dim(1)?;
+            let bcast = row.broadcast_as((total_b, h))?;
+            (e_gene.clone() * bcast)?
+        } else {
+            e_gene.clone()
+        };
+        let pos_score = JointEmbedModel::score_cellcell_gated(
+            &e_gene_lvl,
+            &e_left,
+            &e_right,
+            &b_left,
+            &b_right,
+        )?;
+        let pos_term = log_sigmoid(&pos_score)?;
         let neg_idx = Tensor::from_vec(lvl_neg, total_neg, dev)?;
         let e_neg_flat = model.e_cell.index_select(&neg_idx, 0)?;
         let b_neg_flat = model.b_cell.index_select(&neg_idx, 0)?;
         let h = e_neg_flat.dim(1)?;
         let e_neg = e_neg_flat.reshape((total_b, k, h))?;
         let b_neg = b_neg_flat.reshape((total_b, k))?;
-        let neg_score =
-            JointEmbedModel::score_cellcell_gated_neg(&e_gene, &e_left, &e_neg, &b_left, &b_neg)?;
-        let per_edge = (pos_term.clone() + log_sigmoid(&neg_score.neg()?)?.sum(1)?)?.neg()?;
+        let neg_score = JointEmbedModel::score_cellcell_gated_neg(
+            &e_gene_lvl,
+            &e_left,
+            &e_neg,
+            &b_left,
+            &b_neg,
+        )?;
+        let per_edge = (pos_term + log_sigmoid(&neg_score.neg()?)?.sum(1)?)?.neg()?;
         let per_edge_gb = per_edge.reshape((g, b))?;
         let per_gene = per_edge_gb.mean(1)?; // [G]
         per_gene_per_level.push(per_gene);
