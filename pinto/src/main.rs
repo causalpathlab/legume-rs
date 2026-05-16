@@ -1,4 +1,4 @@
-mod cell_activity_embedding;
+mod cell_activity_graph_embedding;
 mod gene_network;
 mod link_community;
 mod lr_activity;
@@ -10,7 +10,9 @@ mod util;
 #[cfg(test)]
 mod test_support;
 
-use cell_activity_embedding::{fit_cell_activity_embedding, CellActivityEmbeddingArgs};
+use cell_activity_graph_embedding::{
+    fit_cell_activity_graph_embedding, CellActivityGraphEmbeddingArgs,
+};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use link_community::fit::*;
@@ -266,7 +268,7 @@ enum Commands {
                       \x20 {out}.delta.parquet           batch effects (multi-batch only)\n\
                       \x20 {out}.metadata.json           manifest"
     )]
-    Cage(CellActivityEmbeddingArgs),
+    Cage(CellActivityGraphEmbeddingArgs),
 
     #[command(
         alias = "p",
@@ -542,7 +544,7 @@ fn main() -> anyhow::Result<()> {
             fit_srt_link_community(args)?;
         }
         Commands::Cage(args) => {
-            fit_cell_activity_embedding(args)?;
+            fit_cell_activity_graph_embedding(args)?;
         }
         Commands::Plot(args) => {
             make_srt_plot(args)?;

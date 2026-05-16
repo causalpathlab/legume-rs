@@ -11,5 +11,5 @@ pub mod fit;
 pub mod gene_chain_sampler;
 pub mod gene_gating;
 
-pub use args::CellActivityEmbeddingArgs;
-pub use fit::fit_cell_activity_embedding;
+pub use args::CellActivityGraphEmbeddingArgs;
+pub use fit::fit_cell_activity_graph_embedding;

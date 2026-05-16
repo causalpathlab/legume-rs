@@ -16,7 +16,7 @@ use rand::Rng;
 use rand_distr::weighted::WeightedIndex;
 use rayon::prelude::*;
 
-use crate::cell_activity_embedding::gene_gating::CellActivities;
+use crate::cell_activity_graph_embedding::gene_gating::CellActivities;
 
 ////////////////////////////////////////////////////////////////
 //                                                            //

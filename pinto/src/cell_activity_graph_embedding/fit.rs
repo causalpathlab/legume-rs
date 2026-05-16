@@ -10,11 +10,11 @@
 //!   7. training loop — rayon sample, serial fwd/bwd
 //!   8. parquet outputs + metadata.json
 
-use crate::cell_activity_embedding::args::CellActivityEmbeddingArgs;
-use crate::cell_activity_embedding::gene_chain_sampler::{
+use crate::cell_activity_graph_embedding::args::CellActivityGraphEmbeddingArgs;
+use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
 };
-use crate::cell_activity_embedding::gene_gating::{build_cell_activities, GeneGating};
+use crate::cell_activity_graph_embedding::gene_gating::{build_cell_activities, GeneGating};
 use crate::util::cell_pairs::SrtCellPairs;
 use crate::util::common::*;
 use crate::util::graph_coarsen::{graph_coarsen_multilevel, CoarsenConfig, SeedingParams};
@@ -35,7 +35,9 @@ use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
-pub fn fit_cell_activity_embedding(args: &CellActivityEmbeddingArgs) -> anyhow::Result<()> {
+pub fn fit_cell_activity_graph_embedding(
+    args: &CellActivityGraphEmbeddingArgs,
+) -> anyhow::Result<()> {
     let c = &args.common;
     mkdir_parent(&c.out)?;
 
