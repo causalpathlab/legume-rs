@@ -142,7 +142,7 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         default_value_t = 1e-4,
-        help = "L2 penalty on softplus(α) gates (sparsity over levels)"
+        help = "L2 penalty on softplus_floored(γ[L,D]) per-level per-dim gates"
     )]
     pub gate_l2: f32,
 
