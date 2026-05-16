@@ -232,8 +232,16 @@ impl SrtInputArgs {
         }
     }
 
-    /// Convert to the internal read args for data loading.
-    pub fn to_read_args(&self) -> SRTReadArgs {
+    /// Convert to the internal read args for data loading. The
+    /// `feature_kind` selects how row names get canonicalized for
+    /// cross-file / cross-resource matching. `pinto cage` uses
+    /// `FeatureNameKind::Gene { delim: '_' }` (or `auto_detect`'d) so
+    /// gene names like `ENSG00000105329_TGFB1` register both the full
+    /// name and the `TGFB1` suffix as aliases — required for matching
+    /// against external gene resources (PPI, marker sets, etc.). `lc`
+    /// and `svd` currently pass `FeatureNameKind::Exact` for strict
+    /// equality.
+    pub fn to_read_args_with_kind(&self, feature_kind: FeatureNameKind) -> SRTReadArgs {
         SRTReadArgs {
             data_files: self.data_files.clone(),
             coord_files: self.coord_files.clone(),
@@ -242,7 +250,7 @@ impl SrtInputArgs {
             coord_column_names: self.coord_column_names.clone(),
             batch_files: self.batch_files.clone(),
             header_in_coord: self.coord_header_row,
-            feature_kind: FeatureNameKind::Exact,
+            feature_kind,
         }
     }
 }

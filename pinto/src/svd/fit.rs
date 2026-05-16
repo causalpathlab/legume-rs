@@ -1,11 +1,10 @@
 use crate::link_community::profiles::{
     compute_propensity_and_gene_community_stat, PropensityReportConfig,
 };
-use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
-use crate::util::input::*;
+use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
 use data_beans_alg::random_projection::*;
 
 use clap::Parser;
@@ -116,93 +115,28 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     let c = &args.common;
     mkdir_parent(&c.out)?;
 
-    // 1. Load data (with or without coordinates)
-    info!("Loading data files...");
-
-    let has_coords = c.has_coordinates();
-
-    let SRTData {
-        data: mut data_vec,
-        mut coordinates,
-        mut coordinate_names,
-        batches: mut batch_membership,
-    } = if has_coords {
-        read_data_with_coordinates(c.to_read_args())?
-    } else {
-        info!("No coordinate files provided — using expression mode");
-        read_data_without_coordinates(c.to_read_args())?
-    };
-
-    let gene_names = data_vec.row_names()?;
-    let n_genes = data_vec.num_rows();
-    let n_cells = data_vec.num_columns();
-
-    anyhow::ensure!(c.proj_dim > 0, "proj_dim must be > 0");
     anyhow::ensure!(c.n_pseudobulk > 0, "n_pseudobulk must be > 0");
-    anyhow::ensure!(c.knn_spatial > 0, "knn_spatial must be > 0");
     anyhow::ensure!(args.n_latent_topics > 0, "n_latent_topics must be > 0");
-    anyhow::ensure!(
-        c.knn_spatial < n_cells,
-        "knn_spatial ({}) must be < number of cells ({})",
-        c.knn_spatial,
-        n_cells
-    );
 
-    // 2. Build KNN graph (spatial or expression-based)
-    let graph;
-
-    if has_coords {
-        info!("Building spatial KNN graph (k={})...", c.knn_spatial);
-        graph = build_spatial_graph(
-            &coordinates,
-            SrtCellPairsArgs {
-                knn: c.knn_spatial,
-                block_size: c.block_size,
-                reciprocal: c.reciprocal,
-            },
-        )?;
-    } else {
-        info!(
-            "Building expression KNN graph (k={}, proj_dim={})...",
-            c.knn_spatial, c.proj_dim
-        );
-        let cell_proj_pre = data_vec.project_columns_with_batch_correction(
-            c.proj_dim,
-            c.block_size,
-            None::<&[Box<str>]>,
-        )?;
-        let (g, embedding) = build_expression_graph(
-            &cell_proj_pre.proj,
-            SrtCellPairsArgs {
-                knn: c.knn_spatial,
-                block_size: c.block_size,
-                reciprocal: c.reciprocal,
-            },
-        )?;
-        graph = g;
-        coordinates = embedding;
-        coordinate_names = vec!["pc_1".into(), "pc_2".into()];
-    }
-
-    // Auto-detect batches from connected components (opt-in via --auto-batch)
-    if c.auto_batch && c.batch_files.is_none() {
-        crate::util::input::auto_batch_from_components(&graph, &mut batch_membership);
-    }
-
-    // 3. Estimate batch effects
-    let batch_sort_dim = c.proj_dim.min(10);
-    let batch_db = estimate_and_write_batch_effects(
-        &mut data_vec,
-        &batch_membership,
-        EstimateBatchArgs {
-            proj_dim: c.proj_dim,
-            sort_dim: batch_sort_dim,
-            block_size: c.block_size,
-            batch_knn: c.batch_knn,
-            num_levels: c.num_levels,
-        },
-        &c.out,
-    )?;
+    // 1-3. Load + KNN + batch effects (no Fisher weights).
+    let SrtPreprocessed {
+        data_vec,
+        coordinates,
+        coordinate_names,
+        batch_membership,
+        batch_effects: batch_db,
+        graph,
+        gene_weights: _,
+        n_cells,
+        n_genes,
+    } = preprocess_srt(SrtPreprocessConfig {
+        common: c,
+        fisher_weights: false,
+        batch_effects: true,
+        feature_kind: None,
+    })?;
+    let has_coords = c.has_coordinates();
+    let gene_names = data_vec.row_names()?;
 
     // Wrap graph with data for pair-level operations
     let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, graph);

@@ -80,6 +80,28 @@ pub struct OutputFiles {
     /// per-significant-pair edge participation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lr_activity: Option<String>,
+
+    /// `pinto cage` cell embedding `[N × D]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_embedding: Option<String>,
+
+    /// `pinto cage` per-cell bias `[N]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_bias: Option<String>,
+
+    /// `pinto cage` per-gene per-level softplus(α) gates `[G × L]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gene_gates: Option<String>,
+
+    /// `pinto cage` gene embedding `[G × D]` — same shared D-dim space
+    /// as `cell_embedding`. Cosine similarity between gene rows is
+    /// directly interpretable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gene_embedding: Option<String>,
+
+    /// `pinto cage` per-gene bias `[G]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gene_bias: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -213,6 +235,11 @@ pub fn create_lc_metadata(
             batch_effects: None,
             dict_merge,
             lr_activity: None,
+            cell_embedding: None,
+            cell_bias: None,
+            gene_gates: None,
+            gene_embedding: None,
+            gene_bias: None,
         },
         levels: Some(levels),
     }
@@ -260,6 +287,59 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
             batch_effects: Some(format!("{prefix}.delta.parquet")),
             dict_merge: None,
             lr_activity: None,
+            cell_embedding: None,
+            cell_bias: None,
+            gene_gates: None,
+            gene_embedding: None,
+            gene_bias: None,
+        },
+        levels: Some(levels),
+    }
+}
+
+/// Helper for `pinto cage` runs. Embedding-only — one `final` level,
+/// no communities. `has_batch_effects` is `true` when the run had ≥2
+/// batches and `{prefix}.delta.parquet` was written.
+///
+/// `inputs.k` carries the embedding dimensionality (re-purposed; the
+/// JSON's `n_communities` is set to `None` since cage has no clusters).
+pub fn create_cage_metadata(inputs: &RunInputs<'_>, has_batch_effects: bool) -> PintoMetadata {
+    let prefix = inputs.prefix;
+    let levels = vec![LevelInfo {
+        tag: "final".to_string(),
+        level_index: 0,
+        propensity: format!("{prefix}.cell_embedding.parquet"),
+        link_community: format!("{prefix}.gene_gates.parquet"),
+        gene_community: None,
+        entropy_present: Some(false),
+    }];
+
+    PintoMetadata {
+        command: "cage".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        timestamp: now_secs(),
+        prefix: prefix.to_string(),
+        data_files: Some(inputs.data_files.iter().map(|s| s.to_string()).collect()),
+        coord_file: inputs.coord_file.map(|s| s.to_string()),
+        n_cells: inputs.n_cells,
+        n_genes: inputs.n_genes,
+        n_edges: Some(inputs.n_edges),
+        n_communities: None,
+        outputs: OutputFiles {
+            coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
+            coord_columns: coord_columns_field(inputs.coord_columns),
+            propensity: None,
+            link_community: None,
+            gene_community: None,
+            scores: Some(format!("{prefix}.scores.parquet")),
+            batch_effects: has_batch_effects.then(|| format!("{prefix}.delta.parquet")),
+            dict_merge: None,
+            lr_activity: None,
+            cell_embedding: Some(format!("{prefix}.cell_embedding.parquet")),
+            cell_bias: Some(format!("{prefix}.cell_bias.parquet")),
+            gene_gates: Some(format!("{prefix}.gene_gates.parquet")),
+            gene_embedding: Some(format!("{prefix}.gene_embedding.parquet")),
+            gene_bias: Some(format!("{prefix}.gene_bias.parquet")),
         },
         levels: Some(levels),
     }
@@ -305,6 +385,11 @@ pub fn create_prop_metadata(
             batch_effects: None,
             dict_merge: None,
             lr_activity: None,
+            cell_embedding: None,
+            cell_bias: None,
+            gene_gates: None,
+            gene_embedding: None,
+            gene_bias: None,
         },
         levels: Some(levels),
     }
@@ -358,6 +443,67 @@ mod tests {
                 ][..]
             )
         );
+    }
+
+    #[test]
+    fn metadata_roundtrip_cage() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("run").to_string_lossy().to_string();
+        let data_files: Vec<Box<str>> = vec!["a.h5".into()];
+        let coord_cols: Vec<Box<str>> = vec!["x".into(), "y".into()];
+        let meta = create_cage_metadata(
+            &RunInputs {
+                prefix: &prefix,
+                data_files: &data_files,
+                coord_file: Some("a.csv"),
+                coord_columns: &coord_cols,
+                n_cells: 1000,
+                n_genes: 20000,
+                n_edges: 5000,
+                k: 16, // embedding_dim, reused slot
+            },
+            true,
+        );
+        let path = dir.path().join("run.metadata.json");
+        meta.write(&path).unwrap();
+        let back = PintoMetadata::read(&path).unwrap();
+        assert_eq!(back.command, "cage");
+        assert_eq!(back.n_cells, 1000);
+        assert_eq!(back.n_communities, None);
+        assert!(back.outputs.cell_embedding.is_some());
+        assert!(back.outputs.cell_bias.is_some());
+        assert!(back.outputs.gene_gates.is_some());
+        assert!(back.outputs.gene_embedding.is_some());
+        assert!(back.outputs.gene_bias.is_some());
+        assert!(back.outputs.scores.is_some());
+        assert!(back.outputs.batch_effects.is_some());
+        assert!(back.outputs.link_community.is_none());
+        let levels = back.levels.expect("levels");
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels[0].tag, "final");
+    }
+
+    #[test]
+    fn metadata_roundtrip_cage_no_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("run").to_string_lossy().to_string();
+        let data_files: Vec<Box<str>> = vec!["a.h5".into()];
+        let meta = create_cage_metadata(
+            &RunInputs {
+                prefix: &prefix,
+                data_files: &data_files,
+                coord_file: None,
+                coord_columns: &[],
+                n_cells: 100,
+                n_genes: 200,
+                n_edges: 300,
+                k: 8,
+            },
+            false,
+        );
+        let back: PintoMetadata =
+            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        assert!(back.outputs.batch_effects.is_none());
     }
 
     #[test]
