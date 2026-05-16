@@ -67,34 +67,20 @@ Defined in `auxiliary-data/src/feature_names.rs`. Registers each `_`-split compo
 
 cage v3 wires it via a new `--gene-name-mode {exact, gene, auto}` flag (default `gene`, since SRT gene names are virtually always Ensembl-suffixed symbols). Implementation: pinto's `SRTReadArgs.feature_kind` field already supports it — we just stop hardcoding `Exact` in `to_read_args` when running cage.
 
-### 2. `load_feature_network` + `FeatureNetworkSmoother` — gene-pair regularization on `e_gene`
-`graph-embedding-util/src/fit.rs:326 load_feature_network(FeatureNetworkArgs)` reads an external gene-pair edge list with prefix/delim fuzzy matching against the data's row names and returns a `FeatureNetworkConfig` containing a `FeatureNetworkSmoother`. The smoother applies SGC-style graph smoothing to a feature embedding `e_feat`: `e_feat_smoothed = (αI + (1-α)/k · Σ_k Â^k) e_feat`, applied every `refresh_epochs` (or every step). In senna `bge` it lives inside the loss via `select_feat_emb(smoother, e_feat, idx)`.
-
-cage v3 wires it via:
-```
---gene-network <path>             optional gene-pair edge list (TSV/CSV)
---gene-network-prefix-match       fuzzy prefix match on gene names
---gene-network-delim <char>       column delimiter in the edge file
---gene-network-k <usize>          SGC hops, default 2
---gene-network-alpha <f32>        SGC retention, default 0.5
---gene-network-refresh <usize>    refresh every N epochs, default 1
-```
-
-Effect on training: `e_gene` is now regularized to be locally smooth on the gene-gene graph. Functionally-related genes (e.g. `GFAP`/`S100B`/`AQP4`) get pushed toward similar embeddings before any spatial signal flows in, which is exactly the inductive bias the v2 diagnostic showed we lack.
-
-In the gated loss, replace direct `e_gene` reads with `select_feat_emb(smoother, e_gene, gene_idx)` — drop-in.
-
-### 3. `--freeze-feature-embedding <prefix>` — warm-start from prior bge (or cage)
+### 2. `--freeze-feature-embedding <prefix>` — warm-start from prior bge (or cage)
 senna `bge` writes its trained `e_feat` to parquet; `load_frozen_feature_host_for_bge` loads it and registers an immutable Var. cage v3 supports the same flag: when set, `e_gene` is loaded from the prior run, frozen (no gradient), and only `e_cell` / `b_cell` / `α` train. This is the "given biologically meaningful gene embeddings, learn the spatial cell geometry consistent with them" mode — much faster convergence than learning `e_gene` from scratch on one Visium slide.
 
 Two natural sources for the frozen prefix:
 - **senna bge output** — a `*.gene_embedding.parquet` trained on a large scRNA-seq atlas. Biologically grounded, can be applied to many SRT slides downstream.
 - **A prior cage run** — since v3 already emits `{out}.gene_embedding.parquet` with the same shape and row naming convention as senna's, cage outputs can be fed back in for iterative refinement (multi-pass training, freezing gene side while exploring cell side, etc.).
 
-Cage's existing `--gene-name-mode` controls how the frozen prefix is matched to the current data's row names (same fuzzy-match plumbing as `--gene-network`).
+Cage's existing `--gene-name-mode` controls how the frozen prefix is matched to the current data's row names.
+
+### Why we don't wire gene-pair-network regularization (e.g. `FeatureNetworkSmoother` / SGC on `e_gene`)
+The senna `bge` machinery exposes a `--gene-network` flag that smooths `e_feat` along an external gene-pair graph (PPI / BioGRID / etc.). The plumbing is public and the diff to wire it into cage would be small. We're **not** doing it: senna evidence is that injecting external gene-structure priors into embedding-based contrastive training doesn't improve the learned embedding. The contrastive objective discovers what it needs from the data; the prior constrains rather than helps. Hard gene modules (Leiden over the gene network, then per-module collapse) are off the table for the same reason. HVG / Fisher-info **subsetting** is fine — it's gene-axis filtering, not structure injection.
 
 ### Default behavior
-All three are *optional*. Default cage v3 (no flags): gene-name canonicalization on (so output gene names are symbols, not Ensembl-prefixed), no feature network, no warm-start. Identical to "Tier 2 plain" except gene names in output parquets are cleaner.
+Both flags are *optional*. Default cage (no flags): gene-name canonicalization on (so output gene names are symbols, not Ensembl-prefixed), no warm-start. Otherwise identical to bare cage.
 
 ## File changes
 
@@ -157,13 +143,11 @@ Existing `cell_cell_nce_loss_per_level_batched` (gene-agnostic) stays for back-c
 - `ModelArgs { n_features: n_genes, n_cells, embedding_dim }` (was `n_features: 1`).
 - `ModelInit { b_feat: &vec![0.0; n_genes], ... }` (was `&[0.0]`).
 - Build a `gene_ids_chunk: Vec<u32>` alongside `cb_batches` from the rayon sampling output (we already extract `gene_ids` from `mini.into_iter().unzip()`; just cast to `u32`).
-- Call `cell_cell_nce_loss_per_level_batched_gated(&model, cb_batches, &gene_ids_chunk_u32, smoother.as_ref(), &dev)` — smoother is `Option<&FeatureNetworkSmoother>`, threaded through analogously to senna gbe's `select_feat_emb`.
+- Call `cell_cell_nce_loss_per_level_batched_gated(&model, cb_batches, &gene_ids_chunk_u32, Some(&dim_gates), None, &dev)` — `dim_gates` is the `[L, D]` `softplus_floored(γ)`; the `Option<&FeatureNetworkSmoother>` slot stays `None` (we don't wire it for cage).
 - After training, dump `model.e_feat` → `{out}.gene_embedding.parquet` (G × D, row names = canonicalized gene symbols, col names `e0..e{D-1}`).
 - Dump `model.b_feat` → `{out}.gene_bias.parquet`.
 
-If `--freeze-feature-embedding` is set: load the prior bge's `e_feat` via `load_frozen_feature_host_for_bge`, register as immutable, skip the AdamW update for `e_gene`. Optimizer only touches cells + α.
-
-If `--gene-network` is set: build the `FeatureNetworkSmoother` once at start; pass to the loss; call `smoother.refresh(&e_gene)` at the end of each epoch (or every `refresh` epochs).
+If `--freeze-feature-embedding` is set: load the prior bge's `e_feat` via `load_frozen_feature_host_for_bge`, register as immutable, skip the AdamW update for `e_gene`. Optimizer only touches cells + γ.
 
 ### `pinto/src/util/input.rs` — let cage opt out of `Exact`
 
@@ -183,14 +167,8 @@ Update `create_cage_metadata` to populate them. Update existing tests + add one 
 ### `pinto/src/cell_activity_embedding/args.rs` — gene utility flags
 
 ```
---gene-name-mode {exact,gene,auto}           default `gene`
---gene-network <path>                        optional, default off
---gene-network-prefix-match                  default false
---gene-network-delim <char>                  default `\t`
---gene-network-k <usize>                     default 2
---gene-network-alpha <f32>                   default 0.5
---gene-network-refresh <usize>               default 1
---freeze-feature-embedding <prefix>          optional, default off
+--gene-name-mode {auto,exact,gene,locus,mixed}  default `auto`
+--freeze-feature-embedding <prefix>             optional, default off
 ```
 
 Embedding dim itself is **shared** between cells and genes. No `--gene-embedding-dim` — `--embedding-dim` controls both. When `--freeze-feature-embedding` is provided, `--embedding-dim` is checked against the frozen file's D and an error is raised on mismatch (mirrors senna bge).
@@ -203,7 +181,7 @@ Embedding dim itself is **shared** between cells and genes. No `--gene-embedding
 | `{out}.cell_bias.parquet` | N × 1 | (unchanged) |
 | `{out}.gene_embedding.parquet` | G × D | NEW — e_gene in the SAME D-dim space as e_cell |
 | `{out}.gene_bias.parquet` | G × 1 | NEW |
-| `{out}.gene_gates.parquet` | G × L | KEPT (deprecation candidate) |
+| `{out}.level_dim_gates.parquet` | L × D | NEW — softplus_floored(γ) per-level per-dim |
 | `{out}.coord_pairs.parquet` | E × 6 | unchanged |
 | `{out}.scores.parquet` | T × 6 | unchanged |
 | `{out}.metadata.json` | manifest | new gene_embedding/gene_bias keys |
@@ -247,10 +225,7 @@ All existing tests still pass. The renamed/added loss variants must not break se
 
 ## Open
 
-(α-removal + γ[L,D] in-score landed. softplus_floored gives a positive-side gradient floor via `+ ε · relu(x)`. Output is now `level_dim_gates.parquet [L × D]`. v2 considerations dropped.)
-
-- **Full per-gene per-level per-dim gate `γ[G, L, D]`** would be the next step up in expressivity (~864k params for G=18k, L=3, D=16). Worth piloting if `γ[L, D]` saturates without enough biological signal.
-- **Negative-side softplus gradient**: γ in the score is positive (softplus_floored). When γ goes deeply negative, gradient still vanishes — this is intrinsic and arguably the right behavior ("this dim is off at this level"). If we want γ to wake up from deep-negative, swap to `|x| + ε` parameterization (non-vanishing gradient via `sign(x)`).
+(α-removal + γ[L,D] in-score landed. softplus_floored gives a positive-side gradient floor via `+ ε · relu(x)`. Output is now `level_dim_gates.parquet [L × D]`. v2 considerations dropped. Gene-module / gene-network priors deliberately not pursued — senna evidence says external gene-structure priors don't help embedding-based contrastive training.)
 - **v2 marker-diagnostic** (resolved): the `tightness=0.000` bug was `csc.getrow(g).tocsc()` — 1-row CSC has `.indices = [0, 0, ...]`. Fix: use `.getrow(g)` directly (returns CSR with cell-index `.indices`). After fix, v2's marker tightness is uniformly **1.00–1.12** across all 24 GBM markers — no biological clustering whatsoever, confirming the v3 diagnosis.
 
 ## Phase ordering
@@ -258,9 +233,9 @@ All existing tests still pass. The renamed/added loss variants must not break se
 | Phase | What | Effort |
 |---|---|---|
 | A | `model.rs` scoring helpers + unit test | ½ day |
-| B | `loss/chain.rs` gated variants + equivalence test (with optional smoother arg) | ½ day |
+| B | `loss/chain.rs` gated variants + equivalence test | ½ day |
 | C | `fit.rs` refactor + new parquet outputs + metadata extension; default gene-name canonicalization | ½ day |
-| D | senna-style optional plumbing: `--gene-network`, `--freeze-feature-embedding`, `--gene-name-mode` | ½ day |
+| D | senna-style optional plumbing: `--freeze-feature-embedding`, `--gene-name-mode` | ½ day |
 | E | Smoke (CPU + CUDA) + v3 vs v2 diagnostic comparison; verify marker biology (GFAP↔S100B etc.) | ¼ day |
 
 Phases A–C can ship as one PR (core v3 architecture). Phase D is a follow-up PR (gene-utility plumbing). E is the validation gate.
@@ -269,15 +244,13 @@ Phases A–C can ship as one PR (core v3 architecture). Phase D is a follow-up P
 
 ### Core architecture (Phases A–C)
 - `graph-embedding-util/src/model.rs` (add `score_cellcell_gated*`)
-- `graph-embedding-util/src/loss/chain.rs` (add `*_gated` variants + tests; thread optional `Option<&FeatureNetworkSmoother>`)
+- `graph-embedding-util/src/loss/chain.rs` (add `*_gated` variants + tests)
 - `pinto/src/cell_activity_embedding/fit.rs` (wire `n_features = n_genes`, gene-aware loss call, e_gene parquet output)
 - `pinto/src/util/metadata.rs` (extend `OutputFiles` + `create_cage_metadata`)
 - `pinto/src/cell_activity_embedding/gene_gating.rs` (consume / kept; α may be deprecated)
 
 ### Gene-utility plumbing (Phase D) — reuse senna's
 - `auxiliary-data/src/feature_names.rs` (consume `FeatureNameKind::Gene` — no changes needed there)
-- `graph-embedding-util/src/fit.rs:326 load_feature_network` (consume — already public)
-- `graph-embedding-util/src/feature_network.rs::FeatureNetworkSmoother` (consume — already public)
 - `senna/src/fit_bge.rs::load_frozen_feature_host_for_bge` — **promote to a shared crate** (`auxiliary-data` or `graph-embedding-util`) so cage can call it directly without depending on senna. v3 PR scope: factor it out, keep senna's call site intact via re-export.
 - `pinto/src/cell_activity_embedding/args.rs` (new flags as above)
 - `pinto/src/util/input.rs` (let cage override the default `FeatureNameKind::Exact` via the new `--gene-name-mode` arg)
