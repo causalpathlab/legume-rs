@@ -1,6 +1,6 @@
 //! CLI arguments for `pinto cage`.
 
-use crate::cell_activity_embedding::gene_gating::ActivityNorm;
+use crate::cell_activity_graph_embedding::gene_gating::ActivityNorm;
 use auxiliary_data::feature_names::FeatureNameKind;
 use clap::{Parser, ValueEnum};
 use data_beans_alg::hvg::HvgCliArgs;
@@ -66,7 +66,7 @@ impl GeneNameMode {
 }
 
 #[derive(Parser, Debug, Clone)]
-pub struct CellActivityEmbeddingArgs {
+pub struct CellActivityGraphEmbeddingArgs {
     #[command(flatten)]
     pub common: crate::util::input::SrtInputArgs,
 
