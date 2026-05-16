@@ -247,9 +247,10 @@ All existing tests still pass. The renamed/added loss variants must not break se
 
 ## Open
 
-- **α future**: if v3 confirms α stays uniform across (g, l) even with gene identity in the score, drop `α[G, L]` and uniform-weight the chain levels.
-- **Embedding-dim-specific gating**: extend the gate parameterization from `α[G, L]` to per-(level, dim) `γ[L, D]` (or `γ[G, L, D]` full tensor). The score would multiply `e_gene[g] ⊙ softplus(γ[ℓ, :])` so different chain levels can emphasize different embedding directions. `γ[L, D]` is only `L·D = 48` extra params; `γ[G, L, D]` is `G·L·D ≈ 864k` — bigger commitment. Worth piloting after the α-uniformity question is settled.
-- **Softplus gradient floor**: current GATE_EPS adds to the *value*, not the gradient. If we want a non-vanishing gradient on the negative side, a small `+ ε · relu(x)` term would inject a constant linear component (`d/dx = ε` for x > 0); cheap to try if the gates need more aggressive movement.
+(α-removal + γ[L,D] in-score landed. softplus_floored gives a positive-side gradient floor via `+ ε · relu(x)`. Output is now `level_dim_gates.parquet [L × D]`. v2 considerations dropped.)
+
+- **Full per-gene per-level per-dim gate `γ[G, L, D]`** would be the next step up in expressivity (~864k params for G=18k, L=3, D=16). Worth piloting if `γ[L, D]` saturates without enough biological signal.
+- **Negative-side softplus gradient**: γ in the score is positive (softplus_floored). When γ goes deeply negative, gradient still vanishes — this is intrinsic and arguably the right behavior ("this dim is off at this level"). If we want γ to wake up from deep-negative, swap to `|x| + ε` parameterization (non-vanishing gradient via `sign(x)`).
 - **v2 marker-diagnostic** (resolved): the `tightness=0.000` bug was `csc.getrow(g).tocsc()` — 1-row CSC has `.indices = [0, 0, ...]`. Fix: use `.getrow(g)` directly (returns CSR with cell-index `.indices`). After fix, v2's marker tightness is uniformly **1.00–1.12** across all 24 GBM markers — no biological clustering whatsoever, confirming the v3 diagnosis.
 
 ## Phase ordering
