@@ -180,6 +180,58 @@ impl JointEmbedModel {
         let b_c_b = b_c.unsqueeze(1)?.broadcast_as((b, k))?;
         (dot + b_f_neg)? + b_c_b
     }
+
+    /// Gene-modulated diagonal score for cell-cell positive pairs. The
+    /// gene defines a direction in the shared cell-embedding space; the
+    /// score is the product of u's and v's projections along that
+    /// direction, plus the cell biases:
+    ///
+    /// `score(u, v, g) = (e_gene · e_cell_u)(e_gene · e_cell_v)
+    ///                 + b_cell_u + b_cell_v`
+    ///
+    /// `e_gene`, `e_cell_l`, `e_cell_r` all share shape `[B, H]` (each row
+    /// is a `(gene, positive)` lookup pre-gathered by the caller).
+    /// `b_cell_l`, `b_cell_r` are `[B]`. Returns `[B]`.
+    pub fn score_cellcell_gated(
+        e_gene: &Tensor,
+        e_cell_l: &Tensor,
+        e_cell_r: &Tensor,
+        b_cell_l: &Tensor,
+        b_cell_r: &Tensor,
+    ) -> Result<Tensor> {
+        let proj_l = (e_gene * e_cell_l)?.sum(1)?; // [B]
+        let proj_r = (e_gene * e_cell_r)?.sum(1)?; // [B]
+        let pair = (proj_l * proj_r)?;
+        (pair + b_cell_l)? + b_cell_r
+    }
+
+    /// Gene-modulated score for chain negatives. `e_gene`, `e_cell_anchor`
+    /// are `[B, H]` (one row per `(gene, positive)`); `e_cell_neg` is
+    /// `[B, K, H]` (K sibling negatives per positive); `b_cell_anchor`
+    /// is `[B]`; `b_cell_neg` is `[B, K]`. Returns `[B, K]`.
+    ///
+    /// Per-row score: `(e_gene · e_cell_anchor) · (e_gene · e_cell_neg[k])
+    ///               + b_cell_anchor + b_cell_neg[k]`.
+    /// The gene-direction projection of the anchor is computed once and
+    /// broadcast across K negatives.
+    pub fn score_cellcell_gated_neg(
+        e_gene: &Tensor,
+        e_cell_anchor: &Tensor,
+        e_cell_neg: &Tensor,
+        b_cell_anchor: &Tensor,
+        b_cell_neg: &Tensor,
+    ) -> Result<Tensor> {
+        let b = e_cell_neg.dim(0)?;
+        let k = e_cell_neg.dim(1)?;
+        let h = e_cell_neg.dim(2)?;
+        let proj_anchor = (e_gene * e_cell_anchor)?.sum(1)?; // [B]
+        let e_gene_3d = e_gene.unsqueeze(1)?.broadcast_as((b, k, h))?;
+        let proj_neg = (e_cell_neg * e_gene_3d)?.sum(2)?; // [B, K]
+        let proj_anchor_2d = proj_anchor.unsqueeze(1)?.broadcast_as((b, k))?;
+        let pair = (proj_anchor_2d * proj_neg)?; // [B, K]
+        let b_anchor_2d = b_cell_anchor.unsqueeze(1)?.broadcast_as((b, k))?;
+        (pair + b_anchor_2d)? + b_cell_neg
+    }
 }
 
 /// Register a 1D learnable parameter initialized from a slice and
@@ -376,6 +428,140 @@ mod tests {
         }
         for (a, b) in bias_n.iter().zip(bias_r.iter()) {
             assert!((a - b).abs() < 1e-5, "bias mismatch: {a} vs {b}");
+        }
+    }
+
+    /// With `e_gene = 1/√H · 1` (a unit vector pointing along the all-
+    /// ones direction in cell-embedding space), the gated score reduces
+    /// to a rescaled product of axis-aligned projections. Concretely:
+    ///
+    ///   (e_gene · e_cell_l) = (sum_h e_cell_l[h]) / √H = m_l
+    ///   (e_gene · e_cell_r) = m_r
+    ///   pair_score = m_l · m_r + b_l + b_r
+    ///
+    /// This test asserts the gated helper computes exactly that on a
+    /// small fixture, so we have a known-good closed form before
+    /// landing the chain integration.
+    #[test]
+    fn score_cellcell_gated_matches_closed_form() {
+        let dev = dev();
+        let b = 4;
+        let h = 3;
+
+        let e_cell_l = Tensor::from_vec(
+            vec![
+                0.1f32, 0.2, 0.3, //
+                0.4, -0.1, 0.5, //
+                -0.2, 0.0, 0.7, //
+                0.8, 0.1, -0.3, //
+            ],
+            (b, h),
+            &dev,
+        )
+        .unwrap();
+        let e_cell_r = Tensor::from_vec(
+            vec![
+                0.0f32, 0.3, -0.2, //
+                0.6, 0.4, 0.1, //
+                -0.1, 0.5, 0.2, //
+                -0.4, 0.2, 0.5, //
+            ],
+            (b, h),
+            &dev,
+        )
+        .unwrap();
+        let b_l = Tensor::from_vec(vec![0.0f32, 0.01, -0.02, 0.03], b, &dev).unwrap();
+        let b_r = Tensor::from_vec(vec![-0.01f32, 0.02, 0.0, -0.03], b, &dev).unwrap();
+
+        let unit = 1.0f32 / (h as f32).sqrt();
+        let e_gene = Tensor::from_vec(vec![unit; b * h], (b, h), &dev).unwrap();
+
+        let got = JointEmbedModel::score_cellcell_gated(&e_gene, &e_cell_l, &e_cell_r, &b_l, &b_r)
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+
+        let e_l: Vec<f32> = e_cell_l.flatten_all().unwrap().to_vec1().unwrap();
+        let e_r: Vec<f32> = e_cell_r.flatten_all().unwrap().to_vec1().unwrap();
+        let b_l_h: Vec<f32> = b_l.to_vec1().unwrap();
+        let b_r_h: Vec<f32> = b_r.to_vec1().unwrap();
+        for i in 0..b {
+            let m_l: f32 = (0..h).map(|j| e_l[i * h + j]).sum::<f32>() * unit;
+            let m_r: f32 = (0..h).map(|j| e_r[i * h + j]).sum::<f32>() * unit;
+            let expected = m_l * m_r + b_l_h[i] + b_r_h[i];
+            assert!(
+                (got[i] - expected).abs() < 1e-5,
+                "row {i}: got={} expected={}",
+                got[i],
+                expected
+            );
+        }
+    }
+
+    /// Same equivalence check for the negative-side score: gated_neg
+    /// should produce `(unit·anchor)(unit·neg) + b_anchor + b_neg`
+    /// for every (B, K) entry.
+    #[test]
+    fn score_cellcell_gated_neg_matches_closed_form() {
+        let dev = dev();
+        let b = 3;
+        let k = 2;
+        let h = 4;
+
+        let e_cell_anchor = Tensor::from_vec(
+            vec![
+                0.1f32, 0.2, 0.3, 0.4, //
+                -0.1, 0.2, -0.3, 0.5, //
+                0.6, -0.2, 0.1, 0.0, //
+            ],
+            (b, h),
+            &dev,
+        )
+        .unwrap();
+        let e_cell_neg = Tensor::from_vec(
+            vec![
+                0.0f32, 0.1, 0.2, 0.3, 0.4, 0.5, -0.1, -0.2, //
+                -0.3, 0.4, 0.0, 0.1, 0.2, 0.1, 0.0, 0.3, //
+                0.5, -0.1, 0.2, 0.0, 0.0, 0.1, 0.2, 0.4, //
+            ],
+            (b, k, h),
+            &dev,
+        )
+        .unwrap();
+        let b_anchor = Tensor::from_vec(vec![0.01f32, -0.02, 0.03], b, &dev).unwrap();
+        let b_neg =
+            Tensor::from_vec(vec![0.0f32, 0.01, -0.01, 0.02, 0.0, -0.02], (b, k), &dev).unwrap();
+
+        let unit = 1.0f32 / (h as f32).sqrt();
+        let e_gene = Tensor::from_vec(vec![unit; b * h], (b, h), &dev).unwrap();
+
+        let got = JointEmbedModel::score_cellcell_gated_neg(
+            &e_gene,
+            &e_cell_anchor,
+            &e_cell_neg,
+            &b_anchor,
+            &b_neg,
+        )
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap();
+
+        let a: Vec<f32> = e_cell_anchor.flatten_all().unwrap().to_vec1().unwrap();
+        let n: Vec<f32> = e_cell_neg.flatten_all().unwrap().to_vec1().unwrap();
+        let ba: Vec<f32> = b_anchor.to_vec1().unwrap();
+        let bn: Vec<Vec<f32>> = b_neg.to_vec2().unwrap();
+        for i in 0..b {
+            let m_a: f32 = (0..h).map(|j| a[i * h + j]).sum::<f32>() * unit;
+            for kk in 0..k {
+                let m_n: f32 = (0..h).map(|j| n[i * k * h + kk * h + j]).sum::<f32>() * unit;
+                let expected = m_a * m_n + ba[i] + bn[i][kk];
+                assert!(
+                    (got[i][kk] - expected).abs() < 1e-5,
+                    "({i},{kk}): got={} expected={}",
+                    got[i][kk],
+                    expected
+                );
+            }
         }
     }
 }

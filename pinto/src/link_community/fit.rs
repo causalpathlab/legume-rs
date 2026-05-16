@@ -34,11 +34,10 @@ use crate::link_community::outputs::{
     write_score_trace, ScoreEntry,
 };
 use crate::link_community::profiles::*;
-use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
-use crate::util::input::*;
+use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
 use data_beans_alg::random_projection::RandProjOps;
 use matrix_util::common_io::mkdir_parent;
 use rand::rngs::SmallRng;
@@ -54,117 +53,29 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     mkdir_parent(&c.out)?;
 
-    //////////////////////////////////////////////////////
-    // 1. Load data (with or without coordinates)       //
-    //////////////////////////////////////////////////////
-    info!("Loading data files...");
-
-    let has_coords = c.has_coordinates();
-
-    let SRTData {
-        data: mut data_vec,
-        mut coordinates,
-        mut coordinate_names,
-        batches: mut batch_membership,
-    } = if has_coords {
-        read_data_with_coordinates(c.to_read_args())?
-    } else {
-        info!("No coordinate files provided — using expression mode");
-        read_data_without_coordinates(c.to_read_args())?
-    };
-
-    let n_genes = data_vec.num_rows();
-    let n_cells = data_vec.num_columns();
-
-    anyhow::ensure!(c.proj_dim > 0, "proj_dim must be > 0");
     anyhow::ensure!(args.n_communities > 0, "n_communities must be > 0");
-    anyhow::ensure!(c.knn_spatial > 0, "knn_spatial must be > 0");
-    anyhow::ensure!(
-        c.knn_spatial < n_cells,
-        "knn_spatial ({}) must be < number of cells ({})",
-        c.knn_spatial,
-        n_cells
-    );
 
     //////////////////////////////////////////////////////
-    // 2. Build KNN graph (spatial or expression-based) //
+    // 1-3. Load + KNN + batch effects + gene weights   //
     //////////////////////////////////////////////////////
-    let graph;
-
-    if has_coords {
-        info!("Building spatial KNN graph (k={})...", c.knn_spatial);
-        graph = build_spatial_graph(
-            &coordinates,
-            SrtCellPairsArgs {
-                knn: c.knn_spatial,
-                block_size: c.block_size,
-                reciprocal: c.reciprocal,
-            },
-        )?;
-    } else {
-        info!(
-            "Building expression KNN graph (k={}, proj_dim={})...",
-            c.knn_spatial, c.proj_dim
-        );
-        let cell_proj_pre = data_vec.project_columns_with_batch_correction(
-            c.proj_dim,
-            c.block_size,
-            None::<&[Box<str>]>,
-        )?;
-        let (g, embedding) = build_expression_graph(
-            &cell_proj_pre.proj,
-            SrtCellPairsArgs {
-                knn: c.knn_spatial,
-                block_size: c.block_size,
-                reciprocal: c.reciprocal,
-            },
-        )?;
-        graph = g;
-        coordinates = embedding;
-        coordinate_names = vec!["pc_1".into(), "pc_2".into()];
-    }
-
-    // Auto-detect batches from connected components (opt-in via --auto-batch)
-    if c.auto_batch && c.batch_files.is_none() {
-        crate::util::input::auto_batch_from_components(&graph, &mut batch_membership);
-    }
-
-    //////////////////////////////////////////////////////
-    // 3. Estimate batch effects (skipped single-batch) //
-    //////////////////////////////////////////////////////
-    let batch_sort_dim = c.proj_dim.min(10);
-    let batch_db = estimate_and_write_batch_effects(
-        &mut data_vec,
-        &batch_membership,
-        EstimateBatchArgs {
-            proj_dim: c.proj_dim,
-            sort_dim: batch_sort_dim,
-            block_size: c.block_size,
-            batch_knn: c.batch_knn,
-            num_levels: c.num_levels,
-        },
-        &c.out,
-    )?;
-
-    //////////////////////////////////////////////////////
-    // 4-pre0. NB Fisher-info gene weights (always)      //
-    //////////////////////////////////////////////////////
-    // Same w_g formula already used at output time in `compute_gene_community_stat`
-    // and inside the dc_poisson cell coarsening. We compute it once and bake it
-    // into both the module-pair per-cell expression and the projection basis,
-    // so the Gibbs / EM / greedy scoring loop sees gene-weighted profiles
-    // throughout — matching the rest of the data-beans-alg pipeline.
-    info!("Computing NB Fisher-info gene weights for inference...");
-    let gene_weights = compute_nb_fisher_weights(&data_vec, c.block_size)?;
-    info!(
-        "Gene weights w_g: min={:.3e}, mean={:.3e}, max={:.3e}",
-        gene_weights.iter().cloned().fold(f32::INFINITY, f32::min),
-        gene_weights.iter().sum::<f32>() / (gene_weights.len().max(1) as f32),
-        gene_weights
-            .iter()
-            .cloned()
-            .fold(f32::NEG_INFINITY, f32::max),
-    );
+    let SrtPreprocessed {
+        data_vec,
+        coordinates,
+        coordinate_names,
+        batch_membership,
+        batch_effects: batch_db,
+        graph,
+        gene_weights,
+        n_cells,
+        n_genes,
+    } = preprocess_srt(SrtPreprocessConfig {
+        common: c,
+        fisher_weights: true,
+        batch_effects: true,
+        feature_kind: None,
+    })?;
+    let has_coords = c.has_coordinates();
+    let gene_weights = gene_weights.expect("fisher_weights=true must yield Some");
 
     //////////////////////////////////////////////////////
     // 4-pre. Gene network setup (if provided)           //

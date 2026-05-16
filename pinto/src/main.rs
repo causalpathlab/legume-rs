@@ -1,3 +1,4 @@
+mod cell_activity_embedding;
 mod gene_network;
 mod link_community;
 mod lr_activity;
@@ -9,6 +10,7 @@ mod util;
 #[cfg(test)]
 mod test_support;
 
+use cell_activity_embedding::{fit_cell_activity_embedding, CellActivityEmbeddingArgs};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use link_community::fit::*;
@@ -245,6 +247,26 @@ enum Commands {
                       \x20                                or `pinto lr-activity --lc-prefix`."
     )]
     LinkCommunity(SrtLinkCommunityArgs),
+
+    #[command(
+        alias = "cge",
+        about = "Activity-gated cell-graph embedding (cage)",
+        long_about = "Learn per-cell embeddings on the spatial cell-cell graph by\n\
+                      visiting each gene: every gene defines a per-cell activity\n\
+                      vector that gates a shared multi-scale cell-cell hierarchy,\n\
+                      and contrastive (NCE) updates are summed over per-gene\n\
+                      per-level learnable gates α[g, ℓ]. Embedding-only — no\n\
+                      count decoder.\n\n\
+                      Outputs:\n\
+                      \x20 {out}.cell_embedding.parquet  cell × embedding_dim\n\
+                      \x20 {out}.cell_bias.parquet       per-cell scalar\n\
+                      \x20 {out}.gene_gates.parquet      gene × chain_levels (softplus α)\n\
+                      \x20 {out}.coord_pairs.parquet     spatial edge list\n\
+                      \x20 {out}.scores.parquet          per-epoch loss trace\n\
+                      \x20 {out}.delta.parquet           batch effects (multi-batch only)\n\
+                      \x20 {out}.metadata.json           manifest"
+    )]
+    Cage(CellActivityEmbeddingArgs),
 
     #[command(
         alias = "p",
@@ -518,6 +540,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::LinkCommunity(args) => {
             fit_srt_link_community(args)?;
+        }
+        Commands::Cage(args) => {
+            fit_cell_activity_embedding(args)?;
         }
         Commands::Plot(args) => {
             make_srt_plot(args)?;

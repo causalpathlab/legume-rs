@@ -7,6 +7,8 @@ pub mod graph_refine;
 pub mod input;
 pub mod knn_graph;
 pub mod metadata;
+pub mod score_trace;
+pub mod srt_pipeline;
 
 #[cfg(test)]
 mod tests;

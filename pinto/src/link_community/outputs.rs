@@ -204,85 +204,10 @@ pub fn link_community_histogram(membership: &[usize], k: usize, max_width: usize
     lines.join("\n")
 }
 
-/// One row of the score trace.
-///
-/// `level = -1` marks post-EM final rows. `sweep` is the 0-based sweep index
-/// within a cascade level (Gibbs sweeps followed by greedy sweeps — the last
-/// row per level is therefore the level-end summary). Post-EM emits a single
-/// row with `sweep = 0`.
-///
-/// - `score / total_mass = -mean_H(p_k)` — mass-weighted mean per-community
-///   entropy. Within-level "sharpness" indicator; not fair across levels.
-/// - `mutual_information = H(p_global) − mean_H(p_k|community)` — nats of
-///   information the community label carries about the gene profile.
-///   Granularity-aware and comparable across cascade levels.
-#[derive(Clone, Copy, Debug)]
-pub struct ScoreEntry {
-    pub level: i32,
-    pub sweep: i32,
-    pub score: f64,
-    pub n_edges: usize,
-    pub total_mass: f64,
-    pub mutual_information: f64,
-}
-
-/// Write score trace to parquet with six columns:
-/// `(level, sweep, score, n_edges, total_mass, mutual_information)`.
-pub fn write_score_trace(file_path: &str, entries: &[ScoreEntry]) -> anyhow::Result<()> {
-    use matrix_util::parquet::*;
-    use parquet::basic::Type as ParquetType;
-
-    let n_rows = entries.len();
-
-    let levels: Vec<i32> = entries.iter().map(|e| e.level).collect();
-    let sweeps: Vec<i32> = entries.iter().map(|e| e.sweep).collect();
-    let scores: Vec<f64> = entries.iter().map(|e| e.score).collect();
-    let n_edges: Vec<i32> = entries.iter().map(|e| e.n_edges as i32).collect();
-    let total_mass: Vec<f64> = entries.iter().map(|e| e.total_mass).collect();
-    let mi: Vec<f64> = entries.iter().map(|e| e.mutual_information).collect();
-
-    let col_names: Vec<Box<str>> = vec![
-        "level".into(),
-        "sweep".into(),
-        "score".into(),
-        "n_edges".into(),
-        "total_mass".into(),
-        "mutual_information".into(),
-    ];
-    let col_types = vec![
-        ParquetType::INT32,
-        ParquetType::INT32,
-        ParquetType::DOUBLE,
-        ParquetType::INT32,
-        ParquetType::DOUBLE,
-        ParquetType::DOUBLE,
-    ];
-
-    let writer = ParquetWriter::new(
-        file_path,
-        (n_rows, col_names.len()),
-        (None, Some(&col_names)),
-        Some(&col_types),
-        Some("step"),
-    )?;
-
-    let row_names = writer.row_names_vec();
-    let mut writer = writer.get_writer()?;
-    let mut row_group = writer.next_row_group()?;
-
-    parquet_add_bytearray(&mut row_group, row_names)?;
-    parquet_add_numeric_column(&mut row_group, &levels)?;
-    parquet_add_numeric_column(&mut row_group, &sweeps)?;
-    parquet_add_numeric_column(&mut row_group, &scores)?;
-    parquet_add_numeric_column(&mut row_group, &n_edges)?;
-    parquet_add_numeric_column(&mut row_group, &total_mass)?;
-    parquet_add_numeric_column(&mut row_group, &mi)?;
-
-    row_group.close()?;
-    writer.close()?;
-
-    Ok(())
-}
+// Score-trace records and writer moved to `crate::util::score_trace`.
+// Re-exported here so existing call sites in this module / downstream
+// imports keep working.
+pub use crate::util::score_trace::{write_score_trace, ScoreEntry};
 
 /// Write one cascade level's outputs: `.L{l}.link_community.parquet`,
 /// Write `<prefix>.propensity.parquet` from cell-edge labels and return
