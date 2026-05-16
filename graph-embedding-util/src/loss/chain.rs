@@ -11,10 +11,10 @@
 //!
 //! - [`cell_cell_nce_loss_per_level`] — returns `[L]` per-level losses
 //!   for one [`CellChainBatch`].
-//! - [`cell_cell_nce_loss_per_level_batched`] — returns `[G, L]` for
-//!   `G` independent chain batches in one forward pass. Used by `pinto
-//!   cage` to collapse 18k tiny CUDA forwards per epoch into ~600 big
-//!   ones.
+//! - [`cell_cell_nce_loss_per_level_batched_gated`] — returns `[G, L]`
+//!   for `G` independent chain batches in one forward pass; per-gene
+//!   scoring modulates by `e_gene[gene_ids[g]]`. Used by `pinto cage`
+//!   to collapse 18k tiny CUDA forwards per epoch into ~600 big ones.
 //! - [`cell_cell_nce_loss_chain`] — thin wrapper that takes a host-
 //!   side `lambdas: &[f32]` and returns the λ-weighted scalar.
 
@@ -227,86 +227,6 @@ pub fn cell_cell_nce_loss_per_level(
         per_level.push(per_edge.mean(0)?);
     }
     Tensor::stack(&per_level, 0)
-}
-
-/// Same as [`cell_cell_nce_loss_per_level`] but processes `G`
-/// independent `CellChainBatch`es in one forward pass. Returns a
-/// `[G, L]` Tensor whose `(g, l)` entry is the unweighted NCE loss at
-/// chain level `l` for gene `g`. Callers (e.g. cage) multiply by a
-/// `[G, L]` per-gene per-level gate matrix and `sum_all()` to get a
-/// scalar loss with one backward call — converting `G` tiny CUDA
-/// kernels per chunk into a single large one.
-///
-/// All batches must share the same `B = left_cells.len()`, `L =
-/// per_level_neg.len()`, and `K = n_negatives`. cage enforces this
-/// by drawing every (gene, batch) chain-batch with the same
-/// `per_gene_batch` and `n_negatives` settings.
-pub fn cell_cell_nce_loss_per_level_batched(
-    model: &JointEmbedModel,
-    batches: Vec<CellChainBatch>,
-    dev: &Device,
-) -> Result<Tensor> {
-    let g = batches.len();
-    assert!(g > 0, "non-empty batches required");
-    let b = batches[0].left_cells.len();
-    let l = batches[0].per_level_neg.len();
-    let k = batches[0].n_negatives;
-    for cb in batches.iter() {
-        assert_eq!(cb.left_cells.len(), b, "batched: B mismatch across genes");
-        assert_eq!(
-            cb.per_level_neg.len(),
-            l,
-            "batched: L mismatch across genes"
-        );
-        assert_eq!(cb.n_negatives, k, "batched: K mismatch across genes");
-    }
-    if b == 0 {
-        return Tensor::zeros((g, l), candle_util::candle_core::DType::F32, dev);
-    }
-
-    let total_b = g * b;
-    let total_neg = total_b * k;
-
-    // Stack left / right cell ids: G batches of B → G*B.
-    let mut all_left: Vec<u32> = Vec::with_capacity(total_b);
-    let mut all_right: Vec<u32> = Vec::with_capacity(total_b);
-    // Stack per-level negatives by level: L lists of G*B*K cell ids.
-    let mut all_neg_per_level: Vec<Vec<u32>> =
-        (0..l).map(|_| Vec::with_capacity(total_neg)).collect();
-    for cb in batches.into_iter() {
-        all_left.extend(cb.left_cells);
-        all_right.extend(cb.right_cells);
-        for (lvl_idx, lvl_neg) in cb.per_level_neg.into_iter().enumerate() {
-            all_neg_per_level[lvl_idx].extend(lvl_neg);
-        }
-    }
-
-    let left_idx = Tensor::from_vec(all_left, total_b, dev)?;
-    let right_idx = Tensor::from_vec(all_right, total_b, dev)?;
-    let e_left = model.e_cell.index_select(&left_idx, 0)?; // [G*B, D]
-    let b_left = model.b_cell.index_select(&left_idx, 0)?;
-    let e_right = model.e_cell.index_select(&right_idx, 0)?;
-    let b_right = model.b_cell.index_select(&right_idx, 0)?;
-    let pos_score = JointEmbedModel::score_diag(&e_left, &e_right, &b_left, &b_right)?; // [G*B]
-    let pos_term = log_sigmoid(&pos_score)?;
-
-    // Per-level: gather negatives, score, reshape [G*B] -> [G, B], mean over B -> [G].
-    let mut per_gene_per_level: Vec<Tensor> = Vec::with_capacity(l);
-    for lvl_neg in all_neg_per_level.into_iter() {
-        let neg_idx = Tensor::from_vec(lvl_neg, total_neg, dev)?;
-        let e_neg_flat = model.e_cell.index_select(&neg_idx, 0)?;
-        let b_neg_flat = model.b_cell.index_select(&neg_idx, 0)?;
-        let h = e_neg_flat.dim(1)?;
-        let e_neg = e_neg_flat.reshape((total_b, k, h))?;
-        let b_neg = b_neg_flat.reshape((total_b, k))?;
-        let neg_score = JointEmbedModel::score_negatives(&e_neg, &e_left, &b_neg, &b_left)?;
-        let per_edge = (pos_term.clone() + log_sigmoid(&neg_score.neg()?)?.sum(1)?)?.neg()?;
-        let per_edge_gb = per_edge.reshape((g, b))?;
-        let per_gene = per_edge_gb.mean(1)?; // [G]
-        per_gene_per_level.push(per_gene);
-    }
-    // Stack [G] tensors along axis 1 → [G, L].
-    Tensor::stack(&per_gene_per_level, 1)
 }
 
 ////////////////////////////////////////////////////////////////
