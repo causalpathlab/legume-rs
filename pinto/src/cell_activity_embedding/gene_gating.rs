@@ -1,12 +1,13 @@
 //! Per-gene cell activity + per-gene per-level learnable gates.
 //!
-//! v1 design:
-//! - `CellActivities.cell_csr` holds per-gene per-cell activity
-//!   (`log1p` of raw counts, optionally L1/L2 normalized per gene).
 //! - `CellActivities.gene_active_edges[g]` is the precomputed list of
 //!   global edge ids where gene `g` is active at *both* endpoints.
-//!   The gene-gated sampler rebuilds a per-call `WeightedIndex` only
-//!   over this small list.
+//!   Built via an edge-driven merge of per-cell sorted gene lists, so
+//!   the cost is O(n_edges × avg_genes_per_cell) instead of the
+//!   per-gene scan over all edges (O(n_genes × n_edges)).
+//! - `CellActivities.gene_active_edge_weights[g][i]` = `a_g[u] * a_g[v]`
+//!   for the corresponding edge. The gene-gated sampler rebuilds a
+//!   per-call `WeightedIndex` only over this small list.
 //! - `GeneGating.alpha` is `[G × L]` pre-softplus. `softplus(α[g,:])`
 //!   multiplies the per-level chain-NCE losses in `fit.rs`, giving each
 //!   gene a learnable spatial-scale gating without changing the chain
@@ -42,8 +43,9 @@ pub struct CellActivities {
     pub gene_active_edge_weights: Vec<Vec<f32>>,
 }
 
-/// Build per-cell activity in column blocks (rayon over blocks), then
-/// derive per-gene active-edge lists + endpoint-product weights.
+/// Build per-cell activity (log1p + per-gene L1/L2/identity normalization)
+/// and derive per-gene active-edge lists + endpoint-product weights via
+/// an edge-driven merge of per-cell sorted gene lists.
 pub fn build_cell_activities(
     data: &SparseIoVec,
     edges: &[(u32, u32)],
@@ -53,16 +55,17 @@ pub fn build_cell_activities(
     let n_cells = data.num_columns();
     let n_genes = data.num_rows();
 
-    // ---- Phase 1: read counts in column blocks, log1p each entry.
+    // ---- Phase 1: read counts in column blocks; rayon-fold per-thread
+    // (gene, cell, log1p) entries, then concat once on the main thread.
+    // Avoids the per-row mutex on a shared CooMatrix.
     let block = block_size.unwrap_or(n_genes.max(1));
     let intervals = generate_minibatch_intervals(n_cells, block, None);
 
-    let coo = Mutex::new(CooMatrix::<f32>::new(n_genes, n_cells));
-    intervals
+    let per_block: Vec<Vec<(usize, usize, f32)>> = intervals
         .par_iter()
-        .try_for_each(|&(lb, ub)| -> anyhow::Result<()> {
+        .map(|&(lb, ub)| -> anyhow::Result<Vec<(usize, usize, f32)>> {
             let csc = data.read_columns_csc(lb..ub)?;
-            let mut local = Vec::<(usize, usize, f32)>::new();
+            let mut local = Vec::new();
             for col in 0..(ub - lb) {
                 let global_col = lb + col;
                 let column = csc.col(col);
@@ -73,49 +76,53 @@ pub fn build_cell_activities(
                     }
                 }
             }
-            let mut coo = coo.lock().expect("coo mutex");
-            for (g, c, a) in local {
-                coo.push(g, c, a);
-            }
-            Ok(())
-        })?;
-
-    let raw_csr = CsrMatrix::from(&coo.into_inner().expect("coo final"));
-    let cell_csr = normalize_rows(raw_csr, norm);
-
-    // ---- Phase 2: precompute per-gene active edges + endpoint weights.
-    // For each gene, build a HashSet<cell_id> of cells with nonzero
-    // activity, then scan edges once. Rayon over genes.
-    let gene_active: Vec<(Vec<u32>, Vec<f32>)> = (0..n_genes)
-        .into_par_iter()
-        .map(|g| {
-            let row = cell_csr.row(g);
-            if row.nnz() == 0 {
-                return (Vec::new(), Vec::new());
-            }
-            // cell -> activity lookup
-            let mut a: HashMap<u32, f32> =
-                HashMap::with_capacity_and_hasher(row.nnz(), Default::default());
-            for (&c, &v) in row.col_indices().iter().zip(row.values().iter()) {
-                a.insert(c as u32, v);
-            }
-            let mut active = Vec::<u32>::new();
-            let mut weights = Vec::<f32>::new();
-            for (e_idx, &(u, v)) in edges.iter().enumerate() {
-                if let (Some(&au), Some(&av)) = (a.get(&u), a.get(&v)) {
-                    active.push(e_idx as u32);
-                    weights.push(au * av);
-                }
-            }
-            (active, weights)
+            Ok(local)
         })
-        .collect();
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let mut gene_active_edges = Vec::with_capacity(n_genes);
-    let mut gene_active_edge_weights = Vec::with_capacity(n_genes);
-    for (e, w) in gene_active {
-        gene_active_edges.push(e);
-        gene_active_edge_weights.push(w);
+    let mut coo = CooMatrix::<f32>::new(n_genes, n_cells);
+    for block in per_block {
+        for (g, c, a) in block {
+            coo.push(g, c, a);
+        }
+    }
+    let mut cell_csr = CsrMatrix::from(&coo);
+    normalize_rows_inplace(&mut cell_csr, norm);
+
+    // ---- Phase 2: invert to per-cell sorted (gene, activity) lists.
+    // Iterating CSR rows in gene order gives each cell's gene-list
+    // already sorted ascending, which is what the edge-merge needs.
+    let mut cell_to_genes: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_cells];
+    for g in 0..n_genes {
+        let row = cell_csr.row(g);
+        for (&c, &v) in row.col_indices().iter().zip(row.values().iter()) {
+            cell_to_genes[c].push((g as u32, v));
+        }
+    }
+
+    // ---- Phase 3: edge-driven merge — for each edge (u, v), walk the
+    // two sorted lists in tandem, emitting `(edge_idx, a_u·a_v)` for
+    // every common gene. Genes are appended in edge-iteration order,
+    // so per-gene edge lists are sorted ascending by construction.
+    let mut gene_active_edges: Vec<Vec<u32>> = vec![Vec::new(); n_genes];
+    let mut gene_active_edge_weights: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
+    for (e_idx, &(u, v)) in edges.iter().enumerate() {
+        let gu = &cell_to_genes[u as usize];
+        let gv = &cell_to_genes[v as usize];
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < gu.len() && j < gv.len() {
+            match gu[i].0.cmp(&gv[j].0) {
+                std::cmp::Ordering::Equal => {
+                    let g = gu[i].0 as usize;
+                    gene_active_edges[g].push(e_idx as u32);
+                    gene_active_edge_weights[g].push(gu[i].1 * gv[j].1);
+                    i += 1;
+                    j += 1;
+                }
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+            }
+        }
     }
 
     Ok(CellActivities {
@@ -124,19 +131,24 @@ pub fn build_cell_activities(
     })
 }
 
-fn normalize_rows(csr: CsrMatrix<f32>, norm: ActivityNorm) -> CsrMatrix<f32> {
+/// In-place row-wise renormalization of a CSR. Skips the COO round-trip
+/// that an out-of-place build would require.
+fn normalize_rows_inplace(csr: &mut CsrMatrix<f32>, norm: ActivityNorm) {
+    if matches!(norm, ActivityNorm::Log1p) {
+        return;
+    }
     let n_rows = csr.nrows();
-    let n_cols = csr.ncols();
-    let mut coo = CooMatrix::<f32>::new(n_rows, n_cols);
+    let offsets: Vec<usize> = csr.row_offsets().to_vec();
+    let values = csr.values_mut();
     for g in 0..n_rows {
-        let row = csr.row(g);
-        if row.nnz() == 0 {
+        let (start, end) = (offsets[g], offsets[g + 1]);
+        if start == end {
             continue;
         }
         let scale = match norm {
             ActivityNorm::Log1p => 1.0_f32,
             ActivityNorm::L1 => {
-                let s: f32 = row.values().iter().sum();
+                let s: f32 = values[start..end].iter().sum();
                 if s > 0.0 {
                     1.0 / s
                 } else {
@@ -144,7 +156,7 @@ fn normalize_rows(csr: CsrMatrix<f32>, norm: ActivityNorm) -> CsrMatrix<f32> {
                 }
             }
             ActivityNorm::L2 => {
-                let s: f32 = row.values().iter().map(|v| v * v).sum::<f32>().sqrt();
+                let s: f32 = values[start..end].iter().map(|v| v * v).sum::<f32>().sqrt();
                 if s > 0.0 {
                     1.0 / s
                 } else {
@@ -152,11 +164,12 @@ fn normalize_rows(csr: CsrMatrix<f32>, norm: ActivityNorm) -> CsrMatrix<f32> {
                 }
             }
         };
-        for (&c, &v) in row.col_indices().iter().zip(row.values().iter()) {
-            coo.push(g, c, v * scale);
+        if scale != 1.0 {
+            for v in &mut values[start..end] {
+                *v *= scale;
+            }
         }
     }
-    CsrMatrix::from(&coo)
 }
 
 ////////////////////////////////////////////////////////////////
@@ -164,6 +177,25 @@ fn normalize_rows(csr: CsrMatrix<f32>, norm: ActivityNorm) -> CsrMatrix<f32> {
 // GeneGating                                                 //
 //                                                            //
 ////////////////////////////////////////////////////////////////
+
+/// Small additive floor on the post-softplus gate. Keeps the gate value
+/// above zero so a per-level loss contribution never fully zeroes out,
+/// but does NOT prevent the *gradient* of softplus from vanishing on
+/// the negative side (`sigmoid(x) → 0` is intrinsic to softplus). If a
+/// gene + level pair drifts deeply negative, the model is effectively
+/// telling us that level is unhelpful — the gradient-vanishing is
+/// consistent with that signal.
+const GATE_EPS: f32 = 1e-4;
+
+/// Numerically stable softplus: `max(x, 0) + log(1 + exp(-|x|))`. The
+/// naive `log(1 + exp(x))` overflows for large positive `x`.
+fn softplus_stable(x: &Tensor) -> CResult<Tensor> {
+    let abs_x = x.abs()?;
+    let one = Tensor::ones_like(&abs_x)?;
+    let log_term = (one + abs_x.neg()?.exp()?)?.log()?;
+    let relu_x = x.relu()?;
+    relu_x + log_term
+}
 
 /// Per-gene per-level learnable gate `α[G × L]`. Pre-softplus storage
 /// initialized at `ln(e − 1) ≈ 0.5413` so `softplus(α₀) = 1.0`. Owned
@@ -187,24 +219,19 @@ impl GeneGating {
         })
     }
 
-    /// Return `softplus(α[genes, :])` as a `[G, L]` tensor with an ε
-    /// floor. One `index_select + softplus + clamp` chain regardless of
-    /// `G`, so cage's batched fwd/bwd makes a single CUDA call here.
+    /// Return `softplus(α[genes, :]) + ε` as a `[G, L]` tensor.
     pub fn gates_batch(&self, genes: &[usize], dev: &Device) -> CResult<Tensor> {
         let idx_vec: Vec<u32> = genes.iter().map(|&g| g as u32).collect();
         let g = idx_vec.len();
         let idx = Tensor::from_vec(idx_vec, g, dev)?;
         let rows = self.alpha.index_select(&idx, 0)?; // [G, L]
-        let one = Tensor::ones_like(&rows)?;
-        let exp_x = rows.exp()?;
-        let softplus = (one + exp_x)?.log()?;
-        softplus.clamp(1e-4_f32, f32::INFINITY)
+        let sp = softplus_stable(&rows)?;
+        sp.affine(1.0, GATE_EPS as f64)
     }
 
     /// Snapshot the post-softplus gate matrix `[G × L]` for output.
     pub fn snapshot_gates(&self) -> CResult<Tensor> {
-        let one = Tensor::ones_like(&self.alpha)?;
-        let exp_x = self.alpha.exp()?;
-        (one + exp_x)?.log()
+        let sp = softplus_stable(&self.alpha)?;
+        sp.affine(1.0, GATE_EPS as f64)
     }
 }

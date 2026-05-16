@@ -6,9 +6,8 @@
 use crate::loss::cell::LevelSiblingPool;
 use crate::loss::{
     build_per_batch_cell_samplers, cell_cell_nce_loss_chain, cell_cell_nce_loss_per_level,
-    cell_cell_nce_loss_per_level_batched, cell_cell_nce_loss_per_level_batched_gated,
-    cell_cell_nce_loss_per_level_gated, sample_cell_chain_batch, CellChainBatch,
-    CellChainBatchArgs, PbChainFilter,
+    cell_cell_nce_loss_per_level_batched_gated, cell_cell_nce_loss_per_level_gated,
+    sample_cell_chain_batch, CellChainBatch, CellChainBatchArgs, PbChainFilter,
 };
 
 #[test]
@@ -274,116 +273,6 @@ fn per_level_lambda_weighted_matches_chain() {
         diff < 1e-5,
         "chain={chain_loss:.6} vs manual sum={manual:.6} (diff={diff:.2e})"
     );
-}
-
-#[test]
-fn batched_per_level_matches_single_gene() {
-    // For G independent CellChainBatches, the batched per-level loss
-    // must match stacking G calls to the single-gene version.
-    use crate::model::{JointEmbedModel, ModelArgs, ModelInit};
-    use candle_util::candle_core::{DType, Device};
-    use candle_util::candle_nn::{VarBuilder, VarMap};
-    use rand::SeedableRng;
-
-    let dev = Device::Cpu;
-    let varmap = VarMap::new();
-    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
-    let n_cells = 8;
-    let embedding_dim = 4;
-    let e_cell_init = nalgebra::DMatrix::<f32>::from_row_slice(
-        n_cells,
-        embedding_dim,
-        &[
-            0.10, -0.20, 0.30, 0.40, //
-            0.40, 0.50, -0.60, 0.10, //
-            -0.70, 0.80, 0.90, -0.30, //
-            0.05, -0.15, 0.25, 0.35, //
-            0.20, 0.10, -0.10, 0.00, //
-            -0.05, 0.45, -0.25, 0.15, //
-            0.55, -0.35, 0.15, -0.05, //
-            -0.45, 0.25, 0.35, -0.15, //
-        ],
-    );
-    let b_cell_init: Vec<f32> = (0..n_cells).map(|i| 0.01 * i as f32).collect();
-    let model = JointEmbedModel::new_with_init(
-        ModelArgs {
-            n_features: 1,
-            n_cells,
-            embedding_dim,
-        },
-        &ModelInit {
-            e_feat: None,
-            e_cell: Some(&e_cell_init),
-            b_feat: &[0.0],
-            b_cell: &b_cell_init,
-        },
-        &varmap,
-        vs,
-        &dev,
-    )
-    .expect("model");
-
-    let edges = vec![(0u32, 1), (2, 3), (4, 5), (6, 7)];
-    let batch_membership = vec![0u32; n_cells];
-    let cell_to_pb_per_level: Vec<Vec<usize>> =
-        vec![vec![0, 0, 0, 0, 1, 1, 1, 1], vec![0, 0, 1, 1, 2, 2, 3, 3]];
-    let filter = PbChainFilter {
-        cell_to_pb_per_level: &cell_to_pb_per_level,
-        levels: &[0, 1],
-    };
-    let (samplers, _) =
-        build_per_batch_cell_samplers(&edges, &batch_membership, 1, n_cells, 0.75, Some(filter));
-    let s = samplers[0].as_ref().unwrap();
-    let pb_maps: Vec<&[usize]> = vec![&cell_to_pb_per_level[0], &cell_to_pb_per_level[1]];
-
-    let g = 3;
-    let mut single_results: Vec<Vec<f32>> = Vec::with_capacity(g);
-    let mut batches_for_batched: Vec<CellChainBatch> = Vec::with_capacity(g);
-    for gi in 0..g {
-        let mut rng_a = rand::rngs::StdRng::seed_from_u64(100 + gi as u64);
-        let mut rng_b = rand::rngs::StdRng::seed_from_u64(100 + gi as u64);
-        let (batch_a, _) = sample_cell_chain_batch(
-            CellChainBatchArgs {
-                edges: &edges,
-                batch_sampler: s,
-                batch_size: 6,
-                n_negatives: 2,
-                pb_maps: &pb_maps,
-            },
-            &mut rng_a,
-        );
-        let (batch_b, _) = sample_cell_chain_batch(
-            CellChainBatchArgs {
-                edges: &edges,
-                batch_sampler: s,
-                batch_size: 6,
-                n_negatives: 2,
-                pb_maps: &pb_maps,
-            },
-            &mut rng_b,
-        );
-        let single = cell_cell_nce_loss_per_level(&model, batch_a, &dev)
-            .expect("single per-level")
-            .to_vec1::<f32>()
-            .unwrap();
-        single_results.push(single);
-        batches_for_batched.push(batch_b);
-    }
-    let batched = cell_cell_nce_loss_per_level_batched(&model, batches_for_batched, &dev)
-        .expect("batched per-level")
-        .to_vec2::<f32>()
-        .unwrap();
-
-    for (gi, expected) in single_results.iter().enumerate() {
-        for (lvl, &exp) in expected.iter().enumerate() {
-            let got = batched[gi][lvl];
-            let diff = (exp - got).abs();
-            assert!(
-                diff < 1e-5,
-                "gene {gi} level {lvl}: single={exp:.6} batched={got:.6} diff={diff:.2e}"
-            );
-        }
-    }
 }
 
 #[test]
