@@ -99,6 +99,9 @@ svg2pdf = "0.13"
 tiny-skia = "0.12"
 usvg = "0.47"
 
+# Portable explicit SIMD
+wide = "0.7"
+
 # Internal crates
 auxiliary-data = { path = "auxiliary-data" }
 candle-util = { path = "candle-util" }

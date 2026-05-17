@@ -1,4 +1,5 @@
 mod cell_activity_graph_embedding;
+mod cell_activity_graph_embedding_mcmc;
 mod gene_network;
 mod link_community;
 mod lr_activity;
@@ -13,6 +14,7 @@ mod test_support;
 use cell_activity_graph_embedding::{
     fit_cell_activity_graph_embedding, CellActivityGraphEmbeddingArgs,
 };
+use cell_activity_graph_embedding_mcmc::{fit_cage_mcmc, CageMcmcArgs};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use link_community::fit::*;
@@ -262,7 +264,7 @@ enum Commands {
                       Outputs:\n\
                       \x20 {out}.cell_embedding.parquet  cell × embedding_dim\n\
                       \x20 {out}.cell_bias.parquet       per-cell scalar\n\
-                      \x20 {out}.gene_embedding.parquet  gene × embedding_dim\n\
+                      \x20 {out}.feature_embedding.parquet  feature × embedding_dim\n\
                       \x20 {out}.gene_bias.parquet       per-gene scalar\n\
                       \x20 {out}.level_dim_gates.parquet level × dim (softplus_floored γ)\n\
                       \x20 {out}.coord_pairs.parquet     spatial edge list\n\
@@ -271,6 +273,28 @@ enum Commands {
                       \x20 {out}.metadata.json           manifest"
     )]
     Cage(CellActivityGraphEmbeddingArgs),
+
+    #[command(
+        name = "cage-mcmc",
+        alias = "cgm",
+        about = "Bayesian ESS variant of cage (CPU, nalgebra)",
+        long_about = "Same data + logistic likelihood as `pinto cage`, but parameters\n\
+                      (e_cell, e_gene, γ, b_cell) are sampled via Elliptical Slice\n\
+                      Sampling instead of optimized. CPU-only nalgebra backend; the\n\
+                      log-likelihood evaluation parallelizes over gene chunks via\n\
+                      rayon — the embarrassingly-parallel axis.\n\n\
+                      Outputs:\n\
+                      \x20 {out}.cell_embedding.{mean,std}.parquet     cell × D\n\
+                      \x20 {out}.cell_bias.{mean,std}.parquet          per-cell scalar\n\
+                      \x20 {out}.feature_embedding.{mean,std}.parquet  feature × D\n\
+                      \x20 {out}.level_dim_gates.{mean,std}.parquet    level × D (softplus γ)\n\
+                      \x20 {out}.coord_pairs.parquet                   spatial edge list\n\
+                      \x20 {out}.loglik_trace.parquet                  per-sweep log-lik\n\
+                      \x20 {out}.trace.parquet                         thinned-sample log-lik\n\
+                      \x20 {out}.delta.parquet                         batch effects (multi-batch only)\n\
+                      \x20 {out}.metadata.json                         manifest"
+    )]
+    CageMcmc(CageMcmcArgs),
 
     #[command(
         alias = "p",
@@ -547,6 +571,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Cage(args) => {
             fit_cell_activity_graph_embedding(args)?;
+        }
+        Commands::CageMcmc(args) => {
+            fit_cage_mcmc(args)?;
         }
         Commands::Plot(args) => {
             make_srt_plot(args)?;
