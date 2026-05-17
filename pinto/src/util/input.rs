@@ -217,7 +217,7 @@ impl SrtInputArgs {
     }
 
     /// Comma-joined string of coordinate file paths, or `None` when the
-    /// run was without `--coord`. Convenient for metadata.json fields.
+    /// run was without `--coord`. Convenient for .pinto.json fields.
     pub fn coord_files_joined(&self) -> Option<String> {
         if self.coord_files.is_empty() {
             None

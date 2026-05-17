@@ -202,14 +202,14 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
 
     // Open expression data once. Used by markers (--top-markers > 0) AND
     // by the LR-overlay direction inference (per-edge L/R expression).
-    // Falls back to the data_files recorded in metadata.json when --data
-    // is omitted, so `pinto plot --from foo.metadata.json` is enough to
+    // Falls back to the data_files recorded in .pinto.json when --data
+    // is omitted, so `pinto plot --from foo.pinto.json` is enough to
     // get marker plots without re-passing the original data paths.
     let resolved_data_files: Option<Vec<Box<str>>> = match (&args.data, &meta_data_files) {
         (Some(d), _) => Some(d.clone()),
         (None, Some(meta)) if !meta.is_empty() => {
             info!(
-                "--data not given; using {} data file(s) from metadata.json",
+                "--data not given; using {} data file(s) from .pinto.json",
                 meta.len(),
             );
             Some(meta.iter().map(|s| s.clone().into_boxed_str()).collect())
@@ -265,7 +265,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
     levels
         .par_iter()
         .try_for_each(|level| -> anyhow::Result<()> {
-            let prop_path = level.propensity_path(&prefix);
+            let prop_path = level.propensity.clone();
             let (propensity, dominant, entropy_opt, prop_cell_names) =
                 read_propensity(&prop_path, &excluded)?;
 
@@ -283,11 +283,9 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
             // Loaded eagerly when present because both the mesh plot and
             // the interfaces sub-mode need the edge list; --no-mesh only
             // turns off the mesh render, not the edge load.
-            let lc_path = level.link_community_path(&prefix);
-            let lc_pair = if lc_path.exists() {
-                Some(read_link_community(&lc_path)?)
-            } else {
-                None
+            let lc_pair = match level.link_community.as_ref() {
+                Some(p) if p.exists() => Some(read_link_community(p)?),
+                _ => None,
             };
 
             // Drop sparse communities: cells whose dominant community has
@@ -325,11 +323,9 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
             }
 
             // Per-level gene_community (fall back to global).
-            let level_gt_path = level.gene_community_path(&prefix);
-            let gene_community = if level_gt_path.exists() {
-                Some(read_gene_community(&level_gt_path)?)
-            } else {
-                global_gt.clone()
+            let gene_community = match level.gene_community.as_ref() {
+                Some(p) if p.exists() => Some(read_gene_community(p)?),
+                _ => global_gt.clone(),
             };
 
             let level_kind = LevelKind::from_tag(&level.tag);
@@ -824,7 +820,7 @@ fn resolve_lr_json_path(args: &SrtPlotArgs, prefix: &str) -> Option<PathBuf> {
     if let Some(p) = args.lr_activity_json.as_deref() {
         return Some(PathBuf::from(p));
     }
-    let meta_path = PathBuf::from(format!("{prefix}.metadata.json"));
+    let meta_path = PathBuf::from(format!("{prefix}.pinto.json"));
     crate::util::metadata::PintoMetadata::read(&meta_path)
         .ok()
         .and_then(|m| m.outputs.lr_activity.map(PathBuf::from))

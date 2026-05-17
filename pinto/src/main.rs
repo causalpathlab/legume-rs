@@ -135,7 +135,7 @@ enum Commands {
                       - {out}.gene_community.parquet: gene-community Poisson-Gamma statistics (G x K).\n\
                       \x20 Housekeeping-adjusted by default (row-scaled by 1/(bg[g]+ε));\n\
                       \x20 pass --no-adjust-housekeeping for raw rates\n\
-                      - {out}.metadata.json: information-flow manifest used by\n\
+                      - {out}.pinto.json: information-flow manifest used by\n\
                       \x20 `pinto plot` and `pinto lr-activity` (lists every parquet)."
     )]
     DeltaSvd(SrtDeltaSvdArgs),
@@ -176,7 +176,7 @@ enum Commands {
                       - {out}.genes.parquet: cluster-specific gene expression (when expr_data_files provided).\n\
                       \x20 Housekeeping-adjusted by default (row-scaled by 1/(bg[g]+ε));\n\
                       \x20 pass --no-adjust-housekeeping for raw rates\n\
-                      - {out}.metadata.json: information-flow manifest used by\n\
+                      - {out}.pinto.json: information-flow manifest used by\n\
                       \x20 `pinto plot`."
     )]
     Propensity(SrtPropensityArgs),
@@ -243,7 +243,7 @@ enum Commands {
                       \x20 {out}.draft.*.parquet         Pre-merge fine partition (when dictionary merge collapsed)\n\
                       \x20 {out}.dict_merges.parquet     Cosine merge tree over the gene-community dictionary\n\
                       \x20 {out}.dict_merges.cut.parquet Fine→super community remap from --merge-cut\n\
-                      \x20 {out}.metadata.json           Information-flow manifest:\n\
+                      \x20 {out}.pinto.json           Information-flow manifest:\n\
                       \x20                                lists every parquet, level tags,\n\
                       \x20                                dict-merge presence, and (when set by\n\
                       \x20                                lr-activity) the lr_activity JSON.\n\
@@ -270,7 +270,7 @@ enum Commands {
                       \x20 {out}.coord_pairs.parquet     spatial edge list\n\
                       \x20 {out}.scores.parquet          per-epoch loss trace\n\
                       \x20 {out}.delta.parquet           batch effects (multi-batch only)\n\
-                      \x20 {out}.metadata.json           manifest"
+                      \x20 {out}.pinto.json           manifest"
     )]
     Cage(CellActivityGraphEmbeddingArgs),
 
@@ -282,17 +282,25 @@ enum Commands {
                       (e_cell, e_gene, γ, b_cell) are sampled via Elliptical Slice\n\
                       Sampling instead of optimized. CPU-only nalgebra backend; the\n\
                       log-likelihood evaluation parallelizes over gene chunks via\n\
-                      rayon — the embarrassingly-parallel axis.\n\n\
+                      rayon. Output filenames mirror `pinto cage` so downstream\n\
+                      tools (incl. `pinto plot --from {prefix}.pinto.json`)\n\
+                      work identically; .std.parquet sidecars carry the posterior\n\
+                      uncertainty.\n\n\
                       Outputs:\n\
-                      \x20 {out}.cell_embedding.{mean,std}.parquet     cell × D\n\
-                      \x20 {out}.cell_bias.{mean,std}.parquet          per-cell scalar\n\
-                      \x20 {out}.feature_embedding.{mean,std}.parquet  feature × D\n\
-                      \x20 {out}.level_dim_gates.{mean,std}.parquet    level × D (softplus γ)\n\
-                      \x20 {out}.coord_pairs.parquet                   spatial edge list\n\
-                      \x20 {out}.loglik_trace.parquet                  per-sweep log-lik\n\
-                      \x20 {out}.trace.parquet                         thinned-sample log-lik\n\
-                      \x20 {out}.delta.parquet                         batch effects (multi-batch only)\n\
-                      \x20 {out}.metadata.json                         manifest"
+                      \x20 {out}.cell_embedding.parquet    cell × D posterior mean\n\
+                      \x20 {out}.cell_embedding.std.parquet  posterior std sidecar\n\
+                      \x20 {out}.cell_bias.parquet         per-cell scalar (+ .std.)\n\
+                      \x20 {out}.feature_embedding.parquet feature × D (+ .std.)\n\
+                      \x20 {out}.level_dim_gates.parquet   level × D softplus γ (+ .std.)\n\
+                      \x20 {out}.coord_pairs.parquet       spatial edge list\n\
+                      \x20 {out}.scores.parquet            per-sweep log-likelihood trace\n\
+                      \x20 {out}.trace.parquet             thinned-sample log-lik\n\
+                      \x20 {out}.delta.parquet             batch effects (multi-batch)\n\
+                      \x20 {out}.pinto.json             manifest\n\n\
+                      With --leiden-knn > 0 (mirrors `pinto cage`):\n\
+                      \x20 {out}.clusters.parquet           hard cell labels\n\
+                      \x20 {out}.cluster_propensity.parquet cell × K soft assignment\n\
+                      \x20 {out}.feature_dictionary.parquet feature × K dictionary"
     )]
     CageMcmc(CageMcmcArgs),
 
@@ -304,7 +312,7 @@ enum Commands {
                       `pinto prop` runs. Defaults to flat-top hexagon markers\n\
                       that tile tightly; size adapts to plot density.\n\n\
                       INPUT (--from):\n\n\
-                      \x20 Pass either a `{prefix}.metadata.json` (preferred —\n\
+                      \x20 Pass either a `{prefix}.pinto.json` (preferred —\n\
                       \x20 carries level list, dict-merge presence, and any lr_activity\n\
                       \x20 JSON) or a bare `{prefix}` (auto-globs *.parquet).\n\n\
                       PER-LEVEL × PER-CORE PLOTS (default = PDF only):\n\n\
@@ -331,7 +339,7 @@ enum Commands {
                       \x20 Tunables: --entropy-quantile, --neighborhood-hops,\n\
                       \x20            --max-interface-cells, --interface-top-genes.\n\n\
                       LR-ACTIVITY OVERLAY (auto-discovered):\n\n\
-                      \x20 When the metadata.json carries an `outputs.lr_activity`\n\
+                      \x20 When the .pinto.json carries an `outputs.lr_activity`\n\
                       \x20 path (set automatically by `pinto lr-activity`), one\n\
                       \x20 PDF is written per (core × significant LR pair):\n\
                       \x20   lr.core{batch}.lr.B{batch}.C{community}.{L}-{R}.pdf\n\
@@ -388,9 +396,9 @@ enum Commands {
                       \x20    per-stratum (median, MAD) of stat_obs (z_re / p_re), then\n\
                       \x20    Westfall-Young single-step minP for FWER (fwer_wy).\n\n\
                       QUICK START:\n\n\
-                      \x20 # Shortest form — read inputs from a prior pinto lc metadata.json:\n\
-                      \x20 pinto lra --from out/run1.metadata.json --lr-pairs cellchat_pairs.tsv\n\n\
-                      \x20   `--from <metadata.json>` auto-fills `--lc-prefix`, `--out` (=\n\
+                      \x20 # Shortest form — read inputs from a prior pinto lc .pinto.json:\n\
+                      \x20 pinto lra --from out/run1.pinto.json --lr-pairs cellchat_pairs.tsv\n\n\
+                      \x20   `--from <.pinto.json>` auto-fills `--lc-prefix`, `--out` (=\n\
                       \x20   `<prefix>.lra`), `--coord`, and the positional data files from\n\
                       \x20   the metadata. Any of those passed explicitly on the CLI win.\n\n\
                       \x20 # Long form — same effect, fully explicit:\n\
@@ -400,7 +408,7 @@ enum Commands {
                       \x20 --lc-prefix   prefix of a prior `pinto lc` run (reads its\n\
                       \x20               {prefix}.link_community.parquet +\n\
                       \x20               {prefix}.coord_pairs.parquet, and back-fills\n\
-                      \x20               the lr_activity path into {prefix}.metadata.json\n\
+                      \x20               the lr_activity path into {prefix}.pinto.json\n\
                       \x20               so `pinto plot` can auto-discover it).\n\
                       \x20 --lr-pairs    two-column TSV/CSV: ligand gene, receptor gene.\n\
                       \x20               Gene names are resolved against the data\n\
@@ -440,12 +448,12 @@ enum Commands {
     LrActivity(SrtLrActivityArgs),
 }
 
-/// Expand `pinto lra --from <metadata.json>` into the full positional /
+/// Expand `pinto lra --from <.pinto.json>` into the full positional /
 /// flag form clap expects.
 ///
 /// The user-friendly `--from` is not a real `clap` arg on `pinto lra` — it's
 /// preprocessed here so the rest of the CLI surface (`SrtInputArgs` and
-/// friends) stays unchanged. When `--from foo.metadata.json` is detected
+/// friends) stays unchanged. When `--from foo.pinto.json` is detected
 /// after the `lra` / `lr-activity` / `test-lr` subcommand:
 ///
 ///   - `--lc-prefix`, `--out`, `--coord`, and the positional `data_files`
@@ -540,7 +548,7 @@ fn expand_lra_from_metadata(mut args: Vec<String>) -> anyhow::Result<Vec<String>
                 }
             }
             _ => anyhow::bail!(
-                "metadata.json {meta_path} has no data_files; pass them as positional args, \
+                ".pinto.json {meta_path} has no data_files; pass them as positional args, \
                  or re-run pinto lc/dsvd to regenerate metadata"
             ),
         }

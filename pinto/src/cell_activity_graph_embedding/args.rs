@@ -148,6 +148,17 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
+        default_value_t = 1.0,
+        help = "L2 penalty λ on the shared embeddings E_cell ∈ ℝ^{N×D} and \
+                E_gene ∈ ℝ^{G×D}: adds λ · (mean(E_cell²) + mean(E_gene²)) \
+                to the per-step composite loss (mean-normalized, so λ stays \
+                scale-invariant across N, G, D). Default 1.0 (mild shrinkage). \
+                Set 0.0 to disable. Typical: 0.1–10.0."
+    )]
+    pub embedding_l2: f32,
+
+    #[arg(
+        long,
         value_delimiter(','),
         default_value = "0,1,2",
         help = "Chain levels (coarsest → finest) drawn from the coarsening hierarchy"
@@ -178,4 +189,43 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "Relative-range threshold over --convergence-window for stopping"
     )]
     pub convergence_tol: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Leiden kNN on cell embedding; 0 disables clustering",
+        long_help = "After training, build a kNN graph on the L2-normalized \
+                     cell embedding (cosine ≡ dot-product space) and run \
+                     Leiden. Writes {prefix}.clusters.parquet, \
+                     {prefix}.cluster_propensity.parquet, and \
+                     {prefix}.feature_dictionary.parquet. 0 disables."
+    )]
+    pub leiden_knn: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Leiden modularity resolution (γ in CPM after scaling)"
+    )]
+    pub leiden_resolution: f64,
+
+    #[arg(
+        long,
+        help = "If set, binary-search Leiden resolution to approximate this K"
+    )]
+    pub leiden_target_clusters: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Drop Leiden clusters smaller than this; 0 keeps all"
+    )]
+    pub leiden_min_cluster_size: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Softmax temperature τ for cell + gene propensity (higher = sharper)"
+    )]
+    pub propensity_temp: f32,
 }

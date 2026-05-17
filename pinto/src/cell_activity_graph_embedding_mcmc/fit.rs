@@ -12,6 +12,10 @@
 //! supporting CPUs, `RUSTFLAGS="-C target-cpu=native"` unlocks AVX2/AVX-512
 //! codegen for an additional uplift.
 
+use crate::cell_activity_graph_embedding::cluster::{
+    edge_community_from_propensity, propensity_against_centroids, run_leiden_and_propensity,
+    LeidenPropensityArgs, LeidenPropensityResult,
+};
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
 };
@@ -24,10 +28,11 @@ use crate::cell_activity_graph_embedding_mcmc::loglik::{
 use crate::cell_activity_graph_embedding_mcmc::model::{
     randn_matrix, randn_vector, softplus_floored, McmcState,
 };
+use crate::link_community::outputs::write_link_communities;
 use crate::util::cell_pairs::SrtCellPairs;
 use crate::util::common::*;
 use crate::util::graph_coarsen::{graph_coarsen_multilevel, CoarsenConfig, SeedingParams};
-use crate::util::metadata::{create_cage_metadata, RunInputs};
+use crate::util::metadata::{create_cage_metadata, CageClusterInfo, RunInputs};
 use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
 
 use data_beans_alg::hvg::select_hvg_streaming;
@@ -451,6 +456,10 @@ pub fn fit_cage_mcmc(args: &CageMcmcArgs) -> anyhow::Result<()> {
     //////////////////////////////////////////////////////
     // 11. Outputs                                       //
     //////////////////////////////////////////////////////
+    // Filenames mirror `pinto cage` so downstream tools (incl. `pinto
+    // plot --from {prefix}.pinto.json`) work identically; the
+    // posterior-mean lands at the cage filename, the posterior std rides
+    // along as a `.std.parquet` sidecar.
     info!("Writing cage-mcmc outputs...");
 
     let prefix: &str = &c.out;
@@ -466,11 +475,11 @@ pub fn fit_cage_mcmc(args: &CageMcmcArgs) -> anyhow::Result<()> {
     let to_mat =
         |v: Vec<f32>, rows: usize, cols: usize| -> Mat { Mat::from_column_slice(rows, cols, &v) };
 
-    // Cell embedding mean / std
+    // Cell embedding (posterior mean) + .std sidecar.
     let e_cell_mean = to_mat(stat_e_cell.mean(), n_cells, d);
     let e_cell_std = to_mat(stat_e_cell.std(), n_cells, d);
     e_cell_mean.to_parquet_with_names(
-        &format!("{prefix}.cell_embedding.mean.parquet"),
+        &format!("{prefix}.cell_embedding.parquet"),
         (Some(&cell_names), Some("cell")),
         Some(&col_names),
     )?;
@@ -480,11 +489,11 @@ pub fn fit_cage_mcmc(args: &CageMcmcArgs) -> anyhow::Result<()> {
         Some(&col_names),
     )?;
 
-    // Cell bias mean / std (Nx1)
+    // Cell bias (Nx1) + .std sidecar.
     let b_cell_mean = Mat::from_column_slice(n_cells, 1, &stat_b_cell.mean());
     let b_cell_std = Mat::from_column_slice(n_cells, 1, &stat_b_cell.std());
     b_cell_mean.to_parquet_with_names(
-        &format!("{prefix}.cell_bias.mean.parquet"),
+        &format!("{prefix}.cell_bias.parquet"),
         (Some(&cell_names), Some("cell")),
         Some(&[Box::from("b_cell")]),
     )?;
@@ -494,7 +503,7 @@ pub fn fit_cage_mcmc(args: &CageMcmcArgs) -> anyhow::Result<()> {
         Some(&[Box::from("b_cell")]),
     )?;
 
-    // Feature embedding mean / std (HVG-subset on output).
+    // Feature embedding (HVG-subset on output) + .std sidecar.
     let e_gene_mean_full = to_mat(stat_e_gene.mean(), n_genes, d);
     let e_gene_std_full = to_mat(stat_e_gene.std(), n_genes, d);
     let (e_feature_mean, e_feature_std, feature_names_out): (Mat, Mat, Vec<Box<str>>) =
@@ -508,7 +517,7 @@ pub fn fit_cage_mcmc(args: &CageMcmcArgs) -> anyhow::Result<()> {
         };
 
     e_feature_mean.to_parquet_with_names(
-        &format!("{prefix}.feature_embedding.mean.parquet"),
+        &format!("{prefix}.feature_embedding.parquet"),
         (Some(&feature_names_out), Some("feature")),
         Some(&col_names),
     )?;
@@ -518,11 +527,11 @@ pub fn fit_cage_mcmc(args: &CageMcmcArgs) -> anyhow::Result<()> {
         Some(&col_names),
     )?;
 
-    // Level-dim gates (post-softplus) mean / std
+    // Level-dim gates (post-softplus) + .std sidecar.
     let gamma_mean = to_mat(stat_gamma.mean(), n_chain_levels, d);
     let gamma_std = to_mat(stat_gamma.std(), n_chain_levels, d);
     gamma_mean.to_parquet_with_names(
-        &format!("{prefix}.level_dim_gates.mean.parquet"),
+        &format!("{prefix}.level_dim_gates.parquet"),
         (Some(&level_names), Some("level")),
         Some(&col_names),
     )?;
@@ -532,8 +541,9 @@ pub fn fit_cage_mcmc(args: &CageMcmcArgs) -> anyhow::Result<()> {
         Some(&col_names),
     )?;
 
-    // Log-likelihood trace
-    write_loglik_trace(&format!("{prefix}.loglik_trace.parquet"), &loglik_rows)?;
+    // Per-sweep log-likelihood trace under cage's `.scores.parquet`
+    // name so the metadata `outputs.scores` slot points consistently.
+    write_loglik_trace(&format!("{prefix}.scores.parquet"), &loglik_rows)?;
 
     // Thinned trace: post-warmup recorded samples only. Subset of
     // `loglik_rows` filtered by `sample_idx.is_some()`. Per-element
@@ -547,7 +557,105 @@ pub fn fit_cage_mcmc(args: &CageMcmcArgs) -> anyhow::Result<()> {
         write_thinned_trace(&format!("{prefix}.trace.parquet"), &trace)?;
     }
 
-    // Metadata — point standard cage fields at `.mean.parquet`.
+    //////////////////////////////////////////////////////
+    // 12. Optional Leiden clustering + propensity      //
+    //////////////////////////////////////////////////////
+    // Same recipe as `pinto cage --leiden-knn`: L2-normalize the
+    // posterior-mean cell embedding, build cosine kNN, run Leiden,
+    // then derive cell + feature soft propensities by softmax over
+    // cluster centroids. Sidecar files match cage's so `pinto plot`
+    // discovers them identically.
+    let cluster_info: Option<CageClusterInfo> = if args.leiden_knn > 0 {
+        let LeidenPropensityResult {
+            labels,
+            n_clusters,
+            propensity,
+            centroids,
+        } = run_leiden_and_propensity(
+            &e_cell_mean,
+            &LeidenPropensityArgs {
+                knn: args.leiden_knn,
+                resolution: args.leiden_resolution,
+                target_clusters: args.leiden_target_clusters,
+                min_cluster_size: args.leiden_min_cluster_size,
+                propensity_temp: args.propensity_temp,
+                seed: c.seed,
+            },
+        )?;
+
+        let cluster_col_names: Vec<Box<str>> = (0..n_clusters)
+            .map(|k| format!("cluster_{k}").into_boxed_str())
+            .collect();
+
+        // Hard cluster labels [N × 1], NaN for filtered cells.
+        let mut hard = Mat::zeros(n_cells, 1);
+        for (i, &lab) in labels.iter().enumerate() {
+            hard[(i, 0)] = if lab == usize::MAX {
+                f32::NAN
+            } else {
+                lab as f32
+            };
+        }
+        hard.to_parquet_with_names(
+            &format!("{prefix}.clusters.parquet"),
+            (Some(&cell_names), Some("cell")),
+            Some(&[Box::from("cluster")]),
+        )?;
+
+        // Soft cell propensity [N × K].
+        propensity.to_parquet_with_names(
+            &format!("{prefix}.cluster_propensity.parquet"),
+            (Some(&cell_names), Some("cell")),
+            Some(&cluster_col_names),
+        )?;
+
+        // Feature dictionary [G × K]: softmax over centroids on the
+        // (HVG-subset) feature side, matching cage's recipe.
+        let feature_dict =
+            propensity_against_centroids(&e_feature_mean, &centroids, args.propensity_temp);
+        feature_dict.to_parquet_with_names(
+            &format!("{prefix}.feature_dictionary.parquet"),
+            (Some(&feature_names_out), Some("feature")),
+            Some(&cluster_col_names),
+        )?;
+
+        // Per-edge community via Hadamard-argmax of endpoint propensity.
+        // Lands at `link_community.parquet` so `pinto lr-activity
+        // --lc-prefix {prefix}` works directly without an adapter.
+        let edges_usize: Vec<(usize, usize)> = edges_owned
+            .iter()
+            .map(|&(u, v)| (u as usize, v as usize))
+            .collect();
+        let edge_community = edge_community_from_propensity(&edges_owned, &propensity);
+        write_link_communities(
+            &format!("{prefix}.link_community.parquet"),
+            &edges_usize,
+            &edge_community,
+            &cell_names,
+        )?;
+
+        info!(
+            "Leiden post-MCMC: {} clusters; cluster_propensity [{} × {}], \
+             feature_dictionary [{} × {}], link_community [{} edges]",
+            n_clusters,
+            n_cells,
+            n_clusters,
+            feature_names_out.len(),
+            n_clusters,
+            edges_usize.len(),
+        );
+        Some(CageClusterInfo { n_clusters })
+    } else {
+        None
+    };
+
+    //////////////////////////////////////////////////////
+    // 13. Metadata                                      //
+    //////////////////////////////////////////////////////
+    // Reuse cage's metadata builder verbatim — same schema, same slot
+    // mapping, only the `command` field differs. With `cluster=Some`
+    // the JSON's `propensity` / `gene_community` slots point at the
+    // cluster artifacts so plot just works.
     {
         let coord_file_str = c.coord_files_joined();
         let mut meta = create_cage_metadata(
@@ -562,16 +670,11 @@ pub fn fit_cage_mcmc(args: &CageMcmcArgs) -> anyhow::Result<()> {
                 k: d,
             },
             batch_db.is_some(),
-            None,
+            cluster_info,
         );
         meta.command = "cage-mcmc".to_string();
-        meta.outputs.cell_embedding = Some(format!("{prefix}.cell_embedding.mean.parquet"));
-        meta.outputs.cell_bias = Some(format!("{prefix}.cell_bias.mean.parquet"));
-        meta.outputs.feature_embedding = Some(format!("{prefix}.feature_embedding.mean.parquet"));
-        meta.outputs.level_dim_gates = Some(format!("{prefix}.level_dim_gates.mean.parquet"));
         meta.outputs.gene_bias = None; // cage-mcmc has no b_gene
-        meta.outputs.scores = Some(format!("{prefix}.loglik_trace.parquet"));
-        let meta_path = std::path::PathBuf::from(format!("{prefix}.metadata.json"));
+        let meta_path = std::path::PathBuf::from(format!("{prefix}.pinto.json"));
         meta.write(&meta_path)?;
         info!("Wrote {}", meta_path.display());
     }

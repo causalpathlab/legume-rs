@@ -1,15 +1,22 @@
 //! Auto-discover pinto output files under a given prefix.
 //!
-//! Pinto has no run manifest (unlike senna's `.senna.json`), so we glob
-//! the filesystem:
-//! - `{prefix}.propensity.parquet`            → level "final"
-//! - `{prefix}.L{n}.propensity.parquet`       → level "L{n}"
-//! - `{prefix}.draft.propensity.parquet`      → level "draft"
+//! Two discovery paths, tried in order:
 //!
-//! Each level can have matching `.link_community.parquet` (lc / dsvd
-//! runs) and `.gene_community.parquet` siblings — `Level::*_path()` returns
-//! them when present so downstream code can conditionally emit the
-//! mesh plot or marker plots without re-checking the filesystem.
+//! 1. **Filesystem glob** — `{prefix}{.L*,.draft,}.propensity.parquet`
+//!    siblings. This is the lc / dsvd / prop convention; each Level
+//!    gets paths derived from the `infix` field.
+//! 2. **`.pinto.json` fallback** — when the glob finds nothing, read
+//!    `{prefix}.pinto.json` and build a single `final` Level whose
+//!    explicit paths point at `outputs.{propensity, link_community,
+//!    gene_community}` (or the equivalent fields in `levels[]`). This
+//!    is how cage / cage-mcmc plug in: their propensity-equivalent
+//!    file is `cluster_propensity.parquet`, named via the JSON rather
+//!    than discoverable by glob.
+//!
+//! `Level` carries explicit `PathBuf`s for the propensity / link-
+//! community / gene-community parquets so both paths populate the same
+//! shape — downstream plot code doesn't branch on which discovery
+//! kind produced it.
 
 use regex::Regex;
 use std::path::{Path, PathBuf};
@@ -22,20 +29,17 @@ pub struct Level {
     /// Sort key (lower = plotted earlier). `final` and `draft` bracket
     /// the numeric L-levels for natural ordering in the output dir.
     pub sort_key: i32,
-    /// Infix used in parquet names: "" for final, ".L0", ".draft", etc.
-    pub infix: String,
-}
-
-impl Level {
-    pub fn propensity_path(&self, prefix: &str) -> PathBuf {
-        PathBuf::from(format!("{}{}.propensity.parquet", prefix, self.infix))
-    }
-    pub fn link_community_path(&self, prefix: &str) -> PathBuf {
-        PathBuf::from(format!("{}{}.link_community.parquet", prefix, self.infix))
-    }
-    pub fn gene_community_path(&self, prefix: &str) -> PathBuf {
-        PathBuf::from(format!("{}{}.gene_community.parquet", prefix, self.infix))
-    }
+    /// Explicit path to the propensity (or propensity-equivalent)
+    /// parquet for this level. Always populated.
+    pub propensity: PathBuf,
+    /// Optional path to the link-community parquet (per-edge community
+    /// labels — lc / dsvd). `None` for subcommands without a per-edge
+    /// community concept (cage / cage-mcmc); plot skips mesh / edge
+    /// overlays for those levels.
+    pub link_community: Option<PathBuf>,
+    /// Optional path to the gene-community (or feature-dictionary)
+    /// parquet. `None` when the run didn't produce one.
+    pub gene_community: Option<PathBuf>,
 }
 
 /// User selector: `all` | `final` | `draft` | comma-list (`final,L0,draft`).
@@ -70,9 +74,33 @@ impl LevelSelector {
 
 /// Discover all sibling propensity parquets sharing this prefix.
 ///
-/// Returns levels in natural plotting order: `final` → `L0 … Ln` → `draft`.
-/// Filters by `selector`. Empty return is an error at the caller level.
+/// Order of operations:
+/// 1. Filesystem glob for `{prefix}{.L*,.draft,}.propensity.parquet`.
+///    This is the lc / dsvd / prop path; returns levels in natural
+///    plotting order (`final` → `L0…Ln` → `draft`).
+/// 2. If the glob found nothing, fall back to reading
+///    `{prefix}.pinto.json` and constructing a single `final` Level
+///    from `levels[0]`. This covers cage / cage-mcmc whose propensity
+///    artifact is named `cluster_propensity.parquet` (no glob match).
+///
+/// Filters by `selector` in both paths. Empty result is an error.
 pub fn discover_levels(prefix: &str, selector: &LevelSelector) -> anyhow::Result<Vec<Level>> {
+    let glob_hits = discover_via_glob(prefix, selector)?;
+    if !glob_hits.is_empty() {
+        return Ok(glob_hits);
+    }
+    if let Some(meta_hits) = discover_via_pinto_json(prefix, selector)? {
+        if !meta_hits.is_empty() {
+            return Ok(meta_hits);
+        }
+    }
+    anyhow::bail!(
+        "no propensity parquets and no usable {prefix}.pinto.json matched prefix {prefix} \
+         with selector {selector:?}"
+    )
+}
+
+fn discover_via_glob(prefix: &str, selector: &LevelSelector) -> anyhow::Result<Vec<Level>> {
     let (dir, stem) = split_prefix(prefix)?;
     let re = Regex::new(&format!(
         r"^{}(\.L(?P<lvl>\d+)|\.draft)?\.propensity\.parquet$",
@@ -109,15 +137,47 @@ pub fn discover_levels(prefix: &str, selector: &LevelSelector) -> anyhow::Result
         out.push(Level {
             tag,
             sort_key,
-            infix,
+            propensity: PathBuf::from(format!("{prefix}{infix}.propensity.parquet")),
+            link_community: Some(PathBuf::from(format!(
+                "{prefix}{infix}.link_community.parquet"
+            ))),
+            gene_community: Some(PathBuf::from(format!(
+                "{prefix}{infix}.gene_community.parquet"
+            ))),
         });
     }
-
     out.sort_by_key(|l| l.sort_key);
-    if out.is_empty() {
-        anyhow::bail!("no propensity parquets matched prefix {prefix} with selector {selector:?}");
-    }
     Ok(out)
+}
+
+fn discover_via_pinto_json(
+    prefix: &str,
+    selector: &LevelSelector,
+) -> anyhow::Result<Option<Vec<Level>>> {
+    let json_path = PathBuf::from(format!("{prefix}.pinto.json"));
+    if !json_path.exists() {
+        return Ok(None);
+    }
+    let meta = crate::util::metadata::PintoMetadata::read(&json_path)?;
+    let levels = match meta.levels.as_ref() {
+        Some(v) if !v.is_empty() => v,
+        _ => return Ok(Some(Vec::new())),
+    };
+    let mut out = Vec::with_capacity(levels.len());
+    for li in levels {
+        if !selector.accepts(&li.tag) {
+            continue;
+        }
+        out.push(Level {
+            tag: li.tag.clone(),
+            sort_key: li.level_index as i32,
+            propensity: PathBuf::from(&li.propensity),
+            link_community: li.link_community.as_ref().map(PathBuf::from),
+            gene_community: li.gene_community.as_ref().map(PathBuf::from),
+        });
+    }
+    out.sort_by_key(|l| l.sort_key);
+    Ok(Some(out))
 }
 
 fn split_prefix(prefix: &str) -> anyhow::Result<(PathBuf, String)> {

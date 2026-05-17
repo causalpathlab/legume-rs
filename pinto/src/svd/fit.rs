@@ -292,7 +292,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
             n_edges: edges.len(),
             k: n_clusters,
         });
-        let meta_path = std::path::PathBuf::from(format!("{}.metadata.json", c.out));
+        let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
         meta.write(&meta_path)?;
         info!("Wrote {}", meta_path.display());
     }
