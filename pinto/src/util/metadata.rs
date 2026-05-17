@@ -93,15 +93,21 @@ pub struct OutputFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level_dim_gates: Option<String>,
 
-    /// `pinto cage` gene embedding `[G × D]` — same shared D-dim space
-    /// as `cell_embedding`. Cosine similarity between gene rows is
-    /// directly interpretable.
+    /// `pinto cage` feature (gene) embedding `[G × D]` — same shared
+    /// D-dim space as `cell_embedding`. Cosine similarity between
+    /// feature rows is directly interpretable.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gene_embedding: Option<String>,
+    pub feature_embedding: Option<String>,
 
     /// `pinto cage` per-gene bias `[G]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gene_bias: Option<String>,
+
+    /// `pinto cage` hard cluster labels `[N × 1]` from Leiden on the
+    /// cell embedding. Sibling of `cluster_propensity` /
+    /// `feature_dictionary`. Absent when cage was run without leiden.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clusters: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -238,8 +244,9 @@ pub fn create_lc_metadata(
             cell_embedding: None,
             cell_bias: None,
             level_dim_gates: None,
-            gene_embedding: None,
+            feature_embedding: None,
             gene_bias: None,
+            clusters: None,
         },
         levels: Some(levels),
     }
@@ -290,27 +297,60 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
             cell_embedding: None,
             cell_bias: None,
             level_dim_gates: None,
-            gene_embedding: None,
+            feature_embedding: None,
             gene_bias: None,
+            clusters: None,
         },
         levels: Some(levels),
     }
 }
 
-/// Helper for `pinto cage` runs. Embedding-only — one `final` level,
-/// no communities. `has_batch_effects` is `true` when the run had ≥2
-/// batches and `{prefix}.delta.parquet` was written.
+/// Optional cluster sidecar info for `pinto cage` metadata. When
+/// supplied, the run wrote `{prefix}.clusters.parquet`,
+/// `{prefix}.cluster_propensity.parquet`, and
+/// `{prefix}.feature_dictionary.parquet`, and the JSON points plotters
+/// at those via the same slot mapping as `pinto lc`.
+#[derive(Debug, Clone, Copy)]
+pub struct CageClusterInfo {
+    pub n_clusters: usize,
+}
+
+/// Helper for `pinto cage` runs. Embedding-only by default — one
+/// `final` level. `has_batch_effects` is `true` when the run had ≥2
+/// batches and `{prefix}.delta.parquet` was written. `cluster` is
+/// `Some` when Leiden ran post-training and the cluster artifacts are
+/// present; in that case the JSON's `propensity` / `gene_community`
+/// slots point at the cluster files so existing lc-style plotters work
+/// unchanged.
 ///
 /// `inputs.k` carries the embedding dimensionality (re-purposed; the
-/// JSON's `n_communities` is set to `None` since cage has no clusters).
-pub fn create_cage_metadata(inputs: &RunInputs<'_>, has_batch_effects: bool) -> PintoMetadata {
+/// JSON's `n_communities` reports cluster count when leiden ran, else
+/// `None`).
+pub fn create_cage_metadata(
+    inputs: &RunInputs<'_>,
+    has_batch_effects: bool,
+    cluster: Option<CageClusterInfo>,
+) -> PintoMetadata {
     let prefix = inputs.prefix;
+
+    let (level_propensity, level_gene_community, n_communities) = match cluster {
+        Some(c) => (
+            format!("{prefix}.cluster_propensity.parquet"),
+            Some(format!("{prefix}.feature_dictionary.parquet")),
+            Some(c.n_clusters),
+        ),
+        None => (format!("{prefix}.cell_embedding.parquet"), None, None),
+    };
+    let outputs_propensity = cluster.map(|_| format!("{prefix}.cluster_propensity.parquet"));
+    let outputs_gene_community = cluster.map(|_| format!("{prefix}.feature_dictionary.parquet"));
+    let outputs_clusters = cluster.map(|_| format!("{prefix}.clusters.parquet"));
+
     let levels = vec![LevelInfo {
         tag: "final".to_string(),
         level_index: 0,
-        propensity: format!("{prefix}.cell_embedding.parquet"),
+        propensity: level_propensity,
         link_community: format!("{prefix}.level_dim_gates.parquet"),
-        gene_community: None,
+        gene_community: level_gene_community,
         entropy_present: Some(false),
     }];
 
@@ -324,13 +364,13 @@ pub fn create_cage_metadata(inputs: &RunInputs<'_>, has_batch_effects: bool) -> 
         n_cells: inputs.n_cells,
         n_genes: inputs.n_genes,
         n_edges: Some(inputs.n_edges),
-        n_communities: None,
+        n_communities,
         outputs: OutputFiles {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
             coord_columns: coord_columns_field(inputs.coord_columns),
-            propensity: None,
+            propensity: outputs_propensity,
             link_community: None,
-            gene_community: None,
+            gene_community: outputs_gene_community,
             scores: Some(format!("{prefix}.scores.parquet")),
             batch_effects: has_batch_effects.then(|| format!("{prefix}.delta.parquet")),
             dict_merge: None,
@@ -338,8 +378,9 @@ pub fn create_cage_metadata(inputs: &RunInputs<'_>, has_batch_effects: bool) -> 
             cell_embedding: Some(format!("{prefix}.cell_embedding.parquet")),
             cell_bias: Some(format!("{prefix}.cell_bias.parquet")),
             level_dim_gates: Some(format!("{prefix}.level_dim_gates.parquet")),
-            gene_embedding: Some(format!("{prefix}.gene_embedding.parquet")),
+            feature_embedding: Some(format!("{prefix}.feature_embedding.parquet")),
             gene_bias: Some(format!("{prefix}.gene_bias.parquet")),
+            clusters: outputs_clusters,
         },
         levels: Some(levels),
     }
@@ -388,8 +429,9 @@ pub fn create_prop_metadata(
             cell_embedding: None,
             cell_bias: None,
             level_dim_gates: None,
-            gene_embedding: None,
+            feature_embedding: None,
             gene_bias: None,
+            clusters: None,
         },
         levels: Some(levels),
     }
@@ -463,6 +505,7 @@ mod tests {
                 k: 16, // embedding_dim, reused slot
             },
             true,
+            None,
         );
         let path = dir.path().join("run.metadata.json");
         meta.write(&path).unwrap();
@@ -473,14 +516,57 @@ mod tests {
         assert!(back.outputs.cell_embedding.is_some());
         assert!(back.outputs.cell_bias.is_some());
         assert!(back.outputs.level_dim_gates.is_some());
-        assert!(back.outputs.gene_embedding.is_some());
+        assert!(back.outputs.feature_embedding.is_some());
         assert!(back.outputs.gene_bias.is_some());
         assert!(back.outputs.scores.is_some());
         assert!(back.outputs.batch_effects.is_some());
         assert!(back.outputs.link_community.is_none());
+        assert!(back.outputs.clusters.is_none());
         let levels = back.levels.expect("levels");
         assert_eq!(levels.len(), 1);
         assert_eq!(levels[0].tag, "final");
+        assert!(levels[0].propensity.ends_with(".cell_embedding.parquet"));
+    }
+
+    #[test]
+    fn metadata_roundtrip_cage_with_clusters() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("run").to_string_lossy().to_string();
+        let data_files: Vec<Box<str>> = vec!["a.h5".into()];
+        let meta = create_cage_metadata(
+            &RunInputs {
+                prefix: &prefix,
+                data_files: &data_files,
+                coord_file: None,
+                coord_columns: &[],
+                n_cells: 1000,
+                n_genes: 200,
+                n_edges: 300,
+                k: 16,
+            },
+            false,
+            Some(CageClusterInfo { n_clusters: 7 }),
+        );
+        let back: PintoMetadata =
+            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        assert_eq!(back.n_communities, Some(7));
+        assert!(back.outputs.clusters.is_some());
+        assert!(back.outputs.propensity.is_some());
+        assert!(back.outputs.gene_community.is_some());
+        let levels = back.levels.expect("levels");
+        assert!(levels[0]
+            .propensity
+            .ends_with(".cluster_propensity.parquet"));
+        assert_eq!(
+            levels[0]
+                .gene_community
+                .as_deref()
+                .unwrap()
+                .split('/')
+                .next_back()
+                .unwrap(),
+            "run.feature_dictionary.parquet"
+        );
     }
 
     #[test]
@@ -500,6 +586,7 @@ mod tests {
                 k: 8,
             },
             false,
+            None,
         );
         let back: PintoMetadata =
             serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();

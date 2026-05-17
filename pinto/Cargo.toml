@@ -6,7 +6,7 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version = "0.3.0"
+version = "0.4.0"
 
 [[bin]]
 name = "pinto"
@@ -18,6 +18,7 @@ data-beans-alg = { workspace = true }
 candle-util = { workspace = true }
 auxiliary-data = { workspace = true }
 graph-embedding-util = { workspace = true }
+mcmc-util = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
 leiden = { workspace = true }
@@ -39,6 +40,7 @@ rand_distr = { workspace = true }
 nalgebra = { workspace = true }
 nalgebra-sparse = { workspace = true }
 approx = { workspace = true }
+wide = { workspace = true }
 
 special = { workspace = true }
 indicatif = { workspace = true }
