@@ -8,19 +8,24 @@
 //!   5. build_cell_activities (per-gene cell activity + active edges)
 //!   6. allocate JointEmbedModel + GeneGating in one VarMap, AdamW
 //!   7. training loop — rayon sample, serial fwd/bwd
-//!   8. parquet outputs + metadata.json
+//!   8. parquet outputs + .pinto.json
 
 use crate::cell_activity_graph_embedding::args::CellActivityGraphEmbeddingArgs;
+use crate::cell_activity_graph_embedding::cluster::{
+    edge_community_from_propensity, propensity_against_centroids, run_leiden_and_propensity,
+    LeidenPropensityArgs, LeidenPropensityResult,
+};
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
 };
 use crate::cell_activity_graph_embedding::gene_gating::{
     build_cell_activities, softplus_floored, LevelDimGate,
 };
+use crate::link_community::outputs::write_link_communities;
 use crate::util::cell_pairs::SrtCellPairs;
 use crate::util::common::*;
 use crate::util::graph_coarsen::{graph_coarsen_multilevel, CoarsenConfig, SeedingParams};
-use crate::util::metadata::{create_cage_metadata, RunInputs};
+use crate::util::metadata::{create_cage_metadata, CageClusterInfo, RunInputs};
 use crate::util::score_trace::{write_score_trace, ScoreEntry};
 use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
 
@@ -32,10 +37,12 @@ use graph_embedding_util::loss::{
     build_per_batch_cell_samplers, cell_cell_nce_loss_per_level_batched_gated, PbChainFilter,
 };
 use graph_embedding_util::model::{JointEmbedModel, ModelArgs, ModelInit};
+use graph_embedding_util::stop::setup_stop_handler;
 use matrix_util::common_io::mkdir_parent;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use std::sync::atomic::Ordering;
 
 pub fn fit_cell_activity_graph_embedding(
     args: &CellActivityGraphEmbeddingArgs,
@@ -301,7 +308,11 @@ pub fn fit_cell_activity_graph_embedding(
     let mut score_trace: Vec<ScoreEntry> = Vec::new();
     let mut rng_master = SmallRng::seed_from_u64(c.seed);
 
-    for epoch in 0..args.epochs {
+    // First ^C = graceful stop after current chunk, finalize outputs;
+    // second ^C = hard abort. See graph_embedding_util::stop.
+    let stop = setup_stop_handler();
+
+    'epochs: for epoch in 0..args.epochs {
         let mut perm: Vec<usize> = trainable_genes.clone();
         perm.shuffle(&mut rng_master);
 
@@ -316,6 +327,9 @@ pub fn fit_cell_activity_graph_embedding(
         let mut per_level_acc: Option<Tensor> = None;
         let mut chunk_count: usize = 0;
         for chunk in perm.chunks(args.gene_batch_size) {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
             // (a) Parallel sampling — pure CPU, no candle.
             let mini: Vec<(usize, _)> = chunk
                 .par_iter()
@@ -362,12 +376,18 @@ pub fn fit_cell_activity_graph_embedding(
                 &dev,
             )?; // [G, L]
             let loss = per_level_gl.sum_all()?;
-            let total = if args.gate_l2 > 0.0 {
+            let mut total = loss.clone();
+            if args.gate_l2 > 0.0 {
                 let reg = (dim_gates.sqr()?.sum_all()? * (args.gate_l2 as f64))?;
-                (loss.clone() + reg)?
-            } else {
-                loss.clone()
-            };
+                total = (total + reg)?;
+            }
+            if args.embedding_l2 > 0.0 {
+                let lam = args.embedding_l2 as f64;
+                let cell_l2 = (model.e_cell.sqr()?.mean_all()? * lam)?;
+                let gene_l2 = (model.e_feat.sqr()?.mean_all()? * lam)?;
+                total = (total + cell_l2)?;
+                total = (total + gene_l2)?;
+            }
             opt.backward_step(&total)?;
 
             // Diagnostics (no host sync) — accumulate detached tensors.
@@ -448,6 +468,15 @@ pub fn fit_cell_activity_graph_embedding(
                 break;
             }
         }
+
+        if stop.load(Ordering::SeqCst) {
+            info!(
+                "Stopping early at epoch {}/{} — finalizing outputs",
+                epoch + 1,
+                args.epochs
+            );
+            break 'epochs;
+        }
     }
 
     //////////////////////////////////////////////////////
@@ -491,8 +520,8 @@ pub fn fit_cell_activity_graph_embedding(
         };
 
     e_gene_out.to_parquet_with_names(
-        &(c.out.to_string() + ".gene_embedding.parquet"),
-        (Some(&gene_names_out), Some("gene")),
+        &(c.out.to_string() + ".feature_embedding.parquet"),
+        (Some(&gene_names_out), Some("feature")),
         Some(&embedding_col_names(args.embedding_dim)),
     )?;
 
@@ -519,6 +548,96 @@ pub fn fit_cell_activity_graph_embedding(
 
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
+    //////////////////////////////////////////////////////
+    // 10. Optional Leiden clustering + propensity      //
+    //////////////////////////////////////////////////////
+    // Cells: L2-normalized cosine kNN → Leiden → hard labels +
+    // soft propensity (cells × K). Genes: same softmax-over-centroids
+    // recipe re-applied to e_gene_out → feature dictionary (genes × K).
+    let cluster_info: Option<CageClusterInfo> = if args.leiden_knn > 0 {
+        let leiden_args = LeidenPropensityArgs {
+            knn: args.leiden_knn,
+            resolution: args.leiden_resolution,
+            target_clusters: args.leiden_target_clusters,
+            min_cluster_size: args.leiden_min_cluster_size,
+            propensity_temp: args.propensity_temp,
+            seed: c.seed,
+        };
+        let LeidenPropensityResult {
+            labels,
+            n_clusters,
+            propensity,
+            centroids,
+        } = run_leiden_and_propensity(&e_cell_mat, &leiden_args)?;
+
+        let cluster_col_names: Vec<Box<str>> = (0..n_clusters)
+            .map(|k| format!("cluster_{k}").into_boxed_str())
+            .collect();
+
+        // Hard cluster labels [N × 1], NaN for filtered cells.
+        let mut hard = Mat::zeros(n_cells, 1);
+        for (i, &lab) in labels.iter().enumerate() {
+            hard[(i, 0)] = if lab == usize::MAX {
+                f32::NAN
+            } else {
+                lab as f32
+            };
+        }
+        hard.to_parquet_with_names(
+            &(c.out.to_string() + ".clusters.parquet"),
+            (Some(&cell_names), Some("cell")),
+            Some(&[Box::from("cluster")]),
+        )?;
+
+        // Soft cell propensity [N × K].
+        propensity.to_parquet_with_names(
+            &(c.out.to_string() + ".cluster_propensity.parquet"),
+            (Some(&cell_names), Some("cell")),
+            Some(&cluster_col_names),
+        )?;
+
+        // Feature dictionary [G × K] — same softmax-over-centroids
+        // recipe on the gene side. Uses the HVG-subset gene matrix
+        // when HVG was active, so the row axis matches
+        // feature_embedding.parquet.
+        let feature_dict =
+            propensity_against_centroids(&e_gene_out, &centroids, args.propensity_temp);
+        feature_dict.to_parquet_with_names(
+            &(c.out.to_string() + ".feature_dictionary.parquet"),
+            (Some(&gene_names_out), Some("feature")),
+            Some(&cluster_col_names),
+        )?;
+
+        // Per-edge community via Hadamard-argmax of endpoint propensity.
+        // Lands at `link_community.parquet` so `pinto lr-activity
+        // --lc-prefix {prefix}` can run directly without an adapter.
+        let edges_usize: Vec<(usize, usize)> = edges_owned
+            .iter()
+            .map(|&(u, v)| (u as usize, v as usize))
+            .collect();
+        let edge_community = edge_community_from_propensity(&edges_owned, &propensity);
+        write_link_communities(
+            &(c.out.to_string() + ".link_community.parquet"),
+            &edges_usize,
+            &edge_community,
+            &cell_names,
+        )?;
+
+        info!(
+            "Wrote leiden cluster artifacts: {} clusters, {} cells × {} = propensity, \
+             {} features × {} = dictionary, {} edges = link_community",
+            n_clusters,
+            n_cells,
+            n_clusters,
+            gene_names_out.len(),
+            n_clusters,
+            edges_usize.len(),
+        );
+        Some(CageClusterInfo { n_clusters })
+    } else {
+        None
+    };
+
     // Metadata
     {
         let coord_file_str = c.coord_files_joined();
@@ -534,8 +653,9 @@ pub fn fit_cell_activity_graph_embedding(
                 k: args.embedding_dim,
             },
             batch_db.is_some(),
+            cluster_info,
         );
-        let meta_path = std::path::PathBuf::from(format!("{}.metadata.json", c.out));
+        let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
         meta.write(&meta_path)?;
         info!("Wrote {}", meta_path.display());
     }

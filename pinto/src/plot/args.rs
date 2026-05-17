@@ -1,7 +1,7 @@
 //! CLI args for `pinto plot`.
 //!
 //! Auto-discovers pinto output files from a prefix (or its
-//! `{prefix}.metadata.json` manifest, preferred), optionally reading
+//! `{prefix}.pinto.json` manifest, preferred), optionally reading
 //! raw expression (`--data`) for marker-gene overlays AND for per-edge
 //! L→R direction inference in the LR-activity overlay. Every plot
 //! dimension (width, aspect, dot size, etc.) is user-overridable, with
@@ -51,7 +51,7 @@ pub struct SrtPlotArgs {
         long,
         short = 'f',
         required = true,
-        help = "Input prefix or JSON metadata file. If path ends with .json or .metadata.json, reads metadata; otherwise discovers {prefix}.*.parquet files"
+        help = "Input prefix or JSON metadata file. If path ends with .json or .pinto.json, reads metadata; otherwise discovers {prefix}.*.parquet files"
     )]
     pub from: Box<str>,
 
@@ -220,7 +220,7 @@ pub struct SrtPlotArgs {
         long,
         help = "Path to a `pinto lr-activity` JSON sidecar.",
         long_help = "Path to a `pinto lr-activity` JSON sidecar. If omitted,\n\
-                     looks up `outputs.lr_activity` from {prefix}.metadata.json\n\
+                     looks up `outputs.lr_activity` from {prefix}.pinto.json\n\
                      (or skips silently if neither is present). One LR overlay\n\
                      PDF is written per (core × significant pair, top-N\n\
                      by |z| per stratum via --lr-top-pairs)."

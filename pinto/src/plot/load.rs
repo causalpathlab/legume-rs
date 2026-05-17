@@ -90,7 +90,7 @@ impl CellTable {
 
 /// Read `{prefix}.coord_pairs.parquet`, union left+right, dedupe.
 ///
-/// `coord_columns`, when supplied (typically from `metadata.json`'s
+/// `coord_columns`, when supplied (typically from `.pinto.json`'s
 /// `outputs.coord_columns`), names the bare coord basenames in `(x, y)`
 /// order — e.g. `["pxl_row_in_fullres", "pxl_col_in_fullres"]`. Pass
 /// `None` to fall back to the legacy auto-discovery (first two paired
@@ -123,7 +123,7 @@ pub fn read_cells_from_coord_pairs(
             if left_coords.len() < 2 {
                 anyhow::bail!(
                     "coord_pairs.parquet {path:?} has fewer than 2 coordinate columns \
-                     (needs left_x + left_y pair) and metadata.json carried no \
+                     (needs left_x + left_y pair) and .pinto.json carried no \
                      coord_columns hint. Was this run fit without --coord?"
                 );
             }
@@ -258,7 +258,8 @@ pub fn read_propensity(
                 Some(c) => prop_named.push((c, j)),
                 None => anyhow::bail!(
                     "{path:?}: propensity column {n:?} is not a community ID. \
-                     Expected names \"C0\",\"C1\",…,\"C{{K-1}}\" plus optional \"entropy\"/coord cols."
+                     Expected names \"C0\",\"C1\",…,\"C{{K-1}}\" (or `cluster_<k>` / \
+                     `propensity_<k>` / bare ints) plus optional \"entropy\"/coord cols."
                 ),
             },
         }
@@ -347,6 +348,9 @@ fn parse_community_col_name(name: &str) -> Option<i64> {
     if let Some(rest) = name.strip_prefix("propensity_") {
         return rest.parse::<i64>().ok();
     }
+    if let Some(rest) = name.strip_prefix("cluster_") {
+        return rest.parse::<i64>().ok();
+    }
     name.parse::<i64>().ok()
 }
 
@@ -433,15 +437,19 @@ pub fn read_gene_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         .enumerate()
         .map(|(i, f)| (f.name().to_string().into_boxed_str(), i))
         .collect();
-    let gene_idx = *name_to_idx
-        .get("gene")
-        .ok_or_else(|| anyhow::anyhow!("{path_str}: missing `gene` column"))?;
-    let community_idx = *name_to_idx
-        .get("community")
-        .ok_or_else(|| anyhow::anyhow!("{path_str}: missing `community` column"))?;
-    let mean_idx = *name_to_idx
-        .get("mean")
-        .ok_or_else(|| anyhow::anyhow!("{path_str}: missing `mean` column"))?;
+
+    // lc writes long format: (gene, community, mean) triples. cage /
+    // cage-mcmc write `feature_dictionary.parquet` in wide format:
+    // one row per feature, one column per cluster. Dispatch on schema.
+    let has_long = name_to_idx.contains_key("gene")
+        && name_to_idx.contains_key("community")
+        && name_to_idx.contains_key("mean");
+    if !has_long {
+        return read_gene_community_wide(path, &reader, &name_to_idx);
+    }
+    let gene_idx = name_to_idx[&Box::<str>::from("gene")];
+    let community_idx = name_to_idx[&Box::<str>::from("community")];
+    let mean_idx = name_to_idx[&Box::<str>::from("mean")];
 
     let mut gene_pos: HashMap<Box<str>, usize> = HashMap::default();
     let mut gene_names: Vec<Box<str>> = Vec::new();
@@ -521,8 +529,81 @@ pub fn read_gene_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
     Ok((mat, gene_names))
 }
 
+/// Wide-format `feature_dictionary.parquet` (cage / cage-mcmc):
+/// one row per feature, row-name column `feature`/`gene`, plus
+/// per-cluster columns (`cluster_<k>` / `C<k>` / bare ints). Returns
+/// `[G × K]` matrix and feature names; matrix column j corresponds to
+/// the cluster ID parsed from the column name (zero-filled gaps).
+fn read_gene_community_wide(
+    path: &Path,
+    reader: &SerializedFileReader<File>,
+    name_to_idx: &HashMap<Box<str>, usize>,
+) -> anyhow::Result<(Mat, Vec<Box<str>>)> {
+    let path_str = path.to_str().unwrap_or("<non-utf8>");
+
+    // Row-name column: tolerate `feature` (cage) or `gene` (legacy).
+    let name_col_label: Box<str> = if name_to_idx.contains_key(&Box::<str>::from("feature")) {
+        "feature".into()
+    } else if name_to_idx.contains_key(&Box::<str>::from("gene")) {
+        "gene".into()
+    } else {
+        anyhow::bail!(
+            "{path_str}: feature dictionary is missing the row-name column \
+             (expected `feature` or `gene`)"
+        );
+    };
+    let name_idx = name_to_idx[&name_col_label];
+
+    let mut col_to_community: Vec<(usize, i64)> = Vec::new();
+    for (name, &idx) in name_to_idx {
+        if name.as_ref() == name_col_label.as_ref() {
+            continue;
+        }
+        if let Some(c) = parse_community_col_name(name) {
+            col_to_community.push((idx, c));
+        }
+    }
+    anyhow::ensure!(
+        !col_to_community.is_empty(),
+        "{path_str}: feature dictionary has no community-named columns \
+         (expected `cluster_<k>` / `C<k>` / `propensity_<k>`)"
+    );
+    let max_c = col_to_community.iter().map(|&(_, c)| c).max().unwrap();
+    anyhow::ensure!(
+        max_c >= 0,
+        "{path_str}: feature dictionary has negative community ID {max_c}"
+    );
+    let n_communities = (max_c + 1) as usize;
+
+    let mut gene_names: Vec<Box<str>> = Vec::new();
+    let mut rows: Vec<Vec<f32>> = Vec::new();
+    for record in reader.get_row_iter(None)? {
+        let row = record?;
+        let g = row.get_string(name_idx)?.clone().into_boxed_str();
+        let mut r = vec![0.0f32; n_communities];
+        for &(idx, c) in &col_to_community {
+            let v = row
+                .get_float(idx)
+                .or_else(|_| row.get_double(idx).map(|v| v as f32))
+                .unwrap_or(0.0);
+            r[c as usize] = v;
+        }
+        gene_names.push(g);
+        rows.push(r);
+    }
+
+    let n_genes = gene_names.len();
+    let mut mat = Mat::zeros(n_genes, n_communities);
+    for (i, r) in rows.into_iter().enumerate() {
+        for (j, v) in r.into_iter().enumerate() {
+            mat[(i, j)] = v;
+        }
+    }
+    Ok((mat, gene_names))
+}
+
 /// Map "0","1",… numeric batch labels to the friendly basenames of the
-/// upstream input files (`metadata.json::data_files`).
+/// upstream input files (`.pinto.json::data_files`).
 ///
 /// `pinto svd` assigns string-of-integer batch labels (`"0"`, `"1"`, …)
 /// when the user passes multiple data files without an explicit

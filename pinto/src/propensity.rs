@@ -335,7 +335,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             nvertices,
             num_clusters,
         );
-        let meta_path = std::path::PathBuf::from(format!("{}.metadata.json", args.out));
+        let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", args.out));
         meta.write(&meta_path)?;
         info!("Wrote {}", meta_path.display());
     }

@@ -7,6 +7,7 @@
 //! no count decoder.
 
 pub mod args;
+pub mod cluster;
 pub mod fit;
 pub mod gene_chain_sampler;
 pub mod gene_gating;

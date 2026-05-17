@@ -484,7 +484,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     }
 
     //////////////////////////////////////////////////////
-    // 10. Write metadata.json (information-flow root)  //
+    // 10. Write .pinto.json (information-flow root)  //
     //////////////////////////////////////////////////////
     {
         use crate::util::metadata::{create_lc_metadata, RunInputs};
@@ -503,7 +503,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             merge_present_with_consensus,
             &cascade_level_indices,
         );
-        let meta_path = std::path::PathBuf::from(format!("{}.metadata.json", c.out));
+        let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
         meta.write(&meta_path)?;
         info!("Wrote {}", meta_path.display());
     }

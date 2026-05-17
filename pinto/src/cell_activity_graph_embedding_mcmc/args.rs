@@ -113,4 +113,48 @@ pub struct CageMcmcArgs {
         help = "Suppress thinned per-sample trace parquet (large for big runs)"
     )]
     pub no_trace: bool,
+
+    //
+    // ───── Leiden clustering (mirrors `pinto cage`) ─────
+    //
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Leiden kNN on posterior-mean cell embedding; 0 disables",
+        long_help = "After MCMC, build a kNN graph on the L2-normalized \
+                     posterior-mean cell embedding (cosine ≡ dot-product \
+                     space) and run Leiden. Writes {prefix}.clusters.parquet, \
+                     {prefix}.cluster_propensity.parquet, and \
+                     {prefix}.feature_dictionary.parquet — same artifacts as \
+                     `pinto cage --leiden-knn`, so `pinto plot --from \
+                     {prefix}.pinto.json` works the same way."
+    )]
+    pub leiden_knn: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Leiden modularity resolution (γ in CPM after scaling)"
+    )]
+    pub leiden_resolution: f64,
+
+    #[arg(
+        long,
+        help = "If set, binary-search Leiden resolution to approximate this K"
+    )]
+    pub leiden_target_clusters: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Drop Leiden clusters smaller than this; 0 keeps all"
+    )]
+    pub leiden_min_cluster_size: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Softmax temperature τ for cell + gene propensity (higher = sharper)"
+    )]
+    pub propensity_temp: f32,
 }

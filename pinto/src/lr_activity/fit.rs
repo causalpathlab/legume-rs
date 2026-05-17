@@ -449,7 +449,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
 
     if args.emit_json {
         let json_path = format!("{}.lr_activity.json", &c.out);
-        let upstream_meta_path = format!("{}.metadata.json", &args.lc_prefix);
+        let upstream_meta_path = format!("{}.pinto.json", &args.lc_prefix);
         let upstream_meta =
             crate::util::metadata::PintoMetadata::read(std::path::Path::new(&upstream_meta_path))
                 .ok();
