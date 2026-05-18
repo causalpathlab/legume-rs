@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::candle_value_transform::discretize_whitened;
+use crate::value_transform::discretize_whitened;
 use candle_core::{Result, Tensor};
 use candle_nn::Module;
 

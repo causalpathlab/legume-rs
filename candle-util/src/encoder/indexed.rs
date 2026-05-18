@@ -4,7 +4,7 @@ use crate::nn::batch_norm;
 use crate::data::indexed::SparseEdgeBatch;
 use crate::traits::indexed::*;
 use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
-use crate::candle_value_transform::{count_rate_clean, ValueEmbedding, ValueEmbeddingConfig};
+use crate::value_transform::{count_rate_clean, ValueEmbedding, ValueEmbeddingConfig};
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 
