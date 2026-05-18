@@ -1,7 +1,7 @@
 //! Cell-grouped data loader for the hierarchical cell→PB pooling topic
 //! model (`senna cell-embedded-topic`).
 //!
-//! Where [`crate::candle_indexed_data_loader::IndexedInMemoryData`] treats
+//! Where [`crate::data::indexed::IndexedInMemoryData`] treats
 //! each pseudobulk (PB) sample as a single dense atom, this loader keeps
 //! the **cell → PB membership** and feeds the encoder the genuinely sparse
 //! single-cell atoms:
@@ -20,8 +20,8 @@
 //! top-K samples + library-size factors once and shares them across every
 //! PB level via `Arc`.
 
-use crate::candle_data_loader_util::Minibatches;
-use crate::candle_indexed_data_loader::{
+use crate::data::loader_util::Minibatches;
+use crate::data::indexed::{
     build_indexed_samples, build_union_and_scatter_pos, compute_log_selection_freq,
     gather_per_feature_at_indices, labeled_bar, pack_indices_values, slice_log_q_at_union,
     sum_sample_values, IndexedSample,

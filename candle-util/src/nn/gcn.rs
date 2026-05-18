@@ -58,7 +58,7 @@
 use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
 
-use crate::candle_indexed_data_loader::SparseEdgeBatch;
+use crate::data::indexed::SparseEdgeBatch;
 
 /// One γ-gated GCN diffusion step. The only learnable parameter is the
 /// per-dimension diffusion vector `γ ∈ ℝ^H` (zero-init ⇒ identity at
@@ -120,7 +120,7 @@ impl GcnBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::candle_indexed_data_loader::SparseEdgeBatch;
+    use crate::data::indexed::SparseEdgeBatch;
     use candle_core::{DType, Device};
     use candle_nn::VarMap;
 
