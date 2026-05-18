@@ -15,9 +15,6 @@ pub use nn::gcn as candle_aux_gcn;
 pub use nn::batch_norm as candle_batch_norm;
 
 pub mod candle_bipartite_decoder;
-pub mod candle_cell_grouped_data_loader;
-pub mod candle_data_loader;
-pub mod candle_data_loader_util;
 pub mod candle_decoder_delta_topic;
 pub mod candle_decoder_embedded_topic;
 pub mod candle_decoder_joint_topic;
@@ -31,14 +28,23 @@ pub mod candle_encoder_joint_softmax;
 pub mod candle_encoder_softmax;
 pub mod candle_encoder_softmax_iaf;
 pub mod candle_ess;
-pub mod candle_indexed_data_loader;
 pub mod candle_inference;
-pub mod candle_joint_data_loader;
 pub mod candle_topic_refinement;
 pub mod candle_vae_inference;
 pub mod candle_value_transform;
 pub mod cli;
 pub mod frozen_features;
+pub mod data;
+#[deprecated(note = "use candle_util::data::loader")]
+pub use data::loader as candle_data_loader;
+#[deprecated(note = "use candle_util::data::loader_util")]
+pub use data::loader_util as candle_data_loader_util;
+#[deprecated(note = "use candle_util::data::joint")]
+pub use data::joint as candle_joint_data_loader;
+#[deprecated(note = "use candle_util::data::cell_grouped")]
+pub use data::cell_grouped as candle_cell_grouped_data_loader;
+#[deprecated(note = "use candle_util::data::indexed")]
+pub use data::indexed as candle_indexed_data_loader;
 pub mod loss;
 #[deprecated(note = "use candle_util::loss")]
 pub use loss as candle_loss_functions;

@@ -1,7 +1,7 @@
 use crate::nn::gcn::GcnBlock;
 use crate::nn::layers::*;
 use crate::nn::batch_norm;
-use crate::candle_indexed_data_loader::SparseEdgeBatch;
+use crate::data::indexed::SparseEdgeBatch;
 use crate::traits::indexed::*;
 use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::candle_value_transform::{count_rate_clean, ValueEmbedding, ValueEmbeddingConfig};

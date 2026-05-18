@@ -1,5 +1,5 @@
-use crate::candle_cell_grouped_data_loader::CellGroupedMinibatchData;
-use crate::candle_indexed_data_loader::SparseEdgeBatch;
+use crate::data::cell_grouped::CellGroupedMinibatchData;
+use crate::data::indexed::SparseEdgeBatch;
 use crate::traits::model::EssLlikFn;
 use candle_core::{Result, Tensor};
 
@@ -40,7 +40,7 @@ pub trait IndexedEncoderT {
     ///   Anscombe-stabilized biological deviation from each gene's typical
     ///   rate under the prevailing batch.
     /// * `sparse_edges` - pre-normalised per-cell sub-adjacency edges
-    ///   (pre-built by [`crate::candle_indexed_data_loader::IndexedInMemoryData::minibatch_sparse_edges`]),
+    ///   (pre-built by [`crate::data::indexed::IndexedInMemoryData::minibatch_sparse_edges`]),
     ///   supplied when the encoder owns a graph-diffusion block.
     /// * `train` - whether to use dropout/batchnorm
     ///

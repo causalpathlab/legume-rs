@@ -3,7 +3,7 @@
 //! Submodules:
 //! - [`topic`]: dense `EncoderModuleT` + `DecoderModuleT` trainer.
 //! - [`indexed_topic`]: `IndexedEmbeddingEncoder` + `EmbeddedTopicDecoder`
-//!   trainer driven by [`crate::candle_indexed_data_loader::IndexedInMemoryData`].
+//!   trainer driven by [`crate::data::indexed::IndexedInMemoryData`].
 //!
 //! Shared utilities (`TrainScores`, `smooth_topics`, `PhaseTimers`,
 //! grad-clipping helpers) live here at the module root.

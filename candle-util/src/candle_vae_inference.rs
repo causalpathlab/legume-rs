@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::candle_data_loader::*;
+use crate::data::loader::*;
 use crate::candle_inference::TrainConfig;
 use crate::traits::model::{DecoderModuleT, EncoderModuleT};
 

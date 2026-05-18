@@ -1,6 +1,6 @@
 use crate::nn::layers::*;
 use crate::nn::batch_norm;
-use crate::candle_cell_grouped_data_loader::CellGroupedMinibatchData;
+use crate::data::cell_grouped::CellGroupedMinibatchData;
 use crate::traits::indexed::*;
 use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::candle_value_transform::{ValueEmbedding, ValueEmbeddingConfig};

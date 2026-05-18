@@ -1,4 +1,4 @@
-use crate::candle_data_loader_util::*;
+use crate::data::loader_util::*;
 
 use candle_core::{Device, Tensor};
 

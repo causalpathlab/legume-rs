@@ -10,9 +10,9 @@
 //! target without cloning.
 
 use super::{clip_grads_and_step, smooth_topics, LevelLossHook, TrainScores};
-use crate::candle_data_loader::{DataLoader, InMemoryArgs, InMemoryData};
+use crate::data::loader::{DataLoader, InMemoryArgs, InMemoryData};
 use crate::candle_dyn_decoder::DynDecoderModuleT;
-use crate::candle_indexed_data_loader::labeled_bar;
+use crate::data::indexed::labeled_bar;
 use crate::loss::topic_likelihood;
 use crate::traits::model::{DecoderModuleT, EncoderModuleT};
 use candle_core::{Device, Tensor};

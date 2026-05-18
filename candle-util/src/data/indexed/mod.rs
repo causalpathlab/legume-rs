@@ -17,7 +17,7 @@
 //!   cache, and `SparseEdgeBatch` builders for the γ-gated GCN block.
 //! - [`stats`] — per-feature / per-sample aggregates.
 
-use crate::candle_data_loader_util::Minibatches;
+use crate::data::loader_util::Minibatches;
 
 use candle_core::{Device, Tensor};
 use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
