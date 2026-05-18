@@ -1,4 +1,4 @@
-use crate::candle_aux_layers::*;
+use crate::nn::layers::*;
 use crate::candle_loss_functions::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::candle_model_traits::*;
 use crate::candle_value_transform::anscombe_residual;

@@ -1,5 +1,5 @@
-use crate::candle_aux_layers::*;
-use crate::candle_batch_norm;
+use crate::nn::layers::*;
+use crate::nn::batch_norm;
 use crate::candle_loss_functions::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::candle_model_traits::*;
 use crate::candle_value_transform::anscombe_residual;
@@ -9,7 +9,7 @@ use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 pub struct LogSoftmaxEncoder {
     n_topics: usize,
     fc: StackLayers<Linear>,
-    bn_z: candle_batch_norm::BatchNorm,
+    bn_z: batch_norm::BatchNorm,
     z_mean: Linear,
     z_lnvar: Linear,
     /// Per-feature mean rate `μ_d` as a `[1, D]` non-trainable tensor.
@@ -83,7 +83,7 @@ impl LogSoftmaxEncoder {
     /// * `args` - encoder arguments
     /// * `vb` - variable builder
     pub fn new(args: LogSoftmaxEncoderArgs, varmap: &VarMap, vb: VarBuilder) -> Result<Self> {
-        let bn_config = candle_batch_norm::BatchNormConfig {
+        let bn_config = batch_norm::BatchNormConfig {
             eps: 1e-4,
             remove_mean: true,
             affine: true,
@@ -98,7 +98,7 @@ impl LogSoftmaxEncoder {
         let out_dim = *args.layers.last().unwrap();
         let fc = stack_relu_linear(in_dim, out_dim, &fc_dims, vb.pp("nn.enc.fc"))?;
 
-        let bn_z = candle_batch_norm::batch_norm(out_dim, bn_config, varmap, vb.pp("nn.enc.bn_z"))?;
+        let bn_z = batch_norm::batch_norm(out_dim, bn_config, varmap, vb.pp("nn.enc.bn_z"))?;
 
         // fc -> K
         let z_mean = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.mean"))?;

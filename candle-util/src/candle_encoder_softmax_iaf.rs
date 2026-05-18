@@ -1,5 +1,5 @@
-use crate::candle_aux_layers::*;
-use crate::candle_aux_linear::*;
+use crate::nn::layers::*;
+use crate::nn::linear::*;
 use crate::candle_model_traits::*;
 use crate::candle_value_transform::anscombe_residual;
 use candle_core::{Result, Tensor};

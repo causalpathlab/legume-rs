@@ -1,4 +1,4 @@
-use crate::candle_aux_linear::logsumexp_forward;
+use crate::nn::linear::logsumexp_forward;
 use crate::candle_model_traits::DecoderModuleT;
 use candle_core::{Result, Tensor, Var};
 use candle_nn::ops;

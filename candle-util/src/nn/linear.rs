@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::candle_aux_layers::sparsemax;
+use crate::nn::layers::sparsemax;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Module};
 

@@ -189,7 +189,7 @@ impl SubAdjCache {
 /// the dense `[B, K, K]` adjacency with three small `[E]` tensors —
 /// `E` is the total number of cell-local edges in the minibatch
 /// (typically a few × 10⁵ for `K ≈ 500`). Consumed by
-/// [`crate::candle_aux_gcn::GcnBlock::forward`] via
+/// [`crate::nn::gcn::GcnBlock::forward`] via
 /// `index_select` + `index_add` instead of a dense matmul.
 pub struct SparseEdgeBatch {
     /// `[E]` u32 — destination flat index `(b * K + kk_u)`.
