@@ -14,14 +14,6 @@ pub use nn::gcn as candle_aux_gcn;
 #[deprecated(note = "use candle_util::nn::batch_norm")]
 pub use nn::batch_norm as candle_batch_norm;
 
-pub mod candle_bipartite_decoder;
-pub mod candle_decoder_delta_topic;
-pub mod candle_decoder_embedded_topic;
-pub mod candle_decoder_joint_topic;
-pub mod candle_decoder_nb_mixture;
-pub mod candle_decoder_poisson;
-pub mod candle_decoder_topic;
-pub mod candle_dyn_decoder;
 pub mod candle_ess;
 pub mod candle_inference;
 pub mod candle_topic_refinement;
@@ -30,6 +22,23 @@ pub mod candle_value_transform;
 pub mod cli;
 pub mod frozen_features;
 pub mod data;
+pub mod decoder;
+#[deprecated(note = "use candle_util::decoder::topic")]
+pub use decoder::topic as candle_decoder_topic;
+#[deprecated(note = "use candle_util::decoder::embedded_topic")]
+pub use decoder::embedded_topic as candle_decoder_embedded_topic;
+#[deprecated(note = "use candle_util::decoder::delta_topic")]
+pub use decoder::delta_topic as candle_decoder_delta_topic;
+#[deprecated(note = "use candle_util::decoder::joint_topic")]
+pub use decoder::joint_topic as candle_decoder_joint_topic;
+#[deprecated(note = "use candle_util::decoder::nb_mixture")]
+pub use decoder::nb_mixture as candle_decoder_nb_mixture;
+#[deprecated(note = "use candle_util::decoder::poisson")]
+pub use decoder::poisson as candle_decoder_poisson;
+#[deprecated(note = "use candle_util::decoder::bipartite")]
+pub use decoder::bipartite as candle_bipartite_decoder;
+#[deprecated(note = "use candle_util::decoder::dyn_decoder")]
+pub use decoder::dyn_decoder as candle_dyn_decoder;
 pub mod encoder;
 #[deprecated(note = "use candle_util::encoder::softmax")]
 pub use encoder::softmax as candle_encoder_softmax;

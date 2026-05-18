@@ -1,5 +1,5 @@
-use crate::candle_decoder_nb_mixture::{NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME};
-use crate::candle_decoder_topic::{MultinomTopicDecoder, NbTopicDecoder};
+use crate::decoder::nb_mixture::{NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME};
+use crate::decoder::topic::{MultinomTopicDecoder, NbTopicDecoder};
 use crate::traits::model::{DecoderModuleT, EssLlikFn};
 use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
