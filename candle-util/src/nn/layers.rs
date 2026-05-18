@@ -3,7 +3,7 @@
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Activation, Linear, Module};
 
-use crate::candle_loss_functions::gaussian_kl_loss;
+use crate::loss::gaussian_kl_loss;
 
 /// build inverse autoregressive flow layers
 pub struct IAFLayers<M, N>

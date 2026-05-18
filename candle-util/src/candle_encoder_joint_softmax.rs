@@ -1,5 +1,5 @@
 use crate::nn::layers::*;
-use crate::candle_loss_functions::{gaussian_kl_loss, gaussian_reparameterize};
+use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::candle_model_traits::*;
 use crate::candle_value_transform::anscombe_residual;
 use candle_core::{Result, Tensor};

@@ -1,6 +1,6 @@
 use crate::nn::layers::*;
 use crate::nn::batch_norm;
-use crate::candle_loss_functions::{gaussian_kl_loss, gaussian_reparameterize};
+use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::candle_model_traits::*;
 use crate::candle_value_transform::anscombe_residual;
 use candle_core::{Device, Result, Tensor};

@@ -1,7 +1,7 @@
 use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
 
-use crate::candle_loss_functions::approx_lgamma;
+use crate::loss::approx_lgamma;
 
 /// Trait for bipartite decoder likelihood functions.
 ///
