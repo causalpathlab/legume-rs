@@ -1,11 +1,17 @@
 //! Link community model: sufficient statistics and fast Poisson DC-SBM scoring.
 //!
 //! Each edge e has a profile vector y_e ∈ R^M (sparsely stored as non-zero
-//! `(col, val)` pairs) and a community assignment z_e ∈ {0..K-1}. Assignment
-//! score under Poisson DC-SBM with MLE plug-in rates
-//! μ_{kg} = (T_{kg} + ε) / (S_k + M·ε):
+//! `(col, val)` pairs) and a community assignment z_e ∈ {0..K-1}. Let
+//!   D_{kg} = Σ_{e: z_e=k} y_e^g    (edge-weighted gene degree in community k)
+//!   V_k    = Σ_g D_{kg}             (community volume)
+//! Assignment score under Poisson DC-SBM with MLE plug-in rates
+//! μ_{kg} = (D_{kg} + ε) / (V_k + M·ε):
 //!
 //!   score(e, k) = Σ_{g: y_eg > 0} y_{eg} · ln μ_{kg}
+//!
+//! The total log-likelihood reduces to
+//!   ℓ = Σ_kg f(D_{kg}) − Σ_k f(V_k),   f(x) = x · ln x
+//! (equivalently −Σ_k V_k · H(p_k), where p_k = D_{k·}/V_k).
 //!
 //! where log_rate[k, g] = log_gene[k, g] + log_size_offset[k] is factored
 //! into per-gene and per-community-size parts for cheap incremental updates.
@@ -167,9 +173,9 @@ pub struct LinkCommunityStats {
     pub k: usize,
     pub m: usize,
     pub n_edges: usize,
-    /// Per-community per-gene sum: `gene_sum[k*m + g] = Σ_{e: z_e=k} y_e^g`.
+    /// Edge-weighted gene degree D_{kg}: `gene_sum[k*m + g] = Σ_{e: z_e=k} y_e^g`.
     pub gene_sum: Vec<f64>,
-    /// Per-community size factor sum: `size_sum[k] = Σ_{e: z_e=k} s_e`.
+    /// Community volume V_k (size-factor sum): `size_sum[k] = Σ_{e: z_e=k} s_e`.
     pub size_sum: Vec<f64>,
     /// Per-community edge count.
     pub edge_count: Vec<usize>,
@@ -377,11 +383,12 @@ impl LinkCommunityStats {
             .collect()
     }
 
-    /// Total conditional-entropy / plug-in multinomial score (higher = better).
+    /// Plug-in Poisson DC-SBM log-likelihood Σ_kg f(D_kg) − Σ_k f(V_k),
+    /// f(x)=x·ln x. Equivalently −Σ_k V_k · H(p_k). Higher = better.
     pub fn total_score(&self) -> f64 {
-        let sum_f_t: f64 = self.gene_sum.iter().map(|&t| f_entropy(t)).sum();
-        let sum_f_s: f64 = self.size_sum.iter().map(|&s| f_entropy(s)).sum();
-        sum_f_t - sum_f_s
+        let sum_f_d: f64 = self.gene_sum.iter().map(|&d| f_entropy(d)).sum();
+        let sum_f_v: f64 = self.size_sum.iter().map(|&v| f_entropy(v)).sum();
+        sum_f_d - sum_f_v
     }
 
     /// Mutual information between community assignment and gene profile, in nats.
@@ -392,28 +399,28 @@ impl LinkCommunityStats {
     /// Fused `(total_score, mutual_information)` in one pass.
     pub fn score_and_mi(&self) -> (f64, f64) {
         let mut p_global = vec![0.0f64; self.m];
-        let mut sum_f_t = 0.0f64;
+        let mut sum_f_d = 0.0f64;
         for chunk in self.gene_sum.chunks_exact(self.m) {
-            for (acc, &v) in p_global.iter_mut().zip(chunk.iter()) {
-                *acc += v;
-                sum_f_t += f_entropy(v);
+            for (acc, &d) in p_global.iter_mut().zip(chunk.iter()) {
+                *acc += d;
+                sum_f_d += f_entropy(d);
             }
         }
         let mut total = 0.0f64;
-        let mut sum_f_s = 0.0f64;
-        for &s in &self.size_sum {
-            total += s;
-            sum_f_s += f_entropy(s);
+        let mut sum_f_v = 0.0f64;
+        for &v in &self.size_sum {
+            total += v;
+            sum_f_v += f_entropy(v);
         }
-        let score = sum_f_t - sum_f_s;
+        let score = sum_f_d - sum_f_v;
         if total <= 0.0 {
             return (score, 0.0);
         }
         let inv_total = 1.0 / total;
         let h_global: f64 = p_global
             .iter()
-            .map(|&t| {
-                let p = t * inv_total;
+            .map(|&d| {
+                let p = d * inv_total;
                 if p > 0.0 {
                     -p * p.ln()
                 } else {
