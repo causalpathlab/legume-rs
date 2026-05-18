@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::data::loader::*;
-use crate::candle_inference::TrainConfig;
+use super::TrainConfig;
 use crate::traits::model::{DecoderModuleT, EncoderModuleT};
 
 use candle_core::{Result, Tensor};

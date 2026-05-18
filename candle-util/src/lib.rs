@@ -15,9 +15,14 @@ pub use nn::gcn as candle_aux_gcn;
 pub use nn::batch_norm as candle_batch_norm;
 
 pub mod candle_ess;
-pub mod candle_inference;
+#[deprecated(note = "use candle_util::vae::TrainConfig")]
+pub mod candle_inference {
+    #[allow(deprecated)]
+    pub use crate::vae::TrainConfig;
+}
+#[deprecated(note = "use candle_util::vae::core")]
+pub use vae::core as candle_vae_inference;
 pub mod candle_topic_refinement;
-pub mod candle_vae_inference;
 pub mod candle_value_transform;
 pub mod cli;
 pub mod frozen_features;
