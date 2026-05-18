@@ -23,12 +23,12 @@ use crate::util::graph_coarsen::*;
 use crate::util::common::Mat;
 use crate::util::input::*;
 use candle_util::candle_core::{self, Device};
-use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
+use candle_util::decoder::embedded_topic::EmbeddedTopicDecoder;
 use candle_util::candle_nn::{VarBuilder, VarMap};
-use candle_util::candle_encoder_indexed::{
+use candle_util::encoder::indexed::{
     IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs,
 };
-use candle_util::candle_value_transform::ValueEmbeddingConfig;
+use candle_util::value_transform::ValueEmbeddingConfig;
 use candle_util::vae;
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::stop::setup_stop_handler;
