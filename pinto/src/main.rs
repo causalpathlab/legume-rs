@@ -1,6 +1,7 @@
 mod cell_activity_graph_embedding;
 mod gene_network;
 mod link_community;
+mod link_community_etm;
 mod lr_activity;
 mod plot;
 mod propensity;
@@ -16,6 +17,7 @@ use cell_activity_graph_embedding::{
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use link_community::fit::*;
+use link_community_etm::{fit_srt_link_community_etm, SrtLinkCommunityEtmArgs};
 use lr_activity::{fit_srt_lr_activity, SrtLrActivityArgs};
 use plot::{make_srt_plot, SrtPlotArgs};
 use propensity::*;
@@ -234,7 +236,19 @@ enum Commands {
                       \x20                                 pass --no-adjust-housekeeping for raw)\n\
                       \x20 {out}.link_community.parquet  Edge community assignments [E × 3]\n\
                       \x20 {out}.coord_pairs.parquet     Cell pair coordinates\n\
-                      \x20 {out}.scores.parquet          Score trace per iteration\n\
+                      \x20 {out}.scores.parquet          Per-sweep diagnostics (level, sweep,\n\
+                      \x20                                score, n_edges, total_mass,\n\
+                      \x20                                mutual_information). `score` is the\n\
+                      \x20                                plug-in Poisson DC-SBM log-likelihood\n\
+                      \x20                                Σ_kg f(D_kg) − Σ_k f(V_k) with\n\
+                      \x20                                f(x)=x·ln x, where D_kg is the\n\
+                      \x20                                edge-weighted gene degree in community k\n\
+                      \x20                                and V_k = Σ_g D_kg is its volume\n\
+                      \x20                                (equivalently −Σ_k V_k · H(p_k), nats).\n\
+                      \x20                                Higher = better; `score/total_mass`\n\
+                      \x20                                is the\n\
+                      \x20                                mass-weighted mean per-community\n\
+                      \x20                                log-likelihood per edge unit.\n\
                       \x20 {out}.delta.parquet           Batch effects (multi-sample only)\n\
                       \x20 {out}.gene_graph.parquet      Gene-gene pairs (gene-pair mode only)\n\
                       \x20 {out}.L{l}.*.parquet          Per-cascade-level outputs (unless --no-level-outputs)\n\
@@ -276,6 +290,42 @@ enum Commands {
                       \x20 {out}.link_community.parquet     per-edge community"
     )]
     Cage(CellActivityGraphEmbeddingArgs),
+
+    #[command(
+        about = "Link community via embedded topic model (indexed VAE)",
+        long_about = "Embedding-based link community detection: each cell-cell\n\
+                      edge e = (i, j) is treated as a 'document' with token\n\
+                      counts y_e = x_i + x_j, then fit as an indexed topic\n\
+                      ETM (Dieng et al., 2020) using\n\
+                      `candle_util::vae::indexed_topic`.\n\n\
+                      MODEL:\n\n\
+                      \x20 π_e   = encoder(top-K of y_e)         ∈ Δ^K\n\
+                      \x20 β     = softmax_g(α · ρᵀ)             [G × K]\n\
+                      \x20 ℓ_e   = Σ_g y_eg · log Σ_k π_e[k] · β_kg   (with\n\
+                      \x20           Jean importance correction over the per-\n\
+                      \x20           batch gene union; the dense [K, D] is\n\
+                      \x20           never materialised).\n\n\
+                      The K topics are the link communities; β is the\n\
+                      community→gene dictionary; per-cell propensity is the\n\
+                      mass-preserving soft aggregation\n\
+                      \x20 propensity[i, k] = (1/deg(i)) · Σ_{e ∋ i} π_e[k].\n\n\
+                      QUICK START:\n\n\
+                      \x20 pinto lc-etm data.h5 -c tissue_positions.csv -o out\n\
+                      \x20 pinto lc-etm data.h5 -o out  # expression-only\n\n\
+                      OUTPUT FILES (mirroring `pinto lc` where applicable):\n\n\
+                      \x20 {out}.propensity.parquet         Cell community membership\n\
+                      \x20                                  [N × K] + entropy column.\n\
+                      \x20 {out}.gene_community.parquet     Melted (gene, community, mean)\n\
+                      \x20                                  of β = softmax(α · ρᵀ).\n\
+                      \x20 {out}.link_community.parquet     Edges + hard argmax community.\n\
+                      \x20 {out}.coord_pairs.parquet        Cell pair coordinates.\n\
+                      \x20 {out}.scores.parquet             Per-epoch (llik, kl) trace.\n\
+                      \x20 {out}.delta.parquet              Batch effects (multi-sample).\n\
+                      \x20 {out}.latent.parquet             Per-edge soft π_e [E × K].\n\
+                      \x20 {out}.gene_embeddings.parquet    ρ [G × H], shared via ETM tying.\n\
+                      \x20 {out}.community_embeddings.parquet  α [K × H]."
+    )]
+    LcEtm(SrtLinkCommunityEtmArgs),
 
     #[command(
         alias = "p",
@@ -552,6 +602,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Cage(args) => {
             fit_cell_activity_graph_embedding(args)?;
+        }
+        Commands::LcEtm(args) => {
+            fit_srt_link_community_etm(args)?;
         }
         Commands::Plot(args) => {
             make_srt_plot(args)?;
