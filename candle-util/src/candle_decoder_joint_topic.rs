@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::candle_aux_linear::*;
+use crate::nn::linear::*;
 use crate::candle_model_traits::*;
 use candle_core::{Result, Tensor};
 use candle_nn::{Module, VarBuilder};

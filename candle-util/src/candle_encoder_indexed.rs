@@ -1,6 +1,6 @@
-use crate::candle_aux_gcn::GcnBlock;
-use crate::candle_aux_layers::*;
-use crate::candle_batch_norm;
+use crate::nn::gcn::GcnBlock;
+use crate::nn::layers::*;
+use crate::nn::batch_norm;
 use crate::candle_indexed_data_loader::SparseEdgeBatch;
 use crate::candle_indexed_model_traits::*;
 use crate::candle_loss_functions::{gaussian_kl_loss, gaussian_reparameterize};
@@ -25,7 +25,7 @@ pub struct IndexedEmbeddingEncoder {
     /// `IndexedEmbeddingEncoderArgs::use_gcn` was true at construction.
     gcn: Option<GcnBlock>,
     fc: StackLayers<Linear>,
-    bn_z: candle_batch_norm::BatchNorm,
+    bn_z: batch_norm::BatchNorm,
     z_mean: Linear,
     z_lnvar: Linear,
 }
@@ -49,7 +49,7 @@ pub struct IndexedEmbeddingEncoderArgs<'a> {
 
 impl IndexedEmbeddingEncoder {
     pub fn new(args: IndexedEmbeddingEncoderArgs, varmap: &VarMap, vb: VarBuilder) -> Result<Self> {
-        let bn_config = candle_batch_norm::BatchNormConfig {
+        let bn_config = batch_norm::BatchNormConfig {
             eps: 1e-4,
             remove_mean: true,
             affine: true,
@@ -84,7 +84,7 @@ impl IndexedEmbeddingEncoder {
         let out_dim = *args.layers.last().unwrap();
         let fc = stack_relu_linear(in_dim, out_dim, &fc_dims, vb.pp("nn.enc.fc"))?;
 
-        let bn_z = candle_batch_norm::batch_norm(out_dim, bn_config, varmap, vb.pp("nn.enc.bn_z"))?;
+        let bn_z = batch_norm::batch_norm(out_dim, bn_config, varmap, vb.pp("nn.enc.bn_z"))?;
 
         let z_mean = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.mean"))?;
         let z_lnvar = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.lnvar"))?;
