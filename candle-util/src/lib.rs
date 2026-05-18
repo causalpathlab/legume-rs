@@ -32,6 +32,7 @@ pub mod candle_value_transform;
 pub mod cli;
 pub mod frozen_features;
 pub mod sgvb;
+pub mod vae;
 
 pub use candle_core;
 pub use candle_nn;

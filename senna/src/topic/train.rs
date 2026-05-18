@@ -1,42 +1,32 @@
+//! Senna-side glue for the dense VAE topic trainer.
+//!
+//! The training hot loop lives in [`candle_util::vae::topic`]. This
+//! module keeps senna's `TrainConfig` shape (keyed on `&TopicArgs`),
+//! builds per-level data from `CollapsedOut` + `FeatureCoarsening`, and
+//! wires senna's anchor-prior penalty into the trainer's `loss_hook`.
+
 use crate::embed_common::*;
 use crate::fit_topic::TopicArgs;
-use crate::logging::new_progress_bar;
 
 use candle_core::{Device, Tensor};
-use candle_nn::AdamW;
-use candle_util::candle_data_loader::*;
-use candle_util::candle_loss_functions::topic_likelihood;
+use candle_util::candle_dyn_decoder::DynDecoderModuleT;
 use candle_util::candle_model_traits::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use super::anchor_prior::anchor_penalty_at_level;
 use super::common::sample_collapsed_data;
 
-/// Configuration for training
+/// Configuration for training (senna-side bundle).
 pub(crate) struct TrainConfig<'a> {
     pub parameters: &'a candle_nn::VarMap,
     pub dev: &'a Device,
     pub args: &'a TopicArgs,
     pub stop: &'a AtomicBool,
     /// Per-level `[K, D_l]` anchor β prior tensors (pre-transposed and on
-    /// device). `None` means no anchor prior is attached — training runs
-    /// unchanged.
+    /// device). `None` means no anchor prior is attached.
     pub anchor_prior_per_level: Option<&'a [Tensor]>,
     /// Cross-entropy penalty strength λ applied per minibatch.
     pub anchor_penalty: f32,
-}
-
-impl TrainConfig<'_> {
-    #[inline]
-    fn add_anchor_penalty(&self, loss: Tensor, level: usize) -> anyhow::Result<Tensor> {
-        anchor_penalty_at_level(
-            loss,
-            self.parameters,
-            self.anchor_prior_per_level,
-            self.anchor_penalty,
-            level,
-        )
-    }
 }
 
 /// Materialize `(encoder-input, batch, decoder-target)` `Mat` triples
@@ -78,32 +68,28 @@ fn build_level_data(
         .collect()
 }
 
-fn build_device_loaders(
-    level_data: &[(Mat, Option<Mat>, Mat)],
-    dev: &Device,
-) -> anyhow::Result<Vec<InMemoryData>> {
-    level_data
-        .iter()
-        .map(|(enc, batch, target)| {
-            InMemoryData::from_device(
-                InMemoryArgs {
-                    input: enc,
-                    input_null: batch.as_ref(),
-                    output: Some(target),
-                    output_null: None,
-                },
-                dev,
-            )
-        })
-        .collect()
+/// Build the candle-util-side `TrainConfig` from the senna-side bundle.
+/// The anchor-prior hook is included only when priors are attached and
+/// λ > 0; otherwise the hook is `None` and the trainer takes the bare
+/// ELBO path.
+fn make_candle_config<'a>(
+    config: &'a TrainConfig<'a>,
+    hook: Option<&'a candle_util::vae::LevelLossHook<'a>>,
+) -> candle_util::vae::topic::TrainConfig<'a> {
+    candle_util::vae::topic::TrainConfig {
+        parameters: config.parameters,
+        dev: config.dev,
+        epochs: config.args.epochs,
+        minibatch_size: config.args.minibatch_size,
+        learning_rate: config.args.learning_rate,
+        topic_smoothing: config.args.topic_smoothing,
+        grad_clip: config.args.grad_clip,
+        stop: config.stop,
+        loss_hook: hook,
+    }
 }
 
 /// Mixed multi-level VAE training.
-///
-/// Encoder operates at `D_coarse` (finest level's feature coarsening).
-/// Per-level decoders operate at `D_l`. All levels are trained simultaneously
-/// each epoch — the shared encoder sees data from all levels, while each
-/// decoder handles its own feature resolution.
 pub(crate) fn train_mixed<Enc, Dec>(
     collapsed_levels: &[CollapsedOut],
     encoder: &mut Enc,
@@ -115,218 +101,62 @@ where
     Enc: EncoderModuleT,
     Dec: DecoderModuleT,
 {
-    let num_levels = collapsed_levels.len();
-    let total_epochs = config.args.epochs;
-
-    // Encoder coarsening = finest level's coarsening
     let enc_coarsening = level_coarsenings.last().and_then(|c| c.as_ref());
-
-    for (level, (collapsed, decoder)) in collapsed_levels.iter().zip(decoders.iter()).enumerate() {
-        info!(
-            "Level {}/{}: {} samples, decoder dim {}",
-            level + 1,
-            num_levels,
-            collapsed.mu_observed.ncols(),
-            decoder.dim_obs(),
-        );
-    }
-
-    info!("Mixed multi-level training: {num_levels} levels, {total_epochs} epochs");
-
-    let mut adam = AdamW::new_lr(
-        config.parameters.all_vars(),
-        f64::from(config.args.learning_rate),
-    )?;
-
-    let prog_bar = new_progress_bar(total_epochs as u64);
-
-    let mut llik_trace = Vec::with_capacity(total_epochs);
-    let mut kl_trace = Vec::with_capacity(total_epochs);
-
     let level_data = build_level_data(collapsed_levels, level_coarsenings, enc_coarsening)?;
-    let mut data_loaders = build_device_loaders(&level_data, config.dev)?;
+    let level_refs: Vec<candle_util::vae::topic::LevelData> = level_data
+        .iter()
+        .map(|(a, b, c)| (a, b.as_ref(), c))
+        .collect();
 
-    for epoch in 0..total_epochs {
-        for loader in data_loaders.iter_mut() {
-            loader.shuffle_minibatch_on_device(config.args.minibatch_size)?;
-        }
+    // Anchor-prior loss hook: senna injects the CE penalty per level
+    // through the candle-util `loss_hook` slot.
+    let priors = config.anchor_prior_per_level;
+    let lambda = config.anchor_penalty;
+    let parameters = config.parameters;
+    let hook_owned = move |loss: Tensor, level: usize| {
+        anchor_penalty_at_level(loss, parameters, priors, lambda, level)
+    };
+    let hook_ref: &candle_util::vae::LevelLossHook = &hook_owned;
+    let candle_cfg = make_candle_config(config, Some(hook_ref));
 
-        let mut llik_tot = 0f32;
-        let mut kl_tot = 0f32;
-        let mut count_tot = 0f32;
-        let mut n_tot = 0usize;
-
-        for (level, loader) in data_loaders.iter().enumerate() {
-            let decoder = &decoders[level];
-            n_tot += loader.num_data();
-
-            for b in 0..loader.num_minibatch() {
-                let mb = loader.minibatch_cached(b);
-                let (log_z_nk, kl) = encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
-
-                let log_z_nk = smooth_topics(log_z_nk, config.args.topic_smoothing)?;
-
-                let y_nd = mb.output.as_ref().unwrap_or(&mb.input);
-                let (_, llik) = decoder.forward_with_llik(&log_z_nk, y_nd, &topic_likelihood)?;
-
-                let loss = (&kl - &llik)?.mean_all()?;
-                let loss = config.add_anchor_penalty(loss, level)?;
-                clip_grads_and_step(&mut adam, &loss, f64::from(config.args.grad_clip))?;
-
-                llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
-                kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
-                count_tot += y_nd.sum_all()?.to_scalar::<f32>()?;
-
-                if config.stop.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-        }
-
-        let llik_avg = llik_tot / count_tot;
-        let kl_avg = kl_tot / n_tot as f32;
-        llik_trace.push(llik_avg);
-        kl_trace.push(kl_avg);
-
-        prog_bar.inc(1);
-
-        info!("[epoch {}] llik={} kl={}", epoch, llik_avg, kl_avg);
-
-        if config.stop.load(Ordering::SeqCst) {
-            prog_bar.finish_and_clear();
-            info!("Stopping early at epoch {epoch}");
-            return Ok(TrainScores {
-                llik: llik_trace,
-                kl: kl_trace,
-            });
-        }
-    }
-
-    prog_bar.finish_and_clear();
-    info!("done mixed multi-level training");
+    let scores =
+        candle_util::vae::topic::train_mixed(&level_refs, encoder, decoders, &candle_cfg)?;
     Ok(TrainScores {
-        llik: llik_trace,
-        kl: kl_trace,
+        llik: scores.llik,
+        kl: scores.kl,
     })
 }
 
 /// Mixed multi-level training with multiple simultaneous decoders.
-///
-/// Each level has a `Vec<Box<dyn DynDecoderModuleT>>` of decoders.
-/// The shared encoder produces z, and each decoder computes its own
-/// likelihood. The total likelihood is a weighted sum across decoders.
 pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
     collapsed_levels: &[CollapsedOut],
     encoder: &mut Enc,
-    decoders_per_level: &[Vec<Box<dyn candle_util::candle_dyn_decoder::DynDecoderModuleT>>],
+    decoders_per_level: &[Vec<Box<dyn DynDecoderModuleT>>],
     level_coarsenings: &[Option<FeatureCoarsening>],
     decoder_weights: &[f64],
     config: &TrainConfig,
 ) -> anyhow::Result<TrainScores> {
-    use candle_core::Tensor;
-
-    let num_levels = collapsed_levels.len();
-    let total_epochs = config.args.epochs;
-
     let enc_coarsening = level_coarsenings.last().and_then(|c| c.as_ref());
-
-    for (level, (collapsed, decoders)) in collapsed_levels
-        .iter()
-        .zip(decoders_per_level.iter())
-        .enumerate()
-    {
-        let names: Vec<&str> = decoders.iter().map(|d| d.decoder_name()).collect();
-        info!(
-            "Level {}/{}: {} samples, {} decoders {:?}",
-            level + 1,
-            num_levels,
-            collapsed.mu_observed.ncols(),
-            decoders.len(),
-            names,
-        );
-    }
-
-    info!(
-        "Mixed multi-decoder training: {} levels, {} decoders, {} epochs",
-        num_levels,
-        decoders_per_level[0].len(),
-        total_epochs,
-    );
-
-    let mut adam = AdamW::new_lr(
-        config.parameters.all_vars(),
-        f64::from(config.args.learning_rate),
-    )?;
-
-    let prog_bar = new_progress_bar(total_epochs as u64);
-
-    let mut llik_trace = Vec::with_capacity(total_epochs);
-    let mut kl_trace = Vec::with_capacity(total_epochs);
-
     let level_data = build_level_data(collapsed_levels, level_coarsenings, enc_coarsening)?;
-    let mut data_loaders = build_device_loaders(&level_data, config.dev)?;
+    let level_refs: Vec<candle_util::vae::topic::LevelData> = level_data
+        .iter()
+        .map(|(a, b, c)| (a, b.as_ref(), c))
+        .collect();
 
-    for epoch in 0..total_epochs {
-        for loader in data_loaders.iter_mut() {
-            loader.shuffle_minibatch_on_device(config.args.minibatch_size)?;
-        }
+    // Multi-decoder path historically did not apply the anchor-prior
+    // penalty (senna's `fit_topic` passes `anchor_prior_per_level: None`,
+    // `anchor_penalty: 0.0` here). Keep that behaviour explicitly.
+    let candle_cfg = make_candle_config(config, None);
 
-        let mut llik_tot = 0f32;
-        let mut kl_tot = 0f32;
-        let mut count_tot = 0f32;
-        let mut n_tot = 0usize;
-
-        for (level, loader) in data_loaders.iter().enumerate() {
-            let decoders = &decoders_per_level[level];
-            n_tot += loader.num_data();
-
-            for b in 0..loader.num_minibatch() {
-                let mb = loader.minibatch_cached(b);
-                let (log_z_nk, kl) = encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
-
-                let log_z_nk = smooth_topics(log_z_nk, config.args.topic_smoothing)?;
-
-                let y_nd = mb.output.as_ref().unwrap_or(&mb.input);
-
-                // Weighted sum of likelihoods across decoders
-                let mut weighted_llik = Tensor::zeros_like(&kl)?;
-                for (dec, &w) in decoders.iter().zip(decoder_weights) {
-                    let (_, llik) = dec.forward_llik(&log_z_nk, y_nd)?;
-                    weighted_llik = (weighted_llik + llik * w)?;
-                }
-
-                let loss = (&kl - &weighted_llik)?.mean_all()?;
-                clip_grads_and_step(&mut adam, &loss, f64::from(config.args.grad_clip))?;
-
-                llik_tot += weighted_llik.sum_all()?.to_scalar::<f32>()?;
-                kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
-                count_tot += y_nd.sum_all()?.to_scalar::<f32>()?;
-            }
-        }
-
-        let llik_avg = llik_tot / count_tot;
-        let kl_avg = kl_tot / n_tot as f32;
-        llik_trace.push(llik_avg);
-        kl_trace.push(kl_avg);
-
-        prog_bar.inc(1);
-
-        info!("[epoch {}] llik={} kl={}", epoch, llik_avg, kl_avg);
-
-        if config.stop.load(Ordering::SeqCst) {
-            prog_bar.finish_and_clear();
-            info!("Stopping early at epoch {epoch}");
-            return Ok(TrainScores {
-                llik: llik_trace,
-                kl: kl_trace,
-            });
-        }
-    }
-
-    prog_bar.finish_and_clear();
-    info!("done mixed multi-decoder multi-level training");
+    let scores = candle_util::vae::topic::train_mixed_multi_decoder(
+        &level_refs,
+        encoder,
+        decoders_per_level,
+        decoder_weights,
+        &candle_cfg,
+    )?;
     Ok(TrainScores {
-        llik: llik_trace,
-        kl: kl_trace,
+        llik: scores.llik,
+        kl: scores.kl,
     })
 }
