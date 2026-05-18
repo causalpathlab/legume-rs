@@ -119,15 +119,24 @@ pub fn fetch_gene_rows_aligned(
         }
 
         // Backend row_names → ix so we can translate marker names to
-        // backend-local row ids. Intersection across backends is
-        // handled by SparseIoVec at load time, but each backend still
-        // has its own local row order.
+        // backend-local row ids. We also register the canonicalized
+        // alias (e.g. `ENSG..._SAMD11_Gene` → `SAMD11`) for each row
+        // so marker names produced by cage/lc (which run through
+        // `FeatureNameKind::auto_detect → Gene { delim: '_' }`) line
+        // up with the raw data's long row names. Without this, plot
+        // marker overlays read 0/N for every gene.
         let row_names = backend.row_names()?;
-        let row_ix: HashMap<Box<str>, usize> = row_names
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.clone(), i))
-            .collect();
+        let mut row_ix: HashMap<Box<str>, usize> = HashMap::default();
+        let kind = auxiliary_data::feature_names::FeatureNameKind::auto_detect(&row_names);
+        for (i, n) in row_names.iter().enumerate() {
+            row_ix.entry(n.clone()).or_insert(i);
+            if !kind.is_exact() {
+                let canon = kind.canonicalize(n);
+                if canon.as_ref() != n.as_ref() {
+                    row_ix.entry(canon).or_insert(i);
+                }
+            }
+        }
 
         let mut local_row_per_gene: Vec<Option<usize>> = Vec::with_capacity(n_genes);
         let mut present_rows: Vec<usize> = Vec::with_capacity(n_genes);

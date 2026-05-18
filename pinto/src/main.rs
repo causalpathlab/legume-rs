@@ -1,5 +1,4 @@
 mod cell_activity_graph_embedding;
-mod cell_activity_graph_embedding_mcmc;
 mod gene_network;
 mod link_community;
 mod lr_activity;
@@ -14,7 +13,6 @@ mod test_support;
 use cell_activity_graph_embedding::{
     fit_cell_activity_graph_embedding, CellActivityGraphEmbeddingArgs,
 };
-use cell_activity_graph_embedding_mcmc::{fit_cage_mcmc, CageMcmcArgs};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use link_community::fit::*;
@@ -258,8 +256,8 @@ enum Commands {
         long_about = "Learn per-cell embeddings on the spatial cell-cell graph by\n\
                       visiting each gene: every gene defines a per-cell activity\n\
                       vector that gates a shared multi-scale cell-cell hierarchy,\n\
-                      and contrastive (NCE) updates are summed over per-gene\n\
-                      per-level learnable gates α[g, ℓ]. Embedding-only — no\n\
+                      and contrastive (NCE) updates are summed over per-level\n\
+                      per-dim learnable gates γ[L, D]. Embedding-only — no\n\
                       count decoder.\n\n\
                       Outputs:\n\
                       \x20 {out}.cell_embedding.parquet  cell × embedding_dim\n\
@@ -270,39 +268,14 @@ enum Commands {
                       \x20 {out}.coord_pairs.parquet     spatial edge list\n\
                       \x20 {out}.scores.parquet          per-epoch loss trace\n\
                       \x20 {out}.delta.parquet           batch effects (multi-batch only)\n\
-                      \x20 {out}.pinto.json           manifest"
-    )]
-    Cage(CellActivityGraphEmbeddingArgs),
-
-    #[command(
-        name = "cage-mcmc",
-        alias = "cgm",
-        about = "Bayesian ESS variant of cage (CPU, nalgebra)",
-        long_about = "Same data + logistic likelihood as `pinto cage`, but parameters\n\
-                      (e_cell, e_gene, γ, b_cell) are sampled via Elliptical Slice\n\
-                      Sampling instead of optimized. CPU-only nalgebra backend; the\n\
-                      log-likelihood evaluation parallelizes over gene chunks via\n\
-                      rayon. Output filenames mirror `pinto cage` so downstream\n\
-                      tools (incl. `pinto plot --from {prefix}.pinto.json`)\n\
-                      work identically; .std.parquet sidecars carry the posterior\n\
-                      uncertainty.\n\n\
-                      Outputs:\n\
-                      \x20 {out}.cell_embedding.parquet    cell × D posterior mean\n\
-                      \x20 {out}.cell_embedding.std.parquet  posterior std sidecar\n\
-                      \x20 {out}.cell_bias.parquet         per-cell scalar (+ .std.)\n\
-                      \x20 {out}.feature_embedding.parquet feature × D (+ .std.)\n\
-                      \x20 {out}.level_dim_gates.parquet   level × D softplus γ (+ .std.)\n\
-                      \x20 {out}.coord_pairs.parquet       spatial edge list\n\
-                      \x20 {out}.scores.parquet            per-sweep log-likelihood trace\n\
-                      \x20 {out}.trace.parquet             thinned-sample log-lik\n\
-                      \x20 {out}.delta.parquet             batch effects (multi-batch)\n\
-                      \x20 {out}.pinto.json             manifest\n\n\
-                      With --leiden-knn > 0 (mirrors `pinto cage`):\n\
+                      \x20 {out}.pinto.json           manifest\n\n\
+                      With --n-clusters > 0 (k-means++ on the cell embedding):\n\
                       \x20 {out}.clusters.parquet           hard cell labels\n\
                       \x20 {out}.cluster_propensity.parquet cell × K soft assignment\n\
-                      \x20 {out}.feature_dictionary.parquet feature × K dictionary"
+                      \x20 {out}.feature_dictionary.parquet feature × K dictionary\n\
+                      \x20 {out}.link_community.parquet     per-edge community"
     )]
-    CageMcmc(CageMcmcArgs),
+    Cage(CellActivityGraphEmbeddingArgs),
 
     #[command(
         alias = "p",
@@ -579,9 +552,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Cage(args) => {
             fit_cell_activity_graph_embedding(args)?;
-        }
-        Commands::CageMcmc(args) => {
-            fit_cage_mcmc(args)?;
         }
         Commands::Plot(args) => {
             make_srt_plot(args)?;

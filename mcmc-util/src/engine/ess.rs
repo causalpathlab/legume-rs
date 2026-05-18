@@ -6,6 +6,19 @@ use std::f32::consts::PI;
 use super::chain::McmcChain;
 use super::traits::EssParam;
 
+/// Hard cap on bracket-shrinkage iterations inside [`elliptical_slice_step`].
+/// In practice ~5–10 evals suffice; under stochastic likelihoods (e.g. rayon
+/// parallel-summed f32) the shrinkage can stall near φ=0 if proposal lnpdf
+/// drifts within the slice threshold. When this cap is hit we fall back to
+/// the current state — well-defined because `cur_lnpdf > hh` is guaranteed
+/// by `hh = ln(U) + cur_lnpdf` with `U ∈ (0,1)`.
+const MAX_BRACKET_ITERS: usize = 64;
+
+/// Bracket-width floor; if `phi_max − phi_min` falls below this the proposal
+/// is numerically indistinguishable from current — same fallback as the
+/// iteration cap.
+const BRACKET_MIN_WIDTH: f32 = 1e-6;
+
 /// One ESS transition. Returns `(new_params, new_lnpdf)`.
 ///
 /// - `current`: current parameter value f
@@ -29,9 +42,9 @@ pub fn elliptical_slice_step<P: EssParam>(
     let mut phi_min = phi - 2.0 * PI;
     let mut phi_max = phi;
 
-    // 3. Slice sampling loop
+    // 3. Slice sampling loop with shrinkage + safety cap
     let mut angle = phi;
-    loop {
+    for _ in 0..MAX_BRACKET_ITERS {
         let proposal = current.linear_combine(angle.cos(), prior_sample, angle.sin());
         let new_lnpdf = lnpdf(&proposal);
 
@@ -39,14 +52,20 @@ pub fn elliptical_slice_step<P: EssParam>(
             return (proposal, new_lnpdf);
         }
 
-        // Shrink the bracket
         if angle < 0.0 {
             phi_min = angle;
         } else {
             phi_max = angle;
         }
+        if phi_max - phi_min < BRACKET_MIN_WIDTH {
+            break;
+        }
         angle = rng.random_range(phi_min..phi_max);
     }
+
+    // Fallback: bracket exhausted or collapsed. The current state is in
+    // the slice by construction, so accept it.
+    (current.clone(), cur_lnpdf)
 }
 
 /// ESS chain runner configuration.

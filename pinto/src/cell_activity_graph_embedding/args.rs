@@ -193,34 +193,15 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "Leiden kNN on cell embedding; 0 disables clustering",
-        long_help = "After training, build a kNN graph on the L2-normalized \
-                     cell embedding (cosine ≡ dot-product space) and run \
-                     Leiden. Writes {prefix}.clusters.parquet, \
-                     {prefix}.cluster_propensity.parquet, and \
-                     {prefix}.feature_dictionary.parquet. 0 disables."
+        help = "K-means clusters on cell embedding; 0 disables clustering",
+        long_help = "After training, run k-means++ (Lloyd's algorithm, via \
+                     `matrix-util::clustering`) on the L2-normalized cell \
+                     embedding. Writes {prefix}.clusters.parquet, \
+                     {prefix}.cluster_propensity.parquet, \
+                     {prefix}.feature_dictionary.parquet, and \
+                     {prefix}.link_community.parquet."
     )]
-    pub leiden_knn: usize,
-
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "Leiden modularity resolution (γ in CPM after scaling)"
-    )]
-    pub leiden_resolution: f64,
-
-    #[arg(
-        long,
-        help = "If set, binary-search Leiden resolution to approximate this K"
-    )]
-    pub leiden_target_clusters: Option<usize>,
-
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "Drop Leiden clusters smaller than this; 0 keeps all"
-    )]
-    pub leiden_min_cluster_size: usize,
+    pub n_clusters: usize,
 
     #[arg(
         long,
@@ -228,4 +209,11 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "Softmax temperature τ for cell + gene propensity (higher = sharper)"
     )]
     pub propensity_temp: f32,
+
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Lloyd's algorithm iteration cap for k-means"
+    )]
+    pub kmeans_max_iter: usize,
 }
