@@ -1,8 +1,8 @@
 use candle_util::candle_core::{Result, Tensor};
-use candle_util::candle_encoder_indexed::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
-use candle_util::candle_loss_functions::gaussian_kl_loss;
+use candle_util::encoder::indexed::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
+use candle_util::loss::gaussian_kl_loss;
 use candle_util::candle_nn::{ops, VarBuilder, VarMap};
-use candle_util::candle_value_transform::ValueEmbeddingConfig;
+use candle_util::value_transform::ValueEmbeddingConfig;
 
 /// log1p-scale value-embedding bins for the indexed experts. Fixed at the
 /// senna default; expose as an `EncoderArgs` knob if chickpea needs it tuned.
