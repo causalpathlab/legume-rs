@@ -11,7 +11,7 @@
 
 use super::{clip_grads_and_step, smooth_topics, LevelLossHook, TrainScores};
 use crate::data::loader::{DataLoader, InMemoryArgs, InMemoryData};
-use crate::candle_dyn_decoder::DynDecoderModuleT;
+use crate::decoder::dyn_decoder::DynDecoderModuleT;
 use crate::data::indexed::labeled_bar;
 use crate::loss::topic_likelihood;
 use crate::traits::model::{DecoderModuleT, EncoderModuleT};
