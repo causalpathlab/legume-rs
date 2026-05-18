@@ -12,8 +12,8 @@
 
 use crate::cell_activity_graph_embedding::args::CellActivityGraphEmbeddingArgs;
 use crate::cell_activity_graph_embedding::cluster::{
-    edge_community_from_propensity, propensity_against_centroids, run_leiden_and_propensity,
-    LeidenPropensityArgs, LeidenPropensityResult,
+    edge_community_from_propensity, propensity_against_centroids, run_kmeans_clustering,
+    KmeansClusteringArgs, KmeansClusteringResult,
 };
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
@@ -549,26 +549,25 @@ pub fn fit_cell_activity_graph_embedding(
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
     //////////////////////////////////////////////////////
-    // 10. Optional Leiden clustering + propensity      //
+    // 10. Optional k-means clustering + propensity     //
     //////////////////////////////////////////////////////
-    // Cells: L2-normalized cosine kNN → Leiden → hard labels +
-    // soft propensity (cells × K). Genes: same softmax-over-centroids
-    // recipe re-applied to e_gene_out → feature dictionary (genes × K).
-    let cluster_info: Option<CageClusterInfo> = if args.leiden_knn > 0 {
-        let leiden_args = LeidenPropensityArgs {
-            knn: args.leiden_knn,
-            resolution: args.leiden_resolution,
-            target_clusters: args.leiden_target_clusters,
-            min_cluster_size: args.leiden_min_cluster_size,
+    // k-means++ (via matrix-util) on the L2-normalized cell embedding.
+    // Soft propensity comes from temperature-softmax of cosine to the
+    // per-cluster centroid; genes get the same recipe against the same
+    // centroids (feature dictionary [G × K]).
+    let run_clustering = args.n_clusters > 0;
+    let cluster_info: Option<CageClusterInfo> = if run_clustering {
+        let kmeans_args = KmeansClusteringArgs {
+            n_clusters: args.n_clusters,
             propensity_temp: args.propensity_temp,
-            seed: c.seed,
+            max_iter: args.kmeans_max_iter,
         };
-        let LeidenPropensityResult {
+        let KmeansClusteringResult {
             labels,
             n_clusters,
             propensity,
             centroids,
-        } = run_leiden_and_propensity(&e_cell_mat, &leiden_args)?;
+        } = run_kmeans_clustering(&e_cell_mat, &kmeans_args)?;
 
         let cluster_col_names: Vec<Box<str>> = (0..n_clusters)
             .map(|k| format!("cluster_{k}").into_boxed_str())
