@@ -22,11 +22,6 @@ pub mod candle_decoder_nb_mixture;
 pub mod candle_decoder_poisson;
 pub mod candle_decoder_topic;
 pub mod candle_dyn_decoder;
-pub mod candle_encoder_cell_embedded;
-pub mod candle_encoder_indexed;
-pub mod candle_encoder_joint_softmax;
-pub mod candle_encoder_softmax;
-pub mod candle_encoder_softmax_iaf;
 pub mod candle_ess;
 pub mod candle_inference;
 pub mod candle_topic_refinement;
@@ -35,6 +30,17 @@ pub mod candle_value_transform;
 pub mod cli;
 pub mod frozen_features;
 pub mod data;
+pub mod encoder;
+#[deprecated(note = "use candle_util::encoder::softmax")]
+pub use encoder::softmax as candle_encoder_softmax;
+#[deprecated(note = "use candle_util::encoder::softmax_iaf")]
+pub use encoder::softmax_iaf as candle_encoder_softmax_iaf;
+#[deprecated(note = "use candle_util::encoder::joint_softmax")]
+pub use encoder::joint_softmax as candle_encoder_joint_softmax;
+#[deprecated(note = "use candle_util::encoder::indexed")]
+pub use encoder::indexed as candle_encoder_indexed;
+#[deprecated(note = "use candle_util::encoder::cell_embedded")]
+pub use encoder::cell_embedded as candle_encoder_cell_embedded;
 #[deprecated(note = "use candle_util::data::loader")]
 pub use data::loader as candle_data_loader;
 #[deprecated(note = "use candle_util::data::loader_util")]

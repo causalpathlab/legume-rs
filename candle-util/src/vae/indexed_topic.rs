@@ -7,7 +7,7 @@
 
 use super::{clip_and_step_dense, smooth_topics, PhaseTimers, TrainScores};
 use crate::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
-use crate::candle_encoder_indexed::IndexedEmbeddingEncoder;
+use crate::encoder::indexed::IndexedEmbeddingEncoder;
 use crate::data::indexed::{
     labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData,
 };
