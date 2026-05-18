@@ -1,7 +1,7 @@
 use crate::nn::layers::*;
 use crate::nn::batch_norm;
 use crate::candle_cell_grouped_data_loader::CellGroupedMinibatchData;
-use crate::candle_indexed_model_traits::*;
+use crate::traits::indexed::*;
 use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::candle_value_transform::{ValueEmbedding, ValueEmbeddingConfig};
 use candle_core::{DType, Result, Tensor, D};

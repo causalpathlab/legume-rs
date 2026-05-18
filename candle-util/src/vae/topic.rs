@@ -14,7 +14,7 @@ use crate::candle_data_loader::{DataLoader, InMemoryArgs, InMemoryData};
 use crate::candle_dyn_decoder::DynDecoderModuleT;
 use crate::candle_indexed_data_loader::labeled_bar;
 use crate::loss::topic_likelihood;
-use crate::candle_model_traits::{DecoderModuleT, EncoderModuleT};
+use crate::traits::model::{DecoderModuleT, EncoderModuleT};
 use candle_core::{Device, Tensor};
 use candle_nn::AdamW;
 use log::info;
