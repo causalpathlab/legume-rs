@@ -9,9 +9,9 @@ use crate::topic::train_indexed::{
     write_indexed_dictionary, BulkEvalConfig, IndexedTrainConfig,
 };
 
-use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
-use candle_util::candle_encoder_indexed::*;
-use candle_util::candle_value_transform::ValueEmbeddingConfig;
+use candle_util::decoder::embedded_topic::EmbeddedTopicDecoder;
+use candle_util::encoder::indexed::*;
+use candle_util::value_transform::ValueEmbeddingConfig;
 use log::warn;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 
@@ -545,11 +545,11 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // The CSR is shared (Arc) across every level's data loader and is
     // also persisted into the model artifact in safetensors form.
     let feature_graph_csr: Option<
-        std::sync::Arc<candle_util::candle_indexed_data_loader::GraphCsr>,
+        std::sync::Arc<candle_util::data::indexed::GraphCsr>,
     > = feature_graph.as_ref().map(|g| {
         let edges: Vec<(usize, usize)> = g.feature_edges.clone();
         std::sync::Arc::new(
-            candle_util::candle_indexed_data_loader::GraphCsr::from_edges(
+            candle_util::data::indexed::GraphCsr::from_edges(
                 n_features_full,
                 &edges,
                 None,

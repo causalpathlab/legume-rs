@@ -1,5 +1,5 @@
 use candle_util::candle_core;
-use candle_util::candle_indexed_data_loader::GraphCsr;
+use candle_util::data::indexed::GraphCsr;
 use candle_util::candle_nn;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use serde::{Deserialize, Serialize};

@@ -32,9 +32,9 @@ use crate::topic::train_cell_embedded::{
 };
 use crate::topic::train_indexed::{write_feature_embedding, write_indexed_dictionary};
 
-use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
-use candle_util::candle_encoder_cell_embedded::{CellEmbeddedEncoder, CellEmbeddedEncoderArgs};
-use candle_util::candle_value_transform::ValueEmbeddingConfig;
+use candle_util::decoder::embedded_topic::EmbeddedTopicDecoder;
+use candle_util::encoder::cell_embedded::{CellEmbeddedEncoder, CellEmbeddedEncoderArgs};
+use candle_util::value_transform::ValueEmbeddingConfig;
 use log::warn;
 use std::sync::Arc;
 

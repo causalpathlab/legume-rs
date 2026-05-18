@@ -8,9 +8,9 @@
 //! `match` arms when serializing trained models.
 
 use crate::embed_common::*;
-use candle_util::candle_decoder_nb_mixture::NbMixtureTopicDecoder;
-use candle_util::candle_decoder_topic::{MultinomTopicDecoder, NbTopicDecoder};
-use candle_util::candle_model_traits::*;
+use candle_util::decoder::nb_mixture::NbMixtureTopicDecoder;
+use candle_util::decoder::topic::{MultinomTopicDecoder, NbTopicDecoder};
+use candle_util::traits::model::*;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use matrix_util::traits::IoOps;
 

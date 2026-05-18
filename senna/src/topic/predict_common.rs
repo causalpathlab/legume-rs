@@ -11,8 +11,8 @@ use crate::embed_common::*;
 use crate::topic::eval::GeneRemap;
 use candle_core::{Device, Result as CandleResult, Tensor, Var};
 use candle_nn::ops;
-use candle_util::candle_indexed_model_traits::IndexedDecoderT;
-use candle_util::candle_model_traits::DecoderModuleT;
+use candle_util::traits::indexed::IndexedDecoderT;
+use candle_util::traits::model::DecoderModuleT;
 
 /// Lower / upper bounds on per-(gene, batch) δ. Stops a single noisy batch
 /// from blowing up the encoder's null input when one batch has near-zero
