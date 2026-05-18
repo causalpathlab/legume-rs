@@ -14,7 +14,9 @@ pub use nn::gcn as candle_aux_gcn;
 #[deprecated(note = "use candle_util::nn::batch_norm")]
 pub use nn::batch_norm as candle_batch_norm;
 
-pub mod candle_ess;
+pub mod mcmc;
+#[deprecated(note = "use candle_util::mcmc")]
+pub use mcmc as candle_ess;
 #[deprecated(note = "use candle_util::vae::TrainConfig")]
 pub mod candle_inference {
     #[allow(deprecated)]
