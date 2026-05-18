@@ -8,10 +8,10 @@
 
 use anyhow::Context;
 use candle_util::candle_core::{DType, Device, Tensor};
-use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
-use candle_util::candle_encoder_indexed::IndexedEmbeddingEncoder;
-use candle_util::candle_indexed_data_loader::top_k_indices_weighted;
-use candle_util::candle_indexed_model_traits::*;
+use candle_util::decoder::embedded_topic::EmbeddedTopicDecoder;
+use candle_util::encoder::indexed::IndexedEmbeddingEncoder;
+use candle_util::data::indexed::top_k_indices_weighted;
+use candle_util::traits::indexed::*;
 use log::info;
 use matrix_util::traits::{ConvertMatOps, IoOps};
 use nalgebra::DMatrix;
