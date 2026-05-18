@@ -35,13 +35,15 @@ pub mod candle_indexed_data_loader;
 pub mod candle_indexed_model_traits;
 pub mod candle_inference;
 pub mod candle_joint_data_loader;
-pub mod candle_loss_functions;
 pub mod candle_model_traits;
 pub mod candle_topic_refinement;
 pub mod candle_vae_inference;
 pub mod candle_value_transform;
 pub mod cli;
 pub mod frozen_features;
+pub mod loss;
+#[deprecated(note = "use candle_util::loss")]
+pub use loss as candle_loss_functions;
 pub mod sgvb;
 pub mod vae;
 

@@ -3,7 +3,7 @@ use crate::nn::layers::*;
 use crate::nn::batch_norm;
 use crate::candle_indexed_data_loader::SparseEdgeBatch;
 use crate::candle_indexed_model_traits::*;
-use crate::candle_loss_functions::{gaussian_kl_loss, gaussian_reparameterize};
+use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::candle_value_transform::{count_rate_clean, ValueEmbedding, ValueEmbeddingConfig};
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
