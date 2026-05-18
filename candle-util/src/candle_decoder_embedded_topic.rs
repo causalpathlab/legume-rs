@@ -1,4 +1,4 @@
-use crate::candle_indexed_model_traits::*;
+use crate::traits::indexed::*;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, VarBuilder};
 

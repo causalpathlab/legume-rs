@@ -11,7 +11,7 @@ use crate::candle_encoder_indexed::IndexedEmbeddingEncoder;
 use crate::candle_indexed_data_loader::{
     labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData,
 };
-use crate::candle_indexed_model_traits::*;
+use crate::traits::indexed::*;
 use candle_core::{Device, Var};
 use candle_nn::{AdamW, Optimizer};
 use log::info;

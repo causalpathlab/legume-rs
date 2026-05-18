@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::nn::linear::*;
-use crate::candle_model_traits::*;
+use crate::traits::model::*;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, VarBuilder};
 

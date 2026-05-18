@@ -1,6 +1,6 @@
 use crate::candle_cell_grouped_data_loader::CellGroupedMinibatchData;
 use crate::candle_indexed_data_loader::SparseEdgeBatch;
-use crate::candle_model_traits::EssLlikFn;
+use crate::traits::model::EssLlikFn;
 use candle_core::{Result, Tensor};
 
 /// Cell-embedded encoder: pools genuinely sparse single-cell atoms into

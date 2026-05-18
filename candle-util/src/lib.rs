@@ -32,10 +32,8 @@ pub mod candle_encoder_softmax;
 pub mod candle_encoder_softmax_iaf;
 pub mod candle_ess;
 pub mod candle_indexed_data_loader;
-pub mod candle_indexed_model_traits;
 pub mod candle_inference;
 pub mod candle_joint_data_loader;
-pub mod candle_model_traits;
 pub mod candle_topic_refinement;
 pub mod candle_vae_inference;
 pub mod candle_value_transform;
@@ -44,6 +42,11 @@ pub mod frozen_features;
 pub mod loss;
 #[deprecated(note = "use candle_util::loss")]
 pub use loss as candle_loss_functions;
+pub mod traits;
+#[deprecated(note = "use candle_util::traits::model")]
+pub use traits::model as candle_model_traits;
+#[deprecated(note = "use candle_util::traits::indexed")]
+pub use traits::indexed as candle_indexed_model_traits;
 pub mod sgvb;
 pub mod vae;
 

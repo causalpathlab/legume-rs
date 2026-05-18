@@ -2,7 +2,7 @@
 
 use crate::candle_data_loader::*;
 use crate::candle_inference::TrainConfig;
-use crate::candle_model_traits::{DecoderModuleT, EncoderModuleT};
+use crate::traits::model::{DecoderModuleT, EncoderModuleT};
 
 use candle_core::{Result, Tensor};
 use candle_nn::AdamW;

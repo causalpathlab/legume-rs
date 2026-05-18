@@ -1,5 +1,5 @@
 use crate::nn::linear::logsumexp_forward;
-use crate::candle_model_traits::DecoderModuleT;
+use crate::traits::model::DecoderModuleT;
 use candle_core::{Result, Tensor, Var};
 use candle_nn::ops;
 
