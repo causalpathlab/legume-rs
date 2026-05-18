@@ -22,11 +22,11 @@ use crate::logging::new_progress_bar;
 
 use candle_core::{Device, Tensor, Var};
 use candle_nn::AdamW;
-use candle_util::candle_cell_grouped_data_loader::*;
-use candle_util::candle_decoder_embedded_topic::EmbeddedTopicDecoder;
-use candle_util::candle_encoder_cell_embedded::CellEmbeddedEncoder;
-use candle_util::candle_indexed_data_loader::{csc_columns_to_indexed_samples, IndexedSample};
-use candle_util::candle_indexed_model_traits::*;
+use candle_util::data::cell_grouped::*;
+use candle_util::decoder::embedded_topic::EmbeddedTopicDecoder;
+use candle_util::encoder::cell_embedded::CellEmbeddedEncoder;
+use candle_util::data::indexed::{csc_columns_to_indexed_samples, IndexedSample};
+use candle_util::traits::indexed::*;
 use indicatif::ParallelProgressIterator;
 use log::warn;
 use rayon::prelude::*;

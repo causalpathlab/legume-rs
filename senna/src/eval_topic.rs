@@ -5,13 +5,13 @@ use crate::topic::eval::{
 use crate::topic::model_metadata::{load_coarsening, load_dictionary, TopicModelMetadata};
 
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
-use candle_util::candle_decoder_nb_mixture::{
+use candle_util::decoder::nb_mixture::{
     NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME,
 };
-use candle_util::candle_decoder_topic::*;
-use candle_util::candle_encoder_softmax::*;
-use candle_util::candle_model_traits::*;
-use candle_util::candle_topic_refinement::TopicRefinementConfig;
+use candle_util::decoder::topic::*;
+use candle_util::encoder::softmax::*;
+use candle_util::traits::model::*;
+use candle_util::topic_refinement::TopicRefinementConfig;
 use data_beans::sparse_io_vector::SparseIoVec;
 use log::info;
 

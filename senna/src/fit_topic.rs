@@ -6,12 +6,12 @@ use crate::topic::common::{
 use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
 use crate::topic::train::{train_mixed, TrainConfig};
 
-use candle_util::candle_decoder_nb_mixture::{
+use candle_util::decoder::nb_mixture::{
     NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME,
 };
-use candle_util::candle_decoder_topic::*;
-use candle_util::candle_encoder_softmax::*;
-use candle_util::candle_model_traits::*;
+use candle_util::decoder::topic::*;
+use candle_util::encoder::softmax::*;
+use candle_util::traits::model::*;
 use log::warn;
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
@@ -945,7 +945,7 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
     encoder: &mut Enc,
 ) -> anyhow::Result<(TrainScores, Mat)> {
     use crate::topic::train::train_mixed_multi_decoder;
-    use candle_util::candle_dyn_decoder::{create_dyn_decoder, DynDecoderModuleT};
+    use candle_util::decoder::dyn_decoder::{create_dyn_decoder, DynDecoderModuleT};
 
     let decoder_weights =
         compute_decoder_weights(&ctx.args.decoder, ctx.args.decoder_weights.as_ref());

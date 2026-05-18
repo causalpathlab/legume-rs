@@ -15,7 +15,7 @@
 //! - `--pb-refine-*` flags drive [`data_beans_alg::refine_multilevel::RefineParams`]
 //!   used during hierarchical pseudobulk collapsing.
 //! - `--amort-refine-*` flags drive
-//!   [`candle_util::candle_topic_refinement::TopicRefinementConfig`] used at
+//!   [`candle_util::topic_refinement::TopicRefinementConfig`] used at
 //!   inference to fine-tune per-cell topic logits against the frozen decoder.
 
 use clap::{Args, ValueEnum};
@@ -242,12 +242,12 @@ impl AmortRefineArgs {
     /// `--amort-refine-steps = 0` (refinement disabled).
     pub(crate) fn to_config(
         &self,
-    ) -> Option<candle_util::candle_topic_refinement::TopicRefinementConfig> {
+    ) -> Option<candle_util::topic_refinement::TopicRefinementConfig> {
         if self.steps == 0 {
             None
         } else {
             Some(
-                candle_util::candle_topic_refinement::TopicRefinementConfig {
+                candle_util::topic_refinement::TopicRefinementConfig {
                     num_steps: self.steps,
                     learning_rate: self.lr,
                     regularization: self.reg,

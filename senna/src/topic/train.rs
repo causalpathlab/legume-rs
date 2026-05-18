@@ -9,8 +9,8 @@ use crate::embed_common::*;
 use crate::fit_topic::TopicArgs;
 
 use candle_core::{Device, Tensor};
-use candle_util::candle_dyn_decoder::DynDecoderModuleT;
-use candle_util::candle_model_traits::*;
+use candle_util::decoder::dyn_decoder::DynDecoderModuleT;
+use candle_util::traits::model::*;
 use std::sync::atomic::AtomicBool;
 
 use super::anchor_prior::anchor_penalty_at_level;

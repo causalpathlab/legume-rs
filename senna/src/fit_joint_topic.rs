@@ -5,9 +5,9 @@ use crate::senna_input::{
 use crate::topic::common::{create_device, setup_stop_handler};
 use crate::topic::train_joint::{train_and_save, ProgressiveTrainConfig, SaveContext};
 
-use candle_util::candle_decoder_delta_topic::DeltaTopicDecoder;
-use candle_util::candle_decoder_joint_topic::JointTopicDecoder;
-use candle_util::candle_encoder_joint_softmax::*;
+use candle_util::decoder::delta_topic::DeltaTopicDecoder;
+use candle_util::decoder::joint_topic::JointTopicDecoder;
+use candle_util::encoder::joint_softmax::*;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 pub enum JointDecoderType {

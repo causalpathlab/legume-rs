@@ -12,12 +12,12 @@ use super::eval_indexed::refine_indexed_topic_proportions;
 use crate::embed_common::*;
 
 use candle_core::{Device, Tensor};
-use candle_util::candle_cell_grouped_data_loader::{pack_eval_minibatch, CellEvalPackArgs};
-use candle_util::candle_indexed_data_loader::{
+use candle_util::data::cell_grouped::{pack_eval_minibatch, CellEvalPackArgs};
+use candle_util::data::indexed::{
     csc_columns_to_indexed_samples, top_k_indices_weighted, IndexedSample,
 };
-use candle_util::candle_indexed_model_traits::{CellEncoderT, IndexedDecoderT};
-use candle_util::candle_topic_refinement::TopicRefinementConfig;
+use candle_util::traits::indexed::{CellEncoderT, IndexedDecoderT};
+use candle_util::topic_refinement::TopicRefinementConfig;
 
 pub(crate) struct EvaluateCellLatentConfig<'a, Dec> {
     pub dev: &'a Device,

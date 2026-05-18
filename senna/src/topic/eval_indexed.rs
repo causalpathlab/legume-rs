@@ -3,11 +3,11 @@ use crate::embed_common::*;
 
 use candle_core::{Device, Tensor, Var};
 use candle_nn::ops;
-use candle_util::candle_indexed_data_loader::{
+use candle_util::data::indexed::{
     csc_columns_to_indexed_samples, top_k_indices_weighted,
 };
-use candle_util::candle_indexed_model_traits::*;
-use candle_util::candle_topic_refinement::TopicRefinementConfig;
+use candle_util::traits::indexed::*;
+use candle_util::topic_refinement::TopicRefinementConfig;
 use std::collections::{BTreeSet, HashMap};
 
 /// Packed top-K representation built from a dense `[N, D]` tensor.
