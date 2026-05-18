@@ -1,7 +1,7 @@
 use crate::nn::layers::*;
 use crate::nn::linear::*;
 use crate::traits::model::*;
-use crate::candle_value_transform::anscombe_residual;
+use crate::value_transform::anscombe_residual;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, BatchNorm, Linear, Module, ModuleT, VarBuilder};
 
