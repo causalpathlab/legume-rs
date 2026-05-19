@@ -11,7 +11,6 @@ use crate::topic::train_indexed::{
 
 use candle_util::decoder::EmbeddedTopicDecoder;
 use candle_util::encoder::*;
-use log::warn;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 
 #[derive(Args, Debug)]
@@ -437,67 +436,42 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
 
     let k = args.n_latent_topics;
 
-    // --from chain-inheritance: explicit CLI flags always win; otherwise
-    // pull data files, batch files, and the ρ-warm-start prefix from a
-    // prior `senna {bge, fne, topic-family}` manifest. With no flag
-    // specifying init vs freeze, we default to freezing the inherited ρ
-    // (the validated bge→itopic workflow, see
-    // [[feedback-bge-itopic-warm-start]]); the user can pass
-    // --init-feature-embedding explicitly to keep ρ trainable.
+    // --from chain-inheritance: explicit CLI flags win per-field; with no
+    // explicit init/freeze flag, default to freezing the inherited ρ.
     let inherited = args
         .from
         .as_deref()
         .map(crate::run_manifest::inherit_from)
         .transpose()?;
     if let Some(inh) = inherited.as_ref() {
-        log::info!(
+        info!(
             "--from: inheriting data + batch + ρ-prefix from a '{}' manifest",
             inh.source_kind
         );
     }
-
-    let data_files: Vec<Box<str>> = if !args.data_files.is_empty() {
-        args.data_files.clone()
-    } else {
-        inherited
-            .as_ref()
-            .map(|i| i.data_files.clone())
-            .unwrap_or_default()
-    };
-    anyhow::ensure!(
-        !data_files.is_empty(),
-        "no input data files — pass at least one positional .zarr/.h5 path or use --from"
+    let data_files = crate::run_manifest::InheritedFromManifest::resolve_data(
+        inherited.as_ref(),
+        &args.data_files,
+    )?;
+    let batch_files = crate::run_manifest::InheritedFromManifest::resolve_batch(
+        inherited.as_ref(),
+        args.batch_files.as_deref(),
     );
 
-    let batch_files: Option<Vec<Box<str>>> = match (&args.batch_files, inherited.as_ref()) {
-        (Some(bf), _) => Some(bf.clone()),
-        (None, Some(inh)) if !inh.batch_files.is_empty() => Some(inh.batch_files.clone()),
-        _ => None,
-    };
-
-    // ρ pre-training resolution — either --freeze-feature-embedding (lock
-    // ρ after install) or --init-feature-embedding (warm-start ρ, AdamW
-    // continues to update it). Mutually exclusive at the CLI level. In
-    // both cases the spec drives the same mask + materialize machinery —
-    // only the AdamW-exclusion flag differs. Resolved before H so the
-    // pre-trained dictionary's H can dictate the encoder dim.
     let init_feature_embedding: Option<Box<str>> = args.init_feature_embedding.clone();
     let freeze_feature_embedding: Option<Box<str>> =
         args.freeze_feature_embedding.clone().or_else(|| {
-            // No explicit freeze/init; if --from provided, default to
-            // freezing the inherited ρ prefix.
-            if init_feature_embedding.is_none() {
-                inherited
-                    .as_ref()
-                    .map(|i| i.feature_embedding_prefix.clone())
-            } else {
-                None
+            match (init_feature_embedding.is_none(), inherited.as_ref()) {
+                (true, Some(inh)) => Some(inh.feature_embedding_prefix.clone()),
+                _ => None,
             }
         });
     let pretrained_prefix = freeze_feature_embedding
         .as_deref()
         .or(init_feature_embedding.as_deref());
     let freeze_rho = freeze_feature_embedding.is_some();
+    // Resolved before H so the pre-trained dictionary's column count
+    // pins the encoder dim.
     let pretrained_spec: Option<crate::topic::freeze::FrozenFeatureSpec> = match pretrained_prefix {
         None => None,
         Some(prefix) => {
@@ -510,62 +484,18 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             }
             let kind: Option<auxiliary_data::feature_names::FeatureNameKind> =
                 args.feature_name_kind.clone().into();
-            // Auto-detect would require row names we don't have yet; default
-            // to Gene { delim: '_' } since pre-train inputs are gene-keyed.
+            // Pre-train inputs are gene-keyed; row names aren't available yet.
             let kind =
                 kind.unwrap_or(auxiliary_data::feature_names::FeatureNameKind::Gene { delim: '_' });
             Some(crate::topic::freeze::FrozenFeatureSpec::resolve_from_prefix(prefix, kind)?)
         }
     };
 
-    // H resolution. Precedence (highest first):
-    //   1. Pre-trained ρ from --freeze/--init-feature-embedding pins H to
-    //      the dictionary's column count; an explicit --embedding-dim must
-    //      match or we bail with a clearer message than the post-load
-    //      ensure! at materialize time.
-    //   2. Explicit --embedding-dim from the CLI.
-    //   3. Default 2 × K.
     let pretrained_h: Option<usize> = pretrained_spec
         .as_ref()
         .map(|s| s.dictionary_h())
         .transpose()?;
-    let h = match (pretrained_h, args.embedding_dim) {
-        (Some(ph), 0) => {
-            info!("--embedding-dim auto-set to pre-trained ρ width H = {ph}");
-            ph
-        }
-        (Some(ph), explicit) => {
-            anyhow::ensure!(
-                explicit == ph,
-                "--embedding-dim ({explicit}) disagrees with the pre-trained ρ H ({ph}). \
-                 Either omit --embedding-dim (it will be inferred) or pass {ph} to match."
-            );
-            explicit
-        }
-        (None, 0) => {
-            let auto = 2 * k;
-            info!("--embedding-dim not set; defaulting to 2 × K = {auto}");
-            auto
-        }
-        (None, explicit) => explicit,
-    };
-    if h < k {
-        anyhow::bail!(
-            "--embedding-dim ({h}) < --n-latent-topics ({k}). β = softmax(α·ρᵀ) is rank ≤ H, \
-             so at most {h} linearly independent topics can be represented — the remaining \
-             {} would collapse onto linear combinations. Pass --embedding-dim >= {k} \
-             (recommended: {} for headroom), or omit --embedding-dim to use the 2K default.",
-            k - h,
-            k * 2,
-        );
-    }
-    if h < 2 * k {
-        warn!(
-            "--embedding-dim ({h}) is at the β-rank limit for --n-latent-topics ({k}); \
-             topics may collapse during training. Recommend --embedding-dim >= {} for headroom.",
-            k * 2,
-        );
-    }
+    let h = crate::topic::common::resolve_embedding_dim(args.embedding_dim, pretrained_h, k)?;
 
     let (effective_multiome, effective_hvg_n, effective_hvg_list) =
         crate::hvg::resolve_multiome_with_hvg(args.multiome, data_files.len(), &args.hvg);

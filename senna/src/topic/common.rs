@@ -633,3 +633,56 @@ pub fn remap_graph_to_subset(pre: FeaturePairGraph, keep: &[bool]) -> FeaturePai
         feature_edges,
     }
 }
+
+/// Resolve the encoder embedding dim `H` shared by the topic-family fits.
+///
+/// Precedence: a pre-trained ρ's column count pins `H`; an explicit
+/// `--embedding-dim` from the CLI is used when no pre-trained ρ is
+/// present; otherwise the default `2 × K` is used. An explicit value
+/// that disagrees with the pre-trained `H` is a hard error.
+///
+/// Bails when `H < K` (β = softmax(α·ρᵀ) is rank ≤ H, so K independent
+/// topics need H ≥ K); warns when `H < 2K` (β-rank limit, topics may
+/// collapse). The warn-threshold matches the default so the warning
+/// only fires when the user explicitly under-specified.
+pub fn resolve_embedding_dim(
+    cli_embedding_dim: usize,
+    pretrained_h: Option<usize>,
+    k: usize,
+) -> anyhow::Result<usize> {
+    let h = match (pretrained_h, cli_embedding_dim) {
+        (Some(ph), 0) => {
+            info!("--embedding-dim auto-set to pre-trained ρ width H = {ph}");
+            ph
+        }
+        (Some(ph), explicit) => {
+            anyhow::ensure!(
+                explicit == ph,
+                "--embedding-dim ({explicit}) disagrees with the pre-trained ρ H ({ph}). \
+                 Either omit --embedding-dim (it will be inferred) or pass {ph} to match."
+            );
+            explicit
+        }
+        (None, 0) => {
+            let auto = 2 * k;
+            info!("--embedding-dim not set; defaulting to 2 × K = {auto}");
+            auto
+        }
+        (None, explicit) => explicit,
+    };
+    anyhow::ensure!(
+        h >= k,
+        "--embedding-dim ({h}) < --n-latent-topics ({k}). β = softmax(α·ρᵀ) is rank ≤ H, \
+         so at most {h} linearly independent topics can be represented — pass \
+         --embedding-dim >= {k} (recommended {} for headroom), or omit it for the 2K default.",
+        k * 2,
+    );
+    if h < 2 * k {
+        log::warn!(
+            "--embedding-dim ({h}) is at the β-rank limit for --n-latent-topics ({k}); \
+             topics may collapse during training. Recommend --embedding-dim >= {} for headroom.",
+            k * 2,
+        );
+    }
+    Ok(h)
+}
