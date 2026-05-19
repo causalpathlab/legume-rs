@@ -252,13 +252,13 @@ pub struct IndexedTopicArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "Per-feature embedding dimension H (0 = auto = 3 × n-latent-topics)",
+        help = "Per-feature embedding dimension H (0 = auto = 2 × n-latent-topics)",
         long_help = "Dimension H of the per-gene embedding ρ ∈ ℝ^{D×H}. ρ is shared\n\
                      between encoder (value-weighted pool over each cell's top-K\n\
                      features) and decoder (β_kd = log_softmax_d(α_k · ρ_dᵀ), with\n\
                      α ∈ ℝ^{K×H} as topic embeddings). β is rank ≤ H, so H must be\n\
                      ≥ K (--n-latent-topics) for K independent topics to be\n\
-                     representable. Default 0 resolves to 3K for headroom. Set\n\
+                     representable. Default 0 resolves to 2K for headroom. Set\n\
                      explicitly to override; H < K errors at startup."
     )]
     embedding_dim: usize,
@@ -458,7 +458,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     //      match or we bail with a clearer message than the post-load
     //      ensure! at materialize time.
     //   2. Explicit --embedding-dim from the CLI.
-    //   3. Default 3 × K.
+    //   3. Default 2 × K.
     let pretrained_h: Option<usize> = pretrained_spec
         .as_ref()
         .map(|s| s.dictionary_h())
@@ -477,8 +477,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             explicit
         }
         (None, 0) => {
-            let auto = 3 * k;
-            info!("--embedding-dim not set; defaulting to 3 × K = {auto}");
+            let auto = 2 * k;
+            info!("--embedding-dim not set; defaulting to 2 × K = {auto}");
             auto
         }
         (None, explicit) => explicit,
@@ -488,16 +488,16 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             "--embedding-dim ({h}) < --n-latent-topics ({k}). β = softmax(α·ρᵀ) is rank ≤ H, \
              so at most {h} linearly independent topics can be represented — the remaining \
              {} would collapse onto linear combinations. Pass --embedding-dim >= {k} \
-             (recommended: {} for headroom), or omit --embedding-dim to use the 3K default.",
+             (recommended: {} for headroom), or omit --embedding-dim to use the 2K default.",
             k - h,
-            k * 3,
+            k * 2,
         );
     }
     if h < 2 * k {
         warn!(
             "--embedding-dim ({h}) is at the β-rank limit for --n-latent-topics ({k}); \
              topics may collapse during training. Recommend --embedding-dim >= {} for headroom.",
-            k * 3,
+            k * 2,
         );
     }
 
