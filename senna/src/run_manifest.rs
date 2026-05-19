@@ -348,6 +348,54 @@ pub fn default_path(prefix: &str) -> String {
     format!("{prefix}.senna.json")
 }
 
+/// Resolved chain-from inputs that a downstream training subcommand
+/// (`senna {itopic, cell-embedded-topic}`) inherits via `--from`.
+/// All paths are already resolved against the manifest's directory so
+/// the caller can hand them straight to data loaders.
+pub struct InheritedFromManifest {
+    pub data_files: Vec<Box<str>>,
+    pub batch_files: Vec<Box<str>>,
+    /// `--init-feature-embedding` / `--freeze-feature-embedding` prefix.
+    /// Resolved to the manifest's `prefix` after directory resolution;
+    /// the spec resolver downstream will probe `{prefix}.dictionary.parquet`
+    /// (bge/fne layout) or `{prefix}.feature_embedding.parquet`
+    /// (topic-family layout).
+    pub feature_embedding_prefix: Box<str>,
+    /// Source manifest kind — useful for logging.
+    pub source_kind: RunKind,
+}
+
+/// Load a `senna.json` manifest and extract the fields a downstream
+/// trainer would inherit. Bails for source kinds that don't write a
+/// feature embedding (SVD / joint-SVD); accepts bge, fne, and the
+/// topic-family kinds.
+pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest> {
+    let (m, dir) = RunManifest::load(Path::new(manifest_path))?;
+    match m.kind {
+        RunKind::Bge
+        | RunKind::Fne
+        | RunKind::Topic
+        | RunKind::Itopic
+        | RunKind::CellEmbeddedTopic
+        | RunKind::JointTopic => {}
+        RunKind::Svd | RunKind::JointSvd => anyhow::bail!(
+            "--from manifest kind '{}' has no feature embedding to inherit; \
+             use a bge / fne / topic-family run as the source",
+            m.kind
+        ),
+    }
+    let to_box = |s: &str| -> Box<str> { resolve(&dir, s).to_string_lossy().into_owned().into() };
+    let data_files: Vec<Box<str>> = m.data.input.iter().map(|s| to_box(s)).collect();
+    let batch_files: Vec<Box<str>> = m.data.batch.iter().map(|s| to_box(s)).collect();
+    let feature_embedding_prefix: Box<str> = to_box(&m.prefix);
+    Ok(InheritedFromManifest {
+        data_files,
+        batch_files,
+        feature_embedding_prefix,
+        source_kind: m.kind,
+    })
+}
+
 /// Per-run description assembled by each training subcommand, handed to
 /// `write_run_manifest` which owns the `RunManifest` / `save` plumbing.
 pub struct RunDescription<'a> {
