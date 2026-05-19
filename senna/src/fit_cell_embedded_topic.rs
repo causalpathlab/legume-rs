@@ -363,6 +363,12 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     let pretrained_h: Option<usize> = frozen_spec.as_ref().map(|s| s.dictionary_h()).transpose()?;
     let h = crate::topic::common::resolve_embedding_dim(args.embedding_dim, pretrained_h, k)?;
 
+    let prebuilt_partition = inherited
+        .as_ref()
+        .map(|i| i.load_cell_to_pb())
+        .transpose()?
+        .flatten();
+
     let (effective_multiome, effective_hvg_n, effective_hvg_list) =
         crate::hvg::resolve_multiome_with_hvg(args.multiome, data_files.len(), &args.hvg);
 
@@ -419,6 +425,7 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         refine: Some(args.collapse.pb_refine.to_params()),
         ignore_batch: args.collapse.ignore_batch,
         want_hierarchy: true,
+        prebuilt_partition,
     })?;
 
     let cell_to_pb_per_level = cell_to_pb_per_level
@@ -690,6 +697,7 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     }
 
     crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+    crate::postprocess::viz_prep::write_cell_to_pb(&args.out, &cell_to_pb_per_level, &cell_names)?;
 
     let input: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();
     let batch: Vec<String> = batch_files
@@ -711,6 +719,7 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         default_colour_by: "cluster",
         has_latent: true,
+        has_cell_to_pb: true,
     })?;
 
     info!("Done");

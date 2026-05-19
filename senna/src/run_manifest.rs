@@ -18,9 +18,60 @@
 //! directory, so a run directory can be moved or copied without
 //! breaking downstream reads.
 
+use matrix_util::traits::IoOps;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+type Mat = nalgebra::DMatrix<f32>;
+
+/// `(cell_to_pb_per_level [finest-last], cell_names)` — the raw payload
+/// loaded from a `cell_to_pb.parquet`, ready to be aligned to a
+/// caller's data axis.
+pub type InheritedPartition = (Vec<Vec<usize>>, Vec<Box<str>>);
+
+/// Read `{prefix}.cell_to_pb.parquet` (N × num_levels f32, cell-name
+/// rows, `level_0..level_{L-1}` columns) into the same
+/// [`InheritedPartition`] shape that
+/// [`InheritedFromManifest::load_cell_to_pb`] returns. Exposed so
+/// callers that don't hold a full `InheritedFromManifest` (e.g.
+/// `senna layout`) can reuse the loader.
+pub fn load_cell_to_pb_raw(path: &str) -> anyhow::Result<InheritedPartition> {
+    let mat_with_names = Mat::from_parquet_with_row_names(path, Some(0))?;
+    let cell_names_src = mat_with_names.rows;
+    let mat = mat_with_names.mat;
+    let n_src = mat.nrows();
+    let num_levels = mat.ncols();
+    anyhow::ensure!(
+        num_levels >= 1,
+        "{}: cell_to_pb parquet has 0 data columns",
+        path
+    );
+    anyhow::ensure!(
+        cell_names_src.len() == n_src,
+        "{}: row-name count {} != matrix rows {}",
+        path,
+        cell_names_src.len(),
+        n_src
+    );
+    // Parquet columns are level_0..level_{L-1} (finest-first); emit
+    // finest-last to match `PreparedData.collapsed_levels`.
+    let mut cell_to_pb_per_level: Vec<Vec<usize>> = Vec::with_capacity(num_levels);
+    for lvl in (0..num_levels).rev() {
+        let mut col: Vec<usize> = Vec::with_capacity(n_src);
+        for i in 0..n_src {
+            col.push(mat[(i, lvl)] as usize);
+        }
+        cell_to_pb_per_level.push(col);
+    }
+    log::info!(
+        "--from: loaded inherited cell_to_pb {} (num_levels={}, N_src={})",
+        path,
+        num_levels,
+        n_src,
+    );
+    Ok((cell_to_pb_per_level, cell_names_src))
+}
 
 /// Schema version. Bump only on breaking renames or semantic changes.
 /// Readers accept any version and log a warning for newer-than-known.
@@ -161,6 +212,14 @@ pub struct RunOutputs {
     /// learned coordinate in the topic-model embedding space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_embedding: Option<String>,
+    /// `{out}.cell_to_pb.parquet` — N × num_levels u32 matrix of the
+    /// post-refinement cell→pseudobulk membership per coarsening level
+    /// (finest-last to match `collapsed_levels`). Cached so a downstream
+    /// `senna {topic, itopic, ce-topic} --from` chain can skip the
+    /// expensive HNSW + binary-sort + DC-SBM refinement step and feed
+    /// the precomputed partition straight into the per-PB Gamma fit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_to_pb: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -357,6 +416,12 @@ pub struct InheritedFromManifest {
     /// (bge/fne layout) or `{prefix}.feature_embedding.parquet`
     /// (topic-family layout).
     pub feature_embedding_prefix: Box<str>,
+    /// Path to the source run's `{prefix}.cell_to_pb.parquet`
+    /// (`outputs.cell_to_pb`), resolved against the manifest dir.
+    /// When present, downstream trainers can use the post-refinement
+    /// cell→pb membership and skip the BBKNN + Poisson DC-SBM step.
+    /// `None` when the source manifest has no `cell_to_pb` output.
+    pub cell_to_pb_path: Option<Box<str>>,
     /// Source manifest kind — useful for logging.
     pub source_kind: RunKind,
 }
@@ -394,6 +459,73 @@ impl InheritedFromManifest {
             _ => None,
         }
     }
+
+    /// Read the inherited `cell_to_pb.parquet` into raw
+    /// `(cell_to_pb_per_level [finest-last][N_src], cell_names_src)`.
+    /// `None` when the source manifest had no `cell_to_pb` output.
+    /// Caller is expected to call [`Self::align_cell_to_pb_to_cells`]
+    /// against its own `data_vec.column_names()` before feeding the
+    /// partition into the collapse.
+    pub fn load_cell_to_pb(&self) -> anyhow::Result<Option<InheritedPartition>> {
+        let Some(path) = self.cell_to_pb_path.as_deref() else {
+            return Ok(None);
+        };
+        Ok(Some(load_cell_to_pb_raw(path)?))
+    }
+
+    /// Align a loaded partition to `data_cell_names`: short-circuit
+    /// when orders already match; otherwise reorder by cell name and
+    /// bail (with a preview of misses) if any data cell is absent
+    /// from the source. Each level's inner `Vec` ends up with
+    /// `data_cell_names.len()` entries.
+    pub fn align_cell_to_pb_to_cells(
+        cell_to_pb_per_level_src: Vec<Vec<usize>>,
+        cell_names_src: &[Box<str>],
+        data_cell_names: &[Box<str>],
+    ) -> anyhow::Result<Vec<Vec<usize>>> {
+        if cell_names_src == data_cell_names {
+            log::info!("--from: cell-name order matches data axis (no cell_to_pb reorder)");
+            return Ok(cell_to_pb_per_level_src);
+        }
+        let src_index: rustc_hash::FxHashMap<&str, usize> = cell_names_src
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.as_ref(), i))
+            .collect();
+        let mut missing: Vec<&str> = Vec::new();
+        let mut perm: Vec<usize> = Vec::with_capacity(data_cell_names.len());
+        for name in data_cell_names {
+            match src_index.get(name.as_ref()) {
+                Some(&i) => perm.push(i),
+                None => missing.push(name.as_ref()),
+            }
+        }
+        if !missing.is_empty() {
+            let preview: Vec<&str> = missing.iter().copied().take(5).collect();
+            anyhow::bail!(
+                "--from: {} of {} data cells are absent from the inherited cell_to_pb \
+                 (e.g. {:?}); the source run was trained on a different cell set",
+                missing.len(),
+                data_cell_names.len(),
+                preview,
+            );
+        }
+        let n_data = data_cell_names.len();
+        let mut out: Vec<Vec<usize>> = Vec::with_capacity(cell_to_pb_per_level_src.len());
+        for lvl in cell_to_pb_per_level_src {
+            let mut col: Vec<usize> = Vec::with_capacity(n_data);
+            for &src_i in &perm {
+                col.push(lvl[src_i]);
+            }
+            out.push(col);
+        }
+        log::info!(
+            "--from: reordered inherited cell_to_pb by cell name ({}→{} cells aligned)",
+            cell_names_src.len(),
+            n_data,
+        );
+        Ok(out)
+    }
 }
 
 /// Load a `senna.json` manifest and extract the fields a downstream
@@ -419,10 +551,12 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
     let data_files: Vec<Box<str>> = m.data.input.iter().map(|s| to_box(s)).collect();
     let batch_files: Vec<Box<str>> = m.data.batch.iter().map(|s| to_box(s)).collect();
     let feature_embedding_prefix: Box<str> = to_box(&m.prefix);
+    let cell_to_pb_path: Option<Box<str>> = m.outputs.cell_to_pb.as_deref().map(to_box);
     Ok(InheritedFromManifest {
         data_files,
         batch_files,
         feature_embedding_prefix,
+        cell_to_pb_path,
         source_kind: m.kind,
     })
 }
@@ -470,6 +604,11 @@ pub struct RunDescription<'a> {
     /// latent). All cell-based subcommands set this; `fne` (feature-only)
     /// sets this `false`.
     pub has_latent: bool,
+    /// True if the run emits `{basename}.cell_to_pb.parquet` — the
+    /// post-refinement cell→pseudobulk membership per coarsening level.
+    /// Set by topic-family fits that ran `collapse_columns_multilevel_*`
+    /// so a downstream `--from` chain can skip the refinement step.
+    pub has_cell_to_pb: bool,
 }
 
 /// Write `{prefix}.senna.json` describing the run that just finished.
@@ -513,6 +652,9 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     }
     if let Some(suf) = desc.feature_embedding_suffix {
         m.outputs.feature_embedding = Some(format!("{basename}.{suf}"));
+    }
+    if desc.has_cell_to_pb {
+        m.outputs.cell_to_pb = Some(format!("{basename}.cell_to_pb.parquet"));
     }
     m.defaults.colour_by = Some(desc.default_colour_by.into());
 

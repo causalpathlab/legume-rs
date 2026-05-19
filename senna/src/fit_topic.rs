@@ -36,14 +36,28 @@ impl DecoderType {
 #[derive(Args, Debug)]
 pub struct TopicArgs {
     #[arg(
-        required = true,
         value_delimiter = ',',
-        help = "Input data files (.zarr or .h5)",
+        help = "Input data files (.zarr or .h5; optional when --from is given)",
         long_help = "Sparse backends produced by `data-beans from-mtx`.\n\
                      Multiple files may be passed (comma- or space-separated)\n\
-                     and are concatenated column-wise on a shared feature set."
+                     and are concatenated column-wise on a shared feature set.\n\
+                     When `--from <run.senna.json>` is provided and this list\n\
+                     is empty, the data paths come from the source manifest."
     )]
     pub(crate) data_files: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Chain data + batch + cell→pb partition from a prior \
+                `senna {topic, itopic, ce-topic}` run's manifest",
+        long_help = "Read a `{run}.senna.json` manifest and pre-fill `data_files`, \
+                     `--batch-files`, and (when present) the cell→pb partition \
+                     from the source run. Inheriting the partition skips the \
+                     expensive BBKNN + Poisson DC-SBM refinement step. Explicit \
+                     CLI flags override the manifest. SVD-family sources are \
+                     rejected."
+    )]
+    pub(crate) from: Option<Box<str>>,
 
     #[arg(
         long,
@@ -249,14 +263,44 @@ pub struct TopicArgs {
 pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
+    let inherited = args
+        .from
+        .as_deref()
+        .map(crate::run_manifest::inherit_from)
+        .transpose()?;
+    if let Some(inh) = inherited.as_ref() {
+        info!(
+            "--from: inheriting data + batch{} from a '{}' manifest",
+            if inh.cell_to_pb_path.is_some() {
+                " + cell→pb partition"
+            } else {
+                ""
+            },
+            inh.source_kind
+        );
+    }
+    let data_files = crate::run_manifest::InheritedFromManifest::resolve_data(
+        inherited.as_ref(),
+        &args.data_files,
+    )?;
+    let batch_files = crate::run_manifest::InheritedFromManifest::resolve_batch(
+        inherited.as_ref(),
+        args.batch_files.as_deref(),
+    );
+    let prebuilt_partition = inherited
+        .as_ref()
+        .map(|i| i.load_cell_to_pb())
+        .transpose()?
+        .flatten();
+
     let PreparedData {
         data_vec,
         collapsed_levels,
         proj_kn,
-        cell_to_pb_per_level: _,
+        cell_to_pb_per_level,
     } = load_and_collapse(&LoadCollapseArgs {
-        data_files: &args.data_files,
-        batch_files: &args.batch_files,
+        data_files: &data_files,
+        batch_files: &batch_files,
         preload: args.preload_data,
         proj_dim: args.collapse.proj_dim.max(args.n_latent_topics),
         sort_dim: args.collapse.sort_dim,
@@ -273,7 +317,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: None,
-        want_hierarchy: false,
+        want_hierarchy: true,
+        prebuilt_partition,
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
@@ -498,12 +543,19 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     }
 
     crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+    let has_cell_to_pb = if let Some(ref c2p) = cell_to_pb_per_level {
+        crate::postprocess::viz_prep::write_cell_to_pb(&args.out, c2p, &cell_names)?;
+        true
+    } else {
+        false
+    };
 
     write_topic_manifest(
         crate::run_manifest::RunKind::Topic,
         &args.out,
-        &args.data_files,
-        args.batch_files.as_deref(),
+        &data_files,
+        batch_files.as_deref(),
+        has_cell_to_pb,
     )?;
 
     info!("Done");
@@ -518,6 +570,7 @@ fn write_topic_manifest(
     prefix: &str,
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,
+    has_cell_to_pb: bool,
 ) -> anyhow::Result<()> {
     let input: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();
     let batch: Vec<String> = batch_files
@@ -538,6 +591,7 @@ fn write_topic_manifest(
         feature_embedding_suffix: None,
         default_colour_by: "cluster",
         has_latent: true,
+        has_cell_to_pb,
     })
 }
 

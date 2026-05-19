@@ -474,6 +474,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         feature_embedding_suffix: None,
         default_colour_by: "cluster",
         has_latent: true,
+        has_cell_to_pb: false,
     })?;
 
     info!("Done");

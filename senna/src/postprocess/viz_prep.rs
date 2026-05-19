@@ -120,6 +120,52 @@ pub(crate) fn write_cell_proj(
     Ok(path)
 }
 
+/// Serialize the post-refinement cell→pseudobulk membership per
+/// coarsening level so a downstream `--from` chain can skip the
+/// HNSW + binary-sort + DC-SBM refinement step.
+///
+/// `cell_to_pb_per_level[i]` is the membership for level `i`, finest-
+/// last (matching `PreparedData.collapsed_levels`'s order after the
+/// internal `reverse()`). Output is a `[N, num_levels]` `f32` parquet
+/// (`f32` for compatibility with the existing parquet writer; the
+/// downstream loader casts back to `usize`) with cells as rows and
+/// `level_0..level_{L-1}` as columns. PB indices on disk are 0-based.
+pub(crate) fn write_cell_to_pb(
+    prefix: &str,
+    cell_to_pb_per_level: &[Vec<usize>],
+    cell_names: &[Box<str>],
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        !cell_to_pb_per_level.is_empty(),
+        "cell_to_pb_per_level is empty — refusing to write empty membership"
+    );
+    let n_cells = cell_names.len();
+    for (l, lvl) in cell_to_pb_per_level.iter().enumerate() {
+        anyhow::ensure!(
+            lvl.len() == n_cells,
+            "level {l} has {} cells but cell_names has {n_cells}",
+            lvl.len()
+        );
+    }
+    let num_levels = cell_to_pb_per_level.len();
+    let mut mat = Mat::zeros(n_cells, num_levels);
+    for (l, lvl) in cell_to_pb_per_level.iter().enumerate() {
+        for (i, &pb) in lvl.iter().enumerate() {
+            mat[(i, l)] = pb as f32;
+        }
+    }
+    let col_names: Vec<Box<str>> = (0..num_levels)
+        .map(|i| format!("level_{i}").into_boxed_str())
+        .collect();
+    let path = format!("{prefix}.cell_to_pb.parquet");
+    mat.to_parquet_with_names(&path, (Some(cell_names), Some("cell")), Some(&col_names))?;
+    info!(
+        "Wrote cell→pb membership: {} cells × {} levels → {path}",
+        n_cells, num_levels
+    );
+    Ok(path)
+}
+
 /// Apply SVD preprocessing: reduce matrix to top N components.
 /// Returns U * diag(S) where (U, S, V) = rsvd(mat, n_components).
 pub(super) fn apply_svd_preprocessing(mat: &Mat, n_components: usize) -> anyhow::Result<Mat> {

@@ -115,7 +115,7 @@ pub struct IndexedTopicArgs {
     #[arg(
         long,
         alias = "lr",
-        default_value_t = 0.05,
+        default_value_t = 0.01,
         help = "Adam learning rate"
     )]
     learning_rate: f32,
@@ -504,6 +504,12 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         .transpose()?;
     let h = crate::topic::common::resolve_embedding_dim(args.embedding_dim, pretrained_h, k)?;
 
+    let prebuilt_partition = inherited
+        .as_ref()
+        .map(|i| i.load_cell_to_pb())
+        .transpose()?
+        .flatten();
+
     let (effective_multiome, effective_hvg_n, effective_hvg_list) =
         crate::hvg::resolve_multiome_with_hvg(args.multiome, data_files.len(), &args.hvg);
 
@@ -535,7 +541,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         data_vec,
         collapsed_levels,
         proj_kn,
-        cell_to_pb_per_level: _,
+        cell_to_pb_per_level,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &data_files,
         batch_files: &batch_files,
@@ -559,7 +565,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         feature_kind: args.feature_name_kind.clone().into(),
         refine: Some(args.collapse.pb_refine.to_params()),
         ignore_batch: args.collapse.ignore_batch,
-        want_hierarchy: false,
+        want_hierarchy: true,
+        prebuilt_partition,
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
@@ -959,6 +966,12 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     }
 
     crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+    let has_cell_to_pb = if let Some(ref c2p) = cell_to_pb_per_level {
+        crate::postprocess::viz_prep::write_cell_to_pb(&args.out, c2p, &cell_names)?;
+        true
+    } else {
+        false
+    };
 
     let input: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();
     let batch: Vec<String> = batch_files
@@ -980,6 +993,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         default_colour_by: "cluster",
         has_latent: true,
+        has_cell_to_pb,
     })?;
 
     info!("Done");

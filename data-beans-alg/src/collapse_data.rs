@@ -1737,6 +1737,227 @@ where
     refine_and_collect_single_layer(data_vec, proj_kn, &ctx)
 }
 
+/// Variant of [`collapse_columns_multilevel_with_hierarchy`] that **skips
+/// the BBKNN + Poisson DC-SBM refinement**, instead synthesising the
+/// per-pb-sample group assignment from a caller-supplied
+/// `cell_to_pb_per_level` (finest-first; the same shape returned in
+/// [`MultilevelCollapseOut.cell_to_pb_per_level`] by the refining
+/// entry point). Typical use: `senna {topic, itopic, ce-topic} --from`
+/// inheriting a prior run's partition.
+///
+/// Each level's pb-sample → group label is decided by majority vote
+/// across the cells in that pb-sample. The downstream `optimize` step
+/// still runs per level, so the returned `CollapsedOut` posteriors
+/// reflect this run's batch model and priors — only the expensive
+/// clustering work is bypassed.
+pub fn collapse_columns_multilevel_with_partition<T>(
+    data_vec: &mut SparseIoVec,
+    proj_kn: &DMatrix<f32>,
+    batch_membership: &[T],
+    params: &MultilevelParams,
+    cell_to_pb_per_level: &[Vec<usize>],
+) -> anyhow::Result<MultilevelCollapseOut>
+where
+    T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+{
+    let knn = params.knn_pb_samples;
+    let opt_iter = params.num_opt_iter;
+
+    data_vec.register_batch_membership(batch_membership);
+    let num_features = data_vec.num_rows();
+    let num_batches = data_vec.num_batches();
+    if num_batches >= 2 {
+        data_vec.build_hnsw_per_batch(proj_kn, batch_membership)?;
+    }
+
+    let level_dims = compute_level_sort_dims(params.sort_dim, params.num_levels);
+    anyhow::ensure!(
+        cell_to_pb_per_level.len() == level_dims.len(),
+        "inherited cell_to_pb has {} levels but --num-levels is {}; \
+         pass --num-levels to match the source run",
+        cell_to_pb_per_level.len(),
+        level_dims.len(),
+    );
+    let finest_dim = level_dims[0];
+    let nn = proj_kn.ncols();
+    let kk = proj_kn.nrows().min(finest_dim).min(nn);
+    let fine_codes = binary_sort_columns(proj_kn, kk)?;
+    data_vec.assign_groups(&fine_codes, None);
+    let group_to_cols = data_vec
+        .take_grouped_columns()
+        .ok_or_else(|| anyhow::anyhow!("columns not assigned"))?
+        .clone();
+
+    // pb-samples are still built locally — they're needed for the
+    // cross-batch matched-stat path on multi-batch data. Refinement is
+    // what we skip; pb-sample construction is cheap.
+    let pb_samples = build_pb_samples(data_vec, proj_kn, num_features)?;
+    let num_pb = pb_samples.layout.cell_counts.len();
+    let ncols = proj_kn.ncols();
+    let col_to_batch: Vec<usize> = data_vec.get_batch_membership(0..ncols);
+    let pb_sample_to_cells =
+        build_pb_sample_to_cells(&pb_samples.layout, &group_to_cols, &col_to_batch);
+
+    // Synthesize a RefinedAssignment from the inherited cell→pb
+    // membership via per-pb-sample modal vote at each level. Modal vote
+    // lets us tolerate small misalignments between this run's
+    // hash-partition pb-samples and the source's; in practice pb-samps
+    // are tiny so most have a unanimous inherited label.
+    let num_levels = level_dims.len();
+    let mut pbsamp_to_group: Vec<Vec<usize>> = Vec::with_capacity(num_levels);
+    let mut num_groups_per_level: Vec<usize> = Vec::with_capacity(num_levels);
+    for (lvl_idx, lvl) in cell_to_pb_per_level.iter().enumerate() {
+        anyhow::ensure!(
+            lvl.len() == ncols,
+            "inherited cell_to_pb level {} has {} cells, data has {}",
+            lvl_idx,
+            lvl.len(),
+            ncols
+        );
+        let mut p2g: Vec<usize> = Vec::with_capacity(num_pb);
+        for cells in &pb_sample_to_cells {
+            p2g.push(modal_group(cells, lvl));
+        }
+        let (compact, k) = crate::refine_multilevel::compact_labels(&p2g);
+        num_groups_per_level.push(k);
+        pbsamp_to_group.push(compact);
+    }
+    let refined = crate::refine_multilevel::RefinedAssignment {
+        pbsamp_to_group,
+        num_groups_per_level,
+    };
+
+    info!(
+        "Inherited partition: {} cells, {} pb-samples, finest k={} (skipped BBKNN + DC-SBM refinement)",
+        ncols, num_pb, refined.num_groups_per_level[0]
+    );
+
+    // From here the path matches refine_and_collect_single_layer's
+    // post-refinement tail: assign groups, collect stats, fit Gamma
+    // posteriors level-by-level via merge_stat.
+    let k_finest = refined.num_groups_per_level[0];
+    let mut cell_to_group_finest = vec![0usize; ncols];
+    for (pbsamp, cells) in pb_sample_to_cells.iter().enumerate() {
+        let g = refined.pbsamp_to_group[0][pbsamp];
+        for &c in cells {
+            cell_to_group_finest[c] = g;
+        }
+    }
+    let finest_str = pad_numeric_labels(&cell_to_group_finest, k_finest);
+    data_vec.assign_groups(&finest_str, None);
+    debug_assert_eq!(data_vec.num_groups(), k_finest);
+
+    let mut fine_stat = CollapsedStat::new(num_features, k_finest, num_batches);
+    info!("Collecting basic stats over {} groups ...", k_finest);
+    data_vec.collect_basic_stat(&mut fine_stat)?;
+    if num_batches >= 2 {
+        info!(
+            "Collecting per-batch stats over {} groups × {} batches ...",
+            k_finest, num_batches
+        );
+        data_vec.collect_batch_stat(&mut fine_stat)?;
+        let batch_knn = data_vec
+            .batch_knn_lookup()
+            .ok_or_else(|| anyhow::anyhow!("batch_knn_lookup not built"))?;
+        info!(
+            "Collecting cross-batch matched stats (knn={}) over {} pb-samples ...",
+            knn, num_pb
+        );
+        collect_matched_stat_coarse(
+            &pb_samples.layout,
+            &pb_samples.gene_sums,
+            &refined.pbsamp_to_group[0],
+            batch_knn.as_slice(),
+            knn,
+            &mut fine_stat,
+        )?;
+    }
+
+    let mut results: Vec<CollapsedOut> = Vec::with_capacity(num_levels);
+    info!(
+        "Level 1/{}: inherited k={} (finest; {} cells)",
+        num_levels, k_finest, ncols
+    );
+    let finest_out = optimize(
+        &fine_stat,
+        (1.0, 1.0),
+        opt_iter,
+        &format!("Inherit L1/{}", num_levels),
+    )?;
+    results.push(finest_out);
+
+    let mut prev_stat = fine_stat;
+    for level in 1..num_levels {
+        let k_prev = refined.num_groups_per_level[level - 1];
+        let k_level = refined.num_groups_per_level[level];
+        let fine_to_coarse = fine_to_coarse_from_refined(
+            &refined.pbsamp_to_group[level - 1],
+            &refined.pbsamp_to_group[level],
+            k_prev,
+        );
+        let coarse_stat = merge_stat(&prev_stat, &fine_to_coarse, k_level);
+        info!(
+            "Level {}/{}: inherited k={} (merged from {})",
+            level + 1,
+            num_levels,
+            k_level,
+            k_prev
+        );
+        let level_opt_iter = (opt_iter / 2).max(10);
+        let out = optimize(
+            &coarse_stat,
+            (1.0, 1.0),
+            level_opt_iter,
+            &format!("Inherit L{}/{}", level + 1, num_levels),
+        )?;
+        results.push(out);
+        prev_stat = coarse_stat;
+    }
+
+    // Re-derive cell_to_pb_per_level from the post-modal-vote groups so
+    // the returned struct is self-consistent — small drift vs the
+    // inherited values is expected when pb-samples spanned multiple
+    // source groups (handled by majority).
+    let mut cell_to_pb_per_level_out: Vec<Vec<usize>> = Vec::with_capacity(num_levels);
+    for level in 0..num_levels {
+        let mut c2g = vec![0usize; ncols];
+        for (pbsamp, cells) in pb_sample_to_cells.iter().enumerate() {
+            let g = refined.pbsamp_to_group[level][pbsamp];
+            for &c in cells {
+                c2g[c] = g;
+            }
+        }
+        cell_to_pb_per_level_out.push(c2g);
+    }
+
+    Ok(MultilevelCollapseOut {
+        levels: results,
+        cell_to_pb_per_level: cell_to_pb_per_level_out,
+    })
+}
+
+/// Modal `lvl[c]` over `c ∈ cells`. Returns 0 when `cells` is empty.
+/// Fast small-Vec path for the common case where pb-samples contain
+/// just a handful of cells.
+fn modal_group(cells: &[usize], lvl: &[usize]) -> usize {
+    match cells {
+        [] => 0,
+        [c] => lvl[*c],
+        _ => {
+            use rustc_hash::FxHashMap;
+            let mut counts: FxHashMap<usize, usize> = FxHashMap::default();
+            for &c in cells {
+                *counts.entry(lvl[c]).or_insert(0) += 1;
+            }
+            counts
+                .into_iter()
+                .max_by_key(|&(_, n)| n)
+                .map(|(g, _)| g)
+                .unwrap_or(0)
+        }
+    }
+}
+
 impl MultilevelCollapsingOps for SparseIoVec {
     type LevelOutput = CollapsedOut;
 

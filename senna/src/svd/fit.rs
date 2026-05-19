@@ -264,6 +264,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         // `cluster` is the natural default.
         default_colour_by: "cluster",
         has_latent: true,
+        has_cell_to_pb: false,
     })?;
 
     Ok(())
