@@ -17,3 +17,15 @@ pub mod joint_topic;
 pub mod nb_mixture;
 pub mod poisson;
 pub mod topic;
+
+pub use bipartite::{
+    BipartiteDecoder, BipartiteLikelihood, BlockModelMultinomial, GaussianLikelihood,
+    NbLikelihood, PoissonLikelihood, SymmetricMultinomial,
+};
+pub use delta_topic::DeltaTopicDecoder;
+pub use dyn_decoder::{create_dyn_decoder, DynDecoderModuleT};
+pub use embedded_topic::EmbeddedTopicDecoder;
+pub use joint_topic::JointTopicDecoder;
+pub use nb_mixture::NbMixtureTopicDecoder;
+pub use poisson::PoissonDecoder;
+pub use topic::{MultinomTopicDecoder, NbTopicDecoder};

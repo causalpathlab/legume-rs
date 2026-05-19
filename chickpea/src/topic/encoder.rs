@@ -1,5 +1,5 @@
 use candle_util::candle_core::{Result, Tensor};
-use candle_util::encoder::indexed::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
+use candle_util::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
 use candle_util::loss::gaussian_kl_loss;
 use candle_util::candle_nn::{ops, VarBuilder, VarMap};
 use candle_util::value_transform::ValueEmbeddingConfig;

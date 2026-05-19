@@ -12,9 +12,9 @@ use super::eval_indexed::{dense_to_indexed, refine_indexed_topic_proportions, Pe
 use crate::embed_common::*;
 
 use candle_core::{Device, Tensor};
-use candle_util::decoder::embedded_topic::EmbeddedTopicDecoder;
-use candle_util::encoder::indexed::IndexedEmbeddingEncoder;
-use candle_util::traits::indexed::*;
+use candle_util::decoder::EmbeddedTopicDecoder;
+use candle_util::encoder::IndexedEmbeddingEncoder;
+use candle_util::traits::*;
 use candle_util::topic_refinement::TopicRefinementConfig;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 

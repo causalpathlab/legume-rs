@@ -11,3 +11,18 @@ pub mod indexed;
 pub mod joint;
 pub mod loader;
 pub mod loader_util;
+
+pub use cell_grouped::{
+    pack_eval_minibatch, CellEvalPackArgs, CellGroupedArgs, CellGroupedInMemoryData,
+    CellGroupedMinibatchData,
+};
+pub use indexed::{
+    build_indexed_samples, build_sparse_edges_from_tensor, build_union_and_scatter_pos,
+    compute_log_selection_freq, csc_columns_to_indexed_samples, gather_per_feature_at_indices,
+    labeled_bar, pack_indices_values, slice_log_q_at_union, sum_sample_values,
+    top_k_indices_weighted, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData,
+    IndexedMinibatchData, IndexedSample, SparseEdgeBatch,
+};
+pub use joint::{JointDataLoader, JointInMemoryArgs, JointInMemoryData, JointMinibatchData};
+pub use loader::{DataLoader, InMemoryArgs, InMemoryData, MinibatchData};
+pub use loader_util::{copy_shuffled, take_lb_ub, take_shuffled, Minibatches};

@@ -22,10 +22,10 @@ use crate::topic::predict_common::{nb_fisher_weight, solve_delta_from_sums, Delt
 
 use crate::logging::new_progress_bar;
 use candle_core::{Device, Tensor};
-use candle_util::encoder::indexed::IndexedEmbeddingEncoder;
-use candle_util::encoder::softmax::LogSoftmaxEncoder;
-use candle_util::traits::indexed::IndexedEncoderT;
-use candle_util::traits::model::EncoderModuleT;
+use candle_util::encoder::IndexedEmbeddingEncoder;
+use candle_util::encoder::LogSoftmaxEncoder;
+use candle_util::traits::IndexedEncoderT;
+use candle_util::traits::EncoderModuleT;
 use data_beans::sparse_io_vector::SparseIoVec;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use indicatif::ParallelProgressIterator;

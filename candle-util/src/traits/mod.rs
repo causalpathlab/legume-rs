@@ -6,3 +6,10 @@
 
 pub mod indexed;
 pub mod model;
+
+pub use indexed::{CellEncoderT, IndexedDecoderT, IndexedEncoderT};
+pub use model::{
+    joint_multinomial_llik, DecoderModuleT, EncoderModuleT, EssLlikFn, JointDecoderModuleT,
+    JointEncoderModuleT, MatchedDecoderData, MatchedDecoderModuleT, MatchedDecoderRecon,
+    MatchedEncoderData, MatchedEncoderLatent, MatchedEncoderModuleT, NewDecoder,
+};
