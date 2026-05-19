@@ -68,6 +68,40 @@ impl PhaseTimers {
     }
 }
 
+/// Rescale every grad in-place so the global L2 norm is at most `max_norm`.
+///
+/// The `+1e-6` in the inverse-norm protects against zero-norm degeneracy;
+/// the `clamp(0, 1)` makes this a no-op when the actual norm is already
+/// below `max_norm`. Caller guarantees `max_norm > 0`.
+fn apply_global_l2_clip(
+    grads: &mut candle_core::backprop::GradStore,
+    max_norm: f64,
+) -> anyhow::Result<()> {
+    let ids: Vec<_> = grads.get_ids().copied().collect();
+    let mut sumsq: Option<Tensor> = None;
+    for id in &ids {
+        if let Some(g) = grads.get_id(*id) {
+            let s = g.sqr()?.sum_all()?;
+            sumsq = Some(match sumsq {
+                None => s,
+                Some(prev) => (prev + s)?,
+            });
+        }
+    }
+    let Some(sumsq) = sumsq else {
+        return Ok(());
+    };
+    let inv_norm = sumsq.sqrt()?.affine(1.0, 1e-6)?.powf(-1.0)?;
+    let scale = inv_norm.affine(max_norm, 0.0)?.clamp(0.0_f64, 1.0_f64)?;
+    for id in &ids {
+        if let Some(g) = grads.get_id(*id) {
+            let scaled = g.broadcast_mul(&scale)?;
+            grads.insert_id(*id, scaled);
+        }
+    }
+    Ok(())
+}
+
 /// Backward + global-L2-norm gradient clipping + optimizer step.
 /// `max_norm <= 0` skips clipping (falls back to plain `backward_step`).
 ///
@@ -84,31 +118,7 @@ pub fn clip_grads_and_step<O: Optimizer>(
         return Ok(());
     }
     let mut grads = loss.backward()?;
-    let ids: Vec<_> = grads.get_ids().copied().collect();
-
-    let mut sumsq: Option<Tensor> = None;
-    for id in &ids {
-        if let Some(g) = grads.get_id(*id) {
-            let s = g.sqr()?.sum_all()?;
-            sumsq = Some(match sumsq {
-                None => s,
-                Some(prev) => (prev + s)?,
-            });
-        }
-    }
-    let Some(sumsq) = sumsq else {
-        return Ok(());
-    };
-
-    let inv_norm = sumsq.sqrt()?.affine(1.0, 1e-6)?.powf(-1.0)?;
-    let scale = inv_norm.affine(max_norm, 0.0)?.clamp(0.0_f64, 1.0_f64)?;
-
-    for id in &ids {
-        if let Some(g) = grads.get_id(*id) {
-            let scaled = g.broadcast_mul(&scale)?;
-            grads.insert_id(*id, scaled);
-        }
-    }
+    apply_global_l2_clip(&mut grads, max_norm)?;
     opt.step(&grads)?;
     Ok(())
 }
@@ -123,31 +133,8 @@ pub fn clip_and_step_dense(
     mut grads: candle_core::backprop::GradStore,
     max_norm: f64,
 ) -> anyhow::Result<()> {
-    if max_norm <= 0.0 {
-        adam.step(&grads)?;
-        return Ok(());
-    }
-    let ids: Vec<_> = grads.get_ids().copied().collect();
-    let mut sumsq: Option<Tensor> = None;
-    for id in &ids {
-        if let Some(g) = grads.get_id(*id) {
-            let s = g.sqr()?.sum_all()?;
-            sumsq = Some(match sumsq {
-                None => s,
-                Some(prev) => (prev + s)?,
-            });
-        }
-    }
-    let Some(sumsq) = sumsq else {
-        return Ok(());
-    };
-    let inv_norm = sumsq.sqrt()?.affine(1.0, 1e-6)?.powf(-1.0)?;
-    let scale = inv_norm.affine(max_norm, 0.0)?.clamp(0.0_f64, 1.0_f64)?;
-    for id in &ids {
-        if let Some(g) = grads.get_id(*id) {
-            let scaled = g.broadcast_mul(&scale)?;
-            grads.insert_id(*id, scaled);
-        }
+    if max_norm > 0.0 {
+        apply_global_l2_clip(&mut grads, max_norm)?;
     }
     adam.step(&grads)?;
     Ok(())
