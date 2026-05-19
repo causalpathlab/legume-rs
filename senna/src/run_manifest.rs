@@ -1,7 +1,3 @@
-// Several constructors / savers here are consumed by the `senna topic`
-// / `layout` wiring landing in later passes — silence dead-code until then.
-#![allow(dead_code)]
-
 //! Run manifest — the single JSON artifact that ties a senna run
 //! together across subcommands.
 //!

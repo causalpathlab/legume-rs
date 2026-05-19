@@ -355,10 +355,7 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
                     args.feature_network.is_none(),
                     "--freeze-feature-embedding is incompatible with --feature-network"
                 );
-                let kind: Option<auxiliary_data::feature_names::FeatureNameKind> =
-                    args.feature_name_kind.clone().into();
-                let kind = kind
-                    .unwrap_or(auxiliary_data::feature_names::FeatureNameKind::Gene { delim: '_' });
+                let kind = args.feature_name_kind.resolve_or_gene();
                 Some(crate::topic::freeze::FrozenFeatureSpec::resolve_from_prefix(prefix, kind)?)
             }
         };

@@ -413,6 +413,16 @@ pub enum FeatureNameKindArg {
     Mixed,
 }
 
+impl FeatureNameKindArg {
+    /// Resolve to a concrete [`FeatureNameKind`], defaulting `Auto` to
+    /// `Gene { delim: '_' }` — the standard for gene-keyed pre-train
+    /// inputs (bge / fne / topic-family dictionaries).
+    pub fn resolve_or_gene(&self) -> auxiliary_data::feature_names::FeatureNameKind {
+        Option::<auxiliary_data::feature_names::FeatureNameKind>::from(self.clone())
+            .unwrap_or(auxiliary_data::feature_names::FeatureNameKind::Gene { delim: '_' })
+    }
+}
+
 impl From<FeatureNameKindArg> for Option<auxiliary_data::feature_names::FeatureNameKind> {
     fn from(arg: FeatureNameKindArg) -> Self {
         use auxiliary_data::feature_names::FeatureNameKind;
@@ -482,11 +492,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
                      (SGC γ-gated graph diffusion has no learnable target when ρ is frozen)"
                 );
             }
-            let kind: Option<auxiliary_data::feature_names::FeatureNameKind> =
-                args.feature_name_kind.clone().into();
             // Pre-train inputs are gene-keyed; row names aren't available yet.
-            let kind =
-                kind.unwrap_or(auxiliary_data::feature_names::FeatureNameKind::Gene { delim: '_' });
+            let kind = args.feature_name_kind.resolve_or_gene();
             Some(crate::topic::freeze::FrozenFeatureSpec::resolve_from_prefix(prefix, kind)?)
         }
     };
