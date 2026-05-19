@@ -39,11 +39,7 @@ pub struct SrtLinkCommunityEtmArgs {
     )]
     pub embedding_dim: usize,
 
-    #[arg(
-        long,
-        default_value_t = 100,
-        help = "Number of training epochs"
-    )]
+    #[arg(long, default_value_t = 100, help = "Number of training epochs")]
     pub num_epochs: usize,
 
     #[arg(

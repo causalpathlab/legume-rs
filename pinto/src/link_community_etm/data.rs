@@ -28,10 +28,7 @@ pub fn read_cells_csc(data_vec: &SparseIoVec) -> anyhow::Result<CscMatrix<f32>> 
 /// `cell_counts` is the cell × gene sparse matrix in `[G, N]` orientation
 /// (genes as rows, cells as columns) — the layout produced by
 /// [`read_cells_csc`].
-pub fn build_edge_profiles(
-    cell_counts: &CscMatrix<f32>,
-    edges: &[(usize, usize)],
-) -> Mat {
+pub fn build_edge_profiles(cell_counts: &CscMatrix<f32>, edges: &[(usize, usize)]) -> Mat {
     let n_genes = cell_counts.nrows();
     let n_edges = edges.len();
 
@@ -78,10 +75,7 @@ pub fn build_super_cell_counts(
 
 /// Per-super-edge profile matrix `[E_super, G]` where row `e` is
 /// `super_counts[a] + super_counts[b]` for super-edge `(a, b)`.
-pub fn build_super_edge_profiles(
-    super_counts: &[Vec<f32>],
-    super_edges: &[(usize, usize)],
-) -> Mat {
+pub fn build_super_edge_profiles(super_counts: &[Vec<f32>], super_edges: &[(usize, usize)]) -> Mat {
     let n_genes = super_counts.first().map(|r| r.len()).unwrap_or(0);
     let n_edges = super_edges.len();
     let mut flat = vec![0f32; n_edges * n_genes];

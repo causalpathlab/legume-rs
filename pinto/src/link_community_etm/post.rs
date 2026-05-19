@@ -8,9 +8,9 @@
 
 use anyhow::Context;
 use candle_util::candle_core::{DType, Device, Tensor};
+use candle_util::data::top_k_indices_weighted;
 use candle_util::decoder::EmbeddedTopicDecoder;
 use candle_util::encoder::IndexedEmbeddingEncoder;
-use candle_util::data::top_k_indices_weighted;
 use candle_util::traits::*;
 use log::info;
 use matrix_util::traits::{ConvertMatOps, IoOps};
@@ -85,10 +85,21 @@ pub fn run_inference_and_write(args: InferenceArgs) -> anyhow::Result<()> {
         args.cell_names,
     )?;
 
-    write_propensity(&propensity, args.cell_names, args.n_communities, args.out_prefix)?;
+    write_propensity(
+        &propensity,
+        args.cell_names,
+        args.n_communities,
+        args.out_prefix,
+    )?;
     write_gene_community_melted(&beta_gk, args.gene_names, args.out_prefix)?;
     write_latent(&pi_ek, args.edges, args.cell_names, args.out_prefix)?;
-    write_embedding_table(&rho_gh, args.gene_names, "gene", "gene_embeddings", args.out_prefix)?;
+    write_embedding_table(
+        &rho_gh,
+        args.gene_names,
+        "gene",
+        "gene_embeddings",
+        args.out_prefix,
+    )?;
     let community_names = community_col_names(alpha_kh.nrows());
     write_embedding_table(
         &alpha_kh,

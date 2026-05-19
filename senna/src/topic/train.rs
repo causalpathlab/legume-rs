@@ -119,8 +119,7 @@ where
     let hook_ref: &candle_util::vae::LevelLossHook = &hook_owned;
     let candle_cfg = make_candle_config(config, Some(hook_ref));
 
-    let scores =
-        candle_util::vae::topic::train_mixed(&level_refs, encoder, decoders, &candle_cfg)?;
+    let scores = candle_util::vae::topic::train_mixed(&level_refs, encoder, decoders, &candle_cfg)?;
     Ok(TrainScores {
         llik: scores.llik,
         kl: scores.kl,

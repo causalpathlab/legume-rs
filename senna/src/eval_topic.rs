@@ -8,8 +8,8 @@ use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs}
 use candle_util::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
 use candle_util::decoder::*;
 use candle_util::encoder::*;
-use candle_util::traits::*;
 use candle_util::topic_refinement::TopicRefinementConfig;
+use candle_util::traits::*;
 use data_beans::sparse_io_vector::SparseIoVec;
 use log::info;
 

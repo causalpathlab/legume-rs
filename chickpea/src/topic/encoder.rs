@@ -1,12 +1,7 @@
 use candle_util::candle_core::{Result, Tensor};
+use candle_util::candle_nn::{ops, VarBuilder, VarMap};
 use candle_util::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
 use candle_util::loss::gaussian_kl_loss;
-use candle_util::candle_nn::{ops, VarBuilder, VarMap};
-use candle_util::value_transform::ValueEmbeddingConfig;
-
-/// log1p-scale value-embedding bins for the indexed experts. Fixed at the
-/// senna default; expose as an `EncoderArgs` knob if chickpea needs it tuned.
-const N_VALUE_BINS: usize = 16;
 
 /// Inputs for the encoder forward pass.
 pub struct EncoderInput<'a> {
@@ -57,9 +52,6 @@ impl ChickpeaEncoder {
                 n_topics,
                 embedding_dim,
                 layers: hidden_layers,
-                value_embedding: ValueEmbeddingConfig {
-                    n_value_bins: N_VALUE_BINS,
-                },
                 use_gcn: false,
             },
             varmap,
@@ -72,9 +64,6 @@ impl ChickpeaEncoder {
                 n_topics,
                 embedding_dim,
                 layers: hidden_layers,
-                value_embedding: ValueEmbeddingConfig {
-                    n_value_bins: N_VALUE_BINS,
-                },
                 use_gcn: false,
             },
             varmap,

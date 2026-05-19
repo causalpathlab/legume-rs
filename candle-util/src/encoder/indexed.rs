@@ -1,10 +1,10 @@
+use crate::data::indexed::SparseEdgeBatch;
+use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
+use crate::nn::batch_norm;
 use crate::nn::gcn::GcnBlock;
 use crate::nn::layers::*;
-use crate::nn::batch_norm;
-use crate::data::indexed::SparseEdgeBatch;
 use crate::traits::indexed::*;
-use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
-use crate::value_transform::{count_rate_clean, ValueEmbedding, ValueEmbeddingConfig};
+use crate::value_transform::anscombe_lite;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 
@@ -19,7 +19,6 @@ pub struct IndexedEmbeddingEncoder {
     n_topics: usize,
     embedding_dim: usize,
     feature_embeddings: Tensor, // [D, H] learnable
-    value_embedding: ValueEmbedding,
     /// Optional γ-gated GCN block applied to the per-slot value-gated
     /// embedding `[N, K, H]` before pooling. Present iff
     /// `IndexedEmbeddingEncoderArgs::use_gcn` was true at construction.
@@ -35,10 +34,6 @@ pub struct IndexedEmbeddingEncoderArgs<'a> {
     pub n_topics: usize,
     pub embedding_dim: usize,
     pub layers: &'a [usize],
-    /// The learned intensity-embedding value transform — dual binned
-    /// lookup + per-dimension sigmoid gate on ρ. This is the only value
-    /// transform (the fixed Anscombe scalar has been retired here).
-    pub value_embedding: ValueEmbeddingConfig,
     /// When true, construct a [`GcnBlock`] on the per-slot `[N, K, H]`
     /// representation. The caller is responsible for providing the
     /// per-minibatch [`SparseEdgeBatch`] at forward time; when no edge
@@ -66,12 +61,6 @@ impl IndexedEmbeddingEncoder {
             init_ws,
         )?;
 
-        let value_embedding = ValueEmbedding::new(
-            args.value_embedding,
-            args.embedding_dim,
-            vb.pp("nn.enc.value"),
-        )?;
-
         let gcn = if args.use_gcn {
             Some(GcnBlock::new(args.embedding_dim, vb.pp("nn.enc.gcn"))?)
         } else {
@@ -94,7 +83,6 @@ impl IndexedEmbeddingEncoder {
             n_topics: args.n_topics,
             embedding_dim: args.embedding_dim,
             feature_embeddings,
-            value_embedding,
             gcn,
             fc,
             bn_z,
@@ -142,11 +130,14 @@ impl IndexedEmbeddingEncoder {
     /// 3. h_nh   = Σ_k v_norm[i, k] · E_nkh[i, k, :]                → [N, H]
     ///
     /// `values_null` (per-cell μ_residual) and `values_mean` (per-gene
-    /// μ_d) are composed into the count-rate "clean" value
+    /// μ_d) compose into the count-rate "clean" value
     /// `values / (null · mean)` — the cell's biological-deviation rate.
-    /// That clean value is then run through the learned intensity
-    /// embedding, which bins it at two scales and emits a per-dimension
-    /// sigmoid gate `[N, K, H]` on ρ.
+    /// That clean rate is variance-stabilised by `2·sqrt(clean + 3/8)`
+    /// (Anscombe) and used as a per-slot scalar gate on ρ. The output is
+    /// **always non-negative**, so genes at typical expression still
+    /// contribute their full ρ-row magnitude to the pool — the cell
+    /// signature is the value-weighted sum across all top-K slots, not
+    /// just the slots that deviate from baseline.
     fn preprocess_indexed(
         &self,
         indices: &Tensor,
@@ -165,10 +156,14 @@ impl IndexedEmbeddingEncoder {
             .index_select(&flat_idx, 0)?
             .reshape((n, k, h))?; // [N, K, H]
 
-        // Per-slot learned gate on ρ — [N, K, H], broadcast onto `e_nk_h`.
-        let clean = count_rate_clean(values, values_null, values_mean)?;
-        let w = self.value_embedding.gate(&clean)?;
-        let v_nkh = e_nk_h.broadcast_mul(&w)?; // [N, K, H]
+        // Per-slot Anscombe scalar gate on ρ — broadcast across H.
+        // `anscombe_lite` divides by (batch null × per-gene mean) then
+        // applies `2·sqrt(clean + 3/8)`. The subtractive `a_y − a_null`
+        // form (f41754c) zeros out baseline slots and collapses the pool
+        // under per-cell LN on batch-corrected data; divisive Anscombe
+        // keeps every slot's magnitude information and avoids that.
+        let a_nk = anscombe_lite(values, values_null, values_mean)?; // [N, K]
+        let v_nkh = e_nk_h.broadcast_mul(&a_nk.unsqueeze(2)?)?; // [N, K, H]
 
         // γ-gated sparse GCN diffusion. Block is identity at init
         // (γ=0) so downstream FC+BN sees the no-graph training
@@ -268,7 +263,6 @@ mod tests {
                 n_topics: 2,
                 embedding_dim,
                 layers: &layers,
-                value_embedding: ValueEmbeddingConfig { n_value_bins: 8 },
                 use_gcn: false,
             },
             &varmap,

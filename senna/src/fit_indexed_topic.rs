@@ -11,7 +11,6 @@ use crate::topic::train_indexed::{
 
 use candle_util::decoder::EmbeddedTopicDecoder;
 use candle_util::encoder::*;
-use candle_util::value_transform::ValueEmbeddingConfig;
 use log::warn;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 
@@ -143,9 +142,38 @@ pub struct IndexedTopicArgs {
 
     #[arg(
         long,
+        conflicts_with = "freeze_feature_embedding",
+        help = "Warm-start ρ from a prior senna run (typically `senna bge`). \
+                Same layout resolution as `--freeze-feature-embedding` \
+                (gbe `{prefix}.dictionary.parquet` or topic \
+                `{prefix}.feature_embedding.parquet`), same strict gene-name \
+                intersection. The difference is that AdamW continues to \
+                update ρ during training — this just gives a biology-aware \
+                starting point instead of random Kaiming-normal init. \
+                Pairs well with `senna bge` pre-training: cheap NCE-based \
+                gene embedding that's robust to batch effects, used as the \
+                warm-start here. Mutually exclusive with \
+                `--freeze-feature-embedding`."
+    )]
+    init_feature_embedding: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Cross-entropy penalty λ on β toward the anchor prior — \
+                anchors topic indices to Gram-Schmidt anchor gene sets \
+                derived from the finest-level pseudobulks. Breaks the \
+                K-way permutation symmetry of the ETM-factorized β and \
+                is the load-bearing anti-mode-collapse force for this \
+                model. 0 disables; default 1.0."
+    )]
+    anchor_penalty: f32,
+
+    #[arg(
+        long,
         default_value_t = 0.0,
         help = "AdamW decoupled weight decay applied uniformly to every \
-                parameter (encoder ρ + α + FC + BN + GCN γ + ValueEmbedding). \
+                parameter (encoder ρ + α + FC + BN + GCN γ). \
                 Per-step post-update shrinkage; doesn't enter the backward \
                 graph. Default 0.0 (off, i.e. plain Adam despite the name). \
                 Typical: 1e-5 to 1e-4."
@@ -224,25 +252,16 @@ pub struct IndexedTopicArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "Per-feature embedding dimension H (0 = auto = 2 × n-latent-topics)",
+        help = "Per-feature embedding dimension H (0 = auto = 3 × n-latent-topics)",
         long_help = "Dimension H of the per-gene embedding ρ ∈ ℝ^{D×H}. ρ is shared\n\
                      between encoder (value-weighted pool over each cell's top-K\n\
                      features) and decoder (β_kd = log_softmax_d(α_k · ρ_dᵀ), with\n\
                      α ∈ ℝ^{K×H} as topic embeddings). β is rank ≤ H, so H must be\n\
                      ≥ K (--n-latent-topics) for K independent topics to be\n\
-                     representable. Default 0 resolves to 2K for headroom. Set\n\
+                     representable. Default 0 resolves to 3K for headroom. Set\n\
                      explicitly to override; H < K errors at startup."
     )]
     embedding_dim: usize,
-
-    #[arg(
-        long,
-        default_value_t = 16,
-        help = "Intensity-embedding bin count (log1p-scale value bins). \
-                A resolution knob, not a perf one — the per-bin width is H and \
-                the lookup cost is independent of bin count."
-    )]
-    n_value_bins: usize,
 
     #[command(flatten)]
     amort_refine: crate::refine_weighting::AmortRefineArgs,
@@ -402,8 +421,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
 
     let k = args.n_latent_topics;
     let h = if args.embedding_dim == 0 {
-        let auto = 2 * k;
-        info!("--embedding-dim not set; defaulting to 2 × K = {auto}");
+        let auto = 3 * k;
+        info!("--embedding-dim not set; defaulting to 3 × K = {auto}");
         auto
     } else {
         args.embedding_dim
@@ -413,16 +432,16 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             "--embedding-dim ({h}) < --n-latent-topics ({k}). β = softmax(α·ρᵀ) is rank ≤ H, \
              so at most {h} linearly independent topics can be represented — the remaining \
              {} would collapse onto linear combinations. Pass --embedding-dim >= {k} \
-             (recommended: {} for headroom), or omit --embedding-dim to use the 2K default.",
+             (recommended: {} for headroom), or omit --embedding-dim to use the 3K default.",
             k - h,
-            k * 2,
+            k * 3,
         );
     }
     if h < 2 * k {
         warn!(
             "--embedding-dim ({h}) is at the β-rank limit for --n-latent-topics ({k}); \
              topics may collapse during training. Recommend --embedding-dim >= {} for headroom.",
-            k * 2,
+            k * 3,
         );
     }
 
@@ -441,31 +460,40 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     } else {
         args.feature_network.as_deref()
     };
-    // Freeze resolution — must happen before we pick the feature_mask_fn
-    // since freeze owns the mask when active.
-    let frozen_spec: Option<crate::topic::freeze::FrozenFeatureSpec> =
-        match args.freeze_feature_embedding.as_deref() {
-            None => None,
-            Some(prefix) => {
+    // ρ pre-training resolution — either --freeze-feature-embedding (lock
+    // ρ after install) or --init-feature-embedding (warm-start ρ, AdamW
+    // continues to update it). Mutually exclusive at the CLI level. In
+    // both cases the spec drives the same mask + materialize machinery —
+    // only the AdamW-exclusion flag differs.
+    let pretrained_prefix = args
+        .freeze_feature_embedding
+        .as_deref()
+        .or(args.init_feature_embedding.as_deref());
+    let freeze_rho = args.freeze_feature_embedding.is_some();
+    let pretrained_spec: Option<crate::topic::freeze::FrozenFeatureSpec> = match pretrained_prefix {
+        None => None,
+        Some(prefix) => {
+            if freeze_rho {
                 anyhow::ensure!(
                     args.feature_network.is_none(),
                     "--freeze-feature-embedding is incompatible with --feature-network \
                      (SGC γ-gated graph diffusion has no learnable target when ρ is frozen)"
                 );
-                let kind: Option<auxiliary_data::feature_names::FeatureNameKind> =
-                    args.feature_name_kind.clone().into();
-                // Auto-detect would require row names we don't have yet; default
-                // to Gene { delim: '_' } since freeze inputs are always gene-keyed.
-                let kind = kind
-                    .unwrap_or(auxiliary_data::feature_names::FeatureNameKind::Gene { delim: '_' });
-                Some(crate::topic::freeze::FrozenFeatureSpec::resolve_from_prefix(prefix, kind)?)
             }
-        };
+            let kind: Option<auxiliary_data::feature_names::FeatureNameKind> =
+                args.feature_name_kind.clone().into();
+            // Auto-detect would require row names we don't have yet; default
+            // to Gene { delim: '_' } since pre-train inputs are gene-keyed.
+            let kind =
+                kind.unwrap_or(auxiliary_data::feature_names::FeatureNameKind::Gene { delim: '_' });
+            Some(crate::topic::freeze::FrozenFeatureSpec::resolve_from_prefix(prefix, kind)?)
+        }
+    };
 
     let feature_network = crate::topic::common::setup_feature_network(restrict_path, net_opts);
-    let freeze_mask_holder = frozen_spec.as_ref().map(|s| s.mask_fn());
+    let pretrained_mask_holder = pretrained_spec.as_ref().map(|s| s.mask_fn());
     let feature_mask_fn: Option<&crate::topic::common::FeatureMaskFn> = match (
-        freeze_mask_holder.as_deref(),
+        pretrained_mask_holder.as_deref(),
         feature_network.mask_fn.as_deref(),
     ) {
         (Some(fm), _) => Some(fm),
@@ -523,17 +551,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
 
     let dec_context_size = args.decoder_context_size.unwrap_or(args.context_size);
 
-    // Value transform: the learned dual-binned intensity-embedding gate
-    // (Anscombe retired). `n_value_bins` = the number of log1p-scale
-    // value bins.
-    let value_embedding = ValueEmbeddingConfig {
-        n_value_bins: args.n_value_bins,
-    };
-    info!(
-        "intensity-embedding value transform: n_value_bins={} (per-bin width H={})",
-        value_embedding.n_value_bins, h
-    );
-
     // Gene names — needed both for feature-graph resolution (below) and
     // for output artifacts further down.
     let gene_names = data_vec.row_names()?;
@@ -544,18 +561,15 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // Convert FeaturePairGraph → GraphCsr at the encoder's feature axis.
     // The CSR is shared (Arc) across every level's data loader and is
     // also persisted into the model artifact in safetensors form.
-    let feature_graph_csr: Option<
-        std::sync::Arc<candle_util::data::GraphCsr>,
-    > = feature_graph.as_ref().map(|g| {
-        let edges: Vec<(usize, usize)> = g.feature_edges.clone();
-        std::sync::Arc::new(
-            candle_util::data::GraphCsr::from_edges(
+    let feature_graph_csr: Option<std::sync::Arc<candle_util::data::GraphCsr>> =
+        feature_graph.as_ref().map(|g| {
+            let edges: Vec<(usize, usize)> = g.feature_edges.clone();
+            std::sync::Arc::new(candle_util::data::GraphCsr::from_edges(
                 n_features_full,
                 &edges,
                 None,
-            ),
-        )
-    });
+            ))
+        });
     if let Some(ref g) = feature_graph_csr {
         info!(
             "feature-network: {} undirected entries (directed CSR entries: {}); \
@@ -571,7 +585,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             n_topics,
             embedding_dim: h,
             layers: &args.encoder_layers,
-            value_embedding,
             use_gcn: feature_graph_csr.is_some(),
         },
         &parameters,
@@ -593,28 +606,30 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         })
         .collect();
 
-    // Overwrite ρ in place with the frozen values BEFORE warm-start.
-    // The encoder/decoder both hold a Tensor reference into the same Var,
-    // so a single `var.set(...)` updates everywhere. The Var stays in the
-    // VarMap (round-trips through safetensors); the optimizer excludes it
-    // via `trainable_vars` below — see `train_indexed.rs`.
-    if let Some(spec) = frozen_spec.as_ref() {
+    // Overwrite ρ in place with the pre-trained values BEFORE warm-start
+    // from a prior topic checkpoint. The encoder/decoder both hold a
+    // Tensor reference into the same Var, so a single `var.set(...)`
+    // updates everywhere. The Var stays in the VarMap (round-trips
+    // through safetensors); for freeze mode the optimizer excludes it
+    // via `trainable_vars` (see `train_indexed.rs`), for init mode it
+    // keeps updating.
+    if let Some(spec) = pretrained_spec.as_ref() {
         anyhow::ensure!(
             args.init_from.is_none(),
-            "--freeze-feature-embedding is incompatible with --init-from \
-             (warm-start would overwrite the frozen ρ from a different checkpoint)"
+            "ρ pre-training is incompatible with --init-from \
+             (warm-start would overwrite the pre-trained ρ from a different checkpoint)"
         );
         let host = spec.materialize(&gene_names)?;
         anyhow::ensure!(
             host.h == h,
-            "frozen feature embedding has H={} but --embedding-dim={}",
+            "pre-trained feature embedding has H={} but --embedding-dim={}",
             host.h,
             h
         );
         anyhow::ensure!(
             host.e_feat.nrows() == n_features_full,
-            "frozen ρ has {} rows but the post-mask gene axis has {} — \
-             freeze loader and feature-mask disagree (this is a bug, please report)",
+            "pre-trained ρ has {} rows but the post-mask gene axis has {} — \
+             loader and feature-mask disagree (this is a bug, please report)",
             host.e_feat.nrows(),
             n_features_full
         );
@@ -624,11 +639,19 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             &host.e_feat,
             &dev,
         )?;
-        info!(
-            "Freeze mode: ρ seeded from {} (D={}, H={}); encoder/decoders share frozen ρ, \
-             only α + FC + BN (+ GCN γ + value-embedding) train",
-            spec.dictionary_path, n_features_full, h
-        );
+        if freeze_rho {
+            info!(
+                "Freeze mode: ρ seeded from {} (D={}, H={}); encoder/decoders share frozen ρ, \
+                 only α + FC + BN (+ GCN γ) train",
+                spec.dictionary_path, n_features_full, h
+            );
+        } else {
+            info!(
+                "Warm-start: ρ initialised from {} (D={}, H={}); AdamW continues to update it \
+                 alongside α + FC + BN (+ GCN γ)",
+                spec.dictionary_path, n_features_full, h
+            );
+        }
     }
 
     if let Some(prefix) = args.init_from.as_deref() {
@@ -644,7 +667,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
                 encoder_hidden: &args.encoder_layers,
                 level_decoder_dims: &vec![n_features_full; num_levels],
                 embedding_dim: Some(h),
-                value_embedding: Some(value_embedding.n_value_bins),
             },
         )?;
     }
@@ -695,6 +717,28 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // already computed for shortlist selection.
     let feature_fisher_weights = shortlist_weights.clone();
 
+    // Anchor-prior CE penalty: Gram-Schmidt anchors selected on the
+    // finest-level pseudobulks give each topic k a per-gene prior simplex
+    // (rows of `[K, D]`), which we cross-entropy against
+    // `β_kd = log_softmax_d(α · ρᵀ)` at every minibatch. This is the
+    // only K-way symmetry-breaking force on the ETM-factorized β —
+    // without it the model collapses onto one or two dominant topics.
+    let anchor_tensors: Option<Vec<candle_core::Tensor>> = if args.anchor_penalty > 0.0 {
+        info!("Building anchor prior (K={n_topics}) from finest pseudobulks");
+        let anchor_prior = crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(
+            finest_collapsed,
+            n_topics,
+            None,
+        )?;
+        // Indexed decoders all run at D_full — no per-level feature coarsening.
+        let level_coarsenings_none: Vec<
+            Option<data_beans_alg::feature_coarsening::FeatureCoarsening>,
+        > = (0..num_levels).map(|_| None).collect();
+        Some(anchor_prior.per_level_device_tensors(&level_coarsenings_none, &dev)?)
+    } else {
+        None
+    };
+
     let train_config = IndexedTrainConfig {
         parameters: &parameters,
         dev: &dev,
@@ -712,7 +756,13 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         feature_graph: feature_graph_csr.clone(),
         feature_embedding_l2: args.feature_embedding_l2,
         weight_decay: args.weight_decay,
-        frozen_feature_var: frozen_spec.as_ref().map(|_| "enc.feature.embeddings"),
+        frozen_feature_var: if freeze_rho {
+            Some("enc.feature.embeddings")
+        } else {
+            None
+        },
+        anchor_prior_per_level: anchor_tensors.as_deref(),
+        anchor_penalty: args.anchor_penalty,
     };
 
     let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_full, &bulk_deltas) {
@@ -768,7 +818,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         embedding_dim: Some(h),
         enc_context_size: Some(args.context_size),
         dec_context_size: Some(dec_context_size),
-        n_value_bins: Some(value_embedding.n_value_bins),
         theta_mean: None,
         n_graph_edges,
     };
@@ -790,7 +839,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             n_topics,
             embedding_dim: h,
             layers: &args.encoder_layers,
-            value_embedding,
             use_gcn: feature_graph_csr.is_some(),
         },
         &parameters,

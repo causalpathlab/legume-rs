@@ -12,5 +12,5 @@ pub mod nn;
 pub mod sgvb;
 pub mod topic_refinement;
 pub mod traits;
-pub mod value_transform;
 pub mod vae;
+pub mod value_transform;

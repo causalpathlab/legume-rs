@@ -10,9 +10,9 @@
 //! target without cloning.
 
 use super::{clip_grads_and_step, smooth_topics, LevelLossHook, TrainScores};
+use crate::data::indexed::labeled_bar;
 use crate::data::loader::{DataLoader, InMemoryArgs, InMemoryData};
 use crate::decoder::dyn_decoder::DynDecoderModuleT;
-use crate::data::indexed::labeled_bar;
 use crate::loss::topic_likelihood;
 use crate::traits::model::{DecoderModuleT, EncoderModuleT};
 use candle_core::{Device, Tensor};
@@ -92,7 +92,10 @@ where
 
     info!("Mixed multi-level training: {num_levels} levels, {total_epochs} epochs");
 
-    let mut adam = AdamW::new_lr(config.parameters.all_vars(), f64::from(config.learning_rate))?;
+    let mut adam = AdamW::new_lr(
+        config.parameters.all_vars(),
+        f64::from(config.learning_rate),
+    )?;
     let prog_bar = labeled_bar("Epochs", total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);
@@ -183,10 +186,8 @@ pub fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
     let num_levels = level_data.len();
     let total_epochs = config.epochs;
 
-    for (level, (&(mixed, _, _), decoders)) in level_data
-        .iter()
-        .zip(decoders_per_level.iter())
-        .enumerate()
+    for (level, (&(mixed, _, _), decoders)) in
+        level_data.iter().zip(decoders_per_level.iter()).enumerate()
     {
         let names: Vec<&str> = decoders.iter().map(|d| d.decoder_name()).collect();
         info!(
@@ -206,7 +207,10 @@ pub fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
         total_epochs,
     );
 
-    let mut adam = AdamW::new_lr(config.parameters.all_vars(), f64::from(config.learning_rate))?;
+    let mut adam = AdamW::new_lr(
+        config.parameters.all_vars(),
+        f64::from(config.learning_rate),
+    )?;
     let prog_bar = labeled_bar("Epochs", total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);

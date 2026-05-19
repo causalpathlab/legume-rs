@@ -25,11 +25,6 @@ pub struct WarmStartCheck<'a> {
     pub level_decoder_dims: &'a [usize],
     /// Set only for indexed; ignored for dense.
     pub embedding_dim: Option<usize>,
-    /// Learned intensity-embedding bin count (`n_value_bins`) when the
-    /// value transform is the learned gate; `None` for the Anscombe
-    /// baseline. Checked so a warm-start can't silently load mismatched
-    /// value-embedding weights.
-    pub value_embedding: Option<usize>,
 }
 
 /// Validate that the saved checkpoint is architecture-compatible, then load
@@ -87,16 +82,6 @@ pub fn warm_start_load(
             emb,
         );
     }
-    // The value transform must match: a learned intensity-embedding model
-    // carries `nn.enc.value.*` tensors an Anscombe model doesn't (and
-    // vice versa), and the bin count must agree.
-    anyhow::ensure!(
-        metadata.n_value_bins == expected.value_embedding,
-        "warm-start: value-embedding mismatch (saved={:?}, current={:?})",
-        metadata.n_value_bins,
-        expected.value_embedding,
-    );
-
     let safetensors_path = format!("{prefix}.safetensors");
     log::info!("Warm-starting from {safetensors_path}");
 
