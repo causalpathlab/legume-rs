@@ -132,7 +132,7 @@ pub struct CellEmbeddedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 5.0,
+        default_value_t = 1.0,
         help = "Global L2 gradient norm clip per minibatch (0 = off; typical 0.5–5.0)"
     )]
     grad_clip: f32,
