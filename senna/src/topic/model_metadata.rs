@@ -13,9 +13,6 @@ pub const MODEL_TYPE_TOPIC: &str = "topic";
 // here with a clean model-type mismatch instead of silently loading
 // against an incompatible runtime.
 pub const MODEL_TYPE_INDEXED: &str = "indexed_topic_packed";
-/// `senna cell-embedded-topic` — hierarchical cell→PB pooling encoder
-/// over the same shared-ρ ETM decoder as `indexed_topic_packed`.
-pub const MODEL_TYPE_CELL_EMBEDDED: &str = "cell_embedded_topic";
 
 /// Metadata needed to reconstruct a trained topic model for inference.
 #[derive(Serialize, Deserialize)]

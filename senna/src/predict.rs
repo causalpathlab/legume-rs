@@ -1,8 +1,7 @@
-//! Unified prediction subcommand for the dense, indexed, and
-//! cell-embedded topic models.
+//! Unified prediction subcommand for the dense and indexed topic models.
 //!
-//! Loads a model trained by `senna topic` / `indexed-topic` /
-//! `cell-embedded-topic`, applies it to a held-out backend file, and writes:
+//! Loads a model trained by `senna topic` / `indexed-topic`, applies it
+//! to a held-out backend file, and writes:
 //!   - `{out}.latent.parquet`     [N × K] log θ (per-cell topic proportions)
 //!   - `{out}.predictive.parquet` [N × 3] per-cell `[llik, total, llik_per_count]`
 //!
@@ -30,16 +29,13 @@ use crate::topic::predict_common::{
 use crate::logging::new_progress_bar;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_core::{Device, Tensor};
-use candle_util::data::{csc_columns_to_indexed_samples, top_k_indices_weighted, IndexedSample};
-use candle_util::data::{pack_eval_minibatch, CellEvalPackArgs};
 use candle_util::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
 use candle_util::decoder::EmbeddedTopicDecoder;
 use candle_util::decoder::{MultinomTopicDecoder, NbMixtureTopicDecoder, NbTopicDecoder};
-use candle_util::encoder::{CellEmbeddedEncoder, CellEmbeddedEncoderArgs};
 use candle_util::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
 use candle_util::encoder::{LogSoftmaxEncoder, LogSoftmaxEncoderArgs};
 use candle_util::topic_refinement::{refine_topic_proportions, TopicRefinementConfig};
-use candle_util::traits::{CellEncoderT, IndexedEncoderT};
+use candle_util::traits::IndexedEncoderT;
 use candle_util::traits::{DecoderModuleT, EncoderModuleT, NewDecoder};
 use data_beans::sparse_io_vector::SparseIoVec;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
@@ -62,13 +58,13 @@ pub struct PredictArgs {
     #[arg(
         long,
         required = true,
-        help = "Trained model prefix (output of `senna topic` / `indexed-topic` / `cell-embedded-topic` -o)",
+        help = "Trained model prefix (output of `senna topic` / `indexed-topic` -o)",
         long_help = "Loads:\n  \
                      {model}.dictionary.parquet      gene × topic dictionary\n  \
                      {model}.model.json              model architecture metadata\n  \
                      {model}.safetensors             encoder + decoder weights\n  \
                      {model}.coarsening.json         (dense only) feature coarsening\n  \
-                     {model}.shortlist_weights.parquet (indexed / cell-embedded) NB-Fisher weights"
+                     {model}.shortlist_weights.parquet (indexed) NB-Fisher weights"
     )]
     pub(crate) model: Box<str>,
 
@@ -174,16 +170,13 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
         );
     }
 
-    use crate::topic::model_metadata::{
-        MODEL_TYPE_CELL_EMBEDDED, MODEL_TYPE_INDEXED, MODEL_TYPE_TOPIC,
-    };
+    use crate::topic::model_metadata::{MODEL_TYPE_INDEXED, MODEL_TYPE_TOPIC};
     match metadata.model_type.as_ref() {
         MODEL_TYPE_TOPIC => predict_dense(args, &metadata),
         MODEL_TYPE_INDEXED => predict_indexed(args, &metadata),
-        MODEL_TYPE_CELL_EMBEDDED => predict_cell_embedded(args, &metadata),
         other => anyhow::bail!(
-            "predict: unsupported model_type '{other}' (expected '{MODEL_TYPE_TOPIC}', \
-             '{MODEL_TYPE_INDEXED}', or '{MODEL_TYPE_CELL_EMBEDDED}')",
+            "predict: unsupported model_type '{other}' (expected '{MODEL_TYPE_TOPIC}' or \
+             '{MODEL_TYPE_INDEXED}')",
         ),
     }
 }
@@ -995,318 +988,6 @@ fn predict_block_indexed(
     // Total counts at the decoder shortlist (denominator for llik_per_count).
     let total: Vec<f32> = {
         let summed = dec_pack.values.sum(1)?.to_device(&Device::Cpu)?;
-        summed.to_vec1()?
-    };
-
-    let z_cpu = log_z_nk.to_device(&Device::Cpu)?;
-    let z_mat = Mat::from_tensor(&z_cpu)?;
-    Ok((lb, z_mat, llik, total))
-}
-
-////////////////////////////////
-// Cell-embedded prediction   //
-////////////////////////////////
-
-fn predict_cell_embedded(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
-    let embedding_dim = metadata
-        .embedding_dim
-        .ok_or_else(|| anyhow::anyhow!("cell-embedded model metadata missing embedding_dim"))?;
-    // cell-embedded persists the FG context as `enc_context_size`; the BG
-    // context isn't saved separately, so predict reuses the FG window for
-    // the background pool (matches the `--bg-context-size` default).
-    let fg_context_size = metadata
-        .enc_context_size
-        .ok_or_else(|| anyhow::anyhow!("cell-embedded model metadata missing enc_context_size"))?;
-    let dec_context_size = metadata
-        .dec_context_size
-        .ok_or_else(|| anyhow::anyhow!("cell-embedded model metadata missing dec_context_size"))?;
-    let bg_context_size = fg_context_size;
-
-    let (training_genes, beta_dk) = load_dictionary(&args.model)?;
-    let (sw_genes, shortlist_weights) = load_shortlist_weights(&args.model)?;
-    anyhow::ensure!(
-        sw_genes.len() == training_genes.len(),
-        "shortlist_weights gene count ({}) != dictionary gene count ({})",
-        sw_genes.len(),
-        training_genes.len(),
-    );
-    // FG/BG/decoder packs all gather the same NB-Fisher per-gene weight.
-    let feature_fisher_weights = shortlist_weights.clone();
-
-    let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: args.data_files.clone(),
-        batch_files: args.batch_files.clone(),
-        preload: args.preload_data,
-        ..Default::default()
-    })?;
-    let mut data_vec = loaded.data;
-    data_vec.register_batch_membership(&loaded.batch);
-    info!(
-        "Held-out data: {} features × {} cells",
-        data_vec.num_rows(),
-        data_vec.num_columns()
-    );
-
-    let new_genes = data_vec.row_names()?;
-    let gene_remap = build_remap(&training_genes, &new_genes)?;
-
-    let delta_db = estimate_delta(
-        &data_vec,
-        &beta_dk,
-        metadata.theta_mean.as_deref(),
-        gene_remap.as_ref(),
-        args.block_size,
-    )?;
-    if args.delta_iters > 0 {
-        log::warn!(
-            "predict (cell-embedded): --delta-iters TMLE refinement is not wired for \
-             this model type; using the closed-form δ estimate only"
-        );
-    }
-
-    let cpu_dev = Device::Cpu;
-    let mut parameters = candle_nn::VarMap::new();
-    let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
-
-    let n_features_full = metadata.n_features_full;
-    let encoder = CellEmbeddedEncoder::new(
-        CellEmbeddedEncoderArgs {
-            n_features: n_features_full,
-            n_topics: metadata.n_topics,
-            embedding_dim,
-            layers: &metadata.encoder_hidden,
-        },
-        &parameters,
-        vb.pp("enc"),
-    )?;
-
-    let num_levels = metadata.level_decoder_dims.len().max(1);
-    let decoders = register_etm_decoders(
-        &vb,
-        metadata.n_topics,
-        encoder.feature_embeddings(),
-        num_levels,
-    )?;
-
-    let safetensors_path = format!("{}.safetensors", args.model);
-    info!("Loading weights from {safetensors_path}");
-    parameters.load(&safetensors_path)?;
-    let decoder = decoders.last().expect("at least one decoder level");
-
-    let mode = resolve_mode(args);
-    let refine_config = TopicRefinementConfig {
-        num_steps: if args.decoder_only && args.refine_steps == 0 {
-            100
-        } else {
-            args.refine_steps
-        },
-        learning_rate: if args.decoder_only && args.refine_lr <= 0.01 {
-            0.05
-        } else {
-            args.refine_lr
-        },
-        regularization: args.refine_reg,
-    };
-    info!("Latent inference mode: {mode:?}");
-
-    let adj_method = AdjMethod::Batch;
-    // δ is block-invariant: top-K each batch's null profile once here,
-    // rather than re-scanning the `[B, D]` δ inside every block. The block
-    // fn just fans these out by per-cell batch membership.
-    let per_batch_bg: Option<Vec<IndexedSample>> = delta_db
-        .as_ref()
-        .map(|db| -> anyhow::Result<_> {
-            let delta_bd = db.to_tensor(&cpu_dev)?.transpose(0, 1)?.contiguous()?;
-            Ok(delta_bd
-                .to_vec2::<f32>()?
-                .iter()
-                .map(|row| {
-                    let (indices, values) =
-                        top_k_indices_weighted(row, &shortlist_weights, bg_context_size);
-                    IndexedSample { indices, values }
-                })
-                .collect())
-        })
-        .transpose()?;
-
-    let ntot = data_vec.num_columns();
-    let kk = metadata.n_topics;
-
-    let (z_nk, llik, total) = run_predict_blocks(ntot, kk, args.minibatch_size, |(lb, ub)| {
-        predict_block_cell_embedded(PredictBlockCellEmbeddedArgs {
-            lb,
-            ub,
-            data_vec: &data_vec,
-            encoder: &encoder,
-            decoder,
-            per_batch_bg: per_batch_bg.as_deref(),
-            gene_remap: gene_remap.as_ref(),
-            shortlist_weights: &shortlist_weights,
-            feature_fisher_weights: &feature_fisher_weights,
-            n_features_full,
-            fg_context_size,
-            bg_context_size,
-            dec_context_size,
-            dev: &cpu_dev,
-            adj_method: &adj_method,
-            mode,
-            refine_config: &refine_config,
-            n_topics: metadata.n_topics,
-        })
-    })?;
-
-    write_outputs(args, &data_vec, &z_nk, &llik, &total)
-}
-
-struct PredictBlockCellEmbeddedArgs<'a> {
-    lb: usize,
-    ub: usize,
-    data_vec: &'a SparseIoVec,
-    encoder: &'a CellEmbeddedEncoder,
-    decoder: &'a EmbeddedTopicDecoder,
-    /// Per-batch δ-null top-K samples, pre-built once by the caller (δ is
-    /// block-invariant). `None` when no batch δ was estimated.
-    per_batch_bg: Option<&'a [IndexedSample]>,
-    gene_remap: Option<&'a GeneRemap>,
-    shortlist_weights: &'a [f32],
-    feature_fisher_weights: &'a [f32],
-    n_features_full: usize,
-    fg_context_size: usize,
-    bg_context_size: usize,
-    dec_context_size: usize,
-    dev: &'a Device,
-    adj_method: &'a AdjMethod,
-    mode: LatentMode,
-    refine_config: &'a TopicRefinementConfig,
-    n_topics: usize,
-}
-
-fn predict_block_cell_embedded(
-    a: PredictBlockCellEmbeddedArgs<'_>,
-) -> anyhow::Result<(usize, Mat, Vec<f32>, Vec<f32>)> {
-    use crate::topic::predict_common::IndexedDecoderInput;
-
-    let PredictBlockCellEmbeddedArgs {
-        lb,
-        ub,
-        data_vec,
-        encoder,
-        decoder,
-        per_batch_bg,
-        gene_remap,
-        shortlist_weights,
-        feature_fisher_weights,
-        n_features_full,
-        fg_context_size,
-        bg_context_size,
-        dec_context_size,
-        dev,
-        adj_method,
-        mode,
-        refine_config,
-        n_topics,
-    } = a;
-    let remap = gene_remap.map(|rm| rm.new_to_train.as_slice());
-
-    // Held-out CSC for this block — observed counts, sparse.
-    let csc = data_vec.read_columns_csc(lb..ub)?;
-    let ncols = csc.ncols();
-
-    // FG samples: top-K of the observed counts in training-gene space,
-    // visiting only stored nonzeros (no dense `[D, n]` scan).
-    let cell_samples =
-        csc_columns_to_indexed_samples(&csc, shortlist_weights, fg_context_size, remap);
-    // Decoder-target is the same observed counts — reuse the FG pack when
-    // the contexts match instead of re-scanning the columns.
-    let output_samples = if dec_context_size == fg_context_size {
-        cell_samples.clone()
-    } else {
-        csc_columns_to_indexed_samples(&csc, shortlist_weights, dec_context_size, remap)
-    };
-
-    // Library-size factor s_c = Σ_g y_cg over the held-out counts.
-    let cell_size_factor: Vec<f32> = (0..ncols)
-        .map(|j| csc.col(j).values().iter().sum::<f32>().max(1.0))
-        .collect();
-
-    // BG samples: the batch-null profile. With a δ estimate, fan the
-    // pre-built per-batch top-K out by per-cell membership; without δ it
-    // falls back to the observed counts (reusing the FG pack when the
-    // contexts match).
-    let bg_samples: Vec<IndexedSample> = match per_batch_bg {
-        Some(per_batch) => {
-            let membership = crate::topic::common::block_membership(data_vec, adj_method, lb, ub)?;
-            membership.iter().map(|&b| per_batch[b].clone()).collect()
-        }
-        None if bg_context_size == fg_context_size => cell_samples.clone(),
-        None => csc_columns_to_indexed_samples(&csc, shortlist_weights, bg_context_size, remap),
-    };
-
-    let mb = pack_eval_minibatch(
-        CellEvalPackArgs {
-            cell_samples: &cell_samples,
-            cell_size_factor: &cell_size_factor,
-            bg_samples: &bg_samples,
-            output_samples: &output_samples,
-            n_features: n_features_full,
-            fg_context_size,
-            bg_context_size,
-            dec_context_size,
-            feature_fisher_weights,
-        },
-        dev,
-    )?;
-
-    let s_dec = mb.output_union_indices.dim(0)?;
-    let dec_log_q_s = Tensor::zeros((1, s_dec), candle_core::DType::F32, dev)?;
-
-    let log_z_nk = match mode {
-        LatentMode::Encoder => {
-            let (log_z, _) = encoder.forward_cells_t(&mb, false)?;
-            log_z
-        }
-        LatentMode::EncoderRefine => {
-            let (log_z, _) = encoder.forward_cells_t(&mb, false)?;
-            refine_indexed_topic_proportions(
-                &log_z,
-                &mb.output_union_indices,
-                &mb.output_scatter_pos,
-                &mb.output_values,
-                Some(&mb.output_values_weight),
-                &dec_log_q_s,
-                decoder,
-                refine_config,
-            )?
-        }
-        LatentMode::DecoderOnly => decoder_only_inference_indexed(
-            decoder,
-            &IndexedDecoderInput {
-                union_indices: &mb.output_union_indices,
-                scatter_pos: &mb.output_scatter_pos,
-                values: &mb.output_values,
-                values_weight: Some(&mb.output_values_weight),
-                log_q_s: &dec_log_q_s,
-            },
-            n_topics,
-            refine_config.learning_rate,
-            refine_config.num_steps,
-            dev,
-        )?,
-    };
-
-    let llik_t = predictive_llik_indexed(
-        decoder,
-        &log_z_nk,
-        &mb.output_union_indices,
-        &mb.output_scatter_pos,
-        &mb.output_values,
-        Some(&mb.output_values_weight),
-        &dec_log_q_s,
-    )?;
-    let llik: Vec<f32> = llik_t.to_device(&Device::Cpu)?.to_vec1()?;
-
-    let total: Vec<f32> = {
-        let summed = mb.output_values.sum(1)?.to_device(&Device::Cpu)?;
         summed.to_vec1()?
     };
 

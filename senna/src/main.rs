@@ -40,7 +40,6 @@ mod embed_common;
 mod empirical_dict;
 mod eval_topic;
 mod fit_bge;
-mod fit_cell_embedded_topic;
 mod fit_clustering;
 mod fit_fne;
 mod fit_indexed_topic;
@@ -68,7 +67,6 @@ use annotate::{annotate_run, AnnotateArgs};
 use embed_common::*;
 use eval_topic::*;
 use fit_bge::{fit_bge, BgeArgs};
-use fit_cell_embedded_topic::*;
 use fit_clustering::*;
 use fit_fne::{fit_fne, FneArgs};
 use fit_indexed_topic::*;
@@ -188,29 +186,6 @@ enum Commands {
     IndexedTopic(IndexedTopicArgs),
 
     #[command(
-        about = "Train: hierarchical cell→PB pooling topic model.",
-        long_about = "Same model type as `indexed-topic` (shared ρ ∈ ℝ^{D×H}, ETM-factorized\n\
-                      decoder, multi-level PB training), but the cell→PB pooling is\n\
-                      moved INTO the encoder as a two-level gene→cell→PB EmbeddingBag.\n\
-                      A PB sample is a pool of its member cells.\n\n\
-                      A coarse-level PB can pool hundreds of cells, so each minibatch\n\
-                      draws an S = min(--fg-cells-per-pb, |PB|)-cell random subsample\n\
-                      per PB (rescaled by |PB|/S to stay an unbiased full-PB-sum\n\
-                      estimate). That bounds the per-minibatch member-cell count — so\n\
-                      encoder memory stays flat at coarse PB levels — and the fresh\n\
-                      per-epoch subsample is the within-PB SGD stochasticity.\n\n\
-                      The encoder produces a foreground pool (member cells, DC-Poisson\n\
-                      degree-corrected + housekeeping-weighted) and a background pool\n\
-                      (PB μ_residual), concatenated [N,2H] into the latent head.\n\n\
-                      Trains, runs per-cell latent inference, and writes the full\n\
-                      topic-family artifact set (latent / pb_gene / cell_proj /\n\
-                      manifest / CNV); `senna predict` applies the trained model to\n\
-                      held-out data.",
-        visible_aliases = ["cetopic", "cell-etm"]
-    )]
-    CellEmbeddedTopic(CellEmbeddedTopicArgs),
-
-    #[command(
         about = "Train: Nyström SVD embedding.",
         long_about = "Three stages: (1) batch-aware pseudobulk collapsing, (2) randomized SVD,\n\
                       (3) per-cell Nyström projection.\n\n\
@@ -270,7 +245,7 @@ enum Commands {
                       (node2vec convention). Symmetric by construction.\n\n\
                       Writes {out}.feature_embedding.parquet (+ feature_bias, gamma, \
                       log_likelihood, senna.json). The output shape matches the freeze \
-                      loader used by `senna {bge, indexed-topic, cell-embedded-topic} \
+                      loader used by `senna {bge, indexed-topic} \
                       --freeze-feature-embedding`, so an `fne` run is a direct gene-side \
                       input to downstream cell-side training."
     )]
@@ -278,12 +253,11 @@ enum Commands {
 
     // ─────────── 2. Held-out inference ───────────
     #[command(
-        about = "Apply a trained topic / indexed-topic / cell-embedded-topic model to held-out data.",
+        about = "Apply a trained topic / indexed-topic model to held-out data.",
         long_about = "Latent inference + per-cell predictive log-likelihood on a separate\n\
-                      backend file. Auto-dispatches dense / indexed / cell-embedded via\n\
-                      model.json. Handles gene-set misalignment via flexible name\n\
-                      matching and re-estimates per-batch delta from the frozen\n\
-                      dictionary.\n\n\
+                      backend file. Auto-dispatches dense / indexed via model.json.\n\
+                      Handles gene-set misalignment via flexible name matching and\n\
+                      re-estimates per-batch delta from the frozen dictionary.\n\n\
                       Latent modes: encoder-only (default), encoder+refine, decoder-only."
     )]
     Predict(PredictArgs),
@@ -433,9 +407,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::IndexedTopic(args) => {
             fit_indexed_topic_model(args)?;
-        }
-        Commands::CellEmbeddedTopic(args) => {
-            fit_cell_embedded_topic_model(args)?;
         }
         Commands::JointTopic(args) => {
             fit_joint_topic_model(args)?;
