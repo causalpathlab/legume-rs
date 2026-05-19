@@ -79,6 +79,7 @@ enum Commands {
     /// Ridge PRS from z-scores + SuSiE fine-mapping on predicted phenotypes
     FitPrsSusie(FitPrsSusieArgs),
     /// Generic SGVB regression (Gaussian/NB/Poisson likelihoods × mean-field/SuSiE variational)
+    #[command(alias = "regression")]
     FitRegression(FitRegressionArgs),
     /// Collapse single-cell counts into Poisson-Gamma pseudobulk per individual and cell type
     Pseudobulk(PseudobulkArgs),
