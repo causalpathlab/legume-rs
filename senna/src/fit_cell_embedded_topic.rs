@@ -305,12 +305,47 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     mkdir_parent(&args.out)?;
 
     let k = args.n_latent_topics;
-    let h = if args.embedding_dim == 0 {
-        let auto = 2 * k;
-        info!("--embedding-dim not set; defaulting to 2 × K = {auto}");
-        auto
-    } else {
-        args.embedding_dim
+
+    // ρ pre-training resolution — resolved before H so a pre-trained
+    // dictionary's column count pins H.
+    let frozen_spec: Option<crate::topic::freeze::FrozenFeatureSpec> =
+        match args.freeze_feature_embedding.as_deref() {
+            None => None,
+            Some(prefix) => {
+                anyhow::ensure!(
+                    args.feature_network.is_none(),
+                    "--freeze-feature-embedding is incompatible with --feature-network"
+                );
+                let kind: Option<auxiliary_data::feature_names::FeatureNameKind> =
+                    args.feature_name_kind.clone().into();
+                let kind = kind
+                    .unwrap_or(auxiliary_data::feature_names::FeatureNameKind::Gene { delim: '_' });
+                Some(crate::topic::freeze::FrozenFeatureSpec::resolve_from_prefix(prefix, kind)?)
+            }
+        };
+
+    // H resolution. Pre-trained ρ pins H; explicit --embedding-dim must
+    // match. Default 2K when neither is set.
+    let pretrained_h: Option<usize> = frozen_spec.as_ref().map(|s| s.dictionary_h()).transpose()?;
+    let h = match (pretrained_h, args.embedding_dim) {
+        (Some(ph), 0) => {
+            info!("--embedding-dim auto-set to pre-trained ρ width H = {ph}");
+            ph
+        }
+        (Some(ph), explicit) => {
+            anyhow::ensure!(
+                explicit == ph,
+                "--embedding-dim ({explicit}) disagrees with the pre-trained ρ H ({ph}). \
+                 Either omit --embedding-dim (it will be inferred) or pass {ph} to match."
+            );
+            explicit
+        }
+        (None, 0) => {
+            let auto = 2 * k;
+            info!("--embedding-dim not set; defaulting to 2 × K = {auto}");
+            auto
+        }
+        (None, explicit) => explicit,
     };
     if h < k {
         anyhow::bail!(
@@ -342,21 +377,6 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     } else {
         args.feature_network.as_deref()
     };
-    let frozen_spec: Option<crate::topic::freeze::FrozenFeatureSpec> =
-        match args.freeze_feature_embedding.as_deref() {
-            None => None,
-            Some(prefix) => {
-                anyhow::ensure!(
-                    args.feature_network.is_none(),
-                    "--freeze-feature-embedding is incompatible with --feature-network"
-                );
-                let kind: Option<auxiliary_data::feature_names::FeatureNameKind> =
-                    args.feature_name_kind.clone().into();
-                let kind = kind
-                    .unwrap_or(auxiliary_data::feature_names::FeatureNameKind::Gene { delim: '_' });
-                Some(crate::topic::freeze::FrozenFeatureSpec::resolve_from_prefix(prefix, kind)?)
-            }
-        };
 
     let feature_network = crate::topic::common::setup_feature_network(restrict_path, net_opts);
     let freeze_mask_holder = frozen_spec.as_ref().map(|s| s.mask_fn());

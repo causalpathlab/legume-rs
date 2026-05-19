@@ -21,6 +21,7 @@ use auxiliary_data::feature_names::FeatureNameKind;
 use auxiliary_data::frozen_features::{
     load_frozen_feature_host, FrozenFeatureHost, FrozenLoadArgs,
 };
+use matrix_util::parquet::peek_parquet_field_names;
 use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
 use rustc_hash::FxHashSet;
@@ -121,6 +122,22 @@ impl FrozenFeatureSpec {
                 .map(|n| set.contains(&kind.canonicalize(n)))
                 .collect())
         })
+    }
+
+    /// Cheap peek at the dictionary parquet to read just the embedding
+    /// dimension `H` — the number of data columns (total columns minus
+    /// the row-name column). Reads only the parquet schema, not the
+    /// values, so it's safe to call before [`Self::materialize`] when
+    /// the caller needs `H` to size the encoder.
+    pub fn dictionary_h(&self) -> anyhow::Result<usize> {
+        let fields = peek_parquet_field_names(&self.dictionary_path)?;
+        anyhow::ensure!(
+            fields.len() >= 2,
+            "{}: expected at least one row-name column + one data column, got fields {:?}",
+            self.dictionary_path,
+            fields
+        );
+        Ok(fields.len() - 1)
     }
 
     /// After `load_and_collapse`, build the host-side `[|keep|, H]`
