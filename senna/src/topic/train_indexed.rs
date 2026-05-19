@@ -20,7 +20,6 @@ use matrix_param::dmatrix_gamma::GammaMatrix;
 
 // Re-export the generic trainer surface so legacy call sites stay put.
 pub(crate) use candle_util::vae::indexed_topic::IndexedTrainConfig;
-pub(crate) use candle_util::vae::{clip_and_step_dense, PhaseTimers};
 
 /// Estimate bulk-vs-SC bias as a `GammaMatrix` [`D_sc`, 1].
 pub(crate) fn estimate_bulk_delta(bulk_dm: &Mat, collapsed: &CollapsedOut) -> GammaMatrix {

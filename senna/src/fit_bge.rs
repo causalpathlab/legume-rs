@@ -222,13 +222,13 @@ pub struct BgeArgs {
         long,
         help = "Reuse a pre-trained per-gene embedding from a prior senna run. \
                 Loads `{prefix}.dictionary.parquet` (+ `{prefix}.feature_bias.parquet` \
-                if present) — or `{prefix}.feature_embedding.parquet` from a topic / \
-                cell-embedded-topic run, in which case bias defaults to zero. Gene \
-                names are strict-intersected with this dataset's unified feature axis \
-                under the fuzzy `feature_name_delim` / `feature_name_exact` rules; \
-                unmatched features are dropped from training. Cell-side embeddings \
-                still train; E_feat / b_feat stay frozen. Incompatible with \
-                `--feature-network`; forces `--max-features 0` and disables HVG."
+                if present) — or `{prefix}.feature_embedding.parquet` from a topic run, \
+                in which case bias defaults to zero. Gene names are strict-intersected \
+                with this dataset's unified feature axis under the fuzzy \
+                `feature_name_delim` / `feature_name_exact` rules; unmatched features \
+                are dropped from training. Cell-side embeddings still train; E_feat / \
+                b_feat stay frozen. Incompatible with `--feature-network`; forces \
+                `--max-features 0` and disables HVG."
     )]
     freeze_feature_embedding: Option<Box<str>>,
 
@@ -597,7 +597,7 @@ fn load_cell_cell_edges(path: &str, barcodes: &[Box<str>]) -> anyhow::Result<Vec
 /// Probe a senna-run prefix for a frozen feature side. Tries:
 ///   1. `{prefix}.dictionary.parquet` + `{prefix}.feature_bias.parquet` (bge layout).
 ///   2. `{prefix}.feature_embedding.parquet` + optional `{prefix}.feature_bias.parquet`
-///      (topic / cell-embedded-topic / fne layout — fne writes a learned bias too).
+///      (topic / fne layout — fne writes a learned bias too).
 ///
 /// Strict-intersects gene names against `target_feature_names` under `kind`.
 fn load_frozen_feature_host_for_bge(
@@ -637,7 +637,7 @@ fn load_frozen_feature_host_for_bge(
         anyhow::bail!(
             "--freeze-feature-embedding {prefix}: no {prefix}.dictionary.parquet or \
              {prefix}.feature_embedding.parquet — pass a prior senna bge / topic / \
-             cell-embedded-topic / fne output prefix"
+             fne output prefix"
         );
     };
 

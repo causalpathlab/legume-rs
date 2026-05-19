@@ -182,9 +182,10 @@ pub struct PreparedData {
     /// recomputing.
     pub proj_kn: Mat,
     /// Per-level cell → pb membership, finest-last (parallel to
-    /// `collapsed_levels`). `Some` only when `LoadCollapseArgs.want_hierarchy`
-    /// was set — the `senna cell-embedded-topic` path needs it to pool
-    /// member cells inside the encoder. `None` for `indexed-topic` etc.
+    /// `collapsed_levels`). `Some` when `LoadCollapseArgs.want_hierarchy`
+    /// was set or when a `prebuilt_partition` was supplied — needed by
+    /// the writer that serializes `{out}.cell_to_pb.parquet` for
+    /// downstream `--from` chains.
     pub cell_to_pb_per_level: Option<Vec<Vec<usize>>>,
 }
 
@@ -533,7 +534,7 @@ pub(crate) fn move_varmap_to_cpu(parameters: &candle_nn::VarMap) -> anyhow::Resu
 pub(crate) use graph_embedding_util::setup_stop_handler;
 
 ////////////////////////////////////////////////////////////////////////
-// Feature-network setup (shared by indexed-topic + cell-embedded-topic)
+// Feature-network setup (used by indexed-topic)
 ////////////////////////////////////////////////////////////////////////
 
 use matrix_util::pair_graph::FeaturePairGraph;

@@ -39,7 +39,7 @@ pub use top_k::{csc_columns_to_indexed_samples, top_k_indices_weighted};
 pub use types::{IndexedInMemoryArgs, IndexedMinibatchData, IndexedSample};
 pub use union_scatter::{build_union_and_scatter_pos, slice_log_q_at_union};
 
-// Crate-public re-exports (used by `candle_cell_grouped_data_loader`).
+// Crate-public re-exports.
 pub use pack::pack_indices_values;
 pub use top_k::build_indexed_samples;
 

@@ -78,14 +78,13 @@ pub fn load_cell_to_pb_raw(path: &str) -> anyhow::Result<InheritedPartition> {
 pub const MANIFEST_VERSION: u32 = 1;
 
 /// Subcommand that produced the run. Serde-encoded as kebab-case strings
-/// (`"topic"`, `"itopic"`, `"joint-topic"`, `"svd"`, `"joint-svd"`) so the
-/// JSON wire format is stable across renames.
+/// (`"topic"`, `"itopic"`, `"joint-topic"`, `"svd"`, `"joint-svd"`,
+/// `"bge"`, `"fne"`) so the JSON wire format is stable across renames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunKind {
     Topic,
     Itopic,
-    CellEmbeddedTopic,
     JointTopic,
     Svd,
     JointSvd,
@@ -99,7 +98,6 @@ impl RunKind {
         match self {
             RunKind::Topic => "topic",
             RunKind::Itopic => "itopic",
-            RunKind::CellEmbeddedTopic => "cell-embedded-topic",
             RunKind::JointTopic => "joint-topic",
             RunKind::Svd => "svd",
             RunKind::JointSvd => "joint-svd",
@@ -108,15 +106,11 @@ impl RunKind {
         }
     }
 
-    /// Topic-family kinds (topic / itopic / cell-embedded-topic /
-    /// joint-topic) — produce a probability-simplex β. SVD-family kinds
-    /// produce signed loadings.
+    /// Topic-family kinds (topic / itopic / joint-topic) — produce a
+    /// probability-simplex β. SVD-family kinds produce signed loadings.
     #[must_use]
     pub fn is_topic_family(self) -> bool {
-        matches!(
-            self,
-            RunKind::Topic | RunKind::Itopic | RunKind::CellEmbeddedTopic | RunKind::JointTopic
-        )
+        matches!(self, RunKind::Topic | RunKind::Itopic | RunKind::JointTopic)
     }
 }
 
@@ -535,12 +529,7 @@ impl InheritedFromManifest {
 pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest> {
     let (m, dir) = RunManifest::load(Path::new(manifest_path))?;
     match m.kind {
-        RunKind::Bge
-        | RunKind::Fne
-        | RunKind::Topic
-        | RunKind::Itopic
-        | RunKind::CellEmbeddedTopic
-        | RunKind::JointTopic => {}
+        RunKind::Bge | RunKind::Fne | RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => {}
         RunKind::Svd | RunKind::JointSvd => anyhow::bail!(
             "--from manifest kind '{}' has no feature embedding to inherit; \
              use a bge / fne / topic-family run as the source",
