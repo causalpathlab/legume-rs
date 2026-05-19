@@ -1,16 +1,12 @@
 //! VAE-style training drivers for topic / link-community models.
 //!
-//! Submodules:
-//! - [`core`]: the original generic `Vae<Enc,Dec>` + `VaeT` trainer
-//!   built on the [`crate::data::loader::DataLoader`] abstraction.
 //! - [`topic`]: dense `EncoderModuleT` + `DecoderModuleT` trainer.
 //! - [`indexed_topic`]: `IndexedEmbeddingEncoder` + `EmbeddedTopicDecoder`
 //!   trainer driven by [`crate::data::indexed::IndexedInMemoryData`].
 //!
-//! Shared utilities (`TrainConfig`, `TrainScores`, `smooth_topics`,
-//! `PhaseTimers`, grad-clipping helpers) live here at the module root.
+//! Shared utilities (`TrainScores`, `smooth_topics`, `PhaseTimers`,
+//! grad-clipping helpers) live here at the module root.
 
-pub mod core;
 pub mod indexed_topic;
 pub mod topic;
 
@@ -18,17 +14,6 @@ use candle_core::Tensor;
 use candle_nn::{AdamW, Optimizer};
 use log::info;
 use std::time::Duration;
-
-/// Shared training-loop knobs consumed by every VAE trainer in this module.
-pub struct TrainConfig {
-    pub learning_rate: f32,
-    pub batch_size: usize,
-    pub num_epochs: usize,
-    pub num_pretrain_epochs: usize,
-    pub device: candle_core::Device,
-    pub verbose: bool,
-    pub show_progress: bool,
-}
 
 /// Per-epoch llik / kl trace.
 pub struct TrainScores {

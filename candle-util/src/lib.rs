@@ -1,11 +1,7 @@
-// Re-export the upstream candle crates so downstream code can refer to
-// `candle_util::candle_core` / `candle_util::candle_nn` without taking a
-// direct dep.
+// Re-exported so downstream crates don't need a direct dep on candle-core/-nn.
 pub use candle_core;
 pub use candle_nn;
 
-// Primitive layers, model traits, loaders, encoders, decoders, and
-// training drivers — grouped by role.
 pub mod cli;
 pub mod data;
 pub mod decoder;
