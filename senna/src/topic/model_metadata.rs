@@ -1,6 +1,6 @@
 use candle_util::candle_core;
-use candle_util::data::GraphCsr;
 use candle_util::candle_nn;
+use candle_util::data::GraphCsr;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use serde::{Deserialize, Serialize};
 
@@ -51,14 +51,6 @@ pub struct TopicModelMetadata {
     /// Top-K shortlist size at decoder (indexed_topic only)
     #[serde(default)]
     pub dec_context_size: Option<usize>,
-    /// Learned intensity-embedding bin count (value bins per scale,
-    /// indexed / cell-embedded only). `None` = the fixed Anscombe scalar
-    /// transform; `Some` = the dual-binned learned value gate (per-bin
-    /// width is the feature embedding dim `H`). Required to reconstruct
-    /// the encoder at predict time. `serde(alias)` reads checkpoints
-    /// written before the field was renamed from `value_vocab_size`.
-    #[serde(default, alias = "value_vocab_size")]
-    pub n_value_bins: Option<usize>,
     /// Mean training topic proportions θ̄ ∈ ℝ^K. Used at predict time as the
     /// mixture weights for the training-implied gene marginal in
     /// per-batch δ estimation. Falls back to uniform 1/K when absent.

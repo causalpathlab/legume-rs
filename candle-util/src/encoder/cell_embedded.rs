@@ -1,9 +1,9 @@
-use crate::nn::layers::*;
-use crate::nn::batch_norm;
 use crate::data::cell_grouped::CellGroupedMinibatchData;
-use crate::traits::indexed::*;
 use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
-use crate::value_transform::{ValueEmbedding, ValueEmbeddingConfig};
+use crate::nn::batch_norm;
+use crate::nn::layers::*;
+use crate::traits::indexed::*;
+use crate::value_transform::anscombe;
 use candle_core::{DType, Result, Tensor, D};
 use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 
@@ -24,18 +24,15 @@ use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 ///
 /// # Value transform
 ///
-/// The per-slot weighting on ρ is the learned **intensity embedding**: the
-/// normalized value is binned at two scales (linear + log1p), each bin
-/// looked up in an `[n_value_bins, H]` table, the two summed and sigmoid'd into
-/// a per-dimension **gate** on ρ — times the `fisher · mask` scalar. The
-/// fixed Anscombe scalar transform has been retired here.
+/// The per-slot weighting on ρ is the fixed Anscombe scalar
+/// `2·sqrt(norm + 3/8)` — variance-stabilising the per-cell normalised
+/// value — multiplied by `fisher · mask` and broadcast across `H`.
 pub struct CellEmbeddedEncoder {
     n_features: usize,
     n_topics: usize,
     embedding_dim: usize,
     feature_embeddings: Tensor, // [D, H] learnable, shared with decoder
-    value_embedding: ValueEmbedding,
-    fc: StackLayers<Linear>, // 2H -> final_hidden
+    fc: StackLayers<Linear>,    // 2H -> final_hidden
     bn_z: batch_norm::BatchNorm,
     z_mean: Linear,
     z_lnvar: Linear,
@@ -46,9 +43,6 @@ pub struct CellEmbeddedEncoderArgs<'a> {
     pub n_topics: usize,
     pub embedding_dim: usize,
     pub layers: &'a [usize],
-    /// The learned intensity-embedding value transform — the only value
-    /// transform (the fixed Anscombe scalar has been retired here).
-    pub value_embedding: ValueEmbeddingConfig,
 }
 
 impl CellEmbeddedEncoder {
@@ -70,12 +64,6 @@ impl CellEmbeddedEncoder {
             init_ws,
         )?;
 
-        let value_embedding = ValueEmbedding::new(
-            args.value_embedding,
-            args.embedding_dim,
-            vb.pp("nn.enc.value"),
-        )?;
-
         // FC stack: 2H -> ... -> final_hidden (the [fg, bg] concat is 2H).
         let fc_dims = args.layers[..args.layers.len() - 1].to_vec();
         let in_dim = 2 * args.embedding_dim;
@@ -92,7 +80,6 @@ impl CellEmbeddedEncoder {
             n_topics: args.n_topics,
             embedding_dim: args.embedding_dim,
             feature_embeddings,
-            value_embedding,
             fc,
             bn_z,
             z_mean,
@@ -117,9 +104,9 @@ impl CellEmbeddedEncoder {
         &self.feature_embeddings
     }
 
-    /// Per-slot learned gate on ρ — `[*, K, H]`, broadcastable against
-    /// `E [*, K, H]`: the intensity-embedding gate of the normalized value
-    /// times the `fisher · mask` scalar.
+    /// Per-slot scalar gate on ρ — `[*, K, 1]`, broadcastable across `H`
+    /// onto `E [*, K, H]`. Anscombe-stabilised normalised value times
+    /// `fisher · mask`.
     ///
     /// `norm_values` is the per-sample-normalized value (FG: `y / s_c`;
     /// BG: per-PB `1e4`-normalized). `raw_values` is only consulted for the
@@ -131,9 +118,9 @@ impl CellEmbeddedEncoder {
         fisher: &Tensor,
     ) -> Result<Tensor> {
         let mask = raw_values.gt(0f64)?.to_dtype(DType::F32)?; // [*, K]
-        let gate = self.value_embedding.gate(norm_values)?; // [*, K, H]
-        let scalar = fisher.mul(&mask)?.unsqueeze(D::Minus1)?; // [*, K, 1]
-        gate.broadcast_mul(&scalar) // [*, K, H]
+        let a = anscombe(norm_values)?; // [*, K]
+        let scalar = a.mul(&fisher.mul(&mask)?)?.unsqueeze(D::Minus1)?; // [*, K, 1]
+        Ok(scalar)
     }
 
     /// Foreground pool — two-level gene→cell→PB → `[N, H]`.

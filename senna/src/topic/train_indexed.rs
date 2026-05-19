@@ -14,8 +14,8 @@ use crate::embed_common::*;
 use candle_core::{Device, Tensor};
 use candle_util::decoder::EmbeddedTopicDecoder;
 use candle_util::encoder::IndexedEmbeddingEncoder;
-use candle_util::traits::*;
 use candle_util::topic_refinement::TopicRefinementConfig;
+use candle_util::traits::*;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 
 // Re-export the generic trainer surface so legacy call sites stay put.

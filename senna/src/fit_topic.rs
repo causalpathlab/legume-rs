@@ -668,7 +668,6 @@ where
                 encoder_hidden: &ctx.args.encoder_layers,
                 level_decoder_dims: ctx.level_decoder_dims,
                 embedding_dim: None,
-                value_embedding: None,
             },
         )?;
     }
@@ -857,7 +856,6 @@ where
         embedding_dim: None,
         enc_context_size: None,
         dec_context_size: None,
-        n_value_bins: None,
         theta_mean: None,
         n_graph_edges: None,
     };
@@ -985,7 +983,6 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
                 encoder_hidden: &ctx.args.encoder_layers,
                 level_decoder_dims: ctx.level_decoder_dims,
                 embedding_dim: None,
-                value_embedding: None,
             },
         )?;
     }

@@ -2,8 +2,8 @@ use super::common::{expand_delta_for_block, process_blocks};
 use crate::embed_common::*;
 
 use candle_core::{Device, Tensor};
-use candle_util::traits::*;
 use candle_util::topic_refinement::*;
+use candle_util::traits::*;
 
 /// Configuration for latent evaluation by encoder
 pub(crate) struct EvaluateLatentConfig<'a, Dec> {

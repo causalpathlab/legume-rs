@@ -34,7 +34,6 @@ use crate::topic::train_indexed::{write_feature_embedding, write_indexed_diction
 
 use candle_util::decoder::EmbeddedTopicDecoder;
 use candle_util::encoder::{CellEmbeddedEncoder, CellEmbeddedEncoderArgs};
-use candle_util::value_transform::ValueEmbeddingConfig;
 use log::warn;
 use std::sync::Arc;
 
@@ -218,15 +217,6 @@ pub struct CellEmbeddedTopicArgs {
         help = "Per-feature embedding dimension H (0 = auto = 2 × n-latent-topics)"
     )]
     embedding_dim: usize,
-
-    #[arg(
-        long,
-        default_value_t = 16,
-        help = "Intensity-embedding bin count (log1p-scale value bins). \
-                A resolution knob, not a perf one — the per-bin width is H and \
-                the lookup cost is independent of bin count."
-    )]
-    n_value_bins: usize,
 
     #[command(flatten)]
     amort_refine: crate::refine_weighting::AmortRefineArgs,
@@ -427,23 +417,14 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     let dec_context_size = args.decoder_context_size.unwrap_or(fg_context_size);
 
     // Cell-embedded encoder: two value-weighted ρ pools (FG member cells +
-    // BG PB residual) concatenated into the latent head. The value
-    // transform is the learned log1p-scale intensity-embedding gate
-    // (Anscombe retired).
-    let value_embedding = ValueEmbeddingConfig {
-        n_value_bins: args.n_value_bins,
-    };
-    info!(
-        "intensity-embedding value transform: n_value_bins={} (per-bin width H={})",
-        value_embedding.n_value_bins, h
-    );
+    // BG PB residual) concatenated into the latent head. Value transform
+    // is the fixed Anscombe scalar.
     let base_encoder = CellEmbeddedEncoder::new(
         CellEmbeddedEncoderArgs {
             n_features: n_features_full,
             n_topics,
             embedding_dim: h,
             layers: &args.encoder_layers,
-            value_embedding,
         },
         &parameters,
         param_builder.pp("enc"),
@@ -507,7 +488,6 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
                 encoder_hidden: &args.encoder_layers,
                 level_decoder_dims: &vec![n_features_full; num_levels],
                 embedding_dim: Some(h),
-                value_embedding: Some(value_embedding.n_value_bins),
             },
         )?;
     }
@@ -598,7 +578,6 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         embedding_dim: Some(h),
         enc_context_size: Some(fg_context_size),
         dec_context_size: Some(dec_context_size),
-        n_value_bins: Some(value_embedding.n_value_bins),
         theta_mean: None,
         n_graph_edges: None,
     };
@@ -622,7 +601,6 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
             n_topics,
             embedding_dim: h,
             layers: &args.encoder_layers,
-            value_embedding,
         },
         &parameters,
         cpu_vb.pp("enc"),

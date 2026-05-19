@@ -20,12 +20,12 @@
 //! top-K samples + library-size factors once and shares them across every
 //! PB level via `Arc`.
 
-use crate::data::loader_util::Minibatches;
 use crate::data::indexed::{
     build_indexed_samples, build_union_and_scatter_pos, compute_log_selection_freq,
     gather_per_feature_at_indices, labeled_bar, pack_indices_values, slice_log_q_at_union,
     sum_sample_values, IndexedSample,
 };
+use crate::data::loader_util::Minibatches;
 
 use candle_core::{Device, Tensor};
 use indicatif::ParallelProgressIterator;

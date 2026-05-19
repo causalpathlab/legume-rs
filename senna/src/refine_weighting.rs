@@ -240,19 +240,15 @@ impl Default for AmortRefineArgs {
 impl AmortRefineArgs {
     /// Build the candle-side config from these CLI args. Returns `None` when
     /// `--amort-refine-steps = 0` (refinement disabled).
-    pub(crate) fn to_config(
-        &self,
-    ) -> Option<candle_util::topic_refinement::TopicRefinementConfig> {
+    pub(crate) fn to_config(&self) -> Option<candle_util::topic_refinement::TopicRefinementConfig> {
         if self.steps == 0 {
             None
         } else {
-            Some(
-                candle_util::topic_refinement::TopicRefinementConfig {
-                    num_steps: self.steps,
-                    learning_rate: self.lr,
-                    regularization: self.reg,
-                },
-            )
+            Some(candle_util::topic_refinement::TopicRefinementConfig {
+                num_steps: self.steps,
+                learning_rate: self.lr,
+                regularization: self.reg,
+            })
         }
     }
 }

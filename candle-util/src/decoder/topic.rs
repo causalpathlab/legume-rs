@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use crate::nn::linear::*;
 use crate::loss::nb_log_likelihood;
+use crate::nn::linear::*;
 use crate::traits::model::*;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Module, VarBuilder};

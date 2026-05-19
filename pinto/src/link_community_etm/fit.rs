@@ -13,22 +13,19 @@
 //!   8. Inference + writers via
 //!      [`crate::link_community_etm::post::run_inference_and_write`].
 
-pub use crate::link_community_etm::args::SrtLinkCommunityEtmArgs;
 use crate::link_community::profiles::build_super_edges;
+pub use crate::link_community_etm::args::SrtLinkCommunityEtmArgs;
 use crate::link_community_etm::data;
 use crate::link_community_etm::post;
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::*;
-use crate::util::graph_coarsen::*;
 use crate::util::common::Mat;
+use crate::util::graph_coarsen::*;
 use crate::util::input::*;
 use candle_util::candle_core::{self, Device};
-use candle_util::decoder::EmbeddedTopicDecoder;
 use candle_util::candle_nn::{VarBuilder, VarMap};
-use candle_util::encoder::{
-    IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs,
-};
-use candle_util::value_transform::ValueEmbeddingConfig;
+use candle_util::decoder::EmbeddedTopicDecoder;
+use candle_util::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
 use candle_util::vae;
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::stop::setup_stop_handler;
@@ -59,10 +56,14 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
         mut coordinate_names,
         batches: mut batch_membership,
     } = if has_coords {
-        read_data_with_coordinates(c.to_read_args_with_kind(auxiliary_data::feature_names::FeatureNameKind::Exact))?
+        read_data_with_coordinates(
+            c.to_read_args_with_kind(auxiliary_data::feature_names::FeatureNameKind::Exact),
+        )?
     } else {
         info!("No coordinate files provided — using expression mode");
-        read_data_without_coordinates(c.to_read_args_with_kind(auxiliary_data::feature_names::FeatureNameKind::Exact))?
+        read_data_without_coordinates(
+            c.to_read_args_with_kind(auxiliary_data::feature_names::FeatureNameKind::Exact),
+        )?
     };
 
     let n_genes = data_vec.num_rows();
@@ -139,10 +140,7 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
 
     let edges = srt_cell_pairs.graph.edges.clone();
     let n_edges = edges.len();
-    info!(
-        "{} cells, {} edges, {} genes",
-        n_cells, n_edges, n_genes
-    );
+    info!("{} cells, {} edges, {} genes", n_cells, n_edges, n_genes);
 
     //////////////////////////////////////////////////////
     // 4. Multi-level cell coarsening (V-cycle pyramid)  //
@@ -243,7 +241,6 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
     let dtype = candle_core::DType::F32;
     let param_builder = VarBuilder::from_varmap(&parameters, dtype, &dev);
 
-    let value_embedding = ValueEmbeddingConfig { n_value_bins: 8 };
     let encoder_layers: Vec<usize> = vec![args.embedding_dim];
 
     let encoder = IndexedEmbeddingEncoder::new(
@@ -252,7 +249,6 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
             n_topics: args.n_communities,
             embedding_dim: args.embedding_dim,
             layers: &encoder_layers,
-            value_embedding,
             use_gcn: false,
         },
         &parameters,
@@ -300,14 +296,14 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
         feature_embedding_l2: args.feature_embedding_l2,
         weight_decay: args.weight_decay,
         frozen_feature_var: None,
+        anchor_prior_per_level: None,
+        anchor_penalty: 0.0,
     };
 
     // Per-level (input == target) borrowed view — no clones of the
     // multi-GB profile matrices.
-    let level_data: Vec<vae::indexed_topic::LevelData> = level_profiles
-        .iter()
-        .map(|m| (m, None, m))
-        .collect();
+    let level_data: Vec<vae::indexed_topic::LevelData> =
+        level_profiles.iter().map(|m| (m, None, m)).collect();
     let scores =
         vae::indexed_topic::train_mixed(&level_data, &encoder, &decoders, &train_cfg, None)?;
 

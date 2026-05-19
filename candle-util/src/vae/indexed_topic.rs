@@ -6,11 +6,9 @@
 //! all gather/scatter happens at the per-batch gene union.
 
 use super::{clip_and_step_dense, smooth_topics, PhaseTimers, TrainScores};
+use crate::data::indexed::{labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData};
 use crate::decoder::embedded_topic::EmbeddedTopicDecoder;
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
-use crate::data::indexed::{
-    labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData,
-};
 use crate::traits::indexed::*;
 use candle_core::{Device, Var};
 use candle_nn::{AdamW, Optimizer};
@@ -67,6 +65,16 @@ pub struct IndexedTrainConfig<'a> {
     /// parameter). The encoder/decoder still reference ρ through the
     /// same `Var`; freezing just keeps the optimizer's hands off.
     pub frozen_feature_var: Option<&'a str>,
+    /// Per-level `[K, D_l]` anchor β prior tensors (pre-transposed, on
+    /// device). When set with `anchor_penalty > 0`, the trainer adds
+    /// `−λ · mean_K Σ_D prior_kd · log_softmax_D(α · ρᵀ)` to the loss at
+    /// each minibatch. Anchors topic indices to anchor gene sets and
+    /// breaks the K-way permutation symmetry of the ETM-factorized β.
+    /// `None` disables; sized to `level_data.len()` when set.
+    pub anchor_prior_per_level: Option<&'a [candle_core::Tensor]>,
+    /// Cross-entropy penalty strength λ paired with `anchor_prior_per_level`.
+    /// 0.0 disables even when the prior is supplied.
+    pub anchor_penalty: f32,
 }
 
 /// Optional bulk-deconvolution input: `(bulk_full [G, B], deltas_per_level)`.
@@ -112,6 +120,29 @@ pub fn shuffle_and_precompute(
 ) -> anyhow::Result<()> {
     loader.shuffle_minibatch(minibatch_size);
     loader.precompute_all_minibatches()
+}
+
+/// Cross-entropy penalty `−λ · mean_K Σ_D prior · log_softmax_D(logits)`
+/// added to the loss. Anchors topic indices to the supplied per-topic
+/// gene-prior distribution; breaks the K-way permutation symmetry of
+/// the ETM-factorized β. No-op when `prior` is `None` or `lambda ≤ 0`.
+fn apply_anchor_ce(
+    loss: candle_core::Tensor,
+    decoder: &EmbeddedTopicDecoder,
+    prior: Option<&candle_core::Tensor>,
+    lambda: f32,
+) -> candle_core::Result<candle_core::Tensor> {
+    let Some(prior) = prior else {
+        return Ok(loss);
+    };
+    if lambda <= 0.0 {
+        return Ok(loss);
+    }
+    let logits_kd = decoder.full_logits_kd()?;
+    let log_prob = candle_nn::ops::log_softmax(&logits_kd, logits_kd.rank() - 1)?;
+    let ce = (prior * &log_prob)?.sum(1)?.neg()?;
+    let pen = (ce.mean_all()? * f64::from(lambda))?;
+    loss + pen
 }
 
 /// Apply a per-gene posterior-mean delta correction to `bulk_full`.
@@ -165,8 +196,7 @@ pub fn train_mixed(
     let adam_vars: Vec<Var> = match config.frozen_feature_var {
         None => config.parameters.all_vars(),
         Some(name) => {
-            let trainable =
-                crate::frozen_features::trainable_vars(config.parameters, &[name]);
+            let trainable = crate::frozen_features::trainable_vars(config.parameters, &[name]);
             info!(
                 "Freeze mode: AdamW over {} trainable vars ({} frozen, key='{}')",
                 trainable.len(),
@@ -274,6 +304,12 @@ pub fn train_mixed(
                         .affine(f64::from(config.feature_embedding_l2), 0.0)?;
                     loss = (loss + rho_l2)?;
                 }
+                loss = apply_anchor_ce(
+                    loss,
+                    decoder,
+                    config.anchor_prior_per_level.map(|p| &p[level]),
+                    config.anchor_penalty,
+                )?;
                 timers.decoder_fwd += t_dec.elapsed();
 
                 let t_bwd = Instant::now();
@@ -332,6 +368,12 @@ pub fn train_mixed(
                         .affine(f64::from(config.feature_embedding_l2), 0.0)?;
                     loss = (loss + rho_l2)?;
                 }
+                loss = apply_anchor_ce(
+                    loss,
+                    finest_decoder,
+                    config.anchor_prior_per_level.map(|p| &p[finest_idx]),
+                    config.anchor_penalty,
+                )?;
                 timers.decoder_fwd += t_dec.elapsed();
 
                 let t_bwd = Instant::now();
