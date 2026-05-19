@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 description = "Counterfactual Confounder Adjustment for Differential Analysis"
 
-version = "0.2.3"
+version = "0.2.4"
 
 [[bin]]
 name = "cocoa"

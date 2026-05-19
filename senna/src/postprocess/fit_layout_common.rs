@@ -15,7 +15,7 @@ use crate::geometry::cell_layout::project_cells_nystrom;
 use crate::geometry::similarity::{
     compute_cosine_similarity, local_scale_similarity, regularize_similarity, threshold_similarity,
 };
-use crate::run_manifest::{self, rel_to_manifest, RunManifest};
+use crate::run_manifest::{self, load_cell_to_pb_raw, rel_to_manifest, RunManifest};
 use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use crate::topic::common::{
     load_and_collapse, preferred_posterior_log_mean, LoadCollapseArgs, PreparedData,
@@ -344,6 +344,10 @@ pub(crate) struct ResolvedViz {
     pub out: String,
     pub manifest_path: Option<PathBuf>,
     pub manifest: Option<RunManifest>,
+    /// Resolved absolute path to the manifest's `outputs.cell_to_pb`,
+    /// when present. Layout's recompute fallback uses this to skip the
+    /// BBKNN + DC-SBM refinement on chained runs.
+    pub cell_to_pb_path: Option<String>,
 }
 
 pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<ResolvedViz> {
@@ -411,12 +415,21 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
         })?;
     mkdir_parent(&out)?;
 
+    let cell_to_pb_path: Option<String> = manifest.as_ref().and_then(|m| {
+        m.outputs.cell_to_pb.as_deref().map(|s| {
+            run_manifest::resolve(&manifest_dir, s)
+                .to_string_lossy()
+                .into_owned()
+        })
+    });
+
     Ok(ResolvedViz {
         data_files,
         batch_files,
         out,
         manifest_path,
         manifest,
+        cell_to_pb_path,
     })
 }
 
@@ -903,6 +916,19 @@ fn preprocess_layout_data_recompute(
     args: &LayoutCommonArgs,
     resolved: &ResolvedViz,
 ) -> anyhow::Result<LayoutPrep> {
+    // Inherit the source manifest's cell_to_pb partition when present so
+    // the recompute skips the BBKNN + DC-SBM refinement step. Loading
+    // here (not inside load_and_collapse) keeps the partition's source
+    // path local to layout's resolved-viz state.
+    let prebuilt_partition: Option<crate::run_manifest::InheritedPartition> = resolved
+        .cell_to_pb_path
+        .as_deref()
+        .map(load_cell_to_pb_raw)
+        .transpose()?;
+    if prebuilt_partition.is_some() {
+        info!("--from: layout recompute will reuse the source run's cell→pb partition");
+    }
+
     let PreparedData {
         data_vec,
         collapsed_levels,
@@ -932,7 +958,8 @@ fn preprocess_layout_data_recompute(
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: None,
-        want_hierarchy: false,
+        want_hierarchy: prebuilt_partition.is_some(),
+        prebuilt_partition,
     })?;
 
     let finest = collapsed_levels

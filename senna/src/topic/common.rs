@@ -365,6 +365,17 @@ pub struct LoadCollapseArgs<'a> {
     /// `refine = Some(..)`) and populates `PreparedData.cell_to_pb_per_level`.
     /// Default `false` keeps the legacy `indexed-topic` behavior.
     pub want_hierarchy: bool,
+    /// Optional pre-built `cell_to_pb_per_level` membership (finest-
+    /// last) paired with the source's `cell_names`, inherited from a
+    /// prior `senna {topic, itopic, ce-topic}` run via `--from`.
+    /// `load_and_collapse` aligns it to `data_vec.column_names()` by
+    /// name and then routes through
+    /// `collapse_columns_multilevel_with_partition`, skipping the
+    /// BBKNN + Poisson DC-SBM refinement step (still aggregates
+    /// counts + re-fits per-PB Gamma posteriors). `num_levels` must
+    /// equal `partition.len()` or `load_and_collapse` bails. When
+    /// `Some`, the loader auto-sets `want_hierarchy = true`.
+    pub prebuilt_partition: Option<crate::run_manifest::InheritedPartition>,
 }
 
 /// Load sparse data, project, multi-level collapse, and write delta output.
@@ -402,12 +413,46 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         refine: args.refine.clone(),
     };
 
-    // Both `collapse_columns_multilevel_vec` and the with-hierarchy
-    // variant return levels finest-first; `reverse()` makes them
-    // finest-last. `cell_to_pb_per_level` is parallel to `levels`, so it
-    // gets the same reversal to stay aligned with `collapsed_levels`.
+    // Both `collapse_columns_multilevel_vec` and the with-hierarchy /
+    // with-partition variants return levels finest-first; `reverse()`
+    // makes them finest-last. `cell_to_pb_per_level` is parallel to
+    // `levels`, so it gets the same reversal to stay aligned with
+    // `collapsed_levels`. When `prebuilt_partition` is supplied we
+    // route through `collapse_columns_multilevel_with_partition` which
+    // skips the BBKNN + Poisson DC-SBM refinement.
+    let want_hierarchy = args.want_hierarchy || args.prebuilt_partition.is_some();
     let (mut collapsed_levels, cell_to_pb_per_level): (Vec<CollapsedOut>, Option<Vec<Vec<usize>>>) =
-        if args.want_hierarchy {
+        if let Some((partition_src, cell_names_src)) = args.prebuilt_partition.clone() {
+            let data_cell_names = data_vec.column_names()?;
+            // Align by cell name (handles row-order differences /
+            // bails on cell-set mismatch). The aligned partition is
+            // returned finest-last; data-beans-alg expects finest-
+            // first, so reverse before the call.
+            let aligned_finest_last =
+                crate::run_manifest::InheritedFromManifest::align_cell_to_pb_to_cells(
+                    partition_src,
+                    &cell_names_src,
+                    &data_cell_names,
+                )?;
+            let mut partition_finest_first = aligned_finest_last;
+            partition_finest_first.reverse();
+            info!(
+                "Inheriting cell→pb membership for {} levels (skipping BBKNN + DC-SBM refinement)",
+                partition_finest_first.len()
+            );
+            let MultilevelCollapseOut {
+                levels,
+                mut cell_to_pb_per_level,
+            } = data_beans_alg::collapse_data::collapse_columns_multilevel_with_partition(
+                &mut data_vec,
+                &proj_kn,
+                &batch_membership,
+                &ml_params,
+                &partition_finest_first,
+            )?;
+            cell_to_pb_per_level.reverse();
+            (levels, Some(cell_to_pb_per_level))
+        } else if want_hierarchy {
             let MultilevelCollapseOut {
                 levels,
                 mut cell_to_pb_per_level,

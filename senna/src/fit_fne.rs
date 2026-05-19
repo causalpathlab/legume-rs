@@ -231,6 +231,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         default_colour_by: "cluster",
         has_latent: false,
+        has_cell_to_pb: false,
     })?;
 
     if stop.load(Ordering::SeqCst) {
