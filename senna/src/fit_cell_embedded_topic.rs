@@ -40,14 +40,26 @@ use std::sync::Arc;
 #[derive(Args, Debug)]
 pub struct CellEmbeddedTopicArgs {
     #[arg(
-        required = true,
         value_delimiter = ',',
-        help = "Input data files (.zarr or .h5)",
+        help = "Input data files (.zarr or .h5; optional when --from is given)",
         long_help = "Sparse backends produced by `data-beans from-mtx`.\n\
                      Multiple files may be passed (comma- or space-separated)\n\
-                     and are concatenated column-wise on a shared feature set."
+                     and are concatenated column-wise on a shared feature set.\n\
+                     When `--from <run.senna.json>` is provided and this list\n\
+                     is empty, the data paths come from the source manifest."
     )]
     data_files: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Chain inputs + ρ warm-start from a prior `senna bge / fne / topic` \
+                run's manifest",
+        long_help = "Read a `{run}.senna.json` manifest and pre-fill `data_files`, \
+                     `--batch-files`, and `--freeze-feature-embedding` from it. \
+                     Explicit CLI flags override the manifest values. SVD-family \
+                     manifests are rejected (no feature embedding to inherit)."
+    )]
+    from: Option<Box<str>>,
 
     #[arg(
         long,
@@ -306,10 +318,48 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
 
     let k = args.n_latent_topics;
 
+    // --from chain-inheritance: explicit CLI wins; otherwise pull data
+    // files, batch files, and the ρ-prefix (→ --freeze-feature-embedding)
+    // from the source manifest. See [[feedback-bge-itopic-warm-start]].
+    let inherited = args
+        .from
+        .as_deref()
+        .map(crate::run_manifest::inherit_from)
+        .transpose()?;
+    if let Some(inh) = inherited.as_ref() {
+        log::info!(
+            "--from: inheriting data + batch + ρ-prefix from a '{}' manifest",
+            inh.source_kind
+        );
+    }
+    let data_files: Vec<Box<str>> = if !args.data_files.is_empty() {
+        args.data_files.clone()
+    } else {
+        inherited
+            .as_ref()
+            .map(|i| i.data_files.clone())
+            .unwrap_or_default()
+    };
+    anyhow::ensure!(
+        !data_files.is_empty(),
+        "no input data files — pass at least one positional .zarr/.h5 path or use --from"
+    );
+    let batch_files: Option<Vec<Box<str>>> = match (&args.batch_files, inherited.as_ref()) {
+        (Some(bf), _) => Some(bf.clone()),
+        (None, Some(inh)) if !inh.batch_files.is_empty() => Some(inh.batch_files.clone()),
+        _ => None,
+    };
+    let freeze_feature_embedding: Option<Box<str>> =
+        args.freeze_feature_embedding.clone().or_else(|| {
+            inherited
+                .as_ref()
+                .map(|i| i.feature_embedding_prefix.clone())
+        });
+
     // ρ pre-training resolution — resolved before H so a pre-trained
     // dictionary's column count pins H.
     let frozen_spec: Option<crate::topic::freeze::FrozenFeatureSpec> =
-        match args.freeze_feature_embedding.as_deref() {
+        match freeze_feature_embedding.as_deref() {
             None => None,
             Some(prefix) => {
                 anyhow::ensure!(
@@ -363,7 +413,7 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
     }
 
     let (effective_multiome, effective_hvg_n, effective_hvg_list) =
-        crate::hvg::resolve_multiome_with_hvg(args.multiome, args.data_files.len(), &args.hvg);
+        crate::hvg::resolve_multiome_with_hvg(args.multiome, data_files.len(), &args.hvg);
 
     let net_opts = crate::topic::common::FeatureNetworkOpts {
         prefix_match: args.feature_network_prefix_match,
@@ -395,8 +445,8 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
         proj_kn,
         cell_to_pb_per_level,
     } = load_and_collapse(&LoadCollapseArgs {
-        data_files: &args.data_files,
-        batch_files: &args.batch_files,
+        data_files: &data_files,
+        batch_files: &batch_files,
         preload: args.preload_data,
         proj_dim: args.collapse.proj_dim.max(args.n_latent_topics),
         sort_dim: args.collapse.sort_dim,
@@ -690,9 +740,8 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
 
     crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
 
-    let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
-    let batch: Vec<String> = args
-        .batch_files
+    let input: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();
+    let batch: Vec<String> = batch_files
         .as_ref()
         .map(|v| v.iter().map(|s| s.to_string()).collect())
         .unwrap_or_default();
