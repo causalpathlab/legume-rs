@@ -365,6 +365,41 @@ pub struct InheritedFromManifest {
     pub source_kind: RunKind,
 }
 
+impl InheritedFromManifest {
+    /// Pick the effective input file list: explicit CLI wins; otherwise
+    /// the manifest's inherited list. Bails if neither is non-empty so
+    /// the data loader gets a clear "no inputs" error instead of an
+    /// empty `Vec`.
+    pub fn resolve_data(
+        inherited: Option<&Self>,
+        cli: &[Box<str>],
+    ) -> anyhow::Result<Vec<Box<str>>> {
+        let out = if !cli.is_empty() {
+            cli.to_vec()
+        } else {
+            inherited.map(|i| i.data_files.clone()).unwrap_or_default()
+        };
+        anyhow::ensure!(
+            !out.is_empty(),
+            "no input data files — pass at least one positional .zarr/.h5 path or use --from"
+        );
+        Ok(out)
+    }
+
+    /// Pick the effective batch file list: explicit CLI wins; otherwise
+    /// the manifest's inherited list when non-empty.
+    pub fn resolve_batch(
+        inherited: Option<&Self>,
+        cli: Option<&[Box<str>]>,
+    ) -> Option<Vec<Box<str>>> {
+        match (cli, inherited) {
+            (Some(b), _) => Some(b.to_vec()),
+            (None, Some(i)) if !i.batch_files.is_empty() => Some(i.batch_files.clone()),
+            _ => None,
+        }
+    }
+}
+
 /// Load a `senna.json` manifest and extract the fields a downstream
 /// trainer would inherit. Bails for source kinds that don't write a
 /// feature embedding (SVD / joint-SVD); accepts bge, fne, and the

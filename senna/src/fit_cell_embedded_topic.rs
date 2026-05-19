@@ -34,7 +34,6 @@ use crate::topic::train_indexed::{write_feature_embedding, write_indexed_diction
 
 use candle_util::decoder::EmbeddedTopicDecoder;
 use candle_util::encoder::{CellEmbeddedEncoder, CellEmbeddedEncoderArgs};
-use log::warn;
 use std::sync::Arc;
 
 #[derive(Args, Debug)]
@@ -318,37 +317,27 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
 
     let k = args.n_latent_topics;
 
-    // --from chain-inheritance: explicit CLI wins; otherwise pull data
-    // files, batch files, and the ρ-prefix (→ --freeze-feature-embedding)
-    // from the source manifest. See [[feedback-bge-itopic-warm-start]].
+    // --from chain-inheritance: explicit CLI wins; otherwise inherit
+    // data/batch/ρ-prefix from the source manifest (default-freeze).
     let inherited = args
         .from
         .as_deref()
         .map(crate::run_manifest::inherit_from)
         .transpose()?;
     if let Some(inh) = inherited.as_ref() {
-        log::info!(
+        info!(
             "--from: inheriting data + batch + ρ-prefix from a '{}' manifest",
             inh.source_kind
         );
     }
-    let data_files: Vec<Box<str>> = if !args.data_files.is_empty() {
-        args.data_files.clone()
-    } else {
-        inherited
-            .as_ref()
-            .map(|i| i.data_files.clone())
-            .unwrap_or_default()
-    };
-    anyhow::ensure!(
-        !data_files.is_empty(),
-        "no input data files — pass at least one positional .zarr/.h5 path or use --from"
+    let data_files = crate::run_manifest::InheritedFromManifest::resolve_data(
+        inherited.as_ref(),
+        &args.data_files,
+    )?;
+    let batch_files = crate::run_manifest::InheritedFromManifest::resolve_batch(
+        inherited.as_ref(),
+        args.batch_files.as_deref(),
     );
-    let batch_files: Option<Vec<Box<str>>> = match (&args.batch_files, inherited.as_ref()) {
-        (Some(bf), _) => Some(bf.clone()),
-        (None, Some(inh)) if !inh.batch_files.is_empty() => Some(inh.batch_files.clone()),
-        _ => None,
-    };
     let freeze_feature_embedding: Option<Box<str>> =
         args.freeze_feature_embedding.clone().or_else(|| {
             inherited
@@ -356,8 +345,8 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
                 .map(|i| i.feature_embedding_prefix.clone())
         });
 
-    // ρ pre-training resolution — resolved before H so a pre-trained
-    // dictionary's column count pins H.
+    // Resolved before H so the pre-trained dictionary's column count
+    // pins the encoder dim.
     let frozen_spec: Option<crate::topic::freeze::FrozenFeatureSpec> =
         match freeze_feature_embedding.as_deref() {
             None => None,
@@ -374,43 +363,8 @@ pub fn fit_cell_embedded_topic_model(args: &CellEmbeddedTopicArgs) -> anyhow::Re
             }
         };
 
-    // H resolution. Pre-trained ρ pins H; explicit --embedding-dim must
-    // match. Default 2K when neither is set.
     let pretrained_h: Option<usize> = frozen_spec.as_ref().map(|s| s.dictionary_h()).transpose()?;
-    let h = match (pretrained_h, args.embedding_dim) {
-        (Some(ph), 0) => {
-            info!("--embedding-dim auto-set to pre-trained ρ width H = {ph}");
-            ph
-        }
-        (Some(ph), explicit) => {
-            anyhow::ensure!(
-                explicit == ph,
-                "--embedding-dim ({explicit}) disagrees with the pre-trained ρ H ({ph}). \
-                 Either omit --embedding-dim (it will be inferred) or pass {ph} to match."
-            );
-            explicit
-        }
-        (None, 0) => {
-            let auto = 2 * k;
-            info!("--embedding-dim not set; defaulting to 2 × K = {auto}");
-            auto
-        }
-        (None, explicit) => explicit,
-    };
-    if h < k {
-        anyhow::bail!(
-            "--embedding-dim ({h}) < --n-latent-topics ({k}). β = softmax(α·ρᵀ) is rank ≤ H, \
-             so pass --embedding-dim >= {k} (recommended: {} for headroom).",
-            k * 2,
-        );
-    }
-    if h < 2 * k {
-        warn!(
-            "--embedding-dim ({h}) is at the β-rank limit for --n-latent-topics ({k}); \
-             recommend --embedding-dim >= {} for headroom.",
-            k * 2,
-        );
-    }
+    let h = crate::topic::common::resolve_embedding_dim(args.embedding_dim, pretrained_h, k)?;
 
     let (effective_multiome, effective_hvg_n, effective_hvg_list) =
         crate::hvg::resolve_multiome_with_hvg(args.multiome, data_files.len(), &args.hvg);
