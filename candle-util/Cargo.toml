@@ -6,10 +6,6 @@ license.workspace = true
 
 version = "0.2.2"
 
-[[bin]]
-name = "candle-util"
-path = "src/main.rs"
-
 [dependencies]
 
 anyhow = { workspace = true }

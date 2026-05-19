@@ -1,5 +1,6 @@
 mod fit_prs_susie;
 mod fit_qtl_sgvb;
+mod fit_regression;
 mod fit_sumstat_mcmc;
 mod fit_sumstat_sgvb;
 mod pseudobulk;
@@ -10,6 +11,7 @@ mod sim_sumstat;
 
 use fit_prs_susie::*;
 use fit_qtl_sgvb::*;
+use fit_regression::*;
 use fit_sumstat_mcmc::*;
 use fit_sumstat_sgvb::*;
 use pseudobulk::*;
@@ -76,6 +78,8 @@ enum Commands {
     FitQtlSgvb(FitQtlSgvbArgs),
     /// Ridge PRS from z-scores + SuSiE fine-mapping on predicted phenotypes
     FitPrsSusie(FitPrsSusieArgs),
+    /// Generic SGVB regression (Gaussian/NB/Poisson likelihoods × mean-field/SuSiE variational)
+    FitRegression(FitRegressionArgs),
     /// Collapse single-cell counts into Poisson-Gamma pseudobulk per individual and cell type
     Pseudobulk(PseudobulkArgs),
 }
@@ -120,6 +124,9 @@ fn main() -> Result<()> {
         }
         Commands::FitPrsSusie(args) => {
             fit_prs_susie(args)?;
+        }
+        Commands::FitRegression(args) => {
+            fit_regression(args)?;
         }
         Commands::Pseudobulk(args) => {
             pseudobulk(args)?;

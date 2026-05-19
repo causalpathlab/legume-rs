@@ -1,6 +1,6 @@
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
-use candle_nn::{Optimizer, VarBuilder, VarMap};
+use candle_util::candle_core::{DType, Device, Tensor};
+use candle_util::candle_nn::{Optimizer, VarBuilder, VarMap};
 use clap::{Args, ValueEnum};
 use log::info;
 use matrix_util::traits::IoOps;
@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use crate::sgvb::{
+use candle_util::sgvb::{
     composite_local_reparam_loss, local_reparam_loss, samples_local_reparam_loss, CompositeModel,
     GaussianLikelihood, GaussianPrior, GaussianRegressionSGVB, NegativeBinomialLikelihood,
     PoissonLikelihood, RegressionSGVB, SGVBConfig, SparseVariationalOutput, SusieVar,
@@ -215,7 +215,7 @@ pub enum VariationalType {
 }
 
 #[derive(Args, Debug)]
-pub struct RegressionArgs {
+pub struct FitRegressionArgs {
     #[arg(short, long)]
     pub x: PathBuf,
 
@@ -268,7 +268,7 @@ pub struct RegressionArgs {
 //
 
 struct RegressionContext<'a> {
-    args: &'a RegressionArgs,
+    args: &'a FitRegressionArgs,
     x: Tensor,
     y: Tensor,
     vb: VarBuilder<'a>,
@@ -311,7 +311,7 @@ fn run_gaussian_gaussian(ctx: RegressionContext) -> Result<()> {
     let likelihood = GaussianLikelihood::new(y);
 
     // Create optimizer AFTER models are created so varmap contains all variables
-    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+    let mut optimizer = candle_util::candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
 
     info!("Mean module: {} features", p);
     info!("Variance module: {} features", p_var);
@@ -387,7 +387,7 @@ fn run_gaussian_susie(ctx: RegressionContext) -> Result<()> {
     let likelihood = GaussianLikelihood::new(y);
 
     // Create optimizer AFTER models are created so varmap contains all variables
-    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+    let mut optimizer = candle_util::candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
 
     info!(
         "Mean module: {} features, Susie(L={})",
@@ -455,7 +455,7 @@ fn run_poisson_gaussian(ctx: RegressionContext) -> Result<()> {
     let likelihood = PoissonLikelihood::new(y);
 
     // Create optimizer AFTER models are created so varmap contains all variables
-    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+    let mut optimizer = candle_util::candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
 
     train(
         args.iters,
@@ -503,7 +503,7 @@ fn run_poisson_susie(ctx: RegressionContext) -> Result<()> {
     let likelihood = PoissonLikelihood::new(y);
 
     // Create optimizer AFTER models are created so varmap contains all variables
-    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+    let mut optimizer = candle_util::candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
 
     train(
         args.iters,
@@ -562,7 +562,7 @@ fn run_negbin_gaussian(ctx: RegressionContext) -> Result<()> {
     let likelihood = NegativeBinomialLikelihood::new(y);
 
     // Create optimizer AFTER models are created so varmap contains all variables
-    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+    let mut optimizer = candle_util::candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
 
     info!("Mean module: {} features", p);
     info!("Dispersion module: {} features", p_var);
@@ -638,7 +638,7 @@ fn run_negbin_susie(ctx: RegressionContext) -> Result<()> {
     let likelihood = NegativeBinomialLikelihood::new(y);
 
     // Create optimizer AFTER models are created so varmap contains all variables
-    let mut optimizer = candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
+    let mut optimizer = candle_util::candle_nn::AdamW::new_lr(varmap.all_vars(), args.lr)?;
 
     info!(
         "Mean module: {} features, Susie(L={})",
@@ -688,7 +688,7 @@ fn run_negbin_susie(ctx: RegressionContext) -> Result<()> {
 // Main entry point
 //
 
-pub fn run(args: &RegressionArgs) -> Result<()> {
+pub fn fit_regression(args: &FitRegressionArgs) -> Result<()> {
     // Validate argument combinations
     if matches!(args.prior, VariationalType::Susie) && args.susie_layers == 0 {
         anyhow::bail!("susie_layers must be greater than 0 when using Susie prior");
