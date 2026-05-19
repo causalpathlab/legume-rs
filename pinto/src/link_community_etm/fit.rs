@@ -23,9 +23,9 @@ use crate::util::graph_coarsen::*;
 use crate::util::common::Mat;
 use crate::util::input::*;
 use candle_util::candle_core::{self, Device};
-use candle_util::decoder::embedded_topic::EmbeddedTopicDecoder;
+use candle_util::decoder::EmbeddedTopicDecoder;
 use candle_util::candle_nn::{VarBuilder, VarMap};
-use candle_util::encoder::indexed::{
+use candle_util::encoder::{
     IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs,
 };
 use candle_util::value_transform::ValueEmbeddingConfig;

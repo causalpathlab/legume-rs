@@ -30,20 +30,18 @@ use crate::topic::predict_common::{
 use crate::logging::new_progress_bar;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_core::{Device, Tensor};
-use candle_util::data::cell_grouped::{pack_eval_minibatch, CellEvalPackArgs};
-use candle_util::decoder::embedded_topic::EmbeddedTopicDecoder;
-use candle_util::decoder::nb_mixture::{
-    NbMixtureTopicDecoder, DECODER_NAME as NBMIXTURE_NAME,
-};
-use candle_util::decoder::topic::{MultinomTopicDecoder, NbTopicDecoder};
-use candle_util::encoder::cell_embedded::{CellEmbeddedEncoder, CellEmbeddedEncoderArgs};
-use candle_util::encoder::indexed::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
-use candle_util::encoder::softmax::{LogSoftmaxEncoder, LogSoftmaxEncoderArgs};
-use candle_util::data::indexed::{
+use candle_util::data::{pack_eval_minibatch, CellEvalPackArgs};
+use candle_util::decoder::EmbeddedTopicDecoder;
+use candle_util::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
+use candle_util::decoder::{MultinomTopicDecoder, NbMixtureTopicDecoder, NbTopicDecoder};
+use candle_util::encoder::{CellEmbeddedEncoder, CellEmbeddedEncoderArgs};
+use candle_util::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
+use candle_util::encoder::{LogSoftmaxEncoder, LogSoftmaxEncoderArgs};
+use candle_util::data::{
     csc_columns_to_indexed_samples, top_k_indices_weighted, IndexedSample,
 };
-use candle_util::traits::indexed::{CellEncoderT, IndexedEncoderT};
-use candle_util::traits::model::{DecoderModuleT, EncoderModuleT, NewDecoder};
+use candle_util::traits::{CellEncoderT, IndexedEncoderT};
+use candle_util::traits::{DecoderModuleT, EncoderModuleT, NewDecoder};
 use candle_util::topic_refinement::{refine_topic_proportions, TopicRefinementConfig};
 use candle_util::value_transform::ValueEmbeddingConfig;
 use data_beans::sparse_io_vector::SparseIoVec;
@@ -743,7 +741,7 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
 
     // Reconstruct the CSR for adjacency build at prediction time.
     let feature_graph_csr: Option<
-        std::sync::Arc<candle_util::data::indexed::GraphCsr>,
+        std::sync::Arc<candle_util::data::GraphCsr>,
     > = if metadata.has_feature_graph() {
         Some(std::sync::Arc::new(
             crate::topic::model_metadata::read_feature_graph_from_varmap(
@@ -859,7 +857,7 @@ struct PredictBlockIndexedArgs<'a> {
     n_topics: usize,
     /// Feature graph baked into the model. `Some` when the encoder owns a
     /// GCN block; passed to `build_sparse_edges_from_tensor` per block.
-    feature_graph: Option<&'a candle_util::data::indexed::GraphCsr>,
+    feature_graph: Option<&'a candle_util::data::GraphCsr>,
 }
 
 fn predict_block_indexed(
@@ -939,7 +937,7 @@ fn predict_block_indexed(
     // Build sparse edges for this block if the model carries a graph.
     let sparse_edges = match feature_graph {
         Some(g) => Some(
-            candle_util::data::indexed::build_sparse_edges_from_tensor(
+            candle_util::data::build_sparse_edges_from_tensor(
                 &enc_pack.indices,
                 g,
                 dev,

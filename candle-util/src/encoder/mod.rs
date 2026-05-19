@@ -11,3 +11,9 @@ pub mod indexed;
 pub mod joint_softmax;
 pub mod softmax;
 pub mod softmax_iaf;
+
+pub use cell_embedded::{CellEmbeddedEncoder, CellEmbeddedEncoderArgs};
+pub use indexed::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
+pub use joint_softmax::{LogSoftmaxJointEncoder, LogSoftmaxJointEncoderArgs};
+pub use softmax::{LogSoftmaxEncoder, LogSoftmaxEncoderArgs};
+pub use softmax_iaf::{LogSoftmaxIAFEncoder, LogSoftmaxIAFEncoderArgs};

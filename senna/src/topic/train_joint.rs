@@ -5,10 +5,10 @@ use crate::logging::new_progress_bar;
 
 use candle_core::{Device, Tensor};
 use candle_nn::AdamW;
-use candle_util::encoder::joint_softmax::LogSoftmaxJointEncoder;
-use candle_util::data::joint::*;
+use candle_util::encoder::LogSoftmaxJointEncoder;
+use candle_util::data::*;
 use candle_util::loss::topic_likelihood;
-use candle_util::traits::model::*;
+use candle_util::traits::*;
 use matrix_util::dmatrix_util::concatenate_vertical;
 use std::sync::atomic::{AtomicBool, Ordering};
 
