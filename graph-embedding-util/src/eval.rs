@@ -67,7 +67,10 @@ fn save_embedding(
     Ok(())
 }
 
-fn save_bias(
+/// Write a 1-D bias tensor `[N]` as an `[N, 1]` `bias` column parquet.
+/// Public so callers that emit a custom output layout (e.g. `senna bge
+/// --resolve-etm`) reuse the same bias format instead of re-implementing it.
+pub fn save_bias(
     path: &str,
     bias: &Tensor,
     row_names: &[Box<str>],
