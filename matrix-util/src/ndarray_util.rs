@@ -76,6 +76,22 @@ where
         }
     }
 
+    fn log_softmax_columns(&self) -> Self::Mat {
+        let mut xx = self.clone();
+        xx.log_softmax_columns_inplace();
+        xx
+    }
+
+    fn log_softmax_columns_inplace(&mut self) {
+        for j in 0..self.ncols() {
+            let mut x_j = self.column_mut(j);
+            let log_max = x_j.iter().cloned().reduce(T::max).unwrap_or(T::zero());
+            let denom = x_j.mapv(|l| (l - log_max).exp()).sum();
+            let lse = log_max + denom.ln();
+            x_j.mapv_inplace(|x| x - lse);
+        }
+    }
+
     fn sum_to_one_columns(&self) -> Self::Mat {
         let mut xx = self.clone();
         xx.sum_to_one_columns_inplace();

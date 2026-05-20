@@ -85,8 +85,29 @@ impl FeaturePairGraph {
         allow_prefix: bool,
         delimiter: Option<char>,
     ) -> anyhow::Result<Self> {
+        Self::from_edge_list_canon(file_path, feature_names, allow_prefix, delimiter, &|s| {
+            s.into()
+        })
+    }
+
+    /// Like [`Self::from_edge_list`] but canonicalizes both the feature
+    /// axis names and each edge endpoint through `canon` before matching.
+    /// Lets callers reuse a domain canonicalizer (e.g. `FeatureNameKind`
+    /// that normalizes gene symbols *and* `chrX:start-end` loci) so an
+    /// edge file with raw names resolves against a canonicalized axis.
+    /// The stored `feature_names` remain the originals.
+    pub fn from_edge_list_canon(
+        file_path: &str,
+        feature_names: Vec<Box<str>>,
+        allow_prefix: bool,
+        delimiter: Option<char>,
+        canon: &dyn Fn(&str) -> Box<str>,
+    ) -> anyhow::Result<Self> {
         let n_features = feature_names.len();
-        let resolver = GeneIndexResolver::build(&feature_names, delimiter, allow_prefix);
+        // Resolver keyed on canonicalized names; index i still maps to
+        // feature_names[i] because canonicalization preserves order.
+        let canon_names: Vec<Box<str>> = feature_names.iter().map(|n| canon(n)).collect();
+        let resolver = GeneIndexResolver::build(&canon_names, delimiter, allow_prefix);
 
         let file_delim = detect_delimiter(file_path);
         let read_out = read_lines_of_words_delim(file_path, file_delim, -1)?;
@@ -94,13 +115,12 @@ impl FeaturePairGraph {
         let mut edge_set: HashSet<(usize, usize)> = Default::default();
         let mut n_matched = 0usize;
         let mut n_skipped = 0usize;
-
         for line in &read_out.lines {
             if line.len() < 2 {
                 continue;
             }
-            let idx1 = resolver.resolve(&line[0]);
-            let idx2 = resolver.resolve(&line[1]);
+            let idx1 = resolver.resolve(&canon(&line[0]));
+            let idx2 = resolver.resolve(&canon(&line[1]));
             match (idx1, idx2) {
                 (Some(i), Some(j)) if i != j => {
                     let (lo, hi) = if i < j { (i, j) } else { (j, i) };
@@ -115,7 +135,6 @@ impl FeaturePairGraph {
 
         let mut feature_edges: Vec<(usize, usize)> = edge_set.into_iter().collect();
         feature_edges.par_sort_unstable();
-
         info!(
             "Feature-pair graph: {} edges loaded from {} ({} matched, {} skipped, {} unique)",
             read_out.lines.len(),
@@ -124,7 +143,6 @@ impl FeaturePairGraph {
             n_skipped,
             feature_edges.len(),
         );
-
         Ok(Self {
             feature_names,
             n_features,
