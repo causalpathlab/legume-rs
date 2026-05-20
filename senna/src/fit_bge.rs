@@ -55,11 +55,13 @@ impl From<CompositeModeArg> for ge::CompositeMode {
 #[derive(Args, Debug)]
 pub struct BgeArgs {
     #[arg(
-        required = true,
         value_delimiter = ',',
-        help = "Sparse count matrices (zarr/h5), comma-separated. Each \
-                file contributes its rows to the unified feature axis; \
-                cells unify by barcode across files."
+        help = "Sparse count matrices (zarr/h5), comma-separated (single-modality). \
+                For multiome input use --multiome instead.",
+        long_help = "Single-modality input: one or more files sharing a feature axis, \
+                     cells unified by barcode. For multiome (distinct feature spaces \
+                     per modality, glued by barcode) pass the files to --multiome \
+                     instead. Exactly one of [positional files | --multiome] is required."
     )]
     data_files: Vec<Box<str>>,
 
@@ -90,6 +92,54 @@ pub struct BgeArgs {
                 large-data speed knob."
     )]
     max_features: usize,
+
+    #[arg(
+        long = "skip-etm",
+        default_value_t = false,
+        help = "Skip the default ETM resolution and emit only the raw bge embeddings \
+                (latent = cell embedding Z, dictionary = ρ). By default bge resolves \
+                ETM topics from the cell embedding via archetypal analysis and writes \
+                a topic-model layout (latent = log θ, dictionary = β) plus \
+                {cell,feature}_embedding.parquet."
+    )]
+    skip_etm: bool,
+
+    #[arg(
+        long = "num-topics",
+        help = "Number of ETM topics K for --resolve-etm. Omit to auto-select \
+                via an archetypal RSS-elbow sweep over 2..=--max-k."
+    )]
+    num_topics: Option<usize>,
+
+    #[arg(
+        long = "max-k",
+        default_value_t = 30,
+        help = "Upper K for the --resolve-etm auto-sweep (when --num-topics is unset)."
+    )]
+    max_k: usize,
+
+    #[arg(
+        long = "aa-iters",
+        default_value_t = 50,
+        help = "Archetypal-analysis alternating iterations for --resolve-etm."
+    )]
+    aa_iters: usize,
+
+    #[arg(
+        long = "aa-subsample",
+        help = "Cap on cells used to fit archetypes for --resolve-etm \
+                (θ is still assigned for every cell)."
+    )]
+    aa_subsample: Option<usize>,
+
+    #[arg(
+        long = "bridge-weight",
+        default_value_t = 1.0,
+        help = "Up-weight matched (multi-modality) cells in the cell-axis sampler by \
+                this factor so they anchor cross-modal alignment (--multiome only; \
+                1.0 = off)."
+    )]
+    bridge_weight: f32,
 
     #[arg(
         long = "composite-mode",
@@ -277,23 +327,23 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        default_value_t = false,
-        help = "Treat input files as modalities of the same cells, glued by raw barcode.",
-        long_help = "Patchy multi-modal (multiome) load. Each file keeps its own \
-                     feature space (no cross-file barcode suffixing); cells are \
-                     unioned across files by raw barcode — a cell observed only in \
-                     RNA contributes triplets just to the RNA row block, ATAC-only \
-                     cells just to the ATAC block, and shared cells get both. \
-                     Disables `@<basename>` suffixing on cell names. Maps to \
-                     `ColumnAlignment::Union` in the loader.\n\
+        value_delimiter = ',',
+        num_args = 1..,
+        help = "Multiome modality files (comma-separated), one per modality, glued by raw barcode.",
+        long_help = "Multiome load: pass one sparse file per modality, e.g. \
+                     `--multiome rna.zarr,atac.zarr`. Each file keeps its own feature \
+                     space (no cross-file barcode suffixing); cells are unioned by raw \
+                     barcode — a cell seen only in RNA contributes triplets just to the \
+                     RNA block, ATAC-only cells just to the ATAC block, shared cells get \
+                     both. File ORDER defines modality order (used for per-modality \
+                     rebalancing / outputs). Maps to `ColumnAlignment::Union` and \
+                     replaces the positional data files.\n\
                      \n\
-                     With --multiome, batch resolution is constrained: a single \
-                     --batch-files file is allowed (one label per unified cell), or \
-                     embedded `@batch` tags that agree across modalities. The \
-                     default `@<filename>` fallback is disabled — a cell can come \
-                     from multiple files and cannot carry two labels."
+                     Batch resolution is constrained: a single --batch-files file is \
+                     allowed (one label per unified cell), or embedded `@batch` tags \
+                     that agree across modalities."
     )]
-    multiome: bool,
+    multiome: Option<Vec<Box<str>>>,
 
     #[arg(
         long,
@@ -325,16 +375,38 @@ pub struct BgeArgs {
 pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
+    // Input files: positional (single-modality) OR --multiome modality files.
+    // File order under --multiome defines modality order.
+    let is_multiome = args.multiome.as_ref().is_some_and(|v| !v.is_empty());
+
+    // Multiome mixes gene rows (RNA) and locus rows (ATAC peaks) on one axis,
+    // so canonicalize per-name via `Mixed` (genes → gene rule, `chrX:s-e` →
+    // locus rule). This also makes feature-network edges (e.g. gene↔peak
+    // cis-links) resolve against the same canonical names. `--feature-name-exact`
+    // still forces verbatim matching.
     let feature_kind = if args.feature_name_exact {
         ge::FeatureNameKind::Exact
+    } else if is_multiome {
+        ge::FeatureNameKind::Mixed
     } else {
         ge::FeatureNameKind::Gene {
             delim: args.feature_name_delim,
         }
     };
 
+    let data_files: &[Box<str>] = if is_multiome {
+        args.multiome.as_deref().unwrap()
+    } else {
+        anyhow::ensure!(
+            !args.data_files.is_empty(),
+            "no input files: pass single-modality files positionally, or modality \
+             files via `--multiome rna,atac`"
+        );
+        &args.data_files
+    };
+
     let (effective_multiome, effective_hvg_n, effective_hvg_list) =
-        crate::hvg::resolve_multiome_with_hvg(args.multiome, args.data_files.len(), &args.hvg);
+        crate::hvg::resolve_multiome_with_hvg(is_multiome, data_files.len(), &args.hvg);
     let column_alignment = if effective_multiome {
         data_beans::sparse_io_vector::ColumnAlignment::Union
     } else {
@@ -353,7 +425,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     };
 
     let mut unified = ge::load_unified_data(
-        &args.data_files,
+        data_files,
         batch_files,
         feature_kind.clone(),
         args.preload_data,
@@ -388,7 +460,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         Some(load_frozen_feature_host_for_bge(
             prefix,
             &unified.feature_names,
-            feature_kind,
+            feature_kind.clone(),
         )?)
     } else {
         None
@@ -428,6 +500,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 k_hops: args.feature_network_k,
                 alpha: args.feature_network_alpha,
                 refresh_epochs: args.feature_network_refresh,
+                feature_kind: feature_kind.clone(),
             })
         })
         .transpose()?;
@@ -454,6 +527,35 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     } else {
         Some(args.collapse.pb_refine.to_params())
     };
+
+    // Up-weight matched (multi-modality) cells in the cell-axis sampler so
+    // they anchor the cross-modal alignment. No-op outside --multiome
+    // (single-modality cells all have one modality bit set).
+    let cell_weight_mult: Option<Vec<f32>> =
+        if is_multiome && (args.bridge_weight - 1.0).abs() > f32::EPSILON {
+            let mult: Vec<f32> = unified
+                .cell_modality
+                .iter()
+                .map(|&m| {
+                    if m.count_ones() >= 2 {
+                        args.bridge_weight
+                    } else {
+                        1.0
+                    }
+                })
+                .collect();
+            let n_matched = mult
+                .iter()
+                .filter(|&&w| (w - 1.0).abs() > f32::EPSILON)
+                .count();
+            info!(
+                "--bridge-weight {}: up-weighting {} matched cells in the cell-axis sampler",
+                args.bridge_weight, n_matched
+            );
+            Some(mult)
+        } else {
+            None
+        };
 
     let config = ge::FitConfig {
         embedding_dim: args.embedding_dim,
@@ -486,20 +588,32 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         feature_embedding_l2: args.feature_embedding_l2,
         weight_decay: args.weight_decay,
         frozen_feature_host,
+        cell_weight_mult,
     };
 
     let out = ge::fit(&mut unified, config)?;
 
-    ge::save_outputs(
-        &out.model,
-        &ge::OutputContext {
-            feature_names: &unified.feature_names,
-            barcodes: &unified.barcodes,
-        },
-        &args.out,
-    )?;
+    // Output layout depends on --resolve-etm:
+    //   off → bge embeddings (latent = cell embedding Z, dictionary = ρ).
+    //   on  → ETM topic-model layout (latent = log θ, dictionary = β); the raw
+    //         embeddings are preserved as {cell,feature}_embedding.parquet so a
+    //         `--from` chain still finds ρ, while `senna plot` / `plot-topic`
+    //         pick up the resolved topics directly.
+    let resolve_etm = !args.skip_etm;
+    if resolve_etm {
+        resolve_etm_topics(&out.model, &unified.feature_names, &unified.barcodes, args)?;
+    } else {
+        ge::save_outputs(
+            &out.model,
+            &ge::OutputContext {
+                feature_names: &unified.feature_names,
+                barcodes: &unified.barcodes,
+            },
+            &args.out,
+        )?;
+    }
 
-    let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
+    let input: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();
     let batch: Vec<String> = args
         .batch_files
         .as_ref()
@@ -511,14 +625,20 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         data_input: &input,
         data_batch: &batch,
         data_input_null: &[],
+        // With --resolve-etm the dictionary is β (gene × topic) and ρ moves to
+        // feature_embedding.parquet; otherwise the dictionary IS ρ.
         dictionary_suffix: Some("dictionary.parquet"),
         has_model: false,
         has_cell_proj: false,
         pb_gene_suffix: None,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
-        feature_embedding_suffix: None,
-        default_colour_by: "cluster",
+        feature_embedding_suffix: if resolve_etm {
+            Some("feature_embedding.parquet")
+        } else {
+            None
+        },
+        default_colour_by: if resolve_etm { "topic" } else { "cluster" },
         has_latent: true,
         has_cell_to_pb: false,
     })?;
@@ -648,4 +768,127 @@ fn load_frozen_feature_host_for_bge(
         name_kind: kind,
     })?;
     Ok(host)
+}
+
+/////////////////////////////////////////////////////////////////////
+// ETM resolution from the bge cell embedding (--resolve-etm)        //
+/////////////////////////////////////////////////////////////////////
+
+/// Resolve the ETM topic side from a finished bge run, with no further
+/// training, and write a topic-model-shaped output layout so that
+/// `senna {plot, plot-topic, clustering, annotate} --from` consume the
+/// topics directly (matching the `senna topic` / `itopic` conventions:
+/// `latent` = log θ, `dictionary` = β).
+///
+/// Archetypal analysis on the cell embedding `Z [N,H]` yields archetypes
+/// `α [K,H]` (= topic embeddings) and per-cell simplex weights `θ [N,K]`
+/// (= topic proportions); the dictionary is `β = log_softmax_d(ρ·αᵀ)`,
+/// the same factorization the ETM decoder uses. Writes:
+///   - `{out}.latent.parquet`           log θ [N,K]   (topic proportions)
+///   - `{out}.dictionary.parquet`       β    [D,K]   (each topic column a gene simplex)
+///   - `{out}.topic_embedding.parquet`  α    [K,H]   (for a later `itopic` finetune)
+///   - `{out}.cell_embedding.parquet`   Z    [N,H]   (raw bge cell embedding)
+///   - `{out}.feature_embedding.parquet`ρ    [D,H]   (raw bge feature embedding)
+///   - `{out}.{cell,feature}_bias.parquet`            (as `ge::save_outputs`)
+fn resolve_etm_topics(
+    model: &ge::JointEmbedModel,
+    feature_names: &[Box<str>],
+    barcodes: &[Box<str>],
+    args: &BgeArgs,
+) -> anyhow::Result<()> {
+    use matrix_util::archetypal::{archetypal_analysis, select_archetype_k, AaArgs};
+
+    let cpu = candle_core::Device::Cpu;
+    let z = Mat::from_tensor(&model.e_cell.to_device(&cpu)?)?; // [N, H]
+    let rho = Mat::from_tensor(&model.e_feat.to_device(&cpu)?)?; // [D, H]
+    let h = z.ncols();
+    anyhow::ensure!(
+        rho.ncols() == h,
+        "resolve-etm: cell embedding H={} != feature embedding H={}",
+        h,
+        rho.ncols()
+    );
+
+    let base = AaArgs {
+        k: 2,
+        max_iter: args.aa_iters,
+        fw_iters: 30,
+        tol: 1e-4,
+        seed: 1,
+        subsample: args.aa_subsample,
+    };
+
+    let (k, res) = match args.num_topics {
+        Some(k) => {
+            anyhow::ensure!(k >= 2, "resolve-etm: --num-topics must be ≥ 2");
+            info!("resolve-etm: archetypal analysis with fixed K={k}");
+            (k, archetypal_analysis(&z, &AaArgs { k, ..base }))
+        }
+        None => {
+            let krange: Vec<usize> = (2..=args.max_k.max(2)).collect();
+            info!(
+                "resolve-etm: auto-selecting K via archetypal RSS-elbow over 2..={}",
+                args.max_k.max(2)
+            );
+            select_archetype_k(&z, &krange, &base)
+        }
+    };
+    info!("resolve-etm: K={k}, reconstruction RSS={:.4}", res.rss);
+
+    // β = log_softmax_d(ρ · αᵀ): [D, K], each topic column a simplex over genes.
+    let beta_dk = (&rho * res.alpha.transpose()).log_softmax_columns();
+    // log θ on the simplex.
+    let log_theta = res.theta.map(|x| (x + 1e-8).ln());
+
+    let topic_names = axis_id_names("T", k);
+    let h_names = axis_id_names("h", h);
+    let out = &args.out;
+
+    // Topic-model layout — latent = log θ, dictionary = β.
+    log_theta.to_parquet_with_names(
+        &format!("{out}.latent.parquet"),
+        (Some(barcodes), Some("cell")),
+        Some(&topic_names),
+    )?;
+    beta_dk.to_parquet_with_names(
+        &format!("{out}.dictionary.parquet"),
+        (Some(feature_names), Some("gene")),
+        Some(&topic_names),
+    )?;
+    // Resolved topic embeddings α (warm-start for a later `itopic` finetune).
+    res.alpha.to_parquet_with_names(
+        &format!("{out}.topic_embedding.parquet"),
+        (Some(&topic_names), Some("topic")),
+        Some(&h_names),
+    )?;
+    // Raw bge embeddings preserved under non-conflicting names.
+    z.to_parquet_with_names(
+        &format!("{out}.cell_embedding.parquet"),
+        (Some(barcodes), Some("cell")),
+        Some(&h_names),
+    )?;
+    rho.to_parquet_with_names(
+        &format!("{out}.feature_embedding.parquet"),
+        (Some(feature_names), Some("feature")),
+        Some(&h_names),
+    )?;
+    // Bias terms — reuse the canonical writer `ge::save_outputs` uses.
+    ge::eval::save_bias(
+        &format!("{out}.cell_bias.parquet"),
+        &model.b_cell,
+        barcodes,
+        "cell",
+    )?;
+    ge::eval::save_bias(
+        &format!("{out}.feature_bias.parquet"),
+        &model.b_feat,
+        feature_names,
+        "feature",
+    )?;
+
+    info!(
+        "resolve-etm: wrote topic-model layout (latent=log θ, dictionary=β) + \
+         {{cell,feature}}_embedding.parquet to {out}.*"
+    );
+    Ok(())
 }

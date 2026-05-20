@@ -15,6 +15,7 @@ use crate::training::{
     train_composite, AxisSampler, CellCellPbChainTraining, CellCellTraining, CompositeAxis,
     CompositeMode, CompositeTrainContext, TrainingParams,
 };
+use auxiliary_data::feature_names::FeatureNameKind;
 use auxiliary_data::frozen_features::FrozenFeatureHost;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
@@ -156,6 +157,12 @@ pub struct FitConfig {
     ///   table has no compensating gradient path).
     /// - `embedding_dim` MUST equal `host.h`.
     pub frozen_feature_host: Option<FrozenFeatureHost>,
+    /// Optional per-cell multiplier on the cell-axis sampling weight
+    /// (length = `n_cells`, indexed by global cell id). Folded into the
+    /// `degree^α` cell picker so up-weighted cells are sampled more often.
+    /// Used by `--multiome` to up-weight matched (bridge) cells so they
+    /// anchor the cross-modal alignment. `None` = every cell weight ×1.
+    pub cell_weight_mult: Option<Vec<f32>>,
 }
 
 /// Cell-cell NCE configuration. Positives = neighbor pairs from a
@@ -209,6 +216,11 @@ pub struct FeatureNetworkArgs<'a> {
     pub k_hops: usize,
     pub alpha: f32,
     pub refresh_epochs: usize,
+    /// Canonicalizer applied to both the axis names and each edge endpoint
+    /// before matching — the same `FeatureNameKind` used to load the data,
+    /// so an edge file with raw gene / `chrX:start-end` names resolves
+    /// against the canonicalized unified axis (e.g. multiome cis-links).
+    pub feature_kind: FeatureNameKind,
 }
 
 /// Load NB-Fisher per-gene weights from the cache parquet when its
@@ -325,11 +337,13 @@ fn maybe_cap_features(
 
 pub fn load_feature_network(args: FeatureNetworkArgs) -> anyhow::Result<FeatureNetworkConfig> {
     info!("Loading feature network from {}...", args.path);
-    let graph = FeaturePairGraph::from_edge_list(
+    let kind = args.feature_kind.clone();
+    let graph = FeaturePairGraph::from_edge_list_canon(
         args.path,
         args.feature_names.to_vec(),
         args.prefix_match,
         args.delim,
+        &|s| kind.canonicalize(s),
     )?;
     if graph.num_edges() == 0 {
         anyhow::bail!(
@@ -589,6 +603,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         &feat_weights,
         DEFAULT_STRATIFY_ALPHA_CELL,
         alpha_neg,
+        config.cell_weight_mult.as_deref(),
     )?;
     info!(
         "Composite axis cell ({} cells × {} features, strat-cell α={}, {} active batch(es))",
@@ -910,6 +925,7 @@ fn build_active_samplers(
     feat_weights: &[f32],
     alpha_cell: f32,
     alpha_neg: f32,
+    cell_weight_mult: Option<&[f32]>,
 ) -> anyhow::Result<Vec<PerBatchStratifiedCellSampler>> {
     let samplers_all = build_per_batch_stratified_cell_samplers(
         &unified.triplets,
@@ -919,6 +935,7 @@ fn build_active_samplers(
         feat_weights,
         alpha_cell,
         alpha_neg,
+        cell_weight_mult,
     );
     let mut empty: Vec<&str> = Vec::new();
     let active: Vec<PerBatchStratifiedCellSampler> = samplers_all

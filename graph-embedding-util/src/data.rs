@@ -36,6 +36,13 @@ pub struct UnifiedData {
     /// upstream pass (e.g. NB-Fisher) operates on the full backend
     /// and the result needs to be aligned to the compact axis.
     pub feature_to_backend_row: Vec<usize>,
+    /// Per unified cell, a bitmask of which input files (modalities) the
+    /// cell appears in: bit `b` set ⇔ the cell's barcode is present in
+    /// backend `b`. Single-file / non-multiome loads set bit 0 for every
+    /// cell. `count_ones() >= 2` marks a **matched** (multi-modal bridge)
+    /// cell. Drives `--multiome` auto modality-batching and matched-cell
+    /// up-weighting.
+    pub cell_modality: Vec<u32>,
 }
 
 impl UnifiedData {
@@ -124,6 +131,8 @@ impl UnifiedData {
             batch_membership,
             batch_names,
             feature_to_backend_row,
+            // Synthetic pseudobulk "cells" are single-modality.
+            cell_modality: vec![1u32; n_pb],
         })
     }
 
@@ -190,9 +199,47 @@ impl UnifiedData {
     pub(crate) fn from_sparse_io(
         data: SparseIoVec,
         batch_labels: &[Box<str>],
+        auto_modality_batch: bool,
     ) -> anyhow::Result<Self> {
         let feature_names = data.row_names()?;
         let barcodes = data.column_names()?;
+
+        // Per-cell modality bitmask: which input backend(s) each unified
+        // barcode appears in. Single-backend loads → bit 0 for all cells.
+        let n_back = data.len();
+        let cell_modality = if n_back > 1 {
+            let bc_to_idx: FxHashMap<&str, usize> = barcodes
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (b.as_ref(), i))
+                .collect();
+            let mut mask = vec![0u32; barcodes.len()];
+            for b in 0..n_back.min(32) {
+                for name in data[b].column_names()? {
+                    if let Some(&i) = bc_to_idx.get(name.as_ref()) {
+                        mask[i] |= 1u32 << b;
+                    }
+                }
+            }
+            mask
+        } else {
+            vec![1u32; barcodes.len()]
+        };
+
+        // `--multiome` auto-batch: when no explicit batch labels were
+        // resolved, group cells by their modality-presence pattern so the
+        // δ-correction integrates matched + unimodal cohorts onto shared
+        // axes. Otherwise honor the labels the loader resolved.
+        let derived: Vec<Box<str>>;
+        let batch_labels: &[Box<str>] = if auto_modality_batch && n_back > 1 {
+            derived = cell_modality
+                .iter()
+                .map(|&m| modality_presence_label(m, n_back))
+                .collect();
+            &derived
+        } else {
+            batch_labels
+        };
         anyhow::ensure!(
             batch_labels.len() == barcodes.len(),
             "batch labels {} != cells {}",
@@ -257,7 +304,23 @@ impl UnifiedData {
             barcodes,
             batch_membership,
             batch_names,
+            cell_modality,
         })
+    }
+}
+
+/// Human-readable batch label for a modality-presence bitmask, e.g.
+/// `m0`, `m1`, or `m0+m2`. Stable across cells with the same pattern, so
+/// the dedupe in `from_sparse_io` collapses them into one batch each.
+fn modality_presence_label(mask: u32, n_back: usize) -> Box<str> {
+    let present: Vec<String> = (0..n_back.min(32))
+        .filter(|&b| mask & (1u32 << b) != 0)
+        .map(|b| format!("m{b}"))
+        .collect();
+    if present.is_empty() {
+        "none".to_string().into_boxed_str()
+    } else {
+        present.join("+").into_boxed_str()
     }
 }
 
@@ -312,5 +375,9 @@ pub fn load_unified_data(
         ..Default::default()
     })?;
 
-    UnifiedData::from_sparse_io(loaded.data, &loaded.batch)
+    // Under Union with no explicit batch file, auto-batch by
+    // modality-presence so multiome cohorts (matched / unimodal) align.
+    let auto_modality_batch =
+        matches!(column_alignment, ColumnAlignment::Union) && batch_files.is_none();
+    UnifiedData::from_sparse_io(loaded.data, &loaded.batch, auto_modality_batch)
 }

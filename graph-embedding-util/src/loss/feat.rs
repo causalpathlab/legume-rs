@@ -121,6 +121,9 @@ pub struct CellFeatureSampler {
 /// Build one stratified cell sampler per batch. Returns one entry per
 /// original batch id (`None` for batches with zero positives). Caller
 /// filters to the active subset before wiring into `AxisSampler`.
+// Deliberately takes primitives (not `&UnifiedData`) to keep the loss
+// module decoupled from the data layer; the input count is inherent.
+#[allow(clippy::too_many_arguments)]
 pub fn build_per_batch_stratified_cell_samplers(
     triplets: &[Triplet],
     batch_membership: &[u32],
@@ -129,6 +132,7 @@ pub fn build_per_batch_stratified_cell_samplers(
     fisher_weights: &[f32],
     alpha_cell: f32,
     alpha_neg: f32,
+    cell_weight_mult: Option<&[f32]>,
 ) -> Vec<Option<PerBatchStratifiedCellSampler>> {
     let bucket_bar = new_progress_bar(triplets.len() as u64);
     bucket_bar.set_message("bucketing triplets by batch (strat-cell)");
@@ -196,7 +200,8 @@ pub fn build_per_batch_stratified_cell_samplers(
                     .collect();
                 let picker = WeightedIndex::new(weights).expect("non-empty cell-feature weights");
                 per_cell.push(CellFeatureSampler { features, picker });
-                cell_w.push(cell_degree[&c].max(1e-8).powf(alpha_cell));
+                let mult = cell_weight_mult.map_or(1.0, |m| m[c as usize]);
+                cell_w.push(cell_degree[&c].max(1e-8).powf(alpha_cell) * mult);
             }
             let cell_picker = WeightedIndex::new(cell_w).expect("non-empty cell weights");
 
