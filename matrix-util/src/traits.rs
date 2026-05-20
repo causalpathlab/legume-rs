@@ -89,6 +89,13 @@ pub trait MatOps {
     /// normalize logits after taking exp `(log-sum-exp)`
     fn normalize_exp_logits_columns(&self) -> Self::Mat;
 
+    /// column-wise log-softmax: subtract each column's log-sum-exp so the
+    /// `exp` of each column sums to 1. Returns log-probabilities (unlike
+    /// [`Self::normalize_exp_logits_columns`], which returns probabilities).
+    fn log_softmax_columns_inplace(&mut self);
+    /// column-wise log-softmax (see [`Self::log_softmax_columns_inplace`])
+    fn log_softmax_columns(&self) -> Self::Mat;
+
     /// vector norm for each column
     fn normalize_columns_inplace(&mut self);
     /// vector norm for each column

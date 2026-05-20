@@ -696,6 +696,40 @@ where
         ret
     }
 
+    fn log_softmax_columns_inplace(&mut self) {
+        for j in 0..self.ncols() {
+            let lse = {
+                let Some(col) = self.get_col(j) else { continue };
+                let vals = col.values();
+                if vals.is_empty() {
+                    continue;
+                }
+                let mut log_max = vals[0];
+                for &v in vals {
+                    if v > log_max {
+                        log_max = v;
+                    }
+                }
+                let mut denom = T::zero();
+                for &v in vals {
+                    denom += (v - log_max).exp();
+                }
+                log_max + denom.ln()
+            };
+            if let Some(mut col) = self.get_col_mut(j) {
+                for x in col.values_mut() {
+                    *x -= lse;
+                }
+            }
+        }
+    }
+
+    fn log_softmax_columns(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.log_softmax_columns_inplace();
+        ret
+    }
+
     fn sum_to_one_columns_inplace(&mut self) {
         let ncol = self.ncols();
 
@@ -917,6 +951,21 @@ where
     fn normalize_exp_logits_columns(&self) -> Self::Mat {
         let mut ret = self.clone();
         ret.normalize_exp_logits_columns_inplace();
+        ret
+    }
+
+    fn log_softmax_columns_inplace(&mut self) {
+        for mut x_j in self.column_iter_mut() {
+            let log_max = x_j.max();
+            let denom = x_j.map(|l| (l - log_max.clone()).exp()).sum();
+            let lse = log_max + denom.ln();
+            x_j.iter_mut().for_each(|l| *l = l.clone() - lse.clone());
+        }
+    }
+
+    fn log_softmax_columns(&self) -> Self::Mat {
+        let mut ret = self.clone();
+        ret.log_softmax_columns_inplace();
         ret
     }
 
