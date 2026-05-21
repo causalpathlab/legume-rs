@@ -3,9 +3,9 @@
 use crate::common::*;
 use crate::p2g::embed::{build_atac_embedding, cis_link_stats, project_gene, pve_adjust};
 use crate::p2g::finemap::{finemap_gene, FinemapParams};
+use crate::p2g::input::{load_gene_coords_tsv, load_paired_data};
+use crate::p2g::knockoff::{knockoff_threshold, knockoff_w, KnockoffParams};
 use crate::p2g::output::{write_bed, LinkRecord};
-use crate::topic::cis_mask::load_gene_coords_tsv;
-use crate::topic::input::load_paired_data;
 use data_beans_alg::collapse_data::MultilevelParams;
 use data_beans_alg::refine_multilevel::RefineParams;
 use genomic_data::coordinates::{find_cis_peaks, load_gene_tss, parse_peak_coordinates};
@@ -51,7 +51,10 @@ pub struct PeakToGeneArgs {
     )]
     gene_coords: Option<Box<str>>,
 
-    #[arg(long, help = "GFF/GTF annotation for gene TSS. Alternative to --gene-coords")]
+    #[arg(
+        long,
+        help = "GFF/GTF annotation for gene TSS. Alternative to --gene-coords"
+    )]
     gff_file: Option<Box<str>>,
 
     #[arg(
@@ -83,6 +86,13 @@ pub struct PeakToGeneArgs {
     )]
     use_adjusted: bool,
 
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Hierarchical refinement levels (coarsening + refinement); the refined finest level is used. 1 = single level"
+    )]
+    num_levels: usize,
+
     /* Embedding */
     #[arg(
         long,
@@ -113,6 +123,24 @@ pub struct PeakToGeneArgs {
     )]
     prior_var: f64,
 
+    /* Knockoff FDR (optional) */
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Target FDR for knockoff-selected links (0 = off; PIPs only)"
+    )]
+    fdr: f64,
+
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        help = "Knockoff LD ridge λ in R_λ = (1-λ)R + λI"
+    )]
+    ko_ridge: f64,
+
+    #[arg(long, default_value_t = 42, help = "Random seed for knockoff sampling")]
+    seed: u64,
+
     /* Output */
     #[arg(
         long,
@@ -134,7 +162,11 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     /* 1. Load paired RNA + ATAC */
-    let mut paired = load_paired_data(&args.rna_files, &args.atac_files, args.batch_files.as_deref())?;
+    let mut paired = load_paired_data(
+        &args.rna_files,
+        &args.atac_files,
+        args.batch_files.as_deref(),
+    )?;
     let gene_names = paired.data_stack.stack[0].row_names()?;
     let peak_names = paired.data_stack.stack[1].row_names()?;
     let n_genes = gene_names.len();
@@ -157,29 +189,42 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
         &paired.batch_membership,
         &MultilevelParams {
             knn_pb_samples: DEFAULT_KNN,
-            num_levels: 1,
+            num_levels: args.num_levels.max(1),
             sort_dim: args.sort_dim,
             num_opt_iter: DEFAULT_OPT_ITER,
             refine: Some(RefineParams::default()),
         },
     )?;
-    let level = levels
-        .last()
-        .ok_or_else(|| anyhow::anyhow!("collapse produced no levels"))?;
-
-    let rna_pb = pick_pseudobulk(&level[0], args.use_adjusted);
-    let atac_pb = pick_pseudobulk(&level[1], args.use_adjusted);
+    if levels.is_empty() {
+        anyhow::bail!("collapse produced no levels");
+    }
+    // Use the hierarchically-refined finest level (most pb samples). With
+    // --num-levels > 1 the collapse refines pb assignments using the level
+    // hierarchy (bottom-up coarsening + sibling-constrained refinement);
+    // pooling levels as extra columns adds redundancy, not signal, so we take
+    // the refined finest level only.
+    let finest = levels
+        .iter()
+        .max_by_key(|lvl| pick_pseudobulk(&lvl[0], args.use_adjusted).ncols())
+        .expect("levels is non-empty");
+    let rna_pb = pick_pseudobulk(&finest[0], args.use_adjusted);
+    let atac_pb = pick_pseudobulk(&finest[1], args.use_adjusted);
     let s = rna_pb.ncols();
+    let n_eff = s;
     info!(
-        "Pseudobulk: RNA {}x{}, ATAC {}x{} ({} samples)",
+        "Pseudobulk: RNA {}x{}, ATAC {}x{} ({} refinement level(s), {} samples)",
         rna_pb.nrows(),
         s,
         atac_pb.nrows(),
         atac_pb.ncols(),
+        levels.len(),
         s
     );
     if s < 50 {
-        info!("warning: only {} pseudobulk samples; correlations may be unstable", s);
+        info!(
+            "warning: only {} pseudobulk samples; correlations may be unstable",
+            s
+        );
     }
 
     /* 3. Global ATAC embedding (peaks = W, samples = V) */
@@ -200,6 +245,12 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     } else {
         anyhow::bail!("--cis-window must be > 0");
     };
+
+    let ko_params = KnockoffParams {
+        ridge: args.ko_ridge,
+        seed: args.seed,
+    };
+    let use_fdr = args.fdr > 0.0;
 
     /* 5. Per-gene fine-mapping (parallel over genes) */
     let per_gene: Vec<Vec<LinkRecord>> = (0..n_genes)
@@ -226,9 +277,10 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             // Project the gene into the ATAC embedding; marginal z + LD share norms.
             let gene_rate: Vec<f32> = rna_pb.row(g).iter().copied().collect();
             let proj = project_gene(&emb, &gene_rate);
-            let (mut z, r) = cis_link_stats(&proj, &emb, &cis);
+            let (z_raw, r) = cis_link_stats(&proj, &emb, &cis, n_eff as f64);
+            let mut z = z_raw.clone();
             if !args.no_pve_adjust {
-                z.iter_mut().for_each(|zc| *zc = pve_adjust(*zc, s));
+                z.iter_mut().for_each(|zc| *zc = pve_adjust(*zc, n_eff));
             }
 
             let params = FinemapParams {
@@ -236,6 +288,14 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
                 prior_var: args.prior_var,
             };
             let (pip, eff_mean, eff_std) = finemap_gene(&r, &z, &params);
+
+            // Knockoff importance W from the raw (pre-PVE) z, keeping the N(0,R)
+            // null. The pooled FDR threshold is applied after all genes score.
+            let w_stat = if use_fdr {
+                knockoff_w(&z_raw, &r, &ko_params, g)
+            } else {
+                vec![f32::NAN; cis.len()]
+            };
 
             cis.iter()
                 .enumerate()
@@ -256,6 +316,8 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
                         effect_std: eff_std[j],
                         z: z[j],
                         distance: (mid - tss.tss).abs(),
+                        w_stat: w_stat[j],
+                        selected: false,
                     }
                 })
                 .collect()
@@ -270,9 +332,26 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
         n_skipped
     );
 
-    /* 6. Write */
+    /* 6. Pooled knockoff filter (genome-wide FDR over links) */
+    if use_fdr {
+        let all_w: Vec<f32> = records.iter().map(|r| r.w_stat).collect();
+        let tau = knockoff_threshold(&all_w, args.fdr);
+        let mut n_sel = 0usize;
+        for rec in records.iter_mut() {
+            if rec.w_stat.is_finite() && rec.w_stat >= tau {
+                rec.selected = true;
+                n_sel += 1;
+            }
+        }
+        info!(
+            "Knockoff filter (FDR={:.3}): threshold W>={:.4}, {} links selected",
+            args.fdr, tau, n_sel
+        );
+    }
+
+    /* 7. Write */
     let path = format!("{}.results.bed.gz", args.out);
-    write_bed(&mut records, args.pip_threshold, &path)?;
+    write_bed(&mut records, args.pip_threshold, use_fdr, &path)?;
     Ok(())
 }
 

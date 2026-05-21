@@ -39,7 +39,10 @@ pub fn build_atac_embedding(atac_pb: &Mat, embedding_dim: usize) -> anyhow::Resu
     let (u, sigma, v) = a.rsvd(k)?; // u[P,k], sigma[k], v[S,k]
     let kk = sigma.len();
     if kk < embedding_dim {
-        info!("ATAC embedding rank {} (min(P={}, S={}, d={}))", kk, p, s, embedding_dim);
+        info!(
+            "ATAC embedding rank {} (min(P={}, S={}, d={}))",
+            kk, p, s, embedding_dim
+        );
     }
 
     // W = U Σ
@@ -83,10 +86,14 @@ pub fn project_gene(emb: &AtacEmbedding, gene_rate: &[f32]) -> GeneProjection {
 /// - marginal `z_p = β̂/SE` of OLS(`x̃` on `ŷ_p = V W_pᵀ`), where
 ///   `β̂ = (g̃·W_p)/‖W_p‖²` and `RSS = ‖x̃‖² − (g̃·W_p)²/‖W_p‖²`;
 /// - LD `R_{ij} = (W_i·W_j)/(‖W_i‖‖W_j‖)` (cosine; unit diagonal, PSD, rank ≤ d).
-pub fn cis_link_stats(proj: &GeneProjection, emb: &AtacEmbedding, cis: &[usize]) -> (Vec<f32>, Mat) {
+pub fn cis_link_stats(
+    proj: &GeneProjection,
+    emb: &AtacEmbedding,
+    cis: &[usize],
+    n_eff: f64,
+) -> (Vec<f32>, Mat) {
     let d = emb.d;
     let c = cis.len();
-    let s = emb.v.nrows();
 
     // Per cis peak: g̃·W_p and ‖W_p‖², in one pass.
     let mut gw = vec![0.0f64; c];
@@ -102,11 +109,11 @@ pub fn cis_link_stats(proj: &GeneProjection, emb: &AtacEmbedding, cis: &[usize])
     // Marginal z (σ²=1 OLS in embedding space).
     let z: Vec<f32> = (0..c)
         .map(|i| {
-            if wn2[i] < 1e-12 || s <= 2 {
+            if wn2[i] < 1e-12 || n_eff <= 2.0 {
                 return 0.0;
             }
             let rss = (proj.x_norm2 - gw[i] * gw[i] / wn2[i]).max(0.0);
-            let se = (rss / (s as f64 - 2.0) / wn2[i]).sqrt();
+            let se = (rss / (n_eff - 2.0) / wn2[i]).sqrt();
             if se < 1e-12 {
                 0.0
             } else {
@@ -181,7 +188,7 @@ mod tests {
         let emb = build_atac_embedding(&atac, 10).unwrap();
         let proj = project_gene(&emb, &gene);
         let cis: Vec<usize> = (0..c).collect();
-        let (z_raw, r) = cis_link_stats(&proj, &emb, &cis);
+        let (z_raw, r) = cis_link_stats(&proj, &emb, &cis, s as f64);
         let z: Vec<f32> = z_raw.iter().map(|&zc| pve_adjust(zc, s)).collect();
 
         let params = FinemapParams {

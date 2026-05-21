@@ -6,7 +6,7 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version = "0.1.4"
+version = "0.2.0"
 
 [[bin]]
 name = "chickpea"
@@ -20,8 +20,6 @@ candle-util = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
 genomic-data = { workspace = true }
-
-hdf5 = { package = "hdf5-metno", version = "0.12.1", features = ["blosc"] }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
