@@ -1,4 +1,5 @@
 mod common;
+mod p2g;
 mod topic;
 
 use crate::common::*;
@@ -73,6 +74,21 @@ enum Commands {
         alias = "topic"
     )]
     FitTopic(topic::fit::FitTopicArgs),
+
+    /// Fine-map cis peak→gene links via SuSiE-RSS on pseudobulk summary stats
+    #[command(
+        long_about = "Link ATAC peaks to RNA genes by summary-statistics fine-mapping.\n\n\
+            Pseudobulk the matched RNA + ATAC cells and embed peaks (and the\n\
+            projected genes) in a shared ATAC latent space. Score each cis\n\
+            peak–gene pair by a log-linear regression z in that space, then\n\
+            fine-map per gene with SuSiE-RSS using the peak–peak correlation\n\
+            (LD) structure. Lighter and faster than `fit-topic` (no neural model).\n\n\
+            Outputs: {out}.results.bed.gz (chr start end peak_id gene_id pip\n\
+            effect_mean effect_std z distance).",
+        after_long_help = ENV_HELP,
+        aliases = ["p2g", "peak2gene"]
+    )]
+    PeakToGene(p2g::PeakToGeneArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -92,5 +108,6 @@ fn main() -> anyhow::Result<()> {
 
     match &cli.commands {
         Commands::FitTopic(args) => topic::fit::fit_topic_model(args),
+        Commands::PeakToGene(args) => p2g::run_peak_to_gene(args),
     }
 }
