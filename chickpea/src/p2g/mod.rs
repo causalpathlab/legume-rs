@@ -10,6 +10,8 @@ pub mod run;
 
 mod embed;
 mod finemap;
+mod input;
+mod knockoff;
 mod output;
 
 pub use run::{run_peak_to_gene, PeakToGeneArgs};

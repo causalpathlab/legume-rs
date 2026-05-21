@@ -26,7 +26,13 @@ pub fn finemap_gene(r: &Mat, z: &[f32], params: &FinemapParams) -> (Vec<f32>, Ve
     if c == 1 {
         return (vec![1.0], vec![z[0]], vec![0.0]);
     }
-    susie_rss(r, z, params.num_components.max(1), params.prior_var.max(1e-6), 100)
+    susie_rss(
+        r,
+        z,
+        params.num_components.max(1),
+        params.prior_var.max(1e-6),
+        100,
+    )
 }
 
 /// SuSiE-RSS IBSS with residual variance fixed at 1.
@@ -170,8 +176,14 @@ mod tests {
             prior_var: 5.0,
         };
         let (pip, _, _) = finemap_gene(&r, &z, &params);
-        assert!(pip[0] + pip[1] > 0.9, "joint PIP of the pair too low: {pip:?}");
-        assert!(pip[0] < 0.95 && pip[1] < 0.95, "collinear peaks not split: {pip:?}");
+        assert!(
+            pip[0] + pip[1] > 0.9,
+            "joint PIP of the pair too low: {pip:?}"
+        );
+        assert!(
+            pip[0] < 0.95 && pip[1] < 0.95,
+            "collinear peaks not split: {pip:?}"
+        );
         assert!(pip[2] < 0.3, "null peak PIP too high: {pip:?}");
     }
 }

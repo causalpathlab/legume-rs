@@ -1,5 +1,10 @@
+//! Input loading for peak-to-gene: paired RNA + ATAC matrices and gene TSS
+//! coordinates.
+
 use crate::common::*;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
+use auxiliary_data::feature_names::FeatureNameKind;
+use genomic_data::coordinates::GeneTss;
 
 pub(crate) struct PairedDataWithBatch {
     pub data_stack: SparseIoStack,
@@ -41,6 +46,9 @@ pub fn load_paired_data(
         data_files: rna_files.to_vec(),
         batch_files: rna_batch,
         preload: false,
+        // Exact: keep gene symbols verbatim so they match --gene-coords/--gff-file
+        // and stay readable in the output (auto-detect would mangle e.g. `gene_0`).
+        feature_kind: Some(FeatureNameKind::Exact),
         ..Default::default()
     })?;
 
@@ -50,6 +58,8 @@ pub fn load_paired_data(
         data_files: atac_files.to_vec(),
         batch_files: atac_batch,
         preload: false,
+        // Exact: keep peak loci verbatim so `parse_peak_coordinates` reads them.
+        feature_kind: Some(FeatureNameKind::Exact),
         ..Default::default()
     })?;
 
@@ -106,4 +116,53 @@ fn validate_shared_cells(rna: &SparseIoVec, atac: &SparseIoVec) -> anyhow::Resul
     }
 
     Ok(())
+}
+
+/// Load gene TSS positions from a simple TSV file (gene\tchr\ttss).
+/// Produced by sim-link as {out}.gene_coords.tsv.gz.
+pub fn load_gene_coords_tsv(
+    path: &str,
+    gene_names: &[Box<str>],
+) -> anyhow::Result<Vec<Option<GeneTss>>> {
+    use matrix_util::common_io::open_buf_reader;
+    use std::io::BufRead;
+
+    let reader = open_buf_reader(path)?;
+    let mut tss_map: rustc_hash::FxHashMap<Box<str>, GeneTss> = Default::default();
+
+    for (i, line) in reader.lines().enumerate() {
+        let line = line?;
+        if i == 0 {
+            continue; // skip header
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 3 {
+            continue;
+        }
+        let gene: Box<str> = fields[0].into();
+        let chr: Box<str> = fields[1].into();
+        let tss: i64 = fields[2].parse()?;
+        tss_map.insert(gene, GeneTss { chr, tss });
+    }
+
+    info!(
+        "Loaded {} gene positions from {}, matching against {} genes",
+        tss_map.len(),
+        path,
+        gene_names.len()
+    );
+
+    let result: Vec<Option<GeneTss>> = gene_names
+        .iter()
+        .map(|name| tss_map.get(name).cloned())
+        .collect();
+
+    let matched = result.iter().filter(|x| x.is_some()).count();
+    info!(
+        "Matched {}/{} genes to coordinates",
+        matched,
+        gene_names.len()
+    );
+
+    Ok(result)
 }

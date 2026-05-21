@@ -173,4 +173,72 @@ Per tested (gene, cis-peak): a BGZF BED sorted by `(chr,start,end)`:
 ```
 
 `distance = |peak_midpoint − TSS|`. All tested pairs are written; the PIP
-threshold only drives a summary log line.
+threshold only drives a summary log line. With `--fdr q > 0`, two columns are
+appended — `w_stat` (knockoff importance) and `selected` (0/1) — see §10.
+
+---
+
+## 9. Hierarchical pseudobulk refinement (`--num-levels`)
+
+The collapse builds `L` nested resolutions and refines pb assignments using the
+level hierarchy (bottom-up coarsening + sibling-constrained, top-down
+refinement; data-beans-alg `refine`). `--num-levels L` sets that depth; we then
+use the **refined finest level** as the single sample axis (`S` pseudobulks).
+
+We do **not** pool levels as extra columns: nested levels are repartitions of the
+same cells, so pooling adds correlated/redundant columns, not independent signal
+— empirically it *reduced* peak-gene recovery on simulated data. The value of the
+hierarchy is a better-optimized finest partition, not more columns. `L = 1`
+reproduces the single-level pipeline.
+
+---
+
+## 10. Knockoff FDR (`--fdr q`)
+
+SuSiE PIPs rank links but don't bound the error rate across the (many) reported
+pairs. An optional **GhostKnockoff** filter (He et al. 2022; model-X knockoffs,
+Candès et al. 2018) on each gene's `(z, R)` gives genome-wide FDR control.
+
+**Construction.** Under the RSS null `z ~ N(0, R)`. Regularize `R_λ = (1−λ)R + λI`
+(the rank-≤d cosine `R` is otherwise singular). Equicorrelated diagonal
+`s = min(1, 2λ_min(R_λ))`, `D = sI` (so `2R_λ − D ⪰ 0`). Sample knockoff
+z-scores
+
+```
+z̃ | z  ~  N( (R_λ − D) R_λ⁻¹ z ,  2D − D R_λ⁻¹ D )
+```
+
+which makes `(z, z̃)` swap-exchangeable: `cov(z,z̃) = R_λ − D`, `var(z̃) = R_λ`.
+Knockoffs are drawn from the **raw** (pre-PVE) `z` so the null holds.
+
+**Importance (v1 — z-score contrast).**
+
+```
+W_j = |z_j| − |z̃_j|
+```
+
+Flip-sign holds by construction (swapping `z_j ↔ z̃_j` negates `W_j`). This
+marginal statistic only needs `(z, z̃)` exchangeability, so it is robust to the
+embedding `R` being a rank-≤d *approximation* of the true z-correlation. A
+SuSiE-PIP importance — running the augmented `(z_aug, R_aug)` with
+`R_aug = [[R_λ, R_λ−D],[R_λ−D, R_λ]]` through `finemap_gene` and taking
+`W_j = PIP_j − PIP_j̃` — is **deferred to v2**: it is more powerful but, because
+IBSS leans on the full (misspecified) `R`, it inflated FDR on the null sim below.
+
+**Pooled filter.** Collect all `(peak,gene)` `W` and take the knockoff+ threshold
+
+```
+τ_q = min{ t > 0 : (1 + #{W ≤ −t}) / (#{W ≥ t} ∨ 1) ≤ q },   select W_j ≥ τ_q
+```
+
+Pooling across genes (each gene's knockoffs are independent; per-gene flip-sign
+holds) controls FDR over the genome-wide **link** set — per-gene `C` is too small
+to clear the `1/q` detection threshold. `effect_*`/`pip` columns are unchanged;
+`selected`/`w_stat` are added.
+
+**Validation.** Two tests in `src/p2g/knockoff.rs`: a clean-RSS calibration test
+(`pooled_fdr_is_controlled`) and an *embedding-pipeline* null test
+(`embedding_knockoff_controls_fdr_on_nulls`) that drives `build_atac_embedding` +
+`cis_link_stats`, with null peaks loading on factors orthogonal to each gene's
+program. The z-score contrast holds FDR there (FDP ≈ 0 at q = 0.1); the
+SuSiE-PIP contrast did not (FDP ≈ 0.35), which is why it waits for v2.

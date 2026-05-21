@@ -1,6 +1,5 @@
 mod common;
 mod p2g;
-mod topic;
 
 use crate::common::*;
 use colored::Colorize;
@@ -36,13 +35,15 @@ fn print_logo() {
 #[derive(Parser, Debug)]
 #[command(
     version,
-    about = "chickpea — Multi-Omic Linkage Analysis for paired single-cell RNA + ATAC data",
-    long_about = "chickpea — Multi-Omic Linkage Analysis\n\n\
-        Discovers cis-regulatory peak-gene links from paired single-cell\n\
-        RNA + ATAC data via topic model with SuSiE fine-mapping.\n\n\
+    about = "chickpea — peak-to-gene cis-regulatory linkage for paired single-cell RNA + ATAC",
+    long_about = "chickpea — peak-to-gene cis-regulatory linkage\n\n\
+        Links ATAC peaks to RNA genes from paired single-cell RNA + ATAC\n\
+        data by summary-statistics fine-mapping (SuSiE-RSS) in a shared\n\
+        pseudobulk embedding.\n\n\
         Usage:\n\
           data-beans-sim multiome -o sim --n-topics 10\n\
-          chickpea fit-topic --rna-files sim.rna.zarr --atac-files sim.atac.zarr -o out",
+          chickpea peak-to-gene --rna-files sim.rna.zarr \\\n\
+            --atac-files sim.atac.zarr --gene-coords sim.gene_coords.tsv.gz -o out",
     term_width = 80
 )]
 struct Cli {
@@ -62,19 +63,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Fit joint topic model to paired RNA + ATAC data
-    #[command(
-        long_about = "Fit topic model with SuSiE peak-gene linkage.\n\n\
-            Uses multi-level pseudobulk collapsing for scalability.\n\
-            Indexed encoder with gene-guided ATAC selection.\n\
-            Gated RNA decoder interpolates linked and independent dictionaries.\n\n\
-            Outputs: {out}.results.bed.gz (linkage PIPs), {out}.prop.parquet,\n\
-            {out}.atac_dict.parquet, {out}.rna_dict.parquet, {out}.gate_alpha.parquet",
-        after_long_help = ENV_HELP,
-        alias = "topic"
-    )]
-    FitTopic(topic::fit::FitTopicArgs),
-
     /// Fine-map cis peak→gene links via SuSiE-RSS on pseudobulk summary stats
     #[command(
         long_about = "Link ATAC peaks to RNA genes by summary-statistics fine-mapping.\n\n\
@@ -107,7 +95,6 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     match &cli.commands {
-        Commands::FitTopic(args) => topic::fit::fit_topic_model(args),
         Commands::PeakToGene(args) => p2g::run_peak_to_gene(args),
     }
 }
