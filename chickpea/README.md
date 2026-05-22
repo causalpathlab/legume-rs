@@ -19,13 +19,35 @@ for the full derivation.
 1. Load paired RNA + ATAC (matched barcodes), validate shared cells.
 2. Random projection + multi-level pseudobulk collapse (batch-aware).
 3. Global ATAC embedding — rSVD of the standardized log1p ATAC pseudobulk.
-4. Per gene: project expression into the embedding, read off the marginal
-   peak→gene `z` and the peak–peak LD `R` as inner products.
+4. Per gene: read off the marginal peak→gene `z` and the peak–peak LD `R`,
+   either as embedding inner products (default) or — with `--tmle` — as
+   leave-one-chromosome-out **deconfounded** residual statistics (see below).
 5. SuSiE-RSS fine-mapping per gene → posterior inclusion probabilities (PIPs)
    and effect sizes for each cis peak.
 6. *(optional, `--fdr q`)* pooled GhostKnockoff filter on the per-gene `(z, R)`
    to select links at a target genome-wide FDR (the "Knockoff" in the name).
 7. Write all tested (gene, cis-peak) links to a sorted BGZF BED.
+
+### Deconfounding cis from topic (`--tmle`)
+
+The shared ATAC embedding reads peak→gene off a low-rank *topic* space, so a
+cis enhancer and its co-active bystanders — which share the same cell-type
+program — look alike: the topic is a confounder the embedding cannot remove.
+`--tmle` swaps the embedding association for a partially-linear, doubly-robust
+estimator (Robinson/Chernozhukov DML; named **TMLE** after van der Laan &
+Rubin's targeted-learning framing): it regresses both the gene and each peak on
+a topic confounder and reads the partial association off the residuals
+(residual-on-residual). A peak's *private*, topic-orthogonal fluctuation is the
+only part that can reach its gene, so confounded bystanders collapse while
+identifiable cis links survive.
+
+The confounder is estimated **leave-one-chromosome-out** (LOCO): the topic is
+genome-wide but a gene's cis signal is local, so an embedding of peaks *off* the
+gene's chromosome (`--tmle-rank m` factors) captures the trans confounder
+without absorbing the cis effect under test — the Neyman-orthogonality split
+that keeps the residual `z` honest. On simulated multiome the embedding path's
+knockoff FDP runs uncontrolled (≈0.4–0.6, topic confounding), while `--tmle`
+brings it near the target with higher power.
 
 ## Usage
 
@@ -56,6 +78,8 @@ Key options (see `chickpea peak-to-gene --help` for all):
 | `--num-components` | 10 | SuSiE single-effect components `L` |
 | `--prior-var` | 5.0 | SuSiE prior effect variance (z-score scale) |
 | `--no-pve-adjust` | off | disable winner's-curse z shrinkage |
+| `--tmle` | off | LOCO deconfounded residual `z`/`R` instead of the embedding association |
+| `--tmle-rank` | 20 | off-chromosome topic confounder factors `m` for `--tmle` |
 | `--num-levels` | 1 | hierarchical refinement levels; the refined finest level is used |
 | `--fdr` | 0.0 | target FDR for knockoff (z-score contrast) selected links (0 = off) |
 | `--ko-ridge` | 0.05 | knockoff LD ridge λ in `R_λ = (1-λ)R + λI` |

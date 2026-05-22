@@ -13,5 +13,6 @@ mod finemap;
 mod input;
 mod knockoff;
 mod output;
+mod tmle;
 
 pub use run::{run_peak_to_gene, PeakToGeneArgs};
