@@ -42,12 +42,19 @@ only part that can reach its gene, so confounded bystanders collapse while
 identifiable cis links survive.
 
 The confounder is estimated **leave-one-chromosome-out** (LOCO): the topic is
-genome-wide but a gene's cis signal is local, so an embedding of peaks *off* the
-gene's chromosome (`--tmle-rank m` factors) captures the trans confounder
-without absorbing the cis effect under test — the Neyman-orthogonality split
-that keeps the residual `z` honest. On simulated multiome the embedding path's
-knockoff FDP runs uncontrolled (≈0.4–0.6, topic confounding), while `--tmle`
-brings it near the target with higher power.
+genome-wide but a gene's cis signal is local, so a co-embedding of features
+*off* the gene's chromosome (`--tmle-rank m` factors) captures the trans
+confounder without absorbing the cis effect under test — the Neyman-orthogonality
+split that keeps the residual `z` honest.
+
+By default the confounder is a **joint RNA+ATAC** pseudobulk-sample co-embedding:
+cell state is informed by both modalities, so the topic estimate is cleaner and
+recovers more links (LOCO then drops the test chromosome's *genes* as well as
+its peaks, since a chr-`c` gene's expression carries the very cis signal under
+test). `--tmle-atac-only` falls back to an ATAC-only confounder, which controls
+FDP more tightly at some cost in power. On simulated multiome the embedding
+path's knockoff FDP runs uncontrolled (≈0.4, topic confounding) while `--tmle`
+brings it near the target; the joint confounder adds ≈5–9% power over ATAC-only.
 
 ## Usage
 
@@ -80,6 +87,7 @@ Key options (see `chickpea peak-to-gene --help` for all):
 | `--no-pve-adjust` | off | disable winner's-curse z shrinkage |
 | `--tmle` | off | LOCO deconfounded residual `z`/`R` instead of the embedding association |
 | `--tmle-rank` | 20 | off-chromosome topic confounder factors `m` for `--tmle` |
+| `--tmle-atac-only` | off | ATAC-only `--tmle` confounder (default is joint RNA+ATAC; tighter FDP, less power) |
 | `--num-levels` | 1 | hierarchical refinement levels; the refined finest level is used |
 | `--fdr` | 0.0 | target FDR for knockoff (z-score contrast) selected links (0 = off) |
 | `--ko-ridge` | 0.05 | knockoff LD ridge λ in `R_λ = (1-λ)R + λI` |

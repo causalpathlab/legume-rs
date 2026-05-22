@@ -14,62 +14,76 @@
 //! each peak on a topic confounder `W`, then read the partial association off
 //! the residuals (residual-on-residual). The orthogonalization is
 //! leave-one-chromosome-out (LOCO): the topic is genome-wide but a gene's cis
-//! signal is local, so estimating `W₋c` from peaks OFF the gene's chromosome
+//! signal is local, so estimating `W₋c` from features OFF the gene's chromosome
 //! captures the trans confounder without absorbing the cis effect we are
 //! testing — the Neyman-orthogonality split that keeps the residual z honest.
+//! `W₋c` is a joint RNA+ATAC pb-sample co-embedding by default (a two-modality
+//! cell-state estimate; LOCO then drops off-chromosome genes too), or ATAC-only.
 
 use crate::common::*;
-use crate::p2g::embed::build_atac_embedding;
 use genomic_data::coordinates::chr_stripped;
+use matrix_util::dmatrix_util::concatenate_vertical;
 use nalgebra::DVector;
 use std::collections::HashMap;
 
+/// A pseudobulk modality and the chromosome of each of its features, for LOCO
+/// row selection. `pb` is `[features × samples]`; `chr[f]` is feature `f`'s
+/// chromosome (`None` ⇒ unplaced, kept in every off-chromosome set).
+pub struct ModalityBlock<'a> {
+    pub pb: &'a Mat,
+    pub chr: &'a [Option<Box<str>>],
+}
+
 /// Leave-one-chromosome-out topic confounder bank.
 ///
-/// For each chromosome `c` we embed the ATAC pseudobulk restricted to peaks NOT
-/// on `c` (the same row-centered log1p rSVD as [`build_atac_embedding`]) and
-/// keep the `[S×m]` orthonormal sample-factor matrix `W₋c = V₋c`. Genes on `c`
-/// residualize against `W₋c`, which holds the trans/topic structure but none of
-/// `c`'s own cis fluctuation.
+/// For each chromosome `c` we embed the pseudobulk restricted to features NOT on
+/// `c` (standardized log1p, rSVD) and keep the `[S×m]` orthonormal sample-factor
+/// matrix `W₋c`. Genes on `c` residualize against `W₋c`, which holds the
+/// trans/topic structure but none of `c`'s own cis fluctuation.
+///
+/// With one block (ATAC) this is the ATAC-only confounder; with two blocks
+/// (ATAC + RNA) it is the **joint** confounder — a two-modality estimate of each
+/// pb sample's cell state. The joint variant only stays Neyman-orthogonal
+/// because LOCO drops `c`'s features in BOTH modalities (a chr-`c` gene's
+/// expression carries the very cis signal under test).
 pub struct LocoConfounders {
     by_chr: HashMap<Box<str>, Mat>,
-    /// Fallback for unplaced peaks / unseen chromosomes: the all-peaks embedding.
+    /// Fallback for unplaced peaks / unseen chromosomes: the all-features factors.
     global: Mat,
     pub m: usize,
 }
 
 impl LocoConfounders {
-    /// Build the per-chromosome confounder bank from the ATAC pseudobulk
-    /// `[P×S]`. `peak_chr[p]` is peak `p`'s chromosome (`None` ⇒ unplaced).
-    pub fn build(atac_pb: &Mat, peak_chr: &[Option<Box<str>>], m: usize) -> anyhow::Result<Self> {
-        let global = build_atac_embedding(atac_pb, m)?.v;
+    /// Build the per-chromosome confounder bank. Pass one block (ATAC) for the
+    /// ATAC-only confounder or two (ATAC + RNA) for the joint one; all blocks
+    /// must share the same number of samples `S`.
+    pub fn build(blocks: &[ModalityBlock], m: usize) -> anyhow::Result<Self> {
+        let all_rows: Vec<Vec<usize>> =
+            blocks.iter().map(|b| (0..b.pb.nrows()).collect()).collect();
+        let global = loco_factors(blocks, &all_rows, m)?;
 
-        let mut chrs: Vec<Box<str>> = peak_chr
+        let mut chrs: Vec<Box<str>> = blocks
             .iter()
+            .flat_map(|b| b.chr.iter())
             .filter_map(|c| c.as_ref().map(|c| chr_stripped(c).into()))
             .collect();
         chrs.sort();
         chrs.dedup();
 
-        // One off-chromosome embedding per chromosome. Sequential so the peak
-        // row-subset copy stays one-at-a-time; the rSVD parallelizes internally.
+        // One off-chromosome embedding per chromosome. Sequential so the
+        // row-subset copies stay one-at-a-time; the rSVD parallelizes internally.
         let mut by_chr = HashMap::new();
         for c in &chrs {
-            let rows: Vec<usize> = peak_chr
+            let rows: Vec<Vec<usize>> = blocks
                 .iter()
-                .enumerate()
-                .filter(|(_, pc)| {
-                    pc.as_ref()
-                        .map(|x| chr_stripped(x) != c.as_ref())
-                        .unwrap_or(true)
-                })
-                .map(|(i, _)| i)
+                .map(|b| off_chromosome_rows(b.chr, c))
                 .collect();
-            // Degenerate (nearly all peaks on this chr): fall back to global.
-            let w = if rows.len() < m.max(2) {
+            let total: usize = rows.iter().map(|r| r.len()).sum();
+            // Degenerate (nearly all features on this chr): fall back to global.
+            let w = if total < m.max(2) {
                 global.clone()
             } else {
-                build_atac_embedding(&atac_pb.select_rows(&rows), m)?.v
+                loco_factors(blocks, &rows, m)?
             };
             by_chr.insert(c.clone(), w);
         }
@@ -78,10 +92,64 @@ impl LocoConfounders {
     }
 
     /// Confounder `W₋c` for a gene on chromosome `chr` (global fallback if the
-    /// chromosome carried no peaks).
+    /// chromosome carried no features).
     pub fn get(&self, chr: &str) -> &Mat {
         self.by_chr.get(chr_stripped(chr)).unwrap_or(&self.global)
     }
+}
+
+/// Rows of `chr` whose feature is NOT on chromosome `c` (unplaced features kept).
+fn off_chromosome_rows(chr: &[Option<Box<str>>], c: &str) -> Vec<usize> {
+    chr.iter()
+        .enumerate()
+        .filter(|(_, pc)| pc.as_ref().map(|x| chr_stripped(x) != c).unwrap_or(true))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Sample-factor matrix `V [S×m]` of the standardized, block-balanced stack of
+/// each block's selected rows. Each feature is log1p z-scored over samples and
+/// each block is scaled by `1/√(#rows)` so neither modality dominates the joint
+/// factorization; the rSVD then yields the shared cell-state axes.
+fn loco_factors(blocks: &[ModalityBlock], rows: &[Vec<usize>], m: usize) -> anyhow::Result<Mat> {
+    let standardized: Vec<Mat> = blocks
+        .iter()
+        .zip(rows)
+        .map(|(b, r)| standardize_block(b.pb, r))
+        .collect();
+    let stacked = concatenate_vertical(&standardized)?;
+    let (_, _, v) = stacked.rsvd(m)?;
+    Ok(v)
+}
+
+/// log1p, z-score each selected row over samples (mean 0, unit var; zero-var →
+/// 0), then scale the block by `1/√(#rows)`. Row-centering keeps the factors
+/// `⊥ 1` so residualizing against them preserves mean-zero residuals.
+fn standardize_block(pb: &Mat, rows: &[usize]) -> Mat {
+    let s = pb.ncols();
+    let nr = rows.len();
+    let mut out = Mat::zeros(nr, s);
+    for (i, &r) in rows.iter().enumerate() {
+        let mut row = vec![0f32; s];
+        let mut mean = 0.0f32;
+        for (j, x) in row.iter_mut().enumerate() {
+            *x = (pb[(r, j)] + 1.0).ln();
+            mean += *x;
+        }
+        mean /= s as f32;
+        let var =
+            row.iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>() / (s as f32 - 1.0).max(1.0);
+        let sd = var.sqrt();
+        if sd < 1e-8 {
+            continue; // constant feature → all-zero standardized row
+        }
+        let inv = 1.0 / sd;
+        for (j, &x) in row.iter().enumerate() {
+            out[(i, j)] = (x - mean) * inv;
+        }
+    }
+    out.scale_mut(1.0 / (nr.max(1) as f32).sqrt());
+    out
 }
 
 /// Centered log1p of a pseudobulk row over its `S` samples (mean 0).
@@ -203,7 +271,14 @@ mod tests {
         let peak_chr: Vec<Option<Box<str>>> = (0..p)
             .map(|pp| Some(format!("chr{}", chr[pp]).into()))
             .collect();
-        let loco = LocoConfounders::build(&atac, &peak_chr, m).unwrap();
+        let loco = LocoConfounders::build(
+            &[ModalityBlock {
+                pb: &atac,
+                chr: &peak_chr,
+            }],
+            m,
+        )
+        .unwrap();
         let peak_clog: Vec<DVec> = (0..p)
             .map(|pp| centered_log1p(&atac.row(pp).iter().copied().collect::<Vec<_>>()))
             .collect();
