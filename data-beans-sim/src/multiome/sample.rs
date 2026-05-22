@@ -9,7 +9,6 @@ use nalgebra::DMatrix;
 use rand::prelude::*;
 use rand_distr::Poisson;
 use rayon::prelude::*;
-use std::borrow::Cow;
 
 pub type Mat = DMatrix<f32>;
 
@@ -230,45 +229,37 @@ pub fn build_derived_dictionary(
     w
 }
 
-/// Sample Poisson counts with vectorized rates and rayon parallelism.
+/// Sample Poisson counts from a per-(feature, cell) log-rate `logits_dn`.
 ///
-/// Pre-computes effective dictionary `eff = γ ⊙ β`, then parallelises over
-/// cells:
-///   `rate_j = depth_j · δ_{:, b(j)} · eff · θ_j`     (when `delta_db` set),
-///   `rate_j = depth_j ·                  eff · θ_j`   (otherwise).
-/// `delta_db` is `exp(log δ)` in mean space; the caller is responsible for
-/// applying any PVE / log-normal centering before exponentiating.
-pub fn sample_poisson_counts(
-    beta_dk: &Mat,
-    theta_kn: &Mat,
-    cell_depths: &[f32],
-    gamma_gk: Option<&Mat>,
-    delta_db: Option<&Mat>,
-    batch_membership: Option<&[usize]>,
+/// Each cell follows a multinomial-Poisson: softmax the cell's column over
+/// features (numerically stable), scale by the cell's library size `depth_j`,
+/// and draw `Poisson(depth_j · p_fj)` per feature. The softmax fixes the
+/// expected library at `depth_j`, so the variance budget encoded in `logits`
+/// (see `combine_budget_logits`) governs only the relative per-feature rates.
+pub fn sample_poisson_from_logits(
+    logits_dn: &Mat,
+    depths: &[f32],
     rseed: u64,
 ) -> Vec<(u64, u64, f32)> {
-    let eff_dk: Cow<Mat> = match gamma_gk {
-        Some(gamma) => Cow::Owned(gamma.component_mul(beta_dk)),
-        None => Cow::Borrowed(beta_dk),
-    };
-
-    cell_depths
+    let d = logits_dn.nrows();
+    depths
         .par_iter()
         .enumerate()
         .flat_map_iter(|(j, &depth_j)| {
             let mut rng = StdRng::seed_from_u64(rseed.wrapping_add(j as u64));
-            let mut rate_vec = &*eff_dk * theta_kn.column(j) * depth_j;
-            if let (Some(delta), Some(memb)) = (delta_db, batch_membership) {
-                let b = memb[j];
-                rate_vec.component_mul_assign(&delta.column(b));
-            }
-
+            let col = logits_dn.column(j);
+            let maxv = col.max();
+            let denom: f32 = (0..d)
+                .map(|f| (col[f] - maxv).exp())
+                .sum::<f32>()
+                .max(1e-30);
             let mut out = Vec::new();
-            for (i, &rate) in rate_vec.iter().enumerate() {
+            for f in 0..d {
+                let rate = depth_j * (col[f] - maxv).exp() / denom;
                 if rate > 1e-6 {
                     let count = sample_poisson_safe(rate, &mut rng);
                     if count > 0.0 {
-                        out.push((i as u64, j as u64, count));
+                        out.push((f as u64, j as u64, count));
                     }
                 }
             }

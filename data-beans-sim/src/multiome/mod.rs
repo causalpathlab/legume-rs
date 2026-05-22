@@ -1,15 +1,23 @@
 //! Paired ATAC + RNA simulator (`data-beans-sim multiome`).
 //!
-//! Without any `--reference-*`: pure chickpea-style Poisson simulator —
-//! shared latent topics drive ATAC counts via β_atac and RNA counts via the
-//! derived dictionary `W = M · β_ext`. Peak-gene ground truth `M` is sparse
-//! and laid out so cis-window recovery is well-defined.
+//! Without any `--reference-*`: a **two-step** generative model.
 //!
-//! With `--reference-rna` and/or `--reference-atac`: per-modality two-stage
-//! GLM with NB+copula sampling, mirroring `handlers::run_simulate_with_reference`.
-//! Each reference is fitted independently (`fit_global_copula`) — there is
-//! no cross-modality copula. Cross-modality coupling stays implicit through
-//! the shared θ and the indicator M.
+//! Step 1 — ATAC from topics (`build_peak_logits`). Peak `p`'s log-accessibility is
+//! `A_pj = base_p + σ·(√π_topic·T_p + √π_priv·P_p + √π_noise·N_p [+ √π_batch·B_p])`,
+//! where `T = std(log(β_p·θ))` is cell-type on/off switching and `P` a peak-PRIVATE
+//! fluctuation; the peak budget `{topic, private, noise, batch}` is normalized to 1.
+//! A fraction of causal peaks are topic-INVARIANT (pure-private → cleanly identifiable).
+//!
+//! Step 2 — RNA conditional on enhancers (`build_gene_logits`). A linked gene inherits
+//! its causal peaks' regulatory signal `sig = √π_topic·T + √π_priv·P` through a
+//! cell-type-INVARIANT cis link: `E_gj = σ·(√pve_cis·std(Σ_{p∈M_g} sig_p) +
+//! √(1−pve_cis)·N_g [+ batch])`. The gene has no topic path of its own — cell-type
+//! specificity propagates through its peaks; unlinked genes are noise. Counts are
+//! `Poisson(depth_j · softmax(·))`; peak-gene ground truth is `M[G,P]`.
+//!
+//! With `--reference-rna`/`--reference-atac`: per-modality two-stage GLM + NB+copula
+//! sampling (`fit_global_copula`, no cross-modality copula); the `{topic, noise, batch}`
+//! budget (normalized, no cis) weights the log-rate.
 
 mod sample;
 
@@ -95,6 +103,26 @@ pub struct MultiomeArgs {
 
     #[arg(
         long,
+        default_value_t = 0.0,
+        help = "Cis propagation (gene-level, in [0,1]): proportion of a LINKED gene's \
+                log-expression variance inherited from its causal peaks' regulatory \
+                signal (the rest is gene-intrinsic noise). 0 ⇒ gene decoupled from its \
+                enhancers; 1 ⇒ fully enhancer-explained. A gene has no topic path of its \
+                own — cell-type specificity propagates through its peaks."
+    )]
+    pub pve_cis: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Fraction of causal peaks made topic-INVARIANT (pure-private accessibility): \
+                their cis links are cleanly recoverable (no topic confounding). A clean \
+                positive-control set alongside the harder topic-driven links."
+    )]
+    pub invariant_causal_fraction: f32,
+
+    #[arg(
+        long,
         default_value_t = 5000,
         help = "Expected RNA library size per cell. Synthetic mode: enters as the per-cell \
                 depth multiplier ρ_j (with `--cell-sd-log-depth-rna` log-normal noise). \
@@ -127,20 +155,47 @@ pub struct MultiomeArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Topic-PVE π_topic ∈ [0, 1]. Softens θ from one-hot toward uniform: \
-                θ_coarse(k*,j) = π_topic + (1−π_topic)/K. Multiome β is softmax-normalized \
-                over features (sums to 1 per topic), so π_topic acts on θ only — there is \
-                no separate β-PVE knob (like multimodal). Independent of pve_batch."
+        help = "Peak topic weight: (unnormalized) share of a PEAK's log-accessibility \
+                variance from the shared cell-state program (cell-type on/off). The peak \
+                budget {topic, private, noise, batch} is normalized to sum to 1."
     )]
     pub pve_topic: f32,
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Subtype-PVE π_sub ∈ [0, 1]. Same θ-softening but at the subtype level \
-                within the dominant coarse topic. Only used when K_sub > 1."
+        default_value_t = 0.3,
+        help = "Peak-private weight: (unnormalized) share of a peak's log-accessibility \
+                from a peak-PRIVATE fluctuation (independent of cell type). This is the \
+                identifiability dial — only a true enhancer's private signal reaches its \
+                gene; co-active bystanders share only the topic part. 0 ⇒ peaks collinear \
+                within a cell type ⇒ cis links unidentifiable."
     )]
-    pub pve_sub_topic: f32,
+    pub pve_private: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.8,
+        help = "θ geometry: coarse-topic concentration per cell (1 = one-hot cell \
+                states, 0 = uniform). Sets how distinct cell states are; separate \
+                from the topic budget weight."
+    )]
+    pub topic_concentration: f32,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "θ geometry: subtype concentration within the dominant coarse topic \
+                (only used when --n-sub-topics > 1)."
+    )]
+    pub subtopic_concentration: f32,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Total systematic log-rate SD σ (overall dynamic range), orthogonal \
+                to the variance-budget shares."
+    )]
+    pub log_signal_sd: f32,
 
     #[arg(
         long,
@@ -212,12 +267,13 @@ pub struct MultiomeArgs {
     #[arg(long, value_enum, default_value_t = BatchProgram::Random)]
     pub batch_program: BatchProgram,
 
-    /// PVE-style magnitude for the per-cell residual log-mean noise term in
-    /// stage 1 of the reference-mode sampler.
+    /// Peak-noise weight: (unnormalized) share of a peak's log-accessibility from a
+    /// per-cell residual noise term. Normalized with the other peak-budget weights.
     #[arg(long, default_value_t = 0.0)]
     pub pve_noise: f32,
 
-    /// Proportion of variance explained by batch effects (reference mode).
+    /// Batch weight: (unnormalized) share of log-rate variance from batch effects
+    /// (used when --batches > 1). Normalized into the peak and gene budgets.
     #[arg(long, default_value_t = 1.0)]
     pub pve_batch: f32,
 
@@ -299,15 +355,15 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
 
     info!(
         "simulating: {} genes, {} peaks, {} cells, {} topics × {} subtypes = {} total \
-         (pve_coarse={}, pve_sub={}, gene_topic_sd={}, atac_ref={}, rna_ref={})",
+         (topic_conc={}, subtopic_conc={}, gene_topic_sd={}, atac_ref={}, rna_ref={})",
         g,
         p,
         nn,
         kk,
         k_sub,
         k_total,
-        args.pve_topic,
-        args.pve_sub_topic,
+        args.topic_concentration,
+        args.subtopic_concentration,
         args.gene_topic_sd,
         atac_fit.is_some(),
         rna_fit.is_some(),
@@ -320,8 +376,8 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         kk,
         k_sub,
         nn_total,
-        args.pve_topic,
-        args.pve_sub_topic,
+        args.topic_concentration,
+        args.subtopic_concentration,
         theta_seed,
     );
     // ATAC consumes the coarse topic axis (K), RNA the full nested
@@ -401,26 +457,94 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     let batch_membership_rna: Vec<usize> =
         rna_indices.iter().map(|&i| batch_membership[i]).collect();
 
-    // ---- Synthetic-mode batch effects (per modality, log-space PVE decomposition) -------
-    // Mirrors the topic / multimodal subcommands:
-    //   log δ_m(g, b) = √π_batch · z_{g,b} + √(1−π_batch) · w_g
-    // Built only when `bb > 1` AND the corresponding modality is in synthetic mode.
-    // Reference-mode modalities draw their own batch perturbations inside
-    // `sample_with_reference`, where δ rides the gene-gene copula structure.
-    let synth_atac_delta: Option<DMatrix<f32>> = if atac_fit.is_none() && bb > 1 {
-        Some(sample_synth_batch_delta(p, bb, args.pve_batch, &mut rng))
+    // ---- Synthetic two-step generative model (no-reference mode) -----------------------
+    // Step 1: ATAC accessibility from topics. A peak's regulatory signal mixes a topic
+    // component (cell-type on/off) and a peak-PRIVATE fluctuation; the private share is
+    // the identifiability dial. A fraction of causal peaks are topic-INVARIANT (pure
+    // private) → cleanly recoverable links.
+    // Step 2: a linked gene inherits Σ of its causal peaks' regulatory signal scaled by
+    // `pve_cis`; the rest is gene-intrinsic noise. The gene has no topic path of its own
+    // — cell-type specificity propagates through its enhancers.
+    let synth = atac_fit.is_none() && rna_fit.is_none();
+    let mut causal_by_gene: std::collections::HashMap<usize, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (&gi, &pi) in indicator_genes.iter().zip(indicator_peaks.iter()) {
+        causal_by_gene.entry(gi).or_default().push(pi);
+    }
+    let (batch_log_atac, batch_log_rna): (Option<DMatrix<f32>>, Option<DMatrix<f32>>) =
+        if synth && bb > 1 {
+            let normal = rand_distr::Normal::new(0.0f32, 1.0).unwrap();
+            let mut ba = DMatrix::<f32>::zeros(p, bb);
+            ba.iter_mut().for_each(|v| *v = normal.sample(&mut rng));
+            let mut br = DMatrix::<f32>::zeros(g, bb);
+            br.iter_mut().for_each(|v| *v = normal.sample(&mut rng));
+            (Some(ba), Some(br))
+        } else {
+            (None, None)
+        };
+    let (peak_logits, gene_logits): (Option<DMatrix<f32>>, Option<DMatrix<f32>>) = if synth {
+        // Topic-invariant causal peaks (pure-private accessibility).
+        let mut is_invariant = vec![false; p];
+        if args.invariant_causal_fraction > 0.0 {
+            let mut cps: Vec<usize> = indicator_peaks.clone();
+            cps.sort_unstable();
+            cps.dedup();
+            cps.shuffle(&mut rng);
+            let n_inv = (cps.len() as f32 * args.invariant_causal_fraction.clamp(0.0, 1.0)).round()
+                as usize;
+            for &pp in cps.iter().take(n_inv) {
+                is_invariant[pp] = true;
+            }
+            info!("topic-invariant causal peaks: {}/{}", n_inv, cps.len());
+        }
+        // Peak-private fluctuation [P × nn] (identifiability source).
+        let normal = rand_distr::Normal::new(0.0f32, 1.0).unwrap();
+        let mut priv_mat = DMatrix::<f32>::zeros(p, nn);
+        priv_mat
+            .iter_mut()
+            .for_each(|v| *v = normal.sample(&mut rng));
+
+        info!(
+            "synthetic two-step: ATAC←topics, RNA←enhancers (pve_cis={})",
+            args.pve_cis
+        );
+        let (pl, sig) = build_peak_logits(
+            &beta_atac,
+            &theta_coarse_atac,
+            &is_invariant,
+            &priv_mat,
+            batch_log_atac.as_ref(),
+            &batch_membership_atac,
+            (
+                args.pve_topic,
+                args.pve_private,
+                args.pve_noise,
+                args.pve_batch,
+            ),
+            args.log_signal_sd,
+            &mut rng,
+        );
+        let gl = build_gene_logits(
+            &sig,
+            &causal_by_gene,
+            g,
+            nn,
+            nn_shared,
+            batch_log_rna.as_ref(),
+            &batch_membership_rna,
+            args.pve_cis,
+            args.pve_batch,
+            args.log_signal_sd,
+            &mut rng,
+        );
+        (Some(pl), Some(gl))
     } else {
-        None
-    };
-    let synth_rna_delta: Option<DMatrix<f32>> = if rna_fit.is_none() && bb > 1 {
-        Some(sample_synth_batch_delta(g, bb, args.pve_batch, &mut rng))
-    } else {
-        None
+        (None, None)
     };
 
-    // =====================================================================================
-    //   ATAC counts
-    // =====================================================================================
+    /////////////////
+    // ATAC counts //
+    /////////////////
     let (atac_triplets, atac_batch_delta) = if let Some(fit) = atac_fit.as_ref() {
         let (trips, batch_delta) = sample_with_reference(
             &beta_atac,
@@ -443,35 +567,18 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         let rho =
             sample::sample_cell_depths(nn, args.depth_atac, args.cell_sd_log_depth_atac, &mut rng);
         info!(
-            "sampling ATAC counts: {} peaks × {} cells (Poisson{})",
-            p,
-            nn,
-            if synth_atac_delta.is_some() {
-                ", with batch δ"
-            } else {
-                ""
-            }
+            "sampling ATAC counts: {} peaks × {} cells (two-step)",
+            p, nn
         );
-        let atac_seed = rng.next_u64();
-        let memb_ref = synth_atac_delta
-            .as_ref()
-            .map(|_| batch_membership_atac.as_slice());
-        let trips = sample::sample_poisson_counts(
-            &beta_atac,
-            &theta_coarse_atac,
-            &rho,
-            None,
-            synth_atac_delta.as_ref(),
-            memb_ref,
-            atac_seed,
-        );
+        let logits = peak_logits.as_ref().expect("synthetic peak logits");
+        let trips = sample::sample_poisson_from_logits(logits, &rho, rng.next_u64());
         (trips, None)
     };
     info!("ATAC: {} non-zeros", atac_triplets.len());
 
-    // =====================================================================================
-    //   RNA counts
-    // =====================================================================================
+    ////////////////
+    // RNA counts //
+    ////////////////
     let (rna_triplets, rna_batch_delta) = if let Some(fit) = rna_fit.as_ref() {
         let (trips, batch_delta) = sample_with_reference(
             &w_gk,
@@ -493,29 +600,9 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     } else {
         let tau =
             sample::sample_cell_depths(nn, args.depth_rna, args.cell_sd_log_depth_rna, &mut rng);
-        info!(
-            "sampling RNA counts: {} genes × {} cells (Poisson{})",
-            g,
-            nn,
-            if synth_rna_delta.is_some() {
-                ", with batch δ"
-            } else {
-                ""
-            }
-        );
-        let rna_seed = rng.next_u64();
-        let memb_ref = synth_rna_delta
-            .as_ref()
-            .map(|_| batch_membership_rna.as_slice());
-        let trips = sample::sample_poisson_counts(
-            &w_gk,
-            &theta_full_rna,
-            &tau,
-            gamma_gk.as_ref(),
-            synth_rna_delta.as_ref(),
-            memb_ref,
-            rna_seed,
-        );
+        info!("sampling RNA counts: {} genes × {} cells (two-step)", g, nn);
+        let logits = gene_logits.as_ref().expect("synthetic gene logits");
+        let trips = sample::sample_poisson_from_logits(logits, &tau, rng.next_u64());
         (trips, None)
     };
     info!("RNA: {} non-zeros", rna_triplets.len());
@@ -611,20 +698,16 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         info!("batch membership: {}", batch_file);
     }
 
-    // Synthetic-mode log-δ matrices (one per modality where bb > 1 and no ref).
-    if let Some(ref delta) = synth_atac_delta {
+    // Synthetic-mode raw batch log-effects (one per modality where bb > 1 and no ref).
+    if let Some(ref bl) = batch_log_atac {
         let f = format!("{}.atac.ln_batch.parquet", args.out);
-        delta
-            .map(|x| x.ln())
-            .to_parquet_with_names(&f, (Some(&peak_names), Some("peak")), None)?;
-        info!("wrote ATAC synthetic-mode log-δ: {}", f);
+        bl.to_parquet_with_names(&f, (Some(&peak_names), Some("peak")), None)?;
+        info!("wrote ATAC batch log-effects: {}", f);
     }
-    if let Some(ref delta) = synth_rna_delta {
+    if let Some(ref bl) = batch_log_rna {
         let f = format!("{}.rna.ln_batch.parquet", args.out);
-        delta
-            .map(|x| x.ln())
-            .to_parquet_with_names(&f, (Some(&gene_names), Some("gene")), None)?;
-        info!("wrote RNA synthetic-mode log-δ: {}", f);
+        bl.to_parquet_with_names(&f, (Some(&gene_names), Some("gene")), None)?;
+        info!("wrote RNA batch log-effects: {}", f);
     }
 
     if let (Some(fit), Some(delta)) = (atac_fit.as_ref(), atac_batch_delta.as_ref()) {
@@ -651,6 +734,175 @@ fn fit_modality_copula(sc: &SparseRef, args: &MultiomeArgs) -> anyhow::Result<Gl
         r_floor: args.r_floor,
     };
     fit_global_copula(&global_args)
+}
+
+/// Standardize a row to mean 0, unit variance (in place). Zero-variance rows
+/// (e.g. an absent component) are zeroed.
+fn standardize_inplace(v: &mut [f32]) {
+    let n = v.len().max(1) as f32;
+    let mean = v.iter().sum::<f32>() / n;
+    let var = v.iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>() / n;
+    let sd = var.sqrt();
+    if sd < 1e-8 {
+        v.iter_mut().for_each(|x| *x = 0.0);
+    } else {
+        v.iter_mut().for_each(|x| *x = (*x - mean) / sd);
+    }
+}
+
+/// Step 1 — peak log-accessibility from topics. Per peak, mix a standardized topic
+/// component `T = std(log(β·θ))` (cell-type on/off), a peak-PRIVATE fluctuation `P`,
+/// noise, and batch, with √π weights from the normalized peak budget
+/// `{topic, private, noise, batch}`. Topic-invariant peaks move their topic mass to
+/// `P` (pure-private accessibility → cleanly identifiable links). Returns the peak
+/// logits `[P×N]` AND the regulatory signal `sig = √π_topic·T + √π_priv·P` `[P×N]`
+/// (no noise/batch) that genes inherit in step 2. A per-peak topic baseline preserves
+/// abundance.
+#[allow(clippy::too_many_arguments)]
+fn build_peak_logits(
+    beta: &DMatrix<f32>,
+    theta: &DMatrix<f32>,
+    is_invariant: &[bool],
+    priv_mat: &DMatrix<f32>,
+    batch_log: Option<&DMatrix<f32>>,
+    batch_membership: &[usize],
+    pve: (f32, f32, f32, f32), // topic, private, noise, batch
+    sigma: f32,
+    rng: &mut StdRng,
+) -> (DMatrix<f32>, DMatrix<f32>) {
+    let p = beta.nrows();
+    let kk = beta.ncols();
+    let ncol = theta.ncols();
+    let (pt, ppriv, pn, pbt) = pve;
+    let normal = rand_distr::Normal::new(0.0f32, 1.0).unwrap();
+
+    let mut logits = DMatrix::<f32>::zeros(p, ncol);
+    let mut sig = DMatrix::<f32>::zeros(p, ncol);
+    for f in 0..p {
+        let mut t_row: Vec<f32> = (0..ncol)
+            .map(|j| {
+                let mut s = 0.0f32;
+                for k in 0..kk {
+                    s += beta[(f, k)] * theta[(k, j)];
+                }
+                (s + 1e-8).ln()
+            })
+            .collect();
+        let base_f = t_row.iter().sum::<f32>() / ncol as f32;
+        standardize_inplace(&mut t_row);
+
+        let mut p_row: Vec<f32> = (0..ncol).map(|j| priv_mat[(f, j)]).collect();
+        standardize_inplace(&mut p_row);
+
+        let b_row: Option<Vec<f32>> = batch_log.map(|bl| {
+            let mut br: Vec<f32> = (0..ncol).map(|j| bl[(f, batch_membership[j])]).collect();
+            standardize_inplace(&mut br);
+            br
+        });
+
+        let mut n_row: Vec<f32> = (0..ncol).map(|_| normal.sample(rng)).collect();
+        standardize_inplace(&mut n_row);
+
+        // Invariant peaks: topic mass folds into the private share.
+        let (topic_w, priv_w) = if is_invariant[f] {
+            (0.0, pt.max(0.0) + ppriv.max(0.0))
+        } else {
+            (pt.max(0.0), ppriv.max(0.0))
+        };
+        let cbt = if b_row.is_some() { pbt.max(0.0) } else { 0.0 };
+        let ssum = topic_w + priv_w + pn.max(0.0) + cbt;
+        let (wt, wp, wn, wb) = if ssum <= 1e-12 {
+            (0.0, 1.0, 0.0, 0.0)
+        } else {
+            (
+                (topic_w / ssum).sqrt(),
+                (priv_w / ssum).sqrt(),
+                (pn.max(0.0) / ssum).sqrt(),
+                (cbt / ssum).sqrt(),
+            )
+        };
+
+        for j in 0..ncol {
+            let s = wt * t_row[j] + wp * p_row[j]; // regulatory signal (no noise/batch)
+            sig[(f, j)] = s;
+            let mut v = s + wn * n_row[j];
+            if let Some(br) = b_row.as_ref() {
+                v += wb * br[j];
+            }
+            logits[(f, j)] = base_f + sigma * v;
+        }
+    }
+    (logits, sig)
+}
+
+/// Step 2 — gene log-expression conditional on upstream enhancers. A linked gene
+/// inherits its causal peaks' regulatory signal, `C = std(Σ_{p∈M_g} sig_p)` over the
+/// shared cells, with proportion `pve_cis` of its variance; the rest is gene noise
+/// (and batch). The cis weights are cell-type-INVARIANT — a gene has no topic path of
+/// its own. Unlinked genes get noise only. `sig` is indexed by ATAC cell; the first
+/// `nn_shared` columns are the cells shared with RNA.
+#[allow(clippy::too_many_arguments)]
+fn build_gene_logits(
+    sig: &DMatrix<f32>,
+    causal_by_gene: &std::collections::HashMap<usize, Vec<usize>>,
+    g: usize,
+    ncol: usize,
+    nn_shared: usize,
+    batch_log: Option<&DMatrix<f32>>,
+    batch_membership: &[usize],
+    pve_cis: f32,
+    pve_batch: f32,
+    sigma: f32,
+    rng: &mut StdRng,
+) -> DMatrix<f32> {
+    let normal = rand_distr::Normal::new(0.0f32, 1.0).unwrap();
+    let pc = pve_cis.clamp(0.0, 1.0);
+    let shared = nn_shared.min(ncol);
+
+    let mut logits = DMatrix::<f32>::zeros(g, ncol);
+    for gi in 0..g {
+        let linked = causal_by_gene.get(&gi);
+        let mut c_row = vec![0.0f32; ncol];
+        if let Some(peaks) = linked {
+            for s in 0..shared {
+                c_row[s] = peaks.iter().map(|&pp| sig[(pp, s)]).sum();
+            }
+            standardize_inplace(&mut c_row);
+        }
+
+        let b_row: Option<Vec<f32>> = batch_log.map(|bl| {
+            let mut br: Vec<f32> = (0..ncol).map(|j| bl[(gi, batch_membership[j])]).collect();
+            standardize_inplace(&mut br);
+            br
+        });
+
+        let mut n_row: Vec<f32> = (0..ncol).map(|_| normal.sample(rng)).collect();
+        standardize_inplace(&mut n_row);
+
+        // Gene budget: cis + noise = 1 (+ batch, renormalized).
+        let cis_w = if linked.is_some() { pc } else { 0.0 };
+        let noise_w = 1.0 - cis_w;
+        let cbt = if b_row.is_some() {
+            pve_batch.max(0.0)
+        } else {
+            0.0
+        };
+        let ssum = cis_w + noise_w + cbt;
+        let (wc, wn, wb) = (
+            (cis_w / ssum).sqrt(),
+            (noise_w / ssum).sqrt(),
+            (cbt / ssum).sqrt(),
+        );
+
+        for j in 0..ncol {
+            let mut v = wc * c_row[j] + wn * n_row[j];
+            if let Some(br) = b_row.as_ref() {
+                v += wb * br[j];
+            }
+            logits[(gi, j)] = sigma * v; // base_g = 0 (uniform gene abundance)
+        }
+    }
+    logits
 }
 
 /// Two-stage GLM + NB+copula PIT sampler for one modality.
@@ -690,10 +942,17 @@ fn sample_with_reference(
         );
     }
 
-    let alpha_topic = pve_topic.clamp(0.0, 1.0).sqrt();
-    let alpha_noise = pve_noise.clamp(0.0, 1.0).sqrt();
-    let alpha_batch = pve_batch.clamp(0.0, 1.0).sqrt();
-    let alpha_invariant_batch = (1.0 - pve_batch.clamp(0.0, 1.0)).sqrt();
+    // Normalize the {topic, noise, batch} budget to a simplex (reference mode has
+    // no cis path); √π_x are the standardized-component coefficients.
+    let bt = pve_topic.max(0.0);
+    let bn = pve_noise.max(0.0);
+    let bbt = pve_batch.max(0.0);
+    let bsum = (bt + bn + bbt).max(1e-12);
+    let (pi_topic, pi_noise, pi_batch) = (bt / bsum, bn / bsum, bbt / bsum);
+    let alpha_topic = pi_topic.sqrt();
+    let alpha_noise = pi_noise.sqrt();
+    let alpha_batch = pi_batch.sqrt();
+    let alpha_invariant_batch = (1.0 - pi_batch).sqrt();
 
     // Effective dictionary (γ ⊙ β).
     let eff_dk: std::borrow::Cow<Mat> = match gamma_dk {
@@ -820,18 +1079,6 @@ fn sample_with_reference(
         .collect();
 
     Ok((triplets, batch_delta))
-}
-
-/// Mean-space wrapper around `core::sample_log_batch_effects`. Returns
-/// `exp(log δ)` so callers can multiply directly into the Poisson rate
-/// without re-exponentiating per cell.
-fn sample_synth_batch_delta(
-    dd: usize,
-    bb: usize,
-    pve_batch: f32,
-    rng: &mut impl Rng,
-) -> DMatrix<f32> {
-    crate::core::sample_log_batch_effects(dd, bb, pve_batch, rng).map(|x| x.exp())
 }
 
 fn write_reference_extras(
@@ -961,4 +1208,59 @@ fn write_names(
     write_lines(peak_names, &format!("{}.peak_names.txt", out_prefix))?;
     write_lines(cell_names, &format!("{}.barcodes.txt", out_prefix))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The budget is normalized to Σπ = 1, so a feature with all components
+    /// present has log-rate variance ≈ σ² regardless of how the weights split
+    /// (independent, per-feature-standardized components).
+    #[test]
+    fn budget_logits_total_variance_is_sigma_sq() {
+        let (d, k, ncol) = (40usize, 4usize, 600usize);
+        let mut rng = StdRng::seed_from_u64(7);
+        let fill = |rng: &mut StdRng, rows: usize, cols: usize, lo: f32, hi: f32| {
+            let mut m = DMatrix::<f32>::zeros(rows, cols);
+            m.iter_mut().for_each(|v| *v = rng.random_range(lo..hi));
+            m
+        };
+        let dict = fill(&mut rng, d, k, 0.05, 1.0);
+        let mut theta = fill(&mut rng, k, ncol, 0.0, 1.0);
+        for j in 0..ncol {
+            let s: f32 = (0..k).map(|kk| theta[(kk, j)]).sum::<f32>().max(1e-6);
+            for kk in 0..k {
+                theta[(kk, j)] /= s;
+            }
+        }
+        let priv_mat = fill(&mut rng, d, ncol, -1.0, 1.0);
+        let batch = fill(&mut rng, d, 2, -1.0, 1.0);
+        let memb: Vec<usize> = (0..ncol).map(|j| j % 2).collect();
+        let is_invariant = vec![false; d];
+        let sigma = 1.3f32;
+
+        let (logits, _sig) = build_peak_logits(
+            &dict,
+            &theta,
+            &is_invariant,
+            &priv_mat,
+            Some(&batch),
+            &memb,
+            (1.0, 2.0, 0.5, 0.5), // topic, private, noise, batch
+            sigma,
+            &mut rng,
+        );
+
+        let s2 = (sigma * sigma) as f64;
+        for f in 0..d {
+            let row: Vec<f64> = (0..ncol).map(|j| logits[(f, j)] as f64).collect();
+            let mean = row.iter().sum::<f64>() / ncol as f64;
+            let var = row.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / ncol as f64;
+            assert!(
+                (var - s2).abs() < 0.3 * s2,
+                "feature {f}: var {var:.3} vs σ²={s2:.3}"
+            );
+        }
+    }
 }

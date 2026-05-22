@@ -112,17 +112,33 @@ enum Commands {
     Multimodal(RunSimulateMultimodalArgs),
 
     #[command(
-        about = "Paired ATAC + RNA simulator with peak-gene ground truth and optional per-modality NB+copula sampling",
-        long_about = "Synthetic mode (no `--reference-*`): chickpea sim-link Poisson model.\n\
-                      Shared topics θ drive ATAC counts via β_atac and RNA counts via\n\
-                      W = M·β_ext, where M[G,P] is the sparse peak-gene ground truth.\n\
+        about = "Paired ATAC + RNA simulator: cell types switch peaks on/off, genes inherit their enhancers (two-step), with peak-gene ground truth",
+        long_about = "Synthetic mode (no `--reference-*`): a two-step generative model where\n\
+                      cis links are cell-type-INVARIANT and cell-type-specific expression\n\
+                      arises because upstream peaks switch on/off per cell type.\n\
                       \n\
-                      Reference mode (`--reference-rna` and/or `--reference-atac`):\n\
-                      per-modality two-stage GLM + NB+copula PIT sampling — same shape as\n\
-                      `topic --reference`. The supplied reference's row count overrides\n\
-                      `--n-genes` / `--n-peaks`; per-feature dispersion r̂ and a global Σ̂\n\
-                      are fitted independently per modality. Cross-modality coupling stays\n\
-                      implicit through the shared θ and indicator M."
+                      Step 1 — ATAC from topics. Per cell j, topic mix θ_j (concentration\n\
+                      --topic-concentration). Each peak p:\n\
+                      \u{20} A_pj = base_p + σ·( √π_topic·T_p + √π_priv·P_p + √π_noise·N_p [+ batch] )\n\
+                      \u{20} T = std(log(β_p·θ))  cell-type on/off;  P = peak-PRIVATE fluctuation\n\
+                      \u{20} peak budget {topic, private, noise, batch} normalized to 1\n\
+                      A fraction (--invariant-causal-fraction) of causal peaks are topic-\n\
+                      invariant (pure-private) → cleanly recoverable links.\n\
+                      \n\
+                      Step 2 — RNA conditional on enhancers. A linked gene inherits its causal\n\
+                      peaks' signal sig = √π_topic·T + √π_priv·P via an invariant cis link:\n\
+                      \u{20} E_gj = σ·( √pve_cis·std(Σ_{p∈M_g} sig_p) + √(1−pve_cis)·N_g [+ batch] )\n\
+                      The gene has no topic path of its own — cell-type specificity propagates\n\
+                      through its peaks; unlinked genes are noise. counts ~ Poisson(depth·softmax).\n\
+                      \n\
+                      Identifiability: only an enhancer's PRIVATE part reaches its gene; co-active\n\
+                      bystanders share only T. So --pve-private is the recoverability dial and\n\
+                      --pve-cis the gene's cis-dependence strength. Ground truth: M[G,P].\n\
+                      \n\
+                      Reference mode (`--reference-rna` / `--reference-atac`): per-modality\n\
+                      two-stage GLM + NB+copula PIT sampling; a {topic, noise, batch} budget\n\
+                      (normalized, no cis) weights the log-rate. Reference row counts override\n\
+                      --n-genes / --n-peaks."
     )]
     Multiome(MultiomeArgs),
 }
