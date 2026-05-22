@@ -163,6 +163,14 @@ pub struct PeakToGeneArgs {
     )]
     ko_ridge: f64,
 
+    #[arg(
+        long,
+        value_enum,
+        default_value = "equi",
+        help = "Knockoff diagonal s: equi (equicorrelated, default), mvr (min-variance reconstructability), me (max entropy). For dense cis sets reduce --max-cis / raise --ko-ridge — the s-method does not rescue a rank-deficient LD"
+    )]
+    ko_s: KoSMethod,
+
     #[arg(long, default_value_t = 42, help = "Random seed for knockoff sampling")]
     seed: u64,
 
@@ -181,6 +189,24 @@ pub struct PeakToGeneArgs {
         help = "Output prefix (produces {out}.results.bed.gz)"
     )]
     out: Box<str>,
+}
+
+/// CLI surface for [`matrix_util::knockoff::KnockoffS`].
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum KoSMethod {
+    Equi,
+    Mvr,
+    Me,
+}
+
+impl From<KoSMethod> for matrix_util::knockoff::KnockoffS {
+    fn from(m: KoSMethod) -> Self {
+        match m {
+            KoSMethod::Equi => Self::Equicorrelated,
+            KoSMethod::Mvr => Self::Mvr,
+            KoSMethod::Me => Self::Me,
+        }
+    }
 }
 
 pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
@@ -326,6 +352,7 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     let ko_params = KnockoffParams {
         ridge: args.ko_ridge,
         seed: args.seed,
+        s_method: args.ko_s.into(),
     };
     let use_fdr = args.fdr > 0.0;
 

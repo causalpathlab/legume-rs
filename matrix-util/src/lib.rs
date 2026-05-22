@@ -7,6 +7,7 @@ pub mod dmatrix_util;
 pub mod graph;
 pub mod knn_graph;
 pub mod knn_match;
+pub mod knockoff;
 pub mod membership;
 pub mod mtx_io;
 pub mod ndarray_io;

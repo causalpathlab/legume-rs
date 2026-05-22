@@ -12,6 +12,7 @@
 //! (Candès et al. 2018, JRSS-B); knockoff+ FDR (Barber & Candès 2015, AoS).
 
 use crate::common::*;
+use matrix_util::knockoff::{knockoff_s, KnockoffS};
 use nalgebra::{DMatrix, DVector};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -23,6 +24,8 @@ pub struct KnockoffParams {
     pub ridge: f64,
     /// Base RNG seed; per-gene streams derive from this + gene id.
     pub seed: u64,
+    /// Diagonal `s`-vector construction (equicorrelated / MVR / ME).
+    pub s_method: KnockoffS,
 }
 
 /// Importance statistic `W_j = |z_j| − |z̃_j|` for one gene's `C` cis peaks.
@@ -46,7 +49,7 @@ pub fn knockoff_w(z_raw: &[f32], r: &Mat, params: &KnockoffParams, gene_id: usiz
         r_lam[(i, i)] += lambda;
     }
 
-    let s = equicorrelated_s(&r_lam);
+    let s = knockoff_s(&r_lam, params.s_method);
     let r_inv = match r_lam.clone().try_inverse() {
         Some(inv) => inv,
         None => return vec![0.0; c],
@@ -55,7 +58,7 @@ pub fn knockoff_w(z_raw: &[f32], r: &Mat, params: &KnockoffParams, gene_id: usiz
     let mut rng =
         SmallRng::seed_from_u64(params.seed ^ (gene_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     let z = DVector::<f64>::from_iterator(c, z_raw.iter().map(|&v| v as f64));
-    let z_tilde = match knockoff_z(&z, &r_lam, s, &r_inv, &mut rng) {
+    let z_tilde = match knockoff_z(&z, &r_lam, &s, &r_inv, &mut rng) {
         Some(zt) => zt,
         None => return vec![0.0; c],
     };
@@ -91,41 +94,34 @@ pub fn knockoff_threshold(w: &[f32], q: f64) -> f32 {
     f32::INFINITY
 }
 
-/// Equicorrelated knockoff diagonal `s = min(1, 2·λ_min(R_λ))` (so that
-/// `2R_λ − sI ⪰ 0`). `R_λ` must be symmetric PD.
-fn equicorrelated_s(r_lam: &DMatrix<f64>) -> f64 {
-    // Eigenvalues only — no eigenvectors, no clone; we just need λ_min.
-    let lambda_min = r_lam
-        .symmetric_eigenvalues()
-        .iter()
-        .cloned()
-        .fold(f64::INFINITY, f64::min);
-    (2.0 * lambda_min).clamp(0.0, 1.0)
-}
-
-/// Sample knockoff z-scores `z̃ | z ~ N((R_λ − sI)R_λ⁻¹ z, 2sI − s²R_λ⁻¹)`.
+/// Sample knockoff z-scores `z̃ | z ~ N((R_λ − D)R_λ⁻¹ z, 2D − D R_λ⁻¹ D)`,
+/// `D = diag(s)`. With a constant `s` this is the equicorrelated construction;
+/// a per-coordinate `s` (MVR/ME) gives the same exchangeable joint covariance.
 fn knockoff_z(
     z: &DVector<f64>,
     r_lam: &DMatrix<f64>,
-    s: f64,
+    s: &DVector<f64>,
     r_inv: &DMatrix<f64>,
     rng: &mut SmallRng,
 ) -> Option<DVector<f64>> {
     let c = z.len();
 
-    // mean = (R_λ − sI) R_λ⁻¹ z
+    // mean = (R_λ − D) R_λ⁻¹ z
     let mut p = r_lam.clone();
     for i in 0..c {
-        p[(i, i)] -= s;
+        p[(i, i)] -= s[i];
     }
     let pr = &p * r_inv;
     let mean = &pr * z;
 
-    // noise cov V = 2sI − s² R_λ⁻¹ (symmetric PSD); sample e = chol(V)·η.
-    // Cholesky reads only V's lower triangle, so no symmetrization is needed.
-    let mut v = r_inv.scale(-s * s);
-    for i in 0..c {
-        v[(i, i)] += 2.0 * s;
+    // noise cov V = 2D − D R_λ⁻¹ D (symmetric PSD); V_ab = −s_a (R⁻¹)_ab s_b,
+    // plus 2 s_a on the diagonal. Cholesky reads only V's lower triangle.
+    let mut v = DMatrix::<f64>::zeros(c, c);
+    for a in 0..c {
+        for b in 0..c {
+            v[(a, b)] = -s[a] * r_inv[(a, b)] * s[b];
+        }
+        v[(a, a)] += 2.0 * s[a];
     }
 
     let chol = match v.clone().cholesky() {
@@ -166,7 +162,9 @@ mod tests {
         for i in 0..c {
             r_lam[(i, i)] += 0.1;
         }
-        let s = equicorrelated_s(&r_lam);
+        // Use the per-coordinate MVR s so the covariance check also exercises
+        // the diag(s) construction (not just a scalar).
+        let s = knockoff_s(&r_lam, KnockoffS::Mvr);
         let r_inv = r_lam.clone().try_inverse().unwrap();
         let r_chol = r_lam.clone().cholesky().unwrap().l();
 
@@ -176,7 +174,7 @@ mod tests {
         let mut var = DMatrix::<f64>::zeros(c, c);
         for _ in 0..n {
             let z = sample_mvn(&r_chol, &mut rng);
-            let zt = knockoff_z(&z, &r_lam, s, &r_inv, &mut rng).unwrap();
+            let zt = knockoff_z(&z, &r_lam, &s, &r_inv, &mut rng).unwrap();
             let zt_t = zt.transpose();
             cross += &z * &zt_t;
             var += &zt * &zt_t;
@@ -185,7 +183,7 @@ mod tests {
         var /= n as f64;
         for i in 0..c {
             for j in 0..c {
-                let tgt_cross = r_lam[(i, j)] - if i == j { s } else { 0.0 };
+                let tgt_cross = r_lam[(i, j)] - if i == j { s[i] } else { 0.0 };
                 assert!(
                     (cross[(i, j)] - tgt_cross).abs() < 0.05,
                     "cross[{i},{j}]={} vs {tgt_cross}",
@@ -233,6 +231,7 @@ mod tests {
         let params = KnockoffParams {
             ridge: 0.05,
             seed: 1,
+            s_method: KnockoffS::Mvr,
         };
 
         let r = make_block_ld(c);
@@ -339,6 +338,7 @@ mod tests {
         let params = KnockoffParams {
             ridge: 0.05,
             seed: 7,
+            s_method: KnockoffS::Mvr,
         };
 
         let mut all_w: Vec<f32> = Vec::new();
@@ -653,6 +653,7 @@ mod tests {
         let params = KnockoffParams {
             ridge: 0.05,
             seed: 3,
+            s_method: KnockoffS::Mvr,
         };
         let (mut w_base, mut w_loco, mut labels) =
             (Vec::<f32>::new(), Vec::<f32>::new(), Vec::<u8>::new());

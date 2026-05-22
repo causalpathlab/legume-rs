@@ -91,6 +91,7 @@ Key options (see `chickpea peak-to-gene --help` for all):
 | `--num-levels` | 1 | hierarchical refinement levels; the refined finest level is used |
 | `--fdr` | 0.0 | target FDR for knockoff (z-score contrast) selected links (0 = off) |
 | `--ko-ridge` | 0.05 | knockoff LD ridge λ in `R_λ = (1-λ)R + λI` |
+| `--ko-s` | equi | knockoff diagonal `s`: `equi` / `mvr` / `me` (see note below) |
 | `-o`, `--out` | — | output prefix |
 
 Output `{out}.results.bed.gz`, sorted by `(chr, start, end)`:
@@ -102,6 +103,16 @@ Output `{out}.results.bed.gz`, sorted by `(chr, start, end)`:
 `distance = |peak_midpoint − TSS|`. All tested pairs are written;
 `--pip-threshold` only drives a summary log line. With `--fdr q`, two columns
 are appended — `w_stat` (knockoff importance) and `selected` (0/1).
+
+The knockoff diagonal `s` (`--ko-s`) controls how decorrelated each knockoff is
+from its peak; the solver lives in `matrix-util` (`knockoff_s_{equicorrelated,
+mvr,me}`). `mvr` / `me` (Spector & Janson 2022) optimize `s` per coordinate, but
+note that **no `s`-method can rescue a rank-deficient LD**: if a gene's cis set
+is larger than the pseudobulk count can resolve, `2R−diag(s) ⪰ 0` forces `s`
+small and knockoff power collapses regardless. The effective lever there is to
+**shrink `--max-cis` and/or raise `--ko-ridge`** so `R_λ` is well-conditioned.
+`equi` is the default (as good or better than `mvr`/`me` in the well-conditioned
+regime, and far cheaper); `me` is the most aggressive (more power, looser FDP).
 
 ### Simulation
 
