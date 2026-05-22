@@ -6,6 +6,7 @@ use crate::p2g::finemap::{finemap_gene, FinemapParams};
 use crate::p2g::input::{load_gene_coords_tsv, load_paired_data};
 use crate::p2g::knockoff::{knockoff_threshold, knockoff_w, KnockoffParams};
 use crate::p2g::output::{write_bed, LinkRecord};
+use crate::p2g::tmle::{centered_log1p, cis_link_stats_tmle, LocoConfounders};
 use data_beans_alg::collapse_data::MultilevelParams;
 use data_beans_alg::refine_multilevel::RefineParams;
 use genomic_data::coordinates::{find_cis_peaks, load_gene_tss, parse_peak_coordinates};
@@ -107,6 +108,22 @@ pub struct PeakToGeneArgs {
         help = "Disable PVE (winner's-curse) z-score shrinkage"
     )]
     no_pve_adjust: bool,
+
+    /* TMLE deconfounding (LOCO topic adjustment) */
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Deconfound peak→gene z by leave-one-chromosome-out topic adjustment \
+                (residual-on-residual DML/TMLE) instead of the raw embedding association"
+    )]
+    tmle: bool,
+
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "Number of off-chromosome topic confounder factors m for --tmle"
+    )]
+    tmle_rank: usize,
 
     /* Fine-mapping (SuSiE-RSS) */
     #[arg(
@@ -210,7 +227,6 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     let rna_pb = pick_pseudobulk(&finest[0], args.use_adjusted);
     let atac_pb = pick_pseudobulk(&finest[1], args.use_adjusted);
     let s = rna_pb.ncols();
-    let n_eff = s;
     info!(
         "Pseudobulk: RNA {}x{}, ATAC {}x{} ({} refinement level(s), {} samples)",
         rna_pb.nrows(),
@@ -227,12 +243,7 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
         );
     }
 
-    /* 3. Global ATAC embedding (peaks = W, samples = V) */
-    info!("Building ATAC embedding (rank {})...", args.embedding_dim);
-    let emb = build_atac_embedding(atac_pb, args.embedding_dim)?;
-    info!("ATAC embedding: {} peaks x {} dims", emb.w.nrows(), emb.d);
-
-    /* 4. Coordinates + gene TSS */
+    /* 3. Coordinates + gene TSS */
     let peak_coords = parse_peak_coordinates(&peak_names);
     let gene_tss = if args.cis_window > 0 {
         if let Some(path) = &args.gene_coords {
@@ -245,6 +256,42 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     } else {
         anyhow::bail!("--cis-window must be > 0");
     };
+
+    /* 4. Association model: shared ATAC embedding (default) or LOCO+TMLE
+    deconfounded residual statistics. The embedding reads peak→gene off a
+    low-rank topic space (sees only topic co-variation); TMLE residualizes
+    gene + peak against an off-chromosome topic confounder so confounded
+    bystanders collapse and identifiable cis links survive. */
+    let emb;
+    let tmle_state;
+    let n_eff;
+    if args.tmle {
+        let peak_chr: Vec<Option<Box<str>>> = peak_coords
+            .iter()
+            .map(|c| c.as_ref().map(|co| co.chr.clone()))
+            .collect();
+        info!(
+            "Building LOCO topic confounders (rank {})...",
+            args.tmle_rank
+        );
+        let loco = LocoConfounders::build(atac_pb, &peak_chr, args.tmle_rank)?;
+        let m = loco.m;
+        let peak_clog: Vec<DVec> = (0..peak_names.len())
+            .into_par_iter()
+            .map(|p| centered_log1p(&atac_pb.row(p).iter().copied().collect::<Vec<_>>()))
+            .collect();
+        info!("LOCO confounders ready (m={}, n_eff={})", m, s - m);
+        emb = None;
+        tmle_state = Some((loco, peak_clog));
+        n_eff = s.saturating_sub(m);
+    } else {
+        info!("Building ATAC embedding (rank {})...", args.embedding_dim);
+        let e = build_atac_embedding(atac_pb, args.embedding_dim)?;
+        info!("ATAC embedding: {} peaks x {} dims", e.w.nrows(), e.d);
+        emb = Some(e);
+        tmle_state = None;
+        n_eff = s;
+    }
 
     let ko_params = KnockoffParams {
         ridge: args.ko_ridge,
@@ -274,10 +321,18 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
                 cis.truncate(args.max_cis);
             }
 
-            // Project the gene into the ATAC embedding; marginal z + LD share norms.
-            let gene_rate: Vec<f32> = rna_pb.row(g).iter().copied().collect();
-            let proj = project_gene(&emb, &gene_rate);
-            let (z_raw, r) = cis_link_stats(&proj, &emb, &cis, n_eff as f64);
+            // Marginal z + peak–peak LD R, via whichever estimator is active.
+            let (z_raw, r) = if let Some((loco, peak_clog)) = tmle_state.as_ref() {
+                let gene_clog = centered_log1p(&rna_pb.row(g).iter().copied().collect::<Vec<_>>());
+                let w = loco.get(&tss.chr);
+                let (z, r, _n_eff) = cis_link_stats_tmle(&gene_clog, peak_clog, &cis, w);
+                (z, r)
+            } else {
+                let emb = emb.as_ref().expect("embedding built when !tmle");
+                let gene_rate: Vec<f32> = rna_pb.row(g).iter().copied().collect();
+                let proj = project_gene(emb, &gene_rate);
+                cis_link_stats(&proj, emb, &cis, n_eff as f64)
+            };
             let mut z = z_raw.clone();
             if !args.no_pve_adjust {
                 z.iter_mut().for_each(|zc| *zc = pve_adjust(*zc, n_eff));

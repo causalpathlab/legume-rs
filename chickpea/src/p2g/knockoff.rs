@@ -404,4 +404,367 @@ mod tests {
             "embedding-space FDP {fdp:.3} exceeds q={q} (+slack); {n_sel} sel, {n_false} false"
         );
     }
+
+    /// Diagnostic: can a topic-adjusted (partial) association separate DIRECT
+    /// causal peaks from topic-CONFOUNDED ones? Model-2 confounding: the gene is
+    /// driven by its causal peaks' accessibility (incl. their peak-specific
+    /// variation); confounded peaks only share the gene's topic factor. Marginal
+    /// association can't tell them apart; partialling out the top-m shared
+    /// embedding factors should keep causal and collapse confounded.
+    #[test]
+    #[ignore = "diagnostic: partial-z decomposition of causal vs confounded hits"]
+    fn decompose_causal_vs_confounded_via_partial_z() {
+        use crate::p2g::embed::build_atac_embedding;
+
+        let s = 300usize;
+        let k = 6usize;
+        let per_factor = 50usize;
+        let p = k * per_factor;
+        let n_genes = 120usize;
+        let d = 60usize;
+        let m = k; // partial out the topic factors
+
+        let mut rng = SmallRng::seed_from_u64(11);
+        let randn = |rng: &mut SmallRng| -> f32 {
+            let v: f64 = StandardNormal.sample(rng);
+            v as f32
+        };
+
+        let factors: Vec<Vec<f32>> = (0..k)
+            .map(|_| (0..s).map(|_| randn(&mut rng)).collect())
+            .collect();
+        let peak_factor: Vec<usize> = (0..p).map(|pp| pp % k).collect();
+        // peak-specific sample variation — the carrier of direct causal signal.
+        let spec: Vec<Vec<f32>> = (0..p)
+            .map(|_| (0..s).map(|_| randn(&mut rng)).collect())
+            .collect();
+
+        let mut atac = Mat::zeros(p, s);
+        for pp in 0..p {
+            let f = &factors[peak_factor[pp]];
+            for ss in 0..s {
+                atac[(pp, ss)] = (3.0 + f[ss] + 0.8 * spec[pp][ss]).max(0.01);
+            }
+        }
+        let emb = build_atac_embedding(&atac, d).unwrap();
+
+        let clog = |v: &[f32]| -> DVector<f32> {
+            let mut x = DVector::from_iterator(s, v.iter().map(|&a| (a + 1.0).ln()));
+            let mean = x.mean();
+            x.add_scalar_mut(-mean);
+            x
+        };
+        let peak_clog: Vec<DVector<f32>> = (0..p)
+            .map(|pp| clog(&atac.row(pp).iter().copied().collect::<Vec<_>>()))
+            .collect();
+
+        let vm = emb.v.columns(0, m).into_owned(); // [S × m] orthonormal topics
+        let partial = |x: &DVector<f32>| -> DVector<f32> {
+            let proj = &vm * (vm.transpose() * x);
+            x.clone() - proj
+        };
+        let corr = |a: &DVector<f32>, b: &DVector<f32>| -> f64 {
+            let (na, nb) = (a.norm(), b.norm());
+            if na < 1e-8 || nb < 1e-8 {
+                0.0
+            } else {
+                (a.dot(b) / (na * nb)) as f64
+            }
+        };
+
+        let mut by_factor: Vec<Vec<usize>> = vec![Vec::new(); k];
+        for (pp, &f) in peak_factor.iter().enumerate() {
+            by_factor[f].push(pp);
+        }
+
+        let (mut mca, mut mco, mut mnu) = (0.0f64, 0.0, 0.0);
+        let (mut pca, mut pco, mut pnu) = (0.0f64, 0.0, 0.0);
+        let (mut nca, mut nco, mut nnu) = (0usize, 0, 0);
+
+        for gid in 0..n_genes {
+            let sf = gid % k;
+            let causal: Vec<usize> = (0..3)
+                .map(|i| by_factor[sf][(gid * 5 + i) % by_factor[sf].len()])
+                .collect();
+            let mut gene = vec![0f32; s];
+            for ss in 0..s {
+                let mut v = 3.0;
+                for &cp in &causal {
+                    v += factors[sf][ss] + 0.8 * spec[cp][ss];
+                }
+                v += 0.5 * randn(&mut rng);
+                gene[ss] = v.max(0.01);
+            }
+            let gx = clog(&gene);
+            let gx_p = partial(&gx);
+
+            let confounded: Vec<usize> = by_factor[sf]
+                .iter()
+                .copied()
+                .filter(|pp| !causal.contains(pp))
+                .take(8)
+                .collect();
+            let null: Vec<usize> = (0..p).filter(|pp| peak_factor[*pp] != sf).take(8).collect();
+
+            for &cp in &causal {
+                mca += corr(&gx, &peak_clog[cp]).abs();
+                pca += corr(&gx_p, &partial(&peak_clog[cp])).abs();
+                nca += 1;
+            }
+            for &cp in &confounded {
+                mco += corr(&gx, &peak_clog[cp]).abs();
+                pco += corr(&gx_p, &partial(&peak_clog[cp])).abs();
+                nco += 1;
+            }
+            for &cp in &null {
+                mnu += corr(&gx, &peak_clog[cp]).abs();
+                pnu += corr(&gx_p, &partial(&peak_clog[cp])).abs();
+                nnu += 1;
+            }
+        }
+        let avg = |x: f64, n: usize| x / n as f64;
+        eprintln!("mean |corr|       causal  confound   null");
+        eprintln!(
+            "  marginal:       {:.3}    {:.3}    {:.3}",
+            avg(mca, nca),
+            avg(mco, nco),
+            avg(mnu, nnu)
+        );
+        eprintln!(
+            "  partial(m={m}):    {:.3}    {:.3}    {:.3}",
+            avg(pca, nca),
+            avg(pco, nco),
+            avg(pnu, nnu)
+        );
+        let marg_gap = avg(mca, nca) - avg(mco, nco);
+        let part_gap = avg(pca, nca) - avg(pco, nco);
+        eprintln!("  causal−confound gap: marginal={marg_gap:.3}  partial={part_gap:.3}");
+        assert!(
+            part_gap > marg_gap,
+            "partial did not improve causal/confound separation"
+        );
+    }
+
+    /// Prototype: on *identifiable* confounding (Model-2: the gene is driven by
+    /// its cis causal peaks' own accessibility, so causal ≠ confounded given the
+    /// topic), the knockoff controls the confounded FDP through `R` — both the
+    /// marginal (full-R) and the LOCO+DML (off-chromosome confounder, residual-
+    /// on-residual z) variants. This is the positive control: when the effect is
+    /// statistically identifiable the machinery works. (The data-beans-sim's
+    /// ~0.62 confounded FDP comes instead from its near-UNidentifiable model —
+    /// RNA rate = (M·β_ext)·θ ⇒ gene ⊥ peak | θ — not from the knockoff.)
+    /// Topics are genome-wide; W₋c is estimated off the gene's chromosome so it
+    /// captures the trans topic without absorbing the cis signal.
+    #[test]
+    #[ignore = "prototype: knockoff controls confounded FDP on identifiable data (marginal + LOCO/DML)"]
+    fn loco_dml_controls_confounded_fdp() {
+        use crate::p2g::embed::build_atac_embedding;
+
+        let s = 400usize;
+        let k = 6usize; // genome-wide topics
+        let n_chr = 10usize;
+        let per_chr = 80usize;
+        let p = n_chr * per_chr;
+        let n_genes = 120usize;
+        let m = 8usize; // confounder dims (≥ k)
+        let q = 0.1;
+
+        let mut rng = SmallRng::seed_from_u64(2025);
+        let randn = |rng: &mut SmallRng| -> f32 {
+            let v: f64 = StandardNormal.sample(rng);
+            v as f32
+        };
+
+        let topics: Vec<Vec<f32>> = (0..k)
+            .map(|_| (0..s).map(|_| randn(&mut rng)).collect())
+            .collect();
+        // peak attributes: chromosome (block) + topic (genome-wide) + specific noise.
+        let chr: Vec<usize> = (0..p).map(|pp| pp / per_chr).collect();
+        let ptopic: Vec<usize> = (0..p)
+            .map(|_| (randn(&mut rng).abs() as usize * 7 + 3) % k)
+            .collect();
+        let spec: Vec<Vec<f32>> = (0..p)
+            .map(|_| (0..s).map(|_| randn(&mut rng)).collect())
+            .collect();
+
+        let mut atac = Mat::zeros(p, s);
+        for pp in 0..p {
+            let t = &topics[ptopic[pp]];
+            for ss in 0..s {
+                atac[(pp, ss)] = (3.0 + 1.2 * t[ss] + 0.8 * spec[pp][ss]).max(0.01);
+            }
+        }
+
+        // LOCO confounder W₋c: off-chromosome pb embedding (one per chromosome).
+        let w_by_chr: Vec<Mat> = (0..n_chr)
+            .map(|c| {
+                let rows: Vec<usize> = (0..p).filter(|&pp| chr[pp] != c).collect();
+                let mut sub = Mat::zeros(rows.len(), s);
+                for (i, &pp) in rows.iter().enumerate() {
+                    for ss in 0..s {
+                        sub[(i, ss)] = atac[(pp, ss)];
+                    }
+                }
+                let emb = build_atac_embedding(&sub, m).unwrap();
+                let mm = m.min(emb.d);
+                emb.v.columns(0, mm).into_owned()
+            })
+            .collect();
+
+        let clog = |v: &[f32]| -> DVector<f32> {
+            DVector::from_iterator(s, v.iter().map(|&a| (a + 1.0).ln()))
+        };
+        let peak_clog: Vec<DVector<f32>> = (0..p)
+            .map(|pp| clog(&atac.row(pp).iter().copied().collect::<Vec<_>>()))
+            .collect();
+        let resid = |w: &Mat, x: &DVector<f32>| -> DVector<f32> { x - &(w * (w.transpose() * x)) };
+        let corr = |a: &DVector<f32>, b: &DVector<f32>| -> f64 {
+            let (ma, mb) = (a.mean(), b.mean());
+            let (mut sab, mut sa, mut sb) = (0.0f64, 0.0, 0.0);
+            for i in 0..a.len() {
+                let (da, db) = ((a[i] - ma) as f64, (b[i] - mb) as f64);
+                sab += da * db;
+                sa += da * da;
+                sb += db * db;
+            }
+            if sa < 1e-12 || sb < 1e-12 {
+                0.0
+            } else {
+                sab / (sa.sqrt() * sb.sqrt())
+            }
+        };
+        let tstat = |r: f64, df: f64| -> f32 {
+            let r = r.clamp(-0.999, 0.999);
+            (r * (df / (1.0 - r * r)).sqrt()) as f32
+        };
+
+        let mut by_chr_topic: std::collections::HashMap<(usize, usize), Vec<usize>> =
+            Default::default();
+        for pp in 0..p {
+            by_chr_topic
+                .entry((chr[pp], ptopic[pp]))
+                .or_default()
+                .push(pp);
+        }
+        let chr_peaks: Vec<Vec<usize>> = (0..n_chr)
+            .map(|c| (0..p).filter(|&pp| chr[pp] == c).collect())
+            .collect();
+
+        let params = KnockoffParams {
+            ridge: 0.05,
+            seed: 3,
+        };
+        let (mut w_base, mut w_loco, mut labels) =
+            (Vec::<f32>::new(), Vec::<f32>::new(), Vec::<u8>::new());
+
+        for gid in 0..n_genes {
+            let c = gid % n_chr;
+            let t = gid % k;
+            let topic_peaks = by_chr_topic.get(&(c, t)).cloned().unwrap_or_default();
+            if topic_peaks.len() < 10 {
+                continue;
+            }
+            let causal: Vec<usize> = topic_peaks[..3].to_vec();
+            let confound: Vec<usize> = topic_peaks[3..10].to_vec();
+            let cisnull: Vec<usize> = chr_peaks[c]
+                .iter()
+                .copied()
+                .filter(|pp| ptopic[*pp] != t)
+                .take(10)
+                .collect();
+            let cis: Vec<usize> = causal
+                .iter()
+                .chain(&confound)
+                .chain(&cisnull)
+                .copied()
+                .collect();
+            let lab: Vec<u8> = std::iter::repeat_n(0u8, causal.len())
+                .chain(std::iter::repeat_n(1, confound.len()))
+                .chain(std::iter::repeat_n(2, cisnull.len()))
+                .collect();
+
+            // gene = Σ causal accessibility (Model-2) + noise.
+            let mut gene = vec![0f32; s];
+            for ss in 0..s {
+                let mut v = 3.0;
+                for &cp in &causal {
+                    v += 1.2 * topics[t][ss] + 0.8 * spec[cp][ss];
+                }
+                v += 0.4 * randn(&mut rng);
+                gene[ss] = v.max(0.01);
+            }
+            let gx = clog(&gene);
+            let w = &w_by_chr[c];
+            let mm = w.ncols();
+            let gx_r = resid(w, &gx);
+
+            // marginal (baseline) and LOCO-DML (residualized) z + R, then knockoff.
+            let cl: Vec<&DVector<f32>> = cis.iter().map(|&pp| &peak_clog[pp]).collect();
+            let cl_r: Vec<DVector<f32>> = cis.iter().map(|&pp| resid(w, &peak_clog[pp])).collect();
+
+            let z_base: Vec<f32> = cl
+                .iter()
+                .map(|pr| tstat(corr(&gx, pr), (s - 2) as f64))
+                .collect();
+            let z_loco: Vec<f32> = cl_r
+                .iter()
+                .map(|pr| tstat(corr(&gx_r, pr), (s - mm - 2) as f64))
+                .collect();
+            let cc = cis.len();
+            let mut r_base = Mat::identity(cc, cc);
+            let mut r_loco = Mat::identity(cc, cc);
+            for i in 0..cc {
+                for j in (i + 1)..cc {
+                    let rb = corr(cl[i], cl[j]) as f32;
+                    let rl = corr(&cl_r[i], &cl_r[j]) as f32;
+                    r_base[(i, j)] = rb;
+                    r_base[(j, i)] = rb;
+                    r_loco[(i, j)] = rl;
+                    r_loco[(j, i)] = rl;
+                }
+            }
+            let wb = knockoff_w(&z_base, &r_base, &params, gid);
+            let wl = knockoff_w(&z_loco, &r_loco, &params, gid);
+            w_base.extend(wb);
+            w_loco.extend(wl);
+            labels.extend(lab);
+        }
+
+        let decomp = |allw: &[f32], name: &str| -> (f64, f64) {
+            let t = knockoff_threshold(allw, q);
+            let sel: Vec<usize> = (0..allw.len())
+                .filter(|&i| allw[i].is_finite() && allw[i] >= t)
+                .collect();
+            let n = sel.len();
+            let ca = sel.iter().filter(|&&i| labels[i] == 0).count();
+            let co = sel.iter().filter(|&&i| labels[i] == 1).count();
+            let nu = sel.iter().filter(|&&i| labels[i] == 2).count();
+            let tot_causal = labels.iter().filter(|&&l| l == 0).count();
+            let fdp = if n > 0 {
+                (co + nu) as f64 / n as f64
+            } else {
+                0.0
+            };
+            let power = ca as f64 / tot_causal.max(1) as f64;
+            eprintln!(
+                "{name:>12}: sel={n:>3} causal={ca:>3} confound={co:>3} null={nu:>3} FDP={fdp:.2} power={power:.2}"
+            );
+            (fdp, power)
+        };
+        let (fdp_base, pow_base) = decomp(&w_base, "marginal");
+        let (fdp_loco, pow_loco) = decomp(&w_loco, "LOCO+DML");
+        // On identifiable confounding both variants control FDP via R, with power.
+        assert!(
+            fdp_base <= q + 0.10,
+            "marginal (full-R) FDP {fdp_base:.2} not controlled"
+        );
+        assert!(
+            fdp_loco <= q + 0.12,
+            "LOCO+DML FDP {fdp_loco:.2} not controlled"
+        );
+        assert!(
+            pow_base > 0.5 && pow_loco > 0.5,
+            "power too low (marginal {pow_base:.2}, LOCO {pow_loco:.2})"
+        );
+    }
 }
