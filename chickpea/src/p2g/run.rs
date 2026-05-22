@@ -6,7 +6,7 @@ use crate::p2g::finemap::{finemap_gene, FinemapParams};
 use crate::p2g::input::{load_gene_coords_tsv, load_paired_data};
 use crate::p2g::knockoff::{knockoff_threshold, knockoff_w, KnockoffParams};
 use crate::p2g::output::{write_bed, LinkRecord};
-use crate::p2g::tmle::{centered_log1p, cis_link_stats_tmle, LocoConfounders};
+use crate::p2g::tmle::{centered_log1p, cis_link_stats_tmle, LocoConfounders, ModalityBlock};
 use data_beans_alg::collapse_data::MultilevelParams;
 use data_beans_alg::refine_multilevel::RefineParams;
 use genomic_data::coordinates::{find_cis_peaks, load_gene_tss, parse_peak_coordinates};
@@ -124,6 +124,14 @@ pub struct PeakToGeneArgs {
         help = "Number of off-chromosome topic confounder factors m for --tmle"
     )]
     tmle_rank: usize,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Use an ATAC-only --tmle confounder instead of the default joint RNA+ATAC \
+                pb co-embedding (tighter FDP control, lower power)"
+    )]
+    tmle_atac_only: bool,
 
     /* Fine-mapping (SuSiE-RSS) */
     #[arg(
@@ -270,11 +278,33 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             .iter()
             .map(|c| c.as_ref().map(|co| co.chr.clone()))
             .collect();
+        let gene_chr: Vec<Option<Box<str>>> = gene_tss
+            .iter()
+            .map(|t| t.as_ref().map(|x| x.chr.clone()))
+            .collect();
+        let mut blocks = vec![ModalityBlock {
+            pb: atac_pb,
+            chr: &peak_chr,
+        }];
+        if !args.tmle_atac_only {
+            // Default joint RNA+ATAC confounder: a two-modality cell-state
+            // estimate (more power). LOCO drops chr-c features in BOTH blocks
+            // (off-chr genes too) so a chr-c gene's cis signal can't leak in.
+            blocks.push(ModalityBlock {
+                pb: rna_pb,
+                chr: &gene_chr,
+            });
+        }
         info!(
-            "Building LOCO topic confounders (rank {})...",
+            "Building LOCO {} confounders (rank {})...",
+            if args.tmle_atac_only {
+                "ATAC"
+            } else {
+                "joint RNA+ATAC"
+            },
             args.tmle_rank
         );
-        let loco = LocoConfounders::build(atac_pb, &peak_chr, args.tmle_rank)?;
+        let loco = LocoConfounders::build(&blocks, args.tmle_rank)?;
         let m = loco.m;
         let peak_clog: Vec<DVec> = (0..peak_names.len())
             .into_par_iter()
