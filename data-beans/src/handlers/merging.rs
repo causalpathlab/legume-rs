@@ -409,6 +409,7 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
             save_histogram: None,
             dry_run: false,
             interactive: false,
+            auto_cutoff: false,
             output: None,
             row_align: RowAlignMode::Common,
         };
@@ -708,6 +709,7 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
             save_histogram: None,
             dry_run: false,
             interactive: false,
+            auto_cutoff: false,
             output: None,
             row_align: RowAlignMode::Common,
         };

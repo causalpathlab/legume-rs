@@ -48,6 +48,7 @@ pub(super) fn run_squeeze_if_needed(
             save_histogram: None,
             dry_run: false,
             interactive: false,
+            auto_cutoff: false,
             output: None,
             row_align: RowAlignMode::Common,
         };
