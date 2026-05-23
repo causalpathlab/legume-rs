@@ -176,6 +176,18 @@ pub struct RunSqueezeArgs {
     )]
     pub interactive: bool,
 
+    /// auto cutoff - apply the k-means-suggested cutoff without prompting
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Apply the k-means-suggested nnz cutoff headlessly (no prompt)",
+        long_help = "Resolve row/column cutoffs from a 2-means split of log(1+nnz) and squeeze \n\
+		     without prompting. Explicit --row-nnz-cutoff / --column-nnz-cutoff still win \n\
+		     per dimension, so you can pin one axis and auto the other. \n\
+		     Combine with --dry-run to preview the resolved cutoffs without writing."
+    )]
+    pub auto_cutoff: bool,
+
     /// output file for squeezed data
     #[arg(
         short,
@@ -245,6 +257,7 @@ fn build_squeeze_args(output_file: Box<str>, args_cols: usize, args_rows: usize)
         save_histogram: None,
         dry_run: false,
         interactive: false,
+        auto_cutoff: false,
         output: None,
         row_align: RowAlignMode::Common,
     }
@@ -498,8 +511,36 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         let row_nnz_vec = row_stat.count_positives();
         let col_nnz_vec = col_stat.count_positives();
 
+        // Suggest cutoffs by 2-means clustering of log(1+nnz)
+        let want_hist =
+            cmd_args.show_histogram || cmd_args.save_histogram.is_some() || cmd_args.interactive;
+        let want_suggest = want_hist || cmd_args.auto_cutoff;
+        let row_suggest = if want_suggest {
+            suggest_nnz_cutoff(&row_nnz_vec)
+        } else {
+            None
+        };
+        let col_suggest = if want_suggest {
+            suggest_nnz_cutoff(&col_nnz_vec)
+        } else {
+            None
+        };
+
+        // Interactive or auto: derive the cutoff from the suggestion when the
+        // user left it unset (explicit non-zero values always win, per dimension)
+        if cmd_args.interactive || cmd_args.auto_cutoff {
+            row_nnz_cutoff = resolve_cutoff(cmd_args.row_nnz_cutoff, row_suggest, "row");
+            col_nnz_cutoff = resolve_cutoff(cmd_args.column_nnz_cutoff, col_suggest, "column");
+        }
+
+        // Headless auto mode (no histogram shown): report what was applied
+        if cmd_args.auto_cutoff && !want_hist {
+            report_resolved_cutoff("row", &row_nnz_vec, row_nnz_cutoff);
+            report_resolved_cutoff("column", &col_nnz_vec, col_nnz_cutoff);
+        }
+
         // Show/save histogram if requested or in interactive mode
-        if cmd_args.show_histogram || cmd_args.save_histogram.is_some() || cmd_args.interactive {
+        if want_hist {
             display_nnz_histogram(
                 &data_file,
                 &row_nnz_vec,
@@ -508,6 +549,8 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
                 col_nnz_cutoff,
                 cmd_args.show_histogram || cmd_args.interactive,
                 cmd_args.save_histogram.as_deref(),
+                row_suggest,
+                col_suggest,
             )?;
         }
 
@@ -541,6 +584,8 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
                             col_nnz_cutoff,
                             true,
                             None,
+                            row_suggest,
+                            col_suggest,
                         )?;
                     }
                     UserAction::Cancel => {
@@ -625,8 +670,8 @@ fn run_squeeze_and_merge(
         output_prefix
     );
 
-    // Handle interactive mode for first file to get cutoffs
-    if cmd_args.interactive || cmd_args.show_histogram {
+    // Handle interactive / histogram / auto-cutoff for the first file to get cutoffs
+    if cmd_args.interactive || cmd_args.show_histogram || cmd_args.auto_cutoff {
         let (backend, data_file) = resolve_backend_file(&cmd_args.data_files[0], None)?;
         let data = open_sparse_matrix(&data_file, &backend)?;
 
@@ -635,15 +680,37 @@ fn run_squeeze_and_merge(
         let row_nnz_vec = row_stat.count_positives();
         let col_nnz_vec = col_stat.count_positives();
 
-        display_nnz_histogram(
-            &data_file,
-            &row_nnz_vec,
-            &col_nnz_vec,
-            row_nnz_cutoff,
-            col_nnz_cutoff,
-            true,
-            cmd_args.save_histogram.as_deref(),
-        )?;
+        // Suggest cutoffs by 2-means clustering of log(1+nnz)
+        let row_suggest = suggest_nnz_cutoff(&row_nnz_vec);
+        let col_suggest = suggest_nnz_cutoff(&col_nnz_vec);
+
+        // Interactive or auto: derive the cutoff from the suggestion when the
+        // user left it unset (explicit non-zero values always win, per dimension)
+        if cmd_args.interactive || cmd_args.auto_cutoff {
+            row_nnz_cutoff = resolve_cutoff(cmd_args.row_nnz_cutoff, row_suggest, "row");
+            col_nnz_cutoff = resolve_cutoff(cmd_args.column_nnz_cutoff, col_suggest, "column");
+        }
+
+        let show_hist = cmd_args.show_histogram || cmd_args.interactive;
+        if show_hist || cmd_args.save_histogram.is_some() {
+            display_nnz_histogram(
+                &data_file,
+                &row_nnz_vec,
+                &col_nnz_vec,
+                row_nnz_cutoff,
+                col_nnz_cutoff,
+                show_hist,
+                cmd_args.save_histogram.as_deref(),
+                row_suggest,
+                col_suggest,
+            )?;
+        }
+
+        // Headless auto mode (no histogram shown): report what was applied
+        if cmd_args.auto_cutoff && !show_hist {
+            report_resolved_cutoff("row", &row_nnz_vec, row_nnz_cutoff);
+            report_resolved_cutoff("column", &col_nnz_vec, col_nnz_cutoff);
+        }
 
         if cmd_args.interactive {
             loop {
@@ -673,6 +740,8 @@ fn run_squeeze_and_merge(
                             col_nnz_cutoff,
                             true,
                             None,
+                            row_suggest,
+                            col_suggest,
                         )?;
                     }
                     UserAction::Cancel => {
@@ -1024,6 +1093,8 @@ fn display_nnz_histogram(
     col_cutoff: usize,
     show: bool,
     save_prefix: Option<&str>,
+    row_suggest: Option<usize>,
+    col_suggest: Option<usize>,
 ) -> anyhow::Result<()> {
     use matrix_util::common_io::write_types;
 
@@ -1047,9 +1118,9 @@ fn display_nnz_histogram(
         println!("NNZ Distribution for: {}", data_file);
         println!("========================================\n");
 
-        print_nnz_summary("Rows", row_nnz, row_cutoff);
+        print_nnz_summary("Rows", row_nnz, row_cutoff, row_suggest);
         println!();
-        print_nnz_summary("Columns", col_nnz, col_cutoff);
+        print_nnz_summary("Columns", col_nnz, col_cutoff, col_suggest);
 
         println!("\n========================================\n");
     }
@@ -1057,8 +1128,128 @@ fn display_nnz_histogram(
     Ok(())
 }
 
+/// Suggest a reasonable nnz cutoff by 2-means clustering of log(1+nnz).
+///
+/// k-means uses random initialization, so a single fit is not reproducible and
+/// can settle in a suboptimal local optimum. We restart it several times and keep
+/// the partition with the lowest within-cluster sum of squares (the global
+/// optimum). For 1-D, k=2 data that optimum is a unique threshold, so the chosen
+/// cutoff is stable across runs without seeding the clustering crate. Returns the
+/// smallest nnz in the higher-nnz cluster, or `None` for degenerate input
+/// (n < 2 or all-identical nnz).
+fn suggest_nnz_cutoff(nnz: &[f32]) -> Option<usize> {
+    const RESTARTS: usize = 31;
+
+    if nnz.len() < 2 {
+        return None;
+    }
+
+    // log(1+nnz); skip if every value is identical (nothing to split)
+    let logs: Vec<f32> = nnz.iter().map(|&x| (1.0 + x).ln()).collect();
+    let (lo, hi) = logs
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &v| {
+            (a.min(v), b.max(v))
+        });
+    if !(hi > lo) {
+        return None;
+    }
+
+    // Keep the restart with the lowest within-cluster SSE => the global optimum.
+    let mut best: Option<(f64, usize)> = None;
+    for _ in 0..RESTARTS {
+        if let Some(cand) = fit_2means_once(&logs, nnz) {
+            if best.is_none_or(|(best_sse, _)| cand.0 < best_sse) {
+                best = Some(cand);
+            }
+        }
+    }
+    best.map(|(_, cutoff)| cutoff)
+}
+
+/// One 2-means fit of `logs` (= log(1+nnz)). Returns `(within-cluster SSE in log
+/// space, suggested cutoff)`, where the cutoff is the smallest nnz in the
+/// higher-nnz cluster. `None` if the fit collapses to a single cluster.
+fn fit_2means_once(logs: &[f32], nnz: &[f32]) -> Option<(f64, usize)> {
+    use matrix_util::clustering::{Kmeans, KmeansArgs};
+    use nalgebra::DMatrix;
+
+    // log(1+nnz) as a 1 x N matrix; cluster the columns (each a single value)
+    let mat = DMatrix::from_row_slice(1, logs.len(), logs);
+    let membership = mat.kmeans_columns(KmeansArgs::with_clusters(2));
+
+    // Per-cluster log-mean (for SSE) and nnz-mean (to order the two clusters)
+    let mut log_sum = [0.0_f64; 2];
+    let mut nnz_sum = [0.0_f64; 2];
+    let mut cnt = [0_usize; 2];
+    for ((&m, &lv), &v) in membership.iter().zip(logs.iter()).zip(nnz.iter()) {
+        if m < 2 {
+            log_sum[m] += lv as f64;
+            nnz_sum[m] += v as f64;
+            cnt[m] += 1;
+        }
+    }
+    if cnt[0] == 0 || cnt[1] == 0 {
+        return None;
+    }
+    let log_mean = [log_sum[0] / cnt[0] as f64, log_sum[1] / cnt[1] as f64];
+
+    // within-cluster sum of squares in log space
+    let sse = membership
+        .iter()
+        .zip(logs.iter())
+        .filter(|(&m, _)| m < 2)
+        .map(|(&m, &lv)| {
+            let d = lv as f64 - log_mean[m];
+            d * d
+        })
+        .sum();
+
+    let high = if nnz_sum[1] / cnt[1] as f64 >= nnz_sum[0] / cnt[0] as f64 {
+        1
+    } else {
+        0
+    };
+    let cutoff = membership
+        .iter()
+        .zip(nnz.iter())
+        .filter(|(&m, _)| m == high)
+        .map(|(_, &v)| v as usize)
+        .min()?;
+
+    Some((sse, cutoff))
+}
+
+/// Resolve the effective cutoff for one dimension. An explicit user value
+/// (non-zero) always wins; otherwise fall back to the k-means suggestion, or 0
+/// (keep everything) when no suggestion is available.
+fn resolve_cutoff(explicit: usize, suggested: Option<usize>, label: &str) -> usize {
+    if explicit != 0 {
+        return explicit;
+    }
+    match suggested {
+        Some(c) => c,
+        None => {
+            info!("no {label} cutoff suggestion (degenerate nnz); keeping all");
+            0
+        }
+    }
+}
+
+/// Print the resolved cutoff and how much it drops (headless `--auto-cutoff` mode)
+fn report_resolved_cutoff(label: &str, nnz: &[f32], cutoff: usize) {
+    let total = nnz.len();
+    let removed = nnz.iter().filter(|&&x| (x as usize) < cutoff).count();
+    let pct = if total > 0 {
+        100.0 * removed as f64 / total as f64
+    } else {
+        0.0
+    };
+    println!("auto {label} cutoff: {cutoff} (removes {removed} / {total} = {pct:.2}%)");
+}
+
 /// Print summary statistics and histogram for nnz distribution
-fn print_nnz_summary(label: &str, nnz: &[f32], cutoff: usize) {
+fn print_nnz_summary(label: &str, nnz: &[f32], cutoff: usize, suggested: Option<usize>) {
     const MAX_BAR_WIDTH: usize = 50; // Maximum width for histogram bars
 
     let total = nnz.len();
@@ -1098,41 +1289,72 @@ fn print_nnz_summary(label: &str, nnz: &[f32], cutoff: usize) {
         "  Cutoff: {} (removes {} / {} = {:.2}%)",
         cutoff, below_cutoff, total, pct_removed
     );
+    if let Some(s) = suggested {
+        let below_s = nnz.iter().filter(|&&x| (x as usize) < s).count();
+        let pct_s = if total > 0 {
+            100.0 * below_s as f64 / total as f64
+        } else {
+            0.0
+        };
+        println!(
+            "  Suggested cutoff (2-means on log1p nnz): {} (would remove {} / {} = {:.2}%)",
+            s, below_s, total, pct_s
+        );
+    }
 
-    // Create histogram with log10(nnz+1) bins
+    // Create histogram with log10(nnz+1) bins, tracking the real nnz range per bin
     let hist = create_log_histogram(nnz, cutoff);
 
     // Scale bar width on log10(count+1) so a few outlier bins don't flatten the rest
     let max_log_count = hist
         .iter()
-        .map(|(_, count, _)| ((*count as f64) + 1.0).log10())
+        .map(|b| ((b.count as f64) + 1.0).log10())
         .fold(0.0_f64, f64::max)
         .max(1e-9);
 
-    println!("  Histogram (x: log10(nnz+1) bin, bar: log10(count+1)):");
-    for (bin_label, count, is_cutoff_bin) in hist {
-        let marker = if is_cutoff_bin { " <-- CUTOFF" } else { "" };
-        let log_count = ((count as f64) + 1.0).log10();
+    println!("  Histogram (x: actual nnz range [log10(nnz+1)], bar: log10(count+1)):");
+    for b in hist {
+        let marker = if b.is_cutoff { " <-- CUTOFF" } else { "" };
+        let log_count = ((b.count as f64) + 1.0).log10();
         let bar_width = ((log_count / max_log_count) * MAX_BAR_WIDTH as f64).round() as usize;
-        let bar_width = if count > 0 { bar_width.max(1) } else { 0 };
+        let bar_width = if b.count > 0 { bar_width.max(1) } else { 0 };
         let bar = "█".repeat(bar_width);
+        let range = if b.nnz_min == b.nnz_max {
+            b.nnz_min.to_string()
+        } else {
+            format!("{}-{}", b.nnz_min, b.nnz_max)
+        };
         println!(
-            "    {:>8}: {:>6} (log10 {:>5.2}) {}{}",
-            bin_label, count, log_count, bar, marker
+            "    {:>9} [{:>4.2}]: {:>6} {}{}",
+            range, b.log_nnz, b.count, bar, marker
         );
     }
 }
 
-/// Create histogram with log10(nnz+1) transformation
-fn create_log_histogram(nnz: &[f32], cutoff: usize) -> Vec<(String, usize, bool)> {
+/// One log10(nnz+1) histogram bin, carrying the real nnz range that fell into it
+struct HistBin {
+    nnz_min: usize,
+    nnz_max: usize,
+    log_nnz: f64,
+    count: usize,
+    is_cutoff: bool,
+}
+
+/// Create histogram with log10(nnz+1) binning, tracking the real nnz range per bin
+fn create_log_histogram(nnz: &[f32], cutoff: usize) -> Vec<HistBin> {
     let cutoff_log = ((cutoff as f64 + 1.0).log10() * 10.0).round() as i32;
 
-    // Create bins: bin value represents log10(nnz+1)*10 as integer
-    let mut bins: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
+    // Bin key represents log10(nnz+1)*10 as integer; value is (count, min nnz, max nnz)
+    let mut bins: std::collections::BTreeMap<i32, (usize, usize, usize)> =
+        std::collections::BTreeMap::new();
 
     for &val in nnz {
+        let v = val as usize;
         let log_val = ((val as f64 + 1.0).log10() * 10.0).round() as i32;
-        *bins.entry(log_val).or_insert(0) += 1;
+        let entry = bins.entry(log_val).or_insert((0, usize::MAX, 0));
+        entry.0 += 1;
+        entry.1 = entry.1.min(v);
+        entry.2 = entry.2.max(v);
     }
 
     // Mark the first bin at or above the cutoff so the arrow always renders,
@@ -1140,12 +1362,12 @@ fn create_log_histogram(nnz: &[f32], cutoff: usize) -> Vec<(String, usize, bool)
     let cutoff_bin = bins.keys().copied().find(|&b| b >= cutoff_log);
 
     bins.into_iter()
-        .map(|(bin, count)| {
-            let bin_float = bin as f64 / 10.0;
-            let nnz_approx = (10.0_f64.powf(bin_float) - 1.0).round() as usize;
-            let label = format!("~{}", nnz_approx);
-            let is_cutoff = Some(bin) == cutoff_bin;
-            (label, count, is_cutoff)
+        .map(|(bin, (count, nnz_min, nnz_max))| HistBin {
+            nnz_min,
+            nnz_max,
+            log_nnz: bin as f64 / 10.0,
+            count,
+            is_cutoff: Some(bin) == cutoff_bin,
         })
         .collect()
 }
