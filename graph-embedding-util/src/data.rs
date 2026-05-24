@@ -178,15 +178,86 @@ impl UnifiedData {
             }
         });
 
-        log::info!(
-            "Feature subset: {} → {} features ({} → {} edges retained)",
-            n_old,
-            new_feature_names.len(),
-            n_before,
-            self.triplets.len()
-        );
+        // The edge-count half is only meaningful when triplets are already
+        // materialized; in the streaming path they're empty here (built later
+        // from the subsetted axis), so don't report a misleading "0 → 0".
+        if n_before > 0 {
+            log::info!(
+                "Feature subset: {} → {} features ({} → {} edges retained)",
+                n_old,
+                new_feature_names.len(),
+                n_before,
+                self.triplets.len()
+            );
+        } else {
+            log::info!(
+                "Feature subset: {} → {} features (triplets built later from this axis)",
+                n_old,
+                new_feature_names.len()
+            );
+        }
         self.feature_names = new_feature_names;
         self.feature_to_backend_row = new_feature_to_backend_row;
+    }
+
+    /// Build the cell↔feature edge list (`triplets`) from `per_file_data[0]`
+    /// on the *current* unified feature axis. Deferred from construction so
+    /// this training-only structure (~12 B/edge) doesn't coexist with the
+    /// collapse's sufficient-stats during the peak collapse phase — call it
+    /// after the collapse, before training. Honors any `subset_features`
+    /// already applied: only kept backend rows are emitted, remapped to
+    /// compact unified ids via `feature_to_backend_row`. Idempotent-ish: it
+    /// replaces whatever `triplets` currently holds.
+    pub fn materialize_cell_triplets(&mut self) -> anyhow::Result<()> {
+        let data = &self.per_file_data[0];
+        let n_cells = data.num_columns();
+        let backend_rows = data.num_rows();
+
+        // backend compact row → unified compact id (u32::MAX ⇒ dropped by
+        // an HVG/frozen subset). Identity when no subset was applied.
+        let mut backend_to_unified = vec![u32::MAX; backend_rows];
+        for (uid, &brow) in self.feature_to_backend_row.iter().enumerate() {
+            if brow < backend_rows {
+                backend_to_unified[brow] = uid as u32;
+            }
+        }
+
+        info!("Materializing sparse triplets (unified feature space)...");
+        let nnz_hint = data.num_non_zeros().unwrap_or(0);
+        // Bound the per-slab read even when nnz is unavailable (nnz_hint==0),
+        // otherwise the slab would clamp to the whole matrix.
+        let chunk_cols = if nnz_hint > 0 {
+            let avg_per_col = (nnz_hint / n_cells.max(1)).max(1);
+            (8_000_000 / avg_per_col).clamp(1, n_cells.max(1))
+        } else {
+            (1usize << 14).min(n_cells.max(1))
+        };
+        let pb_bar = new_progress_bar(nnz_hint.max(1) as u64);
+        pb_bar.set_message("triplets");
+        let mut triplets: Vec<Triplet> = Vec::with_capacity(nnz_hint);
+        let mut since_tick = 0u64;
+        data.for_each_triplet(0..n_cells, chunk_cols, |row, col, v| {
+            if v != 0.0 {
+                let uid = backend_to_unified[row as usize];
+                if uid != u32::MAX {
+                    triplets.push(Triplet {
+                        cell: col as u32,
+                        feature: uid,
+                        count: v,
+                    });
+                    since_tick += 1;
+                    if since_tick == 1 << 20 {
+                        pb_bar.inc(since_tick);
+                        since_tick = 0;
+                    }
+                }
+            }
+        })?;
+        pb_bar.inc(since_tick);
+        pb_bar.finish_and_clear();
+        info!("  edges: {}", triplets.len());
+        self.triplets = triplets;
+        Ok(())
     }
 
     /// Build a `UnifiedData` from a single in-memory `SparseIoVec` plus
@@ -273,41 +344,15 @@ impl UnifiedData {
                 .join(", ")
         );
 
-        info!("Materializing sparse triplets (unified feature space)...");
-        // Stream nonzeros straight into compact 12-byte triplets: the wide
-        // (u64,u64,f32) form is never built in full, only one bounded slab
-        // at a time. Pre-size from the backend nnz so the edge list never
-        // reallocs, and pick a slab width that keeps each backend read well
-        // under a few hundred MB regardless of per-cell density.
-        let n_cells = data.num_columns();
-        let nnz_hint = data.num_non_zeros().unwrap_or(0);
-        let avg_per_col = (nnz_hint / n_cells.max(1)).max(1);
-        let chunk_cols = (8_000_000 / avg_per_col).clamp(1, n_cells.max(1));
-        let pb_bar = new_progress_bar(nnz_hint.max(1) as u64);
-        pb_bar.set_message("triplets");
-        let mut triplets: Vec<Triplet> = Vec::with_capacity(nnz_hint);
-        let mut since_tick = 0u64;
-        data.for_each_triplet(0..n_cells, chunk_cols, |row, col, v| {
-            if v != 0.0 {
-                triplets.push(Triplet {
-                    cell: col as u32,
-                    feature: row as u32,
-                    count: v,
-                });
-                since_tick += 1;
-                if since_tick == 1 << 20 {
-                    pb_bar.inc(since_tick);
-                    since_tick = 0;
-                }
-            }
-        })?;
-        pb_bar.inc(since_tick);
-        pb_bar.finish_and_clear();
-        info!("  edges: {}", triplets.len());
-
+        // Triplets (the cell↔feature edge list for training) are NOT built
+        // here. They're a training-only structure the collapse never reads, so
+        // materializing them at load would needlessly stack ~12 B/edge on top
+        // of the collapse's sufficient-stats during the (peak) collapse phase.
+        // `materialize_cell_triplets` builds them after the collapse instead,
+        // on the final (possibly HVG/frozen-subset) feature axis.
         let n_features = feature_names.len();
         Ok(UnifiedData {
-            triplets,
+            triplets: Vec::new(),
             feature_names,
             feature_to_backend_row: (0..n_features).collect(),
             per_file_data: vec![data],

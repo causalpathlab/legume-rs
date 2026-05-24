@@ -6,9 +6,11 @@ use crate::coarsen::{identity_axis, AxisCoarsenings};
 use crate::data::UnifiedData;
 use crate::feature_network::FeatureNetworkSmoother;
 use crate::loss::{
-    build_per_batch_cell_samplers, build_per_batch_stratified_cell_samplers,
-    build_stratified_sampler, PerBatchStratifiedCellSampler, StratifiedSampler,
+    build_per_batch_cell_samplers, build_stratified_sampler, CellFeatureSampler,
+    PerBatchStratifiedCellSampler, StratifiedSampler,
 };
+use crate::progress::new_progress_bar;
+use rand_distr::weighted::WeightedIndex;
 use crate::model::{JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
 use crate::stop::setup_stop_handler;
 use crate::training::{
@@ -518,6 +520,12 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         )?);
     }
 
+    // NOTE: the flat cell↔feature edge list is intentionally *not* built.
+    // The cell axis is always `PerBatchStratified`, whose sampler is built by
+    // streaming columns in `build_active_samplers` and is self-contained at
+    // sample time — so `unified.triplets` stays empty. `materialize_cell_triplets`
+    // remains available only for reviving the flat `PerBatch` path.
+
     ////////////////////////////////
     // VarMap and embedding heads //
     ////////////////////////////////
@@ -932,27 +940,120 @@ fn build_active_samplers(
     alpha_neg: f32,
     cell_weight_mult: Option<&[f32]>,
 ) -> anyhow::Result<Vec<PerBatchStratifiedCellSampler>> {
-    let samplers_all = build_per_batch_stratified_cell_samplers(
-        &unified.triplets,
-        &unified.batch_membership,
-        unified.n_batches(),
-        unified.n_features(),
-        feat_weights,
-        alpha_cell,
-        alpha_neg,
-        cell_weight_mult,
-    );
-    let mut empty: Vec<&str> = Vec::new();
-    let active: Vec<PerBatchStratifiedCellSampler> = samplers_all
-        .into_iter()
-        .enumerate()
-        .filter_map(|(b, s)| {
-            if s.is_none() {
-                empty.push(unified.batch_names[b].as_ref());
+    // Build the per-batch stratified-cell samplers by **streaming columns**
+    // from the backend, never materializing the flat cell↔feature edge list.
+    // The strat-cell sampler groups edges by cell (`per_cell`), which is
+    // exactly a column read — so the 5 GB flat triplet list (which only the
+    // unused flat `PerBatch` path ever read) is skipped entirely. The HVG /
+    // frozen subset is honored via `feature_to_backend_row`.
+    let data = &unified.per_file_data[0];
+    let n_cells = data.num_columns();
+    let n_features = unified.n_features();
+    let n_batches = unified.n_batches();
+    let batch_membership = &unified.batch_membership;
+
+    // backend compact row → unified id (u32::MAX ⇒ dropped by a subset).
+    let backend_rows = data.num_rows();
+    let mut backend_to_unified = vec![u32::MAX; backend_rows];
+    for (uid, &brow) in unified.feature_to_backend_row.iter().enumerate() {
+        if brow < backend_rows {
+            backend_to_unified[brow] = uid as u32;
+        }
+    }
+
+    // Per-batch accumulators, filled as cells stream in.
+    let mut active_cells: Vec<Vec<u32>> = vec![Vec::new(); n_batches];
+    let mut per_cell: Vec<Vec<CellFeatureSampler>> = (0..n_batches).map(|_| Vec::new()).collect();
+    let mut cell_w: Vec<Vec<f32>> = vec![Vec::new(); n_batches];
+    let mut feat_count: Vec<Vec<f32>> = (0..n_batches).map(|_| vec![0f32; n_features]).collect();
+
+    // Slab width targets ~8M edges/slab. When nnz can't be reported
+    // (num_non_zeros errs → 0) fall back to a fixed cell-count slab rather
+    // than the whole matrix, so the streaming memory bound always holds.
+    let chunk = match data.num_non_zeros() {
+        Ok(nnz) if nnz > 0 => {
+            let avg_per_col = (nnz / n_cells.max(1)).max(1);
+            (8_000_000 / avg_per_col).clamp(1, n_cells.max(1))
+        }
+        _ => (1usize << 14).min(n_cells.max(1)),
+    };
+    let pb_bar = new_progress_bar(n_cells as u64);
+    pb_bar.set_message("strat-cell sampler (streaming columns)");
+
+    let mut start = 0usize;
+    while start < n_cells {
+        let end = (start + chunk).min(n_cells);
+        let slab = end - start;
+        // Group this slab's nonzeros by local column (cell). `for_each_triplet`
+        // emits out_col relative to the passed `start..end`, i.e. 0..slab.
+        let mut col_feats: Vec<Vec<u32>> = vec![Vec::new(); slab];
+        let mut col_wts: Vec<Vec<f32>> = vec![Vec::new(); slab];
+        let mut col_deg: Vec<f32> = vec![0.0; slab];
+        data.for_each_triplet(start..end, slab, |brow, local_col, v| {
+            if v == 0.0 {
+                return;
             }
-            s
-        })
-        .collect();
+            let uid = backend_to_unified[brow as usize];
+            if uid == u32::MAX {
+                return;
+            }
+            let lc = local_col as usize;
+            let cell = start + lc;
+            let b = batch_membership[cell] as usize;
+            col_feats[lc].push(uid);
+            col_wts[lc].push((v * feat_weights[uid as usize]).max(1e-8));
+            col_deg[lc] += v;
+            feat_count[b][uid as usize] += v;
+        })?;
+        for lc in 0..slab {
+            if col_feats[lc].is_empty() {
+                continue;
+            }
+            let cell = (start + lc) as u32;
+            let b = batch_membership[cell as usize] as usize;
+            let picker =
+                WeightedIndex::new(std::mem::take(&mut col_wts[lc])).expect("cell-feature weights");
+            per_cell[b].push(CellFeatureSampler {
+                features: std::mem::take(&mut col_feats[lc]),
+                picker,
+            });
+            active_cells[b].push(cell);
+            let mult = cell_weight_mult.map_or(1.0, |m| m[cell as usize]);
+            cell_w[b].push(col_deg[lc].max(1e-8).powf(alpha_cell) * mult);
+        }
+        pb_bar.inc(slab as u64);
+        start = end;
+    }
+    pb_bar.finish_and_clear();
+
+    // Finalize one sampler per non-empty batch (re-indexed; the original batch
+    // id isn't used at sample time).
+    let mut empty: Vec<&str> = Vec::new();
+    let mut active: Vec<PerBatchStratifiedCellSampler> = Vec::new();
+    for b in 0..n_batches {
+        if active_cells[b].is_empty() {
+            empty.push(unified.batch_names[b].as_ref());
+            continue;
+        }
+        let cell_picker =
+            WeightedIndex::new(std::mem::take(&mut cell_w[b])).expect("cell weights");
+        let fc = &feat_count[b];
+        let feature_pool: Vec<u32> = (0..n_features as u32)
+            .filter(|&f| fc[f as usize] > 0.0)
+            .collect();
+        let neg_w: Vec<f32> = feature_pool
+            .iter()
+            .map(|&f| fc[f as usize].powf(alpha_neg))
+            .collect();
+        let neg = WeightedIndex::new(neg_w).expect("batch feature pool");
+        active.push(PerBatchStratifiedCellSampler {
+            cell_picker,
+            active_cells: std::mem::take(&mut active_cells[b]),
+            per_cell: std::mem::take(&mut per_cell[b]),
+            neg,
+            feature_pool,
+        });
+    }
     if !empty.is_empty() {
         warn!(
             "Skipping {} batch(es) with no observed edges: {}",

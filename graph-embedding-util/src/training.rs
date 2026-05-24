@@ -336,6 +336,13 @@ fn chain_step(
             if samplers.is_empty() {
                 return Ok(None);
             }
+            anyhow::ensure!(
+                !cell_axis.unified.triplets.is_empty(),
+                "flat PerBatch cell sampler needs a materialized edge list, but \
+                 unified.triplets is empty (the streaming PerBatchStratified path \
+                 leaves it empty) — call materialize_cell_triplets() to revive the \
+                 flat path"
+            );
             let id = rng.random_range(0..samplers.len());
             let bs = &samplers[id];
             let chain_sampler = ChainSampler {
@@ -516,6 +523,12 @@ fn single_axis_step(
 
     let (batch, batch_id): (EdgeBatch, Option<usize>) = match axis.sampler {
         AxisSampler::PerBatch(samplers) => {
+            anyhow::ensure!(
+                !axis.unified.triplets.is_empty(),
+                "flat PerBatch sampler needs a materialized edge list, but \
+                 unified.triplets is empty (streaming PerBatchStratified leaves it \
+                 empty) — call materialize_cell_triplets() to revive the flat path"
+            );
             let id = rng.random_range(0..samplers.len());
             let bs = &samplers[id];
             let batch = sample_edge_batch(
