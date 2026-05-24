@@ -282,6 +282,17 @@ fn optimize_block(
             mu_param.calibrate_with(out_target);
         };
 
+        // Sparse output (bge / MeanOnly): drop each mean's per-column prior
+        // baseline so its support is exactly the observed∪imputed cells.
+        // Downstream `from_pseudobulks` then yields sparse pb_blobs (held
+        // across all training epochs). `All` consumers keep the dense mean.
+        if matches!(out_target, CalibrateTarget::MeanOnly) {
+            mu_param.sparsify_mean_to_support(&stat.observed_sum_ds);
+            mu_adj_param.sparsify_mean_to_support(&(&stat.observed_sum_ds + &stat.imputed_sum_ds));
+            gamma_param.sparsify_mean_to_support(&stat.imputed_sum_ds);
+            mu_resid_param.sparsify_mean_to_support(&stat.residual_sum_ds);
+        }
+
         Ok(CollapsedOut {
             mu_observed: mu_param,
             mu_adjusted: Some(mu_adj_param),
@@ -296,6 +307,9 @@ fn optimize_block(
         }
         mu_param.update_stat(&stat.observed_sum_ds, &denom_ds);
         mu_param.calibrate_with(out_target);
+        if matches!(out_target, CalibrateTarget::MeanOnly) {
+            mu_param.sparsify_mean_to_support(&stat.observed_sum_ds);
+        }
         Ok(CollapsedOut {
             mu_observed: mu_param,
             mu_adjusted: None,
@@ -752,6 +766,39 @@ mod gene_block_tests {
             full.mu_adjusted.as_ref().unwrap().posterior_log_mean(),
             blk_adj.posterior_log_mean(),
             "mu_adj log_mean",
+        );
+    }
+
+    /// MeanOnly drops each mean's per-column prior baseline (unobserved cells
+    /// → exactly 0), so triplet-ization is sparse; `All` keeps the baseline.
+    #[test]
+    fn mean_only_sparsifies_unobserved_cells() {
+        let (g, k, b) = (4usize, 3usize, 2usize);
+        let mut stat = CollapsedStat::new(g, k, b);
+        stat.observed_sum_ds[(0, 0)] = 5.0; // observed support
+        stat.observed_sum_ds[(1, 1)] = 3.0;
+        stat.imputed_sum_ds[(2, 2)] = 2.0; // imputed-only support
+        stat.size_s = DVector::from_element(k, 10.0);
+        stat.n_bs = DMatrix::from_element(b, k, 5.0);
+        stat.observed_sum_db.fill(1.0); // so δ is well-defined
+
+        let out = optimize_block(&stat, (1.0, 1.0), 10, CalibrateTarget::MeanOnly, None).unwrap();
+        let adj = out.mu_adjusted.unwrap();
+        let m = adj.posterior_mean();
+        // support of mu_adjusted = (observed ∪ imputed) > 0
+        assert!(m[(0, 0)] > 0.0);
+        assert!(m[(1, 1)] > 0.0);
+        assert!(m[(2, 2)] > 0.0);
+        // unobserved & unimputed cells → exactly 0 (baseline dropped)
+        assert_eq!(m[(3, 0)], 0.0);
+        assert_eq!(m[(0, 1)], 0.0);
+
+        // All keeps the prior baseline (nonzero everywhere).
+        let out_all = optimize_block(&stat, (1.0, 1.0), 10, CalibrateTarget::All, None).unwrap();
+        let ma = out_all.mu_adjusted.unwrap();
+        assert!(
+            ma.posterior_mean()[(3, 0)] > 0.0,
+            "All path must keep the prior baseline"
         );
     }
 

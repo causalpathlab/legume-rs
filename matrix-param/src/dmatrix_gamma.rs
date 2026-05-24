@@ -220,6 +220,26 @@ impl GammaMatrix {
         self.b_stat = DMatrix::zeros(0, 0);
     }
 
+    /// Zero every `estimated_mean` entry whose corresponding `numerator` is
+    /// zero, collapsing the per-column Gamma prior baseline (`a0/denom`,
+    /// present at *every* unobserved cell) to exact zero. This lets a
+    /// downstream triplet-ization of the mean be **sparse** — only the
+    /// observed support survives. It's the lossy-but-correct choice for
+    /// count-based consumers (the baseline is a regularization floor, not
+    /// signal). `numerator` must match the mean's shape; only meaningful
+    /// after a mean calibration.
+    pub fn sparsify_mean_to_support(&mut self, numerator: &DMatrix<f32>) {
+        debug_assert_eq!(self.estimated_mean.shape(), numerator.shape());
+        self.estimated_mean
+            .iter_mut()
+            .zip(numerator.iter())
+            .for_each(|(m, &n)| {
+                if n == 0.0 {
+                    *m = 0.0;
+                }
+            });
+    }
+
     /// Row-stack per-feature-block parameters (from a gene-blocked fit)
     /// into one `[Σrowsᵢ × K]` parameter. All blocks must share the column
     /// count and hyper-params. Calibrated planes present in the first block
