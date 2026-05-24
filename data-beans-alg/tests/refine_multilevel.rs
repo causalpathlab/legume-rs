@@ -190,6 +190,7 @@ fn refine_assignments_is_deterministic() {
         batch_knn_lookup: &batch_knn,
         k_per_batch: 4,
         initial_sc_to_group_per_level: &initial_per_level,
+        reproject_offsets_per_level: &[],
     };
     let a = refine_assignments(&inputs, &params).unwrap();
     let b = refine_assignments(&inputs, &params).unwrap();
@@ -220,6 +221,7 @@ fn refine_assignments_preserves_hierarchy() {
         batch_knn_lookup: &batch_knn,
         k_per_batch: 4,
         initial_sc_to_group_per_level: &initial_per_level,
+        reproject_offsets_per_level: &[],
     };
     let refined = refine_assignments(&inputs, &RefineParams::default()).unwrap();
 
@@ -267,6 +269,7 @@ fn refine_assignments_does_not_hurt_ari_on_planted() {
         batch_knn_lookup: &batch_knn,
         k_per_batch: 4,
         initial_sc_to_group_per_level: &initial_per_level,
+        reproject_offsets_per_level: &[],
     };
     let refined = refine_assignments(&inputs, &params).unwrap();
 

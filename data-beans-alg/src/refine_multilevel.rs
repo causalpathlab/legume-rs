@@ -24,6 +24,7 @@ use crate::dc_poisson::{
 use log::{debug, info};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use rustc_hash::FxHashMap;
 
 pub use crate::collapse_data::GeneSums;
 // Re-export the DC-Poisson core items so existing callers / integration
@@ -169,6 +170,14 @@ pub struct RefineInputs<'a> {
     pub batch_knn_lookup: &'a [matrix_util::knn_match::ColumnDict<usize>],
     pub k_per_batch: usize,
     pub initial_sc_to_group_per_level: &'a [Vec<usize>],
+    /// Per-level reprojection offsets used to re-anchor each finer level in its
+    /// refined parent (the child hash *relative to its parent* — the "extra
+    /// bits"). `reproject_offsets_per_level[level]` is the per-pb-sample offset
+    /// for subdividing `level` against `level+1`; the coarsest level's entry is
+    /// unused (no parent). An empty outer slice (or empty per-level entry)
+    /// falls back to the positional [`child_offset_within_parent`], which is
+    /// also bounded but not hash-semantic. See `collapse_data::refine`.
+    pub reproject_offsets_per_level: &'a [Vec<usize>],
 }
 
 /// Top-down BBKNN + Poisson refinement.
@@ -188,6 +197,7 @@ pub fn refine_assignments(
         batch_knn_lookup,
         k_per_batch,
         initial_sc_to_group_per_level,
+        reproject_offsets_per_level,
     } = *inputs;
     let num_levels = initial_sc_to_group_per_level.len();
     if num_levels == 0 {
@@ -255,16 +265,29 @@ pub fn refine_assignments(
 
     // Walk coarsest → finest (highest level index down to 0).
     for level in (0..num_levels).rev() {
-        // Refining the coarser level moves individual pb-samples across
-        // parents, which can leave this (not-yet-refined) finer level's
-        // initial groups straddling two *refined* parents. Re-project the
-        // level against its already-refined parent so it is a strict
-        // refinement before sibling sets are computed — otherwise a
-        // straddling group lands in two parents' sibling sets, both
-        // halves are then free to stay put, and the refined hierarchy is
-        // broken (violating `fine_to_coarse_from_refined`'s invariant).
+        // Refining the coarser level moves pb-samples across parents, so this
+        // finer level must be re-anchored to nest strictly in its *refined*
+        // parent before sibling sets are computed (else a straddling group
+        // lands in two parents' sibling sets and the hierarchy breaks,
+        // violating `fine_to_coarse_from_refined`'s invariant).
+        //
+        // We subdivide the refined parent by the child hash *relative to its
+        // parent* (`child_offset_within_parent`), not by the full child code.
+        // Both give a strict refinement, but the relative form is bounded by
+        // `2^child_dim` — crossing the scrambled parent with the full child
+        // code instead inflates the count ~20× (e.g. 1024 leaf codes →
+        // 19098 finest groups), which is the level-graduation pathology.
         if level + 1 < num_levels {
-            let (reprojected, new_k) = project_to_refinement(&refined[level], &refined[level + 1]);
+            // Prefer the hash-semantic extra-bit offsets the caller precomputed;
+            // fall back to the positional offset (still bounded) when absent.
+            let offset: Vec<usize> = match reproject_offsets_per_level.get(level) {
+                Some(o) if !o.is_empty() => o.clone(),
+                _ => child_offset_within_parent(
+                    &initial_sc_to_group_per_level[level],
+                    &initial_sc_to_group_per_level[level + 1],
+                ),
+            };
+            let (reprojected, new_k) = project_to_refinement(&offset, &refined[level + 1]);
             refined[level] = reprojected;
             ks[level] = new_k;
         }
@@ -313,6 +336,30 @@ fn project_to_refinement(child: &[usize], parent: &[usize]) -> (Vec<usize>, usiz
     compact_labels(&pairs)
 }
 
+/// Local index of each entity's `child` label within its `parent` label, in
+/// first-seen order.
+///
+/// Used to subdivide a refined parent by the child hash *relative to its
+/// parent* (the "extra bits") rather than by the full child code. Because the
+/// child hash nests in the parent hash, each parent holds at most
+/// `2^(child_dim − parent_dim)` distinct child codes, so the offset — and any
+/// `(refined_parent, offset)` subdivision built from it — stays bounded by
+/// `2^child_dim` even after DC-SBM has scrambled the parent. Crossing the
+/// refined parent with the *full* child code instead (the old
+/// `project_to_refinement` against `refined[level]`) cross-products the
+/// scrambled parent with every child code and inflates the count ~20×.
+fn child_offset_within_parent(child: &[usize], parent: &[usize]) -> Vec<usize> {
+    debug_assert_eq!(child.len(), parent.len());
+    let mut per_parent: FxHashMap<usize, FxHashMap<usize, usize>> = FxHashMap::default();
+    let mut offsets = vec![0usize; child.len()];
+    for (i, (&c, &p)) in child.iter().zip(parent.iter()).enumerate() {
+        let local = per_parent.entry(p).or_default();
+        let next = local.len();
+        offsets[i] = *local.entry(c).or_insert(next);
+    }
+    offsets
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Tests (BBKNN-specific)
 ////////////////////////////////////////////////////////////////////////////////
@@ -332,6 +379,24 @@ mod tests {
         let cand = build_candidate_sets(&siblings, &bbknn, &pbsamp_to_group);
         assert_eq!(cand[0], vec![0, 1]);
         assert_eq!(cand[1], vec![0, 1]);
+    }
+
+    #[test]
+    fn child_offset_within_parent_is_bounded_per_parent() {
+        // Two parents; child codes nest in them. Offsets are local, first-seen
+        // indices within each parent (so they're bounded by children-per-parent,
+        // not by the global child-code count).
+        let parent = vec![0usize, 0, 0, 1, 1, 1];
+        let child = vec![10usize, 10, 11, 22, 23, 22];
+        let off = child_offset_within_parent(&child, &parent);
+        // parent 0: 10→0, 11→1 ; parent 1: 22→0, 23→1
+        assert_eq!(off, vec![0, 0, 1, 0, 1, 0]);
+
+        // Subdividing a *scrambled* refined parent by the offset stays bounded
+        // by #parent_groups × max_children_per_parent — no cross-product blowup.
+        let refined_parent = vec![3usize, 3, 3, 8, 8, 8];
+        let (_lab, k) = project_to_refinement(&off, &refined_parent);
+        assert!(k <= 4, "expected ≤ 2 parents × 2 offsets, got {k}");
     }
 
     #[test]

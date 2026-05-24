@@ -87,6 +87,40 @@ pub(super) fn initial_per_level_from_hash(
         .collect()
 }
 
+/// Per-level reprojection offsets consumed by `refine_assignments`: for each
+/// pb-sample, the finest hash bits *above* the parent level's sort dim
+/// (`code >> parent_dim`, masked to `child_dim − parent_dim` bits). Crossing
+/// the refined parent with these "extra bits" keeps each finer level bounded
+/// by `2^child_dim` while staying hash-meaningful (cells agreeing on the finer
+/// SVD dims group together), instead of an arbitrary positional index. The
+/// coarsest level has no parent, so its entry is empty (unused).
+pub(super) fn build_reproject_offsets(
+    fine_codes: &[usize],
+    pb_sample_to_cells: &[Vec<usize>],
+    level_dims: &[usize],
+) -> Vec<Vec<usize>> {
+    let raw: Vec<usize> = pb_sample_to_cells
+        .iter()
+        .map(|cells| fine_codes[cells[0]])
+        .collect();
+    (0..level_dims.len())
+        .map(|level| {
+            if level + 1 < level_dims.len() {
+                let parent_dim = level_dims[level + 1];
+                let nbits = level_dims[level].saturating_sub(parent_dim);
+                let mask = if nbits >= usize::BITS as usize {
+                    usize::MAX
+                } else {
+                    (1_usize << nbits).wrapping_sub(1)
+                };
+                raw.iter().map(|&c| (c >> parent_dim) & mask).collect()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect()
+}
+
 /// Run refinement when `allow_refine`, else return the compacted initial
 /// mapping unchanged (single-batch → no BBKNN candidates, nothing to refine).
 pub(super) fn refine_or_identity(
@@ -198,6 +232,7 @@ pub(super) fn refine_and_collect_single_layer(
     } else {
         &empty
     };
+    let reproject_offsets = build_reproject_offsets(fine_codes, &pb_sample_to_cells, level_dims);
     let inputs = crate::refine_multilevel::RefineInputs {
         layout: &pb_samples.layout,
         gene_sums: &pb_samples.gene_sums,
@@ -206,8 +241,42 @@ pub(super) fn refine_and_collect_single_layer(
         batch_knn_lookup: batch_knn,
         k_per_batch: knn,
         initial_sc_to_group_per_level: &initial_per_level,
+        reproject_offsets_per_level: &reproject_offsets,
     };
     let refined = refine_or_identity(num_batches >= 2, &inputs, refine_params)?;
+
+    // ---- collapse-structure diagnostic ----
+    // Resolve how the finest column count actually arises: distinct leaf
+    // codes (initial finest groups) vs refined finest groups, and whether a
+    // refined finest group spans multiple batches (i.e. batches are merged
+    // within a group) or stays single-batch (a per-(leaf,batch) column).
+    {
+        let n_leaves = initial_per_level
+            .first()
+            .map(|lvl| lvl.iter().copied().max().map_or(0, |m| m + 1))
+            .unwrap_or(0);
+        let finest = &refined.pbsamp_to_group[0];
+        let k_fin = refined.num_groups_per_level[0];
+        // Bitmask of batches per finest group (handles up to 128 batches).
+        let mut batch_mask = vec![0u128; k_fin];
+        let b2g = &pb_samples.layout.pb_sample_to_batch;
+        for (pb, &g) in finest.iter().enumerate() {
+            let b = b2g[pb];
+            if b < 128 {
+                batch_mask[g] |= 1u128 << b;
+            }
+        }
+        let spans: Vec<u32> = batch_mask.iter().map(|m| m.count_ones()).collect();
+        let multi = spans.iter().filter(|&&c| c > 1).count();
+        let max_b = spans.iter().copied().max().unwrap_or(0);
+        let mean_b = spans.iter().map(|&c| c as f64).sum::<f64>() / k_fin.max(1) as f64;
+        info!(
+            "collapse structure: {} pb-samples, {} batches, {} leaf codes (finest init), \
+             {} refined finest groups; finest groups spanning >1 batch: {}/{} \
+             (max {} batches/group, mean {:.2})",
+            num_pb, num_batches, n_leaves, k_fin, multi, k_fin, max_b, mean_b
+        );
+    }
 
     // 5. Build finest CollapsedStat once from a full data pass, then derive
     //    coarser levels by `merge_stat` on column-aggregated sums — avoids
@@ -378,6 +447,7 @@ pub(super) fn refine_and_collect_stack(
     } else {
         &empty
     };
+    let reproject_offsets = build_reproject_offsets(fine_codes, &pb_sample_to_cells, level_dims);
     let inputs = crate::refine_multilevel::RefineInputs {
         layout: &layout,
         gene_sums: &gene_sums_owner,
@@ -386,6 +456,7 @@ pub(super) fn refine_and_collect_stack(
         batch_knn_lookup: batch_knn,
         k_per_batch: knn,
         initial_sc_to_group_per_level: &initial_per_level,
+        reproject_offsets_per_level: &reproject_offsets,
     };
     let refined = refine_or_identity(num_batches >= 2, &inputs, refine_params)?;
 
@@ -581,4 +652,38 @@ pub(super) fn compute_fine_to_coarse_mapping(
     let fine_to_coarse: Vec<usize> = coarse_codes.iter().map(|c| coarse_to_idx[c]).collect();
 
     (fine_to_coarse, num_coarse)
+}
+
+#[cfg(test)]
+mod reproject_tests {
+    use super::*;
+
+    #[test]
+    fn build_reproject_offsets_extracts_extra_bits() {
+        // 4 pb-samples (one cell each); 4-bit fine codes differing only in the
+        // high 2 bits. finest-first dims: child = 4 bits, parent = 2 bits.
+        let fine_codes = vec![0b0000usize, 0b0100, 0b1000, 0b1100];
+        let pb_cells = vec![vec![0usize], vec![1], vec![2], vec![3]];
+        let dims = vec![4usize, 2];
+        let off = build_reproject_offsets(&fine_codes, &pb_cells, &dims);
+        assert_eq!(off.len(), 2);
+        // level 0: extra = (code >> 2) & 0b11 — semantic high bits, not a
+        // positional index, so identical extra bits map to the same offset.
+        assert_eq!(off[0], vec![0, 1, 2, 3]);
+        // coarsest level has no parent → empty (unused).
+        assert!(off[1].is_empty());
+    }
+
+    #[test]
+    fn build_reproject_offsets_bounded_by_extra_bit_width() {
+        // child 5 bits, parent 3 bits → extra ∈ [0, 2^2). Codes that share the
+        // high 2 bits collapse to one offset regardless of low bits.
+        let fine_codes = vec![0b00000usize, 0b00111, 0b01000, 0b01011, 0b11111];
+        let pb_cells: Vec<Vec<usize>> = (0..5).map(|i| vec![i]).collect();
+        let dims = vec![5usize, 3];
+        let off = build_reproject_offsets(&fine_codes, &pb_cells, &dims);
+        // extra = (code >> 3) & 0b11
+        assert_eq!(off[0], vec![0, 0, 1, 1, 3]);
+        assert!(off[0].iter().all(|&x| x < 4));
+    }
 }

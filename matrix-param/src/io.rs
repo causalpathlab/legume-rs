@@ -103,41 +103,27 @@ where
         let row_bytes = precompute_name_bytes(row_names_slice, self.nrows());
         let col_bytes = precompute_name_bytes(column_names.0, self.ncols());
 
-        // prepare data - single traversal for all matrices
+        // The mean plane defines the canonical (row, col) order and element
+        // count. Auxiliary planes (sd / log_mean / log_sd) may be lazily
+        // unallocated (0×0) when the parameter was only mean-calibrated
+        // (e.g. CalibrateTarget::MeanOnly); emit zeros of the right length in
+        // that case so serialization always succeeds — matching the pre-lazy
+        // behavior of writing zeros for never-computed planes.
         let mat_mean = self.posterior_mean();
-        let mat_sd = self.posterior_sd();
-        let mat_log_mean = self.posterior_log_mean();
-        let mat_log_sd = self.posterior_log_sd();
-
-        let (mut values, idx) =
-            mat_mean.melt_many_with_indexes(&[mat_sd, mat_log_mean, mat_log_sd]);
-        debug_assert_eq!(values.len(), 4);
-
-        // Pop in reverse order: log_sd, log_mean, sd, mean
-        let log_sd: Vec<f32> = values
-            .pop()
-            .unwrap()
-            .into_iter()
-            .map(|x| x.into())
-            .collect();
-        let log_mean: Vec<f32> = values
-            .pop()
-            .unwrap()
-            .into_iter()
-            .map(|x| x.into())
-            .collect();
-        let sd: Vec<f32> = values
-            .pop()
-            .unwrap()
-            .into_iter()
-            .map(|x| x.into())
-            .collect();
-        let mean: Vec<f32> = values
-            .pop()
-            .unwrap()
-            .into_iter()
-            .map(|x| x.into())
-            .collect();
+        let (mean_scalars, idx) = mat_mean.melt_with_indexes();
+        let mean: Vec<f32> = mean_scalars.into_iter().map(|x| x.into()).collect();
+        let nelem = mean.len();
+        let melt_or_zeros = |m: &<Self as Inference>::Mat| -> Vec<f32> {
+            let v: Vec<f32> = m.melt().into_iter().map(|x| x.into()).collect();
+            if v.len() == nelem {
+                v
+            } else {
+                vec![0.0; nelem]
+            }
+        };
+        let sd = melt_or_zeros(self.posterior_sd());
+        let log_mean = melt_or_zeros(self.posterior_log_mean());
+        let log_sd = melt_or_zeros(self.posterior_log_sd());
 
         // Map indices to pre-computed ByteArrays
         let rows: Vec<_> = idx[0].iter().map(|&i| row_bytes[i].clone()).collect();
@@ -251,41 +237,24 @@ where
     let col_bytes = precompute_name_bytes(column_names.0, first_param.ncols());
 
     for (factor_idx, param) in parameters.iter().enumerate() {
-        // Single traversal for all matrices
+        // Mean defines the canonical order/element count; auxiliary planes may
+        // be lazily unallocated (0×0) under mean-only calibration, in which
+        // case we emit zeros of the right length so serialization succeeds.
         let mat_mean = param.posterior_mean();
-        let mat_sd = param.posterior_sd();
-        let mat_log_mean = param.posterior_log_mean();
-        let mat_log_sd = param.posterior_log_sd();
-
-        let (mut values, idx) =
-            mat_mean.melt_many_with_indexes(&[mat_sd, mat_log_mean, mat_log_sd]);
-        debug_assert_eq!(values.len(), 4);
-
-        // Pop in reverse order: log_sd, log_mean, sd, mean
-        let log_sd: Vec<f32> = values
-            .pop()
-            .unwrap()
-            .into_iter()
-            .map(|x| x.into())
-            .collect();
-        let log_mean: Vec<f32> = values
-            .pop()
-            .unwrap()
-            .into_iter()
-            .map(|x| x.into())
-            .collect();
-        let sd: Vec<f32> = values
-            .pop()
-            .unwrap()
-            .into_iter()
-            .map(|x| x.into())
-            .collect();
-        let mean: Vec<f32> = values
-            .pop()
-            .unwrap()
-            .into_iter()
-            .map(|x| x.into())
-            .collect();
+        let (mean_scalars, idx) = mat_mean.melt_with_indexes();
+        let mean: Vec<f32> = mean_scalars.into_iter().map(|x| x.into()).collect();
+        let nelem = mean.len();
+        let melt_or_zeros = |m: &<Param as Inference>::Mat| -> Vec<f32> {
+            let v: Vec<f32> = m.melt().into_iter().map(|x| x.into()).collect();
+            if v.len() == nelem {
+                v
+            } else {
+                vec![0.0; nelem]
+            }
+        };
+        let sd = melt_or_zeros(param.posterior_sd());
+        let log_mean = melt_or_zeros(param.posterior_log_mean());
+        let log_sd = melt_or_zeros(param.posterior_log_sd());
 
         let factor_name = factor_names[factor_idx].clone();
         let factor_label = ByteArray::from(factor_name.as_bytes());
@@ -488,6 +457,35 @@ mod tests {
 
         assert_eq!(count, nrows * ncols);
 
+        Ok(())
+    }
+
+    #[test]
+    fn mean_only_param_serializes_with_zero_aux_planes() -> anyhow::Result<()> {
+        // With lazy GammaMatrix, a MeanOnly-calibrated param leaves
+        // sd/log_mean/log_sd unallocated (0×0). to_parquet must still succeed,
+        // emitting zeros for those planes (regression guard for the lazy change).
+        let (nrows, ncols) = (3usize, 4usize);
+        let mut gamma = GammaMatrix::new((nrows, ncols), 2.0, 1.0);
+        gamma.calibrate_with(crate::traits::CalibrateTarget::MeanOnly);
+        assert_eq!(gamma.posterior_sd().nrows(), 0, "aux plane should be lazy");
+
+        let temp_dir = tempfile::tempdir()?;
+        let file_path = temp_dir.path().join("mean_only.parquet");
+        gamma.to_parquet(file_path.to_str().unwrap())?; // must not panic
+
+        let file = File::open(&file_path)?;
+        let reader = SerializedFileReader::new(file)?;
+        let mut count = 0;
+        for row in reader.get_row_iter(None)? {
+            let row = row?;
+            // schema: row, col, mean, sd, log_mean, log_sd
+            assert_eq!(row.get_float(3)?, 0.0, "sd should be zero under MeanOnly");
+            assert_eq!(row.get_float(4)?, 0.0, "log_mean should be zero");
+            assert_eq!(row.get_float(5)?, 0.0, "log_sd should be zero");
+            count += 1;
+        }
+        assert_eq!(count, nrows * ncols);
         Ok(())
     }
 
