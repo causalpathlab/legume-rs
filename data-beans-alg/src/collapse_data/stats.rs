@@ -155,13 +155,17 @@ pub(super) fn collect_batch_stat_visitor(
     Ok(())
 }
 
-/// Optimize the mean parameters for three Gamma distributions
-///
-pub(super) fn optimize(
+/// Per-feature-block kernel for [`optimize`]. Runs the DC-Poisson
+/// coordinate descent on a (sub)stat and returns a `CollapsedOut` whose row
+/// count matches `stat.num_genes()`. `progress_label` shows the
+/// per-iteration bar only when this is run as a single block; gene-blocked
+/// runs pass `None` and let the driver show a block-level bar.
+fn optimize_block(
     stat: &CollapsedStat,
     hyper: (f32, f32),
     num_iter: usize,
-    label: &str,
+    out_target: CalibrateTarget,
+    progress_label: Option<&str>,
 ) -> anyhow::Result<CollapsedOut> {
     let (a0, b0) = hyper;
     let num_genes = stat.num_genes();
@@ -195,59 +199,69 @@ pub(super) fn optimize(
                 denom_ds.column_mut(s).add_scalar_mut(stat.size_s[s]);
             }
             mu_resid_param.update_stat(&stat.residual_sum_ds, &denom_ds);
-            mu_resid_param.calibrate();
+            // mu_resid is fixed across the loop (read via posterior_mean);
+            // calibrate to the output target now so it carries sd/log only
+            // when the caller actually needs them.
+            mu_resid_param.calibrate_with(out_target);
         };
 
-        let prog_bar = ProgressBar::new(num_iter as u64).with_style(
-            ProgressStyle::with_template(&format!(
-                "{} {{bar:40}} {{pos}}/{{len}} iterations ({{eta}})",
-                label
-            ))
-            .unwrap()
-            .progress_chars("##-"),
-        );
-        (0..num_iter)
-            .progress_with(prog_bar.clone())
-            .for_each(|_opt_iter| {
-                #[cfg(debug_assertions)]
-                {
-                    debug!("iteration: {}", &_opt_iter);
-                }
+        let prog_bar = progress_label.map(|label| {
+            ProgressBar::new(num_iter as u64).with_style(
+                ProgressStyle::with_template(&format!(
+                    "{} {{bar:40}} {{pos}}/{{len}} iterations ({{eta}})",
+                    label
+                ))
+                .unwrap()
+                .progress_chars("##-"),
+            )
+        });
+        for _opt_iter in 0..num_iter {
+            #[cfg(debug_assertions)]
+            {
+                debug!("iteration: {}", &_opt_iter);
+            }
 
-                let resid_ds = mu_resid_param.posterior_mean();
-                let gamma_ds = gamma_param.posterior_mean();
+            let resid_ds = mu_resid_param.posterior_mean();
+            let gamma_ds = gamma_param.posterior_mean();
 
-                //      observed_ds + imputed_sum_ds
-                // μ = ---------------------------------
-                //      (μ_resid + γ) .* (1_d * size_s')
+            //      observed_ds + imputed_sum_ds
+            // μ = ---------------------------------
+            //      (μ_resid + γ) .* (1_d * size_s')
 
-                denom_ds.copy_from(&(resid_ds + gamma_ds));
-                for s in 0..num_samples {
-                    denom_ds.column_mut(s).scale_mut(stat.size_s[s]);
-                }
+            denom_ds.copy_from(&(resid_ds + gamma_ds));
+            for s in 0..num_samples {
+                denom_ds.column_mut(s).scale_mut(stat.size_s[s]);
+            }
 
-                mu_adj_param
-                    .update_stat(&(&stat.observed_sum_ds + &stat.imputed_sum_ds), &denom_ds);
-                mu_adj_param.calibrate_with(CalibrateTarget::MeanOnly);
+            mu_adj_param.update_stat(&(&stat.observed_sum_ds + &stat.imputed_sum_ds), &denom_ds);
+            mu_adj_param.calibrate_with(CalibrateTarget::MeanOnly);
 
-                let mu_ds = mu_adj_param.posterior_mean();
+            let mu_ds = mu_adj_param.posterior_mean();
 
-                //      imputed_sum_ds
-                // γ = ---------------------
-                //      μ .* (1_d * size_s')
+            //      imputed_sum_ds
+            // γ = ---------------------
+            //      μ .* (1_d * size_s')
 
-                denom_ds.copy_from(mu_ds);
-                for s in 0..num_samples {
-                    denom_ds.column_mut(s).scale_mut(stat.size_s[s]);
-                }
-                gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
-                gamma_param.calibrate_with(CalibrateTarget::MeanOnly);
-            });
-        prog_bar.finish_and_clear();
+            denom_ds.copy_from(mu_ds);
+            for s in 0..num_samples {
+                denom_ds.column_mut(s).scale_mut(stat.size_s[s]);
+            }
+            gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
+            gamma_param.calibrate_with(CalibrateTarget::MeanOnly);
 
-        // Full calibration after loop for output/export
-        mu_adj_param.calibrate();
-        gamma_param.calibrate();
+            if let Some(pb) = &prog_bar {
+                pb.inc(1);
+            }
+        }
+        if let Some(pb) = &prog_bar {
+            pb.finish_and_clear();
+        }
+
+        // Output calibration after loop. `out_target` decides whether the
+        // sd / log_mean / log_sd planes are materialized (only when the
+        // caller writes them) or left empty (e.g. bge, which reads means).
+        mu_adj_param.calibrate_with(out_target);
+        gamma_param.calibrate_with(out_target);
 
         //      observed_db
         // δ = ---------------------
@@ -255,7 +269,7 @@ pub(super) fn optimize(
         {
             let mu_ds = mu_adj_param.posterior_mean();
             delta_param.update_stat(&stat.observed_sum_db, &(mu_ds * &stat.n_bs.transpose()));
-            delta_param.calibrate();
+            delta_param.calibrate_with(out_target);
         }
 
         // Take the observed mean
@@ -265,7 +279,7 @@ pub(super) fn optimize(
                 denom_ds.column_mut(s).add_scalar_mut(stat.size_s[s]);
             }
             mu_param.update_stat(&stat.observed_sum_ds, &denom_ds);
-            mu_param.calibrate();
+            mu_param.calibrate_with(out_target);
         };
 
         Ok(CollapsedOut {
@@ -281,7 +295,7 @@ pub(super) fn optimize(
             denom_ds.column_mut(s).add_scalar_mut(stat.size_s[s]);
         }
         mu_param.update_stat(&stat.observed_sum_ds, &denom_ds);
-        mu_param.calibrate();
+        mu_param.calibrate_with(out_target);
         Ok(CollapsedOut {
             mu_observed: mu_param,
             mu_adjusted: None,
@@ -292,6 +306,96 @@ pub(super) fn optimize(
     }
 }
 
+/// Optimize the mean parameters for the DC-Poisson collapse, **blocked over
+/// feature rows** so peak working memory scales with a block, not the full
+/// feature axis. Every update is elementwise per `(gene, sample)` and δ is
+/// per-gene given the shared per-sample / per-batch sizes, so the fit is
+/// separable across features — block-independent descent is numerically
+/// identical to the joint fit. For `MeanOnly` output the heavy
+/// `a_stat`/`b_stat` planes are dropped per block, so the assembled result
+/// carries only posterior estimates (bge never calls `posterior_sample`).
+pub(super) fn optimize(
+    stat: &CollapsedStat,
+    hyper: (f32, f32),
+    num_iter: usize,
+    label: &str,
+    out_target: CalibrateTarget,
+) -> anyhow::Result<CollapsedOut> {
+    let num_genes = stat.num_genes();
+    let num_samples = stat.num_samples();
+
+    // Block width targets a fixed per-plane footprint regardless of how
+    // many features the panel carries.
+    const BLOCK_ELEMS: usize = 32_000_000;
+    let block_rows = (BLOCK_ELEMS / num_samples.max(1)).clamp(1, num_genes.max(1));
+    let n_blocks = num_genes.div_ceil(block_rows.max(1));
+
+    // Small problems (e.g. topic/svd with modest pb counts) run as a single
+    // block, preserving the familiar per-iteration progress bar.
+    if n_blocks <= 1 {
+        return optimize_block(stat, hyper, num_iter, out_target, Some(label));
+    }
+
+    // `posterior_sample` (topic path) reads a_stat/b_stat; bge (MeanOnly)
+    // does not, so those planes can be discarded per block — that's what
+    // keeps the assembled output from holding the full sufficient stats.
+    let keep_stats = matches!(out_target, CalibrateTarget::All);
+
+    let prog = ProgressBar::new(n_blocks as u64).with_style(
+        ProgressStyle::with_template(&format!(
+            "{} {{bar:40}} {{pos}}/{{len}} gene-blocks ({{eta}})",
+            label
+        ))
+        .unwrap()
+        .progress_chars("##-"),
+    );
+
+    let mut mu_obs: Vec<GammaMatrix> = Vec::with_capacity(n_blocks);
+    let mut mu_adj: Vec<GammaMatrix> = Vec::new();
+    let mut mu_res: Vec<GammaMatrix> = Vec::new();
+    let mut gam: Vec<GammaMatrix> = Vec::new();
+    let mut del: Vec<GammaMatrix> = Vec::new();
+
+    let mut r0 = 0;
+    while r0 < num_genes {
+        let nr = block_rows.min(num_genes - r0);
+        let sub = stat.select_rows(r0, nr);
+        let mut out_b = optimize_block(&sub, hyper, num_iter, out_target, None)?;
+        if !keep_stats {
+            // Free a_stat/b_stat now so the accumulated blocks never add up
+            // to the full sufficient-stat planes.
+            out_b.release_stats();
+        }
+        mu_obs.push(out_b.mu_observed);
+        if let Some(x) = out_b.mu_adjusted {
+            mu_adj.push(x);
+        }
+        if let Some(x) = out_b.mu_residual {
+            mu_res.push(x);
+        }
+        if let Some(x) = out_b.gamma {
+            gam.push(x);
+        }
+        if let Some(x) = out_b.delta {
+            del.push(x);
+        }
+        prog.inc(1);
+        r0 += nr;
+    }
+    prog.finish_and_clear();
+
+    let join = |v: Vec<GammaMatrix>| -> Option<GammaMatrix> {
+        (!v.is_empty()).then(|| GammaMatrix::vconcat(v, keep_stats))
+    };
+    Ok(CollapsedOut {
+        mu_observed: GammaMatrix::vconcat(mu_obs, keep_stats),
+        mu_adjusted: join(mu_adj),
+        mu_residual: join(mu_res),
+        gamma: join(gam),
+        delta: join(del),
+    })
+}
+
 /// output struct to make the model parameters more accessible
 #[derive(Debug)]
 pub struct CollapsedOut {
@@ -300,6 +404,26 @@ pub struct CollapsedOut {
     pub mu_residual: Option<GammaMatrix>,
     pub gamma: Option<GammaMatrix>,
     pub delta: Option<GammaMatrix>,
+}
+
+impl CollapsedOut {
+    /// Drop `a_stat`/`b_stat` on every contained parameter. Safe when the
+    /// consumer reads posterior means/log-means but never `posterior_sample`
+    /// (bge). Used by the gene-blocked `optimize` to keep accumulated blocks
+    /// from summing to the full sufficient-stat planes.
+    fn release_stats(&mut self) {
+        self.mu_observed.release_stats();
+        for p in [
+            &mut self.mu_adjusted,
+            &mut self.mu_residual,
+            &mut self.gamma,
+            &mut self.delta,
+        ] {
+            if let Some(g) = p.as_mut() {
+                g.release_stats();
+            }
+        }
+    }
 }
 
 /// a struct to hold the sufficient statistics for the model
@@ -370,6 +494,21 @@ impl CollapsedStat {
         out.observed_sum_db.copy_from(&self.observed_sum_db);
         out
     }
+
+    /// Select a contiguous block of feature rows (`r0..r0+nrows`). Per-gene
+    /// stats (`observed`/`imputed`/`residual`/`observed_db`) are sliced;
+    /// the per-sample `size_s` and per-batch `n_bs` are shared, so they're
+    /// copied whole. Used by the gene-blocked `optimize`.
+    pub fn select_rows(&self, r0: usize, nrows: usize) -> Self {
+        Self {
+            observed_sum_ds: self.observed_sum_ds.rows(r0, nrows).into_owned(),
+            imputed_sum_ds: self.imputed_sum_ds.rows(r0, nrows).into_owned(),
+            residual_sum_ds: self.residual_sum_ds.rows(r0, nrows).into_owned(),
+            size_s: self.size_s.clone(),
+            observed_sum_db: self.observed_sum_db.rows(r0, nrows).into_owned(),
+            n_bs: self.n_bs.clone(),
+        }
+    }
 }
 
 /// Resample from over-resolved sufficient statistics: randomly select
@@ -387,7 +526,13 @@ pub fn resample_and_optimize(
     indices.truncate(target);
     indices.sort_unstable();
     let sub_stat = stat.select_columns(&indices);
-    optimize(&sub_stat, (1.0, 1.0), opt_iter, "Optimizing")
+    optimize(
+        &sub_stat,
+        (1.0, 1.0),
+        opt_iter,
+        "Optimizing",
+        CalibrateTarget::All,
+    )
 }
 
 /////////////////////////////////////////////////////////////
@@ -522,4 +667,121 @@ pub(super) fn merge_stat(
 
     coarse.observed_sum_db.copy_from(&fine_stat.observed_sum_db);
     coarse
+}
+
+#[cfg(test)]
+mod gene_block_tests {
+    use super::*;
+    use matrix_param::traits::Inference;
+    use nalgebra::{DMatrix, DVector};
+
+    /// Build a small but non-trivial multi-batch `CollapsedStat`.
+    fn toy_stat(num_genes: usize, num_samples: usize, num_batches: usize) -> CollapsedStat {
+        let mut s = CollapsedStat::new(num_genes, num_samples, num_batches);
+        // Deterministic pseudo-random fills; keep everything strictly
+        // positive so the Gamma updates are well-defined.
+        let f = |a: usize, b: usize| -> f32 { 1.0 + ((a * 7 + b * 13) % 11) as f32 };
+        s.observed_sum_ds = DMatrix::from_fn(num_genes, num_samples, |g, c| f(g, c));
+        s.imputed_sum_ds = DMatrix::from_fn(num_genes, num_samples, |g, c| 0.5 * f(g + 1, c + 2));
+        s.residual_sum_ds = DMatrix::from_fn(num_genes, num_samples, |g, c| 0.3 * f(g + 2, c + 1));
+        s.size_s = DVector::from_fn(num_samples, |c, _| 2.0 + (c % 3) as f32);
+        s.observed_sum_db = DMatrix::from_fn(num_genes, num_batches, |g, b| f(g, b) + 0.7);
+        s.n_bs = DMatrix::from_fn(num_batches, num_samples, |b, c| 1.0 + ((b + c) % 4) as f32);
+        s
+    }
+
+    fn assert_mat_close(a: &DMatrix<f32>, b: &DMatrix<f32>, tag: &str) {
+        assert_eq!(a.shape(), b.shape(), "{tag}: shape mismatch");
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert!(
+                (x - y).abs() <= 1e-5 * (1.0 + x.abs().max(y.abs())),
+                "{tag}: {x} vs {y}"
+            );
+        }
+    }
+
+    /// The whole point of gene-blocking: a per-row-block fit reassembled by
+    /// `vconcat` must equal the single-shot fit, because every update is
+    /// separable across feature rows.
+    #[test]
+    fn blocked_optimize_matches_single_block() {
+        let (g, k, b) = (10usize, 4usize, 2usize);
+        let stat = toy_stat(g, k, b);
+        let hyper = (1.0, 1.0);
+        let iters = 25;
+
+        let full = optimize_block(&stat, hyper, iters, CalibrateTarget::All, None).unwrap();
+
+        // Split rows into uneven blocks and reassemble.
+        let ranges = [(0usize, 3usize), (3, 4), (7, 3)];
+        let mut mu_obs = Vec::new();
+        let mut mu_adj = Vec::new();
+        let mut mu_res = Vec::new();
+        let mut gam = Vec::new();
+        let mut del = Vec::new();
+        for (r0, nr) in ranges {
+            let sub = stat.select_rows(r0, nr);
+            let out = optimize_block(&sub, hyper, iters, CalibrateTarget::All, None).unwrap();
+            mu_obs.push(out.mu_observed);
+            mu_adj.push(out.mu_adjusted.unwrap());
+            mu_res.push(out.mu_residual.unwrap());
+            gam.push(out.gamma.unwrap());
+            del.push(out.delta.unwrap());
+        }
+        let blk_obs = GammaMatrix::vconcat(mu_obs, true);
+        let blk_adj = GammaMatrix::vconcat(mu_adj, true);
+        let blk_res = GammaMatrix::vconcat(mu_res, true);
+        let blk_gam = GammaMatrix::vconcat(gam, true);
+        let blk_del = GammaMatrix::vconcat(del, true);
+
+        assert_mat_close(full.mu_observed.posterior_mean(), blk_obs.posterior_mean(), "mu_obs mean");
+        assert_mat_close(
+            full.mu_adjusted.as_ref().unwrap().posterior_mean(),
+            blk_adj.posterior_mean(),
+            "mu_adj mean",
+        );
+        assert_mat_close(
+            full.mu_residual.as_ref().unwrap().posterior_mean(),
+            blk_res.posterior_mean(),
+            "mu_resid mean",
+        );
+        assert_mat_close(full.gamma.as_ref().unwrap().posterior_mean(), blk_gam.posterior_mean(), "gamma mean");
+        assert_mat_close(full.delta.as_ref().unwrap().posterior_mean(), blk_del.posterior_mean(), "delta mean");
+        // sd / log planes too (All target).
+        assert_mat_close(
+            full.mu_adjusted.as_ref().unwrap().posterior_log_mean(),
+            blk_adj.posterior_log_mean(),
+            "mu_adj log_mean",
+        );
+    }
+
+    /// MeanOnly: `vconcat(.., false)` keeps the assembled means but drops the
+    /// sufficient-stat planes, and the means still match the calibrated fit.
+    #[test]
+    fn mean_only_vconcat_drops_stats_keeps_means() {
+        let (g, k, b) = (9usize, 3usize, 2usize);
+        let stat = toy_stat(g, k, b);
+        let hyper = (1.0, 1.0);
+        let iters = 20;
+
+        let reference = optimize_block(&stat, hyper, iters, CalibrateTarget::All, None).unwrap();
+
+        let mut blocks = Vec::new();
+        for (r0, nr) in [(0usize, 5usize), (5, 4)] {
+            let sub = stat.select_rows(r0, nr);
+            let mut out = optimize_block(&sub, hyper, iters, CalibrateTarget::MeanOnly, None).unwrap();
+            out.release_stats();
+            blocks.push(out.mu_observed);
+        }
+        let assembled = GammaMatrix::vconcat(blocks, false);
+
+        // means equal the All-target reference …
+        assert_mat_close(
+            reference.mu_observed.posterior_mean(),
+            assembled.posterior_mean(),
+            "mu_obs mean (mean-only)",
+        );
+        // … but the stat planes were dropped (empty), proving the memory win.
+        assert_eq!(assembled.posterior_sd().nrows(), 0, "sd should be empty under MeanOnly");
+    }
 }

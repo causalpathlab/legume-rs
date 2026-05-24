@@ -669,6 +669,95 @@ impl SparseIoVec {
         Ok(())
     }
 
+    /// Stream every nonzero of the selected `cells` (global column
+    /// indices) through `f(row, col, val)` **without** materializing the
+    /// full triplet vector. `row` is a compact-row index and `col` runs
+    /// over `0..ncol` in the iteration order of `cells` — exactly the
+    /// indices [`Self::columns_triplets`] would emit.
+    ///
+    /// Columns are processed in slabs of at most `chunk_cols`, so the
+    /// only transient allocation is one backend slab's worth of
+    /// `(u64, u64, f32)` triplets: peak memory is bounded by `chunk_cols`,
+    /// not by the total nnz. Callers can therefore build a compact edge
+    /// list (e.g. 12-byte triplets) directly and never pay for the wide
+    /// intermediate. Returns the `(nrow, ncol)` dimensions.
+    pub fn for_each_triplet<I, F>(
+        &self,
+        cells: I,
+        chunk_cols: usize,
+        mut f: F,
+    ) -> anyhow::Result<(usize, usize)>
+    where
+        I: Iterator<Item = usize>,
+        F: FnMut(u64, u64, f32),
+    {
+        let nrow = self.num_rows();
+        let cells: Vec<usize> = cells.collect();
+        let ncol = cells.len();
+        let chunk = chunk_cols.max(1);
+        let g2c = self.global_to_compact_row.as_slice();
+
+        for slab_start in (0..ncol).step_by(chunk) {
+            let slab_end = (slab_start + chunk).min(ncol);
+
+            // Group this slab's cells by backend, tracking (local_col,
+            // out_col) where out_col is the index into the *full* `cells`
+            // sequence. Under `ColumnAlignment::Union` one global cell can
+            // contribute entries to multiple backend groups (one per
+            // backend that observed it); all those reads target the same
+            // out_col.
+            let mut backend_groups: HashMap<usize, Vec<(usize, usize)>> = HashMap::default();
+            for (k, &glob) in cells[slab_start..slab_end].iter().enumerate() {
+                let out_col = slab_start + k;
+                for source in self.col_to_data[glob].iter() {
+                    backend_groups
+                        .entry(source.backend as usize)
+                        .or_default()
+                        .push((source.local_col as usize, out_col));
+                }
+            }
+
+            for (&didx, group) in &backend_groups {
+                let local_cols: Vec<usize> = group.iter().map(|&(loc, _)| loc).collect();
+                let (_, _, group_triplets) =
+                    self.data_vec[didx].read_triplets_by_columns(local_cols)?;
+
+                let l2g = self.data_local_to_global_row[didx].as_slice();
+                if self.data_has_intra_row_merges[didx] {
+                    // Canonicalizer collapsed >=2 local rows in this dataset
+                    // to the same global. Sum into a HashMap so downstream
+                    // consumers don't see duplicate (row, col) entries. Every
+                    // entry for a given out_col lives in this slab, so
+                    // per-slab accumulation is exact.
+                    let mut acc: HashMap<(u64, u64), f32> = HashMap::default();
+                    for (i, j, v) in group_triplets {
+                        if let Some(c) = g2c[l2g[i as usize]] {
+                            let out_col = group[j as usize].1 as u64;
+                            *acc.entry((c as u64, out_col)).or_insert(0.0) += v;
+                        }
+                    }
+                    for ((r, c), v) in acc {
+                        f(r, c, v);
+                    }
+                } else {
+                    for (i, j, v) in group_triplets {
+                        if let Some(c) = g2c[l2g[i as usize]] {
+                            let out_col = group[j as usize].1 as u64;
+                            f(c as u64, out_col, v);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((nrow, ncol))
+    }
+
+    /// Collect all nonzeros of the selected `cells` into one triplet
+    /// vector. Thin wrapper over [`Self::for_each_triplet`] with a single
+    /// slab spanning every column (identical one-pass behavior); prefer
+    /// `for_each_triplet` when the result is consumed once, to avoid the
+    /// full-width intermediate.
     #[allow(clippy::type_complexity)]
     pub fn columns_triplets<I>(
         &self,
@@ -677,56 +766,13 @@ impl SparseIoVec {
     where
         I: Iterator<Item = usize>,
     {
-        let nrow = self.num_rows();
         let cells: Vec<usize> = cells.collect();
-        let ncol = cells.len();
-
-        // Group cells by backend, tracking (local_col, output_col).
-        // Under `ColumnAlignment::Union` one global cell can contribute
-        // entries to multiple backend groups (one per backend that
-        // observed the cell); all those reads target the same output
-        // column.
-        let mut backend_groups: HashMap<usize, Vec<(usize, usize)>> = HashMap::default();
-        for (out_col, &glob) in cells.iter().enumerate() {
-            for source in self.col_to_data[glob].iter() {
-                backend_groups
-                    .entry(source.backend as usize)
-                    .or_default()
-                    .push((source.local_col as usize, out_col));
-            }
-        }
-
+        let one_slab = cells.len().max(1);
         let mut triplets = Vec::new();
-        let g2c = self.global_to_compact_row.as_slice();
-        for (&didx, group) in &backend_groups {
-            let local_cols: Vec<usize> = group.iter().map(|&(loc, _)| loc).collect();
-            let (_, _, group_triplets) =
-                self.data_vec[didx].read_triplets_by_columns(local_cols)?;
-
-            let l2g = self.data_local_to_global_row[didx].as_slice();
-            if self.data_has_intra_row_merges[didx] {
-                // Canonicalizer collapsed >=2 local rows in this dataset to
-                // the same global. Sum into a HashMap so downstream CSC
-                // builders don't see duplicate (row, col) entries.
-                let mut acc: HashMap<(u64, u64), f32> = HashMap::default();
-                for (i, j, v) in group_triplets {
-                    if let Some(c) = g2c[l2g[i as usize]] {
-                        let out_col = group[j as usize].1 as u64;
-                        *acc.entry((c as u64, out_col)).or_insert(0.0) += v;
-                    }
-                }
-                triplets.extend(acc.into_iter().map(|((r, c), v)| (r, c, v)));
-            } else {
-                for (i, j, v) in group_triplets {
-                    if let Some(c) = g2c[l2g[i as usize]] {
-                        let out_col = group[j as usize].1 as u64;
-                        triplets.push((c as u64, out_col, v));
-                    }
-                }
-            }
-        }
-
-        Ok(((nrow, ncol), triplets))
+        let dims = self.for_each_triplet(cells.into_iter(), one_slab, |r, c, v| {
+            triplets.push((r, c, v));
+        })?;
+        Ok((dims, triplets))
     }
 
     pub fn read_columns_ndarray<I>(&self, cells: I) -> anyhow::Result<ndarray::Array2<f32>>

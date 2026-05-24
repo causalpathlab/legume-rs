@@ -46,10 +46,18 @@ impl TwoStatParam for GammaMatrix {
             b0: b,
             a_stat: DMatrix::from_element(dims.0, dims.1, a),
             b_stat: DMatrix::from_element(dims.0, dims.1, b),
+            // `estimated_mean` is eager: the coordinate descent reads
+            // `posterior_mean()` before the first calibration (relying on a
+            // zero start), and it gets allocated immediately anyway.
             estimated_mean: DMatrix::zeros(dims.0, dims.1),
-            estimated_sd: DMatrix::zeros(dims.0, dims.1),
-            estimated_log_mean: DMatrix::zeros(dims.0, dims.1),
-            estimated_log_sd: DMatrix::zeros(dims.0, dims.1),
+            // The sd / log_mean / log_sd planes are lazily allocated by
+            // `map_calibrate_*` (via `calibrate_with`). An iterative fit that
+            // only reads `posterior_mean()` (calibrating `MeanOnly`) never
+            // pays for them — they're materialized only when output needs
+            // them (a calibrate with `All` / `MeanAndLogMean`).
+            estimated_sd: DMatrix::zeros(0, 0),
+            estimated_log_mean: DMatrix::zeros(0, 0),
+            estimated_log_sd: DMatrix::zeros(0, 0),
         }
     }
 
@@ -172,5 +180,77 @@ impl Inference for GammaMatrix {
 
     fn ncols(&self) -> usize {
         self.num_columns
+    }
+}
+
+/// Row-stack one plane across blocks. Returns an empty matrix (and skips
+/// the work) when `enabled` is false or the plane is lazily-unallocated in
+/// the first block, so empty/dropped planes never get materialized.
+fn stack_field<F>(
+    blocks: &[GammaMatrix],
+    nrows: usize,
+    ncols: usize,
+    enabled: bool,
+    sel: F,
+) -> DMatrix<f32>
+where
+    F: Fn(&GammaMatrix) -> &DMatrix<f32>,
+{
+    if !enabled || blocks.is_empty() || sel(&blocks[0]).nrows() == 0 {
+        return DMatrix::zeros(0, 0);
+    }
+    let mut out = DMatrix::zeros(nrows, ncols);
+    let mut r0 = 0;
+    for b in blocks {
+        let src = sel(b);
+        out.rows_mut(r0, src.nrows()).copy_from(src);
+        r0 += src.nrows();
+    }
+    out
+}
+
+impl GammaMatrix {
+    /// Drop the sufficient-stat planes (`a_stat` / `b_stat`) after
+    /// calibration, keeping only the posterior estimates. Use when the
+    /// consumer reads posterior means / log-means but never
+    /// `posterior_sample` (which is the only reader of `a_stat`/`b_stat`).
+    /// Halves the resident footprint of a calibrated parameter.
+    pub fn release_stats(&mut self) {
+        self.a_stat = DMatrix::zeros(0, 0);
+        self.b_stat = DMatrix::zeros(0, 0);
+    }
+
+    /// Row-stack per-feature-block parameters (from a gene-blocked fit)
+    /// into one `[Σrowsᵢ × K]` parameter. All blocks must share the column
+    /// count and hyper-params. Calibrated planes present in the first block
+    /// are stacked; lazily-empty planes stay empty. `stack_stats` controls
+    /// whether `a_stat`/`b_stat` are carried through — pass `false` when the
+    /// output only needs posterior estimates, so the heavy sufficient-stat
+    /// planes are never assembled at full width.
+    pub fn vconcat(blocks: Vec<GammaMatrix>, stack_stats: bool) -> Self {
+        assert!(!blocks.is_empty(), "vconcat of empty block list");
+        let ncols = blocks[0].num_columns;
+        let a0 = blocks[0].a0;
+        let b0 = blocks[0].b0;
+        let nrows: usize = blocks.iter().map(|b| b.num_rows).sum();
+        let a_stat = stack_field(&blocks, nrows, ncols, stack_stats, |g| &g.a_stat);
+        let b_stat = stack_field(&blocks, nrows, ncols, stack_stats, |g| &g.b_stat);
+        let estimated_mean = stack_field(&blocks, nrows, ncols, true, |g| &g.estimated_mean);
+        let estimated_sd = stack_field(&blocks, nrows, ncols, true, |g| &g.estimated_sd);
+        let estimated_log_mean =
+            stack_field(&blocks, nrows, ncols, true, |g| &g.estimated_log_mean);
+        let estimated_log_sd = stack_field(&blocks, nrows, ncols, true, |g| &g.estimated_log_sd);
+        Self {
+            num_rows: nrows,
+            num_columns: ncols,
+            a0,
+            b0,
+            a_stat,
+            b_stat,
+            estimated_mean,
+            estimated_sd,
+            estimated_log_mean,
+            estimated_log_sd,
+        }
     }
 }

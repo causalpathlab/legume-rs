@@ -126,6 +126,9 @@ pub(super) struct RefineCollectCtx<'a> {
     pub(super) knn: usize,
     pub(super) opt_iter: usize,
     pub(super) refine_params: &'a crate::refine_multilevel::RefineParams,
+    /// Posterior planes the emitted `CollapsedOut` should carry (threaded
+    /// from `MultilevelParams::output_calibration`).
+    pub(super) output_calibration: matrix_param::traits::CalibrateTarget,
 }
 
 /// Refinement integration path for `SparseIoVec`.
@@ -152,6 +155,7 @@ pub(super) fn refine_and_collect_single_layer(
         knn,
         opt_iter,
         refine_params,
+        output_calibration,
     } = *ctx;
     info!(
         "Multi-level refinement path (BBKNN + DC-SBM): {} levels",
@@ -262,6 +266,7 @@ pub(super) fn refine_and_collect_single_layer(
         (1.0, 1.0),
         opt_iter,
         &format!("Coarsen L1/{}", num_levels),
+        output_calibration,
     )?;
     results.push(finest_out);
 
@@ -288,6 +293,7 @@ pub(super) fn refine_and_collect_single_layer(
             (1.0, 1.0),
             level_opt_iter,
             &format!("Coarsen L{}/{}", level + 1, num_levels),
+            output_calibration,
         )?;
         results.push(out);
         prev_stat = coarse_stat;
@@ -332,6 +338,7 @@ pub(super) fn refine_and_collect_stack(
         knn,
         opt_iter,
         refine_params,
+        output_calibration,
     } = *ctx;
     let num_layers = stack.num_types();
     info!(
@@ -463,6 +470,7 @@ pub(super) fn refine_and_collect_stack(
             (1.0, 1.0),
             opt_iter,
             &format!("Coarsen L1/{} layer {}/{}", num_levels, d + 1, num_layers),
+            output_calibration,
         )?;
         finest_layer_results.push(out);
         fine_stats.push(stat);
@@ -499,6 +507,7 @@ pub(super) fn refine_and_collect_stack(
                     d + 1,
                     num_layers
                 ),
+                output_calibration,
             )?;
             layer_results.push(out);
             coarse_stats.push(coarse_stat);
