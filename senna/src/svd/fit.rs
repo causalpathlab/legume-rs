@@ -125,6 +125,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             sort_dim: args.collapse.sort_dim,
             num_opt_iter: args.collapse.iter_opt,
             refine: Some(args.collapse.pb_refine.to_params()),
+            output_calibration: matrix_param::traits::CalibrateTarget::All,
         },
     )?;
 

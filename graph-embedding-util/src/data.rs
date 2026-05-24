@@ -166,22 +166,17 @@ impl UnifiedData {
             .collect();
 
         let n_before = self.triplets.len();
-        let pb_bar = new_progress_bar(n_before as u64);
-        pb_bar.set_message("triplet feature subset");
-        let new_triplets: Vec<Triplet> = std::mem::take(&mut self.triplets)
-            .into_par_iter()
-            .progress_with(pb_bar.clone())
-            .filter_map(|t| {
-                let new_id = old_to_new[t.feature as usize];
-                (new_id >= 0).then_some(Triplet {
-                    cell: t.cell,
-                    feature: new_id as u32,
-                    count: t.count,
-                })
-            })
-            .collect();
-        pb_bar.finish_and_clear();
-        self.triplets = new_triplets;
+        // Compact + remap in place: no second triplet vec, so peak memory
+        // stays at the single edge list instead of briefly holding old+new.
+        self.triplets.retain_mut(|t| {
+            let new_id = old_to_new[t.feature as usize];
+            if new_id >= 0 {
+                t.feature = new_id as u32;
+                true
+            } else {
+                false
+            }
+        });
 
         log::info!(
             "Feature subset: {} → {} features ({} → {} edges retained)",
@@ -279,19 +274,34 @@ impl UnifiedData {
         );
 
         info!("Materializing sparse triplets (unified feature space)...");
-        let (_, raw) = data.columns_triplets(0..data.num_columns())?;
-        let pb_bar = new_progress_bar(raw.len() as u64);
+        // Stream nonzeros straight into compact 12-byte triplets: the wide
+        // (u64,u64,f32) form is never built in full, only one bounded slab
+        // at a time. Pre-size from the backend nnz so the edge list never
+        // reallocs, and pick a slab width that keeps each backend read well
+        // under a few hundred MB regardless of per-cell density.
+        let n_cells = data.num_columns();
+        let nnz_hint = data.num_non_zeros().unwrap_or(0);
+        let avg_per_col = (nnz_hint / n_cells.max(1)).max(1);
+        let chunk_cols = (8_000_000 / avg_per_col).clamp(1, n_cells.max(1));
+        let pb_bar = new_progress_bar(nnz_hint.max(1) as u64);
         pb_bar.set_message("triplets");
-        let triplets: Vec<Triplet> = raw
-            .into_par_iter()
-            .progress_with(pb_bar.clone())
-            .filter(|&(_, _, v)| v != 0.0)
-            .map(|(row, col, v)| Triplet {
-                cell: col as u32,
-                feature: row as u32,
-                count: v,
-            })
-            .collect();
+        let mut triplets: Vec<Triplet> = Vec::with_capacity(nnz_hint);
+        let mut since_tick = 0u64;
+        data.for_each_triplet(0..n_cells, chunk_cols, |row, col, v| {
+            if v != 0.0 {
+                triplets.push(Triplet {
+                    cell: col as u32,
+                    feature: row as u32,
+                    count: v,
+                });
+                since_tick += 1;
+                if since_tick == 1 << 20 {
+                    pb_bar.inc(since_tick);
+                    since_tick = 0;
+                }
+            }
+        })?;
+        pb_bar.inc(since_tick);
         pb_bar.finish_and_clear();
         info!("  edges: {}", triplets.len());
 

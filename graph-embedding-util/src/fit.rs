@@ -463,6 +463,11 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             sort_dim: config.sort_dim,
             num_opt_iter: config.num_opt_iter,
             refine: config.refine.clone(),
+            // bge only reads `posterior_mean()` off the collapse output
+            // (see the pb_full loop below), so skip the sd / log_mean /
+            // log_sd planes entirely — that's the bulk of the coarsen-stage
+            // memory at high pb-sample counts.
+            output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
         },
     )?;
     let mut collapsed_levels = collapse_out.levels;

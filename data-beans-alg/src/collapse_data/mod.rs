@@ -3,7 +3,7 @@
 use data_beans::sparse_data_visitors::*;
 use data_beans::sparse_io_stack::SparseIoStack;
 use data_beans::sparse_io_vector::SparseIoVec;
-use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use log::{info, warn};
 use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::Inference;
@@ -68,6 +68,11 @@ pub struct MultilevelParams {
     /// Opt-in BBKNN + Poisson DC-SBM refinement on top of the hash
     /// partition. `None` preserves legacy behavior.
     pub refine: Option<crate::refine_multilevel::RefineParams>,
+    /// Which posterior planes the *output* `CollapsedOut` should carry.
+    /// `MeanOnly` skips the sd / log_mean / log_sd allocations entirely —
+    /// a big memory win for consumers that only read `posterior_mean()`
+    /// (e.g. bge). Use `All` when the caller exports log-scale dictionaries.
+    pub output_calibration: matrix_param::traits::CalibrateTarget,
 }
 
 impl MultilevelParams {
@@ -78,6 +83,7 @@ impl MultilevelParams {
             sort_dim: proj_dim.min(12),
             num_opt_iter: DEFAULT_OPT_ITER,
             refine: Some(crate::refine_multilevel::RefineParams::default()),
+            output_calibration: matrix_param::traits::CalibrateTarget::All,
         }
     }
 }
@@ -249,6 +255,7 @@ impl CollapsingOps for SparseIoVec {
             (a0, b0),
             num_opt_iter.unwrap_or(DEFAULT_OPT_ITER),
             "Optimizing",
+            CalibrateTarget::All,
         )
     }
 
@@ -358,6 +365,7 @@ where
         knn,
         opt_iter,
         refine_params,
+        output_calibration: params.output_calibration,
     };
     refine_and_collect_single_layer(data_vec, proj_kn, &ctx)
 }
@@ -508,6 +516,7 @@ where
         (1.0, 1.0),
         opt_iter,
         &format!("Inherit L1/{}", num_levels),
+        CalibrateTarget::All,
     )?;
     results.push(finest_out);
 
@@ -534,6 +543,7 @@ where
             (1.0, 1.0),
             level_opt_iter,
             &format!("Inherit L{}/{}", level + 1, num_levels),
+            CalibrateTarget::All,
         )?;
         results.push(out);
         prev_stat = coarse_stat;
@@ -662,6 +672,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 knn,
                 opt_iter,
                 refine_params,
+                output_calibration: params.output_calibration,
             };
             return refine_and_collect_single_layer(self, proj_kn, &ctx).map(|out| out.levels);
         }
@@ -707,6 +718,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
             (1.0, 1.0),
             opt_iter,
             &format!("Coarsen L1/{}", level_dims.len()),
+            CalibrateTarget::All,
         )?;
         let mut results = vec![result];
 
@@ -736,6 +748,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 (1.0, 1.0),
                 level_opt_iter,
                 &format!("Coarsen L{}/{}", level + 1, level_dims.len()),
+                CalibrateTarget::All,
             )?;
             results.push(coarse_result);
 
@@ -827,6 +840,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 knn,
                 opt_iter,
                 refine_params,
+                output_calibration: params.output_calibration,
             };
             return refine_and_collect_stack(self, proj_kn, &ctx);
         }
@@ -872,6 +886,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                         d + 1,
                         num_layers
                     ),
+                    CalibrateTarget::All,
                 )?);
                 fine_stats.push(stat);
             }
@@ -905,6 +920,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                             d + 1,
                             num_layers
                         ),
+                        CalibrateTarget::All,
                     )?);
                     coarse_stats.push(coarse_stat);
                 }
@@ -1001,6 +1017,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                     d + 1,
                     num_layers
                 ),
+                CalibrateTarget::All,
             )?);
             fine_stats.push(stat);
         }
@@ -1045,6 +1062,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                         d + 1,
                         num_layers
                     ),
+                    CalibrateTarget::All,
                 )?);
                 coarse_stats.push(coarse_stat);
             }

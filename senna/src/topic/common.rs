@@ -412,6 +412,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         sort_dim: args.sort_dim,
         num_opt_iter: args.iter_opt,
         refine: args.refine.clone(),
+        output_calibration: matrix_param::traits::CalibrateTarget::All,
     };
 
     // Both `collapse_columns_multilevel_vec` and the with-hierarchy /
