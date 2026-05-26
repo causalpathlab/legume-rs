@@ -157,7 +157,7 @@ struct Cli {
 enum Commands {
     // ─────────── 1. Train embedding (writes the run manifest) ───────────
     #[command(
-        about = "Train: topic-model embedding (VAE).",
+        about = "Train topic-model embedding (VAE).",
         long_about = "Probabilistic topic-model embedding.\n\n\
                       Stages: (1) batch-aware pseudobulk collapsing, (2) encoder-decoder\n\
                       VAE via SGD, (3) per-cell topic inference. Decoders: multinomial,\n\
@@ -168,7 +168,7 @@ enum Commands {
     Topic(TopicArgs),
 
     #[command(
-        about = "Train: embedded topic model with adaptive top-K feature windows (~4-7× faster).",
+        about = "Train embedded topic model with adaptive top-K feature windows.",
         long_about = "Same pipeline as `topic`, but encoder and decoder share a learned\n\
                       per-gene embedding ρ ∈ ℝ^{D×H} and both operate on a per-cell\n\
                       top-K feature window.\n\n\
@@ -186,7 +186,7 @@ enum Commands {
     IndexedTopic(IndexedTopicArgs),
 
     #[command(
-        about = "Train: Nyström SVD embedding.",
+        about = "Train Nyström SVD embedding.",
         long_about = "Three stages: (1) batch-aware pseudobulk collapsing, (2) randomized SVD,\n\
                       (3) per-cell Nyström projection.\n\n\
                       Writes {out}.{latent,dictionary}.parquet, {out}.senna.json."
@@ -194,7 +194,7 @@ enum Commands {
     Svd(SvdArgs),
 
     #[command(
-        about = "Train: joint topic model across modalities (independent or delta decoder).",
+        about = "Train joint topic model across modalities (independent or delta decoder).",
         long_about = "Joint topic-model embedding over a stack of modalities sharing cells.\n\
                       Data files are a row-major (modality × batch) table; -m sets the\n\
                       modality-row count.\n\n\
@@ -208,7 +208,7 @@ enum Commands {
     JointTopic(JointTopicArgs),
 
     #[command(
-        about = "Train: joint Nyström SVD across modalities.",
+        about = "Train joint Nyström SVD across modalities.",
         long_about = "Joint SVD over a stack of modalities sharing cells. Data files form\n\
                       a row-major (modality × batch) table; -m sets the modality-row count.\n\
                       Cells must be shared; features may differ.\n\n\
@@ -217,7 +217,7 @@ enum Commands {
     JointSvd(JointSvdArgs),
 
     #[command(
-        about = "Train: graph-based embedding (count-NCE, modality-agnostic).",
+        about = "Train graph-based embedding (count-NCE, modality-agnostic).",
         long_about = "Joint embedding of features and cells in a single H-dim space \
                       via discriminative count-noise-contrastive estimation on a \
                       sketch-coarsened pseudobulk (cell, feature) bipartite graph. \
