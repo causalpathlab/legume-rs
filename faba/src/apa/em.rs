@@ -200,16 +200,20 @@ pub fn select_sites_by_bic(
     }
 
     let best = best_result.unwrap();
-    merge_close_sites(best, &all_site_lls, site_order, noise_ll, params)
+    merge_close_sites(best, &all_site_lls, noise_ll, params)
 }
 
 /// Collapse selected sites whose alphas are within `merge_beta_mult * max(beta_i, beta_j)`
 /// of each other into a single site (keep the higher-pi one), then re-fit weights.
-/// Returns the input unchanged if `merge_beta_mult <= 0` or no merges apply.
+///
+/// Returns the input unchanged if any of:
+/// - `merge_beta_mult <= 0`
+/// - fewer than two live (pi > 0) sites
+/// - no pair is within tolerance
+/// - the merged refit's BIC is not strictly better than the input
 fn merge_close_sites(
     result: EmResult,
     all_site_lls: &[Vec<f32>],
-    site_order: &[usize],
     noise_ll: f32,
     params: &EmParams,
 ) -> EmResult {
@@ -218,18 +222,32 @@ fn merge_close_sites(
     }
 
     let k = result.alphas.len();
+    // Only consider live (pi > 0) components as merge candidates; pruned slots
+    // must not ride into the refit's candidate list.
+    let live: Vec<usize> = (0..k).filter(|&i| result.weights[i + 1] > 0.0).collect();
+    if live.len() < 2 {
+        return result;
+    }
+
+    // NaN-safe ordering: treat NaN as the smallest value so the sort is total.
+    let cmp_f32 = |a: f32, b: f32| {
+        a.partial_cmp(&b).unwrap_or(match (a.is_nan(), b.is_nan()) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => std::cmp::Ordering::Equal,
+        })
+    };
+
     // Index by descending pi (skip noise weight at [0]); break ties by lower alpha.
-    let mut order: Vec<usize> = (0..k).collect();
+    let mut order = live.clone();
     order.sort_by(|&a, &b| {
-        result.weights[b + 1]
-            .partial_cmp(&result.weights[a + 1])
-            .unwrap()
-            .then(result.alphas[a].partial_cmp(&result.alphas[b]).unwrap())
+        cmp_f32(result.weights[b + 1], result.weights[a + 1])
+            .then(cmp_f32(result.alphas[a], result.alphas[b]))
     });
 
     // Greedy keep: walk in descending pi, keep a site unless it is within
     // merge_beta_mult * max(beta) of an already-kept site.
-    let mut keep: Vec<usize> = Vec::with_capacity(k);
+    let mut keep: Vec<usize> = Vec::with_capacity(order.len());
     for &i in &order {
         let close = keep.iter().any(|&j| {
             let tol = params.merge_beta_mult * result.betas[i].max(result.betas[j]);
@@ -240,12 +258,12 @@ fn merge_close_sites(
         }
     }
 
-    if keep.len() == k {
+    if keep.len() == live.len() {
         return result; // nothing to merge
     }
 
-    // Refit weights on the surviving subset of site_order positions.
-    keep.sort_by(|&a, &b| result.alphas[a].partial_cmp(&result.alphas[b]).unwrap());
+    // Refit weights on the surviving subset.
+    keep.sort_by(|&a, &b| cmp_f32(result.alphas[a], result.alphas[b]));
     let n_frag = all_site_lls.first().map(|v| v.len()).unwrap_or(0);
     let kept_alphas: Vec<f32> = keep.iter().map(|&i| result.alphas[i]).collect();
     let kept_betas: Vec<f32> = keep.iter().map(|&i| result.betas[i]).collect();
@@ -260,8 +278,15 @@ fn merge_close_sites(
         })
         .collect();
 
-    let _ = site_order; // already absorbed into all_site_lls indexing
-    run_fixed_em(&component_log_liks, &kept_alphas, &kept_betas, params)
+    let merged = run_fixed_em(&component_log_liks, &kept_alphas, &kept_betas, params);
+
+    // Only accept the merge if BIC strictly improves; otherwise keep the
+    // BIC-best model that motivated the merge attempt.
+    if merged.bic.is_finite() && merged.bic < result.bic {
+        merged
+    } else {
+        result
+    }
 }
 
 #[cfg(test)]
@@ -282,11 +307,15 @@ mod tests {
         let (theta_lik_matrix, theta_grid) =
             precompute_theta_lik_matrix(&fragments, params.utr_length, &lik_params);
 
+        // Baseline EM behavior: disable skirt and post-EM merge so these
+        // tests cover the non-robust path. Robust path has its own test.
         let em_params = EmParams {
             max_iter: 200,
             tol: 1e-6,
             min_weight: 0.005,
-            ..Default::default()
+            skirt_eta: 0.0,
+            skirt_mult: 0.0,
+            merge_beta_mult: 0.0,
         };
 
         let site_data = SiteModelData {
@@ -455,11 +484,15 @@ mod tests {
         // Order: site 0 (true), site 1 (true), site 2 (spurious)
         let site_order = vec![0, 1, 2];
 
+        // Baseline EM behavior: disable skirt and post-EM merge so these
+        // tests cover the non-robust path. Robust path has its own test.
         let em_params = EmParams {
             max_iter: 200,
             tol: 1e-6,
             min_weight: 0.005,
-            ..Default::default()
+            skirt_eta: 0.0,
+            skirt_mult: 0.0,
+            merge_beta_mult: 0.0,
         };
 
         let site_data = SiteModelData {
@@ -519,11 +552,15 @@ mod tests {
         let (theta_lik_matrix, theta_grid) =
             precompute_theta_lik_matrix(&fragments, params.utr_length, &lik_params);
 
+        // Baseline EM behavior: disable skirt and post-EM merge so these
+        // tests cover the non-robust path. Robust path has its own test.
         let em_params = EmParams {
             max_iter: 200,
             tol: 1e-6,
             min_weight: 0.005,
-            ..Default::default()
+            skirt_eta: 0.0,
+            skirt_mult: 0.0,
+            merge_beta_mult: 0.0,
         };
 
         let site_data = SiteModelData {
@@ -538,5 +575,80 @@ mod tests {
 
         assert_eq!(result.alphas.len(), 1);
         assert!(result.weights[1] > 0.8, "single site should dominate");
+    }
+
+    #[test]
+    fn test_post_em_merge_collapses_close_sites() {
+        // Two true sites at 500 and 1500; offer BIC a third spurious candidate
+        // very close to 500 (within merge tolerance) and verify the post-EM
+        // merge collapses it.
+        let params = ScapeSimParams {
+            utr_length: 3000.0,
+            weights: vec![0.05, 0.5, 0.45],
+            alphas: vec![500.0, 1500.0],
+            betas: vec![30.0, 30.0],
+            n_fragments: 3000,
+            n_cells: 10,
+            junction_prob: 0.3,
+            seed: 4242,
+            ..Default::default()
+        };
+        let (fragments, _) = simulate_fragments(&params);
+        let lik_params = LikelihoodParams {
+            mu_f: params.mu_f,
+            sigma_f: params.sigma_f,
+            theta_step: 10,
+            max_polya: params.max_polya,
+            min_polya: params.min_polya,
+        };
+        let (theta_lik_matrix, theta_grid) =
+            precompute_theta_lik_matrix(&fragments, params.utr_length, &lik_params);
+
+        // 530 sits 30bp from the true 500 site → within 2*beta=60 merge tol.
+        let alpha_arr = vec![500.0, 530.0, 1500.0];
+        let beta_arr = vec![30.0, 30.0, 30.0];
+        let site_order = vec![0, 1, 2];
+
+        let em_params = EmParams {
+            max_iter: 200,
+            tol: 1e-6,
+            min_weight: 0.005,
+            skirt_eta: 0.05,
+            skirt_mult: 3.0,
+            merge_beta_mult: 2.0,
+        };
+        let site_data = SiteModelData {
+            alpha_arr: &alpha_arr,
+            beta_arr: &beta_arr,
+            theta_lik_matrix: &theta_lik_matrix,
+            theta_grid: &theta_grid,
+            utr_length: params.utr_length,
+            max_polya: params.max_polya,
+        };
+        let result = select_sites_by_bic(&site_data, &em_params, &site_order);
+
+        // After the merge, no two surviving alphas should be within tol of each other.
+        let live: Vec<f32> = result
+            .alphas
+            .iter()
+            .zip(result.weights.iter().skip(1))
+            .filter(|(_, &w)| w > 0.0)
+            .map(|(&a, _)| a)
+            .collect();
+        for (i, &a) in live.iter().enumerate() {
+            for &b in &live[i + 1..] {
+                assert!(
+                    (a - b).abs() >= 2.0 * 30.0,
+                    "live sites at {} and {} are within merge tolerance; merge should have collapsed them",
+                    a,
+                    b
+                );
+            }
+        }
+        assert!(
+            result.bic.is_finite(),
+            "merged result bic should be finite, got {}",
+            result.bic
+        );
     }
 }

@@ -191,10 +191,10 @@ pub fn log_lik_fragment_given_site_robust(
     eta: f32,
     skirt_mult: f32,
 ) -> f32 {
-    if eta <= 0.0 || skirt_mult <= 0.0 {
+    let w = skirt_mult * beta;
+    if eta <= 0.0 || skirt_mult <= 0.0 || w <= 0.0 || !w.is_finite() {
         return log_lik_fragment_given_site(frag_theta_liks, theta_grid, alpha, beta);
     }
-    let w = skirt_mult * beta;
     let lo = alpha - w;
     let hi = alpha + w;
     let log_uniform_density = -(2.0 * w).ln();

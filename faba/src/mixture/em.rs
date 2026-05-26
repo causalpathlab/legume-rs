@@ -61,7 +61,14 @@ pub fn log_sum_exp(a: f32, b: f32) -> f32 {
 /// Fixed-parameter EM: given precomputed per-observation component log-likelihoods,
 /// estimate only the mixing weights.
 ///
+/// **Contract:** column 0 of `component_log_liks` is treated as a catch-all
+/// (uniform-noise) component that is preserved by the pruning logic and is the
+/// sole survivor if every signal component is pruned below `min_weight` in the
+/// same iteration. Callers without a noise column should add a flat one (e.g.
+/// `-ln(domain_length)`) at index 0.
+///
 /// * `component_log_liks` - `[n_obs][n_components]` log-likelihood matrix
+///   (index 0 is the noise component; see contract above)
 /// * `n_free_params` - number of free parameters for BIC computation
 /// * `params` - EM parameters
 pub fn fixed_em(
