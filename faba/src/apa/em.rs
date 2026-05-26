@@ -1,4 +1,4 @@
-use crate::apa::likelihood::{log_lik_fragment_given_site, log_lik_noise};
+use crate::apa::likelihood::{log_lik_fragment_given_site_robust, log_lik_noise};
 
 /// EM algorithm parameters.
 pub struct EmParams {
@@ -8,6 +8,14 @@ pub struct EmParams {
     pub tol: f32,
     /// Minimum component weight before pruning
     pub min_weight: f32,
+    /// Mixing weight of the per-site uniform "skirt" inside each site's
+    /// emission (heavy-tail robustness). 0 disables.
+    pub skirt_eta: f32,
+    /// Skirt half-width in units of beta: W = skirt_mult * beta.
+    pub skirt_mult: f32,
+    /// Post-EM merge: collapse selected sites with |alpha_i - alpha_j| <
+    /// `merge_beta_mult * max(beta_i, beta_j)`. 0 disables.
+    pub merge_beta_mult: f32,
 }
 
 impl Default for EmParams {
@@ -16,6 +24,9 @@ impl Default for EmParams {
             max_iter: 100,
             tol: 1e-4,
             min_weight: 0.01,
+            skirt_eta: 0.05,
+            skirt_mult: 3.0,
+            merge_beta_mult: 2.0,
         }
     }
 }
@@ -62,11 +73,13 @@ pub fn fixed_inference(data: &SiteModelData, params: &EmParams) -> EmResult {
     for (n, row) in component_log_liks.iter_mut().enumerate() {
         row[0] = noise_ll;
         for k in 0..n_components {
-            row[k + 1] = log_lik_fragment_given_site(
+            row[k + 1] = log_lik_fragment_given_site_robust(
                 &data.theta_lik_matrix[n],
                 data.theta_grid,
                 data.alpha_arr[k],
                 data.beta_arr[k],
+                params.skirt_eta,
+                params.skirt_mult,
             );
         }
     }
@@ -88,7 +101,9 @@ fn run_fixed_em(
         min_weight: params.min_weight,
     };
 
-    let n_free_params = 3 * n_components + 1;
+    // alpha and beta are fixed; only mixing weights are free.
+    // K+1 weights with sum-to-1 ⇒ K free parameters.
+    let n_free_params = n_components;
     let result = crate::mixture::em::fixed_em(component_log_liks, n_free_params, &generic_params);
 
     EmResult {
@@ -129,11 +144,13 @@ pub fn select_sites_by_bic(
             let idx = site_order[i];
             (0..n_frag)
                 .map(|n| {
-                    log_lik_fragment_given_site(
+                    log_lik_fragment_given_site_robust(
                         &data.theta_lik_matrix[n],
                         data.theta_grid,
                         data.alpha_arr[idx],
                         data.beta_arr[idx],
+                        params.skirt_eta,
+                        params.skirt_mult,
                     )
                 })
                 .collect()
@@ -182,7 +199,69 @@ pub fn select_sites_by_bic(
         }
     }
 
-    best_result.unwrap()
+    let best = best_result.unwrap();
+    merge_close_sites(best, &all_site_lls, site_order, noise_ll, params)
+}
+
+/// Collapse selected sites whose alphas are within `merge_beta_mult * max(beta_i, beta_j)`
+/// of each other into a single site (keep the higher-pi one), then re-fit weights.
+/// Returns the input unchanged if `merge_beta_mult <= 0` or no merges apply.
+fn merge_close_sites(
+    result: EmResult,
+    all_site_lls: &[Vec<f32>],
+    site_order: &[usize],
+    noise_ll: f32,
+    params: &EmParams,
+) -> EmResult {
+    if params.merge_beta_mult <= 0.0 || result.alphas.len() < 2 {
+        return result;
+    }
+
+    let k = result.alphas.len();
+    // Index by descending pi (skip noise weight at [0]); break ties by lower alpha.
+    let mut order: Vec<usize> = (0..k).collect();
+    order.sort_by(|&a, &b| {
+        result.weights[b + 1]
+            .partial_cmp(&result.weights[a + 1])
+            .unwrap()
+            .then(result.alphas[a].partial_cmp(&result.alphas[b]).unwrap())
+    });
+
+    // Greedy keep: walk in descending pi, keep a site unless it is within
+    // merge_beta_mult * max(beta) of an already-kept site.
+    let mut keep: Vec<usize> = Vec::with_capacity(k);
+    for &i in &order {
+        let close = keep.iter().any(|&j| {
+            let tol = params.merge_beta_mult * result.betas[i].max(result.betas[j]);
+            (result.alphas[i] - result.alphas[j]).abs() < tol
+        });
+        if !close {
+            keep.push(i);
+        }
+    }
+
+    if keep.len() == k {
+        return result; // nothing to merge
+    }
+
+    // Refit weights on the surviving subset of site_order positions.
+    keep.sort_by(|&a, &b| result.alphas[a].partial_cmp(&result.alphas[b]).unwrap());
+    let n_frag = all_site_lls.first().map(|v| v.len()).unwrap_or(0);
+    let kept_alphas: Vec<f32> = keep.iter().map(|&i| result.alphas[i]).collect();
+    let kept_betas: Vec<f32> = keep.iter().map(|&i| result.betas[i]).collect();
+    let component_log_liks: Vec<Vec<f32>> = (0..n_frag)
+        .map(|n| {
+            let mut row = Vec::with_capacity(keep.len() + 1);
+            row.push(noise_ll);
+            for &i in &keep {
+                row.push(all_site_lls[i][n]);
+            }
+            row
+        })
+        .collect();
+
+    let _ = site_order; // already absorbed into all_site_lls indexing
+    run_fixed_em(&component_log_liks, &kept_alphas, &kept_betas, params)
 }
 
 #[cfg(test)]
@@ -207,6 +286,7 @@ mod tests {
             max_iter: 200,
             tol: 1e-6,
             min_weight: 0.005,
+            ..Default::default()
         };
 
         let site_data = SiteModelData {
@@ -379,6 +459,7 @@ mod tests {
             max_iter: 200,
             tol: 1e-6,
             min_weight: 0.005,
+            ..Default::default()
         };
 
         let site_data = SiteModelData {
@@ -442,6 +523,7 @@ mod tests {
             max_iter: 200,
             tol: 1e-6,
             min_weight: 0.005,
+            ..Default::default()
         };
 
         let site_data = SiteModelData {

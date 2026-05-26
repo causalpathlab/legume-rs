@@ -139,12 +139,14 @@ pub fn fixed_em(
             }
         }
 
-        // Renormalize
+        // Renormalize; if everything collapsed, fall back to noise-only.
         let w_sum: f32 = weights.iter().sum();
         if w_sum > 0.0 {
             for w in weights.iter_mut() {
                 *w /= w_sum;
             }
+        } else {
+            weights[0] = 1.0;
         }
     }
 }
@@ -332,12 +334,14 @@ pub fn weighted_gaussian_mixture_em(
             }
         }
 
-        // Renormalize
+        // Renormalize; if everything collapsed, fall back to noise-only.
         let w_sum: f32 = weights.iter().sum();
         if w_sum > 0.0 {
             for w in weights.iter_mut() {
                 *w /= w_sum;
             }
+        } else {
+            weights[0] = 1.0;
         }
     }
 }

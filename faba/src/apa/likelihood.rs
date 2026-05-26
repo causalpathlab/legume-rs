@@ -175,6 +175,52 @@ pub fn log_lik_fragment_given_site(
     log_sum
 }
 
+/// Robust per-site emission: marginalize theta over a heavy-tailed prior
+///
+///     prior(theta) = (1 - eta) * N(theta | alpha, beta^2)
+///                  +      eta  * Uniform(theta | alpha - W, alpha + W)
+///
+/// where `W = skirt_mult * beta`. The local uniform "skirt" absorbs near-site
+/// outliers that would otherwise nudge BIC into picking an extra Gaussian site
+/// in the same broad cleavage cluster.
+pub fn log_lik_fragment_given_site_robust(
+    frag_theta_liks: &[f32],
+    theta_grid: &[f32],
+    alpha: f32,
+    beta: f32,
+    eta: f32,
+    skirt_mult: f32,
+) -> f32 {
+    if eta <= 0.0 || skirt_mult <= 0.0 {
+        return log_lik_fragment_given_site(frag_theta_liks, theta_grid, alpha, beta);
+    }
+    let w = skirt_mult * beta;
+    let lo = alpha - w;
+    let hi = alpha + w;
+    let log_uniform_density = -(2.0 * w).ln();
+    let log_1m_eta = (1.0 - eta).ln();
+    let log_eta = eta.ln();
+
+    let mut log_sum = f32::NEG_INFINITY;
+    for (t, &theta) in theta_grid.iter().enumerate() {
+        let log_lik = frag_theta_liks[t];
+        if !log_lik.is_finite() {
+            continue;
+        }
+        let log_gauss = log_normal_pdf(theta, alpha, beta);
+        let log_uniform = if theta >= lo && theta <= hi {
+            log_uniform_density
+        } else {
+            f32::NEG_INFINITY
+        };
+        let log_prior = log_sum_exp(log_1m_eta + log_gauss, log_eta + log_uniform);
+        if log_prior.is_finite() {
+            log_sum = log_sum_exp(log_sum, log_lik + log_prior);
+        }
+    }
+    log_sum
+}
+
 /// Compute log-normal PDF: log N(x | mu, sigma)
 fn log_normal_pdf(x: f32, mu: f32, sigma: f32) -> f32 {
     let z = (x - mu) / sigma;

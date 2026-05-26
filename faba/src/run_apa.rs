@@ -369,6 +369,41 @@ pub struct CountApaArgs {
     )]
     pub(crate) merge_distance: f32,
 
+    /// Per-site uniform skirt weight (mixture mode)
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        help = "Per-site skirt eta (heavy-tail robustness, mixture mode)",
+        long_help = "Each site's emission is (1 - eta) * Gaussian(alpha, beta^2)\n\
+                     + eta * Uniform(alpha - W, alpha + W). The local uniform\n\
+                     skirt absorbs near-site outliers so the BIC does not pick\n\
+                     up extra spurious sites in broad cleavage clusters.\n\
+                     Set to 0 to disable. Only used in mixture mode."
+    )]
+    pub(crate) skirt_eta: f32,
+
+    /// Skirt half-width in units of beta (mixture mode)
+    #[arg(
+        long,
+        default_value_t = 3.0,
+        help = "Skirt half-width in beta units (mixture mode)",
+        long_help = "Half-width of the per-site uniform skirt:\n\
+                     W = skirt_mult * beta_k. Only used in mixture mode."
+    )]
+    pub(crate) skirt_mult: f32,
+
+    /// Post-EM merge tolerance in beta units (mixture mode)
+    #[arg(
+        long,
+        default_value_t = 2.0,
+        help = "Post-EM merge tolerance in beta units (mixture mode)",
+        long_help = "After BIC site selection, selected sites with\n\
+                     |alpha_i - alpha_j| < merge_beta_mult * max(beta_i, beta_j)\n\
+                     are collapsed (higher-pi site kept) and weights re-fit.\n\
+                     Set to 0 to disable. Only used in mixture mode."
+    )]
+    pub(crate) merge_beta_mult: f32,
+
     /// Compute PDUI (Percentage of Distal poly(A) site Usage Index)
     #[arg(
         long = "compute-pdui",
@@ -426,6 +461,9 @@ impl CountApaArgs {
     pub(crate) fn em_params(&self) -> EmParams {
         EmParams {
             min_weight: self.min_ws,
+            skirt_eta: self.skirt_eta,
+            skirt_mult: self.skirt_mult,
+            merge_beta_mult: self.merge_beta_mult,
             ..Default::default()
         }
     }

@@ -1064,8 +1064,12 @@ pub fn run_mixture_model(
             .collect();
 
         if let Some(result) = fit_gene_mixture(&cell_observations, gene_length, mixture_params) {
-            // Build component annotations, filtering pi=0
+            // Build component annotations (filter pi=0) and a forward old→new map
+            // for the 1-based GMM component index used in result.cell_component_counts.
             let mut local_annotations = Vec::new();
+            let mut new_to_old: Vec<usize> = Vec::new();
+            let mut old_to_new: rustc_hash::FxHashMap<usize, usize> =
+                rustc_hash::FxHashMap::default();
             for (j, (&mu, &sigma)) in result
                 .gmm
                 .mus
@@ -1075,26 +1079,17 @@ pub fn run_mixture_model(
             {
                 let pi = result.gmm.weights[j + 1]; // skip noise
                 if pi > 0.0 {
+                    let new_idx = local_annotations.len();
+                    old_to_new.insert(j, new_idx);
+                    new_to_old.push(j);
                     local_annotations.push(MixtureComponentAnnotation {
                         gene_name: gene_name.clone(),
-                        component_idx: j, // TEMPORARILY store old GMM index
+                        component_idx: new_idx,
                         mu,
                         sigma,
                         pi,
                     });
                 }
-            }
-
-            // Build OLD→NEW component index mapping to remove gaps from empty components
-            let mut old_to_new: rustc_hash::FxHashMap<usize, usize> =
-                rustc_hash::FxHashMap::default();
-            for (new_idx, annotation) in local_annotations.iter().enumerate() {
-                old_to_new.insert(annotation.component_idx, new_idx);
-            }
-
-            // Renumber annotations to have consistent 0, 1, 2, ... indices
-            for (new_idx, annotation) in local_annotations.iter_mut().enumerate() {
-                annotation.component_idx = new_idx;
             }
 
             // Build triplets: (cell_barcode, feature_id, count)
@@ -1118,29 +1113,16 @@ pub fn run_mixture_model(
             }
 
             // Compute PDUI for genes with 2+ active components
-            // Distal component = largest mu (furthest from gene start)
+            // Distal component = largest mu (positions are already 5'-relative)
             if local_annotations.len() >= 2 {
-                let distal_idx = local_annotations
+                let distal_new_idx = local_annotations
                     .iter()
                     .enumerate()
                     .max_by(|(_, a), (_, b)| a.mu.partial_cmp(&b.mu).unwrap())
                     .map(|(i, _)| i)
                     .unwrap();
-                // Find the old GMM component index corresponding to this distal component
-                // We need to reverse the mapping: new_idx → old_idx
-                let distal_new_idx = local_annotations[distal_idx].component_idx;
-                let distal_old_idx = old_to_new
-                    .iter()
-                    .find_map(|(&old, &new)| {
-                        if new == distal_new_idx {
-                            Some(old)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap();
-                // distal_component is the 1-based component index in GMM (0 = noise)
-                let distal_component = distal_old_idx + 1;
+                // 1-based component index in GMM (0 = noise)
+                let distal_component = new_to_old[distal_new_idx] + 1;
 
                 // Per-cell: PDUI = distal_count / total_non_noise_count
                 let mut cell_total: rustc_hash::FxHashMap<usize, usize> =
