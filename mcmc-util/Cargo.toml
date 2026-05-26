@@ -31,8 +31,11 @@ matrix-util = { workspace = true }
 
 # zip = "5.1.1"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-candle-core = { version = "0.10", features = ["cuda","cudnn"] }
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-core/cudnn"]
+metal = ["candle-core/metal", "candle-core/accelerate"]
 
-[target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { version = "0.10", features = ["metal","accelerate"] }
+[dependencies.candle-core]
+version = "0.10"
+default-features = false

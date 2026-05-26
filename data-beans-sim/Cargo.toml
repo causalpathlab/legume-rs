@@ -12,6 +12,11 @@ version.workspace = true
 name = "data-beans-sim"
 path = "src/main.rs"
 
+[features]
+default = []
+cuda = ["data-beans/cuda", "data-beans-alg/cuda", "matrix-util/cuda"]
+metal = ["data-beans/metal", "data-beans-alg/metal", "matrix-util/metal"]
+
 [dependencies]
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }

@@ -12,6 +12,11 @@ version = "0.1.0"
 name = "cnv"
 path = "src/lib.rs"
 
+[features]
+default = []
+cuda = ["matrix-util/cuda", "mcmc-util/cuda"]
+metal = ["matrix-util/metal", "mcmc-util/metal"]
+
 [dependencies]
 nalgebra = { workspace = true }
 matrix-util = { workspace = true }

@@ -695,7 +695,7 @@ mod gene_block_tests {
         // Deterministic pseudo-random fills; keep everything strictly
         // positive so the Gamma updates are well-defined.
         let f = |a: usize, b: usize| -> f32 { 1.0 + ((a * 7 + b * 13) % 11) as f32 };
-        s.observed_sum_ds = DMatrix::from_fn(num_genes, num_samples, |g, c| f(g, c));
+        s.observed_sum_ds = DMatrix::from_fn(num_genes, num_samples, &f);
         s.imputed_sum_ds = DMatrix::from_fn(num_genes, num_samples, |g, c| 0.5 * f(g + 1, c + 2));
         s.residual_sum_ds = DMatrix::from_fn(num_genes, num_samples, |g, c| 0.3 * f(g + 2, c + 1));
         s.size_s = DVector::from_fn(num_samples, |c, _| 2.0 + (c % 3) as f32);
@@ -748,7 +748,11 @@ mod gene_block_tests {
         let blk_gam = GammaMatrix::vconcat(gam, true);
         let blk_del = GammaMatrix::vconcat(del, true);
 
-        assert_mat_close(full.mu_observed.posterior_mean(), blk_obs.posterior_mean(), "mu_obs mean");
+        assert_mat_close(
+            full.mu_observed.posterior_mean(),
+            blk_obs.posterior_mean(),
+            "mu_obs mean",
+        );
         assert_mat_close(
             full.mu_adjusted.as_ref().unwrap().posterior_mean(),
             blk_adj.posterior_mean(),
@@ -759,8 +763,16 @@ mod gene_block_tests {
             blk_res.posterior_mean(),
             "mu_resid mean",
         );
-        assert_mat_close(full.gamma.as_ref().unwrap().posterior_mean(), blk_gam.posterior_mean(), "gamma mean");
-        assert_mat_close(full.delta.as_ref().unwrap().posterior_mean(), blk_del.posterior_mean(), "delta mean");
+        assert_mat_close(
+            full.gamma.as_ref().unwrap().posterior_mean(),
+            blk_gam.posterior_mean(),
+            "gamma mean",
+        );
+        assert_mat_close(
+            full.delta.as_ref().unwrap().posterior_mean(),
+            blk_del.posterior_mean(),
+            "delta mean",
+        );
         // sd / log planes too (All target).
         assert_mat_close(
             full.mu_adjusted.as_ref().unwrap().posterior_log_mean(),
@@ -816,7 +828,8 @@ mod gene_block_tests {
         let mut blocks = Vec::new();
         for (r0, nr) in [(0usize, 5usize), (5, 4)] {
             let sub = stat.select_rows(r0, nr);
-            let mut out = optimize_block(&sub, hyper, iters, CalibrateTarget::MeanOnly, None).unwrap();
+            let mut out =
+                optimize_block(&sub, hyper, iters, CalibrateTarget::MeanOnly, None).unwrap();
             out.release_stats();
             blocks.push(out.mu_observed);
         }
@@ -829,6 +842,10 @@ mod gene_block_tests {
             "mu_obs mean (mean-only)",
         );
         // … but the stat planes were dropped (empty), proving the memory win.
-        assert_eq!(assembled.posterior_sd().nrows(), 0, "sd should be empty under MeanOnly");
+        assert_eq!(
+            assembled.posterior_sd().nrows(),
+            0,
+            "sd should be empty under MeanOnly"
+        );
     }
 }

@@ -6,6 +6,21 @@ license.workspace = true
 version.workspace = true
 description = "random projection and collapsing routines"
 
+[features]
+default = []
+cuda = [
+    "candle-util/cuda",
+    "data-beans/cuda",
+    "matrix-util/cuda",
+    "matrix-param/cuda",
+]
+metal = [
+    "candle-util/metal",
+    "data-beans/metal",
+    "matrix-util/metal",
+    "matrix-param/metal",
+]
+
 [dependencies]
 auxiliary-data = { workspace = true }
 data-beans = { workspace = true }

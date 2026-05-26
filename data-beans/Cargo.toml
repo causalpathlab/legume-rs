@@ -12,6 +12,11 @@ version.workspace = true
 name = "data-beans"
 path = "src/main.rs"
 
+[features]
+default = []
+cuda = ["candle-util/cuda", "matrix-util/cuda", "matrix-param/cuda"]
+metal = ["candle-util/metal", "matrix-util/metal", "matrix-param/metal"]
+
 [dependencies]
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }

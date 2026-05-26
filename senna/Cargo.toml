@@ -16,6 +16,27 @@ path = "src/lib.rs"
 name = "senna"
 path = "src/main.rs"
 
+[features]
+default = []
+cuda = [
+    "candle-util/cuda",
+    "cnv/cuda",
+    "data-beans/cuda",
+    "data-beans-alg/cuda",
+    "graph-embedding-util/cuda",
+    "matrix-util/cuda",
+    "matrix-param/cuda",
+]
+metal = [
+    "candle-util/metal",
+    "cnv/metal",
+    "data-beans/metal",
+    "data-beans-alg/metal",
+    "graph-embedding-util/metal",
+    "matrix-util/metal",
+    "matrix-param/metal",
+]
+
 [dependencies]
 auxiliary-data = { workspace = true }
 cnv = { workspace = true }
