@@ -16,6 +16,10 @@ path = "src/main.rs"
 default = []
 cuda = ["candle-util/cuda", "matrix-util/cuda", "matrix-param/cuda"]
 metal = ["candle-util/metal", "matrix-util/metal", "matrix-param/metal"]
+# Pulls in libhdf5 — opt-in so installs on hosts without HDF5 headers still
+# build. When off, the HDF5 sparse backend and all H5/H5AD readers compile
+# out; .zarr / .zarr.zip remain the supported formats.
+hdf5 = ["dep:hdf5"]
 
 [dependencies]
 matrix-util = { workspace = true }
@@ -28,7 +32,7 @@ flate2 = { workspace = true }
 rayon = { workspace = true }
 regex = { workspace = true }
 
-hdf5 = { package = "hdf5-metno", version = "0.12.1", features = ["blosc"] }
+hdf5 = { package = "hdf5-metno", version = "0.12.1", features = ["blosc"], optional = true }
 libz-sys = { version = "1.1", features = ["libc"], default-features = false }
 zarrs = { version = "0.23" }
 

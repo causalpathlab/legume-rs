@@ -11,5 +11,6 @@ pub mod utilities; // shared utility functions (name matching, IO helpers)
 pub mod zarr_io; // read coordinate data from zarr files
 
 // backward-compat re-exports
+#[cfg(feature = "hdf5")]
 pub use sparse_backend::hdf5 as sparse_matrix_hdf5;
 pub use sparse_backend::zarr as sparse_matrix_zarr;

@@ -1,7 +1,9 @@
+#[cfg(feature = "hdf5")]
 use crate::hdf5_io::read_hdf5_strings;
 use clap::Args;
 use log::info;
 use matrix_util::common_io::file_ext;
+#[cfg(feature = "hdf5")]
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -56,12 +58,23 @@ pub fn list_zarr(cmd_args: &ListZarrArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Stub when data-beans is built without the `hdf5` feature; produces a
+/// clear runtime error if a user invokes `list-h5` on a CPU-only build.
+#[cfg(not(feature = "hdf5"))]
+pub fn list_h5(_cmd_args: &ListH5Args) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "`list-h5` requires the `hdf5` feature; this build was compiled without it. \
+         Reinstall with `--features hdf5` (requires libhdf5) to inspect .h5 files."
+    )
+}
+
 /// List contents of an HDF5 file.
 ///
 /// Prints the group/dataset hierarchy (with shapes for datasets) and, for
 /// every dataset whose name suggests it holds 10x-style feature types
 /// (`feature_type` / `feature_types`), prints a histogram of distinct values
 /// so the caller knows what to pass to `from-h5 --select-row-type`.
+#[cfg(feature = "hdf5")]
 pub fn list_h5(cmd_args: &ListH5Args) -> anyhow::Result<()> {
     let data_file = cmd_args.h5_file.clone();
     let file = hdf5::File::open(data_file.to_string())?;

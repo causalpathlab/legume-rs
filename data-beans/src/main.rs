@@ -12,10 +12,14 @@ mod utilities;
 mod zarr_io;
 
 use crate::handlers::analysis::{run_stat, RunStatArgs};
+#[cfg(feature = "hdf5")]
 use crate::handlers::builders::{
-    run_build_from_10x_matrix, run_build_from_10x_molecule, run_build_from_fragments,
-    run_build_from_h5ad, run_build_from_mtx, run_build_from_zarr_triplets, From10xMatrixArgs,
-    From10xMoleculeArgs, FromFragmentsArgs, FromH5adArgs, FromMtxArgs, FromZarrArgs,
+    run_build_from_10x_matrix, run_build_from_10x_molecule, run_build_from_h5ad, From10xMatrixArgs,
+    From10xMoleculeArgs, FromH5adArgs,
+};
+use crate::handlers::builders::{
+    run_build_from_fragments, run_build_from_mtx, run_build_from_zarr_triplets, FromFragmentsArgs,
+    FromMtxArgs, FromZarrArgs,
 };
 use crate::handlers::inspection::{
     show_info, take_column_names, take_columns, take_row_names, take_rows, InfoArgs,
@@ -63,12 +67,15 @@ fn main() -> anyhow::Result<()> {
         Commands::FromZarr(args) => {
             run_build_from_zarr_triplets(args)?;
         }
+        #[cfg(feature = "hdf5")]
         Commands::From10xMatrix(args) => {
             run_build_from_10x_matrix(args)?;
         }
+        #[cfg(feature = "hdf5")]
         Commands::FromH5ad(args) => {
             run_build_from_h5ad(args)?;
         }
+        #[cfg(feature = "hdf5")]
         Commands::From10xMolecule(args) => {
             run_build_from_10x_molecule(args)?;
         }
@@ -168,6 +175,7 @@ enum Commands {
     #[command(about = "Build backend from `mtx` file and associated `tsv` files")]
     FromMtx(FromMtxArgs),
 
+    #[cfg(feature = "hdf5")]
     #[command(
         name = "from-10x-matrix",
         about = "Build backend from 10X Genomics feature-barcode matrix `h5`",
@@ -183,6 +191,7 @@ enum Commands {
     )]
     From10xMatrix(From10xMatrixArgs),
 
+    #[cfg(feature = "hdf5")]
     #[command(
         about = "Build backend from AnnData `h5ad` file (CELLxGENE schema)",
         long_about = "Build a backend from an AnnData h5ad file (CELLxGENE schema v7, AnnData spec v0.1.0).\n\
@@ -200,6 +209,7 @@ enum Commands {
     )]
     FromH5ad(FromH5adArgs),
 
+    #[cfg(feature = "hdf5")]
     #[command(
         name = "from-10x-molecule",
         about = "Build backend from 10X molecule_info.h5",

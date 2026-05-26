@@ -27,6 +27,9 @@ metal = [
     "matrix-util/metal",
     "matrix-param/metal",
 ]
+# Forward data-beans's optional `hdf5` feature so `cargo install faba --features hdf5`
+# enables the HDF5 backend + .h5/.h5ad readers (requires libhdf5 on the build host).
+hdf5 = ["data-beans/hdf5"]
 
 [dependencies]
 data-beans = { workspace = true }

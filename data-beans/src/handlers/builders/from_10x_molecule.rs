@@ -33,13 +33,13 @@ pub struct From10xMoleculeArgs {
         long,
         help = "Output file header or name",
         long_help = "Specify the output file header.\n\
-		     The output will be named as {output}.{backend}.\n\
-		     With --zip, zarr backend produces {output}.zarr.zip instead of {output}.zarr."
+		     The zarr backend produces {output}.zarr.zip by default;\n\
+		     pass --no-zip to keep a {output}.zarr directory instead."
     )]
     pub output: Box<str>,
 
-    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
-    #[arg(long, default_value_t = false)]
+    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
     pub zip: bool,
 
     #[arg(

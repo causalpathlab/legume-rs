@@ -2,10 +2,22 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "hdf5")]
 use crate::sparse_backend::hdf5 as sparse_matrix_hdf5;
 use crate::sparse_backend::zarr as sparse_matrix_zarr;
 
 use super::{Array2, DMatrix, SparseIo, SparseIoBackend};
+
+/// Returned when the user asks for the HDF5 backend but data-beans was built
+/// without the `hdf5` feature. Keeps the error message consistent across the
+/// (small) handful of factory callsites that take a `SparseIoBackend`.
+#[cfg(not(feature = "hdf5"))]
+fn hdf5_disabled<T>() -> anyhow::Result<T> {
+    anyhow::bail!(
+        "HDF5 backend selected but data-beans was built without the `hdf5` feature. \
+         Reinstall with `--features hdf5` (requires libhdf5) or use the Zarr backend."
+    )
+}
 
 /// Open a sparse matrix io (backend)
 /// * `backend_file`: file path to the sparse matrix
@@ -18,9 +30,12 @@ pub fn open_sparse_matrix(
         SparseIoBackend::Zarr => Ok(Box::new(sparse_matrix_zarr::SparseMtxData::open(
             backend_file,
         )?)),
+        #[cfg(feature = "hdf5")]
         SparseIoBackend::HDF5 => Ok(Box::new(sparse_matrix_hdf5::SparseMtxData::open(
             backend_file,
         )?)),
+        #[cfg(not(feature = "hdf5"))]
+        SparseIoBackend::HDF5 => hdf5_disabled(),
     }
 }
 
@@ -49,6 +64,7 @@ pub fn create_sparse_from_triplets_owned(
     backend: Option<&SparseIoBackend>,
 ) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
     match backend {
+        #[cfg(feature = "hdf5")]
         Some(SparseIoBackend::HDF5) => {
             let mut ret = Box::new(sparse_matrix_hdf5::SparseMtxData::new(backend_file)?);
 
@@ -59,6 +75,8 @@ pub fn create_sparse_from_triplets_owned(
             ret.read_row_indptr()?;
             Ok(ret)
         }
+        #[cfg(not(feature = "hdf5"))]
+        Some(SparseIoBackend::HDF5) => hdf5_disabled(),
 
         Some(SparseIoBackend::Zarr) | None => {
             let mut ret = Box::new(sparse_matrix_zarr::SparseMtxData::new(backend_file)?);
@@ -83,9 +101,12 @@ pub fn create_sparse_streaming_empty(
     backend: Option<&SparseIoBackend>,
 ) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
     match backend {
+        #[cfg(feature = "hdf5")]
         Some(SparseIoBackend::HDF5) => Ok(Box::new(sparse_matrix_hdf5::SparseMtxData::new(
             backend_file,
         )?)),
+        #[cfg(not(feature = "hdf5"))]
+        Some(SparseIoBackend::HDF5) => hdf5_disabled(),
         Some(SparseIoBackend::Zarr) | None => Ok(Box::new(sparse_matrix_zarr::SparseMtxData::new(
             backend_file,
         )?)),
@@ -102,9 +123,12 @@ pub fn create_sparse_from_mtx_file(
     backend: Option<&SparseIoBackend>,
 ) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
     match backend {
+        #[cfg(feature = "hdf5")]
         Some(SparseIoBackend::HDF5) => Ok(Box::new(
             sparse_matrix_hdf5::SparseMtxData::from_mtx_file(mtx_file, backend_file, Some(true))?,
         )),
+        #[cfg(not(feature = "hdf5"))]
+        Some(SparseIoBackend::HDF5) => hdf5_disabled(),
 
         Some(SparseIoBackend::Zarr) | None => Ok(Box::new(
             sparse_matrix_zarr::SparseMtxData::from_mtx_file(mtx_file, backend_file, Some(true))?,
@@ -122,9 +146,12 @@ pub fn create_sparse_from_ndarray(
     backend: Option<&SparseIoBackend>,
 ) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
     match backend {
+        #[cfg(feature = "hdf5")]
         Some(SparseIoBackend::HDF5) => Ok(Box::new(
             sparse_matrix_hdf5::SparseMtxData::from_ndarray(data, backend_file, Some(true))?,
         )),
+        #[cfg(not(feature = "hdf5"))]
+        Some(SparseIoBackend::HDF5) => hdf5_disabled(),
 
         Some(SparseIoBackend::Zarr) | None => Ok(Box::new(
             sparse_matrix_zarr::SparseMtxData::from_ndarray(data, backend_file, Some(true))?,
@@ -142,9 +169,12 @@ pub fn create_sparse_from_dmatrix(
     backend: Option<&SparseIoBackend>,
 ) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
     match backend {
+        #[cfg(feature = "hdf5")]
         Some(SparseIoBackend::HDF5) => Ok(Box::new(
             sparse_matrix_hdf5::SparseMtxData::from_dmatrix(data, backend_file, Some(true))?,
         )),
+        #[cfg(not(feature = "hdf5"))]
+        Some(SparseIoBackend::HDF5) => hdf5_disabled(),
 
         Some(SparseIoBackend::Zarr) | None => Ok(Box::new(
             sparse_matrix_zarr::SparseMtxData::from_dmatrix(data, backend_file, Some(true))?,
