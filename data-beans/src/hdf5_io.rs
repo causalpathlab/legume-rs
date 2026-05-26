@@ -1,11 +1,16 @@
-use hdf5::types::FixedAscii;
-use hdf5::types::FixedUnicode;
-use hdf5::types::TypeDescriptor;
-use hdf5::types::VarLenUnicode;
-
 use crate::sparse_io::*;
 
+#[cfg(feature = "hdf5")]
+use hdf5::types::FixedAscii;
+#[cfg(feature = "hdf5")]
+use hdf5::types::FixedUnicode;
+#[cfg(feature = "hdf5")]
+use hdf5::types::TypeDescriptor;
+#[cfg(feature = "hdf5")]
+use hdf5::types::VarLenUnicode;
+
 /// Column names and their string data from an H5AD obs/var dataframe
+#[cfg(feature = "hdf5")]
 pub struct H5adDataFrame {
     pub col_names: Vec<Box<str>>,
     pub col_data: Vec<Vec<Box<str>>>,
@@ -92,6 +97,7 @@ pub fn resolve_backend_file(
 /// - String datasets (VarLenUnicode, FixedAscii, FixedUnicode)
 /// - Boolean datasets
 /// - Integer and float datasets (converted to string)
+#[cfg(feature = "hdf5")]
 pub fn read_h5ad_column(group: &hdf5::Group, col_name: &str) -> anyhow::Result<Vec<Box<str>>> {
     // Try as categorical first: column is a subgroup with codes + categories
     if let Ok(col_group) = group.group(col_name) {
@@ -221,6 +227,7 @@ pub fn read_h5ad_column(group: &hdf5::Group, col_name: &str) -> anyhow::Result<V
 /// For each field, calls `read_h5ad_column` which handles categorical,
 /// string, numeric, and boolean datasets. Returns `None` if no field
 /// succeeds.
+#[cfg(feature = "hdf5")]
 pub fn resolve_h5ad_field(
     group: &hdf5::Group,
     fields: &[Box<str>],
@@ -247,6 +254,7 @@ pub fn resolve_h5ad_field(
 ///
 /// Returns `(column_names, columns_data)` where each entry in
 /// `columns_data` is a `Vec<Box<str>>` of the same length.
+#[cfg(feature = "hdf5")]
 pub fn read_h5ad_dataframe(group: &hdf5::Group) -> anyhow::Result<H5adDataFrame> {
     let col_order: Vec<String> = match group.attr("column-order") {
         Ok(attr) => match attr.read_1d::<VarLenUnicode>() {
@@ -284,6 +292,7 @@ pub fn read_h5ad_dataframe(group: &hdf5::Group) -> anyhow::Result<H5adDataFrame>
 }
 
 /// Read strings from `HDF5` dataset
+#[cfg(feature = "hdf5")]
 pub fn read_hdf5_strings(data: hdf5::dataset::Dataset) -> anyhow::Result<Vec<Box<str>>> {
     let dtype = data.dtype()?;
     let desc = dtype.to_descriptor()?;

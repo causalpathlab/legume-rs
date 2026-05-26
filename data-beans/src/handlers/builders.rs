@@ -1,15 +1,21 @@
 use log::info;
 
+#[cfg(feature = "hdf5")]
 mod from_10x_matrix;
+#[cfg(feature = "hdf5")]
 mod from_10x_molecule;
 mod from_fragments;
+#[cfg(feature = "hdf5")]
 mod from_h5ad;
 mod from_mtx;
 mod from_zarr;
 
+#[cfg(feature = "hdf5")]
 pub use from_10x_matrix::*;
+#[cfg(feature = "hdf5")]
 pub use from_10x_molecule::*;
 pub use from_fragments::*;
+#[cfg(feature = "hdf5")]
 pub use from_h5ad::*;
 pub use from_mtx::*;
 pub use from_zarr::*;

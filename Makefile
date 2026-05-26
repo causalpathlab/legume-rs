@@ -30,10 +30,46 @@ ifeq (,$(filter $(BACKEND),cpu cuda metal))
 $(error Unknown BACKEND='$(BACKEND)'; valid values are: cpu, cuda, metal)
 endif
 
-ifeq ($(BACKEND),cpu)
+# HDF5 support is opt-in: enabled automatically when libhdf5 headers are
+# detectable on the build host, otherwise compiled out so installs on
+# HDF5-less systems (e.g. cluster login nodes) still succeed.
+# Detection probes, in order:
+#   1. `h5cc -showconfig` (the canonical HDF5 wrapper script)
+#   2. `pkg-config --exists hdf5`
+#   3. brew --prefix hdf5 (macOS Homebrew)
+# Override with `HDF5=on` to force-enable, or `HDF5=off` to force-disable.
+HAS_H5CC := $(shell command -v h5cc 2>/dev/null)
+HAS_HDF5_PKGCFG := $(shell pkg-config --exists hdf5 2>/dev/null && echo yes)
+HAS_HDF5_BREW := $(shell brew --prefix hdf5 >/dev/null 2>&1 && echo yes)
+
+ifeq ($(or $(HAS_H5CC),$(HAS_HDF5_PKGCFG),$(HAS_HDF5_BREW)),)
+DEFAULT_HDF5 := off
+else
+DEFAULT_HDF5 := on
+endif
+
+HDF5 ?= $(DEFAULT_HDF5)
+
+ifeq (,$(filter $(HDF5),on off))
+$(error Unknown HDF5='$(HDF5)'; valid values are: on, off)
+endif
+
+# Compose --features = $(BACKEND),hdf5 depending on toggles.
+CARGO_FEATURE_LIST :=
+ifneq ($(BACKEND),cpu)
+CARGO_FEATURE_LIST += $(BACKEND)
+endif
+ifeq ($(HDF5),on)
+CARGO_FEATURE_LIST += hdf5
+endif
+
+empty :=
+space := $(empty) $(empty)
+comma := ,
+ifeq ($(strip $(CARGO_FEATURE_LIST)),)
 CARGO_FEATURES :=
 else
-CARGO_FEATURES := --features $(BACKEND)
+CARGO_FEATURES := --features $(subst $(space),$(comma),$(strip $(CARGO_FEATURE_LIST)))
 endif
 
 # Per-binary fallback status is written here so the aggregate `install`
@@ -50,6 +86,7 @@ help:
 	@echo "Legume-rs Makefile"
 	@echo ""
 	@echo "Auto-detected backend on this host: $(DEFAULT_BACKEND)"
+	@echo "Auto-detected HDF5 support:         $(DEFAULT_HDF5)"
 	@echo ""
 	@echo "Install targets:"
 	@echo "  install              - Install all binaries with auto-detected backend"
@@ -69,7 +106,11 @@ help:
 	@echo "  test                 - Run all tests"
 	@echo "  clean                - Clean build artifacts"
 	@echo ""
-	@echo "Override backend explicitly: make <target> BACKEND={cpu|cuda|metal}"
+	@echo "Override backend explicitly:  make <target> BACKEND={cpu|cuda|metal}"
+	@echo "Override HDF5 detection:      make <target> HDF5={on|off}"
+	@echo "    on  pulls in libhdf5 (.h5/.h5ad readers + HDF5 sparse backend)"
+	@echo "    off compiles those code paths out — useful on hosts missing"
+	@echo "        libhdf5 development headers (cluster nodes, minimal Linux)."
 
 all: install
 
@@ -83,7 +124,7 @@ _install_status_init:
 
 _install_status_report:
 	@echo ""
-	@echo "Install summary (requested backend: $(BACKEND)):"
+	@echo "Install summary (requested backend: $(BACKEND), HDF5: $(HDF5)):"
 	@if [ -f $(INSTALL_STATUS_FILE) ]; then \
 	    awk '{ printf "  %-18s -> %s\n", $$1, $$2 }' $(INSTALL_STATUS_FILE); \
 	    if grep -q ' cpu$$' $(INSTALL_STATUS_FILE) && [ "$(BACKEND)" != "cpu" ]; then \
@@ -104,6 +145,15 @@ install-cuda:
 install-metal:
 	@$(MAKE) install BACKEND=metal
 
+# CPU-only fallback feature string. Drops the GPU backend on retry but keeps
+# HDF5 if it was requested — so a GPU build that fails because of missing
+# CUDA libraries doesn't also strip HDF5 support along the way.
+ifeq ($(HDF5),on)
+CARGO_FEATURES_CPU_FALLBACK := --features hdf5
+else
+CARGO_FEATURES_CPU_FALLBACK :=
+endif
+
 # Per-binary install. When a GPU backend is requested, try it first and fall
 # back to a CPU install if the GPU build fails — so a default `make install`
 # on a Linux box without CUDA libraries still succeeds. Each binary's actual
@@ -111,19 +161,19 @@ install-metal:
 $(addprefix install-,$(BINARIES)):
 	@bin=$(@:install-%=%); \
 	if [ -n "$(CARGO_FEATURES)" ]; then \
-	    echo "Installing $$bin (backend: $(BACKEND))..."; \
+	    echo "Installing $$bin (backend: $(BACKEND), HDF5: $(HDF5))..."; \
 	    if cargo install --path $$bin $(CARGO_FEATURES); then \
 	        echo "$$bin $(BACKEND)" >> $(INSTALL_STATUS_FILE); \
 	    else \
 	        echo ""; \
 	        echo "  $(BACKEND) build of $$bin failed; retrying with CPU"; \
 	        echo ""; \
-	        cargo install --path $$bin; \
+	        cargo install --path $$bin $(CARGO_FEATURES_CPU_FALLBACK); \
 	        echo "$$bin cpu" >> $(INSTALL_STATUS_FILE); \
 	    fi; \
 	else \
-	    echo "Installing $$bin (backend: cpu)..."; \
-	    cargo install --path $$bin; \
+	    echo "Installing $$bin (backend: cpu, HDF5: $(HDF5))..."; \
+	    cargo install --path $$bin $(CARGO_FEATURES_CPU_FALLBACK); \
 	    echo "$$bin cpu" >> $(INSTALL_STATUS_FILE); \
 	fi
 
@@ -139,15 +189,21 @@ $(addprefix uninstall-,$(BINARIES)):
 # requested backend is retried with CPU features.
 build:
 ifeq ($(BACKEND),cpu)
+ifeq ($(HDF5),on)
+	@for bin in $(BINARIES); do \
+	    cargo build --release -p $$bin --features hdf5 || exit $$?; \
+	done
+else
 	cargo build --release --workspace
+endif
 else
 	@for bin in $(BINARIES); do \
-	    echo "Building $$bin (backend: $(BACKEND))..."; \
+	    echo "Building $$bin (backend: $(BACKEND), HDF5: $(HDF5))..."; \
 	    if ! cargo build --release -p $$bin $(CARGO_FEATURES); then \
 	        echo ""; \
 	        echo "  $(BACKEND) build of $$bin failed; retrying with CPU"; \
 	        echo ""; \
-	        cargo build --release -p $$bin || exit $$?; \
+	        cargo build --release -p $$bin $(CARGO_FEATURES_CPU_FALLBACK) || exit $$?; \
 	    fi; \
 	done
 endif

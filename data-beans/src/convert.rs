@@ -11,6 +11,7 @@ use matrix_util::common_io::*;
 /// Uses standard 10x field layout:
 ///   root_group/data, root_group/indices, root_group/indptr (CSC),
 ///   root_group/features/{id,name,feature_type}, root_group/barcodes
+#[cfg(feature = "hdf5")]
 pub fn convert_h5_to_backend(h5_file: &str, output: &str) -> anyhow::Result<()> {
     let (backend, backend_file) =
         resolve_backend_file(&Box::from(output), Some(SparseIoBackend::Zarr))?;
@@ -333,11 +334,23 @@ pub fn try_open_or_convert(
 
             match ext.as_ref() {
                 "h5" | "h5ad" => {
-                    info!(
-                        "Converting h5/h5ad to backend: {} -> {}",
-                        data_file, converted
-                    );
-                    convert_h5_to_backend(data_file, &converted)?;
+                    #[cfg(feature = "hdf5")]
+                    {
+                        info!(
+                            "Converting h5/h5ad to backend: {} -> {}",
+                            data_file, converted
+                        );
+                        convert_h5_to_backend(data_file, &converted)?;
+                    }
+                    #[cfg(not(feature = "hdf5"))]
+                    {
+                        anyhow::bail!(
+                            "{} is an HDF5 file but data-beans was built without the `hdf5` \
+                             feature. Reinstall with `--features hdf5` (and a working libhdf5) \
+                             to read .h5/.h5ad inputs.",
+                            data_file
+                        );
+                    }
                 }
                 "zarr" | "zip" => {
                     info!("Converting zarr to backend: {} -> {}", data_file, converted);

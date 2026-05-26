@@ -32,6 +32,7 @@ metal = [
     "matrix-util/metal",
     "matrix-param/metal",
 ]
+hdf5 = ["data-beans/hdf5"]
 
 [dependencies]
 data-beans = { workspace = true }

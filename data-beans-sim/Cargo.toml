@@ -16,6 +16,7 @@ path = "src/main.rs"
 default = []
 cuda = ["data-beans/cuda", "data-beans-alg/cuda", "matrix-util/cuda"]
 metal = ["data-beans/metal", "data-beans-alg/metal", "matrix-util/metal"]
+hdf5 = ["data-beans/hdf5"]
 
 [dependencies]
 data-beans = { workspace = true }
