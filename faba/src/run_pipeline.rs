@@ -92,6 +92,11 @@ pub struct PipelineArgs {
     )]
     pub backend: SparseIoBackend,
 
+    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
+    /// (zarr backend only; no effect on hdf5)
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    pub zip: bool,
+
     #[arg(long, default_value_t = 16, help = "Maximum number of threads")]
     pub max_threads: usize,
 
@@ -386,6 +391,7 @@ fn run_snp_step(args: &PipelineArgs) -> anyhow::Result<FxHashSet<(Box<str>, i64)
             ..GenotypeParams::default()
         },
         backend: args.backend.clone(),
+        zip: args.zip,
         output: args.output.clone(),
         bulk: true,
         umi_tag,
@@ -591,6 +597,7 @@ fn run_atoi_step(
         pseudocount: 1,
         pvalue_cutoff: args.atoi_pvalue_cutoff,
         backend: args.backend.clone(),
+        zip: args.zip,
         output: args.output.clone(),
         output_value_type: ConversionValueType::Ratio,
         row_nnz_cutoff: None,
@@ -717,6 +724,7 @@ fn run_apa_step(
         column_nnz_cutoff: 1,
         output: args.output.clone(),
         backend: args.backend.clone(),
+        zip: args.zip,
         method: ApaMethod::Mixture, // Always use mixture mode (more robust)
         atoi_mask_file,
         snp_mask_file,
@@ -783,6 +791,7 @@ fn run_dart_step(
         pseudocount: 1,
         pvalue_cutoff: args.m6a_pvalue_cutoff,
         backend: args.backend.clone(),
+        zip: args.zip,
         output: args.output.clone(),
         output_value_type: ConversionValueType::Ratio,
         row_nnz_cutoff: None,

@@ -117,6 +117,11 @@ pub struct AtoICountArgs {
     )]
     pub backend: SparseIoBackend,
 
+    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
+    /// (zarr backend only; no effect on hdf5)
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    pub zip: bool,
+
     #[arg(long, default_value_t = false, help = "Include reads w/o barcode info")]
     pub include_missing_barcode: bool,
 
@@ -236,6 +241,7 @@ impl From<&AtoICountArgs> for ConversionParams {
             pseudocount: args.pseudocount,
             pvalue_cutoff: args.pvalue_cutoff,
             backend: args.backend.clone(),
+            zip: args.zip,
             output: args.output.clone(),
             output_value_type: args.output_value_type.clone(),
             row_nnz_cutoff: args.row_nnz_cutoff,

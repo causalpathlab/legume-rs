@@ -46,14 +46,18 @@ pub fn run_simple(
             .flatten()
             .collect();
 
-        let backend_file = match backend {
-            SparseIoBackend::HDF5 => format!("{}/{}.h5", &args.output, batch_name),
-            SparseIoBackend::Zarr => format!("{}/{}.zarr", &args.output, batch_name),
-        };
+        let out = crate::pipeline_util::BackendOutputPath::new(
+            &args.output,
+            batch_name,
+            backend,
+            args.zip,
+        );
 
         format_data_triplets(gene_level_stats)
-            .to_backend(&backend_file)?
+            .to_backend(&out.write_path)?
             .qc(cutoffs.clone())?;
+
+        out.finalize()?;
     }
 
     Ok(())
@@ -143,10 +147,13 @@ pub fn run_splice_aware(
         };
 
         // QC on total counts
-        let total_file = match backend {
-            SparseIoBackend::HDF5 => format!("{}/{}.h5", &args.output, batch_name),
-            SparseIoBackend::Zarr => format!("{}/{}.zarr", &args.output, batch_name),
-        };
+        let total_out = crate::pipeline_util::BackendOutputPath::new(
+            &args.output,
+            batch_name,
+            backend,
+            args.zip,
+        );
+        let total_file = total_out.write_path.clone();
         info!("writing total counts to {}", total_file);
         format_data_triplets(total_triplets)
             .to_backend(&total_file)?
@@ -203,10 +210,12 @@ pub fn run_splice_aware(
         );
 
         // Write spliced matrix
-        let spliced_file = match backend {
-            SparseIoBackend::HDF5 => format!("{}/{}_spliced.h5", &args.output, batch_name),
-            SparseIoBackend::Zarr => format!("{}/{}_spliced.zarr", &args.output, batch_name),
-        };
+        let spliced_out = crate::pipeline_util::BackendOutputPath::new(
+            &args.output,
+            &format!("{}_spliced", batch_name),
+            backend,
+            args.zip,
+        );
         format_data_triplets_shared(
             spliced_triplets,
             &feature_to_index,
@@ -214,14 +223,16 @@ pub fn run_splice_aware(
             row_names.clone(),
             col_names.clone(),
         )
-        .to_backend(&spliced_file)?;
-        info!("wrote spliced counts to {}", spliced_file);
+        .to_backend(&spliced_out.write_path)?;
+        info!("wrote spliced counts to {}", spliced_out.target_path);
 
         // Write unspliced matrix
-        let unspliced_file = match backend {
-            SparseIoBackend::HDF5 => format!("{}/{}_unspliced.h5", &args.output, batch_name),
-            SparseIoBackend::Zarr => format!("{}/{}_unspliced.zarr", &args.output, batch_name),
-        };
+        let unspliced_out = crate::pipeline_util::BackendOutputPath::new(
+            &args.output,
+            &format!("{}_unspliced", batch_name),
+            backend,
+            args.zip,
+        );
         format_data_triplets_shared(
             unspliced_triplets,
             &feature_to_index,
@@ -229,8 +240,16 @@ pub fn run_splice_aware(
             row_names,
             col_names,
         )
-        .to_backend(&unspliced_file)?;
-        info!("wrote unspliced counts to {}", unspliced_file);
+        .to_backend(&unspliced_out.write_path)?;
+        info!("wrote unspliced counts to {}", unspliced_out.target_path);
+
+        // Finalize archives (zip the .zarr staging dirs if applicable).
+        // total_out finalized last so the post-QC backend handle has been
+        // dropped by the time we zip.
+        spliced_out.finalize()?;
+        unspliced_out.finalize()?;
+        drop(total_data);
+        total_out.finalize()?;
     }
 
     Ok(())

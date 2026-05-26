@@ -30,6 +30,8 @@ pub struct ConversionParams {
     pub pseudocount: usize,
     pub pvalue_cutoff: f32,
     pub backend: SparseIoBackend,
+    /// Wrap zarr output in a `.zarr.zip` archive (no effect for HDF5).
+    pub zip: bool,
     pub output: Box<str>,
     pub output_value_type: ConversionValueType,
     pub row_nnz_cutoff: Option<usize>,
@@ -63,13 +65,16 @@ impl ConversionParams {
         }
     }
 
-    /// Create backend file path for a given batch name
-    pub fn backend_file_path(&self, batch_name: &str) -> Box<str> {
-        match self.backend {
-            SparseIoBackend::HDF5 => format!("{}/{}.h5", &self.output, batch_name),
-            SparseIoBackend::Zarr => format!("{}/{}.zarr", &self.output, batch_name),
-        }
-        .into_boxed_str()
+    /// Resolve the user-facing target path (`.zarr.zip` when applicable) and
+    /// the underlying write path. After writing the backend, call
+    /// [`BackendOutputPath::finalize`] to zip the staging directory.
+    pub fn backend_output_path(&self, batch_name: &str) -> crate::pipeline_util::BackendOutputPath {
+        crate::pipeline_util::BackendOutputPath::new(
+            &self.output,
+            batch_name,
+            &self.backend,
+            self.zip,
+        )
     }
 
     /// Get QC cutoffs.
@@ -614,8 +619,8 @@ pub fn process_all_bam_files_to_backend(
     };
 
     let mut sites = HashSet::<Box<str>>::default();
-    let mut site_data_files: Vec<Box<str>> = vec![];
-    let mut null_site_data_files: Vec<Box<str>> = vec![];
+    let mut site_data_files: Vec<crate::pipeline_util::BackendOutputPath> = vec![];
+    let mut null_site_data_files: Vec<crate::pipeline_util::BackendOutputPath> = vec![];
 
     let wt_batch_names = uniq_batch_names(&params.wt_bam_files)?;
 
@@ -687,7 +692,7 @@ fn process_bam_to_backend(
     batch_name: &str,
     ctx: &BamProcessContext<'_, impl Fn(&BedWithGene) -> Box<str> + Send + Sync>,
     sites: &mut HashSet<Box<str>>,
-    site_data_files: &mut Vec<Box<str>>,
+    site_data_files: &mut Vec<crate::pipeline_util::BackendOutputPath>,
 ) -> anyhow::Result<()> {
     info!(
         "collecting data over {} sites from {} ...",
@@ -745,23 +750,29 @@ fn process_bam_to_backend(
         };
         let output_name = format!("{}{}", batch_name, mod_suffix);
 
-        let site_data_file = ctx.params.backend_file_path(&output_name);
+        let out = ctx.params.backend_output_path(&output_name);
         let triplets = summarize_stats(&stats, ctx.site_key, &value_fn);
-        let data = triplets.to_backend(&site_data_file)?;
+        let data = triplets.to_backend(&out.write_path)?;
         data.qc(ctx.cutoffs.clone())?;
         sites.extend(data.row_names()?);
-        info!("created site-level data: {}", &site_data_file);
-        site_data_files.push(site_data_file);
+        info!("created site-level data: {}", &out.target_path);
+        drop(data);
+        // Defer finalize(): we still need to reorder rows on the .zarr
+        // staging directory; zipping happens after reorder_all_matrices.
+        site_data_files.push(out);
     }
 
     Ok(())
 }
 
+/// Reorder rows in-place across all per-batch backends so site indices are
+/// consistent across files, then finalize each staging directory into its
+/// `.zarr.zip` archive (no-op for `.h5` or unzipped `.zarr`).
 fn reorder_all_matrices(
     params: &ConversionParams,
     sites: HashSet<Box<str>>,
-    site_data_files: Vec<Box<str>>,
-    null_site_data_files: Vec<Box<str>>,
+    site_data_files: Vec<crate::pipeline_util::BackendOutputPath>,
+    null_site_data_files: Vec<crate::pipeline_util::BackendOutputPath>,
     output_null_data: bool,
 ) -> anyhow::Result<()> {
     let backend = &params.backend;
@@ -769,13 +780,22 @@ fn reorder_all_matrices(
     let mut sites_sorted: Vec<_> = sites.into_iter().collect();
     sites_sorted.sort();
 
-    for data_file in site_data_files {
-        open_sparse_matrix(&data_file, backend)?.reorder_rows(&sites_sorted)?;
+    for out in &site_data_files {
+        open_sparse_matrix(&out.write_path, backend)?.reorder_rows(&sites_sorted)?;
     }
 
     if output_null_data {
-        for data_file in null_site_data_files {
-            open_sparse_matrix(&data_file, backend)?.reorder_rows(&sites_sorted)?;
+        for out in &null_site_data_files {
+            open_sparse_matrix(&out.write_path, backend)?.reorder_rows(&sites_sorted)?;
+        }
+    }
+
+    for out in site_data_files {
+        out.finalize()?;
+    }
+    if output_null_data {
+        for out in null_site_data_files {
+            out.finalize()?;
         }
     }
 
@@ -1191,10 +1211,12 @@ pub fn run_mixture_model(
         ModificationType::M6A { .. } => format!("{}_m6a", primary_batch_name),
         ModificationType::AtoI => format!("{}_atoi", primary_batch_name),
     };
-    let output_file = params.backend_file_path(&suffix);
-    let data = triplets.to_backend(&output_file)?;
+    let out = params.backend_output_path(&suffix);
+    let data = triplets.to_backend(&out.write_path)?;
     data.qc(params.qc_cutoffs())?;
-    info!("Mixture model: created {}", &output_file);
+    info!("Mixture model: created {}", &out.target_path);
+    drop(data);
+    out.finalize()?;
 
     // Write annotations parquet
     if !annotations.is_empty() {

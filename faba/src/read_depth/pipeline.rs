@@ -75,14 +75,18 @@ pub fn run_read_depth_pipeline(args: &ReadDepthArgs) -> anyhow::Result<()> {
             segment_stats.len()
         );
 
-        let backend_file = match &backend {
-            SparseIoBackend::HDF5 => format!("{}/{}.h5", &args.output, batch_name),
-            SparseIoBackend::Zarr => format!("{}/{}.zarr", &args.output, batch_name),
-        };
+        let out = crate::pipeline_util::BackendOutputPath::new(
+            &args.output,
+            batch_name,
+            &backend,
+            args.zip,
+        );
 
         format_data_triplets(segment_stats)
-            .to_backend(&backend_file)?
+            .to_backend(&out.write_path)?
             .qc(cutoffs.clone())?;
+
+        out.finalize()?;
     }
 
     info!("done");

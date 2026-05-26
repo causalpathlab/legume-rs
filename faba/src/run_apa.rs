@@ -166,6 +166,11 @@ pub struct CountApaArgs {
     )]
     pub(crate) backend: SparseIoBackend,
 
+    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
+    /// (zarr backend only; no effect on hdf5)
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    pub(crate) zip: bool,
+
     // --- Method selection ---
     /// APA quantification method
     #[arg(
@@ -468,12 +473,14 @@ impl CountApaArgs {
         }
     }
 
-    pub(crate) fn backend_file_path(&self, name: &str) -> Box<str> {
-        match self.backend {
-            SparseIoBackend::HDF5 => format!("{}/{}.h5", &self.output, name),
-            SparseIoBackend::Zarr => format!("{}/{}.zarr", &self.output, name),
-        }
-        .into_boxed_str()
+    /// Resolve the staging write path plus the user-facing target path
+    /// (`.zarr.zip` when applicable). After writing the backend, call
+    /// [`BackendOutputPath::finalize`] to zip the staging directory.
+    pub(crate) fn backend_output_path(
+        &self,
+        name: &str,
+    ) -> crate::pipeline_util::BackendOutputPath {
+        crate::pipeline_util::BackendOutputPath::new(&self.output, name, &self.backend, self.zip)
     }
 
     pub(crate) fn qc_cutoffs(&self) -> SqueezeCutoffs {

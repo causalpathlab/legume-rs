@@ -4,9 +4,55 @@ use crate::data::util_htslib::*;
 use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key};
 
 use dashmap::DashMap as HashMap;
+use data_beans::zarr_io::finalize_zarr_output;
 use genomic_data::gff::GffRecordMap;
 use genomic_data::sam::CellBarcode;
 use rustc_hash::FxHashMap;
+
+/// Backend output filenames for a given `(output_dir, batch_name)` pair.
+///
+/// `write_path` is what we hand to the SparseIo backend (a `.zarr` directory
+/// or `.h5` file). `target_path` is what the user actually wants on disk,
+/// either the same as `write_path` (for HDF5 or zarr-without-zip) or its
+/// `.zarr.zip` archive. After the backend has been fully written, call
+/// `finalize_backend_output(&write_path, &target_path)` to zip up Zarr
+/// outputs when applicable (no-op otherwise).
+pub struct BackendOutputPath {
+    pub write_path: Box<str>,
+    pub target_path: Box<str>,
+}
+
+impl BackendOutputPath {
+    pub fn new(output_dir: &str, name: &str, backend: &SparseIoBackend, zip: bool) -> Self {
+        match backend {
+            SparseIoBackend::HDF5 => {
+                let p: Box<str> = format!("{}/{}.h5", output_dir, name).into_boxed_str();
+                Self {
+                    write_path: p.clone(),
+                    target_path: p,
+                }
+            }
+            SparseIoBackend::Zarr if zip => Self {
+                write_path: format!("{}/{}.zarr", output_dir, name).into_boxed_str(),
+                target_path: format!("{}/{}.zarr.zip", output_dir, name).into_boxed_str(),
+            },
+            SparseIoBackend::Zarr => {
+                let p: Box<str> = format!("{}/{}.zarr", output_dir, name).into_boxed_str();
+                Self {
+                    write_path: p.clone(),
+                    target_path: p,
+                }
+            }
+        }
+    }
+
+    /// Zip the staging `.zarr` directory into the `.zarr.zip` target (no-op for
+    /// HDF5 and for zarr without zip). Call once the backend has been written
+    /// and all open handles dropped.
+    pub fn finalize(&self) -> anyhow::Result<()> {
+        finalize_zarr_output(&self.write_path, &self.target_path)
+    }
+}
 
 /// Check BAM indices for all files
 pub fn check_all_bam_indices(bam_files: &[Box<str>]) -> anyhow::Result<()> {
