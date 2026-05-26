@@ -12,6 +12,23 @@ version = "0.1.0"
 name = "graph_embedding_util"
 path = "src/lib.rs"
 
+[features]
+default = []
+cuda = [
+    "candle-util/cuda",
+    "data-beans/cuda",
+    "data-beans-alg/cuda",
+    "matrix-util/cuda",
+    "matrix-param/cuda",
+]
+metal = [
+    "candle-util/metal",
+    "data-beans/metal",
+    "data-beans-alg/metal",
+    "matrix-util/metal",
+    "matrix-param/metal",
+]
+
 [dependencies]
 auxiliary-data = { workspace = true }
 data-beans = { workspace = true }

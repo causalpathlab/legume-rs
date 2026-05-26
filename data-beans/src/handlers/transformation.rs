@@ -543,14 +543,18 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         if want_hist {
             display_nnz_histogram(
                 &data_file,
-                &row_nnz_vec,
-                &col_nnz_vec,
-                row_nnz_cutoff,
-                col_nnz_cutoff,
+                NnzAxis {
+                    nnz: &row_nnz_vec,
+                    cutoff: row_nnz_cutoff,
+                    suggest: row_suggest,
+                },
+                NnzAxis {
+                    nnz: &col_nnz_vec,
+                    cutoff: col_nnz_cutoff,
+                    suggest: col_suggest,
+                },
                 cmd_args.show_histogram || cmd_args.interactive,
                 cmd_args.save_histogram.as_deref(),
-                row_suggest,
-                col_suggest,
             )?;
         }
 
@@ -578,14 +582,18 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
                         // Show updated histogram with new cutoffs
                         display_nnz_histogram(
                             &data_file,
-                            &row_nnz_vec,
-                            &col_nnz_vec,
-                            row_nnz_cutoff,
-                            col_nnz_cutoff,
+                            NnzAxis {
+                                nnz: &row_nnz_vec,
+                                cutoff: row_nnz_cutoff,
+                                suggest: row_suggest,
+                            },
+                            NnzAxis {
+                                nnz: &col_nnz_vec,
+                                cutoff: col_nnz_cutoff,
+                                suggest: col_suggest,
+                            },
                             true,
                             None,
-                            row_suggest,
-                            col_suggest,
                         )?;
                     }
                     UserAction::Cancel => {
@@ -695,14 +703,18 @@ fn run_squeeze_and_merge(
         if show_hist || cmd_args.save_histogram.is_some() {
             display_nnz_histogram(
                 &data_file,
-                &row_nnz_vec,
-                &col_nnz_vec,
-                row_nnz_cutoff,
-                col_nnz_cutoff,
+                NnzAxis {
+                    nnz: &row_nnz_vec,
+                    cutoff: row_nnz_cutoff,
+                    suggest: row_suggest,
+                },
+                NnzAxis {
+                    nnz: &col_nnz_vec,
+                    cutoff: col_nnz_cutoff,
+                    suggest: col_suggest,
+                },
                 show_hist,
                 cmd_args.save_histogram.as_deref(),
-                row_suggest,
-                col_suggest,
             )?;
         }
 
@@ -734,14 +746,18 @@ fn run_squeeze_and_merge(
 
                         display_nnz_histogram(
                             &data_file,
-                            &row_nnz_vec,
-                            &col_nnz_vec,
-                            row_nnz_cutoff,
-                            col_nnz_cutoff,
+                            NnzAxis {
+                                nnz: &row_nnz_vec,
+                                cutoff: row_nnz_cutoff,
+                                suggest: row_suggest,
+                            },
+                            NnzAxis {
+                                nnz: &col_nnz_vec,
+                                cutoff: col_nnz_cutoff,
+                                suggest: col_suggest,
+                            },
                             true,
                             None,
-                            row_suggest,
-                            col_suggest,
                         )?;
                     }
                     UserAction::Cancel => {
@@ -1084,17 +1100,20 @@ fn run_squeeze_then_merge(
     Ok(())
 }
 
+/// Per-axis nnz state passed to [`display_nnz_histogram`].
+struct NnzAxis<'a> {
+    nnz: &'a [f32],
+    cutoff: usize,
+    suggest: Option<usize>,
+}
+
 /// Display and/or save nnz histogram with cutoff markers
 fn display_nnz_histogram(
     data_file: &str,
-    row_nnz: &[f32],
-    col_nnz: &[f32],
-    row_cutoff: usize,
-    col_cutoff: usize,
+    row: NnzAxis<'_>,
+    col: NnzAxis<'_>,
     show: bool,
     save_prefix: Option<&str>,
-    row_suggest: Option<usize>,
-    col_suggest: Option<usize>,
 ) -> anyhow::Result<()> {
     use matrix_util::common_io::write_types;
 
@@ -1103,8 +1122,8 @@ fn display_nnz_histogram(
         let row_file = format!("{}.row_nnz.txt", prefix);
         let col_file = format!("{}.col_nnz.txt", prefix);
 
-        let row_nnz_usize: Vec<usize> = row_nnz.iter().map(|&x| x as usize).collect();
-        let col_nnz_usize: Vec<usize> = col_nnz.iter().map(|&x| x as usize).collect();
+        let row_nnz_usize: Vec<usize> = row.nnz.iter().map(|&x| x as usize).collect();
+        let col_nnz_usize: Vec<usize> = col.nnz.iter().map(|&x| x as usize).collect();
 
         write_types(&row_nnz_usize, &row_file)?;
         write_types(&col_nnz_usize, &col_file)?;
@@ -1118,9 +1137,9 @@ fn display_nnz_histogram(
         println!("NNZ Distribution for: {}", data_file);
         println!("========================================\n");
 
-        print_nnz_summary("Rows", row_nnz, row_cutoff, row_suggest);
+        print_nnz_summary("Rows", row.nnz, row.cutoff, row.suggest);
         println!();
-        print_nnz_summary("Columns", col_nnz, col_cutoff, col_suggest);
+        print_nnz_summary("Columns", col.nnz, col.cutoff, col.suggest);
 
         println!("\n========================================\n");
     }
@@ -1151,7 +1170,7 @@ fn suggest_nnz_cutoff(nnz: &[f32]) -> Option<usize> {
         .fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &v| {
             (a.min(v), b.max(v))
         });
-    if !(hi > lo) {
+    if hi <= lo {
         return None;
     }
 

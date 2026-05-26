@@ -13,6 +13,21 @@ version = "0.2.0"
 name = "faba"
 path = "src/main.rs"
 
+[features]
+default = []
+cuda = [
+    "data-beans/cuda",
+    "data-beans-alg/cuda",
+    "matrix-util/cuda",
+    "matrix-param/cuda",
+]
+metal = [
+    "data-beans/metal",
+    "data-beans-alg/metal",
+    "matrix-util/metal",
+    "matrix-param/metal",
+]
+
 [dependencies]
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }

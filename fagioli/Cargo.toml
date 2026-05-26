@@ -12,6 +12,25 @@ version = "0.1.1"
 name = "fagioli"
 path = "src/main.rs"
 
+[features]
+default = []
+cuda = [
+    "candle-util/cuda",
+    "data-beans/cuda",
+    "data-beans-alg/cuda",
+    "matrix-util/cuda",
+    "mcmc-util/cuda",
+    "matrix-param/cuda",
+]
+metal = [
+    "candle-util/metal",
+    "data-beans/metal",
+    "data-beans-alg/metal",
+    "matrix-util/metal",
+    "mcmc-util/metal",
+    "matrix-param/metal",
+]
+
 [dependencies]
 auxiliary-data = { workspace = true }
 data-beans = { workspace = true }

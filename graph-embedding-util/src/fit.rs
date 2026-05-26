@@ -9,9 +9,8 @@ use crate::loss::{
     build_per_batch_cell_samplers, build_stratified_sampler, CellFeatureSampler,
     PerBatchStratifiedCellSampler, StratifiedSampler,
 };
-use crate::progress::new_progress_bar;
-use rand_distr::weighted::WeightedIndex;
 use crate::model::{JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
+use crate::progress::new_progress_bar;
 use crate::stop::setup_stop_handler;
 use crate::training::{
     train_composite, AxisSampler, CellCellPbChainTraining, CellCellTraining, CompositeAxis,
@@ -32,6 +31,7 @@ use log::{info, warn};
 use matrix_param::traits::Inference;
 use matrix_util::pair_graph::FeaturePairGraph;
 use nalgebra::DMatrix;
+use rand_distr::weighted::WeightedIndex;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -1035,8 +1035,7 @@ fn build_active_samplers(
             empty.push(unified.batch_names[b].as_ref());
             continue;
         }
-        let cell_picker =
-            WeightedIndex::new(std::mem::take(&mut cell_w[b])).expect("cell weights");
+        let cell_picker = WeightedIndex::new(std::mem::take(&mut cell_w[b])).expect("cell weights");
         let fc = &feat_count[b];
         let feature_pool: Vec<u32> = (0..n_features as u32)
             .filter(|&f| fc[f as usize] > 0.0)

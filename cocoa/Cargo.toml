@@ -11,6 +11,23 @@ version = "0.2.4"
 name = "cocoa"
 path = "src/main.rs"
 
+[features]
+default = []
+cuda = [
+    "cnv/cuda",
+    "data-beans/cuda",
+    "data-beans-alg/cuda",
+    "matrix-util/cuda",
+    "matrix-param/cuda",
+]
+metal = [
+    "cnv/metal",
+    "data-beans/metal",
+    "data-beans-alg/metal",
+    "matrix-util/metal",
+    "matrix-param/metal",
+]
+
 [dependencies]
 auxiliary-data = { workspace = true }
 cnv = { workspace = true }

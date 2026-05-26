@@ -12,6 +12,27 @@ version = "0.4.3"
 name = "pinto"
 path = "src/main.rs"
 
+[features]
+default = []
+cuda = [
+    "candle-util/cuda",
+    "data-beans/cuda",
+    "data-beans-alg/cuda",
+    "graph-embedding-util/cuda",
+    "mcmc-util/cuda",
+    "matrix-util/cuda",
+    "matrix-param/cuda",
+]
+metal = [
+    "candle-util/metal",
+    "data-beans/metal",
+    "data-beans-alg/metal",
+    "graph-embedding-util/metal",
+    "mcmc-util/metal",
+    "matrix-util/metal",
+    "matrix-param/metal",
+]
+
 [dependencies]
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
