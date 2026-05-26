@@ -90,8 +90,14 @@ pub fn open_zarr_store(path: &str) -> anyhow::Result<Arc<dyn ZReadStorageTraits>
 
 /// If `zip` is true, ensure the output path ends with `.zarr.zip`.
 /// Otherwise pass through unchanged.
+///
+/// HDF5 outputs are detected by the `.h5` / `.hdf5` suffix and left alone
+/// — otherwise an explicit `--backend hdf5` choice would be hijacked when
+/// callers default `--no-zip` to true (the project-wide default), and
+/// `resolve_backend_file` would silently flip the backend back to Zarr.
 pub fn apply_zip_flag(output: &str, zip: bool) -> Box<str> {
-    if zip && !output.ends_with(".zarr.zip") {
+    let looks_like_hdf5 = output.ends_with(".h5") || output.ends_with(".hdf5");
+    if zip && !looks_like_hdf5 && !output.ends_with(".zarr.zip") {
         let base = crate::hdf5_io::strip_backend_suffix(output);
         format!("{}.zarr.zip", base).into()
     } else {

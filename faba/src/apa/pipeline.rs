@@ -199,12 +199,14 @@ fn process_simple_bam(
     let stats = gather_polya_stats(gene_sites, args, gff_map, bam_file)?;
     info!("collected {} cell-level poly-A counts", stats.len());
 
-    let site_data_file = args.backend_file_path(batch_name);
+    let out = args.backend_output_path(batch_name);
     let triplets = summarize_simple_stats(&stats, |bed| site_key(bed, gff_map));
-    let data = triplets.to_backend(&site_data_file)?;
+    let data = triplets.to_backend(&out.write_path)?;
     data.qc(cutoffs.clone())?;
-    info!("created data backend: {}", &site_data_file);
+    info!("created data backend: {}", &out.target_path);
 
+    drop(data);
+    out.finalize()?;
     Ok(())
 }
 
@@ -438,13 +440,16 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
 
     let triplets = format_data_triplets(triplets_data);
     let output_name = format!("{}_apa", primary_batch_name);
-    let output_file = args.backend_file_path(&output_name);
-    let data = triplets.to_backend(&output_file)?;
+    let out = args.backend_output_path(&output_name);
+    let data = triplets.to_backend(&out.write_path)?;
     data.qc(SqueezeCutoffs {
         row: args.row_nnz_cutoff,
         column: args.column_nnz_cutoff,
     })?;
-    info!("created output: {}", &output_file);
+    info!("created output: {}", &out.target_path);
+
+    drop(data);
+    out.finalize()?;
 
     // Write APA site annotation Parquet
     if !all_annotations.is_empty() {
@@ -744,14 +749,16 @@ fn compute_and_write_pdui(
 
     let triplets = format_data_triplets(pdui_triplets);
     let output_name = format!("{}_pdui", primary_batch_name);
-    let output_file = args.backend_file_path(&output_name);
-    let data = triplets.to_backend(&output_file)?;
+    let out = args.backend_output_path(&output_name);
+    let data = triplets.to_backend(&out.write_path)?;
     data.qc(SqueezeCutoffs {
         row: args.row_nnz_cutoff,
         column: args.column_nnz_cutoff,
     })?;
-    info!("PDUI: created {}", &output_file);
+    info!("PDUI: created {}", &out.target_path);
 
+    drop(data);
+    out.finalize()?;
     Ok(())
 }
 

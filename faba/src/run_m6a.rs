@@ -171,6 +171,11 @@ pub struct DartSeqCountArgs {
     )]
     pub backend: SparseIoBackend,
 
+    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
+    /// (zarr backend only; no effect on hdf5)
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    pub zip: bool,
+
     #[arg(
         long,
         default_value_t = false,
@@ -477,6 +482,7 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             pseudocount: args.pseudocount,
             pvalue_cutoff: args.pvalue_cutoff,
             backend: args.backend.clone(),
+            zip: args.zip,
             output: args.output.clone(),
             output_value_type: args.output_value_type.clone(),
             row_nnz_cutoff: args.row_nnz_cutoff,
@@ -509,6 +515,7 @@ impl DartSeqCountArgs {
             pseudocount: self.pseudocount,
             pvalue_cutoff: self.atoi_pvalue_cutoff,
             backend: self.backend.clone(),
+            zip: self.zip,
             output: self.output.clone(),
             output_value_type: self.output_value_type.clone(),
             row_nnz_cutoff: self.row_nnz_cutoff,

@@ -98,6 +98,11 @@ pub struct GeneCountArgs {
     )]
     pub(crate) backend: SparseIoBackend,
 
+    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
+    /// (zarr backend only; no effect on hdf5)
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    pub(crate) zip: bool,
+
     /// Output directory
     #[arg(
         short,

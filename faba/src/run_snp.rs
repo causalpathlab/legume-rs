@@ -272,6 +272,11 @@ pub struct SnpArgs {
     )]
     pub backend: SparseIoBackend,
 
+    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
+    /// (zarr backend only; no effect on hdf5)
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    pub zip: bool,
+
     /// Include reads without cell barcode information.
     #[arg(
         long,
@@ -376,6 +381,7 @@ pub fn run_snp(args: &SnpArgs) -> anyhow::Result<()> {
             ..GenotypeParams::default()
         },
         backend: args.backend.clone(),
+        zip: args.zip,
         output: args.output.clone(),
         bulk: args.bulk,
         umi_tag,

@@ -28,12 +28,12 @@ pub struct FromMtxArgs {
     #[arg(long, value_enum, default_value = "zarr")]
     pub backend: SparseIoBackend,
 
-    /// output file header: {output}.{backend} (or {output}.zarr.zip with --zip)
+    /// output file header: {output}.zarr.zip by default; pass --no-zip to keep a {output}.zarr directory
     #[arg(short, long)]
     pub output: Box<str>,
 
-    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
-    #[arg(long, default_value_t = false)]
+    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
     pub zip: bool,
 
     /// maximum number of columns to read from the row/feature name file

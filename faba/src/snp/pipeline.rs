@@ -28,6 +28,8 @@ pub struct SnpParams {
     pub min_mapping_quality: u8,
     pub genotype_params: GenotypeParams,
     pub backend: SparseIoBackend,
+    /// Wrap zarr output in a `.zarr.zip` archive (no effect for HDF5).
+    pub zip: bool,
     pub output: Box<str>,
     pub bulk: bool,
     /// UMI tag for deduplication (e.g., "UB"). None = no UMI dedup.
@@ -40,12 +42,16 @@ pub struct SnpParams {
 }
 
 impl SnpParams {
-    pub fn backend_file_path(&self, batch_name: &str) -> Box<str> {
-        match self.backend {
-            SparseIoBackend::HDF5 => format!("{}/{}.h5", &self.output, batch_name),
-            SparseIoBackend::Zarr => format!("{}/{}.zarr", &self.output, batch_name),
-        }
-        .into_boxed_str()
+    /// Resolve both the staging write path and the user-facing target path
+    /// (`.zarr.zip` when applicable). After all writes finish, call
+    /// [`BackendOutputPath::finalize`] to produce the archive.
+    pub fn backend_output_path(&self, batch_name: &str) -> crate::pipeline_util::BackendOutputPath {
+        crate::pipeline_util::BackendOutputPath::new(
+            &self.output,
+            batch_name,
+            &self.backend,
+            self.zip,
+        )
     }
 
     /// Create a marginal DnaBaseFreqMap configured with this pipeline's thresholds,
@@ -717,9 +723,11 @@ pub fn run_snp_pipeline(
                         union.row_names.clone(),
                         union.col_names.clone(),
                     );
-                    let alt_path = params.backend_file_path(&format!("{}_snp_alt", batch_name));
-                    info!("Writing alt count matrix: {}", alt_path);
-                    alt_data.to_backend(&alt_path)?;
+                    let alt_out = params.backend_output_path(&format!("{}_snp_alt", batch_name));
+                    info!("Writing alt count matrix: {}", alt_out.target_path);
+                    let alt_data_io = alt_data.to_backend(&alt_out.write_path)?;
+                    drop(alt_data_io);
+                    alt_out.finalize()?;
 
                     // Total depth matrix
                     let depth_data = format_data_triplets_shared(
@@ -729,9 +737,12 @@ pub fn run_snp_pipeline(
                         union.row_names,
                         union.col_names,
                     );
-                    let depth_path = params.backend_file_path(&format!("{}_snp_depth", batch_name));
-                    info!("Writing depth matrix: {}", depth_path);
-                    depth_data.to_backend(&depth_path)?;
+                    let depth_out =
+                        params.backend_output_path(&format!("{}_snp_depth", batch_name));
+                    info!("Writing depth matrix: {}", depth_out.target_path);
+                    let depth_data_io = depth_data.to_backend(&depth_out.write_path)?;
+                    drop(depth_data_io);
+                    depth_out.finalize()?;
                 }
             }
         } else {
