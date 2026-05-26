@@ -11,6 +11,9 @@ BINARIES := senna pinto cocoa faba chickpea data-beans data-beans-sim fagioli
 #   make install-cuda    # NVIDIA CUDA + cuDNN
 #   make install-metal   # Apple Metal + Accelerate
 #   make install BACKEND={cpu|cuda|metal}
+#
+# HDF5 (.h5/.h5ad I/O) is opt-in — libhdf5 isn't on every host:
+#   make install HDF5=on
 UNAME_S := $(shell uname -s)
 HAS_NVCC := $(shell command -v nvcc 2>/dev/null)
 
@@ -23,38 +26,19 @@ DEFAULT_BACKEND := cpu
 endif
 
 BACKEND ?= $(DEFAULT_BACKEND)
+HDF5 ?= off
 
-# Validate BACKEND so a typo (e.g. `BACKEND=gpu`) fails fast instead of
-# silently producing `--features gpu` and degrading to CPU for every binary.
+# Validate so a typo (e.g. `BACKEND=gpu`, `HDF5=yes`) fails fast instead of
+# silently producing an unknown --features flag.
 ifeq (,$(filter $(BACKEND),cpu cuda metal))
 $(error Unknown BACKEND='$(BACKEND)'; valid values are: cpu, cuda, metal)
 endif
-
-# HDF5 support is opt-in: enabled automatically when libhdf5 headers are
-# detectable on the build host, otherwise compiled out so installs on
-# HDF5-less systems (e.g. cluster login nodes) still succeed.
-# Detection probes, in order:
-#   1. `h5cc -showconfig` (the canonical HDF5 wrapper script)
-#   2. `pkg-config --exists hdf5`
-#   3. brew --prefix hdf5 (macOS Homebrew)
-# Override with `HDF5=on` to force-enable, or `HDF5=off` to force-disable.
-HAS_H5CC := $(shell command -v h5cc 2>/dev/null)
-HAS_HDF5_PKGCFG := $(shell pkg-config --exists hdf5 2>/dev/null && echo yes)
-HAS_HDF5_BREW := $(shell brew --prefix hdf5 >/dev/null 2>&1 && echo yes)
-
-ifeq ($(or $(HAS_H5CC),$(HAS_HDF5_PKGCFG),$(HAS_HDF5_BREW)),)
-DEFAULT_HDF5 := off
-else
-DEFAULT_HDF5 := on
-endif
-
-HDF5 ?= $(DEFAULT_HDF5)
-
 ifeq (,$(filter $(HDF5),on off))
 $(error Unknown HDF5='$(HDF5)'; valid values are: on, off)
 endif
 
-# Compose --features = $(BACKEND),hdf5 depending on toggles.
+# Compose --features = $(BACKEND),hdf5 depending on toggles. Empty when both
+# off so we don't pass an empty --features to cargo.
 CARGO_FEATURE_LIST :=
 ifneq ($(BACKEND),cpu)
 CARGO_FEATURE_LIST += $(BACKEND)
@@ -72,6 +56,15 @@ else
 CARGO_FEATURES := --features $(subst $(space),$(comma),$(strip $(CARGO_FEATURE_LIST)))
 endif
 
+# CPU-only fallback feature string. Drops the GPU backend on retry but keeps
+# HDF5 if it was requested — so a GPU build that fails because of missing
+# CUDA libraries doesn't also strip HDF5 support along the way.
+ifeq ($(HDF5),on)
+CARGO_FEATURES_CPU_FALLBACK := --features hdf5
+else
+CARGO_FEATURES_CPU_FALLBACK :=
+endif
+
 # Per-binary fallback status is written here so the aggregate `install`
 # target can report what each binary was actually built with.
 INSTALL_STATUS_FILE := $(CURDIR)/.make-install-status
@@ -86,7 +79,6 @@ help:
 	@echo "Legume-rs Makefile"
 	@echo ""
 	@echo "Auto-detected backend on this host: $(DEFAULT_BACKEND)"
-	@echo "Auto-detected HDF5 support:         $(DEFAULT_HDF5)"
 	@echo ""
 	@echo "Install targets:"
 	@echo "  install              - Install all binaries with auto-detected backend"
@@ -106,11 +98,13 @@ help:
 	@echo "  test                 - Run all tests"
 	@echo "  clean                - Clean build artifacts"
 	@echo ""
-	@echo "Override backend explicitly:  make <target> BACKEND={cpu|cuda|metal}"
-	@echo "Override HDF5 detection:      make <target> HDF5={on|off}"
-	@echo "    on  pulls in libhdf5 (.h5/.h5ad readers + HDF5 sparse backend)"
-	@echo "    off compiles those code paths out — useful on hosts missing"
-	@echo "        libhdf5 development headers (cluster nodes, minimal Linux)."
+	@echo "Overrides:"
+	@echo "  make <target> BACKEND={cpu|cuda|metal}"
+	@echo "  make <target> HDF5=on            # opt in to libhdf5 (.h5/.h5ad readers)"
+	@echo ""
+	@echo "If HDF5=on fails to find libhdf5 — even when h5cc is on PATH —"
+	@echo "set HDF5_DIR to the install prefix and retry, e.g.:"
+	@echo "  HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial make install HDF5=on"
 
 all: install
 
@@ -124,7 +118,7 @@ _install_status_init:
 
 _install_status_report:
 	@echo ""
-	@echo "Install summary (requested backend: $(BACKEND), HDF5: $(HDF5)):"
+	@echo "Install summary (requested backend: $(BACKEND)):"
 	@if [ -f $(INSTALL_STATUS_FILE) ]; then \
 	    awk '{ printf "  %-18s -> %s\n", $$1, $$2 }' $(INSTALL_STATUS_FILE); \
 	    if grep -q ' cpu$$' $(INSTALL_STATUS_FILE) && [ "$(BACKEND)" != "cpu" ]; then \
@@ -145,15 +139,6 @@ install-cuda:
 install-metal:
 	@$(MAKE) install BACKEND=metal
 
-# CPU-only fallback feature string. Drops the GPU backend on retry but keeps
-# HDF5 if it was requested — so a GPU build that fails because of missing
-# CUDA libraries doesn't also strip HDF5 support along the way.
-ifeq ($(HDF5),on)
-CARGO_FEATURES_CPU_FALLBACK := --features hdf5
-else
-CARGO_FEATURES_CPU_FALLBACK :=
-endif
-
 # Per-binary install. When a GPU backend is requested, try it first and fall
 # back to a CPU install if the GPU build fails — so a default `make install`
 # on a Linux box without CUDA libraries still succeeds. Each binary's actual
@@ -161,7 +146,7 @@ endif
 $(addprefix install-,$(BINARIES)):
 	@bin=$(@:install-%=%); \
 	if [ -n "$(CARGO_FEATURES)" ]; then \
-	    echo "Installing $$bin (backend: $(BACKEND), HDF5: $(HDF5))..."; \
+	    echo "Installing $$bin (backend: $(BACKEND))..."; \
 	    if cargo install --path $$bin $(CARGO_FEATURES); then \
 	        echo "$$bin $(BACKEND)" >> $(INSTALL_STATUS_FILE); \
 	    else \
@@ -172,7 +157,7 @@ $(addprefix install-,$(BINARIES)):
 	        echo "$$bin cpu" >> $(INSTALL_STATUS_FILE); \
 	    fi; \
 	else \
-	    echo "Installing $$bin (backend: cpu, HDF5: $(HDF5))..."; \
+	    echo "Installing $$bin (backend: cpu)..."; \
 	    cargo install --path $$bin $(CARGO_FEATURES_CPU_FALLBACK); \
 	    echo "$$bin cpu" >> $(INSTALL_STATUS_FILE); \
 	fi
@@ -198,7 +183,7 @@ else
 endif
 else
 	@for bin in $(BINARIES); do \
-	    echo "Building $$bin (backend: $(BACKEND), HDF5: $(HDF5))..."; \
+	    echo "Building $$bin (backend: $(BACKEND))..."; \
 	    if ! cargo build --release -p $$bin $(CARGO_FEATURES); then \
 	        echo ""; \
 	        echo "  $(BACKEND) build of $$bin failed; retrying with CPU"; \
