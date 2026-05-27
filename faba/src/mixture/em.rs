@@ -191,11 +191,8 @@ pub fn gaussian_mixture_em(
 
 /// Weighted 1D Gaussian mixture EM with a uniform noise component.
 ///
-/// Each observation has an associated weight (e.g. count), avoiding
-/// the need to expand repeated observations into individual entries.
-///
-/// Component 0 is always uniform noise over `[0, domain_length]`.
-/// Components 1..K are Gaussians.
+/// Convenience wrapper around `weighted_gaussian_mixture_em_with_n` that uses
+/// `n_for_bic = observations.len()` (textbook BIC convention).
 pub fn weighted_gaussian_mixture_em(
     observations: &[f32],
     obs_weights: &[f32],
@@ -203,6 +200,38 @@ pub fn weighted_gaussian_mixture_em(
     initial_sigma: f32,
     domain_length: f32,
     params: &EmParams,
+) -> GmmResult {
+    weighted_gaussian_mixture_em_with_n(
+        observations,
+        obs_weights,
+        initial_mus,
+        initial_sigma,
+        domain_length,
+        params,
+        observations.len() as f32,
+    )
+}
+
+/// Weighted 1D Gaussian mixture EM with explicit BIC sample size.
+///
+/// Same as `weighted_gaussian_mixture_em` except `n_for_bic` is the value used
+/// in the BIC penalty `n_params · ln(N)`. Observation weights are renormalized
+/// so they sum to `n_for_bic`, which keeps the log-likelihood and the BIC
+/// penalty on the same scale — model selection is then invariant to a uniform
+/// rescaling of the input weights. This matters when weights are fractional
+/// (e.g. Beta-posterior regularized rates) and would otherwise shrink the
+/// likelihood relative to the penalty.
+///
+/// Component 0 is always uniform noise over `[0, domain_length]`.
+/// Components 1..K are Gaussians.
+pub fn weighted_gaussian_mixture_em_with_n(
+    observations: &[f32],
+    obs_weights_in: &[f32],
+    initial_mus: &[f32],
+    initial_sigma: f32,
+    domain_length: f32,
+    params: &EmParams,
+    n_for_bic: f32,
 ) -> GmmResult {
     let n = observations.len();
     let k = initial_mus.len();
@@ -217,6 +246,19 @@ pub fn weighted_gaussian_mixture_em(
             bic: 0.0,
         };
     }
+
+    // Renormalize observation weights to sum to `n_for_bic` so that the
+    // log-likelihood (which scales with sum of weights) is on the same scale
+    // as the BIC penalty `n_params · ln(n_for_bic)`. This makes K-selection
+    // invariant to a uniform rescaling of the input weights.
+    let input_total: f32 = obs_weights_in.iter().sum();
+    let obs_weights: Vec<f32> = if input_total > 0.0 && n_for_bic > 0.0 {
+        let scale = n_for_bic / input_total;
+        obs_weights_in.iter().map(|w| w * scale).collect()
+    } else {
+        obs_weights_in.to_vec()
+    };
+    let obs_weights = obs_weights.as_slice();
 
     let total_weight: f32 = obs_weights.iter().sum();
 
@@ -276,7 +318,7 @@ pub fn weighted_gaussian_mixture_em(
         let ll_change = (total_ll - prev_ll).abs();
         if iter > 1 && (ll_change < params.tol || iter >= params.max_iter) {
             let n_params = 3 * k;
-            let bic = -2.0 * total_ll + n_params as f32 * total_weight.ln();
+            let bic = -2.0 * total_ll + n_params as f32 * n_for_bic.ln();
 
             return GmmResult {
                 weights,

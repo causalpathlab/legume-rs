@@ -165,6 +165,29 @@ pub struct PipelineArgs {
     #[arg(long, default_value_t = 0.05, help = "m6A detection p-value cutoff")]
     pub m6a_pvalue_cutoff: f32,
 
+    // === Mixture model weighting (shared by m6A and A-to-I) ===
+    #[arg(
+        long = "mixture-weight",
+        value_enum,
+        default_value_t = crate::editing::pipeline::MixtureWeightMode::Posterior,
+        help = "How to weight each (cell, site) observation in the mixture EM"
+    )]
+    pub mixture_weight: crate::editing::pipeline::MixtureWeightMode,
+
+    #[arg(
+        long = "mixture-prior-alpha",
+        default_value_t = 1.0,
+        help = "Beta prior α for posterior-rate weighting (default: 1.0)"
+    )]
+    pub mixture_prior_alpha: f32,
+
+    #[arg(
+        long = "mixture-prior-beta",
+        default_value_t = 1.0,
+        help = "Beta prior β for posterior-rate weighting (default: 1.0)"
+    )]
+    pub mixture_prior_beta: f32,
+
     // === SNP parameters ===
     #[arg(
         long = "known-snps",
@@ -608,6 +631,9 @@ fn run_atoi_step(
         exact_barcode_match: false,
         min_base_quality: 20,
         min_mapping_quality: 20,
+        mixture_weight_mode: args.mixture_weight,
+        mixture_prior_alpha: args.mixture_prior_alpha,
+        mixture_prior_beta: args.mixture_prior_beta,
     };
 
     // Find ATOI sites (first pass)
@@ -802,6 +828,9 @@ fn run_dart_step(
         exact_barcode_match: false,
         min_base_quality: 20,
         min_mapping_quality: 20,
+        mixture_weight_mode: args.mixture_weight,
+        mixture_prior_alpha: args.mixture_prior_alpha,
+        mixture_prior_beta: args.mixture_prior_beta,
     };
 
     // Find m6A sites (first pass)

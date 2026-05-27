@@ -369,6 +369,34 @@ pub struct DartSeqCountArgs {
     )]
     pub mixture_initial_sigma: f32,
 
+    #[arg(
+        long = "mixture-weight",
+        value_enum,
+        default_value_t = crate::editing::pipeline::MixtureWeightMode::Posterior,
+        help = "How to weight each (cell, site) observation in the mixture EM",
+        long_help = "Per-observation weighting for the per-gene Gaussian mixture.\n\
+                     `posterior` (default) uses the Beta-posterior regularized\n\
+                     effective count w = n · (c + α) / (n + α + β), where n is\n\
+                     the per-site coverage and c the converted-read count. This\n\
+                     prevents low-coverage 1-of-1 sites from dominating μ/σ.\n\
+                     `converted` uses the raw converted-read count c (legacy)."
+    )]
+    pub mixture_weight: crate::editing::pipeline::MixtureWeightMode,
+
+    #[arg(
+        long = "mixture-prior-alpha",
+        default_value_t = 1.0,
+        help = "Beta prior α for posterior-rate weighting (default: 1.0)"
+    )]
+    pub mixture_prior_alpha: f32,
+
+    #[arg(
+        long = "mixture-prior-beta",
+        default_value_t = 1.0,
+        help = "Beta prior β for posterior-rate weighting (default: 1.0)"
+    )]
+    pub mixture_prior_beta: f32,
+
     // ========== Cell clustering options ==========
     #[arg(
         long = "n-clusters",
@@ -496,6 +524,9 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             },
             min_base_quality: 20,
             min_mapping_quality: 20,
+            mixture_weight_mode: args.mixture_weight,
+            mixture_prior_alpha: args.mixture_prior_alpha,
+            mixture_prior_beta: args.mixture_prior_beta,
         }
     }
 }
@@ -527,6 +558,9 @@ impl DartSeqCountArgs {
             mod_type: ModificationType::AtoI,
             min_base_quality: 20,
             min_mapping_quality: 20,
+            mixture_weight_mode: self.mixture_weight,
+            mixture_prior_alpha: self.mixture_prior_alpha,
+            mixture_prior_beta: self.mixture_prior_beta,
         }
     }
 }
