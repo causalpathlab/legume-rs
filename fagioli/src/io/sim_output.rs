@@ -1,6 +1,7 @@
 //! Output writers for single-cell eQTL simulation results.
 
 use anyhow::Result;
+use data_beans::hdf5_io::resolve_backend_file;
 use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
 use log::info;
 use matrix_util::common_io::open_buf_writer;
@@ -33,12 +34,14 @@ pub fn write_sim_qtl_outputs(
 ) -> Result<()> {
     let ext = if use_parquet { "parquet" } else { "tsv" };
 
-    let backend_ext = match params.backend {
-        SparseIoBackend::Zarr => "zarr",
-        SparseIoBackend::HDF5 => "h5",
-    };
-
-    let backend_file = format!("{}.counts.{}", params.output_prefix, backend_ext);
+    // Route through `resolve_backend_file` so the no-hdf5 fallback in
+    // data-beans rewrites an HDF5 request to Zarr instead of failing later
+    // at the factory. The resolved backend is what the create_sparse_*
+    // call actually sees.
+    let counts_stem = format!("{}.counts", params.output_prefix);
+    let (resolved_backend, backend_file) =
+        resolve_backend_file(&counts_stem, Some(params.backend.clone()))?;
+    let backend_file = backend_file.to_string();
     info!("Creating sparse count matrix: {}", backend_file);
 
     let mtx_shape = (sc_data.num_genes, sc_data.num_cells, sc_data.triplets.len());
@@ -46,7 +49,7 @@ pub fn write_sim_qtl_outputs(
         &sc_data.triplets,
         mtx_shape,
         Some(&backend_file),
-        Some(&params.backend),
+        Some(&resolved_backend),
     )?;
 
     let gene_names: Vec<Box<str>> = genes

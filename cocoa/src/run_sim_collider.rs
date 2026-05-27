@@ -143,6 +143,11 @@ pub struct SimColliderArgs {
     )]
     backend: SparseIoBackend,
 
+    /// Disable `.zarr.zip` archiving (the default) and keep a plain `.zarr`
+    /// directory instead. Matches the `--no-zip` convention used by faba.
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    zip: bool,
+
     #[arg(
         long,
         default_value_t = false,
@@ -559,11 +564,14 @@ pub fn run_sim_collider_data(args: SimColliderArgs) -> anyhow::Result<()> {
     // Write output files
     let output = args.output.clone();
 
-    let backend = args.backend.clone();
-    let backend_file = match backend {
-        SparseIoBackend::HDF5 => output.to_string() + ".h5",
-        SparseIoBackend::Zarr => output.to_string() + ".zarr",
-    };
+    // Honor `--no-zip` (default = zip) → `.zarr.zip` target, matching the
+    // faba / data-beans-sim conventions. Then route through
+    // `resolve_backend_file` so the no-hdf5 fallback in data-beans rewrites
+    // an HDF5 request to Zarr instead of failing at the factory.
+    let effective_output = data_beans::zarr_io::apply_zip_flag(&output, args.zip);
+    let (backend, backend_file) =
+        data_beans::hdf5_io::resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
+    let backend_file = backend_file.to_string();
 
     // Cell -> individual mapping
     let sample_file = output.to_string() + ".samples.gz";
@@ -653,7 +661,14 @@ pub fn run_sim_collider_data(args: SimColliderArgs) -> anyhow::Result<()> {
 
     data.register_row_names_vec(&rows);
     data.register_column_names_vec(&cols);
+    // Drop the data handle so the .zarr directory is fully flushed before
+    // we attempt to zip it.
+    drop(data);
 
-    info!("Done. Output: {}", backend_file);
+    // No-op when `effective_output` doesn't end in `.zarr.zip`
+    // (i.e. `--no-zip` or HDF5 backend).
+    data_beans::zarr_io::finalize_zarr_output(&backend_file, &effective_output)?;
+
+    info!("Done. Output: {}", effective_output);
     Ok(())
 }

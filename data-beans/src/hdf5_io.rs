@@ -72,6 +72,26 @@ pub fn resolve_backend_file(
             }
         };
 
+        // When the binary was built without the `hdf5` feature, transparently
+        // fall back to a Zarr write target instead of letting the factory bail
+        // later. Applies only to writes (this `Some(backend)` branch) — for
+        // reads the existing `.h5` file isn't Zarr, so we leave the backend
+        // as HDF5 and let `open_sparse_matrix` surface the rebuild guidance.
+        #[cfg(not(feature = "hdf5"))]
+        if resolved_backend == SparseIoBackend::HDF5 {
+            let stripped = strip_backend_suffix(&backend_file);
+            let new_path = format!("{}.zarr", stripped);
+            log::warn!(
+                "HDF5 output requested but this binary was built without the \
+                 `hdf5` feature; writing Zarr instead ({} -> {}). Pass \
+                 `--zip=true` (or use a `.zarr.zip` output path) for a zipped \
+                 archive.",
+                &backend_file,
+                &new_path
+            );
+            return Ok((SparseIoBackend::Zarr, new_path.into_boxed_str()));
+        }
+
         Ok((resolved_backend, backend_file.into_boxed_str()))
     } else {
         // backend has to be inferred
