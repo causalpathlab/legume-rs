@@ -101,6 +101,18 @@ impl<'a> AxisSampler<'a> {
             Self::Stratified(_) => false,
         }
     }
+
+    /// Number of "draw units" on this axis — used by auto
+    /// `--batches-per-epoch` (one weighted pass = `n_units / batch_size`).
+    /// Per-cell samplers expose one unit per batch (= one per cell);
+    /// pseudobulk axes expose `active_pbs.len()`.
+    pub fn n_units(&self) -> usize {
+        match self {
+            Self::PerBatch(s) => s.len(),
+            Self::PerBatchStratified(s) => s.len(),
+            Self::Stratified(s) => s.active_pbs.len(),
+        }
+    }
 }
 
 pub struct CellCellTraining<'a> {
@@ -128,7 +140,9 @@ pub struct CellCellPbChainTraining<'a> {
 
 pub struct TrainingParams {
     pub epochs: usize,
-    pub batches_per_epoch: usize,
+    /// `None` = auto: one weighted pass over the largest axis
+    /// (`ceil(max_axis_units / batch_size)`). `Some(n)` = fixed budget.
+    pub batches_per_epoch: Option<usize>,
     pub batch_size: usize,
     pub num_negatives: usize,
     pub seed: u64,
@@ -188,6 +202,27 @@ pub fn train_composite(
         None
     };
 
+    // Resolve `batches_per_epoch`: explicit override, or auto = one
+    // weighted pass over the largest axis. `n_units` is per-cell for the
+    // cell axis and `active_pbs.len()` for the pb axes.
+    let max_axis_units = ctx
+        .axes
+        .iter()
+        .map(|a| a.sampler.n_units())
+        .max()
+        .unwrap_or(0);
+    let batches_per_epoch = params.batches_per_epoch.unwrap_or_else(|| {
+        let bs = params.batch_size.max(1);
+        max_axis_units.div_ceil(bs).max(1)
+    });
+    log::info!(
+        "train_composite: {} epochs × {} batches (auto={}, max_axis_units={})",
+        params.epochs,
+        batches_per_epoch,
+        params.batches_per_epoch.is_none(),
+        max_axis_units,
+    );
+
     for epoch in 0..params.epochs {
         if let Some(sm) = smoother.as_deref_mut() {
             if refresh_every > 0 && epoch % refresh_every == 0 {
@@ -198,7 +233,7 @@ pub fn train_composite(
         let mut loss_sum = 0f32;
         let mut n_steps = 0usize;
 
-        for _ in 0..params.batches_per_epoch {
+        for _ in 0..batches_per_epoch {
             let loss = match params.composite_mode {
                 CompositeMode::Sum => sum_step(ctx, &mut rng, params, smoother.as_deref())?,
                 CompositeMode::Sample => sample_step(

@@ -2,7 +2,7 @@
 //! input rows into AGG / count-comp / modifier-comp / site, and builds
 //! the compact (gene_id, modality_id) row identity used by the model.
 //!
-//! Per the CP-factored embedding `e_f = ρ_g + Σ_k z_{g,k} · Q_{k,m,:}`,
+//! Per the embedding rule `e_f = ρ_g · (1 + Σ_k z_{g,k} · Q_{k,m})`,
 //! every component row within a (g, m) pair shares the same e_f and the
 //! same per-row bias b_f. So the model never sees raw row indices —
 //! everything goes through (gene_id, Option<modality_id>), where `None`

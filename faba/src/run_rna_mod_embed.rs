@@ -2,6 +2,7 @@
 
 use anyhow::Context;
 use data_beans::sparse_io_vector::ColumnAlignment;
+use graph_embedding_util::stop::setup_stop_handler;
 use graph_embedding_util::{load_unified_data, FeatureNameKind};
 use log::info;
 use matrix_util::common_io::mkdir_parent;
@@ -42,18 +43,28 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
         args.batch_files.as_deref()
     };
 
+    let feature_kind = if args.feature_name_exact {
+        FeatureNameKind::Exact
+    } else {
+        FeatureNameKind::Gene {
+            delim: args.feature_name_delim,
+        }
+    };
     info!(
-        "rmodem: loading {} modality file(s) under Union column alignment",
-        data_files.len()
+        "loading {} modality file(s) under Union column alignment \
+         (feature_kind={:?}, preload={})",
+        data_files.len(),
+        feature_kind,
+        args.preload_data
     );
     let mut unified = load_unified_data(
         &data_files,
         batch_files,
-        FeatureNameKind::Exact,
-        /* preload = */ false,
+        feature_kind,
+        args.preload_data,
         ColumnAlignment::Union,
     )
-    .context("rmodem: load_unified_data")?;
+    .context("load_unified_data")?;
 
     // `--ignore-batch` semantics: under Union with multiple modality
     // files, `load_unified_data` defaults to auto_modality_batch (one
@@ -66,7 +77,7 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
     }
 
     info!(
-        "rmodem: unified {} features × {} cells × {} batches",
+        "unified {} features × {} cells × {} batches",
         unified.n_features(),
         unified.n_cells(),
         unified.n_batches()
@@ -74,7 +85,7 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
 
     let table = FeatureTable::build(&unified.feature_names);
     info!(
-        "rmodem: feature_table: {} genes, {} modalities, {} count-comp + {} modifier-comp rows",
+        "feature_table: {} genes, {} modalities, {} count-comp + {} modifier-comp rows",
         table.n_genes(),
         table.n_modalities(),
         table.count_comp_rows.len(),
@@ -82,15 +93,19 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
     );
     anyhow::ensure!(
         table.n_genes() > 0,
-        "rmodem: no genes parsed from feature axis — check row name convention (`gene/modality/detail`)"
+        "no genes parsed from feature axis — check row name convention (`gene/modality/detail`)"
     );
 
     let n_cells = unified.n_cells();
-    let pb = build_pseudobulk(&mut unified, &table, args).context("rmodem: build pseudobulk")?;
+    let pb = build_pseudobulk(&mut unified, &table, args).context("build pseudobulk")?;
 
     let n_pbs_per_level: Vec<usize> = pb.pb_pools_per_level.iter().map(|l| l.n_units).collect();
 
-    let dev = candle_core::Device::Cpu;
+    let dev = args
+        .device
+        .to_device(args.device_no)
+        .context("candle device init")?;
+    info!("compute device = {:?}", dev);
     let mut model = RnaModEmbedModel::new(
         table.n_genes(),
         table.n_modalities(),
@@ -100,13 +115,14 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
         &n_pbs_per_level,
         &dev,
     )
-    .context("rmodem: init model")?;
+    .context("init model")?;
 
-    train(args, &table, &pb, &mut model).context("rmodem: training loop")?;
+    let stop = setup_stop_handler();
+    train(args, &table, &pb, &mut model, &stop).context("training loop")?;
 
-    write_outputs(&args.out, &table, &pb, &model, &unified).context("rmodem: write outputs")?;
+    write_outputs(&args.out, &table, &pb, &model, &unified).context("write outputs")?;
 
-    info!("rmodem: done — prefix '{}'", args.out);
+    info!("done — prefix '{}'", args.out);
     Ok(())
 }
 
@@ -155,8 +171,8 @@ fn validate_args(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
     // At least one negative-source must be active or training is a no-op:
     // log_softmax over a single positive column is identically zero.
     anyhow::ensure!(
-        args.n_rand + args.n_swap_z + args.n_swap_q > 0,
-        "at least one of --n-rand, --n-swap-z, --n-swap-q must be > 0 \
+        args.n_rand + args.n_swap_gene_mode > 0,
+        "at least one of --n-rand, --n-swap-gene-mode must be > 0 \
          (else NCE loss collapses to zero and AdamW makes no progress)"
     );
     Ok(())

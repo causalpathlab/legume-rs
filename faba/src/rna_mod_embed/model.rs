@@ -1,4 +1,5 @@
-//! CP-factored feature embedding + per-level pb heads + per-cell head.
+//! Feature embedding by weighted pooling across modalities, plus
+//! per-level pb heads + per-cell head.
 //!
 //! Per the plan, an input feature row has identity (gene_id, modality_id)
 //! and embeds as:
@@ -27,6 +28,7 @@
 //! All public `embed_*` / `bias_*` / `rhs_*` methods take **plain
 //! `&[u32]`** index slices — the sampler stays tensor-free.
 
+use super::common::{candle_core, candle_nn};
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Init, VarMap};
@@ -36,8 +38,8 @@ use candle_nn::{Init, VarMap};
 const PARAM_INIT_STD: f64 = 0.05;
 
 /// Which right-hand-side embedding table the bilinear scores against.
-/// The CP-factored feature side is shared across all axes; only the
-/// pb/cell head varies.
+/// The shared feature side (ρ, z, Q) is reused across all axes; only
+/// the pb/cell head varies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Axis {
     /// Per-cell head. Bilinear `e_f · e_cell[c] + b_f + b_cell[c]`.
@@ -53,15 +55,15 @@ pub struct RnaModEmbedModel {
     pub n_cells: usize,
     pub dev: Device,
 
-    /// Owns every Var registered below. The optimiser pulls from here.
+    /// Owns every Var registered below. The optimizer pulls from here.
     pub varmap: VarMap,
 
     ////////////////////////////////////////
     // Feature params (shared across axes)
     ////////////////////////////////////////
-    pub rho: Tensor,    // [G, H]
-    pub z: Tensor,      // [G, K]
-    pub q: Tensor,      // [K, M, H]
+    pub rho: Tensor,    // [G, H] — gene's cell-space direction
+    pub z: Tensor,      // [G, K] — gene's K-program "mode" loadings
+    pub q: Tensor,      // [K, M] — program × modality scalar response (sim's A_{m,k})
     pub b_agg: Tensor,  // [G]
     pub b_comp: Tensor, // [G, M]
 
@@ -97,13 +99,12 @@ impl RnaModEmbedModel {
 
         let rho = varmap.get((n_genes, embedding_dim), "rho", init_rand, DType::F32, dev)?;
         let z = varmap.get((n_genes, n_programs), "z", init_rand, DType::F32, dev)?;
-        let q = varmap.get(
-            (n_programs, n_modalities, embedding_dim),
-            "q",
-            init_rand,
-            DType::F32,
-            dev,
-        )?;
+        // Q is the program×modality scalar response: Q[k, m] tells how
+        // much program k drives modality m's gate. Shape (K, M) only —
+        // no H axis, because the gate is a scalar that uniformly scales
+        // ρ_g for the (g, m) row. See the "scalar gate" comment on
+        // `embed_rows` below.
+        let q = varmap.get((n_programs, n_modalities), "q", init_rand, DType::F32, dev)?;
         let b_agg = varmap.get(n_genes, "b_agg", init_zero, DType::F32, dev)?;
         let b_comp = varmap.get(
             (n_genes, n_modalities),
@@ -167,10 +168,26 @@ impl RnaModEmbedModel {
     }
 
     /// Feature-side embedding for a batch of rows. `gene_for_rho`
-    /// indexes ρ; `gene_for_z` indexes z; `modality_for_q` selects the
-    /// Q slice. Positives and random in-class negatives coincide on
-    /// all three; swap-z swaps `gene_for_z`; swap-Q swaps
-    /// `modality_for_q`. `is_agg` zeros the z·Q term.
+    /// indexes ρ; `gene_for_z` indexes z (gene-mode loading);
+    /// `modality_for_q` selects the Q column. Positives and random
+    /// in-class negatives coincide on all three; swap-gene-mode swaps
+    /// `gene_for_z`. `is_agg` zeros the z·Q gate (AGG rows use ρ_g
+    /// unmodified).
+    ///
+    /// **Scalar multiplicative gate.** Component rows scale ρ_g by a
+    /// per-(g, m) scalar built from the (z, Q) factors:
+    ///
+    ///     AGG row  ({g}/AGG/total):       e_f = ρ_g
+    ///     comp row ({g}/{m}/{detail}):    e_f = ρ_g · (1 + Σ_k z_{g,k} · Q_{k,m})
+    ///
+    /// The "+1" makes the gate the identity at z = 0, so a fresh model
+    /// behaves like ρ_g on every row and modifier-row gradient flows
+    /// through ρ as well as through (z, Q). The gate is a *scalar*: it
+    /// uniformly scales every H-dim of ρ_g for that (g, m) row, so the
+    /// modifier embedding always points in ρ_g's direction but with
+    /// modality-specific magnitude. This is exactly the simulator's
+    /// generative form: `r_{g,m} ∝ exp(Σ_k z_{g,k} · A_{m,k})` with
+    /// scalar `A_{m,k}` — our `Q[k, m]` plays the role of `A`.
     pub fn embed_rows(
         &self,
         gene_for_rho: &[u32],
@@ -189,17 +206,22 @@ impl RnaModEmbedModel {
 
         let rho_b = self.rho.index_select(&g_rho, 0)?; // [B, H]
         let z_b = self.z.index_select(&g_z, 0)?; // [B, K]
-        let q_b = self.q.index_select(&m_q, 1)?.permute((1, 0, 2))?; // [B, K, H]
+        let q_b = self.q.index_select(&m_q, 1)?; // [K, B] — Q is (K, M), m_q selects M-axis
+        let q_b = q_b.transpose(0, 1)?; // [B, K]
 
-        let z_b_expanded = z_b.unsqueeze(2)?; // [B, K, 1]
-        let zq = z_b_expanded.broadcast_mul(&q_b)?.sum(1)?; // [B, H]
+        // Scalar gate adjustment per row: (z_b · q_b)_b = Σ_k z_b[b,k] · q_b[b,k]
+        let zq = (z_b * q_b)?.sum(1)?; // [B]
 
         let agg = self.agg_mask_f32(is_agg)?;
         let one = Tensor::ones(b, DType::F32, &self.dev)?;
-        let not_agg = (one - agg)?.unsqueeze(1)?;
-        let zq_masked = zq.broadcast_mul(&not_agg)?;
+        let not_agg = (one - agg)?; // [B]
+        let zq_masked = (zq * &not_agg)?; // [B] — scalar zero for AGG
 
-        Ok((rho_b + zq_masked)?)
+        // gate = 1 + (1 - is_agg) · (z·Q)  →  AGG: gate=1, comp: gate=1+z·Q
+        let gate = (zq_masked + 1.0_f64)?; // [B] scalar gate
+                                           // Broadcast scalar gate across H: rho_b [B,H] · gate [B,1]
+        let gate_h = gate.unsqueeze(1)?; // [B, 1]
+        Ok(rho_b.broadcast_mul(&gate_h)?)
     }
 
     /// Per-row bias: AGG → `b_agg[g]`; component → `b_comp[g, m]`.

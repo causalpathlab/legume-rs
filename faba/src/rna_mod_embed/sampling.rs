@@ -1,6 +1,7 @@
-//! Stratum-balanced count-weighted positive sampler + random / swap-z /
-//! swap-Q negative draws. Tensor-free; the loss converts these slates
-//! into tensor batches via `model::embed_rows` and `model::bias_rows`.
+//! Stratum-balanced count-weighted positive sampler + random /
+//! swap-gene-mode negative draws. Tensor-free; the loss converts these
+//! slates into tensor batches via `model::embed_rows` and
+//! `model::bias_rows`.
 //!
 //! One `SamplerState` carries pre-built distributions for **every
 //! axis** (cell + each pb level). `draw_minibatch(axis, ...)` dispatches
@@ -59,8 +60,9 @@ impl NegativeSlate {
 pub struct SubBatch {
     pub positives: PositiveSlate,
     pub rand: NegativeSlate,
-    pub swap_z: Option<NegativeSlate>,
-    pub swap_q: Option<NegativeSlate>,
+    /// Swap-gene-mode negatives: keep ρ_g and modality m; borrow z from
+    /// another gene. Tests the gene's K-program loading.
+    pub swap_gene_mode: Option<NegativeSlate>,
 }
 
 pub struct Minibatch {
@@ -226,8 +228,7 @@ fn build_anchor_sub_batch<R: Rng>(
     Some(SubBatch {
         positives,
         rand,
-        swap_z: None,
-        swap_q: None,
+        swap_gene_mode: None,
     })
 }
 
@@ -278,14 +279,13 @@ fn build_modifier_sub_batch<R: Rng>(
     }
 
     let rand = draw_random_negatives(pools, dists, &positives, args.n_rand, rng);
-    let swap_z = draw_swap_z_negatives(state, &positives, args.n_swap_z, rng);
-    let swap_q = draw_swap_q_negatives(state, &positives, args.n_swap_q, rng);
+    let swap_gene_mode =
+        draw_swap_gene_mode_negatives(state, &positives, args.n_swap_gene_mode, rng);
 
     Some(SubBatch {
         positives,
         rand,
-        swap_z,
-        swap_q,
+        swap_gene_mode,
     })
 }
 
@@ -408,7 +408,7 @@ fn pool_sample_distinct<R: Rng>(
     pool.gene_ids.iter().copied().find(|&g| g != exclude_gene)
 }
 
-fn draw_swap_z_negatives<R: Rng>(
+fn draw_swap_gene_mode_negatives<R: Rng>(
     state: &SamplerState,
     positives: &PositiveSlate,
     k: usize,
@@ -451,49 +451,9 @@ fn draw_swap_z_negatives<R: Rng>(
     Some(out)
 }
 
-fn draw_swap_q_negatives<R: Rng>(
-    state: &SamplerState,
-    positives: &PositiveSlate,
-    k: usize,
-    rng: &mut R,
-) -> Option<NegativeSlate> {
-    if k == 0 {
-        return None;
-    }
-    let modifier_mods = &state.modifier_modality_ids;
-    if modifier_mods.len() < 2 {
-        return None;
-    }
-    let b = positives.len();
-    let total = b * k;
-    let mut out = NegativeSlate {
-        gene_for_rho: Vec::with_capacity(total),
-        gene_for_z: Vec::with_capacity(total),
-        modality_for_q: Vec::with_capacity(total),
-        gene_for_bias: Vec::with_capacity(total),
-        modality_for_bias: Vec::with_capacity(total),
-        is_agg: Vec::with_capacity(total),
-        k,
-    };
-    for i in 0..b {
-        let g = positives.gene_for_rho[i];
-        let m = positives.modality_for_q[i];
-        for _ in 0..k {
-            let m_prime = swap_pick_distinct(modifier_mods, m, rng)?;
-            out.gene_for_rho.push(g);
-            out.gene_for_z.push(g);
-            out.modality_for_q.push(m_prime);
-            out.gene_for_bias.push(g);
-            out.modality_for_bias.push(m);
-            out.is_agg.push(false);
-        }
-    }
-    Some(out)
-}
-
-/// Uniform-with-rejection swap target picker shared by swap-z and
-/// swap-q. After `REJECT_RETRIES` RNG draws, falls back to a
-/// deterministic linear scan so we never silently degenerate to
+/// Uniform-with-rejection swap target picker used by swap-gene-mode.
+/// After `REJECT_RETRIES` RNG draws, falls back to a deterministic
+/// linear scan so we never silently degenerate to
 /// `target == exclude`. Returns `None` only when the haystack has no
 /// element distinct from `exclude`.
 fn swap_pick_distinct<R: Rng>(haystack: &[u32], exclude: u32, rng: &mut R) -> Option<u32> {

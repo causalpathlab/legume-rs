@@ -10,8 +10,8 @@
 //!      counts for each stratum at every requested axis: the cell axis
 //!      (identity partition; one unit per cell) and each pb level.
 //!      All component rows within a (g, m) pair share an embedding
-//!      under the CP form, so per-gene aggregation loses nothing for
-//!      sampling and dedupes work.
+//!      (e_{g,m} = ρ_g + Σ_k z_{g,k} · Q_{k,m,:}), so per-gene aggregation
+//!      loses nothing for sampling and dedupes work.
 //!
 //! The two-stage trainer uses the pb axes for stage 1 (curriculum
 //! training of ρ/z/Q with lower-variance pb signal) and the cell axis
@@ -98,19 +98,19 @@ pub fn build_pseudobulk(
     let batch_arg = (unified.n_batches() > 1).then_some(batch_labels.as_slice());
 
     info!(
-        "rmodem: projection (proj_dim={}, {} batches)...",
+        "projection (proj_dim={}, {} batches)...",
         args.proj_dim,
         unified.n_batches()
     );
     let proj = unified.per_file_data[0]
         .project_columns_with_batch_correction(args.proj_dim, None, batch_arg)
-        .context("rmodem: random projection on count file")?;
+        .context("random projection on count file")?;
 
     ////////////////////////////////////////
     // 2. Multilevel collapse on count file
     ////////////////////////////////////////
     info!(
-        "rmodem: multilevel collapse (sort_dim={}, {} levels)...",
+        "multilevel collapse (sort_dim={}, {} levels)...",
         args.sort_dim, args.num_levels
     );
     let collapse_out = collapse_columns_multilevel_with_hierarchy(
@@ -126,7 +126,7 @@ pub fn build_pseudobulk(
             output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
         },
     )
-    .context("rmodem: multilevel collapse on count file")?;
+    .context("multilevel collapse on count file")?;
 
     // Returned finest-first; flip to coarsest-first.
     let mut cell_to_pb_per_level = collapse_out.cell_to_pb_per_level;
@@ -140,9 +140,9 @@ pub fn build_pseudobulk(
     // peak memory doesn't have to coexist with the triplet edge list.
     unified
         .materialize_cell_triplets()
-        .context("rmodem: materialise unified triplets")?;
+        .context("materialize unified triplets")?;
     info!(
-        "rmodem: materialised {} cell↔feature triplets",
+        "materialized {} cell↔feature triplets",
         unified.triplets.len()
     );
 
@@ -170,7 +170,7 @@ pub fn build_pseudobulk(
         .collect();
 
     info!(
-        "rmodem: cell axis: {} cells, {} agg / {} count-comp / {} modifier-comp draws",
+        "cell axis: {} cells, {} agg / {} count-comp / {} modifier-comp draws",
         cell_pools.n_units,
         cell_pools.agg.len(),
         cell_pools.count_comp.len(),
@@ -182,7 +182,7 @@ pub fn build_pseudobulk(
     );
     for (i, lvl) in pb_pools_per_level.iter().enumerate() {
         info!(
-            "rmodem: pb level {} (coarse→fine): {} pbs, {} agg / {} count-comp / {} modifier-comp draws",
+            "pb level {} (coarse→fine): {} pbs, {} agg / {} count-comp / {} modifier-comp draws",
             i,
             lvl.n_units,
             lvl.agg.len(),

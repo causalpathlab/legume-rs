@@ -272,16 +272,19 @@ Known SNP reference files:\n\n  \
 
     #[command(
         name = "rna-mod-embed",
-        aliases = ["rmodem"],
-        about = "Joint CP-factored embedding across gene counts + modification tracks",
-        long_about = "Joint CP-factored embedding across gene counts + RNA-modification tracks\n\n\
-            Learns a pooled gene embedding ρ_g, a per-gene regulatory profile\n\
-            z_g over K shared programs, and per-modality program signatures\n\
-            Q_{k,m,:} jointly from `faba {genes,dartseq,atoi,apa}` outputs.\n\n\
-            Cross-modality imputation falls out for free: for an unmeasured\n\
-            (gene, modality) pair, e = ρ_g + z_g · Q_{:,m,:} is computable\n\
-            because z_g is inferred from g's other modalities and Q_{:,m,:}\n\
-            from other genes' m-data.",
+        aliases = ["rmodem", "embed"],
+        about = "Joint gene embedding with per-modality scalar gating",
+        long_about = "Joint gene embedding with per-modality scalar gating\n\n\
+            For each gene g and modality m, the feature embedding is\n  \
+              e_{g,m} = ρ_g · (1 + Σ_k z_{g,k} · Q_{k,m}),\n\
+            i.e. a per-gene baseline ρ_g uniformly scaled by a per-(g,m)\n\
+            scalar gate. z_g is the gene's K-program loading; Q_{k,m} is\n\
+            the program×modality scalar response (sim's A_{m,k} analog).\n\
+            All factors are shared across input tracks\n\
+            (`faba {genes,dartseq,atoi,apa}`), so an unmeasured (gene,\n\
+            modality) pair gets a usable e_{g,m} for free — z_g is\n\
+            learned from g's other modalities and Q_{:,m} from other\n\
+            genes' m-data.",
         after_long_help = "\
 Example:\n  \
   faba rmodem --genes out/genes.zarr.zip --dartseq out/dartseq.zarr.zip \\\n    \
