@@ -12,7 +12,14 @@ Four subcommands, four use cases:
 | `topic`      | factored count matrix (genes × cells) with topic + batch structure        | yes (`--reference`)    |
 | `multimodal` | M coupled count matrices sharing latent topics, modality-specific dicts   | no                     |
 | `multiome`   | paired ATAC + RNA with peak–gene ground truth and shared topics           | yes (per modality)     |
+| `faba`       | RNA modification + processing tracks (counts + m6A + A-to-I + APA) in     | no                     |
+|              | faba's `gene/track/detail` convention; substrate-correlated coverage,     |                        |
+|              | shared writer/editor programs                                             |                        |
 | `bulk`       | bulk pseudo-samples by Dirichlet-mixing real single-cell data             | n/a (real-data sampler) |
+
+Per-subcommand generative-model derivations live in `docs/`:
+[topic](docs/topic.md), [multimodal](docs/multimodal.md),
+[multiome](docs/multiome.md), [faba](docs/faba.md), [bulk](docs/bulk.md).
 
 ## Generative model — common scaffolding
 

@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use data_beans_sim::deconv::{generate_convoluted_data, SimConvArgs};
+use data_beans_sim::faba::{run_faba, FabaArgs};
 use data_beans_sim::handlers::{
     run_simulate, run_simulate_multimodal, RunSimulateArgs, RunSimulateMultimodalArgs,
 };
@@ -29,6 +30,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Bulk(args) => generate_convoluted_data(args)?,
         Commands::Multimodal(args) => run_simulate_multimodal(args)?,
         Commands::Multiome(args) => run_multiome(args)?,
+        Commands::Faba(args) => run_faba(args)?,
     }
 
     Ok(())
@@ -82,11 +84,21 @@ enum Commands {
                       (rank `--batch-rank`, axes chosen by `--batch-program {random,empirical}`);\n\
                       w_g iid N(0, 1) gives the batch-invariant per-gene shift. `--depth` is\n\
                       reinterpreted as a multiplicative scale so library size matches the\n\
-                      reference's mean. scDesign / scDesign2 / scDesign3 lineage."
+                      reference's mean. scDesign / scDesign2 / scDesign3 lineage.\n\
+                      \n\
+                      See data-beans-sim/docs/topic.md for the full derivation."
     )]
     Topic(RunSimulateArgs),
 
-    #[command(about = "Bulk (convoluted) data matrix from real SC reference (experimental)")]
+    #[command(
+        about = "Bulk (convoluted) data matrix from real SC reference (experimental)",
+        long_about = "Synthesise bulk pseudo-samples by Dirichlet-mixing real single-cell counts under a \
+                      supplied per-cell topic membership. Each sample is an exact weighted sum of cells \
+                      with known topic memberships — no extra noise model — so ground-truth fractions \
+                      are recovered up to whatever the cell-pool sampling implies.\n\
+                      \n\
+                      See data-beans-sim/docs/bulk.md for the full derivation."
+    )]
     Bulk(SimConvArgs),
 
     #[command(
@@ -107,7 +119,9 @@ enum Commands {
                       depth_m is the **expected** library size for modality m (emergent — no\n\
                       per-cell rescaling). Because each β_m(:,k) sums to 1 over genes, the\n\
                       cell-level total of (β·θ) sums to 1 deterministically and `depth_m`\n\
-                      directly sets E[lib(j) | m]."
+                      directly sets E[lib(j) | m].\n\
+                      \n\
+                      See data-beans-sim/docs/multimodal.md for the full derivation."
     )]
     Multimodal(RunSimulateMultimodalArgs),
 
@@ -138,7 +152,31 @@ enum Commands {
                       Reference mode (`--reference-rna` / `--reference-atac`): per-modality\n\
                       two-stage GLM + NB+copula PIT sampling; a {topic, noise, batch} budget\n\
                       (normalized, no cis) weights the log-rate. Reference row counts override\n\
-                      --n-genes / --n-peaks."
+                      --n-genes / --n-peaks.\n\
+                      \n\
+                      See data-beans-sim/docs/multiome.md for the full derivation."
     )]
     Multiome(MultiomeArgs),
+
+    #[command(
+        about = "RNA modification + processing simulator (counts + m6A + A-to-I + APA)",
+        long_about = "Generate sparse per-track count matrices shaped like a `faba all` run: one .zarr.zip \
+                      per RNA track — expression counts, m6A methylation, A-to-I editing, alternative \
+                      polyadenylation — with rows named '{gene}/{track}/{detail}', plus a full set of \
+                      ground-truth parquets. Encodes substrate-level coupling \
+                      (m6A and pA share a long-3'UTR substrate axis; A-to-I rides on Alu/dsRNA) and \
+                      shared writer/editor programs (one cell-state topic can drive multiple tracks).\n\n\
+                      Generative model summary:\n\
+                      \u{20} cell state    θ_{k,j} ~ Dirichlet (shared with writer/editor activity)\n\
+                      \u{20} substrate     s_g ~ N(0, I_S);  φ_{g,m} = Bernoulli(σ(s_g·w_m + b_m))\n\
+                      \u{20} programs      A_{m,k} ~ N(0,σ_A²)·Bern(π_A);  z_{g,k} ~ N(0,σ_z²)·Bern(π_z)\n\
+                      \u{20} mRNA pool     log μ_{g,j} = β_g + log((β_topic·θ)_{g,j}) + δ_{g,B(j)}\n\
+                      \u{20} mod. rate     log r_{g,m,j} = base_{g,m} + φ_{g,m}·Σ_k z·A·θ + δ_m\n\
+                      \u{20} mixture       α_{g,m} ~ Dir(α_mix·1_{C_m})\n\
+                      \u{20} counts:       λ ∝ α · μ                      → Poisson, depth_count\n\
+                      \u{20} modifiers:    λ ∝ α · μ · r  (only if φ=1)    → Poisson, depth_modifier\n\
+                      \n\
+                      See data-beans-sim/docs/faba.md for the full derivation."
+    )]
+    Faba(FabaArgs),
 }
