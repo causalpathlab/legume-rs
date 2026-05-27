@@ -224,7 +224,9 @@ pub struct MultiomeArgs {
     )]
     pub zip: bool,
 
-    // ---- Reference / copula flags (per modality) ----------------------------------------
+    /////////////////////////////////////////////////
+    // Reference / copula flags (per modality) //
+    /////////////////////////////////////////////////
     /// Real single-cell ATAC reference (`.h5`, `.zarr`, `.zarr.zip`). When set,
     /// the ATAC sampler switches to two-stage GLM + NB+copula PIT (per-peak
     /// `r̂` + global Σ̂ from the reference). The reference's row count
@@ -336,7 +338,9 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     debug_assert_eq!(atac_indices.len(), nn);
     debug_assert_eq!(rna_indices.len(), nn);
 
-    // ---- Open references (if any) and resolve modality dims --------------------------------
+    ////////////////////////////////////////////////////////////
+    // Open references (if any) and resolve modality dims //
+    ////////////////////////////////////////////////////////////
     let atac_fit: Option<GlobalCopulaFit> = if let Some(path) = args.reference_atac.as_ref() {
         info!("opening ATAC reference: {}", path);
         let sc = open_reference(path)?;
@@ -371,7 +375,9 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         rna_fit.is_some(),
     );
 
-    // ---- Topic proportions (nested) -----------------------------------------------------
+    ////////////////////////////////////
+    // Topic proportions (nested) //
+    ////////////////////////////////////
     // Sample for all `nn_total` unique cells; slice per modality below.
     let theta_seed = rng.next_u64();
     let (theta_full, theta_coarse) = sample::sample_nested_topic_proportions(
@@ -387,11 +393,15 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     let theta_coarse_atac = theta_coarse.select_columns(&atac_indices);
     let theta_full_rna = theta_full.select_columns(&rna_indices);
 
-    // ---- Dictionaries -------------------------------------------------------------------
+    //////////////////////
+    // Dictionaries //
+    //////////////////////
     let beta_ext = sample::sample_dictionary(p, k_total, &mut rng);
     let beta_atac = sample::marginalize_dictionary(&beta_ext, kk, k_sub);
 
-    // ---- Names --------------------------------------------------------------------------
+    ///////////////
+    // Names //
+    ///////////////
     let peak_names: Vec<Box<str>> = atac_fit
         .as_ref()
         .map(|f| f.gene_names.clone())
@@ -419,7 +429,9 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         rna_indices.iter().map(|&i| cell_names[i].clone()).collect();
     let gene_coords = generate_gene_coords(g);
 
-    // ---- Indicator matrix M[G × P] -------------------------------------------------------
+    ///////////////////////////////////
+    // Indicator matrix M[G × P] //
+    ///////////////////////////////////
     let n_linked = (g as f32 * args.linked_gene_fraction) as usize;
     let (indicator_genes, indicator_peaks) = sample::sample_indicator_matrix(
         g,
@@ -435,10 +447,14 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         indicator_genes.len()
     );
 
-    // ---- Derived RNA dictionary W[G × K_total] = M · β_ext ----------------------------
+    ///////////////////////////////////////////////////////////
+    // Derived RNA dictionary W[G × K_total] = M · β_ext //
+    ///////////////////////////////////////////////////////////
     let w_gk = sample::build_derived_dictionary(&indicator_genes, &indicator_peaks, &beta_ext, g);
 
-    // ---- Optional gene-topic effect γ[G × K_total] ------------------------------------
+    ///////////////////////////////////////////////////
+    // Optional gene-topic effect γ[G × K_total] //
+    ///////////////////////////////////////////////////
     let gamma_gk = if args.gene_topic_sd > 0.0 {
         Some(sample::sample_gene_topic_effects(
             g,
@@ -450,7 +466,9 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
         None
     };
 
-    // ---- Batch membership (per unified cell; per-modality slices below) -----------------
+    ////////////////////////////////////////////////////////////////////////
+    // Batch membership (per unified cell; per-modality slices below) //
+    ////////////////////////////////////////////////////////////////////////
     let bb = args.batches.max(1);
     let runif = rand_distr::Uniform::new(0, bb).expect("unif [0 .. bb)");
     let batch_membership: Vec<usize> = (0..nn_total).map(|_| runif.sample(&mut rng)).collect();
@@ -459,7 +477,9 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     let batch_membership_rna: Vec<usize> =
         rna_indices.iter().map(|&i| batch_membership[i]).collect();
 
-    // ---- Synthetic two-step generative model (no-reference mode) -----------------------
+    /////////////////////////////////////////////////////////////////
+    // Synthetic two-step generative model (no-reference mode) //
+    /////////////////////////////////////////////////////////////////
     // Step 1: ATAC accessibility from topics. A peak's regulatory signal mixes a topic
     // component (cell-type on/off) and a peak-PRIVATE fluctuation; the private share is
     // the identifiability dial. A fraction of causal peaks are topic-INVARIANT (pure
@@ -609,7 +629,9 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     };
     info!("RNA: {} non-zeros", rna_triplets.len());
 
-    // ---- Persist sparse outputs --------------------------------------------------------
+    ////////////////////////////////
+    // Persist sparse outputs //
+    ////////////////////////////////
     let backend = args.backend.clone();
     let backend_suffix = match backend {
         SparseIoBackend::Zarr => "zarr",
@@ -642,7 +664,9 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     finalize_zarr_output(&rna_dir, &rna_final)?;
     info!("wrote RNA sparse backend: {}", rna_final);
 
-    // ---- Companion parquet / TSV files -------------------------------------------------
+    ///////////////////////////////////////
+    // Companion parquet / TSV files //
+    ///////////////////////////////////////
     let dict_file = format!("{}.dict.parquet", args.out);
     beta_atac.to_parquet_with_names(&dict_file, (Some(&peak_names), Some("peak")), None)?;
     info!("wrote ATAC dictionary (marginalized) to {}", dict_file);
