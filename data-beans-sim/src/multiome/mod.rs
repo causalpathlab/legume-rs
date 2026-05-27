@@ -21,6 +21,8 @@
 
 mod sample;
 
+pub use sample::{sample_nested_topic_proportions, sample_poisson_from_logits};
+
 use crate::copula::gaussian::CopulaCovariance;
 use crate::copula::marginals::{nb_cdf_table, nb_inverse_cdf_from_table, nb_table_cap, phi, NbFit};
 use crate::copula::reference::{open_reference, SparseRef};
