@@ -69,10 +69,14 @@ pub fn sample_all(args: &FabaArgs, pi_meas: &[f32], rng: &mut impl Rng) -> anyho
 
     let normal01 = Normal::new(0.0_f32, 1.0_f32).unwrap();
 
-    // ---- s_g (substrate score) -----------------------------------------
+    ///////////////////////////////
+    // s_g (substrate score) //
+    ///////////////////////////////
     let s_g = DMatrix::<f32>::from_fn(g, s, |_, _| normal01.sample(rng));
 
-    // ---- w_m (substrate weights) ---------------------------------------
+    /////////////////////////////////
+    // w_m (substrate weights) //
+    /////////////////////////////////
     let mut w_m = DMatrix::<f32>::zeros(m, s);
     for (mi, row) in default_substrate_weights().iter().enumerate() {
         for (si, &v) in row.iter().enumerate() {
@@ -80,7 +84,9 @@ pub fn sample_all(args: &FabaArgs, pi_meas: &[f32], rng: &mut impl Rng) -> anyho
         }
     }
 
-    // ---- intercept_m via binary search to hit π_meas[m] -----------------
+    ////////////////////////////////////////////////////////
+    // intercept_m via binary search to hit π_meas[m] //
+    ////////////////////////////////////////////////////////
     let mut intercept_m = vec![0.0_f32; m];
     let mut phi: Vec<Vec<bool>> = vec![vec![false; g]; m];
     let u01 = Uniform::new(0.0_f32, 1.0_f32)?;
@@ -125,7 +131,9 @@ pub fn sample_all(args: &FabaArgs, pi_meas: &[f32], rng: &mut impl Rng) -> anyho
         );
     }
 
-    // ---- A_{m, k} writer/editor coupling -------------------------------
+    /////////////////////////////////////////
+    // A_{m, k} writer/editor coupling //
+    /////////////////////////////////////////
     // K_prog ≡ K_topic by design (user choice 2026-05-27): the writer/editor
     // axis IS the cell-state axis, so A_{m, k} couples topic k to modality m.
     // Only the modifier rows (mi ≥ 1) carry draws — count has no
@@ -140,21 +148,31 @@ pub fn sample_all(args: &FabaArgs, pi_meas: &[f32], rng: &mut impl Rng) -> anyho
         }
     }
 
-    // ---- z_{g, k} gene response ----------------------------------------
+    ////////////////////////////////
+    // z_{g, k} gene response //
+    ////////////////////////////////
     let z_gk = spike_slab_matrix(g, k, args.pi_z, args.sigma_z, &u01, rng);
 
-    // ---- β_g per-gene baseline -----------------------------------------
+    ///////////////////////////////
+    // β_g per-gene baseline //
+    ///////////////////////////////
     let beta_normal = Normal::new(0.0_f32, args.sigma_beta).unwrap();
     let beta_g: Vec<f32> = (0..g).map(|_| beta_normal.sample(rng)).collect();
 
-    // ---- β_topic [G × K] -----------------------------------------------
+    /////////////////////////
+    // β_topic [G × K] //
+    /////////////////////////
     let beta_topic_gk = sample_lognormal_dictionary(g, k, args.pve_topic, args.beta_scale, rng);
 
-    // ---- base_{g, m} per-(g, m) intercept ------------------------------
+    //////////////////////////////////////////
+    // base_{g, m} per-(g, m) intercept //
+    //////////////////////////////////////////
     let base_normal = Normal::new(0.0_f32, args.sigma_base).unwrap();
     let base_gm = DMatrix::<f32>::from_fn(g, m, |_, _| base_normal.sample(rng));
 
-    // ---- α mixture weights per modality --------------------------------
+    ////////////////////////////////////////
+    // α mixture weights per modality //
+    ////////////////////////////////////////
     let mut alpha_per_mod: Vec<DMatrix<f32>> = Vec::with_capacity(m);
     for mi in 0..m {
         let c = if mi == 0 { 2 } else { c_mod };
@@ -168,11 +186,15 @@ pub fn sample_all(args: &FabaArgs, pi_meas: &[f32], rng: &mut impl Rng) -> anyho
         alpha_per_mod.push(alpha);
     }
 
-    // ---- θ_{k, n} cell-state topics ------------------------------------
+    ////////////////////////////////////
+    // θ_{k, n} cell-state topics //
+    ////////////////////////////////////
     let (theta_kn, _) =
         sample_nested_topic_proportions(k, 1, n, args.pve_topic, 1.0, rng.next_u64());
 
-    // ---- gene / cell names ---------------------------------------------
+    ///////////////////////////
+    // gene / cell names //
+    ///////////////////////////
     let gene_names: Vec<Box<str>> = (0..g)
         .map(|i| format!("gene_{}", i).into_boxed_str())
         .collect();
