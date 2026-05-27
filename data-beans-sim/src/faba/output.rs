@@ -174,8 +174,7 @@ pub fn write_all(
     // α mixture weights: one parquet per modality. Stored as [G × C_m].
     for m in 0..MODALITIES.len() {
         let alpha_gc = lats.alpha_per_mod[m].transpose();
-        let comp_names: Vec<Box<str>> =
-            (0..alpha_gc.ncols()).map(|c| lats.detail(m, c)).collect();
+        let comp_names: Vec<Box<str>> = (0..alpha_gc.ncols()).map(|c| lats.detail(m, c)).collect();
         write_dmatrix(
             &format!("{}.alpha_{}.parquet", args.out, MODALITIES[m]),
             &alpha_gc,
@@ -210,10 +209,7 @@ pub fn write_all(
     write_intercepts(args, lats)?;
 
     // ---- Cell barcodes file (faba-compatible) --------------------------
-    write_lines(
-        &lats.cell_names,
-        &format!("{}.barcodes.txt", args.out),
-    )?;
+    write_lines(&lats.cell_names, &format!("{}.barcodes.txt", args.out))?;
 
     Ok(())
 }
@@ -290,15 +286,12 @@ fn write_dmatrix(
 
 fn write_intercepts(args: &FabaArgs, lats: &Latents) -> anyhow::Result<()> {
     let path = format!("{}.intercepts.tsv.gz", args.out);
-    let mut lines: Vec<Box<str>> =
-        Vec::with_capacity(lats.intercept_m.len() + 1);
+    let mut lines: Vec<Box<str>> = Vec::with_capacity(lats.intercept_m.len() + 1);
     lines.push("modality\tintercept\trealized_coverage".into());
     for (m, &b) in lats.intercept_m.iter().enumerate() {
-        let cov = lats.phi[m].iter().filter(|x| **x).count() as f32
-            / lats.phi[m].len().max(1) as f32;
-        lines.push(
-            format!("{}\t{:.6}\t{:.6}", MODALITIES[m], b, cov).into_boxed_str(),
-        );
+        let cov =
+            lats.phi[m].iter().filter(|x| **x).count() as f32 / lats.phi[m].len().max(1) as f32;
+        lines.push(format!("{}\t{:.6}\t{:.6}", MODALITIES[m], b, cov).into_boxed_str());
     }
     write_lines(&lines, &path)?;
     Ok(())

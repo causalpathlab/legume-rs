@@ -56,11 +56,7 @@ impl Latents {
 }
 
 /// Top-level: sample every latent.
-pub fn sample_all(
-    args: &FabaArgs,
-    pi_meas: &[f32],
-    rng: &mut impl Rng,
-) -> anyhow::Result<Latents> {
+pub fn sample_all(args: &FabaArgs, pi_meas: &[f32], rng: &mut impl Rng) -> anyhow::Result<Latents> {
     let g = args.n_genes;
     let n = args.n_cells;
     let m = MODALITIES.len();
@@ -152,8 +148,7 @@ pub fn sample_all(
     let beta_g: Vec<f32> = (0..g).map(|_| beta_normal.sample(rng)).collect();
 
     // ---- β_topic [G × K] -----------------------------------------------
-    let beta_topic_gk =
-        sample_lognormal_dictionary(g, k, args.pve_topic, args.beta_scale, rng);
+    let beta_topic_gk = sample_lognormal_dictionary(g, k, args.pve_topic, args.beta_scale, rng);
 
     // ---- base_{g, m} per-(g, m) intercept ------------------------------
     let base_normal = Normal::new(0.0_f32, args.sigma_base).unwrap();
@@ -178,10 +173,12 @@ pub fn sample_all(
         sample_nested_topic_proportions(k, 1, n, args.pve_topic, 1.0, rng.next_u64());
 
     // ---- gene / cell names ---------------------------------------------
-    let gene_names: Vec<Box<str>> =
-        (0..g).map(|i| format!("gene_{}", i).into_boxed_str()).collect();
-    let cell_names: Vec<Box<str>> =
-        (0..n).map(|i| format!("cell_{}", i).into_boxed_str()).collect();
+    let gene_names: Vec<Box<str>> = (0..g)
+        .map(|i| format!("gene_{}", i).into_boxed_str())
+        .collect();
+    let cell_names: Vec<Box<str>> = (0..n)
+        .map(|i| format!("cell_{}", i).into_boxed_str())
+        .collect();
 
     Ok(Latents {
         s_g,
@@ -248,8 +245,7 @@ fn tune_intercept(scores: &[f32], target: f32) -> f32 {
     let mut hi = 50.0_f32;
     for _ in 0..60 {
         let mid = 0.5 * (lo + hi);
-        let m: f32 =
-            scores.iter().map(|&s| sigmoid(s + mid)).sum::<f32>() / scores.len() as f32;
+        let m: f32 = scores.iter().map(|&s| sigmoid(s + mid)).sum::<f32>() / scores.len() as f32;
         if m < target {
             lo = mid;
         } else {
@@ -272,8 +268,7 @@ fn sigmoid(x: f32) -> f32 {
 /// uniform-on-simplex. Delegates to `rand_distr::Dirichlet`.
 fn sample_dirichlet(k: usize, alpha: f32, rng: &mut impl Rng) -> Vec<f32> {
     let alphas = vec![alpha as f64; k];
-    let dist = rand_distr::multi::Dirichlet::new(&alphas)
-        .expect("Dirichlet: alpha > 0, k > 0");
+    let dist = rand_distr::multi::Dirichlet::new(&alphas).expect("Dirichlet: alpha > 0, k > 0");
     dist.sample(rng).into_iter().map(|x| x as f32).collect()
 }
 
