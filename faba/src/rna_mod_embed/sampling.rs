@@ -1,0 +1,510 @@
+//! Stratum-balanced count-weighted positive sampler + random / swap-z /
+//! swap-Q negative draws. Tensor-free; the loss converts these slates
+//! into tensor batches via `model::embed_rows` and `model::bias_rows`.
+//!
+//! One `SamplerState` carries pre-built distributions for **every
+//! axis** (cell + each pb level). `draw_minibatch(axis, ...)` dispatches
+//! to the right pool. Used by stage 1 (pb axes) and stage 2 (cell axis).
+
+use rand::distr::{weighted::WeightedIndex, Distribution};
+use rand::seq::IndexedRandom;
+use rand::Rng;
+
+use super::args::RnaModEmbedArgs;
+use super::feature_table::FeatureTable;
+use super::model::Axis;
+use super::pseudobulk::{AxisPools, PseudobulkData, StratumPool};
+
+/// Per-positive identity. Positives have `gene_for_rho == gene_for_z`;
+/// negatives may decouple them (swap-z) or carry a different
+/// `modality_for_q` (swap-Q).
+pub struct PositiveSlate {
+    pub gene_for_rho: Vec<u32>,
+    pub gene_for_z: Vec<u32>,
+    pub modality_for_q: Vec<u32>,
+    pub gene_for_bias: Vec<u32>,
+    pub modality_for_bias: Vec<u32>,
+    pub is_agg: Vec<bool>,
+    /// Right-hand-axis id (cell id for `Axis::Cell`; pb id for `Axis::Pb`).
+    pub axis_id: Vec<u32>,
+}
+
+impl PositiveSlate {
+    pub fn len(&self) -> usize {
+        self.gene_for_rho.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.gene_for_rho.is_empty()
+    }
+}
+
+/// Per-negative identity, flattened `[B * k]`.
+pub struct NegativeSlate {
+    pub gene_for_rho: Vec<u32>,
+    pub gene_for_z: Vec<u32>,
+    pub modality_for_q: Vec<u32>,
+    pub gene_for_bias: Vec<u32>,
+    pub modality_for_bias: Vec<u32>,
+    pub is_agg: Vec<bool>,
+    pub k: usize,
+}
+
+impl NegativeSlate {
+    pub fn len(&self) -> usize {
+        self.gene_for_rho.len()
+    }
+}
+
+pub struct SubBatch {
+    pub positives: PositiveSlate,
+    pub rand: NegativeSlate,
+    pub swap_z: Option<NegativeSlate>,
+    pub swap_q: Option<NegativeSlate>,
+}
+
+pub struct Minibatch {
+    pub anchor: Option<SubBatch>,
+    pub modifier: Option<SubBatch>,
+}
+
+/// Pre-built distributions for one axis.
+pub struct AxisDists {
+    pub agg: Option<WeightedIndex<f32>>,
+    pub count: Option<WeightedIndex<f32>>,
+    pub modifier_modality: Option<WeightedIndex<f32>>,
+    pub modifier_per_modality: Vec<Option<WeightedIndex<f32>>>,
+}
+
+pub struct SamplerState {
+    pub cell: AxisDists,
+    pub pb_per_level: Vec<AxisDists>,
+    pub modifier_modality_ids: Vec<u32>,
+    pub measured_genes_per_modality: Vec<Vec<u32>>,
+}
+
+impl SamplerState {
+    pub fn new(table: &FeatureTable, pb: &PseudobulkData, args: &RnaModEmbedArgs) -> Self {
+        let n_modalities = table.n_modalities();
+
+        let modifier_modality_ids: Vec<u32> = (1..n_modalities as u32)
+            .filter(|&m| !table.modifier_rows_by_modality[m as usize].is_empty())
+            .collect();
+
+        let measured_genes_per_modality: Vec<Vec<u32>> = (0..n_modalities)
+            .map(|m| table.measured_genes_for_modality(m as u32))
+            .collect();
+
+        let tau_m = args.tau_modality.max(0.0);
+        let build_dists = |pool: &AxisPools| -> AxisDists {
+            let mod_weights: Vec<f32> = modifier_modality_ids
+                .iter()
+                .map(|&m| {
+                    let mass = pool.modality_total_mass[m as usize].max(0.0);
+                    if mass > 0.0 {
+                        mass.powf(tau_m)
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            AxisDists {
+                agg: weighted_index(&pool.agg.weights),
+                count: weighted_index(&pool.count_comp.weights),
+                modifier_modality: weighted_index(&mod_weights),
+                modifier_per_modality: pool
+                    .modifier_comp_per_modality
+                    .iter()
+                    .map(|p| weighted_index(&p.weights))
+                    .collect(),
+            }
+        };
+
+        let cell = build_dists(&pb.cell_pools);
+        let pb_per_level = pb.pb_pools_per_level.iter().map(build_dists).collect();
+
+        Self {
+            cell,
+            pb_per_level,
+            modifier_modality_ids,
+            measured_genes_per_modality,
+        }
+    }
+
+    pub fn dists(&self, axis: Axis) -> &AxisDists {
+        match axis {
+            Axis::Cell => &self.cell,
+            Axis::Pb(level) => &self.pb_per_level[level],
+        }
+    }
+}
+
+fn axis_pools(pb: &PseudobulkData, axis: Axis) -> &AxisPools {
+    match axis {
+        Axis::Cell => &pb.cell_pools,
+        Axis::Pb(level) => &pb.pb_pools_per_level[level],
+    }
+}
+
+fn weighted_index(w: &[f32]) -> Option<WeightedIndex<f32>> {
+    // `v > 0.0` is false for NaN, ≤ 0, and -∞; we want the same
+    // exclusion semantics here. `v.partial_cmp(&0.0) != Some(Greater)`
+    // matches NaN-as-not-positive without tripping
+    // `neg_cmp_op_on_partial_ord`.
+    if w.is_empty()
+        || w.iter()
+            .all(|&v| v.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater))
+    {
+        return None;
+    }
+    WeightedIndex::new(w).ok()
+}
+
+/// Draw one minibatch on the given axis. Total positive budget
+/// `B = args.batch_size`, partitioned across strata by
+/// `args.f_agg` / `args.f_count` (modifier gets the remainder).
+pub fn draw_minibatch<R: Rng>(
+    axis: Axis,
+    state: &SamplerState,
+    pb: &PseudobulkData,
+    args: &RnaModEmbedArgs,
+    rng: &mut R,
+) -> Minibatch {
+    let b_total = args.batch_size;
+    let b_agg = (args.f_agg.clamp(0.0, 1.0) * b_total as f32).round() as usize;
+    let b_count = (args.f_count.clamp(0.0, 1.0) * b_total as f32).round() as usize;
+    let b_modifier = b_total.saturating_sub(b_agg + b_count);
+
+    let pools = axis_pools(pb, axis);
+    let dists = state.dists(axis);
+
+    let anchor = build_anchor_sub_batch(state, pools, dists, b_agg, b_count, args, rng);
+    let modifier = build_modifier_sub_batch(state, pools, dists, b_modifier, args, rng);
+
+    Minibatch { anchor, modifier }
+}
+
+fn build_anchor_sub_batch<R: Rng>(
+    _state: &SamplerState,
+    pools: &AxisPools,
+    dists: &AxisDists,
+    b_agg: usize,
+    b_count: usize,
+    args: &RnaModEmbedArgs,
+    rng: &mut R,
+) -> Option<SubBatch> {
+    let mut positives = PositiveSlate {
+        gene_for_rho: Vec::with_capacity(b_agg + b_count),
+        gene_for_z: Vec::with_capacity(b_agg + b_count),
+        modality_for_q: Vec::with_capacity(b_agg + b_count),
+        gene_for_bias: Vec::with_capacity(b_agg + b_count),
+        modality_for_bias: Vec::with_capacity(b_agg + b_count),
+        is_agg: Vec::with_capacity(b_agg + b_count),
+        axis_id: Vec::with_capacity(b_agg + b_count),
+    };
+
+    if let Some(dist) = dists.agg.as_ref() {
+        for _ in 0..b_agg {
+            let i = dist.sample(rng);
+            push_agg_positive(&mut positives, &pools.agg, i);
+        }
+    }
+
+    if let Some(dist) = dists.count.as_ref() {
+        for _ in 0..b_count {
+            let i = dist.sample(rng);
+            push_component_positive(&mut positives, &pools.count_comp, i, /*modality=*/ 0);
+        }
+    }
+
+    if positives.is_empty() {
+        return None;
+    }
+
+    let rand = draw_random_negatives(pools, dists, &positives, args.n_rand, rng);
+
+    Some(SubBatch {
+        positives,
+        rand,
+        swap_z: None,
+        swap_q: None,
+    })
+}
+
+fn build_modifier_sub_batch<R: Rng>(
+    state: &SamplerState,
+    pools: &AxisPools,
+    dists: &AxisDists,
+    b: usize,
+    args: &RnaModEmbedArgs,
+    rng: &mut R,
+) -> Option<SubBatch> {
+    if b == 0 {
+        return None;
+    }
+    let mod_dist = dists.modifier_modality.as_ref()?;
+    let modifier_mods = &state.modifier_modality_ids;
+    if modifier_mods.is_empty() {
+        return None;
+    }
+
+    let mut positives = PositiveSlate {
+        gene_for_rho: Vec::with_capacity(b),
+        gene_for_z: Vec::with_capacity(b),
+        modality_for_q: Vec::with_capacity(b),
+        gene_for_bias: Vec::with_capacity(b),
+        modality_for_bias: Vec::with_capacity(b),
+        is_agg: Vec::with_capacity(b),
+        axis_id: Vec::with_capacity(b),
+    };
+
+    for _ in 0..b {
+        let m_idx = mod_dist.sample(rng);
+        let m = modifier_mods[m_idx];
+        let Some(pool_dist) = dists.modifier_per_modality[m as usize].as_ref() else {
+            continue;
+        };
+        let i = pool_dist.sample(rng);
+        push_component_positive(
+            &mut positives,
+            &pools.modifier_comp_per_modality[m as usize],
+            i,
+            m,
+        );
+    }
+
+    if positives.is_empty() {
+        return None;
+    }
+
+    let rand = draw_random_negatives(pools, dists, &positives, args.n_rand, rng);
+    let swap_z = draw_swap_z_negatives(state, &positives, args.n_swap_z, rng);
+    let swap_q = draw_swap_q_negatives(state, &positives, args.n_swap_q, rng);
+
+    Some(SubBatch {
+        positives,
+        rand,
+        swap_z,
+        swap_q,
+    })
+}
+
+fn push_agg_positive(slate: &mut PositiveSlate, pool: &StratumPool, i: usize) {
+    let g = pool.gene_ids[i];
+    let a = pool.axis_ids[i];
+    slate.gene_for_rho.push(g);
+    slate.gene_for_z.push(g);
+    slate.modality_for_q.push(0);
+    slate.gene_for_bias.push(g);
+    slate.modality_for_bias.push(0);
+    slate.is_agg.push(true);
+    slate.axis_id.push(a);
+}
+
+fn push_component_positive(slate: &mut PositiveSlate, pool: &StratumPool, i: usize, modality: u32) {
+    let g = pool.gene_ids[i];
+    let a = pool.axis_ids[i];
+    slate.gene_for_rho.push(g);
+    slate.gene_for_z.push(g);
+    slate.modality_for_q.push(modality);
+    slate.gene_for_bias.push(g);
+    slate.modality_for_bias.push(modality);
+    slate.is_agg.push(false);
+    slate.axis_id.push(a);
+}
+
+const REJECT_RETRIES: usize = 8;
+
+fn draw_random_negatives<R: Rng>(
+    pools: &AxisPools,
+    dists: &AxisDists,
+    positives: &PositiveSlate,
+    k: usize,
+    rng: &mut R,
+) -> NegativeSlate {
+    let b = positives.len();
+    let total = b * k;
+    let mut out = NegativeSlate {
+        gene_for_rho: Vec::with_capacity(total),
+        gene_for_z: Vec::with_capacity(total),
+        modality_for_q: Vec::with_capacity(total),
+        gene_for_bias: Vec::with_capacity(total),
+        modality_for_bias: Vec::with_capacity(total),
+        is_agg: Vec::with_capacity(total),
+        k,
+    };
+    if k == 0 {
+        return out;
+    }
+    for i in 0..b {
+        let pos_gene = positives.gene_for_rho[i];
+        let pos_modality = positives.modality_for_q[i];
+        let pos_is_agg = positives.is_agg[i];
+
+        let (pool, dist_opt) = if pos_is_agg {
+            (&pools.agg, dists.agg.as_ref())
+        } else if pos_modality == 0 {
+            (&pools.count_comp, dists.count.as_ref())
+        } else {
+            (
+                &pools.modifier_comp_per_modality[pos_modality as usize],
+                dists.modifier_per_modality[pos_modality as usize].as_ref(),
+            )
+        };
+
+        for _ in 0..k {
+            let Some(g_neg) = pool_sample_distinct(pool, dist_opt, pos_gene, rng) else {
+                // No gene distinct from the positive exists in this
+                // stratum (e.g. only one distinct gene in the pool).
+                // A "negative" equal to the positive has identical
+                // e_f / b_f and corrupts the NCE softmax denominator,
+                // so drop the whole slate: the caller's loss path
+                // will skip score_negative_slate when k=0.
+                return empty_negative_slate();
+            };
+            out.gene_for_rho.push(g_neg);
+            out.gene_for_z.push(g_neg);
+            out.modality_for_q.push(pos_modality);
+            out.gene_for_bias.push(g_neg);
+            out.modality_for_bias.push(pos_modality);
+            out.is_agg.push(pos_is_agg);
+        }
+    }
+    out
+}
+
+fn empty_negative_slate() -> NegativeSlate {
+    NegativeSlate {
+        gene_for_rho: Vec::new(),
+        gene_for_z: Vec::new(),
+        modality_for_q: Vec::new(),
+        gene_for_bias: Vec::new(),
+        modality_for_bias: Vec::new(),
+        is_agg: Vec::new(),
+        k: 0,
+    }
+}
+
+fn pool_sample_distinct<R: Rng>(
+    pool: &StratumPool,
+    dist: Option<&WeightedIndex<f32>>,
+    exclude_gene: u32,
+    rng: &mut R,
+) -> Option<u32> {
+    let dist = dist?;
+    // First, count-weighted rejection draws (preserves the τ-tempered
+    // sampling distribution in the common case).
+    for _ in 0..REJECT_RETRIES {
+        let idx = dist.sample(rng);
+        let g = pool.gene_ids[idx];
+        if g != exclude_gene {
+            return Some(g);
+        }
+    }
+    // Rare collision storm (e.g. one gene dominates the τ-weighted
+    // mass). Fall back to a deterministic linear scan — if any gene
+    // distinct from the positive exists in this pool, return it;
+    // otherwise return None so the caller can drop the slate.
+    pool.gene_ids.iter().copied().find(|&g| g != exclude_gene)
+}
+
+fn draw_swap_z_negatives<R: Rng>(
+    state: &SamplerState,
+    positives: &PositiveSlate,
+    k: usize,
+    rng: &mut R,
+) -> Option<NegativeSlate> {
+    if k == 0 {
+        return None;
+    }
+    let b = positives.len();
+    let total = b * k;
+    let mut out = NegativeSlate {
+        gene_for_rho: Vec::with_capacity(total),
+        gene_for_z: Vec::with_capacity(total),
+        modality_for_q: Vec::with_capacity(total),
+        gene_for_bias: Vec::with_capacity(total),
+        modality_for_bias: Vec::with_capacity(total),
+        is_agg: Vec::with_capacity(total),
+        k,
+    };
+    for i in 0..b {
+        let g = positives.gene_for_rho[i];
+        let m = positives.modality_for_q[i];
+        let pool = &state.measured_genes_per_modality[m as usize];
+        // Need ≥ 2 distinct measured genes for the modality to even
+        // construct a single swap-z negative; if not, drop the whole
+        // swap-z slate this minibatch (NCE loss skips it gracefully).
+        if pool.len() < 2 {
+            return None;
+        }
+        for _ in 0..k {
+            let g_prime = swap_pick_distinct(pool, g, rng)?;
+            out.gene_for_rho.push(g);
+            out.gene_for_z.push(g_prime);
+            out.modality_for_q.push(m);
+            out.gene_for_bias.push(g);
+            out.modality_for_bias.push(m);
+            out.is_agg.push(false);
+        }
+    }
+    Some(out)
+}
+
+fn draw_swap_q_negatives<R: Rng>(
+    state: &SamplerState,
+    positives: &PositiveSlate,
+    k: usize,
+    rng: &mut R,
+) -> Option<NegativeSlate> {
+    if k == 0 {
+        return None;
+    }
+    let modifier_mods = &state.modifier_modality_ids;
+    if modifier_mods.len() < 2 {
+        return None;
+    }
+    let b = positives.len();
+    let total = b * k;
+    let mut out = NegativeSlate {
+        gene_for_rho: Vec::with_capacity(total),
+        gene_for_z: Vec::with_capacity(total),
+        modality_for_q: Vec::with_capacity(total),
+        gene_for_bias: Vec::with_capacity(total),
+        modality_for_bias: Vec::with_capacity(total),
+        is_agg: Vec::with_capacity(total),
+        k,
+    };
+    for i in 0..b {
+        let g = positives.gene_for_rho[i];
+        let m = positives.modality_for_q[i];
+        for _ in 0..k {
+            let m_prime = swap_pick_distinct(modifier_mods, m, rng)?;
+            out.gene_for_rho.push(g);
+            out.gene_for_z.push(g);
+            out.modality_for_q.push(m_prime);
+            out.gene_for_bias.push(g);
+            out.modality_for_bias.push(m);
+            out.is_agg.push(false);
+        }
+    }
+    Some(out)
+}
+
+/// Uniform-with-rejection swap target picker shared by swap-z and
+/// swap-q. After `REJECT_RETRIES` RNG draws, falls back to a
+/// deterministic linear scan so we never silently degenerate to
+/// `target == exclude`. Returns `None` only when the haystack has no
+/// element distinct from `exclude`.
+fn swap_pick_distinct<R: Rng>(haystack: &[u32], exclude: u32, rng: &mut R) -> Option<u32> {
+    for _ in 0..REJECT_RETRIES {
+        if let Some(&v) = haystack.choose(rng) {
+            if v != exclude {
+                return Some(v);
+            }
+        } else {
+            return None; // empty haystack
+        }
+    }
+    haystack.iter().copied().find(|&v| v != exclude)
+}

@@ -8,24 +8,28 @@ mod hypothesis_tests;
 mod mixture;
 mod pipeline_util;
 mod read_depth;
+mod rna_mod_embed;
 mod run_apa;
 mod run_atoi;
 mod run_gene_count;
 mod run_m6a;
 mod run_pipeline;
 mod run_read_depth;
+mod run_rna_mod_embed;
 mod run_snp;
 mod site_analysis;
 mod snp;
 
 use crate::common::*;
 use colored::Colorize;
+use rna_mod_embed::args::RnaModEmbedArgs;
 use run_apa::*;
 use run_atoi::*;
 use run_gene_count::*;
 use run_m6a::*;
 use run_pipeline::*;
 use run_read_depth::*;
+use run_rna_mod_embed::*;
 use run_snp::*;
 use site_analysis::metagene::*;
 use site_analysis::pileup::*;
@@ -267,6 +271,24 @@ Known SNP reference files:\n\n  \
     Snp(SnpArgs),
 
     #[command(
+        name = "rna-mod-embed",
+        aliases = ["rmodem"],
+        about = "Joint CP-factored embedding across gene counts + modification tracks",
+        long_about = "Joint CP-factored embedding across gene counts + RNA-modification tracks\n\n\
+            Learns a pooled gene embedding ρ_g, a per-gene regulatory profile\n\
+            z_g over K shared programs, and per-modality program signatures\n\
+            Q_{k,m,:} jointly from `faba {genes,dartseq,atoi,apa}` outputs.\n\n\
+            Cross-modality imputation falls out for free: for an unmeasured\n\
+            (gene, modality) pair, e = ρ_g + z_g · Q_{:,m,:} is computable\n\
+            because z_g is inferred from g's other modalities and Q_{:,m,:}\n\
+            from other genes' m-data.",
+        after_long_help = "\
+Example:\n  \
+  faba rmodem --genes out/genes.zarr.zip --dartseq out/dartseq.zarr.zip \\\n    \
+              --atoi out/atoi.zarr.zip --apa out/apa.zarr.zip -o out/rmodem")]
+    RnaModEmbed(RnaModEmbedArgs),
+
+    #[command(
         name = "all",
         aliases = ["pipeline", "full", "magic"],
         about = "Run all RNA-seq analyses: genes → ATOI → APA → DART",
@@ -308,6 +330,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Pileup(ref args) => run_pileup(args)?,
         Commands::Metagene(ref args) => run_metagene(args)?,
         Commands::Snp(ref args) => run_snp(args)?,
+        Commands::RnaModEmbed(ref args) => run_rna_mod_embed(args)?,
         Commands::All(ref args) => run_pipeline(args)?,
     }
 
