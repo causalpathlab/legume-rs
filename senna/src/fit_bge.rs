@@ -166,8 +166,15 @@ pub struct BgeArgs {
     #[arg(short = 'i', long, default_value_t = 200, help = "Training epochs")]
     epochs: usize,
 
-    #[arg(long, default_value_t = 100, help = "Batches per epoch")]
-    batches_per_epoch: usize,
+    /// Batches per epoch. **Omit for auto** — one weighted pass per
+    /// epoch over the largest axis (`ceil(max_axis_units / batch_size)`).
+    /// Pass a value to force a fixed step budget per epoch (historical
+    /// default: 100).
+    #[arg(
+        long,
+        help = "Batches per epoch (default: auto = one pass over largest axis)"
+    )]
+    batches_per_epoch: Option<usize>,
 
     #[arg(long, default_value_t = 1024, help = "Positive edges per batch")]
     batch_size: usize,

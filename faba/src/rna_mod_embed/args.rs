@@ -1,6 +1,15 @@
 use clap::Args;
 
-/// CLI arguments for `faba rna-mod-embed` (alias `rmodem`).
+use super::common::ComputeDevice;
+
+/// CLI arguments for `faba rna-mod-embed` (aliases `rmodem`, `embed`).
+///
+/// Flag conventions mirror `senna bge` where applicable (`-i / --epochs`,
+/// `-b / --batch-files`, `--learning-rate` with `--lr` alias,
+/// `--preload-data`, `--device` / `--device-no`,
+/// `--feature-name-delim` / `--feature-name-exact`,
+/// `-o / --out`). Rmodem-specific knobs (per-stratum fractions,
+/// negative counts, etc.) stay in their own block below.
 #[derive(Args, Debug, Clone)]
 pub struct RnaModEmbedArgs {
     /// Counts (gene-level) sparse matrix prefix. Rows must follow
@@ -24,7 +33,7 @@ pub struct RnaModEmbedArgs {
     pub apa: Option<Box<str>>,
 
     /// Optional batch-label files, one per modality input.
-    #[arg(long, value_delimiter = ',')]
+    #[arg(short = 'b', long, value_delimiter = ',')]
     pub batch_files: Option<Vec<Box<str>>>,
 
     /// Output prefix.
@@ -35,11 +44,11 @@ pub struct RnaModEmbedArgs {
     // Model dims
     ////////////////////////////////////////
     /// Embedding dimension H (size of ρ_g, Q_{k,m,:}).
-    #[arg(short = 'd', long = "embedding-dim", default_value_t = 32)]
+    #[arg(long, default_value_t = 32)]
     pub embedding_dim: usize,
 
     /// Number of shared regulatory programs K.
-    #[arg(short = 'k', long = "num-programs", default_value_t = 8)]
+    #[arg(long = "num-programs", default_value_t = 8)]
     pub n_programs: usize,
 
     ////////////////////////////////////////
@@ -64,20 +73,94 @@ pub struct RnaModEmbedArgs {
     #[arg(long)]
     pub ignore_batch: bool,
 
+    /// Train only on the pseudobulk axes — skip the cell-axis loss.
+    /// For feature-embedding (ρ, z, Q) quality the pb axes carry the
+    /// dense, low-variance signal; the cell axis adds mostly Poisson
+    /// noise on the modifier side. `e_cell` / `b_cell` still get
+    /// allocated and written, but stay at their init values (zero bias,
+    /// random embedding) — refit them post-hoc if needed.
+    #[arg(long)]
+    pub no_cell_axis: bool,
+
+    ////////////////////////////////////////
+    // Feature-name canonicalization (senna bge convention)
+    //
+    // NOTE: rmodem rows are `{gene}/{modality}/{detail}` and the
+    // FeatureTable parser depends on that full path. The Gene-style
+    // last-token canonicalizer (senna bge's default) would collapse
+    // `gene_5/m6A/pos1234` to `1234` and silently drop every modifier
+    // row, so we default to **exact** matching here. The delim flag is
+    // still exposed for symmetry with bge / for input files that mix
+    // `ENSG..._SYMBOL` prefixes inside the `{gene}` slot.
+    ////////////////////////////////////////
+    /// Delimiter for fuzzy gene-name matching across input files (last
+    /// token after the split is the canonical row name). Ignored unless
+    /// `--feature-name-exact` is *off* — which is **not** the default
+    /// for rmodem (see note above).
+    #[arg(long, default_value_t = '_')]
+    pub feature_name_delim: char,
+
+    /// Use exact row-name match across files (no canonicalization). The
+    /// rmodem default — required because the `{gene}/{modality}/{detail}`
+    /// row format is sensitive to suffix-splitting. Pass
+    /// `--feature-name-exact=false` only if your `{gene}` slot itself
+    /// carries a stripping suffix.
+    #[arg(long, default_value_t = true)]
+    pub feature_name_exact: bool,
+
+    ////////////////////////////////////////
+    // I/O knobs (senna bge convention)
+    ////////////////////////////////////////
+    /// Preload all sparse column data into memory before any pass over
+    /// cells. Faster when data fits in RAM; required on slow disks.
+    #[arg(long, default_value_t = false)]
+    pub preload_data: bool,
+
     ////////////////////////////////////////
     // Training
     ////////////////////////////////////////
-    #[arg(long, default_value_t = 30)]
+    #[arg(short = 'i', long, default_value_t = 30, help = "Training epochs")]
     pub epochs: usize,
 
-    #[arg(long, default_value_t = 100)]
-    pub batches_per_epoch: usize,
+    /// Batches per epoch. **Omit for auto** — one weighted pass over the
+    /// largest axis (`ceil(max(n_cells, max_pb_per_level) / batch_size)`).
+    /// Pass a value to force a fixed step budget per epoch (old behavior;
+    /// historical default was 100).
+    #[arg(
+        long,
+        help = "Batches per epoch (default: auto = one pass over largest axis)"
+    )]
+    pub batches_per_epoch: Option<usize>,
 
-    #[arg(long, default_value_t = 1024)]
+    #[arg(long, default_value_t = 1024, help = "Positive edges per batch")]
     pub batch_size: usize,
 
-    #[arg(long, default_value_t = 1e-3)]
+    #[arg(
+        long,
+        default_value_t = 1e-3,
+        alias = "lr",
+        help = "AdamW learning rate"
+    )]
     pub learning_rate: f64,
+
+    /// L2 penalty λ_z · mean(z²) on the per-gene program loadings.
+    /// Matches `senna bge`'s `--feature-embedding-l2` style: mean-normalized
+    /// so λ stays scale-invariant across (G·K). Default 1e-4 (mild).
+    #[arg(
+        long,
+        default_value_t = 1e-4,
+        help = "L2 penalty on z (mean-normalized)"
+    )]
+    pub z_l2: f32,
+
+    /// L2 penalty λ_Q · mean(Q²) on the per-modality program signatures.
+    /// Default 1e-4.
+    #[arg(
+        long,
+        default_value_t = 1e-4,
+        help = "L2 penalty on Q (mean-normalized)"
+    )]
+    pub q_l2: f32,
 
     ////////////////////////////////////////
     // Sampling strata
@@ -103,18 +186,30 @@ pub struct RnaModEmbedArgs {
     ////////////////////////////////////////
     // Negatives
     ////////////////////////////////////////
+    /// Random negatives: pick another (g', m, c) row within the
+    /// positive's stratum and modality. Tests gene-cell identification
+    /// (ρ-side classification).
     #[arg(long, default_value_t = 10)]
     pub n_rand: usize,
 
-    #[arg(long, default_value_t = 5)]
-    pub n_swap_z: usize,
-
-    #[arg(long, default_value_t = 5)]
-    pub n_swap_q: usize,
+    /// Swap-gene-mode negatives: keep ρ_g and modality m fixed, but
+    /// substitute the K-program loading z from another gene g'. Tests
+    /// the gene's program-loading identity given the modality
+    /// (z-side classification). Was `--n-swap-z` previously.
+    #[arg(long, default_value_t = 5, alias = "n-swap-z")]
+    pub n_swap_gene_mode: usize,
 
     ////////////////////////////////////////
     // Misc
     ////////////////////////////////////////
     #[arg(long, default_value_t = 42)]
     pub seed: u64,
+
+    /// Compute device. `cuda`/`metal` require the matching cargo feature.
+    #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
+    pub device: ComputeDevice,
+
+    /// Device ordinal (for `cuda` / `metal`).
+    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
+    pub device_no: usize,
 }

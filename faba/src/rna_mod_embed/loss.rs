@@ -4,10 +4,11 @@
 //!
 //!     L_i = -log( exp(score+_i) / (exp(score+_i) + Σ_k exp(score_neg_{i,k})) )
 //!
-//! where negatives concatenate random / swap-z / swap-Q draws (when
+//! where negatives concatenate random / swap-gene-mode draws (when
 //! applicable for the sub-batch's stratum). All negatives are scored at
 //! the same RHS column (cell id or pb id) as the positive.
 
+use super::common::{candle_core, candle_nn};
 use anyhow::Result;
 use candle_core::{DType, IndexOp, Tensor};
 
@@ -64,12 +65,7 @@ fn sub_batch_loss(model: &RnaModEmbedModel, axis: Axis, sub: &SubBatch) -> Resul
     if let Some(block) = score_negative_slate(model, axis, &pos.axis_id, &sub.rand)? {
         neg_blocks.push(block);
     }
-    if let Some(slate) = sub.swap_z.as_ref() {
-        if let Some(block) = score_negative_slate(model, axis, &pos.axis_id, slate)? {
-            neg_blocks.push(block);
-        }
-    }
-    if let Some(slate) = sub.swap_q.as_ref() {
+    if let Some(slate) = sub.swap_gene_mode.as_ref() {
         if let Some(block) = score_negative_slate(model, axis, &pos.axis_id, slate)? {
             neg_blocks.push(block);
         }

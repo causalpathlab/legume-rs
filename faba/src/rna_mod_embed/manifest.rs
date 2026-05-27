@@ -1,6 +1,7 @@
 //! On-disk outputs: parquet writers for the trained params + a JSON
 //! manifest that senna (Mode A or Mode B) consumes via `--from`.
 
+use super::common::candle_core;
 use anyhow::{Context, Result};
 use candle_core::Tensor;
 use matrix_util::dmatrix_io::DMatrix;
@@ -34,8 +35,9 @@ pub struct RnaModEmbedManifest {
     pub gene_embedding: String,
     /// z_g — `[G × K]` matrix; first column = gene name. (Mode B only.)
     pub gene_program_loadings: String,
-    /// Q — long format with columns
-    /// `(program, modality, dim_0..dim_{H-1})`. (Mode B only.)
+    /// Q — wide format, rows = K programs, columns = M modalities.
+    /// Each entry Q[k, m] is a scalar program-modality response (the
+    /// sim's `A_{m, k}` analog). (Mode B only.)
     pub program_signatures: String,
     /// `[M × 2]` (modality_id, modality_name) lookup.
     pub modality_axis: String,
@@ -103,14 +105,17 @@ pub fn write_outputs(
     )
     .with_context(|| format!("writing {path_z}"))?;
 
-    // Q in long format: row = (program, modality), columns = dim_0..dim_{H-1}.
-    write_q_long(
-        &model.q,
-        &prog_names,
-        &table.modality_names,
-        &dim_names,
-        &path_q,
-    )?;
+    // Q in wide format: rows = K programs, columns = M modalities.
+    // Each entry Q[k, m] is the scalar program-modality response in the
+    // simulator's `A_{m, k}` sense.
+    let q_mat = tensor_to_dmatrix2(&model.q)?;
+    q_mat
+        .to_parquet_with_names(
+            &path_q,
+            (Some(&prog_names), Some("program")),
+            Some(&table.modality_names),
+        )
+        .with_context(|| format!("writing {path_q}"))?;
 
     // modality_axis: row = modality_id (0..M-1), single column = modality_name.
     write_modality_axis(&table.modality_names, &path_mod_axis)?;
@@ -189,7 +194,7 @@ pub fn write_outputs(
 
     let json = serde_json::to_string_pretty(&manifest)?;
     std::fs::write(&path_manifest, json).with_context(|| format!("writing {path_manifest}"))?;
-    log::info!("rmodem: manifest → {path_manifest}");
+    log::info!("manifest → {path_manifest}");
     Ok(())
 }
 
@@ -216,44 +221,6 @@ fn tensor_to_dmatrix1(t: &Tensor) -> Result<DMatrix<f32>> {
     let n = shape[0];
     let v: Vec<f32> = t.to_vec1::<f32>()?;
     Ok(DMatrix::from_column_slice(n, 1, &v))
-}
-
-fn write_q_long(
-    q: &Tensor,
-    program_names: &[Box<str>],
-    modality_names: &[Box<str>],
-    dim_names: &[Box<str>],
-    path: &str,
-) -> Result<()> {
-    // Q shape: [K, M, H]
-    let dims = q.shape().dims();
-    anyhow::ensure!(dims.len() == 3, "Q must be 3D, got {:?}", dims);
-    let (k, m, h) = (dims[0], dims[1], dims[2]);
-    // Pull as Vec<Vec<Vec<f32>>>
-    let data: Vec<Vec<Vec<f32>>> = q.to_vec3::<f32>()?;
-    let n_rows = k * m;
-    let row_names: Vec<Box<str>> = (0..k)
-        .flat_map(|ki| {
-            (0..m).map(move |mi| {
-                format!("{}/{}", program_names[ki], modality_names[mi]).into_boxed_str()
-            })
-        })
-        .collect();
-    let mut mat = DMatrix::<f32>::zeros(n_rows, h);
-    for (ki, prog_mat) in data.iter().enumerate() {
-        for (mi, dim_vec) in prog_mat.iter().enumerate() {
-            let row = ki * m + mi;
-            for (hi, &v) in dim_vec.iter().enumerate() {
-                mat[(row, hi)] = v;
-            }
-        }
-    }
-    mat.to_parquet_with_names(
-        path,
-        (Some(&row_names), Some("program_modality")),
-        Some(dim_names),
-    )
-    .with_context(|| format!("writing {path}"))
 }
 
 fn write_modality_axis(modality_names: &[Box<str>], path: &str) -> Result<()> {

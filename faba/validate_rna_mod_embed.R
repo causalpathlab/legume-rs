@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 # Recovery validation for `faba rna-mod-embed`.
 #
-# Compares rmodem's CP-factored outputs against `data-beans-sim faba`'s
+# Compares rmodem's outputs against `data-beans-sim faba`'s
 # ground truth:
 #
 #   1. z_g recovery — Procrustes-align rmodem's z to sim's z_true on

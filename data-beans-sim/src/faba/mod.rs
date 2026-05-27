@@ -9,7 +9,7 @@
 //! simulated data without code changes.
 //!
 //! Generative model (see `faba/temp.md` for the embedding-side
-//! motivation; this simulator does NOT enforce a CP-recovery-friendly
+//! motivation; this simulator does NOT enforce a recovery-friendly
 //! geometry — it samples from the underlying biology):
 //!
 //! ```text

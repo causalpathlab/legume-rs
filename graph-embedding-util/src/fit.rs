@@ -76,7 +76,9 @@ pub struct FitConfig {
     /// correction and the multilevel collapse.
     pub proj_dim: usize,
     pub epochs: usize,
-    pub batches_per_epoch: usize,
+    /// `None` = auto: one weighted pass per epoch over the largest axis.
+    /// `Some(n)` = fixed step budget.
+    pub batches_per_epoch: Option<usize>,
     pub batch_size: usize,
     pub num_negatives: usize,
     pub learning_rate: f64,
