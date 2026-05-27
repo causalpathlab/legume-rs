@@ -20,12 +20,16 @@ cuda = [
     "data-beans-alg/cuda",
     "matrix-util/cuda",
     "matrix-param/cuda",
+    "candle-util/cuda",
+    "graph-embedding-util/cuda",
 ]
 metal = [
     "data-beans/metal",
     "data-beans-alg/metal",
     "matrix-util/metal",
     "matrix-param/metal",
+    "candle-util/metal",
+    "graph-embedding-util/metal",
 ]
 # Forward data-beans's optional `hdf5` feature so `cargo install faba --features hdf5`
 # enables the HDF5 backend + .h5/.h5ad readers (requires libhdf5 on the build host).
@@ -67,3 +71,18 @@ rustc-hash = { workspace = true }
 dashmap = { version = "6.1.0", features = ["rayon"] }
 rust-htslib = { workspace = true }
 arrow = "58"
+
+# rna-mod-embed subcommand
+candle-util = { workspace = true }
+graph-embedding-util = { workspace = true }
+auxiliary-data = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dependencies.candle-core]
+version = "0.10"
+default-features = false
+
+[dependencies.candle-nn]
+version = "0.10"
+default-features = false
