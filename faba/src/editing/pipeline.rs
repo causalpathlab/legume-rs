@@ -17,6 +17,22 @@ use std::sync::{Arc, Mutex};
 /// Padding around target region when reading BAM files
 const BAM_READ_PADDING: i64 = 1;
 
+/// How per-observation weights are computed for the per-gene mixture model.
+///
+/// Both modes feed the same value to the EM and to the output sparse matrix
+/// (matrix entries are fractional under `Posterior`). The CLI default is
+/// `Posterior`; `Converted` preserves the pre-2026 behavior bit-for-bit.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Default)]
+#[clap(rename_all = "lowercase")]
+pub enum MixtureWeightMode {
+    /// Weight each observation by raw converted-read count `c_i` (legacy).
+    Converted,
+    /// Weight by Beta-posterior regularized effective count
+    /// `w_i = n_i · (c_i + α) / (n_i + α + β)`, where `n_i = c_i + u_i`.
+    #[default]
+    Posterior,
+}
+
 /// Unified parameters for base conversion (m6A and A-to-I) discovery and quantification.
 pub struct ConversionParams {
     pub genome_file: Box<str>,
@@ -43,6 +59,12 @@ pub struct ConversionParams {
     pub mod_type: ModificationType,
     pub min_base_quality: u8,
     pub min_mapping_quality: u8,
+    /// Per-observation weighting used by `run_mixture_model`.
+    pub mixture_weight_mode: MixtureWeightMode,
+    /// Beta(α, β) prior parameter α for `MixtureWeightMode::Posterior`.
+    pub mixture_prior_alpha: f32,
+    /// Beta(α, β) prior parameter β for `MixtureWeightMode::Posterior`.
+    pub mixture_prior_beta: f32,
 }
 
 impl ConversionParams {
@@ -1028,12 +1050,29 @@ pub fn run_mixture_model(
         .map(|(i, cb)| (cb.clone(), i))
         .collect();
 
-    // Group observations by gene, converting to strand-aware relative position
-    let mut gene_obs: rustc_hash::FxHashMap<GeneId, Vec<(usize, f32, usize)>> =
+    // Group observations by gene, converting to strand-aware relative position.
+    // The third tuple element is the per-observation weight (raw count under
+    // Converted mode, regularized effective count under Posterior mode).
+    let mut gene_obs: rustc_hash::FxHashMap<GeneId, Vec<(usize, f32, f32)>> =
         rustc_hash::FxHashMap::default();
     for (cb, bed, meth) in &all_stats {
         let cell_idx = cell_to_idx[cb];
-        let count = meth.converted;
+        let c = meth.converted as f32;
+        let u = meth.unconverted as f32;
+        let n = c + u;
+        let w = match params.mixture_weight_mode {
+            MixtureWeightMode::Converted => c,
+            MixtureWeightMode::Posterior => {
+                let a = params.mixture_prior_alpha;
+                let b = params.mixture_prior_beta;
+                if n + a + b > 0.0 {
+                    let r_hat = (c + a) / (n + a + b);
+                    n * r_hat
+                } else {
+                    0.0
+                }
+            }
+        };
         // Convert absolute site_pos to strand-aware relative position
         let rel_pos = if let Some(gff) = gff_map.get(&bed.gene) {
             let lb = (gff.start - 1).max(0); // GFF 1-based -> 0-based
@@ -1048,7 +1087,7 @@ pub fn run_mixture_model(
         gene_obs
             .entry(bed.gene.clone())
             .or_default()
-            .push((cell_idx, rel_pos, count));
+            .push((cell_idx, rel_pos, w));
     }
 
     // Fit mixture per gene in parallel
@@ -1128,7 +1167,7 @@ pub fn run_mixture_model(
                     let feature_id: Box<str> =
                         format!("{}/{}/{}", gene_name, mod_suffix, new_idx).into();
                     let cb = &unique_cells[*cell_idx];
-                    local_triplets.push((cb.clone(), feature_id, *count as f32));
+                    local_triplets.push((cb.clone(), feature_id, *count));
                 }
             }
 
@@ -1145,25 +1184,25 @@ pub fn run_mixture_model(
                 let distal_component = new_to_old[distal_new_idx] + 1;
 
                 // Per-cell: PDUI = distal_count / total_non_noise_count
-                let mut cell_total: rustc_hash::FxHashMap<usize, usize> =
+                let mut cell_total: rustc_hash::FxHashMap<usize, f32> =
                     rustc_hash::FxHashMap::default();
-                let mut cell_distal: rustc_hash::FxHashMap<usize, usize> =
+                let mut cell_distal: rustc_hash::FxHashMap<usize, f32> =
                     rustc_hash::FxHashMap::default();
                 for &(cell_idx, component, count) in &result.cell_component_counts {
                     if component == 0 {
                         continue;
                     }
-                    *cell_total.entry(cell_idx).or_default() += count;
+                    *cell_total.entry(cell_idx).or_insert(0.0) += count;
                     if component == distal_component {
-                        *cell_distal.entry(cell_idx).or_default() += count;
+                        *cell_distal.entry(cell_idx).or_insert(0.0) += count;
                     }
                 }
 
                 let mut local_pdui = Vec::new();
                 for (&cell_idx, &total) in &cell_total {
-                    if total > 0 {
-                        let distal = *cell_distal.get(&cell_idx).unwrap_or(&0);
-                        let pdui = distal as f32 / total as f32;
+                    if total > 0.0 {
+                        let distal = *cell_distal.get(&cell_idx).unwrap_or(&0.0);
+                        let pdui = distal / total;
                         let cb = &unique_cells[cell_idx];
                         local_pdui.push((cb.clone(), gene_name.clone(), pdui));
                     }
