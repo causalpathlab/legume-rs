@@ -132,7 +132,11 @@ pub struct FabaArgs {
     )]
     pub beta_scale: f32,
 
-    #[arg(long, default_value_t = 5000, help = "Target library size for count rows")]
+    #[arg(
+        long,
+        default_value_t = 5000,
+        help = "Target library size for count rows"
+    )]
     pub depth_count: usize,
 
     #[arg(
@@ -166,7 +170,12 @@ pub struct FabaArgs {
     #[arg(long, default_value_t = 42, help = "Random seed")]
     pub rseed: u64,
 
-    #[arg(long, value_enum, default_value = "zarr", help = "Sparse matrix backend")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "zarr",
+        help = "Sparse matrix backend"
+    )]
     pub backend: SparseIoBackend,
 
     #[arg(
@@ -206,16 +215,15 @@ pub const N_SUBSTRATE_FEATURES: usize = 3;
 /// `pA`   loads on long-3'UTR (s[0]).
 pub fn default_substrate_weights() -> [[f32; N_SUBSTRATE_FEATURES]; MODALITIES.len()] {
     [
-        [0.0, 0.0, 0.0],  // count (unused — φ_count = 1)
-        [0.7, 1.0, 0.0],  // m6A
-        [0.0, 0.0, 1.2],  // A2I
-        [1.0, 0.0, 0.0],  // pA
+        [0.0, 0.0, 0.0], // count (unused — φ_count = 1)
+        [0.7, 1.0, 0.0], // m6A
+        [0.0, 0.0, 1.2], // A2I
+        [1.0, 0.0, 0.0], // pA
     ]
 }
 
 /// Human-readable names for the substrate axes (length `N_SUBSTRATE_FEATURES`).
-pub const SUBSTRATE_AXIS_NAMES: [&str; N_SUBSTRATE_FEATURES] =
-    ["utr_length", "drach", "alu"];
+pub const SUBSTRATE_AXIS_NAMES: [&str; N_SUBSTRATE_FEATURES] = ["utr_length", "drach", "alu"];
 
 pub fn run_faba(args: &FabaArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
@@ -229,10 +237,7 @@ pub fn run_faba(args: &FabaArgs) -> anyhow::Result<()> {
         "faba sim: G={}, N={}, K={}, S={}, B={}",
         g, n, args.k_topics, N_SUBSTRATE_FEATURES, bb
     );
-    info!(
-        "modalities {:?} target coverage {:?}",
-        MODALITIES, pi_meas
-    );
+    info!("modalities {:?} target coverage {:?}", MODALITIES, pi_meas);
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(args.rseed);
 
