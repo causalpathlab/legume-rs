@@ -8,7 +8,7 @@ use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteMap;
 use crate::run_apa::CountApaArgs;
 
-use arrow::array::{ArrayRef, Float32Array, Int64Array, StringArray};
+use arrow::array::{ArrayRef, Float32Array, Int64Array, StringArray, UInt32Array};
 use arrow::record_batch::RecordBatch;
 use dashmap::DashMap;
 use genomic_data::bed::BedWithGene;
@@ -483,7 +483,8 @@ fn load_utrs(args: &CountApaArgs) -> anyhow::Result<Vec<UtrRegion>> {
         for entry in model.three_prime_utr.iter() {
             let gene_id = entry.key();
             let rec = entry.value();
-            let utr_length = (rec.stop - rec.start) as usize;
+            // GFF coords are 1-based inclusive; nucleotide span is stop - start + 1.
+            let utr_length = (rec.stop - rec.start + 1) as usize;
             if utr_length < args.min_utr_length {
                 continue;
             }
@@ -773,6 +774,7 @@ fn write_apa_annotations(annotations: &[ApaSiteAnnotation], path: &str) -> anyho
     let mut genomic_stops = Vec::with_capacity(annotations.len());
     let mut pi_weights = Vec::with_capacity(annotations.len());
     let mut expected_tails = Vec::with_capacity(annotations.len());
+    let mut utr_lengths: Vec<u32> = Vec::with_capacity(annotations.len());
 
     for a in annotations {
         site_ids.push(a.site_id.as_ref());
@@ -784,6 +786,7 @@ fn write_apa_annotations(annotations: &[ApaSiteAnnotation], path: &str) -> anyho
         genomic_stops.push(a.genomic_stop);
         pi_weights.push(a.pi_weight);
         expected_tails.push(a.expected_tail_length);
+        utr_lengths.push(a.utr_length);
     }
 
     let schema = arrow::datatypes::Schema::new(vec![
@@ -800,6 +803,7 @@ fn write_apa_annotations(annotations: &[ApaSiteAnnotation], path: &str) -> anyho
             arrow::datatypes::DataType::Float32,
             false,
         ),
+        arrow::datatypes::Field::new("utr_length", arrow::datatypes::DataType::UInt32, false),
     ]);
 
     let batch = RecordBatch::try_new(
@@ -814,6 +818,7 @@ fn write_apa_annotations(annotations: &[ApaSiteAnnotation], path: &str) -> anyho
             Arc::new(Int64Array::from(genomic_stops)) as ArrayRef,
             Arc::new(Float32Array::from(pi_weights)) as ArrayRef,
             Arc::new(Float32Array::from(expected_tails)) as ArrayRef,
+            Arc::new(UInt32Array::from(utr_lengths)) as ArrayRef,
         ],
     )?;
 

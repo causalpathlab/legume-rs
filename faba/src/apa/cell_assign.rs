@@ -25,6 +25,10 @@ pub struct ApaSiteAnnotation {
     pub genomic_stop: i64,
     pub pi_weight: f32,
     pub expected_tail_length: f32,
+    /// UTR length in nt. Recover normalized 5'→3' UTR position via
+    /// `u = 1 - expected_tail_length / utr_length` ∈ [0, 1]
+    /// (the UTR-local α is not stored directly — only `genomic_alpha`).
+    pub utr_length: u32,
 }
 
 /// Assign fragments to mixture components via hard assignment (argmax gamma),
@@ -99,7 +103,11 @@ pub fn assign_fragments_to_sites(
             genomic_data::sam::Strand::Backward => utr.end - alpha as i64,
         };
         let site_id: Box<str> = format!("{}/pA/{}", utr.name, k).into();
-        let expected_tail_length = utr.utr_length as f32 - alpha;
+        // Clamp to [0, utr_length]: alpha is a UTR-local position seeded
+        // by site_discovery; a tiny numerical drift past utr_length
+        // would otherwise emit a meaningless negative tail length and
+        // poison the `u = 1 - tail / utr_length` reconstruction.
+        let expected_tail_length = (utr.utr_length as f32 - alpha).max(0.0);
         annotations.push(ApaSiteAnnotation {
             site_id,
             gene_name: utr.name.clone(),
@@ -110,6 +118,7 @@ pub fn assign_fragments_to_sites(
             genomic_stop: gstop,
             pi_weight: weight,
             expected_tail_length,
+            utr_length: utr.utr_length as u32,
         });
     }
 
