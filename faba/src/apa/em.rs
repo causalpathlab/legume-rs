@@ -160,21 +160,29 @@ pub fn select_sites_by_bic(
     let mut best_result: Option<EmResult> = None;
     let mut n_worse = 0u32;
 
-    for k in 1..=n_candidates {
-        // Build component_log_liks for top-K sites: column 0 = noise, columns 1..K = sites
-        let component_log_liks: Vec<Vec<f32>> = (0..n_frag)
-            .map(|n| {
-                let mut row = Vec::with_capacity(k + 1);
-                row.push(noise_ll);
-                for site_ll in all_site_lls.iter().take(k) {
-                    row.push(site_ll[n]);
-                }
-                row
-            })
-            .collect();
+    // Build `component_log_liks` (shape n_frag × (k+1)) once and **extend
+    // incrementally** each K-iteration with one new site column. The previous
+    // version rebuilt the entire matrix each iteration → O(n_frag · n_cand²);
+    // this is O(n_frag · n_cand). Same shape inside the EM call, just no
+    // reallocation between K's.
+    let mut component_log_liks: Vec<Vec<f32>> = (0..n_frag)
+        .map(|_| {
+            let mut row = Vec::with_capacity(n_candidates + 1);
+            row.push(noise_ll);
+            row
+        })
+        .collect();
+    let mut selected_alphas: Vec<f32> = Vec::with_capacity(n_candidates);
+    let mut selected_betas: Vec<f32> = Vec::with_capacity(n_candidates);
 
-        let selected_alphas: Vec<f32> = (0..k).map(|i| data.alpha_arr[site_order[i]]).collect();
-        let selected_betas: Vec<f32> = (0..k).map(|i| data.beta_arr[site_order[i]]).collect();
+    for k in 1..=n_candidates {
+        // Append column k (= site `site_order[k-1]`).
+        let new_site_ll = &all_site_lls[k - 1];
+        for (n, row) in component_log_liks.iter_mut().enumerate() {
+            row.push(new_site_ll[n]);
+        }
+        selected_alphas.push(data.alpha_arr[site_order[k - 1]]);
+        selected_betas.push(data.beta_arr[site_order[k - 1]]);
 
         let result = run_fixed_em(
             &component_log_liks,

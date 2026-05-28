@@ -3,7 +3,6 @@ use crate::data::bam_io;
 use crate::data::polya_utils::*;
 use genomic_data::bed::Bed;
 use genomic_data::sam::{CellBarcode, Strand, UmiBarcode};
-use rust_htslib::bam;
 use rust_htslib::bam::ext::BamRecordExtensions;
 use rust_htslib::bam::record::Aux;
 
@@ -40,7 +39,10 @@ pub struct FragmentRecord {
 
 /// Extract fragment records from a BAM file for a given UTR region.
 /// SE-only implementation. Returns fragments within the UTR boundaries.
-pub fn extract_fragments(
+/// Reuses a per-thread `BamReaderCache` so callers inside `par_iter` don't
+/// re-open the BAM on every UTR.
+pub fn extract_fragments_cached(
+    cache: &mut bam_io::BamReaderCache,
     bam_file: &str,
     utr: &UtrRegion,
     cb_tag: &[u8],
@@ -55,7 +57,7 @@ pub fn extract_fragments(
 
     // Try fetching with the original chr name; if empty, try alternate (chr1 <-> 1)
     let bed = utr.to_bed();
-    let result = try_fetch_region(bam_file, &bed);
+    let result = try_fetch_region_cached(cache, bam_file, &bed);
     let bed = match result {
         Some(b) => b,
         None => {
@@ -68,7 +70,7 @@ pub fn extract_fragments(
         }
     };
 
-    bam_io::for_each_record_in_region(bam_file, &bed, |_chr, rec| {
+    bam_io::for_each_record_in_region_cached(cache, bam_file, &bed, |_chr, rec| {
         let ref_start = rec.reference_start();
         let ref_end = rec.reference_end();
 
@@ -168,9 +170,12 @@ pub fn extract_fragments(
 }
 
 /// Try to fetch from BAM with given Bed. Returns Some(bed) if the chr exists, None otherwise.
-fn try_fetch_region(bam_file: &str, bed: &Bed) -> Option<Bed> {
-    let index_file = bam_file.to_string() + ".bai";
-    let mut reader = bam::IndexedReader::from_path_and_index(bam_file, &index_file).ok()?;
+fn try_fetch_region_cached(
+    cache: &mut bam_io::BamReaderCache,
+    bam_file: &str,
+    bed: &Bed,
+) -> Option<Bed> {
+    let reader = cache.get_or_open(bam_file).ok()?;
     match reader.fetch((bed.chr.as_ref(), bed.start, bed.stop)) {
         Ok(_) => Some(bed.clone()),
         Err(_) => None,

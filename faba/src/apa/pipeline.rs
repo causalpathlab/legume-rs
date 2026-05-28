@@ -144,14 +144,18 @@ fn find_all_polya_sites(
         .records()
         .par_iter()
         .progress_count(njobs as u64)
-        .try_for_each(|rec| -> anyhow::Result<()> {
-            find_polya_sites_in_gene(rec, args, arc_gene_sites.clone())
-        })?;
+        .try_for_each_init(
+            crate::data::bam_io::BamReaderCache::new,
+            |cache, rec| -> anyhow::Result<()> {
+                find_polya_sites_in_gene(cache, rec, args, arc_gene_sites.clone())
+            },
+        )?;
 
     Arc::try_unwrap(arc_gene_sites).map_err(|_| anyhow::anyhow!("failed to release gene_sites"))
 }
 
 fn find_polya_sites_in_gene(
+    cache: &mut crate::data::bam_io::BamReaderCache,
     gff_record: &GffRecord,
     args: &CountApaArgs,
     arc_gene_sites: Arc<DashMap<GeneId, Vec<i64>>>,
@@ -159,7 +163,8 @@ fn find_polya_sites_in_gene(
     let mut polya_map = PolyASiteMap::new(args.polya_site_args());
 
     for bam_file in &args.bam_files {
-        polya_map.update_from_gene(
+        polya_map.update_from_gene_cached(
+            cache,
             bam_file,
             gff_record,
             &args.gene_barcode_tag,
@@ -223,16 +228,19 @@ fn gather_polya_stats(
         .into_iter()
         .par_bridge()
         .progress_count(gene_sites.len() as u64)
-        .try_for_each(|gs| -> anyhow::Result<()> {
-            let gene = gs.key();
-            let sites = gs.value();
+        .try_for_each_init(
+            crate::data::bam_io::BamReaderCache::new,
+            |cache, gs| -> anyhow::Result<()> {
+                let gene = gs.key();
+                let sites = gs.value();
 
-            if let Some(gff) = gff_map.get(gene) {
-                let stats = collect_gene_stats(args, bam_file, &gff, gene, sites)?;
-                arc_ret.lock().expect("lock").extend(stats);
-            }
-            Ok(())
-        })?;
+                if let Some(gff) = gff_map.get(gene) {
+                    let stats = collect_gene_stats(cache, args, bam_file, &gff, gene, sites)?;
+                    arc_ret.lock().expect("lock").extend(stats);
+                }
+                Ok(())
+            },
+        )?;
 
     Arc::try_unwrap(arc_ret)
         .map_err(|_| anyhow::anyhow!("failed to release stats"))?
@@ -241,6 +249,7 @@ fn gather_polya_stats(
 }
 
 fn collect_gene_stats(
+    cache: &mut crate::data::bam_io::BamReaderCache,
     args: &CountApaArgs,
     bam_file: &str,
     gff_record: &GffRecord,
@@ -264,7 +273,8 @@ fn collect_gene_stats(
     gff.start = (min_pos - PADDING).max(0);
     gff.stop = max_pos + PADDING;
 
-    polya_map.update_from_gene(
+    polya_map.update_from_gene_cached(
+        cache,
         bam_file,
         &gff,
         &args.gene_barcode_tag,
@@ -388,7 +398,9 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
     let results: Vec<(Vec<CellSiteCount>, Vec<ApaSiteAnnotation>)> = utrs
         .par_iter()
         .progress_count(njobs as u64)
-        .map(|utr| process_utr(utr, &args.bam_files, pre_sites.as_ref(), args))
+        .map_init(crate::data::bam_io::BamReaderCache::new, |cache, utr| {
+            process_utr(cache, utr, &args.bam_files, pre_sites.as_ref(), args)
+        })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     info!("processed {} UTRs", utrs.len());
@@ -546,6 +558,7 @@ fn load_pre_sites(path: &str) -> anyhow::Result<rustc_hash::FxHashMap<Box<str>, 
 
 /// Process a single UTR: extract fragments, discover/load sites, run EM, assign cells.
 fn process_utr(
+    cache: &mut crate::data::bam_io::BamReaderCache,
     utr: &UtrRegion,
     bam_files: &[Box<str>],
     pre_sites: Option<&rustc_hash::FxHashMap<Box<str>, Vec<f32>>>,
@@ -559,7 +572,8 @@ fn process_utr(
             internal_prime_window: args.polya_internal_prime_window,
             internal_prime_count: args.polya_internal_prime_count,
         };
-        let frags = extract_fragments(
+        let frags = extract_fragments_cached(
+            cache,
             bam_file,
             utr,
             args.cell_barcode_tag.as_bytes(),

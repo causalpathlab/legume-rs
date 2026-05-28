@@ -1,7 +1,6 @@
 //! Stratum-balanced count-weighted positive sampler + random /
 //! swap-gene-mode negative draws. Tensor-free; the loss converts these
-//! slates into tensor batches via `model::embed_rows` and
-//! `model::bias_rows`.
+//! slates into tensor batches via `model::embed_and_bias_rows`.
 //!
 //! One `SamplerState` carries pre-built distributions for **every
 //! axis** (cell + each pb level). `draw_minibatch(axis, ...)` dispatches

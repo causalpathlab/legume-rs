@@ -112,8 +112,11 @@ pub struct RnaModEmbedArgs {
     // I/O knobs (senna bge convention)
     ////////////////////////////////////////
     /// Preload all sparse column data into memory before any pass over
-    /// cells. Faster when data fits in RAM; required on slow disks.
-    #[arg(long, default_value_t = false)]
+    /// cells. On by default — much faster than repeated disk reads on
+    /// typical SSDs, and required on slow disks. Pass `--no-preload-data`
+    /// to fall back to streaming reads (use only for datasets that don't
+    /// fit in RAM).
+    #[arg(long = "no-preload-data", default_value_t = true, action = clap::ArgAction::SetFalse)]
     pub preload_data: bool,
 
     ////////////////////////////////////////

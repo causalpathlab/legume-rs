@@ -104,10 +104,9 @@ pub fn pileup_known_snps_by_gene(
     let arc_sites = Arc::new(Mutex::new(Vec::<SnpSite>::new()));
     let gene_site_map = Arc::new(DashMap::<GeneId, Vec<SnpSite>>::default());
 
-    records
-        .par_iter()
-        .progress_count(njobs)
-        .try_for_each(|rec| -> anyhow::Result<()> {
+    records.par_iter().progress_count(njobs).try_for_each_init(
+        crate::data::bam_io::BamReaderCache::new,
+        |cache, rec| -> anyhow::Result<()> {
             let chr = rec.seqname.as_ref();
 
             let chr_snps = match known_snps.by_chr.get(chr) {
@@ -131,7 +130,8 @@ pub fn pileup_known_snps_by_gene(
             freq_map.set_position_filter(gene_positions.clone());
 
             for bam_file in &params.bam_files {
-                freq_map.update_from_gene(
+                freq_map.update_from_gene_cached(
+                    cache,
                     bam_file,
                     rec,
                     &params.gene_barcode_tag,
@@ -174,7 +174,8 @@ pub fn pileup_known_snps_by_gene(
             }
 
             Ok(())
-        })?;
+        },
+    )?;
 
     let mut sites = Arc::try_unwrap(arc_sites)
         .map_err(|_| anyhow::anyhow!("failed to release sites"))?
@@ -206,63 +207,66 @@ pub fn pileup_known_snps_by_region(
     chromosomes
         .par_iter()
         .progress_count(njobs)
-        .try_for_each(|chr| -> anyhow::Result<()> {
-            let chr_snps = match known_snps.by_chr.get(chr.as_ref()) {
-                Some(m) => m,
-                None => return Ok(()),
-            };
+        .try_for_each_init(
+            crate::data::bam_io::BamReaderCache::new,
+            |cache, chr| -> anyhow::Result<()> {
+                let chr_snps = match known_snps.by_chr.get(chr.as_ref()) {
+                    Some(m) => m,
+                    None => return Ok(()),
+                };
 
-            if chr_snps.is_empty() {
-                return Ok(());
-            }
+                if chr_snps.is_empty() {
+                    return Ok(());
+                }
 
-            let positions: FxHashSet<i64> = chr_snps.keys().copied().collect();
-            let min_pos = positions.iter().copied().min().unwrap_or(0);
-            let max_pos = positions.iter().copied().max().unwrap_or(0);
+                let positions: FxHashSet<i64> = chr_snps.keys().copied().collect();
+                let min_pos = positions.iter().copied().min().unwrap_or(0);
+                let max_pos = positions.iter().copied().max().unwrap_or(0);
 
-            let bed = Bed {
-                chr: chr.clone(),
-                start: min_pos,
-                stop: max_pos + 1,
-            };
+                let bed = Bed {
+                    chr: chr.clone(),
+                    start: min_pos,
+                    stop: max_pos + 1,
+                };
 
-            let mut freq_map = params.new_freq_map();
-            freq_map.set_position_filter(positions.clone());
+                let mut freq_map = params.new_freq_map();
+                freq_map.set_position_filter(positions.clone());
 
-            for bam_file in &params.bam_files {
-                freq_map.update_from_region(bam_file, &bed)?;
-            }
+                for bam_file in &params.bam_files {
+                    freq_map.update_from_region_cached(cache, bam_file, &bed)?;
+                }
 
-            let freq = freq_map
-                .marginal_frequency_map()
-                .ok_or_else(|| anyhow::anyhow!("expected marginal frequency map"))?;
-            let qual_map = freq_map.quality_map();
+                let freq = freq_map
+                    .marginal_frequency_map()
+                    .ok_or_else(|| anyhow::anyhow!("expected marginal frequency map"))?;
+                let qual_map = freq_map.quality_map();
 
-            let mut local_sites = Vec::new();
-            for (&pos, &(ref_allele, alt_allele, ref rsid)) in chr_snps.iter() {
-                let counts = freq.get(&pos).cloned().unwrap_or_default();
-                let qual = qual_map.get(&pos);
-                let site = genotype_site(
-                    SiteInput {
-                        chr: chr.clone(),
-                        pos,
-                        ref_allele,
-                        alt_allele,
-                        rsid: rsid.clone(),
-                        counts,
-                        qual: qual.cloned(),
-                    },
-                    &params.genotype_params,
-                );
-                local_sites.push(site);
-            }
+                let mut local_sites = Vec::new();
+                for (&pos, &(ref_allele, alt_allele, ref rsid)) in chr_snps.iter() {
+                    let counts = freq.get(&pos).cloned().unwrap_or_default();
+                    let qual = qual_map.get(&pos);
+                    let site = genotype_site(
+                        SiteInput {
+                            chr: chr.clone(),
+                            pos,
+                            ref_allele,
+                            alt_allele,
+                            rsid: rsid.clone(),
+                            counts,
+                            qual: qual.cloned(),
+                        },
+                        &params.genotype_params,
+                    );
+                    local_sites.push(site);
+                }
 
-            if !local_sites.is_empty() {
-                arc_sites.lock().expect("lock").extend(local_sites);
-            }
+                if !local_sites.is_empty() {
+                    arc_sites.lock().expect("lock").extend(local_sites);
+                }
 
-            Ok(())
-        })?;
+                Ok(())
+            },
+        )?;
 
     let mut sites = Arc::try_unwrap(arc_sites)
         .map_err(|_| anyhow::anyhow!("failed to release sites"))?
@@ -291,20 +295,22 @@ pub fn discover_snps_by_gene(
     let arc_sites = Arc::new(Mutex::new(Vec::<SnpSite>::new()));
     let gene_site_map = Arc::new(DashMap::<GeneId, Vec<SnpSite>>::default());
 
-    records
-        .par_iter()
-        .progress_count(njobs)
-        .try_for_each(|rec| -> anyhow::Result<()> {
+    records.par_iter().progress_count(njobs).try_for_each_init(
+        || {
+            let faidx = load_fasta_index(&params.genome_file)
+                .expect("fasta index validated upfront; load per worker thread");
+            let cache = crate::data::bam_io::BamReaderCache::new();
+            (faidx, cache)
+        },
+        |(faidx, cache), rec| -> anyhow::Result<()> {
             let chr = rec.seqname.as_ref();
-
-            // Each thread creates its own faidx reader (not thread-safe)
-            let faidx = load_fasta_index(&params.genome_file)?;
 
             // Pileup all positions in the gene (no position filter)
             let mut freq_map = params.new_freq_map();
 
             for bam_file in &params.bam_files {
-                freq_map.update_from_gene(
+                freq_map.update_from_gene_cached(
+                    cache,
                     bam_file,
                     rec,
                     &params.gene_barcode_tag,
@@ -326,7 +332,7 @@ pub fn discover_snps_by_gene(
                     continue;
                 }
 
-                let ref_dna = match fetch_reference_base(&faidx, chr, pos)? {
+                let ref_dna = match fetch_reference_base(faidx, chr, pos)? {
                     Some(b) => b,
                     None => continue,
                 };
@@ -369,7 +375,8 @@ pub fn discover_snps_by_gene(
             }
 
             Ok(())
-        })?;
+        },
+    )?;
 
     let mut sites = Arc::try_unwrap(arc_sites)
         .map_err(|_| anyhow::anyhow!("failed to release sites"))?
@@ -399,10 +406,14 @@ pub fn discover_snps_by_region(params: &SnpParams) -> anyhow::Result<Vec<SnpSite
 
     let arc_sites = Arc::new(Mutex::new(Vec::<SnpSite>::new()));
 
-    jobs.par_iter().progress_count(njobs).try_for_each(
-        |(chr, start, stop)| -> anyhow::Result<()> {
-            let faidx = load_fasta_index(&params.genome_file)?;
-
+    jobs.par_iter().progress_count(njobs).try_for_each_init(
+        || {
+            let faidx = load_fasta_index(&params.genome_file)
+                .expect("fasta index validated upfront; load per worker thread");
+            let cache = crate::data::bam_io::BamReaderCache::new();
+            (faidx, cache)
+        },
+        |(faidx, cache), (chr, start, stop)| -> anyhow::Result<()> {
             let bed = Bed {
                 chr: chr.clone(),
                 start: *start,
@@ -412,7 +423,7 @@ pub fn discover_snps_by_region(params: &SnpParams) -> anyhow::Result<Vec<SnpSite
             let mut freq_map = params.new_freq_map();
 
             for bam_file in &params.bam_files {
-                freq_map.update_from_region(bam_file, &bed)?;
+                freq_map.update_from_region_cached(cache, bam_file, &bed)?;
             }
 
             let freq = freq_map
@@ -429,7 +440,7 @@ pub fn discover_snps_by_region(params: &SnpParams) -> anyhow::Result<Vec<SnpSite
                     continue;
                 }
 
-                let ref_dna = match fetch_reference_base(&faidx, chr, pos)? {
+                let ref_dna = match fetch_reference_base(faidx, chr, pos)? {
                     Some(b) => b,
                     None => continue,
                 };
@@ -507,72 +518,80 @@ pub fn gather_snp_allele_counts_by_gene(
         .iter()
         .par_bridge()
         .progress_count(called_sites.len() as u64)
-        .try_for_each(|entry| -> anyhow::Result<()> {
-            let gene_id = entry.key();
-            let sites = entry.value();
+        .try_for_each_init(
+            crate::data::bam_io::BamReaderCache::new,
+            |cache, entry| -> anyhow::Result<()> {
+                let gene_id = entry.key();
+                let sites = entry.value();
 
-            let gff = match gff_map.get(gene_id) {
-                Some(g) => g,
-                None => return Ok(()),
-            };
+                let gff = match gff_map.get(gene_id) {
+                    Some(g) => g,
+                    None => return Ok(()),
+                };
 
-            if sites.is_empty() {
-                return Ok(());
-            }
+                if sites.is_empty() {
+                    return Ok(());
+                }
 
-            let positions: FxHashSet<i64> = sites.iter().map(|s| s.pos).collect();
+                let positions: FxHashSet<i64> = sites.iter().map(|s| s.pos).collect();
 
-            let mut stat_map = params.new_freq_map_percell(cell_membership);
-            stat_map.set_position_filter(positions);
+                let mut stat_map = params.new_freq_map_percell(cell_membership);
+                stat_map.set_position_filter(positions);
 
-            stat_map.update_from_gene(
-                bam_file,
-                &gff,
-                &params.gene_barcode_tag,
-                params.include_missing_barcode,
-            )?;
+                stat_map.update_from_gene_cached(
+                    cache,
+                    bam_file,
+                    &gff,
+                    &params.gene_barcode_tag,
+                    params.include_missing_barcode,
+                )?;
 
-            let chr = gff.seqname.as_ref();
+                let chr = gff.seqname.as_ref();
 
-            let bed = BedWithGene {
-                chr: chr.into(),
-                start: gff.start,
-                stop: gff.stop,
-                gene: gene_id.clone(),
-                strand: gff.strand,
-            };
-            let gene_key = gene_key_fn(&bed);
+                let bed = BedWithGene {
+                    chr: chr.into(),
+                    start: gff.start,
+                    stop: gff.stop,
+                    gene: gene_id.clone(),
+                    strand: gff.strand,
+                };
+                let gene_key = gene_key_fn(&bed);
 
-            let mut local_alt = Vec::new();
-            let mut local_depth = Vec::new();
+                let mut local_alt = Vec::new();
+                let mut local_depth = Vec::new();
 
-            for site in sites.iter() {
-                let feature_name: Box<str> =
-                    format!("{}/SNP/{}:{}", gene_key, site.chr, site.pos).into();
+                for site in sites.iter() {
+                    let feature_name: Box<str> =
+                        format!("{}/SNP/{}:{}", gene_key, site.chr, site.pos).into();
 
-                if let Some(cell_counts) = stat_map.stratified_frequency_at(site.pos) {
-                    for (cb, counts) in cell_counts {
-                        if !params.include_missing_barcode && cb == &CellBarcode::Missing {
-                            continue;
-                        }
-                        let alt_count = counts.get(Dna::from_byte(site.alt_allele).as_ref());
-                        let depth = counts.total();
+                    if let Some(cell_counts) = stat_map.stratified_frequency_at(site.pos) {
+                        for (cb, counts) in cell_counts {
+                            if !params.include_missing_barcode && cb == &CellBarcode::Missing {
+                                continue;
+                            }
+                            let alt_count = counts.get(Dna::from_byte(site.alt_allele).as_ref());
+                            let depth = counts.total();
 
-                        if depth > 0 {
-                            local_alt.push((cb.clone(), feature_name.clone(), alt_count as f32));
-                            local_depth.push((cb.clone(), feature_name.clone(), depth as f32));
+                            if depth > 0 {
+                                local_alt.push((
+                                    cb.clone(),
+                                    feature_name.clone(),
+                                    alt_count as f32,
+                                ));
+                                local_depth.push((cb.clone(), feature_name.clone(), depth as f32));
+                            }
                         }
                     }
                 }
-            }
 
-            if !local_alt.is_empty() {
-                arc_alt.lock().expect("lock").extend(local_alt);
-                arc_depth.lock().expect("lock").extend(local_depth);
-            }
+                if !local_alt.is_empty() {
+                    arc_alt.lock().expect("lock").extend(local_alt);
+                    arc_depth.lock().expect("lock").extend(local_depth);
+                }
 
-            Ok(())
-        })?;
+                Ok(())
+            },
+        )?;
 
     let alt_triplets = Arc::try_unwrap(arc_alt)
         .map_err(|_| anyhow::anyhow!("failed to release alt triplets"))?
