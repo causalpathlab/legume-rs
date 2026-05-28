@@ -73,7 +73,7 @@ pub fn simulate_fragments(params: &ScapeSimParams) -> (Vec<FragmentRecord>, Vec<
         let k = comp_dist.sample(&mut rng);
         let cell_idx = cell_dist.sample(&mut rng);
         let cell_barcode = CellBarcode::Barcode(format!("CELL{:04}", cell_idx).into());
-        let umi = UmiBarcode::Barcode(format!("UMI{:08}", fragments.len()).into());
+        let umi = UmiBarcode::Hash(fragments.len() as u64);
 
         if k == 0 {
             // Noise component: uniform over UTR

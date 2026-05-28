@@ -104,7 +104,7 @@ impl PolyASiteMap {
     /// ................|||||||||| [match]
     /// ---------------SNNNNNNNNNN [reference sequence]
     ///
-    fn add_bam_record(&mut self, bam_record: bam::Record) {
+    fn add_bam_record(&mut self, bam_record: &bam::Record) {
         // Get the soft-clipped poly-A/T length from CIGAR
         let cigar = bam_record.cigar();
         let poly_length = if bam_record.is_reverse() {
@@ -128,7 +128,7 @@ impl PolyASiteMap {
 
         // Count A (forward) or T (reverse) bases in the soft-clipped
         // region to filter by maximum non-A/non-T bases allowed in the tail
-        let num_a_or_t = count_a_or_t_bases_in_tail(&bam_record);
+        let num_a_or_t = count_a_or_t_bases_in_tail(bam_record);
         let non_a_or_t_count = poly_length as usize - num_a_or_t;
         if non_a_or_t_count > self.qc_args.max_non_a_or_t_bases {
             return;
@@ -136,7 +136,7 @@ impl PolyASiteMap {
 
         // Check for internal priming in the aligned sequence
         let is_internally_primed = check_internal_prime(
-            &bam_record,
+            bam_record,
             self.qc_args.internal_prime_in,
             self.qc_args.internal_prime_a_or_t_count,
         );
@@ -162,7 +162,7 @@ impl PolyASiteMap {
                 &self.cell_barcode_tag,
                 &mut self.position_to_count_with_cell,
             ) {
-                let cell_barcode = bam_io::extract_cell_barcode(&bam_record, tag);
+                let cell_barcode = bam_io::extract_cell_barcode(bam_record, tag);
 
                 let cell_map = freq_map.entry(poly_a_position).or_default();
                 *cell_map.entry(cell_barcode).or_default() += 1;

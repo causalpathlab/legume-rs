@@ -1,7 +1,7 @@
 use crate::apa::em::EmResult;
 use crate::apa::fragment::FragmentRecord;
 use crate::apa::utr_region::UtrRegion;
-use genomic_data::sam::CellBarcode;
+use genomic_data::sam::{CellBarcode, UmiBarcode};
 use rustc_hash::FxHashMap as HashMap;
 
 /// A cell-level count at a specific pA site.
@@ -39,9 +39,10 @@ pub fn assign_fragments_to_sites(
     utr: &UtrRegion,
 ) -> (Vec<CellSiteCount>, Vec<ApaSiteAnnotation>) {
     // Hard-assign each fragment to the argmax component (skip noise = k=0)
-    // Key: (cell_barcode, component_idx, umi) -> deduplicate
-    let mut cell_component_umis: HashMap<(CellBarcode, usize), HashMap<Box<str>, ()>> =
-        HashMap::default();
+    // and dedupe UMIs directly on their 64-bit hash — no per-fragment
+    // `Box<str>` allocation.
+    use rustc_hash::FxHashSet;
+    let mut cell_component_umis: HashMap<(CellBarcode, usize), FxHashSet<u64>> = HashMap::default();
 
     for (n, frag) in fragments.iter().enumerate() {
         let gamma = &em_result.gamma[n];
@@ -58,13 +59,16 @@ pub fn assign_fragments_to_sites(
             continue;
         }
 
-        let umi_str: Box<str> = frag.umi.to_string().into();
+        // `UmiBarcode::Missing` shares the sentinel `u64::MAX`, preserving
+        // the prior behaviour where all unset UMIs in a cell collapsed to
+        // one observation rather than over-counting.
+        let umi_h = match frag.umi {
+            UmiBarcode::Hash(h) => h,
+            UmiBarcode::Missing => u64::MAX,
+        };
         let key = (frag.cell_barcode.clone(), best_k);
 
-        cell_component_umis
-            .entry(key)
-            .or_default()
-            .insert(umi_str, ());
+        cell_component_umis.entry(key).or_default().insert(umi_h);
     }
 
     // Build site_id for each active component
@@ -142,7 +146,7 @@ mod tests {
             for frag_idx in 0..10u32 {
                 // Give each fragment a UMI; some will share UMIs within a cell
                 let umi_id = frag_idx % 5; // 0..4, so 2 fragments per UMI
-                let umi = UmiBarcode::Barcode(format!("UMI{:04}", umi_id).into());
+                let umi = UmiBarcode::Hash(umi_id as u64);
 
                 fragments.push(FragmentRecord {
                     x: 100.0 + frag_idx as f32 * 10.0,
@@ -227,7 +231,7 @@ mod tests {
                 is_junction: false,
                 pa_site: None,
                 cell_barcode: CellBarcode::Barcode(format!("CELL{:04}", i % 3).into()),
-                umi: UmiBarcode::Barcode(format!("UMI{:04}", i).into()),
+                umi: UmiBarcode::Hash(i as u64),
             });
             gamma.push(vec![0.95, 0.025, 0.025]); // noise dominant
         }
