@@ -32,16 +32,48 @@ impl Default for EmParams {
 }
 
 /// Precomputed data for a single UTR needed by the EM routines.
+///
+/// `theta_lik_matrix` is flat row-major over **fragment clusters**, not
+/// raw fragments: row `m` lives at `[m * theta_grid.len() .. (m+1) *
+/// theta_grid.len()]` and holds `log p(x_m, l_m, r_m | θ_t)` for cluster
+/// `m`. `cluster_counts[m] = c_m` is the multiplicity (= number of
+/// original fragments that fell into cluster `m`); these weight the EM
+/// log-likelihood and M-step γ accumulator. `n_for_bic` is the original
+/// fragment count, used in the BIC penalty so K-selection isn't biased
+/// upward by clustering.
 pub struct SiteModelData<'a> {
     pub alpha_arr: &'a [f32],
     pub beta_arr: &'a [f32],
-    pub theta_lik_matrix: &'a [Vec<f32>],
+    pub theta_lik_matrix: &'a [f32],
     pub theta_grid: &'a [f32],
+    pub cluster_counts: &'a [f32],
+    pub n_for_bic: usize,
     pub utr_length: f32,
     pub max_polya: f32,
 }
 
+impl<'a> SiteModelData<'a> {
+    /// Number of fragment **clusters** (= rows of `theta_lik_matrix`).
+    #[inline]
+    pub fn n_clusters(&self) -> usize {
+        if self.theta_grid.is_empty() {
+            0
+        } else {
+            self.theta_lik_matrix.len() / self.theta_grid.len()
+        }
+    }
+
+    #[inline]
+    pub fn theta_row(&self, m: usize) -> &[f32] {
+        let stride = self.theta_grid.len();
+        &self.theta_lik_matrix[m * stride..(m + 1) * stride]
+    }
+}
+
 /// Result of EM inference for one UTR.
+///
+/// `gamma` is flat row-major (`n_obs × n_components`). Use `gamma_row(n)`
+/// for slice access.
 pub struct EmResult {
     /// Estimated mixing weights pi_0..pi_K (pi_0 = noise)
     pub weights: Vec<f32>,
@@ -49,8 +81,10 @@ pub struct EmResult {
     pub alphas: Vec<f32>,
     /// pA site dispersions beta_k (for k=1..K)
     pub betas: Vec<f32>,
-    /// Posterior assignment probabilities gamma[n][k] (k=0 is noise)
-    pub gamma: Vec<Vec<f32>>,
+    /// Flat posterior gamma; column k=0 is the noise component.
+    pub gamma: Vec<f32>,
+    /// Number of mixture components (= row stride of `gamma` = K+1 with noise).
+    pub n_components: usize,
     /// Final log-likelihood
     pub log_lik: f32,
     /// BIC
@@ -59,22 +93,33 @@ pub struct EmResult {
     pub n_iter: usize,
 }
 
+impl EmResult {
+    #[inline]
+    pub fn gamma_row(&self, n: usize) -> &[f32] {
+        let start = n * self.n_components;
+        &self.gamma[start..start + self.n_components]
+    }
+}
+
 /// Constrained EM: alpha and beta are fixed, only estimate weights pi_k.
 /// This is SCAPE's `fixed_inference()`.
 pub fn fixed_inference(data: &SiteModelData, params: &EmParams) -> EmResult {
-    let n_frag = data.theta_lik_matrix.len();
+    let n_frag = data.n_clusters();
     let n_components = data.alpha_arr.len(); // K APA components
     let n_total = n_components + 1; // +1 for noise component (k=0)
 
-    // Precompute log p(x_n, l_n, r_n | alpha_k, beta_k) for each fragment and component
-    let mut component_log_liks = vec![vec![0.0; n_total]; n_frag];
+    // Flat (n_frag × n_total) component log-likelihood matrix. Column 0
+    // is the noise term; columns 1..=K are the per-site likelihoods.
+    let mut component_log_liks = vec![0.0_f32; n_frag * n_total];
     let noise_ll = log_lik_noise(data.utr_length, data.max_polya);
 
-    for (n, row) in component_log_liks.iter_mut().enumerate() {
-        row[0] = noise_ll;
+    for n in 0..n_frag {
+        let base = n * n_total;
+        component_log_liks[base] = noise_ll;
+        let theta_row = data.theta_row(n);
         for k in 0..n_components {
-            row[k + 1] = log_lik_fragment_given_site_robust(
-                &data.theta_lik_matrix[n],
+            component_log_liks[base + k + 1] = log_lik_fragment_given_site_robust(
+                theta_row,
                 data.theta_grid,
                 data.alpha_arr[k],
                 data.beta_arr[k],
@@ -84,17 +129,34 @@ pub fn fixed_inference(data: &SiteModelData, params: &EmParams) -> EmResult {
         }
     }
 
-    run_fixed_em(&component_log_liks, data.alpha_arr, data.beta_arr, params)
+    run_fixed_em(
+        &component_log_liks,
+        n_total,
+        data.alpha_arr,
+        data.beta_arr,
+        Some(data.cluster_counts),
+        data.n_for_bic,
+        params,
+    )
 }
 
 /// Run the generic fixed EM on precomputed component log-likelihoods.
+///
+/// `component_log_liks` is flat row-major with stride `n_total`.
+/// `cluster_counts` (optional) supplies the per-row multiplicity `c_m`
+/// for clustered fragments; `n_for_bic` is the original fragment count
+/// (so the BIC penalty stays calibrated to the un-collapsed dataset).
 fn run_fixed_em(
-    component_log_liks: &[Vec<f32>],
+    component_log_liks: &[f32],
+    n_total: usize,
     alpha_arr: &[f32],
     beta_arr: &[f32],
+    cluster_counts: Option<&[f32]>,
+    n_for_bic: usize,
     params: &EmParams,
 ) -> EmResult {
     let n_components = alpha_arr.len();
+    debug_assert_eq!(n_total, n_components + 1, "expected one noise column");
     let generic_params = crate::mixture::em::EmParams {
         max_iter: params.max_iter,
         tol: params.tol,
@@ -104,13 +166,21 @@ fn run_fixed_em(
     // alpha and beta are fixed; only mixing weights are free.
     // K+1 weights with sum-to-1 ⇒ K free parameters.
     let n_free_params = n_components;
-    let result = crate::mixture::em::fixed_em(component_log_liks, n_free_params, &generic_params);
+    let result = crate::mixture::em::fixed_em_weighted(
+        component_log_liks,
+        n_total,
+        cluster_counts,
+        Some(n_for_bic),
+        n_free_params,
+        &generic_params,
+    );
 
     EmResult {
         weights: result.weights,
         alphas: alpha_arr.to_vec(),
         betas: beta_arr.to_vec(),
         gamma: result.gamma,
+        n_components: result.n_components,
         log_lik: result.log_lik,
         bic: result.bic,
         n_iter: result.n_iter,
@@ -130,64 +200,84 @@ pub fn select_sites_by_bic(
     params: &EmParams,
     site_order: &[usize],
 ) -> EmResult {
-    let n_frag = data.theta_lik_matrix.len();
+    let n_frag = data.n_clusters();
     let n_candidates = site_order.len();
 
     if n_candidates <= 1 {
         return fixed_inference(data, params);
     }
 
-    // Precompute log-likelihoods for ALL candidates (noise + each site)
+    // Precompute per-candidate likelihoods in fragment-major flat layout
+    // (`all_site_lls[n * n_candidates + j]` = log p(frag n | site j)).
+    // Computed once and reused across the K-loop; the per-fragment
+    // marginalisation over θ is the dominant cost on heavy UTRs and runs
+    // in parallel for n_frag ≥ 4096.
     let noise_ll = log_lik_noise(data.utr_length, data.max_polya);
-    let all_site_lls: Vec<Vec<f32>> = (0..n_candidates)
-        .map(|i| {
-            let idx = site_order[i];
-            (0..n_frag)
-                .map(|n| {
-                    log_lik_fragment_given_site_robust(
-                        &data.theta_lik_matrix[n],
-                        data.theta_grid,
-                        data.alpha_arr[idx],
-                        data.beta_arr[idx],
-                        params.skirt_eta,
-                        params.skirt_mult,
-                    )
-                })
-                .collect()
-        })
-        .collect();
+    let mut all_site_lls = vec![0.0_f32; n_frag * n_candidates];
+
+    let skirt_eta = params.skirt_eta;
+    let skirt_mult = params.skirt_mult;
+    let alpha_arr = data.alpha_arr;
+    let beta_arr = data.beta_arr;
+    let theta_grid = data.theta_grid;
+    let fill_row = |n: usize, row: &mut [f32]| {
+        let theta_row = data.theta_row(n);
+        for (j, slot) in row.iter_mut().enumerate() {
+            let idx = site_order[j];
+            *slot = log_lik_fragment_given_site_robust(
+                theta_row,
+                theta_grid,
+                alpha_arr[idx],
+                beta_arr[idx],
+                skirt_eta,
+                skirt_mult,
+            );
+        }
+    };
+    const PARALLEL_THRESHOLD: usize = 4096;
+    if n_frag >= PARALLEL_THRESHOLD {
+        use rayon::prelude::*;
+        all_site_lls
+            .par_chunks_mut(n_candidates)
+            .enumerate()
+            .for_each(|(n, row)| fill_row(n, row));
+    } else {
+        for (n, row) in all_site_lls.chunks_mut(n_candidates).enumerate() {
+            fill_row(n, row);
+        }
+    }
 
     let mut best_result: Option<EmResult> = None;
     let mut n_worse = 0u32;
 
-    // Build `component_log_liks` (shape n_frag × (k+1)) once and **extend
-    // incrementally** each K-iteration with one new site column. The previous
-    // version rebuilt the entire matrix each iteration → O(n_frag · n_cand²);
-    // this is O(n_frag · n_cand). Same shape inside the EM call, just no
-    // reallocation between K's.
-    let mut component_log_liks: Vec<Vec<f32>> = (0..n_frag)
-        .map(|_| {
-            let mut row = Vec::with_capacity(n_candidates + 1);
-            row.push(noise_ll);
-            row
-        })
-        .collect();
     let mut selected_alphas: Vec<f32> = Vec::with_capacity(n_candidates);
     let mut selected_betas: Vec<f32> = Vec::with_capacity(n_candidates);
+    // Scratch buffer for `component_log_liks` at the current K; reallocated
+    // (resize) each iteration with stride `n_total = k + 1`. The fragment-
+    // major layout of `all_site_lls` keeps the inner copy contiguous.
+    let mut component_log_liks: Vec<f32> = Vec::new();
 
     for k in 1..=n_candidates {
-        // Append column k (= site `site_order[k-1]`).
-        let new_site_ll = &all_site_lls[k - 1];
-        for (n, row) in component_log_liks.iter_mut().enumerate() {
-            row.push(new_site_ll[n]);
-        }
         selected_alphas.push(data.alpha_arr[site_order[k - 1]]);
         selected_betas.push(data.beta_arr[site_order[k - 1]]);
 
+        let n_total = k + 1;
+        component_log_liks.clear();
+        component_log_liks.resize(n_frag * n_total, 0.0);
+        for n in 0..n_frag {
+            let dst = n * n_total;
+            component_log_liks[dst] = noise_ll;
+            let src = n * n_candidates;
+            component_log_liks[dst + 1..dst + n_total].copy_from_slice(&all_site_lls[src..src + k]);
+        }
+
         let result = run_fixed_em(
             &component_log_liks,
+            n_total,
             &selected_alphas,
             &selected_betas,
+            Some(data.cluster_counts),
+            data.n_for_bic,
             params,
         );
 
@@ -208,21 +298,26 @@ pub fn select_sites_by_bic(
     }
 
     let best = best_result.unwrap();
-    merge_close_sites(best, &all_site_lls, noise_ll, params)
+    merge_close_sites(
+        best,
+        &all_site_lls,
+        n_candidates,
+        noise_ll,
+        data.cluster_counts,
+        data.n_for_bic,
+        params,
+    )
 }
 
 /// Collapse selected sites whose alphas are within `merge_beta_mult * max(beta_i, beta_j)`
 /// of each other into a single site (keep the higher-pi one), then re-fit weights.
-///
-/// Returns the input unchanged if any of:
-/// - `merge_beta_mult <= 0`
-/// - fewer than two live (pi > 0) sites
-/// - no pair is within tolerance
-/// - the merged refit's BIC is not strictly better than the input
 fn merge_close_sites(
     result: EmResult,
-    all_site_lls: &[Vec<f32>],
+    all_site_lls: &[f32],
+    n_candidates: usize,
     noise_ll: f32,
+    cluster_counts: &[f32],
+    n_for_bic: usize,
     params: &EmParams,
 ) -> EmResult {
     if params.merge_beta_mult <= 0.0 || result.alphas.len() < 2 {
@@ -272,21 +367,33 @@ fn merge_close_sites(
 
     // Refit weights on the surviving subset.
     keep.sort_by(|&a, &b| cmp_f32(result.alphas[a], result.alphas[b]));
-    let n_frag = all_site_lls.first().map(|v| v.len()).unwrap_or(0);
+    let n_frag = if n_candidates == 0 {
+        0
+    } else {
+        all_site_lls.len() / n_candidates
+    };
     let kept_alphas: Vec<f32> = keep.iter().map(|&i| result.alphas[i]).collect();
     let kept_betas: Vec<f32> = keep.iter().map(|&i| result.betas[i]).collect();
-    let component_log_liks: Vec<Vec<f32>> = (0..n_frag)
-        .map(|n| {
-            let mut row = Vec::with_capacity(keep.len() + 1);
-            row.push(noise_ll);
-            for &i in &keep {
-                row.push(all_site_lls[i][n]);
-            }
-            row
-        })
-        .collect();
+    let n_total = keep.len() + 1;
+    let mut component_log_liks = vec![0.0_f32; n_frag * n_total];
+    for n in 0..n_frag {
+        let base = n * n_total;
+        component_log_liks[base] = noise_ll;
+        let src_base = n * n_candidates;
+        for (slot, &i) in keep.iter().enumerate() {
+            component_log_liks[base + 1 + slot] = all_site_lls[src_base + i];
+        }
+    }
 
-    let merged = run_fixed_em(&component_log_liks, &kept_alphas, &kept_betas, params);
+    let merged = run_fixed_em(
+        &component_log_liks,
+        n_total,
+        &kept_alphas,
+        &kept_betas,
+        Some(cluster_counts),
+        n_for_bic,
+        params,
+    );
 
     // Only accept the merge if BIC strictly improves; otherwise keep the
     // BIC-best model that motivated the merge attempt.
@@ -300,8 +407,24 @@ fn merge_close_sites(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::apa::fragment::{cluster_fragments, ClusterBins};
     use crate::apa::likelihood::{precompute_theta_lik_matrix, LikelihoodParams};
     use crate::apa::simulate::{simulate_fragments, ScapeSimParams};
+
+    /// Cluster simulated fragments (with the default bin sizes used in
+    /// production) and return the inputs needed to build a SiteModelData:
+    /// flat θ-likelihood matrix, θ grid, per-cluster counts, and the
+    /// original-fragment count for BIC.
+    fn cluster_for_em(
+        fragments: &[crate::apa::fragment::FragmentRecord],
+        params: &ScapeSimParams,
+        lik_params: &LikelihoodParams,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>, usize) {
+        let (clusters, _cluster_idx) = cluster_fragments(fragments, ClusterBins::default());
+        let counts: Vec<f32> = clusters.iter().map(|c| c.count as f32).collect();
+        let (mat, grid) = precompute_theta_lik_matrix(&clusters, params.utr_length, lik_params);
+        (mat, grid, counts, fragments.len())
+    }
 
     fn run_em_on_sim(params: &ScapeSimParams) -> EmResult {
         let (fragments, _labels) = simulate_fragments(params);
@@ -312,8 +435,8 @@ mod tests {
             max_polya: params.max_polya,
             min_polya: params.min_polya,
         };
-        let (theta_lik_matrix, theta_grid) =
-            precompute_theta_lik_matrix(&fragments, params.utr_length, &lik_params);
+        let (theta_lik_matrix, theta_grid, cluster_counts, n_for_bic) =
+            cluster_for_em(&fragments, params, &lik_params);
 
         // Baseline EM behavior: disable skirt and post-EM merge so these
         // tests cover the non-robust path. Robust path has its own test.
@@ -331,6 +454,8 @@ mod tests {
             beta_arr: &params.betas,
             theta_lik_matrix: &theta_lik_matrix,
             theta_grid: &theta_grid,
+            cluster_counts: &cluster_counts,
+            n_for_bic,
             utr_length: params.utr_length,
             max_polya: params.max_polya,
         };
@@ -483,8 +608,8 @@ mod tests {
             max_polya: params.max_polya,
             min_polya: params.min_polya,
         };
-        let (theta_lik_matrix, theta_grid) =
-            precompute_theta_lik_matrix(&fragments, params.utr_length, &lik_params);
+        let (theta_lik_matrix, theta_grid, cluster_counts, n_for_bic) =
+            cluster_for_em(&fragments, &params, &lik_params);
 
         // 2 true sites + 1 spurious site at position 2500
         let alpha_arr = vec![500.0, 1500.0, 2500.0];
@@ -508,6 +633,8 @@ mod tests {
             beta_arr: &beta_arr,
             theta_lik_matrix: &theta_lik_matrix,
             theta_grid: &theta_grid,
+            cluster_counts: &cluster_counts,
+            n_for_bic,
             utr_length: params.utr_length,
             max_polya: params.max_polya,
         };
@@ -557,8 +684,8 @@ mod tests {
             max_polya: params.max_polya,
             min_polya: params.min_polya,
         };
-        let (theta_lik_matrix, theta_grid) =
-            precompute_theta_lik_matrix(&fragments, params.utr_length, &lik_params);
+        let (theta_lik_matrix, theta_grid, cluster_counts, n_for_bic) =
+            cluster_for_em(&fragments, &params, &lik_params);
 
         // Baseline EM behavior: disable skirt and post-EM merge so these
         // tests cover the non-robust path. Robust path has its own test.
@@ -576,6 +703,8 @@ mod tests {
             beta_arr: &[30.0],
             theta_lik_matrix: &theta_lik_matrix,
             theta_grid: &theta_grid,
+            cluster_counts: &cluster_counts,
+            n_for_bic,
             utr_length: params.utr_length,
             max_polya: params.max_polya,
         };
@@ -609,8 +738,8 @@ mod tests {
             max_polya: params.max_polya,
             min_polya: params.min_polya,
         };
-        let (theta_lik_matrix, theta_grid) =
-            precompute_theta_lik_matrix(&fragments, params.utr_length, &lik_params);
+        let (theta_lik_matrix, theta_grid, cluster_counts, n_for_bic) =
+            cluster_for_em(&fragments, &params, &lik_params);
 
         // 530 sits 30bp from the true 500 site → within 2*beta=60 merge tol.
         let alpha_arr = vec![500.0, 530.0, 1500.0];
@@ -630,6 +759,8 @@ mod tests {
             beta_arr: &beta_arr,
             theta_lik_matrix: &theta_lik_matrix,
             theta_grid: &theta_grid,
+            cluster_counts: &cluster_counts,
+            n_for_bic,
             utr_length: params.utr_length,
             max_polya: params.max_polya,
         };

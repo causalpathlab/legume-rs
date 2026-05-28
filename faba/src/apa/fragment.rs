@@ -5,6 +5,137 @@ use genomic_data::bed::Bed;
 use genomic_data::sam::{CellBarcode, Strand, UmiBarcode};
 use rust_htslib::bam::ext::BamRecordExtensions;
 
+/// Clustered fragment: one representative tuple + a count of how many
+/// original `FragmentRecord`s share the same (coarsened) features.
+///
+/// The SCAPE likelihood `p(x_n, l_n, r_n | site_k)` depends *only* on
+/// `(x, l, r, is_junction, pa_site)` — cell_barcode and umi don't enter.
+/// So `(x, l, r, is_junction, pa_site)` is a **sufficient statistic** and
+/// fragments sharing this tuple are indistinguishable to the model.
+/// Counting them and running EM on the (≪ N) cluster representatives
+/// is exact, not an approximation; the per-cluster weight `count` enters
+/// the M-step and log-likelihood accumulator linearly.
+#[derive(Clone)]
+pub struct FragmentCluster {
+    pub x: f32,
+    pub l: f32,
+    pub r: f32,
+    pub is_junction: bool,
+    /// Kept on the representative for symmetry with `FragmentRecord` and
+    /// in case downstream code needs it; the SCAPE per-fragment
+    /// likelihood doesn't depend on it (only site discovery does, and
+    /// that runs on the un-clustered fragments).
+    #[allow(dead_code)]
+    pub pa_site: Option<f32>,
+    /// Number of original fragments collapsed into this cluster.
+    pub count: u32,
+}
+
+/// Quantisation grid for fragment clustering. Bin widths chosen so the
+/// representative tuple sits well inside the SCAPE Gaussian's σ_f (≈50bp
+/// at default `LikelihoodParams`): a 5bp x-bin perturbs log-lik by at most
+/// O((5/50)² / 2) ≈ 0.005, two orders of magnitude below the EM tolerance.
+/// Setting any bin to 0 disables coarsening on that axis and keeps the
+/// raw value as the key (exact dedup only).
+#[derive(Clone, Copy)]
+pub struct ClusterBins {
+    pub x: f32,
+    pub l: f32,
+    pub r: f32,
+    pub pa_site: f32,
+}
+
+impl Default for ClusterBins {
+    fn default() -> Self {
+        Self {
+            x: 5.0,
+            l: 10.0,
+            r: 10.0,
+            pa_site: 5.0,
+        }
+    }
+}
+
+#[inline]
+fn quantise(v: f32, bin: f32) -> i32 {
+    if bin <= 0.0 {
+        // Disabled: fall back to nearest integer so we still get exact dedup.
+        v.round() as i32
+    } else {
+        (v / bin).round() as i32
+    }
+}
+
+/// Group fragments by their coarsened feature tuple. Returns
+/// `(clusters, cluster_idx)` where `cluster_idx[n]` is the cluster the
+/// nth original fragment fell into — used downstream by cell assignment
+/// to look up the per-cluster posterior γ for each (cell, umi).
+///
+/// The representative `(x, l, r, pa_site)` for a cluster is the **mean**
+/// of its members (within the bin width); cheap and slightly more
+/// accurate than a bin centroid.
+pub fn cluster_fragments(
+    fragments: &[FragmentRecord],
+    bins: ClusterBins,
+) -> (Vec<FragmentCluster>, Vec<u32>) {
+    use rustc_hash::FxHashMap;
+
+    // Key: rounded tuple. pa_site uses an Option-aware key (None ≠ 0).
+    // f32 isn't Hash, so we go through quantised i32 representatives.
+    type Key = (i32, i32, i32, bool, Option<i32>);
+
+    let mut acc: FxHashMap<Key, (usize, f64, f64, f64, f64, u32)> = FxHashMap::default();
+    // acc[key] = (cluster_idx, sum_x, sum_l, sum_r, sum_pa, count)
+    let mut cluster_idx = Vec::with_capacity(fragments.len());
+
+    for frag in fragments {
+        let key: Key = (
+            quantise(frag.x, bins.x),
+            quantise(frag.l, bins.l),
+            quantise(frag.r, bins.r),
+            frag.is_junction,
+            frag.pa_site.map(|p| quantise(p, bins.pa_site)),
+        );
+        let next_idx = acc.len();
+        let entry = acc.entry(key).or_insert((next_idx, 0.0, 0.0, 0.0, 0.0, 0));
+        entry.1 += frag.x as f64;
+        entry.2 += frag.l as f64;
+        entry.3 += frag.r as f64;
+        entry.4 += frag.pa_site.unwrap_or(0.0) as f64;
+        entry.5 += 1;
+        cluster_idx.push(entry.0 as u32);
+    }
+
+    // Materialise clusters in insertion order so `cluster_idx` indexing
+    // matches the Vec layout. acc's idx counter was assigned in
+    // insertion order, so collect-then-sort-by-idx reproduces that.
+    let mut clusters: Vec<(usize, FragmentCluster)> = acc
+        .into_iter()
+        .map(|(key, (idx, sx, sl, sr, spa, count))| {
+            let c = count as f64;
+            (
+                idx,
+                FragmentCluster {
+                    x: (sx / c) as f32,
+                    l: (sl / c) as f32,
+                    r: (sr / c) as f32,
+                    is_junction: key.3,
+                    pa_site: if key.4.is_some() {
+                        Some((spa / c) as f32)
+                    } else {
+                        None
+                    },
+                    count,
+                },
+            )
+        })
+        .collect();
+    clusters.sort_by_key(|(idx, _)| *idx);
+    let clusters = clusters.into_iter().map(|(_, c)| c).collect();
+
+    (clusters, cluster_idx)
+}
+
 /// Parameters for polyA tail filtering and internal priming detection.
 pub struct PolyAFilterParams {
     /// Minimum soft-clipped tail length to call a junction read

@@ -31,13 +31,28 @@ pub struct ApaSiteAnnotation {
     pub utr_length: u32,
 }
 
-/// Assign fragments to mixture components via hard assignment (argmax gamma),
-/// then deduplicate by (cell, UMI, component) and count UMIs per cell per site.
+/// Assign fragments to mixture components via hard assignment (argmax γ),
+/// then deduplicate by (cell, UMI, component) and count UMIs per cell
+/// per site.
+///
+/// `cluster_idx[n]` is the cluster the n-th original fragment was
+/// grouped into during pre-EM clustering — all fragments in a cluster
+/// share the same posterior γ (they have identical features), so every
+/// fragment in cluster m gets the same component assignment. Each
+/// fragment still contributes its own (cell_barcode, umi) to the dedup
+/// set, so the per-cell counts are exact.
 pub fn assign_fragments_to_sites(
     fragments: &[FragmentRecord],
+    cluster_idx: &[u32],
     em_result: &EmResult,
     utr: &UtrRegion,
 ) -> (Vec<CellSiteCount>, Vec<ApaSiteAnnotation>) {
+    debug_assert_eq!(
+        fragments.len(),
+        cluster_idx.len(),
+        "cluster_idx must be 1:1 with fragments"
+    );
+
     // Hard-assign each fragment to the argmax component (skip noise = k=0)
     // and dedupe UMIs directly on their 64-bit hash — no per-fragment
     // `Box<str>` allocation.
@@ -45,7 +60,8 @@ pub fn assign_fragments_to_sites(
     let mut cell_component_umis: HashMap<(CellBarcode, usize), FxHashSet<u64>> = HashMap::default();
 
     for (n, frag) in fragments.iter().enumerate() {
-        let gamma = &em_result.gamma[n];
+        let m = cluster_idx[n] as usize;
+        let gamma = em_result.gamma_row(m);
 
         // Find argmax component (including noise at k=0)
         let (best_k, _) = gamma
@@ -139,7 +155,7 @@ mod tests {
     fn test_cell_assignment_deduplication() {
         // 5 cells, 10 fragments each = 50 total
         let mut fragments = Vec::new();
-        let mut gamma = Vec::new();
+        let mut gamma: Vec<f32> = Vec::new();
 
         for cell_idx in 0..5u32 {
             let cb = CellBarcode::Barcode(format!("CELL{:04}", cell_idx).into());
@@ -159,11 +175,12 @@ mod tests {
                 });
 
                 // Assign: first 5 frags to component 1, next 5 to component 2
-                // (noise = 0, comp1 = 1, comp2 = 2)
+                // (noise = 0, comp1 = 1, comp2 = 2). gamma is flat row-major
+                // with stride 3.
                 if frag_idx < 5 {
-                    gamma.push(vec![0.05, 0.9, 0.05]); // strongly assign to comp 1
+                    gamma.extend_from_slice(&[0.05, 0.9, 0.05]);
                 } else {
-                    gamma.push(vec![0.05, 0.05, 0.9]); // strongly assign to comp 2
+                    gamma.extend_from_slice(&[0.05, 0.05, 0.9]);
                 }
             }
         }
@@ -173,6 +190,7 @@ mod tests {
             alphas: vec![500.0, 1500.0],
             betas: vec![30.0, 30.0],
             gamma,
+            n_components: 3,
             log_lik: -1000.0,
             bic: 2000.0,
             n_iter: 10,
@@ -187,7 +205,10 @@ mod tests {
             utr_length: 3000,
         };
 
-        let (counts, annotations) = assign_fragments_to_sites(&fragments, &em_result, &utr);
+        // Each test fragment is its own cluster (no real coarsening here).
+        let cluster_idx: Vec<u32> = (0..fragments.len() as u32).collect();
+        let (counts, annotations) =
+            assign_fragments_to_sites(&fragments, &cluster_idx, &em_result, &utr);
 
         // Should have counts for 5 cells × 2 components = 10 entries
         assert_eq!(
@@ -221,7 +242,7 @@ mod tests {
     fn test_noise_exclusion() {
         // All fragments assigned to noise → no counts
         let mut fragments = Vec::new();
-        let mut gamma = Vec::new();
+        let mut gamma: Vec<f32> = Vec::new();
 
         for i in 0..20u32 {
             fragments.push(FragmentRecord {
@@ -233,7 +254,7 @@ mod tests {
                 cell_barcode: CellBarcode::Barcode(format!("CELL{:04}", i % 3).into()),
                 umi: UmiBarcode::Hash(i as u64),
             });
-            gamma.push(vec![0.95, 0.025, 0.025]); // noise dominant
+            gamma.extend_from_slice(&[0.95, 0.025, 0.025]); // noise dominant
         }
 
         let em_result = EmResult {
@@ -241,6 +262,7 @@ mod tests {
             alphas: vec![500.0, 1500.0],
             betas: vec![30.0, 30.0],
             gamma,
+            n_components: 3,
             log_lik: -500.0,
             bic: 1000.0,
             n_iter: 5,
@@ -255,7 +277,8 @@ mod tests {
             utr_length: 3000,
         };
 
-        let (counts, _) = assign_fragments_to_sites(&fragments, &em_result, &utr);
+        let cluster_idx: Vec<u32> = (0..fragments.len() as u32).collect();
+        let (counts, _) = assign_fragments_to_sites(&fragments, &cluster_idx, &em_result, &utr);
         assert!(
             counts.is_empty(),
             "all-noise fragments should produce no counts, got {}",

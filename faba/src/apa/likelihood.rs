@@ -1,4 +1,4 @@
-use crate::apa::fragment::FragmentRecord;
+use crate::apa::fragment::{FragmentCluster, FragmentRecord};
 
 /// Parameters for the SCAPE likelihood model.
 pub struct LikelihoodParams {
@@ -26,26 +26,67 @@ impl Default for LikelihoodParams {
     }
 }
 
-/// Compute log p(x_n, l_n, r_n | theta_nk) for a single fragment and theta value.
-///
-/// Following SCAPE eq 5-10:
-/// p(x,l,r|theta) = sum_s f(x,l,r,s,theta)
-/// where f = p(l|x,theta) * p(x|s,theta) * p(r|s) * p(s)
-///
-/// For SE reads: s is marginalized out by enumeration.
-/// For junction reads (r > 0, pa_site known): s is known, theta = pa_site.
+/// SCAPE per-fragment likelihood `log p(x_n, l_n, r_n | θ_nk)`. Depends
+/// only on `(x, l, r, is_junction)` — `pa_site` is only used in site
+/// discovery, not in the per-fragment likelihood, so this signature is
+/// shared between `FragmentRecord` and `FragmentCluster` via
+/// [`log_lik_features_given_theta`].
+#[allow(dead_code)] // kept for tests / external callers; production path uses the cluster variant
 pub fn log_lik_fragment_given_theta(
     frag: &FragmentRecord,
     theta: f32,
     utr_length: f32,
     params: &LikelihoodParams,
 ) -> f32 {
-    let x = frag.x;
-    let l = frag.l;
-    let r = frag.r;
+    log_lik_features_given_theta(
+        frag.x,
+        frag.l,
+        frag.r,
+        frag.is_junction,
+        theta,
+        utr_length,
+        params,
+    )
+}
 
+/// Same as [`log_lik_fragment_given_theta`] but for a clustered
+/// representative — the cluster's representative `(x, l, r)` mean is
+/// used; multiplicity enters later in the EM accumulator.
+pub fn log_lik_cluster_given_theta(
+    cluster: &FragmentCluster,
+    theta: f32,
+    utr_length: f32,
+    params: &LikelihoodParams,
+) -> f32 {
+    log_lik_features_given_theta(
+        cluster.x,
+        cluster.l,
+        cluster.r,
+        cluster.is_junction,
+        theta,
+        utr_length,
+        params,
+    )
+}
+
+/// Shared kernel: takes raw features. The original code branched on
+/// `frag.is_junction && r > 0.0`; that's preserved here unchanged.
+///
+/// SCAPE eq 5-10: `p(x,l,r|θ) = Σ_s f(x,l,r,s,θ)` with
+/// `f = p(l|x,θ) · p(x|s,θ) · p(r|s) · p(s)`. Junction reads collapse
+/// the s marginal; SE reads enumerate s.
+#[inline]
+pub fn log_lik_features_given_theta(
+    x: f32,
+    l: f32,
+    r: f32,
+    is_junction: bool,
+    theta: f32,
+    utr_length: f32,
+    params: &LikelihoodParams,
+) -> f32 {
     // Junction read: s is known (s = r), theta = pa_site
-    if frag.is_junction && r > 0.0 {
+    if is_junction && r > 0.0 {
         // For junction reads, set p(x|s,theta) = 1 and p(r|s) = 1
         // Only contribution is from p(l|x,theta)
         let max_l = theta - x + 1.0;
@@ -123,33 +164,53 @@ pub fn log_lik_noise(utr_length: f32, max_polya: f32) -> f32 {
     -2.0 * utr_length.ln() - max_polya.ln()
 }
 
-/// Precompute the theta likelihood matrix for all fragments.
-/// Returns a matrix of shape [n_fragments, n_theta_values] containing
-/// log p(x_n, l_n, r_n | theta) for each fragment and theta grid point.
+/// Precompute the θ likelihood matrix for a slice of **clusters** in
+/// flat row-major layout: entry `[m * n_theta + t]` is
+/// `log p(x_m, l_m, r_m | θ_t)` for cluster `m`. Cluster counts (`c_m`)
+/// do **not** enter here — they're applied later in the EM accumulator
+/// (per-cluster log-likelihood is weighted by `c_m`, the per-cluster
+/// row of the matrix is shared across all `c_m` original fragments).
 ///
-/// theta_grid: the grid of theta values to evaluate (1, 1+step, 1+2*step, ..., L)
+/// Returns `(matrix, theta_grid)`. Recover `n_theta` as `theta_grid.len()`.
 pub fn precompute_theta_lik_matrix(
-    fragments: &[FragmentRecord],
+    clusters: &[FragmentCluster],
     utr_length: f32,
     params: &LikelihoodParams,
-) -> (Vec<Vec<f32>>, Vec<f32>) {
+) -> (Vec<f32>, Vec<f32>) {
+    use rayon::prelude::*;
+
     let step = params.theta_step;
     let theta_grid: Vec<f32> = (1..=utr_length as usize)
         .step_by(step)
         .map(|t| t as f32)
         .collect();
+    let n_theta = theta_grid.len();
+    let n_obs = clusters.len();
 
-    let lik_matrix: Vec<Vec<f32>> = fragments
-        .iter()
-        .map(|frag| {
-            theta_grid
-                .iter()
-                .map(|&theta| log_lik_fragment_given_theta(frag, theta, utr_length, params))
-                .collect()
-        })
-        .collect();
+    let mut matrix = vec![0.0_f32; n_obs * n_theta];
 
-    (lik_matrix, theta_grid)
+    // Threshold matches the EM E-step's parallel gate: parallelise only
+    // when the per-cluster cost has anything to amortise rayon spawn over.
+    const PARALLEL_THRESHOLD: usize = 4096;
+    if n_obs >= PARALLEL_THRESHOLD {
+        matrix
+            .par_chunks_mut(n_theta)
+            .zip(clusters.par_iter())
+            .for_each(|(row, cluster)| {
+                for (t, &theta) in theta_grid.iter().enumerate() {
+                    row[t] = log_lik_cluster_given_theta(cluster, theta, utr_length, params);
+                }
+            });
+    } else {
+        for (m, cluster) in clusters.iter().enumerate() {
+            let row = &mut matrix[m * n_theta..(m + 1) * n_theta];
+            for (t, &theta) in theta_grid.iter().enumerate() {
+                row[t] = log_lik_cluster_given_theta(cluster, theta, utr_length, params);
+            }
+        }
+    }
+
+    (matrix, theta_grid)
 }
 
 /// Compute log p(x_n, l_n, r_n | alpha_k, beta_k) by marginalizing theta
