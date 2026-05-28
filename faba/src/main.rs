@@ -21,7 +21,6 @@ mod site_analysis;
 mod snp;
 
 use crate::common::*;
-use colored::Colorize;
 use rna_mod_embed::args::RnaModEmbedArgs;
 use run_apa::*;
 use run_atoi::*;
@@ -37,43 +36,11 @@ use site_analysis::scan_pwm::*;
 
 const LOGO: &str = include_str!("../logo.txt");
 
-fn colorize_pod(s: &str) -> String {
-    s.replace('○', &"○".truecolor(200, 160, 60).to_string())
-        .replace(':', &":".truecolor(200, 160, 80).to_string())
-        .replace('.', &".".truecolor(220, 170, 90).to_string())
-        .replace('_', &"_".truecolor(60, 120, 40).to_string())
-        .replace('~', &"~".truecolor(80, 140, 60).to_string())
-        .replace('\'', &"'".truecolor(60, 120, 40).to_string())
-        .replace('`', &"`".truecolor(60, 120, 40).to_string())
-        .replace('/', &"/".truecolor(60, 120, 40).to_string())
-        .replace('\\', &"\\".truecolor(60, 120, 40).to_string())
-        .replace('-', &"-".truecolor(80, 140, 60).to_string())
-}
-
-fn colorize_funnel(s: &str) -> String {
-    s.replace('○', &"○".truecolor(240, 100, 100).to_string())
-        .replace('/', &"/".truecolor(200, 160, 60).to_string())
-        .replace('\\', &"\\".truecolor(200, 160, 60).to_string())
-        .replace('|', &"|".truecolor(200, 160, 60).to_string())
-        .replace('=', &"=".truecolor(200, 160, 60).to_string())
-        .replace('>', &">".truecolor(200, 170, 60).to_string())
-}
-
-fn colorize_logo_line(line: &str) -> String {
-    // Pod ends around column 38, funnel+peas after
-    let split = 38.min(line.len());
-    let (pod, funnel) = line.split_at(split);
-    format!("{}{}", colorize_pod(pod), colorize_funnel(funnel))
-}
-
 fn print_logo() {
     for line in LOGO.lines() {
-        println!("  {}", colorize_logo_line(line));
+        println!("  {}", line);
     }
-    println!(
-        " {}",
-        "Feature statistics Accumulator for Base-pair-level Analysis".bold()
-    );
+    println!(" Feature statistics Accumulator for Base-pair-level Analysis");
     println!();
 }
 
