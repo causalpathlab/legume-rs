@@ -101,6 +101,7 @@ mod tests {
             genomic_stop: alpha + 50,
             pi_weight: weight,
             expected_tail_length: 100.0_f32,
+            utr_length: 1000,
         }
     }
 

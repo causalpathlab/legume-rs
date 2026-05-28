@@ -1108,10 +1108,17 @@ pub fn run_mixture_model(
             .unwrap_or_else(|| format!("{}", gene_id))
             .into();
 
-        let gene_length = gff_map
+        // `gene_length` feeds the EM's uniform-noise normalizer (where a
+        // 1000-nt fallback is fine) AND the parquet sidecar (where it
+        // should not smuggle a sentinel out as if it were a measurement).
+        // Diverge: EM gets the fallback, sidecar gets NaN for missing.
+        // GFF coords are 1-based inclusive (genomic-data/src/gff.rs:508),
+        // so the nucleotide span is `stop - start + 1`, not `stop - start`.
+        let gene_span = gff_map
             .get(gene_id)
-            .map(|gff| (gff.stop - gff.start) as f32)
-            .unwrap_or(1000.0);
+            .map(|gff| (gff.stop - gff.start + 1) as f32);
+        let gene_length = gene_span.unwrap_or(1000.0);
+        let gene_length_emit = gene_span.unwrap_or(f32::NAN);
 
         let cell_observations: Vec<WeightedObservation> = obs_list
             .iter()
@@ -1147,6 +1154,7 @@ pub fn run_mixture_model(
                         mu,
                         sigma,
                         pi,
+                        gene_length: gene_length_emit,
                     });
                 }
             }
@@ -1293,6 +1301,7 @@ fn write_mixture_annotations(
     let mus: Vec<f32> = annotations.iter().map(|a| a.mu).collect();
     let sigmas: Vec<f32> = annotations.iter().map(|a| a.sigma).collect();
     let pis: Vec<f32> = annotations.iter().map(|a| a.pi).collect();
+    let gene_lengths: Vec<f32> = annotations.iter().map(|a| a.gene_length).collect();
 
     let schema = arrow::datatypes::Schema::new(vec![
         arrow::datatypes::Field::new("gene_name", arrow::datatypes::DataType::Utf8, false),
@@ -1300,6 +1309,7 @@ fn write_mixture_annotations(
         arrow::datatypes::Field::new("mu", arrow::datatypes::DataType::Float32, false),
         arrow::datatypes::Field::new("sigma", arrow::datatypes::DataType::Float32, false),
         arrow::datatypes::Field::new("pi", arrow::datatypes::DataType::Float32, false),
+        arrow::datatypes::Field::new("gene_length", arrow::datatypes::DataType::Float32, false),
     ]);
 
     let batch = RecordBatch::try_new(
@@ -1310,6 +1320,7 @@ fn write_mixture_annotations(
             std::sync::Arc::new(Float32Array::from(mus)) as ArrayRef,
             std::sync::Arc::new(Float32Array::from(sigmas)) as ArrayRef,
             std::sync::Arc::new(Float32Array::from(pis)) as ArrayRef,
+            std::sync::Arc::new(Float32Array::from(gene_lengths)) as ArrayRef,
         ],
     )?;
 

@@ -34,12 +34,14 @@ pub struct MixtureComponentAnnotation {
     pub gene_name: Box<str>,
     /// Component index within gene
     pub component_idx: usize,
-    /// Learned mean position
+    /// Learned mean position (5'-relative, strand-aware, in nt)
     pub mu: f32,
     /// Learned standard deviation
     pub sigma: f32,
     /// Mixing weight
     pub pi: f32,
+    /// Gene length in nt (denominator for normalized position u = mu / gene_length)
+    pub gene_length: f32,
 }
 
 /// Result of per-gene mixture model
