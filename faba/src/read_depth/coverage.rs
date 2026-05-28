@@ -69,9 +69,9 @@ impl<'a> ReadCoverageCollector<'a> {
     /// # Arguments
     /// * `chr` - Chromosome/contig name
     /// * `bam_record` - The BAM alignment record to process
-    pub fn update(&mut self, chr: &str, bam_record: bam::Record) {
+    pub fn update(&mut self, chr: &str, bam_record: &bam::Record) {
         let cell_barcode =
-            bam_io::extract_cell_barcode(&bam_record, self.cell_barcode_tag.as_bytes());
+            bam_io::extract_cell_barcode(bam_record, self.cell_barcode_tag.as_bytes());
         let first = bam_record.pos() as i32;
         let last = bam_record.reference_end() as i32;
 

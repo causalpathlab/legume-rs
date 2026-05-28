@@ -198,7 +198,7 @@ pub fn run_splice_aware(
 
         let qc_cells: rustc_hash::FxHashSet<CellBarcode> = qc_col_names
             .iter()
-            .map(|name| CellBarcode::Barcode(name.clone()))
+            .map(|name| CellBarcode::Barcode(std::sync::Arc::from(name.as_ref())))
             .collect();
 
         // Filter spliced/unspliced triplets to QC-passing genes and cells.

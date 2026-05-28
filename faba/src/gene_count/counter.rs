@@ -7,7 +7,7 @@ use crate::common::*;
 use crate::data::bam_io;
 use genomic_data::gff::{GeneId, GffRecord, GffRecordMap};
 
-use rust_htslib::bam::{self, record::Aux, Read};
+use rust_htslib::bam::{self, Read};
 use rustc_hash::FxHashMap;
 
 /// Count reads per cell for a single gene
@@ -105,11 +105,8 @@ fn count_reads_in_bam_for_gene(
             continue;
         }
 
-        // Get cell barcode
-        let cell_barcode = match record.aux(cell_barcode_tag.as_bytes()) {
-            Ok(Aux::String(barcode)) => CellBarcode::Barcode(barcode.into()),
-            _ => CellBarcode::Missing,
-        };
+        // Get cell barcode (interned via thread-local interner)
+        let cell_barcode = bam_io::extract_cell_barcode(&record, cell_barcode_tag.as_bytes());
 
         *cell_counts.entry(cell_barcode).or_default() += 1;
     }

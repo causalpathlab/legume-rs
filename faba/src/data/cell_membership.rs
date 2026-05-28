@@ -13,7 +13,7 @@ pub struct CellMembership {
     inner: Membership,
 
     /// Cache for matched BAM barcodes (thread-safe for parallel processing)
-    match_cache: Mutex<HashMap<Box<str>, Option<Box<str>>>>,
+    match_cache: Mutex<HashMap<std::sync::Arc<str>, Option<Box<str>>>>,
 
     /// Statistics tracking (lock-free)
     matched: AtomicUsize,

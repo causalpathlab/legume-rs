@@ -78,7 +78,7 @@ pub fn count_read_per_gene_splice(
     let mut counter = SpliceAwareReadCounter::new(cell_barcode_tag, exons);
 
     bam_io::for_each_record_in_gene(bam_file, rec, gene_barcode_tag, false, |bam_record| {
-        counter.classify_and_count(&bam_record);
+        counter.classify_and_count(bam_record);
     })?;
 
     let spliced = counter
@@ -116,9 +116,9 @@ impl<'a> ReadCounter<'a> {
             .collect()
     }
 
-    pub fn count(&mut self, bam_record: bam::Record) {
+    pub fn count(&mut self, bam_record: &bam::Record) {
         let cell_barcode =
-            bam_io::extract_cell_barcode(&bam_record, self.cell_barcode_tag.as_bytes());
+            bam_io::extract_cell_barcode(bam_record, self.cell_barcode_tag.as_bytes());
         *self.cell_to_count.entry(cell_barcode).or_default() += 1;
     }
 }

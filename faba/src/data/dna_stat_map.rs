@@ -163,7 +163,7 @@ impl<'a> DnaBaseFreqMap<'a> {
         }
     }
 
-    fn add_bam_record(&mut self, bam_record: bam::Record) {
+    fn add_bam_record(&mut self, bam_record: &bam::Record) {
         if bam_record.mapq() < self.min_mapping_quality {
             return;
         }
@@ -178,7 +178,7 @@ impl<'a> DnaBaseFreqMap<'a> {
         }
 
         let seq = bam_record.seq().as_bytes();
-        let umi_hash = self.extract_umi_hash(&bam_record);
+        let umi_hash = self.extract_umi_hash(bam_record);
 
         match &mut self.mode {
             CountMode::Marginal { counts, umi_seen } => {
@@ -220,7 +220,7 @@ impl<'a> DnaBaseFreqMap<'a> {
                 cell_membership,
                 umi_seen,
             } => {
-                let cell_barcode = bam_io::extract_cell_barcode(&bam_record, cell_barcode_tag);
+                let cell_barcode = bam_io::extract_cell_barcode(bam_record, cell_barcode_tag);
 
                 if let Some(membership) = cell_membership {
                     if membership.matches_barcode(&cell_barcode).is_none() {

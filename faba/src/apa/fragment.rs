@@ -4,7 +4,6 @@ use crate::data::polya_utils::*;
 use genomic_data::bed::Bed;
 use genomic_data::sam::{CellBarcode, Strand, UmiBarcode};
 use rust_htslib::bam::ext::BamRecordExtensions;
-use rust_htslib::bam::record::Aux;
 
 /// Parameters for polyA tail filtering and internal priming detection.
 pub struct PolyAFilterParams {
@@ -80,20 +79,17 @@ pub fn extract_fragments_cached(
         }
 
         // Extract cell barcode and UMI
-        let cell_barcode = bam_io::extract_cell_barcode(&rec, cb_tag);
-        let umi = match rec.aux(umi_tag) {
-            Ok(Aux::String(s)) => UmiBarcode::Barcode(s.into()),
-            _ => UmiBarcode::Missing,
-        };
+        let cell_barcode = bam_io::extract_cell_barcode(rec, cb_tag);
+        let umi = bam_io::extract_umi(rec, umi_tag);
 
         // Determine if this is a valid junction read (poly-A/T tail passes all checks)
-        let poly_tail_len = get_polya_tail_length(&rec);
+        let poly_tail_len = get_polya_tail_length(rec);
         let is_valid_junction = if poly_tail_len >= polya.min_tail as i64 {
-            let at_count = count_a_or_t_bases_in_tail(&rec);
+            let at_count = count_a_or_t_bases_in_tail(rec);
             let non_at = poly_tail_len as usize - at_count;
             non_at <= polya.max_non_at
                 && !check_internal_prime(
-                    &rec,
+                    rec,
                     polya.internal_prime_window,
                     polya.internal_prime_count,
                 )
