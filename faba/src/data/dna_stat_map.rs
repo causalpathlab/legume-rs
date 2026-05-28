@@ -123,15 +123,29 @@ impl<'a> DnaBaseFreqMap<'a> {
         })
     }
 
-    /// Update from BAM records matching a gene barcode
-    pub fn update_from_gene(
+    /// Like [`Self::update_from_region`] but reuses a per-thread BAM reader cache.
+    pub fn update_from_region_cached(
         &mut self,
+        cache: &mut bam_io::BamReaderCache,
+        bam_file_path: &str,
+        region: &Bed,
+    ) -> anyhow::Result<()> {
+        bam_io::for_each_record_in_region_cached(cache, bam_file_path, region, |_chr, rec| {
+            self.add_bam_record(rec);
+        })
+    }
+
+    /// Reuses a per-thread BAM reader cache; preferred inside `par_iter` paths.
+    pub fn update_from_gene_cached(
+        &mut self,
+        cache: &mut bam_io::BamReaderCache,
         bam_file_path: &str,
         gff_record: &GffRecord,
         gene_barcode_tag: &str,
         include_missing_barcode: bool,
     ) -> anyhow::Result<()> {
-        bam_io::for_each_record_in_gene(
+        bam_io::for_each_record_in_gene_cached(
+            cache,
             bam_file_path,
             gff_record,
             gene_barcode_tag,

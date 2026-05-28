@@ -126,19 +126,39 @@ pub fn run_splice_aware(
             unspliced_triplets.len()
         );
 
-        // Build total counts (spliced + unspliced) for QC
-        // Gene key: strip "/count/spliced" or "/count/unspliced" suffix, use "/count/total"
-        // Pre-build gene_key → total_key map to avoid per-triplet format! allocation
+        // Build total counts (spliced + unspliced) for QC.
+        // Parallel fold/reduce: each rayon worker accumulates a local
+        // (cell, gene_key) → val map; we then merge the shards and
+        // materialize the "{gene_key}/count/total" feature names once.
         let total_triplets: Vec<(CellBarcode, Box<str>, f32)> = {
-            let mut total_key_cache: HashMap<Box<str>, Box<str>> = HashMap::default();
-            let mut totals: rustc_hash::FxHashMap<(CellBarcode, &str), f32> =
-                rustc_hash::FxHashMap::default();
-            for (cb, feat, val) in spliced_triplets.iter().chain(unspliced_triplets.iter()) {
-                let gene_key = extract_gene_key(feat);
+            use rayon::prelude::*;
+            type Shard<'a> = rustc_hash::FxHashMap<(CellBarcode, &'a str), f32>;
+
+            let totals: Shard = spliced_triplets
+                .par_iter()
+                .chain(unspliced_triplets.par_iter())
+                .fold(Shard::default, |mut acc, (cb, feat, val)| {
+                    let gene_key = extract_gene_key(feat);
+                    *acc.entry((cb.clone(), gene_key)).or_default() += *val;
+                    acc
+                })
+                .reduce(Shard::default, |mut a, mut b| {
+                    if a.len() < b.len() {
+                        std::mem::swap(&mut a, &mut b);
+                    }
+                    for (k, v) in b {
+                        *a.entry(k).or_default() += v;
+                    }
+                    a
+                });
+
+            // Memoize gene_key → "{gene_key}/count/total" once (serial; cheap
+            // relative to the fold above).
+            let mut total_key_cache: HashMap<&str, Box<str>> = HashMap::default();
+            for (_, gk) in totals.keys() {
                 total_key_cache
-                    .entry(gene_key.into())
-                    .or_insert_with(|| format!("{}/count/total", gene_key).into());
-                *totals.entry((cb.clone(), gene_key)).or_default() += val;
+                    .entry(gk)
+                    .or_insert_with(|| format!("{}/count/total", gk).into());
             }
             totals
                 .into_iter()
@@ -181,10 +201,11 @@ pub fn run_splice_aware(
             .map(|name| CellBarcode::Barcode(name.clone()))
             .collect();
 
-        // Filter spliced/unspliced triplets to QC-passing genes and cells
+        // Filter spliced/unspliced triplets to QC-passing genes and cells.
         let filter_triplets = |triplets: Vec<(CellBarcode, Box<str>, f32)>| -> Vec<_> {
+            use rayon::prelude::*;
             triplets
-                .into_iter()
+                .into_par_iter()
                 .filter(|(cb, feat, _)| {
                     let gene_key: &str = extract_gene_key(feat);
                     qc_gene_keys.contains(gene_key) && qc_cells.contains(cb)
@@ -192,8 +213,10 @@ pub fn run_splice_aware(
                 .collect()
         };
 
-        let spliced_triplets = filter_triplets(spliced_triplets);
-        let unspliced_triplets = filter_triplets(unspliced_triplets);
+        let (spliced_triplets, unspliced_triplets) = rayon::join(
+            || filter_triplets(spliced_triplets),
+            || filter_triplets(unspliced_triplets),
+        );
 
         // Use shared names from QC-passing set for consistent dimensions
         let UnionNames {
@@ -209,38 +232,47 @@ pub fn run_splice_aware(
             col_names.len()
         );
 
-        // Write spliced matrix
+        // Write spliced + unspliced matrices in parallel (independent I/O;
+        // rayon::join shares the existing worker pool, so the to_backend
+        // internals don't oversubscribe).
         let spliced_out = crate::pipeline_util::BackendOutputPath::new(
             &args.output,
             &format!("{}_spliced", batch_name),
             backend,
             args.zip,
         );
-        format_data_triplets_shared(
-            spliced_triplets,
-            &feature_to_index,
-            &cell_to_index,
-            row_names.clone(),
-            col_names.clone(),
-        )
-        .to_backend(&spliced_out.write_path)?;
-        info!("wrote spliced counts to {}", spliced_out.target_path);
-
-        // Write unspliced matrix
         let unspliced_out = crate::pipeline_util::BackendOutputPath::new(
             &args.output,
             &format!("{}_unspliced", batch_name),
             backend,
             args.zip,
         );
-        format_data_triplets_shared(
-            unspliced_triplets,
-            &feature_to_index,
-            &cell_to_index,
-            row_names,
-            col_names,
-        )
-        .to_backend(&unspliced_out.write_path)?;
+
+        let (spliced_res, unspliced_res) = rayon::join(
+            || {
+                format_data_triplets_shared(
+                    spliced_triplets,
+                    &feature_to_index,
+                    &cell_to_index,
+                    row_names.clone(),
+                    col_names.clone(),
+                )
+                .to_backend(&spliced_out.write_path)
+            },
+            || {
+                format_data_triplets_shared(
+                    unspliced_triplets,
+                    &feature_to_index,
+                    &cell_to_index,
+                    row_names.clone(),
+                    col_names.clone(),
+                )
+                .to_backend(&unspliced_out.write_path)
+            },
+        );
+        spliced_res?;
+        unspliced_res?;
+        info!("wrote spliced counts to {}", spliced_out.target_path);
         info!("wrote unspliced counts to {}", unspliced_out.target_path);
 
         // Finalize archives (zip the .zarr staging dirs if applicable).

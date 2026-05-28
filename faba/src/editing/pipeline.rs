@@ -168,17 +168,37 @@ pub fn find_all_conversion_sites(
         .records()
         .par_iter()
         .progress_count(njobs as u64)
-        .try_for_each(|rec| -> anyhow::Result<()> {
-            find_sites_in_gene(rec, params, arc_gene_sites.clone(), cell_membership)
-        })?;
+        .try_for_each_init(
+            || {
+                let faidx = load_fasta_index(&params.genome_file)
+                    .expect("fasta index validated upfront; load per worker thread");
+                let cache = crate::data::bam_io::BamReaderCache::new();
+                (faidx, cache)
+            },
+            |(faidx, cache), rec| -> anyhow::Result<()> {
+                find_sites_in_gene(
+                    rec,
+                    params,
+                    faidx,
+                    cache,
+                    arc_gene_sites.clone(),
+                    cell_membership,
+                )
+            },
+        )?;
 
     Arc::try_unwrap(arc_gene_sites).map_err(|_| anyhow::anyhow!("failed to release gene_sites"))
 }
 
 /// Per-gene site discovery: reads WT and MUT BAM files, creates sifter, dispatches via scan().
+///
+/// `faidx_reader` is owned by the calling rayon worker (one per thread, reused
+/// across all genes scheduled to that worker) — see `find_conversion_sites`.
 fn find_sites_in_gene(
     gff_record: &GffRecord,
     params: &ConversionParams,
+    faidx_reader: &faidx::Reader,
+    cache: &mut crate::data::bam_io::BamReaderCache,
     arc_gene_sites: Arc<HashMap<GeneId, Vec<ConversionSite>>>,
     cell_membership: Option<&CellMembership>,
 ) -> anyhow::Result<()> {
@@ -186,21 +206,19 @@ fn find_sites_in_gene(
     let strand = &gff_record.strand;
     let chr = gff_record.seqname.as_ref();
 
-    // Each thread creates its own reader (faidx is not thread-safe)
-    let faidx_reader = load_fasta_index(&params.genome_file)?;
-
     let candidate_sites = match (&params.mod_type, cell_membership) {
         // m6A with cell membership: per-cell-type discovery
         (ModificationType::M6A { .. }, Some(membership)) => find_sites_with_celltype_stats(
             gff_record,
             params,
-            &faidx_reader,
+            faidx_reader,
+            cache,
             chr,
             strand,
             membership,
         )?,
         // m6A without membership or AtoI: bulk discovery
-        _ => find_sites_with_bulk_stats(gff_record, params, &faidx_reader, chr, strand)?,
+        _ => find_sites_with_bulk_stats(gff_record, params, faidx_reader, cache, chr, strand)?,
     };
 
     if !candidate_sites.is_empty() {
@@ -215,6 +233,7 @@ fn find_sites_with_bulk_stats(
     gff_record: &GffRecord,
     params: &ConversionParams,
     faidx_reader: &faidx::Reader,
+    cache: &mut crate::data::bam_io::BamReaderCache,
     chr: &str,
     strand: &Strand,
 ) -> anyhow::Result<Vec<ConversionSite>> {
@@ -222,7 +241,8 @@ fn find_sites_with_bulk_stats(
     wt_base_freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
 
     for wt_file in &params.wt_bam_files {
-        wt_base_freq_map.update_from_gene(
+        wt_base_freq_map.update_from_gene_cached(
+            cache,
             wt_file,
             gff_record,
             &params.gene_barcode_tag,
@@ -242,7 +262,8 @@ fn find_sites_with_bulk_stats(
     mut_base_freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
 
     for mut_file in &params.mut_bam_files {
-        mut_base_freq_map.update_from_gene(
+        mut_base_freq_map.update_from_gene_cached(
+            cache,
             mut_file,
             gff_record,
             &params.gene_barcode_tag,
@@ -281,6 +302,7 @@ fn find_sites_with_celltype_stats(
     gff_record: &GffRecord,
     params: &ConversionParams,
     faidx_reader: &faidx::Reader,
+    cache: &mut crate::data::bam_io::BamReaderCache,
     chr: &str,
     strand: &Strand,
     membership: &CellMembership,
@@ -296,7 +318,8 @@ fn find_sites_with_celltype_stats(
         DnaBaseFreqMap::new_with_cell_barcode(&params.cell_barcode_tag, Some(membership));
     wt_per_cell_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
     for wt_file in &params.wt_bam_files {
-        wt_per_cell_map.update_from_gene(
+        wt_per_cell_map.update_from_gene_cached(
+            cache,
             wt_file,
             gff_record,
             &params.gene_barcode_tag,
@@ -313,7 +336,8 @@ fn find_sites_with_celltype_stats(
     let mut mut_base_freq_map = DnaBaseFreqMap::new();
     mut_base_freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
     for mut_file in &params.mut_bam_files {
-        mut_base_freq_map.update_from_gene(
+        mut_base_freq_map.update_from_gene_cached(
+            cache,
             mut_file,
             gff_record,
             &params.gene_barcode_tag,
@@ -387,17 +411,26 @@ pub fn gather_conversion_stats(
         .into_iter()
         .par_bridge()
         .progress_count(gene_sites.len() as u64)
-        .try_for_each(|gs| -> anyhow::Result<()> {
-            let gene = gs.key();
-            let sites = gs.value();
+        .try_for_each_init(
+            crate::data::bam_io::BamReaderCache::new,
+            |cache, gs| -> anyhow::Result<()> {
+                let gene = gs.key();
+                let sites = gs.value();
 
-            if let Some(gff) = gff_map.get(gene) {
-                let stats =
-                    collect_gene_conversion_stats(params, bam_file, &gff, sites, cell_membership)?;
-                arc_ret.lock().expect("lock").extend(stats);
-            }
-            Ok(())
-        })?;
+                if let Some(gff) = gff_map.get(gene) {
+                    let stats = collect_gene_conversion_stats(
+                        cache,
+                        params,
+                        bam_file,
+                        &gff,
+                        sites,
+                        cell_membership,
+                    )?;
+                    arc_ret.lock().expect("lock").extend(stats);
+                }
+                Ok(())
+            },
+        )?;
 
     let mut stats = Arc::try_unwrap(arc_ret)
         .map_err(|_| anyhow::anyhow!("failed to release stats"))?
@@ -532,6 +565,7 @@ fn extract_site_stats_from_map(
 }
 
 fn collect_gene_conversion_stats(
+    cache: &mut crate::data::bam_io::BamReaderCache,
     params: &ConversionParams,
     bam_file: &str,
     gff_record: &GffRecord,
@@ -582,7 +616,8 @@ fn collect_gene_conversion_stats(
     minimal_gff.stop = max_pos + BAM_READ_PADDING;
 
     // Read only the minimal region spanning all sites, but only accumulate for tracked positions
-    stat_map.update_from_gene(
+    stat_map.update_from_gene_cached(
+        cache,
         bam_file,
         &minimal_gff,
         &params.gene_barcode_tag,

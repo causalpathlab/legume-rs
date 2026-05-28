@@ -162,9 +162,25 @@ impl RnaModEmbedModel {
         Ok(Tensor::from_slice(ids, ids.len(), &self.dev)?)
     }
 
-    fn agg_mask_f32(&self, is_agg: &[bool]) -> Result<Tensor> {
-        let v: Vec<f32> = is_agg.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect();
-        Tensor::from_vec(v, is_agg.len(), &self.dev).map_err(Into::into)
+    /// Build the `(agg_mask, not_agg_mask)` tensors for a slate in a single
+    /// pass — saves the `Tensor::ones - agg` round-trip that `embed_rows`
+    /// and `bias_rows` would otherwise each do separately on every call.
+    pub fn agg_masks_f32(&self, is_agg: &[bool]) -> Result<(Tensor, Tensor)> {
+        let n = is_agg.len();
+        let mut agg = Vec::with_capacity(n);
+        let mut not_agg = Vec::with_capacity(n);
+        for &b in is_agg {
+            if b {
+                agg.push(1.0_f32);
+                not_agg.push(0.0_f32);
+            } else {
+                agg.push(0.0_f32);
+                not_agg.push(1.0_f32);
+            }
+        }
+        let agg_t = Tensor::from_vec(agg, n, &self.dev)?;
+        let not_agg_t = Tensor::from_vec(not_agg, n, &self.dev)?;
+        Ok((agg_t, not_agg_t))
     }
 
     /// Feature-side embedding for a batch of rows. `gene_for_rho`
@@ -188,64 +204,62 @@ impl RnaModEmbedModel {
     /// modality-specific magnitude. This is exactly the simulator's
     /// generative form: `r_{g,m} ∝ exp(Σ_k z_{g,k} · A_{m,k})` with
     /// scalar `A_{m,k}` — our `Q[k, m]` plays the role of `A`.
-    pub fn embed_rows(
+    /// Fused embed + bias for one slate. Builds the per-row `agg` /
+    /// `not_agg` masks and the flat `b_comp` index tensor **once**, then
+    /// reuses them for both the gate computation and the bias lookup.
+    /// Saves ~10 tensor ops per sub-batch vs calling `embed_rows` then
+    /// `bias_rows` separately (which each rebuild the masks and a
+    /// `Tensor::ones` then subtract).
+    #[allow(clippy::too_many_arguments)]
+    pub fn embed_and_bias_rows(
         &self,
         gene_for_rho: &[u32],
         gene_for_z: &[u32],
         modality_for_q: &[u32],
+        gene_for_bias: &[u32],
+        modality_for_bias: &[u32],
         is_agg: &[bool],
-    ) -> Result<Tensor> {
+    ) -> Result<(Tensor, Tensor)> {
         let b = gene_for_rho.len();
         debug_assert_eq!(gene_for_z.len(), b);
         debug_assert_eq!(modality_for_q.len(), b);
+        debug_assert_eq!(gene_for_bias.len(), b);
+        debug_assert_eq!(modality_for_bias.len(), b);
         debug_assert_eq!(is_agg.len(), b);
 
+        let (agg, not_agg) = self.agg_masks_f32(is_agg)?;
+
+        // ── embedding side ──
         let g_rho = self.idx_u32(gene_for_rho)?;
         let g_z = self.idx_u32(gene_for_z)?;
         let m_q = self.idx_u32(modality_for_q)?;
 
         let rho_b = self.rho.index_select(&g_rho, 0)?; // [B, H]
         let z_b = self.z.index_select(&g_z, 0)?; // [B, K]
-        let q_b = self.q.index_select(&m_q, 1)?; // [K, B] — Q is (K, M), m_q selects M-axis
-        let q_b = q_b.transpose(0, 1)?; // [B, K]
+        let q_b = self.q.index_select(&m_q, 1)?.transpose(0, 1)?; // [B, K]
 
-        // Scalar gate adjustment per row: (z_b · q_b)_b = Σ_k z_b[b,k] · q_b[b,k]
         let zq = (z_b * q_b)?.sum(1)?; // [B]
-
-        let agg = self.agg_mask_f32(is_agg)?;
-        let one = Tensor::ones(b, DType::F32, &self.dev)?;
-        let not_agg = (one - agg)?; // [B]
         let zq_masked = (zq * &not_agg)?; // [B] — scalar zero for AGG
-
-        // gate = 1 + (1 - is_agg) · (z·Q)  →  AGG: gate=1, comp: gate=1+z·Q
-        let gate = (zq_masked + 1.0_f64)?; // [B] scalar gate
-                                           // Broadcast scalar gate across H: rho_b [B,H] · gate [B,1]
+        let gate = (zq_masked + 1.0_f64)?; // [B]
         let gate_h = gate.unsqueeze(1)?; // [B, 1]
-        Ok(rho_b.broadcast_mul(&gate_h)?)
-    }
+        let e = rho_b.broadcast_mul(&gate_h)?;
 
-    /// Per-row bias: AGG → `b_agg[g]`; component → `b_comp[g, m]`.
-    pub fn bias_rows(&self, gene: &[u32], modality: &[u32], is_agg: &[bool]) -> Result<Tensor> {
-        let b = gene.len();
-        debug_assert_eq!(modality.len(), b);
-        debug_assert_eq!(is_agg.len(), b);
-
+        // ── bias side (shares `agg` / `not_agg`) ──
         let m_cols = self.n_modalities as u32;
-        let flat_idx_vec: Vec<u32> = gene
+        let flat_idx_vec: Vec<u32> = gene_for_bias
             .iter()
-            .zip(modality.iter())
+            .zip(modality_for_bias.iter())
             .map(|(&g, &m)| g * m_cols + m)
             .collect();
-        let g_idx = self.idx_u32(gene)?;
+        let g_bias_idx = self.idx_u32(gene_for_bias)?;
         let flat_idx = Tensor::from_vec(flat_idx_vec, b, &self.dev)?;
 
-        let b_agg_b = self.b_agg.index_select(&g_idx, 0)?;
+        let b_agg_b = self.b_agg.index_select(&g_bias_idx, 0)?;
         let b_comp_b = self.b_comp.flatten_all()?.index_select(&flat_idx, 0)?;
 
-        let agg = self.agg_mask_f32(is_agg)?;
-        let one = Tensor::ones(b, DType::F32, &self.dev)?;
-        let not_agg = (one - agg.clone())?;
-        Ok((((b_agg_b * agg)?) + (b_comp_b * not_agg)?)?)
+        let bias = (((b_agg_b * &agg)?) + (b_comp_b * &not_agg)?)?;
+
+        Ok((e, bias))
     }
 
     /// RHS embedding + bias for a batch of axis-ids. `Axis::Cell` → e_cell;

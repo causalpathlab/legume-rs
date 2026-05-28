@@ -62,6 +62,25 @@ impl PolyASiteMap {
         )
     }
 
+    /// Like [`Self::update_from_gene`] but reuses a per-thread BAM reader cache.
+    pub fn update_from_gene_cached(
+        &mut self,
+        cache: &mut bam_io::BamReaderCache,
+        bam_file_path: &str,
+        gff_record: &GffRecord,
+        gene_barcode_tag: &str,
+        include_missing_barcode: bool,
+    ) -> anyhow::Result<()> {
+        bam_io::for_each_record_in_gene_cached(
+            cache,
+            bam_file_path,
+            gff_record,
+            gene_barcode_tag,
+            include_missing_barcode,
+            |rec| self.add_bam_record(rec),
+        )
+    }
+
     /// Update frequency maps
     ///
     /// Parse CIGAR string and get potential poly-A cleavage sites

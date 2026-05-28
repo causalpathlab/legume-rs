@@ -48,13 +48,14 @@ fn sub_batch_loss(model: &RnaModEmbedModel, axis: Axis, sub: &SubBatch) -> Resul
     ////////////////////////////////////////
     // Positive scores
     ////////////////////////////////////////
-    let e_pos = model.embed_rows(
+    let (e_pos, b_pos) = model.embed_and_bias_rows(
         &pos.gene_for_rho,
         &pos.gene_for_z,
         &pos.modality_for_q,
+        &pos.gene_for_bias,
+        &pos.modality_for_bias,
         &pos.is_agg,
     )?;
-    let b_pos = model.bias_rows(&pos.gene_for_bias, &pos.modality_for_bias, &pos.is_agg)?;
     let (e_rhs, b_rhs) = model.rhs_rows(axis, &pos.axis_id)?;
     let s_pos = RnaModEmbedModel::score_diag(&e_pos, &e_rhs, &b_pos, &b_rhs)?;
 
@@ -110,13 +111,10 @@ fn score_negative_slate(
         }
     }
 
-    let e_neg = model.embed_rows(
+    let (e_neg, b_neg) = model.embed_and_bias_rows(
         &slate.gene_for_rho,
         &slate.gene_for_z,
         &slate.modality_for_q,
-        &slate.is_agg,
-    )?;
-    let b_neg = model.bias_rows(
         &slate.gene_for_bias,
         &slate.modality_for_bias,
         &slate.is_agg,
