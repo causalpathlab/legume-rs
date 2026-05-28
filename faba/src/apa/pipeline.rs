@@ -624,8 +624,27 @@ fn process_utr(
     }
 
     let lik_params = args.lik_params();
+
+    // Cluster fragments before EM: the SCAPE likelihood depends only on
+    // (x, l, r, is_junction), so fragments sharing this tuple are
+    // mathematically identical and we can run inference on the
+    // representatives with multiplicity weights. Heavy UTRs typically
+    // collapse 5-50× — every downstream phase (theta_lik_matrix,
+    // all_site_lls, EM iterations) scales with M = # clusters, not N.
+    let bins = crate::apa::fragment::ClusterBins::default();
+    let (clusters, cluster_idx) = crate::apa::fragment::cluster_fragments(&all_fragments, bins);
+    let cluster_counts: Vec<f32> = clusters.iter().map(|c| c.count as f32).collect();
+    let n_for_bic = all_fragments.len();
+    log::debug!(
+        "UTR {}: clustered {} → {} ({:.1}×)",
+        utr.name,
+        all_fragments.len(),
+        clusters.len(),
+        all_fragments.len() as f32 / clusters.len().max(1) as f32,
+    );
+
     let (theta_lik_matrix, theta_grid) =
-        precompute_theta_lik_matrix(&all_fragments, utr.utr_length as f32, &lik_params);
+        precompute_theta_lik_matrix(&clusters, utr.utr_length as f32, &lik_params);
 
     let default_beta = (args.min_beta + args.max_beta) / 2.0;
     let beta_arr: Vec<f32> = vec![default_beta; candidate_sites.len()];
@@ -659,6 +678,8 @@ fn process_utr(
         beta_arr: &beta_arr,
         theta_lik_matrix: &theta_lik_matrix,
         theta_grid: &theta_grid,
+        cluster_counts: &cluster_counts,
+        n_for_bic,
         utr_length: utr.utr_length as f32,
         max_polya: lik_params.max_polya,
     };
@@ -674,7 +695,8 @@ fn process_utr(
         em_result.n_iter,
     );
 
-    let (cell_counts, annotations) = assign_fragments_to_sites(&all_fragments, &em_result, utr);
+    let (cell_counts, annotations) =
+        assign_fragments_to_sites(&all_fragments, &cluster_idx, &em_result, utr);
 
     Ok((cell_counts, annotations))
 }

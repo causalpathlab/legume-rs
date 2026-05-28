@@ -19,17 +19,36 @@ impl Default for EmParams {
 }
 
 /// Result of fixed-parameter EM (weights only).
+///
+/// `gamma` is stored in **row-major flat layout**: posterior γ_{n,k} lives
+/// at `gamma[n * n_components + k]`. The old nested `Vec<Vec<f32>>` did
+/// `n_obs` separate heap allocations and scattered the rows across the
+/// allocator; the flat layout keeps the E-step's sequential read of
+/// (n, *) on the same cache line and lets `par_chunks_mut(n_components)`
+/// hand out non-overlapping row slices for the parallel path.
 pub struct FixedEmResult {
     /// Estimated mixing weights pi_0..pi_K (pi_0 = noise)
     pub weights: Vec<f32>,
-    /// Posterior assignment probabilities gamma[n][k] (k=0 is noise)
-    pub gamma: Vec<Vec<f32>>,
+    /// Flat posterior gamma; use `gamma_row(n)` for slice access.
+    pub gamma: Vec<f32>,
+    /// Number of mixture components (= row stride of `gamma`).
+    pub n_components: usize,
     /// Final log-likelihood
     pub log_lik: f32,
     /// BIC
     pub bic: f32,
     /// Number of iterations
     pub n_iter: usize,
+}
+
+impl FixedEmResult {
+    /// Posterior γ_{n,·} for observation `n`.
+    #[allow(dead_code)] // public helper; the in-crate caller unpacks `gamma` directly.
+    #[inline]
+    pub fn gamma_row(&self, n: usize) -> &[f32] {
+        let start = n * self.n_components;
+        &self.gamma[start..start + self.n_components]
+    }
 }
 
 /// Result of full Gaussian mixture EM.
@@ -58,6 +77,14 @@ pub fn log_sum_exp(a: f32, b: f32) -> f32 {
     max + ((a - max).exp() + (b - max).exp()).ln()
 }
 
+/// E-step parallelism gate. Below this fragment count, rayon spawn overhead
+/// dominates the per-fragment work (~10 f32 ops × `n_total`); above it, the
+/// heavy-UTR tail dominates and parallelising the per-fragment log-norm +
+/// γ-update lets idle rayon workers steal it. 4096 was picked empirically
+/// as the smallest `n_obs` where chr1's housekeeping-gene UTRs (HSPA8,
+/// ACTB, …) start dwarfing all the rest combined.
+const E_STEP_PARALLEL_THRESHOLD: usize = 4096;
+
 /// Fixed-parameter EM: given precomputed per-observation component log-likelihoods,
 /// estimate only the mixing weights.
 ///
@@ -67,64 +94,146 @@ pub fn log_sum_exp(a: f32, b: f32) -> f32 {
 /// same iteration. Callers without a noise column should add a flat one (e.g.
 /// `-ln(domain_length)`) at index 0.
 ///
-/// * `component_log_liks` - `[n_obs][n_components]` log-likelihood matrix
-///   (index 0 is the noise component; see contract above)
+/// * `component_log_liks` - flat row-major (`n_obs × n_components`) log-lik
+///   matrix (column 0 = noise component; see contract above)
+/// * `n_components` - row stride of `component_log_liks`
 /// * `n_free_params` - number of free parameters for BIC computation
 /// * `params` - EM parameters
+#[allow(dead_code)] // unweighted convenience wrapper; in-crate caller goes through `fixed_em_weighted`
 pub fn fixed_em(
-    component_log_liks: &[Vec<f32>],
+    component_log_liks: &[f32],
+    n_components: usize,
     n_free_params: usize,
     params: &EmParams,
 ) -> FixedEmResult {
-    let n_obs = component_log_liks.len();
+    fixed_em_weighted(
+        component_log_liks,
+        n_components,
+        None,
+        None,
+        n_free_params,
+        params,
+    )
+}
+
+/// Weighted variant of [`fixed_em`].
+///
+/// `weights_per_obs` lets the caller treat each observation row as
+/// representing `c_m` original observations (fragment clusters); the
+/// E-step is unchanged (γ is per-cluster), but the log-likelihood and
+/// M-step accumulators multiply by `c_m`:
+///
+///     log L = Σ_m c_m · log Σ_k π_k L_{m,k}
+///     π_k   = (1 / N) Σ_m c_m · γ_{m,k}
+///
+/// `n_for_bic` is the BIC sample size used in the `n_params · ln(N)`
+/// penalty — pass the **original** fragment count, not `n_obs`. Default
+/// (`None`) falls back to `n_obs`, giving the standard unweighted BIC.
+pub fn fixed_em_weighted(
+    component_log_liks: &[f32],
+    n_components: usize,
+    weights_per_obs: Option<&[f32]>,
+    n_for_bic: Option<usize>,
+    n_free_params: usize,
+    params: &EmParams,
+) -> FixedEmResult {
+    let n_total = n_components;
+    let n_obs = if n_total == 0 {
+        0
+    } else {
+        component_log_liks.len() / n_total
+    };
+    debug_assert_eq!(
+        component_log_liks.len(),
+        n_obs * n_total,
+        "component_log_liks length must be a multiple of n_components"
+    );
+    if let Some(w) = weights_per_obs {
+        debug_assert_eq!(
+            w.len(),
+            n_obs,
+            "weights_per_obs length must equal n_obs (rows of component_log_liks)"
+        );
+    }
     if n_obs == 0 {
         return FixedEmResult {
             weights: vec![],
             gamma: vec![],
+            n_components: n_total,
             log_lik: 0.0,
             bic: 0.0,
             n_iter: 0,
         };
     }
-    let n_total = component_log_liks[0].len();
+
+    // Total weight = N (for BIC + π normalisation). Without weights it's
+    // just n_obs.
+    let total_weight: f32 = weights_per_obs
+        .map(|w| w.iter().sum())
+        .unwrap_or(n_obs as f32);
+    let n_bic = n_for_bic.unwrap_or(n_obs);
 
     let mut weights = vec![1.0 / n_total as f32; n_total];
-    let mut gamma = vec![vec![0.0; n_total]; n_obs];
+    let mut gamma = vec![0.0_f32; n_obs * n_total];
+    let mut log_weights = vec![f32::NEG_INFINITY; n_total];
     let mut prev_ll = f32::NEG_INFINITY;
 
     let mut iter = 0;
     loop {
-        // E-step
-        let mut total_ll = 0.0;
-
-        for n in 0..n_obs {
-            let mut log_probs = vec![f32::NEG_INFINITY; n_total];
-            for k in 0..n_total {
-                if weights[k] > 0.0 {
-                    log_probs[k] = weights[k].ln() + component_log_liks[n][k];
-                }
-            }
-
-            let log_norm = log_probs
-                .iter()
-                .fold(f32::NEG_INFINITY, |acc, &x| log_sum_exp(acc, x));
-
-            total_ll += log_norm;
-
-            for (k, lp) in log_probs.iter().enumerate().take(n_total) {
-                gamma[n][k] = (lp - log_norm).exp();
-            }
+        // Precompute log(weights) once per iter so the inner loop avoids
+        // recomputing `ln()` per (fragment, component).
+        for k in 0..n_total {
+            log_weights[k] = if weights[k] > 0.0 {
+                weights[k].ln()
+            } else {
+                f32::NEG_INFINITY
+            };
         }
+
+        // E-step. Per-cluster γ is unweighted (conditional on belonging
+        // to the cluster); the cluster's multiplicity `c_m` enters as a
+        // linear factor on the log-likelihood contribution and on the
+        // M-step γ accumulator. With `weights_per_obs = None`, c_m = 1
+        // and the math collapses to plain unweighted EM.
+        let total_ll: f32 = if n_obs >= E_STEP_PARALLEL_THRESHOLD {
+            use rayon::prelude::*;
+            gamma
+                .par_chunks_mut(n_total)
+                .enumerate()
+                .map(|(n, gamma_row)| {
+                    let log_norm = e_step_one(
+                        gamma_row,
+                        &component_log_liks[n * n_total..(n + 1) * n_total],
+                        &log_weights,
+                    );
+                    let w = weights_per_obs.map(|w| w[n]).unwrap_or(1.0);
+                    w * log_norm
+                })
+                .sum()
+        } else {
+            let mut total = 0.0_f32;
+            for (n, gamma_row) in gamma.chunks_mut(n_total).enumerate() {
+                let log_norm = e_step_one(
+                    gamma_row,
+                    &component_log_liks[n * n_total..(n + 1) * n_total],
+                    &log_weights,
+                );
+                let w = weights_per_obs.map(|w| w[n]).unwrap_or(1.0);
+                total += w * log_norm;
+            }
+            total
+        };
 
         iter += 1;
 
         let ll_change = (total_ll - prev_ll).abs();
         if iter > 1 && (ll_change < params.tol || iter >= params.max_iter) {
-            let bic = -2.0 * total_ll + n_free_params as f32 * (n_obs as f32).ln();
+            let bic = -2.0 * total_ll + n_free_params as f32 * (n_bic as f32).ln();
 
             return FixedEmResult {
                 weights,
                 gamma,
+                n_components: n_total,
                 log_lik: total_ll,
                 bic,
                 n_iter: iter,
@@ -133,10 +242,25 @@ pub fn fixed_em(
 
         prev_ll = total_ll;
 
-        // M-step: update weights only
+        // M-step: weighted column sums of γ. With weights_per_obs the
+        // per-cluster γ row is scaled by `c_m` before accumulating —
+        // i.e. `π_k = (1/N) · Σ_m c_m · γ_{m,k}` where N = total_weight.
+        let mut sum_gammas = vec![0.0_f32; n_total];
+        if let Some(w) = weights_per_obs {
+            for (chunk, &c_m) in gamma.chunks(n_total).zip(w.iter()) {
+                for k in 0..n_total {
+                    sum_gammas[k] += c_m * chunk[k];
+                }
+            }
+        } else {
+            for chunk in gamma.chunks(n_total) {
+                for k in 0..n_total {
+                    sum_gammas[k] += chunk[k];
+                }
+            }
+        }
         for k in 0..n_total {
-            let sum_gamma: f32 = gamma.iter().map(|g| g[k]).sum();
-            weights[k] = sum_gamma / n_obs as f32;
+            weights[k] = sum_gammas[k] / total_weight;
         }
 
         // Prune low-weight components (skip noise at k=0)
@@ -156,6 +280,36 @@ pub fn fixed_em(
             weights[0] = 1.0;
         }
     }
+}
+
+/// Single-fragment E-step. Returns `log p(x_n) = log Σ_k π_k · p(x_n|k)`
+/// and writes posterior γ_{n,·} into `gamma_row`.
+#[inline]
+fn e_step_one(gamma_row: &mut [f32], cll_row: &[f32], log_weights: &[f32]) -> f32 {
+    let n_total = gamma_row.len();
+    debug_assert_eq!(cll_row.len(), n_total);
+    debug_assert_eq!(log_weights.len(), n_total);
+
+    // Pass 1: log-norm = log Σ_k exp(log_w_k + log_lik_nk)
+    let mut log_norm = f32::NEG_INFINITY;
+    for k in 0..n_total {
+        let lw = log_weights[k];
+        if lw.is_finite() {
+            log_norm = log_sum_exp(log_norm, lw + cll_row[k]);
+        }
+    }
+
+    // Pass 2: γ_{n,k} = exp(log_w_k + log_lik_nk − log_norm)
+    for k in 0..n_total {
+        let lw = log_weights[k];
+        gamma_row[k] = if lw.is_finite() {
+            (lw + cll_row[k] - log_norm).exp()
+        } else {
+            0.0
+        };
+    }
+
+    log_norm
 }
 
 /// Log PDF of a Gaussian distribution
@@ -487,14 +641,14 @@ mod tests {
 
     #[test]
     fn test_fixed_em_basic() {
-        // 2 components, 10 observations
+        // 2 components, 10 observations; flat row-major with stride 2.
         // Component 0 has high likelihood for first 5, component 1 for last 5
-        let mut component_log_liks = Vec::new();
+        let mut component_log_liks: Vec<f32> = Vec::new();
         for i in 0..10 {
             if i < 5 {
-                component_log_liks.push(vec![-1.0, -10.0]);
+                component_log_liks.extend_from_slice(&[-1.0, -10.0]);
             } else {
-                component_log_liks.push(vec![-10.0, -1.0]);
+                component_log_liks.extend_from_slice(&[-10.0, -1.0]);
             }
         }
 
@@ -504,7 +658,7 @@ mod tests {
             min_weight: 0.01,
         };
 
-        let result = fixed_em(&component_log_liks, 1, &params);
+        let result = fixed_em(&component_log_liks, 2, 1, &params);
 
         assert!(
             (result.weights[0] - 0.5).abs() < 0.1,
