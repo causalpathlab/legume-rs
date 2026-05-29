@@ -1043,6 +1043,7 @@ pub fn run_mixture_model(
     gene_sites: &HashMap<GeneId, Vec<ConversionSite>>,
     gff_map: &GffRecordMap,
     mixture_params: &crate::editing::mixture::MixtureParams,
+    valid_cells: Option<&rustc_hash::FxHashSet<CellBarcode>>,
 ) -> anyhow::Result<()> {
     use crate::editing::mixture::{
         fit_gene_mixture, MixtureComponentAnnotation, WeightedObservation,
@@ -1059,7 +1060,7 @@ pub fn run_mixture_model(
             gff_map,
             bam_file,
             membership.as_ref(),
-            None,
+            valid_cells,
         )?;
         all_stats.extend(stats);
     }
