@@ -3,6 +3,7 @@ use crate::data::conversion::*;
 use crate::editing::io::ToParquet;
 use crate::editing::mask::filter_conversion_sites_by_mask;
 use crate::editing::mixture::MixtureParams;
+use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::*;
 use crate::editing::sifter::ModificationType;
 use crate::pipeline_util::{check_all_bam_indices, run_gene_count_qc};
@@ -203,6 +204,13 @@ pub struct AtoICountArgs {
         help = "Initial sigma, or 0 for auto"
     )]
     pub mixture_initial_sigma: f32,
+
+    #[arg(
+        long = "drop-single-component",
+        default_value_t = false,
+        help = "Drop genes with a single mixture component (no relative signal)"
+    )]
+    pub drop_single_component: bool,
 
     #[arg(
         long = "mixture-weight",
@@ -411,6 +419,7 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
             min_sites: args.mixture_min_sites,
             max_k: args.mixture_max_k,
             initial_sigma: args.mixture_initial_sigma,
+            drop_single_component: args.drop_single_component,
             ..Default::default()
         };
         run_mixture_model(&params, &atoi_sites, &gff_map, &mix_params, valid_cells)?;

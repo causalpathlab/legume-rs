@@ -352,12 +352,6 @@ where
 // ─────────────────────────────────────────────────────────
 
 pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
-    // Get primary BAM basename for output file naming
-    let batch_names = uniq_batch_names(&args.bam_files)?;
-    let primary_batch_name = batch_names
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("no BAM files provided"))?;
-
     let mut utrs = load_utrs(args)?;
 
     // Filter UTRs to expressed genes if available
@@ -434,42 +428,89 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
         );
     }
 
+    // Optionally drop genes that resolved to a single pA site: a lone site
+    // carries no relative usage signal (PDUI is undefined, the count is the
+    // gene total). A gene's active-site count is its annotation count.
+    if args.drop_single_component {
+        use rustc_hash::FxHashMap;
+        let mut sites_per_gene: FxHashMap<Box<str>, usize> = FxHashMap::default();
+        for a in &all_annotations {
+            *sites_per_gene.entry(a.gene_name.clone()).or_insert(0) += 1;
+        }
+        let keep_gene = |g: &str| sites_per_gene.get(g).copied().unwrap_or(0) >= 2;
+        let (before_c, before_a) = (all_counts.len(), all_annotations.len());
+        all_annotations.retain(|a| keep_gene(&a.gene_name));
+        all_counts.retain(|c| {
+            let gene = c
+                .site_id
+                .split_once("/pA/")
+                .map(|(g, _)| g)
+                .unwrap_or(&c.site_id);
+            keep_gene(gene)
+        });
+        info!(
+            "drop-single-component: {} -> {} counts, {} -> {} sites",
+            before_c,
+            all_counts.len(),
+            before_a,
+            all_annotations.len()
+        );
+    }
+
     if all_counts.is_empty() {
         info!("no counts to output");
         return Ok(());
     }
 
-    // Compute PDUI before consuming all_counts
+    // Compute PDUI before consuming all_counts (per batch, see below)
     if args.compute_pdui {
-        compute_and_write_pdui(
-            &all_counts,
-            &all_annotations,
-            &utrs,
-            args,
-            primary_batch_name,
-        )?;
+        compute_and_write_pdui(&all_counts, &all_annotations, &utrs, args)?;
     }
 
-    // Rows=sites, cols=cells
-    let triplets_data: Vec<(CellBarcode, Box<str>, f32)> = all_counts
-        .into_iter()
-        .map(|c| (c.cell_barcode, c.site_id, c.count as f32))
-        .collect();
+    // The SCAPE fit is shared (pooled across BAMs), but each replicate gets
+    // its own `{batch}_apa_mixture` matrix. Rows (GENE/pA/component) are a
+    // shared vocabulary, so reorder to a sorted union for stackability.
+    let batch_names = uniq_batch_names(&args.bam_files)?;
+    let mut by_batch: rustc_hash::FxHashMap<u32, Vec<(CellBarcode, Box<str>, f32)>> =
+        rustc_hash::FxHashMap::default();
+    for c in all_counts {
+        by_batch
+            .entry(c.batch)
+            .or_default()
+            .push((c.cell_barcode, c.site_id, c.count as f32));
+    }
 
-    let triplets = format_data_triplets(triplets_data);
-    let output_name = format!("{}_apa", primary_batch_name);
-    let out = args.backend_output_path(&output_name);
-    let data = triplets.to_backend(&out.write_path)?;
-    data.qc(SqueezeCutoffs {
-        row: args.row_nnz_cutoff,
-        column: args.column_nnz_cutoff,
-    })?;
-    info!("created output: {}", &out.target_path);
+    let mut all_rows = rustc_hash::FxHashSet::<Box<str>>::default();
+    let mut out_files: Vec<crate::pipeline_util::BackendOutputPath> = Vec::new();
+    for (batch_idx, batch_name) in batch_names.iter().enumerate() {
+        let Some(trip) = by_batch.remove(&(batch_idx as u32)) else {
+            continue;
+        };
+        if trip.is_empty() {
+            continue;
+        }
+        let out = args.backend_output_path(&format!("{}_apa_mixture", batch_name));
+        let data = format_data_triplets(trip).to_backend(&out.write_path)?;
+        data.qc(SqueezeCutoffs {
+            row: args.row_nnz_cutoff,
+            column: args.column_nnz_cutoff,
+        })?;
+        all_rows.extend(data.row_names()?);
+        info!("created output: {}", &out.target_path);
+        drop(data);
+        out_files.push(out);
+    }
 
-    drop(data);
-    out.finalize()?;
+    let mut rows_sorted: Vec<_> = all_rows.into_iter().collect();
+    rows_sorted.sort();
+    for out in &out_files {
+        open_sparse_matrix(&out.write_path, &args.backend)?.reorder_rows(&rows_sorted)?;
+    }
+    for out in out_files {
+        out.finalize()?;
+    }
 
-    // Write APA site annotation Parquet
+    // Write APA site annotation Parquet (shared definitions, single file)
     if !all_annotations.is_empty() {
         let parquet_path = format!("{}/apa_components.parquet", &args.output);
         write_apa_annotations(&all_annotations, &parquet_path)?;
@@ -571,7 +612,11 @@ fn process_utr(
     args: &CountApaArgs,
 ) -> anyhow::Result<(Vec<CellSiteCount>, Vec<ApaSiteAnnotation>)> {
     let mut all_fragments = Vec::new();
-    for bam_file in bam_files {
+    // Parallel to `all_fragments`: the batch (replicate) each fragment came
+    // from. Sites are fit on the pooled fragments, but counts are emitted
+    // per batch, so each fragment must remember its origin.
+    let mut frag_batch: Vec<u32> = Vec::new();
+    for (batch_idx, bam_file) in bam_files.iter().enumerate() {
         let polya_params = PolyAFilterParams {
             min_tail: args.polya_min_tail_length,
             max_non_at: args.polya_max_non_a_or_t,
@@ -586,6 +631,7 @@ fn process_utr(
             args.umi_tag.as_bytes(),
             &polya_params,
         )?;
+        frag_batch.extend(std::iter::repeat_n(batch_idx as u32, frags.len()));
         all_fragments.extend(frags);
     }
 
@@ -711,29 +757,31 @@ fn process_utr(
     );
 
     let (cell_counts, annotations) =
-        assign_fragments_to_sites(&all_fragments, &cluster_idx, &em_result, utr);
+        assign_fragments_to_sites(&all_fragments, &cluster_idx, &frag_batch, &em_result, utr);
 
     Ok((cell_counts, annotations))
 }
 
-/// Compute PDUI for genes with exactly 2 active pA sites and write a sparse matrix.
+/// Compute PDUI (per batch) for genes with exactly 2 active pA sites and
+/// write one `{batch}_apa_pdui` sparse matrix per replicate. The 2-site
+/// definitions are shared (pooled fit); only the per-cell counts split by
+/// batch, so the matrices share a gene (row) vocabulary.
 fn compute_and_write_pdui(
     all_counts: &[CellSiteCount],
     all_annotations: &[ApaSiteAnnotation],
     utrs: &[UtrRegion],
     args: &CountApaArgs,
-    primary_batch_name: &str,
 ) -> anyhow::Result<()> {
     use crate::apa::pdui::compute_pdui;
     use rustc_hash::FxHashMap;
 
-    info!("Computing PDUI...");
+    info!("Computing PDUI (per batch)...");
 
     // Build a strand lookup from UTRs by gene name
     let strand_by_gene: FxHashMap<Box<str>, genomic_data::sam::Strand> =
         utrs.iter().map(|u| (u.name.clone(), u.strand)).collect();
 
-    // Group annotations and counts by gene_name
+    // Group annotations by gene_name (shared 2-site definitions)
     let mut annots_by_gene: FxHashMap<Box<str>, Vec<ApaSiteAnnotation>> = FxHashMap::default();
     for a in all_annotations {
         annots_by_gene
@@ -742,75 +790,96 @@ fn compute_and_write_pdui(
             .push(a.clone());
     }
 
-    let mut counts_by_gene: FxHashMap<Box<str>, Vec<&CellSiteCount>> = FxHashMap::default();
+    // Group counts by (batch, gene)
+    let mut counts_by_batch_gene: FxHashMap<(u32, Box<str>), Vec<&CellSiteCount>> =
+        FxHashMap::default();
     for c in all_counts {
-        // Extract gene name from site_id (format: "GENE/pA/k")
         let gene_name = c
             .site_id
             .find("/pA/")
             .map(|pos| &c.site_id[..pos])
             .unwrap_or(c.site_id.as_ref());
-
-        counts_by_gene.entry(gene_name.into()).or_default().push(c);
+        counts_by_batch_gene
+            .entry((c.batch, gene_name.into()))
+            .or_default()
+            .push(c);
     }
 
-    let mut pdui_triplets: Vec<(CellBarcode, Box<str>, f32)> = Vec::new();
-    let mut n_pdui_genes = 0;
+    let batch_names = uniq_batch_names(&args.bam_files)?;
+    let mut all_rows = rustc_hash::FxHashSet::<Box<str>>::default();
+    let mut out_files: Vec<crate::pipeline_util::BackendOutputPath> = Vec::new();
 
-    for (gene_name, annots) in &annots_by_gene {
-        if annots.len() != 2 {
-            continue;
-        }
+    for (batch_idx, batch_name) in batch_names.iter().enumerate() {
+        let b = batch_idx as u32;
+        let mut pdui_triplets: Vec<(CellBarcode, Box<str>, f32)> = Vec::new();
+        let mut n_pdui_genes = 0;
 
-        let strand = match strand_by_gene.get(gene_name) {
-            Some(s) => *s,
-            None => continue,
-        };
-
-        let gene_counts: Vec<CellSiteCount> = counts_by_gene
-            .get(gene_name)
-            .map(|cs| {
-                cs.iter()
-                    .map(|c| CellSiteCount {
-                        cell_barcode: c.cell_barcode.clone(),
-                        site_id: c.site_id.clone(),
-                        count: c.count,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if let Some(pdui_result) = compute_pdui(&gene_counts, annots, strand) {
-            n_pdui_genes += 1;
-            for (cb, pdui_val) in &pdui_result.cell_pdui {
-                pdui_triplets.push((cb.clone(), gene_name.clone(), *pdui_val));
+        for (gene_name, annots) in &annots_by_gene {
+            if annots.len() != 2 {
+                continue;
+            }
+            let strand = match strand_by_gene.get(gene_name) {
+                Some(s) => *s,
+                None => continue,
+            };
+            let gene_counts: Vec<CellSiteCount> = counts_by_batch_gene
+                .get(&(b, gene_name.clone()))
+                .map(|cs| {
+                    cs.iter()
+                        .map(|c| CellSiteCount {
+                            batch: c.batch,
+                            cell_barcode: c.cell_barcode.clone(),
+                            site_id: c.site_id.clone(),
+                            count: c.count,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if gene_counts.is_empty() {
+                continue;
+            }
+            if let Some(pdui_result) = compute_pdui(&gene_counts, annots, strand) {
+                n_pdui_genes += 1;
+                for (cb, pdui_val) in &pdui_result.cell_pdui {
+                    pdui_triplets.push((cb.clone(), gene_name.clone(), *pdui_val));
+                }
             }
         }
+
+        if pdui_triplets.is_empty() {
+            continue;
+        }
+        info!(
+            "PDUI[{}]: {} genes, {} cell-gene values",
+            batch_name,
+            n_pdui_genes,
+            pdui_triplets.len()
+        );
+        let out = args.backend_output_path(&format!("{}_apa_pdui", batch_name));
+        let data = format_data_triplets(pdui_triplets).to_backend(&out.write_path)?;
+        data.qc(SqueezeCutoffs {
+            row: args.row_nnz_cutoff,
+            column: args.column_nnz_cutoff,
+        })?;
+        all_rows.extend(data.row_names()?);
+        info!("PDUI: created {}", &out.target_path);
+        drop(data);
+        out_files.push(out);
     }
 
-    info!(
-        "PDUI: computed for {} genes, {} cell-gene values",
-        n_pdui_genes,
-        pdui_triplets.len()
-    );
-
-    if pdui_triplets.is_empty() {
+    if out_files.is_empty() {
         info!("No PDUI values to output");
         return Ok(());
     }
 
-    let triplets = format_data_triplets(pdui_triplets);
-    let output_name = format!("{}_pdui", primary_batch_name);
-    let out = args.backend_output_path(&output_name);
-    let data = triplets.to_backend(&out.write_path)?;
-    data.qc(SqueezeCutoffs {
-        row: args.row_nnz_cutoff,
-        column: args.column_nnz_cutoff,
-    })?;
-    info!("PDUI: created {}", &out.target_path);
-
-    drop(data);
-    out.finalize()?;
+    let mut rows_sorted: Vec<_> = all_rows.into_iter().collect();
+    rows_sorted.sort();
+    for out in &out_files {
+        open_sparse_matrix(&out.write_path, &args.backend)?.reorder_rows(&rows_sorted)?;
+    }
+    for out in out_files {
+        out.finalize()?;
+    }
     Ok(())
 }
 

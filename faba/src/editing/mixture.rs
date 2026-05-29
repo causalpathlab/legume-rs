@@ -9,6 +9,11 @@ pub struct MixtureParams {
     pub max_k: usize,
     /// Initial sigma (0 = auto: gene_length / (2*K))
     pub initial_sigma: f32,
+    /// Drop genes whose fit yields a single active component. A lone
+    /// component carries no relative/differential signal (its per-cell
+    /// count is just the gene total), so this prunes uninformative rows
+    /// from the mixture matrix and the component annotations.
+    pub drop_single_component: bool,
     /// EM parameters
     pub em_params: EmParams,
 }
@@ -19,6 +24,7 @@ impl Default for MixtureParams {
             min_sites: 3,
             max_k: 5,
             initial_sigma: 0.0,
+            drop_single_component: false,
             em_params: EmParams {
                 max_iter: 200,
                 tol: 1e-6,

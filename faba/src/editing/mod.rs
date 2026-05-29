@@ -1,6 +1,8 @@
+pub mod bed_output;
 pub mod io;
 pub mod mask;
 pub mod mixture;
+pub mod mixture_pipeline;
 pub mod pipeline;
 pub mod sifter;
 

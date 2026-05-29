@@ -6,6 +6,9 @@ use rustc_hash::FxHashMap as HashMap;
 
 /// A cell-level count at a specific pA site.
 pub struct CellSiteCount {
+    /// Batch (replicate) index the contributing reads came from. The
+    /// SCAPE fit is shared across batches, but counts are emitted per batch.
+    pub batch: u32,
     pub cell_barcode: CellBarcode,
     /// Site identifier, e.g. "ENSG_SYMBOL_chr17_7590910_7590950/pA"
     pub site_id: Box<str>,
@@ -44,6 +47,7 @@ pub struct ApaSiteAnnotation {
 pub fn assign_fragments_to_sites(
     fragments: &[FragmentRecord],
     cluster_idx: &[u32],
+    frag_batch: &[u32],
     em_result: &EmResult,
     utr: &UtrRegion,
 ) -> (Vec<CellSiteCount>, Vec<ApaSiteAnnotation>) {
@@ -52,12 +56,19 @@ pub fn assign_fragments_to_sites(
         cluster_idx.len(),
         "cluster_idx must be 1:1 with fragments"
     );
+    debug_assert_eq!(
+        fragments.len(),
+        frag_batch.len(),
+        "frag_batch must be 1:1 with fragments"
+    );
 
     // Hard-assign each fragment to the argmax component (skip noise = k=0)
     // and dedupe UMIs directly on their 64-bit hash — no per-fragment
-    // `Box<str>` allocation.
+    // `Box<str>` allocation. Dedup is keyed by (batch, cell, component) so
+    // the same UMI seen in two replicates counts as two distinct molecules.
     use rustc_hash::FxHashSet;
-    let mut cell_component_umis: HashMap<(CellBarcode, usize), FxHashSet<u64>> = HashMap::default();
+    let mut cell_component_umis: HashMap<(u32, CellBarcode, usize), FxHashSet<u64>> =
+        HashMap::default();
 
     for (n, frag) in fragments.iter().enumerate() {
         let m = cluster_idx[n] as usize;
@@ -82,7 +93,7 @@ pub fn assign_fragments_to_sites(
             UmiBarcode::Hash(h) => h,
             UmiBarcode::Missing => u64::MAX,
         };
-        let key = (frag.cell_barcode.clone(), best_k);
+        let key = (frag_batch[n], frag.cell_barcode.clone(), best_k);
 
         cell_component_umis.entry(key).or_default().insert(umi_h);
     }
@@ -100,9 +111,10 @@ pub fn assign_fragments_to_sites(
     // Convert to CellSiteCount
     let mut results = Vec::new();
 
-    for ((cell_barcode, component_k), umis) in &cell_component_umis {
+    for ((batch, cell_barcode, component_k), umis) in &cell_component_umis {
         let (site_id, _, _) = make_site_id(*component_k);
         results.push(CellSiteCount {
+            batch: *batch,
             cell_barcode: cell_barcode.clone(),
             site_id,
             count: umis.len(),
@@ -207,8 +219,9 @@ mod tests {
 
         // Each test fragment is its own cluster (no real coarsening here).
         let cluster_idx: Vec<u32> = (0..fragments.len() as u32).collect();
+        let frag_batch: Vec<u32> = vec![0; fragments.len()];
         let (counts, annotations) =
-            assign_fragments_to_sites(&fragments, &cluster_idx, &em_result, &utr);
+            assign_fragments_to_sites(&fragments, &cluster_idx, &frag_batch, &em_result, &utr);
 
         // Should have counts for 5 cells × 2 components = 10 entries
         assert_eq!(
@@ -278,7 +291,9 @@ mod tests {
         };
 
         let cluster_idx: Vec<u32> = (0..fragments.len() as u32).collect();
-        let (counts, _) = assign_fragments_to_sites(&fragments, &cluster_idx, &em_result, &utr);
+        let frag_batch: Vec<u32> = vec![0; fragments.len()];
+        let (counts, _) =
+            assign_fragments_to_sites(&fragments, &cluster_idx, &frag_batch, &em_result, &utr);
         assert!(
             counts.is_empty(),
             "all-noise fragments should produce no counts, got {}",

@@ -433,6 +433,14 @@ pub struct CountApaArgs {
     )]
     pub(crate) compute_pdui: bool,
 
+    /// Drop genes with a single active pA site (no relative usage signal)
+    #[arg(
+        long = "drop-single-component",
+        default_value_t = false,
+        help = "Drop genes with a single pA site (no relative usage signal)"
+    )]
+    pub(crate) drop_single_component: bool,
+
     // ========== Gene expression QC ==========
     #[arg(
         long = "gene-min-cells",

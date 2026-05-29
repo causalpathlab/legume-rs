@@ -3,9 +3,9 @@ use crate::data::conversion::ConversionValueType;
 use crate::editing::io::ToParquet;
 use crate::editing::mask::{build_atoi_mask, filter_conversion_sites_by_mask, filter_m6a_by_mask};
 use crate::editing::mixture::MixtureParams;
+use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::{
-    find_all_conversion_sites, process_all_bam_files_to_backend, run_mixture_model,
-    ConversionParams,
+    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams,
 };
 use crate::editing::sifter::ModificationType;
 use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key};
@@ -187,6 +187,13 @@ pub struct PipelineArgs {
         help = "Beta prior β for posterior-rate weighting (default: 1.0)"
     )]
     pub mixture_prior_beta: f32,
+
+    #[arg(
+        long = "drop-single-component",
+        default_value_t = false,
+        help = "Drop genes with a single mixture component across m6A/ATOI/APA"
+    )]
+    pub drop_single_component: bool,
 
     // === SNP parameters ===
     #[arg(
@@ -685,7 +692,10 @@ fn run_atoi_step(
 
     // Mixture model: cluster editing sites per gene
     info!("Running 1D Gaussian mixture model on A-to-I sites...");
-    let mix_params = MixtureParams::default();
+    let mix_params = MixtureParams {
+        drop_single_component: args.drop_single_component,
+        ..MixtureParams::default()
+    };
     run_mixture_model(&params, &atoi_sites, &gff_map, &mix_params, valid_cells)?;
 
     Ok(AtoiMaskData { mask, n_sites })
@@ -761,6 +771,7 @@ fn run_apa_step(
         backend: args.backend.clone(),
         zip: args.zip,
         method: ApaMethod::Mixture, // Always use mixture mode (more robust)
+        drop_single_component: args.drop_single_component,
         atoi_mask_file,
         snp_mask_file,
         gene_barcode_tag: args.gene_barcode_tag.clone(),
@@ -893,7 +904,10 @@ fn run_dart_step(
 
     // Mixture model: cluster modification sites per gene
     info!("Running 1D Gaussian mixture model on m6A sites...");
-    let mix_params = MixtureParams::default();
+    let mix_params = MixtureParams {
+        drop_single_component: args.drop_single_component,
+        ..MixtureParams::default()
+    };
     run_mixture_model(&params, &m6a_sites, &gff_map, &mix_params, valid_cells)?;
 
     Ok(())

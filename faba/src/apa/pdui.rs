@@ -107,6 +107,7 @@ mod tests {
 
     fn make_count(cell: &str, site_id: &str, count: usize) -> CellSiteCount {
         CellSiteCount {
+            batch: 0,
             cell_barcode: CellBarcode::Barcode(cell.into()),
             site_id: site_id.into(),
             count,
