@@ -538,8 +538,13 @@ pub fn run_apa(args: &mut CountApaArgs) -> anyhow::Result<()> {
         check_bam_index(bam_file, None)?;
     }
 
-    // Gene expression QC: populate valid_gene_ids and valid_cell_barcodes
-    if !args.skip_gene_qc && args.valid_gene_ids.is_none() {
+    // Gene expression QC: populate valid_gene_ids and valid_cell_barcodes.
+    // Only mixture mode consumes these fields; running QC for simple mode
+    // would pay the splice-aware scan cost and then discard the result.
+    if !args.skip_gene_qc
+        && args.valid_gene_ids.is_none()
+        && matches!(args.method, ApaMethod::Mixture)
+    {
         if let Some(ref gff_file) = args.gff_file {
             let qc = run_gene_count_qc(
                 gff_file,
