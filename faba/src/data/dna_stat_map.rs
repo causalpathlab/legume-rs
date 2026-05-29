@@ -119,8 +119,20 @@ impl<'a> DnaBaseFreqMap<'a> {
         self.use_base_quality = enabled;
     }
 
+    /// Reset UMI dedup state. Called at the start of every `update_from_*` so
+    /// that dedup is scoped to a single BAM (matching 10x / umi_tools, which
+    /// operate on one library at a time). Two BAMs that happen to share a
+    /// `(cell, UMI)` value by coincidence are no longer collapsed into one.
+    fn reset_umi_seen(&mut self) {
+        match &mut self.mode {
+            CountMode::Marginal { umi_seen, .. } => umi_seen.clear(),
+            CountMode::PerCell { umi_seen, .. } => umi_seen.clear(),
+        }
+    }
+
     /// Update from BAM records in a BED region
     pub fn update_from_region(&mut self, bam_file_path: &str, region: &Bed) -> anyhow::Result<()> {
+        self.reset_umi_seen();
         bam_io::for_each_record_in_region(bam_file_path, region, |_chr, rec| {
             self.add_bam_record(rec);
         })
@@ -133,6 +145,7 @@ impl<'a> DnaBaseFreqMap<'a> {
         bam_file_path: &str,
         region: &Bed,
     ) -> anyhow::Result<()> {
+        self.reset_umi_seen();
         bam_io::for_each_record_in_region_cached(cache, bam_file_path, region, |_chr, rec| {
             self.add_bam_record(rec);
         })
@@ -147,6 +160,7 @@ impl<'a> DnaBaseFreqMap<'a> {
         gene_barcode_tag: &str,
         include_missing_barcode: bool,
     ) -> anyhow::Result<()> {
+        self.reset_umi_seen();
         bam_io::for_each_record_in_gene_cached(
             cache,
             bam_file_path,
