@@ -428,8 +428,20 @@ pub fn unzip_dir(zip_path: &str, extract_path: Option<&str>) -> anyhow::Result<B
 }
 
 /// Zip a directory into a zip archive using `Stored` compression
-/// (zarr chunks are already zstd-compressed internally).
+/// (zarr chunks are already zstd-compressed internally). In-zip entries are
+/// prefixed with the source directory's basename.
 pub fn zip_dir(source_dir: &str, zip_path: &str) -> anyhow::Result<()> {
+    zip_dir_as(source_dir, zip_path, None)
+}
+
+/// Like [`zip_dir`] but lets the caller override the in-zip root name, so the
+/// archive can use a different prefix than the source directory's basename
+/// without renaming or moving the source on disk.
+pub fn zip_dir_as(
+    source_dir: &str,
+    zip_path: &str,
+    entry_root: Option<&str>,
+) -> anyhow::Result<()> {
     use std::io::Write;
     use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
@@ -438,7 +450,6 @@ pub fn zip_dir(source_dir: &str, zip_path: &str) -> anyhow::Result<()> {
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     let source = Path::new(source_dir);
-    let base = source.parent().unwrap_or(source);
 
     fn collect_entries(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
@@ -458,8 +469,20 @@ pub fn zip_dir(source_dir: &str, zip_path: &str) -> anyhow::Result<()> {
     collect_entries(source, &mut entries)?;
     entries.sort();
 
+    let root_name = entry_root.unwrap_or_else(|| {
+        source
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+    });
+
     for path in &entries {
-        let rel = path.strip_prefix(base).unwrap_or(path);
+        let rel_under_source = path.strip_prefix(source).unwrap_or(path);
+        let rel = if root_name.is_empty() {
+            rel_under_source.to_path_buf()
+        } else {
+            Path::new(root_name).join(rel_under_source)
+        };
         if path.symlink_metadata()?.is_dir() {
             zip.add_directory(format!("{}/", rel.display()), options)?;
         } else {

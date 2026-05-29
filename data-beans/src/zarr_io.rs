@@ -186,25 +186,26 @@ pub fn finalize_zarr_output(zarr_dir: &str, target_path: &str) -> anyhow::Result
         .file_name()
         .and_then(|s| s.to_str())
         .map(|s| s.strip_suffix(".zarr").unwrap_or(s))
-        .ok_or_else(|| anyhow::anyhow!("invalid zarr_dir: {}", zarr_dir))?;
-    let parent = zarr_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+        .ok_or_else(|| anyhow::anyhow!("invalid zarr_dir: {}", zarr_dir))?
+        .to_string();
 
-    let staging = tempfile::Builder::new()
-        .prefix(".zarr_zip_staging_")
-        .tempdir_in(&parent)?;
-    let staged = staging.path().join(stem);
-    std::fs::rename(zarr_dir, &staged)?;
-
-    let staged_str = staged
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("non-UTF8 staging path: {:?}", staged))?;
-    info!("Zipping zarr output: {} → {}", staged_str, target_path);
-    matrix_util::common_io::zip_dir(staged_str, target_path)?;
-    // `staging` TempDir removes the staged contents on drop.
+    // Zip to a sibling `.tmp` first so the source .zarr survives any failure
+    // (disk full, etc.). Only after the zip succeeds do we atomically rename
+    // into place and remove the source — so a crash leaves either the source
+    // directory or the final archive, never neither.
+    let tmp_target = format!("{}.tmp", target_path);
+    info!("Zipping zarr output: {} → {}", zarr_dir, target_path);
+    if let Err(e) =
+        matrix_util::common_io::zip_dir_as(zarr_dir, &tmp_target, Some(&stem))
+    {
+        let _ = std::fs::remove_file(&tmp_target);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp_target, target_path) {
+        let _ = std::fs::remove_file(&tmp_target);
+        return Err(e.into());
+    }
+    std::fs::remove_dir_all(zarr_dir)?;
     Ok(())
 }
 
