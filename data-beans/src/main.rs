@@ -54,6 +54,26 @@ fn main() -> anyhow::Result<()> {
             .ok();
     }
 
+    match run(&cli) {
+        Err(e) if is_broken_pipe(&e) => {
+            // A downstream consumer (e.g. `head`, `less`) closed the pipe
+            // before we finished writing. This is expected, not an error.
+            std::process::exit(0);
+        }
+        other => other,
+    }
+}
+
+/// True if any cause in the error chain is a `BrokenPipe` I/O error.
+fn is_broken_pipe(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+    })
+}
+
+fn run(cli: &Cli) -> anyhow::Result<()> {
     match &cli.commands {
         Commands::FromMtx(args) => {
             run_build_from_mtx(args)?;
