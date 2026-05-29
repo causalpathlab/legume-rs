@@ -1,6 +1,8 @@
 use crate::hdf5_io::*;
 use crate::sparse_io::*;
-use crate::utilities::io_helpers::{read_col_names, MAX_COLUMN_NAME_IDX, MAX_ROW_NAME_IDX};
+use crate::utilities::io_helpers::{
+    parse_index_spec, read_col_names, MAX_COLUMN_NAME_IDX, MAX_ROW_NAME_IDX,
+};
 use crate::utilities::name_matching::match_by_substring;
 use clap::Args;
 use matrix_util::common_io::*;
@@ -24,9 +26,9 @@ pub struct TakeColumnsArgs {
     /// data file -- either `.zarr` or `.h5`
     pub data_file: Box<str>,
 
-    /// column indices to take: e.g., `0,1,2,3`
-    #[arg(short = 'i', long, value_delimiter = ',')]
-    pub column_indices: Option<Vec<usize>>,
+    /// column indices to take: singles and inclusive ranges, e.g. `0,1,2,3`, `1-10`, or `1-20,50-55`
+    #[arg(short = 'i', long)]
+    pub column_indices: Option<Box<str>>,
 
     /// column name file where each line is a column name
     #[arg(short = 'f', long)]
@@ -46,9 +48,9 @@ pub struct TakeRowsArgs {
     /// data file -- either `.zarr` or `.h5`
     pub data_file: Box<str>,
 
-    /// row indices to take: e.g., `0,1,2,3`
-    #[arg(short = 'i', long, value_delimiter = ',')]
-    pub row_indices: Option<Vec<usize>>,
+    /// row indices to take: singles and inclusive ranges, e.g. `0,1,2,3`, `1-10`, or `1-20,50-55`
+    #[arg(short = 'i', long)]
+    pub row_indices: Option<Box<str>>,
 
     /// row name file where each line is a row name
     #[arg(short = 'f', long)]
@@ -184,6 +186,7 @@ pub fn take_columns(args: &TakeColumnsArgs) -> anyhow::Result<()> {
     let row_names = data.row_names()?;
 
     let (data, column_names) = if let Some(columns) = columns {
+        let columns = parse_index_spec(&columns)?;
         let n_columns = data.num_columns().unwrap_or(0);
         let columns: Vec<usize> = columns.into_iter().filter(|&i| i < n_columns).collect();
 
@@ -245,6 +248,7 @@ pub fn take_rows(args: &TakeRowsArgs) -> anyhow::Result<()> {
     let data_backend = open_sparse_matrix(&data_file, &backend)?;
 
     let (data, row_names) = if let Some(rows) = rows {
+        let rows = parse_index_spec(&rows)?;
         let n_rows = data_backend.num_rows().unwrap_or(0);
         let rows: Vec<usize> = rows.into_iter().filter(|&i| i < n_rows).collect();
 

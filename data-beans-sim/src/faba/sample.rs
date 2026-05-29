@@ -14,6 +14,21 @@ use crate::multiome::sample_poisson_from_logits;
 const EPS_LOG: f32 = 1e-12;
 const NEG_BIG: f32 = -50.0;
 
+/// Sparse count entry: `(row_id, cell_id, count)`.
+pub type Triplet = (u64, u64, f32);
+/// Maps a modifier-modality `row_id` to `(gene_idx, component_idx)`.
+pub type RowKey = (usize, usize);
+
+/// Inputs shared by every per-modality sampler: the latents, the
+/// precomputed modality-invariant `log((β_topic · θ))` matrix, and the
+/// per-cell batch assignment. Bundling these keeps the per-call signatures
+/// small and avoids re-threading the same three references everywhere.
+pub struct RateContext<'a> {
+    pub lats: &'a Latents,
+    pub log_topic: &'a DMatrix<f32>,
+    pub batch_membership: &'a [usize],
+}
+
 /// Precompute the modality-invariant part of `log μ`:
 /// `log_topic[g, j] = log((β_topic · θ)_{g, j})`. This [G × N] matrix
 /// is shared across all per-modality sampling calls; the modality- and
@@ -33,18 +48,17 @@ pub fn precompute_log_topic(lats: &Latents) -> DMatrix<f32> {
 /// `sample_poisson_from_logits` softmaxes this per cell and scales by
 /// `depth_count`, so library size targets `depth_count`.
 pub fn sample_count_modality(
-    lats: &Latents,
-    log_topic: &DMatrix<f32>,
+    ctx: &RateContext,
     ln_delta_count: &DMatrix<f32>,
-    batch_membership: &[usize],
     depth_count: usize,
     rseed: u64,
-) -> Vec<(u64, u64, f32)> {
+) -> Vec<Triplet> {
+    let lats = ctx.lats;
     let g = lats.beta_g.len();
     let n = lats.theta_kn.ncols();
     let depths = vec![depth_count as f32; n];
 
-    let log_mu = assemble_log_mu(lats, log_topic, ln_delta_count, batch_membership);
+    let log_mu = assemble_log_mu(ctx, ln_delta_count);
 
     // Stack [G × N] for spliced (c=0) and unspliced (c=1) vertically.
     let mut log_rate = DMatrix::<f32>::zeros(2 * g, n);
@@ -71,15 +85,14 @@ pub fn sample_count_modality(
 /// `held_out(g, m)`. Within each emitted gene, `C_m` consecutive rows
 /// (one per component) are produced.
 pub fn sample_modifier_modality(
+    ctx: &RateContext,
     m_idx: usize,
-    lats: &Latents,
-    log_topic: &DMatrix<f32>,
     held_out: &[Vec<bool>],
     ln_delta_m: &DMatrix<f32>,
-    batch_membership: &[usize],
     depth_m: usize,
     rseed: u64,
-) -> (Vec<(u64, u64, f32)>, Vec<(usize, usize)>) {
+) -> (Vec<Triplet>, Vec<RowKey>) {
+    let lats = ctx.lats;
     let g = lats.beta_g.len();
     let n = lats.theta_kn.ncols();
     let c_m = lats.alpha_per_mod[m_idx].nrows();
@@ -89,7 +102,7 @@ pub fn sample_modifier_modality(
         .filter(|&gi| lats.phi[m_idx][gi] && !held_out[m_idx][gi])
         .collect();
     let d = emit_genes.len() * c_m;
-    let row_keys: Vec<(usize, usize)> = emit_genes
+    let row_keys: Vec<RowKey> = emit_genes
         .iter()
         .flat_map(|&gi| (0..c_m).map(move |c| (gi, c)))
         .collect();
@@ -102,8 +115,8 @@ pub fn sample_modifier_modality(
         return (Vec::new(), row_keys);
     }
 
-    let log_mu = assemble_log_mu(lats, log_topic, ln_delta_m, batch_membership);
-    let log_r = build_log_modifier_rate(lats, m_idx, ln_delta_m, batch_membership);
+    let log_mu = assemble_log_mu(ctx, ln_delta_m);
+    let log_r = build_log_modifier_rate(ctx, m_idx, ln_delta_m);
 
     // Assemble log_rate [D × N] = log α + log μ + log r for each (g, c).
     let mut log_rate = DMatrix::<f32>::zeros(d, n);
@@ -130,19 +143,15 @@ pub fn sample_modifier_modality(
 /// per-gene baseline and per-modality batch effect, so the expensive
 /// [G × K] · [K × N] matmul runs once per `run_faba`, not once per
 /// modality. Returned shape: `[G × N]`.
-fn assemble_log_mu(
-    lats: &Latents,
-    log_topic: &DMatrix<f32>,
-    ln_delta: &DMatrix<f32>,
-    batch_membership: &[usize],
-) -> DMatrix<f32> {
+fn assemble_log_mu(ctx: &RateContext, ln_delta: &DMatrix<f32>) -> DMatrix<f32> {
+    let lats = ctx.lats;
     let g = lats.beta_g.len();
     let n = lats.theta_kn.ncols();
     let bb = ln_delta.ncols();
 
-    let mut log_mu = log_topic.clone();
+    let mut log_mu = ctx.log_topic.clone();
     for j in 0..n {
-        let b = batch_membership[j];
+        let b = ctx.batch_membership[j];
         for gi in 0..g {
             let delta = if bb > 1 { ln_delta[(gi, b)] } else { 0.0 };
             log_mu[(gi, j)] += lats.beta_g[gi] + delta;
@@ -158,11 +167,11 @@ fn assemble_log_mu(
 /// downstream callers only emit rows for substrate-positive g so this
 /// gate is mainly a safety net.
 fn build_log_modifier_rate(
-    lats: &Latents,
+    ctx: &RateContext,
     m_idx: usize,
     ln_delta: &DMatrix<f32>,
-    batch_membership: &[usize],
 ) -> DMatrix<f32> {
+    let lats = ctx.lats;
     let g = lats.beta_g.len();
     let n = lats.theta_kn.ncols();
     let k_prog = lats.a_mk.ncols();
@@ -179,7 +188,7 @@ fn build_log_modifier_rate(
 
     let mut log_r = DMatrix::<f32>::zeros(g, n);
     for j in 0..n {
-        let b = batch_membership[j];
+        let b = ctx.batch_membership[j];
         for gi in 0..g {
             let phi = if lats.phi[m_idx][gi] { 1.0 } else { 0.0 };
             let delta = if bb > 1 { ln_delta[(gi, b)] } else { 0.0 };

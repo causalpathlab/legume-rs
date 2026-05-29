@@ -263,13 +263,18 @@ pub fn run_faba(args: &FabaArgs) -> anyhow::Result<()> {
     // recomputed inside each.
     let log_topic = sample::precompute_log_topic(&lats);
 
+    // Shared inputs for every per-modality sampler.
+    let rate_ctx = sample::RateContext {
+        lats: &lats,
+        log_topic: &log_topic,
+        batch_membership: &batch_membership,
+    };
+
     // Per-modality log-rate matrices and triplet sampling.
     let rseed_count = args.rseed.wrapping_add(0x436F_756E); // 'Coun'
     let count_triplets = sample::sample_count_modality(
-        &lats,
-        &log_topic,
+        &rate_ctx,
         &ln_delta_per_mod[0],
-        &batch_membership,
         args.depth_count,
         rseed_count,
     );
@@ -282,12 +287,10 @@ pub fn run_faba(args: &FabaArgs) -> anyhow::Result<()> {
         // handful of tracks.
         let seed = args.rseed.wrapping_add((m as u64) << 32);
         let (trips, row_keys) = sample::sample_modifier_modality(
+            &rate_ctx,
             m,
-            &lats,
-            &log_topic,
             &held_out,
             &ln_delta_per_mod[m],
-            &batch_membership,
             args.depth_modifier,
             seed,
         );

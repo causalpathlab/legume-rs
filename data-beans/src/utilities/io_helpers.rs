@@ -43,6 +43,47 @@ pub fn read_col_names(
         .collect())
 }
 
+/// Parse an index specification into an explicit, ordered list of indices.
+///
+/// Accepts comma-separated single indices and inclusive ranges, e.g.
+/// `0,2,5`, `1-10`, or `1-20,50-55`. Whitespace around tokens is ignored.
+/// Ranges are inclusive on both ends (`1-10` -> 1,2,...,10).
+pub fn parse_index_spec(spec: &str) -> anyhow::Result<Vec<usize>> {
+    let mut out = Vec::new();
+    for token in spec.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        match token.split_once('-') {
+            Some((start, end)) => {
+                let start: usize = start
+                    .trim()
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid range start in `{}`", token))?;
+                let end: usize = end
+                    .trim()
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid range end in `{}`", token))?;
+                if start > end {
+                    anyhow::bail!("range start {} exceeds end {} in `{}`", start, end, token);
+                }
+                out.extend(start..=end);
+            }
+            None => {
+                let idx: usize = token
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid index `{}`", token))?;
+                out.push(idx);
+            }
+        }
+    }
+    if out.is_empty() {
+        anyhow::bail!("no valid indices parsed from `{}`", spec);
+    }
+    Ok(out)
+}
+
 // Re-export constants for convenience
 pub use crate::sparse_io::{MAX_COLUMN_NAME_IDX, MAX_ROW_NAME_IDX};
 
@@ -58,4 +99,28 @@ pub fn chunk_elems(nelem: usize, elem_bytes: usize) -> usize {
     (TARGET_CHUNK_BYTES / elem_bytes.max(1))
         .max(MIN_CHUNK_ELEMS)
         .min(nelem.max(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_index_spec;
+
+    #[test]
+    fn singles_and_ranges() {
+        assert_eq!(parse_index_spec("0,2,5").unwrap(), vec![0, 2, 5]);
+        assert_eq!(parse_index_spec("1-5").unwrap(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            parse_index_spec("1-3,10,20-22").unwrap(),
+            vec![1, 2, 3, 10, 20, 21, 22]
+        );
+        // single-element range and surrounding whitespace
+        assert_eq!(parse_index_spec(" 7 - 7 , 9 ").unwrap(), vec![7, 9]);
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        assert!(parse_index_spec("5-1").is_err());
+        assert!(parse_index_spec("abc").is_err());
+        assert!(parse_index_spec("").is_err());
+    }
 }

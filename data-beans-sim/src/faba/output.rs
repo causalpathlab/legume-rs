@@ -176,11 +176,11 @@ pub fn write_all(
     )?;
 
     // α mixture weights: one parquet per modality. Stored as [G × C_m].
-    for m in 0..MODALITIES.len() {
+    for (m, modality) in MODALITIES.iter().enumerate() {
         let alpha_gc = lats.alpha_per_mod[m].transpose();
         let comp_names: Vec<Box<str>> = (0..alpha_gc.ncols()).map(|c| lats.detail(m, c)).collect();
         write_dmatrix(
-            &format!("{}.alpha_{}.parquet", args.out, MODALITIES[m]),
+            &format!("{}.alpha_{}.parquet", args.out, modality),
             &alpha_gc,
             &lats.gene_names,
             Some("gene"),
@@ -256,11 +256,11 @@ fn write_modality_zarr(
 fn build_count_row_names(gene_names: &[Box<str>]) -> Vec<Box<str>> {
     let g = gene_names.len();
     let mut out: Vec<Box<str>> = Vec::with_capacity(2 * g);
-    for gi in 0..g {
-        out.push(format!("{}/count/spliced", gene_names[gi]).into_boxed_str());
+    for name in gene_names {
+        out.push(format!("{}/count/spliced", name).into_boxed_str());
     }
-    for gi in 0..g {
-        out.push(format!("{}/count/unspliced", gene_names[gi]).into_boxed_str());
+    for name in gene_names {
+        out.push(format!("{}/count/unspliced", name).into_boxed_str());
     }
     out
 }
