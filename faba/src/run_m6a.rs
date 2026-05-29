@@ -2,12 +2,13 @@ use crate::cell_clustering::{cluster_cells_from_bam, ClusteringParams};
 use crate::common::*;
 use crate::data::cell_membership::CellMembership;
 use crate::data::conversion::*;
+use crate::editing::bed_output::process_all_bam_files_to_bed;
 use crate::editing::io::{load_atoi_mask_from_parquet, ToParquet};
 use crate::editing::mask::{build_atoi_mask, filter_m6a_by_mask};
 use crate::editing::mixture::MixtureParams;
+use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::{
-    find_all_conversion_sites, process_all_bam_files_to_backend, process_all_bam_files_to_bed,
-    run_mixture_model, ConversionParams,
+    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams,
 };
 use crate::editing::sifter::ModificationType;
 use crate::pipeline_util::{check_all_bam_indices, run_gene_count_qc};
@@ -368,6 +369,13 @@ pub struct DartSeqCountArgs {
         help = "Initial sigma, or 0 for auto (default: 0)"
     )]
     pub mixture_initial_sigma: f32,
+
+    #[arg(
+        long = "drop-single-component",
+        default_value_t = false,
+        help = "Drop genes with a single mixture component (no relative signal)"
+    )]
+    pub drop_single_component: bool,
 
     #[arg(
         long = "mixture-weight",
@@ -816,6 +824,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             min_sites: args.mixture_min_sites,
             max_k: args.mixture_max_k,
             initial_sigma: args.mixture_initial_sigma,
+            drop_single_component: args.drop_single_component,
             ..Default::default()
         };
         let valid_cells = gene_qc.as_ref().map(|qc| &qc.cell_barcodes);

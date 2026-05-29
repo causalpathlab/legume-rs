@@ -57,6 +57,17 @@ Feature naming convention:\n\
   apa:     gene_key/pA/{component} (mixture), gene_key/pA/{chr}:{pos} (site)\n\n\
   snp:     gene_key/SNP/{chr}:{pos} (alt allele count per cell)\n\n\
   Split on '/' to extract (gene_key, modality, detail) for cross-modal joins.\n\n\
+Output layout (every matrix is per-replicate — one per input BAM):\n\
+  site-level: {batch}_m6a_{ratio,converted,unconverted},\n    \
+              {batch}_atoi_ratio, {batch}_genes, {batch}_snp_{alt,depth}\n\
+  mixture:    {batch}_m6a_mixture, {batch}_atoi_mixture,\n    \
+              {batch}_apa_mixture, {batch}_apa_pdui\n\
+  Mixture components are FIT on the pooled replicates (shared across\n\
+  batches) but COUNTED per batch, so per-batch mixture matrices share one\n\
+  row vocabulary and stack directly. The shared definitions are the only\n\
+  single files: *_sites.parquet, *_components.parquet.\n\
+  --drop-single-component prunes genes with a lone component (no relative\n\
+  signal) from the mixture matrices and component sidecars.\n\n\
 Use `faba <COMMAND> --help` for detailed options on each subcommand.")]
 struct Cli {
     #[arg(short = 'v', long, global = true, help = "Enable verbose logging")]
@@ -75,6 +86,13 @@ enum Commands {
             G->A (reverse) conversion rates between wild-type and mutant BAM\n\
             files using binomial tests, then quantifies per-cell methylation\n\
             at discovered sites.\n\n\
+            Outputs:\n  \
+            - m6a_sites.parquet: site annotations (single)\n  \
+            - {batch}_m6a_{ratio,converted,unconverted}: per-replicate\n    \
+              site-level matrices, one per WT and --mut BAM\n  \
+            - {batch}_m6a_mixture (+ m6a_components.parquet): per-replicate\n    \
+              mixture counts — components fit on pooled WT replicates,\n    \
+              counted per batch (shared row schema)\n\n\
             Reference:\n  \
             Meyer, \"DART-seq: an antibody-free method for global m6A\n  \
             detection\", Nature Methods, 16(12):1275-1280, 2019.\n  \
@@ -93,6 +111,13 @@ Example:\n  \
         long_about = "Quantify alternative polyadenylation (APA) sites per cell\n\n\
             Discovers and quantifies poly(A) site usage from 3'-end sequencing\n\
             data. The mixture mode implements the SCAPE model.\n\n\
+            Outputs (--method mixture, default):\n  \
+            - {batch}_apa_mixture (+ apa_components.parquet): per-replicate\n    \
+              pA-site usage — sites fit on pooled BAMs, counted per batch\n    \
+              (shared row schema)\n  \
+            - {batch}_apa_pdui: per-replicate per-cell PDUI (--compute-pdui)\n  \
+            --method simple instead writes a per-replicate {batch} matrix\n    \
+            for each input BAM.\n\n\
             Reference:\n  \
             Zhou et al., \"SCAPE: a mixture model revealing single-cell\n  \
             polyadenylation diversity and cellular dynamics during cell\n  \
@@ -113,9 +138,13 @@ Example:\n  \
             Discovers editing sites from A->G (forward) or T->C (reverse)\n\
             conversions in BAM files, then quantifies per-cell editing\n\
             at discovered sites.\n\n\
-            Output: atoi_sites.parquet (site annotations) + sparse matrix\n\
-            (cells x sites). The parquet file can be used as --atoi-mask\n\
-            input for `faba dartseq` or `faba apa`.",
+            Outputs:\n  \
+            - atoi_sites.parquet: site annotations (single); usable as\n    \
+              --atoi-mask input for `faba dartseq` or `faba apa`\n  \
+            - {batch}_atoi_ratio: per-replicate site-level matrix, one\n    \
+              per input BAM\n  \
+            - {batch}_atoi_mixture (+ atoi_components.parquet): per-replicate\n    \
+              mixture counts — shared (pooled) component fit, per-batch counts",
         after_long_help = "\
 Example:\n  \
   faba atoi sample.bam -g genes.gff -f genome.fa -o out/\n  \
@@ -170,8 +199,8 @@ Example:\n  \
             position. No GFF file required.",
         after_long_help = "\
 Example:\n  \
-  faba pileup out/m6a.zarr -q BRCA2\n  \
-  faba pileup out/m6a.zarr -q BRCA2 -s out/m6a_sites.parquet --signal nnz"
+  faba pileup out/rep1_wt_m6a_mixture.zarr.zip -q BRCA2\n  \
+  faba pileup out/rep1_wt_m6a_mixture.zarr.zip -q BRCA2 -s out/m6a_sites.parquet --signal nnz"
     )]
     Pileup(PileupArgs),
 
@@ -254,21 +283,25 @@ Known SNP reference files:\n\n  \
             genes' m-data.",
         after_long_help = "\
 Example:\n  \
-  faba rmodem --genes out/genes.zarr.zip --dartseq out/dartseq.zarr.zip \\\n    \
-              --atoi out/atoi.zarr.zip --apa out/apa.zarr.zip -o out/rmodem")]
+  faba rmodem --genes out/rep1_wt_genes.zarr.zip \\\n    \
+              --dartseq out/rep1_wt_m6a_mixture.zarr.zip \\\n    \
+              --atoi out/rep1_wt_atoi_mixture.zarr.zip \\\n    \
+              --apa out/rep1_wt_apa_mixture.zarr.zip -o out/rmodem")]
     RnaModEmbed(RnaModEmbedArgs),
 
     #[command(
         name = "all",
         aliases = ["pipeline", "full", "magic"],
-        about = "Run all RNA-seq analyses: genes → ATOI → APA → DART",
+        about = "Run all RNA-seq analyses: SNP → genes → ATOI → APA → DART",
         long_about = "Run all RNA-seq analyses in a unified pipeline\n\n\
             Orchestrates the complete analysis workflow:\n  \
+            0. SNP genotyping (de novo + optional --known-snps; skip --skip-snp)\n  \
             1. Gene expression filtering (identify expressed genes)\n  \
-            2. ATOI detection (A-to-I editing sites)\n  \
-            3. APA quantification (alternative polyadenylation, masked)\n  \
-            4. DART analysis (m6A methylation, masked, requires --mut)\n\n\
-            Applies gene filtering after step 1 and ATOI masking to steps 3-4.",
+            2. ATOI detection (A-to-I editing sites, masked by SNP)\n  \
+            3. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n  \
+            4. DART analysis (m6A methylation, masked by SNP+ATOI, requires --mut)\n\n\
+            Gene filter applies after step 1; SNP mask to steps 2-4, ATOI mask\n\
+            to steps 3-4.",
         after_long_help = "\
 Example:\n  \
   faba all sample.bam -g genes.gff -f genome.fa -o out/\n  \
