@@ -21,13 +21,16 @@ fn hash_umi(umi: &str) -> u64 {
 pub enum CountMode<'a> {
     Marginal {
         counts: HashMap<i64, DnaBaseCount>,
-        umi_seen: FxHashSet<(i64, u64)>,
+        // Per-read UMI dedup: one entry per unique UMI hash in the region.
+        // A read whose UMI has been seen is skipped entirely, not per-base.
+        umi_seen: FxHashSet<u64>,
     },
     PerCell {
         counts: HashMap<i64, HashMap<CellBarcode, DnaBaseCount>>,
         cell_barcode_tag: Vec<u8>,
         cell_membership: Option<&'a CellMembership>,
-        umi_seen: FxHashSet<(i64, u64, CellBarcode)>,
+        // Per-read UMI dedup keyed by (cell, UMI hash).
+        umi_seen: FxHashSet<(CellBarcode, u64)>,
     },
 }
 
@@ -182,6 +185,13 @@ impl<'a> DnaBaseFreqMap<'a> {
 
         match &mut self.mode {
             CountMode::Marginal { counts, umi_seen } => {
+                // Per-read dedup: if this UMI has already been counted in this
+                // region, drop the whole record before touching the per-base loop.
+                if let Some(h) = umi_hash {
+                    if !umi_seen.insert(h) {
+                        return;
+                    }
+                }
                 let quals = bam_record.qual();
 
                 for [rpos, gpos] in bam_record.aligned_pairs() {
@@ -194,12 +204,6 @@ impl<'a> DnaBaseFreqMap<'a> {
                     let phred = quals[rpos as usize];
                     if phred < self.min_base_quality {
                         continue;
-                    }
-
-                    if let Some(h) = umi_hash {
-                        if !umi_seen.insert((gpos, h)) {
-                            continue;
-                        }
                     }
 
                     let base = Dna::from_byte(seq[rpos as usize]);
@@ -224,6 +228,13 @@ impl<'a> DnaBaseFreqMap<'a> {
 
                 if let Some(membership) = cell_membership {
                     if membership.matches_barcode(&cell_barcode).is_none() {
+                        return;
+                    }
+                }
+
+                // Per-read dedup keyed by (cell, UMI): drop the whole record up front.
+                if let Some(h) = umi_hash {
+                    if !umi_seen.insert((cell_barcode.clone(), h)) {
                         return;
                     }
                 }
@@ -256,12 +267,6 @@ impl<'a> DnaBaseFreqMap<'a> {
 
                 if anchor_matched {
                     for (gpos, base, _phred) in pending {
-                        if let Some(h) = umi_hash {
-                            if !umi_seen.insert((gpos, h, cell_barcode.clone())) {
-                                continue;
-                            }
-                        }
-
                         let freq_map: &mut HashMap<CellBarcode, DnaBaseCount> =
                             counts.entry(gpos).or_default();
                         let freq = freq_map.entry(cell_barcode.clone()).or_default();
