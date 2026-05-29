@@ -119,11 +119,13 @@ pub fn extract_gene_key(feat: &str) -> &str {
 }
 
 /// In-memory QC: count nnz per gene and per cell from combined triplets,
-/// return sets of passing gene_keys and cell barcodes.
+/// return sets of passing gene_keys and cell barcodes. A `gene_min_counts`
+/// of 0 disables the total-count threshold.
 pub fn qc_passing_keys(
     spliced: &[(CellBarcode, Box<str>, f32)],
     unspliced: &[(CellBarcode, Box<str>, f32)],
     gene_min_cells: usize,
+    gene_min_counts: usize,
     cell_min_genes: usize,
 ) -> (
     rustc_hash::FxHashSet<Box<str>>,
@@ -144,9 +146,24 @@ pub fn qc_passing_keys(
         *cell_nnz.entry(cb).or_default() += 1;
     }
 
+    // Total counts per gene (sum over all triplets, not just unique cells)
+    let gene_total: FxHashMap<&str, f64> = if gene_min_counts > 0 {
+        let mut m: FxHashMap<&str, f64> = FxHashMap::default();
+        for (_, feat, v) in spliced.iter().chain(unspliced.iter()) {
+            *m.entry(extract_gene_key(feat)).or_default() += *v as f64;
+        }
+        m
+    } else {
+        FxHashMap::default()
+    };
+
+    let min_counts = gene_min_counts as f64;
     let passing_genes: rustc_hash::FxHashSet<Box<str>> = gene_nnz
         .into_iter()
         .filter(|(_, n)| *n >= gene_min_cells)
+        .filter(|(gk, _)| {
+            gene_min_counts == 0 || gene_total.get(gk).copied().unwrap_or(0.0) >= min_counts
+        })
         .map(|(gk, _)| Box::from(gk))
         .collect();
 
@@ -168,6 +185,7 @@ pub fn run_gene_count_qc(
     cell_barcode_tag: &str,
     gene_barcode_tag: &str,
     gene_min_cells: usize,
+    gene_min_counts: usize,
     cell_min_genes: usize,
 ) -> anyhow::Result<GeneCountQc> {
     info!("=== Gene expression QC ===");
@@ -230,6 +248,7 @@ pub fn run_gene_count_qc(
             &spliced_triplets,
             &unspliced_triplets,
             gene_min_cells,
+            gene_min_counts,
             cell_min_genes,
         );
 

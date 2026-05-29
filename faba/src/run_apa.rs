@@ -431,6 +431,13 @@ pub struct CountApaArgs {
     pub(crate) gene_min_cells: usize,
 
     #[arg(
+        long = "gene-min-counts",
+        default_value_t = 0,
+        help = "Min total UMI counts per gene for expression QC (0 disables)"
+    )]
+    pub(crate) gene_min_counts: usize,
+
+    #[arg(
         long = "cell-min-genes",
         default_value_t = 10,
         help = "Min genes per cell for expression QC"
@@ -529,6 +536,7 @@ pub fn run_apa(args: &mut CountApaArgs) -> anyhow::Result<()> {
                 &args.cell_barcode_tag,
                 &args.gene_barcode_tag,
                 args.gene_min_cells,
+                args.gene_min_counts,
                 args.cell_min_genes,
             )?;
             info!(
