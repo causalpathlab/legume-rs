@@ -682,7 +682,7 @@ fn run_atoi_step(
     // Mixture model: cluster editing sites per gene
     info!("Running 1D Gaussian mixture model on A-to-I sites...");
     let mix_params = MixtureParams::default();
-    run_mixture_model(&params, &atoi_sites, &gff_map, &mix_params)?;
+    run_mixture_model(&params, &atoi_sites, &gff_map, &mix_params, valid_cells)?;
 
     Ok(AtoiMaskData { mask, n_sites })
 }
@@ -885,7 +885,7 @@ fn run_dart_step(
     // Mixture model: cluster modification sites per gene
     info!("Running 1D Gaussian mixture model on m6A sites...");
     let mix_params = MixtureParams::default();
-    run_mixture_model(&params, &m6a_sites, &gff_map, &mix_params)?;
+    run_mixture_model(&params, &m6a_sites, &gff_map, &mix_params, valid_cells)?;
 
     Ok(())
 }

@@ -394,7 +394,7 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
             initial_sigma: args.mixture_initial_sigma,
             ..Default::default()
         };
-        run_mixture_model(&params, &atoi_sites, &gff_map, &mix_params)?;
+        run_mixture_model(&params, &atoi_sites, &gff_map, &mix_params, valid_cells)?;
     }
 
     info!("done");

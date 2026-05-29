@@ -794,7 +794,14 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             initial_sigma: args.mixture_initial_sigma,
             ..Default::default()
         };
-        run_mixture_model(&m6a_params, &gene_sites, &gff_map, &mix_params)?;
+        let valid_cells = gene_qc.as_ref().map(|qc| &qc.cell_barcodes);
+        run_mixture_model(
+            &m6a_params,
+            &gene_sites,
+            &gff_map,
+            &mix_params,
+            valid_cells,
+        )?;
     }
 
     info!("done");
