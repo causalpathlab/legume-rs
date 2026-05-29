@@ -294,6 +294,17 @@ pub struct CountApaArgs {
     )]
     pub(crate) umi_tag: Box<str>,
 
+    /// Disable UMI deduplication (mixture mode)
+    #[arg(
+        long = "no-umi-dedup",
+        default_value_t = false,
+        help = "Disable UMI deduplication (mixture mode)",
+        long_help = "When set, each fragment counts once instead of being\n\
+                     deduplicated by UMI. Use for bulk or non-UMI data.\n\
+                     Only used in mixture mode."
+    )]
+    pub(crate) no_umi_dedup: bool,
+
     /// Expected fragment length mean (mixture mode)
     #[arg(
         long,
