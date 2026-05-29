@@ -211,18 +211,18 @@ $(addprefix install-,$(BINARIES)):
 	@bin=$(@:install-%=%); \
 	if [ -n "$(CARGO_FEATURES)" ]; then \
 	    echo "Installing $$bin (backend: $(BACKEND))..."; \
-	    if cargo install --path $$bin $(CARGO_FEATURES); then \
+	    if cargo install --locked --path $$bin $(CARGO_FEATURES); then \
 	        echo "$$bin $(BACKEND)" >> $(INSTALL_STATUS_FILE); \
 	    else \
 	        echo ""; \
 	        echo "  $(BACKEND) build of $$bin failed; retrying with CPU"; \
 	        echo ""; \
-	        cargo install --path $$bin $(CARGO_FEATURES_CPU_FALLBACK); \
+	        cargo install --locked --path $$bin $(CARGO_FEATURES_CPU_FALLBACK); \
 	        echo "$$bin cpu" >> $(INSTALL_STATUS_FILE); \
 	    fi; \
 	else \
 	    echo "Installing $$bin (backend: cpu)..."; \
-	    cargo install --path $$bin $(CARGO_FEATURES_CPU_FALLBACK); \
+	    cargo install --locked --path $$bin $(CARGO_FEATURES_CPU_FALLBACK); \
 	    echo "$$bin cpu" >> $(INSTALL_STATUS_FILE); \
 	fi
 
