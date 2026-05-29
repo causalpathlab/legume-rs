@@ -259,6 +259,20 @@ pub struct AtoICountArgs {
         help = "Skip gene expression QC step"
     )]
     pub skip_gene_qc: bool,
+
+    #[arg(
+        long = "umi-tag",
+        default_value = "UB",
+        help = "UMI BAM tag (for read dedup)"
+    )]
+    pub umi_tag: Box<str>,
+
+    #[arg(
+        long = "no-umi-dedup",
+        default_value_t = false,
+        help = "Disable UMI deduplication"
+    )]
+    pub no_umi_dedup: bool,
 }
 
 impl From<&AtoICountArgs> for ConversionParams {
@@ -290,6 +304,11 @@ impl From<&AtoICountArgs> for ConversionParams {
             mixture_weight_mode: args.mixture_weight,
             mixture_prior_alpha: args.mixture_prior_alpha,
             mixture_prior_beta: args.mixture_prior_beta,
+            umi_tag: if args.no_umi_dedup {
+                None
+            } else {
+                Some(args.umi_tag.clone())
+            },
         }
     }
 }

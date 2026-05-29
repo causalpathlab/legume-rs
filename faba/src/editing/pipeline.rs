@@ -65,9 +65,19 @@ pub struct ConversionParams {
     pub mixture_prior_alpha: f32,
     /// Beta(α, β) prior parameter β for `MixtureWeightMode::Posterior`.
     pub mixture_prior_beta: f32,
+    /// UMI BAM tag for read deduplication. `None` disables UMI dedup so
+    /// every aligned read at a position contributes to the base counts.
+    pub umi_tag: Option<Box<str>>,
 }
 
 impl ConversionParams {
+    /// If a UMI tag is configured, enable UMI dedup on the given freq map.
+    fn apply_umi(&self, map: &mut crate::data::dna_stat_map::DnaBaseFreqMap<'_>) {
+        if let Some(ref tag) = self.umi_tag {
+            map.set_umi_tag(tag);
+        }
+    }
+
     /// Create a ConversionSifter with these parameters
     pub fn create_sifter<'a>(
         &self,
@@ -239,6 +249,7 @@ fn find_sites_with_bulk_stats(
 ) -> anyhow::Result<Vec<ConversionSite>> {
     let mut wt_base_freq_map = DnaBaseFreqMap::new();
     wt_base_freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+    params.apply_umi(&mut wt_base_freq_map);
 
     for wt_file in &params.wt_bam_files {
         wt_base_freq_map.update_from_gene_cached(
@@ -260,6 +271,7 @@ fn find_sites_with_bulk_stats(
 
     let mut mut_base_freq_map = DnaBaseFreqMap::new();
     mut_base_freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+    params.apply_umi(&mut mut_base_freq_map);
 
     for mut_file in &params.mut_bam_files {
         mut_base_freq_map.update_from_gene_cached(
@@ -317,6 +329,7 @@ fn find_sites_with_celltype_stats(
     let mut wt_per_cell_map =
         DnaBaseFreqMap::new_with_cell_barcode(&params.cell_barcode_tag, Some(membership));
     wt_per_cell_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+    params.apply_umi(&mut wt_per_cell_map);
     for wt_file in &params.wt_bam_files {
         wt_per_cell_map.update_from_gene_cached(
             cache,
@@ -335,6 +348,7 @@ fn find_sites_with_celltype_stats(
     // Collect bulk frequencies from mut BAM files (background/null distribution)
     let mut mut_base_freq_map = DnaBaseFreqMap::new();
     mut_base_freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+    params.apply_umi(&mut mut_base_freq_map);
     for mut_file in &params.mut_bam_files {
         mut_base_freq_map.update_from_gene_cached(
             cache,
@@ -582,6 +596,7 @@ fn collect_gene_conversion_stats(
     let mut stat_map =
         DnaBaseFreqMap::new_with_cell_barcode(&params.cell_barcode_tag, cell_membership);
     stat_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+    params.apply_umi(&mut stat_map);
 
     // Collect all positions we need to query and calculate minimal region bounds
     let mut positions_to_track = rustc_hash::FxHashSet::default();
