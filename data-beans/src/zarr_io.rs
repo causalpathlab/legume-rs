@@ -195,9 +195,7 @@ pub fn finalize_zarr_output(zarr_dir: &str, target_path: &str) -> anyhow::Result
     // directory or the final archive, never neither.
     let tmp_target = format!("{}.tmp", target_path);
     info!("Zipping zarr output: {} → {}", zarr_dir, target_path);
-    if let Err(e) =
-        matrix_util::common_io::zip_dir_as(zarr_dir, &tmp_target, Some(&stem))
-    {
+    if let Err(e) = matrix_util::common_io::zip_dir_as(zarr_dir, &tmp_target, Some(&stem)) {
         let _ = std::fs::remove_file(&tmp_target);
         return Err(e);
     }

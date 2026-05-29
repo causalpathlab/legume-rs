@@ -469,12 +469,8 @@ pub fn zip_dir_as(
     collect_entries(source, &mut entries)?;
     entries.sort();
 
-    let root_name = entry_root.unwrap_or_else(|| {
-        source
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-    });
+    let root_name =
+        entry_root.unwrap_or_else(|| source.file_name().and_then(|s| s.to_str()).unwrap_or(""));
 
     for path in &entries {
         let rel_under_source = path.strip_prefix(source).unwrap_or(path);

@@ -370,7 +370,11 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
             .map(|gid| gid.to_string().into_boxed_str())
             .collect();
         utrs.retain(|utr| {
-            let gid = utr.name.split_once('_').map(|(g, _)| g).unwrap_or(&utr.name);
+            let gid = utr
+                .name
+                .split_once('_')
+                .map(|(g, _)| g)
+                .unwrap_or(&utr.name);
             valid_ids.contains(gid)
         });
         info!(
