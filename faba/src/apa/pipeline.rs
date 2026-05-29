@@ -585,6 +585,15 @@ fn process_utr(
         all_fragments.extend(frags);
     }
 
+    // When UMI dedup is disabled, give each fragment a unique UMI hash so the
+    // (cell, component) HashSet in cell_assign sees them as distinct reads
+    // rather than collapsing all UmiBarcode::Missing into one observation.
+    if args.no_umi_dedup {
+        for (i, frag) in all_fragments.iter_mut().enumerate() {
+            frag.umi = genomic_data::sam::UmiBarcode::Hash(i as u64);
+        }
+    }
+
     log::debug!(
         "UTR {} ({}:{}-{}, L={}): {} fragments extracted",
         utr.name,
