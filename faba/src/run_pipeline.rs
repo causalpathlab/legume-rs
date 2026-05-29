@@ -519,8 +519,7 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
                 triplets
                     .into_par_iter()
                     .filter(|(cb, feat, _)| {
-                        passing_genes.contains(extract_gene_key(feat))
-                            && passing_cells.contains(cb)
+                        passing_genes.contains(extract_gene_key(feat)) && passing_cells.contains(cb)
                     })
                     .collect()
             };
