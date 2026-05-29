@@ -503,6 +503,20 @@ pub struct DartSeqCountArgs {
                      expressed genes/cells before site discovery."
     )]
     pub skip_gene_qc: bool,
+
+    #[arg(
+        long = "umi-tag",
+        default_value = "UB",
+        help = "UMI BAM tag (for read dedup)"
+    )]
+    pub umi_tag: Box<str>,
+
+    #[arg(
+        long = "no-umi-dedup",
+        default_value_t = false,
+        help = "Disable UMI deduplication"
+    )]
+    pub no_umi_dedup: bool,
 }
 
 /// Create m6A ConversionParams from DartSeqCountArgs
@@ -537,6 +551,11 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             mixture_weight_mode: args.mixture_weight,
             mixture_prior_alpha: args.mixture_prior_alpha,
             mixture_prior_beta: args.mixture_prior_beta,
+            umi_tag: if args.no_umi_dedup {
+                None
+            } else {
+                Some(args.umi_tag.clone())
+            },
         }
     }
 }
@@ -571,6 +590,11 @@ impl DartSeqCountArgs {
             mixture_weight_mode: self.mixture_weight,
             mixture_prior_alpha: self.mixture_prior_alpha,
             mixture_prior_beta: self.mixture_prior_beta,
+            umi_tag: if self.no_umi_dedup {
+                None
+            } else {
+                Some(self.umi_tag.clone())
+            },
         }
     }
 }

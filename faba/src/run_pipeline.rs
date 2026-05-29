@@ -639,6 +639,11 @@ fn run_atoi_step(
         mixture_weight_mode: args.mixture_weight,
         mixture_prior_alpha: args.mixture_prior_alpha,
         mixture_prior_beta: args.mixture_prior_beta,
+        umi_tag: if args.no_umi_dedup {
+            None
+        } else {
+            Some(args.umi_tag.clone())
+        },
     };
 
     // Find ATOI sites (first pass)
@@ -838,6 +843,11 @@ fn run_dart_step(
         mixture_weight_mode: args.mixture_weight,
         mixture_prior_alpha: args.mixture_prior_alpha,
         mixture_prior_beta: args.mixture_prior_beta,
+        umi_tag: if args.no_umi_dedup {
+            None
+        } else {
+            Some(args.umi_tag.clone())
+        },
     };
 
     // Find m6A sites (first pass)
