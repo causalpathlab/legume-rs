@@ -363,13 +363,15 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
     // Filter UTRs to expressed genes if available
     if let Some(ref valid_gene_ids) = args.valid_gene_ids {
         let before = utrs.len();
-        let valid_prefixes: Vec<String> =
-            valid_gene_ids.iter().map(|gid| gid.to_string()).collect();
+        // UTR name format: "GENE_ID_SYMBOL" or "GENE_ID" (see load_utrs).
+        // Match on the gene_id token before the first '_' against the expressed set.
+        let valid_ids: rustc_hash::FxHashSet<Box<str>> = valid_gene_ids
+            .iter()
+            .map(|gid| gid.to_string().into_boxed_str())
+            .collect();
         utrs.retain(|utr| {
-            // UTR name format: "GENE_ID_SYMBOL" or "GENE_ID"
-            valid_prefixes
-                .iter()
-                .any(|prefix| utr.name.starts_with(prefix.as_str()))
+            let gid = utr.name.split_once('_').map(|(g, _)| g).unwrap_or(&utr.name);
+            valid_ids.contains(gid)
         });
         info!(
             "filtered UTRs to expressed genes: {} -> {}",

@@ -502,6 +502,7 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
             &spliced_triplets,
             &unspliced_triplets,
             args.gene_min_cells,
+            args.gene_min_counts,
             args.cell_min_genes,
         );
 
@@ -518,8 +519,8 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
                 triplets
                     .into_par_iter()
                     .filter(|(cb, feat, _)| {
-                        let gk: Box<str> = extract_gene_key(feat).into();
-                        passing_genes.contains(&gk) && passing_cells.contains(cb)
+                        passing_genes.contains(extract_gene_key(feat))
+                            && passing_cells.contains(cb)
                     })
                     .collect()
             };
@@ -535,10 +536,12 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
             feature_to_index,
         } = collect_union_names(&spliced_triplets, &unspliced_triplets);
 
-        let backend_file = match args.backend {
-            SparseIoBackend::HDF5 => format!("{}/{}_genes.h5", &args.output, batch_name),
-            SparseIoBackend::Zarr => format!("{}/{}_genes.zarr", &args.output, batch_name),
-        };
+        let out = crate::pipeline_util::BackendOutputPath::new(
+            &args.output,
+            &format!("{}_genes", batch_name),
+            &args.backend,
+            args.zip,
+        );
 
         let merged: Vec<_> = spliced_triplets
             .into_iter()
@@ -552,11 +555,13 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
             row_names,
             col_names,
         )
-        .to_backend(&backend_file)?;
+        .to_backend(&out.write_path)?;
+
+        out.finalize()?;
 
         info!(
             "{}: wrote spliced + unspliced to {}",
-            batch_name, backend_file
+            batch_name, out.target_path
         );
 
         // Map passing gene keys back to GeneIds
@@ -776,6 +781,7 @@ fn run_apa_step(
         merge_beta_mult: 2.0,
         compute_pdui: true,
         gene_min_cells: args.gene_min_cells,
+        gene_min_counts: args.gene_min_counts,
         cell_min_genes: args.cell_min_genes,
         skip_gene_qc: true, // Pipeline already did gene QC in step 1
         valid_gene_ids,

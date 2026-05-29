@@ -475,6 +475,16 @@ pub struct DartSeqCountArgs {
     pub gene_min_cells: usize,
 
     #[arg(
+        long = "gene-min-counts",
+        default_value_t = 0,
+        help = "Min total UMI counts per gene for expression QC (0 disables)",
+        long_help = "Minimum total UMI counts (summed across all cells) for a gene\n\
+                     to pass QC. Genes below this threshold are excluded before\n\
+                     site discovery. 0 disables the threshold."
+    )]
+    pub gene_min_counts: usize,
+
+    #[arg(
         long = "cell-min-genes",
         default_value_t = 10,
         help = "Min genes per cell for expression QC",
@@ -609,6 +619,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             &args.cell_barcode_tag,
             &args.gene_barcode_tag,
             args.gene_min_cells,
+            args.gene_min_counts,
             args.cell_min_genes,
         )?;
         gff_map.retain_by_ids(&qc.gene_ids);
