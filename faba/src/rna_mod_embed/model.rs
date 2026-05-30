@@ -1,11 +1,11 @@
 //! Feature embedding by weighted pooling across modalities, plus
 //! per-level pb heads + per-cell head.
 //!
-//! Per the plan, an input feature row has identity (gene_id, modality_id)
-//! and embeds as:
+//! An input feature row has identity (gene_id, modality_id, region_id)
+//! and embeds via the exp log-deviation gate:
 //!
-//!     AGG row  ({g}/AGG/total):       e_f = ρ_g
-//!     comp row ({g}/{m}/{detail}):    e_f = ρ_g + Σ_k z_{g,k} · Q_{k,m,:}
+//!     AGG row  ({g}/AGG/total):       e_f = β_g
+//!     comp row ({g}/{m}/{detail}):    e_f = β_g ⊙ exp(Σ_k z_{g,k}·δ_{k,m,:} + γ_{m,r,:})
 //!
 //! Biases are per-(gene, AGG) or per-(gene, modality). The RHS of the
 //! bilinear `e_f · e_axis + b_f + b_axis` is one of:
@@ -15,13 +15,13 @@
 //!
 //! Composite-sum training (matches senna bge): each step sums the NCE
 //! loss across the cell axis and every pb level; a single AdamW
-//! `backward_step` updates every Var (ρ, z, Q, b_agg, b_comp, e_cell,
+//! `backward_step` updates every Var (β, z, δ, γ, b_agg, b_comp, e_cell,
 //! b_cell, e_pb_per_level, b_pb_per_level). The shared feature side
 //! gets gradient from every axis; each per-axis head accumulates only
 //! from its own draws.
 //!
 //! Pb-level heads are training scaffolding that feeds gradient into
-//! ρ/z/Q at coarser (lower-variance) resolution. They're **not**
+//! β/z/δ/γ at coarser (lower-variance) resolution. They're **not**
 //! written to disk — only `e_cell` is a deliverable, alongside
 //! `cell_to_pb.parquet` for downstream pb-level views.
 //!
@@ -33,12 +33,12 @@ use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Init, VarMap};
 
-/// Initialiser stdev for ρ, z, Q, E_p, E_cell. Match the order of
+/// Initialiser stdev for β, z, δ, γ, E_p, E_cell. Match the order of
 /// magnitude used in graph-embedding-util's `JointEmbedModel`.
 const PARAM_INIT_STD: f64 = 0.05;
 
 /// Which right-hand-side embedding table the bilinear scores against.
-/// The shared feature side (ρ, z, Q) is reused across all axes; only
+/// The shared feature side (β, z, δ, γ) is reused across all axes; only
 /// the pb/cell head varies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Axis {
@@ -51,6 +51,7 @@ pub enum Axis {
 pub struct RnaModEmbedModel {
     pub n_modalities: usize,
     pub n_programs: usize,
+    pub n_regions: usize,
     pub embedding_dim: usize,
     pub n_cells: usize,
     pub dev: Device,
@@ -61,9 +62,18 @@ pub struct RnaModEmbedModel {
     ////////////////////////////////////////
     // Feature params (shared across axes)
     ////////////////////////////////////////
-    pub rho: Tensor,    // [G, H] — gene's cell-space direction
-    pub z: Tensor,      // [G, K] — gene's K-program "mode" loadings
-    pub q: Tensor,      // [K, M] — program × modality scalar response (sim's A_{m,k})
+    pub beta: Tensor,  // [G, H] — base gene embedding (was `rho`)
+    pub z: Tensor,     // [G, K] — gene's K-program "mode" loadings
+    /// `[K, M, H]` — program × modality deviation **direction** (replaces
+    /// the old scalar `q [K, M]`). `δ_{k,m,:}` is a full H-vector, so a
+    /// program can push the satellite embedding in a new direction, not
+    /// just rescale β_g. Note the name collides with senna-ETM / GWAS /
+    /// APA β — distinct object, documented here only.
+    pub delta: Tensor,
+    /// `[M, R, H]` — additive per-(modality, region) log-space offset.
+    /// Region = transcript-position bin; lets two same-gene/same-modality
+    /// components in different regions diverge even at equal z.
+    pub gamma: Tensor,
     pub b_agg: Tensor,  // [G]
     pub b_comp: Tensor, // [G, M]
 
@@ -81,15 +91,18 @@ pub struct RnaModEmbedModel {
 }
 
 impl RnaModEmbedModel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         n_genes: usize,
         n_modalities: usize,
         n_programs: usize,
+        n_regions: usize,
         embedding_dim: usize,
         n_cells: usize,
         n_pbs_per_level: &[usize],
         dev: &Device,
     ) -> Result<Self> {
+        let n_regions = n_regions.max(1);
         let varmap = VarMap::new();
         let init_rand = Init::Randn {
             mean: 0.0,
@@ -97,14 +110,28 @@ impl RnaModEmbedModel {
         };
         let init_zero = Init::Const(0.0);
 
-        let rho = varmap.get((n_genes, embedding_dim), "rho", init_rand, DType::F32, dev)?;
+        let beta = varmap.get((n_genes, embedding_dim), "beta", init_rand, DType::F32, dev)?;
         let z = varmap.get((n_genes, n_programs), "z", init_rand, DType::F32, dev)?;
-        // Q is the program×modality scalar response: Q[k, m] tells how
-        // much program k drives modality m's gate. Shape (K, M) only —
-        // no H axis, because the gate is a scalar that uniformly scales
-        // ρ_g for the (g, m) row. See the "scalar gate" comment on
-        // `embed_rows` below.
-        let q = varmap.get((n_programs, n_modalities), "q", init_rand, DType::F32, dev)?;
+        // δ is the program×modality deviation *direction*: δ[k, m, :] is
+        // a full H-vector so program k can move the satellite embedding
+        // anywhere in H, not merely rescale β_g (the old scalar q). The
+        // exp gate (see `embed_and_bias_rows`) matches the simulator's
+        // generative `r_{g,m} ∝ exp(Σ_k z_{g,k} · A_{m,k,:})`.
+        let delta = varmap.get(
+            (n_programs, n_modalities, embedding_dim),
+            "delta",
+            init_rand,
+            DType::F32,
+            dev,
+        )?;
+        // γ[m, r, :] is the additive log-space region offset per modality.
+        let gamma = varmap.get(
+            (n_modalities, n_regions, embedding_dim),
+            "gamma",
+            init_rand,
+            DType::F32,
+            dev,
+        )?;
         let b_agg = varmap.get(n_genes, "b_agg", init_zero, DType::F32, dev)?;
         let b_comp = varmap.get(
             (n_genes, n_modalities),
@@ -142,13 +169,15 @@ impl RnaModEmbedModel {
         Ok(Self {
             n_modalities,
             n_programs,
+            n_regions,
             embedding_dim,
             n_cells,
             dev: dev.clone(),
             varmap,
-            rho,
+            beta,
             z,
-            q,
+            delta,
+            gamma,
             b_agg,
             b_comp,
             e_cell,
@@ -184,38 +213,40 @@ impl RnaModEmbedModel {
     }
 
     /// Feature-side embedding for a batch of rows. `gene_for_rho`
-    /// indexes ρ; `gene_for_z` indexes z (gene-mode loading);
-    /// `modality_for_q` selects the Q column. Positives and random
-    /// in-class negatives coincide on all three; swap-gene-mode swaps
-    /// `gene_for_z`. `is_agg` zeros the z·Q gate (AGG rows use ρ_g
-    /// unmodified).
+    /// indexes β (base gene embedding); `gene_for_z` indexes z (program
+    /// loadings); `modality_for_q` selects the δ / γ modality slice;
+    /// `region_for_delta` selects the γ region row. Positives and random
+    /// in-class negatives coincide on all of these; swap-gene-mode swaps
+    /// `gene_for_z`; swap-modality swaps `(modality_for_q,
+    /// region_for_delta)`. `is_agg` zeros the log-deviation gate (AGG
+    /// rows use β_g unmodified).
     ///
-    /// **Scalar multiplicative gate.** Component rows scale ρ_g by a
-    /// per-(g, m) scalar built from the (z, Q) factors:
+    /// **Exp log-deviation gate.** A satellite row deviates β_g by a
+    /// per-row H-vector built from (z, δ, γ):
     ///
-    ///     AGG row  ({g}/AGG/total):       e_f = ρ_g
-    ///     comp row ({g}/{m}/{detail}):    e_f = ρ_g · (1 + Σ_k z_{g,k} · Q_{k,m})
+    ///     AGG row  ({g}/AGG/total):     e_f = β_g
+    ///     comp row ({g}/{m}/{detail}):  e_f = β_g ⊙ exp(logdev_{g,m,r})
+    ///     logdev_{g,m,r} = Σ_k z_{g,k} · δ_{k,m,:} + γ_{m,r,:}
     ///
-    /// The "+1" makes the gate the identity at z = 0, so a fresh model
-    /// behaves like ρ_g on every row and modifier-row gradient flows
-    /// through ρ as well as through (z, Q). The gate is a *scalar*: it
-    /// uniformly scales every H-dim of ρ_g for that (g, m) row, so the
-    /// modifier embedding always points in ρ_g's direction but with
-    /// modality-specific magnitude. This is exactly the simulator's
-    /// generative form: `r_{g,m} ∝ exp(Σ_k z_{g,k} · A_{m,k})` with
-    /// scalar `A_{m,k}` — our `Q[k, m]` plays the role of `A`.
+    /// `exp(0) = 1` makes the gate the identity at z = 0, γ = 0, so a
+    /// fresh model behaves like β_g on every row and gradient still
+    /// flows through β. Unlike the old scalar gate, δ_{k,m,:} is a full
+    /// H-vector, so a program can move the satellite in a **new**
+    /// H-direction (not just rescale β_g's magnitude). exp(·) guarantees
+    /// positivity and matches the simulator's generative
+    /// `r ∝ exp(Σ z A)`. The additive γ_{m,r,:} resolves two same-gene
+    /// components sitting in different transcript regions.
+    ///
     /// Fused embed + bias for one slate. Builds the per-row `agg` /
     /// `not_agg` masks and the flat `b_comp` index tensor **once**, then
     /// reuses them for both the gate computation and the bias lookup.
-    /// Saves ~10 tensor ops per sub-batch vs calling `embed_rows` then
-    /// `bias_rows` separately (which each rebuild the masks and a
-    /// `Tensor::ones` then subtract).
     #[allow(clippy::too_many_arguments)]
     pub fn embed_and_bias_rows(
         &self,
         gene_for_rho: &[u32],
         gene_for_z: &[u32],
         modality_for_q: &[u32],
+        region_for_delta: &[u32],
         gene_for_bias: &[u32],
         modality_for_bias: &[u32],
         is_agg: &[bool],
@@ -223,6 +254,7 @@ impl RnaModEmbedModel {
         let b = gene_for_rho.len();
         debug_assert_eq!(gene_for_z.len(), b);
         debug_assert_eq!(modality_for_q.len(), b);
+        debug_assert_eq!(region_for_delta.len(), b);
         debug_assert_eq!(gene_for_bias.len(), b);
         debug_assert_eq!(modality_for_bias.len(), b);
         debug_assert_eq!(is_agg.len(), b);
@@ -230,19 +262,40 @@ impl RnaModEmbedModel {
         let (agg, not_agg) = self.agg_masks_f32(is_agg)?;
 
         // ── embedding side ──
+        let h = self.embedding_dim;
         let g_rho = self.idx_u32(gene_for_rho)?;
         let g_z = self.idx_u32(gene_for_z)?;
         let m_q = self.idx_u32(modality_for_q)?;
 
-        let rho_b = self.rho.index_select(&g_rho, 0)?; // [B, H]
+        let beta_b = self.beta.index_select(&g_rho, 0)?; // [B, H]
         let z_b = self.z.index_select(&g_z, 0)?; // [B, K]
-        let q_b = self.q.index_select(&m_q, 1)?.transpose(0, 1)?; // [B, K]
 
-        let zq = (z_b * q_b)?.sum(1)?; // [B]
-        let zq_masked = (zq * &not_agg)?; // [B] — scalar zero for AGG
-        let gate = (zq_masked + 1.0_f64)?; // [B]
-        let gate_h = gate.unsqueeze(1)?; // [B, 1]
-        let e = rho_b.broadcast_mul(&gate_h)?;
+        // Σ_k z_{g,k} · δ_{k,m,:}  →  [B, H].
+        // δ is [K, M, H]; gather the per-row modality slice δ[:, m, :]
+        // (index_select on dim 1 → [K, B, H]) then contract over K with
+        // z_b broadcast across H.
+        let delta_m = self.delta.index_select(&m_q, 1)?; // [K, B, H]
+        let delta_m = delta_m.transpose(0, 1)?; // [B, K, H]
+        let z_bk1 = z_b.unsqueeze(2)?; // [B, K, 1]
+        let z_delta = delta_m.broadcast_mul(&z_bk1)?.sum(1)?; // [B, H]
+
+        // γ_{m,r,:}  →  [B, H].  γ is [M, R, H]; flat-index by m*R + r.
+        let r_cols = self.n_regions as u32;
+        let gamma_flat_idx: Vec<u32> = modality_for_q
+            .iter()
+            .zip(region_for_delta.iter())
+            .map(|(&m, &r)| m * r_cols + r)
+            .collect();
+        let gamma_idx = Tensor::from_vec(gamma_flat_idx, b, &self.dev)?;
+        let gamma_b = self
+            .gamma
+            .reshape((self.n_modalities * self.n_regions, h))?
+            .index_select(&gamma_idx, 0)?; // [B, H]
+
+        let logdev = (z_delta + gamma_b)?; // [B, H]
+        // Zero the deviation for AGG rows → e_f = β_g exactly.
+        let logdev_masked = logdev.broadcast_mul(&not_agg.unsqueeze(1)?)?; // [B, H]
+        let e = (beta_b * logdev_masked.exp()?)?;
 
         // ── bias side (shares `agg` / `not_agg`) ──
         let m_cols = self.n_modalities as u32;

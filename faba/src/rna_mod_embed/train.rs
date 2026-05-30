@@ -2,7 +2,7 @@
 //!
 //! Every step assembles `L = L_cell + Σ_ℓ L_pb_ℓ` across one cell-axis
 //! minibatch + one minibatch per pb level, then runs **one** AdamW
-//! backward over the full VarMap. The shared feature side (ρ, z, Q,
+//! backward over the full VarMap. The shared feature side (β, z, δ, γ,
 //! b_agg, b_comp) accumulates gradient from every axis; each cell/pb
 //! head is independent. Per-level pb heads are throwaway scaffolding
 //! that exists only to provide an embedding target for the pb-axis
@@ -36,7 +36,7 @@ pub fn train(
     let sampler = SamplerState::new(table, pb, args);
     let mut rng = StdRng::seed_from_u64(args.seed);
 
-    // AdamW with zero weight decay — ρ, z, Q already carry many
+    // AdamW with zero weight decay — β, z, δ, γ already carry many
     // parameters and L2-like decay would pull everything toward zero
     // faster than the NCE signal can push them apart.
     let mut optim = AdamW::new(
@@ -116,16 +116,20 @@ pub fn train(
             let Some(mut loss) = total else {
                 continue;
             };
-            // Mean-normalized L2 penalties on (z, Q) — scale-invariant
+            // Mean-normalized L2 penalties on (z, δ) — scale-invariant
             // across G·K and K·M·H, so λ stays meaningful as model dims
             // grow. Matches senna bge's --feature-embedding-l2 style.
             if args.z_l2 > 0.0 {
                 let z_sq = model.z.sqr()?.mean_all()?;
                 loss = (loss + (z_sq * (args.z_l2 as f64))?)?;
             }
+            // Penalize the program×modality deviation δ (the old `q`
+            // L2, now over the [K,M,H] tensor). The region offset γ is
+            // left unpenalized — it carries the per-modality positional
+            // baseline we *want* to fit.
             if args.q_l2 > 0.0 {
-                let q_sq = model.q.sqr()?.mean_all()?;
-                loss = (loss + (q_sq * (args.q_l2 as f64))?)?;
+                let d_sq = model.delta.sqr()?.mean_all()?;
+                loss = (loss + (d_sq * (args.q_l2 as f64))?)?;
             }
             optim.backward_step(&loss)?;
             // One scalar fetch per minibatch — releases the graph too.

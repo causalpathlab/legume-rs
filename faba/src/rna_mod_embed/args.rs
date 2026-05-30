@@ -32,6 +32,29 @@ pub struct RnaModEmbedArgs {
     #[arg(long)]
     pub apa: Option<Box<str>>,
 
+    ////////////////////////////////////////
+    // Component annotations (region binning)
+    //
+    // The `*_components.parquet` sidecars emitted by `faba m6a` / `faba
+    // atoi` carry each GMM component's `mu` and `gene_length`. They feed
+    // the transcript-position region bin (`u = mu/gene_length`) used by
+    // the model's γ_{m,r,:} offset. The modality is inferred from the
+    // flag, matching the row's `{gene}/{modality}/{component}` name.
+    // Optional: a missing sidecar collapses that modality's γ to a
+    // single region.
+    ////////////////////////////////////////
+    /// `m6a_components.parquet` for the `--dartseq` (m6A) modality.
+    #[arg(long)]
+    pub dartseq_components: Option<Box<str>>,
+
+    /// `atoi_components.parquet` for the `--atoi` (A2I) modality.
+    #[arg(long)]
+    pub atoi_components: Option<Box<str>>,
+
+    /// Component annotation parquet for the `--apa` (pA) modality.
+    #[arg(long)]
+    pub apa_components: Option<Box<str>>,
+
     /// Optional batch-label files, one per modality input.
     #[arg(short = 'b', long, value_delimiter = ',')]
     pub batch_files: Option<Vec<Box<str>>>,
@@ -43,13 +66,20 @@ pub struct RnaModEmbedArgs {
     ////////////////////////////////////////
     // Model dims
     ////////////////////////////////////////
-    /// Embedding dimension H (size of ρ_g, Q_{k,m,:}).
+    /// Embedding dimension H (size of β_g, δ_{k,m,:}, γ_{m,r,:}).
     #[arg(long, default_value_t = 32)]
     pub embedding_dim: usize,
 
     /// Number of shared regulatory programs K.
     #[arg(long = "num-programs", default_value_t = 8)]
     pub n_programs: usize,
+
+    /// Number of transcript-position region bins R for the additive
+    /// γ_{m,r,:} offset. Components are binned by normalized 5'-relative
+    /// position `u = mu/gene_length`. R=1 collapses γ to one per-modality
+    /// offset (no positional resolution).
+    #[arg(long = "num-regions", default_value_t = 5)]
+    pub n_regions: usize,
 
     ////////////////////////////////////////
     // Pseudobulk collapse
@@ -74,7 +104,7 @@ pub struct RnaModEmbedArgs {
     pub ignore_batch: bool,
 
     /// Train only on the pseudobulk axes — skip the cell-axis loss.
-    /// For feature-embedding (ρ, z, Q) quality the pb axes carry the
+    /// For feature-embedding (β, z, δ, γ) quality the pb axes carry the
     /// dense, low-variance signal; the cell axis adds mostly Poisson
     /// noise on the modifier side. `e_cell` / `b_cell` still get
     /// allocated and written, but stay at their init values (zero bias,
@@ -191,16 +221,34 @@ pub struct RnaModEmbedArgs {
     ////////////////////////////////////////
     /// Random negatives: pick another (g', m, c) row within the
     /// positive's stratum and modality. Tests gene-cell identification
-    /// (ρ-side classification).
+    /// (β-side classification).
     #[arg(long, default_value_t = 10)]
     pub n_rand: usize,
 
-    /// Swap-gene-mode negatives: keep ρ_g and modality m fixed, but
-    /// substitute the K-program loading z from another gene g'. Tests
-    /// the gene's program-loading identity given the modality
+    /// Swap-gene-mode negatives: keep β_g and (modality m, region r)
+    /// fixed, but substitute the K-program loading z from another gene
+    /// g'. Tests the gene's program-loading identity given the modality
     /// (z-side classification). Was `--n-swap-z` previously.
     #[arg(long, default_value_t = 5, alias = "n-swap-z")]
     pub n_swap_gene_mode: usize,
+
+    /// Swap-modality negatives: keep (gene, cell) fixed but swap the
+    /// satellite's `(modality, region)` axis to a different one. Forces
+    /// δ/γ to keep each satellite distinguishable from the gene's base
+    /// and other modalities (prevents the deviation gate collapsing).
+    #[arg(long, default_value_t = 5)]
+    pub n_swap_modality: usize,
+
+    /// Weight satellite edges by the denoised modification fraction
+    /// `w = X·r·π` instead of the raw modified-count `w = X·π`. Per the
+    /// design's locked decision #2 this ships **model-side-first**: the
+    /// fraction path (Phase 4, requires per-component converted/
+    /// unconverted counts from the mixture pipeline) is not yet wired, so
+    /// the default is `false` (raw counts) and `true` currently has no
+    /// effect beyond a warning. Kept here so the CLI contract is stable
+    /// for when Phase 4 lands.
+    #[arg(long, default_value_t = false)]
+    pub use_modification_fraction: bool,
 
     ////////////////////////////////////////
     // Misc

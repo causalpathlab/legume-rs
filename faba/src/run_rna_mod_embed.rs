@@ -12,6 +12,7 @@ use crate::rna_mod_embed::feature_table::FeatureTable;
 use crate::rna_mod_embed::manifest::write_outputs;
 use crate::rna_mod_embed::model::RnaModEmbedModel;
 use crate::rna_mod_embed::pseudobulk::build_pseudobulk;
+use crate::rna_mod_embed::region::{load_component_annotations, ComponentAnnotation, RegionMap};
 use crate::rna_mod_embed::train::train;
 
 pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
@@ -83,11 +84,22 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
         unified.n_batches()
     );
 
-    let table = FeatureTable::build(&unified.feature_names);
+    if args.use_modification_fraction {
+        log::warn!(
+            "--use-modification-fraction=true is not yet wired (Phase 4); \
+             falling back to raw modified-count edge weights"
+        );
+    }
+
+    // Load component annotations (region binning). Modality labels must
+    // match the modifier row names emitted by faba m6a/atoi/apa.
+    let region_map = build_region_map(args)?;
+    let table = FeatureTable::build(&unified.feature_names, &region_map);
     info!(
-        "feature_table: {} genes, {} modalities, {} count-comp + {} modifier-comp rows",
+        "feature_table: {} genes, {} modalities, {} regions, {} count-comp + {} modifier-comp rows",
         table.n_genes(),
         table.n_modalities(),
+        table.n_regions,
         table.count_comp_rows.len(),
         table.modifier_comp_rows.len(),
     );
@@ -110,6 +122,7 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
         table.n_genes(),
         table.n_modalities(),
         args.n_programs,
+        table.n_regions,
         args.embedding_dim,
         n_cells,
         &n_pbs_per_level,
@@ -126,6 +139,29 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Load any supplied `*_components.parquet` sidecars and build the
+/// transcript-position `RegionMap`. Each sidecar is tagged with the
+/// modality label that matches its modifier row names (`m6A`, `A2I`,
+/// `pA`). With no sidecars the map is empty and every satellite falls
+/// back to region 0 (γ collapses to one per-modality offset).
+fn build_region_map(args: &RnaModEmbedArgs) -> anyhow::Result<RegionMap> {
+    let sidecars: [(&Option<Box<str>>, &str); 3] = [
+        (&args.dartseq_components, "m6A"),
+        (&args.atoi_components, "A2I"),
+        (&args.apa_components, "pA"),
+    ];
+    let mut records: Vec<ComponentAnnotation> = Vec::new();
+    for (path, modality) in sidecars {
+        if let Some(path) = path.as_ref() {
+            let recs = load_component_annotations(path, modality)
+                .with_context(|| format!("loading {modality} component annotations from {path}"))?;
+            info!("region: {} {} component annotations from {}", recs.len(), modality, path);
+            records.extend(recs);
+        }
+    }
+    Ok(RegionMap::from_records(&records, args.n_regions))
+}
+
 /// Argument-level sanity checks before any I/O or training. Surfaces
 /// configuration mistakes (zero-dim model, NaN/out-of-range tempering,
 /// stratum-fraction overflow) as a clear `anyhow::Error` rather than a
@@ -140,6 +176,11 @@ fn validate_args(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
         args.n_programs > 0,
         "--num-programs must be > 0 (got {})",
         args.n_programs
+    );
+    anyhow::ensure!(
+        args.n_regions > 0,
+        "--num-regions must be > 0 (got {})",
+        args.n_regions
     );
     anyhow::ensure!(
         args.tau.is_finite() && (0.0..=1.0).contains(&args.tau),
