@@ -33,6 +33,19 @@ pub struct PositiveSlate {
 }
 
 impl PositiveSlate {
+    fn with_capacity(cap: usize) -> Self {
+        PositiveSlate {
+            gene_for_rho: Vec::with_capacity(cap),
+            gene_for_z: Vec::with_capacity(cap),
+            modality_for_q: Vec::with_capacity(cap),
+            region_for_delta: Vec::with_capacity(cap),
+            gene_for_bias: Vec::with_capacity(cap),
+            modality_for_bias: Vec::with_capacity(cap),
+            is_agg: Vec::with_capacity(cap),
+            axis_id: Vec::with_capacity(cap),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.gene_for_rho.len()
     }
@@ -55,6 +68,27 @@ pub struct NegativeSlate {
 }
 
 impl NegativeSlate {
+    /// Empty `[B*k]` slate with capacity for `total` rows. `k` rides
+    /// along so the loss can reshape into `[B, k]`.
+    fn with_capacity(total: usize, k: usize) -> Self {
+        NegativeSlate {
+            gene_for_rho: Vec::with_capacity(total),
+            gene_for_z: Vec::with_capacity(total),
+            modality_for_q: Vec::with_capacity(total),
+            region_for_delta: Vec::with_capacity(total),
+            gene_for_bias: Vec::with_capacity(total),
+            modality_for_bias: Vec::with_capacity(total),
+            is_agg: Vec::with_capacity(total),
+            k,
+        }
+    }
+
+    /// Degenerate slate the loss path skips (k = 0). Used when a stratum
+    /// has no gene distinct from the positive.
+    fn empty() -> Self {
+        Self::with_capacity(0, 0)
+    }
+
     pub fn len(&self) -> usize {
         self.gene_for_rho.len()
     }
@@ -205,16 +239,7 @@ fn build_anchor_sub_batch<R: Rng>(
     args: &RnaModEmbedArgs,
     rng: &mut R,
 ) -> Option<SubBatch> {
-    let mut positives = PositiveSlate {
-        gene_for_rho: Vec::with_capacity(b_agg + b_count),
-        gene_for_z: Vec::with_capacity(b_agg + b_count),
-        modality_for_q: Vec::with_capacity(b_agg + b_count),
-        region_for_delta: Vec::with_capacity(b_agg + b_count),
-        gene_for_bias: Vec::with_capacity(b_agg + b_count),
-        modality_for_bias: Vec::with_capacity(b_agg + b_count),
-        is_agg: Vec::with_capacity(b_agg + b_count),
-        axis_id: Vec::with_capacity(b_agg + b_count),
-    };
+    let mut positives = PositiveSlate::with_capacity(b_agg + b_count);
 
     if let Some(dist) = dists.agg.as_ref() {
         for _ in 0..b_agg {
@@ -261,16 +286,7 @@ fn build_modifier_sub_batch<R: Rng>(
         return None;
     }
 
-    let mut positives = PositiveSlate {
-        gene_for_rho: Vec::with_capacity(b),
-        gene_for_z: Vec::with_capacity(b),
-        modality_for_q: Vec::with_capacity(b),
-        region_for_delta: Vec::with_capacity(b),
-        gene_for_bias: Vec::with_capacity(b),
-        modality_for_bias: Vec::with_capacity(b),
-        is_agg: Vec::with_capacity(b),
-        axis_id: Vec::with_capacity(b),
-    };
+    let mut positives = PositiveSlate::with_capacity(b);
 
     for _ in 0..b {
         let m_idx = mod_dist.sample(rng);
@@ -294,8 +310,7 @@ fn build_modifier_sub_batch<R: Rng>(
     let rand = draw_random_negatives(pools, dists, &positives, args.n_rand, rng);
     let swap_gene_mode =
         draw_swap_gene_mode_negatives(state, &positives, args.n_swap_gene_mode, rng);
-    let swap_modality =
-        draw_swap_modality_negatives(state, &positives, args.n_swap_modality, rng);
+    let swap_modality = draw_swap_modality_negatives(state, &positives, args.n_swap_modality, rng);
 
     Some(SubBatch {
         positives,
@@ -344,16 +359,7 @@ fn draw_random_negatives<R: Rng>(
 ) -> NegativeSlate {
     let b = positives.len();
     let total = b * k;
-    let mut out = NegativeSlate {
-        gene_for_rho: Vec::with_capacity(total),
-        gene_for_z: Vec::with_capacity(total),
-        modality_for_q: Vec::with_capacity(total),
-        region_for_delta: Vec::with_capacity(total),
-        gene_for_bias: Vec::with_capacity(total),
-        modality_for_bias: Vec::with_capacity(total),
-        is_agg: Vec::with_capacity(total),
-        k,
-    };
+    let mut out = NegativeSlate::with_capacity(total, k);
     if k == 0 {
         return out;
     }
@@ -382,7 +388,7 @@ fn draw_random_negatives<R: Rng>(
                 // e_f / b_f and corrupts the NCE softmax denominator,
                 // so drop the whole slate: the caller's loss path
                 // will skip score_negative_slate when k=0.
-                return empty_negative_slate();
+                return NegativeSlate::empty();
             };
             out.gene_for_rho.push(g_neg);
             out.gene_for_z.push(g_neg);
@@ -396,19 +402,6 @@ fn draw_random_negatives<R: Rng>(
         }
     }
     out
-}
-
-fn empty_negative_slate() -> NegativeSlate {
-    NegativeSlate {
-        gene_for_rho: Vec::new(),
-        gene_for_z: Vec::new(),
-        modality_for_q: Vec::new(),
-        region_for_delta: Vec::new(),
-        gene_for_bias: Vec::new(),
-        modality_for_bias: Vec::new(),
-        is_agg: Vec::new(),
-        k: 0,
-    }
 }
 
 fn pool_sample_distinct<R: Rng>(
@@ -444,17 +437,7 @@ fn draw_swap_gene_mode_negatives<R: Rng>(
         return None;
     }
     let b = positives.len();
-    let total = b * k;
-    let mut out = NegativeSlate {
-        gene_for_rho: Vec::with_capacity(total),
-        gene_for_z: Vec::with_capacity(total),
-        modality_for_q: Vec::with_capacity(total),
-        region_for_delta: Vec::with_capacity(total),
-        gene_for_bias: Vec::with_capacity(total),
-        modality_for_bias: Vec::with_capacity(total),
-        is_agg: Vec::with_capacity(total),
-        k,
-    };
+    let mut out = NegativeSlate::with_capacity(b * k, k);
     for i in 0..b {
         let g = positives.gene_for_rho[i];
         let m = positives.modality_for_q[i];
@@ -511,24 +494,18 @@ fn draw_swap_modality_negatives<R: Rng>(
         return None;
     }
 
+    // Region picker built once for the whole sub-batch (n_regions is
+    // constant), not per swap draw.
+    let region_dist = Uniform::new(0, n_regions).ok()?;
+
     let b = positives.len();
-    let total = b * k;
-    let mut out = NegativeSlate {
-        gene_for_rho: Vec::with_capacity(total),
-        gene_for_z: Vec::with_capacity(total),
-        modality_for_q: Vec::with_capacity(total),
-        region_for_delta: Vec::with_capacity(total),
-        gene_for_bias: Vec::with_capacity(total),
-        modality_for_bias: Vec::with_capacity(total),
-        is_agg: Vec::with_capacity(total),
-        k,
-    };
+    let mut out = NegativeSlate::with_capacity(b * k, k);
     for i in 0..b {
         let g = positives.gene_for_rho[i];
         let m = positives.modality_for_q[i];
         let r = positives.region_for_delta[i];
         for _ in 0..k {
-            let (m_prime, r_prime) = swap_pick_axis(mods, n_regions, m, r, rng)?;
+            let (m_prime, r_prime) = swap_pick_axis(mods, n_regions, &region_dist, m, r, rng)?;
             out.gene_for_rho.push(g);
             out.gene_for_z.push(g); // keep the gene's own program loading
             out.modality_for_q.push(m_prime);
@@ -546,19 +523,20 @@ fn draw_swap_modality_negatives<R: Rng>(
 
 /// Pick a satellite axis `(m', r')` distinct from `(m, r)` from the
 /// `modalities × 0..n_regions` grid. Rejection-samples, then falls back
-/// to a deterministic scan for the rare all-collision case.
+/// to a deterministic scan for the rare all-collision case. `region_dist`
+/// is built once by the caller (`0..n_regions`) and reused across draws.
 fn swap_pick_axis<R: Rng>(
     modalities: &[u32],
     n_regions: u32,
+    region_dist: &Uniform<u32>,
     exclude_m: u32,
     exclude_r: u32,
     rng: &mut R,
 ) -> Option<(u32, u32)> {
-    let region_dist = Uniform::new(0, n_regions).ok()?;
     for _ in 0..REJECT_RETRIES {
         let m = *modalities.choose(rng)?;
         let r = region_dist.sample(rng);
-        if m != exclude_m || r != exclude_r {
+        if (m, r) != (exclude_m, exclude_r) {
             return Some((m, r));
         }
     }

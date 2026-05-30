@@ -155,7 +155,12 @@ fn build_region_map(args: &RnaModEmbedArgs) -> anyhow::Result<RegionMap> {
         if let Some(path) = path.as_ref() {
             let recs = load_component_annotations(path, modality)
                 .with_context(|| format!("loading {modality} component annotations from {path}"))?;
-            info!("region: {} {} component annotations from {}", recs.len(), modality, path);
+            info!(
+                "region: {} {} component annotations from {}",
+                recs.len(),
+                modality,
+                path
+            );
             records.extend(recs);
         }
     }
