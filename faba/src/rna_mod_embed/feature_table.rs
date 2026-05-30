@@ -215,11 +215,7 @@ impl FeatureTable {
                     // Resolve the transcript-position region from the
                     // component annotation; un-annotated components fall
                     // back to region 0 (a valid γ index, masked nowhere).
-                    let region = regions.lookup(
-                        &key.gene,
-                        &key.modality,
-                        component.unwrap_or(0),
-                    );
+                    let region = regions.lookup(&key.gene, &key.modality, component.unwrap_or(0));
                     strata.push(Some(stratum));
                     row_gene.push(Some(gene_id));
                     row_modality.push(Some(modality_id));

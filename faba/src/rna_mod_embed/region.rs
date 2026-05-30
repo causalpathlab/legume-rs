@@ -104,7 +104,11 @@ impl RegionMap {
                 None => continue,
             };
             by_key.insert(
-                (rec.gene_name.clone(), rec.modality.clone(), rec.component_idx),
+                (
+                    rec.gene_name.clone(),
+                    rec.modality.clone(),
+                    rec.component_idx,
+                ),
                 region,
             );
         }
@@ -112,9 +116,9 @@ impl RegionMap {
     }
 
     /// Empty map (no annotations): every lookup falls back to region 0.
-    /// Used when no `*_components.parquet` is supplied, collapsing
-    /// `γ_{m,r,:}` to a single per-modality offset.
-    #[allow(dead_code)] // used by tests; also a stable public helper
+    /// Equivalent to `from_records(&[], n_regions)`; the production path
+    /// uses that form, so this is a test-only convenience.
+    #[cfg(test)]
     pub fn empty(n_regions: usize) -> Self {
         Self {
             n_regions: n_regions.max(1),

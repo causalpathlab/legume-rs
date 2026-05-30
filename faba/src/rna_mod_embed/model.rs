@@ -62,8 +62,8 @@ pub struct RnaModEmbedModel {
     ////////////////////////////////////////
     // Feature params (shared across axes)
     ////////////////////////////////////////
-    pub beta: Tensor,  // [G, H] — base gene embedding (was `rho`)
-    pub z: Tensor,     // [G, K] — gene's K-program "mode" loadings
+    pub beta: Tensor, // [G, H] — base gene embedding (was `rho`)
+    pub z: Tensor,    // [G, K] — gene's K-program "mode" loadings
     /// `[K, M, H]` — program × modality deviation **direction** (replaces
     /// the old scalar `q [K, M]`). `δ_{k,m,:}` is a full H-vector, so a
     /// program can push the satellite embedding in a new direction, not
@@ -293,7 +293,7 @@ impl RnaModEmbedModel {
             .index_select(&gamma_idx, 0)?; // [B, H]
 
         let logdev = (z_delta + gamma_b)?; // [B, H]
-        // Zero the deviation for AGG rows → e_f = β_g exactly.
+                                           // Zero the deviation for AGG rows → e_f = β_g exactly.
         let logdev_masked = logdev.broadcast_mul(&not_agg.unsqueeze(1)?)?; // [B, H]
         let e = (beta_b * logdev_masked.exp()?)?;
 

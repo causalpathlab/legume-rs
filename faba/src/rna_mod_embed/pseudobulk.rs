@@ -290,19 +290,24 @@ fn temper(c: f32, tau: f32) -> f32 {
     }
 }
 
-/// Anchor strata (agg / count-comp): keyed by (gene, axis), region
-/// sentinel 0 (the model masks their gate to exp(0)).
-fn anchor_pool_from_map(map: FxHashMap<(u32, u32), f32>, tau: f32) -> StratumPool {
-    let n = map.len();
-    let mut gene_ids = Vec::with_capacity(n);
-    let mut axis_ids = Vec::with_capacity(n);
-    let mut region_ids = Vec::with_capacity(n);
-    let mut counts = Vec::with_capacity(n);
-    let mut weights = Vec::with_capacity(n);
-    for ((g, aid), c) in map {
+/// Assemble a `StratumPool` from `(gene, axis, region, count)` entries,
+/// τ-tempering the weights. Both anchor and satellite builders feed this
+/// — they differ only in how they extract gene/axis/region from their
+/// map key.
+fn pool_from_entries(
+    n_hint: usize,
+    tau: f32,
+    entries: impl Iterator<Item = (u32, u32, u32, f32)>,
+) -> StratumPool {
+    let mut gene_ids = Vec::with_capacity(n_hint);
+    let mut axis_ids = Vec::with_capacity(n_hint);
+    let mut region_ids = Vec::with_capacity(n_hint);
+    let mut counts = Vec::with_capacity(n_hint);
+    let mut weights = Vec::with_capacity(n_hint);
+    for (g, aid, region, c) in entries {
         gene_ids.push(g);
         axis_ids.push(aid);
-        region_ids.push(0);
+        region_ids.push(region);
         counts.push(c);
         weights.push(temper(c, tau));
     }
@@ -315,6 +320,13 @@ fn anchor_pool_from_map(map: FxHashMap<(u32, u32), f32>, tau: f32) -> StratumPoo
     }
 }
 
+/// Anchor strata (agg / count-comp): keyed by (gene, axis), region
+/// sentinel 0 (the model masks their gate to exp(0)).
+fn anchor_pool_from_map(map: FxHashMap<(u32, u32), f32>, tau: f32) -> StratumPool {
+    let n = map.len();
+    pool_from_entries(n, tau, map.into_iter().map(|((g, aid), c)| (g, aid, 0, c)))
+}
+
 /// Satellite stratum (modifier-comp): keyed by (gene, component, axis);
 /// each entry carries the component's transcript-position region from
 /// the side map (default 0 when un-annotated).
@@ -324,23 +336,12 @@ fn satellite_pool_from_map(
     tau: f32,
 ) -> StratumPool {
     let n = map.len();
-    let mut gene_ids = Vec::with_capacity(n);
-    let mut axis_ids = Vec::with_capacity(n);
-    let mut region_ids = Vec::with_capacity(n);
-    let mut counts = Vec::with_capacity(n);
-    let mut weights = Vec::with_capacity(n);
-    for ((g, comp, aid), c) in map {
-        gene_ids.push(g);
-        axis_ids.push(aid);
-        region_ids.push(region_map.get(&(g, comp)).copied().unwrap_or(0));
-        counts.push(c);
-        weights.push(temper(c, tau));
-    }
-    StratumPool {
-        gene_ids,
-        axis_ids,
-        region_ids,
-        counts,
-        weights,
-    }
+    pool_from_entries(
+        n,
+        tau,
+        map.into_iter().map(|((g, comp, aid), c)| {
+            let region = region_map.get(&(g, comp)).copied().unwrap_or(0);
+            (g, aid, region, c)
+        }),
+    )
 }
