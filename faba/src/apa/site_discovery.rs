@@ -1,5 +1,5 @@
 use crate::apa::fragment::FragmentRecord;
-use crate::apa::kernel_smooth::*;
+use crate::mixture::kernel_smooth::*;
 use rustc_hash::FxHashMap as HashMap;
 
 /// Discover candidate pA sites from junction reads in fragment records.

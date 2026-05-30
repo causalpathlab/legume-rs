@@ -199,11 +199,12 @@ pub struct AtoICountArgs {
     pub mixture_max_k: usize,
 
     #[arg(
-        long = "mixture-initial-sigma",
+        long = "mixture-bandwidth",
+        alias = "mixture-initial-sigma",
         default_value_t = 0.0,
-        help = "Initial sigma, or 0 for auto"
+        help = "Gaussian bandwidth (nt) for component calling; 0 = auto (data-derived)"
     )]
-    pub mixture_initial_sigma: f32,
+    pub mixture_bandwidth: f32,
 
     #[arg(
         long = "drop-single-component",
@@ -418,7 +419,7 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
         let mix_params = MixtureParams {
             min_sites: args.mixture_min_sites,
             max_k: args.mixture_max_k,
-            initial_sigma: args.mixture_initial_sigma,
+            bandwidth: args.mixture_bandwidth,
             drop_single_component: args.drop_single_component,
             ..Default::default()
         };

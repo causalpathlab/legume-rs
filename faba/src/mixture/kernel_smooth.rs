@@ -1,3 +1,9 @@
+//! Shared 1-D kernel smoothing + mode/valley finding.
+//!
+//! Used by both the APA pipeline (poly-A site discovery from coverage) and the
+//! editing pipeline (bandwidth-first m6A / A-to-I component calling). Kept in
+//! `mixture` so neither modality-specific module has to depend on the other.
+
 /// Gaussian kernel smoothing of a 1D signal, replacing R's ksmooth.
 ///
 /// * `x` - positions (sorted)
@@ -65,6 +71,7 @@ pub fn find_valleys(y: &[f32]) -> Vec<usize> {
 
 /// Compute a coverage histogram from fragment positions.
 /// Returns (positions, counts) at the given resolution.
+#[allow(dead_code)]
 pub fn coverage_histogram(
     positions: &[f32],
     utr_length: f32,
