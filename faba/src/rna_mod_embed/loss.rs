@@ -52,6 +52,7 @@ fn sub_batch_loss(model: &RnaModEmbedModel, axis: Axis, sub: &SubBatch) -> Resul
         &pos.gene_for_rho,
         &pos.gene_for_z,
         &pos.modality_for_q,
+        &pos.region_for_delta,
         &pos.gene_for_bias,
         &pos.modality_for_bias,
         &pos.is_agg,
@@ -67,6 +68,11 @@ fn sub_batch_loss(model: &RnaModEmbedModel, axis: Axis, sub: &SubBatch) -> Resul
         neg_blocks.push(block);
     }
     if let Some(slate) = sub.swap_gene_mode.as_ref() {
+        if let Some(block) = score_negative_slate(model, axis, &pos.axis_id, slate)? {
+            neg_blocks.push(block);
+        }
+    }
+    if let Some(slate) = sub.swap_modality.as_ref() {
         if let Some(block) = score_negative_slate(model, axis, &pos.axis_id, slate)? {
             neg_blocks.push(block);
         }
@@ -115,6 +121,7 @@ fn score_negative_slate(
         &slate.gene_for_rho,
         &slate.gene_for_z,
         &slate.modality_for_q,
+        &slate.region_for_delta,
         &slate.gene_for_bias,
         &slate.modality_for_bias,
         &slate.is_agg,

@@ -2,13 +2,15 @@
 //! input rows into AGG / count-comp / modifier-comp / site, and builds
 //! the compact (gene_id, modality_id) row identity used by the model.
 //!
-//! Per the embedding rule `e_f = ρ_g · (1 + Σ_k z_{g,k} · Q_{k,m})`,
+//! Per the embedding rule `e_f = β_g ⊙ exp(Σ_k z_{g,k}·δ_{k,m,:} + γ_{m,r,:})`,
 //! every component row within a (g, m) pair shares the same e_f and the
 //! same per-row bias b_f. So the model never sees raw row indices —
 //! everything goes through (gene_id, Option<modality_id>), where `None`
 //! tags the virtual AGG row.
 
 use rustc_hash::FxHashMap;
+
+use super::region::RegionMap;
 
 /// Parsed feature-name parts. Owned `Box<str>` so the parsed value can
 /// outlive the source string slice.
@@ -87,6 +89,15 @@ pub fn classify(key: &FeatureKey) -> RowStratum {
     }
 }
 
+/// Parse the GMM component index from a modifier row's detail. The
+/// mixture pipeline emits `{gene}/{mod}/{new_idx}` with a plain integer
+/// component index, so the common case is `"0".parse()`. Returns `None`
+/// for non-integer details (e.g. `comp_1`, `spliced`), which then fall
+/// back to region 0 at lookup time.
+pub fn parse_component_idx(detail: &str) -> Option<u32> {
+    detail.parse::<u32>().ok()
+}
+
 /// Compact-id view of all input rows.
 pub struct FeatureTable {
     /// Stratum per input row (`None` ⇒ unparseable / dropped).
@@ -97,11 +108,22 @@ pub struct FeatureTable {
     /// `modality_id` → modality name. Slot 0 is always `"count"`.
     pub modality_names: Vec<Box<str>>,
 
+    /// Number of transcript-position region bins R. `region_id ∈ 0..R`.
+    pub n_regions: usize,
+
     /// Per input row: `(gene_id, modality_id)` once classified into a
     /// CountComp or ModifierComp stratum. `None` for Site or
     /// unparseable rows.
     pub row_gene: Vec<Option<u32>>,
     pub row_modality: Vec<Option<u32>>,
+    /// Per modifier-comp row: GMM component index parsed from the detail
+    /// (`None` for count-comp / non-integer details).
+    pub row_component: Vec<Option<u32>>,
+    /// Per modifier-comp row: transcript-position region bin, resolved
+    /// via the `RegionMap` from `(gene, modality, component)`. `None`
+    /// for count-comp / Site / unparseable rows; satellite rows that
+    /// miss the annotation default to region 0.
+    pub row_region: Vec<Option<u32>>,
 
     /// Input row IDs in each loss-participating stratum.
     pub count_comp_rows: Vec<u32>,
@@ -127,8 +149,9 @@ impl FeatureTable {
 
     /// Classify the unified feature axis into row strata + compact ids.
     /// Modality 0 is forced to be `"count"` so AGG rows always reduce to
-    /// "sum of modality-0 components".
-    pub fn build(feature_names: &[Box<str>]) -> Self {
+    /// "sum of modality-0 components". `regions` resolves each modifier
+    /// component to a transcript-position region bin.
+    pub fn build(feature_names: &[Box<str>], regions: &RegionMap) -> Self {
         let n = feature_names.len();
 
         let mut gene_to_id: FxHashMap<Box<str>, u32> = FxHashMap::default();
@@ -142,6 +165,8 @@ impl FeatureTable {
         let mut strata = Vec::with_capacity(n);
         let mut row_gene = Vec::with_capacity(n);
         let mut row_modality = Vec::with_capacity(n);
+        let mut row_component: Vec<Option<u32>> = Vec::with_capacity(n);
+        let mut row_region: Vec<Option<u32>> = Vec::with_capacity(n);
 
         let mut count_comp_rows = Vec::new();
         let mut modifier_comp_rows = Vec::new();
@@ -151,6 +176,8 @@ impl FeatureTable {
                 strata.push(None);
                 row_gene.push(None);
                 row_modality.push(None);
+                row_component.push(None);
+                row_region.push(None);
                 continue;
             };
 
@@ -170,6 +197,8 @@ impl FeatureTable {
                     strata.push(Some(stratum));
                     row_gene.push(Some(gene_id));
                     row_modality.push(Some(0));
+                    row_component.push(None);
+                    row_region.push(None);
                     count_comp_rows.push(row as u32);
                 }
                 RowStratum::ModifierComp => {
@@ -182,9 +211,20 @@ impl FeatureTable {
                             id
                         }
                     };
+                    let component = parse_component_idx(&key.detail);
+                    // Resolve the transcript-position region from the
+                    // component annotation; un-annotated components fall
+                    // back to region 0 (a valid γ index, masked nowhere).
+                    let region = regions.lookup(
+                        &key.gene,
+                        &key.modality,
+                        component.unwrap_or(0),
+                    );
                     strata.push(Some(stratum));
                     row_gene.push(Some(gene_id));
                     row_modality.push(Some(modality_id));
+                    row_component.push(component);
+                    row_region.push(Some(region));
                     modifier_comp_rows.push(row as u32);
                 }
                 RowStratum::Site => {
@@ -199,6 +239,8 @@ impl FeatureTable {
                     strata.push(Some(stratum));
                     row_gene.push(Some(gene_id));
                     row_modality.push(modality_to_id.get(&key.modality).copied());
+                    row_component.push(None);
+                    row_region.push(None);
                 }
             }
         }
@@ -224,10 +266,13 @@ impl FeatureTable {
 
         Self {
             strata,
+            n_regions: regions.n_regions,
             gene_names,
             modality_names,
             row_gene,
             row_modality,
+            row_component,
+            row_region,
             count_comp_rows,
             modifier_comp_rows,
             modifier_rows_by_modality,
@@ -300,7 +345,7 @@ mod tests {
         .map(|s| (*s).into())
         .collect();
 
-        let tab = FeatureTable::build(&names);
+        let tab = FeatureTable::build(&names, &RegionMap::empty(5));
         assert_eq!(tab.n_genes(), 3); // geneA, geneB, geneC
         assert!(tab.modality_names.iter().any(|m| &**m == "count"));
         assert!(tab.modality_names.iter().any(|m| &**m == "m6A"));

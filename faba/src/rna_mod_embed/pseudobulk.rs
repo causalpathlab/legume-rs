@@ -10,12 +10,12 @@
 //!      counts for each stratum at every requested axis: the cell axis
 //!      (identity partition; one unit per cell) and each pb level.
 //!      All component rows within a (g, m) pair share an embedding
-//!      (e_{g,m} = ρ_g + Σ_k z_{g,k} · Q_{k,m,:}), so per-gene aggregation
+//!      (e_{g,m,r} = β_g ⊙ exp(Σ_k z_{g,k}·δ_{k,m,:} + γ_{m,r,:})), so aggregation
 //!      loses nothing for sampling and dedupes work.
 //!
 //! The two-stage trainer uses the pb axes for stage 1 (curriculum
-//! training of ρ/z/Q with lower-variance pb signal) and the cell axis
-//! for stage 2 (refining e_cell with ρ/z/Q frozen).
+//! training of β/z/δ/γ with lower-variance pb signal) and the cell axis
+//! for stage 2 (refining e_cell with β/z/δ/γ frozen).
 
 use anyhow::Context;
 use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, MultilevelParams};
@@ -35,6 +35,12 @@ use super::feature_table::{FeatureTable, RowStratum};
 pub struct StratumPool {
     pub gene_ids: Vec<u32>,
     pub axis_ids: Vec<u32>,
+    /// Transcript-position region bin per pool entry. Anchor strata
+    /// (agg / count-comp) use region 0 as a sentinel — the model masks
+    /// their log-deviation gate to exp(0) regardless. Satellite
+    /// (modifier-comp) entries carry the real `region(component)`, so
+    /// two same-gene components in different regions stay distinct.
+    pub region_ids: Vec<u32>,
     pub counts: Vec<f32>,
     pub weights: Vec<f32>,
 }
@@ -213,10 +219,15 @@ fn aggregate_pools(
     n_modalities: usize,
     tau: f32,
 ) -> AxisPools {
-    // Accumulators keyed by (gene_id, axis_id).
+    // Anchor accumulators keyed by (gene_id, axis_id) — region-agnostic.
     let mut count_comp: FxHashMap<(u32, u32), f32> = FxHashMap::default();
     let mut agg: FxHashMap<(u32, u32), f32> = FxHashMap::default();
-    let mut modifier_by_mod: Vec<FxHashMap<(u32, u32), f32>> =
+    // Satellite accumulators keyed by (gene_id, component, axis_id) so
+    // two same-gene components stay distinct pool entries. A side map
+    // records each (gene, component)'s region for the emitted pool.
+    let mut modifier_by_mod: Vec<FxHashMap<(u32, u32, u32), f32>> =
+        (0..n_modalities).map(|_| FxHashMap::default()).collect();
+    let mut modifier_region: Vec<FxHashMap<(u32, u32), u32>> =
         (0..n_modalities).map(|_| FxHashMap::default()).collect();
 
     for t in &unified.triplets {
@@ -235,18 +246,25 @@ fn aggregate_pools(
             }
             RowStratum::ModifierComp => {
                 if let Some(m) = table.row_modality[row] {
-                    *modifier_by_mod[m as usize].entry((g, aid)).or_insert(0.0) += t.count;
+                    let comp = table.row_component[row].unwrap_or(0);
+                    let region = table.row_region[row].unwrap_or(0);
+                    *modifier_by_mod[m as usize]
+                        .entry((g, comp, aid))
+                        .or_insert(0.0) += t.count;
+                    modifier_region[m as usize].insert((g, comp), region);
                 }
             }
             RowStratum::Site => {}
         }
     }
 
-    let count_comp = pool_from_map(count_comp, tau);
-    let agg = pool_from_map(agg, tau);
+    // Anchor pools: region sentinel 0 (masked in the model).
+    let count_comp = anchor_pool_from_map(count_comp, tau);
+    let agg = anchor_pool_from_map(agg, tau);
     let modifier_comp_per_modality: Vec<StratumPool> = modifier_by_mod
         .into_iter()
-        .map(|m| pool_from_map(m, tau))
+        .zip(modifier_region)
+        .map(|(m, region_map)| satellite_pool_from_map(m, &region_map, tau))
         .collect();
     let modality_total_mass: Vec<f32> = modifier_comp_per_modality
         .iter()
@@ -262,23 +280,66 @@ fn aggregate_pools(
     }
 }
 
-fn pool_from_map(map: FxHashMap<(u32, u32), f32>, tau: f32) -> StratumPool {
+/// τ-tempered sampling weight. τ=1 → strict count-prop; τ=0 → uniform
+/// over rows with non-zero mass.
+fn temper(c: f32, tau: f32) -> f32 {
+    if c > 0.0 {
+        c.powf(tau)
+    } else {
+        0.0
+    }
+}
+
+/// Anchor strata (agg / count-comp): keyed by (gene, axis), region
+/// sentinel 0 (the model masks their gate to exp(0)).
+fn anchor_pool_from_map(map: FxHashMap<(u32, u32), f32>, tau: f32) -> StratumPool {
     let n = map.len();
     let mut gene_ids = Vec::with_capacity(n);
     let mut axis_ids = Vec::with_capacity(n);
+    let mut region_ids = Vec::with_capacity(n);
     let mut counts = Vec::with_capacity(n);
     let mut weights = Vec::with_capacity(n);
     for ((g, aid), c) in map {
         gene_ids.push(g);
         axis_ids.push(aid);
+        region_ids.push(0);
         counts.push(c);
-        // τ-tempered sampling weight. τ=1 → strict count-prop;
-        // τ=0 → uniform over rows with non-zero mass.
-        weights.push(if c > 0.0 { c.powf(tau) } else { 0.0 });
+        weights.push(temper(c, tau));
     }
     StratumPool {
         gene_ids,
         axis_ids,
+        region_ids,
+        counts,
+        weights,
+    }
+}
+
+/// Satellite stratum (modifier-comp): keyed by (gene, component, axis);
+/// each entry carries the component's transcript-position region from
+/// the side map (default 0 when un-annotated).
+fn satellite_pool_from_map(
+    map: FxHashMap<(u32, u32, u32), f32>,
+    region_map: &FxHashMap<(u32, u32), u32>,
+    tau: f32,
+) -> StratumPool {
+    let n = map.len();
+    let mut gene_ids = Vec::with_capacity(n);
+    let mut axis_ids = Vec::with_capacity(n);
+    let mut region_ids = Vec::with_capacity(n);
+    let mut counts = Vec::with_capacity(n);
+    let mut weights = Vec::with_capacity(n);
+    for ((g, comp, aid), c) in map {
+        gene_ids.push(g);
+        axis_ids.push(aid);
+        region_ids.push(region_map.get(&(g, comp)).copied().unwrap_or(0));
+        counts.push(c);
+        weights.push(temper(c, tau));
+    }
+    StratumPool {
+        gene_ids,
+        axis_ids,
+        region_ids,
         counts,
         weights,
     }

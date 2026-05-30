@@ -28,17 +28,21 @@ pub struct RnaModEmbedManifest {
     pub embedding_dim: usize,
     pub n_programs: usize,
     pub n_modalities: usize,
+    pub n_regions: usize,
     pub n_cells: usize,
     pub feature_convention: String,
 
-    /// ρ_g — `[G × H]` matrix; first column = gene name.
+    /// β_g — `[G × H]` base gene embedding; first column = gene name.
     pub gene_embedding: String,
     /// z_g — `[G × K]` matrix; first column = gene name. (Mode B only.)
     pub gene_program_loadings: String,
-    /// Q — wide format, rows = K programs, columns = M modalities.
-    /// Each entry Q[k, m] is a scalar program-modality response (the
-    /// sim's `A_{m, k}` analog). (Mode B only.)
-    pub program_signatures: String,
+    /// δ — long format `[(K·M) × H]`; row name `program_{k}/modality_{m}`.
+    /// `δ_{k,m,:}` is the program×modality deviation **direction**
+    /// (replaces the old scalar Q). (Mode B only.)
+    pub program_modality_deviation: String,
+    /// γ — long format `[(M·R) × H]`; row name `modality_{m}/region_{r}`.
+    /// Additive per-(modality, region) log-space offset. (Mode B only.)
+    pub modality_region_offset: String,
     /// `[M × 2]` (modality_id, modality_name) lookup.
     pub modality_axis: String,
     /// `[G × M]` binary measured mask.
@@ -70,7 +74,8 @@ pub fn write_outputs(
 ) -> Result<()> {
     let path_gene_emb = format!("{prefix}.gene_embedding.parquet");
     let path_z = format!("{prefix}.gene_program_loadings.parquet");
-    let path_q = format!("{prefix}.program_signatures.parquet");
+    let path_delta = format!("{prefix}.program_modality_deviation.parquet");
+    let path_gamma = format!("{prefix}.modality_region_offset.parquet");
     let path_mod_axis = format!("{prefix}.modality_axis.parquet");
     let path_measured = format!("{prefix}.measured_mask.parquet");
     let path_agg_bias = format!("{prefix}.agg_bias.parquet");
@@ -87,8 +92,8 @@ pub fn write_outputs(
         .map(|k| format!("program_{k}").into_boxed_str())
         .collect();
 
-    // ρ_g
-    let rho = tensor_to_dmatrix2(&model.rho)?;
+    // β_g
+    let rho = tensor_to_dmatrix2(&model.beta)?;
     rho.to_parquet_with_names(
         &path_gene_emb,
         (Some(&table.gene_names), Some("gene")),
@@ -105,17 +110,45 @@ pub fn write_outputs(
     )
     .with_context(|| format!("writing {path_z}"))?;
 
-    // Q in wide format: rows = K programs, columns = M modalities.
-    // Each entry Q[k, m] is the scalar program-modality response in the
-    // simulator's `A_{m, k}` sense.
-    let q_mat = tensor_to_dmatrix2(&model.q)?;
-    q_mat
+    // δ in long format: rows = (K programs × M modalities), columns = H
+    // dims. Row name `program_{k}/modality_{m}`; entry is the deviation
+    // direction δ_{k,m,:}.
+    let k = model.n_programs;
+    let m = model.n_modalities;
+    let r = model.n_regions;
+    let h = model.embedding_dim;
+    let delta_mat = tensor_to_dmatrix2(&model.delta.reshape((k * m, h))?)?;
+    let delta_row_names: Vec<Box<str>> = (0..k)
+        .flat_map(|kk| {
+            table
+                .modality_names
+                .iter()
+                .map(move |mn| format!("program_{kk}/{mn}").into_boxed_str())
+        })
+        .collect();
+    delta_mat
         .to_parquet_with_names(
-            &path_q,
-            (Some(&prog_names), Some("program")),
-            Some(&table.modality_names),
+            &path_delta,
+            (Some(&delta_row_names), Some("program_modality")),
+            Some(&dim_names),
         )
-        .with_context(|| format!("writing {path_q}"))?;
+        .with_context(|| format!("writing {path_delta}"))?;
+
+    // γ in long format: rows = (M modalities × R regions), columns = H
+    // dims. Row name `{modality}/region_{r}`.
+    let gamma_mat = tensor_to_dmatrix2(&model.gamma.reshape((m * r, h))?)?;
+    let gamma_row_names: Vec<Box<str>> = table
+        .modality_names
+        .iter()
+        .flat_map(|mn| (0..r).map(move |rr| format!("{mn}/region_{rr}").into_boxed_str()))
+        .collect();
+    gamma_mat
+        .to_parquet_with_names(
+            &path_gamma,
+            (Some(&gamma_row_names), Some("modality_region")),
+            Some(&dim_names),
+        )
+        .with_context(|| format!("writing {path_gamma}"))?;
 
     // modality_axis: row = modality_id (0..M-1), single column = modality_name.
     write_modality_axis(&table.modality_names, &path_mod_axis)?;
@@ -178,11 +211,13 @@ pub fn write_outputs(
         embedding_dim: model.embedding_dim,
         n_programs: model.n_programs,
         n_modalities: model.n_modalities,
+        n_regions: model.n_regions,
         n_cells: model.n_cells,
         feature_convention: FEATURE_CONVENTION.into(),
         gene_embedding: path_gene_emb,
         gene_program_loadings: path_z,
-        program_signatures: path_q,
+        program_modality_deviation: path_delta,
+        modality_region_offset: path_gamma,
         modality_axis: path_mod_axis,
         measured_mask: path_measured,
         cell_embedding: path_cell_emb,

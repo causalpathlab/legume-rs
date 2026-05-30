@@ -6,7 +6,7 @@
 //! axis** (cell + each pb level). `draw_minibatch(axis, ...)` dispatches
 //! to the right pool. Used by stage 1 (pb axes) and stage 2 (cell axis).
 
-use rand::distr::{weighted::WeightedIndex, Distribution};
+use rand::distr::{weighted::WeightedIndex, Distribution, Uniform};
 use rand::seq::IndexedRandom;
 use rand::Rng;
 
@@ -16,12 +16,15 @@ use super::model::Axis;
 use super::pseudobulk::{AxisPools, PseudobulkData, StratumPool};
 
 /// Per-positive identity. Positives have `gene_for_rho == gene_for_z`;
-/// negatives may decouple them (swap-z) or carry a different
-/// `modality_for_q` (swap-Q).
+/// negatives may decouple them (swap-z), carry a different
+/// `modality_for_q` (swap-modality), etc.
 pub struct PositiveSlate {
     pub gene_for_rho: Vec<u32>,
     pub gene_for_z: Vec<u32>,
     pub modality_for_q: Vec<u32>,
+    /// Transcript-position region selecting γ_{m,r,:}. Anchor rows carry
+    /// the sentinel 0 (masked in the model).
+    pub region_for_delta: Vec<u32>,
     pub gene_for_bias: Vec<u32>,
     pub modality_for_bias: Vec<u32>,
     pub is_agg: Vec<bool>,
@@ -44,6 +47,7 @@ pub struct NegativeSlate {
     pub gene_for_rho: Vec<u32>,
     pub gene_for_z: Vec<u32>,
     pub modality_for_q: Vec<u32>,
+    pub region_for_delta: Vec<u32>,
     pub gene_for_bias: Vec<u32>,
     pub modality_for_bias: Vec<u32>,
     pub is_agg: Vec<bool>,
@@ -59,9 +63,13 @@ impl NegativeSlate {
 pub struct SubBatch {
     pub positives: PositiveSlate,
     pub rand: NegativeSlate,
-    /// Swap-gene-mode negatives: keep ρ_g and modality m; borrow z from
-    /// another gene. Tests the gene's K-program loading.
+    /// Swap-gene-mode negatives: keep β_g and (modality m, region r);
+    /// borrow z from another gene. Tests the gene's K-program loading.
     pub swap_gene_mode: Option<NegativeSlate>,
+    /// Swap-modality negatives: keep (gene, cell); swap the (modality,
+    /// region) pair to another satellite axis. Tests that a satellite
+    /// stays distinguishable from the base / other modalities.
+    pub swap_modality: Option<NegativeSlate>,
 }
 
 pub struct Minibatch {
@@ -82,11 +90,13 @@ pub struct SamplerState {
     pub pb_per_level: Vec<AxisDists>,
     pub modifier_modality_ids: Vec<u32>,
     pub measured_genes_per_modality: Vec<Vec<u32>>,
+    pub n_regions: usize,
 }
 
 impl SamplerState {
     pub fn new(table: &FeatureTable, pb: &PseudobulkData, args: &RnaModEmbedArgs) -> Self {
         let n_modalities = table.n_modalities();
+        let n_regions = table.n_regions.max(1);
 
         let modifier_modality_ids: Vec<u32> = (1..n_modalities as u32)
             .filter(|&m| !table.modifier_rows_by_modality[m as usize].is_empty())
@@ -129,6 +139,7 @@ impl SamplerState {
             pb_per_level,
             modifier_modality_ids,
             measured_genes_per_modality,
+            n_regions,
         }
     }
 
@@ -198,6 +209,7 @@ fn build_anchor_sub_batch<R: Rng>(
         gene_for_rho: Vec::with_capacity(b_agg + b_count),
         gene_for_z: Vec::with_capacity(b_agg + b_count),
         modality_for_q: Vec::with_capacity(b_agg + b_count),
+        region_for_delta: Vec::with_capacity(b_agg + b_count),
         gene_for_bias: Vec::with_capacity(b_agg + b_count),
         modality_for_bias: Vec::with_capacity(b_agg + b_count),
         is_agg: Vec::with_capacity(b_agg + b_count),
@@ -228,6 +240,7 @@ fn build_anchor_sub_batch<R: Rng>(
         positives,
         rand,
         swap_gene_mode: None,
+        swap_modality: None,
     })
 }
 
@@ -252,6 +265,7 @@ fn build_modifier_sub_batch<R: Rng>(
         gene_for_rho: Vec::with_capacity(b),
         gene_for_z: Vec::with_capacity(b),
         modality_for_q: Vec::with_capacity(b),
+        region_for_delta: Vec::with_capacity(b),
         gene_for_bias: Vec::with_capacity(b),
         modality_for_bias: Vec::with_capacity(b),
         is_agg: Vec::with_capacity(b),
@@ -280,11 +294,14 @@ fn build_modifier_sub_batch<R: Rng>(
     let rand = draw_random_negatives(pools, dists, &positives, args.n_rand, rng);
     let swap_gene_mode =
         draw_swap_gene_mode_negatives(state, &positives, args.n_swap_gene_mode, rng);
+    let swap_modality =
+        draw_swap_modality_negatives(state, &positives, args.n_swap_modality, rng);
 
     Some(SubBatch {
         positives,
         rand,
         swap_gene_mode,
+        swap_modality,
     })
 }
 
@@ -294,6 +311,7 @@ fn push_agg_positive(slate: &mut PositiveSlate, pool: &StratumPool, i: usize) {
     slate.gene_for_rho.push(g);
     slate.gene_for_z.push(g);
     slate.modality_for_q.push(0);
+    slate.region_for_delta.push(0); // sentinel; masked for AGG
     slate.gene_for_bias.push(g);
     slate.modality_for_bias.push(0);
     slate.is_agg.push(true);
@@ -306,6 +324,9 @@ fn push_component_positive(slate: &mut PositiveSlate, pool: &StratumPool, i: usi
     slate.gene_for_rho.push(g);
     slate.gene_for_z.push(g);
     slate.modality_for_q.push(modality);
+    // Region rides along from the pool entry (satellite = real region;
+    // count-comp anchor = sentinel 0).
+    slate.region_for_delta.push(pool.region_ids[i]);
     slate.gene_for_bias.push(g);
     slate.modality_for_bias.push(modality);
     slate.is_agg.push(false);
@@ -327,6 +348,7 @@ fn draw_random_negatives<R: Rng>(
         gene_for_rho: Vec::with_capacity(total),
         gene_for_z: Vec::with_capacity(total),
         modality_for_q: Vec::with_capacity(total),
+        region_for_delta: Vec::with_capacity(total),
         gene_for_bias: Vec::with_capacity(total),
         modality_for_bias: Vec::with_capacity(total),
         is_agg: Vec::with_capacity(total),
@@ -338,6 +360,7 @@ fn draw_random_negatives<R: Rng>(
     for i in 0..b {
         let pos_gene = positives.gene_for_rho[i];
         let pos_modality = positives.modality_for_q[i];
+        let pos_region = positives.region_for_delta[i];
         let pos_is_agg = positives.is_agg[i];
 
         let (pool, dist_opt) = if pos_is_agg {
@@ -364,6 +387,9 @@ fn draw_random_negatives<R: Rng>(
             out.gene_for_rho.push(g_neg);
             out.gene_for_z.push(g_neg);
             out.modality_for_q.push(pos_modality);
+            // Random negatives keep the positive's (modality, region) and
+            // swap only the gene → they probe gene-cell identification.
+            out.region_for_delta.push(pos_region);
             out.gene_for_bias.push(g_neg);
             out.modality_for_bias.push(pos_modality);
             out.is_agg.push(pos_is_agg);
@@ -377,6 +403,7 @@ fn empty_negative_slate() -> NegativeSlate {
         gene_for_rho: Vec::new(),
         gene_for_z: Vec::new(),
         modality_for_q: Vec::new(),
+        region_for_delta: Vec::new(),
         gene_for_bias: Vec::new(),
         modality_for_bias: Vec::new(),
         is_agg: Vec::new(),
@@ -422,6 +449,7 @@ fn draw_swap_gene_mode_negatives<R: Rng>(
         gene_for_rho: Vec::with_capacity(total),
         gene_for_z: Vec::with_capacity(total),
         modality_for_q: Vec::with_capacity(total),
+        region_for_delta: Vec::with_capacity(total),
         gene_for_bias: Vec::with_capacity(total),
         modality_for_bias: Vec::with_capacity(total),
         is_agg: Vec::with_capacity(total),
@@ -430,6 +458,7 @@ fn draw_swap_gene_mode_negatives<R: Rng>(
     for i in 0..b {
         let g = positives.gene_for_rho[i];
         let m = positives.modality_for_q[i];
+        let r = positives.region_for_delta[i];
         let pool = &state.measured_genes_per_modality[m as usize];
         // Need ≥ 2 distinct measured genes for the modality to even
         // construct a single swap-z negative; if not, drop the whole
@@ -442,12 +471,105 @@ fn draw_swap_gene_mode_negatives<R: Rng>(
             out.gene_for_rho.push(g);
             out.gene_for_z.push(g_prime);
             out.modality_for_q.push(m);
+            // Keep (modality, region); only z's source gene changes.
+            out.region_for_delta.push(r);
             out.gene_for_bias.push(g);
             out.modality_for_bias.push(m);
             out.is_agg.push(false);
         }
     }
     Some(out)
+}
+
+/// Swap-modality negatives: keep (gene, cell) but substitute the
+/// satellite axis `(modality, region)` with a different one. Forces the
+/// model to keep a gene's satellite at `(m, r)` distinguishable from the
+/// same gene's base/other-modality embeddings — without it, δ/γ could
+/// collapse and every satellite would coincide with β_g.
+///
+/// The candidate axes are `{(m', r') : m' ∈ modifier modalities,
+/// r' ∈ 0..R} \ {(m, r)}`. Drawing from the full grid (rather than only
+/// observed components) is intentional: a negative need not correspond
+/// to real data, and the grid guarantees a candidate exists whenever
+/// there is ≥1 modifier modality and R ≥ 1 (excluding the singleton
+/// degenerate case handled below).
+fn draw_swap_modality_negatives<R: Rng>(
+    state: &SamplerState,
+    positives: &PositiveSlate,
+    k: usize,
+    rng: &mut R,
+) -> Option<NegativeSlate> {
+    if k == 0 {
+        return None;
+    }
+    let mods = &state.modifier_modality_ids;
+    let n_regions = state.n_regions.max(1) as u32;
+    // Total satellite axes in the grid. Need ≥ 2 so at least one differs
+    // from any positive's (m, r).
+    let n_axes = mods.len() as u32 * n_regions;
+    if n_axes < 2 {
+        return None;
+    }
+
+    let b = positives.len();
+    let total = b * k;
+    let mut out = NegativeSlate {
+        gene_for_rho: Vec::with_capacity(total),
+        gene_for_z: Vec::with_capacity(total),
+        modality_for_q: Vec::with_capacity(total),
+        region_for_delta: Vec::with_capacity(total),
+        gene_for_bias: Vec::with_capacity(total),
+        modality_for_bias: Vec::with_capacity(total),
+        is_agg: Vec::with_capacity(total),
+        k,
+    };
+    for i in 0..b {
+        let g = positives.gene_for_rho[i];
+        let m = positives.modality_for_q[i];
+        let r = positives.region_for_delta[i];
+        for _ in 0..k {
+            let (m_prime, r_prime) = swap_pick_axis(mods, n_regions, m, r, rng)?;
+            out.gene_for_rho.push(g);
+            out.gene_for_z.push(g); // keep the gene's own program loading
+            out.modality_for_q.push(m_prime);
+            out.region_for_delta.push(r_prime);
+            // Bias keyed by (gene, swapped modality) — matches the
+            // satellite's own b_comp column so the negative isn't trivially
+            // separable on bias alone.
+            out.gene_for_bias.push(g);
+            out.modality_for_bias.push(m_prime);
+            out.is_agg.push(false);
+        }
+    }
+    Some(out)
+}
+
+/// Pick a satellite axis `(m', r')` distinct from `(m, r)` from the
+/// `modalities × 0..n_regions` grid. Rejection-samples, then falls back
+/// to a deterministic scan for the rare all-collision case.
+fn swap_pick_axis<R: Rng>(
+    modalities: &[u32],
+    n_regions: u32,
+    exclude_m: u32,
+    exclude_r: u32,
+    rng: &mut R,
+) -> Option<(u32, u32)> {
+    let region_dist = Uniform::new(0, n_regions).ok()?;
+    for _ in 0..REJECT_RETRIES {
+        let m = *modalities.choose(rng)?;
+        let r = region_dist.sample(rng);
+        if m != exclude_m || r != exclude_r {
+            return Some((m, r));
+        }
+    }
+    for &m in modalities {
+        for r in 0..n_regions {
+            if m != exclude_m || r != exclude_r {
+                return Some((m, r));
+            }
+        }
+    }
+    None
 }
 
 /// Uniform-with-rejection swap target picker used by swap-gene-mode.
