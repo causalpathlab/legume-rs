@@ -1,4 +1,5 @@
 /// EM algorithm parameters.
+#[derive(Clone, Copy)]
 pub struct EmParams {
     /// Maximum number of EM iterations
     pub max_iter: usize,
@@ -60,8 +61,10 @@ pub struct GmmResult {
     /// Learned component standard deviations
     pub sigmas: Vec<f32>,
     /// Posterior assignment probabilities gamma[n][k]
+    #[allow(dead_code)] // set by the GMM path; bandwidth-first caller leaves it empty
     pub gamma: Vec<Vec<f32>>,
     /// BIC
+    #[allow(dead_code)] // no BIC model selection on the editing path
     pub bic: f32,
 }
 

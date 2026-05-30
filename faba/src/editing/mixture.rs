@@ -1,14 +1,25 @@
-use crate::mixture::assign::hard_assign;
-use crate::mixture::em::{weighted_gaussian_mixture_em_with_n, EmParams, GmmResult};
+use crate::mixture::em::{fixed_em_weighted, EmParams, GmmResult};
+use crate::mixture::kernel_smooth::{find_modes, gaussian_kernel_smooth};
 
-/// Parameters for per-gene mixture model
+/// Parameters for per-gene mixture model.
+///
+/// Components are called **bandwidth-first**: the signal-weighted site pileup is
+/// Gaussian-smoothed at `bandwidth` and its modes become component centres
+/// (number of components = number of modes). Mixing weights are then fit with a
+/// fixed-component EM. This replaces the old gene-length-relative GMM + BIC-over-K
+/// scan, whose resolution scaled with gene length rather than the modality's
+/// intrinsic spatial scale.
+#[derive(Clone)]
 pub struct MixtureParams {
-    /// Minimum distinct positions per gene to attempt mixture
+    /// Minimum distinct positions per gene to attempt a fit
     pub min_sites: usize,
-    /// Maximum components to test via BIC
+    /// Optional safety cap on the number of components (peaks). 0 = no cap.
     pub max_k: usize,
-    /// Initial sigma (0 = auto: gene_length / (2*K))
-    pub initial_sigma: f32,
+    /// Gaussian smoothing bandwidth (nt). 0 = derive a per-gene fallback from
+    /// the gene's own site spacing (direct callers / tests); the pipeline
+    /// resolves a global per-modality value via
+    /// [`crate::editing::bandwidth::estimate_bandwidth`] before calling.
+    pub bandwidth: f32,
     /// Drop genes whose fit yields a single active component. A lone
     /// component carries no relative/differential signal (its per-cell
     /// count is just the gene total), so this prunes uninformative rows
@@ -23,7 +34,7 @@ impl Default for MixtureParams {
         Self {
             min_sites: 3,
             max_k: 5,
-            initial_sigma: 0.0,
+            bandwidth: 0.0,
             drop_single_component: false,
             em_params: EmParams {
                 max_iter: 200,
@@ -92,84 +103,153 @@ pub fn fit_gene_mixture(
         return None;
     }
 
-    // Check distinct positions
-    let mut distinct: Vec<i32> = observations.iter().map(|o| o.position as i32).collect();
-    distinct.sort();
-    distinct.dedup();
-    if distinct.len() < params.min_sites {
+    // Unique site positions (rounded to nt) with summed signal weight.
+    let mut by_pos: rustc_hash::FxHashMap<i64, f32> = rustc_hash::FxHashMap::default();
+    for o in observations {
+        *by_pos.entry(o.position.round() as i64).or_insert(0.0) += o.count.max(0.0);
+    }
+    if by_pos.len() < params.min_sites {
         return None;
     }
+    let mut sites: Vec<(f32, f32)> = by_pos.iter().map(|(&p, &w)| (p as f32, w)).collect();
+    sites.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let xs: Vec<f32> = sites.iter().map(|&(p, _)| p).collect();
+    let ys: Vec<f32> = sites.iter().map(|&(_, w)| w).collect();
 
-    let positions: Vec<f32> = observations.iter().map(|o| o.position).collect();
-    let obs_weights: Vec<f32> = observations.iter().map(|o| o.count).collect();
-    let gene_start = distinct[0] as f32;
-    let n_for_bic = observations.len() as f32;
+    // Effective bandwidth: the resolved global value (params.bandwidth > 0) or a
+    // per-gene fallback derived from this gene's own site spacing.
+    let bandwidth = if params.bandwidth > 0.0 {
+        params.bandwidth
+    } else {
+        fallback_bandwidth(&xs)
+    };
 
-    let mut best_result: Option<(usize, GmmResult)> = None;
-    let mut n_worse = 0u32;
+    // Smooth the signal-weighted site pileup at `bandwidth` and read off modes as
+    // component centres. Evaluating only at the (sparse) site positions keeps
+    // this O(S^2) in the number of sites, not O(gene_length).
+    let smoothed = gaussian_kernel_smooth(&xs, &ys, &xs, bandwidth);
 
-    for k in 1..=params.max_k {
-        let initial_mus: Vec<f32> = (0..k)
-            .map(|i| gene_start + (i as f32 + 1.0) * gene_length / (k as f32 + 1.0))
-            .collect();
+    // find_modes returns only interior maxima; pad with zero sentinels so a peak
+    // at the first/last site is detected too. Carry the mode density alongside
+    // the centre position for the optional safety cap.
+    let mut padded = Vec::with_capacity(smoothed.len() + 2);
+    padded.push(0.0);
+    padded.extend_from_slice(&smoothed);
+    padded.push(0.0);
+    let mut centers: Vec<(f32, f32)> = find_modes(&padded)
+        .into_iter()
+        .map(|i| (xs[i - 1], smoothed[i - 1]))
+        .collect();
 
-        let initial_sigma = if params.initial_sigma > 0.0 {
-            params.initial_sigma
+    // Degenerate (flat) profile → no interior mode: fall back to the single
+    // signal-weighted centroid as one component.
+    if centers.is_empty() {
+        let wsum: f32 = ys.iter().sum();
+        let centroid = if wsum > 0.0 {
+            xs.iter().zip(ys.iter()).map(|(&x, &w)| x * w).sum::<f32>() / wsum
         } else {
-            gene_length / (2.0 * k as f32)
+            xs[xs.len() / 2]
         };
+        centers.push((centroid, wsum));
+    }
 
-        let result = weighted_gaussian_mixture_em_with_n(
-            &positions,
-            &obs_weights,
-            &initial_mus,
-            initial_sigma,
-            gene_length,
-            &params.em_params,
-            n_for_bic,
-        );
+    // Optional safety cap: keep the highest-density centres.
+    if params.max_k > 0 && centers.len() > params.max_k {
+        centers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        centers.truncate(params.max_k);
+        centers.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    }
 
-        let is_better = match &best_result {
-            None => true,
-            Some((_, prev)) => result.bic < prev.bic,
-        };
+    let centers: Vec<f32> = centers.into_iter().map(|(p, _)| p).collect();
+    let k = centers.len();
+    let n_total = k + 1; // component 0 = uniform noise
+    let n_obs = observations.len();
 
-        if is_better {
-            best_result = Some((k, result));
-            n_worse = 0;
-        } else {
-            n_worse += 1;
-            if n_worse >= 2 {
-                break;
-            }
+    // Component log-likelihoods: col 0 = uniform noise over the gene body, cols
+    // 1..=k = Gaussian(centre, bandwidth) at each observation position.
+    let noise_ll = if gene_length > 0.0 {
+        -gene_length.ln()
+    } else {
+        f32::NEG_INFINITY
+    };
+    let mut cll = vec![0.0_f32; n_obs * n_total];
+    for (n, o) in observations.iter().enumerate() {
+        let base = n * n_total;
+        cll[base] = noise_ll;
+        for (j, &c) in centers.iter().enumerate() {
+            cll[base + 1 + j] = gaussian_log_pdf(o.position, c, bandwidth);
         }
     }
 
-    let (_best_k, gmm) = best_result?;
+    // Fit mixing weights only (centres and σ = bandwidth are fixed). The
+    // per-observation signal weight enters as multiplicity.
+    let obs_weights: Vec<f32> = observations.iter().map(|o| o.count).collect();
+    let fe = fixed_em_weighted(
+        &cll,
+        n_total,
+        Some(&obs_weights),
+        Some(n_obs),
+        k, // free params = K mixing weights (sum-to-1)
+        &params.em_params,
+    );
 
-    // Hard assignment: gamma[i] gives posterior for observation i,
-    // distribute count to the best component
-    let assignments = hard_assign(&gmm.gamma);
-
-    // Count per (cell_idx, component), weighted by observation count
+    // Hard-assign each observation to argmax over {noise, components} and
+    // accumulate weighted counts per (cell, component). Component 0 = noise.
     let mut counts: rustc_hash::FxHashMap<(usize, usize), f32> = rustc_hash::FxHashMap::default();
-    for (obs_idx, &(_, component)) in assignments.iter().enumerate() {
-        let cell_idx = observations[obs_idx].cell_idx;
-        let count = observations[obs_idx].count;
-        *counts.entry((cell_idx, component)).or_insert(0.0) += count;
+    for (n, o) in observations.iter().enumerate() {
+        let row = &fe.gamma[n * n_total..(n + 1) * n_total];
+        let best = row
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(c, _)| c)
+            .unwrap_or(0);
+        *counts.entry((o.cell_idx, best)).or_insert(0.0) += o.count;
     }
-
     let cell_component_counts: Vec<(usize, usize, f32)> = counts
         .into_iter()
         .map(|((cell, comp), cnt)| (cell, comp, cnt))
         .collect();
 
+    #[cfg(test)]
+    let n_active = fe.weights.iter().skip(1).filter(|&&w| w > 0.0).count();
+    let gmm = GmmResult {
+        weights: fe.weights,
+        mus: centers,
+        sigmas: vec![bandwidth; k],
+        gamma: Vec::new(), // per-obs γ already consumed into cell_component_counts
+        bic: fe.bic,
+    };
+
     Some(GeneMixtureResult {
         #[cfg(test)]
-        best_k: _best_k,
+        best_k: n_active,
         gmm,
         cell_component_counts,
     })
+}
+
+/// Log PDF of a univariate Gaussian.
+fn gaussian_log_pdf(x: f32, mu: f32, sigma: f32) -> f32 {
+    if sigma <= 0.0 {
+        return f32::NEG_INFINITY;
+    }
+    let z = (x - mu) / sigma;
+    -0.5 * z * z - sigma.ln() - 0.5 * std::f32::consts::TAU.ln()
+}
+
+/// Per-gene fallback bandwidth from the gene's own sorted site positions: the
+/// median nearest-neighbour gap, clamped to a sane nt range. Used only when the
+/// pipeline has not resolved a global per-modality bandwidth (e.g. direct
+/// callers and unit tests).
+fn fallback_bandwidth(sorted_positions: &[f32]) -> f32 {
+    if sorted_positions.len() < 2 {
+        return 25.0;
+    }
+    let mut gaps: Vec<f32> = sorted_positions.windows(2).map(|w| w[1] - w[0]).collect();
+    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = gaps[gaps.len() / 2];
+    median.clamp(10.0, 200.0)
 }
 
 #[cfg(test)]

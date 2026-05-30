@@ -124,6 +124,45 @@ pub fn run_mixture_model(
             .push((cell_idx, rel_pos, w));
     }
 
+    // Resolve the component-calling bandwidth once for this modality. An
+    // explicit --mixture-bandwidth (> 0) wins; otherwise estimate a global value
+    // from the empirical within-gene site spacing (cluster-aware for A-to-I).
+    let resolved_params = {
+        let mut p = mixture_params.clone();
+        if p.bandwidth <= 0.0 {
+            use crate::editing::bandwidth::{estimate_bandwidth, BandwidthParams};
+            let cluster_aware = matches!(params.mod_type, ModificationType::AtoI);
+            let bw_params = if cluster_aware {
+                BandwidthParams::atoi()
+            } else {
+                BandwidthParams::m6a()
+            };
+            let per_gene: Vec<Vec<(f32, f32)>> = gene_obs
+                .values()
+                .map(|obs| obs.iter().map(|&(_, pos, w)| (pos, w)).collect())
+                .collect();
+            let est = estimate_bandwidth(&per_gene, &bw_params);
+            info!(
+                "Mixture: auto bandwidth = {:.1} nt ({} gaps pooled, {})",
+                est.bandwidth,
+                est.n_gaps,
+                if cluster_aware {
+                    "A-to-I cluster-aware"
+                } else {
+                    "m6A"
+                }
+            );
+            p.bandwidth = est.bandwidth;
+        } else {
+            info!(
+                "Mixture: bandwidth = {:.1} nt (user-specified)",
+                p.bandwidth
+            );
+        }
+        p
+    };
+    let mixture_params = &resolved_params;
+
     // Fit mixture per gene in parallel
     let gene_entries: Vec<_> = gene_obs.into_iter().collect();
     // Triplets carry the batch index so the single pooled fit can be

@@ -1,3 +1,4 @@
+pub mod bandwidth;
 pub mod bed_output;
 pub mod io;
 pub mod mask;
