@@ -1,7 +1,9 @@
 use arrow::array::{Float32Array, Int64Array, StringArray, UInt64Array};
+use auxiliary_data::feature_names::FeatureNameKind;
 use clap::Args;
 use data_beans::hdf5_io::resolve_backend_file;
 use data_beans::sparse_io::open_sparse_matrix;
+use genomic_data::coordinates::chr_eq;
 use log::info;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rustc_hash::FxHashMap;
@@ -55,12 +57,26 @@ pub struct PileupArgs {
     /// Sparse matrix file (zarr or h5) from faba output
     pub data_file: Box<str>,
 
-    /// Gene name or ID substring to match (case-insensitive)
-    #[arg(short = 'q', long = "gene", required = true)]
-    gene_query: Box<str>,
+    /// Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or
+    /// Ensembl IDs, case-insensitive. Uses the auxiliary-data relaxed
+    /// gene-name scheme; all matched genes are aggregated into one pileup.
+    #[arg(
+        short = 'q',
+        long = "genes",
+        visible_alias = "gene",
+        value_delimiter = ','
+    )]
+    genes: Vec<Box<str>>,
 
-    /// Site-level parquet file (from dartseq or atoi output)
-    #[arg(short = 's', long = "sites")]
+    /// Genomic regions to pile up: comma-separated `chr:lb-ub`
+    /// (`chr17:1000-2000,chr1:50-99`). Selects rows by position, with or
+    /// without `--genes`. At least one of `--genes`/`--regions` is required.
+    #[arg(long = "regions", visible_alias = "region", value_delimiter = ',')]
+    regions: Vec<Box<str>>,
+
+    /// Site-level parquet file (from dartseq or atoi output) for the
+    /// second track
+    #[arg(short = 's', long = "sites-parquet")]
     site_file: Option<Box<str>>,
 
     /// Signal aggregation mode for sparse matrix track
@@ -88,24 +104,187 @@ pub struct PileupArgs {
     quiet: bool,
 }
 
-/// Parse row name like "ENSG00000139618_BRCA2/m6A/chr13:32350000"
-/// Returns (gene_part, chr, position) if parseable.
+/// Parse a faba row name `gene_key/modality/detail`. `detail` is either
+/// `chr:pos` (site output, e.g. `ENSG00000139618_BRCA2/m6A/chr13:32350000`)
+/// or a bare component ordinal (mixture output, e.g.
+/// `ENSG00000139618_BRCA2/m6A/0`). Returns `(gene_part, chr, x)` where
+/// `chr` is empty for mixture rows and `x` is the genomic position or the
+/// component ordinal used as the pileup x-coordinate.
 fn parse_row_name(name: &str) -> Option<(&str, &str, i64)> {
     let mut parts = name.splitn(3, '/');
     let gene_part = parts.next()?;
     let _modality = parts.next()?;
     let detail = parts.next()?;
-    let (chr, pos_str) = detail.split_once(':')?;
-    let pos = pos_str.parse::<i64>().ok()?;
-    Some((gene_part, chr, pos))
+    if let Some((chr, pos_str)) = detail.split_once(':') {
+        let pos = pos_str.parse::<i64>().ok()?;
+        Some((gene_part, chr, pos))
+    } else {
+        // Mixture rows carry a component ordinal, not a chromosome.
+        let component = detail.parse::<i64>().ok()?;
+        Some((gene_part, "", component))
+    }
 }
 
-/// Case-insensitive ASCII substring match without allocation.
-fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
-    haystack
-        .as_bytes()
-        .windows(needle.len())
-        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+/// Relaxed gene matching, consistent with the auxiliary-data
+/// `FeatureNameKind::Gene` canonicalization used for cross-file row
+/// alignment. A row matches when its `gene_part` shares any `_`-split
+/// component with the query, or agrees on the canonical gene symbol
+/// (last `_`-delimited component, Cell Ranger feature-type suffix
+/// stripped) — so both a symbol (`MYCBP`) and an Ensembl ID
+/// (`ENSG00000139618`) query resolve the same row. Case-insensitive.
+/// `query_sym` is the pre-canonicalized query symbol.
+fn gene_matches(query: &str, query_sym: &str, gene_part: &str) -> bool {
+    // Allocation-free component check first — it directly covers symbol and
+    // Ensembl-ID queries (and subsumes a full-composite match). Fall back to
+    // the suffix-stripping canonicalizer only when the components miss.
+    gene_part.split('_').any(|c| c.eq_ignore_ascii_case(query))
+        || FeatureNameKind::Gene { delim: '_' }
+            .canonicalize(gene_part)
+            .eq_ignore_ascii_case(query_sym)
+}
+
+/// Canonical query symbol used by [`gene_matches`].
+fn query_symbol(query: &str) -> Box<str> {
+    FeatureNameKind::Gene { delim: '_' }.canonicalize(query)
+}
+
+/// A `chr:lb-ub` genomic window. Bounds are inclusive.
+struct Region {
+    chr: Box<str>,
+    lb: i64,
+    ub: i64,
+}
+
+/// Parse `chr:lb-ub` (e.g. `chr17:1000-2000`). Reversed bounds are
+/// swapped so `lb <= ub` always holds.
+fn parse_region(spec: &str) -> anyhow::Result<Region> {
+    let bad = || anyhow::anyhow!("region '{}' must be formatted chr:lb-ub", spec);
+    let (chr, range) = spec.split_once(':').ok_or_else(bad)?;
+    let (lb, ub) = range.split_once('-').ok_or_else(bad)?;
+    let lb: i64 = lb.trim().parse().map_err(|_| bad())?;
+    let ub: i64 = ub.trim().parse().map_err(|_| bad())?;
+    let (lb, ub) = if lb <= ub { (lb, ub) } else { (ub, lb) };
+    let chr = chr.trim();
+    if chr.is_empty() {
+        return Err(bad());
+    }
+    Ok(Region {
+        chr: chr.into(),
+        lb,
+        ub,
+    })
+}
+
+/// Combined gene + region row selector. A row is selected when it
+/// matches any requested gene OR falls inside any requested region
+/// (union), so callers can pass either or both.
+struct Selector {
+    genes: Vec<Box<str>>,
+    gene_syms: Vec<Box<str>>,
+    regions: Vec<Region>,
+}
+
+impl Selector {
+    fn build(genes: &[Box<str>], regions: &[Box<str>]) -> anyhow::Result<Self> {
+        let genes: Vec<Box<str>> = genes
+            .iter()
+            .map(|g| g.trim())
+            .filter(|g| !g.is_empty())
+            .map(Into::into)
+            .collect();
+        let gene_syms: Vec<Box<str>> = genes.iter().map(|g| query_symbol(g)).collect();
+        let regions: Vec<Region> = regions
+            .iter()
+            .map(|r| r.trim())
+            .filter(|r| !r.is_empty())
+            .map(parse_region)
+            .collect::<anyhow::Result<_>>()?;
+        if genes.is_empty() && regions.is_empty() {
+            anyhow::bail!("provide at least one of --genes or --regions");
+        }
+        Ok(Self {
+            genes,
+            gene_syms,
+            regions,
+        })
+    }
+
+    fn matches_gene(&self, gene_part: &str) -> bool {
+        self.genes
+            .iter()
+            .zip(&self.gene_syms)
+            .any(|(g, sym)| gene_matches(g, sym, gene_part))
+    }
+
+    fn matches_region(&self, chr: &str, pos: i64) -> bool {
+        // Mixture rows carry no chromosome (empty `chr`); they can never sit
+        // inside a region, so guard explicitly rather than relying on
+        // `parse_region` having rejected empty region chromosomes.
+        !chr.is_empty()
+            && self
+                .regions
+                .iter()
+                .any(|r| chr_eq(&r.chr, chr) && pos >= r.lb && pos <= r.ub)
+    }
+
+    /// Row is kept when it matches any gene or any region.
+    fn selects(&self, gene_part: &str, chr: &str, pos: i64) -> bool {
+        self.matches_gene(gene_part) || self.matches_region(chr, pos)
+    }
+
+    /// Short description of the active selection for log/error messages.
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.genes.is_empty() {
+            let g: Vec<&str> = self.genes.iter().map(|g| g.as_ref()).collect();
+            parts.push(format!("genes [{}]", g.join(",")));
+        }
+        if !self.regions.is_empty() {
+            let r: Vec<String> = self
+                .regions
+                .iter()
+                .map(|r| format!("{}:{}-{}", r.chr, r.lb, r.ub))
+                .collect();
+            parts.push(format!("regions [{}]", r.join(",")));
+        }
+        parts.join(" + ")
+    }
+}
+
+/// Human-readable label for the set of matched genes. A single gene is
+/// shown verbatim; multiple matches collapse to `N genes: a,b,...`.
+fn summarize_genes(distinct: &FxHashMap<&str, usize>) -> Box<str> {
+    if distinct.len() == 1 {
+        return (*distinct.keys().next().unwrap()).into();
+    }
+    let mut names: Vec<&str> = distinct.keys().copied().collect();
+    names.sort_unstable();
+    let shown = names.iter().take(5).copied().collect::<Vec<_>>().join(",");
+    format!(
+        "{} genes: {}{}",
+        names.len(),
+        shown,
+        if names.len() > 5 { ",..." } else { "" }
+    )
+    .into()
+}
+
+/// Label for the chromosome axis. `component` when matched rows carry no
+/// chromosome (mixture output), the single chromosome when all matches
+/// agree, else `*` for a multi-chromosome aggregate.
+fn summarize_chr(matched_rows: &[(usize, &str, &str, i64)]) -> Box<str> {
+    let mut chrs: Vec<&str> = matched_rows
+        .iter()
+        .map(|r| r.2)
+        .filter(|c| !c.is_empty())
+        .collect();
+    chrs.sort_unstable();
+    chrs.dedup();
+    match chrs.len() {
+        0 => "component".into(),
+        1 => chrs[0].into(),
+        _ => "*".into(),
+    }
 }
 
 struct PosAgg {
@@ -140,7 +319,7 @@ struct SiteAnnotation {
 
 fn read_site_annotation(
     site_file: &str,
-    gene_query: &str,
+    selector: &Selector,
     site_signal: &SiteSignal,
 ) -> anyhow::Result<SiteAnnotation> {
     let file = std::fs::File::open(site_file)?;
@@ -176,6 +355,11 @@ fn read_site_annotation(
             .downcast_ref::<Int64Array>()
             .ok_or_else(|| anyhow::anyhow!("'primary_pos' column is not Int64"))?;
 
+        // Optional: enables `--regions` filtering on the parquet track.
+        let chr_col = batch
+            .column_by_name("chr")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+
         let start_col = batch
             .column_by_name("gene_start")
             .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
@@ -200,13 +384,13 @@ fn read_site_annotation(
 
         for i in 0..batch.num_rows() {
             let gene_val = gene_col.value(i);
-            if !contains_ignore_ascii_case(gene_val, gene_query) {
+            let pos = pos_col.value(i);
+            let chr_val = chr_col.map(|c| c.value(i)).unwrap_or("");
+            if !selector.selects(gene_val, chr_val, pos) {
                 continue;
             }
 
             *distinct_genes.entry(gene_val.into()).or_insert(0) += 1;
-
-            let pos = pos_col.value(i);
 
             // Update gene boundaries
             if let (Some(sc), Some(tc)) = (start_col, stop_col) {
@@ -245,35 +429,20 @@ fn read_site_annotation(
 
     if positions.is_empty() {
         return Err(anyhow::anyhow!(
-            "no sites matching gene '{}' in {}",
-            gene_query,
+            "no sites matching {} in {}",
+            selector.describe(),
             site_file
         ));
     }
 
+    // Aggregate every matched gene's sites; gene boundaries below widen to
+    // the span across all of them rather than erroring on ambiguity.
     if distinct_genes.len() > 1 {
-        let mut genes: Vec<_> = distinct_genes.into_iter().collect();
-        genes.sort_by(|a, b| b.1.cmp(&a.1));
-        let list: Vec<String> = genes
-            .iter()
-            .take(10)
-            .map(|(g, n)| format!("  {} ({} sites)", g, n))
-            .collect();
-        return Err(anyhow::anyhow!(
-            "ambiguous gene query '{}' matched {} genes in parquet:\n{}{}",
-            gene_query,
-            genes.len(),
-            list.join("\n"),
-            if genes.len() > 10 { "\n  ..." } else { "" }
-        ));
-    }
-
-    if positions.is_empty() {
-        return Err(anyhow::anyhow!(
-            "no sites matching gene '{}' in {}",
-            gene_query,
-            site_file
-        ));
+        info!(
+            "{} matched {} genes in parquet; aggregating all sites",
+            selector.describe(),
+            distinct_genes.len()
+        );
     }
 
     positions.sort_unstable_by_key(|(pos, _)| *pos);
@@ -299,7 +468,7 @@ fn read_site_annotation(
 
 fn read_matrix_positions(
     data_file: &str,
-    gene_query: &str,
+    selector: &Selector,
     signal: &PileupSignal,
 ) -> anyhow::Result<MatrixGeneData> {
     let (backend, resolved_path) = resolve_backend_file(data_file, None)?;
@@ -312,7 +481,7 @@ fn read_matrix_positions(
 
     for (idx, name) in row_names.iter().enumerate() {
         if let Some((gene_part, chr, pos)) = parse_row_name(name) {
-            if contains_ignore_ascii_case(gene_part, gene_query) {
+            if selector.selects(gene_part, chr, pos) {
                 *distinct_genes.entry(gene_part).or_insert(0) += 1;
                 matched_rows.push((idx, gene_part, chr, pos));
             }
@@ -321,37 +490,24 @@ fn read_matrix_positions(
 
     if matched_rows.is_empty() {
         return Err(anyhow::anyhow!(
-            "no rows matching gene '{}' in {}",
-            gene_query,
+            "no rows matching {} in {}",
+            selector.describe(),
             data_file
         ));
     }
 
-    if distinct_genes.len() > 1 {
-        let mut genes: Vec<_> = distinct_genes.into_iter().collect();
-        genes.sort_by(|a, b| b.1.cmp(&a.1));
-        let list: Vec<String> = genes
-            .iter()
-            .take(10)
-            .map(|(g, n)| format!("  {} ({} sites)", g, n))
-            .collect();
-        return Err(anyhow::anyhow!(
-            "ambiguous gene query '{}' matched {} genes:\n{}{}",
-            gene_query,
-            genes.len(),
-            list.join("\n"),
-            if genes.len() > 10 { "\n  ..." } else { "" }
-        ));
-    }
-
-    let gene: Box<str> = matched_rows[0].1.into();
-    let chr: Box<str> = matched_rows[0].2.into();
+    // Aggregate every matched row. The selection can span several genes
+    // (and chromosomes); rather than erroring on ambiguity we pile them
+    // all together and label the aggregate.
+    let gene: Box<str> = summarize_genes(&distinct_genes);
+    let chr: Box<str> = summarize_chr(&matched_rows);
 
     info!(
-        "matched {} sites for gene {} on {}",
+        "matched {} rows across {} gene(s) for {} [{}]",
         matched_rows.len(),
-        gene,
-        chr
+        distinct_genes.len(),
+        selector.describe(),
+        gene
     );
 
     let local_to_pos: Vec<i64> = matched_rows.iter().map(|(_, _, _, pos)| *pos).collect();
@@ -523,15 +679,17 @@ fn write_pileup_tsv(tracks: &[&BinnedPileup], output: &str) -> anyhow::Result<()
 }
 
 pub fn run_pileup(args: &PileupArgs) -> anyhow::Result<()> {
+    let selector = Selector::build(&args.genes, &args.regions)?;
+
     // Read sparse matrix data
-    let mtx = read_matrix_positions(&args.data_file, &args.gene_query, &args.signal)?;
+    let mtx = read_matrix_positions(&args.data_file, &selector, &args.signal)?;
     let matrix_num_sites = mtx.positions.len();
 
     // Determine x-axis extent and build site track if parquet provided
     let site_annotation = args
         .site_file
         .as_ref()
-        .map(|sf| read_site_annotation(sf, &args.gene_query, &args.site_signal))
+        .map(|sf| read_site_annotation(sf, &selector, &args.site_signal))
         .transpose()?;
 
     let (min_pos, max_pos) = if let Some(ref sa) = site_annotation {
@@ -591,4 +749,104 @@ pub fn run_pileup(args: &PileupArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_site_and_mixture_rows() {
+        // site output: gene/modality/chr:pos
+        assert_eq!(
+            parse_row_name("ENSG00000139618_BRCA2/m6A/chr13:32350000"),
+            Some(("ENSG00000139618_BRCA2", "chr13", 32350000))
+        );
+        // mixture output: gene/modality/component
+        assert_eq!(
+            parse_row_name("ENSG00000060558_GNA15/m6A/0"),
+            Some(("ENSG00000060558_GNA15", "", 0))
+        );
+        // count rows (detail neither chr:pos nor an integer) don't parse
+        assert_eq!(parse_row_name("gene_0/count/spliced"), None);
+    }
+
+    #[test]
+    fn relaxed_gene_matching() {
+        let gp = "ENSG00000060558_GNA15";
+        // symbol, any case
+        assert!(gene_matches("GNA15", &query_symbol("GNA15"), gp));
+        assert!(gene_matches("gna15", &query_symbol("gna15"), gp));
+        // Ensembl ID
+        assert!(gene_matches(
+            "ENSG00000060558",
+            &query_symbol("ENSG00000060558"),
+            gp
+        ));
+        // full composite
+        assert!(gene_matches(gp, &query_symbol(gp), gp));
+        // partial substring must NOT match (consistent with aux-data scheme)
+        assert!(!gene_matches("GNA", &query_symbol("GNA"), gp));
+        assert!(!gene_matches(
+            "RPL",
+            &query_symbol("RPL"),
+            "ENSG00000063177_RPL18"
+        ));
+    }
+
+    #[test]
+    fn region_parsing_and_matching() {
+        let r = parse_region("chr17:1000-2000").unwrap();
+        assert_eq!((r.chr.as_ref(), r.lb, r.ub), ("chr17", 1000, 2000));
+        // reversed bounds are normalized
+        let r = parse_region("17:2000-1000").unwrap();
+        assert_eq!((r.lb, r.ub), (1000, 2000));
+        // malformed specs error
+        assert!(parse_region("chr17").is_err());
+        assert!(parse_region("chr17:1000").is_err());
+        assert!(parse_region(":1-2").is_err());
+
+        // chr-prefix tolerant (shared genomic_data::chr_eq)
+        assert!(chr_eq("chr17", "17"));
+        assert!(chr_eq("17", "17"));
+        assert!(!chr_eq("chr1", "chr2"));
+    }
+
+    #[test]
+    fn selector_gene_or_region_union() {
+        let sel = Selector::build(&["GNA15".into()], &["chr17:100-200".into()]).unwrap();
+        // gene branch (mixture row: no chr, component ordinal)
+        assert!(sel.selects("ENSG00000060558_GNA15", "", 0));
+        // region branch (different gene, but inside the window)
+        assert!(sel.selects("ENSG1_OTHER", "chr17", 150));
+        // outside both
+        assert!(!sel.selects("ENSG1_OTHER", "chr17", 999));
+        assert!(!sel.selects("ENSG1_OTHER", "chr9", 150));
+
+        // at least one selector is required
+        assert!(Selector::build(&[], &[]).is_err());
+        // region-only is fine
+        assert!(Selector::build(&[], &["chr1:1-9".into()]).is_ok());
+    }
+
+    #[test]
+    fn aggregate_labels() {
+        let mut one: FxHashMap<&str, usize> = FxHashMap::default();
+        one.insert("ENSG1_GNA15", 2);
+        assert_eq!(summarize_genes(&one).as_ref(), "ENSG1_GNA15");
+
+        let mut many: FxHashMap<&str, usize> = FxHashMap::default();
+        many.insert("ENSG1_A", 1);
+        many.insert("ENSG2_B", 3);
+        let label = summarize_genes(&many);
+        assert!(label.starts_with("2 genes: "), "got {label}");
+
+        // chr label: empty -> component, single -> that chr, mixed -> *
+        let mix = vec![(0usize, "g", "", 0i64), (1, "g", "", 1)];
+        assert_eq!(summarize_chr(&mix).as_ref(), "component");
+        let single = vec![(0usize, "g", "chr13", 10i64)];
+        assert_eq!(summarize_chr(&single).as_ref(), "chr13");
+        let multi = vec![(0usize, "g", "chr1", 10i64), (1, "g", "chr2", 20)];
+        assert_eq!(summarize_chr(&multi).as_ref(), "*");
+    }
 }
