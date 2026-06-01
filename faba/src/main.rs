@@ -193,14 +193,16 @@ Example:\n  \
         alias = "inspect",
         about = "ASCII pileup plot for a single gene's modification sites",
         long_about = "ASCII pileup plot for a single gene's modification sites\n\n\
-            Reads a sparse matrix (zarr/h5) from faba output, filters to a\n\
-            specific gene, bins positions along the gene body, and renders a\n\
-            vertical ASCII histogram showing signal density across genomic\n\
-            position. No GFF file required.",
+            Reads one or more sparse matrices (zarr/h5) from faba output,\n\
+            filters to a specific gene, bins positions along the gene body,\n\
+            and renders a vertical ASCII histogram showing signal density\n\
+            across genomic position. Multiple files (e.g. replicates via a\n\
+            shell glob) are aggregated per position. No GFF file required.",
         after_long_help = "\
 Example:\n  \
   faba pileup out/rep1_wt_m6a_mixture.zarr.zip -q BRCA2\n  \
-  faba pileup out/rep1_wt_m6a_mixture.zarr.zip -q BRCA2 -s out/m6a_sites.parquet --signal nnz"
+  faba pileup out/rep1_wt_m6a_mixture.zarr.zip -q BRCA2 -s out/m6a_sites.parquet --signal nnz\n  \
+  faba pileup out/rep*_wt_m6a_ratio.zarr.zip -q BRCA2 -s out/m6a_sites.parquet"
     )]
     Pileup(PileupArgs),
 

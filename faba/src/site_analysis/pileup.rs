@@ -54,8 +54,11 @@ impl SiteSignal {
 
 #[derive(Args, Debug)]
 pub struct PileupArgs {
-    /// Sparse matrix file (zarr or h5) from faba output
-    pub data_file: Box<str>,
+    /// Sparse matrix file(s) (zarr or h5) from faba output. Multiple files
+    /// (e.g. replicates via a shell glob) are aggregated per genomic
+    /// position into a single track.
+    #[arg(required = true, num_args = 1..)]
+    pub data_files: Vec<Box<str>>,
 
     /// Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or
     /// Ensembl IDs, case-insensitive. Uses the auxiliary-data relaxed
@@ -253,11 +256,11 @@ impl Selector {
 
 /// Human-readable label for the set of matched genes. A single gene is
 /// shown verbatim; multiple matches collapse to `N genes: a,b,...`.
-fn summarize_genes(distinct: &FxHashMap<&str, usize>) -> Box<str> {
+fn summarize_genes(distinct: &FxHashMap<Box<str>, usize>) -> Box<str> {
     if distinct.len() == 1 {
-        return (*distinct.keys().next().unwrap()).into();
+        return distinct.keys().next().unwrap().clone();
     }
-    let mut names: Vec<&str> = distinct.keys().copied().collect();
+    let mut names: Vec<&str> = distinct.keys().map(|k| k.as_ref()).collect();
     names.sort_unstable();
     let shown = names.iter().take(5).copied().collect::<Vec<_>>().join(",");
     format!(
@@ -272,10 +275,10 @@ fn summarize_genes(distinct: &FxHashMap<&str, usize>) -> Box<str> {
 /// Label for the chromosome axis. `component` when matched rows carry no
 /// chromosome (mixture output), the single chromosome when all matches
 /// agree, else `*` for a multi-chromosome aggregate.
-fn summarize_chr(matched_rows: &[(usize, &str, &str, i64)]) -> Box<str> {
-    let mut chrs: Vec<&str> = matched_rows
+fn summarize_chr(matched_chrs: &[Box<str>]) -> Box<str> {
+    let mut chrs: Vec<&str> = matched_chrs
         .iter()
-        .map(|r| r.2)
+        .map(|c| c.as_ref())
         .filter(|c| !c.is_empty())
         .collect();
     chrs.sort_unstable();
@@ -470,32 +473,64 @@ fn read_site_annotation(
 }
 
 fn read_matrix_positions(
-    data_file: &str,
+    data_files: &[Box<str>],
     selector: &Selector,
     signal: &PileupSignal,
 ) -> anyhow::Result<MatrixGeneData> {
-    let (backend, resolved_path) = resolve_backend_file(data_file, None)?;
-    let data = open_sparse_matrix(&resolved_path, &backend)?;
+    // Accumulate across every input file. Multiple files (e.g. replicates)
+    // are merged per genomic position into one track; gene/chr labels and
+    // signals reflect the union of all files.
+    let mut pos_agg: FxHashMap<i64, PosAgg> = FxHashMap::default();
+    let mut distinct_genes: FxHashMap<Box<str>, usize> = FxHashMap::default();
+    let mut matched_chrs: Vec<Box<str>> = Vec::new();
+    let mut total_matched = 0usize;
 
-    let row_names = data.row_names()?;
+    for data_file in data_files {
+        let (backend, resolved_path) = resolve_backend_file(data_file, None)?;
+        let data = open_sparse_matrix(&resolved_path, &backend)?;
 
-    let mut matched_rows: Vec<(usize, &str, &str, i64)> = Vec::new();
-    let mut distinct_genes: FxHashMap<&str, usize> = FxHashMap::default();
+        let row_names = data.row_names()?;
 
-    for (idx, name) in row_names.iter().enumerate() {
-        if let Some((gene_part, chr, pos)) = parse_row_name(name) {
-            if selector.selects(gene_part, chr, pos) {
-                *distinct_genes.entry(gene_part).or_insert(0) += 1;
-                matched_rows.push((idx, gene_part, chr, pos));
+        let mut matched_rows: Vec<(usize, i64)> = Vec::new();
+        for (idx, name) in row_names.iter().enumerate() {
+            if let Some((gene_part, chr, pos)) = parse_row_name(name) {
+                if selector.selects(gene_part, chr, pos) {
+                    *distinct_genes.entry(gene_part.into()).or_insert(0) += 1;
+                    matched_chrs.push(chr.into());
+                    matched_rows.push((idx, pos));
+                }
+            }
+        }
+
+        if matched_rows.is_empty() {
+            continue;
+        }
+        total_matched += matched_rows.len();
+
+        let local_to_pos: Vec<i64> = matched_rows.iter().map(|(_, pos)| *pos).collect();
+        let row_indices: Vec<usize> = matched_rows.iter().map(|(idx, _)| *idx).collect();
+        let (_nrow, _ncol, triplets) = data.read_triplets_by_rows(row_indices)?;
+
+        for &pos in &local_to_pos {
+            pos_agg.entry(pos).or_insert(PosAgg { sum: 0.0, nnz: 0 });
+        }
+
+        for (row, _col, val) in &triplets {
+            let local_idx = *row as usize;
+            if local_idx < local_to_pos.len() && *val != 0.0 {
+                let pos = local_to_pos[local_idx];
+                let agg = pos_agg.get_mut(&pos).unwrap();
+                agg.sum += *val as f64;
+                agg.nnz += 1;
             }
         }
     }
 
-    if matched_rows.is_empty() {
+    if total_matched == 0 {
         return Err(anyhow::anyhow!(
-            "no rows matching {} in {}",
+            "no rows matching {} in {} file(s)",
             selector.describe(),
-            data_file
+            data_files.len()
         ));
     }
 
@@ -503,35 +538,16 @@ fn read_matrix_positions(
     // (and chromosomes); rather than erroring on ambiguity we pile them
     // all together and label the aggregate.
     let gene: Box<str> = summarize_genes(&distinct_genes);
-    let chr: Box<str> = summarize_chr(&matched_rows);
+    let chr: Box<str> = summarize_chr(&matched_chrs);
 
     info!(
-        "matched {} rows across {} gene(s) for {} [{}]",
-        matched_rows.len(),
+        "matched {} rows across {} gene(s) in {} file(s) for {} [{}]",
+        total_matched,
         distinct_genes.len(),
+        data_files.len(),
         selector.describe(),
         gene
     );
-
-    let local_to_pos: Vec<i64> = matched_rows.iter().map(|(_, _, _, pos)| *pos).collect();
-    let row_indices: Vec<usize> = matched_rows.iter().map(|(idx, _, _, _)| *idx).collect();
-    let (_nrow, _ncol, triplets) = data.read_triplets_by_rows(row_indices)?;
-
-    let mut pos_agg: FxHashMap<i64, PosAgg> = FxHashMap::default();
-
-    for &pos in &local_to_pos {
-        pos_agg.entry(pos).or_insert(PosAgg { sum: 0.0, nnz: 0 });
-    }
-
-    for (row, _col, val) in &triplets {
-        let local_idx = *row as usize;
-        if local_idx < local_to_pos.len() && *val != 0.0 {
-            let pos = local_to_pos[local_idx];
-            let agg = pos_agg.get_mut(&pos).unwrap();
-            agg.sum += *val as f64;
-            agg.nnz += 1;
-        }
-    }
 
     let mut positions: Vec<(i64, f64)> = pos_agg
         .iter()
@@ -745,7 +761,7 @@ pub fn run_pileup(args: &PileupArgs) -> anyhow::Result<()> {
     let selector = Selector::build(&args.genes, &args.regions)?;
 
     // Read sparse matrix data
-    let mtx = read_matrix_positions(&args.data_file, &selector, &args.signal)?;
+    let mtx = read_matrix_positions(&args.data_files, &selector, &args.signal)?;
     let matrix_num_sites = mtx.positions.len();
 
     // Determine x-axis extent and build site track if parquet provided
@@ -917,22 +933,22 @@ mod tests {
 
     #[test]
     fn aggregate_labels() {
-        let mut one: FxHashMap<&str, usize> = FxHashMap::default();
-        one.insert("ENSG1_GNA15", 2);
+        let mut one: FxHashMap<Box<str>, usize> = FxHashMap::default();
+        one.insert("ENSG1_GNA15".into(), 2);
         assert_eq!(summarize_genes(&one).as_ref(), "ENSG1_GNA15");
 
-        let mut many: FxHashMap<&str, usize> = FxHashMap::default();
-        many.insert("ENSG1_A", 1);
-        many.insert("ENSG2_B", 3);
+        let mut many: FxHashMap<Box<str>, usize> = FxHashMap::default();
+        many.insert("ENSG1_A".into(), 1);
+        many.insert("ENSG2_B".into(), 3);
         let label = summarize_genes(&many);
         assert!(label.starts_with("2 genes: "), "got {label}");
 
         // chr label: empty -> component, single -> that chr, mixed -> *
-        let mix = vec![(0usize, "g", "", 0i64), (1, "g", "", 1)];
+        let mix: Vec<Box<str>> = vec!["".into(), "".into()];
         assert_eq!(summarize_chr(&mix).as_ref(), "component");
-        let single = vec![(0usize, "g", "chr13", 10i64)];
+        let single: Vec<Box<str>> = vec!["chr13".into()];
         assert_eq!(summarize_chr(&single).as_ref(), "chr13");
-        let multi = vec![(0usize, "g", "chr1", 10i64), (1, "g", "chr2", 20)];
+        let multi: Vec<Box<str>> = vec!["chr1".into(), "chr2".into()];
         assert_eq!(summarize_chr(&multi).as_ref(), "*");
     }
 }
