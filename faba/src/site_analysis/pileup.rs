@@ -296,6 +296,9 @@ struct BinnedPileup {
     gene: Box<str>,
     chr: Box<str>,
     bins: Vec<f64>,
+    /// Distinct site coordinates (genomic order) backing the bins; used to
+    /// place `+` axis markers and the right-side location list.
+    sites: Vec<i64>,
     min_pos: i64,
     max_pos: i64,
     num_sites: usize,
@@ -577,25 +580,64 @@ fn bin_positions_with_extent(
     bins
 }
 
-/// Compact axis-tick label for a coordinate: `26781984` -> `26.782M`,
-/// `26000000` -> `26M` (trailing zeros trimmed). Values below 1k —
-/// component ordinals and sub-kb positions — render verbatim. Used only
-/// for the ASCII axis; the header and TSV keep full precision.
-fn abbrev_pos(pos: i64) -> String {
-    let (value, suffix) = match pos.unsigned_abs() {
-        n if n >= 1_000_000_000 => (pos as f64 / 1e9, "G"),
-        n if n >= 1_000_000 => (pos as f64 / 1e6, "M"),
-        n if n >= 1_000 => (pos as f64 / 1e3, "k"),
-        _ => return pos.to_string(),
-    };
-    // 3 decimals = kb resolution at the M scale, keeping nearby ticks
-    // distinguishable; trailing zeros trimmed for brevity.
-    let mut s = format!("{value:.3}");
-    while s.contains('.') && (s.ends_with('0') || s.ends_with('.')) {
-        s.pop();
+/// Distinct coordinates from a position/value list (already sorted by
+/// position), for the axis markers and right-side location list.
+fn distinct_positions(positions: &[(i64, f64)]) -> Vec<i64> {
+    let mut out: Vec<i64> = positions.iter().map(|(p, _)| *p).collect();
+    out.dedup();
+    out
+}
+
+/// Group digits in threes for readability: `26781984` -> `26,781,984`.
+fn fmt_thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let bytes = digits.as_bytes();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    if n < 0 {
+        out.push('-');
     }
-    s.push_str(suffix);
-    s
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
+/// Map a coordinate to its bin column under the same binning rule as
+/// [`bin_positions_with_extent`].
+fn pos_to_col(pos: i64, min_pos: i64, max_pos: i64, num_bins: usize) -> usize {
+    let span = (max_pos - min_pos).max(1) as u64;
+    let rel = (pos - min_pos).max(0) as u64;
+    (rel * num_bins as u64 / span).min(num_bins as u64 - 1) as usize
+}
+
+/// Right-side legend listing each site location top-to-bottom (genomic
+/// order, mirroring the `+` marks left-to-right). First line is a title;
+/// the list is capped to the rows available, with an overflow note.
+fn build_site_legend(pileup: &BinnedPileup, height: usize) -> Vec<String> {
+    if pileup.sites.is_empty() {
+        return Vec::new();
+    }
+    // Mixture rows have no chromosome — the "positions" are component ordinals.
+    let kind = if pileup.chr.is_empty() || pileup.chr.as_ref() == "component" {
+        "components".to_string()
+    } else {
+        format!("sites @ {}", pileup.chr)
+    };
+    let mut out = vec![format!("{} ({}):", kind, pileup.sites.len())];
+
+    let capacity = height.saturating_sub(1); // rows left under the title
+    let n = pileup.sites.len();
+    if n <= capacity {
+        out.extend(pileup.sites.iter().map(|&p| fmt_thousands(p)));
+    } else {
+        let shown = capacity.saturating_sub(1);
+        out.extend(pileup.sites.iter().take(shown).map(|&p| fmt_thousands(p)));
+        out.push(format!("... (+{} more)", n - shown));
+    }
+    out
 }
 
 fn print_vertical_histogram(pileup: &BinnedPileup, height: usize) {
@@ -603,8 +645,8 @@ fn print_vertical_histogram(pileup: &BinnedPileup, height: usize) {
         "  {}  {}:{}-{}  [{}] signal: {}  sites: {}",
         pileup.gene,
         pileup.chr,
-        pileup.min_pos,
-        pileup.max_pos,
+        fmt_thousands(pileup.min_pos),
+        fmt_thousands(pileup.max_pos),
         pileup.track_label,
         pileup.signal_name,
         pileup.num_sites
@@ -624,7 +666,11 @@ fn print_vertical_histogram(pileup: &BinnedPileup, height: usize) {
     let max_label = format!("{:.1}", max_val);
     let label_width = max_label.len().max(4);
 
-    for row in (1..=height).rev() {
+    // Locations listed down the right of the plot (one per row), so the
+    // x-axis only needs `+` markers rather than crowded text.
+    let legend = build_site_legend(pileup, height);
+
+    for (i, row) in (1..=height).rev().enumerate() {
         let threshold = max_val * row as f64 / height as f64;
 
         let label = if row == height {
@@ -646,35 +692,21 @@ fn print_vertical_histogram(pileup: &BinnedPileup, height: usize) {
             }
         }
 
-        eprintln!("{} |{}", label, bar);
-    }
-
-    let label_pad = " ".repeat(label_width);
-    eprintln!("{} +{}", label_pad, "-".repeat(pileup.bins.len()));
-
-    // Stacked (90° clockwise) tick labels: each coordinate reads
-    // top-to-bottom in its own column, so long genomic positions never
-    // crowd horizontally regardless of plot width. Left tick sits under
-    // the first bin, right tick under the last.
-    let left: Vec<char> = abbrev_pos(pileup.min_pos).chars().collect();
-    let right: Vec<char> = abbrev_pos(pileup.max_pos).chars().collect();
-    let left_col = label_width + 2; // pad + ' ' + '|' precede bar[0]
-    let right_col = left_col + pileup.bins.len().saturating_sub(1);
-    for r in 0..left.len().max(right.len()) {
-        let mut line = vec![' '; right_col + 1];
-        if let Some(&c) = left.get(r) {
-            line[left_col] = c;
+        let mut line = format!("{label} |{bar}");
+        if let Some(entry) = legend.get(i) {
+            line.push_str("   ");
+            line.push_str(entry);
         }
-        // Skip the right tick when it collapses onto the left one (a
-        // single-bin plot), where both coordinates are the same anyway.
-        if right_col > left_col {
-            if let Some(&c) = right.get(r) {
-                line[right_col] = c;
-            }
-        }
-        let line: String = line.into_iter().collect();
         eprintln!("{}", line.trim_end());
     }
+
+    // Axis line: `+` at every column that holds a site, `-` elsewhere.
+    let mut axis = vec!['-'; pileup.bins.len()];
+    for &pos in &pileup.sites {
+        axis[pos_to_col(pos, pileup.min_pos, pileup.max_pos, pileup.bins.len())] = '+';
+    }
+    let axis: String = axis.into_iter().collect();
+    eprintln!("{} +{}", " ".repeat(label_width), axis);
     eprintln!();
 }
 
@@ -744,6 +776,7 @@ pub fn run_pileup(args: &PileupArgs) -> anyhow::Result<()> {
         gene: mtx.gene.clone(),
         chr: mtx.chr.clone(),
         bins: bin_positions_with_extent(&sa.positions, effective_bins, min_pos, max_pos, false),
+        sites: distinct_positions(&sa.positions),
         min_pos,
         max_pos,
         num_sites: sa.num_sites,
@@ -756,6 +789,7 @@ pub fn run_pileup(args: &PileupArgs) -> anyhow::Result<()> {
         gene: mtx.gene,
         chr: mtx.chr,
         bins: matrix_bins,
+        sites: distinct_positions(&mtx.positions),
         min_pos,
         max_pos,
         num_sites: matrix_num_sites,
@@ -861,18 +895,24 @@ mod tests {
     }
 
     #[test]
-    fn abbreviated_axis_labels() {
-        // nearby coordinates stay distinguishable at kb resolution
-        assert_eq!(abbrev_pos(26780767), "26.781M");
-        assert_eq!(abbrev_pos(26781984), "26.782M");
-        // trailing zeros trimmed
-        assert_eq!(abbrev_pos(26000000), "26M");
-        assert_eq!(abbrev_pos(26780000), "26.78M");
-        assert_eq!(abbrev_pos(5_300), "5.3k");
-        assert_eq!(abbrev_pos(2_000_000_000), "2G");
-        // small values (component ordinals, sub-kb) render verbatim
-        assert_eq!(abbrev_pos(0), "0");
-        assert_eq!(abbrev_pos(42), "42");
+    fn thousands_and_axis_mapping() {
+        assert_eq!(fmt_thousands(26781984), "26,781,984");
+        assert_eq!(fmt_thousands(767), "767");
+        assert_eq!(fmt_thousands(0), "0");
+        assert_eq!(fmt_thousands(-1234), "-1,234");
+
+        // first site -> first column, last site -> last column
+        assert_eq!(pos_to_col(100, 100, 200, 10), 0);
+        assert_eq!(pos_to_col(200, 100, 200, 10), 9);
+        assert_eq!(pos_to_col(150, 100, 200, 10), 5);
+        // degenerate single-position extent collapses to column 0
+        assert_eq!(pos_to_col(100, 100, 100, 10), 0);
+    }
+
+    #[test]
+    fn distinct_positions_dedups_sorted() {
+        let p = [(10, 1.0), (10, 2.0), (20, 0.5), (30, 0.0)];
+        assert_eq!(distinct_positions(&p), vec![10, 20, 30]);
     }
 
     #[test]
