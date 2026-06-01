@@ -577,6 +577,27 @@ fn bin_positions_with_extent(
     bins
 }
 
+/// Compact axis-tick label for a coordinate: `26781984` -> `26.782M`,
+/// `26000000` -> `26M` (trailing zeros trimmed). Values below 1k —
+/// component ordinals and sub-kb positions — render verbatim. Used only
+/// for the ASCII axis; the header and TSV keep full precision.
+fn abbrev_pos(pos: i64) -> String {
+    let (value, suffix) = match pos.unsigned_abs() {
+        n if n >= 1_000_000_000 => (pos as f64 / 1e9, "G"),
+        n if n >= 1_000_000 => (pos as f64 / 1e6, "M"),
+        n if n >= 1_000 => (pos as f64 / 1e3, "k"),
+        _ => return pos.to_string(),
+    };
+    // 3 decimals = kb resolution at the M scale, keeping nearby ticks
+    // distinguishable; trailing zeros trimmed for brevity.
+    let mut s = format!("{value:.3}");
+    while s.contains('.') && (s.ends_with('0') || s.ends_with('.')) {
+        s.pop();
+    }
+    s.push_str(suffix);
+    s
+}
+
 fn print_vertical_histogram(pileup: &BinnedPileup, height: usize) {
     let header = format!(
         "  {}  {}:{}-{}  [{}] signal: {}  sites: {}",
@@ -631,12 +652,15 @@ fn print_vertical_histogram(pileup: &BinnedPileup, height: usize) {
     let label_pad = " ".repeat(label_width);
     eprintln!("{} +{}", label_pad, "-".repeat(pileup.bins.len()));
 
-    let left_label = format!("{}", pileup.min_pos);
-    let right_label = format!("{}", pileup.max_pos);
+    let left_label = abbrev_pos(pileup.min_pos);
+    let right_label = abbrev_pos(pileup.max_pos);
+    // Always leave at least one space so the two ends never merge into a
+    // single run of digits when the plot is narrower than the labels.
     let gap = pileup
         .bins
         .len()
-        .saturating_sub(left_label.len() + right_label.len());
+        .saturating_sub(left_label.len() + right_label.len())
+        .max(1);
     eprintln!(
         "{} {}{}{}",
         " ".repeat(label_width + 1),
@@ -827,6 +851,21 @@ mod tests {
         assert!(Selector::build(&[], &[]).is_err());
         // region-only is fine
         assert!(Selector::build(&[], &["chr1:1-9".into()]).is_ok());
+    }
+
+    #[test]
+    fn abbreviated_axis_labels() {
+        // nearby coordinates stay distinguishable at kb resolution
+        assert_eq!(abbrev_pos(26780767), "26.781M");
+        assert_eq!(abbrev_pos(26781984), "26.782M");
+        // trailing zeros trimmed
+        assert_eq!(abbrev_pos(26000000), "26M");
+        assert_eq!(abbrev_pos(26780000), "26.78M");
+        assert_eq!(abbrev_pos(5_300), "5.3k");
+        assert_eq!(abbrev_pos(2_000_000_000), "2G");
+        // small values (component ordinals, sub-kb) render verbatim
+        assert_eq!(abbrev_pos(0), "0");
+        assert_eq!(abbrev_pos(42), "42");
     }
 
     #[test]
