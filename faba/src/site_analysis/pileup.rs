@@ -652,22 +652,29 @@ fn print_vertical_histogram(pileup: &BinnedPileup, height: usize) {
     let label_pad = " ".repeat(label_width);
     eprintln!("{} +{}", label_pad, "-".repeat(pileup.bins.len()));
 
-    let left_label = abbrev_pos(pileup.min_pos);
-    let right_label = abbrev_pos(pileup.max_pos);
-    // Always leave at least one space so the two ends never merge into a
-    // single run of digits when the plot is narrower than the labels.
-    let gap = pileup
-        .bins
-        .len()
-        .saturating_sub(left_label.len() + right_label.len())
-        .max(1);
-    eprintln!(
-        "{} {}{}{}",
-        " ".repeat(label_width + 1),
-        left_label,
-        " ".repeat(gap),
-        right_label
-    );
+    // Stacked (90° clockwise) tick labels: each coordinate reads
+    // top-to-bottom in its own column, so long genomic positions never
+    // crowd horizontally regardless of plot width. Left tick sits under
+    // the first bin, right tick under the last.
+    let left: Vec<char> = abbrev_pos(pileup.min_pos).chars().collect();
+    let right: Vec<char> = abbrev_pos(pileup.max_pos).chars().collect();
+    let left_col = label_width + 2; // pad + ' ' + '|' precede bar[0]
+    let right_col = left_col + pileup.bins.len().saturating_sub(1);
+    for r in 0..left.len().max(right.len()) {
+        let mut line = vec![' '; right_col + 1];
+        if let Some(&c) = left.get(r) {
+            line[left_col] = c;
+        }
+        // Skip the right tick when it collapses onto the left one (a
+        // single-bin plot), where both coordinates are the same anyway.
+        if right_col > left_col {
+            if let Some(&c) = right.get(r) {
+                line[right_col] = c;
+            }
+        }
+        let line: String = line.into_iter().collect();
+        eprintln!("{}", line.trim_end());
+    }
     eprintln!();
 }
 
