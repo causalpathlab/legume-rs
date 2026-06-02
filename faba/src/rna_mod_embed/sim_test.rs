@@ -124,7 +124,7 @@ fn build_pseudobulk() -> PseudobulkData {
 
 fn test_args() -> RnaModEmbedArgs {
     RnaModEmbedArgs {
-        genes: "".into(),
+        genes: vec!["".into()],
         dartseq: None,
         atoi: None,
         apa: None,
@@ -241,7 +241,7 @@ fn recovers_region_resolved_deviation() {
     // Mean trained cell embedding per group.
     let e_cell = model.e_cell.to_vec2::<f32>().unwrap();
     let mean = |range: std::ops::Range<usize>| -> Vec<f32> {
-        let mut acc = vec![0.0_f32; H];
+        let mut acc = [0.0_f32; H];
         for c in range.clone() {
             for h in 0..H {
                 acc[h] += e_cell[c][h];

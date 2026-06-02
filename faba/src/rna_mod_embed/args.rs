@@ -12,25 +12,28 @@ use super::common::ComputeDevice;
 /// negative counts, etc.) stay in their own block below.
 #[derive(Args, Debug, Clone)]
 pub struct RnaModEmbedArgs {
-    /// Counts (gene-level) sparse matrix prefix. Rows must follow
-    /// `{gene_key}/count/{spliced|unspliced}`.
-    #[arg(long, required = true)]
-    pub genes: Box<str>,
+    /// Counts (gene-level) sparse matrix prefix(es), comma-separated.
+    /// Rows must follow `{gene_key}/count/{spliced|unspliced}`. Multiple
+    /// files are stacked under Union column alignment (cells merged by
+    /// barcode); use an embedded `@batch` tag on the barcodes to keep
+    /// samples as distinct batches (see `--batch-files`).
+    #[arg(long, required = true, value_delimiter = ',')]
+    pub genes: Vec<Box<str>>,
 
-    /// m6A (DART-seq) sparse matrix prefix. Rows
+    /// m6A (DART-seq) sparse matrix prefix(es), comma-separated. Rows
     /// `{gene_key}/m6A/{component|chr:pos}`.
-    #[arg(long)]
-    pub dartseq: Option<Box<str>>,
+    #[arg(long, value_delimiter = ',')]
+    pub dartseq: Option<Vec<Box<str>>>,
 
-    /// A-to-I editing sparse matrix prefix. Rows
+    /// A-to-I editing sparse matrix prefix(es), comma-separated. Rows
     /// `{gene_key}/A2I/{component|chr:pos}`.
-    #[arg(long)]
-    pub atoi: Option<Box<str>>,
+    #[arg(long, value_delimiter = ',')]
+    pub atoi: Option<Vec<Box<str>>>,
 
-    /// Alternative-polyA sparse matrix prefix. Rows
+    /// Alternative-polyA sparse matrix prefix(es), comma-separated. Rows
     /// `{gene_key}/pA/{component|chr:pos}`.
-    #[arg(long)]
-    pub apa: Option<Box<str>>,
+    #[arg(long, value_delimiter = ',')]
+    pub apa: Option<Vec<Box<str>>>,
 
     ////////////////////////////////////////
     // Component annotations (region binning)
@@ -55,7 +58,12 @@ pub struct RnaModEmbedArgs {
     #[arg(long)]
     pub apa_components: Option<Box<str>>,
 
-    /// Optional batch-label files, one per modality input.
+    /// Optional batch labels. Under Union column alignment (rmodem's
+    /// mode) exactly **one** file is expected, listing one label per
+    /// unified cell — a barcode shared across modalities cannot carry two
+    /// labels. As an alternative to this file, embed an `@batch` tag in
+    /// the barcodes (e.g. `AAACCC@sampleA`); the loader infers and
+    /// reconciles per-cell batches from those tags.
     #[arg(short = 'b', long, value_delimiter = ',')]
     pub batch_files: Option<Vec<Box<str>>>,
 
