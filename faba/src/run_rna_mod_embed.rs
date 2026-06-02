@@ -22,17 +22,21 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
 
     // Collect modality files in faba's conventional order: count first,
     // then m6A, A2I, pA. Order seeds modality_id assignment in the
-    // FeatureTable (slot 0 is forced to "count" regardless).
+    // FeatureTable (slot 0 is forced to "count" regardless). Each flag
+    // accepts a comma-separated list of prefixes; all are stacked under
+    // Union (cells merged by barcode, batches resolved from the barcodes'
+    // `@batch` tags or a single --batch-files file). Modality is inferred
+    // from the row name, not the flag, so multiple files per flag are fine.
     let mut data_files: Vec<Box<str>> = Vec::new();
-    data_files.push(args.genes.clone());
-    if let Some(p) = args.dartseq.as_ref() {
-        data_files.push(p.clone());
+    data_files.extend(args.genes.iter().cloned());
+    if let Some(ps) = args.dartseq.as_ref() {
+        data_files.extend(ps.iter().cloned());
     }
-    if let Some(p) = args.atoi.as_ref() {
-        data_files.push(p.clone());
+    if let Some(ps) = args.atoi.as_ref() {
+        data_files.extend(ps.iter().cloned());
     }
-    if let Some(p) = args.apa.as_ref() {
-        data_files.push(p.clone());
+    if let Some(ps) = args.apa.as_ref() {
+        data_files.extend(ps.iter().cloned());
     }
 
     let batch_files: Option<&[Box<str>]> = if args.ignore_batch {

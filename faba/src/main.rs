@@ -288,7 +288,12 @@ Example:\n  \
   faba rmodem --genes out/rep1_wt_genes.zarr.zip \\\n    \
               --dartseq out/rep1_wt_m6a_mixture.zarr.zip \\\n    \
               --atoi out/rep1_wt_atoi_mixture.zarr.zip \\\n    \
-              --apa out/rep1_wt_apa_mixture.zarr.zip -o out/rmodem")]
+              --apa out/rep1_wt_apa_mixture.zarr.zip -o out/rmodem\n\n\
+Multiple samples (comma-separated per modality; each sample a batch via\n\
+its barcodes' `@batch` tag):\n  \
+  faba rmodem --genes out/rep1_genes.zarr.zip,out/rep2_genes.zarr.zip \\\n    \
+              --dartseq out/rep1_m6a.zarr.zip,out/rep2_m6a.zarr.zip \\\n    \
+              -o out/rmodem")]
     RnaModEmbed(RnaModEmbedArgs),
 
     #[command(
