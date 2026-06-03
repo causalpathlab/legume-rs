@@ -61,6 +61,18 @@ pub struct RnaModEmbedManifest {
     pub agg_bias: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comp_bias: Option<String>,
+
+    // Archetype-based topics (`--resolve-topics`). Senna topic-model
+    // layout: `latent` = log θ [N×K], `dictionary` = β [G×K],
+    // `topic_embedding` = α [K×H]. Absent when topics weren't resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_topics: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dictionary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_embedding: Option<String>,
 }
 
 /// Write every model artifact under the configured prefix, then emit
@@ -71,6 +83,7 @@ pub fn write_outputs(
     pb: &PseudobulkData,
     model: &RnaModEmbedModel,
     unified: &UnifiedData,
+    topics: Option<&super::topics::ResolvedTopics>,
 ) -> Result<()> {
     let path_gene_emb = format!("{prefix}.gene_embedding.parquet");
     let path_z = format!("{prefix}.gene_program_loadings.parquet");
@@ -225,6 +238,10 @@ pub fn write_outputs(
         cell_to_pb: path_cell_to_pb,
         agg_bias: Some(path_agg_bias),
         comp_bias: Some(path_comp_bias),
+        num_topics: topics.map(|t| t.k),
+        latent: topics.map(|t| t.latent.clone()),
+        dictionary: topics.map(|t| t.dictionary.clone()),
+        topic_embedding: topics.map(|t| t.topic_embedding.clone()),
     };
 
     let json = serde_json::to_string_pretty(&manifest)?;

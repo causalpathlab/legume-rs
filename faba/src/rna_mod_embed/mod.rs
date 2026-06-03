@@ -20,12 +20,14 @@
 pub mod args;
 pub mod common;
 pub mod feature_table;
+pub mod gene_weight;
 pub mod loss;
 pub mod manifest;
 pub mod model;
 pub mod pseudobulk;
 pub mod region;
 pub mod sampling;
+pub mod topics;
 pub mod train;
 
 #[cfg(test)]

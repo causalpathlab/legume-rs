@@ -115,6 +115,23 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
     let n_cells = unified.n_cells();
     let pb = build_pseudobulk(&mut unified, &table, args).context("build pseudobulk")?;
 
+    // Persist the per-gene NB-Fisher housekeeping weights (senna
+    // convention: `{out}.fisher_weights.parquet`) so the suppression is
+    // inspectable. Skipped when the penalty is disabled.
+    if args.housekeeping_penalty > 0.0 {
+        data_beans_alg::gene_weighting::save_fisher_weights(
+            &args.out,
+            &pb.gene_fisher_weights,
+            &table.gene_names,
+        )
+        .context("save fisher weights")?;
+        info!(
+            "wrote {}.fisher_weights.parquet ({} genes)",
+            args.out,
+            pb.gene_fisher_weights.len()
+        );
+    }
+
     let n_pbs_per_level: Vec<usize> = pb.pb_pools_per_level.iter().map(|l| l.n_units).collect();
 
     let dev = args
@@ -137,7 +154,22 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
     let stop = setup_stop_handler();
     train(args, &table, &pb, &mut model, &stop).context("training loop")?;
 
-    write_outputs(&args.out, &table, &pb, &model, &unified).context("write outputs")?;
+    // Archetype-based topics from the (possibly interrupted) embedding —
+    // runs before output so the manifest can reference them. When training
+    // was Ctrl+C-stopped this still reports topics, skipping the K-sweep.
+    let topics = if args.resolve_topics {
+        Some(
+            crate::rna_mod_embed::topics::resolve_topics(
+                &args.out, &model, &table, &unified, args, &stop,
+            )
+            .context("resolve topics")?,
+        )
+    } else {
+        None
+    };
+
+    write_outputs(&args.out, &table, &pb, &model, &unified, topics.as_ref())
+        .context("write outputs")?;
 
     info!("done — prefix '{}'", args.out);
     Ok(())
@@ -201,6 +233,27 @@ fn validate_args(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
         "--tau-modality must be a finite value in [0, 1] (got {})",
         args.tau_modality
     );
+    anyhow::ensure!(
+        args.housekeeping_penalty.is_finite() && args.housekeeping_penalty >= 0.0,
+        "--housekeeping-penalty must be a finite value ≥ 0 (got {})",
+        args.housekeeping_penalty
+    );
+    if args.resolve_topics {
+        if let Some(k) = args.num_topics {
+            anyhow::ensure!(k >= 2, "--num-topics must be ≥ 2 (got {})", k);
+        } else {
+            anyhow::ensure!(
+                args.max_k >= 2,
+                "--max-k must be ≥ 2 for the topic auto-sweep (got {})",
+                args.max_k
+            );
+        }
+        anyhow::ensure!(
+            args.aa_iters > 0,
+            "--aa-iters must be > 0 (got {})",
+            args.aa_iters
+        );
+    }
     anyhow::ensure!(
         args.f_agg.is_finite() && (0.0..=1.0).contains(&args.f_agg),
         "--f-agg must be in [0, 1] (got {})",

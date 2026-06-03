@@ -224,6 +224,21 @@ pub struct RnaModEmbedArgs {
     #[arg(long, default_value_t = 0.5)]
     pub tau_modality: f32,
 
+    /// NB-Fisher housekeeping penalty (exponent on the per-gene Fisher
+    /// weight `w_g = 1/(1 + π_g·s̄·φ(μ_g))`). Mirrors `senna bge/topic`:
+    /// high-mean / high-dispersion genes (ribosomal, housekeeping,
+    /// library-size drivers) are sampled less from the count-based anchor
+    /// pools (agg + count-comp) so they stop monopolising the shared
+    /// program loadings z. `0` disables (`w⁰ = 1`); `1` is full strength;
+    /// `> 1` is more aggressive. The m6A / modifier pools are unaffected.
+    /// Per-gene weights are written to `{out}.fisher_weights.parquet`.
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "NB-Fisher housekeeping penalty (exponent; 0 = off)"
+    )]
+    pub housekeeping_penalty: f32,
+
     ////////////////////////////////////////
     // Negatives
     ////////////////////////////////////////
@@ -257,6 +272,40 @@ pub struct RnaModEmbedArgs {
     /// for when Phase 4 lands.
     #[arg(long, default_value_t = false)]
     pub use_modification_fraction: bool,
+
+    ////////////////////////////////////////
+    // Topic resolution (archetypal, post-training)
+    //
+    // Mirrors `senna bge --resolve-etm`: archetypal analysis on the
+    // trained cell embedding e_cell → archetypes α (topic embeddings),
+    // per-cell simplex θ (topic proportions), and a gene×topic dictionary
+    // β = log_softmax(β_g·αᵀ). Writes the senna topic-model layout
+    // (`{out}.{latent,dictionary,topic_embedding}.parquet`) consumed by
+    // `senna {plot,clustering,annotate} --from`. No retraining.
+    ////////////////////////////////////////
+    /// Resolve archetype-based topics from the cell embedding after
+    /// training and write the senna topic-model layout.
+    #[arg(long, default_value_t = false)]
+    pub resolve_topics: bool,
+
+    /// Number of topics K for `--resolve-topics`. Omit to auto-select via
+    /// an archetypal RSS-elbow sweep over `2..=--max-k`.
+    #[arg(long = "num-topics")]
+    pub num_topics: Option<usize>,
+
+    /// Upper K for the `--resolve-topics` auto-sweep (when `--num-topics`
+    /// is unset).
+    #[arg(long = "max-k", default_value_t = 30)]
+    pub max_k: usize,
+
+    /// Archetypal-analysis alternating iterations for `--resolve-topics`.
+    #[arg(long = "aa-iters", default_value_t = 50)]
+    pub aa_iters: usize,
+
+    /// Cap on cells used to fit archetypes for `--resolve-topics`
+    /// (θ is still assigned for every cell).
+    #[arg(long = "aa-subsample")]
+    pub aa_subsample: Option<usize>,
 
     ////////////////////////////////////////
     // Misc

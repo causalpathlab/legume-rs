@@ -119,6 +119,7 @@ fn build_pseudobulk() -> PseudobulkData {
         cell_to_pb_per_level: Vec::new(),
         cell_pools,
         pb_pools_per_level: Vec::new(),
+        gene_fisher_weights: vec![1.0; N_GENES],
     }
 }
 
@@ -156,6 +157,12 @@ fn test_args() -> RnaModEmbedArgs {
         f_count: 0.0,
         tau: 1.0,
         tau_modality: 0.5,
+        housekeeping_penalty: 0.0,
+        resolve_topics: false,
+        num_topics: None,
+        max_k: 30,
+        aa_iters: 50,
+        aa_subsample: None,
         n_rand: 8,
         n_swap_gene_mode: 4,
         n_swap_modality: 6,
