@@ -6,11 +6,12 @@ pub fn read_row_names(
     row_file: Box<str>,
     max_row_name_idx: usize,
 ) -> anyhow::Result<Vec<Box<str>>> {
-    let _names = read_lines_of_words(&row_file, -1)?.lines;
-    Ok(_names
+    let names = read_lines_of_words(&row_file, -1)?.lines;
+    Ok(names
         .into_iter()
         .map(|x| {
-            let s = (0..x.len().min(max_row_name_idx))
+            let end = x.len().min(max_row_name_idx.saturating_add(1));
+            let s = (0..end)
                 .filter_map(|i| x.get(i))
                 .map(|x| x.to_string())
                 .collect::<Vec<_>>()
@@ -27,11 +28,12 @@ pub fn read_col_names(
     col_file: Box<str>,
     max_column_name_idx: usize,
 ) -> anyhow::Result<Vec<Box<str>>> {
-    let _names = read_lines_of_words(&col_file, -1)?.lines;
-    Ok(_names
+    let names = read_lines_of_words(&col_file, -1)?.lines;
+    Ok(names
         .into_iter()
         .map(|x| {
-            let s = (0..x.len().min(max_column_name_idx))
+            let end = x.len().min(max_column_name_idx.saturating_add(1));
+            let s = (0..end)
                 .filter_map(|i| x.get(i))
                 .map(|x| x.to_string())
                 .collect::<Vec<_>>()
@@ -55,27 +57,32 @@ pub fn parse_index_spec(spec: &str) -> anyhow::Result<Vec<usize>> {
         if token.is_empty() {
             continue;
         }
-        match token.split_once('-') {
-            Some((start, end)) => {
-                let start: usize = start
-                    .trim()
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("invalid range start in `{}`", token))?;
-                let end: usize = end
-                    .trim()
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("invalid range end in `{}`", token))?;
-                if start > end {
-                    anyhow::bail!("range start {} exceeds end {} in `{}`", start, end, token);
-                }
-                out.extend(start..=end);
+        if token.starts_with('-') {
+            anyhow::bail!("negative indices are not supported: `{}`", token);
+        }
+        if let Ok(idx) = token.parse::<usize>() {
+            out.push(idx);
+            continue;
+        }
+        if token.contains('-') {
+            let parts: Vec<&str> = token.split('-').collect();
+            if parts.len() != 2 || parts[0].trim().is_empty() || parts[1].trim().is_empty() {
+                anyhow::bail!("invalid range `{}`", token);
             }
-            None => {
-                let idx: usize = token
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("invalid index `{}`", token))?;
-                out.push(idx);
+            let start: usize = parts[0]
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid range start in `{}`", token))?;
+            let end: usize = parts[1]
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid range end in `{}`", token))?;
+            if start > end {
+                anyhow::bail!("range start {} exceeds end {} in `{}`", start, end, token);
             }
+            out.extend(start..=end);
+        } else {
+            anyhow::bail!("invalid index `{}`", token);
         }
     }
     if out.is_empty() {
@@ -122,5 +129,7 @@ mod tests {
         assert!(parse_index_spec("5-1").is_err());
         assert!(parse_index_spec("abc").is_err());
         assert!(parse_index_spec("").is_err());
+        assert!(parse_index_spec("-5").is_err());
+        assert!(parse_index_spec("3--5").is_err());
     }
 }

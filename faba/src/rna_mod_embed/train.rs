@@ -168,7 +168,7 @@ pub fn train(
             );
         }
 
-        if stop.load(Ordering::SeqCst) {
+        if stop.load(Ordering::Relaxed) {
             info!(
                 "stopping early at epoch {}/{} — finalizing outputs",
                 epoch + 1,
