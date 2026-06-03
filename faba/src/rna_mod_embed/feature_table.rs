@@ -132,9 +132,13 @@ pub struct FeatureTable {
     /// modality `m`. Modality 0 (count) is empty by convention.
     pub modifier_rows_by_modality: Vec<Vec<u32>>,
 
-    /// `measured[g][m]` = true iff (g, m) has at least one modifier-comp
-    /// row in the input. Used by sampling.rs to restrict swap-z draws to
-    /// genes with real measurement in modality m.
+    /// `measured[g][m]` = true iff gene `g` has at least one input row in
+    /// modality `m` — a count-comp row for the count modality (slot 0), a
+    /// modifier-comp row otherwise. sampling.rs reads only the modifier
+    /// columns (slot ≥ 1) to restrict swap-z draws to genes with real
+    /// measurement in modality m; the count column exists so the exported
+    /// `measured_mask.parquet` reflects count coverage rather than reading
+    /// as all-zero.
     pub measured: Vec<Vec<bool>>,
 }
 
@@ -244,8 +248,14 @@ impl FeatureTable {
         let n_genes = gene_names.len();
         let n_modalities = modality_names.len();
 
-        // measured[g][m]: any modifier-comp row for (g, m)?
+        // measured[g][m]: any input row for (g, m)? Count-comp rows mark
+        // the count modality (slot 0); modifier-comp rows mark the rest.
         let mut measured = vec![vec![false; n_modalities]; n_genes];
+        for &row in &count_comp_rows {
+            if let Some(g) = row_gene[row as usize] {
+                measured[g as usize][0] = true;
+            }
+        }
         for &row in &modifier_comp_rows {
             if let (Some(g), Some(m)) = (row_gene[row as usize], row_modality[row as usize]) {
                 measured[g as usize][m as usize] = true;
@@ -364,5 +374,14 @@ mod tests {
             .unwrap();
         assert!(tab.measured[gene_a as usize][m6a]);
         assert!(!tab.measured[gene_c as usize][m6a]);
+
+        // Count modality (slot 0) reflects count-comp coverage: geneA/geneB
+        // have count rows, geneC (pA only) does not. Regression guard for
+        // the previously all-zero count column in measured_mask.parquet.
+        let gene_b = tab.gene_names.iter().position(|g| &**g == "geneB").unwrap() as u32;
+        assert_eq!(tab.modality_names[0].as_ref(), "count");
+        assert!(tab.measured[gene_a as usize][0]);
+        assert!(tab.measured[gene_b as usize][0]);
+        assert!(!tab.measured[gene_c as usize][0]);
     }
 }
