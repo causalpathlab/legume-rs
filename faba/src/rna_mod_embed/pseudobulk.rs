@@ -77,6 +77,11 @@ pub struct PseudobulkData {
     pub cell_pools: AxisPools,
     /// Per-pb-level pools, coarsest-first.
     pub pb_pools_per_level: Vec<AxisPools>,
+    /// Per-gene NB-Fisher housekeeping weights (length `n_genes`, in
+    /// `(0, 1]`). All `1.0` when `--housekeeping-penalty 0`. Already
+    /// folded into the anchor sampling pools; kept here only so the
+    /// caller can persist them to `{out}.fisher_weights.parquet`.
+    pub gene_fisher_weights: Vec<f32>,
 }
 
 impl PseudobulkData {
@@ -157,7 +162,7 @@ pub fn build_pseudobulk(
 
     // Cell axis: identity partition.
     let cell_identity: Vec<usize> = (0..n_cells).collect();
-    let cell_pools = aggregate_pools(
+    let mut cell_pools = aggregate_pools(
         unified,
         table,
         &cell_identity,
@@ -167,7 +172,7 @@ pub fn build_pseudobulk(
     );
 
     // Pb axes: one set of pools per level (coarsest-first).
-    let pb_pools_per_level: Vec<AxisPools> = cell_to_pb_per_level
+    let mut pb_pools_per_level: Vec<AxisPools> = cell_to_pb_per_level
         .iter()
         .map(|cell_to_pb| {
             let n_pbs = cell_to_pb.iter().copied().max().map(|m| m + 1).unwrap_or(0);
@@ -200,11 +205,76 @@ pub fn build_pseudobulk(
         );
     }
 
+    ////////////////////////////////////////
+    // 4. NB-Fisher housekeeping penalty
+    ////////////////////////////////////////
+    // Per-gene Fisher weights from the cell-axis count modality, folded
+    // into the count-based anchor pools (agg + count-comp) so housekeeping
+    // genes stop monopolising the shared program loadings z. See
+    // `gene_weight`. A no-op (all weights 1.0) when penalty == 0.
+    let n_genes = table.n_genes();
+    let gene_fisher_weights = if args.housekeeping_penalty > 0.0 {
+        let w = super::gene_weight::fisher_weights_from_count_pool(
+            &cell_pools.count_comp,
+            n_genes,
+            n_cells,
+        );
+        apply_fisher_to_axis_pools(&mut cell_pools, &w, args.housekeeping_penalty);
+        for lvl in pb_pools_per_level.iter_mut() {
+            apply_fisher_to_axis_pools(lvl, &w, args.housekeeping_penalty);
+        }
+        log_fisher_summary(&w, table, args.housekeeping_penalty);
+        w
+    } else {
+        vec![1.0; n_genes]
+    };
+
     Ok(PseudobulkData {
         cell_to_pb_per_level,
         cell_pools,
         pb_pools_per_level,
+        gene_fisher_weights,
     })
+}
+
+/// Apply per-gene Fisher weights to an axis's two count-based anchor
+/// pools (agg + count-comp). Modifier (m6A / A2I / pA) pools are left
+/// untouched — that signal is balanced via `--tau-modality` and is what
+/// the model is meant to recover.
+fn apply_fisher_to_axis_pools(pools: &mut AxisPools, fisher: &[f32], penalty: f32) {
+    super::gene_weight::apply_to_pool(&mut pools.agg, fisher, penalty);
+    super::gene_weight::apply_to_pool(&mut pools.count_comp, fisher, penalty);
+}
+
+/// One-line diagnostic: how many genes the penalty meaningfully shrinks,
+/// plus the most-attenuated names (the suspected housekeeping/ribosomal
+/// drivers) so the run log shows what got down-weighted.
+fn log_fisher_summary(weights: &[f32], table: &FeatureTable, penalty: f32) {
+    let n = weights.len();
+    if n == 0 {
+        return;
+    }
+    let n_attenuated = weights.iter().filter(|&&w| w < 0.5).count();
+    let min = weights.iter().cloned().fold(f32::INFINITY, f32::min);
+    let mean = weights.iter().sum::<f32>() / n as f32;
+
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.sort_by(|&a, &b| {
+        weights[a]
+            .partial_cmp(&weights[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let top: Vec<String> = idx
+        .iter()
+        .take(10)
+        .map(|&g| format!("{}={:.3}", table.gene_names[g], weights[g]))
+        .collect();
+
+    info!(
+        "NB-Fisher housekeeping penalty (exp={penalty}): {n_attenuated}/{n} genes w<0.5 \
+         (min={min:.3}, mean={mean:.3}); most-attenuated: {}",
+        top.join(", ")
+    );
 }
 
 /// Aggregate `unified.triplets` to per-(gene, axis_id) granularity per

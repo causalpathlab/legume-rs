@@ -93,8 +93,21 @@ fn sub_batch_loss(model: &RnaModEmbedModel, axis: Axis, sub: &SubBatch) -> Resul
 
     let log_sm = candle_nn::ops::log_softmax(&all_scores, 1)?;
     let log_p_pos = log_sm.i((.., 0))?;
-    let neg = log_p_pos.affine(-1.0, 0.0)?;
-    Ok(neg.mean_all()?)
+    let neg = log_p_pos.affine(-1.0, 0.0)?; // [B] per-positive NCE loss
+
+    ////////////////////////////////////////
+    // NB-Fisher-weighted mean over positives
+    ////////////////////////////////////////
+    // Each positive's loss is scaled by its per-gene Fisher weight
+    // `w_i ∈ (0, 1]` (housekeeping anchors < 1, modifier edges = 1), then
+    // normalised by Σw so the term stays a convex combination — a
+    // down-weighted gene contributes less to the objective without
+    // rescaling the overall loss magnitude. When the penalty is off every
+    // `w_i = 1` and this reduces exactly to `neg.mean_all()`.
+    let w = Tensor::from_slice(&pos.weight, b, &model.dev)?;
+    let sum_w = w.sum_all()?;
+    let weighted = (neg * &w)?.sum_all()?;
+    Ok(weighted.broadcast_div(&sum_w)?)
 }
 
 fn score_negative_slate(
