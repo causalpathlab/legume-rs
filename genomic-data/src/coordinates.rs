@@ -1,5 +1,6 @@
 use crate::gff::GeneId;
 use crate::sam::Strand;
+use std::collections::HashMap;
 
 /// Compare chromosome names ignoring optional "chr" prefix.
 ///
@@ -26,6 +27,17 @@ pub struct PeakCoord {
 pub struct GeneTss {
     pub chr: Box<str>,
     pub tss: i64,
+}
+
+/// Gene TSS position **with strand** parsed from GFF. Like [`GeneTss`]
+/// but retains the strand so callers (e.g. strand-resolved genomic
+/// pileups) can split forward (Watson) from backward (Crick) genes.
+#[derive(Debug, Clone)]
+pub struct GeneLoc {
+    pub chr: Box<str>,
+    /// Transcription start site (start on `+`, stop on `-`).
+    pub tss: i64,
+    pub strand: Strand,
 }
 
 /// Gene annotation simplified for eQTL and cis-regulatory analysis.
@@ -147,18 +159,39 @@ pub fn find_cis_peaks(
         .collect()
 }
 
-/// Load gene TSS positions from a GFF/GTF file.
+/// Load gene TSS positions from a GFF/GTF file, aligned to `gene_names`
+/// by exact symbol match. Strand-discarding projection of
+/// [`load_gene_loci`].
 pub fn load_gene_tss(
     gff_file: &str,
     gene_names: &[Box<str>],
 ) -> anyhow::Result<Vec<Option<GeneTss>>> {
+    Ok(load_gene_loci(gff_file, gene_names)?
+        .into_iter()
+        .map(|loc| {
+            loc.map(|l| GeneTss {
+                chr: l.chr,
+                tss: l.tss,
+            })
+        })
+        .collect())
+}
+
+/// Load a `gene-symbol → (chr, TSS, strand)` map from a GFF/GTF file.
+///
+/// Only `gene` features are kept; each gene is keyed by its symbol,
+/// falling back to the Ensembl id when the symbol is missing. Unlike
+/// [`load_gene_tss`], the strand is retained so callers can split
+/// forward/Watson genes from backward/Crick genes. Keys are the raw GFF
+/// symbols — callers that need alias-tolerant matching (e.g.
+/// `ENSG…_SYMBOL` row names) should canonicalize both sides themselves.
+pub fn load_gene_loci_map(gff_file: &str) -> anyhow::Result<HashMap<Box<str>, GeneLoc>> {
     use crate::gff::{read_gff_record_vec, FeatureType, GeneSymbol};
     use log::info;
-    use rustc_hash::FxHashMap as HashMap;
 
     let records = read_gff_record_vec(gff_file)?;
 
-    let mut tss_map: HashMap<Box<str>, GeneTss> = Default::default();
+    let mut loc_map: HashMap<Box<str>, GeneLoc> = HashMap::new();
     for rec in &records {
         if rec.feature_type != FeatureType::Gene {
             continue;
@@ -174,32 +207,70 @@ pub fn load_gene_tss(
                 id
             }
         };
-        tss_map.insert(
+        loc_map.insert(
             key,
-            GeneTss {
+            GeneLoc {
                 chr: rec.seqname.clone(),
                 tss,
+                strand: rec.strand,
             },
         );
     }
 
-    info!(
-        "Loaded {} gene positions from GFF, matching against {} genes",
-        tss_map.len(),
-        gene_names.len()
-    );
+    info!("Loaded {} gene loci from GFF", loc_map.len());
+    Ok(loc_map)
+}
 
-    let result: Vec<Option<GeneTss>> = gene_names
+/// Load gene TSS positions **and strand** from a GFF/GTF file, aligned
+/// to `gene_names` by exact symbol match (`None` where a name has no
+/// matching `gene` record). For alias-tolerant matching, prefer
+/// [`load_gene_loci_map`] + a caller-side canonicalizer.
+pub fn load_gene_loci(
+    gff_file: &str,
+    gene_names: &[Box<str>],
+) -> anyhow::Result<Vec<Option<GeneLoc>>> {
+    use log::info;
+
+    let loc_map = load_gene_loci_map(gff_file)?;
+
+    let result: Vec<Option<GeneLoc>> = gene_names
         .iter()
-        .map(|name| tss_map.get(name).cloned())
+        .map(|name| loc_map.get(name).cloned())
         .collect();
 
     let matched = result.iter().filter(|x| x.is_some()).count();
-    info!(
-        "Matched {}/{} genes to GFF positions",
-        matched,
-        gene_names.len()
-    );
+    info!("Matched {}/{} genes to GFF loci", matched, gene_names.len());
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_gene_loci_keeps_strand_and_tss() {
+        // Two genes: AAA on +, BBB on -. TSS = start on +, stop on -.
+        let gtf = "\
+chr1\tHAVANA\tgene\t100\t200\t.\t+\t.\tgene_id \"ENSG001\"; gene_name \"AAA\"; gene_type \"protein_coding\"
+chr1\tHAVANA\tgene\t400\t600\t.\t-\t.\tgene_id \"ENSG002\"; gene_name \"BBB\"; gene_type \"protein_coding\"
+chr1\tHAVANA\texon\t100\t150\t.\t+\t.\tgene_id \"ENSG001\"; gene_name \"AAA\"
+";
+        let path = std::env::temp_dir().join(format!("genloci_{}.gtf", std::process::id()));
+        std::fs::write(&path, gtf).unwrap();
+        let names: Vec<Box<str>> = vec!["AAA".into(), "BBB".into(), "MISSING".into()];
+        let loci = load_gene_loci(path.to_str().unwrap(), &names).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let aaa = loci[0].as_ref().expect("AAA present");
+        assert!(matches!(aaa.strand, Strand::Forward));
+        assert_eq!(aaa.tss, 100);
+        assert_eq!(chr_stripped(&aaa.chr), "1");
+
+        let bbb = loci[1].as_ref().expect("BBB present");
+        assert!(matches!(bbb.strand, Strand::Backward));
+        assert_eq!(bbb.tss, 600);
+
+        assert!(loci[2].is_none());
+    }
 }
