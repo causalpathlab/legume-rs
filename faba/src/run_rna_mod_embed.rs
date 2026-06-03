@@ -154,9 +154,14 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
     let stop = setup_stop_handler();
     train(args, &table, &pb, &mut model, &stop).context("training loop")?;
 
-    // Archetype-based topics from the (possibly interrupted) embedding —
-    // runs before output so the manifest can reference them. When training
-    // was Ctrl+C-stopped this still reports topics, skipping the K-sweep.
+    // Durable embeddings first, so a force-abort (second Ctrl+C) during the
+    // optional topic step never loses the trained model.
+    write_outputs(&args.out, &table, &pb, &model, &unified).context("write outputs")?;
+
+    // Archetype-based topics from the (possibly interrupted) embedding.
+    // Runs after the embeddings are on disk; the manifest below then
+    // references them. When training was Ctrl+C-stopped this still reports
+    // topics, skipping the K-sweep.
     let topics = if args.resolve_topics {
         Some(
             crate::rna_mod_embed::topics::resolve_topics(
@@ -168,8 +173,9 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
         None
     };
 
-    write_outputs(&args.out, &table, &pb, &model, &unified, topics.as_ref())
-        .context("write outputs")?;
+    // Manifest last, so it records the resolved-topic artifacts.
+    crate::rna_mod_embed::manifest::write_manifest(&args.out, &model, topics.as_ref())
+        .context("write manifest")?;
 
     info!("done — prefix '{}'", args.out);
     Ok(())
@@ -239,6 +245,13 @@ fn validate_args(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
         args.housekeeping_penalty
     );
     if args.resolve_topics {
+        // --no-cell-axis leaves e_cell at its random init (never trained),
+        // so resolving topics from it would yield archetypes of noise.
+        anyhow::ensure!(
+            !args.no_cell_axis,
+            "--resolve-topics requires a trained cell embedding, but --no-cell-axis \
+             leaves e_cell at its random init; drop one of the two flags"
+        );
         if let Some(k) = args.num_topics {
             anyhow::ensure!(k >= 2, "--num-topics must be ≥ 2 (got {})", k);
         } else {

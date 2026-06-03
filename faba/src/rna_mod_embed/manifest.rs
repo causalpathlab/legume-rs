@@ -34,6 +34,10 @@ pub struct RnaModEmbedManifest {
 
     /// β_g — `[G × H]` base gene embedding; first column = gene name.
     pub gene_embedding: String,
+    /// β_g again under senna's frozen-feature name (`[G × H]`). Lets
+    /// `senna itopic --freeze-feature-embedding {prefix}` reuse the faba
+    /// gene embedding as a fixed ρ.
+    pub feature_embedding: String,
     /// z_g — `[G × K]` matrix; first column = gene name. (Mode B only.)
     pub gene_program_loadings: String,
     /// δ — long format `[(K·M) × H]`; row name `program_{k}/modality_{m}`.
@@ -75,15 +79,16 @@ pub struct RnaModEmbedManifest {
     pub topic_embedding: Option<String>,
 }
 
-/// Write every model artifact under the configured prefix, then emit
-/// `{prefix}.faba.json`.
+/// Write every model artifact (parquets) under the configured prefix.
+/// The manifest is emitted separately by [`write_manifest`] **after**
+/// optional topic resolution, so the durable embeddings land first and
+/// the manifest can reference the resolved-topic files.
 pub fn write_outputs(
     prefix: &str,
     table: &FeatureTable,
     pb: &PseudobulkData,
     model: &RnaModEmbedModel,
     unified: &UnifiedData,
-    topics: Option<&super::topics::ResolvedTopics>,
 ) -> Result<()> {
     let path_gene_emb = format!("{prefix}.gene_embedding.parquet");
     let path_z = format!("{prefix}.gene_program_loadings.parquet");
@@ -96,7 +101,6 @@ pub fn write_outputs(
     let path_cell_emb = format!("{prefix}.cell_embedding.parquet");
     let path_cell_bias = format!("{prefix}.cell_bias.parquet");
     let path_cell_to_pb = format!("{prefix}.cell_to_pb.parquet");
-    let path_manifest = format!("{prefix}.faba.json");
 
     let dim_names: Vec<Box<str>> = (0..model.embedding_dim)
         .map(|h| format!("dim_{h}").into_boxed_str())
@@ -113,6 +117,18 @@ pub fn write_outputs(
         Some(&dim_names),
     )
     .with_context(|| format!("writing {path_gene_emb}"))?;
+
+    // Same matrix under senna's frozen-feature-side name so `senna itopic
+    // --freeze-feature-embedding {prefix}` (topic layout, bias = 0) picks
+    // up β_g as a fixed ρ [G, H] with no renaming. faba's own tooling
+    // keeps using `gene_embedding.parquet`.
+    let path_feat_emb = format!("{prefix}.feature_embedding.parquet");
+    rho.to_parquet_with_names(
+        &path_feat_emb,
+        (Some(&table.gene_names), Some("gene")),
+        Some(&dim_names),
+    )
+    .with_context(|| format!("writing {path_feat_emb}"))?;
 
     // z_g
     let z = tensor_to_dmatrix2(&model.z)?;
@@ -217,6 +233,19 @@ pub fn write_outputs(
         &path_cell_to_pb,
     )?;
 
+    Ok(())
+}
+
+/// Emit `{prefix}.faba.json`. Called **after** [`write_outputs`] and any
+/// `--resolve-topics` step so the manifest references the resolved-topic
+/// artifacts when present. Output parquet paths are reconstructed from
+/// `prefix` (deterministic, matching the names [`write_outputs`] uses).
+pub fn write_manifest(
+    prefix: &str,
+    model: &RnaModEmbedModel,
+    topics: Option<&super::topics::ResolvedTopics>,
+) -> Result<()> {
+    let path_manifest = format!("{prefix}.faba.json");
     let manifest = RnaModEmbedManifest {
         kind: RNA_MOD_EMBED_KIND.into(),
         version: MANIFEST_VERSION,
@@ -227,17 +256,18 @@ pub fn write_outputs(
         n_regions: model.n_regions,
         n_cells: model.n_cells,
         feature_convention: FEATURE_CONVENTION.into(),
-        gene_embedding: path_gene_emb,
-        gene_program_loadings: path_z,
-        program_modality_deviation: path_delta,
-        modality_region_offset: path_gamma,
-        modality_axis: path_mod_axis,
-        measured_mask: path_measured,
-        cell_embedding: path_cell_emb,
-        cell_bias: path_cell_bias,
-        cell_to_pb: path_cell_to_pb,
-        agg_bias: Some(path_agg_bias),
-        comp_bias: Some(path_comp_bias),
+        gene_embedding: format!("{prefix}.gene_embedding.parquet"),
+        feature_embedding: format!("{prefix}.feature_embedding.parquet"),
+        gene_program_loadings: format!("{prefix}.gene_program_loadings.parquet"),
+        program_modality_deviation: format!("{prefix}.program_modality_deviation.parquet"),
+        modality_region_offset: format!("{prefix}.modality_region_offset.parquet"),
+        modality_axis: format!("{prefix}.modality_axis.parquet"),
+        measured_mask: format!("{prefix}.measured_mask.parquet"),
+        cell_embedding: format!("{prefix}.cell_embedding.parquet"),
+        cell_bias: format!("{prefix}.cell_bias.parquet"),
+        cell_to_pb: format!("{prefix}.cell_to_pb.parquet"),
+        agg_bias: Some(format!("{prefix}.agg_bias.parquet")),
+        comp_bias: Some(format!("{prefix}.comp_bias.parquet")),
         num_topics: topics.map(|t| t.k),
         latent: topics.map(|t| t.latent.clone()),
         dictionary: topics.map(|t| t.dictionary.clone()),
