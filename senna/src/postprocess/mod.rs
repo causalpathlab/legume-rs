@@ -11,4 +11,5 @@ pub use fit_layout_tree::*;
 pub use fit_layout_tsne::*;
 pub use fit_layout_umap::*;
 pub use plot::scatter::*;
+pub use plot::strand::*;
 pub use plot::topic::*;

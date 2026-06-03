@@ -362,6 +362,20 @@ enum Commands {
         visible_alias = "pt"
     )]
     PlotTopic(PlotTopicArgs),
+
+    #[command(
+        about = "Watson/Crick mirrored genomic-activity ideograms (Strand-seq style).",
+        long_about = "For each cell type, draw per-chromosome gene activity split by strand:\n\
+                      forward/Watson genes as a filled pileup rising upward, reverse/Crick\n\
+                      genes mirrored downward around a shared chromosome axis.\n\n\
+                      Usage: senna plot-strand --from run.senna.json --gtf gencode.gtf\n\n\
+                      Activity defaults to a gene × cell-type matrix derived from\n\
+                      `senna annotate` outputs; override with --activity. One figure per\n\
+                      cell type (chromosomes stacked) plus an optional consensus, under\n\
+                      {out}.strand/. PDF only by default; pass --svg / --png.",
+        visible_alias = "ps"
+    )]
+    PlotStrand(PlotStrandArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -452,6 +466,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::PlotTopic(args) => {
             fit_plot_topic(args)?;
+        }
+        Commands::PlotStrand(args) => {
+            fit_plot_strand(args)?;
         }
     }
 
