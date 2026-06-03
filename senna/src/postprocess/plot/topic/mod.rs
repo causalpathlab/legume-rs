@@ -22,6 +22,7 @@
 
 use crate::embed_common::*;
 use crate::run_manifest::{self, RunManifest};
+use auxiliary_data::feature_names::FeatureNameKind;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use plot_utils::palette::{self, Palette, Rgb};
@@ -1032,6 +1033,11 @@ fn render_dict_plot(
     let dict_topic_ids = try_parse_axis_ids(&dict_cols, "T")
         .unwrap_or_else(|| (0..n_topics as i64).collect::<Vec<_>>());
 
+    // Display gene labels as the canonical (HGNC) symbol when the axis is
+    // gene-like: `ENSG00000105329_TGFB1` → `TGFB1`. A no-op for axes that
+    // are already bare symbols or non-gene rows (auto-detected).
+    let name_kind = FeatureNameKind::auto_detect(&gene_names);
+
     // Submatrix (n_genes × n_topics) row-major in selected gene order.
     let mut sub: Vec<f32> = Vec::with_capacity(n_genes * n_topics);
     let mut sub_gene_names: Vec<Box<str>> = Vec::with_capacity(n_genes);
@@ -1039,7 +1045,7 @@ fn render_dict_plot(
         for j in 0..n_topics {
             sub.push(weights_gk[gi * n_topics + j]);
         }
-        sub_gene_names.push(gene_names[gi].clone());
+        sub_gene_names.push(name_kind.canonicalize(&gene_names[gi]));
     }
 
     let dict_dir = format!("{plot_root}/dict");
@@ -1509,11 +1515,4 @@ fn emit_outputs(svg: &str, w: u32, h: u32, base: &str, args: &PlotTopicArgs) -> 
     Ok(())
 }
 
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '.' => c,
-            _ => '_',
-        })
-        .collect()
-}
+use super::sanitize_filename as sanitize;
