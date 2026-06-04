@@ -267,6 +267,11 @@ pub fn fit_cell_activity_graph_embedding(
             n_features: n_genes,
             n_cells,
             embedding_dim: args.embedding_dim,
+            // pinto uses the plain gene/cell embedding with no conditions,
+            // so the per-condition gate is inert (one condition, zero
+            // programs ⇒ identity).
+            n_conditions: 1,
+            num_programs: 0,
         },
         &ModelInit {
             e_feat: None,

@@ -143,6 +143,15 @@ pub struct FitConfig {
     /// embedding, added to the composite loss before backward. `0.0`
     /// disables.
     pub feature_embedding_l2: f32,
+    /// Number of latent programs `K` for the per-condition feature gate
+    /// (`e_feat(f|s) = E_feat[f] ⊙ exp(Σ_k z[f,k]·δ[k,s,:])`). The gate is
+    /// identity at init and on the reference condition, so `K` only adds
+    /// capacity when conditions actually diverge.
+    pub num_programs: usize,
+    /// L2 penalty on the gate program loadings `z` (mean-normalized).
+    pub z_l2: f32,
+    /// L2 penalty on the gate deviation directions `δ` (mean-normalized).
+    pub delta_l2: f32,
     /// AdamW decoupled weight decay applied uniformly to every parameter
     /// (the shared `E_feat`, `b_feat`, and every per-axis head). Post-
     /// step shrinkage; doesn't enter the backward graph. `0.0` disables.
@@ -572,11 +581,14 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             n_features, h
         );
     }
+    let n_conditions = unified.n_conditions();
     let cell_model = JointEmbedModel::new_with_init(
         ModelArgs {
             n_features,
             n_cells,
             embedding_dim: h,
+            n_conditions,
+            num_programs: config.num_programs,
         },
         &ModelInit {
             e_feat: frozen_init.map(|host| &host.e_feat),
@@ -600,6 +612,10 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 embedding_dim: h,
                 shared_e_feat: cell_model.e_feat.clone(),
                 shared_b_feat: cell_model.b_feat.clone(),
+                shared_z: cell_model.z.clone(),
+                shared_delta: cell_model.delta.clone(),
+                num_programs: cell_model.num_programs,
+                n_conditions: cell_model.n_conditions,
                 e_cell_init: None,
                 b_cell_init: &vec![0f32; n_pb],
                 var_prefix: &format!("pb_l{}", level_idx),
@@ -672,7 +688,9 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     let opt_vars = if config.frozen_feature_host.is_some() {
         // E_feat / b_feat are seeded from the frozen host but excluded
         // from gradient steps — see `frozen_feature_host` doc on FitConfig.
-        let trainable = trainable_vars(&varmap, &["e_feat", "b_feat"]);
+        // The per-condition gate (`z`, `δ`) is a feature-side correction,
+        // so freeze it alongside the feature embedding.
+        let trainable = trainable_vars(&varmap, &["e_feat", "b_feat", "z", "delta"]);
         info!(
             "Freeze mode: AdamW over {} cell-side vars ({} feature-side vars excluded)",
             trainable.len(),
@@ -1104,11 +1122,16 @@ fn build_smoother(
 
 fn stage_params(config: &FitConfig) -> TrainingParams {
     // No point regularizing the frozen feature side — it doesn't move.
-    let feature_embedding_l2 = if config.frozen_feature_host.is_some() {
+    // The gate (`z`, `δ`) is frozen with the feature side, so drop its L2
+    // too in freeze mode.
+    let frozen = config.frozen_feature_host.is_some();
+    let feature_embedding_l2 = if frozen {
         0.0
     } else {
         config.feature_embedding_l2
     };
+    let z_l2 = if frozen { 0.0 } else { config.z_l2 };
+    let delta_l2 = if frozen { 0.0 } else { config.delta_l2 };
     TrainingParams {
         epochs: config.epochs,
         batches_per_epoch: config.batches_per_epoch,
@@ -1117,5 +1140,7 @@ fn stage_params(config: &FitConfig) -> TrainingParams {
         seed: config.seed,
         composite_mode: config.composite_mode,
         feature_embedding_l2,
+        z_l2,
+        delta_l2,
     }
 }

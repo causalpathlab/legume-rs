@@ -78,6 +78,19 @@ pub struct CompositeAxis<'a> {
     pub label: &'a str,
 }
 
+impl CompositeAxis<'_> {
+    /// Whether the per-condition feature gate applies to this axis. True
+    /// only for the real per-cell axes (`PerBatch` / `PerBatchStratified`)
+    /// when there is more than one condition — pseudobulk (`Stratified`)
+    /// axes are condition-mixing aggregates and score against baseline
+    /// `E_feat`, and with a single condition the gate is the identity. The
+    /// single source of truth for "is this axis gated" across sum, sample,
+    /// and chain modes.
+    fn gates(&self) -> bool {
+        self.model.n_conditions > 1 && !matches!(self.sampler, AxisSampler::Stratified(_))
+    }
+}
+
 /// Bipartite sampler attached to a composite axis. Three variants:
 /// - `PerBatch`: flat per-batch positive draw weighted by `count·fisher`.
 /// - `PerBatchStratified`: per-batch two-stage draw — cell by
@@ -152,6 +165,13 @@ pub struct TrainingParams {
     /// `0.0` disables. Equivalent to a zero-mean Gaussian prior on
     /// `E_feat` with precision `2 · λ`.
     pub feature_embedding_l2: f32,
+    /// L2 penalty on the gate program loadings `z` (mean-normalized).
+    /// `0.0` disables.
+    pub z_l2: f32,
+    /// L2 penalty on the gate deviation directions `δ` (mean-normalized).
+    /// `0.0` disables. Together with `z_l2` this softly resolves the
+    /// `(z·c, δ/c)` scale gauge and shrinks unused condition deviations.
+    pub delta_l2: f32,
 }
 
 pub struct CompositeTrainContext<'a> {
@@ -188,6 +208,10 @@ pub fn train_composite(
     // Smoother refreshes against the *shared* E_feat — pull it from the
     // first axis (every axis points at the same tensor).
     let shared_e_feat = ctx.axes[0].model.e_feat.clone();
+    // Gate params are likewise shared across axes; pull from axes[0] for
+    // the L2 penalties below.
+    let shared_z = ctx.axes[0].model.z.clone();
+    let shared_delta = ctx.axes[0].model.delta.clone();
 
     // Pre-build the axis sampler for `Sample` mode. Reused every step;
     // weights = `λ_k`, so picking axis `k` happens with probability
@@ -253,6 +277,24 @@ pub fn train_composite(
                     .sqr()?
                     .mean_all()?
                     .affine(f64::from(params.feature_embedding_l2), 0.0)?;
+                loss = (loss + l2)?;
+            }
+            if params.z_l2 > 0.0 {
+                let l2 = shared_z
+                    .sqr()?
+                    .mean_all()?
+                    .affine(f64::from(params.z_l2), 0.0)?;
+                loss = (loss + l2)?;
+            }
+            if params.delta_l2 > 0.0 {
+                // Shrinks the condition deviations toward 0 (identity gate).
+                // δ is mean-centered across conditions at gate time, so its
+                // per-condition mean is a free gauge; this L2 also pins that
+                // gauge near 0.
+                let l2 = shared_delta
+                    .sqr()?
+                    .mean_all()?
+                    .affine(f64::from(params.delta_l2), 0.0)?;
                 loss = (loss + l2)?;
             }
             opt.backward_step(&loss)?;
@@ -389,6 +431,7 @@ fn chain_step(
                     triplets: &cell_axis.unified.triplets,
                     sampler: &chain_sampler,
                     fine_feature_weights: ctx.feat_weights,
+                    condition_membership: &cell_axis.unified.condition_membership,
                     batch_size: params.batch_size,
                     n_negatives: params.num_negatives,
                 },
@@ -405,6 +448,7 @@ fn chain_step(
             let chain = sample_chain_batch_stratified(
                 bs,
                 ctx.feat_weights,
+                &cell_axis.unified.condition_membership,
                 params.batch_size,
                 params.num_negatives,
                 rng,
@@ -442,6 +486,8 @@ fn chain_step(
         indices: &cell_idx_tensor,
         lambda: cell_axis.lambda,
         label: cell_axis.label,
+        // Real per-cell axis: score against the condition-gated features.
+        gated: true,
     });
     for (i, axis) in pb_axes.iter().enumerate() {
         chain_axes.push(ChainAxis {
@@ -450,6 +496,8 @@ fn chain_step(
             indices: &idx_tensors[i],
             lambda: axis.lambda,
             label: axis.label,
+            // Pb ancestors: baseline (ungated) features.
+            gated: false,
         });
     }
 
@@ -470,9 +518,16 @@ fn chain_step(
         None => None,
     };
 
+    // Gate the cell axis only (pb ancestors carry `gated: false`); skipped
+    // when single-condition. See `CompositeAxis::gates`.
+    let gate = match cell_axis.gates() {
+        true => Some(cell_axis.model.feat_gate()?),
+        false => None,
+    };
     let chain_loss = nce_loss_chain(
         &cell_axis.model.e_feat,
         &cell_axis.model.b_feat,
+        gate.as_ref(),
         feats,
         &chain_axes,
         smoother,
@@ -494,6 +549,7 @@ fn chain_step(
 fn sample_chain_batch_stratified(
     bs: &PerBatchStratifiedCellSampler,
     fine_feature_weights: &[f32],
+    condition_membership: &[u32],
     batch_size: usize,
     n_negatives: usize,
     rng: &mut StdRng,
@@ -501,6 +557,7 @@ fn sample_chain_batch_stratified(
     let mut leaf_cells = Vec::with_capacity(batch_size);
     let mut fine_feats = Vec::with_capacity(batch_size);
     let mut weights = Vec::with_capacity(batch_size);
+    let mut condition_ids = Vec::with_capacity(batch_size);
 
     for _ in 0..batch_size {
         let lc = bs.cell_picker.sample(rng);
@@ -510,6 +567,7 @@ fn sample_chain_batch_stratified(
         let f = pf.features[lf];
         leaf_cells.push(c);
         fine_feats.push(f);
+        condition_ids.push(condition_membership[c as usize]);
         weights.push(fine_feature_weights[f as usize]);
     }
 
@@ -526,6 +584,7 @@ fn sample_chain_batch_stratified(
             neg_feats,
             edge_weights: weights,
             n_negatives,
+            condition_ids,
         },
     }
 }
@@ -572,6 +631,7 @@ fn single_axis_step(
                     batch_sampler: bs,
                     cell_coarsening: cc,
                     fine_feature_weights: Some(feat_weights),
+                    condition_membership: &axis.unified.condition_membership,
                     batch_size: params.batch_size,
                     n_negatives: params.num_negatives,
                 },
@@ -587,6 +647,7 @@ fn single_axis_step(
                     sampler: bs,
                     cell_coarsening: cc,
                     fine_feature_weights: feat_weights,
+                    condition_membership: &axis.unified.condition_membership,
                     batch_size: params.batch_size,
                     n_negatives: params.num_negatives,
                 },
@@ -608,10 +669,23 @@ fn single_axis_step(
         }
     };
 
+    // The per-condition gate applies on the real per-cell axes only (see
+    // `CompositeAxis::gates`); skipping avoids the wasted gather otherwise.
+    let gate = match axis.gates() {
+        true => Some(axis.model.feat_gate()?),
+        false => None,
+    };
     let bip_loss = if axis.cell_axis.is_identity {
-        nce_loss_identity(axis.model, batch, smoother, dev)?
+        nce_loss_identity(axis.model, batch, gate.as_ref(), smoother, dev)?
     } else {
-        nce_loss(axis.model, batch, &cc.coarse_to_fine, smoother, dev)?
+        nce_loss(
+            axis.model,
+            batch,
+            &cc.coarse_to_fine,
+            gate.as_ref(),
+            smoother,
+            dev,
+        )?
     };
     let mut axis_loss = bip_loss;
 

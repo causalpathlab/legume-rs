@@ -202,6 +202,8 @@ fn per_level_lambda_weighted_matches_chain() {
             n_features: 1,
             n_cells,
             embedding_dim,
+            n_conditions: 1,
+            num_programs: 2,
         },
         &ModelInit {
             e_feat: None,
@@ -321,6 +323,8 @@ fn batched_gated_matches_per_gene_gated() {
             n_features: n_genes,
             n_cells,
             embedding_dim,
+            n_conditions: 1,
+            num_programs: 2,
         },
         &ModelInit {
             e_feat: Some(&e_gene_init),
