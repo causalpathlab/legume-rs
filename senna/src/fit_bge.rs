@@ -73,6 +73,51 @@ pub struct BgeArgs {
     )]
     batch_files: Option<Vec<Box<str>>>,
 
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Per-cell condition label file(s) for the feature gate. \
+                Same on-disk format and ordering as --batch-files (one \
+                label per cell; under --multiome, one file of one label per \
+                unified cell). When omitted, condition defaults to the batch \
+                labels.",
+        long_help = "Drives a per-condition multiplicative gate on the gene \
+                     embedding: e_feat(f | condition s) = E_feat[f] ⊙ \
+                     exp(Σ_k z[f,k]·δ̄[k,s,:]), where δ̄ is δ mean-centered \
+                     across conditions (Σ_s δ̄ = 0). No condition is a \
+                     reference — every condition deviates symmetrically and \
+                     the baseline E_feat is the average-condition embedding; \
+                     δ captures how each condition deviates each gene. \
+                     Mirrors faba rmodem's modality gate with conditions in \
+                     place of modalities. When omitted, condition = batch."
+    )]
+    condition_files: Option<Vec<Box<str>>>,
+
+    #[arg(
+        long = "num-programs",
+        default_value_t = 8,
+        help = "K: number of latent programs in the per-condition feature \
+                gate (low-rank deviation). Only adds capacity when conditions \
+                diverge; identity at init."
+    )]
+    num_programs: usize,
+
+    #[arg(
+        long = "z-l2",
+        default_value_t = 1e-4,
+        help = "L2 penalty on the gate program loadings z (mean-normalized). \
+                0 disables."
+    )]
+    z_l2: f32,
+
+    #[arg(
+        long = "delta-l2",
+        default_value_t = 1e-4,
+        help = "L2 penalty on the gate deviation directions δ \
+                (mean-normalized). 0 disables."
+    )]
+    delta_l2: f32,
+
     #[command(flatten)]
     hvg: HvgCliArgs,
 
@@ -421,7 +466,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     };
 
     // `--ignore-batch` drops the batch labels entirely, so the projection
-    // and multilevel collapse run as if every cell shared one batch.
+    // and multilevel collapse run as if every cell shared one batch. The
+    // per-condition gate keys off the same notion of "no structure", so we
+    // drop condition labels too (condition collapses to a single "all").
     let batch_files = if args.collapse.ignore_batch {
         if args.batch_files.is_some() {
             info!("--ignore-batch: dropping batch labels; treating all cells as one batch");
@@ -430,14 +477,32 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     } else {
         args.batch_files.as_deref()
     };
+    let condition_files = if args.collapse.ignore_batch {
+        if args.condition_files.is_some() {
+            info!("--ignore-batch: dropping condition labels; the feature gate is disabled");
+        }
+        None
+    } else {
+        args.condition_files.as_deref()
+    };
 
     let mut unified = ge::load_unified_data(
         data_files,
         batch_files,
+        condition_files,
         feature_kind.clone(),
         args.preload_data,
         column_alignment,
     )?;
+
+    if unified.n_conditions() > 1 {
+        info!(
+            "Per-condition feature gate: {} conditions (symmetric, mean-centered \
+             across conditions; no reference), K = {} programs",
+            unified.n_conditions(),
+            args.num_programs
+        );
+    }
 
     // ---- Optional frozen feature side ----
     //
@@ -593,6 +658,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         cell_cell,
         stop: None,
         feature_embedding_l2: args.feature_embedding_l2,
+        num_programs: args.num_programs,
+        z_l2: args.z_l2,
+        delta_l2: args.delta_l2,
         weight_decay: args.weight_decay,
         frozen_feature_host,
         cell_weight_mult,
@@ -618,6 +686,23 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             },
             &args.out,
         )?;
+    }
+
+    // Inspectable per-condition gate params (z, δ). Baseline E_feat / E_cell
+    // / ETM topics above stay condition-free; this is the only artifact that
+    // exposes the condition deviations. Skip when there's nothing to show
+    // (single condition ⇒ δ ≡ 0).
+    if unified.n_conditions() > 1 {
+        ge::save_gate(
+            &out.model,
+            &unified.feature_names,
+            &unified.condition_names,
+            &args.out,
+        )?;
+        info!(
+            "Wrote per-condition gate: {}.{{gene_program_loadings,program_condition_deviation}}.parquet",
+            args.out
+        );
     }
 
     let input: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();

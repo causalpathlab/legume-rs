@@ -29,6 +29,13 @@ pub struct UnifiedData {
     pub batch_membership: Vec<u32>,
     /// Global batch labels in id order.
     pub batch_names: Vec<Box<str>>,
+    /// Global cell id → global condition id. Drives the per-condition
+    /// multiplicative gate on the feature embedding (see
+    /// `JointEmbedModel::FeatGate`). Defaults to a copy of
+    /// `batch_membership` when no separate condition input is given.
+    pub condition_membership: Vec<u32>,
+    /// Global condition labels in id order. Defaults to `batch_names`.
+    pub condition_names: Vec<Box<str>>,
     /// For each compact feature id `i ∈ 0..n_features()`, the row
     /// index into `per_file_data[0]` (the underlying `SparseIoVec`).
     /// Identity (`0..n_features()`) when no HVG was applied; the
@@ -56,6 +63,10 @@ impl UnifiedData {
 
     pub fn n_batches(&self) -> usize {
         self.batch_names.len()
+    }
+
+    pub fn n_conditions(&self) -> usize {
+        self.condition_names.len()
     }
 
     /// Build a synthetic `UnifiedData` whose "cells" are pseudobulks
@@ -122,6 +133,11 @@ impl UnifiedData {
         // for stage-1 training on already-corrected counts.
         let batch_membership = vec![0u32; n_pb];
         let batch_names: Vec<Box<str>> = vec!["all".to_string().into_boxed_str()];
+        // Pseudobulks are condition-corrected aggregates with no single
+        // condition; collapse to one synthetic condition so the gate is
+        // identity on this stage-1 data.
+        let condition_membership = vec![0u32; n_pb];
+        let condition_names: Vec<Box<str>> = vec!["all".to_string().into_boxed_str()];
 
         Ok(UnifiedData {
             triplets,
@@ -130,6 +146,8 @@ impl UnifiedData {
             barcodes,
             batch_membership,
             batch_names,
+            condition_membership,
+            condition_names,
             feature_to_backend_row,
             // Synthetic pseudobulk "cells" are single-modality.
             cell_modality: vec![1u32; n_pb],
@@ -265,6 +283,7 @@ impl UnifiedData {
     pub(crate) fn from_sparse_io(
         data: SparseIoVec,
         batch_labels: &[Box<str>],
+        condition_labels: Option<&[Box<str>]>,
         auto_modality_batch: bool,
     ) -> anyhow::Result<Self> {
         let feature_names = data.row_names()?;
@@ -314,21 +333,7 @@ impl UnifiedData {
         );
 
         // Dedupe batch labels into a global namespace (in first-seen order).
-        let mut batch_to_global: FxHashMap<Box<str>, u32> = FxHashMap::default();
-        let mut batch_names: Vec<Box<str>> = Vec::new();
-        let batch_membership: Vec<u32> = batch_labels
-            .iter()
-            .map(|label| {
-                if let Some(&g) = batch_to_global.get(label) {
-                    g
-                } else {
-                    let g = batch_names.len() as u32;
-                    batch_to_global.insert(label.clone(), g);
-                    batch_names.push(label.clone());
-                    g
-                }
-            })
-            .collect();
+        let (batch_membership, batch_names) = dedup_labels(batch_labels);
 
         info!(
             "Unified barcodes: {} total (single in-memory data set)",
@@ -338,6 +343,32 @@ impl UnifiedData {
             "Unified batches: {} ({})",
             batch_names.len(),
             batch_names
+                .iter()
+                .map(|s| s.as_ref())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        // Condition axis: defaults to a copy of the batch axis when no
+        // separate per-cell condition labels are supplied. When given,
+        // dedupe into a global namespace the same first-seen way.
+        let (condition_membership, condition_names): (Vec<u32>, Vec<Box<str>>) =
+            match condition_labels {
+                None => (batch_membership.clone(), batch_names.clone()),
+                Some(labels) => {
+                    anyhow::ensure!(
+                        labels.len() == barcodes.len(),
+                        "condition labels {} != cells {}",
+                        labels.len(),
+                        barcodes.len()
+                    );
+                    dedup_labels(labels)
+                }
+            };
+        info!(
+            "Unified conditions: {} ({})",
+            condition_names.len(),
+            condition_names
                 .iter()
                 .map(|s| s.as_ref())
                 .collect::<Vec<_>>()
@@ -359,9 +390,30 @@ impl UnifiedData {
             barcodes,
             batch_membership,
             batch_names,
+            condition_membership,
+            condition_names,
             cell_modality,
         })
     }
+}
+
+/// Map per-cell string labels to compact `u32` ids in first-seen order,
+/// returning `(membership, names)` where `names[membership[i]] == labels[i]`.
+/// Shared by the batch and condition axes.
+fn dedup_labels(labels: &[Box<str>]) -> (Vec<u32>, Vec<Box<str>>) {
+    let mut to_global: FxHashMap<Box<str>, u32> = FxHashMap::default();
+    let mut names: Vec<Box<str>> = Vec::new();
+    let membership: Vec<u32> = labels
+        .iter()
+        .map(|label| {
+            *to_global.entry(label.clone()).or_insert_with(|| {
+                let g = names.len() as u32;
+                names.push(label.clone());
+                g
+            })
+        })
+        .collect();
+    (membership, names)
 }
 
 /// Human-readable batch label for a modality-presence bitmask, e.g.
@@ -395,11 +447,13 @@ fn modality_presence_label(mask: u32, n_back: usize) -> Box<str> {
 pub fn load_unified_data(
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,
+    condition_files: Option<&[Box<str>]>,
     feature_kind: FeatureNameKind,
     preload: bool,
     column_alignment: data_beans::sparse_io_vector::ColumnAlignment,
 ) -> anyhow::Result<UnifiedData> {
     use data_beans::sparse_io_vector::ColumnAlignment;
+    use matrix_util::common_io::read_lines;
     if let Some(bf) = batch_files {
         // Under `ColumnAlignment::Union` a single barcode can be in
         // multiple files, so per-file batch lists no longer compose;
@@ -430,9 +484,45 @@ pub fn load_unified_data(
         ..Default::default()
     })?;
 
+    // Optional per-cell condition labels. Read line-per-cell, concatenated
+    // in file order (matches the unified column order: Disjoint stacks
+    // files in order; Union takes one file with one label per unified
+    // cell). Validated against the unified cell count below.
+    let condition_labels: Option<Vec<Box<str>>> = match condition_files {
+        None => None,
+        Some(cf) => {
+            let n_cells = loaded.data.num_columns();
+            if matches!(column_alignment, ColumnAlignment::Union) {
+                anyhow::ensure!(
+                    cf.len() == 1,
+                    "ColumnAlignment::Union requires exactly one --condition-files file \
+                     (one label per unified cell); got {}",
+                    cf.len()
+                );
+            }
+            let mut labels: Vec<Box<str>> = Vec::with_capacity(n_cells);
+            for f in cf.iter() {
+                info!("Reading condition file: {}", f);
+                labels.extend(read_lines(f)?);
+            }
+            anyhow::ensure!(
+                labels.len() == n_cells,
+                "condition files have {} lines but data has {} unified cells",
+                labels.len(),
+                n_cells
+            );
+            Some(labels)
+        }
+    };
+
     // Under Union with no explicit batch file, auto-batch by
     // modality-presence so multiome cohorts (matched / unimodal) align.
     let auto_modality_batch =
         matches!(column_alignment, ColumnAlignment::Union) && batch_files.is_none();
-    UnifiedData::from_sparse_io(loaded.data, &loaded.batch, auto_modality_batch)
+    UnifiedData::from_sparse_io(
+        loaded.data,
+        &loaded.batch,
+        condition_labels.as_deref(),
+        auto_modality_batch,
+    )
 }

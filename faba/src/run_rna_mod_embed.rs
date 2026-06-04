@@ -65,6 +65,7 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
     let mut unified = load_unified_data(
         &data_files,
         batch_files,
+        None,
         feature_kind,
         args.preload_data,
         ColumnAlignment::Union,
