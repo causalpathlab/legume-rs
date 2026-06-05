@@ -143,6 +143,38 @@ pub struct PredictArgs {
 
     #[arg(short, long, help = "Verbose logging")]
     pub(crate) verbose: bool,
+
+    #[arg(
+        long,
+        help = "Also write residual expression to a sparse backend ({out}.residual.zarr / .h5)",
+        long_help = "Regress the reference reconstruction μ ∝ δ?·Σ_k θ_k·exp(β_dk) out of\n\
+                     the held-out counts by DIVISION and write the leftover as a NEW\n\
+                     sparse backend (gene × cell). Reuses matrix-util's\n\
+                     `adjust_by_division_inplace`: per cell, x_d /= μ_d·λ with the\n\
+                     self-normalizing column scale λ = Σ_d x / Σ_d μ — so the residual\n\
+                     is a per-cell relative fold-change against the reference, the same\n\
+                     division semantics `senna svd` uses for batch adjustment. Only\n\
+                     entries above --residual-threshold are kept (all are ≥ 0), so the\n\
+                     file stays sparse. Backend chosen by extension: .zarr or .h5\n\
+                     (needs the `hdf5` feature)."
+    )]
+    pub(crate) residual_out: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Fold the re-estimated per-batch δ into μ (removes shared topics AND batch effect)",
+        long_help = "When set, the per-gene denominator is δ_{d,b}·Σ_k θ_k·exp(β_dk) — the\n\
+                     residual is harmonized (batch effect divided out too). When unset,\n\
+                     μ comes from topics only and the residual still carries batch effects."
+    )]
+    pub(crate) residual_include_delta: bool,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Drop residual entries ≤ this value (default 0 = keep all nonzeros)"
+    )]
+    pub(crate) residual_threshold: f32,
 }
 
 pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
@@ -357,7 +389,7 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
         refine_config: &refine_config,
     };
 
-    let (z_nk, llik, total) = match decoder_name {
+    let (z_nk, llik, total, delta_final) = match decoder_name {
         "multinom" => predict_dense_with_decoder::<MultinomTopicDecoder>(inputs)?,
         "nb" => predict_dense_with_decoder::<NbTopicDecoder>(inputs)?,
         name if name == NBMIXTURE_NAME => {
@@ -366,7 +398,16 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
         other => anyhow::bail!("unsupported decoder type in metadata: {other}"),
     };
 
-    write_outputs(args, &data_vec, &z_nk, &llik, &total)
+    finalize_predict(FinalizePredict {
+        args,
+        data_vec: &data_vec,
+        z_nk: &z_nk,
+        llik: &llik,
+        total: &total,
+        beta_dk: &beta_dk,
+        delta_db: delta_final.as_ref(),
+        gene_remap: gene_remap.as_ref(),
+    })
 }
 
 struct DensePredictInputs<'a> {
@@ -388,9 +429,12 @@ struct DensePredictInputs<'a> {
     refine_config: &'a TopicRefinementConfig,
 }
 
+/// `(log θ [N×K], per-cell llik, per-cell total, finalized per-batch δ)`.
+type DensePredictOut = (Mat, Vec<f32>, Vec<f32>, Option<Mat>);
+
 fn predict_dense_with_decoder<Dec>(
     inputs: DensePredictInputs<'_>,
-) -> anyhow::Result<(Mat, Vec<f32>, Vec<f32>)>
+) -> anyhow::Result<DensePredictOut>
 where
     Dec: DecoderModuleT + NewDecoder + Send + Sync,
 {
@@ -488,7 +532,7 @@ where
     let ntot = data_vec.num_columns();
     let kk = metadata.n_topics;
 
-    run_predict_blocks(ntot, kk, minibatch_size, |(lb, ub)| {
+    let (z_nk, llik, total) = run_predict_blocks(ntot, kk, minibatch_size, |(lb, ub)| {
         predict_block_dense::<Dec>(PredictBlockDenseArgs {
             lb,
             ub,
@@ -503,7 +547,10 @@ where
             mode,
             refine_config,
         })
-    })
+    })?;
+    // Return the finalized (TMLE-refined) δ so the caller can regress it
+    // out when writing the residual backend.
+    Ok((z_nk, llik, total, delta_db))
 }
 
 struct PredictBlockDenseArgs<'a, Dec> {
@@ -815,7 +862,16 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
         })
     })?;
 
-    write_outputs(args, &data_vec, &z_nk, &llik, &total)
+    finalize_predict(FinalizePredict {
+        args,
+        data_vec: &data_vec,
+        z_nk: &z_nk,
+        llik: &llik,
+        total: &total,
+        beta_dk: &beta_dk,
+        delta_db: delta_db.as_ref(),
+        gene_remap: gene_remap.as_ref(),
+    })
 }
 
 struct PredictBlockIndexedArgs<'a> {
@@ -1053,6 +1109,33 @@ where
 // Output writers //
 /////////////////////
 
+/// Shared tail of both predict paths: per-cell latent + predictive scores,
+/// then (optionally) the residual-expression backend. Both the dense and
+/// indexed drivers have the same artifacts available, so they funnel through
+/// here rather than duplicating the two write calls.
+struct FinalizePredict<'a> {
+    args: &'a PredictArgs,
+    data_vec: &'a SparseIoVec,
+    z_nk: &'a Mat,
+    llik: &'a [f32],
+    total: &'a [f32],
+    beta_dk: &'a Mat,
+    delta_db: Option<&'a Mat>,
+    gene_remap: Option<&'a GeneRemap>,
+}
+
+fn finalize_predict(f: FinalizePredict<'_>) -> anyhow::Result<()> {
+    write_outputs(f.args, f.data_vec, f.z_nk, f.llik, f.total)?;
+    write_residual_backend(
+        f.args,
+        f.data_vec,
+        f.z_nk,
+        f.beta_dk,
+        f.delta_db,
+        f.gene_remap,
+    )
+}
+
 fn write_outputs(
     args: &PredictArgs,
     data_vec: &SparseIoVec,
@@ -1088,5 +1171,126 @@ fn write_outputs(
         Some(&pred_cols),
     )?;
     info!("Wrote {}.predictive.parquet", args.out);
+    Ok(())
+}
+
+/// Regress the reference reconstruction `μ` out of the held-out counts **by
+/// division**, reusing matrix-util's `adjust_by_division_inplace`, and write
+/// the leftover ("residual expression") to a NEW sparse backend.
+///
+/// Blocks of cells run in parallel (rayon, like [`run_predict_blocks`]). Per
+/// block we form the expected per-gene rate as one `nalgebra` matmul
+/// `pred = exp(β) · θᵀ` (`[D_train, n_block]`) — never an `N × D` dense
+/// matrix, peak intermediate is `D × minibatch`. `pred` is scattered onto the
+/// held-out gene axis (via `gene_remap`) as the per-cell denominator `μ_dn`
+/// (`[D_test, n_block]`), optionally weighted by the per-batch δ when
+/// `--residual-include-delta` is set. Then
+/// `csc.adjust_by_division_inplace(&μ_dn)` performs, per cell `j`,
+///   `x_dj ← x_dj / (μ_dj · λ_j)`,  `λ_j = Σ_d x_dj / Σ_d μ_dj`
+/// — the same self-normalizing division `senna svd` uses for batch
+/// adjustment (`svd/fit.rs`). Absolute scale of `μ` cancels in `λ`, so `pred`
+/// is used directly (no library rescale). Genes absent from the reference
+/// model have `μ = 0` and are passed through unchanged. Surviving entries
+/// above `--residual-threshold` (all ≥ 0) are written as triplets, mirroring
+/// the `svd` backend-write idiom.
+fn write_residual_backend(
+    args: &PredictArgs,
+    data_vec: &SparseIoVec,
+    z_nk: &Mat,
+    beta_dk: &Mat,
+    delta_db: Option<&Mat>,
+    gene_remap: Option<&GeneRemap>,
+) -> anyhow::Result<()> {
+    let Some(path) = args.residual_out.as_deref() else {
+        return Ok(());
+    };
+
+    let threshold = args.residual_threshold;
+    // δ to fold into μ (None ⇒ topics-only denominator).
+    let delta = args.residual_include_delta.then_some(delta_db).flatten();
+
+    let kk = beta_dk.ncols();
+    anyhow::ensure!(
+        z_nk.ncols() == kk,
+        "residual: latent topics ({}) != dictionary topics ({kk})",
+        z_nk.ncols(),
+    );
+
+    // exp(β) once: [D_train, K], shared read-only across blocks.
+    let exp_beta_dk = beta_dk.map(|b| b.exp());
+
+    let ntot = data_vec.num_columns();
+    let d_test = data_vec.num_rows();
+
+    info!(
+        "Computing residual expression by division (include_delta={}, threshold={threshold}) \
+         over {ntot} cells",
+        delta.is_some(),
+    );
+
+    let jobs = create_jobs(ntot, 0, Some(args.minibatch_size));
+    let njobs = jobs.len() as u64;
+    let triplets: Vec<(u64, u64, f32)> = jobs
+        .par_iter()
+        .progress_with(new_progress_bar(njobs))
+        .map(|&(lb, ub)| -> anyhow::Result<Vec<(u64, u64, f32)>> {
+            let mut csc = data_vec.read_columns_csc(lb..ub)?;
+            let n_block = csc.ncols();
+
+            // θ for this block: exp of stored log θ → [K, n_block].
+            let theta_kn = z_nk.rows(lb, n_block).map(|v| v.exp()).transpose();
+            // pred[d, j] = Σ_k exp(β_dk) θ_jk  → [D_train, n_block].
+            let pred_dn = &exp_beta_dk * theta_kn;
+
+            // Scatter pred onto the held-out gene axis as the per-cell
+            // denominator μ_dn [D_test, n_block]; optionally weight by δ.
+            let batch_ids = delta.map(|_| data_vec.get_batch_membership(lb..ub));
+            let mut mu_dn = Mat::zeros(d_test, n_block);
+            for jloc in 0..n_block {
+                for &row_new in csc.col(jloc).row_indices() {
+                    let Some(row_train) = (match gene_remap {
+                        Some(rm) => rm.new_to_train[row_new],
+                        None => Some(row_new),
+                    }) else {
+                        continue; // gene absent from the reference model → μ = 0
+                    };
+                    let mut mu = pred_dn[(row_train, jloc)];
+                    if let Some(delta) = delta {
+                        mu *= delta[(row_train, batch_ids.as_ref().unwrap()[jloc])];
+                    }
+                    mu_dn[(row_new, jloc)] = mu;
+                }
+            }
+
+            // Regress out by division (self-normalizing column scale λ = Σx/Σμ).
+            csc.adjust_by_division_inplace(&mu_dn);
+
+            Ok(csc
+                .triplet_iter()
+                .filter(|&(_, _, &val)| val > threshold)
+                .map(|(i, j_local, &val)| (i as u64, (lb + j_local) as u64, val))
+                .collect())
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+
+    let backend = match file_ext(path)?.as_ref() {
+        "zarr" => SparseIoBackend::Zarr,
+        "h5" => SparseIoBackend::HDF5,
+        other => anyhow::bail!("residual: unknown backend extension '.{other}' (use .zarr or .h5)"),
+    };
+    let mtx_shape = (d_test, ntot, triplets.len());
+    remove_file(path)?;
+    let mut residual =
+        create_sparse_from_triplets(&triplets, mtx_shape, Some(path), Some(&backend))?;
+    residual.register_row_names_vec(&data_vec.row_names()?);
+    residual.register_column_names_vec(&data_vec.column_names()?);
+
+    info!(
+        "Wrote residual backend: {path} ({d_test} genes × {ntot} cells, {} nonzeros)",
+        triplets.len(),
+    );
     Ok(())
 }
