@@ -72,6 +72,24 @@ pub(crate) struct GeneRemap {
     pub n_mapped: usize,
 }
 
+/// Optional query (held-out) row-name transforms applied *before*
+/// matching against the training dictionary.
+///
+/// Order per query name: (1) if `suffix_delim` is set, split once into
+/// `(base, suffix)` and — when `keep_suffix` is set — drop the row unless
+/// its `suffix` equals `keep_suffix`; (2) canonicalize `base` with `kind`
+/// (e.g. `Gene { delim: '_' }` → bare symbol); (3) resolve as usual.
+///
+/// Defaults (`kind = Exact`, no delimiter, no filter) reproduce the legacy
+/// exact-then-flexible behavior — `FeatureNameKind`'s own derived default is
+/// `Exact`, so the whole struct derives `Default`.
+#[derive(Default)]
+pub(crate) struct QueryNameOpts {
+    pub kind: auxiliary_data::feature_names::FeatureNameKind,
+    pub suffix_delim: Option<char>,
+    pub keep_suffix: Option<Box<str>>,
+}
+
 /// Build a gene remap from training gene names and new-data gene names.
 ///
 /// Tries case-insensitive exact match first; falls back to
@@ -80,6 +98,18 @@ pub(crate) struct GeneRemap {
 pub(crate) fn build_gene_remap(
     training_genes: &[Box<str>],
     new_data_genes: &[Box<str>],
+) -> GeneRemap {
+    build_gene_remap_with(training_genes, new_data_genes, &QueryNameOpts::default())
+}
+
+/// Like [`build_gene_remap`] but applies [`QueryNameOpts`] (modality-suffix
+/// filter, base-key trim, and name-kind canonicalization) to each query row
+/// name before resolution. Multiple query rows may resolve to the same
+/// training gene (many-to-one); the scatter sites accumulate them.
+pub(crate) fn build_gene_remap_with(
+    training_genes: &[Box<str>],
+    new_data_genes: &[Box<str>],
+    opts: &QueryNameOpts,
 ) -> GeneRemap {
     use crate::marker_support::flexible_gene_match;
 
@@ -92,15 +122,45 @@ pub(crate) fn build_gene_remap(
 
     let mut n_exact = 0usize;
     let mut n_flexible = 0usize;
+    let mut n_dropped = 0usize;
     let new_to_train: Vec<Option<usize>> = new_data_genes
         .iter()
         .map(|g| {
-            if let Some(&i) = train_pos.get(&g.to_lowercase()) {
+            // (1) suffix split + modality filter
+            let base: &str = match opts.suffix_delim {
+                Some(d) => match g.split_once(d) {
+                    Some((base, suffix)) => {
+                        if let Some(keep) = opts.keep_suffix.as_deref() {
+                            if suffix != keep {
+                                n_dropped += 1;
+                                return None;
+                            }
+                        }
+                        base
+                    }
+                    // no delimiter present: if a suffix filter is in
+                    // force, the row has no qualifying suffix → drop.
+                    None => {
+                        if opts.keep_suffix.is_some() {
+                            n_dropped += 1;
+                            return None;
+                        }
+                        g
+                    }
+                },
+                None => g,
+            };
+
+            // (2) name-kind canonicalization (Gene → bare symbol, etc.)
+            let key = opts.kind.canonicalize(base);
+
+            // (3) resolve: lowercased exact, then flexible fallback
+            if let Some(&i) = train_pos.get(&key.to_lowercase()) {
                 n_exact += 1;
                 Some(i)
             } else if let Some(i) = training_genes
                 .iter()
-                .position(|t| flexible_gene_match(g, t))
+                .position(|t| flexible_gene_match(&key, t))
             {
                 n_flexible += 1;
                 Some(i)
@@ -112,7 +172,8 @@ pub(crate) fn build_gene_remap(
 
     let n_mapped = n_exact + n_flexible;
     log::info!(
-        "Gene alignment: {n_mapped}/{} new genes mapped to {}/{} training genes ({n_exact} exact, {n_flexible} flexible)",
+        "Gene alignment: {n_mapped}/{} new genes mapped to {}/{} training genes \
+         ({n_exact} exact, {n_flexible} flexible, {n_dropped} dropped by suffix filter)",
         new_data_genes.len(),
         n_mapped,
         training_genes.len()
@@ -179,7 +240,7 @@ fn remap_csc_to_dense(csc: &nalgebra_sparse::CscMatrix<f32>, remap: &GeneRemap) 
         let col = csc.col(j);
         for (&row_new, &val) in col.row_indices().iter().zip(col.values().iter()) {
             if let Some(row_train) = remap.new_to_train[row_new] {
-                out[(row_train, j)] = val;
+                out[(row_train, j)] += val;
             }
         }
     }
@@ -245,4 +306,79 @@ where
 
     let z_nk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
     Ok((lb, Mat::from_tensor(&z_nk)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use auxiliary_data::feature_names::FeatureNameKind;
+
+    fn names(xs: &[&str]) -> Vec<Box<str>> {
+        xs.iter().map(|s| (*s).into()).collect()
+    }
+
+    #[test]
+    fn spliced_filter_trim_and_gene_alias() {
+        let training = names(&["TSPAN6", "A1BG"]);
+        let query = names(&[
+            "ENSG00000000003_TSPAN6/count/spliced",
+            "ENSG00000000003_TSPAN6/count/unspliced",
+            "ENSGX_A1BG/count/spliced",
+            "ENSGY_NOTFOUND/count/spliced",
+        ]);
+        let opts = QueryNameOpts {
+            kind: FeatureNameKind::Gene { delim: '_' },
+            suffix_delim: Some('/'),
+            keep_suffix: Some("count/spliced".into()),
+        };
+        let remap = build_gene_remap_with(&training, &query, &opts);
+        // spliced TSPAN6 → training row 0
+        assert_eq!(remap.new_to_train[0], Some(0));
+        // unspliced TSPAN6 → dropped by suffix filter
+        assert_eq!(remap.new_to_train[1], None);
+        // spliced A1BG → training row 1
+        assert_eq!(remap.new_to_train[2], Some(1));
+        // spliced gene absent from dictionary → unmapped
+        assert_eq!(remap.new_to_train[3], None);
+        assert_eq!(remap.n_mapped, 2);
+        assert_eq!(remap.d_train, 2);
+    }
+
+    #[test]
+    fn many_to_one_sums_in_dense_scatter() {
+        // Two query rows resolve to the same training gene; remap_csc_to_dense
+        // must accumulate, not overwrite.
+        let training = names(&["TSPAN6"]);
+        let query = names(&["AAA_TSPAN6", "BBB_TSPAN6"]);
+        let opts = QueryNameOpts {
+            kind: FeatureNameKind::Gene { delim: '_' },
+            suffix_delim: None,
+            keep_suffix: None,
+        };
+        let remap = build_gene_remap_with(&training, &query, &opts);
+        assert_eq!(remap.new_to_train[0], Some(0));
+        assert_eq!(remap.new_to_train[1], Some(0));
+
+        // 2 query rows × 1 cell, values 3 and 4 → training row 0 should hold 7.
+        let coo = nalgebra_sparse::CooMatrix::try_from_triplets(
+            2,
+            1,
+            vec![0, 1],
+            vec![0, 0],
+            vec![3.0f32, 4.0f32],
+        )
+        .unwrap();
+        let csc = nalgebra_sparse::CscMatrix::from(&coo);
+        let dense = remap_csc_to_dense(&csc, &remap);
+        assert_eq!(dense[(0, 0)], 7.0);
+    }
+
+    #[test]
+    fn default_opts_preserve_exact_match() {
+        let training = names(&["FOO", "BAR"]);
+        let query = names(&["BAR", "FOO"]);
+        let remap = build_gene_remap(&training, &query);
+        assert_eq!(remap.new_to_train[0], Some(1));
+        assert_eq!(remap.new_to_train[1], Some(0));
+    }
 }
