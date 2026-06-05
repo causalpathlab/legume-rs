@@ -271,7 +271,11 @@ pub fn estimate_delta(
     if let Some(remap) = gene_remap {
         for (new_idx, opt_train) in remap.new_to_train.iter().enumerate() {
             if let Some(&train_idx) = opt_train.as_ref() {
-                pb_train.row_mut(train_idx).copy_from(&pb_new.row(new_idx));
+                // Accumulate, not overwrite: with a many-to-one query→train
+                // remap (e.g. spliced+unspliced both resolving to one gene),
+                // each contributing query row adds to the training pseudobulk.
+                let mut dst = pb_train.row_mut(train_idx);
+                dst += &pb_new.row(new_idx);
             }
         }
     } else {

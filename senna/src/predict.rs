@@ -14,7 +14,8 @@
 //!     the test feature set is too divergent for the encoder.
 
 use crate::embed_common::*;
-use crate::topic::eval::{build_gene_remap, GeneRemap};
+use crate::fit_indexed_topic::FeatureNameKindArg;
+use crate::topic::eval::{build_gene_remap_with, GeneRemap, QueryNameOpts};
 use crate::topic::eval_indexed::{
     csc_to_indexed, csc_to_indexed_pair, refine_indexed_topic_proportions,
 };
@@ -175,6 +176,50 @@ pub struct PredictArgs {
         help = "Drop residual entries ≤ this value (default 0 = keep all nonzeros)"
     )]
     pub(crate) residual_threshold: f32,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = FeatureNameKindArg::Exact,
+        help = "Canonicalize query row names before matching the dictionary: auto|exact|gene|locus|locus-overlap|mixed",
+        long_help = "Mirrors the training-side flag. `exact` (default) preserves legacy\n\
+                     exact-then-flexible matching. `gene` resolves `ENSG..._TSPAN6` →\n\
+                     `TSPAN6` (rsplit on '_') so a symbol-keyed dictionary matches a\n\
+                     query keyed by `<ensembl>_<symbol>`. Applied AFTER the suffix trim\n\
+                     (see --feature-name-suffix-delim)."
+    )]
+    pub(crate) feature_name_kind: FeatureNameKindArg,
+
+    #[arg(
+        long,
+        help = "Split each query row name once on this char and keep the prefix as the base key",
+        long_help = "e.g. '/' turns `ENSG00000000003_TSPAN6/count/spliced` into base\n\
+                     `ENSG00000000003_TSPAN6` (+ suffix `count/spliced`). The suffix is\n\
+                     then available to --keep-feature-suffix for filtering, and the base\n\
+                     is handed to --feature-name-kind for canonicalization."
+    )]
+    pub(crate) feature_name_suffix_delim: Option<char>,
+
+    #[arg(
+        long,
+        help = "Keep only query rows whose suffix (after --feature-name-suffix-delim) equals this",
+        long_help = "e.g. `count/spliced` drops the `count/unspliced` rows of a faba\n\
+                     genes backend, collapsing the {spliced,unspliced} doubling to one\n\
+                     row per gene. Requires --feature-name-suffix-delim. Rows lacking\n\
+                     the delimiter are dropped when this is set."
+    )]
+    pub(crate) keep_feature_suffix: Option<Box<str>>,
+}
+
+impl PredictArgs {
+    /// Assemble the query-row-name transforms from the CLI flags.
+    fn query_name_opts(&self) -> QueryNameOpts {
+        QueryNameOpts {
+            kind: self.feature_name_kind.clone().resolve_or_gene(),
+            suffix_delim: self.feature_name_suffix_delim,
+            keep_suffix: self.keep_feature_suffix.clone(),
+        }
+    }
 }
 
 pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
@@ -226,8 +271,9 @@ fn resolve_mode(args: &PredictArgs) -> LatentMode {
 fn build_remap(
     training_genes: &[Box<str>],
     new_genes: &[Box<str>],
+    opts: &QueryNameOpts,
 ) -> anyhow::Result<Option<GeneRemap>> {
-    let gene_remap = build_gene_remap(training_genes, new_genes);
+    let gene_remap = build_gene_remap_with(training_genes, new_genes, opts);
     let min_overlap = (training_genes.len() as f32 * 0.1) as usize;
     anyhow::ensure!(
         gene_remap.n_mapped >= min_overlap,
@@ -323,7 +369,7 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
     );
 
     let new_genes = data_vec.row_names()?;
-    let gene_remap = build_remap(&training_genes, &new_genes)?;
+    let gene_remap = build_remap(&training_genes, &new_genes, &args.query_name_opts())?;
 
     let delta_db = estimate_delta(
         &data_vec,
@@ -645,7 +691,7 @@ fn remap_and_coarsen_dense(
             let col = csc.col(j);
             for (&row_new, &val) in col.row_indices().iter().zip(col.values().iter()) {
                 if let Some(row_train) = remap.new_to_train[row_new] {
-                    out[(row_train, j)] = val;
+                    out[(row_train, j)] += val;
                 }
             }
         }
@@ -717,7 +763,7 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
     );
 
     let new_genes = data_vec.row_names()?;
-    let gene_remap = build_remap(&training_genes, &new_genes)?;
+    let gene_remap = build_remap(&training_genes, &new_genes, &args.query_name_opts())?;
 
     let delta_db = estimate_delta(
         &data_vec,

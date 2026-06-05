@@ -128,6 +128,9 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
         residual_out: None,
         residual_include_delta: false,
         residual_threshold: 0.0,
+        feature_name_kind: crate::fit_indexed_topic::FeatureNameKindArg::Exact,
+        feature_name_suffix_delim: None,
+        keep_feature_suffix: None,
     };
     predict_model(&predict_args)?;
 

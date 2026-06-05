@@ -59,7 +59,7 @@ fn remap_csc_to_dense_full(
             let col = csc.col(j);
             for (&row_new, &val) in col.row_indices().iter().zip(col.values().iter()) {
                 if let Some(row_train) = remap.new_to_train[row_new] {
-                    out[(row_train, j)] = val;
+                    out[(row_train, j)] += val;
                 }
             }
         }
