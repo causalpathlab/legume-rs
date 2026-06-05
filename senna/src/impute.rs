@@ -125,6 +125,9 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
         decoder_only: false,
         delta_iters: 3,
         verbose: args.verbose,
+        residual_out: None,
+        residual_include_delta: false,
+        residual_threshold: 0.0,
     };
     predict_model(&predict_args)?;
 
