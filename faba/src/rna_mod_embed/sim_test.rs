@@ -115,11 +115,15 @@ fn build_pseudobulk() -> PseudobulkData {
         modality_total_mass,
     };
 
+    let gene_ubiquity =
+        super::gene_weight::ubiquity_from_count_pool(&cell_pools.count_comp, N_GENES, N_CELLS);
+
     PseudobulkData {
         cell_to_pb_per_level: Vec::new(),
         cell_pools,
         pb_pools_per_level: Vec::new(),
         gene_fisher_weights: vec![1.0; N_GENES],
+        gene_ubiquity,
     }
 }
 
@@ -152,7 +156,7 @@ fn test_args() -> RnaModEmbedArgs {
         batch_size: 96,
         learning_rate: 6e-2,
         z_l2: 1e-3,
-        q_l2: 5e-3, // δ shrinkage → keeps the exp gate from blowing up
+        delta_l2: 5e-3, // δ shrinkage → keeps the exp gate from blowing up
         f_agg: 0.34,
         f_count: 0.0,
         tau: 1.0,
@@ -166,7 +170,6 @@ fn test_args() -> RnaModEmbedArgs {
         n_rand: 8,
         n_swap_gene_mode: 4,
         n_swap_modality: 6,
-        use_modification_fraction: false,
         seed: 7,
         device: ComputeDevice::Cpu,
         device_no: 0,

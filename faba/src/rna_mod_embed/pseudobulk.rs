@@ -82,6 +82,12 @@ pub struct PseudobulkData {
     /// folded into the anchor sampling pools; kept here only so the
     /// caller can persist them to `{out}.fisher_weights.parquet`.
     pub gene_fisher_weights: Vec<f32>,
+    /// Per-gene ubiquity (fraction of cells expressing, length `n_genes`,
+    /// in `(0, 1]`) from the cell-axis count pool. NOT folded into any
+    /// pool or the model; persisted to `{out}.ubiquity.parquet` as a
+    /// diagnostic / inverse-propensity signal (breadth complement to the
+    /// NB-Fisher magnitude weight).
+    pub gene_ubiquity: Vec<f32>,
 }
 
 impl PseudobulkData {
@@ -213,6 +219,12 @@ pub fn build_pseudobulk(
     // genes stop monopolising the shared program loadings z. See
     // `gene_weight`. A no-op (all weights 1.0) when penalty == 0.
     let n_genes = table.n_genes();
+    // Per-gene ubiquity from the cell-axis count pool (computed before the
+    // Fisher reweight, though that only mutates `weights` not `gene_ids`).
+    // Diagnostic / inverse-propensity signal; see `gene_weight`.
+    let gene_ubiquity =
+        super::gene_weight::ubiquity_from_count_pool(&cell_pools.count_comp, n_genes, n_cells);
+
     let gene_fisher_weights = if args.housekeeping_penalty > 0.0 {
         let w = super::gene_weight::fisher_weights_from_count_pool(
             &cell_pools.count_comp,
@@ -234,6 +246,7 @@ pub fn build_pseudobulk(
         cell_pools,
         pb_pools_per_level,
         gene_fisher_weights,
+        gene_ubiquity,
     })
 }
 
