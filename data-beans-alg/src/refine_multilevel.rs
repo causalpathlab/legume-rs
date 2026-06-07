@@ -62,38 +62,17 @@ fn build_bbknn_neighbors(
     batch_knn_lookup: &[matrix_util::knn_match::ColumnDict<usize>],
     knn: usize,
 ) -> anyhow::Result<Vec<Vec<usize>>> {
-    use matrix_util::knn_match::MakeVecPoint;
+    use crate::collapse_data::bbknn_match_one_pbsamp;
     use rayon::prelude::*;
     let num_pb = layout.cell_counts.len();
-    let cell_oversample = (knn * 4 + 1).max(knn);
 
+    // Same cross-batch matching as `per_batch_sc_neighbors`, but we keep only
+    // the candidate pb-sample ids — distances are unused for refinement.
     (0..num_pb)
         .into_par_iter()
         .map(|pbsamp| -> anyhow::Result<Vec<usize>> {
-            let pbsamp_batch = layout.pb_sample_to_batch[pbsamp];
-            let centroid = layout.centroids.column(pbsamp).to_vp();
-            let mut all_scs: Vec<usize> = Vec::new();
-            for (b, bknn) in batch_knn_lookup.iter().enumerate() {
-                if b == pbsamp_batch {
-                    continue;
-                }
-                let (cells, _dists) = bknn.search_by_query_data(&centroid, cell_oversample)?;
-                let mut seen: Vec<usize> = Vec::new();
-                for &c in &cells {
-                    let other_pbsamp = layout.cell_to_pbsamp[c];
-                    if other_pbsamp == usize::MAX || other_pbsamp == pbsamp {
-                        continue;
-                    }
-                    if !seen.contains(&other_pbsamp) {
-                        seen.push(other_pbsamp);
-                        if seen.len() >= knn {
-                            break;
-                        }
-                    }
-                }
-                all_scs.extend(seen);
-            }
-            Ok(all_scs)
+            let hits = bbknn_match_one_pbsamp(layout, batch_knn_lookup, knn, pbsamp)?;
+            Ok(hits.into_iter().map(|(p, _)| p).collect())
         })
         .collect()
 }
