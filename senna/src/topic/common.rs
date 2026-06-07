@@ -525,8 +525,6 @@ pub(crate) use graph_embedding_util::setup_stop_handler;
 ////////////////////////////////////////////////////////////////////////
 
 use matrix_util::pair_graph::FeaturePairGraph;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// QC pipeline + alias-matching options shared between the row-mask
 /// callback (data-axis restriction) and the post-load graph parse
@@ -546,41 +544,25 @@ fn apply_qc_pipeline(graph: &mut FeaturePairGraph, opts: &FeatureNetworkOpts) {
     graph.prune_by_min_degree(opts.min_degree);
 }
 
-#[derive(Clone)]
-struct FeatureNetworkCache {
-    graph: Rc<RefCell<Option<FeaturePairGraph>>>,
-    keep: Rc<RefCell<Option<Vec<bool>>>>,
-}
-
 /// Handle returned by [`setup_feature_network`]. Carries the optional
-/// row-mask callback (present only when restriction is on) and a
-/// graph/keep cache that [`FeatureNetworkHandle::into_feature_graph`]
-/// consumes to avoid a second parse of the same edge list.
+/// row-mask callback for feature-network restriction (present only when
+/// restriction is on).
 pub struct FeatureNetworkHandle {
     pub mask_fn: Option<Box<FeatureMaskFn>>,
-    cache: FeatureNetworkCache,
 }
 
 /// Build the row-mask callback for feature-network restriction.
 ///
 /// When `restrict_path` is `Some`, the callback parses the edge list
 /// against the data axis, applies the QC pipeline, and emits a `keep`
-/// mask of features with at least one surviving edge. Graph + keep
-/// mask are cached so the post-load step can remap rather than re-parse.
-///
-/// When `restrict_path` is `None`, the handle has no mask_fn;
-/// `into_feature_graph` parses fresh from `network_path` (if any).
+/// mask of features with at least one surviving edge. When `restrict_path`
+/// is `None`, the handle has no mask_fn.
 pub fn setup_feature_network(
     restrict_path: Option<&str>,
     opts: FeatureNetworkOpts,
 ) -> FeatureNetworkHandle {
-    let cache = FeatureNetworkCache {
-        graph: Rc::new(RefCell::new(None)),
-        keep: Rc::new(RefCell::new(None)),
-    };
     let mask_fn: Option<Box<FeatureMaskFn>> = restrict_path.map(|p| {
         let path: String = p.to_string();
-        let cache_inner = cache.clone();
         let f: Box<FeatureMaskFn> = Box::new(move |row_names| {
             let mut graph = FeaturePairGraph::from_edge_list(
                 &path,
@@ -596,75 +578,11 @@ pub fn setup_feature_network(
                 n_keep,
                 row_names.len(),
             );
-            *cache_inner.keep.borrow_mut() = Some(keep.clone());
-            *cache_inner.graph.borrow_mut() = Some(graph);
             Ok(keep)
         });
         f
     });
-    FeatureNetworkHandle { mask_fn, cache }
-}
-
-impl FeatureNetworkHandle {
-    /// Resolve the post-load feature graph for the encoder GCN block.
-    /// Reuses the pre-mask cached graph when restriction was on
-    /// (remapping to the post-mask axis); otherwise parses fresh,
-    /// applying the same QC pipeline. `gene_names` must match the
-    /// post-mask feature axis.
-    pub fn into_feature_graph(
-        self,
-        network_path: Option<&str>,
-        gene_names: &[Box<str>],
-        opts: FeatureNetworkOpts,
-    ) -> anyhow::Result<Option<FeaturePairGraph>> {
-        let cached_graph = self.cache.graph.borrow_mut().take();
-        let cached_keep = self.cache.keep.borrow_mut().take();
-        match (cached_graph, cached_keep) {
-            (Some(pre), Some(keep)) => Ok(Some(remap_graph_to_subset(pre, &keep))),
-            _ => network_path
-                .map(|path| -> anyhow::Result<_> {
-                    let mut g = FeaturePairGraph::from_edge_list(
-                        path,
-                        gene_names.to_vec(),
-                        opts.prefix_match,
-                        opts.delim,
-                    )?;
-                    apply_qc_pipeline(&mut g, &opts);
-                    Ok(g)
-                })
-                .transpose(),
-        }
-    }
-}
-
-/// Renumber a `FeaturePairGraph`'s edges + names from a pre-mask axis to
-/// the post-mask one defined by `keep`.
-pub fn remap_graph_to_subset(pre: FeaturePairGraph, keep: &[bool]) -> FeaturePairGraph {
-    debug_assert_eq!(keep.len(), pre.n_features);
-    let mut old_to_new: Vec<Option<usize>> = vec![None; keep.len()];
-    let mut next = 0usize;
-    for (i, &k) in keep.iter().enumerate() {
-        if k {
-            old_to_new[i] = Some(next);
-            next += 1;
-        }
-    }
-    let feature_names: Vec<Box<str>> = pre
-        .feature_names
-        .into_iter()
-        .zip(keep.iter())
-        .filter_map(|(n, &k)| k.then_some(n))
-        .collect();
-    let feature_edges: Vec<(usize, usize)> = pre
-        .feature_edges
-        .into_iter()
-        .map(|(u, v)| (old_to_new[u].expect("kept"), old_to_new[v].expect("kept")))
-        .collect();
-    FeaturePairGraph {
-        feature_names,
-        n_features: next,
-        feature_edges,
-    }
+    FeatureNetworkHandle { mask_fn }
 }
 
 /// Resolve the encoder embedding dim `H` shared by the topic-family fits.

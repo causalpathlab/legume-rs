@@ -911,7 +911,6 @@ where
         enc_context_size: None,
         dec_context_size: None,
         theta_mean: None,
-        n_graph_edges: None,
     };
     metadata.save(&ctx.args.out)?;
 

@@ -202,4 +202,3 @@ pub fn iterate_delta_dense(
     }
     Ok(delta)
 }
-
