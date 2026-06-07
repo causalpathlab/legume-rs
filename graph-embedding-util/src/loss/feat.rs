@@ -851,10 +851,19 @@ pub fn nce_loss_identity(
     nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, gate, smoother, dev)
 }
 
+/// Unit-L2-normalize a tensor over its last dim (the embedding axis).
+/// Thin wrapper over the shared [`candle_util::sgvb::l2_normalize_dim`]
+/// (same epsilon-floored norm) that picks the last dim.
+fn l2_normalize_last(t: &Tensor) -> Result<Tensor> {
+    candle_util::sgvb::l2_normalize_dim(t, t.rank() - 1)
+}
+
 /// Shared tail of [`nce_loss`] / [`nce_loss_identity`]: feature-side
-/// gathers, bilinear scoring, count-weighted log-σ aggregation. The
-/// cell-side embeddings come pre-resolved (pooled or directly
-/// gathered) so we don't pay the path-selection cost twice.
+/// gathers, **cosine** bilinear scoring (rows L2-normalized, dot scaled by
+/// the learnable `exp(model.log_temp)`), count-weighted log-σ aggregation.
+/// Cosine + temperature removes the free scale of the raw dot so the cell
+/// embedding can't drift to an uninformative noise ball. The cell-side
+/// embeddings come pre-resolved (pooled or directly gathered).
 fn nce_loss_with_cell_side(
     model: &JointEmbedModel,
     batch: EdgeBatch,
@@ -890,10 +899,19 @@ fn nce_loss_with_cell_side(
         None => (e_feat_pos, e_feat_neg),
     };
 
-    let pos_score =
-        JointEmbedModel::score_diag(&e_feat_pos, &e_cell_pos, &b_feat_pos, &b_cell_pos)?;
-    let neg_score =
-        JointEmbedModel::score_negatives(&e_feat_neg, &e_cell_pos, &b_feat_neg, &b_cell_pos)?;
+    // Cosine NCE: unit-normalize rows, scale by the learnable temperature
+    // exp(log_temp) (clamped to [1,100]); biases are added raw inside
+    // score_diag. score = scale·(Ê_f·Ê_c) + b_feat. The cell row is shared
+    // by the pos and neg scores, so scaling only `ec_pos` ([b,h]) applies
+    // the temperature to both — avoids a redundant multiply on the larger
+    // `[b,k,h]` negative-feature tensor.
+    let scale = model.log_temp.exp()?.clamp(1f32, 100f32)?;
+    let ef_pos = l2_normalize_last(&e_feat_pos)?;
+    let ef_neg = l2_normalize_last(&e_feat_neg)?;
+    let ec_pos = l2_normalize_last(&e_cell_pos)?.broadcast_mul(&scale)?;
+
+    let pos_score = JointEmbedModel::score_diag(&ef_pos, &ec_pos, &b_feat_pos, &b_cell_pos)?;
+    let neg_score = JointEmbedModel::score_negatives(&ef_neg, &ec_pos, &b_feat_neg, &b_cell_pos)?;
 
     let per_edge = (log_sigmoid(&pos_score)? + log_sigmoid(&neg_score.neg()?)?.sum(1)?)?.neg()?;
 

@@ -5,7 +5,9 @@
 //! caller):
 //! - `{out}.latent.parquet` (cell × H), col prefix `h`
 //! - `{out}.dictionary.parquet` (feature × H), col prefix `h`
-//! - `{out}.cell_bias.parquet` / `{out}.feature_bias.parquet`
+//! - `{out}.feature_bias.parquet` (per-feature bias). There is no
+//!   `cell_bias.parquet`: bge drops the per-cell bias `b_cell`
+//!   (score = E_feat·E_cell + b_feat).
 
 use crate::model::JointEmbedModel;
 use candle_util::candle_core::Tensor;
@@ -30,12 +32,7 @@ pub fn save_outputs(
         ctx.barcodes,
         "cell",
     )?;
-    save_bias(
-        &format!("{out_prefix}.cell_bias.parquet"),
-        &model.b_cell,
-        ctx.barcodes,
-        "cell",
-    )?;
+    // No `cell_bias.parquet` — bge drops the per-cell bias `b_cell`.
     save_embedding(
         &format!("{out_prefix}.dictionary.parquet"),
         &model.e_feat,

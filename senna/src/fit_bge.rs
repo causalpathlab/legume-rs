@@ -22,36 +22,6 @@ use rustc_hash::FxHashMap;
 use std::io::BufRead;
 use std::path::Path;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-#[clap(rename_all = "kebab-case")]
-pub(crate) enum CompositeModeArg {
-    /// Per step, sample a coordinated bottom-up chain — one real
-    /// (cell, feature) edge whose pb ancestors at each level come from
-    /// the cell→pb_per_level map. All axes share the same positive
-    /// feature and negatives per chain. Lowest variance per step;
-    /// per-step compute close to `sum`. Default.
-    #[default]
-    Chain,
-    /// Per step, sum NCE losses across every axis. Higher variance and
-    /// O(n_axes) per-step cost than `chain`, but axes draw independent
-    /// minibatches (no shared-positive correlation).
-    Sum,
-    /// Per step, pick one axis weighted by λ. Same expected gradient as
-    /// `sum`, ~n_axes× faster epochs, higher per-step variance — needs
-    /// proportionally more epochs to reach the same loss.
-    Sample,
-}
-
-impl From<CompositeModeArg> for ge::CompositeMode {
-    fn from(value: CompositeModeArg) -> Self {
-        match value {
-            CompositeModeArg::Sum => ge::CompositeMode::Sum,
-            CompositeModeArg::Sample => ge::CompositeMode::Sample,
-            CompositeModeArg::Chain => ge::CompositeMode::Chain,
-        }
-    }
-}
-
 #[derive(Args, Debug)]
 pub struct BgeArgs {
     #[arg(
@@ -185,20 +155,6 @@ pub struct BgeArgs {
                 1.0 = off)."
     )]
     bridge_weight: f32,
-
-    #[arg(
-        long = "composite-mode",
-        value_enum,
-        default_value_t = CompositeModeArg::Chain,
-        help = "How to mix per-axis NCE losses each step. `chain` (default) samples a \
-                coordinated bottom-up chain (one real cell-feature edge whose pb ancestors \
-                at each level come from the cell→pb_per_level map). All axes share the \
-                same positive feature and negatives per chain — lowest variance per step. \
-                `sum` runs every axis with independent minibatches per step. `sample` picks \
-                one axis per step weighted by λ (~n_axes× faster epochs, more epochs needed \
-                to converge)."
-    )]
-    composite_mode: CompositeModeArg,
 
     #[arg(
         long,
@@ -418,8 +374,8 @@ pub struct BgeArgs {
         required = true,
         help = "Output prefix",
         long_help = "Output prefix; produces {out}.latent.parquet, \
-                     {out}.dictionary.parquet, {out}.cell_bias.parquet, \
-                     {out}.feature_bias.parquet, {out}.senna.json"
+                     {out}.dictionary.parquet, {out}.feature_bias.parquet, \
+                     {out}.senna.json"
     )]
     out: Box<str>,
 }
@@ -638,7 +594,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         proj_dim: args.collapse.proj_dim,
         max_features: if freeze_active { 0 } else { args.max_features },
         hvg_weights,
-        composite_mode: args.composite_mode.into(),
         refine,
         epochs: args.epochs,
         batches_per_epoch: args.batches_per_epoch,
@@ -869,7 +824,7 @@ fn load_frozen_feature_host_for_bge(
 /// Resolve the ETM topic side from a finished bge run, with no further
 /// training, and write a topic-model-shaped output layout so that
 /// `senna {plot, plot-topic, clustering, annotate} --from` consume the
-/// topics directly (matching the `senna topic` / `itopic` conventions:
+/// topics directly (matching the `senna topic` / `masked-topic` conventions:
 /// `latent` = log θ, `dictionary` = β).
 ///
 /// Archetypal analysis on the cell embedding `Z [N,H]` yields archetypes
@@ -878,10 +833,10 @@ fn load_frozen_feature_host_for_bge(
 /// the same factorization the ETM decoder uses. Writes:
 ///   - `{out}.latent.parquet`           log θ [N,K]   (topic proportions)
 ///   - `{out}.dictionary.parquet`       β    [D,K]   (each topic column a gene simplex)
-///   - `{out}.topic_embedding.parquet`  α    [K,H]   (for a later `itopic` finetune)
+///   - `{out}.topic_embedding.parquet`  α    [K,H]   (for a later `masked-topic` finetune)
 ///   - `{out}.cell_embedding.parquet`   Z    [N,H]   (raw bge cell embedding)
 ///   - `{out}.feature_embedding.parquet`ρ    [D,H]   (raw bge feature embedding)
-///   - `{out}.{cell,feature}_bias.parquet`            (as `ge::save_outputs`)
+///   - `{out}.feature_bias.parquet`     b_feat [D]    (no cell_bias — b_cell is dropped)
 fn resolve_etm_topics(
     model: &ge::JointEmbedModel,
     feature_names: &[Box<str>],
@@ -947,7 +902,7 @@ fn resolve_etm_topics(
         (Some(feature_names), Some("gene")),
         Some(&topic_names),
     )?;
-    // Resolved topic embeddings α (warm-start for a later `itopic` finetune).
+    // Resolved topic embeddings α (warm-start for a later `masked-topic` finetune).
     res.alpha.to_parquet_with_names(
         &format!("{out}.topic_embedding.parquet"),
         (Some(&topic_names), Some("topic")),
@@ -964,13 +919,8 @@ fn resolve_etm_topics(
         (Some(feature_names), Some("feature")),
         Some(&h_names),
     )?;
-    // Bias terms — reuse the canonical writer `ge::save_outputs` uses.
-    ge::eval::save_bias(
-        &format!("{out}.cell_bias.parquet"),
-        &model.b_cell,
-        barcodes,
-        "cell",
-    )?;
+    // Feature bias only — bge drops the per-cell bias `b_cell`
+    // (score = E_feat·E_cell + b_feat), so no `cell_bias.parquet`.
     ge::eval::save_bias(
         &format!("{out}.feature_bias.parquet"),
         &model.b_feat,

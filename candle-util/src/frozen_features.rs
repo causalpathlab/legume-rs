@@ -154,6 +154,19 @@ pub fn trainable_vars(varmap: &VarMap, frozen_names: &[&str]) -> Vec<Var> {
         .collect()
 }
 
+/// Allow-list counterpart of [`trainable_vars`]: only the `Var`s whose
+/// name IS in `keep_names`. Use when a stage trains a small named subset
+/// and freezes everything else — clearer (and one lock) than passing the
+/// complement to `trainable_vars`.
+pub fn trainable_only(varmap: &VarMap, keep_names: &[&str]) -> Vec<Var> {
+    let keep: FxHashSet<&str> = keep_names.iter().copied().collect();
+    let tbl = varmap.data().lock().unwrap();
+    tbl.iter()
+        .filter(|(name, _)| keep.contains(name.as_str()))
+        .map(|(_, v)| v.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
