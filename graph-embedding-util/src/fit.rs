@@ -746,7 +746,10 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         // Freeze the cell-axis Vars (not part of phase 1): `e_cell` is a
         // phase-2 job and `b_cell` is dropped. The pb-sample biases
         // `pb_l*_b_cell` stay trainable (they absorb per-pb depth).
-        let mut opt1 = AdamW::new(trainable_vars(&varmap, &["e_cell", "b_cell"]), adamw_params())?;
+        let mut opt1 = AdamW::new(
+            trainable_vars(&varmap, &["e_cell", "b_cell"]),
+            adamw_params(),
+        )?;
         let mut p1 = stage_params(&config);
         p1.composite_mode = CompositeMode::Sum;
         info!(
@@ -779,7 +782,10 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // z/δ, every pb cell-side embedding, the dropped b_cell — is frozen.
     // Single axis ⇒ separable per-cell fit; the n_units() fix makes the auto
     // budget sweep every cell ~once/epoch.
-    let mut opt2 = AdamW::new(trainable_only(&varmap, &["e_cell", "log_temp"]), adamw_params())?;
+    let mut opt2 = AdamW::new(
+        trainable_only(&varmap, &["e_cell", "log_temp"]),
+        adamw_params(),
+    )?;
     let mut p2 = stage_params(&config);
     p2.composite_mode = CompositeMode::Sum; // single axis
     p2.feature_embedding_l2 = 0.0; // feature side is frozen — nothing to regularize
