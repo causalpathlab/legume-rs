@@ -41,6 +41,8 @@ use pb_samples::{
     collect_pb_sample_gene_sums, per_batch_sc_neighbors,
 };
 pub use pb_samples::{PbSampleCollection, PbSampleLayout};
+// Shared cross-batch pb-sample matching, reused by `refine_multilevel`.
+pub(crate) use pb_samples::bbknn_match_one_pbsamp;
 mod refine;
 use refine::{
     compute_fine_to_coarse_mapping, compute_level_sort_dims, fine_to_coarse_from_refined,
