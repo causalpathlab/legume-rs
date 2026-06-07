@@ -20,7 +20,7 @@ use auxiliary_data::feature_names::FeatureNameKind;
 use auxiliary_data::frozen_features::FrozenFeatureHost;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
-use candle_util::frozen_features::trainable_vars;
+use candle_util::frozen_features::{trainable_only, trainable_vars};
 use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, MultilevelParams};
 use data_beans_alg::gene_weighting::{
     compute_nb_fisher_weights, load_per_gene_weights, save_per_gene_weights,
@@ -105,13 +105,6 @@ pub struct FitConfig {
     /// additively: `L = L_bip + λ · L_cc`. `None` (or `lambda == 0`)
     /// disables the term.
     pub cell_cell: Option<CellCellConfig>,
-    /// How the composite training loop mixes per-axis NCE losses each
-    /// step. `Sum` = one minibatch per axis per step (lower variance,
-    /// `O(n_axes)` work per step); `Sample` = one axis per step picked
-    /// proportional to `λ` (same expected gradient, `O(1)` per step,
-    /// roughly `n_axes×` faster epochs at the cost of a noisier
-    /// estimator). Defaults to `Sum` for backwards compatibility.
-    pub composite_mode: CompositeMode,
     /// Optional per-row HVG weights for the random projection (length =
     /// full feature axis). When `Some(w)`, the RP uses
     /// `project_columns_weighted` with these weights — uninformative
@@ -380,22 +373,28 @@ pub struct FitOutput {
     pub varmap: VarMap,
 }
 
-/// Composite-objective gbe fit.
+/// Composite-objective gbe fit — trained in **two phases**.
 ///
-/// Builds one shared `(E_feat, b_feat)` and one head per axis:
-/// - **Per-cell axis** — fine-resolution triplets with optional
-///   cell-cell NCE term.
-/// - **Per pseudobulk level** (coarsest..finest from
-///   `collapse_columns_multilevel_vec`) — pseudobulk-feature triplets
-///   from `mu_adjusted` / `mu_observed` of that level.
+/// The bilinear score is `E_feat[f]·E_cell[c] + b_feat[f]` (no per-cell
+/// bias — `b_cell` is dropped: it carries no cell-type signal and only
+/// siphons the sparse per-cell gradient).
 ///
-/// All heads share `E_feat` / `b_feat` Vars in a single `VarMap`. Each
-/// minibatch step samples one positive batch from every axis,
-/// accumulates `Σ_k λ_k · L_NCE_k` (+ optional cell-cell term on the
-/// per-cell axis), and takes a single AdamW step. The shared feature
-/// embedding receives gradients from every axis simultaneously, so
-/// coarse and fine constraints regularize each other in lockstep
-/// instead of via curriculum hand-offs.
+/// **Phase 1 — features + pseudobulks.** Train only the pseudobulk axes
+/// (coarsest..finest from `collapse_columns_multilevel_vec`, pseudobulk-
+/// feature triplets) with `Sum`. They share — and learn — `E_feat /
+/// b_feat / z / δ` and per-level pb cell-side embeddings. (Skipped when a
+/// frozen feature side is supplied via `frozen_feature_host`.)
+///
+/// **Phase 2 — dense per-cell embedding.** Freeze the entire feature side
+/// and fit ONLY `E_cell` against it. With a single axis the objective is
+/// separable per cell — each row's gradient depends only on that cell's
+/// own edges (embarrassingly parallel) — and the auto per-epoch budget
+/// (sized by `n_units` = n_cells) sweeps every cell ~once per epoch.
+///
+/// This replaces the old single joint pass, in which the per-cell axis was
+/// starved: the per-epoch budget was sized by the pseudobulk count, so
+/// `E_cell` received ~1 step/epoch across all cells and never left random
+/// init (all useful training happened at the pb level).
 pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<FitOutput> {
     let n_cells = unified.n_cells();
     let h = config.embedding_dim;
@@ -614,6 +613,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 shared_b_feat: cell_model.b_feat.clone(),
                 shared_z: cell_model.z.clone(),
                 shared_delta: cell_model.delta.clone(),
+                shared_log_temp: cell_model.log_temp.clone(),
                 num_programs: cell_model.num_programs,
                 n_conditions: cell_model.n_conditions,
                 e_cell_init: None,
@@ -685,29 +685,11 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
 
     let mut smoother = build_smoother(config.feature_network.take(), n_features, h)?;
 
-    let opt_vars = if config.frozen_feature_host.is_some() {
-        // E_feat / b_feat are seeded from the frozen host but excluded
-        // from gradient steps — see `frozen_feature_host` doc on FitConfig.
-        // The per-condition gate (`z`, `δ`) is a feature-side correction,
-        // so freeze it alongside the feature embedding.
-        let trainable = trainable_vars(&varmap, &["e_feat", "b_feat", "z", "delta"]);
-        info!(
-            "Freeze mode: AdamW over {} cell-side vars ({} feature-side vars excluded)",
-            trainable.len(),
-            varmap.all_vars().len() - trainable.len()
-        );
-        trainable
-    } else {
-        varmap.all_vars()
-    };
-    let mut opt = AdamW::new(
-        opt_vars,
-        ParamsAdamW {
-            lr: config.learning_rate,
-            weight_decay: config.weight_decay,
-            ..Default::default()
-        },
-    )?;
+    // Note on biases: the per-CELL bias `b_cell` is dropped (see `fit()`
+    // doc / `model.rs`) — never trained, never written. The per-PB biases
+    // (`pb_l*_b_cell`) DO train in phase 1: a per-pseudobulk bias absorbs
+    // that pb's depth so the shared `E_feat` captures composition, not
+    // library size.
 
     let cell_cell_training = cell_cell_built.as_ref().map(|p| CellCellTraining {
         samplers: &p.samplers,
@@ -721,8 +703,17 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         },
     });
 
-    let mut axes: Vec<CompositeAxis> = Vec::with_capacity(num_levels + 1);
-    axes.push(CompositeAxis {
+    // Two-phase training (always — `ge::fit` is the bge driver only); see
+    // the `fit()` doc for the rationale. Shared AdamW hyperparameters:
+    let adamw_params = || ParamsAdamW {
+        lr: config.learning_rate,
+        weight_decay: config.weight_decay,
+        ..Default::default()
+    };
+
+    // Cell axis (per-cell embedding). Trained ONLY in phase 2, against the
+    // frozen feature side. The optional cell-cell NCE term attaches here.
+    let cell_axis = CompositeAxis {
         model: &cell_model,
         unified,
         cell_axis: &cell_axis_coarsening,
@@ -730,10 +721,12 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         lambda: DEFAULT_AXIS_LAMBDA,
         cell_cell: cell_cell_training,
         label: "cell",
-    });
+    };
+    // Pseudobulk axes — phase 1 only.
+    let mut pb_axes: Vec<CompositeAxis> = Vec::with_capacity(num_levels);
     for (i, model) in level_models.iter().enumerate() {
         let (axis, stratified) = &level_axes_data[i];
-        axes.push(CompositeAxis {
+        pb_axes.push(CompositeAxis {
             model,
             unified: &pb_blobs[i],
             cell_axis: axis,
@@ -744,25 +737,70 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         });
     }
 
-    info!(
-        "Composite training: {} axes (1 cell + {} pseudobulk levels), {} epochs",
-        axes.len(),
-        num_levels,
-        config.epochs
-    );
+    // ---- Phase 1: features + pseudobulks ----
+    // Skipped when a frozen feature side was supplied on disk (already seeded
+    // and held fixed). With no per-cell axis present, Chain mode has no chain
+    // to anchor, so phase 1 trains the pb axes with `Sum`.
+    let do_phase1 = config.frozen_feature_host.is_none() && !pb_axes.is_empty();
+    if do_phase1 {
+        // Freeze the cell-axis Vars (not part of phase 1): `e_cell` is a
+        // phase-2 job and `b_cell` is dropped. The pb-sample biases
+        // `pb_l*_b_cell` stay trainable (they absorb per-pb depth).
+        let mut opt1 = AdamW::new(trainable_vars(&varmap, &["e_cell", "b_cell"]), adamw_params())?;
+        let mut p1 = stage_params(&config);
+        p1.composite_mode = CompositeMode::Sum;
+        info!(
+            "Phase 1 — features + {} pseudobulk level(s) [Sum], {} epochs",
+            pb_axes.len(),
+            config.epochs
+        );
+        train_composite(
+            &CompositeTrainContext {
+                axes: &pb_axes,
+                feat_weights: &feat_weights,
+                dev: &config.device,
+                stop: &stop,
+                cell_to_pb_per_level: None,
+            },
+            &mut opt1,
+            &p1,
+            smoother.as_mut(),
+        )?;
+    } else if pb_axes.is_empty() && config.frozen_feature_host.is_none() {
+        log::warn!(
+            "no pseudobulk axes (num_levels resolved to 0) and no frozen feature side — \
+             E_feat stays at random init; the cell embedding will be meaningless"
+        );
+    }
 
-    let train_params = stage_params(&config);
+    // ---- Phase 2: dense per-cell embedding against the frozen feature side ----
+    // Train ONLY `e_cell` (and the shared cosine temperature `log_temp`, so
+    // it adapts to the cell-feature scale); everything else — E_feat/b_feat/
+    // z/δ, every pb cell-side embedding, the dropped b_cell — is frozen.
+    // Single axis ⇒ separable per-cell fit; the n_units() fix makes the auto
+    // budget sweep every cell ~once/epoch.
+    let mut opt2 = AdamW::new(trainable_only(&varmap, &["e_cell", "log_temp"]), adamw_params())?;
+    let mut p2 = stage_params(&config);
+    p2.composite_mode = CompositeMode::Sum; // single axis
+    p2.feature_embedding_l2 = 0.0; // feature side is frozen — nothing to regularize
+    p2.z_l2 = 0.0;
+    p2.delta_l2 = 0.0;
+    let cell_axes = [cell_axis];
+    info!(
+        "Phase 2 — dense per-cell embedding ({} cells, feature side frozen), {} epochs",
+        n_cells, config.epochs
+    );
     train_composite(
         &CompositeTrainContext {
-            axes: &axes,
+            axes: &cell_axes,
             feat_weights: &feat_weights,
             dev: &config.device,
             stop: &stop,
-            cell_to_pb_per_level: Some(&cell_to_pb_per_level),
+            cell_to_pb_per_level: None,
         },
-        &mut opt,
-        &train_params,
-        smoother.as_mut(),
+        &mut opt2,
+        &p2,
+        None, // feature side frozen — do not smooth E_feat in phase 2
     )?;
 
     Ok(FitOutput {
@@ -1138,7 +1176,10 @@ fn stage_params(config: &FitConfig) -> TrainingParams {
         batch_size: config.batch_size,
         num_negatives: config.num_negatives,
         seed: config.seed,
-        composite_mode: config.composite_mode,
+        // bge is two-phase: phase 1 (pb axes, no cell axis) and phase 2
+        // (single cell axis) both require `Sum`. Each phase sets its own
+        // mode explicitly; this default just makes the value well-formed.
+        composite_mode: CompositeMode::Sum,
         feature_embedding_l2,
         z_l2,
         delta_l2,

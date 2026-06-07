@@ -117,12 +117,16 @@ impl<'a> AxisSampler<'a> {
 
     /// Number of "draw units" on this axis — used by auto
     /// `--batches-per-epoch` (one weighted pass = `n_units / batch_size`).
-    /// Per-cell samplers expose one unit per batch (= one per cell);
-    /// pseudobulk axes expose `active_pbs.len()`.
+    /// A cell axis exposes one unit per *cell* (summed across its per-batch
+    /// samplers) so a "pass" sweeps every cell once; pb axes expose
+    /// `active_pbs.len()`. (The cell axis previously reported the number of
+    /// batches here, which starved per-cell training — the cell axis was
+    /// invisible to the budget and got the same ~1 step/epoch as the pb
+    /// axes despite having orders of magnitude more units.)
     pub fn n_units(&self) -> usize {
         match self {
             Self::PerBatch(s) => s.len(),
-            Self::PerBatchStratified(s) => s.len(),
+            Self::PerBatchStratified(s) => s.iter().map(|x| x.active_cells.len()).sum(),
             Self::Stratified(s) => s.active_pbs.len(),
         }
     }

@@ -6,6 +6,12 @@
 //!
 //!   `score(f, c) = E_feat[f] · E_cell[c] + b_feat[f] + b_cell[c]`
 //!
+//! Note: the bge driver (`fit()` in `fit.rs`) drops `b_cell` — it carries
+//! no cell-type signal (the NCE negatives share the positive's cell) and
+//! only siphons the sparse per-cell gradient — so for bge the effective
+//! score is `E_feat[f] · E_cell[c] + b_feat[f]`. Other callers (e.g. pinto)
+//! still use `b_cell`.
+//!
 //! Features are addressed at fine resolution. The cell axis is
 //! coarsened: cell embeddings are mean-pooled (per the batch's chosen
 //! seed coarsening) over the fine children of each touched pb-sample.
@@ -48,6 +54,9 @@ pub struct ShareFeaturesArgs<'a> {
     /// earlier `new_with_init`); reused so every axis co-trains one gate.
     pub shared_z: Tensor,
     pub shared_delta: Tensor,
+    /// Shared cosine-NCE log-temperature (registered by the earlier
+    /// `new_with_init`); reused so every axis scores at one temperature.
+    pub shared_log_temp: Tensor,
     pub num_programs: usize,
     pub n_conditions: usize,
     pub e_cell_init: Option<&'a nalgebra::DMatrix<f32>>,
@@ -62,6 +71,11 @@ pub struct JointEmbedModel {
     pub e_cell: Tensor,
     pub b_feat: Tensor,
     pub b_cell: Tensor,
+    /// Learnable scalar log-temperature for cosine-scored NCE (the bge
+    /// driver normalizes the embedding rows and scales the dot by
+    /// `exp(log_temp)`). Shared across axes like `E_feat`. Callers that
+    /// score with the raw dot (e.g. pinto's chain loss) simply ignore it.
+    pub log_temp: Tensor,
     #[allow(dead_code)]
     pub embedding_dim: usize,
     /// Per-gene program loadings `[D, K]` for the per-condition gate.
@@ -101,6 +115,9 @@ impl JointEmbedModel {
         };
         let b_feat = register_var_from_slice(varmap, dev, "b_feat", init.b_feat)?;
         let b_cell = register_var_from_slice(varmap, dev, "b_cell", init.b_cell)?;
+        // Cosine-NCE temperature: init scale = 15 (logits ~ ±15 with
+        // unit-norm rows). Learnable; shared across axes via the field.
+        let log_temp = register_var_from_slice(varmap, dev, "log_temp", &[(15f32).ln()])?;
 
         // Gate params. `z` is randn (small) and `δ` is **zero** so the gate
         // is exactly identity at init (`exp(0)=1`) yet gradient still flows
@@ -122,6 +139,7 @@ impl JointEmbedModel {
             e_cell,
             b_feat,
             b_cell,
+            log_temp,
             embedding_dim: args.embedding_dim,
             z,
             delta,
@@ -149,6 +167,7 @@ impl JointEmbedModel {
             shared_b_feat,
             shared_z,
             shared_delta,
+            shared_log_temp,
             num_programs,
             n_conditions,
             e_cell_init,
@@ -172,6 +191,7 @@ impl JointEmbedModel {
             e_cell,
             b_feat: shared_b_feat,
             b_cell,
+            log_temp: shared_log_temp,
             embedding_dim,
             z: shared_z,
             delta: shared_delta,
