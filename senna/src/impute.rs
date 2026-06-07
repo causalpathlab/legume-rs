@@ -1,11 +1,11 @@
 //! `senna impute` — post-hoc kNN imputation against a reference dataset.
 //!
 //! Pipeline:
-//! 1. Project the new sparse data through the trained indexed-topic
+//! 1. Project the new sparse data through the trained masked-topic
 //!    encoder (delegates to `senna predict`) to produce `θ_new [N_new, K]`.
 //! 2. Load the reference dataset's training-time latent
 //!    `θ_ref [N_ref, K]` (a parquet written by the original
-//!    `indexed-topic` run).
+//!    `masked-topic` run).
 //! 3. Build an HNSW kNN index over θ_ref (L2) and, for each new cell,
 //!    find the K nearest reference cells.
 //! 4. Convert kNN L2 distances to softmax weights with temperature τ
@@ -39,7 +39,7 @@ pub struct ImputeArgs {
     )]
     pub data_files: Vec<Box<str>>,
 
-    #[arg(long, required = true, help = "Trained indexed-topic model prefix")]
+    #[arg(long, required = true, help = "Trained masked-topic model prefix")]
     pub model: Box<str>,
 
     #[arg(short, long, required = true, help = "Output file prefix")]
@@ -128,7 +128,7 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
         residual_out: None,
         residual_include_delta: false,
         residual_threshold: 0.0,
-        feature_name_kind: crate::fit_indexed_topic::FeatureNameKindArg::Exact,
+        feature_name_kind: crate::fit_masked_topic::FeatureNameKindArg::Exact,
         feature_name_suffix_delim: None,
         keep_feature_suffix: None,
     };

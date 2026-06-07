@@ -137,20 +137,6 @@ pub(crate) fn compute_level_epochs(total_epochs: usize, num_levels: usize) -> Ve
         .collect()
 }
 
-/// Divide each column of `data` by the corresponding delta value, clamped to `min_val`.
-///
-/// `delta_row` is `[1, D]` (each column j divided by `delta_row[(0, j)]`).
-pub(crate) fn apply_column_delta(data: &Mat, delta_row: &Mat, min_val: f32) -> Mat {
-    let mut corrected = data.clone();
-    for j in 0..corrected.ncols() {
-        let d = delta_row[(0, j)].max(min_val);
-        for i in 0..corrected.nrows() {
-            corrected[(i, j)] /= d;
-        }
-    }
-    corrected
-}
-
 /// Draw `(mixed_nd, batch_nd, target_nd)` from the collapsed posteriors
 /// (one sample per Gamma matrix).
 pub(crate) fn sample_collapsed_data(
@@ -205,7 +191,7 @@ pub struct ProjectedData {
 }
 
 /// Args for [`load_and_project`] — the read + batch + HVG + project
-/// portion shared by topic, indexed-topic, and svd routines.
+/// portion shared by topic, masked-topic, and svd routines.
 pub struct LoadProjectArgs<'a> {
     pub data_files: &'a [Box<str>],
     pub batch_files: &'a Option<Vec<Box<str>>>,
@@ -228,7 +214,7 @@ pub struct LoadProjectArgs<'a> {
     /// Cell-axis alignment strategy. Default Disjoint preserves the
     /// historical concatenate-cells-with-`@<basename>` semantics.
     /// Set to Union to glue cells across files by raw barcode — the
-    /// `senna itopic --multiome` path.
+    /// `senna masked-topic --multiome` path.
     pub column_alignment: data_beans::sparse_io_vector::ColumnAlignment,
     /// Per-name canonicalization rule applied to row names across
     /// backends. Default Exact = strict string match. Gene picks the
@@ -364,11 +350,11 @@ pub struct LoadCollapseArgs<'a> {
     /// `load_and_collapse` routes through
     /// [`collapse_columns_multilevel_with_hierarchy`] (which requires
     /// `refine = Some(..)`) and populates `PreparedData.cell_to_pb_per_level`.
-    /// Default `false` keeps the legacy `indexed-topic` behavior.
+    /// Default `false` keeps the legacy `masked-topic` behavior.
     pub want_hierarchy: bool,
     /// Optional pre-built `cell_to_pb_per_level` membership (finest-
     /// last) paired with the source's `cell_names`, inherited from a
-    /// prior `senna {topic, itopic, ce-topic}` run via `--from`.
+    /// prior `senna {topic, masked-topic, ce-topic}` run via `--from`.
     /// `load_and_collapse` aligns it to `data_vec.column_names()` by
     /// name and then routes through
     /// `collapse_columns_multilevel_with_partition`, skipping the
@@ -381,7 +367,7 @@ pub struct LoadCollapseArgs<'a> {
 
 /// Load sparse data, project, multi-level collapse, and write delta output.
 ///
-/// Shared pipeline for topic and indexed-topic models. The pre-collapse
+/// Shared pipeline for topic and masked-topic models. The pre-collapse
 /// portion (read + batch + HVG + project) is delegated to
 /// [`load_and_project`] so `senna svd` can share the same code.
 pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData> {
@@ -535,7 +521,7 @@ pub(crate) fn move_varmap_to_cpu(parameters: &candle_nn::VarMap) -> anyhow::Resu
 pub(crate) use graph_embedding_util::setup_stop_handler;
 
 ////////////////////////////////////////////////////////////////////////
-// Feature-network setup (used by indexed-topic)
+// Feature-network setup (used by masked-topic)
 ////////////////////////////////////////////////////////////////////////
 
 use matrix_util::pair_graph::FeaturePairGraph;

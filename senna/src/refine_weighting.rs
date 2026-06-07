@@ -6,7 +6,7 @@
 //!   `--num-levels`, `--iter-opt`, `--ignore-batch`) and flattens
 //!   [`PbRefineArgs`] inside it. Flatten it into any subcommand that runs
 //!   that pipeline so the flag surface stays identical across `senna topic`,
-//!   `indexed-topic`, `joint-topic`, `svd`, `svd joint`, and `gbe`.
+//!   `masked-topic`, `joint-topic`, `svd`, `svd joint`, and `gbe`.
 //!
 //! Two distinct things share the word "refinement", so the CLI keeps them on
 //! separate prefixes:

@@ -250,6 +250,7 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
             embedding_dim: args.embedding_dim,
             layers: &encoder_layers,
             use_gcn: false,
+            attn_pool: false,
         },
         &parameters,
         param_builder.pp("enc"),

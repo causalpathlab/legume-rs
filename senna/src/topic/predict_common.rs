@@ -12,7 +12,6 @@ use crate::topic::eval::GeneRemap;
 use candle_core::{Device, Result as CandleResult, Tensor, Var};
 use candle_nn::ops;
 use candle_util::traits::DecoderModuleT;
-use candle_util::traits::IndexedDecoderT;
 
 /// Lower / upper bounds on per-(gene, batch) δ. Stops a single noisy batch
 /// from blowing up the encoder's null input when one batch has near-zero
@@ -64,48 +63,6 @@ pub fn decoder_only_inference_dense<Dec: DecoderModuleT>(
     ops::log_softmax(z_var.as_tensor(), 1)
 }
 
-/// Bundled packed inputs for the indexed decoder forward at a single block.
-pub struct IndexedDecoderInput<'a> {
-    pub union_indices: &'a Tensor,
-    pub scatter_pos: &'a Tensor,
-    pub values: &'a Tensor,
-    /// Optional NB-Fisher per-position weight (gathered at decoder ids).
-    pub values_weight: Option<&'a Tensor>,
-    pub log_q_s: &'a Tensor,
-}
-
-/// Decoder-only latent inference for the indexed topic model.
-pub fn decoder_only_inference_indexed<Dec: IndexedDecoderT>(
-    decoder: &Dec,
-    input: &IndexedDecoderInput<'_>,
-    n_topics: usize,
-    learning_rate: f64,
-    num_steps: usize,
-    dev: &Device,
-) -> CandleResult<Tensor> {
-    let n = input.values.dim(0)?;
-    let z_init = Tensor::zeros((n, n_topics), candle_core::DType::F32, dev)?;
-    let z_var = Var::from_tensor(&z_init)?;
-
-    for _step in 0..num_steps {
-        let log_z = ops::log_softmax(z_var.as_tensor(), 1)?;
-        let llik = decoder.forward_indexed(
-            &log_z,
-            input.union_indices,
-            input.scatter_pos,
-            input.values,
-            input.values_weight,
-            input.log_q_s,
-        )?;
-        let loss = llik.mean_all()?.neg()?;
-        let grad = loss.backward()?;
-        let z_grad = grad.get(z_var.as_tensor()).unwrap();
-        let updated = (z_var.as_tensor() - (z_grad * learning_rate)?)?;
-        z_var.set(&updated)?;
-    }
-
-    ops::log_softmax(z_var.as_tensor(), 1)
-}
 
 /// Per-cell predictive log-likelihood for the dense topic model.
 pub fn predictive_llik_dense<Dec: DecoderModuleT>(
@@ -117,26 +74,6 @@ pub fn predictive_llik_dense<Dec: DecoderModuleT>(
     Ok(llik)
 }
 
-/// Per-cell predictive log-likelihood for the indexed topic model.
-#[allow(clippy::too_many_arguments)]
-pub fn predictive_llik_indexed<Dec: IndexedDecoderT>(
-    decoder: &Dec,
-    log_z_nk: &Tensor,
-    union_indices: &Tensor,
-    scatter_pos: &Tensor,
-    values: &Tensor,
-    values_weight: Option<&Tensor>,
-    log_q_s: &Tensor,
-) -> CandleResult<Tensor> {
-    decoder.forward_indexed(
-        log_z_nk,
-        union_indices,
-        scatter_pos,
-        values,
-        values_weight,
-        log_q_s,
-    )
-}
 
 /// Per-batch sums accumulated across blocks during one TMLE iteration.
 /// `pb_obs[d,b]` and `pb_pred[d,b]` are NB-Fisher-weighted when `phi` is

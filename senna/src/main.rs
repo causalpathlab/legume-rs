@@ -42,8 +42,8 @@ mod eval_topic;
 mod fit_bge;
 mod fit_clustering;
 mod fit_fne;
-mod fit_indexed_topic;
 mod fit_joint_topic;
+mod fit_masked_topic;
 mod fit_pseudotime;
 mod fit_topic;
 mod geometry;
@@ -69,8 +69,8 @@ use eval_topic::*;
 use fit_bge::{fit_bge, BgeArgs};
 use fit_clustering::*;
 use fit_fne::{fit_fne, FneArgs};
-use fit_indexed_topic::*;
 use fit_joint_topic::*;
+use fit_masked_topic::*;
 use fit_pseudotime::{run_pseudotime, PseudotimeArgs};
 use fit_topic::*;
 use impute::{impute_model, ImputeArgs};
@@ -134,7 +134,7 @@ fn print_logo() {
                   with `data-beans from-mtx`).\n\n\
                   Pipeline (each step writes its outputs back to the run manifest\n\
                   `{prefix}.senna.json`, so downstream commands need no extra flags):\n\n  \
-                  1. Train embedding   senna topic | indexed-topic | svd\n                       \
+                  1. Train embedding   senna topic | masked-topic | svd\n                       \
                                        senna joint-topic | joint-svd       (multi-modality)\n  \
                   2. Held-out inference senna predict                       (apply trained model)\n  \
                   3. Cluster cells     senna clustering --from run.senna.json\n  \
@@ -168,22 +168,24 @@ enum Commands {
     Topic(TopicArgs),
 
     #[command(
-        about = "Train embedded topic model with adaptive top-K feature windows.",
-        long_about = "Same pipeline as `topic`, but encoder and decoder share a learned\n\
-                      per-gene embedding ρ ∈ ℝ^{D×H} and both operate on a per-cell\n\
-                      top-K feature window.\n\n\
-                      β factorizes as:    β_kd = log_softmax_d(α_k · ρ_dᵀ)\n\
-                      where α ∈ ℝ^{K×H} are the learned topic embeddings and ρ is the\n\
-                      *same* feature-embedding table the encoder uses to pool per-cell\n\
-                      counts. No D × K dictionary is materialized — the per-batch slice\n\
-                      goes ρ[union, :] [S, H] → α · ρ_Sᵀ [K, S] and uses the Jean et al.\n\
-                      (2015) importance correction on the conditional softmax. Tying ρ\n\
-                      between encoder and decoder follows Dieng et al. (2020, ETM).\n\n\
+        name = "masked-topic",
+        about = "Train a masked-imputation embedded topic model (foundation-style).",
+        long_about = "Embedded topic model trained by masked-gene imputation — no ELBO,\n\
+                      no posterior collapse. Encoder and decoder share a learned per-gene\n\
+                      symbol embedding ρ ∈ ℝ^{D×H} (Dieng et al. 2020, ETM); the encoder\n\
+                      pools a per-cell top-K feature window by single-query attention.\n\n\
+                      Training: each cell's top-K genes are split into visible / masked;\n\
+                      θ_n = softmax(encoder(visible)) (deterministic, no KL); the NB head\n\
+                      imputes the held-out genes with μ = residual · ℓ · (θ·β), where\n\
+                      β_kg = softmax_g(α_k · ρ_g) and φ_g is a per-gene dispersion. The\n\
+                      masked objective (not a KL bottleneck) is what prevents collapse,\n\
+                      so it scales with more data. Inference is encoder-only.\n\n\
                       Writes the same artifacts as `topic`, plus\n\
-                      `{out}.feature_embedding.parquet` (ρ at full gene resolution).",
-        visible_aliases = ["itopic", "etm"]
+                      `{out}.feature_embedding.parquet` (ρ) and `{out}.dispersion.parquet`.",
+        visible_aliases = ["mtm"],
+        aliases = ["itopic", "indexed-topic", "etm"]
     )]
-    IndexedTopic(IndexedTopicArgs),
+    MaskedTopic(MaskedTopicArgs),
 
     #[command(
         about = "Train Nyström SVD embedding.",
@@ -224,9 +226,13 @@ enum Commands {
                       Each input file contributes its rows to a shared feature axis; \
                       cell barcodes union across files. Modality-agnostic — works \
                       for any number of count panels (RNA, ATAC, protein, …). \
-                      Bilinear `E_f · E_c` scoring with per-file rebalanced \
-                      sampling and same-file hard negatives.\n\n\
-                      Writes {out}.{latent,dictionary,cell_bias,feature_bias}.parquet, \
+                      Bilinear `E_f · E_c + b_f` scoring (no per-cell bias) with \
+                      per-file rebalanced sampling and same-file hard negatives.\n\n\
+                      Trains in two phases: (1) embed features + pseudobulks to learn \
+                      the gene side, then (2) freeze it and densely fit each cell's \
+                      embedding — every cell is swept ~once/epoch and the per-cell fit \
+                      is separable (embarrassingly parallel).\n\n\
+                      Writes {out}.{latent,dictionary,feature_bias}.parquet, \
                       {out}.senna.json.",
         alias = "embed-graph",
         alias = "gbe"
@@ -245,7 +251,7 @@ enum Commands {
                       (node2vec convention). Symmetric by construction.\n\n\
                       Writes {out}.feature_embedding.parquet (+ feature_bias, gamma, \
                       log_likelihood, senna.json). The output shape matches the freeze \
-                      loader used by `senna {bge, indexed-topic} \
+                      loader used by `senna {bge, masked-topic} \
                       --freeze-feature-embedding`, so an `fne` run is a direct gene-side \
                       input to downstream cell-side training."
     )]
@@ -253,7 +259,7 @@ enum Commands {
 
     // ─────────── 2. Held-out inference ───────────
     #[command(
-        about = "Apply a trained topic / indexed-topic model to held-out data.",
+        about = "Apply a trained topic / masked-topic model to held-out data.",
         long_about = "Latent inference + per-cell predictive log-likelihood on a separate\n\
                       backend file. Auto-dispatches dense / indexed via model.json.\n\
                       Handles gene-set misalignment via flexible name matching and\n\
@@ -266,7 +272,7 @@ enum Commands {
         about = "Impute full-feature counts on new (sparse-panel) cells via kNN over a reference latent.",
         long_about = "Two-stage post-hoc imputation:\n  \
                       1. Project new sparse-panel data through the trained\n  \
-                         indexed-topic encoder → θ_new [N_new, K] (runs the\n  \
+                         masked-topic encoder → θ_new [N_new, K] (runs the\n  \
                          predict pipeline internally).\n  \
                       2. For each new cell, find K nearest reference cells in\n  \
                          θ-space (L2 over the topic simplex), softmax-weight\n  \
@@ -419,8 +425,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Topic(args) => {
             fit_topic_model(args)?;
         }
-        Commands::IndexedTopic(args) => {
-            fit_indexed_topic_model(args)?;
+        Commands::MaskedTopic(args) => {
+            fit_masked_topic_model(args)?;
         }
         Commands::JointTopic(args) => {
             fit_joint_topic_model(args)?;

@@ -1,4 +1,4 @@
-//! Warm-start initialization for `senna topic` and `senna indexed-topic`.
+//! Warm-start initialization for `senna topic` and `senna masked-topic`.
 //!
 //! Loads weights saved by a previous training run into the current `VarMap`,
 //! so training continues from the previous checkpoint instead of from

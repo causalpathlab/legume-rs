@@ -110,7 +110,7 @@ pub struct PseudotimeArgs {
         help = "Latent representation file (cells × K)",
         long_help = "Cell × K latent matrix in parquet or TSV.\n\
                      Typical sources:\n  \
-                     - senna topic / itopic / joint-topic → .latent.parquet\n  \
+                     - senna topic / masked-topic / joint-topic → .latent.parquet\n  \
                      - senna svd                          → .latent.parquet\n\
                      The first column is expected to be cell names."
     )]
@@ -118,7 +118,7 @@ pub struct PseudotimeArgs {
 
     #[arg(
         long = "from",
-        help = "Run manifest from `senna topic|itopic|joint-topic|svd|joint-svd`",
+        help = "Run manifest from `senna topic|masked-topic|joint-topic|svd|joint-svd`",
         long_help = "When given, latent is read from the manifest's outputs.latent\n\
                      path (resolved relative to the manifest directory). One of\n\
                      --latent or --from is required."

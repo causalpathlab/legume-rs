@@ -3,7 +3,7 @@
 //!
 //! Preferred invocation is `senna plot-topic --from {prefix}.senna.json`;
 //! the manifest carries data/batch/latent/dictionary paths produced by
-//! `senna topic` / `itopic` / `joint-topic`. CLI flags override
+//! `senna topic` / `masked-topic` / `joint-topic`. CLI flags override
 //! manifest values, mirroring the `senna plot` resolution rules at
 //! `fit_plot.rs:428`.
 //!
@@ -93,7 +93,7 @@ pub struct PlotTopicArgs {
     #[arg(
         long,
         short = 'f',
-        help = "Run manifest JSON from `senna topic`/`itopic`/`joint-topic`",
+        help = "Run manifest JSON from `senna topic`/`masked-topic`/`joint-topic`",
         long_help = "If set, fills in --latent / --dictionary and the batch-file \
                      list from the manifest's outputs/data sections. CLI flags \
                      still override individual values."

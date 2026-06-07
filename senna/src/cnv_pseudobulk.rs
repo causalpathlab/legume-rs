@@ -1,7 +1,7 @@
 //! Cluster/topic-informed pseudobulk CNV detection.
 //!
-//! Shared across SVD, topic, and indexed-topic pipelines:
-//! 1. Cell-type membership from K-means (SVD) or topic proportions (topic/itopic).
+//! Shared across SVD, topic, and masked-topic pipelines:
+//! 1. Cell-type membership from K-means (SVD) or topic proportions (topic/masked-topic).
 //! 2. Pseudobulk via `collapse_pseudobulk()` → per-(cell_type, individual) `GammaMatrix`.
 //! 3. Within each cell type: log-ratio vs cross-individual mean → CNV signal.
 //! 4. Hand to [`cnv::per_sample::call_per_sample_cnv`] for per-topic HMM-EM

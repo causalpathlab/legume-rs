@@ -184,7 +184,7 @@ pub struct ClusteringArgs {
 
     #[arg(
         long = "from",
-        help = "Optional run manifest produced by `senna topic|itopic|joint-topic|svd|joint-svd`",
+        help = "Optional run manifest produced by `senna topic|masked-topic|joint-topic|svd|joint-svd`",
         long_help = "When given, the manifest is updated in place with the cluster\n\
                      output path under `cluster.clusters` so that `senna annotate`\n\
                      can pick the cluster parquet up automatically."

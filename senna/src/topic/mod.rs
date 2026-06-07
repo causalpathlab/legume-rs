@@ -7,6 +7,6 @@ pub(crate) mod freeze;
 pub(crate) mod model_metadata;
 pub(crate) mod predict_common;
 pub(crate) mod train;
-pub(crate) mod train_indexed;
 pub(crate) mod train_joint;
+pub(crate) mod train_masked;
 pub(crate) mod warm_start;

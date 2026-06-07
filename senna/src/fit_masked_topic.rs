@@ -3,18 +3,17 @@ use crate::topic::common::{
     create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
     PreparedData,
 };
-use crate::topic::eval_indexed::{evaluate_latent_by_indexed_encoder, EvaluateLatentConfig};
-use crate::topic::train_indexed::{
-    estimate_bulk_delta, evaluate_bulk_samples, train_mixed, write_feature_embedding,
-    write_indexed_dictionary, BulkEvalConfig, IndexedTrainConfig,
+use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
+use crate::topic::train_masked::{
+    train_masked, write_feature_embedding, write_masked_dictionary, IndexedTrainConfig,
 };
 
-use candle_util::decoder::EmbeddedTopicDecoder;
+use candle_util::decoder::EmbeddedNbTopicDecoder;
 use candle_util::encoder::*;
-use matrix_param::dmatrix_gamma::GammaMatrix;
+use log::warn;
 
 #[derive(Args, Debug)]
-pub struct IndexedTopicArgs {
+pub struct MaskedTopicArgs {
     #[arg(
         value_delimiter = ',',
         help = "Input data files (.zarr or .h5; optional when --from is given)",
@@ -34,10 +33,10 @@ pub struct IndexedTopicArgs {
                      `--batch-files`, and `--freeze-feature-embedding` from it. \
                      Explicit CLI flags override the manifest values. SVD-family \
                      manifests are rejected (no feature embedding to inherit). \
-                     Typical use: bge → itopic warm-start.\n\
+                     Typical use: bge → masked-topic warm-start.\n\
                      \n\
                      senna bge   data.zarr.zip -b batch.gz -o run-bge ...\n\
-                     senna itopic --from run-bge.senna.json -o run-topic ..."
+                     senna masked-topic --from run-bge.senna.json -o run-topic ..."
     )]
     from: Option<Box<str>>,
 
@@ -74,7 +73,7 @@ pub struct IndexedTopicArgs {
     #[arg(
         long = "init-from",
         help = "Initialize encoder + decoder weights from a previously trained model",
-        long_help = "Path prefix of a model saved by `senna indexed-topic`\n\
+        long_help = "Path prefix of a model saved by `senna masked-topic`\n\
                      (matching {prefix}.model.json + {prefix}.safetensors).\n\
                      Architecture must match: same K, encoder layers,\n\
                      embedding_dim, and n_features_full. Cross-gene-set\n\
@@ -254,6 +253,17 @@ pub struct IndexedTopicArgs {
                      and prevents dead topics. Typical: 0.01–0.2. Set 0 to disable."
     )]
     topic_smoothing: f64,
+
+    #[arg(
+        long,
+        default_value_t = 0.3,
+        help = "Masked-imputation fraction: per cell, this fraction of its \
+                top-K genes is held out (masked) and predicted by the NB \
+                embedded-topic head; the rest are the encoder's visible input. \
+                Typical 0.2–0.5. The masking is the regularizer that replaces \
+                the (collapse-prone) ELBO/KL."
+    )]
+    mask_fraction: f64,
 
     #[arg(
         long,
@@ -441,7 +451,7 @@ impl From<FeatureNameKindArg> for Option<auxiliary_data::feature_names::FeatureN
     }
 }
 
-pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
+pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     let k = args.n_latent_topics;
@@ -577,7 +587,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     let n_features_full = data_vec.num_rows();
     let num_levels = collapsed_levels.len();
 
-    // 5. Train indexed topic model on collapsed data
+    // 5. Train masked topic model on collapsed data
     let n_topics = args.n_latent_topics;
 
     let dev = create_device(&args.device, args.device_no)?;
@@ -623,6 +633,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             embedding_dim: h,
             layers: &args.encoder_layers,
             use_gcn: feature_graph_csr.is_some(),
+            attn_pool: true,
         },
         &parameters,
         param_builder.pp("enc"),
@@ -632,9 +643,9 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // ETM-factorized — each decoder shares the encoder's feature embeddings ρ,
     // and learns only its own topic embeddings α_{level} [K, H].
     let shared_rho = base_encoder.feature_embeddings().clone();
-    let decoders: Vec<EmbeddedTopicDecoder> = (0..num_levels)
+    let decoders: Vec<EmbeddedNbTopicDecoder> = (0..num_levels)
         .map(|i| {
-            EmbeddedTopicDecoder::new(
+            EmbeddedNbTopicDecoder::new(
                 n_topics,
                 shared_rho.clone(),
                 param_builder.pp(format!("dec_{i}")),
@@ -648,7 +659,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     // Tensor reference into the same Var, so a single `var.set(...)`
     // updates everywhere. The Var stays in the VarMap (round-trips
     // through safetensors); for freeze mode the optimizer excludes it
-    // via `trainable_vars` (see `train_indexed.rs`), for init mode it
+    // via `trainable_vars` (see `train_masked.rs`), for init mode it
     // keeps updating.
     if let Some(spec) = pretrained_spec.as_ref() {
         anyhow::ensure!(
@@ -697,7 +708,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             &parameters,
             prefix,
             &WarmStartCheck {
-                model_type_expected: crate::topic::model_metadata::MODEL_TYPE_INDEXED,
+                model_type_expected: crate::topic::model_metadata::MODEL_TYPE_INDEXED_MASKED,
                 n_topics,
                 n_features_full,
                 n_features_encoder: n_features_full,
@@ -713,25 +724,12 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         n_features_full, h, args.context_size, num_levels, n_features_full, dec_context_size,
     );
 
-    // Read bulk data aligned to SC genes
-    let bulk = args
-        .bulk_data_files
-        .as_ref()
-        .map(|files| read_bulk_data_aligned(files, &gene_names))
-        .transpose()?;
-
-    // Compute per-level bulk delta
-    let bulk_deltas: Option<Vec<GammaMatrix>> = bulk.as_ref().map(|b| {
-        collapsed_levels
-            .iter()
-            .map(|collapsed| estimate_bulk_delta(&b.data, collapsed))
-            .collect::<Vec<_>>()
-    });
+    // Bulk deconvolution is not supported on the masked-imputation path (v1).
+    if args.bulk_data_files.is_some() {
+        warn!("--bulk-data-files is ignored by the masked-topic (not yet supported)");
+    }
 
     let stop = setup_stop_handler();
-
-    // Bulk data at full D
-    let bulk_nd_full: Option<Mat> = bulk.as_ref().map(|b| b.data.transpose());
 
     info!("Computing NB-Fisher weights for shortlist scoring");
     let shortlist_weights: Vec<f32> =
@@ -750,10 +748,6 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             .map(|d| mu.row(d).iter().sum::<f32>() / n_pb)
             .collect()
     };
-    // Decoder Fisher loss weights are the same NB-Fisher per-gene quantity
-    // already computed for shortlist selection.
-    let feature_fisher_weights = shortlist_weights.clone();
-
     // Anchor-prior CE penalty: Gram-Schmidt anchors selected on the
     // finest-level pseudobulks give each topic k a per-gene prior simplex
     // (rows of `[K, D]`), which we cross-entropy against
@@ -788,7 +782,7 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         stop: &stop,
         shortlist_weights: &shortlist_weights,
         feature_mean: &feature_mean,
-        feature_fisher_weights: &feature_fisher_weights,
+        feature_fisher_weights: &shortlist_weights,
         grad_clip: args.grad_clip,
         feature_graph: feature_graph_csr.clone(),
         feature_embedding_l2: args.feature_embedding_l2,
@@ -802,24 +796,19 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
         anchor_penalty: args.anchor_penalty,
     };
 
-    let bulk_with_deltas: Option<(&Mat, &[GammaMatrix])> = match (&bulk_nd_full, &bulk_deltas) {
-        (Some(full), Some(deltas)) => Some((full, deltas)),
-        _ => None,
-    };
-
-    let scores = train_mixed(
+    let scores = train_masked(
         &collapsed_levels,
         &base_encoder,
         &decoders,
         &train_config,
-        bulk_with_deltas,
+        args.mask_fraction,
     )?;
 
     info!("Writing down the model parameters");
 
     // Use finest-level decoder for output
     let finest_decoder = decoders.last().unwrap();
-    write_indexed_dictionary(finest_decoder, &gene_names, &args.out)?;
+    write_masked_dictionary(finest_decoder, &gene_names, &args.out)?;
     write_feature_embedding(base_encoder.feature_embeddings(), &gene_names, &args.out)?;
 
     // Persist trainable weights, model architecture, and shortlist weights
@@ -841,8 +830,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     };
     save_parameters(&parameters, &args.out)?;
     let mut metadata = TopicModelMetadata {
-        model_type: crate::topic::model_metadata::MODEL_TYPE_INDEXED.into(),
-        decoder_types: vec!["multinom".into()],
+        model_type: crate::topic::model_metadata::MODEL_TYPE_INDEXED_MASKED.into(),
+        decoder_types: vec!["nb_masked".into()],
         decoder_weights: vec![1.0],
         n_features_encoder: n_features_full,
         n_features_full,
@@ -862,9 +851,8 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
     save_shortlist_weights(&shortlist_weights, &gene_names, &args.out)?;
     save_feature_mean(&feature_mean, &gene_names, &args.out)?;
 
-    // Move VarMap to CPU, then rebuild encoder + finest-level decoder from the
-    // CPU Vars. The original structs still hold CUDA/Metal tensors internally
-    // and will trigger "device mismatch" errors if reused on CPU indices.
+    // Move VarMap to CPU, then rebuild the encoder from the CPU Vars. The
+    // masked model's inference is encoder-only (no decoder / no refinement).
     info!("Moving parameters to CPU for multi-threaded inference");
     let cpu_dev = candle_core::Device::Cpu;
     move_varmap_to_cpu(&parameters)?;
@@ -877,57 +865,38 @@ pub fn fit_indexed_topic_model(args: &IndexedTopicArgs) -> anyhow::Result<()> {
             embedding_dim: h,
             layers: &args.encoder_layers,
             use_gcn: feature_graph_csr.is_some(),
+            attn_pool: true,
         },
         &parameters,
         cpu_vb.pp("enc"),
     )?;
-    let finest_dec_idx = decoders.len().saturating_sub(1);
-    let cpu_finest_decoder = EmbeddedTopicDecoder::new(
-        n_topics,
-        cpu_encoder.feature_embeddings().clone(),
-        cpu_vb.pp(format!("dec_{finest_dec_idx}")),
-    )?;
-
-    let refine_config = args.amort_refine.to_config();
 
     info!("Writing down the latent states");
-    let eval_config = EvaluateLatentConfig {
+    // Residual/batch correction tensor at full D (encoder operates at D_full).
+    let delta = match args.adj_method {
+        AdjMethod::Batch => finest_collapsed.delta.as_ref(),
+        AdjMethod::Residual => finest_collapsed.mu_residual.as_ref(),
+    }
+    .map(|x| {
+        x.posterior_mean()
+            .to_tensor(&cpu_dev)
+            .expect("delta to tensor")
+            .transpose(0, 1)
+            .expect("transpose")
+            .contiguous()
+            .expect("contiguous")
+    });
+    let eval_config = EvaluateLatentMaskedConfig {
         dev: &cpu_dev,
         adj_method: &args.adj_method,
         minibatch_size: args.minibatch_size,
         enc_context_size: args.context_size,
-        dec_context_size,
-        decoder: &cpu_finest_decoder,
-        refine_config: refine_config.as_ref(),
         shortlist_weights: &shortlist_weights,
         feature_mean: &feature_mean,
-        feature_fisher_weights: &feature_fisher_weights,
     };
-    let z_nk = evaluate_latent_by_indexed_encoder(
-        &data_vec,
-        &cpu_encoder,
-        finest_collapsed,
-        &eval_config,
-    )?;
+    let z_nk = evaluate_latent_masked(&data_vec, &cpu_encoder, &eval_config, delta.as_ref(), None)?;
 
     metadata.populate_theta_mean_and_save(&z_nk, &args.out)?;
-
-    // Evaluate bulk with the CPU encoder/decoder for consistency.
-    if let (Some(bulk), Some(bulk_deltas)) = (&bulk, &bulk_deltas) {
-        let bulk_config = BulkEvalConfig {
-            dev: &cpu_dev,
-            enc_context_size: args.context_size,
-            dec_context_size,
-            refine_config: refine_config.as_ref(),
-            decoder: &cpu_finest_decoder,
-            gene_names: &gene_names,
-            out_prefix: &args.out,
-            shortlist_weights: &shortlist_weights,
-            feature_mean: &feature_mean,
-            feature_fisher_weights: &feature_fisher_weights,
-        };
-        evaluate_bulk_samples(bulk, bulk_deltas, &cpu_encoder, &bulk_config)?;
-    }
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
 

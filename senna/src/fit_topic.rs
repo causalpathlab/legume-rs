@@ -49,7 +49,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         help = "Chain data + batch + cell→pb partition from a prior \
-                `senna {topic, itopic, ce-topic}` run's manifest",
+                `senna {topic, masked-topic, ce-topic}` run's manifest",
         long_help = "Read a `{run}.senna.json` manifest and pre-fill `data_files`, \
                      `--batch-files`, and (when present) the cell→pb partition \
                      from the source run. Inheriting the partition skips the \
@@ -194,11 +194,11 @@ pub struct TopicArgs {
         long,
         value_enum,
         value_delimiter = ',',
-        default_value = "multinom",
+        default_value = "nbmixture",
         help = "Decoder type(s) [multinom|nb|nbmixture], comma-separated",
-        long_help = "multinom  — NB-Fisher-weighted multinomial (default).\n\
+        long_help = "multinom  — NB-Fisher-weighted multinomial.\n\
                      nb        — negative binomial with per-gene dispersion.\n\
-                     nbmixture — NB with ambient-RNA mixture α and per-sample ρ.\n\n\
+                     nbmixture — NB with ambient-RNA mixture α and per-sample ρ (default).\n\n\
                      Multiple types (e.g. --decoder multinom,nb) train jointly with\n\
                      a shared encoder; see --decoder-weights for loss weighting."
     )]
@@ -563,7 +563,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 }
 
 /// Assemble + save the `{prefix}.senna.json` manifest for a topic /
-/// itopic / joint-topic run. Factored out so all three callers stay
+/// masked-topic / joint-topic run. Factored out so all three callers stay
 /// DRY; SVD runs use a distinct helper because they produce no model.
 fn write_topic_manifest(
     kind: crate::run_manifest::RunKind,

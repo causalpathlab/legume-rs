@@ -63,7 +63,7 @@ pub struct PlotArgs {
     #[arg(
         long,
         short = 'f',
-        help = "Run manifest JSON from `senna topic`/`itopic`/`joint-topic` (+ updated by `senna layout`)",
+        help = "Run manifest JSON from `senna topic`/`masked-topic`/`joint-topic` (+ updated by `senna layout`)",
         long_help = "If set, fills in --cell-coords, --topics, --labels, --colour-by, \
                      and --palette from the manifest's viz/outputs/defaults sections. \
                      Any explicit CLI flag still overrides the manifest value. Paths \
