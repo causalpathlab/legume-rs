@@ -18,6 +18,12 @@
 //! (agg + count-comp) so those genes are simply drawn less often. The
 //! m6A / modifier pools are left untouched — that signal is the point of
 //! the model and is already modality-balanced via `--tau-modality`.
+//!
+//! This module also computes per-gene **ubiquity** (`ubiquity_from_count_pool`):
+//! the fraction of cells expressing a gene — a *breadth* signal (distinct
+//! from Fisher's *magnitude*). Written to `{out}.ubiquity.parquet` as a
+//! diagnostic / inverse-propensity signal; not currently fed back into the
+//! model.
 
 use data_beans_alg::nb_dispersion::DispersionTrend;
 
@@ -68,6 +74,38 @@ pub fn fisher_weights_from_count_pool(
             let pi = sum[g] as f32 * inv_total;
             trend.fisher_weight(pi, avg_s, means[g])
         })
+        .collect()
+}
+
+/// Per-gene **ubiquity** `u_g ∈ (0, 1]` = fraction of cells expressing
+/// gene `g`, derived from the **cell-axis** count-comp pool. Each pool
+/// entry is one nonzero `(gene, cell)` total (`aggregate_pools` keys on
+/// `(gene_id, axis_id)`), so the number of entries per gene is exactly the
+/// count of cells with nonzero expression. Divided by `n_cells`.
+///
+/// Unlike the NB-Fisher weight (which keys on mean × overdispersion and
+/// therefore also penalises lineage-restricted *high-mean* markers such as
+/// erythroid Hb), ubiquity separates genes that are high *everywhere*
+/// (true housekeeping: MT-/RP-, u ≈ 1) from genes that are high in *one*
+/// lineage (Hb: u ≈ 0.1). Written to `{out}.ubiquity.parquet` as a
+/// diagnostic / inverse-propensity signal (a *breadth* complement to the
+/// NB-Fisher *magnitude* weight); not currently consumed by the model.
+pub fn ubiquity_from_count_pool(
+    count_comp: &StratumPool,
+    n_genes: usize,
+    n_cells: usize,
+) -> Vec<f32> {
+    let mut cells_with = vec![0u32; n_genes];
+    for i in 0..count_comp.len() {
+        let g = count_comp.gene_ids[i] as usize;
+        if g < n_genes {
+            cells_with[g] += 1;
+        }
+    }
+    let inv_n = 1.0 / n_cells.max(1) as f32;
+    cells_with
+        .iter()
+        .map(|&c| (c as f32 * inv_n).clamp(0.0, 1.0))
         .collect()
 }
 

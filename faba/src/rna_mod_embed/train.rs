@@ -24,7 +24,7 @@ use super::feature_table::FeatureTable;
 use super::loss::minibatch_loss;
 use super::model::{Axis, RnaModEmbedModel};
 use super::pseudobulk::PseudobulkData;
-use super::sampling::{draw_minibatch, SamplerState};
+use super::sampling::{draw_minibatch, Minibatch, SamplerState};
 
 pub fn train(
     args: &RnaModEmbedArgs,
@@ -88,26 +88,106 @@ pub fn train(
         max_axis_units,
     );
 
-    for epoch in 0..args.epochs {
-        // Per-axis loss tensors accumulated within one minibatch so we
-        // can both backward through their sum and report the breakdown.
-        // We sync to scalar **once per minibatch** (after backward),
-        // which releases the autograd graph immediately — accumulating
-        // tensor sums across batches would pin every forward graph in
-        // GPU memory until epoch end (~15 GB blow-up).
-        let mut per_axis = vec![0.0_f32; axes.len()];
-        let mut sum_total = 0.0_f32;
-        let mut n_batches = 0_usize;
-        for _ in 0..batches_per_epoch {
+    // Pipeline CPU sampling with GPU optimization: a scoped producer thread
+    // draws the next minibatches (one per axis) while the main thread runs
+    // forward/backward on the device, so the GPU isn't stalled waiting on the
+    // single-threaded sampler. The producer owns `rng` (keeping the draw
+    // sequence deterministic) and borrows the sampler/pools; bundles flow
+    // through a small bounded channel that also throttles look-ahead.
+    let axes_ref = &axes;
+    let sampler_ref = &sampler;
+
+    std::thread::scope(|scope| -> Result<()> {
+        // One bundle = one minibatch per axis, tagged with the epoch it
+        // belongs to so the consumer can detect epoch boundaries.
+        type Bundle = (usize, Vec<(usize, Axis, Minibatch)>);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Bundle>(2);
+
+        scope.spawn(move || {
+            'epochs: for epoch in 0..args.epochs {
+                for _ in 0..batches_per_epoch {
+                    if stop.load(Ordering::Relaxed) {
+                        break 'epochs;
+                    }
+                    let mut bundle = Vec::with_capacity(axes_ref.len());
+                    for (i, &axis) in axes_ref.iter().enumerate() {
+                        bundle.push((
+                            i,
+                            axis,
+                            draw_minibatch(axis, sampler_ref, pb, args, &mut rng),
+                        ));
+                    }
+                    if tx.send((epoch, bundle)).is_err() {
+                        break 'epochs; // consumer gone
+                    }
+                }
+            }
+            // tx dropped here → consumer's `rx` iterator ends.
+        });
+
+        // Per-epoch loss accumulators kept **on-device** and synced to scalars
+        // once per epoch (not per minibatch). `detach()` keeps the running sum
+        // off the autograd graph, so each minibatch's forward graph is still
+        // released immediately (no GPU-memory blow-up) while we avoid the
+        // ~axes×batches GPU→CPU stalls the old per-minibatch logging incurred.
+        let emit = |epoch: usize,
+                    total_acc: &Option<Tensor>,
+                    per_axis_acc: &[Option<Tensor>],
+                    n_batches: usize| {
+            if n_batches == 0 {
+                return;
+            }
+            let n = n_batches as f32;
+            let scalar = |o: &Option<Tensor>| {
+                o.as_ref()
+                    .and_then(|t| t.to_scalar::<f32>().ok())
+                    .unwrap_or(0.0)
+            };
+            let per_axis_strs: Vec<String> = axes_ref
+                .iter()
+                .enumerate()
+                .map(|(i, axis)| {
+                    let label = match axis {
+                        Axis::Cell => "cell".to_string(),
+                        Axis::Pb(level) => format!("pb_l{level}"),
+                    };
+                    format!("{}={:.3}", label, scalar(&per_axis_acc[i]) / n)
+                })
+                .collect();
+            info!(
+                "epoch {}/{}: total={:.4} [{}] ({} batches)",
+                epoch + 1,
+                args.epochs,
+                scalar(total_acc) / n,
+                per_axis_strs.join(", "),
+                n_batches
+            );
+        };
+
+        let mut cur_epoch = 0usize;
+        let mut started = false;
+        let mut total_acc: Option<Tensor> = None;
+        let mut per_axis_acc: Vec<Option<Tensor>> = vec![None; axes.len()];
+        let mut n_batches = 0usize;
+
+        for (epoch, bundle) in rx {
+            if started && epoch != cur_epoch {
+                emit(cur_epoch, &total_acc, &per_axis_acc, n_batches);
+                total_acc = None;
+                per_axis_acc = vec![None; axes.len()];
+                n_batches = 0;
+            }
+            cur_epoch = epoch;
+            started = true;
+
             let mut total: Option<Tensor> = None;
             let mut per_axis_t: Vec<Option<Tensor>> = vec![None; axes.len()];
-            for (i, &axis) in axes.iter().enumerate() {
-                let mb = draw_minibatch(axis, &sampler, pb, args, &mut rng);
+            for (i, axis, mb) in &bundle {
                 if mb.anchor.is_none() && mb.modifier.is_none() {
                     continue;
                 }
-                let l = minibatch_loss(model, axis, &mb)?;
-                per_axis_t[i] = Some(l.clone());
+                let l = minibatch_loss(model, *axis, mb)?;
+                per_axis_t[*i] = Some(l.clone());
                 total = Some(match total {
                     None => l,
                     Some(t) => (t + l)?,
@@ -116,67 +196,54 @@ pub fn train(
             let Some(mut loss) = total else {
                 continue;
             };
-            // Mean-normalized L2 penalties on (z, δ) — scale-invariant
-            // across G·K and K·M·H, so λ stays meaningful as model dims
-            // grow. Matches senna bge's --feature-embedding-l2 style.
+            // Mean-normalized L2 penalties on (z, δ) — scale-invariant across
+            // G·K and K·M·H, so λ stays meaningful as model dims grow. The
+            // region offset γ is left unpenalized (per-modality positional
+            // baseline we *want* to fit).
             if args.z_l2 > 0.0 {
                 let z_sq = model.z.sqr()?.mean_all()?;
                 loss = (loss + (z_sq * (args.z_l2 as f64))?)?;
             }
-            // Penalize the program×modality deviation δ (the old `q`
-            // L2, now over the [K,M,H] tensor). The region offset γ is
-            // left unpenalized — it carries the per-modality positional
-            // baseline we *want* to fit.
-            if args.q_l2 > 0.0 {
+            if args.delta_l2 > 0.0 {
                 let d_sq = model.delta.sqr()?.mean_all()?;
-                loss = (loss + (d_sq * (args.q_l2 as f64))?)?;
+                loss = (loss + (d_sq * (args.delta_l2 as f64))?)?;
             }
             optim.backward_step(&loss)?;
-            // One scalar fetch per minibatch — releases the graph too.
-            sum_total += loss.to_scalar::<f32>().unwrap_or(0.0);
-            for (i, opt) in per_axis_t.iter().enumerate() {
+
+            // Accumulate detached scalars on-device — no per-minibatch sync.
+            let ld = loss.detach();
+            total_acc = Some(match total_acc.take() {
+                None => ld,
+                Some(a) => (a + ld)?,
+            });
+            for (i, opt) in per_axis_t.into_iter().enumerate() {
                 if let Some(t) = opt {
-                    per_axis[i] += t.to_scalar::<f32>().unwrap_or(0.0);
+                    let td = t.detach();
+                    per_axis_acc[i] = Some(match per_axis_acc[i].take() {
+                        None => td,
+                        Some(a) => (a + td)?,
+                    });
                 }
             }
             n_batches += 1;
 
+            // Stop at sub-epoch granularity on Ctrl-C (epochs are ~100s);
+            // the partial epoch is flushed by the final emit below.
             if stop.load(Ordering::Relaxed) {
+                info!(
+                    "stopping early during epoch {} — finalizing outputs",
+                    cur_epoch + 1
+                );
                 break;
             }
         }
-        if n_batches > 0 {
-            let n = n_batches as f32;
-            let per_axis_strs: Vec<String> = axes
-                .iter()
-                .enumerate()
-                .map(|(i, axis)| {
-                    let label = match axis {
-                        Axis::Cell => "cell".to_string(),
-                        Axis::Pb(level) => format!("pb_l{level}"),
-                    };
-                    format!("{}={:.3}", label, per_axis[i] / n)
-                })
-                .collect();
-            info!(
-                "epoch {}/{}: total={:.4} [{}] ({} batches)",
-                epoch + 1,
-                args.epochs,
-                sum_total / n,
-                per_axis_strs.join(", "),
-                n_batches
-            );
-        }
 
-        if stop.load(Ordering::SeqCst) {
-            info!(
-                "stopping early at epoch {}/{} — finalizing outputs",
-                epoch + 1,
-                args.epochs
-            );
-            return Ok(());
+        // Flush the final (or only) epoch.
+        if started {
+            emit(cur_epoch, &total_acc, &per_axis_acc, n_batches);
         }
-    }
+        Ok(())
+    })?;
 
     Ok(())
 }

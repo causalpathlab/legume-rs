@@ -89,13 +89,6 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
         unified.n_batches()
     );
 
-    if args.use_modification_fraction {
-        log::warn!(
-            "--use-modification-fraction=true is not yet wired (Phase 4); \
-             falling back to raw modified-count edge weights"
-        );
-    }
-
     // Load component annotations (region binning). Modality labels must
     // match the modifier row names emitted by faba m6a/atoi/apa.
     let region_map = build_region_map(args)?;
@@ -132,6 +125,21 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
             pb.gene_fisher_weights.len()
         );
     }
+
+    // Persist per-gene ubiquity (fraction of cells expressing) — a
+    // diagnostic / inverse-propensity signal (breadth complement to the
+    // NB-Fisher magnitude weight), inspectable next to the Fisher weights.
+    data_beans_alg::gene_weighting::save_per_gene_weights(
+        &pb.gene_ubiquity,
+        &table.gene_names,
+        &format!("{}.ubiquity.parquet", args.out),
+    )
+    .context("save gene ubiquity")?;
+    info!(
+        "wrote {}.ubiquity.parquet ({} genes)",
+        args.out,
+        pb.gene_ubiquity.len()
+    );
 
     let n_pbs_per_level: Vec<usize> = pb.pb_pools_per_level.iter().map(|l| l.n_units).collect();
 

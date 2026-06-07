@@ -61,13 +61,32 @@ pub fn resolve_topics(
         rho.ncols()
     );
 
+    // Cap the cells used to *fit* archetypes. The K-sweep fits ~max_k times;
+    // on all ~648k cells that dominates wall-clock. Archetypes are stable
+    // under subsampling and θ is still assigned to every cell afterward
+    // (`assign_theta` on the full Z), so a 50k cap on large datasets is a
+    // large speedup at negligible quality cost. An explicit `--aa-subsample`
+    // is honored as-is; the cap auto-applies only when the flag is unset.
+    const AA_FIT_SUBSAMPLE: usize = 50_000;
+    let aa_subsample = args
+        .aa_subsample
+        .or_else(|| (z.nrows() > AA_FIT_SUBSAMPLE).then_some(AA_FIT_SUBSAMPLE));
+    if args.aa_subsample.is_none() {
+        if let Some(n) = aa_subsample {
+            info!(
+                "resolve-topics: fitting archetypes on a {n}-cell subsample \
+                 (θ still assigned to all {} cells; override with --aa-subsample)",
+                z.nrows()
+            );
+        }
+    }
     let base = AaArgs {
         k: 2,
         max_iter: args.aa_iters,
         fw_iters: 30,
         tol: 1e-4,
         seed: args.seed,
-        subsample: args.aa_subsample,
+        subsample: aa_subsample,
     };
 
     let interrupted = stop.load(Ordering::SeqCst);

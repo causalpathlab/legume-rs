@@ -194,14 +194,16 @@ pub struct RnaModEmbedArgs {
     )]
     pub z_l2: f32,
 
-    /// L2 penalty λ_Q · mean(Q²) on the per-modality program signatures.
-    /// Default 1e-4.
+    /// L2 penalty `λ · mean(δ²)` on the program×modality deviation δ
+    /// (`[K, M, H]`), mean-normalized — keeps the exp gate from blowing up.
+    /// Default 1e-4. (Was `--q-l2`, kept as an alias.)
     #[arg(
-        long,
+        long = "delta-l2",
+        alias = "q-l2",
         default_value_t = 1e-4,
-        help = "L2 penalty on Q (mean-normalized)"
+        help = "L2 penalty on δ (program×modality deviation; mean-normalized)"
     )]
-    pub q_l2: f32,
+    pub delta_l2: f32,
 
     ////////////////////////////////////////
     // Sampling strata
@@ -262,17 +264,6 @@ pub struct RnaModEmbedArgs {
     #[arg(long, default_value_t = 5)]
     pub n_swap_modality: usize,
 
-    /// Weight satellite edges by the denoised modification fraction
-    /// `w = X·r·π` instead of the raw modified-count `w = X·π`. Per the
-    /// design's locked decision #2 this ships **model-side-first**: the
-    /// fraction path (Phase 4, requires per-component converted/
-    /// unconverted counts from the mixture pipeline) is not yet wired, so
-    /// the default is `false` (raw counts) and `true` currently has no
-    /// effect beyond a warning. Kept here so the CLI contract is stable
-    /// for when Phase 4 lands.
-    #[arg(long, default_value_t = false)]
-    pub use_modification_fraction: bool,
-
     ////////////////////////////////////////
     // Topic resolution (archetypal, post-training)
     //
@@ -302,8 +293,10 @@ pub struct RnaModEmbedArgs {
     #[arg(long = "aa-iters", default_value_t = 50)]
     pub aa_iters: usize,
 
-    /// Cap on cells used to fit archetypes for `--resolve-topics`
-    /// (θ is still assigned for every cell).
+    /// Cap on cells used to fit archetypes for `--resolve-topics` (θ is
+    /// still assigned for every cell). Unset → auto-caps at 50k cells when
+    /// the dataset is larger (the K-sweep fits ~max-k times, so fitting on
+    /// all cells dominates runtime); pass an explicit value to override.
     #[arg(long = "aa-subsample")]
     pub aa_subsample: Option<usize>,
 
