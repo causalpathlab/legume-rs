@@ -146,11 +146,11 @@ pub struct MaskedTopicArgs {
                 Gene names are strict-intersected against this dataset's gene \
                 axis under the `--feature-name-kind` rule; unmatched genes are \
                 dropped from training. The encoder/decoder ρ stays fixed; \
-                everything else (α, FC, BN, GCN, value-embedding, decoder \
+                everything else (α, FC, BN, value-embedding, decoder \
                 topic embeddings) trains as usual. Incompatible with \
-                `--feature-network` (SGC nudge has no learnable target); \
-                forces `--feature-embedding-l2 0` (frozen ρ doesn't need \
-                shrinkage)."
+                `--feature-network` (its restriction would change the gene \
+                axis that the frozen ρ pins); forces `--feature-embedding-l2 \
+                0` (frozen ρ doesn't need shrinkage)."
     )]
     freeze_feature_embedding: Option<Box<str>>,
 
@@ -187,7 +187,7 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 0.0,
         help = "AdamW decoupled weight decay applied uniformly to every \
-                parameter (encoder ρ + α + FC + BN + GCN γ). \
+                parameter (encoder ρ + α + FC + BN). \
                 Per-step post-update shrinkage; doesn't enter the backward \
                 graph. Default 0.0 (off, i.e. plain Adam despite the name). \
                 Typical: 1e-5 to 1e-4."
@@ -311,14 +311,13 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
-        help = "Optional feature-feature edge list (TSV/CSV) — wires a \
-                γ-gated GCN diffusion block into the indexed encoder. \
-                Per-cell sub-adjacency on the measured top-K (pre- \
-                normalised at cache build) lets the encoder pool signal \
-                across functionally related genes. Edges may be intra- \
-                or cross-modal (gene-gene PPI, peak-gene ABC, ATAC- \
-                derived regulatory links). Edge names are resolved \
-                against the loaded gene axis."
+        help = "Optional feature-feature edge list (TSV/CSV) — used to \
+                RESTRICT the feature axis to graph-connected genes (see \
+                --no-feature-network-restrict). Graph *diffusion* (GCN) is \
+                not supported by the masked encoder, so the edges only drive \
+                feature selection here. Edges may be intra- or cross-modal \
+                (gene-gene PPI, peak-gene ABC, ATAC-derived regulatory \
+                links). Edge names are resolved against the loaded gene axis."
     )]
     feature_network: Option<Box<str>>,
 
@@ -382,7 +381,8 @@ pub struct MaskedTopicArgs {
                 edges after the QC pipeline (shared-neighbor prune → \
                 hub cap → k-core) are dropped from the data axis before \
                 projection, collapse, and training. Pass to keep the \
-                full feature axis (graph diffusion as a soft prior)."
+                full feature axis (note: with restriction off the graph \
+                has no effect — the masked encoder does not diffuse)."
     )]
     no_feature_network_restrict: bool,
 
@@ -499,7 +499,7 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
                 anyhow::ensure!(
                     args.feature_network.is_none(),
                     "--freeze-feature-embedding is incompatible with --feature-network \
-                     (SGC γ-gated graph diffusion has no learnable target when ρ is frozen)"
+                     (network restriction would change the gene axis that the frozen ρ pins)"
                 );
             }
             // Pre-train inputs are gene-keyed; row names aren't available yet.
@@ -592,37 +592,28 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
 
     let dev = create_device(&args.device, args.device_no)?;
 
-    let mut parameters = candle_nn::VarMap::new();
+    let parameters = candle_nn::VarMap::new();
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
     let dec_context_size = args.decoder_context_size.unwrap_or(args.context_size);
 
-    // Gene names — needed both for feature-graph resolution (below) and
-    // for output artifacts further down.
+    // Gene names — used for output artifacts further down.
     let gene_names = data_vec.row_names()?;
 
-    let feature_graph: Option<matrix_util::pair_graph::FeaturePairGraph> = feature_network
-        .into_feature_graph(args.feature_network.as_deref(), &gene_names, net_opts)?;
-
-    // Convert FeaturePairGraph → GraphCsr at the encoder's feature axis.
-    // The CSR is shared (Arc) across every level's data loader and is
-    // also persisted into the model artifact in safetensors form.
-    let feature_graph_csr: Option<std::sync::Arc<candle_util::data::GraphCsr>> =
-        feature_graph.as_ref().map(|g| {
-            let edges: Vec<(usize, usize)> = g.feature_edges.clone();
-            std::sync::Arc::new(candle_util::data::GraphCsr::from_edges(
-                n_features_full,
-                &edges,
-                None,
-            ))
-        });
-    if let Some(ref g) = feature_graph_csr {
-        info!(
-            "feature-network: {} undirected entries (directed CSR entries: {}); \
-             GCN block enabled on indexed encoder",
-            g.n_directed_entries() / 2,
-            g.n_directed_entries(),
+    // `--feature-network` on the masked path is used for feature *restriction*
+    // only (applied above when building `feature_network`). GCN graph diffusion
+    // is NOT supported by the masked encoder: `forward_indexed_masked` pools the
+    // visible top-K by single-query attention and takes no sparse edges, so a
+    // GcnBlock here would never enter the forward graph (dead weights, no
+    // effect). Diffusion would have to be plumbed through the encoder-only eval
+    // path too (which reads CSC directly, with no edge cache) to keep the latent
+    // train/eval-consistent — out of scope for v1.
+    if args.feature_network.is_some() && args.no_feature_network_restrict {
+        warn!(
+            "--feature-network with --no-feature-network-restrict has no effect on \
+             masked-topic: graph diffusion is not supported by the masked encoder, \
+             and restriction is disabled."
         );
     }
 
@@ -632,7 +623,7 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
             n_topics,
             embedding_dim: h,
             layers: &args.encoder_layers,
-            use_gcn: feature_graph_csr.is_some(),
+            use_gcn: false,
             attn_pool: true,
         },
         &parameters,
@@ -690,13 +681,13 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
         if freeze_rho {
             info!(
                 "Freeze mode: ρ seeded from {} (D={}, H={}); encoder/decoders share frozen ρ, \
-                 only α + FC + BN (+ GCN γ) train",
+                 only α + FC + BN train",
                 spec.dictionary_path, n_features_full, h
             );
         } else {
             info!(
                 "Warm-start: ρ initialised from {} (D={}, H={}); AdamW continues to update it \
-                 alongside α + FC + BN (+ GCN γ)",
+                 alongside α + FC + BN",
                 spec.dictionary_path, n_features_full, h
             );
         }
@@ -784,7 +775,7 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
         feature_mean: &feature_mean,
         feature_fisher_weights: &shortlist_weights,
         grad_clip: args.grad_clip,
-        feature_graph: feature_graph_csr.clone(),
+        feature_graph: None,
         feature_embedding_l2: args.feature_embedding_l2,
         weight_decay: args.weight_decay,
         frozen_feature_var: if freeze_rho {
@@ -814,20 +805,11 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
     // Persist trainable weights, model architecture, and shortlist weights
     // so `senna predict` (and `--init-from` re-runs) can rebuild this model.
     use crate::topic::model_metadata::{
-        save_feature_graph_into_varmap, save_feature_mean, save_parameters, save_shortlist_weights,
-        TopicModelMetadata,
+        save_feature_mean, save_parameters, save_shortlist_weights, TopicModelMetadata,
     };
 
-    // Bake the feature graph into the VarMap (non-trainable) before the
-    // safetensors snapshot is written. Adam has already stopped, so adding
-    // Vars at this point doesn't affect optimization.
-    let n_graph_edges: Option<usize> = match feature_graph_csr.as_ref() {
-        Some(g) => {
-            save_feature_graph_into_varmap(&mut parameters, &dev, g)?;
-            Some(g.col_idx.len())
-        }
-        None => None,
-    };
+    // No feature graph is persisted on the masked path (GCN diffusion is not
+    // wired into the masked encoder — see the encoder construction above).
     save_parameters(&parameters, &args.out)?;
     let mut metadata = TopicModelMetadata {
         model_type: crate::topic::model_metadata::MODEL_TYPE_INDEXED_MASKED.into(),
@@ -845,7 +827,6 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
         enc_context_size: Some(args.context_size),
         dec_context_size: Some(dec_context_size),
         theta_mean: None,
-        n_graph_edges,
     };
     metadata.save(&args.out)?;
     save_shortlist_weights(&shortlist_weights, &gene_names, &args.out)?;
@@ -864,7 +845,7 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
             n_topics,
             embedding_dim: h,
             layers: &args.encoder_layers,
-            use_gcn: feature_graph_csr.is_some(),
+            use_gcn: false,
             attn_pool: true,
         },
         &parameters,

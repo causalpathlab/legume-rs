@@ -1,6 +1,4 @@
-use candle_util::candle_core;
 use candle_util::candle_nn;
-use candle_util::data::GraphCsr;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use serde::{Deserialize, Serialize};
 
@@ -53,22 +51,9 @@ pub struct TopicModelMetadata {
     /// per-batch δ estimation. Falls back to uniform 1/K when absent.
     #[serde(default)]
     pub theta_mean: Option<Vec<f32>>,
-    /// Number of directed CSR entries (`= 2 × undirected edges` after
-    /// symmetrisation) for the feature-feature graph baked into the
-    /// model safetensors. `Some(n)` ⇒ the indexed encoder has a GAT
-    /// block and the safetensors carries `graph.row_ptr / col_idx /
-    /// values` of length `n_features + 1`, `n`, and `n`. `None` ⇒
-    /// legacy sum-pool mode.
-    #[serde(default, alias = "n_graph_edges")]
-    pub n_graph_edges: Option<usize>,
 }
 
 impl TopicModelMetadata {
-    /// `true` iff the model carries a feature-feature graph.
-    pub fn has_feature_graph(&self) -> bool {
-        self.n_graph_edges.is_some_and(|n| n > 0)
-    }
-
     pub fn save(&self, prefix: &str) -> anyhow::Result<()> {
         let path = format!("{prefix}.model.json");
         let json = serde_json::to_string_pretty(self)?;
@@ -146,108 +131,6 @@ pub fn save_parameters(parameters: &candle_nn::VarMap, prefix: &str) -> anyhow::
     let path = format!("{prefix}.safetensors");
     parameters.save(&path)?;
     log::info!("Saved model parameters to {path}");
-    Ok(())
-}
-
-const GRAPH_ROW_PTR: &str = "graph.row_ptr";
-const GRAPH_COL_IDX: &str = "graph.col_idx";
-const GRAPH_VALUES: &str = "graph.values";
-
-/// Register Vars for the feature graph in `parameters`, then overwrite
-/// them with the actual CSR contents. Called once at training time after
-/// the trainable-parameter optimization is finished, so the optimizer
-/// never touches these Vars. Indices are stored as f32 (with a precision
-/// guard against >2^24 indices).
-pub fn save_feature_graph_into_varmap(
-    parameters: &mut candle_nn::VarMap,
-    dev: &candle_core::Device,
-    graph: &GraphCsr,
-) -> anyhow::Result<()> {
-    use candle_core::{DType, Tensor};
-    let max_row_ptr = *graph.row_ptr.last().unwrap_or(&0);
-    let max_col = graph.col_idx.iter().copied().max().unwrap_or(0);
-    let max_idx = max_row_ptr.max(max_col);
-    anyhow::ensure!(
-        max_idx < (1u32 << 24),
-        "feature-graph index {max_idx} exceeds the f32-mantissa-safe range 2^24; \
-         cannot persist as f32 safetensors. Drop edges or shrink the gene axis."
-    );
-
-    let row_ptr_t = Tensor::from_vec(
-        graph.row_ptr.iter().map(|&x| x as f32).collect::<Vec<_>>(),
-        (graph.row_ptr.len(),),
-        dev,
-    )?;
-    let col_idx_t = Tensor::from_vec(
-        graph.col_idx.iter().map(|&x| x as f32).collect::<Vec<_>>(),
-        (graph.col_idx.len(),),
-        dev,
-    )?;
-    let values_t = Tensor::from_vec(graph.values.clone(), (graph.values.len(),), dev)?;
-
-    let _ = parameters.get(
-        (graph.row_ptr.len(),),
-        GRAPH_ROW_PTR,
-        candle_nn::Init::Const(0.0),
-        DType::F32,
-        dev,
-    )?;
-    let _ = parameters.get(
-        (graph.col_idx.len(),),
-        GRAPH_COL_IDX,
-        candle_nn::Init::Const(0.0),
-        DType::F32,
-        dev,
-    )?;
-    let _ = parameters.get(
-        (graph.values.len(),),
-        GRAPH_VALUES,
-        candle_nn::Init::Const(0.0),
-        DType::F32,
-        dev,
-    )?;
-
-    parameters.set_one(GRAPH_ROW_PTR, &row_ptr_t)?;
-    parameters.set_one(GRAPH_COL_IDX, &col_idx_t)?;
-    parameters.set_one(GRAPH_VALUES, &values_t)?;
-    log::info!(
-        "Persisted feature graph ({} CSR entries) into model safetensors",
-        graph.col_idx.len()
-    );
-    Ok(())
-}
-
-/// Pre-allocate feature-graph Vars in `parameters` so `parameters.load(...)`
-/// can write into them. Call this *before* loading the safetensors file at
-/// predict / impute time, only when `metadata.has_feature_graph` is true.
-pub fn allocate_feature_graph_vars(
-    parameters: &candle_nn::VarMap,
-    dev: &candle_core::Device,
-    n_features: usize,
-    n_edges: usize,
-) -> anyhow::Result<()> {
-    use candle_core::DType;
-    let _ = parameters.get(
-        (n_features + 1,),
-        GRAPH_ROW_PTR,
-        candle_nn::Init::Const(0.0),
-        DType::F32,
-        dev,
-    )?;
-    let _ = parameters.get(
-        (n_edges,),
-        GRAPH_COL_IDX,
-        candle_nn::Init::Const(0.0),
-        DType::F32,
-        dev,
-    )?;
-    let _ = parameters.get(
-        (n_edges,),
-        GRAPH_VALUES,
-        candle_nn::Init::Const(0.0),
-        DType::F32,
-        dev,
-    )?;
     Ok(())
 }
 

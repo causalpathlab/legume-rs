@@ -63,7 +63,6 @@ pub fn decoder_only_inference_dense<Dec: DecoderModuleT>(
     ops::log_softmax(z_var.as_tensor(), 1)
 }
 
-
 /// Per-cell predictive log-likelihood for the dense topic model.
 pub fn predictive_llik_dense<Dec: DecoderModuleT>(
     decoder: &Dec,
@@ -73,7 +72,6 @@ pub fn predictive_llik_dense<Dec: DecoderModuleT>(
     let (_, llik) = decoder.forward_with_llik(log_z_nk, x_nd, &|_, _| unreachable!())?;
     Ok(llik)
 }
-
 
 /// Per-batch sums accumulated across blocks during one TMLE iteration.
 /// `pb_obs[d,b]` and `pb_pred[d,b]` are NB-Fisher-weighted when `phi` is

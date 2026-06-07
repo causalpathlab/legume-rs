@@ -27,7 +27,7 @@ pub use delta_topic::DeltaTopicDecoder;
 pub use dyn_decoder::{create_dyn_decoder, DynDecoderModuleT};
 pub use embedded_topic::EmbeddedTopicDecoder;
 pub use joint_topic::JointTopicDecoder;
-pub use masked_etm::EmbeddedNbTopicDecoder;
+pub use masked_etm::{EmbeddedNbTopicDecoder, MaskedNbTarget};
 pub use nb_mixture::NbMixtureTopicDecoder;
 pub use poisson::PoissonDecoder;
 pub use topic::{MultinomTopicDecoder, NbTopicDecoder};

@@ -245,7 +245,18 @@ impl IndexedEmbeddingEncoder {
             .affine(1.0 / scale, 0.0)?; // [N, K]
         let neg_inf = visible_mask.affine(-1.0, 1.0)?.affine(-1e9, 0.0)?; // (1−vis)·(−1e9)
         let attn_nk = ops::softmax(&(scores_nk + neg_inf)?, 1)?; // [N, K]
-        content_nkh.broadcast_mul(&attn_nk.unsqueeze(2)?)?.sum(1) // [N, H]
+        let pooled_nh = content_nkh.broadcast_mul(&attn_nk.unsqueeze(2)?)?.sum(1)?; // [N, H]
+
+        // A row with no visible slot (empty cell, or all real genes masked at
+        // high mask_fraction) has an all-−∞ score row, so softmax degenerates to
+        // a uniform average over the padding slots. Zero that pool out so such
+        // rows get a defined (bias-driven) empty-cell representation instead of
+        // pad-gene content.
+        let has_visible_n1 = visible_mask
+            .sum_keepdim(1)?
+            .gt(0.0)?
+            .to_dtype(pooled_nh.dtype())?; // [N, 1]
+        pooled_nh.broadcast_mul(&has_visible_n1) // [N, H]
     }
 
     /// Deterministic masked-encoder forward → `log θ [N, K_topics]`.

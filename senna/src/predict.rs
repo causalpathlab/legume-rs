@@ -244,7 +244,7 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     use crate::topic::model_metadata::{MODEL_TYPE_INDEXED_MASKED, MODEL_TYPE_TOPIC};
     match metadata.model_type.as_ref() {
         MODEL_TYPE_TOPIC => predict_dense(args, &metadata),
-        MODEL_TYPE_INDEXED_MASKED => predict_indexed_masked(args, &metadata),
+        MODEL_TYPE_INDEXED_MASKED => predict_masked(args, &metadata),
         other => anyhow::bail!(
             "predict: unsupported model_type '{other}' (expected '{MODEL_TYPE_TOPIC}' or \
              '{MODEL_TYPE_INDEXED_MASKED}')",
@@ -718,7 +718,7 @@ fn remap_and_coarsen_dense(
 /// on the held-out cells, and writes the latent. No decoder/refinement (v1);
 /// batch correction at predict is gene-mean only (per-cell residual null is a
 /// future refinement).
-fn predict_indexed_masked(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
+fn predict_masked(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
     use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
     use crate::topic::model_metadata::load_feature_mean;
 
@@ -771,20 +771,12 @@ fn predict_indexed_masked(args: &PredictArgs, metadata: &TopicModelMetadata) -> 
             n_topics: metadata.n_topics,
             embedding_dim,
             layers: &metadata.encoder_hidden,
-            use_gcn: metadata.has_feature_graph(),
+            use_gcn: false,
             attn_pool: true,
         },
         &parameters,
         vb.pp("enc"),
     )?;
-    if let Some(n_edges) = metadata.n_graph_edges {
-        crate::topic::model_metadata::allocate_feature_graph_vars(
-            &parameters,
-            &cpu_dev,
-            metadata.n_features_full,
-            n_edges,
-        )?;
-    }
     let safetensors_path = format!("{}.safetensors", args.model);
     info!("Loading weights from {safetensors_path}");
     parameters.load(&safetensors_path)?;

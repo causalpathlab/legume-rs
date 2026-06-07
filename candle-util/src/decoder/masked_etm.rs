@@ -22,6 +22,22 @@ use crate::loss::nb_log_likelihood_elem;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, VarBuilder};
 
+/// Per-cell minibatch target for [`EmbeddedNbTopicDecoder::impute_masked_nb`].
+/// All tensors are at the cell's top-K positions, in `indices` order.
+pub struct MaskedNbTarget<'a> {
+    /// `[N, K]` u32 per-cell gene ids (the cell's top-K).
+    pub indices: &'a Tensor,
+    /// `[N, K]` per-cell μ_residual at `indices` (batch offset); `None` ⇒ no
+    /// batch offset (factor 1).
+    pub residual: Option<&'a Tensor>,
+    /// `[N, K]` observed counts at `indices` (NB target).
+    pub values: &'a Tensor,
+    /// `[N, 1]` per-cell library size.
+    pub lib: &'a Tensor,
+    /// `[N, K]` 1 = masked (scored), 0 = visible.
+    pub mask: &'a Tensor,
+}
+
 /// NB embedded-topic decoder for masked imputation.
 pub struct EmbeddedNbTopicDecoder {
     n_features: usize,
@@ -96,35 +112,40 @@ impl EmbeddedNbTopicDecoder {
         log_beta_kd.transpose(0, 1)?.contiguous()
     }
 
-    /// Per-topic log-partition `log Z_k = logsumexp_d(α_k·ρ_dᵀ)` as `[1, 1, K]`,
-    /// computed once per step (`O(K·D·H)`), off the per-cell hot path.
-    fn log_partition_11k(&self) -> Result<Tensor> {
-        let full_kd = self.full_logits_kd()?; // [K, D]
+    /// Per-topic log-partition `log Z_k = logsumexp_d(logits_kd)` as `[1, 1, K]`,
+    /// from precomputed `[K, D]` logits (see [`Self::full_logits_kd`]). The
+    /// `[K, D]` product is the dominant decoder cost, so the caller computes it
+    /// once per minibatch and shares it between this partition and the
+    /// anchor-prior CE rather than recomputing it inside each.
+    pub fn log_partition_from_logits(full_kd: &Tensor) -> Result<Tensor> {
+        let k = full_kd.dim(0)?;
         let m = full_kd.max_keepdim(1)?; // [K, 1]
         let lse = (full_kd.broadcast_sub(&m)?.exp()?.sum_keepdim(1)? + 1e-20)?.log()?; // [K,1]
         let logz_k1 = (lse + m)?; // [K, 1]
-        logz_k1.reshape((1, 1, self.n_topics))
+        logz_k1.reshape((1, 1, k))
     }
 
     /// Masked NB imputation log-likelihood, summed over masked positions →
     /// `[N]`.
     ///
     /// * `log_theta_nk` — `[N, K_topics]` encoder log-proportions.
-    /// * `indices` — `[N, K]` u32 per-cell gene ids (the cell's top-K).
-    /// * `residual_nk` — `[N, K]` per-cell μ_residual at `indices` (batch
-    ///   offset); `None` ⇒ no batch offset (factor 1).
-    /// * `values_nk` — `[N, K]` observed counts at `indices` (NB target).
-    /// * `lib_n1` — `[N, 1]` per-cell library size.
-    /// * `mask_nk` — `[N, K]` 1 = masked (scored), 0 = visible.
+    /// * `target` — the per-cell minibatch target (see [`MaskedNbTarget`]).
+    /// * `logz_11k` — `[1, 1, K]` per-topic log-partition from
+    ///   [`Self::log_partition_from_logits`] (caller-hoisted; see there).
     pub fn impute_masked_nb(
         &self,
         log_theta_nk: &Tensor,
-        indices: &Tensor,
-        residual_nk: Option<&Tensor>,
-        values_nk: &Tensor,
-        lib_n1: &Tensor,
-        mask_nk: &Tensor,
+        target: &MaskedNbTarget<'_>,
+        logz_11k: &Tensor,
     ) -> Result<Tensor> {
+        let MaskedNbTarget {
+            indices,
+            residual: residual_nk,
+            values: values_nk,
+            lib: lib_n1,
+            mask: mask_nk,
+        } = *target;
+
         let n = indices.dim(0)?;
         let k = indices.dim(1)?;
         let t = self.n_topics;
@@ -137,8 +158,7 @@ impl EmbeddedNbTopicDecoder {
         let logits = rho_g
             .matmul(&self.topic_embeddings.t()?)? // [N*K, T]
             .reshape((n, k, t))?; // [N, K, T]
-        let logz_11k = self.log_partition_11k()?; // [1, 1, T]
-        let beta_nkt = logits.broadcast_sub(&logz_11k)?.exp()?; // [N, K, T]
+        let beta_nkt = logits.broadcast_sub(logz_11k)?.exp()?; // [N, K, T]
 
         // (θ·β)_nk = Σ_t θ_nt · β_nkt
         let theta_n1t = theta_nt.reshape((n, 1, t))?;

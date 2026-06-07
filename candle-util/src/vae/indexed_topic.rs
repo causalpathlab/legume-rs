@@ -8,7 +8,7 @@
 use super::{clip_and_step_dense, smooth_topics, PhaseTimers, TrainScores};
 use crate::data::indexed::{labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData};
 use crate::decoder::embedded_topic::EmbeddedTopicDecoder;
-use crate::decoder::masked_etm::EmbeddedNbTopicDecoder;
+use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedNbTarget};
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
 use crate::traits::indexed::*;
 use candle_core::{Device, Tensor, Var};
@@ -123,20 +123,15 @@ pub fn shuffle_and_precompute(
     loader.precompute_all_minibatches()
 }
 
-/// ETM decoders that expose their full `α·ρᵀ [K, D]` logits for the
-/// anchor-prior cross-entropy. Lets [`apply_anchor_ce`] serve both the
-/// multinomial ([`EmbeddedTopicDecoder`]) and NB-masked
-/// ([`EmbeddedNbTopicDecoder`]) decoders without duplication. The logits are
-/// computed lazily inside `apply_anchor_ce`, only when the penalty is active.
+/// Multinomial ETM decoder exposing its full `α·ρᵀ [K, D]` logits for the
+/// anchor-prior cross-entropy, computed lazily inside [`apply_anchor_ce`] only
+/// when the penalty is active. (The masked NB trainer already holds these
+/// logits for its log-partition, so it calls [`apply_anchor_ce_from_logits`]
+/// directly rather than through this trait.)
 trait AnchorLogitsKd {
     fn anchor_logits_kd(&self) -> candle_core::Result<Tensor>;
 }
 impl AnchorLogitsKd for EmbeddedTopicDecoder {
-    fn anchor_logits_kd(&self) -> candle_core::Result<Tensor> {
-        self.full_logits_kd()
-    }
-}
-impl AnchorLogitsKd for EmbeddedNbTopicDecoder {
     fn anchor_logits_kd(&self) -> candle_core::Result<Tensor> {
         self.full_logits_kd()
     }
@@ -159,7 +154,19 @@ fn apply_anchor_ce<D: AnchorLogitsKd>(
         return Ok(loss);
     }
     let logits_kd = decoder.anchor_logits_kd()?;
-    let log_prob = candle_nn::ops::log_softmax(&logits_kd, logits_kd.rank() - 1)?;
+    apply_anchor_ce_from_logits(loss, &logits_kd, prior, lambda)
+}
+
+/// Anchor-CE core operating on precomputed `[K, D]` logits. Lets a caller that
+/// already has `full_logits_kd` (e.g. the masked trainer, which also needs it
+/// for the NB log-partition) avoid recomputing the `[K, D]` product.
+fn apply_anchor_ce_from_logits(
+    loss: candle_core::Tensor,
+    logits_kd: &candle_core::Tensor,
+    prior: &candle_core::Tensor,
+    lambda: f32,
+) -> candle_core::Result<candle_core::Tensor> {
+    let log_prob = candle_nn::ops::log_softmax(logits_kd, logits_kd.rank() - 1)?;
     let ce = (prior * &log_prob)?.sum(1)?.neg()?;
     let pen = (ce.mean_all()? * f64::from(lambda))?;
     loss + pen
@@ -541,15 +548,21 @@ pub fn train_masked(
                 )?;
                 let log_z = smooth_topics(log_z, config.topic_smoothing)?;
 
+                // `[K, D]` topic-gene logits — the dominant decoder cost.
+                // Computed once and shared by the NB log-partition and the
+                // anchor-prior CE (both reduce over D).
+                let full_kd = decoder.full_logits_kd()?;
+                let logz_11k = EmbeddedNbTopicDecoder::log_partition_from_logits(&full_kd)?;
+
                 let lib_n1 = (mb.input_values.sum_keepdim(1)? + 1.0)?;
-                let llik = decoder.impute_masked_nb(
-                    &log_z,
-                    &mb.input_indices,
-                    mb.input_values_null.as_ref(),
-                    &mb.input_values,
-                    &lib_n1,
-                    &masked,
-                )?;
+                let target = MaskedNbTarget {
+                    indices: &mb.input_indices,
+                    residual: mb.input_values_null.as_ref(),
+                    values: &mb.input_values,
+                    lib: &lib_n1,
+                    mask: &masked,
+                };
+                let llik = decoder.impute_masked_nb(&log_z, &target, &logz_11k)?;
 
                 let mut loss = llik.mean_all()?.neg()?;
                 if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
@@ -560,12 +573,16 @@ pub fn train_masked(
                         .affine(f64::from(config.feature_embedding_l2), 0.0)?;
                     loss = (loss + rho_l2)?;
                 }
-                loss = apply_anchor_ce(
-                    loss,
-                    decoder,
-                    config.anchor_prior_per_level.map(|p| &p[level]),
-                    config.anchor_penalty,
-                )?;
+                if config.anchor_penalty > 0.0 {
+                    if let Some(prior) = config.anchor_prior_per_level.map(|p| &p[level]) {
+                        loss = apply_anchor_ce_from_logits(
+                            loss,
+                            &full_kd,
+                            prior,
+                            config.anchor_penalty,
+                        )?;
+                    }
+                }
 
                 let grads = loss.backward()?;
                 clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))?;
