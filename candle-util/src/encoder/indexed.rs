@@ -27,6 +27,13 @@ pub struct IndexedEmbeddingEncoder {
     bn_z: batch_norm::BatchNorm,
     z_mean: Linear,
     z_lnvar: Linear,
+    /// Learned attention query `q [1, H]` for the masked-path attention pool
+    /// (PMA-style single-head). Only used by [`Self::forward_indexed_masked`];
+    /// the legacy sum-pool path ([`Self::preprocess_indexed`]) ignores it.
+    /// `None` unless `attn_pool` was set at construction — so sum-pool users
+    /// (dense/legacy/pinto) neither allocate nor persist this var, and old
+    /// safetensors (lacking `attn.query`) still load.
+    attn_query: Option<Tensor>,
 }
 
 pub struct IndexedEmbeddingEncoderArgs<'a> {
@@ -40,6 +47,12 @@ pub struct IndexedEmbeddingEncoderArgs<'a> {
     /// batch is supplied the GCN branch is bypassed and the legacy
     /// sum-pool path is taken.
     pub use_gcn: bool,
+    /// When true, allocate the `attn.query` parameter and use single-query
+    /// attention pooling on the masked forward path
+    /// ([`IndexedEmbeddingEncoder::forward_indexed_masked`]). Sum-pool users
+    /// (dense ELBO / pinto) set this `false` so no `attn.query` var is
+    /// registered — keeping their safetensors unchanged.
+    pub attn_pool: bool,
 }
 
 impl IndexedEmbeddingEncoder {
@@ -78,6 +91,12 @@ impl IndexedEmbeddingEncoder {
         let z_mean = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.mean"))?;
         let z_lnvar = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.lnvar"))?;
 
+        let attn_query = if args.attn_pool {
+            Some(vb.get_with_hints((1, args.embedding_dim), "attn.query", init_ws)?)
+        } else {
+            None
+        };
+
         Ok(Self {
             n_features: args.n_features,
             n_topics: args.n_topics,
@@ -88,6 +107,7 @@ impl IndexedEmbeddingEncoder {
             bn_z,
             z_mean,
             z_lnvar,
+            attn_query,
         })
     }
 
@@ -177,6 +197,85 @@ impl IndexedEmbeddingEncoder {
 }
 
 impl IndexedEmbeddingEncoder {
+    /// Pool packed top-K into `[N, H]` using **only the visible slots**.
+    ///
+    /// Builds the same value-gated tokens as [`Self::preprocess_indexed`]
+    /// (`a_nk · ρ`), then pools by **single-query attention** (PMA-style)
+    /// rather than a plain sum: attention scores for masked / padding slots
+    /// (`visible_mask [N, K]` == 0) are driven to −∞ so those genes are
+    /// excluded from the softmax — the raw `a_nk` gate is *not* zeroed, so a
+    /// masked gene's value never leaks into the pool. Used by the masked-
+    /// imputation topic model. No GCN branch on this path.
+    fn preprocess_indexed_masked(
+        &self,
+        indices: &Tensor,
+        values: &Tensor,
+        values_null: Option<&Tensor>,
+        values_mean: Option<&Tensor>,
+        visible_mask: &Tensor,
+    ) -> Result<Tensor> {
+        let n = indices.dim(0)?;
+        let k = indices.dim(1)?;
+        let h = self.embedding_dim;
+
+        let flat_idx = indices.flatten_all()?;
+        let e_nk_h = self
+            .feature_embeddings
+            .index_select(&flat_idx, 0)?
+            .reshape((n, k, h))?;
+
+        // Value-gated token per slot (expression × symbol embedding). Note:
+        // `a_nk` uses the raw values for ALL slots; masking is applied to the
+        // attention scores (below), not by zeroing the gate — so a masked
+        // gene is excluded from pooling but its value isn't leaked.
+        let a_nk = anscombe_lite(values, values_null, values_mean)?; // [N, K]
+        let content_nkh = e_nk_h.broadcast_mul(&a_nk.unsqueeze(2)?)?; // [N, K, H]
+
+        // Single-query attention pool (PMA-style, O(K·H)): scores = ⟨token, q⟩/√H,
+        // visible-masked to −∞, softmax over K, then weighted sum. The softmax
+        // weights sum to 1, so the pooled vector is depth-normalized.
+        let attn_query = self
+            .attn_query
+            .as_ref()
+            .expect("forward_indexed_masked requires an attn_pool encoder");
+        let scale = (h as f64).sqrt();
+        let scores_nk = content_nkh
+            .broadcast_mul(&attn_query.reshape((1, 1, h))?)?
+            .sum(2)?
+            .affine(1.0 / scale, 0.0)?; // [N, K]
+        let neg_inf = visible_mask.affine(-1.0, 1.0)?.affine(-1e9, 0.0)?; // (1−vis)·(−1e9)
+        let attn_nk = ops::softmax(&(scores_nk + neg_inf)?, 1)?; // [N, K]
+        content_nkh.broadcast_mul(&attn_nk.unsqueeze(2)?)?.sum(1) // [N, H]
+    }
+
+    /// Deterministic masked-encoder forward → `log θ [N, K_topics]`.
+    ///
+    /// Pools the **visible** genes, runs FC + BN, and returns
+    /// `log_softmax(z_mean)` — **no reparameterization, no KL**. This is the
+    /// masked-imputation topic model's encoder: `θ` is a point estimate, so
+    /// there is no posterior-collapse pressure.
+    pub fn forward_indexed_masked(
+        &self,
+        indices: &Tensor,
+        values: &Tensor,
+        values_null: Option<&Tensor>,
+        values_mean: Option<&Tensor>,
+        visible_mask: &Tensor,
+        train: bool,
+    ) -> Result<Tensor> {
+        let h_nh = self.preprocess_indexed_masked(
+            indices,
+            values,
+            values_null,
+            values_mean,
+            visible_mask,
+        )?;
+        let fc_nl = self.fc.forward_t(&h_nh, train)?;
+        let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
+        let z_mean_nk = self.z_mean.forward_t(&bn_nl, train)?.clamp(-8.0, 8.0)?;
+        ops::log_softmax(&z_mean_nk, 1)
+    }
+
     /// Compute latent Gaussian parameters from packed indexed input.
     pub fn latent_gaussian_params_indexed(
         &self,
@@ -264,6 +363,7 @@ mod tests {
                 embedding_dim,
                 layers: &layers,
                 use_gcn: false,
+                attn_pool: false,
             },
             &varmap,
             vb,

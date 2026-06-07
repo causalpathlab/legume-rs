@@ -1,4 +1,4 @@
-//! Decoder-specific post-training I/O for `senna topic` / `senna itopic`.
+//! Decoder-specific post-training I/O for `senna topic` / `senna masked-topic`.
 //!
 //! Each topic-model decoder (NB, multinom, vMF, NB-mixture) needs its
 //! own dictionary-write logic and may emit additional per-gene parameter

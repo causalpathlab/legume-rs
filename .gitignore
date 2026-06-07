@@ -51,3 +51,7 @@ temp*
 
 # claude
 .claude
+
+# faba run/smoke-test output dirs (not source)
+faba/sim_out/
+faba/smoke_out/

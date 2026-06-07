@@ -2,7 +2,7 @@ use clap::Args;
 
 #[derive(Args, Debug)]
 pub struct AnnotateArgs {
-    /// Run manifest produced by `senna topic|itopic|joint-topic|svd|joint-svd`.
+    /// Run manifest produced by `senna topic|masked-topic|joint-topic|svd|joint-svd`.
     #[arg(short = 'f', long = "from", required = true)]
     pub from: Box<str>,
 

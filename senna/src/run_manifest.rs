@@ -1,7 +1,7 @@
 //! Run manifest — the single JSON artifact that ties a senna run
 //! together across subcommands.
 //!
-//! Shape: `senna topic` / `itopic` / `joint-topic` write a fresh
+//! Shape: `senna topic` / `masked-topic` / `joint-topic` write a fresh
 //! manifest at the end of training. `senna layout` reads it, produces 2D
 //! coords, and updates the `layout{}` section in place. `senna plot` (and
 //! future postprocess commands) read the fully-enriched manifest and
@@ -80,6 +80,10 @@ pub const MANIFEST_VERSION: u32 = 1;
 /// Subcommand that produced the run. Serde-encoded as kebab-case strings
 /// (`"topic"`, `"itopic"`, `"joint-topic"`, `"svd"`, `"joint-svd"`,
 /// `"bge"`, `"fne"`) so the JSON wire format is stable across renames.
+///
+/// `Itopic` is the wire string for the `masked-topic` command: the command
+/// was renamed (`itopic` → `masked-topic`) but the manifest kind is kept as
+/// the legacy `"itopic"` so existing manifests keep parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunKind {
@@ -106,7 +110,7 @@ impl RunKind {
         }
     }
 
-    /// Topic-family kinds (topic / itopic / joint-topic) — produce a
+    /// Topic-family kinds (topic / masked-topic / joint-topic) — produce a
     /// probability-simplex β. SVD-family kinds produce signed loadings.
     #[must_use]
     pub fn is_topic_family(self) -> bool {
@@ -173,12 +177,12 @@ pub struct RunOutputs {
     /// without touching raw data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_proj: Option<String>,
-    /// `{out}.safetensors` — trained VAE weights (topic / itopic /
+    /// `{out}.safetensors` — trained VAE weights (topic / masked-topic /
     /// joint-topic only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// `{out}.model.json` — topic-model metadata for `senna
-    /// eval-topic` (topic / itopic / joint-topic only).
+    /// eval-topic` (topic / masked-topic / joint-topic only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<String>,
     /// `{out}.pb_gene.parquet` — G × P pseudobulk gene aggregates at the
@@ -201,7 +205,7 @@ pub struct RunOutputs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dictionary_empirical: Option<String>,
     /// `{out}.feature_embedding.parquet` — D × H learned per-gene embedding
-    /// ρ (indexed-topic only). Shared between encoder and decoder under the
+    /// ρ (masked-topic only). Shared between encoder and decoder under the
     /// ETM factorization β = log_softmax_d(α · ρᵀ); each gene's row is its
     /// learned coordinate in the topic-model embedding space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -209,7 +213,7 @@ pub struct RunOutputs {
     /// `{out}.cell_to_pb.parquet` — N × num_levels u32 matrix of the
     /// post-refinement cell→pseudobulk membership per coarsening level
     /// (finest-last to match `collapsed_levels`). Cached so a downstream
-    /// `senna {topic, itopic, ce-topic} --from` chain can skip the
+    /// `senna {topic, masked-topic, ce-topic} --from` chain can skip the
     /// expensive HNSW + binary-sort + DC-SBM refinement step and feed
     /// the precomputed partition straight into the per-PB Gamma fit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -398,7 +402,7 @@ pub fn default_path(prefix: &str) -> String {
 }
 
 /// Resolved chain-from inputs that a downstream training subcommand
-/// (`senna {itopic, cell-embedded-topic}`) inherits via `--from`.
+/// (`senna {masked-topic, cell-embedded-topic}`) inherits via `--from`.
 /// All paths are already resolved against the manifest's directory so
 /// the caller can hand them straight to data loaders.
 pub struct InheritedFromManifest {
@@ -565,12 +569,12 @@ pub struct RunDescription<'a> {
     /// `None` to omit — SVD runs still produce one, topic runs always do.
     pub dictionary_suffix: Option<&'a str>,
     /// True if the run emits `{basename}.safetensors` +
-    /// `{basename}.model.json` (topic + itopic; not joint-topic, not
+    /// `{basename}.model.json` (topic + masked-topic; not joint-topic, not
     /// SVD).
     pub has_model: bool,
     /// True if the run emits `{basename}.cell_proj.parquet` — the
     /// cached per-cell random projection layout reuses. All training
-    /// subcommands that produce PBs (topic, itopic, joint-topic, svd,
+    /// subcommands that produce PBs (topic, masked-topic, joint-topic, svd,
     /// joint-svd) should set this.
     pub has_cell_proj: bool,
     /// Suffix after `{basename}.` for the PB-level gene aggregates parquet,
@@ -584,7 +588,7 @@ pub struct RunDescription<'a> {
     /// to omit.
     pub dictionary_empirical_suffix: Option<&'a str>,
     /// Suffix after `{basename}.` for the per-gene feature embedding ρ
-    /// parquet (indexed-topic only), e.g. `"feature_embedding.parquet"`.
+    /// parquet (masked-topic only), e.g. `"feature_embedding.parquet"`.
     /// `None` to omit.
     pub feature_embedding_suffix: Option<&'a str>,
     /// Default `--colour-by` for downstream plot / layout.

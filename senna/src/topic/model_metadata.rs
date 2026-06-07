@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 /// of inline `"topic"` / `"indexed_topic"` literals so a typo doesn't silently
 /// break warm-start or predict dispatch.
 pub const MODEL_TYPE_TOPIC: &str = "topic";
-// Bumped from "indexed_topic" to "indexed_topic_packed" with the
-// packed top-K cutover: old safetensors+model.json files fail load
-// here with a clean model-type mismatch instead of silently loading
-// against an incompatible runtime.
-pub const MODEL_TYPE_INDEXED: &str = "indexed_topic_packed";
+/// Masked-imputation embedded topic model (`senna masked-topic`): indexed
+/// symbol-embedding encoder + NB ETM imputation head, trained without ELBO.
+/// Inference is encoder-only (no decoder refinement). The retired generative
+/// indexed-topic model used `"indexed_topic_packed"`; that path is gone.
+pub const MODEL_TYPE_INDEXED_MASKED: &str = "indexed_topic_masked";
 
 /// Metadata needed to reconstruct a trained topic model for inference.
 #[derive(Serialize, Deserialize)]
@@ -251,40 +251,7 @@ pub fn allocate_feature_graph_vars(
     Ok(())
 }
 
-/// Reconstruct a `GraphCsr` from the feature-graph Vars previously
-/// populated by `parameters.load(...)`. Pairs with
-/// [`allocate_feature_graph_vars`].
-pub fn read_feature_graph_from_varmap(
-    parameters: &candle_nn::VarMap,
-    n_features: usize,
-) -> anyhow::Result<GraphCsr> {
-    let data = parameters.data().lock().expect("VarMap lock");
-    let get = |name: &str| -> anyhow::Result<Vec<f32>> {
-        let var = data
-            .get(name)
-            .ok_or_else(|| anyhow::anyhow!("missing {name} in VarMap"))?;
-        Ok(var.as_tensor().to_vec1::<f32>()?)
-    };
-    let row_ptr_f32 = get(GRAPH_ROW_PTR)?;
-    let col_idx_f32 = get(GRAPH_COL_IDX)?;
-    let values = get(GRAPH_VALUES)?;
-    anyhow::ensure!(
-        row_ptr_f32.len() == n_features + 1,
-        "graph.row_ptr length {} != n_features + 1 = {}",
-        row_ptr_f32.len(),
-        n_features + 1,
-    );
-    let row_ptr: Vec<u32> = row_ptr_f32.into_iter().map(|x| x as u32).collect();
-    let col_idx: Vec<u32> = col_idx_f32.into_iter().map(|x| x as u32).collect();
-    Ok(GraphCsr {
-        n_features,
-        row_ptr,
-        col_idx,
-        values,
-    })
-}
-
-/// Save NB-Fisher shortlist weights for indexed-topic prediction.
+/// Save NB-Fisher shortlist weights for masked-topic prediction.
 pub fn save_shortlist_weights(
     weights: &[f32],
     gene_names: &[Box<str>],

@@ -8,9 +8,10 @@
 use super::{clip_and_step_dense, smooth_topics, PhaseTimers, TrainScores};
 use crate::data::indexed::{labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData};
 use crate::decoder::embedded_topic::EmbeddedTopicDecoder;
+use crate::decoder::masked_etm::EmbeddedNbTopicDecoder;
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
 use crate::traits::indexed::*;
-use candle_core::{Device, Var};
+use candle_core::{Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer};
 use log::info;
 use matrix_param::dmatrix_gamma::GammaMatrix;
@@ -122,13 +123,32 @@ pub fn shuffle_and_precompute(
     loader.precompute_all_minibatches()
 }
 
+/// ETM decoders that expose their full `α·ρᵀ [K, D]` logits for the
+/// anchor-prior cross-entropy. Lets [`apply_anchor_ce`] serve both the
+/// multinomial ([`EmbeddedTopicDecoder`]) and NB-masked
+/// ([`EmbeddedNbTopicDecoder`]) decoders without duplication. The logits are
+/// computed lazily inside `apply_anchor_ce`, only when the penalty is active.
+trait AnchorLogitsKd {
+    fn anchor_logits_kd(&self) -> candle_core::Result<Tensor>;
+}
+impl AnchorLogitsKd for EmbeddedTopicDecoder {
+    fn anchor_logits_kd(&self) -> candle_core::Result<Tensor> {
+        self.full_logits_kd()
+    }
+}
+impl AnchorLogitsKd for EmbeddedNbTopicDecoder {
+    fn anchor_logits_kd(&self) -> candle_core::Result<Tensor> {
+        self.full_logits_kd()
+    }
+}
+
 /// Cross-entropy penalty `−λ · mean_K Σ_D prior · log_softmax_D(logits)`
 /// added to the loss. Anchors topic indices to the supplied per-topic
 /// gene-prior distribution; breaks the K-way permutation symmetry of
 /// the ETM-factorized β. No-op when `prior` is `None` or `lambda ≤ 0`.
-fn apply_anchor_ce(
+fn apply_anchor_ce<D: AnchorLogitsKd>(
     loss: candle_core::Tensor,
-    decoder: &EmbeddedTopicDecoder,
+    decoder: &D,
     prior: Option<&candle_core::Tensor>,
     lambda: f32,
 ) -> candle_core::Result<candle_core::Tensor> {
@@ -138,7 +158,7 @@ fn apply_anchor_ce(
     if lambda <= 0.0 {
         return Ok(loss);
     }
-    let logits_kd = decoder.full_logits_kd()?;
+    let logits_kd = decoder.anchor_logits_kd()?;
     let log_prob = candle_nn::ops::log_softmax(&logits_kd, logits_kd.rank() - 1)?;
     let ce = (prior * &log_prob)?.sum(1)?.neg()?;
     let pen = (ce.mean_all()? * f64::from(lambda))?;
@@ -428,6 +448,160 @@ pub fn train_mixed(
     prog_bar.finish_and_clear();
     info!("done mixed multi-level training");
     timers.log_summary();
+    Ok(TrainScores {
+        llik: llik_trace,
+        kl: kl_trace,
+    })
+}
+
+/// Masked-imputation training (no ELBO / no KL) for the embedded topic model.
+///
+/// Per minibatch, the cell's top-K genes are randomly split into **visible**
+/// (encoder input) and **masked** (held-out targets). The encoder pools the
+/// visible genes into a deterministic `log θ`; the NB embedded-topic decoder
+/// imputes the masked genes (`μ = residual·ℓ·θβ`) and the loss is the NB
+/// log-likelihood on masked positions only. No posterior, no KL → no
+/// posterior collapse. Pseudobulk masking also simulates the PB→single-cell
+/// sparsity the amortized encoder must handle at inference.
+///
+/// Separate from [`train_mixed`] (the ELBO path, kept for `pinto lc-etm`).
+pub fn train_masked(
+    level_data: &[LevelData],
+    encoder: &IndexedEmbeddingEncoder,
+    decoders: &[EmbeddedNbTopicDecoder],
+    config: &IndexedTrainConfig,
+    mask_fraction: f64,
+) -> anyhow::Result<TrainScores> {
+    let num_levels = level_data.len();
+    let total_epochs = config.epochs;
+
+    for (level, (&(mixed, _, _), decoder)) in level_data.iter().zip(decoders.iter()).enumerate() {
+        info!(
+            "Level {}/{}: {} samples, decoder dim {} (masked-imputation ETM)",
+            level + 1,
+            num_levels,
+            mixed.ncols(),
+            decoder.dim_obs(),
+        );
+    }
+    info!(
+        "Masked-imputation training: {num_levels} levels, {total_epochs} epochs, mask={mask_fraction}"
+    );
+
+    let adam_vars: Vec<Var> = match config.frozen_feature_var {
+        None => config.parameters.all_vars(),
+        Some(name) => crate::frozen_features::trainable_vars(config.parameters, &[name]),
+    };
+    let mut adam = AdamW::new(
+        adam_vars,
+        candle_nn::ParamsAdamW {
+            lr: f64::from(config.learning_rate),
+            weight_decay: f64::from(config.weight_decay),
+            ..Default::default()
+        },
+    )?;
+    let prog_bar = labeled_bar("Epochs", total_epochs as u64);
+
+    let mut llik_trace = Vec::with_capacity(total_epochs);
+    // No KL in the masked objective; keep a zero column the same length as
+    // `llik` so `TrainScores::to_parquet` sees equal-length columns.
+    let mut kl_trace = Vec::with_capacity(total_epochs);
+    let mut data_loaders = build_indexed_loaders(level_data, config)?;
+
+    for epoch in 0..total_epochs {
+        for loader in data_loaders.iter_mut() {
+            shuffle_and_precompute(loader, config.minibatch_size)?;
+        }
+
+        let mut llik_tot = 0f32;
+        let mut masked_tot = 0f32;
+
+        for (level, loader) in data_loaders.iter().enumerate() {
+            let decoder = &decoders[level];
+
+            for b in 0..loader.num_minibatch() {
+                let mb = loader.minibatch_cached(b).to_device(config.dev)?;
+
+                // Visible/masked split over the cell's real (value>0) top-K.
+                // Pads (value==0) are neither visible (no ρ₀ contamination)
+                // nor scored.
+                let real = mb.input_values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
+                let rnd = Tensor::rand(0f32, 1f32, mb.input_values.shape(), config.dev)?;
+                let drop = rnd.lt(mask_fraction)?.to_dtype(candle_core::DType::F32)?;
+                let masked = real.mul(&drop)?;
+                let visible = (&real - &masked)?;
+
+                let log_z = encoder.forward_indexed_masked(
+                    &mb.input_indices,
+                    &mb.input_values,
+                    mb.input_values_null.as_ref(),
+                    mb.input_values_mean.as_ref(),
+                    &visible,
+                    true,
+                )?;
+                let log_z = smooth_topics(log_z, config.topic_smoothing)?;
+
+                let lib_n1 = (mb.input_values.sum_keepdim(1)? + 1.0)?;
+                let llik = decoder.impute_masked_nb(
+                    &log_z,
+                    &mb.input_indices,
+                    mb.input_values_null.as_ref(),
+                    &mb.input_values,
+                    &lib_n1,
+                    &masked,
+                )?;
+
+                let mut loss = llik.mean_all()?.neg()?;
+                if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
+                    let rho_l2 = encoder
+                        .feature_embeddings()
+                        .sqr()?
+                        .mean_all()?
+                        .affine(f64::from(config.feature_embedding_l2), 0.0)?;
+                    loss = (loss + rho_l2)?;
+                }
+                loss = apply_anchor_ce(
+                    loss,
+                    decoder,
+                    config.anchor_prior_per_level.map(|p| &p[level]),
+                    config.anchor_penalty,
+                )?;
+
+                let grads = loss.backward()?;
+                clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))?;
+
+                llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
+                masked_tot += masked.sum_all()?.to_scalar::<f32>()?;
+
+                if config.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        }
+
+        let per_masked = if masked_tot > 0.0 {
+            llik_tot / masked_tot
+        } else {
+            0.0
+        };
+        llik_trace.push(per_masked);
+        kl_trace.push(0.0);
+        prog_bar.inc(1);
+        if log::log_enabled!(log::Level::Info) {
+            info!("[epoch {epoch}] masked-NB llik/gene={per_masked:.4}");
+        }
+        if config.stop.load(Ordering::SeqCst) {
+            prog_bar.finish_and_clear();
+            info!("Stopping early at epoch {epoch}");
+            return Ok(TrainScores {
+                llik: llik_trace,
+                kl: kl_trace,
+            });
+        }
+    }
+
+    prog_bar.finish_and_clear();
+    info!("done masked-imputation training");
     Ok(TrainScores {
         llik: llik_trace,
         kl: kl_trace,

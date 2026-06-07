@@ -194,30 +194,43 @@ pub fn zi_topic_likelihood(
 /// * `log_phi_1d` - log dispersion parameter log(φ) [1, D]
 ///
 /// Returns: log-likelihood per sample [N]
+///
+/// Thin wrapper over [`nb_log_likelihood_elem`]: broadcasts the per-feature
+/// `log_phi_1d [1, D]` to `x`'s shape, scores elementwise, then sums over the
+/// feature axis. One source of truth for the NB formula.
 pub fn nb_log_likelihood(x_nd: &Tensor, mu_nd: &Tensor, log_phi_1d: &Tensor) -> Result<Tensor> {
-    let phi = log_phi_1d.clamp(-10.0, 10.0)?.exp()?; // [1, D], clamped to [~4.5e-5, ~2.2e4]
-    let mu_nd = mu_nd.clamp(1e-6, 1e6)?; // [N, D]
+    let log_phi = log_phi_1d.broadcast_as(x_nd.shape())?;
+    nb_log_likelihood_elem(x_nd, mu_nd, &log_phi)?.sum(x_nd.rank() - 1)
+}
+
+/// Elementwise negative-binomial log-likelihood — **no reduction**.
+///
+/// `log p(x | μ, φ) = lgamma(x+φ) − lgamma(φ) − lgamma(x+1) + φ·log(φ/(φ+μ))
+///  + x·log(μ/(φ+μ))`, computed per element with `log_phi` the SAME shape as
+/// `x`/`mu` (e.g. `[N, K]` after gathering φ at per-cell gene ids). The
+/// masked-imputation topic model uses this directly to score only the
+/// held-out positions; [`nb_log_likelihood`] wraps it for the summed
+/// `[1, D]`-dispersion case. `μ` is clamped to `[1e-6, 1e6]` and `φ` to
+/// `[e⁻¹⁰, e¹⁰]` for numerical safety.
+pub fn nb_log_likelihood_elem(x: &Tensor, mu: &Tensor, log_phi: &Tensor) -> Result<Tensor> {
+    let phi = log_phi.clamp(-10.0, 10.0)?.exp()?;
+    let mu = mu.clamp(1e-6, 1e6)?;
     let eps = 1e-8;
 
-    let phi_plus_mu = phi.broadcast_add(&mu_nd)?; // [N, D]
+    let phi_plus_mu = (&phi + &mu)?;
     let log_phi = (&phi + eps)?.log()?;
     let log_phi_plus_mu = (&phi_plus_mu + eps)?.log()?;
-    let log_mu = (&mu_nd + eps)?.log()?;
+    let log_mu = (&mu + eps)?.log()?;
 
-    // φ·log(φ/(φ+μ)) = φ·(log φ - log(φ+μ))
-    let term_phi = phi.broadcast_mul(&log_phi.broadcast_sub(&log_phi_plus_mu)?)?;
+    let term_phi = phi.mul(&(&log_phi - &log_phi_plus_mu)?)?;
+    let term_x = x.mul(&(&log_mu - &log_phi_plus_mu)?)?;
 
-    // x·log(μ/(φ+μ)) = x·(log μ - log(φ+μ))
-    let term_x = x_nd.mul(&log_mu.broadcast_sub(&log_phi_plus_mu)?)?;
-
-    // lgamma(x + φ) - lgamma(φ) - lgamma(x + 1)
-    let x_plus_phi = x_nd.broadcast_add(&phi)?;
+    let x_plus_phi = (x + &phi)?;
     let lgamma_term = approx_lgamma(&x_plus_phi)?
-        .broadcast_sub(&approx_lgamma(&phi)?)?
-        .sub(&approx_lgamma(&(x_nd + 1.0)?)?)?;
+        .sub(&approx_lgamma(&phi)?)?
+        .sub(&approx_lgamma(&(x + 1.0)?)?)?;
 
-    // Sum over features
-    (lgamma_term + term_phi + term_x)?.sum(x_nd.rank() - 1)
+    lgamma_term + term_phi + term_x
 }
 
 /// Gaussian log-likelihood of count-ish data

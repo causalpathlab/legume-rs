@@ -1,6 +1,6 @@
-//! Unified prediction subcommand for the dense and indexed topic models.
+//! Unified prediction subcommand for the dense and masked topic models.
 //!
-//! Loads a model trained by `senna topic` / `indexed-topic`, applies it
+//! Loads a model trained by `senna topic` / `masked-topic`, applies it
 //! to a held-out backend file, and writes:
 //!   - `{out}.latent.parquet`     [N × K] log θ (per-cell topic proportions)
 //!   - `{out}.predictive.parquet` [N × 3] per-cell `[llik, total, llik_per_count]`
@@ -14,29 +14,23 @@
 //!     the test feature set is too divergent for the encoder.
 
 use crate::embed_common::*;
-use crate::fit_indexed_topic::FeatureNameKindArg;
+use crate::fit_masked_topic::FeatureNameKindArg;
 use crate::topic::eval::{build_gene_remap_with, GeneRemap, QueryNameOpts};
-use crate::topic::eval_indexed::{
-    csc_to_indexed, csc_to_indexed_pair, refine_indexed_topic_proportions,
-};
 use crate::topic::model_metadata::{
     load_coarsening, load_dictionary, load_shortlist_weights, TopicModelMetadata,
 };
 use crate::topic::predict_common::{
-    decoder_only_inference_dense, decoder_only_inference_indexed, estimate_delta,
-    predictive_llik_dense, predictive_llik_indexed, LatentMode,
+    decoder_only_inference_dense, estimate_delta, predictive_llik_dense, LatentMode,
 };
 
 use crate::logging::new_progress_bar;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_core::{Device, Tensor};
 use candle_util::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
-use candle_util::decoder::EmbeddedTopicDecoder;
 use candle_util::decoder::{MultinomTopicDecoder, NbMixtureTopicDecoder, NbTopicDecoder};
 use candle_util::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
 use candle_util::encoder::{LogSoftmaxEncoder, LogSoftmaxEncoderArgs};
 use candle_util::topic_refinement::{refine_topic_proportions, TopicRefinementConfig};
-use candle_util::traits::IndexedEncoderT;
 use candle_util::traits::{DecoderModuleT, EncoderModuleT, NewDecoder};
 use data_beans::sparse_io_vector::SparseIoVec;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
@@ -59,7 +53,7 @@ pub struct PredictArgs {
     #[arg(
         long,
         required = true,
-        help = "Trained model prefix (output of `senna topic` / `indexed-topic` -o)",
+        help = "Trained model prefix (output of `senna topic` / `masked-topic` -o)",
         long_help = "Loads:\n  \
                      {model}.dictionary.parquet      gene × topic dictionary\n  \
                      {model}.model.json              model architecture metadata\n  \
@@ -247,13 +241,13 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
         );
     }
 
-    use crate::topic::model_metadata::{MODEL_TYPE_INDEXED, MODEL_TYPE_TOPIC};
+    use crate::topic::model_metadata::{MODEL_TYPE_INDEXED_MASKED, MODEL_TYPE_TOPIC};
     match metadata.model_type.as_ref() {
         MODEL_TYPE_TOPIC => predict_dense(args, &metadata),
-        MODEL_TYPE_INDEXED => predict_indexed(args, &metadata),
+        MODEL_TYPE_INDEXED_MASKED => predict_indexed_masked(args, &metadata),
         other => anyhow::bail!(
             "predict: unsupported model_type '{other}' (expected '{MODEL_TYPE_TOPIC}' or \
-             '{MODEL_TYPE_INDEXED}')",
+             '{MODEL_TYPE_INDEXED_MASKED}')",
         ),
     }
 }
@@ -718,35 +712,38 @@ fn remap_and_coarsen_dense(
 // Indexed prediction //
 //////////////////////////
 
-fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
+/// Encoder-only prediction for the masked-topic
+/// ([`MODEL_TYPE_INDEXED_MASKED`]). Rebuilds the indexed symbol-embedding
+/// encoder, runs the deterministic masked-encoder forward (all genes visible)
+/// on the held-out cells, and writes the latent. No decoder/refinement (v1);
+/// batch correction at predict is gene-mean only (per-cell residual null is a
+/// future refinement).
+fn predict_indexed_masked(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
+    use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
+    use crate::topic::model_metadata::load_feature_mean;
+
     let embedding_dim = metadata
         .embedding_dim
-        .ok_or_else(|| anyhow::anyhow!("indexed model metadata missing embedding_dim"))?;
+        .ok_or_else(|| anyhow::anyhow!("masked-topic metadata missing embedding_dim"))?;
     let enc_context_size = metadata
         .enc_context_size
-        .ok_or_else(|| anyhow::anyhow!("indexed model metadata missing enc_context_size"))?;
-    let dec_context_size = metadata
-        .dec_context_size
-        .ok_or_else(|| anyhow::anyhow!("indexed model metadata missing dec_context_size"))?;
+        .ok_or_else(|| anyhow::anyhow!("masked-topic metadata missing enc_context_size"))?;
 
-    let (training_genes, beta_dk) = load_dictionary(&args.model)?;
-    let (sw_genes, shortlist_weights) = load_shortlist_weights(&args.model)?;
+    let (training_genes, _beta_dk) = load_dictionary(&args.model)?;
+    let (_sw_genes, shortlist_weights) = load_shortlist_weights(&args.model)?;
+    let (_fm_genes, feature_mean) = load_feature_mean(&args.model)?;
     anyhow::ensure!(
-        sw_genes.len() == training_genes.len(),
+        shortlist_weights.len() == training_genes.len(),
         "shortlist_weights gene count ({}) != dictionary gene count ({})",
-        sw_genes.len(),
-        training_genes.len(),
+        shortlist_weights.len(),
+        training_genes.len()
     );
-    let (fb_genes, feature_mean) = crate::topic::model_metadata::load_feature_mean(&args.model)?;
     anyhow::ensure!(
-        fb_genes.len() == training_genes.len(),
+        feature_mean.len() == training_genes.len(),
         "feature_mean gene count ({}) != dictionary gene count ({})",
-        fb_genes.len(),
-        training_genes.len(),
+        feature_mean.len(),
+        training_genes.len()
     );
-    // The decoder's NB-Fisher loss weights are the same NB-Fisher per-gene
-    // weights used for selection — the data on disk is one vector.
-    let feature_fisher_weights = shortlist_weights.clone();
 
     let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: args.data_files.clone(),
@@ -765,360 +762,62 @@ fn predict_indexed(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow:
     let new_genes = data_vec.row_names()?;
     let gene_remap = build_remap(&training_genes, &new_genes, &args.query_name_opts())?;
 
-    let delta_db = estimate_delta(
-        &data_vec,
-        &beta_dk,
-        metadata.theta_mean.as_deref(),
-        gene_remap.as_ref(),
-        args.block_size,
-    )?;
-
     let cpu_dev = Device::Cpu;
     let mut parameters = candle_nn::VarMap::new();
     let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
-
-    let n_features_full = metadata.n_features_full;
     let encoder = IndexedEmbeddingEncoder::new(
         IndexedEmbeddingEncoderArgs {
-            n_features: n_features_full,
+            n_features: metadata.n_features_full,
             n_topics: metadata.n_topics,
             embedding_dim,
             layers: &metadata.encoder_hidden,
             use_gcn: metadata.has_feature_graph(),
+            attn_pool: true,
         },
         &parameters,
         vb.pp("enc"),
     )?;
-
-    let num_levels = metadata.level_decoder_dims.len().max(1);
-    let decoders = register_etm_decoders(
-        &vb,
-        metadata.n_topics,
-        encoder.feature_embeddings(),
-        num_levels,
-    )?;
-
-    // Pre-allocate feature-graph Vars before loading the safetensors file so
-    // VarMap::load can populate them by name.
     if let Some(n_edges) = metadata.n_graph_edges {
         crate::topic::model_metadata::allocate_feature_graph_vars(
             &parameters,
             &cpu_dev,
-            n_features_full,
+            metadata.n_features_full,
             n_edges,
         )?;
     }
-
     let safetensors_path = format!("{}.safetensors", args.model);
     info!("Loading weights from {safetensors_path}");
     parameters.load(&safetensors_path)?;
-    let decoder = decoders.last().expect("at least one decoder level");
-
-    // Reconstruct the CSR for adjacency build at prediction time.
-    let feature_graph_csr: Option<std::sync::Arc<candle_util::data::GraphCsr>> =
-        if metadata.has_feature_graph() {
-            Some(std::sync::Arc::new(
-                crate::topic::model_metadata::read_feature_graph_from_varmap(
-                    &parameters,
-                    n_features_full,
-                )?,
-            ))
-        } else {
-            None
-        };
-
-    let mode = resolve_mode(args);
-    let refine_config = TopicRefinementConfig {
-        num_steps: if args.decoder_only && args.refine_steps == 0 {
-            100
-        } else {
-            args.refine_steps
-        },
-        learning_rate: if args.decoder_only && args.refine_lr <= 0.01 {
-            0.05
-        } else {
-            args.refine_lr
-        },
-        regularization: args.refine_reg,
-    };
-    info!("Latent inference mode: {mode:?}");
 
     let adj_method = AdjMethod::Batch;
-
-    // Iterative TMLE δ refinement (indexed). Encoder + dictionary are now
-    // loaded; iterate δ against them. Indexed decoder is currently always
-    // multinomial in metadata, so no φ weighting needed.
-    let delta_db = if args.delta_iters > 0 {
-        if let Some(initial) = delta_db {
-            let phi_for_iter: Option<&[f32]> = None;
-            let refined = crate::predict_tmle::iterate_delta_indexed(
-                args.delta_iters,
-                initial,
-                &data_vec,
-                &encoder,
-                gene_remap.as_ref(),
-                &beta_dk,
-                phi_for_iter,
-                &shortlist_weights,
-                &feature_mean,
-                enc_context_size,
-                args.minibatch_size,
-                &cpu_dev,
-                &adj_method,
-            )?;
-            Some(refined)
-        } else {
-            None
-        }
-    } else {
-        delta_db
-    };
-
-    let delta_tensor = delta_db
-        .as_ref()
-        .map(|db| -> anyhow::Result<Tensor> {
-            let t = db.to_tensor(&cpu_dev)?.transpose(0, 1)?.contiguous()?;
-            Ok(t)
-        })
-        .transpose()?;
-
-    let ntot = data_vec.num_columns();
-    let kk = metadata.n_topics;
-
-    let (z_nk, llik, total) = run_predict_blocks(ntot, kk, args.minibatch_size, |(lb, ub)| {
-        predict_block_indexed(PredictBlockIndexedArgs {
-            lb,
-            ub,
-            data_vec: &data_vec,
-            encoder: &encoder,
-            decoder,
-            delta_tensor: delta_tensor.as_ref(),
-            gene_remap: gene_remap.as_ref(),
-            shortlist_weights: &shortlist_weights,
-            feature_mean: &feature_mean,
-            feature_fisher_weights: &feature_fisher_weights,
-            enc_context_size,
-            dec_context_size,
-            dev: &cpu_dev,
-            adj_method: &adj_method,
-            mode,
-            refine_config: &refine_config,
-            n_topics: metadata.n_topics,
-            feature_graph: feature_graph_csr.as_deref(),
-        })
-    })?;
-
-    finalize_predict(FinalizePredict {
-        args,
-        data_vec: &data_vec,
-        z_nk: &z_nk,
-        llik: &llik,
-        total: &total,
-        beta_dk: &beta_dk,
-        delta_db: delta_db.as_ref(),
-        gene_remap: gene_remap.as_ref(),
-    })
-}
-
-struct PredictBlockIndexedArgs<'a> {
-    lb: usize,
-    ub: usize,
-    data_vec: &'a SparseIoVec,
-    encoder: &'a IndexedEmbeddingEncoder,
-    decoder: &'a EmbeddedTopicDecoder,
-    delta_tensor: Option<&'a Tensor>,
-    gene_remap: Option<&'a GeneRemap>,
-    shortlist_weights: &'a [f32],
-    feature_mean: &'a [f32],
-    feature_fisher_weights: &'a [f32],
-    enc_context_size: usize,
-    dec_context_size: usize,
-    dev: &'a Device,
-    adj_method: &'a AdjMethod,
-    mode: LatentMode,
-    refine_config: &'a TopicRefinementConfig,
-    n_topics: usize,
-    /// Feature graph baked into the model. `Some` when the encoder owns a
-    /// GCN block; passed to `build_sparse_edges_from_tensor` per block.
-    feature_graph: Option<&'a candle_util::data::GraphCsr>,
-}
-
-fn predict_block_indexed(
-    a: PredictBlockIndexedArgs<'_>,
-) -> anyhow::Result<(usize, Mat, Vec<f32>, Vec<f32>)> {
-    use crate::topic::common::expand_delta_for_block;
-
-    let PredictBlockIndexedArgs {
-        lb,
-        ub,
-        data_vec,
-        encoder,
-        decoder,
-        delta_tensor,
-        gene_remap,
-        shortlist_weights,
-        feature_mean,
-        feature_fisher_weights,
+    let eval_config = EvaluateLatentMaskedConfig {
+        dev: &cpu_dev,
+        adj_method: &adj_method,
+        minibatch_size: args.minibatch_size,
         enc_context_size,
-        dec_context_size,
-        dev,
-        adj_method,
-        mode,
-        refine_config,
-        n_topics,
-        feature_graph,
-    } = a;
-    let ctx = crate::topic::eval_indexed::PerGeneContext {
-        feature_mean: Some(feature_mean),
-        feature_fisher_weights: Some(feature_fisher_weights),
+        shortlist_weights: &shortlist_weights,
+        feature_mean: &feature_mean,
     };
-
-    // Held-out CSC for this block. The packed top-K is built straight
-    // from the stored nonzeros — remapped to the training gene axis when
-    // the held-out gene set differs — so no dense `[D, n]` is scattered.
-    let csc = data_vec.read_columns_csc(lb..ub)?;
-    let remap = gene_remap.map(|rm| rm.new_to_train.as_slice());
-
-    // Per-cell batch correction at full D.
-    let x0_nd = delta_tensor
-        .map(|delta_bm| expand_delta_for_block(data_vec, delta_bm, adj_method, lb, ub, dev))
-        .transpose()?;
-
-    // Packed top-K: encoder window and decoder window. When the two
-    // contexts match, the decoder pack is identical — clone (cheap;
-    // Tensor is Arc-buffered) instead of re-scanning the columns.
-    let (enc_pack, dec_pack) = if dec_context_size != enc_context_size {
-        csc_to_indexed_pair(
-            &csc,
-            enc_context_size,
-            dec_context_size,
-            shortlist_weights,
-            remap,
-            ctx,
-            dev,
-        )?
-    } else {
-        let enc = csc_to_indexed(&csc, enc_context_size, shortlist_weights, remap, ctx, dev)?;
-        let dec = enc.clone();
-        (enc, dec)
-    };
-
-    // Encoder-side null gathered at the encoder's per-cell ids — O(N·K).
-    let enc_values_null = match x0_nd.as_ref() {
-        Some(x0) => Some(crate::topic::eval_indexed::gather_null_at_indices(
-            x0,
-            &enc_pack.indices,
-            dev,
-        )?),
-        None => None,
-    };
-
-    // Decoder-side log_q_s = uniform (zeros) at inference time.
-    let s_dec = dec_pack.union_indices.dim(0)?;
-    let dec_log_q_s = Tensor::zeros((1, s_dec), candle_core::DType::F32, dev)?;
-
-    // Build sparse edges for this block if the model carries a graph.
-    let sparse_edges = match feature_graph {
-        Some(g) => Some(candle_util::data::build_sparse_edges_from_tensor(
-            &enc_pack.indices,
-            g,
-            dev,
-        )?),
-        None => None,
-    };
-
-    let log_z_nk = match mode {
-        LatentMode::Encoder => {
-            let (log_z, _) = encoder.forward_indexed_t(
-                &enc_pack.indices,
-                &enc_pack.values,
-                enc_values_null.as_ref(),
-                enc_pack.values_mean.as_ref(),
-                sparse_edges.as_ref(),
-                false,
-            )?;
-            log_z
-        }
-        LatentMode::EncoderRefine => {
-            let (log_z, _) = encoder.forward_indexed_t(
-                &enc_pack.indices,
-                &enc_pack.values,
-                enc_values_null.as_ref(),
-                enc_pack.values_mean.as_ref(),
-                sparse_edges.as_ref(),
-                false,
-            )?;
-            refine_indexed_topic_proportions(
-                &log_z,
-                &dec_pack.union_indices,
-                &dec_pack.scatter_pos,
-                &dec_pack.values,
-                dec_pack.values_weight.as_ref(),
-                &dec_log_q_s,
-                decoder,
-                refine_config,
-            )?
-        }
-        LatentMode::DecoderOnly => decoder_only_inference_indexed(
-            decoder,
-            &crate::topic::predict_common::IndexedDecoderInput {
-                union_indices: &dec_pack.union_indices,
-                scatter_pos: &dec_pack.scatter_pos,
-                values: &dec_pack.values,
-                values_weight: dec_pack.values_weight.as_ref(),
-                log_q_s: &dec_log_q_s,
-            },
-            n_topics,
-            refine_config.learning_rate,
-            refine_config.num_steps,
-            dev,
-        )?,
-    };
-
-    // Predictive lik at the decoder shortlist (K_dec features per cell).
-    let llik_t = predictive_llik_indexed(
-        decoder,
-        &log_z_nk,
-        &dec_pack.union_indices,
-        &dec_pack.scatter_pos,
-        &dec_pack.values,
-        dec_pack.values_weight.as_ref(),
-        &dec_log_q_s,
+    let z_nk = evaluate_latent_masked(
+        &data_vec,
+        &encoder,
+        &eval_config,
+        None,
+        gene_remap.as_ref().map(|r| r.new_to_train.as_slice()),
     )?;
-    let llik: Vec<f32> = llik_t.to_device(&Device::Cpu)?.to_vec1()?;
 
-    // Total counts at the decoder shortlist (denominator for llik_per_count).
-    let total: Vec<f32> = {
-        let summed = dec_pack.values.sum(1)?.to_device(&Device::Cpu)?;
-        summed.to_vec1()?
-    };
-
-    let z_cpu = log_z_nk.to_device(&Device::Cpu)?;
-    let z_mat = Mat::from_tensor(&z_cpu)?;
-    Ok((lb, z_mat, llik, total))
+    let cell_names = data_vec.column_names()?;
+    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names)?;
+    info!(
+        "Wrote {}.latent.parquet (masked-topic, encoder-only)",
+        args.out
+    );
+    Ok(())
 }
 
-/// Register one ETM decoder per training level so the safetensors keys
-/// line up; every level shares the encoder's ρ table. Predict only uses
-/// the finest-level decoder.
-fn register_etm_decoders(
-    vb: &candle_nn::VarBuilder,
-    n_topics: usize,
-    shared_rho: &Tensor,
-    num_levels: usize,
-) -> anyhow::Result<Vec<EmbeddedTopicDecoder>> {
-    (0..num_levels)
-        .map(|i| {
-            EmbeddedTopicDecoder::new(n_topics, shared_rho.clone(), vb.pp(format!("dec_{i}")))
-                .map_err(Into::into)
-        })
-        .collect()
-}
-
-/// Run `block_fn` over `ntot` cells in `minibatch_size`-cell blocks in
-/// parallel, then reassemble the per-block `(lb, z_block, llik, total)`
-/// results into `(z_nk [ntot, kk], llik [ntot], total [ntot])`. Shared by
-/// the dense / indexed / cell-embedded predict drivers.
+/// Run `block_fn` over `[0, ntot)` in `minibatch_size` blocks, concatenating
+/// results into `(z_nk [ntot, kk], llik [ntot], total [ntot])`. Shared by the
+/// dense predict drivers.
 fn run_predict_blocks<F>(
     ntot: usize,
     kk: usize,

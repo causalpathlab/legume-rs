@@ -4,7 +4,7 @@
 //! latent (cell × K), dictionary (gene × K), pb_gene (gene × P), and
 //! fisher_weights (gene × 1). Centralizing the `to_parquet_with_names`
 //! call sites keeps file naming, axis labels, and column-id conventions
-//! identical across topic / itopic / joint-topic / svd / joint-svd.
+//! identical across topic / masked-topic / joint-topic / svd / joint-svd.
 
 use crate::embed_common::{axis_id_names, Mat};
 use matrix_util::traits::IoOps;

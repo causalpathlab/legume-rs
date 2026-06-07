@@ -105,7 +105,7 @@ impl AdjMethod {
     }
 }
 
-/// Shared CNV detection CLI args (used by SVD, topic, indexed-topic).
+/// Shared CNV detection CLI args (used by SVD, topic, masked-topic).
 /// Providing `--gff` or `--cnv-ground-truth` turns on the per-sample HMM CNV
 /// model from `cnv::per_sample`.
 #[derive(Args, Debug, Clone)]

@@ -6,7 +6,7 @@ pub use data_beans_alg::hvg::{select_hvg_streaming, HvgCliArgs, HvgSelection};
 
 /// Resolve the effective `--multiome` flag and HVG settings against the
 /// caller's CLI args. Mirrors the warn-and-zero rules from senna's
-/// `gbe` and `itopic` entry points so both surface identical behavior:
+/// `gbe` and `masked-topic` entry points so both surface identical behavior:
 ///
 /// - `--multiome` with a single input file is a no-op (no other backend
 ///   to glue against) → cleared.
