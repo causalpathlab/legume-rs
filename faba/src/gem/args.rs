@@ -163,6 +163,16 @@ pub struct GemArgs {
     #[arg(short = 'i', long, default_value_t = 30, help = "Training epochs")]
     pub epochs: usize,
 
+    /// Phase-2 epochs: after the joint phase-1 loop (cell + pb axes shape
+    /// the feature side β/z/δ/γ together), a second phase **freezes** the
+    /// entire feature side and every pb head and densely re-evaluates only
+    /// the per-cell embedding `e_cell` against it (mirrors `senna bge`'s
+    /// two-phase fit). One pass per epoch sweeps every cell once. Omit to
+    /// reuse `--epochs`; set `0` to skip phase 2 entirely (also skipped
+    /// under `--no-cell-axis`).
+    #[arg(long, help = "Phase-2 cell-only epochs (default: same as --epochs; 0 = skip)")]
+    pub phase2_epochs: Option<usize>,
+
     /// Batches per epoch. **Omit for auto** — one weighted pass over the
     /// largest axis (`ceil(max(n_cells, max_pb_per_level) / batch_size)`).
     /// Pass a value to force a fixed step budget per epoch (old behavior;
