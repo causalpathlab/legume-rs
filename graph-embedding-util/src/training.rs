@@ -258,7 +258,11 @@ pub fn train_composite(
             }
         }
 
-        let mut loss_sum = 0f32;
+        // Loss kept **on-device** and synced to a scalar once per epoch (not
+        // per minibatch) — `detach()` keeps the running sum off the autograd
+        // graph so each step's forward graph is still freed immediately,
+        // while avoiding a per-step GPU→CPU stall. Mirrors faba rmodem.
+        let mut loss_acc: Option<Tensor> = None;
         let mut n_steps = 0usize;
 
         for _ in 0..batches_per_epoch {
@@ -302,7 +306,11 @@ pub fn train_composite(
                 loss = (loss + l2)?;
             }
             opt.backward_step(&loss)?;
-            loss_sum += loss.to_scalar::<f32>()?;
+            let ld = loss.detach();
+            loss_acc = Some(match loss_acc.take() {
+                None => ld,
+                Some(a) => (a + ld)?,
+            });
             n_steps += 1;
 
             if ctx.stop.load(Ordering::Relaxed) {
@@ -310,7 +318,11 @@ pub fn train_composite(
             }
         }
 
-        let avg = loss_sum / n_steps.max(1) as f32;
+        // Single GPU→CPU sync per epoch.
+        let avg = match &loss_acc {
+            Some(t) => t.to_scalar::<f32>()? / n_steps.max(1) as f32,
+            None => 0f32,
+        };
         prog_bar.set_message(format!("loss={:.3}", avg));
         prog_bar.inc(1);
         // Every-epoch info; senna/pinto's `--verbose` flag raises the
