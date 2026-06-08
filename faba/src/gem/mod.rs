@@ -29,6 +29,3 @@ pub mod region;
 pub mod sampling;
 pub mod topics;
 pub mod train;
-
-#[cfg(test)]
-mod sim_test;

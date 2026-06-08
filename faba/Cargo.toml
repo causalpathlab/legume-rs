@@ -7,7 +7,13 @@ repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
 
-version = "0.2.5"
+version = "0.2.6"
+
+[lib]
+# The library surface exists so `gem`'s integration tests (tests/) can reach
+# the public API. Its module docs use illustrative math blocks (β_g ⊙ exp…),
+# not runnable examples, so doctests are disabled.
+doctest = false
 
 [[bin]]
 name = "faba"

@@ -170,7 +170,10 @@ pub struct GemArgs {
     /// two-phase fit). One pass per epoch sweeps every cell once. Omit to
     /// reuse `--epochs`; set `0` to skip phase 2 entirely (also skipped
     /// under `--no-cell-axis`).
-    #[arg(long, help = "Phase-2 cell-only epochs (default: same as --epochs; 0 = skip)")]
+    #[arg(
+        long,
+        help = "Phase-2 cell-only epochs (default: same as --epochs; 0 = skip)"
+    )]
     pub phase2_epochs: Option<usize>,
 
     /// Batches per epoch. **Omit for auto** — one weighted pass over the

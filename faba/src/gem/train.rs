@@ -99,8 +99,10 @@ pub fn train(
     // backward_step still computes gradients across the whole graph, but
     // AdamW updates exactly the Vars it owns (here, just `e_cell`).
     let phase2_epochs = args.phase2_epochs.unwrap_or(args.epochs);
-    let run_phase2 =
-        !args.no_cell_axis && model.n_cells > 0 && phase2_epochs > 0 && !stop.load(Ordering::Relaxed);
+    let run_phase2 = !args.no_cell_axis
+        && model.n_cells > 0
+        && phase2_epochs > 0
+        && !stop.load(Ordering::Relaxed);
     if run_phase2 {
         let mut opt2 = AdamW::new(
             trainable_only(&model.varmap, &["e_cell"]),

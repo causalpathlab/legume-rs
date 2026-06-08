@@ -25,8 +25,8 @@
 //!   (c) **multi-site resolution** — region-1 leans toward group B far
 //!       more than region-0 does; the two components are distinguishable.
 
-use super::common::candle_core;
 use candle_core::{Device, Tensor};
+use faba::gem::common::candle_core;
 use rand::distr::Distribution;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -34,13 +34,13 @@ use rand_distr::StandardNormal;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use super::args::GemArgs;
-use super::common::ComputeDevice;
-use super::feature_table::FeatureTable;
-use super::model::GemModel;
-use super::pseudobulk::{AxisPools, PseudobulkData, StratumPool};
-use super::region::RegionMap;
-use super::train::train;
+use faba::gem::args::GemArgs;
+use faba::gem::common::ComputeDevice;
+use faba::gem::feature_table::FeatureTable;
+use faba::gem::model::GemModel;
+use faba::gem::pseudobulk::{AxisPools, PseudobulkData, StratumPool};
+use faba::gem::region::RegionMap;
+use faba::gem::train::train;
 
 const N_GENES: usize = 4;
 const N_CELLS: usize = 40;
@@ -113,11 +113,8 @@ fn build_pseudobulk() -> PseudobulkData {
 
     // modifier_comp_per_modality indexed by modality id: slot 0 (base),
     // slot 1 (spliced — a count modality, no modifier rows), slot 2 (m6A).
-    let modifier_comp_per_modality = vec![
-        pool_from(0, &[]),
-        pool_from(SPLICED, &[]),
-        modifier_pool,
-    ];
+    let modifier_comp_per_modality =
+        vec![pool_from(0, &[]), pool_from(SPLICED, &[]), modifier_pool];
     let modality_total_mass = vec![0.0, 0.0, modality_mass];
 
     let cell_pools = AxisPools {
@@ -129,7 +126,7 @@ fn build_pseudobulk() -> PseudobulkData {
     };
 
     let gene_ubiquity =
-        super::gene_weight::ubiquity_from_count_pool(&cell_pools.count_comp, N_GENES, N_CELLS);
+        faba::gem::gene_weight::ubiquity_from_count_pool(&cell_pools.count_comp, N_GENES, N_CELLS);
 
     PseudobulkData {
         cell_to_pb_per_level: Vec::new(),
@@ -249,7 +246,7 @@ fn satellite_embed(model: &GemModel, g: u32, region: u32) -> Vec<f32> {
 #[test]
 fn recovers_region_resolved_deviation() {
     let dev = Device::Cpu;
-    let table = FeatureTable::build(&feature_names(), &RegionMap::empty(R));
+    let table = FeatureTable::build(&feature_names(), &RegionMap::from_records(&[], R));
     assert_eq!(table.n_genes(), N_GENES);
     assert_eq!(table.n_regions, R);
 
@@ -403,7 +400,11 @@ fn build_splice_pseudobulk() -> PseudobulkData {
     count_comp.weights.extend(unspl.weights);
 
     // No modifier modalities; vec sized to n_modalities = 3 (base + 2 splice).
-    let modifier_comp_per_modality = vec![pool_from(0, &[]), pool_from(SPL, &[]), pool_from(UNSPL, &[])];
+    let modifier_comp_per_modality = vec![
+        pool_from(0, &[]),
+        pool_from(SPL, &[]),
+        pool_from(UNSPL, &[]),
+    ];
     let modality_total_mass = vec![0.0, 0.0, 0.0];
 
     let cell_pools = AxisPools {
@@ -414,7 +415,7 @@ fn build_splice_pseudobulk() -> PseudobulkData {
         modality_total_mass,
     };
     let gene_ubiquity =
-        super::gene_weight::ubiquity_from_count_pool(&cell_pools.agg, N_GENES, N_CELLS);
+        faba::gem::gene_weight::ubiquity_from_count_pool(&cell_pools.agg, N_GENES, N_CELLS);
 
     PseudobulkData {
         cell_to_pb_per_level: Vec::new(),
@@ -437,7 +438,10 @@ fn count_embed(model: &GemModel, g: u32, modality: u32) -> Vec<f32> {
 fn recovers_splice_direction() {
     let dev = Device::Cpu;
     let r_splice = 1usize; // splice satellites have no transcript regions
-    let table = FeatureTable::build(&splice_feature_names(), &RegionMap::empty(r_splice));
+    let table = FeatureTable::build(
+        &splice_feature_names(),
+        &RegionMap::from_records(&[], r_splice),
+    );
     assert_eq!(table.n_genes(), N_GENES);
     // spliced / unspliced are distinct count modalities (≥1), not slot 0.
     assert_eq!(table.count_modality_ids, vec![SPL, UNSPL]);
@@ -449,8 +453,17 @@ fn recovers_splice_direction() {
     args.f_count = 0.6; // actually draw spliced/unspliced positives
     args.epochs = 120;
 
-    let mut model =
-        GemModel::new(N_GENES, table.n_modalities(), K, r_splice, H, N_CELLS, &[], &dev).unwrap();
+    let mut model = GemModel::new(
+        N_GENES,
+        table.n_modalities(),
+        K,
+        r_splice,
+        H,
+        N_CELLS,
+        &[],
+        &dev,
+    )
+    .unwrap();
     seed_params(&model, 20260608);
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -458,7 +471,7 @@ fn recovers_splice_direction() {
 
     let e_cell = model.e_cell.to_vec2::<f32>().unwrap();
     let mean = |range: std::ops::Range<usize>| -> Vec<f32> {
-        let mut acc = vec![0.0_f32; H];
+        let mut acc = [0.0_f32; H];
         for c in range.clone() {
             for h in 0..H {
                 acc[h] += e_cell[c][h];
