@@ -235,6 +235,18 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// Mean of the cell embeddings over a contiguous cell range.
+fn group_mean(e_cell: &[Vec<f32>], range: std::ops::Range<usize>) -> Vec<f32> {
+    let mut acc = [0.0_f32; H];
+    for c in range.clone() {
+        for h in 0..H {
+            acc[h] += e_cell[c][h];
+        }
+    }
+    let n = range.len() as f32;
+    acc.iter().map(|x| x / n).collect()
+}
+
 /// Satellite embedding e_f(g, m6A, region) for a single gene/region.
 fn satellite_embed(model: &GemModel, g: u32, region: u32) -> Vec<f32> {
     let (e, _) = model
@@ -267,18 +279,8 @@ fn recovers_region_resolved_deviation() {
 
     // Mean trained cell embedding per group.
     let e_cell = model.e_cell.to_vec2::<f32>().unwrap();
-    let mean = |range: std::ops::Range<usize>| -> Vec<f32> {
-        let mut acc = [0.0_f32; H];
-        for c in range.clone() {
-            for h in 0..H {
-                acc[h] += e_cell[c][h];
-            }
-        }
-        let n = range.len() as f32;
-        acc.iter().map(|x| x / n).collect()
-    };
-    let mean_a = mean(group_a());
-    let mean_b = mean(group_b());
+    let mean_a = group_mean(&e_cell, group_a());
+    let mean_b = group_mean(&e_cell, group_b());
 
     // Sanity: the two cell groups actually separated, else the test
     // proves nothing about region resolution.
@@ -470,18 +472,8 @@ fn recovers_splice_direction() {
     train(&args, &table, &pb, &mut model, &stop).unwrap();
 
     let e_cell = model.e_cell.to_vec2::<f32>().unwrap();
-    let mean = |range: std::ops::Range<usize>| -> Vec<f32> {
-        let mut acc = [0.0_f32; H];
-        for c in range.clone() {
-            for h in 0..H {
-                acc[h] += e_cell[c][h];
-            }
-        }
-        let n = range.len() as f32;
-        acc.iter().map(|x| x / n).collect()
-    };
-    let mean_a = mean(group_a());
-    let mean_b = mean(group_b());
+    let mean_a = group_mean(&e_cell, group_a());
+    let mean_b = group_mean(&e_cell, group_b());
 
     assert!(
         cosine(&mean_a, &mean_b) < 0.9,
