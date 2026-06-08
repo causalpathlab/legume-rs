@@ -1,8 +1,8 @@
-//! Shared imports for `faba rna-mod-embed`.
+//! Shared imports for `faba gem`.
 //!
 //! Mirrors the senna / pinto convention: re-export `candle_core` and
 //! `candle_nn` through `candle_util` so the subcommand modules can do
-//! `use crate::rna_mod_embed::common::*;` and then `use candle_core::…`
+//! `use crate::gem::common::*;` and then `use candle_core::…`
 //! without listing candle-core / candle-nn as direct deps in
 //! `faba/Cargo.toml`. That keeps the `cuda` / `metal` feature graph in
 //! `Cargo.toml` propagating through a single candle entry point

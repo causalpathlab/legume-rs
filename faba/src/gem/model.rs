@@ -48,7 +48,7 @@ pub enum Axis {
     Pb(usize),
 }
 
-pub struct RnaModEmbedModel {
+pub struct GemModel {
     pub n_modalities: usize,
     pub n_programs: usize,
     pub n_regions: usize,
@@ -90,7 +90,7 @@ pub struct RnaModEmbedModel {
     pub b_pb_per_level: Vec<Tensor>, // each [N_pb_ℓ]
 }
 
-impl RnaModEmbedModel {
+impl GemModel {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         n_genes: usize,

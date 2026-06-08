@@ -58,7 +58,7 @@ pub struct BgeArgs {
                      reference — every condition deviates symmetrically and \
                      the baseline E_feat is the average-condition embedding; \
                      δ captures how each condition deviates each gene. \
-                     Mirrors faba rmodem's modality gate with conditions in \
+                     Mirrors faba gem's modality gate with conditions in \
                      place of modalities. When omitted, condition = batch."
     )]
     condition_files: Option<Vec<Box<str>>>,

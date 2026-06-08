@@ -261,7 +261,7 @@ pub fn train_composite(
         // Loss kept **on-device** and synced to a scalar once per epoch (not
         // per minibatch) — `detach()` keeps the running sum off the autograd
         // graph so each step's forward graph is still freed immediately,
-        // while avoiding a per-step GPU→CPU stall. Mirrors faba rmodem.
+        // while avoiding a per-step GPU→CPU stall. Mirrors faba gem.
         let mut loss_acc: Option<Tensor> = None;
         let mut n_steps = 0usize;
 

@@ -25,7 +25,7 @@ use log::info;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use super::args::RnaModEmbedArgs;
+use super::args::GemArgs;
 use super::feature_table::{FeatureTable, RowStratum};
 
 /// One per-(axis, stratum) pool of count-weighted (gene_id, axis_id)
@@ -103,7 +103,7 @@ impl PseudobulkData {
 pub fn build_pseudobulk(
     unified: &mut UnifiedData,
     table: &FeatureTable,
-    args: &RnaModEmbedArgs,
+    args: &GemArgs,
 ) -> anyhow::Result<PseudobulkData> {
     ////////////////////////////////////////
     // 1. Batch labels + projection

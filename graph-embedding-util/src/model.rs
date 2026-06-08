@@ -312,8 +312,8 @@ impl JointEmbedModel {
 /// `δ` is **mean-centered across conditions** (`Σ_s δ̄[k,s,:] = 0`), so no
 /// condition is a baseline and `E_feat` is the *average-condition*
 /// embedding — every condition (technical batch) deviates symmetrically.
-/// Identity at init (`δ = 0`). Mirrors faba rmodem's exp log-deviation
-/// gate with the **condition** axis in place of rmodem's **modality**
+/// Identity at init (`δ = 0`). Mirrors faba gem's exp log-deviation
+/// gate with the **condition** axis in place of gem's **modality**
 /// axis. Negatives are alternative features for the *same* positive cell,
 /// so they carry the positive's condition (see [`FeatGate::gate_feat_neg`]).
 ///

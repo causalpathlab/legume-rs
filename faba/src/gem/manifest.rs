@@ -11,16 +11,16 @@ use serde::{Deserialize, Serialize};
 use graph_embedding_util::data::UnifiedData;
 
 use super::feature_table::FeatureTable;
-use super::model::RnaModEmbedModel;
+use super::model::GemModel;
 use super::pseudobulk::PseudobulkData;
 
 pub const MANIFEST_VERSION: u32 = 1;
-pub const RNA_MOD_EMBED_KIND: &str = "rna-mod-embed";
+pub const GEM_KIND: &str = "gem";
 pub const FEATURE_CONVENTION: &str = "gene/modality/detail";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct RnaModEmbedManifest {
+pub struct GemManifest {
     pub kind: String,
     pub version: u32,
     pub prefix: String,
@@ -87,7 +87,7 @@ pub fn write_outputs(
     prefix: &str,
     table: &FeatureTable,
     pb: &PseudobulkData,
-    model: &RnaModEmbedModel,
+    model: &GemModel,
     unified: &UnifiedData,
 ) -> Result<()> {
     let path_gene_emb = format!("{prefix}.gene_embedding.parquet");
@@ -242,12 +242,12 @@ pub fn write_outputs(
 /// `prefix` (deterministic, matching the names [`write_outputs`] uses).
 pub fn write_manifest(
     prefix: &str,
-    model: &RnaModEmbedModel,
+    model: &GemModel,
     topics: Option<&super::topics::ResolvedTopics>,
 ) -> Result<()> {
     let path_manifest = format!("{prefix}.faba.json");
-    let manifest = RnaModEmbedManifest {
-        kind: RNA_MOD_EMBED_KIND.into(),
+    let manifest = GemManifest {
+        kind: GEM_KIND.into(),
         version: MANIFEST_VERSION,
         prefix: prefix.into(),
         embedding_dim: model.embedding_dim,

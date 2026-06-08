@@ -1,4 +1,4 @@
-//! Entry point for `faba rna-mod-embed` (alias `rmodem`).
+//! Entry point for `faba gem` (alias `gem-embedding`).
 
 use anyhow::Context;
 use data_beans::sparse_io_vector::ColumnAlignment;
@@ -7,15 +7,15 @@ use graph_embedding_util::{load_unified_data, FeatureNameKind};
 use log::info;
 use matrix_util::common_io::mkdir_parent;
 
-use crate::rna_mod_embed::args::RnaModEmbedArgs;
-use crate::rna_mod_embed::feature_table::FeatureTable;
-use crate::rna_mod_embed::manifest::write_outputs;
-use crate::rna_mod_embed::model::RnaModEmbedModel;
-use crate::rna_mod_embed::pseudobulk::build_pseudobulk;
-use crate::rna_mod_embed::region::{load_component_annotations, ComponentAnnotation, RegionMap};
-use crate::rna_mod_embed::train::train;
+use crate::gem::args::GemArgs;
+use crate::gem::feature_table::FeatureTable;
+use crate::gem::manifest::write_outputs;
+use crate::gem::model::GemModel;
+use crate::gem::pseudobulk::build_pseudobulk;
+use crate::gem::region::{load_component_annotations, ComponentAnnotation, RegionMap};
+use crate::gem::train::train;
 
-pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
+pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     validate_args(args)?;
@@ -148,7 +148,7 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
         .to_device(args.device_no)
         .context("candle device init")?;
     info!("compute device = {:?}", dev);
-    let mut model = RnaModEmbedModel::new(
+    let mut model = GemModel::new(
         table.n_genes(),
         table.n_modalities(),
         args.n_programs,
@@ -173,17 +173,15 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
     // topics, skipping the K-sweep.
     let topics = if args.resolve_topics {
         Some(
-            crate::rna_mod_embed::topics::resolve_topics(
-                &args.out, &model, &table, &unified, args, &stop,
-            )
-            .context("resolve topics")?,
+            crate::gem::topics::resolve_topics(&args.out, &model, &table, &unified, args, &stop)
+                .context("resolve topics")?,
         )
     } else {
         None
     };
 
     // Manifest last, so it records the resolved-topic artifacts.
-    crate::rna_mod_embed::manifest::write_manifest(&args.out, &model, topics.as_ref())
+    crate::gem::manifest::write_manifest(&args.out, &model, topics.as_ref())
         .context("write manifest")?;
 
     info!("done — prefix '{}'", args.out);
@@ -195,7 +193,7 @@ pub fn run_rna_mod_embed(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
 /// modality label that matches its modifier row names (`m6A`, `A2I`,
 /// `pA`). With no sidecars the map is empty and every satellite falls
 /// back to region 0 (γ collapses to one per-modality offset).
-fn build_region_map(args: &RnaModEmbedArgs) -> anyhow::Result<RegionMap> {
+fn build_region_map(args: &GemArgs) -> anyhow::Result<RegionMap> {
     let sidecars: [(&Option<Box<str>>, &str); 3] = [
         (&args.dartseq_components, "m6A"),
         (&args.atoi_components, "A2I"),
@@ -222,7 +220,7 @@ fn build_region_map(args: &RnaModEmbedArgs) -> anyhow::Result<RegionMap> {
 /// configuration mistakes (zero-dim model, NaN/out-of-range tempering,
 /// stratum-fraction overflow) as a clear `anyhow::Error` rather than a
 /// candle panic or silently zero-loss training.
-fn validate_args(args: &RnaModEmbedArgs) -> anyhow::Result<()> {
+fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.embedding_dim > 0,
         "--embedding-dim must be > 0 (got {})",

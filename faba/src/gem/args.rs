@@ -2,7 +2,7 @@ use clap::Args;
 
 use super::common::ComputeDevice;
 
-/// CLI arguments for `faba rna-mod-embed` (aliases `rmodem`, `embed`).
+/// CLI arguments for `faba gem` (alias `gem-embedding`).
 ///
 /// Flag conventions mirror `senna bge` where applicable (`-i / --epochs`,
 /// `-b / --batch-files`, `--learning-rate` with `--lr` alias,
@@ -11,7 +11,7 @@ use super::common::ComputeDevice;
 /// `-o / --out`). Rmodem-specific knobs (per-stratum fractions,
 /// negative counts, etc.) stay in their own block below.
 #[derive(Args, Debug, Clone)]
-pub struct RnaModEmbedArgs {
+pub struct GemArgs {
     /// Counts (gene-level) sparse matrix prefix(es), comma-separated.
     /// Rows must follow `{gene_key}/count/{spliced|unspliced}`. Multiple
     /// files are stacked under Union column alignment (cells merged by
@@ -58,7 +58,7 @@ pub struct RnaModEmbedArgs {
     #[arg(long)]
     pub apa_components: Option<Box<str>>,
 
-    /// Optional batch labels. Under Union column alignment (rmodem's
+    /// Optional batch labels. Under Union column alignment (gem's
     /// mode) exactly **one** file is expected, listing one label per
     /// unified cell — a barcode shared across modalities cannot carry two
     /// labels. As an alternative to this file, embed an `@batch` tag in
@@ -123,7 +123,7 @@ pub struct RnaModEmbedArgs {
     ////////////////////////////////////////
     // Feature-name canonicalization (senna bge convention)
     //
-    // NOTE: rmodem rows are `{gene}/{modality}/{detail}` and the
+    // NOTE: gem rows are `{gene}/{modality}/{detail}` and the
     // FeatureTable parser depends on that full path. The Gene-style
     // last-token canonicalizer (senna bge's default) would collapse
     // `gene_5/m6A/pos1234` to `1234` and silently drop every modifier
@@ -134,12 +134,12 @@ pub struct RnaModEmbedArgs {
     /// Delimiter for fuzzy gene-name matching across input files (last
     /// token after the split is the canonical row name). Ignored unless
     /// `--feature-name-exact` is *off* — which is **not** the default
-    /// for rmodem (see note above).
+    /// for gem (see note above).
     #[arg(long, default_value_t = '_')]
     pub feature_name_delim: char,
 
     /// Use exact row-name match across files (no canonicalization). The
-    /// rmodem default — required because the `{gene}/{modality}/{detail}`
+    /// gem default — required because the `{gene}/{modality}/{detail}`
     /// row format is sensitive to suffix-splitting. Pass
     /// `--feature-name-exact=false` only if your `{gene}` slot itself
     /// carries a stripping suffix.

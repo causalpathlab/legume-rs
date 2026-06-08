@@ -3,32 +3,32 @@ mod cell_clustering;
 mod common;
 mod data;
 mod editing;
+mod gem;
 mod gene_count;
 mod hypothesis_tests;
 mod mixture;
 mod pipeline_util;
 mod read_depth;
-mod rna_mod_embed;
 mod run_apa;
 mod run_atoi;
+mod run_gem_embedding;
 mod run_gene_count;
 mod run_m6a;
 mod run_pipeline;
 mod run_read_depth;
-mod run_rna_mod_embed;
 mod run_snp;
 mod site_analysis;
 mod snp;
 
 use crate::common::*;
-use rna_mod_embed::args::RnaModEmbedArgs;
+use gem::args::GemArgs;
 use run_apa::*;
 use run_atoi::*;
+use run_gem_embedding::*;
 use run_gene_count::*;
 use run_m6a::*;
 use run_pipeline::*;
 use run_read_depth::*;
-use run_rna_mod_embed::*;
 use run_snp::*;
 use site_analysis::metagene::*;
 use site_analysis::pileup::*;
@@ -269,32 +269,34 @@ Known SNP reference files:\n\n  \
     Snp(SnpArgs),
 
     #[command(
-        name = "rna-mod-embed",
-        aliases = ["rmodem", "embed"],
-        about = "Joint gene embedding with per-modality scalar gating",
-        long_about = "Joint gene embedding with per-modality scalar gating\n\n\
-            For each gene g and modality m, the feature embedding is\n  \
-              e_{g,m} = ρ_g · (1 + Σ_k z_{g,k} · Q_{k,m}),\n\
-            i.e. a per-gene baseline ρ_g uniformly scaled by a per-(g,m)\n\
-            scalar gate. z_g is the gene's K-program loading; Q_{k,m} is\n\
-            the program×modality scalar response (sim's A_{m,k} analog).\n\
+        name = "gem",
+        aliases = ["gem-embedding"],
+        about = "GEM: Gene Epitranscriptomic Modification embedding",
+        long_about = "GEM — joint embedding of gene counts + RNA-modification\n\
+            tracks (m6A, A-to-I, poly-A) into one cell/gene space.\n\n\
+            A feature row (gene g, modality m, region r) embeds as a base\n\
+            gene vector β_g deviated by an exp log-deviation gate:\n  \
+              AGG  ({g}/count):    e_f = β_g\n  \
+              comp ({g}/{m}/{r}):  e_f = β_g ⊙ exp(Σ_k z_{g,k}·δ_{k,m,:} + γ_{m,r,:})\n\
+            where z_g is the gene's K-program loading, δ_{k,m,:} the\n\
+            program×modality deviation *direction* (a full H-vector, not a\n\
+            scalar), and γ_{m,r,:} a per-(modality, region) offset.\n\
             All factors are shared across input tracks\n\
             (`faba {genes,dartseq,atoi,apa}`), so an unmeasured (gene,\n\
-            modality) pair gets a usable e_{g,m} for free — z_g is\n\
-            learned from g's other modalities and Q_{:,m} from other\n\
-            genes' m-data.",
+            modality) pair still gets a usable embedding — z_g is learned\n\
+            from g's other modalities and δ_{:,m,:} from other genes' m-data.",
         after_long_help = "\
 Example:\n  \
-  faba rmodem --genes out/rep1_wt_genes.zarr.zip \\\n    \
+  faba gem --genes out/rep1_wt_genes.zarr.zip \\\n    \
               --dartseq out/rep1_wt_m6a_mixture.zarr.zip \\\n    \
               --atoi out/rep1_wt_atoi_mixture.zarr.zip \\\n    \
-              --apa out/rep1_wt_apa_mixture.zarr.zip -o out/rmodem\n\n\
+              --apa out/rep1_wt_apa_mixture.zarr.zip -o out/gem\n\n\
 Multiple samples (comma-separated per modality; each sample a batch via\n\
 its barcodes' `@batch` tag):\n  \
-  faba rmodem --genes out/rep1_genes.zarr.zip,out/rep2_genes.zarr.zip \\\n    \
+  faba gem --genes out/rep1_genes.zarr.zip,out/rep2_genes.zarr.zip \\\n    \
               --dartseq out/rep1_m6a.zarr.zip,out/rep2_m6a.zarr.zip \\\n    \
-              -o out/rmodem")]
-    RnaModEmbed(RnaModEmbedArgs),
+              -o out/gem")]
+    Gem(GemArgs),
 
     #[command(
         name = "all",
@@ -340,7 +342,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Pileup(ref args) => run_pileup(args)?,
         Commands::Metagene(ref args) => run_metagene(args)?,
         Commands::Snp(ref args) => run_snp(args)?,
-        Commands::RnaModEmbed(ref args) => run_rna_mod_embed(args)?,
+        Commands::Gem(ref args) => run_gem_embedding(args)?,
         Commands::All(ref args) => run_pipeline(args)?,
     }
 

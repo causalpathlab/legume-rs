@@ -34,10 +34,10 @@ use rand_distr::StandardNormal;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use super::args::RnaModEmbedArgs;
+use super::args::GemArgs;
 use super::common::ComputeDevice;
 use super::feature_table::FeatureTable;
-use super::model::RnaModEmbedModel;
+use super::model::GemModel;
 use super::pseudobulk::{AxisPools, PseudobulkData, StratumPool};
 use super::region::RegionMap;
 use super::train::train;
@@ -127,8 +127,8 @@ fn build_pseudobulk() -> PseudobulkData {
     }
 }
 
-fn test_args() -> RnaModEmbedArgs {
-    RnaModEmbedArgs {
+fn test_args() -> GemArgs {
+    GemArgs {
         genes: vec!["".into()],
         dartseq: None,
         atoi: None,
@@ -182,7 +182,7 @@ fn test_args() -> RnaModEmbedArgs {
 /// pins the whole test. Biases stay at zero; everything else gets small
 /// Gaussian noise. Vars are visited in sorted-name order so the draw
 /// sequence is independent of `HashMap` iteration order.
-fn seed_params(model: &RnaModEmbedModel, seed: u64) {
+fn seed_params(model: &GemModel, seed: u64) {
     let mut rng = StdRng::seed_from_u64(seed);
     let data = model.varmap.data().lock().unwrap();
     let mut names: Vec<&String> = data.keys().collect();
@@ -225,7 +225,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Satellite embedding e_f(g, m6A, region) for a single gene/region.
-fn satellite_embed(model: &RnaModEmbedModel, g: u32, region: u32) -> Vec<f32> {
+fn satellite_embed(model: &GemModel, g: u32, region: u32) -> Vec<f32> {
     let (e, _) = model
         .embed_and_bias_rows(&[g], &[g], &[M6A], &[region], &[g], &[M6A], &[false])
         .unwrap();
@@ -242,7 +242,7 @@ fn recovers_region_resolved_deviation() {
     let pb = build_pseudobulk();
     let args = test_args();
     let mut model =
-        RnaModEmbedModel::new(N_GENES, table.n_modalities(), K, R, H, N_CELLS, &[], &dev).unwrap();
+        GemModel::new(N_GENES, table.n_modalities(), K, R, H, N_CELLS, &[], &dev).unwrap();
     seed_params(&model, 20260530);
 
     let stop = Arc::new(AtomicBool::new(false));
