@@ -113,8 +113,16 @@ pub fn resolve_topics(
     };
     info!("resolve-topics: K={k}, reconstruction RSS={:.4}", res.rss);
 
-    // β = log_softmax_g(β_g · αᵀ): [G, K], each topic column a gene simplex.
-    let beta_gk = (&rho * res.alpha.transpose()).log_softmax_columns();
+    // β = log_softmax_g(β_g · (α − ᾱ)ᵀ): [G, K], each topic column a gene simplex.
+    // Mean-center archetypes across topics first: the raw loading β_g·αᵀ is
+    // dominated by a shared "abundance" direction (the mean archetype ᾱ) that
+    // ranks the same genes top in every topic; reading out deviation from the
+    // average archetype surfaces topic-specific markers (matches senna bge).
+    let abar = res.alpha.row_mean(); // ᾱ: mean archetype across topics, [1, H]
+    let alpha_c = DMatrix::from_fn(res.alpha.nrows(), res.alpha.ncols(), |i, j| {
+        res.alpha[(i, j)] - abar[j]
+    });
+    let beta_gk = (&rho * alpha_c.transpose()).log_softmax_columns();
     // log θ on the simplex (matches senna's `latent = log θ`).
     let log_theta = res.theta.map(|x| (x + 1e-8).ln());
 

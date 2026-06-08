@@ -882,8 +882,24 @@ fn resolve_etm_topics(
     };
     info!("resolve-etm: K={k}, reconstruction RSS={:.4}", res.rss);
 
-    // β = log_softmax_d(ρ · αᵀ): [D, K], each topic column a simplex over genes.
-    let beta_dk = (&rho * res.alpha.transpose()).log_softmax_columns();
+    // β = log_softmax_d(ρ · (α − ᾱ)ᵀ): [D, K], each topic column a simplex over genes.
+    // Mean-center the archetypes across topics first: the raw loading ρ·αᵀ is
+    // dominated by a shared "abundance" direction (the mean archetype ᾱ) that
+    // ranks the same genes top in *every* topic, burying real markers. Reading
+    // out each topic's deviation from the average archetype surfaces
+    // topic-specific genes instead.
+    let alpha_c = {
+        let mut a = res.alpha.clone();
+        let (k, h) = (a.nrows(), a.ncols());
+        for j in 0..h {
+            let mean_j: f32 = (0..k).map(|i| a[(i, j)]).sum::<f32>() / k.max(1) as f32;
+            for i in 0..k {
+                a[(i, j)] -= mean_j;
+            }
+        }
+        a
+    };
+    let beta_dk = (&rho * alpha_c.transpose()).log_softmax_columns();
     // log θ on the simplex.
     let log_theta = res.theta.map(|x| (x + 1e-8).ln());
 
