@@ -1,18 +1,27 @@
-//! Composite-sum training loop (bge-style).
+//! Two-phase training (bge-style).
 //!
-//! Every step assembles `L = L_cell + Σ_ℓ L_pb_ℓ` across one cell-axis
-//! minibatch + one minibatch per pb level, then runs **one** AdamW
-//! backward over the full VarMap. The shared feature side (β, z, δ, γ,
-//! b_agg, b_comp) accumulates gradient from every axis; each cell/pb
-//! head is independent. Per-level pb heads are throwaway scaffolding
-//! that exists only to provide an embedding target for the pb-axis
-//! NCE loss — they're never written to disk.
+//! **Phase 1 — joint feature shaping.** Every step assembles
+//! `L = L_cell + Σ_ℓ L_pb_ℓ` across one cell-axis minibatch + one
+//! minibatch per pb level, then runs **one** AdamW backward over the full
+//! VarMap. The shared feature side (β, z, δ, γ, b_agg, b_comp) accumulates
+//! gradient from every axis; each cell/pb head is independent. Per-level
+//! pb heads are throwaway scaffolding that exists only to provide an
+//! embedding target for the pb-axis NCE loss — they're never written to
+//! disk.
+//!
+//! **Phase 2 — dense cell re-evaluation.** The entire feature side and
+//! every pb head are frozen; only `e_cell` is optimised, on the cell axis
+//! alone. The auto per-epoch budget is sized by `n_cells`, so every cell
+//! is swept ~once/epoch against the fixed dictionary (the joint phase-1
+//! budget, sized by the largest axis, under-trains the cell side). Skipped
+//! under `--no-cell-axis`, with zero cells, or `--phase2-epochs 0`.
 
 use super::common::{candle_core, candle_nn};
 use anyhow::Result;
 use candle_core::Tensor;
 use candle_nn::optim::Optimizer;
 use candle_nn::{AdamW, ParamsAdamW};
+use candle_util::frozen_features::trainable_only;
 use log::info;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -34,7 +43,28 @@ pub fn train(
     stop: &Arc<AtomicBool>,
 ) -> Result<()> {
     let sampler = SamplerState::new(table, pb, args);
+    // One deterministic draw sequence threaded through both phases by
+    // `&mut` borrow (each phase's producer thread is joined before the
+    // borrow is released, so this is sound — see `run_phase`).
     let mut rng = StdRng::seed_from_u64(args.seed);
+
+    let n_pb_levels = pb.n_levels();
+
+    ////////////////////////////////////////
+    // Phase 1: joint cell + pb axes
+    ////////////////////////////////////////
+    let mut phase1_axes: Vec<Axis> = Vec::with_capacity(1 + n_pb_levels);
+    if !args.no_cell_axis {
+        phase1_axes.push(Axis::Cell);
+    }
+    for l in 0..n_pb_levels {
+        phase1_axes.push(Axis::Pb(l));
+    }
+    anyhow::ensure!(
+        !phase1_axes.is_empty(),
+        "--no-cell-axis with zero pb levels leaves nothing to train; \
+         either increase --num-levels or drop --no-cell-axis"
+    );
 
     // AdamW with zero weight decay — β, z, δ, γ already carry many
     // parameters and L2-like decay would pull everything toward zero
@@ -47,55 +77,111 @@ pub fn train(
             ..Default::default()
         },
     )?;
+    info!("phase 1/2 (joint feature shaping): {} epochs", args.epochs);
+    run_phase(
+        args,
+        pb,
+        model,
+        &sampler,
+        &phase1_axes,
+        &mut optim,
+        args.epochs,
+        /*apply_z_delta_l2=*/ true,
+        &mut rng,
+        stop,
+    )?;
+    drop(optim);
 
-    let n_pb_levels = pb.n_levels();
-    let mut axes: Vec<Axis> = Vec::with_capacity(1 + n_pb_levels);
-    if !args.no_cell_axis {
-        axes.push(Axis::Cell);
+    ////////////////////////////////////////
+    // Phase 2: dense cell-only re-evaluation
+    ////////////////////////////////////////
+    // The feature side and pb heads are frozen; only `e_cell` is stepped.
+    // backward_step still computes gradients across the whole graph, but
+    // AdamW updates exactly the Vars it owns (here, just `e_cell`).
+    let phase2_epochs = args.phase2_epochs.unwrap_or(args.epochs);
+    let run_phase2 =
+        !args.no_cell_axis && model.n_cells > 0 && phase2_epochs > 0 && !stop.load(Ordering::Relaxed);
+    if run_phase2 {
+        let mut opt2 = AdamW::new(
+            trainable_only(&model.varmap, &["e_cell"]),
+            ParamsAdamW {
+                lr: args.learning_rate,
+                weight_decay: 0.0,
+                ..Default::default()
+            },
+        )?;
+        info!(
+            "phase 2/2 (cell-only re-evaluation, feature side frozen): {} epochs",
+            phase2_epochs
+        );
+        let cell_axes = [Axis::Cell];
+        run_phase(
+            args,
+            pb,
+            model,
+            &sampler,
+            &cell_axes,
+            &mut opt2,
+            phase2_epochs,
+            /*apply_z_delta_l2=*/ false,
+            &mut rng,
+            stop,
+        )?;
+    } else if !args.no_cell_axis && phase2_epochs > 0 {
+        info!("phase 2 skipped (no cells / interrupted in phase 1)");
     }
-    for l in 0..n_pb_levels {
-        axes.push(Axis::Pb(l));
+
+    Ok(())
+}
+
+/// Run one composite-sum training phase over `axes` for `epochs`, stepping
+/// `optim` once per minibatch bundle. A scoped producer thread draws the
+/// next bundles (one minibatch per axis) on the CPU while the main thread
+/// runs forward/backward on the device, so the GPU isn't stalled on the
+/// single-threaded sampler. The producer borrows `rng` mutably for the
+/// phase's lifetime; the scope joins before this returns, so the next
+/// phase resumes the same deterministic draw sequence.
+#[allow(clippy::too_many_arguments)]
+fn run_phase(
+    args: &GemArgs,
+    pb: &PseudobulkData,
+    model: &GemModel,
+    sampler: &SamplerState,
+    axes: &[Axis],
+    optim: &mut AdamW,
+    epochs: usize,
+    apply_z_delta_l2: bool,
+    rng: &mut StdRng,
+    stop: &Arc<AtomicBool>,
+) -> Result<()> {
+    if epochs == 0 || axes.is_empty() {
+        return Ok(());
     }
-    anyhow::ensure!(
-        !axes.is_empty(),
-        "--no-cell-axis with zero pb levels leaves nothing to train; \
-         either increase --num-levels or drop --no-cell-axis"
-    );
 
     // Resolve `--batches-per-epoch`: explicit override, or auto = one
-    // weighted pass over the largest axis (cell / pb_per_level).
-    let max_axis_units = std::cmp::max(
-        model.n_cells,
-        pb.pb_pools_per_level
-            .iter()
-            .map(|l| l.n_units)
-            .max()
-            .unwrap_or(0),
-    );
+    // weighted pass over the largest axis *in this phase* (cell-only phase
+    // 2 sizes by n_cells, not max(n_cells, pb)).
+    let max_axis_units = axes
+        .iter()
+        .map(|axis| match axis {
+            Axis::Cell => model.n_cells,
+            Axis::Pb(l) => pb.pb_pools_per_level[*l].n_units,
+        })
+        .max()
+        .unwrap_or(0);
     let batches_per_epoch = args.batches_per_epoch.unwrap_or_else(|| {
         let bs = args.batch_size.max(1);
         max_axis_units.div_ceil(bs).max(1)
     });
 
     info!(
-        "composite-sum training: {} axes (1 cell + {} pb levels), {} epochs × {} batches \
-         (auto={}, max_axis_units={})",
+        "  {} axes, {} epochs × {} batches (auto={}, max_axis_units={})",
         axes.len(),
-        n_pb_levels,
-        args.epochs,
+        epochs,
         batches_per_epoch,
         args.batches_per_epoch.is_none(),
         max_axis_units,
     );
-
-    // Pipeline CPU sampling with GPU optimization: a scoped producer thread
-    // draws the next minibatches (one per axis) while the main thread runs
-    // forward/backward on the device, so the GPU isn't stalled waiting on the
-    // single-threaded sampler. The producer owns `rng` (keeping the draw
-    // sequence deterministic) and borrows the sampler/pools; bundles flow
-    // through a small bounded channel that also throttles look-ahead.
-    let axes_ref = &axes;
-    let sampler_ref = &sampler;
 
     std::thread::scope(|scope| -> Result<()> {
         // One bundle = one minibatch per axis, tagged with the epoch it
@@ -104,18 +190,14 @@ pub fn train(
         let (tx, rx) = std::sync::mpsc::sync_channel::<Bundle>(2);
 
         scope.spawn(move || {
-            'epochs: for epoch in 0..args.epochs {
+            'epochs: for epoch in 0..epochs {
                 for _ in 0..batches_per_epoch {
                     if stop.load(Ordering::Relaxed) {
                         break 'epochs;
                     }
-                    let mut bundle = Vec::with_capacity(axes_ref.len());
-                    for (i, &axis) in axes_ref.iter().enumerate() {
-                        bundle.push((
-                            i,
-                            axis,
-                            draw_minibatch(axis, sampler_ref, pb, args, &mut rng),
-                        ));
+                    let mut bundle = Vec::with_capacity(axes.len());
+                    for (i, &axis) in axes.iter().enumerate() {
+                        bundle.push((i, axis, draw_minibatch(axis, sampler, pb, args, rng)));
                     }
                     if tx.send((epoch, bundle)).is_err() {
                         break 'epochs; // consumer gone
@@ -143,7 +225,7 @@ pub fn train(
                     .and_then(|t| t.to_scalar::<f32>().ok())
                     .unwrap_or(0.0)
             };
-            let per_axis_strs: Vec<String> = axes_ref
+            let per_axis_strs: Vec<String> = axes
                 .iter()
                 .enumerate()
                 .map(|(i, axis)| {
@@ -155,9 +237,9 @@ pub fn train(
                 })
                 .collect();
             info!(
-                "epoch {}/{}: total={:.4} [{}] ({} batches)",
+                "  epoch {}/{}: total={:.4} [{}] ({} batches)",
                 epoch + 1,
-                args.epochs,
+                epochs,
                 scalar(total_acc) / n,
                 per_axis_strs.join(", "),
                 n_batches
@@ -199,14 +281,18 @@ pub fn train(
             // Mean-normalized L2 penalties on (z, δ) — scale-invariant across
             // G·K and K·M·H, so λ stays meaningful as model dims grow. The
             // region offset γ is left unpenalized (per-modality positional
-            // baseline we *want* to fit).
-            if args.z_l2 > 0.0 {
-                let z_sq = model.z.sqr()?.mean_all()?;
-                loss = (loss + (z_sq * (args.z_l2 as f64))?)?;
-            }
-            if args.delta_l2 > 0.0 {
-                let d_sq = model.delta.sqr()?.mean_all()?;
-                loss = (loss + (d_sq * (args.delta_l2 as f64))?)?;
+            // baseline we *want* to fit). Skipped in phase 2: the feature
+            // side is frozen, so the penalty gradient on z/δ is computed but
+            // never stepped — wasted compute that also pollutes the log.
+            if apply_z_delta_l2 {
+                if args.z_l2 > 0.0 {
+                    let z_sq = model.z.sqr()?.mean_all()?;
+                    loss = (loss + (z_sq * (args.z_l2 as f64))?)?;
+                }
+                if args.delta_l2 > 0.0 {
+                    let d_sq = model.delta.sqr()?.mean_all()?;
+                    loss = (loss + (d_sq * (args.delta_l2 as f64))?)?;
+                }
             }
             optim.backward_step(&loss)?;
 
@@ -231,7 +317,7 @@ pub fn train(
             // the partial epoch is flushed by the final emit below.
             if stop.load(Ordering::Relaxed) {
                 info!(
-                    "stopping early during epoch {} — finalizing outputs",
+                    "  stopping early during epoch {} — finalizing outputs",
                     cur_epoch + 1
                 );
                 break;

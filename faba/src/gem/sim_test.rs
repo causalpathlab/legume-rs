@@ -152,6 +152,7 @@ fn test_args() -> GemArgs {
         feature_name_exact: true,
         preload_data: true,
         epochs: 70,
+        phase2_epochs: Some(0),
         batches_per_epoch: Some(4),
         batch_size: 96,
         learning_rate: 6e-2,
