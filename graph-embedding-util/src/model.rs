@@ -54,9 +54,6 @@ pub struct ShareFeaturesArgs<'a> {
     /// earlier `new_with_init`); reused so every axis co-trains one gate.
     pub shared_z: Tensor,
     pub shared_delta: Tensor,
-    /// Shared cosine-NCE log-temperature (registered by the earlier
-    /// `new_with_init`); reused so every axis scores at one temperature.
-    pub shared_log_temp: Tensor,
     pub num_programs: usize,
     pub n_conditions: usize,
     pub e_cell_init: Option<&'a nalgebra::DMatrix<f32>>,
@@ -71,11 +68,6 @@ pub struct JointEmbedModel {
     pub e_cell: Tensor,
     pub b_feat: Tensor,
     pub b_cell: Tensor,
-    /// Learnable scalar log-temperature for cosine-scored NCE (the bge
-    /// driver normalizes the embedding rows and scales the dot by
-    /// `exp(log_temp)`). Shared across axes like `E_feat`. Callers that
-    /// score with the raw dot (e.g. pinto's chain loss) simply ignore it.
-    pub log_temp: Tensor,
     #[allow(dead_code)]
     pub embedding_dim: usize,
     /// Per-gene program loadings `[D, K]` for the per-condition gate.
@@ -115,9 +107,6 @@ impl JointEmbedModel {
         };
         let b_feat = register_var_from_slice(varmap, dev, "b_feat", init.b_feat)?;
         let b_cell = register_var_from_slice(varmap, dev, "b_cell", init.b_cell)?;
-        // Cosine-NCE temperature: init scale = 15 (logits ~ ±15 with
-        // unit-norm rows). Learnable; shared across axes via the field.
-        let log_temp = register_var_from_slice(varmap, dev, "log_temp", &[(15f32).ln()])?;
 
         // Gate params. `z` is randn (small) and `δ` is **zero** so the gate
         // is exactly identity at init (`exp(0)=1`) yet gradient still flows
@@ -139,7 +128,6 @@ impl JointEmbedModel {
             e_cell,
             b_feat,
             b_cell,
-            log_temp,
             embedding_dim: args.embedding_dim,
             z,
             delta,
@@ -167,7 +155,6 @@ impl JointEmbedModel {
             shared_b_feat,
             shared_z,
             shared_delta,
-            shared_log_temp,
             num_programs,
             n_conditions,
             e_cell_init,
@@ -191,7 +178,6 @@ impl JointEmbedModel {
             e_cell,
             b_feat: shared_b_feat,
             b_cell,
-            log_temp: shared_log_temp,
             embedding_dim,
             z: shared_z,
             delta: shared_delta,
@@ -360,19 +346,23 @@ impl<'a> FeatGate<'a> {
     ) -> Result<Tensor> {
         let b = feat_ids.len();
         debug_assert_eq!(cond_ids.len(), b);
-        let f_idx = Tensor::from_vec(feat_ids.to_vec(), b, dev)?;
-        let s_idx = Tensor::from_vec(cond_ids.to_vec(), b, dev)?;
+        let f_idx = Tensor::from_slice(feat_ids, b, dev)?;
+        let s_idx = Tensor::from_slice(cond_ids, b, dev)?;
 
         let z_b = self.z.index_select(&f_idx, 0)?; // [B, K]
 
         // Σ_k z[f,k] · δ̄[k,s,:] → [B, H], with δ̄ the condition-centered
         // deviation (precomputed in `new`). Gather the per-row condition
         // slice δ̄[:, s, :] (index_select on dim 1 → [K, B, H]) then
-        // contract over K with z broadcast across H.
-        let delta_s = self.delta_centered.index_select(&s_idx, 1)?; // [K, B, H]
-        let delta_s = delta_s.transpose(0, 1)?; // [B, K, H]
-        let z_bk1 = z_b.unsqueeze(2)?; // [B, K, 1]
-        let logdev = delta_s.broadcast_mul(&z_bk1)?.sum(1)?; // [B, H]
+        // contract over K via a batched matmul z[B,1,K] · δ̄_s[B,K,H] →
+        // [B,1,H] (gemm; folds away the explicit [B,K,H] product).
+        // `transpose` makes the slice non-contiguous, so realise it first.
+        let delta_s = self
+            .delta_centered
+            .index_select(&s_idx, 1)?
+            .transpose(0, 1)?
+            .contiguous()?; // [B, K, H]
+        let logdev = z_b.unsqueeze(1)?.matmul(&delta_s)?.squeeze(1)?; // [B, H]
 
         e_feat_pos.broadcast_mul(&logdev.exp()?)
     }
