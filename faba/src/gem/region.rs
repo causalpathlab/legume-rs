@@ -20,13 +20,27 @@
 use anyhow::{Context, Result};
 use rustc_hash::FxHashMap;
 
-/// Read a `*_components.parquet` sidecar (columns `gene_name`,
-/// `component_idx`, `mu`, `gene_length`) and tag every record with the
+/// Read a `*_components.parquet` sidecar and tag every record with the
 /// given modality name. The modality label must match the one in the
 /// modifier row names (`m6A`, `A2I`, `pA`) so the `(gene, modality,
 /// component)` lookup lines up with `FeatureTable`'s parsed rows.
+///
+/// Two sidecar schemas are accepted — they share the **same** matrix row
+/// convention `{gene}/{modality}/{k}`, so the component index `k` always
+/// lines up; only the sidecar layout differs:
+///
+/// * **GMM** (`faba m6a` / `atoi`, via `editing::mixture_pipeline`):
+///   `gene_name`, `component_idx` (any integer type), `mu`, `gene_length`.
+///   Position `u = μ / gene_length`.
+/// * **APA** (`faba apa`, via `apa::pipeline`): `site_id`
+///   (`{gene}/pA/{k}`), `expected_tail_length`, `utr_length`. The gene and
+///   component `k` are parsed from `site_id` (matching the matrix row),
+///   and the 5'→3' UTR position is recovered as
+///   `u = 1 − expected_tail_length / utr_length` — encoded here as
+///   `mu = utr_length − expected_tail_length`, `gene_length = utr_length`
+///   so the shared `u = μ / gene_length` binning needs no special case.
 pub fn load_component_annotations(path: &str, modality: &str) -> Result<Vec<ComponentAnnotation>> {
-    use arrow::array::{Float32Array, StringArray, UInt64Array};
+    use arrow::array::{Float32Array, StringArray};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let file = std::fs::File::open(path).with_context(|| format!("opening {path}"))?;
@@ -38,33 +52,103 @@ pub fn load_component_annotations(path: &str, modality: &str) -> Result<Vec<Comp
     let mut out = Vec::new();
     for batch in reader {
         let batch = batch?;
-        let gene_col = batch
-            .column_by_name("gene_name")
+        let f32_col = |name: &str| -> Result<Float32Array> {
+            batch
+                .column_by_name(name)
+                .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("{path}: missing/!f32 '{name}'"))
+        };
+
+        if batch.column_by_name("component_idx").is_some() {
+            // ── GMM schema (m6A / A2I) ──
+            let gene_col = batch
+                .column_by_name("gene_name")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| anyhow::anyhow!("{path}: missing/!string 'gene_name'"))?;
+            let comp = read_u32_col(&batch, "component_idx", path)?;
+            let mu_col = f32_col("mu")?;
+            let len_col = f32_col("gene_length")?;
+            for (i, &component_idx) in comp.iter().enumerate() {
+                out.push(ComponentAnnotation {
+                    gene_name: gene_col.value(i).into(),
+                    modality: modality.clone(),
+                    component_idx,
+                    mu: mu_col.value(i),
+                    gene_length: len_col.value(i),
+                });
+            }
+        } else if let Some(site_col) = batch
+            .column_by_name("site_id")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("{path}: missing/!string 'gene_name'"))?;
-        let comp_col = batch
-            .column_by_name("component_idx")
-            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
-            .ok_or_else(|| anyhow::anyhow!("{path}: missing/!u64 'component_idx'"))?;
-        let mu_col = batch
-            .column_by_name("mu")
-            .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-            .ok_or_else(|| anyhow::anyhow!("{path}: missing/!f32 'mu'"))?;
-        let len_col = batch
-            .column_by_name("gene_length")
-            .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-            .ok_or_else(|| anyhow::anyhow!("{path}: missing/!f32 'gene_length'"))?;
-        for i in 0..batch.num_rows() {
-            out.push(ComponentAnnotation {
-                gene_name: gene_col.value(i).into(),
-                modality: modality.clone(),
-                component_idx: comp_col.value(i) as u32,
-                mu: mu_col.value(i),
-                gene_length: len_col.value(i),
-            });
+        {
+            // ── APA schema ── gene + component from `site_id`, position
+            // from `u = 1 − expected_tail_length / utr_length`.
+            let etl_col = f32_col("expected_tail_length")?;
+            let utr = read_u32_col(&batch, "utr_length", path)?;
+            for (i, &utr_raw) in utr.iter().enumerate() {
+                let Some((gene, comp)) = parse_site_id(site_col.value(i)) else {
+                    continue; // unparseable site_id → no matching matrix row
+                };
+                let utr_len = utr_raw as f32;
+                out.push(ComponentAnnotation {
+                    gene_name: gene.into(),
+                    modality: modality.clone(),
+                    component_idx: comp,
+                    mu: utr_len - etl_col.value(i),
+                    gene_length: utr_len,
+                });
+            }
+        } else {
+            anyhow::bail!(
+                "{path}: unrecognized component sidecar schema — \
+                 need 'component_idx' (GMM) or 'site_id' (apa)"
+            );
         }
     }
     Ok(out)
+}
+
+/// Read an integer arrow column as `Vec<u32>`, accepting any of the common
+/// integer widths (`u64`/`u32`/`i64`/`i32`). Relaxing the type lets the
+/// GMM sidecar's `u64 component_idx` and the apa sidecar's `u32
+/// utr_length` flow through one path. Negative values clamp to 0.
+fn read_u32_col(
+    batch: &arrow::record_batch::RecordBatch,
+    name: &str,
+    path: &str,
+) -> Result<Vec<u32>> {
+    use arrow::array::{Int32Array, Int64Array, UInt32Array, UInt64Array};
+    let col = batch
+        .column_by_name(name)
+        .ok_or_else(|| anyhow::anyhow!("{path}: missing integer column '{name}'"))?;
+    let any = col.as_any();
+    if let Some(a) = any.downcast_ref::<UInt64Array>() {
+        Ok((0..a.len()).map(|i| a.value(i) as u32).collect())
+    } else if let Some(a) = any.downcast_ref::<UInt32Array>() {
+        Ok((0..a.len()).map(|i| a.value(i)).collect())
+    } else if let Some(a) = any.downcast_ref::<Int64Array>() {
+        Ok((0..a.len()).map(|i| a.value(i).max(0) as u32).collect())
+    } else if let Some(a) = any.downcast_ref::<Int32Array>() {
+        Ok((0..a.len()).map(|i| a.value(i).max(0) as u32).collect())
+    } else {
+        anyhow::bail!("{path}: column '{name}' is not an integer type")
+    }
+}
+
+/// Parse an apa `site_id` (`{gene}/pA/{k}`) into `(gene, component_idx)`,
+/// exactly mirroring how `FeatureTable` parses the matrix row name, so the
+/// region key lines up. Returns `None` if the shape or the integer `k`
+/// doesn't parse.
+fn parse_site_id(site_id: &str) -> Option<(&str, u32)> {
+    let mut it = site_id.splitn(3, '/');
+    let gene = it.next()?;
+    let _modality = it.next()?;
+    let k = it.next()?.parse::<u32>().ok()?;
+    if gene.is_empty() {
+        return None;
+    }
+    Some((gene, k))
 }
 
 /// One annotation record, modality-tagged. Mirrors the columns of a
@@ -184,5 +268,105 @@ mod tests {
         assert_eq!(map.lookup("geneA", "m6A", 0), 4); // u=0.8 → bin 4
         assert_eq!(map.lookup("geneA", "m6A", 1), 0); // unannotated → 0
         assert_eq!(map.lookup("geneB", "m6A", 0), 0); // unknown gene → 0
+    }
+
+    #[test]
+    fn parses_site_id() {
+        assert_eq!(parse_site_id("ENSG_X/pA/0"), Some(("ENSG_X", 0)));
+        assert_eq!(parse_site_id("G/pA/11"), Some(("G", 11))); // multi-digit k
+        assert_eq!(parse_site_id("G/pA/x"), None); // non-integer k
+        assert_eq!(parse_site_id("/pA/0"), None); // empty gene
+        assert_eq!(parse_site_id("nope"), None); // wrong shape
+    }
+
+    fn write_parquet(path: &std::path::Path, batch: &arrow::record_batch::RecordBatch) {
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::properties::WriterProperties;
+        let file = std::fs::File::create(path).unwrap();
+        let props = WriterProperties::builder().build();
+        let mut w = ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
+        w.write(batch).unwrap();
+        w.close().unwrap();
+    }
+
+    #[test]
+    fn loads_apa_schema() {
+        use arrow::array::{ArrayRef, Float32Array, StringArray, UInt32Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        // APA sidecar: site_id (`{gene}/pA/{k}`) + expected_tail_length +
+        // utr_length. Position u = 1 − etl/utr: comp0 → 0.8, comp2 → 0.1.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("site_id", DataType::Utf8, false),
+            Field::new("gene_name", DataType::Utf8, false),
+            Field::new("expected_tail_length", DataType::Float32, false),
+            Field::new("utr_length", DataType::UInt32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["GENEA/pA/0", "GENEA/pA/2"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["GENEA", "GENEA"])) as ArrayRef,
+                Arc::new(Float32Array::from(vec![200.0_f32, 900.0])) as ArrayRef,
+                Arc::new(UInt32Array::from(vec![1000_u32, 1000])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let path = std::env::temp_dir().join(format!("faba_apa_{}.parquet", std::process::id()));
+        write_parquet(&path, &batch);
+        let recs = load_component_annotations(path.to_str().unwrap(), "pA").unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(recs.len(), 2);
+        // gene + component parsed from site_id (not the gene_name column).
+        assert!(recs
+            .iter()
+            .any(|r| &*r.gene_name == "GENEA" && r.component_idx == 0));
+        assert!(recs
+            .iter()
+            .any(|r| &*r.gene_name == "GENEA" && r.component_idx == 2));
+        // u = 1 − etl/utr → region bins via the shared μ/gene_length path.
+        let map = RegionMap::from_records(&recs, 5);
+        assert_eq!(map.lookup("GENEA", "pA", 0), 4); // u=0.8 → bin 4
+        assert_eq!(map.lookup("GENEA", "pA", 2), 0); // u=0.1 → bin 0
+    }
+
+    #[test]
+    fn loads_gmm_relaxed_int_type() {
+        use arrow::array::{ArrayRef, Float32Array, Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        // GMM sidecar with component_idx as i64 (not the canonical u64) —
+        // the relaxed integer reader must still accept it.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("gene_name", DataType::Utf8, false),
+            Field::new("component_idx", DataType::Int64, false),
+            Field::new("mu", DataType::Float32, false),
+            Field::new("gene_length", DataType::Float32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["GENEB"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![3_i64])) as ArrayRef,
+                Arc::new(Float32Array::from(vec![80.0_f32])) as ArrayRef,
+                Arc::new(Float32Array::from(vec![100.0_f32])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let path = std::env::temp_dir().join(format!("faba_gmm_{}.parquet", std::process::id()));
+        write_parquet(&path, &batch);
+        let recs = load_component_annotations(path.to_str().unwrap(), "m6A").unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].component_idx, 3); // i64 read through
+        assert_eq!(recs[0].gene_name.as_ref(), "GENEB");
+        let map = RegionMap::from_records(&recs, 5);
+        assert_eq!(map.lookup("GENEB", "m6A", 3), 4); // u=0.8 → bin 4
     }
 }
