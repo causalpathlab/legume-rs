@@ -233,6 +233,18 @@ pub fn nb_log_likelihood_elem(x: &Tensor, mu: &Tensor, log_phi: &Tensor) -> Resu
     lgamma_term + term_phi + term_x
 }
 
+/// Numerically-stable element-wise log-sigmoid: `log σ(x) = −softplus(−x)`.
+///
+/// Computed as `min(x, 0) − log(1 + exp(−|x|))` (no `stack`/`logsumexp`), so it
+/// never overflows for large `|x|`. No reduction — output has `x`'s shape. Used
+/// by the contrastive masked-imputation head (mirrors the NCE log-σ scoring in
+/// `graph-embedding-util/src/loss/mod.rs`).
+pub fn log_sigmoid(x: &Tensor) -> Result<Tensor> {
+    let min_x0 = x.neg()?.relu()?.neg()?; // min(x, 0) = −relu(−x)
+    let softplus_tail = (x.abs()?.neg()?.exp()? + 1.0)?.log()?; // log(1 + exp(−|x|))
+    min_x0.sub(&softplus_tail)
+}
+
 /// Gaussian log-likelihood of count-ish data
 ///
 /// llik(i) = -0.5 * sum_w [ x(i,w) - xhat(i,w) ]^2

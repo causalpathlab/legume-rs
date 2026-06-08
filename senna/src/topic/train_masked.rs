@@ -1,6 +1,6 @@
 //! Senna-side glue for the masked-topic trainer.
 //!
-//! The training hot loop lives in [`candle_util::vae::indexed_topic`].
+//! The training hot loop lives in [`candle_util::vae::masked_topic`].
 //! This module owns senna-specific bits the candle-util trainer does not
 //! see: per-level data assembly from [`CollapsedOut`], bulk-vs-SC delta
 //! estimation, bulk evaluation, and the dictionary / feature-embedding
@@ -14,7 +14,7 @@ use candle_core::Tensor;
 use candle_util::encoder::IndexedEmbeddingEncoder;
 
 // Re-export the generic trainer surface so legacy call sites stay put.
-pub(crate) use candle_util::vae::indexed_topic::IndexedTrainConfig;
+pub(crate) use candle_util::vae::masked_topic::IndexedTrainConfig;
 
 /// Materialize per-level `(mixed, batch, target)` `Mat` triples once
 /// per training run.
@@ -24,7 +24,7 @@ fn build_level_data(
     collapsed_levels.iter().map(sample_collapsed_data).collect()
 }
 
-/// Senna wrapper around [`candle_util::vae::indexed_topic::train_masked`] —
+/// Senna wrapper around [`candle_util::vae::masked_topic::train_masked`] —
 /// the masked-imputation (no-ELBO) embedded topic model.
 pub(crate) fn train_masked(
     collapsed_levels: &[CollapsedOut],
@@ -32,18 +32,20 @@ pub(crate) fn train_masked(
     decoders: &[candle_util::decoder::EmbeddedNbTopicDecoder],
     config: &IndexedTrainConfig,
     mask_fraction: f64,
+    opts: &candle_util::vae::masked_topic::MaskedTrainOpts,
 ) -> anyhow::Result<TrainScores> {
     let level_data = build_level_data(collapsed_levels)?;
-    let level_refs: Vec<candle_util::vae::indexed_topic::LevelData> = level_data
+    let level_refs: Vec<candle_util::vae::masked_topic::LevelData> = level_data
         .iter()
         .map(|(a, b, c)| (a, b.as_ref(), c))
         .collect();
-    let scores = candle_util::vae::indexed_topic::train_masked(
+    let scores = candle_util::vae::masked_topic::train_masked(
         &level_refs,
         encoder,
         decoders,
         config,
         mask_fraction,
+        opts,
     )?;
     Ok(TrainScores {
         llik: scores.llik,
