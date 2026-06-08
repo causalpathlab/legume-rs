@@ -129,8 +129,22 @@ pub struct FeatureTable {
     pub count_comp_rows: Vec<u32>,
     pub modifier_comp_rows: Vec<u32>,
     /// `modifier_rows_by_modality[m]` is the modifier-comp row IDs for
-    /// modality `m`. Modality 0 (count) is empty by convention.
+    /// modality `m`. Modality 0 (count base) and the count-splice
+    /// modalities are empty by convention (their rows live in
+    /// `count_comp_rows`).
     pub modifier_rows_by_modality: Vec<Vec<u32>>,
+
+    /// `is_count_modality[m]` = true for the count-derived satellite
+    /// modalities (`count/spliced`, `count/unspliced`, …). These are
+    /// embedded with their own δ direction like any modality, but are
+    /// **sampled** in the count/anchor stratum (drawn under `--f-count`,
+    /// Fisher-penalised) rather than the modifier stratum, and are
+    /// excluded from the τ_modality balance over true modifiers. Slot 0
+    /// (the AGG/count base) is false — no comp row ever carries it.
+    pub is_count_modality: Vec<bool>,
+    /// The modality ids for which `is_count_modality` is true, ascending.
+    /// Used by the sampler to spread the count budget over splice types.
+    pub count_modality_ids: Vec<u32>,
 
     /// `measured[g][m]` = true iff gene `g` has at least one input row in
     /// modality `m` — a count-comp row for the count modality (slot 0), a
@@ -198,11 +212,40 @@ impl FeatureTable {
             let stratum = classify(&key);
             match stratum {
                 RowStratum::CountComp => {
+                    // Count splits map to a satellite modality (≥1) so each
+                    // gets a distinct δ direction, γ offset, and b_comp column
+                    // — a gene's spliced and unspliced rows can deviate β_g in
+                    // different H-directions (RNA-velocity-like). Slot 0 stays
+                    // reserved for the virtual AGG base.
+                    //
+                    // Only an explicit `unspliced` detail gets the unspliced
+                    // modality; **everything else** (`spliced`, or a plain
+                    // gene-count track with no spliced/unspliced split) is
+                    // treated as `spliced`. So a count matrix without the
+                    // split still trains as a single spliced modality rather
+                    // than spawning a per-detail modality.
+                    let modality_name: Box<str> = if &*key.detail == "unspliced" {
+                        "unspliced".into()
+                    } else {
+                        "spliced".into()
+                    };
+                    let modality_id = match modality_to_id.get(&modality_name) {
+                        Some(&id) => id,
+                        None => {
+                            let id = modality_names.len() as u32;
+                            modality_to_id.insert(modality_name.clone(), id);
+                            modality_names.push(modality_name);
+                            id
+                        }
+                    };
                     strata.push(Some(stratum));
                     row_gene.push(Some(gene_id));
-                    row_modality.push(Some(0));
+                    row_modality.push(Some(modality_id));
                     row_component.push(None);
-                    row_region.push(None);
+                    // Splice rows have no transcript-position component;
+                    // region stays the sentinel 0 (γ for splice is one
+                    // offset, the directional signal rides in δ).
+                    row_region.push(Some(0));
                     count_comp_rows.push(row as u32);
                 }
                 RowStratum::ModifierComp => {
@@ -248,12 +291,19 @@ impl FeatureTable {
         let n_genes = gene_names.len();
         let n_modalities = modality_names.len();
 
-        // measured[g][m]: any input row for (g, m)? Count-comp rows mark
-        // the count modality (slot 0); modifier-comp rows mark the rest.
+        // measured[g][m]: any input row for (g, m)? A count-comp row marks
+        // **both** its splice modality (≥1) and slot 0 — the latter keeps
+        // the exported `measured_mask` "count" column reflecting count
+        // coverage (regression guard for the previously all-zero column)
+        // and lets swap-z draws restrict to count-measured genes.
+        // Modifier-comp rows mark their own modality.
         let mut measured = vec![vec![false; n_modalities]; n_genes];
         for &row in &count_comp_rows {
             if let Some(g) = row_gene[row as usize] {
                 measured[g as usize][0] = true;
+                if let Some(m) = row_modality[row as usize] {
+                    measured[g as usize][m as usize] = true;
+                }
             }
         }
         for &row in &modifier_comp_rows {
@@ -261,6 +311,20 @@ impl FeatureTable {
                 measured[g as usize][m as usize] = true;
             }
         }
+
+        // Which modalities are count-derived (the splice satellites). Slot
+        // 0 (AGG/count base) is excluded — no comp row carries it.
+        let mut is_count_modality = vec![false; n_modalities];
+        for &row in &count_comp_rows {
+            if let Some(m) = row_modality[row as usize] {
+                if m as usize != 0 {
+                    is_count_modality[m as usize] = true;
+                }
+            }
+        }
+        let count_modality_ids: Vec<u32> = (0..n_modalities as u32)
+            .filter(|&m| is_count_modality[m as usize])
+            .collect();
 
         // modifier_rows_by_modality[m]
         let mut modifier_rows_by_modality: Vec<Vec<u32>> = vec![Vec::new(); n_modalities];
@@ -282,6 +346,8 @@ impl FeatureTable {
             count_comp_rows,
             modifier_comp_rows,
             modifier_rows_by_modality,
+            is_count_modality,
+            count_modality_ids,
             measured,
         }
     }
@@ -336,6 +402,39 @@ mod tests {
     }
 
     #[test]
+    fn count_detail_defaults_to_spliced() {
+        // A count track whose detail isn't `unspliced` (here a plain
+        // `/count/total`) collapses to the `spliced` modality — no
+        // per-detail modality is spawned — while `unspliced` stays distinct.
+        let names: Vec<Box<str>> = [
+            "geneA/count/total",     // → spliced
+            "geneA/count/unspliced", // → unspliced
+            "geneB/count/spliced",   // → spliced (merges with geneA's `total`)
+        ]
+        .iter()
+        .map(|s| (*s).into())
+        .collect();
+
+        let tab = FeatureTable::build(&names, &RegionMap::empty(1));
+        assert!(tab.modality_names.iter().any(|m| &**m == "spliced"));
+        assert!(tab.modality_names.iter().any(|m| &**m == "unspliced"));
+        // No `total` modality leaked in.
+        assert!(!tab.modality_names.iter().any(|m| &**m == "total"));
+        let spliced = tab
+            .modality_names
+            .iter()
+            .position(|m| &**m == "spliced")
+            .unwrap() as u32;
+        let gene_a = tab.gene_names.iter().position(|g| &**g == "geneA").unwrap();
+        let gene_b = tab.gene_names.iter().position(|g| &**g == "geneB").unwrap();
+        // geneA's `/count/total` and geneB's `/count/spliced` both land on
+        // the spliced modality.
+        assert!(tab.measured[gene_a][spliced as usize]);
+        assert!(tab.measured[gene_b][spliced as usize]);
+        assert!(tab.is_count_modality[spliced as usize]);
+    }
+
+    #[test]
     fn stratification_basics() {
         let names: Vec<Box<str>> = [
             "geneA/count/spliced",
@@ -357,6 +456,25 @@ mod tests {
         assert!(tab.modality_names.iter().any(|m| &**m == "m6A"));
         assert!(tab.modality_names.iter().any(|m| &**m == "A2I"));
         assert!(tab.modality_names.iter().any(|m| &**m == "pA"));
+        // Count details become their own modalities (≥1), distinct from the
+        // reserved slot-0 "count" base — so spliced/unspliced get separate
+        // δ directions.
+        let spliced = tab
+            .modality_names
+            .iter()
+            .position(|m| &**m == "spliced")
+            .expect("spliced modality") as u32;
+        let unspliced = tab
+            .modality_names
+            .iter()
+            .position(|m| &**m == "unspliced")
+            .expect("unspliced modality") as u32;
+        assert_ne!(spliced, unspliced);
+        assert_ne!(spliced, 0); // never the reserved base slot
+        assert!(tab.is_count_modality[spliced as usize]);
+        assert!(tab.is_count_modality[unspliced as usize]);
+        assert!(!tab.is_count_modality[0]); // base slot is not a count modality
+        assert_eq!(tab.count_modality_ids, vec![spliced, unspliced]);
 
         // Two count-comp rows for geneA, one for geneB.
         assert_eq!(tab.count_comp_rows.len(), 3);
