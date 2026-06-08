@@ -140,7 +140,6 @@ impl RnaModEmbedModel {
             DType::F32,
             dev,
         )?;
-
         let e_cell = varmap.get(
             (n_cells.max(1), embedding_dim),
             "e_cell",
@@ -272,12 +271,16 @@ impl RnaModEmbedModel {
 
         // Σ_k z_{g,k} · δ_{k,m,:}  →  [B, H].
         // δ is [K, M, H]; gather the per-row modality slice δ[:, m, :]
-        // (index_select on dim 1 → [K, B, H]) then contract over K with
-        // z_b broadcast across H.
-        let delta_m = self.delta.index_select(&m_q, 1)?; // [K, B, H]
-        let delta_m = delta_m.transpose(0, 1)?; // [B, K, H]
-        let z_bk1 = z_b.unsqueeze(2)?; // [B, K, 1]
-        let z_delta = delta_m.broadcast_mul(&z_bk1)?.sum(1)?; // [B, H]
+        // (index_select on dim 1 → [K, B, H]) then contract over K via a
+        // batched matmul z_b[B,1,K] · δ_m[B,K,H] → [B,1,H] (gemm; folds
+        // away the explicit [B,K,H] product). `transpose` makes the slice
+        // non-contiguous, so realise it before matmul.
+        let delta_m = self
+            .delta
+            .index_select(&m_q, 1)?
+            .transpose(0, 1)?
+            .contiguous()?; // [B, K, H]
+        let z_delta = z_b.unsqueeze(1)?.matmul(&delta_m)?.squeeze(1)?; // [B, H]
 
         // γ_{m,r,:}  →  [B, H].  γ is [M, R, H]; flat-index by m*R + r.
         let r_cols = self.n_regions as u32;

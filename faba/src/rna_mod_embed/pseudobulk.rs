@@ -22,6 +22,7 @@ use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, 
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::data::UnifiedData;
 use log::info;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use super::args::RnaModEmbedArgs;
@@ -177,12 +178,25 @@ pub fn build_pseudobulk(
         args.tau,
     );
 
-    // Pb axes: one set of pools per level (coarsest-first).
+    // Pb axes: one set of pools per level (coarsest-first). Each level
+    // walks `unified.triplets` once into independent thread-local maps, so
+    // the levels are embarrassingly parallel — fan out across them rather
+    // than making `num_levels` sequential passes over the edge list. The
+    // shared reborrow keeps the closure capturing `&UnifiedData` (Sync),
+    // not the outer `&mut`.
+    let unified_ref: &UnifiedData = unified;
     let mut pb_pools_per_level: Vec<AxisPools> = cell_to_pb_per_level
-        .iter()
+        .par_iter()
         .map(|cell_to_pb| {
             let n_pbs = cell_to_pb.iter().copied().max().map(|m| m + 1).unwrap_or(0);
-            aggregate_pools(unified, table, cell_to_pb, n_pbs, n_modalities, args.tau)
+            aggregate_pools(
+                unified_ref,
+                table,
+                cell_to_pb,
+                n_pbs,
+                n_modalities,
+                args.tau,
+            )
         })
         .collect();
 
