@@ -8,7 +8,7 @@
 //!   5. Compute per-gene shortlist weights from total counts.
 //!   6. Instantiate `IndexedEmbeddingEncoder` + `EmbeddedTopicDecoder`
 //!      (shared ρ via ETM tying).
-//!   7. Train via [`candle_util::vae::indexed_topic::train_mixed`]
+//!   7. Train via [`candle_util::vae::masked_topic::train_mixed`]
 //!      (single-level — no V-cycle in v1).
 //!   8. Inference + writers via
 //!      [`crate::link_community_etm::post::run_inference_and_write`].
@@ -279,7 +279,7 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
     // 8. V-cycle training via candle-util               //
     //////////////////////////////////////////////////////
     let stop = setup_stop_handler();
-    let train_cfg = vae::indexed_topic::IndexedTrainConfig {
+    let train_cfg = vae::masked_topic::IndexedTrainConfig {
         parameters: &parameters,
         dev: &dev,
         epochs: args.num_epochs,
@@ -303,10 +303,10 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
 
     // Per-level (input == target) borrowed view — no clones of the
     // multi-GB profile matrices.
-    let level_data: Vec<vae::indexed_topic::LevelData> =
+    let level_data: Vec<vae::masked_topic::LevelData> =
         level_profiles.iter().map(|m| (m, None, m)).collect();
     let scores =
-        vae::indexed_topic::train_mixed(&level_data, &encoder, &decoders, &train_cfg, None)?;
+        vae::masked_topic::train_mixed(&level_data, &encoder, &decoders, &train_cfg, None)?;
 
     write_score_trace(&scores, &c.out)?;
 

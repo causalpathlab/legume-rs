@@ -1,14 +1,19 @@
-//! Indexed-topic VAE trainer.
+//! Masked-imputation (and ELBO) topic VAE trainer.
 //!
+//! Hosts both [`train_masked`] (no-ELBO masked-gene imputation, with NB and
+//! contrastive heads) and [`train_mixed`] (the ELBO path used by pinto
+//! `lc-etm`), sharing the indexed top-K data loader and per-level decoders.
 //! Drives the shared [`IndexedEmbeddingEncoder`] + per-level
 //! [`EmbeddedTopicDecoder`] stack against [`IndexedInMemoryData`]
 //! minibatches. The hot loop never materialises `[N, S]` or `[K, D]`;
 //! all gather/scatter happens at the per-batch gene union.
 
 use super::{clip_and_step_dense, smooth_topics, PhaseTimers, TrainScores};
-use crate::data::indexed::{labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData};
+use crate::data::indexed::{
+    labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData, IndexedMinibatchData,
+};
 use crate::decoder::embedded_topic::EmbeddedTopicDecoder;
-use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedNbTarget};
+use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedContrastiveTarget, MaskedNbTarget};
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
 use crate::traits::indexed::*;
 use candle_core::{Device, Tensor, Var};
@@ -17,6 +22,9 @@ use log::info;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::Inference;
 use nalgebra::DMatrix;
+use rand::RngExt;
+use rand_distr::{weighted::WeightedIndex, Distribution};
+use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -82,6 +90,85 @@ pub struct IndexedTrainConfig<'a> {
 /// The trainer uses the finest-level delta to build a corrected bulk loader
 /// and runs an extra mini-batch step against the finest decoder per epoch.
 pub type BulkWithDeltas<'a> = (&'a Mat, &'a [GammaMatrix]);
+
+/// Likelihood head for the masked-imputation trainer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaskedHead {
+    /// Negative-binomial reconstruction of masked genes (default / legacy).
+    Nb,
+    /// bge-style contrastive scoring of masked genes vs negatives.
+    Contrastive,
+}
+
+/// Per-minibatch mask-rate schedule (any-order / absorbing-diffusion style).
+#[derive(Clone, Copy, Debug)]
+pub enum MaskSchedule {
+    /// Constant mask fraction (the `mask_fraction` arg).
+    Fixed,
+    /// Sample the mask rate uniformly in `[lo, hi]` each minibatch.
+    Uniform { lo: f64, hi: f64 },
+}
+
+/// Options specific to [`train_masked`], kept off the shared
+/// [`IndexedTrainConfig`] so the `train_mixed`/pinto callers are unaffected.
+/// [`Default`] reproduces the legacy NB, fixed-rate behavior.
+pub struct MaskedTrainOpts {
+    pub head: MaskedHead,
+    pub mask_schedule: MaskSchedule,
+    /// Exponent on the positive count used as the contrastive weight.
+    pub count_alpha: f64,
+}
+
+impl Default for MaskedTrainOpts {
+    fn default() -> Self {
+        Self {
+            head: MaskedHead::Nb,
+            mask_schedule: MaskSchedule::Fixed,
+            count_alpha: 0.5,
+        }
+    }
+}
+
+/// `[N, K]` `count^α`-weighted negative gene ids for the contrastive head,
+/// sampled from the genes present in the batch (bge recipe): ubiquitous
+/// high-count genes (housekeeping) are sampled as negatives often, so they get
+/// pushed down and cannot dominate the contrastive objective; the per-gene bias
+/// absorbs the baseline. α_neg = 0.75 (word2vec standard). Falls back to
+/// uniform-over-vocab for tiny batches.
+fn build_marginal_negatives(
+    mb: &IndexedMinibatchData,
+    d_obs: usize,
+    dev: &Device,
+) -> anyhow::Result<Tensor> {
+    const ALPHA_NEG: f64 = 0.75;
+    let (n, k) = mb.input_indices.dims2()?;
+    let idx_host: Vec<Vec<u32>> = mb.input_indices.to_vec2::<u32>()?;
+    let val_host: Vec<Vec<f32>> = mb.input_values.to_vec2::<f32>()?;
+    let mut gene_count: FxHashMap<u32, f64> = FxHashMap::default();
+    for (gi, vi) in idx_host.iter().zip(val_host.iter()) {
+        for (&g, &v) in gi.iter().zip(vi.iter()) {
+            if v > 0.0 {
+                *gene_count.entry(g).or_default() += v as f64;
+            }
+        }
+    }
+    let genes: Vec<u32> = gene_count.keys().copied().collect();
+    if genes.len() < 2 {
+        return Ok(Tensor::rand(0f32, 1f32, (n, k), dev)?
+            .affine(d_obs as f64, 0.0)?
+            .floor()?
+            .clamp(0.0, d_obs.saturating_sub(1) as f64)?
+            .to_dtype(candle_core::DType::U32)?);
+    }
+    let weights: Vec<f32> = genes
+        .iter()
+        .map(|g| gene_count[g].powf(ALPHA_NEG) as f32)
+        .collect();
+    let dist = WeightedIndex::new(weights).expect("non-empty gene marginal");
+    let mut rng = rand::rng();
+    let neg_ids: Vec<u32> = (0..n * k).map(|_| genes[dist.sample(&mut rng)]).collect();
+    Ok(Tensor::from_vec(neg_ids, (n, k), dev)?)
+}
 
 /// Per-level training triple: `(encoder input, optional batch null, decoder target)`.
 ///
@@ -478,6 +565,7 @@ pub fn train_masked(
     decoders: &[EmbeddedNbTopicDecoder],
     config: &IndexedTrainConfig,
     mask_fraction: f64,
+    opts: &MaskedTrainOpts,
 ) -> anyhow::Result<TrainScores> {
     let num_levels = level_data.len();
     let total_epochs = config.epochs;
@@ -515,13 +603,25 @@ pub fn train_masked(
     let mut kl_trace = Vec::with_capacity(total_epochs);
     let mut data_loaders = build_indexed_loaders(level_data, config)?;
 
+    // Per-gene NB-Fisher weights (housekeeping downweighting) for the contrastive
+    // head's positive weight — gathered at each cell's genes per step. Built once
+    // here; only the contrastive head consumes it.
+    let fisher_d = match opts.head {
+        MaskedHead::Contrastive => Some(Tensor::from_slice(
+            config.feature_fisher_weights,
+            config.feature_fisher_weights.len(),
+            config.dev,
+        )?),
+        MaskedHead::Nb => None,
+    };
+
     for epoch in 0..total_epochs {
         for loader in data_loaders.iter_mut() {
             shuffle_and_precompute(loader, config.minibatch_size)?;
         }
 
-        let mut llik_tot = 0f32;
-        let mut masked_tot = 0f32;
+        let mut metric_tot = 0f32;
+        let mut metric_cnt = 0f32;
 
         for (level, loader) in data_loaders.iter().enumerate() {
             let decoder = &decoders[level];
@@ -533,8 +633,14 @@ pub fn train_masked(
                 // Pads (value==0) are neither visible (no ρ₀ contamination)
                 // nor scored.
                 let real = mb.input_values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
+                let rate = match opts.mask_schedule {
+                    MaskSchedule::Fixed => mask_fraction,
+                    MaskSchedule::Uniform { lo, hi } => {
+                        lo + rand::rng().random::<f64>() * (hi - lo)
+                    }
+                };
                 let rnd = Tensor::rand(0f32, 1f32, mb.input_values.shape(), config.dev)?;
-                let drop = rnd.lt(mask_fraction)?.to_dtype(candle_core::DType::F32)?;
+                let drop = rnd.lt(rate)?.to_dtype(candle_core::DType::F32)?;
                 let masked = real.mul(&drop)?;
                 let visible = (&real - &masked)?;
 
@@ -548,23 +654,54 @@ pub fn train_masked(
                 )?;
                 let log_z = smooth_topics(log_z, config.topic_smoothing)?;
 
-                // `[K, D]` topic-gene logits — the dominant decoder cost.
-                // Computed once and shared by the NB log-partition and the
-                // anchor-prior CE (both reduce over D).
-                let full_kd = decoder.full_logits_kd()?;
-                let logz_11k = EmbeddedNbTopicDecoder::log_partition_from_logits(&full_kd)?;
-
-                let lib_n1 = (mb.input_values.sum_keepdim(1)? + 1.0)?;
-                let target = MaskedNbTarget {
-                    indices: &mb.input_indices,
-                    residual: mb.input_values_null.as_ref(),
-                    values: &mb.input_values,
-                    lib: &lib_n1,
-                    mask: &masked,
+                // full_kd (α·ρᵀ [K,D]) is the dominant decoder cost. The NB head
+                // always needs it (log-partition); the contrastive head needs it
+                // only for the anchor-prior CE — so skip it when no anchor is
+                // active (the common self-normalizing contrastive config).
+                let anchor_active =
+                    config.anchor_penalty > 0.0 && config.anchor_prior_per_level.is_some();
+                let full_kd = if matches!(opts.head, MaskedHead::Nb) || anchor_active {
+                    Some(decoder.full_logits_kd()?)
+                } else {
+                    None
                 };
-                let llik = decoder.impute_masked_nb(&log_z, &target, &logz_11k)?;
 
-                let mut loss = llik.mean_all()?.neg()?;
+                let (mut loss, batch_metric, batch_count) = match opts.head {
+                    MaskedHead::Nb => {
+                        let logz_11k = EmbeddedNbTopicDecoder::log_partition_from_logits(
+                            full_kd.as_ref().expect("NB head always computes full_kd"),
+                        )?;
+                        let lib_n1 = (mb.input_values.sum_keepdim(1)? + 1.0)?;
+                        let target = MaskedNbTarget {
+                            indices: &mb.input_indices,
+                            residual: mb.input_values_null.as_ref(),
+                            values: &mb.input_values,
+                            lib: &lib_n1,
+                            mask: &masked,
+                        };
+                        let llik = decoder.impute_masked_nb(&log_z, &target, &logz_11k)?;
+                        let m = llik.sum_all()?.to_scalar::<f32>()?;
+                        let c = masked.sum_all()?.to_scalar::<f32>()?;
+                        (llik.mean_all()?.neg()?, m, c)
+                    }
+                    MaskedHead::Contrastive => {
+                        let neg = build_marginal_negatives(&mb, decoder.dim_obs(), config.dev)?;
+                        let target = MaskedContrastiveTarget {
+                            indices: &mb.input_indices,
+                            values: &mb.input_values,
+                            mask: &masked,
+                            neg_indices: &neg,
+                        };
+                        let loss = decoder.impute_masked_contrastive(
+                            &log_z,
+                            &target,
+                            opts.count_alpha,
+                            fisher_d.as_ref().expect("contrastive head builds fisher_d"),
+                        )?;
+                        let m = loss.to_scalar::<f32>()?;
+                        (loss, m, 1.0)
+                    }
+                };
                 if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
                     let rho_l2 = encoder
                         .feature_embeddings()
@@ -573,22 +710,20 @@ pub fn train_masked(
                         .affine(f64::from(config.feature_embedding_l2), 0.0)?;
                     loss = (loss + rho_l2)?;
                 }
-                if config.anchor_penalty > 0.0 {
-                    if let Some(prior) = config.anchor_prior_per_level.map(|p| &p[level]) {
-                        loss = apply_anchor_ce_from_logits(
-                            loss,
-                            &full_kd,
-                            prior,
-                            config.anchor_penalty,
-                        )?;
+                if anchor_active {
+                    if let (Some(prior), Some(kd)) = (
+                        config.anchor_prior_per_level.map(|p| &p[level]),
+                        full_kd.as_ref(),
+                    ) {
+                        loss = apply_anchor_ce_from_logits(loss, kd, prior, config.anchor_penalty)?;
                     }
                 }
 
                 let grads = loss.backward()?;
                 clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))?;
 
-                llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
-                masked_tot += masked.sum_all()?.to_scalar::<f32>()?;
+                metric_tot += batch_metric;
+                metric_cnt += batch_count;
 
                 if config.stop.load(Ordering::Relaxed) {
                     break;
@@ -596,16 +731,21 @@ pub fn train_masked(
             }
         }
 
-        let per_masked = if masked_tot > 0.0 {
-            llik_tot / masked_tot
+        let per_metric = if metric_cnt > 0.0 {
+            metric_tot / metric_cnt
         } else {
             0.0
         };
-        llik_trace.push(per_masked);
+        llik_trace.push(per_metric);
         kl_trace.push(0.0);
         prog_bar.inc(1);
         if log::log_enabled!(log::Level::Info) {
-            info!("[epoch {epoch}] masked-NB llik/gene={per_masked:.4}");
+            match opts.head {
+                MaskedHead::Nb => info!("[epoch {epoch}] masked-NB llik/gene={per_metric:.4}"),
+                MaskedHead::Contrastive => {
+                    info!("[epoch {epoch}] masked-contrastive loss={per_metric:.4}")
+                }
+            }
         }
         if config.stop.load(Ordering::SeqCst) {
             prog_bar.finish_and_clear();
