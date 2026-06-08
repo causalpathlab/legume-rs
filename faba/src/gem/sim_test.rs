@@ -47,7 +47,12 @@ const N_CELLS: usize = 40;
 const H: usize = 8;
 const K: usize = 3;
 const R: usize = 2;
-const M6A: u32 = 1; // modality id (count = 0)
+// Modality ids assigned by `FeatureTable` in row-appearance order. Slot 0
+// is the reserved AGG/count base; each count detail (`spliced`) then each
+// modifier gets the next id. For the region test's feature axis
+// (`count/spliced`, `m6A/…`) that is spliced = 1, m6A = 2.
+const SPLICED: u32 = 1;
+const M6A: u32 = 2;
 
 fn group_a() -> std::ops::Range<usize> {
     0..(N_CELLS / 2)
@@ -56,11 +61,13 @@ fn group_b() -> std::ops::Range<usize> {
     (N_CELLS / 2)..N_CELLS
 }
 
-/// Build one (gene, cell, region) pool with unit weights.
-fn pool_from(entries: &[(u32, u32, u32)]) -> StratumPool {
+/// Build one (gene, cell, region) pool with unit weights, all entries
+/// tagged with `modality`.
+fn pool_from(modality: u32, entries: &[(u32, u32, u32)]) -> StratumPool {
     StratumPool {
         gene_ids: entries.iter().map(|e| e.0).collect(),
         axis_ids: entries.iter().map(|e| e.1).collect(),
+        modality_ids: vec![modality; entries.len()],
         region_ids: entries.iter().map(|e| e.2).collect(),
         counts: vec![1.0; entries.len()],
         weights: vec![1.0; entries.len()],
@@ -69,7 +76,8 @@ fn pool_from(entries: &[(u32, u32, u32)]) -> StratumPool {
 
 /// Synthetic feature names so `FeatureTable` assigns the gene/modality
 /// ids and `measured` mask that the planted pools assume:
-///   gene id = g (appearance order), modality id: count=0, m6A=1.
+///   gene id = g (appearance order); modality ids: base count slot = 0,
+///   spliced = 1, m6A = 2 (row-appearance order).
 fn feature_names() -> Vec<Box<str>> {
     let mut names = Vec::new();
     for g in 0..N_GENES {
@@ -98,14 +106,19 @@ fn build_pseudobulk() -> PseudobulkData {
         }
     }
 
-    let agg = pool_from(&agg);
-    let count_comp = pool_from(&count);
-    let modifier_pool = pool_from(&modifier);
+    let agg = pool_from(0, &agg);
+    let count_comp = pool_from(SPLICED, &count);
+    let modifier_pool = pool_from(M6A, &modifier);
     let modality_mass: f32 = modifier_pool.weights.iter().sum();
 
-    // modifier_comp_per_modality: slot 0 (count) empty, slot 1 (m6A).
-    let modifier_comp_per_modality = vec![pool_from(&[]), modifier_pool];
-    let modality_total_mass = vec![0.0, modality_mass];
+    // modifier_comp_per_modality indexed by modality id: slot 0 (base),
+    // slot 1 (spliced — a count modality, no modifier rows), slot 2 (m6A).
+    let modifier_comp_per_modality = vec![
+        pool_from(0, &[]),
+        pool_from(SPLICED, &[]),
+        modifier_pool,
+    ];
+    let modality_total_mass = vec![0.0, 0.0, modality_mass];
 
     let cell_pools = AxisPools {
         n_units: N_CELLS,
@@ -241,10 +254,16 @@ fn recovers_region_resolved_deviation() {
     assert_eq!(table.n_regions, R);
 
     let pb = build_pseudobulk();
-    let args = test_args();
+    let mut args = test_args();
+    // Seed + epoch budget calibrated so the model escapes the degenerate
+    // "every satellite tracks expression" basin (the planted group-B signal
+    // is deliberately sparse). Splitting count into per-splice modalities
+    // enlarged δ/γ, so this needs a touch more training than the original
+    // single-modality fixture.
+    args.epochs = 150;
     let mut model =
         GemModel::new(N_GENES, table.n_modalities(), K, R, H, N_CELLS, &[], &dev).unwrap();
-    seed_params(&model, 20260530);
+    seed_params(&model, 1);
 
     let stop = Arc::new(AtomicBool::new(false));
     train(&args, &table, &pb, &mut model, &stop).unwrap();
@@ -328,4 +347,167 @@ fn recovers_region_resolved_deviation() {
             "AGG embedding must equal β exactly"
         );
     }
+}
+
+////////////////////////////////////////////////////////////////////////
+// Directional spliced/unspliced separation.
+//
+// Spliced and unspliced counts are distinct modalities (own δ direction).
+// Planted world: a gene's spliced mass sits in group A, its unspliced mass
+// in group B — the two count subtypes have *decoupled* cell usage. The
+// only way to fit both is to route the spliced satellite toward A and the
+// unspliced satellite toward B, i.e. give them different deviation
+// directions. The count swap-modality negatives (spliced↔unspliced) supply
+// the contrast. Regression guard for the Part-B feature.
+////////////////////////////////////////////////////////////////////////
+
+// Splice-test modality ids (count base = 0, then spliced, unspliced).
+const SPL: u32 = 1;
+const UNSPL: u32 = 2;
+
+fn splice_feature_names() -> Vec<Box<str>> {
+    let mut names = Vec::new();
+    for g in 0..N_GENES {
+        names.push(format!("gene{g}/count/spliced").into_boxed_str());
+        names.push(format!("gene{g}/count/unspliced").into_boxed_str());
+    }
+    names
+}
+
+fn build_splice_pseudobulk() -> PseudobulkData {
+    let mut agg = Vec::new();
+    let mut spliced = Vec::new();
+    let mut unspliced = Vec::new();
+    for g in 0..N_GENES as u32 {
+        // spliced mass → group A; unspliced mass → group B; AGG = both.
+        for c in group_a() {
+            spliced.push((g, c as u32, 0));
+            agg.push((g, c as u32, 0));
+        }
+        for c in group_b() {
+            unspliced.push((g, c as u32, 0));
+            agg.push((g, c as u32, 0));
+        }
+    }
+
+    let agg = pool_from(0, &agg);
+    // count-comp carries BOTH splice modalities (per-entry modality), as the
+    // production aggregator now emits.
+    let mut count_comp = pool_from(SPL, &spliced);
+    let unspl = pool_from(UNSPL, &unspliced);
+    count_comp.gene_ids.extend(unspl.gene_ids);
+    count_comp.axis_ids.extend(unspl.axis_ids);
+    count_comp.modality_ids.extend(unspl.modality_ids);
+    count_comp.region_ids.extend(unspl.region_ids);
+    count_comp.counts.extend(unspl.counts);
+    count_comp.weights.extend(unspl.weights);
+
+    // No modifier modalities; vec sized to n_modalities = 3 (base + 2 splice).
+    let modifier_comp_per_modality = vec![pool_from(0, &[]), pool_from(SPL, &[]), pool_from(UNSPL, &[])];
+    let modality_total_mass = vec![0.0, 0.0, 0.0];
+
+    let cell_pools = AxisPools {
+        n_units: N_CELLS,
+        agg,
+        count_comp,
+        modifier_comp_per_modality,
+        modality_total_mass,
+    };
+    let gene_ubiquity =
+        super::gene_weight::ubiquity_from_count_pool(&cell_pools.agg, N_GENES, N_CELLS);
+
+    PseudobulkData {
+        cell_to_pb_per_level: Vec::new(),
+        cell_pools,
+        pb_pools_per_level: Vec::new(),
+        gene_fisher_weights: vec![1.0; N_GENES],
+        gene_ubiquity,
+    }
+}
+
+/// Count satellite embedding e_f(g, modality, region 0).
+fn count_embed(model: &GemModel, g: u32, modality: u32) -> Vec<f32> {
+    let (e, _) = model
+        .embed_and_bias_rows(&[g], &[g], &[modality], &[0], &[g], &[modality], &[false])
+        .unwrap();
+    row_vec(&e)
+}
+
+#[test]
+fn recovers_splice_direction() {
+    let dev = Device::Cpu;
+    let r_splice = 1usize; // splice satellites have no transcript regions
+    let table = FeatureTable::build(&splice_feature_names(), &RegionMap::empty(r_splice));
+    assert_eq!(table.n_genes(), N_GENES);
+    // spliced / unspliced are distinct count modalities (≥1), not slot 0.
+    assert_eq!(table.count_modality_ids, vec![SPL, UNSPL]);
+
+    let pb = build_splice_pseudobulk();
+    let mut args = test_args();
+    args.n_regions = r_splice;
+    args.f_agg = 0.3;
+    args.f_count = 0.6; // actually draw spliced/unspliced positives
+    args.epochs = 120;
+
+    let mut model =
+        GemModel::new(N_GENES, table.n_modalities(), K, r_splice, H, N_CELLS, &[], &dev).unwrap();
+    seed_params(&model, 20260608);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    train(&args, &table, &pb, &mut model, &stop).unwrap();
+
+    let e_cell = model.e_cell.to_vec2::<f32>().unwrap();
+    let mean = |range: std::ops::Range<usize>| -> Vec<f32> {
+        let mut acc = vec![0.0_f32; H];
+        for c in range.clone() {
+            for h in 0..H {
+                acc[h] += e_cell[c][h];
+            }
+        }
+        let n = range.len() as f32;
+        acc.iter().map(|x| x / n).collect()
+    };
+    let mean_a = mean(group_a());
+    let mean_b = mean(group_b());
+
+    assert!(
+        cosine(&mean_a, &mean_b) < 0.9,
+        "cell groups did not separate (cos={:.3})",
+        cosine(&mean_a, &mean_b)
+    );
+
+    let mut spliced_prefers_a = 0;
+    let mut unspliced_prefers_b = 0;
+    let mut distinguishable = 0;
+    for g in 0..N_GENES as u32 {
+        let e_s = count_embed(&model, g, SPL);
+        let e_u = count_embed(&model, g, UNSPL);
+        let s_lean = dot(&e_s, &mean_a) - dot(&e_s, &mean_b);
+        let u_lean = dot(&e_u, &mean_a) - dot(&e_u, &mean_b);
+
+        if s_lean > 0.0 {
+            spliced_prefers_a += 1; // spliced routes to its (A) cells
+        }
+        if u_lean < 0.0 {
+            unspliced_prefers_b += 1; // unspliced routes to its (B) cells
+        }
+        // Distinguishable directions: spliced leans toward A strictly more
+        // than unspliced does (robust to the shared β_g base).
+        if s_lean > u_lean {
+            distinguishable += 1;
+        }
+    }
+
+    assert_eq!(
+        spliced_prefers_a, N_GENES,
+        "spliced satellite must prefer group A for every gene ({spliced_prefers_a}/{N_GENES})"
+    );
+    assert_eq!(
+        unspliced_prefers_b, N_GENES,
+        "unspliced satellite must prefer group B for every gene ({unspliced_prefers_b}/{N_GENES})"
+    );
+    assert_eq!(
+        distinguishable, N_GENES,
+        "spliced and unspliced must embed in distinct directions ({distinguishable}/{N_GENES})"
+    );
 }
