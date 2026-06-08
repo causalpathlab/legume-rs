@@ -7,13 +7,13 @@ use graph_embedding_util::{load_unified_data, FeatureNameKind};
 use log::info;
 use matrix_util::common_io::mkdir_parent;
 
-use crate::gem::args::GemArgs;
-use crate::gem::feature_table::FeatureTable;
-use crate::gem::manifest::write_outputs;
-use crate::gem::model::GemModel;
-use crate::gem::pseudobulk::build_pseudobulk;
-use crate::gem::region::{load_component_annotations, ComponentAnnotation, RegionMap};
-use crate::gem::train::train;
+use faba::gem::args::GemArgs;
+use faba::gem::feature_table::FeatureTable;
+use faba::gem::manifest::write_outputs;
+use faba::gem::model::GemModel;
+use faba::gem::pseudobulk::build_pseudobulk;
+use faba::gem::region::{load_component_annotations, ComponentAnnotation, RegionMap};
+use faba::gem::train::train;
 
 pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
@@ -173,7 +173,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // topics, skipping the K-sweep.
     let topics = if args.resolve_topics {
         Some(
-            crate::gem::topics::resolve_topics(&args.out, &model, &table, &unified, args, &stop)
+            faba::gem::topics::resolve_topics(&args.out, &model, &table, &unified, args, &stop)
                 .context("resolve topics")?,
         )
     } else {
@@ -181,7 +181,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     };
 
     // Manifest last, so it records the resolved-topic artifacts.
-    crate::gem::manifest::write_manifest(&args.out, &model, topics.as_ref())
+    faba::gem::manifest::write_manifest(&args.out, &model, topics.as_ref())
         .context("write manifest")?;
 
     info!("done — prefix '{}'", args.out);

@@ -55,6 +55,10 @@ impl StratumPool {
     pub fn len(&self) -> usize {
         self.gene_ids.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.gene_ids.is_empty()
+    }
 }
 
 /// Aggregated draws on one right-hand axis, organised by stratum.
@@ -437,7 +441,11 @@ fn pool_from_entries(
 /// sentinel 0 (the model masks the AGG gate to exp(0)).
 fn agg_pool_from_map(map: FxHashMap<(u32, u32), f32>, tau: f32) -> StratumPool {
     let n = map.len();
-    pool_from_entries(n, tau, map.into_iter().map(|((g, aid), c)| (g, aid, 0, 0, c)))
+    pool_from_entries(
+        n,
+        tau,
+        map.into_iter().map(|((g, aid), c)| (g, aid, 0, 0, c)),
+    )
 }
 
 /// Count-comp anchor pool: keyed by (gene, splice_modality, axis); each

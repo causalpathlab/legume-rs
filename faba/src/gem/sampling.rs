@@ -100,6 +100,10 @@ impl NegativeSlate {
     pub fn len(&self) -> usize {
         self.gene_for_rho.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.gene_for_rho.is_empty()
+    }
 }
 
 pub struct SubBatch {
