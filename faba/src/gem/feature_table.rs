@@ -291,37 +291,34 @@ impl FeatureTable {
         let n_genes = gene_names.len();
         let n_modalities = modality_names.len();
 
-        // measured[g][m]: any input row for (g, m)? A count-comp row marks
-        // **both** its splice modality (≥1) and slot 0 — the latter keeps
-        // the exported `measured_mask` "count" column reflecting count
-        // coverage (regression guard for the previously all-zero column)
-        // and lets swap-z draws restrict to count-measured genes.
-        // Modifier-comp rows mark their own modality.
+        // One pass over count-comp rows fills both:
+        //   * measured[g][m]: any input row for (g, m)? A count-comp row marks
+        //     **both** its splice modality (≥1) and slot 0 — the latter keeps
+        //     the exported `measured_mask` "count" column reflecting count
+        //     coverage (regression guard for the previously all-zero column)
+        //     and lets swap-z draws restrict to count-measured genes.
+        //   * is_count_modality[m]: which modalities are count-derived (the
+        //     splice satellites; slot 0 is the AGG base, never a comp row).
         let mut measured = vec![vec![false; n_modalities]; n_genes];
+        let mut is_count_modality = vec![false; n_modalities];
         for &row in &count_comp_rows {
             if let Some(g) = row_gene[row as usize] {
                 measured[g as usize][0] = true;
                 if let Some(m) = row_modality[row as usize] {
                     measured[g as usize][m as usize] = true;
+                    if m != 0 {
+                        is_count_modality[m as usize] = true;
+                    }
                 }
             }
         }
+        // Modifier-comp rows mark their own modality.
         for &row in &modifier_comp_rows {
             if let (Some(g), Some(m)) = (row_gene[row as usize], row_modality[row as usize]) {
                 measured[g as usize][m as usize] = true;
             }
         }
 
-        // Which modalities are count-derived (the splice satellites). Slot
-        // 0 (AGG/count base) is excluded — no comp row carries it.
-        let mut is_count_modality = vec![false; n_modalities];
-        for &row in &count_comp_rows {
-            if let Some(m) = row_modality[row as usize] {
-                if m as usize != 0 {
-                    is_count_modality[m as usize] = true;
-                }
-            }
-        }
         let count_modality_ids: Vec<u32> = (0..n_modalities as u32)
             .filter(|&m| is_count_modality[m as usize])
             .collect();

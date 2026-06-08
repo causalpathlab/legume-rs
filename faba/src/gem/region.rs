@@ -40,7 +40,6 @@ use rustc_hash::FxHashMap;
 ///   `mu = utr_length − expected_tail_length`, `gene_length = utr_length`
 ///   so the shared `u = μ / gene_length` binning needs no special case.
 pub fn load_component_annotations(path: &str, modality: &str) -> Result<Vec<ComponentAnnotation>> {
-    use arrow::array::{Float32Array, StringArray};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let file = std::fs::File::open(path).with_context(|| format!("opening {path}"))?;
@@ -52,53 +51,11 @@ pub fn load_component_annotations(path: &str, modality: &str) -> Result<Vec<Comp
     let mut out = Vec::new();
     for batch in reader {
         let batch = batch?;
-        let f32_col = |name: &str| -> Result<Float32Array> {
-            batch
-                .column_by_name(name)
-                .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("{path}: missing/!f32 '{name}'"))
-        };
-
+        // Sniff the schema by a distinguishing column, then dispatch.
         if batch.column_by_name("component_idx").is_some() {
-            // ── GMM schema (m6A / A2I) ──
-            let gene_col = batch
-                .column_by_name("gene_name")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-                .ok_or_else(|| anyhow::anyhow!("{path}: missing/!string 'gene_name'"))?;
-            let comp = read_u32_col(&batch, "component_idx", path)?;
-            let mu_col = f32_col("mu")?;
-            let len_col = f32_col("gene_length")?;
-            for (i, &component_idx) in comp.iter().enumerate() {
-                out.push(ComponentAnnotation {
-                    gene_name: gene_col.value(i).into(),
-                    modality: modality.clone(),
-                    component_idx,
-                    mu: mu_col.value(i),
-                    gene_length: len_col.value(i),
-                });
-            }
-        } else if let Some(site_col) = batch
-            .column_by_name("site_id")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-        {
-            // ── APA schema ── gene + component from `site_id`, position
-            // from `u = 1 − expected_tail_length / utr_length`.
-            let etl_col = f32_col("expected_tail_length")?;
-            let utr = read_u32_col(&batch, "utr_length", path)?;
-            for (i, &utr_raw) in utr.iter().enumerate() {
-                let Some((gene, comp)) = parse_site_id(site_col.value(i)) else {
-                    continue; // unparseable site_id → no matching matrix row
-                };
-                let utr_len = utr_raw as f32;
-                out.push(ComponentAnnotation {
-                    gene_name: gene.into(),
-                    modality: modality.clone(),
-                    component_idx: comp,
-                    mu: utr_len - etl_col.value(i),
-                    gene_length: utr_len,
-                });
-            }
+            load_gmm_batch(&batch, &modality, path, &mut out)?;
+        } else if batch.column_by_name("site_id").is_some() {
+            load_apa_batch(&batch, &modality, path, &mut out)?;
         } else {
             anyhow::bail!(
                 "{path}: unrecognized component sidecar schema — \
@@ -107,6 +64,82 @@ pub fn load_component_annotations(path: &str, modality: &str) -> Result<Vec<Comp
         }
     }
     Ok(out)
+}
+
+/// GMM sidecar batch (m6A / A2I): `gene_name` + `component_idx` + `mu` +
+/// `gene_length`, position `u = μ / gene_length`.
+fn load_gmm_batch(
+    batch: &arrow::record_batch::RecordBatch,
+    modality: &str,
+    path: &str,
+    out: &mut Vec<ComponentAnnotation>,
+) -> Result<()> {
+    use arrow::array::StringArray;
+    let gene_col = batch
+        .column_by_name("gene_name")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        .ok_or_else(|| anyhow::anyhow!("{path}: missing/!string 'gene_name'"))?;
+    let comp = read_u32_col(batch, "component_idx", path)?;
+    let mu_col = f32_col(batch, "mu", path)?;
+    let len_col = f32_col(batch, "gene_length", path)?;
+    for (i, &component_idx) in comp.iter().enumerate() {
+        out.push(ComponentAnnotation {
+            gene_name: gene_col.value(i).into(),
+            modality: modality.into(),
+            component_idx,
+            mu: mu_col.value(i),
+            gene_length: len_col.value(i),
+        });
+    }
+    Ok(())
+}
+
+/// APA sidecar batch: `site_id` (`{gene}/pA/{k}`), `expected_tail_length`,
+/// `utr_length`. Gene and component `k` are parsed from `site_id`
+/// (matching the matrix row), and the 5'→3' UTR position is recovered as
+/// `u = 1 − etl/utr` — encoded as `mu = utr − etl`, `gene_length = utr` so
+/// the shared `u = μ / gene_length` binning needs no special case.
+fn load_apa_batch(
+    batch: &arrow::record_batch::RecordBatch,
+    modality: &str,
+    path: &str,
+    out: &mut Vec<ComponentAnnotation>,
+) -> Result<()> {
+    use arrow::array::StringArray;
+    let site_col = batch
+        .column_by_name("site_id")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        .ok_or_else(|| anyhow::anyhow!("{path}: missing/!string 'site_id'"))?;
+    let etl_col = f32_col(batch, "expected_tail_length", path)?;
+    let utr = read_u32_col(batch, "utr_length", path)?;
+    for (i, &utr_raw) in utr.iter().enumerate() {
+        let Some((gene, comp)) = parse_site_id(site_col.value(i)) else {
+            continue; // unparseable site_id → no matching matrix row
+        };
+        let utr_len = utr_raw as f32;
+        out.push(ComponentAnnotation {
+            gene_name: gene,
+            modality: modality.into(),
+            component_idx: comp,
+            mu: utr_len - etl_col.value(i),
+            gene_length: utr_len,
+        });
+    }
+    Ok(())
+}
+
+/// Downcast a named column to `Float32Array` (cheap Arc clone of the
+/// backing buffer).
+fn f32_col(
+    batch: &arrow::record_batch::RecordBatch,
+    name: &str,
+    path: &str,
+) -> Result<arrow::array::Float32Array> {
+    batch
+        .column_by_name(name)
+        .and_then(|c| c.as_any().downcast_ref::<arrow::array::Float32Array>())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("{path}: missing/!f32 '{name}'"))
 }
 
 /// Read an integer arrow column as `Vec<u32>`, accepting any of the common
@@ -136,19 +169,15 @@ fn read_u32_col(
     }
 }
 
-/// Parse an apa `site_id` (`{gene}/pA/{k}`) into `(gene, component_idx)`,
-/// exactly mirroring how `FeatureTable` parses the matrix row name, so the
-/// region key lines up. Returns `None` if the shape or the integer `k`
+/// Parse an apa `site_id` (`{gene}/pA/{k}`) into `(gene, component_idx)` by
+/// reusing the matrix row-name grammar (`feature_table::parse_feature_name`
+/// then `parse_component_idx`), so the region key can never drift from how
+/// the matrix row is parsed. Returns `None` if the shape or the integer `k`
 /// doesn't parse.
-fn parse_site_id(site_id: &str) -> Option<(&str, u32)> {
-    let mut it = site_id.splitn(3, '/');
-    let gene = it.next()?;
-    let _modality = it.next()?;
-    let k = it.next()?.parse::<u32>().ok()?;
-    if gene.is_empty() {
-        return None;
-    }
-    Some((gene, k))
+fn parse_site_id(site_id: &str) -> Option<(Box<str>, u32)> {
+    let key = super::feature_table::parse_feature_name(site_id)?;
+    let k = super::feature_table::parse_component_idx(&key.detail)?;
+    Some((key.gene, k))
 }
 
 /// One annotation record, modality-tagged. Mirrors the columns of a
@@ -272,8 +301,8 @@ mod tests {
 
     #[test]
     fn parses_site_id() {
-        assert_eq!(parse_site_id("ENSG_X/pA/0"), Some(("ENSG_X", 0)));
-        assert_eq!(parse_site_id("G/pA/11"), Some(("G", 11))); // multi-digit k
+        assert_eq!(parse_site_id("ENSG_X/pA/0"), Some(("ENSG_X".into(), 0)));
+        assert_eq!(parse_site_id("G/pA/11"), Some(("G".into(), 11))); // multi-digit k
         assert_eq!(parse_site_id("G/pA/x"), None); // non-integer k
         assert_eq!(parse_site_id("/pA/0"), None); // empty gene
         assert_eq!(parse_site_id("nope"), None); // wrong shape
