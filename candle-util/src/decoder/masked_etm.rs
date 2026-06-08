@@ -18,7 +18,7 @@
 //! per-cell `residual` absorbs the batch effect, matching the collapse model
 //! `E[y] = μ_residual · μ_adjusted`).
 
-use crate::loss::nb_log_likelihood_elem;
+use crate::loss::{log_sigmoid, nb_log_likelihood_elem};
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, VarBuilder};
 
@@ -38,6 +38,20 @@ pub struct MaskedNbTarget<'a> {
     pub mask: &'a Tensor,
 }
 
+/// Per-cell minibatch target for
+/// [`EmbeddedNbTopicDecoder::impute_masked_contrastive`]. All `[N, K]` at the
+/// cell's encoder top-K positions, in `indices` order.
+pub struct MaskedContrastiveTarget<'a> {
+    /// `[N, K]` u32 per-cell gene ids (positives — the cell's top-K).
+    pub indices: &'a Tensor,
+    /// `[N, K]` observed counts at `indices` (used for the count weight).
+    pub values: &'a Tensor,
+    /// `[N, K]` 1 = masked (scored), 0 = visible.
+    pub mask: &'a Tensor,
+    /// `[N, K]` u32 `count^α`-sampled negative gene ids.
+    pub neg_indices: &'a Tensor,
+}
+
 /// NB embedded-topic decoder for masked imputation.
 pub struct EmbeddedNbTopicDecoder {
     n_features: usize,
@@ -49,6 +63,11 @@ pub struct EmbeddedNbTopicDecoder {
     feature_embeddings: Tensor,
     /// `log φ_g [1, D]` per-gene NB inverse dispersion (learnable).
     log_phi_1d: Tensor,
+    /// `b_g [1, D]` per-gene bias for the **contrastive** head only
+    /// (self-normalization, mirroring bge's per-feature bias). Learnable,
+    /// zero-init. Deliberately kept **out of `β`** — `get_dictionary` /
+    /// `full_logits_kd` never read it, exactly as `log_phi` is NB-only.
+    contrastive_bias_1d: Tensor,
 }
 
 impl EmbeddedNbTopicDecoder {
@@ -71,6 +90,11 @@ impl EmbeddedNbTopicDecoder {
             vs.get_with_hints((n_topics, embedding_dim), "topic.embeddings", init_ws)?;
         let log_phi_1d =
             vs.get_with_hints((1, n_features), "log_phi", candle_nn::Init::Const(0.693))?;
+        let contrastive_bias_1d = vs.get_with_hints(
+            (1, n_features),
+            "contrastive_bias",
+            candle_nn::Init::Const(0.0),
+        )?;
 
         Ok(Self {
             n_features,
@@ -78,6 +102,7 @@ impl EmbeddedNbTopicDecoder {
             topic_embeddings,
             feature_embeddings,
             log_phi_1d,
+            contrastive_bias_1d,
         })
     }
 
@@ -89,6 +114,9 @@ impl EmbeddedNbTopicDecoder {
     }
     pub fn log_phi(&self) -> &Tensor {
         &self.log_phi_1d
+    }
+    pub fn contrastive_bias(&self) -> &Tensor {
+        &self.contrastive_bias_1d
     }
     pub fn phi(&self) -> Result<Tensor> {
         self.log_phi_1d.exp()
@@ -179,5 +207,80 @@ impl EmbeddedNbTopicDecoder {
 
         let nb_nk = nb_log_likelihood_elem(values_nk, &mu_nk, &log_phi_nk)?; // [N, K]
         nb_nk.mul(mask_nk)?.sum(1) // [N]
+    }
+
+    /// Contrastive masked-imputation loss (scalar). Alternative head to
+    /// [`Self::impute_masked_nb`]: rather than an NB likelihood on the masked
+    /// genes, score each masked-present gene against negatives with a
+    /// log-sigmoid (bge-style) objective — importing the contrastive embedding
+    /// geometry into the joint gene+topic head. Self-normalizing via the
+    /// per-gene `contrastive_bias`, so no `[K, D]` partition is needed. The
+    /// dictionary `β = softmax(α·ρᵀ)` (see [`Self::get_dictionary`]) is
+    /// unchanged — the bias never enters it.
+    ///
+    /// * `log_theta_nk` — `[N, T]` encoder log-proportions (T = topics).
+    /// * `target` — per-cell positives, counts, mask, and `count^α`-sampled
+    ///   negatives (see [`MaskedContrastiveTarget`]).
+    /// * `count_alpha` — positives are weighted by `value^count_alpha`, so
+    ///   counts re-enter as the contrast weight; loss is normalized by Σweight
+    ///   (mirrors the bge NCE reduction).
+    /// * `fisher_weights_d` — `[D]` per-gene NB-Fisher weight (the same
+    ///   housekeeping-downweighting vector the shortlist uses). Multiplied into
+    ///   the positive weight so the contrastive objective is not dominated by
+    ///   ubiquitous high-count (housekeeping) genes.
+    pub fn impute_masked_contrastive(
+        &self,
+        log_theta_nk: &Tensor,
+        target: &MaskedContrastiveTarget<'_>,
+        count_alpha: f64,
+        fisher_weights_d: &Tensor,
+    ) -> Result<Tensor> {
+        let MaskedContrastiveTarget {
+            indices,
+            values,
+            mask,
+            neg_indices,
+        } = *target;
+
+        let n = indices.dim(0)?;
+        let k = indices.dim(1)?;
+        let h = self.feature_embeddings.dim(1)?;
+
+        // Cell projection into gene space: θ̃ = θ·α  [N,T]·[T,H] → [N,H].
+        let theta_nt = log_theta_nk.exp()?;
+        let theta_tilde = theta_nt.matmul(&self.topic_embeddings)?; // [N, H]
+
+        let flat = indices.flatten_all()?; // [N*K]
+        let bias_d = self.contrastive_bias_1d.squeeze(0)?; // [D]
+                                                           // Score a gene set against the cell projection: θ̃_n · ρ_g + b_g → [N,K].
+        let score = |ids: &Tensor| -> Result<Tensor> {
+            let f = ids.flatten_all()?;
+            let rho = self
+                .feature_embeddings
+                .index_select(&f, 0)?
+                .reshape((n, k, h))?;
+            let b = bias_d.index_select(&f, 0)?.reshape((n, k))?;
+            theta_tilde
+                .unsqueeze(1)?
+                .broadcast_mul(&rho)?
+                .sum(2)?
+                .add(&b)
+        };
+
+        let pos = score(indices)?; // present (masked) genes
+        let neg_score = score(neg_indices)?; // count^α-sampled negatives
+
+        let per_pos = log_sigmoid(&pos)?
+            .add(&log_sigmoid(&neg_score.neg()?)?)?
+            .neg()?; // [N, K]
+
+        // Positive weight: w = fisher_g · value^α · mask. The per-gene NB-Fisher
+        // weight downweights housekeeping genes, so the contrastive objective is
+        // not dominated by — and does not collapse onto — ubiquitous high-count
+        // genes. Only masked positions are scored.
+        let fisher_g = fisher_weights_d.index_select(&flat, 0)?.reshape((n, k))?; // [N, K]
+        let w = values.powf(count_alpha)?.mul(mask)?.mul(&fisher_g)?; // [N, K]
+        let w_sum = w.sum_all()?.to_scalar::<f32>()?.max(1e-8);
+        per_pos.mul(&w)?.sum_all()? / (w_sum as f64)
     }
 }

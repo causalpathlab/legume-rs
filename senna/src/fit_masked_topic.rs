@@ -12,6 +12,26 @@ use candle_util::decoder::EmbeddedNbTopicDecoder;
 use candle_util::encoder::*;
 use log::warn;
 
+/// Masked-imputation training objective (CLI surface for `MaskedHead`).
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ObjectiveArg {
+    /// Negative-binomial reconstruction of masked genes (default).
+    #[default]
+    Nb,
+    /// bge-style contrastive scoring of masked genes vs negatives.
+    Contrastive,
+}
+
+/// Mask-rate schedule (CLI surface for `MaskSchedule`).
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MaskScheduleArg {
+    /// Constant mask fraction (`--mask-fraction`).
+    #[default]
+    Fixed,
+    /// Sample the rate per minibatch in `[--mask-rate-lo, --mask-rate-hi]`.
+    Uniform,
+}
+
 #[derive(Args, Debug)]
 pub struct MaskedTopicArgs {
     #[arg(
@@ -264,6 +284,47 @@ pub struct MaskedTopicArgs {
                 the (collapse-prone) ELBO/KL."
     )]
     mask_fraction: f64,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = ObjectiveArg::Nb,
+        help = "Masked-imputation objective: nb (negative-binomial reconstruction) or \
+                contrastive (bge-style log-sigmoid scoring of masked genes vs negatives)."
+    )]
+    objective: ObjectiveArg,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = MaskScheduleArg::Fixed,
+        help = "Mask-rate schedule: fixed (use --mask-fraction) or uniform (sample the \
+                rate per minibatch in [--mask-rate-lo, --mask-rate-hi]; any-order / \
+                absorbing-diffusion style)."
+    )]
+    mask_schedule: MaskScheduleArg,
+
+    #[arg(
+        long,
+        default_value_t = 0.1,
+        help = "Lower bound of the per-minibatch mask rate when --mask-schedule=uniform."
+    )]
+    mask_rate_lo: f64,
+
+    #[arg(
+        long,
+        default_value_t = 0.6,
+        help = "Upper bound of the per-minibatch mask rate when --mask-schedule=uniform."
+    )]
+    mask_rate_hi: f64,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Contrastive head only: exponent on the positive gene count used as the \
+                contrastive loss weight."
+    )]
+    count_alpha: f64,
 
     #[arg(
         long,
@@ -787,12 +848,29 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
         anchor_penalty: args.anchor_penalty,
     };
 
+    use candle_util::vae::masked_topic::{MaskSchedule, MaskedHead, MaskedTrainOpts};
+    let masked_opts = MaskedTrainOpts {
+        head: match args.objective {
+            ObjectiveArg::Nb => MaskedHead::Nb,
+            ObjectiveArg::Contrastive => MaskedHead::Contrastive,
+        },
+        mask_schedule: match args.mask_schedule {
+            MaskScheduleArg::Fixed => MaskSchedule::Fixed,
+            MaskScheduleArg::Uniform => MaskSchedule::Uniform {
+                lo: args.mask_rate_lo,
+                hi: args.mask_rate_hi,
+            },
+        },
+        count_alpha: args.count_alpha,
+    };
+
     let scores = train_masked(
         &collapsed_levels,
         &base_encoder,
         &decoders,
         &train_config,
         args.mask_fraction,
+        &masked_opts,
     )?;
 
     info!("Writing down the model parameters");
@@ -813,7 +891,10 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
     save_parameters(&parameters, &args.out)?;
     let mut metadata = TopicModelMetadata {
         model_type: crate::topic::model_metadata::MODEL_TYPE_INDEXED_MASKED.into(),
-        decoder_types: vec!["nb_masked".into()],
+        decoder_types: vec![match args.objective {
+            ObjectiveArg::Nb => "nb_masked".into(),
+            ObjectiveArg::Contrastive => "contrastive_masked".into(),
+        }],
         decoder_weights: vec![1.0],
         n_features_encoder: n_features_full,
         n_features_full,

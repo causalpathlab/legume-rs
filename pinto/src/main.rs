@@ -297,7 +297,7 @@ enum Commands {
                       edge e = (i, j) is treated as a 'document' with token\n\
                       counts y_e = x_i + x_j, then fit as an indexed topic\n\
                       ETM (Dieng et al., 2020) using\n\
-                      `candle_util::vae::indexed_topic`.\n\n\
+                      `candle_util::vae::masked_topic`.\n\n\
                       MODEL:\n\n\
                       \x20 π_e   = encoder(top-K of y_e)         ∈ Δ^K\n\
                       \x20 β     = softmax_g(α · ρᵀ)             [G × K]\n\

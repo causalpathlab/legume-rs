@@ -1,13 +1,13 @@
 //! VAE-style training drivers for topic / link-community models.
 //!
 //! - [`topic`]: dense `EncoderModuleT` + `DecoderModuleT` trainer.
-//! - [`indexed_topic`]: `IndexedEmbeddingEncoder` + `EmbeddedTopicDecoder`
+//! - [`masked_topic`]: `IndexedEmbeddingEncoder` + `EmbeddedTopicDecoder`
 //!   trainer driven by [`crate::data::indexed::IndexedInMemoryData`].
 //!
 //! Shared utilities (`TrainScores`, `smooth_topics`, `PhaseTimers`,
 //! grad-clipping helpers) live here at the module root.
 
-pub mod indexed_topic;
+pub mod masked_topic;
 pub mod topic;
 
 use candle_core::Tensor;

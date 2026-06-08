@@ -2,7 +2,7 @@
 //!
 //! Treats each cell-cell edge as a "document" with token counts
 //! `y_e = x_i + x_j`, then fits the senna-style indexed topic ETM using
-//! [`candle_util::vae::indexed_topic`]. The K topics are the link
+//! [`candle_util::vae::masked_topic`]. The K topics are the link
 //! communities; β = softmax(α · ρᵀ) gives the per-community gene rates;
 //! the encoder produces per-edge soft posteriors π_e ∈ Δ^K.
 
