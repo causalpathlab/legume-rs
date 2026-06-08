@@ -23,10 +23,10 @@ use matrix_util::archetypal::{archetypal_analysis, select_archetype_k, AaArgs};
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::{ConvertMatOps, IoOps, MatOps};
 
-use super::args::RnaModEmbedArgs;
+use super::args::GemArgs;
 use super::common::candle_core;
 use super::feature_table::FeatureTable;
-use super::model::RnaModEmbedModel;
+use super::model::GemModel;
 use candle_core::Device;
 use graph_embedding_util::data::UnifiedData;
 
@@ -44,10 +44,10 @@ pub struct ResolvedTopics {
 /// it skips the (potentially long) K-sweep and finalises at a fixed K.
 pub fn resolve_topics(
     prefix: &str,
-    model: &RnaModEmbedModel,
+    model: &GemModel,
     table: &FeatureTable,
     unified: &UnifiedData,
-    args: &RnaModEmbedArgs,
+    args: &GemArgs,
     stop: &Arc<AtomicBool>,
 ) -> Result<ResolvedTopics> {
     let cpu = Device::Cpu;

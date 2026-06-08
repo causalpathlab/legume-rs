@@ -10,7 +10,7 @@ use rand::distr::{weighted::WeightedIndex, Distribution, Uniform};
 use rand::seq::IndexedRandom;
 use rand::Rng;
 
-use super::args::RnaModEmbedArgs;
+use super::args::GemArgs;
 use super::feature_table::FeatureTable;
 use super::model::Axis;
 use super::pseudobulk::{AxisPools, PseudobulkData, StratumPool};
@@ -140,7 +140,7 @@ pub struct SamplerState {
 }
 
 impl SamplerState {
-    pub fn new(table: &FeatureTable, pb: &PseudobulkData, args: &RnaModEmbedArgs) -> Self {
+    pub fn new(table: &FeatureTable, pb: &PseudobulkData, args: &GemArgs) -> Self {
         let n_modalities = table.n_modalities();
         let n_regions = table.n_regions.max(1);
 
@@ -234,7 +234,7 @@ pub fn draw_minibatch<R: Rng>(
     axis: Axis,
     state: &SamplerState,
     pb: &PseudobulkData,
-    args: &RnaModEmbedArgs,
+    args: &GemArgs,
     rng: &mut R,
 ) -> Minibatch {
     let b_total = args.batch_size;
@@ -257,7 +257,7 @@ fn build_anchor_sub_batch<R: Rng>(
     dists: &AxisDists,
     b_agg: usize,
     b_count: usize,
-    args: &RnaModEmbedArgs,
+    args: &GemArgs,
     rng: &mut R,
 ) -> Option<SubBatch> {
     let mut positives = PositiveSlate::with_capacity(b_agg + b_count);
@@ -306,7 +306,7 @@ fn build_modifier_sub_batch<R: Rng>(
     pools: &AxisPools,
     dists: &AxisDists,
     b: usize,
-    args: &RnaModEmbedArgs,
+    args: &GemArgs,
     rng: &mut R,
 ) -> Option<SubBatch> {
     if b == 0 {

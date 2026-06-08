@@ -19,18 +19,18 @@ use rand::SeedableRng;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::args::RnaModEmbedArgs;
+use super::args::GemArgs;
 use super::feature_table::FeatureTable;
 use super::loss::minibatch_loss;
-use super::model::{Axis, RnaModEmbedModel};
+use super::model::{Axis, GemModel};
 use super::pseudobulk::PseudobulkData;
 use super::sampling::{draw_minibatch, Minibatch, SamplerState};
 
 pub fn train(
-    args: &RnaModEmbedArgs,
+    args: &GemArgs,
     table: &FeatureTable,
     pb: &PseudobulkData,
-    model: &mut RnaModEmbedModel,
+    model: &mut GemModel,
     stop: &Arc<AtomicBool>,
 ) -> Result<()> {
     let sampler = SamplerState::new(table, pb, args);

@@ -1,4 +1,4 @@
-//! `faba rna-mod-embed` — joint embedding of gene counts + RNA-modification
+//! `faba gem` — joint embedding of gene counts + RNA-modification
 //! tracks (m6A, A-to-I, poly-A). A feature row has identity
 //! `(gene g, modality m, region r)` and embeds as a base gene vector β_g
 //! deviated by an exp gate:

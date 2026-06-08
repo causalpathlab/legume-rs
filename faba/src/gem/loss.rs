@@ -12,11 +12,11 @@ use super::common::{candle_core, candle_nn};
 use anyhow::Result;
 use candle_core::{DType, IndexOp, Tensor};
 
-use super::model::{Axis, RnaModEmbedModel};
+use super::model::{Axis, GemModel};
 use super::sampling::{Minibatch, NegativeSlate, SubBatch};
 
 /// Combine sub-batch losses (anchor + modifier) into one scalar tensor.
-pub fn minibatch_loss(model: &RnaModEmbedModel, axis: Axis, mb: &Minibatch) -> Result<Tensor> {
+pub fn minibatch_loss(model: &GemModel, axis: Axis, mb: &Minibatch) -> Result<Tensor> {
     let mut losses = Vec::new();
     if let Some(sub) = &mb.anchor {
         losses.push(sub_batch_loss(model, axis, sub)?);
@@ -38,7 +38,7 @@ pub fn minibatch_loss(model: &RnaModEmbedModel, axis: Axis, mb: &Minibatch) -> R
     }
 }
 
-fn sub_batch_loss(model: &RnaModEmbedModel, axis: Axis, sub: &SubBatch) -> Result<Tensor> {
+fn sub_batch_loss(model: &GemModel, axis: Axis, sub: &SubBatch) -> Result<Tensor> {
     let pos = &sub.positives;
     let b = pos.len();
     if b == 0 {
@@ -58,7 +58,7 @@ fn sub_batch_loss(model: &RnaModEmbedModel, axis: Axis, sub: &SubBatch) -> Resul
         &pos.is_agg,
     )?;
     let (e_rhs, b_rhs) = model.rhs_rows(axis, &pos.axis_id)?;
-    let s_pos = RnaModEmbedModel::score_diag(&e_pos, &e_rhs, &b_pos, &b_rhs)?;
+    let s_pos = GemModel::score_diag(&e_pos, &e_rhs, &b_pos, &b_rhs)?;
 
     ////////////////////////////////////////
     // Negative-score blocks
@@ -111,7 +111,7 @@ fn sub_batch_loss(model: &RnaModEmbedModel, axis: Axis, sub: &SubBatch) -> Resul
 }
 
 fn score_negative_slate(
-    model: &RnaModEmbedModel,
+    model: &GemModel,
     axis: Axis,
     pos_axis_ids: &[u32],
     slate: &NegativeSlate,
@@ -140,7 +140,7 @@ fn score_negative_slate(
         &slate.is_agg,
     )?;
     let (e_rhs_t, b_rhs_t) = model.rhs_rows(axis, &axis_tiled)?;
-    let s_neg = RnaModEmbedModel::score_diag(&e_neg, &e_rhs_t, &b_neg, &b_rhs_t)?;
+    let s_neg = GemModel::score_diag(&e_neg, &e_rhs_t, &b_neg, &b_rhs_t)?;
     let s_neg = s_neg.reshape((b, k))?;
     Ok(Some(s_neg))
 }
