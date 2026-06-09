@@ -108,6 +108,7 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
 /// [`PerBatchSampler`]. With `alpha_cell = 1`, this is approximately
 /// equivalent to the flat sampler; with `alpha_cell = 0`, every cell
 /// in the batch gets uniform coverage regardless of sequencing depth.
+#[derive(Clone)]
 pub struct PerBatchStratifiedCellSampler {
     /// Local-index picker into `active_cells`. Weights = `q(c)`.
     pub cell_picker: WeightedIndex<f32>,
@@ -121,6 +122,7 @@ pub struct PerBatchStratifiedCellSampler {
     pub feature_pool: Vec<u32>,
 }
 
+#[derive(Clone)]
 pub struct CellFeatureSampler {
     /// Global feature ids expressed in this cell.
     pub features: Vec<u32>,
