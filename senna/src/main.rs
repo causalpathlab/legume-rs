@@ -46,6 +46,7 @@ mod fit_joint_topic;
 mod fit_masked_topic;
 mod fit_pseudotime;
 mod fit_topic;
+mod fit_vae;
 mod geometry;
 mod hvg;
 mod impute;
@@ -73,6 +74,7 @@ use fit_joint_topic::*;
 use fit_masked_topic::*;
 use fit_pseudotime::{run_pseudotime, PseudotimeArgs};
 use fit_topic::*;
+use fit_vae::*;
 use impute::{impute_model, ImputeArgs};
 use postprocess::*;
 use predict::{predict_model, PredictArgs};
@@ -188,6 +190,36 @@ enum Commands {
     MaskedTopic(MaskedTopicArgs),
 
     #[command(
+        name = "masked-vae",
+        about = "Train a masked-imputation Gaussian VAE (BERT-style, continuous latent).",
+        long_about = "Masked-imputation VAE: the Gaussian-latent sibling of `masked-topic`.\n\
+                      Same pipeline (PB-collapse training, shared per-gene ρ embedding, NB\n\
+                      ETM head, encoder-only cell inference), but the encoder emits a\n\
+                      reparameterized Gaussian latent z (no simplex softmax) regularized by\n\
+                      a KL term — a true variational bottleneck. exp(z) drives the NB head's\n\
+                      per-topic intensities (μ_g = ℓ·Σ_t exp(z_t)·β_{t,g}), so the masked\n\
+                      objective + KL train an unconstrained continuous embedding while\n\
+                      reusing the masked decoder unchanged. Held-out genes are imputed; the\n\
+                      masked objective (not just the KL) keeps the latent from collapsing.\n\n\
+                      Writes the same artifacts as `masked-topic`. NB objective only.",
+        visible_aliases = ["bert"]
+    )]
+    MaskedVae(MaskedTopicArgs),
+
+    #[command(
+        about = "Train an scVI-style Gaussian VAE (continuous factor model).",
+        long_about = "Gaussian (scVI-style) VAE — the continuous-latent sibling of\n\
+                      `topic`. Same pipeline (batch-aware pseudobulk collapse → dense VAE),\n\
+                      but the encoder emits an unconstrained Gaussian latent z (no simplex\n\
+                      projection) and the NB decoder maps z → π = softmax_d(z·W) → μ =\n\
+                      library·π. Outputs are continuous factors (cell × factor) and gene ×\n\
+                      factor loadings, not topic proportions + a topic-gene dictionary.\n\n\
+                      Writes {out}.{latent,dictionary}.parquet, {out}.safetensors,\n\
+                      {out}.model.json, {out}.senna.json (run manifest)."
+    )]
+    Vae(VaeArgs),
+
+    #[command(
         about = "Train Nyström SVD embedding.",
         long_about = "Three stages: (1) batch-aware pseudobulk collapsing, (2) randomized SVD,\n\
                       (3) per-cell Nyström projection.\n\n\
@@ -259,7 +291,7 @@ enum Commands {
 
     // ─────────── 2. Held-out inference ───────────
     #[command(
-        about = "Apply a trained topic / masked-topic model to held-out data.",
+        about = "Apply a trained topic / masked-topic / vae model to held-out data.",
         long_about = "Latent inference + per-cell predictive log-likelihood on a separate\n\
                       backend file. Auto-dispatches dense / indexed via model.json.\n\
                       Handles gene-set misalignment via flexible name matching and\n\
@@ -427,6 +459,12 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::MaskedTopic(args) => {
             fit_masked_topic_model(args)?;
+        }
+        Commands::MaskedVae(args) => {
+            fit_masked_vae_model(args)?;
+        }
+        Commands::Vae(args) => {
+            fit_vae_model(args)?;
         }
         Commands::JointTopic(args) => {
             fit_joint_topic_model(args)?;

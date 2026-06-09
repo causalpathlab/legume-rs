@@ -12,16 +12,6 @@ use candle_util::decoder::EmbeddedNbTopicDecoder;
 use candle_util::encoder::*;
 use log::warn;
 
-/// Masked-imputation training objective (CLI surface for `MaskedHead`).
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ObjectiveArg {
-    /// Negative-binomial reconstruction of masked genes (default).
-    #[default]
-    Nb,
-    /// bge-style contrastive scoring of masked genes vs negatives.
-    Contrastive,
-}
-
 /// Mask-rate schedule (CLI surface for `MaskSchedule`).
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MaskScheduleArg {
@@ -287,12 +277,13 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
-        value_enum,
-        default_value_t = ObjectiveArg::Nb,
-        help = "Masked-imputation objective: nb (negative-binomial reconstruction) or \
-                contrastive (bge-style log-sigmoid scoring of masked genes vs negatives)."
+        default_value_t = 1.0,
+        help = "KL weight β for the Gaussian latent (masked-vae only; ignored by \
+                masked-topic). The masked-NB signal is weaker than a full \
+                reconstruction, so β < 1 (e.g. 0.1–0.5) often avoids \
+                over-regularizing the posterior toward the prior."
     )]
-    objective: ObjectiveArg,
+    kl_weight: f64,
 
     #[arg(
         long,
@@ -320,14 +311,6 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0.5,
-        help = "Contrastive head only: exponent on the positive gene count used as the \
-                contrastive loss weight."
-    )]
-    count_alpha: f64,
-
-    #[arg(
-        long,
         default_value_t = 512,
         help = "Encoder context window (top-K features per cell)",
         long_help = "Each cell keeps its top-K features by value; minibatches use the\n\
@@ -348,9 +331,6 @@ pub struct MaskedTopicArgs {
                      explicitly to override; H < K errors at startup."
     )]
     embedding_dim: usize,
-
-    #[command(flatten)]
-    amort_refine: crate::refine_weighting::AmortRefineArgs,
 
     #[arg(
         long,
@@ -512,7 +492,20 @@ impl From<FeatureNameKindArg> for Option<auxiliary_data::feature_names::FeatureN
     }
 }
 
+/// `senna masked-topic` — simplex-`θ`, deterministic (no-KL) masked ETM.
 pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
+    fit_masked_model(args, false)
+}
+
+/// `senna masked-vae` — Gaussian-latent (reparam + KL) masked VAE. Shares the
+/// masked-topic pipeline (PB training, encoder-only cell eval, ETM ρ/α decoder);
+/// the encoder emits a reparameterized `z` (no softmax) and the loss gains a KL
+/// term. `exp(z)` plays the role of the per-topic intensities in the NB head.
+pub fn fit_masked_vae_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
+    fit_masked_model(args, true)
+}
+
+fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     let k = args.n_latent_topics;
@@ -848,12 +841,8 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
         anchor_penalty: args.anchor_penalty,
     };
 
-    use candle_util::vae::masked_topic::{MaskSchedule, MaskedHead, MaskedTrainOpts};
+    use candle_util::vae::masked_topic::{MaskSchedule, MaskedTrainOpts};
     let masked_opts = MaskedTrainOpts {
-        head: match args.objective {
-            ObjectiveArg::Nb => MaskedHead::Nb,
-            ObjectiveArg::Contrastive => MaskedHead::Contrastive,
-        },
         mask_schedule: match args.mask_schedule {
             MaskScheduleArg::Fixed => MaskSchedule::Fixed,
             MaskScheduleArg::Uniform => MaskSchedule::Uniform {
@@ -861,7 +850,8 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
                 hi: args.mask_rate_hi,
             },
         },
-        count_alpha: args.count_alpha,
+        latent_gaussian,
+        kl_weight: args.kl_weight,
     };
 
     let scores = train_masked(
@@ -890,10 +880,15 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
     // wired into the masked encoder — see the encoder construction above).
     save_parameters(&parameters, &args.out)?;
     let mut metadata = TopicModelMetadata {
-        model_type: crate::topic::model_metadata::MODEL_TYPE_INDEXED_MASKED.into(),
-        decoder_types: vec![match args.objective {
-            ObjectiveArg::Nb => "nb_masked".into(),
-            ObjectiveArg::Contrastive => "contrastive_masked".into(),
+        model_type: if latent_gaussian {
+            crate::topic::model_metadata::MODEL_TYPE_MASKED_VAE.into()
+        } else {
+            crate::topic::model_metadata::MODEL_TYPE_INDEXED_MASKED.into()
+        },
+        decoder_types: vec![if latent_gaussian {
+            "nb_masked_vae".into()
+        } else {
+            "nb_masked".into()
         }],
         decoder_weights: vec![1.0],
         n_features_encoder: n_features_full,
@@ -955,6 +950,7 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
         enc_context_size: args.context_size,
         shortlist_weights: &shortlist_weights,
         feature_mean: &feature_mean,
+        latent_gaussian,
     };
     let z_nk = evaluate_latent_masked(&data_vec, &cpu_encoder, &eval_config, delta.as_ref(), None)?;
 
