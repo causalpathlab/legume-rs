@@ -17,11 +17,10 @@
 //! under `--no-cell-axis`, with zero cells, or `--phase2-epochs 0`.
 
 use super::common::{candle_core, candle_nn};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use candle_core::Tensor;
 use candle_nn::optim::Optimizer;
 use candle_nn::{AdamW, ParamsAdamW};
-use candle_util::frozen_features::trainable_only;
 use log::info;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -29,6 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::args::GemArgs;
+use super::cell_solve;
 use super::feature_table::FeatureTable;
 use super::loss::minibatch_loss;
 use super::model::{Axis, GemModel};
@@ -93,44 +93,22 @@ pub fn train(
     drop(optim);
 
     ////////////////////////////////////////
-    // Phase 2: dense cell-only re-evaluation
+    // Phase 2: analytical per-cell projection
     ////////////////////////////////////////
-    // The feature side and pb heads are frozen; only `e_cell` is stepped.
-    // backward_step still computes gradients across the whole graph, but
-    // AdamW updates exactly the Vars it owns (here, just `e_cell`).
-    let phase2_epochs = args.phase2_epochs.unwrap_or(args.epochs);
-    let run_phase2 = !args.no_cell_axis
-        && model.n_cells > 0
-        && phase2_epochs > 0
-        && !stop.load(Ordering::Relaxed);
-    if run_phase2 {
-        let mut opt2 = AdamW::new(
-            trainable_only(&model.varmap, &["e_cell"]),
-            ParamsAdamW {
-                lr: args.learning_rate,
-                weight_decay: 0.0,
-                ..Default::default()
-            },
-        )?;
+    // With the feature side frozen, each cell's embedding is independent —
+    // so instead of SGD we project every cell onto the frozen dictionary in
+    // parallel (Poisson MAP, ridge prior). See `cell_solve`.
+    let phase2_on = args.phase2_epochs.map(|n| n > 0).unwrap_or(true);
+    let run_phase2 = !args.no_cell_axis && model.n_cells > 0 && phase2_on;
+    if run_phase2 && !stop.load(Ordering::Relaxed) {
         info!(
-            "phase 2/2 (cell-only re-evaluation, feature side frozen): {} epochs",
-            phase2_epochs
+            "phase 2/2 (analytical cell projection onto frozen features, ridge λ={}): {} cells",
+            args.phase2_ridge, model.n_cells
         );
-        let cell_axes = [Axis::Cell];
-        run_phase(
-            args,
-            pb,
-            model,
-            &sampler,
-            &cell_axes,
-            &mut opt2,
-            phase2_epochs,
-            /*apply_z_delta_l2=*/ false,
-            &mut rng,
-            stop,
-        )?;
-    } else if !args.no_cell_axis && phase2_epochs > 0 {
-        info!("phase 2 skipped (no cells / interrupted in phase 1)");
+        cell_solve::solve_cell_embeddings(model, table, &pb.cell_pools, args)
+            .context("phase-2 cell projection")?;
+    } else if run_phase2 {
+        info!("phase 2 skipped (interrupted in phase 1)");
     }
 
     Ok(())
