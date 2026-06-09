@@ -42,22 +42,23 @@ const CONVERGE_TOL: f64 = 1e-5;
 ///
 /// `frozen_e` is row-major `[n_features × h]`, `frozen_b` is `[n_features]`.
 /// `per_cell[c]` is cell `c`'s observed `(feature_index, count)` list
-/// (indices into `frozen_e`/`frozen_b`). `fit_intercept` controls whether a
-/// per-cell bias `b_c` is fitted (gem scores with `b_c`; bge drops it).
-/// Returns `(e_cell [n_cells × h] row-major, b_cell [n_cells])` — `b_cell`
-/// is all-zero when `fit_intercept` is false.
+/// (indices into `frozen_e`/`frozen_b`). Returns `(e_cell [n_cells × h]
+/// row-major, b_cell [n_cells])`. The per-cell bias `b_c` is **always**
+/// fitted (it absorbs library size, keeping `e_c` depth-corrected and
+/// well-scaled) — a caller whose model scores without a per-cell bias
+/// (e.g. bge) simply discards `b_cell`; a global per-cell offset doesn't
+/// change `e_c`'s direction.
 pub fn project_cells(
     frozen_e: &[f32],
     frozen_b: &[f32],
     per_cell: &[Vec<(u32, f32)>],
     h: usize,
     lambda: f64,
-    fit_intercept: bool,
 ) -> (Vec<f32>, Vec<f32>) {
     let n_cells = per_cell.len();
     let solved: Vec<(Vec<f32>, f32)> = per_cell
         .par_iter()
-        .map(|feats| solve_one_cell(feats, frozen_e, frozen_b, h, lambda, fit_intercept))
+        .map(|feats| solve_one_cell(feats, frozen_e, frozen_b, h, lambda))
         .collect();
     let mut e = vec![0f32; n_cells * h];
     let mut b = vec![0f32; n_cells];
@@ -68,19 +69,18 @@ pub fn project_cells(
     (e, b)
 }
 
-/// Poisson MAP IRLS for one cell. `θ = [e_c; b_c]` (or just `e_c` when
-/// `fit_intercept` is false); the ridge `λ` applies to `e_c` only. Returns
-/// `(e_c, b_c)` (`b_c = 0` when no intercept). A cell with no observed
-/// features gets the zero embedding.
+/// Poisson MAP IRLS for one cell. `θ = [e_c; b_c]`; the ridge `λ` applies to
+/// `e_c` only (the intercept `b_c` is unpenalised and absorbs library size).
+/// Returns `(e_c, b_c)`. A cell with no observed features gets the zero
+/// embedding.
 pub fn solve_one_cell(
     feats: &[(u32, f32)],
     frozen_e: &[f32],
     frozen_b: &[f32],
     h: usize,
     lambda: f64,
-    fit_intercept: bool,
 ) -> (Vec<f32>, f32) {
-    let d = h + fit_intercept as usize; // intercept is the trailing dim, if any
+    let d = h + 1; // trailing dim is the intercept b_c
     if feats.is_empty() {
         return (vec![0f32; h], 0.0);
     }
@@ -94,11 +94,8 @@ pub fn solve_one_cell(
         for &(idx, n) in feats {
             let ef = &frozen_e[idx as usize * h..(idx as usize + 1) * h];
             let bf = frozen_b[idx as usize] as f64;
-            // s = ⟨e_c, e_f⟩ + b_f (+ b_c)
-            let mut s = bf;
-            if fit_intercept {
-                s += theta[h];
-            }
+            // s = ⟨e_c, e_f⟩ + b_f + b_c
+            let mut s = bf + theta[h];
             for (k, &efk) in ef.iter().enumerate() {
                 s += theta[k] * efk as f64;
             }
@@ -112,14 +109,10 @@ pub fn solve_one_cell(
                 for (bb, &efb) in ef.iter().enumerate().skip(a) {
                     hess[(a, bb)] += row * efb as f64;
                 }
-                if fit_intercept {
-                    hess[(a, h)] += row; // cross column with the intercept (1)
-                }
+                hess[(a, h)] += row; // cross column with the intercept (1)
             }
-            if fit_intercept {
-                grad[h] += resid;
-                hess[(h, h)] += mu;
-            }
+            grad[h] += resid;
+            hess[(h, h)] += mu;
         }
         // Ridge prior on e_c (not the intercept) + PD jitter on the diagonal.
         for k in 0..h {
@@ -145,8 +138,7 @@ pub fn solve_one_cell(
         }
     }
     let e_c: Vec<f32> = (0..h).map(|k| theta[k] as f32).collect();
-    let b_c = if fit_intercept { theta[h] as f32 } else { 0.0 };
-    (e_c, b_c)
+    (e_c, theta[h] as f32)
 }
 
 #[cfg(test)]
@@ -177,7 +169,7 @@ mod tests {
                 (f as u32, s.exp())
             })
             .collect();
-        let (e_c, _b_c) = solve_one_cell(&feats, &e, &b, h, 1e-3, true);
+        let (e_c, _b_c) = solve_one_cell(&feats, &e, &b, h, 1e-3);
         let dot: f32 = e_c.iter().zip(&e_star).map(|(a, b)| a * b).sum();
         let na: f32 = e_c.iter().map(|x| x * x).sum::<f32>().sqrt();
         let nb: f32 = e_star.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -190,18 +182,8 @@ mod tests {
 
     #[test]
     fn empty_cell_is_zero() {
-        let (e_c, b_c) = solve_one_cell(&[], &[0.0; 4], &[0.0; 1], 4, 1.0, true);
+        let (e_c, b_c) = solve_one_cell(&[], &[0.0; 4], &[0.0; 1], 4, 1.0);
         assert_eq!(e_c, vec![0.0; 4]);
-        assert_eq!(b_c, 0.0);
-    }
-
-    #[test]
-    fn no_intercept_returns_zero_bias() {
-        // With fit_intercept=false, b_c is always 0 and e_c has length h.
-        let e = vec![1.0f32, 0.0, 0.0, 1.0];
-        let b = vec![0.0f32, 0.0];
-        let (e_c, b_c) = solve_one_cell(&[(0, 2.0), (1, 1.0)], &e, &b, 2, 1.0, false);
-        assert_eq!(e_c.len(), 2);
         assert_eq!(b_c, 0.0);
     }
 
@@ -211,7 +193,7 @@ mod tests {
         let e = vec![1.0f32, 0.0, 0.0, 1.0]; // 2 features
         let b = vec![0.0f32, 0.0];
         let per_cell = vec![vec![(0u32, 2.0f32)], vec![(1u32, 3.0f32)]];
-        let (ec, bc) = project_cells(&e, &b, &per_cell, 2, 1.0, true);
+        let (ec, bc) = project_cells(&e, &b, &per_cell, 2, 1.0);
         assert_eq!(ec.len(), 4); // 2 cells × h=2
         assert_eq!(bc.len(), 2);
     }
