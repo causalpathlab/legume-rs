@@ -813,9 +813,9 @@ const PHASE2_RIDGE: f32 = 1.0;
 /// Phase 2 — project every cell onto the frozen feature dictionary, in
 /// parallel, and overwrite the `e_cell` var. The gated feature embedding is
 /// condition-dependent (`E_feat ⊙ exp(z·δ̄_s)`), so cells are grouped by
-/// condition and each condition's gated table is built once. bge scores
-/// without a per-cell bias, so the intercept is dropped (`fit_intercept`
-/// false). Cells with no observed features keep their current embedding.
+/// condition and each condition's gated table is built once. The per-cell
+/// bias is fitted (to absorb library size) but discarded — bge scores
+/// without it. Cells with no observed features keep their current embedding.
 #[allow(clippy::too_many_arguments)]
 fn project_cells_phase2(
     model: &mut JointEmbedModel,
@@ -874,7 +874,21 @@ fn project_cells_phase2(
                 let (cell, feats, counts) = cells[i];
                 let edges: Vec<(u32, f32)> =
                     feats.iter().zip(counts).map(|(&f, &c)| (f, c)).collect();
-                let (e_c, _) = solve_one_cell(&edges, &gated_flat, &b_feat, h, lambda, false);
+                // bge scores without a per-cell bias, so discard b_c (the solve
+                // still fits it to absorb the global level). The Poisson MAP
+                // matches absolute counts, so e_c's *magnitude* tracks within-
+                // cell count dynamic range / sequencing depth (a technical
+                // confound) — but its *direction* carries the cell state. bge's
+                // NCE feature side is scale-invariant, so L2-normalize each cell
+                // to keep only the (biological) direction; this is what the
+                // downstream archetypal topic step consumes.
+                let (mut e_c, _) = solve_one_cell(&edges, &gated_flat, &b_feat, h, lambda);
+                let nrm = e_c.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if nrm > 1e-8 {
+                    for v in e_c.iter_mut() {
+                        *v /= nrm;
+                    }
+                }
                 (cell as usize, e_c)
             })
             .collect();

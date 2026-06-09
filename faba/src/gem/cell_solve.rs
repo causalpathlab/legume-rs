@@ -50,9 +50,9 @@ pub fn solve_cell_embeddings(
     let (frozen_e, frozen_b) = embed_identities(model, &ids, h)?;
     // 3. Parallel per-cell Poisson-MAP projection (shared solver).
     let lambda = args.phase2_ridge.max(0.0) as f64;
-    // gem scores with a per-cell bias (b_cell), so fit the intercept.
+    // gem scores with a per-cell bias (b_cell), so keep the fitted b_c.
     let (e_flat, b_flat) = graph_embedding_util::cell_projection::project_cells(
-        &frozen_e, &frozen_b, &per_cell, h, lambda, /*fit_intercept=*/ true,
+        &frozen_e, &frozen_b, &per_cell, h, lambda,
     );
     // 4. Write back into the model's vars (and cached fields).
     let e_t = Tensor::from_vec(e_flat, (n_cells, h), &model.dev)?;
