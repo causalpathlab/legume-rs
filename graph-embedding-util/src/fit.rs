@@ -31,6 +31,9 @@ use log::{info, warn};
 use matrix_param::traits::Inference;
 use matrix_util::pair_graph::FeaturePairGraph;
 use nalgebra::DMatrix;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use rand_distr::weighted::WeightedIndex;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -169,6 +172,18 @@ pub struct FitConfig {
     /// Used by `--multiome` to up-weight matched (bridge) cells so they
     /// anchor the cross-modal alignment. `None` = every cell weight ×1.
     pub cell_weight_mult: Option<Vec<f32>>,
+    /// Phase-1 cell-axis mode (`k`). Controls only what shapes `E_feat` in
+    /// phase 1; phase 2 always analytically projects *every* cell against the
+    /// frozen feature side, so the full per-cell embedding is unaffected.
+    /// - `k == 0`: suppress the cell axis entirely (pure-pb — `E_feat` shaped
+    ///   by pb aggregates only; fastest). This is the default.
+    /// - `1 ≤ k < n_cells`: keep ≤`k` cells per pb-sample at EVERY collapse
+    ///   level (union), shrinking the phase-1 step budget
+    ///   (`Σ active_cells / batch_size`) while keeping rare/shallow cells
+    ///   visible to the shared feature dictionary.
+    /// - `k ≥ n_cells`: no pb-sample exceeds `k`, so subsampling is a no-op —
+    ///   every cell shapes `E_feat` (legacy all-cells behaviour; slowest).
+    pub phase1_cells_per_pb: usize,
 }
 
 /// Cell-cell NCE configuration. Positives = neighbor pairs from a
@@ -643,6 +658,52 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         cell_samplers.len()
     );
 
+    // Phase-1 cell-axis mode (`phase1_cells_per_pb` = k). The full
+    // `cell_samplers` above are always kept for the phase-2 projection (which
+    // visits every cell); k only controls what shapes `E_feat` in phase 1:
+    //   k == 0           → suppress the cell axis entirely (pure-pb phase 1);
+    //                      `E_feat` is driven by pb aggregates only.
+    //   1 ≤ k < n_cells  → subsample a *separate, smaller* view keeping ≤k cells
+    //                      per pb-sample at every collapse level (union),
+    //                      shrinking the per-epoch step budget from `n_cells`
+    //                      to ≈ k × pb-samples while preserving rare-cell coverage.
+    //   k ≥ n_cells      → no pb-sample can exceed k, so subsampling is a no-op:
+    //                      use the full set (legacy all-cells behaviour).
+    let use_cell_axis = config.phase1_cells_per_pb != 0;
+    let phase1_cell_samplers_owned: Option<Vec<PerBatchStratifiedCellSampler>> =
+        (config.phase1_cells_per_pb >= 1 && config.phase1_cells_per_pb < n_cells).then(|| {
+            subsample_cell_samplers_multilevel(
+                &cell_samplers,
+                &cell_to_pb_per_level,
+                config.phase1_cells_per_pb,
+                DEFAULT_STRATIFY_ALPHA_CELL,
+                config.cell_weight_mult.as_deref(),
+                config.seed,
+            )
+        });
+    let phase1_cell_samplers: &[PerBatchStratifiedCellSampler] = match &phase1_cell_samplers_owned {
+        Some(sub) => {
+            let kept: usize = sub.iter().map(|s| s.active_cells.len()).sum();
+            info!(
+                "Phase-1 cell subsampling: ≤{} cells per pb-sample (all {} levels) → \
+                 {} of {} cells shape E_feat (phase 2 still projects all {})",
+                config.phase1_cells_per_pb, num_levels, kept, n_cells, n_cells
+            );
+            sub
+        }
+        None => {
+            // k == 0 → cell axis suppressed (logged); k ≥ n_cells → legacy all-cells.
+            if !use_cell_axis {
+                info!(
+                    "Phase-1 cell axis SUPPRESSED (pure-pb): E_feat shaped by pb aggregates \
+                     only; phase 2 still projects all {} cells",
+                    n_cells
+                );
+            }
+            &cell_samplers
+        }
+    };
+
     let mut level_axes_data: Vec<(AxisCoarsenings, StratifiedSampler)> =
         Vec::with_capacity(num_levels);
     for (level_idx, pb) in pb_blobs.iter().enumerate() {
@@ -717,7 +778,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         model: &cell_model,
         unified,
         cell_axis: &cell_axis_coarsening,
-        sampler: AxisSampler::PerBatchStratified(&cell_samplers),
+        sampler: AxisSampler::PerBatchStratified(phase1_cell_samplers),
         lambda: DEFAULT_AXIS_LAMBDA,
         cell_cell: cell_cell_training,
         label: "cell",
@@ -750,14 +811,19 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // takes `&mut cell_model`.
     if config.frozen_feature_host.is_none() {
         let mut joint_axes: Vec<CompositeAxis> = Vec::with_capacity(1 + pb_axes.len());
-        joint_axes.push(cell_axis);
+        // `use_cell_axis == false` (phase1_cells_per_pb == 0) trains E_feat from
+        // pb aggregates only; `cell_axis` is left unused (its borrow ends here).
+        if use_cell_axis {
+            joint_axes.push(cell_axis);
+        }
         joint_axes.append(&mut pb_axes);
         let mut opt1 = AdamW::new(trainable_vars(&varmap, &["b_cell"]), adamw_params())?;
         let mut p1 = stage_params(&config);
         p1.composite_mode = CompositeMode::Sum;
         info!(
-            "Phase 1 (joint) — features + cell + {} pb level(s) [Sum], {} epochs",
-            joint_axes.len() - 1,
+            "Phase 1 (joint) — features + {}{} pb level(s) [Sum], {} epochs",
+            if use_cell_axis { "cell + " } else { "" },
+            joint_axes.len() - use_cell_axis as usize,
             config.epochs
         );
         train_composite(
@@ -1086,6 +1152,89 @@ fn pb_count(cell_to_pb: &[usize]) -> usize {
 /// < 2 — even if a few edges survive the pb-mismatch filter at that
 /// level, the loss carries near-zero training signal.
 const DEGENERATE_PB_RATIO: f32 = 0.5;
+
+/// Derive a phase-1-only subsampled view of the per-batch stratified cell
+/// samplers: keep at most `k` cells per pb-sample at EVERY collapse level
+/// (`cell_to_pb_per_level`, coarsest..finest), unioned across levels. The
+/// returned samplers cover only the kept cells; each batch's `cell_picker` is
+/// rebuilt from the kept cells' recomputed degree weights (`degree^alpha_cell ·
+/// mult`, degree recovered from `CellFeatureSampler.counts`), while the
+/// negative marginal (`neg` / `feature_pool`) is cloned unchanged so negatives
+/// stay drawn from the full per-batch feature pool.
+///
+/// Keeping ≤k per pb at *every* level (not just the finest) lets each level's
+/// partition contribute diverse representatives — robust even when refinement
+/// breaks strict nesting between adjacent levels. The finest level is batch-
+/// aware, so every non-empty batch keeps ≥1 cell; empty batches are dropped
+/// (the cell axis re-indexes at sample time and ignores the original batch id).
+fn subsample_cell_samplers_multilevel(
+    full: &[PerBatchStratifiedCellSampler],
+    cell_to_pb_per_level: &[Vec<usize>],
+    k: usize,
+    alpha_cell: f32,
+    cell_weight_mult: Option<&[f32]>,
+    seed: u64,
+) -> Vec<PerBatchStratifiedCellSampler> {
+    let n_cells = cell_to_pb_per_level.first().map_or(0, |v| v.len());
+    // Global keep bitmap: ≤k cells per pb-sample, per level, unioned.
+    let mut keep = vec![false; n_cells];
+    for (level, c2pb) in cell_to_pb_per_level.iter().enumerate() {
+        let n_pb = c2pb.iter().copied().max().map_or(0, |m| m + 1);
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); n_pb];
+        for (cell, &pb) in c2pb.iter().enumerate() {
+            buckets[pb].push(cell as u32);
+        }
+        // Per-level seed so the K kept cells differ across levels (more union
+        // diversity) yet stay reproducible across runs.
+        let mut rng =
+            StdRng::seed_from_u64(seed ^ (level as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        for b in buckets.iter_mut() {
+            // `partial_shuffle` does only k swaps (vs a full O(bucket) shuffle)
+            // and hands back the k-element random subset directly.
+            let chosen: &[u32] = if b.len() > k {
+                b.partial_shuffle(&mut rng, k).0
+            } else {
+                &b[..]
+            };
+            for &c in chosen {
+                keep[c as usize] = true;
+            }
+        }
+    }
+
+    // Filter each batch sampler to the kept cells; rebuild `cell_picker`.
+    full.iter()
+        .filter_map(|s| {
+            let cap = s.active_cells.len();
+            let mut active_cells: Vec<u32> = Vec::with_capacity(cap);
+            let mut per_cell: Vec<CellFeatureSampler> = Vec::with_capacity(cap);
+            let mut cell_w: Vec<f32> = Vec::with_capacity(cap);
+            for (i, &c) in s.active_cells.iter().enumerate() {
+                if !keep[c as usize] {
+                    continue;
+                }
+                let cf = &s.per_cell[i];
+                let degree: f32 = cf.counts.iter().sum();
+                let mult = cell_weight_mult.map_or(1.0, |m| m[c as usize]);
+                cell_w.push(degree.max(1e-8).powf(alpha_cell) * mult);
+                per_cell.push(cf.clone());
+                active_cells.push(c);
+            }
+            if active_cells.is_empty() {
+                return None;
+            }
+            let cell_picker =
+                WeightedIndex::new(cell_w).expect("non-empty subsampled cell weights");
+            Some(PerBatchStratifiedCellSampler {
+                cell_picker,
+                active_cells,
+                per_cell,
+                neg: s.neg.clone(),
+                feature_pool: s.feature_pool.clone(),
+            })
+        })
+        .collect()
+}
 
 /// Build the stratified per-batch cell samplers and filter out empty
 /// batches. Mirrors the previous `build_active_samplers` (flat) but

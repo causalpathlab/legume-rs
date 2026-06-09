@@ -109,6 +109,21 @@ pub struct BgeArgs {
     max_features: usize,
 
     #[arg(
+        long = "phase1-cells-per-pb",
+        default_value_t = 0,
+        help = "Phase-1 cell-axis mode (k). Controls what shapes the feature \
+                dictionary in phase 1; phase 2 ALWAYS analytically projects every \
+                cell, so the per-cell embedding output is unaffected. k=0 (default) → \
+                suppress the cell axis entirely (pure-pb: E_feat from pb aggregates \
+                only — fastest). 1≤k<n_cells → keep ≤k cells per pb-sample at each \
+                collapse level (union), cutting the phase-1 step budget while \
+                preserving rare-cell coverage. k≥n_cells → all cells (legacy; \
+                slowest). NOTE: an optional --cell-cell term rides the cell axis and \
+                is dropped when k=0."
+    )]
+    phase1_cells_per_pb: usize,
+
+    #[arg(
         long = "skip-etm",
         default_value_t = false,
         help = "Skip the default ETM resolution and emit only the raw bge embeddings \
@@ -619,6 +634,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         weight_decay: args.weight_decay,
         frozen_feature_host,
         cell_weight_mult,
+        phase1_cells_per_pb: args.phase1_cells_per_pb,
     };
 
     let out = ge::fit(&mut unified, config)?;
