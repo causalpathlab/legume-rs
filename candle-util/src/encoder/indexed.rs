@@ -287,6 +287,59 @@ impl IndexedEmbeddingEncoder {
         ops::log_softmax(&z_mean_nk, 1)
     }
 
+    /// Latent Gaussian params `(z_mean, z_lnvar)` from the **visible-pooled**
+    /// masked input — the masked analogue of [`Self::latent_gaussian_params_indexed`]
+    /// (pools only the visible genes, like [`Self::forward_indexed_masked`]).
+    pub fn latent_gaussian_params_masked(
+        &self,
+        indices: &Tensor,
+        values: &Tensor,
+        values_null: Option<&Tensor>,
+        values_mean: Option<&Tensor>,
+        visible_mask: &Tensor,
+        train: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        let h_nh = self.preprocess_indexed_masked(
+            indices,
+            values,
+            values_null,
+            values_mean,
+            visible_mask,
+        )?;
+        let fc_nl = self.fc.forward_t(&h_nh, train)?;
+        let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
+        let z_mean_nk = self.z_mean.forward_t(&bn_nl, train)?.clamp(-8.0, 8.0)?;
+        let z_lnvar_nk = self.z_lnvar.forward_t(&bn_nl, train)?.clamp(-8.0, 8.0)?;
+        Ok((z_mean_nk, z_lnvar_nk))
+    }
+
+    /// **Gaussian** masked-encoder forward → `(z [N,K], KL [N])`. Visible-pooled
+    /// like [`Self::forward_indexed_masked`], but returns the reparameterized
+    /// **Gaussian** latent (no softmax — unconstrained continuous factors) plus
+    /// the Gaussian KL. This is the masked-VAE bottleneck: the masked-imputation
+    /// objective still drives reconstruction, and the KL regularizes `z` toward
+    /// `N(0, I)`. At eval (`train = false`) `z` is the posterior mean.
+    pub fn forward_indexed_masked_gaussian(
+        &self,
+        indices: &Tensor,
+        values: &Tensor,
+        values_null: Option<&Tensor>,
+        values_mean: Option<&Tensor>,
+        visible_mask: &Tensor,
+        train: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params_masked(
+            indices,
+            values,
+            values_null,
+            values_mean,
+            visible_mask,
+            train,
+        )?;
+        let z_nk = gaussian_reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
+        Ok((z_nk, gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?))
+    }
+
     /// Compute latent Gaussian parameters from packed indexed input.
     pub fn latent_gaussian_params_indexed(
         &self,

@@ -18,6 +18,7 @@
 //! See `faba/temp.md` for the design.
 
 pub mod args;
+pub mod cell_solve;
 pub mod common;
 pub mod feature_table;
 pub mod gene_weight;
@@ -29,6 +30,3 @@ pub mod region;
 pub mod sampling;
 pub mod topics;
 pub mod train;
-
-#[cfg(test)]
-mod sim_test;

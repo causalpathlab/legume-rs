@@ -116,7 +116,7 @@ fn score_negative_slate(
     pos_axis_ids: &[u32],
     slate: &NegativeSlate,
 ) -> Result<Option<Tensor>> {
-    if slate.k == 0 || slate.len() == 0 {
+    if slate.k == 0 || slate.is_empty() {
         return Ok(None);
     }
     let b = pos_axis_ids.len();

@@ -24,6 +24,7 @@
     clippy::many_single_char_names
 )]
 
+pub mod cell_projection;
 pub mod coarsen;
 pub mod data;
 pub mod eval;

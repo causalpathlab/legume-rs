@@ -36,9 +36,14 @@ use super::feature_table::{FeatureTable, RowStratum};
 pub struct StratumPool {
     pub gene_ids: Vec<u32>,
     pub axis_ids: Vec<u32>,
+    /// Per-entry modality id. The AGG pool uses the sentinel 0 (its rows
+    /// are emitted via the masked-gate AGG path). The count-comp pool now
+    /// carries the entry's **splice modality** (`spliced` / `unspliced`,
+    /// each its own id ≥ 1) so the sampler can give them distinct δ
+    /// directions; modifier pools carry their single modality.
+    pub modality_ids: Vec<u32>,
     /// Transcript-position region bin per pool entry. Anchor strata
-    /// (agg / count-comp) use region 0 as a sentinel — the model masks
-    /// their log-deviation gate to exp(0) regardless. Satellite
+    /// (agg / count-comp) use region 0 as a sentinel. Satellite
     /// (modifier-comp) entries carry the real `region(component)`, so
     /// two same-gene components in different regions stay distinct.
     pub region_ids: Vec<u32>,
@@ -49,6 +54,10 @@ pub struct StratumPool {
 impl StratumPool {
     pub fn len(&self) -> usize {
         self.gene_ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.gene_ids.is_empty()
     }
 }
 
@@ -233,18 +242,18 @@ pub fn build_pseudobulk(
     // genes stop monopolising the shared program loadings z. See
     // `gene_weight`. A no-op (all weights 1.0) when penalty == 0.
     let n_genes = table.n_genes();
-    // Per-gene ubiquity from the cell-axis count pool (computed before the
-    // Fisher reweight, though that only mutates `weights` not `gene_ids`).
-    // Diagnostic / inverse-propensity signal; see `gene_weight`.
+    // Per-gene ubiquity / Fisher from the cell-axis **AGG** pool — it holds
+    // exactly one per-(gene, cell) total entry (spliced+unspliced summed),
+    // the per-(gene, cell) granularity these statistics assume. The
+    // count-comp pool is now split per splice modality (multiple entries
+    // per gene/cell), so reading it here would double-count. (The reweight
+    // below still mutates only `weights`, not `gene_ids`.) See `gene_weight`.
     let gene_ubiquity =
-        super::gene_weight::ubiquity_from_count_pool(&cell_pools.count_comp, n_genes, n_cells);
+        super::gene_weight::ubiquity_from_count_pool(&cell_pools.agg, n_genes, n_cells);
 
     let gene_fisher_weights = if args.housekeeping_penalty > 0.0 {
-        let w = super::gene_weight::fisher_weights_from_count_pool(
-            &cell_pools.count_comp,
-            n_genes,
-            n_cells,
-        );
+        let w =
+            super::gene_weight::fisher_weights_from_count_pool(&cell_pools.agg, n_genes, n_cells);
         apply_fisher_to_axis_pools(&mut cell_pools, &w, args.housekeeping_penalty);
         for lvl in pb_pools_per_level.iter_mut() {
             apply_fisher_to_axis_pools(lvl, &w, args.housekeeping_penalty);
@@ -316,8 +325,11 @@ fn aggregate_pools(
     n_modalities: usize,
     tau: f32,
 ) -> AxisPools {
-    // Anchor accumulators keyed by (gene_id, axis_id) — region-agnostic.
-    let mut count_comp: FxHashMap<(u32, u32), f32> = FxHashMap::default();
+    // Count-comp accumulator keyed by (gene_id, splice_modality, axis_id)
+    // so a gene's spliced and unspliced totals stay distinct pool entries
+    // (each embeds with its own δ direction). AGG stays keyed by
+    // (gene_id, axis_id) — the gene total, summed across splice types.
+    let mut count_comp: FxHashMap<(u32, u32, u32), f32> = FxHashMap::default();
     let mut agg: FxHashMap<(u32, u32), f32> = FxHashMap::default();
     // Satellite accumulators keyed by (gene_id, component, axis_id) so
     // two same-gene components stay distinct pool entries. A side map
@@ -338,7 +350,9 @@ fn aggregate_pools(
         };
         match stratum {
             RowStratum::CountComp => {
-                *count_comp.entry((g, aid)).or_insert(0.0) += t.count;
+                // Splice modality (≥1) from the table; AGG sums all splice.
+                let m = table.row_modality[row].unwrap_or(0);
+                *count_comp.entry((g, m, aid)).or_insert(0.0) += t.count;
                 *agg.entry((g, aid)).or_insert(0.0) += t.count;
             }
             RowStratum::ModifierComp => {
@@ -355,13 +369,17 @@ fn aggregate_pools(
         }
     }
 
-    // Anchor pools: region sentinel 0 (masked in the model).
-    let count_comp = anchor_pool_from_map(count_comp, tau);
-    let agg = anchor_pool_from_map(agg, tau);
+    // Anchor pools: region sentinel 0 (masked in the model). count-comp
+    // carries its per-entry splice modality; AGG carries sentinel 0.
+    let count_comp = count_pool_from_map(count_comp, tau);
+    let agg = agg_pool_from_map(agg, tau);
     let modifier_comp_per_modality: Vec<StratumPool> = modifier_by_mod
         .into_iter()
         .zip(modifier_region)
-        .map(|(m, region_map)| satellite_pool_from_map(m, &region_map, tau))
+        .enumerate()
+        .map(|(modality, (m, region_map))| {
+            satellite_pool_from_map(m, &region_map, modality as u32, tau)
+        })
         .collect();
     let modality_total_mass: Vec<f32> = modifier_comp_per_modality
         .iter()
@@ -387,23 +405,24 @@ fn temper(c: f32, tau: f32) -> f32 {
     }
 }
 
-/// Assemble a `StratumPool` from `(gene, axis, region, count)` entries,
-/// τ-tempering the weights. Both anchor and satellite builders feed this
-/// — they differ only in how they extract gene/axis/region from their
-/// map key.
+/// Assemble a `StratumPool` from `(gene, axis, modality, region, count)`
+/// entries, τ-tempering the weights. All pool builders feed this — they
+/// differ only in how they extract the fields from their map key.
 fn pool_from_entries(
     n_hint: usize,
     tau: f32,
-    entries: impl Iterator<Item = (u32, u32, u32, f32)>,
+    entries: impl Iterator<Item = (u32, u32, u32, u32, f32)>,
 ) -> StratumPool {
     let mut gene_ids = Vec::with_capacity(n_hint);
     let mut axis_ids = Vec::with_capacity(n_hint);
+    let mut modality_ids = Vec::with_capacity(n_hint);
     let mut region_ids = Vec::with_capacity(n_hint);
     let mut counts = Vec::with_capacity(n_hint);
     let mut weights = Vec::with_capacity(n_hint);
-    for (g, aid, region, c) in entries {
+    for (g, aid, modality, region, c) in entries {
         gene_ids.push(g);
         axis_ids.push(aid);
+        modality_ids.push(modality);
         region_ids.push(region);
         counts.push(c);
         weights.push(temper(c, tau));
@@ -411,25 +430,44 @@ fn pool_from_entries(
     StratumPool {
         gene_ids,
         axis_ids,
+        modality_ids,
         region_ids,
         counts,
         weights,
     }
 }
 
-/// Anchor strata (agg / count-comp): keyed by (gene, axis), region
-/// sentinel 0 (the model masks their gate to exp(0)).
-fn anchor_pool_from_map(map: FxHashMap<(u32, u32), f32>, tau: f32) -> StratumPool {
+/// AGG anchor pool: keyed by (gene, axis); modality sentinel 0, region
+/// sentinel 0 (the model masks the AGG gate to exp(0)).
+fn agg_pool_from_map(map: FxHashMap<(u32, u32), f32>, tau: f32) -> StratumPool {
     let n = map.len();
-    pool_from_entries(n, tau, map.into_iter().map(|((g, aid), c)| (g, aid, 0, c)))
+    pool_from_entries(
+        n,
+        tau,
+        map.into_iter().map(|((g, aid), c)| (g, aid, 0, 0, c)),
+    )
+}
+
+/// Count-comp anchor pool: keyed by (gene, splice_modality, axis); each
+/// entry carries its splice modality (≥1) so spliced/unspliced embed with
+/// distinct δ directions. Region stays the sentinel 0.
+fn count_pool_from_map(map: FxHashMap<(u32, u32, u32), f32>, tau: f32) -> StratumPool {
+    let n = map.len();
+    pool_from_entries(
+        n,
+        tau,
+        map.into_iter().map(|((g, m, aid), c)| (g, aid, m, 0, c)),
+    )
 }
 
 /// Satellite stratum (modifier-comp): keyed by (gene, component, axis);
 /// each entry carries the component's transcript-position region from
-/// the side map (default 0 when un-annotated).
+/// the side map (default 0 when un-annotated). `modality` is the single
+/// modality this pool was built for.
 fn satellite_pool_from_map(
     map: FxHashMap<(u32, u32, u32), f32>,
     region_map: &FxHashMap<(u32, u32), u32>,
+    modality: u32,
     tau: f32,
 ) -> StratumPool {
     let n = map.len();
@@ -438,7 +476,7 @@ fn satellite_pool_from_map(
         tau,
         map.into_iter().map(|((g, comp, aid), c)| {
             let region = region_map.get(&(g, comp)).copied().unwrap_or(0);
-            (g, aid, region, c)
+            (g, aid, modality, region, c)
         }),
     )
 }

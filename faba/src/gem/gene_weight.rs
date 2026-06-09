@@ -39,9 +39,10 @@ pub fn fisher_weights_from_count_pool(
     n_genes: usize,
     n_cells: usize,
 ) -> Vec<f32> {
-    // Each count-comp entry is one (gene, cell) total (spliced+unspliced
-    // already summed in `aggregate_pools`), so per-gene Σc and Σc² over
-    // entries give the per-cell mean/variance ingredients directly.
+    // Fed the AGG pool: one (gene, cell) total per entry (spliced+unspliced
+    // summed in `aggregate_pools`), so per-gene Σc and Σc² over entries give
+    // the per-cell mean/variance ingredients directly. (The count-comp pool
+    // is split per splice modality and would double-count here.)
     let mut sum = vec![0.0_f64; n_genes];
     let mut sumsq = vec![0.0_f64; n_genes];
     for i in 0..count_comp.len() {

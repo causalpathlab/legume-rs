@@ -374,13 +374,9 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // own `D_coarse` view. Same correction the indexed encoder gets
     // via gather — gives the dense encoder a stable per-gene null
     // beside the per-cell batch null.
-    let feature_mean_full: Vec<f32> = {
-        let mu = finest_collapsed.mu_observed.posterior_mean();
-        let n_pb = mu.ncols().max(1) as f32;
-        (0..n_features_full)
-            .map(|d| mu.row(d).iter().sum::<f32>() / n_pb)
-            .collect()
-    };
+    let feature_mean_full: Vec<f32> = crate::topic::common::pseudobulk_feature_mean(
+        finest_collapsed.mu_observed.posterior_mean(),
+    );
     // `μ_d` at coarse level = **mean** per fine gene within each
     // group. The data and batch null are sum-coarsened
     // (`aggregate_columns_nd` on counts/ratios), so `y_coarse ≈

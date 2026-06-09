@@ -13,6 +13,7 @@ pub mod bipartite;
 pub mod delta_topic;
 pub mod dyn_decoder;
 pub mod embedded_topic;
+pub mod gaussian_nb;
 pub mod joint_topic;
 pub mod masked_etm;
 pub mod nb_mixture;
@@ -26,6 +27,7 @@ pub use bipartite::{
 pub use delta_topic::DeltaTopicDecoder;
 pub use dyn_decoder::{create_dyn_decoder, DynDecoderModuleT};
 pub use embedded_topic::EmbeddedTopicDecoder;
+pub use gaussian_nb::GaussianNbDecoder;
 pub use joint_topic::JointTopicDecoder;
 pub use masked_etm::{EmbeddedNbTopicDecoder, MaskedNbTarget};
 pub use nb_mixture::NbMixtureTopicDecoder;

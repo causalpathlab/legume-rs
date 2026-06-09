@@ -28,6 +28,7 @@ use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs}
 use candle_core::{Device, Tensor};
 use candle_util::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
 use candle_util::decoder::{MultinomTopicDecoder, NbMixtureTopicDecoder, NbTopicDecoder};
+use candle_util::encoder::{GaussianEncoder, GaussianEncoderArgs};
 use candle_util::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
 use candle_util::encoder::{LogSoftmaxEncoder, LogSoftmaxEncoderArgs};
 use candle_util::topic_refinement::{refine_topic_proportions, TopicRefinementConfig};
@@ -241,13 +242,19 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
         );
     }
 
-    use crate::topic::model_metadata::{MODEL_TYPE_INDEXED_MASKED, MODEL_TYPE_TOPIC};
+    use crate::topic::model_metadata::{
+        MODEL_TYPE_INDEXED_MASKED, MODEL_TYPE_MASKED_VAE, MODEL_TYPE_TOPIC, MODEL_TYPE_VAE,
+    };
     match metadata.model_type.as_ref() {
         MODEL_TYPE_TOPIC => predict_dense(args, &metadata),
-        MODEL_TYPE_INDEXED_MASKED => predict_masked(args, &metadata),
+        // Both masked models share the encoder-only path; the Gaussian latent
+        // only switches which encoder forward (simplex vs raw z) is run.
+        MODEL_TYPE_INDEXED_MASKED => predict_masked(args, &metadata, false),
+        MODEL_TYPE_MASKED_VAE => predict_masked(args, &metadata, true),
+        MODEL_TYPE_VAE => predict_vae(args, &metadata),
         other => anyhow::bail!(
-            "predict: unsupported model_type '{other}' (expected '{MODEL_TYPE_TOPIC}' or \
-             '{MODEL_TYPE_INDEXED_MASKED}')",
+            "predict: unsupported model_type '{other}' (expected '{MODEL_TYPE_TOPIC}', \
+             '{MODEL_TYPE_INDEXED_MASKED}', '{MODEL_TYPE_MASKED_VAE}', or '{MODEL_TYPE_VAE}')",
         ),
     }
 }
@@ -718,7 +725,11 @@ fn remap_and_coarsen_dense(
 /// on the held-out cells, and writes the latent. No decoder/refinement (v1);
 /// batch correction at predict is gene-mean only (per-cell residual null is a
 /// future refinement).
-fn predict_masked(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
+fn predict_masked(
+    args: &PredictArgs,
+    metadata: &TopicModelMetadata,
+    latent_gaussian: bool,
+) -> anyhow::Result<()> {
     use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
     use crate::topic::model_metadata::load_feature_mean;
 
@@ -789,6 +800,7 @@ fn predict_masked(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::
         enc_context_size,
         shortlist_weights: &shortlist_weights,
         feature_mean: &feature_mean,
+        latent_gaussian,
     };
     let z_nk = evaluate_latent_masked(
         &data_vec,
@@ -800,10 +812,85 @@ fn predict_masked(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::
 
     let cell_names = data_vec.column_names()?;
     crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names)?;
+    let model_label = if latent_gaussian {
+        "masked-vae"
+    } else {
+        "masked-topic"
+    };
     info!(
-        "Wrote {}.latent.parquet (masked-topic, encoder-only)",
+        "Wrote {}.latent.parquet ({model_label}, encoder-only)",
         args.out
     );
+    Ok(())
+}
+
+/// Held-out latent inference for the Gaussian VAE ([`MODEL_TYPE_VAE`]).
+/// Rebuilds the [`GaussianEncoder`] and runs it (encoder-only, eval mode →
+/// posterior mean `z`) over the held-out cells. Like `predict_masked`, batch
+/// correction is gene-mean only (the per-gene μ_d divisor inside
+/// `anscombe_residual`); a per-cell residual null is a future refinement. The
+/// latent is continuous factors, so there is no decoder refinement to do.
+fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
+    use crate::topic::model_metadata::load_feature_mean;
+
+    let (training_genes, _loadings) = load_dictionary(&args.model)?;
+    let (_fm_genes, feature_mean) = load_feature_mean(&args.model)?;
+    anyhow::ensure!(
+        feature_mean.len() == training_genes.len(),
+        "feature_mean gene count ({}) != dictionary gene count ({})",
+        feature_mean.len(),
+        training_genes.len()
+    );
+
+    let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
+        data_files: args.data_files.clone(),
+        batch_files: args.batch_files.clone(),
+        preload: args.preload_data,
+        ..Default::default()
+    })?;
+    let mut data_vec = loaded.data;
+    data_vec.register_batch_membership(&loaded.batch);
+    info!(
+        "Held-out data: {} features × {} cells",
+        data_vec.num_rows(),
+        data_vec.num_columns()
+    );
+
+    let new_genes = data_vec.row_names()?;
+    let gene_remap = build_remap(&training_genes, &new_genes, &args.query_name_opts())?;
+
+    let cpu_dev = Device::Cpu;
+    let mut parameters = candle_nn::VarMap::new();
+    let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
+    let encoder = GaussianEncoder::new(
+        GaussianEncoderArgs {
+            n_features: metadata.n_features_encoder,
+            n_latent: metadata.n_topics,
+            layers: &metadata.encoder_hidden,
+            feature_mean: Some(&feature_mean),
+        },
+        &parameters,
+        vb.clone(),
+    )?;
+    let safetensors_path = format!("{}.safetensors", args.model);
+    info!("Loading weights from {safetensors_path}");
+    parameters.load(&safetensors_path)?;
+
+    let ntot = data_vec.num_columns();
+    let (z_nk, _llik, _total) =
+        run_predict_blocks(ntot, metadata.n_topics, args.minibatch_size, |(lb, ub)| {
+            // Gene-mean null only (x0 = None): the divisive μ_d correction is
+            // baked into the encoder via `feature_mean`.
+            let csc = data_vec.read_columns_csc(lb..ub)?;
+            let x_nd = remap_and_coarsen_dense(&csc, gene_remap.as_ref(), None, &cpu_dev)?;
+            let (z, _) = encoder.forward_t(&x_nd, None, false)?;
+            let z_mat = Mat::from_tensor(&z.to_device(&Device::Cpu)?)?;
+            Ok((lb, z_mat, Vec::new(), Vec::new()))
+        })?;
+
+    let cell_names = data_vec.column_names()?;
+    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names)?;
+    info!("Wrote {}.latent.parquet (vae, encoder-only)", args.out);
     Ok(())
 }
 
