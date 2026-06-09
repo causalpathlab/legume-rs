@@ -20,7 +20,7 @@ use auxiliary_data::feature_names::FeatureNameKind;
 use auxiliary_data::frozen_features::FrozenFeatureHost;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
-use candle_util::frozen_features::{trainable_only, trainable_vars};
+use candle_util::frozen_features::trainable_vars;
 use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, MultilevelParams};
 use data_beans_alg::gene_weighting::{
     compute_nb_fisher_weights, load_per_gene_weights, save_per_gene_weights,
@@ -581,7 +581,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         );
     }
     let n_conditions = unified.n_conditions();
-    let cell_model = JointEmbedModel::new_with_init(
+    let mut cell_model = JointEmbedModel::new_with_init(
         ModelArgs {
             n_features,
             n_cells,
@@ -745,7 +745,10 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // Without the cell axis, `E_feat` is driven only by pb aggregates and rare
     // compartments (DC/NK/HSPC) collapse into abundant ones. Phase 2 then
     // recalibrates e_cell for *every* cell against the frozen `E_feat`.
-    let cell_axis = if config.frozen_feature_host.is_none() {
+    // The axes borrow `cell_model` / `cell_samplers`; confine them to this
+    // block so those borrows are released before the phase-2 projection
+    // takes `&mut cell_model`.
+    if config.frozen_feature_host.is_none() {
         let mut joint_axes: Vec<CompositeAxis> = Vec::with_capacity(1 + pb_axes.len());
         joint_axes.push(cell_axis);
         joint_axes.append(&mut pb_axes);
@@ -769,45 +772,128 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             &p1,
             smoother.as_mut(),
         )?;
-        joint_axes.swap_remove(0) // recover the cell axis (index 0) for phase 2
-    } else {
-        cell_axis
-    };
+    }
+    // When the feature side is supplied frozen the phase-1 block is skipped;
+    // `cell_axis` / `pb_axes` then go unused and their borrows of
+    // `cell_model` / `cell_samplers` end here (NLL), freeing them for the
+    // phase-2 `&mut` projection below.
 
-    // ---- Phase 2: dense per-cell embedding against the frozen feature side ----
-    // Train ONLY `e_cell`; everything else — E_feat/b_feat/z/δ, every pb
-    // cell-side embedding, the dropped b_cell — is frozen. Single axis ⇒
-    // separable per-cell fit; the n_units() fix makes the auto budget sweep
-    // every cell ~once/epoch (this is the uniform recalibration that
-    // guarantees coverage of cells the joint phase-1 sampler under-touched).
-    let mut opt2 = AdamW::new(trainable_only(&varmap, &["e_cell"]), adamw_params())?;
-    let mut p2 = stage_params(&config);
-    p2.composite_mode = CompositeMode::Sum; // single axis
-    p2.feature_embedding_l2 = 0.0; // feature side is frozen — nothing to regularize
-    p2.z_l2 = 0.0;
-    p2.delta_l2 = 0.0;
-    let cell_axes = [cell_axis];
-    info!(
-        "Phase 2 — dense per-cell embedding ({} cells, feature side frozen), {} epochs",
-        n_cells, config.epochs
-    );
-    train_composite(
-        &CompositeTrainContext {
-            axes: &cell_axes,
-            feat_weights: &feat_weights,
-            dev: &config.device,
-            stop: &stop,
-            cell_to_pb_per_level: None,
-        },
-        &mut opt2,
-        &p2,
-        None, // feature side frozen — do not smooth E_feat in phase 2
-    )?;
+    // ---- Phase 2: analytical per-cell projection onto the frozen feature
+    // side. With E_feat/b_feat/z/δ frozen, each cell's embedding is
+    // independent — so rather than SGD over `e_cell`, project every cell
+    // directly (Poisson MAP, ridge prior) in parallel. bge scores without a
+    // per-cell bias, so the intercept is dropped. See `crate::cell_projection`.
+    if !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        info!(
+            "Phase 2 — analytical per-cell projection ({} cells, feature side frozen, ridge λ={})",
+            n_cells, PHASE2_RIDGE
+        );
+        project_cells_phase2(
+            &mut cell_model,
+            &varmap,
+            &cell_samplers,
+            &unified.condition_membership,
+            n_cells,
+            PHASE2_RIDGE as f64,
+            &config.device,
+        )?;
+    }
 
     Ok(FitOutput {
         model: cell_model,
         varmap,
     })
+}
+
+/// Ridge prior strength λ on `e_cell` in the analytical phase-2 projection.
+/// The Poisson MAP fits each cell's observed features and this Gaussian
+/// prior stands in for the (infeasible) all-feature softmax partition.
+const PHASE2_RIDGE: f32 = 1.0;
+
+/// Phase 2 — project every cell onto the frozen feature dictionary, in
+/// parallel, and overwrite the `e_cell` var. The gated feature embedding is
+/// condition-dependent (`E_feat ⊙ exp(z·δ̄_s)`), so cells are grouped by
+/// condition and each condition's gated table is built once. bge scores
+/// without a per-cell bias, so the intercept is dropped (`fit_intercept`
+/// false). Cells with no observed features keep their current embedding.
+#[allow(clippy::too_many_arguments)]
+fn project_cells_phase2(
+    model: &mut JointEmbedModel,
+    varmap: &VarMap,
+    cell_samplers: &[PerBatchStratifiedCellSampler],
+    condition_membership: &[u32],
+    n_cells: usize,
+    lambda: f64,
+    dev: &Device,
+) -> anyhow::Result<()> {
+    use crate::cell_projection::solve_one_cell;
+    use anyhow::Context;
+    use candle_util::candle_core::{IndexOp, Tensor};
+    use rayon::prelude::*;
+
+    let h = model.embedding_dim;
+    let n_conditions = model.n_conditions.max(1);
+
+    // Condition-independent pieces, once.
+    let b_feat: Vec<f32> = model.b_feat.to_vec1()?;
+    // δ̄ = δ mean-centered across conditions (dim 1): [K, S, H].
+    let delta_centered = model.delta.broadcast_sub(&model.delta.mean_keepdim(1)?)?;
+
+    // Seed from the current e_cell so cells with no observed features keep
+    // their existing (phase-1 / init) embedding.
+    let mut e_out: Vec<f32> = model.e_cell.flatten_all()?.to_vec1()?;
+
+    // Flat references to every active cell's (features, counts).
+    let mut cells: Vec<(u32, &[u32], &[f32])> = Vec::new();
+    for s in cell_samplers {
+        for (i, &cell) in s.active_cells.iter().enumerate() {
+            let cf = &s.per_cell[i];
+            cells.push((cell, &cf.features, &cf.counts));
+        }
+    }
+    // Group cell indices by condition (each gated table built once).
+    let mut by_cond: Vec<Vec<usize>> = vec![Vec::new(); n_conditions];
+    for (i, &(cell, _, _)) in cells.iter().enumerate() {
+        let s = (condition_membership[cell as usize] as usize).min(n_conditions - 1);
+        by_cond[s].push(i);
+    }
+
+    for (s, idxs) in by_cond.iter().enumerate() {
+        if idxs.is_empty() {
+            continue;
+        }
+        // Gated feature table for condition s: E_feat ⊙ exp(z · δ̄_s).
+        let delta_s = delta_centered.i((.., s, ..))?.contiguous()?; // [K, H]
+        let logdev = model.z.matmul(&delta_s)?; // [F, K]·[K, H] = [F, H]
+        let gated = model.e_feat.broadcast_mul(&logdev.exp()?)?; // [F, H]
+        let gated_flat: Vec<f32> = gated.flatten_all()?.to_vec1()?;
+
+        let solved: Vec<(usize, Vec<f32>)> = idxs
+            .par_iter()
+            .map(|&i| {
+                let (cell, feats, counts) = cells[i];
+                let edges: Vec<(u32, f32)> =
+                    feats.iter().zip(counts).map(|(&f, &c)| (f, c)).collect();
+                let (e_c, _) = solve_one_cell(&edges, &gated_flat, &b_feat, h, lambda, false);
+                (cell as usize, e_c)
+            })
+            .collect();
+        for (cell, e_c) in solved {
+            e_out[cell * h..(cell + 1) * h].copy_from_slice(&e_c);
+        }
+    }
+
+    // Overwrite the e_cell var + the model's cached tensor.
+    let e_t = Tensor::from_vec(e_out, (n_cells, h), dev)?;
+    varmap
+        .data()
+        .lock()
+        .unwrap()
+        .get("e_cell")
+        .context("e_cell var missing")?
+        .set(&e_t)?;
+    model.e_cell = e_t;
+    Ok(())
 }
 
 struct CellCellPrepared {
@@ -1046,6 +1132,7 @@ fn build_active_samplers(
         // Group this slab's nonzeros by local column (cell). `for_each_triplet`
         // emits out_col relative to the passed `start..end`, i.e. 0..slab.
         let mut col_feats: Vec<Vec<u32>> = vec![Vec::new(); slab];
+        let mut col_counts: Vec<Vec<f32>> = vec![Vec::new(); slab];
         let mut col_wts: Vec<Vec<f32>> = vec![Vec::new(); slab];
         let mut col_deg: Vec<f32> = vec![0.0; slab];
         data.for_each_triplet(start..end, slab, |brow, local_col, v| {
@@ -1060,6 +1147,7 @@ fn build_active_samplers(
             let cell = start + lc;
             let b = batch_membership[cell] as usize;
             col_feats[lc].push(uid);
+            col_counts[lc].push(v);
             col_wts[lc].push((v * feat_weights[uid as usize]).max(1e-8));
             col_deg[lc] += v;
             feat_count[b][uid as usize] += v;
@@ -1074,6 +1162,7 @@ fn build_active_samplers(
                 WeightedIndex::new(std::mem::take(&mut col_wts[lc])).expect("cell-feature weights");
             per_cell[b].push(CellFeatureSampler {
                 features: std::mem::take(&mut col_feats[lc]),
+                counts: std::mem::take(&mut col_counts[lc]),
                 picker,
             });
             active_cells[b].push(cell);

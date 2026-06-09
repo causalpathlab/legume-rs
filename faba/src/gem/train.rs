@@ -98,17 +98,19 @@ pub fn train(
     // With the feature side frozen, each cell's embedding is independent —
     // so instead of SGD we project every cell onto the frozen dictionary in
     // parallel (Poisson MAP, ridge prior). See `cell_solve`.
-    let phase2_on = args.phase2_epochs.map(|n| n > 0).unwrap_or(true);
-    let run_phase2 = !args.no_cell_axis && model.n_cells > 0 && phase2_on;
-    if run_phase2 && !stop.load(Ordering::Relaxed) {
-        info!(
-            "phase 2/2 (analytical cell projection onto frozen features, ridge λ={}): {} cells",
-            args.phase2_ridge, model.n_cells
-        );
-        cell_solve::solve_cell_embeddings(model, table, &pb.cell_pools, args)
-            .context("phase-2 cell projection")?;
-    } else if run_phase2 {
-        info!("phase 2 skipped (interrupted in phase 1)");
+    let want_phase2 =
+        !args.no_cell_axis && model.n_cells > 0 && args.phase2_epochs.is_none_or(|n| n > 0);
+    if want_phase2 {
+        if stop.load(Ordering::Relaxed) {
+            info!("phase 2 skipped (interrupted in phase 1)");
+        } else {
+            info!(
+                "phase 2/2 (analytical cell projection onto frozen features, ridge λ={}): {} cells",
+                args.phase2_ridge, model.n_cells
+            );
+            cell_solve::solve_cell_embeddings(model, &pb.cell_pools, args)
+                .context("phase-2 cell projection")?;
+        }
     }
 
     Ok(())
