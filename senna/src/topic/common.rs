@@ -158,6 +158,16 @@ pub(crate) fn sample_collapsed_data(
     Ok((mixed_nd, batch_nd, target_nd))
 }
 
+/// Per-gene mean rate `μ_d` from a `[D, n_pb]` pseudobulk posterior mean —
+/// the row-mean across pseudobulks. This is the divisive gene-mean correction
+/// fed to `anscombe_residual` (full-`D`; callers coarsen afterward if needed).
+pub(crate) fn pseudobulk_feature_mean(mu_dp: &Mat) -> Vec<f32> {
+    let n_pb = mu_dp.ncols().max(1) as f32;
+    (0..mu_dp.nrows())
+        .map(|d| mu_dp.row(d).iter().sum::<f32>() / n_pb)
+        .collect()
+}
+
 /// Result of loading and collapsing input data for topic model training.
 pub struct PreparedData {
     pub data_vec: SparseIoVec,

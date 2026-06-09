@@ -133,6 +133,10 @@ pub(crate) struct EvaluateLatentMaskedConfig<'a> {
     pub enc_context_size: usize,
     pub shortlist_weights: &'a [f32],
     pub feature_mean: &'a [f32],
+    /// Masked-VAE: use the Gaussian masked forward (posterior-mean `z`, no
+    /// softmax) instead of the simplex `log θ` forward. The latent semantics
+    /// differ but the eval path (all genes visible, no decoder) is identical.
+    pub latent_gaussian: bool,
 }
 
 /// Encoder-only latent inference for the masked-imputation topic model.
@@ -175,15 +179,28 @@ pub(crate) fn evaluate_latent_masked(
             .map(|x0| gather_null_at_indices(x0, &enc_pack.indices, config.dev))
             .transpose()?;
         let visible = enc_pack.values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
-        let log_z_nk = encoder.forward_indexed_masked(
-            &enc_pack.indices,
-            &enc_pack.values,
-            enc_values_null.as_ref(),
-            enc_pack.values_mean.as_ref(),
-            &visible,
-            false,
-        )?;
-        let z_nk = log_z_nk.to_device(&candle_core::Device::Cpu)?;
+        let latent_nk = if config.latent_gaussian {
+            // Posterior mean `z` (train=false → reparam returns the mean).
+            let (z, _kl) = encoder.forward_indexed_masked_gaussian(
+                &enc_pack.indices,
+                &enc_pack.values,
+                enc_values_null.as_ref(),
+                enc_pack.values_mean.as_ref(),
+                &visible,
+                false,
+            )?;
+            z
+        } else {
+            encoder.forward_indexed_masked(
+                &enc_pack.indices,
+                &enc_pack.values,
+                enc_values_null.as_ref(),
+                enc_pack.values_mean.as_ref(),
+                &visible,
+                false,
+            )?
+        };
+        let z_nk = latent_nk.to_device(&candle_core::Device::Cpu)?;
         Ok((lb, Mat::from_tensor(&z_nk)?))
     })
 }

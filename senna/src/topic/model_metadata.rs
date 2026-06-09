@@ -11,6 +11,18 @@ pub const MODEL_TYPE_TOPIC: &str = "topic";
 /// Inference is encoder-only (no decoder refinement). The retired generative
 /// indexed-topic model used `"indexed_topic_packed"`; that path is gone.
 pub const MODEL_TYPE_INDEXED_MASKED: &str = "indexed_topic_masked";
+/// Masked **Gaussian VAE** (`senna masked-vae`): same masked-imputation ETM
+/// pipeline as [`MODEL_TYPE_INDEXED_MASKED`], but the encoder emits a
+/// reparameterized Gaussian latent `z` (no simplex softmax) regularized by a KL
+/// term, and `exp(z)` drives the NB head's per-topic intensities. Inference is
+/// encoder-only (posterior-mean `z`).
+pub const MODEL_TYPE_MASKED_VAE: &str = "masked_vae";
+/// scVI-style Gaussian VAE (`senna vae`): a Gaussian (unconstrained continuous)
+/// latent `z` from a [`candle_util::encoder::GaussianEncoder`] paired with a
+/// [`candle_util::decoder::GaussianNbDecoder`] (`π = softmax_d(z·W) → μ =
+/// library·π`, NB). The latent is continuous factors, not simplex topic
+/// proportions; the dictionary is gene × factor loadings.
+pub const MODEL_TYPE_VAE: &str = "vae";
 
 /// Metadata needed to reconstruct a trained topic model for inference.
 #[derive(Serialize, Deserialize)]
