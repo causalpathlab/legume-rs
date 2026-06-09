@@ -163,18 +163,25 @@ pub struct GemArgs {
     #[arg(short = 'i', long, default_value_t = 30, help = "Training epochs")]
     pub epochs: usize,
 
-    /// Phase-2 epochs: after the joint phase-1 loop (cell + pb axes shape
-    /// the feature side β/z/δ/γ together), a second phase **freezes** the
-    /// entire feature side and every pb head and densely re-evaluates only
-    /// the per-cell embedding `e_cell` against it (mirrors `senna bge`'s
-    /// two-phase fit). One pass per epoch sweeps every cell once. Omit to
-    /// reuse `--epochs`; set `0` to skip phase 2 entirely (also skipped
-    /// under `--no-cell-axis`).
-    #[arg(
-        long,
-        help = "Phase-2 cell-only epochs (default: same as --epochs; 0 = skip)"
-    )]
+    /// Phase-2 gate: after phase 1 fixes the feature side (β/z/δ/γ + pb
+    /// heads), phase 2 freezes it and re-evaluates the per-cell embedding
+    /// `e_cell` against it. Phase 2 is now an **analytical** per-cell
+    /// projection (Poisson MAP onto the frozen dictionary, solved in
+    /// parallel — not SGD), so the numeric value is just an on/off gate:
+    /// `0` skips phase 2, any non-zero (or omitted → default) runs it.
+    /// Also skipped under `--no-cell-axis`. (The old name is kept for
+    /// back-compat; the value no longer counts SGD epochs.)
+    #[arg(long, help = "Phase-2 cell projection on/off (0 = skip; default = on)")]
     pub phase2_epochs: Option<usize>,
+
+    /// Ridge prior strength λ on `e_cell` in the analytical phase-2
+    /// projection. The Poisson MAP fits each cell's observed features and
+    /// this Gaussian prior stands in for the (infeasible) all-feature
+    /// partition — higher λ shrinks `e_cell` toward 0 / regularises cells
+    /// with few features. The per-cell intercept `b_cell` is left
+    /// unpenalised (it absorbs library size).
+    #[arg(long, default_value_t = 1.0, help = "Phase-2 ridge prior on e_cell")]
+    pub phase2_ridge: f32,
 
     /// Batches per epoch. **Omit for auto** — one weighted pass over the
     /// largest axis (`ceil(max(n_cells, max_pb_per_level) / batch_size)`).
