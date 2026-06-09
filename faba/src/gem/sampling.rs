@@ -100,6 +100,10 @@ impl NegativeSlate {
     pub fn len(&self) -> usize {
         self.gene_for_rho.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.gene_for_rho.is_empty()
+    }
 }
 
 pub struct SubBatch {
@@ -132,6 +136,15 @@ pub struct SamplerState {
     pub pb_per_level: Vec<AxisDists>,
     pub modifier_modality_ids: Vec<u32>,
     pub measured_genes_per_modality: Vec<Vec<u32>>,
+    /// `is_count_modality[m]` = true for the count-derived satellite
+    /// modalities (`spliced` / `unspliced`). Used to route a count
+    /// positive's random negatives to the count pool (filtered to the
+    /// same splice modality) rather than the modifier pools.
+    pub is_count_modality: Vec<bool>,
+    /// Count satellite modality ids (`spliced` / `unspliced`). The
+    /// swap-modality negatives for anchor positives are drawn from this
+    /// set so spliced and unspliced separate directionally.
+    pub count_modality_ids: Vec<u32>,
     pub n_regions: usize,
     /// Per-gene NB-Fisher loss weight `w_g^penalty` (length `n_genes`),
     /// precomputed once so the per-positive draw loop is a plain lookup
@@ -193,6 +206,8 @@ impl SamplerState {
             pb_per_level,
             modifier_modality_ids,
             measured_genes_per_modality,
+            is_count_modality: table.is_count_modality.clone(),
+            count_modality_ids: table.count_modality_ids.clone(),
             n_regions,
             anchor_loss_weights,
         }
@@ -277,11 +292,20 @@ fn build_anchor_sub_batch<R: Rng>(
         for _ in 0..b_count {
             let i = dist.sample(rng);
             let w = lookup(pools.count_comp.gene_ids[i]);
+            // δ/γ modality rides along from the pool entry — `spliced` /
+            // `unspliced`, each its own id ≥ 1 (distinct δ direction). The
+            // **bias** uses the shared count slot 0, so spliced/unspliced
+            // can't be told apart by a per-modality bias column — the
+            // directional contrast is forced into the embedding (a distinct
+            // b_comp per splice would let the bias absorb it and δ never
+            // learns to separate them).
+            let modality = pools.count_comp.modality_ids[i];
             push_component_positive(
                 &mut positives,
                 &pools.count_comp,
                 i,
-                /*modality=*/ 0,
+                modality,
+                COUNT_BIAS_MODALITY,
                 w,
             );
         }
@@ -291,13 +315,21 @@ fn build_anchor_sub_batch<R: Rng>(
         return None;
     }
 
-    let rand = draw_random_negatives(pools, dists, &positives, args.n_rand, rng);
+    let rand = draw_random_negatives(state, pools, dists, &positives, args.n_rand, rng);
+    // Swap-modality negatives over the count satellite modalities: keep the
+    // gene/cell, swap the splice modality (spliced↔unspliced). This is the
+    // contrast that actively separates the two splice directions (and base↔
+    // splice for AGG positives). Swap-gene-mode is intentionally skipped
+    // here — it would be a no-op (and corrupt the NCE) on AGG positives,
+    // whose gate is masked so z is irrelevant.
+    let swap_modality =
+        draw_count_swap_modality_negatives(state, &positives, args.n_swap_modality, rng);
 
     Some(SubBatch {
         positives,
         rand,
         swap_gene_mode: None,
-        swap_modality: None,
+        swap_modality,
     })
 }
 
@@ -335,6 +367,7 @@ fn build_modifier_sub_batch<R: Rng>(
             &pools.modifier_comp_per_modality[m as usize],
             i,
             m,
+            /*bias_modality=*/ m,
             1.0,
         );
     }
@@ -343,7 +376,7 @@ fn build_modifier_sub_batch<R: Rng>(
         return None;
     }
 
-    let rand = draw_random_negatives(pools, dists, &positives, args.n_rand, rng);
+    let rand = draw_random_negatives(state, pools, dists, &positives, args.n_rand, rng);
     let swap_gene_mode =
         draw_swap_gene_mode_negatives(state, &positives, args.n_swap_gene_mode, rng);
     let swap_modality = draw_swap_modality_negatives(state, &positives, args.n_swap_modality, rng);
@@ -375,6 +408,7 @@ fn push_component_positive(
     pool: &StratumPool,
     i: usize,
     modality: u32,
+    bias_modality: u32,
     weight: f32,
 ) {
     let g = pool.gene_ids[i];
@@ -386,7 +420,9 @@ fn push_component_positive(
     // count-comp anchor = sentinel 0).
     slate.region_for_delta.push(pool.region_ids[i]);
     slate.gene_for_bias.push(g);
-    slate.modality_for_bias.push(modality);
+    // `bias_modality` may differ from `modality`: count-splice rows use the
+    // shared count bias slot so the bias can't absorb the splice contrast.
+    slate.modality_for_bias.push(bias_modality);
     slate.is_agg.push(false);
     slate.axis_id.push(a);
     slate.weight.push(weight);
@@ -394,7 +430,15 @@ fn push_component_positive(
 
 const REJECT_RETRIES: usize = 8;
 
+/// Bias slot shared by all count-comp rows (spliced/unspliced + AGG base).
+/// Splice modalities get distinct δ directions but a *shared* bias column,
+/// so the per-modality bias can't absorb the spliced↔unspliced contrast —
+/// the directional signal is forced into the embedding. Shared with
+/// `cell_solve` (phase-2 must project against the same frozen bias).
+pub(crate) const COUNT_BIAS_MODALITY: u32 = 0;
+
 fn draw_random_negatives<R: Rng>(
+    state: &SamplerState,
     pools: &AxisPools,
     dists: &AxisDists,
     positives: &PositiveSlate,
@@ -413,19 +457,31 @@ fn draw_random_negatives<R: Rng>(
         let pos_region = positives.region_for_delta[i];
         let pos_is_agg = positives.is_agg[i];
 
-        let (pool, dist_opt) = if pos_is_agg {
-            (&pools.agg, dists.agg.as_ref())
-        } else if pos_modality == 0 {
-            (&pools.count_comp, dists.count.as_ref())
+        // Count satellites (`spliced` / `unspliced`, modality ≥ 1) and true
+        // modifiers both have is_agg=false; route them by which kind of
+        // modality the positive carries. Count negatives are restricted to
+        // the **same** splice modality so they probe gene-cell identity
+        // within spliced (or within unspliced), not across.
+        let is_count = state
+            .is_count_modality
+            .get(pos_modality as usize)
+            .copied()
+            .unwrap_or(false);
+        let (pool, dist_opt, require_modality) = if pos_is_agg {
+            (&pools.agg, dists.agg.as_ref(), None)
+        } else if is_count {
+            (&pools.count_comp, dists.count.as_ref(), Some(pos_modality))
         } else {
             (
                 &pools.modifier_comp_per_modality[pos_modality as usize],
                 dists.modifier_per_modality[pos_modality as usize].as_ref(),
+                None,
             )
         };
 
         for _ in 0..k {
-            let Some(g_neg) = pool_sample_distinct(pool, dist_opt, pos_gene, rng) else {
+            let Some(g_neg) = pool_sample_distinct(pool, dist_opt, pos_gene, require_modality, rng)
+            else {
                 // No gene distinct from the positive exists in this
                 // stratum (e.g. only one distinct gene in the pool).
                 // A "negative" equal to the positive has identical
@@ -441,7 +497,14 @@ fn draw_random_negatives<R: Rng>(
             // swap only the gene → they probe gene-cell identification.
             out.region_for_delta.push(pos_region);
             out.gene_for_bias.push(g_neg);
-            out.modality_for_bias.push(pos_modality);
+            // Count satellites share the count bias slot (see
+            // `COUNT_BIAS_MODALITY`); modifiers keep their own column.
+            let bias_modality = if is_count {
+                COUNT_BIAS_MODALITY
+            } else {
+                pos_modality
+            };
+            out.modality_for_bias.push(bias_modality);
             out.is_agg.push(pos_is_agg);
         }
     }
@@ -452,23 +515,31 @@ fn pool_sample_distinct<R: Rng>(
     pool: &StratumPool,
     dist: Option<&WeightedIndex<f32>>,
     exclude_gene: u32,
+    require_modality: Option<u32>,
     rng: &mut R,
 ) -> Option<u32> {
     let dist = dist?;
+    // An entry is admissible if its gene differs from the positive and (for
+    // the count pool) it carries the required splice modality.
+    let admissible = |idx: usize| {
+        pool.gene_ids[idx] != exclude_gene
+            && require_modality.is_none_or(|m| pool.modality_ids[idx] == m)
+    };
     // First, count-weighted rejection draws (preserves the τ-tempered
     // sampling distribution in the common case).
     for _ in 0..REJECT_RETRIES {
         let idx = dist.sample(rng);
-        let g = pool.gene_ids[idx];
-        if g != exclude_gene {
-            return Some(g);
+        if admissible(idx) {
+            return Some(pool.gene_ids[idx]);
         }
     }
-    // Rare collision storm (e.g. one gene dominates the τ-weighted
-    // mass). Fall back to a deterministic linear scan — if any gene
-    // distinct from the positive exists in this pool, return it;
-    // otherwise return None so the caller can drop the slate.
-    pool.gene_ids.iter().copied().find(|&g| g != exclude_gene)
+    // Rare collision storm (e.g. one gene dominates the τ-weighted mass, or
+    // the required splice modality is sparse). Fall back to a deterministic
+    // linear scan — return the first admissible gene, else None so the
+    // caller drops the slate.
+    (0..pool.len())
+        .find(|&idx| admissible(idx))
+        .map(|idx| pool.gene_ids[idx])
 }
 
 fn draw_swap_gene_mode_negatives<R: Rng>(
@@ -559,6 +630,51 @@ fn draw_swap_modality_negatives<R: Rng>(
             // separable on bias alone.
             out.gene_for_bias.push(g);
             out.modality_for_bias.push(m_prime);
+            out.is_agg.push(false);
+        }
+    }
+    Some(out)
+}
+
+/// Swap-modality negatives for the **count** stratum: keep (gene, cell)
+/// and the gene's own program loading, but swap the splice modality to a
+/// *different* count satellite (spliced↔unspliced). Region is the
+/// count sentinel 0. This is the contrast that pushes the two splice
+/// directions apart (and base↔splice for AGG positives, whose
+/// `pos_modality = 0` is never itself a count modality). Returns `None`
+/// when there are fewer than two count modalities (no contrast possible),
+/// so the loss path skips it.
+fn draw_count_swap_modality_negatives<R: Rng>(
+    state: &SamplerState,
+    positives: &PositiveSlate,
+    k: usize,
+    rng: &mut R,
+) -> Option<NegativeSlate> {
+    if k == 0 {
+        return None;
+    }
+    let mods = &state.count_modality_ids;
+    if mods.len() < 2 {
+        return None;
+    }
+    let b = positives.len();
+    let mut out = NegativeSlate::with_capacity(b * k, k);
+    for i in 0..b {
+        let g = positives.gene_for_rho[i];
+        let pos_m = positives.modality_for_q[i];
+        for _ in 0..k {
+            // pos_m is either a count modality (count positive → ≥1 other
+            // remains) or 0 (AGG positive → every count modality qualifies),
+            // so with ≥2 count modalities this never fails.
+            let m_prime = swap_pick_distinct(mods, pos_m, rng)?;
+            out.gene_for_rho.push(g);
+            out.gene_for_z.push(g); // keep the gene's own program loading
+            out.modality_for_q.push(m_prime);
+            out.region_for_delta.push(0); // count satellites are region-0
+            out.gene_for_bias.push(g);
+            // Shared count bias slot (same for spliced/unspliced) → the
+            // contrast must be carried by the δ direction, not the bias.
+            out.modality_for_bias.push(COUNT_BIAS_MODALITY);
             out.is_agg.push(false);
         }
     }

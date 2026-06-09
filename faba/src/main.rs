@@ -3,7 +3,6 @@ mod cell_clustering;
 mod common;
 mod data;
 mod editing;
-mod gem;
 mod gene_count;
 mod hypothesis_tests;
 mod mixture;
@@ -21,7 +20,7 @@ mod site_analysis;
 mod snp;
 
 use crate::common::*;
-use gem::args::GemArgs;
+use faba::gem::args::GemArgs;
 use run_apa::*;
 use run_atoi::*;
 use run_gem_embedding::*;

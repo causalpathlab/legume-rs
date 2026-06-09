@@ -90,6 +90,7 @@ pub enum RunKind {
     Topic,
     Itopic,
     JointTopic,
+    Vae,
     Svd,
     JointSvd,
     Bge,
@@ -103,6 +104,7 @@ impl RunKind {
             RunKind::Topic => "topic",
             RunKind::Itopic => "itopic",
             RunKind::JointTopic => "joint-topic",
+            RunKind::Vae => "vae",
             RunKind::Svd => "svd",
             RunKind::JointSvd => "joint-svd",
             RunKind::Bge => "bge",
@@ -533,7 +535,12 @@ impl InheritedFromManifest {
 pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest> {
     let (m, dir) = RunManifest::load(Path::new(manifest_path))?;
     match m.kind {
-        RunKind::Bge | RunKind::Fne | RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => {}
+        RunKind::Bge
+        | RunKind::Fne
+        | RunKind::Topic
+        | RunKind::Itopic
+        | RunKind::JointTopic
+        | RunKind::Vae => {}
         RunKind::Svd | RunKind::JointSvd => anyhow::bail!(
             "--from manifest kind '{}' has no feature embedding to inherit; \
              use a bge / fne / topic-family run as the source",
