@@ -433,8 +433,9 @@ const REJECT_RETRIES: usize = 8;
 /// Bias slot shared by all count-comp rows (spliced/unspliced + AGG base).
 /// Splice modalities get distinct δ directions but a *shared* bias column,
 /// so the per-modality bias can't absorb the spliced↔unspliced contrast —
-/// the directional signal is forced into the embedding.
-const COUNT_BIAS_MODALITY: u32 = 0;
+/// the directional signal is forced into the embedding. Shared with
+/// `cell_solve` (phase-2 must project against the same frozen bias).
+pub(crate) const COUNT_BIAS_MODALITY: u32 = 0;
 
 fn draw_random_negatives<R: Rng>(
     state: &SamplerState,

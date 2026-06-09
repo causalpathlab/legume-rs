@@ -124,6 +124,11 @@ pub struct PerBatchStratifiedCellSampler {
 pub struct CellFeatureSampler {
     /// Global feature ids expressed in this cell.
     pub features: Vec<u32>,
+    /// Raw counts aligned with `features` (the `count` per `(cell, feature)`
+    /// edge, before any fisher/weight). Used by the analytical phase-2
+    /// projection ([`crate::cell_projection`]); the sampler itself draws via
+    /// `picker`.
+    pub counts: Vec<f32>,
     /// `WeightedIndex` over `features`; weights = `count · fisher(f)`.
     pub picker: WeightedIndex<f32>,
 }
@@ -204,12 +209,17 @@ pub fn build_per_batch_stratified_cell_samplers(
             for &c in &active_cells {
                 let edges = &per_cell_map[&c];
                 let features: Vec<u32> = edges.iter().map(|&(f, _)| f).collect();
+                let counts: Vec<f32> = edges.iter().map(|&(_, cnt)| cnt).collect();
                 let weights: Vec<f32> = edges
                     .iter()
                     .map(|&(f, cnt)| (cnt * fisher_weights[f as usize]).max(1e-8))
                     .collect();
                 let picker = WeightedIndex::new(weights).expect("non-empty cell-feature weights");
-                per_cell.push(CellFeatureSampler { features, picker });
+                per_cell.push(CellFeatureSampler {
+                    features,
+                    counts,
+                    picker,
+                });
                 let mult = cell_weight_mult.map_or(1.0, |m| m[c as usize]);
                 cell_w.push(cell_degree[&c].max(1e-8).powf(alpha_cell) * mult);
             }
