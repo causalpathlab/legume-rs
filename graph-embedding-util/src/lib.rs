@@ -35,6 +35,7 @@ pub mod model;
 pub mod progress;
 pub mod stop;
 pub mod training;
+pub mod type_annotation;
 
 pub use auxiliary_data::feature_names::FeatureNameKind;
 pub use data::{load_unified_data, UnifiedData};
