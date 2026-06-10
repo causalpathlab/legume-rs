@@ -345,7 +345,10 @@ impl SparseIoVec {
             .filter_map(|(&didx, cols)| {
                 if let Some(arc_data) = self.data_vec.get(didx) {
                     let k = arc_data.get_backend_file_name();
-                    Some((Box::<str>::from(k), cols.clone()))
+                    // Drop sentinels left by `mask_columns` (masked-out cells).
+                    let kept: Vec<usize> =
+                        cols.iter().copied().filter(|&c| c != usize::MAX).collect();
+                    Some((Box::<str>::from(k), kept))
                 } else {
                     None
                 }
@@ -979,8 +982,13 @@ impl SparseIoVec {
                 .ok_or_else(|| anyhow::anyhow!("missing data_to_cols entry for didx {}", didx))?;
             triplets.reserve(group_triplets.len());
             for (i, j, v) in group_triplets {
+                // `usize::MAX` marks a cell dropped by `mask_columns`.
+                let mapped = cols_map[j as usize];
+                if mapped == usize::MAX {
+                    continue;
+                }
                 let out_row = local_to_out[i as usize] as u64;
-                let out_col = cols_map[j as usize] as u64;
+                let out_col = mapped as u64;
                 triplets.push((out_row, out_col, v));
             }
         }
@@ -2014,6 +2022,104 @@ impl SparseIoVec {
             n_compact,
             next,
             n_compact - next
+        );
+        Ok(())
+    }
+
+    /// Exclude columns (cells) from the working set. `keep[global_col]`
+    /// is `true` for cells to keep, `false` to exclude. Global column
+    /// indices are renumbered after filtering. This affects all
+    /// downstream operations (projection, collapse, training, inference).
+    ///
+    /// Cell-axis mirror of [`Self::mask_rows`]. MUST be called before
+    /// batch/group registration: `register_batch_membership` and group
+    /// assignment index by global column id and would be corrupted by a
+    /// renumber, so we `debug_assert!` they are unset and defensively
+    /// clear them. Dropped cells leave their backend-local columns in
+    /// place but unmapped (`usize::MAX` in `data_to_cols`), which the
+    /// row-wise read path (`rows_triplets`) skips.
+    pub fn mask_columns(&mut self, keep: &[bool]) -> anyhow::Result<()> {
+        let n = self.cached_num_columns;
+        if keep.len() != n {
+            return Err(anyhow::anyhow!(
+                "mask_columns: keep.len()={} != num_columns={}",
+                keep.len(),
+                n
+            ));
+        }
+        debug_assert!(
+            self.col_to_batch.is_none() && self.col_to_group.is_none(),
+            "mask_columns must be called before batch/group registration"
+        );
+
+        // old_global → Some(new_global) | None (dropped)
+        let mut old_to_new: Vec<Option<usize>> = vec![None; n];
+        let mut next = 0usize;
+        for (old, &k) in keep.iter().enumerate() {
+            if k {
+                old_to_new[old] = Some(next);
+                next += 1;
+            }
+        }
+
+        // Compact col_to_data + column_names_with_data_tag in one pass.
+        let mut new_col_to_data: Vec<Vec<BackendLocation>> = Vec::with_capacity(next);
+        let mut new_names: Vec<Box<str>> = Vec::with_capacity(next);
+        for (old, &k) in keep.iter().enumerate() {
+            if k {
+                new_col_to_data.push(std::mem::take(&mut self.col_to_data[old]));
+                new_names.push(self.column_names_with_data_tag[old].clone());
+            }
+        }
+        self.col_to_data = new_col_to_data;
+        self.column_names_with_data_tag = new_names;
+
+        // Remap data_to_cols in place. It is a positional
+        // local-col → global-col map per backend (consumed by
+        // `rows_triplets` / `take_backend_columns`); dropped cells map to
+        // `usize::MAX`, which both consumers skip.
+        for cols in self.data_to_cols.values_mut() {
+            for c in cols.iter_mut() {
+                *c = old_to_new[*c].unwrap_or(usize::MAX);
+            }
+        }
+
+        // Rebuild the Union-mode canonical-barcode → global lookup
+        // (empty / no-op under Disjoint).
+        if !self.col_name_position.is_empty() {
+            let mut pos: HashMap<Box<str>, u32> =
+                HashMap::with_capacity_and_hasher(next, Default::default());
+            for (g, name) in self.column_names_with_data_tag.iter().enumerate() {
+                let canon: Box<str> = match self.column_canonicalizer.as_ref() {
+                    Some(c) => c(name),
+                    None => name.clone(),
+                };
+                let g_u32: u32 = g
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("global col overflows u32"))?;
+                pos.insert(canon, g_u32);
+            }
+            self.col_name_position = pos;
+        }
+
+        self.offset = next;
+        self.cached_num_columns = next;
+
+        // Any cell-indexed membership is now stale (asserted unset above).
+        self.col_to_batch = None;
+        self.batch_to_cols = None;
+        self.batch_idx_to_name = None;
+        self.batch_knn_lookup = None;
+        self.between_batch_proximity = None;
+        self.col_to_group = None;
+        self.group_to_cols = None;
+        self.group_keys = None;
+
+        log::info!(
+            "mask_columns: {} → {} cells ({} excluded)",
+            n,
+            next,
+            n - next
         );
         Ok(())
     }

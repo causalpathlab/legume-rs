@@ -145,6 +145,9 @@ pub struct VaeArgs {
 
     #[command(flatten)]
     pub(crate) hvg: crate::hvg::HvgCliArgs,
+
+    #[command(flatten)]
+    pub(crate) qc: QcArgs,
 }
 
 pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
@@ -185,6 +188,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         collapsed_levels,
         proj_kn,
         cell_to_pb_per_level,
+        output_keep_idx,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &data_files,
         batch_files: &batch_files,
@@ -200,6 +204,9 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         feature_list_file: args.hvg.feature_list_file.as_deref(),
         refine: Some(args.collapse.pb_refine.to_params()),
         ignore_batch: args.collapse.ignore_batch,
+        qc: args.qc.to_config(),
+        qc_block_size: args.block_size,
+        qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn: None,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
@@ -356,11 +363,21 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     let z_nk = evaluate_latent_by_encoder(&data_vec, &cpu_encoder, finest_collapsed, &eval_config)?;
 
     let cell_names = data_vec.column_names()?;
-    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names)?;
+    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
 
-    crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+    crate::postprocess::viz_prep::write_cell_proj(
+        &args.out,
+        &proj_kn,
+        &cell_names,
+        output_keep_idx.as_deref(),
+    )?;
     let has_cell_to_pb = if let Some(ref c2p) = cell_to_pb_per_level {
-        crate::postprocess::viz_prep::write_cell_to_pb(&args.out, c2p, &cell_names)?;
+        crate::postprocess::viz_prep::write_cell_to_pb(
+            &args.out,
+            c2p,
+            &cell_names,
+            output_keep_idx.as_deref(),
+        )?;
         true
     } else {
         false

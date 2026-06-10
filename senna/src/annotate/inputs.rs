@@ -107,6 +107,10 @@ pub fn load_from_manifest(
         batch_files,
         num_types: 1,
         preload: preload_data,
+        // Annotation maps onto an existing cell set — never drop cells.
+        qc: None,
+        qc_block_size: None,
+        qc_report_out: None,
     })?;
     anyhow::ensure!(
         stack.data_stack.stack.len() == 1,

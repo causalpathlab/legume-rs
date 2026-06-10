@@ -811,7 +811,8 @@ fn predict_masked(
     )?;
 
     let cell_names = data_vec.column_names()?;
-    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names)?;
+    // Inference: emit a row per query cell (no QC dropping).
+    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, None)?;
     let model_label = if latent_gaussian {
         "masked-vae"
     } else {
@@ -889,7 +890,8 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
         })?;
 
     let cell_names = data_vec.column_names()?;
-    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names)?;
+    // Inference: emit a row per query cell (no QC dropping).
+    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, None)?;
     info!("Wrote {}.latent.parquet (vae, encoder-only)", args.out);
     Ok(())
 }

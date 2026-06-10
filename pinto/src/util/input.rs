@@ -208,6 +208,9 @@ pub struct SrtInputArgs {
                        with higher-confidence edges."
     )]
     pub reciprocal: bool,
+
+    #[command(flatten)]
+    pub qc: data_beans::qc_lib::QcArgs,
 }
 
 impl SrtInputArgs {

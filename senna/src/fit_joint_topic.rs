@@ -70,6 +70,9 @@ pub struct JointTopicArgs {
     #[command(flatten)]
     pub(crate) collapse: crate::refine_weighting::CollapseArgs,
 
+    #[command(flatten)]
+    pub(crate) qc: QcArgs,
+
     #[arg(
         short = 'c',
         long,
@@ -187,11 +190,15 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     let SparseStackWithBatch {
         mut data_stack,
         mut batch_stack,
+        output_keep_idx,
     } = read_data_on_shared_columns(ReadSharedColumnsArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
         num_types: args.num_modalities,
         preload: args.preload_data,
+        qc: args.qc.to_config(),
+        qc_block_size: args.block_size,
+        qc_report_out: args.qc.qc_report.clone(),
     })?;
     if args.collapse.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch (per modality)");
@@ -383,6 +390,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         n_features_full: &n_features_full,
         gene_names: &gene_names,
         data_stack: &data_stack,
+        output_keep_idx: output_keep_idx.as_deref(),
         args,
     };
 
@@ -440,7 +448,12 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
 
     {
         let cell_names = data_stack.stack[0].column_names()?;
-        crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+        crate::postprocess::viz_prep::write_cell_proj(
+            &args.out,
+            &proj_kn,
+            &cell_names,
+            output_keep_idx.as_deref(),
+        )?;
     }
 
     // Modality-0 only — joint multi-modality annotation is a follow-up.

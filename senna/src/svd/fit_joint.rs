@@ -54,6 +54,9 @@ pub struct JointSvdArgs {
     #[command(flatten)]
     collapse: crate::refine_weighting::CollapseArgs,
 
+    #[command(flatten)]
+    qc: QcArgs,
+
     #[arg(
         short = 'c',
         long,
@@ -92,11 +95,15 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     let SparseStackWithBatch {
         mut data_stack,
         mut batch_stack,
+        output_keep_idx,
     } = read_data_on_shared_columns(ReadSharedColumnsArgs {
         data_files: args.data_files.clone(),
         batch_files: args.batch_files.clone(),
         num_types: args.num_modalities,
         preload: args.preload_data,
+        qc: args.qc.to_config(),
+        qc_block_size: args.block_size,
+        qc_report_out: args.qc.qc_report.clone(),
     })?;
     if args.collapse.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch (per modality)");
@@ -176,7 +183,12 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     let cell_names = data_stack.column_names()?;
     let gene_names = data_stack.row_names()?;
 
-    crate::output_helpers::save_latent(&args.out, &nystrom_out.latent_nk, &cell_names)?;
+    crate::output_helpers::save_latent(
+        &args.out,
+        &nystrom_out.latent_nk,
+        &cell_names,
+        output_keep_idx.as_deref(),
+    )?;
     crate::output_helpers::save_dictionary(&args.out, &nystrom_out.dictionary_dk, &gene_names)?;
 
     // Modality-0 only — joint multi-modality annotation is a follow-up.
@@ -190,7 +202,12 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names_0)?;
     }
 
-    crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+    crate::postprocess::viz_prep::write_cell_proj(
+        &args.out,
+        &proj_kn,
+        &cell_names,
+        output_keep_idx.as_deref(),
+    )?;
 
     let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
     let batch: Vec<String> = args

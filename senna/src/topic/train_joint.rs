@@ -20,6 +20,8 @@ pub(crate) struct SaveContext<'a> {
     pub n_features_full: &'a [usize],
     pub gene_names: &'a [Box<str>],
     pub data_stack: &'a SparseIoStack,
+    /// Near-empty output keep-mask from cell QC. `None` = emit every cell.
+    pub output_keep_idx: Option<&'a [usize]>,
     pub args: &'a JointTopicArgs,
 }
 
@@ -57,6 +59,7 @@ pub(crate) fn train_and_save<Dec: JointDecoderModuleT>(
         &cpu_dev,
         ctx.args,
         ctx.coarsenings,
+        ctx.output_keep_idx,
     )?;
     Ok(())
 }
@@ -106,6 +109,7 @@ pub(crate) fn write_latent_states<Enc: JointEncoderModuleT + Send + Sync>(
     dev: &candle_core::Device,
     args: &JointTopicArgs,
     coarsenings: &[Option<FeatureCoarsening>],
+    output_keep_idx: Option<&[usize]>,
 ) -> anyhow::Result<()> {
     let z_nk = evaluate_latent_by_encoder(
         data_stack,
@@ -116,11 +120,8 @@ pub(crate) fn write_latent_states<Enc: JointEncoderModuleT + Send + Sync>(
         coarsenings,
     )?;
     let cell_names = data_stack.column_names()?;
-    z_nk.to_parquet_with_names(
-        &(args.out.to_string() + ".latent.parquet"),
-        (Some(&cell_names), Some("cell")),
-        Some(&axis_id_names("T", z_nk.ncols())),
-    )?;
+    // Reuse the shared latent writer (handles the near-empty output mask).
+    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx)?;
     Ok(())
 }
 

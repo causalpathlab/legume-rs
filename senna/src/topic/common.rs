@@ -183,6 +183,10 @@ pub struct PreparedData {
     /// the writer that serializes `{out}.cell_to_pb.parquet` for
     /// downstream `--from` chains.
     pub cell_to_pb_per_level: Option<Vec<Vec<usize>>>,
+    /// Near-empty output keep-mask from cell QC (post-`mask_columns`
+    /// column order). `None` when no QC ran. Applied at the per-cell
+    /// output writers via `Mat::select_rows`.
+    pub output_keep_idx: Option<Vec<usize>>,
 }
 
 /// Result of the read + batch + HVG + project pipeline. Shared by
@@ -198,6 +202,10 @@ pub struct ProjectedData {
     /// HVG selection used to weight the basis, if any. `None` when HVG
     /// is disabled.
     pub selected_features: Option<HvgSelection>,
+    /// Near-empty output keep-mask from cell QC (post-`mask_columns`
+    /// column order). `None` when no QC ran. Applied at the per-cell
+    /// output writers via `Mat::select_rows`.
+    pub output_keep_idx: Option<Vec<usize>>,
 }
 
 /// Args for [`load_and_project`] — the read + batch + HVG + project
@@ -211,6 +219,15 @@ pub struct LoadProjectArgs<'a> {
     pub max_features: usize,
     pub feature_list_file: Option<&'a str>,
     pub ignore_batch: bool,
+    /// Optional shared cell QC. `None` = no QC (current behavior). When
+    /// `Some`, applied inside `read_data_on_shared_rows` before
+    /// projection: MAD outliers dropped via `mask_columns`, batch filtered
+    /// in lockstep, near-empty output mask returned in `output_keep_idx`.
+    pub qc: Option<data_beans::qc_lib::QcConfig>,
+    /// Block size for the QC streaming stat passes (`None` = default).
+    pub qc_block_size: Option<usize>,
+    /// Optional per-cell QC report TSV path.
+    pub qc_report_out: Option<&'a str>,
     /// Optional row-subset hook. Called once with the loaded data's row
     /// names; returns `keep[d]` per feature. Applied via
     /// `SparseIoVec::mask_rows` before projection. Use this to restrict
@@ -248,7 +265,7 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
     let SparseDataWithBatch {
         data: mut data_vec,
         batch: mut batch_membership,
-        ..
+        output_keep_idx,
     } = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: args.data_files.to_vec(),
         batch_files: args.batch_files.clone(),
@@ -256,6 +273,9 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         row_alignment: args.row_alignment,
         column_alignment: args.column_alignment,
         feature_kind: args.feature_kind.clone(),
+        qc: args.qc.clone(),
+        qc_block_size: args.qc_block_size,
+        qc_report_out: args.qc_report_out.map(Box::<str>::from),
     })?;
     if args.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch");
@@ -324,6 +344,7 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         batch_membership,
         proj_kn,
         selected_features,
+        output_keep_idx,
     })
 }
 
@@ -348,6 +369,12 @@ pub struct LoadCollapseArgs<'a> {
     pub refine: Option<data_beans_alg::refine_multilevel::RefineParams>,
     /// Treat all cells as a single batch — no per-batch δ estimation.
     pub ignore_batch: bool,
+    /// Optional shared cell QC — see [`LoadProjectArgs::qc`].
+    pub qc: Option<data_beans::qc_lib::QcConfig>,
+    /// Block size for the QC streaming stat passes (`None` = default).
+    pub qc_block_size: Option<usize>,
+    /// Optional per-cell QC report TSV path.
+    pub qc_report_out: Option<&'a str>,
     /// Optional row-subset hook — see [`LoadProjectArgs::feature_mask_fn`].
     pub feature_mask_fn: Option<&'a FeatureMaskFn>,
     /// Row-alignment strategy — see [`LoadProjectArgs::row_alignment`].
@@ -386,6 +413,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         batch_membership,
         proj_kn,
         selected_features: _,
+        output_keep_idx,
     } = load_and_project(&LoadProjectArgs {
         data_files: args.data_files,
         batch_files: args.batch_files,
@@ -395,6 +423,9 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         max_features: args.max_features,
         feature_list_file: args.feature_list_file,
         ignore_batch: args.ignore_batch,
+        qc: args.qc.clone(),
+        qc_block_size: args.qc_block_size,
+        qc_report_out: args.qc_report_out,
         feature_mask_fn: args.feature_mask_fn,
         row_alignment: args.row_alignment,
         column_alignment: args.column_alignment,
@@ -492,6 +523,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         collapsed_levels,
         proj_kn,
         cell_to_pb_per_level,
+        output_keep_idx,
     })
 }
 

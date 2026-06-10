@@ -23,11 +23,19 @@ pub struct ReadSharedColumnsArgs {
     pub batch_files: Option<Vec<Box<str>>>,
     pub num_types: usize,
     pub preload: bool,
+    /// Optional shared cell QC (modality-agnostic; see
+    /// [`data_beans::qc_lib::compute_qc_stack`]). `None` = no QC.
+    pub qc: Option<QcConfig>,
+    pub qc_block_size: Option<usize>,
+    pub qc_report_out: Option<Box<str>>,
 }
 
 pub struct SparseStackWithBatch {
     pub data_stack: SparseIoStack,
     pub batch_stack: Vec<Vec<Box<str>>>,
+    /// Near-empty output keep-mask (post-`mask_columns_all` order).
+    /// `None` when no QC ran.
+    pub output_keep_idx: Option<Vec<usize>>,
 }
 
 pub fn read_data_on_shared_columns(
@@ -111,9 +119,37 @@ pub fn read_data_on_shared_columns(
         }
     }
 
+    // Optional shared cell QC (modality-agnostic), before any batch
+    // registration. MAD outliers dropped across all members in lockstep;
+    // batch_stack filtered to match; near-empty output mask returned.
+    let output_keep_idx = if let Some(cfg) = args.qc.as_ref() {
+        let report = data_beans::qc_lib::compute_qc_stack(&data_stack, cfg, args.qc_block_size)?;
+        if let Some(path) = args.qc_report_out.as_deref() {
+            data_beans::qc_lib::write_qc_report(path, &data_stack.column_names()?, &report)?;
+        }
+        let n_near_empty = report.near_empty.iter().filter(|&&e| e).count();
+        info!(
+            "QC (stacked): dropped {}/{} cells from training, {} near-empty masked at output",
+            report.n_cells_dropped,
+            report.train_keep.len(),
+            n_near_empty,
+        );
+        let keep_idx = report.output_keep_idx();
+        if report.n_cells_dropped > 0 {
+            data_stack.mask_columns_all(&report.train_keep)?;
+            for bm in batch_stack.iter_mut() {
+                *bm = data_beans::qc_lib::filter_by_keep(bm, &report.train_keep);
+            }
+        }
+        Some(keep_idx)
+    } else {
+        None
+    };
+
     Ok(SparseStackWithBatch {
         data_stack,
         batch_stack,
+        output_keep_idx,
     })
 }
 

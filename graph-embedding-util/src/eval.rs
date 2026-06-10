@@ -19,6 +19,9 @@ pub struct OutputContext<'a> {
     /// `E_feat` at fine gene resolution, so no replication is needed.
     pub feature_names: &'a [Box<str>],
     pub barcodes: &'a [Box<str>],
+    /// Optional cell keep-mask (QC): emit only these cell rows of the
+    /// per-cell latent, with matching barcodes. `None` = emit every cell.
+    pub cell_keep_idx: Option<&'a [usize]>,
 }
 
 pub fn save_outputs(
@@ -26,12 +29,19 @@ pub fn save_outputs(
     ctx: &OutputContext,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
-    save_embedding(
-        &format!("{out_prefix}.latent.parquet"),
-        &model.e_cell,
-        ctx.barcodes,
-        "cell",
-    )?;
+    let latent_path = format!("{out_prefix}.latent.parquet");
+    match ctx.cell_keep_idx {
+        // Drop QC-failed cells from the per-cell output (the row indices and
+        // barcodes are subset by the same mask, so they cannot desync).
+        Some(keep) => {
+            let idx: Vec<u32> = keep.iter().map(|&i| i as u32).collect();
+            let idx_t = Tensor::from_vec(idx, keep.len(), model.e_cell.device())?;
+            let kept = model.e_cell.index_select(&idx_t, 0)?;
+            let names: Vec<Box<str>> = keep.iter().map(|&i| ctx.barcodes[i].clone()).collect();
+            save_embedding(&latent_path, &kept, &names, "cell")?;
+        }
+        None => save_embedding(&latent_path, &model.e_cell, ctx.barcodes, "cell")?,
+    }
     // No `cell_bias.parquet` — bge drops the per-cell bias `b_cell`.
     save_embedding(
         &format!("{out_prefix}.dictionary.parquet"),

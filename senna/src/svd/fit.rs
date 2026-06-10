@@ -89,6 +89,9 @@ pub struct SvdArgs {
         help = "Number of k-means cell clusters used as cell-type proxy for CNV."
     )]
     cnv_svd_clusters: usize,
+
+    #[command(flatten)]
+    qc: QcArgs,
 }
 
 pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
@@ -100,6 +103,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         batch_membership,
         proj_kn,
         selected_features,
+        output_keep_idx,
     } = load_and_project(&LoadProjectArgs {
         data_files: &args.data_files,
         batch_files: &args.batch_files,
@@ -109,6 +113,9 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
         ignore_batch: args.collapse.ignore_batch,
+        qc: args.qc.to_config(),
+        qc_block_size: args.block_size,
+        qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn: None,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
@@ -199,7 +206,12 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     // SVD reuses the topic models' `T{c}` convention so `senna plot
     // --colour-by topic` reads the latent.parquet identically regardless
     // of upstream (`senna topic` or `senna svd`).
-    crate::output_helpers::save_latent(&args.out, &nystrom_out.latent_nk, &cell_names)?;
+    crate::output_helpers::save_latent(
+        &args.out,
+        &nystrom_out.latent_nk,
+        &cell_names,
+        output_keep_idx.as_deref(),
+    )?;
     crate::output_helpers::save_dictionary(
         &args.out,
         &nystrom_out.dictionary_dk,
@@ -239,7 +251,12 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         crate::cnv_pseudobulk::write_cnv_results(&cnv_result, &args.out, &gene_names)?;
     }
 
-    crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+    crate::postprocess::viz_prep::write_cell_proj(
+        &args.out,
+        &proj_kn,
+        &cell_names,
+        output_keep_idx.as_deref(),
+    )?;
 
     let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
     let batch: Vec<String> = args

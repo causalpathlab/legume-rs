@@ -87,6 +87,48 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         read_data_without_coordinates(c.to_read_args_with_kind(kind))?
     };
 
+    // Optional shared cell QC — applied before the KNN graph is built so
+    // dropped cells never become graph nodes. MAD outliers are dropped from
+    // the working set; coordinates + batch labels are filtered in lockstep.
+    // (Near-empty cells are kept; the gem-style near-empty output floor is
+    // not applied to pinto's per-cell outputs.)
+    if let Some(qc_cfg) = c.qc.to_config() {
+        let report = data_beans::qc_lib::compute_qc(&data_vec, &qc_cfg, c.block_size)?;
+        let n_near_empty = report.near_empty.iter().filter(|&&e| e).count();
+        info!(
+            "QC: dropped {}/{} cells from the spatial graph ({} near-empty kept)",
+            report.n_cells_dropped,
+            report.train_keep.len(),
+            n_near_empty,
+        );
+        if report.n_cells_dropped > 0 {
+            let kept: Vec<usize> = report
+                .train_keep
+                .iter()
+                .enumerate()
+                .filter(|&(_, &k)| k)
+                .map(|(i, _)| i)
+                .collect();
+            // Spatial mode: coordinates [n_cells × n_dims] are consumed by
+            // the graph build below, so they must be filtered in lockstep
+            // (error loudly on any size mismatch rather than silently skip).
+            // Expression mode overwrites `coordinates` with the embedding of
+            // the already-masked data_vec, so no filtering is needed there.
+            if has_coords {
+                anyhow::ensure!(
+                    coordinates.nrows() == report.train_keep.len(),
+                    "QC: coordinate rows {} != cell count {}",
+                    coordinates.nrows(),
+                    report.train_keep.len()
+                );
+                coordinates = coordinates.select_rows(kept.iter());
+            }
+            data_vec.mask_columns(&report.train_keep)?;
+            batch_membership =
+                data_beans::qc_lib::filter_by_keep(&batch_membership, &report.train_keep);
+        }
+    }
+
     let n_genes = data_vec.num_rows();
     let n_cells = data_vec.num_columns();
 

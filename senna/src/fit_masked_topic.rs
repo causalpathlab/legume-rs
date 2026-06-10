@@ -451,6 +451,9 @@ pub struct MaskedTopicArgs {
 
     #[command(flatten)]
     cnv: CnvArgs,
+
+    #[command(flatten)]
+    qc: QcArgs,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug, Default)]
@@ -606,6 +609,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
         collapsed_levels,
         proj_kn,
         cell_to_pb_per_level,
+        output_keep_idx,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &data_files,
         batch_files: &batch_files,
@@ -619,6 +623,9 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
         out: &args.out,
         max_features: effective_hvg_n,
         feature_list_file: effective_hvg_list,
+        qc: args.qc.to_config(),
+        qc_block_size: args.block_size,
+        qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: if effective_multiome {
@@ -960,7 +967,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
 
     let cell_names = data_vec.column_names()?;
 
-    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names)?;
+    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
 
     // pb_latent omitted: indexed encoder's PB-level forward pass isn't
     // wired here; annotate reconstructs θ_PB from pb_gene · β.
@@ -992,9 +999,19 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
         }
     }
 
-    crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names)?;
+    crate::postprocess::viz_prep::write_cell_proj(
+        &args.out,
+        &proj_kn,
+        &cell_names,
+        output_keep_idx.as_deref(),
+    )?;
     let has_cell_to_pb = if let Some(ref c2p) = cell_to_pb_per_level {
-        crate::postprocess::viz_prep::write_cell_to_pb(&args.out, c2p, &cell_names)?;
+        crate::postprocess::viz_prep::write_cell_to_pb(
+            &args.out,
+            c2p,
+            &cell_names,
+            output_keep_idx.as_deref(),
+        )?;
         true
     } else {
         false

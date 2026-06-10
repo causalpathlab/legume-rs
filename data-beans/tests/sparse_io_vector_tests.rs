@@ -1349,3 +1349,72 @@ fn num_rows_in_at_least_basic() -> anyhow::Result<()> {
     assert_eq!(vec.num_rows_in_at_least(3), 0);
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────
+// mask_columns (cell-axis drop)
+// ─────────────────────────────────────────────────────
+
+#[test]
+fn mask_columns_round_trip() -> anyhow::Result<()> {
+    let nrow = 6;
+    let ncol = 8;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let rows = str_vec(nrow, "gene");
+    let cols = str_vec(ncol, "cell");
+
+    let mut vec = SparseIoVec::new();
+    vec.push(make_named_sparse(&raw, &rows, &cols), None)?;
+
+    let before = vec.read_columns_dmatrix(0..ncol)?;
+    let names_before = vec.column_names()?;
+
+    // drop cells 1 and 3
+    let mut keep = vec![true; ncol];
+    keep[1] = false;
+    keep[3] = false;
+    vec.mask_columns(&keep)?;
+
+    let kept_old: Vec<usize> = (0..ncol).filter(|&c| keep[c]).collect();
+    assert_eq!(vec.num_columns(), kept_old.len());
+
+    // names preserved, in order
+    let names_after = vec.column_names()?;
+    assert_eq!(names_after.len(), kept_old.len());
+    for (new_i, &old_i) in kept_old.iter().enumerate() {
+        assert_eq!(names_after[new_i], names_before[old_i]);
+    }
+
+    // column reads match the original kept columns
+    let after = vec.read_columns_dmatrix(0..vec.num_columns())?;
+    for (new_i, &old_i) in kept_old.iter().enumerate() {
+        for r in 0..nrow {
+            assert!((after[(r, new_i)] - before[(r, old_i)]).abs() < 1e-6);
+        }
+    }
+
+    // row reads (rows_triplets path) honor the mask_columns sentinel
+    let row0 = vec.read_rows_dmatrix(std::iter::once(0usize))?;
+    assert_eq!(row0.ncols(), kept_old.len());
+    for (new_i, &old_i) in kept_old.iter().enumerate() {
+        assert!((row0[(0, new_i)] - before[(0, old_i)]).abs() < 1e-6);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn mask_columns_all_true_is_noop() -> anyhow::Result<()> {
+    let nrow = 4;
+    let ncol = 5;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let rows = str_vec(nrow, "g");
+    let cols = str_vec(ncol, "c");
+
+    let mut vec = SparseIoVec::new();
+    vec.push(make_named_sparse(&raw, &rows, &cols), None)?;
+    vec.mask_columns(&vec![true; ncol])?;
+
+    assert_eq!(vec.num_columns(), ncol);
+    assert_eq!(vec.read_columns_ndarray(0..ncol)?, raw);
+    Ok(())
+}
