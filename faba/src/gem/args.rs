@@ -111,14 +111,43 @@ pub struct GemArgs {
     #[arg(long)]
     pub ignore_batch: bool,
 
-    /// Train only on the pseudobulk axes — skip the cell-axis loss.
-    /// For feature-embedding (β, z, δ, γ) quality the pb axes carry the
-    /// dense, low-variance signal; the cell axis adds mostly Poisson
-    /// noise on the modifier side. `e_cell` / `b_cell` still get
-    /// allocated and written, but stay at their init values (zero bias,
-    /// random embedding) — refit them post-hoc if needed.
+    /// Cell QC: minimum number of detected features (nonzeros) a cell must
+    /// have **across all modalities** (count + m6A/A2I/APA) to be embedded
+    /// and written. Modality-agnostic on purpose — coverage is skewed
+    /// across modalities, so this keeps any cell with signal in *any* one,
+    /// dropping only near-empty cells. Under Union alignment a barcode seen
+    /// in just one sparse modality (e.g. a single stray editing read, no
+    /// counts) is a degenerate "cell" the count-anchored phase-2 projection
+    /// maps to ~0; the default `2` drops exactly those while keeping every
+    /// cell that yields a real embedding. Set `1` to keep all but fully
+    /// empty cells; raise for stricter QC. No data is rewritten — this is a
+    /// write-time selection, not a squeeze.
+    #[arg(long = "min-cell-nnz", default_value_t = 2)]
+    pub min_cell_nnz: usize,
+
+    /// Feature-only mode: skip the cell axis in phase 1 **and** skip the
+    /// phase-2 cell projection. `e_cell` / `b_cell` are still allocated and
+    /// written, but stay at their init values (zero bias, random embedding)
+    /// — refit them post-hoc if needed. This differs from
+    /// `--phase1-cells-per-pb 0` (the default), which also drops the cell
+    /// axis from phase 1 but *still* projects every cell in phase 2.
     #[arg(long)]
     pub no_cell_axis: bool,
+
+    /// Phase-1 cell-axis mode (`k`). Controls only what shapes the feature
+    /// dictionary (β/z/δ/γ) in phase 1; phase 2 ALWAYS analytically projects
+    /// every cell (unless `--no-cell-axis` / `--phase2-epochs 0`), so the
+    /// per-cell embedding output is essentially unaffected by `k`.
+    ///   k = 0 (default) → suppress the cell axis in phase 1 (pure-pb:
+    ///     features shaped by pb aggregates only). Fastest, because the
+    ///     per-epoch step budget is then sized by the pb levels, not n_cells.
+    ///   1 ≤ k < n_cells → keep ≤k cells per pb-sample at EVERY collapse
+    ///     level (union), shrinking the phase-1 budget while keeping rare /
+    ///     shallow cells visible to the shared dictionary.
+    ///   k ≥ n_cells → every cell shapes the dictionary (legacy all-cells;
+    ///     slowest).
+    #[arg(long = "phase1-cells-per-pb", default_value_t = 0)]
+    pub phase1_cells_per_pb: usize,
 
     ////////////////////////////////////////
     // Feature-name canonicalization (senna bge convention)

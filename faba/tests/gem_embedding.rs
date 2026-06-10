@@ -157,7 +157,11 @@ fn test_args() -> GemArgs {
         num_opt_iter: 1,
         proj_dim: 8,
         ignore_batch: true,
+        min_cell_nnz: 0,
         no_cell_axis: false,
+        // This fixture trains on the cell axis only (zero pb levels), so keep
+        // the full cell axis in phase 1 (k ≥ n_cells = legacy all-cells).
+        phase1_cells_per_pb: usize::MAX,
         feature_name_delim: '_',
         feature_name_exact: true,
         preload_data: true,

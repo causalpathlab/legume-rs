@@ -89,6 +89,11 @@ pub fn write_outputs(
     pb: &PseudobulkData,
     model: &GemModel,
     unified: &UnifiedData,
+    // QC-passed cell indices (see `--min-cell-nnz`). The per-cell outputs
+    // (`cell_embedding`, `cell_bias`, `cell_to_pb`) are restricted to these
+    // rows — a write-time selection, no backend rewrite. Feature-side
+    // outputs are unaffected.
+    keep_idx: &[usize],
 ) -> Result<()> {
     let path_gene_emb = format!("{prefix}.gene_embedding.parquet");
     let path_z = format!("{prefix}.gene_program_loadings.parquet");
@@ -205,33 +210,40 @@ pub fn write_outputs(
         .with_context(|| format!("writing {path_comp_bias}"))?;
 
     ////////////////////////////////////////
-    // Cell-axis head
+    // Cell-axis head — restricted to QC-passed cells (`keep_idx`). Rows are
+    // selected at write time; no backend is rewritten.
     ////////////////////////////////////////
-    let e_cell = tensor_to_dmatrix2(&model.e_cell)?;
+    let barcodes_kept: Vec<Box<str>> = keep_idx
+        .iter()
+        .map(|&i| unified.barcodes[i].clone())
+        .collect();
+
+    let e_cell = tensor_to_dmatrix2(&model.e_cell)?.select_rows(keep_idx.iter());
     e_cell
         .to_parquet_with_names(
             &path_cell_emb,
-            (Some(&unified.barcodes), Some("cell")),
+            (Some(&barcodes_kept), Some("cell")),
             Some(&dim_names),
         )
         .with_context(|| format!("writing {path_cell_emb}"))?;
-    let b_cell = tensor_to_dmatrix1(&model.b_cell)?;
+    let b_cell = tensor_to_dmatrix1(&model.b_cell)?.select_rows(keep_idx.iter());
     b_cell
         .to_parquet_with_names(
             &path_cell_bias,
-            (Some(&unified.barcodes), Some("cell")),
+            (Some(&barcodes_kept), Some("cell")),
             Some(&[Box::from("b_cell")]),
         )
         .with_context(|| format!("writing {path_cell_bias}"))?;
 
     ////////////////////////////////////////
-    // cell_to_pb partition
+    // cell_to_pb partition (kept cells only)
     ////////////////////////////////////////
-    write_cell_to_pb(
-        &pb.cell_to_pb_per_level,
-        &unified.barcodes,
-        &path_cell_to_pb,
-    )?;
+    let kept_cell_to_pb: Vec<Vec<usize>> = pb
+        .cell_to_pb_per_level
+        .iter()
+        .map(|c2p| keep_idx.iter().map(|&i| c2p[i]).collect())
+        .collect();
+    write_cell_to_pb(&kept_cell_to_pb, &barcodes_kept, &path_cell_to_pb)?;
 
     Ok(())
 }
@@ -243,6 +255,8 @@ pub fn write_outputs(
 pub fn write_manifest(
     prefix: &str,
     model: &GemModel,
+    // Number of QC-passed cells actually written to the per-cell outputs.
+    n_cells_written: usize,
     topics: Option<&super::topics::ResolvedTopics>,
 ) -> Result<()> {
     let path_manifest = format!("{prefix}.faba.json");
@@ -254,7 +268,7 @@ pub fn write_manifest(
         n_programs: model.n_programs,
         n_modalities: model.n_modalities,
         n_regions: model.n_regions,
-        n_cells: model.n_cells,
+        n_cells: n_cells_written,
         feature_convention: FEATURE_CONVENTION.into(),
         gene_embedding: format!("{prefix}.gene_embedding.parquet"),
         feature_embedding: format!("{prefix}.feature_embedding.parquet"),

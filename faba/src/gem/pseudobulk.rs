@@ -22,6 +22,9 @@ use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, 
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::data::UnifiedData;
 use log::info;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -58,6 +61,37 @@ impl StratumPool {
 
     pub fn is_empty(&self) -> bool {
         self.gene_ids.is_empty()
+    }
+
+    /// Keep only entries whose right-hand-axis id (cell id for the cell
+    /// axis) is marked in `keep`. Weights are carried through unchanged —
+    /// each surviving (gene, cell) edge keeps its τ-tempered / Fisher-
+    /// adjusted weight, so the subsampled draw distribution is just the
+    /// full one restricted to the kept cells.
+    fn filter_by_axis(&self, keep: &[bool]) -> StratumPool {
+        let mut out = StratumPool {
+            gene_ids: Vec::new(),
+            axis_ids: Vec::new(),
+            modality_ids: Vec::new(),
+            region_ids: Vec::new(),
+            counts: Vec::new(),
+            weights: Vec::new(),
+        };
+        for i in 0..self.len() {
+            if keep
+                .get(self.axis_ids[i] as usize)
+                .copied()
+                .unwrap_or(false)
+            {
+                out.gene_ids.push(self.gene_ids[i]);
+                out.axis_ids.push(self.axis_ids[i]);
+                out.modality_ids.push(self.modality_ids[i]);
+                out.region_ids.push(self.region_ids[i]);
+                out.counts.push(self.counts[i]);
+                out.weights.push(self.weights[i]);
+            }
+        }
+        out
     }
 }
 
@@ -271,6 +305,73 @@ pub fn build_pseudobulk(
         gene_fisher_weights,
         gene_ubiquity,
     })
+}
+
+/// Phase-1-only subsampled view of the cell-axis pools: keep at most `k`
+/// cells per pb-sample at EVERY collapse level (`cell_to_pb_per_level`),
+/// unioned across levels, then restrict each cell-axis `StratumPool` to
+/// those cells. The full `cell_pools` are untouched (phase 2 still
+/// projects every cell against the frozen dictionary).
+///
+/// Keeping ≤k per pb at *every* level (not just the finest) lets each
+/// level's partition contribute diverse representatives — robust even when
+/// refinement breaks strict nesting between adjacent levels. `n_units` of
+/// the returned pools is the kept-cell count, so the trainer's auto
+/// per-epoch budget shrinks accordingly. Mirrors `senna bge`'s
+/// `subsample_cell_samplers_multilevel`.
+pub(crate) fn subsample_cell_pools_multilevel(
+    full: &AxisPools,
+    cell_to_pb_per_level: &[Vec<usize>],
+    k: usize,
+    seed: u64,
+) -> AxisPools {
+    let n_cells = cell_to_pb_per_level.first().map_or(0, |v| v.len());
+    // Global keep bitmap: ≤k cells per pb-sample, per level, unioned.
+    let mut keep = vec![false; n_cells];
+    for (level, c2pb) in cell_to_pb_per_level.iter().enumerate() {
+        let n_pb = c2pb.iter().copied().max().map_or(0, |m| m + 1);
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); n_pb];
+        for (cell, &pb) in c2pb.iter().enumerate() {
+            buckets[pb].push(cell as u32);
+        }
+        // Per-level seed so the kept cells differ across levels (more union
+        // diversity) yet stay reproducible across runs.
+        let mut rng =
+            StdRng::seed_from_u64(seed ^ (level as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        for b in buckets.iter_mut() {
+            // `partial_shuffle` does only k swaps (vs a full O(bucket) shuffle)
+            // and hands back the k-element random subset directly.
+            let chosen: &[u32] = if b.len() > k {
+                b.partial_shuffle(&mut rng, k).0
+            } else {
+                &b[..]
+            };
+            for &c in chosen {
+                keep[c as usize] = true;
+            }
+        }
+    }
+
+    let kept = keep.iter().filter(|&&x| x).count();
+    let agg = full.agg.filter_by_axis(&keep);
+    let count_comp = full.count_comp.filter_by_axis(&keep);
+    let modifier_comp_per_modality: Vec<StratumPool> = full
+        .modifier_comp_per_modality
+        .iter()
+        .map(|p| p.filter_by_axis(&keep))
+        .collect();
+    let modality_total_mass: Vec<f32> = modifier_comp_per_modality
+        .iter()
+        .map(|p| p.counts.iter().sum())
+        .collect();
+
+    AxisPools {
+        n_units: kept,
+        agg,
+        count_comp,
+        modifier_comp_per_modality,
+        modality_total_mass,
+    }
 }
 
 /// Apply per-gene Fisher weights to an axis's two count-based anchor
