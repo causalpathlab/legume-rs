@@ -13,14 +13,10 @@
 //! axis, and write senna's run manifest after training.
 
 use crate::embed_common::*;
-use auxiliary_data::frozen_features::{
-    load_frozen_feature_host, FrozenFeatureHost, FrozenLoadArgs,
-};
 use data_beans_alg::hvg::{select_hvg_streaming, HvgCliArgs};
 use graph_embedding_util as ge;
 use rustc_hash::FxHashMap;
 use std::io::BufRead;
-use std::path::Path;
 
 #[derive(Args, Debug)]
 pub struct BgeArgs {
@@ -296,20 +292,6 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        help = "Reuse a pre-trained per-gene embedding from a prior senna run. \
-                Loads `{prefix}.dictionary.parquet` (+ `{prefix}.feature_bias.parquet` \
-                if present) — or `{prefix}.feature_embedding.parquet` from a topic run, \
-                in which case bias defaults to zero. Gene names are strict-intersected \
-                with this dataset's unified feature axis under the fuzzy \
-                `feature_name_delim` / `feature_name_exact` rules; unmatched features \
-                are dropped from training. Cell-side embeddings still train; E_feat / \
-                b_feat stay frozen. Incompatible with `--feature-network`; forces \
-                `--max-features 0` and disables HVG."
-    )]
-    freeze_feature_embedding: Option<Box<str>>,
-
-    #[arg(
-        long,
         help = "Optional cell-cell edge list (whitespace-separated, two cell-barcode \
                 columns per line; lines starting with `#` are ignored). When provided, \
                 activates the cell-cell NCE term — positives are these edges, negatives \
@@ -507,50 +489,12 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         None
     };
 
-    // ---- Optional frozen feature side ----
-    //
-    // Loaded BEFORE HVG / max_features / feature_network so they all see
-    // the post-intersection axis. The prior gene set is the selection,
-    // so we force off the other gene-selection knobs when frozen.
-    let frozen_feature_host = if let Some(prefix) = args.freeze_feature_embedding.as_deref() {
-        if args.feature_network.is_some() {
-            anyhow::bail!(
-                "--freeze-feature-embedding is incompatible with --feature-network \
-                 (SGC smoothing of a frozen table has no learnable parameter to nudge)"
-            );
-        }
-        if args.max_features > 0 {
-            log::warn!(
-                "--freeze-feature-embedding overrides --max-features={} → 0 \
-                 (the frozen gene set is the selection)",
-                args.max_features
-            );
-        }
-        if effective_hvg_n > 0 || effective_hvg_list.is_some() {
-            log::warn!(
-                "--freeze-feature-embedding disables HVG selection \
-                 (the frozen gene set is the selection)"
-            );
-        }
-        Some(load_frozen_feature_host_for_bge(
-            prefix,
-            &unified.feature_names,
-            feature_kind.clone(),
-        )?)
-    } else {
-        None
-    };
-    if let Some(host) = frozen_feature_host.as_ref() {
-        unified.subset_features(&host.keep_target_indices);
-    }
-    let freeze_active = frozen_feature_host.is_some();
-
     // HVG → projection weights (no longer subsets the feature axis).
     // Mirrors senna topic: HVG down-weights uninformative genes for the
     // random projection / pb sketching only; collapse + supergene
     // coarsening + training read all genes. Caller passes the weights
     // through `FitConfig.hvg_weights`.
-    let hvg_enabled = !freeze_active && (effective_hvg_n > 0 || effective_hvg_list.is_some());
+    let hvg_enabled = effective_hvg_n > 0 || effective_hvg_list.is_some();
     let hvg_weights: Option<Vec<f32>> = if hvg_enabled {
         let hvg = select_hvg_streaming(
             &unified.per_file_data[0],
@@ -639,7 +583,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         knn_pb_samples: args.collapse.knn_cells,
         num_opt_iter: args.collapse.iter_opt,
         proj_dim: args.collapse.proj_dim,
-        max_features: if freeze_active { 0 } else { args.max_features },
+        max_features: args.max_features,
         hvg_weights,
         refine,
         epochs: args.epochs,
@@ -664,7 +608,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         z_l2: args.z_l2,
         delta_l2: args.delta_l2,
         weight_decay: args.weight_decay,
-        frozen_feature_host,
         cell_weight_mult,
         phase1_cells_per_pb: args.phase1_cells_per_pb,
     };
@@ -814,62 +757,6 @@ fn load_cell_cell_edges(path: &str, barcodes: &[Box<str>]) -> anyhow::Result<Vec
     }
     info!("Cell-cell edges loaded: {} retained", edges.len());
     Ok(edges)
-}
-
-/// Probe a senna-run prefix for a frozen feature side. Tries:
-///   1. `{prefix}.dictionary.parquet` + `{prefix}.feature_bias.parquet` (bge layout).
-///   2. `{prefix}.feature_embedding.parquet` + optional `{prefix}.feature_bias.parquet`
-///      (topic / fne layout — fne writes a learned bias too).
-///
-/// Strict-intersects gene names against `target_feature_names` under `kind`.
-fn load_frozen_feature_host_for_bge(
-    prefix: &str,
-    target_feature_names: &[Box<str>],
-    kind: ge::FeatureNameKind,
-) -> anyhow::Result<FrozenFeatureHost> {
-    let bge_dict = format!("{prefix}.dictionary.parquet");
-    let bias_file = format!("{prefix}.feature_bias.parquet");
-    let topic_dict = format!("{prefix}.feature_embedding.parquet");
-
-    let (dict_path, bias_path) = if Path::new(&bge_dict).exists() {
-        let bias = Path::new(&bias_file).exists().then_some(bias_file.clone());
-        if bias.is_none() {
-            log::warn!(
-                "{} found but {} missing — loading dictionary only, bias defaults to zero",
-                bge_dict,
-                bias_file
-            );
-        }
-        (bge_dict, bias)
-    } else if Path::new(&topic_dict).exists() {
-        let bias = Path::new(&bias_file).exists().then_some(bias_file.clone());
-        if bias.is_some() {
-            info!(
-                "Frozen feature side: loading {} + {} (fne-style with learned bias)",
-                topic_dict, bias_file
-            );
-        } else {
-            info!(
-                "Frozen feature side: loading topic-style {} (bias = 0)",
-                topic_dict
-            );
-        }
-        (topic_dict, bias)
-    } else {
-        anyhow::bail!(
-            "--freeze-feature-embedding {prefix}: no {prefix}.dictionary.parquet or \
-             {prefix}.feature_embedding.parquet — pass a prior senna bge / topic / \
-             fne output prefix"
-        );
-    };
-
-    let host = load_frozen_feature_host(FrozenLoadArgs {
-        dictionary_path: &dict_path,
-        bias_path: bias_path.as_deref(),
-        target_feature_names,
-        name_kind: kind,
-    })?;
-    Ok(host)
 }
 
 /////////////////////////////////////////////////////////////////////

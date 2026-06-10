@@ -17,7 +17,6 @@ use crate::training::{
     CompositeMode, CompositeTrainContext, TrainingParams,
 };
 use auxiliary_data::feature_names::FeatureNameKind;
-use auxiliary_data::frozen_features::FrozenFeatureHost;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use candle_util::frozen_features::trainable_vars;
@@ -152,20 +151,6 @@ pub struct FitConfig {
     /// (the shared `E_feat`, `b_feat`, and every per-axis head). Post-
     /// step shrinkage; doesn't enter the backward graph. `0.0` disables.
     pub weight_decay: f64,
-    /// Pre-trained, frozen feature side loaded from a prior gbe / topic
-    /// run. When `Some`:
-    /// - The caller MUST have already called
-    ///   `unified.subset_features(&host.keep_target_indices)` so the
-    ///   feature axis matches `host.e_feat.nrows()` row-for-row.
-    /// - `E_feat` and `b_feat` are still registered in the VarMap (so
-    ///   they round-trip through senna's output), but the optimizer
-    ///   excludes them via [`candle_util::frozen_features::trainable_vars`].
-    /// - `feature_embedding_l2` is forced to 0 (no point regularizing
-    ///   non-trainable weights).
-    /// - `feature_network` MUST be `None` (SGC smoothing of a frozen
-    ///   table has no compensating gradient path).
-    /// - `embedding_dim` MUST equal `host.h`.
-    pub frozen_feature_host: Option<FrozenFeatureHost>,
     /// Optional per-cell multiplier on the cell-axis sampling weight
     /// (length = `n_cells`, indexed by global cell id). Folded into the
     /// `degree^α` cell picker so up-weighted cells are sampled more often.
@@ -174,7 +159,7 @@ pub struct FitConfig {
     pub cell_weight_mult: Option<Vec<f32>>,
     /// Phase-1 cell-axis mode (`k`). Controls only what shapes `E_feat` in
     /// phase 1; phase 2 always analytically projects *every* cell against the
-    /// frozen feature side, so the full per-cell embedding is unaffected.
+    /// fixed feature side, so the full per-cell embedding is unaffected.
     /// - `k == 0`: suppress the cell axis entirely (pure-pb — `E_feat` shaped
     ///   by pb aggregates only; fastest). This is the default.
     /// - `1 ≤ k < n_cells`: keep ≤`k` cells per pb-sample at EVERY collapse
@@ -397,8 +382,7 @@ pub struct FitOutput {
 /// **Phase 1 — features + pseudobulks.** Train only the pseudobulk axes
 /// (coarsest..finest from `collapse_columns_multilevel_vec`, pseudobulk-
 /// feature triplets) with `Sum`. They share — and learn — `E_feat /
-/// b_feat / z / δ` and per-level pb cell-side embeddings. (Skipped when a
-/// frozen feature side is supplied via `frozen_feature_host`.)
+/// b_feat / z / δ` and per-level pb cell-side embeddings.
 ///
 /// **Phase 2 — dense per-cell embedding.** Freeze the entire feature side
 /// and fit ONLY `E_cell` against it. With a single axis the objective is
@@ -566,35 +550,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // The cell head allocates the canonical "e_feat" / "b_feat" /
     // "e_cell" / "b_cell" Vars; every level head then clones those
     // shared `e_feat` / `b_feat` Tensors and registers its own cell
-    // side under a unique `pb_l{idx}` prefix. When `frozen_feature_host`
-    // is set, `e_feat` and `b_feat` are seeded from the host matrix and
-    // later excluded from the AdamW var set (see `opt_vars` below).
-    let frozen_init = config.frozen_feature_host.as_ref();
-    if let Some(host) = frozen_init {
-        anyhow::ensure!(
-            host.h == h,
-            "frozen feature side has H={} but --embedding-dim={}",
-            host.h,
-            h
-        );
-        anyhow::ensure!(
-            host.e_feat.nrows() == n_features,
-            "frozen feature side has {} rows but unified feature axis has {} \
-             — caller must call unified.subset_features(&host.keep_target_indices) first",
-            host.e_feat.nrows(),
-            n_features
-        );
-        anyhow::ensure!(
-            config.feature_network.is_none(),
-            "--feature-network is incompatible with a frozen feature embedding \
-             (SGC smoothing has no learnable parameter to nudge)"
-        );
-        info!(
-            "Freeze mode: E_feat / b_feat seeded from prior run (D={}, H={}); \
-             cell side trains, feature side stays fixed",
-            n_features, h
-        );
-    }
+    // side under a unique `pb_l{idx}` prefix.
     let n_conditions = unified.n_conditions();
     let mut cell_model = JointEmbedModel::new_with_init(
         ModelArgs {
@@ -605,11 +561,9 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             num_programs: config.num_programs,
         },
         &ModelInit {
-            e_feat: frozen_init.map(|host| &host.e_feat),
+            e_feat: None,
             e_cell: None,
-            b_feat: frozen_init
-                .map(|host| host.b_feat.as_slice())
-                .unwrap_or(&zeros_features),
+            b_feat: &zeros_features,
             b_cell: &zeros_cells,
         },
         &varmap,
@@ -772,7 +726,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     };
 
     // Cell axis (per-cell embedding). Trained jointly in phase 1 (to shape
-    // `E_feat`) and recalibrated in phase 2 against the frozen feature side.
+    // `E_feat`) and recalibrated in phase 2 against the fixed feature side.
     // The optional cell-cell NCE term attaches here.
     let cell_axis = CompositeAxis {
         model: &cell_model,
@@ -799,17 +753,16 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     }
 
     // ---- Phase 1 (joint): cell axis + pseudobulks shape E_feat together ----
-    // Skipped only when a frozen feature side was supplied (held fixed). The
-    // cell axis is trained HERE (e_cell trainable; base `b_cell` dropped, pb
-    // `pb_l*_b_cell` stay trainable) so the per-cell stratified sampler —
+    // The cell axis is trained HERE (e_cell trainable; base `b_cell` dropped,
+    // pb `pb_l*_b_cell` stay trainable) so the per-cell stratified sampler —
     // which guarantees coverage of rare/shallow cells — shapes `E_feat`.
     // Without the cell axis, `E_feat` is driven only by pb aggregates and rare
     // compartments (DC/NK/HSPC) collapse into abundant ones. Phase 2 then
-    // recalibrates e_cell for *every* cell against the frozen `E_feat`.
+    // recalibrates e_cell for *every* cell against the fixed `E_feat`.
     // The axes borrow `cell_model` / `cell_samplers`; confine them to this
     // block so those borrows are released before the phase-2 projection
     // takes `&mut cell_model`.
-    if config.frozen_feature_host.is_none() {
+    {
         let mut joint_axes: Vec<CompositeAxis> = Vec::with_capacity(1 + pb_axes.len());
         // `use_cell_axis == false` (phase1_cells_per_pb == 0) trains E_feat from
         // pb aggregates only; `cell_axis` is left unused (its borrow ends here).
@@ -839,19 +792,17 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             smoother.as_mut(),
         )?;
     }
-    // When the feature side is supplied frozen the phase-1 block is skipped;
-    // `cell_axis` / `pb_axes` then go unused and their borrows of
-    // `cell_model` / `cell_samplers` end here (NLL), freeing them for the
-    // phase-2 `&mut` projection below.
+    // `cell_axis` / `pb_axes` borrows of `cell_model` / `cell_samplers` end
+    // here, freeing them for the phase-2 `&mut` projection below.
 
-    // ---- Phase 2: analytical per-cell projection onto the frozen feature
-    // side. With E_feat/b_feat/z/δ frozen, each cell's embedding is
+    // ---- Phase 2: analytical per-cell projection onto the fixed feature
+    // side. With E_feat/b_feat/z/δ held fixed, each cell's embedding is
     // independent — so rather than SGD over `e_cell`, project every cell
     // directly (Poisson MAP, ridge prior) in parallel. bge scores without a
     // per-cell bias, so the intercept is dropped. See `crate::cell_projection`.
     if !stop.load(std::sync::atomic::Ordering::Relaxed) {
         info!(
-            "Phase 2 — analytical per-cell projection ({} cells, feature side frozen, ridge λ={})",
+            "Phase 2 — analytical per-cell projection ({} cells, feature side fixed, ridge λ={})",
             n_cells, PHASE2_RIDGE
         );
         project_cells_phase2(
@@ -876,7 +827,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
 /// prior stands in for the (infeasible) all-feature softmax partition.
 const PHASE2_RIDGE: f32 = 1.0;
 
-/// Phase 2 — project every cell onto the frozen feature dictionary, in
+/// Phase 2 — project every cell onto the fixed feature dictionary, in
 /// parallel, and overwrite the `e_cell` var. The gated feature embedding is
 /// condition-dependent (`E_feat ⊙ exp(z·δ̄_s)`), so cells are grouped by
 /// condition and each condition's gated table is built once. The per-cell
@@ -1412,17 +1363,6 @@ fn build_smoother(
 }
 
 fn stage_params(config: &FitConfig) -> TrainingParams {
-    // No point regularizing the frozen feature side — it doesn't move.
-    // The gate (`z`, `δ`) is frozen with the feature side, so drop its L2
-    // too in freeze mode.
-    let frozen = config.frozen_feature_host.is_some();
-    let feature_embedding_l2 = if frozen {
-        0.0
-    } else {
-        config.feature_embedding_l2
-    };
-    let z_l2 = if frozen { 0.0 } else { config.z_l2 };
-    let delta_l2 = if frozen { 0.0 } else { config.delta_l2 };
     TrainingParams {
         epochs: config.epochs,
         batches_per_epoch: config.batches_per_epoch,
@@ -1433,8 +1373,8 @@ fn stage_params(config: &FitConfig) -> TrainingParams {
         // (single cell axis) both require `Sum`. Each phase sets its own
         // mode explicitly; this default just makes the value well-formed.
         composite_mode: CompositeMode::Sum,
-        feature_embedding_l2,
-        z_l2,
-        delta_l2,
+        feature_embedding_l2: config.feature_embedding_l2,
+        z_l2: config.z_l2,
+        delta_l2: config.delta_l2,
     }
 }
