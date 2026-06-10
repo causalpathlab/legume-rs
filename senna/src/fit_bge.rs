@@ -492,7 +492,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                  dictionary keeps all features)"
             );
         }
-        let report = data_beans::qc_lib::compute_qc(&unified.per_file_data[0], &cfg, args.block_size)?;
+        let report =
+            data_beans::qc_lib::compute_qc(&unified.per_file_data[0], &cfg, args.block_size)?;
         let keep = report.emit_idx_unmasked();
         info!(
             "QC: {} / {} cells kept for output ({} near-empty, {} MAD-outlier dropped)",
@@ -902,10 +903,10 @@ fn resolve_etm_topics(
 
     let cpu = candle_core::Device::Cpu;
     let z_full = Mat::from_tensor(&model.e_cell.to_device(&cpu)?)?; // [N, H]
-    // Drop QC-failed cells from archetype fitting + per-cell outputs. `z`
-    // and `barcodes` are subset by the same `keep` so their rows stay
-    // aligned; the dictionary β (from ρ + archetypes) is per-feature and
-    // unaffected.
+                                                                    // Drop QC-failed cells from archetype fitting + per-cell outputs. `z`
+                                                                    // and `barcodes` are subset by the same `keep` so their rows stay
+                                                                    // aligned; the dictionary β (from ρ + archetypes) is per-feature and
+                                                                    // unaffected.
     let (z, barcodes): (Mat, Vec<Box<str>>) = match cell_keep_idx {
         Some(keep) => (
             z_full.select_rows(keep.iter()),

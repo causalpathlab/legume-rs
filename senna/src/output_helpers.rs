@@ -52,7 +52,11 @@ pub fn save_latent(
             mat.to_parquet_with_names(&path, (Some(&names), Some("cell")), Some(&cols))?;
         }
         None => {
-            latent_nk.to_parquet_with_names(&path, (Some(cell_names), Some("cell")), Some(&cols))?;
+            latent_nk.to_parquet_with_names(
+                &path,
+                (Some(cell_names), Some("cell")),
+                Some(&cols),
+            )?;
         }
     }
     Ok(())
