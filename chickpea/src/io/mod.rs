@@ -13,14 +13,22 @@ pub struct FromMultiomeArgs {
     /// Input 10x Multiome HDF5 file (filtered_feature_bc_matrix.h5)
     pub h5_file: Box<str>,
 
-    /// Output prefix for backend files.
-    /// Produces {out}.rna.zarr and {out}.atac.zarr
-    #[arg(long, short, required = true)]
+    #[arg(
+        long,
+        short,
+        required = true,
+        help = "Output prefix for backend files",
+        long_help = "Output prefix for backend files.\n\
+                     Produces {out}.rna.zarr and {out}.atac.zarr"
+    )]
     pub out: Box<str>,
 
-    /// Optional ATAC fragments file (e.g. atac_fragments.tsv.gz).
-    /// When provided, writes {out}.fragments.tsv.gz filtered to matched barcodes.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Optional ATAC fragments file (e.g. atac_fragments.tsv.gz)",
+        long_help = "Optional ATAC fragments file (e.g. atac_fragments.tsv.gz).\n\
+                     When provided, writes {out}.fragments.tsv.gz filtered to matched barcodes."
+    )]
     pub fragments: Option<Box<str>>,
 }
 

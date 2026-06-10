@@ -18,34 +18,54 @@ use rand::SeedableRng;
 
 #[derive(Args, Debug)]
 pub struct SimConvArgs {
-    /// single-cell data (`.zarr` or `.h5`)
-    #[arg(short = 's', long, required = true)]
+    #[arg(
+        short = 's',
+        long,
+        required = true,
+        help = "single-cell data (`.zarr` or `.h5`)"
+    )]
     sc_data_file: Box<str>,
 
-    /// topic matrix with the first column corresponds to cell
-    /// barcodes (`.parquet`, `.tsv.gz`, `.csv.gz`)
-    #[arg(short = 't', long, required = true)]
+    #[arg(
+        short = 't',
+        long,
+        required = true,
+        help = "topic matrix with the first column corresponds to cell barcodes",
+        long_help = "topic matrix with the first column corresponds to cell\n\
+                     barcodes (`.parquet`, `.tsv.gz`, `.csv.gz`)"
+    )]
     topic_file: Box<str>,
 
-    /// number of cells per sample
-    #[arg(short = 'c', long, default_value_t = 10)]
+    #[arg(
+        short = 'c',
+        long,
+        default_value_t = 10,
+        help = "number of cells per sample"
+    )]
     cells_per_sample: usize,
 
-    /// number of bulk samples
-    #[arg(short = 'n', long, default_value_t = 100)]
+    #[arg(
+        short = 'n',
+        long,
+        default_value_t = 100,
+        help = "number of bulk samples"
+    )]
     bulk_samples: usize,
 
-    /// Dirichlet concentration parameter for topic mixing fractions
-    /// (smaller = more skewed, e.g. 0.1-0.5; larger = more uniform)
-    #[arg(short = 'a', long, default_value_t = 0.3)]
+    #[arg(
+        short = 'a',
+        long,
+        default_value_t = 0.3,
+        help = "Dirichlet concentration parameter for topic mixing fractions",
+        long_help = "Dirichlet concentration parameter for topic mixing fractions\n\
+                     (smaller = more skewed, e.g. 0.1-0.5; larger = more uniform)"
+    )]
     dirichlet_alpha: f64,
 
-    /// random seed
-    #[arg(short, long, default_value_t = 42)]
+    #[arg(short, long, default_value_t = 42, help = "random seed")]
     rseed: u64,
 
-    /// output file header
-    #[arg(short, long, required = true)]
+    #[arg(short, long, required = true, help = "output file header")]
     output: Box<str>,
 }
 

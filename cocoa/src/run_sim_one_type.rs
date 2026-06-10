@@ -328,9 +328,14 @@ pub struct SimOneTypeArgs {
     )]
     backend: SparseIoBackend,
 
-    /// Disable `.zarr.zip` archiving (the default) and keep a plain `.zarr`
-    /// directory instead. Matches the `--no-zip` convention used by faba.
-    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    #[arg(
+        long = "no-zip",
+        default_value_t = true,
+        action = clap::ArgAction::SetFalse,
+        help = "Disable `.zarr.zip` archiving (the default) and keep a plain `.zarr` directory instead",
+        long_help = "Disable `.zarr.zip` archiving (the default) and keep a plain `.zarr`\n\
+                     directory instead. Matches the `--no-zip` convention used by faba."
+    )]
     zip: bool,
 
     #[arg(
