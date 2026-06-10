@@ -14,7 +14,7 @@ use super::fit_layout_common::{
     PbLayoutPrep, ResolvedViz,
 };
 use crate::embed_common::*;
-use crate::geometry::umap::Umap;
+use matrix_util::umap::Umap;
 use rayon::prelude::*;
 
 #[derive(Args, Debug)]

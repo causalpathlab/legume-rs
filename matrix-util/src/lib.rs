@@ -20,4 +20,5 @@ pub mod sparse_stat;
 pub mod tensor_io;
 pub mod tensor_util;
 pub mod traits;
+pub mod umap;
 pub mod utils;
