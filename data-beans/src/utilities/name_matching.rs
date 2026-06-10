@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
 /// Make duplicate names unique by appending `-1`, `-2`, etc. to repeated entries.
@@ -137,6 +138,71 @@ pub fn flexible_name_match(query: &str, target: &str) -> bool {
         || t.contains(&format!("_{}_", q))
 }
 
+/// Pre-built index over a gene-name vocabulary for fast marker→row matching.
+/// Resolves a query gene in three tiers, returning the first matching row:
+///   1. exact (case-insensitive) full-name match,
+///   2. last `_`-segment symbol match (`CD8A` → `ENSG…_CD8A`),
+///   3. fallback to the general [`flexible_name_match`] (prefix / `_x_` segment).
+///
+/// Tiers 1–2 are O(1) hash lookups; only the rare fallback scans the
+/// vocabulary. Build once, match many — replaces the O(genes × markers)
+/// `.position(flexible_name_match)` scan. Tier 1 preferring an exact match
+/// over an earlier-indexed suffix match is the one intended refinement vs a
+/// pure positional scan.
+#[allow(dead_code)] // consumed by downstream crates (geu, senna), not the data-beans bin
+pub struct GeneIndex {
+    lowered: Vec<String>,
+    exact: HashMap<String, usize>,
+    symbol: HashMap<String, usize>,
+}
+
+#[allow(dead_code)] // consumed by downstream crates (geu, senna), not the data-beans bin
+impl GeneIndex {
+    /// Build the index from the dictionary's gene-name order. The first row
+    /// wins on duplicate keys (matching positional-scan semantics).
+    #[must_use]
+    pub fn build(gene_names: &[Box<str>]) -> Self {
+        let lowered: Vec<String> = gene_names.par_iter().map(|g| g.to_lowercase()).collect();
+        let mut exact: HashMap<String, usize> = HashMap::default();
+        let mut symbol: HashMap<String, usize> = HashMap::default();
+        for (i, low) in lowered.iter().enumerate() {
+            exact.entry(low.clone()).or_insert(i);
+            if let Some(sym) = low.rsplit('_').next() {
+                symbol.entry(sym.to_string()).or_insert(i);
+            }
+        }
+        Self {
+            lowered,
+            exact,
+            symbol,
+        }
+    }
+
+    /// Row index for `gene`, or `None` if unmatched (tiers above).
+    #[must_use]
+    pub fn match_gene(&self, gene: &str) -> Option<usize> {
+        let gl = gene.to_lowercase();
+        if let Some(&i) = self.exact.get(&gl) {
+            return Some(i);
+        }
+        if let Some(&i) = self.symbol.get(&gl) {
+            return Some(i);
+        }
+        self.lowered
+            .iter()
+            .position(|t| flexible_name_match(&gl, t))
+    }
+}
+
+/// Inverse-document-frequency marker weight `ln(C / df)`: a gene claimed by
+/// all `C` types gets weight 0 (removed from scoring), a type-exclusive gene
+/// the maximum `ln(C)`.
+#[allow(dead_code)] // consumed by downstream crates (geu, senna), not the data-beans bin
+#[must_use]
+pub fn idf_weight(n_types: usize, df: usize) -> f32 {
+    (n_types as f32 / df.max(1) as f32).ln()
+}
+
 /// Match names by substring queries and return matched indices and names
 ///
 /// # Arguments
@@ -174,4 +240,32 @@ pub fn match_by_substring(
         .collect();
 
     Ok((matched_indices, matched_names))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(v: &[&str]) -> Vec<Box<str>> {
+        v.iter().map(|s| Box::from(*s)).collect()
+    }
+
+    #[test]
+    fn gene_index_tiers_and_idf() {
+        let dict = names(&["ENSG00000153563_CD8A", "MS4A1", "A_FOO", "FOO"]);
+        let idx = GeneIndex::build(&dict);
+
+        // exact (case-insensitive)
+        assert_eq!(idx.match_gene("ms4a1"), Some(1));
+        // symbol = last `_`-segment
+        assert_eq!(idx.match_gene("CD8A"), Some(0));
+        // exact preferred over an earlier-indexed suffix match (the refinement)
+        assert_eq!(idx.match_gene("FOO"), Some(3));
+        // unmatched
+        assert_eq!(idx.match_gene("ZZZ9"), None);
+
+        // IDF: ubiquitous (df == C) → 0; exclusive → ln(C)
+        assert_eq!(idf_weight(4, 4), 0.0);
+        assert!(idf_weight(4, 1) > 1.38 && idf_weight(4, 1) < 1.39);
+    }
 }
