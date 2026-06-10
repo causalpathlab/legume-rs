@@ -240,7 +240,10 @@ pub fn compute_qc(
         };
         let rows = resolve_rows_by_regex(&row_names, pat)?;
         if rows.is_empty() {
-            warn!("QC: pattern `{}` matched no features — metric disabled", pat);
+            warn!(
+                "QC: pattern `{}` matched no features — metric disabled",
+                pat
+            );
             return Ok(None);
         }
         let sub_tot = collect_column_stat_across_vec(data, Some(&rows), block_size)?.sum();
@@ -629,10 +632,16 @@ mod qc_tests {
         let mut consider = vec![false; 12];
         consider.extend([true; 6]);
         let keep = robust_outlier_keep(&v, 2.0, Tail::Lower, true, Some(&consider));
-        assert!(!keep[17], "40 is a lower outlier of the real cluster (~100)");
+        assert!(
+            !keep[17],
+            "40 is a lower outlier of the real cluster (~100)"
+        );
         // Without `consider`, the zeros dominate the median and 40 survives.
         let keep_naive = robust_outlier_keep(&v, 2.0, Tail::Lower, true, None);
-        assert!(keep_naive[17], "naive band (contaminated by zeros) keeps 40");
+        assert!(
+            keep_naive[17],
+            "naive band (contaminated by zeros) keeps 40"
+        );
     }
 
     #[test]

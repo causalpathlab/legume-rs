@@ -119,7 +119,11 @@ pub(crate) fn write_cell_proj(
             n
         }
         None => {
-            proj_nk.to_parquet_with_names(&path, (Some(cell_names), Some("cell")), Some(&col_names))?;
+            proj_nk.to_parquet_with_names(
+                &path,
+                (Some(cell_names), Some("cell")),
+                Some(&col_names),
+            )?;
             n_cells
         }
     };
