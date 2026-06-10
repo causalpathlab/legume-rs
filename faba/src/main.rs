@@ -190,18 +190,25 @@ Example:\n  \
     #[command(
         name = "pileup",
         alias = "inspect",
-        about = "ASCII pileup plot for a single gene's modification sites",
-        long_about = "ASCII pileup plot for a single gene's modification sites\n\n\
-            Reads one or more sparse matrices (zarr/h5) from faba output,\n\
-            filters to a specific gene, bins positions along the gene body,\n\
-            and renders a vertical ASCII histogram showing signal density\n\
-            across genomic position. Multiple files (e.g. replicates via a\n\
-            shell glob) are aggregated per position. No GFF file required.",
+        about = "ASCII pileup, or a faceted Miami plot (SVG/PDF) for a gene",
+        long_about = "Pileup plot for a single gene's modification sites.\n\n\
+            ASCII mode (default): reads one or more sparse matrices (zarr/h5)\n\
+            from faba output, filters to a gene, bins positions along the gene\n\
+            body, and renders a vertical ASCII histogram. Multiple files (e.g.\n\
+            replicates via a shell glob) are aggregated per position.\n\n\
+            Miami figure mode: passing --gtf, --bam, --format, --svg, or --png\n\
+            renders a publication SVG/PDF instead — a mirrored Manhattan with\n\
+            epi sites up, a GTF gene model in the middle, and BAM read depth\n\
+            down, faceted into one panel per cell type (--cell-membership).",
         after_long_help = "\
-Example:\n  \
+Examples:\n  \
+  # ASCII histogram (unchanged)\n  \
   faba pileup out/rep1_wt_m6a_mixture.zarr.zip -q BRCA2\n  \
-  faba pileup out/rep1_wt_m6a_mixture.zarr.zip -q BRCA2 -s out/m6a_sites.parquet --signal nnz\n  \
-  faba pileup out/rep*_wt_m6a_ratio.zarr.zip -q BRCA2 -s out/m6a_sites.parquet"
+  faba pileup out/rep*_wt_m6a_ratio.zarr.zip -q BRCA2 -s out/m6a_sites.parquet\n  \
+  # Miami figure: epi sites / gene model / read depth, faceted by cell type\n  \
+  faba pileup out/rep1_wt_m6a_ratio.zarr.zip -q BRCA2 \\\n  \
+    --gtf gencode.gtf --bam sample.bam --cell-membership cells.tsv \\\n  \
+    --top-modality m6A --out brca2_miami --svg --png"
     )]
     Pileup(PileupArgs),
 

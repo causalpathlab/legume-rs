@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
 
-version = "0.2.9"
+version = "0.2.10"
 
 [lib]
 # The library surface exists so `gem`'s integration tests (tests/) can reach
@@ -47,6 +47,7 @@ data-beans-alg = { workspace = true }
 genomic-data = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
+plot-utils = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

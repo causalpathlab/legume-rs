@@ -1,13 +1,22 @@
+use crate::data::cell_membership::CellMembership;
+use crate::site_analysis::miami::bin::BinEdges;
+use crate::site_analysis::miami::depth::read_depth_binned;
+use crate::site_analysis::miami::genemodel::{load_gene_models, models_extent};
+use crate::site_analysis::miami::render::{render_miami, FigOpts, PanelData};
 use arrow::array::{Float32Array, Int64Array, StringArray, UInt64Array};
 use auxiliary_data::feature_names::FeatureNameKind;
 use clap::Args;
 use data_beans::hdf5_io::resolve_backend_file;
 use data_beans::sparse_io::open_sparse_matrix;
+use genomic_data::bed::Bed;
 use genomic_data::coordinates::chr_eq;
+use genomic_data::sam::CellBarcode;
 use log::info;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use plot_utils::palette::Palette;
 use rustc_hash::FxHashMap;
 use std::io::Write;
+use std::sync::Arc;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 pub enum PileupSignal {
@@ -50,6 +59,14 @@ impl SiteSignal {
             SiteSignal::NegLog10Pv => "-log10(pv)",
         }
     }
+}
+
+/// Figure output format when only one is wanted. Omit to get the default
+/// SVG + PDF pair.
+#[derive(clap::ValueEnum, Clone, Debug)]
+pub enum FigFormat {
+    Svg,
+    Pdf,
 }
 
 #[derive(Args, Debug)]
@@ -105,6 +122,88 @@ pub struct PileupArgs {
     /// Suppress ASCII plot
     #[arg(long)]
     quiet: bool,
+
+    // ----- Miami figure mode -----
+    // Providing any of `--gtf`, `--bam`, `--format`, `--svg`, or `--png`
+    // switches `pileup` from the ASCII histogram to a faceted Miami plot
+    // (epi sites up / gene model / read depth down, one panel per cell
+    // type). Otherwise the existing ASCII/TSV behavior is unchanged.
+    /// Gene annotation GTF/GFF for the middle gene-model track (exons,
+    /// introns, strand). Enables figure mode.
+    #[arg(long = "gtf")]
+    gtf: Option<Box<str>>,
+
+    /// BAM file(s) for the bottom read-depth track. Repeatable; replicates
+    /// are pooled. Enables figure mode.
+    #[arg(long = "bam", num_args = 1..)]
+    bam_files: Vec<Box<str>>,
+
+    /// Cell barcode -> cell type membership (TSV/CSV/Parquet). Panels are
+    /// faceted by cell type; without it the figure is a single "all cells"
+    /// panel.
+    #[arg(long = "cell-membership", visible_alias = "membership")]
+    cell_membership_file: Option<Box<str>>,
+
+    /// Column index of the cell barcode in the membership file
+    #[arg(long = "membership-barcode-col", default_value_t = 0)]
+    membership_barcode_col: usize,
+
+    /// Column index of the cell type in the membership file
+    #[arg(long = "membership-celltype-col", default_value_t = 1)]
+    membership_celltype_col: usize,
+
+    /// Require exact barcode matching (default: membership barcodes match
+    /// as prefixes of BAM/matrix barcodes, handling "-1" suffixes)
+    #[arg(long = "exact-barcode-match", default_value_t = false)]
+    exact_barcode_match: bool,
+
+    /// BAM tag holding the cell barcode (read-depth track)
+    #[arg(long = "cell-barcode-tag", default_value = "CB")]
+    cell_barcode_tag: Box<str>,
+
+    /// Restrict the top track to these modalities (e.g. `m6A,A-to-I`).
+    /// Empty = all matrix rows. Matched case-insensitively against the
+    /// `gene/MODALITY/detail` row name.
+    #[arg(long = "top-modality", value_delimiter = ',')]
+    top_modality: Vec<Box<str>>,
+
+    /// Output prefix for figure files (`<prefix>.miami.{svg,pdf,png}`).
+    /// Defaults to the gene label.
+    #[arg(long = "out")]
+    out: Option<Box<str>>,
+
+    /// Emit only this format. Omit for the default SVG + PDF.
+    #[arg(long = "format", value_enum)]
+    format: Option<FigFormat>,
+
+    /// Also write the SVG (always written unless `--format pdf`)
+    #[arg(long = "svg", default_value_t = false)]
+    svg: bool,
+
+    /// Also write a flattened PNG
+    #[arg(long = "png", default_value_t = false)]
+    png: bool,
+
+    /// Skip PDF output
+    #[arg(long = "no-pdf", default_value_t = false)]
+    no_pdf: bool,
+
+    /// Figure width in inches
+    #[arg(long = "fig-width", default_value_t = 8.0)]
+    fig_width: f32,
+
+    /// Figure resolution (dots per inch)
+    #[arg(long = "dpi", default_value_t = 300)]
+    dpi: u32,
+
+    /// Qualitative color palette for cell-type panels
+    #[arg(long = "palette", value_enum, default_value = "auto")]
+    palette: Palette,
+
+    /// Rasterize the per-site dot layer once a panel exceeds this many
+    /// sites (keeps SVG/PDF size bounded; axes/areas stay vector)
+    #[arg(long = "raster-threshold", default_value_t = 300)]
+    raster_threshold: usize,
 }
 
 /// Parse a faba row name `gene_key/modality/detail`. `detail` is either
@@ -113,18 +212,21 @@ pub struct PileupArgs {
 /// `ENSG00000139618_BRCA2/m6A/0`). Returns `(gene_part, chr, x)` where
 /// `chr` is empty for mixture rows and `x` is the genomic position or the
 /// component ordinal used as the pileup x-coordinate.
-fn parse_row_name(name: &str) -> Option<(&str, &str, i64)> {
+/// Returns `(gene, modality, chr, pos)`. `modality` is the middle
+/// `/`-delimited token (e.g. `m6A`), used by the figure's
+/// `--top-modality` filter; `chr` is empty for mixture (component) rows.
+fn parse_row_name_full(name: &str) -> Option<(&str, &str, &str, i64)> {
     let mut parts = name.splitn(3, '/');
     let gene_part = parts.next()?;
-    let _modality = parts.next()?;
+    let modality = parts.next()?;
     let detail = parts.next()?;
     if let Some((chr, pos_str)) = detail.split_once(':') {
         let pos = pos_str.parse::<i64>().ok()?;
-        Some((gene_part, chr, pos))
+        Some((gene_part, modality, chr, pos))
     } else {
         // Mixture rows carry a component ordinal, not a chromosome.
         let component = detail.parse::<i64>().ok()?;
-        Some((gene_part, "", component))
+        Some((gene_part, modality, "", component))
     }
 }
 
@@ -181,14 +283,14 @@ fn parse_region(spec: &str) -> anyhow::Result<Region> {
 /// Combined gene + region row selector. A row is selected when it
 /// matches any requested gene OR falls inside any requested region
 /// (union), so callers can pass either or both.
-struct Selector {
+pub(crate) struct Selector {
     genes: Vec<Box<str>>,
     gene_syms: Vec<Box<str>>,
     regions: Vec<Region>,
 }
 
 impl Selector {
-    fn build(genes: &[Box<str>], regions: &[Box<str>]) -> anyhow::Result<Self> {
+    pub(crate) fn build(genes: &[Box<str>], regions: &[Box<str>]) -> anyhow::Result<Self> {
         let genes: Vec<Box<str>> = genes
             .iter()
             .map(|g| g.trim())
@@ -212,7 +314,7 @@ impl Selector {
         })
     }
 
-    fn matches_gene(&self, gene_part: &str) -> bool {
+    pub(crate) fn matches_gene(&self, gene_part: &str) -> bool {
         self.genes
             .iter()
             .zip(&self.gene_syms)
@@ -472,18 +574,41 @@ fn read_site_annotation(
     })
 }
 
-fn read_matrix_positions(
+/// Matrix positions grouped by cell type (the figure's per-panel top
+/// track). With `membership = None` every cell falls into a single
+/// synthetic `""` group, which is exactly the all-cells aggregate the
+/// ASCII path uses — so [`read_matrix_positions`] is a thin wrapper.
+struct GroupedMatrix {
+    gene: Box<str>,
+    chr: Box<str>,
+    /// celltype label -> sorted `(pos, value)`
+    by_group: FxHashMap<Box<str>, Vec<(i64, f64)>>,
+}
+
+fn read_matrix_positions_grouped(
     data_files: &[Box<str>],
     selector: &Selector,
     signal: &PileupSignal,
-) -> anyhow::Result<MatrixGeneData> {
-    // Accumulate across every input file. Multiple files (e.g. replicates)
-    // are merged per genomic position into one track; gene/chr labels and
-    // signals reflect the union of all files.
-    let mut pos_agg: FxHashMap<i64, PosAgg> = FxHashMap::default();
+    membership: Option<&CellMembership>,
+    top_modality: &[Box<str>],
+) -> anyhow::Result<GroupedMatrix> {
+    // Per group: pos -> aggregate. Multiple input files (e.g. replicates)
+    // merge per genomic position; gene/chr labels reflect the union.
+    let mut by_group: FxHashMap<Box<str>, FxHashMap<i64, PosAgg>> = FxHashMap::default();
     let mut distinct_genes: FxHashMap<Box<str>, usize> = FxHashMap::default();
     let mut matched_chrs: Vec<Box<str>> = Vec::new();
     let mut total_matched = 0usize;
+
+    let modality_filter: Option<Vec<String>> = if top_modality.is_empty() {
+        None
+    } else {
+        Some(
+            top_modality
+                .iter()
+                .map(|m| m.to_ascii_lowercase())
+                .collect(),
+        )
+    };
 
     for data_file in data_files {
         let (backend, resolved_path) = resolve_backend_file(data_file, None)?;
@@ -493,7 +618,12 @@ fn read_matrix_positions(
 
         let mut matched_rows: Vec<(usize, i64)> = Vec::new();
         for (idx, name) in row_names.iter().enumerate() {
-            if let Some((gene_part, chr, pos)) = parse_row_name(name) {
+            if let Some((gene_part, modality, chr, pos)) = parse_row_name_full(name) {
+                if let Some(ref mf) = modality_filter {
+                    if !mf.contains(&modality.to_ascii_lowercase()) {
+                        continue;
+                    }
+                }
                 if selector.selects(gene_part, chr, pos) {
                     *distinct_genes.entry(gene_part.into()).or_insert(0) += 1;
                     matched_chrs.push(chr.into());
@@ -507,22 +637,54 @@ fn read_matrix_positions(
         }
         total_matched += matched_rows.len();
 
+        // Column index -> cell type (None to drop). Only needed when
+        // stratifying; the all-cells path skips reading column names.
+        let col_groups: Option<Vec<Option<Box<str>>>> = match membership {
+            None => None,
+            Some(m) => {
+                let col_names = data.column_names()?;
+                Some(
+                    col_names
+                        .iter()
+                        .map(|bc| m.matches_barcode(&CellBarcode::Barcode(Arc::from(bc.as_ref()))))
+                        .collect(),
+                )
+            }
+        };
+
         let local_to_pos: Vec<i64> = matched_rows.iter().map(|(_, pos)| *pos).collect();
         let row_indices: Vec<usize> = matched_rows.iter().map(|(idx, _)| *idx).collect();
         let (_nrow, _ncol, triplets) = data.read_triplets_by_rows(row_indices)?;
 
-        for &pos in &local_to_pos {
-            pos_agg.entry(pos).or_insert(PosAgg { sum: 0.0, nnz: 0 });
+        // All-cells: pre-seed every matched position so zero-signal sites
+        // still appear (axis markers), matching the legacy behavior.
+        if membership.is_none() {
+            let g = by_group.entry("".into()).or_default();
+            for &pos in &local_to_pos {
+                g.entry(pos).or_insert(PosAgg { sum: 0.0, nnz: 0 });
+            }
         }
 
-        for (row, _col, val) in &triplets {
+        for (row, col, val) in &triplets {
             let local_idx = *row as usize;
-            if local_idx < local_to_pos.len() && *val != 0.0 {
-                let pos = local_to_pos[local_idx];
-                let agg = pos_agg.get_mut(&pos).unwrap();
-                agg.sum += *val as f64;
-                agg.nnz += 1;
+            if local_idx >= local_to_pos.len() || *val == 0.0 {
+                continue;
             }
+            let group: Box<str> = match &col_groups {
+                None => "".into(),
+                Some(cg) => match cg.get(*col as usize).and_then(|o| o.clone()) {
+                    Some(ct) => ct,
+                    None => continue,
+                },
+            };
+            let pos = local_to_pos[local_idx];
+            let agg = by_group
+                .entry(group)
+                .or_default()
+                .entry(pos)
+                .or_insert(PosAgg { sum: 0.0, nnz: 0 });
+            agg.sum += *val as f64;
+            agg.nnz += 1;
         }
     }
 
@@ -534,9 +696,8 @@ fn read_matrix_positions(
         ));
     }
 
-    // Aggregate every matched row. The selection can span several genes
-    // (and chromosomes); rather than erroring on ambiguity we pile them
-    // all together and label the aggregate.
+    // The selection can span several genes (and chromosomes); rather than
+    // erroring on ambiguity we pile them together and label the aggregate.
     let gene: Box<str> = summarize_genes(&distinct_genes);
     let chr: Box<str> = summarize_chr(&matched_chrs);
 
@@ -549,21 +710,47 @@ fn read_matrix_positions(
         gene
     );
 
-    let mut positions: Vec<(i64, f64)> = pos_agg
-        .iter()
-        .map(|(&pos, agg)| {
-            let value = match signal {
-                PileupSignal::Sum | PileupSignal::Log10Sum => agg.sum,
-                PileupSignal::Nnz => agg.nnz as f64,
-            };
-            (pos, value)
+    let by_group = by_group
+        .into_iter()
+        .map(|(grp, pos_agg)| {
+            let mut positions: Vec<(i64, f64)> = pos_agg
+                .iter()
+                .map(|(&pos, agg)| {
+                    let value = match signal {
+                        PileupSignal::Sum | PileupSignal::Log10Sum => agg.sum,
+                        PileupSignal::Nnz => agg.nnz as f64,
+                    };
+                    (pos, value)
+                })
+                .collect();
+            positions.sort_unstable_by_key(|(pos, _)| *pos);
+            (grp, positions)
         })
         .collect();
-    positions.sort_unstable_by_key(|(pos, _)| *pos);
 
-    Ok(MatrixGeneData {
+    Ok(GroupedMatrix {
         gene,
         chr,
+        by_group,
+    })
+}
+
+fn read_matrix_positions(
+    data_files: &[Box<str>],
+    selector: &Selector,
+    signal: &PileupSignal,
+) -> anyhow::Result<MatrixGeneData> {
+    let grouped = read_matrix_positions_grouped(data_files, selector, signal, None, &[])?;
+    // membership = None yields exactly one synthetic "" group.
+    let positions = grouped
+        .by_group
+        .into_iter()
+        .next()
+        .map(|(_, p)| p)
+        .unwrap_or_default();
+    Ok(MatrixGeneData {
+        gene: grouped.gene,
+        chr: grouped.chr,
         positions,
     })
 }
@@ -575,25 +762,7 @@ fn bin_positions_with_extent(
     max_pos: i64,
     log_transform: bool,
 ) -> Vec<f64> {
-    let span = (max_pos - min_pos).max(1) as u64;
-    let mut bins = vec![0.0f64; num_bins];
-
-    for &(pos, val) in positions {
-        if pos < min_pos || pos > max_pos {
-            continue;
-        }
-        let rel = (pos - min_pos) as u64;
-        let bin = (rel * num_bins as u64 / span).min(num_bins as u64 - 1) as usize;
-        bins[bin] += val;
-    }
-
-    if log_transform {
-        for val in bins.iter_mut() {
-            *val = (1.0 + *val).log10();
-        }
-    }
-
-    bins
+    BinEdges::new(min_pos, max_pos, num_bins).bin(positions, log_transform)
 }
 
 /// Distinct coordinates from a position/value list (already sorted by
@@ -605,7 +774,7 @@ fn distinct_positions(positions: &[(i64, f64)]) -> Vec<i64> {
 }
 
 /// Group digits in threes for readability: `26781984` -> `26,781,984`.
-fn fmt_thousands(n: i64) -> String {
+pub(crate) fn fmt_thousands(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let bytes = digits.as_bytes();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -624,9 +793,7 @@ fn fmt_thousands(n: i64) -> String {
 /// Map a coordinate to its bin column under the same binning rule as
 /// [`bin_positions_with_extent`].
 fn pos_to_col(pos: i64, min_pos: i64, max_pos: i64, num_bins: usize) -> usize {
-    let span = (max_pos - min_pos).max(1) as u64;
-    let rel = (pos - min_pos).max(0) as u64;
-    (rel * num_bins as u64 / span).min(num_bins as u64 - 1) as usize
+    BinEdges::new(min_pos, max_pos, num_bins).col_of(pos)
 }
 
 /// Right-side legend listing each site location top-to-bottom (genomic
@@ -760,6 +927,17 @@ fn write_pileup_tsv(tracks: &[&BinnedPileup], output: &str) -> anyhow::Result<()
 pub fn run_pileup(args: &PileupArgs) -> anyhow::Result<()> {
     let selector = Selector::build(&args.genes, &args.regions)?;
 
+    // Figure mode is triggered by any figure-only input/output flag.
+    // Otherwise fall through to the original ASCII / TSV path unchanged.
+    let figure_mode = args.gtf.is_some()
+        || !args.bam_files.is_empty()
+        || args.format.is_some()
+        || args.svg
+        || args.png;
+    if figure_mode {
+        return run_miami_figure(args, &selector);
+    }
+
     // Read sparse matrix data
     let mtx = read_matrix_positions(&args.data_files, &selector, &args.signal)?;
     let matrix_num_sites = mtx.positions.len();
@@ -832,6 +1010,199 @@ pub fn run_pileup(args: &PileupArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Faceted Miami-plot path: stratified matrix epi sites (top), GTF gene
+/// model (middle), and BAM read depth (bottom), one panel per cell type.
+fn run_miami_figure(args: &PileupArgs, selector: &Selector) -> anyhow::Result<()> {
+    // Optional cell-type membership for faceting. allow_prefix = !exact.
+    let membership = match &args.cell_membership_file {
+        Some(p) => Some(CellMembership::from_file(
+            p,
+            args.membership_barcode_col,
+            args.membership_celltype_col,
+            !args.exact_barcode_match,
+        )?),
+        None => None,
+    };
+
+    // Top track: stratified matrix epi sites.
+    let grouped = read_matrix_positions_grouped(
+        &args.data_files,
+        selector,
+        &args.signal,
+        membership.as_ref(),
+        &args.top_modality,
+    )?;
+
+    // Optional parquet refines gene bounds in figure mode.
+    let site_annotation = args
+        .site_file
+        .as_ref()
+        .map(|sf| read_site_annotation(sf, selector, &args.site_signal))
+        .transpose()?;
+
+    // Middle track: gene model(s) from GTF.
+    let models = match &args.gtf {
+        Some(gtf) => load_gene_models(gtf, selector)?,
+        None => Vec::new(),
+    };
+
+    // Shared extent = union of gene-model footprint, all matrix sites, and
+    // parquet bounds — so the whole model and every site are visible.
+    let mut lo = i64::MAX;
+    let mut hi = i64::MIN;
+    if let Some((_, mlo, mhi)) = models_extent(&models) {
+        lo = lo.min(mlo);
+        hi = hi.max(mhi);
+    }
+    for positions in grouped.by_group.values() {
+        for &(p, _) in positions {
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+    }
+    if let Some(sa) = &site_annotation {
+        lo = lo.min(sa.gene_start);
+        hi = hi.max(sa.gene_stop);
+    }
+    if lo > hi {
+        anyhow::bail!(
+            "no genomic coordinates to plot for {} (need positional matrix rows, a GTF, or a sites parquet)",
+            selector.describe()
+        );
+    }
+
+    let edges = BinEdges::new(lo, hi, args.num_bins);
+
+    // Region chromosome: prefer the matrix chr (same origin as the BAM),
+    // else the GTF gene's chr.
+    let region_chr: Box<str> = if grouped.chr.as_ref() != "*"
+        && grouped.chr.as_ref() != "component"
+        && !grouped.chr.is_empty()
+    {
+        grouped.chr.clone()
+    } else if let Some(m) = models.first() {
+        m.chr.clone()
+    } else {
+        grouped.chr.clone()
+    };
+
+    // Bottom track: read depth from BAM, stratified by cell type.
+    let depth_by_group = if args.bam_files.is_empty() {
+        FxHashMap::default()
+    } else {
+        let region = Bed {
+            chr: region_chr.clone(),
+            start: lo,
+            stop: hi + 1,
+        };
+        read_depth_binned(
+            &args.bam_files,
+            &region,
+            &edges,
+            &args.cell_barcode_tag,
+            membership.as_ref(),
+        )?
+    };
+
+    // Panel order: membership cell types (sorted) or one all-cells panel.
+    let celltypes: Vec<Box<str>> = match &membership {
+        Some(m) => {
+            let mut v = m.cell_types();
+            v.sort();
+            v
+        }
+        None => vec!["".into()],
+    };
+
+    let is_log = matches!(args.signal, PileupSignal::Log10Sum);
+    let mut panels: Vec<PanelData> = Vec::with_capacity(celltypes.len());
+    for ct in &celltypes {
+        let raw = grouped.by_group.get(ct).cloned().unwrap_or_default();
+        let epi_sites = if is_log {
+            raw.into_iter()
+                .map(|(p, v)| (p, (1.0 + v).log10()))
+                .collect()
+        } else {
+            raw
+        };
+        let depth_bins = depth_by_group
+            .get(ct)
+            .cloned()
+            .unwrap_or_else(|| vec![0.0; edges.num_bins]);
+        panels.push(PanelData {
+            celltype: ct.clone(),
+            epi_sites,
+            depth_bins,
+        });
+    }
+
+    // Output formats: SVG always (unless `--format pdf`), PDF default-on.
+    let (want_svg, want_pdf, want_png) = match &args.format {
+        Some(FigFormat::Svg) => (true, false, args.png),
+        Some(FigFormat::Pdf) => (args.svg, true, args.png),
+        None => (true, !args.no_pdf, args.png),
+    };
+
+    let out_prefix: Box<str> = args
+        .out
+        .clone()
+        .unwrap_or_else(|| slug(&grouped.gene).into());
+
+    let top_label: Box<str> = if args.top_modality.is_empty() {
+        "epi sites".into()
+    } else {
+        args.top_modality
+            .iter()
+            .map(|m| m.as_ref())
+            .collect::<Vec<_>>()
+            .join("/")
+            .into()
+    };
+
+    let title: Box<str> = format!(
+        "{}  {}:{}-{}",
+        grouped.gene,
+        region_chr,
+        fmt_thousands(lo),
+        fmt_thousands(hi)
+    )
+    .into();
+
+    let opts = FigOpts {
+        out_prefix,
+        width_in: args.fig_width,
+        dpi: args.dpi,
+        palette: args.palette.clone(),
+        want_svg,
+        want_png,
+        want_pdf,
+        raster_threshold: args.raster_threshold,
+        title,
+        top_label,
+    };
+
+    let n = render_miami(&panels, &models, &edges, &opts)?;
+    info!(
+        "rendered Miami plot: {} panel(s), {} file(s)",
+        panels.len(),
+        n
+    );
+    Ok(())
+}
+
+/// Filesystem-safe slug for a default figure output prefix.
+fn slug(s: &str) -> String {
+    let out: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if out.is_empty() {
+        "miami".to_string()
+    } else {
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,16 +1211,16 @@ mod tests {
     fn parse_site_and_mixture_rows() {
         // site output: gene/modality/chr:pos
         assert_eq!(
-            parse_row_name("ENSG00000139618_BRCA2/m6A/chr13:32350000"),
-            Some(("ENSG00000139618_BRCA2", "chr13", 32350000))
+            parse_row_name_full("ENSG00000139618_BRCA2/m6A/chr13:32350000"),
+            Some(("ENSG00000139618_BRCA2", "m6A", "chr13", 32350000))
         );
         // mixture output: gene/modality/component
         assert_eq!(
-            parse_row_name("ENSG00000060558_GNA15/m6A/0"),
-            Some(("ENSG00000060558_GNA15", "", 0))
+            parse_row_name_full("ENSG00000060558_GNA15/m6A/0"),
+            Some(("ENSG00000060558_GNA15", "m6A", "", 0))
         );
         // count rows (detail neither chr:pos nor an integer) don't parse
-        assert_eq!(parse_row_name("gene_0/count/spliced"), None);
+        assert_eq!(parse_row_name_full("gene_0/count/spliced"), None);
     }
 
     #[test]
