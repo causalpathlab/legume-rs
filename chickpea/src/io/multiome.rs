@@ -190,9 +190,7 @@ fn split_triplets(
     // Single pass: filter and remap
     let remapped: Vec<(u64, u64, f32)> = triplets
         .iter()
-        .filter_map(|&(row, col, val)| {
-            new_row_idx[row as usize].map(|new_row| (new_row, col, val))
-        })
+        .filter_map(|&(row, col, val)| new_row_idx[row as usize].map(|new_row| (new_row, col, val)))
         .collect();
 
     ModalitySplit {
@@ -210,8 +208,7 @@ fn write_backend(
     backend: &SparseIoBackend,
     column_names: &[Box<str>],
 ) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
-    let (resolved_backend, backend_file) =
-        resolve_backend_file(out_path, Some(backend.clone()))?;
+    let (resolved_backend, backend_file) = resolve_backend_file(out_path, Some(backend.clone()))?;
 
     if std::path::Path::new(backend_file.as_ref()).exists() {
         info!("Removing existing backend file: {}", &backend_file);

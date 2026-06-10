@@ -50,31 +50,50 @@ pub struct RunSimulateArgs {
     #[arg(short, long, help = "Number of columns or cells")]
     pub cols: usize,
 
-    /// Real single-cell reference (`.h5`, `.zarr`, `.zarr.zip`). When set,
-    /// the GLM pipeline is unchanged, but the final count generation step
-    /// swaps `Poisson(λ)` for a copula-coupled NB draw using per-gene
-    /// dispersion `r̂_g` and a global Σ̂ fitted from this reference.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Real single-cell reference (.h5, .zarr, .zarr.zip)",
+        long_help = "Real single-cell reference (`.h5`, `.zarr`, `.zarr.zip`). When set,\n\
+                     the GLM pipeline is unchanged, but the final count generation step\n\
+                     swaps `Poisson(λ)` for a copula-coupled NB draw using per-gene\n\
+                     dispersion `r̂_g` and a global Σ̂ fitted from this reference."
+    )]
     pub reference: Option<Box<str>>,
 
-    /// HVG count for the gene-gene copula. Genes outside the HVG set are
-    /// sampled independently from `NB(λ_{g,j}, r̂_g)`. Used only with `--reference`.
-    #[arg(long, default_value_t = 2000)]
+    #[arg(
+        long,
+        default_value_t = 2000,
+        help = "HVG count for the gene-gene copula",
+        long_help = "HVG count for the gene-gene copula. Genes outside the HVG set are\n\
+                     sampled independently from `NB(λ_{g,j}, r̂_g)`. Used only with `--reference`."
+    )]
     pub n_hvg: usize,
 
-    /// Maximum rank of the low-rank `Σ̂` factor `F = U·diag(σ)/√N`. Effective
-    /// rank is `min(rank, n_hvg, n_reference_cells)`. Used only with `--reference`.
-    #[arg(long, default_value_t = 100)]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Maximum rank of the low-rank Σ̂ factor F = U·diag(σ)/√N",
+        long_help = "Maximum rank of the low-rank `Σ̂` factor `F = U·diag(σ)/√N`. Effective\n\
+                     rank is `min(rank, n_hvg, n_reference_cells)`. Used only with `--reference`."
+    )]
     pub copula_rank: usize,
 
-    /// Per-gene isotropic ridge variance added at sample time on top of `Σ̂`.
-    /// Used only with `--reference`.
-    #[arg(long, default_value_t = 1e-3)]
+    #[arg(
+        long,
+        default_value_t = 1e-3,
+        help = "Per-gene isotropic ridge variance added at sample time on top of Σ̂",
+        long_help = "Per-gene isotropic ridge variance added at sample time on top of `Σ̂`.\n\
+                     Used only with `--reference`."
+    )]
     pub regularization: f32,
 
-    /// Lower bound on the NB size parameter `r̂_g`. Tames runaway dispersion
-    /// when MoM yields a near-zero `r` for noisy genes. Used only with `--reference`.
-    #[arg(long, default_value_t = 1e-2)]
+    #[arg(
+        long,
+        default_value_t = 1e-2,
+        help = "Lower bound on the NB size parameter r̂_g",
+        long_help = "Lower bound on the NB size parameter `r̂_g`. Tames runaway dispersion\n\
+                     when MoM yields a near-zero `r` for noisy genes. Used only with `--reference`."
+    )]
     pub r_floor: f32,
 
     #[arg(
@@ -120,27 +139,40 @@ pub struct RunSimulateArgs {
     )]
     pub pve_batch: f32,
 
-    /// PVE-style magnitude for the per-cell residual log-mean noise term
-    /// in stage 1 of the reference-mode two-stage simulator. Setting this
-    /// \> 0 adds `√pve_noise · ε_{g,j}` (`ε ~ N(0,1)` iid per gene per cell)
-    /// on top of the topic perturbation, before batch is applied. Default
-    /// 0 keeps stage 1 fully topic + reference-baseline driven.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "PVE-style magnitude for the per-cell residual log-mean noise term",
+        long_help = "PVE-style magnitude for the per-cell residual log-mean noise term\n\
+                     in stage 1 of the reference-mode two-stage simulator. Setting this\n\
+                     > 0 adds `√pve_noise · ε_{g,j}` (`ε ~ N(0,1)` iid per gene per cell)\n\
+                     on top of the topic perturbation, before batch is applied. Default\n\
+                     0 keeps stage 1 fully topic + reference-baseline driven."
+    )]
     pub pve_noise: f32,
 
-    /// Rank of the batch-program subspace (reference mode). `0` = each
-    /// gene's batch shift is iid log-normal (Splatter-style). `2-3` =
-    /// genes co-shift along a low-dim subspace ("batch program"). Higher
-    /// ranks make batch effects look more structured.
-    #[arg(long, default_value_t = 2)]
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Rank of the batch-program subspace (reference mode)",
+        long_help = "Rank of the batch-program subspace (reference mode). `0` = each\n\
+                     gene's batch shift is iid log-normal (Splatter-style). `2-3` =\n\
+                     genes co-shift along a low-dim subspace (\"batch program\"). Higher\n\
+                     ranks make batch effects look more structured."
+    )]
     pub batch_rank: usize,
 
-    /// Where the batch-program subspace comes from when `--batch-rank > 0`.
-    /// `random` = fresh low-dim random factor (default; arbitrary subspace).
-    /// `empirical` = top columns of the reference's fitted gene-gene copula
-    /// factor (worst case: batch shifts ride the reference's real
-    /// co-expression PCs).
-    #[arg(long, value_enum, default_value_t = BatchProgram::Random)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = BatchProgram::Random,
+        help = "Where the batch-program subspace comes from when --batch-rank > 0",
+        long_help = "Where the batch-program subspace comes from when `--batch-rank > 0`.\n\
+                     `random` = fresh low-dim random factor (default; arbitrary subspace).\n\
+                     `empirical` = top columns of the reference's fitted gene-gene copula\n\
+                     factor (worst case: batch shifts ride the reference's real\n\
+                     co-expression PCs)."
+    )]
     pub batch_program: BatchProgram,
 
     #[arg(short, long, help = "Output file header")]
@@ -178,8 +210,11 @@ pub struct RunSimulateArgs {
     )]
     pub backend: SparseIoBackend,
 
-    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Produce a `.zarr.zip` archive instead of a `.zarr` directory"
+    )]
     pub zip: bool,
 }
 
@@ -285,8 +320,11 @@ pub struct RunSimulateMultimodalArgs {
     #[arg(long, value_enum, default_value = "zarr", help = "Backend format")]
     pub backend: SparseIoBackend,
 
-    /// produce a `.zarr.zip` archive instead of a `.zarr` directory
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Produce a `.zarr.zip` archive instead of a `.zarr` directory"
+    )]
     pub zip: bool,
 }
 

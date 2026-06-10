@@ -227,74 +227,118 @@ pub struct MultiomeArgs {
     /////////////////////////////////////////////////
     // Reference / copula flags (per modality) //
     /////////////////////////////////////////////////
-    /// Real single-cell ATAC reference (`.h5`, `.zarr`, `.zarr.zip`). When set,
-    /// the ATAC sampler switches to two-stage GLM + NB+copula PIT (per-peak
-    /// `r̂` + global Σ̂ from the reference). The reference's row count
-    /// overrides `--n-peaks`.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Real single-cell ATAC reference (.h5, .zarr, .zarr.zip)",
+        long_help = "Real single-cell ATAC reference (`.h5`, `.zarr`, `.zarr.zip`). When set,\n\
+                     the ATAC sampler switches to two-stage GLM + NB+copula PIT (per-peak\n\
+                     `r̂` + global Σ̂ from the reference). The reference's row count\n\
+                     overrides `--n-peaks`."
+    )]
     pub reference_atac: Option<Box<str>>,
 
-    /// Real single-cell RNA reference. Symmetric to `--reference-atac`. The
-    /// reference's row count overrides `--n-genes`.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Real single-cell RNA reference. Symmetric to `--reference-atac`",
+        long_help = "Real single-cell RNA reference. Symmetric to `--reference-atac`. The\n\
+                     reference's row count overrides `--n-genes`."
+    )]
     pub reference_rna: Option<Box<str>>,
 
-    /// HVG / HVP count for each modality's gene-gene (peak-peak) copula.
-    /// Features outside the HV set are sampled independently from `NB(λ, r̂)`.
-    #[arg(long, default_value_t = 2000)]
+    #[arg(
+        long,
+        default_value_t = 2000,
+        help = "HVG / HVP count for each modality's gene-gene (peak-peak) copula",
+        long_help = "HVG / HVP count for each modality's gene-gene (peak-peak) copula.\n\
+                     Features outside the HV set are sampled independently from `NB(λ, r̂)`."
+    )]
     pub n_hvg: usize,
 
-    /// Maximum rank of the per-modality low-rank `Σ̂` factor.
-    #[arg(long, default_value_t = 100)]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Maximum rank of the per-modality low-rank Σ̂ factor"
+    )]
     pub copula_rank: usize,
 
-    /// Per-feature isotropic ridge variance added at sample time on top of `Σ̂`.
-    #[arg(long, default_value_t = 1e-3)]
+    #[arg(
+        long,
+        default_value_t = 1e-3,
+        help = "Per-feature isotropic ridge variance added at sample time on top of Σ̂"
+    )]
     pub regularization: f32,
 
-    /// Lower bound on the NB size parameter `r̂`. Tames runaway dispersion when
-    /// MoM yields a near-zero `r` for noisy features.
-    #[arg(long, default_value_t = 1e-2)]
+    #[arg(
+        long,
+        default_value_t = 1e-2,
+        help = "Lower bound on the NB size parameter r̂",
+        long_help = "Lower bound on the NB size parameter `r̂`. Tames runaway dispersion when\n\
+                     MoM yields a near-zero `r` for noisy features."
+    )]
     pub r_floor: f32,
 
-    /// Number of batches (per-cell membership is uniform). Stage-2 batch
-    /// perturbation is fitted per modality; same membership across modalities.
-    #[arg(long, default_value_t = 1)]
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Number of batches (per-cell membership is uniform)",
+        long_help = "Number of batches (per-cell membership is uniform). Stage-2 batch\n\
+                     perturbation is fitted per modality; same membership across modalities."
+    )]
     pub batches: usize,
 
-    /// Rank of the batch-program subspace in reference mode. `0` = iid
-    /// (Splatter-style); `2-3` = co-shifted batch program.
-    #[arg(long, default_value_t = 2)]
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Rank of the batch-program subspace in reference mode",
+        long_help = "Rank of the batch-program subspace in reference mode. `0` = iid\n\
+                     (Splatter-style); `2-3` = co-shifted batch program."
+    )]
     pub batch_rank: usize,
 
-    /// Where the batch-program subspace comes from when `--batch-rank > 0`.
-    #[arg(long, value_enum, default_value_t = BatchProgram::Random)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = BatchProgram::Random,
+        help = "Where the batch-program subspace comes from when --batch-rank > 0"
+    )]
     pub batch_program: BatchProgram,
 
-    /// Peak-noise weight: (unnormalized) share of a peak's log-accessibility from a
-    /// per-cell residual noise term. Normalized with the other peak-budget weights.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Peak-noise weight: (unnormalized) share of a peak's log-accessibility from a per-cell residual noise term",
+        long_help = "Peak-noise weight: (unnormalized) share of a peak's log-accessibility from a\n\
+                     per-cell residual noise term. Normalized with the other peak-budget weights."
+    )]
     pub pve_noise: f32,
 
-    /// Batch weight: (unnormalized) share of log-rate variance from batch effects
-    /// (used when --batches > 1). Normalized into the peak and gene budgets.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Batch weight: (unnormalized) share of log-rate variance from batch effects",
+        long_help = "Batch weight: (unnormalized) share of log-rate variance from batch effects\n\
+                     (used when --batches > 1). Normalized into the peak and gene budgets."
+    )]
     pub pve_batch: f32,
 
-    /// Fraction of cells observed in BOTH modalities. `1.0` (default)
-    /// keeps the historical paired-multiome behavior — ATAC and RNA
-    /// share `--n-cells` barcodes one-to-one. `0.0` makes the two
-    /// modalities fully disjoint (each gets `--n-cells` unique
-    /// barcodes; no cell is in both files). In-between gives **patchy
-    /// multiome**: `floor(n_cells * fraction)` shared cells plus
-    /// `n_cells - floor(...)` modality-only cells per modality.
-    ///
-    /// Shared cells are named `cell_<i>` and appear identically in
-    /// both files. Modality-only cells are named `atac_cell_<i>` or
-    /// `rna_cell_<i>` and appear only in their file. Use to drive
-    /// `senna gbe --multiome` / `senna itopic --multiome` integration
-    /// tests at known overlap fractions.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Fraction of cells observed in BOTH modalities (1.0 = fully paired, 0.0 = fully disjoint)",
+        long_help = "Fraction of cells observed in BOTH modalities. `1.0` (default)\n\
+                     keeps the historical paired-multiome behavior — ATAC and RNA\n\
+                     share `--n-cells` barcodes one-to-one. `0.0` makes the two\n\
+                     modalities fully disjoint (each gets `--n-cells` unique\n\
+                     barcodes; no cell is in both files). In-between gives **patchy\n\
+                     multiome**: `floor(n_cells * fraction)` shared cells plus\n\
+                     `n_cells - floor(...)` modality-only cells per modality.\n\
+                     \n\
+                     Shared cells are named `cell_<i>` and appear identically in\n\
+                     both files. Modality-only cells are named `atac_cell_<i>` or\n\
+                     `rna_cell_<i>` and appear only in their file. Use to drive\n\
+                     `senna gbe --multiome` / `senna itopic --multiome` integration\n\
+                     tests at known overlap fractions."
+    )]
     pub cell_overlap_fraction: f32,
 }
 
