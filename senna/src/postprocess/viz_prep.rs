@@ -98,6 +98,7 @@ pub(crate) fn write_cell_proj(
     prefix: &str,
     proj_kn: &Mat,
     cell_names: &[Box<str>],
+    keep_idx: Option<&[usize]>,
 ) -> anyhow::Result<String> {
     let path = format!("{prefix}.cell_proj.parquet");
     let n_cells = proj_kn.ncols();
@@ -111,10 +112,20 @@ pub(crate) fn write_cell_proj(
     let col_names: Vec<Box<str>> = (0..proj_nk.ncols())
         .map(|i| format!("p{i}").into_boxed_str())
         .collect();
-    proj_nk.to_parquet_with_names(&path, (Some(cell_names), Some("cell")), Some(&col_names))?;
+    let n_emitted = match crate::output_helpers::cell_subset(&proj_nk, cell_names, keep_idx) {
+        Some((mat, names)) => {
+            let n = mat.nrows();
+            mat.to_parquet_with_names(&path, (Some(&names), Some("cell")), Some(&col_names))?;
+            n
+        }
+        None => {
+            proj_nk.to_parquet_with_names(&path, (Some(cell_names), Some("cell")), Some(&col_names))?;
+            n_cells
+        }
+    };
     info!(
         "Wrote cell projection: {} cells × {} dims → {path}",
-        n_cells,
+        n_emitted,
         proj_nk.ncols()
     );
     Ok(path)
@@ -134,6 +145,7 @@ pub(crate) fn write_cell_to_pb(
     prefix: &str,
     cell_to_pb_per_level: &[Vec<usize>],
     cell_names: &[Box<str>],
+    keep_idx: Option<&[usize]>,
 ) -> anyhow::Result<String> {
     anyhow::ensure!(
         !cell_to_pb_per_level.is_empty(),
@@ -158,10 +170,20 @@ pub(crate) fn write_cell_to_pb(
         .map(|i| format!("level_{i}").into_boxed_str())
         .collect();
     let path = format!("{prefix}.cell_to_pb.parquet");
-    mat.to_parquet_with_names(&path, (Some(cell_names), Some("cell")), Some(&col_names))?;
+    let n_emitted = match crate::output_helpers::cell_subset(&mat, cell_names, keep_idx) {
+        Some((m, names)) => {
+            let n = m.nrows();
+            m.to_parquet_with_names(&path, (Some(&names), Some("cell")), Some(&col_names))?;
+            n
+        }
+        None => {
+            mat.to_parquet_with_names(&path, (Some(cell_names), Some("cell")), Some(&col_names))?;
+            n_cells
+        }
+    };
     info!(
         "Wrote cell→pb membership: {} cells × {} levels → {path}",
-        n_cells, num_levels
+        n_emitted, num_levels
     );
     Ok(path)
 }

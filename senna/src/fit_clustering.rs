@@ -320,6 +320,10 @@ fn run_bhc_postprocess(
         batch_files: None,
         num_types: 1,
         preload: true,
+        // Clustering reads an existing cell set — never drop cells.
+        qc: None,
+        qc_block_size: None,
+        qc_report_out: None,
     })?;
     anyhow::ensure!(
         stack.data_stack.stack.len() == 1,

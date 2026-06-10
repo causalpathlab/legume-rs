@@ -12,6 +12,7 @@ pub type CscMat = nalgebra_sparse::CscMatrix<f32>;
 
 pub type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 
+pub use data_beans::qc_lib::{QcArgs, QcConfig};
 pub use data_beans::sparse_data_visitors::*;
 pub use data_beans::sparse_io::*;
 pub use data_beans::sparse_io_stack::*;

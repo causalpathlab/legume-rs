@@ -934,6 +934,7 @@ fn preprocess_layout_data_recompute(
         collapsed_levels,
         proj_kn,
         cell_to_pb_per_level: _,
+        output_keep_idx: _,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &resolved.data_files,
         batch_files: &resolved.batch_files,
@@ -945,6 +946,10 @@ fn preprocess_layout_data_recompute(
         iter_opt: args.iter_opt,
         block_size: args.block_size,
         out: &resolved.out,
+        // Layout recompute lays out a fixed cell set — never drop cells.
+        qc: None,
+        qc_block_size: None,
+        qc_report_out: None,
         // Layout recompute is the legacy path: match training's default
         // HVG gate so the projection reflects variable biology.
         max_features: 5000,

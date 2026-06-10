@@ -61,6 +61,32 @@ impl SparseIoStack {
         Ok(self.column_names.clone())
     }
 
+    /// Exclude columns (cells) across every layer in the stack in
+    /// lockstep. `keep[global_col]` is `true` to keep, `false` to drop.
+    /// Mirror of [`SparseIoVec::mask_columns`]; the members share one
+    /// synchronized cell axis, so the same mask applies to all. MUST be
+    /// called before batch/group registration.
+    pub fn mask_columns_all(&mut self, keep: &[bool]) -> anyhow::Result<()> {
+        let n = self.num_columns()?;
+        if keep.len() != n {
+            return Err(anyhow::anyhow!(
+                "mask_columns_all: keep.len()={} != num_columns={}",
+                keep.len(),
+                n
+            ));
+        }
+        for layer in self.stack.iter_mut() {
+            layer.mask_columns(keep)?;
+        }
+        // Refresh the cached shared column names from the (now filtered)
+        // first member; all members were masked identically.
+        self.column_names = match self.stack.first() {
+            Some(first) => first.column_names()?,
+            None => vec![],
+        };
+        Ok(())
+    }
+
     /// Register batch membership for all layers in the stack.
     pub fn register_batch_membership<T>(&mut self, batch_membership: &[T])
     where

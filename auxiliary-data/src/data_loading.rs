@@ -47,12 +47,27 @@ pub struct ReadSharedRowsArgs {
     /// contributes triplets only on that modality's row block, and no
     /// `@<basename>` suffix is added.
     pub column_alignment: ColumnAlignment,
+    /// Optional shared cell QC. When `Some`, non-near-empty MAD outlier
+    /// cells are dropped from the working set (via `mask_columns`), the
+    /// returned `batch` Vec is filtered in lockstep, junk features are
+    /// dropped (when `feature_min_cells > 0`), and the near-empty
+    /// output keep-mask is returned in `output_keep_idx`. `None`
+    /// (the default) = no QC, i.e. today's behavior.
+    pub qc: Option<data_beans::qc_lib::QcConfig>,
+    /// Block size for the QC streaming stat passes (`None` = default).
+    pub qc_block_size: Option<usize>,
+    /// Optional path for a per-cell QC report TSV (`None` = don't write).
+    pub qc_report_out: Option<Box<str>>,
 }
 
 /// Sparse data with per-cell batch labels.
 pub struct SparseDataWithBatch {
     pub data: SparseIoVec,
     pub batch: Vec<Box<str>>,
+    /// Near-empty output keep-mask: indices (in post-`mask_columns`
+    /// column order) of cells to emit at output. `None` when no QC ran
+    /// (emit every cell). See [`data_beans::qc_lib::QcReport::output_keep_idx`].
+    pub output_keep_idx: Option<Vec<usize>>,
 }
 
 /// Load multiple sparse data files, verify shared row names, and auto-detect batch.
@@ -214,7 +229,7 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
 
     // check batch membership
     let n_cells = data_vec.num_columns();
-    let batch_membership: Vec<Box<str>> = match args.column_alignment {
+    let mut batch_membership: Vec<Box<str>> = match args.column_alignment {
         ColumnAlignment::Disjoint => resolve_batch_disjoint(
             &args.data_files,
             &data_vec,
@@ -237,9 +252,44 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         ));
     }
 
+    // Optional shared cell QC — applied here (before any batch/group
+    // registration, which happens later during projection) so all
+    // downstream stages see the QC-reduced axes consistently.
+    let output_keep_idx = if let Some(cfg) = args.qc.as_ref() {
+        let report = data_beans::qc_lib::compute_qc(&data_vec, cfg, args.qc_block_size)?;
+        if let Some(path) = args.qc_report_out.as_deref() {
+            data_beans::qc_lib::write_qc_report(path, &data_vec.column_names()?, &report)?;
+        }
+        let n_near_empty = report.near_empty.iter().filter(|&&e| e).count();
+        info!(
+            "QC: dropped {}/{} cells from training, {} near-empty masked at output, {}/{} features dropped",
+            report.n_cells_dropped,
+            report.train_keep.len(),
+            n_near_empty,
+            report.n_features_dropped,
+            report.feature_keep.len(),
+        );
+        // Feature axis first (compact-row space is still the original one).
+        if report.n_features_dropped > 0 {
+            data_vec.mask_rows(&report.feature_keep)?;
+        }
+        // Cell axis: indices computed against the original column order,
+        // then mask_columns + lockstep batch filter.
+        let keep_idx = report.output_keep_idx();
+        if report.n_cells_dropped > 0 {
+            data_vec.mask_columns(&report.train_keep)?;
+            batch_membership =
+                data_beans::qc_lib::filter_by_keep(&batch_membership, &report.train_keep);
+        }
+        Some(keep_idx)
+    } else {
+        None
+    };
+
     Ok(SparseDataWithBatch {
         data: data_vec,
         batch: batch_membership,
+        output_keep_idx,
     })
 }
 

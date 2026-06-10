@@ -97,6 +97,9 @@ pub struct BgeArgs {
     #[command(flatten)]
     collapse: crate::refine_weighting::CollapseArgs,
 
+    #[command(flatten)]
+    qc: QcArgs,
+
     #[arg(
         long,
         default_value_t = 0,
@@ -475,6 +478,34 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         );
     }
 
+    // ---- Cell QC ----
+    // gem-style (UnifiedData has no `mask_columns`): every cell + edge still
+    // informs the joint embedding / feature dictionary, but QC-failed cells
+    // (near-empty floor + MAD outliers) are dropped from the archetypal
+    // analysis and all per-cell outputs via a write-time `select_rows`.
+    // Computed on the full-feature unified matrix (`per_file_data[0]`), so
+    // n_genes is the per-cell detected-feature count across all modalities.
+    let qc_keep_idx: Option<Vec<usize>> = if let Some(cfg) = args.qc.to_config() {
+        if cfg.feature_min_cells > 0 {
+            log::warn!(
+                "--qc-feature-min-cells is ignored by bge (cell-only QC; the \
+                 dictionary keeps all features)"
+            );
+        }
+        let report = data_beans::qc_lib::compute_qc(&unified.per_file_data[0], &cfg, args.block_size)?;
+        let keep = report.emit_idx_unmasked();
+        info!(
+            "QC: {} / {} cells kept for output ({} near-empty, {} MAD-outlier dropped)",
+            keep.len(),
+            unified.n_cells(),
+            report.near_empty.iter().filter(|&&e| e).count(),
+            report.n_cells_dropped,
+        );
+        Some(keep)
+    } else {
+        None
+    };
+
     // ---- Optional frozen feature side ----
     //
     // Loaded BEFORE HVG / max_features / feature_network so they all see
@@ -647,13 +678,20 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     //         pick up the resolved topics directly.
     let resolve_etm = !args.skip_etm;
     if resolve_etm {
-        resolve_etm_topics(&out.model, &unified.feature_names, &unified.barcodes, args)?;
+        resolve_etm_topics(
+            &out.model,
+            &unified.feature_names,
+            &unified.barcodes,
+            args,
+            qc_keep_idx.as_deref(),
+        )?;
     } else {
         ge::save_outputs(
             &out.model,
             &ge::OutputContext {
                 feature_names: &unified.feature_names,
                 barcodes: &unified.barcodes,
+                cell_keep_idx: qc_keep_idx.as_deref(),
             },
             &args.out,
         )?;
@@ -858,11 +896,23 @@ fn resolve_etm_topics(
     feature_names: &[Box<str>],
     barcodes: &[Box<str>],
     args: &BgeArgs,
+    cell_keep_idx: Option<&[usize]>,
 ) -> anyhow::Result<()> {
     use matrix_util::archetypal::{archetypal_analysis, select_archetype_k, AaArgs};
 
     let cpu = candle_core::Device::Cpu;
-    let z = Mat::from_tensor(&model.e_cell.to_device(&cpu)?)?; // [N, H]
+    let z_full = Mat::from_tensor(&model.e_cell.to_device(&cpu)?)?; // [N, H]
+    // Drop QC-failed cells from archetype fitting + per-cell outputs. `z`
+    // and `barcodes` are subset by the same `keep` so their rows stay
+    // aligned; the dictionary β (from ρ + archetypes) is per-feature and
+    // unaffected.
+    let (z, barcodes): (Mat, Vec<Box<str>>) = match cell_keep_idx {
+        Some(keep) => (
+            z_full.select_rows(keep.iter()),
+            keep.iter().map(|&i| barcodes[i].clone()).collect(),
+        ),
+        None => (z_full, barcodes.to_vec()),
+    };
     let rho = Mat::from_tensor(&model.e_feat.to_device(&cpu)?)?; // [D, H]
     let h = z.ncols();
     anyhow::ensure!(
@@ -926,7 +976,7 @@ fn resolve_etm_topics(
     // Topic-model layout — latent = log θ, dictionary = β.
     log_theta.to_parquet_with_names(
         &format!("{out}.latent.parquet"),
-        (Some(barcodes), Some("cell")),
+        (Some(&barcodes), Some("cell")),
         Some(&topic_names),
     )?;
     beta_dk.to_parquet_with_names(
@@ -943,7 +993,7 @@ fn resolve_etm_topics(
     // Raw bge embeddings preserved under non-conflicting names.
     z.to_parquet_with_names(
         &format!("{out}.cell_embedding.parquet"),
-        (Some(barcodes), Some("cell")),
+        (Some(&barcodes), Some("cell")),
         Some(&h_names),
     )?;
     rho.to_parquet_with_names(
