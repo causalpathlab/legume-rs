@@ -53,8 +53,13 @@ pub fn train(
     ////////////////////////////////////////
     // Phase 1: joint cell + pb axes
     ////////////////////////////////////////
+    // Phase-1 cell axis is on iff it's not feature-only mode AND the
+    // cell-axis knob isn't 0. `--phase1-cells-per-pb 0` (the default) drops
+    // the cell axis from phase 1 (pure-pb) but phase 2 still projects every
+    // cell; `--no-cell-axis` additionally skips phase 2 (e_cell at init).
+    let use_phase1_cell_axis = !args.no_cell_axis && args.phase1_cells_per_pb != 0;
     let mut phase1_axes: Vec<Axis> = Vec::with_capacity(1 + n_pb_levels);
-    if !args.no_cell_axis {
+    if use_phase1_cell_axis {
         phase1_axes.push(Axis::Cell);
     }
     for l in 0..n_pb_levels {
@@ -62,9 +67,32 @@ pub fn train(
     }
     anyhow::ensure!(
         !phase1_axes.is_empty(),
-        "--no-cell-axis with zero pb levels leaves nothing to train; \
-         either increase --num-levels or drop --no-cell-axis"
+        "phase 1 has no axes to train: the cell axis is off (--no-cell-axis \
+         or --phase1-cells-per-pb 0) and there are zero pb levels; \
+         increase --num-levels or enable the cell axis"
     );
+
+    if use_phase1_cell_axis {
+        match &sampler.phase1_cell_pools {
+            Some(p) => info!(
+                "phase-1 cell axis: subsampled to {} cells (≤{} per pb-sample, all levels); \
+                 phase 2 still projects all {} cells",
+                p.n_units, args.phase1_cells_per_pb, model.n_cells
+            ),
+            None => info!(
+                "phase-1 cell axis: all {} cells (--phase1-cells-per-pb ≥ n_cells)",
+                model.n_cells
+            ),
+        }
+    } else if args.no_cell_axis {
+        info!("phase-1 cell axis OFF (--no-cell-axis): feature-only; phase 2 skipped");
+    } else {
+        info!(
+            "phase-1 cell axis OFF (pure-pb, --phase1-cells-per-pb 0): E_feat from pb \
+             aggregates only; phase 2 still projects all {} cells",
+            model.n_cells
+        );
+    }
 
     // AdamW with zero weight decay — β, z, δ, γ already carry many
     // parameters and L2-like decay would pull everything toward zero
@@ -146,7 +174,10 @@ fn run_phase(
     let max_axis_units = axes
         .iter()
         .map(|axis| match axis {
-            Axis::Cell => model.n_cells,
+            // Size the cell axis by the kept-cell count when phase-1
+            // subsampling is active (`--phase1-cells-per-pb k`), so the auto
+            // budget actually shrinks with k; full `n_cells` otherwise.
+            Axis::Cell => sampler.n_cell_units(model.n_cells),
             Axis::Pb(l) => pb.pb_pools_per_level[*l].n_units,
         })
         .max()

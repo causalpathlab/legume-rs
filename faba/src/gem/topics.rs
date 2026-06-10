@@ -49,9 +49,20 @@ pub fn resolve_topics(
     unified: &UnifiedData,
     args: &GemArgs,
     stop: &Arc<AtomicBool>,
+    // QC-passed cell indices (see `--min-cell-nnz`): archetypes are fit on
+    // and θ is assigned to these cells only, and `latent` is written for
+    // them — keeping near-empty cells out would otherwise seed a spurious
+    // "empty" archetype.
+    keep_idx: &[usize],
 ) -> Result<ResolvedTopics> {
     let cpu = Device::Cpu;
-    let z = DMatrix::<f32>::from_tensor(&model.e_cell.to_device(&cpu)?)?; // [N, H]
+    // Restrict to QC-passed cells (row selection, no backend rewrite).
+    let z =
+        DMatrix::<f32>::from_tensor(&model.e_cell.to_device(&cpu)?)?.select_rows(keep_idx.iter()); // [N_keep, H]
+    let barcodes_kept: Vec<Box<str>> = keep_idx
+        .iter()
+        .map(|&i| unified.barcodes[i].clone())
+        .collect();
     let rho = DMatrix::<f32>::from_tensor(&model.beta.to_device(&cpu)?)?; // [G, H]
     let h = z.ncols();
     anyhow::ensure!(
@@ -138,7 +149,7 @@ pub fn resolve_topics(
     log_theta
         .to_parquet_with_names(
             &path_latent,
-            (Some(&unified.barcodes), Some("cell")),
+            (Some(&barcodes_kept), Some("cell")),
             Some(&topic_names),
         )
         .with_context(|| format!("writing {path_latent}"))?;

@@ -133,6 +133,13 @@ pub struct AxisDists {
 
 pub struct SamplerState {
     pub cell: AxisDists,
+    /// Phase-1-only subsampled cell-axis pools (`--phase1-cells-per-pb k`
+    /// with `1 ≤ k < n_cells`). `Some` → the phase-1 cell axis draws from
+    /// these (≤k cells per pb-sample) and `cell` above is built from them;
+    /// `None` → the full `pb.cell_pools` are used (k = 0 suppresses the
+    /// axis entirely, so it's never drawn; k ≥ n_cells is the full set).
+    /// Phase 2 always uses the full `pb.cell_pools` regardless.
+    pub phase1_cell_pools: Option<AxisPools>,
     pub pb_per_level: Vec<AxisDists>,
     pub modifier_modality_ids: Vec<u32>,
     pub measured_genes_per_modality: Vec<Vec<u32>>,
@@ -190,7 +197,22 @@ impl SamplerState {
             }
         };
 
-        let cell = build_dists(&pb.cell_pools);
+        // Phase-1 cell-axis subsampling (`--phase1-cells-per-pb k`). Only the
+        // `1 ≤ k < n_cells` band builds a smaller view; k = 0 (axis
+        // suppressed, never drawn) and k ≥ n_cells (no-op) both keep the full
+        // pools. The cell dists below are built from whichever pool the
+        // phase-1 cell axis will actually draw from.
+        let k = args.phase1_cells_per_pb;
+        let n_cells = pb.cell_pools.n_units;
+        let phase1_cell_pools: Option<AxisPools> = (k >= 1 && k < n_cells).then(|| {
+            super::pseudobulk::subsample_cell_pools_multilevel(
+                &pb.cell_pools,
+                &pb.cell_to_pb_per_level,
+                k,
+                args.seed,
+            )
+        });
+        let cell = build_dists(phase1_cell_pools.as_ref().unwrap_or(&pb.cell_pools));
         let pb_per_level = pb.pb_pools_per_level.iter().map(build_dists).collect();
 
         // Per-gene loss weight `w_g^penalty`, matching the sampler-side
@@ -203,6 +225,7 @@ impl SamplerState {
 
         Self {
             cell,
+            phase1_cell_pools,
             pb_per_level,
             modifier_modality_ids,
             measured_genes_per_modality,
@@ -219,11 +242,22 @@ impl SamplerState {
             Axis::Pb(level) => &self.pb_per_level[level],
         }
     }
+
+    /// Number of cell-axis units shaping the phase-1 budget: the kept-cell
+    /// count when subsampling is active, else the full `n_cells`.
+    pub fn n_cell_units(&self, n_cells: usize) -> usize {
+        self.phase1_cell_pools
+            .as_ref()
+            .map_or(n_cells, |p| p.n_units)
+    }
 }
 
-fn axis_pools(pb: &PseudobulkData, axis: Axis) -> &AxisPools {
+/// Pool the given axis draws from. The cell axis is **phase-1 only** (phase
+/// 2 is the analytical `cell_solve` path), so when a subsampled phase-1
+/// view exists it's used here; otherwise the full `pb.cell_pools`.
+fn axis_pools<'a>(state: &'a SamplerState, pb: &'a PseudobulkData, axis: Axis) -> &'a AxisPools {
     match axis {
-        Axis::Cell => &pb.cell_pools,
+        Axis::Cell => state.phase1_cell_pools.as_ref().unwrap_or(&pb.cell_pools),
         Axis::Pb(level) => &pb.pb_pools_per_level[level],
     }
 }
@@ -257,7 +291,7 @@ pub fn draw_minibatch<R: Rng>(
     let b_count = (args.f_count.clamp(0.0, 1.0) * b_total as f32).round() as usize;
     let b_modifier = b_total.saturating_sub(b_agg + b_count);
 
-    let pools = axis_pools(pb, axis);
+    let pools = axis_pools(state, pb, axis);
     let dists = state.dists(axis);
 
     let anchor = build_anchor_sub_batch(state, pools, dists, b_agg, b_count, args, rng);

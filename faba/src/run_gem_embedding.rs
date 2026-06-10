@@ -1,11 +1,13 @@
 //! Entry point for `faba gem` (alias `gem-embedding`).
 
 use anyhow::Context;
+use data_beans::qc::collect_column_stat_across_vec;
 use data_beans::sparse_io_vector::ColumnAlignment;
 use graph_embedding_util::stop::setup_stop_handler;
 use graph_embedding_util::{load_unified_data, FeatureNameKind};
 use log::info;
 use matrix_util::common_io::mkdir_parent;
+use matrix_util::traits::RunningStatOps;
 
 use faba::gem::args::GemArgs;
 use faba::gem::feature_table::FeatureTable;
@@ -89,6 +91,28 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         unified.n_batches()
     );
 
+    // ---- Cell QC: inclusive, modality-agnostic, no data rewritten ----
+    // Per-cell detected-feature count over ALL modalities (count +
+    // m6A/A2I/APA), via the data-beans column-stat infra. Cells below
+    // `--min-cell-nnz` are near-empty — typically a barcode seen in one
+    // sparse modality with a single read and no counts; the count-anchored
+    // phase-2 projection maps these to ~0. We keep them through pb collapse
+    // and feature training (their signal still counts) but drop them from
+    // the per-cell outputs (a write-time selection, NOT a squeeze).
+    let cell_nnz = collect_column_stat_across_vec(&unified.per_file_data[0], None, None)
+        .context("cell QC column statistics")?
+        .count_positives();
+    let keep_idx: Vec<usize> = (0..unified.n_cells())
+        .filter(|&c| (cell_nnz[c] as usize) >= args.min_cell_nnz)
+        .collect();
+    info!(
+        "cell QC: {} / {} cells pass --min-cell-nnz {} ({} dropped as near-empty)",
+        keep_idx.len(),
+        unified.n_cells(),
+        args.min_cell_nnz,
+        unified.n_cells() - keep_idx.len()
+    );
+
     // Load component annotations (region binning). Modality labels must
     // match the modifier row names emitted by faba m6a/atoi/apa.
     let region_map = build_region_map(args)?;
@@ -165,7 +189,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
 
     // Durable embeddings first, so a force-abort (second Ctrl+C) during the
     // optional topic step never loses the trained model.
-    write_outputs(&args.out, &table, &pb, &model, &unified).context("write outputs")?;
+    write_outputs(&args.out, &table, &pb, &model, &unified, &keep_idx).context("write outputs")?;
 
     // Archetype-based topics from the (possibly interrupted) embedding.
     // Runs after the embeddings are on disk; the manifest below then
@@ -173,15 +197,18 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // topics, skipping the K-sweep.
     let topics = if args.resolve_topics {
         Some(
-            faba::gem::topics::resolve_topics(&args.out, &model, &table, &unified, args, &stop)
-                .context("resolve topics")?,
+            faba::gem::topics::resolve_topics(
+                &args.out, &model, &table, &unified, args, &stop, &keep_idx,
+            )
+            .context("resolve topics")?,
         )
     } else {
         None
     };
 
-    // Manifest last, so it records the resolved-topic artifacts.
-    faba::gem::manifest::write_manifest(&args.out, &model, topics.as_ref())
+    // Manifest last, so it records the resolved-topic artifacts. n_cells
+    // reflects the QC-passed cells actually written to the per-cell outputs.
+    faba::gem::manifest::write_manifest(&args.out, &model, keep_idx.len(), topics.as_ref())
         .context("write manifest")?;
 
     info!("done — prefix '{}'", args.out);
