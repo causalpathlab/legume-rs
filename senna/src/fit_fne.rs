@@ -6,7 +6,7 @@
 //! Sibling of `senna bge`. Where `bge` builds a bipartite (cell × feature)
 //! graph internally from expression counts, `fne` *consumes* a graph and
 //! emits per-feature embeddings alone — no cells involved. The result is
-//! a first-class input to `senna {bge, masked-topic, cell-embedded-topic}`
+//! a first-class input to `senna {bge, masked-topic}`
 //! via `--freeze-feature-embedding`, so cells can train on a gene-relation
 //! space derived purely from a curated network.
 //!
