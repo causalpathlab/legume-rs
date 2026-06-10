@@ -2,105 +2,171 @@ use clap::Args;
 
 #[derive(Args, Debug)]
 pub struct AnnotateArgs {
-    /// Run manifest produced by `senna topic|masked-topic|joint-topic|svd|joint-svd`.
-    #[arg(short = 'f', long = "from", required = true)]
+    #[arg(
+        short = 'f',
+        long = "from",
+        required = true,
+        help = "Run manifest produced by `senna topic|masked-topic|joint-topic|svd|joint-svd`"
+    )]
     pub from: Box<str>,
 
-    /// Cluster parquet from `senna cluster` (cells × 1 cluster column,
-    /// `NaN` for unassigned). When omitted, the path is read from
-    /// `manifest.cluster.clusters` if populated; otherwise annotate
-    /// runs Leiden internally on the latent matrix from the manifest.
-    #[arg(short = 'c', long = "clusters")]
+    #[arg(
+        short = 'c',
+        long = "clusters",
+        help = "Cluster parquet from `senna cluster` (cells × 1 cluster column,",
+        long_help = "Cluster parquet from `senna cluster` (cells × 1 cluster column,\n\
+                     `NaN` for unassigned). When omitted, the path is read from\n\
+                     `manifest.cluster.clusters` if populated; otherwise annotate\n\
+                     runs Leiden internally on the latent matrix from the manifest."
+    )]
     pub clusters: Option<Box<str>>,
 
-    /// Number of nearest neighbors for the cosine-KNN graph used by the
-    /// internal Leiden clustering. Ignored when --clusters / manifest
-    /// cluster path is provided.
-    #[arg(long = "knn", default_value_t = 15)]
+    #[arg(
+        long = "knn",
+        default_value_t = 15,
+        help = "Number of nearest neighbors for the cosine-KNN graph used by the internal Leiden clustering",
+        long_help = "Number of nearest neighbors for the cosine-KNN graph used by the\n\
+                     internal Leiden clustering. Ignored when --clusters / manifest\n\
+                     cluster path is provided."
+    )]
     pub knn: usize,
 
-    /// Modularity resolution (CPM) for the internal Leiden clustering.
-    /// Higher → more clusters. Ignored when clusters are supplied.
-    #[arg(long = "resolution", default_value_t = 1.0)]
+    #[arg(
+        long = "resolution",
+        default_value_t = 1.0,
+        help = "Modularity resolution (CPM) for the internal Leiden clustering",
+        long_help = "Modularity resolution (CPM) for the internal Leiden clustering.\n\
+                     Higher → more clusters. Ignored when clusters are supplied."
+    )]
     pub resolution: f64,
 
-    /// Optional target cluster count for Leiden auto-resolution. When set,
-    /// resolution is binary-searched to approximate this. Ignored when
-    /// clusters are supplied.
-    #[arg(long = "num-clusters")]
+    #[arg(
+        long = "num-clusters",
+        help = "Optional target cluster count for Leiden auto-resolution",
+        long_help = "Optional target cluster count for Leiden auto-resolution. When set,\n\
+                     resolution is binary-searched to approximate this. Ignored when\n\
+                     clusters are supplied."
+    )]
     pub num_clusters: Option<usize>,
 
-    /// Minimum cluster size; smaller clusters become unassigned.
-    #[arg(long = "min-cluster-size", default_value_t = 2)]
+    #[arg(
+        long = "min-cluster-size",
+        default_value_t = 2,
+        help = "Minimum cluster size; smaller clusters become unassigned"
+    )]
     pub min_cluster_size: usize,
 
-    /// Seed for internal Leiden clustering (deterministic).
-    #[arg(long = "cluster-seed")]
+    #[arg(
+        long = "cluster-seed",
+        help = "Seed for internal Leiden clustering (deterministic)"
+    )]
     pub cluster_seed: Option<u64>,
 
-    /// Marker-gene TSV: `gene<TAB>celltype` per line. Flexible delimiter
-    /// (tab / comma / space). Symbol / alias matching via `flexible_gene_match`.
-    #[arg(short = 'm', long = "markers", required = true)]
+    #[arg(
+        short = 'm',
+        long = "markers",
+        required = true,
+        help = "Marker-gene TSV: `gene<TAB>celltype` per line",
+        long_help = "Marker-gene TSV: `gene<TAB>celltype` per line. Flexible delimiter\n\
+                     (tab / comma / space). Symbol / alias matching via `flexible_gene_match`."
+    )]
     pub markers: Box<str>,
 
-    /// Output prefix for annotation artifacts. When omitted, derived
-    /// from `--from` by stripping `.senna.json` (or `.json`) — e.g.
-    /// `--from temp.senna.json` → `--out temp`.
-    #[arg(short = 'o', long = "out")]
+    #[arg(
+        short = 'o',
+        long = "out",
+        help = "Output prefix for annotation artifacts",
+        long_help = "Output prefix for annotation artifacts. When omitted, derived\n\
+                     from `--from` by stripping `.senna.json` (or `.json`) — e.g.\n\
+                     `--from temp.senna.json` → `--out temp`."
+    )]
     pub out: Option<Box<str>>,
 
-    /// Verbose logging.
-    #[arg(short = 'v', long)]
+    #[arg(short = 'v', long, help = "Verbose logging")]
     pub verbose: bool,
 
-    /// Cells per CSC read block when streaming raw counts for per-cluster
-    /// aggregation and NB-Fisher trend fitting. Larger blocks → fewer reads
-    /// but more memory.
-    #[arg(long = "block-size", default_value_t = 1024)]
+    #[arg(
+        long = "block-size",
+        default_value_t = 1024,
+        help = "Cells per CSC read block when streaming raw counts for per-cluster aggregation",
+        long_help = "Cells per CSC read block when streaming raw counts for per-cluster\n\
+                     aggregation and NB-Fisher trend fitting. Larger blocks → fewer reads\n\
+                     but more memory."
+    )]
     pub block_size: usize,
 
-    /// Number of random gene-set draws per celltype for the
-    /// Efron–Tibshirani row-randomization moments (used to restandardize
-    /// both observed and permuted ES).
-    #[arg(long = "num-draws", default_value_t = 1000)]
+    #[arg(
+        long = "num-draws",
+        default_value_t = 1000,
+        help = "Number of random gene-set draws per celltype for the Efron–Tibshirani row-randomization moments",
+        long_help = "Number of random gene-set draws per celltype for the\n\
+                     Efron–Tibshirani row-randomization moments (used to restandardize\n\
+                     both observed and permuted ES)."
+    )]
     pub num_draws: usize,
 
-    /// Number of PB-level sample permutations for the correlation-preserving
-    /// null (shuffle pb_membership, recompute β̃ = pb_gene · shuffled,
-    /// ES per permutation, pool across clusters). Set 0 to fall back to
-    /// row-randomization-based p-values (useful for small nClusters).
-    #[arg(long = "num-perm", default_value_t = 500)]
+    #[arg(
+        long = "num-perm",
+        default_value_t = 500,
+        help = "Number of PB-level sample permutations for the correlation-preserving null",
+        long_help = "Number of PB-level sample permutations for the correlation-preserving\n\
+                     null (shuffle pb_membership, recompute β̃ = pb_gene · shuffled,\n\
+                     ES per permutation, pool across clusters). Set 0 to fall back to\n\
+                     row-randomization-based p-values (useful for small nClusters)."
+    )]
     pub num_perm: usize,
 
-    /// FDR α for the Q-matrix threshold.
-    #[arg(long = "fdr-alpha", default_value_t = 0.10)]
+    #[arg(
+        long = "fdr-alpha",
+        default_value_t = 0.10,
+        help = "FDR α for the Q-matrix threshold"
+    )]
     pub fdr_alpha: f32,
 
-    /// Softmax temperature used when row-normalizing Q over significant
-    /// entries. Lower → sharper; higher → more uniform.
-    #[arg(long = "q-temperature", default_value_t = 1.0)]
+    #[arg(
+        long = "q-temperature",
+        default_value_t = 1.0,
+        help = "Softmax temperature used when row-normalizing Q over significant entries",
+        long_help = "Softmax temperature used when row-normalizing Q over significant\n\
+                     entries. Lower → sharper; higher → more uniform."
+    )]
     pub q_temperature: f32,
 
-    /// Minimum cell-level confidence to emit a concrete label; below this
-    /// cells are labeled `unassigned` in the argmax TSV.
-    #[arg(long = "min-confidence", default_value_t = 0.0)]
+    #[arg(
+        long = "min-confidence",
+        default_value_t = 0.0,
+        help = "Minimum cell-level confidence to emit a concrete label",
+        long_help = "Minimum cell-level confidence to emit a concrete label; below this\n\
+                     cells are labeled `unassigned` in the argmax TSV."
+    )]
     pub min_confidence: f32,
 
-    /// RNG seed (deterministic; affects row randomization).
-    #[arg(long = "seed", default_value_t = 42)]
+    #[arg(
+        long = "seed",
+        default_value_t = 42,
+        help = "RNG seed (deterministic; affects row randomization)"
+    )]
     pub seed: u64,
 
-    /// Preload columns into memory after opening the zarr/h5 backend.
-    /// On slow disks this trades memory for I/O latency on later block reads.
-    #[arg(long = "preload-data", default_value_t = false)]
+    #[arg(
+        long = "preload-data",
+        default_value_t = false,
+        help = "Preload columns into memory after opening the zarr/h5 backend",
+        long_help = "Preload columns into memory after opening the zarr/h5 backend.\n\
+                     On slow disks this trades memory for I/O latency on later block reads."
+    )]
     pub preload_data: bool,
 
-    /// Disable data-aware specificity re-weighting of marker genes. By
-    /// default, each marker is multiplied by an empirical specificity
-    /// score derived from the cluster expression matrix (`max simplex
-    /// value across clusters`, rescaled to [0, 1]) — this suppresses
-    /// markers that fire broadly (e.g. GZMB shared between NK and CD8
-    /// effector). Set this flag to fall back to IDF-only weighting.
-    #[arg(long = "no-empirical-specificity", default_value_t = false)]
+    #[arg(
+        long = "no-empirical-specificity",
+        default_value_t = false,
+        help = "Disable data-aware specificity re-weighting of marker genes",
+        long_help = "Disable data-aware specificity re-weighting of marker genes. By\n\
+                     default, each marker is multiplied by an empirical specificity\n\
+                     score derived from the cluster expression matrix (`max simplex\n\
+                     value across clusters`, rescaled to [0, 1]) — this suppresses\n\
+                     markers that fire broadly (e.g. GZMB shared between NK and CD8\n\
+                     effector). Set this flag to fall back to IDF-only weighting."
+    )]
     pub no_empirical_specificity: bool,
 }

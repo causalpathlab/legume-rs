@@ -31,7 +31,7 @@ pub fn accumulate_gene_sum(
 /// (`labels_a` / `labels_b`) in a single column-block sweep. When
 /// `labels_b` is empty the second buffer is skipped — used to share code
 /// with the single-grouping case. Halves zarr I/O for callers that need
-/// both per-cluster and per-batch sums (e.g. `senna annotate`).
+/// both per-cluster and per-batch sums (e.g. `senna annotate-by-enrichment`).
 pub fn accumulate_gene_sum_pair(
     data_vec: &SparseIoVec,
     labels_a: &[usize],

@@ -36,7 +36,7 @@ const HINTON_GENE_THRESHOLD: usize = 100;
 
 /// What to group cells by when faceting the structure plot. `Batch` is
 /// the default (one panel per data-source). `Annotation` requires an
-/// `argmax.tsv` from `senna annotate` and produces one panel per cell
+/// `argmax.tsv` from `senna annotate-by-enrichment` and produces one panel per cell
 /// type — the canonical fastTopics structure-plot view.
 #[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]
 #[clap(rename_all = "kebab-case")]
@@ -136,13 +136,13 @@ pub struct PlotTopicArgs {
         long,
         value_enum,
         default_value_t = GroupBy::Batch,
-        help = "Group cells into panels by batch (default) or by `senna annotate` cell-type label"
+        help = "Group cells into panels by batch (default) or by `senna annotate-by-enrichment` cell-type label"
     )]
     pub group_by: GroupBy,
 
     #[arg(
         long,
-        help = "Argmax TSV from `senna annotate` (cell\\tcell_type\\tprobability). Defaults to manifest's annotate.argmax. Required for --group-by annotation."
+        help = "Argmax TSV from `senna annotate-by-enrichment` (cell\\tcell_type\\tprobability). Defaults to manifest's annotate.argmax. Required for --group-by annotation."
     )]
     pub annotation: Option<Box<str>>,
 
@@ -214,7 +214,7 @@ struct ResolvedInputs {
     data_files: Vec<String>,
     /// Optional `cell_coords.parquet` for `--order coord`.
     cell_coords: Option<String>,
-    /// Optional `argmax.tsv` from `senna annotate` for `--group-by annotation`.
+    /// Optional `argmax.tsv` from `senna annotate-by-enrichment` for `--group-by annotation`.
     annotation: Option<String>,
     palette: Palette,
 }
@@ -329,7 +329,7 @@ fn resolve_inputs(args: &PlotTopicArgs) -> anyhow::Result<ResolvedInputs> {
 
     // Dictionary preference: empirical (full-resolution) when present,
     // else the coarse-then-expanded `dictionary`. Mirrors the same
-    // preference `senna annotate` uses.
+    // preference `senna annotate-by-enrichment` uses.
     let dictionary = args.dictionary.as_deref().map(String::from).or_else(|| {
         manifest.as_ref().and_then(|m| {
             m.outputs
@@ -471,7 +471,7 @@ fn load_batch_labels(resolved: &ResolvedInputs, n_cells: usize) -> anyhow::Resul
     Ok(all)
 }
 
-/// Per-cell label from `senna annotate`'s `argmax.tsv`. The TSV's
+/// Per-cell label from `senna annotate-by-enrichment`'s `argmax.tsv`. The TSV's
 /// `cell` column is matched against `latent.parquet`'s row names —
 /// annotate may have run on a subset, so missing cells are tagged
 /// `"unannotated"` rather than failing.
@@ -481,7 +481,7 @@ fn load_annotation_labels(
 ) -> anyhow::Result<Vec<Box<str>>> {
     let path = resolved.annotation.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
-            "--group-by annotation requires --annotation PATH or `senna annotate` \
+            "--group-by annotation requires --annotation PATH or `senna annotate-by-enrichment` \
              must have populated manifest.annotate.argmax"
         )
     })?;

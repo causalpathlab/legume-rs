@@ -95,6 +95,7 @@ pub enum RunKind {
     JointSvd,
     Bge,
     Fne,
+    ResolveEmbeddingSpace,
 }
 
 impl RunKind {
@@ -109,6 +110,7 @@ impl RunKind {
             RunKind::JointSvd => "joint-svd",
             RunKind::Bge => "bge",
             RunKind::Fne => "fne",
+            RunKind::ResolveEmbeddingSpace => "resolve-embedding-space",
         }
     }
 
@@ -188,7 +190,7 @@ pub struct RunOutputs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<String>,
     /// `{out}.pb_gene.parquet` — G × P pseudobulk gene aggregates at the
-    /// finest collapse level. Consumed by `senna annotate` to build a
+    /// finest collapse level. Consumed by `senna annotate-by-enrichment` to build a
     /// permutation null without touching the raw zarr.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_gene: Option<String>,
@@ -202,7 +204,7 @@ pub struct RunOutputs {
     /// gene resolution: row-scaled by NB Fisher-info weights and column-
     /// normalized to the topic simplex. Avoids the lossy expand-from-coarse
     /// approximation in `dictionary` (which ships at the feature-coarsened
-    /// resolution and is interpolated back). `senna annotate` prefers this
+    /// resolution and is interpolated back). `senna annotate-by-enrichment` prefers this
     /// when present; falls back to `dictionary` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dictionary_empirical: Option<String>,
@@ -241,7 +243,7 @@ pub struct RunCluster {
     pub clusters: Option<String>,
 }
 
-/// Paths to artifacts produced by `senna annotate` — the cluster-based
+/// Paths to artifacts produced by `senna annotate-by-enrichment` — the cluster-based
 /// marker enrichment annotation pass. Populated by annotate, not by training.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunAnnotate {
@@ -397,6 +399,18 @@ pub fn resolve(manifest_dir: &Path, rel: &str) -> PathBuf {
     }
 }
 
+/// Derive an output prefix from a `--from` manifest path when `--out` was
+/// omitted: strip `.senna.json` (preferred) or any trailing `.json`, leaving
+/// the same basename the training run used. Single source for the several
+/// subcommands that default `--out` to their `--from`.
+#[must_use]
+pub fn derive_out_prefix(from: &str) -> String {
+    from.strip_suffix(".senna.json")
+        .or_else(|| from.strip_suffix(".json"))
+        .unwrap_or(from)
+        .to_string()
+}
+
 /// Default manifest filename given a run `--out` prefix.
 #[must_use]
 pub fn default_path(prefix: &str) -> String {
@@ -537,6 +551,7 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
     match m.kind {
         RunKind::Bge
         | RunKind::Fne
+        | RunKind::ResolveEmbeddingSpace
         | RunKind::Topic
         | RunKind::Itopic
         | RunKind::JointTopic

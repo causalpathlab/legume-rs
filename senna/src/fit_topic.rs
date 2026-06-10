@@ -756,7 +756,7 @@ where
     )?;
 
     // PB-level topic usage + persistence of pb_gene / pb_latent for
-    // downstream `senna annotate` (enrichment-based annotation works from
+    // downstream `senna annotate-by-enrichment` (enrichment-based annotation works from
     // PB aggregates, no zarr reopen needed).
     {
         let enc_fc = ctx.level_coarsenings.last().and_then(|c| c.as_ref());

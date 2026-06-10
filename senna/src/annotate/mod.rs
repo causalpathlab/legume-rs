@@ -1,4 +1,4 @@
-//! `senna annotate` — bipartite enrichment annotation pipeline.
+//! `senna annotate-by-enrichment` — bipartite enrichment annotation pipeline.
 //!
 //! Thin shell around the `enrichment` crate. Reads a run manifest
 //! (`run.senna.json`) produced by any training subcommand, loads the matching
@@ -14,8 +14,10 @@
 //! the newly-written artifacts.
 
 mod args;
+mod by_enrichment;
+mod by_projection;
 pub mod inputs;
-mod run;
 
 pub use args::AnnotateArgs;
-pub use run::annotate_run;
+pub use by_enrichment::run as annotate_by_enrichment;
+pub use by_projection::{run as annotate_by_projection, AnnotateProjectArgs};

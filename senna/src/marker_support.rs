@@ -3,6 +3,7 @@
 //! membership matrix used for anchor margin scoring.
 
 use crate::embed_common::Mat;
+use data_beans::utilities::name_matching::GeneIndex;
 use matrix_util::common_io::{read_lines_of_words_delim, ReadLinesOut};
 use rustc_hash::FxHashSet as HashSet;
 
@@ -89,6 +90,9 @@ pub(crate) fn build_annotation_matrix(
     let mut matched = 0;
     let mut unmatched = Vec::new();
 
+    // Build the three-tier gene matcher once (exact → symbol → flexible),
+    // instead of an O(genes) `.position(flexible_gene_match)` scan per marker.
+    let gene_index = GeneIndex::build(row_names);
     for (gene, cell_type) in &marker_pairs {
         let normalized_type = cell_type.replace(' ', "_");
         let annot_idx = annot_names
@@ -96,10 +100,7 @@ pub(crate) fn build_annotation_matrix(
             .position(|n| n.as_ref() == normalized_type)
             .unwrap();
 
-        if let Some(gene_idx) = row_names
-            .iter()
-            .position(|dict_gene| flexible_gene_match(gene, dict_gene))
-        {
+        if let Some(gene_idx) = gene_index.match_gene(gene) {
             membership[(gene_idx, annot_idx)] = 1.0;
             matched += 1;
         } else {

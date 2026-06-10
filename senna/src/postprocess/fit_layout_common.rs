@@ -434,7 +434,7 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
 }
 
 /// Shape of the per-PB feature matrix carried by `PbLayoutPrep`.
-/// `Gene` = log1p-CPM in gene space (consumed by `senna annotate`);
+/// `Gene` = log1p-CPM in gene space (consumed by `senna annotate-by-enrichment`);
 /// `Proj` = proj-space centroids (diagnostic only). Drives output
 /// filename + column naming and whether `manifest.layout.pb_gene_mean`
 /// is populated.
@@ -1171,7 +1171,7 @@ pub(crate) fn write_viz_outputs_pb(
     )?;
 
     // Only the gene-space recompute path produces a pb_gene_mean that
-    // `senna annotate` can consume; the fast path emits diagnostic
+    // `senna annotate-by-enrichment` can consume; the fast path emits diagnostic
     // proj-space centroids that are not advertised in the manifest.
     let (pb_feat_path, pb_feat_is_gene) = match prep.pb_feature_kind {
         PbFeatureKind::Gene => (format!("{out}.pb_gene_mean.parquet"), true),
@@ -1311,7 +1311,7 @@ fn update_manifest_viz(
     // None — callers that need PB-level coords must branch on `kind`.
     manifest.layout.pb_coords = pb_coords_path.map(|p| rel_to_manifest(manifest_dir, p));
     // Only the gene-space recompute path produces a proper pb_gene_mean;
-    // the fast path writes a proj-space file that `senna annotate`
+    // the fast path writes a proj-space file that `senna annotate-by-enrichment`
     // would misread, so don't advertise it.
     manifest.layout.pb_gene_mean = pb_gene_mean_path.map(|p| rel_to_manifest(manifest_dir, p));
 

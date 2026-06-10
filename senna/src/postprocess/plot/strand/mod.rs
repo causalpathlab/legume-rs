@@ -8,7 +8,7 @@
 //! chromosome axis (cf. Strand-seq ideograms).
 //!
 //! Inputs come from a trained-then-annotated run:
-//!   - gene × cell-type activity, derived from `senna annotate`'s
+//!   - gene × cell-type activity, derived from `senna annotate-by-enrichment`'s
 //!     `cluster_expression.parquet` (gene × cluster) collapsed to cell
 //!     types via `cluster_celltype_q.parquet` (cluster × cell-type), or
 //!     any gene × group matrix passed with `--activity`.
@@ -42,7 +42,7 @@ pub struct PlotStrandArgs {
     #[arg(
         long,
         short = 'f',
-        help = "Run manifest JSON from `senna {topic,...}` enriched by `senna annotate`",
+        help = "Run manifest JSON from `senna {topic,...}` enriched by `senna annotate-by-enrichment`",
         long_help = "Fills --activity (from annotate.cluster_expression + \
                      annotate.cluster_celltype_q) and --out (from the manifest \
                      prefix). Explicit CLI flags still win. Paths inside the \
@@ -336,13 +336,13 @@ fn resolve_inputs(args: &PlotStrandArgs) -> anyhow::Result<(String, String)> {
     } else {
         let cluster_expr = m.annotate.cluster_expression.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
-                "manifest {from} has no annotate.cluster_expression; run `senna annotate` \
+                "manifest {from} has no annotate.cluster_expression; run `senna annotate-by-enrichment` \
                  first, or pass --activity with a gene × group parquet"
             )
         })?;
         let q = m.annotate.cluster_celltype_q.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
-                "manifest {from} has no annotate.cluster_celltype_q; run `senna annotate` first"
+                "manifest {from} has no annotate.cluster_celltype_q; run `senna annotate-by-enrichment` first"
             )
         })?;
         let derived = format!("{out}.celltype_expression.parquet");

@@ -58,13 +58,14 @@ mod predict;
 mod predict_tmle;
 mod principal_graph;
 mod refine_weighting;
+mod resolve_embedding_space;
 mod run_manifest;
 mod senna_input;
 mod svd;
 mod topic;
 mod tree_layout;
 
-use annotate::{annotate_run, AnnotateArgs};
+use annotate::{annotate_by_enrichment, annotate_by_projection, AnnotateArgs, AnnotateProjectArgs};
 use embed_common::*;
 use eval_topic::*;
 use fit_bge::{fit_bge, BgeArgs};
@@ -78,6 +79,7 @@ use fit_vae::*;
 use impute::{impute_model, ImputeArgs};
 use postprocess::*;
 use predict::{predict_model, PredictArgs};
+use resolve_embedding_space::{resolve_embedding_space, RestArgs};
 use svd::*;
 
 use colored::Colorize;
@@ -140,7 +142,7 @@ fn print_logo() {
                                        senna joint-topic | joint-svd       (multi-modality)\n  \
                   2. Held-out inference senna predict                       (apply trained model)\n  \
                   3. Cluster cells     senna clustering --from run.senna.json\n  \
-                  4. Annotate cells    senna annotate   --from run.senna.json -m markers.tsv\n  \
+                  4. Annotate cells    senna annotate-by-enrichment --from run.senna.json -m markers.tsv\n  \
                   5. Trajectory        senna pseudotime --from run.senna.json\n  \
                   6. 2D layout         senna layout {phate|tsne|umap} --from run.senna.json\n  \
                   7. Scatter plot      senna plot       --from run.senna.json\n  \
@@ -283,11 +285,31 @@ enum Commands {
                       (node2vec convention). Symmetric by construction.\n\n\
                       Writes {out}.feature_embedding.parquet (+ feature_bias, gamma, \
                       log_likelihood, senna.json). The output shape matches the freeze \
-                      loader used by `senna {bge, masked-topic} \
+                      loader used by `senna masked-topic \
                       --freeze-feature-embedding`, so an `fne` run is a direct gene-side \
                       input to downstream cell-side training."
     )]
     Fne(FneArgs),
+
+    #[command(
+        name = "resolve-embedding-space",
+        visible_alias = "rest",
+        about = "Freeze a topic run's cell proportions θ and learn a shared cell+gene \
+                 embedding from the counts (Resolve Embedding Space for Topic-models).",
+        long_about = "Mirror of bge with the roles flipped: takes a finished topic-family \
+                      run via --from, FREEZES its cell topic proportions θ, and trains a \
+                      gene embedding ρ ∈ ℝ^{D×H} + topic embedding α ∈ ℝ^{K×H} against the \
+                      raw counts (bipartite NCE). The cell embedding is derived, frozen-θ: \
+                      Z = θ·α. This recasts the topic result into a metric H-space where \
+                      genes, topics, and cells coexist:\n  \n  \
+                      score(cell c, gene g) = (θ_c·α)·ρ_g + b_g\n  \n\
+                      Writes {out}.{feature_embedding,cell_embedding,latent,topic_embedding}\
+                      .parquet + senna.json (kind=resolve-embedding-space), so \
+                      `senna annotate-by-projection --from {out}.senna.json` can annotate by \
+                      projecting markers into the shared space — which a raw topic run \
+                      cannot do. H defaults to K but may exceed it."
+    )]
+    ResolveEmbeddingSpace(RestArgs),
 
     // ─────────── 2. Held-out inference ───────────
     #[command(
@@ -330,18 +352,37 @@ enum Commands {
     Clustering(ClusteringArgs),
 
     #[command(
+        name = "annotate-by-enrichment",
+        visible_aliases = ["ann-by-enrich", "annot-by-enrich"],
         about = "Annotate cells via cluster-level marker enrichment.",
         long_about = "Pipeline: (re)cluster on the manifest's latent (Leiden if no clusters\n\
                       exist) → NB-Fisher-adjusted per-cluster mean expression (streamed\n\
                       from raw counts) → weighted-KS marker enrichment with cross-cluster\n\
                       simplex normalization (housekeeping suppression) → softmax-normalized\n\
                       per-cluster Q matrix → cluster-broadcast per-cell labels.\n\n\
-                      Usage: senna annotate --from run.senna.json -m markers.tsv -o out\n\n\
+                      Usage: senna annotate-by-enrichment --from run.senna.json -m markers.tsv -o out\n\n\
                       Updates `manifest.annotate.{argmax,annotation,...}` so subsequent\n\
                       `senna plot` runs colour cells by predicted cell type by default.\n\
                       Writes {out}.argmax.tsv, {out}.annotation.parquet, {out}.cluster_*.parquet."
     )]
     Annotate(AnnotateArgs),
+
+    #[command(
+        name = "annotate-by-projection",
+        visible_aliases = ["ann-by-proj", "annot-by-proj"],
+        about = "Light cell-type annotation by marker projection (embedding runs).",
+        long_about = "Projection-based complement to `senna annotate-by-enrichment`: embeds\n\
+                      each marker-defined cell type as the L2-normalized centroid of its\n\
+                      marker feature embeddings (the H-space the cells live in), then\n\
+                      cosine-scores every cell → per-cell soft posterior. Per-cell,\n\
+                      clustering-free; a permutation null (random gene sets) gives\n\
+                      null-standardized z-scores (p = pnorm(-z)).\n\n\
+                      Reads `outputs.feature_embedding` + `outputs.latent` from a\n\
+                      bge / fne / resolve-embedding-space `run.senna.json`.\n\n\
+                      Usage: senna annotate-by-projection --from run.senna.json -m markers.tsv\n\n\
+                      Writes {out}.{kind}_annot.{posterior,zscore,type_embedding}.parquet."
+    )]
+    AnnotateProject(AnnotateProjectArgs),
 
     #[command(
         about = "Pseudotime via Monocle-3-style principal graph (SimplePPT) on the latent.",
@@ -382,7 +423,7 @@ enum Commands {
                       • no `layout.cell_coords` → runs `senna layout phate` first.\n  \
                       • `--colour-by cluster` but no clusters → runs Leiden on the latent.\n\n\
                       --colour-by cluster (default) | annotation | topic | pb-id | pseudotime.\n\
-                      Default flips to `annotation` once `senna annotate` populates the\n\
+                      Default flips to `annotation` once `senna annotate-by-enrichment` populates the\n\
                       manifest, so cells are coloured + labelled by predicted cell type.\n\n\
                       Outputs: {out}.plot.{svg,png,pdf} (PDF default; pass --svg / --png\n\
                       for those formats)."
@@ -408,7 +449,7 @@ enum Commands {
                       genes mirrored downward around a shared chromosome axis.\n\n\
                       Usage: senna plot-strand --from run.senna.json --gtf gencode.gtf\n\n\
                       Activity defaults to a gene × cell-type matrix derived from\n\
-                      `senna annotate` outputs; override with --activity. One figure per\n\
+                      `senna annotate-by-enrichment` outputs; override with --activity. One figure per\n\
                       cell type (chromosomes stacked) plus an optional consensus, under\n\
                       {out}.strand/. PDF only by default; pass --svg / --png.",
         visible_alias = "ps"
@@ -454,6 +495,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Fne(args) => {
             fit_fne(args)?;
         }
+        Commands::ResolveEmbeddingSpace(args) => {
+            resolve_embedding_space(args)?;
+        }
         Commands::Topic(args) => {
             fit_topic_model(args)?;
         }
@@ -471,7 +515,10 @@ fn main() -> anyhow::Result<()> {
         }
 
         Commands::Annotate(args) => {
-            annotate_run(args)?;
+            annotate_by_enrichment(args)?;
+        }
+        Commands::AnnotateProject(args) => {
+            annotate_by_projection(args)?;
         }
         Commands::Predict(args) => {
             predict_model(args)?;
