@@ -5,6 +5,7 @@
 //! `read_triplets_by_rows`.
 
 use data_beans::sparse_io::*;
+use matrix_util::mtx_io::read_mtx_triplets;
 use matrix_util::traits::SampleOps;
 use ndarray::Array2;
 
@@ -251,6 +252,54 @@ fn rows_repeated_calls_warm_cache() -> anyhow::Result<()> {
     assert_triplets_match(t_b, dense_to_triplets_by_rows(&raw, &sel_b));
     assert_triplets_match(t_a2, dense_to_triplets_by_rows(&raw, &sel_a));
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────
+// MTX export (streaming CSC writer)
+// ─────────────────────────────────────────────────────
+
+/// Write `raw` through the zarr backend's `to_mtx_file`, read it back with the
+/// production MTX reader, and assert the round-trip matches the dense reference
+/// (header dims + triplets, modulo ordering).
+fn assert_mtx_roundtrip(raw: &Array2<f32>) -> anyhow::Result<()> {
+    let (nr, nc) = raw.dim();
+    let sp = create_sparse_from_ndarray(raw, None, None)?;
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("out.mtx");
+    let path = path.to_str().unwrap();
+    sp.to_mtx_file(path)?;
+
+    let all_cols: Vec<usize> = (0..nc).collect();
+    let expected = dense_to_triplets(raw, &all_cols);
+
+    let (triplets, shape) = read_mtx_triplets(path)?;
+    assert_eq!(shape, Some((nr, nc, expected.len())));
+    assert_triplets_match(triplets, expected);
+    Ok(())
+}
+
+#[test]
+fn to_mtx_file_roundtrip_with_empty_columns() -> anyhow::Result<()> {
+    // Hand-built sparsity that stresses the streaming column-walk: a leading
+    // empty column (0), interior empties (2, 5), a trailing empty (7), and
+    // multiple nonzeros per column. The writer emits in CSC storage order and
+    // advances `indptr` to label each value's column — empties must be skipped.
+    let mut raw = Array2::<f32>::zeros((6, 8));
+    raw[(0, 1)] = 1.5;
+    raw[(3, 1)] = 2.0;
+    raw[(5, 3)] = -3.25;
+    raw[(1, 4)] = 4.0;
+    raw[(2, 4)] = 5.0;
+    raw[(4, 4)] = 6.0;
+    raw[(0, 6)] = 7.0;
+    assert_mtx_roundtrip(&raw)
+}
+
+#[test]
+fn to_mtx_file_roundtrip_dense() -> anyhow::Result<()> {
+    // General fidelity check over a fully-populated matrix.
+    assert_mtx_roundtrip(&Array2::<f32>::runif(9, 13))
 }
 
 #[test]

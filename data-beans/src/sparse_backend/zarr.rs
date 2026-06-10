@@ -39,6 +39,12 @@ use crate::utilities::io_helpers::chunk_elems;
 
 const COMPRESSION_LEVEL: i32 = 5;
 
+/// Block size (in elements) for streaming the CSC value/row-index arrays when
+/// exporting to Matrix Market. ~1M elements ≈ 4 MiB f32 + 8 MiB u64 transient
+/// per block — large enough to amortize per-retrieve overhead, small enough to
+/// bound memory regardless of matrix size.
+const MTX_STREAM_BLOCK: u64 = 1 << 20;
+
 /// 10x-like cell-feature matrix with `zarr` backend (feature x cell)
 ///
 /// ```text
@@ -741,18 +747,31 @@ impl SparseIo for SparseMtxData {
             let indptr = indptr.retrieve_array_subset::<Vec<u64>>(&indptr.subset_all())?;
             debug_assert!(indptr.len() == ncol + 1);
 
-            for jj in 0..ncol {
-                let (start, end) = (indptr[jj], indptr[jj + 1]);
-                let subset = Self::create_subset(start..end);
-                let data_slice = data.retrieve_array_subset::<Vec<f32>>(&subset)?;
-                let indices_slice = indices.retrieve_array_subset::<Vec<u64>>(&subset)?;
+            // Stream the CSC value/row-index arrays in large sequential blocks
+            // (instead of two retrieves per column) and walk `indptr` to map
+            // each stored nonzero back to its column. CSC values are laid out
+            // column-major in column order, so emitting them in storage order
+            // reproduces the same column-by-column output as a per-column scan;
+            // empty columns are skipped by advancing the column pointer.
+            let total_nnz = indptr[ncol];
+            let mut jj = 0usize; // column owning the running nnz position
+            let mut pos = 0u64;
+            while pos < total_nnz {
+                let end = (pos + MTX_STREAM_BLOCK).min(total_nnz);
+                let subset = Self::create_subset(pos..end);
+                let data_block = data.retrieve_array_subset::<Vec<f32>>(&subset)?;
+                let indices_block = indices.retrieve_array_subset::<Vec<u64>>(&subset)?;
 
-                // write them with 1-based indices
-                for k in 0..(end - start) as usize {
-                    let val = data_slice[k];
-                    let ii = indices_slice[k] as usize;
-                    writeln!(buf, "{}\t{}\t{}", ii + 1, jj + 1, val)?;
+                for (k, (&val, &ii)) in data_block.iter().zip(&indices_block).enumerate() {
+                    let global = pos + k as u64;
+                    // advance to the column owning this nonzero (skips empties)
+                    while jj + 1 < indptr.len() && indptr[jj + 1] <= global {
+                        jj += 1;
+                    }
+                    // 1-based indices
+                    writeln!(buf, "{}\t{}\t{}", ii as usize + 1, jj + 1, val)?;
                 }
+                pos = end;
             }
             buf.flush()?;
             Ok(())
