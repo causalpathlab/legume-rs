@@ -51,9 +51,29 @@ pub fn solve_cell_embeddings(
     // 3. Parallel per-cell Poisson-MAP projection (shared solver).
     let lambda = args.phase2_ridge.max(0.0) as f64;
     // gem scores with a per-cell bias (b_cell), so keep the fitted b_c.
-    let (e_flat, b_flat) = graph_embedding_util::cell_projection::project_cells(
+    let (mut e_flat, b_flat) = graph_embedding_util::cell_projection::project_cells(
         &frozen_e, &frozen_b, &per_cell, h, lambda,
     );
+
+    // L2-normalize each cell's embedding (depth correction). The Poisson-MAP
+    // matches absolute counts, so the *norm* of `e_cell` leaks sequencing
+    // depth (corr(‖e‖, b_cell) ≈ -0.95 on rep1) and a single depth direction
+    // dominates ~82% of the variance — which collapses the downstream
+    // archetypal topics (one giant central topic). The feature side is
+    // trained with scale-invariant NCE, so only the DIRECTION is meaningful;
+    // depth stays in the unpenalized `b_cell`. Mirrors the bge phase-2 fix
+    // (geu commit 9142779). Near-empty cells solve to ~0 and stay 0 (and are
+    // dropped by `--min-cell-nnz` at write time anyway).
+    for c in 0..n_cells {
+        let row = &mut e_flat[c * h..(c + 1) * h];
+        let nrm = row.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if nrm > 0.0 {
+            for v in row.iter_mut() {
+                *v /= nrm;
+            }
+        }
+    }
+
     // 4. Write back into the model's vars (and cached fields).
     let e_t = Tensor::from_vec(e_flat, (n_cells, h), &model.dev)?;
     let b_t = Tensor::from_vec(b_flat, n_cells, &model.dev)?;
