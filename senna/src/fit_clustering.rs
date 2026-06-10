@@ -186,7 +186,7 @@ pub struct ClusteringArgs {
         long = "from",
         help = "Optional run manifest produced by `senna topic|masked-topic|joint-topic|svd|joint-svd`",
         long_help = "When given, the manifest is updated in place with the cluster\n\
-                     output path under `cluster.clusters` so that `senna annotate`\n\
+                     output path under `cluster.clusters` so that `senna annotate-by-enrichment`\n\
                      can pick the cluster parquet up automatically."
     )]
     from: Option<Box<str>>,

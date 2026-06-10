@@ -16,10 +16,10 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
+pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     let out: Box<str> = match args.out.as_deref() {
         Some(o) => Box::from(o),
-        None => derive_out_prefix(&args.from),
+        None => crate::run_manifest::derive_out_prefix(&args.from).into_boxed_str(),
     };
     mkdir_parent(&out)?;
 
@@ -255,7 +255,7 @@ pub fn annotate_run(args: &AnnotateArgs) -> anyhow::Result<()> {
     manifest.defaults.colour_by = Some("annotation".into());
     manifest.save(Path::new(args.from.as_ref()))?;
 
-    info!("senna annotate complete");
+    info!("senna annotate-by-enrichment complete");
     Ok(())
 }
 
@@ -455,18 +455,4 @@ fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
         );
     }
     eprintln!();
-}
-
-/// Derive an output prefix from the manifest path when `--out` was
-/// omitted. Strips `.senna.json` (preferred suffix) or any trailing
-/// `.json`, leaving the user with the same basename pattern as the
-/// training run.
-fn derive_out_prefix(from: &str) -> Box<str> {
-    if let Some(stem) = from.strip_suffix(".senna.json") {
-        return Box::from(stem);
-    }
-    if let Some(stem) = from.strip_suffix(".json") {
-        return Box::from(stem);
-    }
-    Box::from(from)
 }

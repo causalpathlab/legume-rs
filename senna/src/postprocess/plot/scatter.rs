@@ -37,7 +37,7 @@ pub enum ColorBy {
     PbId,
     /// Argmax of a separate topic-proportions parquet (`--topics`).
     Topic,
-    /// Per-cell celltype label from `senna annotate`'s argmax TSV
+    /// Per-cell celltype label from `senna annotate-by-enrichment`'s argmax TSV
     /// (`--annotation`, defaults to `manifest.annotate.argmax`).
     Annotation,
     /// Continuous scalar from `senna pseudotime`'s `.pseudotime.parquet`
@@ -103,7 +103,7 @@ pub struct PlotArgs {
 
     #[arg(
         long,
-        help = "Annotation argmax TSV from `senna annotate` (cell\\tcell_type\\tprobability). Defaults to manifest's annotate.argmax."
+        help = "Annotation argmax TSV from `senna annotate-by-enrichment` (cell\\tcell_type\\tprobability). Defaults to manifest's annotate.argmax."
     )]
     pub annotation: Option<Box<str>>,
 
@@ -287,7 +287,7 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
             let path = resolved.annotation.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "--colour-by annotation requires --annotation PATH \
-                     (or `senna annotate` must have populated manifest.annotate.argmax)"
+                     (or `senna annotate-by-enrichment` must have populated manifest.annotate.argmax)"
                 )
             })?;
             let (ids, label_map) = argmax_annotation(path, &cell_names)?;
@@ -983,7 +983,7 @@ fn argmax_topics(path: &str, n_cells_expected: usize) -> anyhow::Result<Vec<i64>
 }
 
 /// Cluster fallback for `ColorBy::Cluster` when the `cell_coords`
-/// parquet has no `cluster` column. Mirrors `senna annotate`'s strategy:
+/// parquet has no `cluster` column. Mirrors `senna annotate-by-enrichment`'s strategy:
 ///   1. If `manifest.cluster.clusters` is set, load that parquet.
 ///   2. Otherwise run Leiden against `manifest.outputs.latent`, write
 ///      `{out}.clusters.parquet`, and update the manifest in place.
@@ -1075,7 +1075,7 @@ fn write_cluster_assignments_parquet(
     Ok(())
 }
 
-/// Read `senna annotate`'s argmax TSV and produce per-cell integer
+/// Read `senna annotate-by-enrichment`'s argmax TSV and produce per-cell integer
 /// group ids + a stable id → celltype-name label map.
 ///
 /// Format: `cell\tcell_type\tprobability` with optional header. Cells
