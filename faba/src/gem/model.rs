@@ -34,8 +34,10 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::{Init, VarMap};
 
 /// Initialiser stdev for β, z, δ, γ, E_p, E_cell. Match the order of
-/// magnitude used in graph-embedding-util's `JointEmbedModel`.
-const PARAM_INIT_STD: f64 = 0.05;
+/// magnitude used in graph-embedding-util's `JointEmbedModel`. Also the σ
+/// of the per-feature prior null `e_f ~ N(0, σ²I)` that the feature
+/// prior-score QC tests against (see `manifest::write_feature_prior_score`).
+pub(crate) const PARAM_INIT_STD: f64 = 0.05;
 
 /// Which right-hand-side embedding table the bilinear scores against.
 /// The shared feature side (β, z, δ, γ) is reused across all axes; only

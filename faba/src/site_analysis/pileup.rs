@@ -71,56 +71,81 @@ pub enum FigFormat {
 
 #[derive(Args, Debug)]
 pub struct PileupArgs {
-    /// Sparse matrix file(s) (zarr or h5) from faba output. Multiple files
-    /// (e.g. replicates via a shell glob) are aggregated per genomic
-    /// position into a single track.
-    #[arg(required = true, num_args = 1..)]
+    #[arg(
+        required = true,
+        num_args = 1..,
+        help = "Sparse matrix file(s) (zarr or h5) from faba output",
+        long_help = "Sparse matrix file(s) (zarr or h5) from faba output. Multiple files\n\
+                     (e.g. replicates via a shell glob) are aggregated per genomic\n\
+                     position into a single track."
+    )]
     pub data_files: Vec<Box<str>>,
 
-    /// Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or
-    /// Ensembl IDs, case-insensitive. Uses the auxiliary-data relaxed
-    /// gene-name scheme; all matched genes are aggregated into one pileup.
     #[arg(
         short = 'q',
         long = "genes",
         visible_alias = "gene",
-        value_delimiter = ','
+        value_delimiter = ',',
+        help = "Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or Ensembl IDs",
+        long_help = "Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or\n\
+                     Ensembl IDs, case-insensitive. Uses the auxiliary-data relaxed\n\
+                     gene-name scheme; all matched genes are aggregated into one pileup."
     )]
     genes: Vec<Box<str>>,
 
-    /// Genomic regions to pile up: comma-separated `chr:lb-ub`
-    /// (`chr17:1000-2000,chr1:50-99`). Selects rows by position, with or
-    /// without `--genes`. At least one of `--genes`/`--regions` is required.
-    #[arg(long = "regions", visible_alias = "region", value_delimiter = ',')]
+    #[arg(
+        long = "regions",
+        visible_alias = "region",
+        value_delimiter = ',',
+        help = "Genomic regions to pile up: comma-separated `chr:lb-ub`",
+        long_help = "Genomic regions to pile up: comma-separated `chr:lb-ub`\n\
+                     (`chr17:1000-2000,chr1:50-99`). Selects rows by position, with or\n\
+                     without `--genes`. At least one of `--genes`/`--regions` is required."
+    )]
     regions: Vec<Box<str>>,
 
-    /// Site-level parquet file (from dartseq or atoi output) for the
-    /// second track
-    #[arg(short = 's', long = "sites-parquet")]
+    #[arg(
+        short = 's',
+        long = "sites-parquet",
+        help = "Site-level parquet file (from dartseq or atoi output) for the second track"
+    )]
     site_file: Option<Box<str>>,
 
-    /// Signal aggregation mode for sparse matrix track
-    #[arg(long, value_enum, default_value = "sum")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "sum",
+        help = "Signal aggregation mode for sparse matrix track"
+    )]
     signal: PileupSignal,
 
-    /// Signal for site-level parquet track
-    #[arg(long = "site-signal", value_enum, default_value = "wt-coverage")]
+    #[arg(
+        long = "site-signal",
+        value_enum,
+        default_value = "wt-coverage",
+        help = "Signal for site-level parquet track"
+    )]
     site_signal: SiteSignal,
 
-    /// Number of bins along the gene body
-    #[arg(short = 'n', long = "bins", default_value_t = 80)]
+    #[arg(
+        short = 'n',
+        long = "bins",
+        default_value_t = 80,
+        help = "Number of bins along the gene body"
+    )]
     num_bins: usize,
 
-    /// Height of ASCII plot in terminal rows (per track)
-    #[arg(long = "height", default_value_t = 20)]
+    #[arg(
+        long = "height",
+        default_value_t = 20,
+        help = "Height of ASCII plot in terminal rows (per track)"
+    )]
     plot_height: usize,
 
-    /// Output TSV file path (optional)
-    #[arg(short, long)]
+    #[arg(short, long, help = "Output TSV file path (optional)")]
     output: Option<Box<str>>,
 
-    /// Suppress ASCII plot
-    #[arg(long)]
+    #[arg(long, help = "Suppress ASCII plot")]
     quiet: bool,
 
     // ----- Miami figure mode -----
@@ -128,81 +153,134 @@ pub struct PileupArgs {
     // switches `pileup` from the ASCII histogram to a faceted Miami plot
     // (epi sites up / gene model / read depth down, one panel per cell
     // type). Otherwise the existing ASCII/TSV behavior is unchanged.
-    /// Gene annotation GTF/GFF for the middle gene-model track (exons,
-    /// introns, strand). Enables figure mode.
-    #[arg(long = "gtf")]
+    #[arg(
+        long = "gtf",
+        help = "Gene annotation GTF/GFF for the middle gene-model track (exons, introns, strand)",
+        long_help = "Gene annotation GTF/GFF for the middle gene-model track (exons,\n\
+                     introns, strand). Enables figure mode."
+    )]
     gtf: Option<Box<str>>,
 
-    /// BAM file(s) for the bottom read-depth track. Repeatable; replicates
-    /// are pooled. Enables figure mode.
-    #[arg(long = "bam", num_args = 1..)]
+    #[arg(
+        long = "bam",
+        num_args = 1..,
+        help = "BAM file(s) for the bottom read-depth track",
+        long_help = "BAM file(s) for the bottom read-depth track. Repeatable; replicates\n\
+                     are pooled. Enables figure mode."
+    )]
     bam_files: Vec<Box<str>>,
 
-    /// Cell barcode -> cell type membership (TSV/CSV/Parquet). Panels are
-    /// faceted by cell type; without it the figure is a single "all cells"
-    /// panel.
-    #[arg(long = "cell-membership", visible_alias = "membership")]
+    #[arg(
+        long = "cell-membership",
+        visible_alias = "membership",
+        help = "Cell barcode -> cell type membership (TSV/CSV/Parquet)",
+        long_help = "Cell barcode -> cell type membership (TSV/CSV/Parquet). Panels are\n\
+                     faceted by cell type; without it the figure is a single \"all cells\"\n\
+                     panel."
+    )]
     cell_membership_file: Option<Box<str>>,
 
-    /// Column index of the cell barcode in the membership file
-    #[arg(long = "membership-barcode-col", default_value_t = 0)]
+    #[arg(
+        long = "membership-barcode-col",
+        default_value_t = 0,
+        help = "Column index of the cell barcode in the membership file"
+    )]
     membership_barcode_col: usize,
 
-    /// Column index of the cell type in the membership file
-    #[arg(long = "membership-celltype-col", default_value_t = 1)]
+    #[arg(
+        long = "membership-celltype-col",
+        default_value_t = 1,
+        help = "Column index of the cell type in the membership file"
+    )]
     membership_celltype_col: usize,
 
-    /// Require exact barcode matching (default: membership barcodes match
-    /// as prefixes of BAM/matrix barcodes, handling "-1" suffixes)
-    #[arg(long = "exact-barcode-match", default_value_t = false)]
+    #[arg(
+        long = "exact-barcode-match",
+        default_value_t = false,
+        help = "Require exact barcode matching",
+        long_help = "Require exact barcode matching (default: membership barcodes match\n\
+                     as prefixes of BAM/matrix barcodes, handling \"-1\" suffixes)"
+    )]
     exact_barcode_match: bool,
 
-    /// BAM tag holding the cell barcode (read-depth track)
-    #[arg(long = "cell-barcode-tag", default_value = "CB")]
+    #[arg(
+        long = "cell-barcode-tag",
+        default_value = "CB",
+        help = "BAM tag holding the cell barcode (read-depth track)"
+    )]
     cell_barcode_tag: Box<str>,
 
-    /// Restrict the top track to these modalities (e.g. `m6A,A-to-I`).
-    /// Empty = all matrix rows. Matched case-insensitively against the
-    /// `gene/MODALITY/detail` row name.
-    #[arg(long = "top-modality", value_delimiter = ',')]
+    #[arg(
+        long = "top-modality",
+        value_delimiter = ',',
+        help = "Restrict the top track to these modalities (e.g. `m6A,A-to-I`)",
+        long_help = "Restrict the top track to these modalities (e.g. `m6A,A-to-I`).\n\
+                     Empty = all matrix rows. Matched case-insensitively against the\n\
+                     `gene/MODALITY/detail` row name."
+    )]
     top_modality: Vec<Box<str>>,
 
-    /// Output prefix for figure files (`<prefix>.miami.{svg,pdf,png}`).
-    /// Defaults to the gene label.
-    #[arg(long = "out")]
+    #[arg(
+        long = "out",
+        help = "Output prefix for figure files (`<prefix>.miami.{svg,pdf,png}`)",
+        long_help = "Output prefix for figure files (`<prefix>.miami.{svg,pdf,png}`).\n\
+                     Defaults to the gene label."
+    )]
     out: Option<Box<str>>,
 
-    /// Emit only this format. Omit for the default SVG + PDF.
-    #[arg(long = "format", value_enum)]
+    #[arg(
+        long = "format",
+        value_enum,
+        help = "Emit only this format. Omit for the default SVG + PDF"
+    )]
     format: Option<FigFormat>,
 
-    /// Also write the SVG (always written unless `--format pdf`)
-    #[arg(long = "svg", default_value_t = false)]
+    #[arg(
+        long = "svg",
+        default_value_t = false,
+        help = "Also write the SVG (always written unless `--format pdf`)"
+    )]
     svg: bool,
 
-    /// Also write a flattened PNG
-    #[arg(long = "png", default_value_t = false)]
+    #[arg(
+        long = "png",
+        default_value_t = false,
+        help = "Also write a flattened PNG"
+    )]
     png: bool,
 
-    /// Skip PDF output
-    #[arg(long = "no-pdf", default_value_t = false)]
+    #[arg(long = "no-pdf", default_value_t = false, help = "Skip PDF output")]
     no_pdf: bool,
 
-    /// Figure width in inches
-    #[arg(long = "fig-width", default_value_t = 8.0)]
+    #[arg(
+        long = "fig-width",
+        default_value_t = 8.0,
+        help = "Figure width in inches"
+    )]
     fig_width: f32,
 
-    /// Figure resolution (dots per inch)
-    #[arg(long = "dpi", default_value_t = 300)]
+    #[arg(
+        long = "dpi",
+        default_value_t = 300,
+        help = "Figure resolution (dots per inch)"
+    )]
     dpi: u32,
 
-    /// Qualitative color palette for cell-type panels
-    #[arg(long = "palette", value_enum, default_value = "auto")]
+    #[arg(
+        long = "palette",
+        value_enum,
+        default_value = "auto",
+        help = "Qualitative color palette for cell-type panels"
+    )]
     palette: Palette,
 
-    /// Rasterize the per-site dot layer once a panel exceeds this many
-    /// sites (keeps SVG/PDF size bounded; axes/areas stay vector)
-    #[arg(long = "raster-threshold", default_value_t = 300)]
+    #[arg(
+        long = "raster-threshold",
+        default_value_t = 300,
+        help = "Rasterize the per-site dot layer once a panel exceeds this many sites",
+        long_help = "Rasterize the per-site dot layer once a panel exceeds this many\n\
+                     sites (keeps SVG/PDF size bounded; axes/areas stay vector)"
+    )]
     raster_threshold: usize,
 }
 

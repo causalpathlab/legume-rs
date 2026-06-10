@@ -92,9 +92,14 @@ pub struct PipelineArgs {
     )]
     pub backend: SparseIoBackend,
 
-    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
-    /// (zarr backend only; no effect on hdf5)
-    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    #[arg(
+        long = "no-zip",
+        default_value_t = true,
+        action = clap::ArgAction::SetFalse,
+        help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive\n\
+                     (zarr backend only; no effect on hdf5)"
+    )]
     pub zip: bool,
 
     #[arg(long, default_value_t = 16, help = "Maximum number of threads")]

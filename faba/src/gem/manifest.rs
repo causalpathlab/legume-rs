@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 use graph_embedding_util::data::UnifiedData;
 
 use super::feature_table::FeatureTable;
-use super::model::GemModel;
+use super::model::{GemModel, PARAM_INIT_STD};
 use super::pseudobulk::PseudobulkData;
+
+use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 pub const MANIFEST_VERSION: u32 = 1;
 pub const GEM_KIND: &str = "gem";
@@ -51,6 +53,11 @@ pub struct GemManifest {
     pub modality_axis: String,
     /// `[G × M]` binary measured mask.
     pub measured_mask: String,
+    /// `[G × 3]` per-feature prior-score QC (`emb_sq_norm`, `chisq_stat`,
+    /// `prior_pval`); flags rows training never moved off the init prior.
+    /// `#[serde(default)]` so manifests written before this field parse.
+    #[serde(default)]
+    pub feature_prior_score: String,
 
     /// `e_cell` — `[N_cells × H]`; row name = cell barcode.
     pub cell_embedding: String,
@@ -134,6 +141,18 @@ pub fn write_outputs(
         Some(&dim_names),
     )
     .with_context(|| format!("writing {path_feat_emb}"))?;
+
+    // Per-feature prior-score QC. A row that training never moved off its
+    // `N(0, σ²I)` init (σ = PARAM_INIT_STD) is uninformed noise — the dense
+    // small-norm blob that contaminates downstream UMAP / clustering /
+    // archetype topics. Score each β_g row against that prior null.
+    let path_feat_prior = format!("{prefix}.feature_prior_score.parquet");
+    write_feature_prior_score(
+        &rho,
+        &table.gene_names,
+        model.embedding_dim,
+        &path_feat_prior,
+    )?;
 
     // z_g
     let z = tensor_to_dmatrix2(&model.z)?;
@@ -277,6 +296,7 @@ pub fn write_manifest(
         modality_region_offset: format!("{prefix}.modality_region_offset.parquet"),
         modality_axis: format!("{prefix}.modality_axis.parquet"),
         measured_mask: format!("{prefix}.measured_mask.parquet"),
+        feature_prior_score: format!("{prefix}.feature_prior_score.parquet"),
         cell_embedding: format!("{prefix}.cell_embedding.parquet"),
         cell_bias: format!("{prefix}.cell_bias.parquet"),
         cell_to_pb: format!("{prefix}.cell_to_pb.parquet"),
@@ -292,6 +312,40 @@ pub fn write_manifest(
     std::fs::write(&path_manifest, json).with_context(|| format!("writing {path_manifest}"))?;
     log::info!("manifest → {path_manifest}");
     Ok(())
+}
+
+////////////////////////////////////////
+// Manifest reading (shared by gem-plot / gem-annotate)
+////////////////////////////////////////
+
+/// Parse a `{prefix}.faba.json` manifest, returning it plus the directory
+/// it lives in (for resolving its sibling parquet paths).
+pub(crate) fn load_manifest(from: &str) -> Result<(GemManifest, std::path::PathBuf)> {
+    let txt = std::fs::read_to_string(from).with_context(|| format!("reading manifest {from}"))?;
+    let manifest: GemManifest =
+        serde_json::from_str(&txt).with_context(|| format!("parsing manifest {from}"))?;
+    let dir = std::path::Path::new(from)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    Ok((manifest, dir))
+}
+
+/// Resolve a manifest-stored parquet path against the manifest's own
+/// directory (by basename), so a relocated run directory still works.
+pub(crate) fn resolve(dir: &std::path::Path, stored: &str) -> String {
+    let p = std::path::Path::new(stored);
+    let name = p.file_name().map(std::path::Path::new).unwrap_or(p);
+    dir.join(name).to_string_lossy().into_owned()
+}
+
+/// Default output prefix: the manifest directory + the prefix basename.
+pub(crate) fn default_out(dir: &std::path::Path, prefix: &str) -> String {
+    let base = std::path::Path::new(prefix)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| prefix.to_owned());
+    dir.join(base).to_string_lossy().into_owned()
 }
 
 ////////////////////////////////////////
@@ -317,6 +371,67 @@ fn tensor_to_dmatrix1(t: &Tensor) -> Result<DMatrix<f32>> {
     let n = shape[0];
     let v: Vec<f32> = t.to_vec1::<f32>()?;
     Ok(DMatrix::from_column_slice(n, 1, &v))
+}
+
+/// Per-feature prior-score QC, written to `{prefix}.feature_prior_score.parquet`.
+///
+/// Under the null "training never informed this row", the embedding is a draw
+/// from the initialiser prior `e_f ~ N(0, σ²I_H)` (σ = [`PARAM_INIT_STD`]), so
+///
+/// ```text
+///     chisq = ‖e_f‖² / σ²  ~  χ²_H .
+/// ```
+///
+/// `prior_pval = P(χ²_H ≥ chisq)` is then a standard upper-tail p-value for
+/// "distinguishable from the prior": a trained row grows its norm off the tiny
+/// init shell → large `chisq` → `prior_pval → 0` (live feature); an uninformed
+/// row stays on the shell → `chisq ≈ H` → `prior_pval ≈ U(0,1)` (mean 0.5).
+/// Flag dead features with e.g. `prior_pval > 0.05`. `chisq` is the unbounded,
+/// precision-stable monotone score (large = live); `prior_pval` is the
+/// calibrated reading.
+fn write_feature_prior_score(
+    rho: &DMatrix<f32>,
+    gene_names: &[Box<str>],
+    h: usize,
+    path: &str,
+) -> Result<()> {
+    let g = rho.nrows();
+    let var = PARAM_INIT_STD * PARAM_INIT_STD;
+    let dist = ChiSquared::new(h as f64).context("chi-squared dof (embedding_dim)")?;
+
+    // Columns: ‖e_f‖², the χ²_H statistic, and its upper-tail p-value.
+    let mut out = DMatrix::<f32>::zeros(g, 3);
+    let mut n_prior_like = 0usize; // prior_pval > 0.05
+    for r in 0..g {
+        let sq_norm = rho
+            .row(r)
+            .iter()
+            .map(|&x| (x as f64) * (x as f64))
+            .sum::<f64>();
+        let chisq = sq_norm / var;
+        let pval = dist.sf(chisq);
+        if pval > 0.05 {
+            n_prior_like += 1;
+        }
+        out[(r, 0)] = sq_norm as f32;
+        out[(r, 1)] = chisq as f32;
+        out[(r, 2)] = pval as f32;
+    }
+
+    let col_names: Vec<Box<str>> = ["emb_sq_norm", "chisq_stat", "prior_pval"]
+        .iter()
+        .map(|s| Box::from(*s))
+        .collect();
+    out.to_parquet_with_names(path, (Some(gene_names), Some("gene")), Some(&col_names))
+        .with_context(|| format!("writing {path}"))?;
+
+    log::info!(
+        "feature prior-score → {} ({} / {} rows ≈ prior at p>0.05 — candidate uninformed/dead features)",
+        path,
+        n_prior_like,
+        g
+    );
+    Ok(())
 }
 
 fn write_modality_axis(modality_names: &[Box<str>], path: &str) -> Result<()> {

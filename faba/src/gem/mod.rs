@@ -17,6 +17,7 @@
 //!
 //! See `faba/temp.md` for the design.
 
+pub mod annotate;
 pub mod args;
 pub mod cell_solve;
 pub mod common;
@@ -25,6 +26,7 @@ pub mod gene_weight;
 pub mod loss;
 pub mod manifest;
 pub mod model;
+pub mod plot;
 pub mod pseudobulk;
 pub mod region;
 pub mod sampling;

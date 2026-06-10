@@ -8,15 +8,22 @@ use std::io::Write;
 
 #[derive(Args, Debug)]
 pub struct MetageneArgs {
-    /// Site-level parquet file (from dartseq or apa output)
-    #[arg(short = 's', long = "sites", required = true)]
+    #[arg(
+        short = 's',
+        long = "sites",
+        required = true,
+        help = "Site-level parquet file (from dartseq or apa output)"
+    )]
     site_file: Box<str>,
 
-    /// GFF annotation file
-    #[arg(short = 'g', long = "gff", required = true)]
+    #[arg(
+        short = 'g',
+        long = "gff",
+        required = true,
+        help = "GFF annotation file"
+    )]
     gff_file: Box<str>,
 
-    /// Total bins across the metagene (default: 19 per region × 3 regions)
     #[arg(
         short = 'n',
         long = "bins",
@@ -29,16 +36,17 @@ pub struct MetageneArgs {
     )]
     num_bins: usize,
 
-    /// Output TSV file path
-    #[arg(short, long, required = true)]
+    #[arg(short, long, required = true, help = "Output TSV file path")]
     output: Box<str>,
 
-    /// Print ASCII histogram to stderr
-    #[arg(long = "print")]
+    #[arg(long = "print", help = "Print ASCII histogram to stderr")]
     print_histogram: bool,
 
-    /// Maximum width of ASCII histogram
-    #[arg(long = "max-width", default_value_t = 60)]
+    #[arg(
+        long = "max-width",
+        default_value_t = 60,
+        help = "Maximum width of ASCII histogram"
+    )]
     max_width: usize,
 }
 

@@ -12,27 +12,44 @@ use super::common::ComputeDevice;
 /// negative counts, etc.) stay in their own block below.
 #[derive(Args, Debug, Clone)]
 pub struct GemArgs {
-    /// Counts (gene-level) sparse matrix prefix(es), comma-separated.
-    /// Rows must follow `{gene_key}/count/{spliced|unspliced}`. Multiple
-    /// files are stacked under Union column alignment (cells merged by
-    /// barcode); use an embedded `@batch` tag on the barcodes to keep
-    /// samples as distinct batches (see `--batch-files`).
-    #[arg(long, required = true, value_delimiter = ',')]
+    #[arg(
+        long,
+        required = true,
+        value_delimiter = ',',
+        help = "Counts (gene-level) sparse matrix prefix(es), comma-separated",
+        long_help = "Counts (gene-level) sparse matrix prefix(es), comma-separated.\n\
+                     Rows must follow `{gene_key}/count/{spliced|unspliced}`. Multiple\n\
+                     files are stacked under Union column alignment (cells merged by\n\
+                     barcode); use an embedded `@batch` tag on the barcodes to keep\n\
+                     samples as distinct batches (see `--batch-files`)."
+    )]
     pub genes: Vec<Box<str>>,
 
-    /// m6A (DART-seq) sparse matrix prefix(es), comma-separated. Rows
-    /// `{gene_key}/m6A/{component|chr:pos}`.
-    #[arg(long, value_delimiter = ',')]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "m6A (DART-seq) sparse matrix prefix(es), comma-separated",
+        long_help = "m6A (DART-seq) sparse matrix prefix(es), comma-separated. Rows\n\
+                     `{gene_key}/m6A/{component|chr:pos}`."
+    )]
     pub dartseq: Option<Vec<Box<str>>>,
 
-    /// A-to-I editing sparse matrix prefix(es), comma-separated. Rows
-    /// `{gene_key}/A2I/{component|chr:pos}`.
-    #[arg(long, value_delimiter = ',')]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "A-to-I editing sparse matrix prefix(es), comma-separated",
+        long_help = "A-to-I editing sparse matrix prefix(es), comma-separated. Rows\n\
+                     `{gene_key}/A2I/{component|chr:pos}`."
+    )]
     pub atoi: Option<Vec<Box<str>>>,
 
-    /// Alternative-polyA sparse matrix prefix(es), comma-separated. Rows
-    /// `{gene_key}/pA/{component|chr:pos}`.
-    #[arg(long, value_delimiter = ',')]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Alternative-polyA sparse matrix prefix(es), comma-separated",
+        long_help = "Alternative-polyA sparse matrix prefix(es), comma-separated. Rows\n\
+                     `{gene_key}/pA/{component|chr:pos}`."
+    )]
     pub apa: Option<Vec<Box<str>>>,
 
     ////////////////////////////////////////
@@ -46,47 +63,67 @@ pub struct GemArgs {
     // Optional: a missing sidecar collapses that modality's γ to a
     // single region.
     ////////////////////////////////////////
-    /// `m6a_components.parquet` for the `--dartseq` (m6A) modality.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "`m6a_components.parquet` for the `--dartseq` (m6A) modality"
+    )]
     pub dartseq_components: Option<Box<str>>,
 
-    /// `atoi_components.parquet` for the `--atoi` (A2I) modality.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "`atoi_components.parquet` for the `--atoi` (A2I) modality"
+    )]
     pub atoi_components: Option<Box<str>>,
 
-    /// Component annotation parquet for the `--apa` (pA) modality.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Component annotation parquet for the `--apa` (pA) modality"
+    )]
     pub apa_components: Option<Box<str>>,
 
-    /// Optional batch labels. Under Union column alignment (gem's
-    /// mode) exactly **one** file is expected, listing one label per
-    /// unified cell — a barcode shared across modalities cannot carry two
-    /// labels. As an alternative to this file, embed an `@batch` tag in
-    /// the barcodes (e.g. `AAACCC@sampleA`); the loader infers and
-    /// reconciles per-cell batches from those tags.
-    #[arg(short = 'b', long, value_delimiter = ',')]
+    #[arg(
+        short = 'b',
+        long,
+        value_delimiter = ',',
+        help = "Optional batch labels",
+        long_help = "Optional batch labels. Under Union column alignment (gem's\n\
+                     mode) exactly **one** file is expected, listing one label per\n\
+                     unified cell — a barcode shared across modalities cannot carry two\n\
+                     labels. As an alternative to this file, embed an `@batch` tag in\n\
+                     the barcodes (e.g. `AAACCC@sampleA`); the loader infers and\n\
+                     reconciles per-cell batches from those tags."
+    )]
     pub batch_files: Option<Vec<Box<str>>>,
 
-    /// Output prefix.
-    #[arg(short, long, required = true)]
+    #[arg(short, long, required = true, help = "Output prefix")]
     pub out: Box<str>,
 
     ////////////////////////////////////////
     // Model dims
     ////////////////////////////////////////
-    /// Embedding dimension H (size of β_g, δ_{k,m,:}, γ_{m,r,:}).
-    #[arg(long, default_value_t = 32)]
+    #[arg(
+        long,
+        default_value_t = 32,
+        help = "Embedding dimension H (size of β_g, δ_{k,m,:}, γ_{m,r,:})"
+    )]
     pub embedding_dim: usize,
 
-    /// Number of shared regulatory programs K.
-    #[arg(long = "num-programs", default_value_t = 8)]
+    #[arg(
+        long = "num-programs",
+        default_value_t = 8,
+        help = "Number of shared regulatory programs K"
+    )]
     pub n_programs: usize,
 
-    /// Number of transcript-position region bins R for the additive
-    /// γ_{m,r,:} offset. Components are binned by normalized 5'-relative
-    /// position `u = mu/gene_length`. R=1 collapses γ to one per-modality
-    /// offset (no positional resolution).
-    #[arg(long = "num-regions", default_value_t = 5)]
+    #[arg(
+        long = "num-regions",
+        default_value_t = 5,
+        help = "Number of transcript-position region bins R for the additive γ_{m,r,:} offset",
+        long_help = "Number of transcript-position region bins R for the additive\n\
+                     γ_{m,r,:} offset. Components are binned by normalized 5'-relative\n\
+                     position `u = mu/gene_length`. R=1 collapses γ to one per-modality\n\
+                     offset (no positional resolution)."
+    )]
     pub n_regions: usize,
 
     ////////////////////////////////////////
@@ -107,46 +144,57 @@ pub struct GemArgs {
     #[arg(long, default_value_t = 64)]
     pub proj_dim: usize,
 
-    /// Drop batch labels (treat all cells as one batch).
-    #[arg(long)]
+    #[arg(long, help = "Drop batch labels (treat all cells as one batch)")]
     pub ignore_batch: bool,
 
-    /// Cell QC: minimum number of detected features (nonzeros) a cell must
-    /// have **across all modalities** (count + m6A/A2I/APA) to be embedded
-    /// and written. Modality-agnostic on purpose — coverage is skewed
-    /// across modalities, so this keeps any cell with signal in *any* one,
-    /// dropping only near-empty cells. Under Union alignment a barcode seen
-    /// in just one sparse modality (e.g. a single stray editing read, no
-    /// counts) is a degenerate "cell" the count-anchored phase-2 projection
-    /// maps to ~0; the default `2` drops exactly those while keeping every
-    /// cell that yields a real embedding. Set `1` to keep all but fully
-    /// empty cells; raise for stricter QC. No data is rewritten — this is a
-    /// write-time selection, not a squeeze.
-    #[arg(long = "min-cell-nnz", default_value_t = 2)]
+    #[arg(
+        long = "min-cell-nnz",
+        default_value_t = 2,
+        help = "Cell QC: minimum number of detected features (nonzeros) a cell must have across all modalities",
+        long_help = "Cell QC: minimum number of detected features (nonzeros) a cell must\n\
+                     have **across all modalities** (count + m6A/A2I/APA) to be embedded\n\
+                     and written. Modality-agnostic on purpose — coverage is skewed\n\
+                     across modalities, so this keeps any cell with signal in *any* one,\n\
+                     dropping only near-empty cells. Under Union alignment a barcode seen\n\
+                     in just one sparse modality (e.g. a single stray editing read, no\n\
+                     counts) is a degenerate \"cell\" the count-anchored phase-2 projection\n\
+                     maps to ~0; the default `2` drops exactly those while keeping every\n\
+                     cell that yields a real embedding. Set `1` to keep all but fully\n\
+                     empty cells; raise for stricter QC. No data is rewritten — this is a\n\
+                     write-time selection, not a squeeze."
+    )]
     pub min_cell_nnz: usize,
 
-    /// Feature-only mode: skip the cell axis in phase 1 **and** skip the
-    /// phase-2 cell projection. `e_cell` / `b_cell` are still allocated and
-    /// written, but stay at their init values (zero bias, random embedding)
-    /// — refit them post-hoc if needed. This differs from
-    /// `--phase1-cells-per-pb 0` (the default), which also drops the cell
-    /// axis from phase 1 but *still* projects every cell in phase 2.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Feature-only mode: skip the cell axis in phase 1 and skip the phase-2 cell projection",
+        long_help = "Feature-only mode: skip the cell axis in phase 1 **and** skip the\n\
+                     phase-2 cell projection. `e_cell` / `b_cell` are still allocated and\n\
+                     written, but stay at their init values (zero bias, random embedding)\n\
+                     — refit them post-hoc if needed. This differs from\n\
+                     `--phase1-cells-per-pb 0` (the default), which also drops the cell\n\
+                     axis from phase 1 but *still* projects every cell in phase 2."
+    )]
     pub no_cell_axis: bool,
 
-    /// Phase-1 cell-axis mode (`k`). Controls only what shapes the feature
-    /// dictionary (β/z/δ/γ) in phase 1; phase 2 ALWAYS analytically projects
-    /// every cell (unless `--no-cell-axis` / `--phase2-epochs 0`), so the
-    /// per-cell embedding output is essentially unaffected by `k`.
-    ///   k = 0 (default) → suppress the cell axis in phase 1 (pure-pb:
-    ///     features shaped by pb aggregates only). Fastest, because the
-    ///     per-epoch step budget is then sized by the pb levels, not n_cells.
-    ///   1 ≤ k < n_cells → keep ≤k cells per pb-sample at EVERY collapse
-    ///     level (union), shrinking the phase-1 budget while keeping rare /
-    ///     shallow cells visible to the shared dictionary.
-    ///   k ≥ n_cells → every cell shapes the dictionary (legacy all-cells;
-    ///     slowest).
-    #[arg(long = "phase1-cells-per-pb", default_value_t = 0)]
+    #[arg(
+        long = "phase1-cells-per-pb",
+        default_value_t = 0,
+        help = "Phase-1 cell-axis mode (k): controls what shapes the feature dictionary in phase 1",
+        long_help = "Phase-1 cell-axis mode (`k`). Controls only what shapes the feature\n\
+                     dictionary (β/z/δ/γ) in phase 1; phase 2 ALWAYS analytically projects\n\
+                     every cell (unless `--no-cell-axis` / `--phase2-epochs 0`), so the\n\
+                     per-cell embedding output is essentially unaffected by `k`.\n\
+                     \n\
+                       k = 0 (default) → suppress the cell axis in phase 1 (pure-pb:\n\
+                         features shaped by pb aggregates only). Fastest, because the\n\
+                         per-epoch step budget is then sized by the pb levels, not n_cells.\n\
+                       1 ≤ k < n_cells → keep ≤k cells per pb-sample at EVERY collapse\n\
+                         level (union), shrinking the phase-1 budget while keeping rare /\n\
+                         shallow cells visible to the shared dictionary.\n\
+                       k ≥ n_cells → every cell shapes the dictionary (legacy all-cells;\n\
+                         slowest)."
+    )]
     pub phase1_cells_per_pb: usize,
 
     ////////////////////////////////////////
@@ -160,30 +208,43 @@ pub struct GemArgs {
     // still exposed for symmetry with bge / for input files that mix
     // `ENSG..._SYMBOL` prefixes inside the `{gene}` slot.
     ////////////////////////////////////////
-    /// Delimiter for fuzzy gene-name matching across input files (last
-    /// token after the split is the canonical row name). Ignored unless
-    /// `--feature-name-exact` is *off* — which is **not** the default
-    /// for gem (see note above).
-    #[arg(long, default_value_t = '_')]
+    #[arg(
+        long,
+        default_value_t = '_',
+        help = "Delimiter for fuzzy gene-name matching across input files",
+        long_help = "Delimiter for fuzzy gene-name matching across input files (last\n\
+                     token after the split is the canonical row name). Ignored unless\n\
+                     `--feature-name-exact` is *off* — which is **not** the default\n\
+                     for gem (see note above)."
+    )]
     pub feature_name_delim: char,
 
-    /// Use exact row-name match across files (no canonicalization). The
-    /// gem default — required because the `{gene}/{modality}/{detail}`
-    /// row format is sensitive to suffix-splitting. Pass
-    /// `--feature-name-exact=false` only if your `{gene}` slot itself
-    /// carries a stripping suffix.
-    #[arg(long, default_value_t = true)]
+    #[arg(
+        long,
+        default_value_t = true,
+        help = "Use exact row-name match across files (no canonicalization)",
+        long_help = "Use exact row-name match across files (no canonicalization). The\n\
+                     gem default — required because the `{gene}/{modality}/{detail}`\n\
+                     row format is sensitive to suffix-splitting. Pass\n\
+                     `--feature-name-exact=false` only if your `{gene}` slot itself\n\
+                     carries a stripping suffix."
+    )]
     pub feature_name_exact: bool,
 
     ////////////////////////////////////////
     // I/O knobs (senna bge convention)
     ////////////////////////////////////////
-    /// Preload all sparse column data into memory before any pass over
-    /// cells. On by default — much faster than repeated disk reads on
-    /// typical SSDs, and required on slow disks. Pass `--no-preload-data`
-    /// to fall back to streaming reads (use only for datasets that don't
-    /// fit in RAM).
-    #[arg(long = "no-preload-data", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    #[arg(
+        long = "no-preload-data",
+        default_value_t = true,
+        action = clap::ArgAction::SetFalse,
+        help = "Preload all sparse column data into memory before any pass over cells",
+        long_help = "Preload all sparse column data into memory before any pass over\n\
+                     cells. On by default — much faster than repeated disk reads on\n\
+                     typical SSDs, and required on slow disks. Pass `--no-preload-data`\n\
+                     to fall back to streaming reads (use only for datasets that don't\n\
+                     fit in RAM)."
+    )]
     pub preload_data: bool,
 
     ////////////////////////////////////////
@@ -257,22 +318,36 @@ pub struct GemArgs {
     ////////////////////////////////////////
     // Sampling strata
     ////////////////////////////////////////
-    /// Fraction of positives drawn from AGG rows.
-    #[arg(long, default_value_t = 0.25)]
+    #[arg(
+        long,
+        default_value_t = 0.25,
+        help = "Fraction of positives drawn from AGG rows"
+    )]
     pub f_agg: f32,
 
-    /// Fraction of positives drawn from count-component rows.
-    #[arg(long, default_value_t = 0.25)]
+    #[arg(
+        long,
+        default_value_t = 0.25,
+        help = "Fraction of positives drawn from count-component rows"
+    )]
     pub f_count: f32,
 
-    /// Count-weight tempering exponent (τ ∈ [0, 1]; 1 = strict count-prop,
-    /// 0 = uniform over rows with non-zero mass).
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Count-weight tempering exponent (τ ∈ [0, 1]; 1 = strict count-prop, 0 = uniform)",
+        long_help = "Count-weight tempering exponent (τ ∈ [0, 1]; 1 = strict count-prop,\n\
+                     0 = uniform over rows with non-zero mass)."
+    )]
     pub tau: f32,
 
-    /// Modality-balance tempering exponent (τ_M ∈ [0, 1]; 1 = strict
-    /// mass-prop, 0 = uniform across modalities).
-    #[arg(long, default_value_t = 0.5)]
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Modality-balance tempering exponent (τ_M ∈ [0, 1]; 1 = strict mass-prop, 0 = uniform)",
+        long_help = "Modality-balance tempering exponent (τ_M ∈ [0, 1]; 1 = strict\n\
+                     mass-prop, 0 = uniform across modalities)."
+    )]
     pub tau_modality: f32,
 
     /// NB-Fisher housekeeping penalty (exponent on the per-gene Fisher
@@ -293,24 +368,37 @@ pub struct GemArgs {
     ////////////////////////////////////////
     // Negatives
     ////////////////////////////////////////
-    /// Random negatives: pick another (g', m, c) row within the
-    /// positive's stratum and modality. Tests gene-cell identification
-    /// (β-side classification).
-    #[arg(long, default_value_t = 10)]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Random negatives: pick another (g', m, c) row within the positive's stratum and modality",
+        long_help = "Random negatives: pick another (g', m, c) row within the\n\
+                     positive's stratum and modality. Tests gene-cell identification\n\
+                     (β-side classification)."
+    )]
     pub n_rand: usize,
 
-    /// Swap-gene-mode negatives: keep β_g and (modality m, region r)
-    /// fixed, but substitute the K-program loading z from another gene
-    /// g'. Tests the gene's program-loading identity given the modality
-    /// (z-side classification). Was `--n-swap-z` previously.
-    #[arg(long, default_value_t = 5, alias = "n-swap-z")]
+    #[arg(
+        long,
+        default_value_t = 5,
+        alias = "n-swap-z",
+        help = "Swap-gene-mode negatives: keep β_g and modality fixed, substitute z from another gene",
+        long_help = "Swap-gene-mode negatives: keep β_g and (modality m, region r)\n\
+                     fixed, but substitute the K-program loading z from another gene\n\
+                     g'. Tests the gene's program-loading identity given the modality\n\
+                     (z-side classification). Was `--n-swap-z` previously."
+    )]
     pub n_swap_gene_mode: usize,
 
-    /// Swap-modality negatives: keep (gene, cell) fixed but swap the
-    /// satellite's `(modality, region)` axis to a different one. Forces
-    /// δ/γ to keep each satellite distinguishable from the gene's base
-    /// and other modalities (prevents the deviation gate collapsing).
-    #[arg(long, default_value_t = 5)]
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Swap-modality negatives: keep (gene, cell) fixed but swap the satellite's (modality, region) axis",
+        long_help = "Swap-modality negatives: keep (gene, cell) fixed but swap the\n\
+                     satellite's `(modality, region)` axis to a different one. Forces\n\
+                     δ/γ to keep each satellite distinguishable from the gene's base\n\
+                     and other modalities (prevents the deviation gate collapsing)."
+    )]
     pub n_swap_modality: usize,
 
     ////////////////////////////////////////
@@ -323,30 +411,43 @@ pub struct GemArgs {
     // (`{out}.{latent,dictionary,topic_embedding}.parquet`) consumed by
     // `senna {plot,clustering,annotate} --from`. No retraining.
     ////////////////////////////////////////
-    /// Resolve archetype-based topics from the cell embedding after
-    /// training and write the senna topic-model layout.
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Resolve archetype-based topics from the cell embedding after training"
+    )]
     pub resolve_topics: bool,
 
-    /// Number of topics K for `--resolve-topics`. Omit to auto-select via
-    /// an archetypal RSS-elbow sweep over `2..=--max-k`.
-    #[arg(long = "num-topics")]
+    #[arg(
+        long = "num-topics",
+        help = "Number of topics K for `--resolve-topics`",
+        long_help = "Number of topics K for `--resolve-topics`. Omit to auto-select via\n\
+                     an archetypal RSS-elbow sweep over `2..=--max-k`."
+    )]
     pub num_topics: Option<usize>,
 
-    /// Upper K for the `--resolve-topics` auto-sweep (when `--num-topics`
-    /// is unset).
-    #[arg(long = "max-k", default_value_t = 30)]
+    #[arg(
+        long = "max-k",
+        default_value_t = 30,
+        help = "Upper K for the `--resolve-topics` auto-sweep (when `--num-topics` is unset)"
+    )]
     pub max_k: usize,
 
-    /// Archetypal-analysis alternating iterations for `--resolve-topics`.
-    #[arg(long = "aa-iters", default_value_t = 50)]
+    #[arg(
+        long = "aa-iters",
+        default_value_t = 50,
+        help = "Archetypal-analysis alternating iterations for `--resolve-topics`"
+    )]
     pub aa_iters: usize,
 
-    /// Cap on cells used to fit archetypes for `--resolve-topics` (θ is
-    /// still assigned for every cell). Unset → auto-caps at 50k cells when
-    /// the dataset is larger (the K-sweep fits ~max-k times, so fitting on
-    /// all cells dominates runtime); pass an explicit value to override.
-    #[arg(long = "aa-subsample")]
+    #[arg(
+        long = "aa-subsample",
+        help = "Cap on cells used to fit archetypes for `--resolve-topics`",
+        long_help = "Cap on cells used to fit archetypes for `--resolve-topics` (θ is\n\
+                     still assigned for every cell). Unset → auto-caps at 50k cells when\n\
+                     the dataset is larger (the K-sweep fits ~max-k times, so fitting on\n\
+                     all cells dominates runtime); pass an explicit value to override."
+    )]
     pub aa_subsample: Option<usize>,
 
     ////////////////////////////////////////
