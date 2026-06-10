@@ -8,6 +8,10 @@
 //! coords buffer — UMAP's SGD is robust to these; the reference numba
 //! impl does the same.
 //!
+//! Pair this with [`crate::knn_graph::KnnGraph::fuzzy_kernel_weights`]
+//! to build the input edge list. Shared by `senna layout umap` and
+//! `faba gem-plot`.
+//!
 //! References:
 //! - McInnes, Healy & Melville, *arXiv* 1802.03426 — UMAP.
 //! - Recht et al., *NeurIPS* 2011 — HOGWILD! lock-free SGD.
