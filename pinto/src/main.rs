@@ -12,7 +12,8 @@ mod util;
 mod test_support;
 
 use cell_activity_graph_embedding::{
-    fit_cell_activity_graph_embedding, CellActivityGraphEmbeddingArgs,
+    fit_cell_activity_graph_embedding, run_cage_annotate, CageAnnotateArgs,
+    CellActivityGraphEmbeddingArgs,
 };
 use clap::{Parser, Subcommand};
 use colored::Colorize;
@@ -290,6 +291,19 @@ enum Commands {
                       \x20 {out}.link_community.parquet     per-edge community"
     )]
     Cage(CellActivityGraphEmbeddingArgs),
+
+    #[command(
+        about = "Marker-set cell-type annotation by projection (from a cage run)",
+        long_about = "Light cell-type annotation: embeds each marker-defined cell\n\
+                      type as the L2-normalized centroid of its marker feature\n\
+                      embeddings (the space cage cells live in), then cosine-scores\n\
+                      every cell → per-cell soft posterior. A permutation null\n\
+                      (random gene sets) gives null-standardized z-scores.\n\n\
+                      Reads `{prefix}.feature_embedding.parquet` +\n\
+                      `{prefix}.cell_embedding.parquet` from a `pinto cage` run.\n\n\
+                      Outputs: {out}.cage_annot.{posterior,zscore,type_embedding}.parquet"
+    )]
+    CageAnnotate(CageAnnotateArgs),
 
     #[command(
         about = "Link community via embedded topic model (indexed VAE)",
@@ -602,6 +616,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Cage(args) => {
             fit_cell_activity_graph_embedding(args)?;
+        }
+        Commands::CageAnnotate(args) => {
+            run_cage_annotate(args)?;
         }
         Commands::LcEtm(args) => {
             fit_srt_link_community_etm(args)?;
