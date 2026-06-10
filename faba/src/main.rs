@@ -20,7 +20,9 @@ mod site_analysis;
 mod snp;
 
 use crate::common::*;
+use faba::gem::annotate::{run_gem_annotate, GemAnnotateArgs};
 use faba::gem::args::GemArgs;
+use faba::gem::plot::{run_gem_plot, GemPlotArgs};
 use run_apa::*;
 use run_atoi::*;
 use run_gem_embedding::*;
@@ -305,6 +307,40 @@ its barcodes' `@batch` tag):\n  \
     Gem(GemArgs),
 
     #[command(
+        name = "gem-plot",
+        about = "2D UMAP layouts + cluster plots from a `faba gem` manifest",
+        long_about = "Reads a `{prefix}.faba.json` gem manifest and renders two\n\
+            UMAP scatter plots — the feature embedding (β_g) and the cell\n\
+            embedding (e_cell) — each k-means clustered, with a black frame\n\
+            box for easy overlay and per-cluster top-gene labels. Feature\n\
+            clusters are labelled by the genes nearest the cluster centroid;\n\
+            cell clusters by the genes they most upregulate (centroid · β_gᵀ).\n\
+            Layout coords + cluster ids are also written to parquet.",
+        after_long_help = "\
+Example:\n  \
+  faba gem-plot --from out/gem.faba.json\n  \
+  faba gem-plot -f out/gem.faba.json --num-clusters 20 --top-features 5 --no-cells"
+    )]
+    GemPlot(GemPlotArgs),
+
+    #[command(
+        name = "gem-annotate",
+        about = "Marker-set cell-type annotation by projection (from a gem manifest)",
+        long_about = "Light cell-type annotation: projects each marker-defined cell\n\
+            type as a virtual cell onto the frozen gem feature embedding (the\n\
+            same operator that placed the cells), then scores every cell by\n\
+            cosine in the shared space → per-cell soft posterior + argmax.\n\
+            An optional permutation null (random gene sets of matching size)\n\
+            calibrates each affinity into a p-value. Emits type-anchor\n\
+            embeddings that `faba gem-plot` can overlay.",
+        after_long_help = "\
+Example:\n  \
+  faba gem-annotate --from out/gem.faba.json -m markers.tsv\n  \
+  faba gem-annotate -f out/gem.faba.json -m markers.tsv --num-perm 500 --temperature 0.5"
+    )]
+    GemAnnotate(GemAnnotateArgs),
+
+    #[command(
         name = "all",
         aliases = ["pipeline", "full", "magic"],
         about = "Run all RNA-seq analyses: SNP → genes → ATOI → APA → DART",
@@ -349,6 +385,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Metagene(ref args) => run_metagene(args)?,
         Commands::Snp(ref args) => run_snp(args)?,
         Commands::Gem(ref args) => run_gem_embedding(args)?,
+        Commands::GemPlot(ref args) => run_gem_plot(args)?,
+        Commands::GemAnnotate(ref args) => run_gem_annotate(args)?,
         Commands::All(ref args) => run_pipeline(args)?,
     }
 

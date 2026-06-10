@@ -18,32 +18,52 @@ pub enum PwmSource {
 
 #[derive(Args, Debug)]
 pub struct ScanPwmArgs {
-    /// Site-level parquet file (from dartseq or apa output)
-    #[arg(short = 's', long = "sites", required = true)]
+    #[arg(
+        short = 's',
+        long = "sites",
+        required = true,
+        help = "Site-level parquet file (from dartseq or apa output)"
+    )]
     site_file: Box<str>,
 
-    /// Input BAM file(s), comma-separated (required for --source reads)
-    #[arg(value_delimiter = ',')]
+    #[arg(
+        value_delimiter = ',',
+        help = "Input BAM file(s), comma-separated (required for --source reads)"
+    )]
     bam_files: Vec<Box<str>>,
 
-    /// Reference genome FASTA (required for --source reference)
-    #[arg(short = 'f', long = "genome")]
+    #[arg(
+        short = 'f',
+        long = "genome",
+        help = "Reference genome FASTA (required for --source reference)"
+    )]
     genome_file: Option<Box<str>>,
 
-    /// Base frequency source: reads (from BAM) or reference (from FASTA)
-    #[arg(long, value_enum, default_value = "reference")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "reference",
+        help = "Base frequency source: reads (from BAM) or reference (from FASTA)"
+    )]
     source: PwmSource,
 
-    /// Half-window size: collect +/- this many bp around each site
-    #[arg(short = 'w', long, default_value_t = 10)]
+    #[arg(
+        short = 'w',
+        long,
+        default_value_t = 10,
+        help = "Half-window size: collect +/- this many bp around each site"
+    )]
     window: i64,
 
-    /// Number of threads
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = 16, help = "Number of threads")]
     threads: usize,
 
-    /// Output file path (TSV, or .gz for gzipped)
-    #[arg(short, long, required = true)]
+    #[arg(
+        short,
+        long,
+        required = true,
+        help = "Output file path (TSV, or .gz for gzipped)"
+    )]
     output: Box<str>,
 }
 

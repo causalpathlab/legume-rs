@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
 
-version = "0.2.10"
+version = "0.3.0"
 
 [lib]
 # The library surface exists so `gem`'s integration tests (tests/) can reach
