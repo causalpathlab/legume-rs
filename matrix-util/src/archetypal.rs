@@ -1,25 +1,33 @@
-//! Archetypal analysis (Cutler & Breiman, 1994) over the rows of a
-//! dense matrix, plus a k-sweep with elbow selection.
+//! Topic-side recovery from a frozen embedding: given `Z [N, H]` (N points
+//! as rows in an H-dim space) recover K topics `α [K, H]` and per-row
+//! simplex weights `θ [N, K]` with each `θ_n ∈ Δ^{K-1}`. Two routes are
+//! provided, both post-hoc factorizations with no encoder/decoder training:
 //!
-//! Given `Z [N, H]` (N points as rows in an H-dim space) we seek K
-//! archetypes `α [K, H]` and weights `θ [N, K]` with each `θ_n` on the
-//! simplex `Δ^{K-1}`, minimizing `‖Z − θ α‖²_F`. Archetypes are kept
-//! **inside the convex hull** of the data: each `α_k` is maintained as a
-//! running convex combination of data rows via Frank–Wolfe, so no
-//! `[K, N]` coefficient matrix is ever materialized.
+//! 1. **Archetypal analysis** (Cutler & Breiman, 1994) — [`archetypal_analysis`],
+//!    [`select_archetype_k`]. Minimizes `‖Z − θ α‖²_F`, keeping each `α_k`
+//!    **inside the convex hull** as a running convex combination of data
+//!    rows via Frank–Wolfe (no `[K, N]` coefficient matrix is materialized).
+//!    Both phases are embarrassingly parallel over points:
+//!    - **E-step** — each `θ_n` is an independent simplex-constrained
+//!      least-squares solved by Frank–Wolfe (parallel `map` over rows).
+//!    - **M-step** — the archetype gradient is `G = θᵀZ − (θᵀθ) α` (two Gram
+//!      terms); each archetype's Frank–Wolfe vertex is `argmax_n (G_k · z_n)`.
 //!
-//! Both phases are embarrassingly parallel over points:
-//! - **E-step** — each `θ_n` is an independent simplex-constrained
-//!   least-squares solved by Frank–Wolfe (parallel `map` over rows).
-//! - **M-step** — the archetype gradient is `G = θᵀZ − (θᵀθ) α`
-//!   (two Gram terms, a parallel reduction); each archetype's
-//!   Frank–Wolfe vertex is `argmax_n (G_k · z_n)` (a parallel reduction).
+//!    The fit is nonconvex (local minima), so it needs k-means init, a row
+//!    subsample to bound the iterated cost, and a per-K refit for the sweep.
 //!
-//! Used by `senna bge --resolve-etm` to recover the ETM topic-side
-//! embedding α (= archetypes) and per-cell proportions θ from a frozen
-//! bipartite-graph cell embedding, with no encoder/decoder training.
+//! 2. **Separable-NMF / Arora anchors** (Arora et al. 2012; robust SPA of
+//!    Gillis & Vavasis 2014) — [`anchor_topics`], [`select_anchor_topics`].
+//!    *Selects* the topic vertices directly as the extreme rows of a
+//!    feature embedding `ρ [D, H]` (the anchor features ≈ markers, one per
+//!    topic), then projects `Z` onto them for θ. Deterministic, single-pass,
+//!    no RNG / no subsample / no per-K refit. This is the firmer route and
+//!    the one used by `faba gem --resolve-topics` and `senna bge
+//!    --resolve-etm`. [`topic_dictionary`] turns `(ρ, α)` into the topic ×
+//!    feature dictionary `β` shared by both call sites.
 
 use crate::clustering::{Kmeans, KmeansArgs};
+use crate::traits::MatOps;
 use nalgebra::{DMatrix, DVector};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -111,8 +119,209 @@ pub fn select_archetype_k(z: &DMatrix<f32>, k_range: &[usize], args: &AaArgs) ->
 }
 
 /////////////////////////////////////////////////////////////////////
-// Core fit                                                          //
+// Separable-NMF topic recovery (Arora anchors via robust SPA)       //
+//                                                                   //
+// Where archetypal analysis fits hull vertices by a nonconvex       //
+// alternating loop (needing a subsample + a K-refit sweep), the     //
+// Arora separability route (Arora et al. 2012, arXiv:1204.1956)     //
+// *selects* the vertices directly: the anchor features are the      //
+// extreme rows of `ρ`, found by the robust Successive Projection    //
+// Algorithm (Gillis & Vavasis, 2014). Deterministic, single-pass,   //
+// no RNG and no subsample — the anchors are interpretable marker     //
+// features, one per topic.                                          //
 /////////////////////////////////////////////////////////////////////
+
+/// Result of anchor-based (separable-NMF) topic recovery.
+pub struct AnchorResult {
+    /// Anchor feature embeddings `α [K, H]` — the K selected rows of `ρ`.
+    pub alpha: DMatrix<f32>,
+    /// Per-row simplex weights `θ [N, K]` (rows of `z` projected onto α).
+    pub theta: DMatrix<f32>,
+    /// Row indices into `ρ` of the K anchor features (≈ topic markers).
+    pub anchors: Vec<usize>,
+    /// Reconstruction `‖Z − θ α‖²_F` over all N rows.
+    pub rss: f32,
+}
+
+/// Tuning for anchor-based topic recovery.
+#[derive(Clone, Copy, Debug)]
+pub struct AnchorOpts {
+    /// Frank–Wolfe steps for each per-row simplex projection onto the anchors.
+    pub fw_iters: usize,
+    /// Min cells an anchor must hard-claim (be the argmax topic of) to survive.
+    /// Anchors below this are dropped as singleton/outlier-gene topics and θ is
+    /// re-projected on the rest; `0` disables the guard. Never drops below 2.
+    pub min_anchor_cells: usize,
+}
+
+/// Robust Successive Projection Algorithm (Gillis & Vavasis, 2014) for
+/// separable NMF / Arora anchor selection. Greedily picks up to `k` anchor
+/// rows of `rho`: the row of largest residual norm, then deflates every row
+/// orthogonal to it, repeated `k` times. Deterministic — no RNG, no
+/// subsampling, no local minima.
+///
+/// Returns `(anchor_indices, residuals)` where `residuals[t]` is the largest
+/// row norm just before the `t`-th anchor is taken; monotone non-increasing,
+/// so its elbow marks the K past which extra anchors explain little.
+fn spa_anchors(rho: &DMatrix<f32>, k: usize) -> (Vec<usize>, Vec<f32>) {
+    let d = rho.nrows();
+    let kk = k.min(d);
+    let mut r = rho.clone(); // deflated residuals, updated in place
+    let mut anchors = Vec::with_capacity(kk);
+    let mut residuals = Vec::with_capacity(kk);
+    for _ in 0..kk {
+        // Row of largest residual norm (the current extreme point).
+        let (best, best_sq) = (0..d).map(|i| (i, r.row(i).norm_squared())).fold(
+            (0usize, -1.0f32),
+            |(bi, bn), (i, n)| {
+                if n > bn {
+                    (i, n)
+                } else {
+                    (bi, bn)
+                }
+            },
+        );
+        if best_sq <= f32::EPSILON {
+            break; // residual rank exhausted (< k distinct directions)
+        }
+        anchors.push(best);
+        residuals.push(best_sq.sqrt());
+        // Deflate: project every row orthogonal to the unit anchor direction.
+        // R ← R − (R u) uᵀ with u = r_best / ‖r_best‖.
+        let u = r.row(best).transpose() / best_sq.sqrt(); // [H]
+        let ru = &r * &u; // [D] each row's component along u
+        r.ger(-1.0, &ru, &u, 1.0); // R ← R − (R u) uᵀ, rank-1 in place (no [D,H] temp)
+    }
+    (anchors, residuals)
+}
+
+/// Anchor-based topic recovery at a fixed K: pick K anchor features in
+/// `rho [D, H]` by SPA, then assign per-row simplex weights `θ` for `z [N, H]`
+/// against the anchor rows. The [`AnchorOpts::min_anchor_cells`] guard may
+/// return fewer than K anchors (see `result.anchors.len()`).
+pub fn anchor_topics(
+    z: &DMatrix<f32>,
+    rho: &DMatrix<f32>,
+    k: usize,
+    opts: AnchorOpts,
+) -> AnchorResult {
+    let (anchors, _) = spa_anchors(rho, k);
+    finalize_anchors(z, rho, anchors, opts)
+}
+
+/// K-sweep variant: run SPA once to `max(k_range)`, pick the residual-curve
+/// elbow over `k_range`, and finalize at that K. SPA anchors are nested, so
+/// this is a *single* pass — no per-K refit (contrast [`select_archetype_k`]).
+pub fn select_anchor_topics(
+    z: &DMatrix<f32>,
+    rho: &DMatrix<f32>,
+    k_range: &[usize],
+    opts: AnchorOpts,
+) -> (usize, AnchorResult) {
+    assert!(!k_range.is_empty(), "select_anchor_topics: empty k_range");
+    let kmax = *k_range.iter().max().unwrap();
+    let (anchors_full, residuals) = spa_anchors(rho, kmax);
+
+    // Reconstruction proxy after K anchors: the largest still-unexplained
+    // row norm, i.e. what the *next* anchor would remove. `residuals[k]` is
+    // exactly that (0 once anchors are exhausted). Elbow over `k_range`.
+    let rss_curve: Vec<f32> = k_range
+        .iter()
+        .map(|&k| residuals.get(k).copied().unwrap_or(0.0))
+        .collect();
+    let bi = elbow_index(k_range, &rss_curve);
+    let k = k_range[bi].min(anchors_full.len()).max(1);
+    log::info!("anchor K-sweep selected k={k}");
+
+    let anchors = anchors_full[..k].to_vec();
+    let res = finalize_anchors(z, rho, anchors, opts);
+    (res.anchors.len(), res)
+}
+
+/// Build the [`AnchorResult`] from chosen anchor indices: gather α, project
+/// every row of `z` onto the anchor simplex, drop under-supported anchors
+/// (the [`AnchorOpts::min_anchor_cells`] guard), and score the reconstruction.
+fn finalize_anchors(
+    z: &DMatrix<f32>,
+    rho: &DMatrix<f32>,
+    mut anchors: Vec<usize>,
+    opts: AnchorOpts,
+) -> AnchorResult {
+    let mut alpha = rho.select_rows(anchors.iter());
+    let mut theta = assign_theta(z, &alpha, opts.fw_iters);
+
+    // Guard against singleton/outlier-gene topics: SPA takes the most extreme
+    // ρ rows, so a lone high-norm artifact gene can be picked as an anchor even
+    // though almost no cell loads on it. Drop the weakest anchor while it falls
+    // below the floor (and >2 anchors remain), re-projecting θ each time so the
+    // orphaned cells redistribute. Never silent — every drop is logged.
+    while opts.min_anchor_cells > 0 && anchors.len() > 2 {
+        let support = anchor_support(&theta);
+        let (weak, &n) = support
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, &n)| n)
+            .expect("non-empty anchors");
+        if n >= opts.min_anchor_cells {
+            break;
+        }
+        log::info!(
+            "anchor guard: dropping topic {weak} (anchor row {}): {n} cells < min {}",
+            anchors[weak],
+            opts.min_anchor_cells
+        );
+        anchors.remove(weak);
+        alpha = rho.select_rows(anchors.iter());
+        theta = assign_theta(z, &alpha, opts.fw_iters);
+    }
+
+    let rss = reconstruction_rss(z, &theta, &alpha);
+    AnchorResult {
+        alpha,
+        theta,
+        anchors,
+        rss,
+    }
+}
+
+/// Hard cell support per anchor: the number of rows of `theta` whose argmax
+/// (top topic) is that anchor. `[K]`, summing to `theta.nrows()`.
+fn anchor_support(theta: &DMatrix<f32>) -> Vec<usize> {
+    let k = theta.ncols();
+    let mut counts = vec![0usize; k];
+    for i in 0..theta.nrows() {
+        let row = theta.row(i);
+        let mut best = 0usize;
+        let mut best_v = f32::NEG_INFINITY;
+        for j in 0..k {
+            if row[j] > best_v {
+                best_v = row[j];
+                best = j;
+            }
+        }
+        counts[best] += 1;
+    }
+    counts
+}
+
+/// Topic–feature dictionary readout `β [D, K]` from feature embeddings
+/// `rho [D, H]` and topic embeddings `alpha [K, H]`:
+/// `log_softmax_d(ρ · (α − ᾱ)ᵀ)`, each column a simplex over features.
+///
+/// The archetypes are mean-centered across topics first: the raw loading
+/// `ρ·αᵀ` is dominated by a shared "abundance" direction (the mean ᾱ) that
+/// ranks the same features top in *every* topic, burying real markers;
+/// reading out each topic's deviation from ᾱ surfaces topic-specific
+/// features instead.
+pub fn topic_dictionary(rho: &DMatrix<f32>, alpha: &DMatrix<f32>) -> DMatrix<f32> {
+    // `centre_columns` on α [K, H] subtracts, per embedding dimension, the
+    // mean across the K topic rows — i.e. the mean archetype ᾱ.
+    (rho * alpha.centre_columns().transpose()).log_softmax_columns()
+}
+
+//////////////
+// Core fit //
+//////////////
 
 /// Alternating E/M fit on `fit [M, H]`. Returns `(alpha [K, H], fit_rss)`,
 /// where `fit_rss` is the reconstruction error over the fit rows only.
@@ -454,6 +663,103 @@ mod tests {
         assert!(
             (3..=5).contains(&best),
             "elbow picked k={best}, expected ~4"
+        );
+    }
+
+    #[test]
+    fn spa_recovers_planted_anchors() {
+        let (k, h, n) = (4, 8, 500);
+        let (z, a_true) = planted(n, k, h, 5);
+
+        // The first K (pure) rows are the planted vertices; SPA must select
+        // exactly them, in some order.
+        let (anchors, resid) = spa_anchors(&z, k);
+        let got: std::collections::BTreeSet<usize> = anchors.iter().copied().collect();
+        let want: std::collections::BTreeSet<usize> = (0..k).collect();
+        assert_eq!(
+            got, want,
+            "SPA anchors {anchors:?} != planted vertices 0..{k}"
+        );
+        // Residual curve is monotone non-increasing.
+        assert!(
+            resid.windows(2).all(|w| w[0] >= w[1] - 1e-4),
+            "residuals not monotone: {resid:?}"
+        );
+
+        // α equals the planted archetypes (anchors are exact data rows), and
+        // θ rows lie on the simplex.
+        let res = anchor_topics(
+            &z,
+            &z,
+            k,
+            AnchorOpts {
+                fw_iters: 50,
+                min_anchor_cells: 0,
+            },
+        );
+        for kt in 0..k {
+            let best = (0..k)
+                .map(|kr| (a_true.row(kt) - res.alpha.row(kr)).norm())
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                best < 0.1,
+                "planted archetype {kt} unmatched (min dist {best})"
+            );
+        }
+        for i in 0..n {
+            let s: f32 = res.theta.row(i).sum();
+            assert!((s - 1.0).abs() < 1e-3, "θ row {i} sums to {s}");
+            assert!(
+                res.theta.row(i).iter().all(|&x| x >= -1e-5),
+                "θ row {i} negative"
+            );
+        }
+    }
+
+    #[test]
+    fn anchor_sweep_picks_planted_k() {
+        let (k, h, n) = (4, 8, 500);
+        let (z, _) = planted(n, k, h, 6);
+        let krange: Vec<usize> = (2..=8).collect();
+        let (best, _) = select_anchor_topics(
+            &z,
+            &z,
+            &krange,
+            AnchorOpts {
+                fw_iters: 40,
+                min_anchor_cells: 0,
+            },
+        );
+        assert!(
+            (3..=5).contains(&best),
+            "anchor elbow picked k={best}, expected ~4"
+        );
+    }
+
+    #[test]
+    fn guard_drops_singleton_outlier_anchor() {
+        // 3 well-populated clusters + one lone outlier cell at an extreme
+        // position. SPA picks the outlier first (largest norm), but only it
+        // loads on that anchor → the min_anchor_cells guard must drop it.
+        let (k, h, n) = (3, 8, 300);
+        let (z3, _) = planted(n, k, h, 9);
+        let mut z = z3.insert_row(n, 0.0); // append a zero outlier row
+        z[(n, 0)] = 50.0; // push it to an extreme, far from the 3 clusters
+
+        let res = anchor_topics(
+            &z,
+            &z,
+            k + 1, // ask for the 3 real anchors + the outlier
+            AnchorOpts {
+                fw_iters: 50,
+                min_anchor_cells: 10,
+            },
+        );
+        assert_eq!(res.anchors.len(), k, "guard should drop the outlier anchor");
+        assert!(
+            !res.anchors.contains(&n),
+            "outlier row {n} survived as an anchor: {:?}",
+            res.anchors
         );
     }
 }

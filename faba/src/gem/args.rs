@@ -247,10 +247,10 @@ pub struct GemArgs {
     )]
     pub preload_data: bool,
 
-    ////////////////////////////////////////
-    // Training
-    ////////////////////////////////////////
-    #[arg(short = 'i', long, default_value_t = 30, help = "Training epochs")]
+    //////////////
+    // Training //
+    //////////////
+    #[arg(short = 'i', long, default_value_t = 1000, help = "Training epochs")]
     pub epochs: usize,
 
     /// Phase-2 gate: after phase 1 fixes the feature side (β/z/δ/γ + pb
@@ -315,9 +315,9 @@ pub struct GemArgs {
     )]
     pub delta_l2: f32,
 
-    ////////////////////////////////////////
-    // Sampling strata
-    ////////////////////////////////////////
+    ///////////////////////
+    // Sampling features //
+    ///////////////////////
     #[arg(
         long,
         default_value_t = 0.25,
@@ -365,9 +365,9 @@ pub struct GemArgs {
     )]
     pub housekeeping_penalty: f32,
 
-    ////////////////////////////////////////
-    // Negatives
-    ////////////////////////////////////////
+    ///////////////
+    // Negatives //
+    ///////////////
     #[arg(
         long,
         default_value_t = 10,
@@ -401,16 +401,16 @@ pub struct GemArgs {
     )]
     pub n_swap_modality: usize,
 
-    ////////////////////////////////////////
-    // Topic resolution (archetypal, post-training)
-    //
-    // Mirrors `senna bge --resolve-etm`: archetypal analysis on the
-    // trained cell embedding e_cell → archetypes α (topic embeddings),
-    // per-cell simplex θ (topic proportions), and a gene×topic dictionary
-    // β = log_softmax(β_g·αᵀ). Writes the senna topic-model layout
-    // (`{out}.{latent,dictionary,topic_embedding}.parquet`) consumed by
-    // `senna {plot,clustering,annotate} --from`. No retraining.
-    ////////////////////////////////////////
+    /////////////////////////////////////////////////////////////////////////
+    // Topic resolution (archetypal, post-training)			   //
+    // 									   //
+    // Mirrors `senna bge --resolve-etm`: archetypal analysis on the	   //
+    // trained cell embedding e_cell → archetypes α (topic embeddings),	   //
+    // per-cell simplex θ (topic proportions), and a gene×topic dictionary //
+    // β = log_softmax(β_g·αᵀ). Writes the senna topic-model layout	   //
+    // (`{out}.{latent,dictionary,topic_embedding}.parquet`) consumed by   //
+    // `senna {plot,clustering,annotate} --from`. No retraining.	   //
+    /////////////////////////////////////////////////////////////////////////
     #[arg(
         long,
         default_value_t = false,
@@ -422,37 +422,13 @@ pub struct GemArgs {
         long = "num-topics",
         help = "Number of topics K for `--resolve-topics`",
         long_help = "Number of topics K for `--resolve-topics`. Omit to auto-select via\n\
-                     an archetypal RSS-elbow sweep over `2..=--max-k`."
+                     a SPA-anchor residual-elbow sweep over `2..=H+1` (H = embedding dim)."
     )]
     pub num_topics: Option<usize>,
 
-    #[arg(
-        long = "max-k",
-        default_value_t = 30,
-        help = "Upper K for the `--resolve-topics` auto-sweep (when `--num-topics` is unset)"
-    )]
-    pub max_k: usize,
-
-    #[arg(
-        long = "aa-iters",
-        default_value_t = 50,
-        help = "Archetypal-analysis alternating iterations for `--resolve-topics`"
-    )]
-    pub aa_iters: usize,
-
-    #[arg(
-        long = "aa-subsample",
-        help = "Cap on cells used to fit archetypes for `--resolve-topics`",
-        long_help = "Cap on cells used to fit archetypes for `--resolve-topics` (θ is\n\
-                     still assigned for every cell). Unset → auto-caps at 50k cells when\n\
-                     the dataset is larger (the K-sweep fits ~max-k times, so fitting on\n\
-                     all cells dominates runtime); pass an explicit value to override."
-    )]
-    pub aa_subsample: Option<usize>,
-
-    ////////////////////////////////////////
-    // Misc
-    ////////////////////////////////////////
+    //////////
+    // Misc //
+    //////////
     #[arg(long, default_value_t = 42)]
     pub seed: u64,
 

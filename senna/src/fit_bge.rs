@@ -127,39 +127,18 @@ pub struct BgeArgs {
         default_value_t = false,
         help = "Skip ETM resolution; emit raw bge embeddings (Z and ρ) only.",
         long_help = "Skip the default ETM resolution and emit only the raw bge\n\
-                     embeddings (latent = cell embedding Z, dictionary = ρ). By\n\
-                     default bge resolves ETM topics from the cell embedding via\n\
-                     archetypal analysis and writes a topic-model layout\n\
-                     (latent = log θ, dictionary = β) plus\n\
-                     {cell,feature}_embedding.parquet."
+                     embeddings (latent = cell embedding Z, dictionary = ρ). \n\
+		     By default bge resolves ETM topics from the cell embedding via\n\
+                     anchor analysis and writes a topic-model layout\n\
+                     (latent = log θ, dictionary = β)."
     )]
     skip_etm: bool,
 
     #[arg(
         long = "num-topics",
-        help = "ETM topics K (omit to auto-select via archetypal RSS-elbow sweep)."
+        help = "ETM topics K (omit to auto-select via SPA-anchor residual-elbow sweep)."
     )]
     num_topics: Option<usize>,
-
-    #[arg(
-        long = "max-k",
-        default_value_t = 30,
-        help = "Upper K for the --resolve-etm auto-sweep (when --num-topics is unset)."
-    )]
-    max_k: usize,
-
-    #[arg(
-        long = "aa-iters",
-        default_value_t = 50,
-        help = "Archetypal-analysis alternating iterations for --resolve-etm."
-    )]
-    aa_iters: usize,
-
-    #[arg(
-        long = "aa-subsample",
-        help = "Cap on cells used to fit archetypes (θ assigned for every cell)."
-    )]
-    aa_subsample: Option<usize>,
 
     #[arg(
         long = "bridge-weight",
@@ -180,7 +159,7 @@ pub struct BgeArgs {
     )]
     no_refine: bool,
 
-    #[arg(short = 'i', long, default_value_t = 200, help = "Training epochs")]
+    #[arg(short = 'i', long, default_value_t = 1000, help = "Training epochs")]
     epochs: usize,
 
     /// Batches per epoch. **Omit for auto** — one weighted pass per
@@ -314,8 +293,9 @@ pub struct BgeArgs {
         long,
         default_value_t = 1.0,
         help = "Cell-cell loss weight λ (1.0 = equal to cell-feature; 0 = disable).",
-        long_help = "Cell-cell loss weight λ; final loss = L_bipartite + λ ·\n\
-                     L_cell_cell. Default 1.0 weights cell-cell equal to\n\
+        long_help = "Cell-cell loss weight λ; \n\
+		     final loss = L_bipartite + λ · L_cell_cell.\n\
+                     Default 1.0 weights cell-cell equal to\n\
                      cell-feature. Set to 0 to disable. Ignored if\n\
                      --cell-cell-edges is not provided."
     )]
@@ -802,7 +782,9 @@ fn resolve_etm_topics(
     args: &BgeArgs,
     cell_keep_idx: Option<&[usize]>,
 ) -> anyhow::Result<()> {
-    use matrix_util::archetypal::{archetypal_analysis, select_archetype_k, AaArgs};
+    use matrix_util::archetypal::{
+        anchor_topics, select_anchor_topics, topic_dictionary, AnchorOpts,
+    };
 
     let cpu = candle_core::Device::Cpu;
     let z_full = Mat::from_tensor(&model.e_cell.to_device(&cpu)?)?; // [N, H]
@@ -826,50 +808,51 @@ fn resolve_etm_topics(
         rho.ncols()
     );
 
-    let base = AaArgs {
-        k: 2,
-        max_iter: args.aa_iters,
-        fw_iters: 30,
-        tol: 1e-4,
-        seed: 1,
-        subsample: args.aa_subsample,
+    // Separable-NMF topic recovery (Arora anchors via SPA) on the feature
+    // embedding ρ: anchor features are the convex-hull vertices of the
+    // feature cloud — near-pure markers, one per topic. Deterministic and
+    // single-pass (no subsample, no nonconvex fit, no per-K refit); θ is then
+    // assigned to every cell by projecting it onto the anchors (FW_ITERS
+    // Frank–Wolfe steps — the simplex projection converges quickly, not a user
+    // knob). The MIN_ANCHOR_CELLS guard drops singleton/outlier-feature topics:
+    // a topic claimed by < 10 cells is almost surely an artifact at this scale.
+    const FW_ITERS: usize = 30;
+    const MIN_ANCHOR_CELLS: usize = 10;
+    let opts = AnchorOpts {
+        fw_iters: FW_ITERS,
+        min_anchor_cells: MIN_ANCHOR_CELLS,
     };
-
-    let (k, res) = match args.num_topics {
+    let res = match args.num_topics {
         Some(k) => {
             anyhow::ensure!(k >= 2, "resolve-etm: --num-topics must be ≥ 2");
-            info!("resolve-etm: archetypal analysis with fixed K={k}");
-            (k, archetypal_analysis(&z, &AaArgs { k, ..base }))
+            info!("resolve-etm: separable-NMF (SPA anchors) with fixed K={k}");
+            anchor_topics(&z, &rho, k, opts)
         }
         None => {
-            let krange: Vec<usize> = (2..=args.max_k.max(2)).collect();
-            info!(
-                "resolve-etm: auto-selecting K via archetypal RSS-elbow over 2..={}",
-                args.max_k.max(2)
-            );
-            select_archetype_k(&z, &krange, &base)
+            // SPA anchors are nested → the sweep is one pass; residual elbow
+            // over 2..=H+1 selects K.
+            let upper = (h + 1).max(2);
+            let krange: Vec<usize> = (2..=upper).collect();
+            info!("resolve-etm: auto-selecting K via SPA residual-elbow over 2..={upper}");
+            select_anchor_topics(&z, &rho, &krange, opts).1
         }
     };
-    info!("resolve-etm: K={k}, reconstruction RSS={:.4}", res.rss);
+    // K reflects any anchors the guard dropped, not the requested count.
+    let k = res.anchors.len();
+    info!(
+        "resolve-etm: K={k}, anchor features=[{}], reconstruction RSS={:.4}",
+        res.anchors
+            .iter()
+            .map(|&d| feature_names[d].as_ref())
+            .collect::<Vec<&str>>()
+            .join(", "),
+        res.rss
+    );
 
-    // β = log_softmax_d(ρ · (α − ᾱ)ᵀ): [D, K], each topic column a simplex over genes.
-    // Mean-center the archetypes across topics first: the raw loading ρ·αᵀ is
-    // dominated by a shared "abundance" direction (the mean archetype ᾱ) that
-    // ranks the same genes top in *every* topic, burying real markers. Reading
-    // out each topic's deviation from the average archetype surfaces
-    // topic-specific genes instead.
-    let alpha_c = {
-        let mut a = res.alpha.clone();
-        let (k, h) = (a.nrows(), a.ncols());
-        for j in 0..h {
-            let mean_j: f32 = (0..k).map(|i| a[(i, j)]).sum::<f32>() / k.max(1) as f32;
-            for i in 0..k {
-                a[(i, j)] -= mean_j;
-            }
-        }
-        a
-    };
-    let beta_dk = (&rho * alpha_c.transpose()).log_softmax_columns();
+    // β = log_softmax_d(ρ · (α − ᾱ)ᵀ): [D, K], each topic column a feature
+    // simplex; markers surface as each topic's deviation from the mean anchor.
+    // α here are the anchor-feature embeddings.
+    let beta_dk = topic_dictionary(&rho, &res.alpha);
     // log θ on the simplex.
     let log_theta = res.theta.map(|x| (x + 1e-8).ln());
 

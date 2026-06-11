@@ -19,9 +19,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use log::info;
-use matrix_util::archetypal::{archetypal_analysis, select_archetype_k, AaArgs};
+use matrix_util::archetypal::{anchor_topics, select_anchor_topics, topic_dictionary, AnchorOpts};
 use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::{ConvertMatOps, IoOps, MatOps};
+use matrix_util::traits::{ConvertMatOps, IoOps};
 
 use super::args::GemArgs;
 use super::common::candle_core;
@@ -72,68 +72,60 @@ pub fn resolve_topics(
         rho.ncols()
     );
 
-    // Cap the cells used to *fit* archetypes. The K-sweep fits ~max_k times;
-    // on all ~648k cells that dominates wall-clock. Archetypes are stable
-    // under subsampling and θ is still assigned to every cell afterward
-    // (`assign_theta` on the full Z), so a 50k cap on large datasets is a
-    // large speedup at negligible quality cost. An explicit `--aa-subsample`
-    // is honored as-is; the cap auto-applies only when the flag is unset.
-    const AA_FIT_SUBSAMPLE: usize = 50_000;
-    let aa_subsample = args
-        .aa_subsample
-        .or_else(|| (z.nrows() > AA_FIT_SUBSAMPLE).then_some(AA_FIT_SUBSAMPLE));
-    if args.aa_subsample.is_none() {
-        if let Some(n) = aa_subsample {
-            info!(
-                "resolve-topics: fitting archetypes on a {n}-cell subsample \
-                 (θ still assigned to all {} cells; override with --aa-subsample)",
-                z.nrows()
-            );
-        }
-    }
-    let base = AaArgs {
-        k: 2,
-        max_iter: args.aa_iters,
-        fw_iters: 30,
-        tol: 1e-4,
-        seed: args.seed,
-        subsample: aa_subsample,
+    // Separable-NMF topic recovery (Arora anchors via SPA) on the gene
+    // embedding ρ: the K anchor genes are the convex-hull vertices of the
+    // gene cloud — each a near-pure marker for one topic. Deterministic and
+    // single-pass (no subsample, no nonconvex archetype fit, no per-K
+    // refit), so even the auto-K sweep is one SPA pass; θ is then assigned to
+    // every QC-passed cell by projecting it onto the anchors (FW_ITERS
+    // Frank–Wolfe steps — the simplex projection converges quickly, not a user
+    // knob). The MIN_ANCHOR_CELLS guard drops singleton/outlier-gene topics: a
+    // topic claimed by < 10 cells is almost surely an artifact at gem's scale.
+    const FW_ITERS: usize = 30;
+    const MIN_ANCHOR_CELLS: usize = 10;
+    let opts = AnchorOpts {
+        fw_iters: FW_ITERS,
+        min_anchor_cells: MIN_ANCHOR_CELLS,
     };
-
     let interrupted = stop.load(Ordering::SeqCst);
-    let (k, res) = match args.num_topics {
+    let res = match args.num_topics {
         Some(k) => {
             anyhow::ensure!(k >= 2, "resolve-topics: --num-topics must be ≥ 2");
-            info!("resolve-topics: archetypal analysis with fixed K={k}");
-            (k, archetypal_analysis(&z, &AaArgs { k, ..base }))
+            info!("resolve-topics: separable-NMF (SPA anchors) with fixed K={k}");
+            anchor_topics(&z, &rho, k, opts)
         }
         None if interrupted => {
-            // Interrupted: skip the elbow sweep, finalise fast at a sane K.
+            // Interrupted: skip the K-sweep, finalise fast at a sane K.
             let k = args.n_programs.max(2);
-            info!("resolve-topics: interrupted — skipping K-sweep, using fixed K={k}");
-            (k, archetypal_analysis(&z, &AaArgs { k, ..base }))
+            info!("resolve-topics: interrupted — fixing K={k}");
+            anchor_topics(&z, &rho, k, opts)
         }
         None => {
-            let krange: Vec<usize> = (2..=args.max_k.max(2)).collect();
-            info!(
-                "resolve-topics: auto-selecting K via archetypal RSS-elbow over 2..={}",
-                args.max_k.max(2)
-            );
-            select_archetype_k(&z, &krange, &base)
+            // SPA anchors are nested, so the sweep is a single pass; the
+            // residual elbow over 2..=H+1 (a (K-1)-simplex can't span past
+            // H+1 dims) selects K.
+            let upper = (h + 1).max(2);
+            let krange: Vec<usize> = (2..=upper).collect();
+            info!("resolve-topics: auto-selecting K via SPA residual-elbow over 2..={upper}");
+            select_anchor_topics(&z, &rho, &krange, opts).1
         }
     };
-    info!("resolve-topics: K={k}, reconstruction RSS={:.4}", res.rss);
+    // K reflects any anchors the guard dropped, not the requested count.
+    let k = res.anchors.len();
+    info!(
+        "resolve-topics: K={k}, anchor genes=[{}], reconstruction RSS={:.4}",
+        res.anchors
+            .iter()
+            .map(|&g| table.gene_names[g].as_ref())
+            .collect::<Vec<&str>>()
+            .join(", "),
+        res.rss
+    );
 
-    // β = log_softmax_g(β_g · (α − ᾱ)ᵀ): [G, K], each topic column a gene simplex.
-    // Mean-center archetypes across topics first: the raw loading β_g·αᵀ is
-    // dominated by a shared "abundance" direction (the mean archetype ᾱ) that
-    // ranks the same genes top in every topic; reading out deviation from the
-    // average archetype surfaces topic-specific markers (matches senna bge).
-    let abar = res.alpha.row_mean(); // ᾱ: mean archetype across topics, [1, H]
-    let alpha_c = DMatrix::from_fn(res.alpha.nrows(), res.alpha.ncols(), |i, j| {
-        res.alpha[(i, j)] - abar[j]
-    });
-    let beta_gk = (&rho * alpha_c.transpose()).log_softmax_columns();
+    // β = log_softmax_g(β_g · (α − ᾱ)ᵀ): [G, K], each topic column a gene
+    // simplex; markers surface as each topic's deviation from the mean
+    // anchor (matches senna bge). α here are the anchor-gene embeddings.
+    let beta_gk = topic_dictionary(&rho, &res.alpha);
     // log θ on the simplex (matches senna's `latent = log θ`).
     let log_theta = res.theta.map(|x| (x + 1e-8).ln());
 

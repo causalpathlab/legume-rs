@@ -288,18 +288,8 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
         );
         if let Some(k) = args.num_topics {
             anyhow::ensure!(k >= 2, "--num-topics must be ≥ 2 (got {})", k);
-        } else {
-            anyhow::ensure!(
-                args.max_k >= 2,
-                "--max-k must be ≥ 2 for the topic auto-sweep (got {})",
-                args.max_k
-            );
         }
-        anyhow::ensure!(
-            args.aa_iters > 0,
-            "--aa-iters must be > 0 (got {})",
-            args.aa_iters
-        );
+        // Else: K is auto-swept over 2..=H+1, which is always ≥ 2.
     }
     anyhow::ensure!(
         args.f_agg.is_finite() && (0.0..=1.0).contains(&args.f_agg),
