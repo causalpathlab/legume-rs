@@ -22,11 +22,11 @@ use std::io::BufRead;
 pub struct BgeArgs {
     #[arg(
         value_delimiter = ',',
-        help = "Sparse count matrices (zarr/h5), comma-separated (single-modality). \
-                For multiome input use --multiome instead.",
-        long_help = "Single-modality input: one or more files sharing a feature axis, \
-                     cells unified by barcode. For multiome (distinct feature spaces \
-                     per modality, glued by barcode) pass the files to --multiome \
+        help = "Sparse count matrices (zarr/h5), comma-separated. Use --multiome\n\
+                for multi-modality input.",
+        long_help = "Single-modality input: one or more files sharing a feature axis,\n\
+                     cells unified by barcode. For multiome (distinct feature spaces\n\
+                     per modality, glued by barcode) pass the files to --multiome\n\
                      instead. Exactly one of [positional files | --multiome] is required."
     )]
     data_files: Vec<Box<str>>,
@@ -42,19 +42,16 @@ pub struct BgeArgs {
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Per-cell condition label file(s) for the feature gate. \
-                Same on-disk format and ordering as --batch-files (one \
-                label per cell; under --multiome, one file of one label per \
-                unified cell). When omitted, condition defaults to the batch \
-                labels.",
-        long_help = "Drives a per-condition multiplicative gate on the gene \
-                     embedding: e_feat(f | condition s) = E_feat[f] ⊙ \
-                     exp(Σ_k z[f,k]·δ̄[k,s,:]), where δ̄ is δ mean-centered \
-                     across conditions (Σ_s δ̄ = 0). No condition is a \
-                     reference — every condition deviates symmetrically and \
-                     the baseline E_feat is the average-condition embedding; \
-                     δ captures how each condition deviates each gene. \
-                     Mirrors faba gem's modality gate with conditions in \
+        help = "Per-cell condition label file(s) for the feature gate\n\
+                (same format as --batch-files; omit → condition = batch).",
+        long_help = "Drives a per-condition multiplicative gate on the gene\n\
+                     embedding: e_feat(f | condition s) = E_feat[f] ⊙\n\
+                     exp(Σ_k z[f,k]·δ̄[k,s,:]), where δ̄ is δ mean-centered\n\
+                     across conditions (Σ_s δ̄ = 0). No condition is a\n\
+                     reference — every condition deviates symmetrically and\n\
+                     the baseline E_feat is the average-condition embedding;\n\
+                     δ captures how each condition deviates each gene.\n\
+                     Mirrors faba gem's modality gate with conditions in\n\
                      place of modalities. When omitted, condition = batch."
     )]
     condition_files: Option<Vec<Box<str>>>,
@@ -62,25 +59,24 @@ pub struct BgeArgs {
     #[arg(
         long = "num-programs",
         default_value_t = 8,
-        help = "K: number of latent programs in the per-condition feature \
-                gate (low-rank deviation). Only adds capacity when conditions \
-                diverge; identity at init."
+        help = "K: latent programs in the per-condition feature gate.",
+        long_help = "K: number of latent programs in the per-condition feature\n\
+                     gate (low-rank deviation). Only adds capacity when conditions\n\
+                     diverge; identity at init."
     )]
     num_programs: usize,
 
     #[arg(
         long = "z-l2",
         default_value_t = 1e-4,
-        help = "L2 penalty on the gate program loadings z (mean-normalized). \
-                0 disables."
+        help = "L2 penalty on gate program loadings z (mean-normalized). 0 disables."
     )]
     z_l2: f32,
 
     #[arg(
         long = "delta-l2",
         default_value_t = 1e-4,
-        help = "L2 penalty on the gate deviation directions δ \
-                (mean-normalized). 0 disables."
+        help = "L2 penalty on gate deviation directions δ (mean-normalized). 0 disables."
     )]
     delta_l2: f32,
 
@@ -99,44 +95,49 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "Cap on the number of genes trained (0 = keep all). When > 0 and \
-                less than the feature axis, keeps the top-N genes by NB-Fisher \
-                weight and drops the rest before the multilevel collapse. Shrinks \
-                E_feat, triplets, and per-batch samplers proportionally — the main \
-                large-data speed knob."
+        help = "Cap on genes trained (0 = keep all); main large-data speed knob.",
+        long_help = "Cap on the number of genes trained (0 = keep all). When > 0\n\
+                     and less than the feature axis, keeps the top-N genes by\n\
+                     NB-Fisher weight and drops the rest before the multilevel\n\
+                     collapse. Shrinks E_feat, triplets, and per-batch samplers\n\
+                     proportionally — the main large-data speed knob."
     )]
     max_features: usize,
 
     #[arg(
         long = "phase1-cells-per-pb",
         default_value_t = 0,
-        help = "Phase-1 cell-axis mode (k). Controls what shapes the feature \
-                dictionary in phase 1; phase 2 ALWAYS analytically projects every \
-                cell, so the per-cell embedding output is unaffected. k=0 (default) → \
-                suppress the cell axis entirely (pure-pb: E_feat from pb aggregates \
-                only — fastest). 1≤k<n_cells → keep ≤k cells per pb-sample at each \
-                collapse level (union), cutting the phase-1 step budget while \
-                preserving rare-cell coverage. k≥n_cells → all cells (legacy; \
-                slowest). NOTE: an optional --cell-cell term rides the cell axis and \
-                is dropped when k=0."
+        help = "Phase-1 cell-axis mode (k); 0 = pure-pb (fastest), phase 2 always\n\
+                projects every cell.",
+        long_help = "Phase-1 cell-axis mode (k). Controls what shapes the feature\n\
+                     dictionary in phase 1; phase 2 ALWAYS analytically projects\n\
+                     every cell, so the per-cell embedding output is unaffected.\n\
+                     k=0 (default) → suppress the cell axis entirely (pure-pb:\n\
+                     E_feat from pb aggregates only — fastest). 1≤k<n_cells →\n\
+                     keep ≤k cells per pb-sample at each collapse level (union),\n\
+                     cutting the phase-1 step budget while preserving rare-cell\n\
+                     coverage. k≥n_cells → all cells (legacy; slowest). NOTE: an\n\
+                     optional --cell-cell term rides the cell axis and is dropped\n\
+                     when k=0."
     )]
     phase1_cells_per_pb: usize,
 
     #[arg(
         long = "skip-etm",
         default_value_t = false,
-        help = "Skip the default ETM resolution and emit only the raw bge embeddings \
-                (latent = cell embedding Z, dictionary = ρ). By default bge resolves \
-                ETM topics from the cell embedding via archetypal analysis and writes \
-                a topic-model layout (latent = log θ, dictionary = β) plus \
-                {cell,feature}_embedding.parquet."
+        help = "Skip ETM resolution; emit raw bge embeddings (Z and ρ) only.",
+        long_help = "Skip the default ETM resolution and emit only the raw bge\n\
+                     embeddings (latent = cell embedding Z, dictionary = ρ). By\n\
+                     default bge resolves ETM topics from the cell embedding via\n\
+                     archetypal analysis and writes a topic-model layout\n\
+                     (latent = log θ, dictionary = β) plus\n\
+                     {cell,feature}_embedding.parquet."
     )]
     skip_etm: bool,
 
     #[arg(
         long = "num-topics",
-        help = "Number of ETM topics K for --resolve-etm. Omit to auto-select \
-                via an archetypal RSS-elbow sweep over 2..=--max-k."
+        help = "ETM topics K (omit to auto-select via archetypal RSS-elbow sweep)."
     )]
     num_topics: Option<usize>,
 
@@ -156,25 +157,26 @@ pub struct BgeArgs {
 
     #[arg(
         long = "aa-subsample",
-        help = "Cap on cells used to fit archetypes for --resolve-etm \
-                (θ is still assigned for every cell)."
+        help = "Cap on cells used to fit archetypes (θ assigned for every cell)."
     )]
     aa_subsample: Option<usize>,
 
     #[arg(
         long = "bridge-weight",
         default_value_t = 1.0,
-        help = "Up-weight matched (multi-modality) cells in the cell-axis sampler by \
-                this factor so they anchor cross-modal alignment (--multiome only; \
-                1.0 = off)."
+        help = "Up-weight matched cells in the cell-axis sampler (--multiome only;\n\
+                1.0 = off).",
+        long_help = "Up-weight matched (multi-modality) cells in the cell-axis\n\
+                     sampler by this factor so they anchor cross-modal alignment\n\
+                     (--multiome only; 1.0 = off)."
     )]
     bridge_weight: f32,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Disable BBKNN + DC-Poisson refinement of the multi-level pseudobulk \
-                partition. Default: enabled (parity with senna topic / svd)."
+        help = "Disable BBKNN + DC-Poisson refinement of the multi-level pseudobulk\n\
+                partition. Default: enabled."
     )]
     no_refine: bool,
 
@@ -208,30 +210,30 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "L2 penalty λ on the shared feature embedding E_feat ∈ ℝ^{D×H}: \
-                adds λ · mean(E_feat²) to the per-step composite loss \
-                (mean-normalized, so λ stays scale-invariant across D·H). \
-                Default 1.0 (mild shrinkage). Set 0.0 to disable. \
-                Typical: 0.1–10.0."
+        help = "L2 penalty λ on E_feat (mean-normalized). Default 1.0; 0.0 = off.",
+        long_help = "L2 penalty λ on the shared feature embedding E_feat ∈ ℝ^{D×H}:\n\
+                     adds λ · mean(E_feat²) to the per-step composite loss\n\
+                     (mean-normalized, so λ stays scale-invariant across D·H).\n\
+                     Default 1.0 (mild shrinkage). Set 0.0 to disable.\n\
+                     Typical: 0.1–10.0."
     )]
     feature_embedding_l2: f32,
 
     #[arg(
         long,
         default_value_t = 0.0,
-        help = "AdamW decoupled weight decay applied uniformly to every \
-                parameter (E_feat, b_feat, per-axis heads). Per-step \
-                post-update shrinkage; doesn't enter the backward graph. \
-                Default 0.0 (off — plain Adam despite the optimizer name)."
+        help = "AdamW decoupled weight decay (all params). Default 0.0 = off.",
+        long_help = "AdamW decoupled weight decay applied uniformly to every\n\
+                     parameter (E_feat, b_feat, per-axis heads). Per-step\n\
+                     post-update shrinkage; doesn't enter the backward graph.\n\
+                     Default 0.0 (off — plain Adam despite the optimizer name)."
     )]
     weight_decay: f64,
 
     #[arg(
         long,
-        help = "Optional feature-feature edge list (TSV/CSV; e.g. \
-                BioGRID, STRING, synthetic-lethality). Activates SGC \
-                smoothing of E_feat through the K-hop normalized \
-                adjacency."
+        help = "Optional feature-feature edge list (TSV/CSV; activates SGC\n\
+                smoothing of E_feat through the K-hop normalized adjacency)."
     )]
     feature_network: Option<Box<str>>,
 
@@ -244,7 +246,7 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        help = "Optional name-stripping delimiter for feature-network resolution \
+        help = "Name-stripping delimiter for feature-network resolution\n\
                 (e.g. '.' to match `TP53.1` → `TP53`)"
     )]
     feature_network_delim: Option<char>,
@@ -252,9 +254,12 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = 2,
-        help = "SGC propagation hops K (default 2 — useful for sparse synthetic-\
-                lethality / regulatory networks). K=2 already reaches all \
-                shared-neighbor pairs, so no separate SNN augmentation is needed."
+        help = "SGC propagation hops K (default 2; K=2 covers all shared-neighbor\n\
+                pairs).",
+        long_help = "SGC propagation hops K (default 2 — useful for sparse\n\
+                     synthetic-lethality / regulatory networks). K=2 already\n\
+                     reaches all shared-neighbor pairs, so no separate SNN\n\
+                     augmentation is needed."
     )]
     feature_network_k: usize,
 
@@ -275,11 +280,14 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = '_',
-        help = "Delimiter for fuzzy gene-name matching across input files. The last \
-                token after splitting on this char is used as the canonical row name, \
-                so `ENSG00000000003_TSPAN6` (file A) and `TSPAN6` (file B) merge into \
-                a single row. Pass an empty string (currently unsupported by clap; \
-                set --feature-name-kind to override) to fall back to exact matching."
+        help = "Delimiter for fuzzy gene-name suffix matching across input files.",
+        long_help = "Delimiter for fuzzy gene-name matching across input files.\n\
+                     The last token after splitting on this char is used as the\n\
+                     canonical row name, so `ENSG00000000003_TSPAN6` (file A)\n\
+                     and `TSPAN6` (file B) merge into a single row. Pass an\n\
+                     empty string (currently unsupported by clap; set\n\
+                     --feature-name-kind to override) to fall back to exact\n\
+                     matching."
     )]
     feature_name_delim: char,
 
@@ -292,20 +300,24 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        help = "Optional cell-cell edge list (whitespace-separated, two cell-barcode \
-                columns per line; lines starting with `#` are ignored). When provided, \
-                activates the cell-cell NCE term — positives are these edges, negatives \
-                are within-batch random non-neighbor cells. Use a precomputed graph \
-                (e.g. pinto's spatial KNN, exported to TSV)."
+        help = "Optional cell-cell edge list (TSV); activates the cell-cell NCE term.",
+        long_help = "Optional cell-cell edge list (whitespace-separated, two\n\
+                     cell-barcode columns per line; lines starting with `#` are\n\
+                     ignored). When provided, activates the cell-cell NCE term —\n\
+                     positives are these edges, negatives are within-batch random\n\
+                     non-neighbor cells. Use a precomputed graph (e.g. pinto's\n\
+                     spatial KNN, exported to TSV)."
     )]
     cell_cell_edges: Option<Box<str>>,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Cell-cell loss weight λ; final loss = L_bipartite + λ · L_cell_cell. \
-                Default 1.0 weights cell-cell equal to cell-feature. Set to 0 to disable. \
-                Ignored if --cell-cell-edges is not provided."
+        help = "Cell-cell loss weight λ (1.0 = equal to cell-feature; 0 = disable).",
+        long_help = "Cell-cell loss weight λ; final loss = L_bipartite + λ ·\n\
+                     L_cell_cell. Default 1.0 weights cell-cell equal to\n\
+                     cell-feature. Set to 0 to disable. Ignored if\n\
+                     --cell-cell-edges is not provided."
     )]
     cell_cell_lambda: f32,
 
@@ -318,18 +330,19 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        help = "Cells per parallel block for the streaming NB-Fisher pass and \
-                column-block I/O. Omit for auto-scaling (clamps to 100 for large \
-                feature counts — slow on rotational disks). Pass 1024+ when you \
-                have RAM, especially without --preload-data."
+        help = "Cells per block for streaming NB-Fisher / column I/O (omit for auto).",
+        long_help = "Cells per parallel block for the streaming NB-Fisher pass\n\
+                     and column-block I/O. Omit for auto-scaling (clamps to 100\n\
+                     for large feature counts — slow on rotational disks). Pass\n\
+                     1024+ when you have RAM, especially without --preload-data."
     )]
     block_size: Option<usize>,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Preload all sparse column data into memory before any pass over \
-                cells. Faster when data fits in RAM; required on slow disks."
+        help = "Preload all sparse column data into memory. Faster when data fits\n\
+                in RAM; required on slow disks."
     )]
     preload_data: bool,
 
@@ -337,28 +350,31 @@ pub struct BgeArgs {
         long,
         value_delimiter = ',',
         num_args = 1..,
-        help = "Multiome modality files (comma-separated), one per modality, glued by raw barcode.",
-        long_help = "Multiome load: pass one sparse file per modality, e.g. \
-                     `--multiome rna.zarr,atac.zarr`. Each file keeps its own feature \
-                     space (no cross-file barcode suffixing); cells are unioned by raw \
-                     barcode — a cell seen only in RNA contributes triplets just to the \
-                     RNA block, ATAC-only cells just to the ATAC block, shared cells get \
-                     both. File ORDER defines modality order (used for per-modality \
-                     rebalancing / outputs). Maps to `ColumnAlignment::Union` and \
-                     replaces the positional data files.\n\
+        help = "Multiome modality files (comma-separated), one per modality",
+        long_help = "Multiome load: pass one sparse file per modality, e.g.\n\
+                     `--multiome rna.zarr,atac.zarr`. Each file keeps its own\n\
+                     feature space (no cross-file barcode suffixing); cells are\n\
+                     unioned by raw barcode — a cell seen only in RNA contributes\n\
+                     triplets just to the RNA block, ATAC-only cells just to the\n\
+                     ATAC block, shared cells get both. File ORDER defines\n\
+                     modality order (used for per-modality rebalancing / outputs).\n\
+                     Maps to `ColumnAlignment::Union` and replaces the positional\n\
+                     data files.\n\
                      \n\
-                     Batch resolution is constrained: a single --batch-files file is \
-                     allowed (one label per unified cell), or embedded `@batch` tags \
-                     that agree across modalities."
+                     Batch resolution is constrained: a single --batch-files\n\
+                     file is allowed (one label per unified cell), or embedded\n\
+                     `@batch` tags that agree across modalities."
     )]
     multiome: Option<Vec<Box<str>>>,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Always recompute NB-Fisher weights and overwrite the cache. By \
-                default `{out}.fisher_weights.parquet` is loaded if it exists \
-                with matching gene names, otherwise computed and written."
+        help = "Always recompute NB-Fisher weights, overwriting any existing cache.",
+        long_help = "Always recompute NB-Fisher weights and overwrite the cache.\n\
+                     By default `{out}.fisher_weights.parquet` is loaded if it\n\
+                     exists with matching gene names, otherwise computed and\n\
+                     written."
     )]
     no_fisher_cache: bool,
 
@@ -373,8 +389,8 @@ pub struct BgeArgs {
         short,
         required = true,
         help = "Output prefix",
-        long_help = "Output prefix; produces {out}.latent.parquet, \
-                     {out}.dictionary.parquet, {out}.feature_bias.parquet, \
+        long_help = "Output prefix; produces {out}.latent.parquet,\n\
+                     {out}.dictionary.parquet, {out}.feature_bias.parquet,\n\
                      {out}.senna.json"
     )]
     out: Box<str>,

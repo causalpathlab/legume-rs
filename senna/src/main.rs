@@ -254,19 +254,19 @@ enum Commands {
 
     #[command(
         about = "Train graph-based embedding (count-NCE, modality-agnostic).",
-        long_about = "Joint embedding of features and cells in a single H-dim space \
-                      via discriminative count-noise-contrastive estimation on a \
-                      sketch-coarsened pseudobulk (cell, feature) bipartite graph. \
-                      Each input file contributes its rows to a shared feature axis; \
-                      cell barcodes union across files. Modality-agnostic — works \
-                      for any number of count panels (RNA, ATAC, protein, …). \
-                      Bilinear `E_f · E_c + b_f` scoring (no per-cell bias) with \
-                      per-file rebalanced sampling and same-file hard negatives.\n\n\
-                      Trains in two phases: (1) embed features + pseudobulks to learn \
-                      the gene side, then (2) freeze it and densely fit each cell's \
-                      embedding — every cell is swept ~once/epoch and the per-cell fit \
-                      is separable (embarrassingly parallel).\n\n\
-                      Writes {out}.{latent,dictionary,feature_bias}.parquet, \
+        long_about = "Joint embedding of features and cells in a single H-dim\n\
+                      space via discriminative count-NCE on a sketch-coarsened\n\
+                      pseudobulk (cell, feature) bipartite graph. Each input file\n\
+                      contributes its rows to a shared feature axis; cell barcodes\n\
+                      union across files. Modality-agnostic — works for any number\n\
+                      of count panels (RNA, ATAC, protein, …). Bilinear\n\
+                      `E_f · E_c + b_f` scoring with per-file rebalanced sampling\n\
+                      and same-file hard negatives.\n\n\
+                      Trains in two phases: (1) embed features + pseudobulks to\n\
+                      learn the gene side, then (2) freeze it and densely fit each\n\
+                      cell's embedding — every cell is swept ~once/epoch and the\n\
+                      per-cell fit is separable (embarrassingly parallel).\n\n\
+                      Writes {out}.{latent,dictionary,feature_bias}.parquet,\n\
                       {out}.senna.json.",
         alias = "embed-graph",
         alias = "gbe"

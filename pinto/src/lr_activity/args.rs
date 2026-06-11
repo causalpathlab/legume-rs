@@ -10,7 +10,7 @@ pub struct SrtLrActivityArgs {
     #[arg(
         long,
         required = true,
-        help = "Prefix of a prior `pinto lc` run (reads {prefix}.link_community.parquet, {prefix}.coord_pairs.parquet)",
+        help = "Prefix of a prior `pinto lc` run",
         long_help = "Prefix of a prior `pinto lc` run. Reads edge→community assignments\n\
                      from {prefix}.link_community.parquet and cell-pair metadata\n\
                      (including per-edge batch labels when present) from\n\
@@ -22,7 +22,7 @@ pub struct SrtLrActivityArgs {
     #[arg(
         long,
         required = true,
-        help = "Two-column TSV of directional ligand→receptor pairs (ligand\\treceptor)",
+        help = "Two-column TSV of directional ligand→receptor pairs",
         long_help = "Directional ligand→receptor pair file. One pair per line, with\n\
                      two whitespace/tab/comma-separated columns: ligand gene,\n\
                      receptor gene. Delimiter auto-detected (.csv → comma, else tab).\n\
@@ -34,7 +34,7 @@ pub struct SrtLrActivityArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "Random-projection dimension for propensity binary-sort (samples ≈ batches × 2^d)",
+        help = "Random-projection dimension for propensity binary-sort",
         long_help = "Number of random-projection axes used to assign each cell to a\n\
                      propensity bin via binary sort. Each batch gets up to 2^d bins;\n\
                      pseudobulk samples are (batch × propensity-bin) combinations.\n\
@@ -79,7 +79,9 @@ pub struct SrtLrActivityArgs {
     #[arg(
         long,
         default_value_t = 100,
-        help = "Skip communities with fewer than this many edges (sparse communities can't calibrate)"
+        help = "Skip communities with fewer than this many edges",
+        long_help = "Skip communities with fewer than this many edges; sparse\n\
+                     communities can't calibrate the null distribution reliably."
     )]
     pub min_edges_per_community: usize,
 
@@ -104,14 +106,18 @@ pub struct SrtLrActivityArgs {
     #[arg(
         long,
         default_value_t = true,
-        help = "Also write a JSON sidecar with per-stratum participating edge lists for significant pairs"
+        help = "Also write a JSON sidecar with per-stratum edge lists for sig. pairs",
+        long_help = "Also write a JSON sidecar with per-stratum participating edge\n\
+                     lists for significant pairs."
     )]
     pub emit_json: bool,
 
     #[arg(
         long,
         default_value_t = 0.05,
-        help = "Westfall-Young FWER cutoff for including a pair's edge participation in the JSON sidecar"
+        help = "Westfall-Young FWER cutoff for edge participation in the JSON sidecar",
+        long_help = "Westfall-Young FWER cutoff for including a pair's edge\n\
+                     participation in the JSON sidecar."
     )]
     pub json_fwer_threshold: f32,
 }

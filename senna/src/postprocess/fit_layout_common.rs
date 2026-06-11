@@ -53,7 +53,7 @@ pub struct LayoutCommonArgs {
     #[arg(
         long,
         short = 'f',
-        help = "Run manifest JSON from `senna topic` / `masked-topic` / `joint-topic` / `svd` / `joint-svd`",
+        help = "Run manifest JSON from a `senna` topic/svd command",
         long_help = "If set, fills in data files, batch files, and (when --out is \
                      absent) the output prefix from the manifest. The manifest is \
                      then updated in place: its `layout.cell_coords`, `layout.pb_coords`, \

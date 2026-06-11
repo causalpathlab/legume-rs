@@ -24,7 +24,7 @@ pub struct AnnotateArgs {
     #[arg(
         long = "knn",
         default_value_t = 15,
-        help = "Number of nearest neighbors for the cosine-KNN graph used by the internal Leiden clustering",
+        help = "Nearest neighbors for the internal Leiden cosine-KNN graph",
         long_help = "Number of nearest neighbors for the cosine-KNN graph used by the\n\
                      internal Leiden clustering. Ignored when --clusters / manifest\n\
                      cluster path is provided."
@@ -98,7 +98,7 @@ pub struct AnnotateArgs {
     #[arg(
         long = "num-draws",
         default_value_t = 1000,
-        help = "Number of random gene-set draws per celltype for the Efron–Tibshirani row-randomization moments",
+        help = "Random gene-set draws per cell type (Efron–Tibshirani moments)",
         long_help = "Number of random gene-set draws per celltype for the\n\
                      Efron–Tibshirani row-randomization moments (used to restandardize\n\
                      both observed and permuted ES)."

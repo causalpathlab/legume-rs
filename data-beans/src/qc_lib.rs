@@ -529,12 +529,13 @@ pub struct QcArgs {
         default_value_t = false,
         long_help = "Disable cell quality control entirely and keep every input cell.\n\
                      \n\
-                     By DEFAULT (without this flag) cell QC is ON and DROPS cells \
-                     (columns): near-empty cells (fewer than --qc-min-cell-nnz detected \
-                     features) are omitted from the per-cell outputs, and robust MAD \
-                     outliers are excluded from training, so output parquet files may \
-                     have FEWER rows than the input. Join outputs by the cell/barcode \
-                     name column, not by position. Use --qc-report to see what was dropped."
+                     By DEFAULT (without this flag) cell QC is ON and DROPS cells\n\
+                     (columns): near-empty cells (fewer than --qc-min-cell-nnz\n\
+                     detected features) are omitted from the per-cell outputs, and\n\
+                     robust MAD outliers are excluded from training, so output\n\
+                     parquet files may have FEWER rows than the input. Join outputs\n\
+                     by the cell/barcode name column, not by position. Use\n\
+                     --qc-report to see what was dropped."
     )]
     pub no_qc: bool,
 
@@ -542,19 +543,30 @@ pub struct QcArgs {
     #[arg(long = "qc-mads", default_value_t = 5.0)]
     pub qc_mads: f32,
 
-    /// Near-empty floor: cells with fewer detected features than this are
-    /// dropped from the per-cell outputs (still kept in training).
-    #[arg(long = "qc-min-cell-nnz", default_value_t = 2)]
+    #[arg(
+        long = "qc-min-cell-nnz",
+        default_value_t = 2,
+        help = "Near-empty floor: cells with fewer detected features than this are",
+        long_help = "Near-empty floor: cells with fewer detected features than this\n\
+                     are dropped from the per-cell outputs (still kept in training)."
+    )]
     pub qc_min_cell_nnz: usize,
 
-    /// Hard floor on total counts per cell — cells below it are dropped from
-    /// training (0 disables).
-    #[arg(long = "qc-min-counts", default_value_t = 0.0)]
+    #[arg(
+        long = "qc-min-counts",
+        default_value_t = 0.0,
+        help = "Hard floor on total counts per cell — cells below it are dropped",
+        long_help = "Hard floor on total counts per cell — cells below it are dropped\n\
+                     from training (0 disables)."
+    )]
     pub qc_min_counts: f32,
 
-    /// Regex over feature names selecting mitochondrial genes (enables the
-    /// mito-fraction outlier metric), e.g. `(?i)^MT-`.
-    #[arg(long = "qc-mito-pattern")]
+    #[arg(
+        long = "qc-mito-pattern",
+        help = "Regex over feature names selecting mitochondrial genes (enables the",
+        long_help = "Regex over feature names selecting mitochondrial genes (enables\n\
+                     the mito-fraction outlier metric), e.g. `(?i)^MT-`."
+    )]
     pub qc_mito_pattern: Option<String>,
 
     /// Hard max mitochondrial fraction (0..1).
@@ -569,14 +581,23 @@ pub struct QcArgs {
     #[arg(long = "qc-ribo-max-frac")]
     pub qc_ribo_max_frac: Option<f32>,
 
-    /// Feature/row QC (off by default): DROP genes (rows) expressed in fewer
-    /// than this many cells. Not applied by `bge` (cell-only QC there).
-    #[arg(long = "qc-feature-min-cells", default_value_t = 0)]
+    #[arg(
+        long = "qc-feature-min-cells",
+        default_value_t = 0,
+        help = "Feature/row QC (off by default): DROP genes (rows) expressed in fewer",
+        long_help = "Feature/row QC (off by default): DROP genes (rows) expressed in\n\
+                     fewer than this many cells. Not applied by `bge` (cell-only\n\
+                     QC there)."
+    )]
     pub qc_feature_min_cells: usize,
 
-    /// Write a per-cell QC table (.tsv) of metrics + near_empty/train_keep
-    /// flags, so you can see exactly which cells were dropped.
-    #[arg(long = "qc-report")]
+    #[arg(
+        long = "qc-report",
+        help = "Write a per-cell QC table (.tsv) of metrics + near_empty/train_keep",
+        long_help = "Write a per-cell QC table (.tsv) of metrics +\n\
+                     near_empty/train_keep flags, so you can see exactly which\n\
+                     cells were dropped."
+    )]
     pub qc_report: Option<Box<str>>,
 }
 

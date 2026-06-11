@@ -66,7 +66,9 @@ pub struct PlotStrandArgs {
     #[arg(
         long,
         short = 'o',
-        help = "Output prefix (defaults to the manifest `prefix`). Writes {out}.strand/<celltype>.pdf"
+        help = "Output prefix (defaults to the manifest `prefix`)",
+        long_help = "Output prefix (defaults to the manifest `prefix`). Writes\n\
+                     {out}.strand/<celltype>.pdf."
     )]
     pub out: Option<Box<str>>,
 
@@ -96,7 +98,9 @@ pub struct PlotStrandArgs {
         long,
         value_enum,
         default_value_t = HeightScale::Sqrt,
-        help = "Pileup-height scale for the binned activity (default: sqrt). Compresses spikes so low-level signal stays visible."
+        help = "Pileup-height scale for the binned activity (default: sqrt)",
+        long_help = "Pileup-height scale for the binned activity (default: sqrt).\n\
+                     Compresses spikes so low-level signal stays visible."
     )]
     pub scale: HeightScale,
 

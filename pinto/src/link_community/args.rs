@@ -183,7 +183,7 @@ pub struct SrtLinkCommunityArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Disable the frozen K×K incidence (RBM-style vertex prior) in the final EM/greedy",
+        help = "Disable the frozen K×K incidence (RBM-style vertex prior)",
         long_help = "By default, after the V-cycle pinto derives a vertex propensity\n\
                        from the cascade-final edge labels and freezes the K×K\n\
                        incidence matrix\n\

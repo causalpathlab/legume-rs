@@ -30,18 +30,11 @@ use plot_utils::rasterize::PointShape;
 /// What the per-edge arrow color encodes in `pinto plot` LR overlays.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum LrColorMode {
-    /// Edge color = `log((R_receiver + 1) / (L_sender + 1))` on a
-    /// diverging red↔blue ramp. Reads the binding-occupancy regime per
-    /// edge: red → R ≫ L (ligand-limited; signal scales with L, the
-    /// activating direction); blue → L ≫ R (receptor-saturated, signal
-    /// plateaued); near zero → balanced and most tunable. Default.
+    /// log((R+1)/(L+1)) on diverging red↔blue ramp (default).
     LogRatio,
-    /// Edge color = relation to the pair's community hull:
-    /// outgoing (sender in community), incoming (receiver in community),
-    /// internal (both endpoints in community), or external (neither).
+    /// Outgoing/incoming/internal/external vs. community hull.
     Direction,
-    /// Edge color = pair-centered coexpression `sqrt(L·R)` deviation
-    /// (red = above this pair's mean, blue = below).
+    /// Pair-centered sqrt(L·R) coexpression deviation.
     Coexpr,
 }
 
@@ -51,13 +44,19 @@ pub struct SrtPlotArgs {
         long,
         short = 'f',
         required = true,
-        help = "Input prefix or JSON metadata file. If path ends with .json or .pinto.json, reads metadata; otherwise discovers {prefix}.*.parquet files"
+        help = "Input prefix or JSON metadata file",
+        long_help = "Input prefix or JSON metadata file. If path ends with .json\n\
+                     or .pinto.json, reads metadata directly; otherwise discovers\n\
+                     {prefix}.*.parquet files."
     )]
     pub from: Box<str>,
 
     #[arg(
         long,
-        help = "Expression data file (.h5/.zarr). Required only when --top-markers > 0. Multiple files comma-separated for multi-sample runs.",
+        help = "Expression data file (.h5/.zarr); comma-separated for multi-sample runs",
+        long_help = "Expression data file (.h5/.zarr). Required only when\n\
+                     --top-markers > 0. Multiple files comma-separated for\n\
+                     multi-sample runs.",
         value_delimiter = ','
     )]
     pub data: Option<Vec<Box<str>>>,
@@ -65,7 +64,10 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         short = 'o',
-        help = "Output prefix (defaults to --from). Writes {out}.plots/{kind}/{level}.*.pdf (per-kind subdirs) and {out}.plot.manifest.json."
+        help = "Output prefix (defaults to --from)",
+        long_help = "Output prefix (defaults to --from). Writes\n\
+                     {out}.plots/{kind}/{level}.*.pdf (per-kind subdirs)\n\
+                     and {out}.plot.manifest.json."
     )]
     pub out: Option<Box<str>>,
 
@@ -83,7 +85,9 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 3.0,
-        help = "Max aspect ratio (h/w clamp). Wider-than-max or taller-than-max bounds are inflated symmetrically."
+        help = "Max aspect ratio (h/w clamp)",
+        long_help = "Max aspect ratio (h/w clamp). Wider-than-max or taller-than-max\n\
+                     bounds are inflated symmetrically."
     )]
     pub max_aspect: f32,
 
@@ -94,7 +98,9 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 3.0,
-        help = "Max radius multiplier for propensity / expression size mapping (base_size * scale at p99)"
+        help = "Max radius multiplier for propensity/expression size mapping",
+        long_help = "Max radius multiplier for propensity / expression size mapping\n\
+                     (base_size * scale at p99)."
     )]
     pub size_scale: f32,
 
@@ -136,7 +142,10 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 0.02,
-        help = "Min fraction of core cells with non-zero expression for a marker plot to be rendered (default 0.02 = 2%). Skips sparsely-detected genes whose heatmap is mostly empty."
+        help = "Min fraction of core cells with non-zero expression for a marker plot",
+        long_help = "Min fraction of core cells with non-zero expression for a marker\n\
+                     plot to be rendered (default 0.02 = 2%). Skips sparsely-detected\n\
+                     genes whose heatmap is mostly empty."
     )]
     pub marker_min_frac: f32,
 
@@ -151,14 +160,18 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 0.005,
-        help = "Percentile clip for coordinate bounds (0.005 → p0.5/p99.5). Prevents outlier cells from stretching the view; 0 = raw min/max."
+        help = "Percentile clip for coordinate bounds (0.005 → p0.5/p99.5)",
+        long_help = "Percentile clip for coordinate bounds (0.005 → p0.5/p99.5).\n\
+                     Prevents outlier cells from stretching the view; 0 = raw min/max."
     )]
     pub coord_clip: f32,
 
     #[arg(
         long,
         default_value = "all",
-        help = "Which levels to plot: `all` | `final` | `draft` | comma-list like `final,L0,L2,draft`"
+        help = "Which levels to plot: `all` | `final` | `draft` | comma-list",
+        long_help = "Which levels to plot: `all` | `final` | `draft` | comma-list\n\
+                     like `final,L0,L2,draft`."
     )]
     pub levels: Box<str>,
 
@@ -183,35 +196,44 @@ pub struct SrtPlotArgs {
     // ─── Interface (high-entropy neighborhood) sub-mode ──────────────────
     #[arg(
         long,
-        help = "Render high-entropy cells with their neighborhoods. Requires the propensity parquet to carry an `entropy` column (post-2026-04-25 runs)."
+        help = "Render high-entropy cells with their neighborhoods",
+        long_help = "Render high-entropy cells with their neighborhoods. Requires\n\
+                     the propensity parquet to carry an `entropy` column\n\
+                     (post-2026-04-25 runs)."
     )]
     pub show_interfaces: bool,
 
     #[arg(
         long,
         default_value_t = 0.95,
-        help = "Quantile threshold (within each core) used to pick high-entropy focal cells. 0.95 → top 5%."
+        help = "Quantile threshold for high-entropy focal cells (0.95 → top 5%)",
+        long_help = "Quantile threshold (within each core) used to pick high-entropy\n\
+                     focal cells. 0.95 → top 5%."
     )]
     pub entropy_quantile: f32,
 
     #[arg(
         long,
         default_value_t = 2,
-        help = "Neighborhood depth from each focal cell. 1 = direct neighbors only; 2 = 2-hop (default)."
+        help = "Neighborhood depth from each focal cell (1 = direct; 2 = 2-hop)",
+        long_help = "Neighborhood depth from each focal cell. 1 = direct neighbors\n\
+                     only; 2 = 2-hop (default)."
     )]
     pub neighborhood_hops: u8,
 
     #[arg(
         long,
         default_value_t = 5,
-        help = "Top-N marker genes per neighbor community shown in interface panel legends."
+        help = "Top-N marker genes per neighbor community in interface panel legends"
     )]
     pub interface_top_genes: usize,
 
     #[arg(
         long,
         default_value_t = 200,
-        help = "Cap on focal cells rendered per (level, core). When more qualify, top-N by entropy are kept."
+        help = "Cap on focal cells rendered per (level, core); top-N by entropy kept",
+        long_help = "Cap on focal cells rendered per (level, core). When more qualify,\n\
+                     top-N by entropy are kept."
     )]
     pub max_interface_cells: usize,
 
@@ -230,13 +252,19 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "Per-stratum cap on significant LR pairs rendered (top-N by |z| within each (batch, community); collapses to per-community for single-batch runs)."
+        help = "Per-stratum cap on LR pairs rendered (top-N by |z|)",
+        long_help = "Per-stratum cap on significant LR pairs rendered (top-N by |z|\n\
+                     within each (batch, community); collapses to per-community\n\
+                     for single-batch runs)."
     )]
     pub lr_top_pairs: usize,
 
     #[arg(
         long,
-        help = "Keep homotypic LR pairs (L == R, e.g. CADM3-CADM3) in the LR overlay. Default drops them — homotypic adhesion pairs tend to dominate the top-of-list and crowd out heterotypic signaling."
+        help = "Keep homotypic LR pairs (L == R, e.g. CADM3-CADM3) in the overlay",
+        long_help = "Keep homotypic LR pairs (L == R, e.g. CADM3-CADM3) in the LR\n\
+                     overlay. Default drops them — homotypic adhesion pairs tend to\n\
+                     dominate the top-of-list and crowd out heterotypic signaling."
     )]
     pub lr_keep_homotypic: bool,
 
@@ -257,7 +285,9 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 2,
-        help = "Belt width (in graph hops) around uncommitted cells for the LR overlay focal set. 1 = direct neighbors only; 2 = 2-hop (default)."
+        help = "Belt width (hops) around uncommitted cells for LR overlay focal set",
+        long_help = "Belt width (in graph hops) around uncommitted cells for the LR\n\
+                     overlay focal set. 1 = direct neighbors only; 2 = 2-hop (default)."
     )]
     pub lr_belt_hops: u8,
 
@@ -271,28 +301,41 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 25,
-        help = "Within each batch (core), skip propensity/marker/LR plots for communities whose dominant-cell count is below this threshold. Independent of --min-edges-per-community (which applies across all batches)."
+        help = "Skip communities with too few dominant cells per batch",
+        long_help = "Within each batch (core), skip propensity/marker/LR plots for\n\
+                     communities whose dominant-cell count is below this threshold.\n\
+                     Independent of --min-edges-per-community (which applies across\n\
+                     all batches)."
     )]
     pub min_cells_per_community: usize,
 
     #[arg(
         long,
         default_value_t = 30,
-        help = "Min number of drawable arrows (edges with non-zero L+R signal in either orientation) for an LR overlay to be rendered. Skips sparse pairs whose plot is a dust cloud."
+        help = "Min drawable arrows required to render an LR overlay",
+        long_help = "Min number of drawable arrows (edges with non-zero L+R signal in\n\
+                     either orientation) for an LR overlay to be rendered. Skips sparse\n\
+                     pairs whose plot is a dust cloud."
     )]
     pub lr_min_edges: usize,
 
     #[arg(
         long,
         default_value_t = 100,
-        help = "Cap on (ligand, receptor) pairs shown in the combined LR Hinton summary (`lr/summary.pdf`). Pairs are ranked by max |z| across communities; rows and columns are restricted to those involved in the top-N. Per-community summaries are unaffected."
+        help = "Cap on (ligand, receptor) pairs in the combined LR Hinton summary",
+        long_help = "Cap on (ligand, receptor) pairs shown in the combined LR Hinton\n\
+                     summary (`lr/summary.pdf`). Pairs are ranked by max |z| across\n\
+                     communities; rows and columns are restricted to those involved\n\
+                     in the top-N. Per-community summaries are unaffected."
     )]
     pub lr_summary_pairs: usize,
 
     #[arg(
         long,
         default_value_t = 8,
-        help = "Number of bins for the diverging blue↔red coexpression color ramp on LR arrows (only used when --lr-color-mode=coexpr)."
+        help = "Bins for the diverging coexpression ramp (--lr-color-mode=coexpr only)",
+        long_help = "Number of bins for the diverging blue↔red coexpression color ramp\n\
+                     on LR arrows (only used when --lr-color-mode=coexpr)."
     )]
     pub lr_coexpr_bins: usize,
 
@@ -300,7 +343,13 @@ pub struct SrtPlotArgs {
         long,
         value_enum,
         default_value_t = LrColorMode::LogRatio,
-        help = "How LR-arrow colors are assigned: `log-ratio` (default) → log((R_receiver+1)/(L_sender+1)) on a diverging red↔blue ramp (red = R≫L, ligand-limited / activating; blue = L≫R, receptor-saturated / plateau); `direction` → in/out/internal classes; `coexpr` → pair-centered sqrt(L·R) deviation."
+        help = "How LR-arrow colors are assigned (log-ratio | direction | coexpr)",
+        long_help = "How LR-arrow colors are assigned:\n\
+                     `log-ratio` (default) → log((R_receiver+1)/(L_sender+1)) on a\n\
+                     diverging red↔blue ramp (red = R≫L, ligand-limited / activating;\n\
+                     blue = L≫R, receptor-saturated / plateau);\n\
+                     `direction` → in/out/internal classes;\n\
+                     `coexpr` → pair-centered sqrt(L·R) deviation."
     )]
     pub lr_color_mode: LrColorMode,
 }

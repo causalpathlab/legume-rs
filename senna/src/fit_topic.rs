@@ -50,11 +50,11 @@ pub struct TopicArgs {
         long,
         help = "Chain data + batch + cell→pb partition from a prior \
                 `senna {topic, masked-topic, ce-topic}` run's manifest",
-        long_help = "Read a `{run}.senna.json` manifest and pre-fill `data_files`, \
-                     `--batch-files`, and (when present) the cell→pb partition \
-                     from the source run. Inheriting the partition skips the \
-                     expensive BBKNN + Poisson DC-SBM refinement step. Explicit \
-                     CLI flags override the manifest. SVD-family sources are \
+        long_help = "Read a `{run}.senna.json` manifest and pre-fill `data_files`,\n\
+                     `--batch-files`, and (when present) the cell→pb partition\n\
+                     from the source run. Inheriting the partition skips the\n\
+                     expensive BBKNN + Poisson DC-SBM refinement step. Explicit\n\
+                     CLI flags override the manifest. SVD-family sources are\n\
                      rejected."
     )]
     pub(crate) from: Option<Box<str>>,
@@ -74,8 +74,8 @@ pub struct TopicArgs {
                      {out}.dispersion.parquet       NB dispersion (nb / nbmixture)\n  \
                      {out}.alpha.parquet            ambient gene profile (nbmixture)\n  \
                      {out}.rho.parquet              ρ sigmoid coefficients (nbmixture)\n  \
-                     {out}.cell_proj.parquet        cached random projection (consumed by `senna layout`)\n  \
-                     {out}.senna.json               run manifest consumed by `senna layout --from` and `senna plot --from`\n\n\
+                     {out}.cell_proj.parquet        cached random projection (for `senna layout`)\n  \
+                     {out}.senna.json               run manifest for `senna layout/plot --from`\n\n\
                      With --decoder a,b,c: per-decoder dictionaries written as {out}.{name}.dictionary.parquet."
     )]
     pub(crate) out: Box<str>,

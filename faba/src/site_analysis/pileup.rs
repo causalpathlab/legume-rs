@@ -155,7 +155,7 @@ pub struct PileupArgs {
     // type). Otherwise the existing ASCII/TSV behavior is unchanged.
     #[arg(
         long = "gtf",
-        help = "Gene annotation GTF/GFF for the middle gene-model track (exons, introns, strand)",
+        help = "Gene annotation GTF/GFF for the middle gene-model track (exons, introns)",
         long_help = "Gene annotation GTF/GFF for the middle gene-model track (exons,\n\
                      introns, strand). Enables figure mode."
     )]

@@ -63,8 +63,8 @@ pub struct DartSeqCountArgs {
         long,
         default_value = "CB",
         help = "Cell barcode tag",
-        long_help = "Cell barcode tag used for cell/sample identification in 10x Genomics BAM files. \n\
-		     [See here](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam)"
+        long_help = "Cell barcode tag used for cell/sample identification in 10x Genomics\n\
+                     BAM files. [See here](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam)"
     )]
     pub cell_barcode_tag: Box<str>,
 
@@ -81,8 +81,8 @@ pub struct DartSeqCountArgs {
         long,
         default_value_t = 10,
         help = "minimum number of total reads per site",
-        long_help = "Minimum number of total reads required per site for inclusion in the analysis. \n\
-		     Filters out low-coverage sites."
+        long_help = "Minimum number of total reads required per site for inclusion in\n\
+                     the analysis. Filters out low-coverage sites."
     )]
     pub min_coverage: usize,
 
@@ -138,14 +138,16 @@ pub struct DartSeqCountArgs {
     #[arg(
         long,
         help = "Number of non-zero cutoff for rows/features",
-        long_help = "Minimum number of non-zero entries required for rows/features to be included in the output. If not set, no filtering is applied."
+        long_help = "Minimum number of non-zero entries required for rows/features to be\n\
+                     included in the output. If not set, no filtering is applied."
     )]
     row_nnz_cutoff: Option<usize>,
 
     #[arg(
         long,
         help = "Minimum number of non-zero entries for the columns/cells",
-        long_help = "Minimum number of non-zero entries required for columns/cells to be included in the output. If not set, no filtering is applied."
+        long_help = "Minimum number of non-zero entries required for columns/cells to be\n\
+                     included in the output. If not set, no filtering is applied."
     )]
     column_nnz_cutoff: Option<usize>,
 
@@ -186,7 +188,8 @@ pub struct DartSeqCountArgs {
         long,
         default_value_t = false,
         help = "Include reads w/o barcode info",
-        long_help = "Include reads that are missing gene and cell barcode information in the analysis."
+        long_help = "Include reads that are missing gene and cell barcode information\n\
+                     in the analysis."
     )]
     pub include_missing_barcode: bool,
 
@@ -232,7 +235,8 @@ pub struct DartSeqCountArgs {
         alias = "barcode-membership",
         alias = "membership",
         help = "Cell barcode membership file for filtering cells (TSV, CSV, or Parquet)",
-        long_help = "Path to cell barcode membership file for restricting analysis to specific cells.\n\
+        long_help = "Path to cell barcode membership file for restricting analysis to\n\
+                     specific cells.\n\
                      Format: First column = cell barcode, Second column = cell type.\n\
                      Supports .tsv, .csv, .parquet, and .gz variants.\n\
                      Only cells (barcodes) present in this file will be included in analysis.\n\
@@ -324,7 +328,7 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         long = "atoi-mask",
-        help = "Pre-computed A-to-I mask parquet file (from `faba atoi` or `faba dartseq --detect-atoi`)",
+        help = "Pre-computed A-to-I mask parquet (from `faba atoi` or `--detect-atoi`)",
         long_help = "Path to a pre-computed A-to-I sites parquet file.\n\
                      When provided, skips A-to-I discovery and loads the mask\n\
                      directly from this file to filter m6A candidates.\n\

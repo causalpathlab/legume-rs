@@ -50,7 +50,7 @@ pub struct JointTopicArgs {
                      {out}.log_likelihood.parquet   training loss trace\n  \
                      {out}_{d}.delta.parquet        per-batch effects for modality d\n  \
                      {out}.cell_proj.parquet        cached random projection (consumed by `senna layout`)\n  \
-                     {out}.senna.json               run manifest consumed by `senna layout --from` and `senna plot --from`\n\n\
+                     {out}.senna.json               run manifest for `senna layout/plot --from`\n\n\
                      With --decoder-type delta, additionally:\n  \
                      {out}.base_dictionary.parquet  shared base dictionary\n  \
                      {out}_{m}.delta_logits.parquet delta logits for modality m"

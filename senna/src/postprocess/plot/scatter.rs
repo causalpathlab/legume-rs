@@ -63,11 +63,13 @@ pub struct PlotArgs {
     #[arg(
         long,
         short = 'f',
-        help = "Run manifest JSON from `senna topic`/`masked-topic`/`joint-topic` (+ updated by `senna layout`)",
-        long_help = "If set, fills in --cell-coords, --topics, --labels, --colour-by, \
-                     and --palette from the manifest's viz/outputs/defaults sections. \
-                     Any explicit CLI flag still overrides the manifest value. Paths \
-                     inside the manifest are resolved relative to the manifest's own \
+        help = "Run manifest JSON (+ updated by `senna layout`)",
+        long_help = "Run manifest JSON from `senna topic`/`masked-topic`/`joint-topic`\n\
+                     (+ updated by `senna layout`).",
+        long_help = "If set, fills in --cell-coords, --topics, --labels, --colour-by,\n\
+                     and --palette from the manifest's viz/outputs/defaults sections.\n\
+                     Any explicit CLI flag still overrides the manifest value. Paths\n\
+                     inside the manifest are resolved relative to the manifest's own\n\
                      directory so you can move a run directory around freely."
     )]
     pub from: Option<Box<str>>,
@@ -75,7 +77,9 @@ pub struct PlotArgs {
     #[arg(
         long,
         short = 'c',
-        help = "Cell coordinates parquet (from `senna layout`); required unless --from provides it"
+        help = "Cell coordinates parquet (from `senna layout`)",
+        long_help = "Cell coordinates parquet (from `senna layout`); required unless\n\
+                     --from provides it."
     )]
     pub cell_coords: Option<Box<str>>,
 
@@ -103,35 +107,44 @@ pub struct PlotArgs {
 
     #[arg(
         long,
-        help = "Annotation argmax TSV from `senna annotate-by-enrichment` (cell\\tcell_type\\tprobability). Defaults to manifest's annotate.argmax."
+        help = "Annotation argmax TSV from `senna annotate-by-enrichment`",
+        long_help = "Annotation argmax TSV from `senna annotate-by-enrichment`\n\
+                     (cell\\tcell_type\\tprobability). Defaults to manifest's\n\
+                     annotate.argmax."
     )]
     pub annotation: Option<Box<str>>,
 
     #[arg(
         long,
-        help = "Pseudotime parquet from `senna pseudotime` (cells × 1). Defaults to manifest's pseudotime.pseudotime."
+        help = "Pseudotime parquet from `senna pseudotime` (cells × 1)",
+        long_help = "Pseudotime parquet from `senna pseudotime` (cells × 1). Defaults\n\
+                     to manifest's pseudotime.pseudotime."
     )]
     pub pseudotime: Option<Box<str>>,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Preload data when auto-running `senna layout` for a manifest missing layout.cell_coords (no-op if cell_coords already exists)"
+        help = "Preload data when auto-running `senna layout`",
+        long_help = "Preload data when auto-running `senna layout` for a manifest\n\
+                     missing layout.cell_coords (no-op if cell_coords already exists)."
     )]
     pub preload_data: bool,
 
     #[arg(
         long,
-        help = "TSV mapping group_id<TAB>display_name (one per line). Missing IDs fall back to T{id}."
+        help = "TSV mapping group_id<TAB>display_name (one per line)",
+        long_help = "TSV mapping group_id<TAB>display_name (one per line). Missing IDs\n\
+                     fall back to T{id}."
     )]
     pub labels: Option<Box<str>>,
 
     #[arg(
         long,
         help = "Drop groups with fewer than N cells (0 = keep all)",
-        long_help = "Filter out small/dead groups before rendering. When unset, \
-                     defaults to max(50, n_cells / 200) for --colour-by topic \
-                     (kills argmax ghosts on dead topics) and 0 otherwise. \
+        long_help = "Filter out small/dead groups before rendering. When unset,\n\
+                     defaults to max(50, n_cells / 200) for --colour-by topic\n\
+                     (kills argmax ghosts on dead topics) and 0 otherwise.\n\
                      Pass --min-topic-cells 0 to opt out of the auto threshold."
     )]
     pub min_topic_cells: Option<usize>,
@@ -190,7 +203,10 @@ pub struct PlotArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Draw convex hull polygons around each group (off by default: scRNA groups are rarely separable in 2D, and hulls overstate that)"
+        help = "Draw convex hull polygons around each group",
+        long_help = "Draw convex hull polygons around each group (off by default:\n\
+                     scRNA groups are rarely separable in 2D, and hulls overstate\n\
+                     that)."
     )]
     pub hull: bool,
 
