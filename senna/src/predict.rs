@@ -158,7 +158,7 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        help = "Fold the re-estimated per-batch δ into μ (removes shared topics AND batch effect)",
+        help = "Fold per-batch δ into μ (removes topics AND batch effect)",
         long_help = "When set, the per-gene denominator is δ_{d,b}·Σ_k θ_k·exp(β_dk) — the\n\
                      residual is harmonized (batch effect divided out too). When unset,\n\
                      μ comes from topics only and the residual still carries batch effects."
@@ -176,7 +176,7 @@ pub struct PredictArgs {
         long,
         value_enum,
         default_value_t = FeatureNameKindArg::Exact,
-        help = "Canonicalize query row names before matching the dictionary: auto|exact|gene|locus|locus-overlap|mixed",
+        help = "Canonicalize query row names: auto|exact|gene|locus|locus-overlap|mixed",
         long_help = "Mirrors the training-side flag. `exact` (default) preserves legacy\n\
                      exact-then-flexible matching. `gene` resolves `ENSG..._TSPAN6` →\n\
                      `TSPAN6` (rsplit on '_') so a symbol-keyed dictionary matches a\n\
@@ -187,7 +187,7 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        help = "Split each query row name once on this char and keep the prefix as the base key",
+        help = "Split query row names on this char; keep prefix as base key",
         long_help = "e.g. '/' turns `ENSG00000000003_TSPAN6/count/spliced` into base\n\
                      `ENSG00000000003_TSPAN6` (+ suffix `count/spliced`). The suffix is\n\
                      then available to --keep-feature-suffix for filtering, and the base\n\
@@ -197,7 +197,7 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        help = "Keep only query rows whose suffix (after --feature-name-suffix-delim) equals this",
+        help = "Keep only rows whose suffix equals this value",
         long_help = "e.g. `count/spliced` drops the `count/unspliced` rows of a faba\n\
                      genes backend, collapsing the {spliced,unspliced} doubling to one\n\
                      row per gene. Requires --feature-name-suffix-delim. Rows lacking\n\

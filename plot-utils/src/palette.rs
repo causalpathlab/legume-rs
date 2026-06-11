@@ -23,8 +23,7 @@ pub type Rgb = (u8, u8, u8);
 #[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]
 #[clap(rename_all = "lowercase")]
 pub enum Palette {
-    /// Auto: Paired for ≤11 (default), Category20 beyond. Yellow is
-    /// stripped from every palette in this module — illegible on white.
+    /// Paired (≤11) or Category20 beyond; yellow-stripped (default).
     Auto,
     /// Okabe–Ito 8-color colorblind-safe palette.
     OkabeIto,

@@ -304,7 +304,7 @@ pub struct SimOneTypeArgs {
     #[arg(
         long,
         default_value_t = DEFAULT_EFFECT_SIZE,
-        help = "Standardized effect size for causal genes (+effect for matching category, −effect otherwise)"
+        help = "Standardized effect size for causal genes (+/− for matching/other category)"
     )]
     effect_size: f32,
 
@@ -332,7 +332,7 @@ pub struct SimOneTypeArgs {
         long = "no-zip",
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
-        help = "Disable `.zarr.zip` archiving (the default) and keep a plain `.zarr` directory instead",
+        help = "Keep a plain `.zarr` directory instead of `.zarr.zip` archive",
         long_help = "Disable `.zarr.zip` archiving (the default) and keep a plain `.zarr`\n\
                      directory instead. Matches the `--no-zip` convention used by faba."
     )]

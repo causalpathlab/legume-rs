@@ -122,7 +122,9 @@ pub struct PlotTopicArgs {
     #[arg(
         long,
         default_value_t = 12.0,
-        help = "Combined-panel width (inches); per-batch width is allocated proportional to cell count"
+        help = "Combined-panel width (inches)",
+        long_help = "Combined-panel width (inches); per-batch width is allocated\n\
+                     proportional to cell count."
     )]
     pub width: f32,
 
@@ -136,13 +138,18 @@ pub struct PlotTopicArgs {
         long,
         value_enum,
         default_value_t = GroupBy::Batch,
-        help = "Group cells into panels by batch (default) or by `senna annotate-by-enrichment` cell-type label"
+        help = "Group cells into panels by batch or by cell-type label",
+        long_help = "Group cells into panels by batch (default) or by\n\
+                     `senna annotate-by-enrichment` cell-type label."
     )]
     pub group_by: GroupBy,
 
     #[arg(
         long,
-        help = "Argmax TSV from `senna annotate-by-enrichment` (cell\\tcell_type\\tprobability). Defaults to manifest's annotate.argmax. Required for --group-by annotation."
+        help = "Argmax TSV from `senna annotate-by-enrichment`",
+        long_help = "Argmax TSV from `senna annotate-by-enrichment`\n\
+                     (cell\\tcell_type\\tprobability). Defaults to manifest's\n\
+                     annotate.argmax. Required for --group-by annotation."
     )]
     pub annotation: Option<Box<str>>,
 

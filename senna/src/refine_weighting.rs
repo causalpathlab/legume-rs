@@ -27,7 +27,7 @@ pub(crate) enum WeightingArg {
     /// Fisher-info weight from fitted NB mean-variance trend. Default.
     #[default]
     NbFisherInfo,
-    /// No per-feature weighting (raw DC-Poisson with entity-level degree correction).
+    /// No per-feature weighting (raw DC-Poisson).
     None,
 }
 

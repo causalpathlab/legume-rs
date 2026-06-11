@@ -150,7 +150,7 @@ pub struct GemArgs {
     #[arg(
         long = "min-cell-nnz",
         default_value_t = 2,
-        help = "Cell QC: minimum number of detected features (nonzeros) a cell must have across all modalities",
+        help = "Cell QC: minimum nonzeros a cell must have across all modalities",
         long_help = "Cell QC: minimum number of detected features (nonzeros) a cell must\n\
                      have **across all modalities** (count + m6A/A2I/APA) to be embedded\n\
                      and written. Modality-agnostic on purpose — coverage is skewed\n\
@@ -167,7 +167,7 @@ pub struct GemArgs {
 
     #[arg(
         long,
-        help = "Feature-only mode: skip the cell axis in phase 1 and skip the phase-2 cell projection",
+        help = "Feature-only mode: skip cell axis in phase 1 and phase-2 projection",
         long_help = "Feature-only mode: skip the cell axis in phase 1 **and** skip the\n\
                      phase-2 cell projection. `e_cell` / `b_cell` are still allocated and\n\
                      written, but stay at their init values (zero bias, random embedding)\n\
@@ -180,7 +180,7 @@ pub struct GemArgs {
     #[arg(
         long = "phase1-cells-per-pb",
         default_value_t = 0,
-        help = "Phase-1 cell-axis mode (k): controls what shapes the feature dictionary in phase 1",
+        help = "Phase-1 cell-axis mode (k): shapes the feature dictionary in phase 1",
         long_help = "Phase-1 cell-axis mode (`k`). Controls only what shapes the feature\n\
                      dictionary (β/z/δ/γ) in phase 1; phase 2 ALWAYS analytically projects\n\
                      every cell (unless `--no-cell-axis` / `--phase2-epochs 0`), so the\n\
@@ -335,7 +335,7 @@ pub struct GemArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Count-weight tempering exponent (τ ∈ [0, 1]; 1 = strict count-prop, 0 = uniform)",
+        help = "Count-weight tempering exponent (τ ∈ [0,1]; 1=count-prop, 0=uniform)",
         long_help = "Count-weight tempering exponent (τ ∈ [0, 1]; 1 = strict count-prop,\n\
                      0 = uniform over rows with non-zero mass)."
     )]
@@ -344,7 +344,7 @@ pub struct GemArgs {
     #[arg(
         long,
         default_value_t = 0.5,
-        help = "Modality-balance tempering exponent (τ_M ∈ [0, 1]; 1 = strict mass-prop, 0 = uniform)",
+        help = "Modality-balance tempering exponent (τ_M ∈ [0,1]; 1=mass-prop, 0=uniform)",
         long_help = "Modality-balance tempering exponent (τ_M ∈ [0, 1]; 1 = strict\n\
                      mass-prop, 0 = uniform across modalities)."
     )]
@@ -371,7 +371,7 @@ pub struct GemArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "Random negatives: pick another (g', m, c) row within the positive's stratum and modality",
+        help = "Random negatives: pick another (g', m, c) within the positive's stratum",
         long_help = "Random negatives: pick another (g', m, c) row within the\n\
                      positive's stratum and modality. Tests gene-cell identification\n\
                      (β-side classification)."
@@ -382,7 +382,7 @@ pub struct GemArgs {
         long,
         default_value_t = 5,
         alias = "n-swap-z",
-        help = "Swap-gene-mode negatives: keep β_g and modality fixed, substitute z from another gene",
+        help = "Swap-gene-mode negatives: keep β_g fixed, substitute z from another gene",
         long_help = "Swap-gene-mode negatives: keep β_g and (modality m, region r)\n\
                      fixed, but substitute the K-program loading z from another gene\n\
                      g'. Tests the gene's program-loading identity given the modality\n\
@@ -393,7 +393,7 @@ pub struct GemArgs {
     #[arg(
         long,
         default_value_t = 5,
-        help = "Swap-modality negatives: keep (gene, cell) fixed but swap the satellite's (modality, region) axis",
+        help = "Swap-modality negatives: keep (gene, cell) fixed, swap satellite modality/region",
         long_help = "Swap-modality negatives: keep (gene, cell) fixed but swap the\n\
                      satellite's `(modality, region)` axis to a different one. Forces\n\
                      δ/γ to keep each satellite distinguishable from the gene's base\n\

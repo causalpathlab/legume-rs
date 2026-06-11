@@ -96,7 +96,9 @@ pub struct ClusteringArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Resolution parameter for Leiden modularity (higher = more clusters, default 1.0)"
+        help = "Resolution parameter for Leiden modularity",
+        long_help = "Resolution parameter for Leiden modularity (higher = more clusters,\n\
+                     default 1.0)."
     )]
     resolution: f64,
 
@@ -117,7 +119,9 @@ pub struct ClusteringArgs {
     #[arg(
         long,
         default_value_t = 100.0,
-        help = "Edge weight scale for HSBM (default 100.0, scales fuzzy weights to count-like values)"
+        help = "Edge weight scale for HSBM (default 100.0)",
+        long_help = "Edge weight scale for HSBM (default 100.0); scales fuzzy KNN weights\n\
+                     to count-like values expected by the graph-tool backend."
     )]
     edge_scale: f64,
 
@@ -127,7 +131,9 @@ pub struct ClusteringArgs {
     #[arg(
         long,
         default_value_t = 2,
-        help = "Minimum cluster size to report (smaller clusters become unassigned, default 2)"
+        help = "Minimum cluster size to report (default 2)",
+        long_help = "Minimum cluster size to report; smaller clusters become unassigned\n\
+                     (default 2)."
     )]
     min_cluster_size: usize,
 
@@ -184,10 +190,11 @@ pub struct ClusteringArgs {
 
     #[arg(
         long = "from",
-        help = "Optional run manifest produced by `senna topic|masked-topic|joint-topic|svd|joint-svd`",
+        help = "Run manifest from `senna topic|masked-topic|joint-topic|svd|joint-svd`",
         long_help = "When given, the manifest is updated in place with the cluster\n\
-                     output path under `cluster.clusters` so that `senna annotate-by-enrichment`\n\
-                     can pick the cluster parquet up automatically."
+                     output path under `cluster.clusters` so that\n\
+                     `senna annotate-by-enrichment` can pick the cluster parquet up\n\
+                     automatically."
     )]
     from: Option<Box<str>>,
 }

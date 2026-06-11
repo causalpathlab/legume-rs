@@ -91,14 +91,14 @@ pub struct SimColliderArgs {
     #[arg(
         long,
         default_value_t = 0.3,
-        help = "PVE on U → A: cell-confounder influence on cell-type assignment (creates collider)"
+        help = "PVE on U → A: cell-confounder influence on cell-type assignment"
     )]
     pve_cell_covar_celltype: f32,
 
     #[arg(
         long,
         default_value_t = 0.3,
-        help = "PVE on X → Y: causal effect of exposure on gene expression (causal genes only)"
+        help = "PVE on X → Y: causal effect of exposure on gene expression"
     )]
     pve_exposure_gene: f32,
 
@@ -112,14 +112,14 @@ pub struct SimColliderArgs {
     #[arg(
         long,
         default_value_t = 0.2,
-        help = "PVE on U → Y: cell confounder effect on gene expression (source of collider bias)"
+        help = "PVE on U → Y: cell confounder effect on gene expression"
     )]
     pve_cell_covar_gene: f32,
 
     #[arg(
         long,
         default_value_t = DEFAULT_EFFECT_SIZE,
-        help = "Standardized effect size for causal genes (+effect for matching category, −effect otherwise)"
+        help = "Standardized effect size for causal genes (+/− for matching/other category)"
     )]
     effect_size: f32,
 
@@ -147,7 +147,7 @@ pub struct SimColliderArgs {
         long = "no-zip",
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
-        help = "Disable `.zarr.zip` archiving (the default) and keep a plain `.zarr` directory instead",
+        help = "Keep a plain `.zarr` directory instead of `.zarr.zip` archive",
         long_help = "Disable `.zarr.zip` archiving (the default) and keep a plain `.zarr`\n\
                      directory instead. Matches the `--no-zip` convention used by faba."
     )]
