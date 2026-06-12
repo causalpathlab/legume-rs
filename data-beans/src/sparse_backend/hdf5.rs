@@ -717,30 +717,38 @@ impl SparseIo for SparseMtxData {
             return Ok((nrow_out, ncol, ret));
         }
 
+        // Cold path: coalesce abutting/overlapping indptr ranges into single
+        // read_slice_1d calls, matching read_triplets_by_columns and zarr's
+        // by-row path (shared `coalesce_and_emit`). CSR: tag = output row,
+        // inner = column.
         let by_row = self.backend.group("/by_row")?;
         let data = by_row.dataset("data")?;
         let indices = by_row.dataset("indices")?;
-        let mut ret = Vec::new();
-        for (ii, &i_data) in rows_vec.iter().enumerate() {
-            if i_data >= nrow {
-                continue;
-            }
-            debug_assert!((i_data + 1) < indptr.len());
-            let start = indptr[i_data] as usize;
-            let end = indptr[i_data + 1] as usize;
-            if start >= end {
-                continue;
-            }
-            let ii = ii as u64;
-            let data_slice = data.read_slice_1d::<f32, _>(start..end)?;
-            let indices_slice = indices.read_slice_1d::<u64, _>(start..end)?;
-            for k in 0..(end - start) {
-                let x_ij = data_slice[k];
-                let jj = indices_slice[k];
-                debug_assert!((jj as usize) < ncol);
-                ret.push((ii, jj, x_ij));
-            }
-        }
+
+        let mut tagged: Vec<(u64, u64, u64)> = rows_vec
+            .iter()
+            .enumerate()
+            .filter_map(|(ii, &i_data)| {
+                if i_data >= nrow {
+                    return None;
+                }
+                let start = indptr[i_data];
+                let end = indptr[i_data + 1];
+                (start < end).then_some((ii as u64, start, end))
+            })
+            .collect();
+        tagged.sort_by_key(|&(_, start, _)| start);
+
+        let ret = shared::coalesce_and_emit(
+            &tagged,
+            ncol,
+            |ii, jj, val| (ii, jj, val),
+            |s, e| {
+                let data_buf = data.read_slice_1d::<f32, _>((s as usize)..(e as usize))?;
+                let indices_buf = indices.read_slice_1d::<u64, _>((s as usize)..(e as usize))?;
+                Ok((data_buf, indices_buf))
+            },
+        )?;
         Ok((nrow_out, ncol, ret))
     }
 
