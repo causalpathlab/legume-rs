@@ -1449,7 +1449,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "approx",
@@ -1483,7 +1483,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-alg"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "approx",
@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-sim"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1715,7 +1715,7 @@ dependencies = [
 
 [[package]]
 name = "enrichment"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "approx",
@@ -2410,7 +2410,7 @@ dependencies = [
 
 [[package]]
 name = "genomic-data"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -3444,7 +3444,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-param"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "approx",
@@ -3472,7 +3472,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-util"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anndists",
  "anyhow",
@@ -4291,7 +4291,7 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "plot-utils"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
