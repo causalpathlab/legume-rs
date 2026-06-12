@@ -36,7 +36,7 @@ const KEY_BY_ROW_INDICES: &str = "/by_row/indices";
 use anyhow::anyhow;
 
 use crate::sparse_backend::shared;
-use crate::utilities::io_helpers::chunk_elems;
+use crate::utilities::io_helpers::{chunk_elems, parse_name_file};
 
 const COMPRESSION_LEVEL: i32 = 5;
 
@@ -788,7 +788,7 @@ impl SparseIo for SparseMtxData {
         name_columns: Range<usize>,
         name_sep: &str,
     ) -> anyhow::Result<()> {
-        let names = shared::parse_name_file(name_file, name_columns, name_sep)?;
+        let names = parse_name_file(name_file, name_columns, name_sep)?;
         self.new_filled_vector(key, data_type::string(), &names)?;
         Ok(())
     }

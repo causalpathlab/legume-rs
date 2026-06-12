@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 
 use crate::sparse_backend::shared;
-use crate::utilities::io_helpers::chunk_elems;
+use crate::utilities::io_helpers::{chunk_elems, parse_name_file};
 
 const COMPRESSION_LEVEL: u8 = 5;
 
@@ -451,11 +451,10 @@ impl SparseIo for SparseMtxData {
     ) -> anyhow::Result<()> {
         use hdf5::types::VarLenUnicode;
 
-        let _names: Vec<VarLenUnicode> =
-            shared::parse_name_file(name_file, name_columns, name_sep)?
-                .iter()
-                .map(|x| x.parse().expect("invalid name"))
-                .collect();
+        let _names: Vec<VarLenUnicode> = parse_name_file(name_file, name_columns, name_sep)?
+            .iter()
+            .map(|x| x.parse().expect("invalid name"))
+            .collect();
 
         let root = self.backend.group("/")?;
         root.new_dataset::<VarLenUnicode>()
