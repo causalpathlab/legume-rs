@@ -21,9 +21,7 @@ pub struct Triplet {
 }
 
 pub struct UnifiedData {
-    pub triplets: Vec<Triplet>,
-    pub feature_names: Vec<Box<str>>,
-    pub per_file_data: Vec<SparseIoVec>,
+    // ── cell index ────────────────────────────────────────────────────────────
     pub barcodes: Vec<Box<str>>,
     /// Global cell id → global batch id.
     pub batch_membership: Vec<u32>,
@@ -36,13 +34,6 @@ pub struct UnifiedData {
     pub condition_membership: Vec<u32>,
     /// Global condition labels in id order. Defaults to `batch_names`.
     pub condition_names: Vec<Box<str>>,
-    /// For each compact feature id `i ∈ 0..n_features()`, the row
-    /// index into `per_file_data[0]` (the underlying `SparseIoVec`).
-    /// Identity (`0..n_features()`) when no HVG was applied; the
-    /// HVG selection indices after `subset_features`. Used when an
-    /// upstream pass (e.g. NB-Fisher) operates on the full backend
-    /// and the result needs to be aligned to the compact axis.
-    pub feature_to_backend_row: Vec<usize>,
     /// Per unified cell, a bitmask of which input files (modalities) the
     /// cell appears in: bit `b` set ⇔ the cell's barcode is present in
     /// backend `b`. Single-file / non-multiome loads set bit 0 for every
@@ -50,12 +41,51 @@ pub struct UnifiedData {
     /// cell. Drives `--multiome` auto modality-batching and matched-cell
     /// up-weighting.
     pub cell_modality: Vec<u32>,
+
+    // ── feature index ─────────────────────────────────────────────────────────
+    pub feature_names: Vec<Box<str>>,
+    /// For each compact feature id `i ∈ 0..n_features()`, the row index into
+    /// `backend`. Identity (`0..n_features()`) when no HVG was applied; the
+    /// HVG selection indices after `subset_features`. Used when an upstream
+    /// pass (e.g. NB-Fisher) operates on the full backend and the result needs
+    /// to be aligned to the compact axis.
+    pub feature_to_backend_row: Vec<usize>,
+
+    // ── edge list ─────────────────────────────────────────────────────────────
+    /// Cell↔feature edges. Empty until `materialize_cell_triplets` is called
+    /// (real-data path), or pre-built by `from_pseudobulks`.
+    pub triplets: Vec<Triplet>,
+
+    // ── sparse backend ────────────────────────────────────────────────────────
+    /// The underlying sparse count matrix.  `Some` for real-data paths (set by
+    /// `from_sparse_io`); `None` for synthetic pseudobulk `UnifiedData` (set by
+    /// `from_pseudobulks`, which pre-builds `triplets` directly).
+    pub backend: Option<SparseIoVec>,
+}
+
+impl UnifiedData {
+    /// Borrow the sparse count backend. Panics when called on a synthetic
+    /// pseudobulk `UnifiedData` (which has no backend).
+    pub fn count_backend(&self) -> &SparseIoVec {
+        self.backend
+            .as_ref()
+            .expect("count_backend called on synthetic pseudobulk UnifiedData (no backend)")
+    }
+
+    /// Mutably borrow the sparse count backend. Panics when called on a
+    /// synthetic pseudobulk `UnifiedData` (which has no backend).
+    pub fn count_backend_mut(&mut self) -> &mut SparseIoVec {
+        self.backend
+            .as_mut()
+            .expect("count_backend_mut called on synthetic pseudobulk UnifiedData (no backend)")
+    }
 }
 
 impl UnifiedData {
     pub fn n_cells(&self) -> usize {
         self.barcodes.len()
     }
+
 
     pub fn n_features(&self) -> usize {
         self.feature_names.len()
@@ -140,17 +170,17 @@ impl UnifiedData {
         let condition_names: Vec<Box<str>> = vec!["all".to_string().into_boxed_str()];
 
         Ok(UnifiedData {
-            triplets,
-            feature_names,
-            per_file_data: Vec::new(),
             barcodes,
             batch_membership,
             batch_names,
             condition_membership,
             condition_names,
-            feature_to_backend_row,
             // Synthetic pseudobulk "cells" are single-modality.
             cell_modality: vec![1u32; n_pb],
+            feature_names,
+            feature_to_backend_row,
+            triplets,
+            backend: None,
         })
     }
 
@@ -158,8 +188,7 @@ impl UnifiedData {
     /// Drops triplets whose feature isn't in `selected_indices`, remaps
     /// remaining features to compact 0..k indices, updates
     /// `feature_names`, and composes `feature_to_backend_row` so the
-    /// new compact index `i` still maps to the right row in
-    /// `per_file_data[0]`.
+    /// new compact index `i` still maps to the right row in `backend`.
     ///
     /// Used to apply HVG selection (`data_beans_alg::hvg::select_hvg_streaming`)
     /// at the gbe layer without reaching back into `SparseIoVec`.
@@ -218,7 +247,79 @@ impl UnifiedData {
         self.feature_to_backend_row = new_feature_to_backend_row;
     }
 
-    /// Build the cell↔feature edge list (`triplets`) from `per_file_data[0]`
+    /// Restrict to a subset of cells (by current global cell id).
+    /// Drops triplets whose cell isn't in `selected_indices`, remaps
+    /// remaining cells to compact 0..k indices, and updates all
+    /// per-cell metadata vecs (`barcodes`, `batch_membership`,
+    /// `condition_membership`, `cell_modality`).
+    ///
+    /// `backend` is **not** touched — the SparseIoVec retains the
+    /// original column layout.  Callers that later invoke
+    /// `build_pseudobulk` with `skip_materialize = true` rely on the
+    /// already-remapped triplets and must not call
+    /// `materialize_cell_triplets` again (which would overwrite them
+    /// from the full-N_old backend).
+    pub fn subset_cells(&mut self, selected_indices: &[usize]) {
+        if selected_indices.len() == self.n_cells() {
+            return; // no-op
+        }
+        let n_old = self.n_cells();
+        let mut old_to_new: Vec<i32> = vec![-1; n_old];
+        for (new_i, &old_i) in selected_indices.iter().enumerate() {
+            debug_assert!(old_i < n_old, "selected index {old_i} out of range");
+            old_to_new[old_i] = new_i as i32;
+        }
+
+        let new_barcodes: Vec<Box<str>> = selected_indices
+            .iter()
+            .map(|&i| self.barcodes[i].clone())
+            .collect();
+        let new_batch_membership: Vec<u32> = selected_indices
+            .iter()
+            .map(|&i| self.batch_membership[i])
+            .collect();
+        let new_condition_membership: Vec<u32> = selected_indices
+            .iter()
+            .map(|&i| self.condition_membership[i])
+            .collect();
+        let new_cell_modality: Vec<u32> = selected_indices
+            .iter()
+            .map(|&i| self.cell_modality[i])
+            .collect();
+
+        let n_before = self.triplets.len();
+        self.triplets.retain_mut(|t| {
+            let new_id = old_to_new[t.cell as usize];
+            if new_id >= 0 {
+                t.cell = new_id as u32;
+                true
+            } else {
+                false
+            }
+        });
+
+        if n_before > 0 {
+            info!(
+                "Cell subset: {} → {} cells ({} → {} edges retained)",
+                n_old,
+                new_barcodes.len(),
+                n_before,
+                self.triplets.len()
+            );
+        } else {
+            info!(
+                "Cell subset: {} → {} cells (triplets built later from this axis)",
+                n_old,
+                new_barcodes.len()
+            );
+        }
+        self.barcodes = new_barcodes;
+        self.batch_membership = new_batch_membership;
+        self.condition_membership = new_condition_membership;
+        self.cell_modality = new_cell_modality;
+    }
+
+    /// Build the cell↔feature edge list (`triplets`) from `backend`
     /// on the *current* unified feature axis. Deferred from construction so
     /// this training-only structure (~12 B/edge) doesn't coexist with the
     /// collapse's sufficient-stats during the peak collapse phase — call it
@@ -227,7 +328,7 @@ impl UnifiedData {
     /// compact unified ids via `feature_to_backend_row`. Idempotent-ish: it
     /// replaces whatever `triplets` currently holds.
     pub fn materialize_cell_triplets(&mut self) -> anyhow::Result<()> {
-        let data = &self.per_file_data[0];
+        let data = self.count_backend();
         let n_cells = data.num_columns();
         let backend_rows = data.num_rows();
 
@@ -342,11 +443,7 @@ impl UnifiedData {
         info!(
             "Unified batches: {} ({})",
             batch_names.len(),
-            batch_names
-                .iter()
-                .map(|s| s.as_ref())
-                .collect::<Vec<_>>()
-                .join(", ")
+            truncate_names(&batch_names, 6)
         );
 
         // Condition axis: defaults to a copy of the batch axis when no
@@ -365,15 +462,14 @@ impl UnifiedData {
                     dedup_labels(labels)
                 }
             };
-        info!(
-            "Unified conditions: {} ({})",
-            condition_names.len(),
-            condition_names
-                .iter()
-                .map(|s| s.as_ref())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        // Only log conditions when they differ from the batch axis.
+        if condition_names != batch_names {
+            info!(
+                "Unified conditions: {} ({})",
+                condition_names.len(),
+                truncate_names(&condition_names, 6)
+            );
+        }
 
         // Triplets (the cell↔feature edge list for training) are NOT built
         // here. They're a training-only structure the collapse never reads, so
@@ -383,17 +479,28 @@ impl UnifiedData {
         // on the final (possibly HVG/frozen-subset) feature axis.
         let n_features = feature_names.len();
         Ok(UnifiedData {
-            triplets: Vec::new(),
-            feature_names,
-            feature_to_backend_row: (0..n_features).collect(),
-            per_file_data: vec![data],
             barcodes,
             batch_membership,
             batch_names,
             condition_membership,
             condition_names,
             cell_modality,
+            feature_names,
+            feature_to_backend_row: (0..n_features).collect(),
+            triplets: Vec::new(),
+            backend: Some(data),
         })
+    }
+}
+
+/// Format the first `max_show` names from a slice, appending "… and N more" when
+/// the slice is longer, so INFO log lines stay readable regardless of set size.
+fn truncate_names(names: &[Box<str>], max_show: usize) -> String {
+    if names.len() <= max_show {
+        names.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join(", ")
+    } else {
+        let shown: Vec<&str> = names[..max_show].iter().map(|s| s.as_ref()).collect();
+        format!("{} … and {} more", shown.join(", "), names.len() - max_show)
     }
 }
 
@@ -451,6 +558,7 @@ pub fn load_unified_data(
     feature_kind: FeatureNameKind,
     preload: bool,
     column_alignment: data_beans::sparse_io_vector::ColumnAlignment,
+    per_file_feature_suffix: Option<Vec<Box<str>>>,
 ) -> anyhow::Result<UnifiedData> {
     use data_beans::sparse_io_vector::ColumnAlignment;
     use matrix_util::common_io::read_lines;
@@ -481,6 +589,7 @@ pub fn load_unified_data(
         preload,
         feature_kind: Some(feature_kind),
         column_alignment,
+        per_file_feature_suffix,
         ..Default::default()
     })?;
 
@@ -515,14 +624,76 @@ pub fn load_unified_data(
         }
     };
 
-    // Under Union with no explicit batch file, auto-batch by
-    // modality-presence so multiome cohorts (matched / unimodal) align.
-    let auto_modality_batch =
-        matches!(column_alignment, ColumnAlignment::Union) && batch_files.is_none();
+    // Under Union with no explicit batch file AND no embedded @batch tags,
+    // auto-batch by modality-presence so true multiome cohorts (matched +
+    // unimodal cells) get corrected for modality drop-out.
+    //
+    // Do NOT use modality-presence when the loader resolved real per-cell
+    // @batch sample IDs: that would discard sample structure and collapse
+    // all cells in the same input file into one batch (e.g. every cell in
+    // rep1_wt_genes.zarr.zip → "m0", every cell in rep1_wt_m6a.zarr.zip
+    // → "m6"), even though they share the same biological samples.
+    let batch_tags_are_trivial = loaded.batch.iter().all(|b| b.as_ref() == "all");
+    let auto_modality_batch = matches!(column_alignment, ColumnAlignment::Union)
+        && batch_files.is_none()
+        && batch_tags_are_trivial;
     UnifiedData::from_sparse_io(
         loaded.data,
         &loaded.batch,
         condition_labels.as_deref(),
         auto_modality_batch,
     )
+}
+
+/// Validate multiome group structure against the post-load unified barcodes
+/// and `cell_modality` bitmasks (bit `b` set ⇔ barcode present in file `b` of
+/// the flattened file list).
+///
+/// Only **cross-group disjointness** is enforced: a barcode must not appear in
+/// more than one group. Under `ColumnAlignment::Union` two groups sharing a raw
+/// barcode would silently fold into one cell (summing counts from different
+/// donors), so this guards against that mistake — fail fast with the offending
+/// barcode. Partial overlap *within* a group (patchy multiome — RNA-only /
+/// ATAC-only cells) is allowed: bge unions all cells regardless, and the
+/// modality-presence auto-batch already labels each group.
+///
+/// No-op for a single group (nothing to be disjoint from).
+///
+/// `group_sizes` is the file count per group, in flattened file order (so
+/// group 0 owns backend bits `0..group_sizes[0]`, group 1 the next block, …).
+pub fn validate_multiome_groups(
+    group_sizes: &[usize],
+    barcodes: &[Box<str>],
+    cell_modality: &[u32],
+) -> anyhow::Result<()> {
+    if group_sizes.len() <= 1 {
+        return Ok(());
+    }
+
+    // Per-group bitmask covering that group's flattened file indices.
+    let mut offset = 0usize;
+    let group_masks: Vec<u32> = group_sizes
+        .iter()
+        .map(|&n| {
+            let mask = (offset..offset + n).fold(0u32, |acc, i| acc | (1u32 << i));
+            offset += n;
+            mask
+        })
+        .collect();
+
+    // Cross-group: no barcode's modality bits may span more than one group.
+    for (cell_idx, &bits) in cell_modality.iter().enumerate() {
+        let n_groups_hit = group_masks.iter().filter(|&&m| bits & m != 0).count();
+        if n_groups_hit > 1 {
+            anyhow::bail!(
+                "multiome: barcode {:?} appears in multiple groups (modality bits \
+                 {:#b}). Barcodes must be unique across groups — under Union loading \
+                 a shared barcode merges cells from different samples into one.",
+                barcodes[cell_idx],
+                bits,
+            );
+        }
+    }
+
+    Ok(())
 }

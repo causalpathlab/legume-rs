@@ -272,17 +272,12 @@ fn load_or_compute_fisher_weights(
         "Computing NB-Fisher weights (block_size={:?})...",
         block_size
     );
-    let mut full_weights: Vec<f32> = Vec::new();
-    for (i, data) in unified.per_file_data.iter().enumerate() {
-        let w = compute_nb_fisher_weights(data, block_size)?;
-        info!(
-            "  backend {}: {} features, mean Fisher weight {:.3}",
-            i,
-            w.len(),
-            w.iter().sum::<f32>() / w.len().max(1) as f32
-        );
-        full_weights.extend(w);
-    }
+    let full_weights = compute_nb_fisher_weights(unified.count_backend(), block_size)?;
+    info!(
+        "  {} features, mean Fisher weight {:.3}",
+        full_weights.len(),
+        full_weights.iter().sum::<f32>() / full_weights.len().max(1) as f32
+    );
     // Subset to the (possibly HVG-reduced) compact feature axis so the
     // returned vec is aligned 1:1 with `unified.feature_names`.
     let feat_weights: Vec<f32> = unified
@@ -424,14 +419,14 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             "HVG-weighted projection: {} weighted features (>= 1.0)",
             w.iter().filter(|&&x| x > 0.0).count()
         );
-        unified.per_file_data[0].project_columns_weighted(
+        unified.count_backend_mut().project_columns_weighted(
             config.proj_dim,
             config.block_size,
             batch_arg,
             w,
         )?
     } else {
-        unified.per_file_data[0].project_columns_with_batch_correction(
+        unified.count_backend_mut().project_columns_with_batch_correction(
             config.proj_dim,
             config.block_size,
             batch_arg,
@@ -465,7 +460,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         config.sort_dim, config.num_levels
     );
     let collapse_out = collapse_columns_multilevel_with_hierarchy(
-        &mut unified.per_file_data[0],
+        unified.count_backend_mut(),
         &proj_out.proj,
         &batch_labels,
         &MultilevelParams {
@@ -1205,7 +1200,7 @@ fn build_active_samplers(
     // exactly a column read — so the 5 GB flat triplet list (which only the
     // unused flat `PerBatch` path ever read) is skipped entirely. The HVG /
     // frozen subset is honored via `feature_to_backend_row`.
-    let data = &unified.per_file_data[0];
+    let data = unified.count_backend();
     let n_cells = data.num_columns();
     let n_features = unified.n_features();
     let n_batches = unified.n_batches();

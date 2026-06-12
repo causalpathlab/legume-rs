@@ -113,6 +113,15 @@ pub struct SparseIoVec {
     /// Optional canonicalizer for barcode matching under `Union` mode.
     /// See [`ColumnNameCanonicalizer`].
     column_canonicalizer: Option<ColumnNameCanonicalizer>,
+    /// Optional per-backend feature-name (row) suffix, indexed by push
+    /// order (`didx`). When set, every row of backend `b` is renamed
+    /// `{canon(row)}/{suffix[b]}` *after* canonicalization — so the
+    /// canonical gene/locus rule still applies to the bare name, and the
+    /// suffix only namespaces it onto a modality-specific row. Two
+    /// backends sharing a raw name (e.g. spliced vs unspliced `TSPAN6`)
+    /// thus stay separate, while the same name + same suffix (same
+    /// modality across donors) still merges. `None` = no suffixing.
+    per_backend_row_suffix: Option<Vec<Box<str>>>,
 }
 
 /// Strategy for aligning row names across multiple pushed backends.
@@ -203,6 +212,7 @@ impl SparseIoVec {
             row_alignment: RowAlignment::default(),
             column_alignment: ColumnAlignment::default(),
             column_canonicalizer: None,
+            per_backend_row_suffix: None,
         }
     }
 
@@ -238,6 +248,25 @@ impl SparseIoVec {
             "row canonicalizer must be set before any push"
         );
         self.row_canonicalizer = Some(Arc::new(canon));
+        Ok(self)
+    }
+
+    /// Install a per-backend feature-name suffix (one entry per backend,
+    /// in push order). Each backend `b`'s rows are renamed
+    /// `{canon(row)}/{suffix[b]}`, so files sharing raw feature names stay
+    /// on separate rows unless they also share the suffix (same modality).
+    /// Must be called BEFORE the first [`push`](Self::push). The vec length
+    /// must match the number of backends that will be pushed; `push` errors
+    /// if `didx` is out of range.
+    pub fn with_per_backend_row_suffix(
+        mut self,
+        suffix: Vec<Box<str>>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.data_vec.is_empty(),
+            "per-backend row suffix must be set before any push"
+        );
+        self.per_backend_row_suffix = Some(suffix);
         Ok(self)
     }
 
@@ -505,10 +534,23 @@ impl SparseIoVec {
         let row_names = data.row_names()?;
         let mut local_to_global = Vec::with_capacity(row_names.len());
         for row in row_names.iter() {
-            let key: Box<str> = match self.row_canonicalizer.as_ref() {
+            let mut key: Box<str> = match self.row_canonicalizer.as_ref() {
                 Some(canon) => canon(row),
                 None => row.clone(),
             };
+            // Per-backend modality namespacing: append `/{suffix}` after
+            // canonicalization so the gene/locus rule still applies to the
+            // bare name and only the modality tag distinguishes the row.
+            if let Some(suffixes) = self.per_backend_row_suffix.as_ref() {
+                let suffix = suffixes.get(didx).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "per_backend_row_suffix has {} entries but backend index is {}",
+                        suffixes.len(),
+                        didx,
+                    )
+                })?;
+                key = format!("{key}/{suffix}").into_boxed_str();
+            }
             let glob_row = match self.row_name_position.get(&key) {
                 Some(&g) => g,
                 None => {
@@ -1788,17 +1830,35 @@ impl SparseIoVec {
             .progress_chars("##-"),
         );
 
-        let enumerated: Vec<_> = batches.iter().enumerate().collect();
+        // Schedule largest batches first (LPT heuristic) so the heavy tail
+        // overlaps with the many small batches rather than serialising at the end.
+        let mut batches_vec: Vec<_> = batches.into_iter().collect();
+        batches_vec.sort_by_key(|(_, cells)| std::cmp::Reverse(cells.len()));
+        // In outer-parallel mode every per-batch HNSW runs on 1 rayon thread.
+        // For batches much larger than the average that causes a long serial
+        // tail.  Allow large batches to use inner parallelism instead: once
+        // the small batches finish, their rayon threads work-steal subtasks
+        // from the large batch's parallel_insert_slice, effectively donating
+        // all available cores to the outlier.  The threshold is generous
+        // (4× average) to avoid inner-parallel overhead on typical batches.
+        let avg_cells = if batches_vec.is_empty() {
+            1
+        } else {
+            ntot / batches_vec.len()
+        };
+        let large_batch_threshold = (avg_cells * 4).max(n_threads * 512);
+        let enumerated: Vec<_> = batches_vec.iter().enumerate().collect();
         let mut idx_name_glob_dict: Vec<_> = if outer_parallel {
             enumerated
                 .into_par_iter()
                 .progress_with(prog_bar.clone())
                 .map(|(batch_index, (batch_name, batch_glob_indices))| {
+                    let use_inner_parallel = batch_glob_indices.len() > large_batch_threshold;
                     (
                         batch_index,
                         batch_name.to_string().into_boxed_str(),
                         batch_glob_indices.clone(),
-                        create_column_dict(feature_matrix, batch_glob_indices, false),
+                        create_column_dict(feature_matrix, batch_glob_indices, use_inner_parallel),
                     )
                 })
                 .collect()
@@ -1887,11 +1947,13 @@ impl SparseIoVec {
             batches,
         );
 
-        let mut ret = Vec::with_capacity(nbatches);
-        for b in 0..nbatches {
-            let (others, _) = dict.search_by_query_name(&b, nbatches, false)?;
-            ret.push(others);
-        }
+        let ret: Vec<Vec<usize>> = (0..nbatches)
+            .into_par_iter()
+            .map(|b| {
+                dict.search_by_query_name(&b, nbatches, false)
+                    .map(|(others, _)| others)
+            })
+            .collect::<anyhow::Result<Vec<Vec<usize>>>>()?;
         self.between_batch_proximity = Some(ret);
 
         Ok(())
