@@ -230,14 +230,18 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
         args.batch_files.as_deref(),
     )?;
 
-    /* 1b. Cell QC (on by default): drop ambient / outlier cells from BOTH
-    modalities up front — before projection / collapse — so they never shape
-    the pseudobulk or the peak-to-gene links. `--qc-auto-cutoff` adds 2-means
-    cell calling; `--qc-histogram` prints the nnz distribution. */
+    /* 1b. Cell QC (on by default): drop ambient / outlier cells up front —
+    before projection / collapse — so they never shape the pseudobulk or the
+    peak-to-gene links. Cell calling is driven by the RNA (gene) layer only
+    (`stack[0]`), NOT the pooled RNA+ATAC nnz: a cell with deep ATAC but no gene
+    expression must not survive on its ATAC depth. RNA and ATAC share identical
+    cell columns (validated at load), so the RNA `train_keep` masks BOTH layers.
+    `--qc-auto-cutoff` adds 2-means cell calling; `--qc-histogram` prints the
+    nnz distribution. */
     if let Some(cfg) = args.qc.to_config() {
-        let report = data_beans::qc_lib::compute_qc_stack(&paired.data_stack, &cfg, None)?;
+        let report = data_beans::qc_lib::compute_qc(&paired.data_stack.stack[0], &cfg, None)?;
         info!(
-            "cell QC: dropping {} / {} cells before peak-to-gene linkage",
+            "cell QC (RNA-driven): dropping {} / {} cells before peak-to-gene linkage",
             report.n_cells_dropped,
             report.train_keep.len(),
         );

@@ -94,7 +94,7 @@ pub struct GemManifest {
 
 /// Cell-axis QC outputs passed to [`write_outputs`].
 ///
-/// `keep_idx` — QC-passed cell indices (see `--min-cell-nnz`); the per-cell
+/// `keep_idx` — QC-passed cell indices (spliced auto cell-calling); the per-cell
 /// outputs (`cell_embedding`, `cell_bias`, `cell_to_pb`) are restricted to
 /// these rows at write time, no backend rewrite.
 ///

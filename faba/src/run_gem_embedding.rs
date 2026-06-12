@@ -6,7 +6,7 @@ use data_beans::sparse_io_vector::ColumnAlignment;
 use graph_embedding_util::data::UnifiedData;
 use graph_embedding_util::stop::setup_stop_handler;
 use graph_embedding_util::{load_unified_data, FeatureNameKind, LoadUnifiedArgs};
-use log::info;
+use log::{info, warn};
 use matrix_util::common_io::{basename, mkdir_parent};
 use matrix_util::traits::RunningStatOps;
 use rayon::ThreadPoolBuilder;
@@ -63,14 +63,26 @@ fn link_satellites(
                 .iter()
                 .map(|b| bc_to_cell.get(b.as_ref()).copied())
                 .collect();
+            let total = col_to_genes_cell.len();
             let matched = col_to_genes_cell.iter().filter(|c| c.is_some()).count();
-            info!(
-                "satellite {}: {} / {} columns matched a genes cell ({} unmatched, donate nothing)",
-                s.label,
-                matched,
-                col_to_genes_cell.len(),
-                col_to_genes_cell.len() - matched,
-            );
+            if matched == 0 {
+                // Almost always a sample-tag mismatch: the satellite's
+                // `barcode@sample` names don't coincide with any genes cell, so
+                // the whole modality is silently dropped. Surface it loudly.
+                warn!(
+                    "satellite {}: 0 / {total} columns matched a genes cell — this modality \
+                     donates NOTHING to the model. Its `barcode@sample` names don't line up with \
+                     the genes cells; check that the genes and {} files reduce to the SAME sample \
+                     id (set the per-flag --*-sample-strip suffixes so both strip to e.g. `rep1_wt`).",
+                    s.label, s.label,
+                );
+            } else {
+                info!(
+                    "satellite {}: {matched} / {total} columns matched a genes cell ({} unmatched, donate nothing)",
+                    s.label,
+                    total - matched,
+                );
+            }
             SatelliteLink {
                 row_map,
                 col_to_genes_cell,
@@ -294,34 +306,30 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // ---- Cell QC over the SPLICED features (the collapse driver) ----
     // The collapse places each cell from its spliced projection, so a cell with
     // zero spliced counts is a zero vector there — unplaceable. We count
-    // non-zeros over the spliced rows only and, by default (`--auto-cell-cutoff`),
-    // auto-select the ambient↔real boundary by 2-means on the spliced log1p-nnz
-    // (floored at `--min-cell-nnz`), printing the histogram. The called cells are
-    // then subset UP FRONT (see below) so the collapse + training + outputs all
-    // run on real cells only. `--no-auto-cell-cutoff` falls back to a plain
-    // `--min-cell-nnz` floor.
+    // non-zeros over the spliced rows only and, by default, auto-select the
+    // ambient↔real boundary by 2-means on the spliced log1p-nnz (printing the
+    // histogram); the called cells are then subset UP FRONT (see below) so the
+    // collapse + training + outputs all run on real cells only. There is no
+    // manual nnz floor — the automatic cell calling sets the cutoff. When it
+    // finds no split (unimodal) or `--no-auto-cell-cutoff` disables it, the
+    // cutoff falls back to 1, dropping only genuinely zero-spliced (unplaceable)
+    // cells.
     let spliced_rows = spliced_backend_rows(&unified, &table, &genes_row_map);
     let cell_nnz_full =
         collect_column_stat_across_vec(unified.count_backend(), Some(&spliced_rows), None)
             .context("cell QC column statistics (spliced)")?
             .count_positives();
     let n_cells_full = unified.n_cells();
-    let suggested = data_beans::qc::suggest_nnz_cutoff(&cell_nnz_full);
-    let cell_cutoff = if args.auto_cell_cutoff {
-        let c = args
-            .min_cell_nnz
-            .max(suggested.unwrap_or(args.min_cell_nnz));
-        data_beans::qc::print_nnz_summary("Spliced cell", &cell_nnz_full, c, suggested);
-        c
+    let suggested = if args.auto_cell_cutoff {
+        data_beans::qc::suggest_nnz_cutoff(&cell_nnz_full)
     } else {
-        if let Some(s) = suggested {
-            info!(
-                "spliced-nnz auto-cutoff suggestion = {} (disabled; using --min-cell-nnz {})",
-                s, args.min_cell_nnz
-            );
-        }
-        args.min_cell_nnz
+        None
     };
+    // Auto cutoff when found; otherwise 1 (drop only zero-spliced cells).
+    let cell_cutoff = suggested.unwrap_or(1).max(1);
+    if args.auto_cell_cutoff {
+        data_beans::qc::print_nnz_summary("Spliced cell", &cell_nnz_full, cell_cutoff, suggested);
+    }
     // Single keep predicate, shared by the backend mask and the logical subset
     // below — they MUST select the same cells (and both renumber survivors in
     // ascending order) for "logical cell i ≡ backend column i" to hold.
@@ -335,8 +343,8 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         .collect();
     anyhow::ensure!(
         !kept.is_empty(),
-        "cell QC dropped every cell at spliced cutoff {cell_cutoff}; lower --min-cell-nnz \
-         or pass --no-auto-cell-cutoff"
+        "cell QC dropped every cell at spliced cutoff {cell_cutoff} — no cell has a \
+         non-zero spliced count; check the inputs or pass --no-auto-cell-cutoff"
     );
 
     // Subset the genes backend to the called cells UP FRONT — `mask_columns`
@@ -572,7 +580,7 @@ struct Pass1Context<'a> {
     cell_nrms: &'a [f32],
     /// Per-cell **spliced** non-zero count (f32, one per cell).
     cell_nnz: &'a [f32],
-    /// Effective spliced-nnz cell cutoff from pass-1 (auto or `--min-cell-nnz`),
+    /// Effective spliced-nnz cell cutoff from pass-1 (auto cell-calling, else 1),
     /// re-applied to the dead-cell filter so both passes agree.
     cell_cutoff: usize,
     /// Pass-1 feature table — used for gene scoring (n_genes).
@@ -764,8 +772,8 @@ fn run_refine_pass(
         train(args, &table2, &pb2, &mut model2, stop).context("training loop (refined)")?;
 
     // All cells in `unified` already passed the combined QC (subset_cells
-    // applied both min_cell_nnz and the embedding threshold), so keep_idx2
-    // is the identity partition.
+    // applied both the spliced cell cutoff and the embedding threshold), so
+    // keep_idx2 is the identity partition.
     let keep_idx2: Vec<usize> = (0..n_cells2).collect();
 
     Ok(Some(Pass2Outputs {
