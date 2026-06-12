@@ -602,6 +602,7 @@ fn write_topic_manifest(
         pb_latent_suffix: Some("pb_latent.parquet"),
         dictionary_empirical_suffix: Some("dictionary_empirical.parquet"),
         feature_embedding_suffix: None,
+        cell_embedding_suffix: None,
         default_colour_by: "cluster",
         has_latent: true,
         has_cell_to_pb,

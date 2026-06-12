@@ -780,6 +780,14 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         } else {
             None
         },
+        // With --resolve-etm `latent` is log θ (topic space); the H-space cell
+        // embedding Z is written separately so annotate-by-projection finds it.
+        // Without it, `latent` IS Z, so this stays None.
+        cell_embedding_suffix: if resolve_etm {
+            Some("cell_embedding.parquet")
+        } else {
+            None
+        },
         default_colour_by: if resolve_etm { "topic" } else { "cluster" },
         has_latent: true,
         has_cell_to_pb: false,

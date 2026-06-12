@@ -353,7 +353,7 @@ enum Commands {
 
     #[command(
         name = "annotate-by-enrichment",
-        visible_aliases = ["ann-by-enrich", "annot-by-enrich"],
+        visible_aliases = ["annotate-by-topic", "ann-by-topic", "ann-by-enrich", "annot-by-enrich"],
         about = "Annotate cells via cluster-level marker enrichment.",
         long_about = "Pipeline: (re)cluster on the manifest's latent (Leiden if no clusters\n\
                       exist) → NB-Fisher-adjusted per-cluster mean expression (streamed\n\

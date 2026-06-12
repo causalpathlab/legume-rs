@@ -446,6 +446,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: Some("feature_embedding.parquet"),
+        cell_embedding_suffix: Some("cell_embedding.parquet"),
         default_colour_by: "cluster",
         has_latent: true,
         has_cell_to_pb: false,
@@ -685,8 +686,9 @@ fn write_outputs(
         Some(&h_cols),
     )?;
 
-    // Z — cell × H, written as BOTH cell_embedding and latent (annotate-by-projection
-    // reads outputs.latent as the cell embedding).
+    // Z — cell × H, written as BOTH cell_embedding and latent. annotate-by-projection
+    // reads outputs.cell_embedding; latent=Z keeps plot / layout / clustering (which
+    // read outputs.latent) working, since for this run the latent IS the embedding.
     trained.z.to_parquet_with_names(
         &format!("{out}.cell_embedding.parquet"),
         (Some(cell_names), Some("cell")),
