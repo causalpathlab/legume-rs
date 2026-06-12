@@ -58,6 +58,13 @@ pub struct ReadSharedRowsArgs {
     pub qc_block_size: Option<usize>,
     /// Optional path for a per-cell QC report TSV (`None` = don't write).
     pub qc_report_out: Option<Box<str>>,
+    /// Optional per-file feature-name (row) modality suffix, one entry per
+    /// `data_files` entry in order. When `Some`, backend `b`'s rows are
+    /// renamed `{canon(row)}/{suffix[b]}` so files sharing raw feature
+    /// names (e.g. spliced/unspliced) stay on separate rows, while the same
+    /// name + suffix (same modality across samples) still merges. `None` =
+    /// today's behavior (no suffixing). Must match `data_files` length.
+    pub per_file_feature_suffix: Option<Vec<Box<str>>>,
 }
 
 /// Sparse data with per-cell batch labels.
@@ -106,6 +113,21 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         .expect("with_row_alignment on empty SparseIoVec")
         .with_column_alignment(args.column_alignment)
         .expect("with_column_alignment on empty SparseIoVec");
+
+    // Per-file feature-name modality suffix (e.g. `--multiome` modality
+    // namespacing). Installed before any push so backend `b`'s rows become
+    // `{canon(row)}/{suffix[b]}`.
+    if let Some(suffix) = args.per_file_feature_suffix.clone() {
+        anyhow::ensure!(
+            suffix.len() == args.data_files.len(),
+            "per_file_feature_suffix has {} entries but {} data files were given",
+            suffix.len(),
+            args.data_files.len(),
+        );
+        data_vec = data_vec
+            .with_per_backend_row_suffix(suffix)
+            .expect("with_per_backend_row_suffix on empty SparseIoVec");
+    }
 
     use crate::feature_names::FeatureNameKind;
 

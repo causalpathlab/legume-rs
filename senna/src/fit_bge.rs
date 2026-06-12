@@ -18,6 +18,11 @@ use graph_embedding_util as ge;
 use rustc_hash::FxHashMap;
 use std::io::BufRead;
 
+/// One parsed `--multiome` file entry: `(optional modality label, file path)`.
+/// The label (or, when `None`, the within-group position) namespaces that
+/// file's features as `{name}/{modality}`.
+type MultiomeFile = (Option<Box<str>>, Box<str>);
+
 #[derive(Args, Debug)]
 pub struct BgeArgs {
     #[arg(
@@ -328,24 +333,43 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        value_delimiter = ',',
-        num_args = 1..,
-        help = "Multiome modality files (comma-separated), one per modality",
-        long_help = "Multiome load: pass one sparse file per modality, e.g.\n\
-                     `--multiome rna.zarr,atac.zarr`. Each file keeps its own\n\
-                     feature space (no cross-file barcode suffixing); cells are\n\
-                     unioned by raw barcode — a cell seen only in RNA contributes\n\
-                     triplets just to the RNA block, ATAC-only cells just to the\n\
-                     ATAC block, shared cells get both. File ORDER defines\n\
-                     modality order (used for per-modality rebalancing / outputs).\n\
-                     Maps to `ColumnAlignment::Union` and replaces the positional\n\
-                     data files.\n\
+        value_name = "FILE[,FILE...]",
+        help = "Multiome modality files (comma-separated); repeat for multiple samples.",
+        long_help = "Multiome load: pass files for one sample (group) per flag,\n\
+                     comma-separated, e.g. `--multiome rna.zarr,atac.zarr`. Cells\n\
+                     are the shared axis; each modality keeps its own features.\n\
+                     Repeat the flag for each additional sample/group:\n\
                      \n\
-                     Batch resolution is constrained: a single --batch-files\n\
-                     file is allowed (one label per unified cell), or embedded\n\
-                     `@batch` tags that agree across modalities."
+                       --multiome rna1.zarr,atac1.zarr \\\n\
+                       --multiome rna2.zarr,atac2.zarr\n\
+                     \n\
+                     Cell (barcode) identity: within a group, equal barcodes are\n\
+                     the same cell (Union merge across modalities; a cell present\n\
+                     in only some files is fine — patchy multiome). ACROSS groups\n\
+                     barcodes must be disjoint — a shared barcode would merge\n\
+                     cells from different samples (validated; error on collision).\n\
+                     \n\
+                     Feature (modality) identity: features are namespaced\n\
+                     `{name}/{modality}` so the SAME modality across samples\n\
+                     merges (shared gene panel) while DIFFERENT modalities stay\n\
+                     on separate rows — even when names collide (e.g. spliced vs\n\
+                     unspliced `TSPAN6`). The modality tag defaults to the\n\
+                     within-group file position (m0, m1, …); override it with a\n\
+                     `label=` prefix, e.g.\n\
+                       --multiome spliced=spliced.zarr,unspliced=unspliced.zarr\n\
+                     File ORDER within a group defines modality order, so the\n\
+                     positional default lines up across groups.\n\
+                     \n\
+                     Batch identity: each group becomes its own batch when\n\
+                     --batch-files is omitted (modality-presence auto-batch).\n\
+                     Pass a single --batch-files (one label per unified cell) to\n\
+                     set batches explicitly. Replaces the positional data files.\n\
+                     \n\
+                     Note: comma-separate files within one group with no spaces\n\
+                     (e.g. rna.zarr,atac.zarr); use a separate --multiome flag\n\
+                     for each additional group."
     )]
-    multiome: Option<Vec<Box<str>>>,
+    multiome: Vec<Box<str>>,
 
     #[arg(
         long,
@@ -379,9 +403,31 @@ pub struct BgeArgs {
 pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
-    // Input files: positional (single-modality) OR --multiome modality files.
-    // File order under --multiome defines modality order.
-    let is_multiome = args.multiome.as_ref().is_some_and(|v| !v.is_empty());
+    // Input files: positional (single-modality) OR --multiome modality groups.
+    // Each --multiome occurrence is one group; comma-separated files within it.
+    let is_multiome = !args.multiome.is_empty();
+
+    // Parse each --multiome occurrence (one group) into its files, honoring an
+    // optional `label=file` prefix that names the modality. The label (or, when
+    // omitted, the within-group position `m{pos}`) namespaces that file's
+    // features as `{name}/{label}` so distinct modalities stay on separate rows
+    // (e.g. spliced vs unspliced `TSPAN6`), while the same modality across
+    // samples (same label/position) still merges. Each `(label, file)` pair is
+    // (Option<modality label>, file path).
+    let multiome_groups: Vec<Vec<MultiomeFile>> = args
+        .multiome
+        .iter()
+        .map(|s| {
+            s.split(',')
+                .map(|tok| match tok.split_once('=') {
+                    Some((label, file)) if !label.is_empty() && !file.is_empty() => {
+                        (Some(label.into()), file.into())
+                    }
+                    _ => (None, tok.into()),
+                })
+                .collect()
+        })
+        .collect();
 
     // Multiome mixes gene rows (RNA) and locus rows (ATAC peaks) on one axis,
     // so canonicalize per-name via `Mixed` (genes → gene rule, `chrX:s-e` →
@@ -398,13 +444,55 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         }
     };
 
+    // Flatten groups to get the per-file slice passed to load_unified_data,
+    // plus the parallel per-file modality suffix (label, else `m{within-group
+    // position}`) used to namespace features as `{name}/{suffix}`.
+    let data_files_flat: Vec<Box<str>>;
+    let feature_suffix: Option<Vec<Box<str>>>;
     let data_files: &[Box<str>] = if is_multiome {
-        args.multiome.as_deref().unwrap()
+        data_files_flat = multiome_groups
+            .iter()
+            .flat_map(|g| g.iter().map(|(_, file)| file.clone()))
+            .collect();
+        feature_suffix = Some(
+            multiome_groups
+                .iter()
+                .flat_map(|g| {
+                    g.iter().enumerate().map(|(pos, (label, _))| {
+                        label
+                            .clone()
+                            .unwrap_or_else(|| format!("m{pos}").into_boxed_str())
+                    })
+                })
+                .collect(),
+        );
+        if multiome_groups.len() > 1 {
+            let counts = multiome_groups
+                .iter()
+                .map(|g| g.len().to_string())
+                .collect::<Vec<_>>()
+                .join("+");
+            info!(
+                "--multiome: {} groups, {} total files ({})",
+                multiome_groups.len(),
+                data_files_flat.len(),
+                counts
+            );
+        }
+        if let Some(suf) = feature_suffix.as_ref() {
+            info!(
+                "--multiome: namespacing features as {{name}}/{{modality}} (per-file \
+                 modality: {})",
+                suf.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join(", ")
+            );
+        }
+        &data_files_flat
     } else {
+        feature_suffix = None;
         anyhow::ensure!(
             !args.data_files.is_empty(),
-            "no input files: pass single-modality files positionally, or modality \
-             files via `--multiome rna,atac`"
+            "no input files: pass single-modality files positionally, or multiome \
+             groups via `--multiome rna.zarr,atac.zarr [--multiome rna2.zarr,atac2.zarr ...]`"
         );
         &args.data_files
     };
@@ -445,7 +533,19 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         feature_kind.clone(),
         args.preload_data,
         column_alignment,
+        feature_suffix,
     )?;
+
+    // Guard barcode identity across groups: disjoint barcodes, so Union
+    // loading never merges cells from different samples. No-op for one group.
+    if is_multiome {
+        let group_sizes: Vec<usize> = multiome_groups.iter().map(Vec::len).collect();
+        ge::validate_multiome_groups(
+            &group_sizes,
+            &unified.barcodes,
+            &unified.cell_modality,
+        )?;
+    }
 
     if unified.n_conditions() > 1 {
         info!(
@@ -461,8 +561,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // informs the joint embedding / feature dictionary, but QC-failed cells
     // (near-empty floor + MAD outliers) are dropped from the archetypal
     // analysis and all per-cell outputs via a write-time `select_rows`.
-    // Computed on the full-feature unified matrix (`per_file_data[0]`), so
-    // n_genes is the per-cell detected-feature count across all modalities.
+    // Computed on the full-feature unified count backend, so n_genes is the
+    // per-cell detected-feature count across all modalities.
     let qc_keep_idx: Option<Vec<usize>> = if let Some(cfg) = args.qc.to_config() {
         if cfg.feature_min_cells > 0 {
             log::warn!(
@@ -471,7 +571,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             );
         }
         let report =
-            data_beans::qc_lib::compute_qc(&unified.per_file_data[0], &cfg, args.block_size)?;
+            data_beans::qc_lib::compute_qc(unified.count_backend(), &cfg, args.block_size)?;
         let keep = report.emit_idx_unmasked();
         info!(
             "QC: {} / {} cells kept for output ({} near-empty, {} MAD-outlier dropped)",
@@ -493,7 +593,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     let hvg_enabled = effective_hvg_n > 0 || effective_hvg_list.is_some();
     let hvg_weights: Option<Vec<f32>> = if hvg_enabled {
         let hvg = select_hvg_streaming(
-            &unified.per_file_data[0],
+            unified.count_backend(),
             (effective_hvg_n > 0).then_some(effective_hvg_n),
             effective_hvg_list,
             args.block_size,
