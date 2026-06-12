@@ -1,24 +1,45 @@
 use crate::sparse_io::{COLUMN_SEP, ROW_SEP};
 use matrix_util::common_io::*;
+use std::ops::Range;
+
+/// Parse a names file into one joined string per line.
+///
+/// Reads `name_file` as lines of whitespace-separated words, then for each line
+/// joins the words at the column indices in `name_columns` (clamped to the
+/// line's word count) with `name_sep`. Single source of truth shared by the
+/// row/column name readers below and by the zarr/hdf5 backends'
+/// `register_names_file` (the backend-specific dataset write stays per backend).
+pub fn parse_name_file(
+    name_file: &str,
+    name_columns: Range<usize>,
+    name_sep: &str,
+) -> anyhow::Result<Vec<String>> {
+    let name_data = read_lines_of_words(name_file, -1)?;
+    let names: Vec<String> = name_data
+        .lines
+        .iter()
+        .map(|line| {
+            // Clamp the upper bound to the line's word count so a large
+            // `name_columns.end` (e.g. a user-supplied word count) iterates at
+            // most `line.len()` times rather than materializing a huge range.
+            (name_columns.start..name_columns.end.min(line.len()))
+                .filter_map(|i| line.get(i))
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(name_sep)
+        })
+        .collect();
+    Ok(names)
+}
 
 /// Read row names from a file, joining multi-column names with ROW_SEP
 pub fn read_row_names(
     row_file: Box<str>,
     max_row_name_idx: usize,
 ) -> anyhow::Result<Vec<Box<str>>> {
-    let _names = read_lines_of_words(&row_file, -1)?.lines;
-    Ok(_names
+    Ok(parse_name_file(&row_file, 0..max_row_name_idx, ROW_SEP)?
         .into_iter()
-        .map(|x| {
-            let s = (0..x.len().min(max_row_name_idx))
-                .filter_map(|i| x.get(i))
-                .map(|x| x.to_string())
-                .collect::<Vec<_>>()
-                .join(ROW_SEP)
-                .parse::<String>()
-                .expect("invalid row name");
-            s.into_boxed_str()
-        })
+        .map(String::into_boxed_str)
         .collect())
 }
 
@@ -27,20 +48,12 @@ pub fn read_col_names(
     col_file: Box<str>,
     max_column_name_idx: usize,
 ) -> anyhow::Result<Vec<Box<str>>> {
-    let _names = read_lines_of_words(&col_file, -1)?.lines;
-    Ok(_names
-        .into_iter()
-        .map(|x| {
-            let s = (0..x.len().min(max_column_name_idx))
-                .filter_map(|i| x.get(i))
-                .map(|x| x.to_string())
-                .collect::<Vec<_>>()
-                .join(COLUMN_SEP)
-                .parse::<String>()
-                .expect("invalid col name");
-            s.into_boxed_str()
-        })
-        .collect())
+    Ok(
+        parse_name_file(&col_file, 0..max_column_name_idx, COLUMN_SEP)?
+            .into_iter()
+            .map(String::into_boxed_str)
+            .collect(),
+    )
 }
 
 /// Parse an index specification into an explicit, ordered list of indices.

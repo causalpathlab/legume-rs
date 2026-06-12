@@ -1,15 +1,15 @@
 //! Storage-agnostic helpers shared by the `zarr` and `hdf5` sparse backends.
 //!
 //! These capture the *algorithmic* duplication between the two `SparseIo`
-//! impls (range coalescing, name-file parsing, MTX header emission) without
-//! touching the *structural* divergences (zarr's decoded-chunk caches and
-//! `Element` string storage vs hdf5's datasets and `VarLenUnicode`). Each
-//! backend supplies its own retrieval primitive via a closure or keeps its
-//! own dataset-write tail; only the format-agnostic math lives here.
+//! impls (range coalescing and MTX header emission) without touching the
+//! *structural* divergences (zarr's decoded-chunk caches and `Element` string
+//! storage vs hdf5's datasets and `VarLenUnicode`). Each backend supplies its
+//! own retrieval primitive via a closure or keeps its own dataset-write tail;
+//! only the format-agnostic math lives here. (Name-file parsing is shared too,
+//! but lives in `utilities::io_helpers::parse_name_file` since it is general
+//! I/O, not backend-specific.)
 
-use matrix_util::common_io::*;
 use std::io::Write;
-use std::ops::Range;
 
 /// Coalesce abutting/overlapping ranges in `tagged` (already sorted by
 /// `start`), retrieve each merged span once through `retrieve`, and emit
@@ -63,35 +63,6 @@ where
         i = j;
     }
     Ok(ret)
-}
-
-/// Parse a names file into one joined string per line.
-///
-/// Reads `name_file` as lines of whitespace-separated words, then for each
-/// line joins the words at the column indices in `name_columns` with
-/// `name_sep`. The backend-specific dataset write (zarr `Element` string vs
-/// hdf5 `VarLenUnicode`) stays in the caller.
-pub(crate) fn parse_name_file(
-    name_file: &str,
-    name_columns: Range<usize>,
-    name_sep: &str,
-) -> anyhow::Result<Vec<String>> {
-    let name_data = read_lines_of_words(name_file, -1)?;
-    let name_columns: Vec<usize> = name_columns.collect();
-
-    let names: Vec<String> = name_data
-        .lines
-        .iter()
-        .map(|line| {
-            name_columns
-                .iter()
-                .filter_map(|&i| line.get(i))
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-                .join(name_sep)
-        })
-        .collect();
-    Ok(names)
 }
 
 /// Write the MatrixMarket coordinate header: the format magic line followed by
