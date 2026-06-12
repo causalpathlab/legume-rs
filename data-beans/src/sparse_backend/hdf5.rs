@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 
+use crate::sparse_backend::shared;
 use crate::utilities::io_helpers::chunk_elems;
 
 const COMPRESSION_LEVEL: u8 = 5;
@@ -356,8 +357,7 @@ impl SparseIo for SparseMtxData {
             (self.num_columns(), self.num_rows(), self.num_non_zeros())
         {
             let mut buf = open_buf_writer(mtx_file)?;
-            writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
-            writeln!(buf, "{}\t{}\t{}", nrow, ncol, nnz)?;
+            shared::write_mtx_header(&mut buf, nrow, ncol, nnz)?;
 
             for jj in 0..ncol {
                 let start = indptr[jj] as usize;
@@ -451,21 +451,11 @@ impl SparseIo for SparseMtxData {
     ) -> anyhow::Result<()> {
         use hdf5::types::VarLenUnicode;
 
-        let _names = read_lines_of_words(name_file, -1)?.lines;
-        let name_columns = name_columns.clone().collect::<Vec<_>>();
-        let _names: Vec<VarLenUnicode> = _names
-            .iter()
-            .map(|x| {
-                name_columns
-                    .iter()
-                    .filter_map(|&i| x.get(i))
-                    .map(|x| x.to_string())
-                    .collect::<Vec<_>>()
-                    .join(name_sep)
-                    .parse()
-                    .expect("invalid name")
-            })
-            .collect();
+        let _names: Vec<VarLenUnicode> =
+            shared::parse_name_file(name_file, name_columns, name_sep)?
+                .iter()
+                .map(|x| x.parse().expect("invalid name"))
+                .collect();
 
         let root = self.backend.group("/")?;
         root.new_dataset::<VarLenUnicode>()
@@ -636,7 +626,7 @@ impl SparseIo for SparseMtxData {
             // Cold path: coalesce abutting/overlapping indptr ranges into a
             // single `read_slice_1d` call. For a contiguous block of N cells
             // this collapses N HDF5 retrievals into 1 — same idea zarr's
-            // `coalesce_and_emit` uses for the chunked store.
+            // chunk-store path uses (shared `coalesce_and_emit`).
             let data = by_column.dataset("data")?;
             let indices = by_column.dataset("indices")?;
 
@@ -656,37 +646,17 @@ impl SparseIo for SparseMtxData {
                 .collect();
             tagged.sort_by_key(|&(_, start, _)| start);
 
-            let total: u64 = tagged.iter().map(|&(_, s, e)| e - s).sum();
-            let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity(total as usize);
-
-            let mut i = 0;
-            while i < tagged.len() {
-                let merged_start = tagged[i].1;
-                let mut merged_end = tagged[i].2;
-                let mut j = i + 1;
-                while j < tagged.len() && tagged[j].1 <= merged_end {
-                    merged_end = merged_end.max(tagged[j].2);
-                    j += 1;
-                }
-
-                let data_buf =
-                    data.read_slice_1d::<f32, _>((merged_start as usize)..(merged_end as usize))?;
-                let indices_buf = indices
-                    .read_slice_1d::<u64, _>((merged_start as usize)..(merged_end as usize))?;
-
-                for &(jj, start, end) in &tagged[i..j] {
-                    let off = (start - merged_start) as usize;
-                    let len = (end - start) as usize;
-                    for k in 0..len {
-                        let ii = indices_buf[off + k];
-                        let val = data_buf[off + k];
-                        debug_assert!((ii as usize) < nrow);
-                        ret.push((ii, jj, val));
-                    }
-                }
-
-                i = j;
-            }
+            let ret = shared::coalesce_and_emit(
+                &tagged,
+                nrow,
+                |jj, ii, val| (ii, jj, val),
+                |s, e| {
+                    let data_buf = data.read_slice_1d::<f32, _>((s as usize)..(e as usize))?;
+                    let indices_buf =
+                        indices.read_slice_1d::<u64, _>((s as usize)..(e as usize))?;
+                    Ok((data_buf, indices_buf))
+                },
+            )?;
             Ok((nrow, ncol_out, ret))
         }
     }
