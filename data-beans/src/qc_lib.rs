@@ -71,6 +71,15 @@ pub struct QcConfig {
     /// near-empty floor (output mask) is computed — used by inference
     /// (predict/impute) so query cells are never silently dropped.
     pub drop_outliers: bool,
+    /// Automatic cell calling: pick the per-cell nnz cutoff by 2-means on
+    /// `log(1+nnz)` (ambient↔real boundary) and **train-drop** every cell below
+    /// it, floored at `min_cell_nnz`. So called-out ambient is removed up front
+    /// (via the caller's `mask_columns`), not just output-masked — it never
+    /// shapes the model. No-op when `drop_outliers` is false (inference).
+    pub auto_cell_cutoff: bool,
+    /// Print the per-cell nnz histogram + the suggested/applied cutoff (the
+    /// same ASCII summary as `data-beans squeeze --show-histogram`).
+    pub qc_histogram: bool,
 }
 
 impl Default for QcConfig {
@@ -88,6 +97,8 @@ impl Default for QcConfig {
             mad_on_mito: false,
             feature_min_cells: 0,
             drop_outliers: true,
+            auto_cell_cutoff: false,
+            qc_histogram: false,
         }
     }
 }
@@ -402,6 +413,28 @@ fn qc_from_metrics(m: QcMetrics, cfg: &QcConfig) -> QcReport {
             }
             outlier[c] = fail;
         }
+
+        // Automatic cell calling: 2-means on n_genes picks the ambient↔real
+        // boundary; every cell below it (including near-empty ones) is
+        // train-dropped, so the caller's `mask_columns(train_keep)` removes it
+        // up front. Floored at `min_cell_nnz`. The histogram + cutoff are
+        // optionally printed (same ASCII summary as `squeeze --show-histogram`).
+        if cfg.auto_cell_cutoff || cfg.qc_histogram {
+            let suggested = crate::qc::suggest_nnz_cutoff(&n_genes);
+            let floor = if cfg.auto_cell_cutoff {
+                cfg.min_cell_nnz.max(suggested.unwrap_or(cfg.min_cell_nnz))
+            } else {
+                cfg.min_cell_nnz
+            };
+            crate::qc::print_nnz_summary("Cell", &n_genes, floor, suggested);
+            if cfg.auto_cell_cutoff {
+                for (c, &g) in n_genes.iter().enumerate() {
+                    if (g as usize) < floor {
+                        outlier[c] = true;
+                    }
+                }
+            }
+        }
     }
 
     let mut train_keep: Vec<bool> = outlier.iter().map(|&o| !o).collect();
@@ -599,6 +632,36 @@ pub struct QcArgs {
                      cells were dropped."
     )]
     pub qc_report: Option<Box<str>>,
+
+    #[arg(
+        long = "no-qc-auto-cutoff",
+        default_value_t = true,
+        action = clap::ArgAction::SetFalse,
+        help = "Disable automatic cell calling (then --qc-min-cell-nnz alone is the floor)",
+        long_help = "Automatic cell calling (ON by default; pass `--no-qc-auto-cutoff` to\n\
+                     disable). Picks the per-cell nnz cutoff by 2-means clustering of\n\
+                     log(1+nnz) — the ambient↔real-cell boundary, same routine as\n\
+                     `data-beans squeeze` — train-drops every cell below it (floored at\n\
+                     --qc-min-cell-nnz), and prints the nnz histogram. Because the caller\n\
+                     subsets the backend to `train_keep` (mask_columns), the called-out\n\
+                     ambient droplets are removed up front and never shape the model.\n\
+                     Disabled → --qc-min-cell-nnz is the only floor. (Note: 2-means always\n\
+                     splits, so on already-filtered inputs it may still trim a low tail;\n\
+                     disable it then, or set --qc-min-cell-nnz.)"
+    )]
+    pub qc_auto_cutoff: bool,
+
+    #[arg(
+        long = "qc-histogram",
+        default_value_t = false,
+        help = "Print the per-cell nnz histogram even when auto-cutoff is disabled",
+        long_help = "Print an ASCII histogram of the per-cell nnz distribution with the\n\
+                     suggested (2-means) and applied cutoffs marked — the same summary as\n\
+                     `data-beans squeeze --show-histogram`. Auto-cutoff already prints it;\n\
+                     this forces it under `--no-qc-auto-cutoff` (e.g. to pick\n\
+                     --qc-min-cell-nnz by hand)."
+    )]
+    pub qc_histogram: bool,
 }
 
 impl QcArgs {
@@ -617,6 +680,8 @@ impl QcArgs {
             mad_on_mito: self.qc_mito_pattern.is_some(),
             feature_min_cells: self.qc_feature_min_cells,
             drop_outliers: true,
+            auto_cell_cutoff: self.qc_auto_cutoff,
+            qc_histogram: self.qc_histogram,
         })
     }
 }
@@ -641,6 +706,40 @@ mod qc_tests {
         let v = vec![7.0; 20];
         let keep = robust_outlier_keep(&v, 5.0, Tail::Both, true, None);
         assert!(keep.iter().all(|&k| k));
+    }
+
+    #[test]
+    fn auto_cutoff_train_drops_ambient() {
+        // Bimodal nnz: 3 ambient (~2) + 3 real (~100). With auto cell calling on
+        // (MAD tiers off so the auto floor is the only decider), the 2-means
+        // cutoff lands between the modes and the ambient cells are train-dropped.
+        let n_genes = vec![2.0, 2.0, 2.0, 100.0, 100.0, 100.0];
+        let cfg = QcConfig {
+            auto_cell_cutoff: true,
+            qc_histogram: false,
+            drop_outliers: true,
+            mad_on_n_genes: false,
+            mad_on_counts: false,
+            mad_on_mito: false,
+            min_cell_nnz: 0,
+            ..QcConfig::default()
+        };
+        let report = qc_from_metrics(
+            QcMetrics {
+                n_genes: n_genes.clone(),
+                total_counts: n_genes,
+                mito_frac: None,
+                ribo_frac: None,
+                feature_n_cells: None,
+                n_rows: 0,
+            },
+            &cfg,
+        );
+        assert_eq!(
+            report.train_keep,
+            vec![false, false, false, true, true, true]
+        );
+        assert_eq!(report.n_cells_dropped, 3);
     }
 
     #[test]

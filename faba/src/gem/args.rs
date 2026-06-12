@@ -209,6 +209,26 @@ pub struct GemArgs {
     pub min_cell_nnz: usize,
 
     #[arg(
+        long = "no-auto-cell-cutoff",
+        default_value_t = true,
+        action = clap::ArgAction::SetFalse,
+        help = "Disable automatic cell calling (then --min-cell-nnz alone is the cutoff)",
+        long_help = "Automatic cell calling (ON by default; pass `--no-auto-cell-cutoff`\n\
+                     to disable). Picks the spliced-nnz cutoff by 2-means clustering of\n\
+                     log(1+nnz) — the ambient↔real-cell boundary, same routine as\n\
+                     `data-beans squeeze` — prints the spliced-nnz histogram with the\n\
+                     suggested + applied cutoff marked, then **subsets the cells up front**\n\
+                     so the collapse + training + outputs all run on the called cells only\n\
+                     (faster, and ambient never shapes the model). The effective cutoff is\n\
+                     `max(--min-cell-nnz, suggested)`, so `--min-cell-nnz` is a hard floor.\n\
+                     nnz is counted over the spliced rows — the features that drive the\n\
+                     collapse — so cells the spliced projection can't place are dropped.\n\
+                     Disabled → `--min-cell-nnz` is the cutoff and the suggestion is only\n\
+                     logged."
+    )]
+    pub auto_cell_cutoff: bool,
+
+    #[arg(
         long,
         help = "Feature-only mode: skip cell axis in phase 1 and phase-2 projection",
         long_help = "Feature-only mode: skip the cell axis in phase 1 **and** skip the\n\

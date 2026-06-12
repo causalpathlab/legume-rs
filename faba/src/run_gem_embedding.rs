@@ -3,21 +3,132 @@
 use anyhow::Context;
 use data_beans::qc::collect_column_stat_across_vec;
 use data_beans::sparse_io_vector::ColumnAlignment;
+use graph_embedding_util::data::UnifiedData;
 use graph_embedding_util::stop::setup_stop_handler;
 use graph_embedding_util::{load_unified_data, FeatureNameKind, LoadUnifiedArgs};
 use log::info;
 use matrix_util::common_io::{basename, mkdir_parent};
 use matrix_util::traits::RunningStatOps;
 use rayon::ThreadPoolBuilder;
+use rustc_hash::FxHashMap;
 use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 use faba::gem::args::GemArgs;
-use faba::gem::feature_table::FeatureTable;
+use faba::gem::feature_table::{BackendRowMap, FeatureTable};
 use faba::gem::manifest::{write_outputs, CellQcOutputs};
 use faba::gem::model::{GemModel, PARAM_INIT_STD};
-use faba::gem::pseudobulk::{build_pseudobulk, RefineContext};
+use faba::gem::pseudobulk::{build_pseudobulk, spliced_backend_rows, RefineContext, SatelliteData};
 use faba::gem::region::{load_component_annotations, ComponentAnnotation, RegionMap};
 use faba::gem::train::train;
+
+/// A loaded satellite-modality backend (m6A / A2I / pA), held **separately**
+/// from the genes backend. The collapse never sees it; it only donates
+/// `modifier_comp` mass at aggregation time, matched to genes cells by
+/// `barcode@sample`. Triplets are materialized once at load.
+struct SatelliteBackend {
+    /// Modality label for logging (`m6A` / `A2I` / `pA`); the actual modality
+    /// id is resolved from row names by the `FeatureTable`.
+    label: Box<str>,
+    unified: UnifiedData,
+}
+
+/// Per-satellite `col → genes cell` map (matched by `barcode@sample`) plus the
+/// satellite's row classification against the global table. Owns the `Vec`s
+/// that [`SatelliteData`] borrows.
+struct SatelliteLink {
+    row_map: BackendRowMap,
+    col_to_genes_cell: Vec<Option<usize>>,
+}
+
+/// Build `col_to_genes_cell` for every satellite against a given set of genes
+/// cell barcodes (`barcode@sample`). Recomputed in the refine pass after the
+/// genes cells are subset. Logs how many satellite columns matched.
+fn link_satellites(
+    satellites: &[SatelliteBackend],
+    sat_row_maps: Vec<BackendRowMap>,
+    genes_barcodes: &[Box<str>],
+) -> Vec<SatelliteLink> {
+    let bc_to_cell: FxHashMap<&str, usize> = genes_barcodes
+        .iter()
+        .enumerate()
+        .map(|(c, b)| (b.as_ref(), c))
+        .collect();
+    satellites
+        .iter()
+        .zip(sat_row_maps)
+        .map(|(s, row_map)| {
+            let col_to_genes_cell: Vec<Option<usize>> = s
+                .unified
+                .barcodes
+                .iter()
+                .map(|b| bc_to_cell.get(b.as_ref()).copied())
+                .collect();
+            let matched = col_to_genes_cell.iter().filter(|c| c.is_some()).count();
+            info!(
+                "satellite {}: {} / {} columns matched a genes cell ({} unmatched, donate nothing)",
+                s.label,
+                matched,
+                col_to_genes_cell.len(),
+                col_to_genes_cell.len() - matched,
+            );
+            SatelliteLink {
+                row_map,
+                col_to_genes_cell,
+            }
+        })
+        .collect()
+}
+
+/// Borrow `SatelliteData` views from the owned backends + links, ready to pass
+/// into `build_pseudobulk`.
+fn satellite_views<'a>(
+    satellites: &'a [SatelliteBackend],
+    links: &'a [SatelliteLink],
+) -> Vec<SatelliteData<'a>> {
+    satellites
+        .iter()
+        .zip(links)
+        .map(|(s, l)| SatelliteData {
+            unified: &s.unified,
+            row_map: &l.row_map,
+            col_to_genes_cell: &l.col_to_genes_cell,
+        })
+        .collect()
+}
+
+/// Load one modality's files into its own `UnifiedData` under Union alignment.
+/// `do_tag` tags each file's barcodes with its `@sample` id (basename with the
+/// per-flag suffix stripped) so samples stay distinct **and** a cell matches
+/// across modalities. `batch_files` is only passed for the genes backend.
+fn load_modality(
+    files: &[Box<str>],
+    strip: &str,
+    do_tag: bool,
+    batch_files: Option<&[Box<str>]>,
+    feature_kind: FeatureNameKind,
+    preload: bool,
+) -> anyhow::Result<UnifiedData> {
+    let mut data_files: Vec<Box<str>> = Vec::with_capacity(files.len());
+    let mut sample_ids: Vec<Box<str>> = Vec::with_capacity(files.len());
+    for f in files {
+        sample_ids.push(file_sample_id(f, strip)?);
+        data_files.push(f.clone());
+    }
+    let per_file_barcode_suffix: Option<Vec<Option<Box<str>>>> = if do_tag {
+        Some(sample_ids.into_iter().map(Some).collect())
+    } else {
+        None
+    };
+    load_unified_data(LoadUnifiedArgs {
+        data_files,
+        batch_files: batch_files.map(<[Box<str>]>::to_vec),
+        feature_kind: Some(feature_kind),
+        preload,
+        column_alignment: ColumnAlignment::Union,
+        per_file_barcode_suffix,
+        ..Default::default()
+    })
+}
 
 pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
@@ -40,40 +151,19 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         rayon::current_num_threads()
     );
 
-    // Collect modality files in faba's conventional order: count first,
-    // then m6A, A2I, pA. Order seeds modality_id assignment in the
-    // FeatureTable (slot 0 is forced to "count" regardless). Each flag
-    // accepts a comma-separated list of prefixes; all are stacked under
-    // Union (cells merged by barcode, batches resolved from the barcodes'
-    // `@batch` tags or a single --batch-files file). Modality is inferred
-    // from the row name, not the flag, so multiple files per flag are fine.
-    // Collect files and, in lockstep, each file's per-cell sample id (its
-    // basename with the per-flag suffix stripped). The sample id tags the
-    // file's barcodes (`barcode@sample`) before the Union merge so distinct
-    // samples stay apart and a sample's modalities merge into one joint cell.
-    let mut data_files: Vec<Box<str>> = Vec::new();
-    let mut sample_ids: Vec<Box<str>> = Vec::new();
-    let flags: [(&[Box<str>], &str); 4] = [
-        (&args.genes, args.genes_sample_strip.as_ref()),
-        (
-            args.dartseq.as_deref().unwrap_or(&[]),
-            args.dartseq_sample_strip.as_ref(),
-        ),
-        (
-            args.atoi.as_deref().unwrap_or(&[]),
-            args.atoi_sample_strip.as_ref(),
-        ),
-        (
-            args.apa.as_deref().unwrap_or(&[]),
-            args.apa_sample_strip.as_ref(),
-        ),
-    ];
-    for (files, strip) in flags {
-        for f in files {
-            sample_ids.push(file_sample_id(f, strip)?);
-            data_files.push(f.clone());
+    // Separate per-modality backends. The `--genes` files form the primary
+    // `unified` (owns the cell axis, `e_cell`, QC, outputs) and the 6
+    // gene-sample batches that drive the collapse. Each satellite flag
+    // (`--dartseq`/`--atoi`/`--apa`) loads into its own backend and only
+    // donates `modifier_comp` mass, matched to genes cells by `barcode@sample`.
+    // Modality is inferred from the row name, not the flag.
+    let feature_kind = if args.feature_name_exact {
+        FeatureNameKind::Exact
+    } else {
+        FeatureNameKind::Gene {
+            delim: args.feature_name_delim,
         }
-    }
+    };
 
     let batch_files: Option<&[Box<str>]> = if args.ignore_batch {
         if args.batch_files.is_some() {
@@ -84,53 +174,37 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         args.batch_files.as_deref()
     };
 
-    // Tag barcodes with the per-file sample id only when it disambiguates and
-    // the user hasn't supplied explicit identity. With a single input file
-    // there's nothing to keep apart; with `--batch-files` the caller owns
-    // batch/cell identity, so leave barcodes untagged (avoids `@donor@sample`
-    // double tags when barcodes already carry an `@` tag).
-    let per_file_barcode_suffix: Option<Vec<Option<Box<str>>>> =
-        if batch_files.is_some() || data_files.len() <= 1 {
-            None
-        } else {
-            info!(
-                "tagging barcodes with per-file sample id (e.g. {} → @{})",
-                data_files[0], sample_ids[0]
-            );
-            Some(sample_ids.into_iter().map(Some).collect())
-        };
+    // Tag barcodes with the per-file `@sample` id whenever there is more than
+    // one input file and the caller hasn't supplied explicit batch identity.
+    // The SAME rule applies to genes and satellites so a cell's columns carry
+    // identical names across modalities (the basis for matching). With
+    // `--batch-files` the caller owns batch identity, so leave barcodes
+    // untagged.
+    let total_files = args.genes.len()
+        + args.dartseq.as_deref().map_or(0, <[_]>::len)
+        + args.atoi.as_deref().map_or(0, <[_]>::len)
+        + args.apa.as_deref().map_or(0, <[_]>::len);
+    let do_tag = batch_files.is_none() && total_files > 1;
+    if do_tag {
+        info!("tagging barcodes with per-file @sample id (stripped basename) for cross-modality matching");
+    }
 
-    let feature_kind = if args.feature_name_exact {
-        FeatureNameKind::Exact
-    } else {
-        FeatureNameKind::Gene {
-            delim: args.feature_name_delim,
-        }
-    };
     info!(
-        "loading {} modality file(s) under Union column alignment \
-         (feature_kind={:?}, preload={})",
-        data_files.len(),
+        "loading {} genes file(s) (feature_kind={:?}, preload={})",
+        args.genes.len(),
         feature_kind,
         args.preload_data
     );
-    let mut unified = load_unified_data(LoadUnifiedArgs {
-        data_files,
-        batch_files: batch_files.map(<[Box<str>]>::to_vec),
-        feature_kind: Some(feature_kind),
-        preload: args.preload_data,
-        column_alignment: ColumnAlignment::Union,
-        // gem inputs already carry `{gene}/{modality}/{detail}` row names, so
-        // no per-file feature suffix; barcodes get the sample tag instead.
-        per_file_barcode_suffix,
-        ..Default::default()
-    })
-    .context("load_unified_data")?;
+    let mut unified = load_modality(
+        &args.genes,
+        &args.genes_sample_strip,
+        do_tag,
+        batch_files,
+        feature_kind.clone(),
+        args.preload_data,
+    )
+    .context("load genes backend")?;
 
-    // `--ignore-batch` semantics: under Union with multiple modality
-    // files, `load_unified_data` defaults to auto_modality_batch (one
-    // batch per cell-modality-presence pattern). That contradicts
-    // --ignore-batch's "one batch" promise — explicitly collapse here.
     if args.ignore_batch {
         let n = unified.n_cells();
         unified.batch_membership = vec![0_u32; n];
@@ -138,38 +212,69 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     }
 
     info!(
-        "unified {} features × {} cells × {} batches",
+        "genes backend: {} features × {} cells × {} batches",
         unified.n_features(),
         unified.n_cells(),
         unified.n_batches()
     );
 
-    // ---- Cell QC: inclusive, modality-agnostic, no data rewritten ----
-    // Per-cell detected-feature count over ALL modalities (count +
-    // m6A/A2I/APA), via the data-beans column-stat infra. Cells below
-    // `--min-cell-nnz` are near-empty — typically a barcode seen in one
-    // sparse modality with a single read and no counts; the count-anchored
-    // phase-2 projection maps these to ~0. We keep them through pb collapse
-    // and feature training (their signal still counts) but drop them from
-    // the per-cell outputs (a write-time selection, NOT a squeeze).
-    let cell_nnz = collect_column_stat_across_vec(unified.count_backend(), None, None)
-        .context("cell QC column statistics")?
-        .count_positives();
-    let keep_idx: Vec<usize> = (0..unified.n_cells())
-        .filter(|&c| (cell_nnz[c] as usize) >= args.min_cell_nnz)
-        .collect();
-    info!(
-        "cell QC: {} / {} cells pass --min-cell-nnz {} ({} dropped as near-empty)",
-        keep_idx.len(),
-        unified.n_cells(),
-        args.min_cell_nnz,
-        unified.n_cells() - keep_idx.len()
-    );
+    // Load satellite modalities, each into its own backend (triplets
+    // materialized for aggregation). Satellites are never batched/collapsed.
+    let satellite_specs: [(&[Box<str>], &str, &str); 3] = [
+        (
+            args.dartseq.as_deref().unwrap_or(&[]),
+            args.dartseq_sample_strip.as_ref(),
+            "m6A",
+        ),
+        (
+            args.atoi.as_deref().unwrap_or(&[]),
+            args.atoi_sample_strip.as_ref(),
+            "A2I",
+        ),
+        (
+            args.apa.as_deref().unwrap_or(&[]),
+            args.apa_sample_strip.as_ref(),
+            "pA",
+        ),
+    ];
+    let mut satellites: Vec<SatelliteBackend> = Vec::new();
+    for (files, strip, label) in satellite_specs {
+        if files.is_empty() {
+            continue;
+        }
+        let mut sat = load_modality(
+            files,
+            strip,
+            do_tag,
+            None,
+            feature_kind.clone(),
+            args.preload_data,
+        )
+        .with_context(|| format!("load {label} backend"))?;
+        sat.materialize_cell_triplets()
+            .with_context(|| format!("materialize {label} triplets"))?;
+        info!(
+            "{} backend: {} features × {} cells ({} triplets)",
+            label,
+            sat.n_features(),
+            sat.n_cells(),
+            sat.triplets.len(),
+        );
+        satellites.push(SatelliteBackend {
+            label: label.into(),
+            unified: sat,
+        });
+    }
 
-    // Load component annotations (region binning). Modality labels must
-    // match the modifier row names emitted by faba m6a/atoi/apa.
+    // Global feature table spanning genes + satellites (by name, so ids are
+    // joint). The genes backend defines the gene namespace; satellites only
+    // augment existing genes with modifier modalities.
     let region_map = build_region_map(args)?;
-    let table = FeatureTable::build(&unified.feature_names, &region_map);
+    let sat_name_lists: Vec<&[Box<str>]> = satellites
+        .iter()
+        .map(|s| s.unified.feature_names.as_slice())
+        .collect();
+    let table = FeatureTable::build_layered(&unified.feature_names, &sat_name_lists, &region_map);
     info!(
         "feature_table: {} genes, {} modalities, {} regions, {} count-comp + {} modifier-comp rows",
         table.n_genes(),
@@ -183,8 +288,92 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         "no genes parsed from feature axis — check row name convention (`gene/modality/detail`)"
     );
 
+    // Genes-backend row map (feature axis; drives the spliced QC + collapse mask).
+    let genes_row_map = table.map_backend_rows(&unified.feature_names, &region_map);
+
+    // ---- Cell QC over the SPLICED features (the collapse driver) ----
+    // The collapse places each cell from its spliced projection, so a cell with
+    // zero spliced counts is a zero vector there — unplaceable. We count
+    // non-zeros over the spliced rows only and, by default (`--auto-cell-cutoff`),
+    // auto-select the ambient↔real boundary by 2-means on the spliced log1p-nnz
+    // (floored at `--min-cell-nnz`), printing the histogram. The called cells are
+    // then subset UP FRONT (see below) so the collapse + training + outputs all
+    // run on real cells only. `--no-auto-cell-cutoff` falls back to a plain
+    // `--min-cell-nnz` floor.
+    let spliced_rows = spliced_backend_rows(&unified, &table, &genes_row_map);
+    let cell_nnz_full =
+        collect_column_stat_across_vec(unified.count_backend(), Some(&spliced_rows), None)
+            .context("cell QC column statistics (spliced)")?
+            .count_positives();
+    let n_cells_full = unified.n_cells();
+    let suggested = data_beans::qc::suggest_nnz_cutoff(&cell_nnz_full);
+    let cell_cutoff = if args.auto_cell_cutoff {
+        let c = args
+            .min_cell_nnz
+            .max(suggested.unwrap_or(args.min_cell_nnz));
+        data_beans::qc::print_nnz_summary("Spliced cell", &cell_nnz_full, c, suggested);
+        c
+    } else {
+        if let Some(s) = suggested {
+            info!(
+                "spliced-nnz auto-cutoff suggestion = {} (disabled; using --min-cell-nnz {})",
+                s, args.min_cell_nnz
+            );
+        }
+        args.min_cell_nnz
+    };
+    // Single keep predicate, shared by the backend mask and the logical subset
+    // below — they MUST select the same cells (and both renumber survivors in
+    // ascending order) for "logical cell i ≡ backend column i" to hold.
+    let keep_mask: Vec<bool> = (0..n_cells_full)
+        .map(|c| (cell_nnz_full[c] as usize) >= cell_cutoff)
+        .collect();
+    let kept: Vec<usize> = keep_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(c, &k)| k.then_some(c))
+        .collect();
+    anyhow::ensure!(
+        !kept.is_empty(),
+        "cell QC dropped every cell at spliced cutoff {cell_cutoff}; lower --min-cell-nnz \
+         or pass --no-auto-cell-cutoff"
+    );
+
+    // Subset the genes backend to the called cells UP FRONT — `mask_columns`
+    // shrinks the backend columns (the established senna / pinto cell-QC path),
+    // `subset_cells` syncs the logical axis. The collapse + training then run on
+    // real cells only (efficient; ambient never shapes the model).
+    if kept.len() < n_cells_full {
+        unified
+            .count_backend_mut()
+            .mask_columns(&keep_mask)
+            .context("subset genes cells (mask_columns)")?;
+        unified.subset_cells(&kept);
+    }
+    // Per-cell spliced nnz for the kept cells (re-applied in the refine pass).
+    let cell_nnz: Vec<f32> = kept.iter().map(|&c| cell_nnz_full[c]).collect();
+    info!(
+        "cell QC (spliced non-zeros): kept {} / {} cells at cutoff {} (dropped {}){}",
+        kept.len(),
+        n_cells_full,
+        cell_cutoff,
+        n_cells_full - kept.len(),
+        if args.auto_cell_cutoff { " [auto]" } else { "" },
+    );
+    // After the up-front subset every remaining cell is written out.
+    let keep_idx: Vec<usize> = (0..unified.n_cells()).collect();
+
+    // Satellite row maps + cell links (against the SUBSET genes cells).
+    let sat_row_maps: Vec<BackendRowMap> = satellites
+        .iter()
+        .map(|s| table.map_backend_rows(&s.unified.feature_names, &region_map))
+        .collect();
+    let sat_links = link_satellites(&satellites, sat_row_maps, &unified.barcodes);
+    let sat_views = satellite_views(&satellites, &sat_links);
+
     let n_cells = unified.n_cells();
-    let pb = build_pseudobulk(&mut unified, &table, args, None).context("build pseudobulk")?;
+    let pb = build_pseudobulk(&mut unified, &table, &genes_row_map, &sat_views, args, None)
+        .context("build pseudobulk")?;
 
     // Persist the per-gene NB-Fisher housekeeping weights (senna
     // convention: `{out}.fisher_weights.parquet`) so the suppression is
@@ -280,7 +469,10 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
             beta_rows,
             cell_nrms: &cell_nrms,
             cell_nnz: &cell_nnz,
+            cell_cutoff,
             table: &table,
+            genes_row_map: &genes_row_map,
+            satellites: &satellites,
             region_map: &region_map,
         };
         let out2 = run_refine_pass(args, ctx, &mut unified, &stop).context("refinement pass")?;
@@ -378,10 +570,19 @@ struct Pass1Context<'a> {
     beta_rows: Vec<f32>,
     /// Pre-L2-normalisation cell norms from phase-2 (one per original cell).
     cell_nrms: &'a [f32],
-    /// Per-cell detected-feature count from `count_positives` (f32, one per cell).
+    /// Per-cell **spliced** non-zero count (f32, one per cell).
     cell_nnz: &'a [f32],
-    /// Pass-1 feature table — used for the gene→feature-row mapping.
+    /// Effective spliced-nnz cell cutoff from pass-1 (auto or `--min-cell-nnz`),
+    /// re-applied to the dead-cell filter so both passes agree.
+    cell_cutoff: usize,
+    /// Pass-1 feature table — used for gene scoring (n_genes).
     table: &'a FeatureTable,
+    /// Pass-1 genes-backend row map — maps each genes feature row to its gene
+    /// for the dead-gene feature-row filter.
+    genes_row_map: &'a BackendRowMap,
+    /// Satellite backends (unchanged across passes); re-linked to the subset
+    /// genes cells in pass-2.
+    satellites: &'a [SatelliteBackend],
     /// Region map (unchanged across passes).
     region_map: &'a faba::gem::region::RegionMap,
 }
@@ -405,7 +606,10 @@ fn run_refine_pass(
         beta_rows,
         cell_nrms,
         cell_nnz,
+        cell_cutoff,
         table: table_p1,
+        genes_row_map: genes_row_map_p1,
+        satellites,
         region_map,
     } = ctx;
     let h = args.embedding_dim;
@@ -428,15 +632,15 @@ fn run_refine_pass(
 
     // ---- Score cells from pre-L2 norms ----
     // live_cell_mask covers all n_cells_old cells.  Cells that never ran
-    // phase-2 (empty cell_nrms) are kept iff they pass --min-cell-nnz.
+    // phase-2 (empty cell_nrms) are kept iff they pass the pass-1 spliced cutoff.
     let live_cell_mask: Vec<bool> = if cell_nrms.is_empty() {
         (0..n_cells_old)
-            .map(|c| (cell_nnz[c] as usize) >= args.min_cell_nnz)
+            .map(|c| (cell_nnz[c] as usize) >= cell_cutoff)
             .collect()
     } else {
         (0..n_cells_old)
             .map(|c| {
-                if (cell_nnz[c] as usize) < args.min_cell_nnz {
+                if (cell_nnz[c] as usize) < cell_cutoff {
                     return false;
                 }
                 let nrm = cell_nrms[c] as f64;
@@ -460,10 +664,10 @@ fn run_refine_pass(
         return Ok(None);
     }
 
-    // ---- Filter unified ----
+    // ---- Filter unified (genes backend) ----
     let live_feature_rows: Vec<usize> = (0..unified.n_features())
         .filter(|&r| {
-            table_p1.row_gene[r]
+            genes_row_map_p1.gene[r]
                 .map(|g| live_gene_mask[g as usize])
                 .unwrap_or(false)
         })
@@ -487,15 +691,33 @@ fn run_refine_pass(
     unified.subset_cells(&live_cell_old_ids);
 
     // ---- Rebuild ----
-    let table2 = FeatureTable::build(&unified.feature_names, region_map);
+    // Global table from the surviving genes + the (unchanged) satellites.
+    // Dead genes are gone from the genes namespace, so `map_backend_rows`
+    // drops their satellite modifier rows too (gene → None).
+    let sat_name_lists: Vec<&[Box<str>]> = satellites
+        .iter()
+        .map(|s| s.unified.feature_names.as_slice())
+        .collect();
+    let table2 = FeatureTable::build_layered(&unified.feature_names, &sat_name_lists, region_map);
     anyhow::ensure!(
         table2.n_genes() > 0,
         "refine: no genes remain after dead-gene filter"
     );
 
+    // Re-link satellites to the subset genes cells (some matched cells died).
+    let genes_row_map2 = table2.map_backend_rows(&unified.feature_names, region_map);
+    let sat_row_maps2: Vec<BackendRowMap> = satellites
+        .iter()
+        .map(|s| table2.map_backend_rows(&s.unified.feature_names, region_map))
+        .collect();
+    let sat_links2 = link_satellites(satellites, sat_row_maps2, &unified.barcodes);
+    let sat_views2 = satellite_views(satellites, &sat_links2);
+
     let pb2 = build_pseudobulk(
         unified,
         &table2,
+        &genes_row_map2,
+        &sat_views2,
         args,
         Some(RefineContext {
             live_cell_old_ids: &live_cell_old_ids,

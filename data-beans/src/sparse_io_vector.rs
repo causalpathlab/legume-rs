@@ -2075,6 +2075,55 @@ impl SparseIoVec {
         Ok(self.column_names_with_data_tag.clone())
     }
 
+    /// Structural clone for an independent projection / collapse pass.
+    ///
+    /// The backend cannot derive `Clone` because `batch_knn_lookup` holds
+    /// non-`Clone` HNSW indices. This copies the data handles (matrices are
+    /// `Arc`-shared, so only the index `Vec`s/`HashMap`s are duplicated —
+    /// cheap) and the row/column alignment state, while **dropping** the
+    /// derived batch / group / HNSW caches. Those caches are re-registered
+    /// from scratch by `register_batch_membership` / the collapse, so a fresh
+    /// clone is the correct pre-collapse state.
+    ///
+    /// Intended use: `let mut spliced = vec.clone_for_collapse();
+    /// spliced.mask_rows(&spliced_keep)?;` — gives a spliced-only view that
+    /// drives RP + collapse + refinement without disturbing the full backend
+    /// (still needed at all rows for per-modality aggregation).
+    pub fn clone_for_collapse(&self) -> Self {
+        Self {
+            data_vec: self.data_vec.clone(),
+            col_to_data: self.col_to_data.clone(),
+            data_to_cols: self.data_to_cols.clone(),
+            offset: self.offset,
+            row_canonicalizer: self.row_canonicalizer.clone(),
+            row_name_position: self.row_name_position.clone(),
+            row_names_by_global: self.row_names_by_global.clone(),
+            data_local_to_global_row: self.data_local_to_global_row.clone(),
+            data_global_to_local_row: self.data_global_to_local_row.clone(),
+            data_has_intra_row_merges: self.data_has_intra_row_merges.clone(),
+            row_count_by_global: self.row_count_by_global.clone(),
+            global_to_compact_row: self.global_to_compact_row.clone(),
+            compact_to_global_row: self.compact_to_global_row.clone(),
+            column_names_with_data_tag: self.column_names_with_data_tag.clone(),
+            col_name_position: self.col_name_position.clone(),
+            // Derived caches dropped — re-registered by projection / collapse.
+            col_to_group: None,
+            group_to_cols: None,
+            group_keys: None,
+            batch_knn_lookup: None,
+            col_to_batch: None,
+            batch_to_cols: None,
+            batch_idx_to_name: None,
+            between_batch_proximity: None,
+            cached_num_rows: self.cached_num_rows,
+            cached_num_columns: self.cached_num_columns,
+            row_alignment: self.row_alignment,
+            column_alignment: self.column_alignment,
+            column_canonicalizer: self.column_canonicalizer.clone(),
+            per_backend_row_suffix: self.per_backend_row_suffix.clone(),
+        }
+    }
+
     /// Exclude rows (genes) from the working set. `keep[compact_row]`
     /// is `true` for rows to keep, `false` for rows to exclude.
     /// The compact row indices are renumbered after filtering.
