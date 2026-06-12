@@ -38,6 +38,13 @@ pub struct PeakToGeneArgs {
     )]
     batch_files: Option<Vec<Box<str>>>,
 
+    /// Shared cell QC (on by default; `--no-qc` to disable). MAD outliers +
+    /// near-empty floor, with optional `--qc-auto-cutoff` 2-means cell calling
+    /// (`--qc-histogram` to show the nnz distribution). Dropped cells are
+    /// removed from BOTH modalities up front, before projection / collapse.
+    #[command(flatten)]
+    qc: data_beans::qc_lib::QcArgs,
+
     /* Cis enumeration */
     #[arg(
         long,
@@ -222,6 +229,25 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
         &args.atac_files,
         args.batch_files.as_deref(),
     )?;
+
+    /* 1b. Cell QC (on by default): drop ambient / outlier cells from BOTH
+    modalities up front — before projection / collapse — so they never shape
+    the pseudobulk or the peak-to-gene links. `--qc-auto-cutoff` adds 2-means
+    cell calling; `--qc-histogram` prints the nnz distribution. */
+    if let Some(cfg) = args.qc.to_config() {
+        let report = data_beans::qc_lib::compute_qc_stack(&paired.data_stack, &cfg, None)?;
+        info!(
+            "cell QC: dropping {} / {} cells before peak-to-gene linkage",
+            report.n_cells_dropped,
+            report.train_keep.len(),
+        );
+        if report.n_cells_dropped > 0 {
+            paired.data_stack.mask_columns_all(&report.train_keep)?;
+            paired.batch_membership =
+                data_beans::qc_lib::filter_by_keep(&paired.batch_membership, &report.train_keep);
+        }
+    }
+
     let gene_names = paired.data_stack.stack[0].row_names()?;
     let peak_names = paired.data_stack.stack[1].row_names()?;
     let n_genes = gene_names.len();

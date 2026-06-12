@@ -1,17 +1,23 @@
-//! Multilevel pseudobulk collapse driven by the count modality, plus
-//! per-axis per-stratum aggregation of triplets for the sampler.
+//! Multilevel pseudobulk collapse driven by the **spliced** count modality,
+//! plus per-axis per-stratum aggregation of triplets for the sampler.
 //!
 //! Pipeline:
-//!   1. Random projection of cells from the count file (batch-corrected).
-//!   2. `collapse_columns_multilevel_with_hierarchy` on the count file
-//!      → per-level `cell_to_pb` partitions. Other modalities inherit
-//!      the partition trivially via the same `cell_to_pb_per_level`.
-//!   3. Walk `unified.triplets` once, accumulate per-(gene, axis_id)
-//!      counts for each stratum at every requested axis: the cell axis
-//!      (identity partition; one unit per cell) and each pb level.
-//!      All component rows within a (g, m) pair share an embedding
-//!      (e_{g,m,r} = β_g ⊙ exp(Σ_k z_{g,k}·δ_{k,m,:} + γ_{m,r,:})), so aggregation
-//!      loses nothing for sampling and dedupes work.
+//!   1. Random projection of cells from a **spliced-only view** of the genes
+//!      backend (`clone_for_collapse` + `mask_rows`), batch-corrected over the
+//!      gene-sample batches. Because the collapse backend holds only spliced
+//!      rows, both the projection and the refinement's gene-sum scoring are
+//!      spliced-only — unspliced and satellite (m6A / A2I / pA) mass never
+//!      enters the geometry.
+//!   2. `collapse_columns_multilevel_with_hierarchy` on the spliced view
+//!      → per-level `cell_to_pb` partitions over the genes cells.
+//!   3. Walk the genes triplets (for `agg` / `count_comp`) and each
+//!      **satellite** backend's triplets (for `modifier_comp`), accumulating
+//!      per-(gene, axis_id) counts. Satellite columns attach to a pb by
+//!      matching their cell id to a genes cell (`col_to_genes_cell`); columns
+//!      with no genes match donate nothing (e.g. `mut` m6A on a sample that
+//!      has no gene match). All component rows within a (g, m) pair share an
+//!      embedding (e_{g,m,r} = β_g ⊙ exp(Σ_k z_{g,k}·δ_{k,m,:} + γ_{m,r,:})),
+//!      so aggregation loses nothing for sampling and dedupes work.
 //!
 //! The two-stage trainer uses the pb axes for stage 1 (curriculum
 //! training of β/z/δ/γ with lower-variance pb signal) and the cell axis
@@ -29,7 +35,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use super::args::GemArgs;
-use super::feature_table::{FeatureTable, RowStratum};
+use super::feature_table::{BackendRowMap, FeatureTable, RowStratum};
 
 /// One per-(axis, stratum) pool of count-weighted (gene_id, axis_id)
 /// candidates. All component rows within a (g, m) pair share an
@@ -157,19 +163,71 @@ pub struct RefineContext<'a> {
     pub full_batch_labels: &'a [Box<str>],
 }
 
+/// One satellite (non-spliced) modality backend, paired with the data needed
+/// to fold its mass into the spliced-driven pseudobulk. Held **separately**
+/// from the genes backend — the collapse never sees it; it only donates
+/// `modifier_comp` mass at aggregation time.
+pub struct SatelliteData<'a> {
+    /// The satellite backend, with `triplets` already materialized.
+    pub unified: &'a UnifiedData,
+    /// Row classification (global `(gene, modality, …)` ids) aligned to the
+    /// satellite backend's compact rows.
+    pub row_map: &'a BackendRowMap,
+    /// Satellite column → genes cell id, or `None` when the column has no
+    /// matching genes cell (its mass is dropped). Matched by `barcode@sample`.
+    /// In the refine pass this is recomputed against the subset genes cells.
+    pub col_to_genes_cell: &'a [Option<usize>],
+}
+
+/// Backend row indices of the **spliced** features in the genes backend — the
+/// rows that drive both the collapse geometry and the cell QC. Indexed at
+/// backend scale via `feature_to_backend_row` (identity in the normal pass;
+/// N_old in the refine pass). Falls back to every count row when there is no
+/// `spliced` modality, so a count matrix without a splice split still works.
+pub fn spliced_backend_rows(
+    unified: &UnifiedData,
+    table: &FeatureTable,
+    genes_row_map: &BackendRowMap,
+) -> Vec<usize> {
+    let spliced_id = table.spliced_modality_id();
+    let rows: Vec<usize> = (0..genes_row_map.stratum.len())
+        .filter(|&uid| {
+            genes_row_map.stratum[uid] == Some(RowStratum::CountComp)
+                && spliced_id.is_some()
+                && genes_row_map.modality[uid] == spliced_id
+        })
+        .map(|uid| unified.feature_to_backend_row[uid])
+        .collect();
+    if !rows.is_empty() {
+        return rows;
+    }
+    // No spliced track — fall back to all count rows so the collapse + QC still
+    // have geometry to work with.
+    (0..genes_row_map.stratum.len())
+        .filter(|&uid| genes_row_map.stratum[uid] == Some(RowStratum::CountComp))
+        .map(|uid| unified.feature_to_backend_row[uid])
+        .collect()
+}
+
 /// Build the multilevel partition + the per-axis sampling pools.
-/// Mutates `unified.backend` (the count file) to register batch membership
-/// and HNSW caches — same side-effect bge has.
+///
+/// The collapse runs on a transient **spliced-only clone** of the genes
+/// backend (`clone_for_collapse` + `mask_rows`), so `unified`'s own backend is
+/// left untouched (its full rows are still needed for `agg`/`count_comp`
+/// aggregation). `genes_row_map` classifies the genes backend's rows; the
+/// spliced mask is derived from it. `satellites` donate `modifier_comp` mass.
 ///
 /// `refine`: `None` for the normal pass — triplets are materialized from the
 /// backend and batch labels derived from `unified`. `Some(ctx)` for the
 /// `--refine` pass (see [`RefineContext`]): triplets are NOT re-materialized
 /// (already remapped by `subset_cells`), the collapse runs on the full N_old
-/// backend then is narrowed to the live cells, and batch labels / row weights
+/// backend then is narrowed to the live cells, and batch labels / spliced mask
 /// are taken at full-backend scale since `unified` is already subset.
 pub fn build_pseudobulk(
     unified: &mut UnifiedData,
     table: &FeatureTable,
+    genes_row_map: &BackendRowMap,
+    satellites: &[SatelliteData],
     args: &GemArgs,
     refine: Option<RefineContext<'_>>,
 ) -> anyhow::Result<PseudobulkData> {
@@ -188,41 +246,49 @@ pub fn build_pseudobulk(
     };
     let batch_arg = (unified.n_batches() > 1).then_some(batch_labels.as_slice());
 
-    info!(
-        "projection (proj_dim={}, {} batches)...",
-        args.proj_dim,
-        unified.n_batches()
-    );
-    // Gene-anchored projection: only CountComp (spliced gene expression) rows
-    // contribute to the HNSW geometry.  ModifierComp rows (m6a, A2I, pA) — and,
-    // in the refine pass, dropped dead-gene rows — get weight 0, so m6a-only
-    // cells project near zero and inherit their PB assignment from their @batch
-    // label.  Weights are indexed by **backend row**, not the compact unified
-    // axis: in the refine pass the backend still has all N_old rows while
-    // `table` only covers the N_new live features, so each live feature is
-    // placed at its backend row via `feature_to_backend_row` (identity in the
-    // normal pass).  `project_columns_weighted` requires one weight per
-    // backend row.
-    let mut count_row_weights = vec![0.0_f32; unified.count_backend().num_rows()];
-    for (uid, stratum) in table.strata.iter().enumerate() {
-        if matches!(stratum, Some(RowStratum::CountComp)) {
-            count_row_weights[unified.feature_to_backend_row[uid]] = 1.0;
-        }
+    // Spliced-only collapse view: clone the genes backend (matrices are
+    // Arc-shared — cheap) and mask it down to the spliced rows. The clone
+    // drives projection + collapse + refinement, so the geometry is spliced-
+    // only by construction (no row-weights, no satellite/unspliced leakage),
+    // while `unified`'s own backend keeps all rows for aggregation.
+    //
+    // The spliced keep-mask is indexed by **backend row** (not the compact
+    // unified axis): in the refine pass the backend still has all N_old rows
+    // while `genes_row_map` only covers the N_new live features, so each live
+    // spliced feature is placed at its backend row via `feature_to_backend_row`
+    // (identity in the normal pass).
+    let spliced_rows = spliced_backend_rows(unified, table, genes_row_map);
+    let mut spliced_keep = vec![false; unified.count_backend().num_rows()];
+    for &r in &spliced_rows {
+        spliced_keep[r] = true;
     }
-    let proj = unified
-        .count_backend_mut()
-        .project_columns_weighted(args.proj_dim, None, batch_arg, &count_row_weights)
-        .context("gene-anchored random projection on count file")?;
+
+    let mut spliced_backend = unified.count_backend().clone_for_collapse();
+    spliced_backend
+        .mask_rows(&spliced_keep)
+        .context("masking collapse backend to spliced rows")?;
+
+    info!(
+        "projection (proj_dim={}, {} batches, {} spliced rows)...",
+        args.proj_dim,
+        unified.n_batches(),
+        spliced_backend.num_rows(),
+    );
+    // Unweighted projection — the backend is already spliced-only.
+    let row_weights = vec![1.0_f32; spliced_backend.num_rows()];
+    let proj = spliced_backend
+        .project_columns_weighted(args.proj_dim, None, batch_arg, &row_weights)
+        .context("spliced random projection")?;
 
     ////////////////////////////////////////
-    // 2. Multilevel collapse on count file
+    // 2. Multilevel collapse on the spliced view
     ////////////////////////////////////////
     info!(
         "multilevel collapse (sort_dim={}, {} levels)...",
         args.sort_dim, args.num_levels
     );
     let collapse_out = collapse_columns_multilevel_with_hierarchy(
-        unified.count_backend_mut(),
+        &mut spliced_backend,
         &proj.proj,
         &batch_labels,
         &MultilevelParams {
@@ -234,7 +300,8 @@ pub fn build_pseudobulk(
             output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
         },
     )
-    .context("multilevel collapse on count file")?;
+    .context("multilevel collapse on spliced view")?;
+    drop(spliced_backend);
 
     // Returned finest-first; flip to coarsest-first.
     let mut cell_to_pb_per_level = collapse_out.cell_to_pb_per_level;
@@ -275,7 +342,8 @@ pub fn build_pseudobulk(
     let cell_identity: Vec<usize> = (0..n_cells).collect();
     let mut cell_pools = aggregate_pools(
         unified,
-        table,
+        genes_row_map,
+        satellites,
         &cell_identity,
         n_cells,
         n_modalities,
@@ -283,10 +351,10 @@ pub fn build_pseudobulk(
     );
 
     // Pb axes: one set of pools per level (coarsest-first). Each level
-    // walks `unified.triplets` once into independent thread-local maps, so
-    // the levels are embarrassingly parallel — fan out across them rather
-    // than making `num_levels` sequential passes over the edge list. The
-    // shared reborrow keeps the closure capturing `&UnifiedData` (Sync),
+    // walks the genes + satellite triplets once into independent thread-local
+    // maps, so the levels are embarrassingly parallel — fan out across them
+    // rather than making `num_levels` sequential passes over the edge lists.
+    // The shared reborrow keeps the closure capturing `&UnifiedData` (Sync),
     // not the outer `&mut`.
     let unified_ref: &UnifiedData = unified;
     let mut pb_pools_per_level: Vec<AxisPools> = cell_to_pb_per_level
@@ -295,7 +363,8 @@ pub fn build_pseudobulk(
             let n_pbs = cell_to_pb.iter().copied().max().map(|m| m + 1).unwrap_or(0);
             aggregate_pools(
                 unified_ref,
-                table,
+                genes_row_map,
+                satellites,
                 cell_to_pb,
                 n_pbs,
                 n_modalities,
@@ -475,13 +544,16 @@ fn log_fisher_summary(weights: &[f32], table: &FeatureTable, penalty: f32) {
     );
 }
 
-/// Aggregate `unified.triplets` to per-(gene, axis_id) granularity per
-/// stratum. `cell_to_axis_id[c]` gives the right-hand-axis id for
-/// unified cell `c` — identity for the cell axis,
-/// `cell_to_pb_per_level[ℓ]` for pb axes.
+/// Aggregate the genes triplets (`agg` / `count_comp`) and each satellite
+/// backend's triplets (`modifier_comp`) to per-(gene, axis_id) granularity per
+/// stratum. `cell_to_axis_id[c]` gives the right-hand-axis id for **genes**
+/// cell `c` — identity for the cell axis, `cell_to_pb_per_level[ℓ]` for pb
+/// axes. Satellite columns are mapped to a genes cell via
+/// `sat.col_to_genes_cell` first; unmatched columns contribute nothing.
 fn aggregate_pools(
-    unified: &UnifiedData,
-    table: &FeatureTable,
+    genes: &UnifiedData,
+    genes_row_map: &BackendRowMap,
+    satellites: &[SatelliteData],
     cell_to_axis_id: &[usize],
     n_units: usize,
     n_modalities: usize,
@@ -501,33 +573,79 @@ fn aggregate_pools(
     let mut modifier_region: Vec<FxHashMap<(u32, u32), u32>> =
         (0..n_modalities).map(|_| FxHashMap::default()).collect();
 
-    for t in &unified.triplets {
-        let row = t.feature as usize;
-        let aid = cell_to_axis_id[t.cell as usize] as u32;
-        let Some(stratum) = table.strata[row] else {
-            continue;
-        };
-        let Some(g) = table.row_gene[row] else {
-            continue;
-        };
+    // One accumulation rule, fed by both the genes triplets and each satellite's
+    // triplets — the only per-source differences are the row-map and how the axis
+    // id is resolved. Preserves the per-stratum `None`-handling: a ModifierComp
+    // row with no modality is skipped; a CountComp row with no modality folds into
+    // the AGG base (modality 0); a row with no gene is skipped.
+    let mut accumulate = |stratum: RowStratum,
+                          gene: Option<u32>,
+                          modality: Option<u32>,
+                          component: Option<u32>,
+                          region: Option<u32>,
+                          count: f32,
+                          aid: u32| {
+        let Some(g) = gene else { return };
         match stratum {
             RowStratum::CountComp => {
-                // Splice modality (≥1) from the table; AGG sums all splice.
-                let m = table.row_modality[row].unwrap_or(0);
-                *count_comp.entry((g, m, aid)).or_insert(0.0) += t.count;
-                *agg.entry((g, aid)).or_insert(0.0) += t.count;
+                // Splice modality (≥1) from the row map; AGG sums all splice.
+                let m = modality.unwrap_or(0);
+                *count_comp.entry((g, m, aid)).or_insert(0.0) += count;
+                *agg.entry((g, aid)).or_insert(0.0) += count;
             }
             RowStratum::ModifierComp => {
-                if let Some(m) = table.row_modality[row] {
-                    let comp = table.row_component[row].unwrap_or(0);
-                    let region = table.row_region[row].unwrap_or(0);
+                if let Some(m) = modality {
+                    let comp = component.unwrap_or(0);
+                    let region = region.unwrap_or(0);
                     *modifier_by_mod[m as usize]
                         .entry((g, comp, aid))
-                        .or_insert(0.0) += t.count;
+                        .or_insert(0.0) += count;
                     modifier_region[m as usize].insert((g, comp), region);
                 }
             }
             RowStratum::Site => {}
+        }
+    };
+
+    // Genes backend: agg + count_comp (+ any modifier rows, defensively).
+    for t in &genes.triplets {
+        let row = t.feature as usize;
+        let Some(stratum) = genes_row_map.stratum[row] else {
+            continue;
+        };
+        let aid = cell_to_axis_id[t.cell as usize] as u32;
+        accumulate(
+            stratum,
+            genes_row_map.gene[row],
+            genes_row_map.modality[row],
+            genes_row_map.component[row],
+            genes_row_map.region[row],
+            t.count,
+            aid,
+        );
+    }
+
+    // Satellite backends: modifier_comp (+ any count rows), attached to the
+    // matched genes cell via col_to_genes_cell; unmatched columns donate nothing.
+    for sat in satellites {
+        for t in &sat.unified.triplets {
+            let Some(genes_cell) = sat.col_to_genes_cell[t.cell as usize] else {
+                continue;
+            };
+            let row = t.feature as usize;
+            let Some(stratum) = sat.row_map.stratum[row] else {
+                continue;
+            };
+            let aid = cell_to_axis_id[genes_cell] as u32;
+            accumulate(
+                stratum,
+                sat.row_map.gene[row],
+                sat.row_map.modality[row],
+                sat.row_map.component[row],
+                sat.row_map.region[row],
+                t.count,
+                aid,
+            );
         }
     }
 
