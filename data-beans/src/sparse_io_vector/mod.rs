@@ -56,6 +56,40 @@ pub type RowNameCanonicalizer = Arc<dyn Fn(&str) -> Box<str> + Send + Sync>;
 /// behavior.
 pub type ColumnNameCanonicalizer = Arc<dyn Fn(&str) -> Box<str> + Send + Sync>;
 
+/// The lazily-built group- and batch-membership caches for a [`SparseIoVec`],
+/// grouped into one field so the three places that reset them (`new`,
+/// `mask_columns`, and clone-for-collapse) each collapse to a single
+/// assignment.
+///
+/// **Cloning drops every cache** — `Clone` returns [`Default`]. The caches are
+/// derived state, re-registered from scratch by `assign_groups` /
+/// `register_batch_membership` / the collapse, so a cloned `SparseIoVec` starts
+/// from the correct pre-collapse state. Isolating the non-`Clone` HNSW indices
+/// in `batch_knn_lookup` here is also what lets the rest of `SparseIoVec`
+/// `#[derive(Clone)]`. Do not rely on `.clone()` preserving these.
+#[derive(Default)]
+struct DerivedCaches {
+    // group caches (built by `assign_groups`)
+    col_to_group: Option<HashMap<usize, usize>>,
+    group_to_cols: Option<Vec<Vec<usize>>>,
+    group_keys: Option<Vec<Box<str>>>,
+    // batch caches (built by `register_batches` / `register_batch_membership`)
+    batch_knn_lookup: Option<Vec<ColumnDict<usize>>>,
+    col_to_batch: Option<Vec<usize>>,
+    batch_to_cols: Option<Vec<Vec<usize>>>,
+    batch_idx_to_name: Option<Vec<Box<str>>>,
+    between_batch_proximity: Option<Vec<Vec<usize>>>,
+}
+
+impl Clone for DerivedCaches {
+    /// Drops all caches (returns [`Default`]); see the type docs. They rebuild
+    /// lazily, so a cloned `SparseIoVec` is the correct fresh pre-collapse view.
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Clone)]
 pub struct SparseIoVec {
     data_vec: Vec<Arc<SparseData>>,
     /// Per global column → one or more [`BackendLocation`] entries.
@@ -95,14 +129,9 @@ pub struct SparseIoVec {
     /// at push time so subsequent pushes can match cells across backends.
     /// Unused (empty) under `Disjoint`.
     col_name_position: HashMap<Box<str>, u32>,
-    col_to_group: Option<HashMap<usize, usize>>,
-    group_to_cols: Option<Vec<Vec<usize>>>,
-    group_keys: Option<Vec<Box<str>>>,
-    batch_knn_lookup: Option<Vec<ColumnDict<usize>>>,
-    col_to_batch: Option<Vec<usize>>,
-    batch_to_cols: Option<Vec<Vec<usize>>>,
-    batch_idx_to_name: Option<Vec<Box<str>>>,
-    between_batch_proximity: Option<Vec<Vec<usize>>>,
+    /// Lazily-built group/batch membership caches; dropped on clone. See
+    /// [`DerivedCaches`].
+    derived: DerivedCaches,
     cached_num_rows: usize,
     cached_num_columns: usize,
     /// How row names align across pushed backends. Default
@@ -210,14 +239,7 @@ impl SparseIoVec {
             compact_to_global_row: vec![],
             column_names_with_data_tag: vec![],
             col_name_position: HashMap::default(),
-            col_to_group: None,
-            group_to_cols: None,
-            group_keys: None,
-            batch_knn_lookup: None,
-            col_to_batch: None,
-            batch_to_cols: None,
-            batch_idx_to_name: None,
-            between_batch_proximity: None,
+            derived: DerivedCaches::default(),
             cached_num_rows: 0,
             cached_num_columns: 0,
             row_alignment: RowAlignment::default(),
@@ -355,51 +377,28 @@ impl SparseIoVec {
 
     /// Structural clone for an independent projection / collapse pass.
     ///
-    /// The backend cannot derive `Clone` because `batch_knn_lookup` holds
-    /// non-`Clone` HNSW indices. This copies the data handles (matrices are
-    /// `Arc`-shared, so only the index `Vec`s/`HashMap`s are duplicated —
-    /// cheap) and the row/column alignment state, while **dropping** the
-    /// derived batch / group / HNSW caches. Those caches are re-registered
-    /// from scratch by `register_batch_membership` / the collapse, so a fresh
-    /// clone is the correct pre-collapse state.
+    /// Named entry point for the collapse copy; it is exactly `self.clone()`,
+    /// kept as a method so call sites read as intent. Cloning copies the data
+    /// handles (matrices are `Arc`-shared, so only the index `Vec`s/`HashMap`s
+    /// are duplicated — cheap) and the row/column alignment state, while
+    /// **dropping** every derived batch / group / HNSW cache — see
+    /// [`DerivedCaches`], whose drop-on-clone behavior is what isolates the
+    /// non-`Clone` `batch_knn_lookup` HNSW indices and lets `SparseIoVec`
+    /// `#[derive(Clone)]` at all. Those caches are re-registered from scratch
+    /// by `register_batch_membership` / the collapse, so a fresh clone is the
+    /// correct pre-collapse state.
+    ///
+    /// Prefer this name over a bare `.clone()` at collapse sites; note that any
+    /// `.clone()` is likewise lossy on the derived caches.
     ///
     /// Intended use: `let mut spliced = vec.clone_for_collapse();
     /// spliced.mask_rows(&spliced_keep)?;` — gives a spliced-only view that
     /// drives RP + collapse + refinement without disturbing the full backend
     /// (still needed at all rows for per-modality aggregation).
     pub fn clone_for_collapse(&self) -> Self {
-        Self {
-            data_vec: self.data_vec.clone(),
-            col_to_data: self.col_to_data.clone(),
-            data_to_cols: self.data_to_cols.clone(),
-            offset: self.offset,
-            row_canonicalizer: self.row_canonicalizer.clone(),
-            row_name_position: self.row_name_position.clone(),
-            row_names_by_global: self.row_names_by_global.clone(),
-            data_local_to_global_row: self.data_local_to_global_row.clone(),
-            data_global_to_local_row: self.data_global_to_local_row.clone(),
-            data_has_intra_row_merges: self.data_has_intra_row_merges.clone(),
-            row_count_by_global: self.row_count_by_global.clone(),
-            global_to_compact_row: self.global_to_compact_row.clone(),
-            compact_to_global_row: self.compact_to_global_row.clone(),
-            column_names_with_data_tag: self.column_names_with_data_tag.clone(),
-            col_name_position: self.col_name_position.clone(),
-            // Derived caches dropped — re-registered by projection / collapse.
-            col_to_group: None,
-            group_to_cols: None,
-            group_keys: None,
-            batch_knn_lookup: None,
-            col_to_batch: None,
-            batch_to_cols: None,
-            batch_idx_to_name: None,
-            between_batch_proximity: None,
-            cached_num_rows: self.cached_num_rows,
-            cached_num_columns: self.cached_num_columns,
-            row_alignment: self.row_alignment,
-            column_alignment: self.column_alignment,
-            column_canonicalizer: self.column_canonicalizer.clone(),
-            per_backend_row_suffix: self.per_backend_row_suffix.clone(),
-        }
+        // `Clone` drops the derived group/batch caches (see `DerivedCaches`) —
+        // exactly the fresh pre-collapse state this method documents.
+        self.clone()
     }
 
     /// Exclude rows (genes) from the working set. `keep[compact_row]`
@@ -468,7 +467,7 @@ impl SparseIoVec {
             ));
         }
         debug_assert!(
-            self.col_to_batch.is_none() && self.col_to_group.is_none(),
+            self.derived.col_to_batch.is_none() && self.derived.col_to_group.is_none(),
             "mask_columns must be called before batch/group registration"
         );
 
@@ -526,14 +525,7 @@ impl SparseIoVec {
         self.cached_num_columns = next;
 
         // Any cell-indexed membership is now stale (asserted unset above).
-        self.col_to_batch = None;
-        self.batch_to_cols = None;
-        self.batch_idx_to_name = None;
-        self.batch_knn_lookup = None;
-        self.between_batch_proximity = None;
-        self.col_to_group = None;
-        self.group_to_cols = None;
-        self.group_keys = None;
+        self.derived = DerivedCaches::default();
 
         log::info!(
             "mask_columns: {} → {} cells ({} excluded)",
