@@ -22,6 +22,14 @@ use std::io::Write;
 /// through its decoded-chunk cache, hdf5 through `read_slice_1d`). The buffers
 /// are only indexed, so any `Index<usize>`-able owner works (`Vec`,
 /// `ndarray::Array1`, …).
+///
+/// **Contract:** `retrieve(start, end)` must return buffers of length exactly
+/// `end - start`, indexed base-0 at `start` (so element `start + k` lives at
+/// buffer offset `k`). The `Index<usize>` bound can't express this; a caller
+/// returning a short or differently-based buffer would index out of bounds or
+/// silently misalign values against indices. Emission is in `tagged`-order
+/// (i.e. sorted by `start`), not request order — fine for triplet consumers
+/// that rebuild a matrix, which is order-independent.
 pub(crate) fn coalesce_and_emit<R, F, D, I>(
     tagged: &[(u64, u64, u64)],
     inner_bound: usize,
