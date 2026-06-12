@@ -31,11 +31,13 @@ impl SparseIoVec {
         I: Iterator<Item = usize> + Clone,
     {
         let lookups = self
+            .derived
             .batch_knn_lookup
             .as_ref()
             .ok_or(anyhow::anyhow!("no knn lookup"))?;
 
         let cell_to_batch = self
+            .derived
             .col_to_batch
             .as_ref()
             .ok_or(anyhow::anyhow!("no cell to batch"))?;
@@ -180,11 +182,13 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let lookups = self
+            .derived
             .batch_knn_lookup
             .as_ref()
             .ok_or(anyhow::anyhow!("no knn lookup"))?;
 
         let cell_to_batch = self
+            .derived
             .col_to_batch
             .as_ref()
             .ok_or(anyhow::anyhow!("no cell to batch"))?;
@@ -203,18 +207,20 @@ impl SparseIoVec {
 
         // Pre-compute neighbouring batches per source batch
         let neighbouring_batches_by_source: Vec<Vec<usize>> = (0..nbatches)
-            .map(|source_batch| match self.between_batch_proximity.as_ref() {
-                Some(prox) => prox[source_batch]
-                    .iter()
-                    .copied()
-                    .filter(|&b| skip_batches.is_none_or(|skip| !skip.contains(&b)))
-                    .filter(|&b| !skip_same_batch || b != source_batch)
-                    .collect(),
-                _ => (0..nbatches)
-                    .filter(|&b| skip_batches.is_none_or(|skip| !skip.contains(&b)))
-                    .filter(|&b| !skip_same_batch || b != source_batch)
-                    .collect(),
-            })
+            .map(
+                |source_batch| match self.derived.between_batch_proximity.as_ref() {
+                    Some(prox) => prox[source_batch]
+                        .iter()
+                        .copied()
+                        .filter(|&b| skip_batches.is_none_or(|skip| !skip.contains(&b)))
+                        .filter(|&b| !skip_same_batch || b != source_batch)
+                        .collect(),
+                    _ => (0..nbatches)
+                        .filter(|&b| skip_batches.is_none_or(|skip| !skip.contains(&b)))
+                        .filter(|&b| !skip_same_batch || b != source_batch)
+                        .collect(),
+                },
+            )
             .collect();
 
         for glob_index in cells {
@@ -262,6 +268,7 @@ impl SparseIoVec {
         T: MakeVecPoint,
     {
         let lookups = self
+            .derived
             .batch_knn_lookup
             .as_ref()
             .ok_or(anyhow::anyhow!("no knn lookup"))?;

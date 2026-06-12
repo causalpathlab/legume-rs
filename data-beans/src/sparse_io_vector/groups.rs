@@ -30,24 +30,24 @@ impl SparseIoVec {
             .flat_map(|(g, cols)| cols.iter().map(move |&j| (j, g)))
             .collect();
 
-        self.group_keys = Some(group_keys);
-        self.group_to_cols = Some(group_to_cols);
-        self.col_to_group = Some(col_to_group);
+        self.derived.group_keys = Some(group_keys);
+        self.derived.group_to_cols = Some(group_to_cols);
+        self.derived.col_to_group = Some(col_to_group);
     }
 
     /// Take a vector of columns where each vector corresponds to a set
     pub fn take_grouped_columns(&self) -> Option<&Vec<Vec<usize>>> {
-        self.group_to_cols.as_ref()
+        self.derived.group_to_cols.as_ref()
     }
 
     /// Get the group keys in the same order as group indices
     pub fn group_keys(&self) -> Option<&Vec<Box<str>>> {
-        self.group_keys.as_ref()
+        self.derived.group_keys.as_ref()
     }
 
     /// Get a mapping from group keys to their column indices
     pub fn group_key_to_cols(&self) -> Option<HashMap<Box<str>, Vec<usize>>> {
-        if let (Some(keys), Some(cols)) = (&self.group_keys, &self.group_to_cols) {
+        if let (Some(keys), Some(cols)) = (&self.derived.group_keys, &self.derived.group_to_cols) {
             Some(
                 keys.iter()
                     .zip(cols.iter())
@@ -85,6 +85,7 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let cell_to_group = self
+            .derived
             .col_to_group
             .as_ref()
             .expect("groups were not assigned");
@@ -101,6 +102,10 @@ impl SparseIoVec {
 
     /// number of groups
     pub fn num_groups(&self) -> usize {
-        self.group_to_cols.as_ref().map(|x| x.len()).unwrap_or(0)
+        self.derived
+            .group_to_cols
+            .as_ref()
+            .map(|x| x.len())
+            .unwrap_or(0)
     }
 }

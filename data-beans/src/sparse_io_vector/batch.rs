@@ -184,10 +184,10 @@ impl SparseIoVec {
             dictionaries.push(dict);
         }
 
-        self.batch_knn_lookup = Some(dictionaries);
-        self.col_to_batch = Some(col_to_batch);
-        self.batch_to_cols = Some(batch_to_cols);
-        self.batch_idx_to_name = Some(batch_names);
+        self.derived.batch_knn_lookup = Some(dictionaries);
+        self.derived.col_to_batch = Some(col_to_batch);
+        self.derived.batch_to_cols = Some(batch_to_cols);
+        self.derived.batch_idx_to_name = Some(batch_names);
 
         if self.num_batches() > 2 {
             self.sort_batch_proximity()?;
@@ -198,6 +198,7 @@ impl SparseIoVec {
 
     fn sort_batch_proximity(&mut self) -> anyhow::Result<()> {
         let lookups = self
+            .derived
             .batch_knn_lookup
             .as_ref()
             .ok_or(anyhow::anyhow!("no knn lookup"))?;
@@ -244,13 +245,13 @@ impl SparseIoVec {
                     .map(|(others, _)| others)
             })
             .collect::<anyhow::Result<Vec<Vec<usize>>>>()?;
-        self.between_batch_proximity = Some(ret);
+        self.derived.between_batch_proximity = Some(ret);
 
         Ok(())
     }
 
     pub fn batch_name_map(&self) -> Option<HashMap<Box<str>, usize>> {
-        self.batch_idx_to_name.as_ref().map(|names| {
+        self.derived.batch_idx_to_name.as_ref().map(|names| {
             names
                 .iter()
                 .enumerate()
@@ -260,9 +261,9 @@ impl SparseIoVec {
     }
 
     pub fn num_batches(&self) -> usize {
-        if let Some(v) = &self.batch_to_cols {
+        if let Some(v) = &self.derived.batch_to_cols {
             v.len()
-        } else if let Some(v) = &self.batch_knn_lookup {
+        } else if let Some(v) = &self.derived.batch_knn_lookup {
             v.len()
         } else {
             0
@@ -273,7 +274,7 @@ impl SparseIoVec {
     /// `build_hnsw_per_batch` / `register_batches_dmatrix`. Returns `None`
     /// before the indices have been built.
     pub fn batch_knn_lookup(&self) -> Option<&Vec<ColumnDict<usize>>> {
-        self.batch_knn_lookup.as_ref()
+        self.derived.batch_knn_lookup.as_ref()
     }
 
     /// Register batch membership information without building HNSW
@@ -301,17 +302,17 @@ impl SparseIoVec {
             batch_to_cols.push(glob_indices);
         }
 
-        self.col_to_batch = Some(col_to_batch);
-        self.batch_to_cols = Some(batch_to_cols);
-        self.batch_idx_to_name = Some(batch_names);
+        self.derived.col_to_batch = Some(col_to_batch);
+        self.derived.batch_to_cols = Some(batch_to_cols);
+        self.derived.batch_idx_to_name = Some(batch_names);
     }
 
     pub fn batch_names(&self) -> Option<Vec<Box<str>>> {
-        self.batch_idx_to_name.clone()
+        self.derived.batch_idx_to_name.clone()
     }
 
     pub fn batch_to_columns(&self, batch: usize) -> Option<&Vec<usize>> {
-        if let Some(batch_to_cols) = &self.batch_to_cols {
+        if let Some(batch_to_cols) = &self.derived.batch_to_cols {
             Some(&batch_to_cols[batch])
         } else {
             None
@@ -323,6 +324,7 @@ impl SparseIoVec {
         I: Iterator<Item = usize>,
     {
         let cell_to_batch = self
+            .derived
             .col_to_batch
             .as_ref()
             .expect("cell_to_batch not initialized");
