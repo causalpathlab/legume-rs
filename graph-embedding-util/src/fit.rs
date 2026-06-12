@@ -401,11 +401,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         config.proj_dim,
         unified.n_batches()
     );
-    let batch_labels: Vec<Box<str>> = unified
-        .batch_membership
-        .iter()
-        .map(|&b| unified.batch_names[b as usize].clone())
-        .collect();
+    let batch_labels: Vec<Box<str>> = unified.batch_labels();
     let batch_arg = (unified.n_batches() > 1).then_some(batch_labels.as_slice());
     let proj_out = if let Some(w) = config.hvg_weights.as_deref() {
         anyhow::ensure!(
@@ -426,11 +422,9 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             w,
         )?
     } else {
-        unified.count_backend_mut().project_columns_with_batch_correction(
-            config.proj_dim,
-            config.block_size,
-            batch_arg,
-        )?
+        unified
+            .count_backend_mut()
+            .project_columns_with_batch_correction(config.proj_dim, config.block_size, batch_arg)?
     };
 
     let feat_weights = load_or_compute_fisher_weights(

@@ -33,15 +33,19 @@ struct Identity {
 
 /// Solve `e_cell` (and `b_cell`) by projecting every cell onto the frozen
 /// feature side, then overwrite the model's `e_cell` / `b_cell` vars.
+/// Returns the pre-L2-normalisation norm for each cell (one entry per model
+/// cell, ordered by cell id 0..n_cells).  A near-zero norm signals that the
+/// IRLS had nothing to fit — the cell's expressed genes were all near the
+/// β=0 init — and is used downstream for cell prior-score QC.
 pub fn solve_cell_embeddings(
     model: &mut GemModel,
     pools: &AxisPools,
     args: &GemArgs,
-) -> Result<()> {
+) -> Result<Vec<f32>> {
     let n_cells = model.n_cells;
     let h = model.embedding_dim;
     if n_cells == 0 {
-        return Ok(());
+        return Ok(vec![]);
     }
 
     // 1. Distinct identities + per-cell (identity, count) lists.
@@ -64,9 +68,15 @@ pub fn solve_cell_embeddings(
     // depth stays in the unpenalized `b_cell`. Mirrors the bge phase-2 fix
     // (geu commit 9142779). Near-empty cells solve to ~0 and stay 0 (and are
     // dropped by `--min-cell-nnz` at write time anyway).
+    //
+    // We capture the pre-normalisation norms here: a near-zero norm means the
+    // IRLS had nothing informative to fit (all expressed β_g ≈ 0), so the
+    // cell lives in the "dead-gene" region.  Used for cell prior-score QC.
+    let mut cell_nrms: Vec<f32> = Vec::with_capacity(n_cells);
     for c in 0..n_cells {
         let row = &mut e_flat[c * h..(c + 1) * h];
         let nrm = row.iter().map(|x| x * x).sum::<f32>().sqrt();
+        cell_nrms.push(nrm);
         if nrm > 0.0 {
             for v in row.iter_mut() {
                 *v /= nrm;
@@ -88,7 +98,7 @@ pub fn solve_cell_embeddings(
     }
     model.e_cell = e_t;
     model.b_cell = b_t;
-    Ok(())
+    Ok(cell_nrms)
 }
 
 fn intern(

@@ -90,7 +90,7 @@ pub struct PeakToGeneArgs {
     #[arg(
         long,
         default_value_t = 1,
-        help = "Hierarchical refinement levels; refined finest level is used (1 = single level)",
+        help = "Hierarchical refinement levels; refined finest level is used (1 = single level)"
     )]
     num_levels: usize,
 

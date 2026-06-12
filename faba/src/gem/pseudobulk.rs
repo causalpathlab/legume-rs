@@ -140,22 +140,52 @@ impl PseudobulkData {
     }
 }
 
+/// Refinement-pass inputs for [`build_pseudobulk`]. In the second
+/// (`--refine`) pass the caller has already `subset_features` / `subset_cells`'d
+/// `unified` down to the live N_new axis, but the **backend still carries the
+/// full N_old rows × columns**. The projection + collapse therefore run at
+/// N_old scale and need these full-backend-aligned inputs; the resulting
+/// partition is narrowed back to the live cells afterward.
+pub struct RefineContext<'a> {
+    /// Pre-subset ids of the cells kept after dead-cell filtering, in
+    /// new-cell order. Narrows the N_old `cell_to_pb_per_level` to the N_new
+    /// live cells so the partition aligns with the already-remapped triplets.
+    pub live_cell_old_ids: &'a [usize],
+    /// Full per-backend-column batch labels (length = backend `num_columns`
+    /// = N_old). The subset `unified.batch_membership` is already N_new, so
+    /// the caller captures these *before* subsetting.
+    pub full_batch_labels: &'a [Box<str>],
+}
+
 /// Build the multilevel partition + the per-axis sampling pools.
-/// Mutates `unified.per_file_data[0]` (the count file) to register
-/// batch membership and HNSW caches — same side-effect bge has.
+/// Mutates `unified.backend` (the count file) to register batch membership
+/// and HNSW caches — same side-effect bge has.
+///
+/// `refine`: `None` for the normal pass — triplets are materialized from the
+/// backend and batch labels derived from `unified`. `Some(ctx)` for the
+/// `--refine` pass (see [`RefineContext`]): triplets are NOT re-materialized
+/// (already remapped by `subset_cells`), the collapse runs on the full N_old
+/// backend then is narrowed to the live cells, and batch labels / row weights
+/// are taken at full-backend scale since `unified` is already subset.
 pub fn build_pseudobulk(
     unified: &mut UnifiedData,
     table: &FeatureTable,
     args: &GemArgs,
+    refine: Option<RefineContext<'_>>,
 ) -> anyhow::Result<PseudobulkData> {
+    let skip_materialize = refine.is_some();
+    let live_cell_old_ids = refine.as_ref().map(|r| r.live_cell_old_ids);
+
     ////////////////////////////////////////
     // 1. Batch labels + projection
     ////////////////////////////////////////
-    let batch_labels: Vec<Box<str>> = unified
-        .batch_membership
-        .iter()
-        .map(|&b| unified.batch_names[b as usize].clone())
-        .collect();
+    // Batch labels at BACKEND-column scale. Normal pass: derive from `unified`
+    // (N == backend columns). Refine pass: `unified` is already N_new, so use
+    // the caller's full N_old labels (one per backend column).
+    let batch_labels: Vec<Box<str>> = match refine.as_ref() {
+        Some(r) => r.full_batch_labels.to_vec(),
+        None => unified.batch_labels(),
+    };
     let batch_arg = (unified.n_batches() > 1).then_some(batch_labels.as_slice());
 
     info!(
@@ -163,9 +193,26 @@ pub fn build_pseudobulk(
         args.proj_dim,
         unified.n_batches()
     );
-    let proj = unified.per_file_data[0]
-        .project_columns_with_batch_correction(args.proj_dim, None, batch_arg)
-        .context("random projection on count file")?;
+    // Gene-anchored projection: only CountComp (spliced gene expression) rows
+    // contribute to the HNSW geometry.  ModifierComp rows (m6a, A2I, pA) — and,
+    // in the refine pass, dropped dead-gene rows — get weight 0, so m6a-only
+    // cells project near zero and inherit their PB assignment from their @batch
+    // label.  Weights are indexed by **backend row**, not the compact unified
+    // axis: in the refine pass the backend still has all N_old rows while
+    // `table` only covers the N_new live features, so each live feature is
+    // placed at its backend row via `feature_to_backend_row` (identity in the
+    // normal pass).  `project_columns_weighted` requires one weight per
+    // backend row.
+    let mut count_row_weights = vec![0.0_f32; unified.count_backend().num_rows()];
+    for (uid, stratum) in table.strata.iter().enumerate() {
+        if matches!(stratum, Some(RowStratum::CountComp)) {
+            count_row_weights[unified.feature_to_backend_row[uid]] = 1.0;
+        }
+    }
+    let proj = unified
+        .count_backend_mut()
+        .project_columns_weighted(args.proj_dim, None, batch_arg, &count_row_weights)
+        .context("gene-anchored random projection on count file")?;
 
     ////////////////////////////////////////
     // 2. Multilevel collapse on count file
@@ -175,7 +222,7 @@ pub fn build_pseudobulk(
         args.sort_dim, args.num_levels
     );
     let collapse_out = collapse_columns_multilevel_with_hierarchy(
-        &mut unified.per_file_data[0],
+        unified.count_backend_mut(),
         &proj.proj,
         &batch_labels,
         &MultilevelParams {
@@ -194,14 +241,28 @@ pub fn build_pseudobulk(
     cell_to_pb_per_level.reverse();
     drop(collapse_out.levels);
 
+    // Pass-2 refinement: the collapse ran on the full N_old backend, so
+    // each level vector has N_old entries.  Select only the N_new live
+    // cells' rows so the partition aligns with the remapped triplets.
+    if let Some(old_ids) = live_cell_old_ids {
+        for level in &mut cell_to_pb_per_level {
+            *level = old_ids.iter().map(|&i| level[i]).collect();
+        }
+    }
+
     ////////////////////////////////////////
     // 3. Materialise triplets + aggregate
     ////////////////////////////////////////
     // `materialize_cell_triplets` is deferred so the collapse phase's
     // peak memory doesn't have to coexist with the triplet edge list.
-    unified
-        .materialize_cell_triplets()
-        .context("materialize unified triplets")?;
+    // In pass-2 (skip_materialize=true) the triplets are already valid
+    // (remapped by `subset_cells`) and must not be overwritten from the
+    // full-N_old backend.
+    if !skip_materialize {
+        unified
+            .materialize_cell_triplets()
+            .context("materialize unified triplets")?;
+    }
     info!(
         "materialized {} cell↔feature triplets",
         unified.triplets.len()

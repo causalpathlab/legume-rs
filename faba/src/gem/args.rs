@@ -147,6 +147,49 @@ pub struct GemArgs {
     #[arg(long, help = "Drop batch labels (treat all cells as one batch)")]
     pub ignore_batch: bool,
 
+    ////////////////////////////////////////////////////////////////////////
+    // Per-cell sample identity (Union loader)
+    //
+    // Under Union column alignment, cells merge by raw barcode. To keep
+    // distinct biological samples apart — and to MERGE a sample's modalities
+    // into one joint cell — gem tags each input file's barcodes with a sample
+    // id (`barcode@sample`) before the merge. The sample id is the file's
+    // basename with the per-flag suffix below stripped, so e.g. stripping
+    // `_genes` from `rep1_wt_genes` and `_m6a_mixture` from `rep1_wt_m6a_mixture`
+    // both yield `rep1_wt` → their matched cells merge. The `@sample` tag is
+    // also read back as the per-cell batch label. Empty (default) = tag with
+    // the full basename (samples stay distinct, but modalities of one sample
+    // do NOT merge unless their basenames already match). Skipped entirely
+    // when `--batch-files` is given or barcodes already carry an `@` tag.
+    ////////////////////////////////////////////////////////////////////////
+    #[arg(
+        long,
+        default_value = "",
+        help = "Strip this suffix from each --genes file basename to form its sample id"
+    )]
+    pub genes_sample_strip: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "",
+        help = "Strip this suffix from each --dartseq file basename to form its sample id"
+    )]
+    pub dartseq_sample_strip: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "",
+        help = "Strip this suffix from each --atoi file basename to form its sample id"
+    )]
+    pub atoi_sample_strip: Box<str>,
+
+    #[arg(
+        long,
+        default_value = "",
+        help = "Strip this suffix from each --apa file basename to form its sample id"
+    )]
+    pub apa_sample_strip: Box<str>,
+
     #[arg(
         long = "min-cell-nnz",
         default_value_t = 2,
@@ -426,6 +469,44 @@ pub struct GemArgs {
     )]
     pub num_topics: Option<usize>,
 
+    ///////////////
+    // Refinement //
+    ///////////////
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Run a second training pass after filtering dead genes and cells",
+        long_help = "Run a second full training pass.  After pass-1 completes,\n\
+                     genes whose feature_prior_score.prior_pval > --feature-prior-pval-max\n\
+                     and cells whose cell_prior_score.prior_pval > --cell-prior-pval-max\n\
+                     are removed; the pseudobulk, feature table, and model are rebuilt\n\
+                     from the filtered data and training restarts from scratch."
+    )]
+    pub refine: bool,
+
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        help = "Pass-1 threshold: drop genes with feature_prior_score.prior_pval above this",
+        long_help = "Upper-tail χ²_H p-value threshold applied to feature_prior_score after\n\
+                     pass-1.  Genes consistent with the random-init prior\n\
+                     (prior_pval > threshold) are removed before pass-2 retraining.\n\
+                     Only used when --refine is active.  Must be in (0, 1)."
+    )]
+    pub feature_prior_pval_max: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        help = "Pass-1 threshold: drop cells with cell_prior_score.prior_pval above this",
+        long_help = "Upper-tail χ²_H p-value threshold applied to cell_prior_score after\n\
+                     pass-1.  Cells whose pre-L2-norm is consistent with the zero null\n\
+                     (prior_pval > threshold, i.e. the IRLS solved near zero) are removed\n\
+                     before pass-2 retraining.  Only used when --refine is active.\n\
+                     Must be in (0, 1)."
+    )]
+    pub cell_prior_pval_max: f32,
+
     //////////
     // Misc //
     //////////
@@ -439,4 +520,9 @@ pub struct GemArgs {
     /// Device ordinal (for `cuda` / `metal`).
     #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
     pub device_no: usize,
+
+    /// Number of CPU threads for rayon-parallel work (HNSW, collapse, phase-2
+    /// cell projection). Defaults to all available logical CPUs.
+    #[arg(long, default_value_t = 0, help = "CPU threads (0 = all available)")]
+    pub threads: usize,
 }

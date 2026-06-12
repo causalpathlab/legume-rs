@@ -483,7 +483,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             info!(
                 "--multiome: namespacing features as {{name}}/{{modality}} (per-file \
                  modality: {})",
-                suf.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join(", ")
+                suf.iter()
+                    .map(|s| s.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
         &data_files_flat
@@ -526,25 +529,23 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         args.condition_files.as_deref()
     };
 
-    let mut unified = ge::load_unified_data(
-        data_files,
-        batch_files,
-        condition_files,
-        feature_kind.clone(),
-        args.preload_data,
+    let mut unified = ge::load_unified_data(ge::LoadUnifiedArgs {
+        data_files: data_files.to_vec(),
+        batch_files: batch_files.map(<[Box<str>]>::to_vec),
+        condition_files: condition_files.map(<[Box<str>]>::to_vec),
+        feature_kind: Some(feature_kind.clone()),
+        preload: args.preload_data,
         column_alignment,
-        feature_suffix,
-    )?;
+        per_file_feature_suffix: feature_suffix,
+        // senna uses disjoint barcodes per group; no per-file barcode suffix.
+        ..Default::default()
+    })?;
 
     // Guard barcode identity across groups: disjoint barcodes, so Union
     // loading never merges cells from different samples. No-op for one group.
     if is_multiome {
         let group_sizes: Vec<usize> = multiome_groups.iter().map(Vec::len).collect();
-        ge::validate_multiome_groups(
-            &group_sizes,
-            &unified.barcodes,
-            &unified.cell_modality,
-        )?;
+        ge::validate_multiome_groups(&group_sizes, &unified.barcodes, &unified.cell_modality)?;
     }
 
     if unified.n_conditions() > 1 {

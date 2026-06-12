@@ -37,7 +37,7 @@ use candle_nn::{Init, VarMap};
 /// magnitude used in graph-embedding-util's `JointEmbedModel`. Also the σ
 /// of the per-feature prior null `e_f ~ N(0, σ²I)` that the feature
 /// prior-score QC tests against (see `manifest::write_feature_prior_score`).
-pub(crate) const PARAM_INIT_STD: f64 = 0.05;
+pub const PARAM_INIT_STD: f64 = 0.05;
 
 /// Which right-hand-side embedding table the bilinear scores against.
 /// The shared feature side (β, z, δ, γ) is reused across all axes; only
@@ -192,25 +192,17 @@ impl GemModel {
         Ok(Tensor::from_slice(ids, ids.len(), &self.dev)?)
     }
 
-    /// Build the `(agg_mask, not_agg_mask)` tensors for a slate in a single
-    /// pass — saves the `Tensor::ones - agg` round-trip that `embed_rows`
-    /// and `bias_rows` would otherwise each do separately on every call.
+    /// Build the `(agg_mask, not_agg_mask)` f32 tensors for a slate.
+    /// One host→device upload; `not_agg` is computed on-device via affine.
     pub fn agg_masks_f32(&self, is_agg: &[bool]) -> Result<(Tensor, Tensor)> {
         let n = is_agg.len();
-        let mut agg = Vec::with_capacity(n);
-        let mut not_agg = Vec::with_capacity(n);
-        for &b in is_agg {
-            if b {
-                agg.push(1.0_f32);
-                not_agg.push(0.0_f32);
-            } else {
-                agg.push(0.0_f32);
-                not_agg.push(1.0_f32);
-            }
-        }
-        let agg_t = Tensor::from_vec(agg, n, &self.dev)?;
-        let not_agg_t = Tensor::from_vec(not_agg, n, &self.dev)?;
-        Ok((agg_t, not_agg_t))
+        let agg_buf: Vec<f32> = is_agg
+            .iter()
+            .map(|&a| if a { 1.0_f32 } else { 0.0 })
+            .collect();
+        let agg = Tensor::from_vec(agg_buf, n, &self.dev)?;
+        let not_agg = agg.affine(-1.0, 1.0)?; // 1.0 - agg, computed on device
+        Ok((agg, not_agg))
     }
 
     /// Feature-side embedding for a batch of rows. `gene_for_rho`
@@ -260,13 +252,54 @@ impl GemModel {
         debug_assert_eq!(modality_for_bias.len(), b);
         debug_assert_eq!(is_agg.len(), b);
 
-        let (agg, not_agg) = self.agg_masks_f32(is_agg)?;
+        // Pack all six u32 index arrays plus pre-computed flat indices into a
+        // single [6 × B] tensor — one host→device transfer instead of six
+        // separate `from_slice`/`from_vec` calls.  Layout is [6, B] so each
+        // `narrow(0, row, 1).squeeze(0)` yields a contiguous [B] view (no
+        // copy on CUDA).  Rows:
+        //   0  gene_for_rho
+        //   1  gene_for_z
+        //   2  modality_for_q
+        //   3  gamma_flat = m * R + r          (pre-computed on CPU)
+        //   4  gene_for_bias
+        //   5  flat_b_comp = g * M + m         (pre-computed on CPU)
+        let r_cols = self.n_regions as u32;
+        let m_cols = self.n_modalities as u32;
+        let mut idx_buf = Vec::<u32>::with_capacity(b * 6);
+        idx_buf.extend_from_slice(gene_for_rho);
+        idx_buf.extend_from_slice(gene_for_z);
+        idx_buf.extend_from_slice(modality_for_q);
+        idx_buf.extend(
+            modality_for_q
+                .iter()
+                .zip(region_for_delta)
+                .map(|(&m, &r)| m * r_cols + r),
+        );
+        idx_buf.extend_from_slice(gene_for_bias);
+        idx_buf.extend(
+            gene_for_bias
+                .iter()
+                .zip(modality_for_bias)
+                .map(|(&g, &m)| g * m_cols + m),
+        );
+        let idx_t = Tensor::from_vec(idx_buf, (6, b), &self.dev)?;
+        let g_rho = idx_t.narrow(0, 0, 1)?.squeeze(0)?; // [B]
+        let g_z = idx_t.narrow(0, 1, 1)?.squeeze(0)?;
+        let m_q = idx_t.narrow(0, 2, 1)?.squeeze(0)?;
+        let gamma_idx = idx_t.narrow(0, 3, 1)?.squeeze(0)?;
+        let g_bias_idx = idx_t.narrow(0, 4, 1)?.squeeze(0)?;
+        let flat_idx = idx_t.narrow(0, 5, 1)?.squeeze(0)?;
+
+        // Agg mask: one upload, not_agg computed on-device via affine.
+        let agg_buf: Vec<f32> = is_agg
+            .iter()
+            .map(|&a| if a { 1.0_f32 } else { 0.0 })
+            .collect();
+        let agg = Tensor::from_vec(agg_buf, b, &self.dev)?;
+        let not_agg = agg.affine(-1.0, 1.0)?; // 1.0 - agg
 
         // ── embedding side ──
         let h = self.embedding_dim;
-        let g_rho = self.idx_u32(gene_for_rho)?;
-        let g_z = self.idx_u32(gene_for_z)?;
-        let m_q = self.idx_u32(modality_for_q)?;
 
         let beta_b = self.beta.index_select(&g_rho, 0)?; // [B, H]
         let z_b = self.z.index_select(&g_z, 0)?; // [B, K]
@@ -284,14 +317,7 @@ impl GemModel {
             .contiguous()?; // [B, K, H]
         let z_delta = z_b.unsqueeze(1)?.matmul(&delta_m)?.squeeze(1)?; // [B, H]
 
-        // γ_{m,r,:}  →  [B, H].  γ is [M, R, H]; flat-index by m*R + r.
-        let r_cols = self.n_regions as u32;
-        let gamma_flat_idx: Vec<u32> = modality_for_q
-            .iter()
-            .zip(region_for_delta.iter())
-            .map(|(&m, &r)| m * r_cols + r)
-            .collect();
-        let gamma_idx = Tensor::from_vec(gamma_flat_idx, b, &self.dev)?;
+        // γ_{m,r,:}  →  [B, H].  γ is [M*R, H] after reshape.
         let gamma_b = self
             .gamma
             .reshape((self.n_modalities * self.n_regions, h))?
@@ -302,19 +328,9 @@ impl GemModel {
         let logdev_masked = logdev.broadcast_mul(&not_agg.unsqueeze(1)?)?; // [B, H]
         let e = (beta_b * logdev_masked.exp()?)?;
 
-        // ── bias side (shares `agg` / `not_agg`) ──
-        let m_cols = self.n_modalities as u32;
-        let flat_idx_vec: Vec<u32> = gene_for_bias
-            .iter()
-            .zip(modality_for_bias.iter())
-            .map(|(&g, &m)| g * m_cols + m)
-            .collect();
-        let g_bias_idx = self.idx_u32(gene_for_bias)?;
-        let flat_idx = Tensor::from_vec(flat_idx_vec, b, &self.dev)?;
-
+        // ── bias side (reuses g_bias_idx, flat_idx, agg, not_agg) ──
         let b_agg_b = self.b_agg.index_select(&g_bias_idx, 0)?;
         let b_comp_b = self.b_comp.flatten_all()?.index_select(&flat_idx, 0)?;
-
         let bias = (((b_agg_b * &agg)?) + (b_comp_b * &not_agg)?)?;
 
         Ok((e, bias))

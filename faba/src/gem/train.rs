@@ -35,13 +35,16 @@ use super::model::{Axis, GemModel};
 use super::pseudobulk::PseudobulkData;
 use super::sampling::{draw_minibatch, Minibatch, SamplerState};
 
+/// Run both training phases.  Returns the pre-L2-normalisation cell norms
+/// from phase 2 (one entry per model cell), or an empty `Vec` when phase 2
+/// was skipped or interrupted before completion.
 pub fn train(
     args: &GemArgs,
     table: &FeatureTable,
     pb: &PseudobulkData,
     model: &mut GemModel,
     stop: &Arc<AtomicBool>,
-) -> Result<()> {
+) -> Result<Vec<f32>> {
     let sampler = SamplerState::new(table, pb, args);
     // One deterministic draw sequence threaded through both phases by
     // `&mut` borrow (each phase's producer thread is joined before the
@@ -131,17 +134,18 @@ pub fn train(
     if want_phase2 {
         if stop.load(Ordering::Relaxed) {
             info!("phase 2 skipped (interrupted in phase 1)");
-        } else {
-            info!(
-                "phase 2/2 (analytical cell projection onto frozen features, ridge λ={}): {} cells",
-                args.phase2_ridge, model.n_cells
-            );
-            cell_solve::solve_cell_embeddings(model, &pb.cell_pools, args)
-                .context("phase-2 cell projection")?;
+            return Ok(vec![]);
         }
+        info!(
+            "phase 2/2 (analytical cell projection onto frozen features, ridge λ={}): {} cells",
+            args.phase2_ridge, model.n_cells
+        );
+        let cell_nrms = cell_solve::solve_cell_embeddings(model, &pb.cell_pools, args)
+            .context("phase-2 cell projection")?;
+        return Ok(cell_nrms);
     }
 
-    Ok(())
+    Ok(vec![])
 }
 
 /// Run one composite-sum training phase over `axes` for `epochs`, stepping

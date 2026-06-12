@@ -157,6 +157,10 @@ fn test_args() -> GemArgs {
         num_opt_iter: 1,
         proj_dim: 8,
         ignore_batch: true,
+        genes_sample_strip: "".into(),
+        dartseq_sample_strip: "".into(),
+        atoi_sample_strip: "".into(),
+        apa_sample_strip: "".into(),
         min_cell_nnz: 0,
         no_cell_axis: false,
         // This fixture trains on the cell axis only (zero pb levels), so keep
@@ -183,9 +187,13 @@ fn test_args() -> GemArgs {
         n_rand: 8,
         n_swap_gene_mode: 4,
         n_swap_modality: 6,
+        refine: false,
+        feature_prior_pval_max: 0.05,
+        cell_prior_pval_max: 0.05,
         seed: 7,
         device: ComputeDevice::Cpu,
         device_no: 0,
+        threads: 0,
     }
 }
 

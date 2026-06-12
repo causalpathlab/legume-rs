@@ -370,7 +370,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     if cli.verbose {
-        std::env::set_var("RUST_LOG", "info");
+        std::env::set_var("RUST_LOG", "info,hnsw_rs=warn");
     }
     env_logger::init();
 
