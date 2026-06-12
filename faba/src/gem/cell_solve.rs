@@ -66,8 +66,8 @@ pub fn solve_cell_embeddings(
     // archetypal topics (one giant central topic). The feature side is
     // trained with scale-invariant NCE, so only the DIRECTION is meaningful;
     // depth stays in the unpenalized `b_cell`. Mirrors the bge phase-2 fix
-    // (geu commit 9142779). Near-empty cells solve to ~0 and stay 0 (and are
-    // dropped by `--min-cell-nnz` at write time anyway).
+    // (geu commit 9142779). Near-empty cells solve to ~0 and stay 0 (and the
+    // zero-spliced ones are dropped by cell QC before training anyway).
     //
     // We capture the pre-normalisation norms here: a near-zero norm means the
     // IRLS had nothing informative to fit (all expressed β_g ≈ 0), so the

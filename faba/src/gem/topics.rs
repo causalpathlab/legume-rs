@@ -49,7 +49,7 @@ pub fn resolve_topics(
     unified: &UnifiedData,
     args: &GemArgs,
     stop: &Arc<AtomicBool>,
-    // QC-passed cell indices (see `--min-cell-nnz`): archetypes are fit on
+    // QC-passed cell indices (spliced auto cell-calling): archetypes are fit on
     // and θ is assigned to these cells only, and `latent` is written for
     // them — keeping near-empty cells out would otherwise seed a spurious
     // "empty" archetype.

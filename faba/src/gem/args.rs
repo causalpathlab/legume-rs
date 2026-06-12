@@ -191,40 +191,21 @@ pub struct GemArgs {
     pub apa_sample_strip: Box<str>,
 
     #[arg(
-        long = "min-cell-nnz",
-        default_value_t = 2,
-        help = "Cell QC: minimum nonzeros a cell must have across all modalities",
-        long_help = "Cell QC: minimum number of detected features (nonzeros) a cell must\n\
-                     have **across all modalities** (count + m6A/A2I/APA) to be embedded\n\
-                     and written. Modality-agnostic on purpose — coverage is skewed\n\
-                     across modalities, so this keeps any cell with signal in *any* one,\n\
-                     dropping only near-empty cells. Under Union alignment a barcode seen\n\
-                     in just one sparse modality (e.g. a single stray editing read, no\n\
-                     counts) is a degenerate \"cell\" the count-anchored phase-2 projection\n\
-                     maps to ~0; the default `2` drops exactly those while keeping every\n\
-                     cell that yields a real embedding. Set `1` to keep all but fully\n\
-                     empty cells; raise for stricter QC. No data is rewritten — this is a\n\
-                     write-time selection, not a squeeze."
-    )]
-    pub min_cell_nnz: usize,
-
-    #[arg(
         long = "no-auto-cell-cutoff",
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
-        help = "Disable automatic cell calling (then --min-cell-nnz alone is the cutoff)",
+        help = "Disable automatic cell calling (keep every cell with any spliced signal)",
         long_help = "Automatic cell calling (ON by default; pass `--no-auto-cell-cutoff`\n\
                      to disable). Picks the spliced-nnz cutoff by 2-means clustering of\n\
                      log(1+nnz) — the ambient↔real-cell boundary, same routine as\n\
                      `data-beans squeeze` — prints the spliced-nnz histogram with the\n\
-                     suggested + applied cutoff marked, then **subsets the cells up front**\n\
-                     so the collapse + training + outputs all run on the called cells only\n\
-                     (faster, and ambient never shapes the model). The effective cutoff is\n\
-                     `max(--min-cell-nnz, suggested)`, so `--min-cell-nnz` is a hard floor.\n\
-                     nnz is counted over the spliced rows — the features that drive the\n\
-                     collapse — so cells the spliced projection can't place are dropped.\n\
-                     Disabled → `--min-cell-nnz` is the cutoff and the suggestion is only\n\
-                     logged."
+                     applied cutoff marked, then **subsets the cells up front** so the\n\
+                     collapse + training + outputs all run on the called cells only (faster,\n\
+                     and ambient never shapes the model). nnz is counted over the spliced\n\
+                     rows — the features that drive the collapse. There is no separate\n\
+                     manual floor: when the distribution is unimodal (no real ambient↔cell\n\
+                     split) or when this flag disables auto-calling, only genuinely\n\
+                     zero-spliced cells (unplaceable by the spliced projection) are dropped."
     )]
     pub auto_cell_cutoff: bool,
 

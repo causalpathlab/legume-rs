@@ -161,7 +161,6 @@ fn test_args() -> GemArgs {
         dartseq_sample_strip: "".into(),
         atoi_sample_strip: "".into(),
         apa_sample_strip: "".into(),
-        min_cell_nnz: 0,
         auto_cell_cutoff: false,
         no_cell_axis: false,
         // This fixture trains on the cell axis only (zero pb levels), so keep
