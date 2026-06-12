@@ -1047,6 +1047,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: Some("feature_embedding.parquet"),
+        cell_embedding_suffix: None,
         default_colour_by: "cluster",
         has_latent: true,
         has_cell_to_pb,

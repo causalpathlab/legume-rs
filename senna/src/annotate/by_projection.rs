@@ -93,11 +93,19 @@ pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
         .feature_embedding
         .as_deref()
         .context("manifest has no outputs.feature_embedding")?;
+    // Prefer the explicit H-space cell embedding when the run records one
+    // (`bge --resolve-etm`, `resolve-embedding-space`): there `latent` is the
+    // topic θ, NOT the embedding ρ lives in. Plain bge/fne set no
+    // `cell_embedding`, and their `latent` IS the cell embedding — fall back.
     let cell_rel = manifest
         .outputs
-        .latent
+        .cell_embedding
         .as_deref()
-        .context("manifest has no outputs.latent (cell embedding)")?;
+        .or(manifest.outputs.latent.as_deref())
+        .context(
+            "manifest has neither outputs.cell_embedding nor outputs.latent (cell embedding). \
+             For topic-space annotation use `senna annotate-by-topic`.",
+        )?;
 
     let feat_path = resolve(&dir, feat_rel).to_string_lossy().into_owned();
     let feat = DMatrix::<f32>::from_parquet(&feat_path)

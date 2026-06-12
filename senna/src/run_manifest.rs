@@ -214,6 +214,14 @@ pub struct RunOutputs {
     /// learned coordinate in the topic-model embedding space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_embedding: Option<String>,
+    /// `{out}.cell_embedding.parquet` — N × H per-cell embedding Z in the
+    /// SAME H-space as `feature_embedding` ρ. Recorded by runs whose `latent`
+    /// is NOT itself the H-embedding: `bge --resolve-etm` (latent = log θ) and
+    /// `resolve-embedding-space`. `annotate-by-projection` prefers this over
+    /// `latent`. Absent on plain `bge`/`fne`, where `latent` already IS the
+    /// cell embedding (and the projection consumer falls back to it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_embedding: Option<String>,
     /// `{out}.cell_to_pb.parquet` — N × num_levels u32 matrix of the
     /// post-refinement cell→pseudobulk membership per coarsening level
     /// (finest-last to match `collapsed_levels`). Cached so a downstream
@@ -613,6 +621,11 @@ pub struct RunDescription<'a> {
     /// parquet (masked-topic only), e.g. `"feature_embedding.parquet"`.
     /// `None` to omit.
     pub feature_embedding_suffix: Option<&'a str>,
+    /// Suffix after `{basename}.` for the H-space per-cell embedding Z
+    /// parquet, e.g. `"cell_embedding.parquet"`. Set only when `latent` is
+    /// not itself the H-embedding (`bge --resolve-etm`,
+    /// `resolve-embedding-space`). `None` to omit.
+    pub cell_embedding_suffix: Option<&'a str>,
     /// Default `--colour-by` for downstream plot / layout.
     pub default_colour_by: &'a str,
     /// True if the run emits `{basename}.latent.parquet` (per-cell K-dim
@@ -667,6 +680,9 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     }
     if let Some(suf) = desc.feature_embedding_suffix {
         m.outputs.feature_embedding = Some(format!("{basename}.{suf}"));
+    }
+    if let Some(suf) = desc.cell_embedding_suffix {
+        m.outputs.cell_embedding = Some(format!("{basename}.{suf}"));
     }
     if desc.has_cell_to_pb {
         m.outputs.cell_to_pb = Some(format!("{basename}.cell_to_pb.parquet"));

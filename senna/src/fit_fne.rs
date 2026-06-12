@@ -227,6 +227,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: Some("feature_embedding.parquet"),
+        cell_embedding_suffix: None,
         default_colour_by: "cluster",
         has_latent: false,
         has_cell_to_pb: false,
