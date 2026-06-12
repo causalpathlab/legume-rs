@@ -38,7 +38,7 @@ pub mod training;
 pub mod type_annotation;
 
 pub use auxiliary_data::feature_names::FeatureNameKind;
-pub use data::{load_unified_data, validate_multiome_groups, UnifiedData};
+pub use data::{load_unified_data, validate_multiome_groups, LoadUnifiedArgs, UnifiedData};
 pub use data_beans_alg::refine_multilevel::RefineParams;
 pub use eval::{save_gate, save_outputs, OutputContext};
 pub use fit::{

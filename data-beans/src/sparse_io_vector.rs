@@ -10,6 +10,7 @@ use matrix_util::traits::*;
 use matrix_util::utils::*;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::borrow::Cow;
 use std::ops::Index;
 use std::sync::Arc;
 
@@ -258,10 +259,7 @@ impl SparseIoVec {
     /// Must be called BEFORE the first [`push`](Self::push). The vec length
     /// must match the number of backends that will be pushed; `push` errors
     /// if `didx` is out of range.
-    pub fn with_per_backend_row_suffix(
-        mut self,
-        suffix: Vec<Box<str>>,
-    ) -> anyhow::Result<Self> {
+    pub fn with_per_backend_row_suffix(mut self, suffix: Vec<Box<str>>) -> anyhow::Result<Self> {
         anyhow::ensure!(
             self.data_vec.is_empty(),
             "per-backend row suffix must be set before any push"
@@ -412,16 +410,39 @@ impl SparseIoVec {
         self.group_to_cols.as_ref().map(|x| x.len()).unwrap_or(0)
     }
 
-    /// push new sparse data
+    /// Add a backend's columns to the vector.
     ///
-    /// * `data`: `Arc` to `SparseIo`
+    /// * `data`: `Arc` to the backend [`SparseData`].
+    /// * `data_name`: under [`ColumnAlignment::Disjoint`], appended as the
+    ///   `@<data_name>` display disambiguator for barcodes shared across
+    ///   files. **Ignored under [`ColumnAlignment::Union`]**, where cells
+    ///   glue by raw barcode — use [`push_with_barcode_suffix`] to attach a
+    ///   per-cell sample tag that participates in the Union merge.
     ///
-    /// * `data_name`: data name to avoid duplicate barcodes
-    ///
+    /// [`push_with_barcode_suffix`]: Self::push_with_barcode_suffix
     pub fn push(
         &mut self,
         data: Arc<SparseData>,
         data_name: Option<Box<str>>,
+    ) -> anyhow::Result<()> {
+        self.push_with_barcode_suffix(data, data_name, None)
+    }
+
+    /// Like [`push`](Self::push) but, under [`ColumnAlignment::Union`], tags
+    /// every barcode of this backend with `{COLUMN_SEP}{barcode_suffix}`
+    /// **before** the canonical-merge step. Two backends that share a barcode
+    /// merge into one global cell only if they carry the SAME suffix, so
+    /// callers can encode per-file sample identity (e.g. `rep1_wt`):
+    /// same-sample modalities merge, different samples stay distinct. The
+    /// tagged name also becomes the displayed column name. `None` reproduces
+    /// [`push`](Self::push) exactly. The `data_name` Disjoint disambiguator is
+    /// orthogonal: it still applies under `Disjoint`, and `barcode_suffix`
+    /// only under `Union` (the two alignments are mutually exclusive).
+    pub fn push_with_barcode_suffix(
+        &mut self,
+        data: Arc<SparseData>,
+        data_name: Option<Box<str>>,
+        barcode_suffix: Option<&str>,
     ) -> anyhow::Result<()> {
         let Some(ncol_data) = data.num_columns() else {
             return Err(anyhow::anyhow!("data file has no columns"));
@@ -473,9 +494,19 @@ impl SparseIoVec {
                     HashMap::with_capacity_and_hasher(ncol_data, Default::default());
                 let mut local_to_glob = Vec::with_capacity(ncol_data);
                 for (loc, raw) in raw_col_names.iter().enumerate() {
+                    // Tag the barcode with the per-file suffix (sample id)
+                    // before canonicalization so the merge key — and the
+                    // displayed name — carry sample identity. Same suffix
+                    // across backends ⇒ merge; different ⇒ distinct cells.
+                    // Borrow `raw` in the common no-suffix path so the merge
+                    // pass doesn't allocate a `Box<str>` per column.
+                    let tagged: Cow<str> = match barcode_suffix {
+                        Some(s) => Cow::Owned(format!("{raw}{COLUMN_SEP}{s}")),
+                        None => Cow::Borrowed(raw.as_ref()),
+                    };
                     let canon: Box<str> = match self.column_canonicalizer.as_ref() {
-                        Some(c) => c(raw),
-                        None => raw.clone(),
+                        Some(c) => c(&tagged),
+                        None => Box::from(&*tagged),
                     };
                     if let Some(&prev_loc) = seen_in_this_push.get(&canon) {
                         return Err(anyhow::anyhow!(
@@ -511,10 +542,10 @@ impl SparseIoVec {
                                 backend: didx_u32,
                                 local_col: loc_u32,
                             }]);
-                            // Raw barcode (no @<basename> suffix) becomes
+                            // Tagged barcode (`raw` when no suffix) becomes
                             // the displayed name; subsequent backends
                             // contributing to this cell don't relabel it.
-                            self.column_names_with_data_tag.push(raw.clone());
+                            self.column_names_with_data_tag.push(Box::from(&*tagged));
                             self.offset += 1;
                             new_g
                         }

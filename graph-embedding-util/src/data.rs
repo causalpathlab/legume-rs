@@ -7,7 +7,7 @@
 use crate::progress::new_progress_bar;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use auxiliary_data::feature_names::FeatureNameKind;
-use data_beans::sparse_io_vector::SparseIoVec;
+use data_beans::sparse_io_vector::{ColumnAlignment, SparseIoVec};
 use indicatif::ParallelProgressIterator;
 use log::info;
 use rayon::prelude::*;
@@ -86,7 +86,6 @@ impl UnifiedData {
         self.barcodes.len()
     }
 
-
     pub fn n_features(&self) -> usize {
         self.feature_names.len()
     }
@@ -97,6 +96,16 @@ impl UnifiedData {
 
     pub fn n_conditions(&self) -> usize {
         self.condition_names.len()
+    }
+
+    /// Per-cell batch labels (`batch_names[batch_membership[c]]`), in cell-id
+    /// order. Length == `n_cells()`. The string form the projection /
+    /// multilevel collapse consume for within-batch negatives.
+    pub fn batch_labels(&self) -> Vec<Box<str>> {
+        self.batch_membership
+            .iter()
+            .map(|&b| self.batch_names[b as usize].clone())
+            .collect()
     }
 
     /// Build a synthetic `UnifiedData` whose "cells" are pseudobulks
@@ -497,7 +506,11 @@ impl UnifiedData {
 /// the slice is longer, so INFO log lines stay readable regardless of set size.
 fn truncate_names(names: &[Box<str>], max_show: usize) -> String {
     if names.len() <= max_show {
-        names.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join(", ")
+        names
+            .iter()
+            .map(|s| s.as_ref())
+            .collect::<Vec<_>>()
+            .join(", ")
     } else {
         let shown: Vec<&str> = names[..max_show].iter().map(|s| s.as_ref()).collect();
         format!("{} … and {} more", shown.join(", "), names.len() - max_show)
@@ -538,6 +551,34 @@ fn modality_presence_label(mask: u32, n_back: usize) -> Box<str> {
     }
 }
 
+/// Inputs for [`load_unified_data`]. Build with `..Default::default()` and
+/// set only the fields a given flow needs — most callers leave the suffix /
+/// condition axes at their `None` defaults.
+#[derive(Default)]
+pub struct LoadUnifiedArgs {
+    /// Sparse data files (prefixes) to load, in order.
+    pub data_files: Vec<Box<str>>,
+    /// Optional per-cell batch labels. Under [`ColumnAlignment::Union`]
+    /// exactly one file (one label per unified cell); under `Disjoint` one
+    /// file per data file. `None` → infer from `@batch` tags / file names.
+    pub batch_files: Option<Vec<Box<str>>>,
+    /// Optional per-cell condition labels (same shape rules as `batch_files`).
+    /// `None` → condition = batch.
+    pub condition_files: Option<Vec<Box<str>>>,
+    /// Cross-file row-name canonicalization. `None` = auto-detect.
+    pub feature_kind: Option<FeatureNameKind>,
+    /// Preload every sparse column into memory before any pass over cells.
+    pub preload: bool,
+    /// How to align cells (barcodes) across files.
+    pub column_alignment: ColumnAlignment,
+    /// Per-file row (feature) modality suffix — see
+    /// [`ReadSharedRowsArgs::per_file_feature_suffix`].
+    pub per_file_feature_suffix: Option<Vec<Box<str>>>,
+    /// Per-file barcode (sample) suffix — see
+    /// [`ReadSharedRowsArgs::per_file_barcode_suffix`].
+    pub per_file_barcode_suffix: Option<Vec<Option<Box<str>>>>,
+}
+
 /// Load one or more sparse files into a single [`UnifiedData`] by
 /// delegating to `read_data_on_shared_rows` (the same loader senna's
 /// run-manifest-driven flows use). This guarantees the barcodes stored
@@ -551,18 +592,19 @@ fn modality_presence_label(mask: u32, n_back: usize) -> Box<str> {
 /// as **distinct** cells (matching the rest of senna). True multimodal
 /// stacking — different feature schemas per file with shared cells —
 /// is out of scope for this loader.
-pub fn load_unified_data(
-    data_files: &[Box<str>],
-    batch_files: Option<&[Box<str>]>,
-    condition_files: Option<&[Box<str>]>,
-    feature_kind: FeatureNameKind,
-    preload: bool,
-    column_alignment: data_beans::sparse_io_vector::ColumnAlignment,
-    per_file_feature_suffix: Option<Vec<Box<str>>>,
-) -> anyhow::Result<UnifiedData> {
-    use data_beans::sparse_io_vector::ColumnAlignment;
+pub fn load_unified_data(args: LoadUnifiedArgs) -> anyhow::Result<UnifiedData> {
     use matrix_util::common_io::read_lines;
-    if let Some(bf) = batch_files {
+    let LoadUnifiedArgs {
+        data_files,
+        batch_files,
+        condition_files,
+        feature_kind,
+        preload,
+        column_alignment,
+        per_file_feature_suffix,
+        per_file_barcode_suffix,
+    } = args;
+    if let Some(bf) = batch_files.as_deref() {
         // Under `ColumnAlignment::Union` a single barcode can be in
         // multiple files, so per-file batch lists no longer compose;
         // the loader requires exactly one batch file in that mode.
@@ -583,13 +625,15 @@ pub fn load_unified_data(
         }
     }
 
+    let batch_files_present = batch_files.is_some();
     let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: data_files.to_vec(),
-        batch_files: batch_files.map(<[Box<str>]>::to_vec),
+        data_files,
+        batch_files,
         preload,
-        feature_kind: Some(feature_kind),
+        feature_kind,
         column_alignment,
         per_file_feature_suffix,
+        per_file_barcode_suffix,
         ..Default::default()
     })?;
 
@@ -635,7 +679,7 @@ pub fn load_unified_data(
     // → "m6"), even though they share the same biological samples.
     let batch_tags_are_trivial = loaded.batch.iter().all(|b| b.as_ref() == "all");
     let auto_modality_batch = matches!(column_alignment, ColumnAlignment::Union)
-        && batch_files.is_none()
+        && !batch_files_present
         && batch_tags_are_trivial;
     UnifiedData::from_sparse_io(
         loaded.data,

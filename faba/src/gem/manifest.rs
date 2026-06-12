@@ -58,6 +58,12 @@ pub struct GemManifest {
     /// `#[serde(default)]` so manifests written before this field parse.
     #[serde(default)]
     pub feature_prior_score: String,
+    /// `[N_cells × 3]` per-cell prior-score QC (`emb_sq_norm`, `chisq_stat`,
+    /// `prior_pval`); flags cells whose phase-2 projection solved near-zero
+    /// (expressed only dead genes).  Empty string when phase-2 was skipped.
+    /// `#[serde(default)]` so manifests written before this field parse.
+    #[serde(default)]
+    pub cell_prior_score: String,
 
     /// `e_cell` — `[N_cells × H]`; row name = cell barcode.
     pub cell_embedding: String,
@@ -86,22 +92,42 @@ pub struct GemManifest {
     pub topic_embedding: Option<String>,
 }
 
+/// Cell-axis QC outputs passed to [`write_outputs`].
+///
+/// `keep_idx` — QC-passed cell indices (see `--min-cell-nnz`); the per-cell
+/// outputs (`cell_embedding`, `cell_bias`, `cell_to_pb`) are restricted to
+/// these rows at write time, no backend rewrite.
+///
+/// `cell_nrms` — pre-L2-normalisation norms from phase-2 cell projection,
+/// one per model cell (0..n_cells).  Empty slice when phase-2 was skipped.
+pub struct CellQcOutputs<'a> {
+    pub keep_idx: &'a [usize],
+    pub cell_nrms: &'a [f32],
+}
+
 /// Write every model artifact (parquets) under the configured prefix.
 /// The manifest is emitted separately by [`write_manifest`] **after**
 /// optional topic resolution, so the durable embeddings land first and
 /// the manifest can reference the resolved-topic files.
+///
+/// `score_prefix` controls the output path for the prior-score parquets
+/// (`feature_prior_score`, `cell_prior_score`).  Pass the same value as
+/// `prefix` for single-pass runs; pass `"{prefix}.pass1"` for the first
+/// pass of a `--refine` run so pass-1 scores are preserved alongside the
+/// final pass-2 artifacts.
 pub fn write_outputs(
     prefix: &str,
+    score_prefix: &str,
     table: &FeatureTable,
     pb: &PseudobulkData,
     model: &GemModel,
     unified: &UnifiedData,
-    // QC-passed cell indices (see `--min-cell-nnz`). The per-cell outputs
-    // (`cell_embedding`, `cell_bias`, `cell_to_pb`) are restricted to these
-    // rows — a write-time selection, no backend rewrite. Feature-side
-    // outputs are unaffected.
-    keep_idx: &[usize],
+    cell: CellQcOutputs<'_>,
 ) -> Result<()> {
+    let CellQcOutputs {
+        keep_idx,
+        cell_nrms,
+    } = cell;
     let path_gene_emb = format!("{prefix}.gene_embedding.parquet");
     let path_z = format!("{prefix}.gene_program_loadings.parquet");
     let path_delta = format!("{prefix}.program_modality_deviation.parquet");
@@ -146,7 +172,7 @@ pub fn write_outputs(
     // `N(0, σ²I)` init (σ = PARAM_INIT_STD) is uninformed noise — the dense
     // small-norm blob that contaminates downstream UMAP / clustering /
     // archetype topics. Score each β_g row against that prior null.
-    let path_feat_prior = format!("{prefix}.feature_prior_score.parquet");
+    let path_feat_prior = format!("{score_prefix}.feature_prior_score.parquet");
     write_feature_prior_score(
         &rho,
         &table.gene_names,
@@ -264,6 +290,20 @@ pub fn write_outputs(
         .collect();
     write_cell_to_pb(&kept_cell_to_pb, &barcodes_kept, &path_cell_to_pb)?;
 
+    ////////////////////////////////////////
+    // Per-cell prior-score QC
+    ////////////////////////////////////////
+    if !cell_nrms.is_empty() {
+        let path_cell_prior = format!("{score_prefix}.cell_prior_score.parquet");
+        write_cell_prior_score(
+            cell_nrms,
+            keep_idx,
+            &barcodes_kept,
+            model.embedding_dim,
+            &path_cell_prior,
+        )?;
+    }
+
     Ok(())
 }
 
@@ -271,12 +311,17 @@ pub fn write_outputs(
 /// `--resolve-topics` step so the manifest references the resolved-topic
 /// artifacts when present. Output parquet paths are reconstructed from
 /// `prefix` (deterministic, matching the names [`write_outputs`] uses).
+///
+/// `has_cell_prior`: set `true` when `write_outputs` produced a
+/// `{prefix}.cell_prior_score.parquet` (i.e. phase-2 ran and returned
+/// non-empty norms).
 pub fn write_manifest(
     prefix: &str,
     model: &GemModel,
     // Number of QC-passed cells actually written to the per-cell outputs.
     n_cells_written: usize,
     topics: Option<&super::topics::ResolvedTopics>,
+    has_cell_prior: bool,
 ) -> Result<()> {
     let path_manifest = format!("{prefix}.faba.json");
     let manifest = GemManifest {
@@ -297,6 +342,11 @@ pub fn write_manifest(
         modality_axis: format!("{prefix}.modality_axis.parquet"),
         measured_mask: format!("{prefix}.measured_mask.parquet"),
         feature_prior_score: format!("{prefix}.feature_prior_score.parquet"),
+        cell_prior_score: if has_cell_prior {
+            format!("{prefix}.cell_prior_score.parquet")
+        } else {
+            String::new()
+        },
         cell_embedding: format!("{prefix}.cell_embedding.parquet"),
         cell_bias: format!("{prefix}.cell_bias.parquet"),
         cell_to_pb: format!("{prefix}.cell_to_pb.parquet"),
@@ -373,6 +423,15 @@ fn tensor_to_dmatrix1(t: &Tensor) -> Result<DMatrix<f32>> {
     Ok(DMatrix::from_column_slice(n, 1, &v))
 }
 
+const PRIOR_SCORE_COL_NAMES: [&str; 3] = ["emb_sq_norm", "chisq_stat", "prior_pval"];
+
+/// Compute the three prior-score columns for one embedding row given its
+/// pre-squared norm.  Returns `[sq_norm_f32, chisq_f32, pval_f32]`.
+fn prior_score_cols(sq_norm: f64, var: f64, dist: &ChiSquared) -> [f32; 3] {
+    let chisq = sq_norm / var;
+    [sq_norm as f32, chisq as f32, dist.sf(chisq) as f32]
+}
+
 /// Per-feature prior-score QC, written to `{prefix}.feature_prior_score.parquet`.
 ///
 /// Under the null "training never informed this row", the embedding is a draw
@@ -399,26 +458,24 @@ fn write_feature_prior_score(
     let var = PARAM_INIT_STD * PARAM_INIT_STD;
     let dist = ChiSquared::new(h as f64).context("chi-squared dof (embedding_dim)")?;
 
-    // Columns: ‖e_f‖², the χ²_H statistic, and its upper-tail p-value.
     let mut out = DMatrix::<f32>::zeros(g, 3);
-    let mut n_prior_like = 0usize; // prior_pval > 0.05
+    let mut n_prior_like = 0usize;
     for r in 0..g {
         let sq_norm = rho
             .row(r)
             .iter()
             .map(|&x| (x as f64) * (x as f64))
             .sum::<f64>();
-        let chisq = sq_norm / var;
-        let pval = dist.sf(chisq);
-        if pval > 0.05 {
+        let cols = prior_score_cols(sq_norm, var, &dist);
+        if cols[2] > 0.05 {
             n_prior_like += 1;
         }
-        out[(r, 0)] = sq_norm as f32;
-        out[(r, 1)] = chisq as f32;
-        out[(r, 2)] = pval as f32;
+        out[(r, 0)] = cols[0];
+        out[(r, 1)] = cols[1];
+        out[(r, 2)] = cols[2];
     }
 
-    let col_names: Vec<Box<str>> = ["emb_sq_norm", "chisq_stat", "prior_pval"]
+    let col_names: Vec<Box<str>> = PRIOR_SCORE_COL_NAMES
         .iter()
         .map(|s| Box::from(*s))
         .collect();
@@ -430,6 +487,63 @@ fn write_feature_prior_score(
         path,
         n_prior_like,
         g
+    );
+    Ok(())
+}
+
+/// Per-cell prior-score QC, written to `{score_prefix}.cell_prior_score.parquet`.
+///
+/// Symmetric with [`write_feature_prior_score`] but applied to the
+/// **pre-L2-normalisation** norms from the phase-2 Poisson-MAP projection.
+///
+/// Under the null "the cell's expressed genes are all near-zero (dead)", the
+/// IRLS ridge prior dominates and pulls `e_cell_raw → 0`, so `nrm ≈ 0`.
+/// The same statistic `chisq = nrm² / σ²  ~  χ²_H` is used, but its
+/// direction is inverted relative to features:
+///
+/// ```text
+/// dead cell:  nrm ≈ 0  →  chisq ≈ 0  →  prior_pval ≈ 1  (flag: pval > threshold)
+/// live cell:  nrm > 0  →  chisq > 0  →  prior_pval < 1
+/// ```
+///
+/// `prior_pval > threshold` (same threshold direction as features) marks dead cells.
+/// Only kept cells (`keep_idx`) are written.
+fn write_cell_prior_score(
+    cell_nrms: &[f32],
+    keep_idx: &[usize],
+    barcodes: &[Box<str>],
+    h: usize,
+    path: &str,
+) -> Result<()> {
+    let n = keep_idx.len();
+    let var = PARAM_INIT_STD * PARAM_INIT_STD;
+    let dist = ChiSquared::new(h as f64).context("chi-squared dof (embedding_dim)")?;
+
+    let mut out = DMatrix::<f32>::zeros(n, 3);
+    let mut n_dead = 0usize;
+    for (row, &ci) in keep_idx.iter().enumerate() {
+        let nrm = cell_nrms[ci] as f64;
+        let cols = prior_score_cols(nrm * nrm, var, &dist);
+        if cols[2] > 0.05 {
+            n_dead += 1;
+        }
+        out[(row, 0)] = cols[0];
+        out[(row, 1)] = cols[1];
+        out[(row, 2)] = cols[2];
+    }
+
+    let col_names: Vec<Box<str>> = PRIOR_SCORE_COL_NAMES
+        .iter()
+        .map(|s| Box::from(*s))
+        .collect();
+    out.to_parquet_with_names(path, (Some(barcodes), Some("cell")), Some(&col_names))
+        .with_context(|| format!("writing {path}"))?;
+
+    log::info!(
+        "cell prior-score → {} ({} / {} cells dead at p>0.05 — candidate dead-gene-region cells)",
+        path,
+        n_dead,
+        n
     );
     Ok(())
 }

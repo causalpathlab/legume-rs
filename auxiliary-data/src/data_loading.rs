@@ -5,7 +5,6 @@ use log::{debug, info, warn};
 use data_beans::convert::try_open_or_convert;
 use data_beans::sparse_io_vector::SparseIoVec;
 use matrix_util::common_io::{self, basename, read_lines};
-use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 
 use crate::feature_names::FeatureNameKind;
@@ -65,6 +64,16 @@ pub struct ReadSharedRowsArgs {
     /// name + suffix (same modality across samples) still merges. `None` =
     /// today's behavior (no suffixing). Must match `data_files` length.
     pub per_file_feature_suffix: Option<Vec<Box<str>>>,
+    /// Optional per-file barcode (column) suffix, one entry per `data_files`
+    /// entry in order. Under [`ColumnAlignment::Union`], backend `b`'s
+    /// barcodes are tagged `{barcode}@{suffix[b]}` before the canonical merge,
+    /// so callers can encode per-cell **sample identity**: the same barcode in
+    /// two files merges into one cell only when both carry the same suffix
+    /// (same sample across modalities), while different samples stay distinct.
+    /// `None` (or a per-entry `None`) = no tag. Must match `data_files`
+    /// length. No effect under `Disjoint` (which disambiguates via
+    /// `@<basename>`).
+    pub per_file_barcode_suffix: Option<Vec<Option<Box<str>>>>,
 }
 
 /// Sparse data with per-cell batch labels.
@@ -127,6 +136,17 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         data_vec = data_vec
             .with_per_backend_row_suffix(suffix)
             .expect("with_per_backend_row_suffix on empty SparseIoVec");
+    }
+
+    // Per-file barcode (column) sample suffix — applied per push below under
+    // Union. Validate length up front so a mismatch fails before any I/O.
+    if let Some(sfx) = args.per_file_barcode_suffix.as_ref() {
+        anyhow::ensure!(
+            sfx.len() == args.data_files.len(),
+            "per_file_barcode_suffix has {} entries but {} data files were given",
+            sfx.len(),
+            args.data_files.len(),
+        );
     }
 
     use crate::feature_names::FeatureNameKind;
@@ -221,9 +241,14 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
         if kind_was_auto { " (auto)" } else { "" },
         opened.len(),
     );
-    for (data_file, data) in opened.into_iter() {
+    for (file_idx, (data_file, data)) in opened.into_iter().enumerate() {
         let data_name = attach_data_name.then(|| basename(&data_file)).transpose()?;
-        data_vec.push(Arc::from(data), data_name)?;
+        // Per-file barcode sample tag (Union only; ignored under Disjoint).
+        let barcode_suffix: Option<&str> = args
+            .per_file_barcode_suffix
+            .as_ref()
+            .and_then(|v| v[file_idx].as_deref());
+        data_vec.push_with_barcode_suffix(Arc::from(data), data_name, barcode_suffix)?;
     }
 
     // SparseIoVec already aligns rows to the intersection of row names
@@ -258,12 +283,9 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
             args.batch_files.as_deref(),
             attach_data_name,
         )?,
-        ColumnAlignment::Union => resolve_batch_union(
-            &args.data_files,
-            &data_vec,
-            args.batch_files.as_deref(),
-            n_cells,
-        )?,
+        ColumnAlignment::Union => {
+            resolve_batch_union(&data_vec, args.batch_files.as_deref(), n_cells)?
+        }
     };
 
     if batch_membership.len() != data_vec.num_columns() {
@@ -442,7 +464,6 @@ fn resolve_batch_disjoint(
 ///   on an embedded tag. (File-name fallback from the Disjoint path
 ///   doesn't apply — a cell can come from many files.)
 fn resolve_batch_union(
-    data_files: &[Box<str>],
     data_vec: &SparseIoVec,
     batch_files: Option<&[Box<str>]>,
     n_cells: usize,
@@ -471,73 +492,28 @@ fn resolve_batch_union(
         return Ok(labels);
     }
 
-    // No batch_files: try embedded @batch tags per backend, then
-    // reconcile across backends (a barcode that appears in two files
-    // must agree on its tag).
+    // No batch_files: derive the per-cell @batch tag from the UNIFIED column
+    // names. Under Union the displayed name already carries any embedded
+    // `@tag` — whether from data-prep (`barcode@donor`) or from a per-file
+    // barcode suffix (`barcode@sample`, added by `push_with_barcode_suffix`).
+    // Each unified cell has exactly one name, so no cross-backend
+    // reconciliation is needed: two cells that disagreed on their tag would
+    // have different merge keys and never folded into one cell.
     let unified_names = data_vec.column_names()?;
-    let name_to_global: FxHashMap<Box<str>, usize> = unified_names
-        .iter()
-        .enumerate()
-        .map(|(g, n)| (n.clone(), g))
-        .collect();
-    let mut tags: Vec<Option<Box<str>>> = vec![None; n_cells];
-    let mut any_embedded = false;
-    let n_backends = data_vec.len();
-    for didx in 0..n_backends {
-        let raw_names = data_vec[didx].column_names()?;
-        let (_dir, file_base, _ext) = common_io::dir_base_ext(&data_files[didx])?;
-        // Union mode never appends `@<basename>`, so pass `None` for
-        // the suffix arg — `infer_batch_from_columns` returns the raw
-        // embedded tags or the file-name fallback (which we discard).
-        let (per_cell_tags, used_embedded) =
-            infer_batch_from_columns(&raw_names, file_base.as_ref(), None);
-        if !used_embedded {
-            continue;
-        }
-        any_embedded = true;
+    let (per_cell_tags, used_embedded) = infer_batch_from_columns(&unified_names, "", None);
+    if used_embedded {
         info!(
-            "File {} ('{}'): using embedded @batch tag (Union mode, per-barcode merge)",
-            didx, file_base
+            "Union mode: per-cell @batch tag taken from unified barcodes ({} cells)",
+            n_cells
         );
-        for (raw, label) in raw_names.iter().zip(per_cell_tags.into_iter()) {
-            let glob = *name_to_global.get(raw).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "barcode `{}` from backend {} not found in unified cell index — \
-                     this indicates a bug in SparseIoVec::push under Union mode",
-                    raw,
-                    didx,
-                )
-            })?;
-            match tags[glob].as_ref() {
-                None => tags[glob] = Some(label),
-                Some(existing) if existing.as_ref() == label.as_ref() => {}
-                Some(existing) => {
-                    return Err(anyhow::anyhow!(
-                        "Union batch conflict for barcode `{}`: backend {} says `{}`, \
-                         earlier backend said `{}`. Either fix the embedded @batch \
-                         tags so they agree across modalities, or pass a single \
-                         --batch-files file listing one label per unified cell.",
-                        raw,
-                        didx,
-                        label,
-                        existing,
-                    ));
-                }
-            }
-        }
+        return Ok(per_cell_tags);
     }
 
-    if !any_embedded {
-        info!(
-            "No --batch-files and no embedded @batch tags — falling back to single \
-             batch 'all' (Union mode: per-file batch fallback is ambiguous)."
-        );
-    }
-    let all_box: Box<str> = "all".to_string().into_boxed_str();
-    Ok(tags
-        .into_iter()
-        .map(|t| t.unwrap_or_else(|| all_box.clone()))
-        .collect())
+    info!(
+        "No --batch-files and no embedded @batch tags — falling back to single \
+         batch 'all' (Union mode: per-file batch fallback is ambiguous)."
+    );
+    Ok(vec!["all".to_string().into_boxed_str(); n_cells])
 }
 
 /// Infer per-cell batch labels for one file's column names.

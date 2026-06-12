@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 description = "Auxiliary data types: cell annotations, batch metadata, and pseudobulk routines"
 
-version = "0.1.3"
+version = "0.1.4"
 
 [dependencies]
 data-beans = { workspace = true }
