@@ -35,6 +35,7 @@ const KEY_BY_ROW_INDICES: &str = "/by_row/indices";
 
 use anyhow::anyhow;
 
+use crate::sparse_backend::shared;
 use crate::utilities::io_helpers::chunk_elems;
 
 const COMPRESSION_LEVEL: i32 = 5;
@@ -460,59 +461,6 @@ impl SparseMtxData {
         Ok(cell.get().expect("OnceLock populated above"))
     }
 
-    /// Coalesce abutting/overlapping ranges in `tagged` (already sorted
-    /// by `start`), retrieve each merged span through the chunk cache once,
-    /// and emit triplets via `make_triplet(out_tag, inner_idx, value)`.
-    /// Used by both CSC (`out_tag` = output column, `inner_idx` = row) and
-    /// CSR (`out_tag` = output row, `inner_idx` = column) read paths.
-    fn coalesce_and_emit<F>(
-        tagged: &[(u64, u64, u64)],
-        data_cache: &ChunkCacheDecodedLruChunkLimit,
-        indices_cache: &ChunkCacheDecodedLruChunkLimit,
-        inner_bound: usize,
-        make_triplet: F,
-    ) -> anyhow::Result<Vec<(u64, u64, f32)>>
-    where
-        F: Fn(u64, u64, f32) -> (u64, u64, f32),
-    {
-        let opts = zarrs::array::CodecOptions::default();
-        let total: u64 = tagged.iter().map(|&(_, s, e)| e - s).sum();
-        let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity(total as usize);
-
-        let mut i = 0;
-        while i < tagged.len() {
-            let merged_start = tagged[i].1;
-            let mut merged_end = tagged[i].2;
-            let mut j = i + 1;
-            while j < tagged.len() && tagged[j].1 <= merged_end {
-                merged_end = merged_end.max(tagged[j].2);
-                j += 1;
-            }
-
-            let subset = Self::create_subset(merged_start..merged_end);
-            let data_buf = <_ as zarrs::array::chunk_cache::ChunkCache>::retrieve_array_subset::<
-                Vec<f32>,
-            >(data_cache, &subset, &opts)?;
-            let indices_buf = <_ as zarrs::array::chunk_cache::ChunkCache>::retrieve_array_subset::<
-                Vec<u64>,
-            >(indices_cache, &subset, &opts)?;
-
-            for &(tag, start, end) in &tagged[i..j] {
-                let off = (start - merged_start) as usize;
-                let len = (end - start) as usize;
-                for k in 0..len {
-                    let inner = indices_buf[off + k];
-                    let val = data_buf[off + k];
-                    debug_assert!((inner as usize) < inner_bound);
-                    ret.push(make_triplet(tag, inner, val));
-                }
-            }
-
-            i = j;
-        }
-        Ok(ret)
-    }
-
     fn _retrieve_vector<V>(&self, key: &str) -> anyhow::Result<Vec<V>>
     where
         V: zarrs::array::ElementOwned,
@@ -740,8 +688,7 @@ impl SparseIo for SparseMtxData {
             let (nrow, ncol, nnz) = (nrow, ncol, nnz);
 
             let mut buf = open_buf_writer(mtx_file)?;
-            writeln!(buf, "%%MatrixMarket matrix coordinate real general")?;
-            writeln!(buf, "{}\t{}\t{}", nrow, ncol, nnz)?;
+            shared::write_mtx_header(&mut buf, nrow, ncol, nnz)?;
 
             let (indptr, data, indices) = self.open_csc_triplets()?;
             let indptr = indptr.retrieve_array_subset::<Vec<u64>>(&indptr.subset_all())?;
@@ -841,22 +788,7 @@ impl SparseIo for SparseMtxData {
         name_columns: Range<usize>,
         name_sep: &str,
     ) -> anyhow::Result<()> {
-        let name_data = read_lines_of_words(name_file, -1)?;
-        let name_columns_vec: Vec<usize> = name_columns.collect();
-
-        let names: Vec<String> = name_data
-            .lines
-            .iter()
-            .map(|line| {
-                name_columns_vec
-                    .iter()
-                    .filter_map(|&i| line.get(i))
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-                    .join(name_sep)
-            })
-            .collect();
-
+        let names = shared::parse_name_file(name_file, name_columns, name_sep)?;
         self.new_filled_vector(key, data_type::string(), &names)?;
         Ok(())
     }
@@ -1025,12 +957,23 @@ impl SparseIo for SparseMtxData {
             let indices_cache =
                 self.cache_for(&self.by_column_indices_cache, KEY_BY_COLUMN_INDICES)?;
 
-            let ret = Self::coalesce_and_emit(
+            let opts = zarrs::array::CodecOptions::default();
+            let ret = shared::coalesce_and_emit(
                 &tagged,
-                data_cache,
-                indices_cache,
                 nrow,
                 |jj, ii, val| (ii, jj, val),
+                |s, e| {
+                    let subset = Self::create_subset(s..e);
+                    let data_buf =
+                        <_ as zarrs::array::chunk_cache::ChunkCache>::retrieve_array_subset::<
+                            Vec<f32>,
+                        >(data_cache, &subset, &opts)?;
+                    let indices_buf =
+                        <_ as zarrs::array::chunk_cache::ChunkCache>::retrieve_array_subset::<
+                            Vec<u64>,
+                        >(indices_cache, &subset, &opts)?;
+                    Ok((data_buf, indices_buf))
+                },
             )?;
             Ok((nrow, ncol_out, ret))
         }
@@ -1113,10 +1056,25 @@ impl SparseIo for SparseMtxData {
         let data_cache = self.cache_for(&self.by_row_data_cache, KEY_BY_ROW_DATA)?;
         let indices_cache = self.cache_for(&self.by_row_indices_cache, KEY_BY_ROW_INDICES)?;
 
-        let ret =
-            Self::coalesce_and_emit(&tagged, data_cache, indices_cache, ncol, |ii, jj, val| {
-                (ii, jj, val)
-            })?;
+        let opts = zarrs::array::CodecOptions::default();
+        let ret = shared::coalesce_and_emit(
+            &tagged,
+            ncol,
+            |ii, jj, val| (ii, jj, val),
+            |s, e| {
+                let subset = Self::create_subset(s..e);
+                let data_buf = <_ as zarrs::array::chunk_cache::ChunkCache>::retrieve_array_subset::<
+                    Vec<f32>,
+                >(data_cache, &subset, &opts)?;
+                let indices_buf =
+                    <_ as zarrs::array::chunk_cache::ChunkCache>::retrieve_array_subset::<Vec<u64>>(
+                        indices_cache,
+                        &subset,
+                        &opts,
+                    )?;
+                Ok((data_buf, indices_buf))
+            },
+        )?;
         Ok((nrow_out, ncol, ret))
     }
     /// CSR data structure in Zarr backend
