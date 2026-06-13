@@ -394,21 +394,6 @@ pub struct GemArgs {
     )]
     pub tau_modality: f32,
 
-    /// NB-Fisher housekeeping penalty (exponent on the per-gene Fisher
-    /// weight `w_g = 1/(1 + π_g·s̄·φ(μ_g))`). Mirrors `senna bge/topic`:
-    /// high-mean / high-dispersion genes (ribosomal, housekeeping,
-    /// library-size drivers) are sampled less from the count-based anchor
-    /// pools (agg + count-comp) so they stop monopolising the shared
-    /// program loadings z. `0` disables (`w⁰ = 1`); `1` is full strength;
-    /// `> 1` is more aggressive. The m6A / modifier pools are unaffected.
-    /// Per-gene weights are written to `{out}.fisher_weights.parquet`.
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "NB-Fisher housekeeping penalty (exponent; 0 = off)"
-    )]
-    pub housekeeping_penalty: f32,
-
     ///////////////
     // Negatives //
     ///////////////
@@ -477,36 +462,58 @@ pub struct GemArgs {
         long,
         default_value_t = false,
         help = "Run a second training pass after filtering dead genes and cells",
-        long_help = "Run a second full training pass.  After pass-1 completes,\n\
-                     genes whose feature_prior_score.prior_pval > --feature-prior-pval-max\n\
-                     and cells whose cell_prior_score.prior_pval > --cell-prior-pval-max\n\
-                     are removed; the pseudobulk, feature table, and model are rebuilt\n\
-                     from the filtered data and training restarts from scratch."
+        long_help = "Run a second full training pass.  After pass-1 completes, the gene\n\
+                     embeddings are k-means'd into --gene-groups clusters; clusters whose\n\
+                     median per-gene count mass is below --empty-group-frac × the richest\n\
+                     cluster are 'empty'.  Genes in empty clusters, and cells whose\n\
+                     embedding direction lands in one, are removed; the pseudobulk, feature\n\
+                     table, and model are rebuilt from the filtered data and training\n\
+                     restarts from scratch."
     )]
     pub refine: bool,
 
     #[arg(
         long,
-        default_value_t = 0.05,
-        help = "Pass-1 threshold: drop genes with feature_prior_score.prior_pval above this",
-        long_help = "Upper-tail χ²_H p-value threshold applied to feature_prior_score after\n\
-                     pass-1.  Genes consistent with the random-init prior\n\
-                     (prior_pval > threshold) are removed before pass-2 retraining.\n\
-                     Only used when --refine is active.  Must be in (0, 1)."
+        default_value_t = 50,
+        help = "Refine pass: number of k-means gene-embedding clusters for the empty-group QC",
+        long_help = "Number of k-means clusters the trained gene embeddings β_g are grouped\n\
+                     into during the --refine QC.  Untrained background genes collapse into\n\
+                     a few low-mass clusters that get flagged empty; real programs occupy\n\
+                     their own.  Only used when --refine is active.  Must be ≥ 2."
     )]
-    pub feature_prior_pval_max: f32,
+    pub gene_groups: usize,
 
     #[arg(
         long,
-        default_value_t = 0.05,
-        help = "Pass-1 threshold: drop cells with cell_prior_score.prior_pval above this",
-        long_help = "Upper-tail χ²_H p-value threshold applied to cell_prior_score after\n\
-                     pass-1.  Cells whose pre-L2-norm is consistent with the zero null\n\
-                     (prior_pval > threshold, i.e. the IRLS solved near zero) are removed\n\
-                     before pass-2 retraining.  Only used when --refine is active.\n\
-                     Must be in (0, 1)."
+        default_value_t = 0.5,
+        help = "Refine pass: a gene group is 'empty' if its mean ‖β‖ is below this × the median group",
+        long_help = "Relative emptiness cutoff for the --refine gene QC.  The genes-only\n\
+                     pass-1 β embedding is k-means'd into --gene-groups clusters; a cluster\n\
+                     is dropped when its mean ‖β_g‖ (how much the model learned those genes)\n\
+                     is below empty_group_frac × (the MEDIAN non-empty cluster's mean ‖β‖).\n\
+                     ‖β‖ is the embedding-native emptiness signal (what the old χ² read off\n\
+                     ‖β‖²) and is cell-independent, so the gene call is made first with no\n\
+                     ubiquity circularity.  The median reference is robust to the\n\
+                     housekeeping cluster (a ~100× outlier).  Only used when --refine is\n\
+                     active.  Must be in (0, 1)."
     )]
-    pub cell_prior_pval_max: f32,
+    pub empty_group_frac: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Refine pass: drop a cell when its pre-L2 embedding norm is below this × the median",
+        long_help = "Per-cell depth cutoff for the --refine QC.  e_cell is L2-normalised\n\
+                     before storage, so the pre-L2 norm (√emb_sq_norm from the phase-2\n\
+                     Poisson-MAP fit) is the only depth-aware signal that separates a\n\
+                     near-empty droplet — which reconstructs to the gene-bias background —\n\
+                     from a low-depth real cell.  A cell is dropped when that norm is below\n\
+                     cell_min_norm_frac × the median norm of the cutoff-passing cells.  The\n\
+                     per-cell norm and nnz, both cutoffs, and the pass/fail flags are written\n\
+                     to {out}.cell_qc.parquet.  Only used when --refine is active.\n\
+                     Must be in [0, 1)."
+    )]
+    pub cell_min_norm_frac: f32,
 
     //////////
     // Misc //
@@ -526,4 +533,14 @@ pub struct GemArgs {
     /// cell projection). Defaults to all available logical CPUs.
     #[arg(long, default_value_t = 0, help = "CPU threads (0 = all available)")]
     pub threads: usize,
+}
+
+impl GemArgs {
+    /// Whether phase 1 draws the cell axis (and so the per-cell pools are
+    /// built). Off in feature-only mode and in the default pure-pb path
+    /// (`--phase1-cells-per-pb 0`), where phase 2 streams from the backend.
+    /// Single source of truth for the pool-vs-stream decision.
+    pub fn use_phase1_cell_axis(&self) -> bool {
+        !self.no_cell_axis && self.phase1_cells_per_pb != 0
+    }
 }

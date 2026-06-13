@@ -44,6 +44,10 @@ pub fn train(
     pb: &PseudobulkData,
     model: &mut GemModel,
     stop: &Arc<AtomicBool>,
+    // Streaming phase-2 context, used when `pb.cell_pools` is `None` (the
+    // default, pool-free path). `None` only in tests, which always supply
+    // `cell_pools`.
+    cell_stream: Option<&cell_solve::CellStreamCtx>,
 ) -> Result<Vec<f32>> {
     let sampler = SamplerState::new(table, pb, args);
     // One deterministic draw sequence threaded through both phases by
@@ -60,7 +64,7 @@ pub fn train(
     // cell-axis knob isn't 0. `--phase1-cells-per-pb 0` (the default) drops
     // the cell axis from phase 1 (pure-pb) but phase 2 still projects every
     // cell; `--no-cell-axis` additionally skips phase 2 (e_cell at init).
-    let use_phase1_cell_axis = !args.no_cell_axis && args.phase1_cells_per_pb != 0;
+    let use_phase1_cell_axis = args.use_phase1_cell_axis();
     let mut phase1_axes: Vec<Axis> = Vec::with_capacity(1 + n_pb_levels);
     if use_phase1_cell_axis {
         phase1_axes.push(Axis::Cell);
@@ -140,8 +144,16 @@ pub fn train(
             "phase 2/2 (analytical cell projection onto frozen features, ridge λ={}): {} cells",
             args.phase2_ridge, model.n_cells
         );
-        let cell_nrms = cell_solve::solve_cell_embeddings(model, &pb.cell_pools, args)
-            .context("phase-2 cell projection")?;
+        // Pooled when the cell pool was built (cell axis on / tests); else
+        // stream from the backend (default pool-free path).
+        let cell_nrms = match (&pb.cell_pools, cell_stream) {
+            (Some(pools), _) => cell_solve::solve_cell_embeddings(model, pools, args),
+            (None, Some(ctx)) => cell_solve::solve_cell_embeddings_streaming(model, ctx, args),
+            (None, None) => {
+                anyhow::bail!("phase 2: no cell pool and no streaming context")
+            }
+        }
+        .context("phase-2 cell projection")?;
         return Ok(cell_nrms);
     }
 
