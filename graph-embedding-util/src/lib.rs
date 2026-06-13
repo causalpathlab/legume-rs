@@ -32,6 +32,7 @@ pub mod feature_network;
 pub mod fit;
 pub mod loss;
 pub mod model;
+pub mod null_call;
 pub mod progress;
 pub mod stop;
 pub mod training;

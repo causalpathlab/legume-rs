@@ -474,30 +474,17 @@ pub struct GemArgs {
 
     #[arg(
         long,
-        default_value_t = 50,
-        help = "Refine pass: number of k-means gene-embedding clusters for the empty-group QC",
-        long_help = "Number of k-means clusters the trained gene embeddings β_g are grouped\n\
-                     into during the --refine QC.  Untrained background genes collapse into\n\
-                     a few low-mass clusters that get flagged empty; real programs occupy\n\
-                     their own.  Only used when --refine is active.  Must be ≥ 2."
-    )]
-    pub gene_groups: usize,
-
-    #[arg(
-        long,
-        default_value_t = 0.5,
-        help = "Refine pass: a gene group is 'empty' if its mean ‖β‖ is below this × the median group",
-        long_help = "Relative emptiness cutoff for the --refine gene QC.  The genes-only\n\
-                     pass-1 β embedding is k-means'd into --gene-groups clusters; a cluster\n\
-                     is dropped when its mean ‖β_g‖ (how much the model learned those genes)\n\
-                     is below empty_group_frac × (the MEDIAN non-empty cluster's mean ‖β‖).\n\
-                     ‖β‖ is the embedding-native emptiness signal (what the old χ² read off\n\
-                     ‖β‖²) and is cell-independent, so the gene call is made first with no\n\
-                     ubiquity circularity.  The median reference is robust to the\n\
-                     housekeeping cluster (a ~100× outlier).  Only used when --refine is\n\
+        default_value_t = 0.05,
+        help = "Refine pass: target FDR for the empirical-Bayes null-gene call (keep genes significant above the null)",
+        long_help = "Target false-discovery rate for the --refine gene QC.  A null gene\n\
+                     (one the model never moved from init β_g ~ N(0,σ²I)) has ‖β_g‖²/σ² ~\n\
+                     χ²_H; the null scale σ̂² and proportion π̂₀ are estimated from the data\n\
+                     (ashr-style), each gene gets a χ²_H upper-tail p-value and a Storey\n\
+                     q-value, and genes with q ≤ this FDR are kept (signal above the null).\n\
+                     Per-gene and deterministic (no clustering).  Only used when --refine is\n\
                      active.  Must be in (0, 1)."
     )]
-    pub empty_group_frac: f32,
+    pub gene_null_fdr: f32,
 
     #[arg(
         long,
