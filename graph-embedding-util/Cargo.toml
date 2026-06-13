@@ -47,4 +47,5 @@ rand = { workspace = true }
 rand_distr = { workspace = true }
 rayon = { workspace = true }
 rustc-hash = { workspace = true }
+statrs = { workspace = true }
 serde = { workspace = true }
