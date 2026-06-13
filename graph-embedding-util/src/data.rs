@@ -21,19 +21,26 @@ pub struct Triplet {
 }
 
 pub struct UnifiedData {
-    // ── cell index ────────────────────────────────────────────────────────────
+    //////////////////
+    // cell indices //
+    //////////////////
     pub barcodes: Vec<Box<str>>,
+
     /// Global cell id → global batch id.
     pub batch_membership: Vec<u32>,
+
     /// Global batch labels in id order.
     pub batch_names: Vec<Box<str>>,
+
     /// Global cell id → global condition id. Drives the per-condition
     /// multiplicative gate on the feature embedding (see
     /// `JointEmbedModel::FeatGate`). Defaults to a copy of
     /// `batch_membership` when no separate condition input is given.
     pub condition_membership: Vec<u32>,
+
     /// Global condition labels in id order. Defaults to `batch_names`.
     pub condition_names: Vec<Box<str>>,
+
     /// Per unified cell, a bitmask of which input files (modalities) the
     /// cell appears in: bit `b` set ⇔ the cell's barcode is present in
     /// backend `b`. Single-file / non-multiome loads set bit 0 for every
@@ -42,7 +49,9 @@ pub struct UnifiedData {
     /// up-weighting.
     pub cell_modality: Vec<u32>,
 
-    // ── feature index ─────────────────────────────────────────────────────────
+    ///////////////////
+    // feature index //
+    ///////////////////
     pub feature_names: Vec<Box<str>>,
     /// For each compact feature id `i ∈ 0..n_features()`, the row index into
     /// `backend`. Identity (`0..n_features()`) when no HVG was applied; the
@@ -51,12 +60,16 @@ pub struct UnifiedData {
     /// to be aligned to the compact axis.
     pub feature_to_backend_row: Vec<usize>,
 
-    // ── edge list ─────────────────────────────────────────────────────────────
+    ///////////////
+    // edge list //
+    ///////////////
     /// Cell↔feature edges. Empty until `materialize_cell_triplets` is called
     /// (real-data path), or pre-built by `from_pseudobulks`.
     pub triplets: Vec<Triplet>,
 
-    // ── sparse backend ────────────────────────────────────────────────────────
+    ////////////////////
+    // sparse backend //
+    ////////////////////
     /// The underlying sparse count matrix.  `Some` for real-data paths (set by
     /// `from_sparse_io`); `None` for synthetic pseudobulk `UnifiedData` (set by
     /// `from_pseudobulks`, which pre-builds `triplets` directly).
