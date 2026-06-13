@@ -11,9 +11,11 @@
 use super::common::candle_core;
 use anyhow::{Context, Result};
 use candle_core::Tensor;
+use data_beans::sparse_io_vector::SparseIoVec;
 use rustc_hash::FxHashMap;
 
 use super::args::GemArgs;
+use super::feature_table::{BackendRowMap, RowStratum};
 use super::model::GemModel;
 use super::pseudobulk::AxisPools;
 use super::sampling::COUNT_BIAS_MODALITY;
@@ -23,12 +25,12 @@ use super::sampling::COUNT_BIAS_MODALITY;
 /// builds positives (`sampling::push_agg_positive` / `push_component_positive`):
 /// AGG → β_g; count-comp → splice modality + shared `COUNT_BIAS_MODALITY`
 /// bias; modifier-comp → its own modality + region + bias.
-struct Identity {
-    gene: u32,
-    q_modality: u32,
-    region: u32,
-    is_agg: bool,
-    bias_modality: u32,
+pub(crate) struct Identity {
+    pub gene: u32,
+    pub q_modality: u32,
+    pub region: u32,
+    pub is_agg: bool,
+    pub bias_modality: u32,
 }
 
 /// Solve `e_cell` (and `b_cell`) by projecting every cell onto the frozen
@@ -55,23 +57,27 @@ pub fn solve_cell_embeddings(
     // 3. Parallel per-cell Poisson-MAP projection (shared solver).
     let lambda = args.phase2_ridge.max(0.0) as f64;
     // gem scores with a per-cell bias (b_cell), so keep the fitted b_c.
-    let (mut e_flat, b_flat) = graph_embedding_util::cell_projection::project_cells(
+    let (e_flat, b_flat) = graph_embedding_util::cell_projection::project_cells(
         &frozen_e, &frozen_b, &per_cell, h, lambda,
     );
+    // 4. L2-normalise (depth → b_cell) + write back into the model vars.
+    finalize_e_cell(model, e_flat, b_flat)
+}
 
-    // L2-normalize each cell's embedding (depth correction). The Poisson-MAP
-    // matches absolute counts, so the *norm* of `e_cell` leaks sequencing
-    // depth (corr(‖e‖, b_cell) ≈ -0.95 on rep1) and a single depth direction
-    // dominates ~82% of the variance — which collapses the downstream
-    // archetypal topics (one giant central topic). The feature side is
-    // trained with scale-invariant NCE, so only the DIRECTION is meaningful;
-    // depth stays in the unpenalized `b_cell`. Mirrors the bge phase-2 fix
-    // (geu commit 9142779). Near-empty cells solve to ~0 and stay 0 (and the
-    // zero-spliced ones are dropped by cell QC before training anyway).
-    //
-    // We capture the pre-normalisation norms here: a near-zero norm means the
-    // IRLS had nothing informative to fit (all expressed β_g ≈ 0), so the
-    // cell lives in the "dead-gene" region.  Used for cell prior-score QC.
+/// L2-normalise each solved `e_cell` row (depth correction — the Poisson-MAP
+/// matches absolute counts, so the *norm* leaks sequencing depth and would
+/// otherwise dominate ~82% of the variance and collapse downstream archetypal
+/// topics; depth stays in the unpenalized `b_cell`). Captures the pre-norm
+/// magnitudes (`cell_nrms`: near-zero = the IRLS fit nothing, a dead-gene-
+/// region cell — used for cell QC), then writes `e_cell`/`b_cell` back into
+/// the model vars + cached fields. Shared by the pooled and streaming solvers.
+pub(crate) fn finalize_e_cell(
+    model: &mut GemModel,
+    mut e_flat: Vec<f32>,
+    b_flat: Vec<f32>,
+) -> Result<Vec<f32>> {
+    let n_cells = model.n_cells;
+    let h = model.embedding_dim;
     let mut cell_nrms: Vec<f32> = Vec::with_capacity(n_cells);
     for c in 0..n_cells {
         let row = &mut e_flat[c * h..(c + 1) * h];
@@ -83,8 +89,6 @@ pub fn solve_cell_embeddings(
             }
         }
     }
-
-    // 4. Write back into the model's vars (and cached fields).
     let e_t = Tensor::from_vec(e_flat, (n_cells, h), &model.dev)?;
     let b_t = Tensor::from_vec(b_flat, n_cells, &model.dev)?;
     {
@@ -101,7 +105,251 @@ pub fn solve_cell_embeddings(
     Ok(cell_nrms)
 }
 
-fn intern(
+// ─────────────────────────────────────────────────────────────────────────
+// Streaming phase-2: project cells without ever materialising the per-cell
+// `AxisPools` (~one entry per (gene, cell) ≈ tens of GB at 700k cells). The
+// frozen identity→embedding dictionary is cell-independent, so it's built once
+// from the row maps; cells are then streamed from the backend in chunks, each
+// chunk's `(identity, count)` lists reconstructed on the fly and projected.
+// Reproduces `collect_identities` exactly: one AGG entry per (gene, cell)
+// (spliced+unspliced summed), one count entry per (gene, splice, cell), one
+// modifier entry per (gene, component, cell).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// One satellite modality backend, ready to stream its modifier mass into the
+/// matched genes cells.
+pub struct SatStream<'a> {
+    pub backend: &'a SparseIoVec,
+    pub row_map: &'a BackendRowMap,
+    pub feature_to_backend_row: &'a [usize],
+    /// `genes_cell_to_sat_cols[genes_cell]` = the satellite columns matched to
+    /// that genes cell (inverse of `SatelliteLink.col_to_genes_cell`; unmatched
+    /// satellite columns are simply absent → donate nothing).
+    pub genes_cell_to_sat_cols: Vec<Vec<u32>>,
+}
+
+/// Everything streaming phase-2 needs in lieu of `pb.cell_pools`.
+pub struct CellStreamCtx<'a> {
+    pub genes_backend: &'a SparseIoVec,
+    pub genes_row_map: &'a BackendRowMap,
+    pub feature_to_backend_row: &'a [usize],
+    pub satellites: Vec<SatStream<'a>>,
+    /// `cell_columns[cell_id]` = the genes-backend column for model cell
+    /// `cell_id`. Identity (`0..n_cells`) after the up-front mask+subset;
+    /// `live_cell_old_ids` in the refine pass (backend keeps its N_old layout).
+    /// `n_cells` == `cell_columns.len()`. Satellite reverse indices are keyed
+    /// by `cell_id`, not the backend column.
+    pub cell_columns: Vec<usize>,
+}
+
+/// Inverse of `feature_to_backend_row`: backend compact row → unified feature
+/// id (`u32::MAX` for rows not in the unified space). Mirrors
+/// `UnifiedData::materialize_cell_triplets`.
+fn backend_to_unified(feature_to_backend_row: &[usize], n_backend_rows: usize) -> Vec<u32> {
+    let mut b2u = vec![u32::MAX; n_backend_rows];
+    for (uid, &brow) in feature_to_backend_row.iter().enumerate() {
+        if brow < n_backend_rows {
+            b2u[brow] = uid as u32;
+        }
+    }
+    b2u
+}
+
+/// Build the bounded identity universe from the row maps (cell-independent) and
+/// a `(gene, q_modality, region, is_agg) → identity-id` lookup. Same keys and
+/// insertion logic as `collect_identities`/`intern`.
+fn build_identity_universe(
+    ctx: &CellStreamCtx,
+) -> (Vec<Identity>, FxHashMap<(u32, u32, u32, bool), u32>) {
+    let mut ids: Vec<Identity> = Vec::new();
+    let mut map: FxHashMap<(u32, u32, u32, bool), u32> = FxHashMap::default();
+    // Intern every identity a row could yield (same keys as `collect_identities`).
+    let mut scan = |rm: &BackendRowMap| {
+        for uid in 0..rm.stratum.len() {
+            let (Some(stratum), Some(g)) = (rm.stratum[uid], rm.gene[uid]) else {
+                continue;
+            };
+            match stratum {
+                RowStratum::CountComp => {
+                    let m = rm.modality[uid].unwrap_or(0);
+                    intern(&mut ids, &mut map, count_identity(g, m));
+                    intern(&mut ids, &mut map, agg_identity(g));
+                }
+                RowStratum::ModifierComp => {
+                    if let Some(m) = rm.modality[uid] {
+                        let r = rm.region[uid].unwrap_or(0);
+                        intern(&mut ids, &mut map, modifier_identity(g, m, r));
+                    }
+                }
+                RowStratum::Site => {}
+            }
+        }
+    };
+    scan(ctx.genes_row_map);
+    for sat in &ctx.satellites {
+        scan(sat.row_map);
+    }
+    (ids, map)
+}
+
+fn agg_identity(g: u32) -> Identity {
+    Identity { gene: g, q_modality: 0, region: 0, is_agg: true, bias_modality: 0 }
+}
+fn count_identity(g: u32, m: u32) -> Identity {
+    Identity { gene: g, q_modality: m, region: 0, is_agg: false, bias_modality: COUNT_BIAS_MODALITY }
+}
+fn modifier_identity(g: u32, m: u32, r: u32) -> Identity {
+    Identity { gene: g, q_modality: m, region: r, is_agg: false, bias_modality: m }
+}
+
+/// Map one streamed `(backend row → uid, value)` into the chunk's per-cell
+/// lists, mirroring `aggregate_pools::accumulate` + `collect_identities`: a
+/// CountComp row feeds both its splice identity and the gene's AGG sum; a
+/// ModifierComp row feeds its (modality, region) identity. Shared by the genes
+/// and satellite stream callbacks so the mapping can't drift between them.
+#[allow(clippy::too_many_arguments)]
+fn accumulate_streamed(
+    rm: &BackendRowMap,
+    uid: usize,
+    local: usize,
+    v: f32,
+    per_cell: &mut [Vec<(u32, f32)>],
+    agg_acc: &mut FxHashMap<(u32, u32), f32>,
+    id_of: &impl Fn(&(u32, u32, u32, bool)) -> u32,
+) {
+    let (Some(stratum), Some(g)) = (rm.stratum[uid], rm.gene[uid]) else {
+        return;
+    };
+    match stratum {
+        RowStratum::CountComp => {
+            let m = rm.modality[uid].unwrap_or(0);
+            per_cell[local].push((id_of(&(g, m, 0, false)), v));
+            *agg_acc.entry((local as u32, g)).or_insert(0.0) += v;
+        }
+        RowStratum::ModifierComp => {
+            if let Some(m) = rm.modality[uid] {
+                let r = rm.region[uid].unwrap_or(0);
+                per_cell[local].push((id_of(&(g, m, r, false)), v));
+            }
+        }
+        RowStratum::Site => {}
+    }
+}
+
+/// Streaming counterpart of [`solve_cell_embeddings`]: identical result, but
+/// never materialises the per-cell pool.
+pub fn solve_cell_embeddings_streaming(
+    model: &mut GemModel,
+    ctx: &CellStreamCtx,
+    args: &GemArgs,
+) -> Result<Vec<f32>> {
+    let n_cells = ctx.cell_columns.len();
+    let h = model.embedding_dim;
+    if n_cells == 0 {
+        return Ok(vec![]);
+    }
+
+    // 1. Cell-independent identity dictionary + frozen embeddings.
+    let (ids, key_to_id) = build_identity_universe(ctx);
+    let (frozen_e, frozen_b) = embed_identities(model, &ids, h)?;
+    let id_of = |k: &(u32, u32, u32, bool)| *key_to_id.get(k).expect("identity in universe");
+    let lambda = args.phase2_ridge.max(0.0) as f64;
+
+    // 2. Backend-row → unified-feature-id inverses (built once).
+    let g_b2u = backend_to_unified(ctx.feature_to_backend_row, ctx.genes_backend.num_rows());
+    let sat_b2u: Vec<Vec<u32>> = ctx
+        .satellites
+        .iter()
+        .map(|s| backend_to_unified(s.feature_to_backend_row, s.backend.num_rows()))
+        .collect();
+
+    // 3. Chunk over cells. Per chunk: stream genes + satellite triplets, build
+    //    per-cell (identity, count) lists, project, scatter back.
+    let nnz = ctx.genes_backend.num_non_zeros().unwrap_or(0);
+    let avg = (nnz / n_cells.max(1)).max(1);
+    let chunk_cells = (8_000_000 / avg).clamp(1, n_cells);
+    let slab = chunk_cells.min(1 << 14);
+
+    let mut e_flat = vec![0f32; n_cells * h];
+    let mut b_flat = vec![0f32; n_cells];
+
+    for chunk_start in (0..n_cells).step_by(chunk_cells) {
+        let chunk_end = (chunk_start + chunk_cells).min(n_cells);
+        let nlocal = chunk_end - chunk_start;
+        // The genes-backend columns for this chunk's cells (local index == cell
+        // id − chunk_start, i.e. the `out_col` the backend reports).
+        let cols = &ctx.cell_columns[chunk_start..chunk_end];
+
+        let mut per_cell: Vec<Vec<(u32, f32)>> = vec![Vec::new(); nlocal];
+        // AGG sums spliced+unspliced per (local_cell, gene); count/modifier
+        // entries are one-per-backend-row (pushed directly, never merged).
+        let mut agg_acc: FxHashMap<(u32, u32), f32> = FxHashMap::default();
+
+        let rm = ctx.genes_row_map;
+        ctx.genes_backend
+            .for_each_triplet(cols.iter().copied(), slab, |row, out_col, v| {
+                let uid = g_b2u[row as usize];
+                if uid != u32::MAX {
+                    accumulate_streamed(
+                        rm,
+                        uid as usize,
+                        out_col as usize,
+                        v,
+                        &mut per_cell,
+                        &mut agg_acc,
+                        &id_of,
+                    );
+                }
+            })?;
+
+        for (si, sat) in ctx.satellites.iter().enumerate() {
+            // Gather this chunk's satellite columns + their local-cell routing.
+            // Reverse index is keyed by cell id (= chunk_start + local), not the
+            // genes-backend column.
+            let mut sat_cols: Vec<usize> = Vec::new();
+            let mut sat_local: Vec<usize> = Vec::new();
+            for k in 0..nlocal {
+                for &sc in &sat.genes_cell_to_sat_cols[chunk_start + k] {
+                    sat_cols.push(sc as usize);
+                    sat_local.push(k);
+                }
+            }
+            if sat_cols.is_empty() {
+                continue;
+            }
+            let rm = sat.row_map;
+            let b2u = &sat_b2u[si];
+            sat.backend
+                .for_each_triplet(sat_cols.iter().copied(), slab, |row, out_col, v| {
+                    let uid = b2u[row as usize];
+                    if uid != u32::MAX {
+                        accumulate_streamed(
+                            rm,
+                            uid as usize,
+                            sat_local[out_col as usize],
+                            v,
+                            &mut per_cell,
+                            &mut agg_acc,
+                            &id_of,
+                        );
+                    }
+                })?;
+        }
+
+        for ((local, g), sum) in agg_acc {
+            per_cell[local as usize].push((id_of(&(g, 0, 0, true)), sum));
+        }
+
+        let (e_chunk, b_chunk) =
+            graph_embedding_util::cell_projection::project_cells(&frozen_e, &frozen_b, &per_cell, h, lambda);
+        e_flat[chunk_start * h..chunk_end * h].copy_from_slice(&e_chunk);
+        b_flat[chunk_start..chunk_end].copy_from_slice(&b_chunk);
+    }
+
+    finalize_e_cell(model, e_flat, b_flat)
+}
+
+pub(crate) fn intern(
     ids: &mut Vec<Identity>,
     map: &mut FxHashMap<(u32, u32, u32, bool), u32>,
     id: Identity,
@@ -192,7 +440,7 @@ fn collect_identities(pools: &AxisPools, n_cells: usize) -> (Vec<Identity>, Vec<
 /// Compute the frozen `(e_f, b_f)` for each identity via the model's
 /// `embed_and_bias_rows`, in chunks, then bring them to the CPU. Returns
 /// `(e [n_id × h] row-major, b [n_id])`.
-fn embed_identities(model: &GemModel, ids: &[Identity], h: usize) -> Result<(Vec<f32>, Vec<f32>)> {
+pub(crate) fn embed_identities(model: &GemModel, ids: &[Identity], h: usize) -> Result<(Vec<f32>, Vec<f32>)> {
     const CHUNK: usize = 65536;
     let n = ids.len();
     let mut e = vec![0f32; n * h];

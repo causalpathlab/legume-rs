@@ -7,13 +7,16 @@ use graph_embedding_util::data::UnifiedData;
 use graph_embedding_util::stop::setup_stop_handler;
 use graph_embedding_util::{load_unified_data, FeatureNameKind, LoadUnifiedArgs};
 use log::{info, warn};
+use matrix_util::clustering::{Kmeans, KmeansArgs};
 use matrix_util::common_io::{basename, mkdir_parent};
+use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::RunningStatOps;
+use matrix_util::utils::median;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
-use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 use faba::gem::args::GemArgs;
+use faba::gem::cell_solve::{CellStreamCtx, SatStream};
 use faba::gem::feature_table::{BackendRowMap, FeatureTable};
 use faba::gem::manifest::{write_outputs, CellQcOutputs};
 use faba::gem::model::{GemModel, PARAM_INIT_STD};
@@ -89,6 +92,51 @@ fn link_satellites(
             }
         })
         .collect()
+}
+
+/// Assemble the streaming phase-2 context: the genes backend + row map, and
+/// per-satellite `SatStream`s carrying the inverse `genes_cell → sat_cols`
+/// index (so a chunk of genes cells can gather its satellite mass). Valid only
+/// when cell id == backend column (after the up-front mask+subset, i.e. the
+/// non-refine pass).
+fn build_cell_stream_ctx<'a>(
+    unified: &'a UnifiedData,
+    genes_row_map: &'a BackendRowMap,
+    sats: &'a [SatelliteBackend],
+    sat_links: &'a [SatelliteLink],
+    // Model cell id → genes-backend column. `(0..n_cells)` in the main pass;
+    // `live_cell_old_ids` in refine (backend keeps its N_old layout). Indexed
+    // by model cell id, matching how `col_to_genes_cell` is keyed.
+    cell_columns: Vec<usize>,
+) -> CellStreamCtx<'a> {
+    let n_cells = cell_columns.len();
+    let satellites = sats
+        .iter()
+        .zip(sat_links)
+        .map(|(s, link)| {
+            let mut inv: Vec<Vec<u32>> = vec![Vec::new(); n_cells];
+            for (sat_col, &gc) in link.col_to_genes_cell.iter().enumerate() {
+                if let Some(gc) = gc {
+                    if gc < n_cells {
+                        inv[gc].push(sat_col as u32);
+                    }
+                }
+            }
+            SatStream {
+                backend: s.unified.count_backend(),
+                row_map: &link.row_map,
+                feature_to_backend_row: &s.unified.feature_to_backend_row,
+                genes_cell_to_sat_cols: inv,
+            }
+        })
+        .collect();
+    CellStreamCtx {
+        genes_backend: unified.count_backend(),
+        genes_row_map,
+        feature_to_backend_row: &unified.feature_to_backend_row,
+        satellites,
+        cell_columns,
+    }
 }
 
 /// Borrow `SatelliteData` views from the owned backends + links, ready to pass
@@ -186,12 +234,12 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         args.batch_files.as_deref()
     };
 
-    // Tag barcodes with the per-file `@sample` id whenever there is more than
-    // one input file and the caller hasn't supplied explicit batch identity.
-    // The SAME rule applies to genes and satellites so a cell's columns carry
-    // identical names across modalities (the basis for matching). With
-    // `--batch-files` the caller owns batch identity, so leave barcodes
-    // untagged.
+    // Tag barcodes with the per-file `@sample` id whenever there is
+    // more than one input file and the caller hasn't supplied
+    // explicit batch identity.  The SAME rule applies to genes and
+    // satellites so a cell's columns carry identical names across
+    // modalities (the basis for matching). With `--batch-files` the
+    // caller owns batch identity, so leave barcodes untagged.
     let total_files = args.genes.len()
         + args.dartseq.as_deref().map_or(0, <[_]>::len)
         + args.atoi.as_deref().map_or(0, <[_]>::len)
@@ -281,8 +329,16 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // Global feature table spanning genes + satellites (by name, so ids are
     // joint). The genes backend defines the gene namespace; satellites only
     // augment existing genes with modifier modalities.
+    //
+    // First pass is **genes-only** when refining: the QC β embedding is trained
+    // on the core count signal alone, with the sparse epi-modification
+    // satellites (m6A / A-to-I / pA) held out until the cells and genes have
+    // been cleaned. Full modelling over every modality then runs in pass 2 on
+    // the QC-passed subset (see `run_refine_pass`). Without `--refine` the lone
+    // pass uses all modalities. `satellites` stays alive either way for pass 2.
     let region_map = build_region_map(args)?;
-    let sat_name_lists: Vec<&[Box<str>]> = satellites
+    let pass1_sats: &[SatelliteBackend] = if args.refine { &[] } else { &satellites };
+    let sat_name_lists: Vec<&[Box<str>]> = pass1_sats
         .iter()
         .map(|s| s.unified.feature_names.as_slice())
         .collect();
@@ -303,7 +359,10 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // Genes-backend row map (feature axis; drives the spliced QC + collapse mask).
     let genes_row_map = table.map_backend_rows(&unified.feature_names, &region_map);
 
-    // ---- Cell QC over the SPLICED features (the collapse driver) ----
+    /////////////////////////////////////////////////////////////
+    // Cell QC over the SPLICED features (the collapse driver) //
+    /////////////////////////////////////////////////////////////
+
     // The collapse places each cell from its spliced projection, so a cell with
     // zero spliced counts is a zero vector there — unplaceable. We count
     // non-zeros over the spliced rows only and, by default, auto-select the
@@ -371,38 +430,33 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // After the up-front subset every remaining cell is written out.
     let keep_idx: Vec<usize> = (0..unified.n_cells()).collect();
 
-    // Satellite row maps + cell links (against the SUBSET genes cells).
-    let sat_row_maps: Vec<BackendRowMap> = satellites
+    // Satellite row maps + cell links (against the SUBSET genes cells). Empty
+    // in a refine pass-1 (genes-only); the full set is linked in pass 2.
+    let sat_row_maps: Vec<BackendRowMap> = pass1_sats
         .iter()
         .map(|s| table.map_backend_rows(&s.unified.feature_names, &region_map))
         .collect();
-    let sat_links = link_satellites(&satellites, sat_row_maps, &unified.barcodes);
-    let sat_views = satellite_views(&satellites, &sat_links);
+    let sat_links = link_satellites(pass1_sats, sat_row_maps, &unified.barcodes);
+    let sat_views = satellite_views(pass1_sats, &sat_links);
 
     let n_cells = unified.n_cells();
-    let pb = build_pseudobulk(&mut unified, &table, &genes_row_map, &sat_views, args, None)
-        .context("build pseudobulk")?;
+    // Build the per-cell pool only when the sampler draws the cell axis; the
+    // default pure-pb path leaves it out and phase-2 streams from the backend
+    // (no ~per-(gene,cell) object → fits 700k cells).
+    let build_cell_pools = args.use_phase1_cell_axis();
+    let pb = build_pseudobulk(
+        &mut unified,
+        &table,
+        &genes_row_map,
+        &sat_views,
+        args,
+        None,
+        build_cell_pools,
+    )
+    .context("build pseudobulk")?;
 
-    // Persist the per-gene NB-Fisher housekeeping weights (senna
-    // convention: `{out}.fisher_weights.parquet`) so the suppression is
-    // inspectable. Skipped when the penalty is disabled.
-    if args.housekeeping_penalty > 0.0 {
-        data_beans_alg::gene_weighting::save_fisher_weights(
-            &args.out,
-            &pb.gene_fisher_weights,
-            &table.gene_names,
-        )
-        .context("save fisher weights")?;
-        info!(
-            "wrote {}.fisher_weights.parquet ({} genes)",
-            args.out,
-            pb.gene_fisher_weights.len()
-        );
-    }
-
-    // Persist per-gene ubiquity (fraction of cells expressing) — a
-    // diagnostic / inverse-propensity signal (breadth complement to the
-    // NB-Fisher magnitude weight), inspectable next to the Fisher weights.
+    // Persist per-gene ubiquity (fraction of cells expressing) — a breadth
+    // diagnostic.
     data_beans_alg::gene_weighting::save_per_gene_weights(
         &pb.gene_ubiquity,
         &table.gene_names,
@@ -433,9 +487,24 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         &dev,
     )
     .context("init model")?;
+    // Deterministic init (CPU candle can't seed Init::Randn) so the QC is
+    // reproducible run-to-run.
+    model.seed_init(args.seed).context("seed model init")?;
 
     let stop = setup_stop_handler();
-    let cell_nrms = train(args, &table, &pb, &mut model, &stop).context("training loop")?;
+    // Streaming phase-2 context (cell id == backend column after the up-front
+    // mask+subset). Built only on the pool-free path.
+    let cell_stream = (!build_cell_pools).then(|| {
+        build_cell_stream_ctx(
+            &unified,
+            &genes_row_map,
+            pass1_sats,
+            &sat_links,
+            (0..n_cells).collect(),
+        )
+    });
+    let cell_nrms = train(args, &table, &pb, &mut model, &stop, cell_stream.as_ref())
+        .context("training loop")?;
 
     // When --refine is active, pass-1 prior-score parquets go under
     // `{out}.pass1.*` so they survive the pass-2 overwrite.
@@ -483,18 +552,19 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
             satellites: &satellites,
             region_map: &region_map,
         };
+        // Pass 1 was genes-only, so pass 2 (full modelling over every modality)
+        // always runs — even when QC filters nothing, the satellites still need
+        // to enter the model.
         let out2 = run_refine_pass(args, ctx, &mut unified, &stop).context("refinement pass")?;
 
-        // Only write the final manifest and outputs if refine produced a
-        // new model (returns None when nothing was filtered).
-        if let Some(Pass2Outputs {
-            model: model2,
-            table: table2,
-            pb: pb2,
-            keep_idx: keep_idx2,
-            cell_nrms: cell_nrms2,
-        }) = out2
         {
+            let Pass2Outputs {
+                model: model2,
+                table: table2,
+                pb: pb2,
+                keep_idx: keep_idx2,
+                cell_nrms: cell_nrms2,
+            } = out2;
             write_outputs(
                 &args.out,
                 &args.out,
@@ -532,11 +602,10 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
             info!("done (refined) — prefix '{}'", args.out);
             return Ok(());
         }
-        // Nothing was filtered: fall through to write the pass-1 manifest.
-        info!("refine: no genes or cells filtered — using pass-1 model");
     }
 
-    // Single-pass or refine-no-op: write manifest for pass-1 results.
+    // Single pass (no --refine, or interrupted before the refine pass): write
+    // the manifest for the genes+satellites pass-1 results.
     let topics = if args.resolve_topics {
         Some(
             faba::gem::topics::resolve_topics(
@@ -572,44 +641,102 @@ struct Pass2Outputs {
     cell_nrms: Vec<f32>,
 }
 
-/// Pass-1 scoring inputs bundled for `run_refine_pass`.
+/// Pass-1 (genes-only) scoring inputs bundled for `run_refine_pass`.
 struct Pass1Context<'a> {
-    /// β_g rows from the trained model, flat row-major [G × H] in f32.
+    /// β_g rows from the genes-only pass-1 model, flat row-major [G × H] in
+    /// f32. k-means'd into gene groups for the empty-group QC; ‖β_g‖ is the
+    /// emptiness signal (how much the model learned the gene).
     beta_rows: Vec<f32>,
-    /// Pre-L2-normalisation cell norms from phase-2 (one per original cell).
+
+    /// Pre-L2-normalisation cell norms from phase-2 (one per original cell);
+    /// `√emb_sq_norm`. The magnitude the cell projection found — near-zero
+    /// means the IRLS fit nothing beyond the gene-bias background, i.e. a
+    /// near-empty cell. Empty when phase-2 was skipped. Drives the cell QC.
     cell_nrms: &'a [f32],
-    /// Per-cell **spliced** non-zero count (f32, one per cell).
+
+    /// Per-cell **spliced** non-zero count (f32, one per cell). Reported
+    /// side-by-side with the pre-L2 norm in `{out}.cell_qc.parquet`.
     cell_nnz: &'a [f32],
+
     /// Effective spliced-nnz cell cutoff from pass-1 (auto cell-calling, else 1),
     /// re-applied to the dead-cell filter so both passes agree.
     cell_cutoff: usize,
+
     /// Pass-1 feature table — used for gene scoring (n_genes).
     table: &'a FeatureTable,
+
     /// Pass-1 genes-backend row map — maps each genes feature row to its gene
     /// for the dead-gene feature-row filter.
     genes_row_map: &'a BackendRowMap,
+
     /// Satellite backends (unchanged across passes); re-linked to the subset
     /// genes cells in pass-2.
     satellites: &'a [SatelliteBackend],
+
     /// Region map (unchanged across passes).
     region_map: &'a faba::gem::region::RegionMap,
 }
 
-/// Run the pass-2 refinement: filter dead genes/cells from `unified`,
-/// rebuild pseudobulk + model, retrain.  Modifies `unified` in place.
-///
-/// Returns `Some(Pass2Outputs)` when at least one gene or cell was filtered
-/// and retraining completed, or `None` when nothing was filtered (caller uses
-/// pass-1 results).
-///
-/// Scores are computed directly from `ctx.beta_rows` (pass-1 β_g) and
-/// `ctx.cell_nrms` (pre-L2-norm from cell_solve) — no parquet round-trip.
+/// Per-cell QC report written to `{out}.cell_qc.parquet`: the pre-L2 fit
+/// norm and the spliced nnz **side by side**, both cutoff values, and how
+/// each cutoff fired per cell (`pass_nnz` / `pass_norm` / `kept`). Covers
+/// all N_old cells (the full pre-subset axis), so a row exists for every
+/// dropped cell too. `pre_l2_norm` is `NaN` when phase-2 was skipped.
+#[allow(clippy::too_many_arguments)]
+fn write_cell_qc_parquet(
+    args: &GemArgs,
+    gem_data: &graph_embedding_util::data::UnifiedData,
+    cell_nrms: &[f32],
+    cell_nnz: &[f32],
+    cell_cutoff: usize,
+    nrm_thresh: f32,
+    have_nrms: bool,
+    live: &[bool],
+) -> anyhow::Result<()> {
+    use matrix_util::traits::IoOps;
+    let n = gem_data.n_cells();
+    let mut m = DMatrix::<f32>::zeros(n, 7);
+    for c in 0..n {
+        let pass_nnz = (cell_nnz[c] as usize) >= cell_cutoff;
+        let pass_norm = !have_nrms || cell_nrms[c] >= nrm_thresh;
+        m[(c, 0)] = cell_nnz[c];
+        m[(c, 1)] = if have_nrms { cell_nrms[c] } else { f32::NAN };
+        m[(c, 2)] = cell_cutoff as f32;
+        m[(c, 3)] = nrm_thresh;
+        m[(c, 4)] = pass_nnz as u8 as f32;
+        m[(c, 5)] = pass_norm as u8 as f32;
+        m[(c, 6)] = live[c] as u8 as f32;
+    }
+    let cols: Vec<Box<str>> = [
+        "nnz",
+        "pre_l2_norm",
+        "nnz_cutoff",
+        "norm_cutoff",
+        "pass_nnz",
+        "pass_norm",
+        "kept",
+    ]
+    .iter()
+    .map(|s| Box::from(*s))
+    .collect();
+    let path = format!("{}.cell_qc.parquet", args.out);
+    m.to_parquet_with_names(&path, (Some(&gem_data.barcodes), Some("cell")), Some(&cols))
+        .with_context(|| format!("writing {path}"))?;
+    info!("refine: cell QC → {} ({} cells)", path, n);
+    Ok(())
+}
+
+/// Pass 2 of `--refine`: QC the genes-only pass-1 model — flag empty gene
+/// clusters by low mean ‖β‖, then drop near-empty cells by their pre-L2
+/// projection norm — subset `unified` to the survivors, and rebuild + train
+/// the **full** model over every modality (genes + satellites). Always runs
+/// when refining (even if QC filters nothing) because pass 1 was genes-only.
 fn run_refine_pass(
     args: &GemArgs,
     ctx: Pass1Context<'_>,
     unified: &mut graph_embedding_util::data::UnifiedData,
     stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> anyhow::Result<Option<Pass2Outputs>> {
+) -> anyhow::Result<Pass2Outputs> {
     let Pass1Context {
         beta_rows,
         cell_nrms,
@@ -621,55 +748,152 @@ fn run_refine_pass(
         region_map,
     } = ctx;
     let h = args.embedding_dim;
-    let var = PARAM_INIT_STD * PARAM_INIT_STD;
-    let dist = ChiSquared::new(h as f64).context("chi-squared dof")?;
-
     let n_genes = table_p1.n_genes();
     let n_cells_old = unified.n_cells();
 
-    // ---- Score genes from β norms ----
-    let live_gene_mask: Vec<bool> = (0..n_genes)
+    ///////////////////////////////////////////////////////////////////////////////
+    // QC on the genes-only pass-1 model, then full modelling in pass 2.	 //
+    // Everything is keyed on the learned gene embedding β — genes guide the	 //
+    // way. Replaces the χ²-prior test (which rejected ~nothing: its σ=init	 //
+    // null is mis-scaled vs trained β / e_cell).				 //
+    // 										 //
+    //  1. GENES first — k-means β_g [G,H] into `--gene-groups` clusters; the	 //
+    //     emptiness signal is the cluster's mean ‖β_g‖ **in excess of the init	 //
+    //     floor** σ√H (a gene the model never updated keeps ‖β‖ ≈ init, so the	 //
+    //     excess is the learned signal). A group is empty when its mean excess	 //
+    //     is below `--empty-group-frac` × the MEDIAN group's excess. ‖β‖ is the //
+    //     embedding-native emptiness signal — exactly what the chi-square tried //
+    //     to read off ‖β‖² — and is cell-independent, so the gene call needs no //
+    //     cells and carries no ubiquity circularity. The median reference is	 //
+    //     robust to the housekeeping cluster (a ~100× outlier that makes a max	 //
+    //     reference flag everything).						 //
+    //                                                                           //
+    //  2. CELLS — robust threshold on the pre-L2 norm `cell_nrms`		 //
+    //     (= √emb_sq_norm), which is itself gene-guided: it is the magnitude	 //
+    //     of the cell's Poisson-MAP projection onto the frozen β dictionary,	 //
+    //     so a cell whose expressed genes sit in the dead-β region solves to	 //
+    //     ~0 no matter how many raw counts it has. e_cell is L2-normalised	 //
+    //     before storage (depth removed), so the stored unit embedding can't	 //
+    //     see this — only the pre-L2 norm can. Drop cells below		 //
+    //     `--cell-min-norm-frac` × the median norm of the cutoff-passing cells. //
+    //     nnz, the norm, both cutoffs, and each cell's pass/fail land in	 //
+    //     `{out}.cell_qc.parquet`, side by side.				 //
+    ///////////////////////////////////////////////////////////////////////////////
+
+    ///////////////////////////////////////////////////////////////////////////
+    // step 1. gene Q/C: kmeans on gene embedding and flag low density balls //
+    ///////////////////////////////////////////////////////////////////////////
+
+    let n_groups = args.gene_groups.clamp(1, n_genes.max(1));
+    let beta_mat = DMatrix::<f32>::from_row_slice(n_genes, h, &beta_rows);
+    let gene_group: Vec<usize> = beta_mat.kmeans_rows(KmeansArgs::with_clusters(n_groups));
+
+    // Init floor: an untrained gene keeps ‖β‖ ≈ σ√H. Score each cluster by its
+    // mean ‖β‖ in excess of this floor — the learned signal.
+    let init_norm = (PARAM_INIT_STD * (h as f64).sqrt()) as f32;
+    let beta_excess: Vec<f32> = (0..n_genes)
         .map(|g| {
-            let row = &beta_rows[g * h..(g + 1) * h];
-            let sq_norm: f64 = row.iter().map(|&x| (x as f64) * (x as f64)).sum();
-            let pval = dist.sf(sq_norm / var);
-            pval <= args.feature_prior_pval_max as f64
+            let nrm = beta_rows[g * h..(g + 1) * h]
+                .iter()
+                .map(|&x| x * x)
+                .sum::<f32>()
+                .sqrt();
+            (nrm - init_norm).max(0.0)
         })
         .collect();
+    let mut group_bsum = vec![0.0_f32; n_groups];
+    let mut group_size = vec![0_usize; n_groups];
+    for g in 0..n_genes {
+        let j = gene_group[g];
+        group_bsum[j] += beta_excess[g];
+        group_size[j] += 1;
+    }
+    let group_excess: Vec<f32> = (0..n_groups)
+        .map(|j| {
+            if group_size[j] > 0 {
+                group_bsum[j] / group_size[j] as f32
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let live_excess: Vec<f32> = (0..n_groups)
+        .filter(|&j| group_size[j] > 0)
+        .map(|j| group_excess[j])
+        .collect();
+    let empty_thresh = args.empty_group_frac * median(&live_excess);
+    let empty_group: Vec<bool> = (0..n_groups)
+        .map(|j| group_size[j] > 0 && group_excess[j] < empty_thresh)
+        .collect();
+    {
+        let mut sorted = live_excess;
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let q = |f: f32| sorted[((sorted.len() - 1) as f32 * f) as usize];
+        info!(
+            "refine: init floor ‖β‖={:.3}; live-group mean excess‖β‖ min={:.3} p25={:.3} med={:.3} p75={:.3} max={:.3} → empty if < {:.3}",
+            init_norm, sorted[0], q(0.25), q(0.5), q(0.75), sorted[sorted.len() - 1], empty_thresh
+        );
+    }
+    let live_gene_mask: Vec<bool> = (0..n_genes).map(|g| !empty_group[gene_group[g]]).collect();
     let n_dead_genes = live_gene_mask.iter().filter(|&&v| !v).count();
+    let n_empty_groups = empty_group.iter().filter(|&&v| v).count();
 
-    // ---- Score cells from pre-L2 norms ----
-    // live_cell_mask covers all n_cells_old cells.  Cells that never ran
-    // phase-2 (empty cell_nrms) are kept iff they pass the pass-1 spliced cutoff.
-    let live_cell_mask: Vec<bool> = if cell_nrms.is_empty() {
-        (0..n_cells_old)
-            .map(|c| (cell_nnz[c] as usize) >= cell_cutoff)
-            .collect()
+    // ---- 2. Cell QC: spliced cutoff + robust pre-L2-norm threshold ----
+    let have_nrms = cell_nrms.len() == n_cells_old;
+    let nrm_thresh = if have_nrms {
+        let cand: Vec<f32> = (0..n_cells_old)
+            .filter(|&c| (cell_nnz[c] as usize) >= cell_cutoff && cell_nrms[c] > 0.0)
+            .map(|c| cell_nrms[c])
+            .collect();
+        args.cell_min_norm_frac * median(&cand)
     } else {
-        (0..n_cells_old)
-            .map(|c| {
-                if (cell_nnz[c] as usize) < cell_cutoff {
-                    return false;
-                }
-                let nrm = cell_nrms[c] as f64;
-                let pval = dist.sf((nrm * nrm) / var);
-                pval <= args.cell_prior_pval_max as f64
-            })
-            .collect()
+        0.0
     };
-    let n_dead_cells = live_cell_mask.iter().filter(|&&v| !v).count();
+    let live_cell_mask: Vec<bool> = (0..n_cells_old)
+        .map(|c| {
+            (cell_nnz[c] as usize) >= cell_cutoff && (!have_nrms || cell_nrms[c] >= nrm_thresh)
+        })
+        .collect();
+    let n_kept_cells = live_cell_mask.iter().filter(|&&v| v).count();
+    let n_dead_cells = n_cells_old - n_kept_cells;
+
+    // Paired QC report: nnz beside the pre-L2 norm + how each cutoff fired.
+    write_cell_qc_parquet(
+        args,
+        unified,
+        cell_nrms,
+        cell_nnz,
+        cell_cutoff,
+        nrm_thresh,
+        have_nrms,
+        &live_cell_mask,
+    )
+    .context("write cell_qc.parquet")?;
 
     info!(
-        "refine: {} / {} genes dead (feature_prior_pval > {})",
-        n_dead_genes, n_genes, args.feature_prior_pval_max
+        "refine: {} gene groups, {} empty (excess‖β‖ < {} × median group); {} / {} genes dead",
+        n_groups, n_empty_groups, args.empty_group_frac, n_dead_genes, n_genes
     );
-    info!(
-        "refine: {} / {} cells dead (cell_prior_pval > {})",
-        n_dead_cells, n_cells_old, args.cell_prior_pval_max
-    );
-
-    if n_dead_genes == 0 && n_dead_cells == 0 {
-        return Ok(None);
+    if have_nrms {
+        // One pass: split nnz into dropped vs kept for the diagnostic medians.
+        let (mut dropped_nnz, mut kept_nnz) = (Vec::new(), Vec::new());
+        for c in 0..n_cells_old {
+            if live_cell_mask[c] {
+                kept_nnz.push(cell_nnz[c]);
+            } else {
+                dropped_nnz.push(cell_nnz[c]);
+            }
+        }
+        info!(
+            "refine: cell norm cutoff = {:.4} ({}×median pre-L2 norm); {} / {} cells dead (dropped median nnz={:.0} vs kept {:.0})",
+            nrm_thresh, args.cell_min_norm_frac, n_dead_cells, n_cells_old,
+            median(&dropped_nnz), median(&kept_nnz),
+        );
+    } else {
+        info!(
+            "refine: {} / {} cells dead (phase-2 skipped — nnz cutoff {} only)",
+            n_dead_cells, n_cells_old, cell_cutoff
+        );
     }
 
     // ---- Filter unified (genes backend) ----
@@ -721,6 +945,10 @@ fn run_refine_pass(
     let sat_links2 = link_satellites(satellites, sat_row_maps2, &unified.barcodes);
     let sat_views2 = satellite_views(satellites, &sat_links2);
 
+    // Same pool-vs-stream choice as the main pass. After `subset_cells` the
+    // backend keeps its N_old column layout, so streaming addresses cells via
+    // `live_cell_old_ids` (model cell i → old backend column).
+    let build_cell_pools = args.use_phase1_cell_axis();
     let pb2 = build_pseudobulk(
         unified,
         &table2,
@@ -731,18 +959,11 @@ fn run_refine_pass(
             live_cell_old_ids: &live_cell_old_ids,
             full_batch_labels: &full_batch_labels,
         }),
+        build_cell_pools,
     )
     .context("build pseudobulk (refined)")?;
 
     // Diagnostic weights for pass-2.
-    if args.housekeeping_penalty > 0.0 {
-        data_beans_alg::gene_weighting::save_fisher_weights(
-            args.out.as_ref(),
-            &pb2.gene_fisher_weights,
-            &table2.gene_names,
-        )
-        .context("save fisher weights (refined)")?;
-    }
     data_beans_alg::gene_weighting::save_per_gene_weights(
         &pb2.gene_ubiquity,
         &table2.gene_names,
@@ -767,22 +988,45 @@ fn run_refine_pass(
         &dev,
     )
     .context("init model (refined)")?;
+    model2
+        .seed_init(args.seed)
+        .context("seed model init (refined)")?;
 
-    let cell_nrms2 =
-        train(args, &table2, &pb2, &mut model2, stop).context("training loop (refined)")?;
+    // Refine streams phase-2 from the backend too, addressing cells
+    // by their pre-subset column
+    // (`live_cell_old_ids[i]` = backend column for cell i).
+    //
+    let cell_stream2 = (!build_cell_pools).then(|| {
+        build_cell_stream_ctx(
+            unified,
+            &genes_row_map2,
+            satellites,
+            &sat_links2,
+            live_cell_old_ids.clone(),
+        )
+    });
+    let cell_nrms2 = train(
+        args,
+        &table2,
+        &pb2,
+        &mut model2,
+        stop,
+        cell_stream2.as_ref(),
+    )
+    .context("training loop (refined)")?;
 
     // All cells in `unified` already passed the combined QC (subset_cells
     // applied both the spliced cell cutoff and the embedding threshold), so
     // keep_idx2 is the identity partition.
     let keep_idx2: Vec<usize> = (0..n_cells2).collect();
 
-    Ok(Some(Pass2Outputs {
+    Ok(Pass2Outputs {
         model: model2,
         table: table2,
         pb: pb2,
         keep_idx: keep_idx2,
         cell_nrms: cell_nrms2,
-    }))
+    })
 }
 
 /// Per-file sample id: the file's basename (sparse-data extension stripped)
@@ -858,11 +1102,6 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
         "--tau-modality must be a finite value in [0, 1] (got {})",
         args.tau_modality
     );
-    anyhow::ensure!(
-        args.housekeeping_penalty.is_finite() && args.housekeeping_penalty >= 0.0,
-        "--housekeeping-penalty must be a finite value ≥ 0 (got {})",
-        args.housekeeping_penalty
-    );
     if args.resolve_topics {
         // --no-cell-axis leaves e_cell at its random init (never trained),
         // so resolving topics from it would yield archetypes of noise.
@@ -902,14 +1141,19 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
     );
     if args.refine {
         anyhow::ensure!(
-            args.feature_prior_pval_max > 0.0 && args.feature_prior_pval_max < 1.0,
-            "--feature-prior-pval-max must be in (0, 1) (got {})",
-            args.feature_prior_pval_max
+            args.gene_groups >= 2,
+            "--gene-groups must be ≥ 2 (got {})",
+            args.gene_groups
         );
         anyhow::ensure!(
-            args.cell_prior_pval_max > 0.0 && args.cell_prior_pval_max < 1.0,
-            "--cell-prior-pval-max must be in (0, 1) (got {})",
-            args.cell_prior_pval_max
+            args.empty_group_frac > 0.0 && args.empty_group_frac < 1.0,
+            "--empty-group-frac must be in (0, 1) (got {})",
+            args.empty_group_frac
+        );
+        anyhow::ensure!(
+            (0.0..1.0).contains(&args.cell_min_norm_frac),
+            "--cell-min-norm-frac must be in [0, 1) (got {})",
+            args.cell_min_norm_frac
         );
     }
     Ok(())

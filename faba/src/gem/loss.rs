@@ -95,19 +95,10 @@ fn sub_batch_loss(model: &GemModel, axis: Axis, sub: &SubBatch) -> Result<Tensor
     let log_p_pos = log_sm.i((.., 0))?;
     let neg = log_p_pos.affine(-1.0, 0.0)?; // [B] per-positive NCE loss
 
-    ////////////////////////////////////////
-    // NB-Fisher-weighted mean over positives
-    ////////////////////////////////////////
-    // Each positive's loss is scaled by its per-gene Fisher weight
-    // `w_i ∈ (0, 1]` (housekeeping anchors < 1, modifier edges = 1), then
-    // normalised by Σw so the term stays a convex combination — a
-    // down-weighted gene contributes less to the objective without
-    // rescaling the overall loss magnitude. When the penalty is off every
-    // `w_i = 1` and this reduces exactly to `neg.mean_all()`.
-    let w = Tensor::from_slice(&pos.weight, b, &model.dev)?;
-    let sum_w = w.sum_all()?;
-    let weighted = (neg * &w)?.sum_all()?;
-    Ok(weighted.broadcast_div(&sum_w)?)
+    // Plain mean over positives. Abundance balance is handled upstream by the
+    // sampler's `count^τ` draw weighting, so there is no per-positive loss
+    // weight.
+    Ok(neg.mean_all()?)
 }
 
 fn score_negative_slate(

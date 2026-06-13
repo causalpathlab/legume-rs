@@ -123,20 +123,16 @@ pub struct PseudobulkData {
     /// unified cell. Order is **coarsest-first** (level 0 is the smallest
     /// number of pbs). Persisted to `{out}.cell_to_pb.parquet`.
     pub cell_to_pb_per_level: Vec<Vec<usize>>,
-    /// Cell-axis pools (identity partition; one unit per cell).
-    pub cell_pools: AxisPools,
+    /// Cell-axis pools (identity partition; one unit per cell). `Some` only
+    /// when the sampler draws the cell axis (`use_phase1_cell_axis`); `None`
+    /// in the default pure-pb path, where phase-2 streams from the backend
+    /// rather than materialising this ~per-(gene,cell) object.
+    pub cell_pools: Option<AxisPools>,
     /// Per-pb-level pools, coarsest-first.
     pub pb_pools_per_level: Vec<AxisPools>,
-    /// Per-gene NB-Fisher housekeeping weights (length `n_genes`, in
-    /// `(0, 1]`). All `1.0` when `--housekeeping-penalty 0`. Already
-    /// folded into the anchor sampling pools; kept here only so the
-    /// caller can persist them to `{out}.fisher_weights.parquet`.
-    pub gene_fisher_weights: Vec<f32>,
     /// Per-gene ubiquity (fraction of cells expressing, length `n_genes`,
-    /// in `(0, 1]`) from the cell-axis count pool. NOT folded into any
-    /// pool or the model; persisted to `{out}.ubiquity.parquet` as a
-    /// diagnostic / inverse-propensity signal (breadth complement to the
-    /// NB-Fisher magnitude weight).
+    /// in `(0, 1]`) from the cell-axis count pool. NOT consumed by the
+    /// model; persisted to `{out}.ubiquity.parquet` as a breadth diagnostic.
     pub gene_ubiquity: Vec<f32>,
 }
 
@@ -147,35 +143,41 @@ impl PseudobulkData {
 }
 
 /// Refinement-pass inputs for [`build_pseudobulk`]. In the second
-/// (`--refine`) pass the caller has already `subset_features` / `subset_cells`'d
-/// `unified` down to the live N_new axis, but the **backend still carries the
-/// full N_old rows × columns**. The projection + collapse therefore run at
-/// N_old scale and need these full-backend-aligned inputs; the resulting
-/// partition is narrowed back to the live cells afterward.
+/// (`--refine`) pass the caller has already `subset_features` /
+/// `subset_cells`'d `unified` down to the live N_new axis, but the
+/// **backend still carries the full N_old rows × columns**. The
+/// projection + collapse therefore run at N_old scale and need these
+/// full-backend-aligned inputs; the resulting partition is narrowed
+/// back to the live cells afterward.
 pub struct RefineContext<'a> {
     /// Pre-subset ids of the cells kept after dead-cell filtering, in
     /// new-cell order. Narrows the N_old `cell_to_pb_per_level` to the N_new
     /// live cells so the partition aligns with the already-remapped triplets.
     pub live_cell_old_ids: &'a [usize],
-    /// Full per-backend-column batch labels (length = backend `num_columns`
-    /// = N_old). The subset `unified.batch_membership` is already N_new, so
-    /// the caller captures these *before* subsetting.
+
+    /// Full per-backend-column batch labels (length = backend
+    /// `num_columns` = N_old). The subset `unified.batch_membership`
+    /// is already N_new, so the caller captures these *before*
+    /// subsetting.
     pub full_batch_labels: &'a [Box<str>],
 }
 
-/// One satellite (non-spliced) modality backend, paired with the data needed
-/// to fold its mass into the spliced-driven pseudobulk. Held **separately**
-/// from the genes backend — the collapse never sees it; it only donates
-/// `modifier_comp` mass at aggregation time.
+/// One satellite (non-spliced) modality backend, paired with the data
+/// needed to fold its mass into the spliced-driven pseudobulk. Held
+/// **separately** from the genes backend — the collapse never sees
+/// it; it only donates `modifier_comp` mass at aggregation time.
 pub struct SatelliteData<'a> {
     /// The satellite backend, with `triplets` already materialized.
     pub unified: &'a UnifiedData,
-    /// Row classification (global `(gene, modality, …)` ids) aligned to the
-    /// satellite backend's compact rows.
+
+    /// Row classification (global `(gene, modality, …)` ids) aligned
+    /// to the satellite backend's compact rows.
     pub row_map: &'a BackendRowMap,
-    /// Satellite column → genes cell id, or `None` when the column has no
-    /// matching genes cell (its mass is dropped). Matched by `barcode@sample`.
-    /// In the refine pass this is recomputed against the subset genes cells.
+
+    /// Satellite column → genes cell id, or `None` when the column
+    /// has no matching genes cell (its mass is dropped). Matched by
+    /// `barcode@sample`.  In the refine pass this is recomputed
+    /// against the subset genes cells.
     pub col_to_genes_cell: &'a [Option<usize>],
 }
 
@@ -211,18 +213,21 @@ pub fn spliced_backend_rows(
 
 /// Build the multilevel partition + the per-axis sampling pools.
 ///
-/// The collapse runs on a transient **spliced-only clone** of the genes
-/// backend (`clone_for_collapse` + `mask_rows`), so `unified`'s own backend is
-/// left untouched (its full rows are still needed for `agg`/`count_comp`
-/// aggregation). `genes_row_map` classifies the genes backend's rows; the
-/// spliced mask is derived from it. `satellites` donate `modifier_comp` mass.
+/// The collapse runs on a transient **spliced-only clone** of the
+/// genes backend (`clone_for_collapse` + `mask_rows`), so `unified`'s
+/// own backend is left untouched (its full rows are still needed for
+/// `agg`/`count_comp` aggregation). `genes_row_map` classifies the
+/// genes backend's rows; the spliced mask is derived from
+/// it. `satellites` donate `modifier_comp` mass.
 ///
-/// `refine`: `None` for the normal pass — triplets are materialized from the
-/// backend and batch labels derived from `unified`. `Some(ctx)` for the
-/// `--refine` pass (see [`RefineContext`]): triplets are NOT re-materialized
-/// (already remapped by `subset_cells`), the collapse runs on the full N_old
-/// backend then is narrowed to the live cells, and batch labels / spliced mask
-/// are taken at full-backend scale since `unified` is already subset.
+/// `refine`: `None` for the normal pass — triplets are materialized
+/// from the backend and batch labels derived from
+/// `unified`. `Some(ctx)` for the `--refine` pass (see
+/// [`RefineContext`]): triplets are NOT re-materialized (already
+/// remapped by `subset_cells`), the collapse runs on the full N_old
+/// backend then is narrowed to the live cells, and batch labels /
+/// spliced mask are taken at full-backend scale since `unified` is
+/// already subset.
 pub fn build_pseudobulk(
     unified: &mut UnifiedData,
     table: &FeatureTable,
@@ -230,6 +235,11 @@ pub fn build_pseudobulk(
     satellites: &[SatelliteData],
     args: &GemArgs,
     refine: Option<RefineContext<'_>>,
+    // Build the per-(gene, cell) cell-axis pools? Only needed when the sampler
+    // draws the cell axis (`use_phase1_cell_axis`); the default pure-pb path
+    // leaves it `None` and phase-2 streams from the backend instead, never
+    // materialising the ~per-(gene,cell) pool (the 700k-cell OOM driver).
+    build_cell_pools: bool,
 ) -> anyhow::Result<PseudobulkData> {
     let skip_materialize = refine.is_some();
     let live_cell_old_ids = refine.as_ref().map(|r| r.live_cell_old_ids);
@@ -338,17 +348,20 @@ pub fn build_pseudobulk(
     let n_modalities = table.n_modalities();
     let n_cells = unified.n_cells();
 
-    // Cell axis: identity partition.
-    let cell_identity: Vec<usize> = (0..n_cells).collect();
-    let mut cell_pools = aggregate_pools(
-        unified,
-        genes_row_map,
-        satellites,
-        &cell_identity,
-        n_cells,
-        n_modalities,
-        args.tau,
-    );
+    // Cell axis: identity partition. Built only when the sampler needs it;
+    // otherwise phase-2 streams from the backend (see `cell_solve`).
+    let cell_pools: Option<AxisPools> = build_cell_pools.then(|| {
+        let cell_identity: Vec<usize> = (0..n_cells).collect();
+        aggregate_pools(
+            unified,
+            genes_row_map,
+            satellites,
+            &cell_identity,
+            n_cells,
+            n_modalities,
+            args.tau,
+        )
+    });
 
     // Pb axes: one set of pools per level (coarsest-first). Each level
     // walks the genes + satellite triplets once into independent thread-local
@@ -357,7 +370,7 @@ pub fn build_pseudobulk(
     // The shared reborrow keeps the closure capturing `&UnifiedData` (Sync),
     // not the outer `&mut`.
     let unified_ref: &UnifiedData = unified;
-    let mut pb_pools_per_level: Vec<AxisPools> = cell_to_pb_per_level
+    let pb_pools_per_level: Vec<AxisPools> = cell_to_pb_per_level
         .par_iter()
         .map(|cell_to_pb| {
             let n_pbs = cell_to_pb.iter().copied().max().map(|m| m + 1).unwrap_or(0);
@@ -373,17 +386,19 @@ pub fn build_pseudobulk(
         })
         .collect();
 
-    info!(
-        "cell axis: {} cells, {} agg / {} count-comp / {} modifier-comp draws",
-        cell_pools.n_units,
-        cell_pools.agg.len(),
-        cell_pools.count_comp.len(),
-        cell_pools
-            .modifier_comp_per_modality
-            .iter()
-            .map(|p| p.len())
-            .sum::<usize>()
-    );
+    match &cell_pools {
+        Some(cp) => info!(
+            "cell axis: {} cells, {} agg / {} count-comp / {} modifier-comp draws",
+            cp.n_units,
+            cp.agg.len(),
+            cp.count_comp.len(),
+            cp.modifier_comp_per_modality
+                .iter()
+                .map(|p| p.len())
+                .sum::<usize>()
+        ),
+        None => info!("cell axis: {n_cells} cells (streamed in phase 2, pool not materialised)"),
+    }
     for (i, lvl) in pb_pools_per_level.iter().enumerate() {
         info!(
             "pb level {} (coarse→fine): {} pbs, {} agg / {} count-comp / {} modifier-comp draws",
@@ -399,42 +414,59 @@ pub fn build_pseudobulk(
     }
 
     ////////////////////////////////////////
-    // 4. NB-Fisher housekeeping penalty
+    // 4. Per-gene ubiquity (breadth diagnostic)
     ////////////////////////////////////////
-    // Per-gene Fisher weights from the cell-axis count modality, folded
-    // into the count-based anchor pools (agg + count-comp) so housekeeping
-    // genes stop monopolising the shared program loadings z. See
-    // `gene_weight`. A no-op (all weights 1.0) when penalty == 0.
+    // = distinct cells expressing each CountComp gene / n_cells. When the cell
+    // pool was built, read its AGG stratum (one per-(gene, cell) entry); when
+    // streaming, count distinct (gene, cell) over the column-grouped triplets
+    // directly (bit-identical). Abundance balance is the sampler's `count^τ`
+    // tempering, not a separate down-weight (see `gene_weight`).
     let n_genes = table.n_genes();
-    // Per-gene ubiquity / Fisher from the cell-axis **AGG** pool — it holds
-    // exactly one per-(gene, cell) total entry (spliced+unspliced summed),
-    // the per-(gene, cell) granularity these statistics assume. The
-    // count-comp pool is now split per splice modality (multiple entries
-    // per gene/cell), so reading it here would double-count. (The reweight
-    // below still mutates only `weights`, not `gene_ids`.) See `gene_weight`.
-    let gene_ubiquity =
-        super::gene_weight::ubiquity_from_count_pool(&cell_pools.agg, n_genes, n_cells);
-
-    let gene_fisher_weights = if args.housekeeping_penalty > 0.0 {
-        let w =
-            super::gene_weight::fisher_weights_from_count_pool(&cell_pools.agg, n_genes, n_cells);
-        apply_fisher_to_axis_pools(&mut cell_pools, &w, args.housekeeping_penalty);
-        for lvl in pb_pools_per_level.iter_mut() {
-            apply_fisher_to_axis_pools(lvl, &w, args.housekeeping_penalty);
-        }
-        log_fisher_summary(&w, table, args.housekeeping_penalty);
-        w
-    } else {
-        vec![1.0; n_genes]
+    let gene_ubiquity = match &cell_pools {
+        Some(p) => super::gene_weight::ubiquity_from_count_pool(&p.agg, n_genes, n_cells),
+        None => ubiquity_from_triplets(unified, genes_row_map, n_genes, n_cells),
     };
 
     Ok(PseudobulkData {
         cell_to_pb_per_level,
         cell_pools,
         pb_pools_per_level,
-        gene_fisher_weights,
         gene_ubiquity,
     })
+}
+
+/// Per-gene ubiquity (distinct cells expressing each CountComp gene / n_cells)
+/// straight from `unified.triplets`, used when the cell pool isn't built.
+/// Triplets are column-grouped (one cell's nonzeros contiguous), so a gene's
+/// spliced + unspliced rows for the same cell are deduped with a `last_cell`
+/// watermark — matching `ubiquity_from_count_pool(&agg)` exactly.
+fn ubiquity_from_triplets(
+    unified: &UnifiedData,
+    genes_row_map: &BackendRowMap,
+    n_genes: usize,
+    n_cells: usize,
+) -> Vec<f32> {
+    let mut cells_with = vec![0u32; n_genes];
+    let mut last_cell = vec![u32::MAX; n_genes];
+    for t in &unified.triplets {
+        let row = t.feature as usize;
+        if genes_row_map.stratum[row] != Some(RowStratum::CountComp) {
+            continue;
+        }
+        let Some(g) = genes_row_map.gene[row] else {
+            continue;
+        };
+        let g = g as usize;
+        if g < n_genes && last_cell[g] != t.cell {
+            cells_with[g] += 1;
+            last_cell[g] = t.cell;
+        }
+    }
+    let inv_n = 1.0 / n_cells.max(1) as f32;
+    cells_with
+        .iter()
+        .map(|&c| (c as f32 * inv_n).clamp(0.0, 1.0))
+        .collect()
 }
 
 /// Phase-1-only subsampled view of the cell-axis pools: keep at most `k`
@@ -502,46 +534,6 @@ pub(crate) fn subsample_cell_pools_multilevel(
         modifier_comp_per_modality,
         modality_total_mass,
     }
-}
-
-/// Apply per-gene Fisher weights to an axis's two count-based anchor
-/// pools (agg + count-comp). Modifier (m6A / A2I / pA) pools are left
-/// untouched — that signal is balanced via `--tau-modality` and is what
-/// the model is meant to recover.
-fn apply_fisher_to_axis_pools(pools: &mut AxisPools, fisher: &[f32], penalty: f32) {
-    super::gene_weight::apply_to_pool(&mut pools.agg, fisher, penalty);
-    super::gene_weight::apply_to_pool(&mut pools.count_comp, fisher, penalty);
-}
-
-/// One-line diagnostic: how many genes the penalty meaningfully shrinks,
-/// plus the most-attenuated names (the suspected housekeeping/ribosomal
-/// drivers) so the run log shows what got down-weighted.
-fn log_fisher_summary(weights: &[f32], table: &FeatureTable, penalty: f32) {
-    let n = weights.len();
-    if n == 0 {
-        return;
-    }
-    let n_attenuated = weights.iter().filter(|&&w| w < 0.5).count();
-    let min = weights.iter().cloned().fold(f32::INFINITY, f32::min);
-    let mean = weights.iter().sum::<f32>() / n as f32;
-
-    let mut idx: Vec<usize> = (0..n).collect();
-    idx.sort_by(|&a, &b| {
-        weights[a]
-            .partial_cmp(&weights[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let top: Vec<String> = idx
-        .iter()
-        .take(10)
-        .map(|&g| format!("{}={:.3}", table.gene_names[g], weights[g]))
-        .collect();
-
-    info!(
-        "NB-Fisher housekeeping penalty (exp={penalty}): {n_attenuated}/{n} genes w<0.5 \
-         (min={min:.3}, mean={mean:.3}); most-attenuated: {}",
-        top.join(", ")
-    );
 }
 
 /// Aggregate the genes triplets (`agg` / `count_comp`) and each satellite

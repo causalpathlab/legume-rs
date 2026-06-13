@@ -188,6 +188,40 @@ impl GemModel {
         })
     }
 
+    /// Deterministically re-initialise the random-init Vars from a seeded
+    /// host RNG. candle's CPU `Init::Randn` cannot be seeded via
+    /// `Device::set_seed`, so without this the trained β / pre-L2 cell norms
+    /// — and therefore the refine-pass QC cutoffs — wobble run-to-run.
+    /// Biases (names starting `b`) stay zero; every other Var gets `N(0, σ²)`
+    /// with `σ = PARAM_INIT_STD`. Vars are visited in sorted-name order so the
+    /// draw sequence is independent of map iteration order.
+    pub fn seed_init(&self, seed: u64) -> Result<()> {
+        use rand::{rngs::StdRng, SeedableRng};
+        use rand_distr::{Distribution, StandardNormal};
+        let mut rng = StdRng::seed_from_u64(seed);
+        let data = self.varmap.data().lock().unwrap();
+        let mut names: Vec<&String> = data.keys().collect();
+        names.sort();
+        for name in names {
+            let var = &data[name];
+            let dims = var.shape().dims().to_vec();
+            let n: usize = dims.iter().product();
+            let values: Vec<f32> = if name.starts_with('b') {
+                vec![0.0; n]
+            } else {
+                (0..n)
+                    .map(|_| {
+                        let x: f32 = StandardNormal.sample(&mut rng);
+                        PARAM_INIT_STD as f32 * x
+                    })
+                    .collect()
+            };
+            let t = Tensor::from_vec(values, dims, &self.dev)?;
+            var.set(&t)?;
+        }
+        Ok(())
+    }
+
     fn idx_u32(&self, ids: &[u32]) -> Result<Tensor> {
         Ok(Tensor::from_slice(ids, ids.len(), &self.dev)?)
     }

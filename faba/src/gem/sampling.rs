@@ -30,13 +30,6 @@ pub struct PositiveSlate {
     pub is_agg: Vec<bool>,
     /// Right-hand-axis id (cell id for `Axis::Cell`; pb id for `Axis::Pb`).
     pub axis_id: Vec<u32>,
-    /// Per-positive NCE loss weight ∈ (0, 1]. For count-based anchor rows
-    /// (agg + count-comp) this is the NB-Fisher housekeeping weight
-    /// `w_g^penalty` (see `gene_weight`); modifier rows carry `1.0`. The
-    /// loss takes a weighted mean over positives, so a housekeeping gene's
-    /// edges contribute less to the objective — senna's likelihood-side
-    /// Fisher weighting, on top of the sampler-side down-draw.
-    pub weight: Vec<f32>,
 }
 
 impl PositiveSlate {
@@ -50,7 +43,6 @@ impl PositiveSlate {
             modality_for_bias: Vec::with_capacity(cap),
             is_agg: Vec::with_capacity(cap),
             axis_id: Vec::with_capacity(cap),
-            weight: Vec::with_capacity(cap),
         }
     }
 
@@ -153,10 +145,6 @@ pub struct SamplerState {
     /// set so spliced and unspliced separate directionally.
     pub count_modality_ids: Vec<u32>,
     pub n_regions: usize,
-    /// Per-gene NB-Fisher loss weight `w_g^penalty` (length `n_genes`),
-    /// precomputed once so the per-positive draw loop is a plain lookup
-    /// rather than a `powf` per edge. All `1.0` when the penalty is off.
-    pub anchor_loss_weights: Vec<f32>,
 }
 
 impl SamplerState {
@@ -203,25 +191,28 @@ impl SamplerState {
         // pools. The cell dists below are built from whichever pool the
         // phase-1 cell axis will actually draw from.
         let k = args.phase1_cells_per_pb;
-        let n_cells = pb.cell_pools.n_units;
+        // `None` cell pool ⇒ the cell axis is off (streaming phase-2 path);
+        // n_cells 0 then disables subsampling and the cell dists stay empty.
+        let n_cells = pb.cell_pools.as_ref().map_or(0, |p| p.n_units);
         let phase1_cell_pools: Option<AxisPools> = (k >= 1 && k < n_cells).then(|| {
             super::pseudobulk::subsample_cell_pools_multilevel(
-                &pb.cell_pools,
+                pb.cell_pools.as_ref().expect("cell pool present when subsampling"),
                 &pb.cell_to_pb_per_level,
                 k,
                 args.seed,
             )
         });
-        let cell = build_dists(phase1_cell_pools.as_ref().unwrap_or(&pb.cell_pools));
+        let cell = match pb.cell_pools.as_ref() {
+            Some(cp) => build_dists(phase1_cell_pools.as_ref().unwrap_or(cp)),
+            // Cell axis never drawn (off) → empty dists, never sampled.
+            None => AxisDists {
+                agg: None,
+                count: None,
+                modifier_modality: None,
+                modifier_per_modality: Vec::new(),
+            },
+        };
         let pb_per_level = pb.pb_pools_per_level.iter().map(build_dists).collect();
-
-        // Per-gene loss weight `w_g^penalty`, matching the sampler-side
-        // pool reweight (same `effective_weight`), computed once here.
-        let anchor_loss_weights: Vec<f32> = pb
-            .gene_fisher_weights
-            .iter()
-            .map(|&w| super::gene_weight::effective_weight(w, args.housekeeping_penalty))
-            .collect();
 
         Self {
             cell,
@@ -232,7 +223,6 @@ impl SamplerState {
             is_count_modality: table.is_count_modality.clone(),
             count_modality_ids: table.count_modality_ids.clone(),
             n_regions,
-            anchor_loss_weights,
         }
     }
 
@@ -257,7 +247,11 @@ impl SamplerState {
 /// view exists it's used here; otherwise the full `pb.cell_pools`.
 fn axis_pools<'a>(state: &'a SamplerState, pb: &'a PseudobulkData, axis: Axis) -> &'a AxisPools {
     match axis {
-        Axis::Cell => state.phase1_cell_pools.as_ref().unwrap_or(&pb.cell_pools),
+        Axis::Cell => state
+            .phase1_cell_pools
+            .as_ref()
+            .or(pb.cell_pools.as_ref())
+            .expect("cell axis drawn but no cell pool built"),
         Axis::Pb(level) => &pb.pb_pools_per_level[level],
     }
 }
@@ -310,22 +304,17 @@ fn build_anchor_sub_batch<R: Rng>(
     rng: &mut R,
 ) -> Option<SubBatch> {
     let mut positives = PositiveSlate::with_capacity(b_agg + b_count);
-    // Precomputed per-gene loss weight `w_g^penalty` (1.0 when off, and
-    // for genes out of range in degenerate test fixtures).
-    let loss_w = &state.anchor_loss_weights;
-    let lookup = |g: u32| loss_w.get(g as usize).copied().unwrap_or(1.0);
 
     if let Some(dist) = dists.agg.as_ref() {
         for _ in 0..b_agg {
             let i = dist.sample(rng);
-            push_agg_positive(&mut positives, &pools.agg, i, lookup(pools.agg.gene_ids[i]));
+            push_agg_positive(&mut positives, &pools.agg, i);
         }
     }
 
     if let Some(dist) = dists.count.as_ref() {
         for _ in 0..b_count {
             let i = dist.sample(rng);
-            let w = lookup(pools.count_comp.gene_ids[i]);
             // δ/γ modality rides along from the pool entry — `spliced` /
             // `unspliced`, each its own id ≥ 1 (distinct δ direction). The
             // **bias** uses the shared count slot 0, so spliced/unspliced
@@ -340,7 +329,6 @@ fn build_anchor_sub_batch<R: Rng>(
                 i,
                 modality,
                 COUNT_BIAS_MODALITY,
-                w,
             );
         }
     }
@@ -393,16 +381,12 @@ fn build_modifier_sub_batch<R: Rng>(
             continue;
         };
         let i = pool_dist.sample(rng);
-        // Modifier (m6A / A2I / pA) edges carry the modification signal we
-        // want to recover — left unweighted (1.0). The Fisher housekeeping
-        // weight targets only the count axis.
         push_component_positive(
             &mut positives,
             &pools.modifier_comp_per_modality[m as usize],
             i,
             m,
             /*bias_modality=*/ m,
-            1.0,
         );
     }
 
@@ -423,7 +407,7 @@ fn build_modifier_sub_batch<R: Rng>(
     })
 }
 
-fn push_agg_positive(slate: &mut PositiveSlate, pool: &StratumPool, i: usize, weight: f32) {
+fn push_agg_positive(slate: &mut PositiveSlate, pool: &StratumPool, i: usize) {
     let g = pool.gene_ids[i];
     let a = pool.axis_ids[i];
     slate.gene_for_rho.push(g);
@@ -434,7 +418,6 @@ fn push_agg_positive(slate: &mut PositiveSlate, pool: &StratumPool, i: usize, we
     slate.modality_for_bias.push(0);
     slate.is_agg.push(true);
     slate.axis_id.push(a);
-    slate.weight.push(weight);
 }
 
 fn push_component_positive(
@@ -443,7 +426,6 @@ fn push_component_positive(
     i: usize,
     modality: u32,
     bias_modality: u32,
-    weight: f32,
 ) {
     let g = pool.gene_ids[i];
     let a = pool.axis_ids[i];
@@ -459,7 +441,6 @@ fn push_component_positive(
     slate.modality_for_bias.push(bias_modality);
     slate.is_agg.push(false);
     slate.axis_id.push(a);
-    slate.weight.push(weight);
 }
 
 const REJECT_RETRIES: usize = 8;

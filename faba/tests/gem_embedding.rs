@@ -27,10 +27,6 @@
 
 use candle_core::{Device, Tensor};
 use faba::gem::common::candle_core;
-use rand::distr::Distribution;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
-use rand_distr::StandardNormal;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -130,9 +126,8 @@ fn build_pseudobulk() -> PseudobulkData {
 
     PseudobulkData {
         cell_to_pb_per_level: Vec::new(),
-        cell_pools,
+        cell_pools: Some(cell_pools),
         pb_pools_per_level: Vec::new(),
-        gene_fisher_weights: vec![1.0; N_GENES],
         gene_ubiquity,
     }
 }
@@ -181,49 +176,19 @@ fn test_args() -> GemArgs {
         f_count: 0.0,
         tau: 1.0,
         tau_modality: 0.5,
-        housekeeping_penalty: 0.0,
         resolve_topics: false,
         num_topics: None,
         n_rand: 8,
         n_swap_gene_mode: 4,
         n_swap_modality: 6,
         refine: false,
-        feature_prior_pval_max: 0.05,
-        cell_prior_pval_max: 0.05,
+        gene_groups: 50,
+        empty_group_frac: 0.5,
+        cell_min_norm_frac: 0.5,
         seed: 7,
         device: ComputeDevice::Cpu,
         device_no: 0,
         threads: 0,
-    }
-}
-
-/// Deterministically re-initialise the model's parameters from a seeded
-/// RNG. candle's `Init::Randn` seeds from entropy, which would make this
-/// training test flaky run-to-run; with the sampler also seeded this
-/// pins the whole test. Biases stay at zero; everything else gets small
-/// Gaussian noise. Vars are visited in sorted-name order so the draw
-/// sequence is independent of `HashMap` iteration order.
-fn seed_params(model: &GemModel, seed: u64) {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let data = model.varmap.data().lock().unwrap();
-    let mut names: Vec<&String> = data.keys().collect();
-    names.sort();
-    for name in names {
-        let var = &data[name];
-        let dims = var.shape().dims().to_vec();
-        let n: usize = dims.iter().product();
-        let values: Vec<f32> = if name.starts_with('b') {
-            vec![0.0; n] // biases
-        } else {
-            (0..n)
-                .map(|_| {
-                    let x: f32 = StandardNormal.sample(&mut rng);
-                    0.05_f32 * x
-                })
-                .collect()
-        };
-        let t = Tensor::from_vec(values, dims, &Device::Cpu).unwrap();
-        var.set(&t).unwrap();
     }
 }
 
@@ -282,10 +247,10 @@ fn recovers_region_resolved_deviation() {
     args.epochs = 150;
     let mut model =
         GemModel::new(N_GENES, table.n_modalities(), K, R, H, N_CELLS, &[], &dev).unwrap();
-    seed_params(&model, 1);
+    model.seed_init(1).unwrap();
 
     let stop = Arc::new(AtomicBool::new(false));
-    train(&args, &table, &pb, &mut model, &stop).unwrap();
+    train(&args, &table, &pb, &mut model, &stop, None).unwrap();
 
     // Mean trained cell embedding per group.
     let e_cell = model.e_cell.to_vec2::<f32>().unwrap();
@@ -431,9 +396,8 @@ fn build_splice_pseudobulk() -> PseudobulkData {
 
     PseudobulkData {
         cell_to_pb_per_level: Vec::new(),
-        cell_pools,
+        cell_pools: Some(cell_pools),
         pb_pools_per_level: Vec::new(),
-        gene_fisher_weights: vec![1.0; N_GENES],
         gene_ubiquity,
     }
 }
@@ -476,10 +440,10 @@ fn recovers_splice_direction() {
         &dev,
     )
     .unwrap();
-    seed_params(&model, 20260608);
+    model.seed_init(20260608).unwrap();
 
     let stop = Arc::new(AtomicBool::new(false));
-    train(&args, &table, &pb, &mut model, &stop).unwrap();
+    train(&args, &table, &pb, &mut model, &stop, None).unwrap();
 
     let e_cell = model.e_cell.to_vec2::<f32>().unwrap();
     let mean_a = group_mean(&e_cell, group_a());
