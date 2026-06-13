@@ -3,6 +3,22 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 use std::hash::Hash;
 
+/// Median of a slice (sorts a copy). Returns `0.0` for an empty slice and
+/// is NaN-tolerant (NaNs compare as equal rather than panicking).
+pub fn median(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len();
+    if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        0.5 * (sorted[n / 2 - 1] + sorted[n / 2])
+    }
+}
+
 /// partition membership vector into groups of indexes
 /// # Arguments
 /// * `membership` - a vector of membership (E.g., cluster assignment)
