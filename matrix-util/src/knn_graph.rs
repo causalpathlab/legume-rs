@@ -29,17 +29,6 @@ pub struct KnnGraphArgs {
     pub reciprocal: bool,
 }
 
-fn median_f32(values: &[f32]) -> f32 {
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = sorted.len();
-    if n.is_multiple_of(2) {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-    } else {
-        sorted[n / 2]
-    }
-}
-
 impl KnnGraph {
     /// Build a KNN graph from column vectors.
     ///
@@ -195,7 +184,7 @@ impl KnnGraph {
         if self.distances.is_empty() {
             return Vec::new();
         }
-        let sigma = median_f32(&self.distances);
+        let sigma = crate::utils::median(&self.distances);
         let sigma = if sigma <= 0.0 { 1.0 } else { sigma };
         info!("exp_kernel_weights: σ (median distance) = {:.4}", sigma);
         self.distances.iter().map(|&d| (-d / sigma).exp()).collect()
@@ -756,10 +745,10 @@ mod tests {
     }
 
     #[test]
-    fn test_median_f32() {
-        assert_eq!(median_f32(&[1.0, 3.0, 2.0]), 2.0);
-        assert_eq!(median_f32(&[1.0, 2.0, 3.0, 4.0]), 2.5);
-        assert_eq!(median_f32(&[5.0]), 5.0);
+    fn test_median() {
+        assert_eq!(crate::utils::median(&[1.0, 3.0, 2.0]), 2.0);
+        assert_eq!(crate::utils::median(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+        assert_eq!(crate::utils::median(&[5.0]), 5.0);
     }
 
     #[test]
