@@ -7,7 +7,6 @@ use graph_embedding_util::data::UnifiedData;
 use graph_embedding_util::stop::setup_stop_handler;
 use graph_embedding_util::{load_unified_data, FeatureNameKind, LoadUnifiedArgs};
 use log::{info, warn};
-use matrix_util::clustering::{Kmeans, KmeansArgs};
 use matrix_util::common_io::{basename, mkdir_parent};
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::RunningStatOps;
@@ -20,6 +19,7 @@ use faba::gem::cell_solve::{CellStreamCtx, SatStream};
 use faba::gem::feature_table::{BackendRowMap, FeatureTable};
 use faba::gem::manifest::{write_outputs, CellQcOutputs};
 use faba::gem::model::{GemModel, PARAM_INIT_STD};
+use graph_embedding_util::null_call::embedding_null_call;
 use faba::gem::pseudobulk::{build_pseudobulk, spliced_backend_rows, RefineContext, SatelliteData};
 use faba::gem::region::{load_component_annotations, ComponentAnnotation, RegionMap};
 use faba::gem::train::train;
@@ -781,62 +781,20 @@ fn run_refine_pass(
     ///////////////////////////////////////////////////////////////////////////////
 
     ///////////////////////////////////////////////////////////////////////////
-    // step 1. gene Q/C: kmeans on gene embedding and flag low density balls //
+    // step 1. gene Q/C: empirical-Bayes χ²_H null call on ‖β_g‖²             //
     ///////////////////////////////////////////////////////////////////////////
-
-    let n_groups = args.gene_groups.clamp(1, n_genes.max(1));
-    let beta_mat = DMatrix::<f32>::from_row_slice(n_genes, h, &beta_rows);
-    let gene_group: Vec<usize> = beta_mat.kmeans_rows(KmeansArgs::with_clusters(n_groups));
-
-    // Init floor: an untrained gene keeps ‖β‖ ≈ σ√H. Score each cluster by its
-    // mean ‖β‖ in excess of this floor — the learned signal.
-    let init_norm = (PARAM_INIT_STD * (h as f64).sqrt()) as f32;
-    let beta_excess: Vec<f32> = (0..n_genes)
-        .map(|g| {
-            let nrm = beta_rows[g * h..(g + 1) * h]
-                .iter()
-                .map(|&x| x * x)
-                .sum::<f32>()
-                .sqrt();
-            (nrm - init_norm).max(0.0)
-        })
-        .collect();
-    let mut group_bsum = vec![0.0_f32; n_groups];
-    let mut group_size = vec![0_usize; n_groups];
-    for g in 0..n_genes {
-        let j = gene_group[g];
-        group_bsum[j] += beta_excess[g];
-        group_size[j] += 1;
-    }
-    let group_excess: Vec<f32> = (0..n_groups)
-        .map(|j| {
-            if group_size[j] > 0 {
-                group_bsum[j] / group_size[j] as f32
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    let live_excess: Vec<f32> = (0..n_groups)
-        .filter(|&j| group_size[j] > 0)
-        .map(|j| group_excess[j])
-        .collect();
-    let empty_thresh = args.empty_group_frac * median(&live_excess);
-    let empty_group: Vec<bool> = (0..n_groups)
-        .map(|j| group_size[j] > 0 && group_excess[j] < empty_thresh)
-        .collect();
-    {
-        let mut sorted = live_excess;
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let q = |f: f32| sorted[((sorted.len() - 1) as f32 * f) as usize];
-        info!(
-            "refine: init floor ‖β‖={:.3}; live-group mean excess‖β‖ min={:.3} p25={:.3} med={:.3} p75={:.3} max={:.3} → empty if < {:.3}",
-            init_norm, sorted[0], q(0.25), q(0.5), q(0.75), sorted[sorted.len() - 1], empty_thresh
-        );
-    }
-    let live_gene_mask: Vec<bool> = (0..n_genes).map(|g| !empty_group[gene_group[g]]).collect();
-    let n_dead_genes = live_gene_mask.iter().filter(|&&v| !v).count();
-    let n_empty_groups = empty_group.iter().filter(|&&v| v).count();
+    // Null gene: never moved from init β_g ~ N(0,σ²I) ⇒ ‖β‖²/σ² ~ χ²_H. We
+    // estimate σ̂² and π̂₀ from the data (ashr-style) and keep genes significant
+    // above that null at FDR `--gene-null-fdr` (see `null_call`). Per-gene and
+    // deterministic — no kmeans, no arbitrary cluster fraction.
+    let null = embedding_null_call(&beta_rows, n_genes, h, args.gene_null_fdr);
+    let live_gene_mask = null.live;
+    let n_dead_genes = n_genes - null.n_live;
+    let init_sigma2 = (PARAM_INIT_STD * PARAM_INIT_STD) as f32;
+    info!(
+        "refine: gene null call — σ̂²={:.4} (init σ²={:.4}), π̂₀={:.2}; {} / {} genes null at FDR {} → dead",
+        null.sigma2, init_sigma2, null.pi0, n_dead_genes, n_genes, args.gene_null_fdr
+    );
 
     // ---- 2. Cell QC: spliced cutoff + robust pre-L2-norm threshold ----
     let have_nrms = cell_nrms.len() == n_cells_old;
@@ -870,10 +828,6 @@ fn run_refine_pass(
     )
     .context("write cell_qc.parquet")?;
 
-    info!(
-        "refine: {} gene groups, {} empty (excess‖β‖ < {} × median group); {} / {} genes dead",
-        n_groups, n_empty_groups, args.empty_group_frac, n_dead_genes, n_genes
-    );
     if have_nrms {
         // One pass: split nnz into dropped vs kept for the diagnostic medians.
         let (mut dropped_nnz, mut kept_nnz) = (Vec::new(), Vec::new());
@@ -1141,14 +1095,9 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
     );
     if args.refine {
         anyhow::ensure!(
-            args.gene_groups >= 2,
-            "--gene-groups must be ≥ 2 (got {})",
-            args.gene_groups
-        );
-        anyhow::ensure!(
-            args.empty_group_frac > 0.0 && args.empty_group_frac < 1.0,
-            "--empty-group-frac must be in (0, 1) (got {})",
-            args.empty_group_frac
+            args.gene_null_fdr > 0.0 && args.gene_null_fdr < 1.0,
+            "--gene-null-fdr must be in (0, 1) (got {})",
+            args.gene_null_fdr
         );
         anyhow::ensure!(
             (0.0..1.0).contains(&args.cell_min_norm_frac),
