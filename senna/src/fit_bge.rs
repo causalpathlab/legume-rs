@@ -99,6 +99,20 @@ pub struct BgeArgs {
 
     #[arg(
         long,
+        default_value_t = 0.0,
+        help = "Empirical-Bayes null-feature report at this FDR on the trained E_feat (0 = off)",
+        long_help = "When > 0, after training run the shared empirical-Bayes null call on\n\
+                     the feature embedding E_feat: a feature the model never moved keeps\n\
+                     ‖E_feat_f‖² ~ σ²·χ²_H, so the null scale σ̂² + proportion π̂₀ are\n\
+                     estimated from the data and each feature gets a q-value. Features with\n\
+                     q > this FDR are flagged null (untrained / background). Written to\n\
+                     {out}.feature_qc.parquet (norm² + live flag); a diagnostic, not yet a\n\
+                     filter. Must be in [0, 1)."
+    )]
+    feature_null_fdr: f32,
+
+    #[arg(
+        long,
         default_value_t = 0,
         help = "Cap on genes trained (0 = keep all); main large-data speed knob.",
         long_help = "Cap on the number of genes trained (0 = keep all). When > 0\n\
@@ -213,6 +227,25 @@ pub struct BgeArgs {
                      Default 0.0 (off — plain Adam despite the optimizer name)."
     )]
     weight_decay: f64,
+
+    #[arg(
+        long = "max-grad-norm",
+        default_value_t = 0.0,
+        help = "Global-norm gradient clip per AdamW step (0 = off). When > 0, \
+                gradients are scaled down if their global L2 norm exceeds this, \
+                bounding embedding inflation on NCE loss spikes."
+    )]
+    max_grad_norm: f32,
+
+    #[arg(
+        long = "cell-null-fdr",
+        default_value_t = 0.0,
+        help = "When > 0, run the EB empty-droplet cell call on the pre-L2 \
+                projection norm and write {out}.cell_qc.parquet (norm + kept \
+                flag). Real cells form the dominant mode; empties are the \
+                lower tail (norm ≈ 0). FDR for the lower-tail BH call."
+    )]
+    cell_null_fdr: f32,
 
     #[arg(
         long,
@@ -564,7 +597,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // analysis and all per-cell outputs via a write-time `select_rows`.
     // Computed on the full-feature unified count backend, so n_genes is the
     // per-cell detected-feature count across all modalities.
-    let qc_keep_idx: Option<Vec<usize>> = if let Some(cfg) = args.qc.to_config() {
+    let mut qc_keep_idx: Option<Vec<usize>> = if let Some(cfg) = args.qc.to_config() {
         if cfg.feature_min_cells > 0 {
             log::warn!(
                 "--qc-feature-min-cells is ignored by bge (cell-only QC; the \
@@ -591,8 +624,14 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // random projection / pb sketching only; collapse + supergene
     // coarsening + training read all genes. Caller passes the weights
     // through `FitConfig.hvg_weights`.
+    // Full-axis HVG weights (backend-row indexed, identity-aligned to the
+    // current feature axis). Subset through `feature_to_backend_row` inside
+    // `build_config` so the same vector serves pass 1 (full) and the post-QC
+    // pass 2 (null features dropped). The feature network is rebuilt per pass
+    // (its graph is aligned to the live feature-name axis), so it lives in the
+    // closure rather than here.
     let hvg_enabled = effective_hvg_n > 0 || effective_hvg_list.is_some();
-    let hvg_weights: Option<Vec<f32>> = if hvg_enabled {
+    let hvg_full: Option<Vec<f32>> = if hvg_enabled {
         let hvg = select_hvg_streaming(
             unified.count_backend(),
             (effective_hvg_n > 0).then_some(effective_hvg_n),
@@ -603,23 +642,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     } else {
         None
     };
-
-    let feature_network = args
-        .feature_network
-        .as_deref()
-        .map(|path| {
-            ge::load_feature_network(ge::FeatureNetworkArgs {
-                path,
-                feature_names: &unified.feature_names,
-                prefix_match: args.feature_network_prefix_match,
-                delim: args.feature_network_delim,
-                k_hops: args.feature_network_k,
-                alpha: args.feature_network_alpha,
-                refresh_epochs: args.feature_network_refresh,
-                feature_kind: feature_kind.clone(),
-            })
-        })
-        .transpose()?;
 
     let cell_cell = args
         .cell_cell_edges
@@ -673,43 +695,167 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             None
         };
 
-    let config = ge::FitConfig {
-        embedding_dim: args.embedding_dim,
-        num_levels: args.collapse.num_levels,
-        sort_dim: args.collapse.sort_dim,
-        knn_pb_samples: args.collapse.knn_cells,
-        num_opt_iter: args.collapse.iter_opt,
-        proj_dim: args.collapse.proj_dim,
-        max_features: args.max_features,
-        hvg_weights,
-        refine,
-        epochs: args.epochs,
-        batches_per_epoch: args.batches_per_epoch,
-        batch_size: args.batch_size,
-        num_negatives: args.num_negatives,
-        learning_rate: args.learning_rate,
-        // gbe no longer exposes a --seed knob; pin the sampling RNG.
-        seed: 1,
-        device: args.device.to_device(args.device_no)?,
-        block_size: args.block_size,
-        fisher_weights_cache: if args.no_fisher_cache {
-            None
-        } else {
-            Some(format!("{}.fisher_weights.parquet", args.out).into_boxed_str())
-        },
-        feature_network,
-        cell_cell,
-        stop: None,
-        feature_embedding_l2: args.feature_embedding_l2,
-        num_programs: args.num_programs,
-        z_l2: args.z_l2,
-        delta_l2: args.delta_l2,
-        weight_decay: args.weight_decay,
-        cell_weight_mult,
-        phase1_cells_per_pb: args.phase1_cells_per_pb,
+    // Install the Ctrl-C stop handler once and share the flag across both
+    // passes — each `ge::fit` would otherwise try to register its own SIGINT
+    // handler and the second registration panics (`MultipleHandlers`).
+    let stop = ge::setup_stop_handler();
+
+    // Assemble a `FitConfig` for the CURRENT feature axis of `unified`. The
+    // feature-indexed pieces are derived from that axis so the same builder
+    // serves pass 1 (full axis) and the post-QC pass 2 (null features
+    // dropped): HVG weights subset through `feature_to_backend_row`, the
+    // feature network reloads against the live feature names, and the Fisher
+    // cache self-invalidates on the name mismatch. Everything else is
+    // feature-independent and cloned in.
+    let build_config = |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
+        let hvg_weights = hvg_full.as_ref().map(|w| {
+            unified
+                .feature_to_backend_row
+                .iter()
+                .map(|&i| w[i])
+                .collect::<Vec<f32>>()
+        });
+        let feature_network = args
+            .feature_network
+            .as_deref()
+            .map(|path| {
+                ge::load_feature_network(ge::FeatureNetworkArgs {
+                    path,
+                    feature_names: &unified.feature_names,
+                    prefix_match: args.feature_network_prefix_match,
+                    delim: args.feature_network_delim,
+                    k_hops: args.feature_network_k,
+                    alpha: args.feature_network_alpha,
+                    refresh_epochs: args.feature_network_refresh,
+                    feature_kind: feature_kind.clone(),
+                })
+            })
+            .transpose()?;
+        Ok(ge::FitConfig {
+            embedding_dim: args.embedding_dim,
+            num_levels: args.collapse.num_levels,
+            sort_dim: args.collapse.sort_dim,
+            knn_pb_samples: args.collapse.knn_cells,
+            num_opt_iter: args.collapse.iter_opt,
+            proj_dim: args.collapse.proj_dim,
+            max_features: args.max_features,
+            hvg_weights,
+            refine: refine.clone(),
+            epochs: args.epochs,
+            batches_per_epoch: args.batches_per_epoch,
+            batch_size: args.batch_size,
+            num_negatives: args.num_negatives,
+            learning_rate: args.learning_rate,
+            // gbe no longer exposes a --seed knob; pin the sampling RNG.
+            seed: 1,
+            device: args.device.to_device(args.device_no)?,
+            block_size: args.block_size,
+            fisher_weights_cache: if args.no_fisher_cache {
+                None
+            } else {
+                Some(format!("{}.fisher_weights.parquet", args.out).into_boxed_str())
+            },
+            feature_network,
+            cell_cell: cell_cell.clone(),
+            stop: Some(stop.clone()),
+            feature_embedding_l2: args.feature_embedding_l2,
+            num_programs: args.num_programs,
+            z_l2: args.z_l2,
+            delta_l2: args.delta_l2,
+            weight_decay: args.weight_decay,
+            max_grad_norm: args.max_grad_norm,
+            cell_weight_mult: cell_weight_mult.clone(),
+            phase1_cells_per_pb: args.phase1_cells_per_pb,
+        })
     };
 
-    let out = ge::fit(&mut unified, config)?;
+    // Pass 1: fit on the full feature axis.
+    let cfg = build_config(&unified)?;
+    let mut out = ge::fit(&mut unified, cfg)?;
+
+    // Empirical-Bayes null-feature QC on the trained E_feat (shared with faba
+    // gem's gene QC): flags features the model never moved from init. With
+    // `--feature-null-fdr > 0` this is a two-pass refine — drop the null
+    // features and re-fit on the live axis (a fresh inference, not a reuse of
+    // the pass-1 embeddings).
+    if args.feature_null_fdr > 0.0 {
+        let (n, h) = out.model.e_feat.dims2()?;
+        let e_feat: Vec<f32> = out
+            .model
+            .e_feat
+            .to_vec2::<f32>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        let null = write_feature_qc(
+            &e_feat,
+            n,
+            h,
+            &unified.feature_names,
+            args.feature_null_fdr,
+            &args.out,
+        )?;
+        let live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
+        if live.is_empty() {
+            log::warn!(
+                "Feature null QC flagged all {} features as null — keeping the \
+                 pass-1 fit (no second pass).",
+                n
+            );
+        } else if live.len() < n {
+            info!(
+                "Two-pass refine: dropping {} null features, re-fitting on {} live features.",
+                n - live.len(),
+                live.len()
+            );
+            unified.subset_features(&live);
+            let cfg = build_config(&unified)?;
+            out = ge::fit(&mut unified, cfg)?;
+        }
+    }
+
+    // Empirical-Bayes "empty droplet" cell QC on the pre-L2 projection norm
+    // (independent of the feature null — different scale, lower-tail call): real
+    // cells form the dominant mode, empties collapse to ≈0 and fall in the lower
+    // tail. Emits BOTH cell embeddings from one run: the "before" over ALL cells
+    // (`{out}.cell_embedding_before.parquet`, pair with `{out}.cell_qc.parquet`
+    // to color the empties) and the "after" = the standard `{out}.latent` output
+    // restricted to the kept cells via `qc_keep_idx`. We do NOT re-fit on a cell
+    // subset: `subset_cells` leaves the backend at its full column count, which
+    // `ge::fit` streams assuming cell-id == column (gem's refine threads a
+    // model-cell→backend-column map; bge's `fit` has none). The empties barely
+    // engage the NCE dictionary, so removing them + re-UMAP'ing the survivors is
+    // the meaningful "after".
+    if args.cell_null_fdr > 0.0 && !out.cell_nrms.is_empty() {
+        let n = out.cell_nrms.len();
+        let call = ge::null_call::embedding_lower_tail_call(&out.cell_nrms, args.cell_null_fdr);
+        info!(
+            "bge cell empty call (log-norm null μ̂={:.2}, σ̂={:.2}): {} / {} cells empty at FDR {} → {}.cell_qc.parquet",
+            call.mu, call.sigma, call.n_drop, n, args.cell_null_fdr, args.out
+        );
+        write_cell_qc(&out.cell_nrms, &call.drop, &unified.barcodes, &args.out)?;
+        // "Before": pass-1 cell embedding over ALL cells (same h0..h{H-1} layout
+        // as the standard latent), to be colored by the cell_qc kept flag.
+        ge::eval::save_embedding(
+            &format!("{}.cell_embedding_before.parquet", args.out),
+            &out.model.e_cell,
+            &unified.barcodes,
+            "cell",
+        )?;
+        // "After": restrict the standard latent output to the real cells.
+        let keep: Vec<usize> = (0..n).filter(|&c| !call.drop[c]).collect();
+        if keep.len() < n {
+            qc_keep_idx = Some(keep);
+        }
+    }
+
+    // Joint cell–gene biplot side output: the depth-free, gene-co-scaled cell
+    // embedding (same direction as the latent, magnitude gauged onto the
+    // dictionary scale). For overlaying cells on ρ; clustering uses the standard
+    // latent. All cells (join with cell_qc to filter empties).
+    if !out.cell_embedding_scaled.is_empty() {
+        write_cell_embedding_scaled(&out.cell_embedding_scaled, &unified.barcodes, &args.out)?;
+    }
 
     // Output layout depends on --resolve-etm:
     //   off → bge embeddings (latent = cell embedding Z, dictionary = ρ).
@@ -798,6 +944,99 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         args.out
     );
 
+    Ok(())
+}
+
+/// Empirical-Bayes null-feature QC on the trained feature embedding `E_feat`
+/// (flat `[n × h]`): logs the fitted null (σ̂², π̂₀, #null) and writes
+/// `{out}.feature_qc.parquet` with each feature's `norm²` and `live` flag. A
+/// diagnostic — it does not (yet) drop features. Shares the call with faba gem.
+fn write_feature_qc(
+    e_feat: &[f32],
+    n: usize,
+    h: usize,
+    feature_names: &[Box<str>],
+    fdr: f32,
+    out_prefix: &str,
+) -> anyhow::Result<ge::null_call::NullCall> {
+    use matrix_util::dmatrix_io::DMatrix;
+    use matrix_util::traits::IoOps;
+
+    let null = ge::null_call::embedding_null_call(e_feat, n, h, fdr);
+    info!(
+        "bge feature null call — σ̂²={:.4}, ν̂={:.1}/{}, π̂₀={:.2}; {} / {} features null at FDR {} → {}.feature_qc.parquet",
+        null.sigma2, null.eff_dof, h, null.pi0, n - null.n_live, n, fdr, out_prefix
+    );
+
+    let mut m = DMatrix::<f32>::zeros(n, 2);
+    for f in 0..n {
+        let s: f32 = e_feat[f * h..(f + 1) * h].iter().map(|&x| x * x).sum();
+        m[(f, 0)] = s;
+        m[(f, 1)] = null.live[f] as u8 as f32;
+    }
+    let cols: Vec<Box<str>> = ["norm2", "live"].iter().map(|s| Box::from(*s)).collect();
+    let path = format!("{out_prefix}.feature_qc.parquet");
+    m.to_parquet_with_names(&path, (Some(feature_names), Some("feature")), Some(&cols))?;
+    Ok(null)
+}
+
+/// Write the per-cell empty-droplet QC report `{out}.cell_qc.parquet`:
+/// pre-L2 projection norm + a `kept` flag (1 = real cell, 0 = empty), one row
+/// per cell, barcode-indexed.
+fn write_cell_qc(
+    cell_nrms: &[f32],
+    drop: &[bool],
+    barcodes: &[Box<str>],
+    out_prefix: &str,
+) -> anyhow::Result<()> {
+    use matrix_util::dmatrix_io::DMatrix;
+    use matrix_util::traits::IoOps;
+    let n = cell_nrms.len();
+    let mut m = DMatrix::<f32>::zeros(n, 2);
+    for c in 0..n {
+        m[(c, 0)] = cell_nrms[c];
+        m[(c, 1)] = if drop.get(c).copied().unwrap_or(false) {
+            0.0
+        } else {
+            1.0
+        };
+    }
+    let cols: Vec<Box<str>> = ["pre_l2_norm", "kept"]
+        .iter()
+        .map(|s| Box::from(*s))
+        .collect();
+    let path = format!("{out_prefix}.cell_qc.parquet");
+    m.to_parquet_with_names(&path, (Some(barcodes), Some("cell")), Some(&cols))?;
+    Ok(())
+}
+
+/// Write the joint-biplot cell embedding `{out}.cell_embedding_scaled.parquet`
+/// (`[n_cells × H]`, depth-free + gene-co-scaled). For overlaying cells on the
+/// gene dictionary `ρ`; not used by clustering. See `project_cells_phase2`.
+fn write_cell_embedding_scaled(
+    scaled: &[f32],
+    barcodes: &[Box<str>],
+    out_prefix: &str,
+) -> anyhow::Result<()> {
+    use matrix_util::dmatrix_io::DMatrix;
+    use matrix_util::traits::IoOps;
+    let n = barcodes.len();
+    if n == 0 || !scaled.len().is_multiple_of(n) {
+        return Ok(());
+    }
+    let h = scaled.len() / n;
+    let mut m = DMatrix::<f32>::zeros(n, h);
+    for r in 0..n {
+        for c in 0..h {
+            m[(r, c)] = scaled[r * h + c];
+        }
+    }
+    let cols: Vec<Box<str>> = (0..h).map(|i| format!("h{i}").into_boxed_str()).collect();
+    m.to_parquet_with_names(
+        &format!("{out_prefix}.cell_embedding_scaled.parquet"),
+        (Some(barcodes), Some("cell")),
+        Some(&cols),
+    )?;
     Ok(())
 }
 

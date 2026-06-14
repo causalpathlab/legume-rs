@@ -105,7 +105,11 @@ fn h_cols(h: usize) -> Vec<Box<str>> {
     (0..h).map(|i| format!("h{i}").into_boxed_str()).collect()
 }
 
-fn save_embedding(
+/// Write an embedding table `[N, H]` to parquet with `h0..h{H-1}` columns and
+/// `row_names` on the `row_axis`. Public so callers can emit auxiliary
+/// embeddings (e.g. bge's pre-cell-QC "before" cell embedding) in the same
+/// layout as the standard latent output.
+pub fn save_embedding(
     path: &str,
     table: &Tensor,
     row_names: &[Box<str>],

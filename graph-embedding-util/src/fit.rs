@@ -151,6 +151,9 @@ pub struct FitConfig {
     /// (the shared `E_feat`, `b_feat`, and every per-axis head). Post-
     /// step shrinkage; doesn't enter the backward graph. `0.0` disables.
     pub weight_decay: f64,
+    /// Global-norm gradient clip per AdamW step (`0.0` = off). Bounds the
+    /// update magnitude so embeddings don't inflate on NCE loss spikes.
+    pub max_grad_norm: f32,
     /// Optional per-cell multiplier on the cell-axis sampling weight
     /// (length = `n_cells`, indexed by global cell id). Folded into the
     /// `degree^α` cell picker so up-weighted cells are sampled more often.
@@ -176,6 +179,7 @@ pub struct FitConfig {
 /// level; per-chain-position sibling negatives drive the loss across
 /// pb-tree resolutions. Set `lambda = 0` to disable the cell-cell
 /// term entirely.
+#[derive(Clone)]
 pub struct CellCellConfig {
     /// Positive cell pairs as global cell ids (canonical (i, j) with i < j).
     pub edges: Vec<(u32, u32)>,
@@ -366,6 +370,17 @@ pub fn load_feature_network(args: FeatureNetworkArgs) -> anyhow::Result<FeatureN
 pub struct FitOutput {
     pub model: JointEmbedModel,
     pub varmap: VarMap,
+    /// Un-normalized baseline MAP per-cell projection norm from phase 2 (`0`
+    /// for cells with no observed features / when phase 2 was skipped). The
+    /// empty-droplet cell QC reads this: empties solve to ≈0, real cells far
+    /// above. The stored latent (`model.e_cell`) is the L2 *direction*; this
+    /// norm is the un-normalized magnitude it was divided by.
+    pub cell_nrms: Vec<f32>,
+    /// Depth-free, gene-co-scaled cell embedding `[n_cells × H]` row-major —
+    /// the same direction as the latent but with a depth-normalized magnitude
+    /// gauged onto the gene-dictionary scale. For a joint cell–gene biplot, not
+    /// clustering (empty when phase 2 was skipped). See `project_cells_phase2`.
+    pub cell_embedding_scaled: Vec<f32>,
 }
 
 /// Composite-objective gbe fit — trained in **two phases**.
@@ -415,11 +430,22 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             "HVG-weighted projection: {} weighted features (>= 1.0)",
             w.iter().filter(|&&x| x > 0.0).count()
         );
+        // The projection runs on the full backend row axis, which may be
+        // wider than the compact feature axis when a prior pass dropped
+        // features (e.g. the two-pass null-QC refine in `senna bge`). Scatter
+        // the compact weights to backend rows via `feature_to_backend_row`;
+        // rows not in the current feature axis get 0 so they sit out the
+        // projection basis. Identity (and a no-op) when no subset has happened.
+        let backend_rows = unified.count_backend().num_rows();
+        let mut backend_w = vec![0.0f32; backend_rows];
+        for (compact_i, &brow) in unified.feature_to_backend_row.iter().enumerate() {
+            backend_w[brow] = w[compact_i];
+        }
         unified.count_backend_mut().project_columns_weighted(
             config.proj_dim,
             config.block_size,
             batch_arg,
-            w,
+            &backend_w,
         )?
     } else {
         unified
@@ -741,7 +767,10 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         });
     }
 
-    // ---- Phase 1 (joint): cell axis + pseudobulks shape E_feat together ----
+    /////////////////////////////
+    // Phase 1: joint training //
+    /////////////////////////////
+
     // The cell axis is trained HERE (e_cell trainable; base `b_cell` dropped,
     // pb `pb_l*_b_cell` stay trainable) so the per-cell stratified sampler —
     // which guarantees coverage of rare/shallow cells — shapes `E_feat`.
@@ -789,12 +818,14 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // independent — so rather than SGD over `e_cell`, project every cell
     // directly (Poisson MAP, ridge prior) in parallel. bge scores without a
     // per-cell bias, so the intercept is dropped. See `crate::cell_projection`.
+    let mut cell_nrms: Vec<f32> = Vec::new();
+    let mut cell_embedding_scaled: Vec<f32> = Vec::new();
     if !stop.load(std::sync::atomic::Ordering::Relaxed) {
         info!(
             "Phase 2 — analytical per-cell projection ({} cells, feature side fixed, ridge λ={})",
             n_cells, PHASE2_RIDGE
         );
-        project_cells_phase2(
+        let (nrms, scaled) = project_cells_phase2(
             &mut cell_model,
             &varmap,
             &cell_samplers,
@@ -803,11 +834,15 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             PHASE2_RIDGE as f64,
             &config.device,
         )?;
+        cell_nrms = nrms;
+        cell_embedding_scaled = scaled;
     }
 
     Ok(FitOutput {
         model: cell_model,
         varmap,
+        cell_nrms,
+        cell_embedding_scaled,
     })
 }
 
@@ -821,8 +856,26 @@ const PHASE2_RIDGE: f32 = 1.0;
 /// condition-dependent (`E_feat ⊙ exp(z·δ̄_s)`), so cells are grouped by
 /// condition and each condition's gated table is built once. The per-cell
 /// bias is fitted (to absorb library size) but discarded — bge scores
-/// without it. Cells with no observed features keep their current embedding.
-#[allow(clippy::too_many_arguments)]
+/// without it.
+///
+/// The stored latent (`model.e_cell`) is the **L2 direction** of the baseline
+/// Poisson-MAP embedding — depth-robust and best for clustering/UMAP. (Storing
+/// the magnitude instead blurs cell types: the magnitude axis ≈ profile
+/// specialization, roughly orthogonal to cell-type identity, so Euclidean
+/// clustering mixes it in — a measured ~7–11pt purity loss.)
+///
+/// Separately returns a **biplot side embedding** (not the latent): the same
+/// direction but with a *depth-free* magnitude — counts normalized to a common
+/// total before the solve, so sequencing depth drops out (the raw-count MAP
+/// magnitude tracks depth ≈0.8; normalized ≈0) — then co-scaled onto the gene
+/// dictionary by one global gauge `median‖e_feat‖/median‖e_cell‖`. This puts
+/// cells and genes on one scale for a joint cell–gene plot; it is not used for
+/// clustering.
+///
+/// Returns `(cell_nrms, scaled)`. `cell_nrms` is the **un-normalized** baseline
+/// MAP norm — the empty-droplet QC keys on it (empties solve to ≈0 only on raw
+/// counts; normalizing to the common total would upscale and hide them).
+/// `scaled` is the `[n_cells × H]` row-major biplot side embedding.
 fn project_cells_phase2(
     model: &mut JointEmbedModel,
     varmap: &VarMap,
@@ -831,7 +884,7 @@ fn project_cells_phase2(
     n_cells: usize,
     lambda: f64,
     dev: &Device,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
     use crate::cell_projection::solve_one_cell;
     use anyhow::Context;
     use candle_util::candle_core::{IndexOp, Tensor};
@@ -840,16 +893,12 @@ fn project_cells_phase2(
     let h = model.embedding_dim;
     let n_conditions = model.n_conditions.max(1);
 
-    // Condition-independent pieces, once.
     let b_feat: Vec<f32> = model.b_feat.to_vec1()?;
-    // δ̄ = δ mean-centered across conditions (dim 1): [K, S, H].
     let delta_centered = model.delta.broadcast_sub(&model.delta.mean_keepdim(1)?)?;
-
-    // Seed from the current e_cell so cells with no observed features keep
-    // their existing (phase-1 / init) embedding.
     let mut e_out: Vec<f32> = model.e_cell.flatten_all()?.to_vec1()?;
+    let mut cell_nrms = vec![0f32; n_cells];
+    let mut scaled = vec![0f32; n_cells * h]; // biplot side embedding (returned)
 
-    // Flat references to every active cell's (features, counts).
     let mut cells: Vec<(u32, &[u32], &[f32])> = Vec::new();
     for s in cell_samplers {
         for (i, &cell) in s.active_cells.iter().enumerate() {
@@ -857,53 +906,96 @@ fn project_cells_phase2(
             cells.push((cell, &cf.features, &cf.counts));
         }
     }
-    // Group cell indices by condition (each gated table built once).
     let mut by_cond: Vec<Vec<usize>> = vec![Vec::new(); n_conditions];
     for (i, &(cell, _, _)) in cells.iter().enumerate() {
         let s = (condition_membership[cell as usize] as usize).min(n_conditions - 1);
         by_cond[s].push(i);
     }
 
+    // Option-1 target total = median cell total (counts rescaled to this).
+    let mut totals: Vec<f32> = cells
+        .iter()
+        .map(|(_, _, c)| c.iter().sum::<f32>())
+        .collect();
+    totals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let target_total = if totals.is_empty() {
+        1.0
+    } else {
+        totals[totals.len() / 2].max(1.0)
+    };
+
+    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+
     for (s, idxs) in by_cond.iter().enumerate() {
         if idxs.is_empty() {
             continue;
         }
-        // Gated feature table for condition s: E_feat ⊙ exp(z · δ̄_s).
         let delta_s = delta_centered.i((.., s, ..))?.contiguous()?; // [K, H]
-        let logdev = model.z.matmul(&delta_s)?; // [F, K]·[K, H] = [F, H]
-        let gated = model.e_feat.broadcast_mul(&logdev.exp()?)?; // [F, H]
+        let logdev = model.z.matmul(&delta_s)?; // [F, H]
+        let gated = model.e_feat.broadcast_mul(&logdev.exp()?)?;
         let gated_flat: Vec<f32> = gated.flatten_all()?.to_vec1()?;
 
-        let solved: Vec<(usize, Vec<f32>)> = idxs
+        let solved: Vec<(usize, Vec<f32>, Vec<f32>, f32)> = idxs
             .par_iter()
             .map(|&i| {
                 let (cell, feats, counts) = cells[i];
+                // Baseline MAP on RAW counts → L2 direction (the latent) + the
+                // depth-coupled norm the empty-droplet QC keys on.
                 let edges: Vec<(u32, f32)> =
                     feats.iter().zip(counts).map(|(&f, &c)| (f, c)).collect();
-                // bge scores without a per-cell bias, so discard b_c (the solve
-                // still fits it to absorb the global level). The Poisson MAP
-                // matches absolute counts, so e_c's *magnitude* tracks within-
-                // cell count dynamic range / sequencing depth (a technical
-                // confound) — but its *direction* carries the cell state. bge's
-                // NCE feature side is scale-invariant, so L2-normalize each cell
-                // to keep only the (biological) direction; this is what the
-                // downstream archetypal topic step consumes.
-                let (mut e_c, _) = solve_one_cell(&edges, &gated_flat, &b_feat, h, lambda);
-                let nrm = e_c.iter().map(|x| x * x).sum::<f32>().sqrt();
-                if nrm > 1e-8 {
-                    for v in e_c.iter_mut() {
-                        *v /= nrm;
-                    }
-                }
-                (cell as usize, e_c)
+                let (e_map, _) = solve_one_cell(&edges, &gated_flat, &b_feat, h, lambda);
+                let nrm_map = norm(&e_map);
+                let dir: Vec<f32> = if nrm_map > 1e-8 {
+                    e_map.iter().map(|x| x / nrm_map).collect()
+                } else {
+                    e_map.clone()
+                };
+                // Depth-normalized solve (counts → common total) → the biplot
+                // side embedding: depth-free magnitude, same direction.
+                let tot: f32 = counts.iter().sum::<f32>().max(1e-6);
+                let sc = target_total / tot;
+                let edges_n: Vec<(u32, f32)> = feats
+                    .iter()
+                    .zip(counts)
+                    .map(|(&f, &c)| (f, c * sc))
+                    .collect();
+                let (e_n, _) = solve_one_cell(&edges_n, &gated_flat, &b_feat, h, lambda);
+                (cell as usize, dir, e_n, nrm_map)
             })
             .collect();
-        for (cell, e_c) in solved {
-            e_out[cell * h..(cell + 1) * h].copy_from_slice(&e_c);
+        for (cell, dir, e_n, nrm_map) in solved {
+            e_out[cell * h..(cell + 1) * h].copy_from_slice(&dir);
+            scaled[cell * h..(cell + 1) * h].copy_from_slice(&e_n);
+            cell_nrms[cell] = nrm_map;
         }
     }
 
-    // Overwrite the e_cell var + the model's cached tensor.
+    // Co-scale the biplot side embedding onto the gene dictionary's scale (one
+    // global scalar — no per-cell tuning). The clustering latent (`e_out`) is
+    // left as unit directions; only `scaled` is gauged.
+    let feat_flat = model.e_feat.flatten_all()?.to_vec1()?;
+    let feat_scale = median_row_norm(&feat_flat, h);
+    let mut cell_scales: Vec<f32> = scaled
+        .chunks_exact(h)
+        .map(|r| r.iter().map(|x| x * x).sum::<f32>().sqrt())
+        .filter(|&n| n > 1e-8)
+        .collect();
+    let cell_scale = median_of(&mut cell_scales);
+    let gauge = if cell_scale > 1e-8 {
+        feat_scale / cell_scale
+    } else {
+        1.0
+    };
+    info!(
+        "Phase 2 — latent = L2 direction; biplot side embedding gauged ‖e_feat‖/‖e_cell‖ = {:.3}/{:.3} = {:.3}",
+        feat_scale, cell_scale, gauge
+    );
+    if (gauge - 1.0).abs() > 1e-6 {
+        for x in scaled.iter_mut() {
+            *x *= gauge;
+        }
+    }
+
     let e_t = Tensor::from_vec(e_out, (n_cells, h), dev)?;
     varmap
         .data()
@@ -913,7 +1005,28 @@ fn project_cells_phase2(
         .context("e_cell var missing")?
         .set(&e_t)?;
     model.e_cell = e_t;
-    Ok(())
+    Ok((cell_nrms, scaled))
+}
+
+/// Median of a slice (sorts in place; upper-median for even length). Diagnostic.
+fn median_of(xs: &mut [f32]) -> f32 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    xs[xs.len() / 2]
+}
+
+/// Median L2 norm over the rows of a row-major `[n × h]` matrix. Diagnostic.
+fn median_row_norm(flat: &[f32], h: usize) -> f32 {
+    if h == 0 || flat.is_empty() {
+        return 0.0;
+    }
+    let mut norms: Vec<f32> = flat
+        .chunks_exact(h)
+        .map(|r| r.iter().map(|x| x * x).sum::<f32>().sqrt())
+        .collect();
+    median_of(&mut norms)
 }
 
 struct CellCellPrepared {
@@ -1365,5 +1478,6 @@ fn stage_params(config: &FitConfig) -> TrainingParams {
         feature_embedding_l2: config.feature_embedding_l2,
         z_l2: config.z_l2,
         delta_l2: config.delta_l2,
+        max_grad_norm: config.max_grad_norm,
     }
 }

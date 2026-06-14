@@ -26,7 +26,7 @@ use crate::loss::{
 };
 use crate::model::JointEmbedModel;
 use candle_util::candle_core::{Device, Tensor};
-use candle_util::candle_nn::{AdamW, Optimizer};
+use candle_util::candle_nn::AdamW;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::info;
 use rand::{rngs::StdRng, RngExt, SeedableRng};
@@ -176,6 +176,9 @@ pub struct TrainingParams {
     /// `0.0` disables. Together with `z_l2` this softly resolves the
     /// `(z·c, δ/c)` scale gauge and shrinks unused condition deviations.
     pub delta_l2: f32,
+    /// Global-norm gradient clip per AdamW step (`0.0` = off). Bounds the
+    /// update magnitude so embeddings don't inflate on NCE loss spikes.
+    pub max_grad_norm: f32,
 }
 
 pub struct CompositeTrainContext<'a> {
@@ -305,7 +308,8 @@ pub fn train_composite(
                     .affine(f64::from(params.delta_l2), 0.0)?;
                 loss = (loss + l2)?;
             }
-            opt.backward_step(&loss)?;
+            // Backward + optional global-norm gradient clip + step.
+            candle_util::grad_clip::clipped_backward_step(opt, &loss, params.max_grad_norm as f64)?;
             let ld = loss.detach();
             loss_acc = Some(match loss_acc.take() {
                 None => ld,
