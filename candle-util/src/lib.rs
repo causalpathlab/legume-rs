@@ -6,6 +6,7 @@ pub mod data;
 pub mod decoder;
 pub mod encoder;
 pub mod frozen_features;
+pub mod grad_clip;
 pub mod loss;
 pub mod mcmc;
 pub mod nn;
