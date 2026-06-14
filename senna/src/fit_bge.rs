@@ -207,13 +207,16 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "L2 penalty λ on E_feat (mean-normalized). Default 1.0; 0.0 = off.",
+        default_value_t = 0.0,
+        help = "L2 penalty λ on E_feat (mean-normalized). Default 0 (off).",
         long_help = "L2 penalty λ on the shared feature embedding E_feat ∈ ℝ^{D×H}:\n\
                      adds λ · mean(E_feat²) to the per-step composite loss\n\
                      (mean-normalized, so λ stays scale-invariant across D·H).\n\
-                     Default 1.0 (mild shrinkage). Set 0.0 to disable.\n\
-                     Typical: 0.1–10.0."
+                     Default 0 (off): mean-normalization makes the per-element\n\
+                     gradient tiny (÷ D·H), so E_feat — self-bounded under the\n\
+                     NCE + analytical-projection setup — barely moves with it\n\
+                     (toggling it shifts cell-type purity within run-to-run\n\
+                     noise). Set > 0 only if E_feat drifts on long/deep runs."
     )]
     feature_embedding_l2: f32,
 
