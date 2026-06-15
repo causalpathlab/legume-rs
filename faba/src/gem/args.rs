@@ -338,6 +338,15 @@ pub struct GemArgs {
     )]
     pub learning_rate: f64,
 
+    #[arg(
+        long = "max-grad-norm",
+        default_value_t = 0.0,
+        help = "Global-norm gradient clip for phase-1 AdamW (0 = off). When > 0, \
+                each step's gradients are scaled down if their global L2 norm \
+                exceeds this, bounding embedding inflation on loss spikes."
+    )]
+    pub max_grad_norm: f32,
+
     /// L2 penalty λ_z · mean(z²) on the per-gene program loadings.
     /// Matches `senna bge`'s `--feature-embedding-l2` style: mean-normalized
     /// so λ stays scale-invariant across (G·K). Default 1e-4 (mild).
@@ -441,16 +450,16 @@ pub struct GemArgs {
     // `senna {plot,clustering,annotate} --from`. No retraining.	   //
     /////////////////////////////////////////////////////////////////////////
     #[arg(
-        long,
+        long = "skip-topics",
         default_value_t = false,
-        help = "Resolve archetype-based topics from the cell embedding after training"
+        help = "Skip archetype-based topic resolution (resolved by default)"
     )]
-    pub resolve_topics: bool,
+    pub skip_topics: bool,
 
     #[arg(
         long = "num-topics",
-        help = "Number of topics K for `--resolve-topics`",
-        long_help = "Number of topics K for `--resolve-topics`. Omit to auto-select via\n\
+        help = "Number of topics K for topic resolution",
+        long_help = "Number of topics K for topic resolution. Omit to auto-select via\n\
                      a SPA-anchor residual-elbow sweep over `2..=H+1` (H = embedding dim)."
     )]
     pub num_topics: Option<usize>,
@@ -459,48 +468,30 @@ pub struct GemArgs {
     // Refinement //
     ///////////////
     #[arg(
-        long,
+        long = "skip-refine",
         default_value_t = false,
-        help = "Run a second training pass after filtering dead genes and cells",
-        long_help = "Run a second full training pass.  After pass-1 completes, the gene\n\
-                     embeddings are k-means'd into --gene-groups clusters; clusters whose\n\
-                     median per-gene count mass is below --empty-group-frac × the richest\n\
-                     cluster are 'empty'.  Genes in empty clusters, and cells whose\n\
-                     embedding direction lands in one, are removed; the pseudobulk, feature\n\
-                     table, and model are rebuilt from the filtered data and training\n\
-                     restarts from scratch."
+        help = "Skip the second QC-refinement training pass (run by default)",
+        long_help = "By default a second pass runs after pass-1: an empirical-Bayes χ²_H\n\
+                     null call on ‖β_g‖² drops null genes, an EB lower-tail call on the\n\
+                     pre-L2 cell norm drops empty droplets (from the OUTPUT only — they\n\
+                     stay in the re-fit), and the model is re-fit on the live genes.\n\
+                     --skip-refine emits only the pass-1 model."
     )]
-    pub refine: bool,
+    pub skip_refine: bool,
 
     #[arg(
         long,
         default_value_t = 0.05,
         help = "Refine pass: target FDR for the empirical-Bayes null-gene call (keep genes significant above the null)",
-        long_help = "Target false-discovery rate for the --refine gene QC.  A null gene\n\
+        long_help = "Target false-discovery rate for the refine-pass gene QC.  A null gene\n\
                      (one the model never moved from init β_g ~ N(0,σ²I)) has ‖β_g‖²/σ² ~\n\
                      χ²_H; the null scale σ̂² and proportion π̂₀ are estimated from the data\n\
                      (ashr-style), each gene gets a χ²_H upper-tail p-value and a Storey\n\
                      q-value, and genes with q ≤ this FDR are kept (signal above the null).\n\
-                     Per-gene and deterministic (no clustering).  Only used when --refine is\n\
-                     active.  Must be in (0, 1)."
+                     Per-gene and deterministic (no clustering).  Used by the refine pass\n\
+                     (on by default; disable with --skip-refine).  Must be in (0, 1)."
     )]
     pub gene_null_fdr: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0.5,
-        help = "Refine pass: drop a cell when its pre-L2 embedding norm is below this × the median",
-        long_help = "Per-cell depth cutoff for the --refine QC.  e_cell is L2-normalised\n\
-                     before storage, so the pre-L2 norm (√emb_sq_norm from the phase-2\n\
-                     Poisson-MAP fit) is the only depth-aware signal that separates a\n\
-                     near-empty droplet — which reconstructs to the gene-bias background —\n\
-                     from a low-depth real cell.  A cell is dropped when that norm is below\n\
-                     cell_min_norm_frac × the median norm of the cutoff-passing cells.  The\n\
-                     per-cell norm and nnz, both cutoffs, and the pass/fail flags are written\n\
-                     to {out}.cell_qc.parquet.  Only used when --refine is active.\n\
-                     Must be in [0, 1)."
-    )]
-    pub cell_min_norm_frac: f32,
 
     //////////
     // Misc //
@@ -529,5 +520,15 @@ impl GemArgs {
     /// Single source of truth for the pool-vs-stream decision.
     pub fn use_phase1_cell_axis(&self) -> bool {
         !self.no_cell_axis && self.phase1_cells_per_pb != 0
+    }
+
+    /// The QC-refinement second pass runs by default; `--skip-refine` disables.
+    pub fn refine(&self) -> bool {
+        !self.skip_refine
+    }
+
+    /// Archetype topic resolution runs by default; `--skip-topics` disables.
+    pub fn resolve_topics(&self) -> bool {
+        !self.skip_topics
     }
 }
