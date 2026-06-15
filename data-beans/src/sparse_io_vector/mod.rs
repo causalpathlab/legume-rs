@@ -496,10 +496,17 @@ impl SparseIoVec {
         // Remap data_to_cols in place. It is a positional
         // local-col → global-col map per backend (consumed by
         // `rows_triplets` / `take_backend_columns`); dropped cells map to
-        // `usize::MAX`, which both consumers skip.
+        // `usize::MAX`, which both consumers skip. Already-`usize::MAX` entries
+        // (from a prior `mask_columns`) stay dropped — guard them so a second
+        // mask (e.g. up-front cell QC followed by a refine-pass mask) is
+        // re-entrant rather than indexing `old_to_new` out of bounds.
         for cols in self.data_to_cols.values_mut() {
             for c in cols.iter_mut() {
-                *c = old_to_new[*c].unwrap_or(usize::MAX);
+                *c = if *c == usize::MAX {
+                    usize::MAX
+                } else {
+                    old_to_new[*c].unwrap_or(usize::MAX)
+                };
             }
         }
 
@@ -534,6 +541,16 @@ impl SparseIoVec {
             n - next
         );
         Ok(())
+    }
+
+    /// Drop the cell-indexed group/batch membership caches so the columns can
+    /// be re-masked and the membership re-registered from scratch. Needed
+    /// before [`Self::mask_columns`] when a collapse already registered groups
+    /// on this backend (it asserts the caches are unset); the next
+    /// `assign_groups` / `register_batch_membership` / collapse rebuilds them.
+    /// This is the fourth reset site alluded to in [`DerivedCaches`].
+    pub fn clear_column_membership(&mut self) {
+        self.derived = DerivedCaches::default();
     }
 
     pub fn row_names(&self) -> anyhow::Result<Vec<Box<str>>> {
