@@ -247,6 +247,308 @@ fn finish_call(s: &[f64], chi: &ChiSquared, sigma2: f64, eff_dof: f64, fdr: f32)
     }
 }
 
+/// Result of [`embedding_mixture_empty_call`]: which items are empty (drop),
+/// plus the fitted mixture and the empty/real boundary.
+pub struct MixtureEmptyCall {
+    /// Per-item: `true` = empty (ambient / collapsed — drop).
+    pub drop: Vec<bool>,
+    /// Number of dropped (empty) items.
+    pub n_drop: usize,
+    /// BIC-selected number of mixture components.
+    pub k: usize,
+    /// Component-labeling antimode on `log(norm)`: the density valley separating
+    /// the empty mode from the most-massive bulk, used to decide which mixture
+    /// components count as empty (`NEG_INFINITY` ⇒ no empty mode). NOT the
+    /// per-item cut — see `cut`.
+    pub boundary: f64,
+    /// Effective per-item drop cut: the largest `log(norm)` actually called
+    /// empty under the MAP rule (`NEG_INFINITY` when nothing is dropped). This
+    /// is the value to report ("items with norm ≤ exp(cut) were dropped") — it
+    /// can sit well above `boundary` when the empty mode dominates the mass.
+    pub cut: f64,
+    /// Mixture mass assigned to the empty component(s).
+    pub empty_frac: f64,
+}
+
+/// Recommended `k_max` for the empty-droplet QC call. Kept **generous**: a
+/// minority empty mode (e.g. ~12% of cells in a converged gem run) only gets its
+/// OWN low component when BIC has enough components to also model the broad real
+/// distribution — cap it too low (tried 4) and the empties merge with the
+/// low-depth real cells into one "lowest mode", so the first valley lands up in
+/// the real population and over-drops. The run-to-run instability that a wide
+/// sweep used to cause was the mass-degenerate `empty_boundary`, not `k` itself;
+/// with the lowest-mode + prominent-valley boundary, over-split ambient
+/// components overlap into a smooth hump (no spurious deep valley), so a high
+/// cap is safe. BIC still picks the parsimonious `k`.
+pub const QC_MIXTURE_K_MAX: usize = 30;
+
+/// EB "empty droplet" call on a per-item embedding **norm** via a BIC-selected
+/// 1-D Gaussian **mixture** on `x = log(norm)`.
+///
+/// [`embedding_lower_tail_call`] models the empties as the lower *tail* of a
+/// single median+MAD mode; that works only while the model is undertrained
+/// enough that empties collapse to ≈0. On a converged model the empties get a
+/// small but non-zero norm and form their **own mode**, not a tail, so the
+/// lower-tail test misses them entirely. This instead fits the whole
+/// (multimodal) distribution with a Gaussian mixture, picks `k` by BIC over
+/// `1..=k_max` (see [`QC_MIXTURE_K_MAX`]; high enough to resolve a minority
+/// empty mode from the broad real spread), identifies the **empty mode** as the
+/// component(s) below the inter-mode density valley ([`empty_boundary`], which
+/// prefers the valley below the dominant mode, so it works for both a converged
+/// gem run and ~99%-ambient raw droplets), and assigns each item a posterior
+/// `P(empty | x)`. An item is dropped by the **MAP rule** —
+/// `P(empty | x) ≥ 0.5`, i.e. the empty mode owns the majority of its posterior
+/// (Bayes-optimal cluster assignment). Global cumulative-FDR control is
+/// deliberately *not* used: the empties are a substantial *mode*
+/// (≈`empty_frac` of all items), not a sparse tail, so a per-item
+/// `P(empty) > 1−α` requirement drops nothing once the empty and real modes
+/// overlap. `fdr` is the target false-drop rate used only to **warn** when the
+/// realized rate (mean `1 − P(empty)` over the drops) exceeds it. No median,
+/// no fixed `k`, deterministic.
+pub fn embedding_mixture_empty_call(nrm: &[f32], k_max: usize, fdr: f32) -> MixtureEmptyCall {
+    let n = nrm.len();
+    let none = || MixtureEmptyCall {
+        drop: vec![false; n],
+        n_drop: 0,
+        k: 1,
+        boundary: f64::NEG_INFINITY,
+        cut: f64::NEG_INFINITY,
+        empty_frac: 0.0,
+    };
+    if n < 2 {
+        return none();
+    }
+    let x: Vec<f64> = nrm.iter().map(|&v| (v.max(1e-6) as f64).ln()).collect();
+
+    // Fit the mixture on a deterministic subsample (a stride over the item order
+    // — representative across batches): the mixture params are global, so the
+    // posterior below is applied to every item. Keeps the wide k-sweep cheap
+    // (EM cost is one `exp` per point × component × iter × k).
+    const FIT_MAX: usize = 50_000;
+    let xs: Vec<f64> = if n > FIT_MAX {
+        let stride = (n / FIT_MAX).max(1);
+        (0..n).step_by(stride).map(|i| x[i]).collect()
+    } else {
+        x.clone()
+    };
+    let mut sorted_xs = xs.clone();
+    sorted_xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // BIC-select k over 1..=k_max (k=1 = no-structure baseline) on the subsample.
+    let (mut best_k, mut best_bic, mut best) = (1usize, f64::INFINITY, None);
+    for k in 1..=k_max.max(1) {
+        let (g, bic) = fit_gmm_1d(&xs, &sorted_xs, k);
+        if bic < best_bic {
+            best_bic = bic;
+            best_k = k;
+            best = Some(g);
+        }
+    }
+    let gmm = best.unwrap();
+    let k = best_k;
+    if k < 2 {
+        return none();
+    }
+
+    // Empty mode = component(s) below the density antimode (valley) between the
+    // lowest component and the most massive (bulk) one.
+    let boundary = empty_boundary(&gmm);
+    let empty: Vec<usize> = (0..k).filter(|&j| gmm.mu[j] < boundary).collect();
+    if empty.is_empty() {
+        return MixtureEmptyCall {
+            drop: vec![false; n],
+            n_drop: 0,
+            k,
+            boundary,
+            cut: f64::NEG_INFINITY,
+            empty_frac: 0.0,
+        };
+    }
+    let empty_frac: f64 = empty.iter().map(|&j| gmm.pi[j]).sum();
+
+    // Per-item lfdr = P(real | x) = 1 − posterior-empty.
+    let mut lfdr = vec![1.0f64; n];
+    for (i, &xi) in x.iter().enumerate() {
+        let (mut e, mut tot) = (0.0f64, 0.0f64);
+        for j in 0..k {
+            let d = gmm.pi[j] * gauss1d(xi, gmm.mu[j], gmm.sg[j]);
+            tot += d;
+            if gmm.mu[j] < boundary {
+                e += d;
+            }
+        }
+        lfdr[i] = (1.0 - e / tot.max(1e-300)).clamp(0.0, 1.0);
+    }
+    // MAP rule: drop items the empty mode owns by majority posterior
+    // (P(empty | x) ≥ 0.5 ⇔ lfdr < 0.5). The empty boundary already guarantees
+    // we only do this when a genuine density valley separates an empty mode from
+    // the bulk, so a unimodal distribution drops nothing.
+    let drop: Vec<bool> = lfdr.iter().map(|&l| l < 0.5).collect();
+    let n_drop = drop.iter().filter(|&&v| v).count();
+    // Effective cut: the largest log-norm actually dropped. Reflects where the
+    // MAP rule fell (at the density valley), which can lie well above `boundary`
+    // (the component-labeling antimode) when the empty mode dominates the mass.
+    let cut = (0..n)
+        .filter(|&i| drop[i])
+        .map(|i| x[i])
+        .fold(f64::NEG_INFINITY, f64::max);
+    // Realized false-drop rate = mean P(real | x) over the dropped set. Warn
+    // (don't suppress) if it exceeds the target `fdr`: the cut still removes the
+    // empty mode, but the modes overlap enough that some real cells go with it.
+    if n_drop > 0 {
+        let realized = (0..n).filter(|&i| drop[i]).map(|i| lfdr[i]).sum::<f64>() / n_drop as f64;
+        if realized > fdr as f64 {
+            log::warn!(
+                "mixture empty call: dropped {} items at MAP posterior ≥ 0.5, but the \
+                 realized false-drop rate {:.3} exceeds the target {:.3} — the empty and \
+                 real modes overlap; inspect the cell_qc report before trusting the cut",
+                n_drop,
+                realized,
+                fdr
+            );
+        }
+    }
+    MixtureEmptyCall {
+        drop,
+        n_drop,
+        k,
+        boundary,
+        cut,
+        empty_frac,
+    }
+}
+
+struct Gmm1d {
+    mu: Vec<f64>,
+    sg: Vec<f64>,
+    pi: Vec<f64>,
+}
+
+#[inline]
+fn gauss1d(x: f64, mu: f64, sg: f64) -> f64 {
+    let z = (x - mu) / sg;
+    (-0.5 * z * z).exp() / (sg * (2.0 * std::f64::consts::PI).sqrt())
+}
+
+/// EM-fit a 1-D `k`-component Gaussian mixture (sufficient-stats — no `n×k`
+/// responsibility matrix), returning the fit (components sorted by mean) and
+/// its BIC. `sorted` = `x` sorted ascending, for quantile init.
+fn fit_gmm_1d(x: &[f64], sorted: &[f64], k: usize) -> (Gmm1d, f64) {
+    let n = x.len();
+    let q = |p: f64| sorted[((p * n as f64) as usize).min(n - 1)];
+    let mut mu: Vec<f64> = (0..k).map(|j| q((j as f64 + 0.5) / k as f64)).collect();
+    let mean = x.iter().sum::<f64>() / n as f64;
+    let sd = (x.iter().map(|&v| (v - mean) * (v - mean)).sum::<f64>() / n as f64).sqrt();
+    let sd_floor = (sd * 0.05).max(1e-3);
+    let mut sg = vec![sd.max(1e-2); k];
+    let mut pi = vec![1.0 / k as f64; k];
+    let mut d = vec![0.0f64; k];
+    let (mut ll, mut ll_prev) = (0.0f64, f64::NEG_INFINITY);
+    for _ in 0..200 {
+        let (mut nk, mut sx, mut sxx) = (vec![0.0f64; k], vec![0.0f64; k], vec![0.0f64; k]);
+        ll = 0.0;
+        for &xi in x {
+            let mut tot = 0.0;
+            for j in 0..k {
+                d[j] = pi[j] * gauss1d(xi, mu[j], sg[j]);
+                tot += d[j];
+            }
+            let tot = tot.max(1e-300);
+            ll += tot.ln();
+            let inv = 1.0 / tot;
+            for j in 0..k {
+                let r = d[j] * inv;
+                nk[j] += r;
+                sx[j] += r * xi;
+                sxx[j] += r * xi * xi;
+            }
+        }
+        for j in 0..k {
+            let nkj = nk[j].max(1e-9);
+            pi[j] = nk[j] / n as f64;
+            mu[j] = sx[j] / nkj;
+            let var = (sxx[j] / nkj - mu[j] * mu[j]).max(sd_floor * sd_floor);
+            sg[j] = var.sqrt().max(sd_floor);
+        }
+        if ll_prev.is_finite() && (ll - ll_prev).abs() <= 1e-6 * ll_prev.abs().max(1.0) {
+            break;
+        }
+        ll_prev = ll;
+    }
+    let mut idx: Vec<usize> = (0..k).collect();
+    idx.sort_by(|&a, &b| {
+        mu[a]
+            .partial_cmp(&mu[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let g = Gmm1d {
+        mu: idx.iter().map(|&j| mu[j]).collect(),
+        sg: idx.iter().map(|&j| sg[j]).collect(),
+        pi: idx.iter().map(|&j| pi[j]).collect(),
+    };
+    let bic = -2.0 * ll + (3.0 * k as f64 - 1.0) * (n as f64).ln();
+    (g, bic)
+}
+
+/// Empty/real boundary on log(norm): the inter-mode density valley separating
+/// the empty (low-norm) population from the real cells.
+///
+/// The empties may be a MINORITY shoulder (a converged gem run: ~12% of cells at
+/// low norm, the dominant mode is real) or the MAJORITY (raw droplet data: ~99%
+/// ambient, the dominant mode is empty). The broad real distribution can also
+/// carry its OWN deep valley (a high-depth sub-population), so "the deepest /
+/// first valley" picks the wrong one. Since the empties are always the LOWEST
+/// cells, **prefer the valley BELOW the dominant mode** (`bulk`) — the gap
+/// separating a low empty cloud from a real bulk above it. If there is none (the
+/// bulk is itself in the empty cloud), take the valley **ABOVE** the bulk (the
+/// gap before the real cells). This needs no mass threshold and, by capping the
+/// below-search at the bulk, never mistakes a high-depth real valley for the
+/// empty cut. `NEG_INFINITY` when neither range holds a genuine valley (one mode
+/// only ⇒ drop nothing), so clean pre-called data is never over-dropped.
+fn empty_boundary(gmm: &Gmm1d) -> f64 {
+    let k = gmm.mu.len();
+    if k < 2 {
+        return f64::NEG_INFINITY;
+    }
+    let bulk = (0..k)
+        .max_by(|&a, &b| {
+            gmm.pi[a]
+                .partial_cmp(&gmm.pi[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(0);
+    valley_in(gmm, gmm.mu[0], gmm.mu[bulk]) // prefer the empty/real gap below the bulk
+        .or_else(|| valley_in(gmm, gmm.mu[bulk], gmm.mu[k - 1])) // else above it
+        .unwrap_or(f64::NEG_INFINITY)
+}
+
+/// The genuine interior density valley of the mixture over `[lo, hi]`: the
+/// global minimum, accepted only when it lies strictly below both endpoints and
+/// away from the edges (so a monotone — one-mode — range yields `None`).
+fn valley_in(gmm: &Gmm1d, lo: f64, hi: f64) -> Option<f64> {
+    // Component means are finite, so `hi <= lo` is the empty/degenerate range.
+    if hi <= lo {
+        return None;
+    }
+    let k = gmm.mu.len();
+    let dens = |t: f64| -> f64 {
+        (0..k)
+            .map(|j| gmm.pi[j] * gauss1d(t, gmm.mu[j], gmm.sg[j]))
+            .sum()
+    };
+    let steps = 2000usize;
+    let t_at = |i: usize| lo + (hi - lo) * i as f64 / steps as f64;
+    let d: Vec<f64> = (0..=steps).map(|s| dens(t_at(s))).collect();
+    let j = (0..=steps)
+        .min_by(|&a, &b| d[a].partial_cmp(&d[b]).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or(0);
+    let edge = steps / 50;
+    if j < edge || j > steps - edge || !(d[j] < d[0] && d[j] < d[steps]) {
+        return None;
+    }
+    Some(t_at(j))
+}
+
 /// Solve `χ²_ν⁻¹(a_hi)/χ²_ν⁻¹(a_lo) = r` for the effective dof `ν` by bisection,
 /// where `a_lo < a_hi` are the (null-space) probabilities of the two matched
 /// quantiles. The ratio is monotone *decreasing* in `ν` (more dof ⇒ tighter
