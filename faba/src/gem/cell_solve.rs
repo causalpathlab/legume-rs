@@ -155,14 +155,17 @@ fn backend_to_unified(feature_to_backend_row: &[usize], n_backend_rows: usize) -
     b2u
 }
 
+/// Interned-identity key: `(gene, q_modality, region, is_agg)`.
+type IdentityKey = (u32, u32, u32, bool);
+/// Identity key → dense identity-id lookup.
+type IdentityIndex = FxHashMap<IdentityKey, u32>;
+
 /// Build the bounded identity universe from the row maps (cell-independent) and
 /// a `(gene, q_modality, region, is_agg) → identity-id` lookup. Same keys and
 /// insertion logic as `collect_identities`/`intern`.
-fn build_identity_universe(
-    ctx: &CellStreamCtx,
-) -> (Vec<Identity>, FxHashMap<(u32, u32, u32, bool), u32>) {
+fn build_identity_universe(ctx: &CellStreamCtx) -> (Vec<Identity>, IdentityIndex) {
     let mut ids: Vec<Identity> = Vec::new();
-    let mut map: FxHashMap<(u32, u32, u32, bool), u32> = FxHashMap::default();
+    let mut map: IdentityIndex = FxHashMap::default();
     // Intern every identity a row could yield (same keys as `collect_identities`).
     let mut scan = |rm: &BackendRowMap| {
         for uid in 0..rm.stratum.len() {
@@ -193,13 +196,31 @@ fn build_identity_universe(
 }
 
 fn agg_identity(g: u32) -> Identity {
-    Identity { gene: g, q_modality: 0, region: 0, is_agg: true, bias_modality: 0 }
+    Identity {
+        gene: g,
+        q_modality: 0,
+        region: 0,
+        is_agg: true,
+        bias_modality: 0,
+    }
 }
 fn count_identity(g: u32, m: u32) -> Identity {
-    Identity { gene: g, q_modality: m, region: 0, is_agg: false, bias_modality: COUNT_BIAS_MODALITY }
+    Identity {
+        gene: g,
+        q_modality: m,
+        region: 0,
+        is_agg: false,
+        bias_modality: COUNT_BIAS_MODALITY,
+    }
 }
 fn modifier_identity(g: u32, m: u32, r: u32) -> Identity {
-    Identity { gene: g, q_modality: m, region: r, is_agg: false, bias_modality: m }
+    Identity {
+        gene: g,
+        q_modality: m,
+        region: r,
+        is_agg: false,
+        bias_modality: m,
+    }
 }
 
 /// Map one streamed `(backend row → uid, value)` into the chunk's per-cell
@@ -215,7 +236,7 @@ fn accumulate_streamed(
     v: f32,
     per_cell: &mut [Vec<(u32, f32)>],
     agg_acc: &mut FxHashMap<(u32, u32), f32>,
-    id_of: &impl Fn(&(u32, u32, u32, bool)) -> u32,
+    id_of: &impl Fn(&IdentityKey) -> u32,
 ) {
     let (Some(stratum), Some(g)) = (rm.stratum[uid], rm.gene[uid]) else {
         return;
@@ -252,7 +273,7 @@ pub fn solve_cell_embeddings_streaming(
     // 1. Cell-independent identity dictionary + frozen embeddings.
     let (ids, key_to_id) = build_identity_universe(ctx);
     let (frozen_e, frozen_b) = embed_identities(model, &ids, h)?;
-    let id_of = |k: &(u32, u32, u32, bool)| *key_to_id.get(k).expect("identity in universe");
+    let id_of = |k: &IdentityKey| *key_to_id.get(k).expect("identity in universe");
     let lambda = args.phase2_ridge.max(0.0) as f64;
 
     // 2. Backend-row → unified-feature-id inverses (built once).
@@ -340,8 +361,9 @@ pub fn solve_cell_embeddings_streaming(
             per_cell[local as usize].push((id_of(&(g, 0, 0, true)), sum));
         }
 
-        let (e_chunk, b_chunk) =
-            graph_embedding_util::cell_projection::project_cells(&frozen_e, &frozen_b, &per_cell, h, lambda);
+        let (e_chunk, b_chunk) = graph_embedding_util::cell_projection::project_cells(
+            &frozen_e, &frozen_b, &per_cell, h, lambda,
+        );
         e_flat[chunk_start * h..chunk_end * h].copy_from_slice(&e_chunk);
         b_flat[chunk_start..chunk_end].copy_from_slice(&b_chunk);
     }
@@ -349,11 +371,7 @@ pub fn solve_cell_embeddings_streaming(
     finalize_e_cell(model, e_flat, b_flat)
 }
 
-pub(crate) fn intern(
-    ids: &mut Vec<Identity>,
-    map: &mut FxHashMap<(u32, u32, u32, bool), u32>,
-    id: Identity,
-) -> u32 {
+pub(crate) fn intern(ids: &mut Vec<Identity>, map: &mut IdentityIndex, id: Identity) -> u32 {
     let key = (id.gene, id.q_modality, id.region, id.is_agg);
     if let Some(&x) = map.get(&key) {
         return x;
@@ -368,7 +386,7 @@ pub(crate) fn intern(
 /// append `(identity, count)` to its cell's list.
 fn collect_identities(pools: &AxisPools, n_cells: usize) -> (Vec<Identity>, Vec<Vec<(u32, f32)>>) {
     let mut ids: Vec<Identity> = Vec::new();
-    let mut map: FxHashMap<(u32, u32, u32, bool), u32> = FxHashMap::default();
+    let mut map: IdentityIndex = FxHashMap::default();
     let mut per_cell: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_cells];
 
     // AGG anchor: e_f = β_g (gate masked), bias = b_agg[g].
@@ -440,7 +458,11 @@ fn collect_identities(pools: &AxisPools, n_cells: usize) -> (Vec<Identity>, Vec<
 /// Compute the frozen `(e_f, b_f)` for each identity via the model's
 /// `embed_and_bias_rows`, in chunks, then bring them to the CPU. Returns
 /// `(e [n_id × h] row-major, b [n_id])`.
-pub(crate) fn embed_identities(model: &GemModel, ids: &[Identity], h: usize) -> Result<(Vec<f32>, Vec<f32>)> {
+pub(crate) fn embed_identities(
+    model: &GemModel,
+    ids: &[Identity],
+    h: usize,
+) -> Result<(Vec<f32>, Vec<f32>)> {
     const CHUNK: usize = 65536;
     let n = ids.len();
     let mut e = vec![0f32; n * h];

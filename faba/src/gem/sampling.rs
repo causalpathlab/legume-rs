@@ -196,7 +196,9 @@ impl SamplerState {
         let n_cells = pb.cell_pools.as_ref().map_or(0, |p| p.n_units);
         let phase1_cell_pools: Option<AxisPools> = (k >= 1 && k < n_cells).then(|| {
             super::pseudobulk::subsample_cell_pools_multilevel(
-                pb.cell_pools.as_ref().expect("cell pool present when subsampling"),
+                pb.cell_pools
+                    .as_ref()
+                    .expect("cell pool present when subsampling"),
                 &pb.cell_to_pb_per_level,
                 k,
                 args.seed,
