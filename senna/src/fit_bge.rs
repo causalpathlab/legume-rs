@@ -244,9 +244,13 @@ pub struct BgeArgs {
         long = "cell-null-fdr",
         default_value_t = 0.0,
         help = "When > 0, run the EB empty-droplet cell call on the pre-L2 \
-                projection norm and write {out}.cell_qc.parquet (norm + kept \
-                flag). Real cells form the dominant mode; empties are the \
-                lower tail (norm ≈ 0). FDR for the lower-tail BH call."
+                projection norm, then MASK the empties out and re-fit on the \
+                survivors; writes {out}.cell_qc.parquet (norm + kept flag) and \
+                {out}.cell_embedding_before.parquet (all cells, pre-mask). A \
+                BIC-selected Gaussian mixture on log(norm) isolates the empty \
+                MODE (component below the density valley); cells are dropped by \
+                MAP posterior P(empty)>=0.5. This value is the target false-drop \
+                rate, used to warn when the realized rate is exceeded."
     )]
     cell_null_fdr: f32,
 
@@ -593,13 +597,14 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         );
     }
 
-    // ---- Cell QC ----
-    // gem-style (UnifiedData has no `mask_columns`): every cell + edge still
-    // informs the joint embedding / feature dictionary, but QC-failed cells
-    // (near-empty floor + MAD outliers) are dropped from the archetypal
-    // analysis and all per-cell outputs via a write-time `select_rows`.
-    // Computed on the full-feature unified count backend, so n_genes is the
-    // per-cell detected-feature count across all modalities.
+    // ---- Cell QC (output filter) ----
+    // The `--qc` near-empty floor + MAD-outlier call is an OUTPUT filter: every
+    // cell + edge still informs the joint embedding / feature dictionary, but
+    // QC-failed cells are dropped from the archetypal analysis and all per-cell
+    // outputs via a write-time `select_rows`. (The separate EB empty-droplet
+    // call below, when `--cell-null-fdr > 0`, instead masks empties out of the
+    // backend and re-fits.) Computed on the full-feature unified count backend,
+    // so n_genes is the per-cell detected-feature count across all modalities.
     let mut qc_keep_idx: Option<Vec<usize>> = if let Some(cfg) = args.qc.to_config() {
         if cfg.feature_min_cells > 0 {
             log::warn!(
@@ -646,21 +651,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         None
     };
 
-    let cell_cell = args
-        .cell_cell_edges
-        .as_deref()
-        .map(|path| {
-            let edges = load_cell_cell_edges(path, &unified.barcodes)?;
-            anyhow::Ok(ge::CellCellConfig {
-                edges,
-                lambda: args.cell_cell_lambda,
-                n_negatives: args.cell_cell_negatives,
-                pb_levels: None,
-                lambda_per_level: None,
-            })
-        })
-        .transpose()?;
-
     // `--no-refine` is gbe-specific (the other subcommands always refine);
     // otherwise the shared `--pb-refine-*` flags drive RefineParams.
     let refine = if args.no_refine {
@@ -669,47 +659,19 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         Some(args.collapse.pb_refine.to_params())
     };
 
-    // Up-weight matched (multi-modality) cells in the cell-axis sampler so
-    // they anchor the cross-modal alignment. No-op outside --multiome
-    // (single-modality cells all have one modality bit set).
-    let cell_weight_mult: Option<Vec<f32>> =
-        if is_multiome && (args.bridge_weight - 1.0).abs() > f32::EPSILON {
-            let mult: Vec<f32> = unified
-                .cell_modality
-                .iter()
-                .map(|&m| {
-                    if m.count_ones() >= 2 {
-                        args.bridge_weight
-                    } else {
-                        1.0
-                    }
-                })
-                .collect();
-            let n_matched = mult
-                .iter()
-                .filter(|&&w| (w - 1.0).abs() > f32::EPSILON)
-                .count();
-            info!(
-                "--bridge-weight {}: up-weighting {} matched cells in the cell-axis sampler",
-                args.bridge_weight, n_matched
-            );
-            Some(mult)
-        } else {
-            None
-        };
-
     // Install the Ctrl-C stop handler once and share the flag across both
     // passes — each `ge::fit` would otherwise try to register its own SIGINT
     // handler and the second registration panics (`MultipleHandlers`).
     let stop = ge::setup_stop_handler();
 
-    // Assemble a `FitConfig` for the CURRENT feature axis of `unified`. The
-    // feature-indexed pieces are derived from that axis so the same builder
-    // serves pass 1 (full axis) and the post-QC pass 2 (null features
-    // dropped): HVG weights subset through `feature_to_backend_row`, the
-    // feature network reloads against the live feature names, and the Fisher
-    // cache self-invalidates on the name mismatch. Everything else is
-    // feature-independent and cloned in.
+    // Assemble a `FitConfig` for the CURRENT feature AND cell axes of `unified`,
+    // so the same builder serves pass 1 (full axis), the post-QC feature re-fit
+    // (null features dropped) and the cell-empty re-fit (empties dropped): HVG
+    // weights subset through `feature_to_backend_row`, the feature network
+    // reloads against the live feature names, the Fisher cache self-invalidates
+    // on the name mismatch, and the cell-indexed pieces (cell-cell edges, bridge
+    // weights) resolve against the live barcodes/cell axis. Everything else is
+    // axis-independent and cloned in.
     let build_config = |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
         let hvg_weights = hvg_full.as_ref().map(|w| {
             unified
@@ -734,6 +696,45 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 })
             })
             .transpose()?;
+        // Cell-indexed config is ALSO derived from the current `unified` so it
+        // stays valid after a cell-subset re-fit: cell-cell edges resolve
+        // against the live barcodes (edges to dropped cells vanish), and the
+        // bridge weights index the live cell axis. Building them once up front
+        // and cloning would leave stale (pre-mask) cell ids → OOB / wrong pairs.
+        let cell_cell = args
+            .cell_cell_edges
+            .as_deref()
+            .map(|path| {
+                let edges = load_cell_cell_edges(path, &unified.barcodes)?;
+                anyhow::Ok(ge::CellCellConfig {
+                    edges,
+                    lambda: args.cell_cell_lambda,
+                    n_negatives: args.cell_cell_negatives,
+                    pb_levels: None,
+                    lambda_per_level: None,
+                })
+            })
+            .transpose()?;
+        // Up-weight matched (multi-modality) cells in the cell-axis sampler so
+        // they anchor the cross-modal alignment. No-op outside --multiome.
+        let cell_weight_mult: Option<Vec<f32>> =
+            if is_multiome && (args.bridge_weight - 1.0).abs() > f32::EPSILON {
+                Some(
+                    unified
+                        .cell_modality
+                        .iter()
+                        .map(|&m| {
+                            if m.count_ones() >= 2 {
+                                args.bridge_weight
+                            } else {
+                                1.0
+                            }
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            };
         Ok(ge::FitConfig {
             embedding_dim: args.embedding_dim,
             num_levels: args.collapse.num_levels,
@@ -759,7 +760,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 Some(format!("{}.fisher_weights.parquet", args.out).into_boxed_str())
             },
             feature_network,
-            cell_cell: cell_cell.clone(),
+            cell_cell,
             stop: Some(stop.clone()),
             feature_embedding_l2: args.feature_embedding_l2,
             num_programs: args.num_programs,
@@ -767,7 +768,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             delta_l2: args.delta_l2,
             weight_decay: args.weight_decay,
             max_grad_norm: args.max_grad_norm,
-            cell_weight_mult: cell_weight_mult.clone(),
+            cell_weight_mult,
             phase1_cells_per_pb: args.phase1_cells_per_pb,
         })
     };
@@ -818,23 +819,34 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     }
 
     // Empirical-Bayes "empty droplet" cell QC on the pre-L2 projection norm
-    // (independent of the feature null — different scale, lower-tail call): real
-    // cells form the dominant mode, empties collapse to ≈0 and fall in the lower
-    // tail. Emits BOTH cell embeddings from one run: the "before" over ALL cells
+    // (independent of the feature null — different scale). Once the model has
+    // trained, empties don't collapse to a ≈0 lower tail; they form their OWN
+    // low mode separated from the real bulk by a density valley, so a median+MAD
+    // lower-tail fit misses them. Instead fit a BIC-selected 1-D Gaussian
+    // mixture on log(norm) (k BIC-selected up to QC_MIXTURE_K_MAX), take the
+    // lowest mode as empty (the first prominent valley above it is the cut), and
+    // drop by MAP posterior (shared with faba gem). When any empties are
+    // found we MASK them out of the backend and RE-FIT on the survivors
+    // (workflow step iii) — `mask_columns` + `subset_cells` keep cell-id ==
+    // backend-column, exactly as the feature refine keeps the feature axis live.
+    // Emits the "before" cell embedding over ALL cells first
     // (`{out}.cell_embedding_before.parquet`, pair with `{out}.cell_qc.parquet`
-    // to color the empties) and the "after" = the standard `{out}.latent` output
-    // restricted to the kept cells via `qc_keep_idx`. We do NOT re-fit on a cell
-    // subset: `subset_cells` leaves the backend at its full column count, which
-    // `ge::fit` streams assuming cell-id == column (gem's refine threads a
-    // model-cell→backend-column map; bge's `fit` has none). The empties barely
-    // engage the NCE dictionary, so removing them + re-UMAP'ing the survivors is
-    // the meaningful "after".
+    // to color the empties); the re-fit "after" becomes the standard output.
     if args.cell_null_fdr > 0.0 && !out.cell_nrms.is_empty() {
         let n = out.cell_nrms.len();
-        let call = ge::null_call::embedding_lower_tail_call(&out.cell_nrms, args.cell_null_fdr);
+        let call = ge::null_call::embedding_mixture_empty_call(
+            &out.cell_nrms,
+            ge::null_call::QC_MIXTURE_K_MAX,
+            args.cell_null_fdr,
+        );
+        let cut_norm = if call.cut.is_finite() {
+            call.cut.exp()
+        } else {
+            0.0
+        };
         info!(
-            "bge cell empty call (log-norm null μ̂={:.2}, σ̂={:.2}): {} / {} cells empty at FDR {} → {}.cell_qc.parquet",
-            call.mu, call.sigma, call.n_drop, n, args.cell_null_fdr, args.out
+            "bge cell empty call (mixture k={}, dropped norm ≤ {:.3}, π̂_empty={:.2}): {} / {} cells empty → {}.cell_qc.parquet",
+            call.k, cut_norm, call.empty_frac, call.n_drop, n, args.out
         );
         write_cell_qc(&out.cell_nrms, &call.drop, &unified.barcodes, &args.out)?;
         // "Before": pass-1 cell embedding over ALL cells (same h0..h{H-1} layout
@@ -845,10 +857,35 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             &unified.barcodes,
             "cell",
         )?;
-        // "After": restrict the standard latent output to the real cells.
-        let keep: Vec<usize> = (0..n).filter(|&c| !call.drop[c]).collect();
-        if keep.len() < n {
-            qc_keep_idx = Some(keep);
+        let live: Vec<usize> = (0..n).filter(|&c| !call.drop[c]).collect();
+        if !live.is_empty() && live.len() < n {
+            info!(
+                "Cell empty refine: masking {} empties, re-fitting on {} real cells.",
+                n - live.len(),
+                live.len(),
+            );
+            // Remap any `--qc` output filter onto the surviving axis (old id →
+            // new id), dropping empties; the high-outlier filtering it carries
+            // is preserved as an output filter over the re-fit cells.
+            qc_keep_idx = qc_keep_idx.map(|prev| {
+                let mut old_to_new = vec![usize::MAX; n];
+                for (new_i, &old_i) in live.iter().enumerate() {
+                    old_to_new[old_i] = new_i;
+                }
+                prev.into_iter()
+                    .filter_map(|o| (old_to_new[o] != usize::MAX).then_some(old_to_new[o]))
+                    .collect()
+            });
+            let keep_mask: Vec<bool> = call.drop.iter().map(|&d| !d).collect();
+            // ge::fit's collapse runs on the real backend (unlike gem, which
+            // collapses on a clone), so it left group/batch caches registered;
+            // clear them so `mask_columns` (which requires them unset) can shrink
+            // the columns. The pass-2 collapse re-registers from scratch.
+            unified.count_backend_mut().clear_column_membership();
+            unified.count_backend_mut().mask_columns(&keep_mask)?;
+            unified.subset_cells(&live);
+            let cfg = build_config(&unified)?;
+            out = ge::fit(&mut unified, cfg)?;
         }
     }
 
