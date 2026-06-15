@@ -323,7 +323,9 @@ fn run_phase(
                     loss = (loss + (d_sq * (args.delta_l2 as f64))?)?;
                 }
             }
-            optim.backward_step(&loss)?;
+            // Backward + global-norm gradient clip + step (no-op clip when
+            // --max-grad-norm 0). Keeps embeddings from inflating on NCE spikes.
+            candle_util::grad_clip::clipped_backward_step(optim, &loss, args.max_grad_norm as f64)?;
 
             // Accumulate detached scalars on-device — no per-minibatch sync.
             let ld = loss.detach();
