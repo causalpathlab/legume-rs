@@ -1418,3 +1418,102 @@ fn mask_columns_all_true_is_noop() -> anyhow::Result<()> {
     assert_eq!(vec.read_columns_ndarray(0..ncol)?, raw);
     Ok(())
 }
+
+#[test]
+fn clear_column_membership_then_mask_after_groups() -> anyhow::Result<()> {
+    // The bge "mask-then-refit" pattern: a collapse registers group caches on
+    // the live backend, then we drop empty cells with mask_columns (which
+    // asserts the group/batch caches are unset). `clear_column_membership`
+    // makes that legal in a debug build (assert live) and leaves the columns
+    // correctly remapped + re-groupable.
+    let nrow = 3;
+    let ncol = 9;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let rows = str_vec(nrow, "r");
+    let cols = str_vec(ncol, "c");
+
+    let mut vec = SparseIoVec::new();
+    vec.push(make_named_sparse(&raw, &rows, &cols), None)?;
+
+    // Simulate a collapse having registered group membership.
+    let groups = vec!["A", "A", "A", "B", "B", "B", "C", "C", "C"];
+    vec.assign_groups(&groups, None);
+    assert_eq!(vec.num_groups(), 3);
+
+    let before = vec.read_columns_dmatrix(0..ncol)?;
+
+    // Drop cells 1 and 4, mirroring an EB empty call.
+    let mut keep = vec![true; ncol];
+    keep[1] = false;
+    keep[4] = false;
+    // Without this, mask_columns would trip its debug_assert (caches set).
+    vec.clear_column_membership();
+    assert_eq!(vec.num_groups(), 0, "membership cleared");
+    vec.mask_columns(&keep)?;
+
+    let kept_old: Vec<usize> = (0..ncol).filter(|&c| keep[c]).collect();
+    assert_eq!(vec.num_columns(), kept_old.len());
+    let after = vec.read_columns_dmatrix(0..vec.num_columns())?;
+    for (new_i, &old_i) in kept_old.iter().enumerate() {
+        for r in 0..nrow {
+            assert!((after[(r, new_i)] - before[(r, old_i)]).abs() < 1e-6);
+        }
+    }
+
+    // The masked backend can be re-grouped from scratch (the pass-2 collapse).
+    let groups2 = vec!["A", "A", "B", "B", "C", "C", "C"];
+    assert_eq!(groups2.len(), vec.num_columns());
+    vec.assign_groups(&groups2, None);
+    assert_eq!(vec.num_groups(), 3);
+    Ok(())
+}
+
+#[test]
+fn mask_columns_is_reentrant() -> anyhow::Result<()> {
+    // gem's two-stage cell QC masks twice: an up-front drop (zero-spliced cells)
+    // then a refine-pass drop (EB empties). The first mask leaves usize::MAX
+    // sentinels in `data_to_cols`; the second must skip them, not index
+    // `old_to_new` out of bounds.
+    let nrow = 4;
+    let ncol = 10;
+    let raw = Array2::<f32>::runif(nrow, ncol);
+    let rows = str_vec(nrow, "g");
+    let cols = str_vec(ncol, "c");
+
+    let mut vec = SparseIoVec::new();
+    vec.push(make_named_sparse(&raw, &rows, &cols), None)?;
+    let before = vec.read_columns_dmatrix(0..ncol)?;
+
+    // First mask: drop cells 2 and 7.
+    let mut keep1 = vec![true; ncol];
+    keep1[2] = false;
+    keep1[7] = false;
+    vec.mask_columns(&keep1)?;
+    let surv1: Vec<usize> = (0..ncol).filter(|&c| keep1[c]).collect(); // len 8
+
+    // Second mask on the 8 survivors: drop new-ids 0 and 5.
+    let mut keep2 = vec![true; surv1.len()];
+    keep2[0] = false;
+    keep2[5] = false;
+    vec.mask_columns(&keep2)?; // must NOT panic on the prior sentinels
+
+    // Net survivors trace back to original columns.
+    let surv2_old: Vec<usize> = (0..surv1.len())
+        .filter(|&c| keep2[c])
+        .map(|c| surv1[c])
+        .collect();
+    assert_eq!(vec.num_columns(), surv2_old.len());
+    let after = vec.read_columns_dmatrix(0..vec.num_columns())?;
+    for (new_i, &old_i) in surv2_old.iter().enumerate() {
+        for r in 0..nrow {
+            assert!((after[(r, new_i)] - before[(r, old_i)]).abs() < 1e-6);
+        }
+    }
+    // Row reads (the rows_triplets sentinel path) also honor the double mask.
+    let row0 = vec.read_rows_dmatrix(std::iter::once(0usize))?;
+    assert_eq!(row0.ncols(), surv2_old.len());
+    for (new_i, &old_i) in surv2_old.iter().enumerate() {
+        assert!((row0[(0, new_i)] - before[(0, old_i)]).abs() < 1e-6);
+    }
+    Ok(())
+}
