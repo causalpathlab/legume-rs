@@ -276,11 +276,7 @@ impl UnifiedData {
     /// `condition_membership`, `cell_modality`).
     ///
     /// `backend` is **not** touched — the SparseIoVec retains the
-    /// original column layout.  Callers that later invoke
-    /// `build_pseudobulk` with `skip_materialize = true` rely on the
-    /// already-remapped triplets and must not call
-    /// `materialize_cell_triplets` again (which would overwrite them
-    /// from the full-N_old backend).
+    /// original column layout.
     pub fn subset_cells(&mut self, selected_indices: &[usize]) {
         if selected_indices.len() == self.n_cells() {
             return; // no-op
