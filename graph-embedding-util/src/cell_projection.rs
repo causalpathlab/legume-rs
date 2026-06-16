@@ -45,9 +45,7 @@ const CONVERGE_TOL: f64 = 1e-5;
 /// (indices into `frozen_e`/`frozen_b`). Returns `(e_cell [n_cells × h]
 /// row-major, b_cell [n_cells])`. The per-cell bias `b_c` is **always**
 /// fitted (it absorbs library size, keeping `e_c` depth-corrected and
-/// well-scaled) — a caller whose model scores without a per-cell bias
-/// (e.g. bge) simply discards `b_cell`; a global per-cell offset doesn't
-/// change `e_c`'s direction.
+/// well-scaled) and kept by both callers (bge and gem).
 pub fn project_cells(
     frozen_e: &[f32],
     frozen_b: &[f32],

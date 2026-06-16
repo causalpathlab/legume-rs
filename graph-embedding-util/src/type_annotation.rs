@@ -171,7 +171,27 @@ pub fn annotate_by_projection(
     let mut cell_u = cell_emb.to_vec();
     l2_normalize_rows(&mut cell_u, n_cells, h);
 
-    // 3. Cosine score + softmax posterior + argmax, per cell (parallel rows).
+    // 2b. Bias terms (mirroring the model's additive `b_feat` / `b_cell`).
+    // The whole cell cloud points along one shared "average profile" axis
+    // (housekeeping / total expression), so on real data cells sit in a narrow
+    // cone (cos ≈ 0.96 to the mean direction). A raw cosine to each type centroid
+    // is then dominated by that shared component and every cell collapses onto
+    // whichever type best aligns with it. We correct this additively instead of
+    // geometrically:
+    //   logit(c,t) = ⟨z_c, sig_t⟩ − a_t − b_c
+    // The PER-TYPE bias `a_t = mean_c ⟨z_c, sig_t⟩ = ⟨z̄, sig_t⟩` (dot is linear,
+    // z̄ = mean unit cell) is exactly the common-mode component of type t's score
+    // — subtracting it removes the shared axis in *score* space (no renormalize,
+    // no noise blow-up on near-common-mode cells). The PER-CELL bias `b_c` then
+    // centers each cell's logits to zero mean across types — pure calibration of
+    // the softmax (it is constant across types, so it never changes the argmax),
+    // the annotation analogue of the per-cell intercept.
+    let z_bar = mean_cell(&cell_u, n_cells, h); // z̄ (NOT renormalized)
+    let type_bias: Vec<f32> = (0..n_types)
+        .map(|t| dot(&z_bar, &type_emb_ch[t * h..(t + 1) * h]))
+        .collect();
+
+    // 3. Biased score + softmax posterior + argmax, per cell (parallel rows).
     let inv_temp = 1.0 / cfg.temperature.max(1e-6);
     let mut posterior_nc = vec![0f32; n_cells * n_types];
     let argmax: Vec<(usize, f32)> = posterior_nc
@@ -180,7 +200,12 @@ pub fn annotate_by_projection(
         .map(|(n, post)| {
             let cu = &cell_u[n * h..(n + 1) * h];
             for c in 0..n_types {
-                post[c] = dot(cu, &type_emb_ch[c * h..(c + 1) * h]);
+                post[c] = dot(cu, &type_emb_ch[c * h..(c + 1) * h]) - type_bias[c];
+            }
+            // Per-cell bias b_c = mean logit across types (calibration only).
+            let b_c = post.iter().sum::<f32>() / n_types.max(1) as f32;
+            for v in post.iter_mut() {
+                *v -= b_c;
             }
             softmax_inplace(post, inv_temp);
             let mut best = 0usize;
@@ -193,7 +218,10 @@ pub fn annotate_by_projection(
         })
         .collect();
 
-    // 4. Permutation null → per-cell, per-type z-scores.
+    // 4. Permutation null → per-cell, per-type z-scores. The z-score already
+    // standardizes each type against its own null mean (a per-type baseline), so
+    // it is invariant to the additive bias terms above — score it on the raw
+    // unit-normalized cosine.
     let zscore_nc = (cfg.n_perm > 0 && n_types > 0).then(|| {
         permutation_zscores(
             feature_emb,
@@ -248,6 +276,26 @@ fn type_signatures(
             }
         });
     out
+}
+
+/// Mean of the `[n × h]` row-major unit cell vectors, `z̄ = (1/n) Σ_c z_c`
+/// (NOT renormalized — its shrunken magnitude is what makes the per-type bias
+/// `a_t = ⟨z̄, sig_t⟩` equal the empirical mean score `mean_c ⟨z_c, sig_t⟩`).
+fn mean_cell(rows: &[f32], n: usize, h: usize) -> Vec<f32> {
+    let mut mu = vec![0f32; h];
+    if n == 0 || h == 0 {
+        return mu;
+    }
+    for r in rows.chunks_exact(h) {
+        for (m, &x) in mu.iter_mut().zip(r) {
+            *m += x;
+        }
+    }
+    let inv = 1.0 / n as f32;
+    for m in mu.iter_mut() {
+        *m *= inv;
+    }
+    mu
 }
 
 /// `[N × C]` null-standardized z-scores. For each type we draw `n_perm`

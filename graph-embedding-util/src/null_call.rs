@@ -517,9 +517,36 @@ fn empty_boundary(gmm: &Gmm1d) -> f64 {
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .unwrap_or(0);
-    valley_in(gmm, gmm.mu[0], gmm.mu[bulk]) // prefer the empty/real gap below the bulk
-        .or_else(|| valley_in(gmm, gmm.mu[bulk], gmm.mu[k - 1])) // else above it
-        .unwrap_or(f64::NEG_INFINITY)
+    // The empty↔real gap can lie below the bulk (empties are a minority mode
+    // under a real bulk — converged gem) OR above it (the empties ARE the bulk —
+    // ~99%-ambient raw droplets, where the most massive mode is the empty one).
+    // We can't assume which, so take BOTH candidate valleys and keep the DEEPER
+    // (lower mixture density) one: the genuine empty/real separation is the most
+    // prominent density minimum, whereas a spurious within-mode dip (e.g. the
+    // ambient population split into several components) is shallow. Anchoring
+    // only on "below the bulk" mis-fired on majority-ambient data — it returned
+    // a shallow within-ambient dip and kept ~99% of the empties.
+    let below = valley_in(gmm, gmm.mu[0], gmm.mu[bulk]);
+    let above = valley_in(gmm, gmm.mu[bulk], gmm.mu[k - 1]);
+    match (below, above) {
+        (Some(b), Some(a)) => {
+            if mixture_density(gmm, b) <= mixture_density(gmm, a) {
+                b
+            } else {
+                a
+            }
+        }
+        (Some(b), None) => b,
+        (None, Some(a)) => a,
+        (None, None) => f64::NEG_INFINITY,
+    }
+}
+
+/// Mixture density `Σ_j π_j · N(t; μ_j, σ_j)` at `t`.
+fn mixture_density(gmm: &Gmm1d, t: f64) -> f64 {
+    (0..gmm.mu.len())
+        .map(|j| gmm.pi[j] * gauss1d(t, gmm.mu[j], gmm.sg[j]))
+        .sum()
 }
 
 /// The genuine interior density valley of the mixture over `[lo, hi]`: the
@@ -530,15 +557,9 @@ fn valley_in(gmm: &Gmm1d, lo: f64, hi: f64) -> Option<f64> {
     if hi <= lo {
         return None;
     }
-    let k = gmm.mu.len();
-    let dens = |t: f64| -> f64 {
-        (0..k)
-            .map(|j| gmm.pi[j] * gauss1d(t, gmm.mu[j], gmm.sg[j]))
-            .sum()
-    };
     let steps = 2000usize;
     let t_at = |i: usize| lo + (hi - lo) * i as f64 / steps as f64;
-    let d: Vec<f64> = (0..=steps).map(|s| dens(t_at(s))).collect();
+    let d: Vec<f64> = (0..=steps).map(|s| mixture_density(gmm, t_at(s))).collect();
     let j = (0..=steps)
         .min_by(|&a, &b| d[a].partial_cmp(&d[b]).unwrap_or(std::cmp::Ordering::Equal))
         .unwrap_or(0);

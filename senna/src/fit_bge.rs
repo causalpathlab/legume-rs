@@ -233,7 +233,7 @@ pub struct BgeArgs {
 
     #[arg(
         long = "max-grad-norm",
-        default_value_t = 0.0,
+        default_value_t = 1.0,
         help = "Global-norm gradient clip per AdamW step (0 = off). When > 0, \
                 gradients are scaled down if their global L2 norm exceeds this, \
                 bounding embedding inflation on NCE loss spikes."
@@ -242,15 +242,17 @@ pub struct BgeArgs {
 
     #[arg(
         long = "cell-null-fdr",
-        default_value_t = 0.0,
-        help = "When > 0, run the EB empty-droplet cell call on the pre-L2 \
-                projection norm, then MASK the empties out and re-fit on the \
-                survivors; writes {out}.cell_qc.parquet (norm + kept flag) and \
-                {out}.cell_embedding_before.parquet (all cells, pre-mask). A \
-                BIC-selected Gaussian mixture on log(norm) isolates the empty \
-                MODE (component below the density valley); cells are dropped by \
+        default_value_t = 0.05,
+        help = "Embedding-based empty-droplet call (step 2 of bge's two-step QC; \
+                0 disables). After the conservative upfront nnz floor, run the EB \
+                empty call on the pre-L2 projection norm, then MASK the empties out \
+                and re-fit on the survivors; writes {out}.cell_qc.parquet (norm + \
+                kept flag) and {out}.cell_embedding_before.parquet (all cells, \
+                pre-mask). A BIC-selected Gaussian mixture on log(norm) isolates the \
+                empty MODE (component below the density valley); cells are dropped by \
                 MAP posterior P(empty)>=0.5. This value is the target false-drop \
-                rate, used to warn when the realized rate is exceeded."
+                rate, used to warn when the realized rate is exceeded. Pass 0 to keep \
+                only the upfront floor (one-step)."
     )]
     cell_null_fdr: f32,
 
@@ -435,7 +437,7 @@ pub struct BgeArgs {
         help = "Output prefix",
         long_help = "Output prefix; produces {out}.latent.parquet,\n\
                      {out}.dictionary.parquet, {out}.feature_bias.parquet,\n\
-                     {out}.senna.json"
+                     {out}.cell_bias.parquet, {out}.senna.json"
     )]
     out: Box<str>,
 }
@@ -1162,7 +1164,8 @@ fn load_cell_cell_edges(path: &str, barcodes: &[Box<str>]) -> anyhow::Result<Vec
 ///   - `{out}.topic_embedding.parquet`  α    [K,H]   (for a later `masked-topic` finetune)
 ///   - `{out}.cell_embedding.parquet`   Z    [N,H]   (raw bge cell embedding)
 ///   - `{out}.feature_embedding.parquet`ρ    [D,H]   (raw bge feature embedding)
-///   - `{out}.feature_bias.parquet`     b_feat [D]    (no cell_bias — b_cell is dropped)
+///   - `{out}.feature_bias.parquet`     b_feat [D]
+///   - `{out}.cell_bias.parquet`        b_cell [N]    (per-cell depth sink)
 fn resolve_etm_topics(
     model: &ge::JointEmbedModel,
     feature_names: &[Box<str>],
@@ -1276,13 +1279,27 @@ fn resolve_etm_topics(
         (Some(feature_names), Some("feature")),
         Some(&h_names),
     )?;
-    // Feature bias only — bge drops the per-cell bias `b_cell`
-    // (score = E_feat·E_cell + b_feat), so no `cell_bias.parquet`.
     ge::eval::save_bias(
         &format!("{out}.feature_bias.parquet"),
         &model.b_feat,
         feature_names,
         "feature",
+    )?;
+    // Per-cell bias `b_cell` (depth sink), subset by the same QC keep mask as
+    // the cell rows above so barcodes/biases stay aligned.
+    let b_cell = match cell_keep_idx {
+        Some(keep) => {
+            let idx: Vec<u32> = keep.iter().map(|&i| i as u32).collect();
+            let idx_t = candle_core::Tensor::from_vec(idx, keep.len(), model.b_cell.device())?;
+            model.b_cell.index_select(&idx_t, 0)?
+        }
+        None => model.b_cell.clone(),
+    };
+    ge::eval::save_bias(
+        &format!("{out}.cell_bias.parquet"),
+        &b_cell,
+        &barcodes,
+        "cell",
     )?;
 
     info!(

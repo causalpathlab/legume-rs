@@ -88,11 +88,16 @@ pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
         manifest.kind
     );
 
+    // Feature embedding ρ. `bge --resolve-etm` records it explicitly; a plain
+    // `bge`/`fne` run (no ETM) writes it as `dictionary` (there `dictionary` IS
+    // E_feat, not a topic simplex), so fall back to that. ETM runs always set
+    // `feature_embedding`, so the fallback never mis-picks a β simplex.
     let feat_rel = manifest
         .outputs
         .feature_embedding
         .as_deref()
-        .context("manifest has no outputs.feature_embedding")?;
+        .or(manifest.outputs.dictionary.as_deref())
+        .context("manifest has neither outputs.feature_embedding nor outputs.dictionary")?;
     // Prefer the explicit H-space cell embedding when the run records one
     // (`bge --resolve-etm`, `resolve-embedding-space`): there `latent` is the
     // topic θ, NOT the embedding ρ lives in. Plain bge/fne set no

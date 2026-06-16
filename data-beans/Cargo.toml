@@ -6,7 +6,9 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version.workspace = true
+# Own version (decoupled from workspace.version): data-beans evolves its CLI /
+# QC API independently of the shared utility crates.
+version = "0.4.0"
 
 [[bin]]
 name = "data-beans"

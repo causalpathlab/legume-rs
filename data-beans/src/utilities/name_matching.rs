@@ -167,7 +167,12 @@ impl GeneIndex {
         let mut symbol: HashMap<String, usize> = HashMap::default();
         for (i, low) in lowered.iter().enumerate() {
             exact.entry(low.clone()).or_insert(i);
-            if let Some(sym) = low.rsplit('_').next() {
+            // Strip a faba-style aux suffix first (`SYMBOL/count/spliced` →
+            // symbol is the leading `/`-segment), then an Ensembl-style prefix
+            // (`ENSG…_CD8A` → symbol is the trailing `_`-segment). Handles
+            // either convention, or both combined (`ENSG…_CD8A/count/spliced`).
+            let core = low.split('/').next().unwrap_or(low);
+            if let Some(sym) = core.rsplit('_').next() {
                 symbol.entry(sym.to_string()).or_insert(i);
             }
         }

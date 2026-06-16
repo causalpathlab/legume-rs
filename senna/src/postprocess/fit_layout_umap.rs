@@ -100,7 +100,7 @@ const INIT_SCALE: f32 = 10.0;
 
 pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
-    let prep = preprocess_layout_data(&args.common, &resolved)?;
+    let prep = preprocess_layout_data(&args.common, &resolved, /*allow_direct_cells=*/ true)?;
 
     match &prep {
         LayoutPrep::PbThenNystrom(p) => fit_layout_umap_pb(args, &mut resolved, p),

@@ -5,9 +5,8 @@
 //! caller):
 //! - `{out}.latent.parquet` (cell × H), col prefix `h`
 //! - `{out}.dictionary.parquet` (feature × H), col prefix `h`
-//! - `{out}.feature_bias.parquet` (per-feature bias). There is no
-//!   `cell_bias.parquet`: bge drops the per-cell bias `b_cell`
-//!   (score = E_feat·E_cell + b_feat).
+//! - `{out}.feature_bias.parquet` (per-feature bias).
+//! - `{out}.cell_bias.parquet` (per-cell bias `b_cell`, the depth sink).
 
 use crate::model::JointEmbedModel;
 use candle_util::candle_core::Tensor;
@@ -30,19 +29,24 @@ pub fn save_outputs(
     out_prefix: &str,
 ) -> anyhow::Result<()> {
     let latent_path = format!("{out_prefix}.latent.parquet");
+    let cell_bias_path = format!("{out_prefix}.cell_bias.parquet");
     match ctx.cell_keep_idx {
-        // Drop QC-failed cells from the per-cell output (the row indices and
+        // Drop QC-failed cells from the per-cell outputs (the row indices and
         // barcodes are subset by the same mask, so they cannot desync).
         Some(keep) => {
             let idx: Vec<u32> = keep.iter().map(|&i| i as u32).collect();
             let idx_t = Tensor::from_vec(idx, keep.len(), model.e_cell.device())?;
             let kept = model.e_cell.index_select(&idx_t, 0)?;
+            let kept_b = model.b_cell.index_select(&idx_t, 0)?;
             let names: Vec<Box<str>> = keep.iter().map(|&i| ctx.barcodes[i].clone()).collect();
             save_embedding(&latent_path, &kept, &names, "cell")?;
+            save_bias(&cell_bias_path, &kept_b, &names, "cell")?;
         }
-        None => save_embedding(&latent_path, &model.e_cell, ctx.barcodes, "cell")?,
+        None => {
+            save_embedding(&latent_path, &model.e_cell, ctx.barcodes, "cell")?;
+            save_bias(&cell_bias_path, &model.b_cell, ctx.barcodes, "cell")?;
+        }
     }
-    // No `cell_bias.parquet` — bge drops the per-cell bias `b_cell`.
     save_embedding(
         &format!("{out_prefix}.dictionary.parquet"),
         &model.e_feat,

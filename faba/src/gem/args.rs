@@ -191,25 +191,6 @@ pub struct GemArgs {
     pub apa_sample_strip: Box<str>,
 
     #[arg(
-        long = "no-auto-cell-cutoff",
-        default_value_t = true,
-        action = clap::ArgAction::SetFalse,
-        help = "Disable automatic cell calling (keep every cell with any spliced signal)",
-        long_help = "Automatic cell calling (ON by default; pass `--no-auto-cell-cutoff`\n\
-                     to disable). Picks the spliced-nnz cutoff by 2-means clustering of\n\
-                     log(1+nnz) — the ambient↔real-cell boundary, same routine as\n\
-                     `data-beans squeeze` — prints the spliced-nnz histogram with the\n\
-                     applied cutoff marked, then **subsets the cells up front** so the\n\
-                     collapse + training + outputs all run on the called cells only (faster,\n\
-                     and ambient never shapes the model). nnz is counted over the spliced\n\
-                     rows — the features that drive the collapse. There is no separate\n\
-                     manual floor: when the distribution is unimodal (no real ambient↔cell\n\
-                     split) or when this flag disables auto-calling, only genuinely\n\
-                     zero-spliced cells (unplaceable by the spliced projection) are dropped."
-    )]
-    pub auto_cell_cutoff: bool,
-
-    #[arg(
         long,
         help = "Feature-only mode: skip cell axis in phase 1 and phase-2 projection",
         long_help = "Feature-only mode: skip the cell axis in phase 1 **and** skip the\n\
@@ -340,7 +321,7 @@ pub struct GemArgs {
 
     #[arg(
         long = "max-grad-norm",
-        default_value_t = 0.0,
+        default_value_t = 1.0,
         help = "Global-norm gradient clip for phase-1 AdamW (0 = off). When > 0, \
                 each step's gradients are scaled down if their global L2 norm \
                 exceeds this, bounding embedding inflation on loss spikes."

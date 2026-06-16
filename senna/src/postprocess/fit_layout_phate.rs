@@ -93,14 +93,20 @@ impl Default for LayoutPhateArgs {
 
 pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
     let mut resolved = resolve_inputs(&args.common)?;
-    // PHATE here is PB-level (diffusion-MDS over PB features → 2D);
-    // DirectCells manifests (RunKind::Bge / Fne) have no PB scaffolding
-    // so we redirect.
-    let LayoutPrep::PbThenNystrom(prep) = preprocess_layout_data(&args.common, &resolved)? else {
+    // PHATE is PB-level (diffusion-MDS over landmark features → 2D, O(n³) MDS),
+    // so even a graph-trained latent (bge/fne) goes through the PB-then-Nyström
+    // path: `allow_direct_cells=false` routes the embedding to landmark
+    // sampling + Nyström rather than DirectCells. Only the recompute slow path
+    // (no cached latent/cell_proj) could still yield DirectCells-free; guard it.
+    let LayoutPrep::PbThenNystrom(prep) =
+        preprocess_layout_data(&args.common, &resolved, /*allow_direct_cells=*/ false)?
+    else {
+        // Unreachable: with allow_direct_cells=false, graph-trained latents
+        // (bge/fne) route through landmark sampling and every path returns
+        // PbThenNystrom. A DirectCells here means the routing logic regressed.
         anyhow::bail!(
-            "`senna layout phate` does not support DirectCells manifests \
-             (e.g. RunKind::Bge or RunKind::Fne). Use `senna layout umap --from <manifest>` \
-             instead — UMAP runs cell-level directly on the graph-trained embedding."
+            "internal: `senna layout phate` expected a PB-then-Nyström layout prep but got \
+             DirectCells (allow_direct_cells=false should route bge/fne through landmarks)"
         );
     };
 

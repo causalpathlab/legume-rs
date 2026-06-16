@@ -566,13 +566,14 @@ pub struct QcArgs {
         default_value_t = false,
         long_help = "Disable cell quality control entirely and keep every input cell.\n\
                      \n\
-                     By DEFAULT (without this flag) cell QC is ON and DROPS cells\n\
-                     (columns): near-empty cells (fewer than --qc-min-cell-nnz\n\
-                     detected features) are omitted from the per-cell outputs, and\n\
-                     robust MAD outliers are excluded from training, so output\n\
-                     parquet files may have FEWER rows than the input. Join outputs\n\
-                     by the cell/barcode name column, not by position. Use\n\
-                     --qc-report to see what was dropped."
+                     By DEFAULT (without this flag) cell QC is a CONSERVATIVE near-empty\n\
+                     nnz floor: cells with fewer than --qc-min-cell-nnz detected features\n\
+                     are omitted from the per-cell outputs. No bimodal cut and no MAD\n\
+                     outlier drop, so the upfront gate is gentle and the model /\n\
+                     embedding makes the real empty↔real call. Outputs may still have\n\
+                     fewer rows than the input (near-empty mask) — join by the\n\
+                     cell/barcode name column, not by position. Use --qc-report to see\n\
+                     what was dropped."
     )]
     pub no_qc: bool,
 
@@ -638,32 +639,14 @@ pub struct QcArgs {
     pub qc_report: Option<Box<str>>,
 
     #[arg(
-        long = "no-qc-auto-cutoff",
-        default_value_t = true,
-        action = clap::ArgAction::SetFalse,
-        help = "Disable automatic cell calling (then only the near-empty floor + MAD apply)",
-        long_help = "Automatic cell calling (ON by default; pass `--no-qc-auto-cutoff` to\n\
-                     disable). Picks the per-cell nnz cutoff by 2-means clustering of\n\
-                     log(1+nnz) — the ambient↔real-cell boundary, same routine as\n\
-                     `data-beans squeeze` — and train-drops every cell below it, then prints\n\
-                     the nnz histogram. The 2-means cutoff is authoritative; there is no\n\
-                     redundant --qc-min-cell-nnz floor on it (that flag only drives the\n\
-                     separate near-empty output mask). Because the caller subsets the\n\
-                     backend to `train_keep` (mask_columns), the called-out ambient droplets\n\
-                     are removed up front and never shape the model. A BIC guard suppresses\n\
-                     the split on unimodal / already-filtered inputs (no cutoff applied)."
-    )]
-    pub qc_auto_cutoff: bool,
-
-    #[arg(
         long = "qc-histogram",
         default_value_t = false,
-        help = "Print the per-cell nnz histogram even when auto-cutoff is disabled",
+        help = "Print the per-cell nnz histogram + the (diagnostic) 2-means suggested cutoff",
         long_help = "Print an ASCII histogram of the per-cell nnz distribution with the\n\
-                     suggested (2-means) and applied cutoffs marked — the same summary as\n\
-                     `data-beans squeeze --show-histogram`. Auto-cutoff already prints it;\n\
-                     this forces it under `--no-qc-auto-cutoff` (e.g. to pick\n\
-                     --qc-min-cell-nnz by hand)."
+                     suggested (2-means) cutoff marked — the same summary as\n\
+                     `data-beans squeeze --show-histogram`. Purely diagnostic: the cutoff\n\
+                     is shown, not applied (the upfront gate is the conservative\n\
+                     --qc-min-cell-nnz floor), useful for picking --qc-min-cell-nnz by hand."
     )]
     pub qc_histogram: bool,
 }
@@ -679,12 +662,21 @@ impl QcArgs {
             mito_max_frac: self.qc_mito_max_frac,
             ribo_pattern: self.qc_ribo_pattern.clone(),
             ribo_max_frac: self.qc_ribo_max_frac,
-            mad_on_n_genes: true,
-            mad_on_counts: true,
+            // Conservative-floor default: no MAD-outlier drop. The upfront gate
+            // is the near-empty nnz floor only; the model / embedding-norm
+            // empty-call makes the real call. `--qc-auto-cutoff` re-enables
+            // bimodal calling for callers that want an aggressive upfront cut.
+            mad_on_n_genes: false,
+            mad_on_counts: false,
             mad_on_mito: self.qc_mito_pattern.is_some(),
             feature_min_cells: self.qc_feature_min_cells,
             drop_outliers: true,
-            auto_cell_cutoff: self.qc_auto_cutoff,
+            // Conservative floor only: the bimodal 2-means auto-cutoff is not
+            // exposed on senna subcommands. topic/masked-topic rely on the model
+            // + flag-don't-drop; bge uses its embedding-norm empty-call (two-step
+            // QC). `QcConfig::auto_cell_cutoff` stays available for internal /
+            // test use, just never enabled via the CLI here.
+            auto_cell_cutoff: false,
             qc_histogram: self.qc_histogram,
         })
     }

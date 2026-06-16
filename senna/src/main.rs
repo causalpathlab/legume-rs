@@ -260,13 +260,13 @@ enum Commands {
                       contributes its rows to a shared feature axis; cell barcodes\n\
                       union across files. Modality-agnostic — works for any number\n\
                       of count panels (RNA, ATAC, protein, …). Bilinear\n\
-                      `E_f · E_c + b_f` scoring with per-file rebalanced sampling\n\
-                      and same-file hard negatives.\n\n\
+                      `E_f · E_c + b_f + b_c` scoring with per-file rebalanced\n\
+                      sampling and same-file hard negatives.\n\n\
                       Trains in two phases: (1) embed features + pseudobulks to\n\
                       learn the gene side, then (2) freeze it and densely fit each\n\
                       cell's embedding — every cell is swept ~once/epoch and the\n\
                       per-cell fit is separable (embarrassingly parallel).\n\n\
-                      Writes {out}.{latent,dictionary,feature_bias}.parquet,\n\
+                      Writes {out}.{latent,dictionary,feature_bias,cell_bias}.parquet,\n\
                       {out}.senna.json.",
         alias = "embed-graph",
         alias = "gbe"
