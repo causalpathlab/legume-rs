@@ -18,11 +18,11 @@ use faba::gem::args::GemArgs;
 use faba::gem::cell_solve::{CellStreamCtx, SatStream};
 use faba::gem::feature_table::{BackendRowMap, FeatureTable};
 use faba::gem::manifest::{write_outputs, CellQcOutputs};
-use faba::gem::model::{GemModel, PARAM_INIT_STD};
+use faba::gem::model::GemModel;
 use faba::gem::pseudobulk::{build_pseudobulk, spliced_backend_rows, SatelliteData};
 use faba::gem::region::{load_component_annotations, ComponentAnnotation, RegionMap};
 use faba::gem::train::train;
-use graph_embedding_util::null_call::{embedding_mixture_empty_call, embedding_null_call};
+use graph_embedding_util::null_call::embedding_mixture_empty_call;
 
 /// A loaded satellite-modality backend (m6A / A2I / pA), held **separately**
 /// from the genes backend. The collapse never sees it; it only donates
@@ -364,31 +364,19 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     /////////////////////////////////////////////////////////////
 
     // The collapse places each cell from its spliced projection, so a cell with
-    // zero spliced counts is a zero vector there — unplaceable. We count
-    // non-zeros over the spliced rows only and, by default, auto-select the
-    // ambient↔real boundary by 2-means on the spliced log1p-nnz (printing the
-    // histogram); the called cells are then subset UP FRONT (see below) so the
-    // collapse + training + outputs all run on real cells only. There is no
-    // manual nnz floor — the automatic cell calling sets the cutoff. When it
-    // finds no split (unimodal) or `--no-auto-cell-cutoff` disables it, the
-    // cutoff falls back to 1, dropping only genuinely zero-spliced (unplaceable)
-    // cells.
+    // zero spliced counts is a zero vector there — unplaceable. gem's upfront
+    // cell gate is intentionally CONSERVATIVE: it drops only genuinely
+    // zero-spliced (unplaceable) cells (cutoff = 1). There is no upfront bimodal
+    // nnz cut — the real empty↔real decision is the refine pass's
+    // embedding-norm empty-call (gem's two-step QC), which uses the model's own
+    // learned signal rather than a 1-D nnz heuristic.
     let spliced_rows = spliced_backend_rows(&unified, &table, &genes_row_map);
     let cell_nnz_full =
         collect_column_stat_across_vec(unified.count_backend(), Some(&spliced_rows), None)
             .context("cell QC column statistics (spliced)")?
             .count_positives();
     let n_cells_full = unified.n_cells();
-    let suggested = if args.auto_cell_cutoff {
-        data_beans::qc::suggest_nnz_cutoff(&cell_nnz_full)
-    } else {
-        None
-    };
-    // Auto cutoff when found; otherwise 1 (drop only zero-spliced cells).
-    let cell_cutoff = suggested.unwrap_or(1).max(1);
-    if args.auto_cell_cutoff {
-        data_beans::qc::print_nnz_summary("Spliced cell", &cell_nnz_full, cell_cutoff, suggested);
-    }
+    let cell_cutoff = 1usize;
     // Single keep predicate, shared by the backend mask and the logical subset
     // below — they MUST select the same cells (and both renumber survivors in
     // ascending order) for "logical cell i ≡ backend column i" to hold.
@@ -403,7 +391,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     anyhow::ensure!(
         !kept.is_empty(),
         "cell QC dropped every cell at spliced cutoff {cell_cutoff} — no cell has a \
-         non-zero spliced count; check the inputs or pass --no-auto-cell-cutoff"
+         non-zero spliced count; check the inputs"
     );
 
     // Subset the genes backend to the called cells UP FRONT — `mask_columns`
@@ -420,12 +408,12 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // Per-cell spliced nnz for the kept cells (re-applied in the refine pass).
     let cell_nnz: Vec<f32> = kept.iter().map(|&c| cell_nnz_full[c]).collect();
     info!(
-        "cell QC (spliced non-zeros): kept {} / {} cells at cutoff {} (dropped {}){}",
+        "cell QC (spliced non-zeros): kept {} / {} cells at cutoff {} (dropped {}) \
+         [conservative; refine empty-call makes the real cut]",
         kept.len(),
         n_cells_full,
         cell_cutoff,
         n_cells_full - kept.len(),
-        if args.auto_cell_cutoff { " [auto]" } else { "" },
     );
     // After the up-front subset every remaining cell is written out.
     let keep_idx: Vec<usize> = (0..unified.n_cells()).collect();
@@ -532,17 +520,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // Refinement pass: filter dead genes + dead cells identified from pass-1,
     // rebuild everything, retrain.  Skipped when stopped early or disabled.
     if args.refine() && !stop.load(std::sync::atomic::Ordering::Relaxed) {
-        // Extract β_g as a flat row-major slice [G × H] from the trained model.
-        let beta_rows: Vec<f32> = model
-            .beta
-            .to_vec2::<f32>()
-            .context("extract beta for refine")?
-            .into_iter()
-            .flatten()
-            .collect();
-
         let ctx = Pass1Context {
-            beta_rows,
             cell_nrms: &cell_nrms,
             cell_nnz: &cell_nnz,
             cell_cutoff,
@@ -642,11 +620,6 @@ struct Pass2Outputs {
 
 /// Pass-1 (genes-only) scoring inputs bundled for `run_refine_pass`.
 struct Pass1Context<'a> {
-    /// β_g rows from the genes-only pass-1 model, flat row-major [G × H] in
-    /// f32. Scored by `embedding_null_call` (per-gene EB χ²_H null on ‖β_g‖²);
-    /// ‖β_g‖ is the emptiness signal (how much the model learned the gene).
-    beta_rows: Vec<f32>,
-
     /// Pre-L2-normalisation cell norms from phase-2 (one per original cell);
     /// `√emb_sq_norm`. The magnitude the cell projection found — near-zero
     /// means the IRLS fit nothing beyond the gene-bias background, i.e. a
@@ -739,7 +712,6 @@ fn run_refine_pass(
     stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<Pass2Outputs> {
     let Pass1Context {
-        beta_rows,
         cell_nrms,
         cell_nnz,
         cell_cutoff,
@@ -748,7 +720,6 @@ fn run_refine_pass(
         satellites,
         region_map,
     } = ctx;
-    let h = args.embedding_dim;
     let n_genes = table_p1.n_genes();
     let n_cells_old = unified.n_cells();
 
@@ -757,23 +728,17 @@ fn run_refine_pass(
     // k-means, no median×frac heuristic). nnz, the pre-L2 norm, the cutoffs and
     // each cell's pass/fail land side by side in `{out}.cell_qc.parquet`.
 
-    ///////////////////////////////////////////////////////////////////////////
-    // step 1. gene Q/C: empirical-Bayes χ²_H null call on ‖β_g‖²             //
-    ///////////////////////////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////
+    // step 1. NO gene Q/C — keep the full gene dictionary, matching senna bge. //
+    ////////////////////////////////////////////////////////////////////////////
 
-    // Null gene: never moved from init β_g ~ N(0,σ²I) ⇒ ‖β‖²/σ² ~
-    // χ²_H. We estimate σ̂² and π̂₀ from the data (ashr-style) and keep
-    // genes significant above that null at FDR `--gene-null-fdr` (see
-    // `null_call`). Per-gene and deterministic — no kmeans, no
-    // arbitrary cluster fraction.
-    let null = embedding_null_call(&beta_rows, n_genes, h, args.gene_null_fdr);
-    let live_gene_mask = null.live;
-    let n_dead_genes = n_genes - null.n_live;
-    let init_sigma2 = (PARAM_INIT_STD * PARAM_INIT_STD) as f32;
-    info!(
-        "refine: gene null call — σ̂²={:.4} (init σ²={:.4}), π̂₀={:.2}; {} / {} genes null at FDR {} → dead",
-        null.sigma2, init_sigma2, null.pi0, n_dead_genes, n_genes, args.gene_null_fdr
-    );
+    // gem does cell-only QC (like bge). An earlier EB χ²_H null call on ‖β_g‖²
+    // collapsed the dictionary to a handful of genes on ambient-heavy data
+    // (the embedding has gene signal in few genes when most droplets are empty),
+    // which then corrupted the cell empty-call and every downstream consumer
+    // (annotation, topics). Keep all genes; the cell empty-call below is the
+    // only refine filter, exactly as bge has no feature QC.
+    let live_gene_mask = vec![true; n_genes];
 
     //////////////////////
     // step 2. cell q/c //

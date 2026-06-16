@@ -486,9 +486,17 @@ pub(crate) struct DirectLayoutPrep {
     pub cell_proj_kn: Mat,
 }
 
+/// `allow_direct_cells`: when `true` (UMAP), a graph-trained latent
+/// (`RunKind::Bge`/`Fne`) returns `LayoutPrep::DirectCells` so UMAP runs
+/// cell-level directly on the embedding. When `false` (PHATE / t-SNE, whose
+/// O(n³) MDS / O(n²) repulsion can't take all cells), bge/fne fall through to
+/// the existing PB-then-Nyström landmark path — landmarks sampled from the
+/// embedding, PHATE/t-SNE on their centroids, cells placed by Nyström. No new
+/// layout machinery; just which existing path the embedding takes.
 pub(crate) fn preprocess_layout_data(
     args: &LayoutCommonArgs,
     resolved: &ResolvedViz,
+    allow_direct_cells: bool,
 ) -> anyhow::Result<LayoutPrep> {
     let resolve_from_manifest = |p: &str| -> String {
         let manifest_path = resolved.manifest_path.as_ref().expect("manifest present");
@@ -510,7 +518,7 @@ pub(crate) fn preprocess_layout_data(
 
     if let Some((p, kind)) = latent_path {
         info!("Layout latent path: PB + similarity from cached latent {p} (kind={kind})");
-        return preprocess_layout_data_from_latent(args, resolved, &p, kind);
+        return preprocess_layout_data_from_latent(args, resolved, &p, kind, allow_direct_cells);
     }
 
     let cell_proj_path: Option<String> = resolved
@@ -535,6 +543,61 @@ pub(crate) fn preprocess_layout_data(
     }
 }
 
+/// Align the freshly-loaded backend to the cells present in a cached
+/// embedding (`latent` / `cell_proj`). Upstream cell QC (e.g. `senna bge`
+/// without `--no-qc`) drops cells from the written embedding, so the cache is
+/// a subset of the data columns. Rather than erroring on the size mismatch, we
+/// **mask** the data columns down to exactly the cached cells (by barcode),
+/// reusing the re-entrant `mask_columns` path — masking, not subsetting, keeps
+/// the backend object intact and renumbers columns in data order. The data
+/// here carries no batch/group membership yet (the layout discards the batch
+/// vector), so masking is safe.
+///
+/// `mask_columns` renumbers in data-column order; bge writes its QC-kept rows
+/// in that same ascending order, so the masked backend lines up row-for-row
+/// with the cached embedding. We assert that post-mask alignment holds.
+fn align_data_to_cached_cells(
+    data_vec: &mut data_beans::sparse_io_vector::SparseIoVec,
+    cell_names_cached: &[Box<str>],
+    cache_kind: &str,
+) -> anyhow::Result<()> {
+    let data_cell_names = data_vec.column_names()?;
+    if data_cell_names == cell_names_cached {
+        return Ok(());
+    }
+    use std::collections::HashSet;
+    let cached: HashSet<&str> = cell_names_cached.iter().map(|s| s.as_ref()).collect();
+    let keep: Vec<bool> = data_cell_names
+        .iter()
+        .map(|n| cached.contains(n.as_ref()))
+        .collect();
+    let n_keep = keep.iter().filter(|&&k| k).count();
+    anyhow::ensure!(
+        n_keep == cell_names_cached.len(),
+        "cached {cache_kind} has {} cell(s) absent from the data ({} of {} data columns matched) \
+         — the cached embedding and the manifest's data input look mismatched",
+        cell_names_cached.len() - n_keep,
+        n_keep,
+        data_cell_names.len()
+    );
+    data_vec.mask_columns(&keep)?;
+    let masked = data_vec.column_names()?;
+    anyhow::ensure!(
+        masked == cell_names_cached,
+        "after masking to the cached {cache_kind} cells, data column order does not match the \
+         cached embedding's row order (masked={}, cache={}) — cached rows are not in data order",
+        masked.len(),
+        cell_names_cached.len()
+    );
+    info!(
+        "Layout: masked data to the {} cell(s) with a cached {cache_kind} embedding \
+         ({} dropped upstream, e.g. by cell QC)",
+        n_keep,
+        data_cell_names.len() - n_keep
+    );
+    Ok(())
+}
+
 /// Latent-driven layout: topic θ is log-softmax on disk, so we apply
 /// Hellinger (`exp().sqrt()`) to make cosine ≡ Bhattacharyya; SVD
 /// scores are z-scored instead. PBs come from a random landmark
@@ -546,27 +609,23 @@ fn preprocess_layout_data_from_latent(
     resolved: &ResolvedViz,
     latent_path: &str,
     kind: crate::run_manifest::RunKind,
+    allow_direct_cells: bool,
 ) -> anyhow::Result<LayoutPrep> {
-    let SparseDataWithBatch { data: data_vec, .. } =
-        read_data_on_shared_rows(ReadSharedRowsArgs {
-            data_files: resolved.data_files.clone(),
-            batch_files: resolved.batch_files.clone(),
-            preload: args.preload_data,
-            ..Default::default()
-        })?;
+    let SparseDataWithBatch {
+        data: mut data_vec, ..
+    } = read_data_on_shared_rows(ReadSharedRowsArgs {
+        data_files: resolved.data_files.clone(),
+        batch_files: resolved.batch_files.clone(),
+        preload: args.preload_data,
+        ..Default::default()
+    })?;
 
     let MatWithNames {
         rows: cell_names_cached,
         cols: _,
         mat: latent_nk,
     } = Mat::from_parquet_with_row_names(latent_path, Some(0))?;
-    let data_cell_names = data_vec.column_names()?;
-    anyhow::ensure!(
-        data_cell_names == cell_names_cached,
-        "cached latent cells don't match data columns (cache={}, data={})",
-        cell_names_cached.len(),
-        data_cell_names.len()
-    );
+    align_data_to_cached_cells(&mut data_vec, &cell_names_cached, "latent")?;
 
     let tau = args.theta_temperature.max(1e-6);
     let mut feat_kn: Mat = latent_nk.transpose();
@@ -606,10 +665,12 @@ fn preprocess_layout_data_from_latent(
     // entirely and let the layout subcommand work cell-level directly.
     // Topic / SVD latents are noisier and still benefit from the PB
     // summarization, so they fall through to the landmark path below.
-    if matches!(
-        kind,
-        crate::run_manifest::RunKind::Bge | crate::run_manifest::RunKind::Fne
-    ) {
+    if allow_direct_cells
+        && matches!(
+            kind,
+            crate::run_manifest::RunKind::Bge | crate::run_manifest::RunKind::Fne
+        )
+    {
         info!("Graph-trained latent → DirectCells mode: skipping PB landmark sampling");
         return Ok(LayoutPrep::DirectCells(DirectLayoutPrep {
             data_vec,
@@ -791,13 +852,14 @@ fn preprocess_layout_data_from_cache(
     // 1. Lightweight data open: no projection, no collapse. Only pays
     //    for barcode / gene-name metadata + any batch annotation, which
     //    we need later for output parquet headers.
-    let SparseDataWithBatch { data: data_vec, .. } =
-        read_data_on_shared_rows(ReadSharedRowsArgs {
-            data_files: resolved.data_files.clone(),
-            batch_files: resolved.batch_files.clone(),
-            preload: args.preload_data,
-            ..Default::default()
-        })?;
+    let SparseDataWithBatch {
+        data: mut data_vec, ..
+    } = read_data_on_shared_rows(ReadSharedRowsArgs {
+        data_files: resolved.data_files.clone(),
+        batch_files: resolved.batch_files.clone(),
+        preload: args.preload_data,
+        ..Default::default()
+    })?;
 
     // 2. Load the cached projection (written as cells × proj_dim). The
     //    transpose lands us in column-per-cell layout expected by the
@@ -807,13 +869,7 @@ fn preprocess_layout_data_from_cache(
         cols: _,
         mat: proj_nk,
     } = Mat::from_parquet_with_row_names(cell_proj_path, Some(0))?;
-    let data_cell_names = data_vec.column_names()?;
-    anyhow::ensure!(
-        data_cell_names == cell_names_cached,
-        "cached cell_proj cells don't match data columns (cache={}, data={})",
-        cell_names_cached.len(),
-        data_cell_names.len()
-    );
+    align_data_to_cached_cells(&mut data_vec, &cell_names_cached, "cell_proj")?;
     let mut proj_kn: Mat = proj_nk.transpose();
     info!(
         "Loaded cell_proj: {} cells × {} proj-dims",

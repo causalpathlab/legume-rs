@@ -6,11 +6,9 @@
 //!
 //!   `score(f, c) = E_feat[f] · E_cell[c] + b_feat[f] + b_cell[c]`
 //!
-//! Note: the bge driver (`fit()` in `fit.rs`) drops `b_cell` — it carries
-//! no cell-type signal (the NCE negatives share the positive's cell) and
-//! only siphons the sparse per-cell gradient — so for bge the effective
-//! score is `E_feat[f] · E_cell[c] + b_feat[f]`. Other callers (e.g. pinto)
-//! still use `b_cell`.
+//! All callers (bge, gem, pinto) use the full score: the per-cell bias
+//! `b_cell` absorbs library size, so it is trained in phase 1, re-fitted
+//! analytically in phase 2, and written out.
 //!
 //! Features are addressed at fine resolution. The cell axis is
 //! coarsened: cell embeddings are mean-pooled (per the batch's chosen

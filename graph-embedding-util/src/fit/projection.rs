@@ -9,12 +9,16 @@ use log::info;
 /// prior stands in for the (infeasible) all-feature softmax partition.
 pub(crate) const PHASE2_RIDGE: f32 = 1.0;
 
+/// One cell's phase-2 solve result: `(cell_id, L2-direction latent, depth-free
+/// biplot embedding, raw-count MAP norm, per-cell bias b_c)`.
+type SolvedCell = (usize, Vec<f32>, Vec<f32>, f32, f32);
+
 /// Phase 2 — project every cell onto the fixed feature dictionary, in
 /// parallel, and overwrite the `e_cell` var. The gated feature embedding is
 /// condition-dependent (`E_feat ⊙ exp(z·δ̄_s)`), so cells are grouped by
 /// condition and each condition's gated table is built once. The per-cell
-/// bias is fitted (to absorb library size) but discarded — bge scores
-/// without it.
+/// bias is fitted (to absorb library size) and written into the `b_cell`
+/// var alongside `e_cell` (consistent with `faba gem`).
 ///
 /// The stored latent (`model.e_cell`) is the **L2 direction** of the baseline
 /// Poisson-MAP embedding — depth-robust and best for clustering/UMAP. (Storing
@@ -54,6 +58,7 @@ pub(crate) fn project_cells_phase2(
     let b_feat: Vec<f32> = model.b_feat.to_vec1()?;
     let delta_centered = model.delta.broadcast_sub(&model.delta.mean_keepdim(1)?)?;
     let mut e_out: Vec<f32> = model.e_cell.flatten_all()?.to_vec1()?;
+    let mut b_out: Vec<f32> = model.b_cell.to_vec1()?;
     let mut cell_nrms = vec![0f32; n_cells];
     let mut scaled = vec![0f32; n_cells * h]; // biplot side embedding (returned)
 
@@ -93,15 +98,17 @@ pub(crate) fn project_cells_phase2(
         let gated = model.e_feat.broadcast_mul(&logdev.exp()?)?;
         let gated_flat: Vec<f32> = gated.flatten_all()?.to_vec1()?;
 
-        let solved: Vec<(usize, Vec<f32>, Vec<f32>, f32)> = idxs
+        let solved: Vec<SolvedCell> = idxs
             .par_iter()
             .map(|&i| {
                 let (cell, feats, counts) = cells[i];
                 // Baseline MAP on RAW counts → L2 direction (the latent) + the
-                // depth-coupled norm the empty-droplet QC keys on.
+                // depth-coupled norm the empty-droplet QC keys on. The fitted
+                // intercept `b_c` absorbs library size and is kept (written to
+                // `b_cell`), consistent with faba gem.
                 let edges: Vec<(u32, f32)> =
                     feats.iter().zip(counts).map(|(&f, &c)| (f, c)).collect();
-                let (e_map, _) = solve_one_cell(&edges, &gated_flat, &b_feat, h, lambda);
+                let (e_map, b_c) = solve_one_cell(&edges, &gated_flat, &b_feat, h, lambda);
                 let nrm_map = norm(&e_map);
                 let dir: Vec<f32> = if nrm_map > 1e-8 {
                     e_map.iter().map(|x| x / nrm_map).collect()
@@ -118,13 +125,14 @@ pub(crate) fn project_cells_phase2(
                     .map(|(&f, &c)| (f, c * sc))
                     .collect();
                 let (e_n, _) = solve_one_cell(&edges_n, &gated_flat, &b_feat, h, lambda);
-                (cell as usize, dir, e_n, nrm_map)
+                (cell as usize, dir, e_n, nrm_map, b_c)
             })
             .collect();
-        for (cell, dir, e_n, nrm_map) in solved {
+        for (cell, dir, e_n, nrm_map, b_c) in solved {
             e_out[cell * h..(cell + 1) * h].copy_from_slice(&dir);
             scaled[cell * h..(cell + 1) * h].copy_from_slice(&e_n);
             cell_nrms[cell] = nrm_map;
+            b_out[cell] = b_c;
         }
     }
 
@@ -155,14 +163,18 @@ pub(crate) fn project_cells_phase2(
     }
 
     let e_t = Tensor::from_vec(e_out, (n_cells, h), dev)?;
-    varmap
-        .data()
-        .lock()
-        .unwrap()
-        .get("e_cell")
-        .context("e_cell var missing")?
-        .set(&e_t)?;
+    let b_t = Tensor::from_vec(b_out, n_cells, dev)?;
+    {
+        let vars = varmap.data().lock().unwrap();
+        vars.get("e_cell")
+            .context("e_cell var missing")?
+            .set(&e_t)?;
+        vars.get("b_cell")
+            .context("b_cell var missing")?
+            .set(&b_t)?;
+    }
     model.e_cell = e_t;
+    model.b_cell = b_t;
     Ok((cell_nrms, scaled))
 }
 

@@ -22,7 +22,6 @@ use crate::training::{
     CompositeMode, CompositeTrainContext,
 };
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
-use candle_util::frozen_features::trainable_vars;
 use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, MultilevelParams};
 use data_beans_alg::random_projection::RandProjOps;
 use log::info;
@@ -39,9 +38,9 @@ use samplers::{build_active_samplers, build_smoother, subsample_cell_samplers_mu
 
 /// Composite-objective gbe fit — trained in **two phases**.
 ///
-/// The bilinear score is `E_feat[f]·E_cell[c] + b_feat[f]` (no per-cell
-/// bias — `b_cell` is dropped: it carries no cell-type signal and only
-/// siphons the sparse per-cell gradient).
+/// The bilinear score is `E_feat[f]·E_cell[c] + b_feat[f] + b_cell[c]` —
+/// the per-cell bias `b_cell` absorbs library size (consistent with
+/// `faba gem`).
 ///
 /// **Phase 1 — features + pseudobulks.** Train only the pseudobulk axes
 /// (coarsest..finest from `collapse_columns_multilevel_vec`, pseudobulk-
@@ -368,11 +367,11 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
 
     let mut smoother = build_smoother(config.feature_network.take(), n_features, h)?;
 
-    // Note on biases: the per-CELL bias `b_cell` is dropped (see `fit()`
-    // doc / `model.rs`) — never trained, never written. The per-PB biases
-    // (`pb_l*_b_cell`) DO train in phase 1: a per-pseudobulk bias absorbs
-    // that pb's depth so the shared `E_feat` captures composition, not
-    // library size.
+    // Note on biases: the per-CELL bias `b_cell` and the per-PB biases
+    // (`pb_l*_b_cell`) BOTH train in phase 1 — a per-sample bias absorbs
+    // that sample's depth so the shared `E_feat` captures composition, not
+    // library size. `b_cell` is re-fitted analytically in phase 2 and
+    // written alongside `e_cell` (consistent with `faba gem`).
 
     let cell_cell_training = cell_cell_built.as_ref().map(|p| CellCellTraining {
         samplers: &p.samplers,
@@ -425,8 +424,8 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // Phase 1: joint training //
     /////////////////////////////
 
-    // The cell axis is trained HERE (e_cell trainable; base `b_cell` dropped,
-    // pb `pb_l*_b_cell` stay trainable) so the per-cell stratified sampler —
+    // The cell axis is trained HERE (e_cell + b_cell trainable, as are the
+    // pb `pb_l*_b_cell`) so the per-cell stratified sampler —
     // which guarantees coverage of rare/shallow cells — shapes `E_feat`.
     // Without the cell axis, `E_feat` is driven only by pb aggregates and rare
     // compartments (DC/NK/HSPC) collapse into abundant ones. Phase 2 then
@@ -442,7 +441,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             joint_axes.push(cell_axis);
         }
         joint_axes.append(&mut pb_axes);
-        let mut opt1 = AdamW::new(trainable_vars(&varmap, &["b_cell"]), adamw_params())?;
+        let mut opt1 = AdamW::new(varmap.all_vars(), adamw_params())?;
         let mut p1 = stage_params(&config);
         p1.composite_mode = CompositeMode::Sum;
         info!(
@@ -470,8 +469,8 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // ---- Phase 2: analytical per-cell projection onto the fixed feature
     // side. With E_feat/b_feat/z/δ held fixed, each cell's embedding is
     // independent — so rather than SGD over `e_cell`, project every cell
-    // directly (Poisson MAP, ridge prior) in parallel. bge scores without a
-    // per-cell bias, so the intercept is dropped. See `crate::cell_projection`.
+    // directly (Poisson MAP, ridge prior) in parallel. The per-cell
+    // intercept `b_cell` is fitted and kept. See `crate::cell_projection`.
     let mut cell_nrms: Vec<f32> = Vec::new();
     let mut cell_embedding_scaled: Vec<f32> = Vec::new();
     if !stop.load(std::sync::atomic::Ordering::Relaxed) {
