@@ -54,12 +54,21 @@ pub fn solve_cell_embeddings(
     let (ids, per_cell) = collect_identities(pools, n_cells);
     // 2. Frozen feature embeddings (one batched device pass → CPU).
     let (frozen_e, frozen_b) = embed_identities(model, &ids, h)?;
-    // 3. Parallel per-cell Poisson-MAP projection (shared solver).
+    // 3. Parallel per-cell Poisson-MAP projection (shared solver), with a
+    //    per-cell progress bar over the rayon fan-out.
     let lambda = args.phase2_ridge.max(0.0) as f64;
+    let pb = graph_embedding_util::progress::new_progress_bar(n_cells as u64);
+    pb.set_message("cell projection");
     // gem scores with a per-cell bias (b_cell), so keep the fitted b_c.
     let (e_flat, b_flat) = graph_embedding_util::cell_projection::project_cells(
-        &frozen_e, &frozen_b, &per_cell, h, lambda,
+        &frozen_e,
+        &frozen_b,
+        &per_cell,
+        h,
+        lambda,
+        Some(&pb),
     );
+    pb.finish_and_clear();
     // 4. L2-normalise (depth → b_cell) + write back into the model vars.
     finalize_e_cell(model, e_flat, b_flat)
 }
@@ -294,6 +303,11 @@ pub fn solve_cell_embeddings_streaming(
     let mut e_flat = vec![0f32; n_cells * h];
     let mut b_flat = vec![0f32; n_cells];
 
+    // One bar across every chunk (sized to the full cell count), incremented
+    // per solved cell inside `project_cells`.
+    let pb = graph_embedding_util::progress::new_progress_bar(n_cells as u64);
+    pb.set_message("cell projection");
+
     for chunk_start in (0..n_cells).step_by(chunk_cells) {
         let chunk_end = (chunk_start + chunk_cells).min(n_cells);
         let nlocal = chunk_end - chunk_start;
@@ -362,11 +376,17 @@ pub fn solve_cell_embeddings_streaming(
         }
 
         let (e_chunk, b_chunk) = graph_embedding_util::cell_projection::project_cells(
-            &frozen_e, &frozen_b, &per_cell, h, lambda,
+            &frozen_e,
+            &frozen_b,
+            &per_cell,
+            h,
+            lambda,
+            Some(&pb),
         );
         e_flat[chunk_start * h..chunk_end * h].copy_from_slice(&e_chunk);
         b_flat[chunk_start..chunk_end].copy_from_slice(&b_chunk);
     }
+    pb.finish_and_clear();
 
     finalize_e_cell(model, e_flat, b_flat)
 }

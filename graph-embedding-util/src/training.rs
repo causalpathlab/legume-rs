@@ -25,9 +25,9 @@ use crate::loss::{
     StratifiedSampler,
 };
 use crate::model::JointEmbedModel;
+use crate::progress::new_progress_bar;
 use candle_util::candle_core::{Device, Tensor};
 use candle_util::candle_nn::AdamW;
-use indicatif::{ProgressBar, ProgressStyle};
 use log::info;
 use rand::{rngs::StdRng, RngExt, SeedableRng};
 use rand_distr::weighted::WeightedIndex;
@@ -201,12 +201,9 @@ pub fn train_composite(
 ) -> anyhow::Result<()> {
     assert!(!ctx.axes.is_empty(), "composite training needs >= 1 axis");
 
-    let prog_bar = ProgressBar::new(params.epochs as u64);
-    prog_bar.set_style(
-        ProgressStyle::with_template("{bar:30} {pos}/{len} {msg}")
-            .unwrap()
-            .progress_chars("##-"),
-    );
+    // Shared style — consistent with every other faba/senna progress bar
+    // (`[elapsed] bar pos/len (eta) msg`).
+    let prog_bar = new_progress_bar(params.epochs as u64);
 
     let mut rng = StdRng::seed_from_u64(params.seed);
     let refresh_every = smoother.as_ref().map(|s| s.refresh_epochs).unwrap_or(0);
