@@ -12,15 +12,17 @@ use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::RunningStatOps;
 use matrix_util::utils::median;
 use rayon::ThreadPoolBuilder;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use faba::gem::args::GemArgs;
 use faba::gem::cell_solve::{CellStreamCtx, SatStream};
-use faba::gem::feature_table::{BackendRowMap, FeatureTable};
+use faba::gem::feature_table::{
+    classify, parse_component_idx, parse_feature_name, BackendRowMap, FeatureTable, RowStratum,
+};
 use faba::gem::manifest::{write_outputs, CellQcOutputs};
 use faba::gem::model::GemModel;
 use faba::gem::pseudobulk::{build_pseudobulk, spliced_backend_rows, SatelliteData};
-use faba::gem::region::{load_component_annotations, ComponentAnnotation, RegionMap};
+use faba::gem::region::RegionMap;
 use faba::gem::train::train;
 use graph_embedding_util::null_call::embedding_mixture_empty_call;
 
@@ -249,6 +251,76 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         info!("tagging barcodes with per-file @sample id (stripped basename) for cross-modality matching");
     }
 
+    // Basenames per modality, computed once and reused for all strip
+    // inference below (avoids re-deriving them inside each helper).
+    let basenames_of = |files: Option<&[Box<str>]>| -> anyhow::Result<Vec<Box<str>>> {
+        files.unwrap_or(&[]).iter().map(|f| basename(f)).collect()
+    };
+    let genes_bn = basenames_of(Some(&args.genes))?;
+    let dartseq_bn = basenames_of(args.dartseq.as_deref())?;
+    let atoi_bn = basenames_of(args.atoi.as_deref())?;
+    let apa_bn = basenames_of(args.apa.as_deref())?;
+    // All satellite basenames, used to recover the genes sample id in the
+    // single-genes-file case below.
+    let sat_basenames: Vec<Box<str>> = dartseq_bn
+        .iter()
+        .chain(&atoi_bn)
+        .chain(&apa_bn)
+        .cloned()
+        .collect();
+
+    // Resolve per-modality strip suffixes (only relevant when tagging).
+    // genes: ≥2 files → LCS at `_` across genes basenames; exactly 1 file →
+    // the `_`-prefix it shares with the satellites (so a single genes file can
+    // still be matched). Satellites: LCS first, else per-file LCP against the
+    // genes sample-id set, hard-erroring if nothing lines up — that's the
+    // silent-modality-drop bug surfaced. Explicit user strips always win.
+    let genes_strip: Box<str> = if !args.genes_sample_strip.is_empty() {
+        args.genes_sample_strip.clone()
+    } else if !do_tag {
+        "".into()
+    } else if genes_bn.len() >= 2 {
+        let s = longest_common_underscore_suffix(&genes_bn);
+        if !s.is_empty() {
+            info!("auto-strip: --genes-sample-strip = {:?}", s.as_ref());
+        }
+        s
+    } else if !sat_basenames.is_empty() {
+        // Single genes file + satellites: the sample id is the longest
+        // `_`-prefix the genes basename shares with every satellite; the tail
+        // after it is the strip (e.g. `rep1_wt_genes` vs `rep1_wt_m6a_mixture`
+        // → strip `_genes`). No shared prefix → leave unstripped and let the
+        // satellite call raise the clear no-overlap error.
+        let genes_bn0 = genes_bn[0].as_ref();
+        let s: Box<str> = match longest_shared_underscore_prefix(genes_bn0, &sat_basenames) {
+            Some(prefix) if prefix.len() < genes_bn0.len() => genes_bn0[prefix.len()..].into(),
+            _ => "".into(),
+        };
+        if !s.is_empty() {
+            info!("auto-strip: --genes-sample-strip = {:?}", s.as_ref());
+        }
+        s
+    } else {
+        "".into()
+    };
+    let genes_ids: FxHashSet<Box<str>> = genes_bn
+        .iter()
+        .map(|b| strip_sample_id(b.as_ref(), &genes_strip))
+        .collect();
+
+    let resolve_sat =
+        |bn: &[Box<str>], user_strip: &str, label: &str| -> anyhow::Result<Box<str>> {
+            if bn.is_empty() || !do_tag || !user_strip.is_empty() {
+                return Ok(user_strip.into());
+            }
+            let s = infer_satellite_strip(bn, &genes_ids, label)?;
+            info!("auto-strip: --{label}-sample-strip = {:?}", s.as_ref());
+            Ok(s)
+        };
+    let dartseq_strip = resolve_sat(&dartseq_bn, &args.dartseq_sample_strip, "dartseq")?;
+    let atoi_strip = resolve_sat(&atoi_bn, &args.atoi_sample_strip, "atoi")?;
+    let apa_strip = resolve_sat(&apa_bn, &args.apa_sample_strip, "apa")?;
+
     info!(
         "loading {} genes file(s) (feature_kind={:?}, preload={})",
         args.genes.len(),
@@ -257,7 +329,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     );
     let mut unified = load_modality(
         &args.genes,
-        &args.genes_sample_strip,
+        &genes_strip,
         do_tag,
         batch_files,
         feature_kind.clone(),
@@ -283,19 +355,15 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     let satellite_specs: [(&[Box<str>], &str, &str); 3] = [
         (
             args.dartseq.as_deref().unwrap_or(&[]),
-            args.dartseq_sample_strip.as_ref(),
+            dartseq_strip.as_ref(),
             "m6A",
         ),
         (
             args.atoi.as_deref().unwrap_or(&[]),
-            args.atoi_sample_strip.as_ref(),
+            atoi_strip.as_ref(),
             "A2I",
         ),
-        (
-            args.apa.as_deref().unwrap_or(&[]),
-            args.apa_sample_strip.as_ref(),
-            "pA",
-        ),
+        (args.apa.as_deref().unwrap_or(&[]), apa_strip.as_ref(), "pA"),
     ];
     let mut satellites: Vec<SatelliteBackend> = Vec::new();
     for (files, strip, label) in satellite_specs {
@@ -336,7 +404,19 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // been cleaned. Full modelling over every modality then runs in pass 2 on
     // the QC-passed subset (see `run_refine_pass`). Without `--refine` the lone
     // pass uses all modalities. `satellites` stays alive either way for pass 2.
-    let region_map = build_region_map(args)?;
+    // Resolve `n_regions` once: explicit arg if given, else
+    // `max(component_idx) + 1` scanned from satellite row names so each
+    // component gets its own γ slot. `RegionMap` then keys per-component
+    // (clamped to n_regions − 1).
+    let n_regions: usize = match args.n_regions {
+        Some(n) => n,
+        None => {
+            let n = infer_n_regions(&satellites, 1);
+            info!("auto-regions: --num-regions = {n} (max component_idx + 1)");
+            n
+        }
+    };
+    let region_map = RegionMap::new(n_regions);
     let pass1_sats: &[SatelliteBackend] = if args.refine() { &[] } else { &satellites };
     let sat_name_lists: Vec<&[Box<str>]> = pass1_sats
         .iter()
@@ -407,14 +487,20 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     }
     // Per-cell spliced nnz for the kept cells (re-applied in the refine pass).
     let cell_nnz: Vec<f32> = kept.iter().map(|&c| cell_nnz_full[c]).collect();
-    info!(
-        "cell QC (spliced non-zeros): kept {} / {} cells at cutoff {} (dropped {}) \
-         [conservative; refine empty-call makes the real cut]",
-        kept.len(),
-        n_cells_full,
-        cell_cutoff,
-        n_cells_full - kept.len(),
-    );
+    // Only surface this line when it actually filtered something — the refine
+    // empty-call is what makes the real cut; an "kept N/N (dropped 0)" line is
+    // pure noise. The dropped path keeps the conservative reminder.
+    let n_dropped = n_cells_full - kept.len();
+    if n_dropped > 0 {
+        info!(
+            "cell QC (spliced non-zeros): kept {} / {} cells at cutoff {} (dropped {}) \
+             [conservative; refine empty-call makes the real cut]",
+            kept.len(),
+            n_cells_full,
+            cell_cutoff,
+            n_dropped,
+        );
+    }
     // After the up-front subset every remaining cell is written out.
     let keep_idx: Vec<usize> = (0..unified.n_cells()).collect();
 
@@ -967,47 +1053,194 @@ fn run_refine_pass(
     })
 }
 
-/// Per-file sample id: the file's basename (sparse-data extension stripped)
-/// with the per-flag `strip` suffix removed. `rep1_wt_genes.zarr.zip` with
-/// `strip = "_genes"` → `rep1_wt`. Empty `strip` (or a non-matching one)
-/// keeps the full basename, so two modality files of one sample merge only
-/// when their stripped basenames agree.
-fn file_sample_id(file: &str, strip: &str) -> anyhow::Result<Box<str>> {
-    let base = basename(file)?;
-    let sid = if strip.is_empty() {
-        base.as_ref()
+/// Strip the per-flag `strip` suffix from an already-computed basename.
+/// Empty (or non-matching) `strip` keeps the full basename, so two modality
+/// files of one sample merge only when their stripped basenames agree.
+fn strip_sample_id(base: &str, strip: &str) -> Box<str> {
+    if strip.is_empty() {
+        base.into()
     } else {
-        base.as_ref().strip_suffix(strip).unwrap_or(base.as_ref())
-    };
-    Ok(sid.into())
+        base.strip_suffix(strip).unwrap_or(base).into()
+    }
 }
 
-/// Load any supplied `*_components.parquet` sidecars and build the
-/// transcript-position `RegionMap`. Each sidecar is tagged with the
-/// modality label that matches its modifier row names (`m6A`, `A2I`,
-/// `pA`). With no sidecars the map is empty and every satellite falls
-/// back to region 0 (γ collapses to one per-modality offset).
-fn build_region_map(args: &GemArgs) -> anyhow::Result<RegionMap> {
-    let sidecars: [(&Option<Box<str>>, &str); 3] = [
-        (&args.dartseq_components, "m6A"),
-        (&args.atoi_components, "A2I"),
-        (&args.apa_components, "pA"),
-    ];
-    let mut records: Vec<ComponentAnnotation> = Vec::new();
-    for (path, modality) in sidecars {
-        if let Some(path) = path.as_ref() {
-            let recs = load_component_annotations(path, modality)
-                .with_context(|| format!("loading {modality} component annotations from {path}"))?;
-            info!(
-                "region: {} {} component annotations from {}",
-                recs.len(),
-                modality,
-                path
-            );
-            records.extend(recs);
+/// Per-file sample id: the file's basename (sparse-data extension stripped)
+/// with the per-flag `strip` suffix removed. `rep1_wt_genes.zarr.zip` with
+/// `strip = "_genes"` → `rep1_wt`.
+fn file_sample_id(file: &str, strip: &str) -> anyhow::Result<Box<str>> {
+    Ok(strip_sample_id(basename(file)?.as_ref(), strip))
+}
+
+/// Scan modifier-comp rows of every loaded satellite, return
+/// `max(component_idx) + 1`. Falls back to `default_n` if no parseable
+/// modifier-comp row is found (e.g. only the genes backend was loaded, or
+/// the satellites carry only `chr:pos` site rows).
+fn infer_n_regions(satellites: &[SatelliteBackend], default_n: usize) -> usize {
+    let mut max_c: u32 = 0;
+    let mut any = false;
+    for sat in satellites {
+        for name in &sat.unified.feature_names {
+            let Some(key) = parse_feature_name(name) else {
+                continue;
+            };
+            if !matches!(classify(&key), RowStratum::ModifierComp) {
+                continue;
+            }
+            if let Some(c) = parse_component_idx(&key.detail) {
+                max_c = max_c.max(c);
+                any = true;
+            }
         }
     }
-    Ok(RegionMap::from_records(&records, args.n_regions))
+    if any {
+        (max_c as usize) + 1
+    } else {
+        default_n
+    }
+}
+
+/// Longest `_`-aligned suffix shared by every basename in `names`.
+/// Returns "" with fewer than two inputs, or when no `_`-prefixed suffix
+/// (e.g. `_genes`, `_m6a_mixture`) is common to all. Greedy from the
+/// longest candidate down — picks the longest `_`-prefixed suffix of
+/// `names[0]` that's a suffix of every other entry.
+fn longest_common_underscore_suffix(names: &[Box<str>]) -> Box<str> {
+    if names.len() < 2 {
+        return "".into();
+    }
+    // Candidate `_`-aligned suffixes of the first basename, longest first.
+    let first = names[0].as_ref();
+    let mut candidates: Vec<&str> = first.match_indices('_').map(|(i, _)| &first[i..]).collect();
+    candidates.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    for cand in candidates {
+        if names[1..].iter().all(|n| n.ends_with(cand)) {
+            return cand.into();
+        }
+    }
+    "".into()
+}
+
+/// Longest `_`-aligned prefix of `name` that is a member of `candidates`.
+/// The match is `_`-bounded: a candidate `rep1_wt` matches
+/// `rep1_wt_m6a_mixture` (because the char after the prefix is `_`) but
+/// does NOT match `rep1_wtX_...`. Returns `None` when no candidate aligns.
+fn longest_underscore_prefix_in(name: &str, candidates: &FxHashSet<Box<str>>) -> Option<Box<str>> {
+    let mut best: Option<&str> = None;
+    for sid in candidates.iter() {
+        let s = sid.as_ref();
+        if !name.starts_with(s) {
+            continue;
+        }
+        // Boundary: full equality or next char is `_`.
+        if name.len() != s.len() && !name[s.len()..].starts_with('_') {
+            continue;
+        }
+        if best.is_none_or(|b| s.len() > b.len()) {
+            best = Some(s);
+        }
+    }
+    best.map(|s| s.into())
+}
+
+/// Longest `_`-aligned prefix of `name` that is also a `_`-aligned prefix
+/// of *every* entry in `others`. `_`-aligned = the prefix is the whole
+/// string or is immediately followed by `_`. Returns `None` when not even
+/// the first `_`-segment is shared. Used to recover a **single** genes
+/// file's sample id from the satellite basenames it must co-sample with
+/// (e.g. `rep1_wt_genes` + `rep1_wt_m6a_mixture` → `rep1_wt`), so the genes
+/// strip can be inferred without a second genes file to diff against.
+fn longest_shared_underscore_prefix(name: &str, others: &[Box<str>]) -> Option<Box<str>> {
+    // `_`-aligned prefixes of `name`, longest first: the whole name, then
+    // each truncation at a `_`.
+    let mut cands: Vec<&str> = std::iter::once(name)
+        .chain(name.match_indices('_').map(|(i, _)| &name[..i]))
+        .collect();
+    cands.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    let aligned =
+        |hay: &str, p: &str| hay == p || hay.strip_prefix(p).is_some_and(|r| r.starts_with('_'));
+    cands
+        .into_iter()
+        .find(|p| others.iter().all(|o| aligned(o.as_ref(), p)))
+        .map(|p| p.into())
+}
+
+/// Infer the strip suffix for one satellite modality from its `basenames`.
+///
+/// Algorithm:
+///   1. If ≥2 files: try LCS-at-`_` across this modality's basenames.
+///      Accept when every stripped name is a known genes sample id.
+///   2. Else (1 file, or LCS failed): per file, find the longest
+///      `_`-aligned prefix in `genes_ids` and take the tail as the strip.
+///      Accept when every file yields the *same* tail.
+///   3. Otherwise: hard error with both sample-id sets surfaced so the
+///      user can set `--{label}-sample-strip` explicitly.
+fn infer_satellite_strip(
+    basenames: &[Box<str>],
+    genes_ids: &FxHashSet<Box<str>>,
+    label: &str,
+) -> anyhow::Result<Box<str>> {
+    // No files → no strip (the caller already short-circuits empty modalities;
+    // this keeps the `tails[0]` access below sound for any future caller).
+    if basenames.is_empty() {
+        return Ok("".into());
+    }
+
+    // Genes ids, sorted, for any error message (the source is a HashSet, so
+    // sort to keep the diagnostic deterministic run-to-run / test-stable).
+    let sorted_genes_ids = || {
+        let mut v: Vec<&str> = genes_ids.iter().map(|s| s.as_ref()).collect();
+        v.sort_unstable();
+        v
+    };
+
+    // Path 1: LCS across this modality's basenames, validated against genes ids.
+    if basenames.len() >= 2 {
+        let lcs = longest_common_underscore_suffix(basenames);
+        if !lcs.is_empty() {
+            let ok = basenames.iter().all(|b| {
+                b.as_ref()
+                    .strip_suffix(lcs.as_ref())
+                    .is_some_and(|s| genes_ids.contains(s))
+            });
+            if ok {
+                return Ok(lcs);
+            }
+        }
+    }
+
+    // Path 2: per-file LCP against genes ids; tails must agree.
+    let mut tails: Vec<Box<str>> = Vec::with_capacity(basenames.len());
+    for b in basenames {
+        match longest_underscore_prefix_in(b.as_ref(), genes_ids) {
+            Some(sid) => {
+                let tail = &b.as_ref()[sid.len()..];
+                tails.push(tail.into());
+            }
+            None => {
+                anyhow::bail!(
+                    "{label} sample ids don't overlap with genes sample ids.\n  \
+                     genes sample ids: {:?}\n  \
+                     {label} basenames: {:?}\n  \
+                     No `_`-aligned suffix or prefix lines up. Set --genes-sample-strip \
+                     and/or --{label}-sample-strip so both reduce to the same sample id.",
+                    sorted_genes_ids(),
+                    basenames.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+                );
+            }
+        }
+    }
+    let first = tails[0].clone();
+    if tails.iter().all(|t| *t == first) {
+        return Ok(first);
+    }
+    anyhow::bail!(
+        "{label} files imply inconsistent sample-id strips.\n  \
+         genes sample ids: {:?}\n  \
+         per-file inferred strips: {:?}\n  \
+         Pass --{label}-sample-strip <SUFFIX> to override.",
+        sorted_genes_ids(),
+        tails.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+    );
 }
 
 /// Argument-level sanity checks before any I/O or training. Surfaces
@@ -1025,11 +1258,9 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
         "--num-programs must be > 0 (got {})",
         args.n_programs
     );
-    anyhow::ensure!(
-        args.n_regions > 0,
-        "--num-regions must be > 0 (got {})",
-        args.n_regions
-    );
+    if let Some(n) = args.n_regions {
+        anyhow::ensure!(n > 0, "--num-regions must be > 0 (got {n})");
+    }
     anyhow::ensure!(
         args.tau.is_finite() && (0.0..=1.0).contains(&args.tau),
         "--tau must be a finite value in [0, 1] (got {})",
@@ -1086,3 +1317,6 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
