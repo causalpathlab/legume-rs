@@ -35,13 +35,13 @@ pub fn run_mixture_model(
 
     let membership = params.load_membership()?;
 
-    // Collect cell-level stats from all WT BAM files, tagging each
-    // observation with the batch (replicate) it came from. Components are
-    // fit on the POOLED observations (shared across replicates), but the
-    // per-cell counts are written out PER BATCH — so the batch tag must
-    // ride along all the way to the output split.
+    // Collect cell-level stats from each replicate, tagging each observation
+    // with its batch index. Components are fit on the POOLED observations
+    // (shared across replicates), but the per-cell counts are written out PER
+    // BATCH, so the batch tag rides along to the output split.
     let batch_names = uniq_batch_names(&params.wt_bam_files)?;
-    let mut all_stats: Vec<(usize, CellBarcode, BedWithGene, ConversionData)> = Vec::new();
+
+    let mut fit_stats: Vec<(usize, CellBarcode, BedWithGene, ConversionData)> = Vec::new();
     for (batch_idx, bam_file) in params.wt_bam_files.iter().enumerate() {
         let stats = gather_conversion_stats(
             gene_sites,
@@ -51,7 +51,7 @@ pub fn run_mixture_model(
             membership.as_ref(),
             valid_cells,
         )?;
-        all_stats.extend(
+        fit_stats.extend(
             stats
                 .into_iter()
                 .map(|(cb, bed, cd)| (batch_idx, cb, bed, cd)),
@@ -59,20 +59,20 @@ pub fn run_mixture_model(
     }
 
     info!(
-        "Mixture model: collected {} cell-level observations across {} batches",
-        all_stats.len(),
-        batch_names.len()
+        "Mixture model: collected {} observations across {} batches",
+        fit_stats.len(),
+        batch_names.len(),
     );
 
-    if all_stats.is_empty() {
-        info!("No observations for mixture model");
+    if fit_stats.is_empty() {
+        info!("No observations to fit mixture model");
         return Ok(());
     }
 
     // Build a global cell index keyed by (batch, barcode) so identical
     // barcodes in different replicates stay distinct cells — and the
     // per-cell component counts can be split back out per batch downstream.
-    let mut unique_cells: Vec<(usize, CellBarcode)> = all_stats
+    let mut unique_cells: Vec<(usize, CellBarcode)> = fit_stats
         .iter()
         .map(|(b, cb, _, _)| (*b, cb.clone()))
         .collect();
@@ -87,10 +87,12 @@ pub fn run_mixture_model(
     // Group observations by gene, converting to strand-aware relative position.
     // The third tuple element is the per-observation weight (raw count under
     // Converted mode, regularized effective count under Posterior mode).
-    let mut gene_obs: rustc_hash::FxHashMap<GeneId, Vec<(usize, f32, f32)>> =
-        rustc_hash::FxHashMap::default();
-    for (batch_idx, cb, bed, meth) in &all_stats {
-        let cell_idx = cell_to_idx[&(*batch_idx, cb.clone())];
+    let make_obs = |batch_idx: usize,
+                    cb: &CellBarcode,
+                    bed: &BedWithGene,
+                    meth: &ConversionData|
+     -> (GeneId, (usize, f32, f32)) {
+        let cell_idx = cell_to_idx[&(batch_idx, cb.clone())];
         let c = meth.converted as f32;
         let u = meth.unconverted as f32;
         let n = c + u;
@@ -118,10 +120,14 @@ pub fn run_mixture_model(
         } else {
             meth.site_pos as f32
         };
-        gene_obs
-            .entry(bed.gene.clone())
-            .or_default()
-            .push((cell_idx, rel_pos, w));
+        (bed.gene.clone(), (cell_idx, rel_pos, w))
+    };
+
+    let mut gene_obs: rustc_hash::FxHashMap<GeneId, Vec<(usize, f32, f32)>> =
+        rustc_hash::FxHashMap::default();
+    for (batch_idx, cb, bed, meth) in &fit_stats {
+        let (gene, obs) = make_obs(*batch_idx, cb, bed, meth);
+        gene_obs.entry(gene).or_default().push(obs);
     }
 
     // Resolve the component-calling bandwidth once for this modality. An
@@ -238,14 +244,16 @@ pub fn run_mixture_model(
                 return;
             }
 
-            // Build triplets: (batch, cell_barcode, feature_id, count)
-            // Feature IDs: GENE/m6A/0, GENE/A2I/1, etc. using renumbered indices
+            // Build triplets: (batch, cell_barcode, feature_id, count).
+            // Feature IDs: GENE/m6A/0, GENE/A2I/1, etc. using renumbered indices.
+            // Each count references the shared (batch, barcode) cell index, so
+            // the per-batch output split routes it to its own matrix.
             let mod_suffix = match params.mod_type {
                 ModificationType::M6A { .. } => "m6A",
                 ModificationType::AtoI => "A2I",
             };
             let mut local_triplets = Vec::new();
-            for (cell_idx, component, count) in &result.cell_component_counts {
+            for (cell_idx, component, count) in result.cell_component_counts.iter() {
                 if *component == 0 {
                     continue; // skip noise
                 }

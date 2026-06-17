@@ -4,7 +4,6 @@ mod common;
 mod data;
 mod editing;
 mod gene_count;
-mod hypothesis_tests;
 mod mixture;
 mod pipeline_util;
 mod read_depth;
@@ -83,16 +82,17 @@ enum Commands {
     #[command(name = "dartseq", aliases = ["dart", "m6a"],
         about = "Quantify DART-seq m6A sites from C-to-T conversions",
         long_about = "Quantify DART-seq m6A sites from C-to-T conversions\n\n\
-            Discovers m6A methylation sites by comparing C->T (forward) or\n\
-            G->A (reverse) conversion rates between wild-type and mutant BAM\n\
-            files using binomial tests, then quantifies per-cell methylation\n\
-            at discovered sites.\n\n\
+            Discovers m6A methylation sites from reference-anchored C->T\n\
+            (forward) or G->A (reverse) conversions at the DART motif, testing\n\
+            each site against a beta-binomial sequencing-error null and\n\
+            FDR-correcting (no control/mutant sample), then quantifies per-cell\n\
+            methylation at discovered sites.\n\n\
             Outputs:\n  \
             - m6a_sites.parquet: site annotations (single)\n  \
             - {batch}_m6a_{ratio,converted,unconverted}: per-replicate\n    \
-              site-level matrices, one per WT and --mut BAM\n  \
+              site-level matrices, one per input BAM\n  \
             - {batch}_m6a_mixture (+ m6a_components.parquet): per-replicate\n    \
-              mixture counts — components fit on pooled WT replicates,\n    \
+              mixture counts — components fit on pooled replicates,\n    \
               counted per batch (shared row schema)\n\n\
             Reference:\n  \
             Meyer, \"DART-seq: an antibody-free method for global m6A\n  \
@@ -100,10 +100,10 @@ enum Commands {
             https://doi.org/10.1038/s41592-019-0570-0",
         after_long_help = "\
 Example:\n  \
-  faba dartseq wt.bam --mut ctrl.bam -g genes.gff -f genome.fa -o out/\n  \
-  faba dartseq wt1.bam,wt2.bam --mut ctrl.bam -g genes.gff -f genome.fa -o out/ \\\n    \
+  faba dartseq sample.bam -g genes.gff -f genome.fa -o out/\n  \
+  faba dartseq s1.bam,s2.bam -g genes.gff -f genome.fa -o out/ \\\n    \
     --detect-atoi --min-coverage 20\n  \
-  faba dartseq wt.bam --mut ctrl.bam -g genes.gff -f genome.fa -o out/ \\\n    \
+  faba dartseq sample.bam -g genes.gff -f genome.fa -o out/ \\\n    \
     --atoi-mask out/atoi_sites.parquet")]
     DartSeq(DartSeqCountArgs),
 
@@ -343,20 +343,20 @@ Example:\n  \
     #[command(
         name = "all",
         aliases = ["pipeline", "full", "magic"],
-        about = "Run all RNA-seq analyses: SNP → genes → ATOI → APA → DART",
+        about = "Run all RNA-seq analyses: SNP → genes → ATOI → APA → m6A",
         long_about = "Run all RNA-seq analyses in a unified pipeline\n\n\
             Orchestrates the complete analysis workflow:\n  \
             0. SNP genotyping (de novo + optional --known-snps; skip --skip-snp)\n  \
             1. Gene expression filtering (identify expressed genes)\n  \
             2. ATOI detection (A-to-I editing sites, masked by SNP)\n  \
             3. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n  \
-            4. DART analysis (m6A methylation, masked by SNP+ATOI, requires --mut)\n\n\
-            Gene filter applies after step 1; SNP mask to steps 2-4, ATOI mask\n\
-            to steps 3-4.",
+            4. m6A detection (DART C→T, masked by SNP+ATOI)\n\n\
+            Editing calls (ATOI, m6A) are reference-anchored and FDR-controlled\n\
+            against a beta-binomial error null. Gene filter applies after step 1;\n\
+            SNP mask to steps 2-4, ATOI mask to steps 3-4.",
         after_long_help = "\
 Example:\n  \
   faba all sample.bam -g genes.gff -f genome.fa -o out/\n  \
-  faba all sample.bam -g genes.gff -f genome.fa -o out/ --mut ctrl.bam\n  \
   faba all s1.bam,s2.bam -g genes.gff -f genome.fa -o out/ --skip-apa"
     )]
     All(PipelineArgs),

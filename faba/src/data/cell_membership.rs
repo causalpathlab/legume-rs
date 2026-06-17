@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use genomic_data::sam::CellBarcode;
 use matrix_util::membership::Membership;
 use rustc_hash::FxHashMap as HashMap;

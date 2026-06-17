@@ -22,13 +22,16 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Args, Debug)]
 #[command(
-    about = "Run unified RNA-seq pipeline: SNP → genes → ATOI → APA → DART",
+    about = "Run unified RNA-seq pipeline: SNP → genes → ATOI → APA → m6A",
     long_about = "Orchestrates the complete RNA-seq analysis pipeline:\n\n\
         0. SNP genotyping (de novo discovery + optional known sites)\n\
         1. Gene expression filtering (identify expressed genes)\n\
         2. ATOI detection (A-to-I editing, masked by SNP)\n\
         3. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\
-        4. DART analysis (m6A methylation, masked by SNP+ATOI, requires --mut)\n\n\
+        4. m6A detection (DART C→T, masked by SNP+ATOI)\n\n\
+        All editing calls are reference-anchored and tested per site against a\n\
+        beta-binomial sequencing-error null (--edit-error-rate/--edit-overdispersion);\n\
+        no control/mutant sample is used.\n\
         Step 0 discovers variants de novo and optionally force-calls at known\n\
         sites (--known-snps, VCF/BCF/Parquet). De novo variants are VAF-filtered\n\
         (--snp-mask-min-vaf) so RNA editing sites are preserved in the mask.\n\
@@ -39,9 +42,9 @@ pub struct PipelineArgs {
     #[arg(
         value_delimiter = ',',
         required = true,
-        help = "BAM files (WT/observed)",
-        long_help = "Comma-separated list of observed (wild-type) BAM files.\n\
-                     Used for gene counting, ATOI, APA, and DART quantification."
+        help = "Input BAM files (comma-separated)",
+        long_help = "Comma-separated BAM files used for gene counting, ATOI,\n\
+                     APA, and m6A quantification."
     )]
     pub bam_files: Vec<Box<str>>,
 
@@ -68,14 +71,6 @@ pub struct PipelineArgs {
         help = "Output directory (flat structure)"
     )]
     pub output: Box<str>,
-
-    // === Optional mutant BAMs (if missing, skip DART) ===
-    #[arg(
-        long = "mut",
-        value_delimiter = ',',
-        help = "Mutant/control BAM files for DART (skip DART if omitted)"
-    )]
-    pub mut_bam_files: Option<Vec<Box<str>>>,
 
     // === Shared parameters ===
     #[arg(long, default_value = "CB", help = "Cell barcode tag")]
@@ -122,8 +117,9 @@ pub struct PipelineArgs {
 
     #[arg(
         long,
-        default_value_t = 10,
-        help = "Minimum genes per cell (cell filtering)"
+        default_value_t = 100,
+        help = "Minimum detected genes (nnz) per cell; cells below this are \
+                dropped from gene counts and every downstream modality"
     )]
     pub cell_min_genes: usize,
 
@@ -142,8 +138,28 @@ pub struct PipelineArgs {
     )]
     pub atoi_min_conversion: usize,
 
-    #[arg(long, default_value_t = 0.05, help = "ATOI detection p-value cutoff")]
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        help = "ATOI detection FDR target (Benjamini-Hochberg q-value)"
+    )]
     pub atoi_pvalue_cutoff: f32,
+
+    // === Editing statistical null (shared by ATOI and m6A) ===
+    #[arg(
+        long = "edit-error-rate",
+        default_value_t = 0.01,
+        help = "Sequencing-error rate ε: the beta-binomial null mean the edited \
+                fraction is tested against (reference-anchored, no control sample)"
+    )]
+    pub edit_error_rate: f64,
+
+    #[arg(
+        long = "edit-overdispersion",
+        default_value_t = 0.1,
+        help = "Beta-binomial overdispersion ρ for the editing null (0 ⇒ binomial)"
+    )]
+    pub edit_overdispersion: f64,
 
     // === APA parameters ===
     #[arg(
@@ -167,7 +183,11 @@ pub struct PipelineArgs {
     #[arg(long, default_value_t = 5, help = "Minimum C-to-T conversions for m6A")]
     pub m6a_min_conversion: usize,
 
-    #[arg(long, default_value_t = 0.05, help = "m6A detection p-value cutoff")]
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        help = "m6A detection FDR target (Benjamini-Hochberg q-value)"
+    )]
     pub m6a_pvalue_cutoff: f32,
 
     // === Mixture model weighting (shared by m6A and A-to-I) ===
@@ -294,9 +314,6 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
 
     // Validate inputs
     check_all_bam_indices(&args.bam_files)?;
-    if let Some(ref mut_bams) = args.mut_bam_files {
-        check_all_bam_indices(mut_bams)?;
-    }
 
     let n_steps = 5;
 
@@ -361,15 +378,12 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
         info!("=== Step 3/{}: SKIPPED (--skip-apa) ===", n_steps);
     }
 
-    // Step 4: DART Analysis (conditional on mutant data)
-    if let Some(ref mut_bams) = args.mut_bam_files {
-        info!("=== Step 4/{}: DART analysis ===", n_steps);
-        match run_dart_step(args, mut_bams, &atoi_mask, &snp_mask, &gene_count_qc) {
-            Ok(_) => info!("DART complete"),
-            Err(e) => log::warn!("DART step failed: {}", e),
-        }
-    } else {
-        info!("=== Step 4/{}: SKIPPED (no --mut BAM files) ===", n_steps);
+    // Step 4: m6A (DART) detection — reference-anchored, single-sample
+    // (motif-anchored C→T tested vs the sequencing-error null), like ATOI.
+    info!("=== Step 4/{}: m6A detection ===", n_steps);
+    match run_dart_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
+        Ok(_) => info!("m6A complete"),
+        Err(e) => log::warn!("m6A step failed: {}", e),
     }
 
     write_pipeline_summary(args)?;
@@ -449,11 +463,7 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
     let gff_map = GffRecordMap::from_map(gene_map);
     info!("Loaded {} genes for expression filtering", gff_map.len());
 
-    // Combine all BAM files (WT + mut)
-    let mut all_bam_files = args.bam_files.clone();
-    if let Some(ref mut_files) = args.mut_bam_files {
-        all_bam_files.extend_from_slice(mut_files);
-    }
+    let all_bam_files = args.bam_files.clone();
 
     info!("Gene counting across {} BAM files:", all_bam_files.len());
     for bam in &all_bam_files {
@@ -620,21 +630,18 @@ fn run_atoi_step(
     }
 
     // Build ConversionParams for ATOI
-    let mut_bams = args.mut_bam_files.as_ref().cloned().unwrap_or_default();
-    let has_mut_files = !mut_bams.is_empty();
-
     let params = ConversionParams {
         mod_type: ModificationType::AtoI,
         genome_file: args.genome_file.clone(),
         wt_bam_files: args.bam_files.clone(),
-        mut_bam_files: mut_bams,
         gene_barcode_tag: args.gene_barcode_tag.clone(),
         cell_barcode_tag: args.cell_barcode_tag.clone(),
         include_missing_barcode: false,
         min_coverage: args.atoi_min_coverage,
         min_conversion: args.atoi_min_conversion,
-        pseudocount: 1,
         pvalue_cutoff: args.atoi_pvalue_cutoff,
+        error_rate: args.edit_error_rate,
+        overdispersion: args.edit_overdispersion,
         backend: args.backend.clone(),
         zip: args.zip,
         output: args.output.clone(),
@@ -657,8 +664,9 @@ fn run_atoi_step(
         },
     };
 
-    // Find ATOI sites (first pass)
-    info!("Discovering ATOI sites...");
+    // Find ATOI sites (first pass): reference-anchored A→G / T→C calls, each
+    // tested against the beta-binomial sequencing-error null (no control sample).
+    info!("Discovering ATOI sites (reference-anchored)...");
     let atoi_sites = find_all_conversion_sites(&gff_map, &params, None)?;
 
     // Apply SNP mask if available
@@ -686,14 +694,10 @@ fn run_atoi_step(
     atoi_sites.to_parquet(&gff_map, &sites_output)?;
     info!("Saved ATOI sites to {}", sites_output);
 
-    // Second pass: quantification (WT + mut if available)
-    if has_mut_files {
-        info!("Quantifying ATOI sites per cell (WT + mut files)...");
-    } else {
-        info!("Quantifying ATOI sites per cell (WT files only)...");
-    }
+    // Second pass: quantification per cell across all input samples.
+    info!("Quantifying ATOI sites per cell...");
     let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cell_barcodes);
-    process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, has_mut_files, valid_cells)?;
+    process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, valid_cells)?;
 
     // Mixture model: cluster editing sites per gene
     info!("Running 1D Gaussian mixture model on A-to-I sites...");
@@ -733,18 +737,7 @@ fn run_apa_step(
         None
     };
 
-    // Combine WT + mut BAM files for APA quantification
-    let mut all_bam_files = args.bam_files.clone();
-    if let Some(ref mut_files) = args.mut_bam_files {
-        if !mut_files.is_empty() {
-            info!(
-                "APA will quantify {} WT + {} mut BAM files",
-                all_bam_files.len(),
-                mut_files.len()
-            );
-            all_bam_files.extend_from_slice(mut_files);
-        }
-    }
+    let all_bam_files = args.bam_files.clone();
 
     // Extract valid gene IDs and cell barcodes from gene count QC
     let (valid_gene_ids, valid_cell_barcodes) = match gene_count_qc {
@@ -816,7 +809,6 @@ fn run_apa_step(
 // Step 4: DART analysis
 fn run_dart_step(
     args: &PipelineArgs,
-    mut_bams: &[Box<str>],
     atoi_mask: &Option<AtoiMaskData>,
     snp_mask: &Option<FxHashSet<(Box<str>, i64)>>,
     gene_count_qc: &Option<GeneCountQc>,
@@ -835,14 +827,14 @@ fn run_dart_step(
         mod_type: ModificationType::M6A { check_r_site: true },
         genome_file: args.genome_file.clone(),
         wt_bam_files: args.bam_files.clone(),
-        mut_bam_files: mut_bams.to_vec(),
         gene_barcode_tag: args.gene_barcode_tag.clone(),
         cell_barcode_tag: args.cell_barcode_tag.clone(),
         include_missing_barcode: false,
         min_coverage: args.m6a_min_coverage,
         min_conversion: args.m6a_min_conversion,
-        pseudocount: 1,
         pvalue_cutoff: args.m6a_pvalue_cutoff,
+        error_rate: args.edit_error_rate,
+        overdispersion: args.edit_overdispersion,
         backend: args.backend.clone(),
         zip: args.zip,
         output: args.output.clone(),
@@ -902,10 +894,10 @@ fn run_dart_step(
     m6a_sites.to_parquet(&gff_map, &sites_output)?;
     info!("Saved m6A sites to {}", sites_output);
 
-    // Second pass: quantification (wt + mut)
+    // Second pass: quantification per cell across all input samples.
     info!("Quantifying m6A sites per cell...");
     let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cell_barcodes);
-    process_all_bam_files_to_backend(&params, &m6a_sites, &gff_map, true, valid_cells)?;
+    process_all_bam_files_to_backend(&params, &m6a_sites, &gff_map, valid_cells)?;
 
     // Mixture model: cluster modification sites per gene
     info!("Running 1D Gaussian mixture model on m6A sites...");
@@ -927,15 +919,6 @@ fn write_pipeline_summary(args: &PipelineArgs) -> anyhow::Result<()> {
     writeln!(file, "  \"bam_files\": {:?},", args.bam_files)?;
     writeln!(file, "  \"gff_file\": {:?},", args.gff_file)?;
     writeln!(file, "  \"genome_file\": {:?},", args.genome_file)?;
-    writeln!(
-        file,
-        "  \"mut_bam_files\": {},",
-        if args.mut_bam_files.is_some() {
-            "provided"
-        } else {
-            "null"
-        }
-    )?;
     writeln!(file, "  \"output\": {:?}", args.output)?;
     writeln!(file, "}}")?;
     info!("Wrote pipeline summary to {}", summary_path);

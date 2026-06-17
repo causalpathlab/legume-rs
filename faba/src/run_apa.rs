@@ -463,8 +463,8 @@ pub struct CountApaArgs {
 
     #[arg(
         long = "cell-min-genes",
-        default_value_t = 10,
-        help = "Min genes per cell for expression QC"
+        default_value_t = 100,
+        help = "Min detected genes (nnz) per cell for expression QC"
     )]
     pub(crate) cell_min_genes: usize,
 

@@ -24,38 +24,20 @@ pub struct DartSeqCountArgs {
     #[arg(
         value_delimiter = ',',
         required = true,
-        help = "Signal BAM files (APOBEC1-YTH fusion / wild-type)",
-        long_help = "Comma-separated list of signal (wild-type / APOBEC1-YTH fusion) BAM files.\n\
-                     These contain the C->T conversions at m6A sites.\n\
-                     In DART-seq, the WT sample carries the APOBEC1-YTH fusion that\n\
-                     deaminates C-to-U near m6A sites; the mutant is the catalytically\n\
-                     dead control used to estimate background conversion rates."
+        help = "Signal BAM files (APOBEC1-YTH fusion)",
+        long_help = "Comma-separated list of signal (APOBEC1-YTH fusion) BAM files.\n\
+                     These contain the C->T conversions at m6A sites. Sites are\n\
+                     called reference-anchored: the edited fraction at each motif C\n\
+                     is tested against a beta-binomial sequencing-error null and\n\
+                     FDR-corrected — no catalytically-dead control sample is used."
     )]
     pub wt_bam_files: Vec<Box<str>>,
-
-    #[arg(
-        short = 'm',
-        long = "mut",
-        alias = "background",
-        alias = "control",
-        value_delimiter = ',',
-        required = true,
-        help = "Control BAM files (catalytically dead mutant)",
-        long_help = "Comma-separated list of control (catalytically dead mutant) BAM files.\n\
-                     Used to estimate background C->T conversion rates.\n\
-                     Sites are called where the signal BAMs show significantly higher\n\
-                     conversion than these controls (binomial test)."
-    )]
-    pub mut_bam_files: Vec<Box<str>>,
 
     #[arg(
         short = 'g',
         long = "gff",
         required = true,
-        help = "Gene annotation (`GFF`) file",
-        long_help = "Path to the gene annotation file in GFF format. \n\
-		     This file provides genomic feature information required for analysis. \n\
-		     Example: genes.gff"
+        help = "Gene annotation in GFF format (e.g. genes.gff)"
     )]
     pub gff_file: Box<str>,
 
@@ -89,20 +71,23 @@ pub struct DartSeqCountArgs {
     #[arg(
         long = "min-conversion",
         default_value_t = 5,
-        help = "Minimum number of converted reads (T) in wild-type",
-        long_help = "Minimum number of converted reads (C->T) required in wild-type sample. \n\
-		     Ensures sufficient conversion signal beyond just frequency."
+        help = "Minimum converted (C->T) reads per site"
     )]
     pub min_conversion: usize,
 
     #[arg(
-        long = "pseudocount",
-        default_value_t = 1,
-        help = "Pseudocount for null distribution in binomial test",
-        long_help = "Pseudocount added to background/mutant counts for regularization. \n\
-		     Helps avoid overly confident p-values with zero background counts."
+        long = "error-rate",
+        default_value_t = 0.01,
+        help = "Sequencing-error rate ε for the beta-binomial editing null"
     )]
-    pub pseudocount: usize,
+    pub error_rate: f64,
+
+    #[arg(
+        long = "overdispersion",
+        default_value_t = 0.1,
+        help = "Beta-binomial overdispersion ρ for the editing null (0 ⇒ binomial)"
+    )]
+    pub overdispersion: f64,
 
     #[arg(
         short = 'p',
@@ -111,9 +96,7 @@ pub struct DartSeqCountArgs {
         alias = "p-val",
         alias = "p-value",
         default_value_t = 0.05,
-        help = "Maximum detection p-value cutoff",
-        long_help = "Maximum p-value cutoff for detection. \n\
-		     Sites with p-values above this threshold will be excluded."
+        help = "Detection FDR target (Benjamini-Hochberg q-value)"
     )]
     pub pvalue_cutoff: f32,
 
@@ -196,27 +179,12 @@ pub struct DartSeqCountArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Output mutant signals",
-        long_help = "Output mutant signals (null data) in addition to wild-type signals."
-    )]
-    pub output_null_data: bool,
-
-    #[arg(
-        long,
-        default_value_t = false,
         help = "Output results in BED",
         long_help = "Output results in BED file format for genomic intervals."
     )]
     output_bed_file: bool,
 
-    #[arg(
-        short,
-        long,
-        required = true,
-        help = "Output directory",
-        long_help = "Output directory for the output files. \n\
-		     This file will contain the results in the selected format."
-    )]
+    #[arg(short, long, required = true, help = "Output directory")]
     pub output: Box<str>,
 
     #[arg(
@@ -322,7 +290,7 @@ pub struct DartSeqCountArgs {
     #[arg(
         long = "atoi-pval",
         default_value_t = 0.05,
-        help = "P-value cutoff for A-to-I detection"
+        help = "A-to-I detection FDR target (Benjamini-Hochberg q-value)"
     )]
     pub atoi_pvalue_cutoff: f32,
 
@@ -547,14 +515,14 @@ impl From<&DartSeqCountArgs> for ConversionParams {
         ConversionParams {
             genome_file: args.genome_file.clone(),
             wt_bam_files: args.wt_bam_files.clone(),
-            mut_bam_files: args.mut_bam_files.clone(),
             gene_barcode_tag: args.gene_barcode_tag.clone(),
             cell_barcode_tag: args.cell_barcode_tag.clone(),
             include_missing_barcode: args.include_missing_barcode,
             min_coverage: args.min_coverage,
             min_conversion: args.min_conversion,
-            pseudocount: args.pseudocount,
             pvalue_cutoff: args.pvalue_cutoff,
+            error_rate: args.error_rate,
+            overdispersion: args.overdispersion,
             backend: args.backend.clone(),
             zip: args.zip,
             output: args.output.clone(),
@@ -588,14 +556,14 @@ impl DartSeqCountArgs {
         ConversionParams {
             genome_file: self.genome_file.clone(),
             wt_bam_files: self.wt_bam_files.clone(),
-            mut_bam_files: self.mut_bam_files.clone(),
             gene_barcode_tag: self.gene_barcode_tag.clone(),
             cell_barcode_tag: self.cell_barcode_tag.clone(),
             include_missing_barcode: self.include_missing_barcode,
             min_coverage: self.atoi_min_coverage,
             min_conversion: self.atoi_min_conversion,
-            pseudocount: self.pseudocount,
             pvalue_cutoff: self.atoi_pvalue_cutoff,
+            error_rate: self.error_rate,
+            overdispersion: self.overdispersion,
             backend: self.backend.clone(),
             zip: self.zip,
             output: self.output.clone(),
@@ -633,13 +601,12 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     info!("will use {} threads", rayon::current_num_threads());
 
     // Validate inputs
-    if args.wt_bam_files.is_empty() || args.mut_bam_files.is_empty() {
-        return Err(anyhow::anyhow!("need pairs of bam files"));
+    if args.wt_bam_files.is_empty() {
+        return Err(anyhow::anyhow!("need at least one BAM file"));
     }
 
     // Check all BAM indices
     check_all_bam_indices(&args.wt_bam_files)?;
-    check_all_bam_indices(&args.mut_bam_files)?;
 
     // Load and filter GFF
     info!("parsing GFF file: {}", args.gff_file);
@@ -657,11 +624,9 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 
     // Gene expression QC: filter to expressed genes and valid cells
     let gene_qc = if !args.skip_gene_qc {
-        let mut all_bam_files = args.wt_bam_files.clone();
-        all_bam_files.extend_from_slice(&args.mut_bam_files);
         let qc = run_gene_count_qc(
             &args.gff_file,
-            &all_bam_files,
+            &args.wt_bam_files,
             &args.cell_barcode_tag,
             &args.gene_barcode_tag,
             args.gene_min_cells,
@@ -798,22 +763,10 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     //////////////////////////////////////////
 
     if args.output_bed_file {
-        process_all_bam_files_to_bed(
-            &m6a_params,
-            &gene_sites,
-            &gff_map,
-            args.output_cell_types,
-            args.output_null_data,
-        )?;
+        process_all_bam_files_to_bed(&m6a_params, &gene_sites, &gff_map, args.output_cell_types)?;
     } else {
         let valid_cells = gene_qc.as_ref().map(|qc| &qc.cell_barcodes);
-        process_all_bam_files_to_backend(
-            &m6a_params,
-            &gene_sites,
-            &gff_map,
-            args.output_null_data,
-            valid_cells,
-        )?;
+        process_all_bam_files_to_backend(&m6a_params, &gene_sites, &gff_map, valid_cells)?;
     }
 
     // A-to-I second pass: quantify editing sites into sparse matrices
@@ -821,13 +774,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         if !atoi_sites.is_empty() {
             info!("Second pass: A-to-I count matrix");
             let valid_cells = gene_qc.as_ref().map(|qc| &qc.cell_barcodes);
-            process_all_bam_files_to_backend(
-                &atoi_params,
-                atoi_sites,
-                &gff_map,
-                false,
-                valid_cells,
-            )?;
+            process_all_bam_files_to_backend(&atoi_params, atoi_sites, &gff_map, valid_cells)?;
         }
     }
 

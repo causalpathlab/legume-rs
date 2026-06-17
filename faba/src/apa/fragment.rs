@@ -1,6 +1,6 @@
 use crate::apa::utr_region::UtrRegion;
 use crate::data::bam_io;
-use crate::data::polya_utils::*;
+use crate::data::poly_a_utils::*;
 use genomic_data::bed::Bed;
 use genomic_data::sam::{CellBarcode, Strand, UmiBarcode};
 use rust_htslib::bam::ext::BamRecordExtensions;
@@ -27,7 +27,8 @@ pub struct FragmentCluster {
     /// that runs on the un-clustered fragments).
     #[allow(dead_code)]
     pub pa_site: Option<f32>,
-    /// Number of original fragments collapsed into this cluster.
+    /// Number of original fragments collapsed into this cluster (the EM
+    /// multiplicity weight for the representative).
     pub count: u32,
 }
 

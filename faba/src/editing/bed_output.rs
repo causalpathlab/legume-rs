@@ -17,13 +17,12 @@ pub fn process_all_bam_files_to_bed(
     gene_sites: &HashMap<GeneId, Vec<ConversionSite>>,
     gff_map: &GffRecordMap,
     output_cell_types: bool,
-    output_null_data: bool,
 ) -> anyhow::Result<()> {
     let membership = params.load_membership()?;
 
-    let wt_batch_names = uniq_batch_names(&params.wt_bam_files)?;
+    let batch_names = uniq_batch_names(&params.wt_bam_files)?;
 
-    for (bam_file, batch_name) in params.wt_bam_files.iter().zip(wt_batch_names) {
+    for (bam_file, batch_name) in params.wt_bam_files.iter().zip(batch_names) {
         let mut stats = gather_conversion_stats(
             gene_sites,
             params,
@@ -40,30 +39,6 @@ pub fn process_all_bam_files_to_bed(
             membership.as_ref(),
             output_cell_types,
         )?;
-    }
-
-    if output_null_data {
-        info!("output null data");
-        let mut_batch_names = uniq_batch_names(&params.mut_bam_files)?;
-
-        for (bam_file, batch_name) in params.mut_bam_files.iter().zip(mut_batch_names) {
-            let mut stats = gather_conversion_stats(
-                gene_sites,
-                params,
-                gff_map,
-                bam_file,
-                membership.as_ref(),
-                None,
-            )?;
-            let bed_path = format!("{}/{}.bed.gz", &params.output, batch_name);
-            write_bed(
-                &mut stats,
-                gff_map,
-                &bed_path,
-                membership.as_ref(),
-                output_cell_types,
-            )?;
-        }
     }
 
     // Log match statistics if membership was used

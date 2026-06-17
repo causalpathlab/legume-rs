@@ -28,9 +28,9 @@ pub trait ToParquet {
 /// - primary_pos: the main site position (m6a_pos for M6A, editing_pos for AtoI)
 /// - conversion_pos: nullable Int64 (Some for M6A, None/null for AtoI)
 /// - rel_pos: strand-aware relative position from gene start (0-based offset)
-/// - pv: binomial test p-value
-/// - wt_a, wt_t, wt_g, wt_c: wildtype base counts
-/// - mut_a, mut_t, mut_g, mut_c: mutant base counts
+/// - pv: raw beta-binomial p-value vs the sequencing-error null
+/// - qvalue: Benjamini-Hochberg q-value (the FDR the site cleared)
+/// - wt_a, wt_t, wt_g, wt_c: base counts at the site
 impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
     fn to_parquet<P: AsRef<Path>>(&self, gff_map: &GffRecordMap, path: P) -> Result<()> {
         let mut chr_vec: Vec<String> = Vec::new();
@@ -43,14 +43,11 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let mut conversion_pos_builder = Int64Builder::new();
         let mut rel_pos_vec: Vec<i64> = Vec::new();
         let mut pv_vec: Vec<f32> = Vec::new();
+        let mut qv_vec: Vec<f32> = Vec::new();
         let mut wt_a_vec: Vec<u64> = Vec::new();
         let mut wt_t_vec: Vec<u64> = Vec::new();
         let mut wt_g_vec: Vec<u64> = Vec::new();
         let mut wt_c_vec: Vec<u64> = Vec::new();
-        let mut mut_a_vec: Vec<u64> = Vec::new();
-        let mut mut_t_vec: Vec<u64> = Vec::new();
-        let mut mut_g_vec: Vec<u64> = Vec::new();
-        let mut mut_c_vec: Vec<u64> = Vec::new();
 
         for entry in self.iter() {
             let (gene_id, sites) = (entry.key(), entry.value());
@@ -114,16 +111,12 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
 
                 rel_pos_vec.push(rel_pos);
                 pv_vec.push(site.pv());
+                qv_vec.push(site.qv());
 
                 wt_a_vec.push(site.wt_freq().count_a() as u64);
                 wt_t_vec.push(site.wt_freq().count_t() as u64);
                 wt_g_vec.push(site.wt_freq().count_g() as u64);
                 wt_c_vec.push(site.wt_freq().count_c() as u64);
-
-                mut_a_vec.push(site.mut_freq().count_a() as u64);
-                mut_t_vec.push(site.mut_freq().count_t() as u64);
-                mut_g_vec.push(site.mut_freq().count_g() as u64);
-                mut_c_vec.push(site.mut_freq().count_c() as u64);
             }
         }
 
@@ -138,16 +131,12 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let conversion_pos_array = Arc::new(conversion_pos_builder.finish()) as ArrayRef;
         let rel_pos_array = Arc::new(Int64Array::from(rel_pos_vec)) as ArrayRef;
         let pv_array = Arc::new(Float32Array::from(pv_vec)) as ArrayRef;
+        let qv_array = Arc::new(Float32Array::from(qv_vec)) as ArrayRef;
 
         let wt_a_array = Arc::new(UInt64Array::from(wt_a_vec)) as ArrayRef;
         let wt_t_array = Arc::new(UInt64Array::from(wt_t_vec)) as ArrayRef;
         let wt_g_array = Arc::new(UInt64Array::from(wt_g_vec)) as ArrayRef;
         let wt_c_array = Arc::new(UInt64Array::from(wt_c_vec)) as ArrayRef;
-
-        let mut_a_array = Arc::new(UInt64Array::from(mut_a_vec)) as ArrayRef;
-        let mut_t_array = Arc::new(UInt64Array::from(mut_t_vec)) as ArrayRef;
-        let mut_g_array = Arc::new(UInt64Array::from(mut_g_vec)) as ArrayRef;
-        let mut_c_array = Arc::new(UInt64Array::from(mut_c_vec)) as ArrayRef;
 
         let schema = arrow::datatypes::Schema::new(vec![
             arrow::datatypes::Field::new("chr", arrow::datatypes::DataType::Utf8, false),
@@ -164,14 +153,11 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
             ),
             arrow::datatypes::Field::new("rel_pos", arrow::datatypes::DataType::Int64, false),
             arrow::datatypes::Field::new("pv", arrow::datatypes::DataType::Float32, false),
+            arrow::datatypes::Field::new("qvalue", arrow::datatypes::DataType::Float32, false),
             arrow::datatypes::Field::new("wt_a", arrow::datatypes::DataType::UInt64, false),
             arrow::datatypes::Field::new("wt_t", arrow::datatypes::DataType::UInt64, false),
             arrow::datatypes::Field::new("wt_g", arrow::datatypes::DataType::UInt64, false),
             arrow::datatypes::Field::new("wt_c", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("mut_a", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("mut_t", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("mut_g", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("mut_c", arrow::datatypes::DataType::UInt64, false),
         ]);
 
         let batch = RecordBatch::try_new(
@@ -187,14 +173,11 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
                 conversion_pos_array,
                 rel_pos_array,
                 pv_array,
+                qv_array,
                 wt_a_array,
                 wt_t_array,
                 wt_g_array,
                 wt_c_array,
-                mut_a_array,
-                mut_t_array,
-                mut_g_array,
-                mut_c_array,
             ],
         )?;
 
