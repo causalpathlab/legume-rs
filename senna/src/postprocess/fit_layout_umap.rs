@@ -84,10 +84,10 @@ pub fn run_default_umap_layout(manifest_path: &str, preload: bool) -> anyhow::Re
     args.common.preload_data = preload;
 
     let (manifest, manifest_dir) = RunManifest::load(Path::new(manifest_path))?;
-    let prefix_base = Path::new(&manifest.prefix)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| manifest.prefix.clone());
+    let prefix_base = Path::new(&manifest.prefix).file_name().map_or_else(
+        || manifest.prefix.clone(),
+        |s| s.to_string_lossy().into_owned(),
+    );
     let abs_out = manifest_dir.join(prefix_base);
     args.common.out = Some(abs_out.to_string_lossy().into_owned().into_boxed_str());
 
@@ -243,7 +243,7 @@ fn build_cell_cell_fuzzy_edges(
 
 /// Run cell-level UMAP SGD, mutating `coords` in place. Common back-end
 /// for both the PB-mode fine-tune pass and (via the shared edge
-/// builder) the DirectCells path.
+/// builder) the `DirectCells` path.
 fn run_cell_level_umap_in_place(
     coords: &mut Mat,
     edges: &[(usize, usize, f32)],

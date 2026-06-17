@@ -99,7 +99,7 @@ fn block_gene_sum(
         if kk_a < k_a {
             let row = &mut sum_a[kk_a * m..(kk_a + 1) * m];
             for (&g, &v) in rows.iter().zip(vals.iter()) {
-                row[g] += v as f64;
+                row[g] += f64::from(v);
             }
         }
         if do_b {
@@ -107,7 +107,7 @@ fn block_gene_sum(
             if kk_b < k_b {
                 let row = &mut sum_b[kk_b * m..(kk_b + 1) * m];
                 for (&g, &v) in rows.iter().zip(vals.iter()) {
-                    row[g] += v as f64;
+                    row[g] += f64::from(v);
                 }
             }
         }

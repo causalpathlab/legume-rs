@@ -132,8 +132,7 @@ pub fn fit_layout_tree(args: &LayoutTreeArgs) -> anyhow::Result<()> {
     let out_prefix = args
         .out
         .as_deref()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| manifest.prefix.clone());
+        .map_or_else(|| manifest.prefix.clone(), std::string::ToString::to_string);
     mkdir_parent(&out_prefix)?;
 
     let cell_coords_path = format!("{out_prefix}.tree_layout.cell_coords.parquet");

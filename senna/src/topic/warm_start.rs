@@ -8,7 +8,7 @@
 //!
 //! Cross-gene-set warm-start (i.e. resuming on a dataset with a different
 //! gene list) is not supported here: the encoder's input is gene-keyed for
-//! the dense path (D_coarse), and the dictionary tensors at every level are
+//! the dense path (`D_coarse`), and the dictionary tensors at every level are
 //! gene-keyed too. Run on the same gene set, or train from scratch.
 
 use crate::topic::model_metadata::TopicModelMetadata;
@@ -16,7 +16,7 @@ use candle_util::candle_nn::VarMap;
 
 /// Architecture invariants the saved checkpoint must match.
 pub struct WarmStartCheck<'a> {
-    /// "topic" or "indexed_topic"
+    /// "topic" or "`indexed_topic`"
     pub model_type_expected: &'static str,
     pub n_topics: usize,
     pub n_features_full: usize,

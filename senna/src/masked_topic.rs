@@ -579,13 +579,13 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
 
     let pretrained_h: Option<usize> = pretrained_spec
         .as_ref()
-        .map(|s| s.dictionary_h())
+        .map(super::topic::freeze::FrozenFeatureSpec::dictionary_h)
         .transpose()?;
     let h = crate::topic::common::resolve_embedding_dim(args.embedding_dim, pretrained_h, k)?;
 
     let prebuilt_partition = inherited
         .as_ref()
-        .map(|i| i.load_cell_to_pb())
+        .map(super::run_manifest::InheritedFromManifest::load_cell_to_pb)
         .transpose()?
         .flatten();
 
@@ -1029,10 +1029,13 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
         false
     };
 
-    let input: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();
+    let input: Vec<String> = data_files
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     let batch: Vec<String> = batch_files
         .as_ref()
-        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         kind: crate::run_manifest::RunKind::Itopic,

@@ -15,8 +15,12 @@
 use crate::embed_common::*;
 use data_beans_alg::hvg::{select_hvg_streaming, HvgCliArgs};
 use graph_embedding_util as ge;
-use rustc_hash::FxHashMap;
-use std::io::BufRead;
+
+mod io;
+mod resolve_etm;
+
+use io::{write_cell_embedding_scaled, write_cell_qc, write_feature_qc};
+use resolve_etm::resolve_etm_topics;
 
 /// One parsed `--multiome` file entry: `(optional modality label, file path)`.
 /// The label (or, when `None`, the within-group position) namespaces that
@@ -44,51 +48,15 @@ pub struct BgeArgs {
     )]
     batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(
-        long,
-        value_delimiter = ',',
-        help = "Per-cell condition label file(s) for the feature gate\n\
-                (same format as --batch-files; omit → condition = batch).",
-        long_help = "Drives a per-condition multiplicative gate on the gene\n\
-                     embedding: e_feat(f | condition s) = E_feat[f] ⊙\n\
-                     exp(Σ_k z[f,k]·δ̄[k,s,:]), where δ̄ is δ mean-centered\n\
-                     across conditions (Σ_s δ̄ = 0). No condition is a\n\
-                     reference — every condition deviates symmetrically and\n\
-                     the baseline E_feat is the average-condition embedding;\n\
-                     δ captures how each condition deviates each gene.\n\
-                     Mirrors faba gem's modality gate with conditions in\n\
-                     place of modalities. When omitted, condition = batch."
-    )]
-    condition_files: Option<Vec<Box<str>>>,
-
-    #[arg(
-        long = "num-programs",
-        default_value_t = 8,
-        help = "K: latent programs in the per-condition feature gate.",
-        long_help = "K: number of latent programs in the per-condition feature\n\
-                     gate (low-rank deviation). Only adds capacity when conditions\n\
-                     diverge; identity at init."
-    )]
-    num_programs: usize,
-
-    #[arg(
-        long = "z-l2",
-        default_value_t = 1e-4,
-        help = "L2 penalty on gate program loadings z (mean-normalized). 0 disables."
-    )]
-    z_l2: f32,
-
-    #[arg(
-        long = "delta-l2",
-        default_value_t = 1e-4,
-        help = "L2 penalty on gate deviation directions δ (mean-normalized). 0 disables."
-    )]
-    delta_l2: f32,
-
     #[command(flatten)]
     hvg: HvgCliArgs,
 
-    #[arg(long, default_value_t = 16, help = "Embedding dimension H")]
+    #[arg(
+        long,
+        default_value_t = 16,
+        help = "Embedding dimension H",
+        alias = "dim-embedding"
+    )]
     embedding_dim: usize,
 
     #[command(flatten)]
@@ -112,18 +80,6 @@ pub struct BgeArgs {
     feature_null_fdr: f32,
 
     #[arg(
-        long,
-        default_value_t = 0,
-        help = "Cap on genes trained (0 = keep all); main large-data speed knob.",
-        long_help = "Cap on the number of genes trained (0 = keep all). When > 0\n\
-                     and less than the feature axis, keeps the top-N genes by\n\
-                     NB-Fisher weight and drops the rest before the multilevel\n\
-                     collapse. Shrinks E_feat, triplets, and per-batch samplers\n\
-                     proportionally — the main large-data speed knob."
-    )]
-    max_features: usize,
-
-    #[arg(
         long = "phase1-cells-per-pb",
         default_value_t = 0,
         help = "Phase-1 cell-axis mode (k); 0 = pure-pb (fastest), phase 2 always\n\
@@ -135,9 +91,7 @@ pub struct BgeArgs {
                      E_feat from pb aggregates only — fastest). 1≤k<n_cells →\n\
                      keep ≤k cells per pb-sample at each collapse level (union),\n\
                      cutting the phase-1 step budget while preserving rare-cell\n\
-                     coverage. k≥n_cells → all cells (legacy; slowest). NOTE: an\n\
-                     optional --cell-cell term rides the cell axis and is dropped\n\
-                     when k=0."
+                     coverage. k≥n_cells → all cells (legacy; slowest)."
     )]
     phase1_cells_per_pb: usize,
 
@@ -234,8 +188,8 @@ pub struct BgeArgs {
     #[arg(
         long = "max-grad-norm",
         default_value_t = 1.0,
-        help = "Global-norm gradient clip per AdamW step (0 = off). When > 0, \
-                gradients are scaled down if their global L2 norm exceeds this, \
+        help = "Global-norm gradient clip per AdamW step (0 = off). When > 0, \n\
+                gradients are scaled down if their global L2 norm exceeds this, \n\
                 bounding embedding inflation on NCE loss spikes."
     )]
     max_grad_norm: f32,
@@ -243,15 +197,15 @@ pub struct BgeArgs {
     #[arg(
         long = "cell-null-fdr",
         default_value_t = 0.05,
-        help = "Embedding-based empty-droplet call (step 2 of bge's two-step QC; \
-                0 disables). After the conservative upfront nnz floor, run the EB \
-                empty call on the pre-L2 projection norm, then MASK the empties out \
-                and re-fit on the survivors; writes {out}.cell_qc.parquet (norm + \
-                kept flag) and {out}.cell_embedding_before.parquet (all cells, \
-                pre-mask). A BIC-selected Gaussian mixture on log(norm) isolates the \
-                empty MODE (component below the density valley); cells are dropped by \
-                MAP posterior P(empty)>=0.5. This value is the target false-drop \
-                rate, used to warn when the realized rate is exceeded. Pass 0 to keep \
+        help = "Embedding-based empty-droplet call (step 2 of bge's two-step QC; \n\
+                0 disables). After the conservative upfront nnz floor, run the EB \n\
+                empty call on the pre-L2 projection norm, then MASK the empties out \n\
+                and re-fit on the survivors; writes {out}.cell_qc.parquet (norm + \n\
+                kept flag) and {out}.cell_embedding_before.parquet (all cells, \n\
+                pre-mask). A BIC-selected Gaussian mixture on log(norm) isolates the \n\
+                empty MODE (component below the density valley); cells are dropped by \n\
+                MAP posterior P(empty)>=0.5. This value is the target false-drop \n\
+                rate, used to warn when the realized rate is exceeded. Pass 0 to keep \n\
                 only the upfront floor (one-step)."
     )]
     cell_null_fdr: f32,
@@ -323,37 +277,6 @@ pub struct BgeArgs {
         help = "Disable fuzzy gene-name matching (use exact row-name match across files)"
     )]
     feature_name_exact: bool,
-
-    #[arg(
-        long,
-        help = "Optional cell-cell edge list (TSV); activates the cell-cell NCE term.",
-        long_help = "Optional cell-cell edge list (whitespace-separated, two\n\
-                     cell-barcode columns per line; lines starting with `#` are\n\
-                     ignored). When provided, activates the cell-cell NCE term —\n\
-                     positives are these edges, negatives are within-batch random\n\
-                     non-neighbor cells. Use a precomputed graph (e.g. pinto's\n\
-                     spatial KNN, exported to TSV)."
-    )]
-    cell_cell_edges: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "Cell-cell loss weight λ (1.0 = equal to cell-feature; 0 = disable).",
-        long_help = "Cell-cell loss weight λ; \n\
-		     final loss = L_bipartite + λ · L_cell_cell.\n\
-                     Default 1.0 weights cell-cell equal to\n\
-                     cell-feature. Set to 0 to disable. Ignored if\n\
-                     --cell-cell-edges is not provided."
-    )]
-    cell_cell_lambda: f32,
-
-    #[arg(
-        long,
-        default_value_t = 4,
-        help = "Negative cells per positive cell-pair (cell-cell loss only)"
-    )]
-    cell_cell_negatives: usize,
 
     #[arg(
         long,
@@ -523,10 +446,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         }
         if let Some(suf) = feature_suffix.as_ref() {
             info!(
-                "--multiome: namespacing features as {{name}}/{{modality}} (per-file \
-                 modality: {})",
+                "--multiome: namespacing features as {{name}}/{{modality}} \n\
+		 (per-file modality: {})",
                 suf.iter()
-                    .map(|s| s.as_ref())
+                    .map(std::convert::AsRef::as_ref)
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -536,7 +459,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         feature_suffix = None;
         anyhow::ensure!(
             !args.data_files.is_empty(),
-            "no input files: pass single-modality files positionally, or multiome \
+            "no input files: pass single-modality files positionally, or multiome \n\
              groups via `--multiome rna.zarr,atac.zarr [--multiome rna2.zarr,atac2.zarr ...]`"
         );
         &args.data_files
@@ -551,9 +474,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     };
 
     // `--ignore-batch` drops the batch labels entirely, so the projection
-    // and multilevel collapse run as if every cell shared one batch. The
-    // per-condition gate keys off the same notion of "no structure", so we
-    // drop condition labels too (condition collapses to a single "all").
+    // and multilevel collapse run as if every cell shared one batch.
     let batch_files = if args.collapse.ignore_batch {
         if args.batch_files.is_some() {
             info!("--ignore-batch: dropping batch labels; treating all cells as one batch");
@@ -562,19 +483,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     } else {
         args.batch_files.as_deref()
     };
-    let condition_files = if args.collapse.ignore_batch {
-        if args.condition_files.is_some() {
-            info!("--ignore-batch: dropping condition labels; the feature gate is disabled");
-        }
-        None
-    } else {
-        args.condition_files.as_deref()
-    };
 
     let mut unified = ge::load_unified_data(ge::LoadUnifiedArgs {
         data_files: data_files.to_vec(),
         batch_files: batch_files.map(<[Box<str>]>::to_vec),
-        condition_files: condition_files.map(<[Box<str>]>::to_vec),
         feature_kind: Some(feature_kind.clone()),
         preload: args.preload_data,
         column_alignment,
@@ -588,15 +500,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     if is_multiome {
         let group_sizes: Vec<usize> = multiome_groups.iter().map(Vec::len).collect();
         ge::validate_multiome_groups(&group_sizes, &unified.barcodes, &unified.cell_modality)?;
-    }
-
-    if unified.n_conditions() > 1 {
-        info!(
-            "Per-condition feature gate: {} conditions (symmetric, mean-centered \
-             across conditions; no reference), K = {} programs",
-            unified.n_conditions(),
-            args.num_programs
-        );
     }
 
     // ---- Cell QC (output filter) ----
@@ -671,9 +574,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // (null features dropped) and the cell-empty re-fit (empties dropped): HVG
     // weights subset through `feature_to_backend_row`, the feature network
     // reloads against the live feature names, the Fisher cache self-invalidates
-    // on the name mismatch, and the cell-indexed pieces (cell-cell edges, bridge
-    // weights) resolve against the live barcodes/cell axis. Everything else is
-    // axis-independent and cloned in.
+    // on the name mismatch, and the cell-indexed bridge weights resolve against
+    // the live barcodes/cell axis. Everything else is axis-independent and
+    // cloned in.
     let build_config = |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
         let hvg_weights = hvg_full.as_ref().map(|w| {
             unified
@@ -695,25 +598,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                     alpha: args.feature_network_alpha,
                     refresh_epochs: args.feature_network_refresh,
                     feature_kind: feature_kind.clone(),
-                })
-            })
-            .transpose()?;
-        // Cell-indexed config is ALSO derived from the current `unified` so it
-        // stays valid after a cell-subset re-fit: cell-cell edges resolve
-        // against the live barcodes (edges to dropped cells vanish), and the
-        // bridge weights index the live cell axis. Building them once up front
-        // and cloning would leave stale (pre-mask) cell ids → OOB / wrong pairs.
-        let cell_cell = args
-            .cell_cell_edges
-            .as_deref()
-            .map(|path| {
-                let edges = load_cell_cell_edges(path, &unified.barcodes)?;
-                anyhow::Ok(ge::CellCellConfig {
-                    edges,
-                    lambda: args.cell_cell_lambda,
-                    n_negatives: args.cell_cell_negatives,
-                    pb_levels: None,
-                    lambda_per_level: None,
                 })
             })
             .transpose()?;
@@ -744,7 +628,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             knn_pb_samples: args.collapse.knn_cells,
             num_opt_iter: args.collapse.iter_opt,
             proj_dim: args.collapse.proj_dim,
-            max_features: args.max_features,
             hvg_weights,
             refine: refine.clone(),
             epochs: args.epochs,
@@ -762,12 +645,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 Some(format!("{}.fisher_weights.parquet", args.out).into_boxed_str())
             },
             feature_network,
-            cell_cell,
             stop: Some(stop.clone()),
             feature_embedding_l2: args.feature_embedding_l2,
-            num_programs: args.num_programs,
-            z_l2: args.z_l2,
-            delta_l2: args.delta_l2,
             weight_decay: args.weight_decay,
             max_grad_norm: args.max_grad_norm,
             cell_weight_mult,
@@ -803,11 +682,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         )?;
         let live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
         if live.is_empty() {
-            log::warn!(
-                "Feature null QC flagged all {} features as null — keeping the \
-                 pass-1 fit (no second pass).",
-                n
-            );
+            log::warn!("Feature null QC flagged all {n} features as null.");
         } else if live.len() < n {
             info!(
                 "Two-pass refine: dropping {} null features, re-fitting on {} live features.",
@@ -899,11 +774,12 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         write_cell_embedding_scaled(&out.cell_embedding_scaled, &unified.barcodes, &args.out)?;
     }
 
-    // Output layout depends on --resolve-etm:
-    //   off → bge embeddings (latent = cell embedding Z, dictionary = ρ).
-    //   on  → ETM topic-model layout (latent = log θ, dictionary = β); the raw
-    //         embeddings are preserved as {cell,feature}_embedding.parquet so a
-    //         `--from` chain still finds ρ, while `senna plot` / `plot-topic`
+    // Output layout depends on whether ETM was resolved (default on; --skip-etm
+    // disables):
+    //   skipped  → bge embeddings (latent = cell embedding Z, dictionary = ρ).
+    //   resolved → ETM topic-model layout (latent = log θ, dictionary = β); the
+    //         raw embeddings are preserved as {cell,feature}_embedding.parquet so
+    //         a `--from` chain still finds ρ, while `senna plot` / `plot-topic`
     //         pick up the resolved topics directly.
     let resolve_etm = !args.skip_etm;
     if resolve_etm {
@@ -926,28 +802,14 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    // Inspectable per-condition gate params (z, δ). Baseline E_feat / E_cell
-    // / ETM topics above stay condition-free; this is the only artifact that
-    // exposes the condition deviations. Skip when there's nothing to show
-    // (single condition ⇒ δ ≡ 0).
-    if unified.n_conditions() > 1 {
-        ge::save_gate(
-            &out.model,
-            &unified.feature_names,
-            &unified.condition_names,
-            &args.out,
-        )?;
-        info!(
-            "Wrote per-condition gate: {}.{{gene_program_loadings,program_condition_deviation}}.parquet",
-            args.out
-        );
-    }
-
-    let input: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();
+    let input: Vec<String> = data_files
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     let batch: Vec<String> = args
         .batch_files
         .as_ref()
-        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         kind: crate::run_manifest::RunKind::Bge,
@@ -955,7 +817,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         data_input: &input,
         data_batch: &batch,
         data_input_null: &[],
-        // With --resolve-etm the dictionary is β (gene × topic) and ρ moves to
+        // With ETM resolved the dictionary is β (gene × topic) and ρ moves to
         // feature_embedding.parquet; otherwise the dictionary IS ρ.
         dictionary_suffix: Some("dictionary.parquet"),
         has_model: false,
@@ -968,7 +830,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         } else {
             None
         },
-        // With --resolve-etm `latent` is log θ (topic space); the H-space cell
+        // With ETM resolved `latent` is log θ (topic space); the H-space cell
         // embedding Z is written separately so annotate-by-projection finds it.
         // Without it, `latent` IS Z, so this stays None.
         cell_embedding_suffix: if resolve_etm {
@@ -986,325 +848,5 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         args.out
     );
 
-    Ok(())
-}
-
-/// Empirical-Bayes null-feature QC on the trained feature embedding `E_feat`
-/// (flat `[n × h]`): logs the fitted null (σ̂², π̂₀, #null) and writes
-/// `{out}.feature_qc.parquet` with each feature's `norm²` and `live` flag. A
-/// diagnostic — it does not (yet) drop features. Shares the call with faba gem.
-fn write_feature_qc(
-    e_feat: &[f32],
-    n: usize,
-    h: usize,
-    feature_names: &[Box<str>],
-    fdr: f32,
-    out_prefix: &str,
-) -> anyhow::Result<ge::null_call::NullCall> {
-    use matrix_util::dmatrix_io::DMatrix;
-    use matrix_util::traits::IoOps;
-
-    let null = ge::null_call::embedding_null_call(e_feat, n, h, fdr);
-    info!(
-        "bge feature null call — σ̂²={:.4}, ν̂={:.1}/{}, π̂₀={:.2}; {} / {} features null at FDR {} → {}.feature_qc.parquet",
-        null.sigma2, null.eff_dof, h, null.pi0, n - null.n_live, n, fdr, out_prefix
-    );
-
-    let mut m = DMatrix::<f32>::zeros(n, 2);
-    for f in 0..n {
-        let s: f32 = e_feat[f * h..(f + 1) * h].iter().map(|&x| x * x).sum();
-        m[(f, 0)] = s;
-        m[(f, 1)] = null.live[f] as u8 as f32;
-    }
-    let cols: Vec<Box<str>> = ["norm2", "live"].iter().map(|s| Box::from(*s)).collect();
-    let path = format!("{out_prefix}.feature_qc.parquet");
-    m.to_parquet_with_names(&path, (Some(feature_names), Some("feature")), Some(&cols))?;
-    Ok(null)
-}
-
-/// Write the per-cell empty-droplet QC report `{out}.cell_qc.parquet`:
-/// pre-L2 projection norm + a `kept` flag (1 = real cell, 0 = empty), one row
-/// per cell, barcode-indexed.
-fn write_cell_qc(
-    cell_nrms: &[f32],
-    drop: &[bool],
-    barcodes: &[Box<str>],
-    out_prefix: &str,
-) -> anyhow::Result<()> {
-    use matrix_util::dmatrix_io::DMatrix;
-    use matrix_util::traits::IoOps;
-    let n = cell_nrms.len();
-    let mut m = DMatrix::<f32>::zeros(n, 2);
-    for c in 0..n {
-        m[(c, 0)] = cell_nrms[c];
-        m[(c, 1)] = if drop.get(c).copied().unwrap_or(false) {
-            0.0
-        } else {
-            1.0
-        };
-    }
-    let cols: Vec<Box<str>> = ["pre_l2_norm", "kept"]
-        .iter()
-        .map(|s| Box::from(*s))
-        .collect();
-    let path = format!("{out_prefix}.cell_qc.parquet");
-    m.to_parquet_with_names(&path, (Some(barcodes), Some("cell")), Some(&cols))?;
-    Ok(())
-}
-
-/// Write the joint-biplot cell embedding `{out}.cell_embedding_scaled.parquet`
-/// (`[n_cells × H]`, depth-free + gene-co-scaled). For overlaying cells on the
-/// gene dictionary `ρ`; not used by clustering. See `project_cells_phase2`.
-fn write_cell_embedding_scaled(
-    scaled: &[f32],
-    barcodes: &[Box<str>],
-    out_prefix: &str,
-) -> anyhow::Result<()> {
-    use matrix_util::dmatrix_io::DMatrix;
-    use matrix_util::traits::IoOps;
-    let n = barcodes.len();
-    if n == 0 || !scaled.len().is_multiple_of(n) {
-        return Ok(());
-    }
-    let h = scaled.len() / n;
-    let mut m = DMatrix::<f32>::zeros(n, h);
-    for r in 0..n {
-        for c in 0..h {
-            m[(r, c)] = scaled[r * h + c];
-        }
-    }
-    let cols: Vec<Box<str>> = (0..h).map(|i| format!("h{i}").into_boxed_str()).collect();
-    m.to_parquet_with_names(
-        &format!("{out_prefix}.cell_embedding_scaled.parquet"),
-        (Some(barcodes), Some("cell")),
-        Some(&cols),
-    )?;
-    Ok(())
-}
-
-/// Read a whitespace-separated two-column edge list of cell barcodes,
-/// resolve each barcode to its global cell id via `barcodes`. Edges
-/// with either endpoint unmatched are skipped (warned on count).
-/// Self-loops (i == j) are dropped silently.
-fn load_cell_cell_edges(path: &str, barcodes: &[Box<str>]) -> anyhow::Result<Vec<(u32, u32)>> {
-    info!("Loading cell-cell edge list from {}...", path);
-    let bc_to_id: FxHashMap<&str, u32> = barcodes
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.as_ref(), i as u32))
-        .collect();
-
-    let file =
-        std::fs::File::open(path).map_err(|e| anyhow::anyhow!("failed to open {}: {}", path, e))?;
-    let reader = std::io::BufReader::new(file);
-
-    let mut edges: Vec<(u32, u32)> = Vec::new();
-    let mut unmatched = 0usize;
-    let mut malformed = 0usize;
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let mut toks = trimmed.split_whitespace();
-        let (Some(a), Some(b)) = (toks.next(), toks.next()) else {
-            malformed += 1;
-            continue;
-        };
-        match (bc_to_id.get(a), bc_to_id.get(b)) {
-            (Some(&i), Some(&j)) if i != j => {
-                let (lo, hi) = if i < j { (i, j) } else { (j, i) };
-                edges.push((lo, hi));
-            }
-            (Some(_), Some(_)) => {} // self-loop, drop silently
-            _ => unmatched += 1,
-        }
-    }
-
-    if malformed > 0 {
-        log::warn!(
-            "{} malformed line(s) in {} (need ≥2 whitespace-separated tokens)",
-            malformed,
-            path
-        );
-    }
-    if unmatched > 0 {
-        log::warn!(
-            "{} edge(s) had at least one barcode not present in the data — skipped",
-            unmatched
-        );
-    }
-    if edges.is_empty() {
-        anyhow::bail!(
-            "cell-cell edge file {} produced 0 usable edges (after barcode resolution)",
-            path
-        );
-    }
-    info!("Cell-cell edges loaded: {} retained", edges.len());
-    Ok(edges)
-}
-
-/////////////////////////////////////////////////////////////////////
-// ETM resolution from the bge cell embedding (--resolve-etm)        //
-/////////////////////////////////////////////////////////////////////
-
-/// Resolve the ETM topic side from a finished bge run, with no further
-/// training, and write a topic-model-shaped output layout so that
-/// `senna {plot, plot-topic, clustering, annotate} --from` consume the
-/// topics directly (matching the `senna topic` / `masked-topic` conventions:
-/// `latent` = log θ, `dictionary` = β).
-///
-/// Archetypal analysis on the cell embedding `Z [N,H]` yields archetypes
-/// `α [K,H]` (= topic embeddings) and per-cell simplex weights `θ [N,K]`
-/// (= topic proportions); the dictionary is `β = log_softmax_d(ρ·αᵀ)`,
-/// the same factorization the ETM decoder uses. Writes:
-///   - `{out}.latent.parquet`           log θ [N,K]   (topic proportions)
-///   - `{out}.dictionary.parquet`       β    [D,K]   (each topic column a gene simplex)
-///   - `{out}.topic_embedding.parquet`  α    [K,H]   (for a later `masked-topic` finetune)
-///   - `{out}.cell_embedding.parquet`   Z    [N,H]   (raw bge cell embedding)
-///   - `{out}.feature_embedding.parquet`ρ    [D,H]   (raw bge feature embedding)
-///   - `{out}.feature_bias.parquet`     b_feat [D]
-///   - `{out}.cell_bias.parquet`        b_cell [N]    (per-cell depth sink)
-fn resolve_etm_topics(
-    model: &ge::JointEmbedModel,
-    feature_names: &[Box<str>],
-    barcodes: &[Box<str>],
-    args: &BgeArgs,
-    cell_keep_idx: Option<&[usize]>,
-) -> anyhow::Result<()> {
-    use matrix_util::archetypal::{
-        anchor_topics, select_anchor_topics, topic_dictionary, AnchorOpts,
-    };
-
-    let cpu = candle_core::Device::Cpu;
-    let z_full = Mat::from_tensor(&model.e_cell.to_device(&cpu)?)?; // [N, H]
-                                                                    // Drop QC-failed cells from archetype fitting + per-cell outputs. `z`
-                                                                    // and `barcodes` are subset by the same `keep` so their rows stay
-                                                                    // aligned; the dictionary β (from ρ + archetypes) is per-feature and
-                                                                    // unaffected.
-    let (z, barcodes): (Mat, Vec<Box<str>>) = match cell_keep_idx {
-        Some(keep) => (
-            z_full.select_rows(keep.iter()),
-            keep.iter().map(|&i| barcodes[i].clone()).collect(),
-        ),
-        None => (z_full, barcodes.to_vec()),
-    };
-    let rho = Mat::from_tensor(&model.e_feat.to_device(&cpu)?)?; // [D, H]
-    let h = z.ncols();
-    anyhow::ensure!(
-        rho.ncols() == h,
-        "resolve-etm: cell embedding H={} != feature embedding H={}",
-        h,
-        rho.ncols()
-    );
-
-    // Separable-NMF topic recovery (Arora anchors via SPA) on the feature
-    // embedding ρ: anchor features are the convex-hull vertices of the
-    // feature cloud — near-pure markers, one per topic. Deterministic and
-    // single-pass (no subsample, no nonconvex fit, no per-K refit); θ is then
-    // assigned to every cell by projecting it onto the anchors (FW_ITERS
-    // Frank–Wolfe steps — the simplex projection converges quickly, not a user
-    // knob). The MIN_ANCHOR_CELLS guard drops singleton/outlier-feature topics:
-    // a topic claimed by < 10 cells is almost surely an artifact at this scale.
-    const FW_ITERS: usize = 30;
-    const MIN_ANCHOR_CELLS: usize = 10;
-    let opts = AnchorOpts {
-        fw_iters: FW_ITERS,
-        min_anchor_cells: MIN_ANCHOR_CELLS,
-    };
-    let res = match args.num_topics {
-        Some(k) => {
-            anyhow::ensure!(k >= 2, "resolve-etm: --num-topics must be ≥ 2");
-            info!("resolve-etm: separable-NMF (SPA anchors) with fixed K={k}");
-            anchor_topics(&z, &rho, k, opts)
-        }
-        None => {
-            // SPA anchors are nested → the sweep is one pass; residual elbow
-            // over 2..=H+1 selects K.
-            let upper = (h + 1).max(2);
-            let krange: Vec<usize> = (2..=upper).collect();
-            info!("resolve-etm: auto-selecting K via SPA residual-elbow over 2..={upper}");
-            select_anchor_topics(&z, &rho, &krange, opts).1
-        }
-    };
-    // K reflects any anchors the guard dropped, not the requested count.
-    let k = res.anchors.len();
-    info!(
-        "resolve-etm: K={k}, anchor features=[{}], reconstruction RSS={:.4}",
-        res.anchors
-            .iter()
-            .map(|&d| feature_names[d].as_ref())
-            .collect::<Vec<&str>>()
-            .join(", "),
-        res.rss
-    );
-
-    // β = log_softmax_d(ρ · (α − ᾱ)ᵀ): [D, K], each topic column a feature
-    // simplex; markers surface as each topic's deviation from the mean anchor.
-    // α here are the anchor-feature embeddings.
-    let beta_dk = topic_dictionary(&rho, &res.alpha);
-    // log θ on the simplex.
-    let log_theta = res.theta.map(|x| (x + 1e-8).ln());
-
-    let topic_names = axis_id_names("T", k);
-    let h_names = axis_id_names("h", h);
-    let out = &args.out;
-
-    // Topic-model layout — latent = log θ, dictionary = β.
-    log_theta.to_parquet_with_names(
-        &format!("{out}.latent.parquet"),
-        (Some(&barcodes), Some("cell")),
-        Some(&topic_names),
-    )?;
-    beta_dk.to_parquet_with_names(
-        &format!("{out}.dictionary.parquet"),
-        (Some(feature_names), Some("gene")),
-        Some(&topic_names),
-    )?;
-    // Resolved topic embeddings α (warm-start for a later `masked-topic` finetune).
-    res.alpha.to_parquet_with_names(
-        &format!("{out}.topic_embedding.parquet"),
-        (Some(&topic_names), Some("topic")),
-        Some(&h_names),
-    )?;
-    // Raw bge embeddings preserved under non-conflicting names.
-    z.to_parquet_with_names(
-        &format!("{out}.cell_embedding.parquet"),
-        (Some(&barcodes), Some("cell")),
-        Some(&h_names),
-    )?;
-    rho.to_parquet_with_names(
-        &format!("{out}.feature_embedding.parquet"),
-        (Some(feature_names), Some("feature")),
-        Some(&h_names),
-    )?;
-    ge::eval::save_bias(
-        &format!("{out}.feature_bias.parquet"),
-        &model.b_feat,
-        feature_names,
-        "feature",
-    )?;
-    // Per-cell bias `b_cell` (depth sink), subset by the same QC keep mask as
-    // the cell rows above so barcodes/biases stay aligned.
-    let b_cell = match cell_keep_idx {
-        Some(keep) => {
-            let idx: Vec<u32> = keep.iter().map(|&i| i as u32).collect();
-            let idx_t = candle_core::Tensor::from_vec(idx, keep.len(), model.b_cell.device())?;
-            model.b_cell.index_select(&idx_t, 0)?
-        }
-        None => model.b_cell.clone(),
-    };
-    ge::eval::save_bias(
-        &format!("{out}.cell_bias.parquet"),
-        &b_cell,
-        &barcodes,
-        "cell",
-    )?;
-
-    info!(
-        "resolve-etm: wrote topic-model layout (latent=log θ, dictionary=β) + \
-         {{cell,feature}}_embedding.parquet to {out}.*"
-    );
     Ok(())
 }

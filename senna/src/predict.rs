@@ -14,7 +14,7 @@
 //!     the test feature set is too divergent for the encoder.
 
 use crate::embed_common::*;
-use crate::fit_masked_topic::FeatureNameKindArg;
+use crate::masked_topic::FeatureNameKindArg;
 use crate::topic::eval::{build_gene_remap_with, GeneRemap, QueryNameOpts};
 use crate::topic::model_metadata::{
     load_coarsening, load_dictionary, load_shortlist_weights, TopicModelMetadata,
@@ -538,7 +538,7 @@ where
                 .first()
                 .map(std::convert::AsRef::as_ref)
             {
-                Some("nb") | Some("nbmixture") => phi_opt.as_deref(),
+                Some("nb" | "nbmixture") => phi_opt.as_deref(),
                 _ => None,
             };
             let refined = crate::predict_tmle::iterate_delta_dense(
@@ -828,7 +828,7 @@ fn predict_masked(
 /// Held-out latent inference for the Gaussian VAE ([`MODEL_TYPE_VAE`]).
 /// Rebuilds the [`GaussianEncoder`] and runs it (encoder-only, eval mode →
 /// posterior mean `z`) over the held-out cells. Like `predict_masked`, batch
-/// correction is gene-mean only (the per-gene μ_d divisor inside
+/// correction is gene-mean only (the per-gene `μ_d` divisor inside
 /// `anscombe_residual`); a per-cell residual null is a future refinement. The
 /// latent is continuous factors, so there is no decoder refinement to do.
 fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
@@ -1043,7 +1043,7 @@ fn write_residual_backend(
     );
 
     // exp(β) once: [D_train, K], shared read-only across blocks.
-    let exp_beta_dk = beta_dk.map(|b| b.exp());
+    let exp_beta_dk = beta_dk.map(f32::exp);
 
     let ntot = data_vec.num_columns();
     let d_test = data_vec.num_rows();
@@ -1064,7 +1064,7 @@ fn write_residual_backend(
             let n_block = csc.ncols();
 
             // θ for this block: exp of stored log θ → [K, n_block].
-            let theta_kn = z_nk.rows(lb, n_block).map(|v| v.exp()).transpose();
+            let theta_kn = z_nk.rows(lb, n_block).map(f32::exp).transpose();
             // pred[d, j] = Σ_k exp(β_dk) θ_jk  → [D_train, n_block].
             let pred_dn = &exp_beta_dk * theta_kn;
 

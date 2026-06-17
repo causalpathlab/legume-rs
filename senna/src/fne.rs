@@ -1,6 +1,6 @@
 //! `senna fne` (Feature Network Embedding) — continuous Miller-Griffiths-
 //! Jordan latent-feature link-prediction model trained on an explicit
-//! feature-feature edge list (BioGRID / STRING / KEGG / synthetic-lethality
+//! feature-feature edge list (`BioGRID` / STRING / KEGG / synthetic-lethality
 //! / regulatory).
 //!
 //! Sibling of `senna bge`. Where `bge` builds a bipartite (cell × feature)
@@ -10,17 +10,17 @@
 //! via `--freeze-feature-embedding`, so cells can train on a gene-relation
 //! space derived purely from a curated network.
 //!
-//! Model. Each node g gets a continuous latent vector E_g ∈ ℝ^H, a learned
-//! per-dim diagonal gate γ ∈ ℝ^H, and a per-node bias b_g ∈ ℝ. Edge score
+//! Model. Each node g gets a continuous latent vector `E_g` ∈ ℝ^H, a learned
+//! per-dim diagonal gate γ ∈ ℝ^H, and a per-node bias `b_g` ∈ ℝ. Edge score
 //!
-//!   s(i, j) = (E_i ⊙ γ) · E_j + b_i + b_j
+//!   s(i, j) = (`E_i` ⊙ γ) · `E_j` + `b_i` + `b_j`
 //!
 //! is symmetric by construction (γ diagonal). With γ ≡ 1 this reduces to
-//! plain inner-product embedding (DeepWalk / LINE family). Initial γ = 1.
+//! plain inner-product embedding (`DeepWalk` / LINE family). Initial γ = 1.
 //!
 //! Loss. Per-positive aggregation: for each observed edge (i, j),
 //!
-//!   ℓ(i, j) = log σ(s_pos) + Σ_k log σ(-s_{neg_k})
+//!   ℓ(i, j) = log `σ(s_pos)` + `Σ_k` log σ(-s_{`neg_k`})
 //!
 //! Negative pairs (i, k) are drawn with k ~ degree^α (node2vec convention,
 //! α = 0.75). Self-loops rejected; true-positive collisions ignored — α
@@ -213,7 +213,11 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
 
     write_outputs(&trained, &args.out)?;
 
-    let input: Vec<String> = args.networks.iter().map(|s| s.to_string()).collect();
+    let input: Vec<String> = args
+        .networks
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         kind: crate::run_manifest::RunKind::Fne,
         prefix: &args.out,
@@ -284,7 +288,7 @@ fn discover_features_across_files(
 /// Load each path through `FeaturePairGraph::from_edge_list` against the
 /// shared canonical node set, then merge edges into a single graph.
 /// Per-file dedup happens inside `from_edge_list`; cross-file dedup is a
-/// HashSet pass here so the merged graph carries each undirected pair
+/// `HashSet` pass here so the merged graph carries each undirected pair
 /// exactly once regardless of how many files mentioned it.
 fn load_merged_graph(
     paths: &[Box<str>],
@@ -593,10 +597,7 @@ fn write_outputs(trained: &TrainedFne, out_prefix: &str) -> anyhow::Result<()> {
         Some(&[Box::from("loss")]),
     )?;
 
-    info!(
-        "Saved {} features × {} dims to {out_prefix}.feature_embedding.parquet",
-        n, h
-    );
+    info!("Saved {n} features × {h} dims to {out_prefix}.feature_embedding.parquet");
     Ok(())
 }
 

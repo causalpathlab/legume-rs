@@ -35,7 +35,7 @@ pub enum LatentMode {
 
 /// Decoder-only latent inference for the dense topic model.
 ///
-/// Initializes θ logits to zeros (uniform distribution after log_softmax) and
+/// Initializes θ logits to zeros (uniform distribution after `log_softmax`) and
 /// runs `num_steps` of plain gradient descent against the frozen decoder's
 /// likelihood. No regularization — the data should pin θ on its own.
 pub fn decoder_only_inference_dense<Dec: DecoderModuleT>(

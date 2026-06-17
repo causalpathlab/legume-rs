@@ -198,7 +198,7 @@ pub fn build_cnv_config(cnv_args: &CnvArgs) -> PerSampleCnvConfig {
 }
 
 /// Write CNV detection results: `[G_ord × N]` Viterbi states and continuous
-/// cn_score in `[−1, 1]` to parquet.
+/// `cn_score` in `[−1, 1]` to parquet.
 pub fn write_cnv_results(
     result: &PerSampleCnv,
     out_prefix: &str,
@@ -229,10 +229,7 @@ pub fn write_cnv_results(
         (Some(&ordered_gene_names), Some("gene")),
         None,
     )?;
-    info!(
-        "CNV outputs: {pref}.cnv.states.parquet, {pref}.cnv.cn_score.parquet",
-        pref = out_prefix
-    );
+    info!("CNV outputs: {out_prefix}.cnv.states.parquet, {out_prefix}.cnv.cn_score.parquet");
     Ok(())
 }
 

@@ -242,7 +242,7 @@ pub fn fit_plot_strand(args: &PlotStrandArgs) -> anyhow::Result<()> {
         grids
             .iter()
             .chain(consensus_grid.iter())
-            .flat_map(|g| g.iter_values()),
+            .flat_map(place::BinGrid::iter_values),
     );
     anyhow::ensure!(
         robust_max > 0.0,
@@ -331,8 +331,7 @@ fn resolve_inputs(args: &PlotStrandArgs) -> anyhow::Result<(String, String)> {
     let out = args
         .out
         .as_deref()
-        .map(String::from)
-        .unwrap_or_else(|| m.prefix.clone());
+        .map_or_else(|| m.prefix.clone(), String::from);
 
     // --activity wins; else derive a gene × cell-type matrix from annotate.
     let activity = if let Some(p) = args.activity.as_deref() {

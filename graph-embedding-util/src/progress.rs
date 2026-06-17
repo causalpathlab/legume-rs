@@ -5,6 +5,7 @@
 
 use indicatif::{ProgressBar, ProgressStyle};
 
+#[must_use]
 pub fn new_progress_bar(len: u64) -> ProgressBar {
     let prog_bar = ProgressBar::new(len);
     prog_bar.set_style(

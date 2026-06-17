@@ -77,6 +77,7 @@ pub struct CellCellSamplerStats {
 /// retained edges where the cell appears as either endpoint), used to
 /// build the count^α negative distribution analogous to the bipartite
 /// sampler's count^α over feature marginals.
+#[must_use]
 pub fn build_per_batch_cell_samplers(
     edges: &[(u32, u32)],
     batch_membership: &[u32],
@@ -167,9 +168,8 @@ pub fn build_per_batch_cell_samplers(
 /// subsequent position groups the batch cells by their pb at the
 /// *previous chain level* (so siblings are cells under the same parent
 /// in the user's chain, not necessarily adjacent levels in the full
-/// hierarchy). When the user passes a non-contiguous chain like
-/// `--cell-cell-pb-levels 0,2,4`, "parent" still means "previous chain
-/// entry", e.g. parent of L=2 is L=0.
+/// hierarchy). When the chain is non-contiguous, e.g. levels `0,2,4`,
+/// "parent" still means "previous chain entry", e.g. parent of L=2 is L=0.
 ///
 /// Parents whose cells all share the same pb at the current chain level
 /// (no real siblings to contrast against) are dropped at build time so

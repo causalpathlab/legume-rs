@@ -1,4 +1,5 @@
 pub(crate) mod anchor_prior;
+pub(crate) mod cmd;
 pub(crate) mod common;
 pub(crate) mod decoder_output;
 pub(crate) mod eval;

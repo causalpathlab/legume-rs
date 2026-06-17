@@ -153,6 +153,7 @@ pub fn annotate_embeddings(
 /// * `cell_emb` — row-major `[n_cells × h]` cell embedding (normalized
 ///   defensively here, so an un-normalized input still works).
 /// * `type_markers[t]` — type `t`'s `(feature_index, weight)` list.
+#[must_use]
 pub fn annotate_by_projection(
     feature_emb: &[f32],
     n_features: usize,
@@ -292,7 +293,7 @@ fn mean_cell(rows: &[f32], n: usize, h: usize) -> Vec<f32> {
         }
     }
     let inv = 1.0 / n as f32;
-    for m in mu.iter_mut() {
+    for m in &mut mu {
         *m *= inv;
     }
     mu
@@ -353,12 +354,12 @@ fn permutation_zscores(
         .for_each(|(n, zr)| {
             let cu = &cell_u[n * h..(n + 1) * h];
             for t in 0..n_types {
-                let obs = dot(cu, &type_emb_ch[t * h..(t + 1) * h]) as f64;
+                let obs = f64::from(dot(cu, &type_emb_ch[t * h..(t + 1) * h]));
                 // Online mean/variance over the n_perm null cosines.
                 let (mut mean, mut m2) = (0f64, 0f64);
                 for p in 0..n_perm {
                     let v = t * n_perm + p;
-                    let s = dot(cu, &null_emb[v * h..(v + 1) * h]) as f64;
+                    let s = f64::from(dot(cu, &null_emb[v * h..(v + 1) * h]));
                     let delta = s - mean;
                     mean += delta / (p as f64 + 1.0);
                     m2 += delta * (s - mean);

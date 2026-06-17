@@ -54,7 +54,7 @@ pub fn reingold_tilford_layout(graph: &PrincipalGraph, root: usize) -> TreeLayou
             }
         }
     }
-    for c in children.iter_mut() {
+    for c in &mut children {
         c.sort_unstable();
     }
 

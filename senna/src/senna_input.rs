@@ -71,7 +71,7 @@ pub fn read_data_on_shared_columns(
         let mut data_vec = SparseIoVec::new();
         let attach_data_name = files.len() > 1;
 
-        for data_file in files.iter() {
+        for data_file in files {
             info!("Importing data file: {data_file}");
 
             let mut data = try_open_or_convert(data_file)?;
@@ -137,7 +137,7 @@ pub fn read_data_on_shared_columns(
         let keep_idx = report.output_keep_idx();
         if report.n_cells_dropped > 0 {
             data_stack.mask_columns_all(&report.train_keep)?;
-            for bm in batch_stack.iter_mut() {
+            for bm in &mut batch_stack {
                 *bm = data_beans::qc_lib::filter_by_keep(bm, &report.train_keep);
             }
         }

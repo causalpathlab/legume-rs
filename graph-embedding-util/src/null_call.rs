@@ -1,10 +1,10 @@
 //! Empirical-Bayes "null vs signal" call for embedding-based routines.
 //!
-//! A model that fits embeddings (gem β_g / e_cell, bge feature/cell vectors,
+//! A model that fits embeddings (gem `β_g` / `e_cell`, bge feature/cell vectors,
 //! topic loadings, …) leaves *null* items at their random init: an item the
 //! model never moved has `v ~ N(0, σ²I)`, so `‖v‖²` follows a scaled χ². The
 //! old per-item χ² QC asserted σ at the init value *and* the nominal dof `h`;
-//! both are wrong in practice. AdamW + weight decay shrink the null items
+//! both are wrong in practice. `AdamW` + weight decay shrink the null items
 //! below init (so σ must be **estimated**), and the `h` embedding coordinates
 //! are **correlated**, so a null item's `‖v‖²` is over-dispersed relative to
 //! `χ²_h` — it behaves like `σ²·χ²_ν` with an *effective* dof `ν ≪ h`
@@ -46,12 +46,13 @@ pub struct NullCall {
 
 /// Squared-norm null call on a flat row-major embedding `rows` (`[n × h]`):
 /// computes `s_i = ‖row_i‖²` and defers to [`chi2_null_call`] with `dof = h`.
+#[must_use]
 pub fn embedding_null_call(rows: &[f32], n: usize, h: usize, fdr: f32) -> NullCall {
     let s: Vec<f64> = (0..n)
         .map(|i| {
             rows[i * h..(i + 1) * h]
                 .iter()
-                .map(|&x| (x as f64) * (x as f64))
+                .map(|&x| f64::from(x) * f64::from(x))
                 .sum()
         })
         .collect();
@@ -66,6 +67,7 @@ pub fn embedding_null_call(rows: &[f32], n: usize, h: usize, fdr: f32) -> NullCa
 /// and decoupled from the significance call so there is no σ̂²-shrinks-the-call
 /// feedback loop — then keeps items significant above that null (Storey π̂₀ +
 /// BH q ≤ fdr).
+#[must_use]
 pub fn chi2_null_call(s: &[f64], dof: usize, fdr: f32) -> NullCall {
     let n = s.len();
     if n == 0 || dof == 0 {
@@ -159,6 +161,7 @@ pub struct LowerTailCall {
 /// a lower-tail test against a symmetric null, and conservative suits the
 /// asymmetric cost of dropping a real item), and is **dropped** when `q ≤ fdr`
 /// *and* it lies below the mode. Robust, automatic (no bounds), deterministic.
+#[must_use]
 pub fn embedding_lower_tail_call(nrm: &[f32], fdr: f32) -> LowerTailCall {
     let n = nrm.len();
     if n == 0 {
@@ -180,7 +183,7 @@ pub fn embedding_lower_tail_call(nrm: &[f32], fdr: f32) -> LowerTailCall {
         }
     };
     // log statistic (floor tiny/zero norms so the log is finite).
-    let x: Vec<f64> = nrm.iter().map(|&v| (v.max(1e-6) as f64).ln()).collect();
+    let x: Vec<f64> = nrm.iter().map(|&v| f64::from(v.max(1e-6)).ln()).collect();
     let mu = median(&x);
     let dev: Vec<f64> = x.iter().map(|&v| (v - mu).abs()).collect();
     let sigma = (1.4826 * median(&dev)).max(1e-9);
@@ -200,7 +203,9 @@ pub fn embedding_lower_tail_call(nrm: &[f32], fdr: f32) -> LowerTailCall {
         q[gi] = running;
     }
     // Drop = empty: significant on the lower side only.
-    let drop: Vec<bool> = (0..n).map(|i| q[i] <= fdr as f64 && x[i] < mu).collect();
+    let drop: Vec<bool> = (0..n)
+        .map(|i| q[i] <= f64::from(fdr) && x[i] < mu)
+        .collect();
     let n_drop = drop.iter().filter(|&&v| v).count();
     LowerTailCall {
         drop,
@@ -236,7 +241,7 @@ fn finish_call(s: &[f64], chi: &ChiSquared, sigma2: f64, eff_dof: f64, fdr: f32)
         running = running.min(raw);
         q[gi] = running;
     }
-    let live: Vec<bool> = q.iter().map(|&qg| qg <= fdr as f64).collect();
+    let live: Vec<bool> = q.iter().map(|&qg| qg <= f64::from(fdr)).collect();
     let n_live = live.iter().filter(|&&v| v).count();
     NullCall {
         live,
@@ -318,7 +323,7 @@ pub fn embedding_mixture_empty_call(nrm: &[f32], k_max: usize, fdr: f32) -> Mixt
     if n < 2 {
         return none();
     }
-    let x: Vec<f64> = nrm.iter().map(|&v| (v.max(1e-6) as f64).ln()).collect();
+    let x: Vec<f64> = nrm.iter().map(|&v| f64::from(v.max(1e-6)).ln()).collect();
 
     // Fit the mixture on a deterministic subsample (a stride over the item order
     // — representative across batches): the mixture params are global, so the
@@ -397,14 +402,11 @@ pub fn embedding_mixture_empty_call(nrm: &[f32], k_max: usize, fdr: f32) -> Mixt
     // empty mode, but the modes overlap enough that some real cells go with it.
     if n_drop > 0 {
         let realized = (0..n).filter(|&i| drop[i]).map(|i| lfdr[i]).sum::<f64>() / n_drop as f64;
-        if realized > fdr as f64 {
+        if realized > f64::from(fdr) {
             log::warn!(
-                "mixture empty call: dropped {} items at MAP posterior ≥ 0.5, but the \
-                 realized false-drop rate {:.3} exceeds the target {:.3} — the empty and \
-                 real modes overlap; inspect the cell_qc report before trusting the cut",
-                n_drop,
-                realized,
-                fdr
+                "mixture empty call: dropped {n_drop} items at MAP posterior ≥ 0.5, but the \
+                 realized false-drop rate {realized:.3} exceeds the target {fdr:.3} — the empty and \
+                 real modes overlap; inspect the cell_qc report before trusting the cut"
             );
         }
     }

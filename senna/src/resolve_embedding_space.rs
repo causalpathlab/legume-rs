@@ -21,11 +21,11 @@
 //! Objective. Bipartite cell–gene NCE (same family as `bge` / `fne`,
 //! partition-free):
 //!
-//!   score(cell c, gene g) = (θ_c·α)·ρ_g + b_g
-//!   ℓ = log σ(score_pos) + Σ_neg log σ(-score_neg)
+//!   score(cell c, gene g) = (`θ_c·α)·ρ_g` + `b_g`
+//!   ℓ = log `σ(score_pos)` + `Σ_neg` log σ(-score_neg)
 //!
 //! positives are observed (cell, gene) counts (sampled ∝ count); negatives are
-//! genes drawn ∝ marginal^α (node2vec convention). AdamW over {α, ρ, b}. By
+//! genes drawn ∝ marginal^α (node2vec convention). `AdamW` over {α, ρ, b}. By
 //! construction ρ·Zᵀ = the θ-weighted gene affinity per cell, so a marker gene
 //! sits near the cells expressing it.
 
@@ -302,7 +302,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     let theta_cell_names = theta_mat.rows;
     let k = theta_mat.mat.ncols();
     anyhow::ensure!(k > 0, "θ ({theta_path}) has zero columns");
-    let theta_full = theta_mat.mat.map(|x| x.exp()); // log θ → θ
+    let theta_full = theta_mat.mat.map(f32::exp); // log θ → θ
     let h = if args.embedding_dim == 0 {
         k
     } else {
@@ -316,10 +316,13 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     );
     let batch_resolved = inherit_paths(args.batch_files.as_deref(), &manifest.data.batch, &dir);
     let batch_files = (!batch_resolved.is_empty()).then_some(batch_resolved);
-    let input_for_manifest: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();
+    let input_for_manifest: Vec<String> = data_files
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     let batch_for_manifest: Vec<String> = batch_files
         .as_ref()
-        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
 
     /////////////////////////////
@@ -389,7 +392,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
             edge_gene.push(gene as u32);
             edge_cell.push((base + loc) as u32);
             edge_w.push(val);
-            gene_marginal[gene] += val as f64;
+            gene_marginal[gene] += f64::from(val);
         }
     }
     anyhow::ensure!(

@@ -2599,7 +2599,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "auxiliary-data",
@@ -4246,7 +4246,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinto"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "approx",
@@ -4966,7 +4966,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "approx",

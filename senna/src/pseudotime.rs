@@ -3,7 +3,7 @@
 //! Pipeline:
 //!   1. Read a cell × K latent matrix (typically `senna topic`'s
 //!      `.latent.parquet`).
-//!   2. Fit a SimplePPT principal tree over the cells in latent space
+//!   2. Fit a `SimplePPT` principal tree over the cells in latent space
 //!      ([`principal_graph::fit_principal_graph`]).
 //!   3. Project each cell to its nearest point on the tree and compute
 //!      geodesic distance from a user-chosen root.
@@ -392,8 +392,7 @@ fn project_centroids_to_2d(
     );
     if layout_cells != cell_names {
         log::warn!(
-            "layout {} and latent cell-name orderings differ — using positional alignment",
-            cell_coords_path
+            "layout {cell_coords_path} and latent cell-name orderings differ — using positional alignment"
         );
     }
     let xy_cols = pick_xy_columns(&layout_cols);

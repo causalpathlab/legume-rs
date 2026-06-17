@@ -49,13 +49,13 @@ pub struct TopicModelMetadata {
     pub adj_method: Box<str>,
     /// Whether feature coarsening was used
     pub has_coarsening: bool,
-    /// [D, H] feature embedding width (indexed_topic only)
+    /// [D, H] feature embedding width (`indexed_topic` only)
     #[serde(default)]
     pub embedding_dim: Option<usize>,
-    /// Top-K shortlist size at encoder (indexed_topic only)
+    /// Top-K shortlist size at encoder (`indexed_topic` only)
     #[serde(default)]
     pub enc_context_size: Option<usize>,
-    /// Top-K shortlist size at decoder (indexed_topic only)
+    /// Top-K shortlist size at decoder (`indexed_topic` only)
     #[serde(default)]
     pub dec_context_size: Option<usize>,
     /// Mean training topic proportions θ̄ ∈ ℝ^K. Used at predict time as the
@@ -183,7 +183,7 @@ pub fn save_feature_mean(
     Ok(())
 }
 
-/// Load per-gene mean expression rate; returns (gene_names, μ_d).
+/// Load per-gene mean expression rate; returns (`gene_names`, `μ_d`).
 pub fn load_feature_mean(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32>)> {
     use matrix_util::traits::IoOps;
     let path = format!("{prefix}.feature_mean.parquet");
@@ -197,7 +197,7 @@ pub fn load_feature_mean(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32
     Ok((result.rows, feature_mean))
 }
 
-/// Load NB-Fisher shortlist weights from disk; returns (gene_names, weights).
+/// Load NB-Fisher shortlist weights from disk; returns (`gene_names`, weights).
 pub fn load_shortlist_weights(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32>)> {
     use matrix_util::traits::IoOps;
     let path = format!("{prefix}.shortlist_weights.parquet");

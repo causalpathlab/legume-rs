@@ -145,19 +145,16 @@ pub fn load_from_manifest(
             exists
         })
     });
-    let (cluster_labels, n_clusters) = match resolved_path {
-        Some(path) => {
-            log::info!("Resolving cluster source: parquet {path}");
-            load_cluster_labels(&path, &cell_names)
-                .with_context(|| format!("failed to load cluster parquet {path}"))?
-        }
-        None => {
-            log::info!(
-                "Resolving cluster source: internal Leiden on manifest's latent ({:?})",
-                manifest.outputs.latent
-            );
-            compute_clusters_from_latent(&manifest, &resolve, &cell_names, leiden_args)?
-        }
+    let (cluster_labels, n_clusters) = if let Some(path) = resolved_path {
+        log::info!("Resolving cluster source: parquet {path}");
+        load_cluster_labels(&path, &cell_names)
+            .with_context(|| format!("failed to load cluster parquet {path}"))?
+    } else {
+        log::info!(
+            "Resolving cluster source: internal Leiden on manifest's latent ({:?})",
+            manifest.outputs.latent
+        );
+        compute_clusters_from_latent(&manifest, &resolve, &cell_names, leiden_args)?
     };
 
     // Build per-cell batch ids (u32) for permutation null.
@@ -267,18 +264,15 @@ where
     let mut missing = 0usize;
     let mut pruned = 0usize;
     for cell in cell_names {
-        match idx.get(cell.as_ref()) {
-            Some(&i) => {
-                let lab = result.labels[i];
-                if lab == usize::MAX {
-                    pruned += 1;
-                }
-                labels.push(lab);
+        if let Some(&i) = idx.get(cell.as_ref()) {
+            let lab = result.labels[i];
+            if lab == usize::MAX {
+                pruned += 1;
             }
-            None => {
-                labels.push(usize::MAX);
-                missing += 1;
-            }
+            labels.push(lab);
+        } else {
+            labels.push(usize::MAX);
+            missing += 1;
         }
     }
     let assigned = cell_names.len() - missing - pruned;
@@ -288,8 +282,17 @@ where
         result.n_clusters
     );
     if missing > 0 {
-        let preview_data: Vec<&str> = cell_names.iter().take(3).map(|s| s.as_ref()).collect();
-        let preview_latent: Vec<&str> = latent.rows.iter().take(3).map(|s| s.as_ref()).collect();
+        let preview_data: Vec<&str> = cell_names
+            .iter()
+            .take(3)
+            .map(std::convert::AsRef::as_ref)
+            .collect();
+        let preview_latent: Vec<&str> = latent
+            .rows
+            .iter()
+            .take(3)
+            .map(std::convert::AsRef::as_ref)
+            .collect();
         log::warn!(
             "{missing}/{} cells missing from latent (data examples: {:?}; latent examples: {:?}). \
              Likely cause: latent.parquet was written by a different pipeline run with \
@@ -346,24 +349,21 @@ pub fn load_cluster_labels(
     let mut unassigned = 0usize;
     let mut missing = 0usize;
     for cell in cell_names {
-        match cluster_idx.get(cell.as_ref()) {
-            Some(&i) => {
-                let v = cluster_mat[(i, label_col)];
-                if v.is_nan() || v < 0.0 {
-                    labels.push(usize::MAX);
-                    unassigned += 1;
-                } else {
-                    let id = v as usize;
-                    labels.push(id);
-                    if (id as i64) > max_label {
-                        max_label = id as i64;
-                    }
+        if let Some(&i) = cluster_idx.get(cell.as_ref()) {
+            let v = cluster_mat[(i, label_col)];
+            if v.is_nan() || v < 0.0 {
+                labels.push(usize::MAX);
+                unassigned += 1;
+            } else {
+                let id = v as usize;
+                labels.push(id);
+                if (id as i64) > max_label {
+                    max_label = id as i64;
                 }
             }
-            None => {
-                labels.push(usize::MAX);
-                missing += 1;
-            }
+        } else {
+            labels.push(usize::MAX);
+            missing += 1;
         }
     }
     anyhow::ensure!(
@@ -387,7 +387,7 @@ pub fn load_cluster_labels(
     Ok((labels, n_clusters))
 }
 
-/// Build per-cell batch ids as compact u32 indices in [0, n_batches).
+/// Build per-cell batch ids as compact u32 indices in [0, `n_batches`).
 fn build_batch_labels(
     stack: &SparseStackWithBatch,
     n_cells: usize,

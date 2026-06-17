@@ -292,7 +292,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     );
     let prebuilt_partition = inherited
         .as_ref()
-        .map(|i| i.load_cell_to_pb())
+        .map(super::super::run_manifest::InheritedFromManifest::load_cell_to_pb)
         .transpose()?
         .flatten();
 
@@ -585,9 +585,12 @@ fn write_topic_manifest(
     batch_files: Option<&[Box<str>]>,
     has_cell_to_pb: bool,
 ) -> anyhow::Result<()> {
-    let input: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();
+    let input: Vec<String> = data_files
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     let batch: Vec<String> = batch_files
-        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         kind,

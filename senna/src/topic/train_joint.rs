@@ -1,6 +1,6 @@
 use super::common::{compute_level_epochs, process_blocks};
 use crate::embed_common::*;
-use crate::fit_joint_topic::JointTopicArgs;
+use crate::joint_topic::JointTopicArgs;
 use crate::logging::new_progress_bar;
 
 use candle_core::{Device, Tensor};

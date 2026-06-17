@@ -381,7 +381,7 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
         );
     };
     if data_files.is_empty() {
-        anyhow::bail!("manifest {:?} has no data.input entries", manifest_path);
+        anyhow::bail!("manifest {manifest_path:?} has no data.input entries");
     }
 
     let batch_files: Option<Vec<Box<str>>> = args.batch_files.clone().or_else(|| {
@@ -528,18 +528,15 @@ pub(crate) fn preprocess_layout_data(
         .filter(|_| resolved.manifest_path.is_some())
         .map(|p| resolve_from_manifest(p));
 
-    match cell_proj_path {
-        Some(ref p) => {
-            info!("Layout fast path: PB partition from cached projection {p}");
-            preprocess_layout_data_from_cache(args, resolved, p)
-        }
-        None => {
-            info!(
-                "Layout: no cached latent/cell_proj in manifest; running full load_and_collapse \
-                 (slow path, includes batch-correction + Gamma posterior)"
-            );
-            preprocess_layout_data_recompute(args, resolved)
-        }
+    if let Some(ref p) = cell_proj_path {
+        info!("Layout fast path: PB partition from cached projection {p}");
+        preprocess_layout_data_from_cache(args, resolved, p)
+    } else {
+        info!(
+            "Layout: no cached latent/cell_proj in manifest; running full load_and_collapse \
+             (slow path, includes batch-correction + Gamma posterior)"
+        );
+        preprocess_layout_data_recompute(args, resolved)
     }
 }
 
@@ -566,7 +563,10 @@ fn align_data_to_cached_cells(
         return Ok(());
     }
     use std::collections::HashSet;
-    let cached: HashSet<&str> = cell_names_cached.iter().map(|s| s.as_ref()).collect();
+    let cached: HashSet<&str> = cell_names_cached
+        .iter()
+        .map(std::convert::AsRef::as_ref)
+        .collect();
     let keep: Vec<bool> = data_cell_names
         .iter()
         .map(|n| cached.contains(n.as_ref()))
@@ -890,7 +890,7 @@ fn preprocess_layout_data_from_cache(
     let kk = args.sort_dim.min(proj_kn.nrows()).min(n_cells);
     let codes = binary_sort_columns(&proj_kn, kk)?;
     let (membership_full, n_pb_full) = canonicalize_codes(&codes);
-    info!("Partitioned {} cells into {} PBs", n_cells, n_pb_full);
+    info!("Partitioned {n_cells} cells into {n_pb_full} PBs");
 
     // 4. Coverage-prune PBs (same policy as the recompute path).
     let pb_size_full: Vec<usize> = {

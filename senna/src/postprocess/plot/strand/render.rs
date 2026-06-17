@@ -166,7 +166,7 @@ fn strand_path(g: &StrandPath, heights: &[f32], up: bool, color: &str) -> String
         let x0 = g.x_left + b as f32 * g.binpx;
         let x1 = x0 + g.binpx;
         let y = if up { g.y_mid - hpx } else { g.y_mid + hpx };
-        let _ = write!(d, "L {:.2} {:.2} L {:.2} {:.2} ", x0, y, x1, y);
+        let _ = write!(d, "L {x0:.2} {y:.2} L {x1:.2} {y:.2} ");
     }
     let x_right = g.x_left + heights.len() as f32 * g.binpx;
     let _ = write!(d, "L {:.2} {:.2} Z", x_right, g.y_mid);

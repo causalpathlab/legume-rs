@@ -5,9 +5,9 @@
 
 use crate::loss::cell::LevelSiblingPool;
 use crate::loss::{
-    build_per_batch_cell_samplers, cell_cell_nce_loss_chain, cell_cell_nce_loss_per_level,
-    cell_cell_nce_loss_per_level_batched_gated, cell_cell_nce_loss_per_level_gated,
-    sample_cell_chain_batch, CellChainBatch, CellChainBatchArgs, PbChainFilter,
+    build_per_batch_cell_samplers, cell_cell_nce_loss_per_level_batched_gated,
+    cell_cell_nce_loss_per_level_gated, sample_cell_chain_batch, CellChainBatch,
+    CellChainBatchArgs, PbChainFilter,
 };
 
 #[test]
@@ -169,115 +169,6 @@ fn sibling_negative_draws_share_parent_differ_at_self() {
 }
 
 #[test]
-fn per_level_lambda_weighted_matches_chain() {
-    // Tiny deterministic fixture: 4 cells, 1 batch, 2 chain levels,
-    // a small handcrafted JointEmbedModel. Verify that
-    //   (lambdas · cell_cell_nce_loss_per_level()).sum_all()
-    // equals
-    //   cell_cell_nce_loss_chain(lambdas)
-    // up to fp tolerance.
-    use crate::model::{JointEmbedModel, ModelArgs, ModelInit};
-    use candle_util::candle_core::{DType, Device};
-    use candle_util::candle_nn::{VarBuilder, VarMap};
-    use rand::SeedableRng;
-
-    let dev = Device::Cpu;
-    let varmap = VarMap::new();
-    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
-    let n_cells = 4;
-    let embedding_dim = 3;
-    let e_cell_init = nalgebra::DMatrix::<f32>::from_row_slice(
-        n_cells,
-        embedding_dim,
-        &[
-            0.10, -0.20, 0.30, //
-            0.40, 0.50, -0.60, //
-            -0.70, 0.80, 0.90, //
-            0.05, -0.15, 0.25, //
-        ],
-    );
-    let b_cell_init: Vec<f32> = vec![0.0, 0.01, -0.02, 0.03];
-    let model = JointEmbedModel::new_with_init(
-        ModelArgs {
-            n_features: 1,
-            n_cells,
-            embedding_dim,
-            n_conditions: 1,
-            num_programs: 2,
-        },
-        &ModelInit {
-            e_feat: None,
-            e_cell: Some(&e_cell_init),
-            b_feat: &[0.0],
-            b_cell: &b_cell_init,
-        },
-        &varmap,
-        vs,
-        &dev,
-    )
-    .expect("model");
-
-    let edges = vec![(0u32, 1), (2, 3)];
-    let batch_membership = vec![0u32; n_cells];
-    let cell_to_pb_per_level: Vec<Vec<usize>> = vec![
-        vec![0, 0, 1, 1], // L=0 coarse
-        vec![0, 0, 1, 1], // L=1 — matches L=0 here (no real siblings)
-    ];
-    let filter = PbChainFilter {
-        cell_to_pb_per_level: &cell_to_pb_per_level,
-        levels: &[0, 1],
-    };
-    let (samplers, _) =
-        build_per_batch_cell_samplers(&edges, &batch_membership, 1, n_cells, 0.75, Some(filter));
-    let s = samplers[0].as_ref().unwrap();
-
-    let pb_maps: Vec<&[usize]> = vec![&cell_to_pb_per_level[0], &cell_to_pb_per_level[1]];
-
-    let mut rng_a = rand::rngs::StdRng::seed_from_u64(7);
-    let mut rng_b = rand::rngs::StdRng::seed_from_u64(7);
-    let (batch_a, _) = sample_cell_chain_batch(
-        CellChainBatchArgs {
-            edges: &edges,
-            batch_sampler: s,
-            batch_size: 8,
-            n_negatives: 3,
-            pb_maps: &pb_maps,
-        },
-        &mut rng_a,
-    );
-    let (batch_b, _) = sample_cell_chain_batch(
-        CellChainBatchArgs {
-            edges: &edges,
-            batch_sampler: s,
-            batch_size: 8,
-            n_negatives: 3,
-            pb_maps: &pb_maps,
-        },
-        &mut rng_b,
-    );
-
-    let lambdas = vec![0.7f32, 0.3];
-    let chain_loss = cell_cell_nce_loss_chain(&model, batch_a, &lambdas, &dev)
-        .expect("chain loss")
-        .to_scalar::<f32>()
-        .unwrap();
-
-    let per_level = cell_cell_nce_loss_per_level(&model, batch_b, &dev).expect("per-level");
-    let per_level_vals: Vec<f32> = per_level.to_vec1().unwrap();
-    let manual: f32 = lambdas
-        .iter()
-        .zip(per_level_vals.iter())
-        .map(|(a, b)| a * b)
-        .sum();
-
-    let diff = (chain_loss - manual).abs();
-    assert!(
-        diff < 1e-5,
-        "chain={chain_loss:.6} vs manual sum={manual:.6} (diff={diff:.2e})"
-    );
-}
-
-#[test]
 fn batched_gated_matches_per_gene_gated() {
     // The batched gene-modulated per-level loss must match stacking G
     // calls to the single-gene gated version, gene-by-gene.
@@ -323,8 +214,6 @@ fn batched_gated_matches_per_gene_gated() {
             n_features: n_genes,
             n_cells,
             embedding_dim,
-            n_conditions: 1,
-            num_programs: 2,
         },
         &ModelInit {
             e_feat: Some(&e_gene_init),

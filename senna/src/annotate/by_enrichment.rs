@@ -99,7 +99,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     let profile_gk = weighted_mean_profile(&gene_sum_kg, n_clusters, g, &nb_fisher);
     let pb_gene_gp = weighted_mean_profile(&gene_sum_pg, n_batches, g, &nb_fisher);
     let cluster_names = axis_id_names("K", n_clusters);
-    info!("Cluster expression: {} genes × {} clusters", g, n_clusters);
+    info!("Cluster expression: {g} genes × {n_clusters} clusters");
     let profile_max = profile_gk.iter().fold(0f32, |m, &v| m.max(v));
     if profile_max <= 1e-12 {
         anyhow::bail!(
@@ -180,7 +180,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     } = annotate(&group, &markers_gc, &loaded.celltype_names, &config)?;
 
     // ----- Outputs -----
-    let cell_expr_path = format!("{}.cluster_expression.parquet", out);
+    let cell_expr_path = format!("{out}.cluster_expression.parquet");
     profile_gk.to_parquet_with_names(
         &cell_expr_path,
         (Some(&loaded.gene_names), Some("gene")),
@@ -188,7 +188,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     )?;
     info!("wrote {cell_expr_path}");
 
-    let annotation_path = format!("{}.annotation.parquet", out);
+    let annotation_path = format!("{out}.annotation.parquet");
     cell_annotation_nc.to_parquet_with_names(
         &annotation_path,
         (Some(&loaded.cell_names), Some("cell")),
@@ -196,7 +196,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     )?;
     info!("wrote {annotation_path}");
 
-    let argmax_path = format!("{}.argmax.tsv", out);
+    let argmax_path = format!("{out}.argmax.tsv");
     {
         let mut f = File::create(&argmax_path)?;
         writeln!(f, "cell\tcell_type\tprobability")?;
@@ -206,7 +206,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     }
     info!("wrote {argmax_path}");
 
-    let q_path = format!("{}.cluster_celltype_q.parquet", out);
+    let q_path = format!("{out}.cluster_celltype_q.parquet");
     q_kc.to_parquet_with_names(
         &q_path,
         (Some(&cluster_names), Some("cluster")),
@@ -214,7 +214,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     )?;
     info!("wrote {q_path}");
 
-    let es_path = format!("{}.cluster_celltype_es.parquet", out);
+    let es_path = format!("{out}.cluster_celltype_es.parquet");
     es_kc.to_parquet_with_names(
         &es_path,
         (Some(&cluster_names), Some("cluster")),
@@ -222,21 +222,21 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     )?;
     info!("wrote {es_path}");
 
-    let es_std_path = format!("{}.cluster_celltype_es_std.parquet", out);
+    let es_std_path = format!("{out}.cluster_celltype_es_std.parquet");
     es_restandardized_kc.to_parquet_with_names(
         &es_std_path,
         (Some(&cluster_names), Some("cluster")),
         Some(&loaded.celltype_names),
     )?;
 
-    let p_path = format!("{}.cluster_celltype_p.parquet", out);
+    let p_path = format!("{out}.cluster_celltype_p.parquet");
     pvalue_kc.to_parquet_with_names(
         &p_path,
         (Some(&cluster_names), Some("cluster")),
         Some(&loaded.celltype_names),
     )?;
 
-    let q_val_path = format!("{}.cluster_celltype_q_values.parquet", out);
+    let q_val_path = format!("{out}.cluster_celltype_q_values.parquet");
     qvalue_kc.to_parquet_with_names(
         &q_val_path,
         (Some(&cluster_names), Some("cluster")),
@@ -260,10 +260,10 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
 }
 
 fn rel_to_manifest(manifest_dir: &Path, abs_path: &str) -> String {
-    Path::new(abs_path)
-        .strip_prefix(manifest_dir)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| abs_path.to_string())
+    Path::new(abs_path).strip_prefix(manifest_dir).map_or_else(
+        |_| abs_path.to_string(),
+        |p| p.to_string_lossy().into_owned(),
+    )
 }
 
 /// Multiply each gene's marker entries by an empirical specificity score

@@ -8,10 +8,10 @@ use super::fit_layout_common::{
 };
 use super::viz_prep::apply_svd_preprocessing;
 use crate::embed_common::*;
-use crate::fit_pseudotime::{compute_pseudotime, PseudotimeArtifacts, RootSpec};
 use crate::geometry::orient::rotate_root_to_bottom;
 use crate::geometry::phate::phate_layout_2d;
 use crate::principal_graph::PrincipalGraphArgs;
+use crate::pseudotime::{compute_pseudotime, PseudotimeArtifacts, RootSpec};
 use crate::run_manifest::resolve;
 
 #[derive(Args, Debug)]
@@ -162,8 +162,10 @@ fn obtain_pseudotime(
         .manifest_path
         .as_ref()
         .and_then(|p| p.parent())
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+        .map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        );
 
     if let Some(pt_rel) = manifest.pseudotime.pseudotime.as_deref() {
         let pt_path = resolve(&manifest_dir, pt_rel)

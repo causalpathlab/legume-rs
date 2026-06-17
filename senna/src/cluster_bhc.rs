@@ -11,7 +11,7 @@
 //! size.
 //!
 //! Outputs:
-//!   `{out}.bhc.merges.parquet` — merge tree (merge_id, left, right, log_bf, n_cells)
+//!   `{out}.bhc.merges.parquet` — merge tree (`merge_id`, left, right, `log_bf`, `n_cells`)
 //!   `{out}.bhc.cut.parquet`    — consensus id per original cluster (−1 = empty)
 
 use crate::cluster_aggregation::accumulate_gene_sum;
@@ -68,7 +68,7 @@ pub(crate) fn run_cluster_bhc(
         "BHC: cluster sizes = [{}] (active {}/{}, γ={:.2} = {:.3}·G)",
         cluster_sizes
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join(", "),
         active,

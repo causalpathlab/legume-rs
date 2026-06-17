@@ -3,7 +3,7 @@
 //! Each minibatch step samples one positive batch from *every* axis
 //! (the per-cell axis plus every pseudobulk-level axis), computes the
 //! NCE loss on each, and sums them with per-axis weights `λ_k`. A
-//! single AdamW step then updates the shared `E_feat` / `b_feat` Vars
+//! single `AdamW` step then updates the shared `E_feat` / `b_feat` Vars
 //! (gradients accumulate across all axes' losses naturally — they
 //! reference the same tensors) plus each axis's own cell-side Vars.
 //!
@@ -20,7 +20,7 @@ use crate::feature_network::FeatureNetworkSmoother;
 use crate::loss::{
     nce_loss, nce_loss_chain, nce_loss_identity, sample_chain_batch, sample_edge_batch,
     sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, ChainAxis,
-    ChainBatchArgs, ChainSampler, EdgeBatch, EdgeBatchArgs, PerBatchCellSampler, PerBatchSampler,
+    ChainBatchArgs, ChainSampler, EdgeBatch, EdgeBatchArgs, PerBatchSampler,
     PerBatchStratifiedCellSampler, PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs,
     StratifiedSampler,
 };
@@ -46,7 +46,7 @@ use std::sync::Arc;
 ///   `O(1)` work per step.
 /// - [`Chain`]: every step samples a coordinated bottom-up chain — a
 ///   real `(cell, feature)` triplet whose pb ancestors at each level
-///   are derived via the cell→pb_per_level map. All axes share the
+///   are derived via the `cell→pb_per_level` map. All axes share the
 ///   same positive feature and negatives per chain; cell-side indices
 ///   differ per axis. One feature-side gather + one backward per step,
 ///   with coherent across-level gradients on `E_feat`. Lowest variance
@@ -70,25 +70,8 @@ pub struct CompositeAxis<'a> {
     /// Mixing weight in the summed objective. Defaults to 1.0; tune
     /// down for axes that should have less influence on `E_feat`.
     pub lambda: f32,
-    /// Optional cell-cell NCE term — wired only on the per-cell axis
-    /// (pseudobulk axes don't have meaningful pair edges). `None`
-    /// disables.
-    pub cell_cell: Option<CellCellTraining<'a>>,
-    /// Short label for log lines (e.g. "cell", "pb_l0"). Cosmetic.
+    /// Short label for log lines (e.g. "cell", "`pb_l0`"). Cosmetic.
     pub label: &'a str,
-}
-
-impl CompositeAxis<'_> {
-    /// Whether the per-condition feature gate applies to this axis. True
-    /// only for the real per-cell axes (`PerBatch` / `PerBatchStratified`)
-    /// when there is more than one condition — pseudobulk (`Stratified`)
-    /// axes are condition-mixing aggregates and score against baseline
-    /// `E_feat`, and with a single condition the gate is the identity. The
-    /// single source of truth for "is this axis gated" across sum, sample,
-    /// and chain modes.
-    fn gates(&self) -> bool {
-        self.model.n_conditions > 1 && !matches!(self.sampler, AxisSampler::Stratified(_))
-    }
 }
 
 /// Bipartite sampler attached to a composite axis. Three variants:
@@ -106,7 +89,7 @@ pub enum AxisSampler<'a> {
     Stratified(&'a StratifiedSampler),
 }
 
-impl<'a> AxisSampler<'a> {
+impl AxisSampler<'_> {
     fn is_empty(&self) -> bool {
         match self {
             Self::PerBatch(s) => s.is_empty(),
@@ -123,6 +106,7 @@ impl<'a> AxisSampler<'a> {
     /// batches here, which starved per-cell training — the cell axis was
     /// invisible to the budget and got the same ~1 step/epoch as the pb
     /// axes despite having orders of magnitude more units.)
+    #[must_use]
     pub fn n_units(&self) -> usize {
         match self {
             Self::PerBatch(s) => s.len(),
@@ -130,29 +114,6 @@ impl<'a> AxisSampler<'a> {
             Self::Stratified(s) => s.active_pbs.len(),
         }
     }
-}
-
-pub struct CellCellTraining<'a> {
-    pub samplers: &'a [Option<PerBatchCellSampler>],
-    pub edges: &'a [(u32, u32)],
-    pub lambda: f32,
-    pub n_negatives: usize,
-    /// Multi-level chain over pseudobulk resolutions: each level scores
-    /// the same `(left, right)` positive pair against per-level sibling
-    /// negatives summed with `lambdas`.
-    pub pb_chain: CellCellPbChainTraining<'a>,
-}
-
-/// Resolved per-step view of the cell-cell chain. Owned slices live in
-/// [`crate::fit::CellCellPrepared`] so this struct only borrows.
-pub struct CellCellPbChainTraining<'a> {
-    /// Resolved level indices into `cell_to_pb_per_level` (coarsest-first).
-    pub levels: &'a [usize],
-    /// Same length as `levels`; per-level mixing weight inside the chain
-    /// sum. Multiplied by the outer cell-cell `lambda` at loss time.
-    pub lambdas: &'a [f32],
-    /// `cell_to_pb_per_level[L][cell] = pb id at level L`, coarsest-first.
-    pub cell_to_pb_per_level: &'a [Vec<usize>],
 }
 
 pub struct TrainingParams {
@@ -169,14 +130,7 @@ pub struct TrainingParams {
     /// `0.0` disables. Equivalent to a zero-mean Gaussian prior on
     /// `E_feat` with precision `2 · λ`.
     pub feature_embedding_l2: f32,
-    /// L2 penalty on the gate program loadings `z` (mean-normalized).
-    /// `0.0` disables.
-    pub z_l2: f32,
-    /// L2 penalty on the gate deviation directions `δ` (mean-normalized).
-    /// `0.0` disables. Together with `z_l2` this softly resolves the
-    /// `(z·c, δ/c)` scale gauge and shrinks unused condition deviations.
-    pub delta_l2: f32,
-    /// Global-norm gradient clip per AdamW step (`0.0` = off). Bounds the
+    /// Global-norm gradient clip per `AdamW` step (`0.0` = off). Bounds the
     /// update magnitude so embeddings don't inflate on NCE loss spikes.
     pub max_grad_norm: f32,
 }
@@ -206,17 +160,12 @@ pub fn train_composite(
     let prog_bar = new_progress_bar(params.epochs as u64);
 
     let mut rng = StdRng::seed_from_u64(params.seed);
-    let refresh_every = smoother.as_ref().map(|s| s.refresh_epochs).unwrap_or(0);
+    let refresh_every = smoother.as_ref().map_or(0, |s| s.refresh_epochs);
     let mut smoother = smoother;
 
     // Smoother refreshes against the *shared* E_feat — pull it from the
     // first axis (every axis points at the same tensor).
     let shared_e_feat = ctx.axes[0].model.e_feat.clone();
-    // Gate params are likewise shared across axes; pull from axes[0] for
-    // the L2 penalties below.
-    let shared_z = ctx.axes[0].model.z.clone();
-    let shared_delta = ctx.axes[0].model.delta.clone();
-
     // Pre-build the axis sampler for `Sample` mode. Reused every step;
     // weights = `λ_k`, so picking axis `k` happens with probability
     // `λ_k / Σλ`. The `Σλ` scale gets applied to the chosen axis's loss
@@ -287,26 +236,12 @@ pub fn train_composite(
                     .affine(f64::from(params.feature_embedding_l2), 0.0)?;
                 loss = (loss + l2)?;
             }
-            if params.z_l2 > 0.0 {
-                let l2 = shared_z
-                    .sqr()?
-                    .mean_all()?
-                    .affine(f64::from(params.z_l2), 0.0)?;
-                loss = (loss + l2)?;
-            }
-            if params.delta_l2 > 0.0 {
-                // Shrinks the condition deviations toward 0 (identity gate).
-                // δ is mean-centered across conditions at gate time, so its
-                // per-condition mean is a free gauge; this L2 also pins that
-                // gauge near 0.
-                let l2 = shared_delta
-                    .sqr()?
-                    .mean_all()?
-                    .affine(f64::from(params.delta_l2), 0.0)?;
-                loss = (loss + l2)?;
-            }
             // Backward + optional global-norm gradient clip + step.
-            candle_util::grad_clip::clipped_backward_step(opt, &loss, params.max_grad_norm as f64)?;
+            candle_util::grad_clip::clipped_backward_step(
+                opt,
+                &loss,
+                f64::from(params.max_grad_norm),
+            )?;
             let ld = loss.detach();
             loss_acc = Some(match loss_acc.take() {
                 None => ld,
@@ -324,7 +259,7 @@ pub fn train_composite(
             Some(t) => t.to_scalar::<f32>()? / n_steps.max(1) as f32,
             None => 0f32,
         };
-        prog_bar.set_message(format!("loss={:.3}", avg));
+        prog_bar.set_message(format!("loss={avg:.3}"));
         prog_bar.inc(1);
         // Every-epoch info; senna/pinto's `--verbose` flag raises the
         // log level to `info`, so this is gated by the user's choice
@@ -365,7 +300,7 @@ fn sum_step(
         else {
             continue;
         };
-        let scaled = (loss * axis.lambda as f64)?;
+        let scaled = (loss * f64::from(axis.lambda))?;
         total_loss = Some(match total_loss {
             Some(prev) => (prev + scaled)?,
             None => scaled,
@@ -391,7 +326,7 @@ fn sample_step(
     else {
         return Ok(None);
     };
-    Ok(Some((loss * lambda_sum as f64)?))
+    Ok(Some((loss * f64::from(lambda_sum))?))
 }
 
 /// One step of `CompositeMode::Chain` — sample a coordinated chain
@@ -425,7 +360,7 @@ fn chain_step(
     // Chain mode accepts either flat per-batch or stratified per-batch
     // cell samplers — both produce real `(cell, feature)` positives that
     // can be walked up the pb tree. Stratified is the recommended default.
-    let (chain, batch_id) = match cell_axis.sampler {
+    let chain = match cell_axis.sampler {
         AxisSampler::PerBatch(samplers) => {
             if samplers.is_empty() {
                 return Ok(None);
@@ -443,18 +378,16 @@ fn chain_step(
                 batch_sampler: bs,
                 cell_to_pb_per_level: cell_to_pb,
             };
-            let chain = sample_chain_batch(
+            sample_chain_batch(
                 ChainBatchArgs {
                     triplets: &cell_axis.unified.triplets,
                     sampler: &chain_sampler,
                     fine_feature_weights: ctx.feat_weights,
-                    condition_membership: &cell_axis.unified.condition_membership,
                     batch_size: params.batch_size,
                     n_negatives: params.num_negatives,
                 },
                 rng,
-            );
-            (chain, id)
+            )
         }
         AxisSampler::PerBatchStratified(samplers) => {
             if samplers.is_empty() {
@@ -462,15 +395,13 @@ fn chain_step(
             }
             let id = rng.random_range(0..samplers.len());
             let bs = &samplers[id];
-            let chain = sample_chain_batch_stratified(
+            sample_chain_batch_stratified(
                 bs,
                 ctx.feat_weights,
-                &cell_axis.unified.condition_membership,
                 params.batch_size,
                 params.num_negatives,
                 rng,
-            );
-            (chain, id)
+            )
         }
         AxisSampler::Stratified(_) => {
             anyhow::bail!(
@@ -503,8 +434,6 @@ fn chain_step(
         indices: &cell_idx_tensor,
         lambda: cell_axis.lambda,
         label: cell_axis.label,
-        // Real per-cell axis: score against the condition-gated features.
-        gated: true,
     });
     for (i, axis) in pb_axes.iter().enumerate() {
         chain_axes.push(ChainAxis {
@@ -513,48 +442,18 @@ fn chain_step(
             indices: &idx_tensors[i],
             lambda: axis.lambda,
             label: axis.label,
-            // Pb ancestors: baseline (ungated) features.
-            gated: false,
         });
     }
 
-    // Cell-cell loss attaches to the cell axis only. Reuses the existing
-    // PerBatchCellSampler logic — independent draw, summed in.
-    let cc_loss: Option<Tensor> = match cell_axis.cell_cell.as_ref() {
-        Some(cc_ctx) => match cc_ctx.samplers[batch_id].as_ref() {
-            Some(cc_sampler) => Some(compute_cell_cell_loss(
-                cell_axis.model,
-                cc_ctx,
-                cc_sampler,
-                params,
-                rng,
-                ctx.dev,
-            )?),
-            None => None,
-        },
-        None => None,
-    };
-
-    // Gate the cell axis only (pb ancestors carry `gated: false`); skipped
-    // when single-condition. See `CompositeAxis::gates`.
-    let gate = match cell_axis.gates() {
-        true => Some(cell_axis.model.feat_gate()?),
-        false => None,
-    };
     let chain_loss = nce_loss_chain(
         &cell_axis.model.e_feat,
         &cell_axis.model.b_feat,
-        gate.as_ref(),
         feats,
         &chain_axes,
         smoother,
         ctx.dev,
     )?;
-    let total = match cc_loss {
-        Some(cc) => (chain_loss + cc)?,
-        None => chain_loss,
-    };
-    Ok(Some(total))
+    Ok(Some(chain_loss))
 }
 
 /// Chain-batch sampler for the stratified per-batch cell sampler.
@@ -566,7 +465,6 @@ fn chain_step(
 fn sample_chain_batch_stratified(
     bs: &PerBatchStratifiedCellSampler,
     fine_feature_weights: &[f32],
-    condition_membership: &[u32],
     batch_size: usize,
     n_negatives: usize,
     rng: &mut StdRng,
@@ -574,7 +472,6 @@ fn sample_chain_batch_stratified(
     let mut leaf_cells = Vec::with_capacity(batch_size);
     let mut fine_feats = Vec::with_capacity(batch_size);
     let mut weights = Vec::with_capacity(batch_size);
-    let mut condition_ids = Vec::with_capacity(batch_size);
 
     for _ in 0..batch_size {
         let lc = bs.cell_picker.sample(rng);
@@ -584,7 +481,6 @@ fn sample_chain_batch_stratified(
         let f = pf.features[lf];
         leaf_cells.push(c);
         fine_feats.push(f);
-        condition_ids.push(condition_membership[c as usize]);
         weights.push(fine_feature_weights[f as usize]);
     }
 
@@ -601,15 +497,13 @@ fn sample_chain_batch_stratified(
             neg_feats,
             edge_weights: weights,
             n_negatives,
-            condition_ids,
         },
     }
 }
 
-/// Sample a minibatch from a single axis, compute its bipartite NCE
+/// Sample a minibatch from a single axis and compute its bipartite NCE
 /// loss (taking the identity fast path when the axis has identity
-/// coarsening), and add the optional cell-cell term. Returns `None`
-/// when the axis has no positives to sample.
+/// coarsening). Returns `None` when the axis has no positives to sample.
 fn single_axis_step(
     axis: &CompositeAxis,
     rng: &mut StdRng,
@@ -632,7 +526,7 @@ fn single_axis_step(
     };
     let cc = &axis.cell_axis.coarsenings[seed_k];
 
-    let (batch, batch_id): (EdgeBatch, Option<usize>) = match axis.sampler {
+    let batch: EdgeBatch = match axis.sampler {
         AxisSampler::PerBatch(samplers) => {
             anyhow::ensure!(
                 !axis.unified.triplets.is_empty(),
@@ -642,106 +536,47 @@ fn single_axis_step(
             );
             let id = rng.random_range(0..samplers.len());
             let bs = &samplers[id];
-            let batch = sample_edge_batch(
+            sample_edge_batch(
                 EdgeBatchArgs {
                     triplets: &axis.unified.triplets,
                     batch_sampler: bs,
                     cell_coarsening: cc,
                     fine_feature_weights: Some(feat_weights),
-                    condition_membership: &axis.unified.condition_membership,
                     batch_size: params.batch_size,
                     n_negatives: params.num_negatives,
                 },
                 rng,
-            );
-            (batch, Some(id))
+            )
         }
         AxisSampler::PerBatchStratified(samplers) => {
             let id = rng.random_range(0..samplers.len());
             let bs = &samplers[id];
-            let batch = sample_per_batch_stratified_edge_batch(
+            sample_per_batch_stratified_edge_batch(
                 PerBatchStratifiedEdgeBatchArgs {
                     sampler: bs,
                     cell_coarsening: cc,
                     fine_feature_weights: feat_weights,
-                    condition_membership: &axis.unified.condition_membership,
                     batch_size: params.batch_size,
                     n_negatives: params.num_negatives,
                 },
                 rng,
-            );
-            (batch, Some(id))
+            )
         }
-        AxisSampler::Stratified(s) => {
-            let batch = sample_stratified_edge_batch(
-                StratifiedEdgeBatchArgs {
-                    sampler: s,
-                    fine_feature_weights: feat_weights,
-                    batch_size: params.batch_size,
-                    n_negatives: params.num_negatives,
-                },
-                rng,
-            );
-            (batch, None)
-        }
+        AxisSampler::Stratified(s) => sample_stratified_edge_batch(
+            StratifiedEdgeBatchArgs {
+                sampler: s,
+                fine_feature_weights: feat_weights,
+                batch_size: params.batch_size,
+                n_negatives: params.num_negatives,
+            },
+            rng,
+        ),
     };
 
-    // The per-condition gate applies on the real per-cell axes only (see
-    // `CompositeAxis::gates`); skipping avoids the wasted gather otherwise.
-    let gate = match axis.gates() {
-        true => Some(axis.model.feat_gate()?),
-        false => None,
-    };
     let bip_loss = if axis.cell_axis.is_identity {
-        nce_loss_identity(axis.model, batch, gate.as_ref(), smoother, dev)?
+        nce_loss_identity(axis.model, batch, smoother, dev)?
     } else {
-        nce_loss(
-            axis.model,
-            batch,
-            &cc.coarse_to_fine,
-            gate.as_ref(),
-            smoother,
-            dev,
-        )?
+        nce_loss(axis.model, batch, &cc.coarse_to_fine, smoother, dev)?
     };
-    let mut axis_loss = bip_loss;
-
-    if let (Some(cc_ctx), Some(batch_id)) = (axis.cell_cell.as_ref(), batch_id) {
-        if let Some(cc_sampler) = cc_ctx.samplers[batch_id].as_ref() {
-            let cc_loss = compute_cell_cell_loss(axis.model, cc_ctx, cc_sampler, params, rng, dev)?;
-            axis_loss = (axis_loss + cc_loss)?;
-        }
-    }
-    Ok(Some(axis_loss))
-}
-
-/// Cell-cell loss step. Runs the multi-level chain with per-level
-/// sibling negatives and returns the loss already scaled by
-/// `cc_ctx.lambda`.
-fn compute_cell_cell_loss(
-    model: &JointEmbedModel,
-    cc_ctx: &CellCellTraining<'_>,
-    cc_sampler: &PerBatchCellSampler,
-    params: &TrainingParams,
-    rng: &mut StdRng,
-    dev: &Device,
-) -> anyhow::Result<Tensor> {
-    let chain = &cc_ctx.pb_chain;
-    let pb_maps: Vec<&[usize]> = chain
-        .levels
-        .iter()
-        .map(|&l| chain.cell_to_pb_per_level[l].as_slice())
-        .collect();
-    let (batch, _stats) = crate::loss::sample_cell_chain_batch(
-        crate::loss::CellChainBatchArgs {
-            edges: cc_ctx.edges,
-            batch_sampler: cc_sampler,
-            batch_size: params.batch_size,
-            n_negatives: cc_ctx.n_negatives,
-            pb_maps: &pb_maps,
-        },
-        rng,
-    );
-    let raw = crate::loss::cell_cell_nce_loss_chain(model, batch, chain.lambdas, dev)?;
-    Ok((raw * cc_ctx.lambda as f64)?)
+    Ok(Some(bip_loss))
 }

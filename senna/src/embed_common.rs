@@ -44,6 +44,7 @@ pub use data_beans_alg::random_projection::*;
 /// writer in this crate (and pinto's `C{c}` analogue). A reader can
 /// recover the integer ID from the column name alone, surviving column
 /// reordering, schema audits, and partial subsetting.
+#[must_use]
 pub fn axis_id_names(prefix: &str, k: usize) -> Vec<Box<str>> {
     (0..k)
         .map(|i| format!("{prefix}{i}").into_boxed_str())
@@ -53,6 +54,7 @@ pub fn axis_id_names(prefix: &str, k: usize) -> Vec<Box<str>> {
 /// Inverse of [`axis_id_names`]. Accepts the explicit `{prefix}{c}` form
 /// and the legacy bare-integer fallback (matrix-util's default column
 /// names) so older parquets still load.
+#[must_use]
 pub fn parse_axis_id(name: &str, prefix: &str) -> Option<i64> {
     if let Some(rest) = name.strip_prefix(prefix) {
         if let Ok(c) = rest.parse::<i64>() {
@@ -65,6 +67,7 @@ pub fn parse_axis_id(name: &str, prefix: &str) -> Option<i64> {
 /// Map every column to its axis ID via [`parse_axis_id`]. Returns `None`
 /// if any column doesn't carry an ID — caller can then fall back to a
 /// positional check.
+#[must_use]
 pub fn try_parse_axis_ids(cols: &[Box<str>], prefix: &str) -> Option<Vec<i64>> {
     cols.iter().map(|c| parse_axis_id(c, prefix)).collect()
 }

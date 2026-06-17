@@ -135,7 +135,7 @@ impl FeatureNetworkSmoother {
         match &self.residual {
             None => Ok(live),
             Some(r) => {
-                let live_att = (live * self.self_factor as f64)?;
+                let live_att = (live * f64::from(self.self_factor))?;
                 let resid = r.index_select(idx, 0)?;
                 live_att + resid
             }

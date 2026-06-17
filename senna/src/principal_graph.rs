@@ -1,15 +1,15 @@
-//! Principal graph fitting (SimplePPT) on a low-dimensional embedding.
+//! Principal graph fitting (`SimplePPT`) on a low-dimensional embedding.
 //!
-//! Faithful port of Mao et al. 2015, "SimplePPT: A Simple Principal Tree
+//! Faithful port of Mao et al. 2015, "`SimplePPT`: A Simple Principal Tree
 //! Algorithm" — the same fitter Monocle 3 uses inside `learn_graph()` once
 //! cells have been embedded in a low-dim space (UMAP for Monocle 3,
 //! topic θ / SVD components for senna).
 //!
 //! The objective is
 //!
-//!   L(Y, R) = Σ_n Σ_k r_nk ‖z_n − y_k‖²
-//!           + σ Σ_n Σ_k r_nk log r_nk
-//!           + (γ/2) Σ_(j,k)∈E(Y) ‖y_j − y_k‖²
+//!   L(Y, R) = `Σ_n` `Σ_k` `r_nk` ‖`z_n` − `y_k‖²`
+//!           + σ `Σ_n` `Σ_k` `r_nk` log `r_nk`
+//!           + (γ/2) Σ_(j,k)∈E(Y) ‖`y_j` − `y_k‖²`
 //!
 //! and is solved by alternating soft-assignment, MST recomputation, and
 //! a Laplacian-regularized linear solve `(diag(R^T 1) + γL) Y = R^T Z`.
@@ -33,7 +33,7 @@ pub struct PrincipalGraphArgs {
     /// Soft-assignment bandwidth σ (in the same units as ‖z‖²).
     /// Set ≤ 0 to use an adaptive σ = mean of per-cell nearest-centroid dist².
     pub sigma: f32,
-    /// Maximum outer SimplePPT iterations.
+    /// Maximum outer `SimplePPT` iterations.
     pub max_iter: usize,
     /// Relative objective change for early stop.
     pub tol: f32,
@@ -421,7 +421,7 @@ pub fn project_cells_to_graph(z: &DMatrix<f32>, graph: &PrincipalGraph) -> Vec<C
 
 /// Build a petgraph view of the principal tree (nodes = centroid index,
 /// edges = MST with Euclidean weights). The graph is reconstructed lazily
-/// because it's tiny (K ≈ 200) and avoids forcing PrincipalGraph itself
+/// because it's tiny (K ≈ 200) and avoids forcing `PrincipalGraph` itself
 /// to carry a non-Clone graph type.
 fn build_petgraph(graph: &PrincipalGraph) -> (UnGraph<(), f32>, Vec<NodeIndex>) {
     let k = graph.n_nodes();

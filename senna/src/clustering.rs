@@ -304,8 +304,10 @@ fn update_manifest_cluster_path(manifest_path: &str, cluster_path: &str) -> anyh
     let (mut manifest, manifest_dir) = RunManifest::load(path)?;
     let rel = Path::new(cluster_path)
         .strip_prefix(&manifest_dir)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| cluster_path.to_string());
+        .map_or_else(
+            |_| cluster_path.to_string(),
+            |p| p.to_string_lossy().into_owned(),
+        );
     manifest.cluster.clusters = Some(rel);
     manifest.save(path)?;
     info!("Updated manifest {manifest_path} with cluster path");
