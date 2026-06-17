@@ -46,17 +46,28 @@ const CONVERGE_TOL: f64 = 1e-5;
 /// row-major, b_cell [n_cells])`. The per-cell bias `b_c` is **always**
 /// fitted (it absorbs library size, keeping `e_c` depth-corrected and
 /// well-scaled) and kept by both callers (bge and gem).
+///
+/// `progress`, when `Some`, is incremented by one per solved cell — pass a
+/// bar pre-sized to the *total* cell count so a caller that invokes this
+/// once per chunk gets a single bar spanning all chunks.
 pub fn project_cells(
     frozen_e: &[f32],
     frozen_b: &[f32],
     per_cell: &[Vec<(u32, f32)>],
     h: usize,
     lambda: f64,
+    progress: Option<&indicatif::ProgressBar>,
 ) -> (Vec<f32>, Vec<f32>) {
     let n_cells = per_cell.len();
     let solved: Vec<(Vec<f32>, f32)> = per_cell
         .par_iter()
-        .map(|feats| solve_one_cell(feats, frozen_e, frozen_b, h, lambda))
+        .map(|feats| {
+            let solved = solve_one_cell(feats, frozen_e, frozen_b, h, lambda);
+            if let Some(pb) = progress {
+                pb.inc(1);
+            }
+            solved
+        })
         .collect();
     let mut e = vec![0f32; n_cells * h];
     let mut b = vec![0f32; n_cells];
@@ -191,7 +202,7 @@ mod tests {
         let e = vec![1.0f32, 0.0, 0.0, 1.0]; // 2 features
         let b = vec![0.0f32, 0.0];
         let per_cell = vec![vec![(0u32, 2.0f32)], vec![(1u32, 3.0f32)]];
-        let (ec, bc) = project_cells(&e, &b, &per_cell, 2, 1.0);
+        let (ec, bc) = project_cells(&e, &b, &per_cell, 2, 1.0, None);
         assert_eq!(ec.len(), 4); // 2 cells × h=2
         assert_eq!(bc.len(), 2);
     }

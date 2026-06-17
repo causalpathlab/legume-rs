@@ -241,11 +241,20 @@ fn run_phase(
         // off the autograd graph, so each minibatch's forward graph is still
         // released immediately (no GPU-memory blow-up) while we avoid the
         // ~axes×batches GPU→CPU stalls the old per-minibatch logging incurred.
+        // Log ~10 evenly-spaced progress lines (plus first + last) rather than
+        // one per epoch — a 1000-epoch phase otherwise floods the log with
+        // 1000 near-identical lines. Throttling also skips the per-epoch
+        // GPU→CPU scalar sync on quiet epochs.
+        let log_stride = epochs.div_ceil(10).max(1);
         let emit = |epoch: usize,
                     total_acc: &Option<Tensor>,
                     per_axis_acc: &[Option<Tensor>],
                     n_batches: usize| {
             if n_batches == 0 {
+                return;
+            }
+            let is_last = epoch + 1 == epochs;
+            if epoch != 0 && !is_last && !(epoch + 1).is_multiple_of(log_stride) {
                 return;
             }
             let n = n_batches as f32;
