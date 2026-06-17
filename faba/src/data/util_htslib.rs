@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 const DEFAULT_BLOCK_SIZE: usize = 100_000;
 
 use super::dna::Dna;

@@ -17,15 +17,17 @@ pub enum ConversionSite {
         m6a_pos: i64,
         conversion_pos: i64,
         wt_freq: DnaBaseCount,
-        mut_freq: DnaBaseCount,
         pv: f32,
+        /// Benjamini-Hochberg q-value (set by the FDR pass; `1.0` until then)
+        qv: f32,
     },
     /// A-to-I RNA editing site: A->G on forward strand, T->C on reverse
     AtoI {
         editing_pos: i64,
         wt_freq: DnaBaseCount,
-        mut_freq: DnaBaseCount,
         pv: f32,
+        /// Benjamini-Hochberg q-value (set by the FDR pass; `1.0` until then)
+        qv: f32,
     },
 }
 
@@ -54,19 +56,27 @@ impl ConversionSite {
         }
     }
 
-    /// Mutant base frequencies
-    pub fn mut_freq(&self) -> &DnaBaseCount {
-        match self {
-            ConversionSite::M6A { mut_freq, .. } => mut_freq,
-            ConversionSite::AtoI { mut_freq, .. } => mut_freq,
-        }
-    }
-
-    /// P-value from binomial test
+    /// Raw beta-binomial p-value vs the sequencing-error null
     pub fn pv(&self) -> f32 {
         match self {
             ConversionSite::M6A { pv, .. } => *pv,
             ConversionSite::AtoI { pv, .. } => *pv,
+        }
+    }
+
+    /// Benjamini-Hochberg q-value (the FDR the site cleared)
+    pub fn qv(&self) -> f32 {
+        match self {
+            ConversionSite::M6A { qv, .. } => *qv,
+            ConversionSite::AtoI { qv, .. } => *qv,
+        }
+    }
+
+    /// Set the q-value (called by the FDR pass before filtering)
+    pub fn set_qv(&mut self, q: f32) {
+        match self {
+            ConversionSite::M6A { qv, .. } => *qv = q,
+            ConversionSite::AtoI { qv, .. } => *qv = q,
         }
     }
 

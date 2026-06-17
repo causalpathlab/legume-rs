@@ -86,18 +86,25 @@ pub struct AtoICountArgs {
     pub min_mapping_quality: u8,
 
     #[arg(
-        long = "pseudocount",
-        default_value_t = 1,
-        help = "Pseudocount for null distribution in binomial test"
+        long = "error-rate",
+        default_value_t = 0.01,
+        help = "Sequencing-error rate ε for the beta-binomial editing null"
     )]
-    pub pseudocount: usize,
+    pub error_rate: f64,
+
+    #[arg(
+        long = "overdispersion",
+        default_value_t = 0.1,
+        help = "Beta-binomial overdispersion ρ for the editing null (0 ⇒ binomial)"
+    )]
+    pub overdispersion: f64,
 
     #[arg(
         short = 'p',
         long = "pval",
         alias = "pvalue",
         default_value_t = 0.05,
-        help = "P-value cutoff for A-to-I detection"
+        help = "A-to-I detection FDR target (Benjamini-Hochberg q-value)"
     )]
     pub pvalue_cutoff: f32,
 
@@ -294,14 +301,14 @@ impl From<&AtoICountArgs> for ConversionParams {
         ConversionParams {
             genome_file: args.genome_file.clone(),
             wt_bam_files: args.bam_files.clone(),
-            mut_bam_files: Vec::new(),
             gene_barcode_tag: args.gene_barcode_tag.clone(),
             cell_barcode_tag: args.cell_barcode_tag.clone(),
             include_missing_barcode: args.include_missing_barcode,
             min_coverage: args.min_coverage,
             min_conversion: args.min_conversion,
-            pseudocount: args.pseudocount,
             pvalue_cutoff: args.pvalue_cutoff,
+            error_rate: args.error_rate,
+            overdispersion: args.overdispersion,
             backend: args.backend.clone(),
             zip: args.zip,
             output: args.output.clone(),
@@ -416,7 +423,7 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
     // SECOND PASS: quantify into sparse matrix
     info!("Second pass: A-to-I count matrix");
     let valid_cells = gene_qc.as_ref().map(|qc| &qc.cell_barcodes);
-    process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, false, valid_cells)?;
+    process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, valid_cells)?;
 
     // Mixture model: cluster editing sites per gene
     if !args.no_mixture {

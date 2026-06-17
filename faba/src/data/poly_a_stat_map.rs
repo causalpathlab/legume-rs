@@ -1,7 +1,5 @@
-#![allow(dead_code)]
-
 use crate::data::bam_io;
-use crate::data::polya_utils::*;
+use crate::data::poly_a_utils::*;
 use genomic_data::gff::GffRecord;
 use genomic_data::sam::*;
 use rust_htslib::bam::record::Cigar;
@@ -45,24 +43,8 @@ impl PolyASiteMap {
         }
     }
 
-    /// Update from BAM records matching a gene barcode
-    pub fn update_from_gene(
-        &mut self,
-        bam_file_path: &str,
-        gff_record: &GffRecord,
-        gene_barcode_tag: &str,
-        include_missing_barcode: bool,
-    ) -> anyhow::Result<()> {
-        bam_io::for_each_record_in_gene(
-            bam_file_path,
-            gff_record,
-            gene_barcode_tag,
-            include_missing_barcode,
-            |rec| self.add_bam_record(rec),
-        )
-    }
-
-    /// Like [`Self::update_from_gene`] but reuses a per-thread BAM reader cache.
+    /// Update from BAM records matching a gene barcode, reusing a per-thread
+    /// BAM reader cache.
     pub fn update_from_gene_cached(
         &mut self,
         cache: &mut bam_io::BamReaderCache,
@@ -175,19 +157,6 @@ impl PolyASiteMap {
         }
     }
 
-    /// Output sorted genomic positions
-    pub fn sorted_positions(&self) -> Vec<i64> {
-        let mut positions: Vec<i64> = if let Some(map) = &self.position_to_count_with_cell {
-            map.keys().copied().collect()
-        } else if let Some(map) = &self.position_to_count {
-            map.keys().copied().collect()
-        } else {
-            Vec::new()
-        };
-        positions.sort_unstable();
-        positions
-    }
-
     /// Get cell-level counts at a specific position
     /// Returns None if position doesn't exist or cell barcode tracking is not enabled
     pub fn get_cell_counts_at(&self, position: i64) -> Option<&HashMap<CellBarcode, usize>> {
@@ -214,4 +183,4 @@ impl PolyASiteMap {
 }
 
 // Note: get_query_alignment_bounds, count_a_or_t_bases_in_tail, and
-// check_internal_prime are now in polya_utils.rs
+// check_internal_prime are now in poly_a_utils.rs

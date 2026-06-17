@@ -37,14 +37,16 @@ pub enum MixtureWeightMode {
 pub struct ConversionParams {
     pub genome_file: Box<str>,
     pub wt_bam_files: Vec<Box<str>>,
-    pub mut_bam_files: Vec<Box<str>>,
     pub gene_barcode_tag: Box<str>,
     pub cell_barcode_tag: Box<str>,
     pub include_missing_barcode: bool,
     pub min_coverage: usize,
     pub min_conversion: usize,
-    pub pseudocount: usize,
     pub pvalue_cutoff: f32,
+    /// Sequencing-error rate ε for the beta-binomial editing null.
+    pub error_rate: f64,
+    /// Overdispersion ρ for the beta-binomial editing null (0 ⇒ binomial).
+    pub overdispersion: f64,
     pub backend: SparseIoBackend,
     /// Wrap zarr output in a `.zarr.zip` archive (no effect for HDF5).
     pub zip: bool,
@@ -90,8 +92,8 @@ impl ConversionParams {
             chr,
             min_coverage: self.min_coverage,
             min_conversion: self.min_conversion,
-            pseudocount: self.pseudocount,
-            max_pvalue_cutoff: self.pvalue_cutoff,
+            error_rate: self.error_rate,
+            overdispersion: self.overdispersion,
             mod_type: self.mod_type.clone(),
             candidate_sites: Vec::with_capacity(capacity),
         }
@@ -197,7 +199,44 @@ pub fn find_all_conversion_sites(
             },
         )?;
 
-    Arc::try_unwrap(arc_gene_sites).map_err(|_| anyhow::anyhow!("failed to release gene_sites"))
+    let gene_sites = Arc::try_unwrap(arc_gene_sites)
+        .map_err(|_| anyhow::anyhow!("failed to release gene_sites"))?;
+
+    // Multiple-testing correction: Benjamini-Hochberg over every called site,
+    // writing each site's q-value back onto it and keeping those with
+    // q <= pvalue_cutoff (the cutoff is a target FDR, not a per-site threshold).
+    // Pass 1 records each gene's offset into the flat p-value vector; pass 2
+    // uses that offset, so the two passes never share a running cursor.
+    let cutoff = params.pvalue_cutoff;
+    let mut offsets: Vec<(GeneId, usize)> = Vec::with_capacity(gene_sites.len());
+    let mut pvs: Vec<f32> = Vec::new();
+    for e in gene_sites.iter() {
+        offsets.push((e.key().clone(), pvs.len()));
+        pvs.extend(e.value().iter().map(|s| s.pv()));
+    }
+    let n_total = pvs.len();
+    let q = faba::hypothesis_tests::benjamini_hochberg(&pvs);
+    for (k, off) in &offsets {
+        if let Some(mut v) = gene_sites.get_mut(k) {
+            let mut i = *off;
+            v.value_mut().retain_mut(|site| {
+                site.set_qv(q[i]);
+                let keep = q[i] <= cutoff;
+                i += 1;
+                keep
+            });
+        }
+    }
+    let n_kept: usize = gene_sites.iter().map(|e| e.value().len()).sum();
+    info!(
+        "FDR (Benjamini-Hochberg): kept {} / {} {} sites at q <= {}",
+        n_kept,
+        n_total,
+        params.mod_type.label(),
+        cutoff
+    );
+
+    Ok(gene_sites)
 }
 
 /// Per-gene site discovery: reads WT and MUT BAM files, creates sifter, dispatches via scan().
@@ -269,36 +308,13 @@ fn find_sites_with_bulk_stats(
 
     let mut sifter = params.create_sifter(faidx_reader, chr, positions.len());
 
-    let mut mut_base_freq_map = DnaBaseFreqMap::new();
-    mut_base_freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
-    params.apply_umi(&mut mut_base_freq_map);
-
-    for mut_file in &params.mut_bam_files {
-        mut_base_freq_map.update_from_gene_cached(
-            cache,
-            mut_file,
-            gff_record,
-            &params.gene_barcode_tag,
-            params.include_missing_barcode,
-        )?;
-    }
-
     let wt_freq = wt_base_freq_map
         .marginal_frequency_map()
         .ok_or_else(|| anyhow::anyhow!("failed to count wt freq"))?;
 
-    let mut_freq = if params.mut_bam_files.is_empty() {
-        None
-    } else {
-        Some(
-            mut_base_freq_map
-                .marginal_frequency_map()
-                .ok_or_else(|| anyhow::anyhow!("failed to count mut freq"))?,
-        )
-    };
-
+    // Reference-anchored single-sample editing call (beta-binomial vs error).
     let forward = matches!(strand, Strand::Forward);
-    sifter.scan(&positions, wt_freq, mut_freq, forward);
+    sifter.scan(&positions, wt_freq, forward);
 
     let mut candidate_sites = sifter.candidate_sites;
     candidate_sites.sort();
@@ -345,21 +361,6 @@ fn find_sites_with_celltype_stats(
         return Ok(Vec::new());
     }
 
-    // Collect bulk frequencies from mut BAM files (background/null distribution)
-    let mut mut_base_freq_map = DnaBaseFreqMap::new();
-    mut_base_freq_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
-    params.apply_umi(&mut mut_base_freq_map);
-    for mut_file in &params.mut_bam_files {
-        mut_base_freq_map.update_from_gene_cached(
-            cache,
-            mut_file,
-            gff_record,
-            &params.gene_barcode_tag,
-            params.include_missing_barcode,
-        )?;
-    }
-    let mut_freq = mut_base_freq_map.marginal_frequency_map();
-
     let forward = matches!(strand, Strand::Forward);
     let mut all_candidate_sites = Vec::new();
 
@@ -396,7 +397,7 @@ fn find_sites_with_celltype_stats(
         }
 
         let mut sifter = params.create_sifter(faidx_reader, chr, positions.len());
-        sifter.scan(&positions, &celltype_freq, mut_freq, forward);
+        sifter.scan(&positions, &celltype_freq, forward);
         all_candidate_sites.extend(sifter.candidate_sites);
     }
 
@@ -661,7 +662,6 @@ pub fn process_all_bam_files_to_backend(
     params: &ConversionParams,
     gene_sites: &HashMap<GeneId, Vec<ConversionSite>>,
     gff_map: &GffRecordMap,
-    output_null_data: bool,
     valid_cell_barcodes: Option<&rustc_hash::FxHashSet<CellBarcode>>,
 ) -> anyhow::Result<()> {
     let membership = params.load_membership()?;
@@ -692,11 +692,10 @@ pub fn process_all_bam_files_to_backend(
 
     let mut sites = HashSet::<Box<str>>::default();
     let mut site_data_files: Vec<crate::pipeline_util::BackendOutputPath> = vec![];
-    let mut null_site_data_files: Vec<crate::pipeline_util::BackendOutputPath> = vec![];
 
-    let wt_batch_names = uniq_batch_names(&params.wt_bam_files)?;
+    let batch_names = uniq_batch_names(&params.wt_bam_files)?;
 
-    for (bam_file, batch_name) in params.wt_bam_files.iter().zip(wt_batch_names) {
+    for (bam_file, batch_name) in params.wt_bam_files.iter().zip(batch_names) {
         process_bam_to_backend(
             bam_file,
             &batch_name,
@@ -704,21 +703,6 @@ pub fn process_all_bam_files_to_backend(
             &mut sites,
             &mut site_data_files,
         )?;
-    }
-
-    if output_null_data {
-        info!("output null data");
-        let mut_batch_names = uniq_batch_names(&params.mut_bam_files)?;
-
-        for (bam_file, batch_name) in params.mut_bam_files.iter().zip(mut_batch_names) {
-            process_bam_to_backend(
-                bam_file,
-                &batch_name,
-                &ctx,
-                &mut sites,
-                &mut null_site_data_files,
-            )?;
-        }
     }
 
     // Log match statistics if membership was used
@@ -737,13 +721,7 @@ pub fn process_all_bam_files_to_backend(
     }
 
     // Reorder rows to ensure consistency across files
-    reorder_all_matrices(
-        params,
-        sites,
-        site_data_files,
-        null_site_data_files,
-        output_null_data,
-    )?;
+    reorder_all_matrices(params, sites, site_data_files)?;
 
     Ok(())
 }
@@ -844,8 +822,6 @@ fn reorder_all_matrices(
     params: &ConversionParams,
     sites: HashSet<Box<str>>,
     site_data_files: Vec<crate::pipeline_util::BackendOutputPath>,
-    null_site_data_files: Vec<crate::pipeline_util::BackendOutputPath>,
-    output_null_data: bool,
 ) -> anyhow::Result<()> {
     let backend = &params.backend;
 
@@ -856,19 +832,8 @@ fn reorder_all_matrices(
         open_sparse_matrix(&out.write_path, backend)?.reorder_rows(&sites_sorted)?;
     }
 
-    if output_null_data {
-        for out in &null_site_data_files {
-            open_sparse_matrix(&out.write_path, backend)?.reorder_rows(&sites_sorted)?;
-        }
-    }
-
     for out in site_data_files {
         out.finalize()?;
-    }
-    if output_null_data {
-        for out in null_site_data_files {
-            out.finalize()?;
-        }
     }
 
     Ok(())

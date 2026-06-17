@@ -1,151 +1,91 @@
-#![allow(dead_code)]
+use statrs::function::gamma::ln_gamma;
 
-use statrs::distribution::{Binomial, DiscreteCDF};
-
-/// Counts of failures and successes in a binomial experiment
-#[derive(Debug, Clone, Copy)]
-pub struct BinomialCounts<T>
-where
-    T: num_traits::ToPrimitive,
-{
-    pub num_failure: T,
-    pub num_success: T,
-}
-
-impl<T> BinomialCounts<T>
-where
-    T: num_traits::ToPrimitive + std::ops::Add<Output = T> + Copy,
-{
-    pub fn new(num_failure: T, num_success: T) -> Self {
-        Self {
-            num_failure,
-            num_success,
-        }
-    }
-
-    /// Add a pseudocount to both failure and success counts for regularization
-    pub fn with_pseudocount(num_failure: T, num_success: T, pseudocount: T) -> Self {
-        Self {
-            num_failure: num_failure + pseudocount,
-            num_success: num_success + pseudocount,
-        }
-    }
-}
-
-/// Binomial test
-/// - `expected`: expected counts under null hypothesis
-/// - `observed`: observed counts in the data
+/// Upper-tail beta-binomial p-value for single-sample editing detection.
 ///
-pub struct BinomTest<T>
-where
-    T: num_traits::ToPrimitive,
-{
-    pub expected: BinomialCounts<T>,
-    pub observed: BinomialCounts<T>,
+/// Models the alt-allele (edited) read count `k` out of `n` ref+alt reads at a
+/// site as `k ~ BetaBinomial(n, α, β)` under the null that alt reads are
+/// sequencing noise: mean error `eps = α/(α+β)`, overdispersion
+/// `rho = 1/(α+β+1)` (the beta-binomial intra-site correlation). Returns
+/// `P(K >= k)` — small when observed editing exceeds what noise at rate `eps`
+/// (allowing for overdispersion `rho`) would produce. This is the JACUSA2
+/// call-1 / SAILOR-style single-condition test: no control sample required.
+///
+/// `rho <= 0` reduces to the plain `Binomial(n, eps)` tail. The upper tail is
+/// summed directly via an online (streaming) log-sum-exp — no allocation, and
+/// no `1 - lower_tail` complement (which underflows to 0 for very significant
+/// sites).
+pub fn betabinom_pvalue_greater(k: u64, n: u64, eps: f64, rho: f64) -> f32 {
+    if n == 0 || k == 0 {
+        return 1.0;
+    }
+    if k > n {
+        return 0.0;
+    }
+    let eps = eps.clamp(1e-9, 1.0 - 1e-9);
+    let lgn1 = ln_gamma((n + 1) as f64);
+    let ln_choose = |i: u64| lgn1 - ln_gamma((i + 1) as f64) - ln_gamma((n - i + 1) as f64);
+
+    // Sum the upper tail P(K>=k) directly. Each emission log-pmf is built once
+    // per mode (binomial limit vs beta-binomial) with all i-independent terms
+    // hoisted, then folded by `upper_tail_p` with no intermediate buffer.
+    let p = if rho <= 0.0 {
+        let (le, l1) = (eps.ln(), (1.0 - eps).ln());
+        upper_tail_p(k, n, |i| {
+            ln_choose(i) + (i as f64) * le + ((n - i) as f64) * l1
+        })
+    } else {
+        let rho = rho.min(1.0 - 1e-9);
+        let s = (1.0 - rho) / rho; // α + β (precision)
+        let alpha = eps * s;
+        let beta = (1.0 - eps) * s;
+        let lnb_ab = ln_gamma(alpha) + ln_gamma(beta) - ln_gamma(alpha + beta);
+        let lg_denom = ln_gamma(n as f64 + alpha + beta);
+        upper_tail_p(k, n, |i| {
+            ln_choose(i) + ln_gamma(i as f64 + alpha) + ln_gamma((n - i) as f64 + beta)
+                - lg_denom
+                - lnb_ab
+        })
+    };
+    p.clamp(0.0, 1.0) as f32
 }
 
-impl<T> BinomTest<T>
-where
-    T: num_traits::ToPrimitive,
-{
-    /// Test if observed success rate is greater than expected
-    /// Returns P(X >= obs_success | X ~ Binomial(n, p_expected))
-    pub fn pvalue_greater(&self) -> anyhow::Result<f32> {
-        if let (Some(exp_success), Some(exp_failure), Some(obs_success), Some(obs_failure)) = (
-            self.expected.num_success.to_u64(),
-            self.expected.num_failure.to_u64(),
-            self.observed.num_success.to_u64(),
-            self.observed.num_failure.to_u64(),
-        ) {
-            let null_pr = (exp_success as f64) / ((exp_failure + exp_success) as f64).max(1.0);
-            let nobs = obs_success + obs_failure;
-            let distrib = Binomial::new(null_pr, nobs)?;
-            // P(X >= k) = P(X > k-1) = sf(k-1)
-            // Using sf() is more numerically stable than 1 - cdf()
-            Ok(distrib.sf(obs_success.saturating_sub(1)) as f32)
+/// Sum `exp(log_pmf(i))` over `i in k..=n` via an online log-sum-exp, returning
+/// the probability (not log). No heap allocation.
+fn upper_tail_p(k: u64, n: u64, log_pmf: impl Fn(u64) -> f64) -> f64 {
+    let mut max = f64::NEG_INFINITY;
+    let mut sum = 0.0f64;
+    for i in k..=n {
+        let x = log_pmf(i);
+        if x > max {
+            sum = sum * (max - x).exp() + 1.0;
+            max = x;
         } else {
-            Err(anyhow::anyhow!("failed to construct binomial test"))
+            sum += (x - max).exp();
         }
     }
-
-    /// Test if observed success rate is less than expected
-    /// Returns P(X <= obs_success | X ~ Binomial(n, p_expected))
-    pub fn pvalue_less(&self) -> anyhow::Result<f32> {
-        if let (Some(exp_success), Some(exp_failure), Some(obs_success), Some(obs_failure)) = (
-            self.expected.num_success.to_u64(),
-            self.expected.num_failure.to_u64(),
-            self.observed.num_success.to_u64(),
-            self.observed.num_failure.to_u64(),
-        ) {
-            let null_pr = (exp_success as f64) / ((exp_failure + exp_success) as f64).max(1.0);
-            let nobs = obs_success + obs_failure;
-            let distrib = Binomial::new(null_pr, nobs)?;
-            Ok(distrib.cdf(obs_success) as f32)
-        } else {
-            Err(anyhow::anyhow!("failed to construct binomial test"))
-        }
+    if max == f64::NEG_INFINITY {
+        0.0
+    } else {
+        (max + sum.ln()).exp()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_pvalue_greater_significant() {
-        // Expected 10% rate (90C/10T), observed 50% rate (50C/50T)
-        let test = BinomTest {
-            expected: BinomialCounts::new(90u64, 10u64),
-            observed: BinomialCounts::new(50u64, 50u64),
-        };
-        let pv = test.pvalue_greater().unwrap();
-        assert!(pv < 0.001, "pvalue_greater should be < 0.001, got {pv}");
+/// Benjamini-Hochberg FDR adjustment. Returns q-values in the input order.
+pub fn benjamini_hochberg(pvalues: &[f32]) -> Vec<f32> {
+    let m = pvalues.len();
+    if m == 0 {
+        return Vec::new();
     }
-
-    #[test]
-    fn test_pvalue_greater_nonsignificant() {
-        // Expected 10% rate (90C/10T), observed ~12% rate (88C/12T)
-        let test = BinomTest {
-            expected: BinomialCounts::new(90u64, 10u64),
-            observed: BinomialCounts::new(88u64, 12u64),
-        };
-        let pv = test.pvalue_greater().unwrap();
-        assert!(pv > 0.1, "pvalue_greater should be > 0.1, got {pv}");
+    let mut order: Vec<usize> = (0..m).collect();
+    order.sort_by(|&a, &b| pvalues[a].partial_cmp(&pvalues[b]).unwrap());
+    let mut q = vec![0.0f32; m];
+    let mut running_min = 1.0f32;
+    // Walk from largest p to smallest, enforcing monotonic non-decreasing q.
+    for rank in (0..m).rev() {
+        let idx = order[rank];
+        let adj = pvalues[idx] * (m as f32) / ((rank + 1) as f32);
+        running_min = running_min.min(adj);
+        q[idx] = running_min.min(1.0);
     }
-
-    #[test]
-    fn test_pvalue_less() {
-        // Expected 50% rate, observed only 10% (90C/10T)
-        let test = BinomTest {
-            expected: BinomialCounts::new(50u64, 50u64),
-            observed: BinomialCounts::new(90u64, 10u64),
-        };
-        let pv = test.pvalue_less().unwrap();
-        assert!(pv < 0.001, "pvalue_less should be < 0.001, got {pv}");
-    }
-
-    #[test]
-    fn test_pvalue_at_null() {
-        // Expected and observed both 50/50
-        let test = BinomTest {
-            expected: BinomialCounts::new(50u64, 50u64),
-            observed: BinomialCounts::new(50u64, 50u64),
-        };
-        let pv = test.pvalue_greater().unwrap();
-        assert!(
-            (pv - 0.5).abs() < 0.1,
-            "pvalue_greater at null should be ~0.5, got {pv}"
-        );
-    }
-
-    #[test]
-    fn test_pseudocount() {
-        let c1 = BinomialCounts::with_pseudocount(0u64, 0u64, 1u64);
-        assert_eq!(c1.num_failure, 1);
-        assert_eq!(c1.num_success, 1);
-
-        let c2 = BinomialCounts::with_pseudocount(10u64, 5u64, 2u64);
-        assert_eq!(c2.num_failure, 12);
-        assert_eq!(c2.num_success, 7);
-    }
+    q
 }

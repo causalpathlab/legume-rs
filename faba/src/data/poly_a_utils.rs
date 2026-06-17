@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use rust_htslib::bam;
 use rust_htslib::bam::record::Cigar;
 

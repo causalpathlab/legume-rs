@@ -7,3 +7,7 @@
 //! the public API.
 
 pub mod gem;
+
+/// Single-sample editing statistics (beta-binomial p-values, Benjamini-Hochberg
+/// FDR). Exposed so the pure-function tests can live under `tests/`.
+pub mod hypothesis_tests;

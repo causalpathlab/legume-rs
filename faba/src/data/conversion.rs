@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use clap::ValueEnum;
 pub use genomic_data::bed::*;
 
