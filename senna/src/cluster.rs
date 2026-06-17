@@ -8,7 +8,7 @@ use hsblock::{Hsblock, HsbmOptions};
 use leiden::clustering::SimpleClustering;
 use leiden::Clustering;
 use matrix_util::clustering::{Kmeans, KmeansArgs};
-use matrix_util::knn_graph::{self, KnnGraph, KnnGraphArgs};
+use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
 use matrix_util::traits::MatOps;
 
 /// Clustering method
@@ -214,75 +214,18 @@ pub fn leiden_clustering_with_metric(
     seed: Option<u64>,
     metric: LatentMetric,
 ) -> anyhow::Result<ClusterResult> {
-    let n = latent.nrows();
-    let d = latent.ncols();
-    if n < 2 {
-        anyhow::bail!("Need at least 2 cells for Leiden clustering");
-    }
-
-    info!("Leiden: {n} cells x {d} features, knn={knn}, seed={seed:?}, metric={metric:?}");
-
-    // Metric-dependent preprocessing. ZScoreEuclidean: per-dim
-    // standardize so heterogeneous-scale dims don't dominate.
-    // Cosine: per-cell L2 normalize so Euclidean on the unit sphere
-    // matches angular ordering.
-    let mut latent_pre = latent.clone();
-    match metric {
-        LatentMetric::ZScoreEuclidean => latent_pre.scale_columns_inplace(),
-        LatentMetric::Cosine => {
-            for mut row in latent_pre.row_iter_mut() {
-                let denom = row.norm().max(1e-8);
-                row /= denom;
-            }
-        }
-    }
-
-    info!("Building KNN graph (k={knn}) for {n} cells ...");
-    let graph = KnnGraph::from_rows(
-        &latent_pre,
-        KnnGraphArgs {
-            knn,
-            block_size: 1000,
-            reciprocal: false,
-        },
+    // Core kNN-graph + Leiden lives in matrix-util now (shared with the
+    // graph-embedding-util annotation coarsener); this is a thin wrapper
+    // that maps the metric and packages a ClusterResult.
+    let cosine = matches!(metric, LatentMetric::Cosine);
+    let compact = matrix_util::clustering::leiden_clustering(
+        latent,
+        knn,
+        resolution,
+        target_clusters,
+        seed,
+        cosine,
     )?;
-
-    let mean_degree = if graph.num_nodes() > 0 {
-        2.0 * graph.num_edges() as f64 / graph.num_nodes() as f64
-    } else {
-        0.0
-    };
-    info!(
-        "KNN graph: {} nodes, {} edges (mean degree {:.1})",
-        graph.num_nodes(),
-        graph.num_edges(),
-        mean_degree
-    );
-
-    // Check connected components
-    let n_components = matrix_util::graph::num_connected_components(&graph);
-    info!("KNN graph has {n_components} connected component(s)");
-
-    // Step 2: Convert to Leiden Network with modularity objective
-    let (network, total_edge_weight) = graph.to_leiden_network();
-    let resolution_scaled = knn_graph::modularity_to_cpm_resolution(resolution, total_edge_weight);
-    info!(
-        "Modularity resolution={resolution:.4} → scaled={resolution_scaled:.6e}, total_edge_weight={total_edge_weight:.1}"
-    );
-
-    // Step 3: Run Leiden — with optional resolution tuning
-    let seed_val = seed.map(|s| s as usize);
-
-    let labels = if let Some(target_k) = target_clusters {
-        info!("Auto-tuning resolution to target ~{target_k} clusters ...");
-        knn_graph::tune_leiden_resolution(&network, n, target_k, resolution_scaled, seed_val)
-    } else {
-        info!("Running Leiden at scaled resolution={resolution_scaled:.6e} ...");
-        knn_graph::run_leiden(&network, n, resolution_scaled, seed_val)
-    };
-
-    let mut compact = labels;
-    knn_graph::compact_labels(&mut compact);
     let n_clusters = compact.iter().copied().max().unwrap_or(0) + 1;
     let result = ClusterResult {
         labels: compact,

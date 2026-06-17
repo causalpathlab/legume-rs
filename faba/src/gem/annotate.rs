@@ -6,14 +6,14 @@
 //! β_g (`feature_embedding`) and e_cell (`cell_embedding`) from a
 //! `{prefix}.faba.json` manifest and hands them to the shared routine, which
 //! embeds each cell type as the L2-normalized centroid of its marker feature
-//! embeddings (the space the cells live in) and cosine-scores every cell.
-//! Outputs (`[N × C]`, cell-keyed, type columns; `[C × H]` for anchors):
+//! embeddings (the space the cells live in), clusters the cells, and emits a
+//! two-layer (fine + coarse) annotation. Outputs:
 //!
-//! - `{out}.gem_annot.posterior.parquet` — per-cell soft posterior over types
-//!   (the argmax label is the row-max — not materialized)
-//! - `{out}.gem_annot.zscore.parquet`    — null-standardized z (if `--num-perm > 0`;
-//!   p = `pnorm(-z)` downstream)
-//! - `{out}.gem_annot.type_embedding.parquet` — `[C × H]` type anchors
+//! - `{out}.gem_annot.annot.parquet` — per cell: community, coarse + fine
+//!   label, score (z), and p-value (`pnorm(-z)`) for each layer
+//! - `{out}.gem_annot.community_profile.parquet` — one row per community
+//! - `{out}.gem_annot.type_map.parquet` — fine → coarse merge record
+//! - `{out}.gem_annot.{type,coarse}_embedding.parquet` — `[· × H]` anchors
 //!   (drop-in overlay for `faba gem-plot`)
 
 use anyhow::{Context, Result};
@@ -51,19 +51,16 @@ pub struct GemAnnotateArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Softmax temperature for the per-cell posterior"
-    )]
-    pub temperature: f32,
-
-    #[arg(
-        long,
         default_value_t = 200,
         help = "Permutation draws per type for the null (0 = skip z-scores)"
     )]
     pub num_perm: usize,
 
-    #[arg(long, default_value_t = 42, help = "RNG seed (permutation null)")]
+    #[arg(
+        long,
+        default_value_t = 42,
+        help = "RNG seed (permutation null + clustering)"
+    )]
     pub seed: u64,
 
     #[arg(
@@ -71,6 +68,26 @@ pub struct GemAnnotateArgs {
         help = "Disable IDF down-weighting of markers shared across many types"
     )]
     pub no_idf: bool,
+
+    #[arg(
+        long = "no-coarsen",
+        help = "Disable cell-grounded coarsening (emit only the fine layer mirrored as coarse)"
+    )]
+    pub no_coarsen: bool,
+
+    #[arg(
+        long,
+        default_value_t = 30,
+        help = "k for the cell kNN graph used by the coarsening clusterer"
+    )]
+    pub knn: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Leiden resolution for cell clustering (higher → more, finer communities)"
+    )]
+    pub resolution: f64,
 }
 
 pub fn run_gem_annotate(args: &GemAnnotateArgs) -> Result<()> {
@@ -90,9 +107,11 @@ pub fn run_gem_annotate(args: &GemAnnotateArgs) -> Result<()> {
         .with_context(|| format!("reading cell embedding {cell_path}"))?;
 
     let cfg = AnnotateProjConfig {
-        temperature: args.temperature,
         n_perm: args.num_perm,
         seed: args.seed,
+        knn: args.knn,
+        resolution: args.resolution,
+        coarsen: !args.no_coarsen,
     };
     annotate_embeddings(
         &feat.mat,
