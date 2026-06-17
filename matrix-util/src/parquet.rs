@@ -334,6 +334,56 @@ pub fn parquet_add_numeric_column<'a, T: 'static + num_traits::ToPrimitive>(
     Ok(())
 }
 
+/// One column of a tidy table for [`write_named_table`]. Borrows its data.
+pub enum Column<'a> {
+    Str(&'a [Box<str>]),
+    F32(&'a [f32]),
+    I32(&'a [i32]),
+}
+
+/// Write a tidy mixed-type table to parquet: a leading string key column
+/// (`row_col_name` / `row_names`) followed by `columns` of heterogeneous
+/// type. All columns must have the same length as `row_names`.
+pub fn write_named_table(
+    file_path: &str,
+    row_col_name: &str,
+    row_names: &[Box<str>],
+    columns: &[(Box<str>, Column)],
+) -> anyhow::Result<()> {
+    let ncols = columns.len();
+    let col_names: Vec<Box<str>> = columns.iter().map(|(n, _)| n.clone()).collect();
+    let col_types: Vec<ParquetType> = columns
+        .iter()
+        .map(|(_, c)| match c {
+            Column::Str(_) => ParquetType::BYTE_ARRAY,
+            Column::F32(_) => ParquetType::FLOAT,
+            Column::I32(_) => ParquetType::INT32,
+        })
+        .collect();
+
+    let writer = ParquetWriter::new(
+        file_path,
+        (row_names.len(), ncols),
+        (Some(row_names), Some(&col_names)),
+        Some(&col_types),
+        Some(row_col_name),
+    )?;
+    let row_ba = writer.row_names_vec().clone();
+    let mut fw = writer.get_writer()?;
+    let mut rg = fw.next_row_group()?;
+    parquet_add_bytearray(&mut rg, &row_ba)?;
+    for (_, col) in columns {
+        match col {
+            Column::Str(d) => parquet_add_string_column(&mut rg, d)?,
+            Column::F32(d) => parquet_add_numeric_column(&mut rg, *d)?,
+            Column::I32(d) => parquet_add_numeric_column(&mut rg, *d)?,
+        }
+    }
+    rg.close()?;
+    fw.close()?;
+    Ok(())
+}
+
 fn build_columns_schema(
     ncols: usize,
     column_names: Option<&[Box<str>]>,

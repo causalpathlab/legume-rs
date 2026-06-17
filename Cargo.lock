@@ -2607,6 +2607,7 @@ dependencies = [
  "ctrlc",
  "data-beans",
  "data-beans-alg",
+ "enrichment",
  "indicatif",
  "log",
  "matrix-param",

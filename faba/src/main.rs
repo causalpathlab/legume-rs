@@ -336,7 +336,7 @@ Example:\n  \
         after_long_help = "\
 Example:\n  \
   faba gem-annotate --from out/gem.faba.json -m markers.tsv\n  \
-  faba gem-annotate -f out/gem.faba.json -m markers.tsv --num-perm 500 --temperature 0.5"
+  faba gem-annotate -f out/gem.faba.json -m markers.tsv --num-perm 500 --resolution 1.0"
     )]
     GemAnnotate(GemAnnotateArgs),
 

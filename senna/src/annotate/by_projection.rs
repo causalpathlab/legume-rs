@@ -6,8 +6,8 @@
 //! [`graph_embedding_util::type_annotation::annotate_embeddings`]: it reads a
 //! `run.senna.json` manifest, loads `outputs.feature_embedding` (gene × H)
 //! and `outputs.latent` (cell × H — for bge/fne the latent *is* the cell
-//! embedding), and hands them to the shared routine. Outputs
-//! `{out}.{kind}_annot.{posterior,zscore,type_embedding}.parquet`.
+//! embedding), and hands them to the shared routine. Outputs the two-layer
+//! `{out}.{kind}_annot.{annot,community_profile,type_map,type_embedding,coarse_embedding}.parquet`.
 //!
 //! This is the *light, per-cell, clustering-free* complement to
 //! [`super::by_enrichment::run`] (cluster-level marker enrichment with FDR). It is
@@ -51,20 +51,17 @@ pub struct AnnotateProjectArgs {
     pub out: Option<Box<str>>,
 
     #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "Softmax temperature for the per-cell posterior (lower → sharper)"
-    )]
-    pub temperature: f32,
-
-    #[arg(
         long = "num-perm",
         default_value_t = 200,
         help = "Permutation draws per type for the null (0 = skip z-scores)"
     )]
     pub num_perm: usize,
 
-    #[arg(long, default_value_t = 42, help = "RNG seed (permutation null)")]
+    #[arg(
+        long,
+        default_value_t = 42,
+        help = "RNG seed (permutation null + clustering)"
+    )]
     pub seed: u64,
 
     #[arg(
@@ -72,6 +69,26 @@ pub struct AnnotateProjectArgs {
         help = "Disable IDF down-weighting of markers shared across many types"
     )]
     pub no_idf: bool,
+
+    #[arg(
+        long = "no-coarsen",
+        help = "Disable cell-grounded coarsening (emit only the fine layer mirrored as coarse)"
+    )]
+    pub no_coarsen: bool,
+
+    #[arg(
+        long,
+        default_value_t = 30,
+        help = "k for the cell kNN graph used by the coarsening clusterer"
+    )]
+    pub knn: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Leiden resolution for cell clustering (higher → more, finer communities)"
+    )]
+    pub resolution: f64,
 }
 
 pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
@@ -126,9 +143,11 @@ pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
     mkdir_parent(&out)?;
 
     let cfg = AnnotateProjConfig {
-        temperature: args.temperature,
         n_perm: args.num_perm,
         seed: args.seed,
+        knn: args.knn,
+        resolution: args.resolution,
+        coarsen: !args.no_coarsen,
     };
     annotate_embeddings(
         &feat.mat,

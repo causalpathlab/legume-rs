@@ -1,8 +1,12 @@
 //! K-means clustering traits for matrices
 //!
 //! Provides traits for clustering rows or columns of matrices using the
-//! `clustering` crate.
+//! `clustering` crate, plus a Leiden community-detection helper that builds
+//! a kNN graph in latent space and runs modularity-objective Leiden.
 
+use crate::knn_graph::{self, KnnGraph, KnnGraphArgs};
+use crate::traits::MatOps;
+use log::info;
 use nalgebra::DMatrix;
 
 /// Arguments for k-means clustering
@@ -86,6 +90,75 @@ where
         let clust = clustering::kmeans(args.num_clusters, &data, args.max_iter);
         clust.membership
     }
+}
+
+/// Leiden community detection on a latent representation (rows = points).
+///
+/// Builds a kNN graph in latent space and runs the modularity-objective
+/// Leiden algorithm. The community count is *not* a parameter — it emerges
+/// from the modularity `resolution` (higher → more, smaller communities),
+/// unless `target_clusters` is set, in which case the resolution is
+/// binary-searched to approximate that count.
+///
+/// `cosine = true` row-L2-normalizes first, so kNN distances on the unit
+/// sphere are monotonic in cosine — the right choice for dot-product /
+/// cosine-trained embeddings (bge, gem). `cosine = false` column z-scores
+/// instead (Euclidean kNN on heterogeneous-scale dims, e.g. raw SVD).
+///
+/// Returns compacted (contiguous, 0-based) cluster labels, one per row.
+pub fn leiden_clustering(
+    latent: &DMatrix<f32>,
+    knn: usize,
+    resolution: f64,
+    target_clusters: Option<usize>,
+    seed: Option<u64>,
+    cosine: bool,
+) -> anyhow::Result<Vec<usize>> {
+    let n = latent.nrows();
+    let d = latent.ncols();
+    if n < 2 {
+        anyhow::bail!("Need at least 2 points for Leiden clustering");
+    }
+    info!("Leiden: {n} points x {d} features, knn={knn}, seed={seed:?}, cosine={cosine}");
+
+    // Metric-dependent preprocessing.
+    let mut latent_pre = latent.clone();
+    if cosine {
+        for mut row in latent_pre.row_iter_mut() {
+            let denom = row.norm().max(1e-8);
+            row /= denom;
+        }
+    } else {
+        latent_pre.scale_columns_inplace();
+    }
+
+    let graph = KnnGraph::from_rows(
+        &latent_pre,
+        KnnGraphArgs {
+            knn,
+            block_size: 1000,
+            reciprocal: false,
+        },
+    )?;
+    info!(
+        "KNN graph: {} nodes, {} edges",
+        graph.num_nodes(),
+        graph.num_edges()
+    );
+
+    let (network, total_edge_weight) = graph.to_leiden_network();
+    let resolution_scaled = knn_graph::modularity_to_cpm_resolution(resolution, total_edge_weight);
+    let seed_val = seed.map(|s| s as usize);
+
+    let mut labels = if let Some(target_k) = target_clusters {
+        knn_graph::tune_leiden_resolution(&network, n, target_k, resolution_scaled, seed_val)
+    } else {
+        knn_graph::run_leiden(&network, n, resolution_scaled, seed_val)
+    };
+    knn_graph::compact_labels(&mut labels);
+    let n_clusters = labels.iter().copied().max().unwrap_or(0) + 1;
+    info!("Leiden done: {n_clusters} clusters over {n} points");
+    Ok(labels)
 }
 
 #[cfg(test)]
