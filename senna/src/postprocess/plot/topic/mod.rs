@@ -439,8 +439,7 @@ fn load_batch_labels(resolved: &ResolvedInputs, n_cells: usize) -> anyhow::Resul
                 .file_name()
                 .and_then(|s| s.to_str())
                 .map(strip_backend_suffix)
-                .map(Box::<str>::from)
-                .unwrap_or_else(|| idx.to_string().into_boxed_str())
+                .map_or_else(|| idx.to_string().into_boxed_str(), Box::<str>::from)
         })
         .collect();
     let mut counts: FxHashMap<&str, usize> = FxHashMap::default();
@@ -455,7 +454,7 @@ fn load_batch_labels(resolved: &ResolvedInputs, n_cells: usize) -> anyhow::Resul
                 n.clone()
             } else {
                 let k = seen.entry(n.as_ref()).or_insert(0);
-                let s = format!("{}_{}", n, k).into_boxed_str();
+                let s = format!("{n}_{k}").into_boxed_str();
                 *k += 1;
                 s
             }
@@ -746,7 +745,7 @@ fn render_structure_plots(
         .par_iter()
         .map(|(batch, order)| -> anyhow::Result<PanelOut> {
             let n = order.len();
-            let panel_w = ((n as f64 / total_cells as f64) * total_width_px as f64)
+            let panel_w = ((n as f64 / total_cells as f64) * f64::from(total_width_px))
                 .round()
                 .max(1.0) as u32;
             // Reorder probs into a contiguous [n × K] row-major slice so
@@ -932,9 +931,8 @@ fn emit_topic_legend(
         let x = bar_x_end as f32 + pad_left;
         let _ = writeln!(
             s,
-            "    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{sw:.1}\" height=\"{sw:.1}\" \
+            "    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{swatch:.1}\" height=\"{swatch:.1}\" \
              fill=\"rgb({r},{g},{b})\" stroke=\"black\" stroke-width=\"0.5\"/>",
-            sw = swatch,
         );
         let _ = writeln!(
             s,
@@ -971,10 +969,7 @@ fn render_dict_plot(
     } = Mat::from_parquet(dict_path)?;
     let n_genes_full = dict_gk.nrows();
     let n_topics = dict_gk.ncols();
-    info!(
-        "Loaded dictionary {} ({} genes × {} topics)",
-        dict_path, n_genes_full, n_topics
-    );
+    info!("Loaded dictionary {dict_path} ({n_genes_full} genes × {n_topics} topics)");
 
     if n_topics != topic_ids.len() {
         anyhow::bail!(
@@ -1136,10 +1131,7 @@ fn render_dict_plot(
 
         // Percentile-clipped log10 bounds for the diverging color scale.
         let (lo_log, hi_log) = log10_clip_bounds(&sub_disp, 0.01, 0.99);
-        info!(
-            "Heatmap log10 range (1%–99%): [{:.2}, {:.2}]",
-            lo_log, hi_log
-        );
+        info!("Heatmap log10 range (1%–99%): [{lo_log:.2}, {hi_log:.2}]");
 
         let png =
             render_dict_heatmap_png(&sub_disp, n_genes, n_topics, cell_w, cell_h, lo_log, hi_log)?;
@@ -1171,12 +1163,8 @@ fn render_dict_plot(
         let b64 = BASE64.encode(&png);
         let _ = writeln!(
             s,
-            "  <image x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" \
+            "  <image x=\"{label_band_left}\" y=\"{label_band_top}\" width=\"{bar_w}\" height=\"{bar_h}\" \
              preserveAspectRatio=\"none\" href=\"data:image/png;base64,{b64}\"/>",
-            x = label_band_left,
-            y = label_band_top,
-            w = bar_w,
-            h = bar_h,
         );
         // Colorbar (RdBu_r) on the right with min/mid/max log10 ticks.
         // Height matches the heatmap so cell rows and gradient stops are
@@ -1188,12 +1176,8 @@ fn render_dict_plot(
         let cbar_b64 = BASE64.encode(&cbar_png);
         let _ = writeln!(
             s,
-            "  <image x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" \
+            "  <image x=\"{cbar_x}\" y=\"{cbar_y}\" width=\"{cbar_w}\" height=\"{cbar_h}\" \
              preserveAspectRatio=\"none\" href=\"data:image/png;base64,{cbar_b64}\"/>",
-            x = cbar_x,
-            y = cbar_y,
-            w = cbar_w,
-            h = cbar_h,
         );
         let _ = writeln!(
             s,
@@ -1234,8 +1218,7 @@ fn render_dict_plot(
         let _ = writeln!(
             s,
             "  <g id=\"gene-labels\" font-family=\"Helvetica, Arial, sans-serif\" \
-             font-size=\"{fs:.1}\" text-anchor=\"end\" dominant-baseline=\"central\">",
-            fs = label_font_px,
+             font-size=\"{label_font_px:.1}\" text-anchor=\"end\" dominant-baseline=\"central\">",
         );
         for (rr_disp, &rr) in row_order.iter().enumerate() {
             if rr_disp % stride != 0 {
@@ -1351,7 +1334,7 @@ fn format_sci(v: f32) -> String {
     }
 }
 
-/// RdBu_r diverging palette, 3-stop linear interpolation.
+/// `RdBu_r` diverging palette, 3-stop linear interpolation.
 /// `t ∈ [0, 1]`: 0 = blue (low), 0.5 = white (mid), 1 = red (high).
 /// Stops chosen to match matplotlib's `RdBu_r` endpoints.
 fn rdbu_r(t: f32) -> Rgb {
@@ -1359,7 +1342,8 @@ fn rdbu_r(t: f32) -> Rgb {
     const MID: (u8, u8, u8) = (247, 247, 247);
     const HIGH: (u8, u8, u8) = (178, 24, 43);
     let t = t.clamp(0.0, 1.0);
-    let lerp = |a: u8, b: u8, u: f32| (a as f32 + (b as f32 - a as f32) * u).round() as u8;
+    let lerp =
+        |a: u8, b: u8, u: f32| (f32::from(a) + (f32::from(b) - f32::from(a)) * u).round() as u8;
     if t < 0.5 {
         let u = t / 0.5;
         (
@@ -1412,7 +1396,7 @@ fn log10_clip_bounds(sub: &[f32], lo_q: f32, hi_q: f32) -> (f32, f32) {
     }
 }
 
-/// RdBu_r diverging heatmap (n_genes × n_topics). Values are mapped via
+/// `RdBu_r` diverging heatmap (`n_genes` × `n_topics`). Values are mapped via
 /// log10 with 1st/99th percentile clipping so a few extreme entries
 /// don't wash out the rest. Color = `rdbu_r((log10(w) − lo) / (hi − lo))`.
 /// Cells with `w ≤ 0` or non-finite values are drawn at the low end of
@@ -1466,7 +1450,7 @@ fn render_dict_heatmap_png(
         .map_err(|e| anyhow::anyhow!("PNG encode failed: {e}"))
 }
 
-/// Render a vertical RdBu_r colorbar PNG with `bar_w × bar_h` pixels.
+/// Render a vertical `RdBu_r` colorbar PNG with `bar_w × bar_h` pixels.
 /// `bar_w` is typically 10–14 px; the gradient runs top (high) → bottom
 /// (low) so it visually pairs with a y-axis scale.
 fn render_colorbar_png(bar_w: u32, bar_h: u32) -> anyhow::Result<Vec<u8>> {

@@ -32,10 +32,11 @@ pub struct UnifiedData {
     /// Global batch labels in id order.
     pub batch_names: Vec<Box<str>>,
 
-    /// Global cell id → global condition id. Drives the per-condition
-    /// multiplicative gate on the feature embedding (see
-    /// `JointEmbedModel::FeatGate`). Defaults to a copy of
-    /// `batch_membership` when no separate condition input is given.
+    /// Global cell id → global condition id, from optional per-cell
+    /// condition labels. Defaults to a copy of `batch_membership` when no
+    /// separate condition input is given. Retained loader state — the
+    /// per-condition feature gate that consumed it has been removed, so no
+    /// model currently reads this.
     pub condition_membership: Vec<u32>,
 
     /// Global condition labels in id order. Defaults to `batch_names`.
@@ -79,6 +80,7 @@ pub struct UnifiedData {
 impl UnifiedData {
     /// Borrow the sparse count backend. Panics when called on a synthetic
     /// pseudobulk `UnifiedData` (which has no backend).
+    #[must_use]
     pub fn count_backend(&self) -> &SparseIoVec {
         self.backend
             .as_ref()
@@ -95,18 +97,22 @@ impl UnifiedData {
 }
 
 impl UnifiedData {
+    #[must_use]
     pub fn n_cells(&self) -> usize {
         self.barcodes.len()
     }
 
+    #[must_use]
     pub fn n_features(&self) -> usize {
         self.feature_names.len()
     }
 
+    #[must_use]
     pub fn n_batches(&self) -> usize {
         self.batch_names.len()
     }
 
+    #[must_use]
     pub fn n_conditions(&self) -> usize {
         self.condition_names.len()
     }
@@ -114,6 +120,7 @@ impl UnifiedData {
     /// Per-cell batch labels (`batch_names[batch_membership[c]]`), in cell-id
     /// order. Length == `n_cells()`. The string form the projection /
     /// multilevel collapse consume for within-batch negatives.
+    #[must_use]
     pub fn batch_labels(&self) -> Vec<Box<str>> {
         self.batch_membership
             .iter()
@@ -186,8 +193,7 @@ impl UnifiedData {
         let batch_membership = vec![0u32; n_pb];
         let batch_names: Vec<Box<str>> = vec!["all".to_string().into_boxed_str()];
         // Pseudobulks are condition-corrected aggregates with no single
-        // condition; collapse to one synthetic condition so the gate is
-        // identity on this stage-1 data.
+        // condition; collapse to one synthetic condition.
         let condition_membership = vec![0u32; n_pb];
         let condition_names: Vec<Box<str>> = vec!["all".to_string().into_boxed_str()];
 
@@ -275,7 +281,7 @@ impl UnifiedData {
     /// per-cell metadata vecs (`barcodes`, `batch_membership`,
     /// `condition_membership`, `cell_modality`).
     ///
-    /// `backend` is **not** touched — the SparseIoVec retains the
+    /// `backend` is **not** touched — the `SparseIoVec` retains the
     /// original column layout.
     pub fn subset_cells(&mut self, selected_indices: &[usize]) {
         if selected_indices.len() == self.n_cells() {
@@ -517,11 +523,14 @@ fn truncate_names(names: &[Box<str>], max_show: usize) -> String {
     if names.len() <= max_show {
         names
             .iter()
-            .map(|s| s.as_ref())
+            .map(std::convert::AsRef::as_ref)
             .collect::<Vec<_>>()
             .join(", ")
     } else {
-        let shown: Vec<&str> = names[..max_show].iter().map(|s| s.as_ref()).collect();
+        let shown: Vec<&str> = names[..max_show]
+            .iter()
+            .map(std::convert::AsRef::as_ref)
+            .collect();
         format!("{} … and {} more", shown.join(", "), names.len() - max_show)
     }
 }
@@ -663,8 +672,8 @@ pub fn load_unified_data(args: LoadUnifiedArgs) -> anyhow::Result<UnifiedData> {
                 );
             }
             let mut labels: Vec<Box<str>> = Vec::with_capacity(n_cells);
-            for f in cf.iter() {
-                info!("Reading condition file: {}", f);
+            for f in &cf {
+                info!("Reading condition file: {f}");
                 labels.extend(read_lines(f)?);
             }
             anyhow::ensure!(

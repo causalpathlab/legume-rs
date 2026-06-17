@@ -14,11 +14,9 @@ pub(crate) const PHASE2_RIDGE: f32 = 1.0;
 type SolvedCell = (usize, Vec<f32>, Vec<f32>, f32, f32);
 
 /// Phase 2 — project every cell onto the fixed feature dictionary, in
-/// parallel, and overwrite the `e_cell` var. The gated feature embedding is
-/// condition-dependent (`E_feat ⊙ exp(z·δ̄_s)`), so cells are grouped by
-/// condition and each condition's gated table is built once. The per-cell
-/// bias is fitted (to absorb library size) and written into the `b_cell`
-/// var alongside `e_cell` (consistent with `faba gem`).
+/// parallel, and overwrite the `e_cell` var. The per-cell bias is fitted
+/// (to absorb library size) and written into the `b_cell` var alongside
+/// `e_cell` (consistent with `faba gem`).
 ///
 /// The stored latent (`model.e_cell`) is the **L2 direction** of the baseline
 /// Poisson-MAP embedding — depth-robust and best for clustering/UMAP. (Storing
@@ -42,21 +40,18 @@ pub(crate) fn project_cells_phase2(
     model: &mut JointEmbedModel,
     varmap: &VarMap,
     cell_samplers: &[PerBatchStratifiedCellSampler],
-    condition_membership: &[u32],
     n_cells: usize,
     lambda: f64,
     dev: &Device,
 ) -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
     use crate::cell_projection::solve_one_cell;
     use anyhow::Context;
-    use candle_util::candle_core::{IndexOp, Tensor};
+    use candle_util::candle_core::Tensor;
     use rayon::prelude::*;
 
     let h = model.embedding_dim;
-    let n_conditions = model.n_conditions.max(1);
 
     let b_feat: Vec<f32> = model.b_feat.to_vec1()?;
-    let delta_centered = model.delta.broadcast_sub(&model.delta.mean_keepdim(1)?)?;
     let mut e_out: Vec<f32> = model.e_cell.flatten_all()?.to_vec1()?;
     let mut b_out: Vec<f32> = model.b_cell.to_vec1()?;
     let mut cell_nrms = vec![0f32; n_cells];
@@ -68,11 +63,6 @@ pub(crate) fn project_cells_phase2(
             let cf = &s.per_cell[i];
             cells.push((cell, &cf.features, &cf.counts));
         }
-    }
-    let mut by_cond: Vec<Vec<usize>> = vec![Vec::new(); n_conditions];
-    for (i, &(cell, _, _)) in cells.iter().enumerate() {
-        let s = (condition_membership[cell as usize] as usize).min(n_conditions - 1);
-        by_cond[s].push(i);
     }
 
     // Option-1 target total = median cell total (counts rescaled to this).
@@ -89,57 +79,45 @@ pub(crate) fn project_cells_phase2(
 
     let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
 
-    for (s, idxs) in by_cond.iter().enumerate() {
-        if idxs.is_empty() {
-            continue;
-        }
-        let delta_s = delta_centered.i((.., s, ..))?.contiguous()?; // [K, H]
-        let logdev = model.z.matmul(&delta_s)?; // [F, H]
-        let gated = model.e_feat.broadcast_mul(&logdev.exp()?)?;
-        let gated_flat: Vec<f32> = gated.flatten_all()?.to_vec1()?;
-
-        let solved: Vec<SolvedCell> = idxs
-            .par_iter()
-            .map(|&i| {
-                let (cell, feats, counts) = cells[i];
-                // Baseline MAP on RAW counts → L2 direction (the latent) + the
-                // depth-coupled norm the empty-droplet QC keys on. The fitted
-                // intercept `b_c` absorbs library size and is kept (written to
-                // `b_cell`), consistent with faba gem.
-                let edges: Vec<(u32, f32)> =
-                    feats.iter().zip(counts).map(|(&f, &c)| (f, c)).collect();
-                let (e_map, b_c) = solve_one_cell(&edges, &gated_flat, &b_feat, h, lambda);
-                let nrm_map = norm(&e_map);
-                let dir: Vec<f32> = if nrm_map > 1e-8 {
-                    e_map.iter().map(|x| x / nrm_map).collect()
-                } else {
-                    e_map.clone()
-                };
-                // Depth-normalized solve (counts → common total) → the biplot
-                // side embedding: depth-free magnitude, same direction.
-                let tot: f32 = counts.iter().sum::<f32>().max(1e-6);
-                let sc = target_total / tot;
-                let edges_n: Vec<(u32, f32)> = feats
-                    .iter()
-                    .zip(counts)
-                    .map(|(&f, &c)| (f, c * sc))
-                    .collect();
-                let (e_n, _) = solve_one_cell(&edges_n, &gated_flat, &b_feat, h, lambda);
-                (cell as usize, dir, e_n, nrm_map, b_c)
-            })
-            .collect();
-        for (cell, dir, e_n, nrm_map, b_c) in solved {
-            e_out[cell * h..(cell + 1) * h].copy_from_slice(&dir);
-            scaled[cell * h..(cell + 1) * h].copy_from_slice(&e_n);
-            cell_nrms[cell] = nrm_map;
-            b_out[cell] = b_c;
-        }
+    let feat_flat: Vec<f32> = model.e_feat.flatten_all()?.to_vec1()?;
+    let solved: Vec<SolvedCell> = cells
+        .par_iter()
+        .map(|&(cell, feats, counts)| {
+            // Baseline MAP on RAW counts → L2 direction (the latent) + the
+            // depth-coupled norm the empty-droplet QC keys on. The fitted
+            // intercept `b_c` absorbs library size and is kept (written to
+            // `b_cell`), consistent with faba gem.
+            let edges: Vec<(u32, f32)> = feats.iter().zip(counts).map(|(&f, &c)| (f, c)).collect();
+            let (e_map, b_c) = solve_one_cell(&edges, &feat_flat, &b_feat, h, lambda);
+            let nrm_map = norm(&e_map);
+            let dir: Vec<f32> = if nrm_map > 1e-8 {
+                e_map.iter().map(|x| x / nrm_map).collect()
+            } else {
+                e_map.clone()
+            };
+            // Depth-normalized solve (counts → common total) → the biplot
+            // side embedding: depth-free magnitude, same direction.
+            let tot: f32 = counts.iter().sum::<f32>().max(1e-6);
+            let sc = target_total / tot;
+            let edges_n: Vec<(u32, f32)> = feats
+                .iter()
+                .zip(counts)
+                .map(|(&f, &c)| (f, c * sc))
+                .collect();
+            let (e_n, _) = solve_one_cell(&edges_n, &feat_flat, &b_feat, h, lambda);
+            (cell as usize, dir, e_n, nrm_map, b_c)
+        })
+        .collect();
+    for (cell, dir, e_n, nrm_map, b_c) in solved {
+        e_out[cell * h..(cell + 1) * h].copy_from_slice(&dir);
+        scaled[cell * h..(cell + 1) * h].copy_from_slice(&e_n);
+        cell_nrms[cell] = nrm_map;
+        b_out[cell] = b_c;
     }
 
     // Co-scale the biplot side embedding onto the gene dictionary's scale (one
     // global scalar — no per-cell tuning). The clustering latent (`e_out`) is
     // left as unit directions; only `scaled` is gauged.
-    let feat_flat = model.e_feat.flatten_all()?.to_vec1()?;
     let feat_scale = median_row_norm(&feat_flat, h);
     let mut cell_scales: Vec<f32> = scaled
         .chunks_exact(h)
@@ -153,11 +131,10 @@ pub(crate) fn project_cells_phase2(
         1.0
     };
     info!(
-        "Phase 2 — latent = L2 direction; biplot side embedding gauged ‖e_feat‖/‖e_cell‖ = {:.3}/{:.3} = {:.3}",
-        feat_scale, cell_scale, gauge
+        "Phase 2 — latent = L2 direction; biplot side embedding gauged ‖e_feat‖/‖e_cell‖ = {feat_scale:.3}/{cell_scale:.3} = {gauge:.3}"
     );
     if (gauge - 1.0).abs() > 1e-6 {
-        for x in scaled.iter_mut() {
+        for x in &mut scaled {
             *x *= gauge;
         }
     }

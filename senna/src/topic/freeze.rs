@@ -54,9 +54,7 @@ impl FrozenFeatureSpec {
                 Some(bias_file)
             } else {
                 log::warn!(
-                    "{} found but {} missing — loading dictionary only, bias defaults to zero",
-                    bge_dict,
-                    bias_file
+                    "{bge_dict} found but {bias_file} missing — loading dictionary only, bias defaults to zero"
                 );
                 None
             };
@@ -67,16 +65,11 @@ impl FrozenFeatureSpec {
             // present; fall back to zero otherwise.
             let bias = if Path::new(&bias_file).exists() {
                 log::info!(
-                    "Frozen feature side: loading {} + {} (fne-style with learned bias)",
-                    topic_dict,
-                    bias_file
+                    "Frozen feature side: loading {topic_dict} + {bias_file} (fne-style with learned bias)"
                 );
                 Some(bias_file)
             } else {
-                log::info!(
-                    "Frozen feature side: loading topic-style {} (bias = 0)",
-                    topic_dict
-                );
+                log::info!("Frozen feature side: loading topic-style {topic_dict} (bias = 0)");
                 None
             };
             (topic_dict, bias)
@@ -105,7 +98,7 @@ impl FrozenFeatureSpec {
             if canon_cell.borrow().is_none() {
                 let dict = <DMatrix<f32> as IoOps>::from_parquet(&dict_path)?;
                 let mut set: FxHashSet<Box<str>> = FxHashSet::default();
-                for name in dict.rows.iter() {
+                for name in &dict.rows {
                     set.insert(kind.canonicalize(name));
                 }
                 log::info!(

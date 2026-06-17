@@ -2,14 +2,12 @@
 //! own CLI args into a [`FitConfig`] and pass already-loaded
 //! [`UnifiedData`] (so this crate stays free of file/path concerns).
 
-mod cell_cell;
 mod config;
 mod projection;
 mod samplers;
 
 pub use config::{
-    load_feature_network, CellCellConfig, FeatureNetworkArgs, FeatureNetworkConfig, FitConfig,
-    FitOutput,
+    load_feature_network, FeatureNetworkArgs, FeatureNetworkConfig, FitConfig, FitOutput,
 };
 
 use crate::coarsen::{identity_axis, AxisCoarsenings};
@@ -18,8 +16,7 @@ use crate::loss::{build_stratified_sampler, PerBatchStratifiedCellSampler, Strat
 use crate::model::{JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
 use crate::stop::setup_stop_handler;
 use crate::training::{
-    train_composite, AxisSampler, CellCellPbChainTraining, CellCellTraining, CompositeAxis,
-    CompositeMode, CompositeTrainContext,
+    train_composite, AxisSampler, CompositeAxis, CompositeMode, CompositeTrainContext,
 };
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, MultilevelParams};
@@ -28,10 +25,9 @@ use log::info;
 use matrix_param::traits::Inference;
 use nalgebra::DMatrix;
 
-use cell_cell::build_cell_cell_training;
 use config::{
-    load_or_compute_fisher_weights, maybe_cap_features, stage_params, DEFAULT_AXIS_LAMBDA,
-    DEFAULT_STRATIFY_ALPHA_CELL, DEFAULT_STRATIFY_ALPHA_PB,
+    load_or_compute_fisher_weights, stage_params, DEFAULT_AXIS_LAMBDA, DEFAULT_STRATIFY_ALPHA_CELL,
+    DEFAULT_STRATIFY_ALPHA_PB,
 };
 use projection::{project_cells_phase2, PHASE2_RIDGE};
 use samplers::{build_active_samplers, build_smoother, subsample_cell_samplers_multilevel};
@@ -45,13 +41,13 @@ use samplers::{build_active_samplers, build_smoother, subsample_cell_samplers_mu
 /// **Phase 1 — features + pseudobulks.** Train only the pseudobulk axes
 /// (coarsest..finest from `collapse_columns_multilevel_vec`, pseudobulk-
 /// feature triplets) with `Sum`. They share — and learn — `E_feat /
-/// b_feat / z / δ` and per-level pb cell-side embeddings.
+/// b_feat` and per-level pb cell-side embeddings.
 ///
 /// **Phase 2 — dense per-cell embedding.** Freeze the entire feature side
 /// and fit ONLY `E_cell` against it. With a single axis the objective is
 /// separable per cell — each row's gradient depends only on that cell's
 /// own edges (embarrassingly parallel) — and the auto per-epoch budget
-/// (sized by `n_units` = n_cells) sweeps every cell ~once per epoch.
+/// (sized by `n_units` = `n_cells`) sweeps every cell ~once per epoch.
 ///
 /// This replaces the old single joint pass, in which the per-cell axis was
 /// starved: the per-epoch budget was sized by the pseudobulk count, so
@@ -112,15 +108,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         config.fisher_weights_cache.as_deref(),
     )?;
 
-    // ---- Optional hard cap on feature count ----
-    // Picks the top-`max_features` genes by Fisher (ties broken by id
-    // for determinism), prunes `unified` + `feat_weights` to that axis.
-    // Runs after Fisher so the ranking is final; runs before the
-    // multilevel collapse so every downstream pass sees the smaller
-    // axis (smaller pb matrices, smaller sampler prefix sums, smaller
-    // E_feat).
-    let feat_weights = maybe_cap_features(unified, feat_weights, config.max_features);
-
     // ---- Multilevel collapse → batch-corrected pseudobulks ----
     //
     // `sort_dim` controls how many bits of the binary-sketched projection
@@ -173,7 +160,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // — e.g. an HVG mask narrowed `unified.feature_names` — gather the
     // unified rows out of the backend's pb matrix. Otherwise reuse it.
     let mut pb_blobs: Vec<UnifiedData> = Vec::with_capacity(num_levels);
-    for collapsed in collapsed_levels.iter() {
+    for collapsed in &collapsed_levels {
         let pb_full: &DMatrix<f32> = match &collapsed.mu_adjusted {
             Some(adj) => adj.posterior_mean(),
             None => collapsed.mu_observed.posterior_mean(),
@@ -219,14 +206,11 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // "e_cell" / "b_cell" Vars; every level head then clones those
     // shared `e_feat` / `b_feat` Tensors and registers its own cell
     // side under a unique `pb_l{idx}` prefix.
-    let n_conditions = unified.n_conditions();
     let mut cell_model = JointEmbedModel::new_with_init(
         ModelArgs {
             n_features,
             n_cells,
             embedding_dim: h,
-            n_conditions,
-            num_programs: config.num_programs,
         },
         &ModelInit {
             e_feat: None,
@@ -248,13 +232,9 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 embedding_dim: h,
                 shared_e_feat: cell_model.e_feat.clone(),
                 shared_b_feat: cell_model.b_feat.clone(),
-                shared_z: cell_model.z.clone(),
-                shared_delta: cell_model.delta.clone(),
-                num_programs: cell_model.num_programs,
-                n_conditions: cell_model.n_conditions,
                 e_cell_init: None,
                 b_cell_init: &vec![0f32; n_pb],
-                var_prefix: &format!("pb_l{}", level_idx),
+                var_prefix: &format!("pb_l{level_idx}"),
             },
             &varmap,
             &config.device,
@@ -303,28 +283,25 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 config.seed,
             )
         });
-    let phase1_cell_samplers: &[PerBatchStratifiedCellSampler] = match &phase1_cell_samplers_owned {
-        Some(sub) => {
+    let phase1_cell_samplers: &[PerBatchStratifiedCellSampler] =
+        if let Some(sub) = &phase1_cell_samplers_owned {
             let kept: usize = sub.iter().map(|s| s.active_cells.len()).sum();
             info!(
                 "Phase-1 cell subsampling: ≤{} cells per pb-sample (all {} levels) → \
-                 {} of {} cells shape E_feat (phase 2 still projects all {})",
+             {} of {} cells shape E_feat (phase 2 still projects all {})",
                 config.phase1_cells_per_pb, num_levels, kept, n_cells, n_cells
             );
             sub
-        }
-        None => {
+        } else {
             // k == 0 → cell axis suppressed (logged); k ≥ n_cells → legacy all-cells.
             if !use_cell_axis {
                 info!(
                     "Phase-1 cell axis SUPPRESSED (pure-pb): E_feat shaped by pb aggregates \
-                     only; phase 2 still projects all {} cells",
-                    n_cells
+                 only; phase 2 still projects all {n_cells} cells"
                 );
             }
             &cell_samplers
-        }
-    };
+        };
 
     let mut level_axes_data: Vec<(AxisCoarsenings, StratifiedSampler)> =
         Vec::with_capacity(num_levels);
@@ -341,8 +318,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         )
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "pb_l{}: stratified sampler build failed (no positives or empty feature pool)",
-                level_idx
+                "pb_l{level_idx}: stratified sampler build failed (no positives or empty feature pool)"
             )
         })?;
         info!(
@@ -356,15 +332,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         level_axes_data.push((axis, stratified));
     }
 
-    // Cell-cell loss prep (attaches only to the per-cell axis).
-    let cell_cell_built = build_cell_cell_training(
-        unified,
-        n_cells,
-        alpha_neg,
-        config.cell_cell.take(),
-        &cell_to_pb_per_level,
-    );
-
     let mut smoother = build_smoother(config.feature_network.take(), n_features, h)?;
 
     // Note on biases: the per-CELL bias `b_cell` and the per-PB biases
@@ -372,18 +339,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // that sample's depth so the shared `E_feat` captures composition, not
     // library size. `b_cell` is re-fitted analytically in phase 2 and
     // written alongside `e_cell` (consistent with `faba gem`).
-
-    let cell_cell_training = cell_cell_built.as_ref().map(|p| CellCellTraining {
-        samplers: &p.samplers,
-        edges: &p.edges,
-        lambda: p.lambda,
-        n_negatives: p.n_negatives,
-        pb_chain: CellCellPbChainTraining {
-            levels: &p.chain.levels,
-            lambdas: &p.chain.lambdas,
-            cell_to_pb_per_level: &cell_to_pb_per_level,
-        },
-    });
 
     // Two-phase training (always — `ge::fit` is the bge driver only); see
     // the `fit()` doc for the rationale. Shared AdamW hyperparameters:
@@ -395,14 +350,12 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
 
     // Cell axis (per-cell embedding). Trained jointly in phase 1 (to shape
     // `E_feat`) and recalibrated in phase 2 against the fixed feature side.
-    // The optional cell-cell NCE term attaches here.
     let cell_axis = CompositeAxis {
         model: &cell_model,
         unified,
         cell_axis: &cell_axis_coarsening,
         sampler: AxisSampler::PerBatchStratified(phase1_cell_samplers),
         lambda: DEFAULT_AXIS_LAMBDA,
-        cell_cell: cell_cell_training,
         label: "cell",
     };
     // Pseudobulk axes (coarsest→finest).
@@ -415,7 +368,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             cell_axis: axis,
             sampler: AxisSampler::Stratified(stratified),
             lambda: DEFAULT_AXIS_LAMBDA,
-            cell_cell: None,
             label: "pb",
         });
     }
@@ -447,7 +399,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         info!(
             "Phase 1 (joint) — features + {}{} pb level(s) [Sum], {} epochs",
             if use_cell_axis { "cell + " } else { "" },
-            joint_axes.len() - use_cell_axis as usize,
+            joint_axes.len() - usize::from(use_cell_axis),
             config.epochs
         );
         train_composite(
@@ -475,16 +427,14 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     let mut cell_embedding_scaled: Vec<f32> = Vec::new();
     if !stop.load(std::sync::atomic::Ordering::Relaxed) {
         info!(
-            "Phase 2 — analytical per-cell projection ({} cells, feature side fixed, ridge λ={})",
-            n_cells, PHASE2_RIDGE
+            "Phase 2 — analytical per-cell projection ({n_cells} cells, feature side fixed, ridge λ={PHASE2_RIDGE})"
         );
         let (nrms, scaled) = project_cells_phase2(
             &mut cell_model,
             &varmap,
             &cell_samplers,
-            &unified.condition_membership,
             n_cells,
-            PHASE2_RIDGE as f64,
+            f64::from(PHASE2_RIDGE),
             &config.device,
         )?;
         cell_nrms = nrms;

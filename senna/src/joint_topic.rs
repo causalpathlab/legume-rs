@@ -202,7 +202,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     })?;
     if args.collapse.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch (per modality)");
-        for batch in batch_stack.iter_mut() {
+        for batch in &mut batch_stack {
             crate::senna_input::collapse_to_single_batch(batch);
         }
     }
@@ -463,11 +463,15 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names_0)?;
     }
 
-    let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
+    let input: Vec<String> = args
+        .data_files
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     let batch: Vec<String> = args
         .batch_files
         .as_ref()
-        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         kind: crate::run_manifest::RunKind::JointTopic,

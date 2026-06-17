@@ -6,7 +6,7 @@
 
 use crate::embed_common::*;
 
-/// Rotate `pb_coords` (n_pb × 2) so that the centroid of the bottom-`q`
+/// Rotate `pb_coords` (`n_pb` × 2) so that the centroid of the bottom-`q`
 /// PBs by `pb_pt` sits below the centroid of the top-`q` PBs along the
 /// y-axis (root at the bottom, tip at the top). PBs with NaN pseudotime
 /// are excluded from anchor selection but still rotated.
@@ -62,8 +62,7 @@ pub(crate) fn rotate_root_to_bottom(pb_coords: &Mat, pb_pt: &[f32], q: f32) -> a
 
     info!(
         "Orienting layout by pseudotime: bottom-{bin} root anchor at ({rx:.3}, {ry:.3}), \
-         top-{bin} tip anchor at ({tx:.3}, {ty:.3}), rotating by {:.3} rad",
-        delta
+         top-{bin} tip anchor at ({tx:.3}, {ty:.3}), rotating by {delta:.3} rad"
     );
 
     let mut out = Mat::zeros(pb_coords.nrows(), 2);

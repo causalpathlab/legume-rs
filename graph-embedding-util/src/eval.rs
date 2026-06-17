@@ -62,49 +62,6 @@ pub fn save_outputs(
     Ok(())
 }
 
-/// Write the per-condition feature gate parameters for inspection:
-/// - `{out}.gene_program_loadings.parquet` — `z [D, K]`, rows = features,
-///   cols `k0..k{K-1}`.
-/// - `{out}.program_condition_deviation.parquet` — `δ [K, S, H]` reshaped
-///   to `[K·S, H]`, rows `program_{k}/{condition}`, cols `h0..h{H-1}`.
-///
-/// These are the only condition-specific artifacts; the baseline `E_feat`
-/// (dictionary) and `E_cell` (latent) stay condition-free. With a single
-/// condition `δ ≡ 0`, so callers typically skip this.
-pub fn save_gate(
-    model: &JointEmbedModel,
-    feature_names: &[Box<str>],
-    condition_names: &[Box<str>],
-    out_prefix: &str,
-) -> anyhow::Result<()> {
-    // z: [D, K] gene × program loadings.
-    let k = model.num_programs;
-    let prog_cols: Vec<Box<str>> = (0..k).map(|i| format!("k{i}").into_boxed_str()).collect();
-    model.z.to_parquet_with_names(
-        &format!("{out_prefix}.gene_program_loadings.parquet"),
-        (Some(feature_names), Some("feature")),
-        Some(&prog_cols),
-    )?;
-
-    // δ: [K, S, H] → [K*S, H], row = program_{k}/{condition}.
-    let (n_prog, n_cond, h) = model.delta.dims3()?;
-    let delta_2d = model.delta.reshape((n_prog * n_cond, h))?;
-    let mut row_names: Vec<Box<str>> = Vec::with_capacity(n_prog * n_cond);
-    for p in 0..n_prog {
-        for c in 0..n_cond {
-            let cond = condition_names.get(c).map(|x| x.as_ref()).unwrap_or("?");
-            row_names.push(format!("program_{p}/{cond}").into_boxed_str());
-        }
-    }
-    let cols = h_cols(h);
-    delta_2d.to_parquet_with_names(
-        &format!("{out_prefix}.program_condition_deviation.parquet"),
-        (Some(&row_names), Some("program_condition")),
-        Some(&cols),
-    )?;
-    Ok(())
-}
-
 fn h_cols(h: usize) -> Vec<Box<str>> {
     (0..h).map(|i| format!("h{i}").into_boxed_str()).collect()
 }

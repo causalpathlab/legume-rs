@@ -8,6 +8,7 @@ use std::sync::Arc;
 /// Install a SIGINT/SIGTERM handler and return a shared stop flag.
 /// Train loops should poll the flag at minibatch boundaries and finalize
 /// outputs when it's set.
+#[must_use]
 pub fn setup_stop_handler() -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     {

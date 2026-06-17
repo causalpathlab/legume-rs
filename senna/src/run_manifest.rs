@@ -30,7 +30,7 @@ type Mat = nalgebra::DMatrix<f32>;
 /// caller's data axis.
 pub type InheritedPartition = (Vec<Vec<usize>>, Vec<Box<str>>);
 
-/// Read `{prefix}.cell_to_pb.parquet` (N × num_levels f32, cell-name
+/// Read `{prefix}.cell_to_pb.parquet` (N × `num_levels` f32, cell-name
 /// rows, `level_0..level_{L-1}` columns) into the same
 /// [`InheritedPartition`] shape that
 /// [`InheritedFromManifest::load_cell_to_pb`] returns. Exposed so
@@ -44,8 +44,7 @@ pub fn load_cell_to_pb_raw(path: &str) -> anyhow::Result<InheritedPartition> {
     let num_levels = mat.ncols();
     anyhow::ensure!(
         num_levels >= 1,
-        "{}: cell_to_pb parquet has 0 data columns",
-        path
+        "{path}: cell_to_pb parquet has 0 data columns"
     );
     anyhow::ensure!(
         cell_names_src.len() == n_src,
@@ -65,10 +64,7 @@ pub fn load_cell_to_pb_raw(path: &str) -> anyhow::Result<InheritedPartition> {
         cell_to_pb_per_level.push(col);
     }
     log::info!(
-        "--from: loaded inherited cell_to_pb {} (num_levels={}, N_src={})",
-        path,
-        num_levels,
-        n_src,
+        "--from: loaded inherited cell_to_pb {path} (num_levels={num_levels}, N_src={n_src})",
     );
     Ok((cell_to_pb_per_level, cell_names_src))
 }
@@ -210,7 +206,7 @@ pub struct RunOutputs {
     pub dictionary_empirical: Option<String>,
     /// `{out}.feature_embedding.parquet` — D × H learned per-gene embedding
     /// ρ (masked-topic only). Shared between encoder and decoder under the
-    /// ETM factorization β = log_softmax_d(α · ρᵀ); each gene's row is its
+    /// ETM factorization β = `log_softmax_d(α` · ρᵀ); each gene's row is its
     /// learned coordinate in the topic-model embedding space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_embedding: Option<String>,
@@ -222,7 +218,7 @@ pub struct RunOutputs {
     /// cell embedding (and the projection consumer falls back to it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_embedding: Option<String>,
-    /// `{out}.cell_to_pb.parquet` — N × num_levels u32 matrix of the
+    /// `{out}.cell_to_pb.parquet` — N × `num_levels` u32 matrix of the
     /// post-refinement cell→pseudobulk membership per coarsening level
     /// (finest-last to match `collapsed_levels`). Cached so a downstream
     /// `senna {topic, masked-topic, ce-topic} --from` chain can skip the
@@ -355,8 +351,7 @@ impl RunManifest {
         let dir = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         Ok((m, dir))
     }
 
@@ -457,10 +452,10 @@ impl InheritedFromManifest {
         inherited: Option<&Self>,
         cli: &[Box<str>],
     ) -> anyhow::Result<Vec<Box<str>>> {
-        let out = if !cli.is_empty() {
-            cli.to_vec()
-        } else {
+        let out = if cli.is_empty() {
             inherited.map(|i| i.data_files.clone()).unwrap_or_default()
+        } else {
+            cli.to_vec()
         };
         anyhow::ensure!(
             !out.is_empty(),
@@ -646,10 +641,10 @@ pub struct RunDescription<'a> {
 /// the manifest's own directory — even when the run directory is moved
 /// after writing.
 pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
-    let basename = Path::new(desc.prefix)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| desc.prefix.to_string());
+    let basename = Path::new(desc.prefix).file_name().map_or_else(
+        || desc.prefix.to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
 
     let mut m = RunManifest::new(desc.kind, desc.prefix);
     m.data.input = desc.data_input.to_vec();

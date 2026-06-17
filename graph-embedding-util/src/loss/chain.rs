@@ -7,16 +7,14 @@
 //! [`crate::loss::feat`]: gives the cell embedding multi-resolution
 //! classification signal in one coherent step.
 //!
-//! Three closely related public functions live here:
+//! The gene-modulated public functions live here:
 //!
-//! - [`cell_cell_nce_loss_per_level`] — returns `[L]` per-level losses
-//!   for one [`CellChainBatch`].
+//! - [`cell_cell_nce_loss_per_level_gated`] — returns `[L]` per-level
+//!   losses for one [`CellChainBatch`], scored per-gene.
 //! - [`cell_cell_nce_loss_per_level_batched_gated`] — returns `[G, L]`
 //!   for `G` independent chain batches in one forward pass; per-gene
 //!   scoring modulates by `e_gene[gene_ids[g]]`. Used by `pinto cage`
 //!   to collapse 18k tiny CUDA forwards per epoch into ~600 big ones.
-//! - [`cell_cell_nce_loss_chain`] — thin wrapper that takes a host-
-//!   side `lambdas: &[f32]` and returns the λ-weighted scalar.
 
 use crate::feature_network::{select_feat_emb, FeatureNetworkSmoother};
 use crate::loss::cell::{LevelSiblingPool, PerBatchCellSampler};
@@ -42,9 +40,8 @@ pub struct CellChainBatchArgs<'a> {
     pub batch_sampler: &'a PerBatchCellSampler,
     pub batch_size: usize,
     pub n_negatives: usize,
-    /// Pb assignment per chain level (same order as
-    /// `lambdas` in [`cell_cell_nce_loss_chain`]). Each slice is
-    /// length `n_cells`. Drawn from
+    /// Pb assignment per chain level (coarsest-first, one entry per chain
+    /// position). Each slice is length `n_cells`. Drawn from
     /// `MultilevelCollapseOut::cell_to_pb_per_level` after the
     /// coarsest-first reverse in `fit()`.
     pub pb_maps: &'a [&'a [usize]],
@@ -129,7 +126,7 @@ pub fn sample_cell_chain_batch_with_pos(
             let sibling_pool: Option<&[u32]> = match pool_for_pos {
                 Some(LevelSiblingPool::ByParent(by_parent)) => {
                     let parent_pb = args.pb_maps[chain_pos - 1][u as usize] as u32;
-                    by_parent.get(&parent_pb).map(|v| v.as_slice())
+                    by_parent.get(&parent_pb).map(std::vec::Vec::as_slice)
                 }
                 _ => None,
             };
@@ -187,58 +184,16 @@ fn draw_one_negative(
     }
 }
 
-/// Multi-level cell-cell NCE, per-level losses. Returns a 1-D Tensor of
-/// shape `[L]` whose `l`-th entry is the (unweighted) NCE loss at chain
-/// level `l`. `cage` consumes this directly so its per-gene gates can
-/// participate in autograd; `cell_cell_nce_loss_chain` thin-wraps this
-/// with a host-side `lambdas` slice.
-pub fn cell_cell_nce_loss_per_level(
-    model: &JointEmbedModel,
-    batch: CellChainBatch,
-    dev: &Device,
-) -> Result<Tensor> {
-    let b = batch.left_cells.len();
-    let l = batch.per_level_neg.len();
-    assert!(l > 0, "non-empty pb_maps required");
-    if b == 0 {
-        return Tensor::zeros(l, candle_util::candle_core::DType::F32, dev);
-    }
-    let k = batch.n_negatives;
-
-    let left_idx = Tensor::from_vec(batch.left_cells, b, dev)?;
-    let right_idx = Tensor::from_vec(batch.right_cells, b, dev)?;
-    let e_left = model.e_cell.index_select(&left_idx, 0)?;
-    let b_left = model.b_cell.index_select(&left_idx, 0)?;
-    let e_right = model.e_cell.index_select(&right_idx, 0)?;
-    let b_right = model.b_cell.index_select(&right_idx, 0)?;
-    let pos_score = JointEmbedModel::score_diag(&e_left, &e_right, &b_left, &b_right)?;
-    let pos_term = log_sigmoid(&pos_score)?;
-
-    let mut per_level: Vec<Tensor> = Vec::with_capacity(l);
-    for lvl_neg in batch.per_level_neg.into_iter() {
-        let neg_idx = Tensor::from_vec(lvl_neg, b * k, dev)?;
-        let e_neg_flat = model.e_cell.index_select(&neg_idx, 0)?;
-        let b_neg_flat = model.b_cell.index_select(&neg_idx, 0)?;
-        let h = e_neg_flat.dim(1)?;
-        let e_neg = e_neg_flat.reshape((b, k, h))?;
-        let b_neg = b_neg_flat.reshape((b, k))?;
-        let neg_score = JointEmbedModel::score_negatives(&e_neg, &e_left, &b_neg, &b_left)?;
-        let per_edge = (pos_term.clone() + log_sigmoid(&neg_score.neg()?)?.sum(1)?)?.neg()?;
-        per_level.push(per_edge.mean(0)?);
-    }
-    Tensor::stack(&per_level, 0)
-}
-
 ////////////////////////////////////////////////////////////////
 //                                                            //
 // Gene-modulated (v3) variants — gene identity enters score //
 //                                                            //
 ////////////////////////////////////////////////////////////////
 
-/// Same as [`cell_cell_nce_loss_per_level`] but the per-row score is
-/// gene-modulated: `score(u, v) = (e_gene · e_cell[u])(e_gene · e_cell[v])
-/// + b_cell[u] + b_cell[v]`. All B positives in `batch` share the same
-/// gene `gene_id`, so the gene-side gather is one row broadcast across B.
+/// Per-level cell-cell NCE with a gene-modulated per-row score
+/// `score(u, v) = (e_gene·e_cell[u])(e_gene·e_cell[v]) + b_cell[u] + b_cell[v]`.
+/// All B positives in `batch` share the same gene `gene_id`, so the
+/// gene-side gather is one row broadcast across B.
 ///
 /// `e_gene` is read from `model.e_feat` (the model's `e_feat` slot
 /// holds the gene embedding under cage semantics — cells and genes
@@ -246,7 +201,7 @@ pub fn cell_cell_nce_loss_per_level(
 /// enters via the embedding direction; the biases are cell-side only,
 /// matching the original non-gated loss.
 ///
-/// `smoother` optionally applies SGC graph smoothing to the e_gene
+/// `smoother` optionally applies SGC graph smoothing to the `e_gene`
 /// gather, matching senna's `select_feat_emb` pattern.
 pub fn cell_cell_nce_loss_per_level_gated(
     model: &JointEmbedModel,
@@ -281,7 +236,7 @@ pub fn cell_cell_nce_loss_per_level_gated(
     let pos_term = log_sigmoid(&pos_score)?;
 
     let mut per_level: Vec<Tensor> = Vec::with_capacity(l);
-    for lvl_neg in batch.per_level_neg.into_iter() {
+    for lvl_neg in batch.per_level_neg {
         let neg_idx = Tensor::from_vec(lvl_neg, b * k, dev)?;
         let e_neg_flat = model.e_cell.index_select(&neg_idx, 0)?;
         let b_neg_flat = model.b_cell.index_select(&neg_idx, 0)?;
@@ -327,7 +282,7 @@ pub fn cell_cell_nce_loss_per_level_batched_gated(
     let b = batches[0].left_cells.len();
     let l = batches[0].per_level_neg.len();
     let k = batches[0].n_negatives;
-    for cb in batches.iter() {
+    for cb in &batches {
         assert_eq!(cb.left_cells.len(), b, "batched_gated: B mismatch");
         assert_eq!(cb.per_level_neg.len(), l, "batched_gated: L mismatch");
         assert_eq!(cb.n_negatives, k, "batched_gated: K mismatch");
@@ -407,27 +362,4 @@ pub fn cell_cell_nce_loss_per_level_batched_gated(
         per_gene_per_level.push(per_gene);
     }
     Tensor::stack(&per_gene_per_level, 1)
-}
-
-/// Multi-level cell-cell NCE. Shares one positive `(left, right)` per
-/// row across every level; each level scores those positives against
-/// its own per-level negatives and contributes `λ_L · L_NCE` to the
-/// total. Returns the λ-weighted sum (no division by `num_levels` —
-/// caller's `CellCellConfig::lambda` handles total scaling).
-pub fn cell_cell_nce_loss_chain(
-    model: &JointEmbedModel,
-    batch: CellChainBatch,
-    lambdas: &[f32],
-    dev: &Device,
-) -> Result<Tensor> {
-    assert_eq!(
-        batch.per_level_neg.len(),
-        lambdas.len(),
-        "per_level_neg ({}) and lambdas ({}) length mismatch",
-        batch.per_level_neg.len(),
-        lambdas.len(),
-    );
-    let per_level = cell_cell_nce_loss_per_level(model, batch, dev)?;
-    let lam = Tensor::from_slice(lambdas, lambdas.len(), dev)?;
-    (per_level * lam)?.sum_all()
 }

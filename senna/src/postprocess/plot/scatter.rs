@@ -42,7 +42,7 @@ pub enum ColorBy {
     Annotation,
     /// Continuous scalar from `senna pseudotime`'s `.pseudotime.parquet`
     /// (defaults to `manifest.pseudotime.pseudotime`). Cells are coloured
-    /// on a sequential blue→red ramp (ColorBrewer RdYlBu reversed). When
+    /// on a sequential blue→red ramp (`ColorBrewer` `RdYlBu` reversed). When
     /// the manifest also has `pseudotime.nodes_2d` + `pseudotime.edges`,
     /// the principal-graph tree is drawn as a black overlay on top.
     Pseudotime,
@@ -387,7 +387,7 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     let mut unique: Vec<i64> = pts_by_group.keys().copied().collect();
     unique.sort_unstable();
     if pseudotime_norm.is_some() {
-        let n_total: usize = pts_by_group.values().map(|v| v.len()).sum();
+        let n_total: usize = pts_by_group.values().map(std::vec::Vec::len).sum();
         info!("Plotting {n_total} cells (continuous pseudotime, single-PNG layer)");
     } else {
         info!("Plotting {} groups", unique.len());
@@ -569,7 +569,7 @@ struct ResolvedInputs {
     labels: Option<String>,
     pseudotime: Option<String>,
     /// Principal-graph node 2D coordinates parquet (K × 2) — drawn as a
-    /// tree overlay when ColorBy::Pseudotime is in effect.
+    /// tree overlay when `ColorBy::Pseudotime` is in effect.
     principal_graph_nodes_2d: Option<String>,
     /// Principal-graph edges parquet (E × 3: from, to, weight).
     principal_graph_edges: Option<String>,
@@ -606,8 +606,7 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
             .is_some();
         if args.cell_coords.is_none() && !manifest_has_coords {
             info!(
-                "manifest {} has no layout.cell_coords; running `senna layout umap` first",
-                from_path
+                "manifest {from_path} has no layout.cell_coords; running `senna layout umap` first"
             );
             crate::postprocess::run_default_umap_layout(from_path, args.preload_data)?;
             // layout rewrote the manifest in place — reload to pick up
@@ -1004,7 +1003,7 @@ fn argmax_topics(path: &str, n_cells_expected: usize) -> anyhow::Result<Vec<i64>
 ///   2. Otherwise run Leiden against `manifest.outputs.latent`, write
 ///      `{out}.clusters.parquet`, and update the manifest in place.
 ///
-/// Returns per-cell ids aligned to `cell_names` (cell_coords row order),
+/// Returns per-cell ids aligned to `cell_names` (`cell_coords` row order),
 /// with `-1` for unassigned/missing cells.
 fn resolve_cluster_ids_for_plot(
     resolved: &mut ResolvedInputs,
@@ -1096,7 +1095,7 @@ fn write_cluster_assignments_parquet(
 ///
 /// Format: `cell\tcell_type\tprobability` with optional header. Cells
 /// absent from the TSV map to `-1` (filtered downstream by the same
-/// `g < 0` skip used for unassigned clusters / NaN pb_ids). Celltype
+/// `g < 0` skip used for unassigned clusters / NaN `pb_ids`). Celltype
 /// strings are sorted alphabetically before id assignment so the same
 /// celltype gets the same colour across reruns and across sibling
 /// commands (e.g. `plot-topic --group-by annotation`, which sorts
@@ -1148,12 +1147,11 @@ fn argmax_annotation(
     let mut group_ids = Vec::with_capacity(cell_names.len());
     let mut n_missing = 0usize;
     for c in cell_names {
-        match by_cell.get(c) {
-            Some(label) => group_ids.push(*name_to_id.get(label).unwrap_or(&-1)),
-            None => {
-                group_ids.push(-1);
-                n_missing += 1;
-            }
+        if let Some(label) = by_cell.get(c) {
+            group_ids.push(*name_to_id.get(label).unwrap_or(&-1))
+        } else {
+            group_ids.push(-1);
+            n_missing += 1;
         }
     }
     if n_missing > 0 {

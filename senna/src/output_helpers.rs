@@ -1,8 +1,8 @@
 //! Centralized parquet output writers for senna training routines.
 //!
 //! Every senna `fit-*` routine writes the same handful of parquet files:
-//! latent (cell × K), dictionary (gene × K), pb_gene (gene × P), and
-//! fisher_weights (gene × 1). Centralizing the `to_parquet_with_names`
+//! latent (cell × K), dictionary (gene × K), `pb_gene` (gene × P), and
+//! `fisher_weights` (gene × 1). Centralizing the `to_parquet_with_names`
 //! call sites keeps file naming, axis labels, and column-id conventions
 //! identical across topic / masked-topic / joint-topic / svd / joint-svd.
 
@@ -15,7 +15,7 @@ use matrix_util::traits::IoOps;
 /// callers can write the original without copying. `Some((mat, names))`
 /// is the subset to write instead.
 ///
-/// Shared by every per-cell writer so latent / proj / cell_to_pb stay
+/// Shared by every per-cell writer so latent / proj / `cell_to_pb` stay
 /// row-aligned after dropping near-empty cells.
 pub fn cell_subset(
     mat: &Mat,

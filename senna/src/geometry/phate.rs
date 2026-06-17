@@ -157,10 +157,7 @@ pub fn phate_layout_2d(pb_z: &Mat, args: &PhateArgs) -> Mat {
     let m_mat = match matrix_power_via_svd(&p_mat, args.t.max(1), n.min(100)) {
         Ok(m) => m,
         Err(e) => {
-            log::warn!(
-                "SVD-based matrix power failed: {}, falling back to standard",
-                e
-            );
+            log::warn!("SVD-based matrix power failed: {e}, falling back to standard");
             matrix_power(&p_mat, args.t.max(1))
         }
     };
@@ -300,7 +297,7 @@ fn matrix_power_via_svd(m: &Mat, exp: usize, rank: usize) -> anyhow::Result<Mat>
     let rank = rank.min(n);
 
     // Randomized SVD: M ≈ U Σ V^T
-    info!("  RSVD: {} × {} → rank {}", n, n, rank);
+    info!("  RSVD: {n} × {n} → rank {rank}");
     let (u, s, v) = m.rsvd(rank).context("RSVD failed in matrix_power")?;
 
     // Reconstruct: M^t ≈ (U · diag(Σ^t)) · V^T
@@ -371,47 +368,44 @@ fn classical_mds_2d(d2: &Mat) -> Mat {
 
     // Randomized SVD: B ≈ U Σ V^T (for symmetric B, V = U and Σ = eigenvalues)
     let rank = n.min(10); // Keep top 10 components, skip 1st (often library size)
-    match b.rsvd(rank) {
-        Ok((u, s, _v)) => {
-            // Skip 1st eigenvector (technical variation), use components 2-3
-            let mut coords = Mat::zeros(n, 2);
-            for dim in 0..2 {
-                let k = dim + 1; // Skip first component (k=1,2 instead of 0,1)
-                if k >= rank {
-                    break;
-                }
-                let scale = s[k].max(0.0).sqrt(); // sqrt because SVD gives sqrt(eigenvalue)
-                for i in 0..n {
-                    coords[(i, dim)] = u[(i, k)] * scale;
-                }
+    if let Ok((u, s, _v)) = b.rsvd(rank) {
+        // Skip 1st eigenvector (technical variation), use components 2-3
+        let mut coords = Mat::zeros(n, 2);
+        for dim in 0..2 {
+            let k = dim + 1; // Skip first component (k=1,2 instead of 0,1)
+            if k >= rank {
+                break;
             }
-            coords
+            let scale = s[k].max(0.0).sqrt(); // sqrt because SVD gives sqrt(eigenvalue)
+            for i in 0..n {
+                coords[(i, dim)] = u[(i, k)] * scale;
+            }
         }
-        Err(_) => {
-            // Fallback to exact eigendecomposition if RSVD fails
-            let eig = b.symmetric_eigen();
-            let mut order: Vec<usize> = (0..eig.eigenvalues.len()).collect();
-            order.sort_by(|&a, &b_| {
-                eig.eigenvalues[b_]
-                    .partial_cmp(&eig.eigenvalues[a])
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+        coords
+    } else {
+        // Fallback to exact eigendecomposition if RSVD fails
+        let eig = b.symmetric_eigen();
+        let mut order: Vec<usize> = (0..eig.eigenvalues.len()).collect();
+        order.sort_by(|&a, &b_| {
+            eig.eigenvalues[b_]
+                .partial_cmp(&eig.eigenvalues[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-            // Skip 1st eigenvector (technical variation), use components 2-3
-            let mut coords = Mat::zeros(n, 2);
-            for dim in 0..2 {
-                let k = dim + 1; // Skip first component
-                if k >= order.len() {
-                    break;
-                }
-                let lam = eig.eigenvalues[order[k]].max(0.0);
-                let s = lam.sqrt();
-                let ev = eig.eigenvectors.column(order[k]);
-                for i in 0..n {
-                    coords[(i, dim)] = s * ev[i];
-                }
+        // Skip 1st eigenvector (technical variation), use components 2-3
+        let mut coords = Mat::zeros(n, 2);
+        for dim in 0..2 {
+            let k = dim + 1; // Skip first component
+            if k >= order.len() {
+                break;
             }
-            coords
+            let lam = eig.eigenvalues[order[k]].max(0.0);
+            let s = lam.sqrt();
+            let ev = eig.eigenvectors.column(order[k]);
+            for i in 0..n {
+                coords[(i, dim)] = s * ev[i];
+            }
         }
+        coords
     }
 }

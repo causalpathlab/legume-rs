@@ -16,6 +16,7 @@ pub struct AxisCoarsenings {
 }
 
 impl AxisCoarsenings {
+    #[must_use]
     pub fn avg_n_coarse(&self) -> f32 {
         if self.coarsenings.is_empty() {
             return 0.0;
@@ -28,6 +29,7 @@ impl AxisCoarsenings {
 /// One identity coarsening over `n` items. Each item is its own
 /// pb-sample; `pool_cells` becomes a no-op (mean of one row = that
 /// row) and `sample_edge_batch` resolves `coarse_cell == fine_cell`.
+#[must_use]
 pub fn identity_axis(n: usize) -> AxisCoarsenings {
     let fine_to_coarse: Vec<usize> = (0..n).collect();
     let coarse_to_fine: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();

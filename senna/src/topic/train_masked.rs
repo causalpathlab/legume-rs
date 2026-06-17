@@ -5,7 +5,7 @@
 //! see: per-level data assembly from [`CollapsedOut`], bulk-vs-SC delta
 //! estimation, bulk evaluation, and the dictionary / feature-embedding
 //! writers. The `pub(crate) use` re-exports keep existing call sites
-//! (`fit_masked_topic`, `train_cell_embedded`) on stable import paths.
+//! (the `masked_topic` command, `train_cell_embedded`) on stable import paths.
 
 use super::common::sample_collapsed_data;
 use crate::embed_common::*;

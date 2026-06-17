@@ -77,12 +77,6 @@ pub struct FitConfig {
     /// path so subsequent runs are instant. `None` always recomputes.
     pub fisher_weights_cache: Option<Box<str>>,
     pub feature_network: Option<FeatureNetworkConfig>,
-    /// Optional cell-cell loss term — positive cell pairs from a
-    /// caller-provided graph (e.g. spatial KNN), with negatives drawn
-    /// within each pair's batch. Combined with the bipartite loss
-    /// additively: `L = L_bip + λ · L_cc`. `None` (or `lambda == 0`)
-    /// disables the term.
-    pub cell_cell: Option<CellCellConfig>,
     /// Optional per-row HVG weights for the random projection (length =
     /// full feature axis). When `Some(w)`, the RP uses
     /// `project_columns_weighted` with these weights — uninformative
@@ -90,14 +84,6 @@ pub struct FitConfig {
     /// every downstream pass. When `None`, falls back to plain batch-
     /// corrected RP (every gene weight = 1).
     pub hvg_weights: Option<Vec<f32>>,
-    /// Hard cap on the number of features trained. When `> 0` and less
-    /// than `n_features`, keeps the top-`max_features` genes by
-    /// NB-Fisher weight and drops the rest before the multilevel
-    /// collapse. Shrinks `E_feat`, the triplet vec, every per-batch
-    /// sampler, and pb-blob storage proportionally — the dominant
-    /// large-data speed knob now that supergene coarsening is gone.
-    /// `0` keeps every gene.
-    pub max_features: usize,
     /// BBKNN + DC-Poisson refinement on the multi-level pseudobulk
     /// partition. `Some(RefineParams::default())` enables it (parity
     /// with senna topic / svd / postprocess); `None` falls back to the
@@ -114,20 +100,11 @@ pub struct FitConfig {
     /// embedding, added to the composite loss before backward. `0.0`
     /// disables.
     pub feature_embedding_l2: f32,
-    /// Number of latent programs `K` for the per-condition feature gate
-    /// (`e_feat(f|s) = E_feat[f] ⊙ exp(Σ_k z[f,k]·δ[k,s,:])`). The gate is
-    /// identity at init and on the reference condition, so `K` only adds
-    /// capacity when conditions actually diverge.
-    pub num_programs: usize,
-    /// L2 penalty on the gate program loadings `z` (mean-normalized).
-    pub z_l2: f32,
-    /// L2 penalty on the gate deviation directions `δ` (mean-normalized).
-    pub delta_l2: f32,
-    /// AdamW decoupled weight decay applied uniformly to every parameter
+    /// `AdamW` decoupled weight decay applied uniformly to every parameter
     /// (the shared `E_feat`, `b_feat`, and every per-axis head). Post-
     /// step shrinkage; doesn't enter the backward graph. `0.0` disables.
     pub weight_decay: f64,
-    /// Global-norm gradient clip per AdamW step (`0.0` = off). Bounds the
+    /// Global-norm gradient clip per `AdamW` step (`0.0` = off). Bounds the
     /// update magnitude so embeddings don't inflate on NCE loss spikes.
     pub max_grad_norm: f32,
     /// Optional per-cell multiplier on the cell-axis sampling weight
@@ -148,36 +125,6 @@ pub struct FitConfig {
     /// - `k ≥ n_cells`: no pb-sample exceeds `k`, so subsampling is a no-op —
     ///   every cell shapes `E_feat` (legacy all-cells behaviour; slowest).
     pub phase1_cells_per_pb: usize,
-}
-
-/// Cell-cell NCE configuration. Positives = neighbor pairs from a
-/// caller-provided graph, gated by pb co-membership at every chain
-/// level; per-chain-position sibling negatives drive the loss across
-/// pb-tree resolutions. Set `lambda = 0` to disable the cell-cell
-/// term entirely.
-#[derive(Clone)]
-pub struct CellCellConfig {
-    /// Positive cell pairs as global cell ids (canonical (i, j) with i < j).
-    pub edges: Vec<(u32, u32)>,
-    /// Loss mixing weight λ. 0.0 → cell-cell term skipped; 1.0 → equal
-    /// weight with the bipartite loss; > 1 emphasizes cell-cell.
-    pub lambda: f32,
-    /// Negative cells per positive pair.
-    pub n_negatives: usize,
-    /// Which collapse levels to chain over. `None` = every level
-    /// produced by the multilevel collapse inside [`fit`]. Indices
-    /// refer to the coarsest-first `cell_to_pb_per_level`, so `0` =
-    /// coarsest, `last` = finest. Out-of-range entries are dropped
-    /// with a warning. Levels whose pb count is close to `n_cells`
-    /// (per-cell partitions, no useful classification signal) are
-    /// auto-pruned by [`resolve_pb_chain`].
-    pub pb_levels: Option<Vec<usize>>,
-    /// Per-level λ; same length as the resolved `pb_levels`. `None` =
-    /// uniform 1.0. User-supplied values pass through as-is — they
-    /// are not normalized by the number of levels, so adjust the
-    /// global `CellCellConfig::lambda` accordingly when chaining many
-    /// levels.
-    pub lambda_per_level: Option<Vec<f32>>,
 }
 
 /// Optional SGC feature-network smoother configuration. The graph is
@@ -232,7 +179,7 @@ pub(crate) fn load_or_compute_fisher_weights(
                     if cached_names == unified.feature_names
                         && cached_weights.len() == unified.n_features() =>
                 {
-                    info!("Reusing cached NB-Fisher weights from {}", path);
+                    info!("Reusing cached NB-Fisher weights from {path}");
                     return Ok(cached_weights);
                 }
                 Ok((cached_names, _)) => {
@@ -243,15 +190,12 @@ pub(crate) fn load_or_compute_fisher_weights(
                         unified.n_features()
                     );
                 }
-                Err(e) => warn!("Failed to load Fisher cache {} ({}); recomputing", path, e),
+                Err(e) => warn!("Failed to load Fisher cache {path} ({e}); recomputing"),
             }
         }
     }
 
-    info!(
-        "Computing NB-Fisher weights (block_size={:?})...",
-        block_size
-    );
+    info!("Computing NB-Fisher weights (block_size={block_size:?})...");
     let full_weights = compute_nb_fisher_weights(unified.count_backend(), block_size)?;
     info!(
         "  {} features, mean Fisher weight {:.3}",
@@ -268,52 +212,13 @@ pub(crate) fn load_or_compute_fisher_weights(
 
     if let Some(path) = cache_path {
         if let Err(e) = save_per_gene_weights(&feat_weights, &unified.feature_names, path) {
-            warn!("Failed to save Fisher cache to {}: {}", path, e);
+            warn!("Failed to save Fisher cache to {path}: {e}");
         } else {
-            info!("Saved NB-Fisher weights to {}", path);
+            info!("Saved NB-Fisher weights to {path}");
         }
     }
 
     Ok(feat_weights)
-}
-
-/// Cap `unified.n_features()` at `max_features` by Fisher rank (largest
-/// kept). No-op when `max_features == 0` or already <= cap. Subsets
-/// triplets + feature_names + feature_to_backend_row via
-/// [`UnifiedData::subset_features`] and the returned weight vector
-/// in lockstep, so downstream sampler/collapse builds see a single
-/// compact axis.
-pub(crate) fn maybe_cap_features(
-    unified: &mut UnifiedData,
-    feat_weights: Vec<f32>,
-    max_features: usize,
-) -> Vec<f32> {
-    if max_features == 0 {
-        return feat_weights;
-    }
-    let n = unified.n_features();
-    if n <= max_features {
-        return feat_weights;
-    }
-    // Argsort descending by Fisher, then take top-N. Ties broken by
-    // ascending gene id for determinism across runs / re-cached weights.
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_unstable_by(|&a, &b| {
-        feat_weights[b]
-            .partial_cmp(&feat_weights[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.cmp(&b))
-    });
-    let mut selected: Vec<usize> = order.into_iter().take(max_features).collect();
-    selected.sort_unstable(); // subset_features remaps in old-axis order
-    info!(
-        "Feature cap: {} → {} genes (top by NB-Fisher)",
-        n,
-        selected.len()
-    );
-    let new_weights: Vec<f32> = selected.iter().map(|&i| feat_weights[i]).collect();
-    unified.subset_features(&selected);
-    new_weights
 }
 
 pub fn load_feature_network(args: FeatureNetworkArgs) -> anyhow::Result<FeatureNetworkConfig> {
@@ -371,8 +276,6 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
         // mode explicitly; this default just makes the value well-formed.
         composite_mode: CompositeMode::Sum,
         feature_embedding_l2: config.feature_embedding_l2,
-        z_l2: config.z_l2,
-        delta_l2: config.delta_l2,
         max_grad_norm: config.max_grad_norm,
     }
 }

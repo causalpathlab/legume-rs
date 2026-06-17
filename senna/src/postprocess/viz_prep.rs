@@ -112,20 +112,15 @@ pub(crate) fn write_cell_proj(
     let col_names: Vec<Box<str>> = (0..proj_nk.ncols())
         .map(|i| format!("p{i}").into_boxed_str())
         .collect();
-    let n_emitted = match crate::output_helpers::cell_subset(&proj_nk, cell_names, keep_idx) {
-        Some((mat, names)) => {
-            let n = mat.nrows();
-            mat.to_parquet_with_names(&path, (Some(&names), Some("cell")), Some(&col_names))?;
-            n
-        }
-        None => {
-            proj_nk.to_parquet_with_names(
-                &path,
-                (Some(cell_names), Some("cell")),
-                Some(&col_names),
-            )?;
-            n_cells
-        }
+    let n_emitted = if let Some((mat, names)) =
+        crate::output_helpers::cell_subset(&proj_nk, cell_names, keep_idx)
+    {
+        let n = mat.nrows();
+        mat.to_parquet_with_names(&path, (Some(&names), Some("cell")), Some(&col_names))?;
+        n
+    } else {
+        proj_nk.to_parquet_with_names(&path, (Some(cell_names), Some("cell")), Some(&col_names))?;
+        n_cells
     };
     info!(
         "Wrote cell projection: {} cells × {} dims → {path}",
@@ -174,36 +169,28 @@ pub(crate) fn write_cell_to_pb(
         .map(|i| format!("level_{i}").into_boxed_str())
         .collect();
     let path = format!("{prefix}.cell_to_pb.parquet");
-    let n_emitted = match crate::output_helpers::cell_subset(&mat, cell_names, keep_idx) {
-        Some((m, names)) => {
+    let n_emitted =
+        if let Some((m, names)) = crate::output_helpers::cell_subset(&mat, cell_names, keep_idx) {
             let n = m.nrows();
             m.to_parquet_with_names(&path, (Some(&names), Some("cell")), Some(&col_names))?;
             n
-        }
-        None => {
+        } else {
             mat.to_parquet_with_names(&path, (Some(cell_names), Some("cell")), Some(&col_names))?;
             n_cells
-        }
-    };
-    info!(
-        "Wrote cell→pb membership: {} cells × {} levels → {path}",
-        n_emitted, num_levels
-    );
+        };
+    info!("Wrote cell→pb membership: {n_emitted} cells × {num_levels} levels → {path}");
     Ok(path)
 }
 
 /// Apply SVD preprocessing: reduce matrix to top N components.
-/// Returns U * diag(S) where (U, S, V) = rsvd(mat, n_components).
+/// Returns U * diag(S) where (U, S, V) = rsvd(mat, `n_components`).
 pub(super) fn apply_svd_preprocessing(mat: &Mat, n_components: usize) -> anyhow::Result<Mat> {
     use anyhow::Context;
 
     let (n_rows, n_cols) = (mat.nrows(), mat.ncols());
     let n_components = n_components.min(n_rows).min(n_cols);
 
-    info!(
-        "Running randomized SVD: {} × {} → {} components",
-        n_rows, n_cols, n_components
-    );
+    info!("Running randomized SVD: {n_rows} × {n_cols} → {n_components} components");
     let (u, s, _v) = mat.rsvd(n_components).context("Randomized SVD failed")?;
 
     let mut reduced = Mat::zeros(n_rows, n_components);
@@ -212,6 +199,6 @@ pub(super) fn apply_svd_preprocessing(mat: &Mat, n_components: usize) -> anyhow:
         reduced.set_column(i, &col);
     }
 
-    info!("SVD done, reduced to {} dims", n_components);
+    info!("SVD done, reduced to {n_components} dims");
     Ok(reduced)
 }

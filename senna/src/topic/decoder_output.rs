@@ -4,7 +4,7 @@
 //! own dictionary-write logic and may emit additional per-gene parameter
 //! files (dispersion, ambient α, vMF κ, etc.). The [`DecoderExtras`]
 //! trait gives every decoder a uniform two-method surface so the main
-//! pipeline in `fit_topic.rs` doesn't have to fan out per-decoder
+//! pipeline in `topic/cmd.rs` doesn't have to fan out per-decoder
 //! `match` arms when serializing trained models.
 
 use crate::embed_common::*;

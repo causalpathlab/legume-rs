@@ -50,6 +50,7 @@ const CONVERGE_TOL: f64 = 1e-5;
 /// `progress`, when `Some`, is incremented by one per solved cell — pass a
 /// bar pre-sized to the *total* cell count so a caller that invokes this
 /// once per chunk gets a single bar spanning all chunks.
+#[must_use]
 pub fn project_cells(
     frozen_e: &[f32],
     frozen_b: &[f32],
@@ -82,6 +83,7 @@ pub fn project_cells(
 /// `e_c` only (the intercept `b_c` is unpenalised and absorbs library size).
 /// Returns `(e_c, b_c)`. A cell with no observed features gets the zero
 /// embedding.
+#[must_use]
 pub fn solve_one_cell(
     feats: &[(u32, f32)],
     frozen_e: &[f32],
@@ -102,21 +104,21 @@ pub fn solve_one_cell(
         let mut hess = DMatrix::<f64>::zeros(d, d);
         for &(idx, n) in feats {
             let ef = &frozen_e[idx as usize * h..(idx as usize + 1) * h];
-            let bf = frozen_b[idx as usize] as f64;
+            let bf = f64::from(frozen_b[idx as usize]);
             // s = ⟨e_c, e_f⟩ + b_f + b_c
             let mut s = bf + theta[h];
             for (k, &efk) in ef.iter().enumerate() {
-                s += theta[k] * efk as f64;
+                s += theta[k] * f64::from(efk);
             }
             let mu = s.clamp(-SCORE_CLAMP, SCORE_CLAMP).exp();
-            let resid = n as f64 - mu;
+            let resid = f64::from(n) - mu;
             // grad += resid · ẽ ;  hess (upper triangle) += μ · ẽ ẽᵀ
             for (a, &efa) in ef.iter().enumerate() {
-                let efa = efa as f64;
+                let efa = f64::from(efa);
                 grad[a] += resid * efa;
                 let row = mu * efa;
                 for (bb, &efb) in ef.iter().enumerate().skip(a) {
-                    hess[(a, bb)] += row * efb as f64;
+                    hess[(a, bb)] += row * f64::from(efb);
                 }
                 hess[(a, h)] += row; // cross column with the intercept (1)
             }

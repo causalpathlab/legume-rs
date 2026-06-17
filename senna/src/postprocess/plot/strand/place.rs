@@ -81,8 +81,7 @@ pub(super) fn place_genes(
     let allowed = |chr: &str| -> bool {
         allow
             .as_ref()
-            .map(|a| a.iter().any(|c| c.as_ref() == chr))
-            .unwrap_or(true)
+            .is_none_or(|a| a.iter().any(|c| c.as_ref() == chr))
     };
 
     // A matched gene: activity-matrix index + its resolved location.

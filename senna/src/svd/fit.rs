@@ -258,11 +258,15 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         output_keep_idx.as_deref(),
     )?;
 
-    let input: Vec<String> = args.data_files.iter().map(|s| s.to_string()).collect();
+    let input: Vec<String> = args
+        .data_files
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     let batch: Vec<String> = args
         .batch_files
         .as_ref()
-        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         kind: crate::run_manifest::RunKind::Svd,

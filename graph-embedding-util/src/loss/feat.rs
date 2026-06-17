@@ -8,7 +8,7 @@
 use crate::data::Triplet;
 use crate::feature_network::{select_feat_emb, FeatureNetworkSmoother};
 use crate::loss::log_sigmoid;
-use crate::model::{FeatGate, JointEmbedModel};
+use crate::model::JointEmbedModel;
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{Device, Result, Tensor};
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
@@ -26,11 +26,6 @@ pub struct EdgeBatch {
     pub neg_feats: Vec<u32>,
     pub edge_weights: Vec<f32>,
     pub n_negatives: usize,
-    /// Length B; per-positive condition id for the feature gate. Negatives
-    /// are alternative features for the *same* positive cell, so they
-    /// inherit the positive's condition (no separate neg vector). For pb
-    /// axes this is filled with the reference condition (identity gate).
-    pub condition_ids: Vec<u32>,
 }
 
 pub struct PerBatchSampler {
@@ -48,8 +43,6 @@ pub struct EdgeBatchArgs<'a> {
     pub batch_sampler: &'a PerBatchSampler,
     pub cell_coarsening: &'a FeatureCoarsening,
     pub fine_feature_weights: Option<&'a [f32]>,
-    /// Global cell id → condition id, for the per-positive gate condition.
-    pub condition_membership: &'a [u32],
     pub batch_size: usize,
     pub n_negatives: usize,
 }
@@ -58,7 +51,6 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
     let mut coarse_cells = Vec::with_capacity(args.batch_size);
     let mut fine_feats = Vec::with_capacity(args.batch_size);
     let mut weights = Vec::with_capacity(args.batch_size);
-    let mut condition_ids = Vec::with_capacity(args.batch_size);
 
     let sampler = args.batch_sampler;
 
@@ -69,11 +61,9 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
         let c_coarse = args.cell_coarsening.fine_to_coarse[t.cell as usize] as u32;
         coarse_cells.push(c_coarse);
         fine_feats.push(t.feature);
-        condition_ids.push(args.condition_membership[t.cell as usize]);
         let w = args
             .fine_feature_weights
-            .map(|w| w[t.feature as usize])
-            .unwrap_or(1.0);
+            .map_or(1.0, |w| w[t.feature as usize]);
         weights.push(w);
     }
 
@@ -89,7 +79,6 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
         neg_feats,
         edge_weights: weights,
         n_negatives: args.n_negatives,
-        condition_ids,
     }
 }
 
@@ -141,6 +130,7 @@ pub struct CellFeatureSampler {
 // Deliberately takes primitives (not `&UnifiedData`) to keep the loss
 // module decoupled from the data layer; the input count is inherent.
 #[allow(clippy::too_many_arguments)]
+#[must_use]
 pub fn build_per_batch_stratified_cell_samplers(
     triplets: &[Triplet],
     batch_membership: &[u32],
@@ -253,8 +243,6 @@ pub struct PerBatchStratifiedEdgeBatchArgs<'a> {
     pub sampler: &'a PerBatchStratifiedCellSampler,
     pub cell_coarsening: &'a FeatureCoarsening,
     pub fine_feature_weights: &'a [f32],
-    /// Global cell id → condition id, for the per-positive gate condition.
-    pub condition_membership: &'a [u32],
     pub batch_size: usize,
     pub n_negatives: usize,
 }
@@ -270,7 +258,6 @@ pub fn sample_per_batch_stratified_edge_batch(
     let mut coarse_cells = Vec::with_capacity(args.batch_size);
     let mut fine_feats = Vec::with_capacity(args.batch_size);
     let mut weights = Vec::with_capacity(args.batch_size);
-    let mut condition_ids = Vec::with_capacity(args.batch_size);
 
     for _ in 0..args.batch_size {
         let lc = s.cell_picker.sample(rng);
@@ -281,7 +268,6 @@ pub fn sample_per_batch_stratified_edge_batch(
         let c_coarse = args.cell_coarsening.fine_to_coarse[c as usize] as u32;
         coarse_cells.push(c_coarse);
         fine_feats.push(f);
-        condition_ids.push(args.condition_membership[c as usize]);
         weights.push(args.fine_feature_weights[f as usize]);
     }
 
@@ -297,7 +283,6 @@ pub fn sample_per_batch_stratified_edge_batch(
         neg_feats,
         edge_weights: weights,
         n_negatives: args.n_negatives,
-        condition_ids,
     }
 }
 
@@ -340,6 +325,7 @@ pub struct PbFeatureSampler {
 /// Build a stratified sampler for a pseudobulk axis. Returns `None`
 /// when the axis has zero positives or fewer than two active pb's
 /// (degenerate stratum).
+#[must_use]
 pub fn build_stratified_sampler(
     triplets: &[Triplet],
     n_pb: usize,
@@ -503,10 +489,6 @@ pub fn sample_stratified_edge_batch(
         neg_feats,
         edge_weights: weights,
         n_negatives: args.n_negatives,
-        // Pseudobulk "cells" are condition-mixing aggregates and pb axes
-        // never apply the gate (it's a per-cell-axis correction), so the
-        // condition id here is unused downstream — stamp 0.
-        condition_ids: vec![0u32; args.batch_size],
     }
 }
 
@@ -564,19 +546,12 @@ pub struct ChainFeatureSide {
     pub neg_feats: Vec<u32>,
     pub edge_weights: Vec<f32>,
     pub n_negatives: usize,
-    /// Length B; the leaf cell's condition id, used to gate the feature
-    /// embedding on the **cell axis only** (pb ancestors score against the
-    /// baseline `e_feat`). Shared across the chain because every axis in a
-    /// chain derives from the same leaf cell.
-    pub condition_ids: Vec<u32>,
 }
 
 pub struct ChainBatchArgs<'a> {
     pub triplets: &'a [Triplet],
     pub sampler: &'a ChainSampler<'a>,
     pub fine_feature_weights: &'a [f32],
-    /// Global cell id → condition id, for the leaf cell's gate condition.
-    pub condition_membership: &'a [u32],
     pub batch_size: usize,
     pub n_negatives: usize,
 }
@@ -586,7 +561,6 @@ pub fn sample_chain_batch(args: ChainBatchArgs, rng: &mut impl Rng) -> ChainBatc
     let mut leaf_cells = Vec::with_capacity(args.batch_size);
     let mut fine_feats = Vec::with_capacity(args.batch_size);
     let mut weights = Vec::with_capacity(args.batch_size);
-    let mut condition_ids = Vec::with_capacity(args.batch_size);
 
     for _ in 0..args.batch_size {
         let local_idx = bs.pos.sample(rng);
@@ -594,7 +568,6 @@ pub fn sample_chain_batch(args: ChainBatchArgs, rng: &mut impl Rng) -> ChainBatc
         let t = &args.triplets[global_idx];
         leaf_cells.push(t.cell);
         fine_feats.push(t.feature);
-        condition_ids.push(args.condition_membership[t.cell as usize]);
         weights.push(args.fine_feature_weights[t.feature as usize]);
     }
 
@@ -611,7 +584,6 @@ pub fn sample_chain_batch(args: ChainBatchArgs, rng: &mut impl Rng) -> ChainBatc
             neg_feats,
             edge_weights: weights,
             n_negatives: args.n_negatives,
-            condition_ids,
         },
     }
 }
@@ -629,12 +601,6 @@ pub struct ChainAxis<'a> {
     pub lambda: f32,
     /// Used in `nce_loss_chain`'s error diagnostics.
     pub label: &'a str,
-    /// Whether to score this axis against the **condition-gated** feature
-    /// embedding. `true` for the real per-cell axis (carries the leaf
-    /// cell's condition); `false` for pb ancestors (baseline `e_feat`, so
-    /// the gate stays a cell-axis-only correction). Ignored when the chain
-    /// loss is called with no gate.
-    pub gated: bool,
 }
 
 /// Score one chain batch across every axis using a single shared
@@ -648,7 +614,6 @@ pub struct ChainAxis<'a> {
 pub fn nce_loss_chain(
     e_feat: &Tensor,
     b_feat: &Tensor,
-    gate: Option<&FeatGate>,
     feats: ChainFeatureSide,
     axes: &[ChainAxis],
     smoother: Option<&FeatureNetworkSmoother>,
@@ -664,9 +629,7 @@ pub fn nce_loss_chain(
     }
     let k = feats.n_negatives;
 
-    // Feature side gathered once for the whole chain step. Index from
-    // slices (not `from_vec`) so the host `fine_feats` / `neg_feats`
-    // remain available for the gate below.
+    // Feature side gathered once for the whole chain step.
     let pos_feat_idx = Tensor::from_slice(&feats.fine_feats, b, dev)?;
     let e_feat_pos = select_feat_emb(smoother, e_feat, &pos_feat_idx)?;
     let b_feat_pos = b_feat.index_select(&pos_feat_idx, 0)?;
@@ -677,16 +640,6 @@ pub fn nce_loss_chain(
     let h = e_feat_neg_flat.dim(1)?;
     let e_feat_neg = e_feat_neg_flat.reshape((b, k, h))?;
     let b_feat_neg = b_feat_neg_flat.reshape((b, k))?;
-
-    // Condition-gated feature side, used by the real per-cell axis only
-    // (pb ancestors keep the baseline `e_feat`). Computed once per step.
-    let gated: Option<(Tensor, Tensor)> = match gate {
-        Some(g) => Some((
-            g.gate_feat_pos(&e_feat_pos, &feats.fine_feats, &feats.condition_ids, dev)?,
-            g.gate_feat_neg(&e_feat_neg, &feats.neg_feats, &feats.condition_ids, dev)?,
-        )),
-        None => None,
-    };
 
     let w_sum: f32 = feats.edge_weights.iter().sum::<f32>().max(1e-8);
     let w_t = Tensor::from_vec(feats.edge_weights, b, dev)?;
@@ -702,20 +655,15 @@ pub fn nce_loss_chain(
         let e_cell_pos = axis.e_cell.index_select(axis.indices, 0)?;
         let b_cell_pos = axis.b_cell.index_select(axis.indices, 0)?;
 
-        // Cell axis scores against the gated feature embedding; pb axes
-        // against the baseline.
-        let (ef_pos, ef_neg) = match (&gated, axis.gated) {
-            (Some((gp, gn)), true) => (gp, gn),
-            _ => (&e_feat_pos, &e_feat_neg),
-        };
-        let pos_score = JointEmbedModel::score_diag(ef_pos, &e_cell_pos, &b_feat_pos, &b_cell_pos)?;
+        let pos_score =
+            JointEmbedModel::score_diag(&e_feat_pos, &e_cell_pos, &b_feat_pos, &b_cell_pos)?;
         let neg_score =
-            JointEmbedModel::score_negatives(ef_neg, &e_cell_pos, &b_feat_neg, &b_cell_pos)?;
+            JointEmbedModel::score_negatives(&e_feat_neg, &e_cell_pos, &b_feat_neg, &b_cell_pos)?;
         let per_edge =
             (log_sigmoid(&pos_score)? + log_sigmoid(&neg_score.neg()?)?.sum(1)?)?.neg()?;
         let weighted = (per_edge * w_t.clone())?;
-        let axis_loss = (weighted.sum(0)? / (w_sum as f64))?;
-        let scaled = (axis_loss * axis.lambda as f64)?;
+        let axis_loss = (weighted.sum(0)? / f64::from(w_sum))?;
+        let scaled = (axis_loss * f64::from(axis.lambda))?;
         total = Some(match total {
             Some(prev) => (prev + scaled)?,
             None => scaled,
@@ -734,6 +682,7 @@ pub fn nce_loss_chain(
 /// whose cells belong to that batch, and a negative pool restricted to the
 /// features observed in those cells. Batches with zero observed edges are
 /// returned as `None` (caller filters).
+#[must_use]
 pub fn build_per_batch_samplers(
     triplets: &[Triplet],
     batch_membership: &[u32],
@@ -821,7 +770,6 @@ pub fn nce_loss(
     model: &JointEmbedModel,
     batch: EdgeBatch,
     cell_coarse_to_fine: &[Vec<usize>],
-    gate: Option<&FeatGate>,
     smoother: Option<&FeatureNetworkSmoother>,
     dev: &Device,
 ) -> Result<Tensor> {
@@ -836,7 +784,7 @@ pub fn nce_loss(
     let e_cell_pos = e_cell_u.index_select(&cell_idx_t, 0)?;
     let b_cell_pos = b_cell_u.index_select(&cell_idx_t, 0)?;
 
-    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, gate, smoother, dev)
+    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, smoother, dev)
 }
 
 /// Fast path for the identity-coarsening case (every "pb-sample" is
@@ -849,7 +797,6 @@ pub fn nce_loss(
 pub fn nce_loss_identity(
     model: &JointEmbedModel,
     batch: EdgeBatch,
-    gate: Option<&FeatGate>,
     smoother: Option<&FeatureNetworkSmoother>,
     dev: &Device,
 ) -> Result<Tensor> {
@@ -860,7 +807,7 @@ pub fn nce_loss_identity(
     let cell_idx_t = Tensor::from_vec(batch.coarse_cells.clone(), b, dev)?;
     let e_cell_pos = model.e_cell.index_select(&cell_idx_t, 0)?;
     let b_cell_pos = model.b_cell.index_select(&cell_idx_t, 0)?;
-    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, gate, smoother, dev)
+    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, smoother, dev)
 }
 
 /// Shared tail of [`nce_loss`] / [`nce_loss_identity`]: feature-side
@@ -872,15 +819,12 @@ fn nce_loss_with_cell_side(
     batch: EdgeBatch,
     e_cell_pos: Tensor,
     b_cell_pos: Tensor,
-    gate: Option<&FeatGate>,
     smoother: Option<&FeatureNetworkSmoother>,
     dev: &Device,
 ) -> Result<Tensor> {
     let b = batch.coarse_cells.len();
     let k = batch.n_negatives;
 
-    // Index from slices (not `from_vec`) so the host `fine_feats` /
-    // `neg_feats` stay available for the gate below.
     let pos_feat_idx_t = Tensor::from_slice(&batch.fine_feats, b, dev)?;
     let e_feat_pos = select_feat_emb(smoother, &model.e_feat, &pos_feat_idx_t)?;
     let b_feat_pos = model.b_feat.index_select(&pos_feat_idx_t, 0)?;
@@ -891,16 +835,6 @@ fn nce_loss_with_cell_side(
     let h = e_feat_neg_flat.dim(1)?;
     let e_feat_neg = e_feat_neg_flat.reshape((b, k, h))?;
     let b_feat_neg = b_feat_neg_flat.reshape((b, k))?;
-
-    // Per-condition gate (identity when `gate` is None, δ = 0, or all rows
-    // are the reference condition).
-    let (e_feat_pos, e_feat_neg) = match gate {
-        Some(g) => (
-            g.gate_feat_pos(&e_feat_pos, &batch.fine_feats, &batch.condition_ids, dev)?,
-            g.gate_feat_neg(&e_feat_neg, &batch.neg_feats, &batch.condition_ids, dev)?,
-        ),
-        None => (e_feat_pos, e_feat_neg),
-    };
 
     // Raw bilinear scoring: score = E_feat[f]·E_cell[c] + b_feat (+ b_cell,
     // dropped by the bge driver). The cell row is shared by the pos and neg
@@ -920,7 +854,7 @@ fn nce_loss_with_cell_side(
     let w_sum: f32 = batch.edge_weights.iter().sum::<f32>().max(1e-8);
     let w_t = Tensor::from_vec(batch.edge_weights, b, dev)?;
     let weighted = (per_edge * w_t)?;
-    weighted.sum(0)? / (w_sum as f64)
+    weighted.sum(0)? / f64::from(w_sum)
 }
 
 fn unique_with_index(values: &[u32]) -> (Vec<u32>, Vec<u32>) {

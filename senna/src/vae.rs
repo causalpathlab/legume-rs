@@ -181,7 +181,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     );
     let prebuilt_partition = inherited
         .as_ref()
-        .map(|i| i.load_cell_to_pb())
+        .map(super::run_manifest::InheritedFromManifest::load_cell_to_pb)
         .transpose()?
         .flatten();
 
@@ -385,10 +385,13 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         false
     };
 
-    let input: Vec<String> = data_files.iter().map(|s| s.to_string()).collect();
+    let input: Vec<String> = data_files
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     let batch: Vec<String> = batch_files
         .as_deref()
-        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         kind: crate::run_manifest::RunKind::Vae,

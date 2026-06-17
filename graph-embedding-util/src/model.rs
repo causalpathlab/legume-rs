@@ -22,10 +22,6 @@ pub struct ModelArgs {
     pub n_features: usize,
     pub n_cells: usize,
     pub embedding_dim: usize,
-    /// Number of conditions `S` for the per-condition feature gate.
-    pub n_conditions: usize,
-    /// Number of latent programs `K` in the gate (low-rank deviation).
-    pub num_programs: usize,
 }
 
 /// Initial values for [`JointEmbedModel::new_with_init`]. `None` for
@@ -42,41 +38,25 @@ pub struct ModelInit<'a> {
 /// side (`e_feat` / `b_feat`) is provided pre-allocated and registered
 /// in the shared `VarMap` so multiple heads can co-train it. Only the
 /// cell side gets new Vars, namespaced by `var_prefix` so multiple
-/// heads can coexist in one VarMap (e.g. `pb_l0`, `pb_l1`, ..., `cell`).
+/// heads can coexist in one `VarMap` (e.g. `pb_l0`, `pb_l1`, ..., `cell`).
 pub struct ShareFeaturesArgs<'a> {
     pub n_cells: usize,
     pub embedding_dim: usize,
     pub shared_e_feat: Tensor,
     pub shared_b_feat: Tensor,
-    /// Shared gate params (already registered as Vars in the VarMap by an
-    /// earlier `new_with_init`); reused so every axis co-trains one gate.
-    pub shared_z: Tensor,
-    pub shared_delta: Tensor,
-    pub num_programs: usize,
-    pub n_conditions: usize,
     pub e_cell_init: Option<&'a nalgebra::DMatrix<f32>>,
     pub b_cell_init: &'a [f32],
     pub var_prefix: &'a str,
 }
 
 pub struct JointEmbedModel {
-    /// Unified feature embedding (genes ∪ peaks). Baseline (condition-free)
-    /// when the per-condition gate is active.
+    /// Unified feature embedding (genes ∪ peaks).
     pub e_feat: Tensor,
     pub e_cell: Tensor,
     pub b_feat: Tensor,
     pub b_cell: Tensor,
     #[allow(dead_code)]
     pub embedding_dim: usize,
-    /// Per-gene program loadings `[D, K]` for the per-condition gate.
-    pub z: Tensor,
-    /// Program × condition deviation directions `[K, S, H]`. The gated
-    /// feature embedding for an edge in condition `s` is
-    /// `E_feat[f] ⊙ exp(Σ_k z[f,k]·δ̄[k,s,:])` where `δ̄` is `δ` mean-centered
-    /// across conditions (identity at `δ = 0`). See [`FeatGate`].
-    pub delta: Tensor,
-    pub num_programs: usize,
-    pub n_conditions: usize,
 }
 
 impl JointEmbedModel {
@@ -106,31 +86,12 @@ impl JointEmbedModel {
         let b_feat = register_var_from_slice(varmap, dev, "b_feat", init.b_feat)?;
         let b_cell = register_var_from_slice(varmap, dev, "b_cell", init.b_cell)?;
 
-        // Gate params. `z` is randn (small) and `δ` is **zero** so the gate
-        // is exactly identity at init (`exp(0)=1`) yet gradient still flows
-        // into `δ` once conditions diverge (because `z ≠ 0`). `δ` is
-        // mean-centered across conditions at gate time, so no condition is a
-        // baseline; `E_feat` stays the average-condition embedding.
-        let randn_z = candle_nn::Init::Randn {
-            mean: 0.0,
-            stdev: 0.05,
-        };
-        let z = vs.get_with_hints((args.n_features, args.num_programs), "z", randn_z)?;
-        let delta = vs.get_with_hints(
-            (args.num_programs, args.n_conditions, args.embedding_dim),
-            "delta",
-            candle_nn::Init::Const(0.0),
-        )?;
         Ok(Self {
             e_feat,
             e_cell,
             b_feat,
             b_cell,
             embedding_dim: args.embedding_dim,
-            z,
-            delta,
-            num_programs: args.num_programs,
-            n_conditions: args.n_conditions,
         })
     }
 
@@ -138,7 +99,7 @@ impl JointEmbedModel {
     /// `shared_e_feat` / `shared_b_feat` Tensors (already registered as
     /// Vars in `varmap` by an earlier call to `new_with_init`) and
     /// allocate fresh cell-side Vars under `args.var_prefix` so multiple
-    /// heads coexist in one VarMap. AdamW over `varmap.all_vars()` then
+    /// heads coexist in one `VarMap`. `AdamW` over `varmap.all_vars()` then
     /// updates the shared feature side once and each head's cell side
     /// independently.
     pub fn new_sharing_features(
@@ -151,24 +112,19 @@ impl JointEmbedModel {
             embedding_dim,
             shared_e_feat,
             shared_b_feat,
-            shared_z,
-            shared_delta,
-            num_programs,
-            n_conditions,
             e_cell_init,
             b_cell_init,
             var_prefix,
         } = args;
-        let e_name = format!("{}_e_cell", var_prefix);
-        let b_name = format!("{}_b_cell", var_prefix);
-        let e_cell = match e_cell_init {
-            Some(m) => register_var_from_mat(varmap, dev, &e_name, m)?,
-            None => {
-                let randn = Tensor::randn(0.0_f32, 0.1, (n_cells, embedding_dim), dev)?;
-                let var = Var::from_tensor(&randn)?;
-                varmap.data().lock().unwrap().insert(e_name, var.clone());
-                var.as_tensor().clone()
-            }
+        let e_name = format!("{var_prefix}_e_cell");
+        let b_name = format!("{var_prefix}_b_cell");
+        let e_cell = if let Some(m) = e_cell_init {
+            register_var_from_mat(varmap, dev, &e_name, m)?
+        } else {
+            let randn = Tensor::randn(0.0_f32, 0.1, (n_cells, embedding_dim), dev)?;
+            let var = Var::from_tensor(&randn)?;
+            varmap.data().lock().unwrap().insert(e_name, var.clone());
+            var.as_tensor().clone()
         };
         let b_cell = register_var_from_slice(varmap, dev, &b_name, b_cell_init)?;
         Ok(Self {
@@ -177,10 +133,6 @@ impl JointEmbedModel {
             b_feat: shared_b_feat,
             b_cell,
             embedding_dim,
-            z: shared_z,
-            delta: shared_delta,
-            num_programs,
-            n_conditions,
         })
     }
 
@@ -200,14 +152,6 @@ impl JointEmbedModel {
             coarse_to_fine,
             dev,
         )
-    }
-
-    /// Build the per-condition feature gate for use inside the loss
-    /// functions without handing them the whole model. The condition
-    /// mean-centering of `δ` is done **once here** (per step), so the
-    /// per-edge gate calls only gather and exponentiate.
-    pub fn feat_gate(&self) -> Result<FeatGate<'_>> {
-        FeatGate::new(&self.z, &self.delta)
     }
 
     /// Bilinear score with bias terms.
@@ -291,107 +235,6 @@ impl JointEmbedModel {
         let pair = (proj_anchor_2d * proj_neg)?; // [B, K]
         let b_anchor_2d = b_cell_anchor.unsqueeze(1)?.broadcast_as((b, k))?;
         (pair + b_anchor_2d)? + b_cell_neg
-    }
-}
-
-/// Lightweight borrow of the per-condition feature gate params, so the
-/// loss functions can apply the gate without depending on the whole
-/// `JointEmbedModel` (matches the "primitives, not `&UnifiedData`"
-/// convention of the loss module). Construct via
-/// [`JointEmbedModel::feat_gate`].
-///
-/// The gated feature embedding for a row `(feature f, condition s)` is
-///
-/// ```text
-/// e_feat_gated(f, s) = E_feat[f] ⊙ exp( Σ_k z[f,k]·δ̄[k,s,:] )
-///   where  δ̄[k,s,:] = δ[k,s,:] − mean_s' δ[k,s',:]
-/// ```
-///
-/// `δ` is **mean-centered across conditions** (`Σ_s δ̄[k,s,:] = 0`), so no
-/// condition is a baseline and `E_feat` is the *average-condition*
-/// embedding — every condition (technical batch) deviates symmetrically.
-/// Identity at init (`δ = 0`). Mirrors faba gem's exp log-deviation
-/// gate with the **condition** axis in place of gem's **modality**
-/// axis. Negatives are alternative features for the *same* positive cell,
-/// so they carry the positive's condition (see [`FeatGate::gate_feat_neg`]).
-///
-/// `δ̄` is precomputed once at construction ([`FeatGate::new`] /
-/// [`JointEmbedModel::feat_gate`]) so the per-edge gate calls don't
-/// re-center on every positive and negative draw.
-pub struct FeatGate<'a> {
-    z: &'a Tensor, // [D, K]
-    /// `δ` mean-centered across the condition axis (dim 1), `[K, S, H]`.
-    delta_centered: Tensor,
-}
-
-impl<'a> FeatGate<'a> {
-    /// Center `δ` across conditions once and hold the result. `z` is
-    /// borrowed (gathered per call); `delta` is `[K, S, H]`.
-    pub fn new(z: &'a Tensor, delta: &Tensor) -> Result<Self> {
-        let delta_centered = delta.broadcast_sub(&delta.mean_keepdim(1)?)?; // [K, S, H]
-        Ok(Self { z, delta_centered })
-    }
-
-    /// Gate positive feature embeddings. `e_feat_pos`: `[B, H]` (already
-    /// smoother-selected). `feat_ids`, `cond_ids`: `[B]` host slices.
-    /// Returns `[B, H]`.
-    pub fn gate_feat_pos(
-        &self,
-        e_feat_pos: &Tensor,
-        feat_ids: &[u32],
-        cond_ids: &[u32],
-        dev: &Device,
-    ) -> Result<Tensor> {
-        let b = feat_ids.len();
-        debug_assert_eq!(cond_ids.len(), b);
-        let f_idx = Tensor::from_slice(feat_ids, b, dev)?;
-        let s_idx = Tensor::from_slice(cond_ids, b, dev)?;
-
-        let z_b = self.z.index_select(&f_idx, 0)?; // [B, K]
-
-        // Σ_k z[f,k] · δ̄[k,s,:] → [B, H], with δ̄ the condition-centered
-        // deviation (precomputed in `new`). Gather the per-row condition
-        // slice δ̄[:, s, :] (index_select on dim 1 → [K, B, H]) then
-        // contract over K via a batched matmul z[B,1,K] · δ̄_s[B,K,H] →
-        // [B,1,H] (gemm; folds away the explicit [B,K,H] product).
-        // `transpose` makes the slice non-contiguous, so realise it first.
-        let delta_s = self
-            .delta_centered
-            .index_select(&s_idx, 1)?
-            .transpose(0, 1)?
-            .contiguous()?; // [B, K, H]
-        let logdev = z_b.unsqueeze(1)?.matmul(&delta_s)?.squeeze(1)?; // [B, H]
-
-        e_feat_pos.broadcast_mul(&logdev.exp()?)
-    }
-
-    /// Gate negative feature embeddings. `e_feat_neg`: `[B, Kn, H]`.
-    /// `neg_feat_ids`: `[B*Kn]` (row-major: negatives for positive `b` at
-    /// `[b*Kn..(b+1)*Kn]`). `cond_ids`: `[B]` — each positive's condition,
-    /// replicated across its `Kn` negatives. Returns `[B, Kn, H]`. Reuses
-    /// [`FeatGate::gate_feat_pos`] on the flattened rows so there is a
-    /// single gate code path.
-    pub fn gate_feat_neg(
-        &self,
-        e_feat_neg: &Tensor,
-        neg_feat_ids: &[u32],
-        cond_ids: &[u32],
-        dev: &Device,
-    ) -> Result<Tensor> {
-        let (b, kn, h) = e_feat_neg.dims3()?;
-        debug_assert_eq!(cond_ids.len(), b);
-        debug_assert_eq!(neg_feat_ids.len(), b * kn);
-        let cond_rep: Vec<u32> = cond_ids
-            .iter()
-            .flat_map(|&s| std::iter::repeat_n(s, kn))
-            .collect();
-        let gated_flat = self.gate_feat_pos(
-            &e_feat_neg.reshape((b * kn, h))?,
-            neg_feat_ids,
-            &cond_rep,
-            dev,
-        )?;
-        gated_flat.reshape((b, kn, h))
     }
 }
 
@@ -723,139 +566,6 @@ mod tests {
                     expected
                 );
             }
-        }
-    }
-
-    fn small_gate_tensors(
-        dev: &Device,
-        d: usize,
-        k: usize,
-        s: usize,
-        h: usize,
-        zero_delta: bool,
-    ) -> (Tensor, Tensor) {
-        let z = Tensor::randn(0.0f32, 1.0, (d, k), dev).unwrap();
-        let delta = if zero_delta {
-            Tensor::zeros((k, s, h), DType::F32, dev).unwrap()
-        } else {
-            Tensor::randn(0.0f32, 1.0, (k, s, h), dev).unwrap()
-        };
-        (z, delta)
-    }
-
-    /// δ ≡ 0 ⇒ the gate is the identity for *any* condition (the exp of a
-    /// zero log-deviation is 1), so the gated embedding equals the input
-    /// bit-for-bit.
-    #[test]
-    fn gate_feat_pos_identity_when_delta_zero() {
-        let dev = dev();
-        let (d, k, s, h) = (6usize, 3, 4, 5);
-        let (z, delta) = small_gate_tensors(&dev, d, k, s, h, true);
-        let gate = FeatGate::new(&z, &delta).unwrap();
-        let e = Tensor::randn(0.0f32, 1.0, (4, h), &dev).unwrap();
-        let feat_ids = vec![0u32, 2, 5, 1];
-        let cond_ids = vec![1u32, 2, 3, 1]; // any conditions; δ=0 ⇒ identity
-        let out = gate.gate_feat_pos(&e, &feat_ids, &cond_ids, &dev).unwrap();
-        let a: Vec<f32> = e.flatten_all().unwrap().to_vec1().unwrap();
-        let g: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
-        for (x, y) in a.iter().zip(g.iter()) {
-            assert_eq!(x, y, "δ=0 gate must be identity");
-        }
-    }
-
-    /// δ ≠ 0 ⇒ `e ⊙ exp(Σ_k z[f,k]·δ̄[k,s,:])` where `δ̄` is δ mean-centered
-    /// across conditions; matches a host-side reference loop.
-    #[test]
-    fn gate_feat_pos_matches_centered_closed_form() {
-        let dev = dev();
-        let (d, k, s, h) = (6usize, 3, 4, 5);
-        let (z, delta) = small_gate_tensors(&dev, d, k, s, h, false);
-        let z_host: Vec<f32> = z.flatten_all().unwrap().to_vec1().unwrap(); // [D*K]
-        let delta_host: Vec<f32> = delta.flatten_all().unwrap().to_vec1().unwrap(); // [K*S*H]
-                                                                                    // Host-side centering: δ̄[k,s,h] = δ[k,s,h] − mean_s δ[k,s,h].
-        let mut delta_c = delta_host.clone();
-        for kk in 0..k {
-            for hh in 0..h {
-                let mut mean = 0.0f32;
-                for sc in 0..s {
-                    mean += delta_host[kk * s * h + sc * h + hh];
-                }
-                mean /= s as f32;
-                for sc in 0..s {
-                    delta_c[kk * s * h + sc * h + hh] -= mean;
-                }
-            }
-        }
-        let gate = FeatGate::new(&z, &delta).unwrap();
-        let e = Tensor::randn(0.0f32, 1.0, (4, h), &dev).unwrap();
-        let e_host: Vec<f32> = e.flatten_all().unwrap().to_vec1().unwrap();
-        let feat_ids = vec![1u32, 3, 4, 2];
-        let cond_ids = vec![1u32, 2, 3, 0];
-        let out = gate.gate_feat_pos(&e, &feat_ids, &cond_ids, &dev).unwrap();
-        let g: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
-        for i in 0..feat_ids.len() {
-            let f = feat_ids[i] as usize;
-            let sc = cond_ids[i] as usize;
-            for hh in 0..h {
-                let mut logdev = 0.0f32;
-                for kk in 0..k {
-                    let z_fk = z_host[f * k + kk];
-                    let d_ksh = delta_c[kk * s * h + sc * h + hh];
-                    logdev += z_fk * d_ksh;
-                }
-                let expected = e_host[i * h + hh] * logdev.exp();
-                let got = g[i * h + hh];
-                assert!(
-                    (got - expected).abs() < 1e-5,
-                    "({i},{hh}): got={got} expected={expected}"
-                );
-            }
-        }
-    }
-
-    /// Centering invariant: summed over all conditions, the log-deviation
-    /// is zero for every (feature, h) — no condition is privileged and
-    /// `E_feat` is the average-condition embedding.
-    #[test]
-    fn gate_log_deviation_sums_to_zero_across_conditions() {
-        let dev = dev();
-        let (d, k, s, h) = (5usize, 3, 4, 6);
-        let (z, delta) = small_gate_tensors(&dev, d, k, s, h, false);
-        let gate = FeatGate::new(&z, &delta).unwrap();
-        let e = Tensor::ones((1, h), DType::F32, &dev).unwrap();
-        let feat_ids = vec![3u32];
-        let mut acc = vec![0.0f32; h];
-        for sc in 0..s as u32 {
-            let out = gate.gate_feat_pos(&e, &feat_ids, &[sc], &dev).unwrap();
-            let g: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
-            for hh in 0..h {
-                acc[hh] += g[hh].ln(); // logdev = ln(e ⊙ exp(logdev)) with e=1
-            }
-        }
-        for (hh, &v) in acc.iter().enumerate() {
-            assert!(v.abs() < 1e-4, "Σ_s logdev[{hh}] = {v}, expected 0");
-        }
-    }
-
-    /// `gate_feat_neg` gates each `[B, Kn, H]` block with its positive's
-    /// condition. A zero δ leaves the negatives untouched.
-    #[test]
-    fn gate_feat_neg_identity_when_delta_zero() {
-        let dev = dev();
-        let (d, k, s, h) = (6usize, 3, 4, 5);
-        let (z, delta) = small_gate_tensors(&dev, d, k, s, h, true);
-        let gate = FeatGate::new(&z, &delta).unwrap();
-        let (b, kn) = (3usize, 2usize);
-        let e_neg = Tensor::randn(0.0f32, 1.0, (b, kn, h), &dev).unwrap();
-        let neg_ids = vec![0u32, 1, 2, 3, 4, 5];
-        let cond_ids = vec![1u32, 2, 3];
-        let out = gate
-            .gate_feat_neg(&e_neg, &neg_ids, &cond_ids, &dev)
-            .unwrap();
-        let a: Vec<f32> = e_neg.flatten_all().unwrap().to_vec1().unwrap();
-        let g: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
-        for (x, y) in a.iter().zip(g.iter()) {
-            assert_eq!(x, y, "δ=0 neg gate must be identity");
         }
     }
 }

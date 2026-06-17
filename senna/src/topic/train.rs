@@ -6,7 +6,7 @@
 //! wires senna's anchor-prior penalty into the trainer's `loss_hook`.
 
 use crate::embed_common::*;
-use crate::fit_topic::TopicArgs;
+use crate::topic::cmd::TopicArgs;
 
 use candle_core::{Device, Tensor};
 use candle_util::decoder::DynDecoderModuleT;
@@ -143,7 +143,7 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
         .collect();
 
     // Multi-decoder path historically did not apply the anchor-prior
-    // penalty (senna's `fit_topic` passes `anchor_prior_per_level: None`,
+    // penalty (the `topic` command passes `anchor_prior_per_level: None`,
     // `anchor_penalty: 0.0` here). Keep that behaviour explicitly.
     let candle_cfg = make_candle_config(config, None);
 

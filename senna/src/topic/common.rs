@@ -247,7 +247,7 @@ pub struct LoadProjectArgs<'a> {
     /// backends. Default Exact = strict string match. Gene picks the
     /// last token after a delimiter so `ENSG000_TGFB1` and `TGFB1`
     /// resolve to the same row. Locus normalizes `chr1:1000-2000`,
-    /// `1:1000-2000`, etc. LocusOverlap additionally merges overlapping
+    /// `1:1000-2000`, etc. `LocusOverlap` additionally merges overlapping
     /// intervals on the same chromosome into one cluster.
     pub feature_kind: Option<auxiliary_data::feature_names::FeatureNameKind>,
 }
@@ -600,7 +600,7 @@ pub struct FeatureNetworkHandle {
 /// When `restrict_path` is `Some`, the callback parses the edge list
 /// against the data axis, applies the QC pipeline, and emits a `keep`
 /// mask of features with at least one surviving edge. When `restrict_path`
-/// is `None`, the handle has no mask_fn.
+/// is `None`, the handle has no `mask_fn`.
 pub fn setup_feature_network(
     restrict_path: Option<&str>,
     opts: FeatureNetworkOpts,

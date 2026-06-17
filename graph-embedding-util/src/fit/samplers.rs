@@ -9,12 +9,6 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_distr::weighted::WeightedIndex;
 
-/// Threshold above which a pb level is treated as a per-cell partition
-/// and pruned from the chain. `n_pbs / n_cells > 0.5` means avg pb size
-/// < 2 — even if a few edges survive the pb-mismatch filter at that
-/// level, the loss carries near-zero training signal.
-pub(crate) const DEGENERATE_PB_RATIO: f32 = 0.5;
-
 /// Derive a phase-1-only subsampled view of the per-batch stratified cell
 /// samplers: keep at most `k` cells per pb-sample at EVERY collapse level
 /// (`cell_to_pb_per_level`, coarsest..finest), unioned across levels. The
@@ -37,7 +31,7 @@ pub(crate) fn subsample_cell_samplers_multilevel(
     cell_weight_mult: Option<&[f32]>,
     seed: u64,
 ) -> Vec<PerBatchStratifiedCellSampler> {
-    let n_cells = cell_to_pb_per_level.first().map_or(0, |v| v.len());
+    let n_cells = cell_to_pb_per_level.first().map_or(0, std::vec::Vec::len);
     // Global keep bitmap: ≤k cells per pb-sample, per level, unioned.
     let mut keep = vec![false; n_cells];
     for (level, c2pb) in cell_to_pb_per_level.iter().enumerate() {
@@ -50,7 +44,7 @@ pub(crate) fn subsample_cell_samplers_multilevel(
         // diversity) yet stay reproducible across runs.
         let mut rng =
             StdRng::seed_from_u64(seed ^ (level as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        for b in buckets.iter_mut() {
+        for b in &mut buckets {
             // `partial_shuffle` does only k swaps (vs a full O(bucket) shuffle)
             // and hands back the k-element random subset directly.
             let chosen: &[u32] = if b.len() > k {
