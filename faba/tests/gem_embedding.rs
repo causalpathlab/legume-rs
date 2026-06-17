@@ -138,14 +138,11 @@ fn test_args() -> GemArgs {
         dartseq: None,
         atoi: None,
         apa: None,
-        dartseq_components: None,
-        atoi_components: None,
-        apa_components: None,
         batch_files: None,
         out: "".into(),
         embedding_dim: H,
         n_programs: K,
-        n_regions: R,
+        n_regions: Some(R),
         num_levels: 0,
         sort_dim: 10,
         knn_pb: 10,
@@ -156,7 +153,6 @@ fn test_args() -> GemArgs {
         dartseq_sample_strip: "".into(),
         atoi_sample_strip: "".into(),
         apa_sample_strip: "".into(),
-        auto_cell_cutoff: false,
         no_cell_axis: false,
         // This fixture trains on the cell axis only (zero pb levels), so keep
         // the full cell axis in phase 1 (k ≥ n_cells = legacy all-cells).
@@ -232,7 +228,7 @@ fn satellite_embed(model: &GemModel, g: u32, region: u32) -> Vec<f32> {
 #[test]
 fn recovers_region_resolved_deviation() {
     let dev = Device::Cpu;
-    let table = FeatureTable::build(&feature_names(), &RegionMap::from_records(&[], R));
+    let table = FeatureTable::build(&feature_names(), &RegionMap::new(R));
     assert_eq!(table.n_genes(), N_GENES);
     assert_eq!(table.n_regions, R);
 
@@ -413,17 +409,14 @@ fn count_embed(model: &GemModel, g: u32, modality: u32) -> Vec<f32> {
 fn recovers_splice_direction() {
     let dev = Device::Cpu;
     let r_splice = 1usize; // splice satellites have no transcript regions
-    let table = FeatureTable::build(
-        &splice_feature_names(),
-        &RegionMap::from_records(&[], r_splice),
-    );
+    let table = FeatureTable::build(&splice_feature_names(), &RegionMap::new(r_splice));
     assert_eq!(table.n_genes(), N_GENES);
     // spliced / unspliced are distinct count modalities (≥1), not slot 0.
     assert_eq!(table.count_modality_ids, vec![SPL, UNSPL]);
 
     let pb = build_splice_pseudobulk();
     let mut args = test_args();
-    args.n_regions = r_splice;
+    args.n_regions = Some(r_splice);
     args.f_agg = 0.3;
     args.f_count = 0.6; // actually draw spliced/unspliced positives
     args.epochs = 120;

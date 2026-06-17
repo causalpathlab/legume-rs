@@ -266,7 +266,7 @@ impl TableBuilder {
                 RowStratum::ModifierComp => {
                     let modality_id = self.modality_id(&key.modality);
                     let component = parse_component_idx(&key.detail);
-                    let region = regions.lookup(&key.gene, &key.modality, component.unwrap_or(0));
+                    let region = regions.lookup(component.unwrap_or(0));
                     self.strata.push(Some(RowStratum::ModifierComp));
                     self.row_gene.push(Some(gene_id));
                     self.row_modality.push(Some(modality_id));
@@ -470,7 +470,7 @@ impl FeatureTable {
                 }
                 RowStratum::ModifierComp => {
                     let comp = parse_component_idx(&key.detail);
-                    let reg = regions.lookup(&key.gene, &key.modality, comp.unwrap_or(0));
+                    let reg = regions.lookup(comp.unwrap_or(0));
                     stratum.push(Some(RowStratum::ModifierComp));
                     gene.push(Some(gid));
                     modality.push(modality_to_id.get(&*key.modality).copied());

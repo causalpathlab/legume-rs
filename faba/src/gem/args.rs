@@ -52,35 +52,6 @@ pub struct GemArgs {
     )]
     pub apa: Option<Vec<Box<str>>>,
 
-    ////////////////////////////////////////
-    // Component annotations (region binning)
-    //
-    // The `*_components.parquet` sidecars emitted by `faba m6a` / `faba
-    // atoi` carry each GMM component's `mu` and `gene_length`. They feed
-    // the transcript-position region bin (`u = mu/gene_length`) used by
-    // the model's γ_{m,r,:} offset. The modality is inferred from the
-    // flag, matching the row's `{gene}/{modality}/{component}` name.
-    // Optional: a missing sidecar collapses that modality's γ to a
-    // single region.
-    ////////////////////////////////////////
-    #[arg(
-        long,
-        help = "`m6a_components.parquet` for the `--dartseq` (m6A) modality"
-    )]
-    pub dartseq_components: Option<Box<str>>,
-
-    #[arg(
-        long,
-        help = "`atoi_components.parquet` for the `--atoi` (A2I) modality"
-    )]
-    pub atoi_components: Option<Box<str>>,
-
-    #[arg(
-        long,
-        help = "Component annotation parquet for the `--apa` (pA) modality"
-    )]
-    pub apa_components: Option<Box<str>>,
-
     #[arg(
         short = 'b',
         long,
@@ -117,14 +88,14 @@ pub struct GemArgs {
 
     #[arg(
         long = "num-regions",
-        default_value_t = 5,
-        help = "Number of transcript-position region bins R for the additive γ_{m,r,:} offset",
-        long_help = "Number of transcript-position region bins R for the additive\n\
-                     γ_{m,r,:} offset. Components are binned by normalized 5'-relative\n\
-                     position `u = mu/gene_length`. R=1 collapses γ to one per-modality\n\
-                     offset (no positional resolution)."
+        help = "γ slot count R per modality (default: auto = max(component_idx) + 1 across satellites)",
+        long_help = "Number of γ_{m, r, :} slots R per satellite modality. With the\n\
+                     sidecar input gone, R indexes a per-component slot within\n\
+                     (gene, modality) — components beyond R-1 clamp to slot R-1.\n\
+                     Default: auto-inferred from the satellite row names as\n\
+                     `max(component_idx) + 1`, so every component gets its own slot."
     )]
-    pub n_regions: usize,
+    pub n_regions: Option<usize>,
 
     ////////////////////////////////////////
     // Pseudobulk collapse
