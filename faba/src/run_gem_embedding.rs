@@ -23,6 +23,7 @@ use faba::gem::manifest::{write_outputs, CellQcOutputs};
 use faba::gem::model::GemModel;
 use faba::gem::pseudobulk::{build_pseudobulk, spliced_backend_rows, SatelliteData};
 use faba::gem::region::RegionMap;
+use faba::gem::sample_id::{file_sample_id, longest_common_underscore_suffix, strip_sample_id};
 use faba::gem::train::train;
 use graph_embedding_util::null_call::embedding_mixture_empty_call;
 
@@ -1053,24 +1054,6 @@ fn run_refine_pass(
     })
 }
 
-/// Strip the per-flag `strip` suffix from an already-computed basename.
-/// Empty (or non-matching) `strip` keeps the full basename, so two modality
-/// files of one sample merge only when their stripped basenames agree.
-fn strip_sample_id(base: &str, strip: &str) -> Box<str> {
-    if strip.is_empty() {
-        base.into()
-    } else {
-        base.strip_suffix(strip).unwrap_or(base).into()
-    }
-}
-
-/// Per-file sample id: the file's basename (sparse-data extension stripped)
-/// with the per-flag `strip` suffix removed. `rep1_wt_genes.zarr.zip` with
-/// `strip = "_genes"` → `rep1_wt`.
-fn file_sample_id(file: &str, strip: &str) -> anyhow::Result<Box<str>> {
-    Ok(strip_sample_id(basename(file)?.as_ref(), strip))
-}
-
 /// Scan modifier-comp rows of every loaded satellite, return
 /// `max(component_idx) + 1`. Falls back to `default_n` if no parseable
 /// modifier-comp row is found (e.g. only the genes backend was loaded, or
@@ -1097,27 +1080,6 @@ fn infer_n_regions(satellites: &[SatelliteBackend], default_n: usize) -> usize {
     } else {
         default_n
     }
-}
-
-/// Longest `_`-aligned suffix shared by every basename in `names`.
-/// Returns "" with fewer than two inputs, or when no `_`-prefixed suffix
-/// (e.g. `_genes`, `_m6a_mixture`) is common to all. Greedy from the
-/// longest candidate down — picks the longest `_`-prefixed suffix of
-/// `names[0]` that's a suffix of every other entry.
-fn longest_common_underscore_suffix(names: &[Box<str>]) -> Box<str> {
-    if names.len() < 2 {
-        return "".into();
-    }
-    // Candidate `_`-aligned suffixes of the first basename, longest first.
-    let first = names[0].as_ref();
-    let mut candidates: Vec<&str> = first.match_indices('_').map(|(i, _)| &first[i..]).collect();
-    candidates.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    for cand in candidates {
-        if names[1..].iter().all(|n| n.ends_with(cand)) {
-            return cand.into();
-        }
-    }
-    "".into()
 }
 
 /// Longest `_`-aligned prefix of `name` that is a member of `candidates`.

@@ -29,6 +29,8 @@ pub mod model;
 pub mod plot;
 pub mod pseudobulk;
 pub mod region;
+pub mod sample_id;
 pub mod sampling;
+pub mod summary;
 pub mod topics;
 pub mod train;

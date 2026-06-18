@@ -11,6 +11,9 @@
 //!
 //! - `{out}.gem_annot.annot.parquet` — per cell: community, coarse + fine
 //!   label, score (z), and p-value (`pnorm(-z)`) for each layer
+//! - `{out}.gem_annot.membership.tsv` — `cell<TAB>coarse_label` (no header);
+//!   feeds `faba gem-summary` and `data-beans stat -s row -g` to group any
+//!   count matrix by cell type
 //! - `{out}.gem_annot.community_profile.parquet` — one row per community
 //! - `{out}.gem_annot.type_map.parquet` — fine → coarse merge record
 //! - `{out}.gem_annot.{type,coarse}_embedding.parquet` — `[· × H]` anchors
