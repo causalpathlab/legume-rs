@@ -148,12 +148,14 @@ pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
         knn: args.knn,
         resolution: args.resolution,
         coarsen: !args.no_coarsen,
+        ..AnnotateProjConfig::default()
     };
     annotate_embeddings(
         &feat.mat,
         &feat.rows,
         &cell.mat,
         &cell.rows,
+        None,
         &args.markers,
         &format!("{out}.{}_annot", manifest.kind),
         !args.no_idf,
