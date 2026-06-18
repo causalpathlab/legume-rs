@@ -105,12 +105,14 @@ pub fn run_cage_annotate(args: &CageAnnotateArgs) -> Result<()> {
         knn: args.knn,
         resolution: args.resolution,
         coarsen: !args.no_coarsen,
+        ..AnnotateProjConfig::default()
     };
     annotate_embeddings(
         &feat.mat,
         &feat.rows,
         &cell.mat,
         &cell.rows,
+        None,
         &args.markers,
         &format!("{out}.cage_annot"),
         !args.no_idf,

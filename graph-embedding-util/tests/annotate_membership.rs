@@ -48,12 +48,14 @@ fn writes_membership_tsv() {
         knn: 3,
         resolution: 1.0,
         coarsen: true,
+        ..AnnotateProjConfig::default()
     };
     annotate_embeddings(
         &feature_emb,
         &gene_names,
         &cell_emb,
         &cell_names,
+        None,
         markers_path.to_str().unwrap(),
         prefix,
         true,
