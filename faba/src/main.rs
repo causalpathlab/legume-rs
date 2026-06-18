@@ -22,6 +22,7 @@ use crate::common::*;
 use faba::gem::annotate::{run_gem_annotate, GemAnnotateArgs};
 use faba::gem::args::GemArgs;
 use faba::gem::plot::{run_gem_plot, GemPlotArgs};
+use faba::gem::summary::{run_gem_summary, GemSummaryArgs};
 use run_apa::*;
 use run_atoi::*;
 use run_gem_embedding::*;
@@ -325,6 +326,7 @@ Example:\n  \
 
     #[command(
         name = "gem-annotate",
+        aliases = ["annotate"],
         about = "Marker-set cell-type annotation by projection (from a gem manifest)",
         long_about = "Light cell-type annotation: projects each marker-defined cell\n\
             type as a virtual cell onto the frozen gem feature embedding (the\n\
@@ -339,6 +341,43 @@ Example:\n  \
   faba gem-annotate -f out/gem.faba.json -m markers.tsv --num-perm 500 --resolution 1.0"
     )]
     GemAnnotate(GemAnnotateArgs),
+
+    #[command(
+        name = "gem-summary",
+        aliases = ["summary"],
+        about = "Per-modality gene × cell-type summary from annotation labels",
+        long_about = "Group any count matrix by cell type and report per-feature\n\
+            statistics — the tidy \"gene × cell-type, per modality\" summary.\n\n\
+            Decoupled from `faba gem-annotate`: annotate once, then summarize\n\
+            cheaply and repeatedly across measures (m6a_ratio, m6a_mixture,\n\
+            converted, genes, atoi_ratio, …) against the SAME labels. Labels\n\
+            come from a gem-annotate `*.annot.parquet` or any 2-column\n\
+            `cell<TAB>label` TSV (so labels from any tool work).\n\n\
+            Each --matrix flag is one output `summary_{label}.parquet`, long\n\
+            format `(name, group, nnz, tot, mu, sig)` where `name =\n\
+            {gene}/{modality}/{detail}` and `group` is the cell-type label.\n\
+            `mu` is the mean over all cells in the group (incl. uncovered\n\
+            zeros); `tot/nnz` is the mean over covered cells — for a ratio\n\
+            matrix that distinction matters. Reuses the same grouped-row path\n\
+            as `data-beans stat -s row -g`.\n\n\
+            Multi-sample: if the membership is `@sample`-tagged (a multi-sample\n\
+            `faba gem` run), each matrix file's barcodes are tagged the same\n\
+            way (per-file `@sample` id, the `faba gem` convention) so pooled\n\
+            replicates match EXACTLY — not by ambiguous bare barcode. The\n\
+            strip is auto-derived from a flag's files (their common `_`-suffix);\n\
+            for single-file flags pass `--sample-strip` (e.g. `_m6a_ratio`).",
+        after_long_help = "\
+Example:\n  \
+  # ratio (activity) + mixture (component counts) + genes, in one call\n  \
+  faba gem-summary -l out/gem.gem_annot.annot.parquet \\\n    \
+      --matrix out/rep1_m6a_ratio.zarr.zip,out/rep2_m6a_ratio.zarr.zip \\\n    \
+      --matrix m6a_mix=out/rep1_m6a_mixture.zarr.zip \\\n    \
+      --matrix out/rep1_genes.zarr.zip -o out/celltype\n\n\
+  # equivalently, hand the membership file to data-beans for one measure:\n  \
+  data-beans stat -s row -g out/gem.gem_annot.membership.tsv --delimiter @ \\\n    \
+      -o out/m6a_ratio_by_celltype.parquet out/rep1_m6a_ratio.zarr.zip"
+    )]
+    GemSummary(GemSummaryArgs),
 
     #[command(
         name = "all",
@@ -387,6 +426,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Gem(ref args) => run_gem_embedding(args)?,
         Commands::GemPlot(ref args) => run_gem_plot(args)?,
         Commands::GemAnnotate(ref args) => run_gem_annotate(args)?,
+        Commands::GemSummary(ref args) => run_gem_summary(args)?,
         Commands::All(ref args) => run_pipeline(args)?,
     }
 

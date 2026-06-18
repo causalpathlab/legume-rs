@@ -48,7 +48,7 @@
 use anyhow::{Context, Result};
 use data_beans::utilities::name_matching::{idf_weight, GeneIndex};
 use log::info;
-use matrix_util::common_io::{read_lines_of_words_delim, ReadLinesOut};
+use matrix_util::common_io::{read_lines_of_words_delim, write_lines, ReadLinesOut};
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::parquet::{write_named_table, Column};
 use matrix_util::traits::IoOps;
@@ -919,6 +919,23 @@ fn write_annotation_outputs(
     )
     .with_context(|| format!("writing {annot_path}"))?;
     info!("wrote {annot_path}");
+
+    ////////////////////////////
+    // cell → coarse-label membership TSV
+    ////////////////////////////
+    // A plain `cell<TAB>coarse_label` file (no header — `Membership::from_file`
+    // reads with `hdr_line = -1`, so a header would be a stray non-matching
+    // entry). Feeds `data-beans stat -s row -g` and `faba gem-summary` to
+    // group any count matrix by cell type.
+    let membership_lines: Vec<Box<str>> = cell_names
+        .iter()
+        .zip(coarse_label.iter())
+        .map(|(cell, label)| format!("{cell}\t{label}").into_boxed_str())
+        .collect();
+    let membership_path = format!("{out_prefix}.membership.tsv");
+    write_lines(&membership_lines, &membership_path)
+        .with_context(|| format!("writing {membership_path}"))?;
+    info!("wrote {membership_path}");
 
     ////////////////////////////
     // community profile table
