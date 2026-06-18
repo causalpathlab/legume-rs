@@ -375,8 +375,8 @@ pub fn write_named_table(
     for (_, col) in columns {
         match col {
             Column::Str(d) => parquet_add_string_column(&mut rg, d)?,
-            Column::F32(d) => parquet_add_numeric_column(&mut rg, *d)?,
-            Column::I32(d) => parquet_add_numeric_column(&mut rg, *d)?,
+            Column::F32(d) => parquet_add_numeric_column(&mut rg, d)?,
+            Column::I32(d) => parquet_add_numeric_column(&mut rg, d)?,
         }
     }
     rg.close()?;
