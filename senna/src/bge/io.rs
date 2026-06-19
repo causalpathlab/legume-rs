@@ -1,6 +1,6 @@
-//! `senna bge` output writers: feature/cell QC reports and the joint-biplot
-//! cell embedding. Split out of the bge driver to keep `mod.rs` focused on
-//! the clap → `FitConfig` translation.
+//! `senna bge` output writers: feature/cell QC reports and the SIMBA-style
+//! feature co-embedding. Split out of the bge driver to keep `mod.rs` focused
+//! on the clap → `FitConfig` translation.
 
 use crate::embed_common::*;
 use graph_embedding_util as ge;
@@ -68,32 +68,35 @@ pub(super) fn write_cell_qc(
     Ok(())
 }
 
-/// Write the joint-biplot cell embedding `{out}.cell_embedding_scaled.parquet`
-/// (`[n_cells × H]`, depth-free + gene-co-scaled). For overlaying cells on the
-/// gene dictionary `ρ`; not used by clustering. See `project_cells_phase2`.
-pub(super) fn write_cell_embedding_scaled(
-    scaled: &[f32],
-    barcodes: &[Box<str>],
+/// SIMBA-style feature co-embedding: re-embed every feature onto the cell
+/// manifold (gene = softmax-over-cells weighted average of cell embeddings) and
+/// write it as `{out}.feature_embedding.parquet` (overriding ρ), preserving the
+/// raw ρ as `{out}.feature_embedding_raw.parquet`. `e_cell` is the QC-kept cell
+/// embedding and `e_feat` the raw ρ (both `[*, H]`, on the same device);
+/// `target_eff` is the eff-cells temperature target from `ge::cell_clusters`.
+pub(super) fn write_feature_coembedding(
     out_prefix: &str,
+    e_cell: &candle_core::Tensor,
+    e_feat: &candle_core::Tensor,
+    feature_names: &[Box<str>],
+    target_eff: f64,
 ) -> anyhow::Result<()> {
-    use matrix_util::dmatrix_io::DMatrix;
-    use matrix_util::traits::IoOps;
-    let n = barcodes.len();
-    if n == 0 || !scaled.len().is_multiple_of(n) {
-        return Ok(());
-    }
-    let h = scaled.len() / n;
-    let mut m = DMatrix::<f32>::zeros(n, h);
-    for r in 0..n {
-        for c in 0..h {
-            m[(r, c)] = scaled[r * h + c];
-        }
-    }
-    let cols: Vec<Box<str>> = (0..h).map(|i| format!("h{i}").into_boxed_str()).collect();
-    m.to_parquet_with_names(
-        &format!("{out_prefix}.cell_embedding_scaled.parquet"),
-        (Some(barcodes), Some("cell")),
-        Some(&cols),
+    let (coembed, t) = ge::feature_coembedding(e_cell, e_feat, target_eff)?;
+    ge::eval::save_embedding(
+        &format!("{out_prefix}.feature_embedding.parquet"),
+        &coembed,
+        feature_names,
+        "feature",
     )?;
+    ge::eval::save_embedding(
+        &format!("{out_prefix}.feature_embedding_raw.parquet"),
+        e_feat,
+        feature_names,
+        "feature",
+    )?;
+    info!(
+        "Feature co-embedding (SIMBA-style, T={t:.4}) → {out_prefix}.feature_embedding.parquet; \
+         raw ρ → feature_embedding_raw.parquet"
+    );
     Ok(())
 }
