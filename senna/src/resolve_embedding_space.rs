@@ -28,12 +28,23 @@
 //! genes drawn ∝ marginal^α (node2vec convention). `AdamW` over {α, ρ, b}. By
 //! construction ρ·Zᵀ = the θ-weighted gene affinity per cell, so a marker gene
 //! sits near the cells expressing it.
+//!
+//! Post-hoc co-embedding. Like `senna bge`, the learned ρ fans out off the
+//! K-archetype cell simplex (cells live in the convex hull of α), so a joint
+//! UMAP separates genes from cells. The SIMBA `si.tl.embed` transform
+//! ([`graph_embedding_util::feature_coembedding`]) is applied post-hoc: each
+//! gene is re-placed at the softmax-over-cells weighted average of the *cell*
+//! embeddings Z, landing it on the cell manifold. This overrides the written
+//! `{out}.feature_embedding.parquet` (the one `annotate-by-projection` reads);
+//! the raw ρ is the disjoint off-manifold cloud and is not written. Cells are
+//! the reference and are unchanged, and training is untouched.
 
 use crate::embed_common::*;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_core::{Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use candle_util::loss::log_sigmoid;
+use graph_embedding_util as ge;
 use graph_embedding_util::stop::setup_stop_handler;
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
@@ -69,7 +80,7 @@ pub struct RestArgs {
         help = "Output prefix (default: --from with .senna.json stripped)",
         long_help = "Output prefix for every artifact. Defaults to `--from` with a trailing \
                      `.senna.json` (or `.json`) removed. Writes:\n  \
-                     {out}.feature_embedding.parquet  ρ      gene × H\n  \
+                     {out}.feature_embedding.parquet  co-embed  gene × H (ρ re-embedded onto the cell manifold; annotate reads this)\n  \
                      {out}.cell_embedding.parquet     Z=θ·α  cell × H\n  \
                      {out}.latent.parquet             Z      cell × H (the latent annotate-by-projection reads)\n  \
                      {out}.topic_embedding.parquet    α      topic × H\n  \
@@ -434,6 +445,21 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
         },
     )?;
 
+    // Post-hoc SIMBA-style co-embedding: re-place each gene ρ onto the frozen
+    // cell manifold Z = θ·α (gene = softmax-over-cells weighted average of the
+    // cells), mirroring `senna bge`. Without it ρ fans out off the K-archetype
+    // cell simplex, so a joint UMAP separates genes from cells; the co-embed
+    // lands genes on the cell manifold, which is what `annotate-by-projection`
+    // (reading feature_embedding) wants. Overrides {out}.feature_embedding.parquet
+    // (the raw off-manifold ρ is not written). Cells are the reference and are
+    // unchanged. Post-hoc — training above is untouched. Run on CPU over the
+    // finished Z/ρ (Leiden cluster + blocked softmax-matmul pass).
+    let cpu = Device::Cpu;
+    let z_t = trained.z.to_tensor(&cpu)?;
+    let rho_t = trained.rho.to_tensor(&cpu)?;
+    let (_labels, target_eff) = ge::cell_clusters(&z_t, Some(k))?;
+    ge::write_feature_coembedding(&out, &z_t, &rho_t, &gene_names, target_eff)?;
+
     write_outputs(&trained, &gene_names, &kept_names, &out)?;
 
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
@@ -682,12 +708,9 @@ fn write_outputs(
     let h = trained.rho.ncols();
     let h_cols = axis_id_names("h", h);
 
-    // ρ — gene × H (the per-gene embedding annotate-by-projection projects markers into).
-    trained.rho.to_parquet_with_names(
-        &format!("{out}.feature_embedding.parquet"),
-        (Some(gene_names), Some("gene")),
-        Some(&h_cols),
-    )?;
+    // NOTE: {out}.feature_embedding.parquet (the co-embed, genes on the cell
+    // manifold) is written by the SIMBA co-embedding step in
+    // `resolve_embedding_space`, not here. This writer owns the cell/topic side.
 
     // Z — cell × H, written as BOTH cell_embedding and latent. annotate-by-projection
     // reads outputs.cell_embedding; latent=Z keeps plot / layout / clustering (which
@@ -729,9 +752,9 @@ fn write_outputs(
     )?;
 
     info!(
-        "Saved ρ [{}×{h}] and Z [{}×{h}] to {out}.{{feature,cell}}_embedding.parquet",
-        trained.rho.nrows(),
-        trained.z.nrows()
+        "Saved Z [{}×{h}] to {out}.{{cell_embedding,latent}}.parquet and α [{}×{h}] to topic_embedding.parquet",
+        trained.z.nrows(),
+        trained.alpha.nrows()
     );
     Ok(())
 }

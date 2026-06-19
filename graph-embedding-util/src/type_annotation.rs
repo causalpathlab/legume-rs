@@ -173,9 +173,8 @@ pub struct AnnotateProjOutputs {
 /// TSV against `gene_names`, project every type, cluster + coarsen, and write
 /// `{out_prefix}.{annot,community_profile,type_map,marker_embedding}.parquet` plus
 /// the type locations as `{type,coarse}_embedding.parquet` (co-embedded onto the
-/// cell manifold) and `{type,coarse}_embedding_raw.parquet` (the marker centroids).
-/// The thin per-tool adapters (gem / cage / bge) only load the two embedding
-/// matrices from their own manifest and call this.
+/// cell manifold). The thin per-tool adapters (gem / cage / bge) only load the two
+/// embedding matrices from their own manifest and call this.
 ///
 /// * `feature_emb` `[G × H]`, `gene_names` len `G` (the full feature rows the
 ///   markers match against; also projected onto the layout as `kind=feature`).
@@ -252,13 +251,12 @@ pub fn annotate_embeddings(
         cfg,
     )?;
 
-    write_annotation_outputs(out_prefix, cell_names, &type_names, h, &res)?;
+    write_annotation_outputs(out_prefix, cell_names, &type_names, &res)?;
     log_label_histogram(&res);
 
     // Co-embed the cell-type signatures onto the cell manifold (same SIMBA
     // softmax-over-cells transform as the genes), so each type lands where its
-    // cells are — the primary {type,coarse}_embedding outputs. The raw marker
-    // centroids are kept as `*_raw`.
+    // cells are — the {type,coarse}_embedding outputs.
     write_type_coembeddings(out_prefix, cell_emb, &type_names, h, &res)?;
 
     // Layout coordinates + feature placement (part ii).
@@ -766,8 +764,7 @@ fn write_marker_embeddings(
 /// Co-embed the cell-type signatures (`res.type_emb_ch` fine, `res.coarse_emb_kh`
 /// coarse) onto the cell manifold via the SIMBA softmax-over-cells transform —
 /// the same operator used for genes in `senna bge` — so each type lands at the
-/// weighted centroid of *its* cells. Writes `{out}.{type,coarse}_embedding.parquet`;
-/// the raw marker centroids are written by `write_annotation_outputs` as `*_raw`.
+/// weighted centroid of *its* cells. Writes `{out}.{type,coarse}_embedding.parquet`.
 fn write_type_coembeddings(
     out_prefix: &str,
     cell_emb: &DMatrix<f32>,
@@ -1061,7 +1058,6 @@ fn write_annotation_outputs(
     out_prefix: &str,
     cell_names: &[Box<str>],
     type_names: &[Box<str>],
-    h: usize,
     res: &AnnotateProjOutputs,
 ) -> Result<()> {
     let (n, c, k) = (res.n_cells, res.n_types, res.n_coarse);
@@ -1205,37 +1201,6 @@ fn write_annotation_outputs(
     )
     .with_context(|| format!("writing {map_path}"))?;
     info!("wrote {map_path}");
-
-    ////////////////////////////
-    // signature plot anchors (fine + coarse)
-    ////////////////////////////
-    let dim_names: Vec<Box<str>> = (0..h)
-        .map(|j| format!("dim_{j}").into_boxed_str())
-        .collect();
-    // Raw marker-feature centroid signatures. The primary {type,coarse}_embedding
-    // outputs are the cell-manifold co-embeds written by `write_type_coembeddings`;
-    // these `*_raw` files keep the off-manifold centroid the scores were taken on.
-    let type_emb = DMatrix::<f32>::from_row_iterator(c, h, res.type_emb_ch.iter().copied());
-    let te_path = format!("{out_prefix}.type_embedding_raw.parquet");
-    type_emb
-        .to_parquet_with_names(
-            &te_path,
-            (Some(type_names), Some("cell_type")),
-            Some(&dim_names),
-        )
-        .with_context(|| format!("writing {te_path}"))?;
-    info!("wrote {te_path}");
-
-    let coarse_emb = DMatrix::<f32>::from_row_iterator(k, h, res.coarse_emb_kh.iter().copied());
-    let ce_path = format!("{out_prefix}.coarse_embedding_raw.parquet");
-    coarse_emb
-        .to_parquet_with_names(
-            &ce_path,
-            (Some(&res.coarse_names), Some("cell_type")),
-            Some(&dim_names),
-        )
-        .with_context(|| format!("writing {ce_path}"))?;
-    info!("wrote {ce_path}");
 
     Ok(())
 }

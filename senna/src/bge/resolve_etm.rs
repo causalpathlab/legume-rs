@@ -113,10 +113,9 @@ pub(super) fn resolve_etm_topics(
         (Some(&topic_names), Some("topic")),
         Some(&h_names),
     )?;
-    // Raw bge cell embedding Z preserved (the reference manifold). The
-    // feature side — {out}.feature_embedding.parquet (SIMBA co-embed) and
-    // {out}.feature_embedding_raw.parquet (raw ρ) — is written by the bge
-    // driver before this call, so it is not emitted here.
+    // Raw bge cell embedding Z preserved (the reference manifold). The feature
+    // side — {out}.feature_embedding.parquet (SIMBA co-embed) — is written by
+    // the bge driver before this call, so it is not emitted here.
     z.to_parquet_with_names(
         &format!("{out}.cell_embedding.parquet"),
         (Some(&barcodes), Some("cell")),
