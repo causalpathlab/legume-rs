@@ -10,6 +10,7 @@
 
 use crate::model::JointEmbedModel;
 use candle_util::candle_core::Tensor;
+use log::info;
 use matrix_util::traits::IoOps;
 
 pub struct OutputContext<'a> {
@@ -94,5 +95,32 @@ pub fn save_bias(
     let bias_2d = bias.unsqueeze(1)?;
     let col = vec![Box::<str>::from("bias")];
     bias_2d.to_parquet_with_names(path, (Some(row_names), Some(row_axis)), Some(&col))?;
+    Ok(())
+}
+
+/// SIMBA-style feature co-embedding, shared by `senna bge` and `senna rest`:
+/// re-embed every feature onto the cell manifold (feature = softmax-over-cells
+/// weighted average of the cell embeddings) via [`crate::feature_coembedding`]
+/// and write it as `{out}.feature_embedding.parquet`, *overriding* the raw
+/// learned feature embedding (the raw embedding is the disjoint off-manifold
+/// cloud — nothing downstream consumes it, so it is not written). `e_cell` is
+/// the reference cell embedding (left unchanged, SIMBA's anchor) and `e_feat`
+/// the raw feature embedding (both `[*, H]` on the same device); `target_eff`
+/// is the eff-cells temperature target from [`crate::cell_clusters`].
+pub fn write_feature_coembedding(
+    out_prefix: &str,
+    e_cell: &Tensor,
+    e_feat: &Tensor,
+    feature_names: &[Box<str>],
+    target_eff: f64,
+) -> anyhow::Result<()> {
+    let (coembed, t) = crate::feature_coembedding(e_cell, e_feat, target_eff)?;
+    save_embedding(
+        &format!("{out_prefix}.feature_embedding.parquet"),
+        &coembed,
+        feature_names,
+        "feature",
+    )?;
+    info!("Feature co-embedding (SIMBA-style, T={t:.4}) → {out_prefix}.feature_embedding.parquet");
     Ok(())
 }

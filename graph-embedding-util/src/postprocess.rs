@@ -95,11 +95,18 @@ pub fn feature_coembedding(
         n > 1 && d > 0,
         "feature_coembedding: need ≥2 cells and ≥1 feature (got {n}, {d})"
     );
+    // `index_select` / `matmul` require contiguous sources; callers that build
+    // the inputs from a column-major nalgebra matrix (`Mat::to_tensor`, e.g.
+    // `senna rest`) hand us non-contiguous tensors. A no-op when already
+    // contiguous (e.g. bge's candle-native embeddings), so it costs nothing
+    // there.
+    let e_cell = e_cell.contiguous()?;
+    let e_feat = e_feat.contiguous()?;
 
     // Calibrate T on a feature subsample. The score matrix is invariant in T —
     // only the softmax temperature changes — so compute it once and reuse it
     // across the whole bisection.
-    let e_feat_sub = subsample_rows(e_feat, CALIB_FEATS)?;
+    let e_feat_sub = subsample_rows(&e_feat, CALIB_FEATS)?;
     let scores_sub = e_cell.matmul(&e_feat_sub.t()?.contiguous()?)?; // [N, B]
     let t = calibrate_t_for_eff(&scores_sub, target_eff)?;
     info!(
@@ -115,7 +122,7 @@ pub fn feature_coembedding(
     while start < d {
         let len = FEAT_BLOCK.min(d - start);
         let ef = e_feat.narrow(0, start, len)?;
-        blocks.push(coembed_block(e_cell, &ef, t)?); // [len, H]
+        blocks.push(coembed_block(&e_cell, &ef, t)?); // [len, H]
         start += len;
     }
     let coembed = Tensor::cat(blocks.as_slice(), 0)?; // [D, H]

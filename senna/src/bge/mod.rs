@@ -19,7 +19,7 @@ use graph_embedding_util as ge;
 mod io;
 mod resolve_etm;
 
-use io::{write_cell_qc, write_feature_coembedding, write_feature_qc};
+use io::{write_cell_qc, write_feature_qc};
 use resolve_etm::resolve_etm_topics;
 
 /// One parsed `--multiome` file entry: `(optional modality label, file path)`.
@@ -771,10 +771,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // cluster size as the temperature target, ETM uses the labels as topics —
     // so the embedding is clustered a single time. The co-embed re-embeds every
     // feature onto the cell manifold (gene = softmax-over-cells weighted average
-    // of cell embeddings) and OVERRIDES {out}.feature_embedding.parquet, with
-    // the raw ρ preserved as {out}.feature_embedding_raw.parquet. Cells are
-    // SIMBA's reference and are unchanged. Post-hoc only — training (pseudobulk
-    // efficiency, phase-2 projection) is untouched.
+    // of cell embeddings) and OVERRIDES {out}.feature_embedding.parquet (the raw
+    // off-manifold ρ is not written). Cells are SIMBA's reference and are
+    // unchanged. Post-hoc only — training (pseudobulk efficiency, phase-2
+    // projection) is untouched.
     let cpu = candle_core::Device::Cpu;
     let e_feat_cpu = out.model.e_feat.to_device(&cpu)?; // [D, H] raw ρ
     let e_cell_cpu = match qc_keep_idx.as_deref() {
@@ -786,7 +786,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         None => out.model.e_cell.to_device(&cpu)?,
     };
     let (cell_labels, target_eff) = ge::cell_clusters(&e_cell_cpu, args.num_topics)?;
-    write_feature_coembedding(
+    ge::write_feature_coembedding(
         &args.out,
         &e_cell_cpu,
         &e_feat_cpu,

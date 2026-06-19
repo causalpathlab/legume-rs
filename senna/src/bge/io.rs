@@ -1,6 +1,7 @@
-//! `senna bge` output writers: feature/cell QC reports and the SIMBA-style
-//! feature co-embedding. Split out of the bge driver to keep `mod.rs` focused
-//! on the clap → `FitConfig` translation.
+//! `senna bge` output writers: feature/cell QC reports. The SIMBA-style feature
+//! co-embedding writer is shared with `senna rest` and lives in
+//! [`crate::embed_common::write_feature_coembedding`]. Split out of the bge
+//! driver to keep `mod.rs` focused on the clap → `FitConfig` translation.
 
 use crate::embed_common::*;
 use graph_embedding_util as ge;
@@ -65,38 +66,5 @@ pub(super) fn write_cell_qc(
         .collect();
     let path = format!("{out_prefix}.cell_qc.parquet");
     m.to_parquet_with_names(&path, (Some(barcodes), Some("cell")), Some(&cols))?;
-    Ok(())
-}
-
-/// SIMBA-style feature co-embedding: re-embed every feature onto the cell
-/// manifold (gene = softmax-over-cells weighted average of cell embeddings) and
-/// write it as `{out}.feature_embedding.parquet` (overriding ρ), preserving the
-/// raw ρ as `{out}.feature_embedding_raw.parquet`. `e_cell` is the QC-kept cell
-/// embedding and `e_feat` the raw ρ (both `[*, H]`, on the same device);
-/// `target_eff` is the eff-cells temperature target from `ge::cell_clusters`.
-pub(super) fn write_feature_coembedding(
-    out_prefix: &str,
-    e_cell: &candle_core::Tensor,
-    e_feat: &candle_core::Tensor,
-    feature_names: &[Box<str>],
-    target_eff: f64,
-) -> anyhow::Result<()> {
-    let (coembed, t) = ge::feature_coembedding(e_cell, e_feat, target_eff)?;
-    ge::eval::save_embedding(
-        &format!("{out_prefix}.feature_embedding.parquet"),
-        &coembed,
-        feature_names,
-        "feature",
-    )?;
-    ge::eval::save_embedding(
-        &format!("{out_prefix}.feature_embedding_raw.parquet"),
-        e_feat,
-        feature_names,
-        "feature",
-    )?;
-    info!(
-        "Feature co-embedding (SIMBA-style, T={t:.4}) → {out_prefix}.feature_embedding.parquet; \
-         raw ρ → feature_embedding_raw.parquet"
-    );
     Ok(())
 }
