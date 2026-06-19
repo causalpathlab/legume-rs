@@ -371,6 +371,46 @@ pub fn embedding_mixture_empty_call(nrm: &[f32], k_max: usize, fdr: f32) -> Mixt
     }
     let empty_frac: f64 = empty.iter().map(|&j| gmm.pi[j]).sum();
 
+    // Firmness gate — only drop when the empty mode is a GENUINE empty
+    // population (an ambient-vs-cell gap of orders of magnitude in norm), not
+    // merely low-count REAL cells. Dropping the MAJORITY (the BM1 failure: an
+    // over-split real bulk labelled "empty" while a high-norm minority is kept
+    // as "real") demands an even larger gap. Otherwise keep everything —
+    // curated data has no empty droplets, so a modest low↔high spread is just
+    // real depth variation.
+    const MIN_SEP: f64 = 3.0; // minority empty: real mode ≥ 3× the empty norm
+    const EXTREME_SEP: f64 = 10.0; // majority "empty": demand ≥ 10× (else it's real)
+    let empty_top = empty
+        .iter()
+        .map(|&j| gmm.mu[j])
+        .fold(f64::NEG_INFINITY, f64::max);
+    let real_bottom = (0..k)
+        .filter(|j| !empty.contains(j))
+        .map(|j| gmm.mu[j])
+        .fold(f64::INFINITY, f64::min);
+    let sep_ratio = (real_bottom - empty_top).exp(); // linear norm ratio across the valley
+    let need_sep = if empty_frac >= 0.5 {
+        EXTREME_SEP
+    } else {
+        MIN_SEP
+    };
+    if sep_ratio < need_sep {
+        log::info!(
+            "empty call: low mode ({:.0}% mass) only {:.1}× below the real mode — not a genuine \
+             empty population, keeping all cells",
+            empty_frac * 100.0,
+            sep_ratio
+        );
+        return MixtureEmptyCall {
+            drop: vec![false; n],
+            n_drop: 0,
+            k,
+            boundary,
+            cut: f64::NEG_INFINITY,
+            empty_frac: 0.0,
+        };
+    }
+
     // Per-item lfdr = P(real | x) = 1 − posterior-empty.
     let mut lfdr = vec![1.0f64; n];
     for (i, &xi) in x.iter().enumerate() {

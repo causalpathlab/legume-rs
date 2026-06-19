@@ -25,7 +25,6 @@ use graph_embedding_util as ge;
 ///   - `{out}.dictionary.parquet`       β    [D,K]   (each topic column a gene simplex)
 ///   - `{out}.topic_embedding.parquet`  α    [K,H]   (for a later `masked-topic` finetune)
 ///   - `{out}.cell_embedding.parquet`   Z    [N,H]   (raw bge cell embedding)
-///   - `{out}.feature_embedding.parquet`ρ    [D,H]   (raw bge feature embedding)
 ///   - `{out}.feature_bias.parquet`     `b_feat` [D]
 ///   - `{out}.cell_bias.parquet`        `b_cell` [N]    (per-cell depth sink)
 pub(super) fn resolve_etm_topics(
@@ -34,10 +33,9 @@ pub(super) fn resolve_etm_topics(
     barcodes: &[Box<str>],
     args: &BgeArgs,
     cell_keep_idx: Option<&[usize]>,
+    labels: &[usize],
 ) -> anyhow::Result<()> {
-    use matrix_util::archetypal::{
-        anchor_topics, select_anchor_topics, topic_dictionary, AnchorOpts,
-    };
+    use matrix_util::archetypal::topic_dictionary;
 
     let cpu = candle_core::Device::Cpu;
     let z_full = Mat::from_tensor(&model.e_cell.to_device(&cpu)?)?; // [N, H]
@@ -61,50 +59,37 @@ pub(super) fn resolve_etm_topics(
         rho.ncols()
     );
 
-    // Separable-NMF topic recovery (Arora anchors via SPA) on the feature
-    // embedding ρ: anchor features are the convex-hull vertices of the
-    // feature cloud — near-pure markers, one per topic. Deterministic and
-    // single-pass (no subsample, no nonconvex fit, no per-K refit); θ is then
-    // assigned to every cell by projecting it onto the anchors (FW_ITERS
-    // Frank–Wolfe steps — the simplex projection converges quickly, not a user
-    // knob). The MIN_ANCHOR_CELLS guard drops singleton/outlier-feature topics:
-    // a topic claimed by < 10 cells is almost surely an artifact at this scale.
-    const FW_ITERS: usize = 30;
-    const MIN_ANCHOR_CELLS: usize = 10;
-    let opts = AnchorOpts {
-        fw_iters: FW_ITERS,
-        min_anchor_cells: MIN_ANCHOR_CELLS,
-    };
-    let res = if let Some(k) = args.num_topics {
-        anyhow::ensure!(k >= 2, "resolve-etm: --num-topics must be ≥ 2");
-        info!("resolve-etm: separable-NMF (SPA anchors) with fixed K={k}");
-        anchor_topics(&z, &rho, k, opts)
-    } else {
-        // SPA anchors are nested → the sweep is one pass; residual elbow
-        // over 2..=H+1 selects K.
-        let upper = (h + 1).max(2);
-        let krange: Vec<usize> = (2..=upper).collect();
-        info!("resolve-etm: auto-selecting K via SPA residual-elbow over 2..={upper}");
-        select_anchor_topics(&z, &rho, &krange, opts).1
-    };
-    // K reflects any anchors the guard dropped, not the requested count.
-    let k = res.anchors.len();
-    info!(
-        "resolve-etm: K={k}, anchor features=[{}], reconstruction RSS={:.4}",
-        res.anchors
-            .iter()
-            .map(|&d| feature_names[d].as_ref())
-            .collect::<Vec<&str>>()
-            .join(", "),
-        res.rss
+    // Robust topic recovery from CELL CLUSTERS, using the Leiden `labels` the
+    // bge driver computed ONCE on this same kept-cell embedding (shared with the
+    // co-embedding's temperature calibration). The previous approach (Arora/SPA
+    // convex-hull anchors on ρ) was outlier-driven: a few extreme features (e.g.
+    // immunoglobulin genes) became the hull vertices, SPA picked them, and the
+    // min-cells guard nuked the rest → K collapsed (BM1 → 2). Each cluster is a
+    // topic:
+    //   α [K,H] = L2-normalized cluster centroid (the topic *direction*),
+    //   θ [N,K] = softmax over clusters of ⟨z_i, α_k⟩  (soft assignment),
+    //   β [D,K] = log_softmax_d(ρ·(α−ᾱ)ᵀ) — a gene scores high in a topic when
+    //             its embedding aligns with that cluster's cell direction.
+    anyhow::ensure!(
+        labels.len() == z.nrows(),
+        "resolve-etm: labels ({}) != kept cells ({})",
+        labels.len(),
+        z.nrows()
     );
+    let k = labels.iter().copied().max().map_or(0, |m| m + 1);
+    anyhow::ensure!(k >= 2, "resolve-etm: clustering produced < 2 topics");
+    let alpha = cluster_centroids(&z, labels, k); // [K, H]
+    let theta = soft_theta(&z, &alpha); // [N, K]
+    let mut sizes = vec![0usize; k];
+    for &l in labels {
+        sizes[l] += 1;
+    }
+    info!("resolve-etm: cluster-seeded K={k}, cluster sizes={sizes:?}");
 
-    // β = log_softmax_d(ρ · (α − ᾱ)ᵀ): [D, K], each topic column a feature
-    // simplex; markers surface as each topic's deviation from the mean anchor.
-    // α here are the anchor-feature embeddings.
-    let beta_dk = topic_dictionary(&rho, &res.alpha);
+    // β = log_softmax_d(ρ · (α − ᾱ)ᵀ): [D, K], each topic column a gene simplex.
+    let beta_dk = topic_dictionary(&rho, &alpha);
     // log θ on the simplex.
-    let log_theta = res.theta.map(|x| (x + 1e-8).ln());
+    let log_theta = theta.map(|x| (x + 1e-8).ln());
 
     let topic_names = axis_id_names("T", k);
     let h_names = axis_id_names("h", h);
@@ -121,21 +106,20 @@ pub(super) fn resolve_etm_topics(
         (Some(feature_names), Some("gene")),
         Some(&topic_names),
     )?;
-    // Resolved topic embeddings α (warm-start for a later `masked-topic` finetune).
-    res.alpha.to_parquet_with_names(
+    // Resolved topic embeddings α = cluster centroids (warm-start for a later
+    // `masked-topic` finetune).
+    alpha.to_parquet_with_names(
         &format!("{out}.topic_embedding.parquet"),
         (Some(&topic_names), Some("topic")),
         Some(&h_names),
     )?;
-    // Raw bge embeddings preserved under non-conflicting names.
+    // Raw bge cell embedding Z preserved (the reference manifold). The
+    // feature side — {out}.feature_embedding.parquet (SIMBA co-embed) and
+    // {out}.feature_embedding_raw.parquet (raw ρ) — is written by the bge
+    // driver before this call, so it is not emitted here.
     z.to_parquet_with_names(
         &format!("{out}.cell_embedding.parquet"),
         (Some(&barcodes), Some("cell")),
-        Some(&h_names),
-    )?;
-    rho.to_parquet_with_names(
-        &format!("{out}.feature_embedding.parquet"),
-        (Some(feature_names), Some("feature")),
         Some(&h_names),
     )?;
     ge::eval::save_bias(
@@ -163,7 +147,61 @@ pub(super) fn resolve_etm_topics(
 
     info!(
         "resolve-etm: wrote topic-model layout (latent=log θ, dictionary=β) + \
-         {{cell,feature}}_embedding.parquet to {out}.*"
+         cell_embedding.parquet to {out}.*"
     );
     Ok(())
+}
+
+/// L2-normalized cluster centroids of `z` `[N,H]` → `α` `[K,H]` (topic
+/// directions). Empty clusters (shouldn't occur) stay zero.
+fn cluster_centroids(z: &Mat, labels: &[usize], k: usize) -> Mat {
+    let (n, h) = (z.nrows(), z.ncols());
+    let mut alpha = Mat::zeros(k, h);
+    let mut counts = vec![0f32; k];
+    for i in 0..n {
+        let l = labels[i];
+        counts[l] += 1.0;
+        for j in 0..h {
+            alpha[(l, j)] += z[(i, j)];
+        }
+    }
+    for l in 0..k {
+        if counts[l] > 0.0 {
+            let mut nrm = 0f32;
+            for j in 0..h {
+                alpha[(l, j)] /= counts[l];
+                nrm += alpha[(l, j)] * alpha[(l, j)];
+            }
+            let nrm = nrm.sqrt().max(1e-8);
+            for j in 0..h {
+                alpha[(l, j)] /= nrm;
+            }
+        }
+    }
+    alpha
+}
+
+/// Soft topic assignment `θ` `[N,K]` = softmax over clusters of `⟨z_i, α_k⟩`
+/// (both rows ~unit, so this is a temperature-1 cosine softmax). Parameter-free.
+fn soft_theta(z: &Mat, alpha: &Mat) -> Mat {
+    let s = z * alpha.transpose(); // [N, K]
+    let (n, k) = (s.nrows(), s.ncols());
+    let mut th = s.clone();
+    for i in 0..n {
+        let mut mx = f32::NEG_INFINITY;
+        for c in 0..k {
+            mx = mx.max(s[(i, c)]);
+        }
+        let mut sum = 0f32;
+        for c in 0..k {
+            let e = (s[(i, c)] - mx).exp();
+            th[(i, c)] = e;
+            sum += e;
+        }
+        let sum = sum.max(1e-8);
+        for c in 0..k {
+            th[(i, c)] /= sum;
+        }
+    }
+    th
 }

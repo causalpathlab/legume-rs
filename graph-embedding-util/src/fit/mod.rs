@@ -424,12 +424,11 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // directly (Poisson MAP, ridge prior) in parallel. The per-cell
     // intercept `b_cell` is fitted and kept. See `crate::cell_projection`.
     let mut cell_nrms: Vec<f32> = Vec::new();
-    let mut cell_embedding_scaled: Vec<f32> = Vec::new();
     if !stop.load(std::sync::atomic::Ordering::Relaxed) {
         info!(
             "Phase 2 — analytical per-cell projection ({n_cells} cells, feature side fixed, ridge λ={PHASE2_RIDGE})"
         );
-        let (nrms, scaled) = project_cells_phase2(
+        cell_nrms = project_cells_phase2(
             &mut cell_model,
             &varmap,
             &cell_samplers,
@@ -437,14 +436,11 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             f64::from(PHASE2_RIDGE),
             &config.device,
         )?;
-        cell_nrms = nrms;
-        cell_embedding_scaled = scaled;
     }
 
     Ok(FitOutput {
         model: cell_model,
         varmap,
         cell_nrms,
-        cell_embedding_scaled,
     })
 }

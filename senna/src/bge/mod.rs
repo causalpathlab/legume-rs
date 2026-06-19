@@ -19,7 +19,7 @@ use graph_embedding_util as ge;
 mod io;
 mod resolve_etm;
 
-use io::{write_cell_embedding_scaled, write_cell_qc, write_feature_qc};
+use io::{write_cell_qc, write_feature_coembedding, write_feature_qc};
 use resolve_etm::resolve_etm_topics;
 
 /// One parsed `--multiome` file entry: `(optional modality label, file path)`.
@@ -766,21 +766,39 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Joint cell–gene biplot side output: the depth-free, gene-co-scaled cell
-    // embedding (same direction as the latent, magnitude gauged onto the
-    // dictionary scale). For overlaying cells on ρ; clustering uses the standard
-    // latent. All cells (join with cell_qc to filter empties).
-    if !out.cell_embedding_scaled.is_empty() {
-        write_cell_embedding_scaled(&out.cell_embedding_scaled, &unified.barcodes, &args.out)?;
-    }
+    // The SIMBA-style co-embedding and the cluster-seeded ETM share ONE Leiden
+    // clustering of the QC-kept cell embedding: the co-embed uses its median
+    // cluster size as the temperature target, ETM uses the labels as topics —
+    // so the embedding is clustered a single time. The co-embed re-embeds every
+    // feature onto the cell manifold (gene = softmax-over-cells weighted average
+    // of cell embeddings) and OVERRIDES {out}.feature_embedding.parquet, with
+    // the raw ρ preserved as {out}.feature_embedding_raw.parquet. Cells are
+    // SIMBA's reference and are unchanged. Post-hoc only — training (pseudobulk
+    // efficiency, phase-2 projection) is untouched.
+    let cpu = candle_core::Device::Cpu;
+    let e_feat_cpu = out.model.e_feat.to_device(&cpu)?; // [D, H] raw ρ
+    let e_cell_cpu = match qc_keep_idx.as_deref() {
+        Some(keep) => {
+            let idx: Vec<u32> = keep.iter().map(|&i| i as u32).collect();
+            let idx_t = candle_core::Tensor::from_vec(idx, keep.len(), &cpu)?;
+            out.model.e_cell.to_device(&cpu)?.index_select(&idx_t, 0)?
+        }
+        None => out.model.e_cell.to_device(&cpu)?,
+    };
+    let (cell_labels, target_eff) = ge::cell_clusters(&e_cell_cpu, args.num_topics)?;
+    write_feature_coembedding(
+        &args.out,
+        &e_cell_cpu,
+        &e_feat_cpu,
+        &unified.feature_names,
+        target_eff,
+    )?;
 
     // Output layout depends on whether ETM was resolved (default on; --skip-etm
     // disables):
     //   skipped  → bge embeddings (latent = cell embedding Z, dictionary = ρ).
     //   resolved → ETM topic-model layout (latent = log θ, dictionary = β); the
-    //         raw embeddings are preserved as {cell,feature}_embedding.parquet so
-    //         a `--from` chain still finds ρ, while `senna plot` / `plot-topic`
-    //         pick up the resolved topics directly.
+    //         co-embedded feature_embedding is written above for both paths.
     let resolve_etm = !args.skip_etm;
     if resolve_etm {
         resolve_etm_topics(
@@ -789,6 +807,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             &unified.barcodes,
             args,
             qc_keep_idx.as_deref(),
+            &cell_labels,
         )?;
     } else {
         ge::save_outputs(
@@ -825,11 +844,11 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         pb_gene_suffix: None,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
-        feature_embedding_suffix: if resolve_etm {
-            Some("feature_embedding.parquet")
-        } else {
-            None
-        },
+        // The SIMBA co-embed is written as feature_embedding.parquet in BOTH
+        // the ETM and --skip-etm paths, so record it unconditionally (else a
+        // skip-etm run's annotate-by-projection falls back to the raw-ρ
+        // dictionary and ignores the co-embed file on disk).
+        feature_embedding_suffix: Some("feature_embedding.parquet"),
         // With ETM resolved `latent` is log θ (topic space); the H-space cell
         // embedding Z is written separately so annotate-by-projection finds it.
         // Without it, `latent` IS Z, so this stays None.

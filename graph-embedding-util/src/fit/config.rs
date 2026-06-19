@@ -257,11 +257,6 @@ pub struct FitOutput {
     /// above. The stored latent (`model.e_cell`) is the L2 *direction*; this
     /// norm is the un-normalized magnitude it was divided by.
     pub cell_nrms: Vec<f32>,
-    /// Depth-free, gene-co-scaled cell embedding `[n_cells × H]` row-major —
-    /// the same direction as the latent but with a depth-normalized magnitude
-    /// gauged onto the gene-dictionary scale. For a joint cell–gene biplot, not
-    /// clustering (empty when phase 2 was skipped). See `project_cells_phase2`.
-    pub cell_embedding_scaled: Vec<f32>,
 }
 
 pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
