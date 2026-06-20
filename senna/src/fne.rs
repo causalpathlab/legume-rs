@@ -559,7 +559,7 @@ fn write_outputs(trained: &TrainedFne, out_prefix: &str) -> anyhow::Result<()> {
 
     // feature_embedding.parquet — [N, H] keyed by feature name.
     let e_host = nalgebra::DMatrix::<f32>::from_tensor(&trained.e_feat)?;
-    let h_cols: Vec<Box<str>> = (0..h).map(|i| format!("h{i}").into_boxed_str()).collect();
+    let h_cols = graph_embedding_util::embedding_col_names(h);
     e_host.to_parquet_with_names(
         &format!("{out_prefix}.feature_embedding.parquet"),
         (Some(&trained.feature_names), Some("gene")),

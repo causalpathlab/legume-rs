@@ -30,7 +30,6 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use log::warn;
 
 use graph_embedding_util::type_annotation::{annotate_embeddings, AnnotateProjConfig};
 use matrix_util::common_io::mkdir_parent;
@@ -155,22 +154,7 @@ pub fn run_gem_annotate(args: &GemAnnotateArgs) -> Result<()> {
     let cell = DMatrix::<f32>::from_parquet(&cell_path)
         .with_context(|| format!("reading cell embedding {cell_path}"))?;
 
-    // Gene-level embedding (β_g) for the `kind=gene` layout overlay. Loaded
-    // only when laying out; failure to read is non-fatal (genes are skipped).
     let want_layout = !args.no_layout;
-    let gene = if want_layout {
-        let gene_path = resolve(&dir, &manifest.gene_embedding);
-        match DMatrix::<f32>::from_parquet(&gene_path) {
-            Ok(g) => Some(g),
-            Err(e) => {
-                warn!("could not read gene embedding {gene_path}: {e}; skipping gene overlay");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let gene_emb = gene.as_ref().map(|g| (&g.mat, g.rows.as_slice()));
 
     let cfg = AnnotateProjConfig {
         n_perm: args.num_perm,
@@ -192,7 +176,6 @@ pub fn run_gem_annotate(args: &GemAnnotateArgs) -> Result<()> {
         &feat.rows,
         &cell.mat,
         &cell.rows,
-        gene_emb,
         &args.markers,
         &format!("{out}.gem_annot"),
         !args.no_idf,

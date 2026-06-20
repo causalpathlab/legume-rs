@@ -601,6 +601,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
             keep_idx: &keep_idx,
             cell_nrms: &cell_nrms,
         },
+        args.num_topics,
     )
     .context("write outputs")?;
 
@@ -640,6 +641,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
                     keep_idx: &keep_idx2,
                     cell_nrms: &cell_nrms2,
                 },
+                args.num_topics,
             )
             .context("write refined outputs")?;
 

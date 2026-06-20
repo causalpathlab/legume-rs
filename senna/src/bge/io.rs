@@ -8,8 +8,9 @@ use graph_embedding_util as ge;
 
 /// Empirical-Bayes null-feature QC on the trained feature embedding `E_feat`
 /// (flat `[n × h]`): logs the fitted null (σ̂², π̂₀, #null) and writes
-/// `{out}.feature_qc.parquet` with each feature's `norm²` and `live` flag. A
-/// diagnostic — it does not (yet) drop features. Shares the call with faba gem.
+/// `{out}.feature_qc.parquet` with each feature's `norm²` and `live` flag, and
+/// returns the `NullCall` (live mask) the bge driver uses for its two-pass
+/// null-feature refine (drop + re-fit when `--feature-null-fdr > 0`).
 pub(super) fn write_feature_qc(
     e_feat: &[f32],
     n: usize,

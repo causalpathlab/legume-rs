@@ -55,7 +55,6 @@ fn writes_membership_tsv() {
         &gene_names,
         &cell_emb,
         &cell_names,
-        None,
         markers_path.to_str().unwrap(),
         prefix,
         true,

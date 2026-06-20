@@ -6,8 +6,7 @@ use anyhow::{Context, Result};
 use log::info;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::knn_graph::{self, KnnGraph};
-use matrix_util::knn_match::ColumnDict;
-use matrix_util::layout::{phate_layout_2d, project_cells_nystrom, project_via_knn, PhateArgs};
+use matrix_util::layout::{phate_layout_2d, project_cells_nystrom, PhateArgs};
 use matrix_util::parquet::{write_named_table, Column};
 use matrix_util::umap::Umap;
 use rand::rngs::SmallRng;
@@ -166,56 +165,26 @@ fn mat_rows_to_flat(m: &DMatrix<f32>) -> Vec<f32> {
 // Layout + feature-placement outputs (part ii)
 //////////////////////////////
 
-/// Subtract `mu` from each row of a `[m×h]` matrix, then L2-normalize, into a
-/// row-major `Vec<f32>`. Centering removes the embedding's dominant common-mode
-/// direction (a single shared component that can dominate cosine in low-H gem
-/// runs); without it the feature→cell cosine kNN collapses every feature onto
-/// the central, highest-common-mode cells instead of its lineage's cells.
-fn centered_normalized(m: &DMatrix<f32>, mu: &[f32]) -> Vec<f32> {
-    let (r, c) = (m.nrows(), m.ncols());
-    let mut v = vec![0f32; r * c];
-    v.par_chunks_mut(c.max(1)).enumerate().for_each(|(i, row)| {
-        let mut s = 0f32;
-        for (j, slot) in row.iter_mut().enumerate() {
-            let x = m[(i, j)] - mu[j];
-            *slot = x;
-            s += x * x;
-        }
-        let nrm = s.sqrt();
-        if nrm > 1e-8 {
-            for x in row.iter_mut() {
-                *x /= nrm;
-            }
-        }
-    });
-    v
-}
-
-/// As [`centered_normalized`] but for an already-flat row-major `[rows×h]`
-/// source (e.g. the unit signature anchors `type_emb_ch` / `coarse_emb_kh`).
-fn centered_normalized_flat(src: &[f32], rows: usize, h: usize, mu: &[f32]) -> Vec<f32> {
-    let mut v = vec![0f32; rows * h];
-    v.par_chunks_mut(h.max(1)).enumerate().for_each(|(i, row)| {
-        let mut s = 0f32;
-        for (j, slot) in row.iter_mut().enumerate() {
-            let x = src[i * h + j] - mu[j];
-            *slot = x;
-            s += x * x;
-        }
-        let nrm = s.sqrt();
-        if nrm > 1e-8 {
-            for x in row.iter_mut() {
-                *x /= nrm;
-            }
-        }
-    });
-    v
-}
-
 /// `[n×2]` row-major flat → nalgebra `DMatrix` (for use as Nyström/kNN
 /// landmark coords).
 fn flat_to_coords(flat: &[f32], n: usize) -> DMatrix<f32> {
     DMatrix::<f32>::from_fn(n, 2, |i, j| flat[i * 2 + j])
+}
+
+/// Cap on landmark cells for the Nyström feature placement. Exact when the QC'd
+/// cell count is ≤ this; above it, landmarks are subsampled (deterministic
+/// stride) so the dense `O(m · n_land · h)` projection stays bounded on very
+/// large runs. 16384 keeps every current rep/BM-scale run exact.
+const FEAT_LANDMARK_CAP: usize = 16_384;
+
+/// L2-normalize each column in place (→ unit vectors; near-zero columns left as
+/// ~0). Makes the Nyström Euclidean kernel rank landmarks/queries by direction
+/// (cosine) rather than by magnitude.
+fn l2_normalize_columns(mat: &mut DMatrix<f32>) {
+    for mut col in mat.column_iter_mut() {
+        let nrm = col.norm().max(1e-12);
+        col /= nrm;
+    }
 }
 
 /// Write `{prefix}.cell_coords.parquet` (per-cell UMAP/PHATE + community) and
@@ -230,7 +199,8 @@ pub(super) fn write_layout_outputs(
     h: usize,
     feature_emb: &DMatrix<f32>,
     gene_names: &[Box<str>],
-    gene_emb: Option<(&DMatrix<f32>, &[Box<str>])>,
+    type_co: &DMatrix<f32>,
+    coarse_co: &DMatrix<f32>,
     type_names: &[Box<str>],
     res: &AnnotateProjOutputs,
     cfg: &AnnotateProjConfig,
@@ -265,35 +235,40 @@ pub(super) fn write_layout_outputs(
     .with_context(|| format!("writing {cc_path}"))?;
     info!("wrote {cc_path}");
 
-    // ---- feature placement via feature→cell kNN ----
-    // Global mean cell vector — subtracted from cells AND features before the
-    // cosine kNN to strip the common-mode cone (otherwise every feature's
-    // nearest cells collapse onto the central cluster; see `centered_normalized`).
-    let mut mu = vec![0f64; h];
-    for c in 0..n {
-        for (j, m) in mu.iter_mut().enumerate() {
-            *m += cell_flat[c * h + j] as f64;
-        }
-    }
-    let mu: Vec<f32> = mu.iter().map(|&x| (x / n.max(1) as f64) as f32).collect();
-
-    // Index centered+normalized cells once; both layouts share it (cosine via
-    // L2 + DistL2).
-    let cell_cols = DMatrix::<f32>::from_fn(h, n, |r, c| cell_flat[c * h + r] - mu[r]);
-    let cell_cols = {
-        let mut m = cell_cols;
-        for mut col in m.column_iter_mut() {
-            let nrm = col.norm().max(1e-8);
-            col /= nrm;
-        }
-        m
+    // ---- feature + anchor placement: FIRM (follows the co-embedding) ----
+    // Each feature/anchor set is already co-embedded onto the cell manifold
+    // (genes via `feature_embedding`, type/coarse anchors via the returned
+    // co-embed locations). Nyström-project each through the cell layout, using
+    // the cells as landmarks (their 2D coords are known) — so a feature lands at
+    // the weighted 2D position of its nearest cells.
+    //
+    // Geometry: landmark cells AND query rows are L2-normalized, so the Nyström
+    // Euclidean kernel ranks by DIRECTION (cosine), not by the co-embed rows'
+    // sub-unit norm (which would otherwise pull diffuse features toward dense
+    // cells). NO common-mode centering — the co-embed already put each row on the
+    // manifold, and centering is exactly what collapsed the raw anchors to one
+    // spot. For very large N the landmarks are subsampled to FEAT_LANDMARK_CAP
+    // (deterministic stride) so the dense `O(m · n_land · h)` projection stays
+    // bounded; exact when N ≤ cap (every current rep/BM-scale run).
+    let land_idx: Vec<usize> = if n > FEAT_LANDMARK_CAP {
+        let stride = n.div_ceil(FEAT_LANDMARK_CAP);
+        (0..n).step_by(stride).collect()
+    } else {
+        (0..n).collect()
     };
-    let dict = ColumnDict::<usize>::from_dmatrix(cell_cols, (0..n).collect());
+    let n_land = land_idx.len();
+    let mut cell_cols = DMatrix::<f32>::from_fn(h, n_land, |r, c| cell_flat[land_idx[c] * h + r]);
+    l2_normalize_columns(&mut cell_cols);
+    let sub_coords = |flat: &[f32]| -> DMatrix<f32> {
+        let sub: Vec<f32> = land_idx
+            .iter()
+            .flat_map(|&c| [flat[c * 2], flat[c * 2 + 1]])
+            .collect();
+        flat_to_coords(&sub, n_land)
+    };
+    let umap_coords = sub_coords(umap);
+    let phate_coords = res.cell_phate.as_ref().map(|p| sub_coords(p.as_slice()));
 
-    let umap_coords = flat_to_coords(umap, n);
-    let phate_coords = res.cell_phate.as_ref().map(|p| flat_to_coords(p, n));
-
-    // Accumulate (name, kind, u1, u2, p1, p2) across all feature sets.
     let mut names: Vec<Box<str>> = Vec::new();
     let mut kinds: Vec<Box<str>> = Vec::new();
     let mut u1: Vec<f32> = Vec::new();
@@ -301,25 +276,18 @@ pub(super) fn write_layout_outputs(
     let mut p1: Vec<f32> = Vec::new();
     let mut p2: Vec<f32> = Vec::new();
 
-    // Project a feature set given its row-major centered+normalized `[m×h]`.
-    let place = |feat_flat: &[f32],
-                 m: usize,
-                 feat_names: &[Box<str>],
-                 kind: &str,
-                 names: &mut Vec<Box<str>>,
-                 kinds: &mut Vec<Box<str>>,
-                 u1: &mut Vec<f32>,
-                 u2: &mut Vec<f32>,
-                 p1: &mut Vec<f32>,
-                 p2: &mut Vec<f32>| {
+    // Project a co-embed feature set `[m × h]` (rows already on the cell manifold).
+    let mut place = |feat: &DMatrix<f32>, feat_names: &[Box<str>], kind: &str| {
+        let m = feat.nrows();
         if m == 0 {
             return;
         }
-        let q = DMatrix::<f32>::from_fn(h, m, |r, c| feat_flat[c * h + r]);
-        let uc = project_via_knn(&q, &dict, &umap_coords, cfg.feat_knn, FEAT_PROJ_ALPHA);
+        let mut q = DMatrix::<f32>::from_fn(h, m, |r, c| feat[(c, r)]); // [h × m]
+        l2_normalize_columns(&mut q); // cosine geometry vs the unit-norm landmarks
+        let uc = project_cells_nystrom(&q, &cell_cols, &umap_coords, cfg.feat_knn, FEAT_PROJ_ALPHA);
         let pc = phate_coords
             .as_ref()
-            .map(|pco| project_via_knn(&q, &dict, pco, cfg.feat_knn, FEAT_PROJ_ALPHA));
+            .map(|pco| project_cells_nystrom(&q, &cell_cols, pco, cfg.feat_knn, FEAT_PROJ_ALPHA));
         for i in 0..m {
             names.push(feat_names[i].clone());
             kinds.push(Box::from(kind));
@@ -338,72 +306,9 @@ pub(super) fn write_layout_outputs(
         }
     };
 
-    // All feature sets are centered by `mu` and L2-normalized before kNN, the
-    // same transform applied to the indexed cells.
-    // genes (β_g)
-    if let Some((ge, gn)) = gene_emb {
-        let flat = centered_normalized(ge, &mu);
-        place(
-            &flat,
-            ge.nrows(),
-            gn,
-            "gene",
-            &mut names,
-            &mut kinds,
-            &mut u1,
-            &mut u2,
-            &mut p1,
-            &mut p2,
-        );
-    }
-    // full features (gene/modality/region)
-    {
-        let flat = centered_normalized(feature_emb, &mu);
-        place(
-            &flat,
-            feature_emb.nrows(),
-            gene_names,
-            "feature",
-            &mut names,
-            &mut kinds,
-            &mut u1,
-            &mut u2,
-            &mut p1,
-            &mut p2,
-        );
-    }
-    // fine type anchors (unit signatures → re-centered + re-normalized)
-    {
-        let flat = centered_normalized_flat(&res.type_emb_ch, type_names.len(), h, &mu);
-        place(
-            &flat,
-            type_names.len(),
-            type_names,
-            "type_anchor",
-            &mut names,
-            &mut kinds,
-            &mut u1,
-            &mut u2,
-            &mut p1,
-            &mut p2,
-        );
-    }
-    // coarse anchors
-    {
-        let flat = centered_normalized_flat(&res.coarse_emb_kh, res.coarse_names.len(), h, &mu);
-        place(
-            &flat,
-            res.coarse_names.len(),
-            &res.coarse_names,
-            "coarse_anchor",
-            &mut names,
-            &mut kinds,
-            &mut u1,
-            &mut u2,
-            &mut p1,
-            &mut p2,
-        );
-    }
+    place(feature_emb, gene_names, "feature"); // co-embed genes
+    place(type_co, type_names, "type_anchor"); // co-embed fine-type locations
+    place(coarse_co, &res.coarse_names, "coarse_anchor"); // co-embed coarse locations
 
     let fc_path = format!("{out_prefix}.feature_coords.parquet");
     write_named_table(

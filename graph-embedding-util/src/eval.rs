@@ -63,7 +63,13 @@ pub fn save_outputs(
     Ok(())
 }
 
-fn h_cols(h: usize) -> Vec<Box<str>> {
+/// Canonical embedding-coordinate column names `h0..h{H-1}` — the single
+/// convention shared by every embedding writer (senna `save_embedding`,
+/// `faba gem`, `pinto cage`, `annotate-by-projection`). One source of truth so
+/// the `{out}.*_embedding.parquet` column schema never drifts (`h` vs `dim_` vs
+/// `e`). Embedding columns are always read positionally, so the name is purely
+/// for human/schema legibility — but it must be consistent across tools.
+pub fn embedding_col_names(h: usize) -> Vec<Box<str>> {
     (0..h).map(|i| format!("h{i}").into_boxed_str()).collect()
 }
 
@@ -78,7 +84,7 @@ pub fn save_embedding(
     row_axis: &str,
 ) -> anyhow::Result<()> {
     let h = table.dim(1)?;
-    let cols = h_cols(h);
+    let cols = embedding_col_names(h);
     table.to_parquet_with_names(path, (Some(row_names), Some(row_axis)), Some(&cols))?;
     Ok(())
 }

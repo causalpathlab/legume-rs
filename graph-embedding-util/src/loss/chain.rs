@@ -18,7 +18,7 @@
 
 use crate::feature_network::{select_feat_emb, FeatureNetworkSmoother};
 use crate::loss::cell::{LevelSiblingPool, PerBatchCellSampler};
-use crate::loss::log_sigmoid;
+use crate::loss::logistic_nce;
 use crate::model::JointEmbedModel;
 use candle_util::candle_core::{Device, Result, Tensor};
 use rand::{Rng, RngExt};
@@ -233,7 +233,6 @@ pub fn cell_cell_nce_loss_per_level_gated(
 
     let pos_score =
         JointEmbedModel::score_cellcell_gated(&e_gene_b, &e_left, &e_right, &b_left, &b_right)?;
-    let pos_term = log_sigmoid(&pos_score)?;
 
     let mut per_level: Vec<Tensor> = Vec::with_capacity(l);
     for lvl_neg in batch.per_level_neg {
@@ -244,7 +243,7 @@ pub fn cell_cell_nce_loss_per_level_gated(
         let b_neg = b_neg_flat.reshape((b, k))?;
         let neg_score =
             JointEmbedModel::score_cellcell_gated_neg(&e_gene_b, &e_left, &e_neg, &b_left, &b_neg)?;
-        let per_edge = (pos_term.clone() + log_sigmoid(&neg_score.neg()?)?.sum(1)?)?.neg()?;
+        let per_edge = logistic_nce(&pos_score, std::slice::from_ref(&neg_score))?;
         per_level.push(per_edge.mean(0)?);
     }
     Tensor::stack(&per_level, 0)
@@ -342,7 +341,6 @@ pub fn cell_cell_nce_loss_per_level_batched_gated(
             &b_left,
             &b_right,
         )?;
-        let pos_term = log_sigmoid(&pos_score)?;
         let neg_idx = Tensor::from_vec(lvl_neg, total_neg, dev)?;
         let e_neg_flat = model.e_cell.index_select(&neg_idx, 0)?;
         let b_neg_flat = model.b_cell.index_select(&neg_idx, 0)?;
@@ -356,7 +354,7 @@ pub fn cell_cell_nce_loss_per_level_batched_gated(
             &b_left,
             &b_neg,
         )?;
-        let per_edge = (pos_term + log_sigmoid(&neg_score.neg()?)?.sum(1)?)?.neg()?;
+        let per_edge = logistic_nce(&pos_score, std::slice::from_ref(&neg_score))?;
         let per_edge_gb = per_edge.reshape((g, b))?;
         let per_gene = per_edge_gb.mean(1)?; // [G]
         per_gene_per_level.push(per_gene);

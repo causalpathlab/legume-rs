@@ -179,21 +179,18 @@ pub struct AnnotateProjOutputs {
 /// * `feature_emb` `[G × H]`, `gene_names` len `G` (the full feature rows the
 ///   markers match against; also projected onto the layout as `kind=feature`).
 /// * `cell_emb` `[N × H]`, `cell_names` len `N`.
-/// * `gene_emb` — optional gene-level embedding `([n_genes × H], names)` (β_g);
-///   projected onto the layout as `kind=gene`. When `None`, only full features
-///   and type anchors are placed.
 /// * `out_prefix` — full prefix incl. tool infix, e.g. `…/run.gem_annot`.
 ///
 /// When `cfg.layout`, also writes `{out_prefix}.cell_coords.parquet` (UMAP +
-/// PHATE per cell) and `{out_prefix}.feature_coords.parquet` (genes, full
-/// features, and type anchors placed on both layouts via feature→cell kNN).
+/// PHATE per cell) and `{out_prefix}.feature_coords.parquet` (full features and
+/// type/coarse anchors placed on both layouts by Nyström-projecting their
+/// co-embed positions through the cell layout).
 #[allow(clippy::too_many_arguments)]
 pub fn annotate_embeddings(
     feature_emb: &DMatrix<f32>,
     gene_names: &[Box<str>],
     cell_emb: &DMatrix<f32>,
     cell_names: &[Box<str>],
-    gene_emb: Option<(&DMatrix<f32>, &[Box<str>])>,
     markers_path: &str,
     out_prefix: &str,
     use_idf: bool,
@@ -256,10 +253,13 @@ pub fn annotate_embeddings(
 
     // Co-embed the cell-type signatures onto the cell manifold (same SIMBA
     // softmax-over-cells transform as the genes), so each type lands where its
-    // cells are — the {type,coarse}_embedding outputs.
-    write_type_coembeddings(out_prefix, cell_emb, &type_names, h, &res)?;
+    // cells are — the {type,coarse}_embedding outputs. The returned co-embed
+    // locations are reused by the layout so anchors land FIRMLY on the manifold.
+    let (type_co, coarse_co) = write_type_coembeddings(out_prefix, cell_emb, &type_names, h, &res)?;
 
-    // Layout coordinates + feature placement (part ii).
+    // Layout coordinates + feature placement (part ii). Features + anchors are
+    // placed by Nyström-projecting their co-embed positions through the cell
+    // layout (no centering hack), so each lands on its matching cell cluster.
     if cfg.layout && res.cell_umap.is_some() {
         write_layout_outputs(
             out_prefix,
@@ -269,7 +269,8 @@ pub fn annotate_embeddings(
             h,
             feature_emb,
             gene_names,
-            gene_emb,
+            &type_co,
+            &coarse_co,
             &type_names,
             &res,
             cfg,
@@ -752,8 +753,9 @@ fn write_marker_embeddings(
     let mut columns: Vec<(Box<str>, Column)> = Vec::with_capacity(h + 2);
     columns.push((Box::from("type"), Column::Str(&types)));
     columns.push((Box::from("weight"), Column::F32(&weights)));
-    for (c, col) in h_cols.iter().enumerate() {
-        columns.push((format!("h{c}").into_boxed_str(), Column::F32(col)));
+    let h_names = crate::embedding_col_names(h);
+    for (col, name) in h_cols.iter().zip(h_names) {
+        columns.push((name, Column::F32(col)));
     }
     let path = format!("{out_prefix}.marker_embedding.parquet");
     write_named_table(&path, "gene", &genes, &columns)?;
@@ -765,13 +767,16 @@ fn write_marker_embeddings(
 /// coarse) onto the cell manifold via the SIMBA softmax-over-cells transform —
 /// the same operator used for genes in `senna bge` — so each type lands at the
 /// weighted centroid of *its* cells. Writes `{out}.{type,coarse}_embedding.parquet`.
+/// Returns the co-embed locations `(type [C×H], coarse [K×H])` so the layout can
+/// place the anchors *firmly* on the cell manifold (Nyström through the cell
+/// layout) instead of re-centering raw centroids.
 fn write_type_coembeddings(
     out_prefix: &str,
     cell_emb: &DMatrix<f32>,
     type_names: &[Box<str>],
     h: usize,
     res: &AnnotateProjOutputs,
-) -> Result<()> {
+) -> Result<(DMatrix<f32>, DMatrix<f32>)> {
     use candle_util::candle_core::{Device, Tensor};
     use matrix_util::traits::ConvertMatOps;
     let cpu = Device::Cpu;
@@ -779,27 +784,25 @@ fn write_type_coembeddings(
                                             // Same eff-cells temperature target as the gene co-embed (median cell-cluster
                                             // size), so types and genes land on a comparable scale.
     let (_labels, target_eff) = crate::postprocess::cell_clusters(&cell_t, None)?;
-    let dim_names: Vec<Box<str>> = (0..h)
-        .map(|j| format!("dim_{j}").into_boxed_str())
-        .collect();
-    let place = |sig: &[f32], names: &[Box<str>], suffix: &str| -> Result<()> {
+    let col_names = crate::embedding_col_names(h);
+    let place = |sig: &[f32], names: &[Box<str>], suffix: &str| -> Result<DMatrix<f32>> {
         let rows = names.len();
         if rows == 0 {
-            return Ok(());
+            return Ok(DMatrix::<f32>::zeros(0, h));
         }
         let sig_t = Tensor::from_vec(sig.to_vec(), (rows, h), &cpu)?;
         let (co, _t) = crate::postprocess::feature_coembedding(&cell_t, &sig_t, target_eff)?;
         let flat: Vec<f32> = co.to_vec2::<f32>()?.into_iter().flatten().collect();
+        let mat = DMatrix::<f32>::from_row_iterator(rows, h, flat);
         let path = format!("{out_prefix}.{suffix}.parquet");
-        DMatrix::<f32>::from_row_iterator(rows, h, flat)
-            .to_parquet_with_names(&path, (Some(names), Some("cell_type")), Some(&dim_names))
+        mat.to_parquet_with_names(&path, (Some(names), Some("cell_type")), Some(&col_names))
             .with_context(|| format!("writing {path}"))?;
         info!("wrote {path} ({rows} types co-embedded onto the cell manifold)");
-        Ok(())
+        Ok(mat)
     };
-    place(&res.type_emb_ch, type_names, "type_embedding")?;
-    place(&res.coarse_emb_kh, &res.coarse_names, "coarse_embedding")?;
-    Ok(())
+    let type_co = place(&res.type_emb_ch, type_names, "type_embedding")?;
+    let coarse_co = place(&res.coarse_emb_kh, &res.coarse_names, "coarse_embedding")?;
+    Ok((type_co, coarse_co))
 }
 
 /// `[C × H]` L2-normalized weighted centroid of each type's marker feature
