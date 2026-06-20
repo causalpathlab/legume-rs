@@ -56,7 +56,10 @@ pub fn longest_common_underscore_suffix(names: &[Box<str>]) -> Box<str> {
 /// The match is `_`-bounded: a candidate `rep1_wt` matches
 /// `rep1_wt_m6a_mixture` (because the char after the prefix is `_`) but
 /// does NOT match `rep1_wtX_...`. Returns `None` when no candidate aligns.
-fn longest_underscore_prefix_in(name: &str, candidates: &FxHashSet<Box<str>>) -> Option<Box<str>> {
+pub fn longest_underscore_prefix_in(
+    name: &str,
+    candidates: &FxHashSet<Box<str>>,
+) -> Option<Box<str>> {
     let mut best: Option<&str> = None;
     for sid in candidates.iter() {
         let s = sid.as_ref();
