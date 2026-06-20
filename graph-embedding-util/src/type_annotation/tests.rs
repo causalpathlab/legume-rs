@@ -109,7 +109,7 @@ fn layout_produces_finite_separated_coords() {
     let h = 4;
     let per = 25;
     let n = 2 * per; // 50 cells, ≤ phate_max_direct → direct PHATE
-    // Group A points ~ +e0, group B ~ +e1, with small deterministic jitter.
+                     // Group A points ~ +e0, group B ~ +e1, with small deterministic jitter.
     let mut cell = vec![0f32; n * h];
     for c in 0..n {
         let g = c / per; // 0 or 1
@@ -133,9 +133,8 @@ fn layout_produces_finite_separated_coords() {
         knn: 10,
         ..AnnotateProjConfig::default()
     };
-    let res =
-        annotate_by_projection(&feat, n_feat, &cell, n, &type_markers, &type_names, h, &cfg)
-            .expect("annotate_by_projection");
+    let res = annotate_by_projection(&feat, n_feat, &cell, n, &type_markers, &type_names, h, &cfg)
+        .expect("annotate_by_projection");
 
     let umap = res.cell_umap.expect("umap present");
     let phate = res.cell_phate.expect("phate present");
@@ -149,8 +148,16 @@ fn layout_produces_finite_separated_coords() {
         let mean = (0..n).map(|c| coords[c * 2]).sum::<f32>() / n as f32;
         (0..n).map(|c| (coords[c * 2] - mean).powi(2)).sum::<f32>() / n as f32
     };
-    assert!(var_x(&umap) > 1e-6, "UMAP degenerate (var_x={:.3e})", var_x(&umap));
-    assert!(var_x(&phate) > 1e-9, "PHATE degenerate (var_x={:.3e})", var_x(&phate));
+    assert!(
+        var_x(&umap) > 1e-6,
+        "UMAP degenerate (var_x={:.3e})",
+        var_x(&umap)
+    );
+    assert!(
+        var_x(&phate) > 1e-9,
+        "PHATE degenerate (var_x={:.3e})",
+        var_x(&phate)
+    );
 
     // The two groups' UMAP centroids are at least distinct.
     let centroid = |lo: usize, hi: usize| {
@@ -165,5 +172,8 @@ fn layout_produces_finite_separated_coords() {
     let (ax, ay) = centroid(0, per);
     let (bx, by) = centroid(per, n);
     let between = ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt();
-    assert!(between > 1e-2, "UMAP group centroids coincide: {between:.4}");
+    assert!(
+        between > 1e-2,
+        "UMAP group centroids coincide: {between:.4}"
+    );
 }
