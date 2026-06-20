@@ -346,16 +346,20 @@ Example:\n  \
         name = "gem-summary",
         aliases = ["summary"],
         about = "Per-modality gene × cell-type summary from annotation labels",
-        long_about = "Group any count matrix by cell type and report per-feature\n\
+        long_about = "Group a count matrix by cell type and report per-feature\n\
             statistics — the tidy \"gene × cell-type, per modality\" summary.\n\n\
             Decoupled from `faba gem-annotate`: annotate once, then summarize\n\
             cheaply and repeatedly across measures (m6a_ratio, m6a_mixture,\n\
             converted, genes, atoi_ratio, …) against the SAME labels. Labels\n\
             come from a gem-annotate `*.annot.parquet` or any 2-column\n\
             `cell<TAB>label` TSV (so labels from any tool work).\n\n\
-            Each --matrix flag is one output `summary_{label}.parquet`, long\n\
-            format `(name, group, nnz, tot, mu, sig)` where `name =\n\
-            {gene}/{modality}/{detail}` and `group` is the cell-type label.\n\
+            Data files are positional, like `data-beans stat`; multiple files\n\
+            stack into one matrix (e.g. replicates). Run once per measure (with\n\
+            a different -o). The output `{out}.summary.parquet` is long format\n\
+            `(gene, modality, component, group, nnz, tot, mu, sig)`: it splits\n\
+            each `{gene}/{modality}/{detail}` row name\n\
+            into gene/modality/component columns — the modality-aware tidy table\n\
+            you can pivot/filter by modality (what `data-beans stat` can't do).\n\
             `mu` is the mean over all cells in the group (incl. uncovered\n\
             zeros); `tot/nnz` is the mean over covered cells — for a ratio\n\
             matrix that distinction matters. Reuses the same grouped-row path\n\
@@ -364,16 +368,17 @@ Example:\n  \
             `faba gem` run), each matrix file's barcodes are tagged the same\n\
             way (per-file `@sample` id, the `faba gem` convention) so pooled\n\
             replicates match EXACTLY — not by ambiguous bare barcode. The\n\
-            strip is auto-derived from a flag's files (their common `_`-suffix);\n\
-            for single-file flags pass `--sample-strip` (e.g. `_m6a_ratio`).",
+            strip is auto-derived from the files (their common `_`-suffix); for\n\
+            a single file pass `--sample-strip` (e.g. `_m6a_ratio`).",
         after_long_help = "\
 Example:\n  \
-  # ratio (activity) + mixture (component counts) + genes, in one call\n  \
+  # one measure (m6A ratio), two replicates stacked\n  \
   faba gem-summary -l out/gem.gem_annot.annot.parquet \\\n    \
-      --matrix out/rep1_m6a_ratio.zarr.zip,out/rep2_m6a_ratio.zarr.zip \\\n    \
-      --matrix m6a_mix=out/rep1_m6a_mixture.zarr.zip \\\n    \
-      --matrix out/rep1_genes.zarr.zip -o out/celltype\n\n\
-  # equivalently, hand the membership file to data-beans for one measure:\n  \
+      out/rep1_m6a_ratio.zarr.zip out/rep2_m6a_ratio.zarr.zip -o out/celltype\n\n\
+  # another measure → run again (mixture component counts)\n  \
+  faba gem-summary -l out/gem.gem_annot.annot.parquet \\\n    \
+      out/rep1_m6a_mixture.zarr.zip -o out/celltype\n\n\
+  # single-sample: data-beans stat does the same (no modality split)\n  \
   data-beans stat -s row -g out/gem.gem_annot.membership.tsv --delimiter @ \\\n    \
       -o out/m6a_ratio_by_celltype.parquet out/rep1_m6a_ratio.zarr.zip"
     )]

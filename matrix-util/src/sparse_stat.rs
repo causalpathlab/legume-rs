@@ -499,11 +499,22 @@ pub fn save_grouped_stats_parquet(
     group_names: &[Box<str>],
     group_stats: &[SparseRunningStatistics<f32>],
 ) -> anyhow::Result<()> {
-    use parquet::basic::{Compression, ZstdLevel};
-    use parquet::file::properties::WriterProperties;
-    use parquet::file::writer::SerializedFileWriter;
-    use parquet::schema::types::Type as SchemaType;
-    use std::sync::Arc;
+    save_grouped_stats_parquet_cols(filename, &[("name", names)], group_names, group_stats)
+}
+
+/// Like [`save_grouped_stats_parquet`] but with arbitrary leading **string key
+/// columns** instead of the single `name` — e.g. split a `gene/modality/detail`
+/// feature name into `gene` / `modality` / `component` columns. Each
+/// `key_cols[j].1` is a per-feature vector aligned to the stats' row order
+/// (length must equal the feature-row count); the output is long format, one row
+/// per (feature, group): `<key cols…>, group, nnz, tot, mu, sig`.
+pub fn save_grouped_stats_parquet_cols(
+    filename: &str,
+    key_cols: &[(&str, &[Box<str>])],
+    group_names: &[Box<str>],
+    group_stats: &[SparseRunningStatistics<f32>],
+) -> anyhow::Result<()> {
+    use crate::parquet::{write_named_table, Column};
 
     if group_names.len() != group_stats.len() {
         anyhow::bail!(
@@ -512,94 +523,59 @@ pub fn save_grouped_stats_parquet(
             group_stats.len()
         );
     }
+    anyhow::ensure!(
+        !key_cols.is_empty(),
+        "save_grouped_stats_parquet_cols: need at least one key column"
+    );
+    let n_features = group_stats.first().map_or(0, |s| s.nrows());
+    for &(name, vals) in key_cols {
+        anyhow::ensure!(
+            vals.len() == n_features,
+            "key column '{name}' has {} entries but there are {n_features} feature rows",
+            vals.len(),
+        );
+    }
 
-    // Calculate total rows
-    let total_rows: usize = group_stats.iter().map(|s| s.nrows()).sum();
-
-    // Build merged vectors
-    let mut all_names: Vec<Box<str>> = Vec::with_capacity(total_rows);
+    // Expand to long format (one row per (feature, group)): each key column is its
+    // per-feature vector repeated for every group; `group` + stats vary per row.
+    // (`vec![Vec::with_capacity(..); n]` would clone the empty Vec, losing the
+    // reservation on every column but the first — reserve per column instead.)
+    let total_rows = n_features * group_names.len();
+    let mut keys: Vec<Vec<Box<str>>> = (0..key_cols.len())
+        .map(|_| Vec::with_capacity(total_rows))
+        .collect();
     let mut all_groups: Vec<Box<str>> = Vec::with_capacity(total_rows);
     let mut all_nnz: Vec<f32> = Vec::with_capacity(total_rows);
     let mut all_tot: Vec<f32> = Vec::with_capacity(total_rows);
     let mut all_mu: Vec<f32> = Vec::with_capacity(total_rows);
     let mut all_sig: Vec<f32> = Vec::with_capacity(total_rows);
-
     for (group_name, stat) in group_names.iter().zip(group_stats.iter()) {
         let (nnz, tot, mu, sig) = stat.to_f32_vecs();
-        for (i, name) in names.iter().enumerate() {
-            all_names.push(name.clone());
-            all_groups.push(group_name.clone());
-            all_nnz.push(nnz[i]);
-            all_tot.push(tot[i]);
-            all_mu.push(mu[i]);
-            all_sig.push(sig[i]);
+        // Append each column for this group in bulk (one block of `n_features`).
+        for (j, &(_, vals)) in key_cols.iter().enumerate() {
+            keys[j].extend(vals.iter().cloned());
         }
+        all_groups.resize(all_groups.len() + n_features, group_name.clone());
+        all_nnz.extend_from_slice(&nnz);
+        all_tot.extend_from_slice(&tot);
+        all_mu.extend_from_slice(&mu);
+        all_sig.extend_from_slice(&sig);
     }
 
-    // Build schema: name, group, nnz, tot, mu, sig
-    let fields = vec![
-        Arc::new(
-            SchemaType::primitive_type_builder("name", ParquetType::BYTE_ARRAY)
-                .with_repetition(parquet::basic::Repetition::REQUIRED)
-                .with_converted_type(parquet::basic::ConvertedType::UTF8)
-                .build()?,
-        ),
-        Arc::new(
-            SchemaType::primitive_type_builder("group", ParquetType::BYTE_ARRAY)
-                .with_repetition(parquet::basic::Repetition::REQUIRED)
-                .with_converted_type(parquet::basic::ConvertedType::UTF8)
-                .build()?,
-        ),
-        Arc::new(
-            SchemaType::primitive_type_builder("nnz", ParquetType::FLOAT)
-                .with_repetition(parquet::basic::Repetition::REQUIRED)
-                .build()?,
-        ),
-        Arc::new(
-            SchemaType::primitive_type_builder("tot", ParquetType::FLOAT)
-                .with_repetition(parquet::basic::Repetition::REQUIRED)
-                .build()?,
-        ),
-        Arc::new(
-            SchemaType::primitive_type_builder("mu", ParquetType::FLOAT)
-                .with_repetition(parquet::basic::Repetition::REQUIRED)
-                .build()?,
-        ),
-        Arc::new(
-            SchemaType::primitive_type_builder("sig", ParquetType::FLOAT)
-                .with_repetition(parquet::basic::Repetition::REQUIRED)
-                .build()?,
-        ),
-    ];
+    // First key column is the leading row column; remaining key columns, then
+    // `group` and the four stats, follow. Delegate schema + writing to the shared
+    // tidy-table writer instead of hand-rolling it.
+    let mut columns: Vec<(Box<str>, Column)> = Vec::with_capacity(key_cols.len() + 4);
+    for (&(name, _), col) in key_cols.iter().zip(keys.iter()).skip(1) {
+        columns.push((name.into(), Column::Str(col.as_slice())));
+    }
+    columns.push(("group".into(), Column::Str(all_groups.as_slice())));
+    columns.push(("nnz".into(), Column::F32(all_nnz.as_slice())));
+    columns.push(("tot".into(), Column::F32(all_tot.as_slice())));
+    columns.push(("mu".into(), Column::F32(all_mu.as_slice())));
+    columns.push(("sig".into(), Column::F32(all_sig.as_slice())));
 
-    let schema = Arc::new(
-        SchemaType::group_type_builder("grouped_stats")
-            .with_fields(fields)
-            .build()?,
-    );
-
-    let zstd_level = ZstdLevel::try_new(5)?;
-    let props = Arc::new(
-        WriterProperties::builder()
-            .set_compression(Compression::ZSTD(zstd_level))
-            .build(),
-    );
-
-    let file = std::fs::File::create(filename)?;
-    let mut writer = SerializedFileWriter::new(file, schema, props)?;
-    let mut row_group_writer = writer.next_row_group()?;
-
-    parquet_add_string_column(&mut row_group_writer, &all_names)?;
-    parquet_add_string_column(&mut row_group_writer, &all_groups)?;
-    parquet_add_numeric_column(&mut row_group_writer, &all_nnz)?;
-    parquet_add_numeric_column(&mut row_group_writer, &all_tot)?;
-    parquet_add_numeric_column(&mut row_group_writer, &all_mu)?;
-    parquet_add_numeric_column(&mut row_group_writer, &all_sig)?;
-
-    row_group_writer.close()?;
-    writer.close()?;
-
-    Ok(())
+    write_named_table(filename, key_cols[0].0, &keys[0], &columns)
 }
 
 fn format_value<T: Float + Display>(v: T) -> String {
