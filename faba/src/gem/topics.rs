@@ -130,9 +130,7 @@ pub fn resolve_topics(
     let log_theta = res.theta.map(|x| (x + 1e-8).ln());
 
     let topic_names: Vec<Box<str>> = (0..k).map(|i| format!("T{i}").into_boxed_str()).collect();
-    let h_names: Vec<Box<str>> = (0..h)
-        .map(|i| format!("dim_{i}").into_boxed_str())
-        .collect();
+    let h_names = graph_embedding_util::embedding_col_names(h);
 
     let path_latent = format!("{prefix}.latent.parquet");
     let path_dict = format!("{prefix}.dictionary.parquet");

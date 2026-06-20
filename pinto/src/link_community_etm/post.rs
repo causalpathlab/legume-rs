@@ -12,6 +12,7 @@ use candle_util::data::top_k_indices_weighted;
 use candle_util::decoder::EmbeddedTopicDecoder;
 use candle_util::encoder::IndexedEmbeddingEncoder;
 use candle_util::traits::*;
+use graph_embedding_util::embedding_col_names;
 use log::info;
 use matrix_util::traits::{ConvertMatOps, IoOps};
 use nalgebra::DMatrix;
@@ -209,10 +210,6 @@ fn aggregate_propensity(pi_ek: &Mat, edges: &[(usize, usize)], n_cells: usize) -
 
 fn community_col_names(k: usize) -> Vec<Box<str>> {
     (0..k).map(|c| format!("C{c}").into_boxed_str()).collect()
-}
-
-fn embedding_col_names(h: usize) -> Vec<Box<str>> {
-    (0..h).map(|d| format!("H{d}").into_boxed_str()).collect()
 }
 
 fn write_propensity(

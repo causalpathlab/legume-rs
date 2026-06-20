@@ -700,15 +700,14 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // trained, empties don't collapse to a ≈0 lower tail; they form their OWN
     // low mode separated from the real bulk by a density valley, so a median+MAD
     // lower-tail fit misses them. Instead fit a BIC-selected 1-D Gaussian
-    // mixture on log(norm) (k BIC-selected up to QC_MIXTURE_K_MAX), take the
-    // lowest mode as empty (the first prominent valley above it is the cut), and
-    // drop by MAP posterior (shared with faba gem). When any empties are
-    // found we MASK them out of the backend and RE-FIT on the survivors
-    // (workflow step iii) — `mask_columns` + `subset_cells` keep cell-id ==
-    // backend-column, exactly as the feature refine keeps the feature axis live.
-    // Emits the "before" cell embedding over ALL cells first
-    // (`{out}.cell_embedding_before.parquet`, pair with `{out}.cell_qc.parquet`
-    // to color the empties); the re-fit "after" becomes the standard output.
+    // mixture on log(norm) (k BIC-selected up to QC_MIXTURE_K_MAX) + firming
+    // gate, take the lowest mode as empty, and drop by MAP posterior (shared
+    // with faba gem). When any empties are found we MASK them out of the backend
+    // and RE-FIT on the survivors (workflow step iii) — `mask_columns` +
+    // `subset_cells` keep cell-id == backend-column, exactly as the feature
+    // refine keeps the feature axis live. Emits the "before" cell embedding over
+    // ALL cells first (`{out}.cell_embedding_before.parquet`, pair with
+    // `{out}.cell_qc.parquet` to color empties); the re-fit "after" is standard.
     if args.cell_null_fdr > 0.0 && !out.cell_nrms.is_empty() {
         let n = out.cell_nrms.len();
         let call = ge::null_call::embedding_mixture_empty_call(

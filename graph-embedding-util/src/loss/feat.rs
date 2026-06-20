@@ -7,7 +7,7 @@
 
 use crate::data::Triplet;
 use crate::feature_network::{select_feat_emb, FeatureNetworkSmoother};
-use crate::loss::log_sigmoid;
+use crate::loss::logistic_nce;
 use crate::model::JointEmbedModel;
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{Device, Result, Tensor};
@@ -659,8 +659,7 @@ pub fn nce_loss_chain(
             JointEmbedModel::score_diag(&e_feat_pos, &e_cell_pos, &b_feat_pos, &b_cell_pos)?;
         let neg_score =
             JointEmbedModel::score_negatives(&e_feat_neg, &e_cell_pos, &b_feat_neg, &b_cell_pos)?;
-        let per_edge =
-            (log_sigmoid(&pos_score)? + log_sigmoid(&neg_score.neg()?)?.sum(1)?)?.neg()?;
+        let per_edge = logistic_nce(&pos_score, std::slice::from_ref(&neg_score))?;
         let weighted = (per_edge * w_t.clone())?;
         let axis_loss = (weighted.sum(0)? / f64::from(w_sum))?;
         let scaled = (axis_loss * f64::from(axis.lambda))?;
@@ -846,7 +845,7 @@ fn nce_loss_with_cell_side(
     let neg_score =
         JointEmbedModel::score_negatives(&e_feat_neg, &e_cell_pos, &b_feat_neg, &b_cell_pos)?;
 
-    let per_edge = (log_sigmoid(&pos_score)? + log_sigmoid(&neg_score.neg()?)?.sum(1)?)?.neg()?;
+    let per_edge = logistic_nce(&pos_score, std::slice::from_ref(&neg_score))?;
 
     // Normalize by Σw, not B: when most positives are housekeeping and
     // get downweighted, dividing by B leaves an O(mean(w)) gradient

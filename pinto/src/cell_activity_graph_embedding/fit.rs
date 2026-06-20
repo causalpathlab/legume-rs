@@ -33,6 +33,7 @@ use candle_util::candle_core::{DType, Tensor};
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
+use graph_embedding_util::embedding_col_names;
 use graph_embedding_util::loss::{
     build_per_batch_cell_samplers, cell_cell_nce_loss_per_level_batched_gated, PbChainFilter,
 };
@@ -661,10 +662,6 @@ pub fn fit_cell_activity_graph_embedding(
 
     info!("Done");
     Ok(())
-}
-
-fn embedding_col_names(d: usize) -> Vec<Box<str>> {
-    (0..d).map(|i| format!("e{i}").into_boxed_str()).collect()
 }
 
 /// Convert a 2-D `[R × C]` candle Tensor into an `nalgebra::DMatrix<f32>`

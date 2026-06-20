@@ -45,10 +45,27 @@ pub use feat::{
     PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
 };
 
-/// Numerically stable `log σ(x) = x - log_sum_exp([0, x])`. Shared by
-/// `feat` (bipartite NCE) and `chain` (cell-cell chain NCE).
-pub(super) fn log_sigmoid(x: &Tensor) -> Result<Tensor> {
-    let stacked = Tensor::stack(&[x.zeros_like()?, x.clone()], 0)?;
-    let softplus = stacked.log_sum_exp(0)?;
-    x - softplus
+/// The one canonical numerically-stable `log σ(x)` lives in `candle_util`;
+/// re-exported here so `feat` (bipartite NCE), `chain` (cell-cell chain NCE),
+/// and [`logistic_nce`] all share a single implementation.
+pub(super) use candle_util::loss::log_sigmoid;
+
+/// Per-positive logistic (SGNS) NCE loss, shared by the geu embedders gbe
+/// (`feat`, bipartite NCE) and cage (`chain`, cell-cell chain NCE):
+///
+/// ```text
+///   ℓ_i = -( log σ(pos_i) + Σ_blocks Σ_k log σ(-neg_{i,k}) )
+/// ```
+///
+/// `pos` is `[B]`; each `negs` block is `[B, K]`. The `&[Tensor]` form admits
+/// several concatenated negative slates with differing K; the current callers
+/// (`feat`/`chain`) each pass a single block. (`faba gem` trains with its own
+/// sampled-softmax NCE and does NOT use this.) Returns the per-positive loss
+/// `[B]`; callers mean/weight as needed.
+pub fn logistic_nce(pos: &Tensor, negs: &[Tensor]) -> Result<Tensor> {
+    let mut term = log_sigmoid(pos)?;
+    for neg in negs {
+        term = (term + log_sigmoid(&neg.neg()?)?.sum(1)?)?;
+    }
+    term.neg()
 }

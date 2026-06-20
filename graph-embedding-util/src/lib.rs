@@ -42,7 +42,7 @@ pub mod type_annotation;
 pub use auxiliary_data::feature_names::FeatureNameKind;
 pub use data::{load_unified_data, validate_multiome_groups, LoadUnifiedArgs, UnifiedData};
 pub use data_beans_alg::refine_multilevel::RefineParams;
-pub use eval::{save_outputs, write_feature_coembedding, OutputContext};
+pub use eval::{embedding_col_names, save_outputs, write_feature_coembedding, OutputContext};
 pub use fit::{fit, load_feature_network, FeatureNetworkArgs, FitConfig, FitOutput};
 pub use model::JointEmbedModel;
 pub use postprocess::{cell_clusters, feature_coembedding};

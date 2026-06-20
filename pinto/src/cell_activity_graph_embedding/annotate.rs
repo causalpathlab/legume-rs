@@ -112,7 +112,6 @@ pub fn run_cage_annotate(args: &CageAnnotateArgs) -> Result<()> {
         &feat.rows,
         &cell.mat,
         &cell.rows,
-        None,
         &args.markers,
         &format!("{out}.cage_annot"),
         !args.no_idf,

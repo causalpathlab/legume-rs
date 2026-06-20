@@ -5,7 +5,7 @@ use super::common::candle_core;
 use anyhow::{Context, Result};
 use candle_core::Tensor;
 use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::IoOps;
+use matrix_util::traits::{ConvertMatOps, IoOps};
 use serde::{Deserialize, Serialize};
 
 use graph_embedding_util::data::UnifiedData;
@@ -115,6 +115,7 @@ pub struct CellQcOutputs<'a> {
 /// `prefix` for single-pass runs; pass `"{prefix}.pass1"` for the first
 /// pass of a `--refine` run so pass-1 scores are preserved alongside the
 /// final pass-2 artifacts.
+#[allow(clippy::too_many_arguments)]
 pub fn write_outputs(
     prefix: &str,
     score_prefix: &str,
@@ -123,6 +124,7 @@ pub fn write_outputs(
     model: &GemModel,
     unified: &UnifiedData,
     cell: CellQcOutputs<'_>,
+    target_clusters: Option<usize>,
 ) -> Result<()> {
     let CellQcOutputs {
         keep_idx,
@@ -140,9 +142,7 @@ pub fn write_outputs(
     let path_cell_bias = format!("{prefix}.cell_bias.parquet");
     let path_cell_to_pb = format!("{prefix}.cell_to_pb.parquet");
 
-    let dim_names: Vec<Box<str>> = (0..model.embedding_dim)
-        .map(|h| format!("dim_{h}").into_boxed_str())
-        .collect();
+    let dim_names = graph_embedding_util::embedding_col_names(model.embedding_dim);
     let prog_names: Vec<Box<str>> = (0..model.n_programs)
         .map(|k| format!("program_{k}").into_boxed_str())
         .collect();
@@ -156,17 +156,15 @@ pub fn write_outputs(
     )
     .with_context(|| format!("writing {path_gene_emb}"))?;
 
-    // Same matrix under senna's frozen-feature-side name so `senna itopic
-    // --freeze-feature-embedding {prefix}` (topic layout, bias = 0) picks
-    // up β_g as a fixed ρ [G, H] with no renaming. faba's own tooling
-    // keeps using `gene_embedding.parquet`.
-    let path_feat_emb = format!("{prefix}.feature_embedding.parquet");
-    rho.to_parquet_with_names(
-        &path_feat_emb,
-        (Some(&table.gene_names), Some("gene")),
-        Some(&dim_names),
-    )
-    .with_context(|| format!("writing {path_feat_emb}"))?;
+    // NOTE: {prefix}.feature_embedding.parquet is written at the END of this
+    // function as the SIMBA co-embedding of β_g onto the cell manifold (genes
+    // re-placed where their cells are), overriding the raw β_g — mirroring
+    // `senna bge`/`rest`. The raw β_g is preserved separately as
+    // `gene_embedding.parquet` above. Consumers that want genes on the cell
+    // manifold (`faba gem-annotate`, and `senna itopic --freeze-feature-embedding`,
+    // which probes `feature_embedding.parquet`) read the co-embed; tooling that
+    // needs the raw β_g must read `gene_embedding.parquet` by name (freeze does
+    // NOT fall back to it).
 
     // Per-feature prior-score QC. A row that training never moved off its
     // `N(0, σ²I)` init (σ = PARAM_INIT_STD) is uninformed noise — the dense
@@ -302,6 +300,44 @@ pub fn write_outputs(
             model.embedding_dim,
             &path_cell_prior,
         )?;
+    }
+
+    ////////////////////////////////////////
+    // SIMBA feature co-embedding → overrides feature_embedding.parquet
+    ////////////////////////////////////////
+    // Re-place each gene β_g at the softmax-over-cells weighted average of the
+    // (QC-kept, L2-normalized) cell embedding `e_cell`, so genes land on the
+    // cell manifold rather than the raw off-manifold β_g cloud — the same
+    // transform as `senna bge`/`rest`, which `faba gem-annotate` then reads.
+    // Post-hoc on CPU over the finished e_cell/β_g (Leiden cluster + blocked
+    // softmax-matmul). Raw β_g stays as gene_embedding.parquet.
+    //
+    // Guarded on phase-2 having run (`cell_nrms` non-empty): only then is
+    // `e_cell` the L2-normalized projected embedding this transform assumes.
+    // When phase-2 is skipped (`--no-cell-axis`, `--phase2-epochs 0`, early
+    // stop) `e_cell` is raw/un-normalized init and there is no cell manifold to
+    // co-embed onto, so fall back to writing the raw β_g as feature_embedding —
+    // keeping the file present and meaningful instead of co-embedding garbage.
+    let path_feat_emb = format!("{prefix}.feature_embedding.parquet");
+    if !cell_nrms.is_empty() {
+        let cpu = candle_core::Device::Cpu;
+        let z_t = e_cell.to_tensor(&cpu)?;
+        let rho_t = rho.to_tensor(&cpu)?;
+        let (_labels, target_eff) = graph_embedding_util::cell_clusters(&z_t, target_clusters)?;
+        graph_embedding_util::write_feature_coembedding(
+            prefix,
+            &z_t,
+            &rho_t,
+            &table.gene_names,
+            target_eff,
+        )?;
+    } else {
+        rho.to_parquet_with_names(
+            &path_feat_emb,
+            (Some(&table.gene_names), Some("gene")),
+            Some(&dim_names),
+        )
+        .with_context(|| format!("writing {path_feat_emb}"))?;
     }
 
     Ok(())
