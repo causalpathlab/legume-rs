@@ -248,14 +248,14 @@ pub fn build_pseudobulk(
 
     info!(
         "projection (proj_dim={}, {} batches, {} spliced rows)...",
-        args.proj_dim,
+        args.collapse.proj_dim,
         unified.n_batches(),
         spliced_backend.num_rows(),
     );
     // Unweighted projection — the backend is already spliced-only.
     let row_weights = vec![1.0_f32; spliced_backend.num_rows()];
     let proj = spliced_backend
-        .project_columns_weighted(args.proj_dim, None, batch_arg, &row_weights)
+        .project_columns_weighted(args.collapse.proj_dim, None, batch_arg, &row_weights)
         .context("spliced random projection")?;
 
     ////////////////////////////////////////
@@ -263,17 +263,17 @@ pub fn build_pseudobulk(
     ////////////////////////////////////////
     info!(
         "multilevel collapse (sort_dim={}, {} levels)...",
-        args.sort_dim, args.num_levels
+        args.collapse.sort_dim, args.collapse.num_levels
     );
     let collapse_out = collapse_columns_multilevel_with_hierarchy(
         &mut spliced_backend,
         &proj.proj,
         &batch_labels,
         &MultilevelParams {
-            knn_pb_samples: args.knn_pb,
-            num_levels: args.num_levels.max(1),
-            sort_dim: args.sort_dim,
-            num_opt_iter: args.num_opt_iter,
+            knn_pb_samples: args.collapse.knn_pb,
+            num_levels: args.collapse.num_levels.max(1),
+            sort_dim: args.collapse.sort_dim,
+            num_opt_iter: args.collapse.num_opt_iter,
             refine: Some(Default::default()),
             output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
         },
@@ -313,7 +313,7 @@ pub fn build_pseudobulk(
             &cell_identity,
             n_cells,
             n_modalities,
-            args.tau,
+            args.train.tau,
         )
     });
 
@@ -335,7 +335,7 @@ pub fn build_pseudobulk(
                 cell_to_pb,
                 n_pbs,
                 n_modalities,
-                args.tau,
+                args.train.tau,
             )
         })
         .collect();

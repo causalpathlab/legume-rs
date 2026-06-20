@@ -53,7 +53,7 @@ pub fn train(
     // One deterministic draw sequence threaded through both phases by
     // `&mut` borrow (each phase's producer thread is joined before the
     // borrow is released, so this is sound — see `run_phase`).
-    let mut rng = StdRng::seed_from_u64(args.seed);
+    let mut rng = StdRng::seed_from_u64(args.runtime.seed);
 
     let n_pb_levels = pb.n_levels();
 
@@ -84,14 +84,14 @@ pub fn train(
             Some(p) => info!(
                 "phase-1 cell axis: subsampled to {} cells (≤{} per pb-sample, all levels); \
                  phase 2 still projects all {} cells",
-                p.n_units, args.phase1_cells_per_pb, model.n_cells
+                p.n_units, args.collapse.phase1_cells_per_pb, model.n_cells
             ),
             None => info!(
                 "phase-1 cell axis: all {} cells (--phase1-cells-per-pb ≥ n_cells)",
                 model.n_cells
             ),
         }
-    } else if args.no_cell_axis {
+    } else if args.collapse.no_cell_axis {
         info!("phase-1 cell axis OFF (--no-cell-axis): feature-only; phase 2 skipped");
     } else {
         info!(
@@ -107,23 +107,28 @@ pub fn train(
     let mut optim = AdamW::new(
         model.varmap.all_vars(),
         ParamsAdamW {
-            lr: args.learning_rate,
+            lr: args.train.learning_rate,
             weight_decay: 0.0,
             ..Default::default()
         },
     )?;
-    info!("phase 1/2 (joint feature shaping): {} epochs", args.epochs);
+    info!(
+        "phase 1/2 (joint feature shaping): {} epochs",
+        args.train.epochs
+    );
     run_phase(
-        args,
-        pb,
-        model,
-        &sampler,
+        PhaseCtx {
+            args,
+            pb,
+            model,
+            sampler: &sampler,
+            stop,
+        },
         &phase1_axes,
         &mut optim,
-        args.epochs,
+        args.train.epochs,
         /*apply_z_delta_l2=*/ true,
         &mut rng,
-        stop,
     )?;
     drop(optim);
 
@@ -133,8 +138,9 @@ pub fn train(
     // With the feature side frozen, each cell's embedding is independent —
     // so instead of SGD we project every cell onto the frozen dictionary in
     // parallel (Poisson MAP, ridge prior). See `cell_solve`.
-    let want_phase2 =
-        !args.no_cell_axis && model.n_cells > 0 && args.phase2_epochs.is_none_or(|n| n > 0);
+    let want_phase2 = !args.collapse.no_cell_axis
+        && model.n_cells > 0
+        && args.train.phase2_epochs.is_none_or(|n| n > 0);
     if want_phase2 {
         if stop.load(Ordering::Relaxed) {
             info!("phase 2 skipped (interrupted in phase 1)");
@@ -142,7 +148,7 @@ pub fn train(
         }
         info!(
             "phase 2/2 (analytical cell projection onto frozen features, ridge λ={}): {} cells",
-            args.phase2_ridge, model.n_cells
+            args.train.phase2_ridge, model.n_cells
         );
         // Pooled when the cell pool was built (cell axis on / tests); else
         // stream from the backend (default pool-free path).
@@ -160,6 +166,17 @@ pub fn train(
     Ok(vec![])
 }
 
+/// Immutable context shared by every training phase: the args, pseudobulk,
+/// model, sampler, and stop flag. The per-phase varying inputs (axes, optimizer,
+/// epoch count, regularization toggle, rng) are passed alongside.
+struct PhaseCtx<'a> {
+    args: &'a GemArgs,
+    pb: &'a PseudobulkData,
+    model: &'a GemModel,
+    sampler: &'a SamplerState,
+    stop: &'a Arc<AtomicBool>,
+}
+
 /// Run one composite-sum training phase over `axes` for `epochs`, stepping
 /// `optim` once per minibatch bundle. A scoped producer thread draws the
 /// next bundles (one minibatch per axis) on the CPU while the main thread
@@ -167,19 +184,21 @@ pub fn train(
 /// single-threaded sampler. The producer borrows `rng` mutably for the
 /// phase's lifetime; the scope joins before this returns, so the next
 /// phase resumes the same deterministic draw sequence.
-#[allow(clippy::too_many_arguments)]
 fn run_phase(
-    args: &GemArgs,
-    pb: &PseudobulkData,
-    model: &GemModel,
-    sampler: &SamplerState,
+    ctx: PhaseCtx<'_>,
     axes: &[Axis],
     optim: &mut AdamW,
     epochs: usize,
     apply_z_delta_l2: bool,
     rng: &mut StdRng,
-    stop: &Arc<AtomicBool>,
 ) -> Result<()> {
+    let PhaseCtx {
+        args,
+        pb,
+        model,
+        sampler,
+        stop,
+    } = ctx;
     if epochs == 0 || axes.is_empty() {
         return Ok(());
     }
@@ -198,8 +217,8 @@ fn run_phase(
         })
         .max()
         .unwrap_or(0);
-    let batches_per_epoch = args.batches_per_epoch.unwrap_or_else(|| {
-        let bs = args.batch_size.max(1);
+    let batches_per_epoch = args.train.batches_per_epoch.unwrap_or_else(|| {
+        let bs = args.train.batch_size.max(1);
         max_axis_units.div_ceil(bs).max(1)
     });
 
@@ -208,7 +227,7 @@ fn run_phase(
         axes.len(),
         epochs,
         batches_per_epoch,
-        args.batches_per_epoch.is_none(),
+        args.train.batches_per_epoch.is_none(),
         max_axis_units,
     );
 
@@ -323,18 +342,22 @@ fn run_phase(
             // side is frozen, so the penalty gradient on z/δ is computed but
             // never stepped — wasted compute that also pollutes the log.
             if apply_z_delta_l2 {
-                if args.z_l2 > 0.0 {
+                if args.train.z_l2 > 0.0 {
                     let z_sq = model.z.sqr()?.mean_all()?;
-                    loss = (loss + (z_sq * (args.z_l2 as f64))?)?;
+                    loss = (loss + (z_sq * (args.train.z_l2 as f64))?)?;
                 }
-                if args.delta_l2 > 0.0 {
+                if args.train.delta_l2 > 0.0 {
                     let d_sq = model.delta.sqr()?.mean_all()?;
-                    loss = (loss + (d_sq * (args.delta_l2 as f64))?)?;
+                    loss = (loss + (d_sq * (args.train.delta_l2 as f64))?)?;
                 }
             }
             // Backward + global-norm gradient clip + step (no-op clip when
             // --max-grad-norm 0). Keeps embeddings from inflating on NCE spikes.
-            candle_util::grad_clip::clipped_backward_step(optim, &loss, args.max_grad_norm as f64)?;
+            candle_util::grad_clip::clipped_backward_step(
+                optim,
+                &loss,
+                args.train.max_grad_norm as f64,
+            )?;
 
             // Accumulate detached scalars on-device — no per-minibatch sync.
             let ld = loss.detach();

@@ -67,15 +67,18 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        default_value_t = 0.0,
-        help = "Empirical-Bayes null-feature report at this FDR on the trained E_feat (0 = off)",
-        long_help = "When > 0, after training run the shared empirical-Bayes null call on\n\
-                     the feature embedding E_feat: a feature the model never moved keeps\n\
-                     ‖E_feat_f‖² ~ σ²·χ²_H, so the null scale σ̂² + proportion π̂₀ are\n\
-                     estimated from the data and each feature gets a q-value. Features with\n\
-                     q > this FDR are flagged null (untrained / background). Written to\n\
-                     {out}.feature_qc.parquet (norm² + live flag); a diagnostic, not yet a\n\
-                     filter. Must be in [0, 1)."
+        default_value_t = 0.05,
+        help = "Drop null features (E_feat never moved off init) at this FDR, then re-fit (default 0.05; 0 = off)",
+        long_help = "Empirical-Bayes feature-null QC — ON by default at FDR 0.05. After\n\
+                     training, the shared null call tests each feature's ‖E_feat_f‖²\n\
+                     against an estimated null (a feature the model never moved keeps\n\
+                     ‖E_feat_f‖² ~ σ²·χ²_ν; scale σ̂², effective dof ν̂, and proportion π̂₀\n\
+                     are estimated from the data, each feature gets a BH q-value). Features\n\
+                     with q > this FDR are null (untrained / background — the isolated\n\
+                     off-manifold co-embedding spikes) and are DROPPED, then the model\n\
+                     re-fits on the live feature axis (two-pass refine). The live/null flags\n\
+                     and norm² are also written to {out}.feature_qc.parquet. 0 disables.\n\
+                     Must be in [0, 1)."
     )]
     feature_null_fdr: f32,
 

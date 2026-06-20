@@ -34,11 +34,24 @@ pub struct GemManifest {
     pub n_cells: usize,
     pub feature_convention: String,
 
-    /// β_g — `[G × H]` base gene embedding; first column = gene name.
-    pub gene_embedding: String,
-    /// β_g again under senna's frozen-feature name (`[G × H]`). Lets
-    /// `senna itopic --freeze-feature-embedding {prefix}` reuse the faba
-    /// gene embedding as a fixed ρ.
+    /// β_g — `[G × H]` **raw base** gene embedding (the learned model
+    /// parameter), in the model's native NCE/dot-product space; first column
+    /// = gene name. This is NOT the file to co-plot with `cell_embedding`:
+    /// β_g is off-manifold relative to `e_cell` by construction. Its purpose
+    /// is reconstruction — together with `gene_program_loadings` (z),
+    /// `program_modality_deviation` (δ), and `modality_region_offset` (γ) it
+    /// rebuilds any feature row's embedding `e_f = β_g ⊙ exp(Σ z·δ + γ)`,
+    /// including the m6A/A2I/pA modality components (which have no cells and
+    /// so can never be co-embedded). For genes-on-the-cell-manifold use
+    /// `feature_embedding` instead. Renamed from `gene_embedding`; the serde
+    /// alias keeps older manifests parseable.
+    #[serde(default, alias = "gene_embedding")]
+    pub gene_base_embedding: String,
+    /// SIMBA co-embedding — `[G × H]` β_g re-placed onto the cell manifold
+    /// (each gene = softmax-over-cells weighted average of `e_cell`), so it
+    /// shares `cell_embedding`'s coordinate frame. THIS is the file to co-plot
+    /// / co-UMAP with `cell_embedding`, and the one `faba gem-annotate` and
+    /// `senna itopic --freeze-feature-embedding {prefix}` read as a fixed ρ.
     pub feature_embedding: String,
     /// z_g — `[G × K]` matrix; first column = gene name. (Mode B only.)
     pub gene_program_loadings: String,
@@ -100,37 +113,58 @@ pub struct GemManifest {
 ///
 /// `cell_nrms` — pre-L2-normalisation norms from phase-2 cell projection,
 /// one per model cell (0..n_cells).  Empty slice when phase-2 was skipped.
+///
+/// `coembed` — write the SIMBA feature co-embedding (`feature_embedding.parquet`).
+/// Set `false` for the throwaway pass-1 write of a `--refine` run: the co-embed
+/// is expensive (Leiden + softmax-matmul over every cell) and pass-1 still holds
+/// the pre-empty-call cells (mostly ambient droplets), so co-embedding there is
+/// both wasteful and onto the wrong manifold — pass 2 regenerates it correctly
+/// on the QC-passed survivors. Always `true` for single-pass and pass-2 writes.
 pub struct CellQcOutputs<'a> {
     pub keep_idx: &'a [usize],
     pub cell_nrms: &'a [f32],
+    pub coembed: bool,
+}
+
+/// The trained artifacts + destination for [`write_outputs`]: where to write
+/// (`prefix`, and `score_prefix` for the prior-score parquets), the feature
+/// table, pseudobulk, fitted model, and cell backend, plus the topic count for
+/// the co-embedding's Leiden clustering.
+///
+/// `score_prefix` controls the prior-score parquets (`feature_prior_score`,
+/// `cell_prior_score`): pass the same value as `prefix` for single-pass runs;
+/// pass `"{prefix}.pass1"` for the first pass of a `--refine` run so pass-1
+/// scores are preserved alongside the final pass-2 artifacts.
+pub struct OutputCtx<'a> {
+    pub prefix: &'a str,
+    pub score_prefix: &'a str,
+    pub table: &'a FeatureTable,
+    pub pb: &'a PseudobulkData,
+    pub model: &'a GemModel,
+    pub unified: &'a UnifiedData,
+    pub target_clusters: Option<usize>,
 }
 
 /// Write every model artifact (parquets) under the configured prefix.
 /// The manifest is emitted separately by [`write_manifest`] **after**
 /// optional topic resolution, so the durable embeddings land first and
 /// the manifest can reference the resolved-topic files.
-///
-/// `score_prefix` controls the output path for the prior-score parquets
-/// (`feature_prior_score`, `cell_prior_score`).  Pass the same value as
-/// `prefix` for single-pass runs; pass `"{prefix}.pass1"` for the first
-/// pass of a `--refine` run so pass-1 scores are preserved alongside the
-/// final pass-2 artifacts.
-#[allow(clippy::too_many_arguments)]
-pub fn write_outputs(
-    prefix: &str,
-    score_prefix: &str,
-    table: &FeatureTable,
-    pb: &PseudobulkData,
-    model: &GemModel,
-    unified: &UnifiedData,
-    cell: CellQcOutputs<'_>,
-    target_clusters: Option<usize>,
-) -> Result<()> {
+pub fn write_outputs(ctx: OutputCtx<'_>, cell: CellQcOutputs<'_>) -> Result<()> {
+    let OutputCtx {
+        prefix,
+        score_prefix,
+        table,
+        pb,
+        model,
+        unified,
+        target_clusters,
+    } = ctx;
     let CellQcOutputs {
         keep_idx,
         cell_nrms,
+        coembed,
     } = cell;
-    let path_gene_emb = format!("{prefix}.gene_embedding.parquet");
+    let path_gene_base_emb = format!("{prefix}.gene_base_embedding.parquet");
     let path_z = format!("{prefix}.gene_program_loadings.parquet");
     let path_delta = format!("{prefix}.program_modality_deviation.parquet");
     let path_gamma = format!("{prefix}.modality_region_offset.parquet");
@@ -147,24 +181,26 @@ pub fn write_outputs(
         .map(|k| format!("program_{k}").into_boxed_str())
         .collect();
 
-    // β_g
+    // β_g — the RAW BASE gene parameter (model's native NCE space). Off-manifold
+    // relative to e_cell by construction; kept for reconstruction (with z/δ/γ),
+    // NOT for co-plotting with cells — that's feature_embedding below.
     let rho = tensor_to_dmatrix2(&model.beta)?;
     rho.to_parquet_with_names(
-        &path_gene_emb,
+        &path_gene_base_emb,
         (Some(&table.gene_names), Some("gene")),
         Some(&dim_names),
     )
-    .with_context(|| format!("writing {path_gene_emb}"))?;
+    .with_context(|| format!("writing {path_gene_base_emb}"))?;
 
     // NOTE: {prefix}.feature_embedding.parquet is written at the END of this
     // function as the SIMBA co-embedding of β_g onto the cell manifold (genes
     // re-placed where their cells are), overriding the raw β_g — mirroring
     // `senna bge`/`rest`. The raw β_g is preserved separately as
-    // `gene_embedding.parquet` above. Consumers that want genes on the cell
+    // `gene_base_embedding.parquet` above. Consumers that want genes on the cell
     // manifold (`faba gem-annotate`, and `senna itopic --freeze-feature-embedding`,
     // which probes `feature_embedding.parquet`) read the co-embed; tooling that
-    // needs the raw β_g must read `gene_embedding.parquet` by name (freeze does
-    // NOT fall back to it).
+    // needs the raw β_g must read `gene_base_embedding.parquet` by name (freeze
+    // does NOT fall back to it).
 
     // Per-feature prior-score QC. A row that training never moved off its
     // `N(0, σ²I)` init (σ = PARAM_INIT_STD) is uninformed noise — the dense
@@ -310,7 +346,12 @@ pub fn write_outputs(
     // cell manifold rather than the raw off-manifold β_g cloud — the same
     // transform as `senna bge`/`rest`, which `faba gem-annotate` then reads.
     // Post-hoc on CPU over the finished e_cell/β_g (Leiden cluster + blocked
-    // softmax-matmul). Raw β_g stays as gene_embedding.parquet.
+    // softmax-matmul). Raw β_g stays as gene_base_embedding.parquet.
+    //
+    // Skipped entirely for the throwaway pass-1 write of a `--refine` run
+    // (`coembed = false`): pass 1 still holds the pre-empty-call cells (mostly
+    // ambient droplets) and the result is overwritten by pass 2 anyway, so
+    // co-embedding here is wasted work onto the wrong manifold.
     //
     // Guarded on phase-2 having run (`cell_nrms` non-empty): only then is
     // `e_cell` the L2-normalized projected embedding this transform assumes.
@@ -318,6 +359,9 @@ pub fn write_outputs(
     // stop) `e_cell` is raw/un-normalized init and there is no cell manifold to
     // co-embed onto, so fall back to writing the raw β_g as feature_embedding —
     // keeping the file present and meaningful instead of co-embedding garbage.
+    if !coembed {
+        return Ok(());
+    }
     let path_feat_emb = format!("{prefix}.feature_embedding.parquet");
     if !cell_nrms.is_empty() {
         let cpu = candle_core::Device::Cpu;
@@ -370,7 +414,7 @@ pub fn write_manifest(
         n_regions: model.n_regions,
         n_cells: n_cells_written,
         feature_convention: FEATURE_CONVENTION.into(),
-        gene_embedding: format!("{prefix}.gene_embedding.parquet"),
+        gene_base_embedding: format!("{prefix}.gene_base_embedding.parquet"),
         feature_embedding: format!("{prefix}.feature_embedding.parquet"),
         gene_program_loadings: format!("{prefix}.gene_program_loadings.parquet"),
         program_modality_deviation: format!("{prefix}.program_modality_deviation.parquet"),

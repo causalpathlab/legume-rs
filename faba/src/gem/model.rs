@@ -92,18 +92,46 @@ pub struct GemModel {
     pub b_pb_per_level: Vec<Tensor>, // each [N_pb_ℓ]
 }
 
+/// The **feature-node endpoints** for one batch of B graph edges — NOT the
+/// edges themselves (the axis/cell endpoint is gathered separately by
+/// [`GemModel::rhs_rows`]). Per-row index arrays addressing the model parameters
+/// that [`GemModel::embed_and_bias_rows`] gathers: which gene's β/z, which
+/// `(modality, region)` drive the δ/γ deviation gate, which `(gene, modality)`
+/// index the bias, and whether each row is an AGG (β-only) row. Every slice has
+/// length B. (`q`/`rho` keep the historic names for δ and β.) Bundled so the
+/// gather call takes one argument, not seven.
+pub struct FeatureRows<'a> {
+    pub gene_for_rho: &'a [u32],
+    pub gene_for_z: &'a [u32],
+    pub modality_for_q: &'a [u32],
+    pub region_for_delta: &'a [u32],
+    pub gene_for_bias: &'a [u32],
+    pub modality_for_bias: &'a [u32],
+    pub is_agg: &'a [bool],
+}
+
+/// Dimensions for [`GemModel::new`] — the gene/modality/program/region/H sizes
+/// plus the cell count. (The per-level pseudobulk counts and device are passed
+/// alongside, since they aren't model dimensions proper.)
+pub struct GemDims {
+    pub n_genes: usize,
+    pub n_modalities: usize,
+    pub n_programs: usize,
+    pub n_regions: usize,
+    pub embedding_dim: usize,
+    pub n_cells: usize,
+}
+
 impl GemModel {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        n_genes: usize,
-        n_modalities: usize,
-        n_programs: usize,
-        n_regions: usize,
-        embedding_dim: usize,
-        n_cells: usize,
-        n_pbs_per_level: &[usize],
-        dev: &Device,
-    ) -> Result<Self> {
+    pub fn new(dims: GemDims, n_pbs_per_level: &[usize], dev: &Device) -> Result<Self> {
+        let GemDims {
+            n_genes,
+            n_modalities,
+            n_programs,
+            n_regions,
+            embedding_dim,
+            n_cells,
+        } = dims;
         let n_regions = n_regions.max(1);
         let varmap = VarMap::new();
         let init_rand = Init::Randn {
@@ -226,7 +254,7 @@ impl GemModel {
         Ok(Tensor::from_slice(ids, ids.len(), &self.dev)?)
     }
 
-    /// Build the `(agg_mask, not_agg_mask)` f32 tensors for a slate.
+    /// Build the `(agg_mask, not_agg_mask)` f32 tensors for a feature-row batch.
     /// One host→device upload; `not_agg` is computed on-device via affine.
     pub fn agg_masks_f32(&self, is_agg: &[bool]) -> Result<(Tensor, Tensor)> {
         let n = is_agg.len();
@@ -264,20 +292,19 @@ impl GemModel {
     /// `r ∝ exp(Σ z A)`. The additive γ_{m,r,:} resolves two same-gene
     /// components sitting in different transcript regions.
     ///
-    /// Fused embed + bias for one slate. Builds the per-row `agg` /
+    /// Fused embed + bias for one feature-row batch. Builds the per-row `agg` /
     /// `not_agg` masks and the flat `b_comp` index tensor **once**, then
     /// reuses them for both the gate computation and the bias lookup.
-    #[allow(clippy::too_many_arguments)]
-    pub fn embed_and_bias_rows(
-        &self,
-        gene_for_rho: &[u32],
-        gene_for_z: &[u32],
-        modality_for_q: &[u32],
-        region_for_delta: &[u32],
-        gene_for_bias: &[u32],
-        modality_for_bias: &[u32],
-        is_agg: &[bool],
-    ) -> Result<(Tensor, Tensor)> {
+    pub fn embed_and_bias_rows(&self, rows: &FeatureRows) -> Result<(Tensor, Tensor)> {
+        let FeatureRows {
+            gene_for_rho,
+            gene_for_z,
+            modality_for_q,
+            region_for_delta,
+            gene_for_bias,
+            modality_for_bias,
+            is_agg,
+        } = *rows;
         let b = gene_for_rho.len();
         debug_assert_eq!(gene_for_z.len(), b);
         debug_assert_eq!(modality_for_q.len(), b);
