@@ -3,7 +3,8 @@
 //!
 //! A thin adapter over the shared, model-agnostic
 //! [`graph_embedding_util::type_annotation::annotate_embeddings`]: it loads
-//! β_g (`feature_embedding`) and e_cell (`cell_embedding`) from a
+//! the SIMBA co-embed (`feature_embedding`, genes on the cell manifold — NOT
+//! the raw β_g `gene_base_embedding`) and e_cell (`cell_embedding`) from a
 //! `{prefix}.faba.json` manifest and hands them to the shared routine, which
 //! embeds each cell type as the L2-normalized centroid of its marker feature
 //! embeddings (the space the cells live in), clusters the cells, and emits a
@@ -111,7 +112,11 @@ pub struct GemAnnotateArgs {
     #[arg(long = "no-phate", help = "Skip the PHATE layout (keep UMAP only)")]
     pub no_phate: bool,
 
-    #[arg(long, default_value_t = 500, help = "UMAP SGD epochs for the cell layout")]
+    #[arg(
+        long,
+        default_value_t = 500,
+        help = "UMAP SGD epochs for the cell layout"
+    )]
     pub umap_epochs: usize,
 
     #[arg(long, default_value_t = 20, help = "PHATE diffusion time t")]
@@ -120,7 +125,11 @@ pub struct GemAnnotateArgs {
     #[arg(long, default_value_t = 5, help = "PHATE adaptive-bandwidth kNN")]
     pub phate_knn: usize,
 
-    #[arg(long, default_value_t = 40.0, help = "PHATE alpha-decay kernel exponent")]
+    #[arg(
+        long,
+        default_value_t = 40.0,
+        help = "PHATE alpha-decay kernel exponent"
+    )]
     pub phate_alpha: f32,
 
     #[arg(

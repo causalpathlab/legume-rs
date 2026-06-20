@@ -57,7 +57,10 @@ pub struct GemPlotArgs {
         help = "gem run manifest (`{prefix}.faba.json`) from `faba gem`",
         long_help = "Parquet paths are resolved relative to the manifest's own \
                      directory, so a run directory can be moved freely. Reads \
-                     `feature_embedding` (β_g) and `cell_embedding` (e_cell)."
+                     `feature_embedding` (SIMBA co-embed: genes on the cell \
+                     manifold) and `cell_embedding` (e_cell) — the two share a \
+                     coordinate frame. Not `gene_base_embedding` (raw β_g), \
+                     which is off-manifold."
     )]
     pub from: Box<str>,
 
@@ -181,16 +184,18 @@ pub fn run_gem_plot(args: &GemPlotArgs) -> Result<()> {
 
     if !args.no_features {
         plot_axis(
-            &beta,
-            &gene_names,
-            args.num_clusters,
+            AxisPlot {
+                emb: &beta,
+                row_names: &gene_names,
+                num_clusters: args.num_clusters,
+                row_kind: "gene",
+                out_base: &format!("{out}.gem_plot.feature"),
+            },
             args,
             &cfg,
             FeatureLabels {
                 gene_names: &gene_names,
             },
-            "gene",
-            &format!("{out}.gem_plot.feature"),
         )?;
     }
 
@@ -209,17 +214,19 @@ pub fn run_gem_plot(args: &GemPlotArgs) -> Result<()> {
                 e_cell.ncols()
             );
             plot_axis(
-                &e_cell,
-                &cell_names,
-                args.num_clusters,
+                AxisPlot {
+                    emb: &e_cell,
+                    row_names: &cell_names,
+                    num_clusters: args.num_clusters,
+                    row_kind: "cell",
+                    out_base: &format!("{out}.gem_plot.cell"),
+                },
                 args,
                 &cfg,
                 CellLabels {
                     beta: &beta,
                     gene_names: &gene_names,
                 },
-                "cell",
-                &format!("{out}.gem_plot.cell"),
             )?;
         }
     }
@@ -228,18 +235,31 @@ pub fn run_gem_plot(args: &GemPlotArgs) -> Result<()> {
     Ok(())
 }
 
-/// Lay out, cluster, label and render one embedding axis (features or cells).
-#[allow(clippy::too_many_arguments)]
-fn plot_axis<L: ClusterLabeller>(
-    emb: &DMatrix<f32>,
-    row_names: &[Box<str>],
+/// One embedding axis to plot: the embedding matrix, its row names, the target
+/// k-means cluster count, a short kind tag (`"cell"` / `"gene"`) for logs + the
+/// coords parquet, and the output path stem.
+struct AxisPlot<'a> {
+    emb: &'a DMatrix<f32>,
+    row_names: &'a [Box<str>],
     num_clusters: usize,
+    row_kind: &'a str,
+    out_base: &'a str,
+}
+
+/// Lay out, cluster, label and render one embedding axis (features or cells).
+fn plot_axis<L: ClusterLabeller>(
+    axis: AxisPlot<'_>,
     args: &GemPlotArgs,
     cfg: &RenderCfg,
     labeller: L,
-    row_kind: &str,
-    out_base: &str,
 ) -> Result<()> {
+    let AxisPlot {
+        emb,
+        row_names,
+        num_clusters,
+        row_kind,
+        out_base,
+    } = axis;
     let n = emb.nrows();
     let k = num_clusters.clamp(1, n.max(1));
 

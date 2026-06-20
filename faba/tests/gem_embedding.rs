@@ -30,10 +30,10 @@ use faba::gem::common::candle_core;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use faba::gem::args::GemArgs;
+use faba::gem::args::{CollapseArgs, GemArgs, ModelArgs, QcArgs, RuntimeArgs, TrainArgs};
 use faba::gem::common::ComputeDevice;
 use faba::gem::feature_table::FeatureTable;
-use faba::gem::model::GemModel;
+use faba::gem::model::{FeatureRows, GemDims, GemModel};
 use faba::gem::pseudobulk::{AxisPools, PseudobulkData, StratumPool};
 use faba::gem::region::RegionMap;
 use faba::gem::train::train;
@@ -140,50 +140,62 @@ fn test_args() -> GemArgs {
         apa: None,
         batch_files: None,
         out: "".into(),
-        embedding_dim: H,
-        n_programs: K,
-        n_regions: Some(R),
-        num_levels: 0,
-        sort_dim: 10,
-        knn_pb: 10,
-        num_opt_iter: 1,
-        proj_dim: 8,
-        ignore_batch: true,
-        genes_sample_strip: "".into(),
-        dartseq_sample_strip: "".into(),
-        atoi_sample_strip: "".into(),
-        apa_sample_strip: "".into(),
-        no_cell_axis: false,
-        // This fixture trains on the cell axis only (zero pb levels), so keep
-        // the full cell axis in phase 1 (k ≥ n_cells = legacy all-cells).
-        phase1_cells_per_pb: usize::MAX,
-        feature_name_delim: '_',
-        feature_name_exact: true,
-        preload_data: true,
-        epochs: 70,
-        phase2_epochs: Some(0),
-        phase2_ridge: 1.0,
-        batches_per_epoch: Some(4),
-        batch_size: 96,
-        learning_rate: 6e-2,
-        z_l2: 1e-3,
-        delta_l2: 5e-3, // δ shrinkage → keeps the exp gate from blowing up
-        f_agg: 0.34,
-        f_count: 0.0,
-        tau: 1.0,
-        tau_modality: 0.5,
-        skip_topics: true,
-        num_topics: None,
-        n_rand: 8,
-        n_swap_gene_mode: 4,
-        n_swap_modality: 6,
-        skip_refine: true,
-        gene_null_fdr: 0.05,
-        max_grad_norm: 0.0,
-        seed: 7,
-        device: ComputeDevice::Cpu,
-        device_no: 0,
-        threads: 0,
+        model: ModelArgs {
+            embedding_dim: H,
+            n_programs: K,
+            n_regions: Some(R),
+        },
+        collapse: CollapseArgs {
+            num_levels: 0,
+            sort_dim: 10,
+            knn_pb: 10,
+            num_opt_iter: 1,
+            proj_dim: 8,
+            ignore_batch: true,
+            no_cell_axis: false,
+            // This fixture trains on the cell axis only (zero pb levels), so keep
+            // the full cell axis in phase 1 (k ≥ n_cells = legacy all-cells).
+            phase1_cells_per_pb: usize::MAX,
+            genes_sample_strip: "".into(),
+            dartseq_sample_strip: "".into(),
+            atoi_sample_strip: "".into(),
+            apa_sample_strip: "".into(),
+            feature_name_delim: '_',
+            feature_name_exact: true,
+        },
+        train: TrainArgs {
+            epochs: 70,
+            phase2_epochs: Some(0),
+            phase2_ridge: 1.0,
+            batches_per_epoch: Some(4),
+            batch_size: 96,
+            learning_rate: 6e-2,
+            max_grad_norm: 0.0,
+            z_l2: 1e-3,
+            delta_l2: 5e-3, // δ shrinkage → keeps the exp gate from blowing up
+            f_agg: 0.34,
+            f_count: 0.0,
+            tau: 1.0,
+            tau_modality: 0.5,
+            n_rand: 8,
+            n_swap_gene_mode: 4,
+            n_swap_modality: 6,
+        },
+        qc: QcArgs {
+            skip_refine: true,
+            min_cells: 1,
+            feature_null_fdr: 0.0,
+            gene_null_fdr: 0.05,
+            skip_topics: true,
+            num_topics: None,
+        },
+        runtime: RuntimeArgs {
+            preload_data: true,
+            seed: 7,
+            device: ComputeDevice::Cpu,
+            device_no: 0,
+            threads: 0,
+        },
     }
 }
 
@@ -220,7 +232,15 @@ fn group_mean(e_cell: &[Vec<f32>], range: std::ops::Range<usize>) -> Vec<f32> {
 /// Satellite embedding e_f(g, m6A, region) for a single gene/region.
 fn satellite_embed(model: &GemModel, g: u32, region: u32) -> Vec<f32> {
     let (e, _) = model
-        .embed_and_bias_rows(&[g], &[g], &[M6A], &[region], &[g], &[M6A], &[false])
+        .embed_and_bias_rows(&FeatureRows {
+            gene_for_rho: &[g],
+            gene_for_z: &[g],
+            modality_for_q: &[M6A],
+            region_for_delta: &[region],
+            gene_for_bias: &[g],
+            modality_for_bias: &[M6A],
+            is_agg: &[false],
+        })
         .unwrap();
     row_vec(&e)
 }
@@ -239,9 +259,20 @@ fn recovers_region_resolved_deviation() {
     // is deliberately sparse). Splitting count into per-splice modalities
     // enlarged δ/γ, so this needs a touch more training than the original
     // single-modality fixture.
-    args.epochs = 150;
-    let mut model =
-        GemModel::new(N_GENES, table.n_modalities(), K, R, H, N_CELLS, &[], &dev).unwrap();
+    args.train.epochs = 150;
+    let mut model = GemModel::new(
+        GemDims {
+            n_genes: N_GENES,
+            n_modalities: table.n_modalities(),
+            n_programs: K,
+            n_regions: R,
+            embedding_dim: H,
+            n_cells: N_CELLS,
+        },
+        &[],
+        &dev,
+    )
+    .unwrap();
     model.seed_init(1).unwrap();
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -306,7 +337,15 @@ fn recovers_region_resolved_deviation() {
 
     // AGG rows must be the pure β anchor (gate masked to exp(0)).
     let (e_agg, _) = model
-        .embed_and_bias_rows(&[0], &[0], &[0], &[0], &[0], &[0], &[true])
+        .embed_and_bias_rows(&FeatureRows {
+            gene_for_rho: &[0],
+            gene_for_z: &[0],
+            modality_for_q: &[0],
+            region_for_delta: &[0],
+            gene_for_bias: &[0],
+            modality_for_bias: &[0],
+            is_agg: &[true],
+        })
         .unwrap();
     let beta0 = row_vec(&model.beta.narrow(0, 0, 1).unwrap());
     let e_agg = row_vec(&e_agg);
@@ -400,7 +439,15 @@ fn build_splice_pseudobulk() -> PseudobulkData {
 /// Count satellite embedding e_f(g, modality, region 0).
 fn count_embed(model: &GemModel, g: u32, modality: u32) -> Vec<f32> {
     let (e, _) = model
-        .embed_and_bias_rows(&[g], &[g], &[modality], &[0], &[g], &[modality], &[false])
+        .embed_and_bias_rows(&FeatureRows {
+            gene_for_rho: &[g],
+            gene_for_z: &[g],
+            modality_for_q: &[modality],
+            region_for_delta: &[0],
+            gene_for_bias: &[g],
+            modality_for_bias: &[modality],
+            is_agg: &[false],
+        })
         .unwrap();
     row_vec(&e)
 }
@@ -416,18 +463,20 @@ fn recovers_splice_direction() {
 
     let pb = build_splice_pseudobulk();
     let mut args = test_args();
-    args.n_regions = Some(r_splice);
-    args.f_agg = 0.3;
-    args.f_count = 0.6; // actually draw spliced/unspliced positives
-    args.epochs = 120;
+    args.model.n_regions = Some(r_splice);
+    args.train.f_agg = 0.3;
+    args.train.f_count = 0.6; // actually draw spliced/unspliced positives
+    args.train.epochs = 120;
 
     let mut model = GemModel::new(
-        N_GENES,
-        table.n_modalities(),
-        K,
-        r_splice,
-        H,
-        N_CELLS,
+        GemDims {
+            n_genes: N_GENES,
+            n_modalities: table.n_modalities(),
+            n_programs: K,
+            n_regions: r_splice,
+            embedding_dim: H,
+            n_cells: N_CELLS,
+        },
         &[],
         &dev,
     )

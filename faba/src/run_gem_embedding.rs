@@ -1,7 +1,7 @@
 //! Entry point for `faba gem` (alias `gem-embedding`).
 
 use anyhow::Context;
-use data_beans::qc::collect_column_stat_across_vec;
+use data_beans::qc::{collect_column_stat_across_vec, collect_row_stat_across_vec};
 use data_beans::sparse_io_vector::ColumnAlignment;
 use graph_embedding_util::data::UnifiedData;
 use graph_embedding_util::stop::setup_stop_handler;
@@ -19,13 +19,18 @@ use faba::gem::cell_solve::{CellStreamCtx, SatStream};
 use faba::gem::feature_table::{
     classify, parse_component_idx, parse_feature_name, BackendRowMap, FeatureTable, RowStratum,
 };
-use faba::gem::manifest::{write_outputs, CellQcOutputs};
-use faba::gem::model::GemModel;
-use faba::gem::pseudobulk::{build_pseudobulk, spliced_backend_rows, SatelliteData};
+use faba::gem::manifest::{write_outputs, CellQcOutputs, OutputCtx};
+use faba::gem::model::{GemDims, GemModel};
+use faba::gem::pseudobulk::{
+    build_pseudobulk, spliced_backend_rows, PseudobulkData, SatelliteData,
+};
 use faba::gem::region::RegionMap;
-use faba::gem::sample_id::{file_sample_id, longest_common_underscore_suffix, strip_sample_id};
+use faba::gem::sample_id::{
+    file_sample_id, infer_satellite_strip, longest_common_underscore_suffix,
+    longest_shared_underscore_prefix, strip_sample_id,
+};
 use faba::gem::train::train;
-use graph_embedding_util::null_call::embedding_mixture_empty_call;
+use graph_embedding_util::null_call::{embedding_mixture_empty_call, embedding_null_call};
 
 /// A loaded satellite-modality backend (m6A / A2I / pA), held **separately**
 /// from the genes backend. The collapse never sees it; it only donates
@@ -198,12 +203,21 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
 
     validate_args(args)?;
 
-    let n_threads = if args.threads == 0 {
+    if !args.refine() && (args.qc.min_cells > 1 || args.qc.feature_null_fdr > 0.0) {
+        warn!(
+            "gene QC (--min-cells {}, --feature-null-fdr {}) ignored under --skip-refine: both \
+             need the refine pass to measure support / β on real (not ambient) cells; no gene \
+             QC will run",
+            args.qc.min_cells, args.qc.feature_null_fdr
+        );
+    }
+
+    let n_threads = if args.runtime.threads == 0 {
         std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
     } else {
-        args.threads
+        args.runtime.threads
     };
     ThreadPoolBuilder::new()
         .num_threads(n_threads)
@@ -220,15 +234,15 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // (`--dartseq`/`--atoi`/`--apa`) loads into its own backend and only
     // donates `modifier_comp` mass, matched to genes cells by `barcode@sample`.
     // Modality is inferred from the row name, not the flag.
-    let feature_kind = if args.feature_name_exact {
+    let feature_kind = if args.collapse.feature_name_exact {
         FeatureNameKind::Exact
     } else {
         FeatureNameKind::Gene {
-            delim: args.feature_name_delim,
+            delim: args.collapse.feature_name_delim,
         }
     };
 
-    let batch_files: Option<&[Box<str>]> = if args.ignore_batch {
+    let batch_files: Option<&[Box<str>]> = if args.collapse.ignore_batch {
         if args.batch_files.is_some() {
             info!("--ignore-batch: dropping batch labels; treating all cells as one batch");
         }
@@ -276,8 +290,8 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // still be matched). Satellites: LCS first, else per-file LCP against the
     // genes sample-id set, hard-erroring if nothing lines up — that's the
     // silent-modality-drop bug surfaced. Explicit user strips always win.
-    let genes_strip: Box<str> = if !args.genes_sample_strip.is_empty() {
-        args.genes_sample_strip.clone()
+    let genes_strip: Box<str> = if !args.collapse.genes_sample_strip.is_empty() {
+        args.collapse.genes_sample_strip.clone()
     } else if !do_tag {
         "".into()
     } else if genes_bn.len() >= 2 {
@@ -318,15 +332,15 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
             info!("auto-strip: --{label}-sample-strip = {:?}", s.as_ref());
             Ok(s)
         };
-    let dartseq_strip = resolve_sat(&dartseq_bn, &args.dartseq_sample_strip, "dartseq")?;
-    let atoi_strip = resolve_sat(&atoi_bn, &args.atoi_sample_strip, "atoi")?;
-    let apa_strip = resolve_sat(&apa_bn, &args.apa_sample_strip, "apa")?;
+    let dartseq_strip = resolve_sat(&dartseq_bn, &args.collapse.dartseq_sample_strip, "dartseq")?;
+    let atoi_strip = resolve_sat(&atoi_bn, &args.collapse.atoi_sample_strip, "atoi")?;
+    let apa_strip = resolve_sat(&apa_bn, &args.collapse.apa_sample_strip, "apa")?;
 
     info!(
         "loading {} genes file(s) (feature_kind={:?}, preload={})",
         args.genes.len(),
         feature_kind,
-        args.preload_data
+        args.runtime.preload_data
     );
     let mut unified = load_modality(
         &args.genes,
@@ -334,11 +348,11 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         do_tag,
         batch_files,
         feature_kind.clone(),
-        args.preload_data,
+        args.runtime.preload_data,
     )
     .context("load genes backend")?;
 
-    if args.ignore_batch {
+    if args.collapse.ignore_batch {
         let n = unified.n_cells();
         unified.batch_membership = vec![0_u32; n];
         unified.batch_names = vec!["all".into()];
@@ -377,7 +391,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
             do_tag,
             None,
             feature_kind.clone(),
-            args.preload_data,
+            args.runtime.preload_data,
         )
         .with_context(|| format!("load {label} backend"))?;
         sat.materialize_cell_triplets()
@@ -409,7 +423,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // `max(component_idx) + 1` scanned from satellite row names so each
     // component gets its own γ slot. `RegionMap` then keys per-component
     // (clamped to n_regions − 1).
-    let n_regions: usize = match args.n_regions {
+    let n_regions: usize = match args.model.n_regions {
         Some(n) => n,
         None => {
             let n = infer_n_regions(&satellites, 1);
@@ -424,13 +438,30 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         .map(|s| s.unified.feature_names.as_slice())
         .collect();
     let table = FeatureTable::build_layered(&unified.feature_names, &sat_name_lists, &region_map);
+    // In a refine run the satellites are intentionally held out of pass 1, so
+    // the modifier-comp count is trivially 0 — don't print a bare "0" that reads
+    // as "no modifier rows found". Note the deferral instead; the full count
+    // surfaces in the pass-2 table.
+    let modifier_summary = if args.refine() && !satellites.is_empty() {
+        format!(
+            "{} satellite {} deferred to refine pass 2",
+            satellites.len(),
+            if satellites.len() == 1 {
+                "modality"
+            } else {
+                "modalities"
+            },
+        )
+    } else {
+        format!("{} modifier-comp rows", table.modifier_comp_rows.len())
+    };
     info!(
-        "feature_table: {} genes, {} modalities, {} regions, {} count-comp + {} modifier-comp rows",
+        "feature_table: {} genes, {} modalities, {} regions, {} count-comp rows + {}",
         table.n_genes(),
         table.n_modalities(),
         table.n_regions,
         table.count_comp_rows.len(),
-        table.modifier_comp_rows.len(),
+        modifier_summary,
     );
     anyhow::ensure!(
         table.n_genes() > 0,
@@ -546,24 +577,29 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     let n_pbs_per_level: Vec<usize> = pb.pb_pools_per_level.iter().map(|l| l.n_units).collect();
 
     let dev = args
+        .runtime
         .device
-        .to_device(args.device_no)
+        .to_device(args.runtime.device_no)
         .context("candle device init")?;
     info!("compute device = {:?}", dev);
     let mut model = GemModel::new(
-        table.n_genes(),
-        table.n_modalities(),
-        args.n_programs,
-        table.n_regions,
-        args.embedding_dim,
-        n_cells,
+        GemDims {
+            n_genes: table.n_genes(),
+            n_modalities: table.n_modalities(),
+            n_programs: args.model.n_programs,
+            n_regions: table.n_regions,
+            embedding_dim: args.model.embedding_dim,
+            n_cells,
+        },
         &n_pbs_per_level,
         &dev,
     )
     .context("init model")?;
     // Deterministic init (CPU candle can't seed Init::Randn) so the QC is
     // reproducible run-to-run.
-    model.seed_init(args.seed).context("seed model init")?;
+    model
+        .seed_init(args.runtime.seed)
+        .context("seed model init")?;
 
     let stop = setup_stop_handler();
     // Streaming phase-2 context (cell id == backend column after the up-front
@@ -588,26 +624,34 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         args.out.to_string()
     };
 
+    // Will the (overwriting) refine pass run? If so, pass-1 outputs are
+    // throwaway — skip the expensive SIMBA co-embedding here (pass 2 regenerates
+    // it on the QC-passed survivors; pass 1 still holds pre-empty-call cells).
+    let will_refine = args.refine() && !stop.load(std::sync::atomic::Ordering::Relaxed);
+
     // Durable embeddings first, so a force-abort (second Ctrl+C) during the
     // optional topic step never loses the trained model.
     write_outputs(
-        &args.out,
-        &score_prefix_p1,
-        &table,
-        &pb,
-        &model,
-        &unified,
+        OutputCtx {
+            prefix: &args.out,
+            score_prefix: &score_prefix_p1,
+            table: &table,
+            pb: &pb,
+            model: &model,
+            unified: &unified,
+            target_clusters: args.qc.num_topics,
+        },
         CellQcOutputs {
             keep_idx: &keep_idx,
             cell_nrms: &cell_nrms,
+            coembed: !will_refine,
         },
-        args.num_topics,
     )
     .context("write outputs")?;
 
     // Refinement pass: filter dead genes + dead cells identified from pass-1,
     // rebuild everything, retrain.  Skipped when stopped early or disabled.
-    if args.refine() && !stop.load(std::sync::atomic::Ordering::Relaxed) {
+    if will_refine {
         let ctx = Pass1Context {
             cell_nrms: &cell_nrms,
             cell_nnz: &cell_nnz,
@@ -631,17 +675,20 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
                 cell_nrms: cell_nrms2,
             } = out2;
             write_outputs(
-                &args.out,
-                &args.out,
-                &table2,
-                &pb2,
-                &model2,
-                &unified,
+                OutputCtx {
+                    prefix: &args.out,
+                    score_prefix: &args.out,
+                    table: &table2,
+                    pb: &pb2,
+                    model: &model2,
+                    unified: &unified,
+                    target_clusters: args.qc.num_topics,
+                },
                 CellQcOutputs {
                     keep_idx: &keep_idx2,
                     cell_nrms: &cell_nrms2,
+                    coembed: true,
                 },
-                args.num_topics,
             )
             .context("write refined outputs")?;
 
@@ -743,18 +790,33 @@ struct Pass1Context<'a> {
 /// each cutoff fired per cell (`pass_nnz` / `pass_norm` / `kept`). Covers
 /// all N_old cells (the full pre-subset axis), so a row exists for every
 /// dropped cell too. `pre_l2_norm` is `NaN` when phase-2 was skipped.
-#[allow(clippy::too_many_arguments)]
-fn write_cell_qc_parquet(
-    args: &GemArgs,
-    gem_data: &graph_embedding_util::data::UnifiedData,
-    cell_nrms: &[f32],
-    cell_nnz: &[f32],
+/// Per-cell QC columns for [`write_cell_qc_parquet`]: the spliced nnz and its
+/// cutoff, the pre-L2 fit norm and its empty-call cutoff (`NaN`/0 when phase-2
+/// was skipped, flagged by `have_nrms`), and the final per-cell keep decision.
+/// One entry per cell over the full pre-subset axis.
+struct CellQcReport<'a> {
+    cell_nrms: &'a [f32],
+    cell_nnz: &'a [f32],
     cell_cutoff: usize,
     norm_cut: f32,
     have_nrms: bool,
-    kept: &[bool],
+    kept: &'a [bool],
+}
+
+fn write_cell_qc_parquet(
+    args: &GemArgs,
+    gem_data: &graph_embedding_util::data::UnifiedData,
+    report: CellQcReport<'_>,
 ) -> anyhow::Result<()> {
     use matrix_util::traits::IoOps;
+    let CellQcReport {
+        cell_nrms,
+        cell_nnz,
+        cell_cutoff,
+        norm_cut,
+        have_nrms,
+        kept,
+    } = report;
     let n = gem_data.n_cells();
     let mut m = DMatrix::<f32>::zeros(n, 7);
     for c in 0..n {
@@ -789,9 +851,134 @@ fn write_cell_qc_parquet(
     Ok(())
 }
 
-/// Pass 2 of `--refine`: QC the genes-only pass-1 model — flag empty gene
-/// clusters by low mean ‖β‖, then drop near-empty cells by their pre-L2
-/// projection norm — subset `unified` to the survivors, and rebuild + train
+/// Per-gene cell-support QC for the refine pass. `support[g]` = number of cells
+/// (whatever columns are currently in `unified`'s backend) with a non-zero
+/// spliced count for gene `g`; `keep_mask[g] = support[g] >= min_cells`. Call
+/// AFTER the empty-droplet cell subset so support is counted on REAL cells, not
+/// ambient droplets — counting on raw droplets is the confound that sank the
+/// old ‖β_g‖² gene QC. `min_cells <= 1` is a no-op (all kept, empty support vec).
+fn gene_support_mask(
+    unified: &UnifiedData,
+    table: &FeatureTable,
+    genes_row_map: &BackendRowMap,
+    min_cells: usize,
+) -> anyhow::Result<(Vec<bool>, Vec<u32>)> {
+    let n_genes = table.n_genes();
+    if min_cells <= 1 {
+        return Ok((vec![true; n_genes], Vec::new()));
+    }
+    let spliced_rows = spliced_backend_rows(unified, table, genes_row_map);
+    let row_nnz = collect_row_stat_across_vec(unified.count_backend(), None)
+        .context("per-gene row statistics (spliced support)")?
+        .count_positives();
+    let mut support = vec![0u32; n_genes];
+    for &row in &spliced_rows {
+        if let Some(g) = genes_row_map.gene[row] {
+            support[g as usize] = support[g as usize].max(row_nnz[row] as u32);
+        }
+    }
+    let mask = support.iter().map(|&s| (s as usize) >= min_cells).collect();
+    Ok((mask, support))
+}
+
+/// Rebuild the global table + pseudobulk from the current `unified` (already
+/// subset to the surviving cells × genes) plus the unchanged satellites, then
+/// init and train a fresh full model over every modality. Shared by the refine
+/// pass-2 re-fit and the optional feature-null pass-3 re-fit. Returns
+/// `(model, table, pb, cell_nrms)`; the caller derives `keep_idx`. `label` only
+/// tags log/error context (`"refined"` / `"feature-refined"`).
+fn rebuild_and_train(
+    args: &GemArgs,
+    unified: &mut UnifiedData,
+    satellites: &[SatelliteBackend],
+    region_map: &RegionMap,
+    stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    label: &str,
+) -> anyhow::Result<(GemModel, FeatureTable, PseudobulkData, Vec<f32>)> {
+    // Global table from the surviving genes + the (unchanged) satellites. Dropped
+    // genes are gone from the genes namespace, so `map_backend_rows` drops their
+    // satellite modifier rows too (gene → None).
+    let sat_name_lists: Vec<&[Box<str>]> = satellites
+        .iter()
+        .map(|s| s.unified.feature_names.as_slice())
+        .collect();
+    let table = FeatureTable::build_layered(&unified.feature_names, &sat_name_lists, region_map);
+    anyhow::ensure!(
+        table.n_genes() > 0,
+        "refine: no genes remain after gene filter ({label})"
+    );
+
+    // Re-link satellites to the subset genes cells (some matched cells died).
+    let genes_row_map = table.map_backend_rows(&unified.feature_names, region_map);
+    let sat_row_maps: Vec<BackendRowMap> = satellites
+        .iter()
+        .map(|s| table.map_backend_rows(&s.unified.feature_names, region_map))
+        .collect();
+    let sat_links = link_satellites(satellites, sat_row_maps, &unified.barcodes);
+    let sat_views = satellite_views(satellites, &sat_links);
+
+    // Same pool-vs-stream choice as the main pass. Cells + features were re-subset
+    // in lockstep, so cell id == backend column still holds (no remapping needed).
+    let build_cell_pools = args.use_phase1_cell_axis();
+    let pb = build_pseudobulk(
+        unified,
+        &table,
+        &genes_row_map,
+        &sat_views,
+        args,
+        build_cell_pools,
+    )
+    .with_context(|| format!("build pseudobulk ({label})"))?;
+
+    data_beans_alg::gene_weighting::save_per_gene_weights(
+        &pb.gene_ubiquity,
+        &table.gene_names,
+        &format!("{}.ubiquity.parquet", args.out),
+    )
+    .with_context(|| format!("save gene ubiquity ({label})"))?;
+
+    let n_cells = unified.n_cells();
+    let n_pbs: Vec<usize> = pb.pb_pools_per_level.iter().map(|l| l.n_units).collect();
+    let dev = args
+        .runtime
+        .device
+        .to_device(args.runtime.device_no)
+        .with_context(|| format!("candle device init ({label})"))?;
+    let mut model = GemModel::new(
+        GemDims {
+            n_genes: table.n_genes(),
+            n_modalities: table.n_modalities(),
+            n_programs: args.model.n_programs,
+            n_regions: table.n_regions,
+            embedding_dim: args.model.embedding_dim,
+            n_cells,
+        },
+        &n_pbs,
+        &dev,
+    )
+    .with_context(|| format!("init model ({label})"))?;
+    model
+        .seed_init(args.runtime.seed)
+        .with_context(|| format!("seed model init ({label})"))?;
+
+    let cell_stream = (!build_cell_pools).then(|| {
+        build_cell_stream_ctx(
+            unified,
+            &genes_row_map,
+            satellites,
+            &sat_links,
+            (0..n_cells).collect(),
+        )
+    });
+    let cell_nrms = train(args, &table, &pb, &mut model, stop, cell_stream.as_ref())
+        .with_context(|| format!("training loop ({label})"))?;
+
+    Ok((model, table, pb, cell_nrms))
+}
+
+/// Pass 2 of `--refine`: QC the genes-only pass-1 model — call empty droplets
+/// from the pre-L2 cell norm and drop genes below the `--min-cells` support
+/// floor — subset `unified` to the surviving cells × genes, and rebuild + train
 /// the **full** model over every modality (genes + satellites). Always runs
 /// when refining (even if QC filters nothing) because pass 1 was genes-only.
 fn run_refine_pass(
@@ -817,17 +1004,18 @@ fn run_refine_pass(
     // k-means, no median×frac heuristic). nnz, the pre-L2 norm, the cutoffs and
     // each cell's pass/fail land side by side in `{out}.cell_qc.parquet`.
 
-    ////////////////////////////////////////////////////////////////////////////
-    // step 1. NO gene Q/C — keep the full gene dictionary, matching senna bge. //
-    ////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////////////////////////////////////////////////////
+    // step 1. Gene Q/C is DEFERRED to after the cell empty-call (step 3) — the  //
+    // --min-cells support filter must count REAL cells, not ambient droplets.   //
+    /////////////////////////////////////////////////////////////////////////////
 
-    // gem does cell-only QC (like bge). An earlier EB χ²_H null call on ‖β_g‖²
-    // collapsed the dictionary to a handful of genes on ambient-heavy data
-    // (the embedding has gene signal in few genes when most droplets are empty),
-    // which then corrupted the cell empty-call and every downstream consumer
-    // (annotation, topics). Keep all genes; the cell empty-call below is the
-    // only refine filter, exactly as bge has no feature QC.
-    let live_gene_mask = vec![true; n_genes];
+    // gem's only gene QC is the deterministic --min-cells cell-support filter,
+    // built at step 3 once the empty-droplet call has identified the real cells.
+    // It is deliberately NOT model-derived: an earlier EB χ²_H null on ‖β_g‖²
+    // collapsed the dictionary to a handful of genes on ambient-heavy data (the
+    // embedding has gene signal in few genes when most droplets are empty) and
+    // corrupted the cell call and every downstream consumer (annotation, topics).
+    // Counting raw cell support on the QC-passed cells sidesteps that confound.
 
     //////////////////////
     // step 2. cell q/c //
@@ -855,7 +1043,7 @@ fn run_refine_pass(
         let call = embedding_mixture_empty_call(
             cell_nrms,
             graph_embedding_util::null_call::QC_MIXTURE_K_MAX,
-            args.gene_null_fdr,
+            args.qc.gene_null_fdr,
         );
         // Effective drop cut = largest norm still called empty (MAP rule, at the
         // density valley — can sit above the component-labeling antimode).
@@ -882,12 +1070,14 @@ fn run_refine_pass(
     write_cell_qc_parquet(
         args,
         unified,
-        cell_nrms,
-        cell_nnz,
-        cell_cutoff,
-        norm_cut,
-        have_nrms,
-        &cell_keep,
+        CellQcReport {
+            cell_nrms,
+            cell_nnz,
+            cell_cutoff,
+            norm_cut,
+            have_nrms,
+            kept: &cell_keep,
+        },
     )
     .context("write cell_qc.parquet")?;
 
@@ -916,32 +1106,16 @@ fn run_refine_pass(
     }
 
     // ---- Filter unified (genes backend) ----
-    let live_feature_rows: Vec<usize> = (0..unified.n_features())
-        .filter(|&r| {
-            genes_row_map_p1.gene[r]
-                .map(|g| live_gene_mask[g as usize])
-                .unwrap_or(false)
-        })
-        .collect();
+    // step 3a. Subset CELLS first, so the --min-cells gene filter (3b) counts
+    // support on the real cells now in the backend, not the ambient droplets.
+    // `mask_columns` shrinks the backend cell columns, `subset_cells` syncs the
+    // logical axis; both renumber survivors in ascending order, so "cell id ==
+    // backend column" still holds for the streaming phase-2 pass, exactly as the
+    // initial up-front QC established. The EB-called empties never re-enter the
+    // model (not output-only). Guard against a degenerate all-empty call
+    // (mask_columns to 0 columns would crash the re-fit) — keep every cell then.
+    // (cell_qc.parquet was already written above on the pre-subset cell axis.)
     let live_cell_old_ids: Vec<usize> = (0..n_cells_old).filter(|&c| cell_keep[c]).collect();
-
-    info!(
-        "refine: keeping {} / {} feature rows, {} / {} cells",
-        live_feature_rows.len(),
-        unified.n_features(),
-        live_cell_old_ids.len(),
-        n_cells_old,
-    );
-
-    // Workflow step (iii): mask out the empty cells AND the dead genes, then
-    // re-fit on the survivors (not output-only — the EB-called empties never
-    // re-enter the model). `mask_columns` shrinks the backend cell columns,
-    // `subset_cells` syncs the logical axis, `subset_features` drops the
-    // dead-gene rows; all three renumber survivors in ascending order, so
-    // "cell id == backend column" still holds for the streaming phase-2 pass,
-    // exactly as the initial up-front QC established. Guard against a degenerate
-    // all-empty call (mask_columns to 0 columns would crash the re-fit) — keep
-    // every cell in that case, like the pass-1 fit.
     if live_cell_old_ids.is_empty() {
         warn!(
             "refine: cell empty call flagged ALL {n_cells_old} cells empty — keeping them \
@@ -954,98 +1128,118 @@ fn run_refine_pass(
             .context("subset genes cells in refine (mask_columns)")?;
         unified.subset_cells(&live_cell_old_ids);
     }
-    unified.subset_features(&live_feature_rows);
 
-    // ---- Rebuild ----
-    // Global table from the surviving genes + the (unchanged) satellites.
-    // Dead genes are gone from the genes namespace, so `map_backend_rows`
-    // drops their satellite modifier rows too (gene → None).
-    let sat_name_lists: Vec<&[Box<str>]> = satellites
-        .iter()
-        .map(|s| s.unified.feature_names.as_slice())
+    // step 3b. Gene Q/C: drop genes supported by < --min-cells real cells. Counts
+    // on the cell-subset backend (3a), so support reflects real cells. The mask
+    // indexes genes; `genes_row_map_p1` still addresses the full pre-subset
+    // feature axis, which `subset_features` collapses below.
+    let (live_gene_mask, gene_support) =
+        gene_support_mask(unified, table_p1, genes_row_map_p1, args.qc.min_cells)
+            .context("per-gene cell-support QC")?;
+    if args.qc.min_cells > 1 {
+        let (mut dropped, mut kept) = (Vec::new(), Vec::new());
+        for (g, &keep) in live_gene_mask.iter().enumerate() {
+            if keep {
+                kept.push(gene_support[g] as f32);
+            } else {
+                dropped.push(gene_support[g] as f32);
+            }
+        }
+        info!(
+            "refine: gene QC (--min-cells {}): kept {} / {} genes (dropped median support={:.0} vs kept {:.0})",
+            args.qc.min_cells,
+            kept.len(),
+            n_genes,
+            median(&dropped),
+            median(&kept),
+        );
+    }
+    let live_feature_rows: Vec<usize> = (0..unified.n_features())
+        .filter(|&r| {
+            genes_row_map_p1.gene[r]
+                .map(|g| live_gene_mask[g as usize])
+                .unwrap_or(false)
+        })
         .collect();
-    let table2 = FeatureTable::build_layered(&unified.feature_names, &sat_name_lists, region_map);
-    anyhow::ensure!(
-        table2.n_genes() > 0,
-        "refine: no genes remain after dead-gene filter"
+
+    info!(
+        "refine: keeping {} / {} feature rows, {} / {} cells",
+        live_feature_rows.len(),
+        unified.n_features(),
+        live_cell_old_ids.len(),
+        n_cells_old,
     );
 
-    // Re-link satellites to the subset genes cells (some matched cells died).
-    let genes_row_map2 = table2.map_backend_rows(&unified.feature_names, region_map);
-    let sat_row_maps2: Vec<BackendRowMap> = satellites
-        .iter()
-        .map(|s| table2.map_backend_rows(&s.unified.feature_names, region_map))
-        .collect();
-    let sat_links2 = link_satellites(satellites, sat_row_maps2, &unified.barcodes);
-    let sat_views2 = satellite_views(satellites, &sat_links2);
+    unified.subset_features(&live_feature_rows);
 
-    // Same pool-vs-stream choice as the main pass. Cells + features were
-    // re-subset in lockstep above, so cell id == backend column still holds (no
-    // refine remapping needed).
-    let build_cell_pools = args.use_phase1_cell_axis();
-    let pb2 = build_pseudobulk(
-        unified,
-        &table2,
-        &genes_row_map2,
-        &sat_views2,
-        args,
-        build_cell_pools,
-    )
-    .context("build pseudobulk (refined)")?;
+    // ---- Pass 2: rebuild + train the full model on the QC-passed cells × genes.
+    let (mut model2, mut table2, mut pb2, mut cell_nrms2) =
+        rebuild_and_train(args, unified, satellites, region_map, stop, "refined")?;
 
-    // Diagnostic weights for pass-2.
-    data_beans_alg::gene_weighting::save_per_gene_weights(
-        &pb2.gene_ubiquity,
-        &table2.gene_names,
-        &format!("{}.ubiquity.parquet", args.out),
-    )
-    .context("save gene ubiquity (refined)")?;
-
-    let n_cells2 = unified.n_cells();
-    let n_pbs2: Vec<usize> = pb2.pb_pools_per_level.iter().map(|l| l.n_units).collect();
-    let dev = args
-        .device
-        .to_device(args.device_no)
-        .context("candle device init (refined)")?;
-    let mut model2 = GemModel::new(
-        table2.n_genes(),
-        table2.n_modalities(),
-        args.n_programs,
-        table2.n_regions,
-        args.embedding_dim,
-        n_cells2,
-        &n_pbs2,
-        &dev,
-    )
-    .context("init model (refined)")?;
-    model2
-        .seed_init(args.seed)
-        .context("seed model init (refined)")?;
-
-    // Cells were re-subset in lockstep with the backend, so cell id == backend
-    // column (identity) still holds — stream phase-2 over every kept cell.
-    let cell_stream2 = (!build_cell_pools).then(|| {
-        build_cell_stream_ctx(
-            unified,
-            &genes_row_map2,
-            satellites,
-            &sat_links2,
-            (0..n_cells2).collect(),
-        )
-    });
-    let cell_nrms2 = train(
-        args,
-        &table2,
-        &pb2,
-        &mut model2,
-        stop,
-        cell_stream2.as_ref(),
-    )
-    .context("training loop (refined)")?;
+    // ---- Optional pass 3: empirical-Bayes feature-null QC + re-fit ----
+    // The null call (shared with `senna bge`) needs a β trained on REAL cells to
+    // separate untrained genes (β still at its `N(0,σ²I)` init) from genes with
+    // signal — so it runs on the pass-2 β (clean cells), NOT pass-1 (the
+    // ambient-contaminated β was what made the earlier ‖β_g‖² QC collapse the
+    // dictionary). Drop the null genes and re-fit on the live dictionary. Off by
+    // default (--feature-null-fdr 0); intended to eventually supersede --min-cells.
+    if args.qc.feature_null_fdr > 0.0 && !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        let h = args.model.embedding_dim;
+        let n_genes2 = table2.n_genes();
+        let beta_flat: Vec<f32> = model2
+            .beta
+            .flatten_all()
+            .and_then(|t| t.to_vec1::<f32>())
+            .context("read pass-2 β for feature-null QC")?;
+        let null = embedding_null_call(&beta_flat, n_genes2, h, args.qc.feature_null_fdr);
+        if null.n_live == 0 {
+            warn!(
+                "refine: feature null QC flagged ALL {n_genes2} genes null — keeping them \
+                 (check --feature-null-fdr); no feature drop"
+            );
+        } else if null.n_live < n_genes2 {
+            info!(
+                "refine: feature null QC (--feature-null-fdr {}): {} / {} genes live \
+                 (σ̂²={:.4}, ν̂={:.1}, π̂₀={:.2}) — re-fitting on the live dictionary",
+                args.qc.feature_null_fdr,
+                null.n_live,
+                n_genes2,
+                null.sigma2,
+                null.eff_dof,
+                null.pi0,
+            );
+            let genes_row_map2 = table2.map_backend_rows(&unified.feature_names, region_map);
+            let live_rows: Vec<usize> = (0..unified.n_features())
+                .filter(|&r| {
+                    genes_row_map2.gene[r]
+                        .map(|g| null.live[g as usize])
+                        .unwrap_or(false)
+                })
+                .collect();
+            unified.subset_features(&live_rows);
+            let (m3, t3, p3, c3) = rebuild_and_train(
+                args,
+                unified,
+                satellites,
+                region_map,
+                stop,
+                "feature-refined",
+            )?;
+            model2 = m3;
+            table2 = t3;
+            pb2 = p3;
+            cell_nrms2 = c3;
+        } else {
+            info!(
+                "refine: feature null QC (--feature-null-fdr {}): all {n_genes2} genes live — no drop",
+                args.qc.feature_null_fdr
+            );
+        }
+    }
 
     // Empties were masked out before the re-fit, so every cell remaining on the
     // axis is a real survivor — write them all.
-    let keep_idx2: Vec<usize> = (0..n_cells2).collect();
+    let keep_idx2: Vec<usize> = (0..unified.n_cells()).collect();
 
     Ok(Pass2Outputs {
         model: model2,
@@ -1084,203 +1278,82 @@ fn infer_n_regions(satellites: &[SatelliteBackend], default_n: usize) -> usize {
     }
 }
 
-/// Longest `_`-aligned prefix of `name` that is a member of `candidates`.
-/// The match is `_`-bounded: a candidate `rep1_wt` matches
-/// `rep1_wt_m6a_mixture` (because the char after the prefix is `_`) but
-/// does NOT match `rep1_wtX_...`. Returns `None` when no candidate aligns.
-fn longest_underscore_prefix_in(name: &str, candidates: &FxHashSet<Box<str>>) -> Option<Box<str>> {
-    let mut best: Option<&str> = None;
-    for sid in candidates.iter() {
-        let s = sid.as_ref();
-        if !name.starts_with(s) {
-            continue;
-        }
-        // Boundary: full equality or next char is `_`.
-        if name.len() != s.len() && !name[s.len()..].starts_with('_') {
-            continue;
-        }
-        if best.is_none_or(|b| s.len() > b.len()) {
-            best = Some(s);
-        }
-    }
-    best.map(|s| s.into())
-}
-
-/// Longest `_`-aligned prefix of `name` that is also a `_`-aligned prefix
-/// of *every* entry in `others`. `_`-aligned = the prefix is the whole
-/// string or is immediately followed by `_`. Returns `None` when not even
-/// the first `_`-segment is shared. Used to recover a **single** genes
-/// file's sample id from the satellite basenames it must co-sample with
-/// (e.g. `rep1_wt_genes` + `rep1_wt_m6a_mixture` → `rep1_wt`), so the genes
-/// strip can be inferred without a second genes file to diff against.
-fn longest_shared_underscore_prefix(name: &str, others: &[Box<str>]) -> Option<Box<str>> {
-    // `_`-aligned prefixes of `name`, longest first: the whole name, then
-    // each truncation at a `_`.
-    let mut cands: Vec<&str> = std::iter::once(name)
-        .chain(name.match_indices('_').map(|(i, _)| &name[..i]))
-        .collect();
-    cands.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    let aligned =
-        |hay: &str, p: &str| hay == p || hay.strip_prefix(p).is_some_and(|r| r.starts_with('_'));
-    cands
-        .into_iter()
-        .find(|p| others.iter().all(|o| aligned(o.as_ref(), p)))
-        .map(|p| p.into())
-}
-
-/// Infer the strip suffix for one satellite modality from its `basenames`.
-///
-/// Algorithm:
-///   1. If ≥2 files: try LCS-at-`_` across this modality's basenames.
-///      Accept when every stripped name is a known genes sample id.
-///   2. Else (1 file, or LCS failed): per file, find the longest
-///      `_`-aligned prefix in `genes_ids` and take the tail as the strip.
-///      Accept when every file yields the *same* tail.
-///   3. Otherwise: hard error with both sample-id sets surfaced so the
-///      user can set `--{label}-sample-strip` explicitly.
-fn infer_satellite_strip(
-    basenames: &[Box<str>],
-    genes_ids: &FxHashSet<Box<str>>,
-    label: &str,
-) -> anyhow::Result<Box<str>> {
-    // No files → no strip (the caller already short-circuits empty modalities;
-    // this keeps the `tails[0]` access below sound for any future caller).
-    if basenames.is_empty() {
-        return Ok("".into());
-    }
-
-    // Genes ids, sorted, for any error message (the source is a HashSet, so
-    // sort to keep the diagnostic deterministic run-to-run / test-stable).
-    let sorted_genes_ids = || {
-        let mut v: Vec<&str> = genes_ids.iter().map(|s| s.as_ref()).collect();
-        v.sort_unstable();
-        v
-    };
-
-    // Path 1: LCS across this modality's basenames, validated against genes ids.
-    if basenames.len() >= 2 {
-        let lcs = longest_common_underscore_suffix(basenames);
-        if !lcs.is_empty() {
-            let ok = basenames.iter().all(|b| {
-                b.as_ref()
-                    .strip_suffix(lcs.as_ref())
-                    .is_some_and(|s| genes_ids.contains(s))
-            });
-            if ok {
-                return Ok(lcs);
-            }
-        }
-    }
-
-    // Path 2: per-file LCP against genes ids; tails must agree.
-    let mut tails: Vec<Box<str>> = Vec::with_capacity(basenames.len());
-    for b in basenames {
-        match longest_underscore_prefix_in(b.as_ref(), genes_ids) {
-            Some(sid) => {
-                let tail = &b.as_ref()[sid.len()..];
-                tails.push(tail.into());
-            }
-            None => {
-                anyhow::bail!(
-                    "{label} sample ids don't overlap with genes sample ids.\n  \
-                     genes sample ids: {:?}\n  \
-                     {label} basenames: {:?}\n  \
-                     No `_`-aligned suffix or prefix lines up. Set --genes-sample-strip \
-                     and/or --{label}-sample-strip so both reduce to the same sample id.",
-                    sorted_genes_ids(),
-                    basenames.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
-                );
-            }
-        }
-    }
-    let first = tails[0].clone();
-    if tails.iter().all(|t| *t == first) {
-        return Ok(first);
-    }
-    anyhow::bail!(
-        "{label} files imply inconsistent sample-id strips.\n  \
-         genes sample ids: {:?}\n  \
-         per-file inferred strips: {:?}\n  \
-         Pass --{label}-sample-strip <SUFFIX> to override.",
-        sorted_genes_ids(),
-        tails.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
-    );
-}
-
 /// Argument-level sanity checks before any I/O or training. Surfaces
 /// configuration mistakes (zero-dim model, NaN/out-of-range tempering,
 /// stratum-fraction overflow) as a clear `anyhow::Error` rather than a
 /// candle panic or silently zero-loss training.
 fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
     anyhow::ensure!(
-        args.embedding_dim > 0,
+        args.model.embedding_dim > 0,
         "--embedding-dim must be > 0 (got {})",
-        args.embedding_dim
+        args.model.embedding_dim
     );
     anyhow::ensure!(
-        args.n_programs > 0,
+        args.model.n_programs > 0,
         "--num-programs must be > 0 (got {})",
-        args.n_programs
+        args.model.n_programs
     );
-    if let Some(n) = args.n_regions {
+    if let Some(n) = args.model.n_regions {
         anyhow::ensure!(n > 0, "--num-regions must be > 0 (got {n})");
     }
     anyhow::ensure!(
-        args.tau.is_finite() && (0.0..=1.0).contains(&args.tau),
+        args.train.tau.is_finite() && (0.0..=1.0).contains(&args.train.tau),
         "--tau must be a finite value in [0, 1] (got {})",
-        args.tau
+        args.train.tau
     );
     anyhow::ensure!(
-        args.tau_modality.is_finite() && (0.0..=1.0).contains(&args.tau_modality),
+        args.train.tau_modality.is_finite() && (0.0..=1.0).contains(&args.train.tau_modality),
         "--tau-modality must be a finite value in [0, 1] (got {})",
-        args.tau_modality
+        args.train.tau_modality
     );
     if args.resolve_topics() {
         // --no-cell-axis leaves e_cell at its random init (never trained),
         // so resolving topics from it would yield archetypes of noise.
         anyhow::ensure!(
-            !args.no_cell_axis,
+            !args.collapse.no_cell_axis,
             "--resolve-topics requires a trained cell embedding, but --no-cell-axis \
              leaves e_cell at its random init; drop one of the two flags"
         );
-        if let Some(k) = args.num_topics {
+        if let Some(k) = args.qc.num_topics {
             anyhow::ensure!(k >= 2, "--num-topics must be ≥ 2 (got {})", k);
         }
         // Else: K is auto-swept over 2..=H+1, which is always ≥ 2.
     }
     anyhow::ensure!(
-        args.f_agg.is_finite() && (0.0..=1.0).contains(&args.f_agg),
+        args.train.f_agg.is_finite() && (0.0..=1.0).contains(&args.train.f_agg),
         "--f-agg must be in [0, 1] (got {})",
-        args.f_agg
+        args.train.f_agg
     );
     anyhow::ensure!(
-        args.f_count.is_finite() && (0.0..=1.0).contains(&args.f_count),
+        args.train.f_count.is_finite() && (0.0..=1.0).contains(&args.train.f_count),
         "--f-count must be in [0, 1] (got {})",
-        args.f_count
+        args.train.f_count
     );
     anyhow::ensure!(
-        args.f_agg + args.f_count <= 1.0,
+        args.train.f_agg + args.train.f_count <= 1.0,
         "--f-agg + --f-count must be ≤ 1.0 (got {} + {} = {}); modifier stratum gets the remainder",
-        args.f_agg,
-        args.f_count,
-        args.f_agg + args.f_count
+        args.train.f_agg,
+        args.train.f_count,
+        args.train.f_agg + args.train.f_count
     );
     // At least one negative-source must be active or training is a no-op:
     // log_softmax over a single positive column is identically zero.
     anyhow::ensure!(
-        args.n_rand + args.n_swap_gene_mode > 0,
+        args.train.n_rand + args.train.n_swap_gene_mode > 0,
         "at least one of --n-rand, --n-swap-gene-mode must be > 0 \
          (else NCE loss collapses to zero and AdamW makes no progress)"
     );
     if args.refine() {
         anyhow::ensure!(
-            args.gene_null_fdr > 0.0 && args.gene_null_fdr < 1.0,
+            args.qc.gene_null_fdr > 0.0 && args.qc.gene_null_fdr < 1.0,
             "--gene-null-fdr must be in (0, 1) (got {})",
-            args.gene_null_fdr
+            args.qc.gene_null_fdr
         );
     }
+    anyhow::ensure!(
+        args.qc.feature_null_fdr >= 0.0 && args.qc.feature_null_fdr < 1.0,
+        "--feature-null-fdr must be in [0, 1) (0 = off) (got {})",
+        args.qc.feature_null_fdr
+    );
     Ok(())
 }
-
-#[cfg(test)]
-mod tests;

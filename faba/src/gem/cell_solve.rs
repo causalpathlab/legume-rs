@@ -16,7 +16,7 @@ use rustc_hash::FxHashMap;
 
 use super::args::GemArgs;
 use super::feature_table::{BackendRowMap, RowStratum};
-use super::model::GemModel;
+use super::model::{FeatureRows, GemModel};
 use super::pseudobulk::AxisPools;
 use super::sampling::COUNT_BIAS_MODALITY;
 
@@ -56,7 +56,7 @@ pub fn solve_cell_embeddings(
     let (frozen_e, frozen_b) = embed_identities(model, &ids, h)?;
     // 3. Parallel per-cell Poisson-MAP projection (shared solver), with a
     //    per-cell progress bar over the rayon fan-out.
-    let lambda = args.phase2_ridge.max(0.0) as f64;
+    let lambda = args.train.phase2_ridge.max(0.0) as f64;
     let pb = graph_embedding_util::progress::new_progress_bar(n_cells as u64);
     pb.set_message("cell projection");
     // gem scores with a per-cell bias (b_cell), so keep the fitted b_c.
@@ -237,32 +237,43 @@ fn modifier_identity(g: u32, m: u32, r: u32) -> Identity {
 /// CountComp row feeds both its splice identity and the gene's AGG sum; a
 /// ModifierComp row feeds its (modality, region) identity. Shared by the genes
 /// and satellite stream callbacks so the mapping can't drift between them.
-#[allow(clippy::too_many_arguments)]
-fn accumulate_streamed(
-    rm: &BackendRowMap,
-    uid: usize,
-    local: usize,
-    v: f32,
-    per_cell: &mut [Vec<(u32, f32)>],
-    agg_acc: &mut FxHashMap<(u32, u32), f32>,
-    id_of: &impl Fn(&IdentityKey) -> u32,
-) {
-    let (Some(stratum), Some(g)) = (rm.stratum[uid], rm.gene[uid]) else {
-        return;
-    };
-    match stratum {
-        RowStratum::CountComp => {
-            let m = rm.modality[uid].unwrap_or(0);
-            per_cell[local].push((id_of(&(g, m, 0, false)), v));
-            *agg_acc.entry((local as u32, g)).or_insert(0.0) += v;
-        }
-        RowStratum::ModifierComp => {
-            if let Some(m) = rm.modality[uid] {
-                let r = rm.region[uid].unwrap_or(0);
-                per_cell[local].push((id_of(&(g, m, r, false)), v));
+/// Per-chunk streaming accumulator: each local cell's `(identity, count)`
+/// entries, plus the `(local_cell, gene)` → summed-count map for the AGG rows
+/// (spliced+unspliced merged). Owns both so the `for_each_triplet` closures can
+/// borrow it without entangling the surrounding cell-axis arrays.
+struct CellAccum {
+    per_cell: Vec<Vec<(u32, f32)>>,
+    agg_acc: FxHashMap<(u32, u32), f32>,
+}
+
+impl CellAccum {
+    /// Route one streamed `(row, local_cell, value)` triplet (via its backend
+    /// row map `rm`) into the per-cell identity list / AGG sum.
+    fn accumulate(
+        &mut self,
+        rm: &BackendRowMap,
+        uid: usize,
+        local: usize,
+        v: f32,
+        id_of: &impl Fn(&IdentityKey) -> u32,
+    ) {
+        let (Some(stratum), Some(g)) = (rm.stratum[uid], rm.gene[uid]) else {
+            return;
+        };
+        match stratum {
+            RowStratum::CountComp => {
+                let m = rm.modality[uid].unwrap_or(0);
+                self.per_cell[local].push((id_of(&(g, m, 0, false)), v));
+                *self.agg_acc.entry((local as u32, g)).or_insert(0.0) += v;
             }
+            RowStratum::ModifierComp => {
+                if let Some(m) = rm.modality[uid] {
+                    let r = rm.region[uid].unwrap_or(0);
+                    self.per_cell[local].push((id_of(&(g, m, r, false)), v));
+                }
+            }
+            RowStratum::Site => {}
         }
-        RowStratum::Site => {}
     }
 }
 
@@ -283,7 +294,7 @@ pub fn solve_cell_embeddings_streaming(
     let (ids, key_to_id) = build_identity_universe(ctx);
     let (frozen_e, frozen_b) = embed_identities(model, &ids, h)?;
     let id_of = |k: &IdentityKey| *key_to_id.get(k).expect("identity in universe");
-    let lambda = args.phase2_ridge.max(0.0) as f64;
+    let lambda = args.train.phase2_ridge.max(0.0) as f64;
 
     // 2. Backend-row → unified-feature-id inverses (built once).
     let g_b2u = backend_to_unified(ctx.feature_to_backend_row, ctx.genes_backend.num_rows());
@@ -315,25 +326,19 @@ pub fn solve_cell_embeddings_streaming(
         // id − chunk_start, i.e. the `out_col` the backend reports).
         let cols = &ctx.cell_columns[chunk_start..chunk_end];
 
-        let mut per_cell: Vec<Vec<(u32, f32)>> = vec![Vec::new(); nlocal];
         // AGG sums spliced+unspliced per (local_cell, gene); count/modifier
         // entries are one-per-backend-row (pushed directly, never merged).
-        let mut agg_acc: FxHashMap<(u32, u32), f32> = FxHashMap::default();
+        let mut accum = CellAccum {
+            per_cell: vec![Vec::new(); nlocal],
+            agg_acc: FxHashMap::default(),
+        };
 
         let rm = ctx.genes_row_map;
         ctx.genes_backend
             .for_each_triplet(cols.iter().copied(), slab, |row, out_col, v| {
                 let uid = g_b2u[row as usize];
                 if uid != u32::MAX {
-                    accumulate_streamed(
-                        rm,
-                        uid as usize,
-                        out_col as usize,
-                        v,
-                        &mut per_cell,
-                        &mut agg_acc,
-                        &id_of,
-                    );
+                    accum.accumulate(rm, uid as usize, out_col as usize, v, &id_of);
                 }
             })?;
 
@@ -358,27 +363,19 @@ pub fn solve_cell_embeddings_streaming(
                 .for_each_triplet(sat_cols.iter().copied(), slab, |row, out_col, v| {
                     let uid = b2u[row as usize];
                     if uid != u32::MAX {
-                        accumulate_streamed(
-                            rm,
-                            uid as usize,
-                            sat_local[out_col as usize],
-                            v,
-                            &mut per_cell,
-                            &mut agg_acc,
-                            &id_of,
-                        );
+                        accum.accumulate(rm, uid as usize, sat_local[out_col as usize], v, &id_of);
                     }
                 })?;
         }
 
-        for ((local, g), sum) in agg_acc {
-            per_cell[local as usize].push((id_of(&(g, 0, 0, true)), sum));
+        for ((local, g), sum) in accum.agg_acc {
+            accum.per_cell[local as usize].push((id_of(&(g, 0, 0, true)), sum));
         }
 
         let (e_chunk, b_chunk) = graph_embedding_util::cell_projection::project_cells(
             &frozen_e,
             &frozen_b,
-            &per_cell,
+            &accum.per_cell,
             h,
             lambda,
             Some(&pb),
@@ -494,8 +491,15 @@ pub(crate) fn embed_identities(
         let region: Vec<u32> = chunk.iter().map(|x| x.region).collect();
         let bias_mod: Vec<u32> = chunk.iter().map(|x| x.bias_modality).collect();
         let is_agg: Vec<bool> = chunk.iter().map(|x| x.is_agg).collect();
-        let (e_t, b_t) =
-            model.embed_and_bias_rows(&gene, &gene, &q_mod, &region, &gene, &bias_mod, &is_agg)?;
+        let (e_t, b_t) = model.embed_and_bias_rows(&FeatureRows {
+            gene_for_rho: &gene,
+            gene_for_z: &gene,
+            modality_for_q: &q_mod,
+            region_for_delta: &region,
+            gene_for_bias: &gene,
+            modality_for_bias: &bias_mod,
+            is_agg: &is_agg,
+        })?;
         let e_rows = e_t.to_vec2::<f32>()?;
         let b_vals = b_t.to_vec1::<f32>()?;
         for (j, row) in e_rows.iter().enumerate() {

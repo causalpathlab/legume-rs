@@ -88,7 +88,7 @@ pub fn resolve_topics(
         min_anchor_cells: MIN_ANCHOR_CELLS,
     };
     let interrupted = stop.load(Ordering::SeqCst);
-    let res = match args.num_topics {
+    let res = match args.qc.num_topics {
         Some(k) => {
             anyhow::ensure!(k >= 2, "resolve-topics: --num-topics must be ≥ 2");
             info!("resolve-topics: separable-NMF (SPA anchors) with fixed K={k}");
@@ -96,7 +96,7 @@ pub fn resolve_topics(
         }
         None if interrupted => {
             // Interrupted: skip the K-sweep, finalise fast at a sane K.
-            let k = args.n_programs.max(2);
+            let k = args.model.n_programs.max(2);
             info!("resolve-topics: interrupted — fixing K={k}");
             anchor_topics(&z, &rho, k, opts)
         }
