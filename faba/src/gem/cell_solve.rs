@@ -12,12 +12,13 @@ use super::common::candle_core;
 use anyhow::{Context, Result};
 use candle_core::Tensor;
 use data_beans::sparse_io_vector::SparseIoVec;
+use nalgebra::DMatrix;
 use rustc_hash::FxHashMap;
 
 use super::args::GemArgs;
 use super::feature_table::{BackendRowMap, RowStratum};
 use super::model::{FeatureRows, GemModel};
-use super::pseudobulk::AxisPools;
+use super::pseudobulk::{AxisPools, GenesResidual};
 use super::sampling::COUNT_BIAS_MODALITY;
 
 /// One distinct feature-row identity — the `embed_and_bias_rows` inputs that
@@ -33,16 +34,115 @@ pub(crate) struct Identity {
     pub bias_modality: u32,
 }
 
+/// Keep the per-feature divisor's log well inside the solver's `s` clamp (±30);
+/// a fold-factor of e^4 ≈ 55× is already far beyond anything real.
+const DIVISOR_LOG_CLAMP: f64 = 4.0;
+
+/// Phase-2 batch correction: divide each cell's genes counts by the finest-level
+/// `μ_residual[gene, pb(cell)]` (its batch fold-factor) before the Poisson-MAP
+/// projection, so `e_cell` fits the de-batched signal — the analytic twin of
+/// `senna topic`'s `AdjMethod::Residual` divisor. Built only when the collapse
+/// fit a `μ_residual` (>1 batch); a no-op otherwise. Satellite (modifier)
+/// features are not corrected (they have no genes-backend fold-factor).
+pub(crate) struct BatchDivisor<'a> {
+    mu_residual: &'a DMatrix<f32>, // finest [spliced_row × n_pb]
+    gene_to_row: FxHashMap<u32, usize>,
+    cell_to_finest_pb: &'a [usize], // cell → finest pb id (μ_residual column)
+}
+
+impl<'a> BatchDivisor<'a> {
+    /// `genes_residual` is the finest-level fold-factor; `cell_to_finest_pb` is
+    /// the finest entry of `cell_to_pb_per_level` (coarsest-first ⇒ `.last()`).
+    pub(crate) fn new(genes_residual: &'a GenesResidual, cell_to_finest_pb: &'a [usize]) -> Self {
+        let mut gene_to_row = FxHashMap::default();
+        for (row, &g) in genes_residual.resid_row_to_gene.iter().enumerate() {
+            gene_to_row.insert(g, row);
+        }
+        Self {
+            mu_residual: &genes_residual.mu_residual,
+            gene_to_row,
+            cell_to_finest_pb,
+        }
+    }
+
+    /// The clamped fold-factor `μ_residual[row, pb]` a count is divided by; 1.0
+    /// (no-op) on an out-of-range column or non-positive value. The shared core
+    /// of both the pooled (`genes_divisor`) and streaming (`divide_column`) paths.
+    fn clamped_factor(&self, row: usize, pb: usize) -> f32 {
+        if pb >= self.mu_residual.ncols() {
+            return 1.0;
+        }
+        let d = self.mu_residual[(row, pb)];
+        if d > 0.0 {
+            let hi = DIVISOR_LOG_CLAMP.exp() as f32;
+            d.clamp(hi.recip(), hi)
+        } else {
+            1.0
+        }
+    }
+
+    /// The clamped fold-factor `μ_residual[gene, pb(cell)]` to divide a count by;
+    /// 1.0 (no-op) when the gene/cell is unmapped. Used by the pooled path (the
+    /// streaming path divides per cell via [`Self::divide_column`]).
+    fn genes_divisor(&self, gene: u32, cell: usize) -> f32 {
+        let (Some(&row), Some(&pb)) = (
+            self.gene_to_row.get(&gene),
+            self.cell_to_finest_pb.get(cell),
+        ) else {
+            return 1.0;
+        };
+        self.clamped_factor(row, pb)
+    }
+
+    /// Map each genes-backend row to its `μ_residual` row (`None` ⇒ no
+    /// fold-factor ⇒ divisor 1.0). `backend_gene[row]` is the row's gene id (the
+    /// streaming caller derives it). This lets [`Self::divide_column`] read the
+    /// small `μ_residual` directly instead of broadcasting it into a dense
+    /// `[n_backend_rows × n_pb]` divisor.
+    pub(crate) fn backend_to_resid(&self, backend_gene: &[Option<u32>]) -> Vec<Option<usize>> {
+        backend_gene
+            .iter()
+            .map(|g| g.and_then(|g| self.gene_to_row.get(&g).copied()))
+            .collect()
+    }
+
+    /// Self-normalizing **sparse** divide of one cell's genes column by its batch
+    /// fold-factor, read straight from `μ_residual` (no dense broadcast).
+    /// Numerically identical to matrix-util's
+    /// `adjust_by_division_of_selected_inplace` (DMatrix variant): a per-cell
+    /// scale `λ = Σx/Σd` with divisor 1.0 off-gene (keeping depth for `b_cell`).
+    /// `pb` is the cell's finest pseudobulk; `(rows, vals)` are the column's
+    /// nonzero backend rows + counts; `emit(backend_row, divided_value)` is
+    /// called once per nonzero.
+    fn divide_column<F: FnMut(usize, f32)>(
+        &self,
+        resid_row: &[Option<usize>],
+        pb: usize,
+        rows: &[usize],
+        vals: &[f32],
+        mut emit: F,
+    ) {
+        let factor = |row: usize| resid_row[row].map_or(1.0, |rr| self.clamped_factor(rr, pb));
+        let dsum: f32 = rows.iter().map(|&r| factor(r)).sum();
+        let xsum: f32 = vals.iter().copied().sum();
+        let scale = if dsum > 0.0 { xsum / dsum } else { 1.0 };
+        for (&row, &v) in rows.iter().zip(vals) {
+            emit(row, v / (factor(row) * scale));
+        }
+    }
+}
+
 /// Solve `e_cell` (and `b_cell`) by projecting every cell onto the frozen
 /// feature side, then overwrite the model's `e_cell` / `b_cell` vars.
 /// Returns the pre-L2-normalisation norm for each cell (one entry per model
 /// cell, ordered by cell id 0..n_cells).  A near-zero norm signals that the
 /// IRLS had nothing to fit — the cell's expressed genes were all near the
 /// β=0 init — and is used downstream for cell prior-score QC.
-pub fn solve_cell_embeddings(
+pub(crate) fn solve_cell_embeddings(
     model: &mut GemModel,
     pools: &AxisPools,
     args: &GemArgs,
+    batch_divisor: Option<&BatchDivisor>,
 ) -> Result<Vec<f32>> {
     let n_cells = model.n_cells;
     let h = model.embedding_dim;
@@ -50,8 +150,9 @@ pub fn solve_cell_embeddings(
         return Ok(vec![]);
     }
 
-    // 1. Distinct identities + per-cell (identity, count) lists.
-    let (ids, per_cell) = collect_identities(pools, n_cells);
+    // 1. Distinct identities + per-cell (identity, count) lists (genes counts
+    //    divided by their batch fold-factor when `batch_divisor` is set).
+    let (ids, per_cell) = collect_identities(pools, n_cells, batch_divisor);
     // 2. Frozen feature embeddings (one batched device pass → CPU).
     let (frozen_e, frozen_b) = embed_identities(model, &ids, h)?;
     // 3. Parallel per-cell Poisson-MAP projection (shared solver), with a
@@ -279,10 +380,11 @@ impl CellAccum {
 
 /// Streaming counterpart of [`solve_cell_embeddings`]: identical result, but
 /// never materialises the per-cell pool.
-pub fn solve_cell_embeddings_streaming(
+pub(crate) fn solve_cell_embeddings_streaming(
     model: &mut GemModel,
     ctx: &CellStreamCtx,
     args: &GemArgs,
+    batch_divisor: Option<&BatchDivisor>,
 ) -> Result<Vec<f32>> {
     let n_cells = ctx.cell_columns.len();
     let h = model.embedding_dim;
@@ -303,6 +405,23 @@ pub fn solve_cell_embeddings_streaming(
         .iter()
         .map(|s| backend_to_unified(s.feature_to_backend_row, s.backend.num_rows()))
         .collect();
+
+    // Sparse batch-divide map (built once): each genes-backend row → its
+    // `μ_residual` row, so the divide reads the small fold-factor matrix directly
+    // (no dense `[backend_rows × n_pb]` broadcast). `None` ⇒ no correction (≤1 batch).
+    let resid_row: Option<Vec<Option<usize>>> = batch_divisor.map(|bo| {
+        let backend_gene: Vec<Option<u32>> = (0..ctx.genes_backend.num_rows())
+            .map(|r| {
+                let uid = g_b2u[r];
+                if uid == u32::MAX {
+                    None
+                } else {
+                    ctx.genes_row_map.gene[uid as usize]
+                }
+            })
+            .collect();
+        bo.backend_to_resid(&backend_gene)
+    });
 
     // 3. Chunk over cells. Per chunk: stream genes + satellite triplets, build
     //    per-cell (identity, count) lists, project, scatter back.
@@ -334,13 +453,41 @@ pub fn solve_cell_embeddings_streaming(
         };
 
         let rm = ctx.genes_row_map;
-        ctx.genes_backend
-            .for_each_triplet(cols.iter().copied(), slab, |row, out_col, v| {
-                let uid = g_b2u[row as usize];
-                if uid != u32::MAX {
-                    accum.accumulate(rm, uid as usize, out_col as usize, v, &id_of);
+        if let (Some(bo), Some(resid_row)) = (batch_divisor, resid_row.as_ref()) {
+            // Divide mode: read each slab's genes counts as a CSC, then divide each
+            // cell's column by its batch fold-factor (sparse — straight from
+            // `μ_residual`, per-cell self-normalizing scale) and accumulate the
+            // divided values. Slab-bounded like `for_each_triplet`.
+            for slab_start in (0..nlocal).step_by(slab) {
+                let slab_end = (slab_start + slab).min(nlocal);
+                let scols = &cols[slab_start..slab_end];
+                let yy = ctx.genes_backend.read_columns_csc(scols.iter().copied())?;
+                for (k, col) in yy.col_iter().enumerate() {
+                    let local = slab_start + k;
+                    let cell_pb = bo.cell_to_finest_pb[chunk_start + local];
+                    bo.divide_column(
+                        resid_row,
+                        cell_pb,
+                        col.row_indices(),
+                        col.values(),
+                        |row, v| {
+                            let uid = g_b2u[row];
+                            if uid != u32::MAX {
+                                accum.accumulate(rm, uid as usize, local, v, &id_of);
+                            }
+                        },
+                    );
                 }
-            })?;
+            }
+        } else {
+            ctx.genes_backend
+                .for_each_triplet(cols.iter().copied(), slab, |row, out_col, v| {
+                    let uid = g_b2u[row as usize];
+                    if uid != u32::MAX {
+                        accum.accumulate(rm, uid as usize, out_col as usize, v, &id_of);
+                    }
+                })?;
+        }
 
         for (si, sat) in ctx.satellites.iter().enumerate() {
             // Gather this chunk's satellite columns + their local-cell routing.
@@ -400,50 +547,69 @@ pub(crate) fn intern(ids: &mut Vec<Identity>, map: &mut IdentityIndex, id: Ident
 }
 
 /// Walk the cell-axis pools once: intern each distinct feature identity and
-/// append `(identity, count)` to its cell's list.
-fn collect_identities(pools: &AxisPools, n_cells: usize) -> (Vec<Identity>, Vec<Vec<(u32, f32)>>) {
+/// append `(identity, count)` to its cell's list. When `batch_divisor` is set,
+/// the genes strata (AGG + count-comp) are divided by their batch fold-factor
+/// `μ_residual[gene, pb(cell)]` — a plain per-element divide (this pooled path
+/// is the rare cell-axis case; the streaming path adds a per-cell self-normalizing
+/// scale via [`BatchDivisor::divide_column`]). Satellites are not corrected.
+fn collect_identities(
+    pools: &AxisPools,
+    n_cells: usize,
+    batch_divisor: Option<&BatchDivisor>,
+) -> (Vec<Identity>, Vec<Vec<(u32, f32)>>) {
     let mut ids: Vec<Identity> = Vec::new();
     let mut map: IdentityIndex = FxHashMap::default();
     let mut per_cell: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_cells];
 
-    // AGG anchor: e_f = β_g (gate masked), bias = b_agg[g].
+    // Genes-strata batch divide by `μ_residual[gene, pb(cell)]` (identity for ≤1
+    // batch, where `batch_divisor` is `None`).
+    let divide = |gene: u32, cell: usize, c: f32| {
+        batch_divisor.map_or(c, |bo| c / bo.genes_divisor(gene, cell))
+    };
+
+    // AGG anchor: e_f = β_g (gate masked), bias = b_agg[g]. Genes backend.
     for i in 0..pools.agg.len() {
         let cell = pools.agg.axis_ids[i] as usize;
         if cell >= n_cells {
             continue;
         }
+        let gene = pools.agg.gene_ids[i];
+        let count = divide(gene, cell, pools.agg.counts[i]);
         let idx = intern(
             &mut ids,
             &mut map,
             Identity {
-                gene: pools.agg.gene_ids[i],
+                gene,
                 q_modality: 0,
                 region: 0,
                 is_agg: true,
                 bias_modality: 0,
             },
         );
-        per_cell[cell].push((idx, pools.agg.counts[i]));
+        per_cell[cell].push((idx, count));
     }
 
     // Count-comp: splice modality (≥1), region 0, shared count bias slot.
+    // Genes backend.
     for i in 0..pools.count_comp.len() {
         let cell = pools.count_comp.axis_ids[i] as usize;
         if cell >= n_cells {
             continue;
         }
+        let gene = pools.count_comp.gene_ids[i];
+        let count = divide(gene, cell, pools.count_comp.counts[i]);
         let idx = intern(
             &mut ids,
             &mut map,
             Identity {
-                gene: pools.count_comp.gene_ids[i],
+                gene,
                 q_modality: pools.count_comp.modality_ids[i],
                 region: pools.count_comp.region_ids[i],
                 is_agg: false,
                 bias_modality: COUNT_BIAS_MODALITY,
             },
         );
-        per_cell[cell].push((idx, pools.count_comp.counts[i]));
+        per_cell[cell].push((idx, count));
     }
 
     // Modifier-comp: its own modality + transcript-position region + bias.
@@ -509,4 +675,66 @@ pub(crate) fn embed_identities(
         off += chunk.len();
     }
     Ok((e, b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gr(mu: DMatrix<f32>, row_to_gene: Vec<u32>) -> GenesResidual {
+        GenesResidual {
+            mu_residual: mu,
+            resid_row_to_gene: row_to_gene,
+        }
+    }
+
+    #[test]
+    fn genes_divisor_is_clamped_mu_residual() {
+        // 2 spliced rows × 2 finest pbs of fold-factors; cell 0 → pb1, cell 1 → pb0.
+        let g = gr(
+            DMatrix::from_row_slice(2, 2, &[1.0, 2.0, 0.5, 1.0]),
+            vec![10, 20],
+        );
+        let cell_to_finest_pb = [1usize, 0usize];
+        let bo = BatchDivisor::new(&g, &cell_to_finest_pb);
+        assert!((bo.genes_divisor(10, 0) - 2.0).abs() < 1e-6); // μ[(0,1)]
+        assert!((bo.genes_divisor(20, 1) - 0.5).abs() < 1e-6); // μ[(1,0)]
+        assert_eq!(bo.genes_divisor(999, 0), 1.0); // unknown gene → no-op
+        assert_eq!(bo.genes_divisor(10, 5), 1.0); // out-of-range cell → no-op
+                                                  // wild fold-factor is clamped to e^4.
+        let g2 = gr(DMatrix::from_row_slice(1, 1, &[1.0e9]), vec![7]);
+        let bo2 = BatchDivisor::new(&g2, &[0usize]);
+        assert!((bo2.genes_divisor(7, 0) - (DIVISOR_LOG_CLAMP as f32).exp()).abs() < 1.0);
+    }
+
+    #[test]
+    fn divide_column_is_self_normalizing_sparse() {
+        // 2 spliced rows × 2 pbs of fold-factors; genes 10, 20.
+        let g = gr(
+            DMatrix::from_row_slice(2, 2, &[1.0, 2.0, 0.5, 1.0]),
+            vec![10, 20],
+        );
+        let bo = BatchDivisor::new(&g, &[1usize]); // one cell → pb1
+                                                   // backend rows: 0→gene10, 1→gene20, 2→non-gene (divisor 1.0).
+        let resid_row = bo.backend_to_resid(&[Some(10), Some(20), None]);
+        assert_eq!(resid_row, vec![Some(0), Some(1), None]);
+
+        // Column counts at pb1 ⇒ divisors d = [μ(0,1), μ(1,1), 1.0] = [2, 1, 1].
+        // Σx = 20, Σd = 4 ⇒ scale = 5, so xᵢ / (dᵢ·scale) = [0.4, 1.2, 2.0] —
+        // matching matrix-util's `adjust_by_division_of_selected_inplace`.
+        let rows = [0usize, 1, 2];
+        let vals = [4.0f32, 6.0, 10.0];
+        let mut got = [0f32; 3];
+        bo.divide_column(&resid_row, 1, &rows, &vals, |row, v| got[row] = v);
+
+        let want = [0.4f32, 1.2, 2.0];
+        for i in 0..3 {
+            assert!(
+                (got[i] - want[i]).abs() < 1e-5,
+                "row {i}: {} vs {}",
+                got[i],
+                want[i]
+            );
+        }
+    }
 }

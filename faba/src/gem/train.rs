@@ -150,11 +150,27 @@ pub fn train(
             "phase 2/2 (analytical cell projection onto frozen features, ridge λ={}): {} cells",
             args.train.phase2_ridge, model.n_cells
         );
+        // Per-cell batch correction: divide each cell's genes counts by their
+        // finest-pb μ_residual (mirrors senna topic's AdjMethod::Residual).
+        // `None` when there is ≤1 batch (no fold-factor was fit). The finest pb
+        // map is the last entry of the coarsest-first `cell_to_pb_per_level`.
+        let batch_divisor = pb.genes_residual.as_ref().and_then(|gr| {
+            pb.cell_to_pb_per_level
+                .last()
+                .map(|finest| cell_solve::BatchDivisor::new(gr, finest))
+        });
         // Pooled when the cell pool was built (cell axis on / tests); else
         // stream from the backend (default pool-free path).
         let cell_nrms = match (&pb.cell_pools, cell_stream) {
-            (Some(pools), _) => cell_solve::solve_cell_embeddings(model, pools, args),
-            (None, Some(ctx)) => cell_solve::solve_cell_embeddings_streaming(model, ctx, args),
+            (Some(pools), _) => {
+                cell_solve::solve_cell_embeddings(model, pools, args, batch_divisor.as_ref())
+            }
+            (None, Some(ctx)) => cell_solve::solve_cell_embeddings_streaming(
+                model,
+                ctx,
+                args,
+                batch_divisor.as_ref(),
+            ),
             (None, None) => {
                 anyhow::bail!("phase 2: no cell pool and no streaming context")
             }

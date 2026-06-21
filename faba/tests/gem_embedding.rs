@@ -129,6 +129,7 @@ fn build_pseudobulk() -> PseudobulkData {
         cell_pools: Some(cell_pools),
         pb_pools_per_level: Vec::new(),
         gene_ubiquity,
+        genes_residual: None,
     }
 }
 
@@ -433,6 +434,7 @@ fn build_splice_pseudobulk() -> PseudobulkData {
         cell_pools: Some(cell_pools),
         pb_pools_per_level: Vec::new(),
         gene_ubiquity,
+        genes_residual: None,
     }
 }
 
