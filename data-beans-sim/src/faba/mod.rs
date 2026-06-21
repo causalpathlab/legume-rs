@@ -149,11 +149,29 @@ pub struct FabaArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Topic-PVE for β_topic and θ (reuses core sampling)"
+        help = "Topic-PVE π_topic ∈ [0,1] — topic-structure share, NOT a magnitude",
+        long_help = "Topic-PVE π_topic ∈ [0,1]: variance share of topic structure, \
+                     applied to BOTH the dictionary β and the cell proportions θ. \
+                     β: log β(g,k) = σ_β·[√π_topic·u_{g,k} + √(1−π_topic)·v_g] − σ_β²/2 \
+                     (π_topic=1 ⇒ fully per-(gene,topic); π_topic=0 ⇒ per-gene only, no \
+                     topics). θ: θ(k*,j) = π_topic + (1−π_topic)/K for a cell's drawn \
+                     topic k*, (1−π_topic)/K otherwise — so π_topic=1 ⇒ ONE-HOT (pure) \
+                     topics, π_topic=0 ⇒ flat. Independent of --pve-batch."
     )]
     pub pve_topic: f32,
 
-    #[arg(long, default_value_t = 1.0, help = "Batch-PVE")]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Batch-PVE π_batch ∈ [0,1] — batch-SPECIFICITY share, NOT magnitude",
+        long_help = "Batch-PVE π_batch ∈ [0,1]: variance share between batch-SPECIFIC and \
+                     batch-INVARIANT components of the log batch shift, \
+                     log δ(g,b) = √π_batch·z_{g,b} + √(1−π_batch)·w_g (z,w ~ N(0,1)). \
+                     Var(log δ)=1 ALWAYS — π_batch sets how batch-specific the effect is, \
+                     not how large: π_batch=1 ⇒ fully batch-specific (max inter-batch \
+                     difference); π_batch=0 ⇒ all batches share one shift w_g (NO \
+                     inter-batch effect). Independent of --pve-topic (both can be 1)."
+    )]
     pub pve_batch: f32,
 
     #[arg(long, default_value_t = 1, help = "Number of batches B")]

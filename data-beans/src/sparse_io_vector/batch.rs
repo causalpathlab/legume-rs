@@ -120,10 +120,14 @@ impl SparseIoVec {
             .progress_chars("##-"),
         );
 
-        // Schedule largest batches first (LPT heuristic) so the heavy tail
-        // overlaps with the many small batches rather than serialising at the end.
+        // Canonical batch id = SORTED LABEL order (consistent with
+        // `register_batch_membership`), so per-batch stats / δ columns carry the
+        // same batch ids as the rest of the pipeline. Previously this sorted by
+        // descending size and used the processing position as the id, which
+        // silently permuted batch ids vs the label order — a latent bug for δ /
+        // `AdjMethod::Batch` consumers.
         let mut batches_vec: Vec<_> = batches.into_iter().collect();
-        batches_vec.sort_by_key(|(_, cells)| std::cmp::Reverse(cells.len()));
+        batches_vec.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
         // In outer-parallel mode every per-batch HNSW runs on 1 rayon thread.
         // For batches much larger than the average that causes a long serial
         // tail.  Allow large batches to use inner parallelism instead: once
@@ -137,7 +141,11 @@ impl SparseIoVec {
             ntot / batches_vec.len()
         };
         let large_batch_threshold = (avg_cells * 4).max(n_threads * 512);
-        let enumerated: Vec<_> = batches_vec.iter().enumerate().collect();
+        // Ids assigned above; now schedule largest batches first (LPT) so the
+        // heavy tail overlaps with the small batches. The canonical id rides
+        // along; `sort_by_key(idx)` below restores canonical order.
+        let mut enumerated: Vec<_> = batches_vec.iter().enumerate().collect();
+        enumerated.sort_by_key(|(_, (_, cells))| std::cmp::Reverse(cells.len()));
         let mut idx_name_glob_dict: Vec<_> = if outer_parallel {
             enumerated
                 .into_par_iter()

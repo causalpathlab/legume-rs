@@ -24,10 +24,14 @@
 //! for stage 2 (refining e_cell with β/z/δ/γ frozen).
 
 use anyhow::Context;
-use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, MultilevelParams};
+use data_beans_alg::collapse_data::{
+    collapse_columns_multilevel_with_hierarchy, CollapsedOut, MultilevelParams,
+};
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::data::UnifiedData;
 use log::info;
+use matrix_param::traits::Inference;
+use nalgebra::DMatrix;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -134,6 +138,25 @@ pub struct PseudobulkData {
     /// in `(0, 1]`) from the cell-axis count pool. NOT consumed by the
     /// model; persisted to `{out}.ubiquity.parquet` as a breadth diagnostic.
     pub gene_ubiquity: Vec<f32>,
+    /// Genes/spliced batch fold-factor (finest-level `μ_residual`) for phase-2
+    /// batch correction (divide each cell's counts by it before projection).
+    /// `None` when there is ≤1 batch (no cross-batch counterfactual). In-memory
+    /// only. See `cell_solve::BatchDivisor`.
+    pub genes_residual: Option<GenesResidual>,
+}
+
+/// Finest-level genes/spliced batch fold-factor `μ_residual`, the raw material
+/// for the phase-2 batch divide.
+///
+/// `mu_residual[(row, pb)]` is the posterior-mean fold-factor on a ratio scale
+/// (~1); `row` indexes the masked spliced backend rows in ascending order,
+/// mapped to a unified gene by `resid_row_to_gene[row]`; `pb` columns are
+/// **finest-level** pb ids (== `PseudobulkData::cell_to_pb_per_level.last()`,
+/// since that vec is coarsest-first). Consumers divide observed counts by this
+/// (clamped, floored at 1.0 on a miss) so the de-batched signal is fit.
+pub struct GenesResidual {
+    pub mu_residual: DMatrix<f32>,
+    pub resid_row_to_gene: Vec<u32>,
 }
 
 impl PseudobulkData {
@@ -284,6 +307,13 @@ pub fn build_pseudobulk(
     // Returned finest-first; flip to coarsest-first.
     let mut cell_to_pb_per_level = collapse_out.cell_to_pb_per_level;
     cell_to_pb_per_level.reverse();
+
+    // Retain the finest-level genes/spliced μ_residual for phase-2 batch
+    // correction (the collapse only fits it with >1 batch). Its pb columns are
+    // the finest level == `cell_to_pb_per_level.last()` (now coarsest-first).
+    let genes_residual = (unified.n_batches() > 1)
+        .then(|| extract_genes_residual(&collapse_out.levels, unified, table, genes_row_map))
+        .flatten();
     drop(collapse_out.levels);
 
     ////////////////////////////////////////
@@ -386,6 +416,55 @@ pub fn build_pseudobulk(
         cell_pools,
         pb_pools_per_level,
         gene_ubiquity,
+        genes_residual,
+    })
+}
+
+/// Lift the finest-level genes/spliced μ_residual out of the collapse output
+/// into a [`GenesResidual`], mapping each matrix row back to its unified gene.
+///
+/// `mask_rows` renumbers the kept spliced rows in **ascending** old-row order,
+/// so μ_residual row `i` is the `i`-th smallest spliced backend row; we recover
+/// its gene by sorting the same `spliced_backend_rows` used to build the mask.
+/// Returns `None` (correction simply skipped) if the finest level carries no
+/// μ_residual or the row counts disagree — never a wrong mapping.
+fn extract_genes_residual(
+    levels_finest_first: &[CollapsedOut],
+    unified: &UnifiedData,
+    table: &FeatureTable,
+    genes_row_map: &BackendRowMap,
+) -> Option<GenesResidual> {
+    let finest = levels_finest_first.first()?;
+    let mu_residual = finest.mu_residual.as_ref()?.posterior_mean().clone();
+
+    // backend compact row → unified gene, over every count row.
+    let mut row_to_gene: FxHashMap<usize, u32> = FxHashMap::default();
+    for uid in 0..genes_row_map.stratum.len() {
+        if genes_row_map.stratum[uid] == Some(RowStratum::CountComp) {
+            if let Some(g) = genes_row_map.gene[uid] {
+                row_to_gene.insert(unified.feature_to_backend_row[uid], g);
+            }
+        }
+    }
+    let mut kept_rows = spliced_backend_rows(unified, table, genes_row_map);
+    kept_rows.sort_unstable();
+    if kept_rows.len() != mu_residual.nrows() {
+        log::warn!(
+            "genes μ_residual rows ({}) ≠ spliced rows ({}); skipping phase-2 batch divide",
+            mu_residual.nrows(),
+            kept_rows.len()
+        );
+        return None;
+    }
+    let resid_row_to_gene: Vec<u32> = kept_rows.iter().map(|r| row_to_gene[r]).collect();
+    info!(
+        "retained genes μ_residual: {} spliced rows × {} finest pbs",
+        mu_residual.nrows(),
+        mu_residual.ncols()
+    );
+    Some(GenesResidual {
+        mu_residual,
+        resid_row_to_gene,
     })
 }
 
