@@ -29,7 +29,7 @@ use config::{
     load_or_compute_fisher_weights, stage_params, DEFAULT_AXIS_LAMBDA, DEFAULT_STRATIFY_ALPHA_CELL,
     DEFAULT_STRATIFY_ALPHA_PB,
 };
-use projection::{project_cells_phase2, PHASE2_RIDGE};
+use projection::{project_cells_phase2, CellBatchDivisor, PHASE2_RIDGE};
 use samplers::{build_active_samplers, build_smoother, subsample_cell_samplers_multilevel};
 
 /// Composite-objective gbe fit — trained in **two phases**.
@@ -165,18 +165,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             Some(adj) => adj.posterior_mean(),
             None => collapsed.mu_observed.posterior_mean(),
         };
-        let n_pb = pb_full.ncols();
-        let pb_count_ds: DMatrix<f32> = if pb_full.nrows() == n_features {
-            pb_full.clone()
-        } else {
-            let mut subset = DMatrix::<f32>::zeros(n_features, n_pb);
-            for (new_i, &old_i) in feature_to_backend.iter().enumerate() {
-                for s in 0..n_pb {
-                    subset[(new_i, s)] = pb_full[(old_i, s)];
-                }
-            }
-            subset
-        };
+        let pb_count_ds = gather_to_unified_axis(pb_full, n_features, &feature_to_backend);
         pb_blobs.push(UnifiedData::from_pseudobulks(
             &pb_count_ds,
             unified.feature_names.clone(),
@@ -428,6 +417,25 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         info!(
             "Phase 2 — analytical per-cell projection ({n_cells} cells, feature side fixed, ridge λ={PHASE2_RIDGE})"
         );
+        // Phase-2 batch correction (mirrors senna svd/topic): divide each cell's
+        // counts by its finest-pb μ_residual fold-factor via matrix-util's
+        // `adjust_by_division_of_selected_inplace`. μ_residual is gathered onto
+        // the unified feature axis so a feature id indexes a row directly; built
+        // only when the collapse fit one (>1 batch).
+        let phase2_mu_residual: Option<DMatrix<f32>> = collapsed_levels
+            .last()
+            .and_then(|c| c.mu_residual.as_ref())
+            .map(|mr| gather_to_unified_axis(mr.posterior_mean(), n_features, &feature_to_backend));
+        let batch_divisor = phase2_mu_residual.as_ref().map(|mu| CellBatchDivisor {
+            mu_residual: mu,
+            // `.last()` is always `Some` here: the divisor only exists when the
+            // collapse produced a μ_residual, i.e. ≥1 level (num_levels.max(1)),
+            // and `cell_to_pb_per_level` has the same length.
+            cell_to_pb: cell_to_pb_per_level
+                .last()
+                .map(Vec::as_slice)
+                .expect("collapse always produces ≥1 level"),
+        });
         cell_nrms = project_cells_phase2(
             &mut cell_model,
             &varmap,
@@ -435,6 +443,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             n_cells,
             f64::from(PHASE2_RIDGE),
             &config.device,
+            batch_divisor,
         )?;
     }
 
@@ -443,4 +452,26 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         varmap,
         cell_nrms,
     })
+}
+
+/// Gather a backend-axis `[backend_rows × cols]` matrix onto the unified feature
+/// axis `[n_features × cols]` via `feature_to_backend` (a clone when the axes
+/// already match, e.g. no HVG mask narrowed the feature set). Shared by the
+/// per-level pb counts and the phase-2 `μ_residual` divisor.
+fn gather_to_unified_axis(
+    backend: &DMatrix<f32>,
+    n_features: usize,
+    feature_to_backend: &[usize],
+) -> DMatrix<f32> {
+    if backend.nrows() == n_features {
+        return backend.clone();
+    }
+    let cols = backend.ncols();
+    let mut out = DMatrix::<f32>::zeros(n_features, cols);
+    for (new_i, &old_i) in feature_to_backend.iter().enumerate() {
+        for s in 0..cols {
+            out[(new_i, s)] = backend[(old_i, s)];
+        }
+    }
+    out
 }

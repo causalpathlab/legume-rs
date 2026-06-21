@@ -213,6 +213,36 @@ where
     }
 }
 
+/// Self-normalizing Poisson-ratio divide of one sparse column's values, in place.
+///
+/// Models `Y[g] ~ Poisson(X[g]·λ)`: estimate `λ = Σ Y / Σ divisor` over the
+/// column's nonzeros, then replace each `Y[g]` by the residual `Y[g] / (divisor(g)·λ)`
+/// when `divisor(g) > 0` (entries with a non-positive divisor are left unchanged).
+/// `divisor(k)` returns the divisor for the `k`-th value, `k` in `0..vals.len()`.
+///
+/// This is the shared core of the [`AdjustByDivisionOp`] `DMatrix` impls below; it
+/// is also callable directly on any `(values, divisor)` pair without materializing
+/// a matrix — e.g. one cell's counts indexed into a per-pseudobulk fold-factor.
+pub fn adjust_by_poisson_ratio<T, F>(vals: &mut [T], divisor: F)
+where
+    T: nalgebra::RealField + Copy + std::iter::Sum<T>,
+    F: Fn(usize) -> T,
+{
+    let dsum: T = (0..vals.len()).map(&divisor).sum();
+    let xsum: T = vals.iter().copied().sum();
+    let scale = if dsum > T::zero() {
+        xsum / dsum
+    } else {
+        T::one()
+    };
+    for (k, x) in vals.iter_mut().enumerate() {
+        let d = divisor(k);
+        if d > T::zero() {
+            *x /= d * scale;
+        }
+    }
+}
+
 impl<T> AdjustByDivisionOp<nalgebra::DMatrix<T>, T> for nalgebra_sparse::CscMatrix<T>
 where
     T: nalgebra::RealField + Copy + std::iter::Sum<T>,
@@ -223,57 +253,17 @@ where
         batches: &[usize],
     ) {
         self.col_iter_mut().zip(batches).for_each(|(mut x_j, &b)| {
-            let d_j = x_j
-                .row_indices()
-                .iter()
-                .map(|&i| denom_db[(i, b)])
-                .collect::<Vec<_>>();
-
-            let dsum = d_j.iter().copied().sum::<T>();
-            let xsum = x_j.values().iter().copied().sum::<T>();
-            let scale = if dsum > T::zero() {
-                xsum / dsum
-            } else {
-                T::one()
-            };
-
-            x_j.values_mut()
-                .iter_mut()
-                .zip(d_j)
-                .for_each(|(x_ij, d_ij)| {
-                    if d_ij > T::zero() {
-                        *x_ij /= d_ij * scale;
-                    }
-                });
+            let (rows, vals) = x_j.rows_and_values_mut();
+            adjust_by_poisson_ratio(vals, |k| denom_db[(rows[k], b)]);
         });
     }
 
     fn adjust_by_division_inplace(&mut self, denom: &nalgebra::DMatrix<T>) {
         self.col_iter_mut()
             .zip(denom.column_iter())
-            .for_each(|(mut x_j, d_j)| {
-                let d_j = x_j
-                    .row_indices()
-                    .iter()
-                    .map(|&i| d_j[i])
-                    .collect::<Vec<_>>();
-
-                let dsum = d_j.iter().copied().sum::<T>();
-                let xsum = x_j.values().iter().copied().sum::<T>();
-                let scale = if dsum > T::zero() {
-                    xsum / dsum
-                } else {
-                    T::one()
-                };
-
-                x_j.values_mut()
-                    .iter_mut()
-                    .zip(d_j)
-                    .for_each(|(x_ij, d_ij)| {
-                        if d_ij > T::zero() {
-                            *x_ij /= d_ij * scale;
-                        }
-                    });
+            .for_each(|(mut x_j, d_col)| {
+                let (rows, vals) = x_j.rows_and_values_mut();
+                adjust_by_poisson_ratio(vals, |k| d_col[rows[k]]);
             });
     }
 }

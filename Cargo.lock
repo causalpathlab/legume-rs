@@ -2599,7 +2599,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "auxiliary-data",
@@ -3474,7 +3474,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-util"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anndists",
  "anyhow",
