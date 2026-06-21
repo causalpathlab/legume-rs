@@ -3,6 +3,8 @@ use crate::model::JointEmbedModel;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::VarMap;
 use log::info;
+use matrix_util::dmatrix_util::adjust_by_poisson_ratio;
+use nalgebra::DMatrix;
 
 /// Ridge prior strength λ on `e_cell` in the analytical phase-2 projection.
 /// The Poisson MAP fits each cell's observed features and this Gaussian
@@ -12,6 +14,35 @@ pub(crate) const PHASE2_RIDGE: f32 = 1.0;
 /// One cell's phase-2 solve result: `(cell_id, L2-direction latent,
 /// raw-count MAP norm, per-cell bias b_c)`.
 type SolvedCell = (usize, Vec<f32>, f32, f32);
+
+/// Phase-2 batch correction, mirroring `senna svd`/`topic`: divide each cell's
+/// counts by its finest-pseudobulk `μ_residual` fold-factor before the
+/// Poisson-MAP projection, so `e_cell` fits the de-batched signal. Built only
+/// when the collapse fit a `μ_residual` (>1 batch); a no-op otherwise.
+#[derive(Clone, Copy)]
+pub(crate) struct CellBatchDivisor<'a> {
+    /// `[n_features × n_pb]` batch fold-factor on the **unified** feature axis,
+    /// so a cell's feature id indexes a row directly (no remap).
+    pub mu_residual: &'a DMatrix<f32>,
+    /// Cell id → finest-pseudobulk id (the `μ_residual` column to divide by).
+    pub cell_to_pb: &'a [usize],
+}
+
+/// Divide one cell's `(feature, count)` edges by its pseudobulk batch fold-factor,
+/// reusing matrix-util's [`adjust_by_poisson_ratio`] — the same self-normalizing
+/// divide (`λ = Σx/Σd`, depth preserved for `b_cell`) `senna svd`/`topic` apply via
+/// the `CscMatrix` trait, here straight on the cell's counts (no per-cell CSC).
+/// `feats` index `μ_residual` rows directly.
+fn adjust_cell_edges(
+    feats: &[u32],
+    counts: &[f32],
+    pb: usize,
+    mu_residual: &DMatrix<f32>,
+) -> Vec<(u32, f32)> {
+    let mut vals = counts.to_vec();
+    adjust_by_poisson_ratio(&mut vals, |k| mu_residual[(feats[k] as usize, pb)]);
+    feats.iter().copied().zip(vals).collect()
+}
 
 /// Phase 2 — project every cell onto the fixed feature dictionary, in
 /// parallel, and overwrite the `e_cell` var. The per-cell bias is fitted
@@ -37,6 +68,7 @@ pub(crate) fn project_cells_phase2(
     n_cells: usize,
     lambda: f64,
     dev: &Device,
+    batch_divisor: Option<CellBatchDivisor>,
 ) -> anyhow::Result<Vec<f32>> {
     use crate::cell_projection::solve_one_cell;
     use anyhow::Context;
@@ -64,11 +96,18 @@ pub(crate) fn project_cells_phase2(
     let solved: Vec<SolvedCell> = cells
         .par_iter()
         .map(|&(cell, feats, counts)| {
-            // Baseline MAP on RAW counts → L2 direction (the latent) + the
-            // depth-coupled norm the empty-droplet QC keys on. The fitted
-            // intercept `b_c` absorbs library size and is kept (written to
-            // `b_cell`), consistent with faba gem.
-            let edges: Vec<(u32, f32)> = feats.iter().zip(counts).map(|(&f, &c)| (f, c)).collect();
+            // Baseline MAP → L2 direction (the latent) + the depth-coupled norm
+            // the empty-droplet QC keys on. The fitted intercept `b_c` absorbs
+            // library size and is kept (written to `b_cell`), consistent with
+            // faba gem. When batch correction is on, the counts are first divided
+            // by their pseudobulk fold-factor (depth preserved by the trait's
+            // self-normalizing scale, so empties still solve to ≈0).
+            let edges: Vec<(u32, f32)> = match batch_divisor {
+                Some(bd) => {
+                    adjust_cell_edges(feats, counts, bd.cell_to_pb[cell as usize], bd.mu_residual)
+                }
+                None => feats.iter().zip(counts).map(|(&f, &c)| (f, c)).collect(),
+            };
             let (e_map, b_c) = solve_one_cell(&edges, &feat_flat, &b_feat, h, lambda);
             let nrm_map = norm(&e_map);
             let dir: Vec<f32> = if nrm_map > 1e-8 {
@@ -85,7 +124,14 @@ pub(crate) fn project_cells_phase2(
         b_out[cell] = b_c;
     }
 
-    info!("Phase 2 — latent = L2 direction (per-cell Poisson MAP, ridge λ={lambda})");
+    info!(
+        "Phase 2 — latent = L2 direction (per-cell Poisson MAP, ridge λ={lambda}{})",
+        if batch_divisor.is_some() {
+            ", μ_residual batch-divided"
+        } else {
+            ""
+        }
+    );
 
     let e_t = Tensor::from_vec(e_out, (n_cells, h), dev)?;
     let b_t = Tensor::from_vec(b_out, n_cells, dev)?;
