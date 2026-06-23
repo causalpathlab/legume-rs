@@ -16,6 +16,7 @@
 mod args;
 mod by_enrichment;
 mod by_projection;
+mod finalize;
 pub mod inputs;
 
 pub use args::AnnotateArgs;

@@ -12,7 +12,9 @@
 use anyhow::{Context, Result};
 use clap::Args;
 
-use graph_embedding_util::type_annotation::{annotate_embeddings, AnnotateProjConfig};
+use graph_embedding_util::type_annotation::{
+    annotate_embeddings, AnnotateProjConfig, InputEmbeddings,
+};
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::IoOps;
@@ -65,7 +67,7 @@ pub struct CageAnnotateArgs {
     #[arg(
         long,
         default_value_t = 30,
-        help = "k for the cell kNN graph used by the coarsening clusterer"
+        help = "k for the shared cell kNN graph (fine-score smoothing + Leiden coarsening + UMAP layout)"
     )]
     pub knn: usize,
 
@@ -108,10 +110,12 @@ pub fn run_cage_annotate(args: &CageAnnotateArgs) -> Result<()> {
         ..AnnotateProjConfig::default()
     };
     annotate_embeddings(
-        &feat.mat,
-        &feat.rows,
-        &cell.mat,
-        &cell.rows,
+        &InputEmbeddings {
+            feature_emb: &feat.mat,
+            gene_names: &feat.rows,
+            cell_emb: &cell.mat,
+            cell_names: &cell.rows,
+        },
         &args.markers,
         &format!("{out}.cage_annot"),
         !args.no_idf,

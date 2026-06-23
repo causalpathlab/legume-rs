@@ -71,8 +71,7 @@ fn top_enriched_members_picks_positive_top() {
         2.0, 1.5, -1.0, // comm 1: only type 2 positive
         -0.5, -0.2, 3.0,
     ];
-    let w = vec![1.0, 1.0, 1.0];
-    let m = top_enriched_members(&enrich, &w, n_comm, n_types, 6);
+    let m = top_enriched_members(&enrich, n_comm, n_types, 6);
     // community 0: positive top, strongest first
     assert_eq!(m[0], vec![0, 1]);
     // community 1: only the single positive type
@@ -80,15 +79,28 @@ fn top_enriched_members_picks_positive_top() {
 }
 
 #[test]
-fn top_enriched_weight_favors_larger_marker_set() {
-    // one community, two positive types: type 0 slightly higher raw enrich,
-    // but type 1 has a much bigger marker set → weight flips the top pick.
+fn top_enriched_ranks_by_enrichment_not_marker_count() {
+    // Two positive types; the higher-enrichment one leads regardless of how
+    // many markers each has (marker-count weighting was removed).
     let n_types = 2;
     let n_comm = 1;
     let enrich = vec![1.0, 0.8];
-    let weight = vec![1.0, 3.0]; // √1 vs √9
-    let m = top_enriched_members(&enrich, &weight, n_comm, n_types, 6);
-    assert_eq!(m[0], vec![1, 0]); // 0.8*3=2.4 > 1.0*1
+    let m = top_enriched_members(&enrich, n_comm, n_types, 6);
+    assert_eq!(m[0], vec![0, 1]); // 1.0 > 0.8, no √|markers| flip
+}
+
+#[test]
+fn top2_margin_reports_top1_minus_top2() {
+    // 2 cells × 3 types: cell 0 has a clear winner, cell 1 is a near-tie.
+    let score = vec![
+        5.0, 1.0, 0.0, /* cell 0 */ 2.0, 1.9, 0.0, /* cell 1 */
+    ];
+    let m = top2_margin(&score, 2, 3);
+    assert!((m[0] - 4.0).abs() < 1e-6, "clear winner margin");
+    assert!((m[1] - 0.1).abs() < 1e-5, "near-tie margin");
+    // A single type is always definitive (+∞ margin).
+    let m1 = top2_margin(&[1.0, 2.0], 2, 1);
+    assert!(m1.iter().all(|&v| v.is_infinite()));
 }
 
 #[test]
@@ -133,8 +145,19 @@ fn layout_produces_finite_separated_coords() {
         knn: 10,
         ..AnnotateProjConfig::default()
     };
-    let res = annotate_by_projection(&feat, n_feat, &cell, n, &type_markers, &type_names, h, &cfg)
-        .expect("annotate_by_projection");
+    let res = annotate_by_projection(
+        &ProjInputs {
+            feature_emb: &feat,
+            n_features: n_feat,
+            cell_emb: &cell,
+            n_cells: n,
+            type_markers: &type_markers,
+            type_names: &type_names,
+            h,
+        },
+        &cfg,
+    )
+    .expect("annotate_by_projection");
 
     let umap = res.cell_umap.expect("umap present");
     let phate = res.cell_phate.expect("phate present");
