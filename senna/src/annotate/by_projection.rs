@@ -7,7 +7,9 @@
 //! `run.senna.json` manifest, loads `outputs.feature_embedding` (gene × H)
 //! and `outputs.latent` (cell × H — for bge/fne the latent *is* the cell
 //! embedding), and hands them to the shared routine. Outputs the two-layer
-//! `{out}.{kind}_annot.{annot,community_profile,type_map,type_embedding,coarse_embedding}.parquet`.
+//! `{out}.{kind}_annot.{annot,community_profile,type_map,type_embedding,coarse_embedding}.parquet`
+//! plus `{out}.{kind}_annot.{membership,argmax}.tsv`, and points
+//! `manifest.annotate.argmax` at the argmax TSV so `senna plot` auto-colours by it.
 //!
 //! This is the *light, per-cell, clustering-free* complement to
 //! [`super::by_enrichment::run`] (cluster-level marker enrichment with FDR). It is
@@ -18,11 +20,14 @@ use anyhow::{Context, Result};
 use clap::Args;
 use std::path::Path;
 
-use graph_embedding_util::type_annotation::{annotate_embeddings, AnnotateProjConfig};
+use graph_embedding_util::type_annotation::{
+    annotate_embeddings, AnnotateProjConfig, InputEmbeddings, ANNOT_OUTPUT_SUFFIXES,
+};
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::IoOps;
 
+use super::finalize::{clean_outputs, finalize_annotation, AnnotationArtifacts};
 use crate::run_manifest::{derive_out_prefix, resolve, RunKind, RunManifest};
 
 #[derive(Args, Debug)]
@@ -79,7 +84,7 @@ pub struct AnnotateProjectArgs {
     #[arg(
         long,
         default_value_t = 30,
-        help = "k for the cell kNN graph used by the coarsening clusterer"
+        help = "k for the shared cell kNN graph (fine-score smoothing + Leiden coarsening + UMAP layout)"
     )]
     pub knn: usize,
 
@@ -89,10 +94,36 @@ pub struct AnnotateProjectArgs {
         help = "Leiden resolution for cell clustering (higher → more, finer communities)"
     )]
     pub resolution: f64,
+
+    #[arg(
+        long = "no-smooth-fine",
+        help = "Disable kNN-graph smoothing of the per-cell fine scores before argmax"
+    )]
+    pub no_smooth_fine: bool,
+
+    #[arg(
+        long = "fine-fdr",
+        default_value_t = 1.0,
+        help = "Opt-in: mark a fine call 'unassigned' when its best type has BH q ≥ this (1.0 = off; needs --num-perm > 0)"
+    )]
+    pub fine_fdr: f32,
+
+    #[arg(
+        long = "min-margin",
+        default_value_t = 0.0,
+        help = "Opt-in: mark a fine call 'unassigned' when its top1−top2 z-margin < this (0 = off; needs --num-perm > 0)"
+    )]
+    pub min_margin: f32,
+
+    #[arg(
+        long = "no-clean",
+        help = "Keep existing {out}.{kind}_annot.* outputs (default: erase them first for a fresh re-run)"
+    )]
+    pub no_clean: bool,
 }
 
 pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
-    let (manifest, dir) = RunManifest::load(Path::new(args.from.as_ref()))?;
+    let (mut manifest, dir) = RunManifest::load(Path::new(args.from.as_ref()))?;
     anyhow::ensure!(
         matches!(
             manifest.kind,
@@ -148,17 +179,45 @@ pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
         knn: args.knn,
         resolution: args.resolution,
         coarsen: !args.no_coarsen,
+        smooth_fine: !args.no_smooth_fine,
+        fine_fdr: args.fine_fdr,
+        min_margin: args.min_margin,
         ..AnnotateProjConfig::default()
     };
+    let annot_prefix = format!("{out}.{}_annot", manifest.kind);
+    if !args.no_clean {
+        clean_outputs(&annot_prefix, ANNOT_OUTPUT_SUFFIXES);
+    }
     annotate_embeddings(
-        &feat.mat,
-        &feat.rows,
-        &cell.mat,
-        &cell.rows,
+        &InputEmbeddings {
+            feature_emb: &feat.mat,
+            gene_names: &feat.rows,
+            cell_emb: &cell.mat,
+            cell_names: &cell.rows,
+        },
         &args.markers,
-        &format!("{out}.{}_annot", manifest.kind),
+        &annot_prefix,
         !args.no_idf,
         &cfg,
+    )?;
+
+    // Wire the per-cell labels into the manifest so `senna plot` colours by
+    // them automatically. `annotate_embeddings` wrote `{prefix}.argmax.tsv`
+    // (+ `membership.tsv`) via the shared writer, so the I/O contract matches
+    // `annotate-by-enrichment`; the manifest wiring is shared too.
+    let argmax_abs = format!("{annot_prefix}.argmax.tsv");
+    finalize_annotation(
+        &mut manifest,
+        Path::new(args.from.as_ref()),
+        &dir,
+        &AnnotationArtifacts {
+            argmax_abs: &argmax_abs,
+            markers: &args.markers,
+            annotation_abs: None,
+            cluster_celltype_q_abs: None,
+            cluster_celltype_es_abs: None,
+            cluster_expression_abs: None,
+        },
     )?;
     Ok(())
 }

@@ -149,6 +149,12 @@ pub struct AnnotateArgs {
     pub seed: u64,
 
     #[arg(
+        long = "no-clean",
+        help = "Keep existing {out}.* annotation outputs (default: erase the explicit annotation set first — never the embedding/manifest — for a fresh re-run)"
+    )]
+    pub no_clean: bool,
+
+    #[arg(
         long = "preload-data",
         default_value_t = false,
         help = "Preload columns into memory after opening the zarr/h5 backend",
