@@ -193,8 +193,6 @@ fn test_args() -> GemArgs {
             gene_null_fdr: 0.05,
             skip_topics: true,
             num_topics: None,
-            skip_cell_qc: false,
-            cell_qc_debris_mads: 5.0,
         },
         runtime: RuntimeArgs {
             preload_data: true,

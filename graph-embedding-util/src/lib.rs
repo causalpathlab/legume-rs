@@ -25,7 +25,6 @@
 )]
 
 pub mod cell_projection;
-pub mod cell_qc;
 pub mod coarsen;
 pub mod data;
 pub mod eval;
@@ -42,9 +41,6 @@ pub mod training;
 pub mod type_annotation;
 
 pub use auxiliary_data::feature_names::FeatureNameKind;
-pub use cell_qc::{
-    per_batch_cell_qc, write_cell_qc_parquet, CellQcConfig, CellQcInputs, CellQcResult, DropReason,
-};
 pub use data::{load_unified_data, validate_multiome_groups, LoadUnifiedArgs, UnifiedData};
 pub use data_beans_alg::refine_multilevel::RefineParams;
 pub use eval::{embedding_col_names, save_outputs, write_feature_coembedding, OutputContext};
