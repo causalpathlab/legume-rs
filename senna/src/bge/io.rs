@@ -39,33 +39,3 @@ pub(super) fn write_feature_qc(
     m.to_parquet_with_names(&path, (Some(feature_names), Some("feature")), Some(&cols))?;
     Ok(null)
 }
-
-/// Write the per-cell empty-droplet QC report `{out}.cell_qc.parquet`:
-/// pre-L2 projection norm + a `kept` flag (1 = real cell, 0 = empty), one row
-/// per cell, barcode-indexed.
-pub(super) fn write_cell_qc(
-    cell_nrms: &[f32],
-    drop: &[bool],
-    barcodes: &[Box<str>],
-    out_prefix: &str,
-) -> anyhow::Result<()> {
-    use matrix_util::dmatrix_io::DMatrix;
-    use matrix_util::traits::IoOps;
-    let n = cell_nrms.len();
-    let mut m = DMatrix::<f32>::zeros(n, 2);
-    for c in 0..n {
-        m[(c, 0)] = cell_nrms[c];
-        m[(c, 1)] = if drop.get(c).copied().unwrap_or(false) {
-            0.0
-        } else {
-            1.0
-        };
-    }
-    let cols: Vec<Box<str>> = ["pre_l2_norm", "kept"]
-        .iter()
-        .map(|s| Box::from(*s))
-        .collect();
-    let path = format!("{out_prefix}.cell_qc.parquet");
-    m.to_parquet_with_names(&path, (Some(barcodes), Some("cell")), Some(&cols))?;
-    Ok(())
-}
