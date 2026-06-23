@@ -660,10 +660,12 @@ fn preprocess_layout_data_from_latent(
         kind,
         crate::run_manifest::RunKind::Bge | crate::run_manifest::RunKind::Fne
     ) {
-        // BGE / FNE were trained with a dot-product loss; unit-sphere geometry
-        // makes Euclidean kNN match cosine ordering downstream.
-        feat_kn.normalize_columns_inplace();
-        "unit-sphere (cosine)".into()
+        // BGE / FNE embed cells in a Euclidean space where magnitude carries
+        // signal — run the layout on the RAW embedding so the DistL2 kNN
+        // respects it. (Unit-sphere/cosine normalization collapsed magnitude
+        // and sheared populations apart; a raw t-UMAP on the same embedding
+        // does not.)
+        "raw Euclidean".into()
     } else {
         feat_kn.scale_rows_inplace();
         "z-scored scores".into()
