@@ -155,6 +155,19 @@ pub struct LayoutCommonArgs {
     pub similarity_threshold: f32,
 
     #[arg(
+        long = "trim-cell-mads",
+        default_value_t = 5.0,
+        help = "Robustly winsorize cell features to ±N MADs before the layout so outlier \
+                cells/genes don't distort it (per-dimension median ± N·MAD·1.4826). 0 = off.",
+        long_help = "ON by default (N=5). Each feature dimension is clipped to \
+                     `median ± N · MAD · 1.4826` across cells, so a few extreme-outlier cells \
+                     can't stretch the UMAP/t-SNE/PHATE layout or dominate the PB-PB similarity. \
+                     Robust (MAD-based, no Gaussian assumption); only the most extreme tails are \
+                     touched. Set to 0 to disable."
+    )]
+    pub trim_cell_mads: f32,
+
+    #[arg(
         long,
         help = "Local scaling using k-th neighbor distance",
         long_help = "Zelnik-Manor & Perona local scaling. σ_i = distance to k-th nearest\n\
@@ -305,6 +318,7 @@ impl Default for LayoutCommonArgs {
             block_size: None,
             refine_weighting: crate::refine_weighting::WeightingArg::default(),
             similarity_threshold: 0.0,
+            trim_cell_mads: 5.0,
             local_scale_k: None,
             knn: 15,
             kernel_alpha: 10.0,
@@ -654,6 +668,7 @@ fn preprocess_layout_data_from_latent(
         feat_kn.scale_rows_inplace();
         "z-scored scores".into()
     };
+    winsorize_rows_inplace(&mut feat_kn, args.trim_cell_mads);
     let n_cells = feat_kn.ncols();
     info!(
         "Loaded latent: {n_cells} cells × {} dims ({latent_desc})",
@@ -881,6 +896,7 @@ fn preprocess_layout_data_from_cache(
     // the PB-centroid cosine similarity. (scale_rows_inplace standardizes
     // each row to zero-mean/unit-variance across columns.)
     proj_kn.scale_rows_inplace();
+    winsorize_rows_inplace(&mut proj_kn, args.trim_cell_mads);
 
     // 3. Partition: binary_sort_columns runs RSVD + sign-hashing on the
     //    projection and returns a per-cell bucket code. Canonicalize
@@ -988,7 +1004,7 @@ fn preprocess_layout_data_recompute(
     let PreparedData {
         data_vec,
         collapsed_levels,
-        proj_kn,
+        mut proj_kn,
         cell_to_pb_per_level: _,
         output_keep_idx: _,
     } = load_and_collapse(&LoadCollapseArgs {
@@ -1022,6 +1038,7 @@ fn preprocess_layout_data_recompute(
         want_hierarchy: prebuilt_partition.is_some(),
         prebuilt_partition,
     })?;
+    winsorize_rows_inplace(&mut proj_kn, args.trim_cell_mads);
 
     let finest = collapsed_levels
         .last()
@@ -1111,6 +1128,56 @@ fn preprocess_layout_data_recompute(
         cell_proj_kn: proj_kn,
         pb_proj_kp: pb_centroids_kn,
     }))
+}
+
+/// Robustly winsorize each feature dimension (row) of a column-per-cell matrix
+/// to `median ± n_mads · MAD · 1.4826`, so a few extreme-outlier cells can't
+/// stretch the layout or dominate the PB-PB similarity. `n_mads <= 0` (or fewer
+/// than 8 cells) is a no-op. MAD-based ⇒ no Gaussian assumption; only the
+/// extreme tails are clipped.
+fn winsorize_rows_inplace(feat: &mut Mat, n_mads: f32) {
+    let (d, n) = (feat.nrows(), feat.ncols());
+    if n_mads <= 0.0 || n < 8 {
+        return;
+    }
+    let mut clipped = 0usize;
+    let mut buf: Vec<f32> = Vec::with_capacity(n);
+    for r in 0..d {
+        buf.clear();
+        buf.extend((0..n).map(|c| feat[(r, c)]));
+        let med = median_of(&mut buf);
+        buf.iter_mut().for_each(|v| *v = (*v - med).abs());
+        let mad = median_of(&mut buf) * 1.4826;
+        if mad <= 1e-12 {
+            continue;
+        }
+        let (lo, hi) = (med - n_mads * mad, med + n_mads * mad);
+        for c in 0..n {
+            let v = feat[(r, c)];
+            if v < lo {
+                feat[(r, c)] = lo;
+                clipped += 1;
+            } else if v > hi {
+                feat[(r, c)] = hi;
+                clipped += 1;
+            }
+        }
+    }
+    if clipped > 0 {
+        info!("Winsorized {clipped} outlier feature value(s) to ±{n_mads} MADs ({d} dims × {n} cells)");
+    }
+}
+
+/// Median via quickselect on a scratch buffer (mutates its order). 0 for empty.
+fn median_of(buf: &mut [f32]) -> f32 {
+    if buf.is_empty() {
+        return 0.0;
+    }
+    let mid = buf.len() / 2;
+    buf.select_nth_unstable_by(mid, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    buf[mid]
 }
 
 /// Canonicalize raw bucket codes from `binary_sort_columns` into

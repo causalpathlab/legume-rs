@@ -8,9 +8,9 @@
 //! applicable for the sub-batch's stratum). All negatives are scored at
 //! the same RHS column (cell id or pb id) as the positive.
 
-use super::common::{candle_core, candle_nn};
+use super::common::candle_core;
 use anyhow::Result;
-use candle_core::{DType, IndexOp, Tensor};
+use candle_core::{DType, Tensor};
 
 use super::model::{Axis, GemModel};
 use super::sampling::{Minibatch, NegativeEdges, SubBatch};
@@ -55,8 +55,11 @@ fn sub_batch_loss(model: &GemModel, axis: Axis, sub: &SubBatch) -> Result<Tensor
     ////////////////////////////////////////
     // Negative-score blocks
     ////////////////////////////////////////
+    // Marginal-noise negatives (the NEG noise distribution) + structured hard
+    // negatives (swap-modality / swap-gene-mode) which preserve the multimodal
+    // and program contrasts as extra logistic slates.
     let mut neg_blocks: Vec<Tensor> = Vec::new();
-    if let Some(block) = score_negative_edges(model, axis, &pos.axis_id, &sub.rand)? {
+    if let Some(block) = score_negative_edges(model, axis, &pos.axis_id, &sub.marginal)? {
         neg_blocks.push(block);
     }
     if let Some(edges) = sub.swap_gene_mode.as_ref() {
@@ -71,26 +74,18 @@ fn sub_batch_loss(model: &GemModel, axis: Axis, sub: &SubBatch) -> Result<Tensor
     }
 
     ////////////////////////////////////////
-    // Cat + log-softmax
+    // Logistic (NEG/SGNS) NCE
     ////////////////////////////////////////
-    let s_pos_col = s_pos.unsqueeze(1)?;
-    let all_scores = if neg_blocks.is_empty() {
-        s_pos_col
-    } else {
-        let mut blocks = Vec::with_capacity(1 + neg_blocks.len());
-        blocks.push(s_pos_col);
-        blocks.extend(neg_blocks);
-        Tensor::cat(&blocks, 1)?
-    };
-
-    let log_sm = candle_nn::ops::log_softmax(&all_scores, 1)?;
-    let log_p_pos = log_sm.i((.., 0))?;
-    let neg = log_p_pos.affine(-1.0, 0.0)?; // [B] per-positive NCE loss
+    // ℓ_i = -( log σ(s_pos_i) + Σ_blocks Σ_k log σ(-s_neg_{i,k}) ). Each block is
+    // [B, k]; `logistic_nce` sums them per positive. No partition function, so
+    // the objective does not depend on which features exist — robust to feature
+    // QC, unlike the sampled softmax. The per-feature biases (b_agg / b_comp)
+    // absorb the NEG `log(k·q)` noise correction, SGNS-style.
+    let per_pos = graph_embedding_util::loss::logistic_nce(&s_pos, &neg_blocks)?;
 
     // Plain mean over positives. Abundance balance is handled upstream by the
-    // sampler's `count^τ` draw weighting, so there is no per-positive loss
-    // weight.
-    Ok(neg.mean_all()?)
+    // sampler's `count^τ` draw weighting, so there is no per-positive loss weight.
+    Ok(per_pos.mean_all()?)
 }
 
 fn score_negative_edges(

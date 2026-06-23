@@ -126,7 +126,10 @@ impl_feature_rows!(NegativeEdges);
 
 pub struct SubBatch {
     pub positives: PositiveEdges,
-    pub rand: NegativeEdges,
+    /// Marginal-noise negatives: a feature drawn ∝ `count^α_neg` from the
+    /// positive's stratum, INDEPENDENT of the positive (the SGNS/NEG noise
+    /// distribution). May coincide with the positive — a legitimate noise draw.
+    pub marginal: NegativeEdges,
     /// Swap-gene-mode negatives: keep β_g and (modality m, region r);
     /// borrow z from another gene. Tests the gene's K-program loading.
     pub swap_gene_mode: Option<NegativeEdges>,
@@ -141,12 +144,21 @@ pub struct Minibatch {
     pub modifier: Option<SubBatch>,
 }
 
-/// Pre-built distributions for one axis.
+/// Pre-built distributions for one axis. The `*` (positive) draws are
+/// `count^τ`-tempered; the `*_marginal` draws are the `count^α_neg` NEG noise
+/// distribution used for logistic-mode negatives (independent of the positive).
 pub struct AxisDists {
     pub agg: Option<WeightedIndex<f32>>,
     pub count: Option<WeightedIndex<f32>>,
     pub modifier_modality: Option<WeightedIndex<f32>>,
     pub modifier_per_modality: Vec<Option<WeightedIndex<f32>>>,
+    /// `count^α_neg` marginal over the AGG pool (noise negatives for AGG positives).
+    pub agg_marginal: Option<WeightedIndex<f32>>,
+    /// `count^α_neg` marginal over the count-comp pool (filtered to the positive's
+    /// splice modality at draw time so the noise `q` is gene-only).
+    pub count_marginal: Option<WeightedIndex<f32>>,
+    /// `count^α_neg` marginal per modifier modality.
+    pub modifier_marginal_per_modality: Vec<Option<WeightedIndex<f32>>>,
 }
 
 pub struct SamplerState {
@@ -187,6 +199,16 @@ impl SamplerState {
             .collect();
 
         let tau_m = args.train.tau_modality.max(0.0);
+        let alpha_neg = args.train.alpha_neg.max(0.0);
+        // `count^α_neg` marginal over a pool's raw counts — the NEG noise dist.
+        let marginal = |pool: &StratumPool| -> Option<WeightedIndex<f32>> {
+            let w: Vec<f32> = pool
+                .counts
+                .iter()
+                .map(|&c| c.max(0.0).powf(alpha_neg))
+                .collect();
+            weighted_index(&w)
+        };
         let build_dists = |pool: &AxisPools| -> AxisDists {
             let mod_weights: Vec<f32> = modifier_modality_ids
                 .iter()
@@ -207,6 +229,13 @@ impl SamplerState {
                     .modifier_comp_per_modality
                     .iter()
                     .map(|p| weighted_index(&p.weights))
+                    .collect(),
+                agg_marginal: marginal(&pool.agg),
+                count_marginal: marginal(&pool.count_comp),
+                modifier_marginal_per_modality: pool
+                    .modifier_comp_per_modality
+                    .iter()
+                    .map(marginal)
                     .collect(),
             }
         };
@@ -238,6 +267,9 @@ impl SamplerState {
                 count: None,
                 modifier_modality: None,
                 modifier_per_modality: Vec::new(),
+                agg_marginal: None,
+                count_marginal: None,
+                modifier_marginal_per_modality: Vec::new(),
             },
         };
         let pb_per_level = pb.pb_pools_per_level.iter().map(build_dists).collect();
@@ -365,7 +397,14 @@ fn build_anchor_sub_batch<R: Rng>(
         return None;
     }
 
-    let rand = draw_random_negatives(state, pools, dists, &positives, args.train.n_rand, rng);
+    let marginal = draw_marginal_negatives(
+        state,
+        pools,
+        dists,
+        &positives,
+        args.train.n_marginal_neg,
+        rng,
+    );
     // Swap-modality negatives over the count satellite modalities: keep the
     // gene/cell, swap the splice modality (spliced↔unspliced). This is the
     // contrast that actively separates the two splice directions (and base↔
@@ -377,7 +416,7 @@ fn build_anchor_sub_batch<R: Rng>(
 
     Some(SubBatch {
         positives,
-        rand,
+        marginal,
         swap_gene_mode: None,
         swap_modality,
     })
@@ -422,7 +461,14 @@ fn build_modifier_sub_batch<R: Rng>(
         return None;
     }
 
-    let rand = draw_random_negatives(state, pools, dists, &positives, args.train.n_rand, rng);
+    let marginal = draw_marginal_negatives(
+        state,
+        pools,
+        dists,
+        &positives,
+        args.train.n_marginal_neg,
+        rng,
+    );
     let swap_gene_mode =
         draw_swap_gene_mode_negatives(state, &positives, args.train.n_swap_gene_mode, rng);
     let swap_modality =
@@ -430,7 +476,7 @@ fn build_modifier_sub_batch<R: Rng>(
 
     Some(SubBatch {
         positives,
-        rand,
+        marginal,
         swap_gene_mode,
         swap_modality,
     })
@@ -481,7 +527,15 @@ const REJECT_RETRIES: usize = 8;
 /// `cell_solve` (phase-2 must project against the same frozen bias).
 pub(crate) const COUNT_BIAS_MODALITY: u32 = 0;
 
-fn draw_random_negatives<R: Rng>(
+/// Marginal-noise negatives (logistic NEG): for each positive, draw `k`
+/// features ∝ `count^α_neg` from the positive's stratum, **independent of the
+/// positive's gene**. Each negative carries the sampled entry's OWN
+/// `(gene, modality, region)` — a real feature drawn from the noise marginal,
+/// not a counterfactual of the positive. Count negatives are restricted to the
+/// positive's splice modality so the noise `q` is over genes only (absorbable by
+/// the per-gene bias). Unlike the softmax path, a negative may coincide with the
+/// positive — that is correct for a noise distribution and harmless under NEG.
+fn draw_marginal_negatives<R: Rng>(
     state: &SamplerState,
     pools: &AxisPools,
     dists: &AxisDists,
@@ -490,100 +544,89 @@ fn draw_random_negatives<R: Rng>(
     rng: &mut R,
 ) -> NegativeEdges {
     let b = positives.len();
-    let total = b * k;
-    let mut out = NegativeEdges::with_capacity(total, k);
+    let mut out = NegativeEdges::with_capacity(b * k, k);
     if k == 0 {
         return out;
     }
     for i in 0..b {
-        let pos_gene = positives.gene_for_rho[i];
         let pos_modality = positives.modality_for_q[i];
-        let pos_region = positives.region_for_delta[i];
         let pos_is_agg = positives.is_agg[i];
-
-        // Count satellites (`spliced` / `unspliced`, modality ≥ 1) and true
-        // modifiers both have is_agg=false; route them by which kind of
-        // modality the positive carries. Count negatives are restricted to
-        // the **same** splice modality so they probe gene-cell identity
-        // within spliced (or within unspliced), not across.
         let is_count = state
             .is_count_modality
             .get(pos_modality as usize)
             .copied()
             .unwrap_or(false);
-        let (pool, dist_opt, require_modality) = if pos_is_agg {
-            (&pools.agg, dists.agg.as_ref(), None)
+
+        // Route to the positive's stratum marginal. `require_modality` filters
+        // the count pool to the positive's splice direction; `bias_modality` is
+        // the shared count slot for AGG/count rows, the modifier's own column
+        // otherwise.
+        let (pool, dist_opt, require_modality, is_agg_out, bias_modality) = if pos_is_agg {
+            (
+                &pools.agg,
+                dists.agg_marginal.as_ref(),
+                None,
+                true,
+                COUNT_BIAS_MODALITY,
+            )
         } else if is_count {
-            (&pools.count_comp, dists.count.as_ref(), Some(pos_modality))
+            (
+                &pools.count_comp,
+                dists.count_marginal.as_ref(),
+                Some(pos_modality),
+                false,
+                COUNT_BIAS_MODALITY,
+            )
         } else {
             (
                 &pools.modifier_comp_per_modality[pos_modality as usize],
-                dists.modifier_per_modality[pos_modality as usize].as_ref(),
+                dists.modifier_marginal_per_modality[pos_modality as usize].as_ref(),
                 None,
+                false,
+                pos_modality,
             )
         };
 
         for _ in 0..k {
-            let Some(g_neg) = pool_sample_distinct(pool, dist_opt, pos_gene, require_modality, rng)
-            else {
-                // No gene distinct from the positive exists in this
-                // stratum (e.g. only one distinct gene in the pool).
-                // A "negative" equal to the positive has identical
-                // e_f / b_f and corrupts the NCE softmax denominator,
-                // so drop the whole edge batch: the caller's loss path
-                // will skip score_negative_edges when k=0.
+            let Some(idx) = marginal_sample(pool, dist_opt, require_modality, rng) else {
+                // Stratum has no positive-mass entry (or the required splice
+                // modality is absent) → drop the whole edge batch; the loss
+                // path skips score_negative_edges when k=0.
                 return NegativeEdges::empty();
             };
-            out.gene_for_rho.push(g_neg);
-            out.gene_for_z.push(g_neg);
-            out.modality_for_q.push(pos_modality);
-            // Random negatives keep the positive's (modality, region) and
-            // swap only the gene → they probe gene-cell identification.
-            out.region_for_delta.push(pos_region);
-            out.gene_for_bias.push(g_neg);
-            // Count satellites share the count bias slot (see
-            // `COUNT_BIAS_MODALITY`); modifiers keep their own column.
-            let bias_modality = if is_count {
-                COUNT_BIAS_MODALITY
-            } else {
-                pos_modality
-            };
+            let g = pool.gene_ids[idx];
+            out.gene_for_rho.push(g);
+            out.gene_for_z.push(g);
+            // Emit the entry's OWN (modality, region) — a genuine marginal sample.
+            out.modality_for_q.push(pool.modality_ids[idx]);
+            out.region_for_delta.push(pool.region_ids[idx]);
+            out.gene_for_bias.push(g);
             out.modality_for_bias.push(bias_modality);
-            out.is_agg.push(pos_is_agg);
+            out.is_agg.push(is_agg_out);
         }
     }
     out
 }
 
-fn pool_sample_distinct<R: Rng>(
+/// Draw one pool entry **index** by the `count^α_neg` marginal, optionally
+/// restricted to `require_modality`. No gene exclusion — this is a noise draw.
+/// Rejection-samples, then falls back to a deterministic scan; `None` only when
+/// the pool has no admissible entry.
+fn marginal_sample<R: Rng>(
     pool: &StratumPool,
     dist: Option<&WeightedIndex<f32>>,
-    exclude_gene: u32,
     require_modality: Option<u32>,
     rng: &mut R,
-) -> Option<u32> {
+) -> Option<usize> {
     let dist = dist?;
-    // An entry is admissible if its gene differs from the positive and (for
-    // the count pool) it carries the required splice modality.
-    let admissible = |idx: usize| {
-        pool.gene_ids[idx] != exclude_gene
-            && require_modality.is_none_or(|m| pool.modality_ids[idx] == m)
-    };
-    // First, count-weighted rejection draws (preserves the τ-tempered
-    // sampling distribution in the common case).
+    let admissible = |idx: usize| require_modality.is_none_or(|m| pool.modality_ids[idx] == m);
     for _ in 0..REJECT_RETRIES {
         let idx = dist.sample(rng);
         if admissible(idx) {
-            return Some(pool.gene_ids[idx]);
+            return Some(idx);
         }
     }
-    // Rare collision storm (e.g. one gene dominates the τ-weighted mass, or
-    // the required splice modality is sparse). Fall back to a deterministic
-    // linear scan — return the first admissible gene, else None so the
-    // caller drops the edge batch.
-    (0..pool.len())
-        .find(|&idx| admissible(idx))
-        .map(|idx| pool.gene_ids[idx])
+    (0..pool.len()).find(|&idx| admissible(idx))
 }
 
 fn draw_swap_gene_mode_negatives<R: Rng>(

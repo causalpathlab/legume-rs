@@ -42,7 +42,7 @@ use plot_utils::{render_pdf, render_png};
 use rand::{rngs::SmallRng, RngExt, SeedableRng};
 use rayon::prelude::*;
 
-use super::manifest::{default_out, load_manifest, resolve};
+use super::manifest::{default_out, load_manifest, resolve, GemManifest};
 
 const PT_PER_INCH: f32 = 72.0;
 /// UMAP inits in `[-INIT_SCALE, INIT_SCALE]²` so the ±4 gradient clamp
@@ -80,6 +80,15 @@ pub struct GemPlotArgs {
         help = "Top genes named per cluster in the label"
     )]
     pub top_features: usize,
+
+    #[arg(
+        long = "mask-prior-fdr",
+        default_value_t = 0.0,
+        help = "Display-only: hide poor-quality genes from the FEATURE plot (drop genes whose \
+                feature prior_pval > this — they never left the N(0,σ²) prior = dead/noise). \
+                0 = show all. Outputs untouched; gem-annotate still sees every gene."
+    )]
+    pub mask_prior_fdr: f32,
 
     #[arg(long, default_value_t = 200, help = "k-means max iterations")]
     pub kmeans_max_iter: usize,
@@ -182,11 +191,22 @@ pub fn run_gem_plot(args: &GemPlotArgs) -> Result<()> {
         gene_names.len()
     );
 
+    // Optional display-only filter: hide dead/noise genes (prior_pval > fdr) from the
+    // FEATURE plot. Applied BEFORE the layout so the dead-feature blob can't distort
+    // the UMAP. The cell plot keeps the full β (dead genes never score as top labels).
+    let feat_filtered: Option<(DMatrix<f32>, Vec<Box<str>>)> = (args.mask_prior_fdr > 0.0)
+        .then(|| mask_dead_features(&dir, &manifest, args.mask_prior_fdr, &beta, &gene_names))
+        .transpose()?;
+    let (feat_emb, feat_names): (&DMatrix<f32>, &[Box<str>]) = match &feat_filtered {
+        Some((b, n)) => (b, n),
+        None => (&beta, &gene_names),
+    };
+
     if !args.no_features {
         plot_axis(
             AxisPlot {
-                emb: &beta,
-                row_names: &gene_names,
+                emb: feat_emb,
+                row_names: feat_names,
                 num_clusters: args.num_clusters,
                 row_kind: "gene",
                 out_base: &format!("{out}.gem_plot.feature"),
@@ -194,7 +214,7 @@ pub fn run_gem_plot(args: &GemPlotArgs) -> Result<()> {
             args,
             &cfg,
             FeatureLabels {
-                gene_names: &gene_names,
+                gene_names: feat_names,
             },
         )?;
     }
@@ -233,6 +253,36 @@ pub fn run_gem_plot(args: &GemPlotArgs) -> Result<()> {
 
     info!("done — gem plots under '{out}.gem_plot.*'");
     Ok(())
+}
+
+/// Display-only filter for the feature plot: return the feature embedding + names
+/// restricted to INFORMED genes (`prior_pval <= fdr`), dropping the dead/noise
+/// genes that never left the `N(0, σ²)` prior. `prior_pval` is column 2 of
+/// `{prefix}.feature_prior_score.parquet` (`emb_sq_norm, chisq_stat, prior_pval`).
+/// Genes absent from the prior-score are kept. The model outputs are untouched.
+fn mask_dead_features(
+    dir: &Path,
+    manifest: &GemManifest,
+    fdr: f32,
+    beta: &DMatrix<f32>,
+    gene_names: &[Box<str>],
+) -> Result<(DMatrix<f32>, Vec<Box<str>>)> {
+    // Shared dead-gene call (read-side of write_feature_prior_score).
+    let keep_mask = super::manifest::feature_prior_keep(dir, manifest, fdr, gene_names)?;
+    let keep: Vec<usize> = keep_mask
+        .iter()
+        .enumerate()
+        .filter(|(_, &k)| k)
+        .map(|(i, _)| i)
+        .collect();
+    info!(
+        "feature plot: hid {} dead/noise genes (prior_pval > {fdr}); {} shown",
+        gene_names.len() - keep.len(),
+        keep.len()
+    );
+    let fbeta = beta.select_rows(keep.iter());
+    let fnames = keep.iter().map(|&i| gene_names[i].clone()).collect();
+    Ok((fbeta, fnames))
 }
 
 /// One embedding axis to plot: the embedding matrix, its row names, the target

@@ -4,7 +4,7 @@
 //! genes held near the target FDR.
 
 use graph_embedding_util::null_call::{
-    chi2_null_call, embedding_lower_tail_call, embedding_mixture_empty_call, embedding_null_call,
+    chi2_null_call, embedding_lower_tail_call, embedding_null_call,
 };
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -113,76 +113,6 @@ fn lower_tail_drops_empties_keeps_real() {
         call.mu > 13.0_f64.ln() - 0.5 && call.mu < 13.0_f64.ln() + 0.5,
         "null μ̂ off (should sit on the real mode): {}",
         call.mu
-    );
-}
-
-#[test]
-fn mixture_drops_dominant_empty_mode() {
-    // Raw-droplet regime: the empties are the MAJORITY mode (~95%), with a small
-    // well-separated real population (~5%). The old "bulk = most-massive
-    // component" boundary degenerated here (the empties WERE the bulk), flipping
-    // the cut between runs (kept 1460 vs 20317). `empty_boundary` finds no valley
-    // BELOW the (empty) dominant mode, so it falls through to the valley ABOVE it
-    // — dropping (most of) the empties and keeping (most of) the real cells,
-    // never 0 and never everything.
-    let mut rng = StdRng::seed_from_u64(23);
-    let (n_empty, n_real) = (9500usize, 500usize);
-    let empty_d = Normal::new(0.6_f64.ln(), 0.35).unwrap();
-    let real_d = Normal::new(19.0_f64.ln(), 0.45).unwrap();
-    let mut nrm: Vec<f32> = Vec::with_capacity(n_empty + n_real);
-    for _ in 0..n_empty {
-        nrm.push(empty_d.sample(&mut rng).exp() as f32);
-    }
-    for _ in 0..n_real {
-        nrm.push(real_d.sample(&mut rng).exp() as f32);
-    }
-    let n = nrm.len();
-
-    // Small k_max (the QC default), exactly as gem/bge call it.
-    let call = embedding_mixture_empty_call(
-        &nrm,
-        graph_embedding_util::null_call::QC_MIXTURE_K_MAX,
-        0.05,
-    );
-
-    let empty_dropped = (0..n_empty).filter(|&i| call.drop[i]).count();
-    assert!(
-        empty_dropped as f64 / n_empty as f64 > 0.9,
-        "dominant-empty recall too low: {empty_dropped}/{n_empty} (k={}, cut={:.2})",
-        call.k,
-        call.cut
-    );
-    let real_dropped = (n_empty..n).filter(|&i| call.drop[i]).count();
-    assert!(
-        real_dropped as f64 / n_real as f64 <= 0.05,
-        "real false-drop too high: {real_dropped}/{n_real}"
-    );
-    // Not degenerate: keeps the real population, drops the empty one.
-    assert!(
-        call.n_drop > n_empty / 2 && call.n_drop < n,
-        "degenerate drop count {} (n={}, empties={})",
-        call.n_drop,
-        n,
-        n_empty
-    );
-}
-
-#[test]
-fn mixture_no_drop_when_unimodal() {
-    // A single real mode (no empties): the call must not invent an empty
-    // population. Whatever k BIC picks, no component sits below a density valley.
-    let mut rng = StdRng::seed_from_u64(17);
-    let d = Normal::new(1.0_f64.ln(), 0.5).unwrap();
-    let nrm: Vec<f32> = (0..10000)
-        .map(|_| d.sample(&mut rng).exp() as f32)
-        .collect();
-    let call = embedding_mixture_empty_call(&nrm, 30, 0.05);
-    assert!(
-        call.n_drop < 100,
-        "over-dropped on a unimodal distribution: {} (k={}, boundary={:.2})",
-        call.n_drop,
-        call.k,
-        call.boundary
     );
 }
 

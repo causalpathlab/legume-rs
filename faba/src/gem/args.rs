@@ -269,14 +269,28 @@ pub struct TrainArgs {
     pub tau_modality: f32,
 
     #[arg(
-        long,
+        long = "n-marginal-neg",
+        alias = "n-rand",
         default_value_t = 10,
-        help = "Random negatives: pick another (g', m, c) within the positive's stratum",
-        long_help = "Random negatives: pick another (g', m, c) row within the\n\
-                     positive's stratum and modality. Tests gene-cell identification\n\
-                     (β-side classification)."
+        help = "Marginal-noise negatives: draw a feature ∝ count^α (NEG noise dist)",
+        long_help = "Logistic-NEG noise negatives: draw a feature INDEPENDENT of the\n\
+                     positive from the per-stratum marginal `count^α` (see --alpha-neg),\n\
+                     routed to the positive's stratum (count negatives stay within the\n\
+                     positive's splice modality). This is the SGNS/NEG noise\n\
+                     distribution — the negative may coincide with the positive (a\n\
+                     legitimate noise draw). Was `--n-rand`."
     )]
-    pub n_rand: usize,
+    pub n_marginal_neg: usize,
+
+    #[arg(
+        long = "alpha-neg",
+        default_value_t = 0.75,
+        help = "Exponent on the marginal-noise distribution (count^α; geu default 0.75)",
+        long_help = "Tempering exponent on the per-stratum feature-marginal noise\n\
+                     distribution used for logistic-NEG negatives (`count^α`). 1 =\n\
+                     strict count-proportional, 0 = uniform; word2vec/geu use 0.75."
+    )]
+    pub alpha_neg: f32,
 
     #[arg(
         long,
@@ -337,21 +351,47 @@ pub struct QcArgs {
     pub min_cells: usize,
 
     #[arg(
-        long,
-        default_value_t = 0.05,
-        help = "Refine pass: drop null genes (β never moved off init) at this FDR, then re-fit (default 0.05; 0 = off)",
-        long_help = "Empirical-Bayes feature-null QC (shared with `senna bge`) — gem's\n\
-                     primary gene/feature QC, ON by default at FDR 0.05. After the pass-2\n\
-                     re-fit on QC-passed cells, each gene's ‖β_g‖² is tested against an\n\
-                     estimated null (σ̂² and effective dof ν̂ fit from the lower tail, Storey\n\
-                     π̂₀, BH q-value); genes with q > this FDR are NULL (β never moved off its\n\
-                     N(0,σ²I) init — undetectable noise that forms the isolated co-embedding\n\
-                     spikes/rings) and are dropped, then the model re-fits on the live\n\
-                     dictionary (pass 3). Runs on the clean-cell β, so it does NOT suffer the\n\
-                     ambient collapse that retired the old gene QC. 0 disables. Only active\n\
-                     in the refine pass; ignored under --skip-refine."
+        long = "feature-qc",
+        default_value_t = false,
+        help = "Opt in to the HVG feature QC (default keeps EVERY gene)",
+        long_help = "OFF by default — gem keeps every gene, because under logistic NCE the\n\
+                     low-variability background genes are inert (β≈0) and don't harm the\n\
+                     embedding, while removing them strips genes the co-embedding / gem-annotate\n\
+                     need (it cost cell-type markers in practice). Pass `--feature-qc` to run\n\
+                     the model-independent HVG QC: fit the NB mean–variance dispersion trend\n\
+                     and keep the OVERDISPERSED genes (`DispersionTrend::excess > --hvg-min-excess`)\n\
+                     with adequate support (`--feature-qc-min-nnz`). Dropped genes are removed\n\
+                     from the model + re-fit (default), or only masked from the co-embed with\n\
+                     `--feature-qc-mask`. For a clean gene UMAP prefer a plot-time filter over\n\
+                     this. Ignored under --skip-refine."
     )]
-    pub feature_null_fdr: f32,
+    pub feature_qc: bool,
+
+    #[arg(
+        long = "hvg-min-excess",
+        default_value_t = 0.0,
+        help = "Feature QC (HVG): keep genes with excess NB-dispersion strictly above \
+                this (0 = above the mean–variance trend). Higher = stricter."
+    )]
+    pub hvg_min_excess: f32,
+
+    #[arg(
+        long = "feature-qc-min-nnz",
+        default_value_t = 0.0,
+        help = "Feature QC (HVG): expression floor — drop genes detected in fewer than \
+                this many cells (unreliable dispersion). 0 = no floor."
+    )]
+    pub feature_qc_min_nnz: f32,
+
+    #[arg(
+        long = "feature-qc-mask",
+        help = "Feature QC: only MASK the dropped genes from the co-embedding (keep them in \
+                the model) instead of the default DROP + re-fit. The default drops the \
+                low-variability genes from the model — safe under logistic NCE (it has no \
+                softmax partition to collapse). Use --feature-qc-mask to keep every gene in \
+                the model and exclude them from the gene visualization only."
+    )]
+    pub feature_qc_mask: bool,
 
     #[arg(
         long,
@@ -381,6 +421,61 @@ pub struct QcArgs {
                      a SPA-anchor residual-elbow sweep over `2..=H+1` (H = embedding dim)."
     )]
     pub num_topics: Option<usize>,
+
+    #[arg(
+        long = "skip-cell-qc",
+        default_value_t = false,
+        help = "Disable the per-batch debris cell QC (keep every cell)",
+        long_help = "By default the refine pass runs a per-batch debris cell QC on the\n\
+                     pass-1 cell embedding (shared with `senna bge`): for each batch it drops\n\
+                     the low-complexity DEBRIS tail (cells below a per-batch nnz+depth cut).\n\
+                     Every depth decision is per-batch so a shallow replicate is not mistaken\n\
+                     for empties. This replaces the old 1-D embedding-norm mixture empty-call.\n\
+                     `--skip-cell-qc` keeps every cell (only the up-front spliced-nnz≥1 gate\n\
+                     applies); ignored under `--skip-refine`."
+    )]
+    pub skip_cell_qc: bool,
+
+    #[arg(
+        long = "cell-qc-debris-mads",
+        default_value_t = 5.0,
+        help = "Cell QC: per-batch lower-band MAD multiplier (debris fallback when no 2-means split)"
+    )]
+    pub cell_qc_debris_mads: f32,
+}
+
+impl QcArgs {
+    /// Per-batch debris cell QC is on unless `--skip-cell-qc`.
+    #[must_use]
+    pub fn cell_qc_enabled(&self) -> bool {
+        !self.skip_cell_qc
+    }
+
+    /// Build the shared [`graph_embedding_util::cell_qc::CellQcConfig`] from the
+    /// CLI surface.
+    #[must_use]
+    pub fn to_cell_qc_config(&self) -> graph_embedding_util::cell_qc::CellQcConfig {
+        graph_embedding_util::cell_qc::CellQcConfig {
+            enabled: self.cell_qc_enabled(),
+            debris_mads: self.cell_qc_debris_mads,
+        }
+    }
+
+    /// HVG feature QC is OFF by default; opt in with `--feature-qc`.
+    #[must_use]
+    pub fn feature_qc_enabled(&self) -> bool {
+        self.feature_qc
+    }
+
+    /// Build the shared [`graph_embedding_util::feature_qc::FeatureQcConfig`].
+    #[must_use]
+    pub fn to_feature_qc_config(&self) -> graph_embedding_util::feature_qc::FeatureQcConfig {
+        graph_embedding_util::feature_qc::FeatureQcConfig {
+            enabled: self.feature_qc_enabled(),
+            hvg_min_excess: self.hvg_min_excess,
+            min_nnz: self.feature_qc_min_nnz,
+        }
+    }
 }
 
 /// Runtime knobs: data preload, RNG seed, compute device, threads.

@@ -1824,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "faba"
-version = "0.5.11"
+version = "0.5.12"
 dependencies = [
  "anyhow",
  "approx",
@@ -2599,7 +2599,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "auxiliary-data",
@@ -4967,7 +4967,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "anyhow",
  "approx",
