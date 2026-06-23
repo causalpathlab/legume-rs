@@ -8,7 +8,6 @@ use graph_embedding_util::stop::setup_stop_handler;
 use graph_embedding_util::{load_unified_data, FeatureNameKind, LoadUnifiedArgs};
 use log::{info, warn};
 use matrix_util::common_io::{basename, mkdir_parent};
-use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::RunningStatOps;
 use matrix_util::utils::median;
 use rayon::ThreadPoolBuilder;
@@ -30,7 +29,8 @@ use faba::gem::sample_id::{
     longest_shared_underscore_prefix, strip_sample_id,
 };
 use faba::gem::train::train;
-use graph_embedding_util::null_call::{embedding_mixture_empty_call, embedding_null_call};
+use graph_embedding_util::cell_qc::{per_batch_cell_qc, CellQcInputs};
+use graph_embedding_util::feature_qc::hvg_feature_qc;
 
 /// A loaded satellite-modality backend (m6A / A2I / pA), held **separately**
 /// from the genes backend. The collapse never sees it; it only donates
@@ -203,12 +203,13 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
 
     validate_args(args)?;
 
-    if !args.refine() && (args.qc.min_cells > 1 || args.qc.feature_null_fdr > 0.0) {
+    if !args.refine() && (args.qc.min_cells > 1 || args.qc.feature_qc_enabled()) {
         warn!(
-            "gene QC (--min-cells {}, --feature-null-fdr {}) ignored under --skip-refine: both \
+            "gene QC (--min-cells {}, feature QC enabled = {}) ignored under --skip-refine: both \
              need the refine pass to measure support / β on real (not ambient) cells; no gene \
              QC will run",
-            args.qc.min_cells, args.qc.feature_null_fdr
+            args.qc.min_cells,
+            args.qc.feature_qc_enabled()
         );
     }
 
@@ -483,10 +484,11 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // embedding-norm empty-call (gem's two-step QC), which uses the model's own
     // learned signal rather than a 1-D nnz heuristic.
     let spliced_rows = spliced_backend_rows(&unified, &table, &genes_row_map);
-    let cell_nnz_full =
+    let cell_stat =
         collect_column_stat_across_vec(unified.count_backend(), Some(&spliced_rows), None)
-            .context("cell QC column statistics (spliced)")?
-            .count_positives();
+            .context("cell QC column statistics (spliced)")?;
+    let cell_nnz_full = cell_stat.count_positives();
+    let cell_sum_full = cell_stat.sum();
     let n_cells_full = unified.n_cells();
     let cell_cutoff = 1usize;
     // Single keep predicate, shared by the backend mask and the logical subset
@@ -517,8 +519,9 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
             .context("subset genes cells (mask_columns)")?;
         unified.subset_cells(&kept);
     }
-    // Per-cell spliced nnz for the kept cells (re-applied in the refine pass).
+    // Per-cell spliced nnz + depth for the kept cells (re-applied in the refine pass).
     let cell_nnz: Vec<f32> = kept.iter().map(|&c| cell_nnz_full[c]).collect();
+    let cell_sum: Vec<f32> = kept.iter().map(|&c| cell_sum_full[c]).collect();
     // Only surface this line when it actually filtered something — the refine
     // empty-call is what makes the real cut; an "kept N/N (dropped 0)" line is
     // pure noise. The dropped path keeps the conservative reminder.
@@ -630,7 +633,9 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     let will_refine = args.refine() && !stop.load(std::sync::atomic::Ordering::Relaxed);
 
     // Durable embeddings first, so a force-abort (second Ctrl+C) during the
-    // optional topic step never loses the trained model.
+    // optional topic step never loses the trained model. Pass-1 has no feature QC
+    // (it runs in the refine pass), so every gene co-embeds.
+    let feature_keep_p1 = vec![true; table.n_genes()];
     write_outputs(
         OutputCtx {
             prefix: &args.out,
@@ -640,6 +645,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
             model: &model,
             unified: &unified,
             target_clusters: args.qc.num_topics,
+            feature_keep: &feature_keep_p1,
         },
         CellQcOutputs {
             keep_idx: &keep_idx,
@@ -655,7 +661,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         let ctx = Pass1Context {
             cell_nrms: &cell_nrms,
             cell_nnz: &cell_nnz,
-            cell_cutoff,
+            cell_sum: &cell_sum,
             table: &table,
             genes_row_map: &genes_row_map,
             satellites: &satellites,
@@ -673,6 +679,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
                 pb: pb2,
                 keep_idx: keep_idx2,
                 cell_nrms: cell_nrms2,
+                feature_keep: feature_keep2,
             } = out2;
             write_outputs(
                 OutputCtx {
@@ -683,6 +690,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
                     model: &model2,
                     unified: &unified,
                     target_clusters: args.qc.num_topics,
+                    feature_keep: &feature_keep2,
                 },
                 CellQcOutputs {
                     keep_idx: &keep_idx2,
@@ -752,6 +760,10 @@ struct Pass2Outputs {
     pb: faba::gem::pseudobulk::PseudobulkData,
     keep_idx: Vec<usize>,
     cell_nrms: Vec<f32>,
+    /// Per-gene (β-row order) keep mask for the SIMBA feature co-embedding: the
+    /// empty cluster from feature QC is masked out of the gene *visualization*
+    /// only. All-`true` when feature QC is off or finds no empty cluster.
+    feature_keep: Vec<bool>,
 }
 
 /// Pass-1 (genes-only) scoring inputs bundled for `run_refine_pass`.
@@ -766,9 +778,9 @@ struct Pass1Context<'a> {
     /// side-by-side with the pre-L2 norm in `{out}.cell_qc.parquet`.
     cell_nnz: &'a [f32],
 
-    /// Effective spliced-nnz cell cutoff from pass-1 (auto cell-calling, else 1),
-    /// re-applied to the dead-cell filter so both passes agree.
-    cell_cutoff: usize,
+    /// Per-cell **spliced** total count (depth, one per cell). Drives the
+    /// per-batch debris cut alongside `cell_nnz`.
+    cell_sum: &'a [f32],
 
     /// Pass-1 feature table — used for gene scoring (n_genes).
     table: &'a FeatureTable,
@@ -783,72 +795,6 @@ struct Pass1Context<'a> {
 
     /// Region map (unchanged across passes).
     region_map: &'a faba::gem::region::RegionMap,
-}
-
-/// Per-cell QC report written to `{out}.cell_qc.parquet`: the pre-L2 fit
-/// norm and the spliced nnz **side by side**, both cutoff values, and how
-/// each cutoff fired per cell (`pass_nnz` / `pass_norm` / `kept`). Covers
-/// all N_old cells (the full pre-subset axis), so a row exists for every
-/// dropped cell too. `pre_l2_norm` is `NaN` when phase-2 was skipped.
-/// Per-cell QC columns for [`write_cell_qc_parquet`]: the spliced nnz and its
-/// cutoff, the pre-L2 fit norm and its empty-call cutoff (`NaN`/0 when phase-2
-/// was skipped, flagged by `have_nrms`), and the final per-cell keep decision.
-/// One entry per cell over the full pre-subset axis.
-struct CellQcReport<'a> {
-    cell_nrms: &'a [f32],
-    cell_nnz: &'a [f32],
-    cell_cutoff: usize,
-    norm_cut: f32,
-    have_nrms: bool,
-    kept: &'a [bool],
-}
-
-fn write_cell_qc_parquet(
-    args: &GemArgs,
-    gem_data: &graph_embedding_util::data::UnifiedData,
-    report: CellQcReport<'_>,
-) -> anyhow::Result<()> {
-    use matrix_util::traits::IoOps;
-    let CellQcReport {
-        cell_nrms,
-        cell_nnz,
-        cell_cutoff,
-        norm_cut,
-        have_nrms,
-        kept,
-    } = report;
-    let n = gem_data.n_cells();
-    let mut m = DMatrix::<f32>::zeros(n, 7);
-    for c in 0..n {
-        let pass_nnz = (cell_nnz[c] as usize) >= cell_cutoff;
-        // The EB call is the cell decision, so `pass_norm` == `kept` (no
-        // separate nnz-AND); kept here for the side-by-side QC schema.
-        let pass_norm = !have_nrms || kept[c];
-        m[(c, 0)] = cell_nnz[c];
-        m[(c, 1)] = if have_nrms { cell_nrms[c] } else { f32::NAN };
-        m[(c, 2)] = cell_cutoff as f32;
-        m[(c, 3)] = norm_cut;
-        m[(c, 4)] = pass_nnz as u8 as f32;
-        m[(c, 5)] = pass_norm as u8 as f32;
-        m[(c, 6)] = kept[c] as u8 as f32;
-    }
-    let cols: Vec<Box<str>> = [
-        "nnz",
-        "pre_l2_norm",
-        "nnz_cutoff",
-        "norm_cutoff",
-        "pass_nnz",
-        "pass_norm",
-        "kept",
-    ]
-    .iter()
-    .map(|s| Box::from(*s))
-    .collect();
-    let path = format!("{}.cell_qc.parquet", args.out);
-    m.to_parquet_with_names(&path, (Some(&gem_data.barcodes), Some("cell")), Some(&cols))
-        .with_context(|| format!("writing {path}"))?;
-    info!("refine: cell QC → {} ({} cells)", path, n);
-    Ok(())
 }
 
 /// Per-gene cell-support QC for the refine pass. `support[g]` = number of cells
@@ -990,7 +936,7 @@ fn run_refine_pass(
     let Pass1Context {
         cell_nrms,
         cell_nnz,
-        cell_cutoff,
+        cell_sum,
         table: table_p1,
         genes_row_map: genes_row_map_p1,
         satellites,
@@ -1021,110 +967,63 @@ fn run_refine_pass(
     // step 2. cell q/c //
     //////////////////////
 
-    // Independent EB "empty droplet" call on the pre-L2 cell norm. Genes and
-    // cells live on different scales (gene β is weight-decayed small; the cell
-    // MAP norm scales with depth), so the gene null does NOT transfer — cells
-    // get their OWN call. Once the model has trained, empties don't collapse to
-    // a ≈0 lower tail; they form their OWN low mode (norm ~0.2) separated from
-    // the real bulk by a density valley, so a median+MAD lower-tail fit misses
-    // them. Instead fit a BIC-selected 1-D Gaussian mixture on `log(cell_nrms)`,
-    // take the lowest mode as empty (the first prominent density valley above
-    // it is the cut), and drop by MAP posterior P(empty)≥0.5. No median×frac
-    // heuristic, no kmeans. The spliced nnz cutoff still gates depth.
-    let have_nrms = cell_nrms.len() == n_cells_old;
-    let (cell_keep, norm_cut): (Vec<bool>, f32) = if have_nrms {
-        // BIC-selected Gaussian mixture on log(cell_nrms): the empties are a
-        // separate low mode (not a tail at ≈0 — once trained, ambient droplets
-        // still get a small non-zero norm), so a lower-tail/median fit misses
-        // them. The mixture isolates the empty mode (lowest, below the first
-        // prominent valley) and drops it by MAP posterior. k is BIC-selected up
-        // to QC_MIXTURE_K_MAX (generous — a minority empty mode needs enough
-        // components to separate from the broad real distribution).
-        let call = embedding_mixture_empty_call(
-            cell_nrms,
-            graph_embedding_util::null_call::QC_MIXTURE_K_MAX,
-            args.qc.gene_null_fdr,
-        );
-        // Effective drop cut = largest norm still called empty (MAP rule, at the
-        // density valley — can sit above the component-labeling antimode).
-        let norm_cut = if call.cut.is_finite() {
-            call.cut.exp() as f32
-        } else {
-            0.0
-        };
-        info!(
-            "refine: cell empty call (mixture k={}, dropped norm ≤ {:.3}, π̂_empty={:.2}) — {} / {} cells empty",
-            call.k, norm_cut, call.empty_frac, call.n_drop, n_cells_old
-        );
-        (call.drop.iter().map(|&d| !d).collect(), norm_cut)
-    } else {
-        (vec![true; n_cells_old], 0.0)
-    };
-    // `cell_keep` IS the final per-cell decision: the EB empty call alone
-    // (matches senna bge — the spliced-nnz cutoff already filtered every cell
-    // before pass 1, so AND-ing it here would be redundant).
-    let n_kept_cells = cell_keep.iter().filter(|&&v| v).count();
+    // Per-batch debris cell QC on the pass-1 cell embedding (shared with `senna
+    // bge`): for each batch, drop the low-complexity debris tail (cells below a
+    // per-batch nnz AND depth cut). Replaces the retired 1-D mixture empty-call,
+    // which could not fire on already-cell-called data (the embedding norm is
+    // single-peaked — no empty mode). Cell ids align 1:1 with the pre-subset axis
+    // (`unified` is subset below in step 3a), so `batch_membership` lines up with
+    // `cell_nnz` / `cell_sum`.
+    let qc = per_batch_cell_qc(CellQcInputs {
+        cell_nnz,
+        cell_sum,
+        batch_membership: &unified.batch_membership,
+        batch_names: &unified.batch_names,
+        cfg: args.qc.to_cell_qc_config(),
+    });
+    let n_kept_cells = qc.keep.iter().filter(|&&v| v).count();
     let n_dead_cells = n_cells_old - n_kept_cells;
 
-    // Paired QC report: nnz beside the pre-L2 norm + how each cutoff fired.
-    write_cell_qc_parquet(
-        args,
-        unified,
-        CellQcReport {
-            cell_nrms,
-            cell_nnz,
-            cell_cutoff,
-            norm_cut,
-            have_nrms,
-            kept: &cell_keep,
-        },
+    // Per-cell QC report over the full pre-subset axis (one row per cell):
+    // nnz, depth, embedding norm, per-batch cuts, drop_reason, kept.
+    let nrms_opt = (cell_nrms.len() == n_cells_old).then_some(cell_nrms);
+    graph_embedding_util::cell_qc::write_cell_qc_parquet(
+        &format!("{}.cell_qc.parquet", args.out),
+        &unified.barcodes,
+        nrms_opt,
+        cell_nnz,
+        cell_sum,
+        &qc,
     )
     .context("write cell_qc.parquet")?;
-
-    if have_nrms {
-        // One pass: split nnz into dropped vs kept for the diagnostic medians.
-        let (mut dropped_nnz, mut kept_nnz) = (Vec::new(), Vec::new());
-        for c in 0..n_cells_old {
-            if cell_keep[c] {
-                kept_nnz.push(cell_nnz[c]);
-            } else {
-                dropped_nnz.push(cell_nnz[c]);
-            }
-        }
-        info!(
-            "refine: {} / {} cells dead (dropped median nnz={:.0} vs kept {:.0})",
-            n_dead_cells,
-            n_cells_old,
-            median(&dropped_nnz),
-            median(&kept_nnz),
-        );
-    } else {
-        info!(
-            "refine: {} / {} cells dead (phase-2 skipped — nnz cutoff {} only)",
-            n_dead_cells, n_cells_old, cell_cutoff
-        );
-    }
+    info!(
+        "refine: cell QC kept {} / {} cells ({} debris dropped over {} batches)",
+        n_kept_cells,
+        n_cells_old,
+        n_dead_cells,
+        unified.n_batches(),
+    );
 
     // ---- Filter unified (genes backend) ----
     // step 3a. Subset CELLS first, so the --min-cells gene filter (3b) counts
-    // support on the real cells now in the backend, not the ambient droplets.
+    // support on the real cells now in the backend, not the dropped droplets.
     // `mask_columns` shrinks the backend cell columns, `subset_cells` syncs the
     // logical axis; both renumber survivors in ascending order, so "cell id ==
     // backend column" still holds for the streaming phase-2 pass, exactly as the
-    // initial up-front QC established. The EB-called empties never re-enter the
-    // model (not output-only). Guard against a degenerate all-empty call
-    // (mask_columns to 0 columns would crash the re-fit) — keep every cell then.
+    // initial up-front QC established. Dropped cells never re-enter the model
+    // (not output-only). The per-batch guard already prevents gutting a batch;
+    // this all-dropped check is a final backstop (mask_columns to 0 cols crashes).
     // (cell_qc.parquet was already written above on the pre-subset cell axis.)
-    let live_cell_old_ids: Vec<usize> = (0..n_cells_old).filter(|&c| cell_keep[c]).collect();
+    let live_cell_old_ids: Vec<usize> = (0..n_cells_old).filter(|&c| qc.keep[c]).collect();
     if live_cell_old_ids.is_empty() {
         warn!(
-            "refine: cell empty call flagged ALL {n_cells_old} cells empty — keeping them \
-             (no cell mask); inspect {{out}}.cell_qc.parquet and --gene-null-fdr"
+            "refine: cell QC flagged ALL {n_cells_old} cells — keeping them (no cell mask); \
+             inspect {{out}}.cell_qc.parquet and the --cell-qc-* knobs"
         );
     } else if live_cell_old_ids.len() < n_cells_old {
         unified
             .count_backend_mut()
-            .mask_columns(&cell_keep)
+            .mask_columns(&qc.keep)
             .context("subset genes cells in refine (mask_columns)")?;
         unified.subset_cells(&live_cell_old_ids);
     }
@@ -1173,46 +1072,77 @@ fn run_refine_pass(
     unified.subset_features(&live_feature_rows);
 
     // ---- Pass 2: rebuild + train the full model on the QC-passed cells × genes.
+    // `mut` so the default feature-QC drop path can re-fit (`--feature-qc-mask` opts out).
     let (mut model2, mut table2, mut pb2, mut cell_nrms2) =
         rebuild_and_train(args, unified, satellites, region_map, stop, "refined")?;
 
-    // ---- Optional pass 3: empirical-Bayes feature-null QC + re-fit ----
-    // The null call (shared with `senna bge`) needs a β trained on REAL cells to
-    // separate untrained genes (β still at its `N(0,σ²I)` init) from genes with
-    // signal — so it runs on the pass-2 β (clean cells), NOT pass-1 (the
-    // ambient-contaminated β was what made the earlier ‖β_g‖² QC collapse the
-    // dictionary). Drop the null genes and re-fit on the live dictionary. Off by
-    // default (--feature-null-fdr 0); intended to eventually supersede --min-cells.
-    if args.qc.feature_null_fdr > 0.0 && !stop.load(std::sync::atomic::Ordering::Relaxed) {
-        let h = args.model.embedding_dim;
+    // ---- Pass 3: HVG feature QC (model-independent, from counts) ----
+    // Keep genes that are OVERDISPERSED relative to the fitted NB mean–variance
+    // trend (`DispersionTrend::excess > --hvg-min-excess`) with adequate support
+    // (`--feature-qc-min-nnz`); drop the low-variability background. This replaces
+    // the β-based k-means/elbow QC, which was circular (it QC'd genes using the
+    // embedding those genes shape) and brittle (found nothing under logistic).
+    //
+    // Default = DROP the low-variability genes from the model + re-fit (safe under
+    // logistic NCE — no softmax partition to collapse). With `--feature-qc-mask` the
+    // genes instead stay in the model and are excluded from the SIMBA gene
+    // visualization only (the cell embedding + reconstruction params stay intact).
+    // Off with `--skip-feature-qc`; ignored under `--skip-refine`.
+    let mut feature_keep = vec![true; table2.n_genes()];
+    if args.qc.feature_qc_enabled() && !stop.load(std::sync::atomic::Ordering::Relaxed) {
         let n_genes2 = table2.n_genes();
-        let beta_flat: Vec<f32> = model2
-            .beta
-            .flatten_all()
-            .and_then(|t| t.to_vec1::<f32>())
-            .context("read pass-2 β for feature-null QC")?;
-        let null = embedding_null_call(&beta_flat, n_genes2, h, args.qc.feature_null_fdr);
-        if null.n_live == 0 {
-            warn!(
-                "refine: feature null QC flagged ALL {n_genes2} genes null — keeping them \
-                 (check --feature-null-fdr); no feature drop"
-            );
-        } else if null.n_live < n_genes2 {
+
+        // Per-gene cell-support (nnz) + NB dispersion from the spliced rows.
+        let genes_row_map2 = table2.map_backend_rows(&unified.feature_names, region_map);
+        let spliced_rows = spliced_backend_rows(unified, &table2, &genes_row_map2);
+        let row_stat = collect_row_stat_across_vec(unified.count_backend(), None)
+            .context("per-gene row stats for feature QC")?;
+        let row_nnz = row_stat.count_positives();
+        let row_mean = row_stat.mean();
+        let row_var = row_stat.variance();
+        let (mut gene_nnz, mut gene_mean, mut gene_var) = (
+            vec![0f32; n_genes2],
+            vec![0f32; n_genes2],
+            vec![0f32; n_genes2],
+        );
+        for &row in &spliced_rows {
+            if let Some(g) = genes_row_map2.gene[row] {
+                let g = g as usize;
+                // Dominant spliced row per gene drives its support + dispersion.
+                if row_nnz[row] > gene_nnz[g] {
+                    gene_nnz[g] = row_nnz[row];
+                    gene_mean[g] = row_mean[row];
+                    gene_var[g] = row_var[row];
+                }
+            }
+        }
+        let trend = data_beans_alg::nb_dispersion::DispersionTrend::fit(&gene_mean, &gene_var);
+        let gene_hvg: Vec<f32> = (0..n_genes2)
+            .map(|g| trend.excess(gene_mean[g], gene_var[g]))
+            .collect();
+
+        let fqc = hvg_feature_qc(&gene_nnz, &gene_hvg, &args.qc.to_feature_qc_config());
+        if fqc.n_dropped() == 0 {
+            info!("refine: HVG feature QC — all {n_genes2} genes pass (variable)");
+        } else if args.qc.feature_qc_mask {
+            // Opt-out: keep the genes in the model, exclude them from the co-embed.
             info!(
-                "refine: feature null QC (--feature-null-fdr {}): {} / {} genes live \
-                 (σ̂²={:.4}, ν̂={:.1}, π̂₀={:.2}) — re-fitting on the live dictionary",
-                args.qc.feature_null_fdr,
-                null.n_live,
+                "refine: HVG feature QC — masking {} / {} low-variability genes from co-embedding",
+                fqc.n_dropped(),
                 n_genes2,
-                null.sigma2,
-                null.eff_dof,
-                null.pi0,
             );
-            let genes_row_map2 = table2.map_backend_rows(&unified.feature_names, region_map);
+            feature_keep = fqc.keep;
+        } else {
+            // Default: drop the low-variability genes from the model + re-fit.
+            info!(
+                "refine: HVG feature QC — DROPPING {} / {} low-variability genes + re-fitting",
+                fqc.n_dropped(),
+                n_genes2,
+            );
             let live_rows: Vec<usize> = (0..unified.n_features())
                 .filter(|&r| {
                     genes_row_map2.gene[r]
-                        .map(|g| null.live[g as usize])
+                        .map(|g| fqc.keep[g as usize])
                         .unwrap_or(false)
                 })
                 .collect();
@@ -1229,15 +1159,11 @@ fn run_refine_pass(
             table2 = t3;
             pb2 = p3;
             cell_nrms2 = c3;
-        } else {
-            info!(
-                "refine: feature null QC (--feature-null-fdr {}): all {n_genes2} genes live — no drop",
-                args.qc.feature_null_fdr
-            );
+            feature_keep = vec![true; table2.n_genes()];
         }
     }
 
-    // Empties were masked out before the re-fit, so every cell remaining on the
+    // Cell QC masked debris cells before the re-fit, so every cell remaining on the
     // axis is a real survivor — write them all.
     let keep_idx2: Vec<usize> = (0..unified.n_cells()).collect();
 
@@ -1247,6 +1173,7 @@ fn run_refine_pass(
         pb: pb2,
         keep_idx: keep_idx2,
         cell_nrms: cell_nrms2,
+        feature_keep,
     })
 }
 
@@ -1336,12 +1263,12 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
         args.train.f_count,
         args.train.f_agg + args.train.f_count
     );
-    // At least one negative-source must be active or training is a no-op:
-    // log_softmax over a single positive column is identically zero.
+    // At least one negative source must be active, else the logistic NEG loss
+    // has no contrast (positive scores run to +∞ with no opposing gradient).
     anyhow::ensure!(
-        args.train.n_rand + args.train.n_swap_gene_mode > 0,
-        "at least one of --n-rand, --n-swap-gene-mode must be > 0 \
-         (else NCE loss collapses to zero and AdamW makes no progress)"
+        args.train.n_marginal_neg + args.train.n_swap_gene_mode + args.train.n_swap_modality > 0,
+        "at least one of --n-marginal-neg, --n-swap-gene-mode, --n-swap-modality must be > 0 \
+         (else the NCE loss has no negatives and AdamW makes no progress)"
     );
     if args.refine() {
         anyhow::ensure!(
@@ -1350,10 +1277,5 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
             args.qc.gene_null_fdr
         );
     }
-    anyhow::ensure!(
-        args.qc.feature_null_fdr >= 0.0 && args.qc.feature_null_fdr < 1.0,
-        "--feature-null-fdr must be in [0, 1) (0 = off) (got {})",
-        args.qc.feature_null_fdr
-    );
     Ok(())
 }

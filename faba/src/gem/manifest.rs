@@ -143,6 +143,10 @@ pub struct OutputCtx<'a> {
     pub model: &'a GemModel,
     pub unified: &'a UnifiedData,
     pub target_clusters: Option<usize>,
+    /// Per-gene (β-row order) keep mask for the SIMBA feature co-embedding only.
+    /// Feature QC masks its empty cluster out of the gene *visualization*; the raw
+    /// β_g `gene_base_embedding` and reconstruction params are written in full.
+    pub feature_keep: &'a [bool],
 }
 
 /// Write every model artifact (parquets) under the configured prefix.
@@ -158,6 +162,7 @@ pub fn write_outputs(ctx: OutputCtx<'_>, cell: CellQcOutputs<'_>) -> Result<()> 
         model,
         unified,
         target_clusters,
+        feature_keep,
     } = ctx;
     let CellQcOutputs {
         keep_idx,
@@ -363,25 +368,49 @@ pub fn write_outputs(ctx: OutputCtx<'_>, cell: CellQcOutputs<'_>) -> Result<()> 
         return Ok(());
     }
     let path_feat_emb = format!("{prefix}.feature_embedding.parquet");
+
+    // Mask feature-QC's empty cluster out of the gene VISUALIZATION (co-embed)
+    // only — the empty genes are β≈0 (zero bilinear influence) and form the dense
+    // low-norm blob that contaminates the gene UMAP. `feature_keep` is per-gene in
+    // β-row order; the raw β_g (gene_base_embedding) + reconstruction params above
+    // are written in full.
+    let kept_genes: Vec<usize> = (0..table.gene_names.len())
+        .filter(|&g| feature_keep.get(g).copied().unwrap_or(true))
+        .collect();
+    let gene_names_co: Vec<Box<str>> = kept_genes
+        .iter()
+        .map(|&g| table.gene_names[g].clone())
+        .collect();
+    let rho_co = rho.select_rows(kept_genes.iter());
+    if kept_genes.len() < table.gene_names.len() {
+        log::info!(
+            "feature co-embedding: {} / {} genes (masked {} feature-QC empties)",
+            kept_genes.len(),
+            table.gene_names.len(),
+            table.gene_names.len() - kept_genes.len()
+        );
+    }
+
     if !cell_nrms.is_empty() {
         let cpu = candle_core::Device::Cpu;
         let z_t = e_cell.to_tensor(&cpu)?;
-        let rho_t = rho.to_tensor(&cpu)?;
+        let rho_t = rho_co.to_tensor(&cpu)?;
         let (_labels, target_eff) = graph_embedding_util::cell_clusters(&z_t, target_clusters)?;
         graph_embedding_util::write_feature_coembedding(
             prefix,
             &z_t,
             &rho_t,
-            &table.gene_names,
+            &gene_names_co,
             target_eff,
         )?;
     } else {
-        rho.to_parquet_with_names(
-            &path_feat_emb,
-            (Some(&table.gene_names), Some("gene")),
-            Some(&dim_names),
-        )
-        .with_context(|| format!("writing {path_feat_emb}"))?;
+        rho_co
+            .to_parquet_with_names(
+                &path_feat_emb,
+                (Some(&gene_names_co), Some("gene")),
+                Some(&dim_names),
+            )
+            .with_context(|| format!("writing {path_feat_emb}"))?;
     }
 
     Ok(())
@@ -476,6 +505,42 @@ pub(crate) fn default_out(dir: &std::path::Path, prefix: &str) -> String {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| prefix.to_owned());
     dir.join(base).to_string_lossy().into_owned()
+}
+
+/// Per-gene KEEP mask from `feature_prior_score.parquet`, aligned to `gene_names`:
+/// keep genes with `prior_pval <= fdr` (informed), drop those that never left the
+/// `N(0, σ²)` prior (dead/noise); genes absent from the score are kept. `fdr <= 0`
+/// keeps all. This is the shared read-side of [`write_feature_prior_score`] so any
+/// post-gem tool (gem-plot's display filter, and any future consumer) applies the
+/// SAME dead-gene call instead of re-deriving it. `prior_pval` is column 2
+/// (`emb_sq_norm, chisq_stat, prior_pval`).
+pub(crate) fn feature_prior_keep(
+    dir: &std::path::Path,
+    manifest: &GemManifest,
+    fdr: f32,
+    gene_names: &[Box<str>],
+) -> Result<Vec<bool>> {
+    if fdr <= 0.0 {
+        return Ok(vec![true; gene_names.len()]);
+    }
+    let path = resolve(dir, &manifest.feature_prior_score);
+    let prior = DMatrix::<f32>::from_parquet(&path)
+        .with_context(|| format!("reading feature prior-score {path}"))?;
+    anyhow::ensure!(
+        prior.mat.ncols() >= 3,
+        "feature prior-score {path} needs ≥3 columns (…, prior_pval)"
+    );
+    let pcol = prior.mat.column(2);
+    let pmap: std::collections::HashMap<&str, f32> = prior
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.as_ref(), pcol[i]))
+        .collect();
+    Ok(gene_names
+        .iter()
+        .map(|g| !pmap.get(g.as_ref()).is_some_and(|&p| p > fdr))
+        .collect())
 }
 
 ////////////////////////////////////////
