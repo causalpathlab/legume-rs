@@ -2,7 +2,9 @@
 //! `membership.tsv` (consumed by `faba gem-summary` and `data-beans stat -g`)
 //! in the expected 2-column, header-less format.
 
-use graph_embedding_util::type_annotation::{annotate_embeddings, AnnotateProjConfig};
+use graph_embedding_util::type_annotation::{
+    annotate_embeddings, AnnotateProjConfig, InputEmbeddings,
+};
 use matrix_util::dmatrix_io::DMatrix;
 use std::fs;
 
@@ -46,15 +48,16 @@ fn writes_membership_tsv() {
         n_perm: 0, // raw cosine — fast & deterministic
         seed: 42,
         knn: 3,
-        resolution: 1.0,
         coarsen: true,
         ..AnnotateProjConfig::default()
     };
     annotate_embeddings(
-        &feature_emb,
-        &gene_names,
-        &cell_emb,
-        &cell_names,
+        &InputEmbeddings {
+            feature_emb: &feature_emb,
+            gene_names: &gene_names,
+            cell_emb: &cell_emb,
+            cell_names: &cell_names,
+        },
         markers_path.to_str().unwrap(),
         prefix,
         true,

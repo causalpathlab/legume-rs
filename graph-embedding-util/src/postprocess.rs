@@ -67,14 +67,27 @@ pub fn cell_clusters(
     anyhow::ensure!(labels.len() == n, "cell_clusters: label/row count mismatch");
     let k = labels.iter().copied().max().map_or(0, |m| m + 1);
     anyhow::ensure!(k >= 1, "cell_clusters: no clusters");
-    let mut sizes = vec![0f32; k];
-    for &l in &labels {
-        sizes[l] += 1.0;
-    }
-    let upper = (n as f64 / 2.0).max(MIN_TARGET_EFF);
-    let target = f64::from(matrix_util::utils::median(&sizes)).clamp(MIN_TARGET_EFF, upper);
+    let target = target_eff_from_labels(&labels, k);
     info!("co-embedding: {n} cells → {k} Leiden clusters, eff-cells target {target:.0}");
     Ok((labels, target))
+}
+
+/// Co-embedding effective-cells temperature target from PRECOMPUTED cluster
+/// labels: the median cluster size, clamped to `[MIN_TARGET_EFF, n/2]`. Lets a
+/// caller that already clustered (e.g. annotation's coarse communities) reuse
+/// those labels instead of re-running Leiden just to derive the target.
+#[must_use]
+pub fn target_eff_from_labels(labels: &[usize], n_clusters: usize) -> f64 {
+    let n = labels.len();
+    let k = n_clusters.max(1);
+    let mut sizes = vec![0f32; k];
+    for &l in labels {
+        if l < k {
+            sizes[l] += 1.0;
+        }
+    }
+    let upper = (n as f64 / 2.0).max(MIN_TARGET_EFF);
+    f64::from(matrix_util::utils::median(&sizes)).clamp(MIN_TARGET_EFF, upper)
 }
 
 /// Re-embed every feature onto the cell manifold. `target_eff` is the eff-cells

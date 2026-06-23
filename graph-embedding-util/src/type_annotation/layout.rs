@@ -187,24 +187,43 @@ fn l2_normalize_columns(mat: &mut DMatrix<f32>) {
     }
 }
 
+/// Inputs for [`write_layout_outputs`]: the per-cell layout source data plus
+/// the feature embedding and co-embedded type/coarse anchors to place on it.
+pub(super) struct LayoutInputs<'a> {
+    pub out_prefix: &'a str,
+    pub cell_names: &'a [Box<str>],
+    /// Row-major `[n × h]` cell embedding.
+    pub cell_flat: &'a [f32],
+    pub n: usize,
+    pub h: usize,
+    pub feature_emb: &'a DMatrix<f32>,
+    pub gene_names: &'a [Box<str>],
+    /// Co-embedded `[C × H]` fine-type and `[K × H]` coarse anchors.
+    pub type_co: &'a DMatrix<f32>,
+    pub coarse_co: &'a DMatrix<f32>,
+    pub type_names: &'a [Box<str>],
+    pub res: &'a AnnotateProjOutputs,
+    pub cfg: &'a AnnotateProjConfig,
+}
+
 /// Write `{prefix}.cell_coords.parquet` (per-cell UMAP/PHATE + community) and
 /// `{prefix}.feature_coords.parquet` (genes, full features, type anchors
 /// placed on both layouts via feature→cell kNN in the H-dim embedding).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn write_layout_outputs(
-    out_prefix: &str,
-    cell_names: &[Box<str>],
-    cell_flat: &[f32],
-    n: usize,
-    h: usize,
-    feature_emb: &DMatrix<f32>,
-    gene_names: &[Box<str>],
-    type_co: &DMatrix<f32>,
-    coarse_co: &DMatrix<f32>,
-    type_names: &[Box<str>],
-    res: &AnnotateProjOutputs,
-    cfg: &AnnotateProjConfig,
-) -> Result<()> {
+pub(super) fn write_layout_outputs(inp: &LayoutInputs<'_>) -> Result<()> {
+    let &LayoutInputs {
+        out_prefix,
+        cell_names,
+        cell_flat,
+        n,
+        h,
+        feature_emb,
+        gene_names,
+        type_co,
+        coarse_co,
+        type_names,
+        res,
+        cfg,
+    } = inp;
     let umap = res.cell_umap.as_ref().expect("layout guard ensures Some");
     let nan = f32::NAN;
 

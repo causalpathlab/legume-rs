@@ -2,6 +2,9 @@
 //! adjusted), then runs marker-set enrichment on the cluster expression matrix.
 
 use super::args::AnnotateArgs;
+use super::finalize::{
+    clean_outputs, finalize_annotation, AnnotationArtifacts, ENRICHMENT_OUTPUT_SUFFIXES,
+};
 use super::inputs::{load_from_manifest, LeidenArgs};
 use crate::cluster_aggregation::{accumulate_gene_sum_pair, weighted_mean_profile};
 use crate::embed_common::{axis_id_names, Mat};
@@ -12,8 +15,6 @@ use log::info;
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::traits::IoOps;
 use rayon::prelude::*;
-use std::fs::File;
-use std::io::Write;
 use std::path::Path;
 
 pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
@@ -22,6 +23,9 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         None => crate::run_manifest::derive_out_prefix(&args.from).into_boxed_str(),
     };
     mkdir_parent(&out)?;
+    if !args.no_clean {
+        clean_outputs(&out, ENRICHMENT_OUTPUT_SUFFIXES);
+    }
 
     let leiden_args = LeidenArgs {
         knn: args.knn,
@@ -196,15 +200,21 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     )?;
     info!("wrote {annotation_path}");
 
+    // Per-cell label files via the SHARED writer (also emits `membership.tsv`),
+    // so this pass and `annotate-by-projection` produce an identical contract.
     let argmax_path = format!("{out}.argmax.tsv");
     {
-        let mut f = File::create(&argmax_path)?;
-        writeln!(f, "cell\tcell_type\tprobability")?;
-        for lab in &argmax_labels {
-            writeln!(f, "{}\t{}\t{:.4}", lab.cell_name, lab.label, lab.confidence)?;
-        }
+        let cells: Vec<Box<str>> = argmax_labels
+            .iter()
+            .map(|l| Box::from(l.cell_name.as_ref()))
+            .collect();
+        let labels: Vec<Box<str>> = argmax_labels
+            .iter()
+            .map(|l| Box::from(l.label.as_ref()))
+            .collect();
+        let probs: Vec<f32> = argmax_labels.iter().map(|l| l.confidence).collect();
+        graph_embedding_util::type_annotation::write_label_tsvs(&out, &cells, &labels, &probs)?;
     }
-    info!("wrote {argmax_path}");
 
     let q_path = format!("{out}.cluster_celltype_q.parquet");
     q_kc.to_parquet_with_names(
@@ -245,25 +255,22 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
 
     display_annotation_histogram(&cell_annotation_nc, &loaded.celltype_names);
 
-    let rel = |abs_path: &str| -> String { rel_to_manifest(&manifest_dir, abs_path) };
-    manifest.annotate.annotation = Some(rel(&annotation_path));
-    manifest.annotate.argmax = Some(rel(&argmax_path));
-    manifest.annotate.cluster_celltype_q = Some(rel(&q_path));
-    manifest.annotate.cluster_celltype_es = Some(rel(&es_path));
-    manifest.annotate.cluster_expression = Some(rel(&cell_expr_path));
-    manifest.annotate.markers = Some(args.markers.to_string());
-    manifest.defaults.colour_by = Some("annotation".into());
-    manifest.save(Path::new(args.from.as_ref()))?;
+    finalize_annotation(
+        &mut manifest,
+        Path::new(args.from.as_ref()),
+        &manifest_dir,
+        &AnnotationArtifacts {
+            argmax_abs: &argmax_path,
+            markers: &args.markers,
+            annotation_abs: Some(&annotation_path),
+            cluster_celltype_q_abs: Some(&q_path),
+            cluster_celltype_es_abs: Some(&es_path),
+            cluster_expression_abs: Some(&cell_expr_path),
+        },
+    )?;
 
     info!("senna annotate-by-enrichment complete");
     Ok(())
-}
-
-fn rel_to_manifest(manifest_dir: &Path, abs_path: &str) -> String {
-    Path::new(abs_path).strip_prefix(manifest_dir).map_or_else(
-        |_| abs_path.to_string(),
-        |p| p.to_string_lossy().into_owned(),
-    )
 }
 
 /// Multiply each gene's marker entries by an empirical specificity score
