@@ -29,7 +29,6 @@ use faba::gem::sample_id::{
     longest_shared_underscore_prefix, strip_sample_id,
 };
 use faba::gem::train::train;
-use graph_embedding_util::cell_qc::{per_batch_cell_qc, CellQcInputs};
 use graph_embedding_util::feature_qc::hvg_feature_qc;
 
 /// A loaded satellite-modality backend (m6A / A2I / pA), held **separately**
@@ -488,7 +487,6 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         collect_column_stat_across_vec(unified.count_backend(), Some(&spliced_rows), None)
             .context("cell QC column statistics (spliced)")?;
     let cell_nnz_full = cell_stat.count_positives();
-    let cell_sum_full = cell_stat.sum();
     let n_cells_full = unified.n_cells();
     let cell_cutoff = 1usize;
     // Single keep predicate, shared by the backend mask and the logical subset
@@ -519,9 +517,6 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
             .context("subset genes cells (mask_columns)")?;
         unified.subset_cells(&kept);
     }
-    // Per-cell spliced nnz + depth for the kept cells (re-applied in the refine pass).
-    let cell_nnz: Vec<f32> = kept.iter().map(|&c| cell_nnz_full[c]).collect();
-    let cell_sum: Vec<f32> = kept.iter().map(|&c| cell_sum_full[c]).collect();
     // Only surface this line when it actually filtered something — the refine
     // empty-call is what makes the real cut; an "kept N/N (dropped 0)" line is
     // pure noise. The dropped path keeps the conservative reminder.
@@ -659,9 +654,6 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     // rebuild everything, retrain.  Skipped when stopped early or disabled.
     if will_refine {
         let ctx = Pass1Context {
-            cell_nrms: &cell_nrms,
-            cell_nnz: &cell_nnz,
-            cell_sum: &cell_sum,
             table: &table,
             genes_row_map: &genes_row_map,
             satellites: &satellites,
@@ -768,20 +760,6 @@ struct Pass2Outputs {
 
 /// Pass-1 (genes-only) scoring inputs bundled for `run_refine_pass`.
 struct Pass1Context<'a> {
-    /// Pre-L2-normalisation cell norms from phase-2 (one per original cell);
-    /// `√emb_sq_norm`. The magnitude the cell projection found — near-zero
-    /// means the IRLS fit nothing beyond the gene-bias background, i.e. a
-    /// near-empty cell. Empty when phase-2 was skipped. Drives the cell QC.
-    cell_nrms: &'a [f32],
-
-    /// Per-cell **spliced** non-zero count (f32, one per cell). Reported
-    /// side-by-side with the pre-L2 norm in `{out}.cell_qc.parquet`.
-    cell_nnz: &'a [f32],
-
-    /// Per-cell **spliced** total count (depth, one per cell). Drives the
-    /// per-batch debris cut alongside `cell_nnz`.
-    cell_sum: &'a [f32],
-
     /// Pass-1 feature table — used for gene scoring (n_genes).
     table: &'a FeatureTable,
 
@@ -934,104 +912,29 @@ fn run_refine_pass(
     stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<Pass2Outputs> {
     let Pass1Context {
-        cell_nrms,
-        cell_nnz,
-        cell_sum,
         table: table_p1,
         genes_row_map: genes_row_map_p1,
         satellites,
         region_map,
     } = ctx;
     let n_genes = table_p1.n_genes();
-    let n_cells_old = unified.n_cells();
 
-    // QC on the genes-only pass-1 model, then full modelling in pass 2 — both
-    // calls are keyed on the learned gene embedding β (empirical-Bayes, no
-    // k-means, no median×frac heuristic). nnz, the pre-L2 norm, the cutoffs and
-    // each cell's pass/fail land side by side in `{out}.cell_qc.parquet`.
+    // Gene Q/C only. There is NO per-batch cell QC here: it was removed because the
+    // per-batch debris cut behaved incoherently across batches (near-identical
+    // depth distributions produced 0%-vs-44% drops, guillotining real cells). The
+    // up-front spliced-nnz≥1 gate is the only cell filter; the refine pass refits
+    // the full model on every called cell.
 
-    /////////////////////////////////////////////////////////////////////////////
-    // step 1. Gene Q/C is DEFERRED to after the cell empty-call (step 3) — the  //
-    // --min-cells support filter must count REAL cells, not ambient droplets.   //
-    /////////////////////////////////////////////////////////////////////////////
-
-    // gem's only gene QC is the deterministic --min-cells cell-support filter,
-    // built at step 3 once the empty-droplet call has identified the real cells.
+    // gem's only gene QC is the deterministic --min-cells cell-support filter.
     // It is deliberately NOT model-derived: an earlier EB χ²_H null on ‖β_g‖²
     // collapsed the dictionary to a handful of genes on ambient-heavy data (the
     // embedding has gene signal in few genes when most droplets are empty) and
-    // corrupted the cell call and every downstream consumer (annotation, topics).
-    // Counting raw cell support on the QC-passed cells sidesteps that confound.
-
-    //////////////////////
-    // step 2. cell q/c //
-    //////////////////////
-
-    // Per-batch debris cell QC on the pass-1 cell embedding (shared with `senna
-    // bge`): for each batch, drop the low-complexity debris tail (cells below a
-    // per-batch nnz AND depth cut). Replaces the retired 1-D mixture empty-call,
-    // which could not fire on already-cell-called data (the embedding norm is
-    // single-peaked — no empty mode). Cell ids align 1:1 with the pre-subset axis
-    // (`unified` is subset below in step 3a), so `batch_membership` lines up with
-    // `cell_nnz` / `cell_sum`.
-    let qc = per_batch_cell_qc(CellQcInputs {
-        cell_nnz,
-        cell_sum,
-        batch_membership: &unified.batch_membership,
-        batch_names: &unified.batch_names,
-        cfg: args.qc.to_cell_qc_config(),
-    });
-    let n_kept_cells = qc.keep.iter().filter(|&&v| v).count();
-    let n_dead_cells = n_cells_old - n_kept_cells;
-
-    // Per-cell QC report over the full pre-subset axis (one row per cell):
-    // nnz, depth, embedding norm, per-batch cuts, drop_reason, kept.
-    let nrms_opt = (cell_nrms.len() == n_cells_old).then_some(cell_nrms);
-    graph_embedding_util::cell_qc::write_cell_qc_parquet(
-        &format!("{}.cell_qc.parquet", args.out),
-        &unified.barcodes,
-        nrms_opt,
-        cell_nnz,
-        cell_sum,
-        &qc,
-    )
-    .context("write cell_qc.parquet")?;
-    info!(
-        "refine: cell QC kept {} / {} cells ({} debris dropped over {} batches)",
-        n_kept_cells,
-        n_cells_old,
-        n_dead_cells,
-        unified.n_batches(),
-    );
-
-    // ---- Filter unified (genes backend) ----
-    // step 3a. Subset CELLS first, so the --min-cells gene filter (3b) counts
-    // support on the real cells now in the backend, not the dropped droplets.
-    // `mask_columns` shrinks the backend cell columns, `subset_cells` syncs the
-    // logical axis; both renumber survivors in ascending order, so "cell id ==
-    // backend column" still holds for the streaming phase-2 pass, exactly as the
-    // initial up-front QC established. Dropped cells never re-enter the model
-    // (not output-only). The per-batch guard already prevents gutting a batch;
-    // this all-dropped check is a final backstop (mask_columns to 0 cols crashes).
-    // (cell_qc.parquet was already written above on the pre-subset cell axis.)
-    let live_cell_old_ids: Vec<usize> = (0..n_cells_old).filter(|&c| qc.keep[c]).collect();
-    if live_cell_old_ids.is_empty() {
-        warn!(
-            "refine: cell QC flagged ALL {n_cells_old} cells — keeping them (no cell mask); \
-             inspect {{out}}.cell_qc.parquet and the --cell-qc-* knobs"
-        );
-    } else if live_cell_old_ids.len() < n_cells_old {
-        unified
-            .count_backend_mut()
-            .mask_columns(&qc.keep)
-            .context("subset genes cells in refine (mask_columns)")?;
-        unified.subset_cells(&live_cell_old_ids);
-    }
-
-    // step 3b. Gene Q/C: drop genes supported by < --min-cells real cells. Counts
-    // on the cell-subset backend (3a), so support reflects real cells. The mask
-    // indexes genes; `genes_row_map_p1` still addresses the full pre-subset
-    // feature axis, which `subset_features` collapses below.
+    // corrupted every downstream consumer (annotation, topics). Counting raw cell
+    // support sidesteps that confound.
+    //
+    // Drop genes supported by < --min-cells cells. The mask indexes genes;
+    // `genes_row_map_p1` still addresses the full pre-subset feature axis, which
+    // `subset_features` collapses below.
     let (live_gene_mask, gene_support) =
         gene_support_mask(unified, table_p1, genes_row_map_p1, args.qc.min_cells)
             .context("per-gene cell-support QC")?;
@@ -1062,11 +965,10 @@ fn run_refine_pass(
         .collect();
 
     info!(
-        "refine: keeping {} / {} feature rows, {} / {} cells",
+        "refine: keeping {} / {} feature rows over {} cells",
         live_feature_rows.len(),
         unified.n_features(),
-        live_cell_old_ids.len(),
-        n_cells_old,
+        unified.n_cells(),
     );
 
     unified.subset_features(&live_feature_rows);
