@@ -421,46 +421,9 @@ pub struct QcArgs {
                      a SPA-anchor residual-elbow sweep over `2..=H+1` (H = embedding dim)."
     )]
     pub num_topics: Option<usize>,
-
-    #[arg(
-        long = "skip-cell-qc",
-        default_value_t = false,
-        help = "Disable the per-batch debris cell QC (keep every cell)",
-        long_help = "By default the refine pass runs a per-batch debris cell QC on the\n\
-                     pass-1 cell embedding (shared with `senna bge`): for each batch it drops\n\
-                     the low-complexity DEBRIS tail (cells below a per-batch nnz+depth cut).\n\
-                     Every depth decision is per-batch so a shallow replicate is not mistaken\n\
-                     for empties. This replaces the old 1-D embedding-norm mixture empty-call.\n\
-                     `--skip-cell-qc` keeps every cell (only the up-front spliced-nnz≥1 gate\n\
-                     applies); ignored under `--skip-refine`."
-    )]
-    pub skip_cell_qc: bool,
-
-    #[arg(
-        long = "cell-qc-debris-mads",
-        default_value_t = 5.0,
-        help = "Cell QC: per-batch lower-band MAD multiplier (debris fallback when no 2-means split)"
-    )]
-    pub cell_qc_debris_mads: f32,
 }
 
 impl QcArgs {
-    /// Per-batch debris cell QC is on unless `--skip-cell-qc`.
-    #[must_use]
-    pub fn cell_qc_enabled(&self) -> bool {
-        !self.skip_cell_qc
-    }
-
-    /// Build the shared [`graph_embedding_util::cell_qc::CellQcConfig`] from the
-    /// CLI surface.
-    #[must_use]
-    pub fn to_cell_qc_config(&self) -> graph_embedding_util::cell_qc::CellQcConfig {
-        graph_embedding_util::cell_qc::CellQcConfig {
-            enabled: self.cell_qc_enabled(),
-            debris_mads: self.cell_qc_debris_mads,
-        }
-    }
-
     /// HVG feature QC is OFF by default; opt in with `--feature-qc`.
     #[must_use]
     pub fn feature_qc_enabled(&self) -> bool {

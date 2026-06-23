@@ -198,28 +198,6 @@ pub struct BgeArgs {
     max_grad_norm: f32,
 
     #[arg(
-        long = "skip-cell-qc",
-        default_value_t = false,
-        help = "Disable the per-batch debris cell QC (step 2 of bge's QC)",
-        long_help = "Step 2 of bge's QC, after the upfront `--qc` floor. By default, PER\n\
-                     BATCH, drop the low-complexity DEBRIS tail (cells below a per-batch\n\
-                     nnz+depth cut), then MASK the dropped cells and RE-FIT on the survivors;\n\
-                     writes {out}.cell_qc.parquet and {out}.cell_embedding_before.parquet\n\
-                     (all cells, pre-mask). Every depth decision is per-batch so a shallow\n\
-                     sample is not mistaken for empties. Replaces the old 1-D embedding-norm\n\
-                     mixture empty-call (shared with `faba gem`). `--skip-cell-qc` keeps the\n\
-                     upfront floor only."
-    )]
-    skip_cell_qc: bool,
-
-    #[arg(
-        long = "cell-qc-debris-mads",
-        default_value_t = 5.0,
-        help = "Cell QC: per-batch lower-band MAD multiplier (debris fallback when no 2-means split)"
-    )]
-    cell_qc_debris_mads: f32,
-
-    #[arg(
         long,
         help = "Optional feature-feature edge list (TSV/CSV; activates SGC\n\
                 smoothing of E_feat through the K-hop normalized adjacency)."
@@ -374,21 +352,6 @@ pub struct BgeArgs {
     out: Box<str>,
 }
 
-impl BgeArgs {
-    /// Per-batch cluster-aware cell QC is on unless `--skip-cell-qc`.
-    fn cell_qc_enabled(&self) -> bool {
-        !self.skip_cell_qc
-    }
-
-    /// Build the shared cell-QC config from the CLI surface.
-    fn to_cell_qc_config(&self) -> ge::cell_qc::CellQcConfig {
-        ge::cell_qc::CellQcConfig {
-            enabled: self.cell_qc_enabled(),
-            debris_mads: self.cell_qc_debris_mads,
-        }
-    }
-}
-
 pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
@@ -534,7 +497,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // call below, when `--cell-null-fdr > 0`, instead masks empties out of the
     // backend and re-fits.) Computed on the full-feature unified count backend,
     // so n_genes is the per-cell detected-feature count across all modalities.
-    let mut qc_keep_idx: Option<Vec<usize>> = if let Some(cfg) = args.qc.to_config() {
+    let qc_keep_idx: Option<Vec<usize>> = if let Some(cfg) = args.qc.to_config() {
         if cfg.feature_min_cells > 0 {
             log::warn!(
                 "--qc-feature-min-cells is ignored by bge (cell-only QC; the \
@@ -719,88 +682,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Per-batch debris cell QC on the trained cell embedding (step 2 of bge's QC;
-    // shared with `faba gem`). PER BATCH, drop the low-complexity DEBRIS tail
-    // (cells below a per-batch nnz+depth cut). Replaces the 1-D embedding-norm
-    // mixture empty-call (single-peaked on already-cell-called data → it dropped
-    // nothing). When cells are dropped we MASK them out of the backend and RE-FIT
-    // on the survivors —
-    // `mask_columns` + `subset_cells` keep cell-id == backend-column, exactly as
-    // the feature refine keeps the feature axis live. Emits the rich
-    // `{out}.cell_qc.parquet` over ALL cells + the "before" embedding (pair them
-    // to colour dropped cells); the re-fit "after" is standard.
-    if args.cell_qc_enabled() && !out.cell_nrms.is_empty() {
-        use matrix_util::traits::RunningStatOps;
-        let n = out.cell_nrms.len();
-        // Per-cell nnz + depth across all (post-feature-refine) features.
-        let stat = data_beans::qc::collect_column_stat_across_vec(
-            unified.count_backend(),
-            None,
-            args.block_size,
-        )?;
-        let cell_nnz = stat.count_positives();
-        let cell_sum = stat.sum();
-        let qc = ge::cell_qc::per_batch_cell_qc(ge::cell_qc::CellQcInputs {
-            cell_nnz: &cell_nnz,
-            cell_sum: &cell_sum,
-            batch_membership: &unified.batch_membership,
-            batch_names: &unified.batch_names,
-            cfg: args.to_cell_qc_config(),
-        });
-        info!(
-            "bge cell QC: kept {} / {} cells ({} debris dropped over {} batches) → {}.cell_qc.parquet",
-            n - qc.n_dropped(),
-            n,
-            qc.n_dropped(),
-            unified.n_batches(),
-            args.out,
-        );
-        ge::cell_qc::write_cell_qc_parquet(
-            &format!("{}.cell_qc.parquet", args.out),
-            &unified.barcodes,
-            Some(&out.cell_nrms),
-            &cell_nnz,
-            &cell_sum,
-            &qc,
-        )?;
-        // "Before": pass-1 cell embedding over ALL cells (same h0..h{H-1} layout
-        // as the standard latent), to be coloured by the cell_qc kept flag.
-        ge::eval::save_embedding(
-            &format!("{}.cell_embedding_before.parquet", args.out),
-            &out.model.e_cell,
-            &unified.barcodes,
-            "cell",
-        )?;
-        let live: Vec<usize> = (0..n).filter(|&c| qc.keep[c]).collect();
-        if !live.is_empty() && live.len() < n {
-            info!(
-                "Cell QC refine: masking {} cells, re-fitting on {} survivors.",
-                n - live.len(),
-                live.len(),
-            );
-            // Remap any `--qc` output filter onto the surviving axis (old id →
-            // new id), dropping the QC-dropped cells; the high-outlier filtering
-            // it carries is preserved as an output filter over the re-fit cells.
-            qc_keep_idx = qc_keep_idx.map(|prev| {
-                let mut old_to_new = vec![usize::MAX; n];
-                for (new_i, &old_i) in live.iter().enumerate() {
-                    old_to_new[old_i] = new_i;
-                }
-                prev.into_iter()
-                    .filter_map(|o| (old_to_new[o] != usize::MAX).then_some(old_to_new[o]))
-                    .collect()
-            });
-            // ge::fit's collapse runs on the real backend (unlike gem, which
-            // collapses on a clone), so it left group/batch caches registered;
-            // clear them so `mask_columns` (which requires them unset) can shrink
-            // the columns. The pass-2 collapse re-registers from scratch.
-            unified.count_backend_mut().clear_column_membership();
-            unified.count_backend_mut().mask_columns(&qc.keep)?;
-            unified.subset_cells(&live);
-            let cfg = build_config(&unified)?;
-            out = ge::fit(&mut unified, cfg)?;
-        }
-    }
+    // No per-batch cell QC: it was removed because the per-batch debris cut
+    // behaved incoherently across batches (near-identical depth distributions
+    // produced 0%-vs-44% drops, guillotining real cells). The upfront `--qc` floor
+    // is the only cell filter; bge fits on every cell that passes it.
 
     // The SIMBA-style co-embedding and the cluster-seeded ETM share ONE Leiden
     // clustering of the QC-kept cell embedding: the co-embed uses its median
