@@ -179,32 +179,28 @@ pub struct AnnotateArgs {
     // ----- optional inline ontology annotation (TreeBH) -----
     #[arg(
         long = "obo",
-        help = "Cell Ontology OBO file; with --label-cl, also runs annotate-ontology inline",
-        long_help = "Cell Ontology OBO file (e.g. cl-basic.obo). When BOTH --obo and\n\
-                     --label-cl are given, the restandardized-ES z-matrix is fed to the\n\
-                     TreeBH ontology annotator in the same run (no separate\n\
-                     `annotate-ontology` invocation needed), writing\n\
-                     {out}.ontology_assignment.tsv + {out}.ontology_node_mass.parquet."
+        help = "Cell Ontology .obo (e.g. cl-basic.obo). Given WITH --label-cl, runs TreeBH \
+                ontology calling inline → {out}.ontology_assignment.tsv + .ontology_node_mass.parquet"
     )]
     pub obo: Option<Box<str>>,
 
     #[arg(
         long = "label-cl",
-        help = "Curated `label<TAB>CL:id` TSV; enables inline ontology annotation (with --obo)"
+        help = "Curated `label<TAB>CL:id` map, one row per marker celltype. Required together with --obo"
     )]
     pub label_cl: Option<Box<str>>,
 
     #[arg(
         long = "ontology-fdr-q",
         default_value_t = 0.1,
-        help = "Per-level selective-FDR target q for the inline TreeBH ontology walk"
+        help = "Ontology TreeBH per-level FDR target (lower → descends less, abstains more)"
     )]
     pub ontology_fdr_q: f64,
 
     #[arg(
         long = "ontology-by",
         default_value_t = false,
-        help = "Use the Benjamini–Yekutieli correction within families for the inline ontology walk"
+        help = "Ontology: Benjamini–Yekutieli within families (any dependence; more conservative)"
     )]
     pub ontology_by: bool,
 }
@@ -252,29 +248,25 @@ pub struct AnnotateOntologyArgs {
     #[arg(
         long = "fdr-q",
         default_value_t = 0.1,
-        help = "Per-level selective-FDR target q for the TreeBH descent",
-        long_help = "Per-level selective-FDR target q (Bogomolov–Peterson–Benjamini–Sabatti\n\
-                     TreeBH). Benjamini–Hochberg is applied within each family at a\n\
-                     working target shrunk by the rejection proportions along the\n\
-                     ancestor path; lower q → descends less eagerly (more abstention)."
+        help = "Per-level selective-FDR target (TreeBH); lower → descends less, abstains more"
     )]
     pub fdr_q: f64,
 
     #[arg(
         long = "by",
         default_value_t = false,
-        help = "Use the Benjamini–Yekutieli correction within families (arbitrary dependence; more conservative)"
+        help = "Benjamini–Yekutieli within families (valid under any dependence; more conservative)"
     )]
     pub by: bool,
 
     #[arg(
         long = "use-perm-p",
         default_value_t = false,
-        help = "Use the saturated permutation p-values instead of Φ(−z) from the restandardized ES",
-        long_help = "Use `cluster_celltype_p` directly instead of converting the\n\
-                     restandardized-ES z-scores (`cluster_celltype_es_std`) to\n\
-                     p-values. The permutation p is resolution-limited (≈1/B), so the\n\
-                     z→p default is usually more discriminative."
+        help = "Force the (saturated) permutation p-values instead of the default z→p",
+        long_help = "Force `cluster_celltype_p`. By default the walk scores on Φ(−z) using\n\
+                     the correlation-preserving permutation z (`*_perm_z`) when present,\n\
+                     else the row-randomization restandardized ES (`*_es_std`). The\n\
+                     permutation p is resolution-limited (≈1/B) and rarely preferable."
     )]
     pub use_perm_p: bool,
 

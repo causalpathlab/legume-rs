@@ -26,37 +26,25 @@ use super::args::AnnotateOntologyArgs;
 use crate::embed_common::Mat;
 use crate::run_manifest::{self, RunManifest};
 use anyhow::{anyhow, Context, Result};
-use auxiliary_data::cell_ontology::CellOntology;
+use auxiliary_data::ontology::Ontology;
 use log::{info, warn};
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::traits::IoOps;
 use rustc_hash::{FxHashMap, FxHashSet};
+use special::Error;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-/// Upper-tail standard-normal probability `P(Z > z)` (Abramowitz–Stegun 7.1.26
-/// erf, max abs error ~1.5e-7) — converts a restandardized-ES z-score to a
-/// one-sided p-value. Clamped to a small positive floor.
+/// Upper-tail standard-normal probability `P(Z > z) = ½·erfc(z/√2)` via the
+/// exact complementary error function (`special::Error`, already a senna dep) —
+/// converts a z-score to a one-sided p-value. NaN → 1 (no evidence); clamped to
+/// a small positive floor.
 fn norm_sf(z: f64) -> f64 {
-    fn erf(x: f64) -> f64 {
-        let t = 1.0 / (1.0 + 0.327_591_1 * x.abs());
-        let y = 1.0
-            - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736)
-                * t
-                + 0.254_829_592)
-                * t
-                * (-x * x).exp();
-        if x < 0.0 {
-            -y
-        } else {
-            y
-        }
-    }
     if z.is_nan() {
-        return 1.0; // NaN evidence ⇒ no support (clamp would propagate NaN)
+        return 1.0; // clamp would propagate NaN
     }
-    (0.5 * (1.0 - erf(z / std::f64::consts::SQRT_2))).clamp(1e-12, 1.0)
+    (0.5 * (z / std::f64::consts::SQRT_2).compl_error()).clamp(1e-12, 1.0)
 }
 
 /// Parse a `label<TAB>CL:id` TSV (flexible delimiter; `#` comments; header row
@@ -115,15 +103,13 @@ fn sibling_artifact(q_path: &str, suffix: &str) -> Result<String> {
 /// labelled node. Cluster-independent; built once.
 struct TreeModel {
     children: Vec<Vec<usize>>,
-    parent: Vec<usize>,   // parent[root] = root
     depth: Vec<usize>,    // tree depth from virtual root (root = 0)
     cl_id: Vec<Box<str>>, // CL id (self-leaf shares its CL node's id)
     disp: Vec<Box<str>>,  // display name
     is_self_leaf: Vec<bool>,
-    label_col: Vec<Option<usize>>,     // Some(col) only for self-leaves
-    leaf_p_template: Vec<Option<f64>>, // None for internal, Some(NaN placeholder) for leaves
-    postorder: Vec<usize>,             // children before parents
-    sub_cols: Vec<Vec<usize>>,         // label columns at-or-below each node
+    label_col: Vec<Option<usize>>, // Some(col) only for self-leaves
+    postorder: Vec<usize>,         // children before parents
+    sub_cols: Vec<Vec<usize>>,     // label columns at-or-below each node
     root: usize,
 }
 
@@ -135,7 +121,7 @@ impl TreeModel {
     /// are dropped — they only add depth and dilute the bottom-up Simes, and the
     /// resolvable abstention levels are the labels we actually have markers for.
     fn build(
-        onto: &CellOntology,
+        onto: &Ontology,
         col_cl: &[Box<str>], // CL id per celltype column (all present)
         col_label: &[Box<str>],
     ) -> Result<Self> {
@@ -153,7 +139,6 @@ impl TreeModel {
         let selfleaf_of = |c: usize| 1 + ncol + c;
 
         let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
-        let mut parent = vec![root; n];
         let mut cl_id: Vec<Box<str>> = vec!["ROOT".into(); n];
         let mut disp: Vec<Box<str>> = vec!["root".into(); n];
         let mut is_self_leaf = vec![false; n];
@@ -171,7 +156,6 @@ impl TreeModel {
             is_self_leaf[sl] = true;
             label_col[sl] = Some(c);
             children[s].push(sl);
-            parent[sl] = s;
         }
         // Nearest labelled ancestor → tree edges among labels.
         for c in 0..ncol {
@@ -189,7 +173,6 @@ impl TreeModel {
             }
             let s = struct_of(c);
             let p = best.map_or(root, struct_of);
-            parent[s] = p;
             children[p].push(s);
         }
 
@@ -226,20 +209,14 @@ impl TreeModel {
             sub_cols[node].sort_unstable();
             sub_cols[node].dedup();
         }
-        let leaf_p_template: Vec<Option<f64>> = is_self_leaf
-            .iter()
-            .map(|&s| if s { Some(0.0) } else { None })
-            .collect();
 
         Ok(Self {
             children,
-            parent,
             depth,
             cl_id,
             disp,
             is_self_leaf,
             label_col,
-            leaf_p_template,
             postorder,
             sub_cols,
             root,
@@ -284,16 +261,24 @@ pub fn run(args: &AnnotateOntologyArgs) -> Result<()> {
         .to_string_lossy()
         .into_owned();
 
+    // Score preference: explicit --use-perm-p → pooled count p; otherwise the
+    // correlation-preserving permutation z when present, else the row-
+    // randomization restandardized ES. Both z forms use leaf p = Φ(−z).
     let (score_abs, from_z) = if args.use_perm_p {
         (
             sibling_artifact(&q_abs, "cluster_celltype_p.parquet")?,
             false,
         )
     } else {
-        (
-            sibling_artifact(&q_abs, "cluster_celltype_es_std.parquet")?,
-            true,
-        )
+        let perm_z = sibling_artifact(&q_abs, "cluster_celltype_perm_z.parquet")?;
+        if Path::new(&perm_z).exists() {
+            (perm_z, true)
+        } else {
+            (
+                sibling_artifact(&q_abs, "cluster_celltype_es_std.parquet")?,
+                true,
+            )
+        }
     };
 
     let score = Mat::from_parquet_with_row_names(&score_abs, Some(0))
@@ -317,6 +302,11 @@ pub fn run(args: &AnnotateOntologyArgs) -> Result<()> {
         if from_z { "z→p" } else { "permutation p" }
     );
 
+    let score_in = if from_z {
+        OntologyScore::Z(&score.mat)
+    } else {
+        OntologyScore::Pvalue(&score.mat)
+    };
     let (assign_path, mass_path) = annotate_ontology_core(
         &OntologyParams {
             out: &out,
@@ -325,11 +315,10 @@ pub fn run(args: &AnnotateOntologyArgs) -> Result<()> {
             fdr_q: args.fdr_q,
             by: args.by,
         },
-        &score.mat,
-        &q.mat,
+        score_in,
+        Some(&q.mat),
         &cluster_names,
         &celltype_names,
-        from_z,
     )?;
 
     manifest.annotate.ontology_assignment =
@@ -351,28 +340,81 @@ pub(crate) struct OntologyParams<'a> {
     pub by: bool,
 }
 
+/// How to interpret a `units × celltype` score matrix — keeps the matrix and its
+/// meaning inseparable (no separate `from_z` flag for callers to keep in sync).
+pub(crate) enum OntologyScore<'a> {
+    /// z-scores → leaf p = Φ(−z).
+    Z(&'a Mat),
+    /// already one-sided p-values in (0, 1].
+    Pvalue(&'a Mat),
+}
+
+impl OntologyScore<'_> {
+    fn mat(&self) -> &Mat {
+        match self {
+            Self::Z(m) | Self::Pvalue(m) => m,
+        }
+    }
+    fn leaf_p(&self, k: usize, col: usize) -> f64 {
+        match self {
+            Self::Z(m) => norm_sf(m[(k, col)] as f64),
+            Self::Pvalue(m) => (m[(k, col)] as f64).clamp(1e-12, 1.0),
+        }
+    }
+}
+
+/// Per-row softmax — derives a node-mass posterior when a front-end supplies no
+/// Q, so the fabrication lives here once rather than in each caller.
+fn row_softmax(m: &Mat) -> Mat {
+    let mut out = Mat::zeros(m.nrows(), m.ncols());
+    for i in 0..m.nrows() {
+        let mx = (0..m.ncols()).fold(f32::NEG_INFINITY, |a, j| a.max(m[(i, j)]));
+        let mut s = 0.0f32;
+        for j in 0..m.ncols() {
+            let e = (m[(i, j)] - mx).exp();
+            out[(i, j)] = e;
+            s += e;
+        }
+        let s = s.max(1e-12);
+        for j in 0..m.ncols() {
+            out[(i, j)] /= s;
+        }
+    }
+    out
+}
+
 /// Shared TreeBH ontology annotation over a `units × celltype` score matrix.
 ///
-/// `score` is a z-matrix (with `from_z`, leaf p = Φ(−z)) or a p-matrix; `q` is
-/// the soft Q used only for the node-mass viz output. The engine is indifferent
-/// to where the matrix came from — **any front-end that emits a units × celltype
-/// z-matrix** (cluster enrichment, per-cell/community projection, …) can call
-/// this. Writes `{out}.ontology_assignment.tsv` + `{out}.ontology_node_mass.parquet`
-/// and returns their paths; manifest wiring is the caller's job.
+/// `score` carries its own interpretation ([`OntologyScore`]); `q` is the soft
+/// posterior used only for node-mass viz (`None` ⇒ derived from `score`). The
+/// engine is indifferent to where the matrix came from — **any front-end that
+/// emits a units × celltype z-matrix** (cluster enrichment, per-cell/community
+/// projection, …) can call this. Writes `{out}.ontology_assignment.tsv` +
+/// `{out}.ontology_node_mass.parquet` and returns their paths; manifest wiring is
+/// the caller's job.
 pub(crate) fn annotate_ontology_core(
     params: &OntologyParams,
-    score: &Mat,
-    q: &Mat,
+    score: OntologyScore,
+    q: Option<&Mat>,
     cluster_names: &[Box<str>],
     celltype_names: &[Box<str>],
-    from_z: bool,
 ) -> Result<(String, String)> {
     let out = params.out;
-    let (n_clusters, n_types) = (score.nrows(), score.ncols());
-    anyhow::ensure!(
-        q.nrows() == n_clusters && q.ncols() == n_types,
-        "score and Q matrices have mismatched shape"
-    );
+    let sm = score.mat();
+    let (n_clusters, n_types) = (sm.nrows(), sm.ncols());
+    if let Some(q) = q {
+        anyhow::ensure!(
+            q.nrows() == n_clusters && q.ncols() == n_types,
+            "score and Q matrices have mismatched shape"
+        );
+    }
+    // Node-mass source: the supplied posterior Q, else a row-softmax of `score`.
+    let q_derived: Option<Mat> = if q.is_none() {
+        Some(row_softmax(sm))
+    } else {
+        None
+    };
+    let q_mass: &Mat = q.unwrap_or_else(|| q_derived.as_ref().unwrap());
 
     // ----- label → CL -----
     let label_cl = parse_label_cl(params.label_cl)?;
@@ -392,7 +434,7 @@ pub(crate) fn annotate_ontology_core(
         ));
     }
 
-    let onto = CellOntology::load_obo(params.obo)?;
+    let onto = Ontology::load_obo(params.obo)?;
     info!(
         "loaded Cell Ontology: {} terms from {}",
         onto.len(),
@@ -422,47 +464,32 @@ pub(crate) fn annotate_ontology_core(
             .find(|&&c| tree.is_self_leaf[c])
             .and_then(|&c| tree.label_col[c])
     };
-    // `a` is a strict ancestor of `b` in the tree?
-    let is_ancestor_of = |a: usize, b: usize| -> bool {
-        let mut x = b;
-        while x != tree.root {
-            x = tree.parent[x];
-            if x == a {
-                return true;
-            }
-        }
-        false
-    };
 
     for k in 0..n_clusters {
-        // leaf p-values for this cluster.
-        let mut leaf_p = tree.leaf_p_template.clone();
+        // leaf p-values for this cluster (internal nodes stay None for Simes).
+        let mut leaf_p: Vec<Option<f64>> = vec![None; tree.children.len()];
         for (node, slot) in leaf_p.iter_mut().enumerate() {
             if let Some(col) = tree.label_col[node] {
-                let s = score[(k, col)] as f64;
-                *slot = Some(if from_z {
-                    norm_sf(s)
-                } else {
-                    s.clamp(1e-12, 1.0)
-                });
+                *slot = Some(score.leaf_p(k, col));
             }
         }
         let cp = treebh::combine_bottom_up(&tree.children, &tree.postorder, &leaf_p);
         let rejected = treebh::descend(&tree.children, tree.root, &cp, params.fdr_q, params.by);
 
-        // Supported labels = rejected STRUCT (label) nodes: TreeBH rejected the
-        // hypothesis H_v = "cluster is type-v or a descendant". Reading rejected
-        // self-leaves alone would drop a label rejected at its parent's family
-        // whose own `:self` just missed the shrunk within-family threshold.
-        let host_set: FxHashSet<usize> = (0..tree.children.len())
-            .filter(|&n| n != tree.root && !tree.is_self_leaf[n] && rejected[n])
-            .collect();
-
-        // Leaf-most: a rejected label with no rejected label strictly below it.
-        let leaf_most: Vec<usize> = host_set
-            .iter()
-            .copied()
-            .filter(|&h| !host_set.iter().any(|&o| o != h && is_ancestor_of(h, o)))
+        // A rejected STRUCT (label) node = TreeBH rejected "cluster is type-v or
+        // a descendant" (reading self-leaves alone would drop a label rejected at
+        // its parent's family whose own `:self` missed the shrunk threshold).
+        // Leaf-most = a rejected label with no rejected struct CHILD; since
+        // descend reaches a child only when its parent is rejected, "no rejected
+        // child" ⟺ "no rejected descendant".
+        let rejected_label = |v: usize| v != tree.root && !tree.is_self_leaf[v] && rejected[v];
+        let leaf_most: Vec<usize> = (0..tree.children.len())
+            .filter(|&v| {
+                rejected_label(v)
+                    && !tree.children[v]
+                        .iter()
+                        .any(|&c| !tree.is_self_leaf[c] && rejected[c])
+            })
             .collect();
 
         let (assigned, abstained, unresolved, multi, cannot): (
@@ -500,9 +527,9 @@ pub(crate) fn annotate_ontology_core(
             )
         };
 
-        let mut supported: Vec<Box<str>> = host_set
-            .iter()
-            .filter_map(|&h| own_col(h).map(|c| celltype_names[c].clone()))
+        let mut supported: Vec<Box<str>> = (0..tree.children.len())
+            .filter(|&v| rejected_label(v))
+            .filter_map(|v| own_col(v).map(|c| celltype_names[c].clone()))
             .collect();
         supported.sort_unstable();
         supported.dedup();
@@ -527,7 +554,7 @@ pub(crate) fn annotate_ontology_core(
 
         // Soft mass = Σ descendant-leaf Q.
         for (j, &node) in struct_nodes.iter().enumerate() {
-            let m: f32 = tree.sub_cols[node].iter().map(|&c| q[(k, c)]).sum();
+            let m: f32 = tree.sub_cols[node].iter().map(|&c| q_mass[(k, c)]).sum();
             mass[(k, j)] = m;
         }
     }
