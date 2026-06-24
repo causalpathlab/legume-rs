@@ -93,6 +93,10 @@ pub struct AnnotateOutputs {
     pub q_kc: Mat,
     pub es_kc: Mat,
     pub es_restandardized_kc: Mat,
+    /// Sample-permutation z = (ES − perm_mean)/perm_sd against the correlation-
+    /// preserving null. `None` when `num_sample_perm == 0`. Graded (unlike the
+    /// pooled, FWER-style `pvalue_kc`) — the preferred ontology-annotator input.
+    pub perm_z_kc: Option<Mat>,
     pub pvalue_kc: Mat,
     pub qvalue_kc: Mat,
     pub cell_annotation_nc: Mat,
@@ -255,6 +259,7 @@ pub fn annotate(
     // -----------------------------------------------------------------
     let mut pvalue = Mat::zeros(k, c);
     let b_perm = config.num_sample_perm;
+    let mut perm_z_kc: Option<Mat> = None;
 
     if b_perm == 0 {
         // Fallback: row-randomization p-value. Recount with the second pass.
@@ -343,6 +348,7 @@ pub fn annotate(
             }
         }
         let mut perm_sd = Mat::zeros(k, c);
+        let mut sd_floor_hits = 0usize;
         for kk in 0..k {
             for cc in 0..c {
                 let var = if b_perm > 1 {
@@ -350,8 +356,45 @@ pub fn annotate(
                 } else {
                     0.0
                 };
-                perm_sd[(kk, cc)] = var.sqrt().max(1e-8);
+                let sd = var.sqrt();
+                if sd <= 1e-8 {
+                    sd_floor_hits += 1;
+                }
+                perm_sd[(kk, cc)] = sd.max(1e-8);
             }
+        }
+
+        // Sample-permutation z: observed raw ES standardized by the permutation
+        // null's OWN moments — correlation-preserving and graded (unlike the
+        // pooled count p). An entry whose null variance collapsed (perm_sd at the
+        // floor) carries no usable signal → z = 0; and if the null is degenerate
+        // overall (too few pseudobulk samples to permute — e.g. a single sample),
+        // perm-z is suppressed so downstream falls back to the robust
+        // row-randomization es_std instead of `(es − mean)/~0` garbage.
+        let mut pz = Mat::zeros(k, c);
+        for kk in 0..k {
+            for cc in 0..c {
+                pz[(kk, cc)] = if perm_sd[(kk, cc)] <= 1e-8 {
+                    0.0
+                } else {
+                    (es_obs[(kk, cc)] - perm_mean[(kk, cc)]) / perm_sd[(kk, cc)]
+                };
+            }
+        }
+        // Floored entries are inert (z = 0 ⇒ p = 0.5, never reject), so partial
+        // degeneracy ships safely. Fall back to es_std only when the null is
+        // MOSTLY un-estimable — i.e. too few permutable pseudobulk samples, which
+        // collapses the majority of per-(k,c) variances to the floor.
+        let floored_frac = sd_floor_hits as f32 / (k * c).max(1) as f32;
+        if floored_frac < 0.5 {
+            perm_z_kc = Some(pz);
+        } else {
+            log::warn!(
+                "sample-permutation null mostly degenerate ({:.0}% of {} k×c perm_sd at floor); \
+                 suppressing perm-z, ontology falls back to row-randomization es_std",
+                100.0 * floored_frac,
+                k * c
+            );
         }
 
         // Efron–Tibshirani-style restandardization at set level (adapted):
@@ -412,6 +455,7 @@ pub fn annotate(
         q_kc: q_mat,
         es_kc: es_obs,
         es_restandardized_kc: es_obs_std,
+        perm_z_kc,
         pvalue_kc: pvalue,
         qvalue_kc: qvalue,
         cell_annotation_nc: posterior,

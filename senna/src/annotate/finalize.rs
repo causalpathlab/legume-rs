@@ -19,6 +19,7 @@ pub(crate) const ENRICHMENT_OUTPUT_SUFFIXES: &[&str] = &[
     ".cluster_celltype_es_std.parquet",
     ".cluster_celltype_p.parquet",
     ".cluster_celltype_q_values.parquet",
+    ".cluster_celltype_perm_z.parquet",
     ".cluster_expression.parquet",
     ".ontology_assignment.tsv",
     ".ontology_node_mass.parquet",
@@ -85,8 +86,8 @@ pub(crate) fn finalize_annotation(
     }
     // Overwrite (not conditionally set) so a re-run without ontology clears any
     // stale pointers from a previous standalone `annotate-ontology`.
-    manifest.annotate.ontology_assignment = art.ontology_assignment_abs.map(|p| rel(p));
-    manifest.annotate.ontology_node_mass = art.ontology_node_mass_abs.map(|p| rel(p));
+    manifest.annotate.ontology_assignment = art.ontology_assignment_abs.map(&rel);
+    manifest.annotate.ontology_node_mass = art.ontology_node_mass_abs.map(&rel);
     manifest.defaults.colour_by = Some("annotation".into());
     manifest.save(from)
 }
