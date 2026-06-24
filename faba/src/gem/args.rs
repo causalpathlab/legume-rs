@@ -138,10 +138,10 @@ pub struct CollapseArgs {
         long,
         default_value_t = '_',
         help = "Delimiter for fuzzy gene-name matching across input files",
-        long_help = "Delimiter for fuzzy gene-name matching across input files (last\n\
-                     token after the split is the canonical row name). Ignored unless\n\
-                     `--feature-name-exact` is *off* — which is **not** the default\n\
-                     for gem (see note above)."
+        long_help = "Delimiter for fuzzy gene-name matching across input files \n\
+		     (last token after the split is the canonical row name). \n\
+		     Ignored unless `--feature-name-exact` is *off*,\n\
+		     **not** the default for gem (see note above)."
     )]
     pub feature_name_delim: char,
 
@@ -149,8 +149,8 @@ pub struct CollapseArgs {
         long,
         default_value_t = true,
         help = "Use exact row-name match across files (no canonicalization)",
-        long_help = "Use exact row-name match across files (no canonicalization). The\n\
-                     gem default — required because the `{gene}/{modality}/{detail}`\n\
+        long_help = "Use exact row-name match across files (no canonicalization). \n\
+		     The gem default — required because the `{gene}/{modality}/{detail}`\n\
                      row format is sensitive to suffix-splitting. Pass\n\
                      `--feature-name-exact=false` only if your `{gene}` slot itself\n\
                      carries a stripping suffix."
@@ -165,33 +165,41 @@ pub struct TrainArgs {
     #[arg(short = 'i', long, default_value_t = 1000, help = "Training epochs")]
     pub epochs: usize,
 
-    /// Phase-2 gate: after phase 1 fixes the feature side (β/z/δ/γ + pb
-    /// heads), phase 2 freezes it and re-evaluates the per-cell embedding
-    /// `e_cell` against it. Phase 2 is now an **analytical** per-cell
-    /// projection (Poisson MAP onto the frozen dictionary, solved in
-    /// parallel — not SGD), so the numeric value is just an on/off gate:
-    /// `0` skips phase 2, any non-zero (or omitted → default) runs it.
-    /// Also skipped under `--no-cell-axis`. (The old name is kept for
-    /// back-compat; the value no longer counts SGD epochs.)
-    #[arg(long, help = "Phase-2 cell projection on/off (0 = skip; default = on)")]
-    pub phase2_epochs: Option<usize>,
-
-    /// Ridge prior strength λ on `e_cell` in the analytical phase-2
-    /// projection. The Poisson MAP fits each cell's observed features and
-    /// this Gaussian prior stands in for the (infeasible) all-feature
-    /// partition — higher λ shrinks `e_cell` toward 0 / regularises cells
-    /// with few features. The per-cell intercept `b_cell` is left
-    /// unpenalised (it absorbs library size).
-    #[arg(long, default_value_t = 1.0, help = "Phase-2 ridge prior on e_cell")]
-    pub phase2_ridge: f32,
-
-    /// Batches per epoch. **Omit for auto** — one weighted pass over the
-    /// largest axis (`ceil(max(n_cells, max_pb_per_level) / batch_size)`).
-    /// Pass a value to force a fixed step budget per epoch (old behavior;
-    /// historical default was 100).
     #[arg(
         long,
-        help = "Batches per epoch (default: auto = one pass over largest axis)"
+        help = "Phase-2 cell projection on/off (0 = skip; default = on)",
+        long_help = "Phase-2 cell projection on/off (0 = skip; default = on). \n\
+                     After phase 1 fixes the feature side (β/z/δ/γ + pb heads),\n\
+                     phase 2 freezes it and re-evaluates the per-cell embedding\n\
+                     `e_cell` against it. Phase 2 is an analytical per-cell\n\
+                     projection (Poisson MAP onto the frozen dictionary, solved\n\
+                     in parallel — not SGD), so the value is just an on/off gate:\n\
+                     `0` skips phase 2, any non-zero (or omitted → default) runs\n\
+                     it. Also skipped under `--no-cell-axis`. (The old name is\n\
+                     kept for back-compat; the value no longer counts SGD epochs.)"
+    )]
+    pub phase2_epochs: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Phase-2 ridge prior on e_cell",
+        long_help = "Ridge prior strength λ on `e_cell` in the analytical phase-2\n\
+                     projection. The Poisson MAP fits each cell's observed features\n\
+                     and this Gaussian prior stands in for the (infeasible)\n\
+                     all-feature partition — higher λ shrinks `e_cell` toward 0 /\n\
+                     regularises cells with few features. The per-cell intercept\n\
+                     `b_cell` is left unpenalised (it absorbs library size)."
+    )]
+    pub phase2_ridge: f32,
+
+    #[arg(
+        long,
+        help = "Batches per epoch (default: auto = one pass over largest axis)",
+        long_help = "Batches per epoch. Omit for auto — one weighted pass over the\n\
+                     largest axis (`ceil(max(n_cells, max_pb_per_level) / batch_size)`).\n\
+                     Pass a value to force a fixed step budget per epoch (old\n\
+                     behavior; historical default was 100)."
     )]
     pub batches_per_epoch: Option<usize>,
 
@@ -215,24 +223,25 @@ pub struct TrainArgs {
     )]
     pub max_grad_norm: f32,
 
-    /// L2 penalty λ_z · mean(z²) on the per-gene program loadings.
-    /// Matches `senna bge`'s `--feature-embedding-l2` style: mean-normalized
-    /// so λ stays scale-invariant across (G·K). Default 1e-4 (mild).
     #[arg(
         long,
         default_value_t = 1e-4,
-        help = "L2 penalty on z (mean-normalized)"
+        help = "L2 penalty on z (mean-normalized)",
+        long_help = "L2 penalty λ_z · mean(z²) on the per-gene program loadings.\n\
+                     Matches `senna bge`'s `--feature-embedding-l2` style:\n\
+                     mean-normalized so λ stays scale-invariant across (G·K).\n\
+                     Default 1e-4 (mild)."
     )]
     pub z_l2: f32,
 
-    /// L2 penalty `λ · mean(δ²)` on the program×modality deviation δ
-    /// (`[K, M, H]`), mean-normalized — keeps the exp gate from blowing up.
-    /// Default 1e-4. (Was `--q-l2`, kept as an alias.)
     #[arg(
         long = "delta-l2",
         alias = "q-l2",
         default_value_t = 1e-4,
-        help = "L2 penalty on δ (program×modality deviation; mean-normalized)"
+        help = "L2 penalty on δ (program×modality deviation; mean-normalized)",
+        long_help = "L2 penalty `λ · mean(δ²)` on the program×modality deviation δ\n\
+                     (`[K, M, H]`), mean-normalized — keeps the exp gate from\n\
+                     blowing up. Default 1e-4. (Was `--q-l2`, kept as an alias.)"
     )]
     pub delta_l2: f32,
 
@@ -337,7 +346,8 @@ pub struct QcArgs {
     #[arg(
         long,
         default_value_t = 1,
-        help = "Refine pass: drop genes supported by fewer than this many QC-passed cells (default 1 = off; --feature-null-fdr is the primary gene QC)",
+        help = "Refine pass: drop genes supported by fewer than this many QC-passed cells \n\
+		(default 1 = off; --feature-null-fdr is the primary gene QC)",
         long_help = "Minimum number of QC-passed cells that must express a gene (non-zero\n\
                      spliced count) for it to survive the refine pass. Genes below the\n\
                      threshold are dropped from BOTH the pass-2 re-fit and every output.\n\
@@ -460,17 +470,26 @@ pub struct RuntimeArgs {
     #[arg(long, default_value_t = 42)]
     pub seed: u64,
 
-    /// Compute device. `cuda`/`metal` require the matching cargo feature.
-    #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
+    #[arg(
+        long,
+        default_value_t = ComputeDevice::Cpu,
+        value_enum,
+        help = "Compute device",
+        long_help = "Compute device. `cuda` / `metal` require the matching cargo feature."
+    )]
     pub device: ComputeDevice,
 
-    /// Device ordinal (for `cuda` / `metal`).
     #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
     pub device_no: usize,
 
-    /// Number of CPU threads for rayon-parallel work (HNSW, collapse, phase-2
-    /// cell projection). Defaults to all available logical CPUs.
-    #[arg(long, default_value_t = 0, help = "CPU threads (0 = all available)")]
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "CPU threads (0 = all available)",
+        long_help = "Number of CPU threads for rayon-parallel work (HNSW, collapse,\n\
+                     phase-2 cell projection). Defaults to all available logical\n\
+                     CPUs (0 = all)."
+    )]
     pub threads: usize,
 }
 

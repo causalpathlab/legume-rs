@@ -80,9 +80,9 @@ fn link_satellites(
                 // `barcode@sample` names don't coincide with any genes cell, so
                 // the whole modality is silently dropped. Surface it loudly.
                 warn!(
-                    "satellite {}: 0 / {total} columns matched a genes cell — this modality \
-                     donates NOTHING to the model. Its `barcode@sample` names don't line up with \
-                     the genes cells; check that the genes and {} files reduce to the SAME sample \
+                    "satellite {}: 0 / {total} columns matched a genes cell — this modality \n\
+                     donates NOTHING to the model. Its `barcode@sample` names don't line up with \n\
+                     the genes cells; check that the genes and {} files reduce to the SAME sample \n\
                      id (set the per-flag --*-sample-strip suffixes so both strip to e.g. `rep1_wt`).",
                     s.label, s.label,
                 );
@@ -204,8 +204,8 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
 
     if !args.refine() && (args.qc.min_cells > 1 || args.qc.feature_qc_enabled()) {
         warn!(
-            "gene QC (--min-cells {}, feature QC enabled = {}) ignored under --skip-refine: both \
-             need the refine pass to measure support / β on real (not ambient) cells; no gene \
+            "gene QC (--min-cells {}, feature QC enabled = {}) ignored under --skip-refine: both \n\
+             need the refine pass to measure support / β on real (not ambient) cells; no gene \n\
              QC will run",
             args.qc.min_cells,
             args.qc.feature_qc_enabled()
