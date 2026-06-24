@@ -138,22 +138,34 @@ pub fn flexible_name_match(query: &str, target: &str) -> bool {
         || t.contains(&format!("_{}_", q))
 }
 
+/// Heuristic: a lower-cased Ensembl-style stable id (`ensg…`, `ensmusg…`,
+/// `enst…`). Used to index/look up the *leading* id segment of an
+/// `ENSG…_SYMBOL` name so bare-`ENSG` and `ENSG_SYMBOL` forms reconcile both
+/// ways without a linear scan.
+fn is_ensembl_id(s: &str) -> bool {
+    s.len() >= 8 && s.starts_with("ens") && s.bytes().any(|b| b.is_ascii_digit())
+}
+
 /// Pre-built index over a gene-name vocabulary for fast marker→row matching.
-/// Resolves a query gene in three tiers, returning the first matching row:
+/// Resolves a query gene in tiers, returning the first matching row:
 ///   1. exact (case-insensitive) full-name match,
-///   2. last `_`-segment symbol match (`CD8A` → `ENSG…_CD8A`),
-///   3. fallback to the general [`flexible_name_match`] (prefix / `_x_` segment).
+///   2. last `_`-segment symbol match (`CD8A` ↔ `ENSG…_CD8A`),
+///   3. leading Ensembl-id segment match (`ENSG…` ↔ `ENSG…_CD8A`),
+///   4. decompose a combined `ENSG…_SYMBOL` query and retry tiers 2–3 per part,
+///   5. fallback to the general [`flexible_name_match`] (prefix / `_x_` segment).
 ///
-/// Tiers 1–2 are O(1) hash lookups; only the rare fallback scans the
+/// Tiers 1–4 are O(1) hash lookups; only the rare fallback scans the
 /// vocabulary. Build once, match many — replaces the O(genes × markers)
 /// `.position(flexible_name_match)` scan. Tier 1 preferring an exact match
 /// over an earlier-indexed suffix match is the one intended refinement vs a
-/// pure positional scan.
+/// pure positional scan. Tiers 3–4 make HGNC / ENSG / `ENSG_HGNC` reconcile
+/// in either direction (gene-set sources mix these conventions).
 #[allow(dead_code)] // consumed by downstream crates (geu, senna), not the data-beans bin
 pub struct GeneIndex {
     lowered: Vec<String>,
     exact: HashMap<String, usize>,
     symbol: HashMap<String, usize>,
+    ensg: HashMap<String, usize>,
 }
 
 #[allow(dead_code)] // consumed by downstream crates (geu, senna), not the data-beans bin
@@ -165,6 +177,7 @@ impl GeneIndex {
         let lowered: Vec<String> = gene_names.par_iter().map(|g| g.to_lowercase()).collect();
         let mut exact: HashMap<String, usize> = HashMap::default();
         let mut symbol: HashMap<String, usize> = HashMap::default();
+        let mut ensg: HashMap<String, usize> = HashMap::default();
         for (i, low) in lowered.iter().enumerate() {
             exact.entry(low.clone()).or_insert(i);
             // Strip a faba-style aux suffix first (`SYMBOL/count/spliced` →
@@ -175,11 +188,18 @@ impl GeneIndex {
             if let Some(sym) = core.rsplit('_').next() {
                 symbol.entry(sym.to_string()).or_insert(i);
             }
+            // Also index the *leading* segment when it is an Ensembl id, so a
+            // bare `ENSG…` query resolves to an `ENSG…_SYMBOL` row (and back).
+            let head = core.split('_').next().unwrap_or(core);
+            if is_ensembl_id(head) {
+                ensg.entry(head.to_string()).or_insert(i);
+            }
         }
         Self {
             lowered,
             exact,
             symbol,
+            ensg,
         }
     }
 
@@ -193,9 +213,37 @@ impl GeneIndex {
         if let Some(&i) = self.symbol.get(&gl) {
             return Some(i);
         }
-        self.lowered
-            .iter()
-            .position(|t| flexible_name_match(&gl, t))
+        if let Some(&i) = self.ensg.get(&gl) {
+            return Some(i);
+        }
+        // Decompose a combined `ENSG…_SYMBOL[/aux]` query: match its trailing
+        // symbol or leading Ensembl id against the per-part indices.
+        let core = gl.split('/').next().unwrap_or(&gl);
+        if let Some(sym) = core.rsplit('_').next() {
+            if sym != gl {
+                if let Some(&i) = self.symbol.get(sym) {
+                    return Some(i);
+                }
+            }
+        }
+        let head = core.split('_').next().unwrap_or(core);
+        if is_ensembl_id(head) {
+            if let Some(&i) = self.ensg.get(head) {
+                return Some(i);
+            }
+        }
+        // Allocation-free flexible fallback: `flexible_name_match` re-lowercases
+        // both sides and builds three `format!` needles *per comparison*, which
+        // is catastrophic when scanning a 30k+ vocabulary for each of thousands
+        // of unmatched gene-set genes. The vocabulary is already lowercased and
+        // `gl` is lowercase, so build the needles once and scan with plain
+        // byte-level `ends_with`/`starts_with`/`contains`.
+        let suffix = format!("_{gl}");
+        let prefix = format!("{gl}_");
+        let middle = format!("_{gl}_");
+        self.lowered.iter().position(|t| {
+            *t == gl || t.ends_with(&suffix) || t.starts_with(&prefix) || t.contains(&middle)
+        })
     }
 }
 
@@ -268,6 +316,18 @@ mod tests {
         assert_eq!(idx.match_gene("FOO"), Some(3));
         // unmatched
         assert_eq!(idx.match_gene("ZZZ9"), None);
+
+        // bare ENSG query resolves to the `ENSG…_SYMBOL` row (and the combined
+        // form resolves too) — HGNC / ENSG / ENSG_HGNC reconcile both ways.
+        assert_eq!(idx.match_gene("ENSG00000153563"), Some(0));
+        assert_eq!(idx.match_gene("ENSG00000153563_CD8A"), Some(0));
+
+        // dict keyed by bare ENSG: a combined query still resolves via the
+        // leading-id tier.
+        let dict2 = names(&["ENSG00000153563", "MS4A1"]);
+        let idx2 = GeneIndex::build(&dict2);
+        assert_eq!(idx2.match_gene("ENSG00000153563_CD8A"), Some(0));
+        assert_eq!(idx2.match_gene("ensg00000153563"), Some(0));
 
         // IDF: ubiquitous (df == C) → 0; exclusive → ln(C)
         assert_eq!(idf_weight(4, 4), 0.0);

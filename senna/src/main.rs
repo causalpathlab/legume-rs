@@ -390,12 +390,13 @@ enum Commands {
         name = "annotate-ontology",
         visible_aliases = ["ann-ontology", "annot-ontology"],
         about = "Hierarchical multi-resolution cell-type calling on the Cell Ontology (TreeBH).",
-        long_about = "Post-processes an `annotate-by-enrichment` run: places each cluster on\n\
-                      the Cell Ontology is_a tree at the deepest resolution the data\n\
-                      supports, abstaining on sibling ties and flagging clusters no\n\
-                      marker explains. Uses the TreeBH procedure (Bogomolov, Peterson,\n\
-                      Benjamini & Sabatti, Biometrika 2021) on Φ(−z) leaf p-values from\n\
-                      the restandardized ES, Simes-combined up the tree.\n\n\
+        long_about = "Post-processes an `annotate-by-enrichment` run: places each cluster on the\n\
+                      Cell Ontology is_a tree at the deepest resolution the data supports,\n\
+                      abstaining on sibling ties and flagging clusters no marker explains\n\
+                      (TreeBH; Bogomolov, Peterson, Benjamini & Sabatti, Biometrika 2021).\n\
+                      Scores Φ(−z) on the permutation z (else restandardized ES), Simes-combined\n\
+                      up the tree. Writes {out}.ontology_assignment.tsv + .ontology_node_mass.parquet.\n\
+                      `annotate-by-enrichment --obo --label-cl` does the same inline (no re-run).\n\n\
                       Usage: senna annotate-ontology --from run.senna.json \\\n\
                         --label-cl label_cl.tsv --obo cl-basic.obo"
     )]

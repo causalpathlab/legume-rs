@@ -205,6 +205,8 @@ pub struct AnnotateProjOutputs {
     pub n_cells: usize,
     /// Number of fine types.
     pub n_types: usize,
+    /// `[C]` fine type names (marker-file celltype labels), in column order.
+    pub type_names: Vec<Box<str>>,
     /// Number of coarse groups (= number of cell communities).
     pub n_coarse: usize,
     /// `[C × H]` L2-normalized fine type signature embeddings (plot anchors).
@@ -267,7 +269,7 @@ pub fn annotate_embeddings(
     out_prefix: &str,
     use_idf: bool,
     cfg: &AnnotateProjConfig,
-) -> Result<()> {
+) -> Result<AnnotateProjOutputs> {
     let &InputEmbeddings {
         feature_emb,
         gene_names,
@@ -356,7 +358,7 @@ pub fn annotate_embeddings(
             cfg,
         })?;
     }
-    Ok(())
+    Ok(res)
 }
 
 //////////////////////////////
@@ -519,6 +521,7 @@ pub fn annotate_by_projection(
     Ok(AnnotateProjOutputs {
         n_cells,
         n_types,
+        type_names: inp.type_names.to_vec(),
         n_coarse: n_comm,
         type_emb_ch,
         coarse_emb_kh,

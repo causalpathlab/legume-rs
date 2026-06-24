@@ -28,6 +28,8 @@ use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::IoOps;
 
 use super::finalize::{clean_outputs, finalize_annotation, AnnotationArtifacts};
+use super::ontology::{annotate_ontology_core, OntologyParams, OntologyScore};
+use crate::embed_common::{axis_id_names, Mat};
 use crate::run_manifest::{derive_out_prefix, resolve, RunKind, RunManifest};
 
 #[derive(Args, Debug)]
@@ -120,6 +122,34 @@ pub struct AnnotateProjectArgs {
         help = "Keep existing {out}.{kind}_annot.* outputs (default: erase them first for a fresh re-run)"
     )]
     pub no_clean: bool,
+
+    // ----- optional ontology annotation (TreeBH) over the projection z -----
+    #[arg(
+        long = "obo",
+        help = "Cell Ontology .obo. Given WITH --label-cl, runs TreeBH on the community-pooled \
+                projection z → {out}.{kind}_annot.ontology_assignment.tsv (needs --num-perm > 0)"
+    )]
+    pub obo: Option<Box<str>>,
+
+    #[arg(
+        long = "label-cl",
+        help = "Curated `label<TAB>CL:id` map, one row per marker celltype. Required together with --obo"
+    )]
+    pub label_cl: Option<Box<str>>,
+
+    #[arg(
+        long = "ontology-fdr-q",
+        default_value_t = 0.1,
+        help = "Ontology TreeBH per-level FDR target (lower → descends less, abstains more)"
+    )]
+    pub ontology_fdr_q: f64,
+
+    #[arg(
+        long = "ontology-by",
+        default_value_t = false,
+        help = "Ontology: Benjamini–Yekutieli within families (any dependence; more conservative)"
+    )]
+    pub ontology_by: bool,
 }
 
 pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
@@ -172,6 +202,16 @@ pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
         None => derive_out_prefix(&args.from),
     };
     mkdir_parent(&out)?;
+    anyhow::ensure!(
+        args.obo.is_some() == args.label_cl.is_some(),
+        "--obo and --label-cl must be given together for ontology annotation"
+    );
+    if args.obo.is_some() {
+        anyhow::ensure!(
+            args.num_perm > 0,
+            "ontology annotation needs --num-perm > 0 (projection scores must be z-scores, not cosine)"
+        );
+    }
 
     let cfg = AnnotateProjConfig {
         n_perm: args.num_perm,
@@ -188,7 +228,7 @@ pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
     if !args.no_clean {
         clean_outputs(&annot_prefix, ANNOT_OUTPUT_SUFFIXES);
     }
-    annotate_embeddings(
+    let res = annotate_embeddings(
         &InputEmbeddings {
             feature_emb: &feat.mat,
             gene_names: &feat.rows,
@@ -200,6 +240,53 @@ pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
         !args.no_idf,
         &cfg,
     )?;
+
+    // Optional ontology annotation: Stouffer-pool the per-cell projection z into
+    // a community × celltype z-matrix and feed the shared TreeBH core (same
+    // engine as annotate-by-enrichment). NON-FATAL: projection outputs are
+    // already written, so a bad map/OBO is logged, not propagated.
+    let mut ontology_assign: Option<String> = None;
+    let mut ontology_mass: Option<String> = None;
+    if let (Some(obo), Some(label_cl)) = (args.obo.as_deref(), args.label_cl.as_deref()) {
+        // Community × celltype signal = `res.enrich`: the column-centered mean
+        // per-cell projection z within each community — the same discriminative
+        // statistic projection uses to NAME communities. Centering removes the
+        // common-mode "every community scores moderately for T" baseline, so what
+        // remains is each community's enrichment RELATIVE to the others — a
+        // graded z fed straight to the ontology walk (Φ(−z)). (Naive pooling of
+        // per-cell z fails both ways: Stouffer Σz/√n over-inflates by √n on
+        // correlated cells; the plain mean washes the signal out.)
+        let (nc, ct) = (res.n_coarse, res.n_types);
+        let mut score = Mat::zeros(nc, ct);
+        for comm in 0..nc {
+            for c in 0..ct {
+                score[(comm, c)] = res.enrich[comm * ct + c];
+            }
+        }
+        // No posterior Q here — the core derives the node-mass from `score`.
+        let comm_names = axis_id_names("comm", nc);
+        match annotate_ontology_core(
+            &OntologyParams {
+                out: &annot_prefix,
+                label_cl,
+                obo,
+                fdr_q: args.ontology_fdr_q,
+                by: args.ontology_by,
+            },
+            OntologyScore::Z(&score),
+            None,
+            &comm_names,
+            &res.type_names,
+        ) {
+            Ok((a, m)) => {
+                ontology_assign = Some(a);
+                ontology_mass = Some(m);
+            }
+            Err(e) => {
+                log::error!("ontology annotation failed ({e}); projection outputs are intact")
+            }
+        }
+    }
 
     // Wire the per-cell labels into the manifest so `senna plot` colours by
     // them automatically. `annotate_embeddings` wrote `{prefix}.argmax.tsv`
@@ -217,8 +304,8 @@ pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
             cluster_celltype_q_abs: None,
             cluster_celltype_es_abs: None,
             cluster_expression_abs: None,
-            ontology_assignment_abs: None,
-            ontology_node_mass_abs: None,
+            ontology_assignment_abs: ontology_assign.as_deref(),
+            ontology_node_mass_abs: ontology_mass.as_deref(),
         },
     )?;
     Ok(())

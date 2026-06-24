@@ -444,7 +444,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "auxiliary-data"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "data-beans",
@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "approx",
@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "enrichment"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "approx",
@@ -1740,6 +1740,7 @@ dependencies = [
  "rayon",
  "rustc-hash 2.1.2",
  "serde",
+ "special",
 ]
 
 [[package]]
@@ -2652,7 +2653,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "auxiliary-data",
@@ -5072,7 +5073,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.6.7"
+version = "0.6.8"
 dependencies = [
  "anyhow",
  "approx",

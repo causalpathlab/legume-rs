@@ -182,6 +182,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         q_kc,
         es_kc,
         es_restandardized_kc,
+        perm_z_kc,
         pvalue_kc,
         qvalue_kc,
         cell_annotation_nc,
@@ -244,6 +245,17 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         Some(&loaded.celltype_names),
     )?;
 
+    // Correlation-preserving sample-permutation z (when num_perm > 0): the
+    // preferred ontology input — graded, unlike the pooled p-value.
+    if let Some(pz) = &perm_z_kc {
+        let perm_z_path = format!("{out}.cluster_celltype_perm_z.parquet");
+        pz.to_parquet_with_names(
+            &perm_z_path,
+            (Some(&cluster_names), Some("cluster")),
+            Some(&loaded.celltype_names),
+        )?;
+    }
+
     let p_path = format!("{out}.cluster_celltype_p.parquet");
     pvalue_kc.to_parquet_with_names(
         &p_path,
@@ -275,11 +287,12 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
                 fdr_q: args.ontology_fdr_q,
                 by: args.ontology_by,
             },
-            &es_restandardized_kc,
-            &q_kc,
+            // Prefer the correlation-preserving permutation z; fall back to the
+            // row-randomization restandardized ES when no sample permutations ran.
+            super::ontology::OntologyScore::Z(perm_z_kc.as_ref().unwrap_or(&es_restandardized_kc)),
+            Some(&q_kc),
             &cluster_names,
             &loaded.celltype_names,
-            true, // from_z: leaf p = Φ(−z)
         ) {
             Ok((a, m)) => {
                 ontology_assign = Some(a);
