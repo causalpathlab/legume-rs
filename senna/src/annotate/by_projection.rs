@@ -217,6 +217,8 @@ pub fn run(args: &AnnotateProjectArgs) -> Result<()> {
             cluster_celltype_q_abs: None,
             cluster_celltype_es_abs: None,
             cluster_expression_abs: None,
+            ontology_assignment_abs: None,
+            ontology_node_mass_abs: None,
         },
     )?;
     Ok(())

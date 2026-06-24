@@ -20,6 +20,8 @@ pub(crate) const ENRICHMENT_OUTPUT_SUFFIXES: &[&str] = &[
     ".cluster_celltype_p.parquet",
     ".cluster_celltype_q_values.parquet",
     ".cluster_expression.parquet",
+    ".ontology_assignment.tsv",
+    ".ontology_node_mass.parquet",
 ];
 
 /// Erase the exact `{prefix}{suffix}` output files (if present) for a fresh
@@ -52,6 +54,10 @@ pub(crate) struct AnnotationArtifacts<'a> {
     pub cluster_celltype_q_abs: Option<&'a str>,
     pub cluster_celltype_es_abs: Option<&'a str>,
     pub cluster_expression_abs: Option<&'a str>,
+    /// Ontology outputs (`annotate-by-enrichment --obo --label-cl`). Set to
+    /// `None` to CLEAR any stale manifest pointers on a re-run without ontology.
+    pub ontology_assignment_abs: Option<&'a str>,
+    pub ontology_node_mass_abs: Option<&'a str>,
 }
 
 /// Wire the artifacts into the manifest as paths relative to `manifest_dir`,
@@ -77,6 +83,10 @@ pub(crate) fn finalize_annotation(
     if let Some(x) = art.cluster_expression_abs {
         manifest.annotate.cluster_expression = Some(rel(x));
     }
+    // Overwrite (not conditionally set) so a re-run without ontology clears any
+    // stale pointers from a previous standalone `annotate-ontology`.
+    manifest.annotate.ontology_assignment = art.ontology_assignment_abs.map(|p| rel(p));
+    manifest.annotate.ontology_node_mass = art.ontology_node_mass_abs.map(|p| rel(p));
     manifest.defaults.colour_by = Some("annotation".into());
     manifest.save(from)
 }

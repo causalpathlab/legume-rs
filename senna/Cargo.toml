@@ -6,7 +6,7 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version = "0.6.6"
+version = "0.6.7"
 
 [lib]
 name = "senna"

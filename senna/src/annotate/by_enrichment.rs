@@ -23,6 +23,11 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         None => crate::run_manifest::derive_out_prefix(&args.from).into_boxed_str(),
     };
     mkdir_parent(&out)?;
+    anyhow::ensure!(
+        args.obo.is_some() == args.label_cl.is_some(),
+        "--obo and --label-cl must be given together to run inline ontology annotation \
+         (got only one); omit both to skip it"
+    );
     if !args.no_clean {
         clean_outputs(&out, ENRICHMENT_OUTPUT_SUFFIXES);
     }
@@ -255,6 +260,37 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
 
     display_annotation_histogram(&cell_annotation_nc, &loaded.celltype_names);
 
+    // Optional inline ontology annotation (TreeBH) — reuses the freshly computed
+    // restandardized-ES z-matrix in memory, no parquet round-trip. NON-FATAL: a
+    // bad label→CL map / OBO must not discard the already-written enrichment
+    // outputs, so errors are logged and the run still finalizes.
+    let mut ontology_assign: Option<String> = None;
+    let mut ontology_mass: Option<String> = None;
+    if let (Some(obo), Some(label_cl)) = (args.obo.as_deref(), args.label_cl.as_deref()) {
+        match super::ontology::annotate_ontology_core(
+            &super::ontology::OntologyParams {
+                out: &out,
+                label_cl,
+                obo,
+                fdr_q: args.ontology_fdr_q,
+                by: args.ontology_by,
+            },
+            &es_restandardized_kc,
+            &q_kc,
+            &cluster_names,
+            &loaded.celltype_names,
+            true, // from_z: leaf p = Φ(−z)
+        ) {
+            Ok((a, m)) => {
+                ontology_assign = Some(a);
+                ontology_mass = Some(m);
+            }
+            Err(e) => log::error!(
+                "inline ontology annotation failed ({e}); enrichment outputs are intact"
+            ),
+        }
+    }
+
     finalize_annotation(
         &mut manifest,
         Path::new(args.from.as_ref()),
@@ -266,6 +302,8 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
             cluster_celltype_q_abs: Some(&q_path),
             cluster_celltype_es_abs: Some(&es_path),
             cluster_expression_abs: Some(&cell_expr_path),
+            ontology_assignment_abs: ontology_assign.as_deref(),
+            ontology_node_mass_abs: ontology_mass.as_deref(),
         },
     )?;
 

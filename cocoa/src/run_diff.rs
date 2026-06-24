@@ -381,7 +381,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         .iter()
         .map(|indv| {
             if let Some(exposure) = indv_to_exposure.get(indv) {
-                (indv.to_string() + "_" + exposure).into()
+                (indv.to_string() + "_" + exposure.as_ref()).into()
             } else {
                 indv.to_string().into()
             }

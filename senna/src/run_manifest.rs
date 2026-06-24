@@ -271,6 +271,14 @@ pub struct RunAnnotate {
     /// Input marker-gene TSV path (provenance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub markers: Option<String>,
+    /// `{annotate_out}.ontology_assignment.tsv` — per-cluster TreeBH cell-type
+    /// call on the Cell Ontology (assigned node, abstention, disagreement).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ontology_assignment: Option<String>,
+    /// `{annotate_out}.ontology_node_mass.parquet` — nClusters × induced-CL-node
+    /// soft mass (Σ descendant-leaf Q) for visualization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ontology_node_mass: Option<String>,
 }
 
 /// Paths to artifacts produced by `senna pseudotime`. Populated when the

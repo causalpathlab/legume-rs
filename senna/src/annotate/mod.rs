@@ -18,7 +18,9 @@ mod by_enrichment;
 mod by_projection;
 mod finalize;
 pub mod inputs;
+mod ontology;
 
-pub use args::AnnotateArgs;
+pub use args::{AnnotateArgs, AnnotateOntologyArgs};
 pub use by_enrichment::run as annotate_by_enrichment;
 pub use by_projection::{run as annotate_by_projection, AnnotateProjectArgs};
+pub use ontology::run as annotate_ontology;

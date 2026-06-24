@@ -64,7 +64,10 @@ mod topic;
 mod tree_layout;
 mod vae;
 
-use annotate::{annotate_by_enrichment, annotate_by_projection, AnnotateArgs, AnnotateProjectArgs};
+use annotate::{
+    annotate_by_enrichment, annotate_by_projection, annotate_ontology, AnnotateArgs,
+    AnnotateOntologyArgs, AnnotateProjectArgs,
+};
 use bge::{fit_bge, BgeArgs};
 use clustering::*;
 use embed_common::*;
@@ -384,6 +387,21 @@ enum Commands {
     AnnotateProject(AnnotateProjectArgs),
 
     #[command(
+        name = "annotate-ontology",
+        visible_aliases = ["ann-ontology", "annot-ontology"],
+        about = "Hierarchical multi-resolution cell-type calling on the Cell Ontology (TreeBH).",
+        long_about = "Post-processes an `annotate-by-enrichment` run: places each cluster on\n\
+                      the Cell Ontology is_a tree at the deepest resolution the data\n\
+                      supports, abstaining on sibling ties and flagging clusters no\n\
+                      marker explains. Uses the TreeBH procedure (Bogomolov, Peterson,\n\
+                      Benjamini & Sabatti, Biometrika 2021) on Φ(−z) leaf p-values from\n\
+                      the restandardized ES, Simes-combined up the tree.\n\n\
+                      Usage: senna annotate-ontology --from run.senna.json \\\n\
+                        --label-cl label_cl.tsv --obo cl-basic.obo"
+    )]
+    AnnotateOntology(AnnotateOntologyArgs),
+
+    #[command(
         about = "Pseudotime via Monocle-3-style principal graph (SimplePPT) on the latent.",
         long_about = "Port of Mao et al. 2015 SimplePPT applied to `manifest.outputs.latent`.\n\n\
                       (1) k-means init K centroids,\n\
@@ -518,6 +536,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::AnnotateProject(args) => {
             annotate_by_projection(args)?;
+        }
+        Commands::AnnotateOntology(args) => {
+            annotate_ontology(args)?;
         }
         Commands::Predict(args) => {
             predict_model(args)?;

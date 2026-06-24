@@ -175,4 +175,109 @@ pub struct AnnotateArgs {
                      effector). Set this flag to fall back to IDF-only weighting."
     )]
     pub no_empirical_specificity: bool,
+
+    // ----- optional inline ontology annotation (TreeBH) -----
+    #[arg(
+        long = "obo",
+        help = "Cell Ontology OBO file; with --label-cl, also runs annotate-ontology inline",
+        long_help = "Cell Ontology OBO file (e.g. cl-basic.obo). When BOTH --obo and\n\
+                     --label-cl are given, the restandardized-ES z-matrix is fed to the\n\
+                     TreeBH ontology annotator in the same run (no separate\n\
+                     `annotate-ontology` invocation needed), writing\n\
+                     {out}.ontology_assignment.tsv + {out}.ontology_node_mass.parquet."
+    )]
+    pub obo: Option<Box<str>>,
+
+    #[arg(
+        long = "label-cl",
+        help = "Curated `label<TAB>CL:id` TSV; enables inline ontology annotation (with --obo)"
+    )]
+    pub label_cl: Option<Box<str>>,
+
+    #[arg(
+        long = "ontology-fdr-q",
+        default_value_t = 0.1,
+        help = "Per-level selective-FDR target q for the inline TreeBH ontology walk"
+    )]
+    pub ontology_fdr_q: f64,
+
+    #[arg(
+        long = "ontology-by",
+        default_value_t = false,
+        help = "Use the Benjamini–Yekutieli correction within families for the inline ontology walk"
+    )]
+    pub ontology_by: bool,
+}
+
+/// `senna annotate-ontology` — hierarchical multi-resolution cell-type calling
+/// (TreeBH) on the Cell Ontology, post-processing an `annotate-by-enrichment`
+/// run's cluster × celltype matrix.
+#[derive(Args, Debug)]
+pub struct AnnotateOntologyArgs {
+    #[arg(
+        short = 'f',
+        long = "from",
+        required = true,
+        help = "Run manifest already annotated by `senna annotate-by-enrichment`",
+        long_help = "Run manifest already annotated by `senna annotate-by-enrichment`\n\
+                     (reads `annotate.cluster_celltype_q` and its sibling\n\
+                     `*_es_std` / `*_p` matrices)."
+    )]
+    pub from: Box<str>,
+
+    #[arg(
+        long = "label-cl",
+        required = true,
+        help = "Curated `label<TAB>CL:id` TSV mapping each marker celltype to a Cell Ontology term"
+    )]
+    pub label_cl: Box<str>,
+
+    #[arg(
+        long = "obo",
+        required = true,
+        help = "Cell Ontology OBO file (e.g. cl-basic.obo)",
+        long_help = "Cell Ontology OBO file. Fetch the basic release with:\n\
+                     curl -sSL https://github.com/obophenotype/cell-ontology/\
+                     releases/latest/download/cl-basic.obo -o cl-basic.obo"
+    )]
+    pub obo: Box<str>,
+
+    #[arg(
+        short = 'o',
+        long = "out",
+        help = "Output prefix (defaults to `--from` with `.senna.json`/`.json` stripped)"
+    )]
+    pub out: Option<Box<str>>,
+
+    #[arg(
+        long = "fdr-q",
+        default_value_t = 0.1,
+        help = "Per-level selective-FDR target q for the TreeBH descent",
+        long_help = "Per-level selective-FDR target q (Bogomolov–Peterson–Benjamini–Sabatti\n\
+                     TreeBH). Benjamini–Hochberg is applied within each family at a\n\
+                     working target shrunk by the rejection proportions along the\n\
+                     ancestor path; lower q → descends less eagerly (more abstention)."
+    )]
+    pub fdr_q: f64,
+
+    #[arg(
+        long = "by",
+        default_value_t = false,
+        help = "Use the Benjamini–Yekutieli correction within families (arbitrary dependence; more conservative)"
+    )]
+    pub by: bool,
+
+    #[arg(
+        long = "use-perm-p",
+        default_value_t = false,
+        help = "Use the saturated permutation p-values instead of Φ(−z) from the restandardized ES",
+        long_help = "Use `cluster_celltype_p` directly instead of converting the\n\
+                     restandardized-ES z-scores (`cluster_celltype_es_std`) to\n\
+                     p-values. The permutation p is resolution-limited (≈1/B), so the\n\
+                     z→p default is usually more discriminative."
+    )]
+    pub use_perm_p: bool,
+
+    #[arg(short = 'v', long, help = "Verbose logging")]
+    pub verbose: bool,
 }

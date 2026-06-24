@@ -1,0 +1,15 @@
+# Curated marker-label → Cell Ontology (CL) map for the blood_markers.tsv BMMC set.
+# Used by `senna annotate-ontology --label-cl`. Columns: label<TAB>CL:id
+T	CL:0000084
+CD4_T	CL:0000624
+CD8_T	CL:0000625
+NK	CL:0000623
+B	CL:0000236
+Monocyte	CL:0000576
+NCM	CL:0000875
+cDC	CL:0000990
+pDC	CL:0000784
+Erythroid	CL:0000764
+Megakaryocyte	CL:0000556
+HSPC	CL:0008001
+GranPrecursor	CL:0000557
