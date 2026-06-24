@@ -217,9 +217,9 @@ pub struct TrainArgs {
     #[arg(
         long = "max-grad-norm",
         default_value_t = 1.0,
-        help = "Global-norm gradient clip for phase-1 AdamW (0 = off). When > 0, \
-                each step's gradients are scaled down if their global L2 norm \
-                exceeds this, bounding embedding inflation on loss spikes."
+        help = "Global-norm gradient clip for phase-1 AdamW (0 = off).\n\
+		When > 0, each step's gradients are scaled down \n\
+		if their global L2 norm exceeds this, bounding embedding inflation on loss spikes."
     )]
     pub max_grad_norm: f32,
 
@@ -380,7 +380,7 @@ pub struct QcArgs {
     #[arg(
         long = "hvg-min-excess",
         default_value_t = 0.0,
-        help = "Feature QC (HVG): keep genes with excess NB-dispersion strictly above \
+        help = "Feature QC (HVG): keep genes with excess NB-dispersion strictly above \n\
                 this (0 = above the mean–variance trend). Higher = stricter."
     )]
     pub hvg_min_excess: f32,
@@ -388,17 +388,19 @@ pub struct QcArgs {
     #[arg(
         long = "feature-qc-min-nnz",
         default_value_t = 0.0,
-        help = "Feature QC (HVG): expression floor — drop genes detected in fewer than \
+        help = "Feature QC (HVG)",
+        long_help = "Feature QC (HVG): expression floor — drop genes detected in fewer than \n\
                 this many cells (unreliable dispersion). 0 = no floor."
     )]
     pub feature_qc_min_nnz: f32,
 
     #[arg(
         long = "feature-qc-mask",
-        help = "Feature QC: only MASK the dropped genes from the co-embedding (keep them in \
-                the model) instead of the default DROP + re-fit. The default drops the \
-                low-variability genes from the model — safe under logistic NCE (it has no \
-                softmax partition to collapse). Use --feature-qc-mask to keep every gene in \
+        help = "mask QC genes in the co-embedding",
+        long_help = "Feature QC: only MASK the dropped genes from the co-embedding \n\
+		     instead of the default DROP + re-fit. The default drops the \n\
+                low-variability genes from the model — safe under logistic NCE (it has no \n\
+                softmax partition to collapse). Use --feature-qc-mask to keep every gene in \n\
                 the model and exclude them from the gene visualization only."
     )]
     pub feature_qc_mask: bool,
@@ -523,8 +525,8 @@ pub struct GemArgs {
         long,
         value_delimiter = ',',
         help = "m6A (DART-seq) sparse matrix prefix(es), comma-separated",
-        long_help = "m6A (DART-seq) sparse matrix prefix(es), comma-separated. Rows\n\
-                     `{gene_key}/m6A/{component|chr:pos}`."
+        long_help = "m6A (DART-seq) sparse matrix prefix(es), comma-separated. \n\
+		     Rows `{gene_key}/m6A/{component|chr:pos}`."
     )]
     pub dartseq: Option<Vec<Box<str>>>,
 
@@ -532,8 +534,8 @@ pub struct GemArgs {
         long,
         value_delimiter = ',',
         help = "A-to-I editing sparse matrix prefix(es), comma-separated",
-        long_help = "A-to-I editing sparse matrix prefix(es), comma-separated. Rows\n\
-                     `{gene_key}/A2I/{component|chr:pos}`."
+        long_help = "A-to-I editing sparse matrix prefix(es), comma-separated. \n\
+		     Rows `{gene_key}/A2I/{component|chr:pos}`."
     )]
     pub atoi: Option<Vec<Box<str>>>,
 
@@ -541,8 +543,8 @@ pub struct GemArgs {
         long,
         value_delimiter = ',',
         help = "Alternative-polyA sparse matrix prefix(es), comma-separated",
-        long_help = "Alternative-polyA sparse matrix prefix(es), comma-separated. Rows\n\
-                     `{gene_key}/pA/{component|chr:pos}`."
+        long_help = "Alternative-polyA sparse matrix prefix(es), comma-separated. \n\
+                     Rows `{gene_key}/pA/{component|chr:pos}`."
     )]
     pub apa: Option<Vec<Box<str>>>,
 
