@@ -238,12 +238,13 @@ impl GeneIndex {
         // of unmatched gene-set genes. The vocabulary is already lowercased and
         // `gl` is lowercase, so build the needles once and scan with plain
         // byte-level `ends_with`/`starts_with`/`contains`.
+        // (an exact `*t == gl` match is already handled by the `exact` tier above)
         let suffix = format!("_{gl}");
         let prefix = format!("{gl}_");
         let middle = format!("_{gl}_");
-        self.lowered.iter().position(|t| {
-            *t == gl || t.ends_with(&suffix) || t.starts_with(&prefix) || t.contains(&middle)
-        })
+        self.lowered
+            .iter()
+            .position(|t| t.ends_with(&suffix) || t.starts_with(&prefix) || t.contains(&middle))
     }
 }
 

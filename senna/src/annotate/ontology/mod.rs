@@ -176,11 +176,30 @@ impl TreeModel {
             children[p].push(s);
         }
 
-        // Deterministic child order.
+        Ok(Self::finalize(
+            children,
+            cl_id,
+            disp,
+            is_self_leaf,
+            label_col,
+            root,
+        ))
+    }
+
+    /// Compute depth / postorder / `sub_cols` from the assembled node arrays and
+    /// pack a `TreeModel`.
+    fn finalize(
+        mut children: Vec<Vec<usize>>,
+        cl_id: Vec<Box<str>>,
+        disp: Vec<Box<str>>,
+        is_self_leaf: Vec<bool>,
+        label_col: Vec<Option<usize>>,
+        root: usize,
+    ) -> Self {
         for ch in &mut children {
             ch.sort_unstable();
         }
-        // Tree depth + postorder via DFS from root.
+        let n = children.len();
         let mut depth = vec![0usize; n];
         let mut postorder = Vec::with_capacity(n);
         let mut stack = vec![(root, false)];
@@ -195,7 +214,6 @@ impl TreeModel {
                 stack.push((c, false));
             }
         }
-        // Label columns at-or-below each node (postorder accumulation).
         let mut sub_cols: Vec<Vec<usize>> = vec![Vec::new(); n];
         for &node in &postorder {
             if let Some(col) = label_col[node] {
@@ -209,8 +227,7 @@ impl TreeModel {
             sub_cols[node].sort_unstable();
             sub_cols[node].dedup();
         }
-
-        Ok(Self {
+        Self {
             children,
             depth,
             cl_id,
@@ -220,7 +237,7 @@ impl TreeModel {
             postorder,
             sub_cols,
             root,
-        })
+        }
     }
 }
 
@@ -449,6 +466,35 @@ pub(crate) fn annotate_ontology_core(
     }
     let tree = TreeModel::build(&onto, &col_cl, celltype_names)?;
 
+    run_treebh(
+        &tree,
+        &score,
+        q_mass,
+        cluster_names,
+        celltype_names,
+        out,
+        params.fdr_q,
+        params.by,
+    )
+}
+
+/// Per-cluster TreeBH loop + output writing over a *pre-built* tree (the CL
+/// collapsed-label tree). `col_names` index the score-matrix columns (celltype
+/// labels). The call per cluster is the deepest resolved label — the most
+/// specific cell type the data supports.
+#[allow(clippy::too_many_arguments)]
+fn run_treebh(
+    tree: &TreeModel,
+    score: &OntologyScore,
+    q_mass: &Mat,
+    cluster_names: &[Box<str>],
+    col_names: &[Box<str>],
+    out: &str,
+    fdr_q: f64,
+    by: bool,
+) -> Result<(String, String)> {
+    let n_clusters = cluster_names.len();
+
     // ----- per-cluster TreeBH -----
     let mut assignments: Vec<Assignment> = Vec::with_capacity(n_clusters);
     // K × (struct CL nodes) soft mass for viz.
@@ -474,7 +520,7 @@ pub(crate) fn annotate_ontology_core(
             }
         }
         let cp = treebh::combine_bottom_up(&tree.children, &tree.postorder, &leaf_p);
-        let rejected = treebh::descend(&tree.children, tree.root, &cp, params.fdr_q, params.by);
+        let rejected = treebh::descend(&tree.children, tree.root, &cp, fdr_q, by);
 
         // A rejected STRUCT (label) node = TreeBH rejected "cluster is type-v or
         // a descendant" (reading self-leaves alone would drop a label rejected at
@@ -492,17 +538,19 @@ pub(crate) fn annotate_ontology_core(
             })
             .collect();
 
+        // Assign from the leaf-most (deepest) rejected labels — the most specific
+        // cell type the data resolves.
+        let candidates = &leaf_most;
         let (assigned, abstained, unresolved, multi, cannot): (
             Option<usize>,
             bool,
             Vec<Box<str>>,
             bool,
             bool,
-        ) = if leaf_most.is_empty() {
+        ) = if candidates.is_empty() {
             (None, false, Vec::new(), false, true)
         } else {
-            // primary = deepest leaf-most label (tie: smaller CL id).
-            let primary = *leaf_most
+            let primary = *candidates
                 .iter()
                 .max_by(|&&a, &&b| {
                     tree.depth[a]
@@ -516,20 +564,20 @@ pub(crate) fn annotate_ontology_core(
             let unresolved: Vec<Box<str>> = tree.sub_cols[primary]
                 .iter()
                 .filter(|c| !own.contains(c))
-                .map(|&c| celltype_names[c].clone())
+                .map(|&c| col_names[c].clone())
                 .collect();
             (
                 Some(primary),
                 !unresolved.is_empty(),
                 unresolved,
-                leaf_most.len() > 1,
+                candidates.len() > 1,
                 false,
             )
         };
 
         let mut supported: Vec<Box<str>> = (0..tree.children.len())
             .filter(|&v| rejected_label(v))
-            .filter_map(|v| own_col(v).map(|c| celltype_names[c].clone()))
+            .filter_map(|v| own_col(v).map(|c| col_names[c].clone()))
             .collect();
         supported.sort_unstable();
         supported.dedup();
@@ -591,7 +639,7 @@ pub(crate) fn annotate_ontology_core(
     // so two labels mapping to the same CL id don't collide into duplicate headers.
     let mass_cols: Vec<Box<str>> = struct_nodes
         .iter()
-        .map(|&n| own_col(n).map_or_else(|| tree.cl_id[n].clone(), |c| celltype_names[c].clone()))
+        .map(|&n| own_col(n).map_or_else(|| tree.cl_id[n].clone(), |c| col_names[c].clone()))
         .collect();
     mass.to_parquet_with_names(
         &mass_path,
