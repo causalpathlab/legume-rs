@@ -19,12 +19,13 @@ pub fn run_simple(
         return Ok(());
     }
 
-    let cutoffs = SqueezeCutoffs {
-        row: args.row_nnz_cutoff,
-        column: args.column_nnz_cutoff,
-    };
-
     let records = gff_map.records();
+    let gene_key_to_id: HashMap<Box<str>, GeneId> = records
+        .iter()
+        .map(|rec| (format_gene_key(rec), rec.gene_id.clone()))
+        .collect();
+    let mut all_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
+    let cell_call = args.cell_qc.params();
 
     for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
         let njobs = records.len() as u64;
@@ -46,6 +47,36 @@ pub fn run_simple(
             .flatten()
             .collect();
 
+        // Cell calling (barcode QC) + gene nnz filter (no splice split here).
+        let (passing_genes, passing_cells) = crate::pipeline_util::qc_passing_keys(
+            &gene_level_stats,
+            &[],
+            args.row_nnz_cutoff,
+            0,
+            args.column_nnz_cutoff,
+            &cell_call,
+        );
+        info!(
+            "{}: {} genes x {} cells passed QC (cell-filter {:?})",
+            batch_name,
+            passing_genes.len(),
+            passing_cells.len(),
+            cell_call.filter
+        );
+        let gene_level_stats: Vec<(CellBarcode, Box<str>, f32)> = gene_level_stats
+            .into_par_iter()
+            .filter(|(cb, feat, _)| {
+                passing_genes.contains(extract_gene_key(feat)) && passing_cells.contains(cb)
+            })
+            .collect();
+
+        crate::pipeline_util::write_qc_cells(&args.output, batch_name, &passing_cells)?;
+        for gk in &passing_genes {
+            if let Some(id) = gene_key_to_id.get(gk) {
+                all_gene_ids.insert(id.clone());
+            }
+        }
+
         let out = crate::pipeline_util::BackendOutputPath::new(
             &args.output,
             batch_name,
@@ -53,12 +84,12 @@ pub fn run_simple(
             args.zip,
         );
 
-        format_data_triplets(gene_level_stats)
-            .to_backend(&out.write_path)?
-            .qc(cutoffs.clone())?;
+        format_data_triplets(gene_level_stats).to_backend(&out.write_path)?;
 
         out.finalize()?;
     }
+
+    crate::pipeline_util::write_qc_genes(&args.output, &all_gene_ids)?;
 
     Ok(())
 }
@@ -86,10 +117,12 @@ pub fn run_splice_aware(
     // Convert DashMap exon intervals to FxHashMap for fast per-gene lookup
     let exon_intervals: HashMap<GeneId, Vec<(i64, i64)>> = exon_map.into_iter().collect();
     let records = gff_map.records();
-    let cutoffs = SqueezeCutoffs {
-        row: args.row_nnz_cutoff,
-        column: args.column_nnz_cutoff,
-    };
+    // gene_key → GeneId, to write the pooled retained-gene artifact after the loop.
+    let gene_key_to_id: HashMap<Box<str>, GeneId> = records
+        .iter()
+        .map(|rec| (format_gene_key(rec), rec.gene_id.clone()))
+        .collect();
+    let mut all_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
 
     for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
         let njobs = records.len() as u64;
@@ -126,10 +159,49 @@ pub fn run_splice_aware(
             unspliced_triplets.len()
         );
 
-        // Build total counts (spliced + unspliced) for QC.
+        // Cell calling (barcode QC) + gene nnz filter — shared with the modality
+        // QC path so `faba genes` retains the same cells the other modalities do.
+        let cell_call = args.cell_qc.params();
+        let (passing_genes, passing_cells) = crate::pipeline_util::qc_passing_keys(
+            &spliced_triplets,
+            &unspliced_triplets,
+            args.row_nnz_cutoff,
+            0,
+            args.column_nnz_cutoff,
+            &cell_call,
+        );
+        info!(
+            "{}: {} genes x {} cells passed QC (cell-filter {:?})",
+            batch_name,
+            passing_genes.len(),
+            passing_cells.len(),
+            cell_call.filter
+        );
+
+        let keep =
+            |triplets: Vec<(CellBarcode, Box<str>, f32)>| -> Vec<(CellBarcode, Box<str>, f32)> {
+                triplets
+                    .into_par_iter()
+                    .filter(|(cb, feat, _)| {
+                        passing_genes.contains(extract_gene_key(feat)) && passing_cells.contains(cb)
+                    })
+                    .collect()
+            };
+        let (spliced_triplets, unspliced_triplets) =
+            rayon::join(|| keep(spliced_triplets), || keep(unspliced_triplets));
+
+        // Passable QC artifacts: per-batch cells now, pooled gene ids after the loop.
+        crate::pipeline_util::write_qc_cells(&args.output, batch_name, &passing_cells)?;
+        for gk in &passing_genes {
+            if let Some(id) = gene_key_to_id.get(gk) {
+                all_gene_ids.insert(id.clone());
+            }
+        }
+
+        // Total counts (spliced + unspliced) — the primary `{batch}` matrix.
         // Parallel fold/reduce: each rayon worker accumulates a local
-        // (cell, gene_key) → val map; we then merge the shards and
-        // materialize the "{gene_key}/count/total" feature names once.
+        // (cell, gene_key) → val map; merge the shards and materialize the
+        // "{gene_key}/count/total" feature names once.
         let total_triplets: Vec<(CellBarcode, Box<str>, f32)> = {
             use rayon::prelude::*;
             type Shard<'a> = rustc_hash::FxHashMap<(CellBarcode, &'a str), f32>;
@@ -152,8 +224,6 @@ pub fn run_splice_aware(
                     a
                 });
 
-            // Memoize gene_key → "{gene_key}/count/total" once (serial; cheap
-            // relative to the fold above).
             let mut total_key_cache: HashMap<&str, Box<str>> = HashMap::default();
             for (_, gk) in totals.keys() {
                 total_key_cache
@@ -166,57 +236,14 @@ pub fn run_splice_aware(
                 .collect()
         };
 
-        // QC on total counts
         let total_out = crate::pipeline_util::BackendOutputPath::new(
             &args.output,
             batch_name,
             backend,
             args.zip,
         );
-        let total_file = total_out.write_path.clone();
-        info!("writing total counts to {}", total_file);
-        format_data_triplets(total_triplets)
-            .to_backend(&total_file)?
-            .qc(cutoffs.clone())?;
-
-        // Read back surviving genes and cells from total counts QC
-        let total_data = open_sparse_matrix(&total_file, backend)?;
-        let qc_row_names = total_data.row_names()?;
-        let qc_col_names = total_data.column_names()?;
-        info!(
-            "after Q/C on total counts: {} genes x {} cells",
-            qc_row_names.len(),
-            qc_col_names.len()
-        );
-
-        // Build index maps for the QC-passing names
-        // Map total row names back to spliced/unspliced feature names
-        let qc_gene_keys: rustc_hash::FxHashSet<Box<str>> = qc_row_names
-            .iter()
-            .map(|name| extract_gene_key(name).into())
-            .collect();
-
-        let qc_cells: rustc_hash::FxHashSet<CellBarcode> = qc_col_names
-            .iter()
-            .map(|name| CellBarcode::Barcode(std::sync::Arc::from(name.as_ref())))
-            .collect();
-
-        // Filter spliced/unspliced triplets to QC-passing genes and cells.
-        let filter_triplets = |triplets: Vec<(CellBarcode, Box<str>, f32)>| -> Vec<_> {
-            use rayon::prelude::*;
-            triplets
-                .into_par_iter()
-                .filter(|(cb, feat, _)| {
-                    let gene_key: &str = extract_gene_key(feat);
-                    qc_gene_keys.contains(gene_key) && qc_cells.contains(cb)
-                })
-                .collect()
-        };
-
-        let (spliced_triplets, unspliced_triplets) = rayon::join(
-            || filter_triplets(spliced_triplets),
-            || filter_triplets(unspliced_triplets),
-        );
+        format_data_triplets(total_triplets).to_backend(&total_out.write_path)?;
+        info!("wrote total counts to {}", total_out.target_path);
 
         // Use shared names from QC-passing set for consistent dimensions
         let UnionNames {
@@ -280,9 +307,11 @@ pub fn run_splice_aware(
         // dropped by the time we zip.
         spliced_out.finalize()?;
         unspliced_out.finalize()?;
-        drop(total_data);
         total_out.finalize()?;
     }
+
+    // Pooled retained genes (shared vocabulary) for --valid-genes reuse.
+    crate::pipeline_util::write_qc_genes(&args.output, &all_gene_ids)?;
 
     Ok(())
 }

@@ -11,7 +11,7 @@ use crate::editing::pipeline::{
     find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams,
 };
 use crate::editing::sifter::ModificationType;
-use crate::pipeline_util::{check_all_bam_indices, run_gene_count_qc};
+use crate::pipeline_util::{check_all_bam_indices, resolve_modality_gene_qc, GeneQcRequest};
 use crate::snp::io::load_snp_mask_from_parquet;
 
 use genomic_data::gff::GeneType as GffGeneType;
@@ -494,6 +494,20 @@ pub struct DartSeqCountArgs {
     )]
     pub skip_gene_qc: bool,
 
+    #[command(flatten)]
+    pub cell_qc: crate::cell_qc::CellQcArgs,
+
+    /// Reuse a per-batch cell set from `faba genes` instead of recomputing QC
+    #[arg(
+        long = "valid-cells",
+        help = "Directory of `faba genes` outputs ({batch}_cells.tsv.gz) to reuse"
+    )]
+    pub valid_cells_file: Option<Box<str>>,
+
+    /// Reuse the retained-gene set from `faba genes` ({batch}_genes_kept.tsv.gz)
+    #[arg(long = "valid-genes")]
+    pub valid_genes_file: Option<Box<str>>,
+
     #[arg(
         long = "umi-tag",
         default_value = "UB",
@@ -622,27 +636,28 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Gene expression QC: filter to expressed genes and valid cells
-    let gene_qc = if !args.skip_gene_qc {
-        let qc = run_gene_count_qc(
-            &args.gff_file,
-            &args.wt_bam_files,
-            &args.cell_barcode_tag,
-            &args.gene_barcode_tag,
-            args.gene_min_cells,
-            args.gene_min_counts,
-            args.cell_min_genes,
-        )?;
-        gff_map.retain_by_ids(&qc.gene_ids);
-        info!("After gene QC: {} genes retained", gff_map.len());
-        if gff_map.is_empty() {
-            info!("no genes passed QC");
-            return Ok(());
-        }
-        Some(qc)
-    } else {
-        None
-    };
+    // Gene expression QC: reuse a passed cell/gene set from `faba genes`, or
+    // recompute it (per-batch cell calling).
+    let gene_qc = resolve_modality_gene_qc(
+        &mut gff_map,
+        &GeneQcRequest {
+            bam_files: &args.wt_bam_files,
+            cell_barcode_tag: &args.cell_barcode_tag,
+            gene_barcode_tag: &args.gene_barcode_tag,
+            gff_file: Some(&args.gff_file),
+            gene_min_cells: args.gene_min_cells,
+            gene_min_counts: args.gene_min_counts,
+            cell_min_genes: args.cell_min_genes,
+            cell_call: args.cell_qc.params(),
+            valid_cells_file: args.valid_cells_file.as_deref(),
+            valid_genes_file: args.valid_genes_file.as_deref(),
+            skip_gene_qc: args.skip_gene_qc,
+        },
+    )?;
+    if gene_qc.is_some() && gff_map.is_empty() {
+        info!("no genes passed QC");
+        return Ok(());
+    }
 
     // Load cell membership: from file, from clustering, or none
     let membership = if let Some(ref path) = args.cell_membership_file {
@@ -765,7 +780,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     if args.output_bed_file {
         process_all_bam_files_to_bed(&m6a_params, &gene_sites, &gff_map, args.output_cell_types)?;
     } else {
-        let valid_cells = gene_qc.as_ref().map(|qc| &qc.cell_barcodes);
+        let valid_cells = gene_qc.as_ref().map(|qc| &qc.cells_by_batch);
         process_all_bam_files_to_backend(&m6a_params, &gene_sites, &gff_map, valid_cells)?;
     }
 
@@ -773,7 +788,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     if let Some((Some(ref atoi_sites), _)) = atoi_mask {
         if !atoi_sites.is_empty() {
             info!("Second pass: A-to-I count matrix");
-            let valid_cells = gene_qc.as_ref().map(|qc| &qc.cell_barcodes);
+            let valid_cells = gene_qc.as_ref().map(|qc| &qc.cells_by_batch);
             process_all_bam_files_to_backend(&atoi_params, atoi_sites, &gff_map, valid_cells)?;
         }
     }
@@ -788,7 +803,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             drop_single_component: args.drop_single_component,
             ..Default::default()
         };
-        let valid_cells = gene_qc.as_ref().map(|qc| &qc.cell_barcodes);
+        let valid_cells = gene_qc.as_ref().map(|qc| &qc.cells_by_batch);
         run_mixture_model(&m6a_params, &gene_sites, &gff_map, &mix_params, valid_cells)?;
     }
 

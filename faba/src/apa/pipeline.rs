@@ -417,10 +417,16 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
 
     info!("collected {} cell-site counts", all_counts.len());
 
-    // Filter to QC-passing cells from gene count step
+    // Filter to QC-passing cells from gene count step. Each count carries its
+    // batch index, so it is checked against that batch's own called cell set
+    // (per-library knee); batches without a passed set are left unfiltered.
     if let Some(ref valid_cells) = args.valid_cell_barcodes {
+        let batch_names = uniq_batch_names(&args.bam_files)?;
         let before = all_counts.len();
-        all_counts.retain(|c| valid_cells.contains(&c.cell_barcode));
+        all_counts.retain(|c| match valid_cells.get(&batch_names[c.batch as usize]) {
+            Some(set) => set.contains(&c.cell_barcode),
+            None => true,
+        });
         info!(
             "filtered to QC-passing cells: {} -> {} counts",
             before,

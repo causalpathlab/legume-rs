@@ -27,7 +27,7 @@ pub fn run_mixture_model(
     gene_sites: &HashMap<GeneId, Vec<ConversionSite>>,
     gff_map: &GffRecordMap,
     mixture_params: &crate::editing::mixture::MixtureParams,
-    valid_cells: Option<&rustc_hash::FxHashSet<CellBarcode>>,
+    valid_cells: Option<&rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>>>,
 ) -> anyhow::Result<()> {
     use crate::editing::mixture::{
         fit_gene_mixture, MixtureComponentAnnotation, WeightedObservation,
@@ -43,13 +43,15 @@ pub fn run_mixture_model(
 
     let mut fit_stats: Vec<(usize, CellBarcode, BedWithGene, ConversionData)> = Vec::new();
     for (batch_idx, bam_file) in params.wt_bam_files.iter().enumerate() {
+        // Filter each batch by its own per-library called cell set.
+        let batch_valid_cells = valid_cells.and_then(|m| m.get(&batch_names[batch_idx]));
         let stats = gather_conversion_stats(
             gene_sites,
             params,
             gff_map,
             bam_file,
             membership.as_ref(),
-            valid_cells,
+            batch_valid_cells,
         )?;
         fit_stats.extend(
             stats

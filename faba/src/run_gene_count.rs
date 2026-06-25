@@ -87,6 +87,9 @@ pub struct GeneCountArgs {
     )]
     pub(crate) column_nnz_cutoff: usize,
 
+    #[command(flatten)]
+    pub(crate) cell_qc: crate::cell_qc::CellQcArgs,
+
     /// Sparse matrix output backend
     #[arg(
         long,

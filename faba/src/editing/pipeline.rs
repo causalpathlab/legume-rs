@@ -662,7 +662,9 @@ pub fn process_all_bam_files_to_backend(
     params: &ConversionParams,
     gene_sites: &HashMap<GeneId, Vec<ConversionSite>>,
     gff_map: &GffRecordMap,
-    valid_cell_barcodes: Option<&rustc_hash::FxHashSet<CellBarcode>>,
+    valid_cell_barcodes: Option<
+        &rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>>,
+    >,
 ) -> anyhow::Result<()> {
     let membership = params.load_membership()?;
 
@@ -734,7 +736,8 @@ struct BamProcessContext<'a, SK: Fn(&BedWithGene) -> Box<str> + Send + Sync> {
     site_key: &'a SK,
     cutoffs: &'a SqueezeCutoffs,
     cell_membership: Option<&'a CellMembership>,
-    valid_cell_barcodes: Option<&'a rustc_hash::FxHashSet<CellBarcode>>,
+    valid_cell_barcodes:
+        Option<&'a rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>>>,
 }
 
 fn process_bam_to_backend(
@@ -753,13 +756,16 @@ fn process_bam_to_backend(
         bam_file
     );
 
+    // Each batch is filtered by ITS OWN called cell set (per-library knee).
+    let batch_valid_cells = ctx.valid_cell_barcodes.and_then(|m| m.get(batch_name));
+
     let stats = gather_conversion_stats(
         ctx.gene_sites,
         ctx.params,
         ctx.gff_map,
         bam_file,
         ctx.cell_membership,
-        ctx.valid_cell_barcodes,
+        batch_valid_cells,
     )?;
 
     info!(

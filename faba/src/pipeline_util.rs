@@ -105,9 +105,13 @@ where
 
 // ========== Gene count QC ==========
 
+/// Gene-count QC result. Genes are pooled across batches (a shared feature
+/// vocabulary), but retained cells are kept **per batch** — each BAM is a
+/// separate library with its own cell-calling knee, and the same barcode string
+/// in two libraries denotes different cells, so they must not be unioned.
 pub struct GeneCountQc {
     pub gene_ids: rustc_hash::FxHashSet<GeneId>,
-    pub cell_barcodes: rustc_hash::FxHashSet<CellBarcode>,
+    pub cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>>,
 }
 
 /// Extract gene_key from a feature name like `"GENE_SYM/count/spliced"` → `"GENE_SYM"`.
@@ -127,6 +131,7 @@ pub fn qc_passing_keys(
     gene_min_cells: usize,
     gene_min_counts: usize,
     cell_min_genes: usize,
+    cell_call: &crate::cell_qc::CellCallParams,
 ) -> (
     rustc_hash::FxHashSet<Box<str>>,
     rustc_hash::FxHashSet<CellBarcode>,
@@ -167,11 +172,25 @@ pub fn qc_passing_keys(
         .map(|(gk, _)| Box::from(gk))
         .collect();
 
-    let passing_cells: rustc_hash::FxHashSet<CellBarcode> = cell_nnz
+    // The `cell_min_genes` nnz floor always applies. Beyond it, the cell-calling
+    // policy (OrdMag/EmptyDrops/min-counts) decides which barcodes are real
+    // cells; `Nnz` keeps the raw superset (today's behaviour).
+    let nnz_cells: rustc_hash::FxHashSet<CellBarcode> = cell_nnz
         .into_iter()
         .filter(|(_, n)| *n >= cell_min_genes)
         .map(|(cb, _)| cb.clone())
         .collect();
+
+    let passing_cells: rustc_hash::FxHashSet<CellBarcode> =
+        if cell_call.filter == crate::cell_qc::CellFilter::Nnz {
+            nnz_cells
+        } else {
+            let counts = crate::cell_qc::CellCounts::from_triplets(spliced, unspliced);
+            crate::cell_qc::call_cells(&counts, cell_call)
+                .into_iter()
+                .filter(|cb| nnz_cells.contains(cb))
+                .collect()
+        };
 
     (passing_genes, passing_cells)
 }
@@ -179,6 +198,7 @@ pub fn qc_passing_keys(
 /// Run in-memory gene count QC: count reads per gene (splice-aware),
 /// filter genes by min_cells and cells by min_genes.
 /// Returns passing gene IDs and cell barcodes (no disk output).
+#[allow(clippy::too_many_arguments)]
 pub fn run_gene_count_qc(
     gff_file: &str,
     bam_files: &[Box<str>],
@@ -187,8 +207,11 @@ pub fn run_gene_count_qc(
     gene_min_cells: usize,
     gene_min_counts: usize,
     cell_min_genes: usize,
+    cell_call: &crate::cell_qc::CellCallParams,
 ) -> anyhow::Result<GeneCountQc> {
     info!("=== Gene expression QC ===");
+
+    let batch_names = uniq_batch_names(bam_files)?;
 
     let all_records = read_gff_record_vec(gff_file)?;
     let gene_map = build_gene_map(&all_records, Some(&FeatureType::Gene))?;
@@ -207,10 +230,10 @@ pub fn run_gene_count_qc(
         .collect();
 
     let mut expressed_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
-    let mut valid_cell_barcodes: rustc_hash::FxHashSet<CellBarcode> =
-        rustc_hash::FxHashSet::default();
+    let mut cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>> =
+        rustc_hash::FxHashMap::default();
 
-    for bam_file in bam_files {
+    for (bam_file, batch_name) in bam_files.iter().zip(batch_names.iter()) {
         let njobs = records.len() as u64;
         info!(
             "Counting genes (splice-aware) in {} ({} genes)",
@@ -250,33 +273,189 @@ pub fn run_gene_count_qc(
             gene_min_cells,
             gene_min_counts,
             cell_min_genes,
+            cell_call,
         );
 
         info!(
-            "{} genes, {} cells passed QC",
+            "{}: {} genes, {} cells passed QC",
+            batch_name,
             passing_genes.len(),
             passing_cells.len()
         );
 
-        // Map passing gene keys back to GeneIds
+        // Map passing gene keys back to GeneIds (pooled across batches)
         for gene_key in &passing_genes {
             if let Some(gene_id) = gene_key_to_id.get(gene_key) {
                 expressed_gene_ids.insert(gene_id.clone());
             }
         }
 
-        valid_cell_barcodes.extend(passing_cells);
+        cells_by_batch.insert(batch_name.clone(), passing_cells);
     }
 
+    let total_cells: usize = cells_by_batch.values().map(|s| s.len()).sum();
     info!(
         "Gene QC summary: {} genes, {} cells passed across {} BAM files",
         expressed_gene_ids.len(),
-        valid_cell_barcodes.len(),
+        total_cells,
         bam_files.len()
     );
 
     Ok(GeneCountQc {
         gene_ids: expressed_gene_ids,
-        cell_barcodes: valid_cell_barcodes,
+        cells_by_batch,
     })
+}
+
+/// Inputs for [`resolve_gene_qc`]. Each modality runner builds one from its own
+/// args struct (the field names differ — e.g. apa's `gff_file` is optional and
+/// m6a counts over `wt_bam_files`), then the resolution logic is shared.
+pub struct GeneQcRequest<'a> {
+    pub bam_files: &'a [Box<str>],
+    pub cell_barcode_tag: &'a str,
+    pub gene_barcode_tag: &'a str,
+    /// GFF for the recompute path; `None` skips recompute (reuse can still run).
+    pub gff_file: Option<&'a str>,
+    pub gene_min_cells: usize,
+    pub gene_min_counts: usize,
+    pub cell_min_genes: usize,
+    pub cell_call: crate::cell_qc::CellCallParams,
+    pub valid_cells_file: Option<&'a str>,
+    pub valid_genes_file: Option<&'a str>,
+    pub skip_gene_qc: bool,
+}
+
+/// Resolve a modality's gene-expression QC: reuse a passed per-batch cell set
+/// (`--valid-cells` + optional `--valid-genes`) written by `faba genes`, or
+/// recompute it in memory (per-batch cell calling). Returns `None` when QC is
+/// skipped. **Convention:** an empty `gene_ids` means "no gene-level filter"
+/// (e.g. `--valid-cells` without `--valid-genes`) — callers must treat it as
+/// "keep all genes", not "filter to nothing". Does NOT mutate any gff/UTR
+/// structure; the caller applies the gene set however it filters.
+pub fn resolve_gene_qc(req: &GeneQcRequest) -> anyhow::Result<Option<GeneCountQc>> {
+    if let Some(dir) = req.valid_cells_file {
+        let batch_names = uniq_batch_names(req.bam_files)?;
+        let cells_by_batch = load_valid_cells_dir(dir, &batch_names)?;
+        let gene_ids = match req.valid_genes_file {
+            Some(gf) => load_valid_genes(gf)?,
+            None => rustc_hash::FxHashSet::default(),
+        };
+        Ok(Some(GeneCountQc {
+            gene_ids,
+            cells_by_batch,
+        }))
+    } else if !req.skip_gene_qc {
+        match req.gff_file {
+            Some(gff_file) => Ok(Some(run_gene_count_qc(
+                gff_file,
+                req.bam_files,
+                req.cell_barcode_tag,
+                req.gene_barcode_tag,
+                req.gene_min_cells,
+                req.gene_min_counts,
+                req.cell_min_genes,
+                &req.cell_call,
+            )?)),
+            None => Ok(None),
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+/// [`resolve_gene_qc`] plus the gff-map retain that `run_atoi` / `run_m6a` need.
+/// Retains `gff_map` to the QC-passing genes when a gene filter is present (a
+/// non-empty `gene_ids`); an empty set leaves the gff untouched (keep all).
+pub fn resolve_modality_gene_qc(
+    gff_map: &mut GffRecordMap,
+    req: &GeneQcRequest,
+) -> anyhow::Result<Option<GeneCountQc>> {
+    let qc = resolve_gene_qc(req)?;
+    if let Some(ref qc) = qc {
+        if !qc.gene_ids.is_empty() {
+            gff_map.retain_by_ids(&qc.gene_ids);
+            info!("After gene QC: {} genes retained", gff_map.len());
+        }
+    }
+    Ok(qc)
+}
+
+/// Write a batch's retained cell barcodes to `{dir}/{batch}_cells.tsv.gz`
+/// (one barcode per line) — the passable artifact consumed by
+/// [`load_valid_cells_dir`].
+pub fn write_qc_cells(
+    dir: &str,
+    batch_name: &str,
+    cells: &rustc_hash::FxHashSet<CellBarcode>,
+) -> anyhow::Result<()> {
+    let mut lines: Vec<Box<str>> = cells
+        .iter()
+        .map(|c| c.to_string().into_boxed_str())
+        .collect();
+    lines.sort();
+    let path = format!("{}/{}_cells.tsv.gz", dir, batch_name);
+    write_lines(&lines, &path)?;
+    info!("wrote {} retained cells to {}", lines.len(), path);
+    Ok(())
+}
+
+/// Write the retained gene ids to `{dir}/genes_kept.tsv.gz` (one id per line) —
+/// the passable artifact consumed by [`load_valid_genes`]. Genes are a shared
+/// vocabulary, so this is a single pooled file (not per batch).
+pub fn write_qc_genes(dir: &str, gene_ids: &rustc_hash::FxHashSet<GeneId>) -> anyhow::Result<()> {
+    let mut lines: Vec<Box<str>> = gene_ids
+        .iter()
+        .map(|g| g.to_string().into_boxed_str())
+        .collect();
+    lines.sort();
+    let path = format!("{}/genes_kept.tsv.gz", dir);
+    write_lines(&lines, &path)?;
+    info!("wrote {} retained genes to {}", lines.len(), path);
+    Ok(())
+}
+
+/// Load a per-batch valid-cell set written by `faba genes` (one
+/// `{batch}_cells.tsv.gz` per batch, one barcode per line) from `dir`. Missing
+/// per-batch files are warned and skipped (that batch goes unfiltered).
+pub fn load_valid_cells_dir(
+    dir: &str,
+    batch_names: &[Box<str>],
+) -> anyhow::Result<rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>>> {
+    let mut out: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>> =
+        rustc_hash::FxHashMap::default();
+    for batch in batch_names {
+        let path = format!("{}/{}_cells.tsv.gz", dir, batch);
+        if !std::path::Path::new(&path).exists() {
+            log::warn!(
+                "--valid-cells: no file for batch '{}' ({}); not filtered",
+                batch,
+                path
+            );
+            continue;
+        }
+        let cells: rustc_hash::FxHashSet<CellBarcode> = read_lines(&path)?
+            .into_iter()
+            .filter(|s| s.as_ref() != ".")
+            .map(|s| CellBarcode::Barcode(std::sync::Arc::from(s.as_ref())))
+            .collect();
+        info!(
+            "--valid-cells: loaded {} cells for batch '{}'",
+            cells.len(),
+            batch
+        );
+        out.insert(batch.clone(), cells);
+    }
+    Ok(out)
+}
+
+/// Load a retained-gene set written by `faba genes` (`{batch}_genes_kept.tsv.gz`,
+/// one gene id per line). Genes are shared across batches, so a single file is read.
+pub fn load_valid_genes(path: &str) -> anyhow::Result<rustc_hash::FxHashSet<GeneId>> {
+    let genes: rustc_hash::FxHashSet<GeneId> = read_lines(path)?
+        .into_iter()
+        .filter(|s| s.as_ref() != ".")
+        .map(|s| GeneId::Ensembl(s.as_ref().into()))
+        .collect();
+    info!("--valid-genes: loaded {} genes from {}", genes.len(), path);
+    Ok(genes)
 }
