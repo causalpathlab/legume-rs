@@ -490,7 +490,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     } else {
         info!(
             "Done — {out}.{{feature_embedding,cell_embedding,latent,topic_embedding}}.parquet. \
-             Next: `senna annotate-by-projection --from {out}.senna.json --markers <markers.tsv>`."
+             Next: `senna annotate-by-enrichment --from {out}.senna.json --markers <markers.tsv>`."
         );
     }
     Ok(())

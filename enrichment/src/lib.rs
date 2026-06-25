@@ -13,7 +13,7 @@ pub mod es;
 pub mod fdr;
 pub mod markers;
 pub mod null;
-pub mod ontology_ora;
+pub mod ontology_enrich;
 pub mod orchestrate;
 pub mod q_matrix;
 pub mod specificity;
@@ -21,7 +21,7 @@ pub mod specificity;
 pub use cellproj::{label_cells, LabelWithConfidence};
 pub use es::{rank_descending, weighted_ks_es};
 pub use fdr::bh_fdr;
-pub use ontology_ora::{ontology_ora, OntologyOraConfig, OntologyOraOutputs};
+pub use ontology_enrich::{ontology_module_score, OntologyModuleScore};
 pub use orchestrate::{annotate, AnnotateConfig, AnnotateOutputs, GroupInputs};
 pub use specificity::{compute_specificity, SpecificityMode};
 

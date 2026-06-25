@@ -161,13 +161,21 @@ pub fn load_from_manifest(
     let (batch_labels, n_batches) = build_batch_labels(&stack, n_cells)?;
     log::info!("Batches: {n_batches}");
 
-    // Markers aligned to data row order.
-    let annot = build_annotation_matrix(markers_path, &gene_names)?;
-    log::info!(
-        "Marker matrix: {} genes × {} celltypes",
-        annot.membership_ga.nrows(),
-        annot.membership_ga.ncols()
-    );
+    // Markers aligned to data row order. Optional: GO/GMT ontology mode supplies
+    // gene-sets instead of a curated marker TSV, so an empty path yields an empty
+    // marker matrix (the marker-enrichment path is skipped by the caller).
+    let (markers_gc, celltype_names) = if markers_path.is_empty() {
+        log::info!("No marker TSV (ontology gene-set mode); skipping marker matrix");
+        (Mat::zeros(gene_names.len(), 0), Vec::new())
+    } else {
+        let annot = build_annotation_matrix(markers_path, &gene_names)?;
+        log::info!(
+            "Marker matrix: {} genes × {} celltypes",
+            annot.membership_ga.nrows(),
+            annot.membership_ga.ncols()
+        );
+        (annot.membership_ga, annot.annot_names)
+    };
 
     Ok((
         LoadedInputs {
@@ -178,8 +186,8 @@ pub fn load_from_manifest(
             n_batches,
             gene_names,
             cell_names,
-            markers_gc: annot.membership_ga,
-            celltype_names: annot.annot_names,
+            markers_gc,
+            celltype_names,
         },
         manifest,
         manifest_dir,

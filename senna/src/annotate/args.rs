@@ -65,12 +65,50 @@ pub struct AnnotateArgs {
     #[arg(
         short = 'm',
         long = "markers",
-        required = true,
-        help = "Marker-gene TSV: `gene<TAB>celltype` per line",
+        default_value = "",
+        help = "Marker-gene TSV: `gene<TAB>celltype` per line (one of --markers/--gaf/--gmt)",
         long_help = "Marker-gene TSV: `gene<TAB>celltype` per line. Flexible delimiter\n\
-                     (tab / comma / space). Symbol / alias matching via `flexible_gene_match`."
+                     (tab / comma / space). Symbol / alias matching via `flexible_gene_match`.\n\
+                     Exactly one gene-set source is required: --markers (curated cell-type\n\
+                     markers), --gaf (GO annotations), or --gmt (MSigDB gene-sets)."
     )]
     pub markers: Box<str>,
+
+    #[arg(
+        long = "gaf",
+        help = "GO annotation file (.gaf/.gaf.gz). Ontology mode: score each term as a \
+                cross-cluster-contrasted module score on the cluster profile → per-cluster \
+                signature ({out}.ontology_signature.tsv). --obo supplies term names."
+    )]
+    pub gaf: Option<Box<str>>,
+
+    #[arg(
+        long = "gmt",
+        help = "MSigDB GMT gene-sets (`term<TAB>desc<TAB>genes…`). Ontology mode (as --gaf)"
+    )]
+    pub gmt: Option<Box<str>>,
+
+    #[arg(
+        long = "no-iea",
+        default_value_t = false,
+        help = "GAF only: drop IEA (electronic) annotations — the low-confidence bulk"
+    )]
+    pub no_iea: bool,
+
+    #[arg(
+        long = "min-gene-set",
+        default_value_t = 15,
+        help = "Ontology mode: minimum matched members for a term to be scored"
+    )]
+    pub min_gene_set: usize,
+
+    #[arg(
+        long = "max-gene-set",
+        default_value_t = 500,
+        help = "Ontology mode: maximum matched members (size window; excludes \
+                near-universal terms)"
+    )]
+    pub max_gene_set: usize,
 
     #[arg(
         short = 'o',

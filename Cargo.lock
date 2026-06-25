@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "enrichment"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "approx",
@@ -5073,7 +5073,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.6.8"
+version = "0.6.11"
 dependencies = [
  "anyhow",
  "approx",

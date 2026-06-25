@@ -274,6 +274,10 @@ impl GeneSets {
     }
 }
 
+/// Below this matched-gene fraction, [`Reconciled::log_coverage`] warns rather
+/// than logs at info — a thin overlap silently produces no enrichment.
+const COVERAGE_WARN_FRAC: f32 = 0.5;
+
 impl Reconciled {
     /// Fraction of source genes matched to the dictionary.
     #[must_use]
@@ -304,7 +308,7 @@ impl Reconciled {
             self.n_terms_total,
             self.n_memberships(),
         );
-        if frac < 0.5 {
+        if frac < COVERAGE_WARN_FRAC {
             log::warn!("{msg}");
         } else {
             log::info!("{msg}");
