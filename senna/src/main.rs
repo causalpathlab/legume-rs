@@ -64,10 +64,7 @@ mod topic;
 mod tree_layout;
 mod vae;
 
-use annotate::{
-    annotate_by_enrichment, annotate_by_projection, annotate_ontology, AnnotateArgs,
-    AnnotateOntologyArgs, AnnotateProjectArgs,
-};
+use annotate::{annotate_by_enrichment, annotate_ontology, AnnotateArgs, AnnotateOntologyArgs};
 use bge::{fit_bge, BgeArgs};
 use clustering::*;
 use embed_common::*;
@@ -306,10 +303,9 @@ enum Commands {
                       genes, topics, and cells coexist:\n  \n  \
                       score(cell c, gene g) = (θ_c·α)·ρ_g + b_g\n  \n\
                       Writes {out}.{feature_embedding,cell_embedding,latent,topic_embedding}\
-                      .parquet + senna.json (kind=resolve-embedding-space), so \
-                      `senna annotate-by-projection --from {out}.senna.json` can annotate by \
-                      projecting markers into the shared space — which a raw topic run \
-                      cannot do. H defaults to K but may exceed it."
+                      .parquet + senna.json (kind=resolve-embedding-space), a metric H-space \
+                      where genes, topics and cells coexist (e.g. for downstream clustering / \
+                      `senna annotate-by-enrichment`). H defaults to K but may exceed it."
     )]
     ResolveEmbeddingSpace(RestArgs),
 
@@ -368,23 +364,6 @@ enum Commands {
                       Writes {out}.argmax.tsv, {out}.annotation.parquet, {out}.cluster_*.parquet."
     )]
     Annotate(AnnotateArgs),
-
-    #[command(
-        name = "annotate-by-projection",
-        visible_aliases = ["ann-by-proj", "annot-by-proj"],
-        about = "Light cell-type annotation by marker projection (embedding runs).",
-        long_about = "Projection-based complement to `senna annotate-by-enrichment`: embeds\n\
-                      each marker-defined cell type as the L2-normalized centroid of its\n\
-                      marker feature embeddings (the H-space the cells live in), then\n\
-                      cosine-scores every cell → per-cell soft posterior. Per-cell,\n\
-                      clustering-free; a permutation null (random gene sets) gives\n\
-                      null-standardized z-scores (p = pnorm(-z)).\n\n\
-                      Reads `outputs.feature_embedding` + `outputs.latent` from a\n\
-                      bge / fne / resolve-embedding-space `run.senna.json`.\n\n\
-                      Usage: senna annotate-by-projection --from run.senna.json -m markers.tsv\n\n\
-                      Writes {out}.{kind}_annot.{posterior,zscore,type_embedding}.parquet."
-    )]
-    AnnotateProject(AnnotateProjectArgs),
 
     #[command(
         name = "annotate-ontology",
@@ -534,9 +513,6 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Annotate(args) => {
             annotate_by_enrichment(args)?;
-        }
-        Commands::AnnotateProject(args) => {
-            annotate_by_projection(args)?;
         }
         Commands::AnnotateOntology(args) => {
             annotate_ontology(args)?;

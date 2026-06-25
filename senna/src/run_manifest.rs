@@ -279,6 +279,15 @@ pub struct RunAnnotate {
     /// soft mass (Σ descendant-leaf Q) for visualization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ontology_node_mass: Option<String>,
+    /// `{annotate_out}.ontology_signature.tsv` — per-cluster GO/GMT signature
+    /// (top terms by cross-cluster-contrasted module-score effect). Written by
+    /// the `--gaf/--gmt` gene-set mode (distinct from the CL TreeBH assignment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ontology_signature: Option<String>,
+    /// `{annotate_out}.ontology_term_effect.parquet` — nClusters × nTerms
+    /// contrasted module-score effect backing the GO/GMT signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ontology_term_effect: Option<String>,
 }
 
 /// Paths to artifacts produced by `senna pseudotime`. Populated when the

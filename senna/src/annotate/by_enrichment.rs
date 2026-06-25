@@ -6,7 +6,9 @@ use super::finalize::{
     clean_outputs, finalize_annotation, AnnotationArtifacts, ENRICHMENT_OUTPUT_SUFFIXES,
 };
 use super::inputs::{load_from_manifest, LeidenArgs};
-use crate::cluster_aggregation::{accumulate_gene_sum_pair, weighted_mean_profile};
+use crate::cluster_aggregation::{
+    accumulate_gene_sum, accumulate_gene_sum_pair, weighted_mean_profile,
+};
 use crate::embed_common::{axis_id_names, Mat};
 use crate::run_manifest;
 use data_beans_alg::gene_weighting::{compute_nb_fisher_weights, load_fisher_weights};
@@ -23,11 +25,38 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         None => crate::run_manifest::derive_out_prefix(&args.from).into_boxed_str(),
     };
     mkdir_parent(&out)?;
+    // Exactly one gene-set source. --markers → curated cell-type annotation
+    // (+ optional inline CL ontology via --obo/--label-cl); --gaf/--gmt → ontology
+    // gene-set mode (cross-cluster-contrasted module-score signature per cluster).
+    let ontology_mode = args.gaf.is_some() || args.gmt.is_some();
+    let n_sources = [
+        !args.markers.is_empty(),
+        args.gaf.is_some(),
+        args.gmt.is_some(),
+    ]
+    .iter()
+    .filter(|&&x| x)
+    .count();
     anyhow::ensure!(
-        args.obo.is_some() == args.label_cl.is_some(),
-        "--obo and --label-cl must be given together to run inline ontology annotation \
-         (got only one); omit both to skip it"
+        n_sources == 1,
+        "exactly one gene-set source required: --markers, --gaf, or --gmt (got {n_sources})"
     );
+    if ontology_mode {
+        anyhow::ensure!(
+            args.obo.is_some(),
+            "--gaf/--gmt require --obo (resolves GO term ids to names in the signature)"
+        );
+        anyhow::ensure!(
+            args.label_cl.is_none(),
+            "--label-cl is for --markers (curated CL); GO/GMT term ids are ontology ids already"
+        );
+    } else {
+        anyhow::ensure!(
+            args.obo.is_some() == args.label_cl.is_some(),
+            "--obo and --label-cl must be given together to run inline ontology annotation \
+             (got only one); omit both to skip it"
+        );
+    }
     if !args.no_clean {
         clean_outputs(&out, ENRICHMENT_OUTPUT_SUFFIXES);
     }
@@ -87,26 +116,43 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         w_sum / nb_fisher.len() as f32
     );
 
-    // ----- Fused per-cluster + per-batch gene sums (single zarr sweep) -----
+    // ----- Per-cluster gene sums -----
+    // The marker path additionally needs a per-batch axis (its sample-
+    // permutation null), accumulated in the same fused sweep. The GO/GMT
+    // ontology path scores the per-cluster profile directly, so it needs only
+    // the cluster sums.
     let g = loaded.gene_names.len();
     let n_clusters = loaded.n_clusters;
     let n_batches = loaded.n_batches;
     let batch_labels_usize: Vec<usize> = loaded.batch_labels.iter().map(|&b| b as usize).collect();
-    let (gene_sum_kg, gene_sum_pg) = accumulate_gene_sum_pair(
-        loaded.data_vec(),
-        &loaded.cluster_labels,
-        n_clusters,
-        &batch_labels_usize,
-        n_batches,
-        g,
-        args.block_size,
-    )?;
+    let (gene_sum_kg, gene_sum_b_opt): (Vec<f64>, Option<Vec<f64>>) = if ontology_mode {
+        (
+            accumulate_gene_sum(
+                loaded.data_vec(),
+                &loaded.cluster_labels,
+                n_clusters,
+                g,
+                args.block_size,
+            )?,
+            None,
+        )
+    } else {
+        let (kg, b) = accumulate_gene_sum_pair(
+            loaded.data_vec(),
+            &loaded.cluster_labels,
+            n_clusters,
+            &batch_labels_usize,
+            n_batches,
+            g,
+            args.block_size,
+        )?;
+        (kg, Some(b))
+    };
 
     // μ[g, c] = w_NBF[g] · (Σ counts[g, n ∈ c]) / size_sum[c]; Simplex
     // specificity downstream supplies the cross-cluster housekeeping
     // suppression.
     let profile_gk = weighted_mean_profile(&gene_sum_kg, n_clusters, g, &nb_fisher);
-    let pb_gene_gp = weighted_mean_profile(&gene_sum_pg, n_batches, g, &nb_fisher);
     let cluster_names = axis_id_names("K", n_clusters);
     info!("Cluster expression: {g} genes × {n_clusters} clusters");
     let profile_max = profile_gk.iter().fold(0f32, |m, &v| m.max(v));
@@ -117,6 +163,24 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
              data backend, or that the manifest's `clusters` path resolves correctly."
         );
     }
+
+    // ----- GO/GMT ontology gene-set mode -----
+    // Descriptive module-score signature on the cluster profile (no cell-level
+    // labels, no permutation, no tree). Diverges from the marker path entirely.
+    if ontology_mode {
+        return run_ontology_gene_sets(
+            args,
+            &out,
+            &profile_gk,
+            &loaded.gene_names,
+            &cluster_names,
+            &mut manifest,
+            &manifest_dir,
+        );
+    }
+
+    // marker path: the second axis was per-batch.
+    let gene_sum_pg = gene_sum_b_opt.expect("marker path accumulates the per-batch axis");
 
     // pb_membership[batch, cluster] = (# cells in batch with cluster id) / batch_size.
     let pb_membership_pk = build_pb_membership(
@@ -145,6 +209,9 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         apply_empirical_specificity_weights(&mut markers_gc, &profile_gk);
     }
 
+    // Per-batch β̃ profile — only the marker (sample-permutation) path needs it,
+    // so it's built after the GO/GMT early-return above.
+    let pb_gene_gp = weighted_mean_profile(&gene_sum_pg, n_batches, g, &nb_fisher);
     let group = GroupInputs {
         profile_gk: profile_gk.clone(),
         pb_gene_gp,
@@ -321,6 +388,82 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     )?;
 
     info!("senna annotate-by-enrichment complete");
+    Ok(())
+}
+
+/// GO/GMT ontology gene-set mode: read gene-sets → reconcile to the run's gene
+/// dictionary (+ coverage gate) → descriptive module-score signature on the
+/// cluster profile. No cell-level labels (GO terms aren't cell types); writes
+/// the cluster profile + the per-cluster signature and its `K × T` effect matrix.
+fn run_ontology_gene_sets(
+    args: &AnnotateArgs,
+    out: &str,
+    profile_gk: &Mat,
+    gene_names: &[Box<str>],
+    cluster_names: &[Box<str>],
+    manifest: &mut crate::run_manifest::RunManifest,
+    manifest_dir: &Path,
+) -> anyhow::Result<()> {
+    use enrichment::ontology_module_score;
+
+    let obo = args
+        .obo
+        .as_deref()
+        .expect("ontology mode validated to require --obo");
+    let gs = super::go_signature::load_go_gene_sets(
+        obo,
+        args.gaf.as_deref(),
+        args.gmt.as_deref(),
+        args.no_iea,
+        args.min_gene_set,
+        args.max_gene_set,
+        gene_names,
+    )?;
+
+    // ----- Descriptive module-score signature (the GO/GMT scorer) -----
+    // Per (cluster, term): mean_in − mean_out of log1p(CP10K) on the cluster
+    // profile, cross-cluster-contrasted. The top positive-effect terms per
+    // cluster ARE the GO signature. This plain effect-size ranking recovers
+    // cluster lineage (T-cell, cell-cycle, erythroid, …) more cleanly than a
+    // permutation-z + TreeBH walk, whose ÷sd reweighting rewards small,
+    // stable-null terms and whose depth preference descends to narrow processes.
+    let ms = ontology_module_score(profile_gk, &gs.terms, &gs.universe)?;
+
+    let cell_expr_path = format!("{out}.cluster_expression.parquet");
+    profile_gk.to_parquet_with_names(
+        &cell_expr_path,
+        (Some(gene_names), Some("gene")),
+        Some(cluster_names),
+    )?;
+    info!("wrote {cell_expr_path}");
+
+    let sig_path = format!("{out}.ontology_signature.tsv");
+    super::go_signature::write_go_signature(
+        &sig_path,
+        &gs.onto,
+        &ms.effect_kt,
+        &ms.term_ids,
+        &gs.terms,
+        "cluster",
+        cluster_names,
+    )?;
+    let effect_path = format!("{out}.ontology_term_effect.parquet");
+    ms.effect_kt.to_parquet_with_names(
+        &effect_path,
+        (Some(cluster_names), Some("cluster")),
+        Some(&ms.term_ids),
+    )?;
+    info!("wrote {effect_path}");
+
+    manifest.annotate.cluster_expression =
+        Some(run_manifest::rel_to_manifest(manifest_dir, &cell_expr_path));
+    manifest.annotate.ontology_signature =
+        Some(run_manifest::rel_to_manifest(manifest_dir, &sig_path));
+    manifest.annotate.ontology_term_effect =
+        Some(run_manifest::rel_to_manifest(manifest_dir, &effect_path));
+    manifest.save(Path::new(args.from.as_ref()))?;
+
+    info!("senna annotate-by-enrichment (ontology gene-set mode) complete");
     Ok(())
 }
 
