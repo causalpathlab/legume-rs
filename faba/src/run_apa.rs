@@ -3,7 +3,7 @@ use crate::apa::likelihood::*;
 use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteArgs;
 use crate::data::util_htslib::*;
-use crate::pipeline_util::run_gene_count_qc;
+use crate::pipeline_util::{resolve_gene_qc, GeneQcRequest};
 
 use genomic_data::gff::{FeatureType as GffFeatureType, GeneId, GeneType as GffGeneType};
 use genomic_data::sam::CellBarcode;
@@ -479,9 +479,24 @@ pub struct CountApaArgs {
     #[arg(skip)]
     pub(crate) valid_gene_ids: Option<rustc_hash::FxHashSet<GeneId>>,
 
-    /// Valid cell barcodes from gene count QC (pipeline mode or QC step)
+    /// Per-batch valid cell barcodes from gene count QC (pipeline mode or QC step)
     #[arg(skip)]
-    pub(crate) valid_cell_barcodes: Option<rustc_hash::FxHashSet<CellBarcode>>,
+    pub(crate) valid_cell_barcodes:
+        Option<rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>>>,
+
+    #[command(flatten)]
+    pub(crate) cell_qc: crate::cell_qc::CellQcArgs,
+
+    /// Reuse a per-batch cell set from `faba genes` instead of recomputing QC
+    #[arg(
+        long = "valid-cells",
+        help = "Directory of `faba genes` outputs ({batch}_cells.tsv.gz) to reuse"
+    )]
+    pub(crate) valid_cells_file: Option<Box<str>>,
+
+    /// Reuse the retained-gene set from `faba genes` ({batch}_genes_kept.tsv.gz)
+    #[arg(long = "valid-genes")]
+    pub(crate) valid_genes_file: Option<Box<str>>,
 }
 
 impl CountApaArgs {
@@ -551,30 +566,41 @@ pub fn run_apa(args: &mut CountApaArgs) -> anyhow::Result<()> {
         check_bam_index(bam_file, None)?;
     }
 
-    // Gene expression QC: populate valid_gene_ids and valid_cell_barcodes.
-    // Only mixture mode consumes these fields; running QC for simple mode
-    // would pay the splice-aware scan cost and then discard the result.
-    if !args.skip_gene_qc
-        && args.valid_gene_ids.is_none()
-        && matches!(args.method, ApaMethod::Mixture)
-    {
-        if let Some(ref gff_file) = args.gff_file {
-            let qc = run_gene_count_qc(
-                gff_file,
-                &args.bam_files,
-                &args.cell_barcode_tag,
-                &args.gene_barcode_tag,
-                args.gene_min_cells,
-                args.gene_min_counts,
-                args.cell_min_genes,
-            )?;
+    // Gene expression QC: reuse a passed cell/gene set from `faba genes`, or
+    // recompute it (per-batch cell calling). Only mixture mode consumes these
+    // fields; running QC for simple mode would pay the scan cost and discard it.
+    // `valid_cell_barcodes` is pre-populated in `faba all` pipeline mode, which
+    // skips this block.
+    if args.valid_cell_barcodes.is_none() && matches!(args.method, ApaMethod::Mixture) {
+        let qc = resolve_gene_qc(&GeneQcRequest {
+            bam_files: &args.bam_files,
+            cell_barcode_tag: &args.cell_barcode_tag,
+            gene_barcode_tag: &args.gene_barcode_tag,
+            gff_file: args.gff_file.as_deref(),
+            gene_min_cells: args.gene_min_cells,
+            gene_min_counts: args.gene_min_counts,
+            cell_min_genes: args.cell_min_genes,
+            cell_call: args.cell_qc.params(),
+            valid_cells_file: args.valid_cells_file.as_deref(),
+            valid_genes_file: args.valid_genes_file.as_deref(),
+            // Reuse always runs; only gate the *recompute* on not already
+            // having a gene set passed in.
+            skip_gene_qc: args.skip_gene_qc || args.valid_gene_ids.is_some(),
+        })?;
+        if let Some(qc) = qc {
+            let n_cells: usize = qc.cells_by_batch.values().map(|s| s.len()).sum();
             info!(
-                "After gene QC: {} genes, {} cells retained",
+                "Gene QC: {} genes, {} cells retained",
                 qc.gene_ids.len(),
-                qc.cell_barcodes.len()
+                n_cells
             );
-            args.valid_gene_ids = Some(qc.gene_ids);
-            args.valid_cell_barcodes = Some(qc.cell_barcodes);
+            // Empty gene set = "no gene-level filter": leave `valid_gene_ids`
+            // None so `run_mixture` keeps all UTRs (a `Some(empty)` would
+            // retain nothing and drop every UTR).
+            if !qc.gene_ids.is_empty() {
+                args.valid_gene_ids = Some(qc.gene_ids);
+            }
+            args.valid_cell_barcodes = Some(qc.cells_by_batch);
         }
     }
 

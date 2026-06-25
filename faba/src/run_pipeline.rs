@@ -123,6 +123,9 @@ pub struct PipelineArgs {
     )]
     pub cell_min_genes: usize,
 
+    #[command(flatten)]
+    pub cell_qc: crate::cell_qc::CellQcArgs,
+
     // === ATOI parameters ===
     #[arg(
         long,
@@ -480,8 +483,9 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
         .collect();
 
     let mut expressed_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
-    let mut valid_cell_barcodes: rustc_hash::FxHashSet<CellBarcode> =
-        rustc_hash::FxHashSet::default();
+    let mut cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>> =
+        rustc_hash::FxHashMap::default();
+    let cell_call = args.cell_qc.params();
 
     for (bam_file, batch_name) in all_bam_files.iter().zip(batch_names.iter()) {
         let njobs = records.len() as u64;
@@ -519,13 +523,14 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
             unspliced_triplets.len()
         );
 
-        // In-memory QC on total counts
+        // In-memory QC on total counts (per-batch cell calling)
         let (passing_genes, passing_cells) = qc_passing_keys(
             &spliced_triplets,
             &unspliced_triplets,
             args.gene_min_cells,
             args.gene_min_counts,
             args.cell_min_genes,
+            &cell_call,
         );
 
         info!(
@@ -585,32 +590,39 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
             batch_name, out.target_path
         );
 
-        // Map passing gene keys back to GeneIds
+        // Map passing gene keys back to GeneIds (pooled across batches)
         for gene_key in &passing_genes {
             if let Some(gene_id) = gene_key_to_id.get(gene_key) {
                 expressed_gene_ids.insert(gene_id.clone());
             }
         }
 
-        // Collect QC-passing cell barcodes
-        valid_cell_barcodes.extend(passing_cells);
+        // Write this batch's passable cell set so standalone modality runs can
+        // reuse it via --valid-cells.
+        crate::pipeline_util::write_qc_cells(&args.output, batch_name, &passing_cells)?;
+
+        // Per-batch retained cells (NOT a global union — barcodes collide across libraries)
+        cells_by_batch.insert(batch_name.clone(), passing_cells);
     }
 
+    // Pooled retained genes (shared feature vocabulary) for --valid-genes reuse.
+    crate::pipeline_util::write_qc_genes(&args.output, &expressed_gene_ids)?;
+
+    let total_cells: usize = cells_by_batch.values().map(|s| s.len()).sum();
     info!(
         "Gene filtering: {} genes passed QC across {} BAM files",
         expressed_gene_ids.len(),
         all_bam_files.len()
     );
-
     info!(
         "Cell filtering: {} cells passed QC across {} BAM files",
-        valid_cell_barcodes.len(),
+        total_cells,
         all_bam_files.len()
     );
 
     Ok(Some(GeneCountQc {
         gene_ids: expressed_gene_ids,
-        cell_barcodes: valid_cell_barcodes,
+        cells_by_batch,
     }))
 }
 
@@ -696,7 +708,7 @@ fn run_atoi_step(
 
     // Second pass: quantification per cell across all input samples.
     info!("Quantifying ATOI sites per cell...");
-    let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cell_barcodes);
+    let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cells_by_batch);
     process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, valid_cells)?;
 
     // Mixture model: cluster editing sites per gene
@@ -742,12 +754,13 @@ fn run_apa_step(
     // Extract valid gene IDs and cell barcodes from gene count QC
     let (valid_gene_ids, valid_cell_barcodes) = match gene_count_qc {
         Some(qc) => {
+            let n_cells: usize = qc.cells_by_batch.values().map(|s| s.len()).sum();
             info!(
                 "APA will restrict to {} genes, {} cells",
                 qc.gene_ids.len(),
-                qc.cell_barcodes.len()
+                n_cells
             );
-            (Some(qc.gene_ids.clone()), Some(qc.cell_barcodes.clone()))
+            (Some(qc.gene_ids.clone()), Some(qc.cells_by_batch.clone()))
         }
         None => (None, None),
     };
@@ -800,6 +813,9 @@ fn run_apa_step(
         skip_gene_qc: true, // Pipeline already did gene QC in step 1
         valid_gene_ids,
         valid_cell_barcodes,
+        cell_qc: args.cell_qc.clone(),
+        valid_cells_file: None,
+        valid_genes_file: None,
     };
 
     run_apa(&mut apa_args)?;
@@ -896,7 +912,7 @@ fn run_dart_step(
 
     // Second pass: quantification per cell across all input samples.
     info!("Quantifying m6A sites per cell...");
-    let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cell_barcodes);
+    let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cells_by_batch);
     process_all_bam_files_to_backend(&params, &m6a_sites, &gff_map, valid_cells)?;
 
     // Mixture model: cluster modification sites per gene

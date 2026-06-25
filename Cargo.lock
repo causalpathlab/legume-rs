@@ -1838,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "faba"
-version = "0.5.12"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "approx",
