@@ -147,6 +147,11 @@ pub struct OutputCtx<'a> {
     /// Feature QC masks its empty cluster out of the gene *visualization*; the raw
     /// β_g `gene_base_embedding` and reconstruction params are written in full.
     pub feature_keep: &'a [bool],
+    /// BH-FDR q for the dead-feature prior-score screen on the co-embedding
+    /// (0 = keep every gene). Genes whose β never moved off the N(0,σ²) init are
+    /// dropped from `feature_embedding.parquet` so they can't reach downstream
+    /// analysis; an empty survivor set is a hard error.
+    pub feature_prior_fdr: f32,
 }
 
 /// Write every model artifact (parquets) under the configured prefix.
@@ -163,6 +168,7 @@ pub fn write_outputs(ctx: OutputCtx<'_>, cell: CellQcOutputs<'_>) -> Result<()> 
         unified,
         target_clusters,
         feature_keep,
+        feature_prior_fdr,
     } = ctx;
     let CellQcOutputs {
         keep_idx,
@@ -212,7 +218,7 @@ pub fn write_outputs(ctx: OutputCtx<'_>, cell: CellQcOutputs<'_>) -> Result<()> 
     // small-norm blob that contaminates downstream UMAP / clustering /
     // archetype topics. Score each β_g row against that prior null.
     let path_feat_prior = format!("{score_prefix}.feature_prior_score.parquet");
-    write_feature_prior_score(
+    let prior_pvals = write_feature_prior_score(
         &rho,
         &table.gene_names,
         model.embedding_dim,
@@ -369,25 +375,43 @@ pub fn write_outputs(ctx: OutputCtx<'_>, cell: CellQcOutputs<'_>) -> Result<()> 
     }
     let path_feat_emb = format!("{prefix}.feature_embedding.parquet");
 
-    // Mask feature-QC's empty cluster out of the gene VISUALIZATION (co-embed)
-    // only — the empty genes are β≈0 (zero bilinear influence) and form the dense
-    // low-norm blob that contaminates the gene UMAP. `feature_keep` is per-gene in
-    // β-row order; the raw β_g (gene_base_embedding) + reconstruction params above
-    // are written in full.
+    // Screen genes out of the gene VISUALIZATION (co-embed) only — the raw β_g
+    // (gene_base_embedding) + reconstruction params above are written in full.
+    // Two composed masks, both in β-row order:
+    //   * `feature_keep` — feature-QC's empty cluster (β≈0, zero bilinear
+    //     influence), the dense low-norm blob that contaminates the gene UMAP;
+    //   * `prior_keep` — DEAD features whose β never moved off the N(0,σ²) init
+    //     (BH-FDR on the prior-score `‖β_g‖²/σ² ~ χ²_H`). These scatter off the
+    //     cell manifold in a cell+feature UMAP and otherwise creep into every
+    //     downstream consumer of `feature_embedding.parquet` (gem-annotate, the
+    //     `itopic --freeze-feature-embedding` probe).
+    let prior_keep = prior_keep_mask(&prior_pvals, feature_prior_fdr);
     let kept_genes: Vec<usize> = (0..table.gene_names.len())
-        .filter(|&g| feature_keep.get(g).copied().unwrap_or(true))
+        .filter(|&g| feature_keep.get(g).copied().unwrap_or(true) && prior_keep[g])
         .collect();
+    anyhow::ensure!(
+        !kept_genes.is_empty(),
+        "feature co-embedding: no gene is distinguishable from the N(0,σ²) init prior at \
+         BH q ≤ {feature_prior_fdr} — the embedding is uninformed (training never moved β \
+         off init). Refusing to write an all-dead feature_embedding; check training, or set \
+         --feature-prior-fdr 0 to keep every gene."
+    );
     let gene_names_co: Vec<Box<str>> = kept_genes
         .iter()
         .map(|&g| table.gene_names[g].clone())
         .collect();
     let rho_co = rho.select_rows(kept_genes.iter());
     if kept_genes.len() < table.gene_names.len() {
+        let n_dead = (0..table.gene_names.len())
+            .filter(|&g| feature_keep.get(g).copied().unwrap_or(true) && !prior_keep[g])
+            .count();
         log::info!(
-            "feature co-embedding: {} / {} genes (masked {} feature-QC empties)",
+            "feature co-embedding: {} / {} genes kept ({} feature-QC empties, {} dead by \
+             prior-score BH q ≤ {feature_prior_fdr})",
             kept_genes.len(),
             table.gene_names.len(),
-            table.gene_names.len() - kept_genes.len()
+            table.gene_names.len() - kept_genes.len() - n_dead,
+            n_dead,
         );
     }
 
@@ -543,6 +567,24 @@ pub(crate) fn feature_prior_keep(
         .collect())
 }
 
+/// Per-gene KEEP mask from prior p-values via BH-FDR: keep genes whose
+/// BH-adjusted `prior_pval ≤ fdr` (distinguishable from the N(0,σ²) init =
+/// informed/live), drop the rest (dead/noise). `fdr ≤ 0` keeps all. Under the
+/// pure null (every gene sits at the prior) BH yields ≈no survivors, so a wholly
+/// uninformed embedding collapses to an empty mask — [`write_outputs`] turns that
+/// into a hard error rather than writing an all-dead feature_embedding. This is
+/// the WRITE-side dead-feature screen on the co-embedding; [`feature_prior_keep`]
+/// is the read-side (post-gem, raw-threshold) display filter.
+fn prior_keep_mask(prior_pvals: &[f32], fdr: f32) -> Vec<bool> {
+    if fdr <= 0.0 {
+        return vec![true; prior_pvals.len()];
+    }
+    enrichment::bh_fdr(prior_pvals)
+        .iter()
+        .map(|&q| q <= fdr)
+        .collect()
+}
+
 ////////////////////////////////////////
 // Helpers
 ////////////////////////////////////////
@@ -598,12 +640,13 @@ fn write_feature_prior_score(
     gene_names: &[Box<str>],
     h: usize,
     path: &str,
-) -> Result<()> {
+) -> Result<Vec<f32>> {
     let g = rho.nrows();
     let var = PARAM_INIT_STD * PARAM_INIT_STD;
     let dist = ChiSquared::new(h as f64).context("chi-squared dof (embedding_dim)")?;
 
     let mut out = DMatrix::<f32>::zeros(g, 3);
+    let mut prior_pvals = vec![0f32; g];
     let mut n_prior_like = 0usize;
     for r in 0..g {
         let sq_norm = rho
@@ -618,6 +661,7 @@ fn write_feature_prior_score(
         out[(r, 0)] = cols[0];
         out[(r, 1)] = cols[1];
         out[(r, 2)] = cols[2];
+        prior_pvals[r] = cols[2];
     }
 
     let col_names: Vec<Box<str>> = PRIOR_SCORE_COL_NAMES
@@ -633,7 +677,7 @@ fn write_feature_prior_score(
         n_prior_like,
         g
     );
-    Ok(())
+    Ok(prior_pvals)
 }
 
 /// Per-cell prior-score QC, written to `{score_prefix}.cell_prior_score.parquet`.

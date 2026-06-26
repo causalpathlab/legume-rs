@@ -191,6 +191,7 @@ fn test_args() -> GemArgs {
             feature_qc_min_nnz: 0.0,
             feature_qc_mask: false,
             gene_null_fdr: 0.05,
+            feature_prior_fdr: 0.05,
             skip_topics: true,
             num_topics: None,
         },

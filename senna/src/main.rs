@@ -64,7 +64,10 @@ mod topic;
 mod tree_layout;
 mod vae;
 
-use annotate::{annotate_by_enrichment, annotate_ontology, AnnotateArgs, AnnotateOntologyArgs};
+use annotate::{
+    annotate_by_enrichment, annotate_by_projection, annotate_ontology, AnnotateArgs,
+    AnnotateOntologyArgs, AnnotateProjectionArgs,
+};
 use bge::{fit_bge, BgeArgs};
 use clustering::*;
 use embed_common::*;
@@ -382,6 +385,24 @@ enum Commands {
     AnnotateOntology(AnnotateOntologyArgs),
 
     #[command(
+        name = "annotate-by-projection",
+        visible_aliases = ["ann-by-proj", "annot-by-proj"],
+        about = "Annotate cells via firm marker over-representation on the co-embedding.",
+        long_about = "Embedding-grounded alternative to `annotate-by-enrichment` for runs with a\n\
+                      co-embedded gene space (bge / fne / resolve-embedding-space). Pipeline:\n\
+                      build each type's IDF-weighted marker centroid → Euclidean\n\
+                      nearest-centroid per cell → distance-outlier QC → Leiden cluster →\n\
+                      cluster × term hypergeometric over-representation, permutation-calibrated\n\
+                      → per-cluster call broadcast to cells. Optional TreeBH ontology with\n\
+                      --obo/--label-cl. Never re-reads raw counts (complementary to\n\
+                      enrichment, which is raw-count-grounded).\n\n\
+                      Usage: senna annotate-by-projection --from run.senna.json -m markers.tsv -o out\n\
+                      Writes {out}.{argmax.tsv,membership.tsv,annot.parquet,cluster_term_*.parquet,\n\
+                      null_calibration.tsv}; updates `manifest.annotate.*`."
+    )]
+    AnnotateByProjection(AnnotateProjectionArgs),
+
+    #[command(
         about = "Pseudotime via Monocle-3-style principal graph (SimplePPT) on the latent.",
         long_about = "Port of Mao et al. 2015 SimplePPT applied to `manifest.outputs.latent`.\n\n\
                       (1) k-means init K centroids,\n\
@@ -516,6 +537,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::AnnotateOntology(args) => {
             annotate_ontology(args)?;
+        }
+        Commands::AnnotateByProjection(args) => {
+            annotate_by_projection(args)?;
         }
         Commands::Predict(args) => {
             predict_model(args)?;

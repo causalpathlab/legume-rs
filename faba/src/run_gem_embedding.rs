@@ -641,6 +641,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
             unified: &unified,
             target_clusters: args.qc.num_topics,
             feature_keep: &feature_keep_p1,
+            feature_prior_fdr: args.qc.feature_prior_fdr,
         },
         CellQcOutputs {
             keep_idx: &keep_idx,
@@ -683,6 +684,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
                     unified: &unified,
                     target_clusters: args.qc.num_topics,
                     feature_keep: &feature_keep2,
+                    feature_prior_fdr: args.qc.feature_prior_fdr,
                 },
                 CellQcOutputs {
                     keep_idx: &keep_idx2,

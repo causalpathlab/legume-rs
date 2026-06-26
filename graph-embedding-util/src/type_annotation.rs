@@ -61,8 +61,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 mod coarsen;
 mod layout;
 mod markers;
+mod ontology_obo;
 mod output;
 mod score;
+mod term_ora;
 use coarsen::*;
 use layout::{leiden_from_graph, phate_cells, umap_from_graph, write_layout_outputs, LayoutInputs};
 use markers::*;
@@ -72,6 +74,17 @@ use score::*;
 /// The shared per-cell label-file writer (`argmax.tsv` + `membership.tsv`),
 /// used by BOTH annotation methods so their per-cell I/O is identical.
 pub use output::write_label_tsvs;
+
+/// Firm projection annotation by term over-representation within cell clusters
+/// (Euclidean nearest-centroid → QC → cluster → hypergeometric + permutation
+/// calibration → optional TreeBH ontology). The statistically-firm successor to
+/// [`annotate_embeddings`]; `faba gem-annotate` drives it.
+pub use term_ora::{annotate_embeddings_ora, TermOraConfig, TERM_ORA_OUTPUT_SUFFIXES};
+
+/// Bind the generic `enrichment` TreeBH ontology core to the concrete OBO
+/// loader (load OBO + `label→CL`, inject access closures, run). Shared by the
+/// term-ORA path and by `senna annotate-ontology` / `-by-enrichment`.
+pub use ontology_obo::annotate_ontology_from_obo;
 
 /// File-name suffixes (relative to the `out_prefix`) of every artifact
 /// [`annotate_embeddings`] writes — the single source of truth for the

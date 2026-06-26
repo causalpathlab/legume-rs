@@ -1,39 +1,43 @@
-//! `faba gem-annotate` — light marker-set cell-type annotation by projecting
-//! cell types onto the **frozen gem feature embedding**.
+//! `faba gem-annotate` — **firm** marker-set cell-type annotation by projection
+//! onto the frozen gem feature embedding.
 //!
-//! A thin adapter over the shared, model-agnostic
-//! [`graph_embedding_util::type_annotation::annotate_embeddings`]: it loads
-//! the SIMBA co-embed (`feature_embedding`, genes on the cell manifold — NOT
-//! the raw β_g `gene_base_embedding`) and e_cell (`cell_embedding`) from a
-//! `{prefix}.faba.json` manifest and hands them to the shared routine, which
-//! embeds each cell type as the L2-normalized centroid of its marker feature
-//! embeddings (the space the cells live in), clusters the cells, and emits a
-//! two-layer (fine + coarse) annotation. Outputs:
+//! A thin adapter over the shared
+//! [`graph_embedding_util::type_annotation::annotate_embeddings_ora`]: it loads
+//! the SIMBA co-embed (`feature_embedding`, genes on the cell manifold) and
+//! `e_cell` (`cell_embedding`) from a `{prefix}.faba.json` manifest and hands
+//! them to the firm term-ORA routine, which
 //!
-//! - `{out}.gem_annot.annot.parquet` — per cell: community, coarse + fine
-//!   label, score (z), and p-value (`pnorm(-z)`) for each layer
-//! - `{out}.gem_annot.membership.tsv` — `cell<TAB>coarse_label` (no header);
-//!   feeds `faba gem-summary` and `data-beans stat -s row -g` to group any
-//!   count matrix by cell type
-//! - `{out}.gem_annot.community_profile.parquet` — one row per community
-//! - `{out}.gem_annot.type_map.parquet` — fine → coarse merge record
-//! - `{out}.gem_annot.{type,coarse}_embedding.parquet` — `[· × H]` anchors
-//!   (drop-in overlay for `faba gem-plot`)
+//! 1. builds each cell type's **un-normalized IDF-weighted centroid** of its
+//!    marker feature embeddings (a prototype in the embedding space);
+//! 2. hard-assigns every cell to its **nearest centroid** (Euclidean) and QC-
+//!    prunes distance-outlier assignments to `unassigned`;
+//! 3. clusters the cells (Leiden on the cosine cell kNN graph); and
+//! 4. tests, per (cluster, term), the **over-representation** of that term among
+//!    the cluster's cells with the hypergeometric null, **calibrated by
+//!    permuting the per-cell labels**; each cluster is called its top
+//!    FDR-significant term and its cells inherit that label.
 //!
-//! With `--layout` (default on) it also reuses the cosine cell kNN graph it
-//! already builds for Leiden to emit 2D layouts and place features on them:
-//! - `{out}.gem_annot.cell_coords.parquet` — per cell: `community`, UMAP
-//!   (`umap_1/2`, direct off the kNN graph) and PHATE (`phate_1/2`, direct for
-//!   small N, else Leiden-community landmarks + Nyström on e_cell)
-//! - `{out}.gem_annot.feature_coords.parquet` — genes (β_g), full features,
-//!   and type/coarse anchors placed on both layouts via feature→cell kNN in
-//!   the H-dim embedding (`kind`, `umap_1/2`, `phate_1/2`)
+//! Optionally (`--obo`+`--label-cl`) it folds the cluster × term matrix through
+//! the shared TreeBH ontology core for multi-resolution Cell-Ontology calling —
+//! the same engine `senna annotate` uses.
+//!
+//! Outputs (under `{out}.gem_annot`):
+//! - `.annot.parquet` — per cell: `community`, firm `coarse_label` (+ `coarse_p`,
+//!   `coarse_q`), soft per-cell `fine_label` + `fine_distance`, `is_outlier`
+//! - `.membership.tsv` — `cell<TAB>coarse_label` (feeds `faba gem-summary` /
+//!   `data-beans stat -s row -g`)
+//! - `.argmax.tsv` — `cell<TAB>cell_type<TAB>probability`
+//! - `.cluster_term_{p,q,Q}.parquet` — cluster × term permutation p / BH q /
+//!   FDR-sparse softmax Q
+//! - `.null_calibration.tsv` — permutation-null calibration diagnostics
+//! - `.marker_embedding.parquet` — matched marker genes on the cell manifold
+//! - `.ontology_assignment.tsv` + `.ontology_node_mass.parquet` (with `--obo`)
 
 use anyhow::{Context, Result};
 use clap::Args;
 
 use graph_embedding_util::type_annotation::{
-    annotate_embeddings, AnnotateProjConfig, InputEmbeddings,
+    annotate_embeddings_ora, InputEmbeddings, TermOraConfig,
 };
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
@@ -66,15 +70,29 @@ pub struct GemAnnotateArgs {
 
     #[arg(
         long,
-        default_value_t = 200,
-        help = "Permutation draws per type for the null (0 = skip z-scores)"
+        default_value_t = 30,
+        help = "k for the cosine cell kNN graph fed to Leiden clustering"
+    )]
+    pub knn: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Leiden resolution for cell clustering (higher → more, finer clusters)"
+    )]
+    pub resolution: f64,
+
+    #[arg(
+        long,
+        default_value_t = 500,
+        help = "Permutation draws calibrating the over-representation null (0 = analytic p only)"
     )]
     pub num_perm: usize,
 
     #[arg(
         long,
         default_value_t = 42,
-        help = "RNG seed (permutation null + clustering)"
+        help = "RNG seed (clustering + permutation null)"
     )]
     pub seed: u64,
 
@@ -85,68 +103,58 @@ pub struct GemAnnotateArgs {
     pub no_idf: bool,
 
     #[arg(
-        long = "no-coarsen",
-        help = "Disable cell-grounded coarsening (emit only the fine layer mirrored as coarse)"
+        long = "no-assign-qc",
+        help = "Keep every cell→term assignment (skip the distance-outlier prune)"
     )]
-    pub no_coarsen: bool,
+    pub no_assign_qc: bool,
 
     #[arg(
-        long,
-        default_value_t = 30,
-        help = "k for the shared cell kNN graph (fine-score smoothing + Leiden coarsening + UMAP layout)"
+        long = "assign-mad",
+        default_value_t = 2.5,
+        help = "Outlier gate: prune a cell whose distance to its centroid exceeds median + k·MAD"
     )]
-    pub knn: usize,
+    pub assign_mad: f64,
 
     #[arg(
-        long,
+        long = "fdr-alpha",
+        default_value_t = 0.1,
+        help = "FDR α for the per-cluster term call + Q sparsity (BH on the permutation p)"
+    )]
+    pub fdr_alpha: f32,
+
+    #[arg(
+        long = "q-temperature",
         default_value_t = 1.0,
-        help = "Leiden resolution for cell clustering (higher → more, finer communities)"
+        help = "Softmax temperature when row-normalizing Q over significant terms"
     )]
-    pub resolution: f64,
+    pub q_temperature: f32,
 
-    // ---- layout (part i) + feature placement (part ii) ----
+    // ---- optional ontology (TreeBH) layer ----
     #[arg(
-        long = "no-layout",
-        help = "Skip 2D cell layouts (UMAP/PHATE) and feature placement"
+        long = "obo",
+        help = "Cell Ontology .obo (e.g. cl-basic.obo). With --label-cl, runs TreeBH ontology \
+                calling on the cluster × term matrix → {out}.ontology_assignment.tsv"
     )]
-    pub no_layout: bool,
-
-    #[arg(long = "no-phate", help = "Skip the PHATE layout (keep UMAP only)")]
-    pub no_phate: bool,
+    pub obo: Option<Box<str>>,
 
     #[arg(
-        long,
-        default_value_t = 500,
-        help = "UMAP SGD epochs for the cell layout"
+        long = "label-cl",
+        help = "Curated `label<TAB>CL:id` map, one row per marker celltype. Required with --obo"
     )]
-    pub umap_epochs: usize,
-
-    #[arg(long, default_value_t = 20, help = "PHATE diffusion time t")]
-    pub phate_t: usize,
-
-    #[arg(long, default_value_t = 5, help = "PHATE adaptive-bandwidth kNN")]
-    pub phate_knn: usize,
+    pub label_cl: Option<Box<str>>,
 
     #[arg(
-        long,
-        default_value_t = 40.0,
-        help = "PHATE alpha-decay kernel exponent"
+        long = "ontology-fdr-q",
+        default_value_t = 0.1,
+        help = "Ontology TreeBH per-level FDR target (lower → descends less, abstains more)"
     )]
-    pub phate_alpha: f32,
+    pub ontology_fdr_q: f64,
 
     #[arg(
-        long,
-        default_value_t = 3000,
-        help = "Run PHATE directly on all cells at or below this count; above it reuse Leiden communities as landmarks + Nyström"
+        long = "ontology-by",
+        help = "Ontology: Benjamini–Yekutieli within families (any dependence; more conservative)"
     )]
-    pub phate_max_direct: usize,
-
-    #[arg(
-        long = "layout-knn-feat",
-        default_value_t = 15,
-        help = "k for feature→cell kNN projection onto the layouts"
-    )]
-    pub layout_knn_feat: usize,
+    pub ontology_by: bool,
 }
 
 pub fn run_gem_annotate(args: &GemAnnotateArgs) -> Result<()> {
@@ -165,26 +173,22 @@ pub fn run_gem_annotate(args: &GemAnnotateArgs) -> Result<()> {
     let cell = DMatrix::<f32>::from_parquet(&cell_path)
         .with_context(|| format!("reading cell embedding {cell_path}"))?;
 
-    let want_layout = !args.no_layout;
-
-    let cfg = AnnotateProjConfig {
-        n_perm: args.num_perm,
-        seed: args.seed,
+    let cfg = TermOraConfig {
         knn: args.knn,
         resolution: args.resolution,
-        coarsen: !args.no_coarsen,
-        layout: want_layout,
-        phate: !args.no_phate,
-        phate_t: args.phate_t,
-        phate_knn: args.phate_knn,
-        phate_alpha: args.phate_alpha,
-        phate_max_direct: args.phate_max_direct,
-        feat_knn: args.layout_knn_feat,
-        umap_epochs: args.umap_epochs,
-        // Fine-score kNN smoothing + definitiveness gate use their defaults.
-        ..AnnotateProjConfig::default()
+        seed: args.seed,
+        n_perm: args.num_perm,
+        assign_qc: !args.no_assign_qc,
+        assign_mad: args.assign_mad,
+        fdr_alpha: args.fdr_alpha,
+        q_temperature: args.q_temperature,
+        obo: args.obo.as_deref().map(str::to_owned),
+        label_cl: args.label_cl.as_deref().map(str::to_owned),
+        ontology_fdr_q: args.ontology_fdr_q,
+        ontology_by: args.ontology_by,
     };
-    annotate_embeddings(
+
+    annotate_embeddings_ora(
         &InputEmbeddings {
             feature_emb: &feat.mat,
             gene_names: &feat.rows,

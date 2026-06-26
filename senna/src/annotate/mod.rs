@@ -15,11 +15,13 @@
 
 mod args;
 mod by_enrichment;
+mod by_projection;
 mod finalize;
 mod go_signature;
 pub mod inputs;
 mod ontology;
 
-pub use args::{AnnotateArgs, AnnotateOntologyArgs};
+pub use args::{AnnotateArgs, AnnotateOntologyArgs, AnnotateProjectionArgs};
 pub use by_enrichment::run as annotate_by_enrichment;
+pub use by_projection::run as annotate_by_projection;
 pub use ontology::run as annotate_ontology;
