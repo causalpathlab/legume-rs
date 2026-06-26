@@ -243,6 +243,137 @@ pub struct AnnotateArgs {
     pub ontology_by: bool,
 }
 
+/// `senna annotate-by-projection` — firm marker-set annotation by projection
+/// onto a co-embedded feature space (bge / fne / resolve-embedding-space).
+/// Embedding-grounded (no raw-count re-read), complementary to
+/// `annotate-by-enrichment`. Drives the shared firm term-ORA core.
+#[derive(Args, Debug)]
+pub struct AnnotateProjectionArgs {
+    #[arg(
+        short = 'f',
+        long = "from",
+        required = true,
+        help = "Run manifest from a co-embedding run (`senna bge|fne|resolve-embedding-space`)",
+        long_help = "Run manifest with a co-embedded gene space — `senna bge`, `fne`, or\n\
+                     `resolve-embedding-space` (reads `outputs.feature_embedding` +\n\
+                     `outputs.cell_embedding`, falling back to `outputs.latent` for the\n\
+                     cell side on plain bge/fne). topic/svd runs have no genes-on-the-\n\
+                     cell-manifold embedding — use `annotate-by-enrichment` for those."
+    )]
+    pub from: Box<str>,
+
+    #[arg(
+        short = 'm',
+        long = "markers",
+        required = true,
+        help = "Marker-gene TSV: `gene<TAB>celltype` per line (tab/comma/space delimited)"
+    )]
+    pub markers: Box<str>,
+
+    #[arg(
+        short = 'o',
+        long = "out",
+        help = "Output prefix (default: `--from` with `.senna.json`/`.json` stripped)"
+    )]
+    pub out: Option<Box<str>>,
+
+    #[arg(
+        long = "knn",
+        default_value_t = 30,
+        help = "k for the cosine cell kNN graph fed to Leiden clustering"
+    )]
+    pub knn: usize,
+
+    #[arg(
+        long = "resolution",
+        default_value_t = 1.0,
+        help = "Leiden resolution for cell clustering (higher → more, finer clusters)"
+    )]
+    pub resolution: f64,
+
+    #[arg(
+        long = "num-perm",
+        default_value_t = 500,
+        help = "Permutation draws calibrating the over-representation null (0 = analytic p only)"
+    )]
+    pub num_perm: usize,
+
+    #[arg(
+        long = "seed",
+        default_value_t = 42,
+        help = "RNG seed (clustering + permutation null)"
+    )]
+    pub seed: u64,
+
+    #[arg(
+        long = "no-idf",
+        help = "Disable IDF down-weighting of markers shared across many types"
+    )]
+    pub no_idf: bool,
+
+    #[arg(
+        long = "no-assign-qc",
+        help = "Keep every cell→term assignment (skip the distance-outlier prune)"
+    )]
+    pub no_assign_qc: bool,
+
+    #[arg(
+        long = "assign-mad",
+        default_value_t = 2.5,
+        help = "Outlier gate: prune a cell whose distance to its centroid exceeds median + k·MAD"
+    )]
+    pub assign_mad: f64,
+
+    #[arg(
+        long = "fdr-alpha",
+        default_value_t = 0.1,
+        help = "FDR α for the per-cluster term call + Q sparsity (BH on the permutation p)"
+    )]
+    pub fdr_alpha: f32,
+
+    #[arg(
+        long = "q-temperature",
+        default_value_t = 1.0,
+        help = "Softmax temperature when row-normalizing Q over significant terms"
+    )]
+    pub q_temperature: f32,
+
+    #[arg(
+        long = "obo",
+        help = "Cell Ontology .obo (e.g. cl-basic.obo). With --label-cl, runs TreeBH ontology \
+                calling on the cluster × term matrix → {out}.ontology_assignment.tsv"
+    )]
+    pub obo: Option<Box<str>>,
+
+    #[arg(
+        long = "label-cl",
+        help = "Curated `label<TAB>CL:id` map, one row per marker celltype. Required with --obo"
+    )]
+    pub label_cl: Option<Box<str>>,
+
+    #[arg(
+        long = "ontology-fdr-q",
+        default_value_t = 0.1,
+        help = "Ontology TreeBH per-level FDR target (lower → descends less, abstains more)"
+    )]
+    pub ontology_fdr_q: f64,
+
+    #[arg(
+        long = "ontology-by",
+        help = "Ontology: Benjamini–Yekutieli within families (any dependence; more conservative)"
+    )]
+    pub ontology_by: bool,
+
+    #[arg(
+        long = "no-clean",
+        help = "Keep existing {out}.* projection outputs (default: erase the explicit set first)"
+    )]
+    pub no_clean: bool,
+
+    #[arg(short = 'v', long, help = "Verbose logging")]
+    pub verbose: bool,
+}
+
 /// `senna annotate-ontology` — hierarchical multi-resolution cell-type calling
 /// (TreeBH) on the Cell Ontology, post-processing an `annotate-by-enrichment`
 /// run's cluster × celltype matrix.

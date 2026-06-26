@@ -346,14 +346,12 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     let mut ontology_assign: Option<String> = None;
     let mut ontology_mass: Option<String> = None;
     if let (Some(obo), Some(label_cl)) = (args.obo.as_deref(), args.label_cl.as_deref()) {
-        match super::ontology::annotate_ontology_core(
-            &super::ontology::OntologyParams {
-                out: &out,
-                label_cl,
-                obo,
-                fdr_q: args.ontology_fdr_q,
-                by: args.ontology_by,
-            },
+        match super::ontology::annotate_ontology_with_obo(
+            &out,
+            label_cl,
+            obo,
+            args.ontology_fdr_q,
+            args.ontology_by,
             // Prefer the correlation-preserving permutation z; fall back to the
             // row-randomization restandardized ES when no sample permutations ran.
             super::ontology::OntologyScore::Z(perm_z_kc.as_ref().unwrap_or(&es_restandardized_kc)),

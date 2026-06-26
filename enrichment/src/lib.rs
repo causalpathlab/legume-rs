@@ -13,14 +13,19 @@ pub mod es;
 pub mod fdr;
 pub mod markers;
 pub mod null;
+pub mod ontology;
 pub mod ontology_enrich;
 pub mod orchestrate;
 pub mod q_matrix;
 pub mod specificity;
+pub mod treebh;
 
 pub use cellproj::{label_cells, LabelWithConfidence};
 pub use es::{rank_descending, weighted_ks_es};
 pub use fdr::bh_fdr;
+pub use ontology::{
+    annotate_ontology_core, parse_label_map, OntologyAccess, OntologyParams, OntologyScore,
+};
 pub use ontology_enrich::{ontology_module_score, OntologyModuleScore};
 pub use orchestrate::{annotate, AnnotateConfig, AnnotateOutputs, GroupInputs};
 pub use specificity::{compute_specificity, SpecificityMode};

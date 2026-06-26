@@ -420,6 +420,24 @@ pub struct QcArgs {
     pub gene_null_fdr: f32,
 
     #[arg(
+        long = "feature-prior-fdr",
+        default_value_t = 0.05,
+        help = "Drop dead features (β never moved off init) from the co-embedded \n\
+                feature_embedding via BH-FDR on the prior-score. 0 = keep every gene.",
+        long_help = "Screen the co-embedded `feature_embedding.parquet` (the analysis-facing\n\
+                     gene embedding read by gem-annotate / `itopic --freeze-feature-embedding`)\n\
+                     against the per-gene prior-score null `‖β_g‖²/σ² ~ χ²_H`: a gene whose β\n\
+                     never moved off its N(0,σ²) init is uninformed/dead and the SIMBA\n\
+                     co-embedding scatters it off the cell manifold (the off-manifold blobs in\n\
+                     a cell+feature UMAP). Genes whose BH-adjusted prior_pval exceeds this q are\n\
+                     DROPPED from the co-embedding so dead features can't creep into downstream\n\
+                     analysis; the raw β_g (gene_base_embedding) + reconstruction params are\n\
+                     kept in full. If NO gene survives (a wholly-uninformed embedding) gem errors\n\
+                     out rather than writing an all-dead file. 0 disables (keep every gene)."
+    )]
+    pub feature_prior_fdr: f32,
+
+    #[arg(
         long = "skip-topics",
         default_value_t = false,
         help = "Skip archetype-based topic resolution (resolved by default)"

@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
 
-version = "0.6.0"
+version = "0.6.2"
 
 [lib]
 # The library surface exists so `gem`'s integration tests (tests/) can reach
@@ -85,5 +85,6 @@ arrow = "58"
 candle-util = { workspace = true }
 graph-embedding-util = { workspace = true }
 auxiliary-data = { workspace = true }
+enrichment = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
