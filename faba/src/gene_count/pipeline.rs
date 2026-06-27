@@ -50,7 +50,6 @@ pub fn run_simple(
         // Cell calling (barcode QC) + gene nnz filter (no splice split here).
         let (passing_genes, passing_cells) = crate::pipeline_util::qc_passing_keys(
             &gene_level_stats,
-            &[],
             args.row_nnz_cutoff,
             0,
             args.column_nnz_cutoff,
@@ -164,7 +163,6 @@ pub fn run_splice_aware(
         let cell_call = args.cell_qc.params();
         let (passing_genes, passing_cells) = crate::pipeline_util::qc_passing_keys(
             &spliced_triplets,
-            &unspliced_triplets,
             args.row_nnz_cutoff,
             0,
             args.column_nnz_cutoff,
