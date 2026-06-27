@@ -126,7 +126,7 @@ faba <COMMAND> [OPTIONS]
 
 | Command | Purpose |
 |---------|---------|
-| `dartseq` (`dart`, `m6a`) | Quantify DART-seq m6A sites from C-to-T conversions |
+| `dartseq` (`dart`, `m6a`) | Call DART-seq m6A sites by a WT-vs-MUT control contrast on C-to-T conversions |
 | `atoi` (`a2i`, `editing`) | Detect and quantify A-to-I RNA editing sites |
 | `apa` (`polya`)           | Quantify alternative polyadenylation sites per cell |
 | `genes` (`count-genes`)   | Count reads per gene (single-cell or bulk RNA-seq) |
@@ -149,12 +149,15 @@ faba genes sample.bam -g genes.gff -o out/
 # A-to-I editing sites (the mask is reusable by other subcommands)
 faba atoi sample.bam -g genes.gff -f genome.fa -o out/
 
-# DART-seq m6A, masking out editing sites
-faba dartseq wt.bam --mut ctrl.bam -g genes.gff -f genome.fa -o out/ \
+# DART-seq m6A: signal (WT APOBEC1-YTH) vs catalytically-dead control (YTHmut).
+# A control is REQUIRED — m6A can't be told apart from genomic C/T variation
+# without it (--mut / --control / --background are accepted aliases).
+faba dartseq wt.bam --control-bam ctrl.bam -g genes.gff -f genome.fa -o out/ \
     --atoi-mask out/atoi_sites.parquet
 
-# Everything in one pass
-faba all sample.bam -g genes.gff -f genome.fa -o out/ --mut ctrl.bam
+# Everything in one pass (the m6A step runs only when --control-bam is given,
+# otherwise it is skipped; the other steps need no control)
+faba all sample.bam -g genes.gff -f genome.fa -o out/ --control-bam ctrl.bam
 ```
 
 ## License

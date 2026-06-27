@@ -28,10 +28,14 @@ use rustc_hash::{FxHashMap, FxHashSet};
         1. Gene expression filtering (identify expressed genes)\n\
         2. ATOI detection (A-to-I editing, masked by SNP)\n\
         3. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\
-        4. m6A detection (DART C→T, masked by SNP+ATOI)\n\n\
-        All editing calls are reference-anchored and tested per site against a\n\
-        beta-binomial sequencing-error null (--edit-error-rate/--edit-overdispersion);\n\
-        no control/mutant sample is used.\n\
+        4. m6A detection (DART C→T, WT-vs-MUT contrast; skipped without --control-bam)\n\n\
+        ATOI is reference-anchored and tested per site against a beta-binomial\n\
+        sequencing-error null (--edit-error-rate/--edit-overdispersion), no control\n\
+        sample. m6A instead requires a catalytically-dead control (--control-bam):\n\
+        each motif C is tested for higher conversion in the positional BAMs than\n\
+        the pooled control (so a genomic C/T variant is rejected); the step is\n\
+        skipped when no control is given. The SNP mask is off by default for m6A\n\
+        (the contrast already rejects variants; opt back in with --m6a-snp-mask).\n\
         Step 0 discovers variants de novo and optionally force-calls at known\n\
         sites (--known-snps, VCF/BCF/Parquet). De novo variants are VAF-filtered\n\
         (--snp-mask-min-vaf) so RNA editing sites are preserved in the mask.\n\
