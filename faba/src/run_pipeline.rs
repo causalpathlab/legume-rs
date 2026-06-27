@@ -122,23 +122,27 @@ pub struct PipelineArgs {
     // === Gene expression filtering ===
     #[arg(
         long,
-        default_value_t = 10,
-        help = "Minimum cells per gene (gene filtering)"
+        default_value_t = 0,
+        help = "Minimum cells per gene (gene filtering; 0 = off, matching \
+                Cell Ranger, which keeps every gene/feature)"
     )]
     pub gene_min_cells: usize,
 
     #[arg(
         long,
-        default_value_t = 10,
-        help = "Minimum UMI per gene (gene filtering)"
+        default_value_t = 0,
+        help = "Minimum UMI per gene (gene filtering; 0 = off, matching \
+                Cell Ranger, which keeps every gene/feature)"
     )]
     pub gene_min_counts: usize,
 
     #[arg(
         long,
-        default_value_t = 100,
+        default_value_t = 0,
         help = "Minimum detected genes (nnz) per cell; cells below this are \
-                dropped from gene counts and every downstream modality"
+                dropped from gene counts and every downstream modality. \
+                0 = off (default), so cell calling is pure Cell Ranger \
+                EmptyDrops/OrdMag with no extra min-genes floor"
     )]
     pub cell_min_genes: usize,
 
@@ -564,7 +568,6 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
         // In-memory QC on total counts (per-batch cell calling)
         let (passing_genes, passing_cells) = qc_passing_keys(
             &spliced_triplets,
-            &unspliced_triplets,
             args.gene_min_cells,
             args.gene_min_counts,
             args.cell_min_genes,

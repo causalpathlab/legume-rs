@@ -126,12 +126,16 @@ pub fn extract_gene_key(feat: &str) -> &str {
         .unwrap_or(feat)
 }
 
-/// In-memory QC: count nnz per gene and per cell from combined triplets,
-/// return sets of passing gene_keys and cell barcodes. A `gene_min_counts`
-/// of 0 disables the total-count threshold.
+/// In-memory QC, computed on the **spliced** (mature, exonic) gene counts
+/// only — Cell Ranger calls cells from exonic gene-expression UMIs, and faba's
+/// unspliced/intronic layer is deliberately excluded from QC. Counts nnz per
+/// gene and per cell over `spliced`, applies the cell-calling policy, and
+/// returns the passing gene_keys + cell barcodes. (The caller still writes the
+/// unspliced counts to the backend for these passing cells/genes; they just
+/// don't influence which cells/genes pass.) A `gene_min_counts` of 0 disables
+/// the total-count threshold.
 pub fn qc_passing_keys(
     spliced: &[(CellBarcode, Box<str>, f32)],
-    unspliced: &[(CellBarcode, Box<str>, f32)],
     gene_min_cells: usize,
     gene_min_counts: usize,
     cell_min_genes: usize,
@@ -143,7 +147,6 @@ pub fn qc_passing_keys(
     // Collect unique (cell, gene_key) pairs using references (no per-triplet allocation)
     let cell_gene_pairs: rustc_hash::FxHashSet<(&CellBarcode, &str)> = spliced
         .par_iter()
-        .chain(unspliced.par_iter())
         .map(|(cb, feat, _)| (cb, extract_gene_key(feat)))
         .collect();
 
@@ -155,10 +158,10 @@ pub fn qc_passing_keys(
         *cell_nnz.entry(cb).or_default() += 1;
     }
 
-    // Total counts per gene (sum over all triplets, not just unique cells)
+    // Total counts per gene (sum over spliced triplets, not just unique cells)
     let gene_total: FxHashMap<&str, f64> = if gene_min_counts > 0 {
         let mut m: FxHashMap<&str, f64> = FxHashMap::default();
-        for (_, feat, v) in spliced.iter().chain(unspliced.iter()) {
+        for (_, feat, v) in spliced.iter() {
             *m.entry(extract_gene_key(feat)).or_default() += *v as f64;
         }
         m
@@ -189,7 +192,8 @@ pub fn qc_passing_keys(
         if cell_call.filter == crate::cell_qc::CellFilter::Nnz {
             nnz_cells
         } else {
-            let counts = crate::cell_qc::CellCounts::from_triplets(spliced, unspliced);
+            // Spliced-only QC: no unspliced contribution to the cell call.
+            let counts = crate::cell_qc::CellCounts::from_triplets(spliced, &[]);
             crate::cell_qc::call_cells(&counts, cell_call)
                 .into_iter()
                 .filter(|cb| nnz_cells.contains(cb))
@@ -273,7 +277,6 @@ pub fn run_gene_count_qc(
 
         let (passing_genes, passing_cells) = qc_passing_keys(
             &spliced_triplets,
-            &unspliced_triplets,
             gene_min_cells,
             gene_min_counts,
             cell_min_genes,
