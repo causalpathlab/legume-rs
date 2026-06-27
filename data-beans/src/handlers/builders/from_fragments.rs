@@ -661,15 +661,7 @@ fn process_fragments_chunk(
 /// Build a progress bar matching the workspace style for the serial
 /// streaming path (unknown total → spinner with fragment count).
 fn streaming_fragments_progress() -> indicatif::ProgressBar {
-    use indicatif::{ProgressBar, ProgressStyle};
-    let prog_bar = ProgressBar::new_spinner();
-    prog_bar.set_style(
-        ProgressStyle::with_template("{spinner} streamed {pos} fragments ({per_sec})")
-            .unwrap()
-            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
-    );
-    prog_bar.enable_steady_tick(std::time::Duration::from_millis(200));
-    prog_bar
+    matrix_util::progress::new_spinner("{spinner} streamed {pos} fragments ({per_sec})")
 }
 
 /// Preload-and-parse path: read decompressed bytes into memory, split
@@ -695,7 +687,8 @@ fn run_fragments_preload_parallel(
     n_no_overlap: &mut u64,
     n_malformed: &mut u64,
 ) -> anyhow::Result<()> {
-    use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
+    use crate::sparse_data_visitors::styled_progress_bar;
+    use indicatif::ParallelProgressIterator;
     use rayon::prelude::*;
     use std::io::Read;
 
@@ -703,13 +696,8 @@ fn run_fragments_preload_parallel(
     //  Decompress entire file to bytes //
     //////////////////////////////////////
     info!("Preloading fragments from {}", args.fragments);
-    let dec_pb = ProgressBar::new_spinner();
-    dec_pb.set_style(
-        ProgressStyle::with_template("{spinner} decompressing... {bytes} ({bytes_per_sec})")
-            .unwrap()
-            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
-    );
-    dec_pb.enable_steady_tick(std::time::Duration::from_millis(200));
+    let dec_pb =
+        matrix_util::progress::new_spinner("{spinner} decompressing... {bytes} ({bytes_per_sec})");
     let mut reader = open_fragments_reader(args.fragments.as_ref())?;
     let mut buf: Vec<u8> = Vec::with_capacity(1 << 24);
     // small read loop so the progress bar advances during long decompress
@@ -735,12 +723,7 @@ fn run_fragments_preload_parallel(
         ranges.len(),
         n_threads
     );
-    let pb_tmpl = "{bar:40} {pos}/{len} chunks ({eta})";
-    let prog_bar = ProgressBar::new(ranges.len() as u64).with_style(
-        ProgressStyle::with_template(pb_tmpl)
-            .unwrap()
-            .progress_chars("##-"),
-    );
+    let prog_bar = styled_progress_bar(ranges.len() as u64, "chunks");
     let locals: Vec<FragLocalAccum> = ranges
         .par_iter()
         .progress_with(prog_bar.clone())

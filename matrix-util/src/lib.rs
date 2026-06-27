@@ -17,6 +17,7 @@ pub mod ndarray_stat;
 pub mod ndarray_util;
 pub mod pair_graph;
 pub mod parquet;
+pub mod progress;
 pub mod sparse_stat;
 pub mod tensor_io;
 pub mod tensor_util;

@@ -111,14 +111,8 @@ impl SparseIoVec {
             }
         );
 
-        let prog_bar = ProgressBar::new(batches.len() as u64);
-        prog_bar.set_style(
-            ProgressStyle::with_template(
-                "[{elapsed_precise}] {bar:30.cyan/blue} {pos}/{len} batches HNSW",
-            )
-            .unwrap()
-            .progress_chars("##-"),
-        );
+        let prog_bar =
+            crate::sparse_data_visitors::styled_progress_bar(batches.len() as u64, "batches HNSW");
 
         // Canonical batch id = SORTED LABEL order (consistent with
         // `register_batch_membership`), so per-batch stats / δ columns carry the

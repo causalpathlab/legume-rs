@@ -2,7 +2,7 @@
 
 use crate::sparse_io::*;
 
-use indicatif::{ParallelProgressIterator, ProgressBar, ProgressIterator, ProgressStyle};
+use indicatif::{ParallelProgressIterator, ProgressIterator};
 use log::info;
 use matrix_util::knn_match::ColumnDict;
 use matrix_util::knn_match::MakeVecPoint;

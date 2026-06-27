@@ -15,7 +15,7 @@ use crate::feature_coarsening::FeatureCoarsening;
 use crate::nb_dispersion::DispersionTrend;
 use crate::sparse_streaming::streaming_sparse_running_stats;
 use data_beans::sparse_io_vector::SparseIoVec;
-use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
+use indicatif::ParallelProgressIterator;
 use matrix_util::sparse_stat::SparseRunningStatistics;
 use matrix_util::traits::{IoOps, RunningStatOps};
 use matrix_util::utils::generate_minibatch_intervals;
@@ -78,11 +78,8 @@ pub fn compute_nb_fisher_weights_coarsened(
     let n_total = data_vec.num_columns();
     let jobs = generate_minibatch_intervals(n_total, n_features_coarse, block_size);
 
-    let prog_bar = ProgressBar::new(jobs.len() as u64).with_style(
-        ProgressStyle::with_template("NB-Fisher (coarse) {bar:40} {pos}/{len} blocks ({eta})")
-            .unwrap()
-            .progress_chars("##-"),
-    );
+    let prog_bar = matrix_util::progress::new_progress_bar(jobs.len() as u64)
+        .with_message("NB-Fisher (coarse) blocks");
 
     let stats: SparseRunningStatistics<f32> = jobs
         .par_iter()

@@ -206,14 +206,8 @@ fn optimize_block(
         };
 
         let prog_bar = progress_label.map(|label| {
-            ProgressBar::new(num_iter as u64).with_style(
-                ProgressStyle::with_template(&format!(
-                    "{} {{bar:40}} {{pos}}/{{len}} iterations ({{eta}})",
-                    label
-                ))
-                .unwrap()
-                .progress_chars("##-"),
-            )
+            matrix_util::progress::new_progress_bar(num_iter as u64)
+                .with_message(format!("{label} iterations"))
         });
         for _opt_iter in 0..num_iter {
             #[cfg(debug_assertions)]
@@ -355,14 +349,8 @@ pub(super) fn optimize(
     // keeps the assembled output from holding the full sufficient stats.
     let keep_stats = matches!(out_target, CalibrateTarget::All);
 
-    let prog = ProgressBar::new(n_blocks as u64).with_style(
-        ProgressStyle::with_template(&format!(
-            "{} {{bar:40}} {{pos}}/{{len}} gene-blocks ({{eta}})",
-            label
-        ))
-        .unwrap()
-        .progress_chars("##-"),
-    );
+    let prog = matrix_util::progress::new_progress_bar(n_blocks as u64)
+        .with_message(format!("{label} gene-blocks"));
 
     let mut mu_obs: Vec<GammaMatrix> = Vec::with_capacity(n_blocks);
     let mut mu_adj: Vec<GammaMatrix> = Vec::new();

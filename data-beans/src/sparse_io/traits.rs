@@ -12,6 +12,7 @@ pub const ROW_SEP: &str = "_";
 
 use super::helpers::*;
 
+use crate::sparse_data_visitors::styled_progress_bar;
 use clap::ValueEnum;
 use indicatif::ParallelProgressIterator;
 use log::info;
@@ -357,7 +358,7 @@ pub trait SparseIo: Sync + Send {
 
             (0..nblock)
                 .into_par_iter()
-                .progress_count(nblock as u64)
+                .progress_with(styled_progress_bar(nblock as u64, "blocks"))
                 .map(|b| {
                     let lb: u64 = (b * block_size) as u64;
                     let ub: u64 = ((b + 1) * block_size).min(ncol) as u64;
@@ -468,7 +469,7 @@ pub trait SparseIo: Sync + Send {
 
             (0..nblock)
                 .into_par_iter()
-                .progress_count(nblock as u64)
+                .progress_with(styled_progress_bar(nblock as u64, "blocks"))
                 .map(|b| {
                     let lb = (b * block_size) as u64;
                     let ub = ((b + 1) * block_size).min(ncol) as u64;
