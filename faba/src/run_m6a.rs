@@ -11,7 +11,9 @@ use crate::editing::pipeline::{
     find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, M6aContrastArgs,
 };
 use crate::editing::sifter::ModificationType;
-use crate::pipeline_util::{check_all_bam_indices, resolve_modality_gene_qc, GeneQcRequest};
+use crate::pipeline_util::{
+    check_all_bam_indices, resolve_modality_gene_qc, resolve_umi_tag, GeneQcRequest,
+};
 use crate::snp::io::load_snp_mask_from_parquet;
 
 use genomic_data::gff::GeneType as GffGeneType;
@@ -685,6 +687,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             bam_files: &qc_bam_files,
             cell_barcode_tag: &args.cell_barcode_tag,
             gene_barcode_tag: &args.gene_barcode_tag,
+            umi_tag: resolve_umi_tag(args.no_umi_dedup, &args.umi_tag),
             gff_file: Some(&args.gff_file),
             gene_min_cells: args.gene_min_cells,
             gene_min_counts: args.gene_min_counts,

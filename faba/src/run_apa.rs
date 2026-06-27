@@ -3,7 +3,7 @@ use crate::apa::likelihood::*;
 use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteArgs;
 use crate::data::util_htslib::*;
-use crate::pipeline_util::{resolve_gene_qc, GeneQcRequest};
+use crate::pipeline_util::{resolve_gene_qc, resolve_umi_tag, GeneQcRequest};
 
 use genomic_data::gff::{FeatureType as GffFeatureType, GeneId, GeneType as GffGeneType};
 use genomic_data::sam::CellBarcode;
@@ -576,6 +576,7 @@ pub fn run_apa(args: &mut CountApaArgs) -> anyhow::Result<()> {
             bam_files: &args.bam_files,
             cell_barcode_tag: &args.cell_barcode_tag,
             gene_barcode_tag: &args.gene_barcode_tag,
+            umi_tag: resolve_umi_tag(args.no_umi_dedup, &args.umi_tag),
             gff_file: args.gff_file.as_deref(),
             gene_min_cells: args.gene_min_cells,
             gene_min_counts: args.gene_min_counts,

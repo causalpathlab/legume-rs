@@ -26,6 +26,18 @@ pub fn run_simple(
         .collect();
     let mut all_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
     let cell_call = args.cell_qc.params();
+    let umi_tag = args.umi_dedup_tag();
+    let mito_keys = crate::pipeline_util::mito_gene_keys(&records, &args.mito_chr);
+    info!(
+        "{} mitochondrial gene(s) on {} ({})",
+        mito_keys.len(),
+        args.mito_chr,
+        if args.keep_mito {
+            "kept in matrix"
+        } else {
+            "excluded from matrix"
+        }
+    );
 
     for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
         let njobs = records.len() as u64;
@@ -40,6 +52,7 @@ pub fn run_simple(
                     rec,
                     &args.cell_barcode_tag,
                     &args.gene_barcode_tag,
+                    umi_tag,
                 )
             })
             .collect::<anyhow::Result<Vec<_>>>()?
@@ -62,6 +75,27 @@ pub fn run_simple(
             passing_cells.len(),
             cell_call.filter
         );
+
+        // Mitochondrial QC: report per-cell MT fraction (from full pre-filter
+        // counts), optionally drop high-MT cells, and exclude MT genes from the
+        // matrix unless --keep-mito.
+        let mt_stats = crate::pipeline_util::mito_cell_stats(
+            &[&gene_level_stats],
+            &passing_cells,
+            &mito_keys,
+        );
+        crate::pipeline_util::write_mt_qc(&args.output, batch_name, &mt_stats)?;
+        let passing_cells =
+            crate::pipeline_util::apply_mito_filter(passing_cells, &mt_stats, args.max_mito_frac);
+        let passing_genes: rustc_hash::FxHashSet<Box<str>> = if args.keep_mito {
+            passing_genes
+        } else {
+            passing_genes
+                .into_iter()
+                .filter(|gk| !mito_keys.contains(gk))
+                .collect()
+        };
+
         let gene_level_stats: Vec<(CellBarcode, Box<str>, f32)> = gene_level_stats
             .into_par_iter()
             .filter(|(cb, feat, _)| {
@@ -122,6 +156,18 @@ pub fn run_splice_aware(
         .map(|rec| (format_gene_key(rec), rec.gene_id.clone()))
         .collect();
     let mut all_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
+    let umi_tag = args.umi_dedup_tag();
+    let mito_keys = crate::pipeline_util::mito_gene_keys(&records, &args.mito_chr);
+    info!(
+        "{} mitochondrial gene(s) on {} ({})",
+        mito_keys.len(),
+        args.mito_chr,
+        if args.keep_mito {
+            "kept in matrix"
+        } else {
+            "excluded from matrix"
+        }
+    );
 
     for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
         let njobs = records.len() as u64;
@@ -140,6 +186,7 @@ pub fn run_splice_aware(
                     &exon_intervals,
                     &args.cell_barcode_tag,
                     &args.gene_barcode_tag,
+                    umi_tag,
                 )
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -175,6 +222,26 @@ pub fn run_splice_aware(
             passing_cells.len(),
             cell_call.filter
         );
+
+        // Mitochondrial QC: report per-cell MT fraction (from full pre-filter
+        // counts), optionally drop high-MT cells, and exclude MT genes from the
+        // matrix unless --keep-mito.
+        let mt_stats = crate::pipeline_util::mito_cell_stats(
+            &[&spliced_triplets, &unspliced_triplets],
+            &passing_cells,
+            &mito_keys,
+        );
+        crate::pipeline_util::write_mt_qc(&args.output, batch_name, &mt_stats)?;
+        let passing_cells =
+            crate::pipeline_util::apply_mito_filter(passing_cells, &mt_stats, args.max_mito_frac);
+        let passing_genes: rustc_hash::FxHashSet<Box<str>> = if args.keep_mito {
+            passing_genes
+        } else {
+            passing_genes
+                .into_iter()
+                .filter(|gk| !mito_keys.contains(gk))
+                .collect()
+        };
 
         let keep =
             |triplets: Vec<(CellBarcode, Box<str>, f32)>| -> Vec<(CellBarcode, Box<str>, f32)> {
