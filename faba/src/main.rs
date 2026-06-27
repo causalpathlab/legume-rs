@@ -414,10 +414,7 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    if cli.verbose {
-        std::env::set_var("RUST_LOG", "info,hnsw_rs=warn");
-    }
-    env_logger::init();
+    auxiliary_data::logging::init_logger(cli.verbose);
 
     match cli.commands {
         Commands::DartSeq(ref args) => run_m6a(args)?,

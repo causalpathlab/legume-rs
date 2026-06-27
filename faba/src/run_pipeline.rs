@@ -5,7 +5,7 @@ use crate::editing::mask::{build_atoi_mask, filter_conversion_sites_by_mask, fil
 use crate::editing::mixture::MixtureParams;
 use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::{
-    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams,
+    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, M6aContrastArgs,
 };
 use crate::editing::sifter::ModificationType;
 use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key};
@@ -71,6 +71,21 @@ pub struct PipelineArgs {
         help = "Output directory (flat structure)"
     )]
     pub output: Box<str>,
+
+    #[arg(
+        long = "control-bam",
+        alias = "mut",
+        alias = "control",
+        value_delimiter = ',',
+        help = "Control BAM files (catalytically-dead YTHmut) for the m6A contrast",
+        long_help = "Comma-separated control (catalytically-dead YTHmut) BAM files.\n\
+                     m6A is called by a WT-vs-MUT contrast: the signal arm is the\n\
+                     positional BAMs MINUS these controls. SNP/genes/ATOI/APA still\n\
+                     use all positional BAMs. Optional, but the m6A (DART) step is\n\
+                     skipped without it — m6A cannot be separated from genomic C/T\n\
+                     variation without a control."
+    )]
+    pub control_bam_files: Vec<Box<str>>,
 
     // === Shared parameters ===
     #[arg(long, default_value = "CB", help = "Cell barcode tag")]
@@ -192,6 +207,15 @@ pub struct PipelineArgs {
         help = "m6A detection FDR target (Benjamini-Hochberg q-value)"
     )]
     pub m6a_pvalue_cutoff: f32,
+
+    #[command(flatten)]
+    pub m6a_contrast: M6aContrastArgs,
+
+    /// Apply the SNP mask to m6A calls. Off by default: with the WT-vs-MUT
+    /// contrast a genomic variant is rejected automatically, so the mask is
+    /// redundant (and was over-aggressive).
+    #[arg(long = "m6a-snp-mask", default_value_t = false)]
+    pub m6a_snp_mask: bool,
 
     // === Mixture model weighting (shared by m6A and A-to-I) ===
     #[arg(
@@ -317,6 +341,7 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
 
     // Validate inputs
     check_all_bam_indices(&args.bam_files)?;
+    check_all_bam_indices(&args.control_bam_files)?;
 
     let n_steps = 5;
 
@@ -381,12 +406,21 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
         info!("=== Step 3/{}: SKIPPED (--skip-apa) ===", n_steps);
     }
 
-    // Step 4: m6A (DART) detection — reference-anchored, single-sample
-    // (motif-anchored C→T tested vs the sequencing-error null), like ATOI.
-    info!("=== Step 4/{}: m6A detection ===", n_steps);
-    match run_dart_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
-        Ok(_) => info!("m6A complete"),
-        Err(e) => log::warn!("m6A step failed: {}", e),
+    // Step 4: m6A (DART) detection — WT-vs-MUT contrast at motif Cs (signal arm =
+    // positional BAMs minus --control-bam, tested against the pooled control).
+    // Requires a control; skipped (not failed) when none is supplied so the rest
+    // of the pipeline (genes/SNP/ATOI/APA) can run control-free.
+    if args.control_bam_files.is_empty() {
+        info!(
+            "=== Step 4/{}: SKIPPED (m6A needs --control-bam for the WT-vs-MUT contrast) ===",
+            n_steps
+        );
+    } else {
+        info!("=== Step 4/{}: m6A detection ===", n_steps);
+        match run_dart_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
+            Ok(_) => info!("m6A complete"),
+            Err(e) => log::warn!("m6A step failed: {}", e),
+        }
     }
 
     write_pipeline_summary(args)?;
@@ -497,7 +531,7 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
         // Splice-aware counting via par_iter
         let results: Vec<_> = records
             .par_iter()
-            .progress_count(njobs)
+            .progress_with(new_progress_bar(njobs))
             .map(|rec| {
                 count_read_per_gene_splice(
                     bam_file,
@@ -601,8 +635,9 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
         // reuse it via --valid-cells.
         crate::pipeline_util::write_qc_cells(&args.output, batch_name, &passing_cells)?;
 
-        // Per-batch retained cells (NOT a global union — barcodes collide across libraries)
-        cells_by_batch.insert(batch_name.clone(), passing_cells);
+        // Per-batch retained cells (NOT a global union — barcodes collide across
+        // libraries). Keyed by BAM file path (stable + order-independent).
+        cells_by_batch.insert(bam_file.clone(), passing_cells);
     }
 
     // Pooled retained genes (shared feature vocabulary) for --valid-genes reuse.
@@ -674,6 +709,8 @@ fn run_atoi_step(
         } else {
             Some(args.umi_tag.clone())
         },
+        // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
+        mut_bam_files: Vec::new(),
     };
 
     // Find ATOI sites (first pass): reference-anchored A→G / T→C calls, each
@@ -838,11 +875,33 @@ fn run_dart_step(
         info!("Loaded {} genes (no expression filter)", gff_map.len());
     }
 
+    // m6A is a WT-vs-MUT contrast: the signal (wt) arm is the positional BAMs
+    // MINUS the control set; the control (mut) arm is --control-bam. (SNP/genes/
+    // ATOI/APA used all positional BAMs upstream.)
+    let control_set: FxHashSet<&str> = args.control_bam_files.iter().map(|s| s.as_ref()).collect();
+    let signal_bam_files: Vec<Box<str>> = args
+        .bam_files
+        .iter()
+        .filter(|b| !control_set.contains(b.as_ref()))
+        .cloned()
+        .collect();
+    if signal_bam_files.is_empty() {
+        anyhow::bail!("no m6A signal BAMs: every positional BAM is also in --control-bam");
+    }
+    info!(
+        "m6A contrast: {} signal (wt) vs {} control (mut) BAMs",
+        signal_bam_files.len(),
+        args.control_bam_files.len()
+    );
+
     // Build ConversionParams for m6A (DART)
     let params = ConversionParams {
-        mod_type: ModificationType::M6A { check_r_site: true },
+        mod_type: ModificationType::M6A {
+            check_r_site: true,
+            contrast: args.m6a_contrast.to_contrast(),
+        },
         genome_file: args.genome_file.clone(),
-        wt_bam_files: args.bam_files.clone(),
+        wt_bam_files: signal_bam_files,
         gene_barcode_tag: args.gene_barcode_tag.clone(),
         cell_barcode_tag: args.cell_barcode_tag.clone(),
         include_missing_barcode: false,
@@ -871,6 +930,7 @@ fn run_dart_step(
         } else {
             Some(args.umi_tag.clone())
         },
+        mut_bam_files: args.control_bam_files.clone(),
     };
 
     // Find m6A sites (first pass)
@@ -892,17 +952,21 @@ fn run_dart_step(
         );
     }
 
-    // Apply SNP mask if available
-    if let Some(ref mask) = snp_mask {
-        let n_before: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
-        filter_m6a_by_mask(&m6a_sites, mask, &gff_map);
-        let n_after: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
-        info!(
-            "SNP masking: {} → {} m6A sites ({} removed)",
-            n_before,
-            n_after,
-            n_before - n_after
-        );
+    // Apply SNP mask only if explicitly requested. Off by default: the WT-vs-MUT
+    // contrast already rejects genomic variants (equal in both arms), so the SNP
+    // mask is redundant here and was over-aggressive.
+    if args.m6a_snp_mask {
+        if let Some(ref mask) = snp_mask {
+            let n_before: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
+            filter_m6a_by_mask(&m6a_sites, mask, &gff_map);
+            let n_after: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
+            info!(
+                "SNP masking: {} → {} m6A sites ({} removed)",
+                n_before,
+                n_after,
+                n_before - n_after
+            );
+        }
     }
 
     // Save site annotations

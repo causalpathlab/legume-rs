@@ -141,7 +141,7 @@ pub fn collect_all_gene_counts(
     let results: Vec<_> = gff_map
         .records()
         .par_iter()
-        .progress_count(njobs)
+        .progress_with(new_progress_bar(njobs))
         .map(|rec| {
             count_reads_per_gene(bam_files, rec, cell_barcode_tag, gene_barcode_tag, min_mapq)
         })

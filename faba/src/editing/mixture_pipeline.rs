@@ -39,12 +39,16 @@ pub fn run_mixture_model(
     // with its batch index. Components are fit on the POOLED observations
     // (shared across replicates), but the per-cell counts are written out PER
     // BATCH, so the batch tag rides along to the output split.
-    let batch_names = uniq_batch_names(&params.wt_bam_files)?;
+    // Signal (wt) AND control (mut) batches: the mut mixture matrices are the
+    // background sanity check and feed gem (see `quant_bam_files`).
+    let quant_bam_files = params.quant_bam_files();
+    let batch_names = uniq_batch_names(&quant_bam_files)?;
 
     let mut fit_stats: Vec<(usize, CellBarcode, BedWithGene, ConversionData)> = Vec::new();
-    for (batch_idx, bam_file) in params.wt_bam_files.iter().enumerate() {
-        // Filter each batch by its own per-library called cell set.
-        let batch_valid_cells = valid_cells.and_then(|m| m.get(&batch_names[batch_idx]));
+    for (batch_idx, bam_file) in quant_bam_files.iter().enumerate() {
+        // Filter each batch by its own per-library called cell set, looked up by
+        // BAM file path (stable across the QC and quant passes).
+        let batch_valid_cells = valid_cells.and_then(|m| m.get(bam_file));
         let stats = gather_conversion_stats(
             gene_sites,
             params,

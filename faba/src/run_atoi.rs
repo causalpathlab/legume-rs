@@ -344,6 +344,8 @@ impl From<&AtoICountArgs> for ConversionParams {
             } else {
                 Some(args.umi_tag.clone())
             },
+            // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
+            mut_bam_files: Vec::new(),
         }
     }
 }

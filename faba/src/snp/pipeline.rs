@@ -104,78 +104,81 @@ pub fn pileup_known_snps_by_gene(
     let arc_sites = Arc::new(Mutex::new(Vec::<SnpSite>::new()));
     let gene_site_map = Arc::new(DashMap::<GeneId, Vec<SnpSite>>::default());
 
-    records.par_iter().progress_count(njobs).try_for_each_init(
-        crate::data::bam_io::BamReaderCache::new,
-        |cache, rec| -> anyhow::Result<()> {
-            let chr = rec.seqname.as_ref();
+    records
+        .par_iter()
+        .progress_with(new_progress_bar(njobs))
+        .try_for_each_init(
+            crate::data::bam_io::BamReaderCache::new,
+            |cache, rec| -> anyhow::Result<()> {
+                let chr = rec.seqname.as_ref();
 
-            let chr_snps = match known_snps.by_chr.get(chr) {
-                Some(m) => m,
-                None => return Ok(()),
-            };
+                let chr_snps = match known_snps.by_chr.get(chr) {
+                    Some(m) => m,
+                    None => return Ok(()),
+                };
 
-            let gene_lb = (rec.start - 1).max(0);
-            let gene_ub = rec.stop;
-            let gene_positions: FxHashSet<i64> = chr_snps
-                .keys()
-                .filter(|&&p| p >= gene_lb && p < gene_ub)
-                .copied()
-                .collect();
+                let gene_lb = (rec.start - 1).max(0);
+                let gene_ub = rec.stop;
+                let gene_positions: FxHashSet<i64> = chr_snps
+                    .keys()
+                    .filter(|&&p| p >= gene_lb && p < gene_ub)
+                    .copied()
+                    .collect();
 
-            if gene_positions.is_empty() {
-                return Ok(());
-            }
-
-            let mut freq_map = params.new_freq_map();
-            freq_map.set_position_filter(gene_positions.clone());
-
-            for bam_file in &params.bam_files {
-                freq_map.update_from_gene_cached(
-                    cache,
-                    bam_file,
-                    rec,
-                    &params.gene_barcode_tag,
-                    params.include_missing_barcode,
-                )?;
-            }
-
-            let freq = freq_map
-                .marginal_frequency_map()
-                .ok_or_else(|| anyhow::anyhow!("expected marginal frequency map"))?;
-            let qual_map = freq_map.quality_map();
-
-            let mut local_sites = Vec::new();
-            for &pos in &gene_positions {
-                if let Some(&(ref_allele, alt_allele, ref rsid)) = chr_snps.get(&pos) {
-                    let counts = freq.get(&pos).cloned().unwrap_or_default();
-                    let qual = qual_map.get(&pos);
-                    let site = genotype_site(
-                        SiteInput {
-                            chr: chr.into(),
-                            pos,
-                            ref_allele,
-                            alt_allele,
-                            rsid: rsid.clone(),
-                            counts,
-                            qual: qual.cloned(),
-                        },
-                        &params.genotype_params,
-                    );
-                    local_sites.push(site);
+                if gene_positions.is_empty() {
+                    return Ok(());
                 }
-            }
 
-            if !local_sites.is_empty() {
-                gene_site_map
-                    .entry(rec.gene_id.clone())
-                    .or_default()
-                    .extend(local_sites.clone());
-                arc_sites.lock().expect("lock").extend(local_sites);
-            }
+                let mut freq_map = params.new_freq_map();
+                freq_map.set_position_filter(gene_positions.clone());
 
-            Ok(())
-        },
-    )?;
+                for bam_file in &params.bam_files {
+                    freq_map.update_from_gene_cached(
+                        cache,
+                        bam_file,
+                        rec,
+                        &params.gene_barcode_tag,
+                        params.include_missing_barcode,
+                    )?;
+                }
+
+                let freq = freq_map
+                    .marginal_frequency_map()
+                    .ok_or_else(|| anyhow::anyhow!("expected marginal frequency map"))?;
+                let qual_map = freq_map.quality_map();
+
+                let mut local_sites = Vec::new();
+                for &pos in &gene_positions {
+                    if let Some(&(ref_allele, alt_allele, ref rsid)) = chr_snps.get(&pos) {
+                        let counts = freq.get(&pos).cloned().unwrap_or_default();
+                        let qual = qual_map.get(&pos);
+                        let site = genotype_site(
+                            SiteInput {
+                                chr: chr.into(),
+                                pos,
+                                ref_allele,
+                                alt_allele,
+                                rsid: rsid.clone(),
+                                counts,
+                                qual: qual.cloned(),
+                            },
+                            &params.genotype_params,
+                        );
+                        local_sites.push(site);
+                    }
+                }
+
+                if !local_sites.is_empty() {
+                    gene_site_map
+                        .entry(rec.gene_id.clone())
+                        .or_default()
+                        .extend(local_sites.clone());
+                    arc_sites.lock().expect("lock").extend(local_sites);
+                }
+
+                Ok(())
+            },
+        )?;
 
     let mut sites = Arc::try_unwrap(arc_sites)
         .map_err(|_| anyhow::anyhow!("failed to release sites"))?
@@ -206,7 +209,7 @@ pub fn pileup_known_snps_by_region(
 
     chromosomes
         .par_iter()
-        .progress_count(njobs)
+        .progress_with(new_progress_bar(njobs))
         .try_for_each_init(
             crate::data::bam_io::BamReaderCache::new,
             |cache, chr| -> anyhow::Result<()> {
@@ -295,88 +298,91 @@ pub fn discover_snps_by_gene(
     let arc_sites = Arc::new(Mutex::new(Vec::<SnpSite>::new()));
     let gene_site_map = Arc::new(DashMap::<GeneId, Vec<SnpSite>>::default());
 
-    records.par_iter().progress_count(njobs).try_for_each_init(
-        || {
-            let faidx = load_fasta_index(&params.genome_file)
-                .expect("fasta index validated upfront; load per worker thread");
-            let cache = crate::data::bam_io::BamReaderCache::new();
-            (faidx, cache)
-        },
-        |(faidx, cache), rec| -> anyhow::Result<()> {
-            let chr = rec.seqname.as_ref();
+    records
+        .par_iter()
+        .progress_with(new_progress_bar(njobs))
+        .try_for_each_init(
+            || {
+                let faidx = load_fasta_index(&params.genome_file)
+                    .expect("fasta index validated upfront; load per worker thread");
+                let cache = crate::data::bam_io::BamReaderCache::new();
+                (faidx, cache)
+            },
+            |(faidx, cache), rec| -> anyhow::Result<()> {
+                let chr = rec.seqname.as_ref();
 
-            // Pileup all positions in the gene (no position filter)
-            let mut freq_map = params.new_freq_map();
+                // Pileup all positions in the gene (no position filter)
+                let mut freq_map = params.new_freq_map();
 
-            for bam_file in &params.bam_files {
-                freq_map.update_from_gene_cached(
-                    cache,
-                    bam_file,
-                    rec,
-                    &params.gene_barcode_tag,
-                    params.include_missing_barcode,
-                )?;
-            }
-
-            let freq = freq_map
-                .marginal_frequency_map()
-                .ok_or_else(|| anyhow::anyhow!("expected marginal frequency map"))?;
-            let qual_map = freq_map.quality_map();
-
-            let gp = &params.genotype_params;
-            let mut local_sites = Vec::new();
-
-            for (&pos, counts) in freq {
-                let depth = counts.total();
-                if depth < gp.min_coverage {
-                    continue;
+                for bam_file in &params.bam_files {
+                    freq_map.update_from_gene_cached(
+                        cache,
+                        bam_file,
+                        rec,
+                        &params.gene_barcode_tag,
+                        params.include_missing_barcode,
+                    )?;
                 }
 
-                let ref_dna = match fetch_reference_base(faidx, chr, pos)? {
-                    Some(b) => b,
-                    None => continue,
-                };
-                let ref_byte = ref_dna.to_byte();
+                let freq = freq_map
+                    .marginal_frequency_map()
+                    .ok_or_else(|| anyhow::anyhow!("expected marginal frequency map"))?;
+                let qual_map = freq_map.quality_map();
 
-                let (alt_byte, alt_count) = match find_top_alt_allele(counts, ref_byte) {
-                    Some(x) => x,
-                    None => continue,
-                };
+                let gp = &params.genotype_params;
+                let mut local_sites = Vec::new();
 
-                if alt_count < gp.min_alt_count {
-                    continue;
+                for (&pos, counts) in freq {
+                    let depth = counts.total();
+                    if depth < gp.min_coverage {
+                        continue;
+                    }
+
+                    let ref_dna = match fetch_reference_base(faidx, chr, pos)? {
+                        Some(b) => b,
+                        None => continue,
+                    };
+                    let ref_byte = ref_dna.to_byte();
+
+                    let (alt_byte, alt_count) = match find_top_alt_allele(counts, ref_byte) {
+                        Some(x) => x,
+                        None => continue,
+                    };
+
+                    if alt_count < gp.min_alt_count {
+                        continue;
+                    }
+                    if (alt_count as f64 / depth as f64) < gp.min_alt_freq {
+                        continue;
+                    }
+
+                    let qual = qual_map.get(&pos);
+                    let site = genotype_site(
+                        SiteInput {
+                            chr: chr.into(),
+                            pos,
+                            ref_allele: ref_byte,
+                            alt_allele: alt_byte,
+                            rsid: None,
+                            counts: counts.clone(),
+                            qual: qual.cloned(),
+                        },
+                        gp,
+                    );
+                    local_sites.push(site);
                 }
-                if (alt_count as f64 / depth as f64) < gp.min_alt_freq {
-                    continue;
+
+                if !local_sites.is_empty() {
+                    gene_site_map
+                        .entry(rec.gene_id.clone())
+                        .or_default()
+                        .extend(local_sites.clone());
+                    arc_sites.lock().expect("lock").extend(local_sites);
                 }
 
-                let qual = qual_map.get(&pos);
-                let site = genotype_site(
-                    SiteInput {
-                        chr: chr.into(),
-                        pos,
-                        ref_allele: ref_byte,
-                        alt_allele: alt_byte,
-                        rsid: None,
-                        counts: counts.clone(),
-                        qual: qual.cloned(),
-                    },
-                    gp,
-                );
-                local_sites.push(site);
-            }
-
-            if !local_sites.is_empty() {
-                gene_site_map
-                    .entry(rec.gene_id.clone())
-                    .or_default()
-                    .extend(local_sites.clone());
-                arc_sites.lock().expect("lock").extend(local_sites);
-            }
-
-            Ok(())
-        },
-    )?;
+                Ok(())
+            },
+        )?;
 
     let mut sites = Arc::try_unwrap(arc_sites)
         .map_err(|_| anyhow::anyhow!("failed to release sites"))?
@@ -406,81 +412,83 @@ pub fn discover_snps_by_region(params: &SnpParams) -> anyhow::Result<Vec<SnpSite
 
     let arc_sites = Arc::new(Mutex::new(Vec::<SnpSite>::new()));
 
-    jobs.par_iter().progress_count(njobs).try_for_each_init(
-        || {
-            let faidx = load_fasta_index(&params.genome_file)
-                .expect("fasta index validated upfront; load per worker thread");
-            let cache = crate::data::bam_io::BamReaderCache::new();
-            (faidx, cache)
-        },
-        |(faidx, cache), (chr, start, stop)| -> anyhow::Result<()> {
-            let bed = Bed {
-                chr: chr.clone(),
-                start: *start,
-                stop: *stop,
-            };
-
-            let mut freq_map = params.new_freq_map();
-
-            for bam_file in &params.bam_files {
-                freq_map.update_from_region_cached(cache, bam_file, &bed)?;
-            }
-
-            let freq = freq_map
-                .marginal_frequency_map()
-                .ok_or_else(|| anyhow::anyhow!("expected marginal frequency map"))?;
-            let qual_map = freq_map.quality_map();
-
-            let gp = &params.genotype_params;
-            let mut local_sites = Vec::new();
-
-            for (&pos, counts) in freq {
-                let depth = counts.total();
-                if depth < gp.min_coverage {
-                    continue;
-                }
-
-                let ref_dna = match fetch_reference_base(faidx, chr, pos)? {
-                    Some(b) => b,
-                    None => continue,
-                };
-                let ref_byte = ref_dna.to_byte();
-
-                let (alt_byte, alt_count) = match find_top_alt_allele(counts, ref_byte) {
-                    Some(x) => x,
-                    None => continue,
+    jobs.par_iter()
+        .progress_with(new_progress_bar(njobs))
+        .try_for_each_init(
+            || {
+                let faidx = load_fasta_index(&params.genome_file)
+                    .expect("fasta index validated upfront; load per worker thread");
+                let cache = crate::data::bam_io::BamReaderCache::new();
+                (faidx, cache)
+            },
+            |(faidx, cache), (chr, start, stop)| -> anyhow::Result<()> {
+                let bed = Bed {
+                    chr: chr.clone(),
+                    start: *start,
+                    stop: *stop,
                 };
 
-                if alt_count < gp.min_alt_count {
-                    continue;
+                let mut freq_map = params.new_freq_map();
+
+                for bam_file in &params.bam_files {
+                    freq_map.update_from_region_cached(cache, bam_file, &bed)?;
                 }
-                if (alt_count as f64 / depth as f64) < gp.min_alt_freq {
-                    continue;
+
+                let freq = freq_map
+                    .marginal_frequency_map()
+                    .ok_or_else(|| anyhow::anyhow!("expected marginal frequency map"))?;
+                let qual_map = freq_map.quality_map();
+
+                let gp = &params.genotype_params;
+                let mut local_sites = Vec::new();
+
+                for (&pos, counts) in freq {
+                    let depth = counts.total();
+                    if depth < gp.min_coverage {
+                        continue;
+                    }
+
+                    let ref_dna = match fetch_reference_base(faidx, chr, pos)? {
+                        Some(b) => b,
+                        None => continue,
+                    };
+                    let ref_byte = ref_dna.to_byte();
+
+                    let (alt_byte, alt_count) = match find_top_alt_allele(counts, ref_byte) {
+                        Some(x) => x,
+                        None => continue,
+                    };
+
+                    if alt_count < gp.min_alt_count {
+                        continue;
+                    }
+                    if (alt_count as f64 / depth as f64) < gp.min_alt_freq {
+                        continue;
+                    }
+
+                    let qual = qual_map.get(&pos);
+                    let site = genotype_site(
+                        SiteInput {
+                            chr: chr.clone(),
+                            pos,
+                            ref_allele: ref_byte,
+                            alt_allele: alt_byte,
+                            rsid: None,
+                            counts: counts.clone(),
+                            qual: qual.cloned(),
+                        },
+                        gp,
+                    );
+                    local_sites.push(site);
                 }
 
-                let qual = qual_map.get(&pos);
-                let site = genotype_site(
-                    SiteInput {
-                        chr: chr.clone(),
-                        pos,
-                        ref_allele: ref_byte,
-                        alt_allele: alt_byte,
-                        rsid: None,
-                        counts: counts.clone(),
-                        qual: qual.cloned(),
-                    },
-                    gp,
-                );
-                local_sites.push(site);
-            }
+                if !local_sites.is_empty() {
+                    arc_sites.lock().expect("lock").extend(local_sites);
+                }
 
-            if !local_sites.is_empty() {
-                arc_sites.lock().expect("lock").extend(local_sites);
-            }
-
-            Ok(())
-        },
-    )?;
+                Ok(())
+            },
+        )?;
 
     let mut sites = Arc::try_unwrap(arc_sites)
         .map_err(|_| anyhow::anyhow!("failed to release sites"))?
@@ -517,7 +525,7 @@ pub fn gather_snp_allele_counts_by_gene(
     called_sites
         .iter()
         .par_bridge()
-        .progress_count(called_sites.len() as u64)
+        .progress_with(new_progress_bar(called_sites.len() as u64))
         .try_for_each_init(
             crate::data::bam_io::BamReaderCache::new,
             |cache, entry| -> anyhow::Result<()> {

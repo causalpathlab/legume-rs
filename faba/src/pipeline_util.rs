@@ -111,6 +111,10 @@ where
 /// in two libraries denotes different cells, so they must not be unioned.
 pub struct GeneCountQc {
     pub gene_ids: rustc_hash::FxHashSet<GeneId>,
+    /// Per-library valid cells, keyed by **BAM file path** (stable and
+    /// order-independent). Basenames collide across 10x libraries
+    /// (`possorted_genome_bam.bam`), so a positional batch name would mis-key
+    /// between the QC pass and the quant pass when their BAM orderings differ.
     pub cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>>,
 }
 
@@ -242,7 +246,7 @@ pub fn run_gene_count_qc(
 
         let results: Vec<_> = records
             .par_iter()
-            .progress_count(njobs)
+            .progress_with(new_progress_bar(njobs))
             .map(|rec| {
                 count_read_per_gene_splice(
                     bam_file,
@@ -290,7 +294,8 @@ pub fn run_gene_count_qc(
             }
         }
 
-        cells_by_batch.insert(batch_name.clone(), passing_cells);
+        // Keyed by BAM file path (stable + order-independent across passes).
+        cells_by_batch.insert(bam_file.clone(), passing_cells);
     }
 
     let total_cells: usize = cells_by_batch.values().map(|s| s.len()).sum();
@@ -334,8 +339,7 @@ pub struct GeneQcRequest<'a> {
 /// structure; the caller applies the gene set however it filters.
 pub fn resolve_gene_qc(req: &GeneQcRequest) -> anyhow::Result<Option<GeneCountQc>> {
     if let Some(dir) = req.valid_cells_file {
-        let batch_names = uniq_batch_names(req.bam_files)?;
-        let cells_by_batch = load_valid_cells_dir(dir, &batch_names)?;
+        let cells_by_batch = load_valid_cells_dir(dir, req.bam_files)?;
         let gene_ids = match req.valid_genes_file {
             Some(gf) => load_valid_genes(gf)?,
             None => rustc_hash::FxHashSet::default(),
@@ -419,11 +423,14 @@ pub fn write_qc_genes(dir: &str, gene_ids: &rustc_hash::FxHashSet<GeneId>) -> an
 /// per-batch files are warned and skipped (that batch goes unfiltered).
 pub fn load_valid_cells_dir(
     dir: &str,
-    batch_names: &[Box<str>],
+    bam_files: &[Box<str>],
 ) -> anyhow::Result<rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>>> {
+    // Files are named by batch (`{batch}_cells.tsv.gz`), but the in-memory map is
+    // keyed by BAM file path so lookups are stable regardless of BAM ordering.
+    let batch_names = uniq_batch_names(bam_files)?;
     let mut out: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>> =
         rustc_hash::FxHashMap::default();
-    for batch in batch_names {
+    for (bam_file, batch) in bam_files.iter().zip(batch_names.iter()) {
         let path = format!("{}/{}_cells.tsv.gz", dir, batch);
         if !std::path::Path::new(&path).exists() {
             log::warn!(
@@ -443,7 +450,7 @@ pub fn load_valid_cells_dir(
             cells.len(),
             batch
         );
-        out.insert(batch.clone(), cells);
+        out.insert(bam_file.clone(), cells);
     }
     Ok(out)
 }

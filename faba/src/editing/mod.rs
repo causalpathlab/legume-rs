@@ -17,6 +17,10 @@ pub enum ConversionSite {
         m6a_pos: i64,
         conversion_pos: i64,
         wt_freq: DnaBaseCount,
+        /// MUT (catalytically-dead control) base counts at the conversion
+        /// position. The m6A call is `WT conversion > MUT conversion`, so this
+        /// is always populated for m6A sites.
+        mut_freq: DnaBaseCount,
         pv: f32,
         /// Benjamini-Hochberg q-value (set by the FDR pass; `1.0` until then)
         qv: f32,
@@ -25,6 +29,10 @@ pub enum ConversionSite {
     AtoI {
         editing_pos: i64,
         wt_freq: DnaBaseCount,
+        /// Unused for A-to-I (single-sample, reference-anchored): ADAR is active
+        /// in the YTHmut control too, so there is no control to contrast against.
+        /// Kept as an empty default for a uniform `ConversionSite` shape.
+        mut_freq: DnaBaseCount,
         pv: f32,
         /// Benjamini-Hochberg q-value (set by the FDR pass; `1.0` until then)
         qv: f32,
@@ -53,6 +61,15 @@ impl ConversionSite {
         match self {
             ConversionSite::M6A { wt_freq, .. } => wt_freq,
             ConversionSite::AtoI { wt_freq, .. } => wt_freq,
+        }
+    }
+
+    /// MUT (control) base frequencies at the conversion position. Populated for
+    /// m6A; an empty default for A-to-I (single-sample).
+    pub fn mut_freq(&self) -> &DnaBaseCount {
+        match self {
+            ConversionSite::M6A { mut_freq, .. } => mut_freq,
+            ConversionSite::AtoI { mut_freq, .. } => mut_freq,
         }
     }
 
