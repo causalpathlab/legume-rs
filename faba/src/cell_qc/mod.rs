@@ -80,7 +80,7 @@ impl Default for CellCallParams {
             expected_cells: 3000,
             ordmag_quantile: 0.99,
             ordmag_fraction: 0.10,
-            ed_fdr: 0.001,
+            ed_fdr: 0.01,
             ed_n_sims: 10_000,
             ed_ambient_lo: 45_000,
             ed_ambient_hi: 90_000,
@@ -117,7 +117,7 @@ pub struct CellQcArgs {
     pub cell_min_umis: usize,
 
     /// EmptyDrops Benjamini-Hochberg FDR cutoff
-    #[arg(long = "cell-fdr", default_value_t = 0.001)]
+    #[arg(long = "cell-fdr", default_value_t = 0.01)]
     pub cell_fdr: f64,
 
     /// EmptyDrops Monte-Carlo iterations
