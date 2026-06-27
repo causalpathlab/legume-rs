@@ -9,7 +9,10 @@ use crate::editing::pipeline::{
 };
 use crate::editing::sifter::ModificationType;
 use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key};
-use crate::pipeline_util::{check_all_bam_indices, extract_gene_key, qc_passing_keys, GeneCountQc};
+use crate::pipeline_util::{
+    accumulate_gene_stats, batch_qc, check_all_bam_indices, extract_gene_key,
+    passing_genes_from_stats, GeneCountQc,
+};
 use crate::snp::genotyper::GenotypeParams;
 use crate::snp::io::load_known_snps_auto;
 use crate::snp::pipeline::{run_snp_pipeline, SnpParams};
@@ -527,6 +530,11 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
     let mut expressed_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
     let mut cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>> =
         rustc_hash::FxHashMap::default();
+    // Gene stats pooled across batches → the shared vocabulary is thresholded
+    // once on these pooled stats; each batch's matrix is still filtered by its
+    // own passing set. See [`accumulate_gene_stats`] for why summing is exact.
+    let mut pooled_gene_stats: rustc_hash::FxHashMap<Box<str>, (usize, f64)> =
+        rustc_hash::FxHashMap::default();
     let cell_call = args.cell_qc.params();
     let umi_tag = crate::pipeline_util::resolve_umi_tag(args.no_umi_dedup, &args.umi_tag);
 
@@ -567,14 +575,21 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
             unspliced_triplets.len()
         );
 
-        // In-memory QC on total counts (per-batch cell calling)
-        let (passing_genes, passing_cells) = qc_passing_keys(
+        // In-memory QC: gene stats on total (spliced + unspliced), cell call
+        // spliced-only (per-batch).
+        let bq = batch_qc(
             &spliced_triplets,
-            args.gene_min_cells,
-            args.gene_min_counts,
+            &unspliced_triplets,
+            args.gene_min_counts > 0,
             args.cell_min_genes,
             &cell_call,
         );
+        let passing_cells = bq.passing_cells;
+        // This batch's matrix is filtered by its own passing genes; the shared
+        // vocabulary is pooled across batches and thresholded after the loop.
+        let passing_genes =
+            passing_genes_from_stats(&bq.gene_stats, args.gene_min_cells, args.gene_min_counts);
+        accumulate_gene_stats(&mut pooled_gene_stats, bq.gene_stats);
 
         info!(
             "{}: {} genes, {} cells passed QC",
@@ -633,13 +648,6 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
             batch_name, out.target_path
         );
 
-        // Map passing gene keys back to GeneIds (pooled across batches)
-        for gene_key in &passing_genes {
-            if let Some(gene_id) = gene_key_to_id.get(gene_key) {
-                expressed_gene_ids.insert(gene_id.clone());
-            }
-        }
-
         // Write this batch's passable cell set so standalone modality runs can
         // reuse it via --valid-cells.
         crate::pipeline_util::write_qc_cells(&args.output, batch_name, &passing_cells)?;
@@ -649,7 +657,15 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
         cells_by_batch.insert(bam_file.clone(), passing_cells);
     }
 
-    // Pooled retained genes (shared feature vocabulary) for --valid-genes reuse.
+    // Threshold the pooled gene stats once → shared feature vocabulary for
+    // --valid-genes reuse and downstream modality masking.
+    let passing_genes =
+        passing_genes_from_stats(&pooled_gene_stats, args.gene_min_cells, args.gene_min_counts);
+    for gene_key in &passing_genes {
+        if let Some(gene_id) = gene_key_to_id.get(gene_key) {
+            expressed_gene_ids.insert(gene_id.clone());
+        }
+    }
     crate::pipeline_util::write_qc_genes(&args.output, &expressed_gene_ids)?;
 
     let total_cells: usize = cells_by_batch.values().map(|s| s.len()).sum();
