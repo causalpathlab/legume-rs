@@ -9,7 +9,7 @@
 //! bar with consistent styling.
 
 use data_beans::sparse_io_vector::SparseIoVec;
-use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
+use indicatif::ParallelProgressIterator;
 use matrix_util::sparse_stat::SparseRunningStatistics;
 use matrix_util::utils::generate_minibatch_intervals;
 use rayon::prelude::*;
@@ -29,12 +29,8 @@ pub fn streaming_sparse_running_stats(
     let n_total = data_vec.num_columns();
     let jobs = generate_minibatch_intervals(n_total, n_features, block_size);
 
-    let tmpl = format!("{progress_label} {{bar:40}} {{pos}}/{{len}} blocks ({{eta}})");
-    let prog_bar = ProgressBar::new(jobs.len() as u64).with_style(
-        ProgressStyle::with_template(&tmpl)
-            .unwrap()
-            .progress_chars("##-"),
-    );
+    let prog_bar = matrix_util::progress::new_progress_bar(jobs.len() as u64)
+        .with_message(format!("{progress_label} blocks"));
 
     let stats: SparseRunningStatistics<f32> = jobs
         .par_iter()

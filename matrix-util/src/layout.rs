@@ -10,7 +10,6 @@
 
 use crate::knn_match::{ColumnDict, VecPoint};
 use crate::traits::RandomizedAlgs;
-use indicatif::{ProgressBar, ProgressStyle};
 use log::info;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
@@ -79,16 +78,6 @@ fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
             d * d
         })
         .sum()
-}
-
-fn new_progress_bar(len: u64) -> ProgressBar {
-    let prog_bar = ProgressBar::new(len);
-    if let Ok(style) = ProgressStyle::with_template(
-        "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({eta}) {msg}",
-    ) {
-        prog_bar.set_style(style.progress_chars("##-"));
-    }
-    prog_bar
 }
 
 pub struct PhateArgs {
@@ -234,7 +223,7 @@ fn smacof_2d(delta: &Mat, y_init: &Mat, max_iter: usize, tol: f32) -> Mat {
     let mut prev_stress = f32::INFINITY;
     let inv_n = 1.0 / n as f32;
 
-    let prog_bar = new_progress_bar(max_iter as u64);
+    let prog_bar = crate::progress::new_progress_bar(max_iter as u64);
     prog_bar.set_message("SMACOF");
     for _ in 0..max_iter {
         prog_bar.inc(1);

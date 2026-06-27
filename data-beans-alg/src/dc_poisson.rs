@@ -782,7 +782,6 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
     rng: &mut SmallRng,
     ctx: &RefineContext,
 ) -> usize {
-    use indicatif::{ProgressBar, ProgressStyle};
     let RefineContext {
         profiles,
         k,
@@ -812,14 +811,8 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
     };
 
     let max_sweeps = (params.num_gibbs + params.num_greedy) as u64;
-    let prog_bar = ProgressBar::new(max_sweeps).with_style(
-        ProgressStyle::with_template(&format!(
-            "{} {{bar:40}} {{pos}}/{{len}} sweeps ({{elapsed}}/{{eta}})",
-            level_label
-        ))
-        .unwrap()
-        .progress_chars("##-"),
-    );
+    let prog_bar = matrix_util::progress::new_progress_bar(max_sweeps)
+        .with_message(format!("{level_label} sweeps"));
     // Refresh on a timer so the bar visibly animates between sweep ticks
     // (a single sweep at large D can take several seconds — without this
     // the bar is silent until the next inc(1)).

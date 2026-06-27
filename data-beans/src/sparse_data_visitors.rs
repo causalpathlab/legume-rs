@@ -42,18 +42,16 @@ pub trait VisitColumnsOps {
         SharedOut: Sync + Send;
 }
 
-/// Shared bar template used by every par-over-column visitor so progress
-/// shows the same `Label {bar:40} {pos}/{len} units ({eta})` format across
-/// random projection, collapsing, and downstream column scans. Exported so
-/// downstream crates (data-beans-alg, senna) can reuse the same look.
+/// Shared bar used by every par-over-column visitor so progress shows the
+/// workspace-standard `[elapsed] bar pos/len (eta) <unit_label>` style across
+/// random projection, collapsing, and downstream column scans. Delegates to
+/// the canonical [`matrix_util::progress::new_progress_bar`] (single style,
+/// single `MULTI_PROGRESS`) and keeps the 500 ms steady tick so the bar
+/// animates even when a single block is slow. Exported so downstream crates
+/// (data-beans-alg, senna) can reuse the same look.
 pub fn styled_progress_bar(total: u64, unit_label: &str) -> indicatif::ProgressBar {
-    use indicatif::{ProgressBar, ProgressStyle};
-    let tmpl = format!("{{bar:40}} {{pos}}/{{len}} {} ({{eta}})", unit_label);
-    let prog_bar = ProgressBar::new(total).with_style(
-        ProgressStyle::with_template(&tmpl)
-            .unwrap()
-            .progress_chars("##-"),
-    );
+    let prog_bar =
+        matrix_util::progress::new_progress_bar(total).with_message(unit_label.to_string());
     prog_bar.enable_steady_tick(std::time::Duration::from_millis(500));
     prog_bar
 }

@@ -3,7 +3,6 @@
 use data_beans::sparse_data_visitors::*;
 use data_beans::sparse_io_stack::SparseIoStack;
 use data_beans::sparse_io_vector::SparseIoVec;
-use indicatif::{ProgressBar, ProgressStyle};
 use log::{info, warn};
 use matrix_param::dmatrix_gamma::*;
 use matrix_param::traits::Inference;

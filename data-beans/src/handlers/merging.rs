@@ -1,12 +1,12 @@
 use crate::handlers::transformation::{run_squeeze, RowAlignMode, RunSqueezeArgs};
 use crate::hdf5_io::*;
+use crate::sparse_data_visitors::styled_progress_bar;
 use crate::sparse_io::*;
 use crate::utilities::io_helpers::{read_col_names, read_row_names};
 
 use clap::Args;
 use data_beans::sparse_data_visitors::create_jobs;
 use data_beans::zarr_io::{apply_zip_flag, finalize_zarr_output, materialize_writable_backend};
-use indicatif::ProgressBar;
 use log::info;
 use matrix_util::common_io::*;
 use matrix_util::mtx_io;
@@ -349,7 +349,7 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     let mut out = create_sparse_streaming_empty(Some(&backend_file), Some(&backend))?;
     out.begin_streaming_csc((total_nrow, total_ncol, total_nnz))?;
 
-    let prog_bar = ProgressBar::new(num_batches as u64);
+    let prog_bar = styled_progress_bar(num_batches as u64, "batches");
     for h in &batches {
         let src = open_sparse_matrix(&h.path, &h.backend)?;
         let jobs = create_jobs(h.ncol, total_nrow, args.block_size);
@@ -604,7 +604,7 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
     info!("Sizing per-batch nnz ...");
     let mut batch_nnz: Vec<usize> = Vec::with_capacity(num_batches);
-    let pb1 = ProgressBar::new(num_batches as u64);
+    let pb1 = styled_progress_bar(num_batches as u64, "batches");
     for b in 0..num_batches {
         let row_names = read_row_names(row_files[b].clone(), args.num_feature_name_words)?;
         let (_nrow, _ncol, header_nnz) = mtx_io::read_mtx_header(&mtx_files[b])?;
@@ -655,7 +655,7 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
 
     let mut col_offset: u64 = 0;
     let mut nnz_offset: u64 = 0;
-    let pb2 = ProgressBar::new(num_batches as u64);
+    let pb2 = styled_progress_bar(num_batches as u64, "batches");
     for b in 0..num_batches {
         let row_names = read_row_names(row_files[b].clone(), args.num_feature_name_words)?;
         let (triplets, _shape) = mtx_io::read_mtx_triplets(&mtx_files[b].clone())?;

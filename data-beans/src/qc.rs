@@ -120,7 +120,7 @@ pub fn collect_stratified_row_stat_across_vec(
         let arc_stat = Arc::new(Mutex::new(&mut row_stat));
 
         jobs.par_iter()
-            .progress_count(jobs.len() as u64)
+            .progress_with(styled_progress_bar(jobs.len() as u64, "blocks"))
             .for_each(|&(lb, ub)| {
                 let cols_sub = cols[lb..ub].iter().cloned();
                 let csc = data
@@ -151,7 +151,7 @@ pub fn collect_row_stat(
     let jobs = create_jobs(data.num_columns().unwrap_or(0), nrows, block_size);
 
     jobs.par_iter()
-        .progress_count(jobs.len() as u64)
+        .progress_with(styled_progress_bar(jobs.len() as u64, "blocks"))
         .for_each(|&(lb, ub)| {
             let csc = data
                 .read_columns_csc((lb..ub).collect())
@@ -209,7 +209,7 @@ pub fn collect_column_stat(
     let jobs = create_jobs(ncols, nrows, block_size);
 
     jobs.par_iter()
-        .progress_count(jobs.len() as u64)
+        .progress_with(styled_progress_bar(jobs.len() as u64, "blocks"))
         .for_each(|&(lb, ub)| {
             let csc = data
                 .read_columns_csc((lb..ub).collect())
