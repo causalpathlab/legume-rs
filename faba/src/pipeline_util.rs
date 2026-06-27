@@ -126,42 +126,65 @@ pub fn extract_gene_key(feat: &str) -> &str {
         .unwrap_or(feat)
 }
 
-/// In-memory QC, computed on the **spliced** (mature, exonic) gene counts
-/// only — Cell Ranger calls cells from exonic gene-expression UMIs, and faba's
-/// unspliced/intronic layer is deliberately excluded from QC. Counts nnz per
-/// gene and per cell over `spliced`, applies the cell-calling policy, and
-/// returns the passing gene_keys + cell barcodes. (The caller still writes the
-/// unspliced counts to the backend for these passing cells/genes; they just
-/// don't influence which cells/genes pass.) A `gene_min_counts` of 0 disables
-/// the total-count threshold.
-pub fn qc_passing_keys(
+/// One batch's QC primitives, computed in a single pass over its triplets:
+///
+/// - `gene_stats`: per gene_key, the `(nnz, total)` = (# cells expressing it,
+///   summed counts) on the **total** (spliced + unspliced) track. `total` is
+///   only populated when [`batch_qc`] is asked for it. Owned keys so callers
+///   can accumulate them across batches (pooled gene QC) before thresholding.
+/// - `passing_cells`: the **spliced-only** cell call (Cell Ranger-faithful).
+pub struct BatchQc {
+    pub gene_stats: FxHashMap<Box<str>, (usize, f64)>,
+    pub passing_cells: rustc_hash::FxHashSet<CellBarcode>,
+}
+
+/// Compute one batch's [`BatchQc`]. The two QC layers are deliberately scoped
+/// differently:
+///
+/// - **Gene stats** count spliced + unspliced together, so a gene whose mass is
+///   entirely intronic (zero spliced, non-zero unspliced) is not dropped.
+/// - **Cell calling** stays spliced-only — Cell Ranger calls cells from exonic
+///   gene-expression UMIs, so the nnz floor and the cell-calling policy
+///   (OrdMag/EmptyDrops/…) both see only the spliced track.
+///
+/// `want_total` populates the per-gene summed counts (skip the extra pass when
+/// no min-count gate is set). Pass an empty `unspliced` slice for
+/// non-splice-aware callers (gene stats then cover the single `spliced` track).
+pub fn batch_qc(
     spliced: &[(CellBarcode, Box<str>, f32)],
-    gene_min_cells: usize,
-    gene_min_counts: usize,
+    unspliced: &[(CellBarcode, Box<str>, f32)],
+    want_total: bool,
     cell_min_genes: usize,
     cell_call: &crate::cell_qc::CellCallParams,
-) -> (
-    rustc_hash::FxHashSet<Box<str>>,
-    rustc_hash::FxHashSet<CellBarcode>,
-) {
-    // Collect unique (cell, gene_key) pairs using references (no per-triplet allocation)
-    let cell_gene_pairs: rustc_hash::FxHashSet<(&CellBarcode, &str)> = spliced
+) -> BatchQc {
+    // Unique (cell, gene_key) pairs on the spliced track. Hashed once and then
+    // reused for both QC layers: cell QC reads it as-is, gene QC folds the
+    // unspliced keys on top.
+    let spliced_pairs: rustc_hash::FxHashSet<(&CellBarcode, &str)> = spliced
         .par_iter()
         .map(|(cb, feat, _)| (cb, extract_gene_key(feat)))
         .collect();
 
-    // Single pass: count nnz per gene and per cell
-    let mut gene_nnz: FxHashMap<&str, usize> = FxHashMap::default();
+    // Cell nnz (spliced only).
     let mut cell_nnz: FxHashMap<&CellBarcode, usize> = FxHashMap::default();
-    for &(cb, gk) in &cell_gene_pairs {
-        *gene_nnz.entry(gk).or_default() += 1;
+    for &(cb, _) in &spliced_pairs {
         *cell_nnz.entry(cb).or_default() += 1;
     }
 
-    // Total counts per gene (sum over spliced triplets, not just unique cells)
-    let gene_total: FxHashMap<&str, f64> = if gene_min_counts > 0 {
+    // Gene nnz over spliced + unspliced: reuse the spliced pair-set and fold in
+    // the unspliced keys instead of re-hashing spliced.
+    let mut gene_cell_pairs = spliced_pairs;
+    gene_cell_pairs.extend(unspliced.iter().map(|(cb, feat, _)| (cb, extract_gene_key(feat))));
+
+    let mut gene_nnz: FxHashMap<&str, usize> = FxHashMap::default();
+    for &(_, gk) in &gene_cell_pairs {
+        *gene_nnz.entry(gk).or_default() += 1;
+    }
+
+    // Total counts per gene (spliced + unspliced), only when requested.
+    let gene_total: FxHashMap<&str, f64> = if want_total {
         let mut m: FxHashMap<&str, f64> = FxHashMap::default();
-        for (_, feat, v) in spliced.iter() {
+        for (_, feat, v) in spliced.iter().chain(unspliced.iter()) {
             *m.entry(extract_gene_key(feat)).or_default() += *v as f64;
         }
         m
@@ -169,14 +192,17 @@ pub fn qc_passing_keys(
         FxHashMap::default()
     };
 
-    let min_counts = gene_min_counts as f64;
-    let passing_genes: rustc_hash::FxHashSet<Box<str>> = gene_nnz
+    // Own the gene keys so the stats can be summed across batches.
+    let gene_stats: FxHashMap<Box<str>, (usize, f64)> = gene_nnz
         .into_iter()
-        .filter(|(_, n)| *n >= gene_min_cells)
-        .filter(|(gk, _)| {
-            gene_min_counts == 0 || gene_total.get(gk).copied().unwrap_or(0.0) >= min_counts
+        .map(|(gk, nnz)| {
+            let total = if want_total {
+                gene_total.get(gk).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            (Box::from(gk), (nnz, total))
         })
-        .map(|(gk, _)| Box::from(gk))
         .collect();
 
     // The `cell_min_genes` nnz floor always applies. Beyond it, the cell-calling
@@ -200,7 +226,72 @@ pub fn qc_passing_keys(
                 .collect()
         };
 
-    (passing_genes, passing_cells)
+    BatchQc {
+        gene_stats,
+        passing_cells,
+    }
+}
+
+/// Apply the gene thresholds to per-gene `(nnz, total)` stats. The same predicate
+/// serves a single batch ([`qc_passing_keys`]) or stats pooled across batches.
+/// A `gene_min_counts` of 0 disables the total-count threshold.
+pub fn passing_genes_from_stats(
+    gene_stats: &FxHashMap<Box<str>, (usize, f64)>,
+    gene_min_cells: usize,
+    gene_min_counts: usize,
+) -> rustc_hash::FxHashSet<Box<str>> {
+    let min_counts = gene_min_counts as f64;
+    gene_stats
+        .iter()
+        .filter(|(_, (nnz, _))| *nnz >= gene_min_cells)
+        .filter(|(_, (_, total))| gene_min_counts == 0 || *total >= min_counts)
+        .map(|(gk, _)| gk.clone())
+        .collect()
+}
+
+/// Fold one batch's [`BatchQc::gene_stats`] into a running pooled map, so the
+/// gene filter can be applied once on the whole dataset.
+///
+/// Summing per-batch `(nnz, total)` is exact: each cell belongs to exactly one
+/// library, so per-batch cell counts add up to the dataset-wide count per gene.
+/// Barcode *strings* can repeat across libraries (see [`GeneCountQc`]), but this
+/// sums per-gene counts rather than unioning barcodes, so the collisions are
+/// irrelevant here.
+pub fn accumulate_gene_stats(
+    pooled: &mut FxHashMap<Box<str>, (usize, f64)>,
+    batch_stats: FxHashMap<Box<str>, (usize, f64)>,
+) {
+    for (gene_key, (nnz, total)) in batch_stats {
+        let e = pooled.entry(gene_key).or_default();
+        e.0 += nnz;
+        e.1 += total;
+    }
+}
+
+/// Per-batch in-memory QC: thresholds one batch's gene stats and returns its
+/// cell call. Used by the `faba genes` writers, which filter each batch's matrix
+/// against its own passing set. The pooled-vocabulary paths instead accumulate
+/// [`batch_qc`] stats across batches and call [`passing_genes_from_stats`] once.
+pub fn qc_passing_keys(
+    spliced: &[(CellBarcode, Box<str>, f32)],
+    unspliced: &[(CellBarcode, Box<str>, f32)],
+    gene_min_cells: usize,
+    gene_min_counts: usize,
+    cell_min_genes: usize,
+    cell_call: &crate::cell_qc::CellCallParams,
+) -> (
+    rustc_hash::FxHashSet<Box<str>>,
+    rustc_hash::FxHashSet<CellBarcode>,
+) {
+    let bq = batch_qc(
+        spliced,
+        unspliced,
+        gene_min_counts > 0,
+        cell_min_genes,
+        cell_call,
+    );
+    let passing_genes = passing_genes_from_stats(&bq.gene_stats, gene_min_cells, gene_min_counts);
+    (passing_genes, bq.passing_cells)
 }
 
 /// Run in-memory gene count QC: count reads per gene (splice-aware),
@@ -241,6 +332,10 @@ pub fn run_gene_count_qc(
     let mut expressed_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
     let mut cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>> =
         rustc_hash::FxHashMap::default();
+    // Gene stats pooled across batches → thresholded once on the whole dataset
+    // (partition-invariant) rather than per-batch-then-union. See
+    // [`accumulate_gene_stats`] for why summing per-batch counts is exact.
+    let mut pooled_gene_stats: FxHashMap<Box<str>, (usize, f64)> = FxHashMap::default();
 
     for (bam_file, batch_name) in bam_files.iter().zip(batch_names.iter()) {
         let njobs = records.len() as u64;
@@ -277,30 +372,28 @@ pub fn run_gene_count_qc(
             unspliced_triplets.len()
         );
 
-        let (passing_genes, passing_cells) = qc_passing_keys(
+        let bq = batch_qc(
             &spliced_triplets,
-            gene_min_cells,
-            gene_min_counts,
+            &unspliced_triplets,
+            gene_min_counts > 0,
             cell_min_genes,
             cell_call,
         );
 
-        info!(
-            "{}: {} genes, {} cells passed QC",
-            batch_name,
-            passing_genes.len(),
-            passing_cells.len()
-        );
+        info!("{}: {} cells passed QC", batch_name, bq.passing_cells.len());
 
-        // Map passing gene keys back to GeneIds (pooled across batches)
-        for gene_key in &passing_genes {
-            if let Some(gene_id) = gene_key_to_id.get(gene_key) {
-                expressed_gene_ids.insert(gene_id.clone());
-            }
-        }
+        accumulate_gene_stats(&mut pooled_gene_stats, bq.gene_stats);
 
         // Keyed by BAM file path (stable + order-independent across passes).
-        cells_by_batch.insert(bam_file.clone(), passing_cells);
+        cells_by_batch.insert(bam_file.clone(), bq.passing_cells);
+    }
+
+    // Threshold the pooled gene stats once → shared gene vocabulary.
+    let passing_genes = passing_genes_from_stats(&pooled_gene_stats, gene_min_cells, gene_min_counts);
+    for gene_key in &passing_genes {
+        if let Some(gene_id) = gene_key_to_id.get(gene_key) {
+            expressed_gene_ids.insert(gene_id.clone());
+        }
     }
 
     let total_cells: usize = cells_by_batch.values().map(|s| s.len()).sum();
