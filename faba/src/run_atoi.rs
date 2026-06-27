@@ -6,7 +6,9 @@ use crate::editing::mixture::MixtureParams;
 use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::*;
 use crate::editing::sifter::ModificationType;
-use crate::pipeline_util::{check_all_bam_indices, resolve_modality_gene_qc, GeneQcRequest};
+use crate::pipeline_util::{
+    check_all_bam_indices, resolve_modality_gene_qc, resolve_umi_tag, GeneQcRequest,
+};
 use crate::snp::io::load_snp_mask_from_parquet;
 
 use genomic_data::gff::GeneType as GffGeneType;
@@ -388,6 +390,7 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
             bam_files: &args.bam_files,
             cell_barcode_tag: &args.cell_barcode_tag,
             gene_barcode_tag: &args.gene_barcode_tag,
+            umi_tag: resolve_umi_tag(args.no_umi_dedup, &args.umi_tag),
             gff_file: Some(&args.gff_file),
             gene_min_cells: args.gene_min_cells,
             gene_min_counts: args.gene_min_counts,

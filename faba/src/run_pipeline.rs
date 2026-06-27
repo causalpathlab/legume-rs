@@ -528,6 +528,7 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
     let mut cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>> =
         rustc_hash::FxHashMap::default();
     let cell_call = args.cell_qc.params();
+    let umi_tag = crate::pipeline_util::resolve_umi_tag(args.no_umi_dedup, &args.umi_tag);
 
     for (bam_file, batch_name) in all_bam_files.iter().zip(batch_names.iter()) {
         let njobs = records.len() as u64;
@@ -547,6 +548,7 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
                     &exon_intervals,
                     &args.cell_barcode_tag,
                     &args.gene_barcode_tag,
+                    umi_tag,
                 )
             })
             .collect::<anyhow::Result<Vec<_>>>()?;

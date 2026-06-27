@@ -212,6 +212,7 @@ pub fn run_gene_count_qc(
     bam_files: &[Box<str>],
     cell_barcode_tag: &str,
     gene_barcode_tag: &str,
+    umi_tag: Option<&[u8]>,
     gene_min_cells: usize,
     gene_min_counts: usize,
     cell_min_genes: usize,
@@ -258,6 +259,7 @@ pub fn run_gene_count_qc(
                     &exon_intervals,
                     cell_barcode_tag,
                     gene_barcode_tag,
+                    umi_tag,
                 )
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -315,6 +317,17 @@ pub fn run_gene_count_qc(
     })
 }
 
+/// Resolve a `--no-umi-dedup` / `--umi-tag` flag pair to the byte tag used for
+/// deduplication, or `None` when dedup is disabled. Shared by every subcommand
+/// that counts genes so the two flags resolve identically everywhere.
+pub fn resolve_umi_tag(no_umi_dedup: bool, umi_tag: &str) -> Option<&[u8]> {
+    if no_umi_dedup {
+        None
+    } else {
+        Some(umi_tag.as_bytes())
+    }
+}
+
 /// Inputs for [`resolve_gene_qc`]. Each modality runner builds one from its own
 /// args struct (the field names differ — e.g. apa's `gff_file` is optional and
 /// m6a counts over `wt_bam_files`), then the resolution logic is shared.
@@ -322,6 +335,8 @@ pub struct GeneQcRequest<'a> {
     pub bam_files: &'a [Box<str>],
     pub cell_barcode_tag: &'a str,
     pub gene_barcode_tag: &'a str,
+    /// UMI BAM tag for dedup during QC counting; `None` counts reads.
+    pub umi_tag: Option<&'a [u8]>,
     /// GFF for the recompute path; `None` skips recompute (reuse can still run).
     pub gff_file: Option<&'a str>,
     pub gene_min_cells: usize,
@@ -358,6 +373,7 @@ pub fn resolve_gene_qc(req: &GeneQcRequest) -> anyhow::Result<Option<GeneCountQc
                 req.bam_files,
                 req.cell_barcode_tag,
                 req.gene_barcode_tag,
+                req.umi_tag,
                 req.gene_min_cells,
                 req.gene_min_counts,
                 req.cell_min_genes,
@@ -419,6 +435,118 @@ pub fn write_qc_genes(dir: &str, gene_ids: &rustc_hash::FxHashSet<GeneId>) -> an
     write_lines(&lines, &path)?;
     info!("wrote {} retained genes to {}", lines.len(), path);
     Ok(())
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//                          Mitochondrial gene QC                             //
+////////////////////////////////////////////////////////////////////////////////
+
+/// `gene_key`s whose gene sits on a mitochondrial chromosome. `mito_chr_spec`
+/// is a comma-separated list of chromosome names matched case-insensitively
+/// against `GffRecord::seqname` (e.g. `"chrM,MT"`).
+pub fn mito_gene_keys(
+    records: &[GffRecord],
+    mito_chr_spec: &str,
+) -> rustc_hash::FxHashSet<Box<str>> {
+    let mito: rustc_hash::FxHashSet<String> = mito_chr_spec
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    records
+        .iter()
+        .filter(|r| mito.contains(&r.seqname.as_ref().to_ascii_lowercase()))
+        .map(format_gene_key)
+        .collect()
+}
+
+/// Accumulate per-cell `(mito_umi, total_umi)` over the passing cells from one
+/// or more triplet sets (e.g. spliced + unspliced). `total` sums every gene;
+/// `mito` sums only genes in `mito_keys`. Used for the MT-fraction QC metric.
+pub fn mito_cell_stats(
+    triplet_sets: &[&[(CellBarcode, Box<str>, f32)]],
+    passing_cells: &rustc_hash::FxHashSet<CellBarcode>,
+    mito_keys: &rustc_hash::FxHashSet<Box<str>>,
+) -> FxHashMap<CellBarcode, (f32, f32)> {
+    let mut stats: FxHashMap<CellBarcode, (f32, f32)> = FxHashMap::default();
+    for set in triplet_sets {
+        for (cb, feat, val) in set.iter() {
+            if !passing_cells.contains(cb) {
+                continue;
+            }
+            let e = stats.entry(cb.clone()).or_insert((0.0, 0.0));
+            e.1 += *val; // total
+            if mito_keys.contains(extract_gene_key(feat)) {
+                e.0 += *val; // mito
+            }
+        }
+    }
+    stats
+}
+
+/// Write `{dir}/{batch}_mt_qc.tsv.gz`: `barcode  total_umi  mt_umi  mt_frac`,
+/// one row per cell (sorted by barcode).
+pub fn write_mt_qc(
+    dir: &str,
+    batch_name: &str,
+    stats: &FxHashMap<CellBarcode, (f32, f32)>,
+) -> anyhow::Result<()> {
+    let mut rows: Vec<(&CellBarcode, f32, f32)> =
+        stats.iter().map(|(cb, (m, t))| (cb, *m, *t)).collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+    let mut lines: Vec<Box<str>> = Vec::with_capacity(rows.len() + 1);
+    lines.push("barcode\ttotal_umi\tmt_umi\tmt_frac".into());
+    for (cb, mt, tot) in rows {
+        let frac = if tot > 0.0 { mt / tot } else { 0.0 };
+        lines.push(format!("{}\t{}\t{}\t{:.6}", cb, tot, mt, frac).into());
+    }
+    let path = format!("{}/{}_mt_qc.tsv.gz", dir, batch_name);
+    write_lines(&lines, &path)?;
+    info!("wrote MT QC ({} cells) to {}", lines.len() - 1, path);
+    Ok(())
+}
+
+/// Log the MT-fraction distribution across `passing_cells` and, when
+/// `max_frac > 0`, drop cells whose fraction exceeds it (report-only at 0).
+/// Returns the retained cell set.
+pub fn apply_mito_filter(
+    passing_cells: rustc_hash::FxHashSet<CellBarcode>,
+    stats: &FxHashMap<CellBarcode, (f32, f32)>,
+    max_frac: f64,
+) -> rustc_hash::FxHashSet<CellBarcode> {
+    let frac_of = |cb: &CellBarcode| -> f64 {
+        match stats.get(cb) {
+            Some((m, t)) if *t > 0.0 => *m as f64 / *t as f64,
+            _ => 0.0,
+        }
+    };
+    let mut fracs: Vec<f64> = passing_cells.iter().map(&frac_of).collect();
+    if fracs.is_empty() {
+        return passing_cells;
+    }
+    fracs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = fracs[fracs.len() / 2];
+    let mean = fracs.iter().sum::<f64>() / fracs.len() as f64;
+    info!(
+        "MT fraction over {} cells: median {:.3}, mean {:.3}, max {:.3}",
+        fracs.len(),
+        median,
+        mean,
+        fracs[fracs.len() - 1]
+    );
+    if max_frac <= 0.0 {
+        return passing_cells; // report-only
+    }
+    let kept: rustc_hash::FxHashSet<CellBarcode> = passing_cells
+        .into_iter()
+        .filter(|cb| frac_of(cb) <= max_frac)
+        .collect();
+    info!(
+        "dropped {} cells with MT fraction > {:.3}",
+        fracs.len() - kept.len(),
+        max_frac
+    );
+    kept
 }
 
 /// Load a per-batch valid-cell set written by `faba genes` (one

@@ -143,6 +143,70 @@ pub struct GeneCountArgs {
                      Reads falling entirely within this buffer are discarded."
     )]
     pub(crate) intron_buffer: i64,
+
+    /// UMI BAM tag used for read deduplication
+    #[arg(
+        long = "umi-tag",
+        default_value = "UB",
+        help = "UMI BAM tag (for read dedup)",
+        long_help = "BAM tag holding the corrected UMI. Counts collapse to one\n\
+                     per (cell, gene, UMI) — matching Cell Ranger's molecule\n\
+                     counting. Standard 10x tag is \"UB\". Reads without this tag\n\
+                     are counted individually."
+    )]
+    pub(crate) umi_tag: Box<str>,
+
+    /// Disable UMI deduplication (count reads instead of molecules)
+    #[arg(
+        long = "no-umi-dedup",
+        default_value_t = false,
+        help = "Disable UMI deduplication (count reads, not molecules)",
+        long_help = "By default faba collapses reads sharing a (cell, gene, UMI)\n\
+                     into a single count (molecule counting, like Cell Ranger).\n\
+                     Use this flag to count every non-duplicate read instead."
+    )]
+    pub(crate) no_umi_dedup: bool,
+
+    /// Mitochondrial chromosome name(s), comma-separated
+    #[arg(
+        long = "mito-chr",
+        default_value = "chrM,chrMT,MT,M",
+        help = "Mitochondrial chromosome name(s) (comma-separated)",
+        long_help = "Genes on these chromosomes are treated as mitochondrial:\n\
+                     excluded from the count matrix (unless --keep-mito) and\n\
+                     summarized in the per-cell MT-fraction QC. Matched\n\
+                     case-insensitively against the GFF seqname."
+    )]
+    pub(crate) mito_chr: Box<str>,
+
+    /// Keep mitochondrial genes in the count matrix (default: exclude)
+    #[arg(
+        long = "keep-mito",
+        default_value_t = false,
+        help = "Keep mitochondrial genes in the count matrix",
+        long_help = "By default mitochondrial genes are dropped from the output\n\
+                     matrix (their per-cell MT fraction is still reported as QC).\n\
+                     Use this flag to retain them in the matrix."
+    )]
+    pub(crate) keep_mito: bool,
+
+    /// Drop cells whose mitochondrial fraction exceeds this (0 = report only)
+    #[arg(
+        long = "max-mito-frac",
+        default_value_t = 0.0,
+        help = "Drop cells with MT fraction above this (0 = report only)",
+        long_help = "Cells whose mitochondrial UMI fraction exceeds this value\n\
+                     are removed during QC. The default 0 disables the cut and\n\
+                     only reports MT statistics."
+    )]
+    pub(crate) max_mito_frac: f64,
+}
+
+impl GeneCountArgs {
+    /// Resolve the UMI tag for dedup: `None` disables it (count reads).
+    pub(crate) fn umi_dedup_tag(&self) -> Option<&[u8]> {
+        crate::pipeline_util::resolve_umi_tag(self.no_umi_dedup, &self.umi_tag)
+    }
 }
 
 pub fn run_gene_count(args: &GeneCountArgs) -> anyhow::Result<()> {
