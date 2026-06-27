@@ -70,6 +70,50 @@ pub struct ConversionParams {
     /// UMI BAM tag for read deduplication. `None` disables UMI dedup so
     /// every aligned read at a position contributes to the base counts.
     pub umi_tag: Option<Box<str>>,
+    /// MUT (catalytically-dead YTHmut) control BAMs for the m6A WT-vs-MUT
+    /// contrast. Pooled into one background. Empty for A-to-I (single-sample).
+    /// The contrast guards (coverage/effect-size/ρ) live on the
+    /// [`ModificationType::M6A`] arm's [`M6aContrast`], not here.
+    pub mut_bam_files: Vec<Box<str>>,
+}
+
+/// Shared clap args for the m6A WT-vs-MUT contrast guards (control-coverage
+/// floor + effect-size guards + LRT overdispersion). `#[command(flatten)]`-ed
+/// into both `faba dartseq` and `faba all` so the four knobs are defined once.
+/// The control BAM list itself is declared separately by each subcommand (its
+/// required-ness and positional split differ).
+#[derive(Args, Debug, Clone)]
+pub struct M6aContrastArgs {
+    /// m6A: minimum MUT (control) coverage to attempt a site. Soft floor only —
+    /// the WT-vs-MUT test already widens its uncertainty when control is thin, so
+    /// this just avoids calling with essentially no background to calibrate.
+    /// Foreground depth is governed separately by --min-coverage.
+    #[arg(long = "edit-control-min-coverage", default_value_t = 3)]
+    pub control_min_coverage: usize,
+
+    /// m6A: minimum absolute effect size (p_WT − p_MUT) to call a site
+    #[arg(long = "m6a-min-delta", default_value_t = 0.05)]
+    pub m6a_min_delta: f32,
+
+    /// m6A: minimum relative effect size (p_WT / p_MUT) to call a site
+    #[arg(long = "m6a-min-ratio", default_value_t = 2.0)]
+    pub m6a_min_ratio: f32,
+
+    /// m6A: overdispersion ρ for the two-sample beta-binomial LRT contrast
+    #[arg(long = "m6a-contrast-overdispersion", default_value_t = 0.02)]
+    pub m6a_contrast_overdispersion: f64,
+}
+
+impl M6aContrastArgs {
+    /// Build the sifter-side [`M6aContrast`] from these CLI args.
+    pub fn to_contrast(&self) -> M6aContrast {
+        M6aContrast {
+            min_control_coverage: self.control_min_coverage,
+            min_delta: self.m6a_min_delta,
+            min_ratio: self.m6a_min_ratio,
+            rho: self.m6a_contrast_overdispersion,
+        }
+    }
 }
 
 impl ConversionParams {
@@ -78,6 +122,18 @@ impl ConversionParams {
         if let Some(ref tag) = self.umi_tag {
             map.set_umi_tag(tag);
         }
+    }
+
+    /// BAMs that receive per-cell quantification in the second pass: the signal
+    /// (wt) samples AND the control (mut) samples. The mut matrices are a sanity
+    /// check (their m6A should read ~background) and still feed gem. For A-to-I
+    /// `mut_bam_files` is empty, so this is just the wt set.
+    pub fn quant_bam_files(&self) -> Vec<Box<str>> {
+        self.wt_bam_files
+            .iter()
+            .chain(self.mut_bam_files.iter())
+            .cloned()
+            .collect()
     }
 
     /// Create a ConversionSifter with these parameters
@@ -179,7 +235,7 @@ pub fn find_all_conversion_sites(
     gff_map
         .records()
         .par_iter()
-        .progress_count(njobs as u64)
+        .progress_with(new_progress_bar(njobs as u64))
         .try_for_each_init(
             || {
                 let faidx = load_fasta_index(&params.genome_file)
@@ -312,9 +368,30 @@ fn find_sites_with_bulk_stats(
         .marginal_frequency_map()
         .ok_or_else(|| anyhow::anyhow!("failed to count wt freq"))?;
 
-    // Reference-anchored single-sample editing call (beta-binomial vs error).
+    // Pooled MUT (control) frequencies for the m6A WT-vs-MUT contrast. Empty for
+    // A-to-I (single-sample) → skip piling the control BAMs and pass `None`,
+    // which routes the sifter to its reference-anchored beta-binomial path.
+    let mut mut_base_freq_map = DnaBaseFreqMap::new();
+    let mut_freq = if params.mut_bam_files.is_empty() {
+        None
+    } else {
+        mut_base_freq_map
+            .set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+        params.apply_umi(&mut mut_base_freq_map);
+        for mut_file in &params.mut_bam_files {
+            mut_base_freq_map.update_from_gene_cached(
+                cache,
+                mut_file,
+                gff_record,
+                &params.gene_barcode_tag,
+                params.include_missing_barcode,
+            )?;
+        }
+        mut_base_freq_map.marginal_frequency_map()
+    };
+
     let forward = matches!(strand, Strand::Forward);
-    sifter.scan(&positions, wt_freq, forward);
+    sifter.scan(&positions, wt_freq, mut_freq, forward);
 
     let mut candidate_sites = sifter.candidate_sites;
     candidate_sites.sort();
@@ -364,6 +441,29 @@ fn find_sites_with_celltype_stats(
     let forward = matches!(strand, Strand::Forward);
     let mut all_candidate_sites = Vec::new();
 
+    // Pooled MUT (control) background for the m6A contrast — the control is not
+    // stratified by cell type, so it is built once here and shared across all
+    // cell types (mirrors `find_sites_with_bulk_stats`). Empty ⇒ `None`, but
+    // A-to-I never reaches this m6A-only path.
+    let mut mut_base_freq_map = DnaBaseFreqMap::new();
+    let mut_freq = if params.mut_bam_files.is_empty() {
+        None
+    } else {
+        mut_base_freq_map
+            .set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
+        params.apply_umi(&mut mut_base_freq_map);
+        for mut_file in &params.mut_bam_files {
+            mut_base_freq_map.update_from_gene_cached(
+                cache,
+                mut_file,
+                gff_record,
+                &params.gene_barcode_tag,
+                params.include_missing_barcode,
+            )?;
+        }
+        mut_base_freq_map.marginal_frequency_map()
+    };
+
     // For each cell type, aggregate per-cell data into marginal frequencies
     for cell_type in &cell_types {
         use crate::data::dna::DnaBaseCount;
@@ -397,7 +497,7 @@ fn find_sites_with_celltype_stats(
         }
 
         let mut sifter = params.create_sifter(faidx_reader, chr, positions.len());
-        sifter.scan(&positions, &celltype_freq, forward);
+        sifter.scan(&positions, &celltype_freq, mut_freq, forward);
         all_candidate_sites.extend(sifter.candidate_sites);
     }
 
@@ -425,7 +525,7 @@ pub fn gather_conversion_stats(
     gene_sites
         .into_iter()
         .par_bridge()
-        .progress_count(gene_sites.len() as u64)
+        .progress_with(new_progress_bar(gene_sites.len() as u64))
         .try_for_each_init(
             crate::data::bam_io::BamReaderCache::new,
             |cache, gs| -> anyhow::Result<()> {
@@ -695,9 +795,12 @@ pub fn process_all_bam_files_to_backend(
     let mut sites = HashSet::<Box<str>>::default();
     let mut site_data_files: Vec<crate::pipeline_util::BackendOutputPath> = vec![];
 
-    let batch_names = uniq_batch_names(&params.wt_bam_files)?;
+    // Quantify the discovered sites in EVERY sample — signal (wt) AND control
+    // (mut); see `quant_bam_files`.
+    let all_bam_files = params.quant_bam_files();
+    let batch_names = uniq_batch_names(&all_bam_files)?;
 
-    for (bam_file, batch_name) in params.wt_bam_files.iter().zip(batch_names) {
+    for (bam_file, batch_name) in all_bam_files.iter().zip(batch_names) {
         process_bam_to_backend(
             bam_file,
             &batch_name,
@@ -756,8 +859,9 @@ fn process_bam_to_backend(
         bam_file
     );
 
-    // Each batch is filtered by ITS OWN called cell set (per-library knee).
-    let batch_valid_cells = ctx.valid_cell_barcodes.and_then(|m| m.get(batch_name));
+    // Each batch is filtered by ITS OWN called cell set (per-library knee),
+    // looked up by BAM file path (stable across the QC and quant passes).
+    let batch_valid_cells = ctx.valid_cell_barcodes.and_then(|m| m.get(bam_file));
 
     let stats = gather_conversion_stats(
         ctx.gene_sites,

@@ -33,7 +33,7 @@ pub fn run_simple(
 
         let gene_level_stats: Vec<(CellBarcode, Box<str>, f32)> = records
             .par_iter()
-            .progress_count(njobs)
+            .progress_with(new_progress_bar(njobs))
             .map(|rec| {
                 count_read_per_gene(
                     bam_file,
@@ -133,7 +133,7 @@ pub fn run_splice_aware(
 
         let results: Vec<SplicedUnsplicedTriplets> = records
             .par_iter()
-            .progress_count(njobs)
+            .progress_with(new_progress_bar(njobs))
             .map(|rec| {
                 count_read_per_gene_splice(
                     bam_file,

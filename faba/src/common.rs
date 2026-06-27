@@ -1,7 +1,7 @@
+pub use auxiliary_data::logging::new_progress_bar;
 pub use clap::{Args, Parser, Subcommand};
 pub use data_beans::qc::*;
 pub use data_beans::sparse_io::*;
-pub use env_logger;
 pub use genomic_data::gff::*;
 pub use genomic_data::sam::*;
 pub use indicatif::ParallelProgressIterator;

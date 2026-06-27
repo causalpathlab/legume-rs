@@ -8,7 +8,7 @@ use crate::editing::mask::{build_atoi_mask, filter_m6a_by_mask};
 use crate::editing::mixture::MixtureParams;
 use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::{
-    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams,
+    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, M6aContrastArgs,
 };
 use crate::editing::sifter::ModificationType;
 use crate::pipeline_util::{check_all_bam_indices, resolve_modality_gene_qc, GeneQcRequest};
@@ -26,12 +26,32 @@ pub struct DartSeqCountArgs {
         required = true,
         help = "Signal BAM files (APOBEC1-YTH fusion)",
         long_help = "Comma-separated list of signal (APOBEC1-YTH fusion) BAM files.\n\
-                     These contain the C->T conversions at m6A sites. Sites are\n\
-                     called reference-anchored: the edited fraction at each motif C\n\
-                     is tested against a beta-binomial sequencing-error null and\n\
-                     FDR-corrected — no catalytically-dead control sample is used."
+                     These contain the C->T conversions at m6A sites. Each motif C\n\
+                     is called by a WT-vs-MUT contrast against the --control-bam\n\
+                     samples (a genomic C/T variant converts equally in both arms\n\
+                     and is rejected); calls are FDR-corrected."
     )]
     pub wt_bam_files: Vec<Box<str>>,
+
+    #[arg(
+        short = 'm',
+        long = "control-bam",
+        alias = "mut",
+        alias = "control",
+        alias = "background",
+        value_delimiter = ',',
+        required = true,
+        help = "Control BAM files (catalytically-dead YTHmut)",
+        long_help = "Comma-separated list of control (catalytically-dead YTHmut) BAM\n\
+                     files, pooled into one background. m6A is called where the\n\
+                     signal BAMs show significantly higher C->T conversion than\n\
+                     these controls (two-sample test). Required: m6A cannot be\n\
+                     distinguished from genomic variation without a control."
+    )]
+    pub control_bam_files: Vec<Box<str>>,
+
+    #[command(flatten)]
+    pub m6a_contrast: M6aContrastArgs,
 
     #[arg(
         short = 'g',
@@ -549,6 +569,7 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             exact_barcode_match: args.exact_barcode_match,
             mod_type: ModificationType::M6A {
                 check_r_site: !args.no_check_r_site,
+                contrast: args.m6a_contrast.to_contrast(),
             },
             min_base_quality: 20,
             min_mapping_quality: 20,
@@ -560,12 +581,13 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             } else {
                 Some(args.umi_tag.clone())
             },
+            mut_bam_files: args.control_bam_files.clone(),
         }
     }
 }
 
 impl DartSeqCountArgs {
-    /// Create A-to-I ConversionParams from DartSeqCountArgs
+    /// Create A-to-I ConversionParams from DartSeqCountArgs (single-sample).
     fn atoi_params(&self) -> ConversionParams {
         ConversionParams {
             genome_file: self.genome_file.clone(),
@@ -599,6 +621,8 @@ impl DartSeqCountArgs {
             } else {
                 Some(self.umi_tag.clone())
             },
+            // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
+            mut_bam_files: Vec::new(),
         }
     }
 }
@@ -616,11 +640,18 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 
     // Validate inputs
     if args.wt_bam_files.is_empty() {
-        return Err(anyhow::anyhow!("need at least one BAM file"));
+        return Err(anyhow::anyhow!("need at least one signal BAM file"));
+    }
+    if args.control_bam_files.is_empty() {
+        return Err(anyhow::anyhow!(
+            "m6A requires control BAMs (--control-bam): the WT-vs-MUT contrast \
+             cannot separate m6A from genomic C/T variation without a control"
+        ));
     }
 
-    // Check all BAM indices
+    // Check all BAM indices (signal + control)
     check_all_bam_indices(&args.wt_bam_files)?;
+    check_all_bam_indices(&args.control_bam_files)?;
 
     // Load and filter GFF
     info!("parsing GFF file: {}", args.gff_file);
@@ -638,10 +669,20 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 
     // Gene expression QC: reuse a passed cell/gene set from `faba genes`, or
     // recompute it (per-batch cell calling).
+    // Cell-calling QC must cover EVERY quantified BAM — signal (wt) AND control
+    // (mut) — so control cells are filtered by their own per-library knee in the
+    // second pass (see `quant_bam_files`). The map is keyed by BAM path, so it
+    // stays correct regardless of BAM ordering.
+    let qc_bam_files: Vec<Box<str>> = args
+        .wt_bam_files
+        .iter()
+        .chain(args.control_bam_files.iter())
+        .cloned()
+        .collect();
     let gene_qc = resolve_modality_gene_qc(
         &mut gff_map,
         &GeneQcRequest {
-            bam_files: &args.wt_bam_files,
+            bam_files: &qc_bam_files,
             cell_barcode_tag: &args.cell_barcode_tag,
             gene_barcode_tag: &args.gene_barcode_tag,
             gff_file: Some(&args.gff_file),

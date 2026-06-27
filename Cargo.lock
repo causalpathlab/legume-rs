@@ -444,11 +444,14 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "auxiliary-data"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "data-beans",
+ "env_logger",
  "fastobo",
+ "indicatif",
+ "indicatif-log-bridge",
  "log",
  "matrix-param",
  "matrix-util",
@@ -1838,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "faba"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "approx",

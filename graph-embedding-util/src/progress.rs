@@ -1,19 +1,8 @@
-//! Senna-style progress bar for rayon-parallel builds. Inlined here so
-//! this crate doesn't depend on senna; template matches `senna::logging`
-//! byte-for-byte so multi-bar output stays visually consistent when this
-//! crate runs under senna.
+//! Senna-style progress bar for rayon-parallel builds.
+//!
+//! The implementation now lives in [`auxiliary_data::logging`] so the whole
+//! workspace shares one style and one `MULTI_PROGRESS` (previously this file
+//! held a byte-for-byte copy that was *not* registered with senna's bars). This
+//! module is kept as `crate::progress` so existing call sites need no change.
 
-use indicatif::{ProgressBar, ProgressStyle};
-
-#[must_use]
-pub fn new_progress_bar(len: u64) -> ProgressBar {
-    let prog_bar = ProgressBar::new(len);
-    prog_bar.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({eta}) {msg}",
-        )
-        .unwrap()
-        .progress_chars("##-"),
-    );
-    prog_bar
-}
+pub use auxiliary_data::logging::new_progress_bar;

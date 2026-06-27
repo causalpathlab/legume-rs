@@ -165,6 +165,11 @@ mod tests {
     use crate::site_analysis::pileup::Selector;
 
     fn write_gtf(forward: bool) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Unique per call: two tests both write the `forward=true` fixture, so a
+        // pid+strand name collides under parallel execution (one test removes the
+        // file the other is mid-read). The counter keeps every path distinct.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let strand = if forward { "+" } else { "-" };
         // gene 100..550 (1-based) with two exons.
         let gtf = format!(
@@ -176,7 +181,7 @@ mod tests {
         let p = std::env::temp_dir().join(format!(
             "miami_genemodel_{}_{}.gtf",
             std::process::id(),
-            forward
+            COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::write(&p, gtf).unwrap();
         p

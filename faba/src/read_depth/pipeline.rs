@@ -25,7 +25,7 @@ pub fn run_read_depth_pipeline(args: &ReadDepthArgs) -> anyhow::Result<()> {
 
         let segment_stats = jobs
             .par_iter()
-            .progress_count(njobs)
+            .progress_with(new_progress_bar(njobs))
             .map(
                 |(chr, lb, ub)| -> anyhow::Result<Vec<(CellBarcode, Box<str>, f32)>> {
                     let start = *lb;

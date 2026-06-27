@@ -137,7 +137,7 @@ fn collect_from_reads(
 
     let pwm: Vec<DnaBaseCount> = sites
         .par_iter()
-        .progress_count(sites.len() as u64)
+        .progress_with(new_progress_bar(sites.len() as u64))
         .map(|site| {
             let mut local_pwm: Vec<DnaBaseCount> =
                 (0..width).map(|_| DnaBaseCount::new()).collect();
