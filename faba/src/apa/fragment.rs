@@ -179,6 +179,7 @@ pub fn extract_fragments_cached(
     cb_tag: &[u8],
     umi_tag: &[u8],
     polya: &PolyAFilterParams,
+    min_mapping_quality: u8,
 ) -> anyhow::Result<Vec<FragmentRecord>> {
     let mut fragments = Vec::new();
 
@@ -205,8 +206,9 @@ pub fn extract_fragments_cached(
         let ref_start = rec.reference_start();
         let ref_end = rec.reference_end();
 
-        // Skip unmapped reads
-        if rec.is_unmapped() {
+        // Skip unmapped and low mapping-quality reads (consistent with the
+        // editing/SNP modalities, which gate reads at min_mapping_quality).
+        if rec.is_unmapped() || rec.mapq() < min_mapping_quality {
             return;
         }
 

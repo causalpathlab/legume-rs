@@ -152,18 +152,85 @@ pub struct PipelineArgs {
     #[command(flatten)]
     pub cell_qc: crate::cell_qc::CellQcArgs,
 
+    // === Gene biotype (quantification subset) ===
+    #[arg(
+        long,
+        default_value = "protein_coding",
+        help = "Gene biotype to quantify (e.g. protein_coding, lncRNA, \
+                pseudogene). Pass --gene-type \"\" to keep all biotypes. \
+                QC/cell-calling always uses ALL biotypes; only the quantified \
+                gene set (gene counts + ATOI/APA/m6A) is restricted to this type."
+    )]
+    pub gene_type: Box<str>,
+
+    // === Mitochondrial QC ===
+    #[arg(
+        long,
+        default_value = "chrM,chrMT,MT,M",
+        help = "Mitochondrial chromosome name(s), comma-separated. Genes here \
+                are excluded from the quantified matrix (unless --keep-mito); a \
+                per-cell MT-fraction QC is always written."
+    )]
+    pub mito_chr: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Keep mitochondrial genes in the quantified matrix (default: exclude)"
+    )]
+    pub keep_mito: bool,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Max mitochondrial UMI fraction per cell: > 0 = fixed cutoff; \
+                0 (default) = data-driven elbow cutoff on the MT% distribution \
+                (drops the high-MT burst tail). See --no-mito-cell-qc to disable."
+    )]
+    pub max_mito_frac: f64,
+
+    #[arg(
+        long = "no-mito-cell-qc",
+        default_value_t = false,
+        help = "Disable mitochondrial cell QC (report per-cell MT% only, drop no \
+                cells). Mito genes are still excluded from features unless --keep-mito."
+    )]
+    pub no_mito_cell_qc: bool,
+
+    // === Shared read-quality filters (ATOI / m6A / SNP) ===
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "Minimum base quality for editing/SNP base calls (ATOI/m6A/SNP)"
+    )]
+    pub min_base_quality: u8,
+
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "Minimum mapping quality for editing/SNP reads (ATOI/m6A/SNP)"
+    )]
+    pub min_mapping_quality: u8,
+
+    #[arg(
+        long = "no-apa-pdui",
+        default_value_t = false,
+        help = "Skip the APA PDUI matrix output ({batch}_apa_pdui)"
+    )]
+    pub no_apa_pdui: bool,
+
     // === ATOI parameters ===
     #[arg(
         long,
-        default_value_t = 10,
-        help = "Minimum coverage for ATOI detection"
+        default_value_t = 5,
+        help = "Minimum coverage for ATOI detection (matches `faba atoi`)"
     )]
     pub atoi_min_coverage: usize,
 
     #[arg(
         long,
-        default_value_t = 5,
-        help = "Minimum A-to-G conversions for ATOI"
+        default_value_t = 3,
+        help = "Minimum A-to-G conversions for ATOI (matches `faba atoi`)"
     )]
     pub atoi_min_conversion: usize,
 
@@ -477,8 +544,8 @@ fn run_snp_step(args: &PipelineArgs) -> anyhow::Result<FxHashSet<(Box<str>, i64)
         cell_barcode_tag: args.cell_barcode_tag.clone(),
         gene_barcode_tag: args.gene_barcode_tag.clone(),
         include_missing_barcode: false,
-        min_base_quality: 20,
-        min_mapping_quality: 20,
+        min_base_quality: args.min_base_quality,
+        min_mapping_quality: args.min_mapping_quality,
         genotype_params: GenotypeParams {
             min_depth: args.snp_min_depth,
             min_gq: args.snp_min_gq,
@@ -526,6 +593,46 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
         .iter()
         .map(|rec| (format_gene_key(rec), rec.gene_id.clone()))
         .collect();
+
+    // Mitochondrial genes and the biotype-selected vocabulary. BOTH gates are
+    // applied ONLY at the quantification surfaces (the per-batch output matrix
+    // and the frozen `expressed_gene_ids` that ATOI/APA/m6A inherit) — never to
+    // cell-calling. QC/cell-calling sees every gene and biotype, so the frozen
+    // cell set stays Cell Ranger-faithful; only what we quantify is narrowed.
+    let mito_keys = crate::pipeline_util::mito_gene_keys(&all_records, &args.mito_chr);
+    info!(
+        "{} mitochondrial gene(s) on {} ({})",
+        mito_keys.len(),
+        args.mito_chr,
+        if args.keep_mito {
+            "kept in matrix"
+        } else {
+            "excluded from matrix"
+        }
+    );
+    let selected_gene_keys: Option<FxHashSet<Box<str>>> = if args.gene_type.is_empty() {
+        info!("Gene biotype filter: OFF (all biotypes quantified)");
+        None
+    } else {
+        let target: genomic_data::gff::GeneType = args.gene_type.clone().into();
+        let keys: FxHashSet<Box<str>> = records
+            .iter()
+            .filter(|r| r.gene_type == target)
+            .map(format_gene_key)
+            .collect();
+        info!(
+            "Gene biotype filter: quantifying {} '{}' genes (QC keeps all biotypes)",
+            keys.len(),
+            args.gene_type
+        );
+        Some(keys)
+    };
+    // A gene survives to quantification iff it is not mito-excluded AND matches
+    // the selected biotype (when one is set).
+    let quantify_gene = |gk: &str| -> bool {
+        (args.keep_mito || !mito_keys.contains(gk))
+            && selected_gene_keys.as_ref().is_none_or(|s| s.contains(gk))
+    };
 
     let mut expressed_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
     let mut cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>> =
@@ -585,10 +692,33 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
             &cell_call,
         );
         let passing_cells = bq.passing_cells;
+
+        // Mitochondrial QC: per-cell MT fraction over the FULL pre-filter counts
+        // (spliced + unspliced). Always reported; cells are dropped only when
+        // --max-mito-frac > 0. Runs on the frozen-cell candidates, before the
+        // biotype/mito gene gate, so the metric reflects true MT burden.
+        let mt_stats = crate::pipeline_util::mito_cell_stats(
+            &[&spliced_triplets, &unspliced_triplets],
+            &passing_cells,
+            &mito_keys,
+        );
+        crate::pipeline_util::write_mt_qc(&args.output, batch_name, &mt_stats)?;
+        let passing_cells = crate::pipeline_util::apply_mito_filter(
+            passing_cells,
+            &mt_stats,
+            args.max_mito_frac,
+            args.no_mito_cell_qc,
+        );
+
         // This batch's matrix is filtered by its own passing genes; the shared
         // vocabulary is pooled across batches and thresholded after the loop.
-        let passing_genes =
-            passing_genes_from_stats(&bq.gene_stats, args.gene_min_cells, args.gene_min_counts);
+        // Count-QC runs on every gene; `quantify_gene` then narrows the matrix to
+        // the selected biotype and drops mito genes (unless --keep-mito).
+        let passing_genes: FxHashSet<Box<str>> =
+            passing_genes_from_stats(&bq.gene_stats, args.gene_min_cells, args.gene_min_counts)
+                .into_iter()
+                .filter(|gk| quantify_gene(gk))
+                .collect();
         accumulate_gene_stats(&mut pooled_gene_stats, bq.gene_stats);
 
         info!(
@@ -659,9 +789,17 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
 
     // Threshold the pooled gene stats once → shared feature vocabulary for
     // --valid-genes reuse and downstream modality masking.
-    let passing_genes =
-        passing_genes_from_stats(&pooled_gene_stats, args.gene_min_cells, args.gene_min_counts);
+    let passing_genes = passing_genes_from_stats(
+        &pooled_gene_stats,
+        args.gene_min_cells,
+        args.gene_min_counts,
+    );
     for gene_key in &passing_genes {
+        // Same quantification gate as the per-batch matrices: the frozen set that
+        // ATOI/APA/m6A inherit carries the biotype subset and mito exclusion.
+        if !quantify_gene(gene_key) {
+            continue;
+        }
         if let Some(gene_id) = gene_key_to_id.get(gene_key) {
             expressed_gene_ids.insert(gene_id.clone());
         }
@@ -724,8 +862,8 @@ fn run_atoi_step(
         membership_barcode_col: 0,
         membership_celltype_col: 1,
         exact_barcode_match: false,
-        min_base_quality: 20,
-        min_mapping_quality: 20,
+        min_base_quality: args.min_base_quality,
+        min_mapping_quality: args.min_mapping_quality,
         mixture_weight_mode: args.mixture_weight,
         mixture_prior_alpha: args.mixture_prior_alpha,
         mixture_prior_beta: args.mixture_prior_beta,
@@ -837,6 +975,7 @@ fn run_apa_step(
         polya_internal_prime_window: 10,
         polya_internal_prime_count: 7,
         min_coverage: args.apa_min_coverage,
+        min_mapping_quality: args.min_mapping_quality,
         max_threads: args.max_threads,
         // row = poly-A-site feature QC (keep sites seen in >=10 cells) — a
         // distinct feature space from genes, so not redundant with step 1.
@@ -874,7 +1013,7 @@ fn run_apa_step(
         skirt_eta: 0.05,
         skirt_mult: 3.0,
         merge_beta_mult: 2.0,
-        compute_pdui: true,
+        compute_pdui: !args.no_apa_pdui,
         gene_min_cells: args.gene_min_cells,
         gene_min_counts: args.gene_min_counts,
         cell_min_genes: args.cell_min_genes,
@@ -910,6 +1049,21 @@ fn run_dart_step(
     // MINUS the control set; the control (mut) arm is --control-bam. (SNP/genes/
     // ATOI/APA used all positional BAMs upstream.)
     let control_set: FxHashSet<&str> = args.control_bam_files.iter().map(|s| s.as_ref()).collect();
+    // Controls not also passed positionally are never cell-called in step 1, so
+    // cells_by_batch has no frozen set for them and their per-cell {control}_m6a_*
+    // matrices would carry the ambient barcode superset (these feed gem). Warn so
+    // the user lists controls positionally too — the documented usage.
+    let positional: FxHashSet<&str> = args.bam_files.iter().map(|s| s.as_ref()).collect();
+    for c in &args.control_bam_files {
+        if !positional.contains(c.as_ref()) {
+            log::warn!(
+                "control BAM '{}' is not in the positional list; its cells are not \
+                 frozen and its m6A control matrices will carry the ambient superset. \
+                 Pass it positionally too for a consistent cell set.",
+                c
+            );
+        }
+    }
     let signal_bam_files: Vec<Box<str>> = args
         .bam_files
         .iter()
@@ -951,8 +1105,8 @@ fn run_dart_step(
         membership_barcode_col: 0,
         membership_celltype_col: 1,
         exact_barcode_match: false,
-        min_base_quality: 20,
-        min_mapping_quality: 20,
+        min_base_quality: args.min_base_quality,
+        min_mapping_quality: args.min_mapping_quality,
         mixture_weight_mode: args.mixture_weight,
         mixture_prior_alpha: args.mixture_prior_alpha,
         mixture_prior_beta: args.mixture_prior_beta,

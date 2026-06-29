@@ -190,16 +190,27 @@ pub struct GeneCountArgs {
     )]
     pub(crate) keep_mito: bool,
 
-    /// Drop cells whose mitochondrial fraction exceeds this (0 = report only)
+    /// Max mitochondrial fraction per cell (0 = data-driven elbow cutoff)
     #[arg(
         long = "max-mito-frac",
         default_value_t = 0.0,
-        help = "Drop cells with MT fraction above this (0 = report only)",
-        long_help = "Cells whose mitochondrial UMI fraction exceeds this value\n\
-                     are removed during QC. The default 0 disables the cut and\n\
-                     only reports MT statistics."
+        help = "Max MT fraction per cell: >0 = fixed cutoff; 0 = elbow cutoff",
+        long_help = "Cells whose mitochondrial UMI fraction exceeds the cutoff are\n\
+                     removed during QC. A value > 0 is a fixed cutoff; the default 0\n\
+                     uses a data-driven elbow cutoff on the MT% distribution (drops\n\
+                     the high-MT burst tail). See --no-mito-cell-qc to disable."
     )]
     pub(crate) max_mito_frac: f64,
+
+    /// Disable mitochondrial cell QC (report MT% only, drop no cells)
+    #[arg(
+        long = "no-mito-cell-qc",
+        default_value_t = false,
+        help = "Disable MT cell QC (report MT% only, drop no cells)",
+        long_help = "Report per-cell MT% but drop no cells. Mitochondrial genes are\n\
+                     still excluded from the matrix unless --keep-mito."
+    )]
+    pub(crate) no_mito_cell_qc: bool,
 }
 
 impl GeneCountArgs {

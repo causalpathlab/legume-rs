@@ -10,8 +10,10 @@ pub fn run_simple(
     backend: &SparseIoBackend,
     batch_names: &[Box<str>],
 ) -> anyhow::Result<()> {
-    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
-    gff_map.subset(args.gene_type.clone().into());
+    // Count + cell-call on ALL biotypes (Cell Ranger-faithful, matching the
+    // `faba all` pipeline); the biotype subset is applied only to the quantified
+    // output + pooled gene ids below, never to cell-calling.
+    let gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
     info!("found {} features", gff_map.len());
 
     if gff_map.is_empty() {
@@ -38,6 +40,25 @@ pub fn run_simple(
             "excluded from matrix"
         }
     );
+
+    // Biotype + mito quantification gate: count/cell-call on all biotypes, restrict
+    // only the quantified output + pooled gene ids. Mirrors `faba all`'s quantify_gene.
+    let selected_gene_keys: Option<rustc_hash::FxHashSet<Box<str>>> = if args.gene_type.is_empty() {
+        None
+    } else {
+        let target: genomic_data::gff::GeneType = args.gene_type.clone().into();
+        Some(
+            records
+                .iter()
+                .filter(|r| r.gene_type == target)
+                .map(format_gene_key)
+                .collect(),
+        )
+    };
+    let quantify_gene = |gk: &str| -> bool {
+        (args.keep_mito || !mito_keys.contains(gk))
+            && selected_gene_keys.as_ref().is_none_or(|s| s.contains(gk))
+    };
 
     for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
         let njobs = records.len() as u64;
@@ -81,22 +102,19 @@ pub fn run_simple(
         // Mitochondrial QC: report per-cell MT fraction (from full pre-filter
         // counts), optionally drop high-MT cells, and exclude MT genes from the
         // matrix unless --keep-mito.
-        let mt_stats = crate::pipeline_util::mito_cell_stats(
-            &[&gene_level_stats],
-            &passing_cells,
-            &mito_keys,
-        );
+        let mt_stats =
+            crate::pipeline_util::mito_cell_stats(&[&gene_level_stats], &passing_cells, &mito_keys);
         crate::pipeline_util::write_mt_qc(&args.output, batch_name, &mt_stats)?;
-        let passing_cells =
-            crate::pipeline_util::apply_mito_filter(passing_cells, &mt_stats, args.max_mito_frac);
-        let passing_genes: rustc_hash::FxHashSet<Box<str>> = if args.keep_mito {
-            passing_genes
-        } else {
-            passing_genes
-                .into_iter()
-                .filter(|gk| !mito_keys.contains(gk))
-                .collect()
-        };
+        let passing_cells = crate::pipeline_util::apply_mito_filter(
+            passing_cells,
+            &mt_stats,
+            args.max_mito_frac,
+            args.no_mito_cell_qc,
+        );
+        let passing_genes: rustc_hash::FxHashSet<Box<str>> = passing_genes
+            .into_iter()
+            .filter(|gk| quantify_gene(gk))
+            .collect();
 
         let gene_level_stats: Vec<(CellBarcode, Box<str>, f32)> = gene_level_stats
             .into_par_iter()
@@ -140,8 +158,10 @@ pub fn run_splice_aware(
     let gene_map = build_gene_map(&all_records, Some(&FeatureType::Gene))?;
     let exon_map = build_exon_intervals(&all_records);
 
-    let mut gff_map = GffRecordMap::from_map(gene_map);
-    gff_map.subset(args.gene_type.clone().into());
+    // Count + cell-call on ALL biotypes (Cell Ranger-faithful, matching the
+    // `faba all` pipeline); the biotype subset is applied only to the quantified
+    // output + pooled gene ids below, never to cell-calling.
+    let gff_map = GffRecordMap::from_map(gene_map);
     info!("found {} features", gff_map.len());
 
     if gff_map.is_empty() {
@@ -170,6 +190,25 @@ pub fn run_splice_aware(
             "excluded from matrix"
         }
     );
+
+    // Biotype + mito quantification gate: count/cell-call on all biotypes, restrict
+    // only the quantified output + pooled gene ids. Mirrors `faba all`'s quantify_gene.
+    let selected_gene_keys: Option<rustc_hash::FxHashSet<Box<str>>> = if args.gene_type.is_empty() {
+        None
+    } else {
+        let target: genomic_data::gff::GeneType = args.gene_type.clone().into();
+        Some(
+            records
+                .iter()
+                .filter(|r| r.gene_type == target)
+                .map(format_gene_key)
+                .collect(),
+        )
+    };
+    let quantify_gene = |gk: &str| -> bool {
+        (args.keep_mito || !mito_keys.contains(gk))
+            && selected_gene_keys.as_ref().is_none_or(|s| s.contains(gk))
+    };
 
     for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
         let njobs = records.len() as u64;
@@ -235,16 +274,16 @@ pub fn run_splice_aware(
             &mito_keys,
         );
         crate::pipeline_util::write_mt_qc(&args.output, batch_name, &mt_stats)?;
-        let passing_cells =
-            crate::pipeline_util::apply_mito_filter(passing_cells, &mt_stats, args.max_mito_frac);
-        let passing_genes: rustc_hash::FxHashSet<Box<str>> = if args.keep_mito {
-            passing_genes
-        } else {
-            passing_genes
-                .into_iter()
-                .filter(|gk| !mito_keys.contains(gk))
-                .collect()
-        };
+        let passing_cells = crate::pipeline_util::apply_mito_filter(
+            passing_cells,
+            &mt_stats,
+            args.max_mito_frac,
+            args.no_mito_cell_qc,
+        );
+        let passing_genes: rustc_hash::FxHashSet<Box<str>> = passing_genes
+            .into_iter()
+            .filter(|gk| quantify_gene(gk))
+            .collect();
 
         let keep =
             |triplets: Vec<(CellBarcode, Box<str>, f32)>| -> Vec<(CellBarcode, Box<str>, f32)> {
