@@ -112,6 +112,16 @@ pub struct CountApaArgs {
     )]
     pub(crate) min_coverage: usize,
 
+    /// Minimum mapping quality for reads used in poly-A site discovery
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "Minimum mapping quality for poly-A reads",
+        long_help = "Reads with MAPQ below this are skipped during fragment\n\
+                     extraction, consistent with the editing/SNP modalities."
+    )]
+    pub(crate) min_mapping_quality: u8,
+
     /// Maximum number of threads
     #[arg(
         long,

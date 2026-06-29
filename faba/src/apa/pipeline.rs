@@ -383,6 +383,19 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Big-first scheduling (LPT): a few highly-expressed UTRs carry ~100x the
+    // fragments and dominate wall-clock. Start the heaviest first so they overlap
+    // the long tail of light UTRs instead of trailing it on one idle-starved
+    // thread. Output is unaffected — rows are reordered to a sorted vocabulary
+    // downstream, so the per-UTR schedule order does not change results.
+    utrs.sort_by_key(|u| std::cmp::Reverse(u.utr_length));
+
+    // ATOI + SNP position masks, pooled once into one (chr, genomic_pos) set. The
+    // mixture path drops candidate poly-A sites coinciding with an edit/variant;
+    // run_simple did this but run_mixture historically skipped it, so the pipeline
+    // computed both masks and silently ignored them.
+    let site_mask = load_polya_site_mask(args)?;
+
     let pre_sites = if let Some(ref pre_path) = args.pre_sites {
         info!("loading pre-identified sites from {}", pre_path);
         let sites = load_pre_sites(pre_path)?;
@@ -395,15 +408,35 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
     let njobs = utrs.len();
     info!("processing {} UTRs...", njobs);
 
+    // Per-phase wall-clock summed across worker threads: BAM fragment extraction
+    // (I/O) vs site-selection/EM (compute). Diagnoses where APA spends its time.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let extract_ns = AtomicU64::new(0);
+    let bic_ns = AtomicU64::new(0);
+
     let results: Vec<(Vec<CellSiteCount>, Vec<ApaSiteAnnotation>)> = utrs
         .par_iter()
         .progress_with(new_progress_bar(njobs as u64))
         .map_init(crate::data::bam_io::BamReaderCache::new, |cache, utr| {
-            process_utr(cache, utr, &args.bam_files, pre_sites.as_ref(), args)
+            process_utr(
+                cache,
+                utr,
+                &args.bam_files,
+                pre_sites.as_ref(),
+                site_mask.as_ref(),
+                &extract_ns,
+                &bic_ns,
+                args,
+            )
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     info!("processed {} UTRs", utrs.len());
+    info!(
+        "APA timing (summed over threads): extraction {:.1}s, site-selection/EM {:.1}s",
+        extract_ns.load(Ordering::Relaxed) as f64 / 1e9,
+        bic_ns.load(Ordering::Relaxed) as f64 / 1e9,
+    );
 
     let total_counts: usize = results.iter().map(|(c, _)| c.len()).sum();
     let total_annots: usize = results.iter().map(|(_, a)| a.len()).sum();
@@ -539,8 +572,20 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
 fn load_utrs(args: &CountApaArgs) -> anyhow::Result<Vec<UtrRegion>> {
     if let Some(ref gff_file) = args.gff_file {
         info!("parsing GFF/GTF file: {}", gff_file);
-        let records = read_gff_record_vec(gff_file)?;
+        let mut records = read_gff_record_vec(gff_file)?;
         info!("read {} GFF records", records.len());
+        // Honor --gene-type on the mixture path (run_simple subsets the GffRecordMap;
+        // mixture builds UTRs straight from records, so filter here). The pipeline
+        // leaves this None and inherits the biotype subset via valid_gene_ids.
+        if let Some(ref gt) = args.gene_type {
+            let before = records.len();
+            records.retain(|r| r.gene_type == *gt);
+            info!(
+                "gene-type filter: {} -> {} GFF records",
+                before,
+                records.len()
+            );
+        }
 
         let model = build_union_gene_model(&records)?;
         info!(
@@ -613,12 +658,44 @@ fn load_pre_sites(path: &str) -> anyhow::Result<rustc_hash::FxHashMap<Box<str>, 
     Ok(sites)
 }
 
+/// ATOI/SNP position masks pooled by chromosome: `chr -> {genomic_pos}`. Keying
+/// by chr lets `process_utr` do one borrowed lookup per UTR and an i64-only
+/// membership test per candidate (no per-candidate chr-string clone or hash).
+type PolyaSiteMask = rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<i64>>;
+
+/// Load and pool the ATOI + SNP position masks referenced by `CountApaArgs`.
+/// Returns `None` when neither is set. The mixture path checks discovered
+/// candidate poly-A sites against this union and drops any that coincide with an
+/// A-to-I edit or SNP — parity with run_simple.
+fn load_polya_site_mask(args: &CountApaArgs) -> anyhow::Result<Option<PolyaSiteMask>> {
+    let mut mask: PolyaSiteMask = rustc_hash::FxHashMap::default();
+    if let Some(ref f) = args.atoi_mask_file {
+        let m = crate::editing::io::load_atoi_mask_from_parquet(f.as_ref())?;
+        info!("APA: loaded {} ATOI mask positions from {}", m.len(), f);
+        for (chr, pos) in m {
+            mask.entry(chr).or_default().insert(pos);
+        }
+    }
+    if let Some(ref f) = args.snp_mask_file {
+        let m = crate::snp::io::load_snp_mask_from_parquet(f.as_ref())?;
+        info!("APA: loaded {} SNP mask positions from {}", m.len(), f);
+        for (chr, pos) in m {
+            mask.entry(chr).or_default().insert(pos);
+        }
+    }
+    Ok(if mask.is_empty() { None } else { Some(mask) })
+}
+
 /// Process a single UTR: extract fragments, discover/load sites, run EM, assign cells.
+#[allow(clippy::too_many_arguments)]
 fn process_utr(
     cache: &mut crate::data::bam_io::BamReaderCache,
     utr: &UtrRegion,
     bam_files: &[Box<str>],
     pre_sites: Option<&rustc_hash::FxHashMap<Box<str>, Vec<f32>>>,
+    site_mask: Option<&PolyaSiteMask>,
+    extract_ns: &std::sync::atomic::AtomicU64,
+    bic_ns: &std::sync::atomic::AtomicU64,
     args: &CountApaArgs,
 ) -> anyhow::Result<(Vec<CellSiteCount>, Vec<ApaSiteAnnotation>)> {
     let mut all_fragments = Vec::new();
@@ -626,6 +703,7 @@ fn process_utr(
     // from. Sites are fit on the pooled fragments, but counts are emitted
     // per batch, so each fragment must remember its origin.
     let mut frag_batch: Vec<u32> = Vec::new();
+    let t_extract = std::time::Instant::now();
     for (batch_idx, bam_file) in bam_files.iter().enumerate() {
         let polya_params = PolyAFilterParams {
             min_tail: args.polya_min_tail_length,
@@ -640,10 +718,15 @@ fn process_utr(
             args.cell_barcode_tag.as_bytes(),
             args.umi_tag.as_bytes(),
             &polya_params,
+            args.min_mapping_quality,
         )?;
         frag_batch.extend(std::iter::repeat_n(batch_idx as u32, frags.len()));
         all_fragments.extend(frags);
     }
+    extract_ns.fetch_add(
+        t_extract.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     // When UMI dedup is disabled, give each fragment a unique UMI hash so the
     // (cell, component) HashSet in cell_assign sees them as distinct reads
@@ -680,6 +763,32 @@ fn process_utr(
                 discover_sites_from_coverage(&all_fragments, utr.utr_length as f32, bandwidth);
             merge_nearby_sites(&coverage_sites, &all_fragments, args.merge_distance)
         }
+    };
+
+    // Drop candidate sites that coincide with an A-to-I edit or SNP. Candidate
+    // positions are UTR-relative alpha; map each to genomic via the same transform
+    // the EM uses, then test (chr, pos) membership. Parity with run_simple.
+    let candidate_sites: Vec<f32> = match site_mask.and_then(|m| m.get(&*utr.chr)) {
+        Some(masked_pos) => {
+            let before = candidate_sites.len();
+            let kept: Vec<f32> = candidate_sites
+                .into_iter()
+                .filter(|&alpha| {
+                    let g = utr.alpha_to_genomic_range(alpha as f64, 0.0).0;
+                    !masked_pos.contains(&g)
+                })
+                .collect();
+            if kept.len() != before {
+                log::debug!(
+                    "UTR {}: masked candidate sites {} -> {}",
+                    utr.name,
+                    before,
+                    kept.len()
+                );
+            }
+            kept
+        }
+        None => candidate_sites,
     };
 
     let n_junction = all_fragments.iter().filter(|f| f.is_junction).count();
@@ -722,26 +831,35 @@ fn process_utr(
 
     let em_params = args.em_params();
 
-    // Rank candidate sites by fragment coverage (descending) for BIC model selection
+    // Rank candidate sites by nearby fragment mass (descending) for greedy BIC
+    // model selection. Score on the clustered representatives (count = multiplicity,
+    // pa_site preserved within a 5bp bin) via a sorted-candidate sweep — O(M log K)
+    // instead of O(K*N) over raw fragments. site_order only sets the greedy add
+    // order, so the small binning is immaterial.
     let merge_dist = args.merge_distance;
     let site_order = {
-        let mut scored: Vec<(usize, usize)> = candidate_sites
+        let mut sorted_cands: Vec<(f32, usize)> = candidate_sites
             .iter()
+            .copied()
             .enumerate()
-            .map(|(i, &site)| {
-                let count = all_fragments
-                    .iter()
-                    .filter(|f| {
-                        f.pa_site
-                            .map(|pa| (pa - site).abs() < merge_dist)
-                            .unwrap_or(false)
-                    })
-                    .count();
-                (i, count)
-            })
+            .map(|(i, s)| (s, i))
             .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
-        scored.into_iter().map(|(i, _)| i).collect::<Vec<_>>()
+        sorted_cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let mut counts = vec![0u32; candidate_sites.len()];
+        for cl in &clusters {
+            if let Some(pa) = cl.pa_site {
+                // Candidates with |pa - site| < merge_dist (open interval, matching
+                // the original strict comparison).
+                let lo = sorted_cands.partition_point(|&(s, _)| s <= pa - merge_dist);
+                let hi = sorted_cands.partition_point(|&(s, _)| s < pa + merge_dist);
+                for &(_, idx) in &sorted_cands[lo..hi] {
+                    counts[idx] += cl.count;
+                }
+            }
+        }
+        let mut order: Vec<usize> = (0..candidate_sites.len()).collect();
+        order.sort_by(|&a, &b| counts[b].cmp(&counts[a]));
+        order
     };
 
     let site_data = SiteModelData {
@@ -754,7 +872,12 @@ fn process_utr(
         utr_length: utr.utr_length as f32,
         max_polya: lik_params.max_polya,
     };
+    let t_bic = std::time::Instant::now();
     let em_result = select_sites_by_bic(&site_data, &em_params, &site_order);
+    bic_ns.fetch_add(
+        t_bic.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     log::debug!(
         "UTR {}: BIC selected {} sites (from {} candidates), BIC={:.1}, LL={:.1}, {} iters",

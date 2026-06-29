@@ -129,11 +129,19 @@ impl ConversionParams {
     /// check (their m6A should read ~background) and still feed gem. For A-to-I
     /// `mut_bam_files` is empty, so this is just the wt set.
     pub fn quant_bam_files(&self) -> Vec<Box<str>> {
-        self.wt_bam_files
-            .iter()
-            .chain(self.mut_bam_files.iter())
-            .cloned()
-            .collect()
+        let (files, dropped) = unique_bam_files(
+            self.wt_bam_files
+                .iter()
+                .chain(self.mut_bam_files.iter())
+                .cloned(),
+        );
+        if dropped > 0 {
+            log::warn!(
+                "{dropped} BAM file(s) listed in both the signal and control \
+                 (--control-bam) sets; quantifying each once to avoid double counting"
+            );
+        }
+        files
     }
 
     /// Create a ConversionSifter with these parameters

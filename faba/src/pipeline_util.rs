@@ -174,7 +174,11 @@ pub fn batch_qc(
     // Gene nnz over spliced + unspliced: reuse the spliced pair-set and fold in
     // the unspliced keys instead of re-hashing spliced.
     let mut gene_cell_pairs = spliced_pairs;
-    gene_cell_pairs.extend(unspliced.iter().map(|(cb, feat, _)| (cb, extract_gene_key(feat))));
+    gene_cell_pairs.extend(
+        unspliced
+            .iter()
+            .map(|(cb, feat, _)| (cb, extract_gene_key(feat))),
+    );
 
     let mut gene_nnz: FxHashMap<&str, usize> = FxHashMap::default();
     for &(_, gk) in &gene_cell_pairs {
@@ -389,7 +393,8 @@ pub fn run_gene_count_qc(
     }
 
     // Threshold the pooled gene stats once → shared gene vocabulary.
-    let passing_genes = passing_genes_from_stats(&pooled_gene_stats, gene_min_cells, gene_min_counts);
+    let passing_genes =
+        passing_genes_from_stats(&pooled_gene_stats, gene_min_cells, gene_min_counts);
     for gene_key in &passing_genes {
         if let Some(gene_id) = gene_key_to_id.get(gene_key) {
             expressed_gene_ids.insert(gene_id.clone());
@@ -599,13 +604,56 @@ pub fn write_mt_qc(
     Ok(())
 }
 
-/// Log the MT-fraction distribution across `passing_cells` and, when
-/// `max_frac > 0`, drop cells whose fraction exceeds it (report-only at 0).
-/// Returns the retained cell set.
+/// Elbow threshold on an **ascending-sorted** MT-fraction distribution: the rank
+/// of maximum perpendicular distance from the chord joining the first and last
+/// point (the classic elbow / knee, same construction as
+/// `matrix_util::archetypal::elbow_index`). Cells strictly above the returned
+/// fraction are the high-MT "burst" tail.
+///
+/// Returns `None` when there is no usable signal — too few cells, a ~flat
+/// distribution (e.g. no mitochondrial genes), or an elbow in the lower half
+/// (which would cut a *majority* of cells: no clear minority burst population, so
+/// don't filter). This is the "don't over-cut" guard.
+pub fn mito_elbow_cutoff(sorted_fracs: &[f64]) -> Option<f64> {
+    let n = sorted_fracs.len();
+    if n < 50 {
+        return None;
+    }
+    let (ymin, ymax) = (sorted_fracs[0], sorted_fracs[n - 1]);
+    let span = ymax - ymin;
+    if span <= 1e-9 {
+        return None; // flat distribution (e.g. no mito genes)
+    }
+    // Normalised coords: x = rank/(n-1) ∈ [0,1], y = (frac-ymin)/span ∈ [0,1].
+    // Chord runs (0,0)→(1,1), so the perpendicular distance is ∝ |x − y|.
+    let xn = (n - 1) as f64;
+    let (mut best_i, mut best_d) = (0usize, f64::NEG_INFINITY);
+    for (i, &f) in sorted_fracs.iter().enumerate() {
+        let x = i as f64 / xn;
+        let y = (f - ymin) / span;
+        let d = (x - y).abs();
+        if d > best_d {
+            best_d = d;
+            best_i = i;
+        }
+    }
+    // Over-filtering guard: the burst tail must be a minority.
+    if best_i < n / 2 {
+        return None;
+    }
+    Some(sorted_fracs[best_i])
+}
+
+/// Log the MT-fraction distribution across `passing_cells`, then drop high-MT
+/// ("burst") cells. The cutoff is, in order: report-only if `disable`; the fixed
+/// `max_frac` if `max_frac > 0`; otherwise a data-driven [`mito_elbow_cutoff`]
+/// (the default). Returns the retained cell set. (MT genes are excluded from the
+/// feature set separately by the caller.)
 pub fn apply_mito_filter(
     passing_cells: rustc_hash::FxHashSet<CellBarcode>,
     stats: &FxHashMap<CellBarcode, (f32, f32)>,
     max_frac: f64,
+    disable: bool,
 ) -> rustc_hash::FxHashSet<CellBarcode> {
     let frac_of = |cb: &CellBarcode| -> f64 {
         match stats.get(cb) {
@@ -627,17 +675,28 @@ pub fn apply_mito_filter(
         mean,
         fracs[fracs.len() - 1]
     );
-    if max_frac <= 0.0 {
+    if disable {
         return passing_cells; // report-only
     }
+    // Resolve the cutoff: explicit fixed threshold, else data-driven elbow.
+    let (cutoff, kind) = if max_frac > 0.0 {
+        (Some(max_frac), "fixed")
+    } else {
+        (mito_elbow_cutoff(&fracs), "elbow")
+    };
+    let Some(cutoff) = cutoff else {
+        info!("MT QC: no clear high-MT burst population; no cells dropped");
+        return passing_cells;
+    };
     let kept: rustc_hash::FxHashSet<CellBarcode> = passing_cells
         .into_iter()
-        .filter(|cb| frac_of(cb) <= max_frac)
+        .filter(|cb| frac_of(cb) <= cutoff)
         .collect();
     info!(
-        "dropped {} cells with MT fraction > {:.3}",
+        "MT QC: dropped {} cells with MT fraction > {:.3} ({})",
         fracs.len() - kept.len(),
-        max_frac
+        cutoff,
+        kind
     );
     kept
 }
@@ -690,3 +749,6 @@ pub fn load_valid_genes(path: &str) -> anyhow::Result<rustc_hash::FxHashSet<Gene
     info!("--valid-genes: loaded {} genes from {}", genes.len(), path);
     Ok(genes)
 }
+
+#[cfg(test)]
+mod tests;

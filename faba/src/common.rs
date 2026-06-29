@@ -179,6 +179,26 @@ pub fn uniq_batch_names(bam_files: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>>
     }
 }
 
+/// Deduplicate a BAM path list, preserving first-occurrence order. Returns the
+/// unique paths and the number of duplicate entries that were dropped.
+///
+/// A single BAM can legitimately be referenced from more than one role (e.g. a
+/// control listed both positionally and via `--control-bam`); without this the
+/// same file would be quantified twice into the output, double counting it.
+pub fn unique_bam_files(bam_files: impl IntoIterator<Item = Box<str>>) -> (Vec<Box<str>>, usize) {
+    let mut seen = FxHashSet::default();
+    let mut unique = Vec::new();
+    let mut dropped = 0usize;
+    for f in bam_files {
+        if seen.insert(f.clone()) {
+            unique.push(f);
+        } else {
+            dropped += 1;
+        }
+    }
+    (unique, dropped)
+}
+
 // pub trait ToBed {
 //     fn to_bed(&self, file_path: &str) -> anyhow::Result<()>;
 // }

@@ -655,6 +655,31 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     check_all_bam_indices(&args.wt_bam_files)?;
     check_all_bam_indices(&args.control_bam_files)?;
 
+    // m6A is a WT-vs-MUT contrast, so the signal (wt) arm for SITE DISCOVERY is
+    // the positional BAMs MINUS any control listed in --control-bam; otherwise a
+    // both-listed control would be pooled into the wt side and dilute its own
+    // contrast (mirrors `faba all`). Controls are still QUANTIFIED in the second
+    // pass via `quant_bam_files` (signal ∪ control) — only discovery drops them.
+    let control_set: rustc_hash::FxHashSet<&str> =
+        args.control_bam_files.iter().map(|s| s.as_ref()).collect();
+    let signal_bam_files: Vec<Box<str>> = args
+        .wt_bam_files
+        .iter()
+        .filter(|b| !control_set.contains(b.as_ref()))
+        .cloned()
+        .collect();
+    if signal_bam_files.is_empty() {
+        return Err(anyhow::anyhow!(
+            "no m6A signal BAMs: every positional BAM is also in --control-bam"
+        ));
+    }
+    info!(
+        "m6A contrast: {} signal (wt) vs {} control (mut) BAMs \
+         (controls excluded from site discovery, still quantified)",
+        signal_bam_files.len(),
+        args.control_bam_files.len()
+    );
+
     // Load and filter GFF
     info!("parsing GFF file: {}", args.gff_file);
     let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
@@ -675,12 +700,12 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     // (mut) — so control cells are filtered by their own per-library knee in the
     // second pass (see `quant_bam_files`). The map is keyed by BAM path, so it
     // stays correct regardless of BAM ordering.
-    let qc_bam_files: Vec<Box<str>> = args
-        .wt_bam_files
-        .iter()
-        .chain(args.control_bam_files.iter())
-        .cloned()
-        .collect();
+    let (qc_bam_files, _) = unique_bam_files(
+        args.wt_bam_files
+            .iter()
+            .chain(args.control_bam_files.iter())
+            .cloned(),
+    );
     let gene_qc = resolve_modality_gene_qc(
         &mut gff_map,
         &GeneQcRequest {
@@ -733,7 +758,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             min_row_nnz: args.cluster_min_row_nnz,
             min_col_nnz: args.cluster_min_col_nnz,
         };
-        let m = cluster_cells_from_bam(&args.wt_bam_files, &gff_map, &params)?;
+        let m = cluster_cells_from_bam(&signal_bam_files, &gff_map, &params)?;
         info!("Generated {} cell clusters via clustering", args.n_clusters);
         Some(m)
     } else {
@@ -774,7 +799,11 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         None
     };
 
-    let m6a_params = ConversionParams::from(args);
+    let mut m6a_params = ConversionParams::from(args);
+    // Discovery contrasts signal vs control: override the wt arm to exclude
+    // controls. `quant_bam_files` still unions the controls back in, so the
+    // second pass quantifies them (once each) — see above.
+    m6a_params.wt_bam_files = signal_bam_files;
     let gene_sites = find_all_conversion_sites(&gff_map, &m6a_params, membership.as_ref())?;
 
     // Apply A-to-I mask to filter m6A candidates
