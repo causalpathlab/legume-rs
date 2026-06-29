@@ -420,13 +420,17 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
     // Filter to QC-passing cells from gene count step. Each count carries its
     // batch index, so it is checked against that batch's own called cell set
     // (per-library knee); batches without a passed set are left unfiltered.
+    // `cells_by_batch` is keyed by BAM file path (see `GeneCountQc`), NOT batch
+    // name — basenames collide across 10x libraries — so look it up by the path,
+    // matching the conversion pipeline (`editing::pipeline`).
     if let Some(ref valid_cells) = args.valid_cell_barcodes {
-        let batch_names = uniq_batch_names(&args.bam_files)?;
+        // Resolve each batch index to its cell set once (one entry per BAM), so
+        // the per-count retain is a Vec index + barcode lookup instead of hashing
+        // the BAM-path key for every one of the (potentially millions of) counts.
+        let by_batch: Vec<_> = args.bam_files.iter().map(|f| valid_cells.get(f)).collect();
         let before = all_counts.len();
-        all_counts.retain(|c| match valid_cells.get(&batch_names[c.batch as usize]) {
-            Some(set) => set.contains(&c.cell_barcode),
-            None => true,
-        });
+        all_counts
+            .retain(|c| by_batch[c.batch as usize].is_none_or(|set| set.contains(&c.cell_barcode)));
         info!(
             "filtered to QC-passing cells: {} -> {} counts",
             before,

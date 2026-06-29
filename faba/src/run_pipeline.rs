@@ -838,8 +838,14 @@ fn run_apa_step(
         polya_internal_prime_count: 7,
         min_coverage: args.apa_min_coverage,
         max_threads: args.max_threads,
+        // row = poly-A-site feature QC (keep sites seen in >=10 cells) — a
+        // distinct feature space from genes, so not redundant with step 1.
         row_nnz_cutoff: 10,
-        column_nnz_cutoff: 1,
+        // column = cells: 0 = no cell filter. The cell set was frozen in step 1
+        // and every modality restricts to it; re-dropping frozen cells that
+        // happen to lack APA signal would make APA's cell axis inconsistent with
+        // genes/ATOI/m6A (which keep the full set).
+        column_nnz_cutoff: 0,
         output: args.output.clone(),
         backend: args.backend.clone(),
         zip: args.zip,
