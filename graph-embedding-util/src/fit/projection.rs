@@ -44,6 +44,47 @@ fn adjust_cell_edges(
     feats.iter().copied().zip(vals).collect()
 }
 
+/// Flatten the per-batch samplers into one `(cell_id, features, counts)` list,
+/// borrowing each cell's edge slices. Shared by the baseline and dual-axis
+/// phase-2 projections (both walk the same active cells).
+fn collect_sampler_cells(
+    cell_samplers: &[PerBatchStratifiedCellSampler],
+) -> Vec<(u32, &[u32], &[f32])> {
+    let mut cells = Vec::new();
+    for s in cell_samplers {
+        for (i, &cell) in s.active_cells.iter().enumerate() {
+            let cf = &s.per_cell[i];
+            cells.push((cell, cf.features.as_slice(), cf.counts.as_slice()));
+        }
+    }
+    cells
+}
+
+/// One cell's `(feature, count)` edges, batch-divided by its pseudobulk
+/// fold-factor when correction is on, else the raw edges.
+fn cell_edges(
+    cell: u32,
+    feats: &[u32],
+    counts: &[f32],
+    batch_divisor: Option<CellBatchDivisor>,
+) -> Vec<(u32, f32)> {
+    match batch_divisor {
+        Some(bd) => adjust_cell_edges(feats, counts, bd.cell_to_pb[cell as usize], bd.mu_residual),
+        None => feats.iter().copied().zip(counts.iter().copied()).collect(),
+    }
+}
+
+/// L2-normalize to a unit direction; returns the input unchanged when its norm
+/// underflows (an all-zero / empty solve).
+fn l2_direction(v: &[f32]) -> Vec<f32> {
+    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if n > 1e-8 {
+        v.iter().map(|x| x / n).collect()
+    } else {
+        v.to_vec()
+    }
+}
+
 /// Phase 2 — project every cell onto the fixed feature dictionary, in
 /// parallel, and overwrite the `e_cell` var. The per-cell bias is fitted
 /// (to absorb library size) and written into the `b_cell` var alongside
@@ -61,6 +102,7 @@ fn adjust_cell_edges(
 /// handled post-hoc by [`crate::postprocess::feature_coembedding`], which
 /// re-embeds features onto the cell manifold (this replaced the old per-cell
 /// biplot gauge that lived here).
+#[allow(clippy::too_many_arguments)] // frozen dictionary + cell samplers + batch divisor + aux term
 pub(crate) fn project_cells_phase2(
     model: &mut JointEmbedModel,
     varmap: &VarMap,
@@ -69,8 +111,9 @@ pub(crate) fn project_cells_phase2(
     lambda: f64,
     dev: &Device,
     batch_divisor: Option<CellBatchDivisor>,
+    aux: Option<&dyn crate::cell_projection::PerCellAuxTerm>,
 ) -> anyhow::Result<Vec<f32>> {
-    use crate::cell_projection::solve_one_cell;
+    use crate::cell_projection::solve_one_cell_aux;
     use anyhow::Context;
     use candle_util::candle_core::Tensor;
     use rayon::prelude::*;
@@ -82,14 +125,7 @@ pub(crate) fn project_cells_phase2(
     let mut b_out: Vec<f32> = model.b_cell.to_vec1()?;
     let mut cell_nrms = vec![0f32; n_cells];
 
-    let mut cells: Vec<(u32, &[u32], &[f32])> = Vec::new();
-    for s in cell_samplers {
-        for (i, &cell) in s.active_cells.iter().enumerate() {
-            let cf = &s.per_cell[i];
-            cells.push((cell, &cf.features, &cf.counts));
-        }
-    }
-
+    let cells = collect_sampler_cells(cell_samplers);
     let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
 
     let feat_flat: Vec<f32> = model.e_feat.flatten_all()?.to_vec1()?;
@@ -102,20 +138,13 @@ pub(crate) fn project_cells_phase2(
             // faba gem. When batch correction is on, the counts are first divided
             // by their pseudobulk fold-factor (depth preserved by the trait's
             // self-normalizing scale, so empties still solve to ≈0).
-            let edges: Vec<(u32, f32)> = match batch_divisor {
-                Some(bd) => {
-                    adjust_cell_edges(feats, counts, bd.cell_to_pb[cell as usize], bd.mu_residual)
-                }
-                None => feats.iter().zip(counts).map(|(&f, &c)| (f, c)).collect(),
-            };
-            let (e_map, b_c) = solve_one_cell(&edges, &feat_flat, &b_feat, h, lambda);
+            let edges = cell_edges(cell, feats, counts, batch_divisor);
+            // Joint MAP when an aux term (e.g. m6A binomial) is present, else the
+            // plain Poisson solve. The aux term indexes its per-cell data by `cell`.
+            let (e_map, b_c, _extra) =
+                solve_one_cell_aux(cell as usize, &edges, &feat_flat, &b_feat, h, lambda, aux);
             let nrm_map = norm(&e_map);
-            let dir: Vec<f32> = if nrm_map > 1e-8 {
-                e_map.iter().map(|x| x / nrm_map).collect()
-            } else {
-                e_map.clone()
-            };
-            (cell as usize, dir, nrm_map, b_c)
+            (cell as usize, l2_direction(&e_map), nrm_map, b_c)
         })
         .collect();
     for (cell, dir, nrm_map, b_c) in solved {
@@ -147,4 +176,68 @@ pub(crate) fn project_cells_phase2(
     model.e_cell = e_t;
     model.b_cell = b_t;
     Ok(cell_nrms)
+}
+
+/// Dual phase-2 projection for the axis δ (β-sharing spliced/unspliced model).
+///
+/// With the feature side fixed to a per-gene `β` (a gene's spliced and unspliced
+/// rows BOTH embed as `β_g`), the splice signal cannot live on the gene side
+/// (it would be non-identifiable against an equal-and-opposite cell-axis shift).
+/// Instead we recover it on the CELL axis: position each cell against the frozen
+/// `β` TWICE — once on its spliced edges (`θ`) and once on its unspliced edges
+/// (`φ`) — using the same Poisson-MAP solve as [`project_cells_phase2`], then
+/// store the depth-removed shift `δ_cell = dir(φ) − dir(θ)` (each projection
+/// L2-normalized first, so δ measures a direction change, not a depth change).
+/// Because both spliced and unspliced rows index the same `β_g`, the two solves
+/// share one dictionary — `θ` / `φ` are directly comparable.
+///
+/// Returns a flat `[n_cells × H]` row-major buffer in global cell-id order
+/// (cells absent from the samplers stay zero). `unspliced_rows[f]` flags the
+/// unspliced feature rows; `batch_divisor` applies the same μ_residual divide as
+/// the main projection before the modality split.
+pub(crate) fn project_axis_delta(
+    model: &JointEmbedModel,
+    cell_samplers: &[PerBatchStratifiedCellSampler],
+    n_cells: usize,
+    unspliced_rows: &[bool],
+    lambda: f64,
+    batch_divisor: Option<CellBatchDivisor>,
+) -> anyhow::Result<Vec<f32>> {
+    use crate::cell_projection::solve_one_cell;
+    use rayon::prelude::*;
+
+    let h = model.embedding_dim;
+    let b_feat: Vec<f32> = model.b_feat.to_vec1()?;
+    let feat_flat: Vec<f32> = model.e_feat.flatten_all()?.to_vec1()?;
+
+    let cells = collect_sampler_cells(cell_samplers);
+
+    let solved: Vec<(usize, Vec<f32>)> = cells
+        .par_iter()
+        .map(|&(cell, feats, counts)| {
+            let edges = cell_edges(cell, feats, counts, batch_divisor);
+            // Split this cell's edges by modality; both index the shared β_g.
+            let mut spliced: Vec<(u32, f32)> = Vec::with_capacity(edges.len());
+            let mut unspliced: Vec<(u32, f32)> = Vec::with_capacity(edges.len());
+            for &(f, c) in &edges {
+                if unspliced_rows[f as usize] {
+                    unspliced.push((f, c));
+                } else {
+                    spliced.push((f, c));
+                }
+            }
+            let (theta, _) = solve_one_cell(&spliced, &feat_flat, &b_feat, h, lambda);
+            let (phi, _) = solve_one_cell(&unspliced, &feat_flat, &b_feat, h, lambda);
+            let (td, pd) = (l2_direction(&theta), l2_direction(&phi));
+            let delta: Vec<f32> = pd.iter().zip(&td).map(|(a, b)| a - b).collect();
+            (cell as usize, delta)
+        })
+        .collect();
+
+    let mut out = vec![0f32; n_cells * h];
+    for (cell, delta) in solved {
+        out[cell * h..(cell + 1) * h].copy_from_slice(&delta);
+    }
+    info!("Phase 2 — dual-projection axis δ (spliced θ vs unspliced φ) for {n_cells} cells");
+    Ok(out)
 }
