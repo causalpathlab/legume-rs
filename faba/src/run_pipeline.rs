@@ -50,8 +50,8 @@ pub struct PipelineArgs {
         value_delimiter = ',',
         required = true,
         help = "Input BAM files (comma-separated)",
-        long_help = "Comma-separated BAM files used for gene counting, ATOI,\n\
-                     APA, and m6A quantification."
+        long_help = "Comma-separated BAM files used across every modality:\n\
+                     gene counting, ATOI, APA and m6A quantification."
     )]
     pub bam_files: Vec<Box<str>>,
 
@@ -86,11 +86,14 @@ pub struct PipelineArgs {
         value_delimiter = ',',
         help = "Control BAM files (catalytically-dead YTHmut) for the m6A contrast",
         long_help = "Comma-separated control (catalytically-dead YTHmut) BAM files.\n\
-                     m6A is called by a WT-vs-MUT contrast: the signal arm is the\n\
-                     positional BAMs MINUS these controls. SNP/genes/ATOI/APA still\n\
-                     use all positional BAMs. Optional, but the m6A (DART) step is\n\
-                     skipped without it — m6A cannot be separated from genomic C/T\n\
-                     variation without a control."
+                     m6A is called by a WT-vs-MUT contrast:\n\
+                     the signal arm is the positional BAMs MINUS these controls.\n\
+                     That split is used only for m6A site discovery;\n\
+                     otherwise these controls are quantified like positional samples.\n\
+                     Their SNP, gene, ATOI, APA and m6A per-cell matrices are\n\
+                     produced too, with cells frozen per control BAM in step 1.\n\
+                     Optional, but the m6A (DART) step is skipped without it:\n\
+                     m6A cannot be separated from genomic C/T variation without a control."
     )]
     pub control_bam_files: Vec<Box<str>>,
 
@@ -373,10 +376,11 @@ pub struct PipelineArgs {
         default_value_t = 0.35,
         help = "Minimum VAF for SNP mask (filters RNA editing from de novo variants)",
         long_help = "Minimum variant allele fraction for a de novo discovered variant\n\
-                     to enter the SNP mask. Het sites need VAF in [min_vaf, 1-min_vaf],\n\
-                     hom-alt sites need VAF >= 1-min_vaf. Sites with lower VAF are likely\n\
-                     RNA editing (A-to-I or m6A) rather than germline SNPs. Set to 0 to\n\
-                     disable VAF filtering (mask all called variants)."
+                     to enter the SNP mask. A het site needs VAF in the range\n\
+                     [min_vaf, 1-min_vaf]; a hom-alt site needs VAF >= 1-min_vaf.\n\
+                     Sites with lower VAF are likely RNA editing (A-to-I or m6A)\n\
+                     rather than germline SNPs. Set to 0 to disable VAF filtering\n\
+                     (mask all called variants)."
     )]
     pub snp_mask_min_vaf: f32,
 
@@ -407,6 +411,30 @@ pub struct PipelineArgs {
 
     #[arg(long, default_value_t = false, help = "Skip APA quantification step")]
     pub skip_apa: bool,
+}
+
+/// The full set of samples to QUANTIFY in every modality: the positional
+/// (signal/WT) BAMs together with the `--control-bam` (MUT/YTHmut) BAMs,
+/// deduplicated (a BAM may legitimately be listed in both roles). The WT-vs-MUT
+/// split is used ONLY for the m6A discovery contrast (step 4); SNP, gene counts,
+/// ATOI, APA and m6A per-cell matrices are all produced for EVERY one of these
+/// samples, so the control background is fully quantified — not merely consumed
+/// as an m6A reference. This also freezes a cell set for each control BAM in
+/// step 1, so the control m6A matrices reuse it instead of the ambient superset.
+fn all_quant_bam_files(args: &PipelineArgs) -> Vec<Box<str>> {
+    let (files, dropped) = unique_bam_files(
+        args.bam_files
+            .iter()
+            .chain(args.control_bam_files.iter())
+            .cloned(),
+    );
+    if dropped > 0 {
+        log::warn!(
+            "{dropped} BAM file(s) listed both positionally and in --control-bam; \
+             quantifying each once to avoid double counting"
+        );
+    }
+    files
 }
 
 pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
@@ -539,7 +567,9 @@ fn run_snp_step(args: &PipelineArgs) -> anyhow::Result<FxHashSet<(Box<str>, i64)
     };
 
     let params = SnpParams {
-        bam_files: args.bam_files.clone(),
+        // Genotype over WT + control: same genome, so pooling deepens coverage
+        // and the shared mask, and each control BAM gets its own SNP output.
+        bam_files: all_quant_bam_files(args),
         genome_file: args.genome_file.clone(),
         cell_barcode_tag: args.cell_barcode_tag.clone(),
         gene_barcode_tag: args.gene_barcode_tag.clone(),
@@ -578,7 +608,8 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
     let gff_map = GffRecordMap::from_map(gene_map);
     info!("Loaded {} genes for expression filtering", gff_map.len());
 
-    let all_bam_files = args.bam_files.clone();
+    // Count genes (and freeze cells) for WT + control samples alike.
+    let all_bam_files = all_quant_bam_files(args);
 
     info!("Gene counting across {} BAM files:", all_bam_files.len());
     for bam in &all_bam_files {
@@ -843,7 +874,9 @@ fn run_atoi_step(
     let params = ConversionParams {
         mod_type: ModificationType::AtoI,
         genome_file: args.genome_file.clone(),
-        wt_bam_files: args.bam_files.clone(),
+        // ADAR is active in WT and YTHmut alike, so A-to-I is quantified across
+        // all samples (signal-only test, no control arm).
+        wt_bam_files: all_quant_bam_files(args),
         gene_barcode_tag: args.gene_barcode_tag.clone(),
         cell_barcode_tag: args.cell_barcode_tag.clone(),
         include_missing_barcode: false,
@@ -949,7 +982,8 @@ fn run_apa_step(
         None
     };
 
-    let all_bam_files = args.bam_files.clone();
+    // APA is pure quantification (no contrast): produce it for WT + control.
+    let all_bam_files = all_quant_bam_files(args);
 
     // Extract valid gene IDs and cell barcodes from gene count QC
     let (valid_gene_ids, valid_cell_barcodes) = match gene_count_qc {
@@ -1047,23 +1081,13 @@ fn run_dart_step(
 
     // m6A is a WT-vs-MUT contrast: the signal (wt) arm is the positional BAMs
     // MINUS the control set; the control (mut) arm is --control-bam. (SNP/genes/
-    // ATOI/APA used all positional BAMs upstream.)
+    // ATOI/APA quantified the full positional+control union upstream; only this
+    // discovery contrast distinguishes the two arms.)
     let control_set: FxHashSet<&str> = args.control_bam_files.iter().map(|s| s.as_ref()).collect();
-    // Controls not also passed positionally are never cell-called in step 1, so
-    // cells_by_batch has no frozen set for them and their per-cell {control}_m6a_*
-    // matrices would carry the ambient barcode superset (these feed gem). Warn so
-    // the user lists controls positionally too — the documented usage.
-    let positional: FxHashSet<&str> = args.bam_files.iter().map(|s| s.as_ref()).collect();
-    for c in &args.control_bam_files {
-        if !positional.contains(c.as_ref()) {
-            log::warn!(
-                "control BAM '{}' is not in the positional list; its cells are not \
-                 frozen and its m6A control matrices will carry the ambient superset. \
-                 Pass it positionally too for a consistent cell set.",
-                c
-            );
-        }
-    }
+    // Controls are quantified as full samples in steps 0-3 (they are part of the
+    // step-1 cell-calling union), so cells_by_batch carries a frozen cell set for
+    // each control BAM and the per-cell {control}_m6a_* matrices reuse it (no
+    // ambient superset). The WT-vs-MUT split below is only for site discovery.
     let signal_bam_files: Vec<Box<str>> = args
         .bam_files
         .iter()
