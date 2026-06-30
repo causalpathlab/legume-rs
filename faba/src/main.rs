@@ -404,8 +404,11 @@ Example:\n  \
             control (--control-bam): each motif C is tested for higher conversion\n\
             in the positional BAMs than the pooled control, so genomic C/T\n\
             variants are rejected; without a control the m6A step is skipped.\n\
-            Gene filter applies after step 1; SNP mask to steps 2-4 (m6A only\n\
-            with --m6a-snp-mask), ATOI mask to steps 3-4.",
+            The WT-vs-MUT split is only for that contrast: control BAMs are\n\
+            otherwise quantified like the positional samples, so every\n\
+            modality is produced for them too.\n\
+            Gene filter applies after step 1; the SNP mask feeds steps 2-4\n\
+            (m6A only with --m6a-snp-mask) and the ATOI mask feeds steps 3-4.",
         after_long_help = "\
 Example:\n  \
   faba all sample.bam -g genes.gff -f genome.fa -o out/\n  \
