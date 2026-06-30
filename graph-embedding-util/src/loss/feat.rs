@@ -824,12 +824,25 @@ fn nce_loss_with_cell_side(
     let b = batch.coarse_cells.len();
     let k = batch.n_negatives;
 
+    // Gather the feature rows scored THIS step. A β-sharing factored model
+    // composes the row→gene→β gathers, so only the batch's rows (b + b·k) are
+    // materialized — never the full [n_features, H] dictionary per step — and β
+    // still gets gradients through the gather. A free model selects from the
+    // `e_feat` Var (SGC-smoothed when a smoother is present; a factored model
+    // never has one — see `fit::run`). Shared by pos + neg.
+    let gather_feat = |idx: &Tensor| -> Result<Tensor> {
+        match &model.factor {
+            Some(f) => f.beta.index_select(&f.row_to_gene.index_select(idx, 0)?, 0),
+            None => select_feat_emb(smoother, &model.e_feat, idx),
+        }
+    };
+
     let pos_feat_idx_t = Tensor::from_slice(&batch.fine_feats, b, dev)?;
-    let e_feat_pos = select_feat_emb(smoother, &model.e_feat, &pos_feat_idx_t)?;
+    let e_feat_pos = gather_feat(&pos_feat_idx_t)?;
     let b_feat_pos = model.b_feat.index_select(&pos_feat_idx_t, 0)?;
 
     let neg_feat_idx_t = Tensor::from_slice(&batch.neg_feats, b * k, dev)?;
-    let e_feat_neg_flat = select_feat_emb(smoother, &model.e_feat, &neg_feat_idx_t)?;
+    let e_feat_neg_flat = gather_feat(&neg_feat_idx_t)?;
     let b_feat_neg_flat = model.b_feat.index_select(&neg_feat_idx_t, 0)?;
     let h = e_feat_neg_flat.dim(1)?;
     let e_feat_neg = e_feat_neg_flat.reshape((b, k, h))?;

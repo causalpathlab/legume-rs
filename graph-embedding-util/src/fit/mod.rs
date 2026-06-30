@@ -7,13 +7,14 @@ mod projection;
 mod samplers;
 
 pub use config::{
-    load_feature_network, FeatureNetworkArgs, FeatureNetworkConfig, FitConfig, FitOutput,
+    load_feature_network, AuxArmBuilder, AuxArmCtx, AuxCellCtx, AuxProjCtx, FeatFactorSpec,
+    FeatureNetworkArgs, FeatureNetworkConfig, FitConfig, FitOutput,
 };
 
 use crate::coarsen::{identity_axis, AxisCoarsenings};
 use crate::data::UnifiedData;
 use crate::loss::{build_stratified_sampler, PerBatchStratifiedCellSampler, StratifiedSampler};
-use crate::model::{JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
+use crate::model::{FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
 use crate::stop::setup_stop_handler;
 use crate::training::{
     train_composite, AxisSampler, CompositeAxis, CompositeMode, CompositeTrainContext,
@@ -29,7 +30,7 @@ use config::{
     load_or_compute_fisher_weights, stage_params, DEFAULT_AXIS_LAMBDA, DEFAULT_STRATIFY_ALPHA_CELL,
     DEFAULT_STRATIFY_ALPHA_PB,
 };
-use projection::{project_cells_phase2, CellBatchDivisor, PHASE2_RIDGE};
+use projection::{project_axis_delta, project_cells_phase2, CellBatchDivisor, PHASE2_RIDGE};
 use samplers::{build_active_samplers, build_smoother, subsample_cell_samplers_multilevel};
 
 /// Composite-objective gbe fit — trained in **two phases**.
@@ -67,7 +68,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     );
     let batch_labels: Vec<Box<str>> = unified.batch_labels();
     let batch_arg = (unified.n_batches() > 1).then_some(batch_labels.as_slice());
-    let proj_out = if let Some(w) = config.hvg_weights.as_deref() {
+    let mut proj_out = if let Some(w) = config.hvg_weights.as_deref() {
         anyhow::ensure!(
             w.len() == unified.n_features(),
             "hvg_weights length {} != n_features {} (HVG mask must be aligned to the unified \
@@ -107,6 +108,33 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         config.block_size,
         config.fisher_weights_cache.as_deref(),
     )?;
+
+    // M4 — optional aux-modality membership refinement: let the aux builder
+    // append coverage-weighted rows to `proj_kn` *before* the collapse, so the
+    // partition seed + BBKNN candidate graph + pb-sample centroids are joint
+    // (e.g. m6A-aware). `None` (default) leaves the partition expression-only.
+    if let Some(builder) = config.aux.as_mut() {
+        if let Some(extra) = builder.augment_projection(config::AuxProjCtx {
+            proj: &proj_out.proj,
+            barcodes: &unified.barcodes,
+        })? {
+            anyhow::ensure!(
+                extra.ncols() == proj_out.proj.ncols(),
+                "aux projection has {} cols but proj_kn has {} cells",
+                extra.ncols(),
+                proj_out.proj.ncols()
+            );
+            let (d, k, n) = (proj_out.proj.nrows(), extra.nrows(), proj_out.proj.ncols());
+            let mut joint = DMatrix::<f32>::zeros(d + k, n);
+            joint.rows_mut(0, d).copy_from(&proj_out.proj);
+            joint.rows_mut(d, k).copy_from(&extra);
+            proj_out.proj = joint;
+            info!(
+                "aux projection: proj_kn {d} → {} rows (joint membership)",
+                d + k
+            );
+        }
+    }
 
     // ---- Multilevel collapse → batch-corrected pseudobulks ----
     //
@@ -191,43 +219,117 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     let zeros_features = vec![0f32; n_features];
     let zeros_cells = vec![0f32; n_cells];
 
-    // The cell head allocates the canonical "e_feat" / "b_feat" /
-    // "e_cell" / "b_cell" Vars; every level head then clones those
-    // shared `e_feat` / `b_feat` Tensors and registers its own cell
-    // side under a unique `pb_l{idx}` prefix.
-    let mut cell_model = JointEmbedModel::new_with_init(
-        ModelArgs {
-            n_features,
-            n_cells,
-            embedding_dim: h,
-        },
-        &ModelInit {
-            e_feat: None,
-            e_cell: None,
-            b_feat: &zeros_features,
-            b_cell: &zeros_cells,
-        },
-        &varmap,
-        vs,
-        &config.device,
-    )?;
+    // The cell head allocates the canonical feature-side Vars ("e_feat"/"b_feat"
+    // for a free model, or "beta"/"b_feat" when β-sharing factored); every level
+    // head then SHARES that feature side and registers its own cell side under a
+    // unique `pb_l{idx}` prefix.
+    let mut cell_model = match &config.feat_factor {
+        Some(spec) => {
+            // β-sharing is incompatible with the SGC smoother and the free-E_feat
+            // L2 (both assume a single free feature table per row).
+            anyhow::ensure!(
+                config.feature_network.is_none(),
+                "feat_factor (β-sharing) is not supported together with --feature-network"
+            );
+            anyhow::ensure!(
+                config.feature_embedding_l2 == 0.0,
+                "feat_factor (β-sharing) is not supported with feature_embedding_l2 > 0"
+            );
+            anyhow::ensure!(
+                spec.row_to_gene.len() == n_features && spec.unspliced_rows.len() == n_features,
+                "feat_factor row maps (row_to_gene {}, unspliced_rows {}) must match n_features {}",
+                spec.row_to_gene.len(),
+                spec.unspliced_rows.len(),
+                n_features
+            );
+            // Dense gene ids → count is the max + 1 (single source of truth: the
+            // row→gene map; no separately-supplied n_genes to keep in sync).
+            let n_genes = spec
+                .row_to_gene
+                .iter()
+                .copied()
+                .max()
+                .map_or(0, |m| m as usize + 1);
+            info!(
+                "per-gene β-sharing factorization: {} features → {} genes ({} unspliced rows); \
+                 splice δ recovered post-hoc on the cell axis (dual phase-2 projection)",
+                n_features,
+                n_genes,
+                spec.unspliced_rows.iter().filter(|&&b| b).count(),
+            );
+            JointEmbedModel::new_factored(
+                FactoredInit {
+                    n_features,
+                    n_cells,
+                    embedding_dim: h,
+                    n_genes,
+                    row_to_gene: &spec.row_to_gene,
+                    b_feat: &zeros_features,
+                    b_cell: &zeros_cells,
+                },
+                &varmap,
+                vs,
+                &config.device,
+            )?
+        }
+        None => JointEmbedModel::new_with_init(
+            ModelArgs {
+                n_features,
+                n_cells,
+                embedding_dim: h,
+            },
+            &ModelInit {
+                e_feat: None,
+                e_cell: None,
+                b_feat: &zeros_features,
+                b_cell: &zeros_cells,
+            },
+            &varmap,
+            vs,
+            &config.device,
+        )?,
+    };
 
     let mut level_models: Vec<JointEmbedModel> = Vec::with_capacity(num_levels);
     for (level_idx, pb) in pb_blobs.iter().enumerate() {
         let n_pb = pb.n_cells();
-        level_models.push(JointEmbedModel::new_sharing_features(
-            ShareFeaturesArgs {
-                n_cells: n_pb,
-                embedding_dim: h,
-                shared_e_feat: cell_model.e_feat.clone(),
-                shared_b_feat: cell_model.b_feat.clone(),
-                e_cell_init: None,
-                b_cell_init: &vec![0f32; n_pb],
-                var_prefix: &format!("pb_l{level_idx}"),
-            },
-            &varmap,
-            &config.device,
-        )?);
+        let prefix = format!("pb_l{level_idx}");
+        let level_model = if cell_model.factor.is_some() {
+            cell_model.new_sharing_factor(n_pb, &prefix, &varmap, &config.device)?
+        } else {
+            JointEmbedModel::new_sharing_features(
+                ShareFeaturesArgs {
+                    n_cells: n_pb,
+                    embedding_dim: h,
+                    shared_e_feat: cell_model.e_feat.clone(),
+                    shared_b_feat: cell_model.b_feat.clone(),
+                    e_cell_init: None,
+                    b_cell_init: &vec![0f32; n_pb],
+                    var_prefix: &prefix,
+                },
+                &varmap,
+                &config.device,
+            )?
+        };
+        level_models.push(level_model);
+    }
+
+    // Auxiliary co-embedding arms (generic seam; e.g. faba m6A). Built now —
+    // after the pb models exist (so an arm can capture each level's shared pb
+    // `e_cell`) and before phase 1 (so the single AdamW over `varmap.all_vars()`
+    // co-trains the arm's params). The arms own clones of the Vars they score
+    // against (candle Tensors share storage, so training updates are visible).
+    let mut external_arms: Vec<Box<dyn crate::training::LossArm>> = Vec::new();
+    if let Some(builder) = config.aux.as_mut() {
+        external_arms = builder.build_arms(config::AuxArmCtx {
+            varmap: &varmap,
+            device: &config.device,
+            embedding_dim: h,
+            cell_to_pb_per_level: &cell_to_pb_per_level,
+            level_pb_models: &level_models,
+            barcodes: &unified.barcodes,
+        })?;
+        info!("aux: {} external loss arm(s) built", external_arms.len());
     }
 
     ////////////////////////////////
@@ -398,6 +500,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 dev: &config.device,
                 stop: &stop,
                 cell_to_pb_per_level: None,
+                external_arms: &external_arms,
             },
             &mut opt1,
             &p1,
@@ -407,12 +510,35 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // `cell_axis` / `pb_axes` borrows of `cell_model` / `cell_samplers` end
     // here, freeing them for the phase-2 `&mut` projection below.
 
+    // Snapshot the deltaTopic β+δ into the `e_feat` field so phase-2 (and every
+    // output/co-embed reader) sees a fixed materialized dictionary. No-op for a
+    // free model.
+    cell_model.materialize_e_feat()?;
+
+    // Phase-2 aux term (e.g. m6A binomial), built now that the arm's params are
+    // trained: folded into each cell's MAP solve so the per-cell `e_cell`
+    // reflects the second modality, not just expression. `None` → the solve
+    // stays the plain Poisson projection (byte-identical to the no-aux path).
+    let aux_cell_term: Option<Box<dyn crate::cell_projection::PerCellAuxTerm>> =
+        if let Some(builder) = config.aux.as_mut() {
+            builder.build_cell_term(config::AuxCellCtx {
+                varmap: &varmap,
+                device: &config.device,
+                embedding_dim: h,
+                barcodes: &unified.barcodes,
+                n_cells,
+            })?
+        } else {
+            None
+        };
+
     // ---- Phase 2: analytical per-cell projection onto the fixed feature
     // side. With E_feat/b_feat/z/δ held fixed, each cell's embedding is
     // independent — so rather than SGD over `e_cell`, project every cell
     // directly (Poisson MAP, ridge prior) in parallel. The per-cell
     // intercept `b_cell` is fitted and kept. See `crate::cell_projection`.
     let mut cell_nrms: Vec<f32> = Vec::new();
+    let mut axis_delta: Option<Vec<f32>> = None;
     if !stop.load(std::sync::atomic::Ordering::Relaxed) {
         info!(
             "Phase 2 — analytical per-cell projection ({n_cells} cells, feature side fixed, ridge λ={PHASE2_RIDGE})"
@@ -444,13 +570,28 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             f64::from(PHASE2_RIDGE),
             &config.device,
             batch_divisor,
+            aux_cell_term.as_deref(),
         )?;
+        // β-sharing model → recover the splice deviation on the cell axis: a
+        // second per-cell projection on spliced vs unspliced edges against the
+        // same frozen β, δ_cell = dir(φ) − dir(θ). See `project_axis_delta`.
+        if let Some(spec) = config.feat_factor.as_ref() {
+            axis_delta = Some(project_axis_delta(
+                &cell_model,
+                &cell_samplers,
+                n_cells,
+                &spec.unspliced_rows,
+                f64::from(PHASE2_RIDGE),
+                batch_divisor,
+            )?);
+        }
     }
 
     Ok(FitOutput {
         model: cell_model,
         varmap,
         cell_nrms,
+        axis_delta,
     })
 }
 

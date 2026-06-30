@@ -1,36 +1,17 @@
-//! `faba gem` — joint embedding of gene counts + RNA-modification
-//! tracks (m6A, A-to-I, poly-A). A feature row has identity
-//! `(gene g, modality m, region r)` and embeds as a base gene vector β_g
-//! deviated by an exp gate:
+//! `faba gem` — joint embedding of gene counts (spliced + unspliced) into one
+//! cell/gene space, over the shared `graph_embedding_util` engine.
 //!
-//!     AGG  ({g}/AGG):      e_f = β_g
-//!     comp ({g}/{m}/{c}):  e_f = β_g ⊙ exp(logdev_{g,m,r})
-//!     logdev_{g,m,r}       = Σ_k z_{g,k} · δ_{k,m,:} + γ_{m,r,:}
+//! Each feature row `{gene}/count/{spliced|unspliced}` maps to its gene, so a
+//! gene's spliced and unspliced tracks embed identically as `β_g` (β-sharing);
+//! the splice deviation is recovered post-hoc on the cell axis by the dual
+//! phase-2 projection (`{out}.axis_delta.parquet`).
 //!
-//! `δ_{k,m,:}` is the program×modality deviation **direction** (full
-//! H-vector — a modification can move the gene in a new direction, not
-//! just rescale β) and `γ_{m,r,:}` is an additive per-(modality, region)
-//! offset, where region = a transcript-position bin. Together they
-//! resolve multiple modification components per gene. Training uses
-//! count-weighted NCE with counterfactual negatives (random,
-//! swap-gene-mode, swap-modality).
-//!
-//! See `faba/temp.md` for the design.
+//! m6A is co-embedded as an optional second modality: a coverage-conditioned
+//! binomial arm (methylated `M` vs unmethylated `U` reads) sharing the cell
+//! axis, plugged into geu's generic `LossArm` / `PerCellAuxTerm` seams (see
+//! [`m6a`]). A-to-I / poly-A are not modelled here.
 
-pub mod annotate;
 pub mod args;
-pub mod cell_solve;
 pub mod common;
-pub mod feature_table;
-pub mod gene_weight;
-pub mod loss;
-pub mod manifest;
-pub mod model;
-pub mod plot;
-pub mod pseudobulk;
-pub mod region;
+pub mod m6a;
 pub mod sample_id;
-pub mod sampling;
-pub mod summary;
-pub mod topics;
-pub mod train;

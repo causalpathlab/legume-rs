@@ -41,12 +41,18 @@ pub mod training;
 pub mod type_annotation;
 
 pub use auxiliary_data::feature_names::FeatureNameKind;
+pub use cell_projection::{solve_one_cell, solve_one_cell_aux, PerCellAuxTerm};
 pub use data::{load_unified_data, validate_multiome_groups, LoadUnifiedArgs, UnifiedData};
 pub use data_beans_alg::refine_multilevel::RefineParams;
-pub use eval::{embedding_col_names, save_outputs, write_feature_coembedding, OutputContext};
+pub use eval::{
+    embedding_col_names, save_embedding, save_outputs, write_feature_coembedding, OutputContext,
+};
 pub use feature_qc::{hvg_feature_qc, FeatureQcConfig, FeatureQcResult};
-pub use fit::{fit, load_feature_network, FeatureNetworkArgs, FitConfig, FitOutput};
+pub use fit::{
+    fit, load_feature_network, AuxArmBuilder, AuxArmCtx, AuxCellCtx, AuxProjCtx, FeatFactorSpec,
+    FeatureNetworkArgs, FitConfig, FitOutput,
+};
 pub use model::JointEmbedModel;
 pub use postprocess::{cell_clusters, feature_coembedding};
 pub use stop::setup_stop_handler;
-pub use training::CompositeMode;
+pub use training::{CompositeMode, LossArm};

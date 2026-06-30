@@ -20,10 +20,7 @@ mod site_analysis;
 mod snp;
 
 use crate::common::*;
-use faba::gem::annotate::{run_gem_annotate, GemAnnotateArgs};
 use faba::gem::args::GemArgs;
-use faba::gem::plot::{run_gem_plot, GemPlotArgs};
-use faba::gem::summary::{run_gem_summary, GemSummaryArgs};
 use run_apa::*;
 use run_atoi::*;
 use run_gem_embedding::*;
@@ -284,109 +281,28 @@ Known SNP reference files:\n\n  \
     #[command(
         name = "gem",
         aliases = ["gem-embedding"],
-        about = "GEM: Gene Epitranscriptomic Modification embedding",
-        long_about = "GEM — joint embedding of gene counts + RNA-modification\n\
-            tracks (m6A, A-to-I, poly-A) into one cell/gene space.\n\n\
-            A feature row (gene g, modality m, region r) embeds as a base\n\
-            gene vector β_g deviated by an exp log-deviation gate:\n  \
-              AGG  ({g}/count):    e_f = β_g\n  \
-              comp ({g}/{m}/{r}):  e_f = β_g ⊙ exp(Σ_k z_{g,k}·δ_{k,m,:} + γ_{m,r,:})\n\
-            where z_g is the gene's K-program loading, δ_{k,m,:} the\n\
-            program×modality deviation *direction* (a full H-vector, not a\n\
-            scalar), and γ_{m,r,:} a per-(modality, region) offset.\n\
-            All factors are shared across input tracks\n\
-            (`faba {genes,dartseq,atoi,apa}`), so an unmeasured (gene,\n\
-            modality) pair still gets a usable embedding — z_g is learned\n\
-            from g's other modalities and δ_{:,m,:} from other genes' m-data.",
+        about = "GEM: gene embedding (spliced + unspliced counts; optional m6A arm)",
+        long_about = "GEM — joint embedding of gene counts (spliced + unspliced)\n\
+            into one cell/gene space, over the shared graph_embedding_util engine.\n\n\
+            Each feature row `{gene}/count/{spliced|unspliced}` embeds as a base\n\
+            gene vector β_g — a gene's two tracks share one identity (β-sharing):\n  \
+              spliced  count:  e_f = β_g\n  \
+              unspliced count: e_f = β_g\n\
+            The splice deviation is recovered post-hoc on the CELL axis by the\n\
+            dual phase-2 projection (`{out}.axis_delta.parquet`), where it is\n\
+            identifiable.\n\n\
+            Pass `--m6a-converted`/`--m6a-unconverted` to co-embed DART m6A as a\n\
+            coverage-conditioned binomial arm (methylated M vs unmethylated U\n\
+            reads) sharing the cell axis — a free per-gene w_g, so cos(w_g, β_g)\n\
+            reads out methylation decoupled from expression. A-to-I / poly-A are\n\
+            not modelled here.",
         after_long_help = "\
 Example:\n  \
-  faba gem --genes out/rep1_wt_genes.zarr.zip \\\n    \
-              --dartseq out/rep1_wt_m6a_mixture.zarr.zip \\\n    \
-              --atoi out/rep1_wt_atoi_mixture.zarr.zip \\\n    \
-              --apa out/rep1_wt_apa_mixture.zarr.zip -o out/gem\n\n\
-Multiple samples (comma-separated per modality; each sample a batch via\n\
-its barcodes' `@batch` tag):\n  \
-  faba gem --genes out/rep1_genes.zarr.zip,out/rep2_genes.zarr.zip \\\n    \
-              --dartseq out/rep1_m6a.zarr.zip,out/rep2_m6a.zarr.zip \\\n    \
-              -o out/gem")]
+  faba gem --genes out/rep1_wt_genes.zarr.zip -o out/gem\n\n\
+Multiple samples (comma-separated; each sample a batch via its barcodes'\n\
+`@batch` tag):\n  \
+  faba gem --genes out/rep1_genes.zarr.zip,out/rep2_genes.zarr.zip -o out/gem")]
     Gem(GemArgs),
-
-    #[command(
-        name = "gem-plot",
-        about = "2D UMAP layouts + cluster plots from a `faba gem` manifest",
-        long_about = "Reads a `{prefix}.faba.json` gem manifest and renders two\n\
-            UMAP scatter plots — the feature embedding (β_g) and the cell\n\
-            embedding (e_cell) — each k-means clustered, with a black frame\n\
-            box for easy overlay and per-cluster top-gene labels. Feature\n\
-            clusters are labelled by the genes nearest the cluster centroid;\n\
-            cell clusters by the genes they most upregulate (centroid · β_gᵀ).\n\
-            Layout coords + cluster ids are also written to parquet.",
-        after_long_help = "\
-Example:\n  \
-  faba gem-plot --from out/gem.faba.json\n  \
-  faba gem-plot -f out/gem.faba.json --num-clusters 20 --top-features 5 --no-cells"
-    )]
-    GemPlot(GemPlotArgs),
-
-    #[command(
-        name = "gem-annotate",
-        aliases = ["annotate"],
-        about = "Marker-set cell-type annotation by projection (from a gem manifest)",
-        long_about = "Light cell-type annotation: projects each marker-defined cell\n\
-            type as a virtual cell onto the frozen gem feature embedding (the\n\
-            same operator that placed the cells), then scores every cell by\n\
-            cosine in the shared space → per-cell soft posterior + argmax.\n\
-            An optional permutation null (random gene sets of matching size)\n\
-            calibrates each affinity into a p-value. Emits type-anchor\n\
-            embeddings that `faba gem-plot` can overlay.",
-        after_long_help = "\
-Example:\n  \
-  faba gem-annotate --from out/gem.faba.json -m markers.tsv\n  \
-  faba gem-annotate -f out/gem.faba.json -m markers.tsv --num-perm 500 --resolution 1.0"
-    )]
-    GemAnnotate(GemAnnotateArgs),
-
-    #[command(
-        name = "gem-summary",
-        aliases = ["summary"],
-        about = "Per-modality gene × cell-type summary from annotation labels",
-        long_about = "Group a count matrix by cell type and report per-feature\n\
-            statistics — the tidy \"gene × cell-type, per modality\" summary.\n\n\
-            Decoupled from `faba gem-annotate`: annotate once, then summarize\n\
-            cheaply and repeatedly across measures (m6a_ratio, m6a_mixture,\n\
-            converted, genes, atoi_ratio, …) against the SAME labels. Labels\n\
-            come from a gem-annotate `*.annot.parquet` or any 2-column\n\
-            `cell<TAB>label` TSV (so labels from any tool work).\n\n\
-            Data files are positional, like `data-beans stat`; multiple files\n\
-            stack into one matrix (e.g. replicates). Run once per measure (with\n\
-            a different -o). The output `{out}.summary.parquet` is long format\n\
-            `(gene, modality, component, group, nnz, tot, mu, sig)`: it splits\n\
-            each `{gene}/{modality}/{detail}` row name\n\
-            into gene/modality/component columns — the modality-aware tidy table\n\
-            you can pivot/filter by modality (what `data-beans stat` can't do).\n\
-            `mu` is the mean over all cells in the group (incl. uncovered\n\
-            zeros); `tot/nnz` is the mean over covered cells — for a ratio\n\
-            matrix that distinction matters. Reuses the same grouped-row path\n\
-            as `data-beans stat -s row -g`.\n\n\
-            Multi-sample: if the membership is `@sample`-tagged (a multi-sample\n\
-            `faba gem` run), each matrix file's barcodes are tagged the same\n\
-            way (per-file `@sample` id, the `faba gem` convention) so pooled\n\
-            replicates match EXACTLY — not by ambiguous bare barcode. The\n\
-            strip is auto-derived from the files (their common `_`-suffix); for\n\
-            a single file pass `--sample-strip` (e.g. `_m6a_ratio`).",
-        after_long_help = "\
-Example:\n  \
-  # one measure (m6A ratio), two replicates stacked\n  \
-  faba gem-summary -l out/gem.gem_annot.annot.parquet \\\n    \
-      out/rep1_m6a_ratio.zarr.zip out/rep2_m6a_ratio.zarr.zip -o out/celltype\n\n\
-  # another measure → run again (mixture component counts)\n  \
-  faba gem-summary -l out/gem.gem_annot.annot.parquet \\\n    \
-      out/rep1_m6a_mixture.zarr.zip -o out/celltype\n\n\
-  # single-sample: data-beans stat does the same (no modality split)\n  \
-  data-beans stat -s row -g out/gem.gem_annot.membership.tsv --delimiter @ \\\n    \
-      -o out/m6a_ratio_by_celltype.parquet out/rep1_m6a_ratio.zarr.zip"
-    )]
-    GemSummary(GemSummaryArgs),
 
     #[command(
         name = "all",
@@ -438,9 +354,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Metagene(ref args) => run_metagene(args)?,
         Commands::Snp(ref args) => run_snp(args)?,
         Commands::Gem(ref args) => run_gem_embedding(args)?,
-        Commands::GemPlot(ref args) => run_gem_plot(args)?,
-        Commands::GemAnnotate(ref args) => run_gem_annotate(args)?,
-        Commands::GemSummary(ref args) => run_gem_summary(args)?,
         Commands::All(ref args) => run_pipeline(args)?,
     }
 
