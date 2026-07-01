@@ -157,6 +157,74 @@ pub fn assign_fragments_to_sites(
     (results, annotations)
 }
 
+/// Fast PDUI assignment (no θ-model / EM): hard-assign each fragment to the
+/// **nearest** of two given pA sites by position, dedup UMIs, and emit per-cell
+/// counts + the two site annotations. Approximate versus the SCAPE soft
+/// assignment, but PDUI only needs the proximal/distal split, so a nearest-site
+/// rule suffices for the default (non-`--mixture`) path. `site_alphas` are the
+/// two UTR-local pA positions (components 0 and 1).
+pub fn assign_fragments_two_site_fast(
+    fragments: &[FragmentRecord],
+    frag_batch: &[u32],
+    site_alphas: [f32; 2],
+    beta: f32,
+    utr: &UtrRegion,
+) -> (Vec<CellSiteCount>, Vec<ApaSiteAnnotation>) {
+    use rustc_hash::FxHashSet;
+    let mut cell_site_umis: HashMap<(u32, CellBarcode, usize), FxHashSet<u64>> = HashMap::default();
+    let mut site_totals = [0usize; 2];
+
+    for (n, frag) in fragments.iter().enumerate() {
+        let pos = frag.pa_site.unwrap_or(frag.x + frag.l);
+        let k = usize::from((pos - site_alphas[0]).abs() > (pos - site_alphas[1]).abs());
+        site_totals[k] += 1;
+        let umi_h = match frag.umi {
+            UmiBarcode::Hash(h) => h,
+            UmiBarcode::Missing => u64::MAX,
+        };
+        cell_site_umis
+            .entry((frag_batch[n], frag.cell_barcode.clone(), k))
+            .or_default()
+            .insert(umi_h);
+    }
+
+    let results: Vec<CellSiteCount> = cell_site_umis
+        .iter()
+        .map(|((batch, cell, k), umis)| CellSiteCount {
+            batch: *batch,
+            cell_barcode: cell.clone(),
+            site_id: format!("{}/pA/{}", utr.name, k).into(),
+            count: umis.len(),
+        })
+        .collect();
+
+    let total = (site_totals[0] + site_totals[1]).max(1) as f32;
+    let annotations: Vec<ApaSiteAnnotation> = (0..2)
+        .map(|k| {
+            let alpha = site_alphas[k];
+            let (gstart, gstop) = utr.alpha_to_genomic_range(alpha.into(), beta.into());
+            let genomic_alpha = match utr.strand {
+                genomic_data::sam::Strand::Forward => utr.start + alpha as i64,
+                genomic_data::sam::Strand::Backward => utr.end - alpha as i64,
+            };
+            ApaSiteAnnotation {
+                site_id: format!("{}/pA/{}", utr.name, k).into(),
+                gene_name: utr.name.clone(),
+                chr: utr.chr.clone(),
+                genomic_alpha,
+                beta,
+                genomic_start: gstart,
+                genomic_stop: gstop,
+                pi_weight: site_totals[k] as f32 / total,
+                expected_tail_length: (utr.utr_length as f32 - alpha).max(0.0),
+                utr_length: utr.utr_length as u32,
+            }
+        })
+        .collect();
+
+    (results, annotations)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

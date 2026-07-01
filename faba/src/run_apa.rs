@@ -449,6 +449,15 @@ pub struct CountApaArgs {
     )]
     pub(crate) apa_max_sites: usize,
 
+    /// Force the full SCAPE EM for PDUI instead of the fast top-2 nearest-site
+    /// assignment. Off by default (fast PDUI); `--mixture` also forces the EM.
+    #[arg(
+        long = "apa-em-pdui",
+        default_value_t = false,
+        help = "Use the full SCAPE EM for PDUI instead of the fast top-2 nearest-site assignment"
+    )]
+    pub(crate) apa_em_pdui: bool,
+
     /// Compute PDUI (Percentage of Distal poly(A) site Usage Index)
     #[arg(
         long = "compute-pdui",

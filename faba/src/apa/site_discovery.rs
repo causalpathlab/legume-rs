@@ -112,6 +112,42 @@ pub fn merge_nearby_sites(
     merged
 }
 
+/// Discover pA-site clusters by **recursive mass bisection** — no histogram, no
+/// kernel smoothing. Given the sorted read 3'-end / poly-A positions, split at
+/// the largest interior gap that still leaves `min_count` reads on each side,
+/// and recurse ("divide the mass until it can't be split"). A cluster is a leaf
+/// when no such gap ≥ `min_gap` exists. Returns each leaf's `(median position,
+/// read count)`. One sort up front (caller) + O(n) work per recursion level over
+/// O(#sites) levels ⇒ effectively O(n log n), replacing the O(bins²)-ish KDE
+/// fallback + the per-site `merge_nearby_sites` scan for the fast-PDUI path.
+pub fn discover_sites_bisect(sorted: &[f32], min_gap: f32, min_count: usize) -> Vec<(f32, usize)> {
+    let n = sorted.len();
+    if n < min_count {
+        return Vec::new();
+    }
+    // Interior split index i (between sorted[i] and sorted[i+1]) with the largest
+    // gap, keeping ≥ min_count on each side. `lo..hi` enforces that balance.
+    let lo = min_count.saturating_sub(1);
+    let hi = n.saturating_sub(min_count);
+    let mut best_gap = min_gap;
+    let mut best_i: Option<usize> = None;
+    for i in lo..hi {
+        let gap = sorted[i + 1] - sorted[i];
+        if gap > best_gap {
+            best_gap = gap;
+            best_i = Some(i);
+        }
+    }
+    match best_i {
+        None => vec![(sorted[n / 2], n)], // leaf: one site (median representative)
+        Some(i) => {
+            let mut left = discover_sites_bisect(&sorted[..=i], min_gap, min_count);
+            left.extend(discover_sites_bisect(&sorted[i + 1..], min_gap, min_count));
+            left
+        }
+    }
+}
+
 /// Count fragments near a position within a window.
 fn nearby_count(counts: &HashMap<i64, usize>, pos: f32, window: f32) -> usize {
     let lo = (pos - window).round() as i64;
@@ -134,6 +170,38 @@ mod tests {
             cell_barcode: CellBarcode::Missing,
             umi: UmiBarcode::Missing,
         }
+    }
+
+    #[test]
+    fn test_bisect_splits_two_clusters() {
+        // Two tight masses at ~100 and ~600 (gap 500 ≫ min_gap=50).
+        let mut xs: Vec<f32> = Vec::new();
+        for i in 0..40 {
+            xs.push(100.0 + (i % 5) as f32);
+            xs.push(600.0 + (i % 5) as f32);
+        }
+        xs.sort_by(f32::total_cmp);
+        let sites = discover_sites_bisect(&xs, 50.0, 10);
+        assert_eq!(sites.len(), 2, "expected 2 clusters, got {sites:?}");
+        assert_eq!(sites.iter().map(|s| s.1).sum::<usize>(), xs.len());
+        let mut pos: Vec<f32> = sites.iter().map(|s| s.0).collect();
+        pos.sort_by(f32::total_cmp);
+        assert!((pos[0] - 102.0).abs() < 5.0 && (pos[1] - 602.0).abs() < 5.0);
+    }
+
+    #[test]
+    fn test_bisect_single_cluster_and_min_count() {
+        // One tight mass → one site (no interior gap ≥ min_gap).
+        let mut xs: Vec<f32> = (0..30).map(|i| 300.0 + (i % 7) as f32).collect();
+        xs.sort_by(f32::total_cmp);
+        assert_eq!(discover_sites_bisect(&xs, 50.0, 10).len(), 1);
+        // A tiny 2nd mass (< min_count) must NOT spawn its own site.
+        let mut xs2 = xs.clone();
+        xs2.extend([900.0, 901.0, 902.0]); // only 3 reads, min_count=10
+        xs2.sort_by(f32::total_cmp);
+        assert_eq!(discover_sites_bisect(&xs2, 50.0, 10).len(), 1);
+        // Below min_count total → no sites.
+        assert!(discover_sites_bisect(&[100.0, 101.0], 50.0, 10).is_empty());
     }
 
     #[test]

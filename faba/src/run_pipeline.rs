@@ -276,6 +276,14 @@ pub struct PipelineArgs {
     )]
     pub apa_max_sites: usize,
 
+    #[arg(
+        long = "apa-em-pdui",
+        default_value_t = false,
+        help = "Use the full SCAPE EM for PDUI instead of the fast top-2 nearest-site \
+                assignment (slower; --mixture also forces the EM)"
+    )]
+    pub apa_em_pdui: bool,
+
     #[arg(long, default_value_t = 10, help = "Minimum poly(A) tail length")]
     pub polya_min_tail_length: usize,
 
@@ -525,32 +533,34 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
         None
     };
 
-    // Step 3: APA Analysis
-    if !args.skip_apa {
-        info!("=== Step 3/{}: APA analysis ===", n_steps);
-        match run_apa_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
-            Ok(_) => info!("APA complete"),
-            Err(e) => log::warn!("APA step failed: {}. Continuing to DART.", e),
-        }
-    } else {
-        info!("=== Step 3/{}: SKIPPED (--skip-apa) ===", n_steps);
-    }
-
-    // Step 4: m6A (DART) detection — WT-vs-MUT contrast at motif Cs (signal arm =
+    // Step 3: m6A (DART) detection — WT-vs-MUT contrast at motif Cs (signal arm =
     // positional BAMs minus --control-bam, tested against the pooled control).
-    // Requires a control; skipped (not failed) when none is supplied so the rest
-    // of the pipeline (genes/SNP/ATOI/APA) can run control-free.
+    // m6A discovery uses only the SNP + ATOI masks (NOT APA), so it runs BEFORE
+    // the heavy APA EM — the fast modalities all finish first. Requires a
+    // control; skipped (not failed) when none is supplied.
     if args.control_bam_files.is_empty() {
         info!(
-            "=== Step 4/{}: SKIPPED (m6A needs --control-bam for the WT-vs-MUT contrast) ===",
+            "=== Step 3/{}: SKIPPED (m6A needs --control-bam for the WT-vs-MUT contrast) ===",
             n_steps
         );
     } else {
-        info!("=== Step 4/{}: m6A detection ===", n_steps);
+        info!("=== Step 3/{}: m6A detection ===", n_steps);
         match run_dart_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
             Ok(_) => info!("m6A complete"),
             Err(e) => log::warn!("m6A step failed: {}", e),
         }
+    }
+
+    // Step 4: APA analysis — the heavy SCAPE EM, run LAST so it never blocks the
+    // fast modalities (genes / ATOI / m6A) that downstream work needs first.
+    if !args.skip_apa {
+        info!("=== Step 4/{}: APA analysis ===", n_steps);
+        match run_apa_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
+            Ok(_) => info!("APA complete"),
+            Err(e) => log::warn!("APA step failed: {}", e),
+        }
+    } else {
+        info!("=== Step 4/{}: SKIPPED (--skip-apa) ===", n_steps);
     }
 
     write_pipeline_summary(args)?;
@@ -1052,6 +1062,7 @@ fn run_apa_step(
         method: ApaMethod::Mixture, // Always use mixture mode (more robust)
         write_mixture: args.mixture,
         apa_max_sites: args.apa_max_sites,
+        apa_em_pdui: args.apa_em_pdui,
         drop_single_component: args.drop_single_component,
         atoi_mask_file,
         snp_mask_file,

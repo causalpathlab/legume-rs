@@ -25,7 +25,9 @@ pub struct EmParams {
 impl Default for EmParams {
     fn default() -> Self {
         Self {
-            max_iter: 100,
+            // The weighted EM converges in a handful of iters; 40 caps the wasted
+            // tail on the (opt-in) --mixture path with negligible accuracy loss.
+            max_iter: 40,
             tol: 1e-4,
             min_weight: 0.01,
             skirt_eta: 0.05,
