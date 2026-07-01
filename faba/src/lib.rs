@@ -6,6 +6,12 @@
 //! `tests/` and drive the real `model` + `train` + `sampling` stack through
 //! the public API.
 
+/// Canonical feature-name (sparse-matrix row) convention shared by every
+/// modality: `{gene}/{modality}/{subunit}/{channel}` (channel innermost; subunit
+/// optional). Producers format rows with `feature_row`; consumers split them with
+/// `parse_feature_row`.
+pub mod feature_name;
+
 pub mod gem;
 
 /// Single-sample editing statistics (beta-binomial p-values, Benjamini-Hochberg

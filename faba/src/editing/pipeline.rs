@@ -777,24 +777,13 @@ pub fn process_all_bam_files_to_backend(
     let membership = params.load_membership()?;
 
     let gene_key = create_gene_key_function(gff_map);
-
-    // Determine site suffix from modification type
-    let suffix = match params.mod_type {
-        ModificationType::M6A { .. } => "m6A",
-        ModificationType::AtoI => "A2I",
-    };
-
-    let site_key = |x: &BedWithGene| -> Box<str> {
-        let gene_part = gene_key(x);
-        format!("{}/{}/{}:{}", gene_part, suffix, x.chr, x.start).into_boxed_str()
-    };
     let cutoffs = params.qc_cutoffs();
 
     let ctx = BamProcessContext {
         gene_sites,
         params,
         gff_map,
-        site_key: &site_key,
+        gene_key: &gene_key,
         cutoffs: &cutoffs,
         cell_membership: membership.as_ref(),
         valid_cell_barcodes,
@@ -840,11 +829,11 @@ pub fn process_all_bam_files_to_backend(
 }
 
 /// Shared immutable context for BAM-to-backend processing.
-struct BamProcessContext<'a, SK: Fn(&BedWithGene) -> Box<str> + Send + Sync> {
+struct BamProcessContext<'a, GK: Fn(&BedWithGene) -> Box<str> + Send + Sync> {
     gene_sites: &'a HashMap<GeneId, Vec<ConversionSite>>,
     params: &'a ConversionParams,
     gff_map: &'a GffRecordMap,
-    site_key: &'a SK,
+    gene_key: &'a GK,
     cutoffs: &'a SqueezeCutoffs,
     cell_membership: Option<&'a CellMembership>,
     valid_cell_barcodes:
@@ -886,49 +875,36 @@ fn process_bam_to_backend(
         stats.len()
     );
 
-    // For m6A, output all three value types (ratio, converted, unconverted)
-    // For ATOI, output only the specified value type
-    let output_types: Vec<ConversionValueType> = match ctx.params.mod_type {
-        ModificationType::M6A { .. } => vec![
-            ConversionValueType::Ratio,
-            ConversionValueType::Converted,
-            ConversionValueType::Unconverted,
-        ],
-        ModificationType::AtoI => vec![ctx.params.output_value_type.clone()],
+    // Pool sites → gene and emit BOTH channels as rows in ONE backend
+    // (`{batch}_{modality}`): `{gene}/{modality}/{pos}` = Σ converted,
+    // `{gene}/{modality}/{neg}` = Σ unconverted — the gene-per-channel
+    // `(positive, coverage)` form the co-embedding consumes.
+    let (modality, pos_channel, neg_channel) = match ctx.params.mod_type {
+        ModificationType::M6A { .. } => (
+            faba::feature_name::M6A,
+            faba::feature_name::METHYLATED,
+            faba::feature_name::UNMETHYLATED,
+        ),
+        ModificationType::AtoI => (
+            faba::feature_name::ATOI,
+            faba::feature_name::EDITED,
+            faba::feature_name::UNEDITED,
+        ),
     };
 
-    for value_type in output_types {
-        let value_type_for_closure = value_type.clone();
-
-        // Create value extraction function for this type
-        let value_fn = move |dat: &ConversionData| -> f32 {
-            match value_type_for_closure {
-                ConversionValueType::Ratio => {
-                    let tot = (dat.converted + dat.unconverted) as f32;
-                    (dat.converted as f32) / tot.max(1.)
-                }
-                ConversionValueType::Converted => dat.converted as f32,
-                ConversionValueType::Unconverted => dat.unconverted as f32,
-            }
-        };
-
-        let mod_suffix = match ctx.params.mod_type {
-            ModificationType::M6A { .. } => format!("_m6a_{}", value_type),
-            ModificationType::AtoI => format!("_atoi_{}", value_type),
-        };
-        let output_name = format!("{}{}", batch_name, mod_suffix);
-
-        let out = ctx.params.backend_output_path(&output_name);
-        let triplets = summarize_stats(&stats, ctx.site_key, &value_fn);
-        let data = triplets.to_backend(&out.write_path)?;
-        data.qc(ctx.cutoffs.clone())?;
-        sites.extend(data.row_names()?);
-        info!("created site-level data: {}", &out.target_path);
-        drop(data);
-        // Defer finalize(): we still need to reorder rows on the .zarr
-        // staging directory; zipping happens after reorder_all_matrices.
-        site_data_files.push(out);
-    }
+    let out = ctx
+        .params
+        .backend_output_path(&format!("{}_{}", batch_name, modality));
+    let triplets =
+        summarize_stats_two_channel(&stats, ctx.gene_key, modality, pos_channel, neg_channel);
+    let data = triplets.to_backend(&out.write_path)?;
+    data.qc(ctx.cutoffs.clone())?;
+    sites.extend(data.row_names()?);
+    info!("created gene-level {modality} data: {}", &out.target_path);
+    drop(data);
+    // Defer finalize(): rows are reordered to a shared union across batches
+    // before zipping (see reorder_all_matrices).
+    site_data_files.push(out);
 
     Ok(())
 }

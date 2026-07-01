@@ -7,8 +7,10 @@ use rustc_hash::FxHashMap as HashMap;
 pub struct PduiResult {
     /// Gene/UTR name
     pub gene_name: Box<str>,
-    /// Per-cell PDUI values
-    pub cell_pdui: Vec<(CellBarcode, f32)>,
+    /// Per-cell `(proximal_count, distal_count)` — the channel counts the
+    /// co-embedding consumes (`{gene}/apa/{proximal,distal}`); PDUI =
+    /// `distal / (proximal + distal)` is derived where needed.
+    pub cell_counts: Vec<(CellBarcode, usize, usize)>,
     /// Proximal site annotation
     pub proximal: ApaSiteAnnotation,
     /// Distal site annotation
@@ -67,19 +69,18 @@ pub fn compute_pdui(
     all_cells.extend(proximal_counts.keys().cloned());
     all_cells.extend(distal_counts.keys().cloned());
 
-    let mut cell_pdui = Vec::with_capacity(all_cells.len());
+    let mut cell_counts = Vec::with_capacity(all_cells.len());
     for cell in all_cells {
-        let p = *proximal_counts.get(&cell).unwrap_or(&0) as f32;
-        let d = *distal_counts.get(&cell).unwrap_or(&0) as f32;
-        let total = p + d;
-        if total > 0.0 {
-            cell_pdui.push((cell, d / total));
+        let p = *proximal_counts.get(&cell).unwrap_or(&0);
+        let d = *distal_counts.get(&cell).unwrap_or(&0);
+        if p + d > 0 {
+            cell_counts.push((cell, p, d));
         }
     }
 
     Some(PduiResult {
         gene_name: annotations[0].gene_name.clone(),
-        cell_pdui,
+        cell_counts,
         proximal,
         distal,
     })
@@ -130,19 +131,17 @@ mod tests {
 
         let result = compute_pdui(&counts, &annotations, Strand::Forward).unwrap();
 
-        // Find CELL1 and CELL2 PDUIs
-        let cell1_pdui = result
-            .cell_pdui
-            .iter()
-            .find(|(cb, _)| matches!(cb, CellBarcode::Barcode(b) if b.as_ref() == "CELL1"))
-            .map(|(_, v)| *v)
-            .unwrap();
-        let cell2_pdui = result
-            .cell_pdui
-            .iter()
-            .find(|(cb, _)| matches!(cb, CellBarcode::Barcode(b) if b.as_ref() == "CELL2"))
-            .map(|(_, v)| *v)
-            .unwrap();
+        // PDUI = distal / (proximal + distal), derived from cell_counts.
+        let pdui_of = |name: &str| {
+            result
+                .cell_counts
+                .iter()
+                .find(|(cb, _, _)| matches!(cb, CellBarcode::Barcode(b) if b.as_ref() == name))
+                .map(|(_, p, d)| *d as f32 / (*p + *d) as f32)
+                .unwrap()
+        };
+        let cell1_pdui = pdui_of("CELL1");
+        let cell2_pdui = pdui_of("CELL2");
 
         assert!(
             (cell1_pdui - 0.7).abs() < 0.01,
@@ -169,7 +168,8 @@ mod tests {
         ];
 
         let result = compute_pdui(&counts, &annotations, Strand::Backward).unwrap();
-        let pdui = result.cell_pdui[0].1;
+        let (_, p, d) = result.cell_counts[0];
+        let pdui = d as f32 / (p + d) as f32;
         assert!(
             (pdui - 0.8).abs() < 0.01,
             "PDUI should be 0.8, got {}",
@@ -195,7 +195,8 @@ mod tests {
         ];
 
         let result = compute_pdui(&counts, &annotations, Strand::Forward).unwrap();
-        let pdui = result.cell_pdui[0].1;
+        let (_, p, d) = result.cell_counts[0];
+        let pdui = d as f32 / (p + d) as f32;
         assert!(
             (pdui - 1.0).abs() < 0.01,
             "PDUI should be 1.0 for distal-only, got {}",

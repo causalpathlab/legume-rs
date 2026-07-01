@@ -525,23 +525,27 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
 
     let mut all_rows = rustc_hash::FxHashSet::<Box<str>>::default();
     let mut out_files: Vec<crate::pipeline_util::BackendOutputPath> = Vec::new();
-    for (batch_idx, batch_name) in batch_names.iter().enumerate() {
-        let Some(trip) = by_batch.remove(&(batch_idx as u32)) else {
-            continue;
-        };
-        if trip.is_empty() {
-            continue;
+    // The per-cell component matrix is opt-in (`--mixture`); the SCAPE fit above
+    // already ran because PDUI needs it, so this only gates the extra output.
+    if args.write_mixture {
+        for (batch_idx, batch_name) in batch_names.iter().enumerate() {
+            let Some(trip) = by_batch.remove(&(batch_idx as u32)) else {
+                continue;
+            };
+            if trip.is_empty() {
+                continue;
+            }
+            let out = args.backend_output_path(&format!("{}_apa_mixture", batch_name));
+            let data = format_data_triplets(trip).to_backend(&out.write_path)?;
+            data.qc(SqueezeCutoffs {
+                row: args.row_nnz_cutoff,
+                column: args.column_nnz_cutoff,
+            })?;
+            all_rows.extend(data.row_names()?);
+            info!("created output: {}", &out.target_path);
+            drop(data);
+            out_files.push(out);
         }
-        let out = args.backend_output_path(&format!("{}_apa_mixture", batch_name));
-        let data = format_data_triplets(trip).to_backend(&out.write_path)?;
-        data.qc(SqueezeCutoffs {
-            row: args.row_nnz_cutoff,
-            column: args.column_nnz_cutoff,
-        })?;
-        all_rows.extend(data.row_names()?);
-        info!("created output: {}", &out.target_path);
-        drop(data);
-        out_files.push(out);
     }
 
     let mut rows_sorted: Vec<_> = all_rows.into_iter().collect();
@@ -942,9 +946,11 @@ fn compute_and_write_pdui(
     let mut all_rows = rustc_hash::FxHashSet::<Box<str>>::default();
     let mut out_files: Vec<crate::pipeline_util::BackendOutputPath> = Vec::new();
 
+    use crate::pipeline_util::push_channel_row;
+    use faba::feature_name::{APA, DISTAL, PROXIMAL};
     for (batch_idx, batch_name) in batch_names.iter().enumerate() {
         let b = batch_idx as u32;
-        let mut pdui_triplets: Vec<(CellBarcode, Box<str>, f32)> = Vec::new();
+        let mut apa_triplets: Vec<(CellBarcode, Box<str>, f32)> = Vec::new();
         let mut n_pdui_genes = 0;
 
         for (gene_name, annots) in &annots_by_gene {
@@ -973,23 +979,26 @@ fn compute_and_write_pdui(
             }
             if let Some(pdui_result) = compute_pdui(&gene_counts, annots, strand) {
                 n_pdui_genes += 1;
-                for (cb, pdui_val) in &pdui_result.cell_pdui {
-                    pdui_triplets.push((cb.clone(), gene_name.clone(), *pdui_val));
+                // Emit proximal/distal COUNTS as channel rows (aggregated per
+                // gene = the 2-site UTR): {gene}/apa/{proximal,distal}.
+                for (cb, prox, dist) in &pdui_result.cell_counts {
+                    push_channel_row(&mut apa_triplets, cb, gene_name, APA, PROXIMAL, *prox);
+                    push_channel_row(&mut apa_triplets, cb, gene_name, APA, DISTAL, *dist);
                 }
             }
         }
 
-        if pdui_triplets.is_empty() {
+        if apa_triplets.is_empty() {
             continue;
         }
         info!(
-            "PDUI[{}]: {} genes, {} cell-gene values",
+            "APA[{}]: {} genes, {} cell-gene channel values",
             batch_name,
             n_pdui_genes,
-            pdui_triplets.len()
+            apa_triplets.len()
         );
-        let out = args.backend_output_path(&format!("{}_apa_pdui", batch_name));
-        let data = format_data_triplets(pdui_triplets).to_backend(&out.write_path)?;
+        let out = args.backend_output_path(&format!("{}_apa", batch_name));
+        let data = format_data_triplets(apa_triplets).to_backend(&out.write_path)?;
         data.qc(SqueezeCutoffs {
             row: args.row_nnz_cutoff,
             column: args.column_nnz_cutoff,

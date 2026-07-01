@@ -268,6 +268,14 @@ pub struct PipelineArgs {
     )]
     pub apa_min_coverage: usize,
 
+    #[arg(
+        long = "apa-max-sites",
+        default_value_t = 20,
+        help = "Cap candidate poly-A sites per UTR for APA BIC selection \
+                (top-N by coverage; 0 = unlimited). Bounds EM cost on long 3'UTRs."
+    )]
+    pub apa_max_sites: usize,
+
     #[arg(long, default_value_t = 10, help = "Minimum poly(A) tail length")]
     pub polya_min_tail_length: usize,
 
@@ -327,6 +335,22 @@ pub struct PipelineArgs {
         help = "Drop genes with a single mixture component across m6A/ATOI/APA"
     )]
     pub drop_single_component: bool,
+
+    #[arg(
+        long = "mixture",
+        default_value_t = false,
+        help = "Also produce the per-gene component-mixture `_{modality}_mixture` \
+                matrices (EM; slow). Off by default — only the gene-level \
+                `{gene}/{modality}/{channel}` counts are produced.",
+        long_help = "Also produce the per-gene component-mixture matrices (EM; slow). \
+                     Off by default — only the gene-level \
+                     `{gene}/{modality}/{channel}` counts are produced.\n\n\
+                     For m6A / A-to-I this SKIPS the 1-D Gaussian mixture EM \
+                     entirely when off. For APA the SCAPE poly-A fit always runs \
+                     (PDUI needs it to identify proximal vs distal), so this gates \
+                     only the extra `_apa_mixture` component-matrix output."
+    )]
+    pub mixture: bool,
 
     // === SNP parameters ===
     #[arg(
@@ -944,13 +968,16 @@ fn run_atoi_step(
     let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cells_by_batch);
     process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, valid_cells)?;
 
-    // Mixture model: cluster editing sites per gene
-    info!("Running 1D Gaussian mixture model on A-to-I sites...");
-    let mix_params = MixtureParams {
-        drop_single_component: args.drop_single_component,
-        ..MixtureParams::default()
-    };
-    run_mixture_model(&params, &atoi_sites, &gff_map, &mix_params, valid_cells)?;
+    // Mixture model (opt-in): cluster editing sites per gene. Skipped by
+    // default — the gene-level {gene}/atoi/{channel} counts don't need it.
+    if args.mixture {
+        info!("Running 1D Gaussian mixture model on A-to-I sites...");
+        let mix_params = MixtureParams {
+            drop_single_component: args.drop_single_component,
+            ..MixtureParams::default()
+        };
+        run_mixture_model(&params, &atoi_sites, &gff_map, &mix_params, valid_cells)?;
+    }
 
     Ok(AtoiMaskData { mask, n_sites })
 }
@@ -1023,6 +1050,8 @@ fn run_apa_step(
         backend: args.backend.clone(),
         zip: args.zip,
         method: ApaMethod::Mixture, // Always use mixture mode (more robust)
+        write_mixture: args.mixture,
+        apa_max_sites: args.apa_max_sites,
         drop_single_component: args.drop_single_component,
         atoi_mask_file,
         snp_mask_file,
@@ -1188,13 +1217,16 @@ fn run_dart_step(
     let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cells_by_batch);
     process_all_bam_files_to_backend(&params, &m6a_sites, &gff_map, valid_cells)?;
 
-    // Mixture model: cluster modification sites per gene
-    info!("Running 1D Gaussian mixture model on m6A sites...");
-    let mix_params = MixtureParams {
-        drop_single_component: args.drop_single_component,
-        ..MixtureParams::default()
-    };
-    run_mixture_model(&params, &m6a_sites, &gff_map, &mix_params, valid_cells)?;
+    // Mixture model (opt-in): cluster modification sites per gene. Skipped by
+    // default — the gene-level {gene}/m6a/{channel} counts don't need it.
+    if args.mixture {
+        info!("Running 1D Gaussian mixture model on m6A sites...");
+        let mix_params = MixtureParams {
+            drop_single_component: args.drop_single_component,
+            ..MixtureParams::default()
+        };
+        run_mixture_model(&params, &m6a_sites, &gff_map, &mix_params, valid_cells)?;
+    }
 
     Ok(())
 }

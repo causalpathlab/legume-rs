@@ -78,32 +78,69 @@ pub fn create_gene_key_function(
     }
 }
 
-pub fn summarize_stats<F, V, T>(
-    stats: &[(CellBarcode, BedWithGene, ConversionData)],
-    feature_key_func: F,
-    value_func: V,
-) -> TripletsRowsCols
-where
-    F: Fn(&BedWithGene) -> T + Send + Sync,
-    T: Clone + Send + Sync + ToString + std::hash::Hash + std::cmp::Eq + std::cmp::Ord,
-    V: Fn(&ConversionData) -> f32 + Send + Sync,
-{
-    let combined_data: HashMap<(CellBarcode, T), ConversionData> = HashMap::default();
-
-    stats.par_iter().for_each(|(cb, k, dat)| {
-        let key = (cb.clone(), feature_key_func(k));
-        combined_data.entry(key).or_default().add_assign(dat);
-    });
-
-    let combined_data = combined_data
-        .into_iter()
-        .map(|((c, k), v)| (c, k, value_func(&v)))
-        .collect::<Vec<_>>();
-
-    format_data_triplets(combined_data)
+/// Push a channel-last row `{unit}/{modality}/{channel}` = `count` into
+/// `triplets`, skipping zeros to keep the matrix sparse. The single place the
+/// channel-count producers (editing, APA) spell the [`feature_row`] convention.
+///
+/// [`feature_row`]: faba::feature_name::feature_row
+pub fn push_channel_row(
+    triplets: &mut Vec<(CellBarcode, Box<str>, f32)>,
+    cb: &CellBarcode,
+    unit: &str,
+    modality: &str,
+    channel: &str,
+    count: usize,
+) {
+    if count > 0 {
+        triplets.push((
+            cb.clone(),
+            faba::feature_name::feature_row(unit, modality, channel, None),
+            count as f32,
+        ));
+    }
 }
 
-// ========== Gene count QC ==========
+/// Aggregate conversion stats to **gene level** and emit two channel rows per
+/// gene into one matrix, in the channel-last convention
+/// ([`crate::feature_name`]):
+///
+/// ```text
+/// {gene}/{modality}/{pos_channel} = Σ_sites converted    (e.g. methylated / edited)
+/// {gene}/{modality}/{neg_channel} = Σ_sites unconverted  (e.g. unmethylated / unedited)
+/// ```
+///
+/// All of a gene's sites are pooled per cell (both channels ride in
+/// [`ConversionData`]); zero counts are skipped to keep the matrix sparse. This
+/// is the gene-per-channel `(positive, coverage)` form the co-embedding consumes.
+pub fn summarize_stats_two_channel<F>(
+    stats: &[(CellBarcode, BedWithGene, ConversionData)],
+    gene_key_func: F,
+    modality: &str,
+    pos_channel: &str,
+    neg_channel: &str,
+) -> TripletsRowsCols
+where
+    F: Fn(&BedWithGene) -> Box<str> + Send + Sync,
+{
+    // Pool sites → gene per cell (sums converted + unconverted across sites).
+    let combined: HashMap<(CellBarcode, Box<str>), ConversionData> = HashMap::default();
+    stats.par_iter().for_each(|(cb, bed, dat)| {
+        let key = (cb.clone(), gene_key_func(bed));
+        combined.entry(key).or_default().add_assign(dat);
+    });
+
+    // Two channel rows per (cell, gene); drop zeros (sparse).
+    let mut triplets: Vec<(CellBarcode, Box<str>, f32)> = Vec::with_capacity(combined.len() * 2);
+    for ((cb, gene), dat) in combined {
+        push_channel_row(&mut triplets, &cb, &gene, modality, pos_channel, dat.converted);
+        push_channel_row(&mut triplets, &cb, &gene, modality, neg_channel, dat.unconverted);
+    }
+    format_data_triplets(triplets)
+}
+
+///////////////////
+// Gene count QC //
+///////////////////
 
 /// Gene-count QC result. Genes are pooled across batches (a shared feature
 /// vocabulary), but retained cells are kept **per batch** — each BAM is a
@@ -535,9 +572,9 @@ pub fn write_qc_genes(dir: &str, gene_ids: &rustc_hash::FxHashSet<GeneId>) -> an
     Ok(())
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//                          Mitochondrial gene QC                             //
-////////////////////////////////////////////////////////////////////////////////
+///////////////////////////
+// Mitochondrial gene QC //
+///////////////////////////
 
 /// `gene_key`s whose gene sits on a mitochondrial chromosome. `mito_chr_spec`
 /// is a comma-separated list of chromosome names matched case-insensitively

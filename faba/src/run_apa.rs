@@ -435,6 +435,20 @@ pub struct CountApaArgs {
     )]
     pub(crate) merge_beta_mult: f32,
 
+    /// Cap on candidate poly-A sites per UTR for BIC selection (top-N by
+    /// coverage; 0 = unlimited). Bounds EM cost on long/heavy 3'UTRs.
+    #[arg(
+        long = "apa-max-sites",
+        default_value_t = 20,
+        help = "Cap candidate poly-A sites per UTR (top-N by coverage; 0 = unlimited)",
+        long_help = "Upper bound on how many candidate poly-A sites a UTR's BIC \
+                     site-selection considers, ranked by coverage. Long 3'UTRs can \
+                     yield hundreds of coverage peaks; capping bounds the per-UTR \
+                     EM cost with negligible accuracy loss (real UTRs have a handful \
+                     of sites). 0 = unlimited. Only used in mixture mode."
+    )]
+    pub(crate) apa_max_sites: usize,
+
     /// Compute PDUI (Percentage of Distal poly(A) site Usage Index)
     #[arg(
         long = "compute-pdui",
@@ -447,6 +461,16 @@ pub struct CountApaArgs {
                      Only used in mixture mode."
     )]
     pub(crate) compute_pdui: bool,
+
+    /// Also write the per-cell `{batch}_apa_mixture` component matrix. Off by
+    /// default: the poly-A EM still runs (PDUI needs it) but the component
+    /// matrix isn't emitted unless requested.
+    #[arg(
+        long = "mixture",
+        default_value_t = false,
+        help = "Also write the per-cell APA component-mixture matrix (`_apa_mixture`)"
+    )]
+    pub(crate) write_mixture: bool,
 
     /// Drop genes with a single active pA site (no relative usage signal)
     #[arg(
@@ -525,6 +549,7 @@ impl CountApaArgs {
             skirt_eta: self.skirt_eta,
             skirt_mult: self.skirt_mult,
             merge_beta_mult: self.merge_beta_mult,
+            max_sites: self.apa_max_sites,
             ..Default::default()
         }
     }
