@@ -413,6 +413,8 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     let extract_ns = AtomicU64::new(0);
     let bic_ns = AtomicU64::new(0);
+    let discover_ns = AtomicU64::new(0);
+    let assign_ns = AtomicU64::new(0);
 
     let results: Vec<(Vec<CellSiteCount>, Vec<ApaSiteAnnotation>)> = utrs
         .par_iter()
@@ -426,6 +428,8 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
                 site_mask.as_ref(),
                 &extract_ns,
                 &bic_ns,
+                &discover_ns,
+                &assign_ns,
                 args,
             )
         })
@@ -433,8 +437,11 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
 
     info!("processed {} UTRs", utrs.len());
     info!(
-        "APA timing (summed over threads): extraction {:.1}s, site-selection/EM {:.1}s",
+        "APA timing (summed over threads): extraction {:.1}s, discovery {:.1}s, \
+         fast-assign {:.1}s, site-selection/EM {:.1}s",
         extract_ns.load(Ordering::Relaxed) as f64 / 1e9,
+        discover_ns.load(Ordering::Relaxed) as f64 / 1e9,
+        assign_ns.load(Ordering::Relaxed) as f64 / 1e9,
         bic_ns.load(Ordering::Relaxed) as f64 / 1e9,
     );
 
@@ -700,6 +707,8 @@ fn process_utr(
     site_mask: Option<&PolyaSiteMask>,
     extract_ns: &std::sync::atomic::AtomicU64,
     bic_ns: &std::sync::atomic::AtomicU64,
+    discover_ns: &std::sync::atomic::AtomicU64,
+    assign_ns: &std::sync::atomic::AtomicU64,
     args: &CountApaArgs,
 ) -> anyhow::Result<(Vec<CellSiteCount>, Vec<ApaSiteAnnotation>)> {
     let mut all_fragments = Vec::new();
@@ -755,6 +764,58 @@ fn process_utr(
         return Ok((Vec::new(), Vec::new()));
     }
 
+    // Fast PDUI path (default; no --mixture): find pA clusters by recursive mass
+    // bisection straight from read positions — no KDE / merge / EM — then take
+    // the two highest-mass clusters and hard-assign reads to the nearest.
+    let fast_pdui = args.compute_pdui && !args.write_mixture && !args.apa_em_pdui;
+    if fast_pdui {
+        let t_discover = std::time::Instant::now();
+        let mut positions: Vec<f32> = all_fragments
+            .iter()
+            .map(|f| f.pa_site.unwrap_or(f.x + f.l))
+            .collect();
+        positions.sort_unstable_by(f32::total_cmp);
+        let mut clusters = crate::apa::site_discovery::discover_sites_bisect(
+            &positions,
+            args.merge_distance,
+            args.min_coverage,
+        );
+        // Drop clusters coinciding with an A-to-I edit / SNP (parity with the EM path).
+        if let Some(masked) = site_mask.and_then(|m| m.get(&*utr.chr)) {
+            clusters.retain(|&(alpha, _)| {
+                !masked.contains(&utr.alpha_to_genomic_range(alpha as f64, 0.0).0)
+            });
+        }
+        discover_ns.fetch_add(
+            t_discover.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        if clusters.len() < 2 {
+            return Ok((Vec::new(), Vec::new())); // single-site → no PDUI
+        }
+        clusters.sort_unstable_by(|a, b| b.1.cmp(&a.1)); // by read count, desc
+        // Require the runner-up to be a non-trivial fraction of the dominant peak.
+        if clusters[1].1 * 10 < clusters[0].1 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let t_assign = std::time::Instant::now();
+        let sites = [clusters[0].0, clusters[1].0];
+        let beta = (args.min_beta + args.max_beta) / 2.0;
+        let out = crate::apa::cell_assign::assign_fragments_two_site_fast(
+            &all_fragments,
+            &frag_batch,
+            sites,
+            beta,
+            utr,
+        );
+        assign_ns.fetch_add(
+            t_assign.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        return Ok(out);
+    }
+
+    let t_discover = std::time::Instant::now();
     let candidate_sites = if let Some(pre) = pre_sites {
         pre.get(&utr.name).cloned().unwrap_or_default()
     } else {
@@ -794,6 +855,10 @@ fn process_utr(
         }
         None => candidate_sites,
     };
+    discover_ns.fetch_add(
+        t_discover.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     let n_junction = all_fragments.iter().filter(|f| f.is_junction).count();
     log::debug!(
