@@ -16,6 +16,10 @@ pub struct EmParams {
     /// Post-EM merge: collapse selected sites with |alpha_i - alpha_j| <
     /// `merge_beta_mult * max(beta_i, beta_j)`. 0 disables.
     pub merge_beta_mult: f32,
+    /// Cap on the candidate pool considered by BIC site-selection (top-N by
+    /// coverage). Bounds the K-loop / per-column θ-marginalisation on long
+    /// UTRs. 0 = unlimited.
+    pub max_sites: usize,
 }
 
 impl Default for EmParams {
@@ -27,6 +31,7 @@ impl Default for EmParams {
             skirt_eta: 0.05,
             skirt_mult: 3.0,
             merge_beta_mult: 2.0,
+            max_sites: 0,
         }
     }
 }
@@ -201,51 +206,33 @@ pub fn select_sites_by_bic(
     site_order: &[usize],
 ) -> EmResult {
     let n_frag = data.n_clusters();
-    let n_candidates = site_order.len();
+    // Cap the candidate pool to the top-N by coverage (site_order is
+    // coverage-ranked). Bounds the K-loop and per-column cost on long UTRs.
+    let n_candidates = if params.max_sites > 0 {
+        site_order.len().min(params.max_sites)
+    } else {
+        site_order.len()
+    };
 
     if n_candidates <= 1 {
         return fixed_inference(data, params);
     }
 
-    // Precompute per-candidate likelihoods in fragment-major flat layout
-    // (`all_site_lls[n * n_candidates + j]` = log p(frag n | site j)).
-    // Computed once and reused across the K-loop; the per-fragment
-    // marginalisation over θ is the dominant cost on heavy UTRs and runs
-    // in parallel for n_frag ≥ 4096.
+    // Per-candidate fragment log-likelihoods in fragment-major layout
+    // (`all_site_lls[n * n_candidates + j]` = log p(frag n | site_order[j])).
+    // Filled LAZILY inside the K-loop: the greedy search early-stops, so on
+    // long UTRs (many candidates, few real sites) only the first `K_final`
+    // columns are ever computed — we never pay the dominant per-fragment
+    // θ-marginalisation for candidates the search doesn't reach.
     let noise_ll = log_lik_noise(data.utr_length, data.max_polya);
     let mut all_site_lls = vec![0.0_f32; n_frag * n_candidates];
+    let mut n_filled = 0usize; // columns 0..n_filled are materialised
+    let mut col_scratch = vec![0.0_f32; n_frag];
 
     let skirt_eta = params.skirt_eta;
     let skirt_mult = params.skirt_mult;
-    let alpha_arr = data.alpha_arr;
-    let beta_arr = data.beta_arr;
     let theta_grid = data.theta_grid;
-    let fill_row = |n: usize, row: &mut [f32]| {
-        let theta_row = data.theta_row(n);
-        for (j, slot) in row.iter_mut().enumerate() {
-            let idx = site_order[j];
-            *slot = log_lik_fragment_given_site_robust(
-                theta_row,
-                theta_grid,
-                alpha_arr[idx],
-                beta_arr[idx],
-                skirt_eta,
-                skirt_mult,
-            );
-        }
-    };
     const PARALLEL_THRESHOLD: usize = 4096;
-    if n_frag >= PARALLEL_THRESHOLD {
-        use rayon::prelude::*;
-        all_site_lls
-            .par_chunks_mut(n_candidates)
-            .enumerate()
-            .for_each(|(n, row)| fill_row(n, row));
-    } else {
-        for (n, row) in all_site_lls.chunks_mut(n_candidates).enumerate() {
-            fill_row(n, row);
-        }
-    }
 
     let mut best_result: Option<EmResult> = None;
     let mut n_worse = 0u32;
@@ -260,6 +247,41 @@ pub fn select_sites_by_bic(
     for k in 1..=n_candidates {
         selected_alphas.push(data.alpha_arr[site_order[k - 1]]);
         selected_betas.push(data.beta_arr[site_order[k - 1]]);
+
+        // Materialise any not-yet-computed candidate columns up to k (usually
+        // just column k-1). Compute a contiguous scratch column (parallel over
+        // fragments on heavy UTRs), then scatter it into the fragment-major
+        // buffer so the copy below stays a contiguous slice.
+        while n_filled < k {
+            let idx = site_order[n_filled];
+            let (a_j, b_j) = (data.alpha_arr[idx], data.beta_arr[idx]);
+            let fill = |n: usize| {
+                log_lik_fragment_given_site_robust(
+                    data.theta_row(n),
+                    theta_grid,
+                    a_j,
+                    b_j,
+                    skirt_eta,
+                    skirt_mult,
+                )
+            };
+            if n_frag >= PARALLEL_THRESHOLD {
+                use rayon::prelude::*;
+                col_scratch
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(n, s)| *s = fill(n));
+            } else {
+                for (n, s) in col_scratch.iter_mut().enumerate() {
+                    *s = fill(n);
+                }
+            }
+            let j = n_filled;
+            for n in 0..n_frag {
+                all_site_lls[n * n_candidates + j] = col_scratch[n];
+            }
+            n_filled += 1;
+        }
 
         let n_total = k + 1;
         component_log_liks.clear();
@@ -447,6 +469,7 @@ mod tests {
             skirt_eta: 0.0,
             skirt_mult: 0.0,
             merge_beta_mult: 0.0,
+            max_sites: 0,
         };
 
         let site_data = SiteModelData {
@@ -626,6 +649,7 @@ mod tests {
             skirt_eta: 0.0,
             skirt_mult: 0.0,
             merge_beta_mult: 0.0,
+            max_sites: 0,
         };
 
         let site_data = SiteModelData {
@@ -696,6 +720,7 @@ mod tests {
             skirt_eta: 0.0,
             skirt_mult: 0.0,
             merge_beta_mult: 0.0,
+            max_sites: 0,
         };
 
         let site_data = SiteModelData {
@@ -753,6 +778,7 @@ mod tests {
             skirt_eta: 0.05,
             skirt_mult: 3.0,
             merge_beta_mult: 2.0,
+            max_sites: 0,
         };
         let site_data = SiteModelData {
             alpha_arr: &alpha_arr,
