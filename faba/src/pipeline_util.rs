@@ -132,8 +132,22 @@ where
     // Two channel rows per (cell, gene); drop zeros (sparse).
     let mut triplets: Vec<(CellBarcode, Box<str>, f32)> = Vec::with_capacity(combined.len() * 2);
     for ((cb, gene), dat) in combined {
-        push_channel_row(&mut triplets, &cb, &gene, modality, pos_channel, dat.converted);
-        push_channel_row(&mut triplets, &cb, &gene, modality, neg_channel, dat.unconverted);
+        push_channel_row(
+            &mut triplets,
+            &cb,
+            &gene,
+            modality,
+            pos_channel,
+            dat.converted,
+        );
+        push_channel_row(
+            &mut triplets,
+            &cb,
+            &gene,
+            modality,
+            neg_channel,
+            dat.unconverted,
+        );
     }
     format_data_triplets(triplets)
 }

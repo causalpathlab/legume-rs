@@ -21,7 +21,7 @@ pub struct PduiResult {
 ///
 /// Returns None if the gene doesn't have exactly 2 active sites.
 pub fn compute_pdui(
-    counts: &[CellSiteCount],
+    counts: &[&CellSiteCount],
     annotations: &[ApaSiteAnnotation],
     strand: Strand,
 ) -> Option<PduiResult> {
@@ -129,7 +129,12 @@ mod tests {
             make_count("CELL2", "site_B", 5),
         ];
 
-        let result = compute_pdui(&counts, &annotations, Strand::Forward).unwrap();
+        let result = compute_pdui(
+            &counts.iter().collect::<Vec<_>>(),
+            &annotations,
+            Strand::Forward,
+        )
+        .unwrap();
 
         // PDUI = distal / (proximal + distal), derived from cell_counts.
         let pdui_of = |name: &str| {
@@ -167,7 +172,12 @@ mod tests {
             make_count("CELL1", "site_B", 8),
         ];
 
-        let result = compute_pdui(&counts, &annotations, Strand::Backward).unwrap();
+        let result = compute_pdui(
+            &counts.iter().collect::<Vec<_>>(),
+            &annotations,
+            Strand::Backward,
+        )
+        .unwrap();
         let (_, p, d) = result.cell_counts[0];
         let pdui = d as f32 / (p + d) as f32;
         assert!(
@@ -194,7 +204,12 @@ mod tests {
             make_count("CELL1", "site_B", 10), // only distal
         ];
 
-        let result = compute_pdui(&counts, &annotations, Strand::Forward).unwrap();
+        let result = compute_pdui(
+            &counts.iter().collect::<Vec<_>>(),
+            &annotations,
+            Strand::Forward,
+        )
+        .unwrap();
         let (_, p, d) = result.cell_counts[0];
         let pdui = d as f32 / (p + d) as f32;
         assert!(
