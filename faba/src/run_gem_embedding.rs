@@ -5,12 +5,15 @@
 //! identically as `β_g` (β-sharing) via the per-gene factorization. Driven
 //! straight through the shared `graph_embedding_util` engine — the bilinear
 //! score `e_feat·e_cell + b_feat + b_cell`, phase-1 multilevel-pseudobulk
-//! training + phase-2 analytical per-cell projection, then the SIMBA feature
-//! co-embedding. Cell **identity** is resolved by the SPLICED edges (mature mRNA
-//! = current state); the same phase-2 pass emits the nascent latent φ from the
-//! unspliced edges (`{out}.nascent.parquet`) and the velocity δ = dir(φ)−dir(θ)
-//! (`{out}.velocity.parquet`), plus a velocity feature co-embedding
-//! (`{out}.feature_velocity.parquet`) — the genes that drive the flow.
+//! training + phase-2 analytical per-cell projection. Cell **identity** is
+//! resolved by the SPLICED edges (mature mRNA = current state) and written **raw**
+//! (`{out}.latent.parquet`, magnitude kept); the same phase-2 pass fits an analytic
+//! velocity increment `δ` to the unspliced edges (identity held fixed) and writes
+//! it **raw** (`{out}.velocity.parquet`, ‖δ‖ = speed). Everything is the model's
+//! actual MAP estimate — no post-hoc unit-norm, no aggregation. The nascent state
+//! is just `θ + δ` = latent + velocity (derivable). Per-gene velocity, if wanted, is
+//! the in-model `δ_g` (`--delta-l2`). No softmax co-embedding is written (see the
+//! NOTE in `run_gem_genes_bge`: not every gene can be co-embedded).
 
 use anyhow::Context;
 use data_beans::sparse_io_vector::ColumnAlignment;
@@ -100,8 +103,8 @@ fn load_modality(
 
 /// Genes-only joint embedding over the shared `graph_embedding_util` engine.
 /// Writes the standard geu outputs `{out}.{latent,dictionary,feature_bias,
-/// cell_bias}.parquet`, the co-embedded `{out}.feature_embedding.parquet`, and
-/// the splice outputs `{out}.{nascent,velocity,feature_velocity}.parquet`.
+/// cell_bias}.parquet` (latent = raw spliced θ) and `{out}.velocity.parquet` (raw
+/// velocity increment δ). No softmax co-embedding; no nascent/driver post-hoc.
 fn run_gem_genes_bge(
     args: &GemArgs,
     feature_kind: FeatureNameKind,
@@ -148,6 +151,55 @@ fn run_gem_genes_bge(
         unified.n_cells(),
         unified.n_batches()
     );
+
+    // Optional gene-level HVG feature filter (like `senna bge`): select the top-N
+    // most variable GENES and drop the rest — dropping BOTH the spliced and
+    // unspliced rows of a dropped gene together so the β-sharing factorization
+    // stays aligned. `subset_features` narrows the dictionary/co-embed (removing
+    // the low-detection "empty" genes that pile at the co-embed centre); the
+    // uniform `hvg_weights` over the survivors then restricts the pb projection /
+    // membership to those genes too. `None` (n_hvg = 0) keeps every gene.
+    let hvg_weights: Option<Vec<f32>> = if args.collapse.n_hvg > 0 {
+        use data_beans_alg::hvg::select_hvg_streaming;
+        let hvg = select_hvg_streaming(
+            unified.count_backend(),
+            Some(args.collapse.n_hvg),
+            None,
+            None,
+        )
+        .context("HVG selection")?;
+        // Gene-aware: keep a gene if ANY of its rows is HVG-selected, then keep
+        // all of that gene's rows (both spliced + unspliced).
+        let keep_rows: Vec<usize> = {
+            let mut kept_genes: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
+            for &i in &hvg.selected_indices {
+                let name = unified.feature_names[i].as_ref();
+                kept_genes.insert(name.rsplit_once("/count/").map_or(name, |(g, _)| g));
+            }
+            unified
+                .feature_names
+                .iter()
+                .enumerate()
+                .filter_map(|(i, name)| {
+                    let gene = name
+                        .rsplit_once("/count/")
+                        .map_or(name.as_ref(), |(g, _)| g);
+                    kept_genes.contains(gene).then_some(i)
+                })
+                .collect()
+        };
+        let before = unified.n_features();
+        unified.subset_features(&keep_rows);
+        info!(
+            "HVG filter (--n-hvg {}): {} → {} feature rows",
+            args.collapse.n_hvg,
+            before,
+            unified.n_features()
+        );
+        Some(vec![1.0f32; unified.n_features()])
+    } else {
+        None
+    };
 
     // Per-gene β-sharing factorization. Each row `{gene}/count/{spliced|unspliced}`
     // maps to its gene, so a gene's spliced and unspliced tracks embed identically
@@ -198,7 +250,7 @@ fn run_gem_genes_bge(
         knn_pb_samples: args.collapse.knn_pb,
         num_opt_iter: args.collapse.num_opt_iter,
         proj_dim: args.collapse.proj_dim,
-        hvg_weights: None,
+        hvg_weights,
         // geu's multilevel collapse requires a refine spec (it surfaces the
         // per-level cell→pb maps phase-2 needs). Use geu's defaults — same as a
         // `senna bge` run without `--no-refine`.
@@ -224,21 +276,17 @@ fn run_gem_genes_bge(
     };
     let out = ge::fit(&mut unified, cfg).context("ge::fit (genes bge)")?;
 
-    // SIMBA co-embedding (one Leiden clustering → eff-cells temperature target,
-    // same as bge) + the standard geu outputs.
+    // NOTE: NO softmax co-embedding is written. (1) The gene↔cell co-embedding
+    // (`{out}.feature_embedding.parquet`) is dropped: cell-type identity is carried by
+    // a *few* high-contrast marker genes — a sparse, heavy-tailed distribution of gene
+    // norms ‖β_g‖ — and a softmax barycenter that drops every gene onto the cell
+    // manifold has to flatten that contrast, so the great majority of genes land with
+    // no meaningful cell location: NOT EVERY GENE CAN BE CO-EMBEDDED. Gene↔cell
+    // co-embedding and sharp cell clusters are the same degree of freedom pulling
+    // opposite ways — we keep the sharp clusters. (2) The velocity "driver" co-embed is
+    // replaced by the analytic per-gene driver loading δ̄_g computed in phase 2 (see
+    // below). The gene dictionary (β_g) is still written by `save_outputs`.
     let cpu = candle_util::candle_core::Device::Cpu;
-    let e_feat_cpu = out.model.e_feat.to_device(&cpu)?;
-    let e_cell_cpu = out.model.e_cell.to_device(&cpu)?;
-    let (_labels, target_eff) =
-        ge::cell_clusters(&e_cell_cpu, args.qc.num_topics).context("cell clusters")?;
-    ge::write_feature_coembedding(
-        &args.out,
-        &e_cell_cpu,
-        &e_feat_cpu,
-        &unified.feature_names,
-        target_eff,
-    )
-    .context("feature co-embedding")?;
     ge::save_outputs(
         &out.model,
         &ge::OutputContext {
@@ -275,23 +323,16 @@ fn run_gem_genes_bge(
         }
     }
 
-    // Splice outputs (β-sharing): the identity latent above is the spliced θ.
-    // On the cell axis we also emit the nascent φ (`nascent.parquet`) and the
-    // velocity δ = dir(φ)−dir(θ) (`velocity.parquet`), same cell×H layout /
-    // barcodes as the latent; and we co-embed δ onto features
-    // (`feature_velocity.parquet`) — each gene at the mean velocity of the cells
-    // that express it, so genes with large directed rows drive the flow.
+    // Splice output (β-sharing): the identity `latent` above is the RAW spliced θ.
+    // On the cell axis we also emit the RAW velocity increment δ (`velocity.parquet`),
+    // same cell×H layout / barcodes as the latent — magnitude = speed, direction =
+    // velocity, no post-hoc unit-norm. The nascent state is just θ + δ = latent +
+    // velocity (derivable, not written). Per-gene velocity, if wanted, is the in-model
+    // δ_g (`--delta-l2`, written to delta_dictionary.parquet) — not a post-hoc average.
     let h = args.model.embedding_dim;
     let n = unified.barcodes.len();
-    let mk = |buf: &[f32]| -> anyhow::Result<candle_util::candle_core::Tensor> {
-        Ok(candle_util::candle_core::Tensor::from_vec(
-            buf.to_vec(),
-            (n, h),
-            &cpu,
-        )?)
-    };
     if let Some(velocity) = &out.cell_velocity {
-        let vel_t = mk(velocity)?;
+        let vel_t = candle_util::candle_core::Tensor::from_vec(velocity.clone(), (n, h), &cpu)?;
         ge::save_embedding(
             &format!("{}.velocity.parquet", args.out),
             &vel_t,
@@ -299,34 +340,14 @@ fn run_gem_genes_bge(
             "cell",
         )
         .context("save velocity")?;
-        ge::write_feature_velocity(
-            &args.out,
-            &e_cell_cpu,
-            &e_feat_cpu,
-            &vel_t,
-            &unified.feature_names,
-            target_eff,
-        )
-        .context("feature velocity co-embedding")?;
         info!(
-            "wrote {o}.velocity.parquet (cell velocity δ) + {o}.feature_velocity.parquet (drivers)",
-            o = args.out
+            "wrote {}.velocity.parquet (raw cell velocity increment δ; ‖δ‖ = speed)",
+            args.out
         );
-    }
-    if let Some(nascent) = &out.cell_nascent {
-        let nas_t = mk(nascent)?;
-        ge::save_embedding(
-            &format!("{}.nascent.parquet", args.out),
-            &nas_t,
-            &unified.barcodes,
-            "cell",
-        )
-        .context("save nascent")?;
-        info!("wrote {}.nascent.parquet (nascent latent dir(φ))", args.out);
     }
 
     info!(
-        "done (gem — spliced identity + nascent φ + velocity δ over the bge engine) — prefix '{}'",
+        "done (gem — raw spliced identity θ + raw velocity increment δ over the bge engine) — prefix '{}'",
         args.out
     );
     Ok(())
@@ -374,8 +395,5 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
         "--embedding-dim must be > 0 (got {})",
         args.model.embedding_dim
     );
-    if let Some(k) = args.qc.num_topics {
-        anyhow::ensure!(k >= 2, "--num-topics must be ≥ 2 (got {k})");
-    }
     Ok(())
 }

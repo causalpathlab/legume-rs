@@ -94,11 +94,74 @@ pub fn solve_one_cell(
     h: usize,
     lambda: f64,
 ) -> (Vec<f32>, f32) {
-    let d = h + 1; // [e_c; b_c]
-                   // No observed features → the zero embedding (empty-cell contract).
     if feats.is_empty() {
         return (vec![0f32; h], 0.0);
     }
+    // Per-edge offset = the feature's frozen bias b_f (no fixed-latent term).
+    let edge_offset: Vec<f64> = feats
+        .iter()
+        .map(|&(idx, _)| f64::from(frozen_b[idx as usize]))
+        .collect();
+    solve_poisson_map(feats, frozen_e, &edge_offset, h, lambda)
+}
+
+/// Analytic per-cell **velocity increment**. Holding the identity latent `e_base`
+/// (the spliced solve `θ`) and the frozen feature side fixed, estimate the latent
+/// shift `δ` that best explains the cell's UNSPLICED edges under the rate
+/// `μ_f = exp(⟨e_f, e_base + δ⟩ + b_f + b_c)`. Returns `(δ, b_c)`.
+///
+/// This is the same IRLS as [`solve_one_cell`] with the per-feature identity
+/// contribution `⟨e_f, e_base⟩` folded into the offset (constant across Newton
+/// steps, so precomputed once), and the unknown initialised at `δ = 0`. Unlike a
+/// second independent projection (`φ`), `δ` is the *directed residual* — how far
+/// the identity must move to explain nascent transcription — so it isolates real
+/// dynamics from a noisier re-measurement of the same state and keeps its
+/// magnitude (speed). A cell with no unspliced edges gets `δ = 0`.
+#[must_use]
+pub fn solve_cell_increment(
+    feats: &[(u32, f32)],
+    e_base: &[f32],
+    frozen_e: &[f32],
+    frozen_b: &[f32],
+    h: usize,
+    lambda: f64,
+) -> (Vec<f32>, f32) {
+    if feats.is_empty() {
+        return (vec![0f32; h], 0.0);
+    }
+    // Per-edge offset = b_f + ⟨e_f, e_base⟩ (the fixed-identity log-rate). Constant
+    // over the Newton loop since `e_base` is held fixed, so compute it once.
+    let edge_offset: Vec<f64> = feats
+        .iter()
+        .map(|&(idx, _)| {
+            let ef = &frozen_e[idx as usize * h..(idx as usize + 1) * h];
+            let dot: f64 = ef
+                .iter()
+                .zip(e_base)
+                .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                .sum();
+            f64::from(frozen_b[idx as usize]) + dot
+        })
+        .collect();
+    solve_poisson_map(feats, frozen_e, &edge_offset, h, lambda)
+}
+
+/// Shared IRLS core for the identity and velocity-increment solves. Fits
+/// `θ = [v; b_c]` maximizing `Σ_k [ n_k·s_k − exp(s_k) ] − (λ/2)‖v‖²` with
+/// `s_k = ⟨e_{f_k}, v⟩ + edge_offset[k] + b_c`; `edge_offset` is aligned with
+/// `feats` (the frozen bias, plus any fixed-latent log-rate folded in). The ridge
+/// `λ` applies to `v` only; the intercept `b_c` is unpenalised. Returns `(v, b_c)`.
+///
+/// Each Newton step is a small `(h+1)×(h+1)` SPD solve; only the Hessian's upper
+/// triangle is accumulated, then mirrored.
+fn solve_poisson_map(
+    feats: &[(u32, f32)],
+    frozen_e: &[f32],
+    edge_offset: &[f64],
+    h: usize,
+    lambda: f64,
+) -> (Vec<f32>, f32) {
+    let d = h + 1; // [v; b_c]
     let mut theta = DVector::<f64>::zeros(d);
     let mut grad = DVector::<f64>::zeros(d); // reused across iterations
     for _ in 0..MAX_IRLS_ITERS {
@@ -106,13 +169,12 @@ pub fn solve_one_cell(
         // Fresh Hessian (consumed by the Cholesky below, so no clone). Only
         // the upper triangle is filled, then mirrored once.
         let mut hess = DMatrix::<f64>::zeros(d, d);
-        for &(idx, n) in feats {
+        for (k, &(idx, n)) in feats.iter().enumerate() {
             let ef = &frozen_e[idx as usize * h..(idx as usize + 1) * h];
-            let bf = f64::from(frozen_b[idx as usize]);
-            // s = ⟨e_c, e_f⟩ + b_f + b_c
-            let mut s = bf + theta[h];
-            for (k, &efk) in ef.iter().enumerate() {
-                s += theta[k] * f64::from(efk);
+            // s = ⟨e_f, v⟩ + offset_k + b_c
+            let mut s = edge_offset[k] + theta[h];
+            for (j, &efj) in ef.iter().enumerate() {
+                s += theta[j] * f64::from(efj);
             }
             let mu = s.clamp(-SCORE_CLAMP, SCORE_CLAMP).exp();
             let resid = f64::from(n) - mu;
@@ -129,7 +191,7 @@ pub fn solve_one_cell(
             grad[h] += resid;
             hess[(h, h)] += mu;
         }
-        // Ridge prior on e_c (not the intercept) + PD jitter on the diagonal.
+        // Ridge prior on v (not the intercept) + PD jitter on the diagonal.
         for k in 0..h {
             hess[(k, k)] += lambda;
             grad[k] -= lambda * theta[k];
@@ -152,8 +214,8 @@ pub fn solve_one_cell(
             break;
         }
     }
-    let e_c: Vec<f32> = (0..h).map(|k| theta[k] as f32).collect();
-    (e_c, theta[h] as f32)
+    let v: Vec<f32> = (0..h).map(|k| theta[k] as f32).collect();
+    (v, theta[h] as f32)
 }
 
 #[cfg(test)]
@@ -200,6 +262,67 @@ mod tests {
         let (e_c, b_c) = solve_one_cell(&[], &[0.0; 4], &[0.0; 1], 4, 1.0);
         assert_eq!(e_c, vec![0.0; 4]);
         assert_eq!(b_c, 0.0);
+    }
+
+    // Plant an identity e_base and a velocity δ*, generate unspliced counts at the
+    // noiseless rate exp(⟨e_f, e_base+δ*⟩ + b_f + b_c), and check the increment
+    // solve recovers δ* (direction) holding e_base fixed.
+    #[test]
+    fn increment_recovers_planted_velocity() {
+        let h = 4;
+        let n_id = 14;
+        let mut e = vec![0f32; n_id * h];
+        let mut b = vec![0f32; n_id];
+        for f in 0..n_id {
+            for k in 0..h {
+                e[f * h + k] = (((f * 5 + k * 17) % 13) as f32 / 13.0) - 0.5;
+            }
+            b[f] = (((f * 3) % 5) as f32 / 5.0) - 0.3;
+        }
+        let e_base = [0.5f32, 0.3, -0.4, 0.1];
+        let delta_star = [0.3f32, -0.5, 0.2, 0.4];
+        let b_c = 0.2f32;
+        let feats: Vec<(u32, f32)> = (0..n_id)
+            .map(|f| {
+                let ef = &e[f * h..(f + 1) * h];
+                let s: f32 = ef
+                    .iter()
+                    .enumerate()
+                    .map(|(k, ev)| ev * (e_base[k] + delta_star[k]))
+                    .sum::<f32>()
+                    + b[f]
+                    + b_c;
+                (f as u32, s.exp())
+            })
+            .collect();
+        let (delta, _b_c) = solve_cell_increment(&feats, &e_base, &e, &b, h, 1e-3);
+        let dot: f32 = delta.iter().zip(&delta_star).map(|(a, b)| a * b).sum();
+        let na: f32 = delta.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb: f32 = delta_star.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let cos = dot / (na * nb);
+        assert!(cos > 0.97, "recovered velocity misaligned (cos={cos:.3})");
+    }
+
+    // With δ* = 0 (unspliced explained by the identity alone), the increment is ≈ 0.
+    #[test]
+    fn increment_zero_when_no_velocity() {
+        let h = 3;
+        let e = [0.4f32, -0.2, 0.6, 0.1, 0.5, -0.3, -0.5, 0.2, 0.4];
+        let b = [0.1f32, -0.2, 0.0];
+        let e_base = [0.3f32, 0.4, -0.2];
+        let feats: Vec<(u32, f32)> = (0..3)
+            .map(|f| {
+                let ef = &e[f * h..(f + 1) * h];
+                let s: f32 = ef.iter().zip(&e_base).map(|(a, c)| a * c).sum::<f32>() + b[f];
+                (f as u32, s.exp())
+            })
+            .collect();
+        let (delta, _) = solve_cell_increment(&feats, &e_base, &e, &b, h, 1e-2);
+        let mag: f32 = delta.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            mag < 0.2,
+            "increment should be ~0 with no velocity (‖δ‖={mag:.3})"
+        );
     }
 
     #[test]
