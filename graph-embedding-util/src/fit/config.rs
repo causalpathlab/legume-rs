@@ -107,6 +107,11 @@ pub struct FitConfig {
     /// Global-norm gradient clip per `AdamW` step (`0.0` = off). Bounds the
     /// update magnitude so embeddings don't inflate on NCE loss spikes.
     pub max_grad_norm: f32,
+    /// L2 (ridge) penalty on the per-gene splice offset `δ_g` (factored β-sharing
+    /// splice models only). `0.0` = plain β-sharing (no `δ_g`); `> 0` allocates a
+    /// ridge-shrunk `δ_g` so unspliced rows embed as `β_g + δ_g`.
+    /// See [`crate::model::FeatFactor`].
+    pub delta_l2: f32,
     /// Optional per-cell multiplier on the cell-axis sampling weight
     /// (length = `n_cells`, indexed by global cell id). Folded into the
     /// `degree^α` cell picker so up-weighted cells are sampled more often.
@@ -303,5 +308,6 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
         composite_mode: CompositeMode::Sum,
         feature_embedding_l2: config.feature_embedding_l2,
         max_grad_norm: config.max_grad_norm,
+        delta_l2: config.delta_l2,
     }
 }

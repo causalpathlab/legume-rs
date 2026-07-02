@@ -133,6 +133,12 @@ pub struct TrainingParams {
     /// Global-norm gradient clip per `AdamW` step (`0.0` = off). Bounds the
     /// update magnitude so embeddings don't inflate on NCE loss spikes.
     pub max_grad_norm: f32,
+    /// L2 (ridge) penalty `λ · mean(δ_g²)` on the per-gene splice offset (factored
+    /// β-sharing only). Shrinks `δ_g` toward 0 so the splice signal is explained
+    /// on the cell axis unless a gene's nascent deviation genuinely lowers the
+    /// loss — a dense prior that fits the (dense) per-gene γ structure and is
+    /// well-behaved under AdamW. `0.0` disables (plain β-sharing, no `δ_g`).
+    pub delta_l2: f32,
 }
 
 pub struct CompositeTrainContext<'a> {
@@ -166,6 +172,13 @@ pub fn train_composite(
     // Smoother refreshes against the *shared* E_feat — pull it from the
     // first axis (every axis points at the same tensor).
     let shared_e_feat = ctx.axes[0].model.e_feat.clone();
+    // Shared per-gene splice offset δ_g (factored splice models), for the L1
+    // penalty below. `None` for free / plain-β-sharing models.
+    let shared_delta = ctx.axes[0]
+        .model
+        .factor
+        .as_ref()
+        .and_then(|f| f.delta.clone());
     // Pre-build the axis sampler for `Sample` mode. Reused every step;
     // weights = `λ_k`, so picking axis `k` happens with probability
     // `λ_k / Σλ`. The `Σλ` scale gets applied to the chosen axis's loss
@@ -235,6 +248,15 @@ pub fn train_composite(
                     .mean_all()?
                     .affine(f64::from(params.feature_embedding_l2), 0.0)?;
                 loss = (loss + l2)?;
+            }
+            // L2 (ridge) shrinkage on the per-gene splice offset δ_g (factored
+            // models with a splice split). `mean(δ_g²)` keeps λ scale-invariant
+            // across `G · H` (mirrors the feature-embedding L2 above).
+            if let (Some(delta), l2) = (&shared_delta, params.delta_l2) {
+                if l2 > 0.0 {
+                    let pen = delta.sqr()?.mean_all()?.affine(f64::from(l2), 0.0)?;
+                    loss = (loss + pen)?;
+                }
             }
             // Backward + optional global-norm gradient clip + step.
             candle_util::grad_clip::clipped_backward_step(

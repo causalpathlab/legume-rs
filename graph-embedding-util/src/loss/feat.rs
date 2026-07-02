@@ -832,7 +832,19 @@ fn nce_loss_with_cell_side(
     // never has one — see `fit::run`). Shared by pos + neg.
     let gather_feat = |idx: &Tensor| -> Result<Tensor> {
         match &model.factor {
-            Some(f) => f.beta.index_select(&f.row_to_gene.index_select(idx, 0)?, 0),
+            Some(f) => {
+                let genes = f.row_to_gene.index_select(idx, 0)?;
+                let base = f.beta.index_select(&genes, 0)?; // β_g
+                match (&f.delta, &f.unspliced_mask) {
+                    // unspliced rows: + δ_g (β_g + mask ⊙ δ_g); spliced: mask = 0.
+                    (Some(delta), Some(mask)) => {
+                        let d = delta.index_select(&genes, 0)?; // [b, H]
+                        let m = mask.index_select(idx, 0)?; // [b, 1]
+                        base.add(&d.broadcast_mul(&m)?)
+                    }
+                    _ => Ok(base),
+                }
+            }
             None => select_feat_emb(smoother, &model.e_feat, idx),
         }
     };

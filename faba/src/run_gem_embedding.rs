@@ -168,6 +168,20 @@ fn run_gem_genes_bge(
         unified.feature_names.len(),
         factor.unspliced_rows.iter().filter(|&&b| b).count(),
     );
+    // Gene names in gene-id order (first row per gene, minus the `/count/…`
+    // suffix) — for labeling the per-gene δ_g dictionary when `--delta-l2 > 0`.
+    let gene_names: Vec<Box<str>> = {
+        let mut names: Vec<Box<str>> = vec![Box::from(""); n_genes];
+        for (name, &gid) in unified.feature_names.iter().zip(&factor.row_to_gene) {
+            if names[gid as usize].is_empty() {
+                let gene = name
+                    .rsplit_once("/count/")
+                    .map_or(name.as_ref(), |(g, _)| g);
+                names[gid as usize] = gene.into();
+            }
+        }
+        names
+    };
 
     let dev = args
         .runtime
@@ -206,6 +220,7 @@ fn run_gem_genes_bge(
         cell_weight_mult: None,
         phase1_cells_per_pb: args.collapse.phase1_cells_per_pb,
         feat_factor: Some(factor),
+        delta_l2: args.model.delta_l2,
     };
     let out = ge::fit(&mut unified, cfg).context("ge::fit (genes bge)")?;
 
@@ -234,6 +249,31 @@ fn run_gem_genes_bge(
         &args.out,
     )
     .context("save outputs")?;
+
+    // Per-gene splice offset δ_g (`--delta-l2 > 0`): the nascent loading
+    // (unspliced e_f = β_g + δ_g). Read the trained `delta` Var from the varmap
+    // and save it row-labeled by gene — genes with large ‖δ_g‖ carry a distinct
+    // nascent/velocity program; the L2 ridge shrinks the rest toward 0.
+    if args.model.delta_l2 > 0.0 {
+        let vars = out.varmap.data().lock().unwrap();
+        if let Some(delta) = vars.get("delta") {
+            let d_t = delta.as_tensor().to_device(&cpu)?;
+            // genes with any |δ_g| above ~0 (the L1 leaves most rows at ≈0).
+            let per_gene_max: Vec<f32> = d_t.abs()?.max(1)?.to_vec1()?;
+            let nz = per_gene_max.iter().filter(|&&x| x > 1e-6).count();
+            ge::save_embedding(
+                &format!("{}.delta_dictionary.parquet", args.out),
+                &d_t,
+                &gene_names,
+                "gene",
+            )
+            .context("save δ_g dictionary")?;
+            info!(
+                "wrote {}.delta_dictionary.parquet (δ_g; {}/{} genes with nonzero offset)",
+                args.out, nz, n_genes
+            );
+        }
+    }
 
     // Splice outputs (β-sharing): the identity latent above is the spliced θ.
     // On the cell axis we also emit the nascent φ (`nascent.parquet`) and the

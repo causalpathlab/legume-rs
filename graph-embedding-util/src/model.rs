@@ -60,6 +60,10 @@ pub struct FactoredInit<'a> {
     pub row_to_gene: &'a [u32],
     pub b_feat: &'a [f32],
     pub b_cell: &'a [f32],
+    /// Per-row unspliced flag (`len == n_features`). When `Some`, a ridge-shrunk
+    /// per-gene `δ_g` Var is allocated and added to the unspliced rows
+    /// (spliced identity + nascent offset); `None` = plain β-sharing.
+    pub unspliced_rows: Option<&'a [bool]>,
 }
 
 /// Optional per-gene β-sharing feature factorization (used by `faba gem`'s
@@ -68,32 +72,49 @@ pub struct FactoredInit<'a> {
 ///
 ///   `e_feat[row] = β[gene(row)]`
 ///
-/// so a gene's spliced and unspliced rows embed *identically* as `β_g` — one
-/// shared gene identity on the feature side. The splice deviation is **not**
-/// carried here (a gene-side δ_g is non-identifiable against an equal-and-
-/// opposite cell/pb-axis shift); it is recovered post-hoc on the CELL axis by
-/// the phase-2 projection (see `crate::fit::project_cells_phase2`: position each
-/// cell against the frozen `β` twice — on its spliced edges θ [= identity] and
-/// unspliced edges φ [= nascent] — yielding the velocity `δ_cell = dir(φ) −
-/// dir(θ)`). `β` is the learnable `Var`;
-/// `row_to_gene` is a fixed index tensor. The score/loss path gathers the
-/// batch's rows by composing the row→gene→β gathers directly (no full-table
-/// materialization per step); output/co-embed readers use the `e_feat` field
-/// after [`JointEmbedModel::materialize_e_feat`].
+/// so a gene's spliced rows embed as `β_g`. **Optionally** a per-gene splice
+/// offset `δ_g` is carried for the unspliced rows:
+///
+///   `e_feat[row] = β_g + [row is unspliced] · δ_g`
+///
+/// so spliced = current-state identity `β_g` and unspliced = nascent `β_g + δ_g`.
+/// `δ_g` is **L2 (ridge) shrunk** (phase-1 penalty), which resolves the otherwise-
+/// ambiguous split against an equal-and-opposite cell-axis shift: the shrunk
+/// gene-side `δ_g` absorbs the (dense) static per-gene nascent structure (the
+/// "γ"), and the residual dynamics stay on the CELL axis as the phase-2 velocity
+/// `δ_cell = dir(φ) − dir(θ)` (see `crate::fit::project_cells_phase2`). With
+/// `delta = None` this reduces to plain β-sharing (spliced ≡ unspliced ≡ `β_g`).
+/// `β` / `δ_g` are learnable `Var`s; `row_to_gene` / `unspliced_mask` are fixed.
+/// The score/loss path composes the row→gene→(β,δ) gathers directly (no
+/// full-table materialization per step); output/co-embed readers use the
+/// `e_feat` field after [`JointEmbedModel::materialize_e_feat`].
 #[derive(Clone)]
 pub struct FeatFactor {
     /// Per-gene base embedding `[G, H]` (Var).
     pub beta: Tensor,
     /// `[n_features]` u32 (device): row → gene index.
     pub row_to_gene: Tensor,
+    /// Optional per-gene splice offset `δ_g [G, H]` (Var), added to the
+    /// **unspliced** rows only. L2-ridge (phase-1). `None` = plain β-sharing.
+    pub delta: Option<Tensor>,
+    /// `[n_features, 1]` f32 0/1 mask (1 for unspliced rows) selecting where
+    /// `δ_g` applies. `Some` iff `delta` is.
+    pub unspliced_mask: Option<Tensor>,
 }
 
 impl FeatFactor {
-    /// Materialize the full feature embedding `[n_features, H]` from `β` by
-    /// gathering each feature row's gene base. Stays in the autograd graph so
-    /// gradients flow back to the `β` Var.
+    /// Materialize the full feature embedding `[n_features, H]` from `β` (plus
+    /// `δ_g` on the unspliced rows). Stays in the autograd graph so gradients
+    /// flow back to the `β` / `δ_g` Vars.
     fn e_feat(&self) -> Result<Tensor> {
-        self.beta.index_select(&self.row_to_gene, 0)
+        let base = self.beta.index_select(&self.row_to_gene, 0)?;
+        match (&self.delta, &self.unspliced_mask) {
+            (Some(delta), Some(mask)) => {
+                let d = delta.index_select(&self.row_to_gene, 0)?; // [n_features, H]
+                base.add(&d.broadcast_mul(mask)?) // + mask ⊙ δ_g on unspliced rows
+            }
+            _ => Ok(base),
+        }
     }
 }
 
@@ -211,7 +232,18 @@ impl JointEmbedModel {
         let b_feat = register_var_from_slice(varmap, dev, "b_feat", args.b_feat)?;
         let b_cell = register_var_from_slice(varmap, dev, "b_cell", args.b_cell)?;
 
-        let factor = build_feat_factor(&beta, args.row_to_gene, dev)?;
+        // Optional per-gene splice offset δ_g, zero-initialized (so training
+        // starts exactly at β-sharing and δ_g grows only where the data + L2
+        // tradeoff justifies it).
+        let delta = match args.unspliced_rows {
+            Some(_) => Some(vs.get_with_hints(
+                (args.n_genes, args.embedding_dim),
+                "delta",
+                candle_nn::Init::Const(0.0),
+            )?),
+            None => None,
+        };
+        let factor = build_feat_factor(&beta, args.row_to_gene, delta, args.unspliced_rows, dev)?;
         let e_feat = factor.e_feat()?.detach();
         Ok(Self {
             e_feat,
@@ -371,12 +403,28 @@ impl JointEmbedModel {
 
 /// Build a [`FeatFactor`] from the shared `β` Var and the host-side row→gene
 /// map: materializes the fixed `row_to_gene` (u32) index tensor on `dev`.
-fn build_feat_factor(beta: &Tensor, row_to_gene: &[u32], dev: &Device) -> Result<FeatFactor> {
+fn build_feat_factor(
+    beta: &Tensor,
+    row_to_gene: &[u32],
+    delta: Option<Tensor>,
+    unspliced_rows: Option<&[bool]>,
+    dev: &Device,
+) -> Result<FeatFactor> {
     let d = row_to_gene.len();
     let row_to_gene_t = Tensor::from_vec(row_to_gene.to_vec(), d, dev)?;
+    // `[n_features, 1]` 0/1 mask selecting the unspliced rows (where δ_g applies).
+    let unspliced_mask = match unspliced_rows {
+        Some(u) => {
+            let m: Vec<f32> = u.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect();
+            Some(Tensor::from_vec(m, (d, 1), dev)?)
+        }
+        None => None,
+    };
     Ok(FeatFactor {
         beta: beta.clone(),
         row_to_gene: row_to_gene_t,
+        delta,
+        unspliced_mask,
     })
 }
 
