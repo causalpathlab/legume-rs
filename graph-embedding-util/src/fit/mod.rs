@@ -230,6 +230,15 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 n_genes,
                 spec.unspliced_rows.iter().filter(|&&b| b).count(),
             );
+            // Allocate the ridge-shrunk per-gene splice offset δ_g only when its
+            // L2 penalty is on; otherwise plain β-sharing (spliced ≡ unspliced ≡ β_g).
+            let unspliced_rows = (config.delta_l2 > 0.0).then_some(spec.unspliced_rows.as_slice());
+            if unspliced_rows.is_some() {
+                info!(
+                    "δ_g splice offset ON (L2={}): unspliced rows embed as β_g + δ_g",
+                    config.delta_l2
+                );
+            }
             JointEmbedModel::new_factored(
                 FactoredInit {
                     n_features,
@@ -239,6 +248,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     row_to_gene: &spec.row_to_gene,
                     b_feat: &zeros_features,
                     b_cell: &zeros_cells,
+                    unspliced_rows,
                 },
                 &varmap,
                 vs,

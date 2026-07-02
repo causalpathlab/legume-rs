@@ -11,6 +11,21 @@ pub struct ModelArgs {
         help = "Embedding dimension H (size of β_g and the cell embedding)"
     )]
     pub embedding_dim: usize,
+
+    #[arg(
+        long = "delta-l2",
+        default_value_t = 0.0,
+        help = "L2 (ridge) weight on the per-gene splice offset δ_g (0 = off; unspliced ≡ spliced ≡ β_g)",
+        long_help = "L2 (ridge) penalty on the per-gene splice offset δ_g. When 0 (default),\n\
+                     unspliced and spliced rows share β_g exactly (plain β-sharing). When > 0,\n\
+                     unspliced rows embed as β_g + δ_g with a ridge-shrunk δ_g learned in phase\n\
+                     1: it absorbs the (dense) static per-gene nascent structure (the RNA-\n\
+                     velocity γ) so cell identity (spliced θ) stays clean and the phase-2\n\
+                     velocity δ = dir(φ)−dir(θ) becomes γ-calibrated. Larger = more shrinkage\n\
+                     (δ_g pulled toward 0). Try 0.01–1.0; δ_g is written to\n\
+                     `{out}.delta_dictionary.parquet`."
+    )]
+    pub delta_l2: f32,
 }
 
 /// Pseudobulk collapse, phase-1 cell-axis mode, per-file sample identity, and
