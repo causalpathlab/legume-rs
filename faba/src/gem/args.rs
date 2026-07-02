@@ -75,18 +75,6 @@ pub struct CollapseArgs {
 
     #[arg(
         long,
-        default_value = "_m6a_converted",
-        help = "Strip this suffix from each --m6a-converted file basename to form its sample id",
-        long_help = "Strip this suffix from each `--m6a-converted` file basename to form its\n\
-                     sample id, so the m6A backend aligns to the genes backend's cells. The\n\
-                     m6A file `rep1_wt_m6a_converted` minus `_m6a_converted` → `rep1_wt`,\n\
-                     matching the genes file `rep1_wt_genes` minus `--genes-sample-strip`.\n\
-                     The unconverted strip is derived by swapping `converted`→`unconverted`."
-    )]
-    pub m6a_sample_strip: Box<str>,
-
-    #[arg(
-        long,
         default_value_t = '_',
         help = "Delimiter for fuzzy gene-name matching across input files",
         long_help = "Delimiter for fuzzy gene-name matching across input files \n\
@@ -202,8 +190,9 @@ pub struct RuntimeArgs {
 ///
 /// Joint embedding of gene counts (spliced + unspliced) into one cell/gene
 /// space over the shared `graph_embedding_util` engine. Each row
-/// `{gene}/count/{spliced|unspliced}` embeds as `β_g` (β-sharing); the splice
-/// deviation is recovered on the cell axis (`{out}.axis_delta.parquet`).
+/// `{gene}/count/{spliced|unspliced}` embeds as `β_g` (β-sharing); cell identity
+/// is the spliced projection θ and the splice contrast is a velocity δ on the
+/// cell axis (`{out}.velocity.parquet`).
 ///
 /// Flag conventions mirror `senna bge` where applicable (`-i / --epochs`,
 /// `-b / --batch-files`, `--learning-rate` with `--lr` alias,
@@ -237,75 +226,6 @@ pub struct GemArgs {
                      reconciles per-cell batches from those tags."
     )]
     pub batch_files: Option<Vec<Box<str>>>,
-
-    #[arg(
-        long = "m6a-converted",
-        value_delimiter = ',',
-        help = "Optional DART m6A converted-read matrix prefix(es), comma-separated",
-        long_help = "Optional DART m6A converted-read (C→T) sparse matrix prefix(es),\n\
-                     comma-separated. Rows are m6A sites `{gene}/m6A/{chr}:{pos}`; columns\n\
-                     are barcodes. Aligned cell-for-cell to the `--genes` backend (by\n\
-                     `@sample` tag) and pooled to genes. Requires `--m6a-unconverted` (the\n\
-                     pair gives coverage = converted + unconverted). When set, gem co-embeds\n\
-                     m6A as a binomial arm sharing the cell axis."
-    )]
-    pub m6a_converted: Option<Vec<Box<str>>>,
-
-    #[arg(
-        long = "m6a-unconverted",
-        value_delimiter = ',',
-        help = "Optional DART m6A unconverted-read matrix prefix(es), comma-separated",
-        long_help = "DART m6A unconverted-read sparse matrix prefix(es), comma-separated;\n\
-                     the partner of `--m6a-converted` (same site rows, same cells). Together\n\
-                     they form the per-site (converted, coverage) binomial pair."
-    )]
-    pub m6a_unconverted: Option<Vec<Box<str>>>,
-
-    #[arg(
-        long = "m6a-lambda",
-        default_value_t = 1.0,
-        help = "Phase-1 m6A arm mixing weight λ (m6A's influence on the shared e_cell)"
-    )]
-    pub m6a_lambda: f32,
-
-    #[arg(
-        long = "m6a-kappa",
-        default_value_t = 1.0,
-        help = "Phase-2 m6A joint-solve weight κ",
-        long_help = "Phase-2 per-cell joint-solve weight κ on the m6A binomial term. The\n\
-                     expression arm sums raw Poisson residuals (∝ library size) while the\n\
-                     m6A arm is ω-normalized, so κ typically needs to be > 1 for m6A to\n\
-                     move the per-cell embedding. Sweep it."
-    )]
-    pub m6a_kappa: f64,
-
-    #[arg(
-        long = "m6a-n0",
-        default_value_t = 5.0,
-        help = "Coverage stabilizer N0 in ω = N/(N+N0) (down-weights shallow genes/cells)"
-    )]
-    pub m6a_n0: f32,
-
-    #[arg(
-        long = "m6a-cov-min",
-        default_value_t = 0.0,
-        help = "Drop pb edges with pooled m6A coverage ≤ this"
-    )]
-    pub m6a_cov_min: f32,
-
-    #[arg(
-        long = "m6a-refine-weight",
-        default_value_t = 0.0,
-        help = "M4: weight of the m6A block appended to proj_kn for joint membership (0 = off)",
-        long_help = "M4 (m6A-aware pseudobulk membership). When > 0, a coverage-weighted\n\
-                     random projection of each cell's methylation-rate deviation is appended\n\
-                     to the column projection `proj_kn` before the collapse, scaled so its\n\
-                     row-std is this multiple of the expression projection's — so cells that\n\
-                     are expression-similar but methylation-distinct can split into different\n\
-                     pseudobulks. 0 (default) = partition is expression-only. Keep modest\n\
-                     (e.g. 0.2–0.5); large values let m6A reshape coarse structure."
-    )]
-    pub m6a_refine_weight: f32,
 
     #[arg(short, long, required = true, help = "Output prefix")]
     pub out: Box<str>,

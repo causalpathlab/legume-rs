@@ -281,21 +281,19 @@ Known SNP reference files:\n\n  \
     #[command(
         name = "gem",
         aliases = ["gem-embedding"],
-        about = "GEM: gene embedding (spliced + unspliced counts; optional m6A arm)",
+        about = "GEM: gene embedding (spliced + unspliced counts)",
         long_about = "GEM — joint embedding of gene counts (spliced + unspliced)\n\
             into one cell/gene space, over the shared graph_embedding_util engine.\n\n\
             Each feature row `{gene}/count/{spliced|unspliced}` embeds as a base\n\
             gene vector β_g — a gene's two tracks share one identity (β-sharing):\n  \
               spliced  count:  e_f = β_g\n  \
               unspliced count: e_f = β_g\n\
-            The splice deviation is recovered post-hoc on the CELL axis by the\n\
-            dual phase-2 projection (`{out}.axis_delta.parquet`), where it is\n\
-            identifiable.\n\n\
-            Pass `--m6a-converted`/`--m6a-unconverted` to co-embed DART m6A as a\n\
-            coverage-conditioned binomial arm (methylated M vs unmethylated U\n\
-            reads) sharing the cell axis — a free per-gene w_g, so cos(w_g, β_g)\n\
-            reads out methylation decoupled from expression. A-to-I / poly-A are\n\
-            not modelled here.",
+            A single Poisson likelihood on counts. Cell identity comes from the\n\
+            SPLICED projection θ (mature mRNA = current state); the same phase-2\n\
+            pass emits the nascent φ (`{out}.nascent.parquet`) and the velocity\n\
+            δ = dir(φ)−dir(θ) (`{out}.velocity.parquet`) on the cell axis, plus a\n\
+            velocity feature co-embedding (`{out}.feature_velocity.parquet`) —\n\
+            the genes that drive the flow.",
         after_long_help = "\
 Example:\n  \
   faba gem --genes out/rep1_wt_genes.zarr.zip -o out/gem\n\n\

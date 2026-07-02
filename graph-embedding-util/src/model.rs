@@ -72,9 +72,10 @@ pub struct FactoredInit<'a> {
 /// shared gene identity on the feature side. The splice deviation is **not**
 /// carried here (a gene-side δ_g is non-identifiable against an equal-and-
 /// opposite cell/pb-axis shift); it is recovered post-hoc on the CELL axis by
-/// the dual phase-2 projection (see `crate::fit::project_axis_delta`: position
-/// each cell against the frozen `β` twice — on its spliced edges θ and unspliced
-/// edges φ — and store `δ_cell = dir(φ) − dir(θ)`). `β` is the learnable `Var`;
+/// the phase-2 projection (see `crate::fit::project_cells_phase2`: position each
+/// cell against the frozen `β` twice — on its spliced edges θ [= identity] and
+/// unspliced edges φ [= nascent] — yielding the velocity `δ_cell = dir(φ) −
+/// dir(θ)`). `β` is the learnable `Var`;
 /// `row_to_gene` is a fixed index tensor. The score/loss path gathers the
 /// batch's rows by composing the row→gene→β gathers directly (no full-table
 /// materialization per step); output/co-embed readers use the `e_feat` field
