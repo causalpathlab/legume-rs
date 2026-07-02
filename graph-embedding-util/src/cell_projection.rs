@@ -79,45 +79,13 @@ pub fn project_cells(
     (e, b)
 }
 
-/// An optional second likelihood folded into a cell's MAP solve, sharing the
-/// same `e_c` as the Poisson expression term. The implementor lives in a
-/// downstream crate (e.g. faba's m6A binomial term); it owns its per-cell data
-/// and frozen feature side, and contributes its Gauss-Newton grad/Hessian into
-/// the shared accumulators each IRLS step. Generic seam: geu never knows the
-/// modality.
-///
-/// `θ` layout is `[e_c (h); b_c (1); extra (n_extra)]` — the term reads `e_c`
-/// (`theta[0..h]`) and its own extra slots (`theta[h+1 ..]`), and writes into
-/// the **upper triangle** of `hess` over those same indices (the caller mirrors
-/// once). It must leave the expression intercept slot `h` untouched unless it
-/// deliberately couples to library size.
-pub trait PerCellAuxTerm: Send + Sync {
-    /// Extra parameters this term appends to `θ` after `[e_c; b_c]` (e.g. a
-    /// dedicated per-cell intercept). `0` to share none.
-    fn n_extra(&self) -> usize;
-    /// Accumulate grad/Hessian (Gauss-Newton, SPD; upper triangle) for `cell`
-    /// at the current `theta`. `extra_offset == h + 1` is where this term's
-    /// extra params start in `θ`.
-    fn accumulate(
-        &self,
-        cell: usize,
-        theta: &DVector<f64>,
-        h: usize,
-        extra_offset: usize,
-        grad: &mut DVector<f64>,
-        hess: &mut DMatrix<f64>,
-    );
-    /// Ridge added to each extra param's Hessian diagonal (PD + shrinkage).
-    fn extra_ridge(&self) -> f64 {
-        0.0
-    }
-}
-
 /// Poisson MAP IRLS for one cell. `θ = [e_c; b_c]`; the ridge `λ` applies to
 /// `e_c` only (the intercept `b_c` is unpenalised and absorbs library size).
 /// Returns `(e_c, b_c)`. A cell with no observed features gets the zero
-/// embedding. Thin wrapper over [`solve_one_cell_aux`] with no auxiliary term —
-/// the no-aux path is byte-identical to the original solver.
+/// embedding.
+///
+/// The objective is convex (Poisson NLL + ridge), so the damped Newton step
+/// converges; the ridge + PD jitter keep the Hessian PD.
 #[must_use]
 pub fn solve_one_cell(
     feats: &[(u32, f32)],
@@ -126,35 +94,10 @@ pub fn solve_one_cell(
     h: usize,
     lambda: f64,
 ) -> (Vec<f32>, f32) {
-    let (e_c, b_c, _extra) = solve_one_cell_aux(0, feats, frozen_e, frozen_b, h, lambda, None);
-    (e_c, b_c)
-}
-
-/// Joint MAP IRLS for one cell with an optional auxiliary likelihood ([`PerCellAuxTerm`])
-/// sharing `e_c`. `θ = [e_c (h); b_c (1); extra (n_extra)]`; the ridge `λ`
-/// applies to `e_c` only. Returns `(e_c, b_c, extra_params)`. With `aux == None`
-/// this is exactly the Poisson-only solver (`n_extra == 0`, `extra` empty).
-///
-/// The objective is convex (Poisson NLL + the aux term's convex NLL + ridge),
-/// so the damped Newton step converges; the aux term adds SPD Gauss-Newton
-/// blocks so the Hessian stays PD.
-#[must_use]
-pub fn solve_one_cell_aux(
-    cell: usize,
-    feats: &[(u32, f32)],
-    frozen_e: &[f32],
-    frozen_b: &[f32],
-    h: usize,
-    lambda: f64,
-    aux: Option<&dyn PerCellAuxTerm>,
-) -> (Vec<f32>, f32, Vec<f32>) {
-    let n_extra = aux.map_or(0, PerCellAuxTerm::n_extra);
-    let extra_offset = h + 1;
-    let d = extra_offset + n_extra; // [e_c; b_c; extra...]
-                                    // No expression edges AND no aux data → the zero embedding (preserves the
-                                    // original empty-cell contract).
-    if feats.is_empty() && n_extra == 0 {
-        return (vec![0f32; h], 0.0, Vec::new());
+    let d = h + 1; // [e_c; b_c]
+                   // No observed features → the zero embedding (empty-cell contract).
+    if feats.is_empty() {
+        return (vec![0f32; h], 0.0);
     }
     let mut theta = DVector::<f64>::zeros(d);
     let mut grad = DVector::<f64>::zeros(d); // reused across iterations
@@ -186,25 +129,10 @@ pub fn solve_one_cell_aux(
             grad[h] += resid;
             hess[(h, h)] += mu;
         }
-        // Auxiliary likelihood (e.g. m6A binomial): adds its grad/Hess over
-        // [e_c; extra] at the current θ, upper-triangle, same convention.
-        if let Some(a) = aux {
-            a.accumulate(cell, &theta, h, extra_offset, &mut grad, &mut hess);
-        }
-        // Ridge prior on e_c (not the intercepts) + PD jitter on the diagonal.
+        // Ridge prior on e_c (not the intercept) + PD jitter on the diagonal.
         for k in 0..h {
             hess[(k, k)] += lambda;
             grad[k] -= lambda * theta[k];
-        }
-        // Optional ridge/shrinkage on the aux term's extra params.
-        if let Some(a) = aux {
-            let r = a.extra_ridge();
-            if r > 0.0 {
-                for k in extra_offset..d {
-                    hess[(k, k)] += r;
-                    grad[k] -= r * theta[k];
-                }
-            }
         }
         for k in 0..d {
             hess[(k, k)] += PD_JITTER;
@@ -225,8 +153,7 @@ pub fn solve_one_cell_aux(
         }
     }
     let e_c: Vec<f32> = (0..h).map(|k| theta[k] as f32).collect();
-    let extra: Vec<f32> = (extra_offset..d).map(|k| theta[k] as f32).collect();
-    (e_c, theta[h] as f32, extra)
+    (e_c, theta[h] as f32)
 }
 
 #[cfg(test)]

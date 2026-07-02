@@ -11,9 +11,37 @@ use nalgebra::DMatrix;
 /// prior stands in for the (infeasible) all-feature softmax partition.
 pub(crate) const PHASE2_RIDGE: f32 = 1.0;
 
-/// One cell's phase-2 solve result: `(cell_id, L2-direction latent,
-/// raw-count MAP norm, per-cell bias b_c)`.
-type SolvedCell = (usize, Vec<f32>, f32, f32);
+/// One cell's phase-2 solve result.
+struct SolvedCell {
+    /// Global cell id (row into `e_cell` / `b_cell`).
+    cell: usize,
+    /// L2-direction identity latent — the stored `e_cell` row. On the
+    /// β-sharing (splice) path this is `dir(θ)` from the **spliced** edges only
+    /// (mature mRNA = current cell state); otherwise the combined projection.
+    dir: Vec<f32>,
+    /// Un-normalized raw-count MAP norm the empty-droplet QC keys on (spliced
+    /// magnitude `‖θ‖` on the splice path).
+    nrm_map: f32,
+    /// Fitted per-cell bias `b_c` (absorbs library size).
+    b_c: f32,
+    /// `dir(φ)` — the nascent/unspliced-only latent (splice path only; empty
+    /// otherwise). Where transcription is currently pointed = the near future.
+    nascent: Vec<f32>,
+    /// Velocity `δ = dir(φ) − dir(θ)` (splice path only; empty otherwise).
+    velocity: Vec<f32>,
+}
+
+/// Phase-2 splice outputs for the β-sharing (`feat_factor`) path. Both are flat
+/// `[n_cells × h]` row-major in global cell-id order (cells absent from the
+/// samplers stay zero).
+pub(crate) struct SpliceProjection {
+    /// Nascent/unspliced-only latent `dir(φ)` per cell.
+    pub nascent: Vec<f32>,
+    /// Velocity `δ = dir(φ) − dir(θ)` per cell — the spliced→unspliced
+    /// (current→nascent) shift on the cell axis. Zero for a cell missing either
+    /// modality (no velocity is defined).
+    pub velocity: Vec<f32>,
+}
 
 /// Phase-2 batch correction, mirroring `senna svd`/`topic`: divide each cell's
 /// counts by its finest-pseudobulk `μ_residual` fold-factor before the
@@ -102,7 +130,20 @@ fn l2_direction(v: &[f32]) -> Vec<f32> {
 /// handled post-hoc by [`crate::postprocess::feature_coembedding`], which
 /// re-embeds features onto the cell manifold (this replaced the old per-cell
 /// biplot gauge that lived here).
-#[allow(clippy::too_many_arguments)] // frozen dictionary + cell samplers + batch divisor + aux term
+/// Phase 2 projection. Without `unspliced_rows` (bge): one combined Poisson-MAP
+/// per cell → identity `e_cell`. With `unspliced_rows` (gem β-sharing): identity
+/// is resolved by the **spliced** edges only (`e_cell = dir(θ)`, mature mRNA =
+/// current state), and the same pass also positions each cell on its **unspliced**
+/// edges (`φ`, nascent = near future) against the shared `β_g`, yielding the
+/// nascent latent `dir(φ)` and the velocity `δ = dir(φ) − dir(θ)`. Both views
+/// are L2-normalized first, so `δ` is a direction change, not a depth change; a
+/// cell missing either modality gets `δ = 0` (no velocity defined).
+///
+/// Returns `(cell_nrms, splice)`, where `cell_nrms` is the un-normalized MAP norm
+/// the empty-droplet QC keys on (spliced magnitude `‖θ‖` on the splice path) and
+/// `splice` carries the flat `[n_cells × h]` nascent + velocity buffers (`None`
+/// on the bge path).
+#[allow(clippy::too_many_arguments)] // frozen dictionary + samplers + batch divisor + splice mask
 pub(crate) fn project_cells_phase2(
     model: &mut JointEmbedModel,
     varmap: &VarMap,
@@ -111,9 +152,9 @@ pub(crate) fn project_cells_phase2(
     lambda: f64,
     dev: &Device,
     batch_divisor: Option<CellBatchDivisor>,
-    aux: Option<&dyn crate::cell_projection::PerCellAuxTerm>,
-) -> anyhow::Result<Vec<f32>> {
-    use crate::cell_projection::solve_one_cell_aux;
+    unspliced_rows: Option<&[bool]>,
+) -> anyhow::Result<(Vec<f32>, Option<SpliceProjection>)> {
+    use crate::cell_projection::solve_one_cell;
     use anyhow::Context;
     use candle_util::candle_core::Tensor;
     use rayon::prelude::*;
@@ -129,32 +170,87 @@ pub(crate) fn project_cells_phase2(
     let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
 
     let feat_flat: Vec<f32> = model.e_feat.flatten_all()?.to_vec1()?;
+    let solve = |edges: &[(u32, f32)]| solve_one_cell(edges, &feat_flat, &b_feat, h, lambda);
     let solved: Vec<SolvedCell> = cells
         .par_iter()
         .map(|&(cell, feats, counts)| {
-            // Baseline MAP → L2 direction (the latent) + the depth-coupled norm
-            // the empty-droplet QC keys on. The fitted intercept `b_c` absorbs
-            // library size and is kept (written to `b_cell`), consistent with
-            // faba gem. When batch correction is on, the counts are first divided
-            // by their pseudobulk fold-factor (depth preserved by the trait's
-            // self-normalizing scale, so empties still solve to ≈0).
+            // Batch-divide the counts (μ_residual fold-factor) when correction is
+            // on, then project. The fitted intercept `b_c` absorbs library size
+            // and is kept (written to `b_cell`).
             let edges = cell_edges(cell, feats, counts, batch_divisor);
-            // Joint MAP when an aux term (e.g. m6A binomial) is present, else the
-            // plain Poisson solve. The aux term indexes its per-cell data by `cell`.
-            let (e_map, b_c, _extra) =
-                solve_one_cell_aux(cell as usize, &edges, &feat_flat, &b_feat, h, lambda, aux);
-            let nrm_map = norm(&e_map);
-            (cell as usize, l2_direction(&e_map), nrm_map, b_c)
+            match unspliced_rows {
+                // bge: one combined projection = identity.
+                None => {
+                    let (e_map, b_c) = solve(&edges);
+                    SolvedCell {
+                        cell: cell as usize,
+                        dir: l2_direction(&e_map),
+                        nrm_map: norm(&e_map),
+                        b_c,
+                        nascent: Vec::new(),
+                        velocity: Vec::new(),
+                    }
+                }
+                // gem β-sharing: identity = spliced θ, plus nascent φ and δ = φ − θ.
+                // Both modalities index the shared β_g, so θ / φ are comparable.
+                Some(un) => {
+                    let mut spliced: Vec<(u32, f32)> = Vec::with_capacity(edges.len());
+                    let mut unspliced: Vec<(u32, f32)> = Vec::with_capacity(edges.len());
+                    for &(f, c) in &edges {
+                        if un[f as usize] {
+                            unspliced.push((f, c));
+                        } else {
+                            spliced.push((f, c));
+                        }
+                    }
+                    let (theta, b_s) = solve(&spliced);
+                    let (phi, _) = solve(&unspliced);
+                    let (theta_n, phi_n) = (norm(&theta), norm(&phi));
+                    let td = l2_direction(&theta);
+                    let pd = l2_direction(&phi);
+                    // δ = dir(φ) − dir(θ); undefined (→ 0) if either view is empty.
+                    let velocity = if theta_n > 1e-8 && phi_n > 1e-8 {
+                        pd.iter().zip(&td).map(|(a, b)| a - b).collect()
+                    } else {
+                        vec![0f32; h]
+                    };
+                    let nascent = if phi_n > 1e-8 { pd } else { vec![0f32; h] };
+                    SolvedCell {
+                        cell: cell as usize,
+                        dir: td,
+                        nrm_map: theta_n,
+                        b_c: b_s,
+                        nascent,
+                        velocity,
+                    }
+                }
+            }
         })
         .collect();
-    for (cell, dir, nrm_map, b_c) in solved {
-        e_out[cell * h..(cell + 1) * h].copy_from_slice(&dir);
-        cell_nrms[cell] = nrm_map;
-        b_out[cell] = b_c;
+
+    let split = unspliced_rows.is_some();
+    let mut nascent_flat = split.then(|| vec![0f32; n_cells * h]);
+    let mut velocity_flat = split.then(|| vec![0f32; n_cells * h]);
+    for sc in solved {
+        let s = sc.cell * h;
+        e_out[s..s + h].copy_from_slice(&sc.dir);
+        cell_nrms[sc.cell] = sc.nrm_map;
+        b_out[sc.cell] = sc.b_c;
+        if let Some(nf) = nascent_flat.as_mut() {
+            nf[s..s + h].copy_from_slice(&sc.nascent);
+        }
+        if let Some(vf) = velocity_flat.as_mut() {
+            vf[s..s + h].copy_from_slice(&sc.velocity);
+        }
     }
 
     info!(
-        "Phase 2 — latent = L2 direction (per-cell Poisson MAP, ridge λ={lambda}{})",
+        "Phase 2 — {} (per-cell Poisson MAP, ridge λ={lambda}{})",
+        if split {
+            "identity = spliced θ direction (+ nascent φ, velocity δ=φ−θ)"
+        } else {
+            "latent = L2 direction"
+        },
         if batch_divisor.is_some() {
             ", μ_residual batch-divided"
         } else {
@@ -175,69 +271,10 @@ pub(crate) fn project_cells_phase2(
     }
     model.e_cell = e_t;
     model.b_cell = b_t;
-    Ok(cell_nrms)
-}
 
-/// Dual phase-2 projection for the axis δ (β-sharing spliced/unspliced model).
-///
-/// With the feature side fixed to a per-gene `β` (a gene's spliced and unspliced
-/// rows BOTH embed as `β_g`), the splice signal cannot live on the gene side
-/// (it would be non-identifiable against an equal-and-opposite cell-axis shift).
-/// Instead we recover it on the CELL axis: position each cell against the frozen
-/// `β` TWICE — once on its spliced edges (`θ`) and once on its unspliced edges
-/// (`φ`) — using the same Poisson-MAP solve as [`project_cells_phase2`], then
-/// store the depth-removed shift `δ_cell = dir(φ) − dir(θ)` (each projection
-/// L2-normalized first, so δ measures a direction change, not a depth change).
-/// Because both spliced and unspliced rows index the same `β_g`, the two solves
-/// share one dictionary — `θ` / `φ` are directly comparable.
-///
-/// Returns a flat `[n_cells × H]` row-major buffer in global cell-id order
-/// (cells absent from the samplers stay zero). `unspliced_rows[f]` flags the
-/// unspliced feature rows; `batch_divisor` applies the same μ_residual divide as
-/// the main projection before the modality split.
-pub(crate) fn project_axis_delta(
-    model: &JointEmbedModel,
-    cell_samplers: &[PerBatchStratifiedCellSampler],
-    n_cells: usize,
-    unspliced_rows: &[bool],
-    lambda: f64,
-    batch_divisor: Option<CellBatchDivisor>,
-) -> anyhow::Result<Vec<f32>> {
-    use crate::cell_projection::solve_one_cell;
-    use rayon::prelude::*;
-
-    let h = model.embedding_dim;
-    let b_feat: Vec<f32> = model.b_feat.to_vec1()?;
-    let feat_flat: Vec<f32> = model.e_feat.flatten_all()?.to_vec1()?;
-
-    let cells = collect_sampler_cells(cell_samplers);
-
-    let solved: Vec<(usize, Vec<f32>)> = cells
-        .par_iter()
-        .map(|&(cell, feats, counts)| {
-            let edges = cell_edges(cell, feats, counts, batch_divisor);
-            // Split this cell's edges by modality; both index the shared β_g.
-            let mut spliced: Vec<(u32, f32)> = Vec::with_capacity(edges.len());
-            let mut unspliced: Vec<(u32, f32)> = Vec::with_capacity(edges.len());
-            for &(f, c) in &edges {
-                if unspliced_rows[f as usize] {
-                    unspliced.push((f, c));
-                } else {
-                    spliced.push((f, c));
-                }
-            }
-            let (theta, _) = solve_one_cell(&spliced, &feat_flat, &b_feat, h, lambda);
-            let (phi, _) = solve_one_cell(&unspliced, &feat_flat, &b_feat, h, lambda);
-            let (td, pd) = (l2_direction(&theta), l2_direction(&phi));
-            let delta: Vec<f32> = pd.iter().zip(&td).map(|(a, b)| a - b).collect();
-            (cell as usize, delta)
-        })
-        .collect();
-
-    let mut out = vec![0f32; n_cells * h];
-    for (cell, delta) in solved {
-        out[cell * h..(cell + 1) * h].copy_from_slice(&delta);
-    }
-    info!("Phase 2 — dual-projection axis δ (spliced θ vs unspliced φ) for {n_cells} cells");
-    Ok(out)
+    let splice = match (nascent_flat, velocity_flat) {
+        (Some(nascent), Some(velocity)) => Some(SpliceProjection { nascent, velocity }),
+        _ => None,
+    };
+    Ok((cell_nrms, splice))
 }

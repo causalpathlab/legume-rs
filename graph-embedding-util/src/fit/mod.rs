@@ -7,8 +7,8 @@ mod projection;
 mod samplers;
 
 pub use config::{
-    load_feature_network, AuxArmBuilder, AuxArmCtx, AuxCellCtx, AuxProjCtx, FeatFactorSpec,
-    FeatureNetworkArgs, FeatureNetworkConfig, FitConfig, FitOutput,
+    load_feature_network, FeatFactorSpec, FeatureNetworkArgs, FeatureNetworkConfig, FitConfig,
+    FitOutput,
 };
 
 use crate::coarsen::{identity_axis, AxisCoarsenings};
@@ -30,7 +30,7 @@ use config::{
     load_or_compute_fisher_weights, stage_params, DEFAULT_AXIS_LAMBDA, DEFAULT_STRATIFY_ALPHA_CELL,
     DEFAULT_STRATIFY_ALPHA_PB,
 };
-use projection::{project_axis_delta, project_cells_phase2, CellBatchDivisor, PHASE2_RIDGE};
+use projection::{project_cells_phase2, CellBatchDivisor, PHASE2_RIDGE};
 use samplers::{build_active_samplers, build_smoother, subsample_cell_samplers_multilevel};
 
 /// Composite-objective gbe fit — trained in **two phases**.
@@ -68,7 +68,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     );
     let batch_labels: Vec<Box<str>> = unified.batch_labels();
     let batch_arg = (unified.n_batches() > 1).then_some(batch_labels.as_slice());
-    let mut proj_out = if let Some(w) = config.hvg_weights.as_deref() {
+    let proj_out = if let Some(w) = config.hvg_weights.as_deref() {
         anyhow::ensure!(
             w.len() == unified.n_features(),
             "hvg_weights length {} != n_features {} (HVG mask must be aligned to the unified \
@@ -108,33 +108,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         config.block_size,
         config.fisher_weights_cache.as_deref(),
     )?;
-
-    // M4 — optional aux-modality membership refinement: let the aux builder
-    // append coverage-weighted rows to `proj_kn` *before* the collapse, so the
-    // partition seed + BBKNN candidate graph + pb-sample centroids are joint
-    // (e.g. m6A-aware). `None` (default) leaves the partition expression-only.
-    if let Some(builder) = config.aux.as_mut() {
-        if let Some(extra) = builder.augment_projection(config::AuxProjCtx {
-            proj: &proj_out.proj,
-            barcodes: &unified.barcodes,
-        })? {
-            anyhow::ensure!(
-                extra.ncols() == proj_out.proj.ncols(),
-                "aux projection has {} cols but proj_kn has {} cells",
-                extra.ncols(),
-                proj_out.proj.ncols()
-            );
-            let (d, k, n) = (proj_out.proj.nrows(), extra.nrows(), proj_out.proj.ncols());
-            let mut joint = DMatrix::<f32>::zeros(d + k, n);
-            joint.rows_mut(0, d).copy_from(&proj_out.proj);
-            joint.rows_mut(d, k).copy_from(&extra);
-            proj_out.proj = joint;
-            info!(
-                "aux projection: proj_kn {d} → {} rows (joint membership)",
-                d + k
-            );
-        }
-    }
 
     // ---- Multilevel collapse → batch-corrected pseudobulks ----
     //
@@ -314,24 +287,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         level_models.push(level_model);
     }
 
-    // Auxiliary co-embedding arms (generic seam; e.g. faba m6A). Built now —
-    // after the pb models exist (so an arm can capture each level's shared pb
-    // `e_cell`) and before phase 1 (so the single AdamW over `varmap.all_vars()`
-    // co-trains the arm's params). The arms own clones of the Vars they score
-    // against (candle Tensors share storage, so training updates are visible).
-    let mut external_arms: Vec<Box<dyn crate::training::LossArm>> = Vec::new();
-    if let Some(builder) = config.aux.as_mut() {
-        external_arms = builder.build_arms(config::AuxArmCtx {
-            varmap: &varmap,
-            device: &config.device,
-            embedding_dim: h,
-            cell_to_pb_per_level: &cell_to_pb_per_level,
-            level_pb_models: &level_models,
-            barcodes: &unified.barcodes,
-        })?;
-        info!("aux: {} external loss arm(s) built", external_arms.len());
-    }
-
     ////////////////////////////////
     // Composite axes and trainer //
     ////////////////////////////////
@@ -500,7 +455,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 dev: &config.device,
                 stop: &stop,
                 cell_to_pb_per_level: None,
-                external_arms: &external_arms,
             },
             &mut opt1,
             &p1,
@@ -515,30 +469,14 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // free model.
     cell_model.materialize_e_feat()?;
 
-    // Phase-2 aux term (e.g. m6A binomial), built now that the arm's params are
-    // trained: folded into each cell's MAP solve so the per-cell `e_cell`
-    // reflects the second modality, not just expression. `None` → the solve
-    // stays the plain Poisson projection (byte-identical to the no-aux path).
-    let aux_cell_term: Option<Box<dyn crate::cell_projection::PerCellAuxTerm>> =
-        if let Some(builder) = config.aux.as_mut() {
-            builder.build_cell_term(config::AuxCellCtx {
-                varmap: &varmap,
-                device: &config.device,
-                embedding_dim: h,
-                barcodes: &unified.barcodes,
-                n_cells,
-            })?
-        } else {
-            None
-        };
-
     // ---- Phase 2: analytical per-cell projection onto the fixed feature
     // side. With E_feat/b_feat/z/δ held fixed, each cell's embedding is
     // independent — so rather than SGD over `e_cell`, project every cell
     // directly (Poisson MAP, ridge prior) in parallel. The per-cell
     // intercept `b_cell` is fitted and kept. See `crate::cell_projection`.
     let mut cell_nrms: Vec<f32> = Vec::new();
-    let mut axis_delta: Option<Vec<f32>> = None;
+    let mut cell_velocity: Option<Vec<f32>> = None;
+    let mut cell_nascent: Option<Vec<f32>> = None;
     if !stop.load(std::sync::atomic::Ordering::Relaxed) {
         info!(
             "Phase 2 — analytical per-cell projection ({n_cells} cells, feature side fixed, ridge λ={PHASE2_RIDGE})"
@@ -562,7 +500,15 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 .map(Vec::as_slice)
                 .expect("collapse always produces ≥1 level"),
         });
-        cell_nrms = project_cells_phase2(
+        // β-sharing (gem): identity is resolved by the SPLICED edges, and the
+        // same pass emits the nascent (unspliced) latent φ and the velocity
+        // δ = dir(φ) − dir(θ) on the cell axis. Plain (bge): one combined
+        // projection = identity, no splice outputs.
+        let unspliced = config
+            .feat_factor
+            .as_ref()
+            .map(|s| s.unspliced_rows.as_slice());
+        let (nrms, splice) = project_cells_phase2(
             &mut cell_model,
             &varmap,
             &cell_samplers,
@@ -570,20 +516,12 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             f64::from(PHASE2_RIDGE),
             &config.device,
             batch_divisor,
-            aux_cell_term.as_deref(),
+            unspliced,
         )?;
-        // β-sharing model → recover the splice deviation on the cell axis: a
-        // second per-cell projection on spliced vs unspliced edges against the
-        // same frozen β, δ_cell = dir(φ) − dir(θ). See `project_axis_delta`.
-        if let Some(spec) = config.feat_factor.as_ref() {
-            axis_delta = Some(project_axis_delta(
-                &cell_model,
-                &cell_samplers,
-                n_cells,
-                &spec.unspliced_rows,
-                f64::from(PHASE2_RIDGE),
-                batch_divisor,
-            )?);
+        cell_nrms = nrms;
+        if let Some(sp) = splice {
+            cell_nascent = Some(sp.nascent);
+            cell_velocity = Some(sp.velocity);
         }
     }
 
@@ -591,7 +529,8 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         model: cell_model,
         varmap,
         cell_nrms,
-        axis_delta,
+        cell_velocity,
+        cell_nascent,
     })
 }
 

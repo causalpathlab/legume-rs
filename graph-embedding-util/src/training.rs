@@ -116,34 +116,6 @@ impl AxisSampler<'_> {
     }
 }
 
-/// An externally-supplied auxiliary loss term, summed into the composite
-/// objective alongside the built-in axes. The implementor lives in a
-/// downstream crate (e.g. faba's m6A binomial arm); it owns its own
-/// parameters — registered in the *shared* `VarMap` so the single `AdamW`
-/// over `varmap.all_vars()` trains them — and samples its own minibatch each
-/// step, scoring against the shared `e_cell` it captured at construction.
-///
-/// This is the generic, modality-agnostic seam that lets a caller co-train a
-/// second modality against the shared embedding without geu knowing the
-/// modality. Honored only in [`CompositeMode::Sum`] (the bge / gem phase-1
-/// path); `train_composite` errors if external arms are paired with `Sample`
-/// or `Chain`.
-pub trait LossArm: Send + Sync {
-    /// Sample a minibatch and return this arm's scalar loss for one step, or
-    /// `None` when there is nothing to sample this step. The returned tensor
-    /// must reference Vars in the shared `VarMap` so backward reaches them.
-    fn step_loss(&self, rng: &mut StdRng, dev: &Device) -> anyhow::Result<Option<Tensor>>;
-    /// Mixing weight in the summed objective (parallels [`CompositeAxis::lambda`]).
-    fn lambda(&self) -> f32;
-    /// Short label for log lines (cosmetic).
-    fn label(&self) -> &str;
-    /// Draw units for the auto `--batches-per-epoch` budget (`0` = doesn't
-    /// drive the budget; defer to the built-in axes).
-    fn n_units(&self) -> usize {
-        0
-    }
-}
-
 pub struct TrainingParams {
     pub epochs: usize,
     /// `None` = auto: one weighted pass over the largest axis
@@ -173,11 +145,6 @@ pub struct CompositeTrainContext<'a> {
     /// ignored otherwise. Comes from
     /// `MultilevelCollapseOut::cell_to_pb_per_level`.
     pub cell_to_pb_per_level: Option<&'a [Vec<usize>]>,
-    /// Externally-supplied auxiliary loss arms (e.g. faba's m6A binomial arm),
-    /// summed into the `Sum`-mode objective after the built-in axes. Each is
-    /// λ-weighted by its own [`LossArm::lambda`]. Empty `&[]` for the standard
-    /// single-modality path; only honored in [`CompositeMode::Sum`].
-    pub external_arms: &'a [Box<dyn LossArm>],
 }
 
 pub fn train_composite(
@@ -187,11 +154,6 @@ pub fn train_composite(
     smoother: Option<&mut FeatureNetworkSmoother>,
 ) -> anyhow::Result<()> {
     assert!(!ctx.axes.is_empty(), "composite training needs >= 1 axis");
-    anyhow::ensure!(
-        ctx.external_arms.is_empty() || params.composite_mode == CompositeMode::Sum,
-        "external loss arms are only supported in CompositeMode::Sum (got {:?})",
-        params.composite_mode
-    );
 
     // Shared style — consistent with every other faba/senna progress bar
     // (`[elapsed] bar pos/len (eta) msg`).
@@ -224,7 +186,6 @@ pub fn train_composite(
         .axes
         .iter()
         .map(|a| a.sampler.n_units())
-        .chain(ctx.external_arms.iter().map(|a| a.n_units()))
         .max()
         .unwrap_or(0);
     let batches_per_epoch = params.batches_per_epoch.unwrap_or_else(|| {
@@ -340,19 +301,6 @@ fn sum_step(
             continue;
         };
         let scaled = (loss * f64::from(axis.lambda))?;
-        total_loss = Some(match total_loss {
-            Some(prev) => (prev + scaled)?,
-            None => scaled,
-        });
-    }
-    // Externally-supplied arms (e.g. faba m6A): each samples its own minibatch
-    // and scores against the shared `e_cell` it captured; λ-weighted and summed
-    // into the same step loss so one backward updates both modalities' Vars.
-    for arm in ctx.external_arms {
-        let Some(loss) = arm.step_loss(rng, ctx.dev)? else {
-            continue;
-        };
-        let scaled = (loss * f64::from(arm.lambda()))?;
         total_loss = Some(match total_loss {
             Some(prev) => (prev + scaled)?,
             None => scaled,

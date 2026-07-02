@@ -1,7 +1,6 @@
-use crate::cell_projection::PerCellAuxTerm;
 use crate::data::UnifiedData;
 use crate::model::JointEmbedModel;
-use crate::training::{CompositeMode, LossArm, TrainingParams};
+use crate::training::{CompositeMode, TrainingParams};
 use auxiliary_data::feature_names::FeatureNameKind;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::VarMap;
@@ -11,7 +10,6 @@ use data_beans_alg::gene_weighting::{
 use data_beans_alg::refine_multilevel::RefineParams;
 use log::{info, warn};
 use matrix_util::pair_graph::FeaturePairGraph;
-use nalgebra::DMatrix;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -129,84 +127,11 @@ pub struct FitConfig {
     pub phase1_cells_per_pb: usize,
     /// Optional per-gene β-sharing feature parameterization. When `Some`, the
     /// feature side is built as [`crate::model::FeatFactor`] (every feature row
-    /// reuses its gene's `β_g`) instead of a free `E_feat` table, and phase 2
-    /// additionally emits the dual-projection axis δ (see [`FitOutput::axis_delta`]).
+    /// reuses its gene's `β_g`) instead of a free `E_feat` table, phase-2 identity
+    /// is resolved on the spliced edges, and it also emits the nascent latent and
+    /// velocity (see [`FitOutput::cell_nascent`] / [`FitOutput::cell_velocity`]).
     /// `None` = the standard free embedding (bge / Stage 0).
     pub feat_factor: Option<FeatFactorSpec>,
-    /// Optional builder for **auxiliary co-embedding arms** — a generic,
-    /// modality-agnostic seam. When `Some`, [`fit`] calls it once after the
-    /// collapse + per-level pb models exist (to add phase-1 [`LossArm`]s that
-    /// share the pb `e_cell`) and once after phase-1 (to add a phase-2
-    /// [`PerCellAuxTerm`] folded into each cell's MAP solve). The arm owns its
-    /// own params (registered in the shared `VarMap`) and its own data; geu
-    /// never knows the modality. faba's m6A arm is the first implementor.
-    /// `None` = the standard single-modality fit (bge / gem genes-only).
-    pub aux: Option<Box<dyn AuxArmBuilder>>,
-}
-
-/// Builds the auxiliary co-embedding arms for [`FitConfig::aux`]. Implemented in
-/// the caller crate (e.g. faba m6A); geu only invokes it at the two hook points
-/// below and stays modality-agnostic. Mutable so the builder can own + collapse
-/// its own backend in place.
-pub trait AuxArmBuilder: Send {
-    /// Pre-collapse hook (optional): contribute extra rows to the column
-    /// projection `proj_kn` *before* the multilevel collapse, so the aux
-    /// modality co-shapes the pseudobulk **membership** (the partition seed, the
-    /// BBKNN candidate graph, and pb-sample centroids are all derived from
-    /// `proj_kn`). Return `Some(extra [k_aux × n_cells])` to vstack, or `None`
-    /// (the default) to leave the partition expression-only. The implementor
-    /// owns the scaling/coverage-weighting of its block relative to `ctx.proj`.
-    fn augment_projection(&mut self, _ctx: AuxProjCtx) -> anyhow::Result<Option<DMatrix<f32>>> {
-        Ok(None)
-    }
-    /// Phase-1 hook: build loss arms after the collapse + per-level pb models
-    /// exist. The arms capture (clone) the shared Vars they score against and
-    /// register their own params in `ctx.varmap`. Return `vec![]` to add none.
-    fn build_arms(&mut self, ctx: AuxArmCtx) -> anyhow::Result<Vec<Box<dyn LossArm>>>;
-    /// Phase-2 hook: build the per-cell aux term after phase-1 has trained the
-    /// arms' params. `None` skips the joint per-cell solve (per-cell `e_cell`
-    /// then stays expression-only).
-    fn build_cell_term(
-        &mut self,
-        ctx: AuxCellCtx,
-    ) -> anyhow::Result<Option<Box<dyn PerCellAuxTerm>>>;
-}
-
-/// Context handed to [`AuxArmBuilder::augment_projection`] (pre-collapse). The
-/// aux modality scales/positions its block relative to the expression `proj`.
-pub struct AuxProjCtx<'a> {
-    /// The expression column projection `[proj_dim × n_cells]` — read its row
-    /// scale to size the aux block comparably.
-    pub proj: &'a DMatrix<f32>,
-    pub barcodes: &'a [Box<str>],
-}
-
-/// Context handed to [`AuxArmBuilder::build_arms`] (phase 1). Everything the
-/// arm needs to aggregate its own modality onto the *shared* pseudobulk
-/// partition and score against the per-level pb `e_cell`.
-pub struct AuxArmCtx<'a> {
-    pub varmap: &'a VarMap,
-    pub device: &'a Device,
-    pub embedding_dim: usize,
-    /// Per-level cell→pb (coarsest-first, index-aligned 1:1 with
-    /// `level_pb_models`).
-    pub cell_to_pb_per_level: &'a [Vec<usize>],
-    /// Per-level pb models (coarsest-first, parallel to the pb axes); each
-    /// exposes that level's shared `e_cell` / `b_cell` for the arm to score.
-    pub level_pb_models: &'a [JointEmbedModel],
-    /// Unified cell barcodes (for any per-cell alignment the arm needs).
-    pub barcodes: &'a [Box<str>],
-}
-
-/// Context handed to [`AuxArmBuilder::build_cell_term`] (phase 2), after the
-/// arms' params are trained. The term reads its now-trained params back out of
-/// `varmap` (by the names it registered) and builds its per-cell data.
-pub struct AuxCellCtx<'a> {
-    pub varmap: &'a VarMap,
-    pub device: &'a Device,
-    pub embedding_dim: usize,
-    pub barcodes: &'a [Box<str>],
-    pub n_cells: usize,
 }
 
 /// Caller-provided spec for the per-gene β-sharing feature factorization. Lengths
@@ -351,14 +276,18 @@ pub struct FitOutput {
     /// above. The stored latent (`model.e_cell`) is the L2 *direction*; this
     /// norm is the un-normalized magnitude it was divided by.
     pub cell_nrms: Vec<f32>,
-    /// Per-cell axis δ from the dual phase-2 projection, present only when
-    /// `feat_factor` was set (β-sharing spliced/unspliced model). Flattened
-    /// `[n_cells × H]` row-major in global cell-id order: `δ_cell = dir(φ) −
-    /// dir(θ)`, where θ / φ are the cell's Poisson-MAP projections against the
-    /// frozen `β` on its spliced / unspliced edges respectively. This is the
-    /// (identifiable) splice deviation living on the CELL axis — the gene side
-    /// carries none. `None` for a free (non-factored) model.
-    pub axis_delta: Option<Vec<f32>>,
+    /// Per-cell **velocity** `δ_cell = dir(φ) − dir(θ)` from phase 2, present
+    /// only when `feat_factor` was set (β-sharing spliced/unspliced model).
+    /// Flattened `[n_cells × H]` row-major in global cell-id order. `θ` / `φ` are
+    /// the cell's Poisson-MAP projections against the frozen `β` on its spliced
+    /// (current-state identity) / unspliced (nascent) edges. Points current →
+    /// nascent = the direction of transcriptional change on the CELL axis. `0`
+    /// for a cell missing either modality; `None` for a free (non-factored) model.
+    pub cell_velocity: Option<Vec<f32>>,
+    /// Per-cell **nascent** latent `dir(φ)` (unspliced-only projection) from
+    /// phase 2, same layout/gating as [`Self::cell_velocity`] — the near-future
+    /// state each cell is transcribing toward. `None` for a free model.
+    pub cell_nascent: Option<Vec<f32>>,
 }
 
 pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
