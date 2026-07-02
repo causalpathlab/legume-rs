@@ -82,6 +82,20 @@ pub struct CollapseArgs {
     pub phase1_cells_per_pb: usize,
 
     #[arg(
+        long = "n-hvg",
+        default_value_t = 0,
+        help = "Keep only the top-N highly-variable genes (0 = off, use all genes)",
+        long_help = "Gene-level HVG feature filter (like `senna bge`). When > 0, select the\n\
+                     top-N most variable GENES (NB dispersion-trend, spliced+unspliced pooled)\n\
+                     and drop the rest — both the spliced and unspliced rows of a dropped gene\n\
+                     go together so the β-sharing factorization stays aligned. This removes the\n\
+                     low-detection 'empty' genes that otherwise pile at the co-embedding centre,\n\
+                     shrinks the dictionary, and restricts the pseudobulk projection/membership\n\
+                     to the kept genes. 0 (default) keeps every gene. Try 2000–5000."
+    )]
+    pub n_hvg: usize,
+
+    #[arg(
         long,
         default_value = "",
         help = "Strip this suffix from each --genes file basename to form its sample id"
@@ -144,19 +158,6 @@ pub struct TrainArgs {
 		if their global L2 norm exceeds this, bounding embedding inflation on loss spikes."
     )]
     pub max_grad_norm: f32,
-}
-
-/// Co-embedding settings: the cluster count that sets the SIMBA feature
-/// co-embedding temperature target.
-#[derive(Args, Debug, Clone)]
-pub struct QcArgs {
-    #[arg(
-        long = "num-topics",
-        help = "Number of clusters K for the co-embedding temperature target",
-        long_help = "Number of clusters K used to set the SIMBA co-embedding temperature\n\
-                     target. Omit to auto-select."
-    )]
-    pub num_topics: Option<usize>,
 }
 
 /// Runtime knobs: data preload, RNG seed, compute device, threads.
@@ -253,9 +254,6 @@ pub struct GemArgs {
 
     #[command(flatten)]
     pub train: TrainArgs,
-
-    #[command(flatten)]
-    pub qc: QcArgs,
 
     #[command(flatten)]
     pub runtime: RuntimeArgs,

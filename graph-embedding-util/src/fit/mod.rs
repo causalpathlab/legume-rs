@@ -486,7 +486,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // intercept `b_cell` is fitted and kept. See `crate::cell_projection`.
     let mut cell_nrms: Vec<f32> = Vec::new();
     let mut cell_velocity: Option<Vec<f32>> = None;
-    let mut cell_nascent: Option<Vec<f32>> = None;
     if !stop.load(std::sync::atomic::Ordering::Relaxed) {
         info!(
             "Phase 2 — analytical per-cell projection ({n_cells} cells, feature side fixed, ridge λ={PHASE2_RIDGE})"
@@ -510,10 +509,10 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 .map(Vec::as_slice)
                 .expect("collapse always produces ≥1 level"),
         });
-        // β-sharing (gem): identity is resolved by the SPLICED edges, and the
-        // same pass emits the nascent (unspliced) latent φ and the velocity
-        // δ = dir(φ) − dir(θ) on the cell axis. Plain (bge): one combined
-        // projection = identity, no splice outputs.
+        // β-sharing (gem): identity is resolved by the SPLICED edges (stored raw),
+        // and the same pass emits the raw velocity increment δ on the cell axis.
+        // Plain (bge): one combined projection = identity (stored as dir), no splice
+        // output.
         let unspliced = config
             .feat_factor
             .as_ref()
@@ -530,7 +529,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         )?;
         cell_nrms = nrms;
         if let Some(sp) = splice {
-            cell_nascent = Some(sp.nascent);
             cell_velocity = Some(sp.velocity);
         }
     }
@@ -540,7 +538,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         varmap,
         cell_nrms,
         cell_velocity,
-        cell_nascent,
     })
 }
 

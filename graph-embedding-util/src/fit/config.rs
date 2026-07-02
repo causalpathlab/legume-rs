@@ -281,18 +281,14 @@ pub struct FitOutput {
     /// above. The stored latent (`model.e_cell`) is the L2 *direction*; this
     /// norm is the un-normalized magnitude it was divided by.
     pub cell_nrms: Vec<f32>,
-    /// Per-cell **velocity** `δ_cell = dir(φ) − dir(θ)` from phase 2, present
-    /// only when `feat_factor` was set (β-sharing spliced/unspliced model).
-    /// Flattened `[n_cells × H]` row-major in global cell-id order. `θ` / `φ` are
-    /// the cell's Poisson-MAP projections against the frozen `β` on its spliced
-    /// (current-state identity) / unspliced (nascent) edges. Points current →
-    /// nascent = the direction of transcriptional change on the CELL axis. `0`
-    /// for a cell missing either modality; `None` for a free (non-factored) model.
+    /// Per-cell **raw velocity increment** `δ` from phase 2, present only when
+    /// `feat_factor` was set (β-sharing spliced/unspliced model). Flattened
+    /// `[n_cells × H]` row-major in global cell-id order. `δ` is the analytic
+    /// Poisson-MAP shift explaining the cell's unspliced edges with the identity `θ`
+    /// held fixed — magnitude = speed, direction = velocity (no normalization). The
+    /// nascent state is `θ + δ` = `latent + velocity`. `0` for a cell missing either
+    /// modality; `None` for a free (non-factored) model.
     pub cell_velocity: Option<Vec<f32>>,
-    /// Per-cell **nascent** latent `dir(φ)` (unspliced-only projection) from
-    /// phase 2, same layout/gating as [`Self::cell_velocity`] — the near-future
-    /// state each cell is transcribing toward. `None` for a free model.
-    pub cell_nascent: Option<Vec<f32>>,
 }
 
 pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
