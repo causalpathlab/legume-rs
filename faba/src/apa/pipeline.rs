@@ -697,6 +697,11 @@ fn load_polya_site_mask(args: &CountApaArgs) -> anyhow::Result<Option<PolyaSiteM
     Ok(if mask.is_empty() { None } else { Some(mask) })
 }
 
+/// Fast 2-site PDUI path: treat a UTR as effectively single-site (no PDUI)
+/// unless the runner-up cluster carries at least `1/this` of the dominant
+/// cluster's reads. Guards against calling PDUI on a spurious minor peak.
+const MIN_RUNNERUP_MASS_RATIO: usize = 10;
+
 /// Process a single UTR: extract fragments, discover/load sites, run EM, assign cells.
 #[allow(clippy::too_many_arguments)]
 fn process_utr(
@@ -794,8 +799,8 @@ fn process_utr(
             return Ok((Vec::new(), Vec::new())); // single-site → no PDUI
         }
         clusters.sort_unstable_by(|a, b| b.1.cmp(&a.1)); // by read count, desc
-        // Require the runner-up to be a non-trivial fraction of the dominant peak.
-        if clusters[1].1 * 10 < clusters[0].1 {
+                                                         // Require the runner-up to be a non-trivial fraction of the dominant peak.
+        if clusters[1].1 * MIN_RUNNERUP_MASS_RATIO < clusters[0].1 {
             return Ok((Vec::new(), Vec::new()));
         }
         let t_assign = std::time::Instant::now();
@@ -1026,23 +1031,14 @@ fn compute_and_write_pdui(
                 Some(s) => *s,
                 None => continue,
             };
-            let gene_counts: Vec<CellSiteCount> = counts_by_batch_gene
+            let gene_counts: &[&CellSiteCount] = counts_by_batch_gene
                 .get(&(b, gene_name.clone()))
-                .map(|cs| {
-                    cs.iter()
-                        .map(|c| CellSiteCount {
-                            batch: c.batch,
-                            cell_barcode: c.cell_barcode.clone(),
-                            site_id: c.site_id.clone(),
-                            count: c.count,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             if gene_counts.is_empty() {
                 continue;
             }
-            if let Some(pdui_result) = compute_pdui(&gene_counts, annots, strand) {
+            if let Some(pdui_result) = compute_pdui(gene_counts, annots, strand) {
                 n_pdui_genes += 1;
                 // Emit proximal/distal COUNTS as channel rows (aggregated per
                 // gene = the 2-site UTR): {gene}/apa/{proximal,distal}.
