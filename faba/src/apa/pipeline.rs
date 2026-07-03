@@ -517,24 +517,25 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
         compute_and_write_pdui(&all_counts, &all_annotations, &utrs, args)?;
     }
 
-    // The SCAPE fit is shared (pooled across BAMs), but each replicate gets
-    // its own `{batch}_apa_mixture` matrix. Rows (GENE/pA/component) are a
-    // shared vocabulary, so reorder to a sorted union for stackability.
-    let batch_names = uniq_batch_names(&args.bam_files)?;
-    let mut by_batch: rustc_hash::FxHashMap<u32, Vec<(CellBarcode, Box<str>, f32)>> =
-        rustc_hash::FxHashMap::default();
-    for c in all_counts {
-        by_batch
-            .entry(c.batch)
-            .or_default()
-            .push((c.cell_barcode, c.site_id, c.count as f32));
-    }
-
     let mut all_rows = rustc_hash::FxHashSet::<Box<str>>::default();
     let mut out_files: Vec<crate::pipeline_util::BackendOutputPath> = Vec::new();
     // The per-cell component matrix is opt-in (`--mixture`); the SCAPE fit above
     // already ran because PDUI needs it, so this only gates the extra output.
+    // Bucketing `all_counts` by batch is O(n_counts) + per-count allocations, so do
+    // it only when the mixture matrix is actually written (skipped on the default
+    // path). The fit is shared (pooled across BAMs) but each replicate gets its own
+    // `{batch}_apa_mixture`; rows (GENE/apa/component) share a vocabulary, reordered
+    // to a sorted union for stackability.
     if args.write_mixture {
+        let batch_names = uniq_batch_names(&args.bam_files)?;
+        let mut by_batch: rustc_hash::FxHashMap<u32, Vec<(CellBarcode, Box<str>, f32)>> =
+            rustc_hash::FxHashMap::default();
+        for c in all_counts {
+            by_batch
+                .entry(c.batch)
+                .or_default()
+                .push((c.cell_barcode, c.site_id, c.count as f32));
+        }
         for (batch_idx, batch_name) in batch_names.iter().enumerate() {
             let Some(trip) = by_batch.remove(&(batch_idx as u32)) else {
                 continue;
@@ -970,9 +971,9 @@ fn process_utr(
 }
 
 /// Compute PDUI (per batch) for genes with exactly 2 active pA sites and
-/// write one `{batch}_apa_pdui` sparse matrix per replicate. The 2-site
-/// definitions are shared (pooled fit); only the per-cell counts split by
-/// batch, so the matrices share a gene (row) vocabulary.
+/// write one `{batch}_apa` sparse matrix (proximal/distal count channels) per
+/// replicate. The 2-site definitions are shared (pooled fit); only the per-cell
+/// counts split by batch, so the matrices share a gene (row) vocabulary.
 fn compute_and_write_pdui(
     all_counts: &[CellSiteCount],
     all_annotations: &[ApaSiteAnnotation],

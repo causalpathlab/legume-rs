@@ -218,7 +218,7 @@ pub struct PipelineArgs {
     #[arg(
         long = "no-apa-pdui",
         default_value_t = false,
-        help = "Skip the APA PDUI matrix output ({batch}_apa_pdui)"
+        help = "Skip the APA PDUI (proximal/distal count) matrix output ({batch}_apa)"
     )]
     pub no_apa_pdui: bool,
 
