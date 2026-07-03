@@ -1,7 +1,6 @@
 use crate::cell_clustering::{cluster_cells_from_bam, ClusteringParams};
 use crate::common::*;
 use crate::data::cell_membership::CellMembership;
-use crate::data::conversion::*;
 use crate::editing::bed_output::process_all_bam_files_to_bed;
 use crate::editing::io::{load_atoi_mask_from_parquet, ToParquet};
 use crate::editing::mask::{build_atoi_mask, filter_m6a_by_mask};
@@ -155,19 +154,6 @@ pub struct DartSeqCountArgs {
                      included in the output. If not set, no filtering is applied."
     )]
     column_nnz_cutoff: Option<usize>,
-
-    #[arg(
-        short = 't',
-        long,
-        value_enum,
-        default_value = "ratio",
-        help = "Type of output value to report",
-        long_help = "Type of output value to report.\n\
-		     ratio: conversion fraction (converted / total),\n\
-		     converted: raw converted read count,\n\
-		     unconverted: raw unconverted read count."
-    )]
-    pub output_value_type: ConversionValueType,
 
     #[arg(
         long,
@@ -562,7 +548,6 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             backend: args.backend.clone(),
             zip: args.zip,
             output: args.output.clone(),
-            output_value_type: args.output_value_type.clone(),
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             cell_membership_file: args.cell_membership_file.clone(),
@@ -605,7 +590,6 @@ impl DartSeqCountArgs {
             backend: self.backend.clone(),
             zip: self.zip,
             output: self.output.clone(),
-            output_value_type: self.output_value_type.clone(),
             row_nnz_cutoff: self.row_nnz_cutoff,
             column_nnz_cutoff: self.column_nnz_cutoff,
             cell_membership_file: self.cell_membership_file.clone(),
