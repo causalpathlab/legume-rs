@@ -31,6 +31,7 @@ use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreproce
 
 use candle_util::candle_core::{DType, Tensor};
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use data_beans_alg::gene_weighting::save_fisher_weights;
 use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::embedding_col_names;
@@ -81,12 +82,12 @@ pub fn fit_cell_activity_graph_embedding(
         batch_membership,
         batch_effects: batch_db,
         graph,
-        gene_weights: _,
+        gene_weights: fisher_weights,
         n_cells,
         n_genes,
     } = preprocess_srt(SrtPreprocessConfig {
         common: c,
-        fisher_weights: false,
+        fisher_weights: !args.no_fisher_weights,
         batch_effects: true,
         feature_kind: Some(feature_kind),
     })?;
@@ -94,6 +95,12 @@ pub fn fit_cell_activity_graph_embedding(
     let has_coords = c.has_coordinates();
     let cell_names = data_vec.column_names()?;
     let gene_names = data_vec.row_names()?;
+
+    // Persist the NB-Fisher precision weights (when computed) so downstream
+    // tools can reload them, matching the senna/chickpea convention.
+    if let Some(w) = fisher_weights.as_ref() {
+        save_fisher_weights(&c.out, w, &gene_names)?;
+    }
 
     let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, graph);
     srt_cell_pairs.to_parquet(
@@ -202,7 +209,7 @@ pub fn fit_cell_activity_graph_embedding(
     info!("{}/{} genes have ≥1 active edge", nonzero_genes, n_genes);
 
     info!("Precomputing per-(gene, batch) positive distributions...");
-    let cache = build_gene_batch_cache(&activities, &per_batch);
+    let cache = build_gene_batch_cache(&activities, &per_batch, args.activity_alpha);
     info!(
         "Gene-batch cache: {} active (gene, batch) pairs",
         cache.n_active_pairs()
@@ -376,6 +383,20 @@ pub fn fit_cell_activity_graph_embedding(
                 None, // smoother — wired later for --gene-network
                 &dev,
             )?; // [G, L]
+                // NB-Fisher per-gene precision: scale each gene's row of the
+                // per-level loss by w_g ∈ (0,1] before summing, so high-mean /
+                // high-dispersion housekeeping genes contribute less gradient
+                // (the loss-side analog of bge's count·fisher positive draw and
+                // lc's `apply_gene_weights` on the gene basis). Coverage stays
+                // uniform — every gene is still visited once per epoch.
+            let per_level_gl = match fisher_weights.as_ref() {
+                Some(w) => {
+                    let w_chunk: Vec<f32> = gene_ids.iter().map(|&g| w[g]).collect();
+                    let w_g1 = Tensor::from_vec(w_chunk, (gene_ids.len(), 1), &dev)?;
+                    per_level_gl.broadcast_mul(&w_g1)?
+                }
+                None => per_level_gl,
+            };
             let loss = per_level_gl.sum_all()?;
             let mut total = loss.clone();
             if args.gate_l2 > 0.0 {

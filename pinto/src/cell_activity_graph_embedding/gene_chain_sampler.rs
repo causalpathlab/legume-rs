@@ -54,6 +54,7 @@ pub struct GeneBatchCache {
 pub fn build_gene_batch_cache(
     activities: &CellActivities,
     per_batch: &[Option<PerBatchCellSampler>],
+    activity_alpha: f32,
 ) -> GeneBatchCache {
     let n_genes = activities.gene_active_edges.len();
     let n_batches = per_batch.len();
@@ -63,7 +64,14 @@ pub fn build_gene_batch_cache(
             let gene_edges = &activities.gene_active_edges[g];
             let gene_weights = &activities.gene_active_edge_weights[g];
             (0..n_batches)
-                .map(|b| build_entry(gene_edges, gene_weights, per_batch[b].as_ref()))
+                .map(|b| {
+                    build_entry(
+                        gene_edges,
+                        gene_weights,
+                        per_batch[b].as_ref(),
+                        activity_alpha,
+                    )
+                })
                 .collect()
         })
         .collect();
@@ -74,6 +82,7 @@ fn build_entry(
     gene_edges: &[u32],
     gene_weights: &[f32],
     batch_sampler: Option<&PerBatchCellSampler>,
+    activity_alpha: f32,
 ) -> Option<GeneBatchEntry> {
     let bs = batch_sampler?;
     if gene_edges.is_empty() {
@@ -90,7 +99,16 @@ fn build_entry(
         match a.cmp(&b) {
             std::cmp::Ordering::Equal => {
                 local_edges.push(a);
-                local_weights.push(gene_weights[i]);
+                // Stage-2 coverage exponent (bge alpha_pb analog). α=1 keeps
+                // the activity-proportional draw exactly; α<1 flattens toward
+                // uniform over the gene's active edges. Identity fast-path so
+                // the default is bit-for-bit the old behaviour.
+                let w = if activity_alpha == 1.0 {
+                    gene_weights[i]
+                } else {
+                    gene_weights[i].powf(activity_alpha)
+                };
+                local_weights.push(w);
                 i += 1;
                 j += 1;
             }
