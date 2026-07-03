@@ -1,19 +1,26 @@
-//! `pinto cage-annotate` — marker-set cell-type annotation by projecting cell
-//! types onto the **frozen cage feature embedding**.
+//! `pinto cage-annotate` — marker-set cell-type annotation of a `pinto cage`
+//! run.
 //!
-//! A thin adapter over the shared, model-agnostic
-//! [`graph_embedding_util::type_annotation::annotate_embeddings`]: it loads
-//! `{prefix}.feature_embedding.parquet` (gene × D) and
-//! `{prefix}.cell_embedding.parquet` (cell × D) written by `pinto cage` and
-//! hands them to the shared routine. Outputs the two-layer
-//! `{out}.cage_annot.{annot,community_profile,type_map,type_embedding,coarse_embedding}.parquet`
-//! (per-cell fine+coarse labels with z/p, community summaries, and type anchors).
+//! A thin pinto front-end over the shared, model-agnostic **term-ORA** core
+//! [`graph_embedding_util::type_annotation::annotate_embeddings_ora`] (Euclidean
+//! nearest-centroid assignment → distance-outlier QC → Leiden clustering →
+//! cluster×term hypergeometric over-representation, permutation-calibrated →
+//! optional TreeBH Cell-Ontology calling). It is the embedding-grounded twin of
+//! `senna annotate-by-projection` and `faba annotate`, reading cage's parquet
+//! outputs by prefix (pinto has no run manifest).
+//!
+//! Loads `{prefix}.feature_embedding.parquet` (gene × D) and
+//! `{prefix}.cell_embedding.parquet` (cell × D) written by `pinto cage`, then
+//! writes the shared per-cell contract at `{out}.cage_annot.*`
+//! (`annot.parquet`, `membership.tsv`, `argmax.tsv`, the cluster × term
+//! `p`/`q`/`Q` matrices, and — with `--obo`/`--label-cl` — the TreeBH ontology
+//! assignment), directly comparable to the senna/faba passes.
 
 use anyhow::{Context, Result};
 use clap::Args;
 
 use graph_embedding_util::type_annotation::{
-    annotate_embeddings, AnnotateProjConfig, InputEmbeddings,
+    annotate_embeddings_ora, InputEmbeddings, TermOraConfig,
 };
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
@@ -40,17 +47,58 @@ pub struct CageAnnotateArgs {
 
     #[arg(
         long,
-        default_value_t = 200,
-        help = "Permutation draws per type for the null (0 = skip z-scores)"
+        default_value_t = 30,
+        help = "k for the cosine cell kNN graph fed to Leiden clustering"
     )]
-    pub num_perm: usize,
+    pub knn: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Leiden modularity resolution (higher → more, finer clusters)"
+    )]
+    pub resolution: f64,
 
     #[arg(
         long,
         default_value_t = 42,
-        help = "RNG seed (permutation null + clustering)"
+        help = "RNG seed (clustering + permutation null)"
     )]
     pub seed: u64,
+
+    #[arg(
+        long,
+        default_value_t = 500,
+        help = "Permutation draws calibrating the over-representation statistic"
+    )]
+    pub num_perm: usize,
+
+    #[arg(
+        long = "no-assign-qc",
+        help = "Disable pruning of high-distance cell→term assignments"
+    )]
+    pub no_assign_qc: bool,
+
+    #[arg(
+        long,
+        default_value_t = 2.5,
+        help = "MAD multiplier for the assignment-distance outlier gate"
+    )]
+    pub assign_mad: f64,
+
+    #[arg(
+        long,
+        default_value_t = 0.1,
+        help = "FDR α for the cluster call + Q sparsity (BH on the permutation p)"
+    )]
+    pub fdr_alpha: f32,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Softmax temperature for the row-normalized Q over significant terms"
+    )]
+    pub q_temperature: f32,
 
     #[arg(
         long,
@@ -59,33 +107,31 @@ pub struct CageAnnotateArgs {
     pub no_idf: bool,
 
     #[arg(
-        long = "no-coarsen",
-        help = "Disable cell-grounded coarsening (emit only the fine layer mirrored as coarse)"
+        long,
+        help = "Cell Ontology OBO path — runs the TreeBH ontology layer (needs --label-cl)"
     )]
-    pub no_coarsen: bool,
+    pub obo: Option<Box<str>>,
+
+    #[arg(long, help = "Curated `label<TAB>CL:id` map (paired with --obo)")]
+    pub label_cl: Option<Box<str>>,
 
     #[arg(
         long,
-        default_value_t = 30,
-        help = "k for the shared cell kNN graph (fine-score smoothing + Leiden coarsening + UMAP layout)"
+        default_value_t = 0.1,
+        help = "TreeBH per-level selective-FDR target"
     )]
-    pub knn: usize,
+    pub ontology_fdr_q: f64,
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Leiden resolution for cell clustering (higher → more, finer communities)"
+        help = "Benjamini–Yekutieli within ontology families (any dependence)"
     )]
-    pub resolution: f64,
+    pub ontology_by: bool,
 }
 
 pub fn run_cage_annotate(args: &CageAnnotateArgs) -> Result<()> {
     // Accept either the bare cage prefix or its `.pinto.json` manifest path.
-    let prefix = args
-        .from
-        .strip_suffix(".pinto.json")
-        .unwrap_or(&args.from)
-        .to_string();
+    let prefix = args.from.strip_suffix(".pinto.json").unwrap_or(&args.from);
 
     let feat_path = format!("{prefix}.feature_embedding.parquet");
     let feat = DMatrix::<f32>::from_parquet(&feat_path)
@@ -94,22 +140,25 @@ pub fn run_cage_annotate(args: &CageAnnotateArgs) -> Result<()> {
     let cell = DMatrix::<f32>::from_parquet(&cell_path)
         .with_context(|| format!("reading cell embedding {cell_path}"))?;
 
-    let out = args
-        .out
-        .as_deref()
-        .map(str::to_owned)
-        .unwrap_or_else(|| prefix.clone());
+    let out = args.out.as_deref().unwrap_or(prefix).to_string();
     mkdir_parent(&out)?;
 
-    let cfg = AnnotateProjConfig {
-        n_perm: args.num_perm,
-        seed: args.seed,
+    let cfg = TermOraConfig {
         knn: args.knn,
         resolution: args.resolution,
-        coarsen: !args.no_coarsen,
-        ..AnnotateProjConfig::default()
+        seed: args.seed,
+        n_perm: args.num_perm,
+        assign_qc: !args.no_assign_qc,
+        assign_mad: args.assign_mad,
+        fdr_alpha: args.fdr_alpha,
+        q_temperature: args.q_temperature,
+        obo: args.obo.as_deref().map(str::to_owned),
+        label_cl: args.label_cl.as_deref().map(str::to_owned),
+        ontology_fdr_q: args.ontology_fdr_q,
+        ontology_by: args.ontology_by,
     };
-    annotate_embeddings(
+
+    annotate_embeddings_ora(
         &InputEmbeddings {
             feature_emb: &feat.mat,
             gene_names: &feat.rows,
