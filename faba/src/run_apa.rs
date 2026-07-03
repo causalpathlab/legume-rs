@@ -458,17 +458,17 @@ pub struct CountApaArgs {
     )]
     pub(crate) apa_em_pdui: bool,
 
-    /// Compute PDUI (Percentage of Distal poly(A) site Usage Index)
+    /// Per-cell PDUI (proximal/distal count) matrix — written BY DEFAULT.
     #[arg(
-        long = "compute-pdui",
-        default_value_t = false,
-        help = "Compute PDUI for genes with exactly 2 active pA sites",
-        long_help = "Compute PDUI (Percentage of Distal poly(A) site Usage Index)\n\
-                     for genes with exactly 2 active poly(A) sites.\n\
-                     PDUI = distal / (distal + proximal). Writes a per-cell\n\
-                     `{batch}_apa` matrix with the two count channels per gene\n\
-                     (`{gene}/apa/proximal`, `{gene}/apa/distal`) — PDUI is derived\n\
-                     from those downstream. Only used in mixture mode."
+        long = "no-pdui",
+        default_value_t = true,
+        action = clap::ArgAction::SetFalse,
+        help = "Skip the per-cell APA PDUI matrix ({batch}_apa); written by default",
+        long_help = "The per-cell `{batch}_apa` matrix — two count channels per 2-site\n\
+                     gene (`{gene}/apa/proximal`, `{gene}/apa/distal`); PDUI =\n\
+                     distal/(distal+proximal) is derived downstream — is written BY\n\
+                     DEFAULT (matching `faba all`). Pass `--no-pdui` to skip it (the\n\
+                     poly-A EM still runs if `--mixture` needs it)."
     )]
     pub(crate) compute_pdui: bool,
 

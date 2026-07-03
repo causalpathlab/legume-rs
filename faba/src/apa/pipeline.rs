@@ -698,10 +698,12 @@ fn load_polya_site_mask(args: &CountApaArgs) -> anyhow::Result<Option<PolyaSiteM
     Ok(if mask.is_empty() { None } else { Some(mask) })
 }
 
-/// Fast 2-site PDUI path: treat a UTR as effectively single-site (no PDUI)
-/// unless the runner-up cluster carries at least `1/this` of the dominant
-/// cluster's reads. Guards against calling PDUI on a spurious minor peak.
-const MIN_RUNNERUP_MASS_RATIO: usize = 10;
+/// Fast 2-site PDUI path: treat a UTR as effectively single-site (no PDUI) unless
+/// the runner-up cluster carries at least this fraction of the dominant cluster's
+/// reads. Both sites already pass the min-coverage discovery gate, so this is a
+/// light floor that only rejects a near-degenerate minor peak (was 10%, lowered as
+/// too aggressive — it dropped genes with real but modest distal usage).
+const MIN_RUNNERUP_MASS_FRAC: f32 = 0.02;
 
 /// Process a single UTR: extract fragments, discover/load sites, run EM, assign cells.
 #[allow(clippy::too_many_arguments)]
@@ -801,7 +803,7 @@ fn process_utr(
         }
         clusters.sort_unstable_by(|a, b| b.1.cmp(&a.1)); // by read count, desc
                                                          // Require the runner-up to be a non-trivial fraction of the dominant peak.
-        if clusters[1].1 * MIN_RUNNERUP_MASS_RATIO < clusters[0].1 {
+        if (clusters[1].1 as f32) < MIN_RUNNERUP_MASS_FRAC * clusters[0].1 as f32 {
             return Ok((Vec::new(), Vec::new()));
         }
         let t_assign = std::time::Instant::now();

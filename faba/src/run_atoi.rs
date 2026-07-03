@@ -1,5 +1,4 @@
 use crate::common::*;
-use crate::data::conversion::*;
 use crate::editing::io::ToParquet;
 use crate::editing::mask::filter_conversion_sites_by_mask;
 use crate::editing::mixture::MixtureParams;
@@ -109,15 +108,6 @@ pub struct AtoICountArgs {
         help = "A-to-I detection FDR target (Benjamini-Hochberg q-value)"
     )]
     pub pvalue_cutoff: f32,
-
-    #[arg(
-        short = 't',
-        long,
-        value_enum,
-        default_value = "ratio",
-        help = "Type of output value to report"
-    )]
-    pub output_value_type: ConversionValueType,
 
     #[arg(
         long,
@@ -328,7 +318,6 @@ impl From<&AtoICountArgs> for ConversionParams {
             backend: args.backend.clone(),
             zip: args.zip,
             output: args.output.clone(),
-            output_value_type: args.output_value_type.clone(),
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
             cell_membership_file: args.cell_membership_file.clone(),

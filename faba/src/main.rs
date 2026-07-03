@@ -60,7 +60,7 @@ Output layout (every matrix is per-replicate — one per input BAM):\n\
   per-modality: {batch}_m6a, {batch}_atoi (gene two-channel:\n    \
                 {gene}/{mod}/{pos} = edited, /{neg} = coverage),\n    \
                 {batch}_genes, {batch}_snp_{alt,depth}\n\
-  apa:          {batch}_apa (proximal/distal counts, --compute-pdui),\n    \
+  apa:          {batch}_apa (proximal/distal counts, default; --no-pdui skips),\n    \
                 {batch}_apa_mixture (--mixture)\n\
   Mixture components are FIT on the pooled replicates (shared across\n\
   batches) but COUNTED per batch, so per-batch mixture matrices share one\n\
@@ -119,7 +119,7 @@ Example:\n  \
             - apa_components.parquet: shared pA-site component definitions\n    \
               (fit on the pooled BAMs)\n  \
             - {batch}_apa: per-replicate per-cell proximal/distal counts\n    \
-              (--compute-pdui)\n  \
+              (default; --no-pdui to skip)\n  \
             - {batch}_apa_mixture: per-replicate per-cell pA-site usage,\n    \
               counted per batch on the shared components (--mixture)\n  \
             --method simple instead writes a per-replicate {batch} matrix\n    \
@@ -134,7 +134,7 @@ Example:\n  \
 Example:\n  \
   faba apa sample.bam -g genes.gff -o out/\n  \
   faba apa sample.bam -g genes.gff -o out/ --method simple\n  \
-  faba apa sample.bam --utr-bed utrs.bed -o out/ --compute-pdui\n  \
+  faba apa sample.bam --utr-bed utrs.bed -o out/ --mixture\n  \
   faba apa sample.bam -g genes.gff -o out/ --atoi-mask out/atoi_sites.parquet")]
     Apa(CountApaArgs),
 

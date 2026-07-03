@@ -1,5 +1,4 @@
 use crate::common::*;
-use crate::data::conversion::ConversionValueType;
 use crate::editing::io::ToParquet;
 use crate::editing::mask::{build_atoi_mask, filter_conversion_sites_by_mask, filter_m6a_by_mask};
 use crate::editing::mixture::MixtureParams;
@@ -922,7 +921,6 @@ fn run_atoi_step(
         backend: args.backend.clone(),
         zip: args.zip,
         output: args.output.clone(),
-        output_value_type: ConversionValueType::Ratio,
         row_nnz_cutoff: None,
         column_nnz_cutoff: None,
         cell_membership_file: None,
@@ -1162,7 +1160,6 @@ fn run_dart_step(
         backend: args.backend.clone(),
         zip: args.zip,
         output: args.output.clone(),
-        output_value_type: ConversionValueType::Ratio,
         row_nnz_cutoff: None,
         column_nnz_cutoff: None,
         cell_membership_file: None,

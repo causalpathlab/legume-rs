@@ -51,12 +51,6 @@ pub struct ConversionParams {
     /// Wrap zarr output in a `.zarr.zip` archive (no effect for HDF5).
     pub zip: bool,
     pub output: Box<str>,
-    /// Vestigial: the editing output is now always the gene-level two-channel
-    /// (edited + coverage) matrix, so the `--output-value-type` flag that feeds this
-    /// no longer changes anything. Retained (with the flag) pending a removal
-    /// decision; see the `--num-topics`-style deprecation note.
-    #[allow(dead_code)]
-    pub output_value_type: ConversionValueType,
     pub row_nnz_cutoff: Option<usize>,
     pub column_nnz_cutoff: Option<usize>,
     pub cell_membership_file: Option<Box<str>>,
