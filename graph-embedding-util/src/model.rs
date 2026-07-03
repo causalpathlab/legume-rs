@@ -82,7 +82,8 @@ pub struct FactoredInit<'a> {
 /// ambiguous split against an equal-and-opposite cell-axis shift: the shrunk
 /// gene-side `δ_g` absorbs the (dense) static per-gene nascent structure (the
 /// "γ"), and the residual dynamics stay on the CELL axis as the phase-2 velocity
-/// `δ_cell = dir(φ) − dir(θ)` (see `crate::fit::project_cells_phase2`). With
+/// increment `δ_cell` (a raw Poisson-MAP shift with θ held fixed; see
+/// `crate::fit::project_cells_phase2`). With
 /// `delta = None` this reduces to plain β-sharing (spliced ≡ unspliced ≡ `β_g`).
 /// `β` / `δ_g` are learnable `Var`s; `row_to_gene` / the unspliced mask are fixed.
 /// The score/loss path composes the row→gene→(β,δ) gathers directly (no
