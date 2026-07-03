@@ -141,6 +141,30 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
+        default_value_t = 1.0,
+        help = "Exponent on within-gene positive-edge weights a_g[u]·a_g[v]",
+        long_help = "Stage-2 coverage exponent (bge's alpha_pb analog, one axis \
+                     down): positive edges within a gene are drawn with \
+                     probability ∝ (a_g[u]·a_g[v])^activity-alpha. 1.0 (default) \
+                     keeps the activity-proportional draw; 0.0 makes every active \
+                     edge of a gene equally likely, so one high-activity hub pair \
+                     can't dominate that gene's training."
+    )]
+    pub activity_alpha: f32,
+
+    #[arg(
+        long,
+        help = "Disable NB-Fisher per-gene precision weighting of the loss",
+        long_help = "By default cage down-weights each gene's contribution to the \
+                     contrastive loss by its NB Fisher-info weight w_g ∈ (0,1] \
+                     (high-mean / high-dispersion housekeeping genes → 0, \
+                     informative low-mean genes → 1), matching `pinto lc` and \
+                     `senna bge`. Set this to train every gene at equal weight."
+    )]
+    pub no_fisher_weights: bool,
+
+    #[arg(
+        long,
         default_value_t = 1e-4,
         help = "L2 penalty on softplus_floored(γ[L,D]) per-level per-dim gates"
     )]
