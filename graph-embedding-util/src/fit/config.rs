@@ -133,8 +133,8 @@ pub struct FitConfig {
     /// Optional per-gene β-sharing feature parameterization. When `Some`, the
     /// feature side is built as [`crate::model::FeatFactor`] (every feature row
     /// reuses its gene's `β_g`) instead of a free `E_feat` table, phase-2 identity
-    /// is resolved on the spliced edges, and it also emits the nascent latent and
-    /// velocity (see [`FitOutput::cell_nascent`] / [`FitOutput::cell_velocity`]).
+    /// is resolved on the spliced edges (raw `θ`), and the same pass emits the raw
+    /// velocity increment `δ` (see [`FitOutput::cell_velocity`]).
     /// `None` = the standard free embedding (bge / Stage 0).
     pub feat_factor: Option<FeatFactorSpec>,
 }

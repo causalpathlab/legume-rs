@@ -160,39 +160,54 @@ fn run_gem_genes_bge(
     // uniform `hvg_weights` over the survivors then restricts the pb projection /
     // membership to those genes too. `None` (n_hvg = 0) keeps every gene.
     let hvg_weights: Option<Vec<f32>> = if args.collapse.n_hvg > 0 {
-        use data_beans_alg::hvg::select_hvg_streaming;
-        let hvg = select_hvg_streaming(
-            unified.count_backend(),
-            Some(args.collapse.n_hvg),
-            None,
-            None,
-        )
-        .context("HVG selection")?;
-        // Gene-aware: keep a gene if ANY of its rows is HVG-selected, then keep
-        // all of that gene's rows (both spliced + unspliced).
-        let keep_rows: Vec<usize> = {
-            let mut kept_genes: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
-            for &i in &hvg.selected_indices {
-                let name = unified.feature_names[i].as_ref();
-                kept_genes.insert(name.rsplit_once("/count/").map_or(name, |(g, _)| g));
-            }
-            unified
-                .feature_names
-                .iter()
-                .enumerate()
-                .filter_map(|(i, name)| {
-                    let gene = name
-                        .rsplit_once("/count/")
-                        .map_or(name.as_ref(), |(g, _)| g);
-                    kept_genes.contains(gene).then_some(i)
-                })
-                .collect()
-        };
+        use data_beans_alg::hvg::select_hvg_by_stats;
+        use data_beans_alg::sparse_streaming::streaming_sparse_running_stats;
+        use matrix_util::traits::RunningStatOps;
+        // Select the top-N most variable GENES (not rows): compute per-row running
+        // stats, POOL a gene's spliced + unspliced tracks onto one gene entry, and
+        // rank genes by NB dispersion-trend excess. `--n-hvg N` keeps exactly the N
+        // most variable genes (both tracks of each together) — pooling spliced +
+        // unspliced total mirrors the pipeline's CR-style gene filter. Ranking on rows
+        // instead would return well under N genes (the two correlated tracks of a gene
+        // both rank high and collapse to one gene on dedup).
+        let mut gene_id: rustc_hash::FxHashMap<Box<str>, usize> = rustc_hash::FxHashMap::default();
+        let row_gene: Vec<usize> = unified
+            .feature_names
+            .iter()
+            .map(|name| {
+                let gene = name
+                    .rsplit_once("/count/")
+                    .map_or(name.as_ref(), |(g, _)| g);
+                let next = gene_id.len();
+                *gene_id.entry(gene.into()).or_insert(next)
+            })
+            .collect();
+        let n_genes = gene_id.len();
+        let stat = streaming_sparse_running_stats(unified.count_backend(), None, "HVG")
+            .context("HVG streaming stats")?;
+        let (means, vars) = (stat.mean(), stat.variance());
+        // Pooled gene stats: mean is exact (E[s+u]=E[s]+E[u]); var sums the tracks (a
+        // lower bound ignoring cross-track covariance — fine for ranking).
+        let mut gmean = vec![0f32; n_genes];
+        let mut gvar = vec![0f32; n_genes];
+        for (r, (&m, &v)) in means.iter().zip(vars.iter()).enumerate() {
+            gmean[row_gene[r]] += m;
+            gvar[row_gene[r]] += v;
+        }
+        let keep_genes: rustc_hash::FxHashSet<usize> =
+            select_hvg_by_stats(&gmean, &gvar, args.collapse.n_hvg)
+                .into_iter()
+                .collect();
+        let keep_rows: Vec<usize> = (0..row_gene.len())
+            .filter(|&r| keep_genes.contains(&row_gene[r]))
+            .collect();
         let before = unified.n_features();
         unified.subset_features(&keep_rows);
         info!(
-            "HVG filter (--n-hvg {}): {} → {} feature rows",
+            "HVG filter (--n-hvg {}): {} genes → {} kept ({} → {} feature rows)",
             args.collapse.n_hvg,
+            n_genes,
+            keep_genes.len(),
             before,
             unified.n_features()
         );
@@ -203,9 +218,8 @@ fn run_gem_genes_bge(
 
     // Per-gene β-sharing factorization. Each row `{gene}/count/{spliced|unspliced}`
     // maps to its gene, so a gene's spliced and unspliced tracks embed identically
-    // as `β_g`. The splice deviation is recovered post-hoc on the CELL axis by the
-    // dual phase-2 projection — there it is identifiable, whereas a gene-side δ_g
-    // would trade off against an equal cell-axis shift.
+    // as `β_g`. The splice deviation is recovered as the phase-2 velocity increment
+    // δ on the CELL axis (identity θ held fixed, δ fit to the unspliced edges).
     let factor = build_splice_factor(&unified.feature_names);
     let n_genes = factor
         .row_to_gene
@@ -215,7 +229,7 @@ fn run_gem_genes_bge(
         .map_or(0, |m| m as usize + 1);
     info!(
         "β-sharing factor: {} genes from {} count rows ({} unspliced rows); \
-         splice δ → cell axis (dual projection)",
+         splice δ → cell-axis velocity increment",
         n_genes,
         unified.feature_names.len(),
         factor.unspliced_rows.iter().filter(|&&b| b).count(),
@@ -306,7 +320,9 @@ fn run_gem_genes_bge(
         let vars = out.varmap.data().lock().unwrap();
         if let Some(delta) = vars.get("delta") {
             let d_t = delta.as_tensor().to_device(&cpu)?;
-            // genes with any |δ_g| above ~0 (the L1 leaves most rows at ≈0).
+            // genes whose ‖δ_g‖ is above ~0 (the L2 ridge shrinks but does NOT
+            // sparsify, so this count is typically most genes — it is a coverage
+            // readout, not a sparsity one).
             let per_gene_max: Vec<f32> = d_t.abs()?.max(1)?.to_vec1()?;
             let nz = per_gene_max.iter().filter(|&&x| x > 1e-6).count();
             ge::save_embedding(
@@ -356,8 +372,9 @@ fn run_gem_genes_bge(
 /// Build the per-gene β-sharing feature factorization from the genes feature
 /// axis. Each row is `{gene}/count/{spliced|unspliced}`; rows sharing a `{gene}`
 /// key map to one gene id (so both tracks embed as `β_g`), and the `unspliced`
-/// rows are flagged so phase 2 can split each cell's edges for the dual axis-δ
-/// projection. Rows that don't match the `…/count/…` shape fall back to their
+/// rows are flagged so phase 2 can split each cell's edges (identity θ from
+/// spliced, velocity increment δ from unspliced). Rows that don't match the
+/// `…/count/…` shape fall back to their
 /// own gene tagged spliced (defensive; genes-only input is all count rows).
 fn build_splice_factor(feature_names: &[Box<str>]) -> graph_embedding_util::FeatFactorSpec {
     let mut gene_ids: FxHashMap<Box<str>, u32> = FxHashMap::default();

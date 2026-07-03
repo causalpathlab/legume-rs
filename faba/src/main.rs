@@ -289,11 +289,13 @@ Known SNP reference files:\n\n  \
               spliced  count:  e_f = β_g\n  \
               unspliced count: e_f = β_g\n\
             A single Poisson likelihood on counts. Cell identity comes from the\n\
-            SPLICED projection θ (mature mRNA = current state); the same phase-2\n\
-            pass emits the nascent φ (`{out}.nascent.parquet`) and the velocity\n\
-            δ = dir(φ)−dir(θ) (`{out}.velocity.parquet`) on the cell axis, plus a\n\
-            velocity feature co-embedding (`{out}.feature_velocity.parquet`) —\n\
-            the genes that drive the flow.",
+            SPLICED projection θ (mature mRNA = current state), written RAW as\n\
+            `{out}.latent.parquet` (magnitude kept); the same phase-2 pass fits an\n\
+            analytic velocity increment δ to the unspliced edges (identity held\n\
+            fixed) and writes it RAW as `{out}.velocity.parquet` (‖δ‖ = speed). The\n\
+            nascent state is just θ+δ = latent+velocity. No post-hoc unit-norm or\n\
+            co-embedding is written; per-gene velocity, if wanted, is the in-model\n\
+            δ_g (`--delta-l2` → `{out}.delta_dictionary.parquet`).",
         after_long_help = "\
 Example:\n  \
   faba gem --genes out/rep1_wt_genes.zarr.zip -o out/gem\n\n\

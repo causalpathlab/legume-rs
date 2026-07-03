@@ -172,7 +172,7 @@ pub fn train_composite(
     // Smoother refreshes against the *shared* E_feat — pull it from the
     // first axis (every axis points at the same tensor).
     let shared_e_feat = ctx.axes[0].model.e_feat.clone();
-    // Shared per-gene splice offset δ_g (factored splice models), for the L1
+    // Shared per-gene splice offset δ_g (factored splice models), for the L2 (ridge)
     // penalty below. `None` for free / plain-β-sharing models.
     let shared_delta = ctx.axes[0]
         .model
