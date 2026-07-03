@@ -21,7 +21,8 @@ pub struct ModelArgs {
                      unspliced rows embed as β_g + δ_g with a ridge-shrunk δ_g learned in phase\n\
                      1: it absorbs the (dense) static per-gene nascent structure (the RNA-\n\
                      velocity γ) so cell identity (spliced θ) stays clean and the phase-2\n\
-                     velocity δ = dir(φ)−dir(θ) becomes γ-calibrated. Larger = more shrinkage\n\
+                     velocity increment δ (raw Poisson-MAP shift, θ fixed) becomes\n\
+                     γ-calibrated. Larger = more shrinkage\n\
                      (δ_g pulled toward 0). Try 0.01–1.0; δ_g is written to\n\
                      `{out}.delta_dictionary.parquet`."
     )]

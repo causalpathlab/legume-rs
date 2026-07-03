@@ -3,11 +3,11 @@
 //!
 //! Each feature row `{gene}/count/{spliced|unspliced}` maps to its gene, so a
 //! gene's spliced and unspliced tracks embed identically as `β_g` (β-sharing).
-//! A single Poisson likelihood on counts: cell **identity** comes from the
-//! spliced projection θ (mature mRNA = current state), and the spliced↔unspliced
-//! contrast is a **velocity** δ = dir(φ)−dir(θ) on the cell axis (φ = nascent
-//! unspliced projection), tracking transcriptional dynamics rather than a second
-//! (binomial) likelihood.
+//! A single Poisson likelihood on counts: cell **identity** is the spliced
+//! projection θ (written raw), and the **velocity** is the raw analytic increment
+//! δ — a Poisson-MAP shift fit to the unspliced edges with θ held fixed (‖δ‖ =
+//! speed) — tracking the spliced↔unspliced dynamics rather than a second (binomial)
+//! likelihood.
 
 pub mod args;
 pub mod common;

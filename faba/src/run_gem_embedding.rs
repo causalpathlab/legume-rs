@@ -14,6 +14,11 @@
 //! is just `θ + δ` = latent + velocity (derivable). Per-gene velocity, if wanted, is
 //! the in-model `δ_g` (`--delta-l2`). No softmax co-embedding is written (see the
 //! NOTE in `run_gem_genes_bge`: not every gene can be co-embedded).
+//!
+//! NOTE — `latent` is **raw** (its norm carries library size), so cluster / UMAP it
+//! with **cosine** distance, or L2-normalize the rows first; plain Euclidean would be
+//! dominated by the depth axis. (Only the gem/splice path stores raw; `senna bge`
+//! still writes the L2 direction.)
 
 use anyhow::Context;
 use data_beans::sparse_io_vector::ColumnAlignment;
