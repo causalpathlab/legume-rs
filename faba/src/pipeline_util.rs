@@ -78,23 +78,26 @@ pub fn create_gene_key_function(
     }
 }
 
-/// Push a channel-last row `{unit}/{modality}/{channel}` = `count` into
-/// `triplets`, skipping zeros to keep the matrix sparse. The single place the
-/// channel-count producers (editing, APA) spell the [`feature_row`] convention.
+/// Push a channel-last row = `count` into `triplets`, skipping zeros to keep the
+/// matrix sparse. `subunit = None` emits a gene-level `{gene}/{modality}/{channel}`
+/// row; `Some(s)` emits a sub-gene `{gene}/{modality}/{s}/{channel}` row (site or
+/// component). The single place the channel-count producers (editing, APA) spell
+/// the [`feature_row`] convention.
 ///
 /// [`feature_row`]: faba::feature_name::feature_row
 pub fn push_channel_row(
     triplets: &mut Vec<(CellBarcode, Box<str>, f32)>,
     cb: &CellBarcode,
-    unit: &str,
+    gene: &str,
     modality: &str,
     channel: &str,
+    subunit: Option<&str>,
     count: usize,
 ) {
     if count > 0 {
         triplets.push((
             cb.clone(),
-            faba::feature_name::feature_row(unit, modality, channel, None),
+            faba::feature_name::feature_row(gene, modality, channel, subunit),
             count as f32,
         ));
     }
@@ -138,6 +141,7 @@ where
             &gene,
             modality,
             pos_channel,
+            None,
             dat.converted,
         );
         push_channel_row(
@@ -146,6 +150,101 @@ where
             &gene,
             modality,
             neg_channel,
+            None,
+            dat.unconverted,
+        );
+    }
+    format_data_triplets(triplets)
+}
+
+/// Aggregate conversion stats to **per-site** resolution and emit two channel
+/// rows per site into one matrix, using the single-base site as the subunit
+/// ([`crate::feature_name`]):
+///
+/// ```text
+/// {gene}/{modality}/{chr}:{pos}/{pos_channel} = converted    (methylated / edited)
+/// {gene}/{modality}/{chr}:{pos}/{neg_channel} = unconverted  (unmethylated / unedited)
+/// ```
+///
+/// m6A and A-to-I sites are single base pairs, so the subunit is just the
+/// 0-based position `{chr}:{start}` — not a `start-stop` interval. This is the
+/// finer-grained sibling of [`summarize_stats_two_channel`], which pools every
+/// site into its gene; here distinct sites stay separate rows. Zero counts are
+/// skipped to keep the matrix sparse.
+///
+/// `min_cells` applies a **unit-aware** feature QC: a site is kept only if it is
+/// detected in at least `min_cells` cells, and when kept BOTH of its channel
+/// rows are emitted together (never de-paired — mirrors the way Cell Ranger
+/// keeps all of a gene's features together rather than filtering channels
+/// independently). `0` or `1` disables the filter. The gene axis is already
+/// filtered upstream by `gene_min_cells` (see [`passing_genes_from_stats`]); the
+/// per-site axis is new feature space that nothing else QCs. Note `stats` only
+/// carries cells with a converted read at the site, so this counts
+/// signal-bearing cells.
+pub fn summarize_stats_per_site<F>(
+    stats: &[(CellBarcode, BedWithGene, ConversionData)],
+    gene_key_func: F,
+    modality: &str,
+    pos_channel: &str,
+    neg_channel: &str,
+    min_cells: usize,
+) -> TripletsRowsCols
+where
+    F: Fn(&BedWithGene) -> Box<str> + Send + Sync,
+{
+    // Pool per (cell, gene, site). Distinct sites within a gene stay separate;
+    // repeated observations of the same (cell, site) sum.
+    let combined: HashMap<(CellBarcode, Box<str>, Box<str>), ConversionData> = HashMap::default();
+    stats.par_iter().for_each(|(cb, bed, dat)| {
+        let gene = gene_key_func(bed);
+        let site: Box<str> = format!("{}:{}", bed.chr, bed.start).into();
+        let key = (cb.clone(), gene, site);
+        combined.entry(key).or_default().add_assign(dat);
+    });
+
+    // Drain into a Vec so we can count cells per site, then filter sequentially.
+    let entries: Vec<_> = combined.into_iter().collect();
+
+    // Unit-aware min-cells: cells detected per (gene, site). Borrow keys from
+    // `entries` to avoid clones; only built when the filter is active.
+    let cells_per_site: rustc_hash::FxHashMap<(&str, &str), usize> = if min_cells > 1 {
+        let mut m: rustc_hash::FxHashMap<(&str, &str), usize> = rustc_hash::FxHashMap::default();
+        for ((_, gene, site), _) in &entries {
+            *m.entry((gene.as_ref(), site.as_ref())).or_insert(0) += 1;
+        }
+        m
+    } else {
+        rustc_hash::FxHashMap::default()
+    };
+    let keep = |gene: &str, site: &str| -> bool {
+        min_cells <= 1
+            || cells_per_site
+                .get(&(gene, site))
+                .is_some_and(|&n| n >= min_cells)
+    };
+
+    // Two channel rows per kept (cell, gene, site); drop zeros (sparse).
+    let mut triplets: Vec<(CellBarcode, Box<str>, f32)> = Vec::with_capacity(entries.len() * 2);
+    for ((cb, gene, site), dat) in &entries {
+        if !keep(gene, site) {
+            continue;
+        }
+        push_channel_row(
+            &mut triplets,
+            cb,
+            gene,
+            modality,
+            pos_channel,
+            Some(site.as_ref()),
+            dat.converted,
+        );
+        push_channel_row(
+            &mut triplets,
+            cb,
+            gene,
+            modality,
+            neg_channel,
+            Some(site.as_ref()),
             dat.unconverted,
         );
     }

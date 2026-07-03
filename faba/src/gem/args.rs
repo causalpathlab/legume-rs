@@ -196,7 +196,8 @@ pub struct RuntimeArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
+        alias = "max-threads",
+        default_value_t = 16,
         help = "CPU threads (0 = all available)",
         long_help = "Number of CPU threads for rayon-parallel work (HNSW, collapse,\n\
                      phase-2 cell projection). Defaults to all available logical\n\

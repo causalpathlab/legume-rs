@@ -83,7 +83,7 @@ pub struct DartSeqCountArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "minimum number of total reads per site",
+        help = "Minimum number of total reads per site",
         long_help = "Minimum number of total reads required per site for inclusion in\n\
                      the analysis. Filters out low-coverage sites."
     )]
@@ -95,6 +95,20 @@ pub struct DartSeqCountArgs {
         help = "Minimum converted (C->T) reads per site"
     )]
     pub min_conversion: usize,
+
+    #[arg(
+        long = "min-base-quality",
+        default_value_t = 20,
+        help = "Minimum base quality (Phred) to include a base"
+    )]
+    pub min_base_quality: u8,
+
+    #[arg(
+        long = "min-mapping-quality",
+        default_value_t = 20,
+        help = "Minimum mapping quality (MAPQ) to include a read"
+    )]
+    pub min_mapping_quality: u8,
 
     #[arg(
         long = "error-rate",
@@ -132,36 +146,33 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         long,
+        alias = "threads",
         default_value_t = 16,
         help = "Maximum number of threads",
-        long_help = "Maximum number of threads to use for parallel processing. \n\
-		     Choose the right number in HPC environments."
+        long_help = "Maximum number of threads to use for parallel processing.\n\
+                     Choose the right number in HPC environments."
     )]
     max_threads: usize,
 
     #[arg(
-        long,
-        help = "Number of non-zero cutoff for rows/features",
-        long_help = "Minimum number of non-zero entries required for rows/features to be\n\
-                     included in the output. If not set, no filtering is applied."
+        long = "site-min-cells",
+        default_value_t = crate::editing::pipeline::DEFAULT_SITE_MIN_CELLS,
+        help = "Min cells per site for the per-site matrix feature QC (0 disables)",
+        long_help = "Unit-aware feature QC for the per-site (`_site`) output matrix:\n\
+                     a site is kept only if detected in at least this many cells,\n\
+                     and both of its channels (methylated/unmethylated) are kept\n\
+                     together. The gene-level matrix is unaffected. 0 disables.\n\
+                     Sites are a distinct feature space not covered by the upstream\n\
+                     gene expression QC (--gene-min-cells)."
     )]
-    row_nnz_cutoff: Option<usize>,
-
-    #[arg(
-        long,
-        help = "Minimum number of non-zero entries for the columns/cells",
-        long_help = "Minimum number of non-zero entries required for columns/cells to be\n\
-                     included in the output. If not set, no filtering is applied."
-    )]
-    column_nnz_cutoff: Option<usize>,
+    pub site_min_cells: usize,
 
     #[arg(
         long,
         value_enum,
         default_value = "zarr",
-        help = "Backend format for the output file",
-        long_help = "File format for the output sparse matrix.\n\
-		     Supported: zarr, hdf5."
+        help = "Sparse matrix backend (zarr or hdf5)",
+        long_help = "File format for the output sparse matrix. Supported: zarr, hdf5."
     )]
     pub backend: SparseIoBackend,
 
@@ -268,7 +279,9 @@ pub struct DartSeqCountArgs {
     )]
     pub no_check_r_site: bool,
 
-    // ========== A-to-I editing detection ==========
+    //////////////////////////////
+    // A-to-I editing detection //
+    //////////////////////////////
     #[arg(
         long = "detect-atoi",
         default_value_t = false,
@@ -321,7 +334,9 @@ pub struct DartSeqCountArgs {
     )]
     pub snp_mask_file: Option<Box<str>>,
 
-    // ========== Mixture model options ==========
+    ///////////////////////////
+    // Mixture model options //
+    ///////////////////////////
     #[arg(
         long = "no-mixture",
         default_value_t = false,
@@ -395,7 +410,9 @@ pub struct DartSeqCountArgs {
     )]
     pub mixture_prior_beta: f32,
 
-    // ========== Cell clustering options ==========
+    /////////////////////////////
+    // Cell clustering options //
+    /////////////////////////////
     #[arg(
         long = "n-clusters",
         default_value_t = 1,
@@ -461,7 +478,9 @@ pub struct DartSeqCountArgs {
     )]
     cluster_min_col_nnz: usize,
 
-    // ========== Gene expression QC ==========
+    ////////////////////////
+    // Gene expression QC //
+    ////////////////////////
     #[arg(
         long = "gene-min-cells",
         default_value_t = 10,
@@ -548,8 +567,6 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             backend: args.backend.clone(),
             zip: args.zip,
             output: args.output.clone(),
-            row_nnz_cutoff: args.row_nnz_cutoff,
-            column_nnz_cutoff: args.column_nnz_cutoff,
             cell_membership_file: args.cell_membership_file.clone(),
             membership_barcode_col: args.membership_barcode_col,
             membership_celltype_col: args.membership_celltype_col,
@@ -558,8 +575,8 @@ impl From<&DartSeqCountArgs> for ConversionParams {
                 check_r_site: !args.no_check_r_site,
                 contrast: args.m6a_contrast.to_contrast(),
             },
-            min_base_quality: 20,
-            min_mapping_quality: 20,
+            min_base_quality: args.min_base_quality,
+            min_mapping_quality: args.min_mapping_quality,
             mixture_weight_mode: args.mixture_weight,
             mixture_prior_alpha: args.mixture_prior_alpha,
             mixture_prior_beta: args.mixture_prior_beta,
@@ -569,6 +586,7 @@ impl From<&DartSeqCountArgs> for ConversionParams {
                 Some(args.umi_tag.clone())
             },
             mut_bam_files: args.control_bam_files.clone(),
+            site_min_cells: args.site_min_cells,
         }
     }
 }
@@ -590,15 +608,13 @@ impl DartSeqCountArgs {
             backend: self.backend.clone(),
             zip: self.zip,
             output: self.output.clone(),
-            row_nnz_cutoff: self.row_nnz_cutoff,
-            column_nnz_cutoff: self.column_nnz_cutoff,
             cell_membership_file: self.cell_membership_file.clone(),
             membership_barcode_col: self.membership_barcode_col,
             membership_celltype_col: self.membership_celltype_col,
             exact_barcode_match: self.exact_barcode_match,
             mod_type: ModificationType::AtoI,
-            min_base_quality: 20,
-            min_mapping_quality: 20,
+            min_base_quality: self.min_base_quality,
+            min_mapping_quality: self.min_mapping_quality,
             mixture_weight_mode: self.mixture_weight,
             mixture_prior_alpha: self.mixture_prior_alpha,
             mixture_prior_beta: self.mixture_prior_beta,
@@ -609,6 +625,7 @@ impl DartSeqCountArgs {
             },
             // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
             mut_bam_files: Vec::new(),
+            site_min_cells: self.site_min_cells,
         }
     }
 }

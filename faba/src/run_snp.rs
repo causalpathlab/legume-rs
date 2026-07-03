@@ -71,7 +71,8 @@ pub struct SnpArgs {
 
     /// Output directory for results.
     /// Creates: snp_sites.parquet (genotype calls), and optionally
-    /// *_snp_alt.zarr + *_snp_depth.zarr (per-cell matrices for BAF).
+    /// *_snp_alt + *_snp_depth per-cell matrices for BAF (`.zarr.zip` by
+    /// default, `.zarr` with --no-zip, `.h5` for the hdf5 backend).
     #[arg(
         short,
         long,
@@ -80,9 +81,10 @@ pub struct SnpArgs {
         long_help = "Output directory for SNP genotyping results. Created if needed.\n\
                      Outputs:\n\
                      - snp_sites.parquet: all genotyped sites with allele counts and GQ\n\
-                     - {batch}_snp_alt.zarr: per-cell alt allele count matrix (10x mode)\n\
-                     - {batch}_snp_depth.zarr: per-cell total depth matrix (10x mode)\n\
-                     BAF per cell = alt / depth."
+                     - {batch}_snp_alt: per-cell alt allele count matrix (10x mode)\n\
+                     - {batch}_snp_depth: per-cell total depth matrix (10x mode)\n\
+                     (matrices are `.zarr.zip` by default; `.zarr` with --no-zip,\n\
+                     `.h5` for the hdf5 backend.) BAF per cell = alt / depth."
     )]
     pub output: Box<str>,
 
@@ -193,6 +195,7 @@ pub struct SnpArgs {
     /// Base error rate for the genotype likelihood model.
     #[arg(
         long,
+        alias = "error-rate",
         default_value_t = 0.01,
         help = "Base error rate for GL model",
         long_help = "Probability that an observed base is a sequencing error.\n\
@@ -306,8 +309,9 @@ pub struct SnpArgs {
     /// Maximum number of threads for parallel processing.
     #[arg(
         long,
+        alias = "threads",
         default_value_t = 16,
-        help = "Maximum threads",
+        help = "Maximum number of threads",
         long_help = "Maximum number of threads for parallel gene/region processing.\n\
                      Capped at the number of available CPU cores."
     )]

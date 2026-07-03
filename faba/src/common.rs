@@ -250,6 +250,12 @@ pub trait BackendQc {
 
 impl BackendQc for Box<dyn SparseIo<IndexIter = Vec<usize>>> {
     fn qc(&self, cutoffs: SqueezeCutoffs) -> anyhow::Result<()> {
+        // A 0 cutoff keeps every row/column (nnz >= 0 is always true), so the
+        // squeeze would collect full stats and rewrite the backend to no effect.
+        // Skip it when neither axis filters — the common default path.
+        if cutoffs.row == 0 && cutoffs.column == 0 {
+            return Ok(());
+        }
         info!("final Q/C to remove excessive zeros");
         squeeze_by_nnz(self.as_ref(), cutoffs, None, false)
     }

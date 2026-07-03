@@ -58,10 +58,10 @@ pub struct GeneCountArgs {
     /// Gene biotype filter
     #[arg(
         long,
-        default_value = "protein_coding",
-        help = "Gene biotype filter",
-        long_help = "Filter genes by biotype.\n\
-                     Common values: protein_coding, pseudogene, lncRNA."
+        default_value = "",
+        help = "Gene biotype filter (empty = all biotypes)",
+        long_help = "Filter genes by biotype. Empty (default) keeps all biotypes.\n\
+                     Pass a value to restrict: protein_coding, pseudogene, lncRNA."
     )]
     pub(crate) gene_type: Box<str>,
 
