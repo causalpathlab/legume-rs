@@ -170,19 +170,8 @@ fn run_gem_genes_bge(
         // unspliced total mirrors the pipeline's CR-style gene filter. Ranking on rows
         // instead would return well under N genes (the two correlated tracks of a gene
         // both rank high and collapse to one gene on dedup).
-        let mut gene_id: rustc_hash::FxHashMap<Box<str>, usize> = rustc_hash::FxHashMap::default();
-        let row_gene: Vec<usize> = unified
-            .feature_names
-            .iter()
-            .map(|name| {
-                let gene = name
-                    .rsplit_once("/count/")
-                    .map_or(name.as_ref(), |(g, _)| g);
-                let next = gene_id.len();
-                *gene_id.entry(gene.into()).or_insert(next)
-            })
-            .collect();
-        let n_genes = gene_id.len();
+        let (row_gene, genes) = intern_gene_keys(&unified.feature_names);
+        let n_genes = genes.len();
         let stat = streaming_sparse_running_stats(unified.count_backend(), None, "HVG")
             .context("HVG streaming stats")?;
         let (means, vars) = (stat.mean(), stat.variance());
@@ -191,15 +180,15 @@ fn run_gem_genes_bge(
         let mut gmean = vec![0f32; n_genes];
         let mut gvar = vec![0f32; n_genes];
         for (r, (&m, &v)) in means.iter().zip(vars.iter()).enumerate() {
-            gmean[row_gene[r]] += m;
-            gvar[row_gene[r]] += v;
+            gmean[row_gene[r] as usize] += m;
+            gvar[row_gene[r] as usize] += v;
         }
         let keep_genes: rustc_hash::FxHashSet<usize> =
             select_hvg_by_stats(&gmean, &gvar, args.collapse.n_hvg)
                 .into_iter()
                 .collect();
         let keep_rows: Vec<usize> = (0..row_gene.len())
-            .filter(|&r| keep_genes.contains(&row_gene[r]))
+            .filter(|&r| keep_genes.contains(&(row_gene[r] as usize)))
             .collect();
         let before = unified.n_features();
         unified.subset_features(&keep_rows);
@@ -220,13 +209,10 @@ fn run_gem_genes_bge(
     // maps to its gene, so a gene's spliced and unspliced tracks embed identically
     // as `β_g`. The splice deviation is recovered as the phase-2 velocity increment
     // δ on the CELL axis (identity θ held fixed, δ fit to the unspliced edges).
-    let factor = build_splice_factor(&unified.feature_names);
-    let n_genes = factor
-        .row_to_gene
-        .iter()
-        .copied()
-        .max()
-        .map_or(0, |m| m as usize + 1);
+    // `gene_names` is id-ordered (labels the per-gene δ_g dictionary when
+    // `--delta-l2 > 0`); the factor's `row_to_gene` shares the same ids.
+    let (factor, gene_names) = build_splice_factor(&unified.feature_names);
+    let n_genes = gene_names.len();
     info!(
         "β-sharing factor: {} genes from {} count rows ({} unspliced rows); \
          splice δ → cell-axis velocity increment",
@@ -234,20 +220,6 @@ fn run_gem_genes_bge(
         unified.feature_names.len(),
         factor.unspliced_rows.iter().filter(|&&b| b).count(),
     );
-    // Gene names in gene-id order (first row per gene, minus the `/count/…`
-    // suffix) — for labeling the per-gene δ_g dictionary when `--delta-l2 > 0`.
-    let gene_names: Vec<Box<str>> = {
-        let mut names: Vec<Box<str>> = vec![Box::from(""); n_genes];
-        for (name, &gid) in unified.feature_names.iter().zip(&factor.row_to_gene) {
-            if names[gid as usize].is_empty() {
-                let gene = name
-                    .rsplit_once("/count/")
-                    .map_or(name.as_ref(), |(g, _)| g);
-                names[gid as usize] = gene.into();
-            }
-        }
-        names
-    };
 
     let dev = args
         .runtime
@@ -297,9 +269,10 @@ fn run_gem_genes_bge(
     // manifold has to flatten that contrast, so the great majority of genes land with
     // no meaningful cell location: NOT EVERY GENE CAN BE CO-EMBEDDED. Gene↔cell
     // co-embedding and sharp cell clusters are the same degree of freedom pulling
-    // opposite ways — we keep the sharp clusters. (2) The velocity "driver" co-embed is
-    // replaced by the analytic per-gene driver loading δ̄_g computed in phase 2 (see
-    // below). The gene dictionary (β_g) is still written by `save_outputs`.
+    // opposite ways — we keep the sharp clusters. (2) No velocity "driver" co-embed
+    // either: a per-gene velocity readout, if wanted, is the in-model δ_g (`--delta-l2`
+    // → `{out}.delta_dictionary.parquet`), not a post-hoc average. The gene dictionary
+    // (β_g) is still written by `save_outputs`.
     let cpu = candle_util::candle_core::Device::Cpu;
     ge::save_outputs(
         &out.model,
@@ -369,41 +342,58 @@ fn run_gem_genes_bge(
     Ok(())
 }
 
-/// Build the per-gene β-sharing feature factorization from the genes feature
-/// axis. Each row is `{gene}/count/{spliced|unspliced}`; rows sharing a `{gene}`
-/// key map to one gene id (so both tracks embed as `β_g`), and the `unspliced`
-/// rows are flagged so phase 2 can split each cell's edges (identity θ from
-/// spliced, velocity increment δ from unspliced). Rows that don't match the
-/// `…/count/…` shape fall back to their
-/// own gene tagged spliced (defensive; genes-only input is all count rows).
-fn build_splice_factor(feature_names: &[Box<str>]) -> graph_embedding_util::FeatFactorSpec {
+/// Split a gem feature row `{gene}/count/{spliced|unspliced}` into its gene key and
+/// whether it is the unspliced track. Rows not matching that shape fall back to
+/// `(whole name, spliced)` — defensive; genes-only input is all count rows.
+fn split_count_row(name: &str) -> (&str, bool) {
+    match name.rsplit_once("/count/") {
+        Some((gene, suffix)) => (gene, suffix == "unspliced"),
+        None => (name, false),
+    }
+}
+
+/// Intern each row's gene key (see [`split_count_row`]) to a dense gene id. Returns
+/// `(row_to_gene, gene_names)`, `gene_names[gid]` the first-seen key for gene `gid`
+/// (id order). Single source of the β-sharing gene-identity map — used by the HVG
+/// gene filter (pre-subset) and [`build_splice_factor`] (post-subset).
+fn intern_gene_keys(feature_names: &[Box<str>]) -> (Vec<u32>, Vec<Box<str>>) {
     let mut gene_ids: FxHashMap<Box<str>, u32> = FxHashMap::default();
     let mut row_to_gene = Vec::with_capacity(feature_names.len());
-    let mut unspliced_rows = Vec::with_capacity(feature_names.len());
+    let mut gene_names: Vec<Box<str>> = Vec::new();
     for name in feature_names {
-        let s = name.as_ref();
-        let (gene, is_unspliced) = match s.rsplit_once("/count/") {
-            Some((g, suffix)) => (g, suffix == "unspliced"),
-            None => (s, false),
-        };
-        // Borrow-first: only allocate a `Box<str>` key on a genuinely new gene
-        // (the unspliced row of an already-seen gene would otherwise allocate a
-        // key that's immediately dropped).
+        let gene = split_count_row(name).0;
+        // Borrow-first: only allocate a `Box<str>` key on a genuinely new gene.
         let gid = match gene_ids.get(gene) {
             Some(&gid) => gid,
             None => {
                 let gid = gene_ids.len() as u32;
                 gene_ids.insert(gene.into(), gid);
+                gene_names.push(gene.into());
                 gid
             }
         };
         row_to_gene.push(gid);
-        unspliced_rows.push(is_unspliced);
     }
-    graph_embedding_util::FeatFactorSpec {
-        row_to_gene,
-        unspliced_rows,
-    }
+    (row_to_gene, gene_names)
+}
+
+/// Build the per-gene β-sharing feature factorization + the id-ordered gene names.
+/// Each row is `{gene}/count/{spliced|unspliced}`; rows sharing a `{gene}` key map to
+/// one gene id (so both tracks embed as `β_g`), and the `unspliced` rows are flagged
+/// so phase 2 can split each cell's edges (identity θ from spliced, velocity increment
+/// δ from unspliced).
+fn build_splice_factor(
+    feature_names: &[Box<str>],
+) -> (graph_embedding_util::FeatFactorSpec, Vec<Box<str>>) {
+    let (row_to_gene, gene_names) = intern_gene_keys(feature_names);
+    let unspliced_rows: Vec<bool> = feature_names.iter().map(|n| split_count_row(n).1).collect();
+    (
+        graph_embedding_util::FeatFactorSpec {
+            row_to_gene,
+            unspliced_rows,
+        },
+        gene_names,
+    )
 }
 
 fn validate_args(args: &GemArgs) -> anyhow::Result<()> {

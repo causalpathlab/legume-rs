@@ -130,28 +130,3 @@ pub fn write_feature_coembedding(
     info!("Feature co-embedding (SIMBA-style, T={t:.4}) → {out_prefix}.feature_embedding.parquet");
     Ok(())
 }
-
-/// Velocity co-embedding: place each feature at the `P_f`-weighted mean of the
-/// per-cell velocity `δ` (same SIMBA attention as [`write_feature_coembedding`],
-/// value = `velocity` instead of `e_cell`). Writes `{out}.feature_velocity.parquet`
-/// — genes with large, directed rows are the drivers of the cell velocity field.
-pub fn write_feature_velocity(
-    out_prefix: &str,
-    e_cell: &Tensor,
-    e_feat: &Tensor,
-    velocity: &Tensor,
-    feature_names: &[Box<str>],
-    target_eff: f64,
-) -> anyhow::Result<()> {
-    let (coembed, t) = crate::feature_coembedding_value(e_cell, e_feat, velocity, target_eff)?;
-    save_embedding(
-        &format!("{out_prefix}.feature_velocity.parquet"),
-        &coembed,
-        feature_names,
-        "feature",
-    )?;
-    info!(
-        "Feature velocity co-embedding (SIMBA attention · δ, T={t:.4}) → {out_prefix}.feature_velocity.parquet"
-    );
-    Ok(())
-}

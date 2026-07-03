@@ -528,9 +528,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             unspliced,
         )?;
         cell_nrms = nrms;
-        if let Some(sp) = splice {
-            cell_velocity = Some(sp.velocity);
-        }
+        cell_velocity = splice;
     }
 
     Ok(FitOutput {

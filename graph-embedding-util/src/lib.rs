@@ -44,13 +44,12 @@ pub use auxiliary_data::feature_names::FeatureNameKind;
 pub use data::{load_unified_data, validate_multiome_groups, LoadUnifiedArgs, UnifiedData};
 pub use data_beans_alg::refine_multilevel::RefineParams;
 pub use eval::{
-    embedding_col_names, save_embedding, save_outputs, write_feature_coembedding,
-    write_feature_velocity, OutputContext,
+    embedding_col_names, save_embedding, save_outputs, write_feature_coembedding, OutputContext,
 };
 pub use feature_qc::{hvg_feature_qc, FeatureQcConfig, FeatureQcResult};
 pub use fit::{
     fit, load_feature_network, FeatFactorSpec, FeatureNetworkArgs, FitConfig, FitOutput,
 };
 pub use model::JointEmbedModel;
-pub use postprocess::{cell_clusters, feature_coembedding, feature_coembedding_value};
+pub use postprocess::{cell_clusters, feature_coembedding};
 pub use stop::setup_stop_handler;

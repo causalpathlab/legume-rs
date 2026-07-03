@@ -90,48 +90,23 @@ pub fn target_eff_from_labels(labels: &[usize], n_clusters: usize) -> f64 {
     f64::from(matrix_util::utils::median(&sizes)).clamp(MIN_TARGET_EFF, upper)
 }
 
-/// Re-embed every feature onto the cell manifold. `target_eff` is the eff-cells
-/// target from [`cell_clusters`]. Returns `(coembed [D,H], calibrated_T)`; both
-/// inputs are 2-D `[*, H]` on the same device and the output is on that device.
+/// Re-embed every feature onto the cell manifold (SIMBA-style). The attention is
+/// keyed on the identity `e_cell` (query = feature `β_f`, keys = cells):
+/// `P_f[c] = softmax_c(⟨e_cell[c], β_f⟩ / T)` places each feature over the cells
+/// that express it, and the coordinate is the `P_f`-weighted mean of the cell
+/// rows. `target_eff` is the eff-cells target from [`cell_clusters`]. Returns
+/// `(coembed [D,H], calibrated_T)`; both inputs are 2-D `[*, H]` on the same
+/// device and the output is on that device.
 pub fn feature_coembedding(
     e_cell: &Tensor,
     e_feat: &Tensor,
     target_eff: f64,
 ) -> anyhow::Result<(Tensor, f32)> {
-    feature_coembedding_value(e_cell, e_feat, e_cell, target_eff)
-}
-
-/// SIMBA-style feature co-embedding with an arbitrary per-cell **value**.
-///
-/// The attention is always keyed on the identity `e_cell` (query = feature
-/// `β_f`, keys = cells): `P_f[c] = softmax_c(⟨e_cell[c], β_f⟩ / T)` places each
-/// feature over the cells that express it. The returned coordinate is the
-/// `P_f`-weighted mean of the `value` rows:
-/// - `value = e_cell` → the standard identity co-embedding (gene in cell space,
-///   what [`feature_coembedding`] returns).
-/// - `value = δ` (per-cell velocity) → the **velocity** co-embedding: each gene
-///   lands at the mean velocity of its expressing cells (`‖·‖` = how strongly it
-///   marks transitioning cells; direction = the velocity axis it drives).
-///
-/// `value` must have the same row count `N` as `e_cell`; its width may differ
-/// and sets the output width. `T` is calibrated from `(e_cell, e_feat,
-/// target_eff)`, so passing the same `target_eff` across calls shares it.
-pub fn feature_coembedding_value(
-    e_cell: &Tensor,
-    e_feat: &Tensor,
-    value: &Tensor,
-    target_eff: f64,
-) -> anyhow::Result<(Tensor, f32)> {
     let (n, h) = e_cell.dims2()?;
     let (d, h2) = e_feat.dims2()?;
-    let nv = value.dim(0)?;
     anyhow::ensure!(
         h == h2,
         "feature_coembedding: H mismatch (e_cell {h} vs e_feat {h2})"
-    );
-    anyhow::ensure!(
-        nv == n,
-        "feature_coembedding: value has {nv} rows but e_cell has {n}"
     );
     anyhow::ensure!(
         n > 1 && d > 0,
@@ -144,7 +119,6 @@ pub fn feature_coembedding_value(
     // there.
     let e_cell = e_cell.contiguous()?;
     let e_feat = e_feat.contiguous()?;
-    let value = value.contiguous()?;
 
     // Calibrate T on a feature subsample. The score matrix is invariant in T —
     // only the softmax temperature changes — so compute it once and reuse it
@@ -165,18 +139,18 @@ pub fn feature_coembedding_value(
     while start < d {
         let len = FEAT_BLOCK.min(d - start);
         let ef = e_feat.narrow(0, start, len)?;
-        blocks.push(coembed_block(&e_cell, &ef, &value, t)?); // [len, H_value]
+        blocks.push(coembed_block(&e_cell, &ef, t)?); // [len, H]
         start += len;
     }
-    let coembed = Tensor::cat(blocks.as_slice(), 0)?; // [D, H_value]
+    let coembed = Tensor::cat(blocks.as_slice(), 0)?; // [D, H]
     Ok((coembed, t as f32))
 }
 
-/// One feature-block: `softmax_over_cells(e_cell·e_fᵀ / T)ᵀ · value`.
-fn coembed_block(e_cell: &Tensor, e_feat_block: &Tensor, value: &Tensor, t: f64) -> Result<Tensor> {
+/// One feature-block: `softmax_over_cells(e_cell·e_fᵀ / T)ᵀ · e_cell`.
+fn coembed_block(e_cell: &Tensor, e_feat_block: &Tensor, t: f64) -> Result<Tensor> {
     let scores = e_cell.matmul(&e_feat_block.t()?.contiguous()?)?; // [N, B]
     let p = softmax(&scores.affine(1.0 / t, 0.0)?, 0)?; // softmax over cells (dim 0)
-    p.t()?.contiguous()?.matmul(value) // [B, N]·[N, H_value] = [B, H_value]
+    p.t()?.contiguous()?.matmul(e_cell) // [B, N]·[N, H] = [B, H]
 }
 
 /// Mean over features of the effective number of cells `1 / Σ_c P[c,f]²`, given

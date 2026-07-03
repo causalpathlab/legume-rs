@@ -835,14 +835,14 @@ fn nce_loss_with_cell_side(
             Some(f) => {
                 let genes = f.row_to_gene.index_select(idx, 0)?;
                 let base = f.beta.index_select(&genes, 0)?; // β_g
-                match (&f.delta, &f.unspliced_mask) {
+                match &f.splice_delta {
                     // unspliced rows: + δ_g (β_g + mask ⊙ δ_g); spliced: mask = 0.
-                    (Some(delta), Some(mask)) => {
+                    Some((delta, mask)) => {
                         let d = delta.index_select(&genes, 0)?; // [b, H]
                         let m = mask.index_select(idx, 0)?; // [b, 1]
                         base.add(&d.broadcast_mul(&m)?)
                     }
-                    _ => Ok(base),
+                    None => Ok(base),
                 }
             }
             None => select_feat_emb(smoother, &model.e_feat, idx),
