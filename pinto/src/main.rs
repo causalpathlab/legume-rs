@@ -294,14 +294,19 @@ enum Commands {
 
     #[command(
         about = "Marker-set cell-type annotation by projection (from a cage run)",
-        long_about = "Light cell-type annotation: embeds each marker-defined cell\n\
-                      type as the L2-normalized centroid of its marker feature\n\
-                      embeddings (the space cage cells live in), then cosine-scores\n\
-                      every cell → per-cell soft posterior. A permutation null\n\
-                      (random gene sets) gives null-standardized z-scores.\n\n\
+        long_about = "Firm cell-type annotation via the shared term-ORA core\n\
+                      (the embedding-grounded twin of `senna annotate-by-projection`\n\
+                      and `faba annotate`): embed each marker-defined type as the\n\
+                      IDF-weighted centroid of its marker feature embeddings, hard-\n\
+                      assign every cell to its nearest centroid, prune distance\n\
+                      outliers, Leiden-cluster the cells, then test each cluster ×\n\
+                      term for hypergeometric over-representation (permutation-\n\
+                      calibrated). Optional TreeBH Cell-Ontology calling with --obo.\n\n\
                       Reads `{prefix}.feature_embedding.parquet` +\n\
                       `{prefix}.cell_embedding.parquet` from a `pinto cage` run.\n\n\
-                      Outputs: {out}.cage_annot.{posterior,zscore,type_embedding}.parquet"
+                      Outputs the shared per-cell contract at\n\
+                      {out}.cage_annot.{annot.parquet,membership.tsv,argmax.tsv}\n\
+                      plus the cluster × term p/q/Q matrices."
     )]
     CageAnnotate(CageAnnotateArgs),
 
