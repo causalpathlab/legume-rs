@@ -33,6 +33,14 @@ use rustc_hash::FxHashMap;
 use faba::gem::args::GemArgs;
 use faba::gem::sample_id::{file_sample_id, longest_common_underscore_suffix};
 
+/// Default ridge on the per-gene splice offset δ_g, applied automatically whenever
+/// the input carries unspliced rows and the user did not set `--delta-l2`. Keeping a
+/// mild ridge on by default means every spliced+unspliced gem run always emits a δ_g
+/// dictionary (`{out}.delta_dictionary.parquet`) for downstream `faba annotate
+/// --track velocity`, without over-shrinking. Matches the documented `--delta-l2`
+/// range (0.01–1.0).
+const DEFAULT_DELTA_L2: f32 = 1.0;
+
 pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     validate_args(args)?;
@@ -226,6 +234,22 @@ fn run_gem_genes_bge(
         factor.unspliced_rows.iter().filter(|&&b| b).count(),
     );
 
+    // δ_g is only allocated by `ge::fit` when `delta_l2 > 0`. Default a mild ridge
+    // whenever both tracks are present, so gem always emits a δ_g dictionary for
+    // downstream `faba annotate --track velocity`. An explicit `--delta-l2` still wins;
+    // a spliced-only input (no unspliced rows) keeps δ off (plain β-sharing).
+    let has_unspliced = factor.unspliced_rows.iter().any(|&b| b);
+    let delta_l2 = if args.model.delta_l2 > 0.0 {
+        args.model.delta_l2
+    } else if has_unspliced {
+        info!(
+            "δ_g auto-on (--delta-l2 unset, unspliced rows present): ridge L2={DEFAULT_DELTA_L2}"
+        );
+        DEFAULT_DELTA_L2
+    } else {
+        0.0
+    };
+
     let dev = args
         .runtime
         .device
@@ -263,7 +287,7 @@ fn run_gem_genes_bge(
         cell_weight_mult: None,
         phase1_cells_per_pb: args.collapse.phase1_cells_per_pb,
         feat_factor: Some(factor),
-        delta_l2: args.model.delta_l2,
+        delta_l2,
     };
     let out = ge::fit(&mut unified, cfg).context("ge::fit (genes bge)")?;
 
@@ -276,8 +300,9 @@ fn run_gem_genes_bge(
     // co-embedding and sharp cell clusters are the same degree of freedom pulling
     // opposite ways — we keep the sharp clusters. (2) No velocity "driver" co-embed
     // either: a per-gene velocity readout, if wanted, is the in-model δ_g (`--delta-l2`
-    // → `{out}.delta_dictionary.parquet`), not a post-hoc average. The gene dictionary
-    // (β_g) is still written by `save_outputs`.
+    // → `{out}.delta_dictionary.parquet`), not a post-hoc average. `save_outputs` still
+    // writes the raw dictionary keyed by *feature row* (`{gene}/count/{spliced|unspliced}`);
+    // the gene-keyed β_g dictionary below is what marker-based `faba annotate` consumes.
     let cpu = candle_util::candle_core::Device::Cpu;
     ge::save_outputs(
         &out.model,
@@ -290,11 +315,34 @@ fn run_gem_genes_bge(
     )
     .context("save outputs")?;
 
+    // Gene-keyed β_g dictionary. `save_outputs` writes the dictionary keyed by feature
+    // row (`{gene}/count/spliced|unspliced`), which a gene-symbol marker set cannot
+    // match. Read the per-gene `beta` Var directly and save it row-labeled by gene —
+    // the spliced/mature gene program that `faba annotate --track spliced` pairs with
+    // the cell latent θ. Symmetric with the δ_g dictionary below.
+    {
+        let vars = out.varmap.data().lock().unwrap();
+        if let Some(beta) = vars.get("beta") {
+            let beta_t = beta.as_tensor().to_device(&cpu)?;
+            ge::save_embedding(
+                &format!("{}.beta_dictionary.parquet", args.out),
+                &beta_t,
+                &gene_names,
+                "gene",
+            )
+            .context("save β_g dictionary")?;
+            info!(
+                "wrote {}.beta_dictionary.parquet (per-gene β_g; {} genes)",
+                args.out, n_genes
+            );
+        }
+    }
+
     // Per-gene splice offset δ_g (`--delta-l2 > 0`): the nascent loading
     // (unspliced e_f = β_g + δ_g). Read the trained `delta` Var from the varmap
     // and save it row-labeled by gene — genes with large ‖δ_g‖ carry a distinct
     // nascent/velocity program; the L2 ridge shrinks the rest toward 0.
-    if args.model.delta_l2 > 0.0 {
+    if delta_l2 > 0.0 {
         let vars = out.varmap.data().lock().unwrap();
         if let Some(delta) = vars.get("delta") {
             let d_t = delta.as_tensor().to_device(&cpu)?;

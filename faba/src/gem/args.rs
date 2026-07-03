@@ -15,9 +15,11 @@ pub struct ModelArgs {
     #[arg(
         long = "delta-l2",
         default_value_t = 0.0,
-        help = "L2 (ridge) weight on the per-gene splice offset δ_g (0 = off; unspliced ≡ spliced ≡ β_g)",
-        long_help = "L2 (ridge) penalty on the per-gene splice offset δ_g. When 0 (default),\n\
-                     unspliced and spliced rows share β_g exactly (plain β-sharing). When > 0,\n\
+        help = "L2 (ridge) weight on the per-gene splice offset δ_g (0 = auto: a mild ridge is applied when unspliced rows are present)",
+        long_help = "L2 (ridge) penalty on the per-gene splice offset δ_g. When 0 (default) and\n\
+                     the input carries unspliced rows, gem auto-applies a mild ridge (L2=1.0) so a\n\
+                     δ_g dictionary is always written for `faba annotate --track velocity`; set an\n\
+                     explicit value to override, or 0 on a spliced-only input keeps δ off. When > 0,\n\
                      unspliced rows embed as β_g + δ_g with a ridge-shrunk δ_g learned in phase\n\
                      1: it absorbs the (dense) static per-gene nascent structure (the RNA-\n\
                      velocity γ) so cell identity (spliced θ) stays clean and the phase-2\n\

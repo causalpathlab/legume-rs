@@ -8,6 +8,7 @@ mod gene_count;
 mod mixture;
 mod pipeline_util;
 mod read_depth;
+mod run_annotate;
 mod run_apa;
 mod run_atoi;
 mod run_gem_embedding;
@@ -21,6 +22,7 @@ mod snp;
 
 use crate::common::*;
 use faba::gem::args::GemArgs;
+use run_annotate::*;
 use run_apa::*;
 use run_atoi::*;
 use run_gem_embedding::*;
@@ -306,6 +308,27 @@ Multiple samples (comma-separated; each sample a batch via its barcodes'\n\
     Gem(GemArgs),
 
     #[command(
+        name = "annotate",
+        aliases = ["annot", "ann"],
+        about = "Marker-set cell-type annotation of a `faba gem` run",
+        long_about = "Annotate the embeddings from `faba gem` against a marker set.\n\n\
+            Reads gem's parquet outputs by prefix (`-f/--from`) and a marker TSV\n\
+            (`gene<TAB>celltype`, `-m/--markers`), then runs the shared term-ORA core\n\
+            (nearest-centroid assign → distance-outlier QC → Leiden clustering →\n\
+            cluster×term hypergeometric over-representation, permutation-calibrated).\n\n\
+            gem carries two gene programs, each annotated on its own axis (`--track`):\n  \
+              spliced:  gene β_g (beta_dictionary) vs cell θ (latent)  → {out}.spliced.*\n  \
+              velocity: gene δ_g (delta_dictionary) vs cell velocity   → {out}.velocity.*\n\
+            `both` (default) runs both; velocity is skipped with a warning when its\n\
+            inputs are absent (spliced-only gem run).",
+        after_long_help = "\
+Example:\n  \
+  faba gem --genes out/rep1_genes.zarr.zip -o out/gem\n  \
+  faba annotate -f out/gem -m markers.tsv -o out/gem"
+    )]
+    Annotate(AnnotateArgs),
+
+    #[command(
         name = "all",
         aliases = ["pipeline", "full", "magic"],
         about = "Run all RNA-seq analyses: SNP → genes → ATOI → APA → m6A",
@@ -355,6 +378,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Metagene(ref args) => run_metagene(args)?,
         Commands::Snp(ref args) => run_snp(args)?,
         Commands::Gem(ref args) => run_gem_embedding(args)?,
+        Commands::Annotate(ref args) => run_annotate(args)?,
         Commands::All(ref args) => run_pipeline(args)?,
     }
 
