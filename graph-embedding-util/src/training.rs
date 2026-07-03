@@ -178,7 +178,7 @@ pub fn train_composite(
         .model
         .factor
         .as_ref()
-        .and_then(|f| f.delta.clone());
+        .and_then(|f| f.splice_delta.as_ref().map(|(delta, _)| delta.clone()));
     // Pre-build the axis sampler for `Sample` mode. Reused every step;
     // weights = `λ_k`, so picking axis `k` happens with probability
     // `λ_k / Σλ`. The `Σλ` scale gets applied to the chosen axis's loss

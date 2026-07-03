@@ -84,7 +84,7 @@ pub struct FactoredInit<'a> {
 /// "γ"), and the residual dynamics stay on the CELL axis as the phase-2 velocity
 /// `δ_cell = dir(φ) − dir(θ)` (see `crate::fit::project_cells_phase2`). With
 /// `delta = None` this reduces to plain β-sharing (spliced ≡ unspliced ≡ `β_g`).
-/// `β` / `δ_g` are learnable `Var`s; `row_to_gene` / `unspliced_mask` are fixed.
+/// `β` / `δ_g` are learnable `Var`s; `row_to_gene` / the unspliced mask are fixed.
 /// The score/loss path composes the row→gene→(β,δ) gathers directly (no
 /// full-table materialization per step); output/co-embed readers use the
 /// `e_feat` field after [`JointEmbedModel::materialize_e_feat`].
@@ -94,12 +94,11 @@ pub struct FeatFactor {
     pub beta: Tensor,
     /// `[n_features]` u32 (device): row → gene index.
     pub row_to_gene: Tensor,
-    /// Optional per-gene splice offset `δ_g [G, H]` (Var), added to the
-    /// **unspliced** rows only. L2-ridge (phase-1). `None` = plain β-sharing.
-    pub delta: Option<Tensor>,
-    /// `[n_features, 1]` f32 0/1 mask (1 for unspliced rows) selecting where
-    /// `δ_g` applies. `Some` iff `delta` is.
-    pub unspliced_mask: Option<Tensor>,
+    /// Optional per-gene splice offset, present as `(δ_g [G, H] Var, mask [n_features,
+    /// 1])` together (they always co-exist). `δ_g` is added to the **unspliced** rows
+    /// (the `mask` = 1/0 selector); L2-ridge in phase-1. `None` = plain β-sharing
+    /// (spliced ≡ unspliced ≡ `β_g`).
+    pub splice_delta: Option<(Tensor, Tensor)>,
 }
 
 impl FeatFactor {
@@ -108,12 +107,12 @@ impl FeatFactor {
     /// flow back to the `β` / `δ_g` Vars.
     fn e_feat(&self) -> Result<Tensor> {
         let base = self.beta.index_select(&self.row_to_gene, 0)?;
-        match (&self.delta, &self.unspliced_mask) {
-            (Some(delta), Some(mask)) => {
+        match &self.splice_delta {
+            Some((delta, mask)) => {
                 let d = delta.index_select(&self.row_to_gene, 0)?; // [n_features, H]
                 base.add(&d.broadcast_mul(mask)?) // + mask ⊙ δ_g on unspliced rows
             }
-            _ => Ok(base),
+            None => Ok(base),
         }
     }
 }
@@ -412,19 +411,19 @@ fn build_feat_factor(
 ) -> Result<FeatFactor> {
     let d = row_to_gene.len();
     let row_to_gene_t = Tensor::from_vec(row_to_gene.to_vec(), d, dev)?;
-    // `[n_features, 1]` 0/1 mask selecting the unspliced rows (where δ_g applies).
-    let unspliced_mask = match unspliced_rows {
-        Some(u) => {
+    // `δ_g` and its `[n_features, 1]` 0/1 unspliced-row mask co-exist: both are built
+    // exactly when a `δ_g` Var was allocated (`delta_l2 > 0`).
+    let splice_delta = match (delta, unspliced_rows) {
+        (Some(delta), Some(u)) => {
             let m: Vec<f32> = u.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect();
-            Some(Tensor::from_vec(m, (d, 1), dev)?)
+            Some((delta, Tensor::from_vec(m, (d, 1), dev)?))
         }
-        None => None,
+        _ => None,
     };
     Ok(FeatFactor {
         beta: beta.clone(),
         row_to_gene: row_to_gene_t,
-        delta,
-        unspliced_mask,
+        splice_delta,
     })
 }
 

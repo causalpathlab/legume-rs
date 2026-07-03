@@ -32,17 +32,6 @@ struct SolvedCell {
     velocity: Vec<f32>,
 }
 
-/// Phase-2 splice output for the β-sharing (`feat_factor`) path: the raw per-cell
-/// velocity increment `δ`, flat `[n_cells × h]` row-major in global cell-id order
-/// (cells absent from the samplers, or with no unspliced edges, stay zero).
-pub(crate) struct SpliceProjection {
-    /// Raw velocity increment `δ` per cell — the analytic Poisson-MAP shift fit to
-    /// the unspliced edges with the identity `θ` held fixed. Magnitude = speed,
-    /// direction = velocity (no normalization). The nascent state is simply
-    /// `θ + δ` = `latent + velocity`, so it is not materialized separately.
-    pub velocity: Vec<f32>,
-}
-
 /// Phase-2 batch correction, mirroring `senna svd`/`topic`: divide each cell's
 /// counts by its finest-pseudobulk `μ_residual` fold-factor before the
 /// Poisson-MAP projection, so `e_cell` fits the de-batched signal. Built only
@@ -153,7 +142,7 @@ pub(crate) fn project_cells_phase2(
     dev: &Device,
     batch_divisor: Option<CellBatchDivisor>,
     unspliced_rows: Option<&[bool]>,
-) -> anyhow::Result<(Vec<f32>, Option<SpliceProjection>)> {
+) -> anyhow::Result<(Vec<f32>, Option<Vec<f32>>)> {
     use crate::cell_projection::{solve_cell_increment, solve_one_cell};
     use anyhow::Context;
     use candle_util::candle_core::Tensor;
@@ -212,11 +201,12 @@ pub(crate) fn project_cells_phase2(
                     }
                     let (theta, b_s) = solve(&spliced);
                     let theta_n = norm(&theta);
+                    // Empty δ (not `vec![0; h]`) when undefined — velocity_flat is
+                    // already zero-initialized, so the storage loop just skips the copy.
                     let velocity = if theta_n > 1e-8 && !unspliced.is_empty() {
-                        let (delta, _) = solve_incr(&theta, &unspliced);
-                        delta
+                        solve_incr(&theta, &unspliced).0
                     } else {
-                        vec![0f32; h]
+                        Vec::new()
                     };
                     SolvedCell {
                         cell: cell as usize,
@@ -237,7 +227,7 @@ pub(crate) fn project_cells_phase2(
         e_out[s..s + h].copy_from_slice(&sc.latent);
         cell_nrms[sc.cell] = sc.nrm_map;
         b_out[sc.cell] = sc.b_c;
-        if let Some(vf) = velocity_flat.as_mut() {
+        if let (Some(vf), false) = (velocity_flat.as_mut(), sc.velocity.is_empty()) {
             vf[s..s + h].copy_from_slice(&sc.velocity);
         }
     }
@@ -270,6 +260,7 @@ pub(crate) fn project_cells_phase2(
     model.e_cell = e_t;
     model.b_cell = b_t;
 
-    let splice = velocity_flat.map(|velocity| SpliceProjection { velocity });
-    Ok((cell_nrms, splice))
+    // `velocity_flat` is `Some` iff the splice path ran (gem β-sharing); the raw
+    // per-cell velocity increment `δ`, flat `[n_cells × h]`. `None` for bge.
+    Ok((cell_nrms, velocity_flat))
 }
