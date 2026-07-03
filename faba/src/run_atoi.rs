@@ -113,7 +113,7 @@ pub struct AtoICountArgs {
         long,
         value_enum,
         default_value = "zarr",
-        help = "Backend format for the output file"
+        help = "Sparse matrix backend (zarr or hdf5)"
     )]
     pub backend: SparseIoBackend,
 
@@ -130,11 +130,18 @@ pub struct AtoICountArgs {
     #[arg(long, default_value_t = false, help = "Include reads w/o barcode info")]
     pub include_missing_barcode: bool,
 
-    #[arg(long, help = "Number of non-zero cutoff for rows/features")]
-    pub row_nnz_cutoff: Option<usize>,
-
-    #[arg(long, help = "Minimum number of non-zero entries for columns/cells")]
-    pub column_nnz_cutoff: Option<usize>,
+    #[arg(
+        long = "site-min-cells",
+        default_value_t = crate::editing::pipeline::DEFAULT_SITE_MIN_CELLS,
+        help = "Min cells per site for the per-site matrix feature QC (0 disables)",
+        long_help = "Unit-aware feature QC for the per-site (`_site`) output matrix:\n\
+                     a site is kept only if detected in at least this many cells,\n\
+                     and both of its channels (edited/unedited) are kept together.\n\
+                     The gene-level matrix is unaffected. 0 disables. Sites are a\n\
+                     distinct feature space not covered by the upstream gene\n\
+                     expression QC (--gene-min-cells)."
+    )]
+    pub site_min_cells: usize,
 
     #[arg(
         long = "cell-membership",
@@ -177,10 +184,17 @@ pub struct AtoICountArgs {
     #[arg(long, value_enum, help = "Gene type filter")]
     gene_type: Option<GffGeneType>,
 
-    #[arg(long, default_value_t = 16, help = "Maximum number of threads")]
+    #[arg(
+        long,
+        alias = "threads",
+        default_value_t = 16,
+        help = "Maximum number of threads"
+    )]
     max_threads: usize,
 
-    // ========== Mixture model options ==========
+    ///////////////////////////
+    // Mixture model options //
+    ///////////////////////////
     #[arg(
         long = "no-mixture",
         default_value_t = false,
@@ -318,8 +332,6 @@ impl From<&AtoICountArgs> for ConversionParams {
             backend: args.backend.clone(),
             zip: args.zip,
             output: args.output.clone(),
-            row_nnz_cutoff: args.row_nnz_cutoff,
-            column_nnz_cutoff: args.column_nnz_cutoff,
             cell_membership_file: args.cell_membership_file.clone(),
             membership_barcode_col: args.membership_barcode_col,
             membership_celltype_col: args.membership_celltype_col,
@@ -337,6 +349,7 @@ impl From<&AtoICountArgs> for ConversionParams {
             },
             // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
             mut_bam_files: Vec::new(),
+            site_min_cells: args.site_min_cells,
         }
     }
 }

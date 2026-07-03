@@ -53,16 +53,19 @@ Feature naming convention:\n\
   All sparse matrix row names follow: {gene_key}/{modality}/{detail}\n\
   where gene_key = {gene_id}_{symbol} (e.g. ENSG00001234_BRCA2)\n\n\
   genes:   gene_key/count/spliced, gene_key/count/unspliced\n\
-  dartseq: gene_key/m6A/{component} (mixture), gene_key/m6A/{chr}:{pos} (site)\n\
-  atoi:    gene_key/A2I/{component} (mixture), gene_key/A2I/{chr}:{pos} (site)\n\
-  apa:     gene_key/pA/{component} (mixture), gene_key/pA/{chr}:{pos} (site)\n\n\
-  snp:     gene_key/SNP/{chr}:{pos} (alt allele count per cell)\n\n\
+  dartseq: gene_key/m6a/{channel} (gene), gene_key/m6a/{chr}:{pos}/{channel}\n\
+           (site), gene_key/m6a/{component}/{channel} (mixture)\n\
+  atoi:    gene_key/atoi/{channel} (gene), gene_key/atoi/{chr}:{pos}/{channel}\n\
+           (site), gene_key/atoi/{component}/{channel} (mixture)\n\
+  apa:     gene_key/apa/{channel} (gene), gene_key/apa/{component} (mixture)\n\
+  snp:     gene_key/snp/{chr}:{pos} (alt allele count per cell)\n\n\
   Split on '/' to extract (gene_key, modality, detail) for cross-modal joins.\n\n\
 Output layout (every matrix is per-replicate — one per input BAM):\n\
-  per-modality: {batch}_m6a, {batch}_atoi (gene two-channel:\n    \
-                {gene}/{mod}/{pos} = edited, /{neg} = coverage),\n    \
+  per-modality: {batch}_m6a, {batch}_atoi (gene two-channel:\n\
+                {gene}/{mod}/{pos} = converted, /{neg} = unconverted),\n\
+                plus {batch}_{m6a,atoi}_site (per-site) and _mixture,\n\
                 {batch}_genes, {batch}_snp_{alt,depth}\n\
-  apa:          {batch}_apa (proximal/distal counts, default; --no-pdui skips),\n    \
+  apa:          {batch}_apa (proximal/distal counts, default; --no-pdui skips),\n\
                 {batch}_apa_mixture (--mixture)\n\
   Mixture components are FIT on the pooled replicates (shared across\n\
   batches) but COUNTED per batch, so per-batch mixture matrices share one\n\
@@ -92,23 +95,25 @@ enum Commands {
             BH-FDR). A genomic C/T variant converts equally in both arms and is\n\
             rejected, so a control is REQUIRED. Then quantifies per-cell\n\
             methylation at the discovered sites.\n\n\
-            Outputs:\n  \
-            - m6a_sites.parquet: site annotations (single)\n  \
-            - {batch}_m6a_{ratio,converted,unconverted}: per-replicate\n    \
-              site-level matrices, one per input BAM\n  \
-            - {batch}_m6a_mixture (+ m6a_components.parquet): per-replicate\n    \
-              mixture counts — components fit on pooled replicates,\n    \
+            Outputs (one per input BAM, {batch}-prefixed):\n\
+            - m6a_sites.parquet: site annotations (single)\n\
+            - {batch}_m6a: gene-level two-channel matrix\n\
+              (methylated + unmethylated counts per gene)\n\
+            - {batch}_m6a_site: per-site two-channel matrix, keyed on the\n\
+              single-base {chr}:{pos} site (min --site-min-cells)\n\
+            - {batch}_m6a_mixture (+ m6a_components.parquet): per-replicate\n\
+              mixture counts — components fit on pooled replicates,\n\
               counted per batch (shared row schema)\n\n\
             Reference:\n  \
-            Meyer, \"DART-seq: an antibody-free method for global m6A\n  \
-            detection\", Nature Methods, 16(12):1275-1280, 2019.\n  \
+            Meyer, \"DART-seq: an antibody-free method for global m6A\n\
+            detection\", Nature Methods, 16(12):1275-1280, 2019.\n\
             https://doi.org/10.1038/s41592-019-0570-0",
         after_long_help = "\
 Example:\n  \
-  faba dartseq wt.bam --control-bam ctrl.bam -g genes.gff -f genome.fa -o out/\n  \
-  faba dartseq s1.bam,s2.bam --control-bam c1.bam,c2.bam \\\n    \
-    -g genes.gff -f genome.fa -o out/ --detect-atoi --min-coverage 20\n  \
-  faba dartseq wt.bam --control-bam ctrl.bam -g genes.gff -f genome.fa -o out/ \\\n    \
+  faba dartseq wt.bam --control-bam ctrl.bam -g genes.gff -f genome.fa -o out/\n\
+  faba dartseq s1.bam,s2.bam --control-bam c1.bam,c2.bam \n\
+    -g genes.gff -f genome.fa -o out/ --detect-atoi --min-coverage 20\n\
+    faba dartseq wt.bam --control-bam ctrl.bam -g genes.gff -f genome.fa -o out/ \n\
     --atoi-mask out/atoi_sites.parquet")]
     DartSeq(DartSeqCountArgs),
 
@@ -117,26 +122,26 @@ Example:\n  \
         long_about = "Quantify alternative polyadenylation (APA) sites per cell\n\n\
             Discovers and quantifies poly(A) site usage from 3'-end sequencing\n\
             data. The mixture mode implements the SCAPE model.\n\n\
-            Outputs:\n  \
-            - apa_components.parquet: shared pA-site component definitions\n    \
-              (fit on the pooled BAMs)\n  \
-            - {batch}_apa: per-replicate per-cell proximal/distal counts\n    \
-              (default; --no-pdui to skip)\n  \
-            - {batch}_apa_mixture: per-replicate per-cell pA-site usage,\n    \
-              counted per batch on the shared components (--mixture)\n  \
-            --method simple instead writes a per-replicate {batch} matrix\n    \
+            Outputs:\n\
+            - apa_components.parquet: shared pA-site component definitions\n\
+            (fit on the pooled BAMs)\n\
+            - {batch}_apa: per-replicate per-cell proximal/distal counts\n\
+            (default; --no-pdui to skip)\n\
+            - {batch}_apa_mixture: per-replicate per-cell pA-site usage,\n\
+            counted per batch on the shared components (--mixture)\n\
+            --method simple instead writes a per-replicate {batch} matrix\n\
             for each input BAM.\n\n\
-            Reference:\n  \
-            Zhou et al., \"SCAPE: a mixture model revealing single-cell\n  \
-            polyadenylation diversity and cellular dynamics during cell\n  \
-            differentiation and reprogramming\",\n  \
-            Nucleic Acids Research, 50(11):e66, 2022.\n  \
+            Reference:\n\
+            Zhou et al., \"SCAPE: a mixture model revealing single-cell\n\
+            polyadenylation diversity and cellular dynamics during cell\n\
+            differentiation and reprogramming\",\n\
+            Nucleic Acids Research, 50(11):e66, 2022.\n\
             https://doi.org/10.1093/nar/gkac167",
         after_long_help = "\
-Example:\n  \
-  faba apa sample.bam -g genes.gff -o out/\n  \
-  faba apa sample.bam -g genes.gff -o out/ --method simple\n  \
-  faba apa sample.bam --utr-bed utrs.bed -o out/ --mixture\n  \
+	Example:\n\
+	faba apa sample.bam -g genes.gff -o out/\n\
+	faba apa sample.bam -g genes.gff -o out/ --method simple\n\
+	faba apa sample.bam --utr-bed utrs.bed -o out/ --mixture\n\
   faba apa sample.bam -g genes.gff -o out/ --atoi-mask out/atoi_sites.parquet")]
     Apa(CountApaArgs),
 
@@ -146,14 +151,18 @@ Example:\n  \
             Discovers editing sites from A->G (forward) or T->C (reverse)\n\
             conversions in BAM files, then quantifies per-cell editing\n\
             at discovered sites.\n\n\
-            Outputs:\n  \
-            - atoi_sites.parquet: site annotations (single); usable as\n    \
-              --atoi-mask input for `faba dartseq` or `faba apa`\n  \
-            - {batch}_atoi: per-replicate gene-level two-channel matrix\n    \
-              (edited + unedited counts per gene), one per input BAM",
+            Outputs (one per input BAM, {batch}-prefixed):\n\
+            - atoi_sites.parquet: site annotations (single); usable as\n\
+            --atoi-mask input for `faba dartseq` or `faba apa`\n\
+            - {batch}_atoi: gene-level two-channel matrix\n\
+              (edited + unedited counts per gene)\n\
+            - {batch}_atoi_site: per-site two-channel matrix, keyed on the\n\
+              single-base {chr}:{pos} site (min --site-min-cells)\n\
+            - {batch}_atoi_mixture (+ atoi_components.parquet): per-replicate\n\
+              mixture counts (unless --no-mixture)",
         after_long_help = "\
-Example:\n  \
-  faba atoi sample.bam -g genes.gff -f genome.fa -o out/\n  \
+	Example:\n\
+	faba atoi sample.bam -g genes.gff -f genome.fa -o out/\n\
   faba atoi s1.bam,s2.bam -g genes.gff -f genome.fa -o out/ --min-coverage 10")]
     AtoI(AtoICountArgs),
 
@@ -163,9 +172,9 @@ Example:\n  \
             Produces a sparse (cells x genes) count matrix from BAM files\n\
             using GFF gene annotations. Supports 10x-style cell barcodes.",
         after_long_help = "\
-Example:\n  \
-  faba genes sample.bam -g genes.gff -o out/\n  \
-  faba genes sample.bam -g genes.gff -o out/ --no-splice --backend hdf5"
+	Example:\n\
+	faba genes sample.bam -g genes.gff -o out/\n\
+  faba genes sample.bam -g genes.gff -o out/ --no-splice"
     )]
     Genes(GeneCountArgs),
 
@@ -175,9 +184,9 @@ Example:\n  \
             Bins the genome at a given resolution and counts read coverage\n\
             per cell, producing a sparse (cells x bins) matrix.",
         after_long_help = "\
-Example:\n  \
-  faba depth sample.bam -r 10 -o out/\n  \
-  faba depth sample.bam -r 100 -o out/ --backend hdf5"
+	Example:\n\
+	faba depth sample.bam -r 10 -o out/\n\
+  faba depth sample.bam -r 100 -o out/"
     )]
     Depth(ReadDepthArgs),
 
@@ -188,8 +197,8 @@ Example:\n  \
             base frequencies in a +/- window around each site, and outputs\n\
             a position weight matrix as TSV.",
         after_long_help = "\
-Example:\n  \
-  faba pwm -s out/m6a_sites.parquet -f genome.fa -o pwm.tsv\n  \
+	Example:\n\
+	faba pwm -s out/m6a_sites.parquet -f genome.fa -o pwm.tsv\n\
   faba pwm -s out/m6a_sites.parquet sample.bam --source reads -o pwm.tsv"
     )]
     Pwm(ScanPwmArgs),
@@ -208,13 +217,13 @@ Example:\n  \
             epi sites up, a GTF gene model in the middle, and BAM read depth\n\
             down, faceted into one panel per cell type (--cell-membership).",
         after_long_help = "\
-Examples:\n  \
-  # ASCII histogram (unchanged)\n  \
-  faba pileup out/rep1_wt_m6a.zarr.zip -q BRCA2\n  \
-  faba pileup out/rep*_wt_m6a.zarr.zip -q BRCA2 -s out/m6a_sites.parquet\n  \
-  # Miami figure: epi sites / gene model / read depth, faceted by cell type\n  \
-  faba pileup out/rep1_wt_m6a.zarr.zip -q BRCA2 \\\n  \
-    --gtf gencode.gtf --bam sample.bam --cell-membership cells.tsv \\\n  \
+	Examples:\n\
+	# ASCII histogram (unchanged)\n\
+	faba pileup out/rep1_wt_m6a.zarr.zip -q BRCA2\n\
+	faba pileup out/rep*_wt_m6a.zarr.zip -q BRCA2 -s out/m6a_sites.parquet\n\
+	# Miami figure: epi sites / gene model / read depth, faceted by cell type\n\
+	faba pileup out/rep1_wt_m6a.zarr.zip -q BRCA2 \\\n\
+	--gtf gencode.gtf --bam sample.bam --cell-membership cells.tsv \\\n\
     --top-modality m6A --out brca2_miami --svg --png"
     )]
     Pileup(PileupArgs),
@@ -228,8 +237,8 @@ Examples:\n  \
             3'UTR, non-coding) using GFF annotations, and produces a binned\n\
             histogram showing the distribution of sites across the metagene.",
         after_long_help = "\
-Example:\n  \
-  faba metagene -s out/m6a_sites.parquet -g genes.gff -o metagene.tsv --print\n  \
+	Example:\n\
+	faba metagene -s out/m6a_sites.parquet -g genes.gff -o metagene.tsv --print\n\
   faba metagene -s out/atoi_sites.parquet -g genes.gff -o metagene.tsv -n 30"
     )]
     Metagene(MetageneArgs),
@@ -246,37 +255,38 @@ Example:\n  \
             and bulk WGS/RNA-seq modes.\n\n\
             Outputs:\n\
             - snp_sites.parquet: genotype calls with allele counts and GQ\n\
-            - {batch}_snp_alt.zarr: per-cell alt allele count matrix (10x)\n\
-            - {batch}_snp_depth.zarr: per-cell total depth matrix (10x)\n\
-            BAF = alt / depth per cell per site.\n\n\
+            - {batch}_snp_alt: per-cell alt allele count matrix (10x)\n\
+            - {batch}_snp_depth: per-cell total depth matrix (10x)\n\
+            (matrices are `.zarr.zip` by default; `.zarr` with --no-zip,\n\
+            `.h5` for the hdf5 backend.) BAF = alt / depth per cell per site.\n\n\
             Uses a binomial genotype likelihood model (cellSNP-lite;\n\
             Huang & Huang, Bioinformatics 2021).\n\n\
             The SNP mask output can be used with --snp-mask in `faba atoi`,\n\
             `faba dartseq`, and `faba apa` to filter genetic variants that\n\
             masquerade as base modifications.",
         after_long_help = "\
-Example:\n  \
-  # De novo discovery\n  \
-  faba snp sample.bam -f genome.fa -g genes.gff -o out/\n\n  \
-  # Known-site genotyping only\n  \
-  faba snp sample.bam -f genome.fa --known-snps dbsnp.vcf.gz -o out/ --skip-discovery\n\n  \
-  # Both: discover + force-call at known sites\n  \
-  faba snp sample.bam -f genome.fa --known-snps dbsnp.vcf.gz -g genes.gff -o out/\n\n  \
-  # Bulk mode (genotype calls only, no per-cell matrices)\n  \
+	Example:\n\
+	# De novo discovery\n\
+	faba snp sample.bam -f genome.fa -g genes.gff -o out/\n\n\
+	# Known-site genotyping only\n\
+	faba snp sample.bam -f genome.fa --known-snps dbsnp.vcf.gz -o out/ --skip-discovery\n\n\
+	# Both: discover + force-call at known sites\n\
+	faba snp sample.bam -f genome.fa --known-snps dbsnp.vcf.gz -g genes.gff -o out/\n\n\
+	# Bulk mode (genotype calls only, no per-cell matrices)\n\
   faba snp sample.bam -f genome.fa -o out/ --bulk\n\n\
-Known SNP reference files:\n\n  \
-  dbSNP common variants (hg38):\n    \
-    wget https://ftp.ncbi.nih.gov/snp/organisms/human_9606/VCF/00-common_all.vcf.gz\n    \
-    wget https://ftp.ncbi.nih.gov/snp/organisms/human_9606/VCF/00-common_all.vcf.gz.tbi\n\n  \
-  1000 Genomes (hg38):\n    \
-    wget https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/\\\n      \
-    1000G_2504_high_coverage/working/20220422_3202_phased_SNV_INDEL_SV/\\\n      \
-    1kGP_high_coverage_Illumina.sites.vcf.gz\n\n  \
-  gnomAD v4 sites (hg38, per-chromosome):\n    \
-    wget https://storage.googleapis.com/gcp-public-data--gnomad/\\\n      \
-    release/4.1/vcf/genomes/gnomad.genomes.v4.1.sites.chr{1..22}.vcf.bgz\n\n  \
-  Mouse Genomes Project (mm10/mm39):\n    \
-    wget https://ftp.ebi.ac.uk/pub/databases/mousegenomes/\\\n      \
+  Known SNP reference files:\n\n\
+  dbSNP common variants (hg38):\n\
+  wget https://ftp.ncbi.nih.gov/snp/organisms/human_9606/VCF/00-common_all.vcf.gz\n\
+  wget https://ftp.ncbi.nih.gov/snp/organisms/human_9606/VCF/00-common_all.vcf.gz.tbi\n\n\
+  1000 Genomes (hg38):\n\
+  wget https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/\n\
+  1000G_2504_high_coverage/working/20220422_3202_phased_SNV_INDEL_SV/\n\
+  1kGP_high_coverage_Illumina.sites.vcf.gz\n\n\
+  gnomAD v4 sites (hg38, per-chromosome):\n\
+  wget https://storage.googleapis.com/gcp-public-data--gnomad/\n\
+  release/4.1/vcf/genomes/gnomad.genomes.v4.1.sites.chr{1..22}.vcf.bgz\n\n\
+  Mouse Genomes Project (mm10/mm39):\n\
+  wget https://ftp.ebi.ac.uk/pub/databases/mousegenomes/\n\
     REL-2112-v8-SNPs_Indels/mgp_REL2021_snps.vcf.gz"
     )]
     Snp(SnpArgs),
@@ -288,8 +298,8 @@ Known SNP reference files:\n\n  \
         long_about = "GEM — joint embedding of gene counts (spliced + unspliced)\n\
             into one cell/gene space, over the shared graph_embedding_util engine.\n\n\
             Each feature row `{gene}/count/{spliced|unspliced}` embeds as a base\n\
-            gene vector β_g — a gene's two tracks share one identity (β-sharing):\n  \
-              spliced  count:  e_f = β_g\n  \
+            gene vector β_g — a gene's two tracks share one identity (β-sharing):\n\
+            spliced  count:  e_f = β_g\n\
               unspliced count: e_f = β_g\n\
             A single Poisson likelihood on counts. Cell identity comes from the\n\
             SPLICED projection θ (mature mRNA = current state), written RAW as\n\
@@ -300,10 +310,10 @@ Known SNP reference files:\n\n  \
             co-embedding is written; per-gene velocity, if wanted, is the in-model\n\
             δ_g (`--delta-l2` → `{out}.delta_dictionary.parquet`).",
         after_long_help = "\
-Example:\n  \
+	Example:\n\
   faba gem --genes out/rep1_wt_genes.zarr.zip -o out/gem\n\n\
-Multiple samples (comma-separated; each sample a batch via its barcodes'\n\
-`@batch` tag):\n  \
+  Multiple samples (comma-separated)\n\
+  each sample a batch via its barcodes`@batch` tag\n\n\
   faba gem --genes out/rep1_genes.zarr.zip,out/rep2_genes.zarr.zip -o out/gem")]
     Gem(GemArgs),
 
@@ -316,14 +326,14 @@ Multiple samples (comma-separated; each sample a batch via its barcodes'\n\
             (`gene<TAB>celltype`, `-m/--markers`), then runs the shared term-ORA core\n\
             (nearest-centroid assign → distance-outlier QC → Leiden clustering →\n\
             cluster×term hypergeometric over-representation, permutation-calibrated).\n\n\
-            gem carries two gene programs, each annotated on its own axis (`--track`):\n  \
-              spliced:  gene β_g (beta_dictionary) vs cell θ (latent)  → {out}.spliced.*\n  \
+            gem carries two gene programs, each annotated on its own axis (`--track`):\n\
+            spliced:  gene β_g (beta_dictionary) vs cell θ (latent)  → {out}.spliced.*\n\
               velocity: gene δ_g (delta_dictionary) vs cell velocity   → {out}.velocity.*\n\
             `both` (default) runs both; velocity is skipped with a warning when its\n\
             inputs are absent (spliced-only gem run).",
         after_long_help = "\
-Example:\n  \
-  faba gem --genes out/rep1_genes.zarr.zip -o out/gem\n  \
+	Example:\n\
+	faba gem --genes out/rep1_genes.zarr.zip -o out/gem\n\
   faba annotate -f out/gem -m markers.tsv -o out/gem"
     )]
     Annotate(AnnotateArgs),
@@ -332,27 +342,28 @@ Example:\n  \
         name = "all",
         aliases = ["pipeline", "full", "magic"],
         about = "Run all RNA-seq analyses: SNP → genes → ATOI → APA → m6A",
-        long_about = "Run all RNA-seq analyses in a unified pipeline\n\n\
-            Orchestrates the complete analysis workflow:\n  \
-            0. SNP genotyping (de novo + optional --known-snps; skip --skip-snp)\n  \
-            1. Gene expression filtering (identify expressed genes)\n  \
-            2. ATOI detection (A-to-I editing sites, masked by SNP)\n  \
-            3. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n  \
-            4. m6A detection (DART C→T, WT-vs-MUT contrast; skipped w/o --control-bam)\n\n\
-            ATOI is reference-anchored and FDR-controlled against a beta-binomial\n\
-            error null (no control). m6A instead needs a catalytically-dead\n\
-            control (--control-bam): each motif C is tested for higher conversion\n\
-            in the positional BAMs than the pooled control, so genomic C/T\n\
-            variants are rejected; without a control the m6A step is skipped.\n\
-            The WT-vs-MUT split is only for that contrast: control BAMs are\n\
-            otherwise quantified like the positional samples, so every\n\
-            modality is produced for them too.\n\
-            Gene filter applies after step 1; the SNP mask feeds steps 2-4\n\
-            (m6A only with --m6a-snp-mask) and the ATOI mask feeds steps 3-4.",
+        long_about = "\
+	Run all RNA-seq analyses in a unified pipeline\n\n\
+	Orchestrates the complete analysis workflow:\n\
+	0. SNP genotyping (de novo + optional --known-snps; skip --skip-snp)\n\
+	1. Gene expression filtering (identify expressed genes)\n\
+	2. ATOI detection (A-to-I editing sites, masked by SNP)\n\
+	3. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\
+        4. m6A detection (DART C→T, WT-vs-MUT contrast; skipped w/o --control-bam)\n\n\
+        ATOI is reference-anchored and FDR-controlled against a beta-binomial\n\
+        error null (no control). m6A instead needs a catalytically-dead\n\
+        control (--control-bam): each motif C is tested for higher conversion\n\
+        in the positional BAMs than the pooled control, so genomic C/T\n\
+        variants are rejected; without a control the m6A step is skipped.\n\
+        The WT-vs-MUT split is only for that contrast: control BAMs are\n\
+        otherwise quantified like the positional samples, so every\n\
+        modality is produced for them too.\n\
+        Gene filter applies after step 1; the SNP mask feeds steps 2-4\n\
+        (m6A only with --m6a-snp-mask) and the ATOI mask feeds steps 3-4.",
         after_long_help = "\
-Example:\n  \
-  faba all sample.bam -g genes.gff -f genome.fa -o out/\n  \
-  faba all wt.bam -g genes.gff -f genome.fa -o out/ --control-bam ctrl.bam\n  \
+	Example:\n\
+	faba all sample.bam -g genes.gff -f genome.fa -o out/\n\
+	faba all wt.bam -g genes.gff -f genome.fa -o out/ --control-bam ctrl.bam\n\
   faba all s1.bam,s2.bam -g genes.gff -f genome.fa -o out/ --skip-apa"
     )]
     All(PipelineArgs),

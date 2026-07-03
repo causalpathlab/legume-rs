@@ -11,8 +11,9 @@
 //!                the modelling unit at gene resolution.
 //! - `modality` — the lowercase subcommand name: [`COUNT`] / [`M6A`] / [`ATOI`] /
 //!                [`APA`] / [`SNP`].
-//! - `subunit`  — optional sub-gene id: a `{chr}:{start}-{stop}` site or an EM
-//!                mixture `{component}` index. Omitted for gene-level pooled rows.
+//! - `subunit`  — optional sub-gene id: a single-base `{chr}:{pos}` site (m6A
+//!                and A-to-I sites are one base pair) or an EM mixture
+//!                `{component}` index. Omitted for gene-level pooled rows.
 //!                It sits **above** the channel: a component/site is a position
 //!                cluster fit once per `(gene, modality)` and shared by both
 //!                channels, so the channel nests inside it.
@@ -58,8 +59,8 @@ pub const REF: &str = "ref";
 /// Format a feature row. Pass `subunit = None` for a gene-level (pooled) row
 /// `{gene}/{modality}/{channel}`, or `Some(site_or_component)` for a sub-gene row
 /// `{gene}/{modality}/{subunit}/{channel}` (channel innermost). The `subunit` must
-/// not contain `/` (sites use `chr:start-stop`, components are integers), so the
-/// row round-trips through [`parse_feature_row`].
+/// not contain `/` (sites use the single-base `chr:pos`, components are integers),
+/// so the row round-trips through [`parse_feature_row`].
 pub fn feature_row(gene: &str, modality: &str, channel: &str, subunit: Option<&str>) -> Box<str> {
     match subunit {
         Some(s) => format!("{gene}/{modality}/{s}/{channel}").into(),

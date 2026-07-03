@@ -125,6 +125,7 @@ pub struct CountApaArgs {
     /// Maximum number of threads
     #[arg(
         long,
+        alias = "threads",
         default_value_t = 16,
         help = "Maximum number of threads",
         long_help = "Maximum number of threads for parallel processing.\n\
@@ -182,7 +183,7 @@ pub struct CountApaArgs {
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
         long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive\n\
-                     (zarr backend only; no effect on hdf5)."
+                     (zarr backend only; no effect on hdf5)"
     )]
     pub(crate) zip: bool,
 
@@ -490,7 +491,9 @@ pub struct CountApaArgs {
     )]
     pub(crate) drop_single_component: bool,
 
-    // ========== Gene expression QC ==========
+    ////////////////////////
+    // Gene expression QC //
+    ////////////////////////
     #[arg(
         long = "gene-min-cells",
         default_value_t = 10,
@@ -507,7 +510,7 @@ pub struct CountApaArgs {
 
     #[arg(
         long = "cell-min-genes",
-        default_value_t = 100,
+        default_value_t = 10,
         help = "Min detected genes (nnz) per cell for expression QC"
     )]
     pub(crate) cell_min_genes: usize,

@@ -51,8 +51,6 @@ pub struct ConversionParams {
     /// Wrap zarr output in a `.zarr.zip` archive (no effect for HDF5).
     pub zip: bool,
     pub output: Box<str>,
-    pub row_nnz_cutoff: Option<usize>,
-    pub column_nnz_cutoff: Option<usize>,
     pub cell_membership_file: Option<Box<str>>,
     pub membership_barcode_col: usize,
     pub membership_celltype_col: usize,
@@ -74,7 +72,17 @@ pub struct ConversionParams {
     /// The contrast guards (coverage/effect-size/ρ) live on the
     /// [`ModificationType::M6A`] arm's [`M6aContrast`], not here.
     pub mut_bam_files: Vec<Box<str>>,
+    /// Unit-aware feature QC for the per-site `_site` matrix: keep a site only
+    /// if detected in ≥ this many cells (both channels kept together). `0`/`1`
+    /// disables. The gene-level matrix is unaffected (its gene axis is already
+    /// filtered upstream by `gene_min_cells`). See [`crate::pipeline_util::summarize_stats_per_site`].
+    pub site_min_cells: usize,
 }
+
+/// Default for `--site-min-cells`: keep sites seen in ≥10 cells, matching
+/// faba's `gene_min_cells` convention. Cell Ranger does not filter features on
+/// its output matrices (only barcodes), so there is no upstream rule to mirror.
+pub const DEFAULT_SITE_MIN_CELLS: usize = 10;
 
 /// Shared clap args for the m6A WT-vs-MUT contrast guards (control-coverage
 /// floor + effect-size guards + LRT overdispersion). `#[command(flatten)]`-ed
@@ -174,14 +182,6 @@ impl ConversionParams {
         )
     }
 
-    /// Get QC cutoffs.
-    pub fn qc_cutoffs(&self) -> SqueezeCutoffs {
-        SqueezeCutoffs {
-            row: self.row_nnz_cutoff.unwrap_or(0),
-            column: self.column_nnz_cutoff.unwrap_or(0),
-        }
-    }
-
     /// Minimum number of positions required to attempt site discovery.
     /// m6A requires a triplet (3 consecutive positions), A-to-I needs only 1.
     fn min_length_for_testing(&self) -> usize {
@@ -213,9 +213,9 @@ impl ConversionParams {
     }
 }
 
-///////////////////////////////////////////
-// FIRST PASS: Site discovery            //
-///////////////////////////////////////////
+////////////////////////////////
+// FIRST PASS: Site discovery //
+////////////////////////////////
 
 /// Find all conversion sites across the genome.
 ///
@@ -302,7 +302,8 @@ pub fn find_all_conversion_sites(
     Ok(gene_sites)
 }
 
-/// Per-gene site discovery: reads WT and MUT BAM files, creates sifter, dispatches via scan().
+/// Per-gene site discovery: reads WT and MUT BAM files, creates
+/// sifter, dispatches via scan().
 ///
 /// `faidx_reader` is owned by the calling rayon worker (one per thread, reused
 /// across all genes scheduled to that worker) — see `find_conversion_sites`.
@@ -762,9 +763,23 @@ fn collect_gene_conversion_stats(
 // Backend output                        //
 ///////////////////////////////////////////
 
+/// Row-union + backend-file accumulator for one output resolution, collected
+/// across all batches so rows can be reordered to a shared union before each
+/// staging directory is finalized. Editing emits two resolutions in parallel:
+/// the gene-level pooled matrix and the per-site matrix.
+#[derive(Default)]
+struct ResolutionOutputs {
+    rows: HashSet<Box<str>>,
+    files: Vec<crate::pipeline_util::BackendOutputPath>,
+}
+
 /// Unified backend output for conversion sites (m6A or A-to-I).
 ///
-/// Uses `site_suffix()` from ConversionSite for feature IDs.
+/// Emits two matrices per batch from the SAME single BAM pass:
+/// - `{batch}_{modality}`       — gene-level pooled `(positive, coverage)` rows,
+///   the co-embedding form (see [`summarize_stats_two_channel`]).
+/// - `{batch}_{modality}_site`  — per-site rows keyed on the single-base
+///   `{chr}:{pos}` subunit (see [`summarize_stats_per_site`]).
 pub fn process_all_bam_files_to_backend(
     params: &ConversionParams,
     gene_sites: &HashMap<GeneId, Vec<ConversionSite>>,
@@ -776,34 +791,26 @@ pub fn process_all_bam_files_to_backend(
     let membership = params.load_membership()?;
 
     let gene_key = create_gene_key_function(gff_map);
-    let cutoffs = params.qc_cutoffs();
 
     let ctx = BamProcessContext {
         gene_sites,
         params,
         gff_map,
         gene_key: &gene_key,
-        cutoffs: &cutoffs,
         cell_membership: membership.as_ref(),
         valid_cell_barcodes,
     };
 
-    let mut sites = HashSet::<Box<str>>::default();
-    let mut site_data_files: Vec<crate::pipeline_util::BackendOutputPath> = vec![];
+    let mut gene_out = ResolutionOutputs::default();
+    let mut site_out = ResolutionOutputs::default();
 
-    // Quantify the discovered sites in EVERY sample — signal (wt) AND control
-    // (mut); see `quant_bam_files`.
+    // Quantify the discovered sites in EVERY sample, both WT and MUT (control)
+    // See `quant_bam_files`.
     let all_bam_files = params.quant_bam_files();
     let batch_names = uniq_batch_names(&all_bam_files)?;
 
     for (bam_file, batch_name) in all_bam_files.iter().zip(batch_names) {
-        process_bam_to_backend(
-            bam_file,
-            &batch_name,
-            &ctx,
-            &mut sites,
-            &mut site_data_files,
-        )?;
+        process_bam_to_backend(bam_file, &batch_name, &ctx, &mut gene_out, &mut site_out)?;
     }
 
     // Log match statistics if membership was used
@@ -821,8 +828,10 @@ pub fn process_all_bam_files_to_backend(
         );
     }
 
-    // Reorder rows to ensure consistency across files
-    reorder_all_matrices(params, sites, site_data_files)?;
+    // Reorder rows to ensure consistency across files (per resolution — the
+    // gene-level and per-site matrices have disjoint row vocabularies).
+    reorder_all_matrices(params, gene_out)?;
+    reorder_all_matrices(params, site_out)?;
 
     Ok(())
 }
@@ -833,7 +842,6 @@ struct BamProcessContext<'a, GK: Fn(&BedWithGene) -> Box<str> + Send + Sync> {
     params: &'a ConversionParams,
     gff_map: &'a GffRecordMap,
     gene_key: &'a GK,
-    cutoffs: &'a SqueezeCutoffs,
     cell_membership: Option<&'a CellMembership>,
     valid_cell_barcodes:
         Option<&'a rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>>>,
@@ -843,8 +851,8 @@ fn process_bam_to_backend(
     bam_file: &str,
     batch_name: &str,
     ctx: &BamProcessContext<'_, impl Fn(&BedWithGene) -> Box<str> + Send + Sync>,
-    sites: &mut HashSet<Box<str>>,
-    site_data_files: &mut Vec<crate::pipeline_util::BackendOutputPath>,
+    gene_out: &mut ResolutionOutputs,
+    site_out: &mut ResolutionOutputs,
 ) -> anyhow::Result<()> {
     info!(
         "collecting data over {} sites from {} ...",
@@ -868,15 +876,6 @@ fn process_bam_to_backend(
         batch_valid_cells,
     )?;
 
-    info!(
-        "aggregating {} site stats → gene-level two-channel (edited + coverage)...",
-        stats.len()
-    );
-
-    // Pool sites → gene and emit BOTH channels as rows in ONE backend
-    // (`{batch}_{modality}`): `{gene}/{modality}/{pos}` = Σ converted,
-    // `{gene}/{modality}/{neg}` = Σ unconverted — the gene-per-channel
-    // `(positive, coverage)` form the co-embedding consumes.
     let (modality, pos_channel, neg_channel) = match ctx.params.mod_type {
         ModificationType::M6A { .. } => (
             faba::feature_name::M6A,
@@ -890,41 +889,78 @@ fn process_bam_to_backend(
         ),
     };
 
-    let out = ctx
-        .params
-        .backend_output_path(&format!("{}_{}", batch_name, modality));
-    let triplets =
+    info!(
+        "aggregating {} site stats → gene-level + per-site two-channel (edited + coverage)...",
+        stats.len()
+    );
+
+    // Gene-level: pool sites → gene, both channels as rows in `{batch}_{modality}`:
+    // `{gene}/{modality}/{pos}` = Σ converted, `{gene}/{modality}/{neg}` = Σ
+    // unconverted — the gene-per-channel `(positive, coverage)` co-embedding form.
+    let gene_triplets =
         summarize_stats_two_channel(&stats, ctx.gene_key, modality, pos_channel, neg_channel);
-    let data = triplets.to_backend(&out.write_path)?;
-    data.qc(ctx.cutoffs.clone())?;
-    sites.extend(data.row_names()?);
-    info!("created gene-level {modality} data: {}", &out.target_path);
-    drop(data);
-    // Defer finalize(): rows are reordered to a shared union across batches
-    // before zipping (see reorder_all_matrices).
-    site_data_files.push(out);
+    write_resolution_backend(ctx, batch_name, modality, gene_triplets, gene_out)?;
+
+    // Per-site: same channels keyed on the single-base `{chr}:{pos}` subunit, in
+    // `{batch}_{modality}_site`: `{gene}/{modality}/{chr}:{pos}/{pos,neg}`. A
+    // unit-aware `site_min_cells` filter drops sites seen in too few cells.
+    let site_triplets = summarize_stats_per_site(
+        &stats,
+        ctx.gene_key,
+        modality,
+        pos_channel,
+        neg_channel,
+        ctx.params.site_min_cells,
+    );
+    write_resolution_backend(
+        ctx,
+        batch_name,
+        &format!("{}_site", modality),
+        site_triplets,
+        site_out,
+    )?;
 
     Ok(())
 }
 
-/// Reorder rows in-place across all per-batch backends so site indices are
-/// consistent across files, then finalize each staging directory into its
-/// `.zarr.zip` archive (no-op for `.h5` or unzipped `.zarr`).
-fn reorder_all_matrices(
-    params: &ConversionParams,
-    sites: HashSet<Box<str>>,
-    site_data_files: Vec<crate::pipeline_util::BackendOutputPath>,
+/// Write one resolution's triplets to a `{batch}_{name_suffix}` backend and
+/// record its rows + deferred finalize into `out`. Finalize is deferred because
+/// rows are later reordered to the shared cross-batch union (see
+/// [`reorder_all_matrices`]). No post-write nnz squeeze: the gene axis is QC'd
+/// upstream (`gene_min_cells`), the site axis by `site_min_cells`, and cells are
+/// frozen by the shared cell call — so a squeeze here would only be redundant.
+fn write_resolution_backend(
+    ctx: &BamProcessContext<'_, impl Fn(&BedWithGene) -> Box<str> + Send + Sync>,
+    batch_name: &str,
+    name_suffix: &str,
+    triplets: TripletsRowsCols,
+    out_acc: &mut ResolutionOutputs,
 ) -> anyhow::Result<()> {
+    let out = ctx
+        .params
+        .backend_output_path(&format!("{}_{}", batch_name, name_suffix));
+    let data = triplets.to_backend(&out.write_path)?;
+    out_acc.rows.extend(data.row_names()?);
+    info!("created {name_suffix} data: {}", &out.target_path);
+    drop(data);
+    out_acc.files.push(out);
+    Ok(())
+}
+
+/// Reorder rows in-place across all per-batch backends of one resolution so row
+/// indices are consistent across files, then finalize each staging directory
+/// into its `.zarr.zip` archive (no-op for `.h5` or unzipped `.zarr`).
+fn reorder_all_matrices(params: &ConversionParams, out: ResolutionOutputs) -> anyhow::Result<()> {
     let backend = &params.backend;
 
-    let mut sites_sorted: Vec<_> = sites.into_iter().collect();
-    sites_sorted.sort();
+    let mut rows_sorted: Vec<_> = out.rows.into_iter().collect();
+    rows_sorted.sort();
 
-    for out in &site_data_files {
-        open_sparse_matrix(&out.write_path, backend)?.reorder_rows(&sites_sorted)?;
+    for out in &out.files {
+        open_sparse_matrix(&out.write_path, backend)?.reorder_rows(&rows_sorted)?;
     }
 
-    for out in site_data_files {
+    for out in out.files {
         out.finalize()?;
     }
 

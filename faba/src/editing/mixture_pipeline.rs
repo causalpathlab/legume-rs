@@ -329,7 +329,6 @@ pub fn run_mixture_model(
         }
         let out = params.backend_output_path(&format!("{}_{}", batch_name, mod_tag));
         let data = format_data_triplets(trip).to_backend(&out.write_path)?;
-        data.qc(params.qc_cutoffs())?;
         all_rows.extend(data.row_names()?);
         info!("Mixture model: created {}", &out.target_path);
         drop(data);

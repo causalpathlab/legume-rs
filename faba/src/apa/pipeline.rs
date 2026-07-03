@@ -1046,8 +1046,8 @@ fn compute_and_write_pdui(
                 // Emit proximal/distal COUNTS as channel rows (aggregated per
                 // gene = the 2-site UTR): {gene}/apa/{proximal,distal}.
                 for (cb, prox, dist) in &pdui_result.cell_counts {
-                    push_channel_row(&mut apa_triplets, cb, gene_name, APA, PROXIMAL, *prox);
-                    push_channel_row(&mut apa_triplets, cb, gene_name, APA, DISTAL, *dist);
+                    push_channel_row(&mut apa_triplets, cb, gene_name, APA, PROXIMAL, None, *prox);
+                    push_channel_row(&mut apa_triplets, cb, gene_name, APA, DISTAL, None, *dist);
                 }
             }
         }

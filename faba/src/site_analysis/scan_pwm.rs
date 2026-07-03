@@ -55,7 +55,12 @@ pub struct ScanPwmArgs {
     )]
     window: i64,
 
-    #[arg(long, default_value_t = 16, help = "Number of threads")]
+    #[arg(
+        long,
+        alias = "max-threads",
+        default_value_t = 16,
+        help = "Number of threads"
+    )]
     threads: usize,
 
     #[arg(

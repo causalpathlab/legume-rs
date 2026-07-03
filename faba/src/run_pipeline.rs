@@ -44,7 +44,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
         UMI deduplication is applied to all pileup steps (disable with --no-umi-dedup)."
 )]
 pub struct PipelineArgs {
-    // === Required inputs ===
+    // Required inputs
     #[arg(
         value_delimiter = ',',
         required = true,
@@ -96,7 +96,9 @@ pub struct PipelineArgs {
     )]
     pub control_bam_files: Vec<Box<str>>,
 
-    // === Shared parameters ===
+    ///////////////////////
+    // Shared parameters //
+    ///////////////////////
     #[arg(long, default_value = "CB", help = "Cell barcode tag")]
     pub cell_barcode_tag: Box<str>,
 
@@ -121,10 +123,17 @@ pub struct PipelineArgs {
     )]
     pub zip: bool,
 
-    #[arg(long, default_value_t = 16, help = "Maximum number of threads")]
+    #[arg(
+        long,
+        alias = "threads",
+        default_value_t = 16,
+        help = "Maximum number of threads"
+    )]
     pub max_threads: usize,
 
-    // === Gene expression filtering ===
+    ///////////////////////////////
+    // Gene expression filtering //
+    ///////////////////////////////
     #[arg(
         long,
         default_value_t = 0,
@@ -154,18 +163,22 @@ pub struct PipelineArgs {
     #[command(flatten)]
     pub cell_qc: crate::cell_qc::CellQcArgs,
 
-    // === Gene biotype (quantification subset) ===
+    //////////////////////////////////////////
+    // Gene biotype (quantification subset) //
+    //////////////////////////////////////////
     #[arg(
         long,
-        default_value = "protein_coding",
-        help = "Gene biotype to quantify (e.g. protein_coding, lncRNA, \
-                pseudogene). Pass --gene-type \"\" to keep all biotypes. \
+        default_value = "",
+        help = "Gene biotype to quantify. Empty (default) keeps all biotypes. \
+                Pass a value to restrict: protein_coding, lncRNA, pseudogene. \
                 QC/cell-calling always uses ALL biotypes; only the quantified \
                 gene set (gene counts + ATOI/APA/m6A) is restricted to this type."
     )]
     pub gene_type: Box<str>,
 
-    // === Mitochondrial QC ===
+    //////////////////////
+    // Mitochondrial QC //
+    //////////////////////
     #[arg(
         long,
         default_value = "chrM,chrMT,MT,M",
@@ -199,7 +212,9 @@ pub struct PipelineArgs {
     )]
     pub no_mito_cell_qc: bool,
 
-    // === Shared read-quality filters (ATOI / m6A / SNP) ===
+    ////////////////////////////////////////////////////
+    // Shared read-quality filters (ATOI / m6A / SNP) //
+    ////////////////////////////////////////////////////
     #[arg(
         long,
         default_value_t = 20,
@@ -221,7 +236,9 @@ pub struct PipelineArgs {
     )]
     pub no_apa_pdui: bool,
 
-    // === ATOI parameters ===
+    /////////////////////
+    // ATOI parameters //
+    /////////////////////
     #[arg(
         long,
         default_value_t = 5,
@@ -237,15 +254,20 @@ pub struct PipelineArgs {
     pub atoi_min_conversion: usize,
 
     #[arg(
-        long,
+        long = "atoi-pval",
+        alias = "atoi-pvalue-cutoff",
+        alias = "atoi-pvalue",
         default_value_t = 0.05,
         help = "ATOI detection FDR target (Benjamini-Hochberg q-value)"
     )]
     pub atoi_pvalue_cutoff: f32,
 
-    // === Editing statistical null (shared by ATOI and m6A) ===
+    ///////////////////////////////////////////////////////
+    // Editing statistical null (shared by ATOI and m6A) //
+    ///////////////////////////////////////////////////////
     #[arg(
         long = "edit-error-rate",
+        alias = "error-rate",
         default_value_t = 0.01,
         help = "Sequencing-error rate ε: the beta-binomial null mean the edited \
                 fraction is tested against (reference-anchored, no control sample)"
@@ -254,12 +276,15 @@ pub struct PipelineArgs {
 
     #[arg(
         long = "edit-overdispersion",
+        alias = "overdispersion",
         default_value_t = 0.1,
         help = "Beta-binomial overdispersion ρ for the editing null (0 ⇒ binomial)"
     )]
     pub edit_overdispersion: f64,
 
-    // === APA parameters ===
+    ////////////////////
+    // APA parameters //
+    ////////////////////
     #[arg(
         long,
         default_value_t = 10,
@@ -286,7 +311,9 @@ pub struct PipelineArgs {
     #[arg(long, default_value_t = 10, help = "Minimum poly(A) tail length")]
     pub polya_min_tail_length: usize,
 
-    // === DART parameters ===
+    /////////////////////
+    // DART parameters //
+    /////////////////////
     #[arg(
         long,
         default_value_t = 10,
@@ -298,7 +325,9 @@ pub struct PipelineArgs {
     pub m6a_min_conversion: usize,
 
     #[arg(
-        long,
+        long = "m6a-pval",
+        alias = "m6a-pvalue-cutoff",
+        alias = "m6a-pvalue",
         default_value_t = 0.05,
         help = "m6A detection FDR target (Benjamini-Hochberg q-value)"
     )]
@@ -313,7 +342,9 @@ pub struct PipelineArgs {
     #[arg(long = "m6a-snp-mask", default_value_t = false)]
     pub m6a_snp_mask: bool,
 
-    // === Mixture model weighting (shared by m6A and A-to-I) ===
+    ////////////////////////////////////////////////////////
+    // Mixture model weighting (shared by m6A and A-to-I) //
+    ////////////////////////////////////////////////////////
     #[arg(
         long = "mixture-weight",
         value_enum,
@@ -359,7 +390,9 @@ pub struct PipelineArgs {
     )]
     pub mixture: bool,
 
-    // === SNP parameters ===
+    ////////////////////
+    // SNP parameters //
+    ////////////////////
     #[arg(
         long = "known-snps",
         help = "Known SNP sites VCF/BCF/Parquet for SNP masking",
@@ -415,7 +448,9 @@ pub struct PipelineArgs {
     )]
     pub snp_mask_min_vaf: f32,
 
-    // === UMI deduplication (applies to all steps) ===
+    //////////////////////////////////////////////
+    // UMI deduplication (applies to all steps) //
+    //////////////////////////////////////////////
     #[arg(
         long = "umi-tag",
         default_value = "UB",
@@ -430,7 +465,9 @@ pub struct PipelineArgs {
     )]
     pub no_umi_dedup: bool,
 
-    // === Step control ===
+    //////////////////
+    // Step control //
+    //////////////////
     #[arg(long, default_value_t = false, help = "Skip SNP genotyping step")]
     pub skip_snp: bool,
 
@@ -470,7 +507,7 @@ fn all_quant_bam_files(args: &PipelineArgs) -> Vec<Box<str>> {
 
 pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
     // 0. Setup
-    info!("=== faba pipeline: unified RNA-seq analysis ===");
+    info!("faba pipeline: unified RNA-seq analysis");
     ThreadPoolBuilder::new()
         .num_threads(args.max_threads)
         .build_global()?;
@@ -485,7 +522,7 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
     // Step 0: SNP genotyping (de novo discovery + optional known sites).
     // VAF filtering prevents masking true RNA editing sites from de novo variants.
     let snp_mask = if !args.skip_snp {
-        info!("=== Step 0/{}: SNP genotyping ===", n_steps);
+        info!("Step 0/{}: SNP genotyping", n_steps);
         match run_snp_step(args) {
             Ok(mask) => {
                 info!("SNP complete: {} variant positions in mask", mask.len());
@@ -497,22 +534,22 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
             }
         }
     } else {
-        info!("=== Step 0/{}: SKIPPED (--skip-snp) ===", n_steps);
+        info!("Step 0/{}: SKIPPED (--skip-snp)", n_steps);
         None
     };
 
     // Step 1: Gene Expression Filtering
     let gene_count_qc = if !args.skip_genes {
-        info!("=== Step 1/{}: Gene expression filtering ===", n_steps);
+        info!("Step 1/{}: Gene expression filtering", n_steps);
         run_gene_counting_step(args)?
     } else {
-        info!("=== Step 1/{}: SKIPPED (--skip-genes) ===", n_steps);
+        info!("Step 1/{}: SKIPPED (--skip-genes)", n_steps);
         None
     };
 
     // Step 2: ATOI Detection
     let atoi_mask = if !args.skip_atoi {
-        info!("=== Step 2/{}: ATOI detection ===", n_steps);
+        info!("Step 2/{}: ATOI detection", n_steps);
         match run_atoi_step(args, &gene_count_qc, &snp_mask) {
             Ok(mask_data) => {
                 info!(
@@ -528,7 +565,7 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
             }
         }
     } else {
-        info!("=== Step 2/{}: SKIPPED (--skip-atoi) ===", n_steps);
+        info!("Step 2/{}: SKIPPED (--skip-atoi)", n_steps);
         None
     };
 
@@ -539,11 +576,11 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
     // control; skipped (not failed) when none is supplied.
     if args.control_bam_files.is_empty() {
         info!(
-            "=== Step 3/{}: SKIPPED (m6A needs --control-bam for the WT-vs-MUT contrast) ===",
+            "Step 3/{}: SKIPPED (m6A needs --control-bam for the WT-vs-MUT contrast)",
             n_steps
         );
     } else {
-        info!("=== Step 3/{}: m6A detection ===", n_steps);
+        info!("Step 3/{}: m6A detection", n_steps);
         match run_dart_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
             Ok(_) => info!("m6A complete"),
             Err(e) => log::warn!("m6A step failed: {}", e),
@@ -553,13 +590,13 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
     // Step 4: APA analysis — the heavy SCAPE EM, run LAST so it never blocks the
     // fast modalities (genes / ATOI / m6A) that downstream work needs first.
     if !args.skip_apa {
-        info!("=== Step 4/{}: APA analysis ===", n_steps);
+        info!("Step 4/{}: APA analysis", n_steps);
         match run_apa_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
             Ok(_) => info!("APA complete"),
             Err(e) => log::warn!("APA step failed: {}", e),
         }
     } else {
-        info!("=== Step 4/{}: SKIPPED (--skip-apa) ===", n_steps);
+        info!("Step 4/{}: SKIPPED (--skip-apa)", n_steps);
     }
 
     write_pipeline_summary(args)?;
@@ -921,8 +958,6 @@ fn run_atoi_step(
         backend: args.backend.clone(),
         zip: args.zip,
         output: args.output.clone(),
-        row_nnz_cutoff: None,
-        column_nnz_cutoff: None,
         cell_membership_file: None,
         membership_barcode_col: 0,
         membership_celltype_col: 1,
@@ -939,6 +974,7 @@ fn run_atoi_step(
         },
         // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
         mut_bam_files: Vec::new(),
+        site_min_cells: crate::editing::pipeline::DEFAULT_SITE_MIN_CELLS,
     };
 
     // Find ATOI sites (first pass): reference-anchored A→G / T→C calls, each
@@ -1160,8 +1196,6 @@ fn run_dart_step(
         backend: args.backend.clone(),
         zip: args.zip,
         output: args.output.clone(),
-        row_nnz_cutoff: None,
-        column_nnz_cutoff: None,
         cell_membership_file: None,
         membership_barcode_col: 0,
         membership_celltype_col: 1,
@@ -1177,6 +1211,7 @@ fn run_dart_step(
             Some(args.umi_tag.clone())
         },
         mut_bam_files: args.control_bam_files.clone(),
+        site_min_cells: crate::editing::pipeline::DEFAULT_SITE_MIN_CELLS,
     };
 
     // Find m6A sites (first pass)
