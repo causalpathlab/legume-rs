@@ -57,10 +57,11 @@ Feature naming convention:\n\
   snp:     gene_key/SNP/{chr}:{pos} (alt allele count per cell)\n\n\
   Split on '/' to extract (gene_key, modality, detail) for cross-modal joins.\n\n\
 Output layout (every matrix is per-replicate — one per input BAM):\n\
-  site-level: {batch}_m6a_{ratio,converted,unconverted},\n    \
-              {batch}_atoi_ratio, {batch}_genes, {batch}_snp_{alt,depth}\n\
-  mixture:    {batch}_m6a_mixture, {batch}_atoi_mixture,\n    \
-              {batch}_apa_mixture, {batch}_apa_pdui\n\
+  per-modality: {batch}_m6a, {batch}_atoi (gene two-channel:\n    \
+                {gene}/{mod}/{pos} = edited, /{neg} = coverage),\n    \
+                {batch}_genes, {batch}_snp_{alt,depth}\n\
+  apa:          {batch}_apa (proximal/distal counts, --compute-pdui),\n    \
+                {batch}_apa_mixture (--mixture)\n\
   Mixture components are FIT on the pooled replicates (shared across\n\
   batches) but COUNTED per batch, so per-batch mixture matrices share one\n\
   row vocabulary and stack directly. The shared definitions are the only\n\
@@ -114,11 +115,13 @@ Example:\n  \
         long_about = "Quantify alternative polyadenylation (APA) sites per cell\n\n\
             Discovers and quantifies poly(A) site usage from 3'-end sequencing\n\
             data. The mixture mode implements the SCAPE model.\n\n\
-            Outputs (--method mixture, default):\n  \
-            - {batch}_apa_mixture (+ apa_components.parquet): per-replicate\n    \
-              pA-site usage — sites fit on pooled BAMs, counted per batch\n    \
-              (shared row schema)\n  \
-            - {batch}_apa_pdui: per-replicate per-cell PDUI (--compute-pdui)\n  \
+            Outputs:\n  \
+            - apa_components.parquet: shared pA-site component definitions\n    \
+              (fit on the pooled BAMs)\n  \
+            - {batch}_apa: per-replicate per-cell proximal/distal counts\n    \
+              (--compute-pdui)\n  \
+            - {batch}_apa_mixture: per-replicate per-cell pA-site usage,\n    \
+              counted per batch on the shared components (--mixture)\n  \
             --method simple instead writes a per-replicate {batch} matrix\n    \
             for each input BAM.\n\n\
             Reference:\n  \
@@ -144,10 +147,8 @@ Example:\n  \
             Outputs:\n  \
             - atoi_sites.parquet: site annotations (single); usable as\n    \
               --atoi-mask input for `faba dartseq` or `faba apa`\n  \
-            - {batch}_atoi_ratio: per-replicate site-level matrix, one\n    \
-              per input BAM\n  \
-            - {batch}_atoi_mixture (+ atoi_components.parquet): per-replicate\n    \
-              mixture counts — shared (pooled) component fit, per-batch counts",
+            - {batch}_atoi: per-replicate gene-level two-channel matrix\n    \
+              (edited + unedited counts per gene), one per input BAM",
         after_long_help = "\
 Example:\n  \
   faba atoi sample.bam -g genes.gff -f genome.fa -o out/\n  \
@@ -207,10 +208,10 @@ Example:\n  \
         after_long_help = "\
 Examples:\n  \
   # ASCII histogram (unchanged)\n  \
-  faba pileup out/rep1_wt_m6a_mixture.zarr.zip -q BRCA2\n  \
-  faba pileup out/rep*_wt_m6a_ratio.zarr.zip -q BRCA2 -s out/m6a_sites.parquet\n  \
+  faba pileup out/rep1_wt_m6a.zarr.zip -q BRCA2\n  \
+  faba pileup out/rep*_wt_m6a.zarr.zip -q BRCA2 -s out/m6a_sites.parquet\n  \
   # Miami figure: epi sites / gene model / read depth, faceted by cell type\n  \
-  faba pileup out/rep1_wt_m6a_ratio.zarr.zip -q BRCA2 \\\n  \
+  faba pileup out/rep1_wt_m6a.zarr.zip -q BRCA2 \\\n  \
     --gtf gencode.gtf --bam sample.bam --cell-membership cells.tsv \\\n  \
     --top-modality m6A --out brca2_miami --svg --png"
     )]

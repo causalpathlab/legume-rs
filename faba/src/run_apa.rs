@@ -464,10 +464,11 @@ pub struct CountApaArgs {
         default_value_t = false,
         help = "Compute PDUI for genes with exactly 2 active pA sites",
         long_help = "Compute PDUI (Percentage of Distal poly(A) site Usage Index)\n\
-                     for genes with exactly 2 active poly(A) sites after EM.\n\
-                     PDUI = distal_count / (distal + proximal).\n\
-                     Outputs a sparse (genes x cells) PDUI matrix.\n\
-                     Only used in mixture mode."
+                     for genes with exactly 2 active poly(A) sites.\n\
+                     PDUI = distal / (distal + proximal). Writes a per-cell\n\
+                     `{batch}_apa` matrix with the two count channels per gene\n\
+                     (`{gene}/apa/proximal`, `{gene}/apa/distal`) — PDUI is derived\n\
+                     from those downstream. Only used in mixture mode."
     )]
     pub(crate) compute_pdui: bool,
 

@@ -121,31 +121,43 @@ pub fn merge_nearby_sites(
 /// O(#sites) levels ⇒ effectively O(n log n), replacing the O(bins²)-ish KDE
 /// fallback + the per-site `merge_nearby_sites` scan for the fast-PDUI path.
 pub fn discover_sites_bisect(sorted: &[f32], min_gap: f32, min_count: usize) -> Vec<(f32, usize)> {
-    let n = sorted.len();
-    if n < min_count {
+    // A cluster needs ≥1 read (and ≥ min_count overall); `.max(1)` also makes a
+    // `min_count == 0` request well-defined instead of panicking.
+    let floor = min_count.max(1);
+    if sorted.len() < floor {
         return Vec::new();
     }
-    // Interior split index i (between sorted[i] and sorted[i+1]) with the largest
-    // gap, keeping ≥ min_count on each side. `lo..hi` enforces that balance.
-    let lo = min_count.saturating_sub(1);
-    let hi = n.saturating_sub(min_count);
-    let mut best_gap = min_gap;
-    let mut best_i: Option<usize> = None;
-    for i in lo..hi {
-        let gap = sorted[i + 1] - sorted[i];
-        if gap > best_gap {
-            best_gap = gap;
-            best_i = Some(i);
+    // Iterative (explicit work stack) rather than recursive: a long UTR can peel
+    // into very many clusters, and one-leaf-per-level recursion would overflow the
+    // (rayon worker) stack. Pushing right-then-left keeps the leaves in ascending
+    // position order (the recursive `left.extend(right)` order).
+    let mut leaves = Vec::new();
+    let mut stack: Vec<&[f32]> = vec![sorted];
+    while let Some(seg) = stack.pop() {
+        let n = seg.len();
+        // Interior split index i (between seg[i] and seg[i+1]) with the largest gap,
+        // keeping ≥ `floor` reads on each side. `hi = n - floor` bounds i ≤ n-2, so
+        // `seg[i + 1]` is always in range.
+        let lo = floor.saturating_sub(1);
+        let hi = n.saturating_sub(floor);
+        let mut best_gap = min_gap;
+        let mut best_i: Option<usize> = None;
+        for i in lo..hi {
+            let gap = seg[i + 1] - seg[i];
+            if gap > best_gap {
+                best_gap = gap;
+                best_i = Some(i);
+            }
+        }
+        match best_i {
+            None => leaves.push((seg[n / 2], n)), // leaf: one site (median representative)
+            Some(i) => {
+                stack.push(&seg[i + 1..]);
+                stack.push(&seg[..=i]);
+            }
         }
     }
-    match best_i {
-        None => vec![(sorted[n / 2], n)], // leaf: one site (median representative)
-        Some(i) => {
-            let mut left = discover_sites_bisect(&sorted[..=i], min_gap, min_count);
-            left.extend(discover_sites_bisect(&sorted[i + 1..], min_gap, min_count));
-            left
-        }
-    }
+    leaves
 }
 
 /// Count fragments near a position within a window.
@@ -202,6 +214,26 @@ mod tests {
         assert_eq!(discover_sites_bisect(&xs2, 50.0, 10).len(), 1);
         // Below min_count total → no sites.
         assert!(discover_sites_bisect(&[100.0, 101.0], 50.0, 10).is_empty());
+    }
+
+    #[test]
+    fn test_bisect_min_count_zero_no_panic() {
+        // min_count == 0 must not panic (the old bound indexed sorted[n]); it
+        // resolves as if each cluster needs ≥ 1 read.
+        assert!(discover_sites_bisect(&[], 50.0, 0).is_empty());
+        assert_eq!(discover_sites_bisect(&[300.0], 50.0, 0).len(), 1);
+        let mut xs: Vec<f32> = (0..20).map(|i| 300.0 + (i % 5) as f32).collect();
+        xs.extend([900.0, 901.0]); // a well-separated 2nd mass
+        xs.sort_by(f32::total_cmp);
+        assert_eq!(discover_sites_bisect(&xs, 50.0, 0).len(), 2);
+    }
+
+    #[test]
+    fn test_bisect_deep_no_stack_overflow() {
+        // Many well-separated clusters used to recurse one level per cluster; the
+        // iterative version must handle it without overflowing the stack.
+        let xs: Vec<f32> = (0..20_000).map(|i| i as f32 * 1000.0).collect();
+        assert_eq!(discover_sites_bisect(&xs, 50.0, 1).len(), 20_000);
     }
 
     #[test]
