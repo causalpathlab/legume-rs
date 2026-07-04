@@ -125,6 +125,34 @@ impl EmbeddedNbTopicDecoder {
         logz_k1.reshape((1, 1, k))
     }
 
+    /// Per-cell mixture rate `p_nk = Σ_t θ_nt · β_{t,g}` at the cell's top-K
+    /// genes, with β normalized over the full vocab (so `Σ_g p_g = 1`). The
+    /// shared core of both masked-impute heads; the NB and multinomial
+    /// likelihoods differ only in how they score this rate. `[N, K]`.
+    fn mixture_rate_nk(
+        &self,
+        log_theta_nk: &Tensor,
+        indices: &Tensor,
+        logz_11k: &Tensor,
+    ) -> Result<Tensor> {
+        let n = indices.dim(0)?;
+        let k = indices.dim(1)?;
+        let t = self.n_topics;
+
+        let theta_nt = log_theta_nk.exp()?; // [N, T]
+        let flat = indices.flatten_all()?; // [N*K]
+
+        // β_kg at the cell's genes, properly normalized over the full vocab.
+        let rho_g = self.feature_embeddings.index_select(&flat, 0)?; // [N*K, H]
+        let logits = rho_g
+            .matmul(&self.topic_embeddings.t()?)? // [N*K, T]
+            .reshape((n, k, t))?; // [N, K, T]
+        let beta_nkt = logits.broadcast_sub(logz_11k)?.exp()?; // [N, K, T]
+
+        let theta_n1t = theta_nt.reshape((n, 1, t))?;
+        beta_nkt.broadcast_mul(&theta_n1t)?.sum(2) // [N, K]
+    }
+
     /// Masked NB imputation log-likelihood, summed over masked positions →
     /// `[N]`.
     ///
@@ -146,23 +174,8 @@ impl EmbeddedNbTopicDecoder {
             mask: mask_nk,
         } = *target;
 
-        let n = indices.dim(0)?;
-        let k = indices.dim(1)?;
-        let t = self.n_topics;
-
-        let theta_nt = log_theta_nk.exp()?; // [N, T]
-        let flat = indices.flatten_all()?; // [N*K]
-
-        // β_kg at the cell's genes, properly normalized over the full vocab.
-        let rho_g = self.feature_embeddings.index_select(&flat, 0)?; // [N*K, H]
-        let logits = rho_g
-            .matmul(&self.topic_embeddings.t()?)? // [N*K, T]
-            .reshape((n, k, t))?; // [N, K, T]
-        let beta_nkt = logits.broadcast_sub(logz_11k)?.exp()?; // [N, K, T]
-
-        // (θ·β)_nk = Σ_t θ_nt · β_nkt
-        let theta_n1t = theta_nt.reshape((n, 1, t))?;
-        let theta_beta_nk = beta_nkt.broadcast_mul(&theta_n1t)?.sum(2)?; // [N, K]
+        let (n, k) = (indices.dim(0)?, indices.dim(1)?);
+        let theta_beta_nk = self.mixture_rate_nk(log_theta_nk, indices, logz_11k)?; // [N, K]
 
         // μ = residual · ℓ · θβ
         let mu_nk = match residual_nk {
@@ -171,6 +184,7 @@ impl EmbeddedNbTopicDecoder {
         };
 
         // φ at the cell's genes
+        let flat = indices.flatten_all()?; // [N*K]
         let log_phi_nk = self
             .log_phi_1d
             .squeeze(0)? // [D]
@@ -179,5 +193,28 @@ impl EmbeddedNbTopicDecoder {
 
         let nb_nk = nb_log_likelihood_elem(values_nk, &mu_nk, &log_phi_nk)?; // [N, K]
         nb_nk.mul(mask_nk)?.sum(1) // [N]
+    }
+
+    /// Masked **multinomial** (categorical) imputation log-likelihood, summed
+    /// over masked positions → `[N]`. The MLM-faithful sibling of
+    /// [`Self::impute_masked_nb`]: it reuses the identical mixture rate
+    /// `p_g = Σ_t θ_t · β_{t,g}` (β normalized over the full vocab, so
+    /// `Σ_g p_g = 1`) but scores it as full-vocab categorical cross-entropy
+    /// `Σ_{g∈mask} y_g · log p_g` — exactly BERT's MLM loss — instead of a
+    /// per-gene NB. Depth-invariant: no library-size, no dispersion `φ`, no
+    /// batch `residual` (those shape the NB *counts*; the multinomial models
+    /// only relative composition). Sharing `p_g` with the NB head makes an
+    /// ELBO-vs-masked comparison differ *only* in the objective, not the
+    /// likelihood family.
+    pub fn impute_masked_multinomial(
+        &self,
+        log_theta_nk: &Tensor,
+        target: &MaskedNbTarget<'_>,
+        logz_11k: &Tensor,
+    ) -> Result<Tensor> {
+        let p_nk = self.mixture_rate_nk(log_theta_nk, target.indices, logz_11k)?; // [N, K]
+                                                                                  // Categorical cross-entropy at masked positions: Σ y_g · log p_g.
+        let ll_nk = (target.values * (p_nk + 1e-20)?.log()?)?; // [N, K]
+        ll_nk.mul(target.mask)?.sum(1) // [N]
     }
 }

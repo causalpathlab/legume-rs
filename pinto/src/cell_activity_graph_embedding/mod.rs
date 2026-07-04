@@ -6,13 +6,11 @@
 //! small per-gene per-level learnable gate `α[g, ℓ]`. Embedding-only —
 //! no count decoder.
 
-pub mod annotate;
 pub mod args;
 pub mod cluster;
 pub mod fit;
 pub mod gene_chain_sampler;
 pub mod gene_gating;
 
-pub use annotate::{run_cage_annotate, CageAnnotateArgs};
 pub use args::CellActivityGraphEmbeddingArgs;
 pub use fit::fit_cell_activity_graph_embedding;

@@ -1,11 +1,86 @@
 //! CLI arguments for `pinto lc-etm` — link community via embedded topic model.
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+/// Per-gene likelihood for the masked imputation loss (`--train-mode masked`).
+/// CLI mirror of [`candle_util::vae::masked_topic::MaskedLikelihood`] (that
+/// crate can't derive clap's `ValueEnum` without a clap dependency).
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[clap(rename_all = "lowercase")]
+pub enum MaskedLikelihood {
+    /// Negative binomial — over-dispersed per-gene counts. Default.
+    Nb,
+    /// Multinomial / categorical — depth-invariant; the same likelihood the
+    /// ELBO path uses, so `elbo` vs `masked --masked-likelihood multinomial`
+    /// isolates the training objective from the likelihood.
+    Multinomial,
+}
+
+impl MaskedLikelihood {
+    /// Map to the candle-util training enum.
+    pub fn to_lib(self) -> candle_util::vae::masked_topic::MaskedLikelihood {
+        use candle_util::vae::masked_topic::MaskedLikelihood as L;
+        match self {
+            MaskedLikelihood::Nb => L::Nb,
+            MaskedLikelihood::Multinomial => L::Multinomial,
+        }
+    }
+}
+
+/// Training objective for the edge-document ETM.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[clap(rename_all = "lowercase")]
+pub enum TrainMode {
+    /// Amortized VAE / ELBO: reconstruct the full pooled document `y_e`
+    /// via the topic mixture, with a KL term on the per-edge posterior.
+    /// Gives a calibrated posterior (meaningful entropy) but can
+    /// posterior-collapse (topics go unused).
+    Elbo,
+    /// Masked NB imputation (BERT/MLM-style): hold out a fraction of each
+    /// edge's genes, encode the visible remainder, predict the held-out
+    /// counts. No KL → structurally collapse-proof; the objective rewards
+    /// *predictive* communities. Point-estimate π (no posterior).
+    Masked,
+}
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtLinkCommunityEtmArgs {
     #[command(flatten)]
     pub common: crate::util::input::SrtInputArgs,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = TrainMode::Masked,
+        help = "Training objective: masked (BERT-like imputation, default) or elbo (generative VAE)",
+        long_help = "Training objective for the edge-document ETM.\n\
+                       masked (default) — hold out a fraction of each edge's genes\n\
+                       and predict them from the rest (no KL). Structurally\n\
+                       collapse-proof; strongly preferred on real data (ELBO\n\
+                       posterior-collapses — one community swallows most edges).\n\
+                       elbo — generative VAE with a KL'd per-edge posterior; use\n\
+                       only when you need calibrated posterior entropy."
+    )]
+    pub train_mode: TrainMode,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = MaskedLikelihood::Nb,
+        help = "Masked mode: per-gene likelihood (nb = over-dispersed counts; multinomial = compositional)"
+    )]
+    pub masked_likelihood: MaskedLikelihood,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Masked mode: fraction of each edge's genes held out as prediction targets",
+        long_help = "Only used with --train-mode masked. Each minibatch holds out\n\
+                       this fraction of an edge's observed (nonzero) genes as NB\n\
+                       imputation targets; the encoder sees only the visible\n\
+                       remainder. Typical 0.3–0.6. Ignored under --train-mode elbo."
+    )]
+    pub mask_fraction: f64,
 
     #[arg(
         long,

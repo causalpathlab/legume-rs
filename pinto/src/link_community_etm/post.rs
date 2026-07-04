@@ -9,10 +9,11 @@
 use anyhow::Context;
 use candle_util::candle_core::{DType, Device, Tensor};
 use candle_util::data::top_k_indices_weighted;
-use candle_util::decoder::EmbeddedTopicDecoder;
 use candle_util::encoder::IndexedEmbeddingEncoder;
 use candle_util::traits::*;
-use graph_embedding_util::embedding_col_names;
+use graph_embedding_util::{
+    cell_clusters, embedding_col_names, save_embedding, write_feature_coembedding,
+};
 use log::info;
 use matrix_util::traits::{ConvertMatOps, IoOps};
 use nalgebra::DMatrix;
@@ -25,9 +26,20 @@ type Mat = DMatrix<f32>;
 const INFERENCE_BATCH: usize = 4096;
 
 /// Inputs to [`run_inference_and_write`].
+///
+/// The decoder is passed pre-extracted as its three host-side tensors
+/// (`log_β`, `ρ`, `α`) rather than as a concrete type, so the same writer
+/// serves both the ELBO (`EmbeddedTopicDecoder`) and masked
+/// (`EmbeddedNbTopicDecoder`) heads — both expose an identical
+/// `get_dictionary`/`feature_embeddings`/`topic_embeddings` surface.
 pub struct InferenceArgs<'a> {
     pub encoder: &'a IndexedEmbeddingEncoder,
-    pub decoder: &'a EmbeddedTopicDecoder,
+    /// `log_β` `[G × K]` from `decoder.get_dictionary()` (log-softmax over genes).
+    pub dictionary_log: &'a Tensor,
+    /// `ρ` `[G × H]` gene embedding.
+    pub feature_emb: &'a Tensor,
+    /// `α` `[K × H]` community embedding.
+    pub topic_emb: &'a Tensor,
     pub edge_profiles: &'a Mat,
     pub edges: &'a [(usize, usize)],
     pub n_cells: usize,
@@ -72,11 +84,16 @@ pub fn run_inference_and_write(args: InferenceArgs) -> anyhow::Result<()> {
     )?;
     let propensity = aggregate_propensity(&pi_ek, args.edges, args.n_cells);
 
-    // `get_dictionary()` returns log_β (log_softmax over genes); the
-    // melted parquet's `mean` column convention is probability, so exp first.
-    let beta_gk = host_from_tensor(&args.decoder.get_dictionary()?.exp()?)?;
-    let rho_gh = host_from_tensor(args.decoder.feature_embeddings())?;
-    let alpha_kh = host_from_tensor(args.decoder.topic_embeddings())?;
+    // `dictionary_log` is log_β (log_softmax over genes); the melted
+    // parquet's `mean` column convention is probability, so exp first.
+    let beta_gk = host_from_tensor(&args.dictionary_log.exp()?)?;
+    // ρ on host, kept as both a Tensor (co-embedding) and a Mat (parquet write).
+    let rho_t = args
+        .feature_emb
+        .to_device(&Device::Cpu)?
+        .to_dtype(DType::F32)?;
+    let rho_gh = Mat::from_tensor(&rho_t).context("tensor → DMatrix")?;
+    let alpha_kh = host_from_tensor(args.topic_emb)?;
 
     let hard_z: Vec<usize> = (0..n_edges).map(|e| argmax_row(&pi_ek, e)).collect();
     crate::link_community::outputs::write_link_communities(
@@ -109,6 +126,24 @@ pub fn run_inference_and_write(args: InferenceArgs) -> anyhow::Result<()> {
         "community_embeddings",
         args.out_prefix,
     )?;
+
+    // Annotation-ready co-embedding (SIMBA, mirroring `senna rest` / `bge`):
+    // recast the topic result into one inner-product space. The cell embedding
+    // is derived frozen-θ as Z = propensity·α (cells in the convex hull of the
+    // K community archetypes), then each gene ρ is re-placed onto the cell
+    // manifold (gene = softmax-over-cells weighted average of Z). Writes
+    // {out}.cell_embedding.parquet (Z) + {out}.feature_embedding.parquet
+    // (genes on-manifold), the pair `pinto annotate` projects markers into.
+    let z_nh = &propensity * &alpha_kh; // [N × H]
+    let z_t = z_nh.to_tensor(&Device::Cpu)?;
+    save_embedding(
+        &format!("{}.cell_embedding.parquet", args.out_prefix),
+        &z_t,
+        args.cell_names,
+        "cell",
+    )?;
+    let (_labels, target_eff) = cell_clusters(&z_t, Some(args.n_communities))?;
+    write_feature_coembedding(args.out_prefix, &z_t, &rho_t, args.gene_names, target_eff)?;
 
     Ok(())
 }
