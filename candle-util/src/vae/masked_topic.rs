@@ -99,8 +99,24 @@ pub enum MaskSchedule {
 /// Options specific to [`train_masked`], kept off the shared
 /// [`IndexedTrainConfig`] so the `train_mixed`/pinto callers are unaffected.
 /// [`Default`] reproduces the legacy NB, fixed-rate behavior.
+/// Per-gene likelihood for the masked imputation loss.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaskedLikelihood {
+    /// Negative binomial — per-gene overdispersed counts (library-scaled,
+    /// learnable dispersion φ). The default; best for raw over-dispersed
+    /// count data.
+    Nb,
+    /// Multinomial / categorical — depth-invariant composition, full-vocab
+    /// softmax cross-entropy at masked positions (no φ, no library term).
+    /// The likelihood the generative ELBO path (`train_mixed`) also uses, so
+    /// an ELBO-vs-masked comparison under this option isolates the objective.
+    Multinomial,
+}
+
 pub struct MaskedTrainOpts {
     pub mask_schedule: MaskSchedule,
+    /// Per-gene likelihood for the masked imputation loss.
+    pub likelihood: MaskedLikelihood,
     /// **Masked-VAE mode.** When `true`, the encoder emits a reparameterized
     /// **Gaussian** latent `z` (no log-softmax simplex projection) and the loss
     /// gains a `kl_weight · KL(z)` term. `exp(z)` then plays the role of the
@@ -116,6 +132,7 @@ impl Default for MaskedTrainOpts {
     fn default() -> Self {
         Self {
             mask_schedule: MaskSchedule::Fixed,
+            likelihood: MaskedLikelihood::Nb,
             latent_gaussian: false,
             kl_weight: 1.0,
         }
@@ -628,7 +645,14 @@ pub fn train_masked(
                         lib: &lib_n1,
                         mask: &masked,
                     };
-                    let llik = decoder.impute_masked_nb(&log_z, &target, &logz_11k)?;
+                    let llik = match opts.likelihood {
+                        MaskedLikelihood::Nb => {
+                            decoder.impute_masked_nb(&log_z, &target, &logz_11k)?
+                        }
+                        MaskedLikelihood::Multinomial => {
+                            decoder.impute_masked_multinomial(&log_z, &target, &logz_11k)?
+                        }
+                    };
                     let m = llik.sum_all()?.to_scalar::<f32>()?;
                     let c = masked.sum_all()?.to_scalar::<f32>()?;
                     (llik.mean_all()?.neg()?, m, c)

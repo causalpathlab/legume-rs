@@ -8,13 +8,17 @@
 //!   5. Compute per-gene shortlist weights from total counts.
 //!   6. Instantiate `IndexedEmbeddingEncoder` + `EmbeddedTopicDecoder`
 //!      (shared ρ via ETM tying).
-//!   7. Train via [`candle_util::vae::masked_topic::train_mixed`]
-//!      (single-level — no V-cycle in v1).
+//!   7. Train under `--train-mode`: masked NB imputation
+//!      ([`candle_util::vae::masked_topic::train_masked`], default — no KL,
+//!      collapse-proof) or the generative ELBO
+//!      ([`candle_util::vae::masked_topic::train_mixed`]). Single-level (no
+//!      V-cycle in v1).
 //!   8. Inference + writers via
 //!      [`crate::link_community_etm::post::run_inference_and_write`].
 
 use crate::link_community::profiles::build_super_edges;
 pub use crate::link_community_etm::args::SrtLinkCommunityEtmArgs;
+use crate::link_community_etm::args::TrainMode;
 use crate::link_community_etm::data;
 use crate::link_community_etm::post;
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
@@ -24,8 +28,9 @@ use crate::util::graph_coarsen::*;
 use crate::util::input::*;
 use candle_util::candle_core::{self, Device};
 use candle_util::candle_nn::{VarBuilder, VarMap};
-use candle_util::decoder::EmbeddedTopicDecoder;
+use candle_util::decoder::{EmbeddedNbTopicDecoder, EmbeddedTopicDecoder};
 use candle_util::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
+use candle_util::traits::IndexedDecoderT;
 use candle_util::vae;
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::stop::setup_stop_handler;
@@ -243,6 +248,10 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
 
     let encoder_layers: Vec<usize> = vec![args.embedding_dim];
 
+    // The masked NB imputation path pools visible genes through the
+    // attention head (`forward_indexed_masked` requires it); ELBO uses the
+    // plain mean pool.
+    let attn_pool = matches!(args.train_mode, TrainMode::Masked);
     let encoder = IndexedEmbeddingEncoder::new(
         IndexedEmbeddingEncoderArgs {
             n_features: n_genes,
@@ -250,29 +259,27 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
             embedding_dim: args.embedding_dim,
             layers: &encoder_layers,
             use_gcn: false,
-            attn_pool: false,
+            attn_pool,
         },
         &parameters,
         param_builder.pp("enc"),
     )?;
 
-    // One decoder per coarsening level; all share ρ via the Var clone.
-    // Each level holds its own α (under separate `dec_{l}` scopes).
+    // One decoder per coarsening level; all share ρ via the Var clone. Each
+    // level holds its own α (under separate `dec_{l}` scopes). The concrete
+    // decoder type is chosen by `--train-mode` below (ELBO topic head vs the
+    // masked NB imputation head).
     let shared_rho = encoder.feature_embeddings().clone();
     let num_levels = level_profiles.len();
-    let decoders: Vec<EmbeddedTopicDecoder> = (0..num_levels)
-        .map(|l| {
-            EmbeddedTopicDecoder::new(
-                args.n_communities,
-                shared_rho.clone(),
-                param_builder.pp(format!("dec_{l}")),
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
 
     info!(
-        "lc-etm: {} genes -> indexed encoder (emb={}, ctx={}) -> {} decoders (K={})",
-        n_genes, args.embedding_dim, args.context_size, num_levels, args.n_communities
+        "lc-etm: {} genes -> indexed encoder (emb={}, ctx={}) -> {} decoders (K={}, mode={:?})",
+        n_genes,
+        args.embedding_dim,
+        args.context_size,
+        num_levels,
+        args.n_communities,
+        args.train_mode
     );
 
     //////////////////////////////////////////////////////
@@ -305,8 +312,62 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
     // multi-GB profile matrices.
     let level_data: Vec<vae::masked_topic::LevelData> =
         level_profiles.iter().map(|m| (m, None, m)).collect();
-    let scores =
-        vae::masked_topic::train_mixed(&level_data, &encoder, &decoders, &train_cfg, None)?;
+
+    // Train under the chosen objective, then extract the finest level's
+    // dictionary tensors (log_β, ρ, α) so inference is decoder-type-agnostic.
+    // The finest decoder's α head was trained against the per-cell-pair profile.
+    let (scores, dictionary_log, feature_emb, topic_emb) = match args.train_mode {
+        TrainMode::Elbo => {
+            let decoders: Vec<EmbeddedTopicDecoder> = (0..num_levels)
+                .map(|l| {
+                    EmbeddedTopicDecoder::new(
+                        args.n_communities,
+                        shared_rho.clone(),
+                        param_builder.pp(format!("dec_{l}")),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let scores =
+                vae::masked_topic::train_mixed(&level_data, &encoder, &decoders, &train_cfg, None)?;
+            let d = &decoders[num_levels - 1];
+            (
+                scores,
+                d.get_dictionary()?,
+                d.feature_embeddings().clone(),
+                d.topic_embeddings().clone(),
+            )
+        }
+        TrainMode::Masked => {
+            let decoders: Vec<EmbeddedNbTopicDecoder> = (0..num_levels)
+                .map(|l| {
+                    EmbeddedNbTopicDecoder::new(
+                        args.n_communities,
+                        shared_rho.clone(),
+                        param_builder.pp(format!("dec_{l}")),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let opts = vae::masked_topic::MaskedTrainOpts {
+                likelihood: args.masked_likelihood.to_lib(),
+                ..vae::masked_topic::MaskedTrainOpts::default()
+            };
+            let scores = vae::masked_topic::train_masked(
+                &level_data,
+                &encoder,
+                &decoders,
+                &train_cfg,
+                args.mask_fraction,
+                &opts,
+            )?;
+            let d = &decoders[num_levels - 1];
+            (
+                scores,
+                d.get_dictionary()?,
+                d.feature_embeddings().clone(),
+                d.topic_embeddings().clone(),
+            )
+        }
+    };
 
     write_score_trace(&scores, &c.out)?;
 
@@ -322,7 +383,9 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
     let fine_profile = level_profiles.last().expect("level_profiles non-empty");
     post::run_inference_and_write(post::InferenceArgs {
         encoder: &encoder,
-        decoder: &decoders[num_levels - 1],
+        dictionary_log: &dictionary_log,
+        feature_emb: &feature_emb,
+        topic_emb: &topic_emb,
         edge_profiles: fine_profile,
         edges: &edges,
         n_cells,

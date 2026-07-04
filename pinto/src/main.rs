@@ -1,3 +1,4 @@
+mod annotate;
 mod cell_activity_graph_embedding;
 mod gene_network;
 mod link_community;
@@ -11,9 +12,9 @@ mod util;
 #[cfg(test)]
 mod test_support;
 
+use annotate::{run_annotate, AnnotateArgs};
 use cell_activity_graph_embedding::{
-    fit_cell_activity_graph_embedding, run_cage_annotate, CageAnnotateArgs,
-    CellActivityGraphEmbeddingArgs,
+    fit_cell_activity_graph_embedding, CellActivityGraphEmbeddingArgs,
 };
 use clap::{Parser, Subcommand};
 use colored::Colorize;
@@ -293,7 +294,8 @@ enum Commands {
     Cage(CellActivityGraphEmbeddingArgs),
 
     #[command(
-        about = "Marker-set cell-type annotation by projection (from a cage run)",
+        visible_alias = "cage-annotate",
+        about = "Marker-set cell-type annotation by projection (any embedding run)",
         long_about = "Firm cell-type annotation via the shared term-ORA core\n\
                       (the embedding-grounded twin of `senna annotate-by-projection`\n\
                       and `faba annotate`): embed each marker-defined type as the\n\
@@ -303,12 +305,15 @@ enum Commands {
                       term for hypergeometric over-representation (permutation-\n\
                       calibrated). Optional TreeBH Cell-Ontology calling with --obo.\n\n\
                       Reads `{prefix}.feature_embedding.parquet` +\n\
-                      `{prefix}.cell_embedding.parquet` from a `pinto cage` run.\n\n\
+                      `{prefix}.cell_embedding.parquet` from any pinto embedding run\n\
+                      (`cage`, or `lc-etm` via its SIMBA co-embedding). Point\n\
+                      --feature-embedding / --cell-embedding at explicit paths to\n\
+                      annotate anything else.\n\n\
                       Outputs the shared per-cell contract at\n\
-                      {out}.cage_annot.{annot.parquet,membership.tsv,argmax.tsv}\n\
-                      plus the cluster × term p/q/Q matrices."
+                      {out}.annot.{parquet,membership.tsv,argmax.tsv} plus the\n\
+                      cluster × term p/q/Q matrices."
     )]
-    CageAnnotate(CageAnnotateArgs),
+    Annotate(AnnotateArgs),
 
     #[command(
         about = "Link community via embedded topic model (indexed VAE)",
@@ -328,6 +333,13 @@ enum Commands {
                       community→gene dictionary; per-cell propensity is the\n\
                       mass-preserving soft aggregation\n\
                       \x20 propensity[i, k] = (1/deg(i)) · Σ_{e ∋ i} π_e[k].\n\n\
+                      TRAINING (--train-mode):\n\n\
+                      \x20 masked (default) — hold out a fraction of each\n\
+                      \x20   edge's genes and predict them (BERT-like, no KL).\n\
+                      \x20   Collapse-proof; strongly preferred on real data.\n\
+                      \x20 elbo — generative VAE with a KL'd posterior; prone\n\
+                      \x20   to posterior collapse. Use only for calibrated\n\
+                      \x20   per-edge entropy.\n\n\
                       QUICK START:\n\n\
                       \x20 pinto lc-etm data.h5 -c tissue_positions.csv -o out\n\
                       \x20 pinto lc-etm data.h5 -o out  # expression-only\n\n\
@@ -622,8 +634,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Cage(args) => {
             fit_cell_activity_graph_embedding(args)?;
         }
-        Commands::CageAnnotate(args) => {
-            run_cage_annotate(args)?;
+        Commands::Annotate(args) => {
+            run_annotate(args)?;
         }
         Commands::LcEtm(args) => {
             fit_srt_link_community_etm(args)?;

@@ -1,20 +1,25 @@
-//! `pinto cage-annotate` — marker-set cell-type annotation of a `pinto cage`
-//! run.
+//! `pinto annotate` — marker-set cell-type annotation by projection, for **any**
+//! pinto embedding run (not cage-specific).
 //!
 //! A thin pinto front-end over the shared, model-agnostic **term-ORA** core
 //! [`graph_embedding_util::type_annotation::annotate_embeddings_ora`] (Euclidean
 //! nearest-centroid assignment → distance-outlier QC → Leiden clustering →
 //! cluster×term hypergeometric over-representation, permutation-calibrated →
-//! optional TreeBH Cell-Ontology calling). It is the embedding-grounded twin of
-//! `senna annotate-by-projection` and `faba annotate`, reading cage's parquet
-//! outputs by prefix (pinto has no run manifest).
+//! optional TreeBH Cell-Ontology calling). The embedding-grounded twin of
+//! `senna annotate-by-projection` and `faba annotate`.
 //!
-//! Loads `{prefix}.feature_embedding.parquet` (gene × D) and
-//! `{prefix}.cell_embedding.parquet` (cell × D) written by `pinto cage`, then
-//! writes the shared per-cell contract at `{out}.cage_annot.*`
-//! (`annot.parquet`, `membership.tsv`, `argmax.tsv`, the cluster × term
-//! `p`/`q`/`Q` matrices, and — with `--obo`/`--label-cl` — the TreeBH ontology
-//! assignment), directly comparable to the senna/faba passes.
+//! Input is a co-embedded (gene, cell) pair in one inner-product space:
+//! `{prefix}.feature_embedding.parquet` (gene × D) + `{prefix}.cell_embedding.parquet`
+//! (cell × D). `pinto cage` writes these directly; `pinto lc-etm` writes them via
+//! its SIMBA co-embedding of the topic result (`Z = propensity·α`, genes on the
+//! cell manifold) — so both, and any future embedding output, annotate the same
+//! way. Pass a shared `--from` prefix, or point `--feature-embedding` /
+//! `--cell-embedding` at explicit parquet paths.
+//!
+//! Writes the shared per-cell contract at `{out}.annot.*` (`annot.parquet`,
+//! `membership.tsv`, `argmax.tsv`, the cluster × term `p`/`q`/`Q` matrices, and —
+//! with `--obo`/`--label-cl` — the TreeBH ontology assignment), directly
+//! comparable to the senna/faba passes.
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -27,13 +32,30 @@ use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::IoOps;
 
 #[derive(Args, Debug)]
-pub struct CageAnnotateArgs {
+pub struct AnnotateArgs {
     #[arg(
         long,
         short = 'f',
-        help = "cage output prefix (the `-o` value), or its `{prefix}.pinto.json`"
+        help = "Embedding-run prefix (cage / lc-etm `-o` value), or its `{prefix}.pinto.json`",
+        long_help = "Shared output prefix of a pinto embedding run. Reads\n\
+                     `{prefix}.feature_embedding.parquet` + `{prefix}.cell_embedding.parquet`.\n\
+                     A `{prefix}.pinto.json` path is also accepted (suffix stripped).\n\
+                     Override either side explicitly with --feature-embedding /\n\
+                     --cell-embedding (both required together when --from is omitted)."
     )]
-    pub from: Box<str>,
+    pub from: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Explicit gene × D feature-embedding parquet (overrides `{from}.feature_embedding.parquet`)"
+    )]
+    pub feature_embedding: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Explicit cell × D cell-embedding parquet (overrides `{from}.cell_embedding.parquet`)"
+    )]
+    pub cell_embedding: Option<Box<str>>,
 
     #[arg(
         long,
@@ -42,7 +64,11 @@ pub struct CageAnnotateArgs {
     )]
     pub markers: Box<str>,
 
-    #[arg(long, short = 'o', help = "Output prefix (default: the cage prefix)")]
+    #[arg(
+        long,
+        short = 'o',
+        help = "Output prefix (default: the `--from` prefix)"
+    )]
     pub out: Option<Box<str>>,
 
     #[arg(
@@ -129,18 +155,40 @@ pub struct CageAnnotateArgs {
     pub ontology_by: bool,
 }
 
-pub fn run_cage_annotate(args: &CageAnnotateArgs) -> Result<()> {
-    // Accept either the bare cage prefix or its `.pinto.json` manifest path.
-    let prefix = args.from.strip_suffix(".pinto.json").unwrap_or(&args.from);
+pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
+    // Accept either a bare prefix (`{prefix}.pinto.json` suffix tolerated) or
+    // explicit per-side parquet paths.
+    let prefix = args
+        .from
+        .as_deref()
+        .map(|f| f.strip_suffix(".pinto.json").unwrap_or(f));
 
-    let feat_path = format!("{prefix}.feature_embedding.parquet");
+    let feat_path = args
+        .feature_embedding
+        .as_deref()
+        .map(str::to_string)
+        .or_else(|| prefix.map(|pre| format!("{pre}.feature_embedding.parquet")))
+        .context("provide --from or --feature-embedding")?;
+    let cell_path = args
+        .cell_embedding
+        .as_deref()
+        .map(str::to_string)
+        .or_else(|| prefix.map(|pre| format!("{pre}.cell_embedding.parquet")))
+        .context("provide --from or --cell-embedding")?;
+
     let feat = DMatrix::<f32>::from_parquet(&feat_path)
         .with_context(|| format!("reading feature embedding {feat_path}"))?;
-    let cell_path = format!("{prefix}.cell_embedding.parquet");
     let cell = DMatrix::<f32>::from_parquet(&cell_path)
         .with_context(|| format!("reading cell embedding {cell_path}"))?;
 
-    let out = args.out.as_deref().unwrap_or(prefix).to_string();
+    // Output prefix defaults to `--from`; required explicitly when only bare
+    // `--feature-embedding`/`--cell-embedding` paths were given.
+    let out = args
+        .out
+        .as_deref()
+        .or(prefix)
+        .map(str::to_string)
+        .context("provide --out (or --from)")?;
     mkdir_parent(&out)?;
 
     let cfg = TermOraConfig {
@@ -166,7 +214,7 @@ pub fn run_cage_annotate(args: &CageAnnotateArgs) -> Result<()> {
             cell_names: &cell.rows,
         },
         &args.markers,
-        &format!("{out}.cage_annot"),
+        &format!("{out}.annot"),
         !args.no_idf,
         &cfg,
     )?;
