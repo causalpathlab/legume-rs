@@ -1849,6 +1849,7 @@ dependencies = [
  "auxiliary-data",
  "candle-util",
  "clap",
+ "clustering",
  "coitrees",
  "colored",
  "dashmap",

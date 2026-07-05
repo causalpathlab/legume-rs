@@ -1,4 +1,5 @@
 use crate::common::*;
+use crate::data::cell_membership::CellMembership;
 use crate::editing::io::ToParquet;
 use crate::editing::mask::{build_atoi_mask, filter_conversion_sites_by_mask, filter_m6a_by_mask};
 use crate::editing::mixture::MixtureParams;
@@ -8,6 +9,7 @@ use crate::editing::pipeline::{
 };
 use crate::editing::sifter::ModificationType;
 use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key};
+use crate::pipeline_util::mass_enrichment::MassEnrichmentArgs;
 use crate::pipeline_util::{
     accumulate_gene_stats, batch_qc, check_all_bam_indices, extract_gene_key,
     passing_genes_from_stats, GeneCountQc,
@@ -479,6 +481,12 @@ pub struct PipelineArgs {
 
     #[arg(long, default_value_t = false, help = "Skip APA quantification step")]
     pub skip_apa: bool,
+
+    ///////////////////////////////
+    // Mass-enrichment grouping   //
+    ///////////////////////////////
+    #[command(flatten)]
+    pub enrich: MassEnrichmentArgs,
 }
 
 /// The full set of samples to QUANTIFY in every modality: the positional
@@ -547,10 +555,35 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
         None
     };
 
+    // Mass-enrichment grouping (shared instrument for stratified discovery).
+    // Built once over all quantified cells so ATOI (all samples) and m6A (signal
+    // arm ⊆ all samples) stratify on the same groups; `None` when disabled
+    // (`--n-clusters <= 1`), which restores bulk discovery.
+    let enrich_membership: Option<CellMembership> = if args.enrich.enabled() {
+        info!("Grouping cells for mass enrichment (shared across ATOI + m6A)");
+        // Reuse the gene-count matrices Step 1 persisted (no BAM re-scan). The gff
+        // is only consulted on the fallback path (no persisted matrix).
+        let matrix_paths: Vec<Box<str>> = gene_count_qc
+            .as_ref()
+            .map(|q| q.matrix_by_batch.values().cloned().collect())
+            .unwrap_or_default();
+        let gff_map = filtered_gff(&args.gff_file, &gene_count_qc)?;
+        args.enrich.build_membership(
+            &all_quant_bam_files(args),
+            &gff_map,
+            &matrix_paths,
+            &args.cell_barcode_tag,
+            &args.gene_barcode_tag,
+            true,
+        )?
+    } else {
+        None
+    };
+
     // Step 2: ATOI Detection
     let atoi_mask = if !args.skip_atoi {
         info!("Step 2/{}: ATOI detection", n_steps);
-        match run_atoi_step(args, &gene_count_qc, &snp_mask) {
+        match run_atoi_step(args, &gene_count_qc, &snp_mask, enrich_membership.as_ref()) {
             Ok(mask_data) => {
                 info!(
                     "ATOI complete: {} sites, {} mask positions",
@@ -581,7 +614,13 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
         );
     } else {
         info!("Step 3/{}: m6A detection", n_steps);
-        match run_dart_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
+        match run_dart_step(
+            args,
+            &atoi_mask,
+            &snp_mask,
+            &gene_count_qc,
+            enrich_membership.as_ref(),
+        ) {
             Ok(_) => info!("m6A complete"),
             Err(e) => log::warn!("m6A step failed: {}", e),
         }
@@ -668,6 +707,20 @@ fn run_snp_step(args: &PipelineArgs) -> anyhow::Result<FxHashSet<(Box<str>, i64)
 }
 
 // Step 1: Gene expression filtering (splice-aware: spliced + unspliced in one backend)
+/// Parse the GFF and retain to the QC-passing genes when a resolved `GeneCountQc`
+/// is present. Shared by the enrichment, ATOI, and m6A steps, which each need the
+/// same expressed-gene-filtered map.
+fn filtered_gff(gff_file: &str, qc: &Option<GeneCountQc>) -> anyhow::Result<GffRecordMap> {
+    let mut gff_map = GffRecordMap::from(gff_file)?;
+    if let Some(eg) = qc {
+        gff_map.retain_by_ids(&eg.gene_ids);
+        info!("Filtered to {} expressed genes", gff_map.len());
+    } else {
+        info!("Loaded {} genes (no expression filter)", gff_map.len());
+    }
+    Ok(gff_map)
+}
+
 fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCountQc>> {
     // Parse GFF once to get both gene map and exon intervals
     let all_records = read_gff_record_vec(args.gff_file.as_ref())?;
@@ -737,6 +790,8 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
 
     let mut expressed_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
     let mut cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>> =
+        rustc_hash::FxHashMap::default();
+    let mut matrix_by_batch: rustc_hash::FxHashMap<Box<str>, Box<str>> =
         rustc_hash::FxHashMap::default();
     // Gene stats pooled across batches → the shared vocabulary is thresholded
     // once on these pooled stats; each batch's matrix is still filtered by its
@@ -878,6 +933,8 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
             "{}: wrote spliced + unspliced to {}",
             batch_name, out.target_path
         );
+        // Record for mass-enrichment reuse (keyed by BAM path like cells_by_batch).
+        matrix_by_batch.insert(bam_file.clone(), out.target_path.clone());
 
         // Write this batch's passable cell set so standalone modality runs can
         // reuse it via --valid-cells.
@@ -922,6 +979,7 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
     Ok(Some(GeneCountQc {
         gene_ids: expressed_gene_ids,
         cells_by_batch,
+        matrix_by_batch,
     }))
 }
 
@@ -930,15 +988,10 @@ fn run_atoi_step(
     args: &PipelineArgs,
     gene_count_qc: &Option<GeneCountQc>,
     snp_mask: &Option<FxHashSet<(Box<str>, i64)>>,
+    membership: Option<&CellMembership>,
 ) -> anyhow::Result<AtoiMaskData> {
     // Load GFF and filter to expressed genes
-    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
-    if let Some(ref eg) = gene_count_qc {
-        gff_map.retain_by_ids(&eg.gene_ids);
-        info!("Filtered to {} expressed genes", gff_map.len());
-    } else {
-        info!("Loaded {} genes (no expression filter)", gff_map.len());
-    }
+    let gff_map = filtered_gff(args.gff_file.as_ref(), gene_count_qc)?;
 
     // Build ConversionParams for ATOI
     let params = ConversionParams {
@@ -980,7 +1033,7 @@ fn run_atoi_step(
     // Find ATOI sites (first pass): reference-anchored A→G / T→C calls, each
     // tested against the beta-binomial sequencing-error null (no control sample).
     info!("Discovering ATOI sites (reference-anchored)...");
-    let atoi_sites = find_all_conversion_sites(&gff_map, &params, None)?;
+    let atoi_sites = find_all_conversion_sites(&gff_map, &params, membership)?;
 
     // Apply SNP mask if available
     if let Some(ref mask) = snp_mask {
@@ -1143,15 +1196,10 @@ fn run_dart_step(
     atoi_mask: &Option<AtoiMaskData>,
     snp_mask: &Option<FxHashSet<(Box<str>, i64)>>,
     gene_count_qc: &Option<GeneCountQc>,
+    membership: Option<&CellMembership>,
 ) -> anyhow::Result<()> {
     // Load GFF and filter to expressed genes
-    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
-    if let Some(ref eg) = gene_count_qc {
-        gff_map.retain_by_ids(&eg.gene_ids);
-        info!("Filtered to {} expressed genes", gff_map.len());
-    } else {
-        info!("Loaded {} genes (no expression filter)", gff_map.len());
-    }
+    let gff_map = filtered_gff(args.gff_file.as_ref(), gene_count_qc)?;
 
     // m6A is a WT-vs-MUT contrast: the signal (wt) arm is the positional BAMs
     // MINUS the control set; the control (mut) arm is --control-bam. (SNP/genes/
@@ -1216,7 +1264,7 @@ fn run_dart_step(
 
     // Find m6A sites (first pass)
     info!("Discovering m6A sites...");
-    let m6a_sites = find_all_conversion_sites(&gff_map, &params, None)?;
+    let m6a_sites = find_all_conversion_sites(&gff_map, &params, membership)?;
 
     let n_sites_before: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
     info!("Found {} m6A sites before masking", n_sites_before);
