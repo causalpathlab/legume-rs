@@ -3,7 +3,7 @@ use crate::apa::likelihood::*;
 use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteArgs;
 use crate::data::util_htslib::*;
-use crate::pipeline_util::{resolve_gene_qc, resolve_umi_tag, GeneQcRequest};
+use crate::pipeline_util::{resolve_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest};
 
 use genomic_data::gff::{FeatureType as GffFeatureType, GeneId, GeneType as GffGeneType};
 use genomic_data::sam::CellBarcode;
@@ -635,6 +635,11 @@ pub fn run_apa(args: &mut CountApaArgs) -> anyhow::Result<()> {
             // Reuse always runs; only gate the *recompute* on not already
             // having a gene set passed in.
             skip_gene_qc: args.skip_gene_qc || args.valid_gene_ids.is_some(),
+            persist: Some(GeneMatrixSink {
+                output_dir: &args.output,
+                backend: &args.backend,
+                zip: args.zip,
+            }),
         })?;
         if let Some(qc) = qc {
             let n_cells: usize = qc.cells_by_batch.values().map(|s| s.len()).sum();

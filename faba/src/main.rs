@@ -1,5 +1,4 @@
 mod apa;
-mod cell_clustering;
 mod cell_qc;
 mod common;
 mod data;
