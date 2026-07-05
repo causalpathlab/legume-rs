@@ -171,14 +171,15 @@ pub fn phate_layout_2d(data: &Mat, args: &PhateArgs) -> Mat {
         }
     }
 
-    info!("PHATE 4/6: diffusion M = P^{} (via SVD)", args.t.max(1));
-    let m_mat = match matrix_power_via_svd(&p_mat, args.t.max(1), n.min(100)) {
-        Ok(m) => m,
-        Err(e) => {
-            log::warn!("SVD-based matrix power failed: {e}, falling back to standard");
-            matrix_power(&p_mat, args.t.max(1))
-        }
-    };
+    // Exact diffusion M = P^t by repeated squaring. P is row-stochastic and
+    // NON-symmetric, so an SVD-based `U Σ^t V^T` power is mathematically wrong
+    // (that identity needs a normal matrix) — it corrupted the diffusion and
+    // collapsed the embedding. Exact power is O(n³ log t), fine at PHATE's n≲10³.
+    info!(
+        "PHATE 4/6: diffusion M = P^{} (repeated squaring)",
+        args.t.max(1)
+    );
+    let m_mat = matrix_power(&p_mat, args.t.max(1));
 
     info!("PHATE 5/6: potential distance + classical MDS init");
     let log_m = build_nn_matrix(n, |j| {
@@ -297,40 +298,7 @@ fn smacof_2d(delta: &Mat, y_init: &Mat, max_iter: usize, tol: f32) -> Mat {
     y
 }
 
-/// Fast matrix power via SVD: M^t = U Σ^t V^T.
-/// Uses randomized SVD to approximate, much faster for large t and n.
-fn matrix_power_via_svd(m: &Mat, exp: usize, rank: usize) -> anyhow::Result<Mat> {
-    use anyhow::Context;
-
-    if exp == 0 {
-        return Ok(Mat::identity(m.nrows(), m.ncols()));
-    }
-    if exp == 1 {
-        return Ok(m.clone());
-    }
-
-    let n = m.nrows();
-    let rank = rank.min(n);
-
-    // Randomized SVD: M ≈ U Σ V^T
-    info!("  RSVD: {n} × {n} → rank {rank}");
-    let (u, s, v) = m.rsvd(rank).context("RSVD failed in matrix_power")?;
-
-    // Reconstruct: M^t ≈ (U · diag(Σ^t)) · V^T
-    let mut u_scaled = u.clone();
-    for k in 0..rank {
-        let s_pow_k = s[k].powi(exp as i32);
-        for i in 0..n {
-            u_scaled[(i, k)] *= s_pow_k;
-        }
-    }
-
-    let result = &u_scaled * v.transpose();
-
-    Ok(result)
-}
-
-#[allow(dead_code)]
+/// Exact matrix power `M^exp` by repeated squaring.
 fn matrix_power(m: &Mat, exp: usize) -> Mat {
     let n = m.nrows();
     let mut result: Mat = Mat::identity(n, n);
@@ -379,13 +347,18 @@ fn classical_mds_2d(d2: &Mat) -> Mat {
         }
     }
 
-    // Randomized SVD: B ≈ U Σ V^T (for symmetric B, V = U and Σ = eigenvalues)
-    let rank = n.min(10); // Keep top 10 components, skip 1st (often library size)
+    // Classical MDS embeds along the TOP eigenvectors of the Gram matrix. For
+    // PHATE these are the potential-distance axes (the trajectory itself), so we
+    // must use the top two — NOT skip the first. (Skipping it, as an earlier
+    // "library size" heuristic did, left the init near-collinear; SMACOF's
+    // Guttman update preserves a zero coordinate, so the layout then collapsed
+    // to ~1D. This is MDS on potential distances, where no library-size axis
+    // exists.)
+    let rank = n.min(10);
     if let Ok((u, s, _v)) = b.rsvd(rank) {
-        // Skip 1st eigenvector (technical variation), use components 2-3
         let mut coords = Mat::zeros(n, 2);
         for dim in 0..2 {
-            let k = dim + 1; // Skip first component (k=1,2 instead of 0,1)
+            let k = dim;
             if k >= rank {
                 break;
             }
@@ -405,10 +378,10 @@ fn classical_mds_2d(d2: &Mat) -> Mat {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Skip 1st eigenvector (technical variation), use components 2-3
+        // Top two eigenvectors (see note above — do not skip the first).
         let mut coords = Mat::zeros(n, 2);
         for dim in 0..2 {
-            let k = dim + 1; // Skip first component
+            let k = dim;
             if k >= order.len() {
                 break;
             }
@@ -608,38 +581,75 @@ mod tests {
     use super::*;
     use crate::knn_match::ColumnDict;
 
-    /// PHATE smoke test on three jittered blobs in 5D: output is the right
-    /// shape, all finite, and carries real structure (non-degenerate spread).
-    /// A strict cluster-separation assertion is avoided here because the
-    /// classical-MDS "skip first eigenvector" heuristic interacts badly with
-    /// the perfectly-disconnected toy graphs that tiny test data produces.
+    /// PHATE must recover genuine 2D structure: three blobs whose centers form a
+    /// *triangle* (non-collinear → intrinsically 2D) stay separated in the layout
+    /// and use *both* output dimensions. This guards the two bugs that once
+    /// collapsed the embedding to ~1D: classical-MDS skipping the first
+    /// eigenvector, and an SVD-based `P^t` power (invalid for the non-symmetric
+    /// diffusion operator).
     #[test]
-    fn phate_smoke_finite_and_structured() {
-        let blobs = 3;
-        let per = 6;
+    fn phate_recovers_2d_cluster_structure() {
+        let centers = [[0.0_f32, 0.0], [10.0, 0.0], [5.0, 8.0]];
+        let (blobs, per, d) = (3, 20, 5);
         let n = blobs * per;
-        let d = 5;
         let mut data = Mat::zeros(n, d);
         for b in 0..blobs {
             for p in 0..per {
                 let i = b * per + p;
-                for j in 0..d {
-                    // distinct center per blob + deterministic per-point jitter
-                    let center = (b as f32) * 8.0;
-                    data[(i, j)] = center + (((i * 7 + j * 13) % 11) as f32 / 11.0) - 0.5;
+                let jit = |s: usize| ((i * 7 + s * 13) % 11) as f32 / 11.0 - 0.5;
+                data[(i, 0)] = centers[b][0] + jit(0) * 0.6;
+                data[(i, 1)] = centers[b][1] + jit(1) * 0.6;
+                for j in 2..d {
+                    data[(i, j)] = jit(j) * 0.3;
                 }
             }
         }
         let y = phate_layout_2d(&data, &PhateArgs::default());
-        assert_eq!(y.nrows(), n);
-        assert_eq!(y.ncols(), 2);
+        assert_eq!((y.nrows(), y.ncols()), (n, 2));
         assert!(y.iter().all(|v| v.is_finite()), "coords must be finite");
-        // Not all points collapsed onto a single coordinate.
-        let var: f32 = {
-            let mx = y.column(0).mean();
-            y.column(0).iter().map(|v| (v - mx).powi(2)).sum::<f32>() / n as f32
+
+        // Both output dimensions carry real variance (guards the 1D collapse).
+        let var = |c: usize| {
+            let m = y.column(c).mean();
+            y.column(c).iter().map(|v| (v - m).powi(2)).sum::<f32>() / n as f32
         };
-        assert!(var > 1e-8, "layout is degenerate (var={var:.3e})");
+        assert!(
+            var(0) > 1e-6 && var(1) > 1e-6,
+            "2D structure collapsed: var=({:.2e}, {:.2e})",
+            var(0),
+            var(1)
+        );
+
+        // Blobs stay separated: max within-blob radius < min between-centroid gap.
+        let centroid = |b: usize| {
+            let (mut x, mut z) = (0.0f32, 0.0f32);
+            for p in 0..per {
+                let i = b * per + p;
+                x += y[(i, 0)];
+                z += y[(i, 1)];
+            }
+            (x / per as f32, z / per as f32)
+        };
+        let cens: Vec<(f32, f32)> = (0..blobs).map(centroid).collect();
+        let mut max_within = 0f32;
+        for (b, &c) in cens.iter().enumerate() {
+            for p in 0..per {
+                let i = b * per + p;
+                let dd = ((y[(i, 0)] - c.0).powi(2) + (y[(i, 1)] - c.1).powi(2)).sqrt();
+                max_within = max_within.max(dd);
+            }
+        }
+        let mut min_between = f32::INFINITY;
+        for a in 0..blobs {
+            for b in (a + 1)..blobs {
+                let dd = ((cens[a].0 - cens[b].0).powi(2) + (cens[a].1 - cens[b].1).powi(2)).sqrt();
+                min_between = min_between.min(dd);
+            }
+        }
+        assert!(
+            min_between > max_within,
+            "blobs not separated: within={max_within:.3} between={min_between:.3}"
+        );
     }
 
     /// A query sitting exactly on a landmark, with `knn = 1`, lands on that
