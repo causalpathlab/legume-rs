@@ -1,4 +1,5 @@
 mod apa;
+mod assoc;
 mod cell_qc;
 mod common;
 mod data;
@@ -10,6 +11,7 @@ mod pipeline_util;
 mod read_depth;
 mod run_annotate;
 mod run_apa;
+mod run_assoc;
 mod run_atoi;
 mod run_gem_embedding;
 mod run_gene_count;
@@ -25,6 +27,7 @@ use crate::common::*;
 use faba::gem::args::GemArgs;
 use run_annotate::*;
 use run_apa::*;
+use run_assoc::*;
 use run_atoi::*;
 use run_gem_embedding::*;
 use run_gene_count::*;
@@ -368,6 +371,32 @@ Example:\n  \
     Lineage(LineageArgs),
 
     #[command(
+        name = "dyn-assoc",
+        aliases = ["assoc", "temporal-assoc", "trend"],
+        about = "Counterfactual between-branch modality contrast along a `faba lineage`",
+        long_about = "Test whether a modality (m6a/apa/atoi) diverges between lineage branches.\n\n\
+            Downstream of `faba lineage` (like `annotate` is to `gem`): reads the\n\
+            lineage's per-cell pseudotime + branch (`-f/--from` → {from}.pseudotime.parquet)\n\
+            and a per-site modality matrix (`-s/--sites`), and asks the counterfactual\n\
+            question — if a cell had gone down a different branch, would its editing\n\
+            rate differ? Branches are compared at MATCHED pseudotime (bin-stratified,\n\
+            a tradeSeq patternTest / cocoa matched-null analog). Coverage (edited +\n\
+            unedited) is the binomial denominator, so detection bias is conditioned\n\
+            out; calibrated by permuting branch labels within pseudotime bins.\n\n\
+            Not double-dipping: branches come from gem θ + velocity, which never see\n\
+            the modality. Outputs {out}.branch_contrast.parquet (per site×branch:\n\
+            stat, effect, p, q) and {out}.branch_profile.parquet (rate vs pseudotime).\n\n\
+            Reference:\n  \
+            Van den Berge et al., \"Trajectory-based differential expression analysis\n\
+            for single-cell sequencing data\", Nat Commun 11:1201, 2020.",
+        after_long_help = "\
+	Example:\n\
+	faba lineage -f out/gem -o out/lin\n\
+  faba dyn-assoc -f out/lin -s out/rep1_wt_m6a_site.zarr.zip --modality m6a -o out/m6a_assoc"
+    )]
+    Assoc(AssocArgs),
+
+    #[command(
         name = "all",
         aliases = ["pipeline", "full", "magic"],
         about = "Run all RNA-seq analyses: SNP → genes → ATOI → APA → m6A",
@@ -420,6 +449,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Gem(ref args) => run_gem_embedding(args)?,
         Commands::Annotate(ref args) => run_annotate(args)?,
         Commands::Lineage(ref args) => run_lineage(args)?,
+        Commands::Assoc(ref args) => run_assoc(args)?,
         Commands::All(ref args) => run_pipeline(args)?,
     }
 
