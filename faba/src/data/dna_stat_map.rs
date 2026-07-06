@@ -301,6 +301,15 @@ impl<'a> DnaBaseFreqMap<'a> {
         ret
     }
 
+    /// Number of distinct genomic positions currently tracked — O(1), no
+    /// allocation or sort (unlike [`Self::sorted_positions`]).
+    pub fn num_positions(&self) -> usize {
+        match &self.mode {
+            CountMode::Marginal { counts, .. } => counts.len(),
+            CountMode::PerCell { counts, .. } => counts.len(),
+        }
+    }
+
     /// Frequency stratified by cell barcodes on a genomic position `pos`
     pub fn stratified_frequency_at(&self, pos: i64) -> Option<&HashMap<CellBarcode, DnaBaseCount>> {
         match &self.mode {
@@ -315,6 +324,39 @@ impl<'a> DnaBaseFreqMap<'a> {
             CountMode::Marginal { counts, .. } => Some(counts),
             _ => None,
         }
+    }
+
+    /// Collapse the per-cell counts into one marginal frequency map per group.
+    ///
+    /// `group_of` maps a cell barcode to its dense group ordinal in `0..n_groups`
+    /// (or `None` to drop the cell). Every stored `(position, cell)` entry is
+    /// visited exactly once and folded into its cell's group, so stratified
+    /// discovery costs a single pass — not one re-scan per group. A non-`PerCell`
+    /// map has no per-cell counts and yields `n_groups` empty maps.
+    ///
+    /// `group_of` is `FnMut` so callers can memoize the (comparatively costly)
+    /// barcode→group resolution across the many positions a cell recurs at.
+    pub fn marginalize_by_group<F>(
+        &self,
+        n_groups: usize,
+        mut group_of: F,
+    ) -> Vec<HashMap<i64, DnaBaseCount>>
+    where
+        F: FnMut(&CellBarcode) -> Option<usize>,
+    {
+        let mut per_group: Vec<HashMap<i64, DnaBaseCount>> =
+            (0..n_groups).map(|_| HashMap::default()).collect();
+        if let CountMode::PerCell { counts, .. } = &self.mode {
+            for (&pos, cell_map) in counts {
+                for (cb, count) in cell_map {
+                    if let Some(g) = group_of(cb) {
+                        debug_assert!(g < n_groups, "group ordinal out of range");
+                        *per_group[g].entry(pos).or_default() += count;
+                    }
+                }
+            }
+        }
+        per_group
     }
 
     /// Quality accumulator map (marginal mode only, requires set_use_base_quality(true))

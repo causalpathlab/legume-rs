@@ -690,7 +690,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         Some(m)
     } else {
         // Generate membership by grouping cells for mass enrichment (returns None
-        // when n_clusters <= 1). Reuse the gene-count matrices QC just persisted so
+        // when grouping is disabled). Reuse the gene-count matrices QC just persisted so
         // enrichment does not re-scan the BAMs. The instrument is built over the
         // signal (wt) cells here by design; the pipeline builds it over the
         // all-quant union instead (shared with ATOI) — see run_pipeline.

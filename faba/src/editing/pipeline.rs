@@ -415,8 +415,10 @@ fn find_sites_with_bulk_stats(
 /// Used by both m6A (WT-vs-MUT) and A-to-I (control-free, reference-anchored)
 /// whenever a `CellMembership` is supplied.
 ///
-/// Reads WT BAM files once (per-cell mode), then aggregates marginal frequencies
-/// per cell type in memory instead of re-reading BAM K times.
+/// Reads WT BAM files once (per-cell mode), then collapses the per-cell counts
+/// into one marginal frequency map per group in a single pass
+/// (`DnaBaseFreqMap::marginalize_by_group`) — resolving each barcode's group
+/// once rather than re-scanning every cell once per group.
 fn find_sites_with_celltype_stats(
     gff_record: &GffRecord,
     params: &ConversionParams,
@@ -447,8 +449,7 @@ fn find_sites_with_celltype_stats(
         )?;
     }
 
-    let all_positions = wt_per_cell_map.sorted_positions();
-    if all_positions.len() < params.min_length_for_testing() {
+    if wt_per_cell_map.num_positions() < params.min_length_for_testing() {
         return Ok(Vec::new());
     }
 
@@ -479,27 +480,33 @@ fn find_sites_with_celltype_stats(
         mut_base_freq_map.marginal_frequency_map()
     };
 
-    // For each cell type, aggregate per-cell data into marginal frequencies
-    for cell_type in &cell_types {
-        use crate::data::dna::DnaBaseCount;
-
-        let mut celltype_freq: rustc_hash::FxHashMap<i64, DnaBaseCount> =
-            rustc_hash::FxHashMap::default();
-
-        for &pos in &all_positions {
-            if let Some(cell_map) = wt_per_cell_map.stratified_frequency_at(pos) {
-                let mut agg = DnaBaseCount::default();
-                for (cb, counts) in cell_map {
-                    if membership.matches_celltype(cb, cell_type) {
-                        agg += counts;
-                    }
-                }
-                if agg.total() > 0 {
-                    celltype_freq.insert(pos, agg);
-                }
-            }
+    // Collapse the per-cell counts into one marginal map per cell group in a
+    // SINGLE pass (see `DnaBaseFreqMap::marginalize_by_group`). Each barcode's
+    // group is resolved once and memoized here, so the shared `CellMembership`
+    // lock is touched at most once per distinct barcode in this gene — not once
+    // per (position, cell) and per group, as the old K-nested re-scan did.
+    let ct_index: rustc_hash::FxHashMap<&str, usize> = cell_types
+        .iter()
+        .enumerate()
+        .map(|(i, ct)| (ct.as_ref(), i))
+        .collect();
+    let mut group_memo: rustc_hash::FxHashMap<CellBarcode, Option<usize>> =
+        rustc_hash::FxHashMap::default();
+    let per_group_freq = wt_per_cell_map.marginalize_by_group(cell_types.len(), |cb| {
+        // Clone the barcode only on a memo miss; hits (the common case, since a
+        // cell recurs across many positions) probe by reference.
+        if let Some(&g) = group_memo.get(cb) {
+            g
+        } else {
+            let g = membership
+                .matches_barcode(cb)
+                .and_then(|ct| ct_index.get(ct.as_ref()).copied());
+            group_memo.insert(cb.clone(), g);
+            g
         }
+    });
 
+    for celltype_freq in &per_group_freq {
         if celltype_freq.is_empty() {
             continue;
         }
@@ -512,7 +519,7 @@ fn find_sites_with_celltype_stats(
         }
 
         let mut sifter = params.create_sifter(faidx_reader, chr, positions.len());
-        sifter.scan(&positions, &celltype_freq, mut_freq, forward);
+        sifter.scan(&positions, celltype_freq, mut_freq, forward);
         all_candidate_sites.extend(sifter.candidate_sites);
     }
 

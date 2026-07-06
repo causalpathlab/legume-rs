@@ -111,13 +111,6 @@ impl CellMembership {
         self.inner.unique_groups()
     }
 
-    /// Check if a barcode matches a specific cell type
-    pub fn matches_celltype(&self, barcode: &CellBarcode, target_celltype: &str) -> bool {
-        self.matches_barcode(barcode)
-            .map(|ct| ct.as_ref() == target_celltype)
-            .unwrap_or(false)
-    }
-
     /// Create cell membership from cluster assignments
     pub fn from_clusters(barcodes: &[Box<str>], assignments: &[usize], allow_prefix: bool) -> Self {
         let pairs = barcodes
