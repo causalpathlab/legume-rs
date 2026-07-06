@@ -1,3 +1,5 @@
+pub mod mass_enrichment;
+
 use crate::common::*;
 use crate::data::conversion::*;
 use crate::data::util_htslib::*;
@@ -266,6 +268,20 @@ pub struct GeneCountQc {
     /// (`possorted_genome_bam.bam`), so a positional batch name would mis-key
     /// between the QC pass and the quant pass when their BAM orderings differ.
     pub cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>>,
+    /// Persisted per-batch gene-count matrix path (target on disk), keyed by
+    /// **BAM file path** like `cells_by_batch`. Empty when QC did not write a
+    /// matrix (e.g. the `--valid-cells` reuse path). Consumers (mass enrichment)
+    /// load these instead of re-scanning the BAMs.
+    pub matrix_by_batch: rustc_hash::FxHashMap<Box<str>, Box<str>>,
+}
+
+/// Where [`run_gene_count_qc`] persists the gene-count matrix it already builds
+/// for QC. Bundled so the modality runners can turn "report gene counts" on with
+/// one field instead of threading three args through the QC call.
+pub struct GeneMatrixSink<'a> {
+    pub output_dir: &'a str,
+    pub backend: &'a SparseIoBackend,
+    pub zip: bool,
 }
 
 /// Extract gene_key from a feature name like `"GENE_SYM/count/spliced"` → `"GENE_SYM"`.
@@ -462,6 +478,7 @@ pub fn run_gene_count_qc(
     gene_min_counts: usize,
     cell_min_genes: usize,
     cell_call: &crate::cell_qc::CellCallParams,
+    persist: Option<&GeneMatrixSink>,
 ) -> anyhow::Result<GeneCountQc> {
     info!("=== Gene expression QC ===");
 
@@ -485,6 +502,8 @@ pub fn run_gene_count_qc(
 
     let mut expressed_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
     let mut cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>> =
+        rustc_hash::FxHashMap::default();
+    let mut matrix_by_batch: rustc_hash::FxHashMap<Box<str>, Box<str>> =
         rustc_hash::FxHashMap::default();
     // Gene stats pooled across batches → thresholded once on the whole dataset
     // (partition-invariant) rather than per-batch-then-union. See
@@ -536,6 +555,40 @@ pub fn run_gene_count_qc(
 
         info!("{}: {} cells passed QC", batch_name, bq.passing_cells.len());
 
+        // Persist the gene-count matrix we already built (no extra BAM scan), so
+        // counts are reported in every mode and mass enrichment can reuse them.
+        // Restricted to this batch's QC-passing cells; all counted genes kept
+        // (the pooled gene filter is a separate `genes_kept.tsv.gz` artifact).
+        if let Some(sink) = persist {
+            let keep = |t: Vec<(CellBarcode, Box<str>, f32)>| -> Vec<_> {
+                t.into_iter()
+                    .filter(|(cb, _, _)| bq.passing_cells.contains(cb))
+                    .collect::<Vec<_>>()
+            };
+            let spliced = keep(spliced_triplets);
+            let unspliced = keep(unspliced_triplets);
+
+            let UnionNames {
+                col_names,
+                cell_to_index,
+                row_names,
+                feature_to_index,
+            } = collect_union_names(&spliced, &unspliced);
+
+            let out = BackendOutputPath::new(
+                sink.output_dir,
+                &format!("{}_genes", batch_name),
+                sink.backend,
+                sink.zip,
+            );
+            let merged: Vec<_> = spliced.into_iter().chain(unspliced).collect();
+            format_data_triplets_shared(merged, &feature_to_index, &cell_to_index, row_names, col_names)
+                .to_backend(&out.write_path)?;
+            out.finalize()?;
+            info!("{}: wrote gene-count matrix to {}", batch_name, out.target_path);
+            matrix_by_batch.insert(bam_file.clone(), out.target_path);
+        }
+
         accumulate_gene_stats(&mut pooled_gene_stats, bq.gene_stats);
 
         // Keyed by BAM file path (stable + order-independent across passes).
@@ -562,6 +615,7 @@ pub fn run_gene_count_qc(
     Ok(GeneCountQc {
         gene_ids: expressed_gene_ids,
         cells_by_batch,
+        matrix_by_batch,
     })
 }
 
@@ -594,6 +648,10 @@ pub struct GeneQcRequest<'a> {
     pub valid_cells_file: Option<&'a str>,
     pub valid_genes_file: Option<&'a str>,
     pub skip_gene_qc: bool,
+    /// When set, the QC pass persists the gene-count matrix it builds (so counts
+    /// are reported in every mode, and mass enrichment can reuse it). `None`
+    /// skips the write (e.g. the `--valid-cells` reuse path builds no matrix).
+    pub persist: Option<GeneMatrixSink<'a>>,
 }
 
 /// Resolve a modality's gene-expression QC: reuse a passed per-batch cell set
@@ -613,6 +671,8 @@ pub fn resolve_gene_qc(req: &GeneQcRequest) -> anyhow::Result<Option<GeneCountQc
         Ok(Some(GeneCountQc {
             gene_ids,
             cells_by_batch,
+            // Reuse path (`--valid-cells`) recomputes no matrix.
+            matrix_by_batch: rustc_hash::FxHashMap::default(),
         }))
     } else if !req.skip_gene_qc {
         match req.gff_file {
@@ -626,6 +686,7 @@ pub fn resolve_gene_qc(req: &GeneQcRequest) -> anyhow::Result<Option<GeneCountQc
                 req.gene_min_counts,
                 req.cell_min_genes,
                 &req.cell_call,
+                req.persist.as_ref(),
             )?)),
             None => Ok(None),
         }

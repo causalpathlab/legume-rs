@@ -319,9 +319,13 @@ fn find_sites_in_gene(
     let strand = &gff_record.strand;
     let chr = gff_record.seqname.as_ref();
 
-    let candidate_sites = match (&params.mod_type, cell_membership) {
-        // m6A with cell membership: per-cell-type discovery
-        (ModificationType::M6A { .. }, Some(membership)) => find_sites_with_celltype_stats(
+    // Per-cell-group discovery whenever a membership is supplied (mass
+    // enrichment); otherwise bulk. Applies to both m6A (WT-vs-MUT contrast) and
+    // A-to-I (control-free, reference-anchored) — the stratified helper builds a
+    // pooled control only when `mut_bam_files` is non-empty, so A-to-I routes to
+    // the reference-anchored beta-binomial per stratum.
+    let candidate_sites = match cell_membership {
+        Some(membership) => find_sites_with_celltype_stats(
             gff_record,
             params,
             faidx_reader,
@@ -330,8 +334,7 @@ fn find_sites_in_gene(
             strand,
             membership,
         )?,
-        // m6A without membership or AtoI: bulk discovery
-        _ => find_sites_with_bulk_stats(gff_record, params, faidx_reader, cache, chr, strand)?,
+        None => find_sites_with_bulk_stats(gff_record, params, faidx_reader, cache, chr, strand)?,
     };
 
     if !candidate_sites.is_empty() {
@@ -407,7 +410,10 @@ fn find_sites_with_bulk_stats(
     Ok(candidate_sites)
 }
 
-/// Find conversion sites using per-cell-type statistics (m6A only).
+/// Find conversion sites using per-cell-group statistics (mass enrichment).
+///
+/// Used by both m6A (WT-vs-MUT) and A-to-I (control-free, reference-anchored)
+/// whenever a `CellMembership` is supplied.
 ///
 /// Reads WT BAM files once (per-cell mode), then aggregates marginal frequencies
 /// per cell type in memory instead of re-reading BAM K times.
@@ -451,8 +457,9 @@ fn find_sites_with_celltype_stats(
 
     // Pooled MUT (control) background for the m6A contrast — the control is not
     // stratified by cell type, so it is built once here and shared across all
-    // cell types (mirrors `find_sites_with_bulk_stats`). Empty ⇒ `None`, but
-    // A-to-I never reaches this m6A-only path.
+    // cell types (mirrors `find_sites_with_bulk_stats`). Empty ⇒ `None`: A-to-I
+    // has no control arm, so it falls through to the reference-anchored
+    // beta-binomial null per stratum.
     let mut mut_base_freq_map = DnaBaseFreqMap::new();
     let mut_freq = if params.mut_bam_files.is_empty() {
         None

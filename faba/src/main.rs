@@ -1,10 +1,10 @@
 mod apa;
-mod cell_clustering;
 mod cell_qc;
 mod common;
 mod data;
 mod editing;
 mod gene_count;
+mod lineage;
 mod mixture;
 mod pipeline_util;
 mod read_depth;
@@ -13,6 +13,7 @@ mod run_apa;
 mod run_atoi;
 mod run_gem_embedding;
 mod run_gene_count;
+mod run_lineage;
 mod run_m6a;
 mod run_pipeline;
 mod run_read_depth;
@@ -27,6 +28,7 @@ use run_apa::*;
 use run_atoi::*;
 use run_gem_embedding::*;
 use run_gene_count::*;
+use run_lineage::*;
 use run_m6a::*;
 use run_pipeline::*;
 use run_read_depth::*;
@@ -339,6 +341,33 @@ Example:\n  \
     Annotate(AnnotateArgs),
 
     #[command(
+        name = "lineage",
+        aliases = ["trajectory", "traj"],
+        about = "Velocity-oriented lineage + principal curves over a `faba gem` run",
+        long_about = "Infer a velocity-oriented lineage over the embeddings from `faba gem`.\n\n\
+            Reads gem's parquet outputs by prefix (`-f/--from`): the latent θ\n\
+            (latent.parquet) and per-cell velocity δ (velocity.parquet). Fits K\n\
+            k-means centroids on θ, an MST over them, orients that tree by the\n\
+            per-node mean velocity flux (root = velocity source), and fits\n\
+            Slingshot-style smooth principal curves per lineage → per-cell\n\
+            pseudotime + branch.\n\n\
+            The low-coverage modalities are NOT embedded here; this produces the\n\
+            lineage ordering that a separate confounder-adjusted test runs against.\n\n\
+            Outputs (all `{out}`-prefixed parquet): nodes, node_velocity, edges\n\
+            (with velocity_flux + directed edges), lineages, pseudotime,\n\
+            cell_lineage_weights, lineage_pseudotime, curves.\n\n\
+            Reference:\n  \
+            Street et al., \"Slingshot: cell lineage and pseudotime inference for\n\
+            single-cell transcriptomics\", BMC Genomics, 19:477, 2018.\n\
+            https://doi.org/10.1186/s12864-018-4772-0",
+        after_long_help = "\
+	Example:\n\
+	faba gem --genes out/rep1_genes.zarr.zip -o out/gem\n\
+  faba lineage -f out/gem -o out/gem"
+    )]
+    Lineage(LineageArgs),
+
+    #[command(
         name = "all",
         aliases = ["pipeline", "full", "magic"],
         about = "Run all RNA-seq analyses: SNP → genes → ATOI → APA → m6A",
@@ -390,6 +419,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Snp(ref args) => run_snp(args)?,
         Commands::Gem(ref args) => run_gem_embedding(args)?,
         Commands::Annotate(ref args) => run_annotate(args)?,
+        Commands::Lineage(ref args) => run_lineage(args)?,
         Commands::All(ref args) => run_pipeline(args)?,
     }
 

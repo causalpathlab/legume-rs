@@ -6,7 +6,7 @@ use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::*;
 use crate::editing::sifter::ModificationType;
 use crate::pipeline_util::{
-    check_all_bam_indices, resolve_modality_gene_qc, resolve_umi_tag, GeneQcRequest,
+    check_all_bam_indices, resolve_modality_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest,
 };
 use crate::snp::io::load_snp_mask_from_parquet;
 
@@ -401,6 +401,11 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
             valid_cells_file: args.valid_cells_file.as_deref(),
             valid_genes_file: args.valid_genes_file.as_deref(),
             skip_gene_qc: args.skip_gene_qc,
+            persist: Some(GeneMatrixSink {
+                output_dir: &args.output,
+                backend: &args.backend,
+                zip: args.zip,
+            }),
         },
     )?;
     if gene_qc.is_some() && gff_map.is_empty() {
