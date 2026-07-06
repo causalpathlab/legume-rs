@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
 
-version = "0.9.0"
+version = "0.9.1"
 
 [lib]
 # The library surface exists so `gem`'s integration tests (tests/) can reach
@@ -28,6 +28,7 @@ cuda = [
     "matrix-param/cuda",
     "candle-util/cuda",
     "graph-embedding-util/cuda",
+    "mcmc-util/cuda",
 ]
 metal = [
     "data-beans/metal",
@@ -36,6 +37,7 @@ metal = [
     "matrix-param/metal",
     "candle-util/metal",
     "graph-embedding-util/metal",
+    "mcmc-util/metal",
 ]
 # Forward data-beans's optional `hdf5` feature so `cargo install faba --features hdf5`
 # enables the HDF5 backend + .h5/.h5ad readers (requires libhdf5 on the build host).
@@ -47,6 +49,7 @@ data-beans-alg = { workspace = true }
 genomic-data = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
+mcmc-util = { workspace = true }
 plot-utils = { workspace = true }
 
 anyhow = { workspace = true }

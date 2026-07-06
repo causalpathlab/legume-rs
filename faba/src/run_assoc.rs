@@ -1,10 +1,12 @@
-//! Entry point for `faba assoc` — counterfactual between-branch modality contrast
-//! along the lineage. Loads the lineage's per-cell pseudotime + branch, a modality
-//! site matrix, and tests per (site, branch) whether editing diverges from the
-//! other-fate cells at matched pseudotime (see [`crate::assoc`]).
+//! Entry point for `faba assoc` — modality dynamics along the lineage. Loads the
+//! lineage's per-cell pseudotime + branch and a modality site matrix, then runs two
+//! tests per (site, branch): the counterfactual **between-branch** contrast (editing
+//! vs the other-fate cells at matched pseudotime) and the **within-branch** trend GAM
+//! (does editing change as the branch progresses — frequentist quasi-binomial/binomial
+//! or a Bayesian ESS variant, via `--trend-method`). See [`crate::assoc`].
 
 use anyhow::Result;
-use clap::Args;
+use clap::{Args, ValueEnum};
 use log::info;
 
 use matrix_util::common_io::mkdir_parent;
@@ -15,8 +17,21 @@ use crate::assoc::contrast::{
     bin_pseudotime, run_contrasts, site_profile, AssocConfig, BranchResult,
 };
 use crate::assoc::io::{load_lineage, load_sites, Lineage, Site};
+use crate::assoc::trend::{run_trends, TrendConfig, TrendResult};
+use crate::assoc::trend_bayes::{run_trends_bayes, BayesTrendConfig, BayesTrendResult};
 use crate::assoc::Modality;
 use faba::hypothesis_tests::benjamini_hochberg;
+
+/// Within-branch trend estimator.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum TrendMethod {
+    /// Bayesian spline GAM: Gaussian smoothing prior, ESS posterior, lfsr (default).
+    Bayes,
+    /// Quasi-binomial spline GAM, F-test.
+    Quasi,
+    /// Plain binomial spline GAM, deviance LRT (χ²).
+    Binomial,
+}
 
 #[derive(Args, Debug)]
 pub struct AssocArgs {
@@ -68,6 +83,38 @@ pub struct AssocArgs {
 
     #[arg(long, default_value_t = 42, help = "RNG seed for permutations")]
     pub seed: u64,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "spline knots for the within-branch trend GAM"
+    )]
+    pub n_knots: usize,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "bayes",
+        help = "within-branch trend estimator (bayes | quasi | binomial)"
+    )]
+    pub trend_method: TrendMethod,
+
+    #[arg(
+        long,
+        default_value_t = 3.0,
+        help = "bayes trend: prior sd on the spline coefficients"
+    )]
+    pub trend_prior_sd: f32,
+
+    #[arg(
+        long,
+        default_value_t = 800,
+        help = "bayes trend: posterior samples per (site, branch)"
+    )]
+    pub trend_samples: usize,
+
+    #[arg(long, default_value_t = 300, help = "bayes trend: ESS warmup")]
+    pub trend_warmup: usize,
 
     #[arg(long, default_value_t = 0.1, help = "BH FDR alpha for reporting")]
     pub fdr_alpha: f32,
@@ -131,12 +178,88 @@ pub fn run_assoc(args: &AssocArgs) -> Result<()> {
         args.n_bins,
         &format!("{out}.branch_profile.parquet"),
     )?;
+
+    // Within-branch association: does the rate change *along* each branch?
+    let trend_path = format!("{out}.branch_trend.parquet");
+    match args.trend_method {
+        TrendMethod::Bayes => {
+            let bcfg = BayesTrendConfig {
+                n_knots: args.n_knots,
+                min_total_coverage: args.min_total_coverage,
+                min_cells: args.min_cells,
+                prior_sd: args.trend_prior_sd,
+                n_samples: args.trend_samples,
+                warmup: args.trend_warmup,
+                seed: args.seed,
+            };
+            let trends = run_trends_bayes(&sites, &lin, &bcfg);
+            if trends.is_empty() {
+                info!("no (site, branch) passed within-branch trend QC");
+            } else {
+                let n_conf = trends.iter().filter(|r| r.lfsr < args.fdr_alpha).count();
+                info!(
+                    "{} within-branch Bayesian trends; {n_conf} with lfsr < {}",
+                    trends.len(),
+                    args.fdr_alpha
+                );
+                write_branch_trend_bayes(&trends, &sites, &trend_path)?;
+            }
+        }
+        method => {
+            let tcfg = TrendConfig {
+                n_knots: args.n_knots,
+                min_total_coverage: args.min_total_coverage,
+                min_cells: args.min_cells,
+                overdispersion: method == TrendMethod::Quasi,
+            };
+            let trends = run_trends(&sites, &lin, &tcfg);
+            if trends.is_empty() {
+                info!("no (site, branch) passed within-branch trend QC");
+            } else {
+                let tps: Vec<f32> = trends.iter().map(|r| r.p_value).collect();
+                let tqs = benjamini_hochberg(&tps);
+                let t_sig = tqs.iter().filter(|&&q| q < args.fdr_alpha).count();
+                info!(
+                    "{} within-branch trend tests; {t_sig} at q < {}",
+                    trends.len(),
+                    args.fdr_alpha
+                );
+                write_branch_trend(&trends, &tqs, &sites, &trend_path)?;
+            }
+        }
+    }
     Ok(())
 }
 
 ////////////////////////////////////////////////////////////////////////
 // Output writers
 ////////////////////////////////////////////////////////////////////////
+
+/// `{gene}/{subunit}/b{branch}` row key for a (site, branch) record.
+fn site_branch_key(sites: &[Site], site: usize, branch: usize) -> Box<str> {
+    let s = &sites[site];
+    format!("{}/{}/b{}", s.gene, s.subunit, branch).into_boxed_str()
+}
+
+/// Assemble a `site_branch`-indexed table (`rows` × `col_names`, values row-major in
+/// `vals`) and write it to Parquet. Shared by the three site-branch writers.
+fn write_site_branch_table(
+    path: &str,
+    rows: Vec<Box<str>>,
+    col_names: &[&str],
+    vals: &[Vec<f32>],
+) -> Result<()> {
+    let mut mat = DMatrix::<f32>::zeros(rows.len(), col_names.len());
+    for (i, v) in vals.iter().enumerate() {
+        for (j, &x) in v.iter().enumerate() {
+            mat[(i, j)] = x;
+        }
+    }
+    let cols: Vec<Box<str>> = col_names.iter().map(|s| (*s).into()).collect();
+    mat.to_parquet_with_names(path, (Some(&rows), Some("site_branch")), Some(&cols))?;
+    info!("Wrote {path}");
+    Ok(())
+}
 
 /// `{gene}/{chr:pos}/b{branch}` × [n_cells, total_cov, stat, effect, p_perm, q].
 fn write_branch_contrast(
@@ -145,25 +268,108 @@ fn write_branch_contrast(
     sites: &[Site],
     path: &str,
 ) -> Result<()> {
-    let mut mat = DMatrix::<f32>::zeros(res.len(), 6);
-    let mut rows: Vec<Box<str>> = Vec::with_capacity(res.len());
-    for (i, r) in res.iter().enumerate() {
-        let s = &sites[r.site];
-        rows.push(format!("{}/{}/b{}", s.gene, s.subunit, r.branch).into_boxed_str());
-        mat[(i, 0)] = r.n_cells as f32;
-        mat[(i, 1)] = r.total_cov as f32;
-        mat[(i, 2)] = r.stat;
-        mat[(i, 3)] = r.effect;
-        mat[(i, 4)] = r.p_perm;
-        mat[(i, 5)] = qs[i];
-    }
-    let cols: Vec<Box<str>> = ["n_cells", "total_cov", "stat", "effect", "p_perm", "q"]
+    let rows = res
         .iter()
-        .map(|s| (*s).into())
+        .map(|r| site_branch_key(sites, r.site, r.branch))
         .collect();
-    mat.to_parquet_with_names(path, (Some(&rows), Some("site_branch")), Some(&cols))?;
-    info!("Wrote {path}");
-    Ok(())
+    let vals: Vec<Vec<f32>> = res
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            vec![
+                r.n_cells as f32,
+                r.total_cov as f32,
+                r.stat,
+                r.effect,
+                r.p_perm,
+                qs[i],
+            ]
+        })
+        .collect();
+    write_site_branch_table(
+        path,
+        rows,
+        &["n_cells", "total_cov", "stat", "effect", "p_perm", "q"],
+        &vals,
+    )
+}
+
+/// `{gene}/{chr:pos}/b{branch}` × [n_cells, total_cov, stat, effect, dispersion,
+/// p_trend, q] — the within-branch association GAM (does the rate change along the
+/// branch), one row per QC-passing (site, branch).
+fn write_branch_trend(res: &[TrendResult], qs: &[f32], sites: &[Site], path: &str) -> Result<()> {
+    let rows = res
+        .iter()
+        .map(|r| site_branch_key(sites, r.site, r.branch))
+        .collect();
+    let vals: Vec<Vec<f32>> = res
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            vec![
+                r.n_cells as f32,
+                r.total_cov as f32,
+                r.stat,
+                r.effect,
+                r.dispersion,
+                r.p_value,
+                qs[i],
+            ]
+        })
+        .collect();
+    write_site_branch_table(
+        path,
+        rows,
+        &[
+            "n_cells",
+            "total_cov",
+            "stat",
+            "effect",
+            "dispersion",
+            "p_trend",
+            "q",
+        ],
+        &vals,
+    )
+}
+
+/// `{gene}/{chr:pos}/b{branch}` × [n_cells, total_cov, effect, effect_sd, effect_lo,
+/// effect_hi, lfsr] — the Bayesian within-branch association (posterior net log-odds
+/// change along the branch + local false sign rate), one row per QC-passing (site,
+/// branch).
+fn write_branch_trend_bayes(res: &[BayesTrendResult], sites: &[Site], path: &str) -> Result<()> {
+    let rows = res
+        .iter()
+        .map(|r| site_branch_key(sites, r.site, r.branch))
+        .collect();
+    let vals: Vec<Vec<f32>> = res
+        .iter()
+        .map(|r| {
+            vec![
+                r.n_cells as f32,
+                r.total_cov as f32,
+                r.effect,
+                r.effect_sd,
+                r.effect_lo,
+                r.effect_hi,
+                r.lfsr,
+            ]
+        })
+        .collect();
+    write_site_branch_table(
+        path,
+        rows,
+        &[
+            "n_cells",
+            "total_cov",
+            "effect",
+            "effect_sd",
+            "effect_lo",
+            "effect_hi",
+            "lfsr",
+        ],
+        &vals,
+    )
 }
 
 /// `{gene}/{chr:pos}/b{branch}/bin{b}` × [bin, K, N, rate] — the counterfactual

@@ -1,15 +1,28 @@
-//! `faba assoc` — counterfactual between-branch modality contrast along the lineage.
+//! `faba assoc` — modality dynamics along the lineage.
 //!
 //! Downstream of `faba lineage` (mirrors `gem → annotate`): the trajectory is fit
-//! once; `assoc` asks, per modality site, the **counterfactual** question — *if a
-//! cell had gone down a different branch, would its m6a/apa/atoi rate differ?* —
-//! by comparing branches at **matched pseudotime** (tradeSeq `patternTest`, cocoa
-//! matched-null spirit). Coverage n = edited+unedited is the binomial denominator,
-//! so detection bias is conditioned out; the branches come from gem θ + velocity
-//! (modality held out), so the contrast is not double-dipping.
+//! once; `assoc` then asks two complementary questions per modality site, with
+//! coverage n = edited+unedited as the binomial denominator (so detection bias is
+//! conditioned out) and the branches taken from gem θ + velocity with the modality
+//! held out (so neither test double-dips):
+//!
+//! - **Between branches** ([`contrast`]) — the counterfactual *if a cell had gone
+//!   down a different branch, would its rate differ?*, comparing branches at matched
+//!   pseudotime (tradeSeq `patternTest`, cocoa matched-null spirit).
+//! - **Along a branch** ([`trend`]) — *does the rate change as the branch
+//!   progresses?*, a binomial/quasi-binomial spline GAM of `logit(k/n)` on pseudotime
+//!   (tradeSeq `associationTest`).
 
 pub mod contrast;
+pub mod gam;
 pub mod io;
+pub mod trend;
+pub mod trend_bayes;
+
+#[cfg(test)]
+mod test_util;
+#[cfg(test)]
+mod tests;
 
 use clap::ValueEnum;
 
