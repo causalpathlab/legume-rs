@@ -2,8 +2,9 @@
 //! read mass for site detection.
 //!
 //! This is NOT a general cell-typing feature. Cells are grouped (random
-//! projection + SVD + k-means on gene expression) purely so that stratified
-//! editing-site discovery (`editing::pipeline::find_sites_with_celltype_stats`)
+//! projection + SVD on gene expression, then Leiden community detection) purely
+//! so that stratified editing-site discovery
+//! (`editing::pipeline::find_sites_with_celltype_stats`)
 //! sees a higher foreground fraction within each stratum: if an edit is specific
 //! to a sub-population, pooling all cells dilutes it, whereas grouping
 //! concentrates the edited reads and improves the foreground-vs-background
@@ -18,18 +19,26 @@ use genomic_data::gff::GffRecordMap;
 use data_beans::sparse_io_vector::ColumnAlignment;
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::{load_unified_data, LoadUnifiedArgs};
-use matrix_util::clustering::{Kmeans, KmeansArgs};
 use matrix_util::traits::RandomizedAlgs;
 use nalgebra::DMatrix;
 use std::sync::Arc;
 
+/// Fixed RNG seed for the Leiden community detection, so a rerun on the same
+/// embedding reproduces the same groups.
+const ENRICH_SEED: u64 = 42;
+
 /// Parameters for the mass-enrichment grouping.
 pub struct MassEnrichmentParams<'a> {
-    cluster_k: ClusterK,
-    pub proj_dim: usize,
-    pub svd_dim: usize,
+    /// Leiden modularity resolution (higher → more, finer communities). The
+    /// group count is not fixed — it emerges from the graph at this resolution.
+    resolution: f64,
+    /// k for the cell kNN graph fed to Leiden.
+    knn: usize,
+    /// Embedding dimension: cells are random-projected to `dim` features and the
+    /// SVD is taken at the same rank (`proj_dim = svd_dim = dim`), so this is both
+    /// the projection width and the principal-component count Leiden clusters on.
+    dim: usize,
     pub block_size: usize,
-    pub kmeans_max_iter: usize,
     pub cell_barcode_tag: &'a str,
     pub gene_barcode_tag: &'a str,
     pub allow_prefix_matching: bool,
@@ -64,39 +73,34 @@ pub fn group_cells_for_enrichment(
         embed_cells_from_matrices(matrix_paths, params)?
     };
 
-    let (assignments, k) = match params.cluster_k {
-        ClusterK::Fixed(k) => {
-            if cols.len() < k {
-                return Err(anyhow::anyhow!(
-                    "Number of cells ({}) is less than requested clusters ({})",
-                    cols.len(),
-                    k
-                ));
-            }
-            info!("Running k-means clustering with {} clusters", k);
-            let assignments = v_nk.kmeans_rows(KmeansArgs {
-                num_clusters: k,
-                max_iter: params.kmeans_max_iter,
-            });
-            (assignments, k)
-        }
-        ClusterK::Auto { k_max } => {
-            if cols.len() < 2 {
-                return Err(anyhow::anyhow!(
-                    "auto-K needs at least 2 cells, got {}",
-                    cols.len()
-                ));
-            }
-            // Sweep with a capped iteration budget (early-stops anyway), then a
-            // full-budget final fit at the chosen K — see `select_k_by_ch`.
-            select_k_by_ch(
-                &v_nk,
-                k_max,
-                params.kmeans_max_iter.min(25),
-                params.kmeans_max_iter,
-            )
-        }
-    };
+    if cols.len() < 2 {
+        return Err(anyhow::anyhow!(
+            "mass enrichment needs at least 2 cells, got {}",
+            cols.len()
+        ));
+    }
+
+    // Group cells by Leiden community detection on the SVD embedding. The count
+    // is not fixed: it emerges from the graph at `resolution`. `cosine = false`
+    // z-scores the (heterogeneous-scale, unscaled-by-singular-value) SVD columns
+    // and takes Euclidean kNN — the correct metric for a raw SVD latent, and
+    // more robust than k-means, which on this embedding produced singleton
+    // clusters and an unusable Calinski–Harabasz sweep.
+    let knn = params.knn.min(cols.len() - 1).max(1);
+    info!(
+        "Leiden community detection on the SVD embedding (resolution {:.3}, knn {})",
+        params.resolution, knn
+    );
+    let assignments = matrix_util::clustering::leiden_clustering(
+        &v_nk,
+        knn,
+        params.resolution,
+        None, // resolution-driven: the community count emerges
+        Some(ENRICH_SEED),
+        false, // raw SVD dims → z-score + Euclidean kNN
+    )?;
+    let k = assignments.iter().copied().max().map_or(0, |m| m + 1);
+    info!("Leiden found {} cell group(s) over {} cells", k, cols.len());
 
     log_cluster_sizes(&assignments, k);
 
@@ -105,116 +109,6 @@ pub fn group_cells_for_enrichment(
         &assignments,
         params.allow_prefix_matching,
     ))
-}
-
-/// Sweep K over `2..=k_max`, cluster the SVD embedding `v_nk` at each, and pick the
-/// K that maximizes the Calinski–Harabasz index
-/// `CH(k) = (B/(k-1)) / (W/(n-k))`, where `W` is the within-cluster inertia and
-/// `B = total − W` the between-cluster inertia. Returns the winning assignments and K.
-///
-/// The random projection + rSVD that produced `v_nk` ran once; the sweep only
-/// repeats the cheap k-means on the small `n × svd_dim` embedding. Rows are
-/// materialized once and reused across candidate K (k-means early-stops on
-/// convergence), then one full-budget fit runs at the chosen K.
-///
-/// Reference: Caliński, T. & Harabasz, J. (1974), "A dendrite method for cluster
-/// analysis," *Communications in Statistics* 3(1):1–27,
-/// <https://doi.org/10.1080/03610927408827101>.
-fn select_k_by_ch(
-    v_nk: &DMatrix<f32>,
-    k_max: usize,
-    sweep_iter: usize,
-    final_iter: usize,
-) -> (Vec<usize>, usize) {
-    let n = v_nk.nrows();
-    // Materialize rows once so each candidate K reuses the same data (rather than
-    // re-cloning the embedding on every call).
-    let rows: Vec<Vec<f32>> = v_nk
-        .row_iter()
-        .map(|r| r.iter().copied().collect())
-        .collect();
-
-    let k_hi = k_max.min(n.saturating_sub(1)).max(2);
-    let total = total_inertia(&rows);
-
-    let mut best_k = 2;
-    let mut best_ch = f64::NEG_INFINITY;
-    info!("Auto-K: sweeping K in 2..={} (Calinski–Harabasz)", k_hi);
-    for k in 2..=k_hi {
-        let clust = clustering::kmeans(k, &rows, sweep_iter);
-        let w = within_inertia(&rows, &clust.membership, k);
-        let b = (total - w).max(0.0);
-        let ch = if w > 0.0 && n > k {
-            (b / (k as f64 - 1.0)) / (w / (n as f64 - k as f64))
-        } else {
-            f64::NEG_INFINITY
-        };
-        info!("  K={}: CH={:.2} (within-inertia={:.3})", k, ch, w);
-        if ch > best_ch {
-            best_ch = ch;
-            best_k = k;
-        }
-    }
-    info!("Auto-K selected K={} (max Calinski–Harabasz)", best_k);
-
-    // Full-budget final fit at the chosen K.
-    let clust = clustering::kmeans(best_k, &rows, final_iter);
-    (clust.membership, best_k)
-}
-
-/// Total inertia: sum of squared distances of every row to the global centroid.
-fn total_inertia(rows: &[Vec<f32>]) -> f64 {
-    let n = rows.len();
-    if n == 0 {
-        return 0.0;
-    }
-    let d = rows[0].len();
-    let mut mean = vec![0f64; d];
-    for r in rows {
-        for (j, &v) in r.iter().enumerate() {
-            mean[j] += v as f64;
-        }
-    }
-    for m in &mut mean {
-        *m /= n as f64;
-    }
-    rows.iter().map(|r| sq_dist(r, &mean)).sum()
-}
-
-/// Within-cluster inertia: sum of squared distances of each row to its cluster
-/// centroid (centroids recomputed from `membership`).
-fn within_inertia(rows: &[Vec<f32>], membership: &[usize], k: usize) -> f64 {
-    let d = rows.first().map_or(0, Vec::len);
-    let mut sums = vec![vec![0f64; d]; k];
-    let mut counts = vec![0usize; k];
-    for (r, &c) in rows.iter().zip(membership) {
-        counts[c] += 1;
-        for (j, &v) in r.iter().enumerate() {
-            sums[c][j] += v as f64;
-        }
-    }
-    for (centroid, &count) in sums.iter_mut().zip(counts.iter()) {
-        if count > 0 {
-            for s in centroid.iter_mut() {
-                *s /= count as f64;
-            }
-        }
-    }
-    rows.iter()
-        .zip(membership)
-        .map(|(r, &c)| sq_dist(r, &sums[c]))
-        .sum()
-}
-
-/// Squared Euclidean distance between an `f32` row and an `f64` centroid.
-fn sq_dist(row: &[f32], centroid: &[f64]) -> f64 {
-    row.iter()
-        .zip(centroid)
-        .map(|(&v, &m)| {
-            let dv = v as f64 - m;
-            dv * dv
-        })
-        .sum()
 }
 
 /// Tally and log the number of cells in each cluster.
@@ -227,16 +121,20 @@ fn log_cluster_sizes(assignments: &[usize], n_clusters: usize) {
 }
 
 /// Random-projection + rSVD embedding of a sparse count backend's columns (cells).
-/// Returns the `n_cells × svd_dim` right-singular-vector matrix `v_nk`.
+/// Returns the `n_cells × dim` right-singular-vector matrix `v_nk`.
 fn project_and_embed(
     data_vec: &data_beans::sparse_io_vector::SparseIoVec,
     params: &MassEnrichmentParams,
     n_cells: usize,
 ) -> anyhow::Result<DMatrix<f32>> {
-    info!("Random projection to {} dims, then SVD", params.proj_dim);
-    let proj_out = data_vec.project_columns(params.proj_dim, Some(params.block_size))?;
-    let svd_dim = params.svd_dim.min(params.proj_dim).min(n_cells);
-    let (_, _, v_nk) = proj_out.proj.rsvd(svd_dim)?;
+    // Random-project to `dim` features, then SVD at the same rank — an
+    // orthogonal, variance-ordered rotation of the sketch (no truncation). Cap
+    // `dim` at the achievable rank: it can exceed neither the cell count nor the
+    // feature (row) count, and projecting to more dims than either is wasteful.
+    let dim = params.dim.min(n_cells).min(data_vec.num_rows()).max(1);
+    info!("Random projection to {dim} dims, then SVD");
+    let proj_out = data_vec.project_columns(dim, Some(params.block_size))?;
+    let (_, _, v_nk) = proj_out.proj.rsvd(dim)?;
     Ok(v_nk)
 }
 
@@ -333,39 +231,52 @@ fn embed_cells_from_matrices(
 /// by every subcommand that stratifies detection by cell group (`m6a`, `pipeline`).
 #[derive(clap::Args, Debug, Clone)]
 pub struct MassEnrichmentArgs {
+    // The single clustering knob most users touch: Leiden auto-grouping is ON by
+    // default; this dial tunes granularity (or disables it). Everything below is
+    // advanced embedding/QC tuning, hidden from the short `-h` view.
     #[arg(
-        long = "n-clusters",
-        default_value_t = 1,
-        help = "Number of cell groups for mass enrichment (1 = no grouping)",
-        long_help = "Number of cell groups used to concentrate per-stratum read\n\
-                     mass for site detection. When 1 (default), all cells are one\n\
-                     group (bulk detection). When > 1, cells are grouped via random\n\
-                     projection + SVD + k-means on gene expression, and discovery\n\
-                     runs per group so cell-type-specific edits are not diluted."
+        long = "cluster-resolution",
+        default_value_t = 0.5,
+        help = "Leiden auto-grouping for mass enrichment: ON by default at 0.5; 0 = off (bulk); higher → more groups",
+        long_help = "Leiden modularity resolution for mass-enrichment cell grouping.\n\
+                     Grouping is ON by default (0.5): cells are embedded (random\n\
+                     projection + SVD on gene expression) and Leiden community\n\
+                     detection groups them automatically — the group count is NOT\n\
+                     fixed, it emerges from the graph (higher resolution → more,\n\
+                     finer groups). Discovery then runs per group so cell-type-\n\
+                     specific edits are not diluted. Set 0 to disable grouping and\n\
+                     fall back to bulk (single-group) detection."
     )]
-    pub n_clusters: usize,
+    pub cluster_resolution: f64,
 
     #[arg(
-        long = "cluster-proj-dim",
+        long = "cluster-knn",
+        default_value_t = 30,
+        hide_short_help = true,
+        help = "k for the cell kNN graph fed to Leiden grouping",
+        long_help = "Number of nearest neighbours per cell when building the kNN\n\
+                     graph that Leiden partitions. Larger k → smoother, coarser\n\
+                     communities."
+    )]
+    pub cluster_knn: usize,
+
+    #[arg(
+        long = "cluster-dim",
         default_value_t = 50,
-        help = "Random projection dimension for grouping",
-        long_help = "Dimensionality of the random projection used to compress\n\
-                     the gene expression matrix before SVD."
+        hide_short_help = true,
+        help = "Embedding dimension for grouping (random-projection width = SVD rank)",
+        long_help = "Cell embedding dimension for Leiden grouping. Cells are\n\
+                     random-projected to this many features and the SVD is taken at\n\
+                     the same rank, so it is both the projection width and the\n\
+                     principal-component count clustered on. Capped at the cell\n\
+                     count. 30–50 is typical."
     )]
-    pub cluster_proj_dim: usize,
-
-    #[arg(
-        long = "cluster-svd-dim",
-        default_value_t = 10,
-        help = "Number of SVD components for grouping",
-        long_help = "Number of leading singular vectors to retain after SVD.\n\
-                     These form the feature space for k-means."
-    )]
-    pub cluster_svd_dim: usize,
+    pub cluster_dim: usize,
 
     #[arg(
         long = "cluster-block-size",
         default_value_t = 100,
+        hide_short_help = true,
         help = "Block size for grouping parallel processing",
         long_help = "Number of columns processed per parallel block during\n\
                      the random projection step."
@@ -373,17 +284,9 @@ pub struct MassEnrichmentArgs {
     pub cluster_block_size: usize,
 
     #[arg(
-        long = "cluster-max-iter",
-        default_value_t = 100,
-        help = "Maximum k-means iterations for grouping",
-        long_help = "Maximum number of k-means iterations before convergence\n\
-                     is declared."
-    )]
-    pub cluster_max_iter: usize,
-
-    #[arg(
         long = "cluster-min-row-nnz",
         default_value_t = 1,
+        hide_short_help = true,
         help = "Minimum non-zeros per gene for grouping QC",
         long_help = "Genes with fewer non-zero cells than this are removed\n\
                      before grouping."
@@ -393,42 +296,33 @@ pub struct MassEnrichmentArgs {
     #[arg(
         long = "cluster-min-col-nnz",
         default_value_t = 1,
+        hide_short_help = true,
         help = "Minimum non-zeros per cell for grouping QC",
         long_help = "Cells with fewer non-zero genes than this are removed\n\
                      before grouping."
     )]
     pub cluster_min_col_nnz: usize,
 
-    #[arg(
-        long = "cluster-k-max",
-        default_value_t = 0,
-        help = "Auto-select K by sweeping 2..=this (0 = off, use --n-clusters)",
-        long_help = "When > 0, the number of cell groups is chosen automatically by\n\
-                     sweeping K over 2..=this value on the (cheap) SVD embedding and\n\
-                     picking the K that maximizes the Calinski-Harabasz index. This\n\
-                     overrides --n-clusters. 0 (default) uses a fixed --n-clusters."
-    )]
+    // ---- Deprecated: k-means grouping knobs (superseded by Leiden). Still
+    // parsed so existing command lines keep working, but ignored — passing either
+    // just warns and grouping runs at `--cluster-resolution`. Prefer that knob.
+    #[arg(long = "n-clusters", default_value_t = 1, hide = true)]
+    pub n_clusters: usize,
+
+    #[arg(long = "cluster-k-max", default_value_t = 0, hide = true)]
     pub cluster_k_max: usize,
 }
 
-/// Resolved number of enrichment groups. `Bulk` is handled by `build_membership`
-/// (returns `None`); the algorithm only ever sees `Fixed` or `Auto`.
-#[derive(Clone, Copy, Debug)]
-enum ClusterK {
-    Fixed(usize),
-    Auto { k_max: usize },
-}
-
 impl MassEnrichmentArgs {
-    /// Whether grouping is on (fixed `--n-clusters > 1` or auto `--cluster-k-max > 1`).
+    /// Whether grouping is on. On by default (resolution 0.5); disabled only when
+    /// `--cluster-resolution` is set to 0 (or below), which restores bulk detection.
     pub fn enabled(&self) -> bool {
-        self.n_clusters > 1 || self.cluster_k_max > 1
+        self.cluster_resolution > 0.0
     }
 
     /// Generate a `CellMembership` by grouping cells for enrichment, or `None`
-    /// when grouping is disabled (`n_clusters <= 1`). When `matrix_paths` is
-    /// non-empty, enrichment reuses those persisted gene-count matrices instead
-    /// of re-scanning `bam_files`.
+    /// when grouping is disabled. When `matrix_paths` is non-empty, enrichment
+    /// reuses those persisted gene-count matrices instead of re-scanning `bam_files`.
     pub fn build_membership(
         &self,
         bam_files: &[Box<str>],
@@ -438,23 +332,26 @@ impl MassEnrichmentArgs {
         gene_barcode_tag: &str,
         allow_prefix_matching: bool,
     ) -> anyhow::Result<Option<CellMembership>> {
-        // `--cluster-k-max > 0` auto-selects K (overrides --n-clusters); otherwise
-        // a fixed --n-clusters; `<= 1` disables grouping (bulk detection).
-        let cluster_k = if self.cluster_k_max > 1 {
-            ClusterK::Auto {
-                k_max: self.cluster_k_max,
-            }
-        } else if self.n_clusters > 1 {
-            ClusterK::Fixed(self.n_clusters)
-        } else {
+        // `--cluster-resolution` drives Leiden directly. The old count knobs are
+        // deprecated and ignored; warn if they were passed so the switch to
+        // resolution-driven grouping is visible.
+        if self.n_clusters > 1 || self.cluster_k_max > 1 {
+            log::warn!(
+                "--n-clusters/--cluster-k-max are deprecated and ignored; mass \
+                 enrichment now uses Leiden communities at --cluster-resolution \
+                 {:.3} (higher → more groups; 0 disables).",
+                self.cluster_resolution
+            );
+        }
+        // Resolution 0 (or below) disables grouping → bulk detection.
+        if !self.enabled() {
             return Ok(None);
-        };
+        }
         let params = MassEnrichmentParams {
-            cluster_k,
-            proj_dim: self.cluster_proj_dim,
-            svd_dim: self.cluster_svd_dim,
+            resolution: self.cluster_resolution,
+            knn: self.cluster_knn,
+            dim: self.cluster_dim,
             block_size: self.cluster_block_size,
-            kmeans_max_iter: self.cluster_max_iter,
             cell_barcode_tag,
             gene_barcode_tag,
             allow_prefix_matching,
@@ -463,41 +360,5 @@ impl MassEnrichmentArgs {
         };
         let membership = group_cells_for_enrichment(bam_files, gff_map, &params, matrix_paths)?;
         Ok(Some(membership))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{sq_dist, total_inertia, within_inertia};
-
-    #[test]
-    fn total_inertia_matches_hand_calc() {
-        // Two points on a line: mean = [1,0]; each is distance 1 away → total 2.
-        let rows = vec![vec![0.0f32, 0.0], vec![2.0, 0.0]];
-        assert!((total_inertia(&rows) - 2.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn within_inertia_uses_per_cluster_centroids() {
-        // Two tight pairs; centroids [1,0] and [11,0]; four points each 1 away → 4.
-        let rows = vec![
-            vec![0.0f32, 0.0],
-            vec![2.0, 0.0],
-            vec![10.0, 0.0],
-            vec![12.0, 0.0],
-        ];
-        let membership = [0usize, 0, 1, 1];
-        assert!((within_inertia(&rows, &membership, 2) - 4.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn within_inertia_is_zero_when_each_point_is_its_own_cluster() {
-        let rows = vec![vec![3.0f32, -1.0], vec![-2.0, 5.0]];
-        assert!(within_inertia(&rows, &[0usize, 1], 2).abs() < 1e-9);
-    }
-
-    #[test]
-    fn sq_dist_basic() {
-        assert!((sq_dist(&[3.0f32, 4.0], &[0.0f64, 0.0]) - 25.0).abs() < 1e-9);
     }
 }
