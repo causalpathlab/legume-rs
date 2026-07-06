@@ -22,6 +22,29 @@ pub enum MaskScheduleArg {
     Uniform,
 }
 
+/// Per-gene likelihood for the masked imputation loss (CLI surface for
+/// [`candle_util::vae::masked_topic::MaskedLikelihood`]).
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MaskedLikelihoodArg {
+    /// Negative binomial — overdispersed counts (library-scaled, learnable φ).
+    #[default]
+    Nb,
+    /// Multinomial / categorical — depth-invariant composition; the same
+    /// likelihood the generative ELBO path uses.
+    Multinomial,
+}
+
+impl MaskedLikelihoodArg {
+    /// Map to the candle-util training enum.
+    pub fn to_lib(self) -> candle_util::vae::masked_topic::MaskedLikelihood {
+        use candle_util::vae::masked_topic::MaskedLikelihood as L;
+        match self {
+            MaskedLikelihoodArg::Nb => L::Nb,
+            MaskedLikelihoodArg::Multinomial => L::Multinomial,
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct MaskedTopicArgs {
     #[arg(
@@ -301,6 +324,14 @@ pub struct MaskedTopicArgs {
                      any-order / absorbing-diffusion style)."
     )]
     mask_schedule: MaskScheduleArg,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = MaskedLikelihoodArg::Nb,
+        help = "Masked-loss likelihood: nb (overdispersed counts) or multinomial (depth-invariant)."
+    )]
+    masked_likelihood: MaskedLikelihoodArg,
 
     #[arg(
         long,
@@ -869,6 +900,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
                 hi: args.mask_rate_hi,
             },
         },
+        likelihood: args.masked_likelihood.to_lib(),
         latent_gaussian,
         kl_weight: args.kl_weight,
     };
