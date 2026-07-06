@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "faba"
-version = "0.7.1"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "approx",
@@ -1849,6 +1849,7 @@ dependencies = [
  "auxiliary-data",
  "candle-util",
  "clap",
+ "clustering",
  "coitrees",
  "colored",
  "dashmap",
@@ -3532,7 +3533,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-util"
-version = "0.3.4"
+version = "0.3.6"
 dependencies = [
  "anndists",
  "anyhow",
@@ -3554,6 +3555,7 @@ dependencies = [
  "num-traits",
  "num_cpus",
  "parquet",
+ "petgraph",
  "rand 0.10.1",
  "rand_distr 0.6.0",
  "rayon",
@@ -5077,7 +5079,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.6.12"
+version = "0.6.13"
 dependencies = [
  "anyhow",
  "approx",

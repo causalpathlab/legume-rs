@@ -1,4 +1,3 @@
-use crate::cell_clustering::{cluster_cells_from_bam, ClusteringParams};
 use crate::common::*;
 use crate::data::cell_membership::CellMembership;
 use crate::editing::bed_output::process_all_bam_files_to_bed;
@@ -10,8 +9,9 @@ use crate::editing::pipeline::{
     find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, M6aContrastArgs,
 };
 use crate::editing::sifter::ModificationType;
+use crate::pipeline_util::mass_enrichment::MassEnrichmentArgs;
 use crate::pipeline_util::{
-    check_all_bam_indices, resolve_modality_gene_qc, resolve_umi_tag, GeneQcRequest,
+    check_all_bam_indices, resolve_modality_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest,
 };
 use crate::snp::io::load_snp_mask_from_parquet;
 
@@ -410,73 +410,11 @@ pub struct DartSeqCountArgs {
     )]
     pub mixture_prior_beta: f32,
 
-    /////////////////////////////
-    // Cell clustering options //
-    /////////////////////////////
-    #[arg(
-        long = "n-clusters",
-        default_value_t = 1,
-        help = "Number of cell clusters (1 = no clustering)",
-        long_help = "Number of cell clusters for automatic cell type assignment.\n\
-                     When set to 1 (default), all cells are treated as one group.\n\
-                     When > 1, cells are clustered via random projection + SVD +\n\
-                     k-means on gene expression profiles."
-    )]
-    n_clusters: usize,
-
-    #[arg(
-        long = "cluster-proj-dim",
-        default_value_t = 50,
-        help = "Random projection dimension for clustering",
-        long_help = "Dimensionality of the random projection used to compress\n\
-                     the gene expression matrix before SVD."
-    )]
-    cluster_proj_dim: usize,
-
-    #[arg(
-        long = "cluster-svd-dim",
-        default_value_t = 10,
-        help = "Number of SVD components for clustering",
-        long_help = "Number of leading singular vectors to retain after SVD.\n\
-                     These form the feature space for k-means."
-    )]
-    cluster_svd_dim: usize,
-
-    #[arg(
-        long = "cluster-block-size",
-        default_value_t = 100,
-        help = "Block size for clustering parallel processing",
-        long_help = "Number of columns processed per parallel block during\n\
-                     the random projection step."
-    )]
-    cluster_block_size: usize,
-
-    #[arg(
-        long = "cluster-max-iter",
-        default_value_t = 100,
-        help = "Maximum k-means iterations for clustering",
-        long_help = "Maximum number of k-means iterations before convergence\n\
-                     is declared."
-    )]
-    cluster_max_iter: usize,
-
-    #[arg(
-        long = "cluster-min-row-nnz",
-        default_value_t = 1,
-        help = "Minimum non-zeros per gene for clustering QC",
-        long_help = "Genes with fewer non-zero cells than this are removed\n\
-                     before clustering."
-    )]
-    cluster_min_row_nnz: usize,
-
-    #[arg(
-        long = "cluster-min-col-nnz",
-        default_value_t = 1,
-        help = "Minimum non-zeros per cell for clustering QC",
-        long_help = "Cells with fewer non-zero genes than this are removed\n\
-                     before clustering."
-    )]
-    cluster_min_col_nnz: usize,
+    ///////////////////////////////
+    // Mass-enrichment grouping   //
+    ///////////////////////////////
+    #[command(flatten)]
+    enrich: MassEnrichmentArgs,
 
     ////////////////////////
     // Gene expression QC //
@@ -722,6 +660,11 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             valid_cells_file: args.valid_cells_file.as_deref(),
             valid_genes_file: args.valid_genes_file.as_deref(),
             skip_gene_qc: args.skip_gene_qc,
+            persist: Some(GeneMatrixSink {
+                output_dir: &args.output,
+                backend: &args.backend,
+                zip: args.zip,
+            }),
         },
     )?;
     if gene_qc.is_some() && gff_map.is_empty() {
@@ -745,25 +688,24 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         );
         info!("Prefix matching: {}", !args.exact_barcode_match);
         Some(m)
-    } else if args.n_clusters > 1 {
-        // Generate membership via clustering
-        let params = ClusteringParams {
-            n_clusters: args.n_clusters,
-            proj_dim: args.cluster_proj_dim,
-            svd_dim: args.cluster_svd_dim,
-            block_size: args.cluster_block_size,
-            kmeans_max_iter: args.cluster_max_iter,
-            cell_barcode_tag: &args.cell_barcode_tag,
-            gene_barcode_tag: &args.gene_barcode_tag,
-            allow_prefix_matching: !args.exact_barcode_match,
-            min_row_nnz: args.cluster_min_row_nnz,
-            min_col_nnz: args.cluster_min_col_nnz,
-        };
-        let m = cluster_cells_from_bam(&signal_bam_files, &gff_map, &params)?;
-        info!("Generated {} cell clusters via clustering", args.n_clusters);
-        Some(m)
     } else {
-        None
+        // Generate membership by grouping cells for mass enrichment (returns None
+        // when n_clusters <= 1). Reuse the gene-count matrices QC just persisted so
+        // enrichment does not re-scan the BAMs. The instrument is built over the
+        // signal (wt) cells here by design; the pipeline builds it over the
+        // all-quant union instead (shared with ATOI) — see run_pipeline.
+        let matrix_paths: Vec<Box<str>> = gene_qc
+            .as_ref()
+            .map(|q| q.matrix_by_batch.values().cloned().collect())
+            .unwrap_or_default();
+        args.enrich.build_membership(
+            &signal_bam_files,
+            &gff_map,
+            &matrix_paths,
+            &args.cell_barcode_tag,
+            &args.gene_barcode_tag,
+            !args.exact_barcode_match,
+        )?
     };
 
     /////////////////////////////////
@@ -779,7 +721,9 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         info!("Loaded A-to-I mask with {} positions", mask.len());
         Some((None, mask))
     } else if args.detect_atoi {
-        let atoi_sites = find_all_conversion_sites(&gff_map, &atoi_params, None)?;
+        // Stratify the A-to-I masking pass by the same groups when enabled, so
+        // cell-type-specific A-to-I edits are also masked out of m6A candidates.
+        let atoi_sites = find_all_conversion_sites(&gff_map, &atoi_params, membership.as_ref())?;
         let n_atoi: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
         info!("Found {} A-to-I editing sites", n_atoi);
 

@@ -1,6 +1,6 @@
 [package]
 name = "matrix-util"
-version = "0.3.4"
+version = "0.3.6"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -37,6 +37,7 @@ log = { workspace = true }
 zip = { workspace = true }
 clustering = { workspace = true }
 leiden = { workspace = true }
+petgraph = { workspace = true }
 
 [features]
 default = []
