@@ -52,6 +52,39 @@ pub struct Site {
     pub n: Vec<u32>,
 }
 
+/// One branch's covered cells for a site: edited `k`, coverage `n`, pseudotime `x`,
+/// and total coverage — the per-(site, branch) input both trend estimators fit.
+pub struct BranchData {
+    pub k: Vec<u32>,
+    pub n: Vec<u32>,
+    pub x: Vec<f32>,
+    pub cov: u64,
+}
+
+/// Split a site's covered cells (`n > 0`) into per-branch buckets in a single pass
+/// over the cells — `O(ncell)`, versus rescanning once per branch. Bucket `l` holds
+/// the cells whose primary branch is `l`, in cell order.
+pub fn branch_buckets(site: &Site, lin: &Lineage) -> Vec<BranchData> {
+    let mut buckets: Vec<BranchData> = (0..lin.n_branches)
+        .map(|_| BranchData {
+            k: Vec::new(),
+            n: Vec::new(),
+            x: Vec::new(),
+            cov: 0,
+        })
+        .collect();
+    for c in 0..site.n.len() {
+        if site.n[c] > 0 {
+            let b = &mut buckets[lin.branch[c]];
+            b.k.push(site.k[c]);
+            b.n.push(site.n[c]);
+            b.x.push(lin.pseudotime[c]);
+            b.cov += site.n[c] as u64;
+        }
+    }
+    buckets
+}
+
 /// Open the modality site matrices, pair the two channels per (gene, subunit), and
 /// return per-site (k, n) vectors aligned to `cell_names`. Only sites with both
 /// channels present are returned. Multiple files are concatenated (per-file sites).

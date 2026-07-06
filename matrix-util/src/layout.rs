@@ -358,13 +358,12 @@ fn classical_mds_2d(d2: &Mat) -> Mat {
     if let Ok((u, s, _v)) = b.rsvd(rank) {
         let mut coords = Mat::zeros(n, 2);
         for dim in 0..2 {
-            let k = dim;
-            if k >= rank {
+            if dim >= rank {
                 break;
             }
-            let scale = s[k].max(0.0).sqrt(); // sqrt because SVD gives sqrt(eigenvalue)
+            let scale = s[dim].max(0.0).sqrt(); // sqrt because SVD gives sqrt(eigenvalue)
             for i in 0..n {
-                coords[(i, dim)] = u[(i, k)] * scale;
+                coords[(i, dim)] = u[(i, dim)] * scale;
             }
         }
         coords
@@ -381,13 +380,11 @@ fn classical_mds_2d(d2: &Mat) -> Mat {
         // Top two eigenvectors (see note above — do not skip the first).
         let mut coords = Mat::zeros(n, 2);
         for dim in 0..2 {
-            let k = dim;
-            if k >= order.len() {
+            if dim >= order.len() {
                 break;
             }
-            let lam = eig.eigenvalues[order[k]].max(0.0);
-            let s = lam.sqrt();
-            let ev = eig.eigenvectors.column(order[k]);
+            let s = eig.eigenvalues[order[dim]].max(0.0).sqrt();
+            let ev = eig.eigenvectors.column(order[dim]);
             for i in 0..n {
                 coords[(i, dim)] = s * ev[i];
             }
@@ -593,12 +590,12 @@ mod tests {
         let (blobs, per, d) = (3, 20, 5);
         let n = blobs * per;
         let mut data = Mat::zeros(n, d);
-        for b in 0..blobs {
+        for (b, center) in centers.iter().enumerate() {
             for p in 0..per {
                 let i = b * per + p;
                 let jit = |s: usize| ((i * 7 + s * 13) % 11) as f32 / 11.0 - 0.5;
-                data[(i, 0)] = centers[b][0] + jit(0) * 0.6;
-                data[(i, 1)] = centers[b][1] + jit(1) * 0.6;
+                data[(i, 0)] = center[0] + jit(0) * 0.6;
+                data[(i, 1)] = center[1] + jit(1) * 0.6;
                 for j in 2..d {
                     data[(i, j)] = jit(j) * 0.3;
                 }

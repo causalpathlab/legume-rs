@@ -47,12 +47,12 @@ fn cell_cloud(per: usize) -> DMatrix<f32> {
     let k = COORDS.len();
     let n = k * per;
     let mut z = DMatrix::<f32>::zeros(n, 2);
-    for i in 0..k {
+    for (i, coord) in COORDS.iter().enumerate() {
         for p in 0..per {
             let idx = i * per + p;
             let jitter = (p as f32 / per as f32 - 0.5) * 0.2;
-            z[(idx, 0)] = COORDS[i][0] + jitter;
-            z[(idx, 1)] = COORDS[i][1] + jitter * 0.5;
+            z[(idx, 0)] = coord[0] + jitter;
+            z[(idx, 1)] = coord[1] + jitter * 0.5;
         }
     }
     z
@@ -95,7 +95,7 @@ fn pseudotime_increases_toward_leaf() {
         fit_principal_curves(&z, &centroids, &edges, 0, &PrincipalCurveArgs::default()).unwrap();
 
     // Cell near trunk root (centroid 0) vs the far leaf (centroid 5).
-    let pt_trunk = res.pseudotime[0 * per + per / 2];
+    let pt_trunk = res.pseudotime[per / 2];
     let pt_leaf = res.pseudotime[5 * per + per / 2];
     assert!(
         pt_leaf > pt_trunk + 1.0,

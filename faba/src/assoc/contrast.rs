@@ -13,6 +13,7 @@
 
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use rayon::prelude::*;
 
 use enrichment::null::permute_indices;
 
@@ -54,41 +55,64 @@ pub(crate) fn bin_pseudotime(pt: &[f32], n_bins: usize) -> Vec<u32> {
         .collect()
 }
 
-/// One-vs-rest CMH numerators for every branch of one site, in a single pass over
-/// the site's covered cells. `num[L]` = Σ_bin (K_{L,bin} − expected).
-fn cmh_nums(
-    site: &Site,
-    covered: &[usize],
-    bins: &[u32],
-    branch: &[usize],
+/// Reusable per-(bin, branch) accumulators for the one-vs-rest CMH numerators — one
+/// flat `n_bins × n_branches` buffer pair, cleared and refilled per call so a site can
+/// reuse it across all permutations instead of allocating a fresh 2-D grid each time.
+struct CmhScratch {
+    aggk: Vec<u64>,
+    aggn: Vec<u64>,
     n_bins: usize,
     n_branches: usize,
-) -> Vec<f32> {
-    let mut aggk = vec![vec![0u64; n_branches]; n_bins];
-    let mut aggn = vec![vec![0u64; n_branches]; n_bins];
-    for &c in covered {
-        let (b, l) = (bins[c] as usize, branch[c]);
-        aggk[b][l] += site.k[c] as u64;
-        aggn[b][l] += site.n[c] as u64;
-    }
-    let mut num = vec![0f32; n_branches];
-    for b in 0..n_bins {
-        let sumk: u64 = aggk[b].iter().sum();
-        let sumn: u64 = aggn[b].iter().sum();
-        if sumn == 0 {
-            continue;
+}
+
+impl CmhScratch {
+    fn new(n_bins: usize, n_branches: usize) -> Self {
+        Self {
+            aggk: vec![0; n_bins * n_branches],
+            aggn: vec![0; n_bins * n_branches],
+            n_bins,
+            n_branches,
         }
-        let p_hat = sumk as f32 / sumn as f32;
-        for l in 0..n_branches {
-            let n1 = aggn[b][l];
-            let n0 = sumn - n1;
-            if n1 == 0 || n0 == 0 {
-                continue; // no contrast in this bin
+    }
+
+    /// One-vs-rest CMH numerators for every branch of one site, in a single pass over
+    /// the covered cells. `num[L]` = Σ_bin (K_{L,bin} − expected).
+    fn numerators(
+        &mut self,
+        site: &Site,
+        covered: &[usize],
+        bins: &[u32],
+        branch: &[usize],
+    ) -> Vec<f32> {
+        let nbr = self.n_branches;
+        self.aggk.fill(0);
+        self.aggn.fill(0);
+        for &c in covered {
+            let idx = bins[c] as usize * nbr + branch[c];
+            self.aggk[idx] += site.k[c] as u64;
+            self.aggn[idx] += site.n[c] as u64;
+        }
+        let mut num = vec![0f32; nbr];
+        for b in 0..self.n_bins {
+            let (row_k, row_n) = (
+                &self.aggk[b * nbr..(b + 1) * nbr],
+                &self.aggn[b * nbr..(b + 1) * nbr],
+            );
+            let sumn: u64 = row_n.iter().sum();
+            if sumn == 0 {
+                continue;
             }
-            num[l] += aggk[b][l] as f32 - n1 as f32 * p_hat;
+            let p_hat = row_k.iter().sum::<u64>() as f32 / sumn as f32;
+            for l in 0..nbr {
+                let n1 = row_n[l];
+                if n1 == 0 || sumn - n1 == 0 {
+                    continue; // no contrast in this bin
+                }
+                num[l] += row_k[l] as f32 - n1 as f32 * p_hat;
+            }
         }
+        num
     }
-    num
 }
 
 /// Run the counterfactual contrast for every (site, branch) that passes QC.
@@ -98,32 +122,49 @@ pub fn run_contrasts(sites: &[Site], lin: &Lineage, cfg: &AssocConfig) -> Vec<Br
 
     // Covered cells per site (n>0) — reused across observed + all permutations.
     let covered: Vec<Vec<usize>> = sites
-        .iter()
+        .par_iter()
         .map(|s| (0..ncell).filter(|&c| s.n[c] > 0).collect())
         .collect();
 
-    // Observed numerators.
+    // Observed one-vs-rest CMH numerators, per site.
     let obs: Vec<Vec<f32>> = sites
-        .iter()
+        .par_iter()
         .enumerate()
-        .map(|(si, s)| cmh_nums(s, &covered[si], &bins, &lin.branch, nb, nbr))
+        .map(|(si, s)| CmhScratch::new(nb, nbr).numerators(s, &covered[si], &bins, &lin.branch))
         .collect();
 
-    // Permutation null: shuffle branch labels within pseudotime bins.
-    let mut ge = vec![vec![0u32; nbr]; sites.len()];
-    let mut rng = SmallRng::seed_from_u64(cfg.seed);
-    for _ in 0..cfg.num_perm {
-        let pi = permute_indices(ncell, Some(&bins), &mut rng);
-        let pb: Vec<usize> = (0..ncell).map(|c| lin.branch[pi[c]]).collect();
-        for (si, s) in sites.iter().enumerate() {
-            let nums = cmh_nums(s, &covered[si], &bins, &pb, nb, nbr);
-            for l in 0..nbr {
-                if nums[l].abs() >= obs[si][l].abs() {
-                    ge[si][l] += 1;
+    // Precompute the within-bin branch-label permutations once, with a single
+    // sequential RNG — so the null is reproducible and independent of thread count.
+    // Only the per-site counting below runs in parallel; the perm set is shared.
+    let perms: Vec<Vec<usize>> = {
+        let mut rng = SmallRng::seed_from_u64(cfg.seed);
+        (0..cfg.num_perm)
+            .map(|_| {
+                let pi = permute_indices(ncell, Some(&bins), &mut rng);
+                (0..ncell).map(|c| lin.branch[pi[c]]).collect()
+            })
+            .collect()
+    };
+
+    // Permutation null: per site, count permutations whose |CMH| ≥ |observed|.
+    // Sites are independent → parallel over sites.
+    let ge: Vec<Vec<u32>> = sites
+        .par_iter()
+        .enumerate()
+        .map(|(si, s)| {
+            let mut scr = CmhScratch::new(nb, nbr);
+            let mut cnt = vec![0u32; nbr];
+            for pb in &perms {
+                let nums = scr.numerators(s, &covered[si], &bins, pb);
+                for l in 0..nbr {
+                    if nums[l].abs() >= obs[si][l].abs() {
+                        cnt[l] += 1;
+                    }
                 }
             }
-        }
-    }
+            cnt
+        })
+        .collect();
 
     // Assemble QC-passing results.
     let mut out = Vec::new();

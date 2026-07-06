@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "faba"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "approx",
@@ -1864,6 +1864,7 @@ dependencies = [
  "log",
  "matrix-param",
  "matrix-util",
+ "mcmc-util",
  "nalgebra 0.34.2",
  "nalgebra-sparse",
  "ndarray",
@@ -3533,7 +3534,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-util"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anndists",
  "anyhow",
