@@ -1529,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-sim"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "faba"
-version = "0.9.1"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "approx",
@@ -2658,7 +2658,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.2.17"
+version = "0.2.19"
 dependencies = [
  "anyhow",
  "auxiliary-data",
@@ -5079,7 +5079,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "anyhow",
  "approx",

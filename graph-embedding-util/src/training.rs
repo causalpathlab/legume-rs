@@ -17,6 +17,8 @@
 use crate::coarsen::AxisCoarsenings;
 use crate::data::UnifiedData;
 use crate::feature_network::FeatureNetworkSmoother;
+use crate::fit::lineage::PbLineageLevel;
+use crate::fit::projection::PbLevelVelocity;
 use crate::loss::{
     nce_loss, nce_loss_chain, nce_loss_identity, sample_chain_batch, sample_edge_batch,
     sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, ChainAxis,
@@ -26,8 +28,10 @@ use crate::loss::{
 };
 use crate::model::JointEmbedModel;
 use crate::progress::new_progress_bar;
+use candle_util::candle_core::{DType, Var};
 use candle_util::candle_core::{Device, Tensor};
 use candle_util::candle_nn::AdamW;
+use candle_util::candle_nn::VarMap;
 use log::info;
 use rand::{rngs::StdRng, RngExt, SeedableRng};
 use rand_distr::weighted::WeightedIndex;
@@ -151,14 +155,294 @@ pub struct CompositeTrainContext<'a> {
     /// ignored otherwise. Comes from
     /// `MultilevelCollapseOut::cell_to_pb_per_level`.
     pub cell_to_pb_per_level: Option<&'a [Vec<usize>]>,
+    /// Optional per-axis velocity-drift SEM term (lineage-DAG refine pass, M1 fixed
+    /// structure). Aligned 1:1 with `axes`: `None` for axes with no lineage structure
+    /// (the cell axis, and any pb level with no oriented edges), `Some` otherwise.
+    /// When set, each `Some` term's penalty is added to the per-step loss so its
+    /// pb embedding is pulled toward the velocity-consistent geometry.
+    pub lineage_sem: Option<&'a [Option<PbSemTerm>]>,
+    /// Optional per-axis learnable pb-DAG term (lineage-DAG refine pass, M2). Aligned
+    /// 1:1 with `axes` like `lineage_sem`, but its `W` is a learned adjacency
+    /// co-optimized with the embedding. Mutually exclusive with `lineage_sem`.
+    pub lineage_dag: Option<&'a [Option<PbDagTerm>]>,
+    /// Apply the `lineage_dag` structure loss only every `lineage_dag_stride` steps
+    /// (NCE still runs every step). The structure is a light prior on a warm-started
+    /// `W`; hammering it every step over-shapes the embedding, so we sample the DATA
+    /// side densely and the STRUCTURE side sparsely. `1` = every step; ignored unless
+    /// `lineage_dag` is set.
+    pub lineage_dag_stride: usize,
 }
 
+/// Device-side velocity-drift SEM term for one pb axis (lineage-DAG, M1 fixed
+/// structure). Precomputes the per-edge source/target index tensors, weights, and
+/// the constant drift `s·v̂_i`, so each training step is two `index_select`s plus
+/// elementwise ops. Penalizes `Σ_{i→j} w_ij ‖e_j − e_i − s·v̂_i‖² · λ / Σw`, i.e.
+/// a pb node should sit one velocity-step ahead of its parent along the flow.
+pub struct PbSemTerm {
+    /// `[E]` parent (source) node id per edge.
+    src: Tensor,
+    /// `[E]` child (target) node id per edge.
+    dst: Tensor,
+    /// `[E]` edge weight.
+    w: Tensor,
+    /// `[E, H]` constant drift `s·v̂_i` (unit velocity of the parent, scaled).
+    drift: Tensor,
+    /// `λ_sem / Σw` — the weight, folded with the `Σw` normalizer.
+    scale: f64,
+}
+
+impl PbSemTerm {
+    /// Build the device term for one level, or `None` when the level has no
+    /// oriented edges (nothing to penalize). `step` is `s`, `weight` is `λ_sem`.
+    pub fn new(
+        level: &PbLineageLevel,
+        h: usize,
+        step: f32,
+        weight: f32,
+        dev: &Device,
+    ) -> anyhow::Result<Option<Self>> {
+        if level.edges.is_empty() {
+            return Ok(None);
+        }
+        let e = level.edges.len();
+        let mut src = Vec::with_capacity(e);
+        let mut dst = Vec::with_capacity(e);
+        let mut w = Vec::with_capacity(e);
+        let mut drift = Vec::with_capacity(e * h);
+        let mut wsum = 0f32;
+        for &(i, j, wij) in &level.edges {
+            src.push(i);
+            dst.push(j);
+            w.push(wij);
+            wsum += wij;
+            let vi = &level.velocity[i as usize * h..(i as usize + 1) * h];
+            for &vk in vi {
+                drift.push(step * vk);
+            }
+        }
+        Ok(Some(Self {
+            src: Tensor::from_vec(src, e, dev)?,
+            dst: Tensor::from_vec(dst, e, dev)?,
+            w: Tensor::from_vec(w, e, dev)?,
+            drift: Tensor::from_vec(drift, (e, h), dev)?,
+            scale: f64::from(weight) / f64::from(wsum.max(1e-8)),
+        }))
+    }
+}
+
+/// `tr(A) = Σ_i A_ii`, via the elementwise product with the identity `eye`.
+fn trace(a: &Tensor, eye: &Tensor) -> anyhow::Result<Tensor> {
+    Ok(a.mul(eye)?.sum_all()?)
+}
+
+/// DAGMA/NOTEARS-style acyclicity surrogate `Σ_{k=1}^K tr((W∘W)^k)/k! / P` — candle
+/// has no differentiable log-det, so this truncated trace-of-powers of `W∘W` stands
+/// in for `tr(e^{W∘W}) − P`: it is `≈ 0` iff `W` is acyclic (a nilpotent adjacency
+/// has zero-trace powers) and strictly positive when `W` carries a cycle.
+fn acyclicity_series(
+    w_eff: &Tensor,
+    eye: &Tensor,
+    order: usize,
+    p: usize,
+) -> anyhow::Result<Tensor> {
+    let a = w_eff.sqr()?; // W ∘ W, [P, P]
+    let mut ak = a.clone();
+    let mut h = trace(&ak, eye)?; // k = 1
+    let mut fact = 1.0f64;
+    for k in 2..=order {
+        ak = ak.matmul(&a)?;
+        fact *= k as f64;
+        h = (h + trace(&ak, eye)?.affine(1.0 / fact, 0.0)?)?;
+    }
+    Ok(h.affine(1.0 / p as f64, 0.0)?)
+}
+
+/// Velocity-drift SEM penalty on one axis's pb embedding `e_cell`, differentiable
+/// in `e_cell`: `λ · (Σ_ij w_ij ‖e_j − e_i − s·v̂_i‖²) / Σw`.
+fn sem_penalty(e_cell: &Tensor, term: &PbSemTerm) -> anyhow::Result<Tensor> {
+    let e_src = e_cell.index_select(&term.src, 0)?;
+    let e_dst = e_cell.index_select(&term.dst, 0)?;
+    let resid = e_dst.sub(&e_src)?.sub(&term.drift)?; // [E, H]
+    let sq = resid.sqr()?.sum(1)?; // [E]
+    let weighted = sq.mul(&term.w)?.sum_all()?; // scalar
+    Ok(weighted.affine(term.scale, 0.0)?)
+}
+
+/// Hyperparameters for the learnable pb-DAG term (lineage-DAG, M2).
+#[derive(Clone, Copy)]
+pub struct PbDagParams {
+    /// Velocity-drift step `s` in the SEM residual `e_j − Σ_i W_ij(e_i + s·v̂_i)`.
+    pub step: f32,
+    /// Weight on the SEM reconstruction residual.
+    pub sem_weight: f32,
+    /// Weight on the L1 sparsity penalty `‖W‖_1`.
+    pub l1_weight: f32,
+    /// Weight on the DAGMA-style acyclicity penalty.
+    pub acyc_weight: f32,
+    /// Truncation order `K` of the trace-of-powers acyclicity surrogate
+    /// `Σ_{k=1}^K tr((W∘W)^k)/k!` (≈ `tr(e^{W∘W}) − P`, zero iff acyclic).
+    pub acyc_order: usize,
+}
+
+impl Default for PbDagParams {
+    fn default() -> Self {
+        Self {
+            step: 2.0,
+            sem_weight: 1.0,
+            l1_weight: 0.01,
+            acyc_weight: 0.3,
+            acyc_order: 4,
+        }
+    }
+}
+
+/// Learnable directed pb-DAG term for one level (lineage-DAG, M2). Holds a learnable
+/// adjacency `W [P×P]` (registered in the varmap, so AdamW co-optimizes it with the
+/// embedding) plus the constant drift `s·v̂`, an identity, and a fixed **forward
+/// candidate mask** derived from the exogenous velocity. `W` is restricted to
+/// velocity-forward edges by construction (`W_eff = W ∘ fwd_mask`), so the learned
+/// DAG cannot run against the velocity field and is (near-)acyclic for free — this is
+/// the "velocity anchors orientation" idea as a hard constraint rather than a soft
+/// penalty. [`Self::dag_loss`] is `sem·‖E − W_eff(E + s·v̂)‖² + l1·‖W_eff‖₁ +
+/// acyc·h(W_eff)`, differentiable in both `E` and `W`.
+pub struct PbDagTerm {
+    /// Learnable adjacency `[P, P]` (Var tensor).
+    w: Tensor,
+    /// Constant drift `s·v̂` `[P, H]` (parent's own velocity step).
+    drift: Tensor,
+    /// Identity `[P, P]` — used for the trace via `(A∘I).sum`.
+    eye: Tensor,
+    /// Forward candidate mask `[P, P]`: `1` where edge `i→j` is velocity-forward
+    /// (`⟨θ_j − θ_i, v̂_i⟩ > 0`, `i` has velocity, `j ≠ i`), `0` otherwise. Multiplied
+    /// into `W` so only forward edges can carry weight.
+    fwd_mask: Tensor,
+    params: PbDagParams,
+    p: usize,
+}
+
+impl PbDagTerm {
+    /// Build the learnable term for one level, registering the `W` Var under
+    /// `var_name`. Returns `None` when the level has fewer than two nodes. The
+    /// forward-orientation mask and drift are fixed from the warm-up velocity/identity
+    /// (`vel.theta` / `vel.delta`). `w_init` warm-starts `W` from a fixed structure
+    /// (M1's velocity-oriented KNN, `[p×p]` row-major) so SGD refines from a correctly-
+    /// oriented start; `None` zero-initializes (the DAGMA-clean but unstable start).
+    pub fn new(
+        vel: &PbLevelVelocity,
+        h: usize,
+        params: &PbDagParams,
+        var_name: &str,
+        varmap: &VarMap,
+        dev: &Device,
+        w_init: Option<&[f32]>,
+    ) -> anyhow::Result<Option<Self>> {
+        let p = vel.n_pb;
+        if p < 2 {
+            return Ok(None);
+        }
+        // Unit velocity v̂ per node (zero when ‖δ‖ ≈ 0), shared with the lineage graph.
+        let (vhat, has_vel) = crate::fit::lineage::unit_velocity(vel, h);
+        // Constant drift s·v̂.
+        let drift: Vec<f32> = vhat.iter().map(|x| params.step * x).collect();
+        // Forward candidate mask: keep W_ij only where j is velocity-forward of i
+        // (⟨θ_j − θ_i, v̂_i⟩ > 0). Undefined-velocity rows and the diagonal stay 0, so
+        // the learned DAG is forward-oriented by construction. θ is the warm-up identity.
+        let theta = &vel.theta;
+        let mut fwd = vec![0f32; p * p];
+        for i in 0..p {
+            if !has_vel[i] {
+                continue;
+            }
+            let ti = &theta[i * h..(i + 1) * h];
+            let vi = &vhat[i * h..(i + 1) * h];
+            for j in 0..p {
+                if j == i {
+                    continue;
+                }
+                let tj = &theta[j * h..(j + 1) * h];
+                let f: f32 = (0..h).map(|c| (tj[c] - ti[c]) * vi[c]).sum();
+                if f > 0.0 {
+                    fwd[i * p + j] = 1.0;
+                }
+            }
+        }
+        let eye: Vec<f32> = (0..p * p)
+            .map(|idx| f32::from(idx / p == idx % p))
+            .collect();
+
+        let w0 = match w_init {
+            Some(init) => {
+                anyhow::ensure!(
+                    init.len() == p * p,
+                    "w_init length {} != p·p {}",
+                    init.len(),
+                    p * p
+                );
+                Tensor::from_vec(init.to_vec(), (p, p), dev)?
+            }
+            None => Tensor::zeros((p, p), DType::F32, dev)?,
+        };
+        let w_var = Var::from_tensor(&w0)?;
+        varmap
+            .data()
+            .lock()
+            .unwrap()
+            .insert(var_name.to_string(), w_var.clone());
+
+        Ok(Some(Self {
+            w: w_var.as_tensor().clone(),
+            drift: Tensor::from_vec(drift, (p, h), dev)?,
+            eye: Tensor::from_vec(eye, (p, p), dev)?,
+            fwd_mask: Tensor::from_vec(fwd, (p, p), dev)?,
+            params: *params,
+            p,
+        }))
+    }
+
+    /// Full learnable-DAG loss for this level, differentiable in `e_cell` and `W`.
+    pub fn dag_loss(&self, e_cell: &Tensor) -> anyhow::Result<Tensor> {
+        let w_eff = self.w.mul(&self.fwd_mask)?; // forward-only (also zeros self-loops)
+                                                 // SEM reconstruction: E − W_effᵀ · (E + s·v̂). `fwd_mask[i,j]=1` marks j as
+                                                 // velocity-forward of i, so W_eff[i,j] is the edge i→j (i earlier, j later). We
+                                                 // must reconstruct the CHILD j from its PARENT i (`e_j ≈ e_i + s·v̂_i`), i.e.
+                                                 // `recon[j] = Σ_i W_eff[i,j]·(e_i + drift_i)` — that is `W_effᵀ·(E+drift)`, NOT
+                                                 // `W_eff·(...)`. Without the transpose each node is reconstructed from its
+                                                 // successors and the whole velocity-drift convention runs backward (M1's SEM,
+                                                 // `e_j − e_i − s·v̂_i`, is the correct forward form we match here). Normalize PER
+                                                 // NODE (sum over H, mean over P) — `mean_all` would divide the W-gradient by P·H.
+        let parent = e_cell.add(&self.drift)?; // [P, H]
+        let recon = w_eff.t()?.matmul(&parent)?; // [P, H] — Wᵀ: child from parent
+        let sem = e_cell.sub(&recon)?.sqr()?.sum(1)?.mean(0)?;
+        // L1 sparsity (per-node budget).
+        let l1 = w_eff.abs()?.sum(1)?.mean(0)?;
+        // Acyclicity surrogate.
+        let acyc = self.acyclicity(&w_eff)?;
+        let loss = sem.affine(f64::from(self.params.sem_weight), 0.0)?;
+        let loss = (loss + l1.affine(f64::from(self.params.l1_weight), 0.0)?)?;
+        let loss = (loss + acyc.affine(f64::from(self.params.acyc_weight), 0.0)?)?;
+        Ok(loss)
+    }
+
+    /// DAGMA/NOTEARS-style acyclicity surrogate (see [`acyclicity_series`]).
+    fn acyclicity(&self, w_eff: &Tensor) -> anyhow::Result<Tensor> {
+        acyclicity_series(w_eff, &self.eye, self.params.acyc_order, self.p)
+    }
+
+    /// The current effective forward adjacency `W_eff = W ∘ fwd_mask` as a host
+    /// `[P, P]` row-major buffer — consumed by the phase-2 cell lift (M3).
+    pub fn w_dense(&self) -> anyhow::Result<Vec<f32>> {
+        Ok(self.w.mul(&self.fwd_mask)?.flatten_all()?.to_vec1()?)
+    }
+}
+
+/// Returns the final epoch's mean composite loss (an NCE ≈ neg-log-likelihood proxy),
+/// used as a fit-hygiene signal by the lineage QC.
 pub fn train_composite(
     ctx: &CompositeTrainContext,
     opt: &mut AdamW,
     params: &TrainingParams,
     smoother: Option<&mut FeatureNetworkSmoother>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<f32> {
     assert!(!ctx.axes.is_empty(), "composite training needs >= 1 axis");
 
     // Shared style — consistent with every other faba/senna progress bar
@@ -168,6 +452,10 @@ pub fn train_composite(
     let mut rng = StdRng::seed_from_u64(params.seed);
     let refresh_every = smoother.as_ref().map_or(0, |s| s.refresh_epochs);
     let mut smoother = smoother;
+    // Global step index (across epochs) — gates the sparse structure-side update.
+    let mut global_step = 0usize;
+    let dag_stride = ctx.lineage_dag_stride.max(1);
+    let mut last_avg = 0f32; // final-epoch mean loss, returned as the fit-hygiene signal
 
     // Smoother refreshes against the *shared* E_feat — pull it from the
     // first axis (every axis points at the same tensor).
@@ -258,6 +546,30 @@ pub fn train_composite(
                     loss = (loss + pen)?;
                 }
             }
+            // Velocity-drift SEM residual (lineage-DAG refine pass). One penalty per
+            // pb axis with oriented edges, pulling its pb embedding toward the
+            // velocity-consistent geometry; gradients reach `E_feat` through the NCE
+            // coupling. `None` (default) is a no-op → byte-identical training.
+            if let Some(terms) = ctx.lineage_sem {
+                for (axis, term) in ctx.axes.iter().zip(terms) {
+                    if let Some(t) = term {
+                        loss = (loss + sem_penalty(&axis.model.e_cell, t)?)?;
+                    }
+                }
+            }
+            // Learnable pb-DAG (M2): the SEM/acyclicity/sparsity/orientation loss on
+            // the learned `W`. Applied only every `dag_stride` steps — the DATA side
+            // (NCE) trains every step, the STRUCTURE side (`W`) only occasionally, so a
+            // warm-started `W` is nudged rather than hammered (over-shaping collapse).
+            if let Some(terms) = ctx.lineage_dag {
+                if global_step.is_multiple_of(dag_stride) {
+                    for (axis, term) in ctx.axes.iter().zip(terms) {
+                        if let Some(t) = term {
+                            loss = (loss + t.dag_loss(&axis.model.e_cell)?)?;
+                        }
+                    }
+                }
+            }
             // Backward + optional global-norm gradient clip + step.
             candle_util::grad_clip::clipped_backward_step(
                 opt,
@@ -270,6 +582,7 @@ pub fn train_composite(
                 Some(a) => (a + ld)?,
             });
             n_steps += 1;
+            global_step += 1;
 
             if ctx.stop.load(Ordering::Relaxed) {
                 break;
@@ -281,6 +594,7 @@ pub fn train_composite(
             Some(t) => t.to_scalar::<f32>()? / n_steps.max(1) as f32,
             None => 0f32,
         };
+        last_avg = avg;
         prog_bar.set_message(format!("loss={avg:.3}"));
         prog_bar.inc(1);
         // Every-epoch info; senna/pinto's `--verbose` flag raises the
@@ -300,12 +614,12 @@ pub fn train_composite(
                 epoch + 1,
                 params.epochs
             );
-            return Ok(());
+            return Ok(last_avg);
         }
     }
     prog_bar.finish_and_clear();
 
-    Ok(())
+    Ok(last_avg)
 }
 
 /// One step of `CompositeMode::Sum` — sample a minibatch from every
@@ -602,3 +916,6 @@ fn single_axis_step(
     };
     Ok(Some(bip_loss))
 }
+
+#[cfg(test)]
+mod tests;

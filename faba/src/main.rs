@@ -299,21 +299,20 @@ Example:\n  \
     #[command(
         name = "gem",
         aliases = ["gem-embedding"],
-        about = "GEM: gene embedding (spliced + unspliced counts)",
-        long_about = "GEM — joint embedding of gene counts (spliced + unspliced)\n\
-            into one cell/gene space, over the shared graph_embedding_util engine.\n\n\
-            Each feature row `{gene}/count/{spliced|unspliced}` embeds as a base\n\
-            gene vector β_g — a gene's two tracks share one identity (β-sharing):\n\
-            spliced  count:  e_f = β_g\n\
-              unspliced count: e_f = β_g\n\
-            A single Poisson likelihood on counts. Cell identity comes from the\n\
-            SPLICED projection θ (mature mRNA = current state), written RAW as\n\
-            `{out}.latent.parquet` (magnitude kept); the same phase-2 pass fits an\n\
-            analytic velocity increment δ to the unspliced edges (identity held\n\
-            fixed) and writes it RAW as `{out}.velocity.parquet` (‖δ‖ = speed). The\n\
-            nascent state is just θ+δ = latent+velocity. No post-hoc unit-norm or\n\
-            co-embedding is written; per-gene velocity, if wanted, is the in-model\n\
-            δ_g (`--delta-l2` → `{out}.delta_dictionary.parquet`).",
+        about = "GEM: Geodesic Embedding + Motion — velocity (tangent) + lineage (path) in one cell space",
+        long_about = "GEM — Geodesic Embedding + Motion: a joint cell-feature embedding.\n\
+            Motion is the local velocity δ (the tangent); the lineage is the geodesic path it traces.\n\
+            Runs over the shared graph_embedding_util engine, which is modality-agnostic.\n\
+            Fed gene counts (spliced + unspliced) today; embeds any per-feature count.\n\n\
+            Per-gene β-sharing: each `{gene}/count/{spliced|unspliced}` row embeds as β_g.\n\
+            A gene's spliced and unspliced tracks thus share one identity.\n\
+            Cell identity is the spliced projection θ → `{out}.latent.parquet` (raw).\n\
+            A velocity increment δ is fit from the unspliced edges → `{out}.velocity.parquet`.\n\
+            The nascent state is just θ+δ; ‖δ‖ is speed.\n\
+            Per-gene velocity, if wanted, is the in-model δ_g (`--delta-l2`).\n\n\
+            With `--lineage-dag` it also shapes the embedding along a pseudobulk lineage.\n\
+            It then writes a per-cell pseudotime + fate backbone.\n\
+            That backbone is a prior for `faba lineage`, not a replacement.",
         after_long_help = "\
 	Example:\n\
   faba gem --genes out/rep1_wt_genes.zarr.zip -o out/gem\n\n\

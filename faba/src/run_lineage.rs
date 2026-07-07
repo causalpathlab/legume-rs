@@ -20,9 +20,13 @@ use clap::{Args, ValueEnum};
 use log::{info, warn};
 use std::path::Path;
 
+use graph_embedding_util::type_annotation::{
+    annotate_with_communities, CommunityCalls, InputEmbeddings, TermOraConfig,
+};
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::layout::{phate_layout_2d, project_cells_nystrom, PhateArgs};
+use matrix_util::parquet::{write_named_table, Column};
 use matrix_util::principal_curve::{fit_principal_curves, PrincipalCurveArgs, PrincipalCurves};
 use matrix_util::principal_graph::{
     kmeans_centroids, mst_from_sqdist, pairwise_sqdist_rows_to_rows,
@@ -109,6 +113,52 @@ pub struct LineageArgs {
     pub root_cell: Option<Box<str>>,
 
     #[arg(
+        long = "root-from-gem",
+        help = "Anchor the root at gem's inferred root (the min-pseudotime cell in \
+                {from}.pseudotime.parquet). Uses gem's velocity-DAG root inference — more \
+                robust than the per-edge flux pick — while lineage still fits the curves. \
+                Overridden by --root-node / --root-cell; falls back to flux if the file is \
+                absent."
+    )]
+    pub root_from_gem: bool,
+
+    #[arg(
+        long,
+        help = "Marker TSV (gene<TAB>celltype) to name trajectory nodes by cell type",
+        long_help = "Annotate each trajectory node with a cell type by term over-representation \
+                     (the `faba annotate` core) run over the MST-node grouping, so the call \
+                     carries the same permutation-calibrated confidence.\n\
+                     Input: a `gene<TAB>celltype` TSV (tab/comma/space delimited).\n\
+                     Reads gene β from `{from}.beta_dictionary.parquet` and raw θ from \
+                     `{from}.latent.parquet`. Writes `{out}.lineage_annot.*` (per-cell calls \
+                     keyed by MST node) and `{out}.trajectory_annotation.parquet` \
+                     (node → role[root|terminal|internal] → cell_type → confidence)."
+    )]
+    pub markers: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 500,
+        help = "With --markers: permutation draws calibrating each node's over-representation"
+    )]
+    pub marker_num_perm: usize,
+
+    #[arg(
+        long,
+        help = "Cell Ontology OBO file for the --markers ontology layer (needs --marker-label-cl)",
+        long_help = "Optional. Adds a TreeBH Cell-Ontology layer over the per-node marker calls, \
+                     as in `faba annotate`. Give the OBO graph here and the marker-type → CL id \
+                     map via --marker-label-cl (both required together)."
+    )]
+    pub marker_obo: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Curated `label<TAB>CL:id` TSV pairing marker types to CL ids (with --marker-obo)"
+    )]
+    pub marker_label_cl: Option<Box<str>>,
+
+    #[arg(
         long,
         default_value_t = 100,
         help = "k-means iterations for centroid initialization"
@@ -159,14 +209,16 @@ fn choose_k(n: usize, requested: Option<usize>) -> usize {
     requested.unwrap_or_else(|| (n / 10).clamp(2, 200)).min(n)
 }
 
-/// Resolve the root MST node: `--root-node` (validated), else `--root-cell` (the
-/// node of the named cell's cluster), else the velocity-picked root, else node 0.
+/// Resolve the root MST node, in priority order: `--root-node` (validated), `--root-cell`
+/// (the node of the named cell's cluster), `gem_root` (the centroid of gem's inferred
+/// root cell, from `--root-from-gem`), the velocity-flux-picked root, else node 0.
 fn resolve_root(
     root_node: Option<usize>,
     root_cell: Option<&str>,
     cell_names: &[Box<str>],
     labels: &[usize],
     k: usize,
+    gem_root: Option<usize>,
     velocity_root: Option<usize>,
 ) -> Result<usize> {
     if let Some(r) = root_node {
@@ -178,8 +230,50 @@ fn resolve_root(
             .position(|c| c.as_ref() == name)
             .with_context(|| format!("--root-cell '{name}' not found in latent"))?;
         Ok(labels[idx])
+    } else if let Some(r) = gem_root {
+        Ok(r)
     } else {
         Ok(velocity_root.unwrap_or(0))
+    }
+}
+
+/// Map gem's inferred root to an MST centroid (for `--root-from-gem`): read
+/// `{prefix}.pseudotime.parquet`, take the barcode with minimum pseudotime (τ ≈ 0, the
+/// velocity-DAG source), find it in the latent, and return its cluster label. `None`
+/// (with a warning) when the file is absent or the barcode can't be matched — the caller
+/// then falls back to the velocity-flux root.
+fn gem_root_node(prefix: &str, cell_names: &[Box<str>], labels: &[usize]) -> Option<usize> {
+    let path = format!("{prefix}.pseudotime.parquet");
+    if !Path::new(&path).exists() {
+        warn!("--root-from-gem: {path} absent; falling back to the velocity-flux root");
+        return None;
+    }
+    let pt = match DMatrix::<f32>::from_parquet(&path) {
+        Ok(pt) => pt,
+        Err(e) => {
+            warn!("--root-from-gem: cannot read {path} ({e}); falling back to velocity root");
+            return None;
+        }
+    };
+    // Column 0 is `pseudotime` (column 1 is `ambiguity`); take the row-minimum barcode.
+    let rmin = (0..pt.mat.nrows()).min_by(|&a, &b| {
+        pt.mat[(a, 0)]
+            .partial_cmp(&pt.mat[(b, 0)])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+    let root_bc = pt.rows.get(rmin)?.as_ref();
+    match cell_names.iter().position(|c| c.as_ref() == root_bc) {
+        Some(idx) => {
+            info!(
+                "--root-from-gem: root cell '{root_bc}' (τ≈min) → MST node {}",
+                labels[idx]
+            );
+            Some(labels[idx])
+        }
+        None => {
+            warn!("--root-from-gem: root barcode '{root_bc}' not in latent; using flux root");
+            None
+        }
     }
 }
 
@@ -197,6 +291,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     let cell = DMatrix::<f32>::from_parquet(&latent_path)
         .with_context(|| format!("reading latent embedding {latent_path}"))?;
     let cell_names = cell.rows;
+    // Raw θ kept only for `--markers` node annotation, which scores in the same raw
+    // latent space `faba annotate` uses (the L2-normalized `theta` below drives the fit).
+    let raw_theta: Option<DMatrix<f32>> = args.markers.is_some().then(|| cell.mat.clone());
     let theta = if args.no_normalize_latent {
         cell.mat
     } else {
@@ -249,12 +346,19 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
 
     // ---- root selection ----
     let velocity_root = have_velocity.then(|| pick_velocity_root(&edges, &flux, k));
+    // Optional gem hand-off: anchor the root at gem's velocity-DAG-inferred root
+    // (min-pseudotime cell), more robust than the per-edge flux pick.
+    let gem_root = args
+        .root_from_gem
+        .then(|| gem_root_node(prefix, &cell_names, &labels))
+        .flatten();
     let root = resolve_root(
         args.root_node,
         args.root_cell.as_deref(),
         &cell_names,
         &labels,
         k,
+        gem_root,
         velocity_root,
     )?;
     info!("lineage root node = {root}");
@@ -304,6 +408,24 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     )?;
     write_curves(&curves, &format!("{out}.curves.parquet"))?;
 
+    // ---- optional marker annotation of the trajectory nodes ----
+    if let (Some(markers), Some(raw)) = (args.markers.as_deref(), raw_theta.as_ref()) {
+        annotate_trajectory(&AnnotateTrajArgs {
+            prefix,
+            out: &out,
+            markers,
+            raw_theta: raw,
+            cell_names: &cell_names,
+            labels: &labels,
+            k,
+            root,
+            directed: &directed,
+            num_perm: args.marker_num_perm,
+            obo: args.marker_obo.as_deref(),
+            label_cl: args.marker_label_cl.as_deref(),
+        })?;
+    }
+
     // ---- optional PHATE 2D layout (cells + nodes + curves projected) ----
     if args.layout == LayoutKind::Phate {
         let phate = PhateArgs {
@@ -321,6 +443,107 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
             &out,
         )?;
     }
+    Ok(())
+}
+
+////////////////////////////////////////////////////////////////////////
+// Marker annotation of the trajectory
+////////////////////////////////////////////////////////////////////////
+
+/// Inputs for [`annotate_trajectory`] — bundled to keep the fan-in a struct.
+struct AnnotateTrajArgs<'a> {
+    prefix: &'a str,
+    out: &'a str,
+    markers: &'a str,
+    /// Raw θ `[N × H]` — the same latent space `faba annotate` scores in.
+    raw_theta: &'a DMatrix<f32>,
+    cell_names: &'a [Box<str>],
+    /// Per-cell MST-node id (the k-means `labels`) — the annotation clustering.
+    labels: &'a [usize],
+    /// Number of MST nodes.
+    k: usize,
+    root: usize,
+    /// Velocity-oriented directed edges `(from, to)`; a leaf (never a `from`) is terminal.
+    directed: &'a [(usize, usize)],
+    num_perm: usize,
+    obo: Option<&'a str>,
+    label_cl: Option<&'a str>,
+}
+
+/// Name each trajectory node by cell type: run the `faba annotate` term-ORA core over the
+/// MST-node grouping (raw θ vs the gem β dictionary), giving every node a permutation-
+/// calibrated call, then summarize the root / terminals / branches. Writes
+/// `{out}.lineage_annot.*` and `{out}.trajectory_annotation.parquet`.
+fn annotate_trajectory(a: &AnnotateTrajArgs) -> Result<()> {
+    let beta_path = format!("{}.beta_dictionary.parquet", a.prefix);
+    let beta = DMatrix::<f32>::from_parquet(&beta_path)
+        .with_context(|| format!("--markers needs the gem β dictionary {beta_path}"))?;
+    let cfg = TermOraConfig {
+        n_perm: a.num_perm,
+        obo: a.obo.map(str::to_owned),
+        label_cl: a.label_cl.map(str::to_owned),
+        ..TermOraConfig::default()
+    };
+    let input = InputEmbeddings {
+        feature_emb: &beta.mat,
+        gene_names: &beta.rows,
+        cell_emb: a.raw_theta,
+        cell_names: a.cell_names,
+    };
+    let calls = annotate_with_communities(
+        &input,
+        a.markers,
+        &format!("{}.lineage_annot", a.out),
+        true, // IDF-weight markers, as `faba annotate` does by default
+        a.labels,
+        a.k,
+        &cfg,
+    )?;
+    write_trajectory_annotation(a.out, &calls, a.root, a.directed, a.k)?;
+    Ok(())
+}
+
+/// Cross the per-node calls with the oriented MST → the labeled trajectory: one row per
+/// MST node — `role` (root | terminal | internal), `cell_type`, `confidence`.
+fn write_trajectory_annotation(
+    out: &str,
+    calls: &CommunityCalls,
+    root: usize,
+    directed: &[(usize, usize)],
+    k: usize,
+) -> Result<()> {
+    // A terminal is a directed leaf: it never appears as a `from`.
+    let mut has_out = vec![false; k];
+    for &(f, _) in directed {
+        if f < k {
+            has_out[f] = true;
+        }
+    }
+    let node_names = numbered("node_", k);
+    let roles: Vec<Box<str>> = (0..k)
+        .map(|node| {
+            if node == root {
+                Box::from("root")
+            } else if !has_out[node] {
+                Box::from("terminal")
+            } else {
+                Box::from("internal")
+            }
+        })
+        .collect();
+    let path = format!("{out}.trajectory_annotation.parquet");
+    write_named_table(
+        &path,
+        "node",
+        &node_names,
+        &[
+            (Box::from("role"), Column::Str(&roles)),
+            (Box::from("cell_type"), Column::Str(&calls.labels)),
+            (Box::from("confidence"), Column::F32(&calls.confidence)),
+        ],
+    )
+    .with_context(|| format!("writing {path}"))?;
+    info!("wrote {path} ({k} nodes; root={root})");
     Ok(())
 }
 
