@@ -79,7 +79,10 @@ pub use output::write_label_tsvs;
 /// (Euclidean nearest-centroid → QC → cluster → hypergeometric + permutation
 /// calibration → optional TreeBH ontology). The statistically-firm successor to
 /// [`annotate_embeddings`]; `faba gem-annotate` drives it.
-pub use term_ora::{annotate_embeddings_ora, TermOraConfig, TERM_ORA_OUTPUT_SUFFIXES};
+pub use term_ora::{
+    annotate_embeddings_ora, annotate_with_communities, CommunityCalls, TermOraConfig,
+    TERM_ORA_OUTPUT_SUFFIXES,
+};
 
 /// Bind the generic `enrichment` TreeBH ontology core to the concrete OBO
 /// loader (load OBO + `label→CL`, inject access closures, run). Shared by the
