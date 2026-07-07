@@ -582,10 +582,19 @@ pub fn run_gene_count_qc(
                 sink.zip,
             );
             let merged: Vec<_> = spliced.into_iter().chain(unspliced).collect();
-            format_data_triplets_shared(merged, &feature_to_index, &cell_to_index, row_names, col_names)
-                .to_backend(&out.write_path)?;
+            format_data_triplets_shared(
+                merged,
+                &feature_to_index,
+                &cell_to_index,
+                row_names,
+                col_names,
+            )
+            .to_backend(&out.write_path)?;
             out.finalize()?;
-            info!("{}: wrote gene-count matrix to {}", batch_name, out.target_path);
+            info!(
+                "{}: wrote gene-count matrix to {}",
+                batch_name, out.target_path
+            );
             matrix_by_batch.insert(bam_file.clone(), out.target_path);
         }
 

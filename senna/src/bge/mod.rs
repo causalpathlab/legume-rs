@@ -642,6 +642,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             feat_factor: None,
             // δ_g splice offset is gem-only (needs feat_factor); off for bge.
             delta_l2: 0.0,
+            // Lineage-DAG is a gem-only (β-sharing) path; off for bge.
+            lineage_dag: false,
+            dag_learnable: false,
+            lineage_smooth: false,
         })
     };
 

@@ -161,6 +161,42 @@ pub struct TrainArgs {
 		if their global L2 norm exceeds this, bounding embedding inflation on loss spikes."
     )]
     pub max_grad_norm: f32,
+
+    #[arg(
+        long = "lineage-dag",
+        default_value_t = false,
+        help = "Lineage-aware pseudobulk DAG (experimental; default off).",
+        long_help = "Inject developmental structure at pseudobulk scale. When set, gem runs an\n\
+                     analytic pb-level velocity readout after phase 1 (identity θ_pb and\n\
+                     velocity δ_pb per pseudobulk per collapse level) that orients a directed\n\
+                     lineage structure over pseudobulks. Off by default — the per-cell embedding\n\
+                     is byte-identical to a plain run. Only meaningful with spliced+unspliced\n\
+                     input (β-sharing)."
+    )]
+    pub lineage_dag: bool,
+
+    #[arg(
+        long = "dag-learn",
+        default_value_t = false,
+        help = "Lineage-DAG: learn the pseudobulk DAG (M2) instead of a fixed graph.",
+        long_help = "Within `--lineage-dag`, learn the directed pb structure `W` jointly with\n\
+                     the embedding (velocity-drift SEM + DAGMA-style acyclicity + L1 +\n\
+                     velocity-orientation prior) instead of the default fixed velocity-oriented\n\
+                     KNN graph (M1). Ignored unless `--lineage-dag` is set. Experimental."
+    )]
+    pub dag_learn: bool,
+
+    #[arg(
+        long = "lineage-smooth",
+        default_value_t = false,
+        help = "Lineage-DAG: smooth the pb velocity readout δ_pb (opt-in).",
+        long_help = "Smooth the pb velocity readout δ_pb over θ-space KNN neighbours before it\n\
+                     orients the lineage graph, stabilizing sign(δ_pb). A wash on clean data\n\
+                     (no noise to remove, and it can blur branch-point velocity), so it is off\n\
+                     by default — the payoff is on noisy real spliced/unspliced ratios. Ignored\n\
+                     unless `--lineage-dag` is set."
+    )]
+    pub lineage_smooth: bool,
 }
 
 /// Runtime knobs: data preload, RNG seed, compute device, threads.

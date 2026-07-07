@@ -288,6 +288,9 @@ fn run_gem_genes_bge(
         phase1_cells_per_pb: args.collapse.phase1_cells_per_pb,
         feat_factor: Some(factor),
         delta_l2,
+        lineage_dag: args.train.lineage_dag,
+        dag_learnable: args.train.dag_learn,
+        lineage_smooth: args.train.lineage_smooth,
     };
     let out = ge::fit(&mut unified, cfg).context("ge::fit (genes bge)")?;
 
@@ -385,6 +388,135 @@ fn run_gem_genes_bge(
         info!(
             "wrote {}.velocity.parquet (raw cell velocity increment δ; ‖δ‖ = speed)",
             args.out
+        );
+    }
+
+    // Lineage-DAG (experimental): dump the per-level pseudobulk states — identity
+    // θ_pb, velocity δ_pb, and (M2) the learned DAG adjacency W — so the structure
+    // can be inspected / scored and consumed by the phase-2 cell lift. Only present
+    // when `--lineage-dag` ran on a β-sharing model.
+    if let Some(pbv) = &out.pb_velocity {
+        for (i, lvl) in pbv.iter().enumerate() {
+            let np = lvl.n_pb;
+            let pb_names: Vec<Box<str>> = (0..np)
+                .map(|p| format!("pb_{i}_{p}").into_boxed_str())
+                .collect();
+            let th = candle_util::candle_core::Tensor::from_vec(lvl.theta.clone(), (np, h), &cpu)?;
+            ge::save_embedding(
+                &format!("{}.pb_theta_l{i}.parquet", args.out),
+                &th,
+                &pb_names,
+                "pb",
+            )
+            .context("save pb theta")?;
+            let dl = candle_util::candle_core::Tensor::from_vec(lvl.delta.clone(), (np, h), &cpu)?;
+            ge::save_embedding(
+                &format!("{}.pb_velocity_l{i}.parquet", args.out),
+                &dl,
+                &pb_names,
+                "pb",
+            )
+            .context("save pb velocity")?;
+            if let Some(w) = out
+                .pb_dag_w
+                .as_ref()
+                .and_then(|d| d.get(i))
+                .filter(|w| !w.is_empty())
+            {
+                let wt = candle_util::candle_core::Tensor::from_vec(w.clone(), (np, np), &cpu)?;
+                ge::save_embedding(
+                    &format!("{}.pb_dag_l{i}.parquet", args.out),
+                    &wt,
+                    &pb_names,
+                    "pb",
+                )
+                .context("save pb dag W")?;
+            }
+        }
+        info!(
+            "wrote pb-level θ/δ{} for {} level(s)",
+            if out.pb_dag_w.is_some() {
+                " + learned DAG W"
+            } else {
+                ""
+            },
+            pbv.len()
+        );
+    }
+
+    // M3 phase-2 cell-lineage lift: per-cell pseudotime τ_c + landmark ambiguity
+    // (`{out}.pseudotime.parquet`) and per-cell fate over the terminal pb nodes
+    // (`{out}.fate.parquet`). Evaluation-only — lifted from the finest pb trajectory
+    // onto every cell. Present only when `--lineage-dag` produced a readout. These
+    // feed `faba lineage` as an informed backbone.
+    if let Some(lin) = &out.cell_lineage {
+        use matrix_util::traits::IoOps;
+        // pseudotime + ambiguity, two named columns, keyed on barcodes.
+        let mut pt = Vec::with_capacity(n * 2);
+        for c in 0..n {
+            pt.push(lin.tau[c]);
+            pt.push(lin.ambiguity[c]);
+        }
+        let pt_t = candle_util::candle_core::Tensor::from_vec(pt, (n, 2), &cpu)?;
+        let pt_cols = [
+            Box::<str>::from("pseudotime"),
+            Box::<str>::from("ambiguity"),
+        ];
+        pt_t.to_parquet_with_names(
+            &format!("{}.pseudotime.parquet", args.out),
+            (Some(&unified.barcodes), Some("cell")),
+            Some(&pt_cols),
+        )?;
+        info!(
+            "wrote {}.pseudotime.parquet (per-cell τ + landmark ambiguity; pb level {})",
+            args.out, lin.level
+        );
+
+        // fate: one column per terminal pb node (empty when no terminal exists,
+        // e.g. a single-fate or edge-free trajectory — skip the write then).
+        let k = lin.terminals.len();
+        if k > 0 {
+            let fate_t =
+                candle_util::candle_core::Tensor::from_vec(lin.fate.clone(), (n, k), &cpu)?;
+            let fate_cols: Vec<Box<str>> = lin
+                .terminals
+                .iter()
+                .map(|t| format!("fate_pb{t}").into_boxed_str())
+                .collect();
+            fate_t.to_parquet_with_names(
+                &format!("{}.fate.parquet", args.out),
+                (Some(&unified.barcodes), Some("cell")),
+                Some(&fate_cols),
+            )?;
+            info!(
+                "wrote {}.fate.parquet (per-cell fate over {} terminal pb node(s))",
+                args.out, k
+            );
+        }
+    }
+
+    // Unsupervised per-run QC diagnostics (`{out}.lineage_qc.json`) for an agent
+    // exploring random seeds: reject broken runs on `flag == "underfit"`, then inspect
+    // the structure. The remaining fields are DIAGNOSTICS, not a validated quality
+    // ranker (see LineageQc). Flat JSON, no ground truth needed.
+    if let Some(qc) = &out.lineage_qc {
+        let json = format!(
+            "{{\n  \"root_decisiveness\": {:.4},\n  \"velocity_coherence\": {:.4},\n  \
+             \"n_roots\": {},\n  \"n_terminals\": {},\n  \"mean_ambiguity\": {:.4},\n  \
+             \"likelihood\": {:.4},\n  \"flag\": \"{}\"\n}}\n",
+            qc.root_decisiveness,
+            qc.velocity_coherence,
+            qc.n_roots,
+            qc.n_terminals,
+            qc.mean_ambiguity,
+            qc.likelihood,
+            qc.flag,
+        );
+        std::fs::write(format!("{}.lineage_qc.json", args.out), json)
+            .with_context(|| format!("writing {}.lineage_qc.json", args.out))?;
+        info!(
+            "wrote {}.lineage_qc.json (flag={}, decisiveness={:.3}, {} fate(s))",
+            args.out, qc.flag, qc.root_decisiveness, qc.n_terminals
         );
     }
 

@@ -1,5 +1,7 @@
-//! `faba gem` — joint embedding of gene counts (spliced + unspliced) into one
-//! cell/gene space, over the shared `graph_embedding_util` engine.
+//! `faba gem` — **Ge**odesic **E**mbedding + **M**otion: a joint cell-feature embedding
+//! over the shared `graph_embedding_util` engine. Motion is the local velocity δ (the
+//! tangent); the lineage is the geodesic path it traces. The engine is modality-agnostic;
+//! it is fed gene counts (spliced + unspliced) today, but embeds any per-feature count.
 //!
 //! Each feature row `{gene}/count/{spliced|unspliced}` maps to its gene, so a
 //! gene's spliced and unspliced tracks embed identically as `β_g` (β-sharing).
