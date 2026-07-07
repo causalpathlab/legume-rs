@@ -175,6 +175,36 @@ pub fn write_all(
         Some(&topic_names),
     )?;
 
+    // Trajectory ground truth (trajectory mode only): per-cell pseudotime + branch,
+    // and the look-ahead (nascent) topic state used to inject velocity. Together
+    // these let a harness score recovered pseudotime, branch topology, and velocity
+    // direction against the truth.
+    if let (Some(pt), Some(br)) = (&lats.pseudotime, &lats.branch) {
+        let mut pt_mat = DMatrix::<f32>::zeros(n, 2);
+        for j in 0..n {
+            pt_mat[(j, 0)] = pt[j];
+            pt_mat[(j, 1)] = br[j] as f32;
+        }
+        let pt_cols: [Box<str>; 2] = ["pseudotime".into(), "branch".into()];
+        write_dmatrix(
+            &format!("{}.pseudotime.parquet", args.out),
+            &pt_mat,
+            &lats.cell_names,
+            Some("cell"),
+            Some(&pt_cols),
+        )?;
+    }
+    if let Some(tf) = &lats.theta_future_kn {
+        let tf_nk = tf.transpose();
+        write_dmatrix(
+            &format!("{}.topic_proportions_future.parquet", args.out),
+            &tf_nk,
+            &lats.cell_names,
+            Some("cell"),
+            Some(&topic_names),
+        )?;
+    }
+
     // α mixture weights: one parquet per modality. Stored as [G × C_m].
     for (m, modality) in MODALITIES.iter().enumerate() {
         let alpha_gc = lats.alpha_per_mod[m].transpose();

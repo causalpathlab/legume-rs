@@ -6,7 +6,7 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version = "0.2.17"
+version = "0.2.18"
 
 [lib]
 name = "graph_embedding_util"

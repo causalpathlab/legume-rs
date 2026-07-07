@@ -1,3 +1,5 @@
+use crate::cell_projection::{solve_cell_increment, solve_one_cell};
+use crate::data::UnifiedData;
 use crate::loss::PerBatchStratifiedCellSampler;
 use crate::model::JointEmbedModel;
 use candle_util::candle_core::Device;
@@ -143,7 +145,6 @@ pub(crate) fn project_cells_phase2(
     batch_divisor: Option<CellBatchDivisor>,
     unspliced_rows: Option<&[bool]>,
 ) -> anyhow::Result<(Vec<f32>, Option<Vec<f32>>)> {
-    use crate::cell_projection::{solve_cell_increment, solve_one_cell};
     use anyhow::Context;
     use candle_util::candle_core::Tensor;
     use rayon::prelude::*;
@@ -160,11 +161,6 @@ pub(crate) fn project_cells_phase2(
 
     let feat_flat: Vec<f32> = model.e_feat.flatten_all()?.to_vec1()?;
     let solve = |edges: &[(u32, f32)]| solve_one_cell(edges, &feat_flat, &b_feat, h, lambda);
-    // Velocity: analytic Poisson-MAP increment δ holding the identity `e_base`
-    // fixed (same likelihood/frame as the identity solve, so θ + δ is coherent).
-    let solve_incr = |e_base: &[f32], edges: &[(u32, f32)]| {
-        solve_cell_increment(edges, e_base, &feat_flat, &b_feat, h, lambda)
-    };
     let solved: Vec<SolvedCell> = cells
         .par_iter()
         .map(|&(cell, feats, counts)| {
@@ -189,25 +185,11 @@ pub(crate) fn project_cells_phase2(
                 // held fixed. Both index the shared β_g, so δ is a directed residual in
                 // θ's own frame. No post-hoc unit-norm on either — the nascent state is
                 // just θ + δ. δ = 0 when identity is empty or there are no unspliced edges.
+                // Empty δ (not `vec![0; h]`) when undefined — velocity_flat is already
+                // zero-initialized, so the storage loop just skips the copy.
                 Some(un) => {
-                    let mut spliced: Vec<(u32, f32)> = Vec::with_capacity(edges.len());
-                    let mut unspliced: Vec<(u32, f32)> = Vec::with_capacity(edges.len());
-                    for &(f, c) in &edges {
-                        if un[f as usize] {
-                            unspliced.push((f, c));
-                        } else {
-                            spliced.push((f, c));
-                        }
-                    }
-                    let (theta, b_s) = solve(&spliced);
-                    let theta_n = norm(&theta);
-                    // Empty δ (not `vec![0; h]`) when undefined — velocity_flat is
-                    // already zero-initialized, so the storage loop just skips the copy.
-                    let velocity = if theta_n > 1e-8 && !unspliced.is_empty() {
-                        solve_incr(&theta, &unspliced).0
-                    } else {
-                        Vec::new()
-                    };
+                    let (theta, theta_n, b_s, velocity) =
+                        solve_node_splice(&edges, un, &feat_flat, &b_feat, h, lambda);
                     SolvedCell {
                         cell: cell as usize,
                         latent: theta,
@@ -264,3 +246,105 @@ pub(crate) fn project_cells_phase2(
     // per-cell velocity increment `δ`, flat `[n_cells × h]`. `None` for bge.
     Ok((cell_nrms, velocity_flat))
 }
+
+/// Split one node's `(feature, count)` edges by the unspliced mask and run the
+/// dual analytic solve: identity `θ` from the spliced edges, then the velocity
+/// increment `δ` from the unspliced edges holding `θ` fixed (same likelihood
+/// frame, so `θ + δ` is coherent). Shared by the per-cell gem β-sharing path and
+/// the per-pseudobulk readout. `frozen_e` is row-major `[n_features × h]`.
+///
+/// Returns `(θ, ‖θ‖, b_c, δ)`; `δ` is **empty** — not zero-filled — when velocity
+/// is undefined (empty identity or no unspliced edges), so callers can skip the
+/// copy into a pre-zeroed buffer.
+fn solve_node_splice(
+    edges: &[(u32, f32)],
+    unspliced_rows: &[bool],
+    frozen_e: &[f32],
+    frozen_b: &[f32],
+    h: usize,
+    lambda: f64,
+) -> (Vec<f32>, f32, f32, Vec<f32>) {
+    let mut spliced: Vec<(u32, f32)> = Vec::with_capacity(edges.len());
+    let mut unspliced: Vec<(u32, f32)> = Vec::with_capacity(edges.len());
+    for &(f, c) in edges {
+        if unspliced_rows[f as usize] {
+            unspliced.push((f, c));
+        } else {
+            spliced.push((f, c));
+        }
+    }
+    let (theta, b_s) = solve_one_cell(&spliced, frozen_e, frozen_b, h, lambda);
+    let theta_n = theta.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let velocity = if theta_n > 1e-8 && !unspliced.is_empty() {
+        solve_cell_increment(&unspliced, &theta, frozen_e, frozen_b, h, lambda).0
+    } else {
+        Vec::new()
+    };
+    (theta, theta_n, b_s, velocity)
+}
+
+/// Per-level pseudobulk phase-2 velocity readout: the analytic identity `θ_pb`
+/// and velocity increment `δ_pb` for every pb node of one collapse level, each
+/// flattened `[n_pb × h]` row-major. Produced by [`project_pbs_phase2`] for the
+/// lineage-DAG path — `δ_pb` orients the pb-DAG structure term, `θ_pb` are the
+/// latent landmarks the phase-2 cell lift attaches to.
+pub struct PbLevelVelocity {
+    pub n_pb: usize,
+    /// Identity `θ_pb`, `[n_pb × h]` row-major (raw spliced Poisson-MAP).
+    pub theta: Vec<f32>,
+    /// Velocity `δ_pb`, `[n_pb × h]` row-major; zero rows where undefined.
+    pub delta: Vec<f32>,
+}
+
+/// Phase-2 **pseudobulk** velocity readout (gem β-sharing / lineage-DAG path).
+/// Analytically re-projects every pb node of every level onto the frozen feature
+/// dictionary — identity `θ_pb` from its spliced aggregate, velocity `δ_pb` from
+/// its unspliced aggregate with `θ_pb` fixed — exactly as [`project_cells_phase2`]
+/// does per cell, but at pseudobulk resolution. Reuses the pb aggregates already
+/// built for phase 1 (`pb_blobs[level].triplets`), which are already
+/// batch-corrected, so no batch divisor is applied. `frozen_e` is row-major
+/// `[n_features × h]`.
+///
+/// Returns one [`PbLevelVelocity`] per level, in `pb_blobs` order (coarsest→finest).
+pub(crate) fn project_pbs_phase2(
+    frozen_e: &[f32],
+    frozen_b: &[f32],
+    h: usize,
+    pb_blobs: &[UnifiedData],
+    unspliced_rows: &[bool],
+    lambda: f64,
+) -> anyhow::Result<Vec<PbLevelVelocity>> {
+    use rayon::prelude::*;
+
+    let mut out = Vec::with_capacity(pb_blobs.len());
+    for pb in pb_blobs {
+        let n_pb = pb.n_cells();
+        // Group the pb's (feature, count) edges by pb-node id.
+        let mut per_pb: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_pb];
+        for t in &pb.triplets {
+            per_pb[t.cell as usize].push((t.feature, t.count));
+        }
+        let solved: Vec<(Vec<f32>, Vec<f32>)> = per_pb
+            .par_iter()
+            .map(|edges| {
+                let (theta, _n, _b, delta) =
+                    solve_node_splice(edges, unspliced_rows, frozen_e, frozen_b, h, lambda);
+                (theta, delta)
+            })
+            .collect();
+        let mut theta = vec![0f32; n_pb * h];
+        let mut delta = vec![0f32; n_pb * h];
+        for (p, (th, dl)) in solved.into_iter().enumerate() {
+            let s = p * h;
+            theta[s..s + h].copy_from_slice(&th);
+            if !dl.is_empty() {
+                delta[s..s + h].copy_from_slice(&dl);
+            }
+        }
+        out.push(PbLevelVelocity { n_pb, theta, delta });
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests;

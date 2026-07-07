@@ -1,3 +1,5 @@
+use super::lift::{CellLineage, LineageQc};
+use super::projection::PbLevelVelocity;
 use crate::data::UnifiedData;
 use crate::model::JointEmbedModel;
 use crate::training::{CompositeMode, TrainingParams};
@@ -137,6 +139,24 @@ pub struct FitConfig {
     /// velocity increment `δ` (see [`FitOutput::cell_velocity`]).
     /// `None` = the standard free embedding (bge / Stage 0).
     pub feat_factor: Option<FeatFactorSpec>,
+    /// Lineage-DAG path (gem β-sharing only). When `true`, [`fit`] runs the
+    /// analytic **pseudobulk** velocity readout after phase 1 (identity `θ_pb` +
+    /// velocity `δ_pb` per pb node per level) and returns it in
+    /// [`FitOutput::pb_velocity`]; `δ_pb` orients the pb-DAG structure term. A
+    /// no-op (and a warning) when `feat_factor` is `None`. `false` = current
+    /// behaviour (bge and plain gem), byte-identical output.
+    pub lineage_dag: bool,
+    /// Within the lineage-DAG path, use the **learnable** pb-DAG (M2: a `W` adjacency
+    /// co-optimized with the embedding via a velocity-drift SEM + DAGMA-style
+    /// acyclicity + L1 + orientation prior) instead of the fixed velocity-oriented KNN
+    /// graph (M1). Ignored when `lineage_dag` is `false`.
+    pub dag_learnable: bool,
+    /// Smooth + confidence-gate the pb velocity readout `δ_pb` before it orients the
+    /// lineage graph / SEM drift / cell-lift (see
+    /// [`crate::fit::lineage::smooth_pb_velocity`]). Denoises `sign(δ_pb)` via θ-space
+    /// neighbour averaging — neutral on clean data, robustness on noisy real velocity.
+    /// Ignored when `lineage_dag` is `false`.
+    pub lineage_smooth: bool,
 }
 
 /// Caller-provided spec for the per-gene β-sharing feature factorization. Lengths
@@ -289,6 +309,25 @@ pub struct FitOutput {
     /// nascent state is `θ + δ` = `latent + velocity`. `0` for a cell missing either
     /// modality; `None` for a free (non-factored) model.
     pub cell_velocity: Option<Vec<f32>>,
+    /// Per-level pseudobulk velocity readout (identity `θ_pb` + velocity `δ_pb`),
+    /// present only when `lineage_dag` was set on a β-sharing model. One entry per
+    /// collapse level (coarsest→finest). Consumed by the lineage-DAG structure
+    /// term and the phase-2 cell lift. `None` otherwise.
+    pub pb_velocity: Option<Vec<PbLevelVelocity>>,
+    /// Learned pb-DAG adjacency per level (M2 learnable path only), each a dense
+    /// `[n_pb × n_pb]` row-major `W` aligned to `pb_velocity`. `None` for the fixed
+    /// (M1) path or when lineage-DAG is off. Consumed by the phase-2 cell lift to
+    /// integrate pseudotime and fate along the learned structure.
+    pub pb_dag_w: Option<Vec<Vec<f32>>>,
+    /// Phase-2 cell-lineage lift (M3): per-cell pseudotime `τ_c` + fate + ambiguity,
+    /// evaluated (no training) from the finest-level pb trajectory. `Some` only on the
+    /// lineage-DAG path with a non-empty pb velocity readout; `None` otherwise.
+    pub cell_lineage: Option<CellLineage>,
+    /// Unsupervised per-run QC diagnostics + `underfit` hygiene floor (decisiveness,
+    /// velocity coherence, fate count, ambiguity, likelihood, flag). For an agent to reject
+    /// broken runs and inspect structure — NOT a validated quality ranker. Written as
+    /// `{out}.lineage_qc.json`. `Some` alongside `cell_lineage`; `None` otherwise.
+    pub lineage_qc: Option<LineageQc>,
 }
 
 pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
