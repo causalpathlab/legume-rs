@@ -109,6 +109,16 @@ pub struct LineageArgs {
     pub root_cell: Option<Box<str>>,
 
     #[arg(
+        long = "root-from-gem",
+        help = "Anchor the root at gem's inferred root (the min-pseudotime cell in \
+                {from}.pseudotime.parquet). Uses gem's velocity-DAG root inference — more \
+                robust than the per-edge flux pick — while lineage still fits the curves. \
+                Overridden by --root-node / --root-cell; falls back to flux if the file is \
+                absent."
+    )]
+    pub root_from_gem: bool,
+
+    #[arg(
         long,
         default_value_t = 100,
         help = "k-means iterations for centroid initialization"
@@ -159,14 +169,16 @@ fn choose_k(n: usize, requested: Option<usize>) -> usize {
     requested.unwrap_or_else(|| (n / 10).clamp(2, 200)).min(n)
 }
 
-/// Resolve the root MST node: `--root-node` (validated), else `--root-cell` (the
-/// node of the named cell's cluster), else the velocity-picked root, else node 0.
+/// Resolve the root MST node, in priority order: `--root-node` (validated), `--root-cell`
+/// (the node of the named cell's cluster), `gem_root` (the centroid of gem's inferred
+/// root cell, from `--root-from-gem`), the velocity-flux-picked root, else node 0.
 fn resolve_root(
     root_node: Option<usize>,
     root_cell: Option<&str>,
     cell_names: &[Box<str>],
     labels: &[usize],
     k: usize,
+    gem_root: Option<usize>,
     velocity_root: Option<usize>,
 ) -> Result<usize> {
     if let Some(r) = root_node {
@@ -178,8 +190,50 @@ fn resolve_root(
             .position(|c| c.as_ref() == name)
             .with_context(|| format!("--root-cell '{name}' not found in latent"))?;
         Ok(labels[idx])
+    } else if let Some(r) = gem_root {
+        Ok(r)
     } else {
         Ok(velocity_root.unwrap_or(0))
+    }
+}
+
+/// Map gem's inferred root to an MST centroid (for `--root-from-gem`): read
+/// `{prefix}.pseudotime.parquet`, take the barcode with minimum pseudotime (τ ≈ 0, the
+/// velocity-DAG source), find it in the latent, and return its cluster label. `None`
+/// (with a warning) when the file is absent or the barcode can't be matched — the caller
+/// then falls back to the velocity-flux root.
+fn gem_root_node(prefix: &str, cell_names: &[Box<str>], labels: &[usize]) -> Option<usize> {
+    let path = format!("{prefix}.pseudotime.parquet");
+    if !Path::new(&path).exists() {
+        warn!("--root-from-gem: {path} absent; falling back to the velocity-flux root");
+        return None;
+    }
+    let pt = match DMatrix::<f32>::from_parquet(&path) {
+        Ok(pt) => pt,
+        Err(e) => {
+            warn!("--root-from-gem: cannot read {path} ({e}); falling back to velocity root");
+            return None;
+        }
+    };
+    // Column 0 is `pseudotime` (column 1 is `ambiguity`); take the row-minimum barcode.
+    let rmin = (0..pt.mat.nrows()).min_by(|&a, &b| {
+        pt.mat[(a, 0)]
+            .partial_cmp(&pt.mat[(b, 0)])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+    let root_bc = pt.rows.get(rmin)?.as_ref();
+    match cell_names.iter().position(|c| c.as_ref() == root_bc) {
+        Some(idx) => {
+            info!(
+                "--root-from-gem: root cell '{root_bc}' (τ≈min) → MST node {}",
+                labels[idx]
+            );
+            Some(labels[idx])
+        }
+        None => {
+            warn!("--root-from-gem: root barcode '{root_bc}' not in latent; using flux root");
+            None
+        }
     }
 }
 
@@ -249,12 +303,19 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
 
     // ---- root selection ----
     let velocity_root = have_velocity.then(|| pick_velocity_root(&edges, &flux, k));
+    // Optional gem hand-off: anchor the root at gem's velocity-DAG-inferred root
+    // (min-pseudotime cell), more robust than the per-edge flux pick.
+    let gem_root = args
+        .root_from_gem
+        .then(|| gem_root_node(prefix, &cell_names, &labels))
+        .flatten();
     let root = resolve_root(
         args.root_node,
         args.root_cell.as_deref(),
         &cell_names,
         &labels,
         k,
+        gem_root,
         velocity_root,
     )?;
     info!("lineage root node = {root}");
