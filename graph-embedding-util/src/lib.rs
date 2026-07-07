@@ -48,7 +48,8 @@ pub use eval::{
 };
 pub use feature_qc::{hvg_feature_qc, FeatureQcConfig, FeatureQcResult};
 pub use fit::{
-    fit, load_feature_network, FeatFactorSpec, FeatureNetworkArgs, FitConfig, FitOutput,
+    fit, load_feature_network, CellLineage, FeatFactorSpec, FeatureNetworkArgs, FitConfig,
+    FitOutput, LineageQc, PbLevelVelocity,
 };
 pub use model::JointEmbedModel;
 pub use postprocess::{cell_clusters, feature_coembedding};

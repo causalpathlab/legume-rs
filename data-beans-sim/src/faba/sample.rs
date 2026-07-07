@@ -26,6 +26,10 @@ pub type RowKey = (usize, usize);
 pub struct RateContext<'a> {
     pub lats: &'a Latents,
     pub log_topic: &'a DMatrix<f32>,
+    /// Trajectory mode: the look-ahead `log((β_topic · θ(t+Δ)))` driving the
+    /// UNSPLICED count track. `None` ⇒ unspliced reuses `log_topic` (no velocity —
+    /// the standard, byte-identical behaviour).
+    pub log_topic_future: Option<&'a DMatrix<f32>>,
     pub batch_membership: &'a [usize],
 }
 
@@ -35,7 +39,17 @@ pub struct RateContext<'a> {
 /// gene-specific additive terms (β_g and δ_{g, B(j)}) are folded in
 /// inside `assemble_log_mu`.
 pub fn precompute_log_topic(lats: &Latents) -> DMatrix<f32> {
-    let lambda = &lats.beta_topic_gk * &lats.theta_kn;
+    precompute_log_topic_from(&lats.beta_topic_gk, &lats.theta_kn)
+}
+
+/// `log((β_topic · θ))` for an arbitrary topic-proportion matrix `θ` (`[K × N]`).
+/// Shared by the current (spliced) state and the trajectory look-ahead
+/// (unspliced) state, so both tracks reuse the same log-rate assembly.
+pub fn precompute_log_topic_from(
+    beta_topic_gk: &DMatrix<f32>,
+    theta_kn: &DMatrix<f32>,
+) -> DMatrix<f32> {
+    let lambda = beta_topic_gk * theta_kn;
     lambda.map(|v| v.max(EPS_LOG).ln())
 }
 
@@ -58,11 +72,23 @@ pub fn sample_count_modality(
     let n = lats.theta_kn.ncols();
     let depths = vec![depth_count as f32; n];
 
-    let log_mu = assemble_log_mu(ctx, ln_delta_count);
+    let log_mu_spliced = assemble_log_mu(ctx, ln_delta_count);
+    // Unspliced (nascent) uses the look-ahead state θ(t+Δ) in trajectory mode, so
+    // the spliced→unspliced contrast encodes velocity; otherwise it reuses the same
+    // log_mu (constant spliced/unspliced ratio ⇒ no velocity, the original behaviour).
+    let log_mu_unspliced = match ctx.log_topic_future {
+        Some(future) => assemble_log_mu_from(future, lats, ctx.batch_membership, ln_delta_count),
+        None => log_mu_spliced.clone(),
+    };
 
     // Stack [G × N] for spliced (c=0) and unspliced (c=1) vertically.
     let mut log_rate = DMatrix::<f32>::zeros(2 * g, n);
     for c in 0..2 {
+        let log_mu = if c == 0 {
+            &log_mu_spliced
+        } else {
+            &log_mu_unspliced
+        };
         for gi in 0..g {
             let row = c * g + gi;
             let log_alpha = (lats.alpha_per_mod[0][(c, gi)] + EPS_LOG).ln();
@@ -144,14 +170,25 @@ pub fn sample_modifier_modality(
 /// [G × K] · [K × N] matmul runs once per `run_faba`, not once per
 /// modality. Returned shape: `[G × N]`.
 fn assemble_log_mu(ctx: &RateContext, ln_delta: &DMatrix<f32>) -> DMatrix<f32> {
-    let lats = ctx.lats;
+    assemble_log_mu_from(ctx.log_topic, ctx.lats, ctx.batch_membership, ln_delta)
+}
+
+/// [`assemble_log_mu`] for an explicit `log_topic` matrix — the current (spliced)
+/// or look-ahead (unspliced) state — folding in `β_g` and the per-modality batch
+/// effect. Shared so both count tracks assemble identically off their own topic state.
+fn assemble_log_mu_from(
+    log_topic: &DMatrix<f32>,
+    lats: &Latents,
+    batch_membership: &[usize],
+    ln_delta: &DMatrix<f32>,
+) -> DMatrix<f32> {
     let g = lats.beta_g.len();
-    let n = lats.theta_kn.ncols();
+    let n = log_topic.ncols();
     let bb = ln_delta.ncols();
 
-    let mut log_mu = ctx.log_topic.clone();
+    let mut log_mu = log_topic.clone();
     for j in 0..n {
-        let b = ctx.batch_membership[j];
+        let b = batch_membership[j];
         for gi in 0..g {
             let delta = if bb > 1 { ln_delta[(gi, b)] } else { 0.0 };
             log_mu[(gi, j)] += lats.beta_g[gi] + delta;

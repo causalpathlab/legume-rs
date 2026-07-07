@@ -36,6 +36,14 @@ pub struct Latents {
     pub alpha_per_mod: Vec<DMatrix<f32>>,
     /// Cell-state topic proportions (shared with writer/editor activity), [K_topic × N].
     pub theta_kn: DMatrix<f32>,
+    /// Trajectory mode only: the look-ahead (nascent) topic state θ(t+Δ), [K × N].
+    /// `None` in the standard Dirichlet mode. Drives the UNSPLICED count track so the
+    /// spliced→unspliced contrast encodes velocity along the trajectory tangent.
+    pub theta_future_kn: Option<DMatrix<f32>>,
+    /// Trajectory mode only: per-cell pseudotime `t ∈ [0,1]`. `None` otherwise.
+    pub pseudotime: Option<Vec<f32>>,
+    /// Trajectory mode only: per-cell branch id. `None` otherwise.
+    pub branch: Option<Vec<usize>>,
     /// Gene labels.
     pub gene_names: Vec<Box<str>>,
     /// Cell labels (shared across all per-modality matrices).
@@ -66,6 +74,20 @@ pub fn sample_all(args: &FabaArgs, pi_meas: &[f32], rng: &mut impl Rng) -> anyho
 
     anyhow::ensure!(k >= 1, "k-topics must be ≥ 1");
     anyhow::ensure!(c_mod >= 1, "components-per-modifier must be ≥ 1");
+    if args.trajectory {
+        anyhow::ensure!(args.n_branches >= 1, "trajectory: --n-branches must be ≥ 1");
+        anyhow::ensure!(
+            args.velocity_lookahead > 0.0 && args.velocity_lookahead <= 1.0,
+            "trajectory: --velocity-lookahead must be in (0, 1] (got {})",
+            args.velocity_lookahead
+        );
+        anyhow::ensure!(
+            k >= 2 + args.n_branches,
+            "trajectory: --k-topics ({}) must be ≥ 2 + --n-branches ({})",
+            k,
+            2 + args.n_branches
+        );
+    }
 
     let normal01 = Normal::new(0.0_f32, 1.0_f32).unwrap();
 
@@ -186,11 +208,40 @@ pub fn sample_all(args: &FabaArgs, pi_meas: &[f32], rng: &mut impl Rng) -> anyho
         alpha_per_mod.push(alpha);
     }
 
+    // Trajectory mode: force the count spliced/unspliced split to be EQUAL per gene.
+    // Otherwise the (random Dirichlet) α ratio is a large per-gene nuisance that
+    // dominates the spliced↔unspliced contrast and swamps the velocity signal. With
+    // an equal split the ONLY s/u difference is θ(t) vs θ(t+Δ) — pure, recoverable
+    // velocity (mirrors real RNA-velocity kinetics where u/s reflects dynamics).
+    // Overwritten AFTER the draw loop so the RNG stream (and every other latent) is
+    // unchanged relative to a same-seed non-count edit.
+    if args.trajectory {
+        let count = &mut alpha_per_mod[0];
+        for gi in 0..g {
+            count[(0, gi)] = 0.5;
+            count[(1, gi)] = 0.5;
+        }
+    }
+
     ////////////////////////////////////
     // θ_{k, n} cell-state topics //
     ////////////////////////////////////
-    let (theta_kn, _) =
-        sample_nested_topic_proportions(k, 1, n, args.pve_topic, 1.0, rng.next_u64());
+    // Trajectory mode replaces the Dirichlet cell states with a bifurcating
+    // pseudotime path and its look-ahead (nascent) state; the standard path is
+    // otherwise byte-identical (same RNG draws).
+    let (theta_kn, theta_future_kn, pseudotime, branch) = if args.trajectory {
+        let traj = sample_trajectory_topics(k, n, args.n_branches, args.velocity_lookahead, rng)?;
+        (
+            traj.theta,
+            Some(traj.theta_future),
+            Some(traj.pseudotime),
+            Some(traj.branch),
+        )
+    } else {
+        let (theta, _) =
+            sample_nested_topic_proportions(k, 1, n, args.pve_topic, 1.0, rng.next_u64());
+        (theta, None, None, None)
+    };
 
     ///////////////////////////
     // gene / cell names //
@@ -214,9 +265,84 @@ pub fn sample_all(args: &FabaArgs, pi_meas: &[f32], rng: &mut impl Rng) -> anyho
         base_gm,
         alpha_per_mod,
         theta_kn,
+        theta_future_kn,
+        pseudotime,
+        branch,
         gene_names,
         cell_names,
     })
+}
+
+/// Trajectory-mode cell states. Returned by [`sample_trajectory_topics`].
+struct TrajectoryTopics {
+    /// Mature (spliced) state θ(t), `[K × N]`.
+    theta: DMatrix<f32>,
+    /// Nascent (unspliced) look-ahead state θ(min(t+Δ, 1)), `[K × N]`.
+    theta_future: DMatrix<f32>,
+    /// Per-cell pseudotime `t ∈ [0,1]`.
+    pseudotime: Vec<f32>,
+    /// Per-cell branch id `∈ 0..n_branches`.
+    branch: Vec<usize>,
+}
+
+/// Sample bifurcating-trajectory cell states: each cell draws a pseudotime
+/// `t ~ U(0,1)` and a branch `b ~ U{0..B}`. The mature state is θ(t,b); the
+/// nascent state is the look-ahead θ(min(t+Δ,1), b), so the mature→nascent
+/// contrast points along the trajectory tangent (recoverable velocity). At the
+/// terminus (`t+Δ ≥ 1`) the look-ahead saturates, so velocity → 0.
+fn sample_trajectory_topics(
+    k: usize,
+    n: usize,
+    n_branches: usize,
+    lookahead: f32,
+    rng: &mut impl Rng,
+) -> anyhow::Result<TrajectoryTopics> {
+    let u01 = Uniform::new(0.0_f32, 1.0_f32)?;
+    let ubr = Uniform::new(0usize, n_branches)?;
+    let mut theta = DMatrix::<f32>::zeros(k, n);
+    let mut theta_future = DMatrix::<f32>::zeros(k, n);
+    let mut pseudotime = vec![0f32; n];
+    let mut branch = vec![0usize; n];
+    for j in 0..n {
+        let t: f32 = u01.sample(rng);
+        let b: usize = ubr.sample(rng);
+        pseudotime[j] = t;
+        branch[j] = b;
+        let cur = traj_theta(t, b, k);
+        let fut = traj_theta((t + lookahead).min(1.0), b, k);
+        for kk in 0..k {
+            theta[(kk, j)] = cur[kk];
+            theta_future[(kk, j)] = fut[kk];
+        }
+    }
+    Ok(TrajectoryTopics {
+        theta,
+        theta_future,
+        pseudotime,
+        branch,
+    })
+}
+
+/// θ(t, b) on the bifurcating path: root interpolates topic 0 → topic 1 for
+/// `t ≤ 0.5`, then branch `b` interpolates topic 1 → topic `2+b` for `t > 0.5`.
+/// A small uniform floor keeps every topic strictly positive (numerical safety),
+/// and the result stays a valid proportion (sums to 1).
+fn traj_theta(t: f32, b: usize, k: usize) -> Vec<f32> {
+    const FLOOR: f32 = 0.02;
+    let mut th = vec![0f32; k];
+    if t <= 0.5 {
+        let f = (t / 0.5).clamp(0.0, 1.0);
+        th[0] += 1.0 - f;
+        th[1] += f;
+    } else {
+        let f = ((t - 0.5) / 0.5).clamp(0.0, 1.0);
+        th[1] += 1.0 - f;
+        th[2 + b] += f;
+    }
+    for v in &mut th {
+        *v = (1.0 - FLOOR) * *v + FLOOR / k as f32;
+    }
+    th
 }
 
 /// Pick a held-out subset of substrate-positive (g, m) pairs. Only
@@ -293,6 +419,9 @@ fn sample_dirichlet(k: usize, alpha: f32, rng: &mut impl Rng) -> Vec<f32> {
     let dist = rand_distr::multi::Dirichlet::new(&alphas).expect("Dirichlet: alpha > 0, k > 0");
     dist.sample(rng).into_iter().map(|x| x as f32).collect()
 }
+
+#[cfg(test)]
+mod tests;
 
 /// Spike-and-slab matrix: each entry is `Bernoulli(π) · N(0, σ²)`.
 /// Shared between the writer/editor coupling `A` and the gene response

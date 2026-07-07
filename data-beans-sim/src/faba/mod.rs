@@ -179,6 +179,37 @@ pub struct FabaArgs {
 
     #[arg(
         long,
+        default_value_t = false,
+        help = "Trajectory mode: cell states follow a branching pseudotime with a \
+                recoverable RNA velocity (nascent leads mature).",
+        long_help = "Trajectory mode (default off = the standard Dirichlet cell states).\n\
+                     Each cell gets a pseudotime t ∈ [0,1] and a branch; the topic state θ(t)\n\
+                     moves along a bifurcating path (root topics 0→1 for t≤0.5, then 1→(2+b)\n\
+                     for branch b). The SPLICED (mature) track uses θ(t); the UNSPLICED\n\
+                     (nascent) track uses the look-ahead θ(t+Δ), so gem's velocity δ points\n\
+                     along the trajectory tangent. Ground truth is written to\n\
+                     `{out}.pseudotime.parquet` (pseudotime + branch) and\n\
+                     `{out}.topic_proportions_future.parquet`. Requires K ≥ 2 + n-branches."
+    )]
+    pub trajectory: bool,
+
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Trajectory mode: number of lineage branches from the common root"
+    )]
+    pub n_branches: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.1,
+        help = "Trajectory mode: velocity look-ahead Δ in pseudotime units — how far the \
+                nascent (unspliced) state leads the mature (spliced) state"
+    )]
+    pub velocity_lookahead: f32,
+
+    #[arg(
+        long,
         default_value_t = 0.1,
         help = "Fraction of substrate-positive (g, m) pairs held out (no rows emitted) \
                 for imputation evaluation"
@@ -280,11 +311,18 @@ pub fn run_faba(args: &FabaArgs) -> anyhow::Result<()> {
     // across the count and every modifier sampler call instead of
     // recomputed inside each.
     let log_topic = sample::precompute_log_topic(&lats);
+    // Trajectory mode: the look-ahead log-topic θ(t+Δ) driving the nascent
+    // (unspliced) track. `None` in the standard mode (unspliced reuses log_topic).
+    let log_topic_future = lats
+        .theta_future_kn
+        .as_ref()
+        .map(|tf| sample::precompute_log_topic_from(&lats.beta_topic_gk, tf));
 
     // Shared inputs for every per-modality sampler.
     let rate_ctx = sample::RateContext {
         lats: &lats,
         log_topic: &log_topic,
+        log_topic_future: log_topic_future.as_ref(),
         batch_membership: &batch_membership,
     };
 

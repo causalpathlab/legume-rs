@@ -109,6 +109,17 @@ impl Default for TermOraConfig {
 
 const UNASSIGNED: usize = usize::MAX;
 
+/// Per-community (cluster / MST-node) firm call returned by
+/// [`annotate_with_communities`], so a caller (e.g. `faba lineage --markers`) can name
+/// each trajectory node without re-reading the parquet.
+pub struct CommunityCalls {
+    /// Called cell type per community (or `"unassigned"`), length `n_comm`.
+    pub labels: Vec<Box<str>>,
+    /// Confidence of each community's call (the FDR-sparse softmax `Q`; `0` when
+    /// unassigned), length `n_comm`.
+    pub confidence: Vec<f32>,
+}
+
 /// Name of a term index, mapping the [`UNASSIGNED`] sentinel to `"unassigned"`.
 fn label_of(t: usize, type_names: &[Box<str>]) -> Box<str> {
     if t == UNASSIGNED {
@@ -118,8 +129,9 @@ fn label_of(t: usize, type_names: &[Box<str>]) -> Box<str> {
     }
 }
 
-/// End-to-end firm annotation from in-memory embeddings. See the module docs for
-/// the pipeline. Writes the `{out_prefix}.*` artifacts and returns nothing.
+/// End-to-end firm annotation from in-memory embeddings, clustering cells with **Leiden**
+/// over their own cosine kNN graph, then delegating to [`annotate_with_communities`].
+/// See the module docs for the pipeline. Writes the `{out_prefix}.*` artifacts.
 pub fn annotate_embeddings_ora(
     input: &InputEmbeddings<'_>,
     markers_path: &str,
@@ -127,6 +139,46 @@ pub fn annotate_embeddings_ora(
     use_idf: bool,
     cfg: &TermOraConfig,
 ) -> Result<()> {
+    let n = input.cell_emb.nrows();
+    let h = input.cell_emb.ncols();
+    anyhow::ensure!(n >= 2, "term-ORA needs ≥ 2 cells, found {n}");
+    // Communities are Leiden over the cell kNN graph — the embedding's own geometry,
+    // independent of the term labels (module docs step 4).
+    let cell_flat = row_major(input.cell_emb);
+    let community = cluster_cells(&cell_flat, n, h, cfg)?;
+    let n_comm = community.iter().copied().max().map_or(0, |m| m + 1).max(1);
+    info!(
+        "clustered cells into {n_comm} communities (knn={}, res={})",
+        cfg.knn, cfg.resolution
+    );
+    annotate_with_communities(
+        input,
+        markers_path,
+        out_prefix,
+        use_idf,
+        &community,
+        n_comm,
+        cfg,
+    )?;
+    Ok(())
+}
+
+/// Firm annotation given an **externally-supplied** cell clustering (`community[i]` =
+/// cell `i`'s group id, `n_comm` groups) rather than Leiden. Runs the shared pipeline —
+/// term centroids, nearest-centroid `fine_label`, per-term QC, then cluster × term
+/// over-representation + permutation calibration over the *given* grouping — and writes
+/// every `{out_prefix}.*` artifact. [`annotate_embeddings_ora`] wraps this with Leiden;
+/// `faba lineage --markers` passes the MST-node clustering, so each trajectory node gets
+/// the same permutation-calibrated call.
+pub fn annotate_with_communities(
+    input: &InputEmbeddings<'_>,
+    markers_path: &str,
+    out_prefix: &str,
+    use_idf: bool,
+    community: &[usize],
+    n_comm: usize,
+    cfg: &TermOraConfig,
+) -> Result<CommunityCalls> {
     anyhow::ensure!(
         cfg.obo.is_some() == cfg.label_cl.is_some(),
         "--obo and --label-cl must be given together to run the ontology layer (got only one)"
@@ -148,7 +200,13 @@ pub fn annotate_embeddings_ora(
     anyhow::ensure!(gene_names.len() == g, "gene_names len != feature rows");
     anyhow::ensure!(cell_names.len() == n, "cell_names len != cell rows");
     anyhow::ensure!(n >= 2, "term-ORA needs ≥ 2 cells, found {n}");
-    info!("term-ORA: β [{g} × {h}], cells [{n} × {h}]");
+    anyhow::ensure!(
+        community.len() == n,
+        "community len {} != cell rows {n}",
+        community.len()
+    );
+    anyhow::ensure!(n_comm >= 1, "need ≥ 1 community, got {n_comm}");
+    info!("term-ORA: β [{g} × {h}], cells [{n} × {h}], {n_comm} group(s)");
 
     let (type_names, type_markers) = parse_and_match_markers(markers_path, gene_names, use_idf)?;
     let c = type_names.len();
@@ -189,16 +247,8 @@ pub fn annotate_embeddings_ora(
         "after QC only {n_assigned} cells remain assigned — loosen --assign-mad or check markers"
     );
 
-    // ----- 4. cluster cells (cosine kNN + Leiden) -----
-    let community = cluster_cells(&cell_flat, n, h, cfg)?;
-    let n_comm = community.iter().copied().max().map_or(0, |m| m + 1).max(1);
-    info!(
-        "clustered cells into {n_comm} communities (knn={}, res={})",
-        cfg.knn, cfg.resolution
-    );
-
     // ----- 5. cluster × term over-representation + permutation calibration -----
-    let ora = cluster_term_ora(&assign, &community, n_comm, c, cfg);
+    let ora = cluster_term_ora(&assign, community, n_comm, c, cfg);
 
     // ----- 6. cluster calls → per-cell firm labels -----
     // Each cluster's call is its top over-represented term, kept only if
@@ -234,7 +284,7 @@ pub fn annotate_embeddings_ora(
     write_annot_parquet(
         out_prefix,
         cell_names,
-        &community,
+        community,
         &coarse_label,
         &assign,
         &dist,
@@ -247,7 +297,7 @@ pub fn annotate_embeddings_ora(
     write_label_tsvs(out_prefix, cell_names, &coarse_label, &coarse_conf)?;
     write_cluster_term_matrices(out_prefix, &comm_names, &type_names, &ora)?;
     write_calibration(out_prefix, &ora, n_assigned, n_outliers)?;
-    log_cluster_calls(&cluster_label, &type_names, &community, n_comm);
+    log_cluster_calls(&cluster_label, &type_names, community, n_comm);
 
     // ----- 7. optional ontology (TreeBH over the cluster × term matrix) -----
     if let (Some(obo), Some(label_cl)) = (cfg.obo.as_deref(), cfg.label_cl.as_deref()) {
@@ -262,7 +312,19 @@ pub fn annotate_embeddings_ora(
         )?;
     }
 
-    Ok(())
+    // Per-community calls, so a trajectory caller can name each node directly.
+    let comm_calls = CommunityCalls {
+        labels: (0..n_comm)
+            .map(|k| label_of(cluster_label[k], &type_names))
+            .collect(),
+        confidence: (0..n_comm)
+            .map(|k| match cluster_label[k] {
+                UNASSIGNED => 0.0,
+                t => ora.q_soft[k * c + t],
+            })
+            .collect(),
+    };
+    Ok(comm_calls)
 }
 
 //////////////////////////////
