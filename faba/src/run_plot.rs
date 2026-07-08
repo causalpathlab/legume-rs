@@ -1,6 +1,6 @@
 //! Entry point for `faba plot` — render the outputs of `faba lineage` into a
-//! publication-style PNG: an annotated trajectory laid over the 2D (PHATE)
-//! embedding.
+//! publication-style figure (PDF by default; opt-in PNG/SVG): an annotated
+//! trajectory laid over the 2D (PHATE) embedding.
 //!
 //! Reads the `{from}.*_2d.parquet` layout tables written by
 //! `faba lineage --markers` (with the default `--layout phate`) plus the
@@ -18,9 +18,10 @@
 //! ([`plot_utils::rasterize::rasterize_group_png`]); the curves + nodes are
 //! rasterized as dark overlay layers; [`plot_utils::svg_emit::emit_svg`] stacks
 //! the layers as base64 `<image>` elements; then this module splices vector
-//! node labels, the root star, and a legend / colourbar on top before
-//! [`plot_utils::render::render_png`] (resvg) rasterizes the SVG to
-//! `{out}.plot.png`.
+//! node labels, the root star, and a legend / colourbar on top. The stacked SVG
+//! is then written as `{out}.plot.pdf` (vector, via `svg2pdf`; the default) and,
+//! opt-in, `{out}.plot.png` (resvg) / `{out}.plot.svg`. The point cloud stays a
+//! raster layer, so the PDF is a hybrid: vector text over a raster scatter at `--dpi`.
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
@@ -41,7 +42,7 @@ use plot_utils::rasterize::{
     rasterize_arrow_layer_png, rasterize_group_png, rasterize_per_point_png,
     rasterize_segment_layer_png, DataBounds, Extent, PointShape,
 };
-use plot_utils::render::render_png;
+use plot_utils::render::{render_pdf, render_png};
 use plot_utils::svg_emit::{emit_svg, escape_xml, SvgOpts, TopicLayer};
 use plot_utils::RadiusSpec;
 
@@ -83,7 +84,7 @@ pub struct PlotArgs {
     #[arg(
         long,
         short = 'o',
-        help = "Output prefix (default: the --from prefix); writes {out}.plot.png"
+        help = "Output prefix (default: the --from prefix); writes {out}.plot.pdf (+ .png / .svg with --png / --svg)"
     )]
     pub out: Option<Box<str>>,
 
@@ -125,6 +126,25 @@ pub struct PlotArgs {
         help = "Node / legend label font size (pt)"
     )]
     pub label_font_size: f32,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Also emit SVG (default: PDF only)"
+    )]
+    pub svg: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Also emit flattened PNG (default: PDF only). The scatter/curves/nodes \
+                are raster layers, so the PDF is a hybrid — vector text/legend/star over \
+                a raster point cloud rendered at --dpi. Raise --dpi (300-600) for print."
+    )]
+    pub png: bool,
+
+    #[arg(long, default_value_t = false, help = "Skip PDF output")]
+    pub no_pdf: bool,
 }
 
 pub fn run_plot(args: &PlotArgs) -> Result<()> {
@@ -248,10 +268,35 @@ pub fn run_plot(args: &PlotArgs) -> Result<()> {
         svg.replacen("</svg>", &format!("{overlay}</svg>"), 1)
     };
 
-    let png_path = format!("{out}.plot.png");
-    render_png(&svg, width_px, height_px, Path::new(&png_path))
-        .with_context(|| format!("rendering {png_path}"))?;
-    info!("Wrote {png_path} ({width_px}x{height_px})");
+    // SVG is opt-in (the intermediate source); PDF is the default; PNG is opt-in.
+    if args.svg {
+        let svg_path = format!("{out}.plot.svg");
+        std::fs::write(&svg_path, svg.as_bytes()).with_context(|| format!("writing {svg_path}"))?;
+        info!("Wrote {svg_path}");
+    }
+
+    // PNG + PDF share the same SVG string and are independent; render concurrently to
+    // hide resvg/svg2pdf parse latency. Default is PDF-only; PNG is opt-in.
+    let png_task = args.png.then(|| format!("{out}.plot.png"));
+    let pdf_task = (!args.no_pdf).then(|| format!("{out}.plot.pdf"));
+    let (png_res, pdf_res) = rayon::join(
+        || match &png_task {
+            Some(p) => {
+                render_png(&svg, width_px, height_px, Path::new(p)).map(|()| Some(p.clone()))
+            }
+            None => Ok(None),
+        },
+        || match &pdf_task {
+            Some(p) => render_pdf(&svg, Path::new(p)).map(|()| Some(p.clone())),
+            None => Ok(None),
+        },
+    );
+    if let Some(p) = png_res? {
+        info!("Wrote {p} ({width_px}x{height_px})");
+    }
+    if let Some(p) = pdf_res? {
+        info!("Wrote {p}");
+    }
     Ok(())
 }
 
