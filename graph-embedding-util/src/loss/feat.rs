@@ -316,10 +316,79 @@ pub struct StratifiedSampler {
 }
 
 pub struct PbFeatureSampler {
-    /// Global feature ids expressed in this pb.
+    /// Global feature ids sampled within this pb. In per-row mode this is every
+    /// expressed row; in β-sharing gene-paired mode ([`FeatPairing`]) it is one
+    /// entry per gene — the **spliced** (identity) row.
     pub features: Vec<u32>,
-    /// `WeightedIndex` over `features`; weights = `μ_pf · fisher(f)`.
+    /// Gene-paired mode only (else empty): the **unspliced** row paired with each
+    /// `features` entry (`u32::MAX` = the gene has no nascent track in this pb). A
+    /// draw emits both `features[i]` and `paired[i]` so δ_g trains at the spliced
+    /// sampling frequency.
+    pub paired: Vec<u32>,
+    /// `WeightedIndex` over `features`; per-row weights = `μ_pf · fisher(f)`,
+    /// gene-paired weights = `spliced_count · fisher(spliced_row)`.
     pub picker: WeightedIndex<f32>,
+}
+
+/// β-sharing pairing for **spliced-driven** positive sampling (gem's feat_factor
+/// path). Each gene is sampled by its SPLICED-track count, and a draw emits both
+/// the spliced row (identity, scored vs `β_g`) and its paired unspliced row
+/// (nascent, scored vs `β_g + δ_g`). `None` at build time → plain per-row sampling
+/// (bge). Row-indexed, aligned to the unified feature axis.
+pub struct FeatPairing<'a> {
+    pub row_to_gene: &'a [u32],
+    pub unspliced_rows: &'a [bool],
+}
+
+/// Group one stratum's `(row, count)` edges by gene for [`FeatPairing`]: returns
+/// `(primary_rows, paired_rows, weights)`, one entry per gene present. The gene is
+/// sampled by its **total** count (`spliced + unspliced` — the nascent fraction
+/// up-weights actively-regulated genes and no gene is dropped for lacking a mature
+/// track), `weight = total_count · fisher(primary)`. `primary` is the spliced
+/// (identity) row when present (else the nascent row for a nascent-only gene);
+/// `paired` is the unspliced row when both tracks exist (`u32::MAX` otherwise). A
+/// draw emits both rows so β_g / δ_g train at the gene's sampling frequency.
+fn gene_paired_entries(
+    edges: &[(u32, f32)],
+    fp: &FeatPairing,
+    fisher_weights: &[f32],
+) -> (Vec<u32>, Vec<u32>, Vec<f32>) {
+    // gene → (row, summed count) for each track.
+    let mut spliced: FxHashMap<u32, (u32, f32)> = FxHashMap::default();
+    let mut unspliced: FxHashMap<u32, (u32, f32)> = FxHashMap::default();
+    for &(row, cnt) in edges {
+        let g = fp.row_to_gene[row as usize];
+        let table = if fp.unspliced_rows[row as usize] {
+            &mut unspliced
+        } else {
+            &mut spliced
+        };
+        let e = table.entry(g).or_insert((row, 0.0));
+        e.0 = row;
+        e.1 += cnt;
+    }
+    let mut genes: Vec<u32> = spliced.keys().chain(unspliced.keys()).copied().collect();
+    genes.sort_unstable();
+    genes.dedup();
+    let mut features = Vec::with_capacity(genes.len());
+    let mut paired = Vec::with_capacity(genes.len());
+    let mut weights = Vec::with_capacity(genes.len());
+    for g in genes {
+        let s = spliced.get(&g);
+        let u = unspliced.get(&g);
+        let total = s.map_or(0.0, |&(_, c)| c) + u.map_or(0.0, |&(_, c)| c);
+        // Primary = spliced (identity) row when present, else the nascent row.
+        let (primary, pair) = match (s, u) {
+            (Some(&(srow, _)), Some(&(urow, _))) => (srow, urow),
+            (Some(&(srow, _)), None) => (srow, u32::MAX),
+            (None, Some(&(urow, _))) => (urow, u32::MAX),
+            (None, None) => unreachable!("gene collected from a nonempty track"),
+        };
+        features.push(primary);
+        paired.push(pair);
+        weights.push((total * fisher_weights[primary as usize]).max(1e-8));
+    }
+    (features, paired, weights)
 }
 
 /// Build a stratified sampler for a pseudobulk axis. Returns `None`
@@ -333,6 +402,7 @@ pub fn build_stratified_sampler(
     fisher_weights: &[f32],
     alpha_pb: f32,
     alpha_neg: f32,
+    pairing: Option<&FeatPairing>,
 ) -> Option<StratifiedSampler> {
     if triplets.is_empty() {
         return None;
@@ -401,15 +471,28 @@ pub fn build_stratified_sampler(
         .progress_with(build_bar.clone())
         .map(|&p| {
             let edges = &per_pb[p];
-            let features: Vec<u32> = edges.iter().map(|&(f, _)| f).collect();
-            let weights: Vec<f32> = edges
-                .iter()
-                .map(|&(f, c)| (c * fisher_weights[f as usize]).max(1e-8))
-                .collect();
+            let (features, paired, weights) = match pairing {
+                // β-sharing: one entry per gene, sampled by spliced count, paired
+                // with its unspliced row (emitted together at draw time).
+                Some(fp) => gene_paired_entries(edges, fp, fisher_weights),
+                // Plain per-row: every expressed row sampled by count · fisher.
+                None => {
+                    let features: Vec<u32> = edges.iter().map(|&(f, _)| f).collect();
+                    let weights: Vec<f32> = edges
+                        .iter()
+                        .map(|&(f, c)| (c * fisher_weights[f as usize]).max(1e-8))
+                        .collect();
+                    (features, Vec::new(), weights)
+                }
+            };
             let picker = WeightedIndex::new(weights).expect("non-empty pb feature weights");
             (
                 p as u32,
-                PbFeatureSampler { features, picker },
+                PbFeatureSampler {
+                    features,
+                    paired,
+                    picker,
+                },
                 pb_size[p].max(1e-8).powf(alpha_pb),
             )
         })
@@ -426,6 +509,24 @@ pub fn build_stratified_sampler(
     }
     let pb_picker = WeightedIndex::new(pb_q).expect("non-empty pb weights");
 
+    // Negative-sampling basis per feature row. Per-row (bge): the row's own count.
+    // Gene-paired (gem): the row's GENE total (spliced + unspliced) count · fisher — the
+    // SAME per-gene weighting as the positive draw, so the NCE noise distribution matches
+    // the data distribution (fisher on negatives too, not just positives). The pos/neg
+    // asymmetry (fisher on positives only) otherwise biases the learned scores toward the
+    // abundant genes.
+    let neg_basis: Vec<f32> = match pairing {
+        Some(fp) => {
+            let mut gene_total = vec![0f32; n_features];
+            for f in 0..n_features {
+                gene_total[fp.row_to_gene[f] as usize] += feat_count[f];
+            }
+            (0..n_features)
+                .map(|f| gene_total[fp.row_to_gene[f] as usize] * fisher_weights[f])
+                .collect()
+        }
+        None => feat_count.clone(),
+    };
     let feature_pool: Vec<u32> = (0..n_features as u32)
         .filter(|&f| feat_count[f as usize] > 0.0)
         .collect();
@@ -434,7 +535,7 @@ pub fn build_stratified_sampler(
     }
     let neg_w: Vec<f32> = feature_pool
         .iter()
-        .map(|&f| feat_count[f as usize].powf(alpha_neg))
+        .map(|&f| neg_basis[f as usize].powf(alpha_neg))
         .collect();
     let neg = WeightedIndex::new(neg_w).expect("non-empty negative pool");
 
@@ -475,10 +576,24 @@ pub fn sample_stratified_edge_batch(
         coarse_cells.push(p);
         fine_feats.push(f);
         weights.push(args.fine_feature_weights[f as usize]);
+        // β-sharing gene-paired draw: the entry above is the spliced (identity)
+        // row, drawn by its spliced count. Emit the paired unspliced row into the
+        // same batch (same pb) so δ_g trains at the spliced sampling frequency.
+        if !pf.paired.is_empty() {
+            let u = pf.paired[local_f];
+            if u != u32::MAX {
+                coarse_cells.push(p);
+                fine_feats.push(u);
+                weights.push(args.fine_feature_weights[u as usize]);
+            }
+        }
     }
 
-    let mut neg_feats = Vec::with_capacity(args.batch_size * args.n_negatives);
-    for _ in 0..(args.batch_size * args.n_negatives) {
+    // Negatives scale with the actual positive count (gene-paired draws emit up to
+    // 2× batch_size positives); the loss reads `neg_feats[b*K..(b+1)*K]` per positive.
+    let n_pos = fine_feats.len();
+    let mut neg_feats = Vec::with_capacity(n_pos * args.n_negatives);
+    for _ in 0..(n_pos * args.n_negatives) {
         let local = s.neg.sample(rng);
         neg_feats.push(s.feature_pool[local]);
     }
@@ -894,4 +1009,64 @@ fn unique_with_index(values: &[u32]) -> (Vec<u32>, Vec<u32>) {
         idx_map.push(id);
     }
     (unique, idx_map)
+}
+
+#[cfg(test)]
+mod pairing_tests {
+    use super::*;
+    use rustc_hash::FxHashMap;
+
+    // Rows: 0=gene0 spliced, 1=gene0 unspliced, 2=gene1 spliced (no nascent),
+    //       3=gene2 unspliced (NO spliced → nascent-only, now KEPT).
+    fn fixture() -> (Vec<u32>, Vec<bool>) {
+        let row_to_gene = vec![0u32, 0, 1, 2];
+        let unspliced_rows = vec![false, true, false, true];
+        (row_to_gene, unspliced_rows)
+    }
+
+    #[test]
+    fn gene_paired_entries_pairs_and_keeps_nascent_only() {
+        let (row_to_gene, unspliced_rows) = fixture();
+        let fp = FeatPairing {
+            row_to_gene: &row_to_gene,
+            unspliced_rows: &unspliced_rows,
+        };
+        let fisher = vec![1.0f32; 4];
+        // pb has all four rows: gene0 spliced 5 + unspliced 2, gene1 spliced 3,
+        // gene2 unspliced-only 4.
+        let edges = vec![(0u32, 5.0f32), (1, 2.0), (2, 3.0), (3, 4.0)];
+        let (features, paired, weights) = gene_paired_entries(&edges, &fp, &fisher);
+
+        // One entry per gene present → gene0, gene1, gene2 (nascent-only kept).
+        assert_eq!(features.len(), 3);
+        let by_primary: FxHashMap<u32, (u32, f32)> = features
+            .iter()
+            .zip(paired.iter())
+            .zip(weights.iter())
+            .map(|((&f, &p), &w)| (f, (p, w)))
+            .collect();
+        // gene0: primary spliced row 0, paired unspliced row 1, weight = total (5+2).
+        assert_eq!(by_primary[&0], (1, 7.0));
+        // gene1: primary spliced row 2, no nascent pair, weight = 3.
+        assert_eq!(by_primary[&2], (u32::MAX, 3.0));
+        // gene2: nascent-only → primary is the unspliced row 3, no pair, weight = 4.
+        assert_eq!(by_primary[&3], (u32::MAX, 4.0));
+    }
+
+    #[test]
+    fn weight_sums_spliced_and_unspliced() {
+        let (row_to_gene, unspliced_rows) = fixture();
+        let fp = FeatPairing {
+            row_to_gene: &row_to_gene,
+            unspliced_rows: &unspliced_rows,
+        };
+        let fisher = vec![2.0f32, 1.0, 1.0, 1.0];
+        // gene0 spliced 5 + unspliced 2 → total 7; fisher applied on the primary
+        // (spliced) row (2.0) → 14. Confirms the unspliced count IS summed in.
+        let edges = vec![(0u32, 5.0f32), (1, 2.0)];
+        let (features, paired, weights) = gene_paired_entries(&edges, &fp, &fisher);
+        assert_eq!(features, vec![0]);
+        assert_eq!(paired, vec![1]);
+        assert_eq!(weights, vec![14.0]);
+    }
 }

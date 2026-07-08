@@ -18,6 +18,7 @@ mod run_gene_count;
 mod run_lineage;
 mod run_m6a;
 mod run_pipeline;
+mod run_plot;
 mod run_read_depth;
 mod run_snp;
 mod site_analysis;
@@ -34,6 +35,7 @@ use run_gene_count::*;
 use run_lineage::*;
 use run_m6a::*;
 use run_pipeline::*;
+use run_plot::*;
 use run_read_depth::*;
 use run_snp::*;
 use site_analysis::metagene::*;
@@ -350,14 +352,18 @@ Example:\n  \
             Reads gem's parquet outputs by prefix (`-f/--from`): the latent θ\n\
             (latent.parquet) and per-cell velocity δ (velocity.parquet). Fits K\n\
             k-means centroids on θ, an MST over them, orients that tree by the\n\
-            per-node mean velocity flux (root = velocity source), and fits\n\
-            Slingshot-style smooth principal curves per lineage → per-cell\n\
-            pseudotime + branch.\n\n\
+            per-node mean velocity flux, and fits Slingshot-style smooth principal\n\
+            curves per lineage → per-cell pseudotime + branch.\n\n\
+            Root selection (priority order): --root-node, --root-cell, --root-type\n\
+            (marker-grounded, needs --markers), --root-from-gem (gem's velocity-DAG\n\
+            source), else the velocity-flux source.\n\n\
             The low-coverage modalities are NOT embedded here; this produces the\n\
             lineage ordering that a separate confounder-adjusted test runs against.\n\n\
             Outputs (all `{out}`-prefixed parquet): nodes, node_velocity, edges\n\
             (with velocity_flux + directed edges), lineages, pseudotime,\n\
-            cell_lineage_weights, lineage_pseudotime, curves.\n\n\
+            cell_lineage_weights, lineage_pseudotime, curves; with --markers also\n\
+            lineage_annot.* + trajectory_annotation; with --layout phate (default)\n\
+            also {cells,nodes,curves}_2d.\n\n\
             Reference:\n  \
             Street et al., \"Slingshot: cell lineage and pseudotime inference for\n\
             single-cell transcriptomics\", BMC Genomics, 19:477, 2018.\n\
@@ -368,6 +374,33 @@ Example:\n  \
   faba lineage -f out/gem -o out/gem"
     )]
     Lineage(LineageArgs),
+
+    #[command(
+        name = "plot",
+        aliases = ["plot-lineage", "trajectory-plot"],
+        about = "Publication-style PNG of a `faba lineage` trajectory over its 2D embedding",
+        long_about = "Render the outputs of `faba lineage --markers` (with the default\n\
+            --layout phate) into a single annotated PNG: cells laid out on the PHATE\n\
+            embedding, coloured by coarse cell type (default) or pseudotime, with the\n\
+            Slingshot principal curves + MST trajectory nodes overlaid.\n\n\
+            Reads by prefix (`-f/--from`): {from}.cells_2d.parquet (PHATE coords),\n\
+            {from}.lineage_annot.annot.parquet (per-cell coarse_label),\n\
+            {from}.curves_2d.parquet (principal curves), {from}.nodes_2d.parquet\n\
+            (MST nodes), {from}.trajectory_annotation.parquet (node role/cell_type),\n\
+            and {from}.pseudotime.parquet (for --color-by pseudotime).\n\n\
+            The cells are drawn as one transparent raster layer per cell type from a\n\
+            qualitative palette (with a legend), or one continuous blue->red\n\
+            pseudotime layer (with a colourbar). Principal curves + nodes are dark\n\
+            overlays; each non-Cycling_Progenitor node is labeled with its cell type\n\
+            and the root node is marked with a red star. Uses the shared plot-utils\n\
+            rasterize -> SVG -> resvg pipeline; writes {out}.plot.png.",
+        after_long_help = "\
+	Example:\n\
+	faba lineage -f out/gem -o out/lin --markers markers.tsv\n\
+	faba plot -f out/lin\n\
+  faba plot -f out/lin -o out/lin_pt --color-by pseudotime"
+    )]
+    Plot(PlotArgs),
 
     #[command(
         name = "dyn-assoc",
@@ -448,6 +481,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Gem(ref args) => run_gem_embedding(args)?,
         Commands::Annotate(ref args) => run_annotate(args)?,
         Commands::Lineage(ref args) => run_lineage(args)?,
+        Commands::Plot(ref args) => run_plot(args)?,
         Commands::Assoc(ref args) => run_assoc(args)?,
         Commands::All(ref args) => run_pipeline(args)?,
     }

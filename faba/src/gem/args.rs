@@ -29,6 +29,26 @@ pub struct ModelArgs {
                      `{out}.delta_dictionary.parquet`."
     )]
     pub delta_l2: f32,
+
+    #[arg(
+        long = "feature-null-fdr",
+        default_value_t = 0.05,
+        help = "Empirical-Bayes feature-null QC: drop genes whose β never moved off init at this FDR, then re-fit (default 0.05; 0 = off)",
+        long_help = "Empirical-Bayes feature-null QC — ON by default at FDR 0.05, the same\n\
+                     shared engine call `senna bge` uses. After phase 1, each feature row's\n\
+                     ‖e_feat‖² (its materialized β_g) is tested against an estimated null: a\n\
+                     gene the model never moved keeps ‖e_feat‖² ~ σ²·χ²_ν, and the scale σ̂²,\n\
+                     effective dof ν̂, and null proportion π̂₀ are estimated from the data so\n\
+                     each row gets a BH q-value. Rows with q > this FDR are the untrained\n\
+                     low-detection background (the 'empty' genes that pile at the co-embed\n\
+                     centre) and are DROPPED; the model then re-fits on the live feature axis\n\
+                     (two-pass refine). β-sharing means a null gene drops both its spliced and\n\
+                     unspliced tracks together. The live/null flags and norm² are written to\n\
+                     `{out}.feature_qc.parquet`. This is the automatic, data-driven complement\n\
+                     to the `--n-hvg` top-N cut (which runs first, up front); leaving both on\n\
+                     gives the strongest feature gate. 0 disables. Must be in [0, 1)."
+    )]
+    pub feature_null_fdr: f32,
 }
 
 /// Pseudobulk collapse, phase-1 cell-axis mode, per-file sample identity, and
@@ -49,19 +69,39 @@ pub struct ModelArgs {
 /// carry an `ENSG..._SYMBOL` prefix inside the `{gene}` slot.
 #[derive(Args, Debug, Clone)]
 pub struct CollapseArgs {
-    #[arg(long, default_value_t = 3)]
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Number of pseudobulk collapse levels (coarse→fine); each level is a training axis"
+    )]
     pub num_levels: usize,
 
-    #[arg(long, default_value_t = 10)]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Bits of the binary projection sketch used to hash cells into the finest pb-samples (≤ 2^sort_dim codes)"
+    )]
     pub sort_dim: usize,
 
-    #[arg(long, default_value_t = 10)]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "kNN neighbours for the cross-batch pseudobulk matching during collapse"
+    )]
     pub knn_pb: usize,
 
-    #[arg(long, default_value_t = 100)]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Optimization iterations for the pseudobulk collapse/refine"
+    )]
     pub num_opt_iter: usize,
 
-    #[arg(long, default_value_t = 64)]
+    #[arg(
+        long,
+        default_value_t = 64,
+        help = "Random-projection dimension for the batch-corrected sketch that drives collapse"
+    )]
     pub proj_dim: usize,
 
     #[arg(long, help = "Drop batch labels (treat all cells as one batch)")]
@@ -86,15 +126,17 @@ pub struct CollapseArgs {
 
     #[arg(
         long = "n-hvg",
-        default_value_t = 0,
-        help = "Keep only the top-N highly-variable genes (0 = off, use all genes)",
-        long_help = "Gene-level HVG feature filter (like `senna bge`). When > 0, select the\n\
-                     top-N most variable GENES (NB dispersion-trend, spliced+unspliced pooled)\n\
-                     and drop the rest — both the spliced and unspliced rows of a dropped gene\n\
-                     go together so the β-sharing factorization stays aligned. This removes the\n\
-                     low-detection 'empty' genes that otherwise pile at the co-embedding centre,\n\
-                     shrinks the dictionary, and restricts the pseudobulk projection/membership\n\
-                     to the kept genes. 0 (default) keeps every gene. Try 2000–5000."
+        default_value_t = 5000,
+        help = "Keep only the top-N highly-variable genes (default 5000, matching senna/pinto; 0 = all genes)",
+        long_help = "Gene-level HVG feature filter (like `senna bge`). Selects the top-N most\n\
+                     variable GENES (NB dispersion-trend, spliced+unspliced pooled) and drops the\n\
+                     rest — both the spliced and unspliced rows of a dropped gene go together so\n\
+                     the β-sharing factorization stays aligned. This removes the abundant, uniform\n\
+                     housekeeping/ribosomal genes that otherwise dominate the positive edges and\n\
+                     collapse every cell onto one point; it shrinks the dictionary and restricts\n\
+                     the pseudobulk projection/membership to the kept genes. Defaults to 5000 for\n\
+                     consistency with `senna bge` / `pinto`; `0` keeps every gene (expect a\n\
+                     proliferation/housekeeping-dominated collapse on rich data). Try 2000–5000."
     )]
     pub n_hvg: usize,
 
@@ -165,26 +207,32 @@ pub struct TrainArgs {
     #[arg(
         long = "lineage-dag",
         default_value_t = false,
-        help = "Lineage-aware pseudobulk DAG (experimental; default off).",
-        long_help = "Inject developmental structure at pseudobulk scale. When set, gem runs an\n\
-                     analytic pb-level velocity readout after phase 1 (identity θ_pb and\n\
-                     velocity δ_pb per pseudobulk per collapse level) that orients a directed\n\
-                     lineage structure over pseudobulks. Off by default — the per-cell embedding\n\
-                     is byte-identical to a plain run. Only meaningful with spliced+unspliced\n\
-                     input (β-sharing)."
+        help = "Inject developmental structure at pseudobulk scale (experimental; default off).",
+        long_help = "Shape the embedding along a pseudobulk lineage. When set, gem reads the\n\
+                     pb-level velocity (identity θ_pb + velocity δ_pb per pseudobulk per collapse\n\
+                     level), orients a directed lineage over the pseudobulks, and runs a SECOND\n\
+                     phase-1 pass with a velocity-drift term so the shared feature dictionary\n\
+                     picks up that lineage geometry — then lifts a per-cell pseudotime + fate\n\
+                     (`{out}.dag_pseudotime.parquet` / `{out}.dag_fate.parquet`). It uses the\n\
+                     LEARNED DAG by default (see `--fixed-dag`). Off by default — the per-cell\n\
+                     embedding is then byte-identical to a plain run; turning it ON changes the\n\
+                     embedding (the second pass). Only meaningful with spliced+unspliced input\n\
+                     (β-sharing)."
     )]
     pub lineage_dag: bool,
 
     #[arg(
-        long = "dag-learn",
+        long = "fixed-dag",
         default_value_t = false,
-        help = "Lineage-DAG: learn the pseudobulk DAG (M2) instead of a fixed graph.",
-        long_help = "Within `--lineage-dag`, learn the directed pb structure `W` jointly with\n\
-                     the embedding (velocity-drift SEM + DAGMA-style acyclicity + L1 +\n\
-                     velocity-orientation prior) instead of the default fixed velocity-oriented\n\
-                     KNN graph (M1). Ignored unless `--lineage-dag` is set. Experimental."
+        help = "Lineage-DAG: use the fixed velocity-KNN graph instead of the default learned DAG.",
+        long_help = "Within `--lineage-dag`, orient the pb structure with a FIXED velocity-oriented\n\
+                     KNN graph, instead of LEARNING the directed adjacency `W` (the default).\n\
+                     Learning co-refines `W` with the embedding (velocity-drift SEM + DAGMA-style\n\
+                     acyclicity + L1 + velocity-orientation prior) and gives a cleaner single-\n\
+                     lineage structure; the fixed graph is faster but more fragmented. Ignored\n\
+                     unless `--lineage-dag` is set."
     )]
-    pub dag_learn: bool,
+    pub fixed_dag: bool,
 
     #[arg(
         long = "lineage-smooth",

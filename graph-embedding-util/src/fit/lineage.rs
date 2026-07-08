@@ -1,4 +1,4 @@
-//! Fixed pseudobulk lineage structure for the velocity-drift SEM residual (M1).
+//! Fixed pseudobulk lineage structure for the velocity-drift SEM residual (velocity-KNN).
 //!
 //! Given the analytic pb-level velocity readout ([`PbLevelVelocity`]: identity
 //! `θ_pb` + velocity `δ_pb` per pb node per collapse level), build a **directed**
@@ -6,7 +6,7 @@
 //! `i → j` is kept when `j` is velocity-forward of `i` (`⟨θ_j − θ_i, δ_i⟩ > 0`).
 //! This fixed structure feeds the velocity-drift SEM residual
 //! `Σ_{i→j} w_ij ‖ê_j − ê_i − s·v̂_i‖²` added to phase-1 training (see
-//! `crate::training::PbSemTerm`). M2 replaces this fixed graph with a learnable
+//! `crate::training::PbSemTerm`). the learned DAG replaces this fixed graph with a learnable
 //! DAGMA `W`; the residual form is unchanged.
 
 use super::projection::PbLevelVelocity;
@@ -32,7 +32,7 @@ pub struct PbLineageLevel {
 
 impl PbLineageLevel {
     /// Dense `[n_pb × n_pb]` row-major adjacency: `[i·n + j] = w` for edge `(i→j)`,
-    /// `0` elsewhere. Warm-starts the learnable pb-DAG `W` (M2) from this fixed
+    /// `0` elsewhere. Warm-starts the learnable pb-DAG `W` (learned-DAG) from this fixed
     /// velocity-oriented structure so SGD refines from a correctly-oriented start
     /// instead of zeros. The `(i, j)` layout matches `PbDagTerm`'s forward mask.
     #[must_use]

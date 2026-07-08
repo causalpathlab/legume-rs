@@ -1,4 +1,4 @@
-//! Unit tests for the phase-2 cell-lineage lift (M3).
+//! Unit tests for the phase-2 cell-lineage lift (cell-lift).
 
 use super::{dense_to_edges, lift_cells, pb_trajectory};
 use crate::fit::projection::PbLevelVelocity;

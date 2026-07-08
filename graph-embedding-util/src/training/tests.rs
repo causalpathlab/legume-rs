@@ -94,7 +94,7 @@ fn empty_level_yields_no_term() {
     assert!(PbSemTerm::new(&level, 2, 1.0, 1.0, &dev).unwrap().is_none());
 }
 
-// ---- M2: learnable pb-DAG ----
+// ---- learned-DAG: learnable pb-DAG ----
 
 /// A strictly-upper-triangular (acyclic) `W` has ~zero acyclicity; a 2-cycle is
 /// strictly positive.
