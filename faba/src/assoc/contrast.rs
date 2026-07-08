@@ -36,7 +36,12 @@ pub struct BranchResult {
     pub stat: f32,
     /// Adjusted rate difference proxy = stat / branch coverage.
     pub effect: f32,
+    /// Raw per-test permutation p-value `(1 + #{|T^(b)| ≥ |T^obs|}) / (1 + B)`.
     pub p_perm: f32,
+    /// Westfall–Young step-down min-P FWER-adjusted p-value (strong control across the
+    /// whole (site, branch) family, accounting for their dependence via the shared
+    /// permutation null). In `[1/(B+1), 1]`, monotone in the observed-p order.
+    pub p_fwer: f32,
 }
 
 /// Equal-width pseudotime bins → per-cell bin id.
@@ -146,28 +151,15 @@ pub fn run_contrasts(sites: &[Site], lin: &Lineage, cfg: &AssocConfig) -> Vec<Br
             .collect()
     };
 
-    // Permutation null: per site, count permutations whose |CMH| ≥ |observed|.
-    // Sites are independent → parallel over sites.
-    let ge: Vec<Vec<u32>> = sites
-        .par_iter()
-        .enumerate()
-        .map(|(si, s)| {
-            let mut scr = CmhScratch::new(nb, nbr);
-            let mut cnt = vec![0u32; nbr];
-            for pb in &perms {
-                let nums = scr.numerators(s, &covered[si], &bins, pb);
-                for l in 0..nbr {
-                    if nums[l].abs() >= obs[si][l].abs() {
-                        cnt[l] += 1;
-                    }
-                }
-            }
-            cnt
-        })
-        .collect();
-
-    // Assemble QC-passing results.
-    let mut out = Vec::new();
+    // QC mask on the OBSERVED data: the (site, branch) family is fixed before
+    // permutation. Records each passing test's metadata and its per-site branch id.
+    struct Passing {
+        si: usize,
+        l: usize,
+        n_cells: usize,
+        cov: u64,
+    }
+    let mut passing: Vec<Passing> = Vec::new();
     for (si, s) in sites.iter().enumerate() {
         for l in 0..nbr {
             let (mut ncells, mut cov) = (0usize, 0u64);
@@ -177,24 +169,163 @@ pub fn run_contrasts(sites: &[Site], lin: &Lineage, cfg: &AssocConfig) -> Vec<Br
                     cov += s.n[c] as u64;
                 }
             }
-            if cov < cfg.min_total_coverage || ncells < cfg.min_cells {
-                continue;
+            if cov >= cfg.min_total_coverage && ncells >= cfg.min_cells {
+                passing.push(Passing {
+                    si,
+                    l,
+                    n_cells: ncells,
+                    cov,
+                });
             }
-            let num = obs[si][l];
-            let effect = if cov > 0 { num / cov as f32 } else { 0.0 };
-            let p_perm = (1 + ge[si][l] as usize) as f32 / (1 + cfg.num_perm) as f32;
-            out.push(BranchResult {
-                site: si,
-                branch: l,
-                n_cells: ncells,
-                total_cov: cov,
-                stat: num,
-                effect,
-                p_perm,
-            });
         }
     }
-    out
+    if passing.is_empty() {
+        return Vec::new();
+    }
+
+    // Per site, the (global test index, branch) pairs it owns — so the parallel
+    // permutation pass can fill each test's column of the shared statistic matrix.
+    let mut per_site: Vec<Vec<(usize, usize)>> = vec![Vec::new(); sites.len()];
+    for (t, p) in passing.iter().enumerate() {
+        per_site[p.si].push((t, p.l));
+    }
+
+    // Shared permutation statistic matrix `perm_abs[t] = [|T_t^(b)|; B]`. All tests share
+    // the SAME `perms` (in the same order), so column b is one common permutation across
+    // every test — the prerequisite for a valid Westfall–Young min-P null. Parallel over
+    // sites; each site writes only the columns for the tests it owns.
+    let site_cols: Vec<Vec<(usize, Vec<f32>)>> = sites
+        .par_iter()
+        .enumerate()
+        .map(|(si, s)| {
+            let owned = &per_site[si];
+            if owned.is_empty() {
+                return Vec::new();
+            }
+            let mut scr = CmhScratch::new(nb, nbr);
+            let mut cols: Vec<Vec<f32>> = owned
+                .iter()
+                .map(|_| Vec::with_capacity(perms.len()))
+                .collect();
+            for pb in &perms {
+                let nums = scr.numerators(s, &covered[si], &bins, pb);
+                for (k, &(_, l)) in owned.iter().enumerate() {
+                    cols[k].push(nums[l].abs());
+                }
+            }
+            owned.iter().map(|&(t, _)| t).zip(cols).collect()
+        })
+        .collect();
+
+    let mut perm_abs: Vec<Vec<f32>> = vec![Vec::new(); passing.len()];
+    for sc in site_cols {
+        for (t, col) in sc {
+            perm_abs[t] = col;
+        }
+    }
+    let obs_abs: Vec<f32> = passing.iter().map(|p| obs[p.si][p.l].abs()).collect();
+
+    // Raw per-test permutation p-value, then the Westfall–Young FWER calibration.
+    let p_perm: Vec<f32> = perm_abs
+        .iter()
+        .zip(&obs_abs)
+        .map(|(col, &o)| {
+            let ge = col.iter().filter(|&&v| v >= o).count();
+            (1 + ge) as f32 / (1 + cfg.num_perm) as f32
+        })
+        .collect();
+    let p_fwer = westfall_young_step_down_minp(&perm_abs, &obs_abs, cfg.num_perm);
+
+    passing
+        .iter()
+        .enumerate()
+        .map(|(t, p)| {
+            let num = obs[p.si][p.l];
+            let effect = if p.cov > 0 { num / p.cov as f32 } else { 0.0 };
+            BranchResult {
+                site: p.si,
+                branch: p.l,
+                n_cells: p.n_cells,
+                total_cov: p.cov,
+                stat: num,
+                effect,
+                p_perm: p_perm[t],
+                p_fwer: p_fwer[t],
+            }
+        })
+        .collect()
+}
+
+/// Westfall–Young **step-down min-P** FWER-adjusted p-values from a shared permutation
+/// set (Westfall & Young 1993; algorithm as in Ge, Dudoit & Speed 2003).
+///
+/// `perm_abs[t]` are the `B` permutation statistics `|T_t^(b)|` for test `t` — all tests
+/// share the same `B` within-bin branch-label permutations (column `b` is one common
+/// relabelling), so the minimum across tests within a permutation is a coherent draw from
+/// the global null. `obs_abs[t] = |T_t^obs|`. min-P (not max-T): each test is first mapped
+/// to its own permutation p-value, so tests of differing coverage/scale compare fairly.
+///
+/// Per test the permutation p-value is `p_t^(c) = #{b: |T_t^(b)| ≥ |T_t^(c)|} / B` and
+/// `p_t^obs = #{b: |T_t^(b)| ≥ |T_t^obs|} / B`. Tests are ordered by `p_t^obs`; stepping
+/// down from the least significant, `q_i^(c) = min_{k ≥ i} p_{r_k}^(c)` is the successive
+/// minimum over the not-yet-rejected tests, and the adjusted p is
+/// `(1 + #{c: q_i^(c) ≤ p_{r_i}^obs}) / (1 + B)`, made monotone in the step-down order.
+/// Result is in `[1/(B+1), 1]`.
+fn westfall_young_step_down_minp(
+    perm_abs: &[Vec<f32>],
+    obs_abs: &[f32],
+    num_perm: usize,
+) -> Vec<f32> {
+    let m = perm_abs.len();
+    if m == 0 || num_perm == 0 {
+        return vec![1.0; m];
+    }
+    let bf = num_perm as f32;
+
+    // Ascending-sorted copy of each test's B permutation stats, for O(log B) tail counts.
+    let sorted: Vec<Vec<f32>> = perm_abs
+        .iter()
+        .map(|col| {
+            let mut v = col.clone();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            v
+        })
+        .collect();
+    // #{b: perm_abs[t][b] ≥ v} via partition_point on the ascending column.
+    let tail_ge = |t: usize, v: f32| -> usize {
+        let s = &sorted[t];
+        s.len() - s.partition_point(|&x| x < v)
+    };
+
+    let p_obs: Vec<f32> = (0..m).map(|t| tail_ge(t, obs_abs[t]) as f32 / bf).collect();
+
+    // Tests ordered by observed p ascending (most → least significant).
+    let mut order: Vec<usize> = (0..m).collect();
+    order.sort_by(|&i, &j| {
+        p_obs[i]
+            .partial_cmp(&p_obs[j])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Successive minima across permutations, accumulated from least to most significant.
+    let mut running_min = vec![f32::INFINITY; num_perm];
+    let mut adj = vec![0f32; m];
+    for &t in order.iter().rev() {
+        for (c, rm) in running_min.iter_mut().enumerate() {
+            let ptc = tail_ge(t, perm_abs[t][c]) as f32 / bf;
+            *rm = rm.min(ptc);
+        }
+        let cnt = running_min.iter().filter(|&&q| q <= p_obs[t]).count();
+        adj[t] = (1 + cnt) as f32 / (1 + num_perm) as f32;
+    }
+
+    // Step-down monotonicity: adjusted p is non-decreasing in the observed-p order.
+    let mut prev = 0f32;
+    for &t in &order {
+        adj[t] = adj[t].max(prev);
+        prev = adj[t];
+    }
+    adj
 }
 
 /// Per-(branch, bin) pseudobulk `(branch, bin, K, N)` for one site (non-empty only)

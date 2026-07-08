@@ -128,7 +128,7 @@ pub struct LineageArgs {
                 low-τ region in {from}.dag_pseudotime.parquet. More robust than the per-edge \
                 flux pick, while lineage still fits the curves. Overridden by \
                 --root-node / --root-cell / --root-type; falls back to the flux root if the \
-                file is absent or gem flagged the DAG underfit (lineage_qc.json)."
+                file is absent or gem's DAG has no terminal structure (lineage_qc.json)."
     )]
     pub root_from_gem: bool,
 
@@ -256,16 +256,16 @@ fn resolve_root(
 /// is robust to a single τ≈0 outlier (a rare cell the old min-τ-cell pick could land on).
 /// Returns `None` (with a warning) — so the caller falls back to the velocity-flux root —
 /// when the file is absent/unreadable, no low-τ barcode matches the latent, or gem's
-/// `lineage_qc.json` flags the DAG as `underfit` (an unreliable τ).
+/// `lineage_qc.json` reports zero terminal fates (a structureless DAG with meaningless τ).
 fn gem_root_node(
     prefix: &str,
     cell_names: &[Box<str>],
     labels: &[usize],
     k: usize,
 ) -> Option<usize> {
-    if gem_dag_underfit(prefix) {
+    if gem_dag_n_terminals(prefix) == Some(0) {
         warn!(
-            "--root-from-gem: gem flagged its velocity-DAG 'underfit' (lineage_qc.json); \
+            "--root-from-gem: gem's velocity-DAG has no terminal structure (lineage_qc.json); \
              using the velocity-flux root instead"
         );
         return None;
@@ -316,13 +316,13 @@ fn gem_root_node(
     Some(root)
 }
 
-/// True when gem's `{prefix}.lineage_qc.json` reports the pb-DAG as `underfit`
-/// (fragmented — many roots/terminals), so its τ root is unreliable. False when the file
-/// is absent/unreadable (no signal → don't veto the gem root).
-fn gem_dag_underfit(prefix: &str) -> bool {
-    std::fs::read_to_string(format!("{prefix}.lineage_qc.json"))
-        .map(|s| s.contains("\"underfit\""))
-        .unwrap_or(false)
+/// Terminal-fate count from gem's `{prefix}.lineage_qc.json`. `None` when the file is
+/// absent/unreadable or the field is missing — the caller then does NOT veto the gem
+/// root (no signal). `Some(0)` means a structureless DAG whose τ is meaningless.
+fn gem_dag_n_terminals(prefix: &str) -> Option<usize> {
+    let s = std::fs::read_to_string(format!("{prefix}.lineage_qc.json")).ok()?;
+    let qc: serde_json::Value = serde_json::from_str(&s).ok()?;
+    qc.get("n_terminals")?.as_u64().map(|n| n as usize)
 }
 
 pub fn run_lineage(args: &LineageArgs) -> Result<()> {
@@ -422,7 +422,7 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         .root_type
         .as_deref()
         .and_then(|t| node_calls.as_ref().and_then(|c| root_type_node(c, t)));
-    // gem hand-off: anchor at gem's velocity-DAG source unless it flagged the DAG underfit.
+    // gem hand-off: anchor at gem's velocity-DAG source unless that DAG is structureless.
     let gem_root = args
         .root_from_gem
         .then(|| gem_root_node(prefix, &cell_names, &labels, k))

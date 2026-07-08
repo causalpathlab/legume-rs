@@ -59,10 +59,10 @@ pub struct PbTrajectory {
     pub tau_scale: f32,
 }
 
-/// Unsupervised per-run **diagnostics + hygiene floor** for lineage runs (no ground
-/// truth). An agent exploring random seeds reads this to reject broken runs
-/// (`flag == "underfit"`) and inspect a run's structure. NOTE: these are *diagnostics*,
-/// not a validated quality ranker — on the branching sim `root_decisiveness` correlated
+/// Unsupervised per-run **structural diagnostics** for lineage runs (no ground
+/// truth). An agent exploring random seeds reads these numbers to inspect a run's
+/// structure (root/terminal counts, source reach, placement ambiguity). NOTE: these
+/// are *diagnostics*, not a validated quality ranker — on the branching sim `root_decisiveness` correlated
 /// with quality on one seed batch but not another (coarse values + pipeline
 /// non-determinism), so it must not be trusted for fine seed selection. Reliable fine
 /// selection of the genuine tail needs a marker-prior root, not these scores.
@@ -82,9 +82,6 @@ pub struct LineageQc {
     /// Final-epoch refine loss (NCE ≈ neg-log-lik) — a fit-hygiene signal ONLY. It is
     /// orientation-invariant, so it says nothing about trajectory quality.
     pub likelihood: f32,
-    /// `"ok"` | `"underfit"` (no terminal structure / collapsed backbone — reject). This
-    /// binary FLOOR is the reliable part; the other fields are diagnostics, not a ranker.
-    pub flag: Box<str>,
 }
 
 /// Per-cell lineage lifted from a [`PbTrajectory`] (evaluation only).
@@ -468,8 +465,8 @@ pub fn pb_trajectory(
 }
 
 /// Assemble the unsupervised [`LineageQc`] diagnostics for one run from its trajectory,
-/// velocity readout, cell lift, and final refine loss. Bakes the binary `underfit` floor
-/// in; the remaining fields are diagnostics (not a validated ranker). `knn` = lineage KNN.
+/// velocity readout, cell lift, and final refine loss. All fields are structural
+/// diagnostics (not a validated ranker). `knn` = lineage KNN.
 pub fn compute_lineage_qc(
     traj: &PbTrajectory,
     vel: &PbLevelVelocity,
@@ -484,15 +481,6 @@ pub fn compute_lineage_qc(
     } else {
         lin.ambiguity.iter().sum::<f32>() / lin.ambiguity.len() as f32
     };
-    // Binary FLOOR only — reject a run with no terminal structure or a collapsed
-    // backbone (decisiveness ≈ 0). NOT gated on coherence (the learned DAG collapses δ while its
-    // `W`-trajectory is great). Everything else is `ok`. The other fields are diagnostics
-    // — decisiveness is NOT a reliable fine ranker (coarse + pipeline non-determinism).
-    let flag = if traj.terminals.is_empty() || traj.decisiveness < 0.12 {
-        "underfit"
-    } else {
-        "ok"
-    };
     LineageQc {
         root_decisiveness: traj.decisiveness,
         velocity_coherence: coherence,
@@ -500,7 +488,6 @@ pub fn compute_lineage_qc(
         n_terminals: traj.terminals.len(),
         mean_ambiguity,
         likelihood,
-        flag: flag.into(),
     }
 }
 

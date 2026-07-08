@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "faba"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "approx",
@@ -2658,7 +2658,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.2.19"
+version = "0.2.20"
 dependencies = [
  "anyhow",
  "auxiliary-data",

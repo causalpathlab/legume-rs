@@ -118,3 +118,64 @@ fn permutation_p_is_bounded() {
         );
     }
 }
+
+/// Westfall–Young FWER p on the real pipeline: bounded, and the diverging site's
+/// branches still clear FWER while the flat site does not.
+#[test]
+fn westfall_young_fwer_on_pipeline() {
+    let (lin, sites) = synth();
+    let res = run_contrasts(&sites, &lin, &cfg());
+    for r in &res {
+        assert!(
+            r.p_fwer >= 1.0 / 501.0 && r.p_fwer <= 1.0,
+            "fwer out of range: {}",
+            r.p_fwer
+        );
+    }
+    for r in res.iter().filter(|r| r.site == 0) {
+        assert!(
+            r.p_fwer < 0.05,
+            "diverging branch{} fwer={}",
+            r.branch,
+            r.p_fwer
+        );
+    }
+    for r in res.iter().filter(|r| r.site == 1) {
+        assert!(r.p_fwer > 0.1, "flat branch{} fwer={}", r.branch, r.p_fwer);
+    }
+}
+
+/// Direct check of the step-down min-P routine on a controlled shared-permutation
+/// matrix: a test whose observed statistic exceeds every permutation clears FWER,
+/// median-observed tests do not, all values are bounded, and the strong test is the
+/// smallest adjusted p.
+#[test]
+fn westfall_young_minp_separates_and_bounds() {
+    let b = 200usize;
+    // Four tests share the same B permutation stats 0,1,…,199. Test 0's observed value
+    // is beyond every permutation (p_obs = 0); tests 1–3 sit at their median (p_obs = 0.5).
+    let perm_abs: Vec<Vec<f32>> = (0..4).map(|_| (0..b).map(|x| x as f32).collect()).collect();
+    let obs = vec![1000.0f32, 100.0, 100.0, 100.0];
+    let fwer = westfall_young_step_down_minp(&perm_abs, &obs, b);
+    let floor = 1.0 / (b as f32 + 1.0);
+    for &p in &fwer {
+        assert!((floor..=1.0).contains(&p), "fwer out of range: {p}");
+    }
+    assert!(fwer[0] < 0.05, "strong test fwer={}", fwer[0]);
+    for (t, &p) in fwer.iter().enumerate().skip(1) {
+        assert!(p > 0.2, "null test {t} fwer={p}");
+        assert!(
+            fwer[0] <= p,
+            "strong test should be the smallest adjusted p"
+        );
+    }
+    // Degenerate guards.
+    assert_eq!(
+        westfall_young_step_down_minp(&[], &[], b),
+        Vec::<f32>::new()
+    );
+    assert_eq!(
+        westfall_young_step_down_minp(&perm_abs, &obs, 0),
+        vec![1.0; 4]
+    );
+}
