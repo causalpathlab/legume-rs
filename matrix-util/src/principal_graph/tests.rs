@@ -28,7 +28,11 @@ fn kmeans_seeded_is_reproducible() {
     assert_eq!(c1.nrows(), 3);
     for i in 0..c1.nrows() {
         for j in 0..c1.ncols() {
-            assert_eq!(c1[(i, j)], c2[(i, j)], "centroid ({i},{j}) differs at same seed");
+            assert_eq!(
+                c1[(i, j)],
+                c2[(i, j)],
+                "centroid ({i},{j}) differs at same seed"
+            );
         }
     }
 }
@@ -50,7 +54,11 @@ fn kmeans_seeded_recovers_separated_blobs() {
     let mut used: Vec<usize> = vec![labels[0], labels[40], labels[80]];
     used.sort_unstable();
     used.dedup();
-    assert_eq!(used.len(), 3, "the three blobs must map to three distinct clusters");
+    assert_eq!(
+        used.len(),
+        3,
+        "the three blobs must map to three distinct clusters"
+    );
 }
 
 #[test]
