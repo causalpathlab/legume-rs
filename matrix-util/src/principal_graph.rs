@@ -24,8 +24,6 @@ use rayon::prelude::*;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 
-use crate::clustering::{Kmeans, KmeansArgs};
-
 /// Configuration for [`fit_principal_graph`].
 #[derive(Debug, Clone)]
 pub struct PrincipalGraphArgs {
@@ -156,38 +154,12 @@ pub fn fit_principal_graph(
 }
 
 /// k-means on the rows of `z` (cells × D); returns `(centroids K×D, labels)`.
-/// Empty clusters are re-seeded from a data row so `K` stays non-degenerate.
-/// Shared by [`fit_principal_graph`] and the Slingshot driver in `faba`.
+/// Fixed-seed shim over [`kmeans_centroids_seeded`] — the two functions used to diverge (an
+/// unseeded delegate to the `clustering` crate), which risked drift; this keeps callers that
+/// don't need seed control on the same implementation as `faba lineage --seed`. Empty
+/// clusters are re-seeded from the point currently worst-served by its centroid.
 pub fn kmeans_centroids(z: &DMatrix<f32>, k: usize, max_iter: usize) -> (DMatrix<f32>, Vec<usize>) {
-    let labels = z.kmeans_rows(KmeansArgs {
-        num_clusters: k,
-        max_iter,
-    });
-    let d = z.ncols();
-    let mut centroids = DMatrix::<f32>::zeros(k, d);
-    let mut counts = vec![0usize; k];
-    for (i, &c) in labels.iter().enumerate() {
-        if c < k {
-            for j in 0..d {
-                centroids[(c, j)] += z[(i, j)];
-            }
-            counts[c] += 1;
-        }
-    }
-    for c in 0..k {
-        if counts[c] > 0 {
-            for j in 0..d {
-                centroids[(c, j)] /= counts[c] as f32;
-            }
-        } else {
-            // Empty cluster: re-seed from a data row to keep K non-degenerate.
-            let src = c % z.nrows().max(1);
-            for j in 0..d {
-                centroids[(c, j)] = z[(src, j)];
-            }
-        }
-    }
-    (centroids, labels)
+    kmeans_centroids_seeded(z, k, max_iter, 42)
 }
 
 /// Seeded k-means on the rows of `z` (cells × D): **kmeans++** initialization from a
@@ -253,14 +225,19 @@ pub fn kmeans_centroids_seeded(
     }
 
     // ---- Lloyd iterations ----
+    // Reuse `pairwise_sqdist_rows_to_rows` for the assignment step: it computes the full
+    // n×k sq-dist matrix in parallel via a shared flat buffer, then a single par row-scan
+    // picks the argmin per point. Much tighter than the naive O(n·k·d) scalar double loop.
     let mut labels = vec![0usize; n];
     let mut nearest = vec![0f32; n]; // sq-dist of each point to its assigned centroid
     for _ in 0..max_iter.max(1) {
+        let dist_nk = pairwise_sqdist_rows_to_rows(z, &centers);
         let mut changed = false;
         for i in 0..n {
-            let (mut best, mut best_d) = (0usize, f32::INFINITY);
-            for c in 0..k {
-                let dd = sqdist_row_to_center(z, i, &centers, c);
+            let row = dist_nk.row(i);
+            let (mut best, mut best_d) = (0usize, row[0]);
+            for c in 1..k {
+                let dd = row[c];
                 if dd < best_d {
                     best_d = dd;
                     best = c;
