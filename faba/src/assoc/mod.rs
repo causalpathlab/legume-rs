@@ -13,7 +13,9 @@
 //!   progresses?*, a binomial/quasi-binomial spline GAM of `logit(k/n)` on pseudotime
 //!   (tradeSeq `associationTest`).
 
+mod bayes_common;
 pub mod contrast;
+pub mod contrast_bayes;
 pub mod gam;
 pub mod io;
 pub mod trend;

@@ -20,12 +20,9 @@ use rayon::prelude::*;
 
 use mcmc_util::engine::EssSampler;
 
+use super::bayes_common::{derive_seed, softplus, summarize_posterior, Posterior, INTERCEPT_SD};
 use super::gam::{build_spline_design, SplineDesign};
 use super::io::{branch_buckets, Lineage, Site};
-
-/// Vague prior standard deviation for the intercept (weakly informative on the logit
-/// scale). The spline-coefficient prior sd is a caller knob.
-const INTERCEPT_SD: f32 = 10.0;
 
 pub struct BayesTrendConfig {
     pub n_knots: usize,
@@ -78,16 +75,12 @@ fn site_trends_bayes(
         if bd.k.len() < cfg.min_cells || bd.cov < cfg.min_total_coverage {
             continue;
         }
-        // Distinct per-(site, branch) seed → reproducible regardless of thread order.
-        let seed = cfg
-            .seed
-            .wrapping_add((si as u64).wrapping_mul(1009))
-            .wrapping_add(l as u64);
-        if let Some(post) = fit_branch(&bd.k, &bd.n, &bd.x, cfg, seed) {
+        let seed = derive_seed(cfg.seed, si, l);
+        if let Some((post, n_obs)) = fit_branch(&bd.k, &bd.n, &bd.x, cfg, seed) {
             out.push(BayesTrendResult {
                 site: si,
                 branch: l,
-                n_cells: post.n_obs,
+                n_cells: n_obs,
                 total_cov: bd.cov,
                 effect: post.effect,
                 effect_sd: post.effect_sd,
@@ -100,24 +93,15 @@ fn site_trends_bayes(
     out
 }
 
-struct Posterior {
-    n_obs: usize,
-    effect: f32,
-    effect_sd: f32,
-    effect_lo: f32,
-    effect_hi: f32,
-    lfsr: f32,
-}
-
-/// ESS posterior for the net log-odds change of one branch, or `None` if the branch
-/// cannot support a spline.
+/// ESS posterior for the net log-odds change of one branch, plus the number of design rows.
+/// `None` if the branch cannot support a spline (degenerate design).
 fn fit_branch(
     k: &[u32],
     n: &[u32],
     x: &[f32],
     cfg: &BayesTrendConfig,
     seed: u64,
-) -> Option<Posterior> {
+) -> Option<(Posterior, usize)> {
     // The spline design is already f32 — consume it directly (no per-branch copy).
     let SplineDesign {
         x: xf,
@@ -134,15 +118,7 @@ fn fit_branch(
         let eta = &xf * beta;
         let mut ll = 0.0f32;
         for i in 0..m {
-            let e = eta[i];
-            let l1pe = if e > 20.0 {
-                e
-            } else if e < -20.0 {
-                0.0
-            } else {
-                (1.0 + e.exp()).ln()
-            };
-            ll += kf[i] * e - nf[i] * l1pe;
+            ll += kf[i] * eta[i] - nf[i] * softplus(eta[i]);
         }
         ll
     };
@@ -165,39 +141,9 @@ fn fit_branch(
         seed,
     };
     let chain = sampler.run(&lnpdf, &prior_draw, &init);
-
     // Posterior of the start→end net log-odds change.
-    let mut effects: Vec<f32> = chain.samples.iter().map(|b| contrast.dot(b)).collect();
-    let ns = effects.len();
-    if ns == 0 {
-        return None;
-    }
-    let mean = effects.iter().sum::<f32>() / ns as f32;
-    let var = effects.iter().map(|e| (e - mean).powi(2)).sum::<f32>() / ns as f32;
-    let pos = effects.iter().filter(|&&e| e > 0.0).count() as f32 / ns as f32;
-    let neg = effects.iter().filter(|&&e| e < 0.0).count() as f32 / ns as f32;
-
-    // 5%/95% quantiles via order-statistic selection (O(ns)) — no full sort. Select
-    // the upper index first, then the lower one within the left partition.
-    let cmp = |a: &f32, b: &f32| a.partial_cmp(b).unwrap();
-    let idx = |pr: f32| ((pr * (ns as f32 - 1.0)).round() as usize).min(ns - 1);
-    let (lo_i, hi_i) = (idx(0.05), idx(0.95));
-    effects.select_nth_unstable_by(hi_i, cmp);
-    let effect_hi = effects[hi_i];
-    let effect_lo = if lo_i < hi_i {
-        *effects[..hi_i].select_nth_unstable_by(lo_i, cmp).1
-    } else {
-        effect_hi
-    };
-
-    Some(Posterior {
-        n_obs: m,
-        effect: mean,
-        effect_sd: var.sqrt(),
-        effect_lo,
-        effect_hi,
-        lfsr: pos.min(neg),
-    })
+    let effects: Vec<f32> = chain.samples.iter().map(|b| contrast.dot(b)).collect();
+    summarize_posterior(effects).map(|post| (post, m))
 }
 
 #[cfg(test)]
