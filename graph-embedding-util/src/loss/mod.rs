@@ -41,7 +41,7 @@ pub use feat::{
     nce_loss, nce_loss_chain, nce_loss_identity, sample_chain_batch, sample_edge_batch,
     sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, CellFeatureSampler,
     ChainAxis, ChainBatch, ChainBatchArgs, ChainFeatureSide, ChainSampler, EdgeBatch,
-    EdgeBatchArgs, PbFeatureSampler, PerBatchSampler, PerBatchStratifiedCellSampler,
+    EdgeBatchArgs, FeatPairing, PbFeatureSampler, PerBatchSampler, PerBatchStratifiedCellSampler,
     PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
 };
 

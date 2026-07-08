@@ -146,10 +146,10 @@ pub struct FitConfig {
     /// no-op (and a warning) when `feat_factor` is `None`. `false` = current
     /// behaviour (bge and plain gem), byte-identical output.
     pub lineage_dag: bool,
-    /// Within the lineage-DAG path, use the **learnable** pb-DAG (M2: a `W` adjacency
+    /// Within the lineage-DAG path, use the **learnable** pb-DAG (learned-DAG: a `W` adjacency
     /// co-optimized with the embedding via a velocity-drift SEM + DAGMA-style
     /// acyclicity + L1 + orientation prior) instead of the fixed velocity-oriented KNN
-    /// graph (M1). Ignored when `lineage_dag` is `false`.
+    /// graph (velocity-KNN). Ignored when `lineage_dag` is `false`.
     pub dag_learnable: bool,
     /// Smooth + confidence-gate the pb velocity readout `δ_pb` before it orients the
     /// lineage graph / SEM drift / cell-lift (see
@@ -314,12 +314,12 @@ pub struct FitOutput {
     /// collapse level (coarsest→finest). Consumed by the lineage-DAG structure
     /// term and the phase-2 cell lift. `None` otherwise.
     pub pb_velocity: Option<Vec<PbLevelVelocity>>,
-    /// Learned pb-DAG adjacency per level (M2 learnable path only), each a dense
+    /// Learned pb-DAG adjacency per level (learned DAG path only), each a dense
     /// `[n_pb × n_pb]` row-major `W` aligned to `pb_velocity`. `None` for the fixed
-    /// (M1) path or when lineage-DAG is off. Consumed by the phase-2 cell lift to
+    /// (velocity-KNN) path or when lineage-DAG is off. Consumed by the phase-2 cell lift to
     /// integrate pseudotime and fate along the learned structure.
     pub pb_dag_w: Option<Vec<Vec<f32>>>,
-    /// Phase-2 cell-lineage lift (M3): per-cell pseudotime `τ_c` + fate + ambiguity,
+    /// Phase-2 cell-lineage lift (cell-lift): per-cell pseudotime `τ_c` + fate + ambiguity,
     /// evaluated (no training) from the finest-level pb trajectory. `Some` only on the
     /// lineage-DAG path with a non-empty pb velocity readout; `None` otherwise.
     pub cell_lineage: Option<CellLineage>,

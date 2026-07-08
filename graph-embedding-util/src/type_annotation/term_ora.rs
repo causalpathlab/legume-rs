@@ -54,7 +54,7 @@ pub const TERM_ORA_OUTPUT_SUFFIXES: &[&str] = &[
     ".marker_embedding.parquet",
     ".cluster_term_p.parquet",
     ".cluster_term_q.parquet",
-    ".cluster_term_Q.parquet",
+    ".cluster_term_softq.parquet",
     ".null_calibration.tsv",
     ".ontology_assignment.tsv",
     ".ontology_node_mass.parquet",
@@ -871,7 +871,7 @@ fn write_cluster_term_matrices(
     for (suffix, flat) in [
         ("cluster_term_p", &ora.p_perm),
         ("cluster_term_q", &ora.q),
-        ("cluster_term_Q", &ora.q_soft),
+        ("cluster_term_softq", &ora.q_soft),
     ] {
         let path = format!("{out_prefix}.{suffix}.parquet");
         to_mat(flat)

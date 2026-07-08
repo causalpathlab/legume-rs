@@ -1,7 +1,7 @@
-//! Phase-2 cell-lineage lift (M3): evaluation-only pseudotime + fate.
+//! Phase-2 cell-lineage lift (cell-lift): evaluation-only pseudotime + fate.
 //!
-//! Phase 1 shapes the shared dictionary through a directed pb-DAG (fixed M1 or
-//! learnable M2); phase 2 analytically projects every cell onto that dictionary
+//! Phase 1 shapes the shared dictionary through a directed pb-DAG (fixed velocity-KNN or
+//! learnable learned-DAG); phase 2 analytically projects every cell onto that dictionary
 //! (identity `θ_c` + velocity `δ_c`). This module lifts the pb-level structure to
 //! cells **by evaluation only** — no extra training:
 //!
@@ -71,7 +71,7 @@ pub struct LineageQc {
     /// the backbone one source drains). A diagnostic, NOT a reliable ranker (see above).
     pub root_decisiveness: f32,
     /// Mean local velocity coherence (scVelo-style): how well each pb node's `v̂` agrees
-    /// with its θ-neighbours'. Meaningful for M1; ≈0 for M2 (which collapses the δ readout).
+    /// with its θ-neighbours'. Meaningful for the velocity-KNN; ≈0 for the learned DAG (which collapses the δ readout).
     pub velocity_coherence: f32,
     /// Number of inferred roots (sources). `1`–few expected; many ⇒ fragmented field.
     pub n_roots: usize,
@@ -103,7 +103,7 @@ pub struct CellLineage {
 }
 
 /// Directed edges `(i, j, w)` with `w > EDGE_EPS` from a dense `[n × n]` row-major
-/// adjacency (M2 learnable `W`, forward-masked; negatives are dropped). The lift
+/// adjacency (learned-DAG `W`, forward-masked; negatives are dropped). The lift
 /// only follows forward mass, so sub-`eps` and negative entries carry no edge.
 pub fn dense_to_edges(w: &[f32], n: usize) -> Vec<(usize, usize, f32)> {
     let mut edges = Vec::new();
@@ -183,8 +183,8 @@ fn find_roots(n: usize, edges: &[(usize, usize, f32)]) -> Vec<usize> {
 
 /// QC **decisiveness** diagnostic: reduce the graph to its *functional* backbone (each
 /// node keeps only its single strongest forward out-edge), then return the top source's
-/// reachable fraction `[0, 1]`. The reduction makes this comparable across M1's sparse
-/// velocity-KNN and M2's dense learned `W` (a dense graph trivially reaches everything,
+/// reachable fraction `[0, 1]`. The reduction makes this comparable across the velocity-KNN's sparse
+/// velocity-KNN and the learned DAG's dense learned `W` (a dense graph trivially reaches everything,
 /// so raw reach ≡ 1 is useless). A structural summary only — its correlation with true
 /// quality is unstable across runs, so it is a diagnostic, not a reliable ranker.
 fn functional_decisiveness(n: usize, edges: &[(usize, usize, f32)]) -> f32 {
@@ -382,7 +382,7 @@ fn absorbing_fate(n: usize, edges: &[(usize, usize, f32)]) -> (Vec<usize>, Vec<f
         }
     }
 
-    // B = (I − Q)^{-1} R. A tiny ridge guards residual cycles (M2 acyclicity is
+    // B = (I − Q)^{-1} R. A tiny ridge guards residual cycles (learned-DAG acyclicity is
     // soft, so Q may not be strictly substochastic on every row).
     let mut im_q = DMatrix::<f64>::identity(nt, nt) - &q;
     for d in 0..nt {
@@ -406,7 +406,7 @@ fn absorbing_fate(n: usize, edges: &[(usize, usize, f32)]) -> (Vec<usize>, Vec<f
 }
 
 /// Build the [`PbTrajectory`] for one level from its velocity readout and directed
-/// edges (dense `W` → [`dense_to_edges`] for M2, fixed-lineage edges for M1).
+/// edges (dense `W` → [`dense_to_edges`] for the learned DAG, fixed velocity-KNN edges).
 pub fn pb_trajectory(
     vel: &PbLevelVelocity,
     edges: &[(usize, usize, f32)],
@@ -485,7 +485,7 @@ pub fn compute_lineage_qc(
         lin.ambiguity.iter().sum::<f32>() / lin.ambiguity.len() as f32
     };
     // Binary FLOOR only — reject a run with no terminal structure or a collapsed
-    // backbone (decisiveness ≈ 0). NOT gated on coherence (M2 collapses δ while its
+    // backbone (decisiveness ≈ 0). NOT gated on coherence (the learned DAG collapses δ while its
     // `W`-trajectory is great). Everything else is `ok`. The other fields are diagnostics
     // — decisiveness is NOT a reliable fine ranker (coarse + pipeline non-determinism).
     let flag = if traj.terminals.is_empty() || traj.decisiveness < 0.12 {

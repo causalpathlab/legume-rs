@@ -155,13 +155,13 @@ pub struct CompositeTrainContext<'a> {
     /// ignored otherwise. Comes from
     /// `MultilevelCollapseOut::cell_to_pb_per_level`.
     pub cell_to_pb_per_level: Option<&'a [Vec<usize>]>,
-    /// Optional per-axis velocity-drift SEM term (lineage-DAG refine pass, M1 fixed
+    /// Optional per-axis velocity-drift SEM term (lineage-DAG refine pass, fixed velocity-KNN
     /// structure). Aligned 1:1 with `axes`: `None` for axes with no lineage structure
     /// (the cell axis, and any pb level with no oriented edges), `Some` otherwise.
     /// When set, each `Some` term's penalty is added to the per-step loss so its
     /// pb embedding is pulled toward the velocity-consistent geometry.
     pub lineage_sem: Option<&'a [Option<PbSemTerm>]>,
-    /// Optional per-axis learnable pb-DAG term (lineage-DAG refine pass, M2). Aligned
+    /// Optional per-axis learnable pb-DAG term (lineage-DAG refine pass, learned). Aligned
     /// 1:1 with `axes` like `lineage_sem`, but its `W` is a learned adjacency
     /// co-optimized with the embedding. Mutually exclusive with `lineage_sem`.
     pub lineage_dag: Option<&'a [Option<PbDagTerm>]>,
@@ -173,7 +173,7 @@ pub struct CompositeTrainContext<'a> {
     pub lineage_dag_stride: usize,
 }
 
-/// Device-side velocity-drift SEM term for one pb axis (lineage-DAG, M1 fixed
+/// Device-side velocity-drift SEM term for one pb axis (lineage-DAG, fixed velocity-KNN
 /// structure). Precomputes the per-edge source/target index tensors, weights, and
 /// the constant drift `s·v̂_i`, so each training step is two `index_select`s plus
 /// elementwise ops. Penalizes `Σ_{i→j} w_ij ‖e_j − e_i − s·v̂_i‖² · λ / Σw`, i.e.
@@ -268,7 +268,7 @@ fn sem_penalty(e_cell: &Tensor, term: &PbSemTerm) -> anyhow::Result<Tensor> {
     Ok(weighted.affine(term.scale, 0.0)?)
 }
 
-/// Hyperparameters for the learnable pb-DAG term (lineage-DAG, M2).
+/// Hyperparameters for the learnable pb-DAG term (lineage-DAG, learned).
 #[derive(Clone, Copy)]
 pub struct PbDagParams {
     /// Velocity-drift step `s` in the SEM residual `e_j − Σ_i W_ij(e_i + s·v̂_i)`.
@@ -296,7 +296,7 @@ impl Default for PbDagParams {
     }
 }
 
-/// Learnable directed pb-DAG term for one level (lineage-DAG, M2). Holds a learnable
+/// Learnable directed pb-DAG term for one level (lineage-DAG, learned). Holds a learnable
 /// adjacency `W [P×P]` (registered in the varmap, so AdamW co-optimizes it with the
 /// embedding) plus the constant drift `s·v̂`, an identity, and a fixed **forward
 /// candidate mask** derived from the exogenous velocity. `W` is restricted to
@@ -325,7 +325,7 @@ impl PbDagTerm {
     /// `var_name`. Returns `None` when the level has fewer than two nodes. The
     /// forward-orientation mask and drift are fixed from the warm-up velocity/identity
     /// (`vel.theta` / `vel.delta`). `w_init` warm-starts `W` from a fixed structure
-    /// (M1's velocity-oriented KNN, `[p×p]` row-major) so SGD refines from a correctly-
+    /// (the velocity-oriented KNN, `[p×p]` row-major) so SGD refines from a correctly-
     /// oriented start; `None` zero-initializes (the DAGMA-clean but unstable start).
     pub fn new(
         vel: &PbLevelVelocity,
@@ -407,7 +407,7 @@ impl PbDagTerm {
                                                  // must reconstruct the CHILD j from its PARENT i (`e_j ≈ e_i + s·v̂_i`), i.e.
                                                  // `recon[j] = Σ_i W_eff[i,j]·(e_i + drift_i)` — that is `W_effᵀ·(E+drift)`, NOT
                                                  // `W_eff·(...)`. Without the transpose each node is reconstructed from its
-                                                 // successors and the whole velocity-drift convention runs backward (M1's SEM,
+                                                 // successors and the whole velocity-drift convention runs backward (the velocity-KNN SEM,
                                                  // `e_j − e_i − s·v̂_i`, is the correct forward form we match here). Normalize PER
                                                  // NODE (sum over H, mean over P) — `mean_all` would divide the W-gradient by P·H.
         let parent = e_cell.add(&self.drift)?; // [P, H]
@@ -429,7 +429,7 @@ impl PbDagTerm {
     }
 
     /// The current effective forward adjacency `W_eff = W ∘ fwd_mask` as a host
-    /// `[P, P]` row-major buffer — consumed by the phase-2 cell lift (M3).
+    /// `[P, P]` row-major buffer — consumed by the phase-2 cell lift (cell-lift).
     pub fn w_dense(&self) -> anyhow::Result<Vec<f32>> {
         Ok(self.w.mul(&self.fwd_mask)?.flatten_all()?.to_vec1()?)
     }
@@ -557,7 +557,7 @@ pub fn train_composite(
                     }
                 }
             }
-            // Learnable pb-DAG (M2): the SEM/acyclicity/sparsity/orientation loss on
+            // Learnable pb-DAG (learned-DAG): the SEM/acyclicity/sparsity/orientation loss on
             // the learned `W`. Applied only every `dag_stride` steps — the DATA side
             // (NCE) trains every step, the STRUCTURE side (`W`) only occasionally, so a
             // warm-started `W` is nudged rather than hammered (over-shaping collapse).

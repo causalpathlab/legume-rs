@@ -172,7 +172,8 @@ fn run_gem_genes_bge(
     // the low-detection "empty" genes that pile at the co-embed centre); the
     // uniform `hvg_weights` over the survivors then restricts the pb projection /
     // membership to those genes too. `None` (n_hvg = 0) keeps every gene.
-    let hvg_weights: Option<Vec<f32>> = if args.collapse.n_hvg > 0 {
+    let hvg_on = args.collapse.n_hvg > 0;
+    if hvg_on {
         use data_beans_alg::hvg::select_hvg_by_stats;
         use data_beans_alg::sparse_streaming::streaming_sparse_running_stats;
         use matrix_util::traits::RunningStatOps;
@@ -213,43 +214,11 @@ fn run_gem_genes_bge(
             before,
             unified.n_features()
         );
-        Some(vec![1.0f32; unified.n_features()])
-    } else {
-        None
-    };
+    }
 
-    // Per-gene β-sharing factorization. Each row `{gene}/count/{spliced|unspliced}`
-    // maps to its gene, so a gene's spliced and unspliced tracks embed identically
-    // as `β_g`. The splice deviation is recovered as the phase-2 velocity increment
-    // δ on the CELL axis (identity θ held fixed, δ fit to the unspliced edges).
-    // `gene_names` is id-ordered (labels the per-gene δ_g dictionary when
-    // `--delta-l2 > 0`); the factor's `row_to_gene` shares the same ids.
-    let (factor, gene_names) = build_splice_factor(&unified.feature_names);
-    let n_genes = gene_names.len();
-    info!(
-        "β-sharing factor: {} genes from {} count rows ({} unspliced rows); \
-         splice δ → cell-axis velocity increment",
-        n_genes,
-        unified.feature_names.len(),
-        factor.unspliced_rows.iter().filter(|&&b| b).count(),
-    );
-
-    // δ_g is only allocated by `ge::fit` when `delta_l2 > 0`. Default a mild ridge
-    // whenever both tracks are present, so gem always emits a δ_g dictionary for
-    // downstream `faba annotate --track velocity`. An explicit `--delta-l2` still wins;
-    // a spliced-only input (no unspliced rows) keeps δ off (plain β-sharing).
-    let has_unspliced = factor.unspliced_rows.iter().any(|&b| b);
-    let delta_l2 = if args.model.delta_l2 > 0.0 {
-        args.model.delta_l2
-    } else if has_unspliced {
-        info!(
-            "δ_g auto-on (--delta-l2 unset, unspliced rows present): ridge L2={DEFAULT_DELTA_L2}"
-        );
-        DEFAULT_DELTA_L2
-    } else {
-        0.0
-    };
-
+    // Compute device + a single shared Ctrl-C stop handler. `setup_stop_handler`
+    // registers a SIGINT handler and a second registration panics, so it must run
+    // once and be cloned into each pass's config (the feature-null refine fits twice).
     let dev = args
         .runtime
         .device
@@ -258,41 +227,123 @@ fn run_gem_genes_bge(
     info!("compute device = {:?}", dev);
     let stop = setup_stop_handler();
 
-    let cfg = ge::FitConfig {
-        embedding_dim: args.model.embedding_dim,
-        num_levels: args.collapse.num_levels,
-        sort_dim: args.collapse.sort_dim,
-        knn_pb_samples: args.collapse.knn_pb,
-        num_opt_iter: args.collapse.num_opt_iter,
-        proj_dim: args.collapse.proj_dim,
-        hvg_weights,
-        // geu's multilevel collapse requires a refine spec (it surfaces the
-        // per-level cell→pb maps phase-2 needs). Use geu's defaults — same as a
-        // `senna bge` run without `--no-refine`.
-        refine: Some(ge::RefineParams::default()),
-        epochs: args.train.epochs,
-        batches_per_epoch: args.train.batches_per_epoch,
-        batch_size: args.train.batch_size,
-        num_negatives: 4,
-        learning_rate: args.train.learning_rate,
-        seed: args.runtime.seed,
-        device: dev,
-        block_size: None,
-        fisher_weights_cache: Some(format!("{}.fisher_weights.parquet", args.out).into_boxed_str()),
-        feature_network: None,
-        stop: Some(stop),
-        feature_embedding_l2: 0.0,
-        weight_decay: 0.0,
-        max_grad_norm: args.train.max_grad_norm,
-        cell_weight_mult: None,
-        phase1_cells_per_pb: args.collapse.phase1_cells_per_pb,
-        feat_factor: Some(factor),
-        delta_l2,
-        lineage_dag: args.train.lineage_dag,
-        dag_learnable: args.train.dag_learn,
-        lineage_smooth: args.train.lineage_smooth,
+    // Build a `FitConfig` for the CURRENT feature axis of `unified`, so the same
+    // builder serves pass 1 (full post-HVG axis) and the post-QC re-fit (null
+    // features dropped): the per-gene β-sharing factor is rebuilt from the live
+    // feature names, the δ_g ridge / HVG weights realign to the reduced axis, and
+    // the Fisher cache self-invalidates on the name mismatch. Mirrors senna bge's
+    // two-pass `build_config`. Returns the config plus the axis-derived gene names
+    // and resolved δ ridge the downstream dictionary writers need.
+    //
+    // Per-gene β-sharing factorization: each row `{gene}/count/{spliced|unspliced}`
+    // maps to its gene, so a gene's two tracks embed identically as `β_g`; the splice
+    // deviation is recovered as the phase-2 velocity increment δ on the CELL axis. δ_g
+    // is auto-on with a mild ridge whenever both tracks are present (unless the user
+    // set `--delta-l2`) so a δ_g dictionary is always emitted for `faba annotate
+    // --track velocity`; a spliced-only input keeps δ off.
+    let build_cfg = |unified: &UnifiedData| -> anyhow::Result<(ge::FitConfig, Vec<Box<str>>, f32)> {
+        let (factor, gene_names) = build_splice_factor(&unified.feature_names);
+        info!(
+            "β-sharing factor: {} genes from {} count rows ({} unspliced rows); \
+             splice δ → cell-axis velocity increment",
+            gene_names.len(),
+            unified.feature_names.len(),
+            factor.unspliced_rows.iter().filter(|&&b| b).count(),
+        );
+        let has_unspliced = factor.unspliced_rows.iter().any(|&b| b);
+        let delta_l2 = if args.model.delta_l2 > 0.0 {
+            args.model.delta_l2
+        } else if has_unspliced {
+            DEFAULT_DELTA_L2
+        } else {
+            0.0
+        };
+        let hvg_weights = hvg_on.then(|| vec![1.0f32; unified.n_features()]);
+        let cfg = ge::FitConfig {
+            embedding_dim: args.model.embedding_dim,
+            num_levels: args.collapse.num_levels,
+            sort_dim: args.collapse.sort_dim,
+            knn_pb_samples: args.collapse.knn_pb,
+            num_opt_iter: args.collapse.num_opt_iter,
+            proj_dim: args.collapse.proj_dim,
+            hvg_weights,
+            // geu's multilevel collapse requires a refine spec (it surfaces the
+            // per-level cell→pb maps phase-2 needs). Use geu's defaults — same as a
+            // `senna bge` run without `--no-refine`.
+            refine: Some(ge::RefineParams::default()),
+            epochs: args.train.epochs,
+            batches_per_epoch: args.train.batches_per_epoch,
+            batch_size: args.train.batch_size,
+            num_negatives: 4,
+            learning_rate: args.train.learning_rate,
+            seed: args.runtime.seed,
+            device: dev.clone(),
+            block_size: None,
+            fisher_weights_cache: Some(
+                format!("{}.fisher_weights.parquet", args.out).into_boxed_str(),
+            ),
+            feature_network: None,
+            stop: Some(stop.clone()),
+            feature_embedding_l2: 0.0,
+            weight_decay: 0.0,
+            max_grad_norm: args.train.max_grad_norm,
+            cell_weight_mult: None,
+            phase1_cells_per_pb: args.collapse.phase1_cells_per_pb,
+            feat_factor: Some(factor),
+            delta_l2,
+            lineage_dag: args.train.lineage_dag,
+            dag_learnable: !args.train.fixed_dag,
+            lineage_smooth: args.train.lineage_smooth,
+        };
+        Ok((cfg, gene_names, delta_l2))
     };
-    let out = ge::fit(&mut unified, cfg).context("ge::fit (genes bge)")?;
+
+    // Pass 1 — fit on the full (post-HVG) feature axis.
+    let (cfg, mut gene_names, mut delta_l2) = build_cfg(&unified)?;
+    let mut out = ge::fit(&mut unified, cfg).context("ge::fit (genes bge)")?;
+
+    // Empirical-Bayes feature-null QC — the same shared engine call `senna bge` uses.
+    // Each feature row's ‖e_feat‖² (its materialized β_g) is tested against an
+    // estimated null (a gene the model never moved keeps ‖e_feat‖² ~ σ²·χ²_ν); rows
+    // null at the FDR are the untrained low-detection background (the 'empty' genes
+    // that pile at the co-embed centre) and are DROPPED, then the model re-fits on the
+    // live axis (two-pass refine). β-sharing means a null gene drops both its tracks
+    // together. The automatic, data-driven analog of the manual `--n-hvg` cut. Off
+    // with `--feature-null-fdr 0`.
+    if args.model.feature_null_fdr > 0.0 {
+        let (n, h) = out.model.e_feat.dims2()?;
+        let e_feat: Vec<f32> = out
+            .model
+            .e_feat
+            .to_vec2::<f32>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        let null = ge::null_call::embedding_null_call(&e_feat, n, h, args.model.feature_null_fdr);
+        info!(
+            "feature-null QC — σ̂²={:.4}, ν̂={:.1}/{}, π̂₀={:.2}; {} / {} rows null at FDR {} → {}.feature_qc.parquet",
+            null.sigma2, null.eff_dof, h, null.pi0, n - null.n_live, n, args.model.feature_null_fdr, args.out,
+        );
+        save_feature_qc(&e_feat, n, h, &unified.feature_names, &null, &args.out)?;
+        let live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
+        if live.is_empty() {
+            log::warn!(
+                "feature-null QC flagged all {n} rows null (degenerate fit); keeping pass-1 fit."
+            );
+        } else if live.len() < n {
+            info!(
+                "two-pass refine: dropping {} null feature rows, re-fitting on {} live rows.",
+                n - live.len(),
+                live.len()
+            );
+            unified.subset_features(&live);
+            let (cfg2, gn2, dl2) = build_cfg(&unified)?;
+            out = ge::fit(&mut unified, cfg2).context("ge::fit refit (feature-null)")?;
+            gene_names = gn2;
+            delta_l2 = dl2;
+        }
+    }
+    let n_genes = gene_names.len();
 
     // NOTE: NO softmax co-embedding is written. (1) The gene↔cell co-embedding
     // (`{out}.feature_embedding.parquet`) is dropped: cell-type identity is carried by
@@ -392,7 +443,7 @@ fn run_gem_genes_bge(
     }
 
     // Lineage-DAG (experimental): dump the per-level pseudobulk states — identity
-    // θ_pb, velocity δ_pb, and (M2) the learned DAG adjacency W — so the structure
+    // θ_pb, velocity δ_pb, and (learned-DAG) the learned DAG adjacency W — so the structure
     // can be inspected / scored and consumed by the phase-2 cell lift. Only present
     // when `--lineage-dag` ran on a β-sharing model.
     if let Some(pbv) = &out.pb_velocity {
@@ -444,11 +495,13 @@ fn run_gem_genes_bge(
         );
     }
 
-    // M3 phase-2 cell-lineage lift: per-cell pseudotime τ_c + landmark ambiguity
-    // (`{out}.pseudotime.parquet`) and per-cell fate over the terminal pb nodes
-    // (`{out}.fate.parquet`). Evaluation-only — lifted from the finest pb trajectory
-    // onto every cell. Present only when `--lineage-dag` produced a readout. These
-    // feed `faba lineage` as an informed backbone.
+    // cell-lift (phase-2 cell-lineage): per-cell pseudotime τ_c + landmark ambiguity
+    // (`{out}.dag_pseudotime.parquet`) and per-cell fate over the terminal pb nodes
+    // (`{out}.dag_fate.parquet`). Evaluation-only — lifted from the finest pb trajectory
+    // onto every cell. Present only when `--lineage-dag` produced a readout. These feed
+    // `faba lineage --root-from-gem` as an informed backbone. The `dag_` prefix keeps
+    // them distinct from `faba lineage`'s own `{out}.pseudotime.parquet` (Slingshot),
+    // so the two can share an output prefix without clobbering each other.
     if let Some(lin) = &out.cell_lineage {
         use matrix_util::traits::IoOps;
         // pseudotime + ambiguity, two named columns, keyed on barcodes.
@@ -463,12 +516,12 @@ fn run_gem_genes_bge(
             Box::<str>::from("ambiguity"),
         ];
         pt_t.to_parquet_with_names(
-            &format!("{}.pseudotime.parquet", args.out),
+            &format!("{}.dag_pseudotime.parquet", args.out),
             (Some(&unified.barcodes), Some("cell")),
             Some(&pt_cols),
         )?;
         info!(
-            "wrote {}.pseudotime.parquet (per-cell τ + landmark ambiguity; pb level {})",
+            "wrote {}.dag_pseudotime.parquet (per-cell τ + landmark ambiguity; pb level {})",
             args.out, lin.level
         );
 
@@ -484,30 +537,31 @@ fn run_gem_genes_bge(
                 .map(|t| format!("fate_pb{t}").into_boxed_str())
                 .collect();
             fate_t.to_parquet_with_names(
-                &format!("{}.fate.parquet", args.out),
+                &format!("{}.dag_fate.parquet", args.out),
                 (Some(&unified.barcodes), Some("cell")),
                 Some(&fate_cols),
             )?;
             info!(
-                "wrote {}.fate.parquet (per-cell fate over {} terminal pb node(s))",
+                "wrote {}.dag_fate.parquet (per-cell fate over {} terminal pb node(s))",
                 args.out, k
             );
         }
     }
 
-    // Unsupervised per-run QC diagnostics (`{out}.lineage_qc.json`) for an agent
-    // exploring random seeds: reject broken runs on `flag == "underfit"`, then inspect
-    // the structure. The remaining fields are DIAGNOSTICS, not a validated quality
-    // ranker (see LineageQc). Flat JSON, no ground truth needed.
+    // Unsupervised per-run structural stats (`{out}.lineage_qc.json`). Report the
+    // DESCRIPTIVE structure (root/terminal counts, top-source reach, velocity coherence,
+    // placement ambiguity) rather than leaning on the coarse `flag` — the flag is a
+    // one-word floor kept only so `--root-from-gem` can veto a fragmented DAG; the numbers
+    // are what actually characterize the trajectory. No ground truth needed.
     if let Some(qc) = &out.lineage_qc {
         let json = format!(
-            "{{\n  \"root_decisiveness\": {:.4},\n  \"velocity_coherence\": {:.4},\n  \
-             \"n_roots\": {},\n  \"n_terminals\": {},\n  \"mean_ambiguity\": {:.4},\n  \
-             \"likelihood\": {:.4},\n  \"flag\": \"{}\"\n}}\n",
-            qc.root_decisiveness,
-            qc.velocity_coherence,
+            "{{\n  \"n_roots\": {},\n  \"n_terminals\": {},\n  \"top_source_reach\": {:.4},\n  \
+             \"velocity_coherence\": {:.4},\n  \"mean_ambiguity\": {:.4},\n  \
+             \"refine_likelihood\": {:.4},\n  \"flag\": \"{}\"\n}}\n",
             qc.n_roots,
             qc.n_terminals,
+            qc.root_decisiveness,
+            qc.velocity_coherence,
             qc.mean_ambiguity,
             qc.likelihood,
             qc.flag,
@@ -515,8 +569,14 @@ fn run_gem_genes_bge(
         std::fs::write(format!("{}.lineage_qc.json", args.out), json)
             .with_context(|| format!("writing {}.lineage_qc.json", args.out))?;
         info!(
-            "wrote {}.lineage_qc.json (flag={}, decisiveness={:.3}, {} fate(s))",
-            args.out, qc.flag, qc.root_decisiveness, qc.n_terminals
+            "lineage-DAG structure: {} root(s), {} terminal(s), top-source reach {:.2}, \
+             velocity-coherence {:.2}, mean-ambiguity {:.2} → {}.lineage_qc.json",
+            qc.n_roots,
+            qc.n_terminals,
+            qc.root_decisiveness,
+            qc.velocity_coherence,
+            qc.mean_ambiguity,
+            args.out,
         );
     }
 
@@ -581,11 +641,43 @@ fn build_splice_factor(
     )
 }
 
+/// Write the feature-null QC report `{out}.feature_qc.parquet` (per feature row:
+/// `norm2` = ‖e_feat‖², `live` = 1 kept / 0 dropped), the same schema `senna bge`
+/// emits. `e_feat` is row-major `[n × h]`.
+fn save_feature_qc(
+    e_feat: &[f32],
+    n: usize,
+    h: usize,
+    feature_names: &[Box<str>],
+    null: &graph_embedding_util::null_call::NullCall,
+    out_prefix: &str,
+) -> anyhow::Result<()> {
+    use matrix_util::dmatrix_io::DMatrix;
+    use matrix_util::traits::IoOps;
+    let mut m = DMatrix::<f32>::zeros(n, 2);
+    for f in 0..n {
+        m[(f, 0)] = e_feat[f * h..(f + 1) * h].iter().map(|&x| x * x).sum();
+        m[(f, 1)] = f32::from(u8::from(null.live[f]));
+    }
+    let cols: Vec<Box<str>> = ["norm2", "live"].iter().map(|s| Box::from(*s)).collect();
+    m.to_parquet_with_names(
+        &format!("{out_prefix}.feature_qc.parquet"),
+        (Some(feature_names), Some("feature")),
+        Some(&cols),
+    )?;
+    Ok(())
+}
+
 fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.model.embedding_dim > 0,
         "--embedding-dim must be > 0 (got {})",
         args.model.embedding_dim
+    );
+    anyhow::ensure!(
+        (0.0..1.0).contains(&args.model.feature_null_fdr),
+        "--feature-null-fdr must be in [0, 1) (got {})",
+        args.model.feature_null_fdr
     );
     Ok(())
 }

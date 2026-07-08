@@ -40,11 +40,12 @@ use crate::lineage::orient::{
 /// 2D layout for plotting the trajectory.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
 pub enum LayoutKind {
-    /// No 2D layout (default).
-    #[default]
+    /// No 2D layout.
     None,
-    /// PHATE diffusion embedding — the trajectory-appropriate layout that
-    /// preserves branch/continuum structure (unlike UMAP/t-SNE).
+    /// PHATE diffusion embedding (default) — the trajectory-appropriate layout
+    /// that preserves branch/continuum structure (unlike UMAP/t-SNE), so it is
+    /// on by default; pass `--layout none` to skip it.
+    #[default]
     Phate,
 }
 
@@ -113,12 +114,21 @@ pub struct LineageArgs {
     pub root_cell: Option<Box<str>>,
 
     #[arg(
+        long = "root-type",
+        help = "Root the trajectory at the highest-confidence node of this cell type \
+                (needs --markers), e.g. `--root-type HSC_MPP`. Marker-grounded and robust \
+                to unreliable velocity; overrides --root-from-gem / velocity but is itself \
+                overridden by --root-node / --root-cell."
+    )]
+    pub root_type: Option<Box<str>>,
+
+    #[arg(
         long = "root-from-gem",
-        help = "Anchor the root at gem's inferred root (the min-pseudotime cell in \
-                {from}.pseudotime.parquet). Uses gem's velocity-DAG root inference — more \
-                robust than the per-edge flux pick — while lineage still fits the curves. \
-                Overridden by --root-node / --root-cell; falls back to flux if the file is \
-                absent."
+        help = "Anchor the root at gem's velocity-DAG source: the modal MST node of the \
+                low-τ region in {from}.dag_pseudotime.parquet. More robust than the per-edge \
+                flux pick, while lineage still fits the curves. Overridden by \
+                --root-node / --root-cell / --root-type; falls back to the flux root if the \
+                file is absent or gem flagged the DAG underfit (lineage_qc.json)."
     )]
     pub root_from_gem: bool,
 
@@ -174,8 +184,8 @@ pub struct LineageArgs {
     #[arg(
         long,
         value_enum,
-        default_value_t = LayoutKind::None,
-        help = "2D layout: 'phate' emits {out}.{cells,nodes,curves}_2d.parquet for plotting"
+        default_value_t = LayoutKind::Phate,
+        help = "2D layout for plotting (default: phate). Emits {out}.{cells,nodes,curves}_2d.parquet; 'none' to skip"
     )]
     pub layout: LayoutKind,
 
@@ -210,14 +220,17 @@ fn choose_k(n: usize, requested: Option<usize>) -> usize {
 }
 
 /// Resolve the root MST node, in priority order: `--root-node` (validated), `--root-cell`
-/// (the node of the named cell's cluster), `gem_root` (the centroid of gem's inferred
-/// root cell, from `--root-from-gem`), the velocity-flux-picked root, else node 0.
+/// (the node of the named cell's cluster), `type_root` (`--root-type`, a marker-named
+/// node), `gem_root` (gem's velocity-DAG source, from `--root-from-gem`), the
+/// velocity-flux-picked root, else node 0.
+#[allow(clippy::too_many_arguments)]
 fn resolve_root(
     root_node: Option<usize>,
     root_cell: Option<&str>,
     cell_names: &[Box<str>],
     labels: &[usize],
     k: usize,
+    type_root: Option<usize>,
     gem_root: Option<usize>,
     velocity_root: Option<usize>,
 ) -> Result<usize> {
@@ -230,20 +243,34 @@ fn resolve_root(
             .position(|c| c.as_ref() == name)
             .with_context(|| format!("--root-cell '{name}' not found in latent"))?;
         Ok(labels[idx])
-    } else if let Some(r) = gem_root {
+    } else if let Some(r) = type_root.or(gem_root).or(velocity_root) {
         Ok(r)
     } else {
-        Ok(velocity_root.unwrap_or(0))
+        Ok(0)
     }
 }
 
 /// Map gem's inferred root to an MST centroid (for `--root-from-gem`): read
-/// `{prefix}.pseudotime.parquet`, take the barcode with minimum pseudotime (τ ≈ 0, the
-/// velocity-DAG source), find it in the latent, and return its cluster label. `None`
-/// (with a warning) when the file is absent or the barcode can't be matched — the caller
-/// then falls back to the velocity-flux root.
-fn gem_root_node(prefix: &str, cell_names: &[Box<str>], labels: &[usize]) -> Option<usize> {
-    let path = format!("{prefix}.pseudotime.parquet");
+/// `{prefix}.dag_pseudotime.parquet` and return the MST node that dominates gem's low-τ
+/// (velocity-DAG source) region — the **modal** cluster among the lowest-τ cells, which
+/// is robust to a single τ≈0 outlier (a rare cell the old min-τ-cell pick could land on).
+/// Returns `None` (with a warning) — so the caller falls back to the velocity-flux root —
+/// when the file is absent/unreadable, no low-τ barcode matches the latent, or gem's
+/// `lineage_qc.json` flags the DAG as `underfit` (an unreliable τ).
+fn gem_root_node(
+    prefix: &str,
+    cell_names: &[Box<str>],
+    labels: &[usize],
+    k: usize,
+) -> Option<usize> {
+    if gem_dag_underfit(prefix) {
+        warn!(
+            "--root-from-gem: gem flagged its velocity-DAG 'underfit' (lineage_qc.json); \
+             using the velocity-flux root instead"
+        );
+        return None;
+    }
+    let path = format!("{prefix}.dag_pseudotime.parquet");
     if !Path::new(&path).exists() {
         warn!("--root-from-gem: {path} absent; falling back to the velocity-flux root");
         return None;
@@ -255,32 +282,57 @@ fn gem_root_node(prefix: &str, cell_names: &[Box<str>], labels: &[usize]) -> Opt
             return None;
         }
     };
-    // Column 0 is `pseudotime` (column 1 is `ambiguity`); take the row-minimum barcode.
-    let rmin = (0..pt.mat.nrows()).min_by(|&a, &b| {
+    // Barcode → MST node lookup, then vote the modal node over the lowest-τ cells.
+    let bc_label: std::collections::HashMap<&str, usize> = cell_names
+        .iter()
+        .zip(labels)
+        .map(|(c, &l)| (c.as_ref(), l))
+        .collect();
+    let nrow = pt.mat.nrows();
+    let mut order: Vec<usize> = (0..nrow).collect();
+    order.sort_by(|&a, &b| {
         pt.mat[(a, 0)]
             .partial_cmp(&pt.mat[(b, 0)])
             .unwrap_or(std::cmp::Ordering::Equal)
-    })?;
-    let root_bc = pt.rows.get(rmin)?.as_ref();
-    match cell_names.iter().position(|c| c.as_ref() == root_bc) {
-        Some(idx) => {
-            info!(
-                "--root-from-gem: root cell '{root_bc}' (τ≈min) → MST node {}",
-                labels[idx]
-            );
-            Some(labels[idx])
-        }
-        None => {
-            warn!("--root-from-gem: root barcode '{root_bc}' not in latent; using flux root");
-            None
+    });
+    let n_low = (nrow / 20).clamp(5.min(nrow), nrow); // lowest ~5% of τ, ≥ 5 cells (or all)
+    let mut votes = vec![0usize; k];
+    for &r in order.iter().take(n_low) {
+        if let Some(&lab) = pt.rows.get(r).and_then(|bc| bc_label.get(bc.as_ref())) {
+            if lab < k {
+                votes[lab] += 1;
+            }
         }
     }
+    let root = (0..k).max_by_key(|&c| votes[c])?;
+    if votes[root] == 0 {
+        warn!("--root-from-gem: no low-τ barcode matched the latent; using flux root");
+        return None;
+    }
+    info!(
+        "--root-from-gem: low-τ region ({n_low} cells) → MST node {root} ({} votes)",
+        votes[root]
+    );
+    Some(root)
+}
+
+/// True when gem's `{prefix}.lineage_qc.json` reports the pb-DAG as `underfit`
+/// (fragmented — many roots/terminals), so its τ root is unreliable. False when the file
+/// is absent/unreadable (no signal → don't veto the gem root).
+fn gem_dag_underfit(prefix: &str) -> bool {
+    std::fs::read_to_string(format!("{prefix}.lineage_qc.json"))
+        .map(|s| s.contains("\"underfit\""))
+        .unwrap_or(false)
 }
 
 pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     let prefix = args.from.as_ref();
     let out = args.out.as_deref().unwrap_or(prefix).to_string();
     mkdir_parent(&out)?;
+    anyhow::ensure!(
+        args.root_type.is_none() || args.markers.is_some(),
+        "--root-type needs --markers (the node cell-type calls come from the marker annotation)"
+    );
 
     // ---- load frozen embedding θ ----
     // gem θ is cosine-oriented, so by default the whole fit (k-means → MST →
@@ -344,13 +396,36 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     };
     let directed = directed_edges(&edges, &flux);
 
+    // ---- marker node calls (computed here, before root selection, so `--root-type`
+    // can pick the root from them; written as `{out}.trajectory_annotation.parquet`
+    // after the root/orientation are known). Also writes `{out}.lineage_annot.*`. ----
+    let node_calls = match (args.markers.as_deref(), raw_theta.as_ref()) {
+        (Some(markers), Some(raw)) => Some(compute_node_calls(&AnnotateTrajArgs {
+            prefix,
+            out: &out,
+            markers,
+            raw_theta: raw,
+            cell_names: &cell_names,
+            labels: &labels,
+            k,
+            num_perm: args.marker_num_perm,
+            obo: args.marker_obo.as_deref(),
+            label_cl: args.marker_label_cl.as_deref(),
+        })?),
+        _ => None,
+    };
+
     // ---- root selection ----
     let velocity_root = have_velocity.then(|| pick_velocity_root(&edges, &flux, k));
-    // Optional gem hand-off: anchor the root at gem's velocity-DAG-inferred root
-    // (min-pseudotime cell), more robust than the per-edge flux pick.
+    // Marker-grounded root (`--root-type`): the highest-confidence node of the named type.
+    let type_root = args
+        .root_type
+        .as_deref()
+        .and_then(|t| node_calls.as_ref().and_then(|c| root_type_node(c, t)));
+    // gem hand-off: anchor at gem's velocity-DAG source unless it flagged the DAG underfit.
     let gem_root = args
         .root_from_gem
-        .then(|| gem_root_node(prefix, &cell_names, &labels))
+        .then(|| gem_root_node(prefix, &cell_names, &labels, k))
         .flatten();
     let root = resolve_root(
         args.root_node,
@@ -358,6 +433,7 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         &cell_names,
         &labels,
         k,
+        type_root,
         gem_root,
         velocity_root,
     )?;
@@ -408,22 +484,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     )?;
     write_curves(&curves, &format!("{out}.curves.parquet"))?;
 
-    // ---- optional marker annotation of the trajectory nodes ----
-    if let (Some(markers), Some(raw)) = (args.markers.as_deref(), raw_theta.as_ref()) {
-        annotate_trajectory(&AnnotateTrajArgs {
-            prefix,
-            out: &out,
-            markers,
-            raw_theta: raw,
-            cell_names: &cell_names,
-            labels: &labels,
-            k,
-            root,
-            directed: &directed,
-            num_perm: args.marker_num_perm,
-            obo: args.marker_obo.as_deref(),
-            label_cl: args.marker_label_cl.as_deref(),
-        })?;
+    // ---- labeled trajectory annotation (node roles need the oriented root) ----
+    if let Some(calls) = &node_calls {
+        write_trajectory_annotation(&out, calls, root, &directed, k)?;
     }
 
     // ---- optional PHATE 2D layout (cells + nodes + curves projected) ----
@@ -462,9 +525,6 @@ struct AnnotateTrajArgs<'a> {
     labels: &'a [usize],
     /// Number of MST nodes.
     k: usize,
-    root: usize,
-    /// Velocity-oriented directed edges `(from, to)`; a leaf (never a `from`) is terminal.
-    directed: &'a [(usize, usize)],
     num_perm: usize,
     obo: Option<&'a str>,
     label_cl: Option<&'a str>,
@@ -472,9 +532,11 @@ struct AnnotateTrajArgs<'a> {
 
 /// Name each trajectory node by cell type: run the `faba annotate` term-ORA core over the
 /// MST-node grouping (raw θ vs the gem β dictionary), giving every node a permutation-
-/// calibrated call, then summarize the root / terminals / branches. Writes
-/// `{out}.lineage_annot.*` and `{out}.trajectory_annotation.parquet`.
-fn annotate_trajectory(a: &AnnotateTrajArgs) -> Result<()> {
+/// calibrated call. Writes `{out}.lineage_annot.*` and returns the per-node
+/// [`CommunityCalls`]. Run BEFORE root selection (it doesn't depend on the root) so
+/// `--root-type` can pick the root from these calls; the caller writes
+/// `{out}.trajectory_annotation.parquet` afterwards via [`write_trajectory_annotation`].
+fn compute_node_calls(a: &AnnotateTrajArgs) -> Result<CommunityCalls> {
     let beta_path = format!("{}.beta_dictionary.parquet", a.prefix);
     let beta = DMatrix::<f32>::from_parquet(&beta_path)
         .with_context(|| format!("--markers needs the gem β dictionary {beta_path}"))?;
@@ -490,7 +552,7 @@ fn annotate_trajectory(a: &AnnotateTrajArgs) -> Result<()> {
         cell_emb: a.raw_theta,
         cell_names: a.cell_names,
     };
-    let calls = annotate_with_communities(
+    annotate_with_communities(
         &input,
         a.markers,
         &format!("{}.lineage_annot", a.out),
@@ -498,9 +560,32 @@ fn annotate_trajectory(a: &AnnotateTrajArgs) -> Result<()> {
         a.labels,
         a.k,
         &cfg,
-    )?;
-    write_trajectory_annotation(a.out, &calls, a.root, a.directed, a.k)?;
-    Ok(())
+    )
+}
+
+/// `--root-type`: the MST node whose per-node call matches `root_type` (case-insensitive)
+/// with the highest confidence, or `None` (with a warning) when no node carries that type.
+fn root_type_node(calls: &CommunityCalls, root_type: &str) -> Option<usize> {
+    let node = (0..calls.labels.len())
+        .filter(|&i| calls.labels[i].eq_ignore_ascii_case(root_type))
+        .max_by(|&a, &b| {
+            calls.confidence[a]
+                .partial_cmp(&calls.confidence[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    match node {
+        Some(i) => {
+            info!(
+                "--root-type '{root_type}' → MST node {i} (confidence {:.3})",
+                calls.confidence[i]
+            );
+            Some(i)
+        }
+        None => {
+            warn!("--root-type '{root_type}' matched no trajectory node; using the next root rule");
+            None
+        }
+    }
 }
 
 /// Cross the per-node calls with the oriented MST → the labeled trajectory: one row per

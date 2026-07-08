@@ -17,7 +17,9 @@ pub use projection::PbLevelVelocity;
 
 use crate::coarsen::{identity_axis, AxisCoarsenings};
 use crate::data::UnifiedData;
-use crate::loss::{build_stratified_sampler, PerBatchStratifiedCellSampler, StratifiedSampler};
+use crate::loss::{
+    build_stratified_sampler, FeatPairing, PerBatchStratifiedCellSampler, StratifiedSampler,
+};
 use crate::model::{FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
 use crate::stop::setup_stop_handler;
 use crate::training::{
@@ -364,6 +366,14 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             &cell_samplers
         };
 
+    // β-sharing (gem): sample phase-1 positives by GENE at the spliced count, and
+    // emit the paired unspliced edge so δ_g trains at that frequency (identity stays
+    // spliced-driven, no double-bite from nascent abundance). `None` for bge (per-row).
+    let pairing = config.feat_factor.as_ref().map(|spec| FeatPairing {
+        row_to_gene: &spec.row_to_gene,
+        unspliced_rows: &spec.unspliced_rows,
+    });
+
     let mut level_axes_data: Vec<(AxisCoarsenings, StratifiedSampler)> =
         Vec::with_capacity(num_levels);
     for (level_idx, pb) in pb_blobs.iter().enumerate() {
@@ -376,6 +386,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             &feat_weights,
             DEFAULT_STRATIFY_ALPHA_PB,
             alpha_neg,
+            pairing.as_ref(),
         )
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -487,7 +498,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // free model.
     cell_model.materialize_e_feat()?;
 
-    // Lineage-DAG refine (gem β-sharing only; M1 fixed structure). The warm-up
+    // Lineage-DAG refine (gem β-sharing only; fixed velocity-KNN structure). The warm-up
     // phase 1 above yields a trained-enough dictionary: read pb-level velocity
     // (identity θ_pb + velocity δ_pb, reusing the phase-2 dual solver on the
     // already-batch-corrected pb aggregates), build a fixed velocity-oriented pb
@@ -546,12 +557,12 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     // Per-axis term slices lead with the optional cell axis, so pb level
                     // `i`'s term sits at `offset + i`.
                     let offset = usize::from(use_cell_axis);
-                    // Warm-start each `W` from M1's velocity-oriented KNN so SGD refines a
+                    // Warm-start each `W` from the velocity-oriented KNN so SGD refines a
                     // correctly-oriented structure instead of learning one from zeros
                     // (zero-init `W` is the unstable, non-monotone start).
                     let knn_init =
                         lineage::build_pb_lineage(&warmup_vel, h, lineage::DEFAULT_LINEAGE_KNN);
-                    // M2: learnable pb-DAG. Build one `PbDagTerm` per pb level
+                    // learned-DAG: learnable pb-DAG. Build one `PbDagTerm` per pb level
                     // (registers a `W` Var — must precede the optimizer) aligned to
                     // the refine axes ([cell?] + pb levels).
                     let mut dag_terms: Vec<Option<PbDagTerm>> = Vec::with_capacity(1 + num_levels);
@@ -572,8 +583,8 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     }
                     let n_dag = dag_terms.iter().filter(|t| t.is_some()).count();
                     info!(
-                        "Lineage-DAG refine (M2 learnable) — {} pb-level DAG(s), warm-started \
-                         from M1 KNN [SEM + DAGMA acyclicity + L1], structure every {} steps, {} epochs",
+                        "Lineage-DAG refine (learned DAG) — {} pb-level DAG(s), warm-started \
+                         from the velocity-KNN graph [SEM + DAGMA acyclicity + L1], structure every {} steps, {} epochs",
                         n_dag, DAG_STRIDE, config.epochs
                     );
                     let mut opt2 = AdamW::new(varmap.all_vars(), adamw_params())?;
@@ -603,10 +614,10 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     pb_dag_w = Some(ws);
                     drop(refine_axes);
                 } else {
-                    // M1: fixed velocity-oriented KNN graph + velocity-drift SEM residual.
+                    // velocity-KNN: fixed velocity-oriented KNN graph + velocity-drift SEM residual.
                     // The dense KNN graph (each node → its velocity-forward neighbours),
                     // built once from the warm-up readout, shapes E_feat in a single refine
-                    // pass. `pb_dag_w` stays `None`; the M3 lift rebuilds the same graph from
+                    // pass. `pb_dag_w` stays `None`; the cell-lift rebuilds the same graph from
                     // the final `pb_velocity`.
                     let levels =
                         lineage::build_pb_lineage(&warmup_vel, h, lineage::DEFAULT_LINEAGE_KNN);
@@ -625,7 +636,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                         )?);
                     }
                     info!(
-                        "Lineage-DAG refine (M1 fixed) — {} oriented pb edge(s) across \
+                        "Lineage-DAG refine (fixed velocity-KNN) — {} oriented pb edge(s) across \
                          {} level(s); velocity-drift SEM residual ON",
                         n_edges,
                         levels.len()
@@ -650,7 +661,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 }
 
                 // Refresh the dictionary and read the FINAL pb velocity (post-refine),
-                // smoothed the same way so the M3 cell lift orients off a denoised field.
+                // smoothed the same way so the cell-lift orients off a denoised field.
                 cell_model.materialize_e_feat()?;
                 pb_velocity = Some(maybe_smooth(
                     pb_velocity_readout(&cell_model, &pb_blobs, &spec.unspliced_rows)?,
@@ -719,10 +730,10 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         cell_velocity = splice;
     }
 
-    // ---- M3: phase-2 cell-lineage lift (evaluation only). Runs on the FINAL pb
+    // ---- cell-lift: phase-2 cell-lineage lift (evaluation only). Runs on the FINAL pb
     // velocity readout + the now-projected per-cell identity θ_c. Integrate a pb
-    // pseudotime/fate along the oriented pb-DAG (learned `W` for M2, the fixed
-    // velocity-oriented graph for M1) at the finest level, then landmark-blend it to
+    // pseudotime/fate along the oriented pb-DAG (learned `W` for the learned DAG, the fixed
+    // velocity-oriented graph for the velocity-KNN) at the finest level, then landmark-blend it to
     // every cell. `None` when lineage-DAG is off or the readout is empty.
     let mut lineage_qc: Option<LineageQc> = None;
     let cell_lineage = match &pb_velocity {
@@ -730,9 +741,9 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             let level = pbv.len() - 1; // finest level: densest landmark tiling
             let vel = &pbv[level];
             let edges = match &pb_dag_w {
-                // M2: dense learned W (forward-masked) → positive-mass edges.
+                // learned-DAG: dense learned W (forward-masked) → positive-mass edges.
                 Some(ws) => lift::dense_to_edges(&ws[level], vel.n_pb),
-                // M1: rebuild the fixed velocity-oriented graph from the readout.
+                // velocity-KNN: rebuild the fixed velocity-oriented graph from the readout.
                 None => lineage::build_pb_lineage(
                     std::slice::from_ref(vel),
                     h,
@@ -762,8 +773,8 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 lineage::DEFAULT_LINEAGE_KNN,
             );
             info!(
-                "M3 cell lift — finest pb level {} ({} nodes, {} root(s), {} fate(s)); \
-                 QC decisiveness={:.3} coherence={:.3} flag={}",
+                "cell-lift — finest pb level {}: {} nodes, {} root(s), {} fate(s), \
+                 top-source reach {:.2}, velocity-coherence {:.2} [{}]",
                 level,
                 vel.n_pb,
                 traj.roots.len(),
