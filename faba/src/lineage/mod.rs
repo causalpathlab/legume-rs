@@ -1,11 +1,13 @@
 //! Velocity-oriented lineage inference over a `faba gem` embedding, driven by
 //! [`crate::run_lineage::run_lineage`].
 //!
-//! The generic numeric primitives live in `matrix-util`: k-means centroids
-//! ([`matrix_util::principal_graph::kmeans_centroids`]), the K×K distance matrix
+//! The generic numeric primitives live in `matrix-util`: seeded k-means centroids
+//! ([`matrix_util::principal_graph::kmeans_centroids_seeded`]), the K×K distance matrix
 //! ([`matrix_util::principal_graph::pairwise_sqdist_rows_to_rows`]) + MST
 //! ([`matrix_util::principal_graph::mst_from_sqdist`]), and the Slingshot curves
-//! ([`matrix_util::principal_curve`]). This module only holds the faba-specific
-//! velocity [`orient`]ation of the tree (δ is a gem output).
+//! ([`matrix_util::principal_curve`]). This module holds two faba-specific pieces on top of
+//! that generic tree: the velocity [`orient`]ation of edges (δ from gem), and the local,
+//! root-free [`branch`] structure (junctions + sibling branches).
 
+pub mod branch;
 pub mod orient;

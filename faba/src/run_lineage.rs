@@ -10,10 +10,10 @@
 //! and the smooth curves as parquet — the ordering the parked modality-enrichment
 //! test will run against.
 //!
-//! NOTE: the underlying k-means (`matrix_util::…::kmeans_centroids`) is not
-//! seeded, so centroid placement — and hence the exact root/lineage count — can
-//! vary slightly run-to-run on the same input. There is no `--seed` for this
-//! reason; reproducibility would need a seeded k-means in matrix-util.
+//! NOTE: centroid placement uses a **seeded** k-means
+//! (`matrix_util::…::kmeans_centroids_seeded`, kmeans++ from `--seed`), so the whole
+//! fit — centroids, MST, root, lineage count — is reproducible for a given seed.
+//! Varying `--seed` is also the basis for bootstrap-support scoring of the structure.
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
@@ -29,7 +29,7 @@ use matrix_util::layout::{phate_layout_2d, project_cells_nystrom, PhateArgs};
 use matrix_util::parquet::{write_named_table, Column};
 use matrix_util::principal_curve::{fit_principal_curves, PrincipalCurveArgs, PrincipalCurves};
 use matrix_util::principal_graph::{
-    kmeans_centroids, mst_from_sqdist, pairwise_sqdist_rows_to_rows,
+    kmeans_centroids_seeded, mst_from_sqdist, pairwise_sqdist_rows_to_rows,
 };
 use matrix_util::traits::IoOps;
 
@@ -174,6 +174,23 @@ pub struct LineageArgs {
         help = "k-means iterations for centroid initialization"
     )]
     pub kmeans_iter: usize,
+
+    #[arg(
+        long,
+        default_value_t = 42,
+        help = "RNG seed for the k-means centroids (reproducible structure; vary it for \
+                bootstrap-support scoring)"
+    )]
+    pub seed: u64,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Bootstrap-support draws for the branch structure: refit under N extra seeds \
+                and score how reproducibly each junction's sibling split recurs \
+                (0 = off; writes {out}.junction_support.parquet when > 0)"
+    )]
+    pub n_bootstrap: usize,
 
     #[arg(
         long = "no-normalize-latent",
@@ -362,7 +379,7 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     );
 
     // ---- k-means centroids + MST ----
-    let (centroids, labels) = kmeans_centroids(&theta, k, args.kmeans_iter);
+    let (centroids, labels) = kmeans_centroids_seeded(&theta, k, args.kmeans_iter, args.seed);
     let (edges, weights) = mst_from_sqdist(&pairwise_sqdist_rows_to_rows(&centroids, &centroids));
     anyhow::ensure!(
         edges.len() == k - 1,
@@ -395,6 +412,16 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         )
     };
     let directed = directed_edges(&edges, &flux);
+
+    // ---- local branch structure (root-free): junctions + sibling branches over the MST.
+    // Each cell is placed by its k-means node at (junction, sibling_branch, dist_from_junction)
+    // — the local, root-invariant axis the sibling-branch association test (`faba dyn-assoc`)
+    // matches cells on, replacing global pseudotime.
+    let branch_topo = crate::lineage::branch::detect_branches(&edges, &directed, k);
+    info!(
+        "branch structure: {} junction(s) over {k} nodes",
+        branch_topo.junctions.len()
+    );
 
     // ---- marker node calls (computed here, before root selection, so `--root-type`
     // can pick the root from them; written as `{out}.trajectory_annotation.parquet`
@@ -483,6 +510,30 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         &format!("{out}.lineage_pseudotime.parquet"),
     )?;
     write_curves(&curves, &format!("{out}.curves.parquet"))?;
+
+    // ---- junction trust scoring: cross-seed bootstrap support (+ marker coherence) ----
+    if args.n_bootstrap > 0 && !branch_topo.junctions.is_empty() {
+        let support = bootstrap_junction_support(
+            &theta,
+            k,
+            args.kmeans_iter,
+            args.seed,
+            args.n_bootstrap,
+            &labels,
+            &branch_topo,
+        );
+        let n_strong = support.iter().filter(|&&(_, s, _)| s >= 0.5).count();
+        info!(
+            "junction support: {n_strong}/{} junction(s) reproducible (support ≥ 0.5 over {} seeds)",
+            support.len(),
+            args.n_bootstrap
+        );
+        write_junction_support(
+            &support,
+            node_calls.as_ref(),
+            &format!("{out}.junction_support.parquet"),
+        )?;
+    }
 
     // ---- labeled trajectory annotation (node roles need the oriented root) ----
     if let Some(calls) = &node_calls {
@@ -884,6 +935,212 @@ fn write_pseudotime(curves: &PrincipalCurves, cell_names: &[Box<str>], path: &st
     let cols: Vec<Box<str>> = vec!["pseudotime".into(), "branch".into()];
     mat.to_parquet_with_names(path, (Some(cell_names), Some("cell")), Some(&cols))?;
     info!("Wrote {path}");
+    Ok(())
+}
+
+/// Bootstrap-support of each reference junction. Refit the **undirected** branch structure
+/// under `n_boot` alternative k-means seeds (`base_seed+1 ..= base_seed+n_boot`) and score,
+/// per reference junction, how reproducibly its sibling split partitions the same cells —
+/// the mean Rand agreement between the reference sibling labelling of the junction's cells
+/// and each bootstrap run's labelling of those same cells. High support ⇒ a real branch
+/// point (survives reseeding); low ⇒ a seed-specific artefact. This is the "bootstrap the
+/// cell assignment, not the raw structure" scoring: it lives entirely in cell space, so the
+/// node ids being seed-specific doesn't matter. Orientation is irrelevant to whether a node
+/// is a junction, so the bootstrap runs unoriented. Returns `(junction_node, support, n_cells)`.
+fn bootstrap_junction_support(
+    theta: &DMatrix<f32>,
+    k: usize,
+    kmeans_iter: usize,
+    base_seed: u64,
+    n_boot: usize,
+    labels: &[usize],
+    ref_topo: &crate::lineage::branch::BranchTopology,
+) -> Vec<(usize, f32, usize)> {
+    use crate::lineage::branch::{detect_branches, BranchTopology};
+    use rayon::prelude::*;
+    let ncell = labels.len();
+
+    // Per-cell reference sibling placement: `Some((junction, sibling))` on any sibling branch,
+    // `None` at a hub or off any junction. Using the `Option<(usize,usize)>` shape directly
+    // (it already impls Hash+Eq+Copy) avoids a fragile u64 pack.
+    let place_of = |topo: &BranchTopology, node_of: &[usize]| -> Vec<Option<(usize, usize)>> {
+        (0..ncell)
+            .map(|c| {
+                topo.node_branch
+                    .get(node_of[c])
+                    .copied()
+                    .flatten()
+                    .and_then(|nb| nb.branch.map(|b| (nb.junction, b)))
+            })
+            .collect()
+    };
+    let ref_place = place_of(ref_topo, labels);
+
+    // Junctions are dense indices in 0..k — a Vec sized `k` skips the HashMap.
+    let mut cells_of: Vec<Vec<usize>> = vec![Vec::new(); k];
+    for (c, p) in ref_place.iter().enumerate() {
+        if let Some((j, _)) = p {
+            cells_of[*j].push(c);
+        }
+    }
+    let n_cells: Vec<usize> = ref_topo
+        .junctions
+        .iter()
+        .map(|&j| cells_of[j].len())
+        .collect();
+
+    // One bootstrap per seed. Each seed is independent so run them in par_iter and *fold*
+    // per-junction Rand agreement into a shared accumulator — no `boot_places` (would be
+    // n_boot × ncell Options, ~5–6 MB on 20 seeds × 18k cells). map-reduce keeps peak
+    // memory at O(ncell) per worker thread.
+    let ref_lab_per_junction: Vec<Vec<Option<(usize, usize)>>> = ref_topo
+        .junctions
+        .iter()
+        .map(|&j| cells_of[j].iter().map(|&c| ref_place[c]).collect())
+        .collect();
+    let sums: Vec<f32> = (1..=n_boot as u64)
+        .into_par_iter()
+        .map(|d| {
+            let seed = base_seed.wrapping_add(d);
+            let (centroids, blabels) = kmeans_centroids_seeded(theta, k, kmeans_iter, seed);
+            let (edges, _w) =
+                mst_from_sqdist(&pairwise_sqdist_rows_to_rows(&centroids, &centroids));
+            let topo = detect_branches(&edges, &[], k);
+            let bp = place_of(&topo, &blabels);
+            ref_topo
+                .junctions
+                .iter()
+                .enumerate()
+                .map(|(ji, &j)| {
+                    let cells = &cells_of[j];
+                    if cells.len() < 2 {
+                        return 0.0;
+                    }
+                    let boot_lab: Vec<Option<(usize, usize)>> =
+                        cells.iter().map(|&c| bp[c]).collect();
+                    rand_index(&ref_lab_per_junction[ji], &boot_lab)
+                })
+                .collect::<Vec<f32>>()
+        })
+        .reduce(
+            || vec![0f32; ref_topo.junctions.len()],
+            |mut a, b| {
+                for (a, b) in a.iter_mut().zip(b) {
+                    *a += b;
+                }
+                a
+            },
+        );
+
+    ref_topo
+        .junctions
+        .iter()
+        .enumerate()
+        .map(|(ji, &j)| {
+            let ncj = n_cells[ji];
+            let support = if ncj < 2 {
+                0.0
+            } else {
+                sums[ji] / n_boot as f32
+            };
+            (j, support, ncj)
+        })
+        .collect()
+}
+
+/// Rand index (fraction of item pairs that agree) between two labellings of the same items,
+/// via a contingency table — O(m), not O(m²). `1.0` for < 2 items.
+fn rand_index<A, B>(a: &[A], b: &[B]) -> f32
+where
+    A: std::hash::Hash + Eq + Copy,
+    B: std::hash::Hash + Eq + Copy,
+{
+    let m = a.len();
+    if m < 2 {
+        return 1.0;
+    }
+    let choose2 = |n: u64| (n * n.saturating_sub(1)) / 2;
+    let (ai, na) = intern_labels(a);
+    let (bi, nb) = intern_labels(b);
+    let mut n_ij: std::collections::HashMap<(usize, usize), u64> = std::collections::HashMap::new();
+    let mut a_cnt = vec![0u64; na];
+    let mut b_cnt = vec![0u64; nb];
+    for t in 0..m {
+        *n_ij.entry((ai[t], bi[t])).or_insert(0) += 1;
+        a_cnt[ai[t]] += 1;
+        b_cnt[bi[t]] += 1;
+    }
+    let total = choose2(m as u64) as i64;
+    if total == 0 {
+        return 1.0;
+    }
+    let sum_nij: i64 = n_ij.values().map(|&n| choose2(n) as i64).sum();
+    let sum_a: i64 = a_cnt.iter().map(|&n| choose2(n) as i64).sum();
+    let sum_b: i64 = b_cnt.iter().map(|&n| choose2(n) as i64).sum();
+    // agreements = same-in-both + different-in-both.
+    ((total - sum_a - sum_b + 2 * sum_nij) as f32 / total as f32).clamp(0.0, 1.0)
+}
+
+/// Map arbitrary hashable labels to compact `0..n` ids; returns `(ids, n)`. Named to avoid
+/// colliding with `matrix_util::knn_graph::compact_labels`, which is `&mut [usize] -> ()`.
+fn intern_labels<A: std::hash::Hash + Eq + Copy>(a: &[A]) -> (Vec<usize>, usize) {
+    let mut map: std::collections::HashMap<A, usize> = std::collections::HashMap::new();
+    let ids = a
+        .iter()
+        .map(|&x| {
+            let n = map.len();
+            *map.entry(x).or_insert(n)
+        })
+        .collect();
+    let n = map.len();
+    (ids, n)
+}
+
+/// `junction × [node, support, n_cells, marker_confidence]` + `marker_type` (Str): the
+/// per-junction trust score (bootstrap support ∈ [0,1]) and, when `--markers` ran, the
+/// junction node's cell-type call — the two scores that say which branch points to believe.
+fn write_junction_support(
+    support: &[(usize, f32, usize)],
+    node_calls: Option<&CommunityCalls>,
+    path: &str,
+) -> Result<()> {
+    let row_names: Vec<Box<str>> = support
+        .iter()
+        .map(|(j, _, _)| format!("junction_{j}").into_boxed_str())
+        .collect();
+    let node_ids: Vec<f32> = support.iter().map(|&(j, _, _)| j as f32).collect();
+    let sup: Vec<f32> = support.iter().map(|&(_, s, _)| s).collect();
+    let ncells: Vec<f32> = support.iter().map(|&(_, _, n)| n as f32).collect();
+    let marker_type: Vec<Box<str>> = support
+        .iter()
+        .map(|&(j, _, _)| {
+            node_calls
+                .and_then(|c| c.labels.get(j).cloned())
+                .unwrap_or_else(|| Box::from(""))
+        })
+        .collect();
+    let marker_conf: Vec<f32> = support
+        .iter()
+        .map(|&(j, _, _)| {
+            node_calls
+                .and_then(|c| c.confidence.get(j).copied())
+                .unwrap_or(f32::NAN)
+        })
+        .collect();
+    write_named_table(
+        path,
+        "junction",
+        &row_names,
+        &[
+            (Box::from("node"), Column::F32(&node_ids)),
+            (Box::from("support"), Column::F32(&sup)),
+            (Box::from("n_cells"), Column::F32(&ncells)),
+            (Box::from("marker_type"), Column::Str(&marker_type)),
+            (Box::from("marker_confidence"), Column::F32(&marker_conf)),
+        ],
+    )
+    .with_context(|| format!("writing {path}"))?;
+    info!("wrote {path} ({} junction(s))", support.len());
     Ok(())
 }
 

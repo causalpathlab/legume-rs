@@ -21,7 +21,8 @@ use petgraph::graph::{NodeIndex, UnGraph};
 use petgraph::visit::EdgeRef;
 use rayon::prelude::*;
 
-use crate::clustering::{Kmeans, KmeansArgs};
+use rand::rngs::SmallRng;
+use rand::{RngExt, SeedableRng};
 
 /// Configuration for [`fit_principal_graph`].
 #[derive(Debug, Clone)]
@@ -153,38 +154,164 @@ pub fn fit_principal_graph(
 }
 
 /// k-means on the rows of `z` (cells × D); returns `(centroids K×D, labels)`.
-/// Empty clusters are re-seeded from a data row so `K` stays non-degenerate.
-/// Shared by [`fit_principal_graph`] and the Slingshot driver in `faba`.
+/// Fixed-seed shim over [`kmeans_centroids_seeded`] — the two functions used to diverge (an
+/// unseeded delegate to the `clustering` crate), which risked drift; this keeps callers that
+/// don't need seed control on the same implementation as `faba lineage --seed`. Empty
+/// clusters are re-seeded from the point currently worst-served by its centroid.
 pub fn kmeans_centroids(z: &DMatrix<f32>, k: usize, max_iter: usize) -> (DMatrix<f32>, Vec<usize>) {
-    let labels = z.kmeans_rows(KmeansArgs {
-        num_clusters: k,
-        max_iter,
-    });
-    let d = z.ncols();
-    let mut centroids = DMatrix::<f32>::zeros(k, d);
-    let mut counts = vec![0usize; k];
-    for (i, &c) in labels.iter().enumerate() {
-        if c < k {
+    kmeans_centroids_seeded(z, k, max_iter, 42)
+}
+
+/// Seeded k-means on the rows of `z` (cells × D): **kmeans++** initialization from a
+/// `SmallRng(seed)` followed by Lloyd iterations, returning `(centroids K×D, labels)`.
+/// Unlike [`kmeans_centroids`] — which delegates to the unseeded `clustering` crate
+/// (its kmeans++ picks the first centroid from the global thread RNG, so results vary
+/// run-to-run) — this is fully reproducible for a given `seed`. That reproducibility is
+/// what `faba lineage --seed` needs, and it is the substrate for bootstrap-support
+/// scoring (refit under many seeds, count how often each structure recurs). Empty
+/// clusters are re-seeded from the point currently worst-served by its centroid, so `K`
+/// stays non-degenerate.
+pub fn kmeans_centroids_seeded(
+    z: &DMatrix<f32>,
+    k: usize,
+    max_iter: usize,
+    seed: u64,
+) -> (DMatrix<f32>, Vec<usize>) {
+    let (n, d) = (z.nrows(), z.ncols());
+    // Degenerate cases mirror `Kmeans::kmeans_rows`: ≤1 cluster or no rows → one node
+    // (the column mean) and all-zero labels.
+    if k <= 1 || n == 0 {
+        let mut c = DMatrix::<f32>::zeros(k.max(1), d);
+        for j in 0..d {
+            let mut s = 0f32;
+            for i in 0..n {
+                s += z[(i, j)];
+            }
+            if n > 0 {
+                c[(0, j)] = s / n as f32;
+            }
+        }
+        return (c, vec![0usize; n]);
+    }
+
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut centers = DMatrix::<f32>::zeros(k, d);
+
+    // ---- kmeans++ init: first centroid uniform, the rest sampled ∝ D²(x) ----
+    let mut d2 = vec![f32::INFINITY; n]; // sq-dist of each point to its nearest centroid
+    let first = rng.random_range(0..n);
+    copy_row(z, first, &mut centers, 0);
+    fold_min_sqdist(z, &centers, 0, &mut d2);
+    for c in 1..k {
+        let sum: f64 = d2.iter().map(|&x| f64::from(x)).sum();
+        let pick = if sum > 0.0 {
+            let target = rng.random_range(0.0f64..sum);
+            let mut acc = 0f64;
+            let mut idx = n - 1;
+            for (i, &w) in d2.iter().enumerate() {
+                acc += f64::from(w);
+                if acc >= target {
+                    idx = i;
+                    break;
+                }
+            }
+            idx
+        } else {
+            // All points coincide with an existing centroid — any point will do.
+            rng.random_range(0..n)
+        };
+        copy_row(z, pick, &mut centers, c);
+        fold_min_sqdist(z, &centers, c, &mut d2);
+    }
+
+    // ---- Lloyd iterations ----
+    // Reuse `pairwise_sqdist_rows_to_rows` for the assignment step: it computes the full
+    // n×k sq-dist matrix in parallel via a shared flat buffer, then a single par row-scan
+    // picks the argmin per point. Much tighter than the naive O(n·k·d) scalar double loop.
+    let mut labels = vec![0usize; n];
+    let mut nearest = vec![0f32; n]; // sq-dist of each point to its assigned centroid
+    for _ in 0..max_iter.max(1) {
+        let dist_nk = pairwise_sqdist_rows_to_rows(z, &centers);
+        let mut changed = false;
+        for i in 0..n {
+            let row = dist_nk.row(i);
+            let (mut best, mut best_d) = (0usize, row[0]);
+            for c in 1..k {
+                let dd = row[c];
+                if dd < best_d {
+                    best_d = dd;
+                    best = c;
+                }
+            }
+            nearest[i] = best_d;
+            if best != labels[i] {
+                changed = true;
+                labels[i] = best;
+            }
+        }
+        // Recompute centroids as cluster means; re-seed any empty cluster.
+        let mut counts = vec![0usize; k];
+        let mut next = DMatrix::<f32>::zeros(k, d);
+        for i in 0..n {
+            let c = labels[i];
             for j in 0..d {
-                centroids[(c, j)] += z[(i, j)];
+                next[(c, j)] += z[(i, j)];
             }
             counts[c] += 1;
         }
-    }
-    for c in 0..k {
-        if counts[c] > 0 {
-            for j in 0..d {
-                centroids[(c, j)] /= counts[c] as f32;
-            }
-        } else {
-            // Empty cluster: re-seed from a data row to keep K non-degenerate.
-            let src = c % z.nrows().max(1);
-            for j in 0..d {
-                centroids[(c, j)] = z[(src, j)];
+        for c in 0..k {
+            if counts[c] > 0 {
+                let inv = 1.0 / counts[c] as f32;
+                for j in 0..d {
+                    next[(c, j)] *= inv;
+                }
+            } else {
+                // Empty cluster: adopt the point currently farthest from its centroid,
+                // then mark it consumed so a second empty cluster picks a different one.
+                let src = (0..n)
+                    .max_by(|&a, &b| {
+                        nearest[a]
+                            .partial_cmp(&nearest[b])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .unwrap_or(0);
+                copy_row(z, src, &mut next, c);
+                nearest[src] = 0.0;
             }
         }
+        centers = next;
+        if !changed {
+            break;
+        }
     }
-    (centroids, labels)
+    (centers, labels)
+}
+
+/// Copy row `src` of `z` into row `dst` of `centers` (same column count).
+fn copy_row(z: &DMatrix<f32>, src: usize, centers: &mut DMatrix<f32>, dst: usize) {
+    for j in 0..z.ncols() {
+        centers[(dst, j)] = z[(src, j)];
+    }
+}
+
+/// Squared Euclidean distance from point `i` (row of `z`) to centroid `c` (row of `centers`).
+fn sqdist_row_to_center(z: &DMatrix<f32>, i: usize, centers: &DMatrix<f32>, c: usize) -> f32 {
+    let mut s = 0f32;
+    for j in 0..z.ncols() {
+        let v = z[(i, j)] - centers[(c, j)];
+        s += v * v;
+    }
+    s
+}
+
+/// Fold the just-added centroid `c` into the running per-point nearest-centroid sq-dist.
+fn fold_min_sqdist(z: &DMatrix<f32>, centers: &DMatrix<f32>, c: usize, d2: &mut [f32]) {
+    for (i, slot) in d2.iter_mut().enumerate() {
+        let dd = sqdist_row_to_center(z, i, centers, c);
+        if dd < *slot {
+            *slot = dd;
+        }
+    }
 }
 
 /// `(N×D, K×D) → N×K` matrix of squared Euclidean distances. Fills a
