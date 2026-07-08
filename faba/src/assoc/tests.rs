@@ -1,12 +1,12 @@
-//! Cross-cutting integration tests for the `assoc` module: calibration of the
-//! between-branch permutation null under a pseudotime confounder, and agreement of the
-//! within-branch estimators. Per-function tests live in each submodule's `tests.rs`.
+//! Cross-cutting integration tests for the `assoc` module: calibration of the Bayesian
+//! between-branch contrast under a pseudotime confounder, and agreement of the within-branch
+//! estimators. Per-function tests live in each submodule's `tests.rs`.
 
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use rand_distr::{Binomial, Distribution};
 
-use super::contrast::{run_contrasts, AssocConfig};
+use super::contrast_bayes::{run_contrasts_bayes, BayesContrastConfig};
 use super::io::{Lineage, Site};
 use super::trend::{run_trends, TrendConfig};
 use super::trend_bayes::{run_trends_bayes, BayesTrendConfig};
@@ -67,31 +67,33 @@ fn confounded_null(n_sites: usize, seed: u64) -> (Lineage, Vec<Site>) {
 #[test]
 fn between_branch_null_is_calibrated_under_confounding() {
     let (lin, sites) = confounded_null(80, 11);
-    let cfg = AssocConfig {
+    let cfg = BayesContrastConfig {
         n_bins: 5,
-        num_perm: 300,
         min_total_coverage: 50,
         min_cells: 10,
+        prior_sd: 3.0,
+        n_samples: 400,
+        warmup: 200,
         seed: 3,
     };
-    let res = run_contrasts(&sites, &lin, &cfg);
+    let res = run_contrasts_bayes(&sites, &lin, &cfg);
     assert!(!res.is_empty(), "some (site, branch) should pass QC");
 
+    // Editing depends only on the pseudotime bin, never on branch. The per-bin baseline α_b
+    // conditions out that confounder, so the branch effect β must sit at ≈ 0 — small in
+    // magnitude and with no systematic direction. (lfsr can still be small under high
+    // coverage because the *sign* of a ~0 effect is well-determined; calibration here is
+    // about magnitude.) A leaked confounder would inflate |effect| and bias its mean.
     let n = res.len() as f32;
-    let frac_sig = res.iter().filter(|r| r.p_perm < 0.1).count() as f32 / n;
-    let mean_p = res.iter().map(|r| r.p_perm).sum::<f32>() / n;
-    // Calibrated ⇒ ≈ 10% below 0.1 and a roughly central mean; a confounder leak would
-    // push both far off (frac ≫ 0.1, mean ≪ 0.5).
+    let mean_effect = res.iter().map(|r| r.effect).sum::<f32>() / n;
+    let frac_big = res.iter().filter(|r| r.effect.abs() > 1.0).count() as f32 / n;
     assert!(
-        frac_sig < 0.2,
-        "confounded null not calibrated: {:.3} of {n} tests below 0.1",
-        frac_sig
+        mean_effect.abs() < 0.2,
+        "systematic branch effect under the null (confounder leak?): mean={mean_effect:.3}"
     );
-    // Two-sided band: a leaked confounder collapses the mean toward 0, a degenerate
-    // all-null inflates it toward 1; a calibrated uniform null sits near 0.5.
     assert!(
-        (0.35..0.65).contains(&mean_p),
-        "mean permutation p not central: {mean_p:.3}"
+        frac_big < 0.1,
+        "too many large spurious effects: {frac_big:.3} of {n} with |effect| > 1"
     );
 }
 

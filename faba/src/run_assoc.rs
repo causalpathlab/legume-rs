@@ -1,21 +1,22 @@
 //! Entry point for `faba assoc` — modality dynamics along the lineage. Loads the
 //! lineage's per-cell pseudotime + branch and a modality site matrix, then runs two
-//! tests per (site, branch): the counterfactual **between-branch** contrast (editing
-//! vs the other-fate cells at matched pseudotime) and the **within-branch** trend GAM
-//! (does editing change as the branch progresses — frequentist quasi-binomial/binomial
-//! or a Bayesian ESS variant, via `--trend-method`). See [`crate::assoc`].
+//! Bayesian tests per (site, branch): the **between-branch** contrast (the posterior of a
+//! branch's pseudotime-adjusted editing excess vs the other fates — mean effect + 90%
+//! credible interval + lfsr, [`crate::assoc::contrast_bayes`]) and the **within-branch**
+//! trend GAM (does editing change as the branch progresses — a Bayesian ESS spline by
+//! default, or a frequentist quasi-binomial/binomial variant via `--trend-method`). See
+//! [`crate::assoc`].
 
 use anyhow::Result;
 use clap::{Args, ValueEnum};
-use log::{info, warn};
+use log::info;
 
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::IoOps;
 
-use crate::assoc::contrast::{
-    bin_pseudotime, run_contrasts, site_profile, AssocConfig, BranchResult,
-};
+use crate::assoc::contrast::{bin_pseudotime, site_profile};
+use crate::assoc::contrast_bayes::{run_contrasts_bayes, BayesContrastConfig, BayesContrastResult};
 use crate::assoc::io::{load_lineage, load_sites, Lineage, Site};
 use crate::assoc::trend::{run_trends, TrendConfig, TrendResult};
 use crate::assoc::trend_bayes::{run_trends_bayes, BayesTrendConfig, BayesTrendResult};
@@ -62,13 +63,6 @@ pub struct AssocArgs {
 
     #[arg(
         long,
-        default_value_t = 500,
-        help = "branch-label permutations within pseudotime bins"
-    )]
-    pub num_perm: usize,
-
-    #[arg(
-        long,
         default_value_t = 50,
         help = "min total coverage per (site, branch)"
     )]
@@ -81,7 +75,11 @@ pub struct AssocArgs {
     )]
     pub min_cells: usize,
 
-    #[arg(long, default_value_t = 42, help = "RNG seed for permutations")]
+    #[arg(
+        long,
+        default_value_t = 42,
+        help = "RNG seed for the Bayesian (ESS) samplers"
+    )]
     pub seed: u64,
 
     #[arg(
@@ -146,49 +144,31 @@ pub fn run_assoc(args: &AssocArgs) -> Result<()> {
     info!("loaded {} {} sites", sites.len(), args.modality.token());
     anyhow::ensure!(!sites.is_empty(), "no sites with both channels found");
 
-    let cfg = AssocConfig {
+    // Between-branch contrast: Bayesian binomial GLM — the posterior of a branch's
+    // pseudotime-adjusted log-odds excess, reported as a mean effect + 90% credible interval
+    // + lfsr. The per-bin baseline conditions out pseudotime; the shrinkage prior regularizes
+    // the branch effect (so calls are stable across seeds without any permutation machinery).
+    let bcfg = BayesContrastConfig {
         n_bins: args.n_bins,
-        num_perm: args.num_perm,
         min_total_coverage: args.min_total_coverage,
         min_cells: args.min_cells,
+        prior_sd: args.trend_prior_sd,
+        n_samples: args.trend_samples,
+        warmup: args.trend_warmup,
         seed: args.seed,
     };
-    let results = run_contrasts(&sites, &lin, &cfg);
-    anyhow::ensure!(!results.is_empty(), "no (site, branch) passed QC");
-
-    let ps: Vec<f32> = results.iter().map(|r| r.p_perm).collect();
-    let qs = benjamini_hochberg(&ps);
-    let n_sig = qs.iter().filter(|&&q| q < args.fdr_alpha).count();
-    let n_fwer = results.iter().filter(|r| r.p_fwer < args.fdr_alpha).count();
+    let res = run_contrasts_bayes(&sites, &lin, &bcfg);
+    anyhow::ensure!(!res.is_empty(), "no (site, branch) passed QC");
+    let n_conf = res.iter().filter(|r| r.lfsr < args.fdr_alpha).count();
     info!(
-        "{} (site,branch) tests; {n_sig} at BH q < {a}, {n_fwer} at Westfall–Young FWER < {a}",
-        results.len(),
-        a = args.fdr_alpha
+        "Bayesian between-branch contrast: {} (site,branch); {n_conf} with lfsr < {}",
+        res.len(),
+        args.fdr_alpha
     );
-    // Westfall–Young cannot resolve a p below 1/(B+1): a test that beats every
-    // permutation pins to that floor, so its FWER is a resolution limit, not a fitted
-    // value. Flag it so the user can raise --num-perm for finer calibration.
-    let fwer_floor = 1.0 / (1.0 + args.num_perm as f32);
-    let n_floor = results
-        .iter()
-        .filter(|r| r.p_fwer <= fwer_floor * 1.000_1)
-        .count();
-    if n_floor > 0 {
-        warn!(
-            "{n_floor} (site,branch) hit the FWER resolution floor 1/(B+1) = {fwer_floor:.2e} \
-             (observed beats all {} permutations); raise --num-perm for a finer FWER estimate",
-            args.num_perm
-        );
-    }
-
-    write_branch_contrast(
-        &results,
-        &qs,
-        &sites,
-        &format!("{out}.branch_contrast.parquet"),
-    )?;
+    write_branch_contrast_bayes(&res, &sites, &format!("{out}.branch_contrast.parquet"))?;
+    let tested: Vec<usize> = res.iter().map(|r| r.site).collect();
     write_branch_profile(
-        &results,
+        &tested,
         &sites,
         &lin,
         args.n_bins,
@@ -277,11 +257,12 @@ fn write_site_branch_table(
     Ok(())
 }
 
-/// `{gene}/{chr:pos}/b{branch}` × [n_cells, total_cov, stat, effect, p_perm, p_fwer, q].
-/// `p_fwer` is the Westfall–Young step-down min-P FWER-adjusted p; `q` is BH-FDR.
-fn write_branch_contrast(
-    res: &[BranchResult],
-    qs: &[f32],
+/// `{gene}/{chr:pos}/b{branch}` × [n_cells, total_cov, effect, effect_sd, effect_lo, effect_hi,
+/// lfsr] — the **Bayesian** between-branch contrast: posterior of the pseudotime-adjusted branch
+/// log-odds excess (mean + 90% credible interval) and the local false sign rate, one row per
+/// QC-passing (site, branch). No permutation p-value / FWER column — `lfsr` is the report.
+fn write_branch_contrast_bayes(
+    res: &[BayesContrastResult],
     sites: &[Site],
     path: &str,
 ) -> Result<()> {
@@ -291,16 +272,15 @@ fn write_branch_contrast(
         .collect();
     let vals: Vec<Vec<f32>> = res
         .iter()
-        .enumerate()
-        .map(|(i, r)| {
+        .map(|r| {
             vec![
                 r.n_cells as f32,
                 r.total_cov as f32,
-                r.stat,
                 r.effect,
-                r.p_perm,
-                r.p_fwer,
-                qs[i],
+                r.effect_sd,
+                r.effect_lo,
+                r.effect_hi,
+                r.lfsr,
             ]
         })
         .collect();
@@ -310,11 +290,11 @@ fn write_branch_contrast(
         &[
             "n_cells",
             "total_cov",
-            "stat",
             "effect",
-            "p_perm",
-            "p_fwer",
-            "q",
+            "effect_sd",
+            "effect_lo",
+            "effect_hi",
+            "lfsr",
         ],
         &vals,
     )
@@ -401,14 +381,14 @@ fn write_branch_trend_bayes(res: &[BayesTrendResult], sites: &[Site], path: &str
 /// `{gene}/{chr:pos}/b{branch}/bin{b}` × [bin, K, N, rate] — the counterfactual
 /// divergence of editing along pseudotime, for the tested sites.
 fn write_branch_profile(
-    res: &[BranchResult],
+    tested_sites: &[usize],
     sites: &[Site],
     lin: &Lineage,
     n_bins: usize,
     path: &str,
 ) -> Result<()> {
     let bins = bin_pseudotime(&lin.pseudotime, n_bins);
-    let mut which: Vec<usize> = res.iter().map(|r| r.site).collect();
+    let mut which: Vec<usize> = tested_sites.to_vec();
     which.sort_unstable();
     which.dedup();
 

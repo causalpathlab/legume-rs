@@ -378,9 +378,9 @@ Example:\n  \
     #[command(
         name = "plot",
         aliases = ["plot-lineage", "trajectory-plot"],
-        about = "Publication-style PNG of a `faba lineage` trajectory over its 2D embedding",
+        about = "Publication-style figure (PDF/PNG/SVG) of a `faba lineage` trajectory over its 2D embedding",
         long_about = "Render the outputs of `faba lineage --markers` (with the default\n\
-            --layout phate) into a single annotated PNG: cells laid out on the PHATE\n\
+            --layout phate) into a single annotated figure: cells laid out on the PHATE\n\
             embedding, coloured by coarse cell type (default) or pseudotime, with the\n\
             Slingshot principal curves + MST trajectory nodes overlaid.\n\n\
             Reads by prefix (`-f/--from`): {from}.cells_2d.parquet (PHATE coords),\n\
@@ -393,7 +393,10 @@ Example:\n  \
             pseudotime layer (with a colourbar). Principal curves + nodes are dark\n\
             overlays; each non-Cycling_Progenitor node is labeled with its cell type\n\
             and the root node is marked with a red star. Uses the shared plot-utils\n\
-            rasterize -> SVG -> resvg pipeline; writes {out}.plot.png.",
+            rasterize -> SVG -> render pipeline; writes {out}.plot.pdf by default\n\
+            (--png / --svg add those formats, --no-pdf skips the PDF). The scatter is a\n\
+            raster layer, so the PDF is a hybrid (vector text over raster points at --dpi;\n\
+            raise --dpi to 300-600 for print).",
         after_long_help = "\
 	Example:\n\
 	faba lineage -f out/gem -o out/lin --markers markers.tsv\n\
@@ -405,19 +408,18 @@ Example:\n  \
     #[command(
         name = "dyn-assoc",
         aliases = ["assoc", "temporal-assoc", "trend"],
-        about = "Counterfactual between-branch modality contrast along a `faba lineage`",
+        about = "Bayesian between-branch modality contrast along a `faba lineage`",
         long_about = "Test whether a modality (m6a/apa/atoi) diverges between lineage branches.\n\n\
-            Downstream of `faba lineage` (like `annotate` is to `gem`): reads the\n\
-            lineage's per-cell pseudotime + branch (`-f/--from` → {from}.pseudotime.parquet)\n\
-            and a per-site modality matrix (`-s/--sites`), and asks the counterfactual\n\
-            question — if a cell had gone down a different branch, would its editing\n\
-            rate differ? Branches are compared at MATCHED pseudotime (bin-stratified,\n\
-            a tradeSeq patternTest / cocoa matched-null analog). Coverage (edited +\n\
-            unedited) is the binomial denominator, so detection bias is conditioned\n\
-            out; calibrated by permuting branch labels within pseudotime bins.\n\n\
-            Not double-dipping: branches come from gem θ + velocity, which never see\n\
-            the modality. Outputs {out}.branch_contrast.parquet (per site×branch:\n\
-            stat, effect, p, q) and {out}.branch_profile.parquet (rate vs pseudotime).\n\n\
+            Downstream of `faba lineage` (like `annotate` is to `gem`). Fits, per branch, a\n\
+            binomial GLM  logit(p_{b,g}) = α_b + β·1[g=L]  where α_b conditions out pseudotime\n\
+            (matched-null, à la tradeSeq patternTest / cocoa) and β is the branch's\n\
+            pseudotime-adjusted log-odds excess. Coverage (edited + unedited) is the binomial\n\
+            denominator so detection bias is conditioned out; a shrinkage prior N(0, τ²) on β\n\
+            damps noisy calls (stable across seeds — no permutation machinery). Reports the\n\
+            posterior mean effect, 90% credible interval, and lfsr = min(P(β>0), P(β<0)); the\n\
+            within-branch trend GAM (--trend-method) runs alongside.\n\n\
+            Not double-dipping: branches come from gem θ + velocity, which never see the\n\
+            modality.\n\n\
             Reference:\n  \
             Van den Berge et al., \"Trajectory-based differential expression analysis\n\
             for single-cell sequencing data\", Nat Commun 11:1201, 2020.",
