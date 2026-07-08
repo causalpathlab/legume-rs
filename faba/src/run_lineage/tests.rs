@@ -78,3 +78,25 @@ fn numbered_names() {
     assert_eq!(got, vec!["node_0".into(), "node_1".into(), "node_2".into()]);
     assert!(numbered("x", 0).is_empty());
 }
+
+#[test]
+fn gem_dag_n_terminals_parses_field_and_zero_vetoes() {
+    let dir = std::env::temp_dir();
+    let prefix = dir
+        .join(format!("faba_qc_{}", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+    let write = |body: &str| std::fs::write(format!("{prefix}.lineage_qc.json"), body).unwrap();
+
+    // Well-formed descriptive JSON (no `flag` field): the terminal count is read out.
+    write("{\n  \"n_roots\": 1,\n  \"n_terminals\": 42,\n  \"top_source_reach\": 0.31\n}\n");
+    assert_eq!(gem_dag_n_terminals(&prefix), Some(42));
+
+    // A structureless DAG → Some(0), which is the only case that vetoes --root-from-gem.
+    write("{\n  \"n_roots\": 0,\n  \"n_terminals\": 0,\n  \"top_source_reach\": 0.0\n}\n");
+    assert_eq!(gem_dag_n_terminals(&prefix), Some(0));
+
+    // Missing file → None (no signal → do NOT veto the gem root).
+    std::fs::remove_file(format!("{prefix}.lineage_qc.json")).unwrap();
+    assert_eq!(gem_dag_n_terminals(&prefix), None);
+}

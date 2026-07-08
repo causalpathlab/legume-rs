@@ -5,12 +5,13 @@ use anyhow::{Context, Result};
 use rustc_hash::FxHashMap;
 
 use data_beans::hdf5_io::resolve_backend_file;
-use data_beans::sparse_io::open_sparse_matrix;
+use data_beans::sparse_io::{open_sparse_matrix, COLUMN_SEP};
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::IoOps;
 
 use super::Modality;
 use faba::feature_name::parse_feature_row;
+use matrix_util::common_io::basename;
 
 /// Per-cell lineage: a common pseudotime axis + primary branch, in cell order.
 pub struct Lineage {
@@ -102,7 +103,12 @@ pub fn load_sites(
     let (pos_ch, neg_ch) = modality.channels();
     let tok = modality.token();
 
+    // One site per (gene, subunit), pooled across the per-sample files: a gene recurs
+    // once per replicate matrix, but each file's cells map to disjoint lineage indices
+    // (distinct `@sample` tags), so summing k/n into a shared site fills different cells
+    // rather than double-counting. `site_index` maps the key to its slot in `sites`.
     let mut sites: Vec<Site> = Vec::new();
+    let mut site_index: FxHashMap<(Box<str>, Box<str>), usize> = FxHashMap::default();
     for path in paths {
         let (backend, resolved) = resolve_backend_file(path, None)
             .with_context(|| format!("resolving backend for {path}"))?;
@@ -110,9 +116,25 @@ pub fn load_sites(
             open_sparse_matrix(&resolved, &backend).with_context(|| format!("opening {path}"))?;
         let row_names = data.row_names()?;
         let col_names = data.column_names()?;
+        // The lineage tags each cell `{barcode}@{sample_id}` (gem's Union naming); a
+        // per-sample modality matrix stores bare barcodes. Match `{barcode}@{sample_id}`
+        // first, then fall back to the bare barcode (single-sample lineages that were
+        // never `@`-tagged) — without this every cell drops and no (site, branch)
+        // clears QC.
+        let sid = site_sample_id(path, tok);
+        let mut tagged = String::new(); // reused across columns to avoid a per-cell alloc
         let col_to_cell: Vec<Option<usize>> = col_names
             .iter()
-            .map(|bc| cell_idx.get(bc.as_ref()).copied())
+            .map(|bc| {
+                tagged.clear();
+                tagged.push_str(bc.as_ref());
+                tagged.push_str(COLUMN_SEP);
+                tagged.push_str(&sid);
+                cell_idx
+                    .get(tagged.as_str())
+                    .or_else(|| cell_idx.get(bc.as_ref()))
+                    .copied()
+            })
             .collect();
 
         // Group rows by (gene, subunit); record the pos/neg channel row indices.
@@ -169,13 +191,65 @@ pub fn load_sites(
             }
         }
         for (li, (gene, sub)) in meta.into_iter().enumerate() {
-            sites.push(Site {
-                gene,
-                subunit: sub,
-                k: std::mem::take(&mut kk[li]),
-                n: std::mem::take(&mut nn[li]),
-            });
+            let kv = std::mem::take(&mut kk[li]);
+            let nv = std::mem::take(&mut nn[li]);
+            let key = (gene, sub);
+            if let Some(&idx) = site_index.get(&key) {
+                // Same gene seen in an earlier replicate file — accumulate coverage.
+                let s = &mut sites[idx];
+                for c in 0..ncell {
+                    s.k[c] += kv[c];
+                    s.n[c] += nv[c];
+                }
+            } else {
+                site_index.insert(key.clone(), sites.len());
+                sites.push(Site {
+                    gene: key.0,
+                    subunit: key.1,
+                    k: kv,
+                    n: nv,
+                });
+            }
         }
     }
     Ok(sites)
+}
+
+/// Per-file sample id matching gem's `@sample` cell tag. The faba editing pipeline
+/// names a modality matrix `{sample_id}_{modality}[_site].zarr.zip`, so stripping the
+/// modality suffix (`_m6a_site`, then `_m6a`) recovers gem's sample id
+/// (`rep1_wt_m6a.zarr.zip` → `rep1_wt`), letting the bare barcodes rejoin the
+/// lineage's `{barcode}@rep1_wt` cells. A shared-suffix heuristic is deliberately
+/// avoided — a WT-only file set shares `_wt_m6a` and would over-strip to `rep1`.
+fn site_sample_id(path: &str, tok: &str) -> Box<str> {
+    let base = basename(path).unwrap_or_else(|_| path.into());
+    for suf in [format!("_{tok}_site"), format!("_{tok}")] {
+        if let Some(s) = base.strip_suffix(suf.as_str()) {
+            return s.into();
+        }
+    }
+    base
+}
+
+#[cfg(test)]
+mod tests {
+    use super::site_sample_id;
+
+    #[test]
+    fn sample_id_strips_modality_suffix_not_shared_suffix() {
+        // gem tags cells `@rep1_wt` (it stripped `_genes` over the mixed wt/mut set);
+        // the modality files must recover the SAME id by stripping the modality token,
+        // not the suffix shared by a wt-only file set (`_wt_m6a` → would give `rep1`).
+        assert_eq!(&*site_sample_id("rep1_wt_m6a.zarr.zip", "m6a"), "rep1_wt");
+        assert_eq!(&*site_sample_id("rep2_wt_m6a.zarr.zip", "m6a"), "rep2_wt");
+        // site-level matrices carry the `_site` suffix first.
+        assert_eq!(
+            &*site_sample_id("out/rep3_mut_m6a_site.zarr.zip", "m6a"),
+            "rep3_mut"
+        );
+        // other modalities.
+        assert_eq!(&*site_sample_id("rep1_wt_atoi.zarr.zip", "atoi"), "rep1_wt");
+        // no modality suffix → bare basename, so the bare-barcode fallback applies.
+        assert_eq!(&*site_sample_id("sampleA.zarr.zip", "m6a"), "sampleA");
+    }
 }

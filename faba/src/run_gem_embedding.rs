@@ -548,23 +548,22 @@ fn run_gem_genes_bge(
         }
     }
 
-    // Unsupervised per-run structural stats (`{out}.lineage_qc.json`). Report the
-    // DESCRIPTIVE structure (root/terminal counts, top-source reach, velocity coherence,
-    // placement ambiguity) rather than leaning on the coarse `flag` — the flag is a
-    // one-word floor kept only so `--root-from-gem` can veto a fragmented DAG; the numbers
-    // are what actually characterize the trajectory. No ground truth needed.
+    // Unsupervised per-run structural stats (`{out}.lineage_qc.json`): the DESCRIPTIVE
+    // structure (root/terminal counts, top-source reach, velocity coherence, placement
+    // ambiguity) that characterizes the trajectory. No ground truth needed, and no coarse
+    // one-word verdict — `--root-from-gem` reads `n_terminals` directly to skip a
+    // structureless DAG.
     if let Some(qc) = &out.lineage_qc {
         let json = format!(
             "{{\n  \"n_roots\": {},\n  \"n_terminals\": {},\n  \"top_source_reach\": {:.4},\n  \
              \"velocity_coherence\": {:.4},\n  \"mean_ambiguity\": {:.4},\n  \
-             \"refine_likelihood\": {:.4},\n  \"flag\": \"{}\"\n}}\n",
+             \"refine_likelihood\": {:.4}\n}}\n",
             qc.n_roots,
             qc.n_terminals,
             qc.root_decisiveness,
             qc.velocity_coherence,
             qc.mean_ambiguity,
             qc.likelihood,
-            qc.flag,
         );
         std::fs::write(format!("{}.lineage_qc.json", args.out), json)
             .with_context(|| format!("writing {}.lineage_qc.json", args.out))?;

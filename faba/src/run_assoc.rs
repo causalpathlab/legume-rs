@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use clap::{Args, ValueEnum};
-use log::info;
+use log::{info, warn};
 
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
@@ -159,11 +159,27 @@ pub fn run_assoc(args: &AssocArgs) -> Result<()> {
     let ps: Vec<f32> = results.iter().map(|r| r.p_perm).collect();
     let qs = benjamini_hochberg(&ps);
     let n_sig = qs.iter().filter(|&&q| q < args.fdr_alpha).count();
+    let n_fwer = results.iter().filter(|r| r.p_fwer < args.fdr_alpha).count();
     info!(
-        "{} (site,branch) tests; {n_sig} at q < {}",
+        "{} (site,branch) tests; {n_sig} at BH q < {a}, {n_fwer} at Westfall–Young FWER < {a}",
         results.len(),
-        args.fdr_alpha
+        a = args.fdr_alpha
     );
+    // Westfall–Young cannot resolve a p below 1/(B+1): a test that beats every
+    // permutation pins to that floor, so its FWER is a resolution limit, not a fitted
+    // value. Flag it so the user can raise --num-perm for finer calibration.
+    let fwer_floor = 1.0 / (1.0 + args.num_perm as f32);
+    let n_floor = results
+        .iter()
+        .filter(|r| r.p_fwer <= fwer_floor * 1.000_1)
+        .count();
+    if n_floor > 0 {
+        warn!(
+            "{n_floor} (site,branch) hit the FWER resolution floor 1/(B+1) = {fwer_floor:.2e} \
+             (observed beats all {} permutations); raise --num-perm for a finer FWER estimate",
+            args.num_perm
+        );
+    }
 
     write_branch_contrast(
         &results,
@@ -261,7 +277,8 @@ fn write_site_branch_table(
     Ok(())
 }
 
-/// `{gene}/{chr:pos}/b{branch}` × [n_cells, total_cov, stat, effect, p_perm, q].
+/// `{gene}/{chr:pos}/b{branch}` × [n_cells, total_cov, stat, effect, p_perm, p_fwer, q].
+/// `p_fwer` is the Westfall–Young step-down min-P FWER-adjusted p; `q` is BH-FDR.
 fn write_branch_contrast(
     res: &[BranchResult],
     qs: &[f32],
@@ -282,6 +299,7 @@ fn write_branch_contrast(
                 r.stat,
                 r.effect,
                 r.p_perm,
+                r.p_fwer,
                 qs[i],
             ]
         })
@@ -289,7 +307,15 @@ fn write_branch_contrast(
     write_site_branch_table(
         path,
         rows,
-        &["n_cells", "total_cov", "stat", "effect", "p_perm", "q"],
+        &[
+            "n_cells",
+            "total_cov",
+            "stat",
+            "effect",
+            "p_perm",
+            "p_fwer",
+            "q",
+        ],
         &vals,
     )
 }

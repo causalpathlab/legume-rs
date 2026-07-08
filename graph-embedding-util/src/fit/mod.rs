@@ -761,9 +761,9 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             let traj = lift::pb_trajectory(vel, &edges, h, lineage::DEFAULT_SEM_STEP);
             let theta_c = cell_model.e_cell.flatten_all()?.to_vec1()?;
             let lin = lift::lift_cells(&theta_c, n_cells, vel, &traj, h, level);
-            // Unsupervised per-run QC diagnostics + `underfit` hygiene floor (decisiveness,
-            // coherence, fate count, ambiguity, likelihood) — for run inspection/rejection,
-            // not a validated quality ranker.
+            // Unsupervised per-run structural diagnostics (decisiveness, coherence, fate
+            // count, ambiguity, likelihood) — for run inspection, not a validated quality
+            // ranker.
             let qc = lift::compute_lineage_qc(
                 &traj,
                 vel,
@@ -774,14 +774,13 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             );
             info!(
                 "cell-lift — finest pb level {}: {} nodes, {} root(s), {} fate(s), \
-                 top-source reach {:.2}, velocity-coherence {:.2} [{}]",
+                 top-source reach {:.2}, velocity-coherence {:.2}",
                 level,
                 vel.n_pb,
                 traj.roots.len(),
                 traj.terminals.len(),
                 qc.root_decisiveness,
                 qc.velocity_coherence,
-                qc.flag,
             );
             lineage_qc = Some(qc);
             Some(lin)
