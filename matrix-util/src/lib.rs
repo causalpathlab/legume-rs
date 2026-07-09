@@ -20,6 +20,7 @@ pub mod parquet;
 pub mod principal_curve;
 pub mod principal_graph;
 pub mod progress;
+pub mod running_quantile;
 pub mod sparse_stat;
 pub mod tensor_io;
 pub mod tensor_util;
