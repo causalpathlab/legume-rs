@@ -5,9 +5,13 @@
 //! in-distribution `--calibration` backend, flags query cells whose fit falls
 //! below the null tail, and emits a batch-level **covered vs novel** verdict.
 //!
-//! This is the "covered vs new" axis of the drift-probe design (the τ_new /
-//! novelty gate). The forgetting-risk (τ_old) axis and the full 2×2 verdict are
-//! a later rung and are not computed here.
+//! What this computes is a **goodness-of-fit / reconstruction residual**: the
+//! predictive log-likelihood of each cell under the *frozen* model — the
+//! potential outcome `Y(0)` ("does the current model explain this cell"). That
+//! is a novelty **proxy**, not the counterfactual `τ_new = E[Y(1) − Y(0)]`
+//! ("would updating help"), which needs the gradient `g_new` and the Fisher `H`.
+//! The counterfactual axes (`τ_new`, `τ_old`) and the 2×2 verdict are a later
+//! rung and are not computed here.
 
 use crate::embed_common::*;
 use crate::masked_topic::FeatureNameKindArg;
