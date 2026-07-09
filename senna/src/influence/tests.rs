@@ -103,6 +103,22 @@ fn analytic_gradient_matches_finite_difference() {
     }
 }
 
+/// The control-arm contrast must give an *exact* null when the query is the
+/// calibration set itself: `ḡ_Δ = 0 ⇒ Δ = 0 ⇒ τ_new = τ_old = 0`.
+#[test]
+fn identical_query_and_calibration_give_exact_null() {
+    let stats = || GradStats {
+        n_cells: 7,
+        g_mean: vec![0.31, -0.12, 0.87, 0.04],
+        fisher: vec![0.5, 2.0, 0.01, 1.0],
+    };
+    let cf = counterfactual(&stats(), &stats(), 1.0, 2);
+    assert_eq!(cf.tau_new, 0.0, "tau_new must vanish under the null");
+    assert_eq!(cf.tau_old, 0.0, "tau_old must vanish under the null");
+    assert_eq!(cf.g_delta_norm, 0.0);
+    assert!(cf.delta_norm_per_topic.iter().all(|&d| d == 0.0));
+}
+
 /// With an unregularized step the axes collapse (`τ_old = −τ_new`); the
 /// EWC-regularized step must keep them distinct.
 #[test]

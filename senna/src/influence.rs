@@ -24,19 +24,29 @@
 //! diagonals `F` (mean squared per-cell gradient), the EWC-regularized one-step
 //! update and the two axes of the decision plane are
 //! ```text
-//!   Δ     = ḡ_new / (κ·F_old + F_new)
-//!   τ_new = ḡ_new·Δ − ½ Δᵀ F_new Δ        (benefit on the new batch)
-//!   τ_old = ḡ_old·Δ − ½ Δᵀ F_old Δ        (change on old data; < 0 ⇒ forgetting)
+//!   ḡ_Δ   = ḡ_new − ḡ_cal                 (query-specific pull, see below)
+//!   Δ     = ḡ_Δ / (κ·F_cal + F_new)
+//!   τ_new = ḡ_Δ·Δ   − ½ Δᵀ F_new Δ        (differential benefit of the query)
+//!   τ_old = ḡ_cal·Δ − ½ Δᵀ F_cal Δ        (change on old data; < 0 ⇒ forgetting)
 //! ```
-//! Regularizing by `(κ·F_old + F_new)` rather than `F_old` alone is what keeps
+//! Regularizing by `(κ·F_cal + F_new)` rather than `F_cal` alone is what keeps
 //! the axes independent: an unregularized Newton step collapses them to
-//! `τ_old = −τ_new`. Novelty along low-`F_old` (unexplored) directions is cheap
-//! and safe; conflict along high-`F_old` (well-known) directions is toxic.
+//! `τ_old = −τ_new`. Novelty along low-`F_cal` (unexplored) directions is cheap
+//! and safe; conflict along high-`F_cal` (well-known) directions is toxic.
 //!
-//! **Objective mismatch, handled honestly.** The model is *trained* on a masked-NB
-//! loss, so its gradient of this multinomial objective is not zero even on
-//! in-distribution data. We therefore keep the first-order term `ḡ_old·Δ` in
-//! `τ_old` instead of assuming optimality.
+//! **Why the contrast `ḡ_new − ḡ_cal` (the control arm).** The model is *trained*
+//! on a masked-NB loss over pseudobulks, so its gradient of this per-cell objective
+//! is **not** zero even on in-distribution data. That non-zero direction is
+//! *common-mode*: every batch shares it, and updating along it improves the fit of
+//! new and old data alike. Left in, it swamps `τ_new`. Treating the calibration
+//! batch as a **control arm** and taking the difference removes it — a
+//! negative-control / difference-in-differences adjustment. The estimand becomes
+//! "the effect of adding *this* batch rather than an equally-sized in-distribution
+//! batch", which is precisely what novelty-relative-to-reference means.
+//!
+//! Consequence: with query ≡ calibration, `ḡ_Δ = 0 ⇒ Δ = 0 ⇒ τ_new = τ_old = 0` —
+//! an exact null, which is what makes the axes usable as calibrated statistics.
+//! The first-order term `ḡ_cal·Δ` is retained in `τ_old` (no optimality assumed).
 
 use crate::embed_common::*;
 use crate::topic::eval::GeneRemap;
@@ -210,15 +220,19 @@ pub(crate) fn topic_gradient_stats(
 
 /// The two counterfactual axes and the one-step update that produces them.
 pub(crate) struct Counterfactual {
-    /// Predicted per-cell fit gain on the new batch if we applied `Δ`.
+    /// Predicted per-cell fit gain on the new batch attributable to its
+    /// **query-specific** direction (control-arm contrast). `0` when query ≡ calibration.
     pub tau_new: f64,
     /// Predicted per-cell fit change on the old (calibration) data; `< 0` ⇒ forgetting.
     pub tau_old: f64,
+    /// ‖ḡ_new − ḡ_cal‖ — how far the query pulls beyond an in-distribution batch.
+    pub g_delta_norm: f64,
     /// Per-topic ‖Δ_k‖ — which topics a joint retrain would move.
     pub delta_norm_per_topic: Vec<f64>,
 }
 
-/// EWC-regularized one-step counterfactual: `Δ = ḡ_new / (κ·F_old + F_new)`.
+/// EWC-regularized one-step counterfactual on the control-arm contrast:
+/// `Δ = (ḡ_new − ḡ_cal) / (κ·F_cal + F_new)`.
 pub(crate) fn counterfactual(
     new: &GradStats,
     old: &GradStats,
@@ -228,12 +242,17 @@ pub(crate) fn counterfactual(
     let p = new.g_mean.len();
     let hh = p / n_topics.max(1);
     let mut delta = vec![0f64; p];
-    let (mut tau_new, mut tau_old) = (0f64, 0f64);
+    let (mut tau_new, mut tau_old, mut g_delta_sq) = (0f64, 0f64, 0f64);
 
     for (i, d_slot) in delta.iter_mut().enumerate() {
-        let d = new.g_mean[i] / (kappa * old.fisher[i] + new.fisher[i] + 1e-12);
+        // Control-arm contrast: strip the common-mode pull that any
+        // in-distribution batch would also produce.
+        let g_delta = new.g_mean[i] - old.g_mean[i];
+        g_delta_sq += g_delta * g_delta;
+
+        let d = g_delta / (kappa * old.fisher[i] + new.fisher[i] + 1e-12);
         *d_slot = d;
-        tau_new += new.g_mean[i] * d - 0.5 * d * d * new.fisher[i];
+        tau_new += g_delta * d - 0.5 * d * d * new.fisher[i];
         tau_old += old.g_mean[i] * d - 0.5 * d * d * old.fisher[i];
     }
 
@@ -249,6 +268,7 @@ pub(crate) fn counterfactual(
     Counterfactual {
         tau_new,
         tau_old,
+        g_delta_norm: g_delta_sq.sqrt(),
         delta_norm_per_topic,
     }
 }
