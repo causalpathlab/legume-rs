@@ -55,6 +55,7 @@ mod postprocess;
 mod predict;
 mod predict_tmle;
 mod principal_graph;
+mod probe;
 mod pseudotime;
 mod refine_weighting;
 mod resolve_embedding_space;
@@ -80,6 +81,7 @@ use joint_topic::*;
 use masked_topic::*;
 use postprocess::*;
 use predict::{predict_model, PredictArgs};
+use probe::{run_probe, ProbeArgs};
 use pseudotime::{run_pseudotime, PseudotimeArgs};
 use resolve_embedding_space::{resolve_embedding_space, RestArgs};
 use svd::*;
@@ -343,6 +345,18 @@ enum Commands {
     Predict(PredictArgs),
 
     #[command(
+        about = "Drift probe: novelty verdict for held-out data vs a trained masked model.",
+        long_about = "Read-only drift probe (the covered-vs-new gate). Scores query cells'\n\
+                      per-cell predictive fit under a trained masked model\n\
+                      (masked-topic/-vae/-sbp), calibrates a null from an in-distribution\n\
+                      --calibration backend, and flags query cells below the null tail.\n\
+                      Emits a batch-level covered/novel verdict.\n\n\
+                      Usage: senna probe --model M --calibration ref.zarr query.zarr -o out\n\
+                      Writes {out}.probe.tsv (per-cell fit + flag) and {out}.probe.json."
+    )]
+    Probe(ProbeArgs),
+
+    #[command(
         about = "Impute full-feature counts on new (sparse-panel) cells via kNN over a reference latent.",
         long_about = "Two-stage post-hoc imputation:\n  \
                       1. Project new sparse-panel data through the trained\n  \
@@ -584,6 +598,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Predict(args) => {
             predict_model(args)?;
+        }
+        Commands::Probe(args) => {
+            run_probe(args)?;
         }
         Commands::Impute(args) => {
             impute_model(args)?;

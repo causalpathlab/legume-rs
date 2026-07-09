@@ -735,20 +735,72 @@ fn predict_masked(
     metadata: &TopicModelMetadata,
     head: candle_util::vae::masked_topic::LatentHead,
 ) -> anyhow::Result<()> {
-    use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
-    use crate::topic::model_metadata::load_feature_mean;
     use crate::topic::model_metadata::masked_head_label;
 
-    let embedding_dim = metadata
+    let scored = score_masked_backend(MaskedScoreArgs {
+        model: &args.model,
+        data_files: &args.data_files,
+        batch_files: args.batch_files.as_deref(),
+        preload: args.preload_data,
+        minibatch_size: args.minibatch_size,
+        query_name_opts: &args.query_name_opts(),
+        metadata,
+        head,
+    })?;
+    write_outputs(
+        args,
+        &scored.data_vec,
+        &scored.z_nk,
+        &scored.llik,
+        &scored.total,
+    )?;
+    info!(
+        "predict complete ({}, encoder-only latent + full-cell predictive llik)",
+        masked_head_label(head)
+    );
+    Ok(())
+}
+
+/// Encoder + full-cell predictive scores for a masked / indexed model on one
+/// backend. Shared by `predict` and `probe` (the latter reuses only the scores,
+/// not the file output).
+pub(crate) struct MaskedScored {
+    pub data_vec: SparseIoVec,
+    pub z_nk: Mat,
+    pub llik: Vec<f32>,
+    pub total: Vec<f32>,
+}
+
+pub(crate) struct MaskedScoreArgs<'a> {
+    pub model: &'a str,
+    pub data_files: &'a [Box<str>],
+    pub batch_files: Option<&'a [Box<str>]>,
+    pub preload: bool,
+    pub minibatch_size: usize,
+    pub query_name_opts: &'a QueryNameOpts,
+    pub metadata: &'a TopicModelMetadata,
+    pub head: candle_util::vae::masked_topic::LatentHead,
+}
+
+/// Rebuild the indexed encoder from a trained masked model, run encoder-only
+/// latent inference on `data_files`, and compute the per-cell full-cell
+/// predictive log-likelihood (the probe fit score). Writes nothing.
+pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<MaskedScored> {
+    use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
+    use crate::topic::model_metadata::load_feature_mean;
+
+    let embedding_dim = a
+        .metadata
         .embedding_dim
         .ok_or_else(|| anyhow::anyhow!("masked-topic metadata missing embedding_dim"))?;
-    let enc_context_size = metadata
+    let enc_context_size = a
+        .metadata
         .enc_context_size
         .ok_or_else(|| anyhow::anyhow!("masked-topic metadata missing enc_context_size"))?;
 
-    let (training_genes, beta_dk) = load_dictionary(&args.model)?;
-    let (_sw_genes, shortlist_weights) = load_shortlist_weights(&args.model)?;
-    let (_fm_genes, feature_mean) = load_feature_mean(&args.model)?;
+    let (training_genes, beta_dk) = load_dictionary(a.model)?;
+    let (_sw_genes, shortlist_weights) = load_shortlist_weights(a.model)?;
+    let (_fm_genes, feature_mean) = load_feature_mean(a.model)?;
     anyhow::ensure!(
         shortlist_weights.len() == training_genes.len(),
         "shortlist_weights gene count ({}) != dictionary gene count ({})",
@@ -763,9 +815,9 @@ fn predict_masked(
     );
 
     let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: args.data_files.clone(),
-        batch_files: args.batch_files.clone(),
-        preload: args.preload_data,
+        data_files: a.data_files.to_vec(),
+        batch_files: a.batch_files.map(<[_]>::to_vec),
+        preload: a.preload,
         ..Default::default()
     })?;
     let mut data_vec = loaded.data;
@@ -777,24 +829,24 @@ fn predict_masked(
     );
 
     let new_genes = data_vec.row_names()?;
-    let gene_remap = build_remap(&training_genes, &new_genes, &args.query_name_opts())?;
+    let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
     let cpu_dev = Device::Cpu;
     let mut parameters = candle_nn::VarMap::new();
     let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
     let encoder = IndexedEmbeddingEncoder::new(
         IndexedEmbeddingEncoderArgs {
-            n_features: metadata.n_features_full,
-            n_topics: metadata.n_topics,
+            n_features: a.metadata.n_features_full,
+            n_topics: a.metadata.n_topics,
             embedding_dim,
-            layers: &metadata.encoder_hidden,
+            layers: &a.metadata.encoder_hidden,
             use_gcn: false,
             attn_pool: true,
         },
         &parameters,
         vb.pp("enc"),
     )?;
-    let safetensors_path = format!("{}.safetensors", args.model);
+    let safetensors_path = format!("{}.safetensors", a.model);
     info!("Loading weights from {safetensors_path}");
     parameters.load(&safetensors_path)?;
 
@@ -802,11 +854,11 @@ fn predict_masked(
     let eval_config = EvaluateLatentMaskedConfig {
         dev: &cpu_dev,
         adj_method: &adj_method,
-        minibatch_size: args.minibatch_size,
+        minibatch_size: a.minibatch_size,
         enc_context_size,
         shortlist_weights: &shortlist_weights,
         feature_mean: &feature_mean,
-        head,
+        head: a.head,
     };
     let z_nk = evaluate_latent_masked(
         &data_vec,
@@ -816,22 +868,20 @@ fn predict_masked(
         gene_remap.as_ref().map(|r| r.new_to_train.as_slice()),
     )?;
 
-    // Full-cell predictive log-likelihood (the probe fit score): score every
-    // observed gene under the reconstructed composition recon = exp(β)·θ, so
-    // `senna predict` emits `{out}.predictive.parquet` for masked models too.
     let (llik, total) = predictive_llik_masked(
         &data_vec,
         &z_nk,
         &beta_dk,
         gene_remap.as_ref(),
-        args.minibatch_size,
+        a.minibatch_size,
     )?;
-    write_outputs(args, &data_vec, &z_nk, &llik, &total)?;
-    info!(
-        "predict complete ({}, encoder-only latent + full-cell predictive llik)",
-        masked_head_label(head)
-    );
-    Ok(())
+
+    Ok(MaskedScored {
+        data_vec,
+        z_nk,
+        llik,
+        total,
+    })
 }
 
 /// Per-cell predictive log-likelihood for the masked / indexed topic model.
