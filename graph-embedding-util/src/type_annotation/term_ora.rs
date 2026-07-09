@@ -33,7 +33,7 @@ use super::output::{write_label_tsvs, write_marker_embeddings};
 use super::score::{argmax_rows, row_major};
 use super::InputEmbeddings;
 use anyhow::{Context, Result};
-use log::info;
+use log::{info, warn};
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
 use matrix_util::parquet::{write_named_table, Column};
@@ -123,7 +123,7 @@ pub struct CommunityCalls {
 /// Name of a term index, mapping the [`UNASSIGNED`] sentinel to `"unassigned"`.
 fn label_of(t: usize, type_names: &[Box<str>]) -> Box<str> {
     if t == UNASSIGNED {
-        Box::from("unassigned")
+        Box::from(enrichment::UNASSIGNED_LABEL)
     } else {
         type_names[t].clone()
     }
@@ -227,15 +227,21 @@ pub fn annotate_with_communities(
         h,
     )?;
 
-    // ----- 1. term centroids (un-normalized, IDF-weighted mean) -----
+    //////////////////////////////////////////////////////////
+    // 1. term centroids (un-normalized, IDF-weighted mean) //
+    //////////////////////////////////////////////////////////
     let beta_flat = row_major(feature_emb);
     let centroids = term_centroids(&beta_flat, g, &type_markers, h); // [c × h] row-major
 
-    // ----- 2. nearest-centroid assignment (Euclidean) -----
+    ////////////////////////////////////////////////
+    // 2. nearest-centroid assignment (Euclidean) //
+    ////////////////////////////////////////////////
     let cell_flat = row_major(cell_emb);
     let (mut assign, dist) = assign_nearest(&cell_flat, n, &centroids, c, h);
 
-    // ----- 3. QC: prune high-distance outliers per assigned term -----
+    ///////////////////////////////////////////////////////////
+    // 3. QC: prune high-distance outliers per assigned term //
+    ///////////////////////////////////////////////////////////
     let mut n_outliers = 0usize;
     if cfg.assign_qc {
         n_outliers = prune_outliers(&mut assign, &dist, c, cfg.assign_mad);
@@ -247,10 +253,14 @@ pub fn annotate_with_communities(
         "after QC only {n_assigned} cells remain assigned — loosen --assign-mad or check markers"
     );
 
-    // ----- 5. cluster × term over-representation + permutation calibration -----
+    /////////////////////////////////////////////////////////////////////
+    // 5. cluster × term over-representation + permutation calibration //
+    /////////////////////////////////////////////////////////////////////
     let ora = cluster_term_ora(&assign, community, n_comm, c, cfg);
 
-    // ----- 6. cluster calls → per-cell firm labels -----
+    /////////////////////////////////////////////
+    // 6. cluster calls → per-cell firm labels //
+    /////////////////////////////////////////////
     // Each cluster's call is its top over-represented term, kept only if
     // FDR-significant; otherwise the cluster stays unassigned.
     let top = argmax_rows(&ora.stat, n_comm, c);
@@ -277,7 +287,9 @@ pub fn annotate_with_communities(
         })
         .collect();
 
-    // ----- outputs -----
+    /////////////
+    // outputs //
+    /////////////
     let comm_names: Vec<Box<str>> = (0..n_comm)
         .map(|k| format!("K{k}").into_boxed_str())
         .collect();
@@ -299,7 +311,9 @@ pub fn annotate_with_communities(
     write_calibration(out_prefix, &ora, n_assigned, n_outliers)?;
     log_cluster_calls(&cluster_label, &type_names, community, n_comm);
 
-    // ----- 7. optional ontology (TreeBH over the cluster × term matrix) -----
+    //////////////////////////////////////////////////////////////////
+    // 7. optional ontology (TreeBH over the cluster × term matrix) //
+    //////////////////////////////////////////////////////////////////
     if let (Some(obo), Some(label_cl)) = (cfg.obo.as_deref(), cfg.label_cl.as_deref()) {
         run_ontology(
             out_prefix,
@@ -327,9 +341,9 @@ pub fn annotate_with_communities(
     Ok(comm_calls)
 }
 
-//////////////////////////////
-// 1–2. centroids + assignment
-//////////////////////////////
+/////////////////////////////////
+// 1–2. centroids + assignment //
+/////////////////////////////////
 
 /// `[c × h]` row-major IDF-weighted mean of each type's marker feature
 /// embeddings — the **un-normalized** centroid (the Euclidean prototype). Empty
@@ -368,8 +382,23 @@ fn term_centroids(
 
 /// Nearest-centroid assignment by squared Euclidean distance. Returns
 /// `(assign[n], dist[n])` where `dist` is the Euclidean distance to the assigned
-/// centroid. A type with an all-zero (no-marker) centroid can still win only if
-/// it is genuinely closest; QC downstream prunes poor fits.
+/// centroid.
+///
+/// **A zero-norm centroid can never win.** [`term_centroids`] leaves a type with no
+/// usable markers at the origin (it only divides when `wsum > 0`). Cells here are
+/// the *raw* embedding, so that centroid sits at squared distance `‖cell‖²` from
+/// every cell — and therefore beats every real prototype for any cell nearer the
+/// origin than to any of them. It is not a weak competitor, it is a magnet: on a
+/// bone-marrow gem run, four types matched zero markers and one of them captured
+/// 6814 / 15315 = 44.5% of all cells, while the other three captured none (the
+/// strict `<` below lets only the first such type by index ever win).
+///
+/// `parse_and_match_markers` drops types that matched no gene, which is the common
+/// cause but not the only one: a zero centroid also arises when every marker's gene
+/// index is out of range, when the IDF weights all vanish, or when the embedding
+/// rows cancel. None of those survive as an *empty marker list*, so the guard here
+/// is a strictly larger net, not a duplicate of the drop. The cosine path
+/// (`type_scores`) is immune for free, since a zero centroid scores 0.
 fn assign_nearest(
     cell_flat: &[f32],
     n: usize,
@@ -377,6 +406,21 @@ fn assign_nearest(
     c: usize,
     h: usize,
 ) -> (Vec<usize>, Vec<f32>) {
+    let mut live: Vec<bool> = (0..c)
+        .map(|t| centroids[t * h..(t + 1) * h].iter().any(|&x| x != 0.0))
+        .collect();
+    let n_degenerate = live.iter().filter(|&&l| !l).count();
+    if n_degenerate == c {
+        // Nothing to choose between; keep the old (arbitrary) behaviour rather than
+        // returning an infinite distance that would poison the MAD prune downstream.
+        warn!("all {c} term centroids are zero-norm — assignment is meaningless");
+        live.iter_mut().for_each(|l| *l = true);
+    } else if n_degenerate > 0 {
+        warn!(
+            "{n_degenerate} of {c} term centroid(s) are zero-norm and were excluded from \
+             nearest-centroid assignment (they would sit at constant distance from every cell)"
+        );
+    }
     let mut assign = vec![0usize; n];
     let mut dist = vec![0f32; n];
     assign
@@ -388,6 +432,9 @@ fn assign_nearest(
             let mut best = 0usize;
             let mut best_d2 = f32::INFINITY;
             for t in 0..c {
+                if !live[t] {
+                    continue;
+                }
                 let ct = &centroids[t * h..(t + 1) * h];
                 let mut s = 0f32;
                 for (x, y) in cell.iter().zip(ct) {
@@ -435,9 +482,9 @@ fn prune_outliers(assign: &mut [usize], dist: &[f32], c: usize, k: f64) -> usize
     pruned
 }
 
-//////////////////////////////
-// 4. clustering
-//////////////////////////////
+///////////////////
+// 4. clustering //
+///////////////////
 
 /// Leiden communities over a cosine cell kNN graph (cells L2-normalized for the
 /// graph; gem `e_cell` is already unit, so this matches the assignment geometry).
@@ -462,9 +509,9 @@ fn cluster_cells(cell_flat: &[f32], n: usize, h: usize, cfg: &TermOraConfig) -> 
     ))
 }
 
-//////////////////////////////
-// 5. over-representation + calibration
-//////////////////////////////
+//////////////////////////////////////////
+// 5. over-representation + calibration //
+//////////////////////////////////////////
 
 /// Cluster × term over-representation result. All `[n_comm × c]` matrices are
 /// row-major (`[k*c + t]`).
@@ -539,7 +586,9 @@ fn cluster_term_ora(
         }
     }
 
-    // ----- permutation null: pool stat across clusters per term -----
+    //////////////////////////////////////////////////////////
+    // permutation null: pool stat across clusters per term //
+    //////////////////////////////////////////////////////////
     let b = cfg.n_perm;
     let mut null_pool: Vec<Vec<f32>> = vec![Vec::with_capacity(b * n_comm); c];
     if b > 0 && n_tot >= 2 {
@@ -799,9 +848,9 @@ fn ks_uniform(ps: &[f64]) -> f64 {
     d
 }
 
-//////////////////////////////
-// outputs
-//////////////////////////////
+/////////////
+// outputs //
+/////////////
 
 #[allow(clippy::too_many_arguments)]
 fn write_annot_parquet(
@@ -956,9 +1005,9 @@ fn log_cluster_calls(
     }
 }
 
-//////////////////////////////
-// 7. ontology
-//////////////////////////////
+/////////////////
+// 7. ontology //
+/////////////////
 
 fn run_ontology(
     out_prefix: &str,
