@@ -14,10 +14,13 @@
 //! rung and are not computed here.
 
 use crate::embed_common::*;
+use crate::influence::{counterfactual, topic_gradient_stats};
 use crate::masked_topic::FeatureNameKindArg;
-use crate::predict::{score_masked_backend, MaskedScoreArgs};
+use crate::predict::{score_masked_backend, MaskedScoreArgs, MaskedScored};
 use crate::topic::eval::QueryNameOpts;
-use crate::topic::model_metadata::{masked_head_from_model_type, TopicModelMetadata};
+use crate::topic::model_metadata::{
+    load_dictionary, load_feature_embedding, masked_head_from_model_type, TopicModelMetadata,
+};
 use log::info;
 use std::f64::consts::SQRT_2;
 
@@ -62,6 +65,25 @@ pub struct ProbeArgs {
 
     #[arg(long, help = "Load all columns into memory before scoring")]
     preload_data: bool,
+
+    #[arg(
+        long,
+        help = "Also estimate the counterfactual axes τ_new / τ_old (influence core)",
+        long_help = "Differentiate the fit objective w.r.t. the decoder's topic embeddings on\n\
+                     both the calibration and query cells, take their empirical Fisher\n\
+                     diagonals, and form the EWC-regularized one-step update\n\
+                     Δ = ḡ_new / (κ·F_old + F_new). Reports τ_new (predicted fit gain on the\n\
+                     query if we updated) and τ_old (predicted change on calibration data;\n\
+                     negative means forgetting), plus per-topic ‖Δ_k‖."
+    )]
+    influence: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "EWC prior strength κ: how hard the old model resists moving"
+    )]
+    prior_strength: f64,
 }
 
 /// Standard normal upper tail `P(Z > z)` via the Abramowitz-Stegun erf.
@@ -105,9 +127,8 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
         keep_suffix: None,
     };
 
-    // Per-cell fit = predictive log-likelihood / count (depth-invariant).
-    let score = |files: &[Box<str>]| -> anyhow::Result<(Vec<Box<str>>, Vec<f32>)> {
-        let s = score_masked_backend(MaskedScoreArgs {
+    let scored = |files: &[Box<str>]| -> anyhow::Result<MaskedScored> {
+        score_masked_backend(MaskedScoreArgs {
             model: &args.model,
             data_files: files,
             batch_files: None,
@@ -116,21 +137,24 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
             query_name_opts: &qopts,
             metadata: &metadata,
             head,
-        })?;
-        let names = s.data_vec.column_names()?;
-        let fit = s
-            .llik
+        })
+    };
+
+    // Per-cell fit = predictive log-likelihood / count (depth-invariant).
+    fn per_cell_fit(s: &MaskedScored) -> Vec<f32> {
+        s.llik
             .iter()
             .zip(&s.total)
             .map(|(&l, &t)| if t > 0.0 { l / t } else { 0.0 })
-            .collect();
-        Ok((names, fit))
-    };
+            .collect()
+    }
 
-    let (_, cal_fit) = score(std::slice::from_ref(&args.calibration))?;
-    let thr = quantile(&cal_fit, args.alpha);
+    let cal = scored(std::slice::from_ref(&args.calibration))?;
+    let thr = quantile(&per_cell_fit(&cal), args.alpha);
 
-    let (q_names, q_fit) = score(&args.data_files)?;
+    let query = scored(&args.data_files)?;
+    let q_fit = per_cell_fit(&query);
+    let q_names = query.data_vec.column_names()?;
     let n = q_fit.len();
     anyhow::ensure!(n > 0, "probe: query has no cells");
     let n_flag = q_fit.iter().filter(|&&f| f < thr).count();
@@ -148,6 +172,68 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
         "COVERED — certify"
     };
 
+    // Counterfactual axes: what would a joint retrain actually do?
+    let infl_json = if args.influence {
+        let (_, beta_dk) = load_dictionary(&args.model)?;
+        let (_, rho_dh) = load_feature_embedding(&args.model)?;
+        let l2 = |v: &[f64]| v.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+        let old = topic_gradient_stats(
+            &cal.data_vec,
+            &cal.z_nk,
+            &beta_dk,
+            &rho_dh,
+            cal.gene_remap.as_ref(),
+            args.minibatch_size,
+        )?;
+        let new = topic_gradient_stats(
+            &query.data_vec,
+            &query.z_nk,
+            &beta_dk,
+            &rho_dh,
+            query.gene_remap.as_ref(),
+            args.minibatch_size,
+        )?;
+        let cf = counterfactual(&new, &old, args.prior_strength, beta_dk.ncols());
+        let (gn, go) = (l2(&new.g_mean), l2(&old.g_mean));
+
+        info!(
+            "influence: n_query={} n_calib={}  ||g_query||={gn:.3e}  ||g_calib||={go:.3e}  (κ={})",
+            new.n_cells, old.n_cells, args.prior_strength
+        );
+        info!(
+            "counterfactual: τ_new={:+.4e} (benefit of updating)  τ_old={:+.4e} ({})",
+            cf.tau_new,
+            cf.tau_old,
+            if cf.tau_old < 0.0 {
+                "forgetting"
+            } else {
+                "no forgetting"
+            }
+        );
+        let per_topic: Vec<String> = cf
+            .delta_norm_per_topic
+            .iter()
+            .map(|v| format!("{v:.3e}"))
+            .collect();
+        info!("per-topic ||Δ_k||: [{}]", per_topic.join(", "));
+
+        format!(
+            ",\"tau_new\":{:.6e},\"tau_old\":{:.6e},\"g_query_norm\":{gn:.6e},\
+             \"g_calib_norm\":{go:.6e},\"kappa\":{},\"delta_norm_per_topic\":[{}]",
+            cf.tau_new,
+            cf.tau_old,
+            args.prior_strength,
+            cf.delta_norm_per_topic
+                .iter()
+                .map(|v| format!("{v:.6e}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    } else {
+        String::new()
+    };
+
     let mut tsv = String::from("cell\tfit\tflag\n");
     for (nm, &f) in q_names.iter().zip(&q_fit) {
         tsv.push_str(&format!("{nm}\t{f:.6}\t{}\n", u8::from(f < thr)));
@@ -157,7 +243,7 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
         format!("{}.probe.json", args.out),
         format!(
             "{{\"n_query\":{n},\"alpha\":{},\"threshold\":{thr:.6},\"n_flagged\":{n_flag},\
-             \"novelty_rate\":{rate:.4},\"p_value\":{pval:.3e},\"verdict\":\"{verdict}\"}}\n",
+             \"novelty_rate\":{rate:.4},\"p_value\":{pval:.3e},\"verdict\":\"{verdict}\"{infl_json}}}\n",
             args.alpha
         ),
     )?;
