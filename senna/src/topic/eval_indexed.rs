@@ -4,6 +4,7 @@ use crate::embed_common::*;
 use candle_core::{Device, Tensor};
 use candle_util::data::csc_columns_to_indexed_samples;
 use candle_util::traits::*;
+use candle_util::vae::masked_topic::{masked_encode, LatentHead, MaskedEncoderInput};
 
 /// Packed top-K representation consumed by the masked encoder.
 ///
@@ -133,10 +134,11 @@ pub(crate) struct EvaluateLatentMaskedConfig<'a> {
     pub enc_context_size: usize,
     pub shortlist_weights: &'a [f32],
     pub feature_mean: &'a [f32],
-    /// Masked-VAE: use the Gaussian masked forward (posterior-mean `z`, no
-    /// softmax) instead of the simplex `log θ` forward. The latent semantics
-    /// differ but the eval path (all genes visible, no decoder) is identical.
-    pub latent_gaussian: bool,
+    /// Latent head to run at inference — must match the head the model was
+    /// trained with. The eval path (all genes visible, no decoder) is identical
+    /// across heads; only the final simplex/latent map differs. The Gaussian
+    /// arm returns the posterior mean `z` (train=false → reparam returns mean).
+    pub head: LatentHead,
 }
 
 /// Encoder-only latent inference for the masked-imputation topic model.
@@ -179,27 +181,20 @@ pub(crate) fn evaluate_latent_masked(
             .map(|x0| gather_null_at_indices(x0, &enc_pack.indices, config.dev))
             .transpose()?;
         let visible = enc_pack.values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
-        let latent_nk = if config.latent_gaussian {
-            // Posterior mean `z` (train=false → reparam returns the mean).
-            let (z, _kl) = encoder.forward_indexed_masked_gaussian(
-                &enc_pack.indices,
-                &enc_pack.values,
-                enc_values_null.as_ref(),
-                enc_pack.values_mean.as_ref(),
-                &visible,
-                false,
-            )?;
-            z
-        } else {
-            encoder.forward_indexed_masked(
-                &enc_pack.indices,
-                &enc_pack.values,
-                enc_values_null.as_ref(),
-                enc_pack.values_mean.as_ref(),
-                &visible,
-                false,
-            )?
-        };
+        // Encoder-only inference: `train = false` (Gaussian returns its posterior
+        // mean), and the KL is discarded — the latent alone is written out.
+        let (latent_nk, _kl) = masked_encode(
+            encoder,
+            config.head,
+            &MaskedEncoderInput {
+                indices: &enc_pack.indices,
+                values: &enc_pack.values,
+                values_null: enc_values_null.as_ref(),
+                values_mean: enc_pack.values_mean.as_ref(),
+                visible_mask: &visible,
+            },
+            false,
+        )?;
         let z_nk = latent_nk.to_device(&candle_core::Device::Cpu)?;
         Ok((lb, Mat::from_tensor(&z_nk)?))
     })

@@ -243,18 +243,21 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     }
 
     use crate::topic::model_metadata::{
-        MODEL_TYPE_INDEXED_MASKED, MODEL_TYPE_MASKED_VAE, MODEL_TYPE_TOPIC, MODEL_TYPE_VAE,
+        masked_head_from_model_type, MODEL_TYPE_INDEXED_MASKED, MODEL_TYPE_MASKED_STICK,
+        MODEL_TYPE_MASKED_VAE, MODEL_TYPE_TOPIC, MODEL_TYPE_VAE,
     };
+    // All masked heads (softmax / stick-breaking / Gaussian) share the
+    // encoder-only path; `masked_head_from_model_type` recovers which one.
+    if let Some(head) = masked_head_from_model_type(&metadata.model_type) {
+        return predict_masked(args, &metadata, head);
+    }
     match metadata.model_type.as_ref() {
         MODEL_TYPE_TOPIC => predict_dense(args, &metadata),
-        // Both masked models share the encoder-only path; the Gaussian latent
-        // only switches which encoder forward (simplex vs raw z) is run.
-        MODEL_TYPE_INDEXED_MASKED => predict_masked(args, &metadata, false),
-        MODEL_TYPE_MASKED_VAE => predict_masked(args, &metadata, true),
         MODEL_TYPE_VAE => predict_vae(args, &metadata),
         other => anyhow::bail!(
             "predict: unsupported model_type '{other}' (expected '{MODEL_TYPE_TOPIC}', \
-             '{MODEL_TYPE_INDEXED_MASKED}', '{MODEL_TYPE_MASKED_VAE}', or '{MODEL_TYPE_VAE}')",
+             '{MODEL_TYPE_INDEXED_MASKED}', '{MODEL_TYPE_MASKED_STICK}', \
+             '{MODEL_TYPE_MASKED_VAE}', or '{MODEL_TYPE_VAE}')",
         ),
     }
 }
@@ -728,10 +731,11 @@ fn remap_and_coarsen_dense(
 fn predict_masked(
     args: &PredictArgs,
     metadata: &TopicModelMetadata,
-    latent_gaussian: bool,
+    head: candle_util::vae::masked_topic::LatentHead,
 ) -> anyhow::Result<()> {
     use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
     use crate::topic::model_metadata::load_feature_mean;
+    use crate::topic::model_metadata::masked_head_label;
 
     let embedding_dim = metadata
         .embedding_dim
@@ -800,7 +804,7 @@ fn predict_masked(
         enc_context_size,
         shortlist_weights: &shortlist_weights,
         feature_mean: &feature_mean,
-        latent_gaussian,
+        head,
     };
     let z_nk = evaluate_latent_masked(
         &data_vec,
@@ -813,11 +817,7 @@ fn predict_masked(
     let cell_names = data_vec.column_names()?;
     // Inference: emit a row per query cell (no QC dropping).
     crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, None)?;
-    let model_label = if latent_gaussian {
-        "masked-vae"
-    } else {
-        "masked-topic"
-    };
+    let model_label = masked_head_label(head);
     info!(
         "Wrote {}.latent.parquet ({model_label}, encoder-only)",
         args.out

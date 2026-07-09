@@ -113,18 +113,41 @@ pub enum MaskedLikelihood {
     Multinomial,
 }
 
+/// Which latent head the masked encoder uses to turn pooled visible genes into
+/// the per-topic log-intensity `log θ` the NB/multinomial imputation head reads.
+///
+/// `Softmax` and `StickBreaking` are both deterministic point estimates with no
+/// KL (the masked objective alone prevents collapse); they differ only in the
+/// simplex parameterization. `Gaussian` is the true variational bottleneck.
+///
+/// This is a pure identity tag — a `Copy`, round-trippable value used by the
+/// train dispatch, the inference dispatch, and model persistence alike. The
+/// Gaussian KL weight is a train-only hyperparameter and lives on
+/// [`MaskedTrainOpts::kl_weight`], not in the tag, so the inference/persistence
+/// sites never fabricate a placeholder weight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LatentHead {
+    /// Deterministic simplex `log_softmax(z)` — exchangeable topics. The legacy
+    /// masked-topic default.
+    Softmax,
+    /// Deterministic **stick-breaking** simplex — ordered, exchangeability-
+    /// broken topics with a self-pruning tail. Same no-KL objective as
+    /// `Softmax`, only the final simplex map differs.
+    StickBreaking,
+    /// Reparameterized **Gaussian** latent `z` (no simplex projection) plus a
+    /// `kl_weight · KL(z ‖ N(0, I))` term. `exp(z)` drives the NB head's
+    /// per-topic intensities, so the decoder is reused unchanged.
+    Gaussian,
+}
+
 pub struct MaskedTrainOpts {
     pub mask_schedule: MaskSchedule,
     /// Per-gene likelihood for the masked imputation loss.
     pub likelihood: MaskedLikelihood,
-    /// **Masked-VAE mode.** When `true`, the encoder emits a reparameterized
-    /// **Gaussian** latent `z` (no log-softmax simplex projection) and the loss
-    /// gains a `kl_weight · KL(z)` term. `exp(z)` then plays the role of the
-    /// per-topic intensities in the NB head (`μ_g = ℓ·Σ_t exp(z_t)·β_{t,g}`), so
-    /// the decoder is reused unchanged. `false` = the legacy simplex-`θ`
-    /// masked-topic model (deterministic, no KL). NB head only.
-    pub latent_gaussian: bool,
-    /// KL weight `β` for the Gaussian latent (ignored unless `latent_gaussian`).
+    /// Latent head: simplex (softmax / stick-breaking, deterministic no-KL) or
+    /// Gaussian (reparameterized + KL). See [`LatentHead`].
+    pub latent: LatentHead,
+    /// KL weight `β` for the Gaussian latent. Ignored unless `latent == Gaussian`.
     pub kl_weight: f64,
 }
 
@@ -133,9 +156,73 @@ impl Default for MaskedTrainOpts {
         Self {
             mask_schedule: MaskSchedule::Fixed,
             likelihood: MaskedLikelihood::Nb,
-            latent_gaussian: false,
+            latent: LatentHead::Softmax,
             kl_weight: 1.0,
         }
+    }
+}
+
+/// Borrowed masked-encoder inputs: the per-cell packed top-K plus the
+/// visible-slot mask. Grouping them lets the trainer and encoder-only inference
+/// share one dispatch entry point ([`masked_encode`]) instead of spelling the
+/// six-argument encoder call out per head at each site.
+pub struct MaskedEncoderInput<'a> {
+    pub indices: &'a Tensor,
+    pub values: &'a Tensor,
+    pub values_null: Option<&'a Tensor>,
+    pub values_mean: Option<&'a Tensor>,
+    pub visible_mask: &'a Tensor,
+}
+
+/// Run the masked encoder under `head`, returning the raw per-topic latent
+/// `[N, K]` (`log θ` for the simplex heads, `z` for Gaussian) and — only for
+/// `Gaussian` — the per-cell KL `[N]`.
+///
+/// Single source of truth for the head → encoder-forward dispatch shared by
+/// [`train_masked`] and senna's encoder-only inference. The encoder itself
+/// stays head-agnostic (three plain forwards, no `LatentHead` dependency).
+/// Callers own their post-processing: the trainer smooths the simplex heads
+/// (`kl.is_none()`) and adds the KL term; inference discards the KL.
+pub fn masked_encode(
+    encoder: &IndexedEmbeddingEncoder,
+    head: LatentHead,
+    input: &MaskedEncoderInput,
+    train: bool,
+) -> candle_core::Result<(Tensor, Option<Tensor>)> {
+    match head {
+        LatentHead::Gaussian => {
+            let (z, kl) = encoder.forward_indexed_masked_gaussian(
+                input.indices,
+                input.values,
+                input.values_null,
+                input.values_mean,
+                input.visible_mask,
+                train,
+            )?;
+            Ok((z, Some(kl)))
+        }
+        LatentHead::StickBreaking => Ok((
+            encoder.forward_indexed_masked_stick(
+                input.indices,
+                input.values,
+                input.values_null,
+                input.values_mean,
+                input.visible_mask,
+                train,
+            )?,
+            None,
+        )),
+        LatentHead::Softmax => Ok((
+            encoder.forward_indexed_masked(
+                input.indices,
+                input.values,
+                input.values_null,
+                input.values_mean,
+                input.visible_mask,
+                train,
+            )?,
+            None,
+        )),
     }
 }
 
@@ -604,29 +691,28 @@ pub fn train_masked(
                 let visible = (&real - &masked)?;
 
                 // Masked-VAE: reparameterized Gaussian `z` (no softmax) + KL.
-                // Legacy masked-topic: deterministic simplex `log θ`, no KL.
-                // In both cases the NB head reads this as its per-topic
-                // intensity log — `exp(z)` for the VAE, `θ` for the topic model.
-                let (log_z, kl_opt) = if opts.latent_gaussian {
-                    let (z, kl) = encoder.forward_indexed_masked_gaussian(
-                        &mb.input_indices,
-                        &mb.input_values,
-                        mb.input_values_null.as_ref(),
-                        mb.input_values_mean.as_ref(),
-                        &visible,
-                        true,
-                    )?;
-                    (z, Some(kl))
+                // Masked-topic: deterministic simplex `log θ` (softmax or
+                // stick-breaking), no KL. In all cases the NB head reads this as
+                // its per-topic intensity log — `exp(z)` for the VAE, `θ` for
+                // the topic models.
+                let (raw_z, kl_opt) = masked_encode(
+                    encoder,
+                    opts.latent,
+                    &MaskedEncoderInput {
+                        indices: &mb.input_indices,
+                        values: &mb.input_values,
+                        values_null: mb.input_values_null.as_ref(),
+                        values_mean: mb.input_values_mean.as_ref(),
+                        visible_mask: &visible,
+                    },
+                    true,
+                )?;
+                // Simplex heads (`kl_opt` None) get topic smoothing; the Gaussian
+                // `z` is a raw log-intensity, not a log-simplex, so it's left as-is.
+                let log_z = if kl_opt.is_some() {
+                    raw_z
                 } else {
-                    let log_z = encoder.forward_indexed_masked(
-                        &mb.input_indices,
-                        &mb.input_values,
-                        mb.input_values_null.as_ref(),
-                        mb.input_values_mean.as_ref(),
-                        &visible,
-                        true,
-                    )?;
-                    (smooth_topics(log_z, config.topic_smoothing)?, None)
+                    smooth_topics(raw_z, config.topic_smoothing)?
                 };
 
                 // full_kd (α·ρᵀ [K,D]) — the per-topic log-partition for the NB
@@ -657,7 +743,8 @@ pub fn train_masked(
                     let c = masked.sum_all()?.to_scalar::<f32>()?;
                     (llik.mean_all()?.neg()?, m, c)
                 };
-                // Masked-VAE KL bottleneck: β · mean_N KL(z ‖ N(0, I)).
+                // Masked-VAE KL bottleneck: β · mean_N KL(z ‖ N(0, I)). `kl_opt`
+                // is `Some` only on the Gaussian head, so no head re-check needed.
                 if let Some(kl) = kl_opt {
                     kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
                     kl_cnt += kl.dim(0)? as f32;
@@ -704,7 +791,7 @@ pub fn train_masked(
         kl_trace.push(per_kl);
         prog_bar.inc(1);
         if log::log_enabled!(log::Level::Info) {
-            let kl_msg = if opts.latent_gaussian {
+            let kl_msg = if matches!(opts.latent, LatentHead::Gaussian) {
                 format!(" kl/cell={per_kl:.4}")
             } else {
                 String::new()

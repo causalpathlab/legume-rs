@@ -10,6 +10,7 @@ use crate::topic::train_masked::{
 
 use candle_util::decoder::EmbeddedNbTopicDecoder;
 use candle_util::encoder::*;
+use candle_util::vae::masked_topic::LatentHead;
 use log::warn;
 
 /// Mask-rate schedule (CLI surface for `MaskSchedule`).
@@ -538,9 +539,17 @@ impl From<FeatureNameKindArg> for Option<auxiliary_data::feature_names::FeatureN
     }
 }
 
-/// `senna masked-topic` — simplex-`θ`, deterministic (no-KL) masked ETM.
+/// `senna masked-topic` — softmax simplex-`θ`, deterministic (no-KL) masked ETM.
 pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
-    fit_masked_model(args, false)
+    fit_masked_model(args, LatentHead::Softmax)
+}
+
+/// `senna masked-stick` — **stick-breaking** simplex-`θ`, deterministic (no-KL)
+/// masked ETM. Same pipeline as `masked-topic`; the encoder maps its logits
+/// through a stick-breaking simplex instead of softmax, giving ordered,
+/// exchangeability-broken topics with a self-pruning tail.
+pub fn fit_masked_stick_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
+    fit_masked_model(args, LatentHead::StickBreaking)
 }
 
 /// `senna masked-vae` — Gaussian-latent (reparam + KL) masked VAE. Shares the
@@ -548,10 +557,10 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
 /// the encoder emits a reparameterized `z` (no softmax) and the loss gains a KL
 /// term. `exp(z)` plays the role of the per-topic intensities in the NB head.
 pub fn fit_masked_vae_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
-    fit_masked_model(args, true)
+    fit_masked_model(args, LatentHead::Gaussian)
 }
 
-fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Result<()> {
+fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     let k = args.n_latent_topics;
@@ -803,7 +812,9 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
             &parameters,
             prefix,
             &WarmStartCheck {
-                model_type_expected: crate::topic::model_metadata::MODEL_TYPE_INDEXED_MASKED,
+                // Warm-start from a checkpoint of the same head — the z_mean
+                // semantics differ per head, so `--init-from` must match.
+                model_type_expected: crate::topic::model_metadata::masked_model_type(head),
                 n_topics,
                 n_features_full,
                 n_features_encoder: n_features_full,
@@ -901,7 +912,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
             },
         },
         likelihood: args.masked_likelihood.to_lib(),
-        latent_gaussian,
+        latent: head,
         kl_weight: args.kl_weight,
     };
 
@@ -924,23 +935,16 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
     // Persist trainable weights, model architecture, and shortlist weights
     // so `senna predict` (and `--init-from` re-runs) can rebuild this model.
     use crate::topic::model_metadata::{
-        save_feature_mean, save_parameters, save_shortlist_weights, TopicModelMetadata,
+        masked_decoder_type, masked_model_type, save_feature_mean, save_parameters,
+        save_shortlist_weights, TopicModelMetadata,
     };
 
     // No feature graph is persisted on the masked path (GCN diffusion is not
     // wired into the masked encoder — see the encoder construction above).
     save_parameters(&parameters, &args.out)?;
     let mut metadata = TopicModelMetadata {
-        model_type: if latent_gaussian {
-            crate::topic::model_metadata::MODEL_TYPE_MASKED_VAE.into()
-        } else {
-            crate::topic::model_metadata::MODEL_TYPE_INDEXED_MASKED.into()
-        },
-        decoder_types: vec![if latent_gaussian {
-            "nb_masked_vae".into()
-        } else {
-            "nb_masked".into()
-        }],
+        model_type: masked_model_type(head).into(),
+        decoder_types: vec![masked_decoder_type(head).into()],
         decoder_weights: vec![1.0],
         n_features_encoder: n_features_full,
         n_features_full,
@@ -1001,7 +1005,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
         enc_context_size: args.context_size,
         shortlist_weights: &shortlist_weights,
         feature_mean: &feature_mean,
-        latent_gaussian,
+        head,
     };
     let z_nk = evaluate_latent_masked(&data_vec, &cpu_encoder, &eval_config, delta.as_ref(), None)?;
 
