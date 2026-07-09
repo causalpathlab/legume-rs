@@ -11,6 +11,12 @@ pub const MODEL_TYPE_TOPIC: &str = "topic";
 /// Inference is encoder-only (no decoder refinement). The retired generative
 /// indexed-topic model used `"indexed_topic_packed"`; that path is gone.
 pub const MODEL_TYPE_INDEXED_MASKED: &str = "indexed_topic_masked";
+/// Masked **stick-breaking process** topic model (`senna masked-sbp`): same
+/// masked-imputation ETM pipeline as [`MODEL_TYPE_INDEXED_MASKED`]
+/// (deterministic, no KL), but the encoder maps its logits through a
+/// stick-breaking simplex instead of softmax — ordered, exchangeability-broken
+/// topics with a self-pruning tail. Inference is encoder-only.
+pub const MODEL_TYPE_MASKED_SBP: &str = "masked_sbp";
 /// Masked **Gaussian VAE** (`senna masked-vae`): same masked-imputation ETM
 /// pipeline as [`MODEL_TYPE_INDEXED_MASKED`], but the encoder emits a
 /// reparameterized Gaussian latent `z` (no simplex softmax) regularized by a KL
@@ -23,6 +29,50 @@ pub const MODEL_TYPE_MASKED_VAE: &str = "masked_vae";
 /// library·π`, NB). The latent is continuous factors, not simplex topic
 /// proportions; the dictionary is gene × factor loadings.
 pub const MODEL_TYPE_VAE: &str = "vae";
+
+use candle_util::vae::masked_topic::LatentHead;
+
+/// Single source of truth for the masked-model head ↔ persisted `model_type`
+/// ↔ CLI label mapping. Every site (metadata write, `predict` dispatch, log
+/// labels, warm-start expectation) derives from these three functions instead
+/// of re-spelling the mapping, so a new head is added in one place.
+pub fn masked_model_type(head: LatentHead) -> &'static str {
+    match head {
+        LatentHead::Softmax => MODEL_TYPE_INDEXED_MASKED,
+        LatentHead::StickBreaking => MODEL_TYPE_MASKED_SBP,
+        LatentHead::Gaussian => MODEL_TYPE_MASKED_VAE,
+    }
+}
+
+/// Inverse of [`masked_model_type`]: recover the head from a persisted
+/// `model_type`, or `None` for a non-masked model (`topic` / `vae`).
+pub fn masked_head_from_model_type(model_type: &str) -> Option<LatentHead> {
+    match model_type {
+        MODEL_TYPE_INDEXED_MASKED => Some(LatentHead::Softmax),
+        MODEL_TYPE_MASKED_SBP => Some(LatentHead::StickBreaking),
+        MODEL_TYPE_MASKED_VAE => Some(LatentHead::Gaussian),
+        _ => None,
+    }
+}
+
+/// Human-facing CLI/log label for a masked head (the subcommand name).
+pub fn masked_head_label(head: LatentHead) -> &'static str {
+    match head {
+        LatentHead::Softmax => "masked-topic",
+        LatentHead::StickBreaking => "masked-sbp",
+        LatentHead::Gaussian => "masked-vae",
+    }
+}
+
+/// Decoder-type label persisted for a masked head. The NB ETM decoder is
+/// identical across the two deterministic simplex heads; only the Gaussian VAE
+/// gets a distinct label.
+pub fn masked_decoder_type(head: LatentHead) -> &'static str {
+    match head {
+        LatentHead::Gaussian => "nb_masked_vae",
+        LatentHead::Softmax | LatentHead::StickBreaking => "nb_masked",
+    }
+}
 
 /// Metadata needed to reconstruct a trained topic model for inference.
 #[derive(Serialize, Deserialize)]

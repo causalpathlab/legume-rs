@@ -31,6 +31,39 @@ pub fn smooth_topics(log_z_nk: Tensor, alpha: f64) -> candle_core::Result<Tensor
     }
 }
 
+/// Deterministic stick-breaking map `logits [N,K] → log θ [N,K]` on the simplex.
+///
+/// Interprets the first `K−1` columns as stick logits `η_k`; the stick
+/// fractions are `v_k = σ(η_k)` and `θ_k = v_k ∏_{j<k}(1−v_j)`, with the last
+/// topic taking the closing mass `θ_{K−1} = ∏_{j<K}(1−v_j)`. Computed entirely
+/// in log-space (`log σ` via [`crate::loss::log_sigmoid`] + an inclusive cumsum
+/// of `log(1−v)`), so it is numerically stable for `|η|` up to the encoder
+/// clamp (±8) and any `K`. Rows sum to 1 exactly by telescoping — no explicit
+/// normalization.
+///
+/// A drop-in for `log_softmax` on the masked head: no sampling, no KL, still a
+/// point estimate. Unlike softmax it **breaks topic exchangeability** — early
+/// sticks carry more mass a priori, giving an intrinsic ordering and a
+/// self-pruning tail (later topics shrink toward 0 unless the data needs them).
+pub fn stick_breaking_log_simplex(logits_nk: &Tensor) -> candle_core::Result<Tensor> {
+    let k = logits_nk.dim(1)?;
+    if k == 1 {
+        // Degenerate simplex: θ ≡ 1, so log θ ≡ 0.
+        return logits_nk.zeros_like();
+    }
+    // θ_k = v_k·∏_{j<k}(1−v_j), v_k = σ(η_k). Using the identity
+    // log σ(η) − log σ(−η) = η, the log-simplex collapses to
+    // log θ_k = η_k + Σ_{j≤k} log(1−v_j) — so only a single `log σ` (for
+    // `log(1−v)`) and its inclusive cumsum are needed; `log v` and the
+    // exclusive-cumsum subtraction both drop out.
+    let eta = logits_nk.narrow(1, 0, k - 1)?; // [N, K−1] stick logits (strided view)
+    let log_1mv = crate::loss::log_sigmoid(&eta.neg()?)?; // log(1−v_k) = log σ(−η_k)
+    let incl = log_1mv.cumsum(1)?; // inclusive: Σ_{j≤k} log(1−v_j)
+    let head = (&eta + &incl)?; // log θ_0..θ_{K−2} = η_k + Σ_{j≤k} log(1−v_j)
+    let tail = incl.narrow(1, k - 2, 1)?; // log θ_{K−1} = full remaining mass [N, 1]
+    Tensor::cat(&[&head, &tail], 1) // [N, K], rows sum to 1
+}
+
 /// Wall-clock breakdown of the indexed-topic training hot loop.
 ///
 /// Candle's CPU backend is eager, so an `Instant` straddling each phase
@@ -148,3 +181,50 @@ pub fn clip_and_step_dense(
 ///
 /// Signature: `(loss, level) -> extended_loss`.
 pub type LevelLossHook<'a> = dyn Fn(Tensor, usize) -> anyhow::Result<Tensor> + 'a;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+
+    /// Hand-computed reference for the stick-breaking map. With logits
+    /// `η = [0, ln2, *]` (the 3rd column is ignored — only the first K−1 are
+    /// sticks): `v₀ = σ(0) = 1/2`, `v₁ = σ(ln2) = 2/3`, so
+    /// `θ = [v₀, v₁(1−v₀), (1−v₀)(1−v₁)] = [1/2, 1/3, 1/6]`.
+    #[test]
+    fn stick_breaking_matches_reference_and_normalizes() {
+        let dev = Device::Cpu;
+        let ln2 = std::f32::consts::LN_2;
+        // Row 0: the reference case. Row 1: arbitrary logits → check it still
+        // normalizes. The last column (999.0 / −999.0) must not affect output.
+        let logits =
+            Tensor::from_vec(vec![0.0f32, ln2, 999.0, -1.5, 2.0, -999.0], (2, 3), &dev).unwrap();
+
+        let log_theta = stick_breaking_log_simplex(&logits).unwrap();
+        assert_eq!(log_theta.dims(), &[2, 3]);
+        let theta = log_theta.exp().unwrap().to_vec2::<f32>().unwrap();
+
+        // Row 0 matches the closed form.
+        let expect0 = [0.5f32, 1.0 / 3.0, 1.0 / 6.0];
+        for (got, want) in theta[0].iter().zip(expect0.iter()) {
+            assert!((got - want).abs() < 1e-5, "θ₀ {got} vs {want}");
+        }
+        // Both rows lie on the simplex (sum to 1) despite the huge 3rd logit.
+        for row in &theta {
+            let sum: f32 = row.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-5, "row sum {sum} ≠ 1");
+            assert!(row.iter().all(|&p| p > 0.0), "non-positive θ entry");
+        }
+    }
+
+    /// `K = 1` is a degenerate simplex: θ ≡ 1, log θ ≡ 0.
+    #[test]
+    fn stick_breaking_k1_is_degenerate() {
+        let dev = Device::Cpu;
+        let logits = Tensor::from_vec(vec![3.7f32, -2.0], (2, 1), &dev).unwrap();
+        let log_theta = stick_breaking_log_simplex(&logits).unwrap();
+        for v in log_theta.flatten_all().unwrap().to_vec1::<f32>().unwrap() {
+            assert_eq!(v, 0.0, "K=1 log θ must be 0");
+        }
+    }
+}

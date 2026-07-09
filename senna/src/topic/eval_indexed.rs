@@ -3,7 +3,14 @@ use crate::embed_common::*;
 
 use candle_core::{Device, Tensor};
 use candle_util::data::csc_columns_to_indexed_samples;
+use candle_util::decoder::{EmbeddedNbTopicDecoder, MaskedNbTarget};
 use candle_util::traits::*;
+use candle_util::vae::masked_topic::{
+    masked_encode, LatentHead, MaskedEncoderInput, MaskedLikelihood,
+};
+use candle_util::vae::smooth_topics;
+use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
 
 /// Packed top-K representation consumed by the masked encoder.
 ///
@@ -133,10 +140,11 @@ pub(crate) struct EvaluateLatentMaskedConfig<'a> {
     pub enc_context_size: usize,
     pub shortlist_weights: &'a [f32],
     pub feature_mean: &'a [f32],
-    /// Masked-VAE: use the Gaussian masked forward (posterior-mean `z`, no
-    /// softmax) instead of the simplex `log θ` forward. The latent semantics
-    /// differ but the eval path (all genes visible, no decoder) is identical.
-    pub latent_gaussian: bool,
+    /// Latent head to run at inference — must match the head the model was
+    /// trained with. The eval path (all genes visible, no decoder) is identical
+    /// across heads; only the final simplex/latent map differs. The Gaussian
+    /// arm returns the posterior mean `z` (train=false → reparam returns mean).
+    pub head: LatentHead,
 }
 
 /// Encoder-only latent inference for the masked-imputation topic model.
@@ -179,28 +187,151 @@ pub(crate) fn evaluate_latent_masked(
             .map(|x0| gather_null_at_indices(x0, &enc_pack.indices, config.dev))
             .transpose()?;
         let visible = enc_pack.values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
-        let latent_nk = if config.latent_gaussian {
-            // Posterior mean `z` (train=false → reparam returns the mean).
-            let (z, _kl) = encoder.forward_indexed_masked_gaussian(
-                &enc_pack.indices,
-                &enc_pack.values,
-                enc_values_null.as_ref(),
-                enc_pack.values_mean.as_ref(),
-                &visible,
-                false,
-            )?;
-            z
-        } else {
-            encoder.forward_indexed_masked(
-                &enc_pack.indices,
-                &enc_pack.values,
-                enc_values_null.as_ref(),
-                enc_pack.values_mean.as_ref(),
-                &visible,
-                false,
-            )?
-        };
+        // Encoder-only inference: `train = false` (Gaussian returns its posterior
+        // mean), and the KL is discarded — the latent alone is written out.
+        let (latent_nk, _kl) = masked_encode(
+            encoder,
+            config.head,
+            &MaskedEncoderInput {
+                indices: &enc_pack.indices,
+                values: &enc_pack.values,
+                values_null: enc_values_null.as_ref(),
+                values_mean: enc_pack.values_mean.as_ref(),
+                visible_mask: &visible,
+            },
+            false,
+        )?;
         let z_nk = latent_nk.to_device(&candle_core::Device::Cpu)?;
         Ok((lb, Mat::from_tensor(&z_nk)?))
+    })
+}
+
+/// Config for [`evaluate_holdout_imputation`].
+pub(crate) struct HoldoutEvalConfig<'a> {
+    pub dev: &'a Device,
+    pub adj_method: &'a AdjMethod,
+    pub minibatch_size: usize,
+    pub enc_context_size: usize,
+    pub shortlist_weights: &'a [f32],
+    pub feature_mean: &'a [f32],
+    /// Latent head the model was trained with (matches the persisted model).
+    pub head: LatentHead,
+    /// Per-gene likelihood — must match training for a comparable number.
+    pub likelihood: MaskedLikelihood,
+    /// Topic smoothing applied to the simplex heads, mirroring training.
+    pub topic_smoothing: f64,
+    /// Fraction of each cell's observed genes to hold out and score.
+    pub mask_fraction: f64,
+    /// Seed for the hold-out mask. A fixed seed masks the **same** per-cell
+    /// positions across heads, so the comparison is apples-to-apples.
+    pub seed: u64,
+}
+
+/// Held-out masked-imputation likelihood: for each cell, hide `mask_fraction`
+/// of its observed genes, encode from the **visible** genes, impute the hidden
+/// ones with the trained NB/multinomial ETM decoder, and return the mean
+/// log-likelihood per held-out gene.
+///
+/// This is the honest generalization metric the per-epoch training likelihood
+/// can't provide: the scored positions are never encoder inputs on their own
+/// forward pass, and individual cells enter training only via their pseudobulk
+/// aggregate — so a model that merely memorizes the training pseudobulks cannot
+/// score well here. Runs one no-gradient pass; the decoder's `β = α·ρᵀ` (and
+/// its log-partition) are fixed, so they are computed once.
+pub(crate) fn evaluate_holdout_imputation(
+    data_vec: &SparseIoVec,
+    encoder: &candle_util::encoder::IndexedEmbeddingEncoder,
+    decoder: &EmbeddedNbTopicDecoder,
+    config: &HoldoutEvalConfig,
+    delta: Option<&Tensor>,
+) -> anyhow::Result<f32> {
+    let ntot = data_vec.num_columns();
+    let full_kd = decoder.full_logits_kd()?;
+    let logz_11k = EmbeddedNbTopicDecoder::log_partition_from_logits(&full_kd)?;
+
+    let mut llik_sum = 0f64;
+    let mut mask_cnt = 0f64;
+    for (lb, ub) in create_jobs(ntot, 0, Some(config.minibatch_size)) {
+        let x_dn = data_vec.read_columns_csc(lb..ub)?;
+        let x0_nd = delta
+            .map(|delta_bm| {
+                expand_delta_for_block(data_vec, delta_bm, config.adj_method, lb, ub, config.dev)
+            })
+            .transpose()?;
+
+        let ctx = PerGeneContext {
+            feature_mean: Some(config.feature_mean),
+        };
+        let enc_pack = csc_to_indexed(
+            &x_dn,
+            config.enc_context_size,
+            config.shortlist_weights,
+            None,
+            ctx,
+            config.dev,
+        )?;
+        let values_null = x0_nd
+            .as_ref()
+            .map(|x0| gather_null_at_indices(x0, &enc_pack.indices, config.dev))
+            .transpose()?;
+
+        // Seeded hold-out mask over the cell's real (value>0) top-K positions.
+        // Host-side RNG keyed by `seed ^ lb` so the masked set is deterministic
+        // and identical across heads for a fixed seed.
+        let (n, k) = enc_pack.values.dims2()?;
+        let values_host: Vec<f32> = enc_pack.values.flatten_all()?.to_vec1()?;
+        let mut rng = StdRng::seed_from_u64(config.seed ^ (lb as u64));
+        let mut mask_buf = vec![0f32; n * k];
+        for (slot, &v) in values_host.iter().enumerate() {
+            if v > 0.0 && rng.random::<f64>() < config.mask_fraction {
+                mask_buf[slot] = 1.0;
+            }
+        }
+        let masked = Tensor::from_vec(mask_buf, (n, k), config.dev)?;
+        let real = enc_pack.values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
+        let visible = (&real - &masked)?;
+
+        // Encode from the visible genes only, mirroring the training split
+        // (including the simplex-head topic smoothing).
+        let (raw_z, kl_opt) = masked_encode(
+            encoder,
+            config.head,
+            &MaskedEncoderInput {
+                indices: &enc_pack.indices,
+                values: &enc_pack.values,
+                values_null: values_null.as_ref(),
+                values_mean: enc_pack.values_mean.as_ref(),
+                visible_mask: &visible,
+            },
+            false,
+        )?;
+        let log_z = if kl_opt.is_some() {
+            raw_z
+        } else {
+            smooth_topics(raw_z, config.topic_smoothing)?
+        };
+
+        let lib_n1 = (enc_pack.values.sum_keepdim(1)? + 1.0)?;
+        let target = MaskedNbTarget {
+            indices: &enc_pack.indices,
+            residual: values_null.as_ref(),
+            values: &enc_pack.values,
+            lib: &lib_n1,
+            mask: &masked,
+        };
+        let llik = match config.likelihood {
+            MaskedLikelihood::Nb => decoder.impute_masked_nb(&log_z, &target, &logz_11k)?,
+            MaskedLikelihood::Multinomial => {
+                decoder.impute_masked_multinomial(&log_z, &target, &logz_11k)?
+            }
+        };
+        llik_sum += f64::from(llik.sum_all()?.to_scalar::<f32>()?);
+        mask_cnt += f64::from(masked.sum_all()?.to_scalar::<f32>()?);
+    }
+
+    Ok(if mask_cnt > 0.0 {
+        (llik_sum / mask_cnt) as f32
+    } else {
+        f32::NAN
     })
 }

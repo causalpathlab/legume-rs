@@ -10,6 +10,7 @@ use crate::topic::train_masked::{
 
 use candle_util::decoder::EmbeddedNbTopicDecoder;
 use candle_util::encoder::*;
+use candle_util::vae::masked_topic::LatentHead;
 use log::warn;
 
 /// Mask-rate schedule (CLI surface for `MaskSchedule`).
@@ -305,6 +306,28 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
+        default_value_t = 0.0,
+        help = "Held-out imputation eval: fraction to hold out after training (0 = off)",
+        long_help = "After training, run a held-out masked-imputation evaluation and\n\
+                     log the mean log-likelihood per held-out gene. For each cell this\n\
+                     fraction of its observed genes is hidden, the rest encode a latent,\n\
+                     and the trained decoder imputes the hidden genes. Unlike the\n\
+                     per-epoch training likelihood this is not optimized, so it\n\
+                     distinguishes real structure from overfitting. Use a fixed\n\
+                     --eval-seed to compare heads on the same held-out positions.\n\
+                     0 disables (default)."
+    )]
+    eval_mask_fraction: f64,
+
+    #[arg(
+        long,
+        default_value_t = 42,
+        help = "Seed for the held-out imputation mask (see --eval-mask-fraction)"
+    )]
+    eval_seed: u64,
+
+    #[arg(
+        long,
         default_value_t = 1.0,
         help = "KL weight β for the Gaussian latent (masked-vae only; default 1.0)",
         long_help = "KL weight β for the Gaussian latent (masked-vae only; ignored by\n\
@@ -538,9 +561,17 @@ impl From<FeatureNameKindArg> for Option<auxiliary_data::feature_names::FeatureN
     }
 }
 
-/// `senna masked-topic` — simplex-`θ`, deterministic (no-KL) masked ETM.
+/// `senna masked-topic` — softmax simplex-`θ`, deterministic (no-KL) masked ETM.
 pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
-    fit_masked_model(args, false)
+    fit_masked_model(args, LatentHead::Softmax)
+}
+
+/// `senna masked-sbp` — **stick-breaking process** simplex-`θ`, deterministic
+/// (no-KL) masked ETM. Same pipeline as `masked-topic`; the encoder maps its
+/// logits through a stick-breaking simplex instead of softmax, giving ordered,
+/// exchangeability-broken topics with a self-pruning tail.
+pub fn fit_masked_sbp_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
+    fit_masked_model(args, LatentHead::StickBreaking)
 }
 
 /// `senna masked-vae` — Gaussian-latent (reparam + KL) masked VAE. Shares the
@@ -548,10 +579,10 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
 /// the encoder emits a reparameterized `z` (no softmax) and the loss gains a KL
 /// term. `exp(z)` plays the role of the per-topic intensities in the NB head.
 pub fn fit_masked_vae_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
-    fit_masked_model(args, true)
+    fit_masked_model(args, LatentHead::Gaussian)
 }
 
-fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Result<()> {
+fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     let k = args.n_latent_topics;
@@ -803,7 +834,9 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
             &parameters,
             prefix,
             &WarmStartCheck {
-                model_type_expected: crate::topic::model_metadata::MODEL_TYPE_INDEXED_MASKED,
+                // Warm-start from a checkpoint of the same head — the z_mean
+                // semantics differ per head, so `--init-from` must match.
+                model_type_expected: crate::topic::model_metadata::masked_model_type(head),
                 n_topics,
                 n_features_full,
                 n_features_encoder: n_features_full,
@@ -901,7 +934,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
             },
         },
         likelihood: args.masked_likelihood.to_lib(),
-        latent_gaussian,
+        latent: head,
         kl_weight: args.kl_weight,
     };
 
@@ -921,26 +954,64 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
     write_masked_dictionary(finest_decoder, &gene_names, &args.out)?;
     write_feature_embedding(base_encoder.feature_embeddings(), &gene_names, &args.out)?;
 
+    // Optional held-out masked-imputation evaluation — the un-optimized
+    // generalization metric (see `--eval-mask-fraction`). Runs on the training
+    // device with the in-memory encoder + finest decoder, before the CPU move.
+    if args.eval_mask_fraction > 0.0 {
+        use crate::topic::eval_indexed::{evaluate_holdout_imputation, HoldoutEvalConfig};
+        let delta_train = match args.adj_method {
+            AdjMethod::Batch => finest_collapsed.delta.as_ref(),
+            AdjMethod::Residual => finest_collapsed.mu_residual.as_ref(),
+        }
+        .map(|x| {
+            x.posterior_mean()
+                .to_tensor(&dev)
+                .expect("delta to tensor")
+                .transpose(0, 1)
+                .expect("transpose")
+                .contiguous()
+                .expect("contiguous")
+        });
+        let holdout_cfg = HoldoutEvalConfig {
+            dev: &dev,
+            adj_method: &args.adj_method,
+            minibatch_size: args.minibatch_size,
+            enc_context_size: args.context_size,
+            shortlist_weights: &shortlist_weights,
+            feature_mean: &feature_mean,
+            head,
+            likelihood: args.masked_likelihood.to_lib(),
+            topic_smoothing: args.topic_smoothing,
+            mask_fraction: args.eval_mask_fraction,
+            seed: args.eval_seed,
+        };
+        let holdout_llik = evaluate_holdout_imputation(
+            &data_vec,
+            &base_encoder,
+            finest_decoder,
+            &holdout_cfg,
+            delta_train.as_ref(),
+        )?;
+        info!(
+            "Held-out imputation: mean log-likelihood/gene = {holdout_llik:.4} \
+             (mask={}, seed={})",
+            args.eval_mask_fraction, args.eval_seed
+        );
+    }
+
     // Persist trainable weights, model architecture, and shortlist weights
     // so `senna predict` (and `--init-from` re-runs) can rebuild this model.
     use crate::topic::model_metadata::{
-        save_feature_mean, save_parameters, save_shortlist_weights, TopicModelMetadata,
+        masked_decoder_type, masked_model_type, save_feature_mean, save_parameters,
+        save_shortlist_weights, TopicModelMetadata,
     };
 
     // No feature graph is persisted on the masked path (GCN diffusion is not
     // wired into the masked encoder — see the encoder construction above).
     save_parameters(&parameters, &args.out)?;
     let mut metadata = TopicModelMetadata {
-        model_type: if latent_gaussian {
-            crate::topic::model_metadata::MODEL_TYPE_MASKED_VAE.into()
-        } else {
-            crate::topic::model_metadata::MODEL_TYPE_INDEXED_MASKED.into()
-        },
-        decoder_types: vec![if latent_gaussian {
-            "nb_masked_vae".into()
-        } else {
-            "nb_masked".into()
-        }],
+        model_type: masked_model_type(head).into(),
+        decoder_types: vec![masked_decoder_type(head).into()],
         decoder_weights: vec![1.0],
         n_features_encoder: n_features_full,
         n_features_full,
@@ -1001,7 +1072,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, latent_gaussian: bool) -> anyhow::Re
         enc_context_size: args.context_size,
         shortlist_weights: &shortlist_weights,
         feature_mean: &feature_mean,
-        latent_gaussian,
+        head,
     };
     let z_nk = evaluate_latent_masked(&data_vec, &cpu_encoder, &eval_config, delta.as_ref(), None)?;
 
