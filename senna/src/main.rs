@@ -38,6 +38,7 @@ mod cluster_aggregation;
 mod cluster_bhc;
 mod clustering;
 mod cnv_pseudobulk;
+mod deconvolve;
 mod embed_common;
 mod empirical_dict;
 mod eval_topic;
@@ -70,6 +71,7 @@ use annotate::{
 };
 use bge::{fit_bge, BgeArgs};
 use clustering::*;
+use deconvolve::DeconvolveArgs;
 use embed_common::*;
 use eval_topic::*;
 use fne::{fit_fne, FneArgs};
@@ -403,6 +405,22 @@ enum Commands {
     AnnotateByProjection(AnnotateProjectionArgs),
 
     #[command(
+        name = "deconvolve",
+        visible_aliases = ["deconv", "deconvolution"],
+        about = "Deconvolve bulk samples into cell-type fractions + per-type expression.",
+        long_about = "Projection-based hierarchical-Bayes bulk deconvolution built on a feature\n\
+                      embedding (`senna bge --skip-etm`, exact; or `masked-topic`, approximate).\n\
+                      Reconstructs each cell type's gene profile from the embedding, projects\n\
+                      bulk samples into the shared latent, and runs a full Gibbs sampler\n\
+                      (Gamma-Poisson fractions + multinomial gene split + elliptical-slice anchor\n\
+                      updates that carry annotate-by-projection uncertainty).\n\n\
+                      Usage: senna deconvolve --from run.senna.json -m markers.tsv --bulk bulk.parquet\n\
+                      Writes {out}.{fractions,fractions_ci,abundance,residual}.tsv,\n\
+                      {out}.{sample_embedding,anchors}.parquet, {out}.expression/*.parquet."
+    )]
+    Deconvolve(DeconvolveArgs),
+
+    #[command(
         about = "Pseudotime via Monocle-3-style principal graph (SimplePPT) on the latent.",
         long_about = "Port of Mao et al. 2015 SimplePPT applied to `manifest.outputs.latent`.\n\n\
                       (1) k-means init K centroids,\n\
@@ -540,6 +558,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::AnnotateByProjection(args) => {
             annotate_by_projection(args)?;
+        }
+        Commands::Deconvolve(args) => {
+            deconvolve::run(args)?;
         }
         Commands::Predict(args) => {
             predict_model(args)?;
