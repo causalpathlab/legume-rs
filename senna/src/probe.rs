@@ -81,7 +81,14 @@ pub struct ProbeArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "EWC prior strength κ: how hard the old model resists moving"
+        help = "EWC prior strength κ: how hard the old model resists moving",
+        long_help = "Weights the old model's Fisher in Δ = ḡ_Δ / (κ·F_cal + F_new). Both Fishers\n\
+                     are per-cell, so the principled value is κ ≈ n_train / n_query — the old\n\
+                     model should resist in proportion to how much data it was fit on.\n\
+                     The default of 1 holds it with the weight of a single cell, which pushes\n\
+                     the second-order expansion outside its trust region: use it for ranking\n\
+                     only. τ_new and τ_old scale like 1/κ; the sign of τ_old and the ratio\n\
+                     τ_new/|τ_old| are the κ-stable readouts."
     )]
     prior_strength: f64,
 }
@@ -198,11 +205,12 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
         let (gn, go) = (l2(&new.g_mean), l2(&old.g_mean));
 
         info!(
-            "influence: n_query={} n_calib={}  ||g_query||={gn:.3e}  ||g_calib||={go:.3e}  (κ={})",
-            new.n_cells, old.n_cells, args.prior_strength
+            "influence: n_query={} n_calib={}  ||g_query||={gn:.3e}  ||g_calib||={go:.3e}  \
+             ||g_query−g_calib||={:.3e}  (κ={})",
+            new.n_cells, old.n_cells, cf.g_delta_norm, args.prior_strength
         );
         info!(
-            "counterfactual: τ_new={:+.4e} (benefit of updating)  τ_old={:+.4e} ({})",
+            "counterfactual: τ_new={:+.4e} (query-specific benefit)  τ_old={:+.4e} ({})",
             cf.tau_new,
             cf.tau_old,
             if cf.tau_old < 0.0 {
@@ -220,9 +228,11 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
 
         format!(
             ",\"tau_new\":{:.6e},\"tau_old\":{:.6e},\"g_query_norm\":{gn:.6e},\
-             \"g_calib_norm\":{go:.6e},\"kappa\":{},\"delta_norm_per_topic\":[{}]",
+             \"g_calib_norm\":{go:.6e},\"g_delta_norm\":{:.6e},\"kappa\":{},\
+             \"delta_norm_per_topic\":[{}]",
             cf.tau_new,
             cf.tau_old,
+            cf.g_delta_norm,
             args.prior_strength,
             cf.delta_norm_per_topic
                 .iter()
