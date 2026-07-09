@@ -1,3 +1,4 @@
+use super::feature_projection::{FeatureProjection, FeatureProjectionConfig};
 use super::lift::{CellLineage, LineageQc};
 use super::projection::PbLevelVelocity;
 use crate::data::UnifiedData;
@@ -157,6 +158,13 @@ pub struct FitConfig {
     /// neighbour averaging — neutral on clean data, robustness on noisy real velocity.
     /// Ignored when `lineage_dag` is `false`.
     pub lineage_smooth: bool,
+    /// Post-hoc projection of the features that never entered training — the
+    /// `--n-hvg` remainder, plus anything `--feature-null-fdr` dropped. Runs
+    /// strictly after phase 2 against the frozen pseudobulk side, so every
+    /// cell-side output is unchanged. No-op when the trained feature axis
+    /// already covers the whole backend. `None` = skip entirely.
+    /// See [`crate::fit::feature_projection`].
+    pub feature_projection: Option<FeatureProjectionConfig>,
 }
 
 /// Caller-provided spec for the per-gene β-sharing feature factorization. Lengths
@@ -328,6 +336,11 @@ pub struct FitOutput {
     /// broken runs and inspect structure — NOT a validated quality ranker. Written as
     /// `{out}.lineage_qc.json`. `Some` alongside `cell_lineage`; `None` otherwise.
     pub lineage_qc: Option<LineageQc>,
+    /// Embeddings for the features that never entered training, solved post-hoc
+    /// against the frozen pseudobulk side. `Some` iff [`FitConfig::feature_projection`]
+    /// was set and the run reached the stage; the inner `gene_ids` is empty when
+    /// the trained axis already covered the whole backend.
+    pub feature_projection: Option<FeatureProjection>,
 }
 
 pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {

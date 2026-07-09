@@ -3,6 +3,7 @@
 //! [`UnifiedData`] (so this crate stays free of file/path concerns).
 
 mod config;
+mod feature_projection;
 pub mod lift;
 pub mod lineage;
 pub mod projection;
@@ -11,6 +12,10 @@ mod samplers;
 pub use config::{
     load_feature_network, FeatFactorSpec, FeatureNetworkArgs, FeatureNetworkConfig, FitConfig,
     FitOutput,
+};
+pub use feature_projection::{
+    CalibrationDiag, CalibrationKind, FeatureProjection, FeatureProjectionConfig,
+    DEFAULT_PROJECTION_CALIB_RIDGE, DEFAULT_PROJECTION_RIDGE,
 };
 pub use lift::{CellLineage, LineageQc};
 pub use projection::PbLevelVelocity;
@@ -67,7 +72,9 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     let alpha_neg = 0.75_f32;
     let stop = config.stop.take().unwrap_or_else(setup_stop_handler);
 
-    // ---- Shared upstream: batch-corrected projection + Fisher weights ----
+    //////////////////////////////////////////////////////////////////
+    // Shared upstream: batch-corrected projection + Fisher weights //
+    //////////////////////////////////////////////////////////////////
     info!(
         "Batch-corrected projection (proj_dim={}, {} batches)...",
         config.proj_dim,
@@ -116,7 +123,9 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         config.fisher_weights_cache.as_deref(),
     )?;
 
-    // ---- Multilevel collapse → batch-corrected pseudobulks ----
+    ///////////////////////////////////////////////////////
+    // Multilevel collapse → batch-corrected pseudobulks //
+    ///////////////////////////////////////////////////////
     //
     // `sort_dim` controls how many bits of the binary-sketched projection
     // are used to hash cells into the *finest* pb-sample partition (so
@@ -678,7 +687,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         }
     }
 
-    // ---- Phase 2: analytical per-cell projection onto the fixed feature
+    // Phase 2: analytical per-cell projection onto the fixed feature
     // side. With E_feat/b_feat/z/δ held fixed, each cell's embedding is
     // independent — so rather than SGD over `e_cell`, project every cell
     // directly (Poisson MAP, ridge prior) in parallel. The per-cell
@@ -730,7 +739,29 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         cell_velocity = splice;
     }
 
-    // ---- cell-lift: phase-2 cell-lineage lift (evaluation only). Runs on the FINAL pb
+    // Post-hoc held-out feature projection. Solve `β_g` for every backend
+    // feature the training axis never saw (the `--n-hvg` remainder, plus
+    // anything the feature-null QC dropped) against the frozen pseudobulk side.
+    // Strictly read-only on the cell side, so every cell output above is
+    // unaffected. See `crate::fit::feature_projection`.
+    let feature_projection = match &config.feature_projection {
+        Some(fp_cfg) if !stop.load(std::sync::atomic::Ordering::Relaxed) => {
+            let pb = stacked_pb_view(&varmap, &collapsed_levels, &cell_to_pb_per_level, h)?;
+            let trained = trained_gene_beta(
+                &cell_model,
+                config.feat_factor.as_ref(),
+                &feature_to_backend,
+                &fp_cfg.backend_row_to_gene,
+                h,
+            )?;
+            Some(feature_projection::project_held_out_features(
+                &pb, h, &trained, fp_cfg,
+            ))
+        }
+        _ => None,
+    };
+
+    // cell-lift: phase-2 cell-lineage lift (evaluation only). Runs on the FINAL pb
     // velocity readout + the now-projected per-cell identity θ_c. Integrate a pb
     // pseudotime/fate along the oriented pb-DAG (learned `W` for the learned DAG, the fixed
     // velocity-oriented graph for the velocity-KNN) at the finest level, then landmark-blend it to
@@ -797,6 +828,128 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         pb_dag_w,
         cell_lineage,
         lineage_qc,
+        feature_projection,
+    })
+}
+
+/// The trained per-gene `β`, plus each trained gene's id on the caller's backend
+/// gene axis. Returns `(beta [n_trained_genes × H] row-major, backend_gene_id)`.
+///
+/// For a **factored** (β-sharing) model the source is the `beta` Var itself: a
+/// gene's `e_feat` rows are `β_g` (spliced) and `β_g + δ_g` (unspliced), so only
+/// `β` is a clean calibration target. For a **free** model (bge) every compact
+/// feature row is its own gene and `e_feat` is exactly `β`.
+fn trained_gene_beta(
+    model: &JointEmbedModel,
+    spec: Option<&FeatFactorSpec>,
+    feature_to_backend: &[usize],
+    backend_row_to_gene: &[u32],
+    h: usize,
+) -> anyhow::Result<feature_projection::TrainedBeta> {
+    let (beta, backend_gene_id) = match (spec, &model.factor) {
+        (Some(spec), Some(factor)) => {
+            let beta = factor.beta.flatten_all()?.to_vec1::<f32>()?;
+            let n_trained_genes = beta.len() / h;
+            // compact gene id → backend gene id, via any of the gene's rows.
+            let mut backend_gene_id = vec![u32::MAX; n_trained_genes];
+            for (r, &g) in spec.row_to_gene.iter().enumerate() {
+                backend_gene_id[g as usize] = backend_row_to_gene[feature_to_backend[r]];
+            }
+            anyhow::ensure!(
+                backend_gene_id.iter().all(|&g| g != u32::MAX),
+                "trained gene without any feature row — β-sharing factor is inconsistent"
+            );
+            (beta, backend_gene_id)
+        }
+        _ => {
+            let beta = model.e_feat.flatten_all()?.to_vec1::<f32>()?;
+            let backend_gene_id = feature_to_backend
+                .iter()
+                .map(|&row| backend_row_to_gene[row])
+                .collect();
+            (beta, backend_gene_id)
+        }
+    };
+    Ok(feature_projection::TrainedBeta {
+        beta,
+        backend_gene_id,
+    })
+}
+
+/// Stack every collapse level's **trained** pseudobulk embedding into one frozen
+/// table, paired with that level's full-backend count matrix.
+///
+/// Phase 1 shapes `β` against exactly these axes — one per level, combined with
+/// `CompositeMode::Sum` at uniform [`DEFAULT_AXIS_LAMBDA`] — and with the default
+/// `phase1_cells_per_pb == 0` the cell axis is suppressed entirely, so this stack
+/// *is* the objective `β` was fit under. Solving a held-out gene against it puts
+/// the result in `β`'s native frame.
+///
+/// The pb Vars are read out of the `VarMap` by name rather than off
+/// `level_models[l].e_cell`: the latter is a `Tensor` aliasing the `Var`'s
+/// storage, and whether it tracks in-place `Var::set` updates is a candle
+/// implementation detail.
+///
+/// Counts come from `mu_adjusted` when the collapse produced one, matching the
+/// `pb_blobs` the model actually trained on, so held-out and trained genes are on
+/// the same scale.
+fn stacked_pb_view<'a>(
+    varmap: &VarMap,
+    collapsed_levels: &'a [data_beans_alg::collapse_data::CollapsedOut],
+    cell_to_pb_per_level: &[Vec<usize>],
+    h: usize,
+) -> anyhow::Result<feature_projection::StackedPb<'a>> {
+    let vars = varmap.data().lock().expect("varmap poisoned");
+    let (mut theta, mut bias, mut counts, mut sizes, mut offsets) =
+        (vec![], vec![], vec![], vec![], vec![]);
+    for (level, collapsed) in collapsed_levels.iter().enumerate() {
+        let get = |suffix: &str| -> anyhow::Result<Vec<f32>> {
+            let name = format!("pb_l{level}_{suffix}");
+            let var = vars
+                .get(&name)
+                .ok_or_else(|| anyhow::anyhow!("pb var {name} missing from the varmap"))?;
+            Ok(var.as_tensor().flatten_all()?.to_vec1::<f32>()?)
+        };
+        let level_bias = get("b_cell")?;
+        let level_theta = get("e_cell")?;
+        let n_pb = level_bias.len();
+        let pb_full = match &collapsed.mu_adjusted {
+            Some(adj) => adj.posterior_mean(),
+            None => collapsed.mu_observed.posterior_mean(),
+        };
+        anyhow::ensure!(
+            level_theta.len() == n_pb * h && pb_full.ncols() == n_pb,
+            "pb_l{level}: embedding ({} × {h}) and counts ({} pb) disagree on the pseudobulk count {n_pb}",
+            level_theta.len() / h.max(1),
+            pb_full.ncols(),
+        );
+
+        // Exposure: cells per pseudobulk. The collapse stores per-cell RATES, so a
+        // Poisson likelihood on them is mis-scaled unless each column carries its
+        // `size_p` — see `StackedPb`. Empty pseudobulks are clamped to 1 so the
+        // `log(size)` offset stays finite; their counts are zero anyway.
+        let mut level_sizes = vec![0f32; n_pb];
+        for &p in &cell_to_pb_per_level[level] {
+            if p < n_pb {
+                level_sizes[p] += 1.0;
+            }
+        }
+        for s in &mut level_sizes {
+            *s = s.max(1.0);
+        }
+
+        offsets.push(bias.len());
+        theta.extend(level_theta);
+        bias.extend(level_bias.iter().zip(&level_sizes).map(|(b, s)| b + s.ln()));
+        counts.push(pb_full);
+        sizes.push(level_sizes);
+    }
+    Ok(feature_projection::StackedPb {
+        theta,
+        bias,
+        counts,
+        sizes,
+        offsets,
     })
 }
 
