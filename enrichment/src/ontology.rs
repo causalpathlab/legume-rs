@@ -352,7 +352,9 @@ pub fn annotate_ontology_core(
     };
     let q_mass: &Mat = q.unwrap_or_else(|| q_derived.as_ref().unwrap());
 
-    // ----- label → ontology id -----
+    /////////////////////////
+    // label → ontology id //
+    /////////////////////////
     let mut col_cl: Vec<Box<str>> = Vec::with_capacity(n_types);
     let mut missing: Vec<Box<str>> = Vec::new();
     for ct in celltype_names {
@@ -400,7 +402,9 @@ fn run_treebh(
 ) -> Result<(String, String)> {
     let n_clusters = cluster_names.len();
 
-    // ----- per-unit TreeBH -----
+    /////////////////////
+    // per-unit TreeBH //
+    /////////////////////
     let mut assignments: Vec<Assignment> = Vec::with_capacity(n_clusters);
     // K × (struct ontology nodes) soft mass for viz.
     let struct_nodes: Vec<usize> = (0..tree.children.len())
@@ -491,7 +495,7 @@ fn run_treebh(
         // internal ROOT node id.
         let (assigned_cl, assigned_name, depth) = match assigned {
             Some(v) => (tree.cl_id[v].clone(), tree.disp[v].clone(), tree.depth[v]),
-            None => ("NA".into(), "unassigned".into(), 0usize),
+            None => ("NA".into(), crate::UNASSIGNED_LABEL.into(), 0usize),
         };
         assignments.push(Assignment {
             cluster: cluster_names[k].clone(),
@@ -512,7 +516,9 @@ fn run_treebh(
         }
     }
 
-    // ----- write outputs -----
+    ///////////////////
+    // write outputs //
+    ///////////////////
     let assign_path = format!("{out}.ontology_assignment.tsv");
     {
         let mut f = File::create(&assign_path)?;

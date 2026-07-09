@@ -38,7 +38,7 @@ pub fn label_cells(
         if s < 1e-12 {
             labels.push(LabelWithConfidence {
                 cell_name: cell_name.clone(),
-                label: "unassigned".into(),
+                label: crate::UNASSIGNED_LABEL.into(),
                 confidence: 0.0,
             });
             continue;
@@ -51,7 +51,7 @@ pub fn label_cells(
         let label = if *max_val >= min_confidence {
             celltype_names[argmax].clone()
         } else {
-            "unassigned".into()
+            crate::UNASSIGNED_LABEL.into()
         };
         labels.push(LabelWithConfidence {
             cell_name: cell_name.clone(),
