@@ -5,13 +5,28 @@
 //! in-distribution `--calibration` backend, flags query cells whose fit falls
 //! below the null tail, and emits a batch-level **covered vs novel** verdict.
 //!
-//! What this computes is a **goodness-of-fit / reconstruction residual**: the
-//! predictive log-likelihood of each cell under the *frozen* model — the
-//! potential outcome `Y(0)` ("does the current model explain this cell"). That
-//! is a novelty **proxy**, not the counterfactual `τ_new = E[Y(1) − Y(0)]`
-//! ("would updating help"), which needs the gradient `g_new` and the Fisher `H`.
-//! The counterfactual axes (`τ_new`, `τ_old`) and the 2×2 verdict are a later
-//! rung and are not computed here.
+//! The default verdict rests on a **goodness-of-fit / reconstruction residual**: the
+//! predictive log-likelihood of each cell under the *frozen* model — the potential
+//! outcome `Y(0)` ("does the current model explain this cell"). That is a novelty
+//! **proxy**, not the counterfactual `τ_new = E[Y(1) − Y(0)]` ("would updating
+//! help"). Scoring reconstruction error against an in-distribution null to call
+//! unseen cells is the CAMLU strategy (Li et al. 2022); the query-to-reference
+//! setting is that of scArches (Lotfollahi et al. 2021) and the open-world,
+//! uncertainty-aware scPoli (De Donno et al. 2023).
+//!
+//! `--influence` additionally estimates the **counterfactual axes** `τ_new` / `τ_old`
+//! via the gradient and empirical Fisher of the fit objective — see the `influence`
+//! module for the estimand, the control-arm contrast, and its caveats.
+//! The 2×2 verdict (certify / quarantine / expand / protected) is a later rung: it
+//! needs `κ ≈ n_train/n_query`, which requires persisting `n_train` with the model.
+//!
+//! # References
+//! - Li et al. (2022) *A machine learning-based method for automatically identifying
+//!   novel cells in annotating single-cell RNA-seq data* (CAMLU). Bioinformatics 38:4885.
+//! - Lotfollahi et al. (2021) *Mapping single-cell data to reference atlases by transfer
+//!   learning* (scArches). Nat. Biotechnol. 39:1436.
+//! - De Donno et al. (2023) *Population-level integration of single-cell datasets enables
+//!   multi-scale analysis across samples* (scPoli). Nat. Methods 20:1683.
 
 use crate::embed_common::*;
 use crate::influence::{counterfactual, topic_gradient_stats};
