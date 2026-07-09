@@ -6,7 +6,7 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version = "0.6.14"
+version = "0.7.0"
 
 [lib]
 name = "senna"
@@ -26,6 +26,7 @@ cuda = [
     "graph-embedding-util/cuda",
     "matrix-util/cuda",
     "matrix-param/cuda",
+    "mcmc-util/cuda",
 ]
 metal = [
     "candle-util/metal",
@@ -35,6 +36,7 @@ metal = [
     "graph-embedding-util/metal",
     "matrix-util/metal",
     "matrix-param/metal",
+    "mcmc-util/metal",
 ]
 hdf5 = ["data-beans/hdf5"]
 
@@ -48,6 +50,7 @@ genomic-data = { workspace = true }
 graph-embedding-util = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
+mcmc-util = { workspace = true }
 leiden = { workspace = true }
 hsblock = { workspace = true }
 petgraph = { workspace = true }
