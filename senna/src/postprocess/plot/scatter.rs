@@ -513,7 +513,7 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
             label_font_size_px: label_font_px,
             hull_stroke_px: (radius_px * 0.8).max(1.0),
             hull_fill_alpha: args.hull_fill_alpha,
-            frame_stroke_px: 0.0,
+            ..Default::default()
         },
     );
 
@@ -1134,7 +1134,10 @@ fn argmax_annotation(
     // Push "unassigned" to the very end of the colour cycle when present,
     // so the argmax-thresholded cells don't steal the leading palette
     // slot.
-    if let Some(pos) = unique.iter().position(|s| s.as_ref() == "unassigned") {
+    if let Some(pos) = unique
+        .iter()
+        .position(|s| s.as_ref() == enrichment::UNASSIGNED_LABEL)
+    {
         let last = unique.remove(pos);
         unique.push(last);
     }

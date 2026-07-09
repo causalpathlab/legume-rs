@@ -55,7 +55,17 @@ pub struct TopicLayer {
     pub color: Rgb,
 }
 
+/// Default canvas when a caller uses `..SvgOpts::default()` without sizing it.
+/// A derived `Default` would hand out a 0×0 canvas, which every rasterizer
+/// downstream rejects; 8 inches at 96 dpi is a plausible figure instead.
+const DEFAULT_CANVAS_PX: u32 = 768;
+
 /// SVG assembly options.
+///
+/// [`Default`] gives a transparent [`DEFAULT_CANVAS_PX`]-square canvas with no
+/// hulls, labels or frame — so a caller names only the fields it cares about
+/// (`SvgOpts { width_px, height_px, ..Default::default() }`) and adding a field
+/// here stops breaking every call site.
 pub struct SvgOpts {
     pub width_px: u32,
     pub height_px: u32,
@@ -69,6 +79,27 @@ pub struct SvgOpts {
     /// Outline box stroke width in pixels around the full canvas
     /// (0 = no frame).
     pub frame_stroke_px: f32,
+    /// Canvas background. `None` (the default) leaves the SVG transparent, which
+    /// the PNG rasterizer then flattens to **black** — fine when the caller wants
+    /// that, surprising otherwise. `Some(rgb)` paints a full-canvas rect first,
+    /// e.g. R's `gray90` = `(229, 229, 229)`.
+    pub background: Option<Rgb>,
+}
+
+impl Default for SvgOpts {
+    fn default() -> Self {
+        Self {
+            width_px: DEFAULT_CANVAS_PX,
+            height_px: DEFAULT_CANVAS_PX,
+            draw_hulls: false,
+            draw_labels: false,
+            label_font_size_px: 12.0,
+            hull_stroke_px: 1.0,
+            hull_fill_alpha: 0.0,
+            frame_stroke_px: 0.0,
+            background: None,
+        }
+    }
 }
 
 /// Assemble a full SVG document as a `String`.
@@ -84,6 +115,17 @@ pub fn emit_svg(layers: &[TopicLayer], opts: &SvgOpts) -> String {
         w = opts.width_px,
         h = opts.height_px,
     );
+
+    // Background, before every raster layer so it never occludes them.
+    if let Some((r, g, b)) = opts.background {
+        let _ = writeln!(
+            &mut s,
+            "  <rect id=\"background\" x=\"0\" y=\"0\" width=\"{w}\" height=\"{h}\" \
+             fill=\"rgb({r},{g},{b})\"/>",
+            w = opts.width_px,
+            h = opts.height_px,
+        );
+    }
 
     // Raster layers.
     let _ = writeln!(&mut s, "  <g id=\"raster-layers\">");
