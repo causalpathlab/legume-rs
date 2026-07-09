@@ -305,17 +305,27 @@ pub struct RuntimeArgs {
 #[derive(Args, Debug, Clone)]
 pub struct GemArgs {
     #[arg(
-        long,
-        required = true,
+        value_name = "GENES",
         value_delimiter = ',',
-        help = "Counts (gene-level) sparse matrix prefix(es), comma-separated",
-        long_help = "Counts (gene-level) sparse matrix prefix(es), comma-separated.\n\
-                     Rows must follow `{gene_key}/count/{spliced|unspliced}`. Multiple\n\
-                     files are stacked under Union column alignment (cells merged by\n\
-                     barcode); use an embedded `@batch` tag on the barcodes to keep\n\
-                     samples as distinct batches (see `--batch-files`)."
+        help = "Counts (gene-level) sparse matrix prefix(es), space- or comma-separated",
+        long_help = "Counts (gene-level) sparse matrix prefix(es), given positionally —\n\
+                     space-separated, so shell globs work: `faba gem out/*_genes.zarr.zip`.\n\
+                     Commas are also accepted. Rows must follow\n\
+                     `{gene_key}/count/{spliced|unspliced}`. Multiple files are stacked\n\
+                     under Union column alignment (cells merged by barcode); use an\n\
+                     embedded `@batch` tag on the barcodes to keep samples as distinct\n\
+                     batches (see `--batch-files`).\n\n\
+                     The `--genes a,b` flag form is still accepted, but pass one or the\n\
+                     other, not both."
     )]
-    pub genes: Vec<Box<str>>,
+    pub genes_pos: Vec<Box<str>>,
+
+    #[arg(
+        long = "genes",
+        value_delimiter = ',',
+        help = "Deprecated alias for the positional GENES argument (comma-separated)"
+    )]
+    pub genes_flag: Vec<Box<str>>,
 
     #[arg(
         short = 'b',
@@ -346,3 +356,31 @@ pub struct GemArgs {
     #[command(flatten)]
     pub runtime: RuntimeArgs,
 }
+
+impl GemArgs {
+    /// The gene matrices to load, from whichever form the user gave.
+    ///
+    /// Positional is the primary spelling (`faba gem a.zarr.zip b.zarr.zip`, so shell
+    /// globs work); `--genes a,b` is kept for the existing scripts. Accepting both at
+    /// once would silently pick one, so it is an error — the user's intent is
+    /// genuinely ambiguous there.
+    pub fn genes(&self) -> anyhow::Result<&[Box<str>]> {
+        match (self.genes_pos.is_empty(), self.genes_flag.is_empty()) {
+            (false, true) => Ok(&self.genes_pos),
+            (true, false) => Ok(&self.genes_flag),
+            (true, true) => anyhow::bail!(
+                "no gene matrices given — pass them positionally \
+                 (`faba gem out/*_genes.zarr.zip -o out/gem`) or with `--genes a,b`"
+            ),
+            (false, false) => anyhow::bail!(
+                "gene matrices given both positionally ({}) and via --genes ({}) — \
+                 pass one or the other",
+                self.genes_pos.len(),
+                self.genes_flag.len()
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

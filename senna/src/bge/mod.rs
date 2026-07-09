@@ -489,7 +489,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         ge::validate_multiome_groups(&group_sizes, &unified.barcodes, &unified.cell_modality)?;
     }
 
-    // ---- Cell QC (output filter) ----
+    /////////////////////////////
+    // Cell QC (output filter) //
+    /////////////////////////////
     // The `--qc` near-empty floor + MAD-outlier call is an OUTPUT filter: every
     // cell + edge still informs the joint embedding / feature dictionary, but
     // QC-failed cells are dropped from the archetypal analysis and all per-cell
@@ -555,6 +557,13 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // passes — each `ge::fit` would otherwise try to register its own SIGINT
     // handler and the second registration panics (`MultipleHandlers`).
     let stop = ge::setup_stop_handler();
+
+    // Full-backend feature identity, captured before any subsetting. bge never
+    // narrows the feature axis by HVG, so this differs from the trained axis only
+    // after a `--feature-null-fdr` refit — and those dropped rows are exactly what
+    // the post-hoc projection re-embeds.
+    let backend_feature_names = unified.count_backend().row_names()?;
+    let n_backend_rows = backend_feature_names.len();
 
     // Assemble a `FitConfig` for the CURRENT feature AND cell axes of `unified`,
     // so the same builder serves pass 1 (full axis), the post-QC feature re-fit
@@ -646,6 +655,22 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             lineage_dag: false,
             dag_learnable: false,
             lineage_smooth: false,
+            // bge never subsets the feature axis (HVG only reweights the random
+            // projection), so on pass 1 the trained axis IS the backend and this
+            // is an exact no-op. It earns its keep on the `--feature-null-fdr`
+            // refit, where it re-embeds the rows that pass dropped. Each backend
+            // row is its own "gene" (no β-sharing), and there is no splice track.
+            feature_projection: Some(ge::FeatureProjectionConfig {
+                ridge: ge::DEFAULT_PROJECTION_RIDGE,
+                calib_ridge: ge::DEFAULT_PROJECTION_CALIB_RIDGE,
+                backend_row_to_gene: (0..n_backend_rows as u32).collect(),
+                backend_unspliced_rows: vec![false; n_backend_rows],
+                with_velocity: false,
+                // The same null call that dropped these rows also gates their
+                // return: a row re-solves to a real direction or it stays at the
+                // origin. Restoring coverage must not mean restoring noise.
+                null_fdr: args.feature_null_fdr,
+            }),
         })
     };
 
@@ -715,11 +740,48 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         None => out.model.e_cell.to_device(&cpu)?,
     };
     let (cell_labels, target_eff) = ge::cell_clusters(&e_cell_cpu, args.num_topics)?;
+
+    // Rows the null QC dropped, re-embedded post-hoc against the frozen pseudobulk
+    // side (bge never subsets by HVG, so this is empty without a `--feature-null-fdr`
+    // refit). They join the co-embed — which is what `annotate-by-projection` reads —
+    // so a dropped gene still gets a manifold coordinate. They deliberately do NOT
+    // join `out.model.e_feat`, so ETM keeps factorizing exactly the trained rows.
+    let proj = out
+        .feature_projection
+        .as_ref()
+        .filter(|p| !p.gene_ids.is_empty());
+    let (coembed_feat, coembed_names) = match proj {
+        Some(p) => {
+            let h = out.model.embedding_dim;
+            let mut flat: Vec<f32> = e_feat_cpu.flatten_all()?.to_vec1()?;
+            flat.extend_from_slice(&p.beta);
+            let mut names = unified.feature_names.clone();
+            names.extend(
+                p.gene_ids
+                    .iter()
+                    .map(|&g| backend_feature_names[g as usize].clone()),
+            );
+            info!(
+                "restoring {} null-dropped feature(s) into the co-embed \
+                 (frame calibration on {} trained: cosine {:.3}, norm ratio {:.3}, R² {:.3})",
+                p.gene_ids.len(),
+                p.calib.n_trained,
+                p.calib.mean_cosine,
+                p.calib.norm_ratio,
+                p.calib.r2,
+            );
+            (
+                candle_core::Tensor::from_vec(flat, (names.len(), h), &cpu)?,
+                names,
+            )
+        }
+        None => (e_feat_cpu.clone(), unified.feature_names.clone()),
+    };
     ge::write_feature_coembedding(
         &args.out,
         &e_cell_cpu,
-        &e_feat_cpu,
-        &unified.feature_names,
+        &coembed_feat,
+        &coembed_names,
         target_eff,
     )?;
 
