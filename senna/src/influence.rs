@@ -8,9 +8,10 @@
 //!   recon_j = Σ_k θ_jk β_k,               β_k = softmax_g(α_k · ρᵀ)
 //! ```
 //! with respect to the decoder's **topic embeddings** `α ∈ ℝ^{K×H}` — the
-//! topic-side generative parameters. `ρ` (gene embedding) and the encoder are
-//! held fixed, matching the design rule "scope influence to β/anchors, not the
-//! encoder".
+//! topic-side generative parameters. The `β = softmax_g(α·ρᵀ)` parameterization is
+//! the embedded topic model of Dieng, Ruiz & Blei (2020). `ρ` (gene embedding) and
+//! the encoder are held fixed, matching the design rule "scope influence to
+//! β/anchors, not the encoder".
 //!
 //! **Closed-form gradient** (no autograd, no decoder rebuild):
 //! ```text
@@ -29,6 +30,12 @@
 //!   τ_new = ḡ_Δ·Δ   − ½ Δᵀ F_new Δ        (differential benefit of the query)
 //!   τ_old = ḡ_cal·Δ − ½ Δᵀ F_cal Δ        (change on old data; < 0 ⇒ forgetting)
 //! ```
+//! This is the one-step / influence-function estimate of a refit (Hampel 1974;
+//! Koh & Liang 2017; Giordano et al. 2019) under an EWC quadratic anchor
+//! (Kirkpatrick et al. 2017), with `κ` playing the role of the generalized-Bayes
+//! prior temperature (Bissiri, Holmes & Walker 2016). `ḡᵀF⁻¹ḡ` is Rao's score
+//! statistic (Rao 1948).
+//!
 //! Regularizing by `(κ·F_cal + F_new)` rather than `F_cal` alone is what keeps
 //! the axes independent: an unregularized Newton step collapses them to
 //! `τ_old = −τ_new`. Novelty along low-`F_cal` (unexplored) directions is cheap
@@ -40,13 +47,64 @@
 //! *common-mode*: every batch shares it, and updating along it improves the fit of
 //! new and old data alike. Left in, it swamps `τ_new`. Treating the calibration
 //! batch as a **control arm** and taking the difference removes it — a
-//! negative-control / difference-in-differences adjustment. The estimand becomes
-//! "the effect of adding *this* batch rather than an equally-sized in-distribution
-//! batch", which is precisely what novelty-relative-to-reference means.
+//! negative-control / difference-in-differences adjustment (Lipsitch, Tchetgen
+//! Tchetgen & Cohen 2010). The estimand becomes "the effect of adding *this* batch
+//! rather than an equally-sized in-distribution batch", which is precisely what
+//! novelty-relative-to-reference means.
 //!
 //! Consequence: with query ≡ calibration, `ḡ_Δ = 0 ⇒ Δ = 0 ⇒ τ_new = τ_old = 0` —
 //! an exact null, which is what makes the axes usable as calibrated statistics.
 //! The first-order term `ḡ_cal·Δ` is retained in `τ_old` (no optimality assumed).
+//!
+//! **Reading `τ` as an average treatment effect.** Take unit = cell, treatment =
+//! "apply `Δ` to the model", outcome `Y_j = ℓ_j`. A second-order expansion of
+//! `(1/n) Σ_j [Y_j(1) − Y_j(0)]` about `α`, with `−Hessian ≈ F`, is exactly the
+//! `ḡ·Δ − ½ΔᵀFΔ` form above. So `τ_old` is a **sample average treatment effect** on
+//! the calibration cells of the intervention `Δ`, in log-likelihood-per-count units
+//! (Neyman 1923; Rubin 1974). Two honest caveats:
+//!  1. `Δ` is chosen *using* the query batch and `τ_new` is then evaluated *on* that
+//!     same batch, so `τ_new` is optimistic — the honest version needs cross-fitting
+//!     (Chernozhukov et al. 2018), as in one-step / TMLE estimators
+//!     (van der Laan & Rubin 2006).
+//!  2. As written, `τ_new` uses `ḡ_Δ` rather than `ḡ_new`, so it is a
+//!     difference-in-differences-flavoured contrast, **not** the ATE on the query.
+//!     Using the contrast only to *define* `Δ` (and scoring with `ḡ_new`) would make
+//!     the pair `(τ_new, τ_old)` two ATEs of the same intervention.
+//!
+//! **Caveat: this is the *empirical* Fisher.** `F` is the mean of squared per-cell
+//! gradients. It coincides with the Fisher — and hence with `−Hessian` — only at a
+//! well-specified optimum, which is exactly the assumption we *cannot* make here
+//! (`ḡ_cal ≠ 0`). Treat `F` as a positive-definite preconditioner and `τ` as a
+//! **screening statistic**, not a calibrated second-order prediction (Kunstner,
+//! Hennig & Balles 2019; Martens 2020; Amari 1998). A generalized Gauss-Newton
+//! curvature (Schraudolph 2002) is the principled upgrade.
+//!
+//! # References
+//! - Amari (1998) *Natural gradient works efficiently in learning.* Neural Comput. 10:251.
+//! - Bissiri, Holmes & Walker (2016) *A general framework for updating belief
+//!   distributions.* J. R. Stat. Soc. B 78:1103.
+//! - Chernozhukov et al. (2018) *Double/debiased machine learning for treatment and
+//!   structural parameters.* Econometrics J. 21:C1.
+//! - Dieng, Ruiz & Blei (2020) *Topic modeling in embedding spaces.* TACL 8:439.
+//! - Giordano, Stephenson, Liu, Jordan & Broderick (2019) *A Swiss army infinitesimal
+//!   jackknife.* AISTATS, PMLR 89:1139.
+//! - Hampel (1974) *The influence curve and its role in robust estimation.* JASA 69:383.
+//! - Kirkpatrick et al. (2017) *Overcoming catastrophic forgetting in neural networks.*
+//!   PNAS 114:3521.
+//! - Koh & Liang (2017) *Understanding black-box predictions via influence functions.* ICML.
+//! - Kunstner, Hennig & Balles (2019) *Limitations of the empirical Fisher approximation
+//!   for natural gradient descent.* NeurIPS.
+//! - Lipsitch, Tchetgen Tchetgen & Cohen (2010) *Negative controls: a tool for detecting
+//!   confounding and bias in observational studies.* Epidemiology 21:383.
+//! - Martens (2020) *New insights and perspectives on the natural gradient method.* JMLR 21:1.
+//! - Nguyen, Li, Bui & Turner (2018) *Variational continual learning.* ICLR.
+//! - Rao (1948) *Large sample tests of statistical hypotheses concerning several parameters.*
+//!   Math. Proc. Camb. Phil. Soc. 44:50.
+//! - Rubin (1974) *Estimating causal effects of treatments in randomized and nonrandomized
+//!   studies.* J. Educ. Psychol. 66:688.
+//! - Schraudolph (2002) *Fast curvature matrix-vector products for second-order gradient
+//!   descent.* Neural Comput. 14:1723.
+//! - van der Laan & Rubin (2006) *Targeted maximum likelihood learning.* Int. J. Biostat. 2(1).
 
 use crate::embed_common::*;
 use crate::topic::eval::GeneRemap;
