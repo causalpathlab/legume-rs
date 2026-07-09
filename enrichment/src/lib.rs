@@ -20,6 +20,16 @@ pub mod q_matrix;
 pub mod specificity;
 pub mod treebh;
 
+/// The label every annotator in the workspace writes for a cell, community or
+/// trajectory node it declined to call.
+///
+/// It is a **wire format**: it lands in `*.annot.parquet` and
+/// `trajectory_annotation.parquet`, and downstream readers (`faba plot`, `senna
+/// plot`) branch on it to keep a non-call out of the palette and off the figure.
+/// Producer and consumer live in different crates and different processes, so the
+/// two must not drift — reference this const rather than retyping the string.
+pub const UNASSIGNED_LABEL: &str = "unassigned";
+
 pub use cellproj::{label_cells, LabelWithConfidence};
 pub use es::{rank_descending, weighted_ks_es};
 pub use fdr::bh_fdr;

@@ -158,9 +158,9 @@ pub(super) fn write_annotation_outputs(
     let (n, c, k) = (res.n_cells, res.n_types, res.n_coarse);
     let nan = f32::NAN;
 
-    ////////////////////////////
-    // per-cell annotation table
-    ////////////////////////////
+    ///////////////////////////////
+    // per-cell annotation table //
+    ///////////////////////////////
     let mut community = Vec::with_capacity(n);
     let mut coarse_label = Vec::with_capacity(n);
     let mut coarse_z = Vec::with_capacity(n);
@@ -200,7 +200,7 @@ pub(super) fn write_annotation_outputs(
     // top1−top2 margin; fine types are nested/correlated by design, so margins
     // are inherently small and margin gating is opt-in (default off) — the
     // significance gate is the safe default.
-    let unassigned: Box<str> = Box::from("unassigned");
+    let unassigned: Box<str> = Box::from(enrichment::UNASSIGNED_LABEL);
     let fine_label: Vec<Box<str>> = (0..n)
         .map(|cell| {
             // Both gates off by default (fine_fdr ≥ 1, min_margin ≤ 0) ⇒ every
@@ -244,9 +244,9 @@ pub(super) fn write_annotation_outputs(
     // via the one writer below, so both methods emit an identical contract.
     write_label_tsvs(out_prefix, cell_names, &coarse_label, &coarse_prob)?;
 
-    ////////////////////////////
-    // community profile table
-    ////////////////////////////
+    /////////////////////////////
+    // community profile table //
+    /////////////////////////////
     let mut comm_sizes = vec![0i32; k];
     for &kk in &res.community {
         comm_sizes[kk] += 1;
@@ -280,9 +280,9 @@ pub(super) fn write_annotation_outputs(
     .with_context(|| format!("writing {profile_path}"))?;
     info!("wrote {profile_path}");
 
-    ////////////////////////////
-    // fine → coarse merge map
-    ////////////////////////////
+    /////////////////////////////
+    // fine → coarse merge map //
+    /////////////////////////////
     let mut group_members: Vec<Vec<usize>> = vec![Vec::new(); k];
     for (t, &kk) in res.coarse_of_fine.iter().enumerate() {
         group_members[kk].push(t);
