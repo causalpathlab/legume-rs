@@ -725,9 +725,11 @@ fn remap_and_coarsen_dense(
 /// Encoder-only prediction for the masked-topic
 /// ([`MODEL_TYPE_INDEXED_MASKED`]). Rebuilds the indexed symbol-embedding
 /// encoder, runs the deterministic masked-encoder forward (all genes visible)
-/// on the held-out cells, and writes the latent. No decoder/refinement (v1);
-/// batch correction at predict is gene-mean only (per-cell residual null is a
-/// future refinement).
+/// on the held-out cells, and writes the latent plus the per-cell full-cell
+/// predictive log-likelihood (`{out}.predictive.parquet`, via
+/// [`predictive_llik_masked`]) — the reconstruction-residual fit score. Encoder
+/// forward only (no decoder refinement); batch correction at predict is
+/// gene-mean only.
 fn predict_masked(
     args: &PredictArgs,
     metadata: &TopicModelMetadata,
@@ -744,7 +746,7 @@ fn predict_masked(
         .enc_context_size
         .ok_or_else(|| anyhow::anyhow!("masked-topic metadata missing enc_context_size"))?;
 
-    let (training_genes, _beta_dk) = load_dictionary(&args.model)?;
+    let (training_genes, beta_dk) = load_dictionary(&args.model)?;
     let (_sw_genes, shortlist_weights) = load_shortlist_weights(&args.model)?;
     let (_fm_genes, feature_mean) = load_feature_mean(&args.model)?;
     anyhow::ensure!(
@@ -814,15 +816,86 @@ fn predict_masked(
         gene_remap.as_ref().map(|r| r.new_to_train.as_slice()),
     )?;
 
-    let cell_names = data_vec.column_names()?;
-    // Inference: emit a row per query cell (no QC dropping).
-    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, None)?;
-    let model_label = masked_head_label(head);
+    // Full-cell predictive log-likelihood (the probe fit score): score every
+    // observed gene under the reconstructed composition recon = exp(β)·θ, so
+    // `senna predict` emits `{out}.predictive.parquet` for masked models too.
+    let (llik, total) = predictive_llik_masked(
+        &data_vec,
+        &z_nk,
+        &beta_dk,
+        gene_remap.as_ref(),
+        args.minibatch_size,
+    )?;
+    write_outputs(args, &data_vec, &z_nk, &llik, &total)?;
     info!(
-        "Wrote {}.latent.parquet ({model_label}, encoder-only)",
-        args.out
+        "predict complete ({}, encoder-only latent + full-cell predictive llik)",
+        masked_head_label(head)
     );
     Ok(())
+}
+
+/// Per-cell predictive log-likelihood for the masked / indexed topic model.
+///
+/// The masked ETM decoder's dictionary `β` is a gene-simplex per topic
+/// (`exp(β)` columns sum to 1), so `recon = exp(β)·θ` is the reconstructed
+/// composition over genes (columns sum to 1). Scoring the observed counts under
+/// it gives the multinomial predictive log-likelihood
+///   `llik(cell) = Σ_g x_gj · log recon_gj`,   `total(cell) = Σ_g x_gj`,
+/// and `write_outputs` derives `llik_per_count = llik / total`. Genes absent
+/// from the reference model are skipped (μ = 0), mirroring
+/// [`write_residual_backend`]. Head-agnostic — the same score applies to the
+/// softmax, Gaussian, and stick-breaking latent heads (θ is already normalized).
+fn predictive_llik_masked(
+    data_vec: &SparseIoVec,
+    z_nk: &Mat,
+    beta_dk: &Mat,
+    gene_remap: Option<&GeneRemap>,
+    minibatch_size: usize,
+) -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
+    let exp_beta_dk = beta_dk.map(f32::exp);
+    let ntot = data_vec.num_columns();
+
+    let jobs = create_jobs(ntot, 0, Some(minibatch_size));
+    let njobs = jobs.len() as u64;
+    let blocks: Vec<(usize, Vec<f32>, Vec<f32>)> = jobs
+        .par_iter()
+        .progress_with(new_progress_bar(njobs))
+        .map(|&(lb, ub)| -> anyhow::Result<(usize, Vec<f32>, Vec<f32>)> {
+            let csc = data_vec.read_columns_csc(lb..ub)?;
+            let n_block = csc.ncols();
+            let theta_kn = z_nk.rows(lb, n_block).map(f32::exp).transpose();
+            let recon_dn = &exp_beta_dk * theta_kn; // [D_train, n_block]
+
+            let mut llik = vec![0f32; n_block];
+            let mut total = vec![0f32; n_block];
+            for jloc in 0..n_block {
+                let col = csc.col(jloc);
+                for (&row_new, &val) in col.row_indices().iter().zip(col.values().iter()) {
+                    let row_train = match gene_remap {
+                        Some(rm) => rm.new_to_train[row_new],
+                        None => Some(row_new),
+                    };
+                    let Some(row_train) = row_train else {
+                        continue; // gene absent from the reference model
+                    };
+                    let recon = recon_dn[(row_train, jloc)].max(1e-12);
+                    llik[jloc] += val * recon.ln();
+                    total[jloc] += val;
+                }
+            }
+            Ok((lb, llik, total))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let mut llik = vec![0f32; ntot];
+    let mut total = vec![0f32; ntot];
+    for (lb, ll, tot) in blocks {
+        for (k, (&l, &t)) in ll.iter().zip(tot.iter()).enumerate() {
+            llik[lb + k] = l;
+            total[lb + k] = t;
+        }
+    }
+    Ok((llik, total))
 }
 
 /// Held-out latent inference for the Gaussian VAE ([`MODEL_TYPE_VAE`]).

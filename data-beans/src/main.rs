@@ -294,6 +294,7 @@ enum Commands {
 
     #[command(
         about = "Take columns and output dense matrix",
+        visible_aliases = ["take-columns"],
         long_about = "Take columns from the sparse matrix and save them to an `output` file as a dense matrix for quick examination.\n\
 		      Useful for extracting subsets for visualization or analysis."
     )]
@@ -301,6 +302,7 @@ enum Commands {
 
     #[command(
         about = "Take rows and output dense matrix (transposed)",
+        visible_aliases = ["take-rows"],
         long_about = "Take rows from the sparse matrix and save them to an `output` file as a dense matrix for quick examination.\n\
 		      For convenience, it will output a transposed (`column x selected_row`) matrix."
     )]
