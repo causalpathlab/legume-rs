@@ -13,8 +13,9 @@ use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 use rayon::prelude::*;
 
-// Cell layout (UMAP + PHATE)
-//////////////////////////////
+////////////////////////////////
+// Cell layout (UMAP + PHATE) //
+////////////////////////////////
 
 /// Leiden community detection over a prebuilt kNN graph (modularity
 /// objective), returning compacted labels. Mirrors the tail of
@@ -161,9 +162,9 @@ fn mat_rows_to_flat(m: &DMatrix<f32>) -> Vec<f32> {
     v
 }
 
-//////////////////////////////
-// Layout + feature-placement outputs (part ii)
-//////////////////////////////
+//////////////////////////////////////////////////
+// Layout + feature-placement outputs (part ii) //
+//////////////////////////////////////////////////
 
 /// `[n×2]` row-major flat → nalgebra `DMatrix` (for use as Nyström/kNN
 /// landmark coords).
@@ -227,7 +228,9 @@ pub(super) fn write_layout_outputs(inp: &LayoutInputs<'_>) -> Result<()> {
     let umap = res.cell_umap.as_ref().expect("layout guard ensures Some");
     let nan = f32::NAN;
 
-    // ---- per-cell coordinates ----
+    //////////////////////////
+    // per-cell coordinates //
+    //////////////////////////
     let umap_1: Vec<f32> = (0..n).map(|i| umap[i * 2]).collect();
     let umap_2: Vec<f32> = (0..n).map(|i| umap[i * 2 + 1]).collect();
     let (phate_1, phate_2): (Vec<f32>, Vec<f32>) = match res.cell_phate.as_ref() {
@@ -254,7 +257,9 @@ pub(super) fn write_layout_outputs(inp: &LayoutInputs<'_>) -> Result<()> {
     .with_context(|| format!("writing {cc_path}"))?;
     info!("wrote {cc_path}");
 
-    // ---- feature + anchor placement: FIRM (follows the co-embedding) ----
+    /////////////////////////////////////////////////////////////////
+    // feature + anchor placement: FIRM (follows the co-embedding) //
+    /////////////////////////////////////////////////////////////////
     // Each feature/anchor set is already co-embedded onto the cell manifold
     // (genes via `feature_embedding`, type/coarse anchors via the returned
     // co-embed locations). Nyström-project each through the cell layout, using

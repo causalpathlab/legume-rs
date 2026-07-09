@@ -62,9 +62,9 @@ impl KnnGraph {
         let jobs = create_jobs(nn, args.block_size);
         let njobs = jobs.len() as u64;
 
-        /////////////////////////////////////////////////////////////////
-        // step 1: searching nearest neighbours                        //
-        /////////////////////////////////////////////////////////////////
+        //////////////////////////////////////////
+        // step 1: searching nearest neighbours //
+        //////////////////////////////////////////
 
         let triplets: DashMap<(usize, usize), f32> = DashMap::new();
 
@@ -86,9 +86,9 @@ impl KnnGraph {
             return Err(anyhow::anyhow!("empty triplets"));
         }
 
-        ///////////////////////////////////////////////////
+        //////////////////////////////////////////////////
         // step 2: edge filtering (reciprocal or union) //
-        ///////////////////////////////////////////////////
+        //////////////////////////////////////////////////
 
         let mut edges: Vec<((usize, usize), f32)> = if args.reciprocal {
             // Intersection: keep (i,j) only if both i→j and j→i exist
@@ -346,9 +346,9 @@ fn directed_umap_weight(d: f32, rho: f32, sigma: f32) -> f32 {
     }
 }
 
-//////////////////////////////
-// Leiden integration       //
-//////////////////////////////
+////////////////////////
+// Leiden integration //
+////////////////////////
 
 impl WeightedGraph for leiden::Network {
     fn num_nodes(&self) -> usize {

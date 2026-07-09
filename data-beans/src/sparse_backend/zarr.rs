@@ -266,9 +266,9 @@ impl SparseMtxData {
         })
     }
 
-    //////////////////////
-    // backend related  //
-    //////////////////////
+    /////////////////////
+    // backend related //
+    /////////////////////
 
     /// Helper function to create a filled 1D array with the given
     /// data type and fill value. This is the most useful function to

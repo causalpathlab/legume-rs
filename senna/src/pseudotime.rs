@@ -16,9 +16,9 @@ use crate::principal_graph::{
 use crate::run_manifest::{rel_to_manifest, resolve, RunManifest};
 use std::path::PathBuf;
 
-////////////////////////////////////////////////////////////////////////////////
-// Pure pseudotime core
-////////////////////////////////////////////////////////////////////////////////
+//////////////////////////
+// Pure pseudotime core //
+//////////////////////////
 
 /// How the pseudotime origin is specified. Cells/nodes are resolved against
 /// the principal graph after it is fit, so any variant is valid here.

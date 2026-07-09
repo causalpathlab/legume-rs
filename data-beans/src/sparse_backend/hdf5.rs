@@ -225,9 +225,9 @@ impl SparseMtxData {
         Ok(())
     }
 
-    //////////////////////
-    // backend related  //
-    //////////////////////
+    /////////////////////
+    // backend related //
+    /////////////////////
 
     /// Associate sparse matrix data with a HDF5 file
     /// * `hdf5_file`: HDF5 file to be associated with

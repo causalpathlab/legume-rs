@@ -82,7 +82,9 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         loaded.n_clusters
     );
 
-    // ----- NB-Fisher per-gene weights -----
+    ////////////////////////////////
+    // NB-Fisher per-gene weights //
+    ////////////////////////////////
     // Try the cached parquet from training first; fall back to recomputing.
     let fisher_prefix = run_manifest::resolve(&manifest_dir, &manifest.prefix)
         .to_string_lossy()
@@ -116,7 +118,9 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         w_sum / nb_fisher.len() as f32
     );
 
-    // ----- Per-cluster gene sums -----
+    ///////////////////////////
+    // Per-cluster gene sums //
+    ///////////////////////////
     // The marker path additionally needs a per-batch axis (its sample-
     // permutation null), accumulated in the same fused sweep. The GO/GMT
     // ontology path scores the per-cluster profile directly, so it needs only
@@ -164,7 +168,9 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         );
     }
 
-    // ----- GO/GMT ontology gene-set mode -----
+    ///////////////////////////////////
+    // GO/GMT ontology gene-set mode //
+    ///////////////////////////////////
     // Descriptive module-score signature on the cluster profile (no cell-level
     // labels, no permutation, no tree). Diverges from the marker path entirely.
     if ontology_mode {
@@ -256,7 +262,9 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         argmax_labels,
     } = annotate(&group, &markers_gc, &loaded.celltype_names, &config)?;
 
-    // ----- Outputs -----
+    /////////////
+    // Outputs //
+    /////////////
     let cell_expr_path = format!("{out}.cluster_expression.parquet");
     profile_gk.to_parquet_with_names(
         &cell_expr_path,
@@ -418,7 +426,9 @@ fn run_ontology_gene_sets(
         gene_names,
     )?;
 
-    // ----- Descriptive module-score signature (the GO/GMT scorer) -----
+    ////////////////////////////////////////////////////////////
+    // Descriptive module-score signature (the GO/GMT scorer) //
+    ////////////////////////////////////////////////////////////
     // Per (cluster, term): mean_in − mean_out of log1p(CP10K) on the cluster
     // profile, cross-cluster-contrasted. The top positive-effect terms per
     // cluster ARE the GO signature. This plain effect-size ranking recovers

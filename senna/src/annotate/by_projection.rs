@@ -114,7 +114,9 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
         &cfg,
     )?;
 
-    // ----- wire into the manifest (shared finalizer) -----
+    ///////////////////////////////////////////////
+    // wire into the manifest (shared finalizer) //
+    ///////////////////////////////////////////////
     let annot = format!("{out}.annot.parquet");
     let argmax = format!("{out}.argmax.tsv");
     let onto_assign = format!("{out}.ontology_assignment.tsv");

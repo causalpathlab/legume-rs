@@ -18,11 +18,9 @@ use rayon::prelude::*;
 
 use crate::cell_activity_graph_embedding::gene_gating::CellActivities;
 
-////////////////////////////////////////////////////////////////
-//                                                            //
-// GeneBatchCache                                             //
-//                                                            //
-////////////////////////////////////////////////////////////////
+////////////////////
+// GeneBatchCache //
+////////////////////
 
 /// Precomputed positive distribution for one `(gene, batch)` pair.
 pub struct GeneBatchEntry {
@@ -144,11 +142,9 @@ impl GeneBatchCache {
     }
 }
 
-////////////////////////////////////////////////////////////////
-//                                                            //
-// GeneGatedChainSampler                                      //
-//                                                            //
-////////////////////////////////////////////////////////////////
+///////////////////////////
+// GeneGatedChainSampler //
+///////////////////////////
 
 pub struct GeneGatedChainSampler<'a> {
     pub edges: &'a [(u32, u32)],

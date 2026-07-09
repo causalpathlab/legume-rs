@@ -197,7 +197,9 @@ pub fn kmeans_centroids_seeded(
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut centers = DMatrix::<f32>::zeros(k, d);
 
-    // ---- kmeans++ init: first centroid uniform, the rest sampled ∝ D²(x) ----
+    /////////////////////////////////////////////////////////////////////
+    // kmeans++ init: first centroid uniform, the rest sampled ∝ D²(x) //
+    /////////////////////////////////////////////////////////////////////
     let mut d2 = vec![f32::INFINITY; n]; // sq-dist of each point to its nearest centroid
     let first = rng.random_range(0..n);
     copy_row(z, first, &mut centers, 0);
@@ -224,7 +226,9 @@ pub fn kmeans_centroids_seeded(
         fold_min_sqdist(z, &centers, c, &mut d2);
     }
 
-    // ---- Lloyd iterations ----
+    //////////////////////
+    // Lloyd iterations //
+    //////////////////////
     // Reuse `pairwise_sqdist_rows_to_rows` for the assignment step: it computes the full
     // n×k sq-dist matrix in parallel via a shared flat buffer, then a single par row-scan
     // picks the argmin per point. Much tighter than the naive O(n·k·d) scalar double loop.
@@ -483,9 +487,9 @@ fn objective(
     data_term + sigma * entropy + 0.5 * gamma * tree_term
 }
 
-////////////////////////////////////////////////////////////////////////
-// Cell projection + geodesic pseudotime
-////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////
+// Cell projection + geodesic pseudotime //
+///////////////////////////////////////////
 
 /// Per-cell projection onto the principal graph.
 #[derive(Debug, Clone, Copy)]

@@ -29,11 +29,9 @@ pub enum ActivityNorm {
     Log1p,
 }
 
-////////////////////////////////////////////////////////////////
-//                                                            //
-// CellActivities                                             //
-//                                                            //
-////////////////////////////////////////////////////////////////
+////////////////////
+// CellActivities //
+////////////////////
 
 pub struct CellActivities {
     /// `gene_active_edges[g]`: global edge ids where both endpoints have
@@ -56,7 +54,7 @@ pub fn build_cell_activities(
     let n_cells = data.num_columns();
     let n_genes = data.num_rows();
 
-    // ---- Phase 1: read counts in column blocks; rayon-fold per-thread
+    // Phase 1: read counts in column blocks; rayon-fold per-thread
     // (gene, cell, log1p) entries, then concat once on the main thread.
     // Avoids the per-row mutex on a shared CooMatrix.
     let block = block_size.unwrap_or(n_genes.max(1));
@@ -90,7 +88,7 @@ pub fn build_cell_activities(
     let mut cell_csr = CsrMatrix::from(&coo);
     normalize_rows_inplace(&mut cell_csr, norm);
 
-    // ---- Phase 2: invert to per-cell sorted (gene, activity) lists.
+    // Phase 2: invert to per-cell sorted (gene, activity) lists.
     // Iterating CSR rows in gene order gives each cell's gene-list
     // already sorted ascending, which is what the edge-merge needs.
     let mut cell_to_genes: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_cells];
@@ -101,7 +99,7 @@ pub fn build_cell_activities(
         }
     }
 
-    // ---- Phase 3: edge-driven merge — for each edge (u, v), walk the
+    // Phase 3: edge-driven merge — for each edge (u, v), walk the
     // two sorted lists in tandem, emitting `(edge_idx, a_u·a_v)` for
     // every common gene. Genes are appended in edge-iteration order,
     // so per-gene edge lists are sorted ascending by construction.
@@ -173,11 +171,9 @@ fn normalize_rows_inplace(csr: &mut CsrMatrix<f32>, norm: ActivityNorm) {
     }
 }
 
-////////////////////////////////////////////////////////////////
-//                                                            //
-// LevelDimGate                                               //
-//                                                            //
-////////////////////////////////////////////////////////////////
+//////////////////
+// LevelDimGate //
+//////////////////
 
 /// Linear-floor coefficient on the positive side of softplus. The
 /// floored softplus is `softplus(x) + GAMMA_EPS · relu(x)`:

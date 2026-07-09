@@ -258,7 +258,9 @@ pub struct AtoICountArgs {
     )]
     pub mixture_prior_beta: f32,
 
-    // ========== Gene expression QC ==========
+    ////////////////////////
+    // Gene expression QC //
+    ////////////////////////
     #[arg(
         long = "gene-min-cells",
         default_value_t = 10,

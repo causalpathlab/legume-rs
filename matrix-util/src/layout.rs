@@ -16,9 +16,9 @@ use rayon::prelude::*;
 
 type Mat = DMatrix<f32>;
 
-//////////////////////////////
-// PHATE
-//////////////////////////////
+///////////
+// PHATE //
+///////////
 
 // PHATE — Potential of Heat-diffusion for Affinity-based Transition Embedding.
 // Moon et al., Nat Biotechnol 2019 (PMC7073148).
@@ -393,9 +393,9 @@ fn classical_mds_2d(d2: &Mat) -> Mat {
     }
 }
 
-//////////////////////////////
-// Nyström projection
-//////////////////////////////
+////////////////////////
+// Nyström projection //
+////////////////////////
 
 /// Alpha-decay-kernel Nyström projection: place each *query* point into an
 /// existing 2D layout as a smooth weighted average of the *landmark* points'

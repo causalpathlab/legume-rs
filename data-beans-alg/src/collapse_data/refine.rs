@@ -245,7 +245,9 @@ pub(super) fn refine_and_collect_single_layer(
     };
     let refined = refine_or_identity(num_batches >= 2, &inputs, refine_params)?;
 
-    // ---- collapse-structure diagnostic ----
+    ///////////////////////////////////
+    // collapse-structure diagnostic //
+    ///////////////////////////////////
     // Resolve how the finest column count actually arises: distinct leaf
     // codes (initial finest groups) vs refined finest groups, and whether a
     // refined finest group spans multiple batches (i.e. batches are merged

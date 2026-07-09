@@ -295,9 +295,9 @@ pub fn log_softmax_linear_nobias(
     Ok(SoftmaxLinear::new(ws_kd, None))
 }
 
-/////////////////////////////
+////////////////////////////
 // Sparsemax linear layer //
-/////////////////////////////
+////////////////////////////
 
 #[derive(Clone, Debug)]
 pub struct SparsemaxLinear {

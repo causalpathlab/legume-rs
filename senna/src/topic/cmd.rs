@@ -639,9 +639,9 @@ impl ConfigureDecoder for NbMixtureTopicDecoder {
     }
 }
 
-/////////////////////////////
+////////////////////////////
 // Generic topic pipeline //
-/////////////////////////////
+////////////////////////////
 
 struct PipelineCtx<'a> {
     level_decoder_dims: &'a [usize],

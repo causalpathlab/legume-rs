@@ -72,9 +72,9 @@ pub fn fit_cell_activity_graph_embedding(
         c.data_files[0]
     );
 
-    //////////////////////////////////////////////////////
-    // 1-3. Load + KNN + batch effects                  //
-    //////////////////////////////////////////////////////
+    /////////////////////////////////////
+    // 1-3. Load + KNN + batch effects //
+    /////////////////////////////////////
     let SrtPreprocessed {
         data_vec,
         coordinates,
@@ -116,9 +116,9 @@ pub fn fit_cell_activity_graph_embedding(
     let n_edges = edges_owned.len();
     info!("{} cells, {} genes, {} edges", n_cells, n_genes, n_edges);
 
-    //////////////////////////////////////////////////////
-    // 4. Coarsening (no DC-Poisson — embedding-only)   //
-    //////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////
+    // 4. Coarsening (no DC-Poisson — embedding-only) //
+    ////////////////////////////////////////////////////
     let batch_arg: Option<&[Box<str>]> = if batch_db.is_some() {
         Some(&batch_membership)
     } else {
@@ -154,9 +154,9 @@ pub fn fit_cell_activity_graph_embedding(
     }
     let n_chain_levels = args.chain_levels.len();
 
-    //////////////////////////////////////////////////////
-    // 5. Per-batch chain samplers                       //
-    //////////////////////////////////////////////////////
+    /////////////////////////////////
+    // 5. Per-batch chain samplers //
+    /////////////////////////////////
     let batch_id_of: HashMap<Box<str>, u32> = {
         let mut uniq: Vec<Box<str>> = batch_membership.to_vec();
         uniq.sort();
@@ -195,9 +195,9 @@ pub fn fit_cell_activity_graph_embedding(
         "no batch retained any within-batch within-pb edges; consider --chain-levels or --reciprocal"
     );
 
-    //////////////////////////////////////////////////////
-    // 6. Per-gene activities + (gene, batch) cache      //
-    //////////////////////////////////////////////////////
+    //////////////////////////////////////////////////
+    // 6. Per-gene activities + (gene, batch) cache //
+    //////////////////////////////////////////////////
     info!("Computing per-gene cell activities...");
     let activities =
         build_cell_activities(&data_vec, &edges_owned, c.block_size, args.activity_norm)?;
@@ -259,9 +259,9 @@ pub fn fit_cell_activity_graph_embedding(
         "no trainable genes after HVG / active-edge filter"
     );
 
-    //////////////////////////////////////////////////////
-    // 7. Model + gates + optimizer                      //
-    //////////////////////////////////////////////////////
+    //////////////////////////////////
+    // 7. Model + gates + optimizer //
+    //////////////////////////////////
     let dev = args.device.to_device(args.device_no)?;
     info!("Using device: {:?}", dev);
     let varmap = VarMap::new();
@@ -295,9 +295,9 @@ pub fn fit_cell_activity_graph_embedding(
         },
     )?;
 
-    //////////////////////////////////////////////////////
-    // 8. Training loop                                  //
-    //////////////////////////////////////////////////////
+    //////////////////////
+    // 8. Training loop //
+    //////////////////////
     let pb_maps: Vec<&[usize]> = args
         .chain_levels
         .iter()
@@ -501,9 +501,9 @@ pub fn fit_cell_activity_graph_embedding(
         }
     }
 
-    //////////////////////////////////////////////////////
-    // 9. Outputs                                        //
-    //////////////////////////////////////////////////////
+    ////////////////
+    // 9. Outputs //
+    ////////////////
     info!("Writing cage outputs...");
 
     // Cell embedding [N × D]
@@ -570,9 +570,9 @@ pub fn fit_cell_activity_graph_embedding(
 
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
-    //////////////////////////////////////////////////////
-    // 10. Optional k-means clustering + propensity     //
-    //////////////////////////////////////////////////////
+    //////////////////////////////////////////////////
+    // 10. Optional k-means clustering + propensity //
+    //////////////////////////////////////////////////
     // k-means++ (via matrix-util) on the L2-normalized cell embedding.
     // Soft propensity comes from temperature-softmax of cosine to the
     // per-cluster centroid; genes get the same recipe against the same

@@ -259,9 +259,9 @@ pub struct AnnotateProjOutputs {
     pub cell_phate: Option<Vec<f32>>,
 }
 
-//////////////////////////////
-// High-level entry point
-//////////////////////////////
+////////////////////////////
+// High-level entry point //
+////////////////////////////
 
 /// End-to-end annotation from in-memory embeddings: parse + match the marker
 /// TSV against `gene_names`, project every type, cluster + coarsen, and write
@@ -377,9 +377,9 @@ pub fn annotate_embeddings(
     Ok(res)
 }
 
-//////////////////////////////
-// Core compute (pure, slice-based)
-//////////////////////////////
+//////////////////////////////////////
+// Core compute (pure, slice-based) //
+//////////////////////////////////////
 
 /// Annotate cells against marker-defined types by signature projection.
 /// The cell embedding is defensively re-normalized here, so an un-normalized

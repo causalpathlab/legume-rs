@@ -183,12 +183,12 @@ fn optimize_block(
         let mut gamma_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
         let mut delta_param = GammaMatrix::new((num_genes, num_batches), a0, b0);
 
-        ////////////////////////////////////
-        // E[y_resid] = E[μ_resid]        //
-        //       E[y] = E[μ_resid] * E[μ] //
-        //   E[y_hat] = E[γ] * E[μ]       //
-        //   E[y_bat] = E[δ] * E[μ]       //
-        ////////////////////////////////////
+        //////////////////////////////
+        // E[y_resid] = E[μ_resid]  //
+        // E[y] = E[μ_resid] * E[μ] //
+        // E[y_hat] = E[γ] * E[μ]   //
+        // E[y_bat] = E[δ] * E[μ]   //
+        //////////////////////////////
 
         //            residual_sum_ds
         // μ_resid = -----------------
@@ -537,9 +537,9 @@ pub fn resample_and_optimize(
     )
 }
 
-/////////////////////////////////////////////////////////////
-// Multi-level (METIS-inspired) collapsing for batch effects
-/////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////
+// Multi-level (METIS-inspired) collapsing for batch effects //
+///////////////////////////////////////////////////////////////
 
 pub(super) const DEFAULT_NUM_LEVELS: usize = 2;
 pub(super) const DEFAULT_COARSEST_SORT_DIM: usize = 7;

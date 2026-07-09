@@ -351,7 +351,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         "--root-type needs --markers (the node cell-type calls come from the marker annotation)"
     );
 
-    // ---- load frozen embedding θ ----
+    /////////////////////////////
+    // load frozen embedding θ //
+    /////////////////////////////
     // gem θ is cosine-oriented, so by default the whole fit (k-means → MST →
     // curves) runs on L2-normalized θ; this keeps a few extreme-magnitude cells
     // from dominating and matches the PHATE layout's geometry. `--no-normalize-latent`
@@ -378,7 +380,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         theta.ncols()
     );
 
-    // ---- k-means centroids + MST ----
+    /////////////////////////////
+    // k-means centroids + MST //
+    /////////////////////////////
     let (centroids, labels) = kmeans_centroids_seeded(&theta, k, args.kmeans_iter, args.seed);
     let (edges, weights) = mst_from_sqdist(&pairwise_sqdist_rows_to_rows(&centroids, &centroids));
     anyhow::ensure!(
@@ -388,7 +392,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         edges.len()
     );
 
-    // ---- velocity orientation (optional) ----
+    /////////////////////////////////////
+    // velocity orientation (optional) //
+    /////////////////////////////////////
     let velocity_path = format!("{prefix}.velocity.parquet");
     let have_velocity = !args.no_orient_velocity && Path::new(&velocity_path).exists();
     let (node_velocity, flux) = if have_velocity {
@@ -413,7 +419,7 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     };
     let directed = directed_edges(&edges, &flux);
 
-    // ---- local branch structure (root-free): junctions + sibling branches over the MST.
+    // local branch structure (root-free): junctions + sibling branches over the MST.
     // Each cell is placed by its k-means node at (junction, sibling_branch, dist_from_junction)
     // — the local, root-invariant axis the sibling-branch association test (`faba dyn-assoc`)
     // matches cells on, replacing global pseudotime.
@@ -423,7 +429,7 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         branch_topo.junctions.len()
     );
 
-    // ---- marker node calls (computed here, before root selection, so `--root-type`
+    // marker node calls (computed here, before root selection, so `--root-type`
     // can pick the root from them; written as `{out}.trajectory_annotation.parquet`
     // after the root/orientation are known). Also writes `{out}.lineage_annot.*`. ----
     let node_calls = match (args.markers.as_deref(), raw_theta.as_ref()) {
@@ -442,7 +448,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         _ => None,
     };
 
-    // ---- root selection ----
+    ////////////////////
+    // root selection //
+    ////////////////////
     let velocity_root = have_velocity.then(|| pick_velocity_root(&edges, &flux, k));
     // Marker-grounded root (`--root-type`): the highest-confidence node of the named type.
     let type_root = args
@@ -466,7 +474,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     )?;
     info!("lineage root node = {root}");
 
-    // ---- Slingshot principal curves ----
+    ////////////////////////////////
+    // Slingshot principal curves //
+    ////////////////////////////////
     let curves = fit_principal_curves(
         &theta,
         &centroids,
@@ -485,7 +495,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         curves.n_iters
     );
 
-    // ---- outputs ----
+    /////////////
+    // outputs //
+    /////////////
     write_nodes(&centroids, &format!("{out}.nodes.parquet"))?;
     write_nodes(&node_velocity, &format!("{out}.node_velocity.parquet"))?;
     write_edges(
@@ -511,7 +523,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     )?;
     write_curves(&curves, &format!("{out}.curves.parquet"))?;
 
-    // ---- junction trust scoring: cross-seed bootstrap support (+ marker coherence) ----
+    ///////////////////////////////////////////////////////////////////////////////
+    // junction trust scoring: cross-seed bootstrap support (+ marker coherence) //
+    ///////////////////////////////////////////////////////////////////////////////
     if args.n_bootstrap > 0 && !branch_topo.junctions.is_empty() {
         let support = bootstrap_junction_support(
             &theta,
@@ -535,12 +549,16 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         )?;
     }
 
-    // ---- labeled trajectory annotation (node roles need the oriented root) ----
+    ///////////////////////////////////////////////////////////////////////
+    // labeled trajectory annotation (node roles need the oriented root) //
+    ///////////////////////////////////////////////////////////////////////
     if let Some(calls) = &node_calls {
         write_trajectory_annotation(&out, calls, root, &directed, k)?;
     }
 
-    // ---- optional PHATE 2D layout (cells + nodes + curves projected) ----
+    /////////////////////////////////////////////////////////////////
+    // optional PHATE 2D layout (cells + nodes + curves projected) //
+    /////////////////////////////////////////////////////////////////
     if args.layout == LayoutKind::Phate {
         let phate = PhateArgs {
             t: args.phate_t,
@@ -560,9 +578,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     Ok(())
 }
 
-////////////////////////////////////////////////////////////////////////
-// Marker annotation of the trajectory
-////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////
+// Marker annotation of the trajectory //
+/////////////////////////////////////////
 
 /// Inputs for [`annotate_trajectory`] — bundled to keep the fan-in a struct.
 struct AnnotateTrajArgs<'a> {
@@ -683,9 +701,9 @@ fn write_trajectory_annotation(
     Ok(())
 }
 
-////////////////////////////////////////////////////////////////////////
-// PHATE 2D layout
-////////////////////////////////////////////////////////////////////////
+/////////////////////
+// PHATE 2D layout //
+/////////////////////
 
 /// Row-wise L2 normalization (unit vectors): Euclidean distance on the result
 /// equals cosine distance on the input. Used for both the cosine θ fit and the
@@ -851,9 +869,9 @@ fn write_curves_2d(coords: &DMatrix<f32>, meta: &[(usize, usize)], path: &str) -
     Ok(())
 }
 
-////////////////////////////////////////////////////////////////////////
-// Parquet writers
-////////////////////////////////////////////////////////////////////////
+/////////////////////
+// Parquet writers //
+/////////////////////
 
 /// Contiguous `{prefix}{0..n}` names for parquet row/column headers.
 fn numbered(prefix: &str, n: usize) -> Vec<Box<str>> {

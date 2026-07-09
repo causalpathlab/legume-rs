@@ -148,7 +148,9 @@ pub struct PileupArgs {
     #[arg(long, help = "Suppress ASCII plot")]
     quiet: bool,
 
-    // ----- Miami figure mode -----
+    ///////////////////////
+    // Miami figure mode //
+    ///////////////////////
     // Providing any of `--gtf`, `--bam`, `--format`, `--svg`, or `--png`
     // switches `pileup` from the ASCII histogram to a faceted Miami plot
     // (epi sites up / gene model / read depth down, one panel per cell

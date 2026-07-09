@@ -336,9 +336,9 @@ pub(crate) fn aggregate_feature_mean_to_coarse(
     }
 }
 
-////////////////////////
+//////////////////////
 // Dense prediction //
-////////////////////////
+//////////////////////
 
 fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
     let (training_genes, beta_dk) = load_dictionary(&args.model)?;
@@ -718,9 +718,9 @@ fn remap_and_coarsen_dense(
     Ok(nd)
 }
 
-//////////////////////////
+////////////////////////
 // Indexed prediction //
-//////////////////////////
+////////////////////////
 
 /// Encoder-only prediction for the masked-topic
 /// ([`MODEL_TYPE_INDEXED_MASKED`]). Rebuilds the indexed symbol-embedding
@@ -931,9 +931,9 @@ where
     Ok((z_nk, llik, total))
 }
 
-/////////////////////
+////////////////////
 // Output writers //
-/////////////////////
+////////////////////
 
 /// Shared tail of both predict paths: per-cell latent + predictive scores,
 /// then (optionally) the residual-expression backend. Both the dense and

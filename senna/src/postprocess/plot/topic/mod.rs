@@ -946,9 +946,9 @@ fn emit_topic_legend(
     let _ = writeln!(s, "  </g>");
 }
 
-// ---------------------------------------------------------------------------
-// Dictionary plot (Hinton ≤ 100 rows, heatmap above).
-// ---------------------------------------------------------------------------
+/////////////////////////////////////////////////////////
+// Dictionary plot (Hinton ≤ 100 rows, heatmap above). //
+/////////////////////////////////////////////////////////
 
 fn render_dict_plot(
     topic_ids: &[i64],
@@ -1474,9 +1474,9 @@ fn render_colorbar_png(bar_w: u32, bar_h: u32) -> anyhow::Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("colorbar PNG encode failed: {e}"))
 }
 
-// ---------------------------------------------------------------------------
-// Output emission (PDF default, SVG/PNG opt-in).
-// ---------------------------------------------------------------------------
+////////////////////////////////////////////////////
+// Output emission (PDF default, SVG/PNG opt-in). //
+////////////////////////////////////////////////////
 
 fn emit_outputs(svg: &str, w: u32, h: u32, base: &str, args: &PlotTopicArgs) -> anyhow::Result<()> {
     if args.svg {

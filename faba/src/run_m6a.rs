@@ -410,9 +410,9 @@ pub struct DartSeqCountArgs {
     )]
     pub mixture_prior_beta: f32,
 
-    ///////////////////////////////
-    // Mass-enrichment grouping   //
-    ///////////////////////////////
+    //////////////////////////////
+    // Mass-enrichment grouping //
+    //////////////////////////////
     #[command(flatten)]
     enrich: MassEnrichmentArgs,
 

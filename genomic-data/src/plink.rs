@@ -17,9 +17,9 @@ const BED_FILE_MAGIC2: u8 = 0x1B; // 0b00011011 or <esc>
 const CB_HEADER_U64: u64 = 3;
 const CB_HEADER_USIZE: usize = 3;
 
-// ---------------------------------------------------------------------------
-// Core helpers (from bed-reader lib.rs)
-// ---------------------------------------------------------------------------
+///////////////////////////////////////////
+// Core helpers (from bed-reader lib.rs) //
+///////////////////////////////////////////
 
 fn open_and_check(path: &Path) -> Result<(BufReader<File>, [u8; CB_HEADER_USIZE])> {
     let mut buf_reader = BufReader::new(
@@ -195,9 +195,9 @@ fn internal_read_no_alloc(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// FAM / BIM parsing (from bed-reader's Metadata::read_fam_or_bim)
-// ---------------------------------------------------------------------------
+/////////////////////////////////////////////////////////////////////
+// FAM / BIM parsing (from bed-reader's Metadata::read_fam_or_bim) //
+/////////////////////////////////////////////////////////////////////
 
 /// Parse a whitespace-delimited metadata file (.fam or .bim), extracting the
 /// specified field indices (0-based). Returns `(vec_of_columns, row_count)`.
@@ -230,9 +230,9 @@ fn read_fam_or_bim(field_indices: &[usize], path: &Path) -> Result<(Vec<Vec<Stri
     Ok((vec_of_vec, count))
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+////////////////
+// Public API //
+////////////////
 
 /// PLINK BED/BIM/FAM file set reader.
 pub struct PlinkBed {

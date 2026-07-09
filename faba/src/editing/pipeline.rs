@@ -528,9 +528,9 @@ fn find_sites_with_celltype_stats(
     Ok(all_candidate_sites)
 }
 
-///////////////////////////////////////////
-// SECOND PASS: Collect cell-level data  //
-///////////////////////////////////////////
+//////////////////////////////////////////
+// SECOND PASS: Collect cell-level data //
+//////////////////////////////////////////
 
 /// Gather conversion statistics for all sites in all genes from a single BAM file.
 pub fn gather_conversion_stats(
@@ -773,9 +773,9 @@ fn collect_gene_conversion_stats(
     Ok(all_stats)
 }
 
-///////////////////////////////////////////
-// Backend output                        //
-///////////////////////////////////////////
+////////////////////
+// Backend output //
+////////////////////
 
 /// Row-union + backend-file accumulator for one output resolution, collected
 /// across all batches so rows can be reordered to a shared union before each

@@ -214,7 +214,9 @@ pub struct AnnotateArgs {
     )]
     pub no_empirical_specificity: bool,
 
-    // ----- optional inline ontology annotation (TreeBH) -----
+    //////////////////////////////////////////////////
+    // optional inline ontology annotation (TreeBH) //
+    //////////////////////////////////////////////////
     #[arg(
         long = "obo",
         help = "Cell Ontology .obo (e.g. cl-basic.obo). Given WITH --label-cl, runs TreeBH \

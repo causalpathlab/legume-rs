@@ -113,7 +113,9 @@ pub(super) fn render_one(
 
     svg.push_str("</svg>");
 
-    // ----- Render -----
+    ////////////
+    // Render //
+    ////////////
     let base = format!("{out_dir}/{}", sanitize(name));
     let mut written = 0usize;
     if args.svg {
