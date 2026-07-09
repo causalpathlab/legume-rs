@@ -200,3 +200,72 @@ fn layout_produces_finite_separated_coords() {
         "UMAP group centroids coincide: {between:.4}"
     );
 }
+
+// A marker type whose genes are all absent from the embedding must be DROPPED, not
+// kept with a zero signature.
+//
+// `type_signatures` skips normalization when the summed vector has zero norm, so an
+// empty type keeps the origin as its centroid. Cells are unit-norm, so that centroid
+// sits at squared distance 1 from every cell, while a real unit signature sits at
+// `2 − 2·cos`. The empty type therefore wins for every cell with `cos < 0.5`. On a
+// real bone-marrow run this let one marker-less type capture 44.5% of all cells.
+#[test]
+fn marker_type_with_no_matched_gene_is_dropped() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join("geu_marker_drop_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("markers.tsv");
+    let mut f = std::fs::File::create(&path).unwrap();
+    // `Ghost` names only genes that do not exist in the embedding.
+    writeln!(f, "gene\tcell_type").unwrap();
+    for g in ["AAA", "BBB"] {
+        writeln!(f, "{g}\tReal").unwrap();
+    }
+    for g in ["CCC", "DDD"] {
+        writeln!(f, "{g}\tAlsoReal").unwrap();
+    }
+    for g in ["NOPE1", "NOPE2"] {
+        writeln!(f, "{g}\tGhost").unwrap();
+    }
+    drop(f);
+
+    let gene_names: Vec<Box<str>> = ["AAA", "BBB", "CCC", "DDD"]
+        .iter()
+        .map(|s| (*s).into())
+        .collect();
+    let (names, sets) =
+        super::markers::parse_and_match_markers(path.to_str().unwrap(), &gene_names, false)
+            .unwrap();
+
+    assert_eq!(
+        names.iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
+        vec!["AlsoReal", "Real"],
+        "the marker-less type must not survive"
+    );
+    assert!(sets.iter().all(|m| !m.is_empty()));
+    assert_eq!(
+        sets.len(),
+        names.len(),
+        "names and marker sets stay aligned"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Every type matching nothing is a hard error, not a silent all-zero centroid set.
+#[test]
+fn all_marker_types_unmatched_is_an_error() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join("geu_marker_none_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("markers.tsv");
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(f, "gene\tcell_type").unwrap();
+    writeln!(f, "NOPE\tGhost").unwrap();
+    drop(f);
+    let gene_names: Vec<Box<str>> = vec!["AAA".into()];
+    assert!(
+        super::markers::parse_and_match_markers(path.to_str().unwrap(), &gene_names, false)
+            .is_err()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

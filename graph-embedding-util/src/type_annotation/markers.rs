@@ -1,4 +1,5 @@
 use super::*;
+use log::warn;
 
 /// Per-type `(feature_index, weight)` marker lists — one inner `Vec` per type.
 pub(super) type MarkerSets = Vec<Vec<(u32, f32)>>;
@@ -11,6 +12,12 @@ pub(super) type MarkerSets = Vec<Vec<(u32, f32)>>;
 /// — `ln(C / df_gene)` — unless `use_idf` is false (then unit), so markers
 /// shared across many types are down-weighted (a ubiquitous gene → IDF 0,
 /// dropped so it can't anchor a type).
+///
+/// **A type that ends up with no markers is dropped, not kept.** Its signature would
+/// be the zero vector, which is not merely uninformative but an outright **magnet**
+/// in the nearest-centroid assignment — see `term_ora::assign_nearest` for the
+/// geometry and what it cost on a real run. Dropping the type here also keeps
+/// the reported counts honest: a type we cannot score should not appear at all.
 pub(super) fn parse_and_match_markers(
     markers_path: &str,
     gene_names: &[Box<str>],
@@ -81,7 +88,37 @@ pub(super) fn parse_and_match_markers(
         })
         .collect();
 
-    Ok((type_names, type_markers))
+    // Drop types left with no markers — either none of their genes are in the
+    // embedding, or IDF zeroed every one. See the doc comment: an empty type's
+    // zero signature out-competes every real one for any cell whose best cosine is
+    // below 0.5, so keeping it silently mislabels the majority of the data.
+    let (kept_names, kept_markers): (Vec<Box<str>>, MarkerSets) = type_names
+        .iter()
+        .zip(type_markers)
+        .filter(|(_, m)| !m.is_empty())
+        .map(|(n, m)| (n.clone(), m))
+        .unzip();
+    if kept_names.len() < c {
+        let dropped: Vec<&str> = type_names
+            .iter()
+            .filter(|n| !kept_names.contains(n))
+            .map(std::convert::AsRef::as_ref)
+            .collect();
+        warn!(
+            "{} of {c} marker type(s) matched no gene in the embedding and were DROPPED: {}. \
+             Their cells will be assigned among the remaining types — widen the feature axis \
+             (e.g. lower `--n-hvg`, or rely on the held-out feature projection) if you need them.",
+            dropped.len(),
+            dropped.join(", ")
+        );
+    }
+    anyhow::ensure!(
+        !kept_names.is_empty(),
+        "no marker type matched any gene in the embedding — check the marker file's gene \
+         naming against the dictionary's row names"
+    );
+
+    Ok((kept_names, kept_markers))
 }
 
 /// Parse a marker TSV/CSV into `(gene, celltype)` pairs via the shared,
