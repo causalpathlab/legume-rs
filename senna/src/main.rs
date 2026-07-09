@@ -46,6 +46,7 @@ mod fne;
 mod geometry;
 mod hvg;
 mod impute;
+mod influence;
 mod joint_topic;
 mod logging;
 mod marker_support;

@@ -188,6 +188,22 @@ pub fn load_dictionary(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, nalgebra:
     Ok((result.rows, result.mat))
 }
 
+/// Load the feature-embedding parquet, returning gene names and `ρ [D × H]`.
+pub fn load_feature_embedding(
+    prefix: &str,
+) -> anyhow::Result<(Vec<Box<str>>, nalgebra::DMatrix<f32>)> {
+    use matrix_util::traits::IoOps;
+    let path = format!("{prefix}.feature_embedding.parquet");
+    let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))?;
+    log::info!(
+        "Loaded feature embedding: {} genes × {} dims from {}",
+        result.rows.len(),
+        result.mat.ncols(),
+        path
+    );
+    Ok((result.rows, result.mat))
+}
+
 /// Save `VarMap` parameters as safetensors.
 pub fn save_parameters(parameters: &candle_nn::VarMap, prefix: &str) -> anyhow::Result<()> {
     let path = format!("{prefix}.safetensors");

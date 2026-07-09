@@ -769,6 +769,9 @@ pub(crate) struct MaskedScored {
     pub z_nk: Mat,
     pub llik: Vec<f32>,
     pub total: Vec<f32>,
+    /// Query→training gene mapping used for the scores; `probe` reuses it for
+    /// the influence/gradient pass.
+    pub gene_remap: Option<GeneRemap>,
 }
 
 pub(crate) struct MaskedScoreArgs<'a> {
@@ -881,6 +884,7 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
         z_nk,
         llik,
         total,
+        gene_remap,
     })
 }
 
