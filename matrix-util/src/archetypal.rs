@@ -422,7 +422,12 @@ fn assign_theta(z: &DMatrix<f32>, alpha: &DMatrix<f32>, fw_iters: usize) -> DMat
 }
 
 /// Solve `min_{a ∈ Δ^{K-1}} ‖x − αᵀ a‖²` by Frank–Wolfe.
-fn simplex_lsq(alpha: &DMatrix<f32>, x: &DVector<f32>, fw_iters: usize) -> DVector<f32> {
+///
+/// `alpha` is `[K, H]` (each row an archetype); the fit reconstructs `x` `[H]`
+/// as a convex combination `αᵀ a` of the rows. Returns the simplex weights `a`
+/// `[K]`. Reused by `senna deconvolve` to initialize cell-type fractions from a
+/// projected bulk sample against the anchor rows.
+pub fn simplex_lsq(alpha: &DMatrix<f32>, x: &DVector<f32>, fw_iters: usize) -> DVector<f32> {
     let k = alpha.nrows();
     let mut a = DVector::<f32>::from_element(k, 1.0 / k as f32);
     for _ in 0..fw_iters {

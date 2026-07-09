@@ -3533,7 +3533,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-util"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anndists",
  "anyhow",
@@ -5079,7 +5079,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.6.14"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -5105,6 +5105,7 @@ dependencies = [
  "log",
  "matrix-param",
  "matrix-util",
+ "mcmc-util",
  "nalgebra 0.34.2",
  "nalgebra-sparse",
  "ndarray",
