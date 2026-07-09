@@ -213,6 +213,22 @@ enum Commands {
     MaskedVae(MaskedTopicArgs),
 
     #[command(
+        name = "masked-stick",
+        about = "Train a masked-imputation topic model with a stick-breaking simplex.",
+        long_about = "Stick-breaking sibling of `masked-topic`: same masked-imputation\n\
+                      pipeline (shared per-gene ρ embedding, NB ETM head, deterministic\n\
+                      no-KL objective, encoder-only inference), but the encoder maps its\n\
+                      logits through a stick-breaking simplex θ_k = v_k·∏_{j<k}(1−v_j),\n\
+                      v_k = σ(η_k), instead of softmax. Topics are no longer exchangeable:\n\
+                      early sticks carry more mass a priori, giving an intrinsic ordering\n\
+                      and a self-pruning tail (later topics shrink toward 0 unless the data\n\
+                      needs them) — a soft, differentiable way to over-provision K and\n\
+                      prune. Writes the same artifacts as `masked-topic`.",
+        visible_aliases = ["mstick"]
+    )]
+    MaskedStick(MaskedTopicArgs),
+
+    #[command(
         about = "Train an scVI-style Gaussian VAE (continuous factor model).",
         long_about = "Gaussian (scVI-style) VAE — the continuous-latent sibling of\n\
                       `topic`. Same pipeline (batch-aware pseudobulk collapse → dense VAE),\n\
@@ -542,6 +558,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::MaskedVae(args) => {
             fit_masked_vae_model(args)?;
+        }
+        Commands::MaskedStick(args) => {
+            fit_masked_stick_model(args)?;
         }
         Commands::Vae(args) => {
             fit_vae_model(args)?;

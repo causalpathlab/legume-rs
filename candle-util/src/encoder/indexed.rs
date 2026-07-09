@@ -8,6 +8,11 @@ use crate::value_transform::anscombe_lite;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 
+/// Symmetric clamp on the masked-encoder's per-topic logits (`z_mean`, and the
+/// Gaussian head's `z_lnvar`): keeps `exp`/`softmax`/stick-breaking numerically
+/// bounded. Shared by every masked head so the bound can't drift between them.
+const MASKED_LOGIT_CLAMP: f64 = 8.0;
+
 /// Indexed embedding encoder over packed top-K input.
 ///
 /// Consumes `(indices [N, K], values [N, K], values_null [N, K]?)` directly:
@@ -259,13 +264,11 @@ impl IndexedEmbeddingEncoder {
         pooled_nh.broadcast_mul(&has_visible_n1) // [N, H]
     }
 
-    /// Deterministic masked-encoder forward → `log θ [N, K_topics]`.
-    ///
-    /// Pools the **visible** genes, runs FC + BN, and returns
-    /// `log_softmax(z_mean)` — **no reparameterization, no KL**. This is the
-    /// masked-imputation topic model's encoder: `θ` is a point estimate, so
-    /// there is no posterior-collapse pressure.
-    pub fn forward_indexed_masked(
+    /// Shared masked-encoder trunk: visible-pool → FC → BN → `bn_nl [N, L]`.
+    /// All three masked heads (softmax / stick-breaking / Gaussian) branch off
+    /// this — only the final projection differs — so the pooling + FC + BN wiring
+    /// lives in exactly one place.
+    fn masked_hidden(
         &self,
         indices: &Tensor,
         values: &Tensor,
@@ -282,9 +285,84 @@ impl IndexedEmbeddingEncoder {
             visible_mask,
         )?;
         let fc_nl = self.fc.forward_t(&h_nh, train)?;
-        let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
-        let z_mean_nk = self.z_mean.forward_t(&bn_nl, train)?.clamp(-8.0, 8.0)?;
+        self.bn_z.forward_t(&fc_nl, train)
+    }
+
+    /// Clamped per-topic logits `z_mean [N, K]` from the masked trunk — the
+    /// pre-activation the simplex heads map to `log θ`.
+    fn masked_logits(
+        &self,
+        indices: &Tensor,
+        values: &Tensor,
+        values_null: Option<&Tensor>,
+        values_mean: Option<&Tensor>,
+        visible_mask: &Tensor,
+        train: bool,
+    ) -> Result<Tensor> {
+        let bn_nl = self.masked_hidden(
+            indices,
+            values,
+            values_null,
+            values_mean,
+            visible_mask,
+            train,
+        )?;
+        self.z_mean
+            .forward_t(&bn_nl, train)?
+            .clamp(-MASKED_LOGIT_CLAMP, MASKED_LOGIT_CLAMP)
+    }
+
+    /// Deterministic masked-encoder forward → `log θ [N, K_topics]`.
+    ///
+    /// Pools the **visible** genes, runs the shared trunk, and returns
+    /// `log_softmax(z_mean)` — **no reparameterization, no KL**. This is the
+    /// masked-imputation topic model's encoder: `θ` is a point estimate, so
+    /// there is no posterior-collapse pressure.
+    pub fn forward_indexed_masked(
+        &self,
+        indices: &Tensor,
+        values: &Tensor,
+        values_null: Option<&Tensor>,
+        values_mean: Option<&Tensor>,
+        visible_mask: &Tensor,
+        train: bool,
+    ) -> Result<Tensor> {
+        let z_mean_nk = self.masked_logits(
+            indices,
+            values,
+            values_null,
+            values_mean,
+            visible_mask,
+            train,
+        )?;
         ops::log_softmax(&z_mean_nk, 1)
+    }
+
+    /// Deterministic **stick-breaking** masked-encoder forward → `log θ [N,K]`.
+    ///
+    /// Same shared trunk as [`Self::forward_indexed_masked`]; only the final
+    /// simplex map differs — the pre-activation logits go through
+    /// [`crate::vae::stick_breaking_log_simplex`] instead of `log_softmax`.
+    /// Ordered, exchangeability-broken topics with a self-pruning tail, still a
+    /// point estimate (no reparameterization, no KL).
+    pub fn forward_indexed_masked_stick(
+        &self,
+        indices: &Tensor,
+        values: &Tensor,
+        values_null: Option<&Tensor>,
+        values_mean: Option<&Tensor>,
+        visible_mask: &Tensor,
+        train: bool,
+    ) -> Result<Tensor> {
+        let z_mean_nk = self.masked_logits(
+            indices,
+            values,
+            values_null,
+            values_mean,
+            visible_mask,
+            train,
+        )?;
+        crate::vae::stick_breaking_log_simplex(&z_mean_nk)
     }
 
     /// Latent Gaussian params `(z_mean, z_lnvar)` from the **visible-pooled**
@@ -299,17 +377,22 @@ impl IndexedEmbeddingEncoder {
         visible_mask: &Tensor,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
-        let h_nh = self.preprocess_indexed_masked(
+        let bn_nl = self.masked_hidden(
             indices,
             values,
             values_null,
             values_mean,
             visible_mask,
+            train,
         )?;
-        let fc_nl = self.fc.forward_t(&h_nh, train)?;
-        let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
-        let z_mean_nk = self.z_mean.forward_t(&bn_nl, train)?.clamp(-8.0, 8.0)?;
-        let z_lnvar_nk = self.z_lnvar.forward_t(&bn_nl, train)?.clamp(-8.0, 8.0)?;
+        let z_mean_nk = self
+            .z_mean
+            .forward_t(&bn_nl, train)?
+            .clamp(-MASKED_LOGIT_CLAMP, MASKED_LOGIT_CLAMP)?;
+        let z_lnvar_nk = self
+            .z_lnvar
+            .forward_t(&bn_nl, train)?
+            .clamp(-MASKED_LOGIT_CLAMP, MASKED_LOGIT_CLAMP)?;
         Ok((z_mean_nk, z_lnvar_nk))
     }
 
