@@ -306,6 +306,28 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
+        default_value_t = 0.0,
+        help = "Held-out imputation eval: fraction to hold out after training (0 = off)",
+        long_help = "After training, run a held-out masked-imputation evaluation and\n\
+                     log the mean log-likelihood per held-out gene. For each cell this\n\
+                     fraction of its observed genes is hidden, the rest encode a latent,\n\
+                     and the trained decoder imputes the hidden genes. Unlike the\n\
+                     per-epoch training likelihood this is not optimized, so it\n\
+                     distinguishes real structure from overfitting. Use a fixed\n\
+                     --eval-seed to compare heads on the same held-out positions.\n\
+                     0 disables (default)."
+    )]
+    eval_mask_fraction: f64,
+
+    #[arg(
+        long,
+        default_value_t = 42,
+        help = "Seed for the held-out imputation mask (see --eval-mask-fraction)"
+    )]
+    eval_seed: u64,
+
+    #[arg(
+        long,
         default_value_t = 1.0,
         help = "KL weight β for the Gaussian latent (masked-vae only; default 1.0)",
         long_help = "KL weight β for the Gaussian latent (masked-vae only; ignored by\n\
@@ -544,11 +566,11 @@ pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
     fit_masked_model(args, LatentHead::Softmax)
 }
 
-/// `senna masked-stick` — **stick-breaking** simplex-`θ`, deterministic (no-KL)
-/// masked ETM. Same pipeline as `masked-topic`; the encoder maps its logits
-/// through a stick-breaking simplex instead of softmax, giving ordered,
+/// `senna masked-sbp` — **stick-breaking process** simplex-`θ`, deterministic
+/// (no-KL) masked ETM. Same pipeline as `masked-topic`; the encoder maps its
+/// logits through a stick-breaking simplex instead of softmax, giving ordered,
 /// exchangeability-broken topics with a self-pruning tail.
-pub fn fit_masked_stick_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
+pub fn fit_masked_sbp_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
     fit_masked_model(args, LatentHead::StickBreaking)
 }
 
@@ -931,6 +953,51 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
     let finest_decoder = decoders.last().unwrap();
     write_masked_dictionary(finest_decoder, &gene_names, &args.out)?;
     write_feature_embedding(base_encoder.feature_embeddings(), &gene_names, &args.out)?;
+
+    // Optional held-out masked-imputation evaluation — the un-optimized
+    // generalization metric (see `--eval-mask-fraction`). Runs on the training
+    // device with the in-memory encoder + finest decoder, before the CPU move.
+    if args.eval_mask_fraction > 0.0 {
+        use crate::topic::eval_indexed::{evaluate_holdout_imputation, HoldoutEvalConfig};
+        let delta_train = match args.adj_method {
+            AdjMethod::Batch => finest_collapsed.delta.as_ref(),
+            AdjMethod::Residual => finest_collapsed.mu_residual.as_ref(),
+        }
+        .map(|x| {
+            x.posterior_mean()
+                .to_tensor(&dev)
+                .expect("delta to tensor")
+                .transpose(0, 1)
+                .expect("transpose")
+                .contiguous()
+                .expect("contiguous")
+        });
+        let holdout_cfg = HoldoutEvalConfig {
+            dev: &dev,
+            adj_method: &args.adj_method,
+            minibatch_size: args.minibatch_size,
+            enc_context_size: args.context_size,
+            shortlist_weights: &shortlist_weights,
+            feature_mean: &feature_mean,
+            head,
+            likelihood: args.masked_likelihood.to_lib(),
+            topic_smoothing: args.topic_smoothing,
+            mask_fraction: args.eval_mask_fraction,
+            seed: args.eval_seed,
+        };
+        let holdout_llik = evaluate_holdout_imputation(
+            &data_vec,
+            &base_encoder,
+            finest_decoder,
+            &holdout_cfg,
+            delta_train.as_ref(),
+        )?;
+        info!(
+            "Held-out imputation: mean log-likelihood/gene = {holdout_llik:.4} \
+             (mask={}, seed={})",
+            args.eval_mask_fraction, args.eval_seed
+        );
+    }
 
     // Persist trainable weights, model architecture, and shortlist weights
     // so `senna predict` (and `--init-from` re-runs) can rebuild this model.

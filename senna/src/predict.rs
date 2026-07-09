@@ -243,7 +243,7 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     }
 
     use crate::topic::model_metadata::{
-        masked_head_from_model_type, MODEL_TYPE_INDEXED_MASKED, MODEL_TYPE_MASKED_STICK,
+        masked_head_from_model_type, MODEL_TYPE_INDEXED_MASKED, MODEL_TYPE_MASKED_SBP,
         MODEL_TYPE_MASKED_VAE, MODEL_TYPE_TOPIC, MODEL_TYPE_VAE,
     };
     // All masked heads (softmax / stick-breaking / Gaussian) share the
@@ -256,7 +256,7 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
         MODEL_TYPE_VAE => predict_vae(args, &metadata),
         other => anyhow::bail!(
             "predict: unsupported model_type '{other}' (expected '{MODEL_TYPE_TOPIC}', \
-             '{MODEL_TYPE_INDEXED_MASKED}', '{MODEL_TYPE_MASKED_STICK}', \
+             '{MODEL_TYPE_INDEXED_MASKED}', '{MODEL_TYPE_MASKED_SBP}', \
              '{MODEL_TYPE_MASKED_VAE}', or '{MODEL_TYPE_VAE}')",
         ),
     }

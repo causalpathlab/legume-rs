@@ -11,12 +11,12 @@ pub const MODEL_TYPE_TOPIC: &str = "topic";
 /// Inference is encoder-only (no decoder refinement). The retired generative
 /// indexed-topic model used `"indexed_topic_packed"`; that path is gone.
 pub const MODEL_TYPE_INDEXED_MASKED: &str = "indexed_topic_masked";
-/// Masked **stick-breaking** topic model (`senna masked-stick`): same masked-
-/// imputation ETM pipeline as [`MODEL_TYPE_INDEXED_MASKED`] (deterministic, no
-/// KL), but the encoder maps its logits through a stick-breaking simplex instead
-/// of softmax — ordered, exchangeability-broken topics with a self-pruning tail.
-/// Inference is encoder-only.
-pub const MODEL_TYPE_MASKED_STICK: &str = "masked_stick";
+/// Masked **stick-breaking process** topic model (`senna masked-sbp`): same
+/// masked-imputation ETM pipeline as [`MODEL_TYPE_INDEXED_MASKED`]
+/// (deterministic, no KL), but the encoder maps its logits through a
+/// stick-breaking simplex instead of softmax — ordered, exchangeability-broken
+/// topics with a self-pruning tail. Inference is encoder-only.
+pub const MODEL_TYPE_MASKED_SBP: &str = "masked_sbp";
 /// Masked **Gaussian VAE** (`senna masked-vae`): same masked-imputation ETM
 /// pipeline as [`MODEL_TYPE_INDEXED_MASKED`], but the encoder emits a
 /// reparameterized Gaussian latent `z` (no simplex softmax) regularized by a KL
@@ -39,7 +39,7 @@ use candle_util::vae::masked_topic::LatentHead;
 pub fn masked_model_type(head: LatentHead) -> &'static str {
     match head {
         LatentHead::Softmax => MODEL_TYPE_INDEXED_MASKED,
-        LatentHead::StickBreaking => MODEL_TYPE_MASKED_STICK,
+        LatentHead::StickBreaking => MODEL_TYPE_MASKED_SBP,
         LatentHead::Gaussian => MODEL_TYPE_MASKED_VAE,
     }
 }
@@ -49,7 +49,7 @@ pub fn masked_model_type(head: LatentHead) -> &'static str {
 pub fn masked_head_from_model_type(model_type: &str) -> Option<LatentHead> {
     match model_type {
         MODEL_TYPE_INDEXED_MASKED => Some(LatentHead::Softmax),
-        MODEL_TYPE_MASKED_STICK => Some(LatentHead::StickBreaking),
+        MODEL_TYPE_MASKED_SBP => Some(LatentHead::StickBreaking),
         MODEL_TYPE_MASKED_VAE => Some(LatentHead::Gaussian),
         _ => None,
     }
@@ -59,7 +59,7 @@ pub fn masked_head_from_model_type(model_type: &str) -> Option<LatentHead> {
 pub fn masked_head_label(head: LatentHead) -> &'static str {
     match head {
         LatentHead::Softmax => "masked-topic",
-        LatentHead::StickBreaking => "masked-stick",
+        LatentHead::StickBreaking => "masked-sbp",
         LatentHead::Gaussian => "masked-vae",
     }
 }
