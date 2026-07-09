@@ -223,9 +223,9 @@ fn embed_cells_from_matrices(
     Ok((v_nk, cols))
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Shared CLI block                                                             //
-////////////////////////////////////////////////////////////////////////////////
+//////////////////////
+// Shared CLI block //
+//////////////////////
 
 /// CLI knobs for the mass-enrichment grouping, shared (via `#[command(flatten)]`)
 /// by every subcommand that stratifies detection by cell group (`m6a`, `pipeline`).
@@ -303,7 +303,7 @@ pub struct MassEnrichmentArgs {
     )]
     pub cluster_min_col_nnz: usize,
 
-    // ---- Deprecated: k-means grouping knobs (superseded by Leiden). Still
+    // Deprecated: k-means grouping knobs (superseded by Leiden). Still
     // parsed so existing command lines keep working, but ignored — passing either
     // just warns and grouping runs at `--cluster-resolution`. Prefer that knob.
     #[arg(long = "n-clusters", default_value_t = 1, hide = true)]

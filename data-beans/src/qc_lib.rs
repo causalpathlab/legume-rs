@@ -12,8 +12,9 @@ use matrix_util::common_io::write_lines;
 use matrix_util::traits::RunningStatOps;
 use regex::Regex;
 
-// ---------------------------------------------------------------------------
-// Cell-axis quality control: robust (MAD) outlier detection + near-empty floor.
+///////////////////////////////////////////////////////////////////////////////////
+// Cell-axis quality control: robust (MAD) outlier detection + near-empty floor. //
+///////////////////////////////////////////////////////////////////////////////////
 //
 // This MAY DROP CELLS (columns): callers that enable QC end up with fewer
 // cells in the working set and/or in the per-cell outputs than the input had,
@@ -26,7 +27,6 @@ use regex::Regex;
 //     dropped from the *output* (gem-style; see `faba gem --min-cell-nnz`);
 //   * non-near-empty MAD outliers are dropped from *training* via
 //     `SparseIoVec::mask_columns` (so they leave the outputs too).
-// ---------------------------------------------------------------------------
 
 /// Which side(s) of the robust band count as outliers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

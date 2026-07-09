@@ -29,9 +29,9 @@
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 
-////////////////////////////////////////////////////////////////////////
-// Public API
-////////////////////////////////////////////////////////////////////////
+////////////////
+// Public API //
+////////////////
 
 /// Configuration for [`fit_principal_curves`].
 #[derive(Debug, Clone)]
@@ -138,17 +138,23 @@ pub fn fit_principal_curves(
     let mut n_iters = 0usize;
 
     for iter in 0..args.max_iter {
-        // ---- projection step (all cells × all their lineages) ----
+        //////////////////////////////////////////////////////
+        // projection step (all cells × all their lineages) //
+        //////////////////////////////////////////////////////
         for (l, curve) in curves.iter().enumerate() {
             project_members(z, curve, &weights, l, &mut lambda, &mut dist2);
         }
 
-        // ---- smoothing step (per lineage, weighted NW on λ) ----
+        ////////////////////////////////////////////////////
+        // smoothing step (per lineage, weighted NW on λ) //
+        ////////////////////////////////////////////////////
         for (l, curve) in curves.iter_mut().enumerate() {
             smooth_curve(z, &weights, &lambda, l, args, curve);
         }
 
-        // ---- convergence on per-cell primary pseudotime ----
+        ////////////////////////////////////////////////
+        // convergence on per-cell primary pseudotime //
+        ////////////////////////////////////////////////
         let (primary, _branch) = primary_assignment(&lambda, &dist2, &weights);
         let delta = mean_rel_delta(&prev_primary, &primary);
         prev_primary = primary;
@@ -176,9 +182,9 @@ pub fn fit_principal_curves(
     })
 }
 
-////////////////////////////////////////////////////////////////////////
-// Tree → lineages
-////////////////////////////////////////////////////////////////////////
+/////////////////////
+// Tree → lineages //
+/////////////////////
 
 /// BFS from `root` over the undirected MST; returns each node's children in the
 /// rooted orientation.
@@ -228,9 +234,9 @@ fn enumerate_lineages(children: &[Vec<usize>], root: usize) -> Vec<Vec<usize>> {
     out
 }
 
-////////////////////////////////////////////////////////////////////////
-// Cluster assignment + membership
-////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////
+// Cluster assignment + membership //
+/////////////////////////////////////
 
 fn assign_clusters(z: &DMatrix<f32>, centroids: &DMatrix<f32>) -> Vec<usize> {
     let n = z.nrows();
@@ -291,9 +297,9 @@ fn membership_weights(cluster: &[usize], lineages: &[Vec<usize>], n: usize) -> D
     w
 }
 
-////////////////////////////////////////////////////////////////////////
-// Curve init, projection, smoothing
-////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////
+// Curve init, projection, smoothing //
+///////////////////////////////////////
 
 /// Resample the polyline through a lineage's centroids to `resolution` points
 /// uniformly spaced in arc-length.
@@ -512,9 +518,9 @@ fn smooth_curve(
     curve.lambda_grid = arclen;
 }
 
-////////////////////////////////////////////////////////////////////////
-// Assignment + convergence
-////////////////////////////////////////////////////////////////////////
+//////////////////////////////
+// Assignment + convergence //
+//////////////////////////////
 
 /// For each cell pick its primary lineage (min orthogonal distance among the
 /// lineages it belongs to) and return `(pseudotime, branch)`.

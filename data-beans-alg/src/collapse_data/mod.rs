@@ -659,9 +659,9 @@ impl MultilevelCollapsingOps for SparseIoVec {
             .clone();
         let num_groups = group_to_cols.len();
 
-        //////////////////////////////////////////////////////////////////
-        // Opt-in refinement path: BBKNN + Poisson DC-SBM over pb-samples
-        //////////////////////////////////////////////////////////////////
+        ////////////////////////////////////////////////////////////////////
+        // Opt-in refinement path: BBKNN + Poisson DC-SBM over pb-samples //
+        ////////////////////////////////////////////////////////////////////
 
         if let Some(refine_params) = params.refine.as_ref() {
             let ctx = RefineCollectCtx {

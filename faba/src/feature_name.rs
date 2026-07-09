@@ -32,14 +32,18 @@
 //! The gene is always recoverable from a parsed row's [`FeatureRow::unit`] via
 //! `unit.split('/').next()`.
 
-// ----- modality tokens (field 1) -----
+///////////////////////////////
+// modality tokens (field 1) //
+///////////////////////////////
 pub const COUNT: &str = "count";
 pub const M6A: &str = "m6a";
 pub const ATOI: &str = "atoi";
 pub const APA: &str = "apa";
 pub const SNP: &str = "snp";
 
-// ----- channel tokens (field 2) -----
+//////////////////////////////
+// channel tokens (field 2) //
+//////////////////////////////
 pub const SPLICED: &str = "spliced";
 pub const UNSPLICED: &str = "unspliced";
 /// Gene-count total (spliced + unspliced) — used by the pooled gene-QC track.

@@ -51,7 +51,9 @@ impl<P: ComponentPrior, F: Fn(&P::Theta) -> f32> McmcModel for SparseModel<P, F>
     }
 
     fn sweep(&self, state: &mut SparseState<P>, rng: &mut SmallRng) {
-        // --- ESS update of inclusion params ---
+        ////////////////////////////////////
+        // ESS update of inclusion params //
+        ////////////////////////////////////
         for l in 0..self.num_components {
             self.prior.remove_component_inplace(
                 &mut state.theta,
@@ -78,7 +80,9 @@ impl<P: ComponentPrior, F: Fn(&P::Theta) -> f32> McmcModel for SparseModel<P, F>
                 .add_component_inplace(&mut state.theta, &state.alphas[l], &state.effects[l]);
         }
 
-        // --- ESS update of effect sizes ---
+        ////////////////////////////////
+        // ESS update of effect sizes //
+        ////////////////////////////////
         for l in 0..self.num_components {
             self.prior.remove_component_inplace(
                 &mut state.theta,

@@ -119,16 +119,15 @@ pub fn select_archetype_k(z: &DMatrix<f32>, k_range: &[usize], args: &AaArgs) ->
 }
 
 /////////////////////////////////////////////////////////////////////
-// Separable-NMF topic recovery (Arora anchors via robust SPA)       //
-//                                                                   //
-// Where archetypal analysis fits hull vertices by a nonconvex       //
-// alternating loop (needing a subsample + a K-refit sweep), the     //
-// Arora separability route (Arora et al. 2012, arXiv:1204.1956)     //
-// *selects* the vertices directly: the anchor features are the      //
-// extreme rows of `ρ`, found by the robust Successive Projection    //
-// Algorithm (Gillis & Vavasis, 2014). Deterministic, single-pass,   //
-// no RNG and no subsample — the anchors are interpretable marker     //
-// features, one per topic.                                          //
+// Separable-NMF topic recovery (Arora anchors via robust SPA)     //
+// Where archetypal analysis fits hull vertices by a nonconvex     //
+// alternating loop (needing a subsample + a K-refit sweep), the   //
+// Arora separability route (Arora et al. 2012, arXiv:1204.1956)   //
+// *selects* the vertices directly: the anchor features are the    //
+// extreme rows of `ρ`, found by the robust Successive Projection  //
+// Algorithm (Gillis & Vavasis, 2014). Deterministic, single-pass, //
+// no RNG and no subsample — the anchors are interpretable marker  //
+// features, one per topic.                                        //
 /////////////////////////////////////////////////////////////////////
 
 /// Result of anchor-based (separable-NMF) topic recovery.
@@ -400,9 +399,9 @@ fn init_archetypes(z: &DMatrix<f32>, k: usize, seed: u64) -> DMatrix<f32> {
     alpha
 }
 
-/////////////////////////////////////////////////////////////////////
-// Sub-solvers                                                       //
-/////////////////////////////////////////////////////////////////////
+/////////////////
+// Sub-solvers //
+/////////////////
 
 /// E-step: assign simplex weights `θ [N, K]` for every row of `z` against
 /// fixed archetypes `α [K, H]`. Parallel over rows; each row is written
@@ -479,9 +478,9 @@ fn best_vertices(z: &DMatrix<f32>, g: &DMatrix<f32>, k: usize) -> Vec<usize> {
     idx
 }
 
-/////////////////////////////////////////////////////////////////////
-// Helpers                                                           //
-/////////////////////////////////////////////////////////////////////
+/////////////
+// Helpers //
+/////////////
 
 /// `‖Z − θ α‖²_F`.
 fn reconstruction_rss(z: &DMatrix<f32>, theta: &DMatrix<f32>, alpha: &DMatrix<f32>) -> f32 {

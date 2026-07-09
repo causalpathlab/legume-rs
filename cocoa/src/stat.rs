@@ -236,8 +236,9 @@ pub fn z_to_pvalue(z: f32) -> f32 {
     p as f32
 }
 
-///////////////////////////////////////////////////////////////////////////
-// Residual collider adjustment for topic proportions
+////////////////////////////////////////////////////////
+// Residual collider adjustment for topic proportions //
+////////////////////////////////////////////////////////
 //
 // When cell type A is a collider (X -> A <- U), conditioning on A
 // opens the spurious path X -> A <- U -> Y. We remove the exposure-
@@ -259,7 +260,6 @@ pub fn z_to_pvalue(z: f32) -> f32 {
 //
 //   Davey Smith & Munafò (2019) Int J Epidemiol
 //   "Contextualizing selection bias in Mendelian randomization"
-///////////////////////////////////////////////////////////////////////////
 
 /// Average each topic's log-proportion across cells belonging to the
 /// same individual.

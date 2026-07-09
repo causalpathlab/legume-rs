@@ -76,7 +76,9 @@ pub fn run(args: &AnnotateOntologyArgs) -> Result<()> {
     };
     mkdir_parent(&out)?;
 
-    // ----- manifest → enrichment matrices -----
+    ////////////////////////////////////
+    // manifest → enrichment matrices //
+    ////////////////////////////////////
     let (mut manifest, manifest_dir) = RunManifest::load(Path::new(args.from.as_ref()))?;
     let q_rel = manifest
         .annotate

@@ -154,7 +154,9 @@ impl<'a> ConversionSifter<'a> {
         Some((pv, mut_conv.cloned().unwrap_or_default()))
     }
 
-    // ========== m6A (DART) methods ==========
+    ////////////////////////
+    // m6A (DART) methods //
+    ////////////////////////
 
     /// Validate RAC pattern in reference: R=A/G, A, C
     fn validate_rac_pattern(&self, r_site: i64, m6a_site: i64, conv_site: i64) -> bool {
@@ -302,7 +304,9 @@ impl<'a> ConversionSifter<'a> {
         }
     }
 
-    // ========== A-to-I methods (single-sample, reference-anchored) ==========
+    ////////////////////////////////////////////////////////
+    // A-to-I methods (single-sample, reference-anchored) //
+    ////////////////////////////////////////////////////////
 
     /// Forward strand scan: ref=A, look for A->G conversion
     pub fn forward_scan(&mut self, positions: &[i64], wt_pos_to_freq: &HashMap<i64, DnaBaseCount>) {

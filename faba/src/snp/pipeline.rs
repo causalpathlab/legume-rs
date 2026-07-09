@@ -87,9 +87,9 @@ pub struct GenePileupResult {
     pub gene_sites: DashMap<GeneId, Vec<SnpSite>>,
 }
 
-// ============================================================
-// KNOWN-SITE GENOTYPING (pileup at VCF positions)
-// ============================================================
+/////////////////////////////////////////////////////
+// KNOWN-SITE GENOTYPING (pileup at VCF positions) //
+/////////////////////////////////////////////////////
 
 /// Gene-centric genotyping at known SNP sites.
 pub fn pileup_known_snps_by_gene(
@@ -279,9 +279,9 @@ pub fn pileup_known_snps_by_region(
     Ok(sites)
 }
 
-// ============================================================
-// DE NOVO SNP DISCOVERY (compare reads to reference genome)
-// ============================================================
+///////////////////////////////////////////////////////////////
+// DE NOVO SNP DISCOVERY (compare reads to reference genome) //
+///////////////////////////////////////////////////////////////
 
 /// Gene-centric de novo SNP discovery: pileup all positions, compare to reference.
 pub fn discover_snps_by_gene(
@@ -499,9 +499,9 @@ pub fn discover_snps_by_region(params: &SnpParams) -> anyhow::Result<Vec<SnpSite
     Ok(sites)
 }
 
-// ============================================================
-// SECOND PASS: Per-cell allele counts (10x single-cell mode)
-// ============================================================
+////////////////////////////////////////////////////////////////
+// SECOND PASS: Per-cell allele counts (10x single-cell mode) //
+////////////////////////////////////////////////////////////////
 
 /// Dual per-cell output: alt allele counts + total depth.
 pub struct DualTriplets {
@@ -614,9 +614,9 @@ pub fn gather_snp_allele_counts_by_gene(
     })
 }
 
-// ============================================================
-// Orchestration: full SNP pipeline
-// ============================================================
+//////////////////////////////////////
+// Orchestration: full SNP pipeline //
+//////////////////////////////////////
 
 /// Run the full SNP genotyping pipeline.
 ///

@@ -253,10 +253,10 @@ fn col_stat_visitor(
     Ok(())
 }
 
-//////////////////////////////////////////////////////////////////////////////
-// Automatic nnz-cutoff selection + ASCII histogram (shared by `squeeze` and by
-// callers that want cell-calling on a per-column nnz vector, e.g. `faba gem`).
-//////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////
+// Automatic nnz-cutoff selection + ASCII histogram (shared by `squeeze` and by //
+// callers that want cell-calling on a per-column nnz vector, e.g. `faba gem`). //
+//////////////////////////////////////////////////////////////////////////////////
 
 /// Suggest a reasonable nnz cutoff by an **exact 1-D 2-means** split of
 /// `log(1+nnz)`, **guarded by a BIC model-selection test** so a cutoff is only

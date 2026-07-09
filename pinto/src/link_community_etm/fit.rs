@@ -49,9 +49,9 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
     anyhow::ensure!(args.batch_edges > 0, "batch_edges must be > 0");
     anyhow::ensure!(c.knn_spatial > 0, "knn_spatial must be > 0");
 
-    //////////////////////////////////////////////////////
-    // 1. Load data                                      //
-    //////////////////////////////////////////////////////
+    //////////////////
+    // 1. Load data //
+    //////////////////
     info!("Loading data files...");
     let has_coords = c.has_coordinates();
 
@@ -80,9 +80,9 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
         n_cells
     );
 
-    //////////////////////////////////////////////////////
-    // 2. Build KNN graph                                //
-    //////////////////////////////////////////////////////
+    ////////////////////////
+    // 2. Build KNN graph //
+    ////////////////////////
     let graph = if has_coords {
         info!("Building spatial KNN graph (k={})...", c.knn_spatial);
         build_spatial_graph(
@@ -120,9 +120,9 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
         crate::util::input::auto_batch_from_components(&graph, &mut batch_membership);
     }
 
-    //////////////////////////////////////////////////////
-    // 3. Batch effects                                  //
-    //////////////////////////////////////////////////////
+    //////////////////////
+    // 3. Batch effects //
+    //////////////////////
     let batch_sort_dim = c.proj_dim.min(10);
     let _batch_db = estimate_and_write_batch_effects(
         &mut data_vec,
@@ -148,7 +148,7 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
     info!("{} cells, {} edges, {} genes", n_cells, n_edges, n_genes);
 
     //////////////////////////////////////////////////////
-    // 4. Multi-level cell coarsening (V-cycle pyramid)  //
+    // 4. Multi-level cell coarsening (V-cycle pyramid) //
     //////////////////////////////////////////////////////
     info!(
         "Graph coarsening ({} levels, {} coarse clusters)...",
@@ -180,9 +180,9 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
         },
     );
 
-    //////////////////////////////////////////////////////
-    // 5. Per-level super-edge profiles + fine profile   //
-    //////////////////////////////////////////////////////
+    /////////////////////////////////////////////////////
+    // 5. Per-level super-edge profiles + fine profile //
+    /////////////////////////////////////////////////////
     info!("Reading cell counts and assembling edge profiles...");
     let cell_counts_csc = data::read_cells_csc(&data_vec)?;
     let gene_totals = data::gene_total_counts(&cell_counts_csc);
@@ -221,9 +221,9 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
     );
     level_profiles.push(fine_profile);
 
-    //////////////////////////////////////////////////////
-    // 6. Shortlist weights from gene totals             //
-    //////////////////////////////////////////////////////
+    ///////////////////////////////////////////
+    // 6. Shortlist weights from gene totals //
+    ///////////////////////////////////////////
     let shortlist_weights = data::shortlist_weights(&gene_totals, args.min_gene_count);
     let n_kept = shortlist_weights.iter().filter(|&&w| w > 0.0).count();
     info!(
@@ -238,9 +238,9 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
     let feature_mean: Vec<f32> = vec![0.0; n_genes];
     let feature_fisher_weights: Vec<f32> = vec![1.0; n_genes];
 
-    //////////////////////////////////////////////////////
-    // 7. Encoder + per-level decoders (ETM ρ tying)     //
-    //////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////
+    // 7. Encoder + per-level decoders (ETM ρ tying) //
+    ///////////////////////////////////////////////////
     let dev = Device::Cpu;
     let parameters = VarMap::new();
     let dtype = candle_core::DType::F32;
@@ -282,9 +282,9 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
         args.train_mode
     );
 
-    //////////////////////////////////////////////////////
-    // 8. V-cycle training via candle-util               //
-    //////////////////////////////////////////////////////
+    /////////////////////////////////////////
+    // 8. V-cycle training via candle-util //
+    /////////////////////////////////////////
     let stop = setup_stop_handler();
     let train_cfg = vae::masked_topic::IndexedTrainConfig {
         parameters: &parameters,
@@ -371,9 +371,9 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
 
     write_score_trace(&scores, &c.out)?;
 
-    //////////////////////////////////////////////////////
-    // 8. Inference + writers                            //
-    //////////////////////////////////////////////////////
+    ////////////////////////////
+    // 8. Inference + writers //
+    ////////////////////////////
     let cell_names = data_vec.column_names()?;
     let gene_names = data_vec.row_names()?;
     // Inference at the fine level: the final entry of `level_profiles`

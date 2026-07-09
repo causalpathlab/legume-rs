@@ -214,9 +214,9 @@ fn collect_matched_stat_visitor(
     Ok(())
 }
 
-/////////////////////////////
-// Match cache for permutations
-/////////////////////////////
+//////////////////////////////////
+// Match cache for permutations //
+//////////////////////////////////
 
 /// Cached KNN matches for one individual within a pseudobulk sample
 struct IndvMatchCache {

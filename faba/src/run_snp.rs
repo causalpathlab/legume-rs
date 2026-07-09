@@ -135,7 +135,9 @@ pub struct SnpArgs {
     )]
     pub skip_discovery: bool,
 
-    // ========== De novo discovery parameters ==========
+    //////////////////////////////////
+    // De novo discovery parameters //
+    //////////////////////////////////
     /// Minimum total read depth to consider a position for de novo discovery.
     #[arg(
         long,
@@ -169,7 +171,9 @@ pub struct SnpArgs {
     )]
     pub min_alt_freq: f64,
 
-    // ========== Genotyping parameters ==========
+    ///////////////////////////
+    // Genotyping parameters //
+    ///////////////////////////
     /// Minimum read depth to call a genotype at known sites.
     #[arg(
         long,
@@ -205,7 +209,9 @@ pub struct SnpArgs {
     )]
     pub base_error_rate: f64,
 
-    // ========== Quality filters ==========
+    /////////////////////
+    // Quality filters //
+    /////////////////////
     /// Minimum Phred base quality score to include a base in pileup.
     #[arg(
         long = "min-base-quality",
@@ -226,7 +232,9 @@ pub struct SnpArgs {
     )]
     pub min_mapping_quality: u8,
 
-    // ========== UMI deduplication ==========
+    ///////////////////////
+    // UMI deduplication //
+    ///////////////////////
     /// UMI barcode tag for deduplication. Reads sharing the same UMI at the
     /// same position (and cell barcode) are counted once.
     #[arg(
@@ -250,7 +258,9 @@ pub struct SnpArgs {
     )]
     pub no_umi_dedup: bool,
 
-    // ========== Quality model ==========
+    ///////////////////
+    // Quality model //
+    ///////////////////
     /// Use per-base quality scores for genotype likelihoods (Li 2011 model).
     #[arg(
         long = "use-base-quality",
@@ -262,7 +272,9 @@ pub struct SnpArgs {
     )]
     pub use_base_quality: bool,
 
-    // ========== Output options ==========
+    ////////////////////
+    // Output options //
+    ////////////////////
     /// Backend format for sparse matrix output.
     #[arg(
         long,

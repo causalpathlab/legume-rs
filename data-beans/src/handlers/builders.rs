@@ -20,11 +20,11 @@ pub use from_h5ad::*;
 pub use from_mtx::*;
 pub use from_zarr::*;
 
-////////////////////////////////////////////////////////////////////////
-//  Shared helpers used across all build-from-* subcommands.          //
-//  Each subcommand lives in its own submodule (`from_*`); helpers    //
-//  that are reused by more than one of them stay here.               //
-////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////
+// Shared helpers used across all build-from-* subcommands.       //
+// Each subcommand lives in its own submodule (`from_*`); helpers //
+// that are reused by more than one of them stay here.            //
+////////////////////////////////////////////////////////////////////
 
 pub(super) fn log_feature_type_histogram(label: &str, row_types: &[Box<str>]) {
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();

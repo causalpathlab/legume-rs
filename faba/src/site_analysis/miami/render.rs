@@ -151,7 +151,9 @@ pub fn render_miami(
             );
         }
 
-        // ---- Top: epi lollipops (rasterize the dot layer when dense) ----
+        /////////////////////////////////////////////////////////////
+        // Top: epi lollipops (rasterize the dot layer when dense) //
+        /////////////////////////////////////////////////////////////
         if panel.epi_sites.len() > opts.raster_threshold {
             svg.push_str(&rasterized_dots(
                 &panel.epi_sites,
@@ -176,12 +178,16 @@ pub fn render_miami(
             ));
         }
 
-        // ---- Middle: gene model band ----
+        /////////////////////////////
+        // Middle: gene model band //
+        /////////////////////////////
         for g in models {
             svg.push_str(&gene_model_svg(g, edges, left, plot_w, model_mid, band_h));
         }
 
-        // ---- Bottom: read-depth filled step-area (mirrored down) ----
+        /////////////////////////////////////////////////////////
+        // Bottom: read-depth filled step-area (mirrored down) //
+        /////////////////////////////////////////////////////////
         svg.push_str(&area_path(
             &panel.depth_bins,
             left,
@@ -205,7 +211,9 @@ pub fn render_miami(
 
     svg.push_str("</svg>");
 
-    // ---- Render ----
+    ////////////
+    // Render //
+    ////////////
     let base = opts.out_prefix.as_ref();
     let mut written = 0usize;
     if opts.want_svg {

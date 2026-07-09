@@ -33,9 +33,9 @@ use render::render_one;
 use rustc_hash::FxHashMap;
 use std::path::Path;
 
-////////////////////////////////////////////////////////////////////////
-// CLI
-////////////////////////////////////////////////////////////////////////
+/////////
+// CLI //
+/////////
 
 #[derive(Args, Debug)]
 pub struct PlotStrandArgs {
@@ -198,15 +198,19 @@ impl HeightScale {
     }
 }
 
-////////////////////////////////////////////////////////////////////////
-// Entry point
-////////////////////////////////////////////////////////////////////////
+/////////////////
+// Entry point //
+/////////////////
 
 pub fn fit_plot_strand(args: &PlotStrandArgs) -> anyhow::Result<()> {
-    // ----- Resolve inputs (manifest defaults, CLI wins) -----
+    //////////////////////////////////////////////////
+    // Resolve inputs (manifest defaults, CLI wins) //
+    //////////////////////////////////////////////////
     let (activity_path, out_prefix) = resolve_inputs(args)?;
 
-    // ----- Load gene × group activity -----
+    ////////////////////////////////
+    // Load gene × group activity //
+    ////////////////////////////////
     let Activity {
         mat,
         gene_names,
@@ -218,7 +222,9 @@ pub fn fit_plot_strand(args: &PlotStrandArgs) -> anyhow::Result<()> {
         group_names.len()
     );
 
-    // ----- Attach genomic coordinates + strand (alias-tolerant) -----
+    //////////////////////////////////////////////////////////
+    // Attach genomic coordinates + strand (alias-tolerant) //
+    //////////////////////////////////////////////////////////
     let placements = place_genes(&gene_names, &args.gtf, args)?;
     anyhow::ensure!(
         !placements.chromosomes.is_empty(),
@@ -230,7 +236,9 @@ pub fn fit_plot_strand(args: &PlotStrandArgs) -> anyhow::Result<()> {
         placements.chromosomes.len()
     );
 
-    // ----- Bin every group, then a global robust scale -----
+    /////////////////////////////////////////////////
+    // Bin every group, then a global robust scale //
+    /////////////////////////////////////////////////
     let grids: Vec<BinGrid> = (0..group_names.len())
         .into_par_iter()
         .map(|c| bin_group(&mat, c, &placements))
@@ -249,7 +257,9 @@ pub fn fit_plot_strand(args: &PlotStrandArgs) -> anyhow::Result<()> {
         "all activity values are zero/negative — nothing to draw"
     );
 
-    // ----- Render one figure per group (+ consensus) -----
+    ///////////////////////////////////////////////
+    // Render one figure per group (+ consensus) //
+    ///////////////////////////////////////////////
     let out_dir = format!("{out_prefix}.strand");
     std::fs::create_dir_all(&out_dir)?;
 
@@ -299,9 +309,9 @@ pub fn fit_plot_strand(args: &PlotStrandArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-////////////////////////////////////////////////////////////////////////
-// Input resolution
-////////////////////////////////////////////////////////////////////////
+//////////////////////
+// Input resolution //
+//////////////////////
 
 /// Returns `(activity_parquet_path, out_prefix)`.
 fn resolve_inputs(args: &PlotStrandArgs) -> anyhow::Result<(String, String)> {

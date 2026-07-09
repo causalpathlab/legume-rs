@@ -82,11 +82,9 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
     }
 }
 
-////////////////////////////////////////////////////////////////
-//                                                            //
-// Per-batch stratified cell sampler (cell axis)              //
-//                                                            //
-////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////
+// Per-batch stratified cell sampler (cell axis) //
+///////////////////////////////////////////////////
 
 /// Two-stage per-batch sampler for the cell axis. Stage 1 picks a cell
 /// (within this batch) with `q(c) ∝ degree(c)^alpha_cell`; stage 2
@@ -286,11 +284,9 @@ pub fn sample_per_batch_stratified_edge_batch(
     }
 }
 
-////////////////////////////////////////////////////////////////
-//                                                            //
-// Stratified positive sampler                                //
-//                                                            //
-////////////////////////////////////////////////////////////////
+/////////////////////////////////
+// Stratified positive sampler //
+/////////////////////////////////
 
 /// Two-stage stratified sampler for pseudobulk axes. Stage 1 picks a
 /// pb (stratum) by `q(p) ∝ pb_size(p)^alpha_pb`; stage 2 picks a
@@ -607,11 +603,9 @@ pub fn sample_stratified_edge_batch(
     }
 }
 
-////////////////////////////////////////////////////////////////
-//                                                            //
-// Nested chain sampler (cell-feature MVP)                    //
-//                                                            //
-////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////
+// Nested chain sampler (cell-feature MVP) //
+/////////////////////////////////////////////
 
 /// Bottom-up nested chain sampler. Each chain starts from a real
 /// `(cell, feature)` super-edge drawn by the existing per-batch
@@ -786,11 +780,9 @@ pub fn nce_loss_chain(
     Ok(total.unwrap())
 }
 
-////////////////////////////////////////////////////////////////
-//                                                            //
-// Standard per-batch sampler + bipartite NCE losses          //
-//                                                            //
-////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////
+// Standard per-batch sampler + bipartite NCE losses //
+///////////////////////////////////////////////////////
 
 /// Build a per-batch sampler. Each batch contributes the positive triplets
 /// whose cells belong to that batch, and a negative pool restricted to the

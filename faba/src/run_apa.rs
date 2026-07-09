@@ -187,7 +187,9 @@ pub struct CountApaArgs {
     )]
     pub(crate) zip: bool,
 
-    // --- Method selection ---
+    //////////////////////
+    // Method selection //
+    //////////////////////
     /// APA quantification method
     #[arg(
         long,
@@ -200,7 +202,9 @@ pub struct CountApaArgs {
     )]
     pub(crate) method: ApaMethod,
 
-    // --- A-to-I mask (shared between simple and mixture) ---
+    /////////////////////////////////////////////////////
+    // A-to-I mask (shared between simple and mixture) //
+    /////////////////////////////////////////////////////
     /// Pre-computed A-to-I mask parquet file
     #[arg(
         long = "atoi-mask",
@@ -219,7 +223,9 @@ pub struct CountApaArgs {
     )]
     pub(crate) snp_mask_file: Option<Box<str>>,
 
-    // --- Simple-mode args ---
+    //////////////////////
+    // Simple-mode args //
+    //////////////////////
     /// Gene barcode BAM tag (simple mode)
     #[arg(
         long,
@@ -270,7 +276,9 @@ pub struct CountApaArgs {
     )]
     pub(crate) gene_type: Option<GffGeneType>,
 
-    // --- Mixture-mode (SCAPE) args ---
+    ///////////////////////////////
+    // Mixture-mode (SCAPE) args //
+    ///////////////////////////////
     /// 3'-UTR regions BED file (mixture mode)
     #[arg(
         short = 'u',

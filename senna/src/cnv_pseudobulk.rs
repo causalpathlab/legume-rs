@@ -23,9 +23,9 @@ use matrix_util::traits::IoOps;
 
 use crate::embed_common::*;
 
-// ---------------------------------------------------------------------------
-// Public entry points
-// ---------------------------------------------------------------------------
+/////////////////////////
+// Public entry points //
+/////////////////////////
 
 /// CNV detection using K-means clusters on SVD latent embeddings.
 pub fn detect_cnv_cluster_informed(
@@ -74,9 +74,9 @@ pub fn detect_cnv_topic_informed(
     detect_cnv_with_membership(data_vec, &membership, batch_membership, gene_positions, cfg)
 }
 
-// ---------------------------------------------------------------------------
-// Core shared logic
-// ---------------------------------------------------------------------------
+///////////////////////
+// Core shared logic //
+///////////////////////
 
 /// Pseudobulk by `(cell_type, individual)` → per-cell-type log-ratio against
 /// the cross-individual mean → stack into `[G × (n_cell_types · n_individuals)]`
@@ -140,9 +140,9 @@ fn detect_cnv_with_membership(
     call_per_sample_cnv(&signal, gene_positions, n_cell_types, n_individuals, cfg)
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+/////////////
+// Helpers //
+/////////////
 
 /// Load gene positions from `--gff` or `--cnv-ground-truth`.
 pub fn load_gene_positions(

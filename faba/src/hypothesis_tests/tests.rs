@@ -1,6 +1,8 @@
 use super::*;
 
-// ---------- Fisher exact (one-sided, WT > MUT) ----------
+////////////////////////////////////////
+// Fisher exact (one-sided, WT > MUT) //
+////////////////////////////////////////
 
 #[test]
 fn fisher_strong_wt_enrichment_is_significant() {
@@ -29,7 +31,9 @@ fn fisher_degenerate_margins_return_one() {
     assert_eq!(fisher_exact_greater(0, 10, 0, 10), 1.0); // no converted reads anywhere
 }
 
-// ---------- Beta-binomial LRT (one-sided, WT > MUT) ----------
+/////////////////////////////////////////////
+// Beta-binomial LRT (one-sided, WT > MUT) //
+/////////////////////////////////////////////
 
 #[test]
 fn lrt_wt_enriched_low_fraction_is_significant() {
@@ -73,7 +77,9 @@ fn lrt_overdispersion_rescues_high_coverage_variant() {
     );
 }
 
-// ---------- contrast dispatch ----------
+///////////////////////
+// contrast dispatch //
+///////////////////////
 
 #[test]
 fn contrast_small_counts_match_fisher() {

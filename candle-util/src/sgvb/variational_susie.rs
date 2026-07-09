@@ -547,7 +547,9 @@ mod tests {
         Ok(())
     }
 
-    // --- Gated SusieVar tests ---
+    //////////////////////////
+    // Gated SusieVar tests //
+    //////////////////////////
 
     #[test]
     fn test_smoothed_sigmoid_bounds() -> Result<()> {

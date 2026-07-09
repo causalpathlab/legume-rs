@@ -126,9 +126,9 @@ pub fn run_build_from_fragments(args: &FromFragmentsArgs) -> anyhow::Result<()> 
         remove_file(&backend_file)?;
     }
 
-    ////////////////////////////////////
-    //  1. Build the feature catalog  //
-    ////////////////////////////////////
+    //////////////////////////////////
+    // 1. Build the feature catalog //
+    //////////////////////////////////
     //
     // Peaks mode: load all peaks up front, sort per-chromosome.
     // Bin mode: discover bins lazily as fragments stream in.
@@ -204,9 +204,9 @@ pub fn run_build_from_fragments(args: &FromFragmentsArgs) -> anyhow::Result<()> 
         );
     }
 
-    /////////////////////////////////////
-    //  2. Optional barcode whitelist  //
-    /////////////////////////////////////
+    ///////////////////////////////////
+    // 2. Optional barcode whitelist //
+    ///////////////////////////////////
     let mut barcode_idx: HashMap<Box<str>, u64> = Default::default();
     let mut col_names: Vec<Box<str>> = Vec::new();
     let whitelist_only = args.barcodes.is_some();
@@ -234,9 +234,9 @@ pub fn run_build_from_fragments(args: &FromFragmentsArgs) -> anyhow::Result<()> 
         }
     }
 
-    //////////////////////////////////////////////////
-    //  3. Stream fragments and accumulate triplets //
-    //////////////////////////////////////////////////
+    /////////////////////////////////////////////////
+    // 3. Stream fragments and accumulate triplets //
+    /////////////////////////////////////////////////
     let mut triplet_map: HashMap<(u64, u64), f32> = Default::default();
     let mut n_total: u64 = 0;
     let mut n_skipped_bc: u64 = 0;
@@ -438,15 +438,14 @@ pub fn run_build_from_fragments(args: &FromFragmentsArgs) -> anyhow::Result<()> 
     Ok(())
 }
 
-////////////////////////////////////////////////////////////////////////
-//  Parallel fragments path: preload entire (decompressed) TSV into   //
-//  memory, split at newline boundaries, parse + aggregate per-thread //
-//  with rayon, then merge into the global triplet/row/col state.     //
-//                                                                    //
-//  Output is identical to the serial path. First-appearance ordering //
-//  of barcodes (and bin rows) is preserved by iterating threads in   //
-//  chunk order during the merge phase.                               //
-////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////
+// Parallel fragments path: preload entire (decompressed) TSV into   //
+// memory, split at newline boundaries, parse + aggregate per-thread //
+// with rayon, then merge into the global triplet/row/col state.     //
+// Output is identical to the serial path. First-appearance ordering //
+// of barcodes (and bin rows) is preserved by iterating threads in   //
+// chunk order during the merge phase.                               //
+///////////////////////////////////////////////////////////////////////
 
 /// Per-thread parse/accumulate state. Triplet keys are interpreted as:
 /// - peaks + whitelist: (global_peak_row, global_col_idx)
@@ -692,9 +691,9 @@ fn run_fragments_preload_parallel(
     use rayon::prelude::*;
     use std::io::Read;
 
-    //////////////////////////////////////
-    //  Decompress entire file to bytes //
-    //////////////////////////////////////
+    /////////////////////////////////////
+    // Decompress entire file to bytes //
+    /////////////////////////////////////
     info!("Preloading fragments from {}", args.fragments);
     let dec_pb =
         matrix_util::progress::new_spinner("{spinner} decompressing... {bytes} ({bytes_per_sec})");
@@ -713,9 +712,9 @@ fn run_fragments_preload_parallel(
     dec_pb.finish_and_clear();
     info!("Decompressed {} bytes", buf.len());
 
-    /////////////////////////////////////////
-    //  Chunk & parallel parse+accumulate  //
-    /////////////////////////////////////////
+    ///////////////////////////////////////
+    // Chunk & parallel parse+accumulate //
+    ///////////////////////////////////////
     let n_threads = rayon::current_num_threads().max(1);
     let ranges = fragment_chunk_ranges(&buf, n_threads);
     info!(
@@ -744,9 +743,9 @@ fn run_fragments_preload_parallel(
     prog_bar.finish_and_clear();
     drop(buf);
 
-    /////////////////////////////////
-    //  Merge: barcodes (col idx)  //
-    /////////////////////////////////
+    ///////////////////////////////
+    // Merge: barcodes (col idx) //
+    ///////////////////////////////
     let mut col_remaps: Vec<Vec<u64>> = Vec::with_capacity(locals.len());
     if whitelist_only {
         // Local triplet keys already use global col idx; no remap.
@@ -771,9 +770,9 @@ fn run_fragments_preload_parallel(
         }
     }
 
-    //////////////////////////////
-    //  Merge: bins (row idx)   //
-    //////////////////////////////
+    ///////////////////////////
+    // Merge: bins (row idx) //
+    ///////////////////////////
     let mut row_remaps: Vec<Vec<u64>> = Vec::with_capacity(locals.len());
     if use_peaks {
         for _ in &locals {
@@ -813,9 +812,9 @@ fn run_fragments_preload_parallel(
         }
     }
 
-    //////////////////////////////
-    //  Merge: triplets + stats //
-    //////////////////////////////
+    /////////////////////////////
+    // Merge: triplets + stats //
+    /////////////////////////////
     for (t, local) in locals.iter().enumerate() {
         *n_total += local.n_total;
         *n_skipped_bc += local.n_skipped_bc;
@@ -881,9 +880,9 @@ fn open_fragments_reader(path: &str) -> anyhow::Result<Box<dyn std::io::BufRead>
 mod tests {
     use super::*;
 
-    ////////////////////////////////////////
-    //  chr_key prefix-stripping (units)  //
-    ////////////////////////////////////////
+    //////////////////////////////////////
+    // chr_key prefix-stripping (units) //
+    //////////////////////////////////////
 
     #[test]
     fn chr_key_strips_lowercase_prefix() {
@@ -920,9 +919,9 @@ mod tests {
         assert_eq!(chr_key(""), "");
     }
 
-    ////////////////////////////////////////////////////
-    //  End-to-end: peaks with mixed chr/no-chr names //
-    ////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////
+    // End-to-end: peaks with mixed chr/no-chr names //
+    ///////////////////////////////////////////////////
 
     /// Peaks BED uses bare `1`/`2`, fragments file uses `chr1`/`chr2`.
     /// Without normalization, zero fragments would overlap any peak.
@@ -1106,11 +1105,11 @@ mod tests {
         assert_eq!(mat[(0, 0)], 2.0);
     }
 
-    /////////////////////////////////////////////////////////////////
-    //  --preload-data parity: parallel path must produce exactly  //
-    //  the same row names, column names, and matrix entries as    //
-    //  the serial path.                                           //
-    /////////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////
+    // --preload-data parity: parallel path must produce exactly //
+    // the same row names, column names, and matrix entries as   //
+    // the serial path.                                          //
+    ///////////////////////////////////////////////////////////////
 
     fn run_pair_and_compare(args_serial: FromFragmentsArgs, args_parallel: FromFragmentsArgs) {
         let out_serial = format!("{}.zarr", &args_serial.output);

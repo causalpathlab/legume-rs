@@ -20,11 +20,9 @@ use crate::util::knn_graph::KnnGraph;
 use auxiliary_data::feature_names::FeatureNameKind;
 use data_beans_alg::random_projection::RandProjOps;
 
-////////////////////////////////////////////////////////////////
-//                                                            //
-// Config + result types                                      //
-//                                                            //
-////////////////////////////////////////////////////////////////
+///////////////////////////
+// Config + result types //
+///////////////////////////
 
 pub struct SrtPreprocessConfig<'a> {
     pub common: &'a SrtInputArgs,
@@ -55,11 +53,9 @@ pub struct SrtPreprocessed {
     pub n_genes: usize,
 }
 
-////////////////////////////////////////////////////////////////
-//                                                            //
-// preprocess_srt                                             //
-//                                                            //
-////////////////////////////////////////////////////////////////
+////////////////////
+// preprocess_srt //
+////////////////////
 
 /// Run the shared SRT preamble: load, build the cell-cell KNN graph,
 /// optionally auto-detect batches from disconnected components, estimate

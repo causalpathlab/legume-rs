@@ -16,7 +16,9 @@ pub trait EssParamSummary: EssParam {
     fn dim(&self) -> usize;
 }
 
-// --- nalgebra DVector<f32> ---
+///////////////////////////
+// nalgebra DVector<f32> //
+///////////////////////////
 
 impl EssParam for DVector<f32> {
     fn linear_combine(&self, a: f32, other: &Self, b: f32) -> Self {
@@ -34,7 +36,9 @@ impl EssParamSummary for DVector<f32> {
     }
 }
 
-// --- nalgebra DMatrix<f32> ---
+///////////////////////////
+// nalgebra DMatrix<f32> //
+///////////////////////////
 
 impl EssParam for DMatrix<f32> {
     fn linear_combine(&self, a: f32, other: &Self, b: f32) -> Self {
@@ -52,7 +56,9 @@ impl EssParamSummary for DMatrix<f32> {
     }
 }
 
-// --- Vec<P> for composite parameters ---
+/////////////////////////////////////
+// Vec<P> for composite parameters //
+/////////////////////////////////////
 
 impl<P: EssParam> EssParam for Vec<P> {
     fn linear_combine(&self, a: f32, other: &Self, b: f32) -> Self {
@@ -63,7 +69,9 @@ impl<P: EssParam> EssParam for Vec<P> {
     }
 }
 
-// --- candle Tensor ---
+///////////////////
+// candle Tensor //
+///////////////////
 
 impl EssParam for Tensor {
     fn linear_combine(&self, a: f32, other: &Self, b: f32) -> Self {

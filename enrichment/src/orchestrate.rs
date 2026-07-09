@@ -177,12 +177,12 @@ pub fn annotate(
     )
     .unwrap();
 
-    // -----------------------------------------------------------------
-    // Null 1: row randomization → (mean*, sd*) restandardization moments.
-    // For each celltype c, sample random size-|M_c| gene sets, compute ES
-    // against every topic's observed ranking, accumulate per-(k, c) mean
-    // and sd via Welford. Does not set the p-value — that comes from null 2.
-    // -----------------------------------------------------------------
+    ////////////////////////////////////////////////////////////////////////////
+    // Null 1: row randomization → (mean*, sd*) restandardization moments.    //
+    // For each celltype c, sample random size-|M_c| gene sets, compute ES    //
+    // against every topic's observed ranking, accumulate per-(k, c) mean     //
+    // and sd via Welford. Does not set the p-value — that comes from null 2. //
+    ////////////////////////////////////////////////////////////////////////////
     let b_rand = config.num_row_randomization;
     let row_moments: Vec<(Vec<f32>, Vec<f32>)> = (0..c)
         .into_par_iter()
@@ -246,8 +246,9 @@ pub fn annotate(
         }
     }
 
-    // -----------------------------------------------------------------
-    // Null 2: sample (PB) permutation → pooled null for p-values.
+    /////////////////////////////////////////////////////////////////
+    // Null 2: sample (PB) permutation → pooled null for p-values. //
+    /////////////////////////////////////////////////////////////////
     // Each perm: shuffle pb_membership rows (within batch if provided),
     // recompute β̃, specificity, rank, ES. Pool permuted restandardized
     // ES across all K topics per celltype to produce a topic-labeling-
@@ -256,7 +257,6 @@ pub fn annotate(
     // When `num_sample_perm == 0`, fall back to row-randomization-based
     // p-values (count of row-rand ES ≥ observed). Useful for small-K
     // settings where the pooled null floor at ~1/K is too conservative.
-    // -----------------------------------------------------------------
     let mut pvalue = Mat::zeros(k, c);
     let b_perm = config.num_sample_perm;
     let mut perm_z_kc: Option<Mat> = None;

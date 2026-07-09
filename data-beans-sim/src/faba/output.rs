@@ -34,9 +34,9 @@ pub fn write_all(
         SparseIoBackend::HDF5 => "h5",
     };
 
-    ////////////////////////////////
+    ////////////////////////////
     // Per-modality .zarr.zip //
-    ////////////////////////////////
+    ////////////////////////////
     // Count modality (m=0): rows are 2G, layout: spliced (0..G), unspliced (G..2G).
     {
         let row_names = build_count_row_names(&lats.gene_names);
@@ -76,9 +76,9 @@ pub fn write_all(
         )?;
     }
 
-    ///////////////////////////////
+    ///////////////////////////
     // Ground-truth parquets //
-    ///////////////////////////////
+    ///////////////////////////
     let modality_names: Vec<Box<str>> = MODALITIES.iter().map(|s| (*s).into()).collect();
 
     let substrate_axis_names: Vec<Box<str>> = SUBSTRATE_AXIS_NAMES
@@ -218,9 +218,9 @@ pub fn write_all(
         )?;
     }
 
-    /////////////////////////////////////////
+    /////////////////////////////////////
     // Batch artefacts (only if B > 1) //
-    /////////////////////////////////////////
+    /////////////////////////////////////
     let bb = ln_delta_per_mod[0].ncols();
     if bb > 1 {
         let batch_lines: Vec<Box<str>> = batch_membership
@@ -241,14 +241,14 @@ pub fn write_all(
         }
     }
 
-    //////////////////////////////////////////
+    //////////////////////////////////////
     // Substrate intercepts (small TSV) //
-    //////////////////////////////////////////
+    //////////////////////////////////////
     write_intercepts(args, lats)?;
 
-    //////////////////////////////////////////////
+    //////////////////////////////////////////
     // Cell barcodes file (faba-compatible) //
-    //////////////////////////////////////////////
+    //////////////////////////////////////////
     write_lines(&lats.cell_names, &format!("{}.barcodes.txt", args.out))?;
 
     Ok(())

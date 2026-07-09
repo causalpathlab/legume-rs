@@ -73,7 +73,9 @@ where
         let p = self.x.ncols();
         let n = self.x.nrows();
 
-        // --- ESS update of inclusion params ---
+        ////////////////////////////////////
+        // ESS update of inclusion params //
+        ////////////////////////////////////
         for l in 0..self.num_components {
             let beta_l = state.betas[l];
             update_residual(&mut state.residual, self.x, &state.alphas[l], beta_l);
@@ -99,7 +101,9 @@ where
             update_residual(&mut state.residual, self.x, &state.alphas[l], -beta_l);
         }
 
-        // --- Conjugate Gaussian update of beta ---
+        ///////////////////////////////////////
+        // Conjugate Gaussian update of beta //
+        ///////////////////////////////////////
         let effect_var = state.effect_var;
         for l in 0..self.num_components {
             let old_beta = state.betas[l];
@@ -122,7 +126,9 @@ where
             state.residual.axpy(-new_beta, &state.xa_buf, 1.0);
         }
 
-        // --- Conjugate InvGamma update of sigma2_eps ---
+        /////////////////////////////////////////////
+        // Conjugate InvGamma update of sigma2_eps //
+        /////////////////////////////////////////////
         if self.reg.estimate_residual_var {
             let rss = state.residual.dot(&state.residual);
             let a_post = 0.01 + n as f32 / 2.0;
@@ -131,7 +137,9 @@ where
             state.sigma2_eps = 1.0 / gamma.sample(rng) as f32;
         }
 
-        // --- Conjugate InvGamma update of effect_var ---
+        /////////////////////////////////////////////
+        // Conjugate InvGamma update of effect_var //
+        /////////////////////////////////////////////
         // beta_l ~ N(0, effect_var), so effect_var | betas ~ InvGamma
         if self.reg.estimate_effect_var {
             let l = self.num_components;

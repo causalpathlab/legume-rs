@@ -55,9 +55,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     anyhow::ensure!(args.n_communities > 0, "n_communities must be > 0");
 
-    //////////////////////////////////////////////////////
-    // 1-3. Load + KNN + batch effects + gene weights   //
-    //////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////
+    // 1-3. Load + KNN + batch effects + gene weights //
+    ////////////////////////////////////////////////////
     let SrtPreprocessed {
         data_vec,
         coordinates,
@@ -77,9 +77,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let has_coords = c.has_coordinates();
     let gene_weights = gene_weights.expect("fisher_weights=true must yield Some");
 
-    //////////////////////////////////////////////////////
-    // 4-pre. Gene network setup (if provided)           //
-    //////////////////////////////////////////////////////
+    /////////////////////////////////////////////
+    // 4-pre. Gene network setup (if provided) //
+    /////////////////////////////////////////////
     // Resolve gene modules on the SNN-augmented, k-core-trimmed graph before
     // building the cell-cell KNN coarsening, so the module-pair basis is
     // ready to feed the V-cycle.
@@ -148,9 +148,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let n_edges = edges.len();
     info!("{} cells, {} edges", n_cells, n_edges);
 
-    //////////////////////////////////////////////////////
-    // 4. Multi-level cell coarsening                   //
-    //////////////////////////////////////////////////////
+    ////////////////////////////////////
+    // 4. Multi-level cell coarsening //
+    ////////////////////////////////////
     info!(
         "Graph coarsening ({} levels, {} coarse clusters)...",
         c.num_levels, c.n_pseudobulk
@@ -196,9 +196,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         },
     );
 
-    //////////////////////////////////////////////////////
-    // 5. Profile context: module-pair OR projection     //
-    //////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////
+    // 5. Profile context: module-pair OR projection //
+    ///////////////////////////////////////////////////
     let proj_basis: Option<Mat> = if module_ctx.is_none() {
         // Projection mode: Gaussian random-projection basis with optional
         // low-count gene filtering, then NB Fisher-info gene weighting baked
@@ -234,9 +234,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         }
     };
 
-    //////////////////////////////////////////////////////
-    // 6. Full fine-resolution profiles                  //
-    //////////////////////////////////////////////////////
+    //////////////////////////////////////
+    // 6. Full fine-resolution profiles //
+    //////////////////////////////////////
     let all_edge_indices: Vec<usize> = (0..n_edges).collect();
     let full_profiles = build_full_profiles(
         &data_vec,
@@ -259,9 +259,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             / 1_048_576.0
     );
 
-    //////////////////////////////////////////////////////
-    // 7. V-cycle cascade through the pyramid            //
-    //////////////////////////////////////////////////////
+    ////////////////////////////////////////////
+    // 7. V-cycle cascade through the pyramid //
+    ////////////////////////////////////////////
     let cell_names = data_vec.column_names()?;
     let mut sampler = LinkGibbsSampler::new(SmallRng::seed_from_u64(c.seed));
 
@@ -289,9 +289,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let mut score_trace: Vec<ScoreEntry> = cascade_result.score_trace;
     let cascade_level_indices = cascade_result.written_level_indices;
 
-    //////////////////////////////////////////////////////
-    // 8. Component-EM + greedy on full profiles        //
-    //////////////////////////////////////////////////////
+    ///////////////////////////////////////////////
+    // 8. Component-EM + greedy on full profiles //
+    ///////////////////////////////////////////////
     // Alpha for EM: auto-scale from full-resolution sparsity (or user override).
     let alpha: f64 = args.alpha.map_or_else(
         || {
@@ -400,9 +400,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         eprintln!();
     }
 
-    //////////////////////////////////////////////////////
-    // 9. Extract and write final outputs               //
-    //////////////////////////////////////////////////////
+    ////////////////////////////////////////
+    // 9. Extract and write final outputs //
+    ////////////////////////////////////////
     let draft_prefix = format!("{}.draft", c.out);
     info!(
         "Writing draft outputs (propensity, gene_community, link_community) → {}.*",
@@ -483,9 +483,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         }
     }
 
-    //////////////////////////////////////////////////////
-    // 10. Write .pinto.json (information-flow root)  //
-    //////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////
+    // 10. Write .pinto.json (information-flow root) //
+    ///////////////////////////////////////////////////
     {
         use crate::util::metadata::{create_lc_metadata, RunInputs};
         let coord_file_str = c.coord_files_joined();

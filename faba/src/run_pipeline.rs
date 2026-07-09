@@ -482,9 +482,9 @@ pub struct PipelineArgs {
     #[arg(long, default_value_t = false, help = "Skip APA quantification step")]
     pub skip_apa: bool,
 
-    ///////////////////////////////
-    // Mass-enrichment grouping   //
-    ///////////////////////////////
+    //////////////////////////////
+    // Mass-enrichment grouping //
+    //////////////////////////////
     #[command(flatten)]
     pub enrich: MassEnrichmentArgs,
 }

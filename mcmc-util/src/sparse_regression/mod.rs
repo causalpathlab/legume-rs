@@ -183,7 +183,9 @@ mod tests {
         })
     }
 
-    // ---- Blackbox sampler tests ----
+    ////////////////////////////
+    // Blackbox sampler tests //
+    ////////////////////////////
 
     #[test]
     fn test_blackbox_single_signal() {
@@ -230,7 +232,9 @@ mod tests {
         );
     }
 
-    // ---- Regression sampler tests ----
+    //////////////////////////////
+    // Regression sampler tests //
+    //////////////////////////////
 
     #[test]
     fn test_regression_single_signal() {

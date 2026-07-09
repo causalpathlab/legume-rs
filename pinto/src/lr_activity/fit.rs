@@ -91,9 +91,9 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     let c = &args.common;
     mkdir_parent(&c.out)?;
 
-    //////////////////////////////////////////////////////
-    // 1. Load expression + resolve gene index map
-    //////////////////////////////////////////////////////
+    /////////////////////////////////////////////////
+    // 1. Load expression + resolve gene index map //
+    /////////////////////////////////////////////////
     info!("Loading expression data...");
     let data_vec = load_expr_data(c)?;
 
@@ -110,9 +110,9 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         .map(|(i, n)| (n.clone(), i))
         .collect();
 
-    //////////////////////////////////////////////////////
-    // 2. Parse LR pairs, resolve genes
-    //////////////////////////////////////////////////////
+    //////////////////////////////////////
+    // 2. Parse LR pairs, resolve genes //
+    //////////////////////////////////////
     info!("Reading LR pairs from {}...", &args.lr_pairs);
     let raw_pairs = read_lr_pairs(&args.lr_pairs)?;
     let mut resolved_pairs: Vec<(Box<str>, Box<str>, usize, usize)> = Vec::new();
@@ -132,9 +132,9 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     );
     info!("Resolved {} LR pairs", resolved_pairs.len());
 
-    //////////////////////////////////////////////////////
-    // 3. Read edges + batches from prior `pinto lc` run
-    //////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////
+    // 3. Read edges + batches from prior `pinto lc` run //
+    ///////////////////////////////////////////////////////
     let lc_edges_path = format!("{}.link_community.parquet", &args.lc_prefix);
     let coord_pairs_path = format!("{}.coord_pairs.parquet", &args.lc_prefix);
     info!("Reading edge assignments from {}", &lc_edges_path);
@@ -190,9 +190,9 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         );
     }
 
-    //////////////////////////////////////////////////////
-    // 4. Per-gene total counts (filter LR pairs)
-    //////////////////////////////////////////////////////
+    ////////////////////////////////////////////////
+    // 4. Per-gene total counts (filter LR pairs) //
+    ////////////////////////////////////////////////
     info!("Computing per-gene total counts...");
     const SUM_CHUNK: usize = 512;
     let mut gene_sum = vec![0.0f32; n_genes];
@@ -223,20 +223,20 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         args.min_gene_count
     );
 
-    //////////////////////////////////////////////////////
-    // 5. Cell→community soft membership (sender / receiver)
-    //////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////
+    // 5. Cell→community soft membership (sender / receiver) //
+    ///////////////////////////////////////////////////////////
     info!("Building cell→community soft membership...");
     let (p_send, p_recv) = build_role_memberships(&edges, n_cells, n_communities);
 
-    //////////////////////////////////////////////////////
-    // 6. Per-cell batch label (modal incident batch)
-    //////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////
+    // 6. Per-cell batch label (modal incident batch) //
+    ////////////////////////////////////////////////////
     let cell_batch = derive_cell_batch_labels(&edges, n_cells);
 
-    //////////////////////////////////////////////////////
-    // 7. Random projection + propensity binary-sort
-    //////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////
+    // 7. Random projection + propensity binary-sort //
+    ///////////////////////////////////////////////////
     info!(
         "Random projection (dim {}) + propensity binary-sort...",
         args.propensity_dim
@@ -260,9 +260,9 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
             .len()
     );
 
-    //////////////////////////////////////////////////////
-    // 8. Read just the LR-gene rows (dense, small)
-    //////////////////////////////////////////////////////
+    //////////////////////////////////////////////////
+    // 8. Read just the LR-gene rows (dense, small) //
+    //////////////////////////////////////////////////
     let mut lr_genes: Vec<usize> = Vec::new();
     let mut gene_to_local: HashMap<usize, usize> = HashMap::default();
     for &(_, _, li, ri) in &real_pairs {
@@ -289,9 +289,9 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         fisher_lr.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
     );
 
-    //////////////////////////////////////////////////////
-    // 9. Collapse into per-(community, sample) pseudobulk
-    //////////////////////////////////////////////////////
+    /////////////////////////////////////////////////////////
+    // 9. Collapse into per-(community, sample) pseudobulk //
+    /////////////////////////////////////////////////////////
     info!(
         "Collapsing into pseudobulk: {} comm × {} samples × {} LR genes...",
         n_communities,
@@ -316,9 +316,9 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         apply_gene_weights(&mut collapse.log_mean_recv[c], &fisher_lr);
     }
 
-    //////////////////////////////////////////////////////
-    // 10. Per-stratum scoring (per-batch and pooled)
-    //////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////
+    // 10. Per-stratum scoring (per-batch and pooled) //
+    ////////////////////////////////////////////////////
     let mut rows: Vec<LrActivityRow> = Vec::new();
     let mut strata: Vec<StratumEntry> = Vec::new();
 
@@ -440,9 +440,9 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         eprintln!();
     }
 
-    //////////////////////////////////////////////////////
-    // 11. Write output
-    //////////////////////////////////////////////////////
+    //////////////////////
+    // 11. Write output //
+    //////////////////////
     let out_path = format!("{}.lr_activity.parquet", &c.out);
     info!("Writing {} rows to {}", rows.len(), out_path);
     write_lr_activity(&out_path, &rows)?;
