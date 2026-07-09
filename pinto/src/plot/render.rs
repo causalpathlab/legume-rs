@@ -180,8 +180,8 @@ pub fn emit_figure(
         draw_labels: !layers.iter().all(|l| l.label.is_empty()),
         label_font_size_px: frame.label_font_px,
         hull_stroke_px: 0.5,
-        hull_fill_alpha: 0.0,
         frame_stroke_px: if draw_frame { 0.1 } else { 0.0 },
+        ..Default::default()
     };
 
     let with_ext = |ext: &str| -> PathBuf {

@@ -8,6 +8,7 @@ mod gene_count;
 mod lineage;
 mod mixture;
 mod pipeline_util;
+mod plot;
 mod read_depth;
 mod run_annotate;
 mod run_apa;
@@ -18,7 +19,6 @@ mod run_gene_count;
 mod run_lineage;
 mod run_m6a;
 mod run_pipeline;
-mod run_plot;
 mod run_read_depth;
 mod run_snp;
 mod site_analysis;
@@ -26,6 +26,7 @@ mod snp;
 
 use crate::common::*;
 use faba::gem::args::GemArgs;
+use plot::*;
 use run_annotate::*;
 use run_apa::*;
 use run_assoc::*;
@@ -35,7 +36,6 @@ use run_gene_count::*;
 use run_lineage::*;
 use run_m6a::*;
 use run_pipeline::*;
-use run_plot::*;
 use run_read_depth::*;
 use run_snp::*;
 use site_analysis::metagene::*;
@@ -317,10 +317,12 @@ Example:\n  \
             That backbone is a prior for `faba lineage`, not a replacement.",
         after_long_help = "\
 	Example:\n\
-  faba gem --genes out/rep1_wt_genes.zarr.zip -o out/gem\n\n\
-  Multiple samples (comma-separated)\n\
-  each sample a batch via its barcodes`@batch` tag\n\n\
-  faba gem --genes out/rep1_genes.zarr.zip,out/rep2_genes.zarr.zip -o out/gem")]
+  faba gem out/rep1_wt_genes.zarr.zip -o out/gem\n\n\
+  Multiple samples — pass them positionally, so shell globs work.\n\
+  Each sample becomes a batch via its barcodes' `@batch` tag.\n\n\
+  faba gem out/rep1_genes.zarr.zip out/rep2_genes.zarr.zip -o out/gem\n\
+  faba gem out/*_genes.zarr.zip -o out/gem\n\n\
+  The `--genes a,b` flag form still works, but not together with the positional one.")]
     Gem(GemArgs),
 
     #[command(
