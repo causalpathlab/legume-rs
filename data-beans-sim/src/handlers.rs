@@ -180,6 +180,19 @@ pub struct RunSimulateArgs {
 
     #[arg(
         long,
+        value_delimiter = ',',
+        help = "Route cells whose dominant topic is in this list to a second `<out>.holdout` backend",
+        long_help = "Comma-separated 0-indexed topic ids. Cells whose dominant topic (argmax θ)\n\
+                     is in this set are written to `<out>.holdout.<backend>` instead of the\n\
+                     primary `<out>.<backend>`, so a model trained on the primary file provably\n\
+                     never sees these topics. β/θ ground-truth parquets stay full; column names\n\
+                     in both backends are the original cell indices (cross-reference\n\
+                     `<out>.prop.parquet`). Default: unset → a single output file. Synthetic mode only."
+    )]
+    pub holdout_topics: Option<Vec<usize>>,
+
+    #[arg(
+        long,
         default_value_t = 1.0,
         help = "Log-normal scale σ_β. Total log-variance per gene-topic entry is σ_β² \
                 (independent of pve_topic); E[β(g,k)] = 1 by centering. Higher = more \
@@ -328,6 +341,34 @@ pub struct RunSimulateMultimodalArgs {
     pub zip: bool,
 }
 
+/// Build a sparse backend from column-remapped triplets and register
+/// row/column names. Shared by the single-file and holdout-split write
+/// paths of [`run_simulate`].
+fn build_and_write_backend(
+    triplets: &[(u64, u64, f32)],
+    row_names: &[Box<str>],
+    col_names: &[Box<str>],
+    backend: &SparseIoBackend,
+    effective_output: &str,
+) -> anyhow::Result<()> {
+    let (_, backend_file) = resolve_backend_file(effective_output, Some(backend.clone()))?;
+    remove_all_files(&vec![backend_file.clone()]).ok();
+
+    let shape = (row_names.len(), col_names.len(), triplets.len());
+    let mut data =
+        create_sparse_from_triplets(triplets, shape, Some(&backend_file), Some(backend))?;
+    data.register_row_names_vec(row_names);
+    data.register_column_names_vec(col_names);
+
+    finalize_zarr_output(&backend_file, effective_output)?;
+    info!(
+        "wrote backend: {} ({} cells)",
+        backend_file,
+        col_names.len()
+    );
+    Ok(())
+}
+
 /// Simulate log-normal factored count data.
 ///
 /// Without `--reference`: pure log-normal · Poisson model
@@ -408,8 +449,6 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
     write_lines(&batch_out, &batch_memb_file)?;
     info!("batch membership: {:?}", &batch_memb_file);
 
-    let mtx_shape = (sim_args.rows, sim_args.cols, sim.triplets.len());
-
     let rows: Vec<Box<str>> = (0..sim_args.rows)
         .map(|i| i.to_string().into_boxed_str())
         .collect();
@@ -456,19 +495,61 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 
     info!("registering triplets ...");
 
-    let mut data = create_sparse_from_triplets(
-        &sim.triplets,
-        mtx_shape,
-        Some(&backend_file),
-        Some(&backend),
-    )?;
+    let holdout_set: Option<std::collections::HashSet<usize>> = cmd_args
+        .holdout_topics
+        .as_ref()
+        .map(|v| v.iter().copied().collect());
 
-    info!("created sparse matrix: {}", backend_file);
+    match holdout_set {
+        None => {
+            build_and_write_backend(&sim.triplets, &rows, &cols, &backend, &effective_output)?;
+        }
+        Some(holdout) => {
+            // Route each cell by its dominant (argmax θ) topic.
+            let dom: Vec<usize> = (0..sim_args.cols)
+                .map(|j| sim.theta_kn.column(j).imax())
+                .collect();
 
-    data.register_row_names_vec(&rows);
-    data.register_column_names_vec(&cols);
+            let mut prim_map = vec![usize::MAX; sim_args.cols];
+            let mut hold_map = vec![usize::MAX; sim_args.cols];
+            let mut prim_cols: Vec<Box<str>> = Vec::new();
+            let mut hold_cols: Vec<Box<str>> = Vec::new();
+            for j in 0..sim_args.cols {
+                if holdout.contains(&dom[j]) {
+                    hold_map[j] = hold_cols.len();
+                    hold_cols.push(cols[j].clone());
+                } else {
+                    prim_map[j] = prim_cols.len();
+                    prim_cols.push(cols[j].clone());
+                }
+            }
 
-    finalize_zarr_output(&backend_file, &effective_output)?;
+            let mut prim_tr: Vec<(u64, u64, f32)> = Vec::with_capacity(sim.triplets.len());
+            let mut hold_tr: Vec<(u64, u64, f32)> = Vec::new();
+            for &(g, j, v) in &sim.triplets {
+                let jj = j as usize;
+                if holdout.contains(&dom[jj]) {
+                    hold_tr.push((g, hold_map[jj] as u64, v));
+                } else {
+                    prim_tr.push((g, prim_map[jj] as u64, v));
+                }
+            }
+
+            build_and_write_backend(&prim_tr, &rows, &prim_cols, &backend, &effective_output)?;
+
+            let holdout_effective =
+                apply_zip_flag(&format!("{}.holdout", cmd_args.output), cmd_args.zip);
+            build_and_write_backend(&hold_tr, &rows, &hold_cols, &backend, &holdout_effective)?;
+
+            info!(
+                "holdout split by dominant topic {:?}: {} primary + {} holdout cells",
+                cmd_args.holdout_topics.as_ref().unwrap(),
+                prim_cols.len(),
+                hold_cols.len()
+            );
+        }
+    }
+
     info!("done");
     Ok(())
 }
@@ -493,6 +574,9 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 /// copula for HVGs and iid `N(0, 1)` for non-HVGs. No per-cell depth
 /// renormalization — library size emerges from `μ̂_g · exp(stage-1 + stage-2)`.
 fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
+    if cmd_args.holdout_topics.is_some() {
+        log::warn!("--holdout-topics is ignored in reference mode (synthetic mode only)");
+    }
     let reference_path = cmd_args
         .reference
         .as_ref()
