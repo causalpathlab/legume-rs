@@ -6,6 +6,14 @@
 //! trend GAM (does editing change as the branch progresses — a Bayesian ESS spline by
 //! default, or a frequentist quasi-binomial/binomial variant via `--trend-method`). See
 //! [`crate::assoc`].
+//!
+//! When the lineage was annotated (`faba lineage --markers`, which writes
+//! `{from}.lineage_annot.membership.tsv`), a **second reporting level** re-runs the same
+//! two tests with cells regrouped by their annotated **cell type** instead of by branch —
+//! pooling the cells that share a cell type across lineages (`{out}.celltype_*.parquet`).
+//! The between-cell-type contrast is clean; the within-cell-type trend is secondary,
+//! because pooling divergent lineages of one cell type onto a shared pseudotime axis
+//! weakens the "change along the trajectory" reading (noted in its output).
 
 use anyhow::Result;
 use clap::{Args, ValueEnum};
@@ -17,7 +25,7 @@ use matrix_util::traits::IoOps;
 
 use crate::assoc::contrast::{bin_pseudotime, site_profile};
 use crate::assoc::contrast_bayes::{run_contrasts_bayes, BayesContrastConfig, BayesContrastResult};
-use crate::assoc::io::{load_lineage, load_sites, Lineage, Site};
+use crate::assoc::io::{load_celltypes, load_lineage, load_sites, Lineage, Site};
 use crate::assoc::trend::{run_trends, TrendConfig, TrendResult};
 use crate::assoc::trend_bayes::{run_trends_bayes, BayesTrendConfig, BayesTrendResult};
 use crate::assoc::Modality;
@@ -106,7 +114,7 @@ pub struct AssocArgs {
 
     #[arg(
         long,
-        default_value_t = 800,
+        default_value_t = 1000,
         help = "bayes trend: posterior samples per (site, branch)"
     )]
     pub trend_samples: usize,
@@ -116,6 +124,19 @@ pub struct AssocArgs {
 
     #[arg(long, default_value_t = 0.1, help = "BH FDR alpha for reporting")]
     pub fdr_alpha: f32,
+
+    #[arg(
+        long,
+        conflicts_with = "no_celltype",
+        help = "cell<TAB>cell_type TSV for the cell-type-level report \
+                (default: {from}.lineage_annot.membership.tsv from `faba lineage --markers`). \
+                Unassigned/unmatched cells stay in the contrast 'rest' as background but are \
+                not reported as a cell type. Errors if this explicit path is missing."
+    )]
+    pub celltype_annot: Option<Box<str>>,
+
+    #[arg(long, help = "skip the cell-type-level aggregation report")]
+    pub no_celltype: bool,
 
     #[arg(
         long,
@@ -144,10 +165,60 @@ pub fn run_assoc(args: &AssocArgs) -> Result<()> {
     info!("loaded {} {} sites", sites.len(), args.modality.token());
     anyhow::ensure!(!sites.is_empty(), "no sites with both channels found");
 
-    // Between-branch contrast: Bayesian binomial GLM — the posterior of a branch's
-    // pseudotime-adjusted log-odds excess, reported as a mean effect + 90% credible interval
-    // + lfsr. The per-bin baseline conditions out pseudotime; the shrinkage prior regularizes
-    // the branch effect (so calls are stable across seeds without any permutation machinery).
+    // Branch-level report (the primary deliverable). `strict` → error if nothing clears QC.
+    run_report(
+        &sites,
+        &lin,
+        args,
+        &ReportLevel {
+            names: None,
+            drop_group: None,
+            tag: "branch",
+            unit: "branch",
+            strict: true,
+        },
+        &out,
+    )?;
+
+    // Cell-type-level report (optional; requires `faba lineage --markers`).
+    if !args.no_celltype {
+        run_celltype_level(args, &lin, &sites, &out)?;
+    }
+    Ok(())
+}
+
+/// One reporting level's grouping + labelling knobs. The branch level groups cells by
+/// principal-curve lineage (`names: None`); the cell-type level groups by annotated cell
+/// type (`names: Some`, with the `unassigned` background bucket named in `drop_group`).
+struct ReportLevel<'a> {
+    /// Group id → display name (cell-type level), or `None` to key rows by `b{group}`.
+    names: Option<&'a [Box<str>]>,
+    /// A background group kept in the contrast "rest" but omitted from every report.
+    drop_group: Option<usize>,
+    /// Output-file infix, e.g. `"branch"` → `{out}.branch_contrast.parquet`.
+    tag: &'a str,
+    /// Log noun, e.g. `"branch"` or `"cell-type"`.
+    unit: &'a str,
+    /// Error (vs. log) when the contrast finds no QC-passing group — true for the primary level.
+    strict: bool,
+}
+
+/// Run both association tests for one grouping of `lin` and write the three parquet outputs
+/// (`{out}.{tag}_contrast/_profile/_trend.parquet`). Shared by the branch and cell-type
+/// levels: they differ only in the grouping (`lin`), the row labels, the dropped background
+/// group, and strictness. The between-group contrast is a Bayesian binomial GLM (per-bin
+/// baseline conditions out pseudotime; a shrinkage prior stabilises the effect across seeds);
+/// the within-group trend GAM asks whether the rate changes along the grouping's axis.
+fn run_report(
+    sites: &[Site],
+    lin: &Lineage,
+    args: &AssocArgs,
+    level: &ReportLevel,
+    out: &str,
+) -> Result<()> {
+    let keep = |g: usize| level.drop_group != Some(g);
+
+    // Between-group contrast.
     let bcfg = BayesContrastConfig {
         n_bins: args.n_bins,
         min_total_coverage: args.min_total_coverage,
@@ -157,29 +228,47 @@ pub fn run_assoc(args: &AssocArgs) -> Result<()> {
         warmup: args.trend_warmup,
         seed: args.seed,
     };
-    let res = run_contrasts_bayes(&sites, &lin, &bcfg);
-    anyhow::ensure!(!res.is_empty(), "no (site, branch) passed QC");
-    let n_conf = res.iter().filter(|r| r.lfsr < args.fdr_alpha).count();
-    info!(
-        "Bayesian between-branch contrast: {} (site,branch); {n_conf} with lfsr < {}",
-        res.len(),
-        args.fdr_alpha
-    );
-    write_branch_contrast_bayes(&res, &sites, &format!("{out}.branch_contrast.parquet"))?;
-    let tested: Vec<usize> = res.iter().map(|r| r.site).collect();
-    write_branch_profile(
-        &tested,
-        &sites,
-        &lin,
-        args.n_bins,
-        &format!("{out}.branch_profile.parquet"),
-    )?;
+    let res: Vec<_> = run_contrasts_bayes(sites, lin, &bcfg)
+        .into_iter()
+        .filter(|r| keep(r.branch))
+        .collect();
+    if res.is_empty() {
+        anyhow::ensure!(!level.strict, "no (site, {}) passed QC", level.unit);
+        info!(
+            "no (site, {}) passed the between-{} contrast QC",
+            level.unit, level.unit
+        );
+    } else {
+        let n_conf = res.iter().filter(|r| r.lfsr < args.fdr_alpha).count();
+        info!(
+            "between-{} contrast: {} (site, {}); {n_conf} with lfsr < {}",
+            level.unit,
+            res.len(),
+            level.unit,
+            args.fdr_alpha
+        );
+        write_branch_contrast_bayes(
+            &res,
+            sites,
+            level,
+            &format!("{out}.{}_contrast.parquet", level.tag),
+        )?;
+        let tested: Vec<usize> = res.iter().map(|r| r.site).collect();
+        write_branch_profile(
+            &tested,
+            sites,
+            lin,
+            level,
+            args.n_bins,
+            &format!("{out}.{}_profile.parquet", level.tag),
+        )?;
+    }
 
-    // Within-branch association: does the rate change *along* each branch?
-    let trend_path = format!("{out}.branch_trend.parquet");
+    // Within-group trend: does the rate change *along* the grouping's axis?
+    let trend_path = format!("{out}.{}_trend.parquet", level.tag);
     match args.trend_method {
         TrendMethod::Bayes => {
-            let bcfg = BayesTrendConfig {
+            let tcfg = BayesTrendConfig {
                 n_knots: args.n_knots,
                 min_total_coverage: args.min_total_coverage,
                 min_cells: args.min_cells,
@@ -188,17 +277,24 @@ pub fn run_assoc(args: &AssocArgs) -> Result<()> {
                 warmup: args.trend_warmup,
                 seed: args.seed,
             };
-            let trends = run_trends_bayes(&sites, &lin, &bcfg);
+            let trends: Vec<_> = run_trends_bayes(sites, lin, &tcfg)
+                .into_iter()
+                .filter(|r| keep(r.branch))
+                .collect();
             if trends.is_empty() {
-                info!("no (site, branch) passed within-branch trend QC");
+                info!(
+                    "no (site, {}) passed within-{} trend QC",
+                    level.unit, level.unit
+                );
             } else {
                 let n_conf = trends.iter().filter(|r| r.lfsr < args.fdr_alpha).count();
                 info!(
-                    "{} within-branch Bayesian trends; {n_conf} with lfsr < {}",
+                    "{} within-{} Bayesian trends; {n_conf} with lfsr < {}",
                     trends.len(),
+                    level.unit,
                     args.fdr_alpha
                 );
-                write_branch_trend_bayes(&trends, &sites, &trend_path)?;
+                write_branch_trend_bayes(&trends, sites, level, &trend_path)?;
             }
         }
         method => {
@@ -208,40 +304,137 @@ pub fn run_assoc(args: &AssocArgs) -> Result<()> {
                 min_cells: args.min_cells,
                 overdispersion: method == TrendMethod::Quasi,
             };
-            let trends = run_trends(&sites, &lin, &tcfg);
+            let trends: Vec<_> = run_trends(sites, lin, &tcfg)
+                .into_iter()
+                .filter(|r| keep(r.branch))
+                .collect();
             if trends.is_empty() {
-                info!("no (site, branch) passed within-branch trend QC");
+                info!(
+                    "no (site, {}) passed within-{} trend QC",
+                    level.unit, level.unit
+                );
             } else {
                 let tps: Vec<f32> = trends.iter().map(|r| r.p_value).collect();
                 let tqs = benjamini_hochberg(&tps);
                 let t_sig = tqs.iter().filter(|&&q| q < args.fdr_alpha).count();
                 info!(
-                    "{} within-branch trend tests; {t_sig} at q < {}",
+                    "{} within-{} trend tests; {t_sig} at q < {}",
                     trends.len(),
+                    level.unit,
                     args.fdr_alpha
                 );
-                write_branch_trend(&trends, &tqs, &sites, &trend_path)?;
+                write_branch_trend(&trends, &tqs, sites, level, &trend_path)?;
             }
         }
     }
     Ok(())
 }
 
+/// Cell-type-level report: re-pool the lineage cells by their annotated cell type and
+/// re-run the same tests via [`run_report`] — the fitting core reads only the integer group
+/// id per cell, so swapping the branch grouping for a cell-type grouping needs no change to
+/// the models. Requires a cell-type annotation: an explicit `--celltype-annot` must exist and
+/// load (errors otherwise), while the auto-detected `{from}.lineage_annot.membership.tsv` is
+/// best-effort (missing or unreadable → info/warn + skip, never failing the run whose
+/// branch-level outputs are already written).
+fn run_celltype_level(args: &AssocArgs, lin: &Lineage, sites: &[Site], out: &str) -> Result<()> {
+    let (path, explicit) = match args.celltype_annot.as_deref() {
+        Some(p) => (p.to_string(), true),
+        None => (format!("{}.lineage_annot.membership.tsv", args.from), false),
+    };
+    if !std::path::Path::new(&path).exists() {
+        anyhow::ensure!(!explicit, "--celltype-annot {path}: file not found");
+        info!(
+            "cell-type report skipped: no annotation at {path} \
+             (run `faba lineage --markers`, or pass --celltype-annot)"
+        );
+        return Ok(());
+    }
+
+    // An explicit override's load errors are fatal; the auto-default's are not (the branch
+    // report already succeeded, so a bad membership file should not sink the whole run).
+    let ctg = match load_celltypes(&path, &lin.cell_names) {
+        Ok(c) => c,
+        Err(e) if !explicit => {
+            log::warn!("cell-type report skipped: {e:#}");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+
+    let n_types = ctg.names.len();
+    let has_bg = ctg.unassigned_id.is_some();
+    let n_reported = n_types - usize::from(has_bg);
+    info!(
+        "cell-type report: {} cells over {n_reported} cell type(s){} from {path}",
+        ctg.ids.len(),
+        if has_bg {
+            " (+ unassigned background)"
+        } else {
+            ""
+        }
+    );
+    // Need ≥ 2 *reported* cell types for a one-vs-rest contrast; below that there is nothing
+    // to contrast (the unassigned background does not count as a fate).
+    if n_reported < 2 {
+        info!("cell-type report skipped: need ≥ 2 annotated cell types, found {n_reported}");
+        return Ok(());
+    }
+
+    // Shares pseudotime with `lin`, so `sites` (aligned to that cell order) apply unchanged;
+    // only the per-cell group id (branch) becomes the cell type. `cell_names` is unused by the
+    // report path, so it is left empty rather than cloning the n barcodes.
+    let ct_lin = Lineage {
+        cell_names: Vec::new(),
+        pseudotime: lin.pseudotime.clone(),
+        branch: ctg.ids,
+        n_branches: n_types,
+    };
+    run_report(
+        sites,
+        &ct_lin,
+        args,
+        &ReportLevel {
+            names: Some(&ctg.names),
+            drop_group: ctg.unassigned_id,
+            tag: "celltype",
+            unit: "cell-type",
+            strict: false,
+        },
+        out,
+    )
+}
+
 ////////////////////
 // Output writers //
 ////////////////////
 
-/// `{gene}/{subunit}/b{branch}` row key for a (site, branch) record.
-fn site_branch_key(sites: &[Site], site: usize, branch: usize) -> Box<str> {
-    let s = &sites[site];
-    format!("{}/{}/b{}", s.gene, s.subunit, branch).into_boxed_str()
+/// Display label for group `g`: the cell-type name (with any `/` neutralised to `-`, since
+/// the row key is `/`-delimited) when the level is labelled, else `b{g}` (branch level).
+fn group_label(names: Option<&[Box<str>]>, g: usize) -> String {
+    match names {
+        Some(nm) => nm[g].replace('/', "-"),
+        None => format!("b{g}"),
+    }
 }
 
-/// Assemble a `site_branch`-indexed table (`rows` × `col_names`, values row-major in
-/// `vals`) and write it to Parquet. Shared by the three site-branch writers.
+/// Row key for a (site, group) record: `{gene}/{subunit}/{group_label}`.
+fn site_group_key(
+    sites: &[Site],
+    site: usize,
+    group: usize,
+    names: Option<&[Box<str>]>,
+) -> Box<str> {
+    let s = &sites[site];
+    format!("{}/{}/{}", s.gene, s.subunit, group_label(names, group)).into_boxed_str()
+}
+
+/// Assemble a group-indexed table (`rows` × `col_names`, values row-major in `vals`) under
+/// the `index_name` row key and write it to Parquet. Shared by the three site-group writers.
 fn write_site_branch_table(
     path: &str,
     rows: Vec<Box<str>>,
+    index_name: &str,
     col_names: &[&str],
     vals: &[Vec<f32>],
 ) -> Result<()> {
@@ -252,7 +445,7 @@ fn write_site_branch_table(
         }
     }
     let cols: Vec<Box<str>> = col_names.iter().map(|s| (*s).into()).collect();
-    mat.to_parquet_with_names(path, (Some(&rows), Some("site_branch")), Some(&cols))?;
+    mat.to_parquet_with_names(path, (Some(&rows), Some(index_name)), Some(&cols))?;
     info!("Wrote {path}");
     Ok(())
 }
@@ -264,11 +457,12 @@ fn write_site_branch_table(
 fn write_branch_contrast_bayes(
     res: &[BayesContrastResult],
     sites: &[Site],
+    level: &ReportLevel,
     path: &str,
 ) -> Result<()> {
     let rows = res
         .iter()
-        .map(|r| site_branch_key(sites, r.site, r.branch))
+        .map(|r| site_group_key(sites, r.site, r.branch, level.names))
         .collect();
     let vals: Vec<Vec<f32>> = res
         .iter()
@@ -287,6 +481,7 @@ fn write_branch_contrast_bayes(
     write_site_branch_table(
         path,
         rows,
+        &format!("site_{}", level.tag),
         &[
             "n_cells",
             "total_cov",
@@ -303,10 +498,16 @@ fn write_branch_contrast_bayes(
 /// `{gene}/{chr:pos}/b{branch}` × [n_cells, total_cov, stat, effect, dispersion,
 /// p_trend, q] — the within-branch association GAM (does the rate change along the
 /// branch), one row per QC-passing (site, branch).
-fn write_branch_trend(res: &[TrendResult], qs: &[f32], sites: &[Site], path: &str) -> Result<()> {
+fn write_branch_trend(
+    res: &[TrendResult],
+    qs: &[f32],
+    sites: &[Site],
+    level: &ReportLevel,
+    path: &str,
+) -> Result<()> {
     let rows = res
         .iter()
-        .map(|r| site_branch_key(sites, r.site, r.branch))
+        .map(|r| site_group_key(sites, r.site, r.branch, level.names))
         .collect();
     let vals: Vec<Vec<f32>> = res
         .iter()
@@ -326,6 +527,7 @@ fn write_branch_trend(res: &[TrendResult], qs: &[f32], sites: &[Site], path: &st
     write_site_branch_table(
         path,
         rows,
+        &format!("site_{}", level.tag),
         &[
             "n_cells",
             "total_cov",
@@ -343,10 +545,15 @@ fn write_branch_trend(res: &[TrendResult], qs: &[f32], sites: &[Site], path: &st
 /// effect_hi, lfsr] — the Bayesian within-branch association (posterior net log-odds
 /// change along the branch + local false sign rate), one row per QC-passing (site,
 /// branch).
-fn write_branch_trend_bayes(res: &[BayesTrendResult], sites: &[Site], path: &str) -> Result<()> {
+fn write_branch_trend_bayes(
+    res: &[BayesTrendResult],
+    sites: &[Site],
+    level: &ReportLevel,
+    path: &str,
+) -> Result<()> {
     let rows = res
         .iter()
-        .map(|r| site_branch_key(sites, r.site, r.branch))
+        .map(|r| site_group_key(sites, r.site, r.branch, level.names))
         .collect();
     let vals: Vec<Vec<f32>> = res
         .iter()
@@ -365,6 +572,7 @@ fn write_branch_trend_bayes(res: &[BayesTrendResult], sites: &[Site], path: &str
     write_site_branch_table(
         path,
         rows,
+        &format!("site_{}", level.tag),
         &[
             "n_cells",
             "total_cov",
@@ -384,6 +592,7 @@ fn write_branch_profile(
     tested_sites: &[usize],
     sites: &[Site],
     lin: &Lineage,
+    level: &ReportLevel,
     n_bins: usize,
     path: &str,
 ) -> Result<()> {
@@ -397,7 +606,11 @@ fn write_branch_profile(
     for &si in &which {
         let s = &sites[si];
         for (l, b, k, ntot) in site_profile(s, &bins, &lin.branch, n_bins, lin.n_branches) {
-            rows.push(format!("{}/{}/b{l}/bin{b}", s.gene, s.subunit).into_boxed_str());
+            if level.drop_group == Some(l) {
+                continue; // background bucket kept in the contrast rest but not reported
+            }
+            let group = group_label(level.names, l);
+            rows.push(format!("{}/{}/{group}/bin{b}", s.gene, s.subunit).into_boxed_str());
             vals.push([b as f32, k as f32, ntot as f32, k as f32 / ntot as f32]);
         }
     }
@@ -411,7 +624,14 @@ fn write_branch_profile(
         .iter()
         .map(|s| (*s).into())
         .collect();
-    mat.to_parquet_with_names(path, (Some(&rows), Some("site_branch_bin")), Some(&cols))?;
+    mat.to_parquet_with_names(
+        path,
+        (
+            Some(&rows),
+            Some(format!("site_{}_bin", level.tag).as_str()),
+        ),
+        Some(&cols),
+    )?;
     info!("Wrote {path}");
     Ok(())
 }
