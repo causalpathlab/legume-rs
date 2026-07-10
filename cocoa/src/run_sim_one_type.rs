@@ -402,7 +402,7 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
     // faba / data-beans-sim conventions. Then route through
     // `resolve_backend_file` so the no-hdf5 fallback in data-beans rewrites
     // an HDF5 request to Zarr instead of failing at the factory.
-    let effective_output = data_beans::zarr_io::apply_zip_flag(&output, args.zip);
+    let effective_output = data_beans::zarr_io::apply_zip_flag(&output, args.zip, &args.backend);
     let (backend, backend_file) =
         data_beans::hdf5_io::resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
     let backend_file = backend_file.to_string();

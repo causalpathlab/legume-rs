@@ -265,7 +265,7 @@ fn write_modality_zarr(
 ) -> anyhow::Result<()> {
     let backend = args.backend.clone();
     let backend_dir = format!("{}.{}.{}", args.out, stem, backend_suffix);
-    let final_path = apply_zip_flag(&backend_dir, args.zip_output());
+    let final_path = apply_zip_flag(&backend_dir, args.zip_output(), &backend);
     let (nrows, ncols) = shape;
     let mut data = create_sparse_from_triplets(
         triplets,

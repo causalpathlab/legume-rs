@@ -4,9 +4,9 @@ use crate::sparse_data_visitors::styled_progress_bar;
 use crate::sparse_io::*;
 use crate::utilities::io_helpers::{read_col_names, read_row_names};
 
+use crate::zarr_io::{apply_zip_flag, finalize_zarr_output, materialize_writable_backend};
 use clap::Args;
 use data_beans::sparse_data_visitors::create_jobs;
-use data_beans::zarr_io::{apply_zip_flag, finalize_zarr_output, materialize_writable_backend};
 use log::info;
 use matrix_util::common_io::*;
 use matrix_util::mtx_io;
@@ -334,7 +334,7 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
         total_ncol, num_batches, total_nnz
     );
 
-    let effective_output = apply_zip_flag(&args.output, args.zip);
+    let effective_output = apply_zip_flag(&args.output, args.zip, &args.backend);
     let (backend, backend_file) =
         resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
 
@@ -635,7 +635,7 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
     );
 
     let backend = args.backend.clone();
-    let effective_output = apply_zip_flag(&args.output, args.zip);
+    let effective_output = apply_zip_flag(&args.output, args.zip, &backend);
     let output = args.output.clone();
     let batch_memb_file = (output.to_string() + ".batch.gz").into_boxed_str();
 

@@ -2,7 +2,7 @@ use super::{log_feature_type_histogram, run_squeeze_if_needed};
 use crate::hdf5_io::*;
 use crate::sparse_io::*;
 use crate::utilities::name_matching::{make_names_unique, RowTypeFilter};
-use data_beans::zarr_io::*;
+use crate::zarr_io::*;
 
 use clap::Args;
 use log::info;
@@ -83,7 +83,7 @@ pub fn run_build_from_mtx(args: &FromMtxArgs) -> anyhow::Result<()> {
     let row_file = args.row.as_ref();
     let col_file = args.col.as_ref();
 
-    let effective_output = apply_zip_flag(&args.output, args.zip);
+    let effective_output = apply_zip_flag(&args.output, args.zip, &args.backend);
     let (backend, backend_file) =
         resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
 

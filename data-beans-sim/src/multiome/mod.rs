@@ -683,7 +683,7 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     };
 
     let atac_dir = format!("{}.atac.{}", args.out, backend_suffix);
-    let atac_final = apply_zip_flag(&atac_dir, args.zip);
+    let atac_final = apply_zip_flag(&atac_dir, args.zip, &backend);
     let mut atac_data = create_sparse_from_triplets(
         &atac_triplets,
         (p, nn, atac_triplets.len()),
@@ -696,7 +696,7 @@ pub fn run_multiome(args: &MultiomeArgs) -> anyhow::Result<()> {
     info!("wrote ATAC sparse backend: {}", atac_final);
 
     let rna_dir = format!("{}.rna.{}", args.out, backend_suffix);
-    let rna_final = apply_zip_flag(&rna_dir, args.zip);
+    let rna_final = apply_zip_flag(&rna_dir, args.zip, &backend);
     let mut rna_data = create_sparse_from_triplets(
         &rna_triplets,
         (g, nn, rna_triplets.len()),

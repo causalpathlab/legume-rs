@@ -1,9 +1,13 @@
 use clap::Args;
 
+mod convert;
 mod squeeze;
+mod subsample;
 mod subset;
 
+pub use convert::*;
 pub use squeeze::*;
+pub use subsample::*;
 pub use subset::*;
 
 #[derive(Args, Debug)]

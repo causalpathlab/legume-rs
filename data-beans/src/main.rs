@@ -11,7 +11,7 @@ mod utilities;
 #[allow(dead_code)]
 mod zarr_io;
 
-use crate::handlers::analysis::{run_stat, RunStatArgs};
+use crate::handlers::analysis::{run_histogram, run_stat, RunHistogramArgs, RunStatArgs};
 #[cfg(feature = "hdf5")]
 use crate::handlers::builders::{
     run_build_from_10x_matrix, run_build_from_10x_molecule, run_build_from_h5ad, From10xMatrixArgs,
@@ -21,6 +21,9 @@ use crate::handlers::builders::{
     run_build_from_fragments, run_build_from_mtx, run_build_from_zarr_triplets, FromFragmentsArgs,
     FromMtxArgs, FromZarrArgs,
 };
+#[cfg(feature = "hdf5")]
+use crate::handlers::exporters::{run_export_to_h5ad, ToH5adArgs};
+use crate::handlers::exporters::{run_export_to_mtx, ToMtxArgs};
 use crate::handlers::inspection::{
     show_info, take_column_names, take_columns, take_row_names, take_rows, InfoArgs,
     TakeColumnNamesArgs, TakeColumnsArgs, TakeRowNamesArgs, TakeRowsArgs,
@@ -30,8 +33,8 @@ use crate::handlers::merging::{
     align_backends, run_merge_backend, run_merge_mtx, AlignDataArgs, MergeBackendArgs, MergeMtxArgs,
 };
 use crate::handlers::transformation::{
-    reorder_rows, run_squeeze, subset_columns, subset_rows, ReorderRowsArgs, RunSqueezeArgs,
-    SubsetColumnsArgs, SubsetRowsArgs,
+    reorder_rows, run_convert, run_squeeze, run_subsample, subset_columns, subset_rows,
+    ConvertArgs, ReorderRowsArgs, RunSqueezeArgs, SubsampleArgs, SubsetColumnsArgs, SubsetRowsArgs,
 };
 
 use clap::{Parser, Subcommand};
@@ -99,6 +102,19 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         Commands::From10xMolecule(args) => {
             run_build_from_10x_molecule(args)?;
         }
+        #[cfg(feature = "hdf5")]
+        Commands::ToH5ad(args) => {
+            run_export_to_h5ad(args)?;
+        }
+        Commands::ToMtx(args) => {
+            run_export_to_mtx(args)?;
+        }
+        Commands::Subsample(args) => {
+            run_subsample(args)?;
+        }
+        Commands::Convert(args) => {
+            run_convert(args)?;
+        }
         Commands::FromFragments(args) => {
             run_build_from_fragments(args)?;
         }
@@ -107,6 +123,9 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         }
         Commands::Statistics(args) => {
             run_stat(args)?;
+        }
+        Commands::Histogram(args) => {
+            run_histogram(args)?;
         }
         Commands::Squeeze(args) => {
             run_squeeze(args)?;
@@ -245,6 +264,41 @@ enum Commands {
     )]
     From10xMolecule(From10xMoleculeArgs),
 
+    #[cfg(feature = "hdf5")]
+    #[command(
+        name = "to-h5ad",
+        about = "Export backend to an AnnData `h5ad` file (scanpy-readable)",
+        long_about = "Export a backend to an AnnData h5ad file readable by scanpy / anndata.\n\
+                      This is the inverse of `from-h5ad`.\n\
+                      \n\
+                      The (features x cells) backend is transposed back to AnnData's\n\
+                      (cells x features) layout and written as a gzip-compressed CSR\n\
+                      `X` (gzip, not Blosc, so h5py needs no filter plugin).\n\
+                      \n\
+                      Row names -> var/_index, column names -> obs/_index. Attach\n\
+                      cell/feature annotations with --obs / --var (e.g. feed back the\n\
+                      `*.cell_metadata.tsv.gz` that `from-h5ad` emitted).",
+        visible_alias = "to-anndata"
+    )]
+    ToH5ad(ToH5adArgs),
+
+    #[command(
+        name = "to-mtx",
+        about = "Export backend to a 10x-style MatrixMarket triplet (MEX)",
+        long_about = "Export a backend to a 10x Genomics Cell Ranger MEX triplet directory,\n\
+			      loadable with `scanpy.read_10x_mtx(dir)` or Seurat `Read10X(dir)`.\n\
+			      This is the inverse of `from-mtx` and needs no HDF5.\n\
+			      \n\
+			      Writes into the output directory (Cell Ranger v3 gzipped layout):\n\
+			      - matrix.mtx.gz   (integer MatrixMarket, features x barcodes, 1-based)\n\
+			      - features.tsv.gz (id, name, feature_type; composite names split on '_')\n\
+			      - barcodes.tsv.gz (one barcode per line)\n\
+			      \n\
+			      Pass --no-gzip for the uncompressed layout.",
+        visible_alias = "to-10x"
+    )]
+    ToMtx(ToMtxArgs),
+
     #[command(
         about = "Build backend from triplets in 10X Xenium `zarr`",
         long_about = "Build a backend from triplets in `zarr` format.\n\
@@ -337,6 +391,32 @@ enum Commands {
     SubsetRows(SubsetRowsArgs),
 
     #[command(
+        about = "Randomly subsample cells and/or genes into a smaller backend",
+        long_about = "Draw a random subset of cells (columns) and/or genes (rows) into a new,\n\
+			      smaller backend. Handy for making quick test/demo datasets.\n\
+			      \n\
+			      Specify counts (--cells / --genes) or fractions (--cell-frac /\n\
+			      --gene-frac); an unset dimension keeps all of its entries. Sampling\n\
+			      is reproducible via --seed and reads only the selected columns, so\n\
+			      cost scales with the output size, not the input.",
+        visible_alias = "downsample"
+    )]
+    Subsample(SubsampleArgs),
+
+    #[command(
+        about = "Convert a backend between on-disk formats (zarr <-> h5)",
+        long_about = "Convert a backend to a different on-disk format, preserving the matrix\n\
+			      and row/column names:\n\
+			      - zarr <-> h5 (re-encodes the data)\n\
+			      - .zarr <-> .zarr.zip (unzip / re-zip)\n\
+			      \n\
+			      The output format follows --backend and the output path (pass\n\
+			      --no-zip to keep a .zarr directory instead of a .zarr.zip archive).",
+        visible_alias = "to-backend"
+    )]
+    Convert(ConvertArgs),
+
+    #[command(
         about = "Align data backends",
         long_about = "To ensure that column names are aligned for multimodal analysis.\n\
 		      We will only keep columns and rows matched across files.\n\
@@ -385,4 +465,17 @@ enum Commands {
         visible_alias = "stat"
     )]
     Statistics(RunStatArgs),
+
+    #[command(
+        about = "ASCII log-scale histogram of a row/column statistic",
+        long_about = "Print an ASCII log10(x+1) histogram of a per-feature (row) and/or\n\
+		      per-cell (column) statistic — the same summary shown by\n\
+		      `squeeze --show-histogram`, exposed as a standalone command.\n\
+		      \n\
+		      Choose the statistic with --stat (default `nnz`; also `sum`,\n\
+		      `mean`, `sd`) and the margin with --dim (default `both`).\n\
+		      Pass -o/--output to also dump the raw per-unit values.",
+        visible_alias = "hist"
+    )]
+    Histogram(RunHistogramArgs),
 }
