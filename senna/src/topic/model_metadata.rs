@@ -113,6 +113,12 @@ pub struct TopicModelMetadata {
     /// per-batch δ estimation. Falls back to uniform 1/K when absent.
     #[serde(default)]
     pub theta_mean: Option<Vec<f32>>,
+    /// Number of cells the model was trained on. Model provenance, and the running
+    /// `N_absorbed` for sequential integration: net gain is weighted
+    /// `n_query · benefit − n_train · forgetting`, so later rounds resist updates in
+    /// proportion to how much data the model already carries. Absent in older models.
+    #[serde(default)]
+    pub n_train_cells: Option<usize>,
 }
 
 impl TopicModelMetadata {
@@ -181,22 +187,6 @@ pub fn load_dictionary(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, nalgebra:
     let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))?;
     log::info!(
         "Loaded dictionary: {} genes × {} topics from {}",
-        result.rows.len(),
-        result.mat.ncols(),
-        path
-    );
-    Ok((result.rows, result.mat))
-}
-
-/// Load the feature-embedding parquet, returning gene names and `ρ [D × H]`.
-pub fn load_feature_embedding(
-    prefix: &str,
-) -> anyhow::Result<(Vec<Box<str>>, nalgebra::DMatrix<f32>)> {
-    use matrix_util::traits::IoOps;
-    let path = format!("{prefix}.feature_embedding.parquet");
-    let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))?;
-    log::info!(
-        "Loaded feature embedding: {} genes × {} dims from {}",
         result.rows.len(),
         result.mat.ncols(),
         path
