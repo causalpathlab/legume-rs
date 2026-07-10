@@ -420,6 +420,11 @@ Example:\n  \
             damps noisy calls (stable across seeds — no permutation machinery). Reports the\n\
             posterior mean effect, 90% credible interval, and lfsr = min(P(β>0), P(β<0)); the\n\
             within-branch trend GAM (--trend-method) runs alongside.\n\n\
+            If the lineage was annotated (`faba lineage --markers`), the same two tests are\n\
+            also reported per CELL TYPE — cells sharing an annotated type are pooled across\n\
+            lineages ({out}.celltype_contrast/_trend.parquet). The between-cell-type contrast\n\
+            is the clean deliverable; the within-cell-type trend is secondary (pooling divergent\n\
+            lineages onto one pseudotime axis weakens the trend reading). Skip with --no-celltype.\n\n\
             Not double-dipping: branches come from gem θ + velocity, which never see the\n\
             modality.\n\n\
             Reference:\n  \
@@ -427,7 +432,7 @@ Example:\n  \
             for single-cell sequencing data\", Nat Commun 11:1201, 2020.",
         after_long_help = "\
 	Example:\n\
-	faba lineage -f out/gem -o out/lin\n\
+	faba lineage -f out/gem -o out/lin --markers markers.tsv\n\
   faba dyn-assoc -f out/lin -s out/rep1_wt_m6a_site.zarr.zip --modality m6a -o out/m6a_assoc"
     )]
     Assoc(AssocArgs),

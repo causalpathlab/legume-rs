@@ -12,6 +12,7 @@ use matrix_util::traits::IoOps;
 use super::Modality;
 use faba::feature_name::parse_feature_row;
 use matrix_util::common_io::basename;
+use matrix_util::membership::Membership;
 
 /// Per-cell lineage: a common pseudotime axis + primary branch, in cell order.
 pub struct Lineage {
@@ -41,6 +42,87 @@ pub fn load_lineage(prefix: &str) -> Result<Lineage> {
         pseudotime,
         branch,
         n_branches,
+    })
+}
+
+/// Sentinel cell-type label for cells with no marker call.
+const UNASSIGNED_CELLTYPE: &str = "unassigned";
+
+/// A per-lineage-cell grouping by annotated cell type, for the cell-type-level
+/// aggregation in `faba assoc`. `ids[c]` is the contiguous cell-type id of lineage cell
+/// `c` (aligned to `cell_names`); `names[id]` is that id's cell-type name. Cells absent
+/// from the annotation, or explicitly `unassigned`, land in the trailing background group
+/// `unassigned_id` (present only when some cell needs it) — those cells stay in the
+/// contrast's pooled "rest" but are **not** reported as a cell type. Feeding this in as a
+/// [`Lineage`]'s `branch`/`n_branches` re-runs the branch tests at cell-type granularity —
+/// the fitting core reads only the integer group id, so nothing else changes.
+pub struct CellTypeGrouping {
+    pub ids: Vec<usize>,
+    pub names: Vec<Box<str>>,
+    /// Group id of the `unassigned` background bucket, when present.
+    pub unassigned_id: Option<usize>,
+}
+
+/// Read a `cell<TAB>cell_type` membership file — the `{prefix}.lineage_annot.membership.tsv`
+/// written by `faba lineage --markers`, or a user-supplied override — and align it to
+/// `cell_names`, returning a contiguous per-cell cell-type id + the id→name table. Delegates
+/// the read + barcode matching to [`Membership`]: the delimiter is auto-detected by extension
+/// (tab for `.tsv`, so comma-bearing Cell-Ontology labels survive; comma for `.csv`), and
+/// `@`-base-key matching lets a file of bare barcodes still join the lineage's
+/// `{barcode}@{sample}` cell names (the same reconciliation [`load_sites`] does). Present
+/// labels are sorted for reproducible ids; the `unassigned` group (unmatched cells or the
+/// explicit sentinel) is forced last. Warns when the annotation barely joins — usually a
+/// barcode-naming mismatch rather than genuine abstention.
+pub fn load_celltypes(path: &str, cell_names: &[Box<str>]) -> Result<CellTypeGrouping> {
+    let mem = Membership::from_file(path, 0, 1, false)
+        .with_context(|| format!("reading cell-type annotation {path}"))?
+        .with_delimiter('@');
+
+    // Per-cell label; a cell with no match (or the explicit sentinel) is left unassigned.
+    let labels: Vec<Option<&str>> = cell_names
+        .iter()
+        .map(|c| {
+            mem.get(c.as_ref())
+                .filter(|l| !l.eq_ignore_ascii_case(UNASSIGNED_CELLTYPE))
+        })
+        .collect();
+
+    // Sorted, deduped vocabulary of the labels actually present → reproducible ids.
+    let mut vocab: Vec<&str> = labels.iter().flatten().copied().collect();
+    vocab.sort_unstable();
+    vocab.dedup();
+    let unassigned_id = vocab.len();
+
+    // `vocab` covers every present label, so a `Some` always resolves; only unmatched cells
+    // (the `None`s) land in `unassigned_id`.
+    let ids: Vec<usize> = labels
+        .iter()
+        .map(|&l| {
+            l.map_or(unassigned_id, |lab| {
+                vocab.binary_search(&lab).unwrap_or(unassigned_id)
+            })
+        })
+        .collect();
+    let n = cell_names.len();
+    let matched = labels.iter().filter(|l| l.is_some()).count();
+    let any_unassigned = matched < n;
+
+    let mut names: Vec<Box<str>> = vocab.iter().map(|&l| l.into()).collect();
+    if any_unassigned {
+        names.push(UNASSIGNED_CELLTYPE.into());
+    }
+
+    if n > 0 && matched * 2 < n {
+        log::warn!(
+            "cell-type annotation {path}: only {matched}/{n} cells matched a label — check \
+             barcode naming (expected {{barcode}}@{{sample}} or bare barcodes)"
+        );
+    }
+
+    Ok(CellTypeGrouping {
+        ids,
+        names,
+        unassigned_id: any_unassigned.then_some(unassigned_id),
     })
 }
 

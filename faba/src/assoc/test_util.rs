@@ -1,6 +1,6 @@
 //! Shared synthetic fixtures for the `assoc` unit tests.
 
-use super::io::{Lineage, Site};
+use super::io::{CellTypeGrouping, Lineage, Site};
 
 /// Deterministic Binomial counts on a logit-linear rate `logit(p) = a + b·x`, with `x`
 /// on an even grid in [0, 1] and coverage `cov` per observation.
@@ -64,4 +64,63 @@ pub fn two_branch_panel() -> (Lineage, Vec<Site>) {
         },
     ];
     (lin, sites)
+}
+
+/// 3 branches × 50 cells (pseudotime rising 0→1 within each). Branches 0 and 1 are BOTH
+/// cell type `"A"`; branch 2 is cell type `"B"`. Site A is hyper-edited (~80%) in cell
+/// type `"A"` — i.e. across *both* of its lineages — and ~20% in `"B"`; site B is flat
+/// (~20%) everywhere. The branch-level `Lineage` and the cell-type grouping (ids A=0, B=1)
+/// are returned together so a test can check that re-pooling A's two lineages recovers the
+/// shared effect. Coverage 40.
+pub fn celltype_shared_panel() -> (Lineage, Vec<Site>, CellTypeGrouping) {
+    let (nbr, per, cov) = (3usize, 50usize, 40u32);
+    let n = nbr * per;
+    // branch -> cell type: 0,1 -> "A" (id 0); 2 -> "B" (id 1).
+    let type_of = |b: usize| if b < 2 { 0usize } else { 1usize };
+
+    let (mut names, mut pt, mut branch, mut ids) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for b in 0..nbr {
+        for j in 0..per {
+            names.push(format!("c_{b}_{j}").into_boxed_str());
+            branch.push(b);
+            pt.push(j as f32 / (per as f32 - 1.0));
+            ids.push(type_of(b));
+        }
+    }
+    let lin = Lineage {
+        cell_names: names,
+        pseudotime: pt,
+        branch,
+        n_branches: nbr,
+    };
+    let ctg = CellTypeGrouping {
+        ids,
+        names: vec!["A".into(), "B".into()],
+        unassigned_id: None,
+    };
+
+    // Rates: cell type A ~0.8 (site A), everything else ~0.2.
+    let (mut ka, mut kb) = (vec![0u32; n], vec![0u32; n]);
+    let (na, nb) = (vec![cov; n], vec![cov; n]);
+    for i in 0..n {
+        let is_a = ctg.ids[i] == 0;
+        let pa = if is_a { 0.8 } else { 0.2 };
+        ka[i] = (cov as f64 * pa).round() as u32;
+        kb[i] = (cov as f64 * 0.2).round() as u32;
+    }
+    let sites = vec![
+        Site {
+            gene: "G".into(),
+            subunit: "chr1:100".into(),
+            k: ka,
+            n: na,
+        },
+        Site {
+            gene: "G".into(),
+            subunit: "chr1:200".into(),
+            k: kb,
+            n: nb,
+        },
+    ];
+    (lin, sites, ctg)
 }

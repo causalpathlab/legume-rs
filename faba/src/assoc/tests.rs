@@ -170,6 +170,106 @@ fn within_branch_estimators_agree_on_direction() {
     );
 }
 
+/// The cell-type report re-pools cells across lineages: cell type "A" spans two branches,
+/// both hyper-edited at site 0. Grouping by cell type and running the between-cell-type
+/// contrast must recover A's positive excess (pooled over its two lineages) at site 0 and
+/// stay ≈ 0 at the flat site 1.
+#[test]
+fn celltype_repool_recovers_shared_effect() {
+    let (lin, sites, ctg) = super::test_util::celltype_shared_panel();
+    // Cell-type-level Lineage: the per-cell group id is the cell type, n_branches = n_types.
+    let ct_lin = Lineage {
+        cell_names: lin.cell_names.clone(),
+        pseudotime: lin.pseudotime.clone(),
+        branch: ctg.ids.clone(),
+        n_branches: ctg.names.len(),
+    };
+    let cfg = BayesContrastConfig {
+        n_bins: 4,
+        min_total_coverage: 50,
+        min_cells: 10,
+        prior_sd: 3.0,
+        n_samples: 400,
+        warmup: 200,
+        seed: 5,
+    };
+    let res = run_contrasts_bayes(&sites, &ct_lin, &cfg);
+    assert!(!res.is_empty(), "some (site, cell type) should pass QC");
+
+    // Site 0, cell type A (id 0) — pooled over branches 0 & 1, ~80% vs ~20% rest.
+    let a0 = res
+        .iter()
+        .find(|r| r.site == 0 && r.branch == 0)
+        .expect("A / site 0 result");
+    assert!(
+        a0.effect > 1.0,
+        "pooled cell-type A excess should be large +, got {}",
+        a0.effect
+    );
+    assert!(a0.lfsr < 0.05, "expected confident sign, lfsr={}", a0.lfsr);
+    // Site 1 is flat everywhere → A's effect ≈ 0.
+    let a1 = res
+        .iter()
+        .find(|r| r.site == 1 && r.branch == 0)
+        .expect("A / site 1 result");
+    assert!(
+        a1.effect.abs() < 0.5,
+        "flat site should give ≈0 effect, got {}",
+        a1.effect
+    );
+}
+
+/// `load_celltypes`: parse a `cell<TAB>label` TSV, assign contiguous sorted ids with the
+/// `unassigned` bucket last, and bucket missing / explicitly-unassigned cells there.
+#[test]
+fn load_celltypes_maps_sorts_and_buckets() {
+    use std::io::Write;
+    let mut f = tempfile::NamedTempFile::new().expect("temp file");
+    write!(f, "a1\tBcell\na2\tBcell\nm1\tAcell\nu1\tunassigned\n").expect("write temp tsv");
+    f.flush().expect("flush");
+    let cells: Vec<Box<str>> = ["m1", "a1", "u1", "x1", "a2"]
+        .iter()
+        .map(|s| (*s).into())
+        .collect();
+    let ctg = super::io::load_celltypes(f.path().to_str().unwrap(), &cells).expect("load");
+
+    // Assigned labels sorted (Acell, Bcell); unassigned forced last.
+    assert_eq!(
+        ctg.names.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+        vec!["Acell", "Bcell", "unassigned"]
+    );
+    // ids aligned to `cells`: m1→Acell(0), a1→Bcell(1), u1→unassigned(2),
+    // x1 (absent)→unassigned(2), a2→Bcell(1).
+    assert_eq!(ctg.ids, vec![0, 1, 2, 2, 1]);
+    assert_eq!(ctg.unassigned_id, Some(2));
+}
+
+/// A bare-barcode annotation still joins `{barcode}@{sample}`-tagged lineage cells via
+/// Membership's `@` base-key fallback, and no `unassigned` bucket appears when all match.
+#[test]
+fn load_celltypes_joins_at_tagged_barcodes() {
+    use std::io::Write;
+    let mut f = tempfile::NamedTempFile::new().expect("temp file");
+    write!(f, "bc1\tAcell\nbc2\tBcell\n").expect("write temp tsv");
+    f.flush().expect("flush");
+    // Lineage cells are `@sample`-tagged; the annotation lists bare barcodes.
+    let cells: Vec<Box<str>> = ["bc1@rep1", "bc2@rep2"]
+        .iter()
+        .map(|s| (*s).into())
+        .collect();
+    let ctg = super::io::load_celltypes(f.path().to_str().unwrap(), &cells).expect("load");
+
+    assert_eq!(
+        ctg.names.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+        vec!["Acell", "Bcell"]
+    );
+    assert_eq!(ctg.ids, vec![0, 1]);
+    assert_eq!(
+        ctg.unassigned_id, None,
+        "all cells matched → no unassigned bucket"
+    );
+}
+
 #[test]
 fn modality_tokens_and_channels_are_distinct() {
     for m in [Modality::M6a, Modality::Atoi, Modality::Apa] {
