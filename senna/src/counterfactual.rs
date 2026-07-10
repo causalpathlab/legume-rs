@@ -60,6 +60,7 @@ use data_beans::sparse_io_vector::SparseIoVec;
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rayon::prelude::*;
 
 /// Rebuild the encoder (only to obtain the shared `ρ` handle and to create the
 /// `enc.*` vars the safetensors file expects) plus the **finest** decoder, then load
@@ -280,6 +281,13 @@ pub(crate) struct Counterfactual {
     /// `P(forgetting ≥ observed)` under the exchangeable treatment/control labelling.
     pub p_benefit: f64,
     pub p_forgetting: f64,
+    /// 95% Bayesian-bootstrap intervals (Rubin 1981; Dirichlet(1,…,1) reweighting of the
+    /// per-cell differences) — `(lo, hi)` for each effect. Distribution-free, so no
+    /// normality assumption. These condition on the fit split (eval-cell variance only);
+    /// for the fit-cell component too, bootstrap the input backends and re-invoke `probe`.
+    /// `benefit`/`forgetting` themselves stay the plain sample means.
+    pub benefit_ci: (f64, f64),
+    pub forgetting_ci: (f64, f64),
     /// `‖α₁_k − α₀_k‖` — how far the query moved topic `k` *beyond* what an equally
     /// sized reference batch moved it. The enacted analog of the influence step's
     /// per-topic `‖Δ_k‖`, and unlike it, the move actually taken.
@@ -295,6 +303,34 @@ fn mean(x: &[f32]) -> f64 {
         return 0.0;
     }
     x.iter().map(|&v| f64::from(v)).sum::<f64>() / x.len() as f64
+}
+
+/// Replicate count for the Bayesian-bootstrap intervals. Free (reweights an in-memory
+/// vector, no refits), so we can afford enough for stable 2.5/97.5 tail quantiles.
+const CI_BOOT_REPS: usize = 2000;
+
+/// 95% Bayesian bootstrap interval (Rubin 1981) for `sign · mean(x)`, using Dirichlet(1,…,1)
+/// weights (normalized Exp(1) draws). Distribution-free — no CLT/normality assumption, and
+/// the interval is asymmetric where the per-cell differences are skewed. Uses its **own**
+/// RNG so the permutation stream, and hence the reported p-values, are untouched.
+fn bayes_ci(x: &[f32], sign: f64, rng: &mut StdRng) -> (f64, f64) {
+    let point = sign * mean(x);
+    if x.len() < 2 {
+        return (point, point);
+    }
+    let mut reps = Vec::with_capacity(CI_BOOT_REPS);
+    for _ in 0..CI_BOOT_REPS {
+        let (mut num, mut den) = (0f64, 0f64);
+        for &v in x {
+            let w = -rng.random::<f64>().max(f64::MIN_POSITIVE).ln(); // Exp(1) = Gamma(1,1)
+            num += w * f64::from(v);
+            den += w;
+        }
+        reps.push(sign * num / den);
+    }
+    reps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let q = |p: f64| reps[((p * (reps.len() - 1) as f64).round() as usize).min(reps.len() - 1)];
+    (q(0.025), q(0.975))
 }
 
 /// Which cells train each arm, and which cells the two arms are compared on.
@@ -351,9 +387,19 @@ fn row_norms_of_diff(a: &Tensor, b: &Tensor) -> anyhow::Result<Vec<f64>> {
     Ok(d.into_iter().map(f64::from).collect())
 }
 
-/// Run the treatment and control arms from a common starting `α`. Returns
-/// `(benefit, forgetting, ‖α₁ − α₀‖ per topic)`. Note `forgetting` is the *negated*
-/// reference-cell effect, so both returned effects are "larger is more extreme".
+/// Outcome of one treatment/control pair: the two scalar effects, the raw per-cell
+/// difference vectors they average (kept so the observed pair can be bootstrapped), and
+/// the per-topic ‖α₁ − α₀‖. `forgetting` is the *negated* reference-cell effect, so both
+/// scalar effects are "larger is more extreme".
+struct ArmOutcome {
+    benefit: f64,
+    forgetting: f64,
+    dq: Vec<f32>,
+    dc: Vec<f32>,
+    delta_norm_per_topic: Vec<f64>,
+}
+
+/// Run the treatment and control arms from a common starting `α`.
 fn two_arms(
     decoder: &EmbeddedNbTopicDecoder,
     alpha: &candle_core::Var,
@@ -361,7 +407,7 @@ fn two_arms(
     bank: &CellBank,
     spec: &ArmSpec<'_>,
     cfg: &RefitCfg,
-) -> anyhow::Result<(f64, f64, Vec<f64>)> {
+) -> anyhow::Result<ArmOutcome> {
     // One arm: restart from the shared `α₀`, refit on `base ∪ extra`, then read both
     // evaluation sets and copy out the resulting `α`. Treatment and control differ only
     // in `extra`, so they share this path.
@@ -381,29 +427,70 @@ fn two_arms(
     let dq: Vec<f32> = tq.iter().zip(&cq).map(|(a, b)| a - b).collect();
     let dc: Vec<f32> = tc.iter().zip(&cc).map(|(a, b)| a - b).collect();
     // Negate the reference effect: `forgetting` is a loss, so larger is worse.
-    Ok((mean(&dq), -mean(&dc), row_norms_of_diff(&a_treat, &a_ctrl)?))
+    Ok(ArmOutcome {
+        benefit: mean(&dq),
+        forgetting: -mean(&dc),
+        dq,
+        dc,
+        delta_norm_per_topic: row_norms_of_diff(&a_treat, &a_ctrl)?,
+    })
 }
 
-/// Enacted control arm + label-permutation null.
-pub(crate) fn counterfactual(
-    decoder: &EmbeddedNbTopicDecoder,
-    parameters: &VarMap,
-    alpha_name: &str,
-    bank: &CellBank,
-    cfg: &RefitCfg,
-    n_perm: usize,
-    seed: u64,
-) -> anyhow::Result<Counterfactual> {
-    let alpha = parameters
+/// A self-contained decoder plus its **own** `α` (and `α₀`), so one rayon worker can refit
+/// without touching another's parameters. Holds the `VarMap` only to keep `α` alive.
+struct Worker {
+    _params: VarMap,
+    decoder: EmbeddedNbTopicDecoder,
+    alpha: candle_core::Var,
+    alpha0: Tensor,
+}
+
+/// Rebuild an independent decoder from the model file and detach its loaded `α` as `α₀`.
+/// Called once for the observed pair and once per rayon worker (via `map_init`).
+fn build_worker(
+    model: &str,
+    metadata: &crate::topic::model_metadata::TopicModelMetadata,
+    dev: &Device,
+) -> anyhow::Result<Worker> {
+    let (params, decoder, alpha_name) = rebuild_decoder(model, metadata, dev)?;
+    let alpha = params
         .data()
         .lock()
         .expect("varmap poisoned")
-        .get(alpha_name)
+        .get(&alpha_name)
         .cloned()
         .ok_or_else(|| {
             anyhow::anyhow!("counterfactual: var `{alpha_name}` not found in the model")
         })?;
     let alpha0 = detached_copy(alpha.as_tensor())?;
+    Ok(Worker {
+        _params: params,
+        decoder,
+        alpha,
+        alpha0,
+    })
+}
+
+pub(crate) struct CfArgs<'a> {
+    pub model: &'a str,
+    pub metadata: &'a crate::topic::model_metadata::TopicModelMetadata,
+    pub dev: &'a Device,
+    pub bank: &'a CellBank,
+    pub cfg: &'a RefitCfg,
+    pub n_perm: usize,
+    pub seed: u64,
+}
+
+/// Enacted control arm + label-permutation null.
+///
+/// The permutations are generated **serially** (same RNG sequence as a plain loop, so the
+/// set of shuffles — hence the p-values — is identical), then evaluated **in parallel**:
+/// each refit is deterministic and independent, so the only shared state is the read-only
+/// `CellBank`. Every rayon worker rebuilds its own decoder/`α`, so parallel refits never
+/// collide, and the result is bit-identical to the serial version.
+pub(crate) fn counterfactual(a: CfArgs<'_>) -> anyhow::Result<Counterfactual> {
+    let (bank, cfg) = (a.bank, a.cfg);
+    let main = build_worker(a.model, a.metadata, a.dev)?;
 
     let s = splits(bank.n_calib, bank.n_query)?;
     let spec = ArmSpec {
@@ -413,43 +500,72 @@ pub(crate) fn counterfactual(
         eval_q: &s.q_eval,
         eval_c: &s.c_eval,
     };
-    let (benefit, forgetting, delta_norm_per_topic) =
-        two_arms(decoder, &alpha, &alpha0, bank, &spec, cfg)?;
+    let obs = two_arms(&main.decoder, &main.alpha, &main.alpha0, bank, &spec, cfg)?;
+    let (benefit, forgetting) = (obs.benefit, obs.forgetting);
 
-    // Null: the treatment/control label of a pooled fit cell is uninformative. Both
-    // effects are signed "larger is more extreme", so both tests are upper-tail.
+    // Pre-generate the permutations serially — identical RNG sequence to a plain loop, so
+    // the null set and its p-values are unchanged; only the (deterministic) evaluation runs
+    // in parallel. Both effects are signed "larger is more extreme", so both tests upper-tail.
     let mut pool: Vec<usize> = s.q_fit.clone();
     pool.extend_from_slice(&s.c2);
-    let mut rng = StdRng::seed_from_u64(seed);
-    let (mut ge_benefit, mut ge_forgetting) = (0usize, 0usize);
-    for _ in 0..n_perm {
-        pool.shuffle(&mut rng);
-        let (g1, g2) = pool.split_at(s.q_fit.len());
-        let perm = ArmSpec {
-            base: &s.c_base,
-            treat_extra: g1,
-            ctrl_extra: g2,
-            eval_q: &s.q_eval,
-            eval_c: &s.c_eval,
-        };
-        let (b, f, _) = two_arms(decoder, &alpha, &alpha0, bank, &perm, cfg)?;
-        if b >= benefit {
-            ge_benefit += 1;
-        }
-        if f >= forgetting {
-            ge_forgetting += 1;
-        }
-    }
-    alpha.set(&alpha0)?; // leave the model as we found it
+    let qn = s.q_fit.len();
+    let mut rng = StdRng::seed_from_u64(a.seed);
+    let perms: Vec<(Vec<usize>, Vec<usize>)> = (0..a.n_perm)
+        .map(|_| {
+            pool.shuffle(&mut rng);
+            let (g1, g2) = pool.split_at(qn);
+            (g1.to_vec(), g2.to_vec())
+        })
+        .collect();
 
-    let denom = (n_perm + 1) as f64;
+    // Evaluate in parallel: each worker rebuilds its own decoder/α (once, via `map_init`) so
+    // refits never collide. ~1.4× wall-clock here — modest because candle and this loop share
+    // rayon's global pool, so the refits and this fan-out contend. It stays worthwhile for a
+    // single call; across many concurrent probe calls (a sweep or an external bootstrap),
+    // single-core-per-call would compose better.
+    let (ge_benefit, ge_forgetting) = perms
+        .par_iter()
+        .map_init(
+            || build_worker(a.model, a.metadata, a.dev),
+            |worker, (g1, g2)| -> anyhow::Result<(usize, usize)> {
+                let w = worker
+                    .as_mut()
+                    .map_err(|e| anyhow::anyhow!("counterfactual worker init: {e}"))?;
+                let perm = ArmSpec {
+                    base: &s.c_base,
+                    treat_extra: g1,
+                    ctrl_extra: g2,
+                    eval_q: &s.q_eval,
+                    eval_c: &s.c_eval,
+                };
+                let o = two_arms(&w.decoder, &w.alpha, &w.alpha0, bank, &perm, cfg)?;
+                Ok((
+                    usize::from(o.benefit >= benefit),
+                    usize::from(o.forgetting >= forgetting),
+                ))
+            },
+        )
+        .try_reduce(
+            || (0usize, 0usize),
+            |(a1, b1), (a2, b2)| Ok((a1 + a2, b1 + b2)),
+        )?;
+
+    // Effect-size intervals from the observed pair. A *separate* RNG stream keeps the
+    // permutation p-values above bit-identical regardless of the bootstrap.
+    let mut boot_rng = StdRng::seed_from_u64(a.seed ^ 0x9E37_79B9_7F4A_7C15);
+    let benefit_ci = bayes_ci(&obs.dq, 1.0, &mut boot_rng);
+    let forgetting_ci = bayes_ci(&obs.dc, -1.0, &mut boot_rng);
+
+    let denom = (a.n_perm + 1) as f64;
     Ok(Counterfactual {
         benefit,
         forgetting,
         p_benefit: (ge_benefit + 1) as f64 / denom,
         p_forgetting: (ge_forgetting + 1) as f64 / denom,
-        delta_norm_per_topic,
-        n_perm,
+        benefit_ci,
+        forgetting_ci,
+        delta_norm_per_topic: obs.delta_norm_per_topic,
+        n_perm: a.n_perm,
         n_fit: s.c_base.len() + s.q_fit.len(),
         n_eval_query: s.q_eval.len(),
         n_eval_calib: s.c_eval.len(),

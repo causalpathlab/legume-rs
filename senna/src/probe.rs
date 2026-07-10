@@ -31,7 +31,7 @@
 //!   multi-scale analysis across samples* (scPoli). Nat. Methods 20:1683.
 
 use crate::counterfactual::{
-    counterfactual, rebuild_decoder, BankArgs, BankSource, CellBank, Counterfactual, RefitCfg,
+    counterfactual, BankArgs, BankSource, CellBank, CfArgs, Counterfactual, RefitCfg,
 };
 use crate::embed_common::*;
 use crate::masked_topic::FeatureNameKindArg;
@@ -183,7 +183,6 @@ fn counterfactual_json(
     query: &MaskedScored,
 ) -> anyhow::Result<String> {
     let dev = candle_core::Device::Cpu;
-    let (params, decoder, alpha_name) = rebuild_decoder(&args.model, metadata, &dev)?;
     let (_, feature_mean) = load_feature_mean(&args.model)?;
     let (_, shortlist) = load_shortlist_weights(&args.model)?;
     let context_size = metadata
@@ -207,18 +206,18 @@ fn counterfactual_json(
         dev: &dev,
     })?;
 
-    let r = counterfactual(
-        &decoder,
-        &params,
-        &alpha_name,
-        &bank,
-        &RefitCfg {
+    let r = counterfactual(CfArgs {
+        model: &args.model,
+        metadata,
+        dev: &dev,
+        bank: &bank,
+        cfg: &RefitCfg {
             steps: args.cf_steps,
             lr: args.cf_lr,
         },
-        args.counterfactual,
-        args.cf_seed,
-    )?;
+        n_perm: args.counterfactual,
+        seed: args.cf_seed,
+    })?;
 
     info!(
         "counterfactual: refit α on {} cells ({} steps, lr {}); eval {} query / {} calib; \
@@ -226,8 +225,16 @@ fn counterfactual_json(
         r.n_fit, args.cf_steps, args.cf_lr, r.n_eval_query, r.n_eval_calib, r.n_perm
     );
     info!(
-        "counterfactual: benefit={:+.4e} (perm p={:.4})   forgetting={:+.4e} (perm p={:.4})",
-        r.benefit, r.p_benefit, r.forgetting, r.p_forgetting
+        "counterfactual: benefit={:+.4e} (95% CI [{:+.3e}, {:+.3e}], perm p={:.4})   \
+         forgetting={:+.4e} (95% CI [{:+.3e}, {:+.3e}], perm p={:.4})",
+        r.benefit,
+        r.benefit_ci.0,
+        r.benefit_ci.1,
+        r.p_benefit,
+        r.forgetting,
+        r.forgetting_ci.0,
+        r.forgetting_ci.1,
+        r.p_forgetting
     );
     let perm_floor = 1.0 / (r.n_perm + 1) as f64;
     if perm_floor >= CF_ALPHA {
@@ -248,13 +255,20 @@ fn counterfactual_json(
     info!("per-topic ||α₁_k − α₀_k||: [{}]", per_topic.join(", "));
 
     Ok(format!(
-        ",\"cf_perms\":{},\"benefit\":{:.6e},\"p_benefit\":{:.4},\"forgetting\":{:.6e},\
-         \"p_forgetting\":{:.4},\"cf_steps\":{},\"cf_lr\":{},\"delta_norm_per_topic\":[{}]",
+        ",\"cf_perms\":{},\"benefit\":{:.6e},\"p_benefit\":{:.4},\
+         \"benefit_ci_lo\":{:.6e},\"benefit_ci_hi\":{:.6e},\
+         \"forgetting\":{:.6e},\"p_forgetting\":{:.4},\
+         \"forgetting_ci_lo\":{:.6e},\"forgetting_ci_hi\":{:.6e},\
+         \"cf_steps\":{},\"cf_lr\":{},\"delta_norm_per_topic\":[{}]",
         r.n_perm,
         r.benefit,
         r.p_benefit,
+        r.benefit_ci.0,
+        r.benefit_ci.1,
         r.forgetting,
         r.p_forgetting,
+        r.forgetting_ci.0,
+        r.forgetting_ci.1,
         args.cf_steps,
         args.cf_lr,
         r.delta_norm_per_topic
