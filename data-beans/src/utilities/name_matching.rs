@@ -1,3 +1,4 @@
+use crate::sparse_io::ROW_SEP;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 
@@ -41,6 +42,18 @@ pub fn compose_id_name(ids: Vec<Box<str>>, names: Vec<Box<str>>) -> Vec<Box<str>
             }
         })
         .collect()
+}
+
+/// Inverse of [`compose_id_name`]: split a composite `id{ROW_SEP}name` display
+/// name back into `(id, name)` on the first `ROW_SEP`. When there is no
+/// separator (a bare symbol, or an id-only composite where name was empty or
+/// equalled id) both parts are the whole string, so a 10x `features.tsv` still
+/// gets a non-empty gene name.
+pub fn split_id_name(composite: &str) -> (&str, &str) {
+    match composite.split_once(ROW_SEP) {
+        Some((id, name)) if !name.is_empty() => (id, name),
+        _ => (composite, composite),
+    }
 }
 
 /// Comma-separated case-insensitive substring filter, parsed once and matched

@@ -428,7 +428,7 @@ fn qc_from_metrics(m: QcMetrics, cfg: &QcConfig) -> QcReport {
             // Display cutoff: the 2-means suggestion if found, else the
             // near-empty floor (what the non-auto tier would use).
             let shown = suggested.unwrap_or(cfg.min_cell_nnz);
-            crate::qc::print_nnz_summary("Cell", &n_genes, shown, suggested);
+            crate::qc::print_nnz_summary("Cell", "nnz", &n_genes, shown, suggested);
             if cfg.auto_cell_cutoff {
                 if let Some(cut) = suggested {
                     for (c, &g) in n_genes.iter().enumerate() {

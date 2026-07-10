@@ -7,6 +7,7 @@ use clap::{Args, ValueEnum};
 use log::info;
 use matrix_util::common_io::*;
 use matrix_util::membership::Membership;
+use matrix_util::traits::RunningStatOps;
 use regex::Regex;
 use std::sync::Arc;
 
@@ -222,5 +223,121 @@ pub fn run_stat(cmd_args: &RunStatArgs) -> anyhow::Result<()> {
         }
     };
 
+    Ok(())
+}
+
+/// Which per-row/per-column statistic to histogram.
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum HistStat {
+    Nnz,
+    Sum,
+    Mean,
+    Sd,
+}
+
+impl HistStat {
+    fn metric(&self) -> &'static str {
+        match self {
+            HistStat::Nnz => "nnz",
+            HistStat::Sum => "sum",
+            HistStat::Mean => "mean",
+            HistStat::Sd => "sd",
+        }
+    }
+
+    /// Pull the chosen statistic out of a running-stat accumulator (works for
+    /// both the row and column variants via the shared `RunningStatOps` trait).
+    fn values<S: RunningStatOps<f32, Output = Vec<f32>>>(&self, s: &S) -> Vec<f32> {
+        match self {
+            HistStat::Nnz => s.count_positives(),
+            HistStat::Sum => s.sum(),
+            HistStat::Mean => s.mean(),
+            HistStat::Sd => s.std(),
+        }
+    }
+}
+
+/// Which margin to summarize.
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum HistDim {
+    Row,
+    Column,
+    Both,
+}
+
+#[derive(Args, Debug)]
+pub struct RunHistogramArgs {
+    /// data file -- `.zarr`, `.zarr.zip`, or `.h5`
+    pub data_file: Box<str>,
+
+    /// statistic to histogram (log10(x+1) scale)
+    #[arg(short, long, value_enum, default_value = "nnz")]
+    pub stat: HistStat,
+
+    /// margin to summarize: per-feature (row), per-cell (column), or both
+    #[arg(short, long, value_enum, default_value = "both")]
+    pub dim: HistDim,
+
+    /// preload columns into memory for faster stat collection
+    #[arg(long, alias = "preload-data", default_value_t = false)]
+    pub preload: bool,
+
+    /// cells per rayon job (omit for auto-scaling by feature count)
+    #[arg(long)]
+    pub block_size: Option<usize>,
+
+    /// optional prefix; also writes raw values to {prefix}.{row,col}_{stat}.txt
+    #[arg(short, long)]
+    pub output: Option<Box<str>>,
+}
+
+/// Print an ASCII log-scale histogram of a per-row and/or per-column statistic
+/// (default nnz) — the same summary `squeeze --show-histogram` shows, exposed
+/// as a standalone command over any statistic.
+pub fn run_histogram(cmd_args: &RunHistogramArgs) -> anyhow::Result<()> {
+    let (backend, data_file) = resolve_backend_file(&cmd_args.data_file, None)?;
+    let mut data = open_sparse_matrix(&data_file, &backend)?;
+    if cmd_args.preload {
+        info!("Preloading data from {} ...", data_file);
+        data.preload_columns()?;
+    }
+
+    let metric = cmd_args.stat.metric();
+
+    if matches!(cmd_args.dim, HistDim::Row | HistDim::Both) {
+        let row_stat = collect_row_stat(data.as_ref(), cmd_args.block_size)?;
+        let vals = cmd_args.stat.values(&row_stat);
+        print_nnz_summary("Row (feature)", metric, &vals, 0, None);
+        write_stat_values(cmd_args.output.as_deref(), "row", metric, &vals)?;
+    }
+
+    if matches!(cmd_args.dim, HistDim::Column | HistDim::Both) {
+        if matches!(cmd_args.dim, HistDim::Both) {
+            println!();
+        }
+        let col_stat = collect_column_stat(data.as_ref(), cmd_args.block_size)?;
+        let vals = cmd_args.stat.values(&col_stat);
+        print_nnz_summary("Column (cell)", metric, &vals, 0, None);
+        write_stat_values(cmd_args.output.as_deref(), "col", metric, &vals)?;
+    }
+
+    Ok(())
+}
+
+/// When a prefix is given, write the raw per-unit values to
+/// `{prefix}.{dim}_{metric}.txt` (one per line) for downstream plotting.
+fn write_stat_values(
+    prefix: Option<&str>,
+    dim: &str,
+    metric: &str,
+    vals: &[f32],
+) -> anyhow::Result<()> {
+    if let Some(prefix) = prefix {
+        let path = format!("{}.{}_{}.txt", prefix, dim, metric);
+        write_types(&vals.to_vec(), &path)?;
+        info!("wrote {}", path);
+    }
     Ok(())
 }

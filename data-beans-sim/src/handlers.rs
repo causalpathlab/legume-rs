@@ -395,7 +395,7 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
         .rows
         .ok_or_else(|| anyhow::anyhow!("--rows is required when --reference is not set"))?;
 
-    let effective_output = apply_zip_flag(&cmd_args.output, cmd_args.zip);
+    let effective_output = apply_zip_flag(&cmd_args.output, cmd_args.zip, &cmd_args.backend);
     let output: Box<str> = strip_backend_suffix(&effective_output).into();
 
     dirname(&output).as_deref().map(mkdir).transpose()?;
@@ -537,8 +537,11 @@ pub fn run_simulate(cmd_args: &RunSimulateArgs) -> anyhow::Result<()> {
 
             build_and_write_backend(&prim_tr, &rows, &prim_cols, &backend, &effective_output)?;
 
-            let holdout_effective =
-                apply_zip_flag(&format!("{}.holdout", cmd_args.output), cmd_args.zip);
+            let holdout_effective = apply_zip_flag(
+                &format!("{}.holdout", cmd_args.output),
+                cmd_args.zip,
+                &backend,
+            );
             build_and_write_backend(&hold_tr, &rows, &hold_cols, &backend, &holdout_effective)?;
 
             info!(
@@ -582,7 +585,7 @@ fn run_simulate_with_reference(cmd_args: &RunSimulateArgs) -> anyhow::Result<()>
         .as_ref()
         .expect("run_simulate_with_reference called without --reference");
 
-    let effective_output = apply_zip_flag(&cmd_args.output, cmd_args.zip);
+    let effective_output = apply_zip_flag(&cmd_args.output, cmd_args.zip, &cmd_args.backend);
     let output: Box<str> = strip_backend_suffix(&effective_output).into();
     dirname(&output).as_deref().map(mkdir).transpose()?;
 
@@ -949,7 +952,8 @@ pub fn run_simulate_multimodal(cmd_args: &RunSimulateMultimodalArgs) -> anyhow::
     let backend = cmd_args.backend.clone();
     for m in 0..mm {
         let suffix = format!(".m{}", m);
-        let modality_output = apply_zip_flag(&format!("{}{}", output, suffix), cmd_args.zip);
+        let modality_output =
+            apply_zip_flag(&format!("{}{}", output, suffix), cmd_args.zip, &backend);
         let (_, backend_file) = resolve_backend_file(&modality_output, Some(backend.clone()))?;
 
         let mtx_shape = (cmd_args.rows, cmd_args.cols, sim.triplets[m].len());

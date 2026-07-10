@@ -5,7 +5,7 @@ use crate::sparse_util::*;
 use crate::utilities::name_matching::{
     compose_id_name, filter_row_indices_by_type, make_names_unique,
 };
-use data_beans::zarr_io::*;
+use crate::zarr_io::*;
 
 use clap::Args;
 use log::info;
@@ -185,7 +185,7 @@ pub struct From10xMatrixArgs {
 pub fn run_build_from_10x_matrix(args: &From10xMatrixArgs) -> anyhow::Result<()> {
     let file = hdf5::File::open(args.h5_file.to_string())?;
     info!("Opened 10X H5 file: {}", args.h5_file);
-    let effective_output = apply_zip_flag(&args.output, args.zip);
+    let effective_output = apply_zip_flag(&args.output, args.zip, &args.backend);
     let (backend, backend_file) =
         resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
 

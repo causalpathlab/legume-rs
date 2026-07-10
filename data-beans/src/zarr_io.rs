@@ -5,6 +5,7 @@
 //! (row names + numeric matrix) that returns `MatWithNames<DMatrix<f32>>`,
 //! matching the parquet reader interface in matrix-util.
 
+use crate::sparse_io::SparseIoBackend;
 use log::info;
 use matrix_util::traits::MatWithNames;
 use nalgebra::DMatrix;
@@ -88,21 +89,64 @@ pub fn open_zarr_store(path: &str) -> anyhow::Result<Arc<dyn ZReadStorageTraits>
     open_zarr_store_rw(path).map(|(r, _)| r)
 }
 
-/// If `zip` is true, ensure the output path ends with `.zarr.zip`.
-/// Otherwise pass through unchanged.
+/// If `zip` is true and the target is zarr, ensure the output path ends with
+/// `.zarr.zip`; otherwise pass through unchanged.
 ///
-/// HDF5 outputs are detected by the `.h5` / `.hdf5` suffix and left alone
-/// — otherwise an explicit `--backend hdf5` choice would be hijacked when
-/// callers default `--no-zip` to true (the project-wide default), and
-/// `resolve_backend_file` would silently flip the backend back to Zarr.
-pub fn apply_zip_flag(output: &str, zip: bool) -> Box<str> {
-    let looks_like_hdf5 = output.ends_with(".h5") || output.ends_with(".hdf5");
-    if zip && !looks_like_hdf5 && !output.ends_with(".zarr.zip") {
+/// The target is treated as HDF5 (and left alone) when `backend` is
+/// [`SparseIoBackend::HDF5`] or the name already carries a `.h5` / `.hdf5`
+/// suffix. Without the `backend` signal, a bare `-o foo` under `--backend hdf5`
+/// would be zarr-ified here and then flipped back to Zarr by
+/// `resolve_backend_file` — silently ignoring the requested backend.
+pub fn apply_zip_flag(output: &str, zip: bool, backend: &SparseIoBackend) -> Box<str> {
+    // The `.zarr.zip` suffix only makes sense for a zarr target. An HDF5 target
+    // — selected by `--backend hdf5` or an explicit `.h5`/`.hdf5` name — is left
+    // untouched, so a bare `-o foo` under `--backend hdf5` resolves to `foo.h5`
+    // rather than being silently zarr-ified by `resolve_backend_file`.
+    let target_is_hdf5 = matches!(backend, SparseIoBackend::HDF5)
+        || output.ends_with(".h5")
+        || output.ends_with(".hdf5");
+    if zip && !target_is_hdf5 && !output.ends_with(".zarr.zip") {
         let base = crate::hdf5_io::strip_backend_suffix(output);
         format!("{}.zarr.zip", base).into()
     } else {
         output.into()
     }
+}
+
+/// Resolve the output target for a handler that writes a fresh backend, and
+/// clear any pre-existing file at that path. Returns
+/// `(effective_output, backend, working_file)`, where `working_file` is the
+/// path to write (the un-zipped `.zarr` directory for a `.zarr.zip` target) —
+/// pair it with [`finalize_output`] once the backend is populated.
+pub fn prepare_output(
+    output: &str,
+    backend: SparseIoBackend,
+    zip: bool,
+) -> anyhow::Result<(Box<str>, SparseIoBackend, Box<str>)> {
+    use crate::hdf5_io::resolve_backend_file;
+    use matrix_util::common_io::remove_file;
+
+    let effective_output = apply_zip_flag(output, zip, &backend);
+    let (backend, working_file) = resolve_backend_file(&effective_output, Some(backend))?;
+    if std::path::Path::new(working_file.as_ref()).exists() {
+        remove_file(&working_file)?;
+    }
+    Ok((effective_output, backend, working_file))
+}
+
+/// Finalize a handler's output: re-zip the working `.zarr` directory when the
+/// target is `.zarr.zip`, and return the path the user will actually find (the
+/// archive for a `.zarr.zip` target, otherwise the working file).
+pub fn finalize_output<'a>(
+    working_file: &'a str,
+    effective_output: &'a str,
+) -> anyhow::Result<&'a str> {
+    finalize_zarr_output(working_file, effective_output)?;
+    Ok(if effective_output.ends_with(".zarr.zip") {
+        effective_output
+    } else {
+        working_file
+    })
 }
 
 /// Extract a `.zarr.zip` archive into `target_dir`, transparently stripping

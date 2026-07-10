@@ -5,7 +5,7 @@ use crate::sparse_util::*;
 use crate::utilities::name_matching::{
     compose_id_name, filter_row_indices_by_type, make_names_unique,
 };
-use data_beans::zarr_io::*;
+use crate::zarr_io::*;
 
 use log::info;
 use matrix_util::common_io::*;
@@ -176,7 +176,7 @@ pub struct FromZarrArgs {
 pub fn run_build_from_zarr_triplets(args: &FromZarrArgs) -> anyhow::Result<()> {
     let source_zarr_file_path = args.zarr_file.clone();
 
-    let effective_output = apply_zip_flag(&args.output, args.zip);
+    let effective_output = apply_zip_flag(&args.output, args.zip, &args.backend);
     let (backend, backend_file) =
         resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
 

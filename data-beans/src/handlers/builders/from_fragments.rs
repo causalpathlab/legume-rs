@@ -1,7 +1,7 @@
 use super::run_squeeze_if_needed;
 use crate::hdf5_io::*;
 use crate::sparse_io::*;
-use data_beans::zarr_io::*;
+use crate::zarr_io::*;
 
 use clap::Args;
 use log::info;
@@ -117,7 +117,7 @@ pub fn run_build_from_fragments(args: &FromFragmentsArgs) -> anyhow::Result<()> 
         anyhow::bail!("must provide either --peaks <bed> or --bin-size > 0");
     }
 
-    let effective_output = apply_zip_flag(&args.output, args.zip);
+    let effective_output = apply_zip_flag(&args.output, args.zip, &args.backend);
     let (backend, backend_file) =
         resolve_backend_file(&effective_output, Some(args.backend.clone()))?;
 

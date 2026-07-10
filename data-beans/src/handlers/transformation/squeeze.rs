@@ -689,9 +689,9 @@ fn display_nnz_histogram(
         println!("NNZ Distribution for: {}", data_file);
         println!("========================================\n");
 
-        print_nnz_summary("Rows", row.nnz, row.cutoff, row.suggest);
+        print_nnz_summary("Rows", "nnz", row.nnz, row.cutoff, row.suggest);
         println!();
-        print_nnz_summary("Columns", col.nnz, col.cutoff, col.suggest);
+        print_nnz_summary("Columns", "nnz", col.nnz, col.cutoff, col.suggest);
 
         println!("\n========================================\n");
     }
