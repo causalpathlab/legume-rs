@@ -337,6 +337,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         enc_context_size: None,
         dec_context_size: None,
         theta_mean: None,
+        n_train_cells: Some(data_vec.num_columns()),
     };
     metadata.save(&args.out)?;
 

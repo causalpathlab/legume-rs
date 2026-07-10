@@ -928,6 +928,7 @@ where
         enc_context_size: None,
         dec_context_size: None,
         theta_mean: None,
+        n_train_cells: Some(ctx.data_vec.num_columns()),
     };
     metadata.save(&ctx.args.out)?;
 

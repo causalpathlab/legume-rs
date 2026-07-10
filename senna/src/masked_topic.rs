@@ -1025,6 +1025,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         enc_context_size: Some(args.context_size),
         dec_context_size: Some(dec_context_size),
         theta_mean: None,
+        n_train_cells: Some(data_vec.num_columns()),
     };
     metadata.save(&args.out)?;
     save_shortlist_weights(&shortlist_weights, &gene_names, &args.out)?;
