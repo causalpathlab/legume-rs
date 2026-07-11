@@ -112,6 +112,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         block_size: args.block_size,
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
+        must_train_file: args.hvg.must_train_features.as_deref(),
         ignore_batch: args.collapse.ignore_batch,
         qc: args.qc.to_config(),
         qc_block_size: args.block_size,

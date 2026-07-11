@@ -308,7 +308,7 @@ Example:\n  \
             Fed gene counts (spliced + unspliced) today; embeds any per-feature count.\n\n\
             Per-gene β-sharing: each `{gene}/count/{spliced|unspliced}` row embeds as β_g.\n\
             A gene's spliced and unspliced tracks thus share one identity.\n\
-            Cell identity is the spliced projection θ → `{out}.latent.parquet` (raw).\n\
+            Cell identity is the spliced projection θ → `{out}.cell_embedding.parquet` (raw).\n\
             A velocity increment δ is fit from the unspliced edges → `{out}.velocity.parquet`.\n\
             The nascent state is just θ+δ; ‖δ‖ is speed.\n\
             Per-gene velocity, if wanted, is the in-model δ_g (`--delta-l2`).\n\n\
@@ -335,7 +335,7 @@ Example:\n  \
             (nearest-centroid assign → distance-outlier QC → Leiden clustering →\n\
             cluster×term hypergeometric over-representation, permutation-calibrated).\n\n\
             gem carries two gene programs, each annotated on its own axis (`--track`):\n\
-            spliced:  gene β_g (beta_dictionary) vs cell θ (latent)  → {out}.spliced.*\n\
+            spliced:  gene β_g (beta_dictionary) vs cell θ (cell_embedding)  → {out}.spliced.*\n\
               velocity: gene δ_g (delta_dictionary) vs cell velocity   → {out}.velocity.*\n\
             `both` (default) runs both; velocity is skipped with a warning when its\n\
             inputs are absent (spliced-only gem run).",
@@ -351,8 +351,8 @@ Example:\n  \
         aliases = ["trajectory", "traj"],
         about = "Velocity-oriented lineage + principal curves over a `faba gem` run",
         long_about = "Infer a velocity-oriented lineage over the embeddings from `faba gem`.\n\n\
-            Reads gem's parquet outputs by prefix (`-f/--from`): the latent θ\n\
-            (latent.parquet) and per-cell velocity δ (velocity.parquet). Fits K\n\
+            Reads gem's parquet outputs by prefix (`-f/--from`): the cell embedding θ\n\
+            (cell_embedding.parquet) and per-cell velocity δ (velocity.parquet). Fits K\n\
             k-means centroids on θ, an MST over them, orients that tree by the\n\
             per-node mean velocity flux, and fits Slingshot-style smooth principal\n\
             curves per lineage → per-cell pseudotime + branch.\n\n\

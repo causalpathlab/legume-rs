@@ -17,6 +17,9 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use tempfile::tempdir;
 
+#[cfg(test)]
+mod tests;
+
 /// Define a Delimiter enum to handle both &str and `Vec<char>`
 pub enum Delimiter {
     Str(String),
@@ -255,6 +258,119 @@ pub fn read_lines_of_words_delim(
     };
 
     read_lines_of_words_generic(input_file, hdr_line, parse_fn, parse_fn)
+}
+
+////////////////////////////////////////////////////////////
+// Name lists (a column of feature / gene names)           //
+////////////////////////////////////////////////////////////
+
+/// Header labels recognized as the name-bearing column of a name list, matched
+/// case-insensitively.
+const NAME_LIST_HEADERS: [&str; 12] = [
+    "gene",
+    "genes",
+    "gene_name",
+    "gene_names",
+    "gene_id",
+    "gene_symbol",
+    "feature",
+    "features",
+    "feature_name",
+    "symbol",
+    "name",
+    "id",
+];
+
+/// Position of the name-bearing column in `header`, if one is labelled.
+fn name_list_column(header: &[Box<str>]) -> Option<usize> {
+    header.iter().position(|h| {
+        let h = h.trim().trim_matches('"').to_ascii_lowercase();
+        NAME_LIST_HEADERS.contains(&h.as_str())
+    })
+}
+
+/// Read a flat list of names (genes / features) from a file, keeping one column
+/// and dropping every other.
+///
+/// The format is inferred from the extension: `.parquet`, else delimited text —
+/// tab, comma, or whitespace, optionally gzipped (`.txt`, `.tsv`, `.csv`,
+/// `.tsv.gz`, …). A header whose label is gene-like (`gene`, `feature`,
+/// `symbol`, …) selects the column to read; without one the first column is
+/// used. Every other column is ignored, so a two-column `gene<TAB>celltype`
+/// marker table doubles as a plain gene list. Names are de-duplicated, keeping
+/// first-seen order.
+///
+/// Names are returned verbatim — matching them against a data vocabulary
+/// (symbol / Ensembl / case) is the caller's job.
+pub fn read_name_list(file_path: &str) -> anyhow::Result<Vec<Box<str>>> {
+    let is_parquet = Path::new(file_path)
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|e| e.eq_ignore_ascii_case("parquet"));
+
+    let names: Vec<Box<str>> = if is_parquet {
+        let header = crate::parquet::peek_parquet_field_names(file_path)?;
+        let col = name_list_column(&header).unwrap_or(0);
+        crate::parquet::read_parquet_string_column(file_path, col)?
+    } else {
+        let raw = read_lines(file_path)?;
+        let data_lines: Vec<&str> = raw
+            .iter()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('%'))
+            .collect();
+
+        // Sniff ONE delimiter from the first row — tab, else comma, else whitespace.
+        // Splitting on all three at once would tear a value like `T cell` into two
+        // fields and shift every column after it.
+        let delim: &[char] = match data_lines.first() {
+            Some(first) if first.contains('\t') => &['\t'],
+            Some(first) if first.contains(',') => &[','],
+            _ => &[' ', '\t'],
+        };
+
+        // Blank fields (repeated or leading delimiters) are dropped before the column
+        // is indexed, so ragged indentation does not shift it either.
+        let rows: Vec<Vec<&str>> = data_lines
+            .iter()
+            .map(|line| {
+                line.split(delim)
+                    .map(|w| w.trim().trim_matches('"'))
+                    .filter(|w| !w.is_empty())
+                    .collect::<Vec<&str>>()
+            })
+            .filter(|row| !row.is_empty())
+            .collect();
+
+        // A gene-like label in the first row means it is a header: read the column it
+        // names and skip it. Otherwise the file is headerless and data starts at row 0
+        // — treating that first row as a header would silently drop a gene.
+        let header: Vec<Box<str>> = rows
+            .first()
+            .map(|row| row.iter().map(|w| (*w).into()).collect())
+            .unwrap_or_default();
+        let (col, skip) = match name_list_column(&header) {
+            Some(col) => (col, 1),
+            None => (0, 0),
+        };
+
+        rows.iter()
+            .skip(skip)
+            .filter_map(|row| row.get(col).map(|w| (*w).into()))
+            .collect()
+    };
+
+    let mut seen: std::collections::HashSet<Box<str>> = std::collections::HashSet::new();
+    let names: Vec<Box<str>> = names
+        .into_iter()
+        .filter(|n| !n.is_empty())
+        .filter(|n| seen.insert(n.clone()))
+        .collect();
+
+    if names.is_empty() {
+        return Err(anyhow::anyhow!("no names found in {file_path}"));
+    }
+    Ok(names)
 }
 
 ///

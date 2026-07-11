@@ -651,8 +651,9 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         .transpose()?
         .flatten();
 
-    let (effective_multiome, effective_hvg_n, effective_hvg_list) =
+    let effective_hvg =
         crate::hvg::resolve_multiome_with_hvg(args.multiome, data_files.len(), &args.hvg);
+    let effective_multiome = effective_hvg.multiome;
 
     let net_opts = crate::topic::common::FeatureNetworkOpts {
         prefix_match: args.feature_network_prefix_match,
@@ -695,8 +696,9 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         iter_opt: args.collapse.iter_opt,
         block_size: args.block_size,
         out: &args.out,
-        max_features: effective_hvg_n,
-        feature_list_file: effective_hvg_list,
+        max_features: effective_hvg.n_hvg,
+        feature_list_file: effective_hvg.feature_list_file,
+        must_train_file: effective_hvg.must_train_file,
         qc: args.qc.to_config(),
         qc_block_size: args.block_size,
         qc_report_out: args.qc.qc_report.as_deref(),

@@ -232,13 +232,15 @@ pub fn fit_cell_activity_graph_embedding(
     // user-provided `--feature-list-file`), applied as a subset of the
     // training gene axis. Non-HVG genes keep their randn-init e_gene
     // rows untouched and are dropped from the parquet output below.
-    let hvg_selected: Option<Vec<usize>> = if args.hvg.n_hvg > 0
-        || args.hvg.feature_list_file.is_some()
-    {
+    let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
+    let must_train =
+        data_beans_alg::hvg::load_must_train(args.hvg.must_train_features.as_deref(), hvg_enabled)?;
+    let hvg_selected: Option<Vec<usize>> = if hvg_enabled {
         let hvg = select_hvg_streaming(
             &data_vec,
             (args.hvg.n_hvg > 0).then_some(args.hvg.n_hvg),
             args.hvg.feature_list_file.as_deref(),
+            must_train.as_ref(),
             c.block_size,
         )?;
         let kept: std::collections::HashSet<usize> = hvg.selected_indices.iter().copied().collect();

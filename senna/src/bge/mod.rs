@@ -452,8 +452,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         &args.data_files
     };
 
-    let (effective_multiome, effective_hvg_n, effective_hvg_list) =
+    let effective_hvg =
         crate::hvg::resolve_multiome_with_hvg(is_multiome, data_files.len(), &args.hvg);
+    let effective_multiome = effective_hvg.multiome;
     let column_alignment = if effective_multiome {
         data_beans::sparse_io_vector::ColumnAlignment::Union
     } else {
@@ -532,12 +533,21 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // pass 2 (null features dropped). The feature network is rebuilt per pass
     // (its graph is aligned to the live feature-name axis), so it lives in the
     // closure rather than here.
-    let hvg_enabled = effective_hvg_n > 0 || effective_hvg_list.is_some();
+    //
+    // `--must-train-features` is loaded whether or not HVG is on, because it also
+    // exempts its features from the `--feature-null-fdr` drop further down — that
+    // gate runs independently of HVG, so a curated panel must survive it too.
+    let hvg_enabled = effective_hvg.selection_on();
+    let must_train = crate::hvg::load_must_train(
+        effective_hvg.must_train_file,
+        hvg_enabled || args.feature_null_fdr > 0.0,
+    )?;
     let hvg_full: Option<Vec<f32>> = if hvg_enabled {
         let hvg = select_hvg_streaming(
             unified.count_backend(),
-            (effective_hvg_n > 0).then_some(effective_hvg_n),
-            effective_hvg_list,
+            (effective_hvg.n_hvg > 0).then_some(effective_hvg.n_hvg),
+            effective_hvg.feature_list_file,
+            must_train.as_ref(),
             args.block_size,
         )?;
         Some(hvg.row_weights(unified.n_features()))
@@ -700,18 +710,44 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             args.feature_null_fdr,
             &args.out,
         )?;
-        let live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
+        let mut live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
+
+        // The all-null case is a degenerate-fit detector, so it has to read the RAW null
+        // call — BEFORE any `--must-train-features` rescue. Rescuing first would make
+        // `live` non-empty, the detector would never fire, and the refit would drop every
+        // feature EXCEPT the force-kept ones: the panel would eat the dictionary.
         if live.is_empty() {
             log::warn!("Feature null QC flagged all {n} features as null.");
-        } else if live.len() < n {
-            info!(
-                "Two-pass refine: dropping {} null features, re-fitting on {} live features.",
-                n - live.len(),
-                live.len()
-            );
-            unified.subset_features(&live);
-            let cfg = build_config(&unified)?;
-            out = ge::fit(&mut unified, cfg)?;
+        } else {
+            // `--must-train-features` outranks the null call as well as the HVG cut: a
+            // curated feature the user named stays in the dictionary even when the model
+            // never moved it off init. Still reported as null in the QC parquet.
+            if let Some(must_train) = must_train.as_ref() {
+                let rescued = crate::hvg::union_indices(
+                    &mut live,
+                    &must_train.resolve_quiet(&unified.feature_names),
+                );
+                if rescued > 0 {
+                    log::warn!(
+                        "--must-train-features: {rescued} feature(s) were called null at FDR {} \
+                         but kept anyway — they carry no signal in this data, so their embeddings \
+                         stay near their init. See {}.feature_qc.parquet.",
+                        args.feature_null_fdr,
+                        args.out
+                    );
+                }
+            }
+
+            if live.len() < n {
+                info!(
+                    "Two-pass refine: dropping {} null features, re-fitting on {} live features.",
+                    n - live.len(),
+                    live.len()
+                );
+                unified.subset_features(&live);
+                let cfg = build_config(&unified)?;
+                out = ge::fit(&mut unified, cfg)?;
+            }
         }
     }
 

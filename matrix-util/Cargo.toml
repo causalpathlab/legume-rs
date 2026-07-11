@@ -1,6 +1,6 @@
 [package]
 name = "matrix-util"
-version = "0.3.8"
+version = "0.3.9"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
