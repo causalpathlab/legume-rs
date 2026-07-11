@@ -728,7 +728,7 @@ fn fit_calibration(
     // against. The regression weight grades them; nothing is hard-gated.
     let calib_genes: Vec<usize> = (0..n_trained_genes)
         .filter(|&i| {
-            trained.beta[i * h..(i + 1) * h].iter().any(|&x| x != 0.0)
+            crate::null_call::live_row(&trained.beta, i, h).is_some()
                 && !gene_rows[trained.backend_gene_id[i] as usize]
                     .spliced
                     .is_empty()

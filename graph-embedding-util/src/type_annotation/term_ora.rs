@@ -32,6 +32,7 @@ use super::markers::parse_and_match_markers;
 use super::output::{write_label_tsvs, write_marker_embeddings};
 use super::score::{argmax_rows, row_major};
 use super::InputEmbeddings;
+use crate::null_call::live_row;
 use anyhow::{Context, Result};
 use log::{info, warn};
 use matrix_util::dmatrix_io::DMatrix;
@@ -43,6 +44,9 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use std::io::Write;
+
+#[cfg(test)]
+mod tests;
 
 /// File-name suffixes (relative to `out_prefix`) the firm term-ORA path writes.
 /// Kept explicit (never a glob) so a caller can erase a prior run without
@@ -231,7 +235,8 @@ pub fn annotate_with_communities(
     // 1. term centroids (un-normalized, IDF-weighted mean) //
     //////////////////////////////////////////////////////////
     let beta_flat = row_major(feature_emb);
-    let centroids = term_centroids(&beta_flat, g, &type_markers, h); // [c × h] row-major
+    let (centroids, n_live) = term_centroids(&beta_flat, &type_markers, h); // [c × h] row-major
+    report_marker_liveness(&type_names, &type_markers, &n_live);
 
     ////////////////////////////////////////////////
     // 2. nearest-centroid assignment (Euclidean) //
@@ -345,28 +350,36 @@ pub fn annotate_with_communities(
 // 1–2. centroids + assignment //
 /////////////////////////////////
 
-/// `[c × h]` row-major IDF-weighted mean of each type's marker feature
-/// embeddings — the **un-normalized** centroid (the Euclidean prototype). Empty
-/// types get a zero row.
+/// `[c × h]` row-major IDF-weighted mean of each type's marker feature embeddings — the
+/// **un-normalized** centroid (the Euclidean prototype) — plus the number of *live*
+/// markers each type's centroid was actually built from ([`live_row`]). Empty types get
+/// a zero row.
+///
+/// A dead marker is skipped in numerator *and* denominator. Counting it in `wsum` would
+/// divide a partial sum by the full weight, pulling the centroid toward the origin in
+/// proportion to the type's dead-marker fraction — and a short centroid is not a weak
+/// competitor, it is a magnet (see [`assign_nearest`]). Skipping it makes the centroid
+/// the honest mean over the markers carrying evidence, and leaves an all-dead type at the
+/// origin, where [`assign_nearest`]'s guard excludes it.
 fn term_centroids(
     feature_emb: &[f32],
-    n_features: usize,
     type_markers: &[Vec<(u32, f32)>],
     h: usize,
-) -> Vec<f32> {
+) -> (Vec<f32>, Vec<usize>) {
     let c = type_markers.len();
     let mut out = vec![0f32; c * h];
+    let mut n_live = vec![0usize; c];
     out.par_chunks_mut(h)
+        .zip(n_live.par_iter_mut())
         .zip(type_markers.par_iter())
-        .for_each(|(row, markers)| {
+        .for_each(|((row, live), markers)| {
             let mut wsum = 0f32;
             for &(gi, w) in markers {
-                let gi = gi as usize;
-                if gi >= n_features {
+                let Some(ef) = live_row(feature_emb, gi as usize, h) else {
                     continue;
-                }
+                };
+                *live += 1;
                 wsum += w;
-                let ef = &feature_emb[gi * h..(gi + 1) * h];
                 for (r, &e) in row.iter_mut().zip(ef) {
                     *r += w * e;
                 }
@@ -377,7 +390,60 @@ fn term_centroids(
                 }
             }
         });
-    out
+    (out, n_live)
+}
+
+/// Report the [`term_centroids`] live-marker counts, and warn about the types running on
+/// a mostly-dead panel.
+///
+/// A dead marker still *matches* the panel and counts toward the "matched entries" tally,
+/// but contributes nothing to its type's centroid — so a panel that is mostly dead looks
+/// exactly like a healthy one from the outside. Say so, and name the flag that fixes it.
+fn report_marker_liveness(
+    type_names: &[Box<str>],
+    type_markers: &[Vec<(u32, f32)>],
+    n_live: &[usize],
+) {
+    let n_matched: usize = type_markers.iter().map(Vec::len).sum();
+    if n_matched == 0 {
+        return;
+    }
+    info!(
+        "marker liveness: {}/{n_matched} matched markers carry a live β row",
+        n_live.iter().sum::<usize>()
+    );
+
+    // (name, live, matched) for every type more than half dead, worst fraction first.
+    // Compared as `live_a · matched_b` vs `live_b · matched_a` — the same order as the
+    // ratio, in exact integer arithmetic.
+    let mut starved: Vec<(&str, usize, usize)> = type_names
+        .iter()
+        .zip(type_markers)
+        .zip(n_live)
+        .filter(|&((_, m), &live)| !m.is_empty() && live * 2 < m.len())
+        .map(|((name, m), &live)| (name.as_ref(), live, m.len()))
+        .collect();
+    if starved.is_empty() {
+        return;
+    }
+    starved.sort_by(|&(_, al, am), &(_, bl, bm)| (al * bm).cmp(&(bl * am)));
+
+    let mut preview: Vec<String> = starved
+        .iter()
+        .take(10)
+        .map(|&(name, live, m)| format!("{name} {live}/{m}"))
+        .collect();
+    if starved.len() > preview.len() {
+        preview.push("…".into());
+    }
+    warn!(
+        "{} type(s) have under half their markers alive in the embedding: {}. \
+         A dead marker is a gene the embedding never trained on and whose post-hoc \
+         projection failed its null test; those types are scored off the survivors alone. \
+         Re-run the embedding with `--must-train-features <panel>` to train on the panel.",
+        starved.len(),
+        preview.join(", "),
+    );
 }
 
 /// Nearest-centroid assignment by squared Euclidean distance. Returns
@@ -407,7 +473,7 @@ fn assign_nearest(
     h: usize,
 ) -> (Vec<usize>, Vec<f32>) {
     let mut live: Vec<bool> = (0..c)
-        .map(|t| centroids[t * h..(t + 1) * h].iter().any(|&x| x != 0.0))
+        .map(|t| live_row(centroids, t, h).is_some())
         .collect();
     let n_degenerate = live.iter().filter(|&&l| !l).count();
     if n_degenerate == c {

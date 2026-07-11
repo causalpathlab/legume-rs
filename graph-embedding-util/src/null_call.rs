@@ -44,6 +44,24 @@ pub struct NullCall {
     pub n_live: usize,
 }
 
+/// Row `i` of a flat row-major embedding (`[· × h]`) **when it carries a usable
+/// embedding** — in range and not all-zero. `None` for a dead row.
+///
+/// An exactly-all-zero row is this crate's in-band "no usable embedding" signal: a
+/// held-out feature that fails its null call is *zeroed* rather than handed a
+/// fabricated direction (see [`crate::fit::feature_projection`]), and `faba gem`
+/// records which in `gene_qc.parquet`. Consumers must read it as **missing data, not
+/// an observation of zero** — averaging it in would drag the mean toward the origin.
+///
+/// This is an invariant, not a heuristic: a row the model actually trained is never
+/// exactly zero (SGD from a random init in `f32`, and there is no sparsity penalty on
+/// β anywhere), so the only all-zero rows are the deliberately-zeroed ones.
+#[must_use]
+pub fn live_row(rows: &[f32], i: usize, h: usize) -> Option<&[f32]> {
+    let row = rows.get(i * h..(i + 1) * h)?;
+    row.iter().any(|&x| x != 0.0).then_some(row)
+}
+
 /// Squared-norm null call on a flat row-major embedding `rows` (`[n × h]`):
 /// computes `s_i = ‖row_i‖²` and defers to [`chi2_null_call`] with `dof = h`.
 #[must_use]
