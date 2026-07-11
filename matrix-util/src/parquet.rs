@@ -25,6 +25,41 @@ pub fn peek_parquet_field_names(file_path: &str) -> anyhow::Result<Vec<Box<str>>
         .collect())
 }
 
+/// Read one string (`BYTE_ARRAY`) column out of a parquet file.
+///
+/// [`ParquetReader`] is a *matrix* reader: it needs at least one numeric column
+/// and bails with "no available columns" otherwise. A name table (a gene list, a
+/// `gene,celltype` marker file) is all strings, so it needs this instead.
+pub fn read_parquet_string_column(
+    file_path: &str,
+    column_index: usize,
+) -> anyhow::Result<Vec<Box<str>>> {
+    let file = File::open(file_path)?;
+    let reader = SerializedFileReader::new(file)?;
+    let metadata = reader.metadata();
+    let nrows = metadata.file_metadata().num_rows() as usize;
+    let fields = metadata.file_metadata().schema().get_fields();
+
+    let field = fields.get(column_index).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{file_path}: column index {column_index} out of range ({} column(s))",
+            fields.len()
+        )
+    })?;
+    anyhow::ensure!(
+        field.get_physical_type() == ParquetType::BYTE_ARRAY,
+        "{file_path}: column `{}` is {:?}, not a string column",
+        field.name(),
+        field.get_physical_type()
+    );
+
+    let mut out: Vec<Box<str>> = Vec::with_capacity(nrows);
+    for record in reader.get_row_iter(None)? {
+        out.push(record?.get_string(column_index)?.clone().into_boxed_str());
+    }
+    Ok(out)
+}
+
 pub struct ParquetReader {
     pub row_major_data: Vec<f64>,
     pub row_names: Vec<Box<str>>,

@@ -141,6 +141,36 @@ pub struct CollapseArgs {
     pub n_hvg: usize,
 
     #[arg(
+        long = "must-train-features",
+        value_name = "FILE",
+        help = "Genes to TRAIN on regardless of whether they make the HVG cut",
+        long_help = "Force-include list: these genes enter the FIT even when they do not make\n\
+                     the `--n-hvg` cut. UNIONed with the HVG selection, and also exempt from the\n\
+                     `--feature-null-fdr` drop — the two gates a gene would otherwise have to\n\
+                     pass. Both the spliced and unspliced rows of a kept gene are kept together,\n\
+                     so the β-sharing factorization stays aligned.\n\
+                     \n\
+                     This is about TRAINED vs PROJECTED, not presence: a gene that misses the\n\
+                     HVG cut still gets a β in `{out}.beta_dictionary.parquet`, but a post-hoc\n\
+                     PROJECTED one (the held-out-feature regression), not an in-model estimate.\n\
+                     Name it here and it is fit in-model instead. The `trained` column of\n\
+                     `{out}.gene_qc.parquet` says which each gene got.\n\
+                     \n\
+                     Format is inferred from the extension: .txt / .tsv / .csv / .parquet,\n\
+                     optionally gzipped. One gene per row; a gene-like header (`gene`,\n\
+                     `feature`, `symbol`, …) picks the column, else the first column is used.\n\
+                     EVERY OTHER COLUMN IS IGNORED, so a curated `gene<TAB>celltype` marker\n\
+                     table can be passed as-is.\n\
+                     \n\
+                     Names are matched leniently against the `{gene}` slot of the\n\
+                     `{gene}/count/{spliced|unspliced}` rows (case-insensitive, symbol ↔\n\
+                     `ENSG…_SYMBOL` either way); unmatched names are logged, not fatal.\n\
+                     A no-op only when `--n-hvg 0` AND `--feature-null-fdr 0`, i.e. when\n\
+                     nothing would drop a gene anyway."
+    )]
+    pub must_train_features: Option<Box<str>>,
+
+    #[arg(
         long,
         default_value = "",
         help = "Strip this suffix from each --genes file basename to form its sample id"

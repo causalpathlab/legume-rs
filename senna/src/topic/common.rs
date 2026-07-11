@@ -1,5 +1,5 @@
 use crate::embed_common::*;
-use crate::hvg::{select_hvg_streaming, HvgSelection};
+use crate::hvg::{load_must_train, select_hvg_streaming, HvgSelection};
 use crate::logging::new_progress_bar;
 use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 
@@ -218,6 +218,9 @@ pub struct LoadProjectArgs<'a> {
     pub block_size: Option<usize>,
     pub max_features: usize,
     pub feature_list_file: Option<&'a str>,
+    /// Optional `--must-train-features` list: force-included on top of whichever
+    /// selection ran. A no-op when no selection is happening.
+    pub must_train_file: Option<&'a str>,
     pub ignore_batch: bool,
     /// Optional shared cell QC. `None` = no QC (current behavior). When
     /// `Some`, applied inside `read_data_on_shared_rows` before
@@ -310,11 +313,13 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
     // random sketch (and hence the PB partitioning + cached cell_proj)
     // reflects variable biology. Collapsing still reads all genes.
     let hvg_enabled = args.max_features > 0 || args.feature_list_file.is_some();
+    let must_train = load_must_train(args.must_train_file, hvg_enabled)?;
     if hvg_enabled {
         selected_features = Some(select_hvg_streaming(
             &data_vec,
             (args.max_features > 0).then_some(args.max_features),
             args.feature_list_file,
+            must_train.as_ref(),
             args.block_size,
         )?);
     }
@@ -366,6 +371,8 @@ pub struct LoadCollapseArgs<'a> {
     pub max_features: usize,
     /// Optional pre-computed feature list (overrides `max_features`).
     pub feature_list_file: Option<&'a str>,
+    /// Optional force-include list — see [`LoadProjectArgs::must_train_file`].
+    pub must_train_file: Option<&'a str>,
     /// Opt-in BBKNN + Poisson DC-SBM refinement of the multilevel
     /// partition. `None` keeps the legacy hash-only behavior.
     pub refine: Option<data_beans_alg::refine_multilevel::RefineParams>,
@@ -424,6 +431,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         block_size: args.block_size,
         max_features: args.max_features,
         feature_list_file: args.feature_list_file,
+        must_train_file: args.must_train_file,
         ignore_batch: args.ignore_batch,
         qc: args.qc.clone(),
         qc_block_size: args.qc_block_size,

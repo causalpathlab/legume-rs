@@ -44,7 +44,8 @@ pub use auxiliary_data::feature_names::FeatureNameKind;
 pub use data::{load_unified_data, validate_multiome_groups, LoadUnifiedArgs, UnifiedData};
 pub use data_beans_alg::refine_multilevel::RefineParams;
 pub use eval::{
-    embedding_col_names, save_embedding, save_outputs, write_feature_coembedding, OutputContext,
+    embedding_col_names, save_embedding, save_outputs, save_outputs_named,
+    write_feature_coembedding, EmbeddingFileNames, OutputContext,
 };
 pub use feature_qc::{hvg_feature_qc, FeatureQcConfig, FeatureQcResult};
 pub use fit::{

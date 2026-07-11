@@ -1028,6 +1028,7 @@ fn preprocess_layout_data_recompute(
         // HVG gate so the projection reflects variable biology.
         max_features: 5000,
         feature_list_file: None,
+        must_train_file: None,
         refine: Some(data_beans_alg::refine_multilevel::RefineParams {
             feature_weighting: args.refine_weighting.into(),
             ..data_beans_alg::refine_multilevel::RefineParams::default()

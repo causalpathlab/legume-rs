@@ -13,7 +13,7 @@
 //! nascent splice offset `δ_g` — with two matching cell readouts — the latent `θ`
 //! and the velocity increment. Annotation runs per track, one side at a time. The
 //! `spliced` track pairs gene `β_g` (`{from}.beta_dictionary.parquet`) with cell `θ`
-//! (`{from}.latent.parquet`) → `{out}.spliced.*`; the `velocity` track pairs gene
+//! (`{from}.cell_embedding.parquet`) → `{out}.spliced.*`; the `velocity` track pairs gene
 //! `δ_g` (`{from}.delta_dictionary.parquet`) with cell velocity
 //! (`{from}.velocity.parquet`) → `{out}.velocity.*`.
 //!
@@ -186,7 +186,7 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
             &cfg,
             &TrackSpec {
                 gene_file: "beta_dictionary.parquet",
-                cell_file: "latent.parquet",
+                cell_file: "cell_embedding.parquet",
                 tag: "spliced",
             },
         )?;

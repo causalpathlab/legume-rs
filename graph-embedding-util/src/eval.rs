@@ -1,10 +1,9 @@
 //! Output writers shared by all callers.
 //!
-//! Conforms to senna's parquet conventions (so `senna {clustering,
-//! annotate, layout, plot} --from` work directly on outputs from any
-//! caller):
-//! - `{out}.latent.parquet` (cell × H), col prefix `h`
-//! - `{out}.dictionary.parquet` (feature × H), col prefix `h`
+//! The two embedding tables are written under caller-chosen stems (see
+//! [`EmbeddingFileNames`]); the bias tables are fixed:
+//! - cell × H, col prefix `h` — `latent` by default, `cell_embedding` for gem
+//! - feature × H, col prefix `h` — `dictionary` by default, `feature_embedding` for gem
 //! - `{out}.feature_bias.parquet` (per-feature bias).
 //! - `{out}.cell_bias.parquet` (per-cell bias `b_cell`, the depth sink).
 
@@ -13,23 +12,67 @@ use candle_util::candle_core::Tensor;
 use log::info;
 use matrix_util::traits::IoOps;
 
+/// File stems for the two embedding tables.
+///
+/// [`Default`] is senna's convention (`latent` / `dictionary`), which every
+/// `senna {clustering, annotate, layout, plot} --from` reader expects — so
+/// `senna bge` / `fne` keep it. `faba gem` uses [`EmbeddingFileNames::EXPLICIT`]
+/// instead, and its own downstream (`faba lineage` / `faba annotate`) reads those
+/// names. The two conventions do not mix: a reader expects one or the other.
+#[derive(Clone, Copy, Debug)]
+pub struct EmbeddingFileNames {
+    /// Stem for the cell × H table.
+    pub cell: &'static str,
+    /// Stem for the feature × H table.
+    pub feature: &'static str,
+}
+
+impl Default for EmbeddingFileNames {
+    fn default() -> Self {
+        Self {
+            cell: "latent",
+            feature: "dictionary",
+        }
+    }
+}
+
+impl EmbeddingFileNames {
+    /// The explicit spelling used by `faba gem`: say what the table *is* rather
+    /// than what role it plays in a topic model.
+    pub const EXPLICIT: Self = Self {
+        cell: "cell_embedding",
+        feature: "feature_embedding",
+    };
+}
+
 pub struct OutputContext<'a> {
     /// Names for the rows of `model.e_feat` / `model.b_feat`. The
-    /// dictionary parquet is keyed directly on these — gbe trains
+    /// feature-embedding parquet is keyed directly on these — gbe trains
     /// `E_feat` at fine gene resolution, so no replication is needed.
     pub feature_names: &'a [Box<str>],
     pub barcodes: &'a [Box<str>],
     /// Optional cell keep-mask (QC): emit only these cell rows of the
-    /// per-cell latent, with matching barcodes. `None` = emit every cell.
+    /// per-cell embedding, with matching barcodes. `None` = emit every cell.
     pub cell_keep_idx: Option<&'a [usize]>,
 }
 
+/// Write the outputs under senna's `latent` / `dictionary` convention.
 pub fn save_outputs(
     model: &JointEmbedModel,
     ctx: &OutputContext,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
-    let latent_path = format!("{out_prefix}.latent.parquet");
+    save_outputs_named(model, ctx, out_prefix, EmbeddingFileNames::default())
+}
+
+/// Write the outputs, choosing the stems for the two embedding tables.
+pub fn save_outputs_named(
+    model: &JointEmbedModel,
+    ctx: &OutputContext,
+    out_prefix: &str,
+    names: EmbeddingFileNames,
+) -> anyhow::Result<()> {
+    let latent_path = format!("{out_prefix}.{}.parquet", names.cell);
     let cell_bias_path = format!("{out_prefix}.cell_bias.parquet");
     match ctx.cell_keep_idx {
         // Drop QC-failed cells from the per-cell outputs (the row indices and
@@ -49,7 +92,7 @@ pub fn save_outputs(
         }
     }
     save_embedding(
-        &format!("{out_prefix}.dictionary.parquet"),
+        &format!("{out_prefix}.{}.parquet", names.feature),
         &model.e_feat,
         ctx.feature_names,
         "feature",

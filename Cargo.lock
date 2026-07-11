@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-alg"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "approx",
@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "faba"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "approx",
@@ -2658,7 +2658,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "anyhow",
  "auxiliary-data",
@@ -3533,7 +3533,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-util"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anndists",
  "anyhow",
@@ -4359,7 +4359,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinto"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "approx",
@@ -5079,7 +5079,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "approx",

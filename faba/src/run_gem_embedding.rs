@@ -7,7 +7,7 @@
 //! score `e_feat·e_cell + b_feat + b_cell`, phase-1 multilevel-pseudobulk
 //! training + phase-2 analytical per-cell projection. Cell **identity** is
 //! resolved by the SPLICED edges (mature mRNA = current state) and written **raw**
-//! (`{out}.latent.parquet`, magnitude kept); the same phase-2 pass fits an analytic
+//! (`{out}.cell_embedding.parquet`, magnitude kept); the same phase-2 pass fits an analytic
 //! velocity increment `δ` to the unspliced edges (identity held fixed) and writes
 //! it **raw** (`{out}.velocity.parquet`, ‖δ‖ = speed). Everything is the model's
 //! actual MAP estimate — no post-hoc unit-norm, no aggregation. The nascent state
@@ -15,10 +15,10 @@
 //! the in-model `δ_g` (`--delta-l2`). No softmax co-embedding is written (see the
 //! NOTE in `run_gem_genes_bge`: not every gene can be co-embedded).
 //!
-//! NOTE — `latent` is **raw** (its norm carries library size), so cluster / UMAP it
-//! with **cosine** distance, or L2-normalize the rows first; plain Euclidean would be
-//! dominated by the depth axis. (Only the gem/splice path stores raw; `senna bge`
-//! still writes the L2 direction.)
+//! NOTE — `cell_embedding` is **raw** (its norm carries library size), so cluster /
+//! UMAP it with **cosine** distance, or L2-normalize the rows first; plain Euclidean
+//! would be dominated by the depth axis. (Only the gem/splice path stores raw; `senna
+//! bge` still writes the L2 direction.)
 
 use anyhow::Context;
 use candle_util::candle_core::Tensor;
@@ -116,9 +116,11 @@ fn load_modality(
 }
 
 /// Genes-only joint embedding over the shared `graph_embedding_util` engine.
-/// Writes the standard geu outputs `{out}.{latent,dictionary,feature_bias,
-/// cell_bias}.parquet` (latent = raw spliced θ) and `{out}.velocity.parquet` (raw
-/// velocity increment δ). No softmax co-embedding; no nascent/driver post-hoc.
+/// Writes `{out}.{cell_embedding,feature_embedding,feature_bias,cell_bias}.parquet`
+/// (cell_embedding = raw spliced θ) and `{out}.velocity.parquet` (raw velocity
+/// increment δ). gem spells the two embedding tables out rather than using senna's
+/// `latent` / `dictionary` — it is not a topic model. No softmax co-embedding; no
+/// nascent/driver post-hoc.
 fn run_gem_genes_bge(
     args: &GemArgs,
     feature_kind: FeatureNameKind,
@@ -187,7 +189,17 @@ fn run_gem_genes_bge(
     // the low-detection "empty" genes that pile at the co-embed centre); the
     // uniform `hvg_weights` over the survivors then restricts the pb projection /
     // membership to those genes too. `None` (n_hvg = 0) keeps every gene.
+    //
+    // `--must-train-features` force-includes a curated panel on top of that cut, at
+    // the GENE level (so both splice tracks of a kept gene come along). It is loaded
+    // whether or not HVG is on, because it also exempts its genes from the
+    // `--feature-null-fdr` drop below — the other gate a gene has to survive.
     let hvg_on = args.collapse.n_hvg > 0;
+    let must_train = data_beans_alg::hvg::load_must_train(
+        args.collapse.must_train_features.as_deref(),
+        hvg_on || args.model.feature_null_fdr > 0.0,
+    )?;
+
     if hvg_on {
         use data_beans_alg::hvg::select_hvg_by_stats;
         use data_beans_alg::sparse_streaming::streaming_sparse_running_stats;
@@ -212,20 +224,38 @@ fn run_gem_genes_bge(
             gmean[row_gene[r] as usize] += m;
             gvar[row_gene[r] as usize] += v;
         }
-        let keep_genes: rustc_hash::FxHashSet<usize> =
-            select_hvg_by_stats(&gmean, &gvar, args.collapse.n_hvg)
-                .into_iter()
-                .collect();
+        let mut selected = select_hvg_by_stats(&gmean, &gvar, args.collapse.n_hvg);
+
+        // Force-include, resolved against the GENE keys (not the count rows), so a
+        // `CD8A` panel entry keeps `CD8A/count/spliced` AND `CD8A/count/unspliced`.
+        let forced = if let Some(must_train) = must_train.as_ref() {
+            let forced = must_train.resolve(&genes);
+            let added = data_beans_alg::hvg::union_indices(&mut selected, &forced);
+            info!(
+                "--must-train-features: {added} gene(s) force-added on top of the HVG cut \
+                 ({} of the {} matched were already HVGs)",
+                forced.len() - added,
+                forced.len()
+            );
+            added
+        } else {
+            0
+        };
+
+        let keep_genes: rustc_hash::FxHashSet<usize> = selected.into_iter().collect();
         let keep_rows: Vec<usize> = (0..row_gene.len())
             .filter(|&r| keep_genes.contains(&(row_gene[r] as usize)))
             .collect();
         let before = unified.n_features();
         unified.subset_features(&keep_rows);
         info!(
-            "HVG filter (--n-hvg {}): {} genes → {} kept ({} → {} feature rows)",
+            "HVG filter (--n-hvg {}): {} genes → {} kept ({} HVG + {} force-kept; \
+             {} → {} feature rows)",
             args.collapse.n_hvg,
             n_genes,
             keep_genes.len(),
+            keep_genes.len() - forced,
+            forced,
             before,
             unified.n_features()
         );
@@ -358,22 +388,53 @@ fn run_gem_genes_bge(
             null.sigma2, null.eff_dof, h, null.pi0, n - null.n_live, n, args.model.feature_null_fdr, args.out,
         );
         save_feature_qc(&e_feat, n, h, &unified.feature_names, &null, &args.out)?;
-        let live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
+        let mut live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
+
+        // The all-null case is a degenerate-fit detector, so it has to read the RAW null
+        // call — BEFORE any `--must-train-features` rescue. Rescuing first would make
+        // `live` non-empty, the detector would never fire, and the refit would drop
+        // every row EXCEPT the force-kept ones: the panel would eat the dictionary.
         if live.is_empty() {
             log::warn!(
                 "feature-null QC flagged all {n} rows null (degenerate fit); keeping pass-1 fit."
             );
-        } else if live.len() < n {
-            info!(
-                "two-pass refine: dropping {} null feature rows, re-fitting on {} live rows.",
-                n - live.len(),
-                live.len()
-            );
-            unified.subset_features(&live);
-            let (cfg2, gn2, dl2) = build_cfg(&unified)?;
-            out = ge::fit(&mut unified, cfg2).context("ge::fit refit (feature-null)")?;
-            gene_names = gn2;
-            delta_l2 = dl2;
+        } else {
+            // `--must-train-features` outranks the null call as well as the HVG cut: a
+            // gene the user named stays in the dictionary even when the model never moved
+            // its β off init. Resolved gene-level again (not row-level) so a rescued gene
+            // keeps BOTH its splice tracks — dropping one would break the β-sharing
+            // pairing. The genes are still reported null in `{out}.feature_qc.parquet`.
+            if let Some(must_train) = must_train.as_ref() {
+                let (row_gene, genes) = intern_gene_keys(&unified.feature_names);
+                let keep_genes: rustc_hash::FxHashSet<usize> =
+                    must_train.resolve_quiet(&genes).into_iter().collect();
+                let forced_rows: Vec<usize> = (0..row_gene.len())
+                    .filter(|&r| keep_genes.contains(&(row_gene[r] as usize)))
+                    .collect();
+                let rescued = data_beans_alg::hvg::union_indices(&mut live, &forced_rows);
+                if rescued > 0 {
+                    log::warn!(
+                        "--must-train-features: {rescued} feature row(s) were called null at FDR \
+                         {} but kept anyway — those genes carry no signal in this data, so their \
+                         β stays near its init. See {}.feature_qc.parquet.",
+                        args.model.feature_null_fdr,
+                        args.out
+                    );
+                }
+            }
+
+            if live.len() < n {
+                info!(
+                    "two-pass refine: dropping {} null feature rows, re-fitting on {} live rows.",
+                    n - live.len(),
+                    live.len()
+                );
+                unified.subset_features(&live);
+                let (cfg2, gn2, dl2) = build_cfg(&unified)?;
+                out = ge::fit(&mut unified, cfg2).context("ge::fit refit (feature-null)")?;
+                gene_names = gn2;
+                delta_l2 = dl2;
+            }
         }
     }
     let n_genes = gene_names.len();
@@ -387,11 +448,16 @@ fn run_gem_genes_bge(
     // co-embedding and sharp cell clusters are the same degree of freedom pulling
     // opposite ways — we keep the sharp clusters. (2) No velocity "driver" co-embed
     // either: a per-gene velocity readout, if wanted, is the in-model δ_g (`--delta-l2`
-    // → `{out}.delta_dictionary.parquet`), not a post-hoc average. `save_outputs` still
-    // writes the raw dictionary keyed by *feature row* (`{gene}/count/{spliced|unspliced}`);
-    // the gene-keyed β_g dictionary below is what marker-based `faba annotate` consumes.
+    // → `{out}.delta_dictionary.parquet`), not a post-hoc average. The feature embedding
+    // is keyed by *feature row* (`{gene}/count/{spliced|unspliced}`); the gene-keyed β_g
+    // dictionary below is what marker-based `faba annotate` consumes.
+    //
+    // gem writes the EXPLICIT names (`{out}.cell_embedding.parquet` /
+    // `{out}.feature_embedding.parquet`) rather than senna's `latent` / `dictionary` —
+    // gem is not a topic model, so "latent"/"dictionary" said less than the tables are.
+    // `faba {lineage, annotate}` read these names.
     let cpu = candle_util::candle_core::Device::Cpu;
-    ge::save_outputs(
+    ge::save_outputs_named(
         &out.model,
         &ge::OutputContext {
             feature_names: &unified.feature_names,
@@ -399,6 +465,7 @@ fn run_gem_genes_bge(
             cell_keep_idx: None,
         },
         &args.out,
+        ge::EmbeddingFileNames::EXPLICIT,
     )
     .context("save outputs")?;
 

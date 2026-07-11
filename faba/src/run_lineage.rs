@@ -1,7 +1,7 @@
 //! Entry point for `faba lineage` — velocity-oriented lineage inference over a
 //! `faba gem` embedding.
 //!
-//! Reads gem's raw parquet outputs by prefix (`{from}.latent.parquet` = θ,
+//! Reads gem's raw parquet outputs by prefix (`{from}.cell_embedding.parquet` = θ,
 //! `{from}.velocity.parquet` = δ), fits **K k-means centroids** on θ, an **MST**
 //! over them ([`matrix_util::principal_graph::mst_from_sqdist`]), **orients** that
 //! tree by the per-node mean velocity flux ([`crate::lineage::orient`]), and fits
@@ -54,7 +54,7 @@ pub struct LineageArgs {
     #[arg(
         long,
         short = 'f',
-        help = "gem output prefix (reads {from}.latent.parquet and {from}.velocity.parquet)"
+        help = "gem output prefix (reads {from}.cell_embedding.parquet and {from}.velocity.parquet)"
     )]
     pub from: Box<str>,
 
@@ -140,7 +140,7 @@ pub struct LineageArgs {
                      carries the same permutation-calibrated confidence.\n\
                      Input: a `gene<TAB>celltype` TSV (tab/comma/space delimited).\n\
                      Reads gene β from `{from}.beta_dictionary.parquet` and raw θ from \
-                     `{from}.latent.parquet`. Writes `{out}.lineage_annot.*` (per-cell calls \
+                     `{from}.cell_embedding.parquet`. Writes `{out}.lineage_annot.*` (per-cell calls \
                      keyed by MST node) and `{out}.trajectory_annotation.parquet` \
                      (node → role[root|terminal|internal] → cell_type → confidence)."
     )]
@@ -358,9 +358,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     // curves) runs on L2-normalized θ; this keeps a few extreme-magnitude cells
     // from dominating and matches the PHATE layout's geometry. `--no-normalize-latent`
     // reverts to the raw-Euclidean fit.
-    let latent_path = format!("{prefix}.latent.parquet");
+    let latent_path = format!("{prefix}.cell_embedding.parquet");
     let cell = DMatrix::<f32>::from_parquet(&latent_path)
-        .with_context(|| format!("reading latent embedding {latent_path}"))?;
+        .with_context(|| format!("reading cell embedding {latent_path}"))?;
     let cell_names = cell.rows;
     // Raw θ kept only for `--markers` node annotation, which scores in the same raw
     // latent space `faba annotate` uses (the L2-normalized `theta` below drives the fit).
