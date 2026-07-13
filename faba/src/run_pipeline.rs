@@ -26,7 +26,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Args, Debug)]
 #[command(
-    about = "Run unified RNA-seq pipeline: SNP → genes → ATOI → APA → m6A",
+    about = "Run unified RNA-seq pipeline: SNP → genes → ATOI → m6A → APA",
     long_about = "Orchestrates the complete RNA-seq analysis pipeline:\n\n\
         0. SNP genotyping (de novo discovery + optional known sites)\n\
         1. Gene expression filtering (identify expressed genes)\n\

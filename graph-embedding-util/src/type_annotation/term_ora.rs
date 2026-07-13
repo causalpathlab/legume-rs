@@ -66,7 +66,6 @@ use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rayon::prelude::*;
-use std::borrow::Cow;
 use std::io::Write;
 
 #[cfg(test)]
@@ -121,6 +120,10 @@ pub struct TermOraConfig {
     /// Draws for the **marker-panel permutation null** ([`super::panel_null`]) — the *bias*
     /// guard the bootstrap cannot supply. `0` ⇒ off.
     pub panel_perm: usize,
+    /// Shuffled panels for the **support null** ([`super::support_null`]) — turns `label_support`
+    /// into a p-value, so a cutoff can be an FDR rather than the arbitrary `--min-support`.
+    /// `0` ⇒ off. Needs the bootstrap.
+    pub support_perm: usize,
     /// When set, the per-cell call is the consensus of a **marker bootstrap**
     /// ([`super::marker_bootstrap`]) rather than a bare nearest-centroid argmin: each type's
     /// panel is resampled with replacement, its centroid rebuilt, and the cells re-assigned,
@@ -145,10 +148,14 @@ impl Default for TermOraConfig {
             ontology_fdr_q: 0.1,
             ontology_by: false,
             panel_perm: 0,
+            support_perm: 0,
             bootstrap: None,
         }
     }
 }
+
+/// One replicate's grouping: the per-cell community id, and how many communities there are.
+pub(super) type Partition = (Vec<usize>, usize);
 
 /// How a bootstrap replicate re-derives the cell grouping, given that replicate's seed.
 ///
@@ -375,31 +382,39 @@ fn annotate_inner(
         );
     }
 
-    let (mut assign, dist, boot) = match cfg.bootstrap.as_ref() {
+    let mut sup_null: Option<super::support_null::SupportNull> = None;
+    let (mut assign, dist, mut boot) = match cfg.bootstrap.as_ref() {
         None => {
             let (assign, dist) = assign_nearest(&cell_flat, n, &centroids, c, h);
             (assign, dist, None)
         }
         Some(bcfg) => {
-            // Each replicate's *pipeline* half — re-derive the grouping, test it, call it.
-            // Handed to the bootstrap as a callback so the panel is drawn exactly once per
-            // replicate and both the geometric call and the shipped label come off that one
-            // draw (see `marker_bootstrap::CoarseStep`).
+            // **The partitions do not depend on the marker panel.** Derive them once, up front,
+            // and every replicate — and later every shuffled-panel null replicate — reuses them.
+            // This is what makes the support null affordable: re-clustering is ~94% of a
+            // replicate's cost, so a null over P shuffles × B replicates would otherwise pay for
+            // P·B Leiden runs when B is all that is ever needed.
+            let partitions: Vec<Partition> = match regroup.filter(|_| bcfg.recluster) {
+                Some(f) => crate::stop::par_replicates(bcfg.n_boot, "clustering", |b| {
+                    let comm = f(cfg.seed.wrapping_add(b as u64))?;
+                    let m = n_communities(&comm);
+                    Ok((comm, m))
+                })?,
+                // Grouping held fixed: one partition, shared by every draw.
+                None => vec![(community.to_vec(), n_comm)],
+            };
             let step =
                 |b: usize, fine: &[usize], cent: &[f32]| -> Result<Option<(Vec<usize>, usize)>> {
                     replicate_label(
                         fine,
                         cent,
                         &cell_flat,
-                        community,
-                        n_comm,
-                        regroup.filter(|_| bcfg.recluster),
+                        &partitions[b % partitions.len()],
                         n,
                         c,
                         h,
                         &lnfact,
                         cfg,
-                        b,
                     )
                 };
             let post = run_marker_bootstrap(
@@ -411,6 +426,25 @@ fn annotate_inner(
                 cfg.seed,
                 Some(&step),
             )?;
+            // Calibrate the support: what would this cell's agreement look like if the panel
+            // carried no type information at all? Reuses the very partitions the observed run
+            // drew, so the only thing that differs between the two is the panel's *meaning*.
+            if cfg.support_perm > 0 {
+                if let Some(con) = post.coarse.as_ref() {
+                    sup_null = Some(super::support_null::run_support_null(
+                        &beta_flat,
+                        &cell_flat,
+                        &type_markers,
+                        h,
+                        &partitions,
+                        &lnfact,
+                        &con.support,
+                        cfg.support_perm,
+                        cfg,
+                        bcfg,
+                    )?);
+                }
+            }
             (post.assign.clone(), post.dist.clone(), Some(post))
         }
     };
@@ -459,6 +493,33 @@ fn annotate_inner(
     // confidence is *how often they agreed* — a per-cell number, and one that finally means
     // something operational ("re-run this and you'd get the same answer this fraction of the
     // time").
+    // **The calibrated cutoff, applied.** `--support-perm` was computing an FDR and gating nothing
+    // — three answers to "may this call stand?" (an arbitrary bar, a sign test, and a calibrated
+    // q) and the one we paid the most for got no vote. It gets one now: a cell whose support is no
+    // better than a meaningless panel achieves is not called, whatever `--min-support` says.
+    //
+    // This is strictly the stronger test. Measured on cord blood, a *shuffled* panel still earns a
+    // mean support of 0.60 — so the default bar of 0.50 sits BELOW the null, and kept 91% of cells
+    // where the FDR keeps 36%.
+    if let (Some(sn), Some(b)) = (sup_null.as_ref(), boot.as_mut()) {
+        if let Some(con) = b.coarse.as_mut() {
+            let mut cut = 0usize;
+            for i in 0..n {
+                if con.label[i] != UNASSIGNED && sn.q[i] >= cfg.fdr_alpha {
+                    con.label[i] = UNASSIGNED;
+                    cut += 1;
+                }
+            }
+            info!(
+                "support null ({} shuffled panels): {cut} call(s) dropped for failing the \
+                 calibrated cutoff (support_q >= {}); a panel carrying no type information \
+                 attains a mean support of {:.2} here, so `--min-support` alone was not a test",
+                sn.n_perm,
+                cfg.fdr_alpha,
+                sn.null_support.iter().sum::<f32>() / n.max(1) as f32,
+            );
+        }
+    }
     let consensus: Option<&CoarseConsensus> = boot.as_ref().and_then(|b| b.coarse.as_ref());
     let (coarse_label, coarse_conf): (Vec<Box<str>>, Vec<f32>) = match consensus {
         Some(con) => {
@@ -507,6 +568,7 @@ fn annotate_inner(
         &cluster_label,
         boot.as_ref(),
         consensus,
+        sup_null.as_ref(),
     )?;
     if let (Some(post), Some(con)) = (boot.as_ref(), consensus) {
         write_bootstrap_outputs(
@@ -885,34 +947,18 @@ fn cluster_cells(graph: &KnnGraph, n: usize, cfg: &TermOraConfig, seed: u64) -> 
 /// how we got it: which markers were drawn, and — when `recluster` — which partition the
 /// (irreproducible) clustering happened to land in this time.
 #[allow(clippy::too_many_arguments)]
-fn replicate_label(
+pub(super) fn replicate_label(
     fine: &[usize],
     centroids: &[f32],
     cell_flat: &[f32],
-    community: &[usize],
-    n_comm_ref: usize,
-    regroup: Option<&Regroup<'_>>,
+    partition: &Partition,
     n: usize,
     c: usize,
     h: usize,
     lnfact: &[f64],
     cfg: &TermOraConfig,
-    draw: usize,
 ) -> Result<Option<(Vec<usize>, usize)>> {
-    // Borrowed when the grouping is held fixed; owned only when we re-derive it.
-    let (comm, n_comm): (Cow<'_, [usize]>, usize) = match regroup {
-        Some(f) => {
-            let comm = f(cfg.seed.wrapping_add(draw as u64))?;
-            anyhow::ensure!(
-                comm.len() == n,
-                "regroup returned {} labels, need {n}",
-                comm.len()
-            );
-            let m = n_communities(&comm);
-            (Cow::Owned(comm), m)
-        }
-        None => (Cow::Borrowed(community), n_comm_ref),
-    };
+    let (comm, n_comm) = (&partition.0, partition.1);
 
     let mut assign = fine.to_vec();
     if cfg.assign_qc {
@@ -923,7 +969,7 @@ fn replicate_label(
         return Ok(None);
     }
 
-    let ora = cluster_term_ora(&assign, &comm, n_comm, c, lnfact, Want::CallOnly, cfg);
+    let ora = cluster_term_ora(&assign, comm, n_comm, c, lnfact, Want::CallOnly, cfg);
     let call = cluster_calls(&ora, n_comm, c, cfg.fdr_alpha);
     let per_cell: Vec<usize> = (0..n)
         .map(|i| match call[comm[i]] {
@@ -1403,6 +1449,7 @@ fn write_annot_parquet(
     cluster_label: &[usize],
     boot: Option<&BootstrapResult>,
     consensus: Option<&CoarseConsensus>,
+    sup_null: Option<&super::support_null::SupportNull>,
 ) -> Result<()> {
     let n = cell_names.len();
     let c = type_names.len();
@@ -1499,6 +1546,16 @@ fn write_annot_parquet(
             (Box::from("fine_entropy"), Column::F32(&b.entropy)),
         ]);
     }
+    // The support, calibrated: `support_q` is a Benjamini–Hochberg FDR across the cells, so a
+    // cutoff on it means the same thing whatever the number of types — unlike `label_support`,
+    // whose natural scale is `1/C`.
+    if let Some(sn) = sup_null {
+        cols.extend([
+            (Box::from("support_p"), Column::F32(&sn.p)),
+            (Box::from("support_q"), Column::F32(&sn.q)),
+            (Box::from("null_support"), Column::F32(&sn.null_support)),
+        ]);
+    }
     write_named_table(&annot_path, "cell", cell_names, &cols)
         .with_context(|| format!("writing {annot_path}"))?;
     info!("wrote {annot_path}");
@@ -1563,15 +1620,18 @@ fn write_bootstrap_outputs(
 
     let path = format!("{out_prefix}.type_qc.tsv");
     let mut f = std::fs::File::create(&path).with_context(|| format!("creating {path}"))?;
+    // `n_draws` is the number of replicates that actually ran — every support in this run is a
+    // fraction of it, and a Ctrl+C makes it smaller than `--n-boot`.
     writeln!(
         f,
-        "cell_type\tn_markers\tn_live\tcentroid_jitter\tdecision_gap\tnoise_ratio\tmean_support\toccupancy"
+        "cell_type\tn_draws\tn_markers\tn_live\tcentroid_jitter\tdecision_gap\tnoise_ratio\tmean_support\toccupancy"
     )?;
     for (t, qc) in post.type_qc.iter().enumerate() {
         writeln!(
             f,
-            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.3}\t{:.4}\t{:.4}",
+            "{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.3}\t{:.4}\t{:.4}",
             type_names[t],
+            post.n_draws,
             type_markers[t].len(),
             qc.n_live,
             qc.centroid_jitter,

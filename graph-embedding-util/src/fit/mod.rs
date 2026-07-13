@@ -26,7 +26,6 @@ use crate::loss::{
     build_stratified_sampler, FeatPairing, PerBatchStratifiedCellSampler, StratifiedSampler,
 };
 use crate::model::{FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
-use crate::stop::setup_stop_handler;
 use crate::training::{
     train_composite, AxisSampler, CompositeAxis, CompositeMode, CompositeTrainContext, PbDagParams,
     PbDagTerm, PbSemTerm,
@@ -70,7 +69,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     let n_cells = unified.n_cells();
     let h = config.embedding_dim;
     let alpha_neg = 0.75_f32;
-    let stop = config.stop.take().unwrap_or_else(setup_stop_handler);
+    let stop = crate::stop::stop_flag();
 
     //////////////////////////////////////////////////////////////////
     // Shared upstream: batch-corrected projection + Fisher weights //

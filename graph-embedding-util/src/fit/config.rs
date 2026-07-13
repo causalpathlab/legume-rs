@@ -13,8 +13,6 @@ use data_beans_alg::gene_weighting::{
 use data_beans_alg::refine_multilevel::RefineParams;
 use log::{info, warn};
 use matrix_util::pair_graph::FeaturePairGraph;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
 /// Per-axis mixing weight in the composite loss. Defaults to 1.0 for
 /// every axis (uniform); callers can override by passing a different
@@ -93,12 +91,6 @@ pub struct FitConfig {
     /// raw hash partition. Setting `num_gibbs == 0 && num_greedy == 0`
     /// inside `Some(..)` is equivalent to disabling.
     pub refine: Option<RefineParams>,
-    /// Optional caller-provided stop flag (so a single SIGINT handler
-    /// can be shared with surrounding orchestration). When `None`,
-    /// [`fit`] installs its own. Callers running `fit` more than once
-    /// in the same process MUST pass `Some(...)` with a single shared
-    /// flag — `ctrlc::set_handler` panics on the second registration.
-    pub stop: Option<Arc<AtomicBool>>,
     /// Explicit L2 penalty `λ · ‖E_feat‖_F²` on the shared feature
     /// embedding, added to the composite loss before backward. `0.0`
     /// disables.

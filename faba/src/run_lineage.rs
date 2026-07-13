@@ -179,15 +179,18 @@ pub struct LineageArgs {
 
     #[arg(
         long = "no-bootstrap-markers",
-        help = "[--markers] Turn OFF the stability bootstrap on the node calls and name each \
-                node by a bare point estimate. ON by default: each draw resamples every type's \
-                marker panel with replacement AND re-derives the k-means grouping, then the \
-                consensus is shipped, so a node's name carries the fraction of resamples that \
-                agreed on it. This matters most for --root-type, which picks the trajectory root \
-                as the highest-confidence node of a given type: without the bootstrap that \
-                `confidence` is a softmaxed test statistic rather than a reproducibility, and \
-                the whole trajectory hangs off it. Costs ~8 min at --marker-n-boot 200 (the \
-                replicate k-means has nothing to cache, unlike `faba annotate`'s kNN graph)"
+        help = "[--markers] Turn OFF the stability bootstrap on the node calls",
+        long_help = "Turn OFF the stability bootstrap on the node calls, naming each node\n\
+            by a bare point estimate.\n\n\
+            The bootstrap is ON by default. Each draw resamples every type's marker panel\n\
+            with replacement AND re-derives the k-means grouping; the consensus is what\n\
+            ships, so a node's name carries the fraction of resamples that agreed on it.\n\n\
+            This matters most for --root-type, which picks the trajectory root as the\n\
+            highest-confidence node of a given type. Without the bootstrap that\n\
+            `confidence` is a softmaxed test statistic rather than a reproducibility —\n\
+            and the whole trajectory hangs off it.\n\n\
+            Costs ~6 min at --marker-n-boot 200: the replicate k-means has nothing to\n\
+            cache, unlike `faba annotate`'s kNN graph"
     )]
     pub no_bootstrap_markers: bool,
 
@@ -667,6 +670,8 @@ fn compute_node_calls(a: &AnnotateTrajArgs) -> Result<CommunityCalls> {
         seed: a.seed,
         obo: a.obo.map(str::to_owned),
         label_cl: a.label_cl.map(str::to_owned),
+        panel_perm: 0,
+        support_perm: 0,
         bootstrap: a.bootstrap.clone(),
         ..TermOraConfig::default()
     };

@@ -566,7 +566,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // Install the Ctrl-C stop handler once and share the flag across both
     // passes — each `ge::fit` would otherwise try to register its own SIGINT
     // handler and the second registration panics (`MultipleHandlers`).
-    let stop = ge::setup_stop_handler();
 
     // Full-backend feature identity, captured before any subsetting. bge never
     // narrows the feature axis by HVG, so this differs from the trained axis only
@@ -651,7 +650,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 Some(format!("{}.fisher_weights.parquet", args.out).into_boxed_str())
             },
             feature_network,
-            stop: Some(stop.clone()),
             feature_embedding_l2: args.feature_embedding_l2,
             weight_decay: args.weight_decay,
             max_grad_norm: args.max_grad_norm,

@@ -59,6 +59,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 mod coarsen;
+mod gene_strata;
 mod layout;
 mod marker_bootstrap;
 mod markers;
@@ -66,6 +67,7 @@ mod ontology_obo;
 mod output;
 mod panel_null;
 mod score;
+mod support_null;
 mod term_ora;
 use coarsen::*;
 use layout::{leiden_from_graph, phate_cells, umap_from_graph, write_layout_outputs, LayoutInputs};
@@ -114,6 +116,11 @@ pub use marker_bootstrap::{
 /// panel captures more cells than random genes would. Because the null panel is the same size, a
 /// small panel's winner's-curse advantage appears in the null too and **cancels**.
 pub use panel_null::{run_panel_null, PanelNull};
+
+/// The **support permutation null** — turns `label_support` into a p-value, so the cutoff is an
+/// FDR rather than the arbitrary (and not scale-free) `--min-support`. Shuffles the gene → type
+/// assignment within norm strata and re-runs the whole bootstrap, reusing the cached partitions.
+pub use support_null::{run_support_null, SupportNull};
 
 /// Bind the generic `enrichment` TreeBH ontology core to the concrete OBO
 /// loader (load OBO + `label→CL`, inject access closures, run). Shared by the

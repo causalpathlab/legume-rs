@@ -52,6 +52,8 @@
 //! and drawing exactly `|live(t)|` of them, holds "is this gene trained?" fixed and isolates the
 //! one question worth asking: **are these the right genes?**
 
+use super::gene_strata::GeneStrata;
+use super::marker_bootstrap::sq_dist;
 use super::markers::marker_gene_pool;
 use super::term_ora::term_centroids;
 use crate::null_call::live_row;
@@ -93,18 +95,6 @@ pub struct PanelNull {
 /// panel resampling, so the three cannot accidentally share draws off the same `--seed`.
 const PANEL_NULL_STREAM: u64 = 0x009A_5E11_C0DE;
 
-/// Squared Euclidean distance, kept `f32`-monomorphic so it vectorizes.
-#[inline]
-fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b)
-        .map(|(&x, &y)| {
-            let d = x - y;
-            d * d
-        })
-        .sum()
-}
-
 /// Run the per-type panel null. `feature_emb` / `cell_flat` are row-major `[g × h]` / `[n × h]`.
 pub fn run_panel_null(
     feature_emb: &[f32],
@@ -127,6 +117,28 @@ pub fn run_panel_null(
         .filter(|&gi| live_row(feature_emb, gi as usize, h).is_some())
         .collect();
     let pool_n = pool.len();
+
+    // **Match the null on gene norm.** Draw uniformly from the pool and every null panel inherits
+    // the *pool's* mean norm, so a type whose markers are longer than average beats its null on
+    // norm alone and one whose markers are shorter loses on norm alone — with no biology tested
+    // either way. Stratifying reproduces each type's own norm profile in its null. See
+    // `super::gene_strata`.
+    let strata = GeneStrata::by_norm(feature_emb, &pool, h);
+    // `quota[t][k]` = how many of type t's live markers fall in norm stratum k. A null draw for t
+    // takes exactly that many from each stratum, so its norm profile is t's own.
+    let pos_of: std::collections::HashMap<u32, usize> =
+        pool.iter().enumerate().map(|(i, &g)| (g, i)).collect();
+    let quota: Vec<Vec<usize>> = (0..c)
+        .map(|t| {
+            let mut q = vec![0usize; strata.members.len()];
+            for &(gi, _) in &type_markers[t] {
+                if let Some(&i) = pos_of.get(&gi) {
+                    q[strata.stratum[i]] += 1;
+                }
+            }
+            q
+        })
+        .collect();
 
     ////////////////////////////////////////////////////////////////////////
     // The rivals are fixed, so the bar each type must clear is fixed too //
@@ -203,7 +215,22 @@ pub fn run_panel_null(
     // Times a null-t panel explained cell i at least as well as t's own panel did.
     let mut cell_hits = vec![0u32; n * c];
 
-    let per_type: Vec<(Vec<f32>, Vec<f32>, Vec<u32>)> = (0..c)
+    // Ctrl+C: stop drawing and score each type against the draws it got. The types run in
+    // parallel and so may stop at different counts, but that is harmless — every type's p is an
+    // empirical tail against *its own* null draws, so each simply gets a coarser denominator.
+    let stop = crate::stop::stop_flag();
+    let mut n_done = vec![0usize; c];
+
+    /// One type's trial: its null occupancies, its null costs, per-cell hits, and how many draws
+    /// actually ran (a Ctrl+C can cut it short).
+    struct Trial {
+        occ: Vec<f32>,
+        cost: Vec<f32>,
+        hits: Vec<u32>,
+        done: usize,
+    }
+
+    let per_type: Vec<Trial> = (0..c)
         .into_par_iter()
         .map(|t| {
             let m = n_live[t].min(pool_n);
@@ -211,7 +238,12 @@ pub fn run_panel_null(
             let mut cost_t = vec![f32::INFINITY; n_perm];
             let mut hits_t = vec![0u32; n];
             if m < 1 || !usable[t] {
-                return (occ_t, cost_t, hits_t);
+                return Trial {
+                    occ: occ_t,
+                    cost: cost_t,
+                    hits: hits_t,
+                    done: 0,
+                };
             }
             // t's IDF weights, in order, but only as many as it has live markers — the null
             // panel is the same size and carries the same weight multiset.
@@ -222,16 +254,34 @@ pub fn run_panel_null(
                 .collect();
 
             let mut cent = vec![0f32; h];
+            let mut drawn: Vec<usize> = Vec::with_capacity(m);
+            let mut done = 0usize;
             for p in 0..n_perm {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 let mut rng = SmallRng::seed_from_u64(
                     seed ^ PANEL_NULL_STREAM
                         ^ ((t as u64) << 32)
                         ^ (p as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
                 );
-                let drawn = rand::seq::index::sample(&mut rng, pool_n, m);
+                // Stratum-matched: take t's own number of genes from each norm bin.
+                drawn.clear();
+                for (k, &want) in quota[t].iter().enumerate() {
+                    let bin = &strata.members[k];
+                    let take = want.min(bin.len());
+                    if take == 0 {
+                        continue;
+                    }
+                    drawn.extend(
+                        rand::seq::index::sample(&mut rng, bin.len(), take)
+                            .iter()
+                            .map(|j| bin[j]),
+                    );
+                }
                 cent.iter_mut().for_each(|v| *v = 0.0);
                 let mut wsum = 0f32;
-                for (pool_i, &w) in drawn.iter().zip(&weights) {
+                for (&pool_i, &w) in drawn.iter().zip(&weights) {
                     let gi = pool[pool_i] as usize;
                     let ef = &feature_emb[gi * h..(gi + 1) * h];
                     wsum += w;
@@ -257,37 +307,47 @@ pub fn run_panel_null(
                 }
                 occ_t[p] = won as f32 / n as f32;
                 cost_t[p] = cost_p;
+                done += 1;
             }
-            (occ_t, cost_t, hits_t)
+            Trial {
+                occ: occ_t,
+                cost: cost_t,
+                hits: hits_t,
+                done,
+            }
         })
         .collect();
 
-    for (t, (occ_t, cost_t, hits_t)) in per_type.iter().enumerate() {
-        null_occ[t * n_perm..(t + 1) * n_perm].copy_from_slice(occ_t);
-        null_cost_all[t * n_perm..(t + 1) * n_perm].copy_from_slice(cost_t);
+    for (t, trial) in per_type.iter().enumerate() {
+        n_done[t] = trial.done;
+        null_occ[t * n_perm..(t + 1) * n_perm].copy_from_slice(&trial.occ);
+        null_cost_all[t * n_perm..(t + 1) * n_perm].copy_from_slice(&trial.cost);
         for i in 0..n {
-            cell_hits[i * c + t] = hits_t[i];
+            cell_hits[i * c + t] = trial.hits[i];
         }
     }
 
-    let mean_over = |v: &[f32]| v.iter().sum::<f32>() / n_perm.max(1) as f32;
-    let null_occupancy: Vec<f32> = (0..c)
-        .map(|t| mean_over(&null_occ[t * n_perm..(t + 1) * n_perm]))
-        .collect();
-    let null_cost: Vec<f32> = (0..c)
-        .map(|t| mean_over(&null_cost_all[t * n_perm..(t + 1) * n_perm]))
-        .collect();
+    // Every average and every tail is over the draws that *ran* (`n_done[t]`), not the draws that
+    // were asked for — so an interrupted run is a coarser null, not a wrong one.
+    let drawn = |t: usize| &null_occ[t * n_perm..t * n_perm + n_done[t]];
+    let drawn_cost = |t: usize| &null_cost_all[t * n_perm..t * n_perm + n_done[t]];
+    let mean_over = |v: &[f32]| {
+        if v.is_empty() {
+            0.0
+        } else {
+            v.iter().sum::<f32>() / v.len() as f32
+        }
+    };
+    let null_occupancy: Vec<f32> = (0..c).map(|t| mean_over(drawn(t))).collect();
+    let null_cost: Vec<f32> = (0..c).map(|t| mean_over(drawn_cost(t))).collect();
     let p: Vec<f32> = (0..c)
         .map(|t| {
-            if !usable[t] || n_perm == 0 {
+            if !usable[t] || n_done[t] == 0 {
                 return 1.0;
             }
             // Lower cost = better panel, so the null "wins" by coming in at or under the real.
-            let le = null_cost_all[t * n_perm..(t + 1) * n_perm]
-                .iter()
-                .filter(|&&x| x <= cost[t])
-                .count();
-            (le as f32 + 1.0) / (n_perm as f32 + 1.0)
+            let le = drawn_cost(t).iter().filter(|&&x| x <= cost[t]).count();
+            (le as f32 + 1.0) / (n_done[t] as f32 + 1.0)
         })
         .collect();
 
@@ -296,8 +356,8 @@ pub fn run_panel_null(
         .map(|i| {
             let assigned = (0..c).find(|&t| usable[t] && own[i * c + t] < bar[i * c + t]);
             match assigned {
-                Some(t) if n_perm > 0 => {
-                    (cell_hits[i * c + t] as f32 + 1.0) / (n_perm as f32 + 1.0)
+                Some(t) if n_done[t] > 0 => {
+                    (cell_hits[i * c + t] as f32 + 1.0) / (n_done[t] as f32 + 1.0)
                 }
                 _ => f32::NAN,
             }
@@ -305,7 +365,7 @@ pub fn run_panel_null(
         .collect();
 
     PanelNull {
-        n_perm,
+        n_perm: *n_done.iter().max().unwrap_or(&0),
         occupancy,
         null_occupancy,
         cost,
