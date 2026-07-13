@@ -59,6 +59,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 mod coarsen;
+mod consensus;
 mod gene_strata;
 mod layout;
 mod marker_bootstrap;
