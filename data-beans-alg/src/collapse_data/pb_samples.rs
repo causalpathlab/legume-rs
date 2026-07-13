@@ -245,7 +245,7 @@ pub(super) fn build_pb_samples(
 /// distance per pb-sample is the minimum over its collapsed cells.
 pub(crate) fn knn_distinct_pbsamples_in_batch(
     bknn: &ColumnDict<usize>,
-    query: &matrix_util::knn_match::VecPoint,
+    query: &[f32],
     knn: usize,
     cell_to_pbsamp: &[usize],
     own_pbsamp: usize,
@@ -298,9 +298,8 @@ pub(crate) fn bbknn_match_one_pbsamp(
     knn: usize,
     pbsamp: usize,
 ) -> anyhow::Result<Vec<(usize, f32)>> {
-    use matrix_util::knn_match::MakeVecPoint;
     let pbsamp_batch = layout.pb_sample_to_batch[pbsamp];
-    let centroid = layout.centroids.column(pbsamp).to_vp();
+    let centroid: Vec<f32> = layout.centroids.column(pbsamp).iter().copied().collect();
     let mut all_hits: Vec<(usize, f32)> = Vec::new();
     for (b, bknn) in batch_knn_lookup.iter().enumerate() {
         if b == pbsamp_batch {

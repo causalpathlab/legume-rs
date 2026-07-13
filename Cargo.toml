@@ -80,9 +80,9 @@ coitrees = "0.4"
 rust-htslib = "1.0"
 
 # Nearest neighbours / clustering
-anndists = "0.1"
+instant-distance = "0.6"
+multiversion = "0.8"
 clustering = { version = "0.2", features = ["parallel"] }
-hnsw_rs = "0.3"
 
 # Graphs (MST, Dijkstra, etc.)
 petgraph = "0.8"

@@ -283,8 +283,9 @@ impl SparseIoVec {
         let mut distances = Vec::with_capacity(approx_knn);
 
         for lookup in lookups {
+            let q = query.to_vp();
             let (matched, matched_distances) =
-                lookup.search_by_query_data(&query.to_vp(), knn_per_batch)?;
+                lookup.search_by_query_data(&q.data, knn_per_batch)?;
 
             for (&glob_idx, &dist) in matched.iter().zip(matched_distances.iter()) {
                 self.read_column_offset(glob_idx, &mut ncol, &mut triplets)?;

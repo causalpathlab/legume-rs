@@ -762,12 +762,10 @@ fn preprocess_layout_data_from_latent(
     let membership_full: Vec<usize> = (0..n_cells)
         .into_par_iter()
         .map_init(
-            || matrix_util::knn_match::VecPoint {
-                data: Vec::with_capacity(feat_kn.nrows()),
-            },
+            || Vec::<f32>::with_capacity(feat_kn.nrows()),
             |query, c| {
-                query.data.clear();
-                query.data.extend(feat_kn.column(c).iter().copied());
+                query.clear();
+                query.extend(feat_kn.column(c).iter().copied());
                 match landmark_dict.search_by_query_data(query, 1) {
                     Ok((ids, _)) => ids.first().copied().unwrap_or(usize::MAX),
                     Err(_) => usize::MAX,

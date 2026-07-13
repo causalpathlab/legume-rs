@@ -1,10 +1,9 @@
 #![allow(dead_code)]
 
-/// Default `env_logger` filter when verbose mode is on. Promotes everything
-/// to info but pins `hnsw_rs` at warn — its info output spams ~5–7 lines per
-/// HNSW build, which is unreadable when we build one per batch. Override via
-/// `RUST_LOG=...` to get full hnsw_rs output back.
-pub const VERBOSE_LOG_FILTER: &str = "info,hnsw_rs=warn";
+/// Default `env_logger` filter when verbose mode is on. Promotes everything to
+/// info. (The k-NN backend, instant-distance, emits no `log` output, so no
+/// per-crate pin is needed here.) Override via `RUST_LOG=...`.
+pub const VERBOSE_LOG_FILTER: &str = "info";
 
 /// Default `env_logger` filter when verbose mode is off.
 pub const QUIET_LOG_FILTER: &str = "warn";
