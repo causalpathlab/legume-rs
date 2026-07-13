@@ -61,7 +61,7 @@ pub use metric::l2_simd;
 pub struct ColumnDict<K> {
     backend: Backend,
     pub data_vec: Vec<VecPoint>,
-    pub name2index: HashMap<K, usize>,
+    name2index: HashMap<K, usize>,
     names: Vec<K>,
 }
 
@@ -107,29 +107,6 @@ where
     /// (rows): each constructor takes the input's *contiguous* axis as the point.
     pub fn from_dmatrix(data: nalgebra::DMatrix<f32>, names: Vec<K>) -> Self {
         Self::from_dvector_views(data.column_iter().collect(), names)
-    }
-
-    /// Deprecated alias for [`from_dvector_views`](Self::from_dvector_views).
-    ///
-    /// The `_serial` variants existed so a caller already inside a rayon section
-    /// could avoid nested-pool contention with the old `hnsw_rs` insert. The
-    /// current instant-distance backend always builds via rayon internally, so
-    /// this is now identical to the non-`_serial` constructor.
-    pub fn from_dvector_views_serial(data: Vec<nalgebra::DVectorView<f32>>, names: Vec<K>) -> Self {
-        <ColumnDict<K> as ColumnDictOps<K, nalgebra::DVectorView<f32>>>::from_column_views_serial(
-            data, names,
-        )
-    }
-
-    /// Deprecated alias for [`from_ndarray_views`](Self::from_ndarray_views) —
-    /// see [`from_dvector_views_serial`](Self::from_dvector_views_serial).
-    pub fn from_ndarray_views_serial<'a>(
-        data: Vec<ndarray::ArrayView1<'a, f32>>,
-        names: Vec<K>,
-    ) -> Self {
-        <ColumnDict<K> as ColumnDictOps<K, ndarray::ArrayView1<'a, f32>>>::from_column_views_serial(
-            data, names,
-        )
     }
 
     /// An empty dictionary (no points; every search returns no neighbours). The
@@ -340,10 +317,6 @@ pub trait ColumnDictOps<K, V> {
     fn empty() -> Self;
     /// Build from a list of column views, one point per view, aligned to `names`.
     fn from_column_views(data: Vec<V>, names: Vec<K>) -> Self;
-    /// Deprecated alias for [`from_column_views`](Self::from_column_views); the
-    /// serial/parallel distinction no longer applies (see the `_serial`
-    /// constructors on [`ColumnDict`]).
-    fn from_column_views_serial(data: Vec<V>, names: Vec<K>) -> Self;
 }
 
 impl<T, V> ColumnDictOps<T, V> for ColumnDict<T>
@@ -361,12 +334,6 @@ where
     }
 
     fn from_column_views(data: Vec<V>, names: Vec<T>) -> Self {
-        build_column_dict(data, names, EXACT_THRESHOLD)
-    }
-
-    // The parallel/serial split is now a no-op (instant-distance always builds
-    // via rayon internally); kept as a distinct method only for API compat.
-    fn from_column_views_serial(data: Vec<V>, names: Vec<T>) -> Self {
         build_column_dict(data, names, EXACT_THRESHOLD)
     }
 }
