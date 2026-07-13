@@ -71,9 +71,7 @@
 //! variability is held fixed between them rather than being an extra source of difference.
 
 use super::gene_strata::GeneStrata;
-use super::marker_bootstrap::{
-    assign_with_margin, label_support, LivePanel, MarkerBootstrapConfig,
-};
+use super::marker_bootstrap::{assign_nearest, label_support, LivePanel, MarkerBootstrapConfig};
 use super::markers::marker_gene_pool;
 use super::term_ora::{replicate_label, Partition, TermOraConfig};
 use crate::null_call::live_row;
@@ -175,6 +173,11 @@ impl StratifiedShuffle {
 
 /// Run the support null. `partitions` are the *same* `B` groupings the observed bootstrap used;
 /// `obs_support` is its per-cell `label_support`.
+///
+/// `None` means **do not gate on this null** — it did not run, or it ran too few shuffles to say
+/// anything at the requested α. The annotation itself is unaffected either way: this is a
+/// calibration layer on top of a result that already exists, so when it cannot speak it must fall
+/// silent rather than take the run down with it.
 #[allow(clippy::too_many_arguments)]
 pub fn run_support_null(
     feature_emb: &[f32],
@@ -187,19 +190,35 @@ pub fn run_support_null(
     n_perm: usize,
     cfg: &TermOraConfig,
     bcfg: &MarkerBootstrapConfig,
-) -> Result<SupportNull> {
+) -> Result<Option<SupportNull>> {
     let c = type_markers.len();
     let n = cell_flat.len() / h;
     let b_draws = bcfg.n_boot.max(1);
+
+    // The bootstrap already finished, and its annotation is shippable. If the user interrupted it,
+    // the flag is *latched*, so every shuffle below would be filtered out and we would come back
+    // with nothing — and reporting that as an error would throw away the annotation the user is
+    // waiting for. Decline instead.
+    if crate::stop::stopped() {
+        log::warn!(
+            "skipping the support null: the run was interrupted, and the bootstrap's own result \
+             is what you asked to keep. `label_support` is reported uncalibrated."
+        );
+        return Ok(None);
+    }
 
     // Built ONCE. It is a pure function of the embedding and the panel — nothing about it varies
     // per shuffle — and it costs a pool scan, a sort and a hash map, so rebuilding it inside the
     // fan-out would pay for all of that `P` times over.
     let shuffler = StratifiedShuffle::new(feature_emb, type_markers, h);
 
-    // Per shuffle: which cells it beat, and the support it handed each of them.
-    let acc: Vec<(Vec<u32>, Vec<f64>)> =
-        crate::stop::par_replicates(n_perm, "support null", |p| {
+    // Folded, not collected: only the two running totals below survive a shuffle. Keeping the
+    // per-shuffle vectors instead would hold `P × 2n` of them at once — 1.8 GB at `P = 10 000`,
+    // for numbers that are summed and discarded. See `stop::par_reduce_replicates`.
+    let folded = crate::stop::par_reduce_replicates(
+        n_perm,
+        "support null",
+        |p| {
             let mut rng = SmallRng::seed_from_u64(
                 cfg.seed ^ SUPPORT_NULL_STREAM ^ (p as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
             );
@@ -223,8 +242,7 @@ pub fn run_support_null(
                     d,
                     &mut centroids,
                 );
-                let (fine, _gap) =
-                    assign_with_margin(cell_flat, n, &centroids, c, h, &panel.usable);
+                let fine = assign_nearest(cell_flat, n, &centroids, c, h, &panel.usable);
                 let partition = &partitions[d % partitions.len()];
                 if let Some((per_cell, _)) = replicate_label(
                     &fine, &centroids, cell_flat, partition, n, c, h, lnfact, cfg,
@@ -240,40 +258,89 @@ pub fn run_support_null(
             // `marker_bootstrap::label_support`. (These were two different maxima once, and the
             // p-value was quietly comparing incomparable things.)
             let denom = drawn.max(1.0);
-            let mut beat = vec![0u32; n];
-            let mut sum = vec![0f64; n];
-            for i in 0..n {
-                let row = &mut counts[i * (c + 1)..(i + 1) * (c + 1)];
-                for v in row.iter_mut() {
-                    *v /= denom;
-                }
-                let s = label_support(row);
-                sum[i] = f64::from(s);
-                beat[i] = u32::from(s >= obs_support[i]);
-            }
-            Ok((beat, sum))
-        })?;
+            let (ge, sum): (Vec<u32>, Vec<f64>) = counts
+                .chunks_mut(c + 1)
+                .enumerate()
+                .map(|(i, row)| {
+                    for v in row.iter_mut() {
+                        *v /= denom;
+                    }
+                    let s = label_support(row);
+                    (u32::from(s >= obs_support[i]), f64::from(s))
+                })
+                .unzip();
+            Ok(Tally { ge, sum })
+        },
+        Tally::merge,
+    )?;
 
-    let done = acc.len();
+    let Some((done, acc)) = folded else {
+        log::warn!("the support null completed no shuffles; `label_support` is uncalibrated.");
+        return Ok(None);
+    };
 
-    let mut ge = vec![0u32; n];
-    let mut null_support = vec![0f32; n];
-    for (beat, sum) in &acc {
-        for i in 0..n {
-            ge[i] += beat[i];
-            null_support[i] += (sum[i] / done as f64) as f32;
-        }
+    // **A permutation null cannot report a p below `1 / (P + 1)`.** That floor is a property of the
+    // +1-smoothed estimator, not of the data, so with too few shuffles *every* cell lands above
+    // `fdr_alpha` — and the gate downstream would then quietly unassign the entire dataset while
+    // exiting 0. An interrupted null is not a smaller null; it is one that cannot answer the
+    // question it was asked, and the honest move is to say so and leave the calls alone.
+    let floor = 1.0 / (done as f32 + 1.0);
+    if floor >= cfg.fdr_alpha {
+        log::warn!(
+            "the support null ran only {done} shuffle(s): the smallest p it can report is \
+             1/{} = {floor:.3}, which is not below --fdr-alpha {}. It cannot reject anything, so \
+             the calibrated cutoff is NOT applied and the calls stand on `--min-support` alone. \
+             Re-run without interrupting, or with --support-perm >= {}.",
+            done + 1,
+            cfg.fdr_alpha,
+            (1.0 / cfg.fdr_alpha).ceil() as usize,
+        );
+        return Ok(None);
     }
-    let p: Vec<f32> = ge
+
+    let p: Vec<f32> = acc
+        .ge
         .iter()
         .map(|&k| (f64::from(k) + 1.0) as f32 / (done as f32 + 1.0))
         .collect();
     let q = enrichment::bh_fdr(&p);
+    let null_support = acc
+        .sum
+        .iter()
+        .map(|&s| (s / done as f64) as f32)
+        .collect::<Vec<f32>>();
 
-    Ok(SupportNull {
+    Ok(Some(SupportNull {
         n_perm: done,
         p,
         q,
         null_support,
-    })
+    }))
+}
+
+/// The only two things a shuffle leaves behind, per cell.
+///
+/// `sum` is `f64` and stays `f64` until the final divide. It is a sum of `P` values in `[0, 1]`,
+/// and at `P = 10 000` an `f32` running total is already large enough that each new term lands
+/// ~13 bits down in the mantissa — the classic "adding a small number to a big one" drift, right
+/// in the mean the p-value is reported against.
+struct Tally {
+    /// Shuffles whose support for this cell reached the observed one.
+    ge: Vec<u32>,
+    /// Sum, over shuffles, of the support this cell got.
+    sum: Vec<f64>,
+}
+
+impl Tally {
+    /// Associative — required by `try_reduce_with`, which combines subtrees in whatever order
+    /// rayon split them, never in shuffle order.
+    fn merge(mut a: Self, b: Self) -> Self {
+        for (x, y) in a.ge.iter_mut().zip(&b.ge) {
+            *x += y;
+        }
+        for (x, y) in a.sum.iter_mut().zip(&b.sum) {
+            *x += y;
+        }
+        a
+    }
 }

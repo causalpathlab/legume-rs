@@ -431,7 +431,7 @@ fn annotate_inner(
             // drew, so the only thing that differs between the two is the panel's *meaning*.
             if cfg.support_perm > 0 {
                 if let Some(con) = post.coarse.as_ref() {
-                    sup_null = Some(super::support_null::run_support_null(
+                    sup_null = super::support_null::run_support_null(
                         &beta_flat,
                         &cell_flat,
                         &type_markers,
@@ -442,7 +442,7 @@ fn annotate_inner(
                         cfg.support_perm,
                         cfg,
                         bcfg,
-                    )?);
+                    )?;
                 }
             }
             (post.assign.clone(), post.dist.clone(), Some(post))
