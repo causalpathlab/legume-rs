@@ -84,27 +84,30 @@ impl SparseIoVec {
         let ntot = self.num_columns();
         let mut col_to_batch = vec![0; ntot];
 
-        // When batches outnumber threads, run the outer loop in parallel (builds
-        // work-steal against each other in the shared pool); when batches are
-        // few, build them sequentially so each instant-distance build gets the
-        // whole pool. (instant-distance always builds via rayon internally, so
-        // there is no per-batch serial-insert choice to make.)
+        // A ColumnDict build is internally parallel (instant-distance's rayon
+        // insert) only ABOVE EXACT_THRESHOLD points; smaller batches use the
+        // exact backend and build single-threaded. So when batches are many
+        // (>= n_threads) run the outer loop in parallel — that is the only
+        // parallelism the small batches get, and large ones just nest into the
+        // same work-stealing pool (safe, no true oversubscription). When batches
+        // are few, build sequentially so each large build owns the pool and only
+        // one HNSW index is under construction at a time (bounds peak memory).
         let n_threads = rayon::current_num_threads();
         let outer_parallel = batches.len() >= n_threads;
 
         info!(
-            "building per-batch HNSW indices ({} batches, {} cells, {}) ...",
+            "building per-batch kNN indices ({} batches, {} cells, {}) ...",
             batches.len(),
             ntot,
             if outer_parallel {
-                "outer parallel"
+                "parallel over batches"
             } else {
-                "inner parallel"
+                "sequential over batches"
             }
         );
 
         let prog_bar =
-            crate::sparse_data_visitors::styled_progress_bar(batches.len() as u64, "batches HNSW");
+            crate::sparse_data_visitors::styled_progress_bar(batches.len() as u64, "batches kNN");
 
         // Canonical batch id = SORTED LABEL order (consistent with
         // `register_batch_membership`), so per-batch stats / δ columns carry the
