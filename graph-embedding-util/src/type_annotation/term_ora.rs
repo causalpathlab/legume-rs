@@ -383,6 +383,10 @@ fn annotate_inner(
     }
 
     let mut sup_null: Option<super::support_null::SupportNull> = None;
+    // The partition the cluster-level outputs are reported against. It starts as the caller's
+    // (one Leiden draw off `--seed`) and is replaced by the ensemble's medoid once the bootstrap
+    // has drawn its `B` — see `super::consensus`.
+    let mut reported: Option<Partition> = None;
     let (mut assign, dist, mut boot) = match cfg.bootstrap.as_ref() {
         None => {
             let (assign, dist) = assign_nearest(&cell_flat, n, &centroids, c, h);
@@ -403,6 +407,35 @@ fn annotate_inner(
                 // Grouping held fixed: one partition, shared by every draw.
                 None => vec![(community.to_vec(), n_comm)],
             };
+            // **Report the ensemble's centre, not one draw from it.** The cluster-level outputs —
+            // `community`, the cluster × term matrices, the per-community calls — used to come off
+            // whichever partition `--seed` produced, which is a coin toss among near-equal optima.
+            // The medoid is the partition that agrees most with all the others we just drew, and it
+            // costs nothing extra because we are holding them anyway.
+            if partitions.len() > 1 {
+                let m = super::consensus::medoid(&partitions);
+                let agree = m.agreement;
+                info!(
+                    "reporting the medoid of {} partitions: mean ARI to the rest {agree:.3} (an \
+                     arbitrary draw would score {:.3}), {} communities. The cluster-level outputs \
+                     are the ensemble's most typical partition, not the one `--seed` drew. This \
+                     does NOT make them reproducible across runs — the kNN graph, not the Leiden \
+                     seed, is what differs between runs.",
+                    partitions.len(),
+                    m.ensemble_mean,
+                    partitions[m.best].1,
+                );
+                if agree < 0.5 {
+                    warn!(
+                        "the partitions barely agree with one another (mean ARI {agree:.3}): no \
+                         single clustering means much here, so read `community` and the cluster × \
+                         term matrices as one draw among many. The per-cell consensus label is \
+                         unaffected — it is averaged over all {} partitions.",
+                        partitions.len()
+                    );
+                }
+                reported = Some(partitions[m.best].clone());
+            }
             let step =
                 |b: usize, fine: &[usize], cent: &[f32]| -> Result<Option<(Vec<usize>, usize)>> {
                     replicate_label(
@@ -477,6 +510,13 @@ fn annotate_inner(
     /////////////////////////////////////////////////////////////////////
     // 5. cluster × term over-representation + permutation calibration //
     /////////////////////////////////////////////////////////////////////
+    // From here down, "the clustering" means the medoid of the bootstrap's partitions when there
+    // was one, and the caller's single partition otherwise. Every cluster-level output below —
+    // the ORA, the calls, `community`, the per-community consensus — reads the same one.
+    let (community, n_comm) = match reported.as_ref() {
+        Some((p, m)) => (p.as_slice(), *m),
+        None => (community, n_comm),
+    };
     let ora = cluster_term_ora(&assign, community, n_comm, c, &lnfact, Want::Report, cfg);
 
     /////////////////////////////////////////////
