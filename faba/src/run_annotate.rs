@@ -9,13 +9,17 @@
 //! `senna annotate-by-projection`, reading gem's parquet outputs by prefix (faba
 //! has no run manifest).
 //!
-//! gem carries two gene programs — the spliced/mature identity `β_g` and the
-//! nascent splice offset `δ_g` — with two matching cell readouts — the latent `θ`
-//! and the velocity increment. Annotation runs per track, one side at a time. The
-//! `spliced` track pairs gene `β_g` (`{from}.beta_dictionary.parquet`) with cell `θ`
-//! (`{from}.cell_embedding.parquet`) → `{out}.spliced.*`; the `velocity` track pairs gene
-//! `δ_g` (`{from}.delta_dictionary.parquet`) with cell velocity
-//! (`{from}.velocity.parquet`) → `{out}.velocity.*`.
+//! The gene side is gem's **co-embedded feature vectors**
+//! (`{from}.feature_embedding.parquet`), *not* the `β_g` dictionary — a Euclidean
+//! nearest-centroid call is only meaningful when genes and cells share a metric
+//! space, and β does not share one with θ. See [`crate::gem_gene_embedding`] for the
+//! measurements. Those rows are keyed by feature (`{gene}/count/{spliced,unspliced}`),
+//! so each track selects its own modality and re-keys by gene.
+//!
+//! Annotation runs per track, one side at a time. The `spliced` track pairs the
+//! spliced feature rows with cell `θ` (`{from}.cell_embedding.parquet`) →
+//! `{out}.spliced.*`; the `velocity` track pairs the unspliced rows with the cell
+//! velocity increment (`{from}.velocity.parquet`) → `{out}.velocity.*`.
 //!
 //! `--track both` (default) runs both; the velocity pass is skipped with a warning
 //! when its inputs are absent (a spliced-only gem run, or `--delta-l2 0` on data
@@ -26,8 +30,9 @@ use clap::{Args, ValueEnum};
 use log::{info, warn};
 use std::path::Path;
 
+use crate::gem_gene_embedding::{load_gene_embedding, Modality};
 use graph_embedding_util::type_annotation::{
-    annotate_embeddings_ora, InputEmbeddings, TermOraConfig,
+    annotate_embeddings_ora, Abstain, InputEmbeddings, MarkerBootstrapConfig, TermOraConfig,
 };
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
@@ -153,6 +158,93 @@ pub struct AnnotateArgs {
         help = "Benjamini–Yekutieli within ontology families (any dependence)"
     )]
     pub ontology_by: bool,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Marker-panel permutation null: put each type on trial by replacing ONLY its \
+                markers with the same number of random genes (same IDF weights, drawn from the \
+                live marker pool) and asking whether its own genes place its prototype any \
+                better. This is the BIAS guard — the bootstrap only measures variance, so a type \
+                whose markers are simply wrong comes back perfectly *stable*. 0 = off; try 200. \
+                Writes {out}.panel_null.tsv"
+    )]
+    pub panel_perm: usize,
+
+    #[arg(
+        long,
+        help = "Stability bootstrap: resample each type's marker panel with replacement AND \
+                re-derive the clustering on every draw, then ship the consensus. Every call \
+                carries the fraction of resamples that agreed on it, and one that cannot hold \
+                up across them abstains"
+    )]
+    pub bootstrap_markers: bool,
+
+    #[arg(
+        long,
+        default_value_t = 200,
+        help = "[--bootstrap-markers] Number of resamples"
+    )]
+    pub n_boot: usize,
+
+    #[arg(
+        long,
+        help = "[--bootstrap-markers] Hold the clustering fixed across resamples. By default \
+                each draw re-derives it, so the pipeline's own stochasticity is absorbed into \
+                the support rather than silently trusted: the kNN graph comes from hnsw_rs, \
+                which seeds itself from OS entropy with no way to set it, and Leiden is a \
+                stochastic optimiser on top — two identical runs can disagree on ~10% of cells. \
+                A label that moves when nothing but the RNG moved is not a robust label"
+    )]
+    pub no_recluster: bool,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "[--bootstrap-markers] Minimum fraction of resamples the top label must win for \
+                the cell to be called at all. NOTE this bar is not scale-free: with C types, \
+                chance agreement is 1/C, so 0.5 is ~3x chance on a 6-type panel and ~12x chance \
+                on a 24-type one — the same value is a different test on different panels. \
+                --abstain-separable avoids that"
+    )]
+    pub min_support: f32,
+
+    #[arg(
+        long,
+        conflicts_with = "min_support",
+        help = "[--bootstrap-markers] Abstain by a TEST rather than a threshold: keep the top \
+                label only if it beat the runner-up by more than resampling noise (exact \
+                binomial sign test at --abstain-alpha). No magic number, and unlike \
+                --min-support it means the same thing whatever the number of types"
+    )]
+    pub abstain_separable: bool,
+
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        help = "[--abstain-separable] Significance level for the top-vs-runner-up sign test"
+    )]
+    pub abstain_alpha: f64,
+
+    #[arg(
+        long,
+        default_value_t = 0.8,
+        help = "[--bootstrap-markers] Coverage of the reported `label_set` — the smallest set of \
+                labels accounting for this share of the resamples. A cell that cannot be given \
+                ONE label can still be given two, and `HSPC/LMPP` is a better answer than \
+                `unassigned`"
+    )]
+    pub set_coverage: f32,
+
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "[--bootstrap-markers] Largest `label_set` worth printing. `HSPC/LMPP` is an \
+                annotation; a four-way tie is not — past a point a set stops narrowing anything \
+                down. A cell needing more labels than this to reach --set-coverage is left \
+                unassigned"
+    )]
+    pub max_set_size: usize,
 }
 
 pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
@@ -173,6 +265,18 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
         label_cl: args.label_cl.as_deref().map(str::to_owned),
         ontology_fdr_q: args.ontology_fdr_q,
         ontology_by: args.ontology_by,
+        panel_perm: args.panel_perm,
+        bootstrap: args.bootstrap_markers.then_some(MarkerBootstrapConfig {
+            n_boot: args.n_boot,
+            abstain: if args.abstain_separable {
+                Abstain::Separable(args.abstain_alpha)
+            } else {
+                Abstain::Support(args.min_support)
+            },
+            set_coverage: args.set_coverage,
+            max_set_size: args.max_set_size,
+            recluster: !args.no_recluster,
+        }),
     };
 
     let want_spliced = matches!(args.track, Track::Spliced | Track::Both);
@@ -185,7 +289,7 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
             args,
             &cfg,
             &TrackSpec {
-                gene_file: "beta_dictionary.parquet",
+                modality: Modality::Spliced,
                 cell_file: "cell_embedding.parquet",
                 tag: "spliced",
             },
@@ -193,7 +297,7 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
     }
 
     if want_velocity {
-        let gene = format!("{prefix}.delta_dictionary.parquet");
+        let gene = format!("{prefix}.feature_embedding.parquet");
         let cell = format!("{prefix}.velocity.parquet");
         if Path::new(&gene).exists() && Path::new(&cell).exists() {
             annotate_track(
@@ -202,7 +306,7 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
                 args,
                 &cfg,
                 &TrackSpec {
-                    gene_file: "delta_dictionary.parquet",
+                    modality: Modality::Unspliced,
                     cell_file: "velocity.parquet",
                     tag: "velocity",
                 },
@@ -222,10 +326,11 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
     Ok(())
 }
 
-/// The gem parquet suffixes + output tag identifying one annotation track.
+/// One annotation track: which of gem's feature-embedding rows to score, against which cell
+/// readout.
 struct TrackSpec {
-    /// Gene-embedding parquet suffix (`{from}.{gene_file}`): β_g or δ_g.
-    gene_file: &'static str,
+    /// Which feature rows carry this track's gene program (see [`Modality`]).
+    modality: Modality,
     /// Cell-embedding parquet suffix (`{from}.{cell_file}`): latent θ or velocity.
     cell_file: &'static str,
     /// Output tag: outputs land at `{out}.{tag}.*`.
@@ -241,10 +346,8 @@ fn annotate_track(
     cfg: &TermOraConfig,
     spec: &TrackSpec,
 ) -> Result<()> {
-    let gene_path = format!("{prefix}.{}", spec.gene_file);
     let cell_path = format!("{prefix}.{}", spec.cell_file);
-    let feat = DMatrix::<f32>::from_parquet(&gene_path)
-        .with_context(|| format!("reading gene embedding {gene_path}"))?;
+    let feat = load_gene_embedding(prefix, spec.modality)?;
     let cell = DMatrix::<f32>::from_parquet(&cell_path)
         .with_context(|| format!("reading cell embedding {cell_path}"))?;
     info!(

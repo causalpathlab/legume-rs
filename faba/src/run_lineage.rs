@@ -21,7 +21,8 @@ use log::{info, warn};
 use std::path::Path;
 
 use graph_embedding_util::type_annotation::{
-    annotate_with_communities, CommunityCalls, InputEmbeddings, TermOraConfig,
+    annotate_with_communities, Abstain, CommunityCalls, InputEmbeddings, MarkerBootstrapConfig,
+    Regroup, TermOraConfig,
 };
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
@@ -139,7 +140,8 @@ pub struct LineageArgs {
                      (the `faba annotate` core) run over the MST-node grouping, so the call \
                      carries the same permutation-calibrated confidence.\n\
                      Input: a `gene<TAB>celltype` TSV (tab/comma/space delimited).\n\
-                     Reads gene β from `{from}.beta_dictionary.parquet` and raw θ from \
+                     Reads the co-embedded gene vectors from \
+                     `{from}.feature_embedding.parquet` (spliced rows) and raw θ from \
                      `{from}.cell_embedding.parquet`. Writes `{out}.lineage_annot.*` (per-cell calls \
                      keyed by MST node) and `{out}.trajectory_annotation.parquet` \
                      (node → role[root|terminal|internal] → cell_type → confidence)."
@@ -174,6 +176,33 @@ pub struct LineageArgs {
         help = "k-means iterations for centroid initialization"
     )]
     pub kmeans_iter: usize,
+
+    #[arg(
+        long,
+        help = "[--markers] Stability bootstrap on the node calls: resample each type's marker \
+                panel with replacement AND re-derive the k-means grouping on every draw, then \
+                ship the consensus. Every node's name carries the fraction of resamples that \
+                agreed on it, and a cell whose call cannot hold up across them abstains. \
+                Without this, each node is named by a bare `argmin` over marker centroids — a \
+                point estimate with no error bar, which on a panel the embedding never trained \
+                can be decided by a ~1% distance margin"
+    )]
+    pub bootstrap_markers: bool,
+
+    #[arg(
+        long,
+        default_value_t = 200,
+        help = "[--bootstrap-markers] Number of resamples"
+    )]
+    pub marker_n_boot: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "[--bootstrap-markers] Minimum fraction of resamples the top label must win for \
+                a cell to be called at all"
+    )]
+    pub marker_min_support: f32,
 
     #[arg(
         long,
@@ -444,6 +473,16 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
             num_perm: args.marker_num_perm,
             obo: args.marker_obo.as_deref(),
             label_cl: args.marker_label_cl.as_deref(),
+            bootstrap: args.bootstrap_markers.then_some(MarkerBootstrapConfig {
+                n_boot: args.marker_n_boot,
+                abstain: Abstain::Support(args.marker_min_support),
+                set_coverage: 0.8,
+                max_set_size: 3,
+                recluster: true,
+            }),
+            theta: &theta,
+            kmeans_iter: args.kmeans_iter,
+            seed: args.seed,
         })?),
         _ => None,
     };
@@ -597,6 +636,12 @@ struct AnnotateTrajArgs<'a> {
     num_perm: usize,
     obo: Option<&'a str>,
     label_cl: Option<&'a str>,
+    /// Stability bootstrap over the marker panel + the k-means grouping (`None` ⇒ point estimate).
+    bootstrap: Option<MarkerBootstrapConfig>,
+    /// θ `[N × H]`, kept so a replicate can re-run k-means on it under a fresh seed.
+    theta: &'a DMatrix<f32>,
+    kmeans_iter: usize,
+    seed: u64,
 }
 
 /// Name each trajectory node by cell type: run the `faba annotate` term-ORA core over the
@@ -606,13 +651,21 @@ struct AnnotateTrajArgs<'a> {
 /// `--root-type` can pick the root from these calls; the caller writes
 /// `{out}.trajectory_annotation.parquet` afterwards via [`write_trajectory_annotation`].
 fn compute_node_calls(a: &AnnotateTrajArgs) -> Result<CommunityCalls> {
-    let beta_path = format!("{}.beta_dictionary.parquet", a.prefix);
-    let beta = DMatrix::<f32>::from_parquet(&beta_path)
-        .with_context(|| format!("--markers needs the gem β dictionary {beta_path}"))?;
+    // The co-embedded feature vectors, not β — see `crate::gem_gene_embedding` for why a
+    // Euclidean nearest-centroid call against β is not a well-posed question.
+    let beta = crate::gem_gene_embedding::load_gene_embedding(
+        a.prefix,
+        crate::gem_gene_embedding::Modality::Spliced,
+    )?;
     let cfg = TermOraConfig {
         n_perm: a.num_perm,
+        // `--seed` drives the whole fit; it should drive the annotation's randomness too. It was
+        // silently falling through to `TermOraConfig`'s own default of 42, so varying `--seed`
+        // moved the centroids but left the permutation null (and now the bootstrap) untouched.
+        seed: a.seed,
         obo: a.obo.map(str::to_owned),
         label_cl: a.label_cl.map(str::to_owned),
+        bootstrap: a.bootstrap.clone(),
         ..TermOraConfig::default()
     };
     let input = InputEmbeddings {
@@ -621,6 +674,22 @@ fn compute_node_calls(a: &AnnotateTrajArgs) -> Result<CommunityCalls> {
         cell_emb: a.raw_theta,
         cell_names: a.cell_names,
     };
+
+    // One replicate's grouping: the same k-means, reseeded.
+    //
+    // The trajectory's own nodes stay put — they are the structure, and `--seed` is meant to
+    // reproduce them. This redraws the grouping *inside* the annotation bootstrap only, which is
+    // what gives the resampling something to disagree about. Holding the partition fixed and
+    // resampling the panel alone is close to a no-op: a node's argmax does not flip because a
+    // few markers were redrawn, so every call comes back with support ≈ 1 and nothing abstains.
+    // k-means++ from a fresh seed lands on genuinely different nodes, and a label that survives
+    // *that* is a label worth printing on a trajectory.
+    let regroup = |seed: u64| -> Result<Vec<usize>> {
+        let (_, labels) = kmeans_centroids_seeded(a.theta, a.k, a.kmeans_iter, seed);
+        Ok(labels)
+    };
+    let regroup: Option<&Regroup<'_>> = a.bootstrap.as_ref().map(|_| &regroup as &Regroup<'_>);
+
     annotate_with_communities(
         &input,
         a.markers,
@@ -628,6 +697,7 @@ fn compute_node_calls(a: &AnnotateTrajArgs) -> Result<CommunityCalls> {
         true, // IDF-weight markers, as `faba annotate` does by default
         a.labels,
         a.k,
+        regroup,
         &cfg,
     )
 }
