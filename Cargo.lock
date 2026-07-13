@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "approx",
@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-alg"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "approx",
@@ -3464,7 +3464,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-util"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "approx",
