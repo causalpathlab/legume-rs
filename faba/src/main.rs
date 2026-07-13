@@ -4,6 +4,7 @@ mod cell_qc;
 mod common;
 mod data;
 mod editing;
+mod gem_gene_embedding;
 mod gene_count;
 mod lineage;
 mod mixture;

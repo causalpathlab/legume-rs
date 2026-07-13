@@ -11,12 +11,32 @@
 //!    metric needs).
 //! 2. **Nearest-centroid assignment** `t(c) = argmin_T ‖e_cell[c] − e_T‖₂` —
 //!    every cell hard-assigned to its closest term, with the distance kept.
+//!    With [`TermOraConfig::bootstrap`], the call is instead the consensus of a
+//!    **marker bootstrap** ([`super::marker_bootstrap`]): each type's panel is
+//!    resampled with replacement, its centroid rebuilt and the cells re-assigned,
+//!    so a call that only survives one particular draw of the panel is reported
+//!    as unreproducible rather than as a confident label. Note that `argmin` has
+//!    no error bar and *always* returns something — on a panel the embedding
+//!    never trained, its answer can be decided by a ~1% distance margin.
 //! 3. **QC prune** — per term, drop cells whose distance to their assigned
 //!    centroid is a high-side robust outlier (`> median + k·MAD`): cells that
 //!    argmaxed a term but don't actually sit near it (ambient/doublet). They
 //!    become `unassigned` and are excluded from the counts.
-//! 4. **Cluster cells** — Leiden on the cell kNN graph (the embedding's own
-//!    geometry, independent of the term labels).
+//! 4. **Cluster cells** — the aggregation device. A single cell's
+//!    nearest-centroid call is close to a coin flip; pooling cells is what makes
+//!    it testable. Leiden over the cell kNN graph (the embedding's own geometry,
+//!    independent of the term labels).
+//!
+//!    **The pooling must stay coarse, and that is a constraint, not a default.**
+//!    The hypergeometric ranks terms by how *surprising* a count is, not how
+//!    *likely* — a discovery statistic, not a classifier. The two rankings
+//!    coincide only when the cluster is large: at 700 cells you need many of them
+//!    to be surprising, so most-enriched ≈ most-abundant. Shrink the cluster and
+//!    it inverts — a type with 4 cells in the entire dataset has an expected count
+//!    near zero, so *two* of them outscore the 30 cells of the type that actually
+//!    fills the cluster. Anything that makes the groups small (a high
+//!    `--resolution`, or replacing the partition with per-cell neighbourhoods)
+//!    walks into this. See `docs/annotation-grouping.md`.
 //! 5. **Over-representation** — per (cluster K, term T) the count
 //!    `a = #{c∈K : t(c)=T}` is tested against the hypergeometric null with
 //!    fixed margins `(N, m_T, n_K)`; the statistic `−ln P(X≥a)` is **calibrated
@@ -28,10 +48,13 @@
 //! 7. **Ontology (optional)** — feed the cluster × term p (and Q) to the shared
 //!    generic TreeBH core for multi-resolution CL calling.
 
+use super::marker_bootstrap::{
+    run_marker_bootstrap, BootstrapResult, CoarseConsensus, MarkerBootstrapConfig,
+};
 use super::markers::parse_and_match_markers;
 use super::output::{write_label_tsvs, write_marker_embeddings};
 use super::score::{argmax_rows, row_major};
-use super::InputEmbeddings;
+use super::{n_communities, InputEmbeddings, UNASSIGNED};
 use crate::null_call::live_row;
 use anyhow::{Context, Result};
 use log::{info, warn};
@@ -43,6 +66,7 @@ use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::io::Write;
 
 #[cfg(test)]
@@ -62,6 +86,10 @@ pub const TERM_ORA_OUTPUT_SUFFIXES: &[&str] = &[
     ".null_calibration.tsv",
     ".ontology_assignment.tsv",
     ".ontology_node_mass.parquet",
+    ".label_stability.parquet",
+    ".marker_support.parquet",
+    ".type_qc.tsv",
+    ".panel_null.tsv",
 ];
 
 /// Tunables for [`annotate_embeddings_ora`].
@@ -90,6 +118,15 @@ pub struct TermOraConfig {
     pub ontology_fdr_q: f64,
     /// Benjamini–Yekutieli within ontology families (any dependence).
     pub ontology_by: bool,
+    /// Draws for the **marker-panel permutation null** ([`super::panel_null`]) — the *bias*
+    /// guard the bootstrap cannot supply. `0` ⇒ off.
+    pub panel_perm: usize,
+    /// When set, the per-cell call is the consensus of a **marker bootstrap**
+    /// ([`super::marker_bootstrap`]) rather than a bare nearest-centroid argmin: each type's
+    /// panel is resampled with replacement, its centroid rebuilt, and the cells re-assigned,
+    /// so every call carries the support it earned across resamples and an unreproducible one
+    /// abstains. `None` ⇒ the point-estimate path, unchanged.
+    pub bootstrap: Option<MarkerBootstrapConfig>,
 }
 
 impl Default for TermOraConfig {
@@ -107,11 +144,26 @@ impl Default for TermOraConfig {
             label_cl: None,
             ontology_fdr_q: 0.1,
             ontology_by: false,
+            panel_perm: 0,
+            bootstrap: None,
         }
     }
 }
 
-const UNASSIGNED: usize = usize::MAX;
+/// How a bootstrap replicate re-derives the cell grouping, given that replicate's seed.
+///
+/// **The grouping has to be resampled, or the bootstrap has no teeth.** Resampling only the
+/// marker panel while holding the partition fixed measures almost nothing: a 2,000-cell
+/// cluster's argmax does not flip because a few markers were redrawn, so every call comes back
+/// with support ≈ 1 and the run abstains on nothing (measured: 0% unassigned, and the support's
+/// ability to separate spurious calls collapses from AUC 0.93 to 0.69). The partition is where
+/// the instability lives, so the partition is what must move.
+///
+/// It is a callback because each caller's grouping is arbitrary in its own way: `faba annotate`
+/// re-runs **Leiden** on a fixed kNN graph (modularity has many near-equal optima — the same
+/// cells have partitioned into anywhere from 132 to 990 communities), while `faba lineage`
+/// re-runs its **seeded k-means** over the trajectory nodes. Same question, different coin.
+pub type Regroup<'a> = dyn Fn(u64) -> Result<Vec<usize>> + Sync + 'a;
 
 /// Per-community (cluster / MST-node) firm call returned by
 /// [`annotate_with_communities`], so a caller (e.g. `faba lineage --markers`) can name
@@ -136,6 +188,10 @@ fn label_of(t: usize, type_names: &[Box<str>]) -> Box<str> {
 /// End-to-end firm annotation from in-memory embeddings, clustering cells with **Leiden**
 /// over their own cosine kNN graph, then delegating to [`annotate_with_communities`].
 /// See the module docs for the pipeline. Writes the `{out_prefix}.*` artifacts.
+///
+/// Because the clustering is derived here rather than handed in, it is also **re-derived on
+/// every bootstrap replicate**: the arbitrariness in *how we pooled* then lands in the per-cell
+/// support alongside the arbitrariness in *which markers we drew*.
 pub fn annotate_embeddings_ora(
     input: &InputEmbeddings<'_>,
     markers_path: &str,
@@ -149,19 +205,28 @@ pub fn annotate_embeddings_ora(
     // Communities are Leiden over the cell kNN graph — the embedding's own geometry,
     // independent of the term labels (module docs step 4).
     let cell_flat = row_major(input.cell_emb);
-    let community = cluster_cells(&cell_flat, n, h, cfg)?;
-    let n_comm = community.iter().copied().max().map_or(0, |m| m + 1).max(1);
+    let graph = cell_knn_graph(&cell_flat, n, h, cfg)?;
+    let community = cluster_cells(&graph, n, cfg, cfg.seed);
+    let n_comm = n_communities(&community);
     info!(
         "clustered cells into {n_comm} communities (knn={}, res={})",
         cfg.knn, cfg.resolution
     );
-    annotate_with_communities(
+    // Each replicate re-partitions the *same* graph under a fresh Leiden seed. The graph itself
+    // is built once: the bootstrap resamples the marker panel, so the cell embedding it clusters
+    // is identical on every draw, and the only thing a rebuild would redraw is `hnsw_rs`'s
+    // OS-seeded layer RNG — approximation error in an ANN index, not uncertainty about the data.
+    // (Rebuilding it every time cost 135 s where reseeding Leiden costs 4 s, for the same
+    // discrimination: AUC 0.931 vs 0.943, support correlation 0.96.)
+    let regroup = |seed: u64| -> Result<Vec<usize>> { Ok(cluster_cells(&graph, n, cfg, seed)) };
+    annotate_inner(
         input,
         markers_path,
         out_prefix,
         use_idf,
         &community,
         n_comm,
+        Some(&regroup),
         cfg,
     )?;
     Ok(())
@@ -174,6 +239,11 @@ pub fn annotate_embeddings_ora(
 /// every `{out_prefix}.*` artifact. [`annotate_embeddings_ora`] wraps this with Leiden;
 /// `faba lineage --markers` passes the MST-node clustering, so each trajectory node gets
 /// the same permutation-calibrated call.
+///
+/// `regroup` (see [`Regroup`]) says how a bootstrap replicate re-derives the caller's grouping —
+/// `faba lineage` reseeds its k-means. Pass `None` to hold the grouping fixed, but note that a
+/// panel-only bootstrap over a fixed partition is close to toothless (see [`Regroup`]).
+#[allow(clippy::too_many_arguments)]
 pub fn annotate_with_communities(
     input: &InputEmbeddings<'_>,
     markers_path: &str,
@@ -181,6 +251,31 @@ pub fn annotate_with_communities(
     use_idf: bool,
     community: &[usize],
     n_comm: usize,
+    regroup: Option<&Regroup<'_>>,
+    cfg: &TermOraConfig,
+) -> Result<CommunityCalls> {
+    annotate_inner(
+        input,
+        markers_path,
+        out_prefix,
+        use_idf,
+        community,
+        n_comm,
+        regroup,
+        cfg,
+    )
+}
+
+/// The shared core. `regroup` re-derives the grouping for one bootstrap replicate ([`Regroup`]).
+#[allow(clippy::too_many_arguments)]
+fn annotate_inner(
+    input: &InputEmbeddings<'_>,
+    markers_path: &str,
+    out_prefix: &str,
+    use_idf: bool,
+    community: &[usize],
+    n_comm: usize,
+    regroup: Option<&Regroup<'_>>,
     cfg: &TermOraConfig,
 ) -> Result<CommunityCalls> {
     anyhow::ensure!(
@@ -238,59 +333,159 @@ pub fn annotate_with_communities(
     let (centroids, n_live) = term_centroids(&beta_flat, &type_markers, h); // [c × h] row-major
     report_marker_liveness(&type_names, &type_markers, &n_live);
 
-    ////////////////////////////////////////////////
-    // 2. nearest-centroid assignment (Euclidean) //
-    ////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////
+    // 1b. is this panel better than a panel that means nothing? (bias)   //
+    ////////////////////////////////////////////////////////////////////////
     let cell_flat = row_major(cell_emb);
-    let (mut assign, dist) = assign_nearest(&cell_flat, n, &centroids, c, h);
+    let panel_null = (cfg.panel_perm > 0).then(|| {
+        super::panel_null::run_panel_null(
+            &beta_flat,
+            &cell_flat,
+            &type_markers,
+            h,
+            cfg.panel_perm,
+            cfg.seed,
+        )
+    });
+    if let Some(pn) = panel_null.as_ref() {
+        write_panel_null(out_prefix, &type_names, pn)?;
+        report_panel_null(pn, &type_names);
+    }
 
-    ///////////////////////////////////////////////////////////
-    // 3. QC: prune high-distance outliers per assigned term //
-    ///////////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////
+    // 2–3. per-cell call: bare nearest-centroid, or the marker bootstrap     //
+    ////////////////////////////////////////////////////////////////////////////
+    // Both paths hand the same `(assign, dist)` contract to the over-representation step
+    // below, so everything downstream — the permutation null, the FDR call, the ontology
+    // layer, `CommunityCalls` — is identical whichever one ran. Under the bootstrap the call
+    // is the consensus over resampled panels, and a cell whose call is not reproducible
+    // abstains; the MAD distance gate still runs on top, since it catches a different failure
+    // (a cell that sits nowhere near the centroid it stably picked).
+    // `ln(i!)` up to the full cell count — a superset of every replicate's population, so the
+    // hypergeometric tables share one table instead of rebuilding it on all `--n-boot` draws.
+    let lnfact = ln_factorials(n);
+    let b_eff = capped_n_perm(cfg.n_perm, n_comm);
+    if b_eff < cfg.n_perm {
+        info!(
+            "{n_comm} clusters pool the permutation null to {b_eff}×{n_comm} = {} draws per term; \
+             taking {b_eff} of the {} requested (the pool, not the draw count, is what resolves \
+             the tail)",
+            b_eff * n_comm,
+            cfg.n_perm
+        );
+    }
+
+    let (mut assign, dist, boot) = match cfg.bootstrap.as_ref() {
+        None => {
+            let (assign, dist) = assign_nearest(&cell_flat, n, &centroids, c, h);
+            (assign, dist, None)
+        }
+        Some(bcfg) => {
+            // Each replicate's *pipeline* half — re-derive the grouping, test it, call it.
+            // Handed to the bootstrap as a callback so the panel is drawn exactly once per
+            // replicate and both the geometric call and the shipped label come off that one
+            // draw (see `marker_bootstrap::CoarseStep`).
+            let step =
+                |b: usize, fine: &[usize], cent: &[f32]| -> Result<Option<(Vec<usize>, usize)>> {
+                    replicate_label(
+                        fine,
+                        cent,
+                        &cell_flat,
+                        community,
+                        n_comm,
+                        regroup.filter(|_| bcfg.recluster),
+                        n,
+                        c,
+                        h,
+                        &lnfact,
+                        cfg,
+                        b,
+                    )
+                };
+            let post = run_marker_bootstrap(
+                &beta_flat,
+                &cell_flat,
+                &type_markers,
+                h,
+                bcfg,
+                cfg.seed,
+                Some(&step),
+            )?;
+            (post.assign.clone(), post.dist.clone(), Some(post))
+        }
+    };
+    let n_unstable = assign.iter().filter(|&&t| t == UNASSIGNED).count();
+
     let mut n_outliers = 0usize;
     if cfg.assign_qc {
         n_outliers = prune_outliers(&mut assign, &dist, c, cfg.assign_mad);
     }
     let n_assigned = assign.iter().filter(|&&t| t != UNASSIGNED).count();
-    info!("assignment: {n_assigned}/{n} cells assigned ({n_outliers} pruned as distance outliers)");
+    if boot.is_some() {
+        info!(
+            "assignment: {n_assigned}/{n} cells called ({n_unstable} unreproducible under the \
+             marker bootstrap, {n_outliers} further pruned as distance outliers)"
+        );
+    } else {
+        info!(
+            "assignment: {n_assigned}/{n} cells assigned ({n_outliers} pruned as distance outliers)"
+        );
+    }
     anyhow::ensure!(
         n_assigned >= 2,
-        "after QC only {n_assigned} cells remain assigned — loosen --assign-mad or check markers"
+        "only {n_assigned} cells remain assigned — loosen --assign-mad / --min-support, \
+         or check that the marker panel was trained into the embedding"
     );
+    if let Some(post) = boot.as_ref() {
+        report_bootstrap(post, &type_names);
+    }
 
     /////////////////////////////////////////////////////////////////////
     // 5. cluster × term over-representation + permutation calibration //
     /////////////////////////////////////////////////////////////////////
-    let ora = cluster_term_ora(&assign, community, n_comm, c, cfg);
+    let ora = cluster_term_ora(&assign, community, n_comm, c, &lnfact, Want::Report, cfg);
 
     /////////////////////////////////////////////
     // 6. cluster calls → per-cell firm labels //
     /////////////////////////////////////////////
-    // Each cluster's call is its top over-represented term, kept only if
-    // FDR-significant; otherwise the cluster stays unassigned.
-    let top = argmax_rows(&ora.stat, n_comm, c);
-    let cluster_label: Vec<usize> = (0..n_comm)
-        .map(|k| {
-            let best = top[k];
-            if ora.q[k * c + best] < cfg.fdr_alpha {
-                best
-            } else {
-                UNASSIGNED
-            }
-        })
-        .collect();
-    let coarse_label: Vec<Box<str>> = (0..n)
-        .map(|i| label_of(cluster_label[community[i]], &type_names))
-        .collect();
-    let coarse_conf: Vec<f32> = (0..n)
-        .map(|i| {
-            let k = community[i];
-            match cluster_label[k] {
-                UNASSIGNED => 0.0,
-                t => ora.q_soft[k * c + t],
-            }
-        })
-        .collect();
+    let cluster_label = cluster_calls(&ora, n_comm, c, cfg.fdr_alpha);
+    ////////////////////////////////////////////////////////////////////////////
+    // 6b. the shipped label: one partition's word, or the consensus of many  //
+    ////////////////////////////////////////////////////////////////////////////
+    // Without the bootstrap, `coarse_label` is whatever this single (irreproducible) Leiden
+    // partition happened to say, and `coarse_conf` is a softmaxed test statistic that is
+    // identical for every cell in a cluster. With it, both come from the replicates: the
+    // label is the one the resampled panels and re-derived partitions agreed on, and the
+    // confidence is *how often they agreed* — a per-cell number, and one that finally means
+    // something operational ("re-run this and you'd get the same answer this fraction of the
+    // time").
+    let consensus: Option<&CoarseConsensus> = boot.as_ref().and_then(|b| b.coarse.as_ref());
+    let (coarse_label, coarse_conf): (Vec<Box<str>>, Vec<f32>) = match consensus {
+        Some(con) => {
+            report_consensus(con, n);
+            (
+                con.label
+                    .iter()
+                    .map(|&t| label_of(t, &type_names))
+                    .collect(),
+                con.support.clone(),
+            )
+        }
+        None => (
+            (0..n)
+                .map(|i| label_of(cluster_label[community[i]], &type_names))
+                .collect(),
+            (0..n)
+                .map(|i| {
+                    let k = community[i];
+                    match cluster_label[k] {
+                        UNASSIGNED => 0.0,
+                        t => ora.q_soft[k * c + t],
+                    }
+                })
+                .collect(),
+        ),
+    };
 
     /////////////
     // outputs //
@@ -298,23 +493,38 @@ pub fn annotate_with_communities(
     let comm_names: Vec<Box<str>> = (0..n_comm)
         .map(|k| format!("K{k}").into_boxed_str())
         .collect();
+    let sizes = cluster_sizes(community, n_comm);
     write_annot_parquet(
         out_prefix,
         cell_names,
         community,
+        &sizes,
         &coarse_label,
         &assign,
         &dist,
         &type_names,
         &ora,
         &cluster_label,
+        boot.as_ref(),
+        consensus,
     )?;
+    if let (Some(post), Some(con)) = (boot.as_ref(), consensus) {
+        write_bootstrap_outputs(
+            out_prefix,
+            cell_names,
+            gene_names,
+            &type_names,
+            &type_markers,
+            post,
+            con,
+        )?;
+    }
     // membership.tsv + argmax.tsv on the firm (cluster-driven) label, the shared
     // contract `gem-summary` / `data-beans stat -g` consume.
     write_label_tsvs(out_prefix, cell_names, &coarse_label, &coarse_conf)?;
     write_cluster_term_matrices(out_prefix, &comm_names, &type_names, &ora)?;
     write_calibration(out_prefix, &ora, n_assigned, n_outliers)?;
-    log_cluster_calls(&cluster_label, &type_names, community, n_comm);
+    log_cluster_calls(&cluster_label, &type_names, &sizes);
 
     //////////////////////////////////////////////////////////////////
     // 7. optional ontology (TreeBH over the cluster × term matrix) //
@@ -332,18 +542,67 @@ pub fn annotate_with_communities(
     }
 
     // Per-community calls, so a trajectory caller can name each node directly.
-    let comm_calls = CommunityCalls {
-        labels: (0..n_comm)
-            .map(|k| label_of(cluster_label[k], &type_names))
-            .collect(),
-        confidence: (0..n_comm)
-            .map(|k| match cluster_label[k] {
-                UNASSIGNED => 0.0,
-                t => ora.q_soft[k * c + t],
-            })
-            .collect(),
+    //
+    // Under the bootstrap the replicates each invent their own grouping, so a *replicate's*
+    // community `k` means nothing to the caller — but the caller's own partition is right here,
+    // and its cells carry consensus labels. So a node is named by the label its cells actually
+    // hold (a plurality vote over `coarse_label`), and its confidence is the mean support of the
+    // cells that voted for it: "re-run this and this node keeps this name this often". That is a
+    // number `--root-type` can act on. Without the bootstrap, nothing has changed: the node's
+    // call is its own FDR-gated top term, and the confidence is the softmaxed statistic.
+    let comm_calls = match consensus {
+        Some(con) => community_consensus_calls(community, n_comm, con, &type_names),
+        None => CommunityCalls {
+            labels: (0..n_comm)
+                .map(|k| label_of(cluster_label[k], &type_names))
+                .collect(),
+            confidence: (0..n_comm)
+                .map(|k| match cluster_label[k] {
+                    UNASSIGNED => 0.0,
+                    t => ora.q_soft[k * c + t],
+                })
+                .collect(),
+        },
     };
     Ok(comm_calls)
+}
+
+/// Name each of the *caller's* communities by the consensus its cells reached, with the mean
+/// bootstrap support of the voters as the confidence. A community whose cells could not hold a
+/// label is `unassigned` at confidence 0 — which is the honest answer for a trajectory node the
+/// resampling could not name.
+fn community_consensus_calls(
+    community: &[usize],
+    n_comm: usize,
+    con: &CoarseConsensus,
+    type_names: &[Box<str>],
+) -> CommunityCalls {
+    let c = type_names.len();
+    // votes[k][t] = cells of community k whose consensus label is t; `c` == unassigned.
+    let mut votes = vec![0usize; n_comm * (c + 1)];
+    let mut support = vec![0f32; n_comm * (c + 1)];
+    for (i, &k) in community.iter().enumerate() {
+        let t = match con.label[i] {
+            UNASSIGNED => c,
+            t => t,
+        };
+        votes[k * (c + 1) + t] += 1;
+        support[k * (c + 1) + t] += con.support[i];
+    }
+    let (mut labels, mut confidence) = (Vec::with_capacity(n_comm), Vec::with_capacity(n_comm));
+    for k in 0..n_comm {
+        let row = &votes[k * (c + 1)..(k + 1) * (c + 1)];
+        // The plurality among *called* cells; `unassigned` wins only if nothing else was called.
+        let best = (0..c).max_by_key(|&t| row[t]).unwrap_or(c);
+        if row[best] == 0 {
+            labels.push(Box::from(enrichment::UNASSIGNED_LABEL));
+            confidence.push(0.0);
+        } else {
+            labels.push(type_names[best].clone());
+            confidence.push(support[k * (c + 1) + best] / row[best] as f32);
+        }
+    }
+    CommunityCalls { labels, confidence }
 }
 
 /////////////////////////////////
@@ -361,7 +620,7 @@ pub fn annotate_with_communities(
 /// competitor, it is a magnet (see [`assign_nearest`]). Skipping it makes the centroid
 /// the honest mean over the markers carrying evidence, and leaves an all-dead type at the
 /// origin, where [`assign_nearest`]'s guard excludes it.
-fn term_centroids(
+pub(super) fn term_centroids(
     feature_emb: &[f32],
     type_markers: &[Vec<(u32, f32)>],
     h: usize,
@@ -548,31 +807,158 @@ fn prune_outliers(assign: &mut [usize], dist: &[f32], c: usize, k: f64) -> usize
     pruned
 }
 
-///////////////////
-// 4. clustering //
-///////////////////
+/////////////////
+// 4. grouping //
+/////////////////
+
+/// Cells per cluster.
+fn cluster_sizes(community: &[usize], n_comm: usize) -> Vec<usize> {
+    let mut sizes = vec![0usize; n_comm];
+    for &k in community {
+        if k < n_comm {
+            sizes[k] += 1;
+        }
+    }
+    sizes
+}
 
 /// Leiden communities over a cosine cell kNN graph (cells L2-normalized for the
 /// graph; gem `e_cell` is already unit, so this matches the assignment geometry).
-fn cluster_cells(cell_flat: &[f32], n: usize, h: usize, cfg: &TermOraConfig) -> Result<Vec<usize>> {
+///
+/// **This step is not reproducible, and `seed` cannot make it so.** The kNN graph comes from
+/// `hnsw_rs`, whose layer-assignment RNG is seeded from OS entropy with no API to set it
+/// (`hnsw_rs-0.3.4/src/hnsw.rs:328`), and Leiden is a stochastic local optimiser on top of a
+/// graph that therefore differs every run. Measured on 15,315 cord-blood cells at
+/// `--resolution 8`: four identical invocations gave 990 / 132 / 137 / 138 communities and
+/// agreed on only 83–94% of the final labels. The `seed` here still pins Leiden's own draws,
+/// which is worth doing, but it does not buy reproducibility.
+///
+/// The remedy is not a deterministic clusterer — it is to stop trusting any single partition.
+/// [`MarkerBootstrapConfig::recluster`] calls this once per bootstrap replicate so the
+/// variation lands in the per-cell support, where it belongs.
+fn cell_knn_graph(cell_flat: &[f32], n: usize, h: usize, cfg: &TermOraConfig) -> Result<KnnGraph> {
     let mut cell_u = cell_flat.to_vec();
     super::score::l2_normalize_rows(&mut cell_u, n, h);
     let cell_mat = DMatrix::<f32>::from_row_iterator(n, h, cell_u.iter().copied());
-    let knn = cfg.knn.clamp(1, n - 1);
-    let graph = KnnGraph::from_rows(
+    KnnGraph::from_rows(
         &cell_mat,
         KnnGraphArgs {
-            knn,
+            knn: cfg.knn.clamp(1, n - 1),
             block_size: 1000,
             reciprocal: false,
         },
-    )?;
-    Ok(super::layout::leiden_from_graph(
-        &graph,
-        n,
-        cfg.resolution,
-        cfg.seed,
-    ))
+    )
+}
+
+/// Leiden over a **prebuilt** cell kNN graph.
+///
+/// The graph is built once and reused by every bootstrap replicate, and that is deliberate. The
+/// bootstrap resamples the *marker panel*; the cell embedding it clusters is identical on every
+/// draw, so the graph's input never changes. The only reason two builds differ is that `hnsw_rs`
+/// seeds its layer RNG from OS entropy — which is **approximation error in an ANN index**, not
+/// uncertainty about the data, and resampling it would only pay to re-randomise a nuisance.
+///
+/// Leiden's `seed` is a different animal and *is* redrawn per replicate: modularity has many
+/// near-equal optima and which one the optimiser lands in is a real, load-bearing arbitrary
+/// choice — the same 15k cells have partitioned into anywhere from 132 to 990 communities across
+/// identical runs. Holding the partition fixed across replicates makes the bootstrap abstain on
+/// nothing (measured: 0% unassigned, and its support falls from AUC 0.93 to 0.69 at separating
+/// spurious calls), because a cluster's argmax will not flip when only the panel jiggles. The
+/// partition is where the instability lives, so the partition is what gets resampled.
+fn cluster_cells(graph: &KnnGraph, n: usize, cfg: &TermOraConfig, seed: u64) -> Vec<usize> {
+    super::layout::leiden_from_graph(graph, n, cfg.resolution, seed)
+}
+
+//////////////////////////////////////////////////////////////////////////
+// one replicate's pipeline half (the `CoarseStep` the bootstrap calls) //
+//////////////////////////////////////////////////////////////////////////
+
+/// Turn one replicate's resampled nearest-centroid assignment into the **shipped** label:
+/// re-derive the clustering, prune distance outliers, run the cluster × term
+/// over-representation test, and take each cluster's FDR-gated call.
+///
+/// Returns the per-cell label as a column index into `0..=c` (where `c` means `unassigned`),
+/// plus this replicate's community count. `None` when the draw was degenerate — too few cells
+/// left assigned to test anything — so it drops out of the tally rather than poisoning it.
+///
+/// A label therefore survives only if it survives *everything that was ever arbitrary* about
+/// how we got it: which markers were drawn, and — when `recluster` — which partition the
+/// (irreproducible) clustering happened to land in this time.
+#[allow(clippy::too_many_arguments)]
+fn replicate_label(
+    fine: &[usize],
+    centroids: &[f32],
+    cell_flat: &[f32],
+    community: &[usize],
+    n_comm_ref: usize,
+    regroup: Option<&Regroup<'_>>,
+    n: usize,
+    c: usize,
+    h: usize,
+    lnfact: &[f64],
+    cfg: &TermOraConfig,
+    draw: usize,
+) -> Result<Option<(Vec<usize>, usize)>> {
+    // Borrowed when the grouping is held fixed; owned only when we re-derive it.
+    let (comm, n_comm): (Cow<'_, [usize]>, usize) = match regroup {
+        Some(f) => {
+            let comm = f(cfg.seed.wrapping_add(draw as u64))?;
+            anyhow::ensure!(
+                comm.len() == n,
+                "regroup returned {} labels, need {n}",
+                comm.len()
+            );
+            let m = n_communities(&comm);
+            (Cow::Owned(comm), m)
+        }
+        None => (Cow::Borrowed(community), n_comm_ref),
+    };
+
+    let mut assign = fine.to_vec();
+    if cfg.assign_qc {
+        let dist = centroid_distances(cell_flat, n, centroids, h, &assign);
+        prune_outliers(&mut assign, &dist, c, cfg.assign_mad);
+    }
+    if assign.iter().filter(|&&t| t != UNASSIGNED).count() < 2 {
+        return Ok(None);
+    }
+
+    let ora = cluster_term_ora(&assign, &comm, n_comm, c, lnfact, Want::CallOnly, cfg);
+    let call = cluster_calls(&ora, n_comm, c, cfg.fdr_alpha);
+    let per_cell: Vec<usize> = (0..n)
+        .map(|i| match call[comm[i]] {
+            UNASSIGNED => c, // the `unassigned` column
+            t => t,
+        })
+        .collect();
+    Ok(Some((per_cell, n_comm)))
+}
+
+/// Distance from each cell to the centroid it was assigned to (`NaN` when unassigned).
+fn centroid_distances(
+    cell_flat: &[f32],
+    n: usize,
+    centroids: &[f32],
+    h: usize,
+    assign: &[usize],
+) -> Vec<f32> {
+    (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let t = assign[i];
+            if t == UNASSIGNED {
+                return f32::NAN;
+            }
+            let cell = &cell_flat[i * h..(i + 1) * h];
+            let ct = &centroids[t * h..(t + 1) * h];
+            cell.iter()
+                .zip(ct)
+                .map(|(x, y)| (x - y) * (x - y))
+                .sum::<f32>()
+                .max(0.0)
+                .sqrt()
+        })
+        .collect()
 }
 
 //////////////////////////////////////////
@@ -588,10 +974,11 @@ struct OraResult {
     p_perm: Vec<f32>,
     /// BH q of `p_perm`, per cluster row.
     q: Vec<f32>,
-    /// FDR-sparse row-softmax Q over significant terms (confidence weights).
+    /// FDR-sparse row-softmax Q over significant terms (confidence weights). Only the reported
+    /// run needs it — see [`Want`].
     q_soft: Vec<f32>,
-    /// Calibration diagnostics.
-    cal: Calibration,
+    /// Calibration diagnostics. `None` for a bootstrap replicate, which never reads them.
+    cal: Option<Calibration>,
 }
 
 struct Calibration {
@@ -603,40 +990,89 @@ struct Calibration {
     degenerate_frac: f64,
 }
 
+/// How much of the ORA the caller actually intends to read.
+///
+/// A bootstrap replicate wants a *label*, and reads only `stat` and `q` on its way to one
+/// ([`cluster_calls`]). It never looks at `q_soft` or `cal` — but `cal` is the most expensive
+/// thing here by a wide margin (two sorts and an inverse-normal CDF over every one of the
+/// `n_perm × n_comm × c` pooled null values), so computing it 200 times and discarding it 200
+/// times costs more than the permutation it is meant to be calibrating.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Want {
+    /// Everything: the reported run, which writes `null_calibration.tsv` and the Q matrix.
+    Report,
+    /// The label only: one bootstrap replicate.
+    CallOnly,
+}
+
+/// Cap on the pooled null per term. The permutation statistic is pooled **across clusters** (it
+/// is relabeling-invariant), so the pool is `n_perm × n_comm` — and a runaway partition can make
+/// that enormous for no gain: `--resolution 8` has produced 1,713 communities on 15k cells, where
+/// the full `--num-perm 500` would build and sort 20M f32 per term. This is a **cost ceiling**,
+/// not a precision target: at any resolution worth using (tens of clusters) it does nothing and
+/// the user's `--num-perm` stands.
+const MAX_NULL_POOL: usize = 100_000;
+
+/// Draws actually taken. Only ever *reduces* the caller's request; `null_calibration.tsv` records
+/// what was used (`n_perm`), and [`annotate_inner`] says so on the console when it bites.
+fn capped_n_perm(requested: usize, n_comm: usize) -> usize {
+    if requested == 0 || n_comm == 0 {
+        return requested;
+    }
+    MAX_NULL_POOL.div_ceil(n_comm).clamp(1, requested)
+}
+
+/// `lnfact` must cover `0..=n` for the cell count `n` (it is reused across bootstrap replicates,
+/// whose `n_tot` is always ≤ `n`).
 fn cluster_term_ora(
     assign: &[usize],
     community: &[usize],
     n_comm: usize,
     c: usize,
+    lnfact: &[f64],
+    want: Want,
     cfg: &TermOraConfig,
 ) -> OraResult {
     let n = assign.len();
-    // Assigned cells only (post-QC) feed the contingency.
+
+    // Assigned cells only (post-QC) feed the contingency: an unassigned cell is out of the
+    // hypergeometric population entirely, not a zero in it.
     let assigned: Vec<usize> = (0..n).filter(|&i| assign[i] != UNASSIGNED).collect();
     let labels: Vec<usize> = assigned.iter().map(|&i| assign[i]).collect();
     let comms: Vec<usize> = assigned.iter().map(|&i| community[i]).collect();
     let n_tot = assigned.len();
 
     let count = contingency(&comms, &labels, n_comm, c);
-    let n_k: Vec<usize> = (0..n_comm)
-        .map(|k| (0..c).map(|t| count[k * c + t] as usize).sum())
+    let n_k: Vec<usize> = count
+        .chunks(c)
+        .map(|row| row.iter().map(|&v| v as usize).sum())
         .collect();
-    let m_t: Vec<usize> = (0..c)
-        .map(|t| (0..n_comm).map(|k| count[k * c + t] as usize).sum())
-        .collect();
+    let mut m_t = vec![0usize; c];
+    for &t in &labels {
+        m_t[t] += 1;
+    }
 
-    // Per-(K,T) hypergeometric SF table — margins fixed under permutation, so
-    // each table is reused for the observed count and every permuted count. The
-    // ln-factorials (pop = n_tot for every table) are precomputed once.
-    let lnfact = ln_factorials(n_tot);
-    let sf_tables: Vec<Vec<f64>> = (0..n_comm * c)
-        .map(|kt| {
-            let (k, t) = (kt / c, kt % c);
-            hypergeom_sf_table(n_tot, m_t[t], n_k[k], &lnfact)
-        })
+    // Hypergeometric SF tables. The margins `(n_tot, m_t, n_k)` are fixed under permutation, so
+    // each table serves the observed count and every permuted one.
+    //
+    // Tables are keyed by the margin *pair*, not by `(k, t)`: clusters that happen to share a
+    // size share a table. At the resolutions worth using the sizes are all distinct and this
+    // saves nothing, but it is what keeps a runaway partition (1,713 clusters, most of them
+    // tiny and identically-sized) from building thousands of copies of the same table. `slot`
+    // resolves the sharing once, so the lookup itself stays a plain index.
+    let mut degrees: Vec<usize> = n_k.clone();
+    degrees.sort_unstable();
+    degrees.dedup();
+    let slot: Vec<usize> = n_k
+        .iter()
+        .map(|nk| degrees.binary_search(nk).expect("n_k came from degrees"))
+        .collect();
+    let sf_tables: Vec<Vec<f64>> = (0..degrees.len() * c)
+        .into_par_iter()
+        .map(|st| hypergeom_sf_table(n_tot, m_t[st % c], degrees[st / c], lnfact))
         .collect();
     let sf_at = |k: usize, t: usize, a: usize| -> f64 {
-        let tbl = &sf_tables[k * c + t];
+        let tbl = &sf_tables[slot[k] * c + t];
         tbl.get(a)
             .copied()
             .unwrap_or(if tbl.is_empty() { 1.0 } else { 0.0 })
@@ -655,7 +1091,11 @@ fn cluster_term_ora(
     //////////////////////////////////////////////////////////
     // permutation null: pool stat across clusters per term //
     //////////////////////////////////////////////////////////
-    let b = cfg.n_perm;
+    // Serial by design. This whole function already runs inside a 200-way rayon fan-out over
+    // bootstrap replicates (`marker_bootstrap::run_marker_bootstrap`), so the cores are spoken
+    // for; a nested fan-out here would only contend. It also keeps the RNG a single chain, which
+    // is what makes `--seed` mean something.
+    let b = capped_n_perm(cfg.n_perm, n_comm);
     let mut null_pool: Vec<Vec<f32>> = vec![Vec::with_capacity(b * n_comm); c];
     if b > 0 && n_tot >= 2 {
         let mut perm = labels.clone();
@@ -671,40 +1111,39 @@ fn cluster_term_ora(
             }
         }
     }
-    for pool in &mut null_pool {
-        pool.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    }
+    null_pool.par_iter_mut().for_each(|pool| {
+        pool.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    });
 
     // permutation p per (K,T): fraction of the term's pooled null ≥ observed.
     let mut p_perm = vec![1f32; n_comm * c];
-    for k in 0..n_comm {
-        for t in 0..c {
-            let pool = &null_pool[t];
-            p_perm[k * c + t] = if pool.is_empty() {
-                p_analytic[k * c + t]
-            } else {
-                let obs = stat[k * c + t];
-                let ge = pool.len() - lower_bound(pool, obs);
-                (ge as f32 + 1.0) / (pool.len() as f32 + 1.0)
-            };
-        }
+    for kt in 0..n_comm * c {
+        let pool = &null_pool[kt % c];
+        p_perm[kt] = if pool.is_empty() {
+            p_analytic[kt]
+        } else {
+            let ge = pool.len() - lower_bound(pool, stat[kt]);
+            (ge as f32 + 1.0) / (pool.len() as f32 + 1.0)
+        };
     }
 
     // BH q per cluster row on the permutation p.
     let mut q = vec![1f32; n_comm * c];
     for k in 0..n_comm {
-        let row: Vec<f32> = (0..c).map(|t| p_perm[k * c + t]).collect();
-        let row_q = enrichment::bh_fdr(&row);
-        for t in 0..c {
-            q[k * c + t] = row_q[t];
-        }
+        let row_q = enrichment::bh_fdr(&p_perm[k * c..(k + 1) * c]);
+        q[k * c..(k + 1) * c].copy_from_slice(&row_q);
     }
 
-    // FDR-sparse row-softmax Q (confidence weights): softmax of stat over terms
-    // with q < α; zero elsewhere; uniform fallback if a row has no significant term.
-    let q_soft = sparse_row_softmax(&stat, &q, n_comm, c, cfg.fdr_alpha, cfg.q_temperature);
-
-    let cal = calibrate(&p_analytic, &p_perm, &null_pool, n_comm, c, b);
+    // The rest is for the reported run only — a replicate reads `stat` and `q` and stops.
+    let (q_soft, cal) = match want {
+        Want::CallOnly => (Vec::new(), None),
+        Want::Report => (
+            // FDR-sparse row-softmax Q (confidence weights): softmax of stat over terms
+            // with q < α; zero elsewhere; uniform fallback if a row has no significant term.
+            sparse_row_softmax(&stat, &q, n_comm, c, cfg.fdr_alpha, cfg.q_temperature),
+            Some(calibrate(&p_analytic, &p_perm, &null_pool, n_comm, c, b)),
+        ),
+    };
 
     OraResult {
         stat,
@@ -715,7 +1154,25 @@ fn cluster_term_ora(
     }
 }
 
-/// `[n_comm × c]` row-major contingency counts.
+/// Each cluster's FDR-gated call: its top over-represented term, kept only if significant.
+/// [`UNASSIGNED`] when nothing survives `fdr_alpha`.
+fn cluster_calls(ora: &OraResult, n_comm: usize, c: usize, alpha: f32) -> Vec<usize> {
+    let top = argmax_rows(&ora.stat, n_comm, c);
+    (0..n_comm)
+        .map(|k| {
+            let best = top[k];
+            if ora.q[k * c + best] < alpha {
+                best
+            } else {
+                UNASSIGNED
+            }
+        })
+        .collect()
+}
+
+/// `[n_comm × c]` row-major contingency counts over the **assigned cells only**: `comms` and
+/// `labels` are the compacted, parallel per-assigned-cell arrays, so there is no sentinel to
+/// filter and the walk is over `n_tot`, not `n`.
 fn contingency(comms: &[usize], labels: &[usize], n_comm: usize, c: usize) -> Vec<u32> {
     let mut count = vec![0u32; n_comm * c];
     for (&k, &t) in comms.iter().zip(labels) {
@@ -768,6 +1225,11 @@ fn hypergeom_sf_table(pop: usize, succ: usize, draws: usize, lnfact: &[f64]) -> 
 /// Index of the first element ≥ `x` in a sorted slice (count of strictly-smaller).
 fn lower_bound(sorted: &[f32], x: f32) -> usize {
     sorted.partition_point(|&v| v < x)
+}
+
+/// Index of the first element > `x` in a sorted slice (count of ≤ `x`).
+fn upper_bound(sorted: &[f32], x: f32) -> usize {
+    sorted.partition_point(|&v| v <= x)
 }
 
 /// Per cluster row: softmax of `stat/τ` over terms with `q < α`, zero elsewhere.
@@ -852,8 +1314,17 @@ fn calibrate(
         .count();
     let degenerate_frac = degenerate_terms as f64 / c.max(1) as f64;
 
-    // Machinery sanity: leave-one-out empirical p of every pooled null value vs
-    // its term's pool (uniform under an unbiased permutation null).
+    // Machinery sanity: leave-one-out empirical p of every pooled null value vs its term's pool
+    // (uniform under an unbiased permutation null).
+    //
+    // **mid-p, not the plain tail count.** The statistic is discrete and the pool is full of
+    // ties at the floor — a (group, term) with no enriched cells scores exactly 0, and once the
+    // assignment is sparse (as it is after the bootstrap abstains on half the cells) that is
+    // most of the pool. The plain tail `#{≥x}/m` hands every one of those p = 1, which the
+    // clamp turns into z = Φ⁻¹(1e-12) = −7.03 and λ = 49.48/0.4549 = **108.77** — a number that
+    // is a property of the clamp, not of the null, and that used to fire a "raise --num-perm"
+    // warning no amount of permutation could ever fix. Splitting the ties (`#{>x} + ½#{=x}`)
+    // makes λ mean what it claims to again, and leaves the continuous case unchanged.
     let mut loo: Vec<f64> = Vec::new();
     for pool in null_pool {
         let m = pool.len();
@@ -861,9 +1332,9 @@ fn calibrate(
             continue;
         }
         for &x in pool {
-            // strictly-greater + ties-excluding-self, +1 smoothing.
-            let ge = m - lower_bound(pool, x);
-            let p = ge as f64 / m as f64;
+            let lo = lower_bound(pool, x); // strictly below
+            let hi = upper_bound(pool, x); // ≤ x
+            let p = (m as f64 - 0.5 * (lo + hi) as f64) / m as f64;
             loo.push(p.clamp(1e-12, 1.0));
         }
     }
@@ -923,55 +1394,325 @@ fn write_annot_parquet(
     out_prefix: &str,
     cell_names: &[Box<str>],
     community: &[usize],
+    sizes: &[usize],
     coarse_label: &[Box<str>],
     assign: &[usize],
     dist: &[f32],
     type_names: &[Box<str>],
     ora: &OraResult,
     cluster_label: &[usize],
+    boot: Option<&BootstrapResult>,
+    consensus: Option<&CoarseConsensus>,
 ) -> Result<()> {
     let n = cell_names.len();
     let c = type_names.len();
     let comm_i32: Vec<i32> = community.iter().map(|&k| k as i32).collect();
+    // How many cells the call was pooled over — its cluster's size. The test's power comes
+    // entirely from this number, and a call resting on a handful of cells is a different animal
+    // from one resting on hundreds, so it goes out in the parquet rather than being implied.
+    let cluster_size: Vec<i32> = community.iter().map(|&k| sizes[k] as i32).collect();
     let fine_label: Vec<Box<str>> = assign.iter().map(|&t| label_of(t, type_names)).collect();
     let is_outlier: Vec<i32> = assign.iter().map(|&t| (t == UNASSIGNED) as i32).collect();
-    // Per-cell coarse stats = the cluster's call entry.
-    let coarse_p: Vec<f32> = (0..n)
-        .map(|i| {
-            let k = community[i];
-            match cluster_label[k] {
-                UNASSIGNED => f32::NAN,
-                t => ora.p_perm[k * c + t],
-            }
-        })
-        .collect();
-    let coarse_q: Vec<f32> = (0..n)
-        .map(|i| {
-            let k = community[i];
-            match cluster_label[k] {
-                UNASSIGNED => f32::NAN,
-                t => ora.q[k * c + t],
-            }
-        })
-        .collect();
+    // Per-cell coarse stats = the cluster's call entry, broadcast to its members.
+    let stat_of = |m: &[f32], i: usize| -> f32 {
+        let k = community[i];
+        match cluster_label[k] {
+            UNASSIGNED => f32::NAN,
+            t => m[k * c + t],
+        }
+    };
+    let coarse_p: Vec<f32> = (0..n).map(|i| stat_of(&ora.p_perm, i)).collect();
+    let coarse_q: Vec<f32> = (0..n).map(|i| stat_of(&ora.q, i)).collect();
+
     let annot_path = format!("{out_prefix}.annot.parquet");
-    write_named_table(
-        &annot_path,
-        "cell",
-        cell_names,
-        &[
-            (Box::from("community"), Column::I32(&comm_i32)),
-            (Box::from("coarse_label"), Column::Str(coarse_label)),
+    let mut cols = vec![
+        (Box::from("community"), Column::I32(&comm_i32)),
+        (Box::from("cluster_size"), Column::I32(&cluster_size)),
+        (Box::from("coarse_label"), Column::Str(coarse_label)),
+        (Box::from("fine_label"), Column::Str(&fine_label)),
+        (Box::from("fine_distance"), Column::F32(dist)),
+        (Box::from("is_outlier"), Column::I32(&is_outlier)),
+    ];
+    // **`coarse_p`/`coarse_q` are only honest without the bootstrap**, and are withheld with it.
+    //
+    // They are one partition's word: the p/q that this single (irreproducible) Leiden run gave
+    // to the term *it* picked for the cell's cluster. Under the bootstrap `coarse_label` is the
+    // consensus over resampled panels and re-partitionings instead — so the two disagree about
+    // which term they even describe, and they disagree about how sure to be. Measured on cord
+    // blood: 6,891 cells whose consensus label was `NK` carried q between 1e-3 and 6e-3 — flat
+    // certainty — next to a `label_support` of 0.50-0.60, a coin flip. Shipping a p-value that
+    // confident beside a label that unstable is worse than shipping no p-value at all, and the
+    // p-value is the one that is lying.
+    if boot.is_none() {
+        cols.extend([
             (Box::from("coarse_p"), Column::F32(&coarse_p)),
             (Box::from("coarse_q"), Column::F32(&coarse_q)),
-            (Box::from("fine_label"), Column::Str(&fine_label)),
-            (Box::from("fine_distance"), Column::F32(dist)),
-            (Box::from("is_outlier"), Column::I32(&is_outlier)),
-        ],
-    )
-    .with_context(|| format!("writing {annot_path}"))?;
+        ]);
+    }
+    // The bootstrap's per-cell numbers, which are what replace them. These vary cell by cell —
+    // the whole point of resampling — where a cluster's p/q is identical for every one of its
+    // members. `label_support` is the headline: the fraction of replicates (panel resampled, and
+    // the partition re-derived) that agreed on this cell's shipped label.
+    // The **mixed annotation**. `coarse_label` is forced to pick one type or give up; this is
+    // what the resampling actually said, and it is defined for every cell — including the ones
+    // `coarse_label` abstains on, which is exactly where it earns its keep. `HSPC/LMPP` is a real
+    // answer; `unassigned` is a refusal to give one.
+    //
+    // **The set is rendered in canonical (type-index) order, not in support order.** A
+    // set-valued label is a category, and a category has to have one spelling: sorting by support
+    // would render the same 3-way call as `Erythroid/Granulo-Mono/HSPC` for one cell and
+    // `Granulo-Mono/Erythroid/HSPC` for the next, so grouping by it would split one group into
+    // `k!` of them. Which member is the most probable is already carried by `coarse_label` and
+    // `label_support`; this column's job is to name the *set*.
+    let set_str: Vec<Box<str>>;
+    let set_size: Vec<i32>;
+    if let (Some(b), Some(con)) = (boot, consensus) {
+        set_str = con
+            .label_set
+            .iter()
+            .map(|set| {
+                if set.is_empty() {
+                    // Too wide to mean anything — see `CoarseConsensus::label_set`.
+                    return Box::from(enrichment::UNASSIGNED_LABEL);
+                }
+                let mut canon = set.clone();
+                canon.sort_unstable(); // the `unassigned` column is `c`, so it sorts last
+                canon
+                    .iter()
+                    .map(|&t| label_of(t, type_names))
+                    .collect::<Vec<_>>()
+                    .join("/")
+                    .into_boxed_str()
+            })
+            .collect();
+        set_size = con.label_set.iter().map(|s| s.len() as i32).collect();
+        cols.extend([
+            (Box::from("label_set"), Column::Str(&set_str)),
+            (Box::from("label_set_size"), Column::I32(&set_size)),
+            (
+                Box::from("label_set_support"),
+                Column::F32(&con.set_support),
+            ),
+            (Box::from("label_support"), Column::F32(&con.support)),
+            (Box::from("label_entropy"), Column::F32(&con.entropy)),
+            (Box::from("fine_support"), Column::F32(&b.support)),
+            (Box::from("fine_entropy"), Column::F32(&b.entropy)),
+        ]);
+    }
+    write_named_table(&annot_path, "cell", cell_names, &cols)
+        .with_context(|| format!("writing {annot_path}"))?;
     info!("wrote {annot_path}");
     Ok(())
+}
+
+///////////////////////////////////////
+// marker-bootstrap outputs + report //
+///////////////////////////////////////
+
+/// The per-cell bootstrap distribution, the marker-deviation table, and the per-type
+/// diagnostics.
+///
+/// `marker_deviation` is the deliverable that states the first error source — *does the
+/// embedding actually place this listed gene anywhere near the type it is listed under?* —
+/// as an output rather than absorbing it silently into a centroid.
+fn write_bootstrap_outputs(
+    out_prefix: &str,
+    cell_names: &[Box<str>],
+    gene_names: &[Box<str>],
+    type_names: &[Box<str>],
+    type_markers: &[Vec<(u32, f32)>],
+    post: &BootstrapResult,
+    consensus: &CoarseConsensus,
+) -> Result<()> {
+    // The distribution over the SHIPPED label — what fraction of the replicates put this cell
+    // in each type, and in `unassigned`.
+    let mut col_names: Vec<Box<str>> = type_names.to_vec();
+    col_names.push(Box::from(enrichment::UNASSIGNED_LABEL));
+    let path = format!("{out_prefix}.label_stability.parquet");
+    DMatrix::<f32>::from_row_iterator(cell_names.len(), post.c + 1, consensus.post.iter().copied())
+        .to_parquet_with_names(&path, (Some(cell_names), Some("cell")), Some(&col_names))
+        .with_context(|| format!("writing {path}"))?;
+    info!("wrote {path}");
+
+    // Long (gene, type) marker table.
+    let (mut genes, mut types, mut weights, mut dev, mut live) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (t, markers) in type_markers.iter().enumerate() {
+        for (j, &(gi, w)) in markers.iter().enumerate() {
+            genes.push(gene_names[gi as usize].clone());
+            types.push(type_names[t].clone());
+            weights.push(w);
+            dev.push(post.marker_dev[t][j]);
+            live.push(i32::from(post.marker_live[t][j]));
+        }
+    }
+    let path = format!("{out_prefix}.marker_support.parquet");
+    write_named_table(
+        &path,
+        "gene",
+        &genes,
+        &[
+            (Box::from("cell_type"), Column::Str(&types)),
+            (Box::from("idf_weight"), Column::F32(&weights)),
+            (Box::from("deviation"), Column::F32(&dev)),
+            (Box::from("live"), Column::I32(&live)),
+        ],
+    )
+    .with_context(|| format!("writing {path}"))?;
+    info!("wrote {path}");
+
+    let path = format!("{out_prefix}.type_qc.tsv");
+    let mut f = std::fs::File::create(&path).with_context(|| format!("creating {path}"))?;
+    writeln!(
+        f,
+        "cell_type\tn_markers\tn_live\tcentroid_jitter\tdecision_gap\tnoise_ratio\tmean_support\toccupancy"
+    )?;
+    for (t, qc) in post.type_qc.iter().enumerate() {
+        writeln!(
+            f,
+            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.3}\t{:.4}\t{:.4}",
+            type_names[t],
+            type_markers[t].len(),
+            qc.n_live,
+            qc.centroid_jitter,
+            qc.decision_gap,
+            noise_ratio(qc),
+            qc.mean_support,
+            qc.occupancy
+        )?;
+    }
+    info!("wrote {path}");
+    Ok(())
+}
+
+/// The panel null's per-type verdict: does the type's own gene list place its prototype better
+/// than the same number of random marker genes would?
+fn write_panel_null(
+    out_prefix: &str,
+    type_names: &[Box<str>],
+    pn: &super::panel_null::PanelNull,
+) -> Result<()> {
+    let path = format!("{out_prefix}.panel_null.tsv");
+    let mut f = std::fs::File::create(&path).with_context(|| format!("creating {path}"))?;
+    writeln!(
+        f,
+        "cell_type\tn_live\toccupancy\tnull_occupancy\tcost\tnull_cost\tcost_ratio\tp"
+    )?;
+    for (t, name) in type_names.iter().enumerate() {
+        writeln!(
+            f,
+            "{name}\t{}\t{:.4}\t{:.4}\t{:.1}\t{:.1}\t{:.3}\t{:.4}",
+            pn.n_live[t],
+            pn.occupancy[t],
+            pn.null_occupancy[t],
+            pn.cost[t],
+            pn.null_cost[t],
+            pn.null_cost[t] / pn.cost[t].max(1e-9),
+            pn.p[t]
+        )?;
+    }
+    info!("wrote {path}");
+    Ok(())
+}
+
+/// Name the types whose gene list is doing no better than random genes would. These are the types
+/// the point-estimate path fills anyway, confidently, and that the bootstrap will *also* call
+/// confidently — because every resample of a wrong panel is wrong the same way.
+fn report_panel_null(pn: &super::panel_null::PanelNull, type_names: &[Box<str>]) {
+    let mut dud: Vec<(&str, f32, f32)> = type_names
+        .iter()
+        .enumerate()
+        .filter(|&(t, _)| pn.n_live[t] > 0 && pn.p[t] > 0.05)
+        .map(|(t, name)| (name.as_ref(), pn.p[t], pn.occupancy[t]))
+        .collect();
+    info!(
+        "marker-panel null ({} draws/type): {}/{} types place their prototype better than random \
+         genes of the same number (p < 0.05)",
+        pn.n_perm,
+        type_names.len() - dud.len(),
+        type_names.len()
+    );
+    if dud.is_empty() {
+        return;
+    }
+    dud.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let preview: Vec<String> = dud
+        .iter()
+        .take(10)
+        .map(|&(name, p, occ)| format!("{name} (p={p:.2}, holds {:.1}% of cells)", occ * 100.0))
+        .collect();
+    warn!(
+        "{} type(s) are NOT identified by their own markers — random genes of the same number \
+         place their prototype just as well, yet they still hold cells: {}. This is BIAS, and no \
+         amount of bootstrapping will find it: every resample of a wrong panel is wrong the same \
+         way, so these calls come back *stable*. See {{out}}.panel_null.tsv.",
+        dud.len(),
+        preview.join(", ")
+    );
+}
+
+/// How far the centroid moves under resampling, against the margin the assignment is actually
+/// decided by. **Above 1 the type's cells are being assigned by noise**: the panel does not
+/// place the type to within the precision the decision needs.
+fn noise_ratio(qc: &super::marker_bootstrap::TypeQc) -> f32 {
+    if qc.decision_gap > 0.0 {
+        qc.centroid_jitter / qc.decision_gap
+    } else {
+        f32::NAN
+    }
+}
+
+/// Say plainly how much of the labelling was resting on arbitrary choices: how far the
+/// clustering wandered across replicates, and how many cells could not hold a label through it.
+fn report_consensus(con: &CoarseConsensus, n: usize) {
+    let called = con.label.iter().filter(|&&t| t != UNASSIGNED).count();
+    let mean_support = con.support.iter().sum::<f32>() / n as f32;
+    let (lo, hi) = con
+        .n_comm
+        .iter()
+        .fold((usize::MAX, 0), |(l, h), &k| (l.min(k), h.max(k)));
+    info!(
+        "stability bootstrap ({} replicates, panel + clustering resampled): {called}/{n} cells \
+         held a label (mean support {mean_support:.2}); the clustering itself ranged over \
+         {lo}–{hi} communities across replicates",
+        con.n_comm.len()
+    );
+    if hi > 2 * lo.max(1) {
+        warn!(
+            "the clustering is unstable — replicates ranged from {lo} to {hi} communities on the \
+             SAME data. Any single partition's labelling is one draw from that, which is why the \
+             shipped label is now the consensus rather than one run's word for it."
+        );
+    }
+}
+
+/// Name the types whose panel cannot place them to the precision the assignment needs. These
+/// are exactly the types the point-estimate path hands a confident share of cells anyway.
+fn report_bootstrap(post: &BootstrapResult, type_names: &[Box<str>]) {
+    let mut weak: Vec<(&str, f32, f32)> = post
+        .type_qc
+        .iter()
+        .zip(type_names)
+        .filter(|(qc, _)| noise_ratio(qc) > 1.0)
+        .map(|(qc, name)| (name.as_ref(), noise_ratio(qc), qc.occupancy))
+        .collect();
+    if weak.is_empty() {
+        return;
+    }
+    weak.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let preview: Vec<String> = weak
+        .iter()
+        .take(10)
+        .map(|&(name, r, occ)| format!("{name} ({r:.1}×, {occ:.1}% of cells)", occ = occ * 100.0))
+        .collect();
+    warn!(
+        "{} type(s) move further under marker resampling than the margin their assignment is \
+         decided by — their cells are being called by noise: {}. This is an EMBEDDING problem, \
+         not a statistics one: re-run `faba gem --must-train-features <panel>` so the marker \
+         genes are trained rather than post-hoc projected. See {{out}}.type_qc.tsv.",
+        weak.len(),
+        preview.join(", ")
+    );
 }
 
 fn write_cluster_term_matrices(
@@ -1003,7 +1744,9 @@ fn write_calibration(
     n_assigned: usize,
     n_outliers: usize,
 ) -> Result<()> {
-    let cal = &ora.cal;
+    let Some(cal) = ora.cal.as_ref() else {
+        return Ok(()); // a `Want::CallOnly` run has nothing to report
+    };
     let path = format!("{out_prefix}.null_calibration.tsv");
     let mut f = std::fs::File::create(&path).with_context(|| format!("creating {path}"))?;
     writeln!(f, "metric\tvalue")?;
@@ -1042,32 +1785,48 @@ fn write_calibration(
             cal.median_logratio
         );
     }
+    // λ straying from 1 has two very different causes, and telling the user to raise --num-perm
+    // is right for exactly one of them. When a term's pooled null has no spread — too few cells
+    // are assigned to it for any relabeling to move its count — its statistic is a constant, and
+    // no number of permutations will ever give that constant a distribution. `degenerate_frac`
+    // is precisely the share of terms in that state, so let it pick the message.
     if cal.lambda_perm.is_finite() && !(0.7..=1.4).contains(&cal.lambda_perm) {
-        log::warn!(
-            "permutation null lambda_perm={:.2} strays from 1 — raise --num-perm",
-            cal.lambda_perm
-        );
+        if cal.degenerate_frac > 0.1 {
+            log::warn!(
+                "permutation null lambda_perm={:.2} strays from 1, but {:.0}% of terms have a \
+                 null with no spread — too few cells are assigned to them to test at all. More \
+                 permutations cannot fix this; a marker panel the embedding actually trained on \
+                 can (`faba gem --must-train-features`).",
+                cal.lambda_perm,
+                cal.degenerate_frac * 100.0
+            );
+        } else {
+            log::warn!(
+                "permutation null lambda_perm={:.2} strays from 1 — raise --num-perm",
+                cal.lambda_perm
+            );
+        }
     }
     eprintln!();
     Ok(())
 }
 
-fn log_cluster_calls(
-    cluster_label: &[usize],
-    type_names: &[Box<str>],
-    community: &[usize],
-    n_comm: usize,
-) {
-    let mut sizes = vec![0usize; n_comm];
-    for &k in community {
-        sizes[k] += 1;
-    }
+/// Print each cluster's call, largest first. A sane partition has tens of clusters; a runaway
+/// one (`--resolution 8` has produced 1,713 on 15k cells) is truncated rather than allowed to
+/// bury the log — and the truncation is stated, not silent.
+const MAX_CLUSTERS_LISTED: usize = 64;
+
+fn log_cluster_calls(cluster_label: &[usize], type_names: &[Box<str>], sizes: &[usize]) {
+    let n_comm = sizes.len();
     info!("cluster calls ({n_comm} clusters):");
     let mut order: Vec<usize> = (0..n_comm).collect();
-    order.sort_by(|&a, &b| sizes[b].cmp(&sizes[a]));
-    for k in order {
+    order.sort_by_key(|&k| std::cmp::Reverse(sizes[k]));
+    for &k in order.iter().take(MAX_CLUSTERS_LISTED) {
         let name = label_of(cluster_label[k], type_names);
         info!("  K{k:<3} {:6} cells  {name}", sizes[k]);
+    }
+    if let Some(rest) = n_comm.checked_sub(MAX_CLUSTERS_LISTED).filter(|&r| r > 0) {
+        info!("  … and {rest} smaller cluster(s)");
     }
 }
 

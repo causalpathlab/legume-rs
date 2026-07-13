@@ -60,9 +60,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 mod coarsen;
 mod layout;
+mod marker_bootstrap;
 mod markers;
 mod ontology_obo;
 mod output;
+mod panel_null;
 mod score;
 mod term_ora;
 use coarsen::*;
@@ -75,14 +77,43 @@ use score::*;
 /// used by BOTH annotation methods so their per-cell I/O is identical.
 pub use output::write_label_tsvs;
 
+/// The "this cell has no call" sentinel, shared by the firm path and the marker bootstrap.
+/// (`usize::MAX`, so it is never a valid term index and any `t < c` test excludes it.)
+pub(super) const UNASSIGNED: usize = usize::MAX;
+
+/// Number of communities in a partition (`community[i]` = cell `i`'s group id). At least 1,
+/// so an all-in-one-cluster partition is still a partition.
+pub(super) fn n_communities(community: &[usize]) -> usize {
+    community.iter().copied().max().map_or(0, |m| m + 1).max(1)
+}
+
 /// Firm projection annotation by term over-representation within cell clusters
 /// (Euclidean nearest-centroid → QC → cluster → hypergeometric + permutation
 /// calibration → optional TreeBH ontology). The statistically-firm successor to
 /// [`annotate_embeddings`]; `faba gem-annotate` drives it.
 pub use term_ora::{
-    annotate_embeddings_ora, annotate_with_communities, CommunityCalls, TermOraConfig,
+    annotate_embeddings_ora, annotate_with_communities, CommunityCalls, Regroup, TermOraConfig,
     TERM_ORA_OUTPUT_SUFFIXES,
 };
+
+/// The per-cell **stability bootstrap**: resample each type's marker panel with replacement
+/// *and* re-derive the clustering, then ship the consensus — so a call that only survives one
+/// particular draw of the panel, or one particular partition, is reported as what it is
+/// (unreproducible) rather than as a confident label. Swapped in for the bare nearest-centroid
+/// assignment when [`TermOraConfig::bootstrap`] is set.
+///
+/// `support` is **not** a posterior: it is the fraction of replicates that agreed, i.e. the
+/// sampling variability of the pipeline's own output. It sees variance, not bias.
+pub use marker_bootstrap::{
+    Abstain, BootstrapResult, CoarseConsensus, MarkerBootstrapConfig, TypeQc as BootstrapTypeQc,
+};
+
+/// The **marker-panel permutation null** — the *bias* guard the bootstrap cannot supply. Puts one
+/// type at a time on trial: replace only its panel with the same number of random genes (same IDF
+/// weights, drawn from the *live* marker pool), leave every rival real, and ask whether the real
+/// panel captures more cells than random genes would. Because the null panel is the same size, a
+/// small panel's winner's-curse advantage appears in the null too and **cancels**.
+pub use panel_null::{run_panel_null, PanelNull};
 
 /// Bind the generic `enrichment` TreeBH ontology core to the concrete OBO
 /// loader (load OBO + `label→CL`, inject access closures, run). Shared by the
@@ -462,7 +493,7 @@ pub fn annotate_by_projection(
     let (community, n_comm) = match (do_coarsen, cell_graph.as_ref()) {
         (true, Some(graph)) => {
             let labels = leiden_from_graph(graph, n_cells, cfg.resolution, cfg.seed);
-            let k = labels.iter().copied().max().map_or(0, |m| m + 1).max(1);
+            let k = n_communities(&labels);
             (labels, k)
         }
         // Coarse layer mirrors fine: each cell's "community" is its fine argmax.

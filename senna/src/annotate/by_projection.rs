@@ -99,6 +99,8 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
         label_cl: args.label_cl.as_deref().map(str::to_owned),
         ontology_fdr_q: args.ontology_fdr_q,
         ontology_by: args.ontology_by,
+        panel_perm: 0,
+        bootstrap: None,
     };
 
     annotate_embeddings_ora(
