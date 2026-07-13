@@ -128,14 +128,12 @@ where
         self.data_vec.first().map(|p| p.len())
     }
 
-    /// k-nearest neighbours of a stored column, **excluding the column itself**.
-    ///
-    /// The query column counts toward the `knn` budget and is then dropped, so a
-    /// call with `knn` returns up to `knn - 1` neighbours. Callers that want
-    /// exactly `k` others should pass `k + 1` (this is what `KnnGraph` does).
+    /// The `knn` nearest neighbours of a stored column, **excluding the column
+    /// itself** — a call with `knn` returns up to `knn` *other* columns (fewer
+    /// only if the dictionary holds fewer than `knn + 1` points).
     ///
     /// * `query_name` - name of the column to search around
-    /// * `knn` - budget including the query itself
+    /// * `knn` - number of other neighbours to return
     ///
     /// Returns `(names, distances)` in nearest-first order. Errors if `query_name`
     /// is not in the dictionary.
@@ -231,13 +229,11 @@ where
     }
 
     /// Core backend dispatch: return the `knn` nearest column *indices* and their
-    /// distances to `query`, then optionally drop one index (`exclude`, for
-    /// self-search).
+    /// distances to `query`.
     ///
-    /// Note the ordering: the query itself counts toward the `knn` budget and is
-    /// removed *after* selection, so a self-search for `knn` yields `knn - 1`
-    /// neighbours. This matches the historical `hnsw_rs`-backed behaviour that
-    /// callers (e.g. `KnnGraph`, which passes `knn + 1`) rely on.
+    /// When `exclude` is set (self-search) it fetches one extra candidate and
+    /// then drops that index, so exactly `knn` *others* are returned — i.e.
+    /// `search_others(k)` yields `k` neighbours, not `k - 1`.
     fn search_indices(
         &self,
         query: &VecPoint,
@@ -245,22 +241,24 @@ where
         exclude: Option<usize>,
         search: &mut Search,
     ) -> (Vec<usize>, Vec<f32>) {
+        // Fetch one extra when excluding self so dropping it still leaves `knn`.
+        let fetch = if exclude.is_some() { knn + 1 } else { knn };
         let (mut indices, mut distances) = match &self.backend {
-            Backend::Exact => exact::topk(&self.data_vec, &query.data, knn),
+            Backend::Exact => exact::topk(&self.data_vec, &query.data, fetch),
             Backend::Approx(map) => {
                 // `EF_SEARCH` is baked into the index at build, so the search
-                // yields at most that many candidates; a larger `knn` would be
+                // yields at most that many candidates; a larger request would be
                 // silently truncated (see the const's doc).
                 debug_assert!(
-                    knn <= EF_SEARCH,
+                    fetch <= EF_SEARCH,
                     "knn={knn} exceeds EF_SEARCH={EF_SEARCH}; approx results are truncated"
                 );
                 // `search` is reset internally by instant-distance and its `ef`
                 // is overwritten from the index, so a reused (or fresh) buffer is
                 // equally correct here.
-                let mut indices = Vec::with_capacity(knn);
-                let mut distances = Vec::with_capacity(knn);
-                for item in map.search(query, search).take(knn) {
+                let mut indices = Vec::with_capacity(fetch);
+                let mut distances = Vec::with_capacity(fetch);
+                for item in map.search(query, search).take(fetch) {
                     indices.push(*item.value as usize);
                     // `Point::distance` returns squared L2; take the sqrt only
                     // for the neighbours we actually return (true Euclidean).
@@ -275,6 +273,10 @@ where
                 indices.remove(pos);
                 distances.remove(pos);
             }
+            // Self may be absent (exact ties at distance 0 can crowd it out of
+            // the top `knn + 1`); cap back to `knn`.
+            indices.truncate(knn);
+            distances.truncate(knn);
         }
         (indices, distances)
     }

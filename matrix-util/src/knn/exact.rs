@@ -31,9 +31,8 @@ fn scan_sq(points: &[VecPoint], query: &[f32], out: &mut Vec<(usize, f32)>) {
 /// below `EXACT_THRESHOLD`, where an O(n) scan per query is cheaper than an HNSW
 /// traversal and gives recall = 1.0 deterministically.
 ///
-/// Self is *not* excluded here; when a self-search is wanted the caller keeps
-/// the query itself in the top-`k` budget and drops it afterwards, matching the
-/// historical `ColumnDict` semantics (see [`super::ColumnDict::search_indices`]).
+/// Self is *not* excluded here; a self-search fetches `k + 1` and drops the
+/// query index afterwards in [`super::ColumnDict::search_indices`].
 pub(super) fn topk(points: &[VecPoint], query: &[f32], k: usize) -> (Vec<usize>, Vec<f32>) {
     let mut scored: Vec<(usize, f32)> = Vec::with_capacity(points.len());
     scan_sq(points, query, &mut scored);

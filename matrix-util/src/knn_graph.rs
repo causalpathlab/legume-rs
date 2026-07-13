@@ -57,7 +57,9 @@ impl KnnGraph {
         nn: usize,
         args: &KnnGraphArgs,
     ) -> anyhow::Result<KnnGraph> {
-        let nquery = (args.knn + 1).min(nn).max(2);
+        // `search_others` now returns exactly this many *other* neighbours
+        // (self excluded). Clamp to the available others and floor at 1.
+        let n_neighbours = args.knn.min(nn.saturating_sub(1)).max(1);
 
         let jobs = create_jobs(nn, args.block_size);
         let njobs = jobs.len() as u64;
@@ -75,7 +77,7 @@ impl KnnGraph {
                 let mut scratch = SearchScratch::default();
                 for i in lb..ub {
                     let (_indices, _distances) =
-                        dict.search_others_reuse(&i, nquery, &mut scratch)?;
+                        dict.search_others_reuse(&i, n_neighbours, &mut scratch)?;
                     for (j, d_ij) in _indices.into_iter().zip(_distances) {
                         triplets.insert((i, j), d_ij);
                     }
