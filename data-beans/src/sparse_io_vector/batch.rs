@@ -211,7 +211,11 @@ impl SparseIoVec {
         let batch_data = lookups
             .iter()
             .flat_map(|dict| {
-                let data: Vec<f32> = dict.data_vec.iter().flat_map(|x| x.data.clone()).collect();
+                let data: Vec<f32> = dict
+                    .data_vec
+                    .iter()
+                    .flat_map(|x| x.data.iter().copied())
+                    .collect();
                 let ncols = dict.data_vec.len();
                 let nrows = data.len() / ncols;
                 DMatrix::from_vec(nrows, ncols, data)

@@ -26,7 +26,7 @@ use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs}
 use clap::Args;
 use data_beans::sparse_io_vector::SparseIoVec;
 use log::info;
-use matrix_util::knn_match::{ColumnDict, VecPoint};
+use matrix_util::knn_match::ColumnDict;
 use matrix_util::traits::IoOps;
 use rayon::prelude::*;
 
@@ -172,11 +172,10 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
     let neighbours: Vec<(Vec<u32>, Vec<f32>)> = (0..n_new)
         .into_par_iter()
         .map(|i| {
-            let row = theta_new.row(i);
-            let vp = VecPoint {
-                data: row.iter().copied().collect(),
-            };
-            ref_dict.search_by_query_data(&vp, knn).expect("kNN search")
+            let query: Vec<f32> = theta_new.row(i).iter().copied().collect();
+            ref_dict
+                .search_by_query_data(&query, knn)
+                .expect("kNN search")
         })
         .collect();
 

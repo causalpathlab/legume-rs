@@ -28,8 +28,8 @@ ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
 
 dashmap = { workspace = true }
-hnsw_rs = { workspace = true }
-anndists = { workspace = true }
+instant-distance = { workspace = true }
+multiversion = { workspace = true }
 indicatif = { workspace = true }
 parquet = { workspace = true }
 rustc-hash = { workspace = true }

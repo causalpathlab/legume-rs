@@ -8,7 +8,7 @@
 //! placement), and any other caller. Originally `pub(crate)` inside senna;
 //! lifted here so faba can reuse them without duplication.
 
-use crate::knn_match::{ColumnDict, VecPoint};
+use crate::knn_match::ColumnDict;
 use crate::traits::RandomizedAlgs;
 use log::info;
 use nalgebra::DMatrix;
@@ -68,17 +68,9 @@ fn rows_as_contiguous(m: &Mat) -> Vec<Vec<f32>> {
         .collect()
 }
 
-/// SIMD-friendly squared L2 distance between two equal-length slices.
-#[inline]
-fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| {
-            let d = x - y;
-            d * d
-        })
-        .sum()
-}
+/// Squared L2 distance — the shared runtime-SIMD kernel from the k-NN metric
+/// module (replaces a hand-rolled scalar loop that did not autovectorise).
+use crate::knn::metric::l2_sq as sq_dist;
 
 pub struct PhateArgs {
     pub t: usize,
@@ -537,10 +529,8 @@ pub fn project_via_knn(
     let results: Vec<(f32, f32)> = (0..n_query)
         .into_par_iter()
         .map(|q| {
-            let vp = VecPoint {
-                data: qslice[q * h..(q + 1) * h].to_vec(),
-            };
-            let Ok((idx, dist)) = landmark_dict.search_by_query_data(&vp, k) else {
+            let query = &qslice[q * h..(q + 1) * h];
+            let Ok((idx, dist)) = landmark_dict.search_by_query_data(query, k) else {
                 return (f32::NAN, f32::NAN);
             };
             if idx.is_empty() {
