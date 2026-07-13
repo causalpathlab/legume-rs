@@ -218,12 +218,11 @@ pub struct AnnotateArgs {
         long,
         help = "Hold the clustering fixed across resamples (weakens the bootstrap)",
         long_help = "Hold the clustering fixed across resamples.\n\n\
-            By default each draw re-derives it, so the pipeline's own stochasticity is\n\
-            absorbed into the support rather than silently trusted: the kNN graph comes\n\
-            from hnsw_rs, which seeds itself from OS entropy with no way to set it, and\n\
-            Leiden is a stochastic optimiser on top — four identical runs on the same\n\
-            15,315 cells gave 990 / 132 / 137 / 138 communities.\n\n\
-            A label that moves when nothing but the RNG moved is not a robust label.\n\n\
+            By default each draw re-derives the clustering, so the partition's own\n\
+            arbitrariness is absorbed into the support rather than silently trusted.\n\
+            The kNN graph is deterministic (so runs reproduce), but Leiden still picks\n\
+            among near-equal modularity optima, and a label that flips when the\n\
+            partition is re-drawn is not a robust one.\n\n\
             WARNING: with the partition held fixed the bootstrap has little to say —\n\
             measured, NOTHING abstains (0% unassigned) and support's ability to separate\n\
             spurious calls falls from AUC 0.93 to 0.69"
