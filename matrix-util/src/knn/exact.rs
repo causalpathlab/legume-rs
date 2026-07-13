@@ -6,16 +6,21 @@ use multiversion::multiversion;
 // Exact brute-force k-NN fallback //
 ////////////////////////////////////
 
-/// Fill `out[i]` with the *squared* L2 distance from `query` to `points[i]`.
+/// Fill `out` with `(index, squared-L2 distance)` for every point vs. `query`.
 ///
 /// Multiversioned so the whole scan runs under one runtime dispatch (amortised
 /// over all `points`), with `l2_sq_kernel` inlined and autovectorised for the
 /// selected CPU. Squared distances are enough to rank; the `sqrt` is applied
 /// only to the surviving top-`k` in [`topk`].
 #[multiversion(targets = "simd")]
-fn scan_sq(points: &[VecPoint], query: &[f32], out: &mut Vec<f32>) {
+fn scan_sq(points: &[VecPoint], query: &[f32], out: &mut Vec<(usize, f32)>) {
     out.clear();
-    out.extend(points.iter().map(|p| l2_sq_kernel(&p.data, query)));
+    out.extend(
+        points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i, l2_sq_kernel(&p.data, query))),
+    );
 }
 
 /// Exact top-`k` nearest neighbours of `query` among `points`, returned as
@@ -30,10 +35,8 @@ fn scan_sq(points: &[VecPoint], query: &[f32], out: &mut Vec<f32>) {
 /// the query itself in the top-`k` budget and drops it afterwards, matching the
 /// historical `ColumnDict` semantics (see [`super::ColumnDict::search_indices`]).
 pub(super) fn topk(points: &[VecPoint], query: &[f32], k: usize) -> (Vec<usize>, Vec<f32>) {
-    let mut sq = Vec::with_capacity(points.len());
-    scan_sq(points, query, &mut sq);
-
-    let mut scored: Vec<(usize, f32)> = sq.into_iter().enumerate().collect();
+    let mut scored: Vec<(usize, f32)> = Vec::with_capacity(points.len());
+    scan_sq(points, query, &mut scored);
 
     let kk = k.min(scored.len());
     if kk == 0 {

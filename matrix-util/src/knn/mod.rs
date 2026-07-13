@@ -125,11 +125,7 @@ where
     /// empty. A query passed to [`search_by_query_data`](Self::search_by_query_data)
     /// must have this length.
     pub fn dim(&self) -> Option<usize> {
-        if !self.data_vec.is_empty() {
-            Some(self.data_vec[0].len())
-        } else {
-            None
-        }
+        self.data_vec.first().map(|p| p.len())
     }
 
     /// k-nearest neighbours of a stored column, **excluding the column itself**.
@@ -266,7 +262,9 @@ where
                 let mut distances = Vec::with_capacity(knn);
                 for item in map.search(query, search).take(knn) {
                     indices.push(*item.value as usize);
-                    distances.push(item.distance);
+                    // `Point::distance` returns squared L2; take the sqrt only
+                    // for the neighbours we actually return (true Euclidean).
+                    distances.push(item.distance.sqrt());
                 }
                 (indices, distances)
             }
@@ -366,12 +364,6 @@ impl VecPoint {
     }
 }
 
-impl From<Vec<f32>> for VecPoint {
-    fn from(data: Vec<f32>) -> Self {
-        VecPoint { data: data.into() }
-    }
-}
-
 /// Converts one column/vector view into the index's internal [`VecPoint`].
 ///
 /// This is the extension point that lets the `from_*_views` constructors accept
@@ -385,7 +377,7 @@ pub trait MakeVecPoint {
 impl MakeVecPoint for Vec<f32> {
     fn to_vp(&self) -> VecPoint {
         VecPoint {
-            data: Arc::from(self.as_slice()),
+            data: self.iter().copied().collect(),
         }
     }
 }

@@ -27,13 +27,11 @@ impl SparseIoVec {
         self._register_batches(
             feature_matrix,
             batch_membership,
-            |feature_matrix, batch_cells, _inner_parallel| {
+            |feature_matrix, batch_cells| {
                 let columns = batch_cells
                     .iter()
                     .map(|&c| feature_matrix.column(c))
                     .collect::<Vec<_>>();
-                // instant-distance always builds via rayon internally, so there
-                // is no serial-insert variant to select.
                 ColumnDict::<usize>::from_ndarray_views(columns, batch_cells.clone())
             },
         )
@@ -60,13 +58,11 @@ impl SparseIoVec {
         self._register_batches(
             feature_matrix,
             batch_membership,
-            |feature_matrix, batch_cells, _inner_parallel| {
+            |feature_matrix, batch_cells| {
                 let columns = batch_cells
                     .iter()
                     .map(|&c| feature_matrix.column(c))
                     .collect::<Vec<_>>();
-                // instant-distance always builds via rayon internally, so there
-                // is no serial-insert variant to select.
                 ColumnDict::<usize>::from_dvector_views(columns, batch_cells.clone())
             },
         )
@@ -80,7 +76,7 @@ impl SparseIoVec {
     ) -> anyhow::Result<()>
     where
         M: Sync,
-        F: Fn(&M, &Vec<usize>, bool) -> ColumnDict<usize> + Sync,
+        F: Fn(&M, &Vec<usize>) -> ColumnDict<usize> + Sync,
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
     {
         let batches = partition_by_membership(batch_membership, None);
@@ -88,11 +84,11 @@ impl SparseIoVec {
         let ntot = self.num_columns();
         let mut col_to_batch = vec![0; ntot];
 
-        // Pick the parallelism level with the most work: when batches >=
-        // threads, parallelize the outer loop and keep HNSW insertion
-        // serial; when batches are few, build batches sequentially and let
-        // each HNSW build use the full thread pool. Either way avoids
-        // nested rayon contention.
+        // When batches outnumber threads, run the outer loop in parallel (builds
+        // work-steal against each other in the shared pool); when batches are
+        // few, build them sequentially so each instant-distance build gets the
+        // whole pool. (instant-distance always builds via rayon internally, so
+        // there is no per-batch serial-insert choice to make.)
         let n_threads = rayon::current_num_threads();
         let outer_parallel = batches.len() >= n_threads;
 
@@ -118,22 +114,9 @@ impl SparseIoVec {
         // `AdjMethod::Batch` consumers.
         let mut batches_vec: Vec<_> = batches.into_iter().collect();
         batches_vec.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
-        // In outer-parallel mode every per-batch HNSW runs on 1 rayon thread.
-        // For batches much larger than the average that causes a long serial
-        // tail.  Allow large batches to use inner parallelism instead: once
-        // the small batches finish, their rayon threads work-steal subtasks
-        // from the large batch's parallel_insert_slice, effectively donating
-        // all available cores to the outlier.  The threshold is generous
-        // (4× average) to avoid inner-parallel overhead on typical batches.
-        let avg_cells = if batches_vec.is_empty() {
-            1
-        } else {
-            ntot / batches_vec.len()
-        };
-        let large_batch_threshold = (avg_cells * 4).max(n_threads * 512);
-        // Ids assigned above; now schedule largest batches first (LPT) so the
-        // heavy tail overlaps with the small batches. The canonical id rides
-        // along; `sort_by_key(idx)` below restores canonical order.
+        // Schedule largest batches first (LPT) so the heavy tail overlaps with
+        // the small batches. The canonical id rides along; `sort_by_key(idx)`
+        // below restores canonical order.
         let mut enumerated: Vec<_> = batches_vec.iter().enumerate().collect();
         enumerated.sort_by_key(|(_, (_, cells))| std::cmp::Reverse(cells.len()));
         let mut idx_name_glob_dict: Vec<_> = if outer_parallel {
@@ -141,12 +124,11 @@ impl SparseIoVec {
                 .into_par_iter()
                 .progress_with(prog_bar.clone())
                 .map(|(batch_index, (batch_name, batch_glob_indices))| {
-                    let use_inner_parallel = batch_glob_indices.len() > large_batch_threshold;
                     (
                         batch_index,
                         batch_name.to_string().into_boxed_str(),
                         batch_glob_indices.clone(),
-                        create_column_dict(feature_matrix, batch_glob_indices, use_inner_parallel),
+                        create_column_dict(feature_matrix, batch_glob_indices),
                     )
                 })
                 .collect()
@@ -159,7 +141,7 @@ impl SparseIoVec {
                         batch_index,
                         batch_name.to_string().into_boxed_str(),
                         batch_glob_indices.clone(),
-                        create_column_dict(feature_matrix, batch_glob_indices, true),
+                        create_column_dict(feature_matrix, batch_glob_indices),
                     )
                 })
                 .collect()
