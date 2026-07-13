@@ -285,7 +285,7 @@ impl SparseIoVec {
         let q = query.to_vp();
         for lookup in lookups {
             let (matched, matched_distances) =
-                lookup.search_by_query_data(&q.data, knn_per_batch)?;
+                lookup.search_by_query_data(q.as_slice(), knn_per_batch)?;
 
             for (&glob_idx, &dist) in matched.iter().zip(matched_distances.iter()) {
                 self.read_column_offset(glob_idx, &mut ncol, &mut triplets)?;

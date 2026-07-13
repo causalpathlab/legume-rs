@@ -55,12 +55,13 @@ pub use metric::l2_simd;
 ///
 /// The backend is chosen automatically at construction: an exact brute-force
 /// scan below `EXACT_THRESHOLD` points, or a seeded instant-distance HNSW above
-/// it (see the `backend` module). Both are deterministic. `data_vec` remains the canonical
-/// original-order store of the points (used for self-search queries, `dim`, and
-/// the exact path); it is read directly by some call sites, so it stays public.
+/// it (see the `backend` module). Both are deterministic. `data_vec` is the
+/// canonical original-order store of the points (used for self-search queries,
+/// `dim`, and the exact path); read it through [`points`](Self::points) /
+/// [`num_points`](Self::num_points).
 pub struct ColumnDict<K> {
     backend: Backend,
-    pub data_vec: Vec<VecPoint>,
+    data_vec: Vec<VecPoint>,
     name2index: HashMap<K, usize>,
     names: Vec<K>,
 }
@@ -126,6 +127,17 @@ where
     /// must have this length.
     pub fn dim(&self) -> Option<usize> {
         self.data_vec.first().map(|p| p.len())
+    }
+
+    /// Number of stored points.
+    pub fn num_points(&self) -> usize {
+        self.data_vec.len()
+    }
+
+    /// The stored point coordinates, in original (insertion) order — aligned
+    /// with [`names`](Self::names).
+    pub fn points(&self) -> impl Iterator<Item = &[f32]> {
+        self.data_vec.iter().map(|p| p.as_slice())
     }
 
     /// The `knn` nearest neighbours of a stored column, **excluding the column
@@ -348,10 +360,11 @@ where
 /// refcount bump, not a data copy: the approximate backend hands instant-distance
 /// its own `Vec<VecPoint>` (which it reorders) while `ColumnDict.data_vec` keeps
 /// the originals — both share the same underlying buffers. Queries are passed as
-/// plain `&[f32]`, so this type is only ever *constructed* internally.
+/// plain `&[f32]`, so this type is only ever *constructed* internally (via
+/// [`MakeVecPoint`]); read its coordinates with [`as_slice`](Self::as_slice).
 #[derive(Clone, Debug)]
 pub struct VecPoint {
-    pub data: Arc<[f32]>,
+    data: Arc<[f32]>,
 }
 
 impl VecPoint {
@@ -363,6 +376,11 @@ impl VecPoint {
     /// Whether the point has zero coordinates.
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
+    }
+
+    /// Borrow the coordinates as a slice.
+    pub fn as_slice(&self) -> &[f32] {
+        &self.data
     }
 }
 

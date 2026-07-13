@@ -250,7 +250,7 @@ pub(crate) fn knn_distinct_pbsamples_in_batch(
     cell_to_pbsamp: &[usize],
     own_pbsamp: usize,
 ) -> anyhow::Result<Vec<(usize, f32)>> {
-    let n = bknn.data_vec.len();
+    let n = bknn.num_points();
     if n == 0 || knn == 0 {
         return Ok(Vec::new());
     }
