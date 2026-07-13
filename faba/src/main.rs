@@ -15,6 +15,7 @@ mod run_annotate;
 mod run_apa;
 mod run_assoc;
 mod run_atoi;
+mod run_docs;
 mod run_gem_embedding;
 mod run_gene_count;
 mod run_lineage;
@@ -32,6 +33,7 @@ use run_annotate::*;
 use run_apa::*;
 use run_assoc::*;
 use run_atoi::*;
+use run_docs::*;
 use run_gem_embedding::*;
 use run_gene_count::*;
 use run_lineage::*;
@@ -348,6 +350,14 @@ Example:\n  \
     Annotate(AnnotateArgs),
 
     #[command(
+        name = "docs",
+        about = "Print the method write-ups compiled into this binary",
+        long_about = "Print the method write-ups compiled into this binary.\n\n\
+            Run with no argument to list what there is."
+    )]
+    Docs(DocsArgs),
+
+    #[command(
         name = "lineage",
         aliases = ["trajectory", "traj"],
         about = "Velocity-oriented lineage + principal curves over a `faba gem` run",
@@ -441,7 +451,7 @@ Example:\n  \
     #[command(
         name = "all",
         aliases = ["pipeline", "full", "magic"],
-        about = "Run all RNA-seq analyses: SNP → genes → ATOI → APA → m6A",
+        about = "Run all RNA-seq analyses: SNP → genes → ATOI → m6A → APA",
         long_about = "\
 	Run all RNA-seq analyses in a unified pipeline\n\n\
 	Orchestrates the complete analysis workflow:\n\
@@ -478,6 +488,15 @@ fn main() -> anyhow::Result<()> {
 
     auxiliary_data::logging::init_logger(cli.verbose);
 
+    // Install the Ctrl+C handler up front, so one keypress means one thing for the whole run.
+    //
+    // It used to be installed lazily, by whichever library function first asked for the flag —
+    // which made the *same* keypress behave three different ways depending on when you pressed
+    // it: a hard kill before the handler existed, a graceful stop while a loop was polling, and —
+    // worst — a silent no-op afterwards, where the flag was set, nothing was watching it, and the
+    // process simply appeared to ignore you until you pressed it a second time.
+    let _stop = graph_embedding_util::stop_flag();
+
     match cli.commands {
         Commands::DartSeq(ref args) => run_m6a(args)?,
         Commands::Apa(mut args) => run_apa(&mut args)?,
@@ -490,6 +509,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Snp(ref args) => run_snp(args)?,
         Commands::Gem(ref args) => run_gem_embedding(args)?,
         Commands::Annotate(ref args) => run_annotate(args)?,
+        Commands::Docs(ref args) => run_docs(args)?,
         Commands::Lineage(ref args) => run_lineage(args)?,
         Commands::Plot(ref args) => run_plot(args)?,
         Commands::Assoc(ref args) => run_assoc(args)?,

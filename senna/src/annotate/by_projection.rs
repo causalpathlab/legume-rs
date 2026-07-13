@@ -100,6 +100,7 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
         ontology_fdr_q: args.ontology_fdr_q,
         ontology_by: args.ontology_by,
         panel_perm: 0,
+        support_perm: 0,
         bootstrap: None,
     };
 

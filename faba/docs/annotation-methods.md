@@ -1,7 +1,7 @@
 # Marker-based cell-type annotation in `faba` — methods
 
-Source material for a paper Methods section. Every default quoted here is the shipped default;
-every number attributed to "measured" was obtained on the cord-blood dataset described in §7.
+What the method does and why each part of it is there. Every default quoted here is the shipped
+default; every number attributed to "measured" was obtained on the dataset described in §7.
 Code: `graph-embedding-util/src/type_annotation/{term_ora,marker_bootstrap,panel_null}.rs`,
 driven by `faba annotate` and `faba lineage --markers`.
 
@@ -80,6 +80,13 @@ relabeling-invariant). `--num-perm` (default 500) draws; the pool is `n_perm × 
 at 10⁵ per type. The permutation p is Benjamini–Hochberg-adjusted across the types within each
 group. A group is called by its top over-represented type if `q < --fdr-alpha` (default **0.1**),
 else left uncalled; its cells inherit the call.
+
+**The permutation and the hypergeometric are the same test.** Shuffling the cell labels with the
+group memberships held fixed makes the count in (K, T) *exactly* Hypergeometric(N, m_T, n_K)
+conditional on the margins — Fisher's argument — which is what the analytic form already computes.
+Confirmed on every run: `median log10(p_perm / p_analytic) = 0.0000`. The permutation is therefore a
+*self-consistency check*, not an independent test, and it is only run on the reported pass; the
+bootstrap's replicates use the exact analytic p (which also has no `1/(pool+1)` floor).
 
 Calibration diagnostics (`{out}.null_calibration.tsv`): analytic-vs-permutation agreement, and a
 genomic-inflation-style λ plus a Kolmogorov–Smirnov statistic on the permutation null itself. λ is
@@ -181,7 +188,33 @@ rival type's panel real. Rebuild `e_T`, re-run the assignment, and score
     cost(T | panel) = Σ_c min( ‖θ_c − e_T(panel)‖², bar[c][T] )
     p_T = P( cost(T | random genes) ≤ cost(T | T's own genes) )
 
-Four design points, each of which we found to be necessary:
+**The null draw is matched on gene norm** — and this is not a refinement, it decides the answer.
+A type's centroid is the mean of its markers' embeddings, so a type whose markers are *long*
+vectors gets a long centroid; and because `‖cell‖ ≫ ‖centroid‖` the Euclidean rule degenerates to
+`argmax ⟨x, c⟩`, where a longer centroid wins cells almost irrespective of direction (measured:
+rank correlation between centroid norm and cell share, **+0.93**). Draw the null genes *uniformly*
+and every null panel inherits the pool's mean norm — so a type above that mean beats its null on
+norm alone, and one below it loses on norm alone, with no biology tested either way.
+
+This is GOseq's bias [16] in a different coordinate. GOseq stratifies on gene *length* because
+length is the observable proxy for the thing that biases the test (reads → power). Our covariate is
+the embedding norm itself, which we can measure directly — so we stratify on it exactly, and skip
+the noncentral (Wallenius) approximation GOseq needs because it cannot permute.
+
+The effect on the cord-blood panel is not subtle:
+
+| | uniform draw | **norm-stratified** |
+|---|---|---|
+| `Spearman(mean gene norm, p)` | **−0.857** | **+0.107** |
+| EoBasoMast | p = 0.020 ✓ | p = 0.515 |
+| Granulo-Mono | p = 0.060 | p = 0.521 |
+| Megakaryocyte | p = 0.119 | **p = 0.008** ✓ |
+| Lymphoid | p = 0.075 | **p = 0.020** ✓ |
+
+Unstratified, the p-value was almost a monotone function of mean gene norm. EoBasoMast's
+"significance" was pure norm artifact; Megakaryocyte and Lymphoid were *masked* by it.
+
+Four further design points, each of which we found to be necessary:
 
 - **One type at a time.** Randomising every panel at once collapses all `C` null centroids onto
   the marker-pool mean; they become mutually indistinguishable and the null fails for reasons
@@ -206,6 +239,41 @@ On a matched panel the null discriminates: the three compartments holding cells 
 On a *mismatched* panel it finds nothing significant — which is itself the correct verdict.
 
 ---
+
+## 6b. Support permutation null (`--support-perm`) — calibrating the cutoff
+
+`label_support` is a raw agreement fraction, and the bar it is compared against (`--min-support`,
+0.5) is arbitrary. Worse, it is **not scale-free**: with `C` types chance agreement is `1/C`, so 0.5
+sits at 3× chance on a 6-type panel and 12× chance on a 24-type one — the same flag is a different
+test on different panels, and their abstention rates are not comparable.
+
+So calibrate it. Shuffle **which type each marker gene belongs to** — within norm strata, so no
+type's norm profile changes (§6) — and re-run the whole bootstrap. That is the literal statement of
+"the panel carries no information about cell type". Then
+
+    p_i = P( support under a meaningless panel ≥ support observed )
+
+with Benjamini–Hochberg across the cells, giving `support_q`. **A cutoff on an FDR means the same
+thing whatever the number of types.**
+
+Three points of method:
+
+- **The null must use the same `B`.** `s_i = max_t n_it/B` is a maximum over noisy proportions and
+  is biased upward, the more so the smaller `B` is; matching `B` makes that bias appear on both
+  sides and cancel. There is no closed form and no CLT shortcut — a maximum is an extreme-value
+  statistic, not an asymptotically normal one, and the variance that matters is *across shuffled
+  panels*, not across replicates.
+- **The null cannot be pooled across cells.** A cell deep inside a dense cluster gets high support
+  under *any* panel, because it is stably assigned to whichever centroid is nearest. Pooling would
+  hand it a small p for a reason that has nothing to do with markers.
+- **It is affordable because the partitions do not depend on the panel.** The `B` Leiden partitions
+  are drawn once and reused by the observed run *and* every shuffle, so `P × B` re-clusterings
+  collapse to `B`. (It also holds partition variability fixed between observed and null.)
+
+**The headline number, and the reason this matters:** on cord blood a *shuffled* panel still earns a
+mean support of **0.60**. The default bar of 0.50 therefore sits **below the null** — it was keeping
+91% of cells, including many whose agreement was *worse than chance*. The calibrated cutoff keeps
+36%.
 
 ## 7. Validation design
 

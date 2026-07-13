@@ -55,4 +55,4 @@ pub use fit::{
 };
 pub use model::JointEmbedModel;
 pub use postprocess::{cell_clusters, feature_coembedding};
-pub use stop::setup_stop_handler;
+pub use stop::{setup_stop_handler, stop_flag};

@@ -58,8 +58,8 @@ fn run(w: &World, n_perm: usize) -> PanelNull {
 /// null is clearable, so it is not vacuous.
 #[test]
 fn a_real_panel_beats_random_genes_of_the_same_size() {
-    let w = build(&[15, 15, 15], &[100, 100, 100], 6.0, 0.3, 1);
-    let r = run(&w, 200);
+    let w = build(&[40, 40, 40], &[100, 100, 100], 6.0, 0.3, 1);
+    let r = run(&w, 500);
     for t in 0..3 {
         assert!(
             r.p[t] < 0.05,
@@ -80,13 +80,13 @@ fn a_real_panel_beats_random_genes_of_the_same_size() {
 fn a_panel_that_does_not_identify_its_type_fails_the_null() {
     // Types 0 and 1 are real. Type 2's markers are strewn across the whole marker cloud — they
     // pick out nothing.
-    let mut w = build(&[15, 15, 15], &[100, 100, 100], 6.0, 0.3, 2);
+    let mut w = build(&[40, 40, 40], &[100, 100, 100], 6.0, 0.3, 2);
     let mut rng = StdRng::seed_from_u64(99);
     for &(gi, _) in &w.type_markers[2].clone() {
         let anywhere = jitter(&[0f32; H], 6.0, &mut rng);
         w.feature_emb[gi as usize * H..(gi as usize + 1) * H].copy_from_slice(&anywhere);
     }
-    let r = run(&w, 200);
+    let r = run(&w, 500);
     assert!(
         r.p[0] < 0.05 && r.p[1] < 0.05,
         "the two honest panels must still clear the null: p = {:.3}, {:.3}",
@@ -103,18 +103,18 @@ fn a_panel_that_does_not_identify_its_type_fails_the_null() {
     );
 }
 
-/// **The winner's curse cancels.** A 3-marker type has a wobbly centroid and steals cells it has
+/// **The winner's curse cancels.** A 6-marker type has a wobbly centroid and steals cells it has
 /// no right to — but a *random* 3-marker panel is exactly as wobbly and steals just as many, so
 /// the comparison divides the advantage out. The small honest panel is therefore not punished for
 /// being small: it still clears its own null.
 #[test]
 fn a_small_but_honest_panel_is_not_punished_for_being_small() {
-    let w = build(&[20, 3], &[100, 100], 6.0, 0.3, 3);
-    let r = run(&w, 200);
-    assert_eq!(r.n_live, vec![20, 3]);
+    let w = build(&[40, 6], &[100, 100], 6.0, 0.3, 3);
+    let r = run(&w, 500);
+    assert_eq!(r.n_live, vec![40, 6]);
     assert!(
         r.p[1] < 0.05,
-        "3 markers that genuinely sit on their type must still beat 3 random ones \
+        "6 markers that genuinely sit on their type must still beat 6 random ones \
          (occupancy {:.3} vs null {:.3}, p = {:.3})",
         r.occupancy[1],
         r.null_occupancy[1],
@@ -126,8 +126,8 @@ fn a_small_but_honest_panel_is_not_punished_for_being_small() {
 /// and says so. Cells sitting squarely on a well-marked type do not.
 #[test]
 fn cell_p_flags_cells_that_any_panel_would_have_explained() {
-    let clean = run(&build(&[15, 15], &[100, 100], 6.0, 0.3, 4), 200);
-    let mush = run(&build(&[15, 15], &[100, 100], 0.5, 6.0, 4), 200);
+    let clean = run(&build(&[40, 40], &[100, 100], 6.0, 0.3, 4), 500);
+    let mush = run(&build(&[40, 40], &[100, 100], 0.5, 6.0, 4), 500);
     let mean = |r: &PanelNull| {
         let v: Vec<f32> = r.cell_p.iter().copied().filter(|x| !x.is_nan()).collect();
         v.iter().sum::<f32>() / v.len() as f32
@@ -147,8 +147,8 @@ fn cell_p_flags_cells_that_any_panel_would_have_explained() {
 /// cannot: the counts agree, while the cost — which is the statistic — separates them cleanly.
 #[test]
 fn occupancy_is_blind_where_cost_is_not() {
-    let w = build(&[15, 15, 15], &[100, 100, 100], 6.0, 0.3, 7);
-    let r = run(&w, 200);
+    let w = build(&[40, 40, 40], &[100, 100, 100], 6.0, 0.3, 7);
+    let r = run(&w, 500);
     for t in 0..3 {
         assert!(
             (r.occupancy[t] - r.null_occupancy[t]).abs() < 0.05,
@@ -169,14 +169,14 @@ fn occupancy_is_blind_where_cost_is_not() {
 /// The draws are keyed by `(seed, type, perm)`, not by rayon's scheduling, so a seed reproduces.
 #[test]
 fn seed_reproduces() {
-    let w = build(&[10, 10], &[60, 60], 3.0, 2.0, 5);
+    let w = build(&[30, 30], &[60, 60], 3.0, 2.0, 5);
     assert_eq!(run(&w, 50).p, run(&w, 50).p);
 }
 
 /// A type the embedding never trained (all-dead markers) cannot compete and cannot be tested.
 #[test]
 fn a_dead_type_is_not_tested() {
-    let mut w = build(&[15, 15], &[100, 100], 6.0, 0.3, 6);
+    let mut w = build(&[40, 40], &[100, 100], 6.0, 0.3, 6);
     for &(gi, _) in &w.type_markers[1].clone() {
         w.feature_emb[gi as usize * H..(gi as usize + 1) * H].fill(0.0);
     }

@@ -161,6 +161,12 @@ pub struct TypeQc {
 pub struct BootstrapResult {
     /// Number of types.
     pub c: usize,
+    /// Replicates that actually ran. **Not** `MarkerBootstrapConfig::n_boot`, which is only what
+    /// was *asked* for: a Ctrl+C leaves this smaller, and then every `support` below is a
+    /// fraction of *this* number. A support of 0.51 earned over 3 draws and one earned over 200
+    /// are not the same claim, and the log line that said so has long since scrolled away by the
+    /// time anyone opens the parquet — so it travels with the output.
+    pub n_draws: usize,
     /// `[n × c]` row-major: the fraction of replicates that assigned each cell to each type by
     /// **nearest centroid** — i.e. stability of the raw geometric call under panel resampling
     /// alone, before any clustering.
@@ -246,6 +252,19 @@ fn binom_half_upper_tail(m: usize, k: usize) -> f64 {
         acc += (ln_fact(m) - ln_fact(x) - ln_fact(m - x) - ln_denom).exp();
     }
     acc.min(1.0)
+}
+
+/// **The support statistic**, in one place.
+///
+/// `row` is a cell's distribution over the `c` types **and** the `unassigned` column, and the
+/// support is the largest entry of it — including `unassigned`, which is a legitimate outcome a
+/// cell's replicates can agree on.
+///
+/// This exists so the observed run and [`super::support_null`] cannot drift apart. They did: the
+/// null was taking the max over the *types only* while the shipped number took it over everything,
+/// so a p-value was being formed by comparing two different statistics.
+pub(super) fn label_support(row: &[f32]) -> f32 {
+    top_two(row).1
 }
 
 /// `(argmax, top share, runner-up share)` of a distribution.
@@ -411,25 +430,22 @@ pub fn run_marker_bootstrap(
     // Replicates are independent. Each is dominated by the *serial* Leiden pass inside
     // `coarse`, which left most cores idle when they ran one at a time — fanning out here
     // overlaps those stretches (the inner per-cell parallelism nests safely under rayon's
-    // work-stealing).
-    let draws: Vec<Draw> = (0..cfg.n_boot)
-        .into_par_iter()
-        .map(|b| -> Result<Draw> {
-            let mut centroids = vec![0f32; c * h];
-            panel.resample_into(feature_emb, h, seed, b, &mut centroids);
-            let (fine, gap) = assign_with_margin(cell_flat, n, &centroids, c, h, &panel.usable);
-            let shipped = match coarse {
-                Some(f) => f(b, &fine, &centroids)?,
-                None => None,
-            };
-            Ok(Draw {
-                fine,
-                gap,
-                centroids,
-                shipped,
-            })
+    // work-stealing). Ctrl+C keeps whatever finished; see `crate::stop::par_replicates`.
+    let draws: Vec<Draw> = crate::stop::par_replicates(cfg.n_boot, "marker bootstrap", |b| {
+        let mut centroids = vec![0f32; c * h];
+        panel.resample_into(feature_emb, h, seed, b, &mut centroids);
+        let (fine, gap) = assign_with_margin(cell_flat, n, &centroids, c, h, &panel.usable);
+        let shipped = match coarse {
+            Some(f) => f(b, &fine, &centroids)?,
+            None => None,
+        };
+        Ok(Draw {
+            fine,
+            gap,
+            centroids,
+            shipped,
         })
-        .collect::<Result<Vec<_>>>()?;
+    })?;
 
     // Tally. The fine call is read off every draw; the shipped label only off those the
     // pipeline could actually complete.
@@ -491,7 +507,7 @@ struct Draw {
 }
 
 /// Assign every cell to its nearest usable centroid, keeping how close the runner-up came.
-fn assign_with_margin(
+pub(super) fn assign_with_margin(
     cell_flat: &[f32],
     n: usize,
     centroids: &[f32],
@@ -586,7 +602,7 @@ fn summarize(s: Summary<'_>, cfg: &MarkerBootstrapConfig) -> BootstrapResult {
         for i in 0..n {
             let row = &cp[i * k..(i + 1) * k];
             let (best, p1, p2) = top_two(row);
-            support[i] = p1;
+            support[i] = p1; // == `label_support(row)`; kept inline, `best`/`p2` are needed too
             entropy[i] = -row
                 .iter()
                 .filter(|&&p| p > 0.0)
@@ -713,6 +729,7 @@ fn summarize(s: Summary<'_>, cfg: &MarkerBootstrapConfig) -> BootstrapResult {
 
     BootstrapResult {
         c,
+        n_draws,
         post,
         assign,
         dist,
@@ -755,7 +772,7 @@ fn median(x: &[f32]) -> f32 {
 /// `h ≈ 64` and coordinates of order 10, the accumulated relative error is ~1e-5, four orders
 /// below the ~1% margin these distances are actually compared at.
 #[inline]
-fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
+pub(super) fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
     a.iter()
         .zip(b)
         .map(|(&x, &y)| {

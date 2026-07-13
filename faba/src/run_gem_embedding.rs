@@ -24,7 +24,6 @@ use anyhow::Context;
 use candle_util::candle_core::Tensor;
 use data_beans::sparse_io_vector::ColumnAlignment;
 use graph_embedding_util::data::UnifiedData;
-use graph_embedding_util::stop::setup_stop_handler;
 use graph_embedding_util::{load_unified_data, FeatureNameKind, LoadUnifiedArgs};
 use log::info;
 use matrix_util::common_io::{basename, mkdir_parent};
@@ -270,7 +269,6 @@ fn run_gem_genes_bge(
         .to_device(args.runtime.device_no)
         .context("candle device init")?;
     info!("compute device = {:?}", dev);
-    let stop = setup_stop_handler();
 
     // Build a `FitConfig` for the CURRENT feature axis of `unified`, so the same
     // builder serves pass 1 (full post-HVG axis) and the post-QC re-fit (null
@@ -328,7 +326,6 @@ fn run_gem_genes_bge(
                 format!("{}.fisher_weights.parquet", args.out).into_boxed_str(),
             ),
             feature_network: None,
-            stop: Some(stop.clone()),
             feature_embedding_l2: 0.0,
             weight_decay: 0.0,
             max_grad_norm: args.train.max_grad_norm,

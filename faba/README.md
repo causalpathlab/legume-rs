@@ -126,19 +126,44 @@ faba <COMMAND> [OPTIONS]
 
 | Command | Purpose |
 |---------|---------|
+| **Feature profiling — BAM → per-cell features** ||
 | `dartseq` (`dart`, `m6a`) | Call DART-seq m6A sites by a WT-vs-MUT control contrast on C-to-T conversions |
 | `atoi` (`a2i`, `editing`) | Detect and quantify A-to-I RNA editing sites |
 | `apa` (`polya`)           | Quantify alternative polyadenylation sites per cell |
 | `genes` (`count-genes`)   | Count reads per gene (single-cell or bulk RNA-seq) |
 | `depth` (`rd`)            | Compute read depth over genomic intervals |
 | `snp` (`genotype`)        | Discover and genotype SNP variants from BAM pileup |
+| `all` (`pipeline`)        | Run the full profiling pipeline: SNP → genes → ATOI → APA → m6A |
+| **Embedding, trajectory, annotation** ||
+| `gem`                     | GEM: Geodesic Embedding + Motion — a joint cell/gene space with a velocity increment |
+| `annotate`                | Marker-set cell-type annotation of a `gem` run |
+| `lineage`                 | Velocity-oriented lineage + principal curves over a `gem` run |
+| `dyn-assoc`               | Bayesian between-branch modality contrast along a `lineage` |
+| **Inspection & reference** ||
 | `pwm`                     | Build a position weight matrix around genomic sites |
-| `pileup` (`inspect`)      | ASCII pileup plot for one gene's modification sites |
+| `pileup` (`inspect`)      | ASCII pileup, or a faceted Miami plot, for one gene |
 | `metagene` (`mg`)         | Metagene histogram of site positions across gene features |
-| `gem`                     | GEM: joint Gene + Epitranscriptomic Modification embedding |
-| `all` (`pipeline`)        | Run the full pipeline: SNP → genes → ATOI → APA → DART |
+| `plot`                    | Publication-style figure of a `lineage` trajectory over its 2D embedding |
+| `docs`                    | Print the method write-ups compiled into this binary |
 
 Run `faba <COMMAND> --help` for the detailed options of each subcommand.
+
+## Methods
+
+The method write-ups are **compiled into the binary** — `include_str!`, not files read at
+runtime — so they travel with a `cargo install`ed `faba` or one copied to a cluster with no
+checkout beside it, and the build fails if one of them goes missing.
+
+```sh
+faba docs                # list what there is
+faba docs annotation     # marker cell-type annotation, end to end
+faba docs profiling      # BAM -> per-cell features: m6A, A-to-I, APA, counts, SNPs
+faba docs grouping       # why the annotation pools cells into coarse clusters
+```
+
+The same files live in [`docs/`](docs/), which also carries the design notes for work that is
+planned but **not implemented** (kept separate on purpose — reading a plan as though it described
+the code is how people end up debugging things that were never built).
 
 ### Examples
 
