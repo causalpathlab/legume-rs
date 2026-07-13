@@ -304,6 +304,32 @@ fn the_credible_set_says_what_the_replicates_said() {
     );
 }
 
+/// **The `unassigned` column must never enter the set.** It is not a cell type, it has no name in
+/// `type_names`, and rendering it panicked (`label_of` indexing past the end) the moment a
+/// grouping produced enough uncalled replicates for it to win a slot — which `faba lineage` does
+/// routinely, since its MST nodes fail the FDR gate far more often than Leiden clusters do.
+///
+/// The mass still counts: the caller passes only the type columns while the shares stay shares of
+/// *all* replicates, so `unassigned` weight makes `coverage` harder to reach and the cell falls
+/// out as uncalled — which is the right answer, not `Erythroid/unassigned`.
+#[test]
+fn replicates_that_declined_to_call_do_not_become_a_label() {
+    // 3 types + an `unassigned` column holding 60% of the replicates.
+    let row = [0.25f32, 0.10, 0.05, 0.60];
+    let types = &row[..3];
+    // The types together hold only 40% — they cannot reach 80% coverage at any set size.
+    assert_eq!(
+        credible_set(types, 0.8, 3),
+        None,
+        "must fall out as uncalled"
+    );
+    // …and had we (wrongly) passed the whole row, `unassigned` (index 3) would win a slot.
+    assert_eq!(credible_set(&row, 0.8, 3), Some(vec![3, 0]));
+    // With the mass the other way round, the types carry it and no sentinel appears.
+    let row = [0.55f32, 0.30, 0.05, 0.10];
+    assert_eq!(credible_set(&row[..3], 0.8, 3), Some(vec![0, 1]));
+}
+
 /// **Past three, a set stops narrowing anything down.** A cell whose evidence is spread over four
 /// or more labels has no call, and dressing that up as `A/B/C/D` would launder "we don't know"
 /// as a finding. It abstains instead.

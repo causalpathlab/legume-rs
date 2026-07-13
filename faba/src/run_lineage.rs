@@ -178,21 +178,23 @@ pub struct LineageArgs {
     pub kmeans_iter: usize,
 
     #[arg(
-        long,
-        help = "[--markers] Stability bootstrap on the node calls: resample each type's marker \
-                panel with replacement AND re-derive the k-means grouping on every draw, then \
-                ship the consensus. Every node's name carries the fraction of resamples that \
-                agreed on it, and a cell whose call cannot hold up across them abstains. \
-                Without this, each node is named by a bare `argmin` over marker centroids — a \
-                point estimate with no error bar, which on a panel the embedding never trained \
-                can be decided by a ~1% distance margin"
+        long = "no-bootstrap-markers",
+        help = "[--markers] Turn OFF the stability bootstrap on the node calls and name each \
+                node by a bare point estimate. ON by default: each draw resamples every type's \
+                marker panel with replacement AND re-derives the k-means grouping, then the \
+                consensus is shipped, so a node's name carries the fraction of resamples that \
+                agreed on it. This matters most for --root-type, which picks the trajectory root \
+                as the highest-confidence node of a given type: without the bootstrap that \
+                `confidence` is a softmaxed test statistic rather than a reproducibility, and \
+                the whole trajectory hangs off it. Costs ~8 min at --marker-n-boot 200 (the \
+                replicate k-means has nothing to cache, unlike `faba annotate`'s kNN graph)"
     )]
-    pub bootstrap_markers: bool,
+    pub no_bootstrap_markers: bool,
 
     #[arg(
         long,
         default_value_t = 200,
-        help = "[--bootstrap-markers] Number of resamples"
+        help = "Bootstrap resamples on the node calls (--no-bootstrap-markers to disable)"
     )]
     pub marker_n_boot: usize,
 
@@ -473,7 +475,7 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
             num_perm: args.marker_num_perm,
             obo: args.marker_obo.as_deref(),
             label_cl: args.marker_label_cl.as_deref(),
-            bootstrap: args.bootstrap_markers.then_some(MarkerBootstrapConfig {
+            bootstrap: (!args.no_bootstrap_markers).then_some(MarkerBootstrapConfig {
                 n_boot: args.marker_n_boot,
                 abstain: Abstain::Support(args.marker_min_support),
                 set_coverage: 0.8,
