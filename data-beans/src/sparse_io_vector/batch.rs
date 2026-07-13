@@ -27,16 +27,14 @@ impl SparseIoVec {
         self._register_batches(
             feature_matrix,
             batch_membership,
-            |feature_matrix, batch_cells, parallel_insert| {
+            |feature_matrix, batch_cells, _inner_parallel| {
                 let columns = batch_cells
                     .iter()
                     .map(|&c| feature_matrix.column(c))
                     .collect::<Vec<_>>();
-                if parallel_insert {
-                    ColumnDict::<usize>::from_ndarray_views(columns, batch_cells.clone())
-                } else {
-                    ColumnDict::<usize>::from_ndarray_views_serial(columns, batch_cells.clone())
-                }
+                // instant-distance always builds via rayon internally, so there
+                // is no serial-insert variant to select.
+                ColumnDict::<usize>::from_ndarray_views(columns, batch_cells.clone())
             },
         )
     }
@@ -62,16 +60,14 @@ impl SparseIoVec {
         self._register_batches(
             feature_matrix,
             batch_membership,
-            |feature_matrix, batch_cells, parallel_insert| {
+            |feature_matrix, batch_cells, _inner_parallel| {
                 let columns = batch_cells
                     .iter()
                     .map(|&c| feature_matrix.column(c))
                     .collect::<Vec<_>>();
-                if parallel_insert {
-                    ColumnDict::<usize>::from_dvector_views(columns, batch_cells.clone())
-                } else {
-                    ColumnDict::<usize>::from_dvector_views_serial(columns, batch_cells.clone())
-                }
+                // instant-distance always builds via rayon internally, so there
+                // is no serial-insert variant to select.
+                ColumnDict::<usize>::from_dvector_views(columns, batch_cells.clone())
             },
         )
     }
