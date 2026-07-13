@@ -55,3 +55,6 @@ temp*
 # faba run/smoke-test output dirs (not source)
 faba/sim_out/
 faba/smoke_out/
+
+# local `make install` status marker
+.make-install-status
