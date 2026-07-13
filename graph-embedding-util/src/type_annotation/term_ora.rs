@@ -219,12 +219,13 @@ pub fn annotate_embeddings_ora(
         "clustered cells into {n_comm} communities (knn={}, res={})",
         cfg.knn, cfg.resolution
     );
-    // Each replicate re-partitions the *same* graph under a fresh Leiden seed. The graph itself
-    // is built once: the bootstrap resamples the marker panel, so the cell embedding it clusters
-    // is identical on every draw, and the only thing a rebuild would redraw is `hnsw_rs`'s
-    // OS-seeded layer RNG — approximation error in an ANN index, not uncertainty about the data.
-    // (Rebuilding it every time cost 135 s where reseeding Leiden costs 4 s, for the same
-    // discrimination: AUC 0.931 vs 0.943, support correlation 0.96.)
+    // Each replicate re-partitions the *same* graph under a fresh Leiden seed. The graph is built
+    // once and reused: the bootstrap resamples the marker panel, which drives the *scoring*, not
+    // the clustering embedding, so the embedding clustered here is identical on every draw. The
+    // graph is deterministic (seeded instant-distance), so rebuilding it per replicate would only
+    // reproduce the identical graph anyway — 135 s for nothing, where reseeding Leiden costs 4 s
+    // and probes the real within-run uncertainty (its choice among near-equal modularity optima):
+    // same discrimination, AUC 0.931 vs 0.943, support correlation 0.96.
     let regroup = |seed: u64| -> Result<Vec<usize>> { Ok(cluster_cells(&graph, n, cfg, seed)) };
     annotate_inner(
         input,
@@ -927,17 +928,15 @@ fn cluster_sizes(community: &[usize], n_comm: usize) -> Vec<usize> {
 /// Leiden communities over a cosine cell kNN graph (cells L2-normalized for the
 /// graph; gem `e_cell` is already unit, so this matches the assignment geometry).
 ///
-/// **This step is not reproducible, and `seed` cannot make it so.** The kNN graph comes from
-/// `hnsw_rs`, whose layer-assignment RNG is seeded from OS entropy with no API to set it
-/// (`hnsw_rs-0.3.4/src/hnsw.rs:328`), and Leiden is a stochastic local optimiser on top of a
-/// graph that therefore differs every run. Measured on 15,315 cord-blood cells at
-/// `--resolution 8`: four identical invocations gave 990 / 132 / 137 / 138 communities and
-/// agreed on only 83–94% of the final labels. The `seed` here still pins Leiden's own draws,
-/// which is worth doing, but it does not buy reproducibility.
+/// The kNN graph is now **deterministic** (matrix-util's seeded instant-distance backend), so this
+/// step reproduces run-to-run and `seed` pins Leiden on top of a fixed graph. Historically, under
+/// the old un-seedable `hnsw_rs` backend it was *not* reproducible: four identical invocations on
+/// 15,315 cord-blood cells at `--resolution 8` gave 990 / 132 / 137 / 138 communities, agreeing on
+/// only 83–94% of the labels. That cross-run instability is resolved.
 ///
-/// The remedy is not a deterministic clusterer — it is to stop trusting any single partition.
-/// [`MarkerBootstrapConfig::recluster`] calls this once per bootstrap replicate so the
-/// variation lands in the per-cell support, where it belongs.
+/// A single partition still should not be over-trusted: within a run, Leiden picks among near-equal
+/// modularity optima, so [`MarkerBootstrapConfig::recluster`] reseeds it once per bootstrap
+/// replicate and lets that partition-choice uncertainty land in the per-cell support.
 fn cell_knn_graph(cell_flat: &[f32], n: usize, h: usize, cfg: &TermOraConfig) -> Result<KnnGraph> {
     let mut cell_u = cell_flat.to_vec();
     super::score::l2_normalize_rows(&mut cell_u, n, h);
@@ -956,17 +955,15 @@ fn cell_knn_graph(cell_flat: &[f32], n: usize, h: usize, cfg: &TermOraConfig) ->
 ///
 /// The graph is built once and reused by every bootstrap replicate, and that is deliberate. The
 /// bootstrap resamples the *marker panel*; the cell embedding it clusters is identical on every
-/// draw, so the graph's input never changes. The only reason two builds differ is that `hnsw_rs`
-/// seeds its layer RNG from OS entropy — which is **approximation error in an ANN index**, not
-/// uncertainty about the data, and resampling it would only pay to re-randomise a nuisance.
+/// draw, so the graph's input never changes. The graph is also deterministic now (seeded
+/// instant-distance), so rebuilding it would reproduce the identical graph — nothing to gain.
 ///
 /// Leiden's `seed` is a different animal and *is* redrawn per replicate: modularity has many
-/// near-equal optima and which one the optimiser lands in is a real, load-bearing arbitrary
-/// choice — the same 15k cells have partitioned into anywhere from 132 to 990 communities across
-/// identical runs. Holding the partition fixed across replicates makes the bootstrap abstain on
-/// nothing (measured: 0% unassigned, and its support falls from AUC 0.93 to 0.69 at separating
+/// near-equal optima and which one the optimiser lands in is a real, load-bearing arbitrary choice.
+/// Holding the partition fixed across replicates makes the bootstrap abstain on nothing (measured
+/// on the fixed graph: 0% unassigned, and its support falls from AUC 0.93 to 0.69 at separating
 /// spurious calls), because a cluster's argmax will not flip when only the panel jiggles. The
-/// partition is where the instability lives, so the partition is what gets resampled.
+/// partition is where the within-run instability lives, so the partition is what gets resampled.
 fn cluster_cells(graph: &KnnGraph, n: usize, cfg: &TermOraConfig, seed: u64) -> Vec<usize> {
     super::layout::leiden_from_graph(graph, n, cfg.resolution, seed)
 }

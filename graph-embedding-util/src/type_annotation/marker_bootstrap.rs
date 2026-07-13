@@ -114,13 +114,12 @@ pub struct MarkerBootstrapConfig {
     /// Re-derive the cell clustering inside every resample, so the **pipeline's own
     /// stochasticity** is absorbed into the support alongside the marker panel's.
     ///
-    /// The kNN graph is built by `hnsw_rs`, whose layer-assignment RNG is seeded from OS
-    /// entropy with no API to set it (`hnsw.rs:328`), and Leiden is a stochastic local
-    /// optimiser on top of it — so two identical runs of this pipeline can disagree on ~10%
-    /// of cells and occasionally land in a wildly different partition. A label that moves
-    /// when nothing but the RNG moved is, by definition, not a robust label. Rather than
-    /// chase a deterministic clusterer, resample over the clustering and let the consensus
-    /// reject whatever the choice of partition was holding up.
+    /// The kNN graph is deterministic now (matrix-util's seeded instant-distance backend), so the
+    /// pipeline reproduces run-to-run. What reclustering absorbs is the clustering's *within-run*
+    /// arbitrariness: Leiden picks among near-equal modularity optima, so re-partitioning under a
+    /// fresh seed each replicate moves the cells that only ever sat on a partition boundary. A
+    /// label that flips when nothing but the partition seed moved is not a robust label. Rather
+    /// than trust one partition, resample it and let the consensus reject whatever it held up.
     pub recluster: bool,
 }
 

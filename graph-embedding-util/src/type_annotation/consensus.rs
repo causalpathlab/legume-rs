@@ -30,19 +30,18 @@
 //! formality; at `0.5` no single partition means much and the cluster-level outputs should be read
 //! as one draw among many, whatever we print.
 //!
-//! # What this does *not* fix
+//! # Cross-run reproducibility (now solved)
 //!
-//! **It does not make `community` reproducible between runs, and it was measured, not assumed.**
-//! Three runs of the same binary on the same data agree on `community` at ARI 0.93 with the old
-//! `--seed` draw and 0.91 with the medoid — i.e. unchanged. The reason is that all `B` partitions
-//! within one run are Leiden re-seeds of **one kNN graph**, and it is the *graph* that differs
-//! between runs (`hnsw_rs` seeds its layer RNG from OS entropy; measured edge Jaccard 0.91 between
-//! two builds of the same embedding). The medoid centres the seed ensemble; the graph noise sits
-//! outside it and dominates. The cure for that is an exact kNN graph, not a better choice of draw.
+//! `community` **is** reproducible between runs now. All `B` partitions within one run are Leiden
+//! re-seeds of **one kNN graph**, and that graph is deterministic (matrix-util's seeded
+//! instant-distance backend), so a second run rebuilds the identical graph and re-derives the
+//! identical partition. Under the old un-seedable `hnsw_rs` backend this was false — the graph
+//! differed by ~9% of edges between builds (edge Jaccard 0.91), and three runs agreed on
+//! `community` at only ARI 0.91–0.93. That source is gone.
 //!
-//! So read this module for what it is: the reported partition is the ensemble's centre rather than
-//! an arbitrary member of it, and it now arrives with a stability number attached. Cross-run
-//! reproducibility is a separate, unsolved problem.
+//! So read this module for what it is: within a run, Leiden's choice among near-equal modularity
+//! optima is still arbitrary, so the reported partition is the ensemble's centre (medoid) rather
+//! than an arbitrary member of it, and it arrives with a stability number attached.
 
 use super::term_ora::Partition;
 use rayon::prelude::*;
