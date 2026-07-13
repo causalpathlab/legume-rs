@@ -267,6 +267,11 @@ fn top_two(row: &[f32]) -> (usize, f32, f32) {
 ///
 /// `None` when it would take more than `max_len` labels to get there: at that point the set has
 /// stopped narrowing anything down, and printing it would launder "we don't know" as a finding.
+///
+/// `row` need not sum to 1: the caller passes only the *type* columns while the shares remain
+/// shares of every replicate, so any mass the replicates spent on `unassigned` is simply absent
+/// and makes `coverage` correspondingly harder to reach. That is the intended behaviour — a cell
+/// its replicates mostly declined to call should come out uncalled.
 fn credible_set(row: &[f32], coverage: f32, max_len: usize) -> Option<Vec<usize>> {
     let mut order: Vec<usize> = (0..row.len()).collect();
     order.sort_by(|&a, &b| row[b].total_cmp(&row[a]));
@@ -594,7 +599,14 @@ fn summarize(s: Summary<'_>, cfg: &MarkerBootstrapConfig) -> BootstrapResult {
             }
             // …and whether it survived or not, say what the replicates *did* say — unless even
             // that is more hedge than answer, in which case the cell has no call at all.
-            let set = credible_set(row, cfg.set_coverage, cfg.max_set_size).unwrap_or_default();
+            //
+            // **The set is over TYPES, not over the `unassigned` column** — but the shares are
+            // still shares of *all* the replicates, so the `unassigned` mass stays in the
+            // denominator and pushes the set toward not reaching coverage. A cell whose
+            // replicates mostly declined to call it therefore gets no call, rather than the
+            // nonsense set `Erythroid/unassigned`.
+            let set =
+                credible_set(&row[..c], cfg.set_coverage, cfg.max_set_size).unwrap_or_default();
             set_support[i] = set.iter().map(|&t| row[t]).sum();
             label_set.push(set);
         }

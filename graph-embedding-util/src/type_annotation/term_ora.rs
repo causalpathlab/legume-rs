@@ -36,7 +36,7 @@
 //!    near zero, so *two* of them outscore the 30 cells of the type that actually
 //!    fills the cluster. Anything that makes the groups small (a high
 //!    `--resolution`, or replacing the partition with per-cell neighbourhoods)
-//!    walks into this. See `docs/annotation-grouping.md`.
+//!    walks into this. See `faba/docs/annotation-grouping.md`.
 //! 5. **Over-representation** — per (cluster K, term T) the count
 //!    `a = #{c∈K : t(c)=T}` is tested against the hypergeometric null with
 //!    fixed margins `(N, m_T, n_K)`; the statistic `−ln P(X≥a)` is **calibrated
