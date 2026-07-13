@@ -323,6 +323,11 @@ impl LivePanel {
     /// A dead β row is a gene the embedding never learned; it carries no evidence about where
     /// its type sits, so it is not part of the panel we resample (the same rule
     /// `term_ora::term_centroids` applies).
+    ///
+    /// **Silent by design.** [`super::support_null`] builds one of these per permutation, inside
+    /// the rayon fan-out, and a `warn!` there would fire `P` times *and* funnel every worker
+    /// through the logger's mutex. The observed run reports the dropped types once, via
+    /// [`Self::warn_unusable`].
     pub(super) fn new(feature_emb: &[f32], type_markers: &[Vec<(u32, f32)>], h: usize) -> Self {
         let live: Vec<LiveMarkers> = type_markers
             .iter()
@@ -338,7 +343,28 @@ impl LivePanel {
             })
             .collect();
         let usable: Vec<bool> = live.iter().map(|m| m.len() >= MIN_LIVE_MARKERS).collect();
-        let dropped = usable.iter().filter(|&&u| !u).count();
+        Self { live, usable }
+    }
+
+    /// Name the types that cannot be bootstrapped, and refuse to run if *none* can.
+    ///
+    /// **Zero usable types is the "magnet" failure, and it must not be survivable.** With every
+    /// centroid a zero row and every `usable[t]` false, `nearest` never enters its update branch
+    /// and falls back on its `best = 0` initializer — so every cell in the dataset is called as
+    /// whichever type happens to be listed first in the marker file, at a perfectly stable
+    /// `support` of 1.0, and the run exits 0 with an annotation that looks confident and is
+    /// entirely fictional. It is reachable: a panel matched by gene *name* but never trained into
+    /// the embedding has no live β rows at all.
+    fn warn_unusable(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.usable.iter().any(|&u| u),
+            "not one of the {} marker type(s) has {MIN_LIVE_MARKERS} live markers in this \
+             embedding, so there is nothing to assign cells to. The marker genes were matched by \
+             name but never trained: re-run `faba gem --must-train-features <panel>` with THIS \
+             panel.",
+            self.live.len()
+        );
+        let dropped = self.usable.iter().filter(|&&u| !u).count();
         if dropped > 0 {
             log::warn!(
                 "{dropped} of {} type(s) have fewer than {MIN_LIVE_MARKERS} live markers and \
@@ -346,10 +372,10 @@ impl LivePanel {
                  allowed to win cells on evidence whose variance is unmeasurable. Train the \
                  panel into the embedding (`faba gem --must-train-features <panel>`) to bring \
                  them back.",
-                live.len()
+                self.live.len()
             );
         }
-        Self { live, usable }
+        Ok(())
     }
 
     /// Draw resample `b`: for each type, pick `|live(t)|` of its live markers **with
@@ -426,6 +452,7 @@ pub fn run_marker_bootstrap(
     let c = type_markers.len();
     let n = cell_flat.len() / h;
     let panel = LivePanel::new(feature_emb, type_markers, h);
+    panel.warn_unusable()?;
 
     // Replicates are independent. Each is dominated by the *serial* Leiden pass inside
     // `coarse`, which left most cores idle when they ran one at a time — fanning out here
@@ -506,6 +533,31 @@ struct Draw {
     shipped: Option<(Vec<usize>, usize)>,
 }
 
+/// Cell `i`'s nearest usable centroid, and how close the runner-up came.
+#[inline]
+fn nearest(cell: &[f32], centroids: &[f32], c: usize, h: usize, usable: &[bool]) -> (usize, f32) {
+    let (mut best, mut d1, mut d2) = (0usize, f32::INFINITY, f32::INFINITY);
+    for t in 0..c {
+        if !usable[t] {
+            continue;
+        }
+        let d = sq_dist(cell, &centroids[t * h..(t + 1) * h]);
+        if d < d1 {
+            d2 = d1;
+            d1 = d;
+            best = t;
+        } else if d < d2 {
+            d2 = d;
+        }
+    }
+    let gap = if d2.is_finite() {
+        d2.max(0.0).sqrt() - d1.max(0.0).sqrt()
+    } else {
+        f32::NAN
+    };
+    (best, gap)
+}
+
 /// Assign every cell to its nearest usable centroid, keeping how close the runner-up came.
 pub(super) fn assign_with_margin(
     cell_flat: &[f32],
@@ -517,30 +569,27 @@ pub(super) fn assign_with_margin(
 ) -> (Vec<usize>, Vec<f32>) {
     (0..n)
         .into_par_iter()
-        .map(|i| {
-            let cell = &cell_flat[i * h..(i + 1) * h];
-            let (mut best, mut d1, mut d2) = (0usize, f32::INFINITY, f32::INFINITY);
-            for t in 0..c {
-                if !usable[t] {
-                    continue;
-                }
-                let d = sq_dist(cell, &centroids[t * h..(t + 1) * h]);
-                if d < d1 {
-                    d2 = d1;
-                    d1 = d;
-                    best = t;
-                } else if d < d2 {
-                    d2 = d;
-                }
-            }
-            let gap = if d2.is_finite() {
-                d2.max(0.0).sqrt() - d1.max(0.0).sqrt()
-            } else {
-                f32::NAN
-            };
-            (best, gap)
-        })
+        .map(|i| nearest(&cell_flat[i * h..(i + 1) * h], centroids, c, h, usable))
         .unzip()
+}
+
+/// [`assign_with_margin`] without the margin — for callers that discard it.
+///
+/// The null passes run this `P × B` times (two *million* calls at `P = 10 000`, `B = 200`) and
+/// never look at the gaps, so materializing the `n`-cell gap vector each time is pure allocator
+/// churn. Same loop, one output.
+pub(super) fn assign_nearest(
+    cell_flat: &[f32],
+    n: usize,
+    centroids: &[f32],
+    c: usize,
+    h: usize,
+    usable: &[bool],
+) -> Vec<usize> {
+    (0..n)
+        .into_par_iter()
+        .map(|i| nearest(&cell_flat[i * h..(i + 1) * h], centroids, c, h, usable).0)
+        .collect()
 }
 
 struct Summary<'a> {

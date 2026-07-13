@@ -8,8 +8,11 @@
 //! panics on a second registration, and a workspace where one binary trains a model, then
 //! bootstraps an annotation, is exactly the shape that trips it.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+
+#[cfg(test)]
+mod tests;
 
 static STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
@@ -83,11 +86,94 @@ where
         "{what} was interrupted before a single replicate completed"
     );
     if done.len() < n {
-        log::warn!(
-            "{what} interrupted: {done} of {n} replicates completed; using those (estimates now \
-             resolve to ~1/{done}).",
-            done = done.len(),
-        );
+        interrupted(what, done.len(), n);
     }
     Ok(done)
+}
+
+/// Has the user already asked us to stop?
+///
+/// The flag **latches** — nothing ever clears it — so a stage that starts after an interrupt has
+/// landed will complete *zero* replicates. Such a stage must check this and decline to run, rather
+/// than discover it the hard way and report "interrupted before a single replicate completed" as
+/// an **error**: that error propagates, and the interrupt then destroys the output of every stage
+/// that had already finished — the precise outcome this module exists to prevent.
+#[must_use]
+pub fn stopped() -> bool {
+    stop_flag().load(Ordering::Relaxed)
+}
+
+/// [`par_replicates`], but **folding** each replicate into a running accumulator instead of
+/// keeping it. Returns `(replicates completed, the accumulator)`, or `None` if not one completed.
+///
+/// Same interrupt semantics, same argument. Reach for this one when a replicate's output is large
+/// and only its *aggregate* is ever read: `par_replicates` holds all `n` outputs at once, which is
+/// fine for a 200-draw bootstrap and ruinous for a 10 000-draw permutation null. The support null
+/// emits two `n`-cell vectors per shuffle — **1.8 GB live at `P = 10 000`** — and then sums them
+/// and throws them away. Folded, the same run holds one accumulator per thread.
+///
+/// `combine` must be **associative**: rayon splits the range into subtrees and combines them in
+/// whatever order they finish, never in index order. It need not be commutative, and there is no
+/// identity to supply.
+///
+/// Returning `None` rather than erroring on an empty run is deliberate — see [`stopped`]. The
+/// caller knows what a zero-replicate result means for *its* statistic; this combinator does not.
+pub fn par_reduce_replicates<A, F, C>(
+    n: usize,
+    what: &str,
+    f: F,
+    combine: C,
+) -> anyhow::Result<Option<(usize, A)>>
+where
+    A: Send,
+    F: Fn(usize) -> anyhow::Result<A> + Sync + Send,
+    C: Fn(A, A) -> A + Sync + Send,
+{
+    reduce_in(&stop_flag(), n, what, f, combine)
+}
+
+/// [`par_reduce_replicates`] against a caller-supplied flag.
+///
+/// The public entry point reads the process-wide `OnceLock` flag, which no test can set without
+/// poisoning every other test in the binary — so the interrupt path, and the `done` count that
+/// becomes the denominator of every support-null p-value, would otherwise be untestable.
+fn reduce_in<A, F, C>(
+    stop: &AtomicBool,
+    n: usize,
+    what: &str,
+    f: F,
+    combine: C,
+) -> anyhow::Result<Option<(usize, A)>>
+where
+    A: Send,
+    F: Fn(usize) -> anyhow::Result<A> + Sync + Send,
+    C: Fn(A, A) -> A + Sync + Send,
+{
+    use rayon::prelude::*;
+    let done = AtomicUsize::new(0);
+    let acc = (0..n)
+        .into_par_iter()
+        .filter(|_| !stop.load(Ordering::Relaxed))
+        .map(|i| {
+            let a = f(i)?;
+            done.fetch_add(1, Ordering::Relaxed);
+            anyhow::Ok(a)
+        })
+        // `try_reduce_with`, not `try_reduce`: no identity to invent, and none to get subtly
+        // wrong. `None` is exactly the case where every replicate was filtered out.
+        .try_reduce_with(|a, b| Ok(combine(a, b)))
+        .transpose()?;
+
+    let done = done.load(Ordering::Relaxed);
+    if done < n {
+        interrupted(what, done, n);
+    }
+    Ok(acc.map(|a| (done, a)))
+}
+
+fn interrupted(what: &str, done: usize, n: usize) {
+    log::warn!(
+        "{what} interrupted: {done} of {n} replicates completed; using those (estimates now \
+         resolve to ~1/{done})."
+    );
 }
