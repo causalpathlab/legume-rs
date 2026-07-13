@@ -65,11 +65,14 @@ pub fn l2_simd(a: &[f32], b: &[f32]) -> f32 {
 
 impl Point for VecPoint {
     /// Called once per candidate pair inside instant-distance's HNSW traversal.
-    /// This routes through the runtime-dispatched [`l2_sq`]; the dispatch is a
-    /// cached indirect call (portable across CPUs, the chosen trade-off) rather
-    /// than a statically-inlined kernel.
+    ///
+    /// Returns the **squared** distance: the traversal only ever *compares*
+    /// distances, and squaring is monotone, so the per-pair `sqrt` is skipped
+    /// here and applied only to the handful of neighbours actually returned (see
+    /// `ColumnDict::search_indices`). Routes through the runtime-dispatched
+    /// [`l2_sq`] — a cached indirect call, the portability trade-off.
     #[inline]
     fn distance(&self, other: &Self) -> f32 {
-        l2_simd(&self.data, &other.data)
+        l2_sq(&self.data, &other.data)
     }
 }
