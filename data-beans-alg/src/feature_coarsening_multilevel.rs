@@ -73,6 +73,8 @@ impl FeatureKnnContext {
         if d == 0 {
             return Err(anyhow::anyhow!("sketch has zero features"));
         }
+        // `search_others` returns exactly this many neighbours (self excluded),
+        // clamped to the number of other features available.
         let knn_query = knn_k.min(d.saturating_sub(1)).max(1);
 
         let sketch_sd = sketch_ds.transpose();

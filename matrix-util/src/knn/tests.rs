@@ -60,8 +60,8 @@ fn approx_recall_vs_exact() {
     let mut hits = 0usize;
     let mut total = 0usize;
     for q in (0..points.len()).step_by(23) {
-        // search_others counts self in the budget, so request k+1 to net k.
-        let (got, _) = dict.search_others(&q, k + 1).unwrap();
+        // search_others returns exactly k *others* (self excluded).
+        let (got, _) = dict.search_others(&q, k).unwrap();
         let truth = brute_others(&points, q, k);
         let truth: std::collections::HashSet<usize> = truth.into_iter().collect();
         hits += got.iter().filter(|i| truth.contains(i)).count();
@@ -78,8 +78,8 @@ fn exact_path_is_perfect() {
     let dict = dict_from(&points);
     let k = 8;
     for q in 0..points.len() {
-        // request k+1 (self counted in budget) to net exactly k neighbours.
-        let (got, dists) = dict.search_others(&q, k + 1).unwrap();
+        // search_others returns exactly k *others* (self excluded).
+        let (got, dists) = dict.search_others(&q, k).unwrap();
         let truth = brute_others(&points, q, k);
         assert_eq!(
             got, truth,
