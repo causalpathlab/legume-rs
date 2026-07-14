@@ -155,6 +155,20 @@ pub struct AnnotateArgs {
     pub num_perm: usize,
 
     #[arg(
+        long = "min-markers",
+        default_value_t = 3,
+        help = "Drop a cell type with fewer than this many matched markers",
+        long_help = "Minimum matched markers before a cell type is allowed to compete.\n\n\
+            A type below this is not weakly supported, it is UNSUPPORTED: an enrichment\n\
+            walk over one or two genes is noise, and the winner's curse then hands the\n\
+            cluster to whichever noisy panel happened to spike.\n\n\
+            A dropped type keeps its column in every output. It simply never wins a\n\
+            cluster.\n\n\
+            Floored at 2: you cannot resample a single point"
+    )]
+    pub min_markers: usize,
+
+    #[arg(
         long = "fdr-alpha",
         default_value_t = 0.10,
         help = "FDR α for the Q-matrix threshold"
@@ -420,6 +434,21 @@ pub struct AnnotateProjectionArgs {
         help = "RNG seed (clustering + permutation null)"
     )]
     pub seed: u64,
+
+    #[arg(
+        long = "min-markers",
+        default_value_t = 3,
+        help = "Drop a cell type with fewer than this many usable markers",
+        long_help = "Minimum usable markers before a cell type is allowed to compete.\n\n\
+            A type below this is not weakly located, it is UNLOCATED. The mean of one or\n\
+            two points has no direction worth the name, and a centroid built from too few\n\
+            markers lands short — near the middle of the cell cloud, where it is close to\n\
+            EVERY cell at once. It does not compete weakly; it becomes a magnet and takes\n\
+            the dataset.\n\n\
+            A dropped type keeps its column in every output. It simply never wins a cell.\n\n\
+            Floored at 2: you cannot resample a single point"
+    )]
+    pub min_markers: usize,
 
     #[arg(
         long = "no-idf",

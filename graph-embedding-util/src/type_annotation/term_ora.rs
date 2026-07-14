@@ -51,12 +51,13 @@
 use super::marker_bootstrap::{
     run_marker_bootstrap, BootstrapResult, CoarseConsensus, MarkerBootstrapConfig,
 };
-use super::markers::parse_and_match_markers;
+use super::markers::{parse_and_match_markers, MarkerSets};
 use super::output::{write_label_tsvs, write_marker_embeddings};
 use super::score::{argmax_rows, row_major};
 use super::{n_communities, InputEmbeddings, UNASSIGNED};
 use crate::null_call::live_row;
 use anyhow::{Context, Result};
+use enrichment::consensus::MIN_LIVE_MARKERS;
 use log::{info, warn};
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
@@ -101,6 +102,14 @@ pub struct TermOraConfig {
     pub seed: u64,
     /// Permutation draws calibrating the over-representation statistic.
     pub n_perm: usize,
+    /// Minimum markers carrying a **live** feature row before a cell type is allowed to compete.
+    ///
+    /// A type below this is not weakly located, it is *unlocated*: the mean of one or two points has
+    /// no direction, and a centroid built from too few markers lands short — near the middle of the
+    /// cell cloud, where it is close to every cell and becomes a magnet rather than a weak
+    /// competitor. Such a type is dropped: it keeps its column in every output but can never win a
+    /// cell. Floored at 2 (you cannot resample a single point).
+    pub min_markers: usize,
     /// Prune outlier cell→term assignments (distance > median + `assign_mad`·MAD).
     pub assign_qc: bool,
     /// MAD multiplier for the assignment-distance outlier gate.
@@ -144,6 +153,7 @@ impl Default for TermOraConfig {
             resolution: 1.0,
             seed: 42,
             n_perm: 500,
+            min_markers: 3,
             assign_qc: true,
             assign_mad: 2.5,
             fdr_alpha: 0.1,
@@ -351,6 +361,20 @@ fn annotate_inner(
     // Zeroing restores the `live_row` contract, and every consumer below inherits the fix.
     // See `super::hub_call`.
     super::hub_call::zero_hub_parked(&mut beta_flat, cell_emb, g, h);
+
+    // …and now drop the types the panel cannot locate at all. Emptying a type's marker list is the
+    // single lever: `term_centroids` then leaves it at the origin, `assign_nearest` excludes the
+    // origin, and the bootstrap's live panel, the panel null and the support null all see a type
+    // with nothing in it. One decision, inherited everywhere.
+    let mut type_markers = type_markers;
+    drop_unsupported_types(
+        &beta_flat,
+        &type_names,
+        &mut type_markers,
+        h,
+        cfg.min_markers,
+    )?;
+
     let (centroids, n_live) = term_centroids(&beta_flat, &type_markers, h); // [c × h] row-major
     report_marker_liveness(&type_names, &type_markers, &n_live);
 
@@ -774,6 +798,80 @@ pub(super) fn term_centroids(
 /// A dead marker still *matches* the panel and counts toward the "matched entries" tally,
 /// but contributes nothing to its type's centroid — so a panel that is mostly dead looks
 /// exactly like a healthy one from the outside. Say so, and name the flag that fixes it.
+/// Drop the cell types the panel cannot locate: those left with fewer than `min_markers` markers
+/// carrying a live feature row.
+///
+/// **A type is not "weakly supported", it is unlocated.** Its centroid is the mean of whatever
+/// survived, and the mean of one or two points has no direction worth the name — the sampling
+/// variance of a mean of one is not small, it is *undefined*. Worse, a centroid built from too few
+/// markers tends to land short, and a short centroid sits near the middle of the cell cloud, where
+/// it is close to every cell at once: it does not compete weakly, it becomes a **magnet** and takes
+/// the dataset. The honest outcome is that it does not compete at all.
+///
+/// The drop is done by **emptying the type's marker list**, which is the one lever every consumer
+/// downstream already respects: [`term_centroids`] leaves an empty type at the origin,
+/// [`assign_nearest`] excludes the origin, and the marker bootstrap, the panel null and the support
+/// null all build their pools from these same lists.
+///
+/// The type keeps its name and its column in every output — it simply never wins a cell. Silently
+/// renumbering the types would be worse than the disease.
+fn drop_unsupported_types(
+    beta_flat: &[f32],
+    type_names: &[Box<str>],
+    type_markers: &mut MarkerSets,
+    h: usize,
+    min_markers: usize,
+) -> Result<usize> {
+    // Never below the bootstrap's own invariant: you cannot resample a single point.
+    let bar = min_markers.max(MIN_LIVE_MARKERS);
+
+    let mut dropped: Vec<(usize, usize, usize)> = Vec::new(); // (type, matched, live)
+    for (t, markers) in type_markers.iter_mut().enumerate() {
+        let matched = markers.len();
+        let live = markers
+            .iter()
+            .filter(|&&(gi, _)| live_row(beta_flat, gi as usize, h).is_some())
+            .count();
+        if live < bar {
+            dropped.push((t, matched, live));
+            markers.clear();
+        }
+    }
+    if dropped.is_empty() {
+        return Ok(0);
+    }
+
+    let preview: Vec<String> = dropped
+        .iter()
+        .take(12)
+        .map(|&(t, matched, live)| format!("{} ({live}/{matched})", type_names[t]))
+        .collect();
+    let tail = if dropped.len() > preview.len() {
+        format!(", … {} more", dropped.len() - preview.len())
+    } else {
+        String::new()
+    };
+    warn!(
+        "dropping {} cell type(s) with fewer than {bar} live markers — they are not weakly \
+         located, they are UNLOCATED, and a centroid built from too few markers lands short, near \
+         the middle of the cell cloud, where it is close to every cell and becomes a magnet. \
+         Shown as live/matched: {}{tail}. They keep their columns in the outputs but can no longer \
+         win a cell. If this is unexpected, the markers are missing from the embedding rather than \
+         from the data — re-run the fit with `--must-train-features <panel>`.",
+        dropped.len(),
+        preview.join(", "),
+    );
+
+    let surviving = type_markers.iter().filter(|m| !m.is_empty()).count();
+    anyhow::ensure!(
+        surviving >= 2,
+        "only {surviving} cell type(s) have {bar} or more live markers — there is nothing left to \
+         tell apart. Lower --min-markers, or (far more likely) the marker panel was never trained \
+         into this embedding: re-run the fit with `--must-train-features <panel>`."
+    );
+    Ok(dropped.len())
+}
+
 fn report_marker_liveness(
     type_names: &[Box<str>],
     type_markers: &[Vec<(u32, f32)>],

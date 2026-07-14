@@ -25,7 +25,7 @@
 //! restandardized ES ≥ observed restandardized ES.
 
 use crate::cellproj::{label_cells, LabelWithConfidence};
-use crate::consensus::UNASSIGNED;
+use crate::consensus::{MIN_LIVE_MARKERS, UNASSIGNED};
 use crate::es::{rank_descending, weighted_ks_es};
 use crate::fdr::bh_fdr;
 use crate::gene_strata::GeneStrata;
@@ -74,6 +74,14 @@ pub struct AnnotateConfig {
     pub q_softmax_temperature: f32,
     pub min_confidence: f32,
     pub seed: u64,
+    /// Minimum markers a celltype needs before it is allowed to compete.
+    ///
+    /// A celltype whose panel barely matched the data is not weakly supported, it is *unsupported*:
+    /// a KS walk over two genes is noise, and the winner's curse hands the cluster to whichever
+    /// noisy panel happened to spike. Such a celltype is dropped — its column stays in every output
+    /// but its enrichment score is zero, so it can never clear `build_q_matrix`'s `es > 0` gate.
+    /// Floored at 2 (you cannot resample a single point).
+    pub min_markers: usize,
     /// Draw the row-randomization null **within gene-abundance strata**, so a null gene set
     /// reproduces each panel's own abundance profile (GOseq; see [`crate::gene_strata`]).
     ///
@@ -102,6 +110,7 @@ impl Default for AnnotateConfig {
             q_softmax_temperature: 1.0,
             min_confidence: 0.0,
             seed: 42,
+            min_markers: 3,
             stratify_null: true,
             bootstrap: None,
         }
@@ -174,10 +183,45 @@ pub fn annotate(
     let hit_weights: Vec<Vec<f32>> = (0..c)
         .map(|cc| (0..g).map(|gi| markers_gc[(gi, cc)].max(0.0)).collect())
         .collect();
-    let marker_sizes: Vec<usize> = hit_weights
+    let mut hit_weights = hit_weights;
+    let mut marker_sizes: Vec<usize> = hit_weights
         .iter()
         .map(|hw| hw.iter().filter(|&&w| w > 0.0).count())
         .collect();
+
+    // Drop the celltypes the panel cannot support. Zeroing the column is the one lever every
+    // consumer already respects: `weighted_ks_es` returns 0.0 for an empty hit vector, and a zero
+    // ES can never clear `build_q_matrix`'s `es_std > 0` gate — so the type keeps its column in
+    // every output and simply never wins a cluster.
+    {
+        let bar = config.min_markers.max(MIN_LIVE_MARKERS);
+        let dropped: Vec<String> = (0..c)
+            .filter(|&cc| marker_sizes[cc] < bar)
+            .map(|cc| format!("{} ({})", celltype_names[cc], marker_sizes[cc]))
+            .collect();
+        if !dropped.is_empty() {
+            for cc in 0..c {
+                if marker_sizes[cc] < bar {
+                    hit_weights[cc].iter_mut().for_each(|w| *w = 0.0);
+                    marker_sizes[cc] = 0;
+                }
+            }
+            log::warn!(
+                "dropping {} celltype(s) with fewer than {bar} matched markers — an enrichment \
+                 walk over one or two genes is noise, and the winner's curse hands the cluster to \
+                 whichever noisy panel happened to spike. Shown as name (markers): {}. They keep \
+                 their columns in the outputs but can no longer win a cluster.",
+                dropped.len(),
+                dropped.join(", "),
+            );
+            let surviving = marker_sizes.iter().filter(|&&m| m >= bar).count();
+            anyhow::ensure!(
+                surviving >= 2,
+                "only {surviving} celltype(s) have {bar} or more matched markers — there is nothing \
+                 left to tell apart. Check that the marker file's gene names match the data's."
+            );
+        }
+    }
 
     // Observed specificity and ranked orderings per topic.
     let specificity_obs = compute_specificity(&inputs.profile_gk, config.specificity);

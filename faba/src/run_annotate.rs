@@ -105,6 +105,21 @@ pub struct AnnotateArgs {
     pub num_perm: usize,
 
     #[arg(
+        long = "min-markers",
+        default_value_t = 3,
+        help = "Drop a cell type with fewer than this many usable markers",
+        long_help = "Minimum usable markers before a cell type is allowed to compete.\n\n\
+            A type below this is not weakly located, it is UNLOCATED. The mean of one or\n\
+            two points has no direction worth the name, and a centroid built from too few\n\
+            markers lands short — near the middle of the cell cloud, where it is close to\n\
+            EVERY cell at once. It does not compete weakly; it becomes a magnet and takes\n\
+            the dataset.\n\n\
+            A dropped type keeps its column in every output. It simply never wins a cell.\n\n\
+            Floored at 2: you cannot resample a single point"
+    )]
+    pub min_markers: usize,
+
+    #[arg(
         long = "no-assign-qc",
         help = "Disable pruning of high-distance cell→term assignments"
     )]
@@ -322,6 +337,7 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
         resolution: args.resolution,
         seed: args.seed,
         n_perm: args.num_perm,
+        min_markers: args.min_markers,
         assign_qc: !args.no_assign_qc,
         assign_mad: args.assign_mad,
         fdr_alpha: args.fdr_alpha,
