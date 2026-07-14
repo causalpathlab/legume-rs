@@ -82,7 +82,8 @@ pub use output::write_label_tsvs;
 
 /// The "this cell has no call" sentinel, shared by the firm path and the marker bootstrap.
 /// (`usize::MAX`, so it is never a valid term index and any `t < c` test excludes it.)
-pub(super) const UNASSIGNED: usize = usize::MAX;
+/// Defined in `enrichment::consensus` so the raw-count bootstrap agrees on it.
+pub(super) use enrichment::consensus::UNASSIGNED;
 
 /// Number of communities in a partition (`community[i]` = cell `i`'s group id). At least 1,
 /// so an all-in-one-cluster partition is still a partition.

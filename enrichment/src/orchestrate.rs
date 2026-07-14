@@ -25,8 +25,10 @@
 //! restandardized ES ≥ observed restandardized ES.
 
 use crate::cellproj::{label_cells, LabelWithConfidence};
+use crate::consensus::UNASSIGNED;
 use crate::es::{rank_descending, weighted_ks_es};
 use crate::fdr::bh_fdr;
+use crate::marker_bootstrap::{run_cluster_bootstrap, ClusterBootstrap, EnrichmentBootstrapConfig};
 use crate::null::permute_indices;
 use crate::q_matrix::build_q_matrix;
 use crate::specificity::{compute_specificity, SpecificityMode};
@@ -72,6 +74,14 @@ pub struct AnnotateConfig {
     pub q_softmax_temperature: f32,
     pub min_confidence: f32,
     pub seed: u64,
+    /// When set, the shipped per-cluster call is the consensus of a **marker bootstrap**
+    /// ([`crate::marker_bootstrap`]) rather than a single pass over one panel: each celltype's
+    /// panel is resampled with replacement, the ES re-walked and the FDR re-called, so every call
+    /// carries the support it earned across resamples and an unreproducible one abstains.
+    /// `None` ⇒ the point-estimate path, unchanged.
+    ///
+    /// The library default is `None`; senna's CLI turns it **on**, as `faba annotate` does.
+    pub bootstrap: Option<EnrichmentBootstrapConfig>,
 }
 
 impl Default for AnnotateConfig {
@@ -85,6 +95,7 @@ impl Default for AnnotateConfig {
             q_softmax_temperature: 1.0,
             min_confidence: 0.0,
             seed: 42,
+            bootstrap: None,
         }
     }
 }
@@ -101,6 +112,11 @@ pub struct AnnotateOutputs {
     pub qvalue_kc: Mat,
     pub cell_annotation_nc: Mat,
     pub argmax_labels: Vec<LabelWithConfidence>,
+    /// The marker bootstrap's per-**cluster** consensus, when `config.bootstrap` was set. When it
+    /// is present, `cell_annotation_nc` and `argmax_labels` are *derived from it* (broadcast to
+    /// cells), not from the single-pass `q_kc` — so the shipped `confidence` is a resampling
+    /// frequency rather than a softmaxed test statistic.
+    pub bootstrap: Option<ClusterBootstrap>,
 }
 
 /// Run the full bipartite enrichment annotation pipeline.
@@ -261,6 +277,13 @@ pub fn annotate(
     let b_perm = config.num_sample_perm;
     let mut perm_z_kc: Option<Mat> = None;
 
+    // The pooled permuted z's, per celltype, **kept** (sorted ascending) rather than dropped:
+    // the marker bootstrap scores each of its draws against this same frozen pool. Rebuilding it
+    // per draw would be `b_perm × n_boot × K × C` ES walks — see `marker_bootstrap`'s module doc
+    // on why it is frozen, and why `num_sample_perm == 0` is the exact alternative.
+    // Empty ⇒ the bootstrap falls back to exact row-randomization counts.
+    let mut pooled_null: Vec<Vec<f32>> = Vec::new();
+
     if b_perm == 0 {
         // Fallback: row-randomization p-value. Recount with the second pass.
         let counts: Vec<Vec<u32>> = (0..c)
@@ -404,6 +427,7 @@ pub fn annotate(
         // the correlation correction. Count-based p then compares observed
         // z (gene-level scale) against permutation z-scores (perm-self scale).
         let total_pool = (b_perm * k) as f32;
+        pooled_null.reserve(c);
         for cc in 0..c {
             let mut pool: Vec<f32> = Vec::with_capacity(b_perm * k);
             for es_raw in &perm_es_raw {
@@ -417,6 +441,10 @@ pub fn annotate(
                 let n_ge = pool.iter().filter(|&&v| v >= obs_z).count() as f32;
                 pvalue[(kk, cc)] = (n_ge + 1.0) / (total_pool + 1.0);
             }
+            // Sorted once so the bootstrap can binary-search the tail instead of rescanning
+            // `b_perm × K` values for every one of its `n_boot × K × C` lookups.
+            pool.sort_by(f32::total_cmp);
+            pooled_null.push(pool);
         }
     }
 
@@ -442,14 +470,43 @@ pub fn annotate(
         config.q_softmax_temperature,
     );
 
-    // Cell-level posterior + labels.
-    let (posterior, labels) = label_cells(
+    // Cell-level posterior + labels — the single-pass point estimate.
+    let (mut posterior, mut labels) = label_cells(
         &inputs.cell_membership_nk,
         &q_mat,
         &inputs.cell_names,
         celltype_names,
         config.min_confidence,
     );
+
+    // The stability bootstrap. When it runs, its consensus REPLACES the point estimate above: a
+    // cluster whose call cannot survive resampling of its own marker panel should not ship that
+    // call with a softmaxed `confidence` of 0.98 beside it.
+    let bootstrap = match config.bootstrap.as_ref() {
+        None => None,
+        Some(bcfg) => {
+            let boot = run_cluster_bootstrap(
+                &ranked_per_k,
+                markers_gc,
+                &pooled_null,
+                g,
+                config.fdr_alpha,
+                config.q_softmax_temperature,
+                config.seed,
+                bcfg,
+            )?;
+            let (bp, bl) = broadcast_to_cells(
+                &boot,
+                &inputs.cell_membership_nk,
+                &inputs.cell_names,
+                celltype_names,
+                &q_mat,
+            );
+            posterior = bp;
+            labels = bl;
+            Some(boot)
+        }
+    };
 
     Ok(AnnotateOutputs {
         q_kc: q_mat,
@@ -460,5 +517,91 @@ pub fn annotate(
         qvalue_kc: qvalue,
         cell_annotation_nc: posterior,
         argmax_labels: labels,
+        bootstrap,
     })
+}
+
+/// Push the per-cluster consensus down onto the cells.
+///
+/// `cell_membership_nk` is one-hot on this path, so a cell's cluster is the column it fires on and
+/// **its label is its cluster's label**. The per-cell posterior becomes the cluster's *bootstrap*
+/// distribution over celltypes, and the reported confidence becomes `cluster_label_support` — the
+/// fraction of resamples that agreed — rather than a softmax over one panel's test statistics.
+///
+/// A cell whose cluster id is out of range (the sentinel for "not clustered") stays unassigned, as
+/// it already did.
+fn broadcast_to_cells(
+    boot: &ClusterBootstrap,
+    cell_membership_nk: &Mat,
+    cell_names: &[Box<str>],
+    celltype_names: &[Box<str>],
+    q_mat: &Mat,
+) -> (Mat, Vec<LabelWithConfidence>) {
+    let n = cell_membership_nk.nrows();
+    let k = cell_membership_nk.ncols();
+    let c = boot.c;
+    let width = c + 1; // the consensus rows carry an `unassigned` column
+
+    // Where the bootstrap and the single-pass call disagree, say so. This is the disagreement the
+    // point estimate would otherwise have hidden behind a confident-looking q.
+    for kk in 0..k {
+        let top_q = (0..c)
+            .max_by(|&a, &b| q_mat[(kk, a)].total_cmp(&q_mat[(kk, b)]))
+            .filter(|&cc| q_mat[(kk, cc)] > 0.0);
+        let con = boot.consensus.label[kk];
+        if let Some(tq) = top_q {
+            if con != tq {
+                let con_name = if con == UNASSIGNED {
+                    crate::UNASSIGNED_LABEL
+                } else {
+                    &celltype_names[con]
+                };
+                log::warn!(
+                    "cluster {kk}: single-pass FDR calls '{}' but only {:.0}% of bootstrap \
+                     resamples agreed — shipping '{}' (support {:.2})",
+                    celltype_names[tq],
+                    100.0 * boot.consensus.support[kk],
+                    con_name,
+                    boot.consensus.support[kk],
+                );
+            }
+        }
+    }
+
+    let mut posterior = Mat::zeros(n, c);
+    let mut labels: Vec<LabelWithConfidence> = Vec::with_capacity(n);
+
+    for (i, cell_name) in cell_names.iter().enumerate().take(n) {
+        // The one-hot cluster this cell fires on, if any.
+        let kk = (0..k).find(|&kk| cell_membership_nk[(i, kk)] > 0.0);
+        let Some(kk) = kk else {
+            labels.push(LabelWithConfidence {
+                cell_name: cell_name.clone(),
+                label: crate::UNASSIGNED_LABEL.into(),
+                confidence: 0.0,
+            });
+            continue;
+        };
+
+        // The type columns only: any mass the resamples spent on `unassigned` is simply absent, so
+        // the row sums to less than 1 exactly when the bootstrap declined to call. That is honest.
+        let row = &boot.consensus.post[kk * width..(kk + 1) * width];
+        for cc in 0..c {
+            posterior[(i, cc)] = row[cc];
+        }
+
+        let t = boot.consensus.label[kk];
+        labels.push(LabelWithConfidence {
+            cell_name: cell_name.clone(),
+            label: if t == UNASSIGNED {
+                crate::UNASSIGNED_LABEL.into()
+            } else {
+                celltype_names[t].clone()
+            },
+            // `cluster_label_support`: a resampling frequency, not a softmaxed statistic.
+            confidence: boot.consensus.support[kk],
+        });
+    }
+
+    (posterior, labels)
 }

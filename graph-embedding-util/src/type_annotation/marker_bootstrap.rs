@@ -48,50 +48,21 @@
 use super::UNASSIGNED;
 use crate::null_call::live_row;
 use anyhow::Result;
-use rand::rngs::SmallRng;
-use rand::{RngExt, SeedableRng};
+use rand::RngExt;
 use rayon::prelude::*;
+
+pub(super) use enrichment::consensus::label_support;
+/// The vote-tally half of the bootstrap — how a distribution over resampled winners becomes a
+/// label, a credible set, or a refusal. It knows nothing about embeddings, so it lives in
+/// `enrichment`, where the raw-count marker bootstrap (`enrichment::marker_bootstrap`) shares it.
+/// One definition of "what counts as agreement", used by both paths.
+pub use enrichment::consensus::Abstain;
+use enrichment::consensus::{
+    keyed_rng, summarize_consensus, top_two, AbstainConfig, Consensus, MIN_LIVE_MARKERS,
+};
 
 #[cfg(test)]
 mod tests;
-
-/// Live markers a type needs before it is allowed to compete for cells.
-///
-/// **You cannot bootstrap a single point.** Resampling a one-element panel with replacement
-/// always returns that same element, so such a type's centroid never moves and it comes out
-/// looking *perfectly* stable — the exact opposite of the truth, and it would then win cells
-/// with full confidence. The sampling variance of a mean of one is not zero, it is *unknown*.
-/// A type located by a single surviving marker is not located, so it does not compete; it is
-/// named in a warning and left at zero occupancy instead.
-const MIN_LIVE_MARKERS: usize = 2;
-
-/// When a cell's top label is allowed to stand.
-///
-/// These ask genuinely different questions, and the difference matters:
-///
-/// * [`Self::Support`] asks **"is the top label probable enough to act on?"** — a fixed bar on
-///   its share of the replicates. Simple, but the bar is not scale-free: with `C` types, chance
-///   agreement is `1/C`, so `0.5` sits at 3× chance on a 6-type panel and 12× chance on a
-///   24-type one. The *same* flag is a different test on different panels, which makes their
-///   abstention rates incomparable.
-/// * [`Self::Separable`] asks **"can the top label even be told apart from the runner-up?"** —
-///   an exact sign test, with no magic number and no dependence on `C`. Among the `m` replicates
-///   that picked one of the two leading labels, each is a coin flip if the two are equally
-///   probable, so `n₁ ~ Binomial(m, ½)` and its upper tail is the p-value.
-///
-/// Note what `Separable` does *not* do: it says nothing about whether the winner is *likely*,
-/// only that it is distinguishable from second place. Its power grows with `n_boot`, so more
-/// replicates resolve more cells — correct (more evidence, finer resolution), but it means a
-/// 51/49 cell will eventually be called given enough draws. Whichever you pick, the honest
-/// output for a cell whose leaders are inseparable is not a shrug but a **set** — see
-/// [`CoarseConsensus::label_set`].
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub enum Abstain {
-    /// Call only if the top label won at least this fraction of the replicates.
-    Support(f32),
-    /// Call only if the top label beat the runner-up by more than resampling noise, at this α.
-    Separable(f64),
-}
 
 /// Tunables for [`run_marker_bootstrap`].
 #[derive(Clone, Debug)]
@@ -221,88 +192,13 @@ pub struct CoarseConsensus {
     pub n_comm: Vec<usize>,
 }
 
-impl Abstain {
-    /// Does the top label (share `p1`, runner-up `p2`) survive, out of `b` replicates?
-    fn allows(self, p1: f32, p2: f32, b: usize) -> bool {
-        match self {
-            Self::Support(min) => p1 >= min,
-            Self::Separable(alpha) => {
-                let (n1, n2) = (
-                    (p1 * b as f32).round() as usize,
-                    (p2 * b as f32).round() as usize,
-                );
-                binom_half_upper_tail(n1 + n2, n1) < alpha
-            }
-        }
+/// The abstention triple, lifted out of the embedding-specific [`MarkerBootstrapConfig`].
+fn abstain_cfg(cfg: &MarkerBootstrapConfig) -> AbstainConfig {
+    AbstainConfig {
+        abstain: cfg.abstain,
+        set_coverage: cfg.set_coverage,
+        max_set_size: cfg.max_set_size,
     }
-}
-
-/// `P(X ≥ k)` for `X ~ Binomial(m, ½)` — the exact sign test. Computed in log space so `m` in
-/// the hundreds is safe, and summed from the far tail inward so the small terms land first.
-fn binom_half_upper_tail(m: usize, k: usize) -> f64 {
-    use statrs::function::gamma::ln_gamma;
-    if m == 0 {
-        return 1.0; // nobody voted for either: nothing to separate
-    }
-    let ln_fact = |x: usize| ln_gamma(x as f64 + 1.0);
-    let ln_denom = m as f64 * std::f64::consts::LN_2;
-    let mut acc = 0f64;
-    for x in (k.min(m)..=m).rev() {
-        acc += (ln_fact(m) - ln_fact(x) - ln_fact(m - x) - ln_denom).exp();
-    }
-    acc.min(1.0)
-}
-
-/// **The support statistic**, in one place.
-///
-/// `row` is a cell's distribution over the `c` types **and** the `unassigned` column, and the
-/// support is the largest entry of it — including `unassigned`, which is a legitimate outcome a
-/// cell's replicates can agree on.
-///
-/// This exists so the observed run and [`super::support_null`] cannot drift apart. They did: the
-/// null was taking the max over the *types only* while the shipped number took it over everything,
-/// so a p-value was being formed by comparing two different statistics.
-pub(super) fn label_support(row: &[f32]) -> f32 {
-    top_two(row).1
-}
-
-/// `(argmax, top share, runner-up share)` of a distribution.
-fn top_two(row: &[f32]) -> (usize, f32, f32) {
-    let (mut best, mut p1, mut p2) = (0usize, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for (t, &p) in row.iter().enumerate() {
-        if p > p1 {
-            p2 = p1;
-            p1 = p;
-            best = t;
-        } else if p > p2 {
-            p2 = p;
-        }
-    }
-    (best, p1.max(0.0), p2.max(0.0))
-}
-
-/// The smallest set of labels whose shares sum to `coverage`, largest first — a credible set.
-///
-/// `None` when it would take more than `max_len` labels to get there: at that point the set has
-/// stopped narrowing anything down, and printing it would launder "we don't know" as a finding.
-///
-/// `row` need not sum to 1: the caller passes only the *type* columns while the shares remain
-/// shares of every replicate, so any mass the replicates spent on `unassigned` is simply absent
-/// and makes `coverage` correspondingly harder to reach. That is the intended behaviour — a cell
-/// its replicates mostly declined to call should come out uncalled.
-fn credible_set(row: &[f32], coverage: f32, max_len: usize) -> Option<Vec<usize>> {
-    let mut order: Vec<usize> = (0..row.len()).collect();
-    order.sort_by(|&a, &b| row[b].total_cmp(&row[a]));
-    let mut acc = 0f32;
-    let mut out = Vec::new();
-    for t in order.into_iter().take(max_len.max(1)) {
-        out.push(t);
-        acc += row[t];
-        if acc >= coverage {
-            return Some(out);
-        }
-    }
-    None
 }
 
 /// One type's live markers: `(row index into feature_emb, IDF weight, index into
@@ -633,49 +529,21 @@ fn summarize(s: Summary<'_>, cfg: &MarkerBootstrapConfig) -> BootstrapResult {
     }
     let post = fine_post;
 
-    // The shipped label's consensus, over the replicates the pipeline could complete.
-    let coarse = coarse_post.map(|mut cp| {
-        let drawn = n_comm.len().max(1) as f32;
-        for v in &mut cp {
-            *v /= drawn;
-        }
-        let k = c + 1;
-        let unassigned_col = c;
-        let ln_k = (k as f32).ln();
+    // The shipped label's consensus, over the replicates the pipeline could complete. The tally →
+    // (label, set, support, entropy) reduction is `enrichment::consensus`, shared with the
+    // raw-count bootstrap so there is one definition of what counts as agreement.
+    let coarse = coarse_post.map(|cp| {
         let n_drawn = n_comm.len().max(1);
-        let (mut label, mut support, mut entropy) =
-            (vec![UNASSIGNED; n], vec![0f32; n], vec![0f32; n]);
-        let mut label_set: Vec<Vec<usize>> = Vec::with_capacity(n);
-        let mut set_support = vec![0f32; n];
-        for i in 0..n {
-            let row = &cp[i * k..(i + 1) * k];
-            let (best, p1, p2) = top_two(row);
-            support[i] = p1; // == `label_support(row)`; kept inline, `best`/`p2` are needed too
-            entropy[i] = -row
-                .iter()
-                .filter(|&&p| p > 0.0)
-                .map(|&p| p * p.ln())
-                .sum::<f32>()
-                / ln_k;
-            // A label survives only if the replicates actually agreed on it.
-            if best != unassigned_col && cfg.abstain.allows(p1, p2, n_drawn) {
-                label[i] = best;
-            }
-            // …and whether it survived or not, say what the replicates *did* say — unless even
-            // that is more hedge than answer, in which case the cell has no call at all.
-            //
-            // **The set is over TYPES, not over the `unassigned` column** — but the shares are
-            // still shares of *all* the replicates, so the `unassigned` mass stays in the
-            // denominator and pushes the set toward not reaching coverage. A cell whose
-            // replicates mostly declined to call it therefore gets no call, rather than the
-            // nonsense set `Erythroid/unassigned`.
-            let set =
-                credible_set(&row[..c], cfg.set_coverage, cfg.max_set_size).unwrap_or_default();
-            set_support[i] = set.iter().map(|&t| row[t]).sum();
-            label_set.push(set);
-        }
+        let Consensus {
+            post,
+            label,
+            label_set,
+            support,
+            set_support,
+            entropy,
+        } = summarize_consensus(cp, n, c + 1, n_drawn, &abstain_cfg(cfg));
         CoarseConsensus {
-            post: cp,
+            post,
             label_set,
             set_support,
             label,
@@ -828,15 +696,4 @@ pub(super) fn sq_dist(a: &[f32], b: &[f32]) -> f32 {
             d * d
         })
         .sum()
-}
-
-/// An RNG keyed by `(seed, draw, type)` — so a resample depends only on *which* one it is,
-/// never on how rayon scheduled it. That is what makes `--seed` reproduce.
-fn keyed_rng(seed: u64, draw: usize, item: u64) -> SmallRng {
-    let mut k = seed
-        ^ (draw as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ item.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-    k = (k ^ (k >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    k = (k ^ (k >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    SmallRng::seed_from_u64(k ^ (k >> 31))
 }

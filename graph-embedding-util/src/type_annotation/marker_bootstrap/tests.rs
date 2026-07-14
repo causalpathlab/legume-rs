@@ -1,4 +1,7 @@
 use super::*;
+// The consensus primitives now live in `enrichment::consensus` (shared with the raw-count
+// bootstrap); these tests still exercise them from here, which is what keeps the move honest.
+use enrichment::consensus::{binom_half_upper_tail, credible_set};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
