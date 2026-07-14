@@ -36,12 +36,18 @@
 //! * the **weight multiset disperses** — multiplicities 0, 1, 2, 3… concentrate the walk on fewer
 //!   genes, and that dispersion scales as `1/√|M_c|`, so it hits *small panels hardest*.
 //!
-//! If the null tracked neither (the observed row-randomization null uses binary weights at a fixed
-//! size — harmless there as a constant offset, not harmless here), small panels would get
+//! and a third holds even before any resampling:
+//!
+//! * the **abundance profile** — a uniform draw over all genes is ~30% undetected genes, which sort
+//!   to the bottom of every ranking and can never be enriched, so it is trivially easy to beat, and
+//!   easy to beat by an amount that differs per celltype. See [`crate::gene_strata`].
+//!
+//! If the null tracked none of the three, small panels and well-expressed panels would get
 //! systematically inflated `es_std` and the bootstrap would **manufacture the very winner's curse
 //! it exists to remove**. So [`null_moments`] scatters *the draw's own weight multiset* onto a
-//! random gene set *of the draw's own size*. `restandardization_does_not_favour_small_panels` in
-//! the tests is the regression guard, and it is the reason that function exists.
+//! random gene set of *the draw's own size* drawn *within the draw's own abundance strata*. The
+//! `the_null_tracks_*` tests are the regression guards, and they are the reason that function
+//! exists.
 //!
 //! # The one approximation
 //!
@@ -60,6 +66,7 @@ use crate::consensus::{
 };
 use crate::es::weighted_ks_es;
 use crate::fdr::bh_fdr;
+use crate::gene_strata::GeneStrata;
 use crate::q_matrix::build_q_matrix;
 use crate::Mat;
 use anyhow::Result;
@@ -148,6 +155,7 @@ struct Draw {
 pub fn run_cluster_bootstrap(
     ranked_per_k: &[Vec<u32>],
     markers_gc: &Mat,
+    strata: &GeneStrata,
     pooled_null: &[Vec<f32>],
     g: usize,
     fdr_alpha: f32,
@@ -197,6 +205,7 @@ pub fn run_cluster_bootstrap(
             ranked_per_k,
             &live,
             &usable,
+            strata,
             pooled_null,
             g,
             k,
@@ -278,6 +287,7 @@ fn one_draw(
     ranked_per_k: &[Vec<u32>],
     live: &[Vec<(u32, f32)>],
     usable: &[bool],
+    strata: &GeneStrata,
     pooled_null: &[Vec<f32>],
     g: usize,
     k: usize,
@@ -292,7 +302,8 @@ fn one_draw(
 
     // Scratch, reused across celltypes within this replicate.
     let mut hit_buf = vec![0f32; g];
-    let mut pool: Vec<u32> = (0..g as u32).collect();
+    let mut scratch = strata.scratch();
+    let mut drawn: Vec<(u32, f32)> = Vec::new();
 
     for cc in 0..c {
         if !usable[cc] {
@@ -319,8 +330,11 @@ fn one_draw(
             // `weighted_ks_es` needs no change to handle it.
             hit_buf[gi as usize] += w;
         }
-        // The draw's own weight multiset, in the draw's own effective size.
-        let weights: Vec<f32> = touched.iter().map(|&gi| hit_buf[gi as usize]).collect();
+        // The draw's own (gene, summed weight) multiset, in the draw's own effective size.
+        let resampled: Vec<(u32, f32)> = touched
+            .iter()
+            .map(|&gi| (gi, hit_buf[gi as usize]))
+            .collect();
 
         // --- observed ES for this draw --------------------------------------------------------
         let es_col: Vec<f32> = (0..k)
@@ -332,16 +346,19 @@ fn one_draw(
             hit_buf[gi as usize] = 0.0;
         }
 
-        // --- the null, matched to THIS draw's size and weight multiset -------------------------
+        // --- the null, matched to THIS draw's size, weights AND abundance profile --------------
+        let profile = strata.profile_of(&resampled);
         let mut null_rng = keyed_rng(seed ^ BOOT_NULL_STREAM, b, cc as u64);
         let (mean, sd, count_ge) = null_moments(
             ranked_per_k,
-            &weights,
+            strata,
+            &profile,
+            resampled.len(),
             &es_col,
-            g,
             cfg.boot_num_draws,
             &mut hit_buf,
-            &mut pool,
+            &mut scratch,
+            &mut drawn,
             &mut null_rng,
         );
 
@@ -394,45 +411,46 @@ fn one_draw(
     })
 }
 
-/// Efron–Tibshirani restandardization moments, **matched on both the draw's effective size and its
-/// weight multiset** — see the module doc for why neither may be dropped.
+/// Efron–Tibshirani restandardization moments, **matched on the draw's effective size, its weight
+/// multiset, and its abundance profile** — see the module doc for why the first two may not be
+/// dropped, and [`crate::gene_strata`] for the third.
 ///
-/// Scatters `weights` onto `weights.len()` uniformly-random genes, `b_rand` times, and walks the ES
-/// against every cluster's ranking. Also counts, for free, how often the null beat `es_obs` — which
-/// is the exact row-randomization p-value when there is no permutation pool to score against.
+/// `profile` is the resampled draw's own abundance profile (per stratum, the weights it put there),
+/// so the null reproduces all three at once: same number of genes, same weights, same abundance
+/// distribution. Walks the ES against every cluster's ranking `b_rand` times, and counts for free
+/// how often the null beat `es_obs` — the exact row-randomization p-value when there is no
+/// permutation pool to score against.
 ///
-/// `hit_buf` and `pool` are caller-owned scratch (`hit_buf` must arrive all-zero and leaves
-/// all-zero) so a 200-draw bootstrap does not allocate `G` floats a million times.
+/// `hit_buf` and `scratch` are caller-owned (`hit_buf` must arrive all-zero and leaves all-zero) so
+/// a 200-draw bootstrap does not allocate `G` floats a million times.
 #[allow(clippy::too_many_arguments)]
 fn null_moments(
     ranked_per_k: &[Vec<u32>],
-    weights: &[f32],
+    strata: &GeneStrata,
+    profile: &[Vec<f32>],
+    n_hit: usize,
     es_obs: &[f32],
-    g: usize,
     b_rand: usize,
     hit_buf: &mut [f32],
-    pool: &mut [u32],
+    scratch: &mut [Vec<u32>],
+    drawn: &mut Vec<(u32, f32)>,
     rng: &mut impl RngExt,
 ) -> (Vec<f32>, Vec<f32>, Vec<u32>) {
     let k = ranked_per_k.len();
-    let n_hit = weights.len();
     let mut mean = vec![0f32; k];
     let mut m2 = vec![0f32; k];
     let mut count_ge = vec![0u32; k];
 
-    if n_hit == 0 || n_hit >= g || b_rand == 0 {
+    if n_hit == 0 || b_rand == 0 {
         // Nothing to standardize against; an SD of 1 leaves the raw ES untouched rather than
         // dividing by zero.
         return (mean, vec![1.0; k], count_ge);
     }
 
     for draw in 0..b_rand {
-        // Partial Fisher–Yates: we only need the first `n_hit` of the permutation, and a full
-        // shuffle of G would cost more than the ES walks it feeds.
-        for j in 0..n_hit {
-            let r = rng.random_range(j..g);
-            pool.swap(j, r);
-            hit_buf[pool[j] as usize] = weights[j];
+        strata.draw_matched(profile, scratch, drawn, rng);
+        for &(gi, w) in drawn.iter() {
+            hit_buf[gi as usize] = w;
         }
         for kk in 0..k {
             let es = weighted_ks_es(&ranked_per_k[kk], hit_buf);
@@ -444,8 +462,8 @@ fn null_moments(
             m2[kk] += (es - prev) * (es - new);
             mean[kk] = new;
         }
-        for j in 0..n_hit {
-            hit_buf[pool[j] as usize] = 0.0;
+        for &(gi, _) in drawn.iter() {
+            hit_buf[gi as usize] = 0.0;
         }
     }
 

@@ -242,6 +242,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         q_softmax_temperature: args.q_temperature,
         min_confidence: args.min_confidence,
         seed: args.seed,
+        stratify_null: !args.no_gene_strata,
         // ON by default, as in `faba annotate`. A single pass over one marker panel always
         // returns a winner, and returns it with a softmaxed `confidence` that says nothing
         // about whether the panel could have said otherwise.
