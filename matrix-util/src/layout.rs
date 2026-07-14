@@ -73,6 +73,8 @@ fn rows_as_contiguous(m: &Mat) -> Vec<Vec<f32>> {
 use crate::knn::metric::l2_sq as sq_dist;
 
 pub struct PhateArgs {
+    /// Diffusion time. `0` = auto-select at the von-Neumann-entropy knee (PHATE's
+    /// `t='auto'`); a positive value fixes it.
     pub t: usize,
     pub knn: usize,
     pub alpha: f32,
@@ -85,7 +87,7 @@ pub struct PhateArgs {
 impl Default for PhateArgs {
     fn default() -> Self {
         Self {
-            t: 20,
+            t: 0, // auto (von Neumann entropy knee)
             knn: 5,
             alpha: 40.0,
             mds_iter: 300,
@@ -103,10 +105,9 @@ pub fn phate_layout_2d(data: &Mat, args: &PhateArgs) -> Mat {
     }
     let knn = args.knn.clamp(1, n - 1);
     info!(
-        "PHATE start: n={} points, features={}, t={}, knn={}, α={}",
+        "PHATE start: n={} points, features={}, knn={}, α={} (t resolved below)",
         n,
         data.ncols(),
-        args.t,
         knn,
         args.alpha
     );
@@ -163,15 +164,30 @@ pub fn phate_layout_2d(data: &Mat, args: &PhateArgs) -> Mat {
         }
     }
 
+    // Diffusion time: auto-select at the von-Neumann-entropy knee (PHATE's `t='auto'`)
+    // when `args.t == 0`, else honour the fixed value. A fixed, too-large `t`
+    // over-diffuses and collapses the manifold onto its principal curve. The VNE is taken
+    // over the singular values of the Markov operator `P`, exactly as reference PHATE does.
+    let t = if args.t == 0 {
+        auto_t_vne(p_mat.singular_values().as_slice(), 100)
+    } else {
+        args.t
+    }
+    .max(1);
+    info!(
+        "PHATE 4/6: diffusion M = P^{t} ({})",
+        if args.t == 0 {
+            "auto t, von-Neumann-entropy knee"
+        } else {
+            "fixed"
+        }
+    );
+
     // Exact diffusion M = P^t by repeated squaring. P is row-stochastic and
     // NON-symmetric, so an SVD-based `U Σ^t V^T` power is mathematically wrong
     // (that identity needs a normal matrix) — it corrupted the diffusion and
     // collapsed the embedding. Exact power is O(n³ log t), fine at PHATE's n≲10³.
-    info!(
-        "PHATE 4/6: diffusion M = P^{} (repeated squaring)",
-        args.t.max(1)
-    );
-    let m_mat = matrix_power(&p_mat, args.t.max(1));
+    let m_mat = matrix_power(&p_mat, t);
 
     info!("PHATE 5/6: potential distance + classical MDS init");
     let log_m = build_nn_matrix(n, |j| {
@@ -288,6 +304,83 @@ fn smacof_2d(delta: &Mat, y_init: &Mat, max_iter: usize, tol: f32) -> Mat {
     prog_bar.finish_and_clear();
 
     y
+}
+
+/// PHATE's `t='auto'`: pick the diffusion time at the knee of the von Neumann entropy
+/// curve of the diffusion operator's spectrum `spec` (the singular values of `P`). As `t`
+/// grows the small values (noise directions) vanish first, so the entropy
+/// `H(t) = −Σ pᵢ log pᵢ` (with `pᵢ = σᵢᵗ / Σ σⱼᵗ`) drops steeply then levels off; the knee
+/// is where denoising gives way to collapsing real signal. Returns `t ∈ [1, t_max]`.
+fn auto_t_vne(spec: &[f32], t_max: usize) -> usize {
+    // Drop the (near-)zero tail that never contributes; keep the scale (do not clamp) so
+    // the leading singular value ≥ 1 concentrates the distribution as `t` grows.
+    let lam: Vec<f64> = spec
+        .iter()
+        .map(|&x| (x as f64).abs())
+        .filter(|&x| x > 1e-12)
+        .collect();
+    if lam.len() < 3 || t_max < 3 {
+        return 1;
+    }
+    // H(t) via incremental powers λᵗ = λᵗ⁻¹·λ (no repeated powi).
+    let mut pw = lam.clone(); // λ¹
+    let mut h = Vec::with_capacity(t_max);
+    for _ in 0..t_max {
+        let z: f64 = pw.iter().sum::<f64>().max(1e-300);
+        let mut ent = 0.0;
+        for &v in &pw {
+            let p = v / z + f64::EPSILON;
+            ent -= p * p.ln();
+        }
+        h.push(ent);
+        for (p, &l) in pw.iter_mut().zip(&lam) {
+            *p *= l;
+        }
+    }
+    // Knee index is 0-based over t = 1..=t_max, so the diffusion time is index + 1.
+    (find_knee_point(&h) + 1).clamp(1, t_max)
+}
+
+/// Index of the knee of a 1-D curve `y`: the split `k` minimizing the summed
+/// least-squares residual of a line fit to `y[..=k]` plus one to `y[k..]` (the
+/// two-segment fit PHATE's `find_knee_point` uses).
+fn find_knee_point(y: &[f64]) -> usize {
+    let n = y.len();
+    if n < 3 {
+        return 0;
+    }
+    let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+    let (mut best, mut best_err) = (1usize, f64::INFINITY);
+    for k in 1..n - 1 {
+        let e = line_fit_sse(&x[..=k], &y[..=k]) + line_fit_sse(&x[k..], &y[k..]);
+        if e < best_err {
+            best_err = e;
+            best = k;
+        }
+    }
+    best
+}
+
+/// Sum of squared residuals of the ordinary least-squares line fit `y ≈ m·x + b`.
+fn line_fit_sse(x: &[f64], y: &[f64]) -> f64 {
+    let n = x.len() as f64;
+    let sx: f64 = x.iter().sum();
+    let sy: f64 = y.iter().sum();
+    let sxx: f64 = x.iter().map(|v| v * v).sum();
+    let sxy: f64 = x.iter().zip(y).map(|(a, b)| a * b).sum();
+    let det = n * sxx - sx * sx;
+    if det.abs() < 1e-12 {
+        return 0.0;
+    }
+    let m = (n * sxy - sx * sy) / det;
+    let b = (sy - m * sx) / n;
+    x.iter()
+        .zip(y)
+        .map(|(a, c)| {
+            let r = c - (m * a + b);
+            r * r
+        })
+        .sum()
 }
 
 /// Exact matrix power `M^exp` by repeated squaring.

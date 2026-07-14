@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "faba"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "approx",
@@ -3464,7 +3464,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-util"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "approx",
