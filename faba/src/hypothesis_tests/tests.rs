@@ -117,7 +117,7 @@ fn bootstrap_ci_brackets_a_clear_positive_mean() {
     let mut rng = SmallRng::seed_from_u64(1);
     let (se, lo, hi) = bootstrap_mean_ci(&x, 500, 0.05, &mut rng);
     assert!(lo > 0.0 && hi > lo, "CI [{lo}, {hi}] should clear 0");
-    assert!(se >= 0.0 && se < 0.1, "SE should be small, got {se}");
+    assert!((0.0..0.1).contains(&se), "SE should be small, got {se}");
     assert!(mean(&x) > lo && mean(&x) < hi, "CI brackets the mean");
 }
 

@@ -33,10 +33,9 @@ pub(super) fn l2_sq_kernel(a: &[f32], b: &[f32]) -> f32 {
         }
     }
 
-    let mut sum = 0.0f32;
-    for l in 0..LANES {
-        sum += acc[l];
-    }
+    // Horizontal reduction of the lanes; folds left, so the sum order (and the
+    // f32 result) matches the hand-rolled index loop this replaced.
+    let mut sum: f32 = acc.iter().sum();
     for (x, y) in a_chunks.remainder().iter().zip(b_chunks.remainder()) {
         let d = x - y;
         sum += d * d;

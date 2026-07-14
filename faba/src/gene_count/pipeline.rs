@@ -29,36 +29,11 @@ pub fn run_simple(
     let mut all_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
     let cell_call = args.cell_qc.params();
     let umi_tag = args.umi_dedup_tag();
-    let mito_keys = crate::pipeline_util::mito_gene_keys(&records, &args.mito_chr);
-    info!(
-        "{} mitochondrial gene(s) on {} ({})",
-        mito_keys.len(),
-        args.mito_chr,
-        if args.keep_mito {
-            "kept in matrix"
-        } else {
-            "excluded from matrix"
-        }
-    );
 
-    // Biotype + mito quantification gate: count/cell-call on all biotypes, restrict
-    // only the quantified output + pooled gene ids. Mirrors `faba all`'s quantify_gene.
-    let selected_gene_keys: Option<rustc_hash::FxHashSet<Box<str>>> = if args.gene_type.is_empty() {
-        None
-    } else {
-        let target: genomic_data::gff::GeneType = args.gene_type.clone().into();
-        Some(
-            records
-                .iter()
-                .filter(|r| r.gene_type == target)
-                .map(format_gene_key)
-                .collect(),
-        )
-    };
-    let quantify_gene = |gk: &str| -> bool {
-        (args.keep_mito || !mito_keys.contains(gk))
-            && selected_gene_keys.as_ref().is_none_or(|s| s.contains(gk))
-    };
+    // Count/cell-call on all biotypes; the gate narrows only the quantified output
+    // and the pooled gene ids. Same object `faba all` and the modality QC use.
+    let gate =
+        crate::pipeline_util::GeneGate::new(&records, &args.gene_type, args.mito_qc.params());
 
     for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
         let njobs = records.len() as u64;
@@ -81,16 +56,28 @@ pub fn run_simple(
             .flatten()
             .collect();
 
-        // Cell calling (barcode QC) + gene nnz filter (no splice split here, so
-        // the unspliced track is empty).
-        let (passing_genes, passing_cells) = crate::pipeline_util::qc_passing_keys(
+        // Cell call + mito cell filter + QC artifacts, in the one shared place.
+        // No splice split here, so the unspliced track is empty.
+        let bq = crate::pipeline_util::qc_one_batch(
             &gene_level_stats,
             &[],
-            args.row_nnz_cutoff,
+            &gate,
             0,
             args.column_nnz_cutoff,
             &cell_call,
-        );
+            Some(crate::pipeline_util::QcArtifacts {
+                dir: &args.output,
+                batch_name,
+            }),
+        )?;
+        let passing_cells = bq.passing_cells;
+
+        // Gene nnz filter, then the quantification gate.
+        let passing_genes: rustc_hash::FxHashSet<Box<str>> =
+            crate::pipeline_util::passing_genes_from_stats(&bq.gene_stats, args.row_nnz_cutoff, 0)
+                .into_iter()
+                .filter(|gk| gate.quantify(gk))
+                .collect();
         info!(
             "{}: {} genes x {} cells passed QC (cell-filter {:?})",
             batch_name,
@@ -99,23 +86,6 @@ pub fn run_simple(
             cell_call.filter
         );
 
-        // Mitochondrial QC: report per-cell MT fraction (from full pre-filter
-        // counts), optionally drop high-MT cells, and exclude MT genes from the
-        // matrix unless --keep-mito.
-        let mt_stats =
-            crate::pipeline_util::mito_cell_stats(&[&gene_level_stats], &passing_cells, &mito_keys);
-        crate::pipeline_util::write_mt_qc(&args.output, batch_name, &mt_stats)?;
-        let passing_cells = crate::pipeline_util::apply_mito_filter(
-            passing_cells,
-            &mt_stats,
-            args.max_mito_frac,
-            args.no_mito_cell_qc,
-        );
-        let passing_genes: rustc_hash::FxHashSet<Box<str>> = passing_genes
-            .into_iter()
-            .filter(|gk| quantify_gene(gk))
-            .collect();
-
         let gene_level_stats: Vec<(CellBarcode, Box<str>, f32)> = gene_level_stats
             .into_par_iter()
             .filter(|(cb, feat, _)| {
@@ -123,7 +93,6 @@ pub fn run_simple(
             })
             .collect();
 
-        crate::pipeline_util::write_qc_cells(&args.output, batch_name, &passing_cells)?;
         for gk in &passing_genes {
             if let Some(id) = gene_key_to_id.get(gk) {
                 all_gene_ids.insert(id.clone());
@@ -179,36 +148,11 @@ pub fn run_splice_aware(
         .collect();
     let mut all_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
     let umi_tag = args.umi_dedup_tag();
-    let mito_keys = crate::pipeline_util::mito_gene_keys(&records, &args.mito_chr);
-    info!(
-        "{} mitochondrial gene(s) on {} ({})",
-        mito_keys.len(),
-        args.mito_chr,
-        if args.keep_mito {
-            "kept in matrix"
-        } else {
-            "excluded from matrix"
-        }
-    );
 
-    // Biotype + mito quantification gate: count/cell-call on all biotypes, restrict
-    // only the quantified output + pooled gene ids. Mirrors `faba all`'s quantify_gene.
-    let selected_gene_keys: Option<rustc_hash::FxHashSet<Box<str>>> = if args.gene_type.is_empty() {
-        None
-    } else {
-        let target: genomic_data::gff::GeneType = args.gene_type.clone().into();
-        Some(
-            records
-                .iter()
-                .filter(|r| r.gene_type == target)
-                .map(format_gene_key)
-                .collect(),
-        )
-    };
-    let quantify_gene = |gk: &str| -> bool {
-        (args.keep_mito || !mito_keys.contains(gk))
-            && selected_gene_keys.as_ref().is_none_or(|s| s.contains(gk))
-    };
+    // Count/cell-call on all biotypes; the gate narrows only the quantified output
+    // and the pooled gene ids. Same object `faba all` and the modality QC use.
+    let gate =
+        crate::pipeline_util::GeneGate::new(&records, &args.gene_type, args.mito_qc.params());
 
     for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
         let njobs = records.len() as u64;
@@ -246,17 +190,30 @@ pub fn run_splice_aware(
             unspliced_triplets.len()
         );
 
-        // Cell calling (barcode QC) + gene nnz filter — shared with the modality
-        // QC path so `faba genes` retains the same cells the other modalities do.
+        // Cell call + mito cell filter + QC artifacts — the same shared helper the
+        // modality QC path uses, so `faba genes` retains exactly the cells the
+        // other modalities do.
         let cell_call = args.cell_qc.params();
-        let (passing_genes, passing_cells) = crate::pipeline_util::qc_passing_keys(
+        let bq = crate::pipeline_util::qc_one_batch(
             &spliced_triplets,
             &unspliced_triplets,
-            args.row_nnz_cutoff,
+            &gate,
             0,
             args.column_nnz_cutoff,
             &cell_call,
-        );
+            Some(crate::pipeline_util::QcArtifacts {
+                dir: &args.output,
+                batch_name,
+            }),
+        )?;
+        let passing_cells = bq.passing_cells;
+
+        // Gene nnz filter, then the quantification gate.
+        let passing_genes: rustc_hash::FxHashSet<Box<str>> =
+            crate::pipeline_util::passing_genes_from_stats(&bq.gene_stats, args.row_nnz_cutoff, 0)
+                .into_iter()
+                .filter(|gk| gate.quantify(gk))
+                .collect();
         info!(
             "{}: {} genes x {} cells passed QC (cell-filter {:?})",
             batch_name,
@@ -264,26 +221,6 @@ pub fn run_splice_aware(
             passing_cells.len(),
             cell_call.filter
         );
-
-        // Mitochondrial QC: report per-cell MT fraction (from full pre-filter
-        // counts), optionally drop high-MT cells, and exclude MT genes from the
-        // matrix unless --keep-mito.
-        let mt_stats = crate::pipeline_util::mito_cell_stats(
-            &[&spliced_triplets, &unspliced_triplets],
-            &passing_cells,
-            &mito_keys,
-        );
-        crate::pipeline_util::write_mt_qc(&args.output, batch_name, &mt_stats)?;
-        let passing_cells = crate::pipeline_util::apply_mito_filter(
-            passing_cells,
-            &mt_stats,
-            args.max_mito_frac,
-            args.no_mito_cell_qc,
-        );
-        let passing_genes: rustc_hash::FxHashSet<Box<str>> = passing_genes
-            .into_iter()
-            .filter(|gk| quantify_gene(gk))
-            .collect();
 
         let keep =
             |triplets: Vec<(CellBarcode, Box<str>, f32)>| -> Vec<(CellBarcode, Box<str>, f32)> {
@@ -297,8 +234,7 @@ pub fn run_splice_aware(
         let (spliced_triplets, unspliced_triplets) =
             rayon::join(|| keep(spliced_triplets), || keep(unspliced_triplets));
 
-        // Passable QC artifacts: per-batch cells now, pooled gene ids after the loop.
-        crate::pipeline_util::write_qc_cells(&args.output, batch_name, &passing_cells)?;
+        // `qc_one_batch` wrote this batch's cells; the pooled gene ids follow the loop.
         for gk in &passing_genes {
             if let Some(id) = gene_key_to_id.get(gk) {
                 all_gene_ids.insert(id.clone());

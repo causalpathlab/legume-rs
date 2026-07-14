@@ -542,6 +542,9 @@ pub struct CountApaArgs {
     #[command(flatten)]
     pub(crate) cell_qc: crate::cell_qc::CellQcArgs,
 
+    #[command(flatten)]
+    pub(crate) mito_qc: crate::pipeline_util::MitoQcArgs,
+
     /// Reuse a per-batch cell set from `faba genes` instead of recomputing QC
     #[arg(
         long = "valid-cells",
@@ -634,17 +637,21 @@ pub fn run_apa(args: &mut CountApaArgs) -> anyhow::Result<()> {
             gene_barcode_tag: &args.gene_barcode_tag,
             umi_tag: resolve_umi_tag(args.no_umi_dedup, &args.umi_tag),
             gff_file: args.gff_file.as_deref(),
+            output_dir: &args.output,
+            // Biotype is applied by subsetting the gff for site discovery; QC counts
+            // every biotype (and the gene set it freezes is intersected with that subset).
+            gene_type: "",
             gene_min_cells: args.gene_min_cells,
             gene_min_counts: args.gene_min_counts,
             cell_min_genes: args.cell_min_genes,
             cell_call: args.cell_qc.params(),
+            mito: args.mito_qc.params(),
             valid_cells_file: args.valid_cells_file.as_deref(),
             valid_genes_file: args.valid_genes_file.as_deref(),
             // Reuse always runs; only gate the *recompute* on not already
             // having a gene set passed in.
             skip_gene_qc: args.skip_gene_qc || args.valid_gene_ids.is_some(),
             persist: Some(GeneMatrixSink {
-                output_dir: &args.output,
                 backend: &args.backend,
                 zip: args.zip,
             }),
