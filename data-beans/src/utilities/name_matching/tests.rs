@@ -8,7 +8,9 @@ fn names(v: &[&str]) -> Vec<Box<str>> {
 fn gene_index_resolves_hgnc_renames_both_ways() {
     // A matrix on the CURRENT HGNC release; a marker panel on an older one. Without the
     // alias tier every one of these silently drops out of the panel.
-    let dict = names(&["H4C3", "H2BC21", "H1-0", "MARCHF2", "SEPTIN7", "MTARC1", "CD8A"]);
+    let dict = names(&[
+        "H4C3", "H2BC21", "H1-0", "MARCHF2", "SEPTIN7", "MTARC1", "CD8A",
+    ]);
     let idx = GeneIndex::build(&dict);
     assert_eq!(idx.match_gene("HIST1H4C"), Some(0));
     assert_eq!(idx.match_gene("HIST2H2BE"), Some(1));

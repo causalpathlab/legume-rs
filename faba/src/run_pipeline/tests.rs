@@ -52,7 +52,11 @@ fn summary_records_the_effective_options_not_just_the_inputs() {
     assert_eq!(json["enrich"]["cluster_resolution"], 0.0);
     assert_eq!(json["max_threads"], 16);
     // The foreign enum goes in by its Debug form rather than being dropped.
-    assert!(json["backend"].is_string(), "backend: {:?}", json["backend"]);
+    assert!(
+        json["backend"].is_string(),
+        "backend: {:?}",
+        json["backend"]
+    );
     // Inputs are still there.
     assert_eq!(json["gff_file"], "g.gff");
     assert_eq!(json["output"], "out");

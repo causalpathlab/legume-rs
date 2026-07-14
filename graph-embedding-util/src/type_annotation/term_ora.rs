@@ -331,7 +331,8 @@ fn annotate_inner(
     anyhow::ensure!(n_comm >= 1, "need ≥ 1 community, got {n_comm}");
     info!("term-ORA: β [{g} × {h}], cells [{n} × {h}], {n_comm} group(s)");
 
-    let (type_names, type_markers) = parse_and_match_markers(markers_path, gene_names, use_idf, cfg.min_panel_coverage)?;
+    let (type_names, type_markers) =
+        parse_and_match_markers(markers_path, gene_names, use_idf, cfg.min_panel_coverage)?;
     let c = type_names.len();
     anyhow::ensure!(
         c >= 2,

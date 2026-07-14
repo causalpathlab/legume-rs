@@ -350,7 +350,8 @@ pub fn annotate_embeddings(
     anyhow::ensure!(cell_names.len() == n, "cell_names len != cell rows");
     info!("annotate: β [{g} × {h}], cells [{n} × {h}]");
 
-    let (type_names, type_markers) = parse_and_match_markers(markers_path, gene_names, use_idf, cfg.min_panel_coverage)?;
+    let (type_names, type_markers) =
+        parse_and_match_markers(markers_path, gene_names, use_idf, cfg.min_panel_coverage)?;
     anyhow::ensure!(
         type_names.len() >= 2,
         "need ≥ 2 cell types with matched markers, found {}",
