@@ -125,15 +125,18 @@ pub struct DartSeqCountArgs {
     pub overdispersion: f64,
 
     #[arg(
-        short = 'p',
-        long = "pval",
-        alias = "pvalue",
-        alias = "p-val",
-        alias = "p-value",
+        short = 'q',
+        long = "fdr",
         default_value_t = 0.05,
-        help = "Detection FDR target (Benjamini-Hochberg q-value)"
+        help = "Detection FDR target (Benjamini-Hochberg q-value)",
+        long_help = "Target FDR (Benjamini-Hochberg q-value cutoff) for site detection.\n\
+                     It is applied genome-wide across all called sites,\n\
+                     not as a per-site p-value threshold.\n\
+                     The same cutoff governs both the m6A calls\n\
+                     and the A-to-I confounder-mask pass\n\
+                     (used when --detect-atoi or --atoi-mask is set)."
     )]
-    pub pvalue_cutoff: f32,
+    pub fdr_cutoff: f32,
 
     #[arg(
         long,
@@ -286,11 +289,11 @@ pub struct DartSeqCountArgs {
         long = "detect-atoi",
         default_value_t = false,
         help = "Detect A-to-I editing sites and mask them from m6A calling",
-        long_help = "Detect A-to-I (adenosine-to-inosine) RNA editing sites\n\
-                     via A→G conversions. Detected sites are output to a\n\
-                     separate parquet file and used as a mask to exclude\n\
-                     false-positive m6A candidates whose RAC/GTY triplet\n\
-                     overlaps an A-to-I site."
+        long_help = "Detect A-to-I (adenosine-to-inosine) RNA editing sites via A→G conversions.\n\
+                     Detected sites are written to a separate parquet file\n\
+                     and used as a mask to exclude false-positive m6A candidates\n\
+                     whose RAC/GTY triplet overlaps an A-to-I site.\n\
+                     This mask pass shares the m6A detection FDR target (--fdr)."
     )]
     pub detect_atoi: bool,
 
@@ -307,13 +310,6 @@ pub struct DartSeqCountArgs {
         help = "Minimum A-to-G conversions for A-to-I detection"
     )]
     pub atoi_min_conversion: usize,
-
-    #[arg(
-        long = "atoi-pval",
-        default_value_t = 0.05,
-        help = "A-to-I detection FDR target (Benjamini-Hochberg q-value)"
-    )]
-    pub atoi_pvalue_cutoff: f32,
 
     #[arg(
         long = "atoi-mask",
@@ -502,7 +498,7 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             include_missing_barcode: args.include_missing_barcode,
             min_coverage: args.min_coverage,
             min_conversion: args.min_conversion,
-            pvalue_cutoff: args.pvalue_cutoff,
+            fdr_cutoff: args.fdr_cutoff,
             error_rate: args.error_rate,
             overdispersion: args.overdispersion,
             backend: args.backend.clone(),
@@ -543,7 +539,8 @@ impl DartSeqCountArgs {
             include_missing_barcode: self.include_missing_barcode,
             min_coverage: self.atoi_min_coverage,
             min_conversion: self.atoi_min_conversion,
-            pvalue_cutoff: self.atoi_pvalue_cutoff,
+            // A-to-I mask pass shares the m6A detection FDR target (`--fdr`).
+            fdr_cutoff: self.fdr_cutoff,
             error_rate: self.error_rate,
             overdispersion: self.overdispersion,
             backend: self.backend.clone(),
