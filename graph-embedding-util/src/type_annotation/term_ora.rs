@@ -343,7 +343,14 @@ fn annotate_inner(
     //////////////////////////////////////////////////////////
     // 1. term centroids (un-normalized, IDF-weighted mean) //
     //////////////////////////////////////////////////////////
-    let beta_flat = row_major(feature_emb);
+    let mut beta_flat = row_major(feature_emb);
+    // Before ANY of this reads a feature row: zero the rows the co-embedding parked at the centre
+    // of the cell cloud. That is its signature for a gene it never learned, and it arrives wearing
+    // a perfectly healthy unit-norm coordinate — so `live_row` cannot see it, and it would be
+    // averaged into a centroid and drag it to the hub, where it is close to every cell at once.
+    // Zeroing restores the `live_row` contract, and every consumer below inherits the fix.
+    // See `super::hub_call`.
+    super::hub_call::zero_hub_parked(&mut beta_flat, cell_emb, g, h);
     let (centroids, n_live) = term_centroids(&beta_flat, &type_markers, h); // [c × h] row-major
     report_marker_liveness(&type_names, &type_markers, &n_live);
 

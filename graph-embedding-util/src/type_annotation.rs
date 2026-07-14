@@ -61,6 +61,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 mod coarsen;
 mod consensus;
 mod gene_strata;
+mod hub_call;
 mod layout;
 mod marker_bootstrap;
 mod markers;
