@@ -244,6 +244,26 @@ pub struct AnnotateArgs {
     )]
     pub ontology_by: bool,
 
+    #[arg(
+        long = "no-gene-strata",
+        help = "Draw the null gene sets uniformly instead of within gene-abundance strata",
+        long_help = "Draw the null gene sets uniformly over all genes instead of within\n\
+            gene-abundance strata (GOseq). NOT recommended — this restores a known bias.\n\n\
+            The enrichment score is standardized against random gene sets, and that\n\
+            standardization is the decision variable (the label is the argmax over\n\
+            celltypes of it). A uniform draw is ~30% undetected genes, which sort to the\n\
+            bottom of every ranking and can never be enriched — so it is trivially easy to\n\
+            beat, and easy to beat by an amount that DIFFERS PER CELLTYPE, because panels\n\
+            differ in how well-expressed their markers are.\n\n\
+            Measured on BMMNC with the uniform null: a celltype's mean es_std was a\n\
+            perfectly monotone function of its markers' mean expression (Spearman +1.000\n\
+            across all 8 types). Stratifying puts the abundance advantage on both sides of\n\
+            the comparison, where it cancels.\n\n\
+            This is GOseq's gene-length correction [Young et al. 2010] in expression space.\n\
+            Kept only as an escape hatch and to reproduce pre-0.4 outputs"
+    )]
+    pub no_gene_strata: bool,
+
     ////////////////////////////////////
     // marker-panel stability bootstrap //
     ////////////////////////////////////

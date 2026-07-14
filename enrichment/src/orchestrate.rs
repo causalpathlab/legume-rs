@@ -28,6 +28,7 @@ use crate::cellproj::{label_cells, LabelWithConfidence};
 use crate::consensus::UNASSIGNED;
 use crate::es::{rank_descending, weighted_ks_es};
 use crate::fdr::bh_fdr;
+use crate::gene_strata::GeneStrata;
 use crate::marker_bootstrap::{run_cluster_bootstrap, ClusterBootstrap, EnrichmentBootstrapConfig};
 use crate::null::permute_indices;
 use crate::q_matrix::build_q_matrix;
@@ -35,7 +36,6 @@ use crate::specificity::{compute_specificity, SpecificityMode};
 use crate::Mat;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
 use rand::rngs::SmallRng;
-use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rayon::prelude::*;
 
@@ -74,6 +74,13 @@ pub struct AnnotateConfig {
     pub q_softmax_temperature: f32,
     pub min_confidence: f32,
     pub seed: u64,
+    /// Draw the row-randomization null **within gene-abundance strata**, so a null gene set
+    /// reproduces each panel's own abundance profile (GOseq; see [`crate::gene_strata`]).
+    ///
+    /// `false` restores the old uniform draw over every gene — which is ~30% undetected genes that
+    /// sort to the bottom of every ranking and can never be enriched, i.e. a null that is trivially
+    /// easy to beat. Kept only as an escape hatch and as the control the tests measure against.
+    pub stratify_null: bool,
     /// When set, the shipped per-cluster call is the consensus of a **marker bootstrap**
     /// ([`crate::marker_bootstrap`]) rather than a single pass over one panel: each celltype's
     /// panel is resampled with replacement, the ES re-walked and the FDR re-called, so every call
@@ -95,6 +102,7 @@ impl Default for AnnotateConfig {
             q_softmax_temperature: 1.0,
             min_confidence: 0.0,
             seed: 42,
+            stratify_null: true,
             bootstrap: None,
         }
     }
@@ -195,11 +203,38 @@ pub fn annotate(
 
     ////////////////////////////////////////////////////////////////////////////
     // Null 1: row randomization → (mean*, sd*) restandardization moments.    //
-    // For each celltype c, sample random size-|M_c| gene sets, compute ES    //
-    // against every topic's observed ranking, accumulate per-(k, c) mean     //
-    // and sd via Welford. Does not set the p-value — that comes from null 2. //
+    // For each celltype c, sample random gene sets MATCHED on abundance and  //
+    // on the panel's own weights, compute ES against every topic's observed  //
+    // ranking, accumulate per-(k, c) mean and sd via Welford. Does not set    //
+    // the p-value — that comes from null 2.                                  //
+    //                                                                        //
+    // The matching is load-bearing, not a refinement. A uniform draw is 30%  //
+    // undetected genes (measured on BMMNC) — genes pinned to the bottom of    //
+    // every ranking, which can never be enriched — so it is trivially easy   //
+    // to beat, and easy to beat by an amount that DIFFERS PER CELLTYPE, since //
+    // panels differ in how well-expressed their markers are. `es_std` is the  //
+    // decision variable (`argmax_c`), so that differential lands straight in  //
+    // the label: measured, a celltype's mean es_std was a perfectly monotone  //
+    // function of its markers' mean expression (Spearman +1.000 over 8 types).//
+    // See `crate::gene_strata`.                                              //
     ////////////////////////////////////////////////////////////////////////////
     let b_rand = config.num_row_randomization;
+    let strata = if config.stratify_null {
+        GeneStrata::by_abundance(&inputs.profile_gk)
+    } else {
+        GeneStrata::unstratified(g)
+    };
+    // Each panel's live markers, and the abundance profile a null draw must reproduce.
+    let live: Vec<Vec<(u32, f32)>> = (0..c)
+        .map(|cc| {
+            (0..g)
+                .filter(|&gi| hit_weights[cc][gi] > 0.0)
+                .map(|gi| (gi as u32, hit_weights[cc][gi]))
+                .collect()
+        })
+        .collect();
+    let strata_profile: Vec<Vec<Vec<f32>>> = live.iter().map(|p| strata.profile_of(p)).collect();
+
     let row_moments: Vec<(Vec<f32>, Vec<f32>)> = (0..c)
         .into_par_iter()
         .progress_with_style(style.clone())
@@ -216,15 +251,16 @@ pub fn annotate(
                     .seed
                     .wrapping_add(1_000_003u64.wrapping_mul(cc as u64 + 1)),
             );
-            let mut pool: Vec<u32> = (0..g as u32).collect();
-            // Reusable hit-weight buffer (binary 0/1; same size as |M_c|).
+            let mut scratch = strata.scratch();
+            let mut drawn: Vec<(u32, f32)> = Vec::with_capacity(m_size);
             let mut hit_buf = vec![0.0f32; g];
             for draw in 0..b_rand {
-                pool.shuffle(&mut rng);
-                // Reset previous draw, then mark the new random set.
-                hit_buf.fill(0.0);
-                for &gi in pool.iter().take(m_size) {
-                    hit_buf[gi as usize] = 1.0;
+                strata.draw_matched(&strata_profile[cc], &mut scratch, &mut drawn, &mut rng);
+                // The null carries the panel's OWN weights, not a binary 1.0: the observed ES is
+                // IDF/specificity-weighted, and standardizing a weighted statistic against an
+                // unweighted null compares two different quantities.
+                for &(gi, w) in &drawn {
+                    hit_buf[gi as usize] = w;
                 }
                 for kk in 0..k {
                     let es = weighted_ks_es(&ranked_per_k[kk], &hit_buf);
@@ -232,6 +268,10 @@ pub fn annotate(
                     let new_mean = prev_mean + (es - prev_mean) / (draw as f32 + 1.0);
                     m2[kk] += (es - prev_mean) * (es - new_mean);
                     mean[kk] = new_mean;
+                }
+                // Reset only what was touched; `fill(0)` over G would dominate the loop.
+                for &(gi, _) in &drawn {
+                    hit_buf[gi as usize] = 0.0;
                 }
             }
             (mean, m2)
@@ -285,7 +325,9 @@ pub fn annotate(
     let mut pooled_null: Vec<Vec<f32>> = Vec::new();
 
     if b_perm == 0 {
-        // Fallback: row-randomization p-value. Recount with the second pass.
+        // Fallback: row-randomization p-value. Recount with the second pass — same abundance- and
+        // weight-matched null as the moments above, or the p-value would be calibrated against a
+        // different gene population than the one that standardized the statistic.
         let counts: Vec<Vec<u32>> = (0..c)
             .into_par_iter()
             .map(|cc| {
@@ -299,19 +341,22 @@ pub fn annotate(
                         .seed
                         .wrapping_add(3_000_003u64.wrapping_mul(cc as u64 + 1)),
                 );
-                let mut pool_idx: Vec<u32> = (0..g as u32).collect();
+                let mut scratch = strata.scratch();
+                let mut drawn: Vec<(u32, f32)> = Vec::with_capacity(m_size);
                 let mut hit_buf = vec![0.0f32; g];
                 for _ in 0..b_rand {
-                    pool_idx.shuffle(&mut rng);
-                    hit_buf.fill(0.0);
-                    for &gi in pool_idx.iter().take(m_size) {
-                        hit_buf[gi as usize] = 1.0;
+                    strata.draw_matched(&strata_profile[cc], &mut scratch, &mut drawn, &mut rng);
+                    for &(gi, w) in &drawn {
+                        hit_buf[gi as usize] = w;
                     }
                     for kk in 0..k {
                         let es = weighted_ks_es(&ranked_per_k[kk], &hit_buf);
                         if es >= es_obs[(kk, cc)] {
                             count[kk] += 1;
                         }
+                    }
+                    for &(gi, _) in &drawn {
+                        hit_buf[gi as usize] = 0.0;
                     }
                 }
                 count
@@ -488,6 +533,7 @@ pub fn annotate(
             let boot = run_cluster_bootstrap(
                 &ranked_per_k,
                 markers_gc,
+                &strata,
                 &pooled_null,
                 g,
                 config.fdr_alpha,

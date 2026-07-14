@@ -12,6 +12,7 @@ pub mod cellproj;
 pub mod consensus;
 pub mod es;
 pub mod fdr;
+pub mod gene_strata;
 pub mod marker_bootstrap;
 pub mod markers;
 pub mod null;

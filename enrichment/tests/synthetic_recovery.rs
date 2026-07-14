@@ -25,22 +25,40 @@ fn synthetic_three_blocks_recovered() {
     // β (G × K): topic k has loading 1.0 on its block; small baseline 0.05
     // outside so rows aren't all zero. (Deterministic construction — no
     // noise needed since the test has fixed topology.)
+    //
+    // Every row is additionally scaled by a per-gene abundance factor spanning ~2 orders of
+    // magnitude. Scaling a row does NOT change its simplex specificity, so the rankings — and
+    // therefore every observed ES below — are bit-identical to an unscaled fixture. What it does
+    // change is the gene's ABUNDANCE, and hence which stratum the row-randomization null draws it
+    // from (`enrichment::gene_strata`). Without it, abundance would perfectly separate markers
+    // (1.1) from background (0.15), the abundance-matched null would be forced to draw a marker
+    // panel's null from the marker pool itself, and the test would be measuring a degeneracy that
+    // does not occur on real data — where a decile of 36k genes holds thousands of non-markers.
+    let scale = |gi: usize| -> f32 {
+        let h = (gi as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(0x51ED);
+        let u = ((h >> 40) as f32) / ((1u64 << 24) as f32); // [0, 1)
+        0.2 * 25f32.powf(u) // 0.2 .. 5.0
+    };
     let mut beta = Mat::zeros(g, k);
     for kk in 0..k {
         for i in 0..block_genes {
             let gi = kk * block_genes + i;
-            beta[(gi, kk)] = 1.0;
+            let s = scale(gi);
+            beta[(gi, kk)] = s;
             for other in 0..k {
                 if other != kk {
-                    beta[(gi, other)] = 0.05;
+                    beta[(gi, other)] = 0.05 * s;
                 }
             }
         }
     }
     for i in 0..noise_genes {
         let gi = k * block_genes + i;
+        let s = scale(gi);
         for kk in 0..k {
-            beta[(gi, kk)] = 0.05;
+            beta[(gi, kk)] = 0.05 * s;
         }
     }
 
@@ -106,6 +124,7 @@ fn synthetic_three_blocks_recovered() {
         q_softmax_temperature: 1.0,
         min_confidence: 0.0,
         seed: 7,
+        stratify_null: true,
         // The point-estimate path: this test is the no-regression guard for it.
         bootstrap: None,
     };
