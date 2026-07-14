@@ -1,4 +1,5 @@
 pub mod archetypal;
+pub mod branching;
 pub mod clustering;
 pub mod common_io;
 pub mod dmatrix_io;

@@ -211,5 +211,75 @@ pub fn contrast_pvalue(a_w: u64, u_w: u64, a_m: u64, u_m: u64, rho: f64) -> f32 
     }
 }
 
+/// Mean of a slice (`NaN` if empty).
+pub fn mean(x: &[f32]) -> f32 {
+    if x.is_empty() {
+        f32::NAN
+    } else {
+        x.iter().sum::<f32>() / x.len() as f32
+    }
+}
+
+/// Nonparametric bootstrap of the sample **mean**: resample `x` with replacement `n_boot`
+/// times and return `(standard_error, ci_lo, ci_hi)` at confidence level `1 − alpha`
+/// (percentile interval). `NaN`s when `x` or `n_boot` is empty.
+pub fn bootstrap_mean_ci(
+    x: &[f32],
+    n_boot: usize,
+    alpha: f64,
+    rng: &mut impl rand::RngExt,
+) -> (f32, f32, f32) {
+    let n = x.len();
+    if n == 0 || n_boot == 0 {
+        return (f32::NAN, f32::NAN, f32::NAN);
+    }
+    let mut means: Vec<f32> = (0..n_boot)
+        .map(|_| {
+            let mut s = 0f32;
+            for _ in 0..n {
+                s += x[rng.random_range(0..n)];
+            }
+            s / n as f32
+        })
+        .collect();
+    means.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let m = mean(&means);
+    let var = if n_boot < 2 {
+        0.0
+    } else {
+        means.iter().map(|&v| (v - m) * (v - m)).sum::<f32>() / (n_boot - 1) as f32
+    };
+    let se = var.max(0.0).sqrt();
+    let lo = means[(((alpha / 2.0) * n_boot as f64) as usize).min(n_boot - 1)];
+    let hi = means[(((1.0 - alpha / 2.0) * n_boot as f64) as usize).min(n_boot - 1)];
+    (se, lo, hi)
+}
+
+/// Two-sided **sign-flip** permutation p-value for H0: `E[x] = 0`. Each draw flips the
+/// sign of every element independently (fixing magnitudes, testing only the mean's
+/// direction), add-one corrected. `NaN` when `x` is empty.
+pub fn sign_flip_pvalue(x: &[f32], n_perm: usize, rng: &mut impl rand::RngExt) -> f32 {
+    let n = x.len();
+    if n == 0 {
+        return f32::NAN;
+    }
+    let obs = mean(x).abs();
+    let mut ge = 0usize;
+    for _ in 0..n_perm {
+        let mut s = 0f32;
+        for &xi in x {
+            if rng.random::<bool>() {
+                s += xi;
+            } else {
+                s -= xi;
+            }
+        }
+        if (s / n as f32).abs() >= obs {
+            ge += 1;
+        }
+    }
+    (1.0 + ge as f32) / (1.0 + n_perm as f32)
+}
+
 #[cfg(test)]
 mod tests;

@@ -1,19 +1,19 @@
-//! Entry point for `faba lineage` — velocity-oriented lineage inference over a
+//! Entry point for `faba lineage` — velocity-informed lineage inference over a
 //! `faba gem` embedding.
 //!
 //! Reads gem's raw parquet outputs by prefix (`{from}.cell_embedding.parquet` = θ,
-//! `{from}.velocity.parquet` = δ), fits **K k-means centroids** on θ, an **MST**
-//! over them ([`matrix_util::principal_graph::mst_from_sqdist`]), **orients** that
-//! tree by the per-node mean velocity flux ([`crate::lineage::orient`]), and fits
-//! **Slingshot-style principal curves** ([`matrix_util::principal_curve`]) rooted
-//! at the velocity source. Outputs per-cell pseudotime + branch, the node graph,
-//! and the smooth curves as parquet — the ordering the parked modality-enrichment
-//! test will run against.
+//! `{from}.velocity.parquet` = δ), fits **K k-means centroids** on θ and an **MST**
+//! over them ([`matrix_util::principal_graph::mst_from_sqdist`]), tests the velocity
+//! **direction** of every candidate edge ([`crate::lineage::orient`]), and turns that
+//! into a **rooted forest** by maximum-weight branching ([`matrix_util::branching`]):
+//! contradictions are cut, weak parents rewired, and each tree rooted at its velocity
+//! source. **Slingshot-style principal curves** ([`matrix_util::principal_curve`]) are
+//! then fit per tree ([`crate::lineage::forest`]). Outputs per-cell pseudotime + branch
+//! + tree + order confidence, the candidate-edge graph, the trees, and the curves.
 //!
 //! NOTE: centroid placement uses a **seeded** k-means
 //! (`matrix_util::…::kmeans_centroids_seeded`, kmeans++ from `--seed`), so the whole
-//! fit — centroids, MST, root, lineage count — is reproducible for a given seed.
-//! Varying `--seed` is also the basis for bootstrap-support scoring of the structure.
+//! fit — centroids, MST, edge directions, forest, curves — is reproducible for a seed.
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
@@ -24,18 +24,23 @@ use graph_embedding_util::type_annotation::{
     annotate_with_communities, Abstain, CommunityCalls, InputEmbeddings, MarkerBootstrapConfig,
     Regroup, TermOraConfig,
 };
+use matrix_util::branching::{max_branching, Branching};
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::layout::{phate_layout_2d, project_cells_nystrom, PhateArgs};
 use matrix_util::parquet::{write_named_table, Column};
-use matrix_util::principal_curve::{fit_principal_curves, PrincipalCurveArgs, PrincipalCurves};
+use matrix_util::principal_curve::{PrincipalCurveArgs, PrincipalCurves};
 use matrix_util::principal_graph::{
     kmeans_centroids_seeded, mst_from_sqdist, pairwise_sqdist_rows_to_rows,
 };
 use matrix_util::traits::IoOps;
+use matrix_util::utils::median;
+use std::collections::HashMap;
 
+use crate::lineage::forest::fit_forest_curves;
 use crate::lineage::orient::{
-    aggregate_node_velocity, directed_edges, edge_velocity_flux, pick_velocity_root,
+    aggregate_node_velocity, candidate_edges, edge_directionality, mst_only_directions, undirected,
+    EdgeCall, EdgeDirection, EdgeDirectionConfig,
 };
 
 /// 2D layout for plotting the trajectory.
@@ -50,72 +55,146 @@ pub enum LayoutKind {
     Phate,
 }
 
+/// Whether the PHATE layout is warped along the confident velocity directions.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
+pub enum VelocityLayout {
+    /// Warp only when enough edges are confidently oriented (default).
+    #[default]
+    Auto,
+    /// Always warp along the selected directions.
+    On,
+    /// Never warp — the pure-θ PHATE manifold.
+    Off,
+}
+
+// The advanced tuning knobs carry `hide_short_help` so `faba lineage -h` shows only the
+// common flags; `--help` lists everything. `help_heading` buckets each flag into a category.
 #[derive(Args, Debug)]
 pub struct LineageArgs {
     #[arg(
         long,
         short = 'f',
+        help_heading = "Input/output",
         help = "gem output prefix (reads {from}.cell_embedding.parquet and {from}.velocity.parquet)"
     )]
     pub from: Box<str>,
 
-    #[arg(long, short = 'o', help = "Output prefix (default: the gem prefix)")]
+    #[arg(
+        long,
+        short = 'o',
+        help_heading = "Input/output",
+        help = "Output prefix (default: the gem prefix)"
+    )]
     pub out: Option<Box<str>>,
 
     #[arg(
         long,
+        help_heading = "Centroids & MST",
         help = "Number of MST node centroids K (default: min(cells / 10, 200))"
     )]
     pub n_centroids: Option<usize>,
 
     #[arg(
         long,
-        default_value_t = 0.0,
-        help = "Gaussian kernel bandwidth in pseudotime units (0 = adaptive per curve)"
+        default_value_t = 42,
+        help_heading = "Centroids & MST",
+        help = "RNG seed (reproducible centroids, edge directions, forest)"
     )]
-    pub curve_bandwidth: f32,
+    pub seed: u64,
 
     #[arg(
         long,
         default_value_t = 100,
-        help = "Points sampled along each fitted principal curve"
+        hide_short_help = true,
+        help_heading = "Centroids & MST",
+        help = "k-means iterations for centroid initialization"
     )]
-    pub curve_resolution: usize,
+    pub kmeans_iter: usize,
 
     #[arg(
-        long,
-        default_value_t = 15,
-        help = "Max project-then-smooth iterations for the curves"
+        long = "normalize-latent",
+        hide_short_help = true,
+        help_heading = "Centroids & MST",
+        help = "L2-normalize θ (cosine geometry) for the fit AND layout \
+                [default: raw θ / Euclidean]"
     )]
-    pub max_iter: usize,
+    pub normalize_latent: bool,
 
     #[arg(
-        long,
-        default_value_t = 1e-3,
-        help = "Convergence tolerance on mean |Δpseudotime| / range"
+        long = "no-edge-direction",
+        help_heading = "Velocity direction & forest",
+        help = "Skip the per-edge velocity direction test; forest = the geometric MST",
+        long_help = "Skip the per-edge velocity direction test. Every candidate edge is then\n\
+            geometry-only (abstained), so the max-weight branching reduces to the geometric MST\n\
+            rooted by the hint chain — the legacy behaviour with no velocity-informed cut/rewire."
     )]
-    pub tol: f32,
+    pub no_edge_direction: bool,
 
     #[arg(
         long = "no-orient-velocity",
-        help = "Do not orient the MST or pick the root by velocity flux"
+        hide_short_help = true,
+        help_heading = "Velocity direction & forest",
+        help = "Ignore velocity entirely (skip loading {from}.velocity.parquet)"
     )]
     pub no_orient_velocity: bool,
 
     #[arg(
         long,
-        help = "Force the root MST node by index (overrides velocity orientation)"
+        default_value_t = 4,
+        hide_short_help = true,
+        help_heading = "Velocity direction & forest",
+        help = "Nearest centroids added to the MST to form the directionality candidate set"
     )]
-    pub root_node: Option<usize>,
+    pub edge_cand_knn: usize,
 
     #[arg(
         long,
-        help = "Force the root at the node nearest a named cell (overrides velocity)"
+        default_value_t = 200,
+        hide_short_help = true,
+        help_heading = "Velocity direction & forest",
+        help = "Cell bootstrap resamples for each edge's direction CI/SE"
     )]
-    pub root_cell: Option<Box<str>>,
+    pub edge_direction_n_boot: usize,
+
+    #[arg(
+        long,
+        default_value_t = 500,
+        hide_short_help = true,
+        help_heading = "Velocity direction & forest",
+        help = "Sign-flip permutation draws for each edge's direction p-value"
+    )]
+    pub edge_direction_n_perm: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        hide_short_help = true,
+        help_heading = "Velocity direction & forest",
+        help = "q cutoff and CI level (the abstain bar) for calling an edge's direction"
+    )]
+    pub edge_alpha: f64,
+
+    #[arg(
+        long,
+        default_value_t = 2,
+        hide_short_help = true,
+        help_heading = "Velocity direction & forest",
+        help = "Minimum cells on an edge before its direction can be called (else abstain)"
+    )]
+    pub edge_min_cells: usize,
+
+    #[arg(
+        long,
+        hide_short_help = true,
+        help_heading = "Velocity direction & forest",
+        help = "Forest granularity τ_root: virtual no-parent weight; higher ⇒ more trees. \
+                Default = median selected arc weight."
+    )]
+    pub root_affinity: Option<f32>,
 
     #[arg(
         long = "root-type",
+        help_heading = "Root selection",
         help = "Root the trajectory at the highest-confidence node of this cell type \
                 (needs --markers), e.g. `--root-type HSC_MPP`. Marker-grounded and robust \
                 to unreliable velocity; overrides --root-from-gem / velocity but is itself \
@@ -125,6 +204,7 @@ pub struct LineageArgs {
 
     #[arg(
         long = "root-from-gem",
+        help_heading = "Root selection",
         help = "Anchor the root at gem's velocity-DAG source: the modal MST node of the \
                 low-τ region in {from}.dag_pseudotime.parquet. More robust than the per-edge \
                 flux pick, while lineage still fits the curves. Overridden by \
@@ -135,6 +215,59 @@ pub struct LineageArgs {
 
     #[arg(
         long,
+        hide_short_help = true,
+        help_heading = "Root selection",
+        help = "Force the root MST node by index (overrides velocity orientation)"
+    )]
+    pub root_node: Option<usize>,
+
+    #[arg(
+        long,
+        hide_short_help = true,
+        help_heading = "Root selection",
+        help = "Force the root at the node nearest a named cell (overrides velocity)"
+    )]
+    pub root_cell: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        hide_short_help = true,
+        help_heading = "Principal curves",
+        help = "Gaussian kernel bandwidth in pseudotime units (0 = adaptive per curve)"
+    )]
+    pub curve_bandwidth: f32,
+
+    #[arg(
+        long,
+        default_value_t = 100,
+        hide_short_help = true,
+        help_heading = "Principal curves",
+        help = "Points sampled along each fitted principal curve"
+    )]
+    pub curve_resolution: usize,
+
+    #[arg(
+        long,
+        default_value_t = 15,
+        hide_short_help = true,
+        help_heading = "Principal curves",
+        help = "Max project-then-smooth iterations for the curves"
+    )]
+    pub max_iter: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1e-3,
+        hide_short_help = true,
+        help_heading = "Principal curves",
+        help = "Convergence tolerance on mean |Δpseudotime| / range"
+    )]
+    pub tol: f32,
+
+    #[arg(
+        long,
+        help_heading = "Marker annotation",
         help = "Marker TSV (gene<TAB>celltype) to name trajectory nodes by cell type",
         long_help = "Annotate each trajectory node with a cell type by term over-representation \
                      (the `faba annotate` core) run over the MST-node grouping, so the call \
@@ -151,12 +284,16 @@ pub struct LineageArgs {
     #[arg(
         long,
         default_value_t = 500,
+        hide_short_help = true,
+        help_heading = "Marker annotation",
         help = "With --markers: permutation draws calibrating each node's over-representation"
     )]
     pub marker_num_perm: usize,
 
     #[arg(
         long,
+        hide_short_help = true,
+        help_heading = "Marker annotation",
         help = "Cell Ontology OBO file for the --markers ontology layer (needs --marker-label-cl)",
         long_help = "Optional. Adds a TreeBH Cell-Ontology layer over the per-node marker calls, \
                      as in `faba annotate`. Give the OBO graph here and the marker-type → CL id \
@@ -166,19 +303,16 @@ pub struct LineageArgs {
 
     #[arg(
         long,
+        hide_short_help = true,
+        help_heading = "Marker annotation",
         help = "Curated `label<TAB>CL:id` TSV pairing marker types to CL ids (with --marker-obo)"
     )]
     pub marker_label_cl: Option<Box<str>>,
 
     #[arg(
-        long,
-        default_value_t = 100,
-        help = "k-means iterations for centroid initialization"
-    )]
-    pub kmeans_iter: usize,
-
-    #[arg(
         long = "no-bootstrap-markers",
+        hide_short_help = true,
+        help_heading = "Marker annotation",
         help = "[--markers] Turn OFF the stability bootstrap on the node calls",
         long_help = "Turn OFF the stability bootstrap on the node calls, naming each node\n\
             by a bare point estimate.\n\n\
@@ -197,6 +331,8 @@ pub struct LineageArgs {
     #[arg(
         long,
         default_value_t = 200,
+        hide_short_help = true,
+        help_heading = "Marker annotation",
         help = "Bootstrap resamples on the node calls (--no-bootstrap-markers to disable)"
     )]
     pub marker_n_boot: usize,
@@ -204,6 +340,8 @@ pub struct LineageArgs {
     #[arg(
         long,
         default_value_t = 0.5,
+        hide_short_help = true,
+        help_heading = "Marker annotation",
         help = "[--bootstrap-markers] Minimum fraction of resamples the top label must win for \
                 a cell to be called at all"
     )]
@@ -211,52 +349,46 @@ pub struct LineageArgs {
 
     #[arg(
         long,
-        default_value_t = 42,
-        help = "RNG seed for the k-means centroids (reproducible structure; vary it for \
-                bootstrap-support scoring)"
-    )]
-    pub seed: u64,
-
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "Bootstrap-support draws for the branch structure: refit under N extra seeds \
-                and score how reproducibly each junction's sibling split recurs \
-                (0 = off; writes {out}.junction_support.parquet when > 0)"
-    )]
-    pub n_bootstrap: usize,
-
-    #[arg(
-        long = "no-normalize-latent",
-        help = "Fit on raw θ instead of L2-normalized (cosine) θ [default: normalize]"
-    )]
-    pub no_normalize_latent: bool,
-
-    #[arg(
-        long,
         value_enum,
         default_value_t = LayoutKind::Phate,
+        help_heading = "PHATE layout",
         help = "2D layout for plotting (default: phate). Emits {out}.{cells,nodes,curves}_2d.parquet; 'none' to skip"
     )]
     pub layout: LayoutKind,
 
     #[arg(
         long,
+        value_enum,
+        default_value_t = VelocityLayout::Auto,
+        help_heading = "PHATE layout",
+        help = "Warp the PHATE layout along confident velocity directions: auto (when \
+                enough edges are oriented), on, or off"
+    )]
+    pub velocity_aware_layout: VelocityLayout,
+
+    #[arg(
+        long,
         default_value_t = 15,
+        hide_short_help = true,
+        help_heading = "PHATE layout",
         help = "PHATE kNN adaptive bandwidth (only with --layout phate)"
     )]
     pub phate_knn: usize,
 
     #[arg(
         long,
-        default_value_t = 20,
-        help = "PHATE diffusion time t (only with --layout phate)"
+        default_value_t = 0,
+        hide_short_help = true,
+        help_heading = "PHATE layout",
+        help = "PHATE diffusion time t (0 = auto-select at the von-Neumann-entropy knee)"
     )]
     pub phate_t: usize,
 
     #[arg(
         long,
         default_value_t = 2000,
+        hide_short_help = true,
+        help_heading = "PHATE layout",
         help = "PHATE landmark budget: above this many cells, PHATE runs on a \
                 landmark subsample + Nyström lift (scales linearly). Raise it \
                 if the layout looks thin/stringy on very large data."
@@ -274,8 +406,7 @@ fn choose_k(n: usize, requested: Option<usize>) -> usize {
 /// (the node of the named cell's cluster), `type_root` (`--root-type`, a marker-named
 /// node), `gem_root` (gem's velocity-DAG source, from `--root-from-gem`), the
 /// velocity-flux-picked root, else node 0.
-#[allow(clippy::too_many_arguments)]
-fn resolve_root(
+fn resolve_root_hint(
     root_node: Option<usize>,
     root_cell: Option<&str>,
     cell_names: &[Box<str>],
@@ -283,21 +414,18 @@ fn resolve_root(
     k: usize,
     type_root: Option<usize>,
     gem_root: Option<usize>,
-    velocity_root: Option<usize>,
-) -> Result<usize> {
+) -> Result<Option<usize>> {
     if let Some(r) = root_node {
         anyhow::ensure!(r < k, "--root-node {r} out of range (K = {k})");
-        Ok(r)
+        Ok(Some(r))
     } else if let Some(name) = root_cell {
         let idx = cell_names
             .iter()
             .position(|c| c.as_ref() == name)
             .with_context(|| format!("--root-cell '{name}' not found in latent"))?;
-        Ok(labels[idx])
-    } else if let Some(r) = type_root.or(gem_root).or(velocity_root) {
-        Ok(r)
+        Ok(Some(labels[idx]))
     } else {
-        Ok(0)
+        Ok(type_root.or(gem_root))
     }
 }
 
@@ -388,21 +516,21 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     /////////////////////////////
     // load frozen embedding θ //
     /////////////////////////////
-    // gem θ is cosine-oriented, so by default the whole fit (k-means → MST →
-    // curves) runs on L2-normalized θ; this keeps a few extreme-magnitude cells
-    // from dominating and matches the PHATE layout's geometry. `--no-normalize-latent`
-    // reverts to the raw-Euclidean fit.
+    // The fit (k-means → MST → curves) and the PHATE layout run on raw θ (Euclidean) by
+    // default. `--normalize-latent` L2-normalizes θ instead (cosine geometry): gem θ is
+    // cosine-oriented, so that can help when a few extreme-magnitude cells otherwise
+    // dominate the raw distances.
     let latent_path = format!("{prefix}.cell_embedding.parquet");
     let cell = DMatrix::<f32>::from_parquet(&latent_path)
         .with_context(|| format!("reading cell embedding {latent_path}"))?;
     let cell_names = cell.rows;
     // Raw θ kept only for `--markers` node annotation, which scores in the same raw
-    // latent space `faba annotate` uses (the L2-normalized `theta` below drives the fit).
+    // latent space `faba annotate` uses (the `theta` below drives the fit).
     let raw_theta: Option<DMatrix<f32>> = args.markers.is_some().then(|| cell.mat.clone());
-    let theta = if args.no_normalize_latent {
-        cell.mat
-    } else {
+    let theta = if args.normalize_latent {
         l2_normalize_rows(&cell.mat)
+    } else {
+        cell.mat
     };
     let n = theta.nrows();
     anyhow::ensure!(n >= 2, "need ≥ 2 cells, got {n}");
@@ -418,7 +546,8 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     // k-means centroids + MST //
     /////////////////////////////
     let (centroids, labels) = kmeans_centroids_seeded(&theta, k, args.kmeans_iter, args.seed);
-    let (edges, weights) = mst_from_sqdist(&pairwise_sqdist_rows_to_rows(&centroids, &centroids));
+    let (edges, _mst_weights) =
+        mst_from_sqdist(&pairwise_sqdist_rows_to_rows(&centroids, &centroids));
     anyhow::ensure!(
         edges.len() == k - 1,
         "MST on {k} nodes should have {} edges, got {}",
@@ -426,12 +555,12 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         edges.len()
     );
 
-    /////////////////////////////////////
-    // velocity orientation (optional) //
-    /////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////
+    // velocity-informed directed forest: candidate graph → tested directions //
+    ///////////////////////////////////////////////////////////////////////////
     let velocity_path = format!("{prefix}.velocity.parquet");
     let have_velocity = !args.no_orient_velocity && Path::new(&velocity_path).exists();
-    let (node_velocity, flux) = if have_velocity {
+    let velocity: Option<DMatrix<f32>> = if have_velocity {
         let vel = DMatrix::<f32>::from_parquet(&velocity_path)
             .with_context(|| format!("reading velocity {velocity_path}"))?;
         anyhow::ensure!(
@@ -439,33 +568,46 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
             "velocity rows ({}) != latent rows ({n})",
             vel.mat.nrows()
         );
-        let nv = aggregate_node_velocity(&vel.mat, &labels, k);
-        let fx = edge_velocity_flux(&centroids, &nv, &edges);
-        (nv, fx)
+        Some(vel.mat)
     } else {
         if !args.no_orient_velocity {
-            warn!("velocity file {velocity_path} absent; MST left unoriented, root defaults");
+            warn!("velocity file {velocity_path} absent; forest falls back to the geometric MST");
         }
-        (
-            DMatrix::<f32>::zeros(k, theta.ncols()),
-            vec![0f32; edges.len()],
-        )
+        None
     };
-    let directed = directed_edges(&edges, &flux);
+    let node_velocity = match &velocity {
+        Some(v) => aggregate_node_velocity(v, &labels, k),
+        None => DMatrix::<f32>::zeros(k, theta.ncols()),
+    };
 
-    // local branch structure (root-free): junctions + sibling branches over the MST.
-    // Each cell is placed by its k-means node at (junction, sibling_branch, dist_from_junction)
-    // — the local, root-invariant axis the sibling-branch association test (`faba dyn-assoc`)
-    // matches cells on, replacing global pseudotime.
-    let branch_topo = crate::lineage::branch::detect_branches(&edges, &directed, k);
+    // Candidate edges (MST ∪ kNN centroids) with a statistically-tested velocity direction.
+    let cand_edges = candidate_edges(&centroids, &edges, args.edge_cand_knn);
+    let dirs: Vec<EdgeDirection> = match (&velocity, args.no_edge_direction) {
+        (Some(v), false) => edge_directionality(
+            &centroids,
+            v,
+            &labels,
+            &cand_edges,
+            &edges,
+            &EdgeDirectionConfig {
+                n_boot: args.edge_direction_n_boot,
+                n_perm: args.edge_direction_n_perm,
+                alpha: args.edge_alpha,
+                min_cells: args.edge_min_cells,
+                seed: args.seed,
+            },
+        ),
+        // No velocity / disabled: keep the MST only, as geometry-only (all-abstain) edges.
+        _ => mst_only_directions(&centroids, &edges),
+    };
+    let n_called = dirs.iter().filter(|d| d.call != EdgeCall::Abstain).count();
     info!(
-        "branch structure: {} junction(s) over {k} nodes",
-        branch_topo.junctions.len()
+        "edge directions: {n_called}/{} candidate edge(s) confidently oriented",
+        dirs.len()
     );
 
-    // marker node calls (computed here, before root selection, so `--root-type`
-    // can pick the root from them; written as `{out}.trajectory_annotation.parquet`
-    // after the root/orientation are known). Also writes `{out}.lineage_annot.*`. ----
+    // Marker node calls (before rooting, so `--root-type` can ground a root hint). Also
+    // writes `{out}.lineage_annot.*`.
     let node_calls = match (args.markers.as_deref(), raw_theta.as_ref()) {
         (Some(markers), Some(raw)) => Some(compute_node_calls(&AnnotateTrajArgs {
             prefix,
@@ -492,21 +634,19 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         _ => None,
     };
 
-    ////////////////////
-    // root selection //
-    ////////////////////
-    let velocity_root = have_velocity.then(|| pick_velocity_root(&edges, &flux, k));
-    // Marker-grounded root (`--root-type`): the highest-confidence node of the named type.
+    ////////////////////////////////////////////////////////////////
+    // max-weight branching: cut + rewire + root into a forest     //
+    ////////////////////////////////////////////////////////////////
+    // Optional root hint (user / marker type / gem source) pins one node as a root.
     let type_root = args
         .root_type
         .as_deref()
         .and_then(|t| node_calls.as_ref().and_then(|c| root_type_node(c, t)));
-    // gem hand-off: anchor at gem's velocity-DAG source unless that DAG is structureless.
     let gem_root = args
         .root_from_gem
         .then(|| gem_root_node(prefix, &cell_names, &labels, k))
         .flatten();
-    let root = resolve_root(
+    let root_hint = resolve_root_hint(
         args.root_node,
         args.root_cell.as_deref(),
         &cell_names,
@@ -514,18 +654,27 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         k,
         type_root,
         gem_root,
-        velocity_root,
     )?;
-    info!("lineage root node = {root}");
 
-    ////////////////////////////////
-    // Slingshot principal curves //
-    ////////////////////////////////
-    let curves = fit_principal_curves(
+    let (arcs, root_affinity) = assemble_arcs(&dirs, k, args.root_affinity, root_hint);
+    let branching = max_branching(k, &arcs, &root_affinity);
+    info!(
+        "forest: {} tree(s), {} directed edge(s) selected over {k} nodes",
+        branching.roots.len(),
+        branching.parent.iter().filter(|p| p.is_some()).count()
+    );
+
+    /////////////////////////////////////////////
+    // per-tree Slingshot curves + pseudotime   //
+    /////////////////////////////////////////////
+    let dirs_map: HashMap<(usize, usize), &EdgeDirection> =
+        dirs.iter().map(|d| (d.edge, d)).collect();
+    let forest = fit_forest_curves(
         &theta,
         &centroids,
-        &edges,
-        root,
+        &labels,
+        &branching,
+        &dirs_map,
         &PrincipalCurveArgs {
             max_iter: args.max_iter,
             tol: args.tol,
@@ -533,10 +682,11 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
             bandwidth: args.curve_bandwidth,
         },
     )?;
+    let curves = &forest.curves;
     info!(
-        "fit {} lineage(s) in {} iteration(s)",
+        "fit {} lineage(s) across {} tree(s)",
         curves.n_lineages(),
-        curves.n_iters
+        branching.roots.len()
     );
 
     /////////////
@@ -544,15 +694,21 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     /////////////
     write_nodes(&centroids, &format!("{out}.nodes.parquet"))?;
     write_nodes(&node_velocity, &format!("{out}.node_velocity.parquet"))?;
-    write_edges(
-        &edges,
-        &weights,
-        &flux,
-        &directed,
-        &format!("{out}.edges.parquet"),
+    write_edge_directions(&dirs, &branching, &format!("{out}.edges.parquet"))?;
+    write_trees(
+        &branching,
+        &labels,
+        &dirs_map,
+        &format!("{out}.trees.parquet"),
     )?;
-    write_lineages(&curves, &format!("{out}.lineages.parquet"))?;
-    write_pseudotime(&curves, &cell_names, &format!("{out}.pseudotime.parquet"))?;
+    write_lineages(curves, &format!("{out}.lineages.parquet"))?;
+    write_pseudotime(
+        curves,
+        &forest.cell_tree,
+        &forest.order_conf,
+        &cell_names,
+        &format!("{out}.pseudotime.parquet"),
+    )?;
     write_cell_matrix(
         &curves.weights,
         &cell_names,
@@ -565,39 +721,17 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         "lineage",
         &format!("{out}.lineage_pseudotime.parquet"),
     )?;
-    write_curves(&curves, &format!("{out}.curves.parquet"))?;
-
-    ///////////////////////////////////////////////////////////////////////////////
-    // junction trust scoring: cross-seed bootstrap support (+ marker coherence) //
-    ///////////////////////////////////////////////////////////////////////////////
-    if args.n_bootstrap > 0 && !branch_topo.junctions.is_empty() {
-        let support = bootstrap_junction_support(
-            &theta,
-            k,
-            args.kmeans_iter,
-            args.seed,
-            args.n_bootstrap,
-            &labels,
-            &branch_topo,
-        );
-        let n_strong = support.iter().filter(|&&(_, s, _)| s >= 0.5).count();
-        info!(
-            "junction support: {n_strong}/{} junction(s) reproducible (support ≥ 0.5 over {} seeds)",
-            support.len(),
-            args.n_bootstrap
-        );
-        write_junction_support(
-            &support,
-            node_calls.as_ref(),
-            &format!("{out}.junction_support.parquet"),
-        )?;
-    }
+    write_curves(curves, &format!("{out}.curves.parquet"))?;
 
     ///////////////////////////////////////////////////////////////////////
-    // labeled trajectory annotation (node roles need the oriented root) //
+    // labeled trajectory annotation (node roles from the rooted forest) //
     ///////////////////////////////////////////////////////////////////////
     if let Some(calls) = &node_calls {
-        write_trajectory_annotation(&out, calls, root, &directed, k)?;
+        write_trajectory_annotation(
+            calls,
+            &branching,
+            &format!("{out}.trajectory_annotation.parquet"),
+        )?;
     }
 
     /////////////////////////////////////////////////////////////////
@@ -609,14 +743,34 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
             knn: args.phate_knn,
             ..PhateArgs::default()
         };
+        // Warp the layout along flow only when the directions are trustworthy.
+        let frac_called = if dirs.is_empty() {
+            0.0
+        } else {
+            n_called as f32 / dirs.len() as f32
+        };
+        let velocity_aware = match args.velocity_aware_layout {
+            VelocityLayout::On => true,
+            VelocityLayout::Off => false,
+            VelocityLayout::Auto => frac_called >= 0.5,
+        };
+        if velocity_aware {
+            info!(
+                "PHATE: velocity-aware warp ({:.0}% of edges oriented)",
+                100.0 * frac_called
+            );
+        }
         emit_phate_layout(
             &theta,
             &centroids,
-            &curves,
+            curves,
             &cell_names,
             &phate,
             args.phate_landmarks,
+            args.seed,
             &out,
+            velocity_aware.then_some((&dirs_map, &branching, &labels)),
+            args.normalize_latent,
         )?;
     }
     Ok(())
@@ -734,37 +888,32 @@ fn root_type_node(calls: &CommunityCalls, root_type: &str) -> Option<usize> {
     }
 }
 
-/// Cross the per-node calls with the oriented MST → the labeled trajectory: one row per
-/// MST node — `role` (root | terminal | internal), `cell_type`, `confidence`.
-fn write_trajectory_annotation(
-    out: &str,
-    calls: &CommunityCalls,
-    root: usize,
-    directed: &[(usize, usize)],
-    k: usize,
-) -> Result<()> {
-    // A terminal is a directed leaf: it never appears as a `from`.
-    let mut has_out = vec![false; k];
-    for &(f, _) in directed {
-        if f < k {
-            has_out[f] = true;
+/// Cross the per-node calls with the rooted forest → the labeled trajectory: one row per
+/// node — `role` (root | terminal | internal), `cell_type`, `confidence`. Terminals are
+/// derived from the rooted children (a node with no children), not from the orientation,
+/// so abstained edges cannot misclassify a leaf.
+fn write_trajectory_annotation(calls: &CommunityCalls, br: &Branching, path: &str) -> Result<()> {
+    let k = br.parent.len();
+    let mut has_child = vec![false; k];
+    for p in br.parent.iter().flatten() {
+        if *p < k {
+            has_child[*p] = true;
         }
     }
     let node_names = numbered("node_", k);
     let roles: Vec<Box<str>> = (0..k)
         .map(|node| {
-            if node == root {
+            if br.parent[node].is_none() {
                 Box::from("root")
-            } else if !has_out[node] {
+            } else if !has_child[node] {
                 Box::from("terminal")
             } else {
                 Box::from("internal")
             }
         })
         .collect();
-    let path = format!("{out}.trajectory_annotation.parquet");
     write_named_table(
-        &path,
+        path,
         "node",
         &node_names,
         &[
@@ -774,7 +923,7 @@ fn write_trajectory_annotation(
         ],
     )
     .with_context(|| format!("writing {path}"))?;
-    info!("wrote {path} ({k} nodes; root={root})");
+    info!("wrote {path} ({k} nodes; {} root(s))", br.roots.len());
     Ok(())
 }
 
@@ -804,28 +953,26 @@ fn l2_normalize_rows(m: &DMatrix<f32>) -> DMatrix<f32> {
 }
 
 /// Choose the PHATE landmark set and its 2D layout. When `N ≤ n_landmarks` every
-/// cell is a landmark (exact PHATE). Above that, PHATE runs on a deterministic
-/// stride subsample of `n_landmarks` cells and the rest are lifted with the
-/// Nyström projector — capping the O(n³) PHATE work at the landmark budget and
-/// making the remainder linear in N. Returns `(landmark_features L×D, coords L×2)`.
+/// cell is a landmark (exact PHATE). Above that, PHATE runs on `n_landmarks`
+/// **k-means centroids** and the rest are lifted with the Nyström projector — capping
+/// the O(n³) PHATE work at the landmark budget and making the remainder linear in N.
+/// Returns `(landmark_features L×D, coords L×2)`.
 fn phate_landmark_layout(
     theta_n: &DMatrix<f32>,
     phate: &PhateArgs,
     n_landmarks: usize,
+    seed: u64,
 ) -> (DMatrix<f32>, DMatrix<f32>) {
     let n = theta_n.nrows();
     if n <= n_landmarks || n_landmarks < 3 {
         return (theta_n.clone(), phate_layout_2d(theta_n, phate));
     }
-    let (l, d) = (n_landmarks, theta_n.ncols());
-    // Deterministic, evenly-spread stride subsample (cell order is arbitrary).
-    let mut land = DMatrix::<f32>::zeros(l, d);
-    for r in 0..l {
-        let s = (r * n / l).min(n - 1);
-        for j in 0..d {
-            land[(r, j)] = theta_n[(s, j)];
-        }
-    }
+    // Landmarks = k-means centroids (density-representative), like reference PHATE's
+    // spectral landmarks. A plain stride subsample under-represents structure and the
+    // Nyström lift then smears it — collapsing the layout onto its principal curve.
+    // A loose 15-iteration cap is plenty: landmarks only seed the Nyström base, so tight
+    // k-means convergence isn't needed (and k ≈ 2000 rarely stabilizes exactly anyway).
+    let (land, _labels) = kmeans_centroids_seeded(theta_n, n_landmarks, 15, seed);
     let coords = phate_layout_2d(&land, phate);
     (land, coords)
 }
@@ -835,12 +982,66 @@ fn phate_landmark_layout(
 /// Nyström projection — so the trajectory overlays faithfully. `project_cells_nystrom`
 /// takes points as columns (D × n), hence the transposes.
 ///
-/// The layout runs on **L2-normalized θ (cosine geometry)** applied here
-/// regardless of the fit mode — so the layout is always cosine, even under
-/// `--no-normalize-latent`. (gem θ is cosine-oriented; a few extreme-magnitude
-/// cells otherwise dominate the Euclidean diffusion distances.) For large N,
-/// PHATE is run on a landmark subsample and every cell/node/curve point is lifted
-/// onto that layout via the same Nyström projector.
+/// The layout runs on raw θ (Euclidean) by default; `--normalize-latent` switches it (and the
+/// fit) to L2-normalized θ (cosine geometry). For large N, PHATE runs on **k-means landmarks**
+/// and every cell/node/curve point is lifted onto that layout via the same Nyström projector.
+/// Edge → its tested direction, keyed by the canonical `(min, max)` node pair.
+type DirsMap<'a> = HashMap<(usize, usize), &'a EdgeDirection>;
+
+/// Warp step as a fraction of the mean selected-edge length.
+const WARP_STEP_FRAC: f32 = 0.15;
+
+/// Nudge each node along the net 2D flow of its confident selected edges (child downstream,
+/// parent upstream), magnitude ∝ confidence and `WARP_STEP_FRAC` of the mean edge length;
+/// cells follow their node. Abstained/geometry-only regions stay put.
+fn warp_layout_along_flow(
+    nodes_2d: &mut DMatrix<f32>,
+    cells_2d: &mut DMatrix<f32>,
+    dirs_map: &DirsMap,
+    br: &Branching,
+    labels: &[usize],
+) {
+    let k = nodes_2d.nrows();
+    let mut disp = DMatrix::<f32>::zeros(k, 2);
+    let (mut len_sum, mut len_cnt) = (0f32, 0f32);
+    for v in 0..k {
+        let Some(p) = br.parent[v] else { continue };
+        let Some(d) = dirs_map.get(&undirected(p, v)) else {
+            continue;
+        };
+        if d.call == EdgeCall::Abstain {
+            continue;
+        }
+        let dx = nodes_2d[(v, 0)] - nodes_2d[(p, 0)];
+        let dy = nodes_2d[(v, 1)] - nodes_2d[(p, 1)];
+        let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+        len_sum += len;
+        len_cnt += 1.0;
+        let (ux, uy) = (d.confidence * dx / len, d.confidence * dy / len);
+        disp[(v, 0)] += ux;
+        disp[(v, 1)] += uy;
+        disp[(p, 0)] -= ux;
+        disp[(p, 1)] -= uy;
+    }
+    let step = if len_cnt > 0.0 {
+        WARP_STEP_FRAC * len_sum / len_cnt
+    } else {
+        0.0
+    };
+    for v in 0..k {
+        nodes_2d[(v, 0)] += step * disp[(v, 0)];
+        nodes_2d[(v, 1)] += step * disp[(v, 1)];
+    }
+    for i in 0..cells_2d.nrows() {
+        let l = labels[i];
+        if l < k {
+            cells_2d[(i, 0)] += step * disp[(l, 0)];
+            cells_2d[(i, 1)] += step * disp[(l, 1)];
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_phate_layout(
     theta: &DMatrix<f32>,
     centroids: &DMatrix<f32>,
@@ -848,11 +1049,23 @@ fn emit_phate_layout(
     cell_names: &[Box<str>],
     phate: &PhateArgs,
     n_landmarks: usize,
+    seed: u64,
     out: &str,
+    warp: Option<(&DirsMap, &Branching, &[usize])>,
+    normalize: bool,
 ) -> Result<()> {
     let n = theta.nrows();
-    let theta_n = l2_normalize_rows(theta);
-    let (land_feat, land_2d) = phate_landmark_layout(&theta_n, phate, n_landmarks);
+    // Cosine metric = rows projected to the unit sphere (Euclidean distance there is
+    // 2(1−cos)); with `normalize = false` PHATE runs on raw θ, i.e. true Euclidean.
+    let norm = |m: &DMatrix<f32>| {
+        if normalize {
+            l2_normalize_rows(m)
+        } else {
+            m.clone()
+        }
+    };
+    let theta_n = norm(theta);
+    let (land_feat, land_2d) = phate_landmark_layout(&theta_n, phate, n_landmarks, seed);
     let exact = land_feat.nrows() == n;
     info!(
         "PHATE layout: {n} cells ({})",
@@ -866,20 +1079,19 @@ fn emit_phate_layout(
     let (knn, alpha) = (phate.knn, phate.alpha);
 
     // Cells: exact PHATE already placed them; else lift onto the landmark layout.
-    let cells_2d = if exact {
+    let mut cells_2d = if exact {
         land_2d.clone()
     } else {
         project_cells_nystrom(&theta_n.transpose(), &land_t, &land_2d, knn, alpha)
     };
 
     // Nodes + curve points always lift onto the landmark layout via Nyström.
-    let nodes_2d = project_cells_nystrom(
-        &l2_normalize_rows(centroids).transpose(),
-        &land_t,
-        &land_2d,
-        knn,
-        alpha,
-    );
+    let mut nodes_2d =
+        project_cells_nystrom(&norm(centroids).transpose(), &land_t, &land_2d, knn, alpha);
+
+    if let Some((dirs_map, br, labels)) = warp {
+        warp_layout_along_flow(&mut nodes_2d, &mut cells_2d, dirs_map, br, labels);
+    }
 
     // Stack all lineage curve points (in θ space) + remember (lineage, grid).
     let d = theta.ncols();
@@ -896,13 +1108,7 @@ fn emit_phate_layout(
             r += 1;
         }
     }
-    let curves_2d = project_cells_nystrom(
-        &l2_normalize_rows(&cpts).transpose(),
-        &land_t,
-        &land_2d,
-        knn,
-        alpha,
-    );
+    let curves_2d = project_cells_nystrom(&norm(&cpts).transpose(), &land_t, &land_2d, knn, alpha);
 
     write_xy(
         &cells_2d,
@@ -966,36 +1172,196 @@ fn write_nodes(mat: &DMatrix<f32>, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// `edge_i × [from, to, weight, velocity_flux, directed_from, directed_to]`.
-fn write_edges(
-    edges: &[(usize, usize)],
-    weights: &[f32],
-    flux: &[f32],
-    directed: &[(usize, usize)],
-    path: &str,
-) -> Result<()> {
-    let mut mat = DMatrix::<f32>::zeros(edges.len(), 6);
-    for i in 0..edges.len() {
-        let (a, b) = edges[i];
-        let (df, dt) = directed[i];
-        mat[(i, 0)] = a as f32;
-        mat[(i, 1)] = b as f32;
-        mat[(i, 2)] = weights[i];
-        mat[(i, 3)] = flux[i];
-        mat[(i, 4)] = df as f32;
-        mat[(i, 5)] = dt as f32;
+/// Geometry floor: an abstained edge can still connect via geometry.
+const BETA: f32 = 0.2;
+/// Weight of a velocity-contradicted orientation — near zero so it is never selected.
+const BETA_LOW: f32 = 1e-3;
+
+/// Build the directed arc set + per-node `root_affinity` for [`max_branching`]. Each
+/// candidate edge yields two opposing arcs weighted by geometric affinity × direction
+/// support; abstained edges contribute geometry only. A user `root_hint` is pinned as a
+/// root via an infinite affinity. `root_affinity_arg` (τ_root) overrides the default
+/// (median arc weight) and controls forest granularity.
+fn assemble_arcs(
+    dirs: &[EdgeDirection],
+    k: usize,
+    root_affinity_arg: Option<f32>,
+    root_hint: Option<usize>,
+) -> (Vec<(usize, usize, f32)>, Vec<f32>) {
+    // σ = median candidate geom_dist (scale of the affinity kernel).
+    let d: Vec<f32> = dirs
+        .iter()
+        .map(|e| e.geom_dist)
+        .filter(|x| *x > 0.0)
+        .collect();
+    let sigma = if d.is_empty() {
+        1.0
+    } else {
+        median(&d).max(1e-6)
+    };
+
+    let mut arcs: Vec<(usize, usize, f32)> = Vec::with_capacity(dirs.len() * 2);
+    for e in dirs {
+        let (a, b) = e.edge;
+        let s = (-(e.geom_dist / sigma).powi(2)).exp();
+        let strong = s * (BETA + (1.0 - BETA) * e.confidence);
+        let weak = s * BETA_LOW;
+        let floor = s * BETA;
+        match e.call {
+            EdgeCall::Forward => {
+                arcs.push((a, b, strong));
+                arcs.push((b, a, weak));
+            }
+            EdgeCall::Reverse => {
+                arcs.push((b, a, strong));
+                arcs.push((a, b, weak));
+            }
+            EdgeCall::Abstain => {
+                arcs.push((a, b, floor));
+                arcs.push((b, a, floor));
+            }
+        }
     }
-    let rows = numbered("edge_", edges.len());
-    let cols: Vec<Box<str>> = vec![
-        "from".into(),
-        "to".into(),
-        "weight".into(),
-        "velocity_flux".into(),
-        "directed_from".into(),
-        "directed_to".into(),
-    ];
-    mat.to_parquet_with_names(path, (Some(&rows), Some("edge")), Some(&cols))?;
+
+    let tau = root_affinity_arg
+        .unwrap_or_else(|| median(&arcs.iter().map(|&(_, _, w)| w).collect::<Vec<_>>()));
+    let mut root_affinity = vec![tau; k];
+    if let Some(r) = root_hint {
+        if r < k {
+            root_affinity[r] = f32::INFINITY; // pin r as a root
+        }
+    }
+    (arcs, root_affinity)
+}
+
+/// `edge_i × [from, to, geom_dist, velocity_flux, se, ci_lo, ci_hi, p, q, n_cells,
+/// confidence, in_mst, selected, directed_from, directed_to, tree]` + `call` (Str).
+/// Rows are all candidate edges. `directed_*`/`tree` are `NaN` for edges the branching
+/// did not select; `call` is `forward`/`reverse`/`unassigned`.
+fn write_edge_directions(dirs: &[EdgeDirection], br: &Branching, path: &str) -> Result<()> {
+    let m = dirs.len();
+    let (mut from, mut to) = (vec![0f32; m], vec![0f32; m]);
+    let (mut geom, mut flux) = (vec![0f32; m], vec![0f32; m]);
+    let (mut se, mut ci_lo, mut ci_hi) = (vec![0f32; m], vec![0f32; m], vec![0f32; m]);
+    let (mut p, mut q, mut ncell) = (vec![0f32; m], vec![0f32; m], vec![0f32; m]);
+    let (mut conf, mut in_mst) = (vec![0f32; m], vec![0f32; m]);
+    let (mut selected, mut dfrom, mut dto, mut tree) =
+        (vec![0f32; m], vec![0f32; m], vec![0f32; m], vec![0f32; m]);
+    let mut call: Vec<Box<str>> = Vec::with_capacity(m);
+
+    for (i, e) in dirs.iter().enumerate() {
+        let (a, b) = e.edge;
+        from[i] = a as f32;
+        to[i] = b as f32;
+        geom[i] = e.geom_dist;
+        flux[i] = e.flux;
+        se[i] = e.se;
+        ci_lo[i] = e.ci_lo;
+        ci_hi[i] = e.ci_hi;
+        p[i] = e.p;
+        q[i] = e.q;
+        ncell[i] = e.n_cells as f32;
+        conf[i] = e.confidence;
+        in_mst[i] = if e.in_mst { 1.0 } else { 0.0 };
+        // Selected orientation from the branching (parent → child).
+        let (sel, df, dt, tr) = if br.parent[b] == Some(a) {
+            (1.0, a as f32, b as f32, br.tree[b] as f32)
+        } else if br.parent[a] == Some(b) {
+            (1.0, b as f32, a as f32, br.tree[a] as f32)
+        } else {
+            (0.0, f32::NAN, f32::NAN, f32::NAN)
+        };
+        selected[i] = sel;
+        dfrom[i] = df;
+        dto[i] = dt;
+        tree[i] = tr;
+        call.push(match e.call {
+            EdgeCall::Forward => "forward".into(),
+            EdgeCall::Reverse => "reverse".into(),
+            EdgeCall::Abstain => "unassigned".into(),
+        });
+    }
+
+    let rows = numbered("edge_", m);
+    write_named_table(
+        path,
+        "edge",
+        &rows,
+        &[
+            (Box::from("from"), Column::F32(&from)),
+            (Box::from("to"), Column::F32(&to)),
+            (Box::from("geom_dist"), Column::F32(&geom)),
+            (Box::from("velocity_flux"), Column::F32(&flux)),
+            (Box::from("se"), Column::F32(&se)),
+            (Box::from("ci_lo"), Column::F32(&ci_lo)),
+            (Box::from("ci_hi"), Column::F32(&ci_hi)),
+            (Box::from("p"), Column::F32(&p)),
+            (Box::from("q"), Column::F32(&q)),
+            (Box::from("n_cells"), Column::F32(&ncell)),
+            (Box::from("confidence"), Column::F32(&conf)),
+            (Box::from("in_mst"), Column::F32(&in_mst)),
+            (Box::from("selected"), Column::F32(&selected)),
+            (Box::from("directed_from"), Column::F32(&dfrom)),
+            (Box::from("directed_to"), Column::F32(&dto)),
+            (Box::from("tree"), Column::F32(&tree)),
+            (Box::from("call"), Column::Str(&call)),
+        ],
+    )
+    .with_context(|| format!("writing {path}"))?;
     info!("Wrote {path}");
+    Ok(())
+}
+
+/// `tree_c × [root, n_nodes, n_cells, mean_confidence]`: one row per forest tree.
+fn write_trees(br: &Branching, labels: &[usize], dirs_map: &DirsMap, path: &str) -> Result<()> {
+    let k = br.parent.len();
+    let n_comp = br.roots.len();
+
+    let mut n_nodes = vec![0f32; n_comp];
+    for v in 0..k {
+        n_nodes[br.tree[v]] += 1.0;
+    }
+    let mut n_cells = vec![0f32; n_comp];
+    for &l in labels {
+        if l < k {
+            n_cells[br.tree[l]] += 1.0;
+        }
+    }
+    // Mean confidence of the selected (parent → child) edges within each tree.
+    let mut conf_sum = vec![0f32; n_comp];
+    let mut conf_cnt = vec![0f32; n_comp];
+    for v in 0..k {
+        if let Some(u) = br.parent[v] {
+            if let Some(d) = dirs_map.get(&undirected(u, v)) {
+                conf_sum[br.tree[v]] += d.confidence;
+                conf_cnt[br.tree[v]] += 1.0;
+            }
+        }
+    }
+    let roots: Vec<f32> = br.roots.iter().map(|&r| r as f32).collect();
+    let mean_conf: Vec<f32> = (0..n_comp)
+        .map(|c| {
+            if conf_cnt[c] > 0.0 {
+                conf_sum[c] / conf_cnt[c]
+            } else {
+                f32::NAN
+            }
+        })
+        .collect();
+    let rows = numbered("tree_", n_comp);
+    write_named_table(
+        path,
+        "tree",
+        &rows,
+        &[
+            (Box::from("root"), Column::F32(&roots)),
+            (Box::from("n_nodes"), Column::F32(&n_nodes)),
+            (Box::from("n_cells"), Column::F32(&n_cells)),
+            (Box::from("mean_confidence"), Column::F32(&mean_conf)),
+        ],
+    )
+    .with_context(|| format!("writing {path}"))?;
+    info!("Wrote {path} ({n_comp} tree(s))");
     Ok(())
 }
 
@@ -1019,223 +1385,37 @@ fn write_lineages(curves: &PrincipalCurves, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// `cell × [pseudotime, branch]` (primary-lineage pseudotime + lineage id).
-fn write_pseudotime(curves: &PrincipalCurves, cell_names: &[Box<str>], path: &str) -> Result<()> {
+/// `cell × [pseudotime, branch, tree, order_confidence]`: primary-lineage pseudotime +
+/// global lineage id + forest tree id + the min edge confidence on the cell's root→node
+/// path (0 where the ordering crosses an abstained/geometry-only edge). `pseudotime` and
+/// `branch` stay the first two columns for back-compatibility with `faba dyn-assoc`.
+fn write_pseudotime(
+    curves: &PrincipalCurves,
+    cell_tree: &[usize],
+    order_conf: &[f32],
+    cell_names: &[Box<str>],
+    path: &str,
+) -> Result<()> {
     let n = curves.pseudotime.len();
-    let mut mat = DMatrix::<f32>::zeros(n, 2);
+    let mut mat = DMatrix::<f32>::zeros(n, 4);
     for i in 0..n {
         mat[(i, 0)] = curves.pseudotime[i];
         mat[(i, 1)] = curves.branch[i] as f32;
+        mat[(i, 2)] = if cell_tree[i] == usize::MAX {
+            f32::NAN
+        } else {
+            cell_tree[i] as f32
+        };
+        mat[(i, 3)] = order_conf[i];
     }
-    let cols: Vec<Box<str>> = vec!["pseudotime".into(), "branch".into()];
+    let cols: Vec<Box<str>> = vec![
+        "pseudotime".into(),
+        "branch".into(),
+        "tree".into(),
+        "order_confidence".into(),
+    ];
     mat.to_parquet_with_names(path, (Some(cell_names), Some("cell")), Some(&cols))?;
     info!("Wrote {path}");
-    Ok(())
-}
-
-/// Bootstrap-support of each reference junction. Refit the **undirected** branch structure
-/// under `n_boot` alternative k-means seeds (`base_seed+1 ..= base_seed+n_boot`) and score,
-/// per reference junction, how reproducibly its sibling split partitions the same cells —
-/// the mean Rand agreement between the reference sibling labelling of the junction's cells
-/// and each bootstrap run's labelling of those same cells. High support ⇒ a real branch
-/// point (survives reseeding); low ⇒ a seed-specific artefact. This is the "bootstrap the
-/// cell assignment, not the raw structure" scoring: it lives entirely in cell space, so the
-/// node ids being seed-specific doesn't matter. Orientation is irrelevant to whether a node
-/// is a junction, so the bootstrap runs unoriented. Returns `(junction_node, support, n_cells)`.
-fn bootstrap_junction_support(
-    theta: &DMatrix<f32>,
-    k: usize,
-    kmeans_iter: usize,
-    base_seed: u64,
-    n_boot: usize,
-    labels: &[usize],
-    ref_topo: &crate::lineage::branch::BranchTopology,
-) -> Vec<(usize, f32, usize)> {
-    use crate::lineage::branch::{detect_branches, BranchTopology};
-    use rayon::prelude::*;
-    let ncell = labels.len();
-
-    // Per-cell reference sibling placement: `Some((junction, sibling))` on any sibling branch,
-    // `None` at a hub or off any junction. Using the `Option<(usize,usize)>` shape directly
-    // (it already impls Hash+Eq+Copy) avoids a fragile u64 pack.
-    let place_of = |topo: &BranchTopology, node_of: &[usize]| -> Vec<Option<(usize, usize)>> {
-        (0..ncell)
-            .map(|c| {
-                topo.node_branch
-                    .get(node_of[c])
-                    .copied()
-                    .flatten()
-                    .and_then(|nb| nb.branch.map(|b| (nb.junction, b)))
-            })
-            .collect()
-    };
-    let ref_place = place_of(ref_topo, labels);
-
-    // Junctions are dense indices in 0..k — a Vec sized `k` skips the HashMap.
-    let mut cells_of: Vec<Vec<usize>> = vec![Vec::new(); k];
-    for (c, p) in ref_place.iter().enumerate() {
-        if let Some((j, _)) = p {
-            cells_of[*j].push(c);
-        }
-    }
-    let n_cells: Vec<usize> = ref_topo
-        .junctions
-        .iter()
-        .map(|&j| cells_of[j].len())
-        .collect();
-
-    // One bootstrap per seed. Each seed is independent so run them in par_iter and *fold*
-    // per-junction Rand agreement into a shared accumulator — no `boot_places` (would be
-    // n_boot × ncell Options, ~5–6 MB on 20 seeds × 18k cells). map-reduce keeps peak
-    // memory at O(ncell) per worker thread.
-    let ref_lab_per_junction: Vec<Vec<Option<(usize, usize)>>> = ref_topo
-        .junctions
-        .iter()
-        .map(|&j| cells_of[j].iter().map(|&c| ref_place[c]).collect())
-        .collect();
-    let sums: Vec<f32> = (1..=n_boot as u64)
-        .into_par_iter()
-        .map(|d| {
-            let seed = base_seed.wrapping_add(d);
-            let (centroids, blabels) = kmeans_centroids_seeded(theta, k, kmeans_iter, seed);
-            let (edges, _w) =
-                mst_from_sqdist(&pairwise_sqdist_rows_to_rows(&centroids, &centroids));
-            let topo = detect_branches(&edges, &[], k);
-            let bp = place_of(&topo, &blabels);
-            ref_topo
-                .junctions
-                .iter()
-                .enumerate()
-                .map(|(ji, &j)| {
-                    let cells = &cells_of[j];
-                    if cells.len() < 2 {
-                        return 0.0;
-                    }
-                    let boot_lab: Vec<Option<(usize, usize)>> =
-                        cells.iter().map(|&c| bp[c]).collect();
-                    rand_index(&ref_lab_per_junction[ji], &boot_lab)
-                })
-                .collect::<Vec<f32>>()
-        })
-        .reduce(
-            || vec![0f32; ref_topo.junctions.len()],
-            |mut a, b| {
-                for (a, b) in a.iter_mut().zip(b) {
-                    *a += b;
-                }
-                a
-            },
-        );
-
-    ref_topo
-        .junctions
-        .iter()
-        .enumerate()
-        .map(|(ji, &j)| {
-            let ncj = n_cells[ji];
-            let support = if ncj < 2 {
-                0.0
-            } else {
-                sums[ji] / n_boot as f32
-            };
-            (j, support, ncj)
-        })
-        .collect()
-}
-
-/// Rand index (fraction of item pairs that agree) between two labellings of the same items,
-/// via a contingency table — O(m), not O(m²). `1.0` for < 2 items.
-fn rand_index<A, B>(a: &[A], b: &[B]) -> f32
-where
-    A: std::hash::Hash + Eq + Copy,
-    B: std::hash::Hash + Eq + Copy,
-{
-    let m = a.len();
-    if m < 2 {
-        return 1.0;
-    }
-    let choose2 = |n: u64| (n * n.saturating_sub(1)) / 2;
-    let (ai, na) = intern_labels(a);
-    let (bi, nb) = intern_labels(b);
-    let mut n_ij: std::collections::HashMap<(usize, usize), u64> = std::collections::HashMap::new();
-    let mut a_cnt = vec![0u64; na];
-    let mut b_cnt = vec![0u64; nb];
-    for t in 0..m {
-        *n_ij.entry((ai[t], bi[t])).or_insert(0) += 1;
-        a_cnt[ai[t]] += 1;
-        b_cnt[bi[t]] += 1;
-    }
-    let total = choose2(m as u64) as i64;
-    if total == 0 {
-        return 1.0;
-    }
-    let sum_nij: i64 = n_ij.values().map(|&n| choose2(n) as i64).sum();
-    let sum_a: i64 = a_cnt.iter().map(|&n| choose2(n) as i64).sum();
-    let sum_b: i64 = b_cnt.iter().map(|&n| choose2(n) as i64).sum();
-    // agreements = same-in-both + different-in-both.
-    ((total - sum_a - sum_b + 2 * sum_nij) as f32 / total as f32).clamp(0.0, 1.0)
-}
-
-/// Map arbitrary hashable labels to compact `0..n` ids; returns `(ids, n)`. Named to avoid
-/// colliding with `matrix_util::knn_graph::compact_labels`, which is `&mut [usize] -> ()`.
-fn intern_labels<A: std::hash::Hash + Eq + Copy>(a: &[A]) -> (Vec<usize>, usize) {
-    let mut map: std::collections::HashMap<A, usize> = std::collections::HashMap::new();
-    let ids = a
-        .iter()
-        .map(|&x| {
-            let n = map.len();
-            *map.entry(x).or_insert(n)
-        })
-        .collect();
-    let n = map.len();
-    (ids, n)
-}
-
-/// `junction × [node, support, n_cells, marker_confidence]` + `marker_type` (Str): the
-/// per-junction trust score (bootstrap support ∈ [0,1]) and, when `--markers` ran, the
-/// junction node's cell-type call — the two scores that say which branch points to believe.
-fn write_junction_support(
-    support: &[(usize, f32, usize)],
-    node_calls: Option<&CommunityCalls>,
-    path: &str,
-) -> Result<()> {
-    let row_names: Vec<Box<str>> = support
-        .iter()
-        .map(|(j, _, _)| format!("junction_{j}").into_boxed_str())
-        .collect();
-    let node_ids: Vec<f32> = support.iter().map(|&(j, _, _)| j as f32).collect();
-    let sup: Vec<f32> = support.iter().map(|&(_, s, _)| s).collect();
-    let ncells: Vec<f32> = support.iter().map(|&(_, _, n)| n as f32).collect();
-    let marker_type: Vec<Box<str>> = support
-        .iter()
-        .map(|&(j, _, _)| {
-            node_calls
-                .and_then(|c| c.labels.get(j).cloned())
-                .unwrap_or_else(|| Box::from(""))
-        })
-        .collect();
-    let marker_conf: Vec<f32> = support
-        .iter()
-        .map(|&(j, _, _)| {
-            node_calls
-                .and_then(|c| c.confidence.get(j).copied())
-                .unwrap_or(f32::NAN)
-        })
-        .collect();
-    write_named_table(
-        path,
-        "junction",
-        &row_names,
-        &[
-            (Box::from("node"), Column::F32(&node_ids)),
-            (Box::from("support"), Column::F32(&sup)),
-            (Box::from("n_cells"), Column::F32(&ncells)),
-            (Box::from("marker_type"), Column::Str(&marker_type)),
-            (Box::from("marker_confidence"), Column::F32(&marker_conf)),
-        ],
-    )
-    .with_context(|| format!("writing {path}"))?;
-    info!("wrote {path} ({} junction(s))", support.len());
     Ok(())
 }
 

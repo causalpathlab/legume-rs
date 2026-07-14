@@ -9,5 +9,9 @@
 //! that generic tree: the velocity [`orient`]ation of edges (δ from gem), and the local,
 //! root-free [`branch`] structure (junctions + sibling branches).
 
+// Parked for the root-free sibling-branch association test (`faba dyn-assoc`); its former
+// consumer (the junction-support bootstrap) was removed with the velocity-forest rework.
+#[allow(dead_code)]
 pub mod branch;
+pub mod forest;
 pub mod orient;

@@ -102,3 +102,42 @@ fn contrast_large_counts_use_lrt() {
         betabinom_lrt_greater(a_w, a_w + u_w, a_m, a_m + u_m, 0.02)
     );
 }
+
+//////////////////////////////////////////
+// Bootstrap mean CI + sign-flip p-value //
+//////////////////////////////////////////
+
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
+
+#[test]
+fn bootstrap_ci_brackets_a_clear_positive_mean() {
+    // A tight positive sample: the mean is ~5 and the CI should sit well above 0.
+    let x: Vec<f32> = (0..40).map(|i| 5.0 + 0.01 * (i as f32 - 20.0)).collect();
+    let mut rng = SmallRng::seed_from_u64(1);
+    let (se, lo, hi) = bootstrap_mean_ci(&x, 500, 0.05, &mut rng);
+    assert!(lo > 0.0 && hi > lo, "CI [{lo}, {hi}] should clear 0");
+    assert!(se >= 0.0 && se < 0.1, "SE should be small, got {se}");
+    assert!(mean(&x) > lo && mean(&x) < hi, "CI brackets the mean");
+}
+
+#[test]
+fn sign_flip_rejects_strong_signal_and_not_zero_mean() {
+    let mut rng = SmallRng::seed_from_u64(2);
+    // All positive → the observed |mean| is never exceeded by a sign-flip → tiny p.
+    let pos = vec![1.0f32; 30];
+    assert!(sign_flip_pvalue(&pos, 500, &mut rng) < 0.01);
+    // Symmetric ±1 → mean 0 → every flip ties or exceeds → p ≈ 1.
+    let sym: Vec<f32> = (0..30)
+        .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+        .collect();
+    assert!(sign_flip_pvalue(&sym, 500, &mut rng) > 0.5);
+}
+
+#[test]
+fn bootstrap_and_sign_flip_handle_empty_input() {
+    let mut rng = SmallRng::seed_from_u64(3);
+    let (se, lo, hi) = bootstrap_mean_ci(&[], 100, 0.05, &mut rng);
+    assert!(se.is_nan() && lo.is_nan() && hi.is_nan());
+    assert!(sign_flip_pvalue(&[], 100, &mut rng).is_nan());
+}
