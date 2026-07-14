@@ -16,6 +16,10 @@
 mod bayes_common;
 pub mod contrast;
 pub mod contrast_bayes;
+
+/// The row both Bayesian tests report — see [`bayes_common::BayesResult`]. Re-exported here
+/// because it is the shape of their (identical) output schemas, which `run_assoc` writes.
+pub use bayes_common::BayesResult;
 pub mod gam;
 pub mod io;
 pub mod trend;

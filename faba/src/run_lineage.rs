@@ -688,6 +688,18 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         curves.n_lineages(),
         branching.roots.len()
     );
+    // Cells on a trivial tree (a lone centroid, or a tree with too few cells to fit a curve)
+    // get no position on any trajectory: their pseudotime is NaN. That is a real, reportable
+    // state, not a defect — but it is easy to miss in a parquet, and every downstream model
+    // (`faba assoc`) has to drop those cells, so say so here, at the source.
+    let n_unplaced = curves.pseudotime.iter().filter(|t| !t.is_finite()).count();
+    if n_unplaced > 0 {
+        log::warn!(
+            "{n_unplaced}/{} cell(s) have no pseudotime (their tree is too small to carry a \
+             curve); they are written as NaN and are skipped by `faba assoc`",
+            curves.pseudotime.len()
+        );
+    }
 
     /////////////
     // outputs //

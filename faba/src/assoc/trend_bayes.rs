@@ -20,7 +20,9 @@ use rayon::prelude::*;
 
 use mcmc_util::engine::EssSampler;
 
-use super::bayes_common::{derive_seed, softplus, summarize_posterior, Posterior, INTERCEPT_SD};
+use super::bayes_common::{
+    derive_seed, softplus, summarize_posterior, BayesResult, Posterior, INTERCEPT_SD,
+};
 use super::gam::{build_spline_design, SplineDesign};
 use super::io::{branch_buckets, Lineage, Site};
 
@@ -35,20 +37,11 @@ pub struct BayesTrendConfig {
     pub seed: u64,
 }
 
-pub struct BayesTrendResult {
-    pub site: usize,
-    pub branch: usize,
-    pub n_cells: usize,
-    pub total_cov: u64,
-    /// Posterior mean net change in log-odds from branch start → end.
-    pub effect: f32,
-    pub effect_sd: f32,
-    /// 5% and 95% posterior quantiles of the effect (90% credible interval).
-    pub effect_lo: f32,
-    pub effect_hi: f32,
-    /// Local false sign rate `min(P(effect > 0), P(effect < 0))`.
-    pub lfsr: f32,
-}
+/// One QC-passing (site, group) row of the within-group trend. Its `effect` is the posterior
+/// mean net change in log-odds from the group's start to its end. The row is [`BayesResult`],
+/// shared with the between-group contrast: the two tests differ in *what the contrast is*,
+/// not in what they report about it.
+pub type BayesTrendResult = BayesResult;
 
 /// Fit the Bayesian within-branch association for every (site, branch) that passes QC.
 /// Parallel over sites; each branch is one sequential ESS chain.
@@ -77,17 +70,7 @@ fn site_trends_bayes(
         }
         let seed = derive_seed(cfg.seed, si, l);
         if let Some((post, n_obs)) = fit_branch(&bd.k, &bd.n, &bd.x, cfg, seed) {
-            out.push(BayesTrendResult {
-                site: si,
-                branch: l,
-                n_cells: n_obs,
-                total_cov: bd.cov,
-                effect: post.effect,
-                effect_sd: post.effect_sd,
-                effect_lo: post.effect_lo,
-                effect_hi: post.effect_hi,
-                lfsr: post.lfsr,
-            });
+            out.push(BayesResult::new(si, l, n_obs, bd.cov, &post));
         }
     }
     out

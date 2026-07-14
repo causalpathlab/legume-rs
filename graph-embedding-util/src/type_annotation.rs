@@ -195,6 +195,10 @@ pub struct AnnotateProjConfig {
     pub feat_knn: usize,
     /// UMAP SGD epochs for the cell layout.
     pub umap_epochs: usize,
+    /// Minimum fraction of the marker panel that must be present on the embedding's feature
+    /// axis, or the run fails. See [`markers::parse_and_match_markers`]. `0.0` ⇒ report and
+    /// warn, never refuse.
+    pub min_panel_coverage: f32,
 }
 
 impl Default for AnnotateProjConfig {
@@ -216,6 +220,7 @@ impl Default for AnnotateProjConfig {
             phate_max_direct: 3000,
             feat_knn: 15,
             umap_epochs: 500,
+            min_panel_coverage: 0.0,
         }
     }
 }
@@ -343,7 +348,7 @@ pub fn annotate_embeddings(
     anyhow::ensure!(cell_names.len() == n, "cell_names len != cell rows");
     info!("annotate: β [{g} × {h}], cells [{n} × {h}]");
 
-    let (type_names, type_markers) = parse_and_match_markers(markers_path, gene_names, use_idf)?;
+    let (type_names, type_markers) = parse_and_match_markers(markers_path, gene_names, use_idf, cfg.min_panel_coverage)?;
     anyhow::ensure!(
         type_names.len() >= 2,
         "need ≥ 2 cell types with matched markers, found {}",

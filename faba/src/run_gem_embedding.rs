@@ -194,10 +194,24 @@ fn run_gem_genes_bge(
     // whether or not HVG is on, because it also exempts its genes from the
     // `--feature-null-fdr` drop below — the other gate a gene has to survive.
     let hvg_on = args.collapse.n_hvg > 0;
-    let must_train = data_beans_alg::hvg::load_must_train(
+    let selection_on = hvg_on || args.model.feature_null_fdr > 0.0;
+    // `--markers` is force-trained alongside `--must-train-features`. The annotators read
+    // only the TRAINED feature rows, so a marker off the trained axis is absent from the
+    // panel rather than merely down-weighted — naming the panel here is what keeps the genes
+    // the calls are made on and the genes the model fit the same set.
+    //
+    // The panel is kept separately as well as unioned in, so the coverage log below can say
+    // what share of the trained axis it is *without* re-reading the file.
+    let explicit = data_beans_alg::hvg::load_must_train(
         args.collapse.must_train_features.as_deref(),
-        hvg_on || args.model.feature_null_fdr > 0.0,
+        selection_on,
     )?;
+    let panel =
+        data_beans_alg::hvg::load_must_train(args.collapse.markers.as_deref(), selection_on)?;
+    let parts: Vec<&data_beans_alg::hvg::MustTrainFeatures> =
+        [explicit.as_ref(), panel.as_ref()].into_iter().flatten().collect();
+    let must_train =
+        (!parts.is_empty()).then(|| data_beans_alg::hvg::MustTrainFeatures::union(&parts));
 
     if hvg_on {
         use data_beans_alg::hvg::select_hvg_by_stats;
@@ -227,11 +241,14 @@ fn run_gem_genes_bge(
 
         // Force-include, resolved against the GENE keys (not the count rows), so a
         // `CD8A` panel entry keeps `CD8A/count/spliced` AND `CD8A/count/unspliced`.
+        // The index lowercases and hash-indexes the whole gene vocabulary, so build it once
+        // and resolve both lists (the force-train union, then the panel) against it.
+        let gene_index = data_beans::utilities::name_matching::GeneIndex::build(&genes);
         let forced = if let Some(must_train) = must_train.as_ref() {
-            let forced = must_train.resolve(&genes);
+            let forced = must_train.resolve_with(&gene_index);
             let added = data_beans_alg::hvg::union_indices(&mut selected, &forced);
             info!(
-                "--must-train-features: {added} gene(s) force-added on top of the HVG cut \
+                "force-train: {added} gene(s) added on top of the HVG cut \
                  ({} of the {} matched were already HVGs)",
                 forced.len() - added,
                 forced.len()
@@ -242,6 +259,27 @@ fn run_gem_genes_bge(
         };
 
         let keep_genes: rustc_hash::FxHashSet<usize> = selected.into_iter().collect();
+
+        // What share of the trained axis IS the marker panel? Worth saying out loud, because
+        // it is the price of forcing the panel in: the embedding is now partly built to
+        // separate the very compartments the panel will later be used to call, so a
+        // downstream "the markers agree with the clusters" check is a check on the grouping,
+        // not an independent confirmation. Small share ⇒ the axis still has its own opinion.
+        if let Some(panel) = panel.as_ref() {
+            let on_axis = panel
+                .resolve_quiet_with(&gene_index)
+                .into_iter()
+                .filter(|g| keep_genes.contains(g))
+                .count();
+            info!(
+                "--markers: {on_axis} panel gene(s) on the trained axis = {:.0}% of its {} \
+                 gene(s). The embedding is trained to separate what the panel will later \
+                 call, so read `annotate`'s agreement as a check on the grouping, not an \
+                 independent one.",
+                100.0 * on_axis as f32 / keep_genes.len().max(1) as f32,
+                keep_genes.len()
+            );
+        }
         let keep_rows: Vec<usize> = (0..row_gene.len())
             .filter(|&r| keep_genes.contains(&(row_gene[r] as usize)))
             .collect();

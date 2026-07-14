@@ -171,6 +171,31 @@ pub struct CollapseArgs {
     pub must_train_features: Option<Box<str>>,
 
     #[arg(
+        long = "markers",
+        value_name = "FILE",
+        help = "Marker panel this embedding will be annotated with — force-trained, like \
+                --must-train-features",
+        long_help = "The `gene<TAB>celltype` marker panel that `faba annotate` /\n\
+                     `faba lineage --markers` will later score against this embedding. Its\n\
+                     genes are UNIONed into `--must-train-features`, i.e. trained in-model\n\
+                     regardless of the `--n-hvg` cut and the `--feature-null-fdr` drop.\n\
+                     \n\
+                     This exists because the two ends of the pipeline are easy to leave\n\
+                     inconsistent. The embedding writes only its TRAINED feature rows to\n\
+                     `{out}.feature_embedding.parquet`, and that is the table the annotators\n\
+                     read — so a marker that misses the HVG cut is not merely down-weighted,\n\
+                     it is ABSENT, and it silently leaves the panel. A cell type that entered\n\
+                     with 20 markers and scores on 1 still produces a confident-looking call.\n\
+                     Naming the panel here removes the failure mode: the genes the calls will\n\
+                     be made on are, by construction, the genes the model fit.\n\
+                     \n\
+                     Same format and lenient name matching as --must-train-features (the\n\
+                     celltype column is ignored here); pass the SAME file you will pass to\n\
+                     `faba annotate --markers`."
+    )]
+    pub markers: Option<Box<str>>,
+
+    #[arg(
         long,
         default_value = "",
         help = "Strip this suffix from each --genes file basename to form its sample id"

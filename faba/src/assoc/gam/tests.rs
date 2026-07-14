@@ -116,6 +116,41 @@ fn uncovered_cells_are_ignored() {
     );
 }
 
+#[test]
+fn nan_pseudotime_cells_are_dropped_not_panicked() {
+    // A cell the lineage could not place on a tree carries a NaN pseudotime. It used to
+    // reach the knot sort and panic on `partial_cmp(...).unwrap()`: `f32::min`/`f32::max`
+    // *skip* NaN, so lo/hi came back finite and the `span > 0` guard let it through.
+    let (mut k, mut n, mut x) = logit_line(-2.5, 5.0, 30, 60);
+    for i in (0..x.len()).step_by(5) {
+        x[i] = f32::NAN;
+    }
+    let fit = association_test(&k, &n, &x, &GamArgs::default()).expect("fit");
+    assert_eq!(fit.n_obs, 48, "the 12 NaN-pseudotime cells are dropped");
+    assert!(
+        fit.p_value < 0.05 && fit.effect > 0.0,
+        "the rising trend survives dropping them, p={} effect={}",
+        fit.p_value,
+        fit.effect
+    );
+
+    // ±inf is unusable for the same reason (it destroys the [0,1] rescale), so it goes too.
+    k.push(5);
+    n.push(30);
+    x.push(f32::INFINITY);
+    let fit_inf = association_test(&k, &n, &x, &GamArgs::default()).expect("fit");
+    assert_eq!(fit_inf.n_obs, 48, "the infinite pseudotime is dropped too");
+}
+
+#[test]
+fn all_nan_pseudotime_returns_none() {
+    // Every cell unplaceable ⇒ no usable observation ⇒ no test, rather than a panic or a
+    // fit on an empty design.
+    let (k, n, _) = logit_line(-2.5, 5.0, 30, 60);
+    let x = vec![f32::NAN; k.len()];
+    assert!(association_test(&k, &n, &x, &GamArgs::default()).is_none());
+}
+
 /// Regenerate the mgcv / tradeSeq comparison data consumed by
 /// `faba/examples/gam_compare*.R`. Ignored by default; run on demand:
 ///   `GAM_COMPARE_DIR=/dir cargo test -p faba --bin faba \`

@@ -87,6 +87,7 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
     );
 
     let cfg = TermOraConfig {
+        min_panel_coverage: 0.0, // the default: report + warn on a thin panel, never refuse
         knn: args.knn,
         resolution: args.resolution,
         seed: args.seed,

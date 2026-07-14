@@ -130,6 +130,11 @@ pub struct TermOraConfig {
     /// so every call carries the support it earned across resamples and an unreproducible one
     /// abstains. `None` ⇒ the point-estimate path, unchanged.
     pub bootstrap: Option<MarkerBootstrapConfig>,
+    /// Minimum fraction of the marker panel that must be present on the embedding's feature
+    /// axis, or the run fails. Guards the silent case where the HVG cut has left a type
+    /// scoring on a handful of its genes and the call still looks confident (see
+    /// [`super::markers::parse_and_match_markers`]). `0.0` ⇒ report and warn, never refuse.
+    pub min_panel_coverage: f32,
 }
 
 impl Default for TermOraConfig {
@@ -150,6 +155,7 @@ impl Default for TermOraConfig {
             panel_perm: 0,
             support_perm: 0,
             bootstrap: None,
+            min_panel_coverage: 0.0,
         }
     }
 }
@@ -315,7 +321,7 @@ fn annotate_inner(
     anyhow::ensure!(n_comm >= 1, "need ≥ 1 community, got {n_comm}");
     info!("term-ORA: β [{g} × {h}], cells [{n} × {h}], {n_comm} group(s)");
 
-    let (type_names, type_markers) = parse_and_match_markers(markers_path, gene_names, use_idf)?;
+    let (type_names, type_markers) = parse_and_match_markers(markers_path, gene_names, use_idf, cfg.min_panel_coverage)?;
     let c = type_names.len();
     anyhow::ensure!(
         c >= 2,

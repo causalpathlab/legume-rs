@@ -29,7 +29,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /////////////////////////
 
 /// Which barcode-QC criterion to apply when selecting cells.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub enum CellFilter {
     /// OrdMag knee ∪ EmptyDrops (CellRanger-style; the default).
     #[default]
@@ -92,7 +92,7 @@ impl Default for CellCallParams {
 
 /// Shared CLI knobs for cell calling, flattened into each subcommand that does
 /// gene-count QC (`genes`, `apa`, `atoi`, `dartseq`, `all`).
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, serde::Serialize)]
 pub struct CellQcArgs {
     /// Cell-calling method (barcode QC)
     #[arg(

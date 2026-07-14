@@ -18,10 +18,19 @@ pub(super) type MarkerSets = Vec<Vec<(u32, f32)>>;
 /// in the nearest-centroid assignment — see `term_ora::assign_nearest` for the
 /// geometry and what it cost on a real run. Dropping the type here also keeps
 /// the reported counts honest: a type we cannot score should not appear at all.
+///
+/// **A type that keeps only a sliver of its panel is the quieter, more dangerous case**,
+/// and [`report_panel_coverage`] is what surfaces it. The embedding is trained on a
+/// feature axis narrowed by the HVG cut (`--n-hvg`) and the feature-null FDR, and a marker
+/// off that axis is not *projected*, it is simply **absent** — so it silently leaves the
+/// panel. A type that entered with 20 markers and scores on 1 still produces a confident-
+/// looking call, indistinguishable in the output from one that kept all 20. `min_coverage`
+/// is the floor below which that stops being a warning and becomes an error.
 pub(super) fn parse_and_match_markers(
     markers_path: &str,
     gene_names: &[Box<str>],
     use_idf: bool,
+    min_coverage: f32,
 ) -> Result<(Vec<Box<str>>, MarkerSets)> {
     let pairs = read_marker_tsv(markers_path)?;
 
@@ -40,6 +49,10 @@ pub(super) fn parse_and_match_markers(
 
     let c = type_names.len();
     let mut membership: Vec<FxHashSet<u32>> = vec![FxHashSet::default(); c];
+    // Distinct genes the panel *asked* for, per type — the denominator of the coverage
+    // report below. Kept separate from `membership` (the ones we could find) because the
+    // gap between the two is the whole point.
+    let mut requested: Vec<FxHashSet<&str>> = vec![FxHashSet::default(); c];
     // Memoize matches by gene string: the same gene recurs across types, and
     // the flexible fallback is an O(genes) scan — resolve each distinct gene
     // at most once.
@@ -49,6 +62,7 @@ pub(super) fn parse_and_match_markers(
         let Some(&ti) = type_idx.get(ct.as_ref()) else {
             continue;
         };
+        requested[ti].insert(gene.as_ref());
         match *match_cache
             .entry(gene.as_ref())
             .or_insert_with(|| index.match_gene(gene))
@@ -62,6 +76,7 @@ pub(super) fn parse_and_match_markers(
     if unmatched > 0 {
         info!("{unmatched} marker pairs had no matching gene (dropped)");
     }
+    report_panel_coverage(&type_names, &requested, &membership, min_coverage)?;
 
     // IDF: df_gene = #types containing the gene.
     let mut df: FxHashMap<u32, usize> = FxHashMap::default();
@@ -119,6 +134,100 @@ pub(super) fn parse_and_match_markers(
     );
 
     Ok((kept_names, kept_markers))
+}
+
+/// Coverage below which a panel is reported as degraded rather than merely noted. Shared with
+/// `auxiliary-data`'s gene-set reconciliation, which asks the same question of GAF/GMT term
+/// sets — a marker panel is just another term→genes map, and a thin overlap means the same
+/// thing in both.
+use auxiliary_data::gene_sets::COVERAGE_WARN_FRAC as WARN_COVERAGE;
+
+/// How many under-covered types to name before truncating the warning.
+const MAX_LISTED: usize = 10;
+
+/// Report what fraction of the marker panel actually reached the embedding, overall and per
+/// type — and fail when it falls under `min_coverage`.
+///
+/// This is the guard on a failure mode that otherwise leaves no trace. Marker calls are only
+/// as good as the genes they are computed on, but the embedding's feature axis is narrowed
+/// long before the panel is read (`--n-hvg`, then the feature-null FDR), and a marker that
+/// falls off that axis just quietly stops contributing. The result is a call that *looks*
+/// identical to a well-supported one: same shape of output, same confidence, computed on a
+/// handful of surviving genes. Without this, the only signal is a count of dropped pairs,
+/// which says nothing about *which* types were gutted.
+///
+/// `min_coverage == 0` (the default) never errors — it reports and warns, so existing
+/// pipelines keep running while the degradation stops being invisible. Set it to make a
+/// thin panel fatal.
+fn report_panel_coverage(
+    type_names: &[Box<str>],
+    requested: &[FxHashSet<&str>],
+    membership: &[FxHashSet<u32>],
+    min_coverage: f32,
+) -> Result<()> {
+    let (n_req, n_hit): (usize, usize) = (
+        requested.iter().map(FxHashSet::len).sum(),
+        membership.iter().map(FxHashSet::len).sum(),
+    );
+    if n_req == 0 {
+        return Ok(());
+    }
+    let overall = n_hit as f32 / n_req as f32;
+
+    // Per-type coverage, worst first — the overall number can look healthy while one type
+    // has been reduced to a single gene.
+    let mut thin: Vec<(f32, &str, usize, usize)> = (0..type_names.len())
+        .filter(|&i| !requested[i].is_empty())
+        .map(|i| {
+            let (hit, req) = (membership[i].len(), requested[i].len());
+            (hit as f32 / req as f32, type_names[i].as_ref(), hit, req)
+        })
+        .filter(|&(cov, ..)| cov < WARN_COVERAGE)
+        .collect();
+    thin.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    info!(
+        "marker panel: {n_hit}/{n_req} genes ({:.0}%) are on the embedding's feature axis, \
+         across {} type(s)",
+        overall * 100.0,
+        type_names.len()
+    );
+
+    if !thin.is_empty() {
+        let listed: Vec<String> = thin
+            .iter()
+            .take(MAX_LISTED)
+            .map(|(cov, name, hit, req)| format!("{name} {hit}/{req} ({:.0}%)", cov * 100.0))
+            .collect();
+        // Name `--must-train-features`, not `faba gem --markers`: this guard fires in senna and
+        // pinto too, and they have the former but not the latter. A warning whose remedy is a
+        // flag your binary does not have is a warning you learn to ignore.
+        warn!(
+            "{} marker type(s) kept under {:.0}% of their panel — their calls rest on the few \
+             genes that survived the feature axis, and will still look confident: {}{}. \
+             Widen the axis (raise `--n-hvg`) or force the panel into training with \
+             `--must-train-features <the marker file>` (in faba, `gem --markers` does this).",
+            thin.len(),
+            WARN_COVERAGE * 100.0,
+            listed.join("; "),
+            if thin.len() > MAX_LISTED {
+                format!(", … and {} more", thin.len() - MAX_LISTED)
+            } else {
+                String::new()
+            }
+        );
+    }
+
+    anyhow::ensure!(
+        overall >= min_coverage,
+        "marker panel coverage {:.0}% is below the required {:.0}% ({n_hit}/{n_req} genes on \
+         the embedding's feature axis). The panel the calls would be built on is mostly \
+         missing. Widen the feature axis (raise `--n-hvg`) or force the panel into training \
+         with `--must-train-features <the marker file>` (in faba, `gem --markers` does this).",
+        overall * 100.0,
+        min_coverage * 100.0
+    );
+    Ok(())
 }
 
 /// Parse a marker TSV/CSV into `(gene, celltype)` pairs via the shared,

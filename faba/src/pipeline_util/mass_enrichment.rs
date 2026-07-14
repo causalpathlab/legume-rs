@@ -229,23 +229,30 @@ fn embed_cells_from_matrices(
 
 /// CLI knobs for the mass-enrichment grouping, shared (via `#[command(flatten)]`)
 /// by every subcommand that stratifies detection by cell group (`m6a`, `pipeline`).
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, serde::Serialize)]
 pub struct MassEnrichmentArgs {
-    // The single clustering knob most users touch: Leiden auto-grouping is ON by
-    // default; this dial tunes granularity (or disables it). Everything below is
-    // advanced embedding/QC tuning, hidden from the short `-h` view.
+    // The single clustering knob most users touch: this dial turns Leiden auto-grouping
+    // on and tunes its granularity. Everything below is advanced embedding/QC tuning,
+    // hidden from the short `-h` view.
     #[arg(
         long = "cluster-resolution",
-        default_value_t = 0.5,
-        help = "Leiden auto-grouping for mass enrichment: ON by default at 0.5; 0 = off (bulk); higher → more groups",
+        default_value_t = 0.0,
+        help = "Leiden auto-grouping for mass enrichment: OFF by default (bulk); set > 0 to enable (try 0.5; higher → more groups)",
         long_help = "Leiden modularity resolution for mass-enrichment cell grouping.\n\
-                     Grouping is ON by default (0.5): cells are embedded (random\n\
-                     projection + SVD on gene expression) and Leiden community\n\
-                     detection groups them automatically — the group count is NOT\n\
-                     fixed, it emerges from the graph (higher resolution → more,\n\
-                     finer groups). Discovery then runs per group so cell-type-\n\
-                     specific edits are not diluted. Set 0 to disable grouping and\n\
-                     fall back to bulk (single-group) detection."
+                     \n\
+                     OFF by default (0): discovery runs in bulk, over all cells at\n\
+                     once. Set a positive resolution to turn grouping on — cells are\n\
+                     embedded (random projection + SVD on gene expression) and Leiden\n\
+                     community detection groups them automatically, the group count NOT\n\
+                     fixed but emerging from the graph (higher resolution → more, finer\n\
+                     groups). Discovery then runs per group, so cell-type-specific edits\n\
+                     are not diluted by the cells that do not carry them. Try 0.5.\n\
+                     \n\
+                     The default is off because grouping is expensive — it adds a cell\n\
+                     embedding, a kNN graph, and Leiden, and then multiplies the\n\
+                     discovery work by the number of groups. It is a deliberate opt-in\n\
+                     for when a rare compartment's edits are being washed out, not\n\
+                     something to pay for on every run."
     )]
     pub cluster_resolution: f64,
 

@@ -160,16 +160,47 @@ impl MustTrainFeatures {
     /// Load the list from any of the supported formats. See the
     /// `--must-train-features` `long_help` for the accepted layouts.
     pub fn load(file_path: &str) -> anyhow::Result<Self> {
-        let names = read_name_list(file_path)?;
-        info!(
-            "--must-train-features: {} name(s) read from {}",
-            names.len(),
-            file_path
-        );
+        Self::load_union(std::slice::from_ref(&file_path))
+    }
+
+    /// Load the **union** of several name lists as one force-train set.
+    ///
+    /// The motivating pair is an explicit `--must-train-features` list plus the `--markers`
+    /// panel a downstream `annotate` will score on: those genes have to be on the trained
+    /// axis for their calls to mean anything, and requiring the user to name the same file
+    /// twice is exactly the kind of step that gets forgotten. Empty input is not an error —
+    /// it just yields an empty set.
+    pub fn load_union(file_paths: &[&str]) -> anyhow::Result<Self> {
+        let mut names: Vec<Box<str>> = Vec::new();
+        for path in file_paths {
+            let read = read_name_list(path)?;
+            info!("force-train: {} name(s) read from {path}", read.len());
+            names.extend(read);
+        }
+        names.sort_unstable();
+        names.dedup();
         Ok(Self {
             names,
-            source: file_path.into(),
+            source: file_paths.join(" + ").into(),
         })
+    }
+
+    /// Union of **already-loaded** lists, so a caller holding both an explicit force-train
+    /// list and a marker panel can merge them without re-reading either file.
+    #[must_use]
+    pub fn union(parts: &[&Self]) -> Self {
+        let mut names: Vec<Box<str>> = parts.iter().flat_map(|p| p.names.iter().cloned()).collect();
+        names.sort_unstable();
+        names.dedup();
+        let source = parts
+            .iter()
+            .map(|p| p.source.as_ref())
+            .collect::<Vec<_>>()
+            .join(" + ");
+        Self {
+            names,
+            source: source.into_boxed_str(),
+        }
     }
 
     /// Resolve the list against a vocabulary (feature names, or the interned gene
@@ -181,7 +212,15 @@ impl MustTrainFeatures {
     /// that a given assay never captured.
     #[must_use]
     pub fn resolve(&self, vocab: &[Box<str>]) -> Vec<usize> {
-        let index = GeneIndex::build(vocab);
+        self.resolve_with(&GeneIndex::build(vocab))
+    }
+
+    /// [`Self::resolve`] against an **already-built** index. Building a [`GeneIndex`] lowercases
+    /// and hash-indexes the whole gene vocabulary — tens of thousands of allocations — so a
+    /// caller resolving two lists against the same vocabulary should build it once and call
+    /// this twice, rather than paying for the index on each list.
+    #[must_use]
+    pub fn resolve_with(&self, index: &GeneIndex) -> Vec<usize> {
         let mut hits: Vec<usize> = Vec::with_capacity(self.names.len());
         let mut misses: Vec<&str> = Vec::new();
         for name in &self.names {
@@ -194,7 +233,7 @@ impl MustTrainFeatures {
         hits.dedup();
 
         info!(
-            "--must-train-features: {} / {} name(s) from {} matched the data",
+            "force-train: {} / {} name(s) from {} matched the data",
             hits.len(),
             self.names.len(),
             self.source
@@ -202,7 +241,7 @@ impl MustTrainFeatures {
         if !misses.is_empty() {
             let preview: Vec<&str> = misses.iter().take(10).copied().collect();
             log::warn!(
-                "--must-train-features: {} name(s) not found in the data and ignored: {:?}{}",
+                "force-train: {} name(s) not found in the data and ignored: {:?}{}",
                 misses.len(),
                 preview,
                 if misses.len() > preview.len() {
@@ -220,7 +259,12 @@ impl MustTrainFeatures {
     /// re-reporting reads as a second, different list).
     #[must_use]
     pub fn resolve_quiet(&self, vocab: &[Box<str>]) -> Vec<usize> {
-        let index = GeneIndex::build(vocab);
+        self.resolve_quiet_with(&GeneIndex::build(vocab))
+    }
+
+    /// [`Self::resolve_quiet`] against an already-built index — see [`Self::resolve_with`].
+    #[must_use]
+    pub fn resolve_quiet_with(&self, index: &GeneIndex) -> Vec<usize> {
         let mut hits: Vec<usize> = self
             .names
             .iter()
@@ -241,17 +285,28 @@ pub fn load_must_train(
     must_train_file: Option<&str>,
     selection_on: bool,
 ) -> anyhow::Result<Option<MustTrainFeatures>> {
-    match must_train_file {
-        Some(path) if !selection_on => {
-            log::warn!(
-                "--must-train-features {path} is a no-op: feature selection is off \
-                 (--n-hvg 0 / no feature list), so every feature is trained anyway."
-            );
-            Ok(None)
-        }
-        Some(path) => MustTrainFeatures::load(path).map(Some),
-        None => Ok(None),
+    load_must_train_union(must_train_file.as_slice(), selection_on)
+}
+
+/// [`load_must_train`] over the **union** of several lists — an explicit force-train list
+/// plus, say, the marker panel the run will later be annotated with. Same no-op guard: with
+/// selection off, nothing can be promoted, so say so rather than appear to work.
+pub fn load_must_train_union(
+    paths: &[&str],
+    selection_on: bool,
+) -> anyhow::Result<Option<MustTrainFeatures>> {
+    if paths.is_empty() {
+        return Ok(None);
     }
+    if !selection_on {
+        log::warn!(
+            "force-train list ({}) is a no-op: feature selection is off \
+             (--n-hvg 0 / no feature list), so every feature is trained anyway.",
+            paths.join(" + ")
+        );
+        return Ok(None);
+    }
+    MustTrainFeatures::load_union(paths).map(Some)
 }
 
 /// Merge `extra` into `selected` in place (both become ascending + deduped).
