@@ -88,12 +88,20 @@ pub struct SplineDesign {
 
 /// Build the standardized spline design for one branch's covered cells.
 ///
-/// Drops uncovered observations, standardizes pseudotime to `[0, 1]`, places
-/// `n_knots` knots at its quantiles (auto-reduced for small/degenerate branches),
-/// builds a restricted-cubic-spline (or straight-line) design, and centers + scales
-/// the spline columns. Returns `None` when the branch cannot support a spline: fewer
-/// than 4 covered observations, no pseudotime spread, or too few observations for the
-/// spline parameters.
+/// Drops uncovered (`n == 0`) and non-finite-pseudotime observations, standardizes
+/// pseudotime to `[0, 1]`, places `n_knots` knots at its quantiles (auto-reduced for
+/// small/degenerate branches), builds a restricted-cubic-spline (or straight-line)
+/// design, and centers + scales the spline columns. Returns `None` when the branch
+/// cannot support a spline: fewer than 4 usable observations, no pseudotime spread, or
+/// too few observations for the spline parameters.
+///
+/// Dropping non-finite `x` is this function's **own contract**, not a guard against one
+/// caller: it is a public spline builder taking a raw `&[f32]`, and a point with no abscissa
+/// is not an observation to fit. (`faba assoc` separately drops unplaceable cells at its
+/// input boundary — see [`crate::assoc::io::load_lineage`] — but the tests here call this
+/// with hand-built vectors, and so may anything else.) The guard has to be explicit because
+/// `f32::min`/`f32::max` silently *skip* NaN: a NaN sails through the `span > 0` check below
+/// and only surfaces at the sort, as an unorderable value.
 pub fn build_spline_design(
     k: &[u32],
     n: &[u32],
@@ -105,12 +113,12 @@ pub fn build_spline_design(
         return None;
     }
 
-    // Drop uncovered observations; standardize x to [0, 1] for conditioning.
+    // Drop uncovered / unplaceable observations; standardize x to [0, 1] for conditioning.
     let mut xs = Vec::with_capacity(n_obs);
     let mut kk = Vec::with_capacity(n_obs);
     let mut nn = Vec::with_capacity(n_obs);
     for i in 0..n_obs {
-        if n[i] > 0 {
+        if n[i] > 0 && x[i].is_finite() {
             xs.push(x[i]);
             kk.push(k[i] as f32);
             nn.push(n[i] as f32);
@@ -134,8 +142,10 @@ pub fn build_spline_design(
     }
 
     // Effective knots: cap by requested, distinct-x, and observations (need m > p + 1).
+    // `xs` is finite by construction, so `total_cmp` is a plain sort here — it just cannot
+    // panic if that ever stops holding.
     let mut distinct = xs.clone();
-    distinct.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    distinct.sort_by(|a, b| a.total_cmp(b));
     distinct.dedup_by(|a, b| (*a - *b).abs() < 1e-7);
     let n_distinct = distinct.len();
     let k_eff = n_knots.min(n_distinct).min((m - 2).max(2)).max(2);
@@ -167,12 +177,8 @@ pub fn build_spline_design(
     }
 
     // Start→end contrast on the standardized rows (intercept term cancels to 0).
-    let imin = (0..m)
-        .min_by(|&a, &b| xs[a].partial_cmp(&xs[b]).unwrap())
-        .unwrap();
-    let imax = (0..m)
-        .max_by(|&a, &b| xs[a].partial_cmp(&xs[b]).unwrap())
-        .unwrap();
+    let imin = (0..m).min_by(|&a, &b| xs[a].total_cmp(&xs[b])).unwrap();
+    let imax = (0..m).max_by(|&a, &b| xs[a].total_cmp(&xs[b])).unwrap();
     let contrast = DVector::from_fn(p, |j, _| xd[(imax, j)] - xd[(imin, j)]);
 
     Some(SplineDesign {

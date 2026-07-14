@@ -24,7 +24,7 @@ use rayon::prelude::*;
 
 use mcmc_util::engine::EssSampler;
 
-use super::bayes_common::{derive_seed, softplus, summarize_posterior, INTERCEPT_SD};
+use super::bayes_common::{derive_seed, softplus, summarize_posterior, BayesResult, INTERCEPT_SD};
 use super::contrast::bin_pseudotime;
 use super::io::{Lineage, Site};
 
@@ -39,21 +39,12 @@ pub struct BayesContrastConfig {
     pub seed: u64,
 }
 
-pub struct BayesContrastResult {
-    pub site: usize,
-    pub branch: usize,
-    pub n_cells: usize,
-    pub total_cov: u64,
-    /// Posterior mean of `β` — the pseudotime-adjusted log-odds excess of the branch vs rest.
-    pub effect: f32,
-    pub effect_sd: f32,
-    /// 5% / 95% posterior quantiles of `β` (90% credible interval).
-    pub effect_lo: f32,
-    pub effect_hi: f32,
-    /// Local false sign rate `min(P(β>0), P(β<0))` — small when the branch's editing differs
-    /// from the other fates in a consistent direction.
-    pub lfsr: f32,
-}
+/// One QC-passing (site, group) row of the between-group contrast. Its `effect` is `β` — the
+/// pseudotime-adjusted log-odds excess of the group vs the pooled rest — and a small `lfsr`
+/// means the group's editing differs from the other fates in a consistent direction. The row
+/// is [`BayesResult`], shared with the within-group trend: the two tests differ in *what the
+/// contrast is*, not in what they report about it.
+pub type BayesContrastResult = BayesResult;
 
 /// Fit the Bayesian between-branch contrast for every (site, branch) that passes QC. Parallel
 /// over sites; each branch is one sequential ESS chain (no nested rayon).
@@ -102,17 +93,7 @@ fn site_contrasts_bayes(
         }
         let seed = derive_seed(cfg.seed, si, l);
         if let Some(post) = fit_contrast(nb, nbr, l, &aggk, &aggn, cfg, seed) {
-            out.push(BayesContrastResult {
-                site: si,
-                branch: l,
-                n_cells: n_cells[l],
-                total_cov: br_cov[l],
-                effect: post.effect,
-                effect_sd: post.effect_sd,
-                effect_lo: post.effect_lo,
-                effect_hi: post.effect_hi,
-                lfsr: post.lfsr,
-            });
+            out.push(BayesResult::new(si, l, n_cells[l], br_cov[l], &post));
         }
     }
     out

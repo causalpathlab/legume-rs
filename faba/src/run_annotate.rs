@@ -290,6 +290,25 @@ pub struct AnnotateArgs {
             unassigned"
     )]
     pub max_set_size: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        value_name = "FRAC",
+        help = "Fail if under this fraction of the marker panel is on the embedding's \
+                feature axis (0 = report only)",
+        long_help = "Refuse to annotate on a marker panel the embedding mostly never saw.\n\n\
+            `faba gem` writes only its TRAINED feature rows, so a marker that missed the\n\
+            `--n-hvg` cut is not down-weighted — it is ABSENT, and it silently drops out of\n\
+            the panel. A cell type that entered with 20 markers and scores on 1 still gets a\n\
+            confident-looking call, and nothing in the output distinguishes it from a\n\
+            well-supported one.\n\n\
+            The coverage is always reported, and a type keeping under half its panel always\n\
+            warns. This makes it fatal instead. The fix when it fires is to widen the axis\n\
+            (raise `--n-hvg`) or to force the panel into training — `faba gem --markers\n\
+            <the same file>`."
+    )]
+    pub min_panel_coverage: f32,
 }
 
 pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
@@ -298,6 +317,7 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
     mkdir_parent(&out)?;
 
     let cfg = TermOraConfig {
+        min_panel_coverage: args.min_panel_coverage,
         knn: args.knn,
         resolution: args.resolution,
         seed: args.seed,

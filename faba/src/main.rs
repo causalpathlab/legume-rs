@@ -438,6 +438,13 @@ Example:\n  \
             lineages onto one pseudotime axis weakens the trend reading). Skip with --no-celltype.\n\n\
             Not double-dipping: branches come from gem θ + velocity, which never see the\n\
             modality.\n\n\
+            Output is tidy: `site | gene | subunit | branch` (branch level) or\n\
+            `site | gene | subunit | cell_type` (cell-type level — no branch column, because a\n\
+            cell-type aggregate pools cells across branches), then the values. The Bayesian\n\
+            tables also carry `ess` and `mcse_lfsr`: lfsr is a Monte-Carlo tail probability, so\n\
+            a site near --fdr-alpha can cross it with the seed, and mcse_lfsr is that error per\n\
+            site. When |lfsr - alpha| is not comfortably above mcse_lfsr, raise\n\
+            --posterior-samples rather than reading anything into the effect.\n\n\
             Reference:\n  \
             Van den Berge et al., \"Trajectory-based differential expression analysis\n\
             for single-cell sequencing data\", Nat Commun 11:1201, 2020.",

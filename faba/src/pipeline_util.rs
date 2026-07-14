@@ -768,7 +768,7 @@ pub const MITO_CHR_DEFAULT: &str = "chrM,chrMT,MT,M";
 /// does gene-count QC (`genes`, `apa`, `atoi`, `dartseq`, `all`) so the policy
 /// is spelled the same way everywhere. Mirrors [`crate::cell_qc::CellQcArgs`];
 /// resolve to the clap-free [`MitoQcParams`] with [`MitoQcArgs::params`].
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, serde::Serialize)]
 pub struct MitoQcArgs {
     /// Mitochondrial chromosome name(s), comma-separated
     #[arg(

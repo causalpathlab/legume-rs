@@ -192,6 +192,7 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
     mkdir_parent(&out)?;
 
     let cfg = TermOraConfig {
+        min_panel_coverage: 0.0, // the default: report + warn on a thin panel, never refuse
         knn: args.knn,
         resolution: args.resolution,
         seed: args.seed,

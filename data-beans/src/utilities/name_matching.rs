@@ -159,20 +159,137 @@ fn is_ensembl_id(s: &str) -> bool {
     s.len() >= 8 && s.starts_with("ens") && s.bytes().any(|b| b.is_ascii_digit())
 }
 
+/// Curated HGNC **old symbol → current symbol** renames, lower-cased.
+///
+/// A symbol match is exact, so a marker panel written against an older HGNC release
+/// silently loses every gene HGNC has since renamed — the gene is in the matrix under its
+/// new name, but the panel asks for the old one and gets nothing back. That is invisible in
+/// the output: the type just scores on fewer genes (or is dropped entirely). This table is
+/// what closes the gap.
+///
+/// It is **curated, not exhaustive** — the families that actually recur in single-cell
+/// marker panels (histones, the `MARCH`/`SEPT` families that Excel also mangles into dates,
+/// the selenoproteins, and the well-known one-off renames). Systematic families are handled
+/// by rule in [`alias_candidates`] rather than enumerated here. Entries are one-directional
+/// in this table but matched **both ways** at lookup, so it does not matter whether the
+/// matrix or the panel is the one carrying the old name.
+static HGNC_RENAMES: &[(&str, &str)] = &[
+    // Histones — HGNC's 2019 systematic renaming; heavily used as cell-cycle / S-phase
+    // markers, so a stale panel loses much of its S-phase signature.
+    ("h1f0", "h1-0"),
+    ("h1fx", "h1-10"),
+    ("hist1h1b", "h1-5"),
+    ("hist1h1c", "h1-2"),
+    ("hist1h1d", "h1-3"),
+    ("hist1h1e", "h1-4"),
+    ("hist1h2ac", "h2ac6"),
+    ("hist1h2bk", "h2bc12"),
+    ("hist1h4c", "h4c3"),
+    ("hist2h2be", "h2bc21"),
+    ("hist3h2a", "h2ac25"),
+    ("h2afx", "h2ax"),
+    ("h2afv", "h2az2"),
+    ("h2afz", "h2az1"),
+    ("h2afy", "macroh2a1"),
+    ("h3f3a", "h3-3a"),
+    ("h3f3b", "h3-3b"),
+    // Mitochondrial amidoxime-reducing components (note: NOT the MARCH family below).
+    ("marc1", "mtarc1"),
+    ("marc2", "mtarc2"),
+    // Selenoproteins.
+    ("sepp1", "selenop"),
+    ("selt", "selenot"),
+    ("sepw1", "selenow"),
+    // One-off renames common in immune / proliferation panels.
+    ("fam129a", "niban1"),
+    ("fam129b", "niban2"),
+    ("fam129c", "niban3"),
+    ("rarres3", "plaat4"),
+    ("fyb", "fyb1"),
+    ("cd97", "adgre5"),
+    ("gpr56", "adgrg1"),
+    ("kiaa0101", "pclaf"),
+    ("c10orf54", "vsir"),
+    ("tmem66", "saraf"),
+    ("atpif1", "atp5if1"),
+    ("fam46c", "tent5c"),
+    ("whsc1", "nsd2"),
+];
+
+/// `HGNC_RENAMES` as a lookup: old → new (`fwd`) and new → old (`rev`).
+///
+/// Kept as two maps rather than one seeded in both directions. The table's key sets happen to
+/// be disjoint today, so one map would give identical answers — but the moment someone adds a
+/// *chained* rename (`A→B` alongside an existing `B→C`), a single map has two entries for `B`
+/// and silently keeps whichever was inserted last. Two maps cannot lose that way.
+struct RenameMaps {
+    fwd: HashMap<&'static str, &'static str>,
+    rev: HashMap<&'static str, &'static str>,
+}
+
+/// The lazily-built rename lookups. Built once; every `match_gene` miss consults them.
+fn rename_maps() -> &'static RenameMaps {
+    static MAPS: std::sync::OnceLock<RenameMaps> = std::sync::OnceLock::new();
+    MAPS.get_or_init(|| RenameMaps {
+        fwd: HGNC_RENAMES.iter().copied().collect(),
+        rev: HGNC_RENAMES.iter().map(|&(o, n)| (n, o)).collect(),
+    })
+}
+
+/// The numeric suffix of a `{prefix}{n}` symbol (`numeric_suffix("march12", "march") == 12`),
+/// or `None` if `sym` does not have exactly that shape.
+fn numeric_suffix(sym: &str, prefix: &str) -> Option<u32> {
+    sym.strip_prefix(prefix)
+        .filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|d| d.parse().ok())
+}
+
+/// Alternative HGNC symbols for `sym` (already lower-cased): the table above in both
+/// directions, plus the two rule-based families whose members are too numerous to enumerate
+/// and whose rename is purely mechanical — `MARCH{n}` ↔ `MARCHF{n}` (membrane-associated
+/// ring-CH E3 ligases) and `SEPT{n}` ↔ `SEPTIN{n}` (septins). Both families were renamed
+/// precisely because spreadsheets kept coercing them to dates, so panels in the wild carry
+/// either form.
+///
+/// `MARCH1`/`MARC1` do not collide: `MARC1` is in the table (→ `MTARC1`) and the `march`
+/// rule only fires on the literal `march` prefix.
+fn alias_candidates(sym: &str) -> Vec<String> {
+    let maps = rename_maps();
+    let mut out = Vec::new();
+    if let Some(&new) = maps.fwd.get(sym) {
+        out.push(new.to_string());
+    }
+    if let Some(&old) = maps.rev.get(sym) {
+        out.push(old.to_string());
+    }
+    for (old, new) in [("march", "marchf"), ("sept", "septin")] {
+        if let Some(n) = numeric_suffix(sym, old) {
+            out.push(format!("{new}{n}"));
+        }
+        if let Some(n) = numeric_suffix(sym, new) {
+            out.push(format!("{old}{n}"));
+        }
+    }
+    out
+}
+
 /// Pre-built index over a gene-name vocabulary for fast marker→row matching.
 /// Resolves a query gene in tiers, returning the first matching row:
 ///   1. exact (case-insensitive) full-name match,
 ///   2. last `_`-segment symbol match (`CD8A` ↔ `ENSG…_CD8A`),
 ///   3. leading Ensembl-id segment match (`ENSG…` ↔ `ENSG…_CD8A`),
 ///   4. decompose a combined `ENSG…_SYMBOL` query and retry tiers 2–3 per part,
-///   5. fallback to the general [`flexible_name_match`] (prefix / `_x_` segment).
+///   5. HGNC alias retry ([`alias_candidates`]: `HIST1H4C` ↔ `H4C3`, `MARCH2` ↔ `MARCHF2`),
+///   6. fallback to the general [`flexible_name_match`] (prefix / `_x_` segment).
 ///
-/// Tiers 1–4 are O(1) hash lookups; only the rare fallback scans the
+/// Tiers 1–5 are O(1) hash lookups; only the rare fallback scans the
 /// vocabulary. Build once, match many — replaces the O(genes × markers)
 /// `.position(flexible_name_match)` scan. Tier 1 preferring an exact match
 /// over an earlier-indexed suffix match is the one intended refinement vs a
 /// pure positional scan. Tiers 3–4 make HGNC / ENSG / `ENSG_HGNC` reconcile
-/// in either direction (gene-set sources mix these conventions).
+/// in either direction (gene-set sources mix these conventions), and tier 5
+/// does the same across HGNC *releases* — the matrix and the marker panel are
+/// routinely built against different ones.
 #[allow(dead_code)] // consumed by downstream crates (geu, senna), not the data-beans bin
 pub struct GeneIndex {
     lowered: Vec<String>,
@@ -245,6 +362,15 @@ impl GeneIndex {
                 return Some(i);
             }
         }
+        // HGNC alias retry: the query and the vocabulary can be built against different HGNC
+        // releases (`HIST1H4C` in the panel, `H4C3` in the matrix, or the reverse). Retry the
+        // exact/symbol tiers under each alternative symbol before falling back to the scan.
+        let sym = core.rsplit('_').next().unwrap_or(core);
+        for alias in alias_candidates(sym) {
+            if let Some(&i) = self.exact.get(&alias).or_else(|| self.symbol.get(&alias)) {
+                return Some(i);
+            }
+        }
         // Allocation-free flexible fallback: `flexible_name_match` re-lowercases
         // both sides and builds three `format!` needles *per comparison*, which
         // is catastrophic when scanning a 30k+ vocabulary for each of thousands
@@ -310,41 +436,4 @@ pub fn match_by_substring(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn names(v: &[&str]) -> Vec<Box<str>> {
-        v.iter().map(|s| Box::from(*s)).collect()
-    }
-
-    #[test]
-    fn gene_index_tiers_and_idf() {
-        let dict = names(&["ENSG00000153563_CD8A", "MS4A1", "A_FOO", "FOO"]);
-        let idx = GeneIndex::build(&dict);
-
-        // exact (case-insensitive)
-        assert_eq!(idx.match_gene("ms4a1"), Some(1));
-        // symbol = last `_`-segment
-        assert_eq!(idx.match_gene("CD8A"), Some(0));
-        // exact preferred over an earlier-indexed suffix match (the refinement)
-        assert_eq!(idx.match_gene("FOO"), Some(3));
-        // unmatched
-        assert_eq!(idx.match_gene("ZZZ9"), None);
-
-        // bare ENSG query resolves to the `ENSG…_SYMBOL` row (and the combined
-        // form resolves too) — HGNC / ENSG / ENSG_HGNC reconcile both ways.
-        assert_eq!(idx.match_gene("ENSG00000153563"), Some(0));
-        assert_eq!(idx.match_gene("ENSG00000153563_CD8A"), Some(0));
-
-        // dict keyed by bare ENSG: a combined query still resolves via the
-        // leading-id tier.
-        let dict2 = names(&["ENSG00000153563", "MS4A1"]);
-        let idx2 = GeneIndex::build(&dict2);
-        assert_eq!(idx2.match_gene("ENSG00000153563_CD8A"), Some(0));
-        assert_eq!(idx2.match_gene("ensg00000153563"), Some(0));
-
-        // IDF: ubiquitous (df == C) → 0; exclusive → ln(C)
-        assert_eq!(idf_weight(4, 4), 0.0);
-        assert!(idf_weight(4, 1) > 1.38 && idf_weight(4, 1) < 1.39);
-    }
-}
+mod tests;

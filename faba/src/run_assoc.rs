@@ -14,21 +14,40 @@
 //! The between-cell-type contrast is clean; the within-cell-type trend is secondary,
 //! because pooling divergent lineages of one cell type onto a shared pseudotime axis
 //! weakens the "change along the trajectory" reading (noted in its output).
+//!
+//! ## Output schema
+//!
+//! Every table is **tidy**: a `site` key (`{gene}/{subunit}`) plus the identity broken out
+//! into typed columns, rather than one `/`-joined string a reader has to take apart.
+//!
+//! ```text
+//! branch level    site | gene | subunit | branch (i32)      | <values…>
+//! cell-type level site | gene | subunit | cell_type (str)   | <values…>
+//! ```
+//!
+//! The group column differs *because the groups differ*. A branch is an integer the lineage
+//! assigned; a cell type is a name a human gave. And a cell-type aggregate pools cells
+//! **across** branches, so it has no branch — and now gets no `branch` column, instead of a
+//! fabricated one. (Cell-type names are also written verbatim now: the old `/`-joined key
+//! forced `/` in a name to be rewritten as `-`, which quietly corrupted Cell-Ontology labels.)
+//!
+//! The Bayesian tables carry `ess` and `mcse_lfsr` beside `lfsr`. `lfsr` is a Monte-Carlo
+//! tail proportion, so a site near `--fdr-alpha` can cross it from one `--seed` to the next;
+//! `mcse_lfsr` is that error, per site, so a borderline call is visible in its own row.
 
 use anyhow::Result;
 use clap::{Args, ValueEnum};
 use log::info;
 
 use matrix_util::common_io::mkdir_parent;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::IoOps;
+use matrix_util::parquet::{write_named_table, Column};
 
 use crate::assoc::contrast::{bin_pseudotime, site_profile};
-use crate::assoc::contrast_bayes::{run_contrasts_bayes, BayesContrastConfig, BayesContrastResult};
+use crate::assoc::contrast_bayes::{run_contrasts_bayes, BayesContrastConfig};
 use crate::assoc::io::{load_celltypes, load_lineage, load_sites, Lineage, Site};
 use crate::assoc::trend::{run_trends, TrendConfig, TrendResult};
-use crate::assoc::trend_bayes::{run_trends_bayes, BayesTrendConfig, BayesTrendResult};
-use crate::assoc::Modality;
+use crate::assoc::trend_bayes::{run_trends_bayes, BayesTrendConfig};
+use crate::assoc::{BayesResult, Modality};
 use faba::hypothesis_tests::benjamini_hochberg;
 
 /// Within-branch trend estimator.
@@ -105,24 +124,47 @@ pub struct AssocArgs {
     )]
     pub trend_method: TrendMethod,
 
+    // The three sampler knobs below drive BOTH Bayesian tests — the between-group contrast
+    // as much as the within-group trend — at both reporting levels. They were named
+    // `--trend-*`, which reads as trend-only and hid that raising `--trend-samples` is also
+    // what sharpens the contrast's `lfsr`. Renamed to say what they do; the old names stay
+    // as aliases so existing pipelines keep working.
     #[arg(
         long,
+        alias = "trend-prior-sd",
         default_value_t = 3.0,
-        help = "bayes trend: prior sd on the spline coefficients"
+        help = "bayes: prior sd on the effect coefficients (contrast AND trend)"
     )]
-    pub trend_prior_sd: f32,
+    pub posterior_prior_sd: f32,
 
     #[arg(
         long,
+        alias = "trend-samples",
         default_value_t = 1000,
-        help = "bayes trend: posterior samples per (site, branch)"
+        help = "bayes: posterior samples per (site, group) — drives the contrast AND the trend"
     )]
-    pub trend_samples: usize,
+    pub posterior_samples: usize,
 
-    #[arg(long, default_value_t = 300, help = "bayes trend: ESS warmup")]
-    pub trend_warmup: usize,
+    #[arg(
+        long,
+        alias = "trend-warmup",
+        default_value_t = 300,
+        help = "bayes: sampler warmup (contrast AND trend)"
+    )]
+    pub posterior_warmup: usize,
 
-    #[arg(long, default_value_t = 0.1, help = "BH FDR alpha for reporting")]
+    #[arg(
+        long,
+        default_value_t = 0.1,
+        help = "reporting threshold: lfsr (bayes) or BH q (quasi/binomial)",
+        long_help = "Reporting threshold — the count in the log, not a filter on the output.\n\n\
+            On the Bayesian paths (the default) this is compared against `lfsr`, which is a\n\
+            Monte-Carlo tail proportion: a site whose lfsr sits near this cutoff can cross it\n\
+            from one --seed to the next. The `mcse_lfsr` column is that error, per site —\n\
+            when |lfsr − alpha| is not comfortably larger than mcse_lfsr, the row is\n\
+            under-sampled rather than borderline, and the answer is more --posterior-samples.\n\n\
+            On the frequentist trend paths (--trend-method quasi|binomial) it is a BH q cutoff."
+    )]
     pub fdr_alpha: f32,
 
     #[arg(
@@ -223,9 +265,9 @@ fn run_report(
         n_bins: args.n_bins,
         min_total_coverage: args.min_total_coverage,
         min_cells: args.min_cells,
-        prior_sd: args.trend_prior_sd,
-        n_samples: args.trend_samples,
-        warmup: args.trend_warmup,
+        prior_sd: args.posterior_prior_sd,
+        n_samples: args.posterior_samples,
+        warmup: args.posterior_warmup,
         seed: args.seed,
     };
     let res: Vec<_> = run_contrasts_bayes(sites, lin, &bcfg)
@@ -247,14 +289,14 @@ fn run_report(
             level.unit,
             args.fdr_alpha
         );
-        write_branch_contrast_bayes(
+        write_bayes(
             &res,
             sites,
             level,
             &format!("{out}.{}_contrast.parquet", level.tag),
         )?;
         let tested: Vec<usize> = res.iter().map(|r| r.site).collect();
-        write_branch_profile(
+        write_profile(
             &tested,
             sites,
             lin,
@@ -272,9 +314,9 @@ fn run_report(
                 n_knots: args.n_knots,
                 min_total_coverage: args.min_total_coverage,
                 min_cells: args.min_cells,
-                prior_sd: args.trend_prior_sd,
-                n_samples: args.trend_samples,
-                warmup: args.trend_warmup,
+                prior_sd: args.posterior_prior_sd,
+                n_samples: args.posterior_samples,
+                warmup: args.posterior_warmup,
                 seed: args.seed,
             };
             let trends: Vec<_> = run_trends_bayes(sites, lin, &tcfg)
@@ -294,7 +336,7 @@ fn run_report(
                     level.unit,
                     args.fdr_alpha
                 );
-                write_branch_trend_bayes(&trends, sites, level, &trend_path)?;
+                write_bayes(&trends, sites, level, &trend_path)?;
             }
         }
         method => {
@@ -323,7 +365,7 @@ fn run_report(
                     level.unit,
                     args.fdr_alpha
                 );
-                write_branch_trend(&trends, &tqs, sites, level, &trend_path)?;
+                write_trend_freq(&trends, &tqs, sites, level, &trend_path)?;
             }
         }
     }
@@ -409,186 +451,173 @@ fn run_celltype_level(args: &AssocArgs, lin: &Lineage, sites: &[Site], out: &str
 // Output writers //
 ////////////////////
 
-/// Display label for group `g`: the cell-type name (with any `/` neutralised to `-`, since
-/// the row key is `/`-delimited) when the level is labelled, else `b{g}` (branch level).
-fn group_label(names: Option<&[Box<str>]>, g: usize) -> String {
-    match names {
-        Some(nm) => nm[g].replace('/', "-"),
-        None => format!("b{g}"),
-    }
+/// One column of a report table: names are strings, statistics are `f32`, counts and ids are
+/// `i32`. The owned sibling of [`Column`], which borrows — the writer has to keep the buffers
+/// alive while `write_named_table` reads them.
+enum Val {
+    Str(Vec<Box<str>>),
+    F32(Vec<f32>),
+    I32(Vec<i32>),
 }
 
-/// Row key for a (site, group) record: `{gene}/{subunit}/{group_label}`.
-fn site_group_key(
-    sites: &[Site],
-    site: usize,
-    group: usize,
-    names: Option<&[Box<str>]>,
-) -> Box<str> {
-    let s = &sites[site];
-    format!("{}/{}/{}", s.gene, s.subunit, group_label(names, group)).into_boxed_str()
-}
-
-/// Assemble a group-indexed table (`rows` × `col_names`, values row-major in `vals`) under
-/// the `index_name` row key and write it to Parquet. Shared by the three site-group writers.
-fn write_site_branch_table(
-    path: &str,
-    rows: Vec<Box<str>>,
-    index_name: &str,
-    col_names: &[&str],
-    vals: &[Vec<f32>],
-) -> Result<()> {
-    let mut mat = DMatrix::<f32>::zeros(rows.len(), col_names.len());
-    for (i, v) in vals.iter().enumerate() {
-        for (j, &x) in v.iter().enumerate() {
-            mat[(i, j)] = x;
+impl Val {
+    fn as_column(&self) -> Column<'_> {
+        match self {
+            Val::Str(v) => Column::Str(v),
+            Val::F32(v) => Column::F32(v),
+            Val::I32(v) => Column::I32(v),
         }
     }
-    let cols: Vec<Box<str>> = col_names.iter().map(|s| (*s).into()).collect();
-    mat.to_parquet_with_names(path, (Some(&rows), Some(index_name)), Some(&cols))?;
-    info!("Wrote {path}");
+}
+
+/// Write one report table as a **tidy** parquet: a `site` key column, the site's identity
+/// broken out into its own columns, the row's group in a column typed for what that group
+/// actually *is*, then the value columns.
+///
+/// The identity used to be one `/`-joined string per row (`{gene}/{subunit}/b3`), which made
+/// every consumer re-split it, and forced two things that were never true:
+///
+/// - **A branch id and a cell-type name shared one slot.** They are not the same kind of
+///   thing. A branch is an integer the lineage assigned; a cell type is a name a human gave.
+///   Now the branch level writes an integer `branch` column and the cell-type level writes a
+///   string `cell_type` column — and a cell-type aggregate, which pools cells *across*
+///   branches, gets no `branch` column at all, because it does not have one.
+/// - **Cell-type names had to be mangled.** `group_label` used to rewrite `/` to `-` so the
+///   name would survive being embedded in a `/`-delimited key. Cell-Ontology labels contain
+///   `/` routinely, so that silently corrupted them. In its own column the name is written
+///   verbatim.
+fn write_report_table(
+    path: &str,
+    sites: &[Site],
+    level: &ReportLevel,
+    keys: &[(usize, usize)],
+    values: Vec<(&str, Val)>,
+) -> Result<()> {
+    let site_key: Vec<Box<str>> = keys
+        .iter()
+        .map(|&(si, _)| format!("{}/{}", sites[si].gene, sites[si].subunit).into_boxed_str())
+        .collect();
+
+    // The group column, typed for the level: `branch` is an id, `cell_type` is a name.
+    let group = match level.names {
+        Some(nm) => (
+            "cell_type",
+            Val::Str(keys.iter().map(|&(_, g)| nm[g].clone()).collect()),
+        ),
+        None => (
+            "branch",
+            Val::I32(keys.iter().map(|&(_, g)| g as i32).collect()),
+        ),
+    };
+
+    let owned: Vec<(&str, Val)> = [
+        (
+            "gene",
+            Val::Str(keys.iter().map(|&(si, _)| sites[si].gene.clone()).collect()),
+        ),
+        (
+            "subunit",
+            Val::Str(
+                keys.iter()
+                    .map(|&(si, _)| sites[si].subunit.clone())
+                    .collect(),
+            ),
+        ),
+        group,
+    ]
+    .into_iter()
+    .chain(values)
+    .collect();
+
+    let cols: Vec<(Box<str>, Column)> = owned
+        .iter()
+        .map(|(name, v)| ((*name).into(), v.as_column()))
+        .collect();
+
+    write_named_table(path, "site", &site_key, &cols)?;
+    info!("Wrote {path} ({} rows)", site_key.len());
     Ok(())
 }
 
-/// `{gene}/{chr:pos}/b{branch}` × [n_cells, total_cov, effect, effect_sd, effect_lo, effect_hi,
-/// lfsr] — the **Bayesian** between-branch contrast: posterior of the pseudotime-adjusted branch
-/// log-odds excess (mean + 90% credible interval) and the local false sign rate, one row per
-/// QC-passing (site, branch). No permutation p-value / FWER column — `lfsr` is the report.
-fn write_branch_contrast_bayes(
-    res: &[BayesContrastResult],
+/// Write a Bayesian test's table: the posterior of its linear contrast (mean + sd + 90%
+/// credible interval), the local false sign rate, and the two numbers that say how far to
+/// trust it — `ess` and `mcse_lfsr`. One row per QC-passing (site, group). No permutation
+/// p-value / FWER column: `lfsr` is the report.
+///
+/// **Both** Bayesian tests write through here, because both report exactly [`BayesResult`] —
+/// they differ in *what the contrast is* (the group's log-odds excess vs the pooled rest, for
+/// the contrast; the net log-odds change start→end, for the trend), not in what they say
+/// about it. One writer is what keeps the two schemas identical, as the module doc promises.
+///
+/// `lfsr` is a Monte-Carlo tail proportion, so a site sitting near `--fdr-alpha` can cross it
+/// from one `--seed` to the next. `mcse_lfsr` is that Monte-Carlo error, per site: when
+/// `|lfsr − alpha|` is not comfortably larger than it, the row is under-sampled, not
+/// borderline-significant, and the answer is more `--posterior-samples`.
+fn write_bayes(
+    res: &[BayesResult],
     sites: &[Site],
     level: &ReportLevel,
     path: &str,
 ) -> Result<()> {
-    let rows = res
-        .iter()
-        .map(|r| site_group_key(sites, r.site, r.branch, level.names))
-        .collect();
-    let vals: Vec<Vec<f32>> = res
-        .iter()
-        .map(|r| {
-            vec![
-                r.n_cells as f32,
-                r.total_cov as f32,
-                r.effect,
-                r.effect_sd,
-                r.effect_lo,
-                r.effect_hi,
-                r.lfsr,
-            ]
-        })
-        .collect();
-    write_site_branch_table(
+    let keys: Vec<(usize, usize)> = res.iter().map(|r| (r.site, r.branch)).collect();
+    let f32_col = |f: fn(&BayesResult) -> f32| Val::F32(res.iter().map(f).collect());
+    write_report_table(
         path,
-        rows,
-        &format!("site_{}", level.tag),
-        &[
-            "n_cells",
-            "total_cov",
-            "effect",
-            "effect_sd",
-            "effect_lo",
-            "effect_hi",
-            "lfsr",
+        sites,
+        level,
+        &keys,
+        vec![
+            (
+                "n_cells",
+                Val::I32(res.iter().map(|r| r.n_cells as i32).collect()),
+            ),
+            (
+                "total_cov",
+                Val::F32(res.iter().map(|r| r.total_cov as f32).collect()),
+            ),
+            ("effect", f32_col(|r| r.effect)),
+            ("effect_sd", f32_col(|r| r.effect_sd)),
+            ("effect_lo", f32_col(|r| r.effect_lo)),
+            ("effect_hi", f32_col(|r| r.effect_hi)),
+            ("lfsr", f32_col(|r| r.lfsr)),
+            ("ess", f32_col(|r| r.ess)),
+            ("mcse_lfsr", f32_col(|r| r.mcse_lfsr)),
         ],
-        &vals,
     )
 }
 
-/// `{gene}/{chr:pos}/b{branch}` × [n_cells, total_cov, stat, effect, dispersion,
-/// p_trend, q] — the within-branch association GAM (does the rate change along the
-/// branch), one row per QC-passing (site, branch).
-fn write_branch_trend(
+/// The frequentist within-group trend GAM (`--trend-method quasi|binomial`): does the rate
+/// change along the group's axis. One row per QC-passing (site, group). No `ess`/`mcse_lfsr`
+/// here — this path has no sampler; its uncertainty is the p-value and its BH `q`.
+fn write_trend_freq(
     res: &[TrendResult],
     qs: &[f32],
     sites: &[Site],
     level: &ReportLevel,
     path: &str,
 ) -> Result<()> {
-    let rows = res
-        .iter()
-        .map(|r| site_group_key(sites, r.site, r.branch, level.names))
-        .collect();
-    let vals: Vec<Vec<f32>> = res
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            vec![
-                r.n_cells as f32,
-                r.total_cov as f32,
-                r.stat,
-                r.effect,
-                r.dispersion,
-                r.p_value,
-                qs[i],
-            ]
-        })
-        .collect();
-    write_site_branch_table(
+    let keys: Vec<(usize, usize)> = res.iter().map(|r| (r.site, r.branch)).collect();
+    write_report_table(
         path,
-        rows,
-        &format!("site_{}", level.tag),
-        &[
-            "n_cells",
-            "total_cov",
-            "stat",
-            "effect",
-            "dispersion",
-            "p_trend",
-            "q",
+        sites,
+        level,
+        &keys,
+        vec![
+            ("n_cells", Val::I32(res.iter().map(|r| r.n_cells as i32).collect())),
+            ("total_cov", Val::F32(res.iter().map(|r| r.total_cov as f32).collect())),
+            ("stat", Val::F32(res.iter().map(|r| r.stat).collect())),
+            ("effect", Val::F32(res.iter().map(|r| r.effect).collect())),
+            ("dispersion", Val::F32(res.iter().map(|r| r.dispersion).collect())),
+            ("p_trend", Val::F32(res.iter().map(|r| r.p_value).collect())),
+            ("q", Val::F32(qs.to_vec())),
         ],
-        &vals,
     )
 }
 
-/// `{gene}/{chr:pos}/b{branch}` × [n_cells, total_cov, effect, effect_sd, effect_lo,
-/// effect_hi, lfsr] — the Bayesian within-branch association (posterior net log-odds
-/// change along the branch + local false sign rate), one row per QC-passing (site,
-/// branch).
-fn write_branch_trend_bayes(
-    res: &[BayesTrendResult],
-    sites: &[Site],
-    level: &ReportLevel,
-    path: &str,
-) -> Result<()> {
-    let rows = res
-        .iter()
-        .map(|r| site_group_key(sites, r.site, r.branch, level.names))
-        .collect();
-    let vals: Vec<Vec<f32>> = res
-        .iter()
-        .map(|r| {
-            vec![
-                r.n_cells as f32,
-                r.total_cov as f32,
-                r.effect,
-                r.effect_sd,
-                r.effect_lo,
-                r.effect_hi,
-                r.lfsr,
-            ]
-        })
-        .collect();
-    write_site_branch_table(
-        path,
-        rows,
-        &format!("site_{}", level.tag),
-        &[
-            "n_cells",
-            "total_cov",
-            "effect",
-            "effect_sd",
-            "effect_lo",
-            "effect_hi",
-            "lfsr",
-        ],
-        &vals,
-    )
-}
-
-/// `{gene}/{chr:pos}/b{branch}/bin{b}` × [bin, K, N, rate] — the counterfactual
-/// divergence of editing along pseudotime, for the tested sites.
-fn write_branch_profile(
+/// The counterfactual divergence of editing along pseudotime, for the tested sites: the
+/// per-(group, bin) pseudobulk rate. One row per (site, group, bin) — `bin` is its own
+/// integer column rather than a `bin{b}` suffix welded onto the row key.
+fn write_profile(
     tested_sites: &[usize],
     sites: &[Site],
     lin: &Lineage,
@@ -601,37 +630,39 @@ fn write_branch_profile(
     which.sort_unstable();
     which.dedup();
 
-    let mut rows: Vec<Box<str>> = Vec::new();
-    let mut vals: Vec<[f32; 4]> = Vec::new();
+    let mut keys: Vec<(usize, usize)> = Vec::new();
+    let (mut bin, mut kk, mut nn, mut rate) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for &si in &which {
-        let s = &sites[si];
-        for (l, b, k, ntot) in site_profile(s, &bins, &lin.branch, n_bins, lin.n_branches) {
+        for (l, b, k, ntot) in site_profile(
+            &sites[si],
+            &bins,
+            &lin.branch,
+            n_bins,
+            lin.n_branches,
+        ) {
             if level.drop_group == Some(l) {
                 continue; // background bucket kept in the contrast rest but not reported
             }
-            let group = group_label(level.names, l);
-            rows.push(format!("{}/{}/{group}/bin{b}", s.gene, s.subunit).into_boxed_str());
-            vals.push([b as f32, k as f32, ntot as f32, k as f32 / ntot as f32]);
+            keys.push((si, l));
+            bin.push(b as i32);
+            kk.push(k as f32);
+            nn.push(ntot as f32);
+            rate.push(k as f32 / ntot as f32);
         }
     }
-    let mut mat = DMatrix::<f32>::zeros(rows.len(), 4);
-    for (i, v) in vals.iter().enumerate() {
-        for j in 0..4 {
-            mat[(i, j)] = v[j];
-        }
-    }
-    let cols: Vec<Box<str>> = ["bin", "K", "N", "rate"]
-        .iter()
-        .map(|s| (*s).into())
-        .collect();
-    mat.to_parquet_with_names(
+    write_report_table(
         path,
-        (
-            Some(&rows),
-            Some(format!("site_{}_bin", level.tag).as_str()),
-        ),
-        Some(&cols),
-    )?;
-    info!("Wrote {path}");
-    Ok(())
+        sites,
+        level,
+        &keys,
+        vec![
+            ("bin", Val::I32(bin)),
+            ("K", Val::F32(kk)),
+            ("N", Val::F32(nn)),
+            ("rate", Val::F32(rate)),
+        ],
+    )
 }
+
+#[cfg(test)]
+mod tests;

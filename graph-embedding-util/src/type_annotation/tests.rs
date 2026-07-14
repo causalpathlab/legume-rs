@@ -234,7 +234,7 @@ fn marker_type_with_no_matched_gene_is_dropped() {
         .map(|s| (*s).into())
         .collect();
     let (names, sets) =
-        super::markers::parse_and_match_markers(path.to_str().unwrap(), &gene_names, false)
+        super::markers::parse_and_match_markers(path.to_str().unwrap(), &gene_names, false, 0.0)
             .unwrap();
 
     assert_eq!(
@@ -247,6 +247,48 @@ fn marker_type_with_no_matched_gene_is_dropped() {
         sets.len(),
         names.len(),
         "names and marker sets stay aligned"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// A panel the embedding mostly never saw is refusable — the quiet failure the coverage guard
+// exists for. `Thin` KEEPS one of its five markers, so it survives the drop-empty-types rule
+// above and would otherwise produce a normal-looking, confident call off a single gene.
+#[test]
+fn thin_marker_panel_is_refused_under_min_coverage() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join("geu_marker_coverage_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("markers.tsv");
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(f, "gene\tcell_type").unwrap();
+    for g in ["AAA", "BBB"] {
+        writeln!(f, "{g}\tFull").unwrap(); // 2/2 on the axis
+    }
+    writeln!(f, "CCC\tThin").unwrap(); // 1/5 on the axis
+    for g in ["GONE1", "GONE2", "GONE3", "GONE4"] {
+        writeln!(f, "{g}\tThin").unwrap();
+    }
+    drop(f);
+    let gene_names: Vec<Box<str>> = ["AAA", "BBB", "CCC"].iter().map(|s| (*s).into()).collect();
+    let p = path.to_str().unwrap();
+
+    // Overall coverage is 3/7 ≈ 43%.
+    let strict = super::markers::parse_and_match_markers(p, &gene_names, false, 0.9);
+    assert!(
+        strict.is_err(),
+        "43% coverage must not pass a 90% floor — this is the silent case"
+    );
+
+    // The default (0.0) still returns the panel: report + warn, never refuse, so existing
+    // pipelines keep running while the degradation stops being invisible.
+    let (names, sets) = super::markers::parse_and_match_markers(p, &gene_names, false, 0.0)
+        .expect("min_coverage 0 never refuses");
+    assert_eq!(names.len(), 2, "both types survive — `Thin` kept one gene");
+    assert_eq!(
+        sets[names.iter().position(|n| n.as_ref() == "Thin").unwrap()].len(),
+        1,
+        "…on a single marker, which is exactly what the guard is for"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -264,7 +306,7 @@ fn all_marker_types_unmatched_is_an_error() {
     drop(f);
     let gene_names: Vec<Box<str>> = vec!["AAA".into()];
     assert!(
-        super::markers::parse_and_match_markers(path.to_str().unwrap(), &gene_names, false)
+        super::markers::parse_and_match_markers(path.to_str().unwrap(), &gene_names, false, 0.0)
             .is_err()
     );
     let _ = std::fs::remove_dir_all(&dir);

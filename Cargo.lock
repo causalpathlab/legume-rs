@@ -427,7 +427,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "auxiliary-data"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "data-beans",
@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "approx",
@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-alg"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "approx",
@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "faba"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "approx",
@@ -2612,7 +2612,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "auxiliary-data",
@@ -3509,7 +3509,7 @@ dependencies = [
 
 [[package]]
 name = "mcmc-util"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "approx",
@@ -4292,7 +4292,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinto"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "approx",
@@ -5012,7 +5012,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "approx",

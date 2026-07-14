@@ -14,12 +14,18 @@ use crate::snp::genotyper::GenotypeParams;
 use crate::snp::io::load_known_snps_auto;
 use crate::snp::pipeline::{run_snp_pipeline, SnpParams};
 
+use anyhow::Context;
 use genomic_data::gff::GffRecordMap;
 use log::info;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashSet;
 
-#[derive(Args, Debug)]
+/// Serialize a field by its `Debug` form — for foreign enums that carry no `Serialize`.
+fn ser_debug<T: std::fmt::Debug, S: serde::Serializer>(v: &T, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&format!("{v:?}"))
+}
+
+#[derive(Args, Debug, serde::Serialize)]
 #[command(
     about = "Run unified RNA-seq pipeline: SNP → genes → ATOI → m6A → APA",
     long_about = "Orchestrates the complete RNA-seq analysis pipeline:\n\n\
@@ -108,6 +114,9 @@ pub struct PipelineArgs {
         default_value = "zarr",
         help = "Sparse matrix backend (zarr or hdf5)"
     )]
+    // `SparseIoBackend` is data-beans' and does not implement `Serialize`; it is a plain
+    // enum, so its `Debug` form ("Zarr" / "Hdf5") is exactly what belongs in the summary.
+    #[serde(serialize_with = "ser_debug")]
     pub backend: SparseIoBackend,
 
     #[arg(
@@ -1065,17 +1074,33 @@ fn run_dart_step(
     Ok(())
 }
 
-// Write pipeline summary
+/// Write `{output}/pipeline_summary.json`: the faba version, the exact command line, and the
+/// **effective** value of every pipeline option.
+///
+/// "Effective" is the whole point, and it is why this serializes [`PipelineArgs`] itself
+/// rather than re-listing fields by hand. A run is defined as much by the defaults it did not
+/// override as by the flags it passed — and faba's defaults have changed between builds
+/// (`--cluster-resolution` used to be 0.5 and is now 0; `--n-bootstrap` existed and then did
+/// not). Recording only the command line would leave a rerun unable to tell whether an output
+/// was produced with grouping on or off, and `faba --version` cannot settle it either (the
+/// version has gone 0.10.3 → 0.13.0 → 0.11.0 → 0.12.0, non-monotonic). The previous summary
+/// recorded four input paths and no parameters at all, so it could not answer the question it
+/// existed to answer.
+///
+/// Serializing the struct also means a new option cannot be silently *omitted* here: it
+/// appears the moment it is added to `PipelineArgs`, with no second list to keep in sync.
 fn write_pipeline_summary(args: &PipelineArgs) -> anyhow::Result<()> {
-    use std::io::Write;
     let summary_path = format!("{}/pipeline_summary.json", args.output);
-    let mut file = std::fs::File::create(&summary_path)?;
-    writeln!(file, "{{")?;
-    writeln!(file, "  \"bam_files\": {:?},", args.bam_files)?;
-    writeln!(file, "  \"gff_file\": {:?},", args.gff_file)?;
-    writeln!(file, "  \"genome_file\": {:?},", args.genome_file)?;
-    writeln!(file, "  \"output\": {:?}", args.output)?;
-    writeln!(file, "}}")?;
-    info!("Wrote pipeline summary to {}", summary_path);
+    let summary = serde_json::json!({
+        "faba_version": env!("CARGO_PKG_VERSION"),
+        "command_line": std::env::args().collect::<Vec<_>>(),
+        "options": args,
+    });
+    std::fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)
+        .with_context(|| format!("writing {summary_path}"))?;
+    info!("Wrote pipeline summary (version + argv + effective options) to {summary_path}");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -22,7 +22,7 @@ const BAM_READ_PADDING: i64 = 1;
 /// Both modes feed the same value to the EM and to the output sparse matrix
 /// (matrix entries are fractional under `Posterior`). The CLI default is
 /// `Posterior`; `Converted` preserves the pre-2026 behavior bit-for-bit.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Default)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Default, serde::Serialize)]
 #[clap(rename_all = "lowercase")]
 pub enum MixtureWeightMode {
     /// Weight each observation by raw converted-read count `c_i` (legacy).
@@ -89,7 +89,7 @@ pub const DEFAULT_SITE_MIN_CELLS: usize = 10;
 /// into both `faba dartseq` and `faba all` so the four knobs are defined once.
 /// The control BAM list itself is declared separately by each subcommand (its
 /// required-ness and positional split differ).
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize)]
 pub struct M6aContrastArgs {
     /// m6A: minimum MUT (control) coverage to attempt a site. Soft floor only —
     /// the WT-vs-MUT test already widens its uncertainty when control is thin, so

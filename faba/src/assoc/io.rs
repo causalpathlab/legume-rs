@@ -23,6 +23,18 @@ pub struct Lineage {
 }
 
 /// Read `{prefix}.pseudotime.parquet` (columns `pseudotime`, `branch`; rows = cells).
+///
+/// **Cells the lineage could not place on any tree are dropped here.** `faba lineage`
+/// writes a NaN pseudotime for them (a cell on a trivial tree — a lone centroid, or a tree
+/// with too few cells to fit a curve — has no position on any trajectory, so NaN is the
+/// honest encoding, not a value to be imputed). But a NaN is not an observation either, and
+/// every model below this point reads pseudotime as a number: the trend GAM sorts it (a NaN
+/// is unorderable) and the contrast bins it (a NaN silently floors into bin 0, quietly
+/// misplacing the cell at the start of the axis). Dropping the cells once, here, is what
+/// keeps both honest — the alternative is each model rediscovering the same NaN separately.
+///
+/// The drop is safe to do at the boundary because everything downstream is keyed off the
+/// returned `cell_names`: [`load_sites`] and [`load_celltypes`] align to it by name.
 pub fn load_lineage(prefix: &str) -> Result<Lineage> {
     let path = format!("{prefix}.pseudotime.parquet");
     let m = DMatrix::<f32>::from_parquet(&path).with_context(|| format!("reading {path}"))?;
@@ -34,11 +46,36 @@ pub fn load_lineage(prefix: &str) -> Result<Lineage> {
     };
     let (cpt, cbr) = (col("pseudotime")?, col("branch")?);
     let n = m.mat.nrows();
-    let pseudotime: Vec<f32> = (0..n).map(|i| m.mat[(i, cpt)]).collect();
-    let branch: Vec<usize> = (0..n).map(|i| m.mat[(i, cbr)].max(0.0) as usize).collect();
+
+    let mut cell_names = Vec::with_capacity(n);
+    let mut pseudotime = Vec::with_capacity(n);
+    let mut branch = Vec::with_capacity(n);
+    for (i, name) in m.rows.into_iter().enumerate() {
+        let pt = m.mat[(i, cpt)];
+        if !pt.is_finite() {
+            continue; // unplaceable cell — no position on any trajectory
+        }
+        cell_names.push(name);
+        pseudotime.push(pt);
+        branch.push(m.mat[(i, cbr)].max(0.0) as usize);
+    }
+
+    let n_dropped = n - cell_names.len();
+    if n_dropped > 0 {
+        log::warn!(
+            "{path}: dropped {n_dropped}/{n} cell(s) with no pseudotime (unplaceable by the \
+             lineage forest); the remaining {} cell(s) are tested",
+            cell_names.len()
+        );
+    }
+    anyhow::ensure!(
+        !cell_names.is_empty(),
+        "{path}: no cell has a finite pseudotime — nothing to test"
+    );
+
     let n_branches = branch.iter().copied().max().map_or(0, |x| x + 1);
     Ok(Lineage {
-        cell_names: m.rows,
+        cell_names,
         pseudotime,
         branch,
         n_branches,
