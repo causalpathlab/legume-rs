@@ -23,6 +23,10 @@ pub(crate) const ENRICHMENT_OUTPUT_SUFFIXES: &[&str] = &[
     ".cluster_expression.parquet",
     ".ontology_assignment.tsv",
     ".ontology_node_mass.parquet",
+    // marker-panel stability bootstrap
+    ".cluster_celltype_support.parquet",
+    ".cluster_qc.tsv",
+    ".type_qc.tsv",
 ];
 
 /// Erase the exact `{prefix}{suffix}` output files (if present) for a fresh

@@ -24,7 +24,8 @@ use super::finalize::{clean_outputs, finalize_annotation, AnnotationArtifacts};
 use crate::run_manifest::{self, RunManifest};
 use anyhow::{Context, Result};
 use graph_embedding_util::type_annotation::{
-    annotate_embeddings_ora, InputEmbeddings, TermOraConfig, TERM_ORA_OUTPUT_SUFFIXES,
+    annotate_embeddings_ora, Abstain, InputEmbeddings, MarkerBootstrapConfig, TermOraConfig,
+    TERM_ORA_OUTPUT_SUFFIXES,
 };
 use log::info;
 use matrix_util::common_io::mkdir_parent;
@@ -100,9 +101,21 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
         label_cl: args.label_cl.as_deref().map(str::to_owned),
         ontology_fdr_q: args.ontology_fdr_q,
         ontology_by: args.ontology_by,
-        panel_perm: 0,
-        support_perm: 0,
-        bootstrap: None,
+        panel_perm: args.panel_perm,
+        support_perm: args.support_perm,
+        // ON by default, as in `faba annotate`: a bare `argmin` over marker centroids always
+        // returns something, and returns it with no error bar.
+        bootstrap: (!args.no_bootstrap_markers).then_some(MarkerBootstrapConfig {
+            n_boot: args.n_boot,
+            abstain: if args.abstain_separable {
+                Abstain::Separable(args.abstain_alpha)
+            } else {
+                Abstain::Support(args.min_support)
+            },
+            set_coverage: args.set_coverage,
+            max_set_size: args.max_set_size,
+            recluster: !args.no_recluster,
+        }),
     };
 
     annotate_embeddings_ora(

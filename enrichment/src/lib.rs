@@ -9,8 +9,10 @@
 //! DBs, recompute Q; train β once, annotate any dataset via θ · Q.
 
 pub mod cellproj;
+pub mod consensus;
 pub mod es;
 pub mod fdr;
+pub mod marker_bootstrap;
 pub mod markers;
 pub mod null;
 pub mod ontology;

@@ -36,7 +36,6 @@ pub mod model;
 pub mod null_call;
 pub mod postprocess;
 pub mod progress;
-pub mod stop;
 pub mod training;
 pub mod type_annotation;
 
@@ -55,4 +54,11 @@ pub use fit::{
 };
 pub use model::JointEmbedModel;
 pub use postprocess::{cell_clusters, feature_coembedding};
-pub use stop::{setup_stop_handler, stop_flag};
+
+/// Graceful-stop on Ctrl+C. Lives in `matrix-util` so the annotation crates *below* this one
+/// (`enrichment`, which owns the raw-count marker bootstrap) can share the same flag and the same
+/// interrupt-safe replicate combinators — a process must have exactly one SIGINT handler, and
+/// `ctrlc::set_handler` panics on a second registration. Re-exported here so `crate::stop::…` and
+/// `graph_embedding_util::stop::…` keep resolving for the callers that already use them.
+pub use matrix_util::stop;
+pub use matrix_util::stop::{setup_stop_handler, stop_flag};

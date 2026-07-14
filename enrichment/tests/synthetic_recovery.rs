@@ -106,6 +106,8 @@ fn synthetic_three_blocks_recovered() {
         q_softmax_temperature: 1.0,
         min_confidence: 0.0,
         seed: 7,
+        // The point-estimate path: this test is the no-regression guard for it.
+        bootstrap: None,
     };
 
     let AnnotateOutputs {
