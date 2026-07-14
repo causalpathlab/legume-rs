@@ -833,6 +833,7 @@ fn compute_node_calls(a: &AnnotateTrajArgs) -> Result<CommunityCalls> {
         // `--seed` drives the whole fit; it should drive the annotation's randomness too. It was
         // silently falling through to `TermOraConfig`'s own default of 42, so varying `--seed`
         // moved the centroids but left the permutation null (and now the bootstrap) untouched.
+        min_markers: 3,
         seed: a.seed,
         obo: a.obo.map(str::to_owned),
         label_cl: a.label_cl.map(str::to_owned),

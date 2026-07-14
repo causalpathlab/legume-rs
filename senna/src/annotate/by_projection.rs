@@ -93,6 +93,7 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
         resolution: args.resolution,
         seed: args.seed,
         n_perm: args.num_perm,
+        min_markers: args.min_markers,
         assign_qc: !args.no_assign_qc,
         assign_mad: args.assign_mad,
         fdr_alpha: args.fdr_alpha,

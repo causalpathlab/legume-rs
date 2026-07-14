@@ -372,3 +372,26 @@ fn the_null_tracks_the_draws_weight_dispersion() {
          flat={sd_uniform:.4}, dispersed={sd_dispersed:.4}"
     );
 }
+
+#[test]
+fn a_celltype_with_too_few_markers_is_dropped_not_merely_weak() {
+    // A panel that barely matched the data is not a weak competitor. An enrichment walk over one or
+    // two genes is noise, and the winner's curse hands the cluster to whichever noisy panel spiked.
+    // `MIN_LIVE_MARKERS` is the floor the bootstrap itself cannot go below (you cannot resample a
+    // single point); `AnnotateConfig::min_markers` is the user-facing bar above it.
+    let mut panels = clean_panels();
+    panels[2] = vec![2 * PROG, 2 * PROG + 1]; // exactly 2 — at the floor, but thin
+    let boot = run(&panels, &cfg(60)).expect("the other two types are still usable");
+
+    assert_eq!(boot.n_live[2], 2);
+    assert!(
+        boot.usable[2],
+        "2 markers clears MIN_LIVE_MARKERS; the *drop* is the caller's --min-markers, not this floor"
+    );
+    // Below the floor it cannot compete at all, whatever the caller asked for.
+    let mut panels = clean_panels();
+    panels[2] = vec![2 * PROG];
+    let boot = run(&panels, &cfg(60)).expect("runs");
+    assert!(!boot.usable[2]);
+    assert!(!boot.consensus.label.contains(&2));
+}
