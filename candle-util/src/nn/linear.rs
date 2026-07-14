@@ -267,7 +267,7 @@ pub fn logsumexp_forward(log_h_nk: &Tensor, log_w_kd: &Tensor) -> Result<Tensor>
 /// The per-output bias is load-bearing: it absorbs baseline gene-frequency
 /// offsets so the per-topic logits encode *deviations* from baseline.
 /// Empirically, removing it leaves the multinom decoder near-degenerate
-/// (≈7× worse train llik on BMMNC). NB-family decoders tolerate `_nobias`
+/// (≈7× worse train llik). NB-family decoders tolerate `_nobias`
 /// because the per-gene dispersion / NbMixture's α absorb baseline
 /// instead, but they still benefit slightly from the bias term.
 /// Default to `log_softmax_linear` unless you have a specific reason.

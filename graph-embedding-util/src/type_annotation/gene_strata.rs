@@ -15,8 +15,8 @@
 //! markers are long vectors gets a long centroid. And because the cells sit far from every
 //! centroid (`‖cell‖ ≫ ‖centroid‖`), the Euclidean rule degenerates —
 //! `argmin_t ‖x − c_t‖² = argmax_t (⟨x, c_t⟩ − ½‖c_t‖²)` — and a longer centroid simply wins more
-//! cells, largely irrespective of *where it points*. Measured on cord blood: the rank correlation
-//! between a type's centroid norm and its share of the cells is **+0.93**.
+//! cells, largely irrespective of *where it points*. Measured, the rank correlation between a
+//! type's centroid norm and its share of the cells is **+0.93**.
 //!
 //! So if the null draws genes **uniformly** from the marker pool, every null panel inherits the
 //! *pool's* mean norm. A type whose own markers are above that mean beats its null on norm alone;

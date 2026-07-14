@@ -1087,11 +1087,86 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
 
     crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
 
-    // pb_latent omitted: indexed encoder's PB-level forward pass isn't
-    // wired here; annotate reconstructs θ_PB from pb_gene · β.
+    // PB aggregates + the empirical dictionary, exactly as `senna topic` writes them.
+    //
+    // `topic` gets θ_PB by running the encoder's forward pass on the collapsed pseudobulk. The
+    // indexed encoder's PB-level pass is not wired, and it does not need to be: θ is already known
+    // per cell, and the finest collapsing already says which pseudobulk each cell belongs to — so
+    // θ_PB is just the within-PB mean of it. That is the same quantity, without a second encoder
+    // pass on data the encoder never saw in that shape.
+    //
+    // The empirical dictionary is the **model-free** counterpart to `dictionary.parquet`. The
+    // latter is factorized — β = log_softmax(ρ·αᵀ) — so it can only say what the H-dimensional
+    // embedding can express. This one is the plain NB-Fisher-weighted average of each topic's
+    // pseudobulk expression, and depends on the factorization only through θ.
+    //
+    // Neither dominates, and this is not the "sharper" of the two — the softmax over ρ·αᵀ makes the
+    // factorized β the more peaked one. It is an *independent* estimate, so having both lets a
+    // caller cross-check a topic against something the model did not itself construct. It is also
+    // the same object `senna topic` writes, so consumers that already prefer it (`plot-topic` does
+    // `dictionary_empirical.or(dictionary)`) behave the same across every topic-family run instead
+    // of silently falling back here.
     {
         let pb_gene_gp: Mat = finest_collapsed.mu_observed.posterior_mean().clone();
         crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names)?;
+
+        if let Some(c2p) = cell_to_pb_per_level.as_ref().and_then(|l| l.last()) {
+            let n_pb = pb_gene_gp.ncols();
+            let k = z_nk.ncols();
+
+            // θ_PB[p, ·] = mean over the cells collapsed into pseudobulk p. `z_nk` is log θ.
+            let mut pb_latent_pk = Mat::zeros(n_pb, k);
+            let mut n_in_pb = vec![0f32; n_pb];
+            for (n, &p) in c2p.iter().enumerate() {
+                if p < n_pb && n < z_nk.nrows() {
+                    n_in_pb[p] += 1.0;
+                    for kk in 0..k {
+                        pb_latent_pk[(p, kk)] += z_nk[(n, kk)].exp();
+                    }
+                }
+            }
+            for (p, &cnt) in n_in_pb.iter().enumerate() {
+                if cnt > 0.0 {
+                    for kk in 0..k {
+                        pb_latent_pk[(p, kk)] /= cnt;
+                    }
+                }
+            }
+
+            let pb_names = axis_id_names("PB_", n_pb);
+            let topic_names = axis_id_names("T", k);
+            pb_latent_pk.to_parquet_with_names(
+                &format!("{}.pb_latent.parquet", args.out),
+                (Some(&pb_names), Some("pb")),
+                Some(&topic_names),
+            )?;
+
+            let beta_emp = crate::empirical_dict::build_empirical_dictionary(
+                &pb_gene_gp,
+                &pb_latent_pk,
+                &shortlist_weights,
+            );
+            beta_emp.to_parquet_with_names(
+                &format!("{}.dictionary_empirical.parquet", args.out),
+                (Some(&gene_names), Some("gene")),
+                Some(&topic_names),
+            )?;
+            info!(
+                "Wrote empirical dictionary {}×{} (NB-Fisher-weighted, column-simplex) + \
+                 pb_latent {}×{}",
+                beta_emp.nrows(),
+                beta_emp.ncols(),
+                n_pb,
+                k,
+            );
+        } else {
+            warn!(
+                "no cell→pseudobulk map, so no θ_PB and no empirical dictionary — \
+                 {}.dictionary_empirical.parquet is not written and downstream falls back to the \
+                 factorized dictionary.parquet",
+                args.out
+            );
+        }
     }
 
     // CNV detection using topic proportions
@@ -1153,8 +1228,11 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         has_model: true,
         has_cell_proj: true,
         pb_gene_suffix: Some("pb_gene.parquet"),
-        pb_latent_suffix: None,
-        dictionary_empirical_suffix: None,
+        pb_latent_suffix: Some("pb_latent.parquet"),
+        // Full-gene-resolution β̂, the same object `senna topic` writes. Preferred over the
+        // factorized `dictionary.parquet` by anything that ranks genes (plot-topic already does
+        // `dictionary_empirical.or(dictionary)`), because the factorization flattens rare genes.
+        dictionary_empirical_suffix: Some("dictionary_empirical.parquet"),
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         cell_embedding_suffix: None,
         default_colour_by: "cluster",

@@ -214,7 +214,7 @@ pub struct FeatureProjection {
 /// counts. A rate has `Var(n) = μ / size_p`, so a Poisson fit to it is a
 /// quasi-Poisson with a per-column dispersion — its deviance scales with the
 /// pseudobulk's cell count and with the gene's expression, and is therefore *not*
-/// `χ²`-calibrated. Measured on real data (10k BMMNC) that broke the null gate
+/// `χ²`-calibrated. Measured on real data that broke the null gate
 /// outright: `Spearman(LRT, detection) = +0.60`, the lower quantiles collapsed to
 /// zero, `σ̂² → 0`, and 59% of dropped genes were called live against an estimated
 /// `π̂₀ = 0.81`.

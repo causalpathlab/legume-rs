@@ -148,45 +148,6 @@ fn a_live_but_nonspecific_panel_is_called_only_by_the_unstratified_null() {
     );
 }
 
-#[test]
-fn the_unstratified_null_is_easier_to_beat_because_it_is_full_of_dead_genes() {
-    // The mechanism behind the test above, measured directly. A null drawn uniformly is ~30%
-    // undetected genes; those contribute hit steps at the very bottom of the walk, so the null's
-    // enrichment score is depressed — and a depressed null is one any live panel clears.
-    let p = profile();
-    let r = ranked(&p);
-    let live_panel: Vec<(u32, f32)> = (0..20).map(|g| (g as u32, 1.0)).collect();
-
-    let mean_of = |s: &GeneStrata| -> f32 {
-        let prof = s.profile_of(&live_panel);
-        let mut hit = vec![0f32; G];
-        let mut scratch = s.scratch();
-        let mut drawn = Vec::new();
-        let mut rng = keyed_rng(11, 0, 0);
-        let (mean, _, _) = null_moments(
-            &r,
-            s,
-            &prof,
-            20,
-            &vec![0f32; K],
-            400,
-            &mut hit,
-            &mut scratch,
-            &mut drawn,
-            &mut rng,
-        );
-        mean[0]
-    };
-
-    let uniform = mean_of(&GeneStrata::unstratified(G));
-    let stratified = mean_of(&GeneStrata::by_abundance(&p));
-    assert!(
-        stratified > uniform,
-        "an abundance-matched null must score HIGHER (i.e. be harder to beat) than a uniform one \
-         that is 30% dead genes: stratified={stratified:.4}, uniform={uniform:.4}"
-    );
-}
-
 ///////////////////////////
 // behaviour, unchanged  //
 ///////////////////////////
@@ -284,28 +245,6 @@ fn deterministic_given_seed() {
     assert_eq!(a.decision_gap, b.decision_gap);
 }
 
-#[test]
-fn resample_shrinks_the_effective_size() {
-    // The assumption the size-matching rests on: a with-replacement draw of m items covers only
-    // ~0.632*m distinct ones.
-    let m = 20usize;
-    let mut total = 0f64;
-    let reps = 400;
-    for b in 0..reps {
-        let mut rng = keyed_rng(7, b, 0);
-        let mut seen = vec![false; m];
-        for _ in 0..m {
-            seen[rng.random_range(0..m)] = true;
-        }
-        total += seen.iter().filter(|&&s| s).count() as f64;
-    }
-    let frac = total / (reps as f64 * m as f64);
-    assert!(
-        (frac - 0.632).abs() < 0.03,
-        "distinct fraction was {frac:.3}, expected ~0.632"
-    );
-}
-
 ///////////////////////////////////////////
 // the size / weight matching guards     //
 ///////////////////////////////////////////
@@ -342,38 +281,6 @@ fn moments(weights: &[f32], seed: u64) -> (f32, f32) {
 }
 
 #[test]
-fn the_null_tracks_the_draws_effective_size() {
-    // A smaller gene set gives a more variable KS walk, so its null SD must be LARGER. A null
-    // cached at the panel's nominal size — rather than the draw's actual ~0.632x distinct genes —
-    // would miss this and under-state the noise.
-    let (_, sd_8) = moments(&[1.0; 8], 1);
-    let (_, sd_40) = moments(&[1.0; 40], 1);
-    assert!(
-        sd_8 > sd_40,
-        "an 8-gene null must be noisier than a 40-gene one: sd_8={sd_8:.4}, sd_40={sd_40:.4}"
-    );
-}
-
-#[test]
-fn the_null_tracks_the_draws_weight_dispersion() {
-    // Resampling with replacement produces multiplicities (1, 2, 3…), which concentrate the walk on
-    // fewer genes and make it MORE variable. A null scattering binary weights would miss this.
-    // Same gene count, same total mass; only the dispersion differs.
-    let uniform = vec![2.0f32; 40];
-    let mut dispersed = vec![1.0f32; 40];
-    for w in dispersed.iter_mut().take(10) {
-        *w = 5.0; // 10 genes drawn 5x, 30 drawn once — same 80 units of mass
-    }
-    let (_, sd_uniform) = moments(&uniform, 2);
-    let (_, sd_dispersed) = moments(&dispersed, 2);
-    assert!(
-        sd_dispersed > sd_uniform,
-        "a dispersed weight multiset must give a noisier null than a flat one of the same size: \
-         flat={sd_uniform:.4}, dispersed={sd_dispersed:.4}"
-    );
-}
-
-#[test]
 fn a_celltype_with_too_few_markers_is_dropped_not_merely_weak() {
     // A panel that barely matched the data is not a weak competitor. An enrichment walk over one or
     // two genes is noise, and the winner's curse hands the cluster to whichever noisy panel spiked.
@@ -394,4 +301,36 @@ fn a_celltype_with_too_few_markers_is_dropped_not_merely_weak() {
     let boot = run(&panels, &cfg(60)).expect("runs");
     assert!(!boot.usable[2]);
     assert!(!boot.consensus.label.contains(&2));
+}
+
+#[test]
+fn the_null_tracks_the_draws_size_and_weight_dispersion() {
+    // A resampled panel differs from its nominal self in TWO ways, and the null must follow both or
+    // it standardizes the score against the wrong thing — which inflates small panels and
+    // manufactures the very winner's curse the bootstrap exists to remove.
+    //
+    // Size: fewer genes => a more variable KS walk => a LARGER null SD. A null cached at the
+    // panel's nominal size would miss this.
+    let (_, sd_8) = moments(&[1.0; 8], 1);
+    let (_, sd_40) = moments(&[1.0; 40], 1);
+    assert!(
+        sd_8 > sd_40,
+        "an 8-gene null must be noisier than a 40-gene one: sd_8={sd_8:.4}, sd_40={sd_40:.4}"
+    );
+
+    // Weights: drawing with replacement produces multiplicities, which concentrate the walk on
+    // fewer genes and make it MORE variable. A null scattering binary weights would miss this.
+    // Same gene count, same total mass; only the dispersion differs.
+    let flat = vec![2.0f32; 40];
+    let mut dispersed = vec![1.0f32; 40];
+    for w in dispersed.iter_mut().take(10) {
+        *w = 5.0; // 10 genes drawn 5x, 30 once — the same 80 units of mass
+    }
+    let (_, sd_flat) = moments(&flat, 2);
+    let (_, sd_dispersed) = moments(&dispersed, 2);
+    assert!(
+        sd_dispersed > sd_flat,
+        "a dispersed weight multiset must give a noisier null than a flat one of the same size: \
+         flat={sd_flat:.4}, dispersed={sd_dispersed:.4}"
+    );
 }

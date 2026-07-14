@@ -21,10 +21,10 @@
 //!
 //! This is not hypothetical. `senna bge` trains on the features that survive its null-QC refit and
 //! then **post-hoc projects the rest back in, so downstream tools get a full feature set** (which is
-//! the right call — a dropped gene should still have a coordinate). Measured on BMMNC, H=32: of
-//! 36,591 rows, 11,096 were projected, and they land as a *degenerate point mass* —
-//! 0.0019 from the cell-cloud centre, coordinate spread 0.0069, norms 0.957 ± 0.0024 — while
-//! genuinely trained genes sit 0.603 away.
+//! the right call — a dropped gene should still have a coordinate). Measured on real runs, those
+//! projected rows land as a *degenerate point mass*: a hair from the cell-cloud centre, with a
+//! coordinate spread near zero and a perfectly healthy-looking norm, while genuinely trained genes
+//! sit hundreds of times further out.
 //!
 //! # Why it matters
 //!
@@ -42,8 +42,9 @@
 //!
 //! The scale is the point of it. A gene can only tell one cell from another if its coordinate is an
 //! appreciable distance from the middle of them all; at `d ≪ R` it is very nearly equidistant from
-//! every cell and discriminates nothing. On BMMNC the two populations are not close: the projected
-//! rows sit at `0.008·R` and the trained ones at `2.4·R`, three orders of magnitude apart.
+//! every cell and discriminates nothing. The two populations are not close: measured, the
+//! projected rows sit at a few thousandths of `R` and the trained ones at a small multiple of it —
+//! three orders of magnitude apart, so the cut has enormous margin.
 //!
 //! It does **not** matter whether such a gene got there by never being trained or by being
 //! genuinely expressed in every cell at the same level — neither can localize a cell type, and both
@@ -77,8 +78,8 @@ use rayon::prelude::*;
 /// judged to carry no localizing information at all.
 ///
 /// Deliberately small. The populations this separates are three orders of magnitude apart on real
-/// data (`0.008·R` vs `2.4·R`), so there is no need to cut anywhere near the live genes — and a
-/// *false positive* here silently deletes a real marker, which is the one thing this must not do.
+/// data, so there is no need to cut anywhere near the live genes — and a *false positive* here
+/// silently deletes a real marker, which is the one thing this must not do.
 const HUB_RADIUS_FRAC: f32 = 0.05;
 
 /// Zero every feature row that the co-embedding parked at the hub of the cell cloud.

@@ -14,16 +14,17 @@
 //!
 //! Two things make it decisive here. A gene the data never detected has zero specificity in every
 //! cluster, so it sorts to the **bottom of every ranking** and can never contribute a hit step —
-//! and a uniform draw from all genes is full of them (measured on BMMNC: **30% of the 36,601-gene
-//! pool is undetected**, and the pool's mean expression is a *quarter* of the real panel's). A
-//! null made largely of genes that cannot possibly be enriched is trivially easy to beat.
+//! and a uniform draw from all genes is full of them — measured, **~30% of the gene pool is
+//! undetected**, and the pool's mean expression is a *quarter* of a real marker panel's. A null
+//! made largely of genes that cannot possibly be enriched is trivially easy to beat.
 //!
 //! That alone would only inflate everything by a constant. What makes it *decision-relevant* is
 //! that the inflation **differs by cell type**, because panels differ in how well-expressed their
 //! markers are. The label is `argmax_c es_std[k, c]`, so a cell type whose markers happen to be
-//! abundant out-scores one whose markers are not — on abundance, not on biology. Measured on
-//! BMMNC before this module existed: the rank correlation between a cell type's mean `es_std` and
-//! its markers' mean expression was **+1.000** across all eight types, a perfect monotone.
+//! abundant out-scores one whose markers are not — on abundance, not on biology. Measured before
+//! this module existed: the rank correlation between a cell type's mean `es_std` and its markers'
+//! mean expression was **+1.000** across every type — a *perfect* monotone, which no biology
+//! produces.
 //!
 //! # The fix
 //!
