@@ -553,12 +553,7 @@ fn write_report_table(
 /// from one `--seed` to the next. `mcse_lfsr` is that Monte-Carlo error, per site: when
 /// `|lfsr − alpha|` is not comfortably larger than it, the row is under-sampled, not
 /// borderline-significant, and the answer is more `--posterior-samples`.
-fn write_bayes(
-    res: &[BayesResult],
-    sites: &[Site],
-    level: &ReportLevel,
-    path: &str,
-) -> Result<()> {
+fn write_bayes(res: &[BayesResult], sites: &[Site], level: &ReportLevel, path: &str) -> Result<()> {
     let keys: Vec<(usize, usize)> = res.iter().map(|r| (r.site, r.branch)).collect();
     let f32_col = |f: fn(&BayesResult) -> f32| Val::F32(res.iter().map(f).collect());
     write_report_table(
@@ -603,11 +598,20 @@ fn write_trend_freq(
         level,
         &keys,
         vec![
-            ("n_cells", Val::I32(res.iter().map(|r| r.n_cells as i32).collect())),
-            ("total_cov", Val::F32(res.iter().map(|r| r.total_cov as f32).collect())),
+            (
+                "n_cells",
+                Val::I32(res.iter().map(|r| r.n_cells as i32).collect()),
+            ),
+            (
+                "total_cov",
+                Val::F32(res.iter().map(|r| r.total_cov as f32).collect()),
+            ),
             ("stat", Val::F32(res.iter().map(|r| r.stat).collect())),
             ("effect", Val::F32(res.iter().map(|r| r.effect).collect())),
-            ("dispersion", Val::F32(res.iter().map(|r| r.dispersion).collect())),
+            (
+                "dispersion",
+                Val::F32(res.iter().map(|r| r.dispersion).collect()),
+            ),
             ("p_trend", Val::F32(res.iter().map(|r| r.p_value).collect())),
             ("q", Val::F32(qs.to_vec())),
         ],
@@ -633,13 +637,8 @@ fn write_profile(
     let mut keys: Vec<(usize, usize)> = Vec::new();
     let (mut bin, mut kk, mut nn, mut rate) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for &si in &which {
-        for (l, b, k, ntot) in site_profile(
-            &sites[si],
-            &bins,
-            &lin.branch,
-            n_bins,
-            lin.n_branches,
-        ) {
+        for (l, b, k, ntot) in site_profile(&sites[si], &bins, &lin.branch, n_bins, lin.n_branches)
+        {
             if level.drop_group == Some(l) {
                 continue; // background bucket kept in the contrast rest but not reported
             }

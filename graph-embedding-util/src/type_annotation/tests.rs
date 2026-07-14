@@ -305,9 +305,12 @@ fn all_marker_types_unmatched_is_an_error() {
     writeln!(f, "NOPE\tGhost").unwrap();
     drop(f);
     let gene_names: Vec<Box<str>> = vec!["AAA".into()];
-    assert!(
-        super::markers::parse_and_match_markers(path.to_str().unwrap(), &gene_names, false, 0.0)
-            .is_err()
-    );
+    assert!(super::markers::parse_and_match_markers(
+        path.to_str().unwrap(),
+        &gene_names,
+        false,
+        0.0
+    )
+    .is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }

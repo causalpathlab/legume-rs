@@ -208,8 +208,10 @@ fn run_gem_genes_bge(
     )?;
     let panel =
         data_beans_alg::hvg::load_must_train(args.collapse.markers.as_deref(), selection_on)?;
-    let parts: Vec<&data_beans_alg::hvg::MustTrainFeatures> =
-        [explicit.as_ref(), panel.as_ref()].into_iter().flatten().collect();
+    let parts: Vec<&data_beans_alg::hvg::MustTrainFeatures> = [explicit.as_ref(), panel.as_ref()]
+        .into_iter()
+        .flatten()
+        .collect();
     let must_train =
         (!parts.is_empty()).then(|| data_beans_alg::hvg::MustTrainFeatures::union(&parts));
 
