@@ -42,7 +42,8 @@ pub struct ConversionParams {
     pub include_missing_barcode: bool,
     pub min_coverage: usize,
     pub min_conversion: usize,
-    pub pvalue_cutoff: f32,
+    /// Target FDR (Benjamini-Hochberg q-value cutoff) for site detection.
+    pub fdr_cutoff: f32,
     /// Sequencing-error rate ε for the beta-binomial editing null.
     pub error_rate: f64,
     /// Overdispersion ρ for the beta-binomial editing null (0 ⇒ binomial).
@@ -267,10 +268,10 @@ pub fn find_all_conversion_sites(
 
     // Multiple-testing correction: Benjamini-Hochberg over every called site,
     // writing each site's q-value back onto it and keeping those with
-    // q <= pvalue_cutoff (the cutoff is a target FDR, not a per-site threshold).
+    // q <= fdr_cutoff (the cutoff is a target FDR, not a per-site threshold).
     // Pass 1 records each gene's offset into the flat p-value vector; pass 2
     // uses that offset, so the two passes never share a running cursor.
-    let cutoff = params.pvalue_cutoff;
+    let cutoff = params.fdr_cutoff;
     let mut offsets: Vec<(GeneId, usize)> = Vec::with_capacity(gene_sites.len());
     let mut pvs: Vec<f32> = Vec::new();
     for e in gene_sites.iter() {

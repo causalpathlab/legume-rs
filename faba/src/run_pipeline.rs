@@ -230,13 +230,11 @@ pub struct PipelineArgs {
     pub atoi_min_conversion: usize,
 
     #[arg(
-        long = "atoi-pval",
-        alias = "atoi-pvalue-cutoff",
-        alias = "atoi-pvalue",
+        long = "atoi-fdr",
         default_value_t = 0.05,
         help = "ATOI detection FDR target (Benjamini-Hochberg q-value)"
     )]
-    pub atoi_pvalue_cutoff: f32,
+    pub atoi_fdr_cutoff: f32,
 
     ///////////////////////////////////////////////////////
     // Editing statistical null (shared by ATOI and m6A) //
@@ -301,13 +299,11 @@ pub struct PipelineArgs {
     pub m6a_min_conversion: usize,
 
     #[arg(
-        long = "m6a-pval",
-        alias = "m6a-pvalue-cutoff",
-        alias = "m6a-pvalue",
+        long = "m6a-fdr",
         default_value_t = 0.05,
         help = "m6A detection FDR target (Benjamini-Hochberg q-value)"
     )]
-    pub m6a_pvalue_cutoff: f32,
+    pub m6a_fdr_cutoff: f32,
 
     #[command(flatten)]
     pub m6a_contrast: M6aContrastArgs,
@@ -756,7 +752,7 @@ fn run_atoi_step(
         include_missing_barcode: false,
         min_coverage: args.atoi_min_coverage,
         min_conversion: args.atoi_min_conversion,
-        pvalue_cutoff: args.atoi_pvalue_cutoff,
+        fdr_cutoff: args.atoi_fdr_cutoff,
         error_rate: args.edit_error_rate,
         overdispersion: args.edit_overdispersion,
         backend: args.backend.clone(),
@@ -990,7 +986,7 @@ fn run_dart_step(
         include_missing_barcode: false,
         min_coverage: args.m6a_min_coverage,
         min_conversion: args.m6a_min_conversion,
-        pvalue_cutoff: args.m6a_pvalue_cutoff,
+        fdr_cutoff: args.m6a_fdr_cutoff,
         error_rate: args.edit_error_rate,
         overdispersion: args.edit_overdispersion,
         backend: args.backend.clone(),

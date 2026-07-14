@@ -58,7 +58,7 @@ conversions ≥ `--min-conversion` (5), control coverage ≥ `--edit-control-min
 on Jeffreys-regularised rates `(a+½)/(n+1)` — an absolute excess `≥ --m6a-min-delta` (0.05) **and**
 a fold excess `≥ --m6a-min-ratio` (2.0).
 
-**Multiple testing.** Benjamini–Hochberg [4] across all sites genome-wide. `-p/--pval` (0.05) is
+**Multiple testing.** Benjamini–Hochberg [4] across all sites genome-wide. `-q/--fdr` (0.05) is
 therefore a **target FDR**, not a per-site p-value threshold.
 
 **Stratified discovery.** By default cells are first grouped by expression (§8), and discovery runs
@@ -87,7 +87,7 @@ noise: `k ~ BetaBinomial(n, α, β)` with mean `ε = --error-rate` (0.01) and in
 to a plain binomial. This is the single-condition test used by SAILOR [5] and JACUSA2 [6].
 
 Gates before testing: `n ≥ --min-coverage` (**5** — note this differs from dartseq's 10) and
-`k ≥ --min-conversion` (**3**). Then Benjamini–Hochberg [4] across all sites, keeping `q ≤ --pval`
+`k ≥ --min-conversion` (**3**). Then Benjamini–Hochberg [4] across all sites, keeping `q ≤ --fdr`
 (0.05).
 
 Quantification is as in §2, with channels `edited` / `unedited`.

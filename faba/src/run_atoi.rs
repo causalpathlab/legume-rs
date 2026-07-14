@@ -101,13 +101,12 @@ pub struct AtoICountArgs {
     pub overdispersion: f64,
 
     #[arg(
-        short = 'p',
-        long = "pval",
-        alias = "pvalue",
+        short = 'q',
+        long = "fdr",
         default_value_t = 0.05,
         help = "A-to-I detection FDR target (Benjamini-Hochberg q-value)"
     )]
-    pub pvalue_cutoff: f32,
+    pub fdr_cutoff: f32,
 
     #[arg(
         long,
@@ -331,7 +330,7 @@ impl From<&AtoICountArgs> for ConversionParams {
             include_missing_barcode: args.include_missing_barcode,
             min_coverage: args.min_coverage,
             min_conversion: args.min_conversion,
-            pvalue_cutoff: args.pvalue_cutoff,
+            fdr_cutoff: args.fdr_cutoff,
             error_rate: args.error_rate,
             overdispersion: args.overdispersion,
             backend: args.backend.clone(),
