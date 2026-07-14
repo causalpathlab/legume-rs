@@ -8,21 +8,16 @@ use crate::editing::pipeline::{
     find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, M6aContrastArgs,
 };
 use crate::editing::sifter::ModificationType;
-use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key};
 use crate::pipeline_util::mass_enrichment::MassEnrichmentArgs;
-use crate::pipeline_util::{
-    accumulate_gene_stats, batch_qc, check_all_bam_indices, extract_gene_key,
-    passing_genes_from_stats, GeneCountQc,
-};
+use crate::pipeline_util::{check_all_bam_indices, GeneCountQc};
 use crate::snp::genotyper::GenotypeParams;
 use crate::snp::io::load_known_snps_auto;
 use crate::snp::pipeline::{run_snp_pipeline, SnpParams};
 
 use genomic_data::gff::GffRecordMap;
-use genomic_data::sam::CellBarcode;
 use log::info;
 use rayon::ThreadPoolBuilder;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 
 #[derive(Args, Debug)]
 #[command(
@@ -181,38 +176,8 @@ pub struct PipelineArgs {
     //////////////////////
     // Mitochondrial QC //
     //////////////////////
-    #[arg(
-        long,
-        default_value = "chrM,chrMT,MT,M",
-        help = "Mitochondrial chromosome name(s), comma-separated. Genes here \
-                are excluded from the quantified matrix (unless --keep-mito); a \
-                per-cell MT-fraction QC is always written."
-    )]
-    pub mito_chr: Box<str>,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Keep mitochondrial genes in the quantified matrix (default: exclude)"
-    )]
-    pub keep_mito: bool,
-
-    #[arg(
-        long,
-        default_value_t = 0.0,
-        help = "Max mitochondrial UMI fraction per cell: > 0 = fixed cutoff; \
-                0 (default) = data-driven elbow cutoff on the MT% distribution \
-                (drops the high-MT burst tail). See --no-mito-cell-qc to disable."
-    )]
-    pub max_mito_frac: f64,
-
-    #[arg(
-        long = "no-mito-cell-qc",
-        default_value_t = false,
-        help = "Disable mitochondrial cell QC (report per-cell MT% only, drop no \
-                cells). Mito genes are still excluded from features unless --keep-mito."
-    )]
-    pub no_mito_cell_qc: bool,
+    #[command(flatten)]
+    pub mito_qc: crate::pipeline_util::MitoQcArgs,
 
     ////////////////////////////////////////////////////
     // Shared read-quality filters (ATOI / m6A / SNP) //
@@ -721,16 +686,10 @@ fn filtered_gff(gff_file: &str, qc: &Option<GeneCountQc>) -> anyhow::Result<GffR
     Ok(gff_map)
 }
 
+/// Step 1 is [`run_gene_count_qc`] with the pipeline's knobs — the same call the
+/// standalone modalities make, so `faba all` and `faba dartseq` cannot disagree
+/// about which cells and genes survive.
 fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCountQc>> {
-    // Parse GFF once to get both gene map and exon intervals
-    let all_records = read_gff_record_vec(args.gff_file.as_ref())?;
-    let gene_map = build_gene_map(&all_records, Some(&FeatureType::Gene))?;
-    let exon_map = build_exon_intervals(&all_records);
-    let exon_intervals: FxHashMap<GeneId, Vec<(i64, i64)>> = exon_map.into_iter().collect();
-
-    let gff_map = GffRecordMap::from_map(gene_map);
-    info!("Loaded {} genes for expression filtering", gff_map.len());
-
     // Count genes (and freeze cells) for WT + control samples alike.
     let all_bam_files = all_quant_bam_files(args);
 
@@ -739,248 +698,31 @@ fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Option<GeneCoun
         info!("  {}", bam);
     }
 
-    let batch_names = uniq_batch_names(&all_bam_files)?;
-    let records = gff_map.records();
-
-    // Build gene_key → GeneId mapping for reverse lookup after QC
-    let gene_key_to_id: FxHashMap<Box<str>, GeneId> = records
-        .iter()
-        .map(|rec| (format_gene_key(rec), rec.gene_id.clone()))
-        .collect();
-
-    // Mitochondrial genes and the biotype-selected vocabulary. BOTH gates are
-    // applied ONLY at the quantification surfaces (the per-batch output matrix
-    // and the frozen `expressed_gene_ids` that ATOI/APA/m6A inherit) — never to
-    // cell-calling. QC/cell-calling sees every gene and biotype, so the frozen
-    // cell set stays Cell Ranger-faithful; only what we quantify is narrowed.
-    let mito_keys = crate::pipeline_util::mito_gene_keys(&all_records, &args.mito_chr);
-    info!(
-        "{} mitochondrial gene(s) on {} ({})",
-        mito_keys.len(),
-        args.mito_chr,
-        if args.keep_mito {
-            "kept in matrix"
-        } else {
-            "excluded from matrix"
-        }
-    );
-    let selected_gene_keys: Option<FxHashSet<Box<str>>> = if args.gene_type.is_empty() {
-        info!("Gene biotype filter: OFF (all biotypes quantified)");
-        None
-    } else {
-        let target: genomic_data::gff::GeneType = args.gene_type.clone().into();
-        let keys: FxHashSet<Box<str>> = records
-            .iter()
-            .filter(|r| r.gene_type == target)
-            .map(format_gene_key)
-            .collect();
-        info!(
-            "Gene biotype filter: quantifying {} '{}' genes (QC keeps all biotypes)",
-            keys.len(),
-            args.gene_type
-        );
-        Some(keys)
-    };
-    // A gene survives to quantification iff it is not mito-excluded AND matches
-    // the selected biotype (when one is set).
-    let quantify_gene = |gk: &str| -> bool {
-        (args.keep_mito || !mito_keys.contains(gk))
-            && selected_gene_keys.as_ref().is_none_or(|s| s.contains(gk))
-    };
-
-    let mut expressed_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
-    let mut cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>> =
-        rustc_hash::FxHashMap::default();
-    let mut matrix_by_batch: rustc_hash::FxHashMap<Box<str>, Box<str>> =
-        rustc_hash::FxHashMap::default();
-    // Gene stats pooled across batches → the shared vocabulary is thresholded
-    // once on these pooled stats; each batch's matrix is still filtered by its
-    // own passing set. See [`accumulate_gene_stats`] for why summing is exact.
-    let mut pooled_gene_stats: rustc_hash::FxHashMap<Box<str>, (usize, f64)> =
-        rustc_hash::FxHashMap::default();
-    let cell_call = args.cell_qc.params();
-    let umi_tag = crate::pipeline_util::resolve_umi_tag(args.no_umi_dedup, &args.umi_tag);
-
-    for (bam_file, batch_name) in all_bam_files.iter().zip(batch_names.iter()) {
-        let njobs = records.len() as u64;
-        info!(
-            "Counting genes (splice-aware) in {} ({} genes)",
-            batch_name, njobs
-        );
-
-        // Splice-aware counting via par_iter
-        let results: Vec<_> = records
-            .par_iter()
-            .progress_with(new_progress_bar(njobs))
-            .map(|rec| {
-                count_read_per_gene_splice(
-                    bam_file,
-                    rec,
-                    &exon_intervals,
-                    &args.cell_barcode_tag,
-                    &args.gene_barcode_tag,
-                    umi_tag,
-                )
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-
-        let mut spliced_triplets = Vec::new();
-        let mut unspliced_triplets = Vec::new();
-        for r in results {
-            spliced_triplets.extend(r.spliced);
-            unspliced_triplets.extend(r.unspliced);
-        }
-
-        info!(
-            "{}: {} spliced, {} unspliced triplets",
-            batch_name,
-            spliced_triplets.len(),
-            unspliced_triplets.len()
-        );
-
-        // In-memory QC: gene stats on total (spliced + unspliced), cell call
-        // spliced-only (per-batch).
-        let bq = batch_qc(
-            &spliced_triplets,
-            &unspliced_triplets,
-            args.gene_min_counts > 0,
-            args.cell_min_genes,
-            &cell_call,
-        );
-        let passing_cells = bq.passing_cells;
-
-        // Mitochondrial QC: per-cell MT fraction over the FULL pre-filter counts
-        // (spliced + unspliced). Always reported; cells are dropped only when
-        // --max-mito-frac > 0. Runs on the frozen-cell candidates, before the
-        // biotype/mito gene gate, so the metric reflects true MT burden.
-        let mt_stats = crate::pipeline_util::mito_cell_stats(
-            &[&spliced_triplets, &unspliced_triplets],
-            &passing_cells,
-            &mito_keys,
-        );
-        crate::pipeline_util::write_mt_qc(&args.output, batch_name, &mt_stats)?;
-        let passing_cells = crate::pipeline_util::apply_mito_filter(
-            passing_cells,
-            &mt_stats,
-            args.max_mito_frac,
-            args.no_mito_cell_qc,
-        );
-
-        // This batch's matrix is filtered by its own passing genes; the shared
-        // vocabulary is pooled across batches and thresholded after the loop.
-        // Count-QC runs on every gene; `quantify_gene` then narrows the matrix to
-        // the selected biotype and drops mito genes (unless --keep-mito).
-        let passing_genes: FxHashSet<Box<str>> =
-            passing_genes_from_stats(&bq.gene_stats, args.gene_min_cells, args.gene_min_counts)
-                .into_iter()
-                .filter(|gk| quantify_gene(gk))
-                .collect();
-        accumulate_gene_stats(&mut pooled_gene_stats, bq.gene_stats);
-
-        info!(
-            "{}: {} genes, {} cells passed QC",
-            batch_name,
-            passing_genes.len(),
-            passing_cells.len()
-        );
-
-        // Filter triplets to QC-passing genes and cells (par_iter)
-        let filter_triplets =
-            |triplets: Vec<(CellBarcode, Box<str>, f32)>| -> Vec<(CellBarcode, Box<str>, f32)> {
-                triplets
-                    .into_par_iter()
-                    .filter(|(cb, feat, _)| {
-                        passing_genes.contains(extract_gene_key(feat)) && passing_cells.contains(cb)
-                    })
-                    .collect()
-            };
-
-        let spliced_triplets = filter_triplets(spliced_triplets);
-        let unspliced_triplets = filter_triplets(unspliced_triplets);
-
-        // Merge spliced + unspliced into one backend
-        let UnionNames {
-            col_names,
-            cell_to_index,
-            row_names,
-            feature_to_index,
-        } = collect_union_names(&spliced_triplets, &unspliced_triplets);
-
-        let out = crate::pipeline_util::BackendOutputPath::new(
-            &args.output,
-            &format!("{}_genes", batch_name),
-            &args.backend,
-            args.zip,
-        );
-
-        let merged: Vec<_> = spliced_triplets
-            .into_iter()
-            .chain(unspliced_triplets)
-            .collect();
-
-        format_data_triplets_shared(
-            merged,
-            &feature_to_index,
-            &cell_to_index,
-            row_names,
-            col_names,
-        )
-        .to_backend(&out.write_path)?;
-
-        out.finalize()?;
-
-        info!(
-            "{}: wrote spliced + unspliced to {}",
-            batch_name, out.target_path
-        );
-        // Record for mass-enrichment reuse (keyed by BAM path like cells_by_batch).
-        matrix_by_batch.insert(bam_file.clone(), out.target_path.clone());
-
-        // Write this batch's passable cell set so standalone modality runs can
-        // reuse it via --valid-cells.
-        crate::pipeline_util::write_qc_cells(&args.output, batch_name, &passing_cells)?;
-
-        // Per-batch retained cells (NOT a global union — barcodes collide across
-        // libraries). Keyed by BAM file path (stable + order-independent).
-        cells_by_batch.insert(bam_file.clone(), passing_cells);
-    }
-
-    // Threshold the pooled gene stats once → shared feature vocabulary for
-    // --valid-genes reuse and downstream modality masking.
-    let passing_genes = passing_genes_from_stats(
-        &pooled_gene_stats,
-        args.gene_min_cells,
-        args.gene_min_counts,
-    );
-    for gene_key in &passing_genes {
-        // Same quantification gate as the per-batch matrices: the frozen set that
-        // ATOI/APA/m6A inherit carries the biotype subset and mito exclusion.
-        if !quantify_gene(gene_key) {
-            continue;
-        }
-        if let Some(gene_id) = gene_key_to_id.get(gene_key) {
-            expressed_gene_ids.insert(gene_id.clone());
-        }
-    }
-    crate::pipeline_util::write_qc_genes(&args.output, &expressed_gene_ids)?;
-
-    let total_cells: usize = cells_by_batch.values().map(|s| s.len()).sum();
-    info!(
-        "Gene filtering: {} genes passed QC across {} BAM files",
-        expressed_gene_ids.len(),
-        all_bam_files.len()
-    );
-    info!(
-        "Cell filtering: {} cells passed QC across {} BAM files",
-        total_cells,
-        all_bam_files.len()
-    );
-
-    Ok(Some(GeneCountQc {
-        gene_ids: expressed_gene_ids,
-        cells_by_batch,
-        matrix_by_batch,
-    }))
+    let qc = crate::pipeline_util::run_gene_count_qc(
+        args.gff_file.as_ref(),
+        &crate::pipeline_util::GeneQcRequest {
+            bam_files: &all_bam_files,
+            cell_barcode_tag: &args.cell_barcode_tag,
+            gene_barcode_tag: &args.gene_barcode_tag,
+            umi_tag: crate::pipeline_util::resolve_umi_tag(args.no_umi_dedup, &args.umi_tag),
+            gff_file: Some(args.gff_file.as_ref()),
+            output_dir: &args.output,
+            gene_type: &args.gene_type,
+            gene_min_cells: args.gene_min_cells,
+            gene_min_counts: args.gene_min_counts,
+            cell_min_genes: args.cell_min_genes,
+            cell_call: args.cell_qc.params(),
+            mito: args.mito_qc.params(),
+            valid_cells_file: None,
+            valid_genes_file: None,
+            skip_gene_qc: false,
+            persist: Some(crate::pipeline_util::GeneMatrixSink {
+                backend: &args.backend,
+                zip: args.zip,
+            }),
+        },
+    )?;
+    Ok(Some(qc))
 }
 
 // Step 2: ATOI detection
@@ -1182,6 +924,7 @@ fn run_apa_step(
         valid_gene_ids,
         valid_cell_barcodes,
         cell_qc: args.cell_qc.clone(),
+        mito_qc: args.mito_qc.clone(),
         valid_cells_file: None,
         valid_genes_file: None,
     };

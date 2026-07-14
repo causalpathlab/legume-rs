@@ -275,11 +275,11 @@ pub struct GeneCountQc {
     pub matrix_by_batch: rustc_hash::FxHashMap<Box<str>, Box<str>>,
 }
 
-/// Where [`run_gene_count_qc`] persists the gene-count matrix it already builds
-/// for QC. Bundled so the modality runners can turn "report gene counts" on with
-/// one field instead of threading three args through the QC call.
+/// How [`run_gene_count_qc`] persists the gene-count matrix it already builds for
+/// QC. Only the *matrix* is optional — the QC artifacts always land in
+/// [`GeneQcRequest::output_dir`], so a run can never drop cells without leaving
+/// the `{batch}_mt_qc.tsv.gz` record of why.
 pub struct GeneMatrixSink<'a> {
-    pub output_dir: &'a str,
     pub backend: &'a SparseIoBackend,
     pub zip: bool,
 }
@@ -403,8 +403,8 @@ pub fn batch_qc(
 }
 
 /// Apply the gene thresholds to per-gene `(nnz, total)` stats. The same predicate
-/// serves a single batch ([`qc_passing_keys`]) or stats pooled across batches.
-/// A `gene_min_counts` of 0 disables the total-count threshold.
+/// serves a single batch (one [`qc_one_batch`] result) or stats pooled across
+/// batches. A `gene_min_counts` of 0 disables the total-count threshold.
 pub fn passing_genes_from_stats(
     gene_stats: &FxHashMap<Box<str>, (usize, f64)>,
     gene_min_cells: usize,
@@ -438,50 +438,20 @@ pub fn accumulate_gene_stats(
     }
 }
 
-/// Per-batch in-memory QC: thresholds one batch's gene stats and returns its
-/// cell call. Used by the `faba genes` writers, which filter each batch's matrix
-/// against its own passing set. The pooled-vocabulary paths instead accumulate
-/// [`batch_qc`] stats across batches and call [`passing_genes_from_stats`] once.
-pub fn qc_passing_keys(
-    spliced: &[(CellBarcode, Box<str>, f32)],
-    unspliced: &[(CellBarcode, Box<str>, f32)],
-    gene_min_cells: usize,
-    gene_min_counts: usize,
-    cell_min_genes: usize,
-    cell_call: &crate::cell_qc::CellCallParams,
-) -> (
-    rustc_hash::FxHashSet<Box<str>>,
-    rustc_hash::FxHashSet<CellBarcode>,
-) {
-    let bq = batch_qc(
-        spliced,
-        unspliced,
-        gene_min_counts > 0,
-        cell_min_genes,
-        cell_call,
-    );
-    let passing_genes = passing_genes_from_stats(&bq.gene_stats, gene_min_cells, gene_min_counts);
-    (passing_genes, bq.passing_cells)
-}
-
-/// Run in-memory gene count QC: count reads per gene (splice-aware),
-/// filter genes by min_cells and cells by min_genes.
-/// Returns passing gene IDs and cell barcodes (no disk output).
-#[allow(clippy::too_many_arguments)]
-pub fn run_gene_count_qc(
-    gff_file: &str,
-    bam_files: &[Box<str>],
-    cell_barcode_tag: &str,
-    gene_barcode_tag: &str,
-    umi_tag: Option<&[u8]>,
-    gene_min_cells: usize,
-    gene_min_counts: usize,
-    cell_min_genes: usize,
-    cell_call: &crate::cell_qc::CellCallParams,
-    persist: Option<&GeneMatrixSink>,
-) -> anyhow::Result<GeneCountQc> {
+/// Splice-aware gene counting + QC over every batch: count → [`qc_one_batch`] →
+/// per-batch matrix → pooled gene vocabulary.
+///
+/// **The one gene-counting loop.** `faba all` (via `run_gene_counting_step`) and
+/// the shared modality QC behind `dartseq` / `atoi` / `apa` are both just calls to
+/// this with a different [`GeneQcRequest`]. They used to be two near-identical
+/// copies of this loop, and the mito cell filter was added to one and forgotten in
+/// the other — the copies *were* the defect, so there is now only one.
+/// (`faba genes` keeps its own writers: it emits a different set of matrices.)
+pub fn run_gene_count_qc(gff_file: &str, req: &GeneQcRequest) -> anyhow::Result<GeneCountQc> {
     info!("=== Gene expression QC ===");
 
+    let bam_files = req.bam_files;
+    let persist = req.persist.as_ref();
     let batch_names = uniq_batch_names(bam_files)?;
 
     let all_records = read_gff_record_vec(gff_file)?;
@@ -499,6 +469,10 @@ pub fn run_gene_count_qc(
         .iter()
         .map(|rec| (format_gene_key(rec), rec.gene_id.clone()))
         .collect();
+
+    // Resolved once, outside the batch loop: the gate is a property of the
+    // annotation, not of a batch.
+    let gate = GeneGate::new(&records, req.gene_type, req.mito.clone());
 
     let mut expressed_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
     let mut cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>> =
@@ -525,9 +499,9 @@ pub fn run_gene_count_qc(
                     bam_file,
                     rec,
                     &exon_intervals,
-                    cell_barcode_tag,
-                    gene_barcode_tag,
-                    umi_tag,
+                    req.cell_barcode_tag,
+                    req.gene_barcode_tag,
+                    req.umi_tag,
                 )
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -545,24 +519,48 @@ pub fn run_gene_count_qc(
             unspliced_triplets.len()
         );
 
-        let bq = batch_qc(
+        // Cell call + mito cell filter + this batch's QC artifacts, in the one
+        // shared place (see `qc_one_batch`).
+        let bq = qc_one_batch(
             &spliced_triplets,
             &unspliced_triplets,
-            gene_min_counts > 0,
-            cell_min_genes,
-            cell_call,
-        );
+            &gate,
+            req.gene_min_counts,
+            req.cell_min_genes,
+            &req.cell_call,
+            Some(QcArtifacts {
+                dir: req.output_dir,
+                batch_name,
+            }),
+        )?;
 
-        info!("{}: {} cells passed QC", batch_name, bq.passing_cells.len());
+        // This batch's matrix carries only what we quantify: count-QC runs on every
+        // gene, then the gate narrows to the selected biotype and drops mito genes
+        // (unless --keep-mito). The shared vocabulary is pooled across batches and
+        // thresholded after the loop.
+        let passing_genes: rustc_hash::FxHashSet<Box<str>> =
+            passing_genes_from_stats(&bq.gene_stats, req.gene_min_cells, req.gene_min_counts)
+                .into_iter()
+                .filter(|gk| gate.quantify(gk))
+                .collect();
+        accumulate_gene_stats(&mut pooled_gene_stats, bq.gene_stats);
+
+        info!(
+            "{}: {} genes, {} cells passed QC",
+            batch_name,
+            passing_genes.len(),
+            bq.passing_cells.len()
+        );
 
         // Persist the gene-count matrix we already built (no extra BAM scan), so
         // counts are reported in every mode and mass enrichment can reuse them.
-        // Restricted to this batch's QC-passing cells; all counted genes kept
-        // (the pooled gene filter is a separate `genes_kept.tsv.gz` artifact).
         if let Some(sink) = persist {
             let keep = |t: Vec<(CellBarcode, Box<str>, f32)>| -> Vec<_> {
-                t.into_iter()
-                    .filter(|(cb, _, _)| bq.passing_cells.contains(cb))
+                t.into_par_iter()
+                    .filter(|(cb, feat, _)| {
+                        passing_genes.contains(extract_gene_key(feat))
+                            && bq.passing_cells.contains(cb)
+                    })
                     .collect::<Vec<_>>()
             };
             let spliced = keep(spliced_triplets);
@@ -576,7 +574,7 @@ pub fn run_gene_count_qc(
             } = collect_union_names(&spliced, &unspliced);
 
             let out = BackendOutputPath::new(
-                sink.output_dir,
+                req.output_dir,
                 &format!("{}_genes", batch_name),
                 sink.backend,
                 sink.zip,
@@ -592,26 +590,28 @@ pub fn run_gene_count_qc(
             .to_backend(&out.write_path)?;
             out.finalize()?;
             info!(
-                "{}: wrote gene-count matrix to {}",
+                "{}: wrote spliced + unspliced to {}",
                 batch_name, out.target_path
             );
             matrix_by_batch.insert(bam_file.clone(), out.target_path);
         }
 
-        accumulate_gene_stats(&mut pooled_gene_stats, bq.gene_stats);
-
         // Keyed by BAM file path (stable + order-independent across passes).
         cells_by_batch.insert(bam_file.clone(), bq.passing_cells);
     }
 
-    // Threshold the pooled gene stats once → shared gene vocabulary.
+    // Threshold the pooled gene stats once → the shared vocabulary for
+    // --valid-genes reuse and downstream modality masking. Same gate as the
+    // per-batch matrices, so the frozen set ATOI/APA/m6A inherit carries the
+    // biotype subset and the mito exclusion.
     let passing_genes =
-        passing_genes_from_stats(&pooled_gene_stats, gene_min_cells, gene_min_counts);
-    for gene_key in &passing_genes {
+        passing_genes_from_stats(&pooled_gene_stats, req.gene_min_cells, req.gene_min_counts);
+    for gene_key in passing_genes.iter().filter(|gk| gate.quantify(gk)) {
         if let Some(gene_id) = gene_key_to_id.get(gene_key) {
             expressed_gene_ids.insert(gene_id.clone());
         }
     }
+    write_qc_genes(req.output_dir, &expressed_gene_ids)?;
 
     let total_cells: usize = cells_by_batch.values().map(|s| s.len()).sum();
     info!(
@@ -650,10 +650,22 @@ pub struct GeneQcRequest<'a> {
     pub umi_tag: Option<&'a [u8]>,
     /// GFF for the recompute path; `None` skips recompute (reuse can still run).
     pub gff_file: Option<&'a str>,
+    /// Where the QC artifacts land (`{batch}_cells.tsv.gz`, `{batch}_mt_qc.tsv.gz`,
+    /// `genes_kept.tsv.gz`). Always written; see [`GeneMatrixSink`] for the
+    /// separate, optional matrix write.
+    pub output_dir: &'a str,
+    /// Biotype to quantify; `""` keeps all. Narrows only what is *quantified* —
+    /// cell calling always sees every biotype. The modality runners pass `""`:
+    /// they apply their own `--gene-type` by subsetting the gff for site
+    /// discovery, and their QC counts every biotype by design.
+    pub gene_type: &'a str,
     pub gene_min_cells: usize,
     pub gene_min_counts: usize,
     pub cell_min_genes: usize,
     pub cell_call: crate::cell_qc::CellCallParams,
+    /// Mitochondrial QC policy: the per-cell MT filter applied by [`qc_one_batch`]
+    /// and the MT-gene exclusion applied to the quantified gene set.
+    pub mito: MitoQcParams,
     pub valid_cells_file: Option<&'a str>,
     pub valid_genes_file: Option<&'a str>,
     pub skip_gene_qc: bool,
@@ -685,18 +697,7 @@ pub fn resolve_gene_qc(req: &GeneQcRequest) -> anyhow::Result<Option<GeneCountQc
         }))
     } else if !req.skip_gene_qc {
         match req.gff_file {
-            Some(gff_file) => Ok(Some(run_gene_count_qc(
-                gff_file,
-                req.bam_files,
-                req.cell_barcode_tag,
-                req.gene_barcode_tag,
-                req.umi_tag,
-                req.gene_min_cells,
-                req.gene_min_counts,
-                req.cell_min_genes,
-                &req.cell_call,
-                req.persist.as_ref(),
-            )?)),
+            Some(gff_file) => Ok(Some(run_gene_count_qc(gff_file, req)?)),
             None => Ok(None),
         }
     } else {
@@ -759,6 +760,196 @@ pub fn write_qc_genes(dir: &str, gene_ids: &rustc_hash::FxHashSet<GeneId>) -> an
 // Mitochondrial gene QC //
 ///////////////////////////
 
+/// Chromosomes treated as mitochondrial unless `--mito-chr` says otherwise. The
+/// one source of truth: both the clap default and [`MitoQcParams::default`] read it.
+pub const MITO_CHR_DEFAULT: &str = "chrM,chrMT,MT,M";
+
+/// Shared CLI knobs for mitochondrial QC, flattened into every subcommand that
+/// does gene-count QC (`genes`, `apa`, `atoi`, `dartseq`, `all`) so the policy
+/// is spelled the same way everywhere. Mirrors [`crate::cell_qc::CellQcArgs`];
+/// resolve to the clap-free [`MitoQcParams`] with [`MitoQcArgs::params`].
+#[derive(clap::Args, Debug, Clone)]
+pub struct MitoQcArgs {
+    /// Mitochondrial chromosome name(s), comma-separated
+    #[arg(
+        long = "mito-chr",
+        default_value = MITO_CHR_DEFAULT,
+        help = "Mitochondrial chromosome name(s) (comma-separated)",
+        long_help = "Genes on these chromosomes are treated as mitochondrial:\n\
+                     excluded from the quantified gene set (unless --keep-mito) and\n\
+                     summarized in the per-cell MT-fraction QC. Matched\n\
+                     case-insensitively against the GFF seqname."
+    )]
+    pub mito_chr: Box<str>,
+
+    /// Keep mitochondrial genes in the quantified gene set (default: exclude)
+    #[arg(
+        long = "keep-mito",
+        default_value_t = false,
+        help = "Keep mitochondrial genes in the quantified gene set",
+        long_help = "By default mitochondrial genes are dropped from what is\n\
+                     quantified (their per-cell MT fraction is still reported as\n\
+                     QC). Use this flag to retain them."
+    )]
+    pub keep_mito: bool,
+
+    /// Max mitochondrial fraction per cell (0 = data-driven elbow cutoff)
+    #[arg(
+        long = "max-mito-frac",
+        default_value_t = 0.0,
+        help = "Max MT fraction per cell: >0 = fixed cutoff; 0 = elbow cutoff",
+        long_help = "Cells whose mitochondrial UMI fraction exceeds the cutoff are\n\
+                     removed during QC. A value > 0 is a fixed cutoff; the default 0\n\
+                     uses a data-driven elbow cutoff on the MT% distribution (drops\n\
+                     the high-MT burst tail). See --no-mito-cell-qc to disable."
+    )]
+    pub max_mito_frac: f64,
+
+    /// Disable mitochondrial cell QC (report MT% only, drop no cells)
+    #[arg(
+        long = "no-mito-cell-qc",
+        default_value_t = false,
+        help = "Disable MT cell QC (report MT% only, drop no cells)",
+        long_help = "Report per-cell MT% but drop no cells. Mitochondrial genes are\n\
+                     still excluded from the quantified gene set unless --keep-mito."
+    )]
+    pub no_mito_cell_qc: bool,
+}
+
+impl Default for MitoQcArgs {
+    fn default() -> Self {
+        let d = MitoQcParams::default();
+        Self {
+            mito_chr: d.mito_chr,
+            keep_mito: d.keep_mito,
+            max_mito_frac: d.max_mito_frac,
+            no_mito_cell_qc: d.no_mito_cell_qc,
+        }
+    }
+}
+
+impl MitoQcArgs {
+    /// Resolve to [`MitoQcParams`].
+    pub fn params(&self) -> MitoQcParams {
+        MitoQcParams {
+            mito_chr: self.mito_chr.clone(),
+            keep_mito: self.keep_mito,
+            max_mito_frac: self.max_mito_frac,
+            no_mito_cell_qc: self.no_mito_cell_qc,
+        }
+    }
+}
+
+/// The resolved mitochondrial QC policy — the clap-free form of [`MitoQcArgs`],
+/// carried in [`GeneQcRequest`] and consumed by [`qc_one_batch`].
+#[derive(Debug, Clone)]
+pub struct MitoQcParams {
+    pub mito_chr: Box<str>,
+    /// Keep MT genes in the quantified gene set (the QC metric is reported either way).
+    pub keep_mito: bool,
+    /// Fixed per-cell MT-fraction cutoff; 0 uses the data-driven elbow.
+    pub max_mito_frac: f64,
+    /// Report the MT fraction but drop no cells.
+    pub no_mito_cell_qc: bool,
+}
+
+impl Default for MitoQcParams {
+    fn default() -> Self {
+        Self {
+            mito_chr: MITO_CHR_DEFAULT.into(),
+            keep_mito: false,
+            max_mito_frac: 0.0,
+            no_mito_cell_qc: false,
+        }
+    }
+}
+
+/// Which genes a run **quantifies**, resolved once against the annotation.
+///
+/// This is the *only* gate: a gene survives iff it is not mito-excluded AND matches
+/// the selected biotype (when one is set). Keeping the mito key set next to the
+/// policy that uses it means the two cannot be resolved from different
+/// `--mito-chr` values, and it gives the three writers one object to consult
+/// instead of three copies of the same predicate.
+///
+/// Cell calling never consults this — see [`qc_one_batch`] for why the QC layer
+/// must stay blind to it.
+pub struct GeneGate {
+    mito: MitoQcParams,
+    mito_keys: rustc_hash::FxHashSet<Box<str>>,
+    /// Biotype subset; `None` quantifies every biotype.
+    selected: Option<rustc_hash::FxHashSet<Box<str>>>,
+}
+
+impl GeneGate {
+    /// Resolve the gate against the annotation, announcing both halves once.
+    /// An empty `gene_type` keeps all biotypes (the modality subcommands, which
+    /// expose no `--gene-type`, always pass one).
+    pub fn new(records: &[GffRecord], gene_type: &str, mito: MitoQcParams) -> Self {
+        let mito_keys = mito_gene_keys(records, &mito.mito_chr);
+        info!(
+            "{} mitochondrial gene(s) on {} ({})",
+            mito_keys.len(),
+            mito.mito_chr,
+            if mito.keep_mito {
+                "kept in matrix"
+            } else {
+                "excluded from matrix"
+            }
+        );
+
+        let selected = if gene_type.is_empty() {
+            info!("Gene biotype filter: OFF (all biotypes quantified)");
+            None
+        } else {
+            let target: genomic_data::gff::GeneType = Box::<str>::from(gene_type).into();
+            let keys: rustc_hash::FxHashSet<Box<str>> = records
+                .iter()
+                .filter(|r| r.gene_type == target)
+                .map(format_gene_key)
+                .collect();
+            info!(
+                "Gene biotype filter: quantifying {} '{}' genes (QC keeps all biotypes)",
+                keys.len(),
+                gene_type
+            );
+            Some(keys)
+        };
+
+        Self::from_keys(mito, mito_keys, selected)
+    }
+
+    /// Build the gate from an already-resolved MT key set, for callers that have
+    /// the keys but not the annotation records.
+    pub fn from_keys(
+        mito: MitoQcParams,
+        mito_keys: rustc_hash::FxHashSet<Box<str>>,
+        selected: Option<rustc_hash::FxHashSet<Box<str>>>,
+    ) -> Self {
+        Self {
+            mito,
+            mito_keys,
+            selected,
+        }
+    }
+
+    /// The mitochondrial QC policy (cutoffs) this gate was built from.
+    pub fn mito(&self) -> &MitoQcParams {
+        &self.mito
+    }
+
+    /// The `gene_key`s on the mitochondrial chromosome(s) — the MT-fraction numerator.
+    pub fn mito_keys(&self) -> &rustc_hash::FxHashSet<Box<str>> {
+        &self.mito_keys
+    }
+
+    /// Whether a gene survives to quantification.
+    pub fn quantify(&self, gene_key: &str) -> bool {
+        (self.mito.keep_mito || !self.mito_keys.contains(gene_key))
+            && self.selected.as_ref().is_none_or(|s| s.contains(gene_key))
+    }
+}
+
 /// `gene_key`s whose gene sits on a mitochondrial chromosome. `mito_chr_spec`
 /// is a comma-separated list of chromosome names matched case-insensitively
 /// against `GffRecord::seqname` (e.g. `"chrM,MT"`).
@@ -781,20 +972,32 @@ pub fn mito_gene_keys(
 /// Accumulate per-cell `(mito_umi, total_umi)` over the passing cells from one
 /// or more triplet sets (e.g. spliced + unspliced). `total` sums every gene;
 /// `mito` sums only genes in `mito_keys`. Used for the MT-fraction QC metric.
+///
+/// Deliberately a serial fold: this decides a QC cutoff, and a rayon reduce would
+/// sum the `f32`s in a work-stealing-dependent order, so a cell sitting exactly on
+/// the threshold could fall either way between runs of the same data.
 pub fn mito_cell_stats(
     triplet_sets: &[&[(CellBarcode, Box<str>, f32)]],
     passing_cells: &rustc_hash::FxHashSet<CellBarcode>,
     mito_keys: &rustc_hash::FxHashSet<Box<str>>,
 ) -> FxHashMap<CellBarcode, (f32, f32)> {
+    // No MT genes in the annotation → every gene-key hash below is wasted work
+    // (the fractions come out flat and no cell is ever dropped).
+    let has_mito = !mito_keys.is_empty();
     let mut stats: FxHashMap<CellBarcode, (f32, f32)> = FxHashMap::default();
     for set in triplet_sets {
         for (cb, feat, val) in set.iter() {
             if !passing_cells.contains(cb) {
                 continue;
             }
-            let e = stats.entry(cb.clone()).or_insert((0.0, 0.0));
+            // `get_mut` first: the barcode is an `Arc`, so `entry` would clone
+            // (an atomic bump) on every triplet rather than once per cell.
+            let e = match stats.get_mut(cb) {
+                Some(e) => e,
+                None => stats.entry(cb.clone()).or_insert((0.0, 0.0)),
+            };
             e.1 += *val; // total
-            if mito_keys.contains(extract_gene_key(feat)) {
+            if has_mito && mito_keys.contains(extract_gene_key(feat)) {
                 e.0 += *val; // mito
             }
         }
@@ -919,6 +1122,74 @@ pub fn apply_mito_filter(
         kind
     );
     kept
+}
+
+/// Where one batch's QC artifacts land: `{dir}/{batch}_mt_qc.tsv.gz` (the per-cell
+/// MT table) and `{dir}/{batch}_cells.tsv.gz` (the passable cell set consumed by
+/// `--valid-cells`). `None` runs the QC without writing anything.
+pub struct QcArtifacts<'a> {
+    pub dir: &'a str,
+    pub batch_name: &'a str,
+}
+
+/// QC one batch end to end: gene/cell QC ([`batch_qc`]) → per-cell MT metric
+/// ([`mito_cell_stats`]) → mito cell filter ([`apply_mito_filter`]) → the batch's
+/// two QC artifacts.
+///
+/// **This is the single place a batch's passing cell set is decided.** Every path
+/// that calls cells routes through it — the `faba all` loop, both `faba genes`
+/// writers, and [`run_gene_count_qc`] (the shared QC behind `dartseq` / `atoi` /
+/// `apa`) — so the cell sets cannot drift apart.
+///
+/// Two invariants are load-bearing, and the reason this is one function:
+///
+/// 1. **Cell calling stays mito-blind.** It sees every gene and biotype, so the
+///    frozen cell set stays Cell Ranger-faithful. Only what is *quantified* gets
+///    narrowed afterwards, via [`GeneGate::quantify`].
+/// 2. **The MT fraction is computed on the FULL pre-filter counts** (spliced +
+///    unspliced, *before* any biotype/mito **gene** gate) over the already-called
+///    cells. Gate the genes first and the `mt_frac` denominator changes, which
+///    silently moves both the fixed and the elbow cutoff.
+///
+/// Returns the batch's [`BatchQc`] with `passing_cells` already mito-filtered;
+/// `gene_stats` is untouched (thresholding it — per batch or pooled — remains the
+/// caller's business).
+pub fn qc_one_batch(
+    spliced: &[(CellBarcode, Box<str>, f32)],
+    unspliced: &[(CellBarcode, Box<str>, f32)],
+    gate: &GeneGate,
+    gene_min_counts: usize,
+    cell_min_genes: usize,
+    cell_call: &crate::cell_qc::CellCallParams,
+    out: Option<QcArtifacts>,
+) -> anyhow::Result<BatchQc> {
+    let bq = batch_qc(
+        spliced,
+        unspliced,
+        gene_min_counts > 0,
+        cell_min_genes,
+        cell_call,
+    );
+
+    let mt_stats = mito_cell_stats(&[spliced, unspliced], &bq.passing_cells, gate.mito_keys());
+    let mito = gate.mito();
+    if let Some(ref out) = out {
+        write_mt_qc(out.dir, out.batch_name, &mt_stats)?;
+    }
+    let passing_cells = apply_mito_filter(
+        bq.passing_cells,
+        &mt_stats,
+        mito.max_mito_frac,
+        mito.no_mito_cell_qc,
+    );
+    if let Some(ref out) = out {
+        write_qc_cells(out.dir, out.batch_name, &passing_cells)?;
+    }
+
+    Ok(BatchQc {
+        gene_stats: bq.gene_stats,
+        passing_cells,
+    })
 }
 
 /// Load a per-batch valid-cell set written by `faba genes` (one
