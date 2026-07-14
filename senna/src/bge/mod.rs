@@ -861,8 +861,12 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         data_input: &input,
         data_batch: &batch,
         data_input_null: &[],
-        // With ETM resolved the dictionary is β (gene × topic) and ρ moves to
-        // feature_embedding.parquet; otherwise the dictionary IS ρ.
+        // With ETM resolved the dictionary is β (gene × topic); otherwise it IS ρ.
+        //
+        // ρ does NOT go to feature_embedding.parquet — that file is always the SIMBA co-embed (see
+        // below, and `write_feature_coembedding` above). ρ lives on the model's own axis, not on
+        // the cell manifold, so putting it there would hand `annotate-by-projection` an
+        // off-manifold gene table and make its Euclidean nearest-centroid call ill-posed.
         dictionary_suffix: Some("dictionary.parquet"),
         has_model: false,
         has_cell_proj: false,

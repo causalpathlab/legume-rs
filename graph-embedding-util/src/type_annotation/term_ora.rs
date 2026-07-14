@@ -576,7 +576,7 @@ fn annotate_inner(
     // q) and the one we paid the most for got no vote. It gets one now: a cell whose support is no
     // better than a meaningless panel achieves is not called, whatever `--min-support` says.
     //
-    // This is strictly the stronger test. Measured on cord blood, a *shuffled* panel still earns a
+    // This is strictly the stronger test. Measured, a *shuffled* panel still earns a
     // mean support of 0.60 — so the default bar of 0.50 sits BELOW the null, and kept 91% of cells
     // where the FDR keeps 36%.
     if let (Some(sn), Some(b)) = (sup_null.as_ref(), boot.as_mut()) {

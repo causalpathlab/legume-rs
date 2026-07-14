@@ -36,27 +36,21 @@ fn the_sign_test_is_the_binomial_upper_tail() {
 
 #[test]
 fn support_is_not_scale_free_but_separable_is() {
-    // The core argument for `Separable`: a fixed support bar means a different test on panels of
-    // different size, because chance agreement is 1/C.
-    let unanimous_of_two = Abstain::Support(0.5);
-    // 0.5 support is exactly chance on a 2-type panel, and 12x chance on a 24-type one — yet the
-    // same flag accepts both.
-    assert!(unanimous_of_two.allows(0.5, 0.5, 100));
+    // The core argument for `Separable`. A fixed support bar means a DIFFERENT test on panels of
+    // different size, because chance agreement is 1/C — but the sign test does not move with C.
+    let bar = Abstain::Support(0.5);
+    // 0.5 is exactly chance on a 2-type panel and 12x chance on a 24-type one; the same flag
+    // accepts both.
+    assert!(bar.allows(0.5, 0.5, 100));
 
-    // The sign test refuses a 50/50 split no matter how many replicates, because the two leaders
-    // are not distinguishable.
     let sep = Abstain::Separable(0.05);
+    // It refuses a 50/50 split no matter how many replicates: the leaders are indistinguishable.
     assert!(!sep.allows(0.5, 0.5, 100));
-    // …and accepts a clear winner.
     assert!(sep.allows(0.9, 0.1, 100));
-}
 
-#[test]
-fn separable_needs_evidence_not_just_a_ratio() {
-    let sep = Abstain::Separable(0.05);
-    // 3 vs 1 out of 4 replicates: P(X>=3 | m=4) = 5/16 = 0.31 — not significant.
+    // …and it asks for EVIDENCE, not just a ratio. 3-vs-1 out of 4 replicates is
+    // P(X>=3 | m=4) = 5/16 = 0.31 — not significant. The same ratio out of 40 is overwhelming.
     assert!(!sep.allows(0.75, 0.25, 4));
-    // The same 3:1 ratio out of 40 replicates is overwhelming.
     assert!(sep.allows(0.75, 0.25, 40));
 }
 

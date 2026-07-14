@@ -217,8 +217,8 @@ pub struct AnnotateArgs {
             So every call carries the fraction of resamples that agreed on it, and a call\n\
             that cannot hold up across them abstains rather than being printed.\n\n\
             Without it, `argmin` over marker centroids always returns something, and\n\
-            returns it with no error bar. Measured on cord blood: 28.2% of cells were\n\
-            assigned to types the tissue does not contain, against 2.4% with it on"
+            returns it with no error bar. Measured: 28.2% of cells were assigned to\n\
+            types the tissue does not contain, against 2.4% with it on"
     )]
     pub no_bootstrap_markers: bool,
 

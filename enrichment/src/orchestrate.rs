@@ -253,7 +253,7 @@ pub fn annotate(
     // the p-value — that comes from null 2.                                  //
     //                                                                        //
     // The matching is load-bearing, not a refinement. A uniform draw is 30%  //
-    // undetected genes (measured on BMMNC) — genes pinned to the bottom of    //
+    // undetected genes (measured) — genes pinned to the bottom of every        //
     // every ranking, which can never be enriched — so it is trivially easy   //
     // to beat, and easy to beat by an amount that DIFFERS PER CELLTYPE, since //
     // panels differ in how well-expressed their markers are. `es_std` is the  //
