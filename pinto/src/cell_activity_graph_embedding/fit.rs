@@ -29,8 +29,8 @@ use crate::util::metadata::{create_cage_metadata, CageClusterInfo, RunInputs};
 use crate::util::score_trace::{write_score_trace, ScoreEntry};
 use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
 
-use candle_util::candle_core::{DType, Tensor};
-use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use candle_util::candle_core::Tensor;
+use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
 use data_beans_alg::gene_weighting::save_fisher_weights;
 use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
@@ -267,7 +267,6 @@ pub fn fit_cell_activity_graph_embedding(
     let dev = args.device.to_device(args.device_no)?;
     info!("Using device: {:?}", dev);
     let varmap = VarMap::new();
-    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
     // `JointEmbedModel.e_feat` / `b_feat` ARE the gene embedding
     // (cells and genes share the same D-dim space). `n_features =
     // n_genes` and `b_feat` is zero-init per gene; both are learned
@@ -277,6 +276,7 @@ pub fn fit_cell_activity_graph_embedding(
             n_features: n_genes,
             n_cells,
             embedding_dim: args.embedding_dim,
+            seed: c.seed,
         },
         &ModelInit {
             e_feat: None,
@@ -285,7 +285,6 @@ pub fn fit_cell_activity_graph_embedding(
             b_cell: &vec![0.0_f32; n_cells],
         },
         &varmap,
-        vs,
         &dev,
     )?;
     let gate = LevelDimGate::new(n_chain_levels, args.embedding_dim, &varmap, &dev)?;

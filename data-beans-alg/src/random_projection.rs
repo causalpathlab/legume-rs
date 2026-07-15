@@ -4,6 +4,7 @@ use data_beans::sparse_data_visitors::*;
 use data_beans::sparse_io_stack::SparseIoStack;
 use data_beans::sparse_io_vector::SparseIoVec;
 use matrix_util::dmatrix_util::*;
+use matrix_util::rand_util::mix_seed;
 use std::sync::{Arc, Mutex};
 
 use log::{info, warn};
@@ -30,6 +31,15 @@ pub struct RandRowProjOut {
     pub proj: nalgebra::DMatrix<f32>,
 }
 
+/// Default random-basis seed for the non-seeded projection entry points.
+///
+/// The random-projection basis only needs to be *stable* (a fixed
+/// Johnson–Lindenstrauss draw is still a valid projection), so callers that do
+/// not thread their own `--seed` get a pinned, reproducible basis for free.
+/// Callers that want `--seed` to also drive the projection use the `_seeded`
+/// variants (e.g. the shared `graph_embedding_util::fit` gem/bge path).
+pub const DEFAULT_PROJECTION_SEED: u64 = 0x50524F4A_50524F4A; // "PROJPROJ"
+
 pub trait RandProjOps {
     ///
     /// Create K x ncol projection by concatenating data across
@@ -43,11 +53,16 @@ pub trait RandProjOps {
     /// # Output
     /// * `basis`: `D x K` random basis matrix
     /// * `proj`: `K x N` projection results
+    ///
+    /// Uses [`DEFAULT_PROJECTION_SEED`] for the basis; for a caller-controlled
+    /// seed see [`RandProjOps::project_columns_with_batch_correction_seeded`].
     fn project_columns(
         &self,
         target_dim: usize,
         block_size: Option<usize>,
-    ) -> anyhow::Result<RandColProjOut>;
+    ) -> anyhow::Result<RandColProjOut> {
+        self.project_columns_with_batch_correction::<usize>(target_dim, block_size, None)
+    }
 
     ///
     /// Create K x ncol projection by concatenating data across
@@ -61,6 +76,9 @@ pub trait RandProjOps {
     /// # Output
     /// * `basis`: `D x K` random basis matrix
     /// * `proj`: `K x N` projection results
+    ///
+    /// Uses [`DEFAULT_PROJECTION_SEED`]; delegates to
+    /// [`RandProjOps::project_columns_with_batch_correction_seeded`].
     fn project_columns_with_batch_correction<T>(
         &self,
         target_dim: usize,
@@ -68,17 +86,62 @@ pub trait RandProjOps {
         batch_membership: Option<&[T]>,
     ) -> anyhow::Result<RandColProjOut>
     where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
+        self.project_columns_with_batch_correction_seeded(
+            target_dim,
+            block_size,
+            batch_membership,
+            DEFAULT_PROJECTION_SEED,
+        )
+    }
+
+    /// Seeded variant of [`RandProjOps::project_columns_with_batch_correction`]:
+    /// `seed` pins the random basis so identical-config runs are byte-identical.
+    fn project_columns_with_batch_correction_seeded<T>(
+        &self,
+        target_dim: usize,
+        block_size: Option<usize>,
+        batch_membership: Option<&[T]>,
+        seed: u64,
+    ) -> anyhow::Result<RandColProjOut>
+    where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 
     /// Like `project_columns_with_batch_correction` but with per-row
     /// (per-feature) weights applied to the random basis. Features with
     /// weight 0 are excluded from the projection geometry.
+    ///
+    /// Uses [`DEFAULT_PROJECTION_SEED`]; delegates to
+    /// [`RandProjOps::project_columns_weighted_seeded`].
     fn project_columns_weighted<T>(
         &self,
         target_dim: usize,
         block_size: Option<usize>,
         batch_membership: Option<&[T]>,
         row_weights: &[f32],
+    ) -> anyhow::Result<RandColProjOut>
+    where
+        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
+    {
+        self.project_columns_weighted_seeded(
+            target_dim,
+            block_size,
+            batch_membership,
+            row_weights,
+            DEFAULT_PROJECTION_SEED,
+        )
+    }
+
+    /// Seeded variant of [`RandProjOps::project_columns_weighted`]: `seed` pins
+    /// the random basis so identical-config runs are byte-identical.
+    fn project_columns_weighted_seeded<T>(
+        &self,
+        target_dim: usize,
+        block_size: Option<usize>,
+        batch_membership: Option<&[T]>,
+        row_weights: &[f32],
+        seed: u64,
     ) -> anyhow::Result<RandColProjOut>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
@@ -136,19 +199,12 @@ fn project_columns_visitor(
 }
 
 impl RandProjOps for SparseIoStack {
-    fn project_columns(
-        &self,
-        target_dim: usize,
-        block_size: Option<usize>,
-    ) -> anyhow::Result<RandColProjOut> {
-        self.project_columns_with_batch_correction::<usize>(target_dim, block_size, None)
-    }
-
-    fn project_columns_with_batch_correction<T>(
+    fn project_columns_with_batch_correction_seeded<T>(
         &self,
         target_dim: usize,
         block_size: Option<usize>,
         batch_membership: Option<&[T]>,
+        seed: u64,
     ) -> anyhow::Result<RandColProjOut>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
@@ -159,11 +215,15 @@ impl RandProjOps for SparseIoStack {
         let proj_vec = self
             .stack
             .iter()
-            .map(|data_vec| -> anyhow::Result<_> {
-                data_vec.project_columns_with_batch_correction(
+            .enumerate()
+            .map(|(m, data_vec)| -> anyhow::Result<_> {
+                // Distinct sub-seed per stacked modality so same-sized modalities
+                // do not share a basis.
+                data_vec.project_columns_with_batch_correction_seeded(
                     target_dim,
                     block_size,
                     batch_membership,
+                    mix_seed(seed, m as u64),
                 )
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -191,12 +251,13 @@ impl RandProjOps for SparseIoStack {
         Ok(RandColProjOut { basis, proj })
     }
 
-    fn project_columns_weighted<T>(
+    fn project_columns_weighted_seeded<T>(
         &self,
         target_dim: usize,
         block_size: Option<usize>,
         batch_membership: Option<&[T]>,
         row_weights: &[f32],
+        seed: u64,
     ) -> anyhow::Result<RandColProjOut>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
@@ -220,15 +281,16 @@ impl RandProjOps for SparseIoStack {
 
         let mut offset = 0usize;
         let mut proj_vec = Vec::with_capacity(self.stack.len());
-        for data_vec in self.stack.iter() {
+        for (m, data_vec) in self.stack.iter().enumerate() {
             let nrows = data_vec.num_rows();
             let slice = &row_weights[offset..offset + nrows];
             offset += nrows;
-            proj_vec.push(data_vec.project_columns_weighted(
+            proj_vec.push(data_vec.project_columns_weighted_seeded(
                 target_dim,
                 block_size,
                 batch_membership,
                 slice,
+                mix_seed(seed, m as u64),
             )?);
         }
 
@@ -277,19 +339,12 @@ impl RandProjOps for SparseIoStack {
 }
 
 impl RandProjOps for SparseIoVec {
-    fn project_columns(
-        &self,
-        target_dim: usize,
-        block_size: Option<usize>,
-    ) -> anyhow::Result<RandColProjOut> {
-        self.project_columns_with_batch_correction::<usize>(target_dim, block_size, None)
-    }
-
-    fn project_columns_with_batch_correction<T>(
+    fn project_columns_with_batch_correction_seeded<T>(
         &self,
         target_dim: usize,
         block_size: Option<usize>,
         batch_membership: Option<&[T]>,
+        seed: u64,
     ) -> anyhow::Result<RandColProjOut>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
@@ -299,7 +354,7 @@ impl RandProjOps for SparseIoVec {
 
         let mut proj_kn = nalgebra::DMatrix::<f32>::zeros(target_dim, ncols);
 
-        let basis_dk = nalgebra::DMatrix::<f32>::rnorm(nrows, target_dim);
+        let basis_dk = nalgebra::DMatrix::<f32>::rnorm_seeded(nrows, target_dim, seed);
         // Carry a K×D copy for the inner kernel so per-non-zero column
         // slices into the basis are contiguous (unit-stride SAXPY).
         let basis_kd = basis_dk.transpose();
@@ -359,12 +414,13 @@ impl RandProjOps for SparseIoVec {
     /// Like `project_columns_with_batch_correction` but with per-row
     /// (per-feature) weights applied to the random basis. Features with
     /// weight 0 are excluded from the projection geometry.
-    fn project_columns_weighted<T>(
+    fn project_columns_weighted_seeded<T>(
         &self,
         target_dim: usize,
         block_size: Option<usize>,
         batch_membership: Option<&[T]>,
         row_weights: &[f32],
+        seed: u64,
     ) -> anyhow::Result<RandColProjOut>
     where
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
@@ -376,7 +432,7 @@ impl RandProjOps for SparseIoVec {
 
         let mut proj_kn = nalgebra::DMatrix::<f32>::zeros(target_dim, ncols);
 
-        let mut basis_dk = nalgebra::DMatrix::<f32>::rnorm(nrows, target_dim);
+        let mut basis_dk = nalgebra::DMatrix::<f32>::rnorm_seeded(nrows, target_dim, seed);
 
         // Zero out basis rows for filtered features
         for (r, &w) in row_weights.iter().enumerate() {
@@ -510,4 +566,81 @@ pub fn binary_sort_columns(
 /// maximum binary code (binary shifting)
 pub fn max_binary_code(kk: usize) -> usize {
     (1 << kk) - 1
+}
+
+#[cfg(test)]
+mod repro_tests {
+    use super::*;
+    use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+    use std::sync::Arc;
+
+    /// Small 8-gene × 12-cell `SparseIoVec` for exercising the projection.
+    fn tiny_data_vec(dir: &tempfile::TempDir) -> anyhow::Result<SparseIoVec> {
+        let path = dir.path().join("proj.zarr");
+        let path_str = path.to_str().unwrap();
+        let (d, n) = (8usize, 12usize);
+        // Deterministic sparse pattern (nonzero where (i*7 + j*3) % 5 < 3).
+        let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
+        for i in 0..d {
+            for j in 0..n {
+                if (i * 7 + j * 3) % 5 < 3 {
+                    triplets.push((i as u64, j as u64, 1.0 + ((i + j) % 4) as f32));
+                }
+            }
+        }
+        let nnz = triplets.len();
+        let mut backend = create_sparse_from_triplets(
+            &triplets,
+            (d, n, nnz),
+            Some(path_str),
+            Some(&SparseIoBackend::Zarr),
+        )?;
+        let gene_names: Vec<Box<str>> = (0..d).map(|i| format!("g{i}").into()).collect();
+        let cell_names: Vec<Box<str>> = (0..n).map(|j| format!("c{j}").into()).collect();
+        backend.register_row_names_vec(&gene_names);
+        backend.register_column_names_vec(&cell_names);
+        let mut data_vec = SparseIoVec::new();
+        data_vec.push(Arc::from(backend), None)?;
+        Ok(data_vec)
+    }
+
+    /// The seeded projection must be byte-identical across runs for a fixed seed
+    /// — this is the reproducibility guarantee the gem/bge pipeline relies on.
+    #[test]
+    fn seeded_projection_is_reproducible() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let data_vec = tiny_data_vec(&dir)?;
+        let a =
+            data_vec.project_columns_with_batch_correction_seeded::<usize>(4, None, None, 123)?;
+        let b =
+            data_vec.project_columns_with_batch_correction_seeded::<usize>(4, None, None, 123)?;
+        assert_eq!(a.basis, b.basis, "same seed → identical basis");
+        assert_eq!(a.proj, b.proj, "same seed → identical projection");
+        Ok(())
+    }
+
+    /// The non-seeded entry point must also be reproducible now (it pins
+    /// `DEFAULT_PROJECTION_SEED` internally rather than drawing fresh entropy).
+    #[test]
+    fn default_projection_is_reproducible() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let data_vec = tiny_data_vec(&dir)?;
+        let a = data_vec.project_columns(4, None)?;
+        let b = data_vec.project_columns(4, None)?;
+        assert_eq!(a.basis, b.basis);
+        assert_eq!(a.proj, b.proj);
+        Ok(())
+    }
+
+    /// Distinct seeds must yield distinct bases (the seed genuinely drives the
+    /// projection, so `--seed` is authoritative where callers pass it).
+    #[test]
+    fn distinct_seeds_diverge() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let data_vec = tiny_data_vec(&dir)?;
+        let a = data_vec.project_columns_with_batch_correction_seeded::<usize>(4, None, None, 1)?;
+        let b = data_vec.project_columns_with_batch_correction_seeded::<usize>(4, None, None, 2)?;
+        assert_ne!(a.basis, b.basis, "distinct seeds → distinct basis");
+        Ok(())
+    }
 }

@@ -14,14 +14,22 @@
 //! coarsened: cell embeddings are mean-pooled (per the batch's chosen
 //! seed coarsening) over the fine children of each touched pb-sample.
 
-use candle_util::candle_core::{DType, Device, Result, Tensor, Var};
+use candle_util::candle_core::{DType, Device, Result, Tensor};
 use candle_util::candle_nn::{self, VarBuilder, VarMap};
+use matrix_util::rand_util::name_seed;
+use matrix_util::traits::SampleOps;
+
+/// stdev of the embedding-table randn init (matches the former
+/// `candle_nn::Init::Randn { stdev: 0.1 }`).
+const INIT_STDEV: f32 = 0.1;
 
 /// Shape of the embedding tables.
 pub struct ModelArgs {
     pub n_features: usize,
     pub n_cells: usize,
     pub embedding_dim: usize,
+    /// Base seed for the reproducible randn init of any `None` embedding.
+    pub seed: u64,
 }
 
 /// Initial values for [`JointEmbedModel::new_with_init`]. `None` for
@@ -47,6 +55,9 @@ pub struct ShareFeaturesArgs<'a> {
     pub e_cell_init: Option<&'a nalgebra::DMatrix<f32>>,
     pub b_cell_init: &'a [f32],
     pub var_prefix: &'a str,
+    /// Base seed for the reproducible randn init of the cell side when
+    /// `e_cell_init` is `None`.
+    pub seed: u64,
 }
 
 /// Inputs for [`JointEmbedModel::new_factored`] — a per-gene β-sharing feature
@@ -60,6 +71,8 @@ pub struct FactoredInit<'a> {
     pub row_to_gene: &'a [u32],
     pub b_feat: &'a [f32],
     pub b_cell: &'a [f32],
+    /// Base seed for the reproducible randn init of `β` and the cell side.
+    pub seed: u64,
     /// Per-row unspliced flag (`len == n_features`). When `Some`, a ridge-shrunk
     /// per-gene `δ_g` Var is allocated and added to the unspliced rows
     /// (spliced identity + nascent offset); `None` = plain β-sharing.
@@ -143,20 +156,29 @@ impl JointEmbedModel {
         args: ModelArgs,
         init: &ModelInit,
         varmap: &VarMap,
-        vs: VarBuilder,
         dev: &Device,
     ) -> Result<Self> {
-        let randn = candle_nn::Init::Randn {
-            mean: 0.0,
-            stdev: 0.1,
-        };
         let e_feat = match init.e_feat {
             Some(m) => register_var_from_mat(varmap, dev, "e_feat", m)?,
-            None => vs.get_with_hints((args.n_features, args.embedding_dim), "e_feat", randn)?,
+            None => register_randn_seeded(
+                varmap,
+                dev,
+                "e_feat",
+                args.n_features,
+                args.embedding_dim,
+                args.seed,
+            )?,
         };
         let e_cell = match init.e_cell {
             Some(m) => register_var_from_mat(varmap, dev, "e_cell", m)?,
-            None => vs.get_with_hints((args.n_cells, args.embedding_dim), "e_cell", randn)?,
+            None => register_randn_seeded(
+                varmap,
+                dev,
+                "e_cell",
+                args.n_cells,
+                args.embedding_dim,
+                args.seed,
+            )?,
         };
         let b_feat = register_var_from_slice(varmap, dev, "b_feat", init.b_feat)?;
         let b_cell = register_var_from_slice(varmap, dev, "b_cell", init.b_cell)?;
@@ -191,16 +213,14 @@ impl JointEmbedModel {
             e_cell_init,
             b_cell_init,
             var_prefix,
+            seed,
         } = args;
         let e_name = format!("{var_prefix}_e_cell");
         let b_name = format!("{var_prefix}_b_cell");
         let e_cell = if let Some(m) = e_cell_init {
             register_var_from_mat(varmap, dev, &e_name, m)?
         } else {
-            let randn = Tensor::randn(0.0_f32, 0.1, (n_cells, embedding_dim), dev)?;
-            let var = Var::from_tensor(&randn)?;
-            varmap.data().lock().unwrap().insert(e_name, var.clone());
-            var.as_tensor().clone()
+            register_randn_seeded(varmap, dev, &e_name, n_cells, embedding_dim, seed)?
         };
         let b_cell = register_var_from_slice(varmap, dev, &b_name, b_cell_init)?;
         Ok(Self {
@@ -223,12 +243,22 @@ impl JointEmbedModel {
         vs: VarBuilder,
         dev: &Device,
     ) -> Result<Self> {
-        let randn = candle_nn::Init::Randn {
-            mean: 0.0,
-            stdev: 0.1,
-        };
-        let beta = vs.get_with_hints((args.n_genes, args.embedding_dim), "beta", randn)?;
-        let e_cell = vs.get_with_hints((args.n_cells, args.embedding_dim), "e_cell", randn)?;
+        let beta = register_randn_seeded(
+            varmap,
+            dev,
+            "beta",
+            args.n_genes,
+            args.embedding_dim,
+            args.seed,
+        )?;
+        let e_cell = register_randn_seeded(
+            varmap,
+            dev,
+            "e_cell",
+            args.n_cells,
+            args.embedding_dim,
+            args.seed,
+        )?;
         let b_feat = register_var_from_slice(varmap, dev, "b_feat", args.b_feat)?;
         let b_cell = register_var_from_slice(varmap, dev, "b_cell", args.b_cell)?;
 
@@ -266,6 +296,7 @@ impl JointEmbedModel {
         var_prefix: &str,
         varmap: &VarMap,
         dev: &Device,
+        seed: u64,
     ) -> Result<Self> {
         let factor = self
             .factor
@@ -280,6 +311,7 @@ impl JointEmbedModel {
                 e_cell_init: None,
                 b_cell_init: &vec![0f32; n_cells],
                 var_prefix,
+                seed,
             },
             varmap,
             dev,
@@ -426,6 +458,40 @@ fn build_feat_factor(
         row_to_gene: row_to_gene_t,
         splice_delta,
     })
+}
+
+/// Register a `[rows, cols]` learnable parameter initialized with **seeded,
+/// reproducible** `N(0, INIT_STDEV)` values, and return the underlying tensor.
+///
+/// Replaces `vs.get_with_hints(..., Init::Randn)` / `Tensor::randn`: candle's
+/// device randn is unseedable on the CPU backend (`Device::set_seed` errors
+/// out, `rand_normal` reads OS entropy), so identical-config runs would
+/// otherwise draw a fresh init every time. The seeded `Tensor` sampler draws
+/// it host-side instead, keyed by `name` so each table (`e_feat`, `e_cell`,
+/// `beta`, per-level `{prefix}_e_cell`) gets an independent stream off one
+/// `base_seed` with no hand-assigned salts.
+fn register_randn_seeded(
+    varmap: &VarMap,
+    dev: &Device,
+    name: &str,
+    rows: usize,
+    cols: usize,
+    base_seed: u64,
+) -> Result<Tensor> {
+    // `rnorm_seeded` (a host `from_vec`) and `affine` are both contiguous, and
+    // `to_device` preserves that; the explicit `contiguous()` is a cheap no-op
+    // guard so the registered Var is always contiguous for CUDA matmul kernels.
+    let t = Tensor::rnorm_seeded(rows, cols, name_seed(base_seed, name))
+        .affine(INIT_STDEV as f64, 0.0)?
+        .to_device(dev)?
+        .contiguous()?;
+    let var = candle_util::candle_core::Var::from_tensor(&t)?;
+    varmap
+        .data()
+        .lock()
+        .unwrap()
+        .insert(name.to_string(), var.clone());
+    Ok(var.as_tensor().clone())
 }
 
 /// Register a 1D learnable parameter initialized from a slice and
@@ -583,6 +649,56 @@ mod tests {
 
     fn dev() -> Device {
         Device::Cpu
+    }
+
+    /// The randn model init is drawn from the seed (not candle's unseedable CPU
+    /// device RNG), so two constructions with the same seed must produce
+    /// byte-identical embedding tables, and different seeds must diverge.
+    #[test]
+    fn model_init_is_seed_reproducible() {
+        let dev = dev();
+        // Equal feature/cell counts so the e_feat vs e_cell comparison below is
+        // shape-matched and therefore a real test of salt separation.
+        let args = || ModelArgs {
+            n_features: 16,
+            n_cells: 16,
+            embedding_dim: 4,
+            seed: 2026,
+        };
+        let init = ModelInit {
+            e_feat: None,
+            e_cell: None,
+            b_feat: &[0f32; 16],
+            b_cell: &[0f32; 16],
+        };
+        let build = |seed: u64| {
+            let mut a = args();
+            a.seed = seed;
+            let vm = VarMap::new();
+            let m = JointEmbedModel::new_with_init(a, &init, &vm, &dev).unwrap();
+            // Init tensors must be contiguous — non-contiguous Vars break CUDA
+            // matmul kernels during training.
+            assert!(m.e_feat.is_contiguous(), "e_feat init must be contiguous");
+            assert!(m.e_cell.is_contiguous(), "e_cell init must be contiguous");
+            (
+                m.e_feat.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                m.e_cell.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            )
+        };
+
+        let (ef1, ec1) = build(2026);
+        let (ef2, ec2) = build(2026);
+        assert_eq!(ef1, ef2, "same seed → identical e_feat");
+        assert_eq!(ec1, ec2, "same seed → identical e_cell");
+
+        let (ef3, _) = build(2027);
+        assert_ne!(ef1, ef3, "different seed → different e_feat");
+        // e_feat and e_cell use distinct per-tensor salts, so they must not be
+        // identical to each other even under one seed.
+        assert_ne!(
+            ef1, ec1,
+            "e_feat and e_cell must use independent sub-streams"
+        );
     }
 
     #[test]

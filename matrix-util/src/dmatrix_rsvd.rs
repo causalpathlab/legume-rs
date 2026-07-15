@@ -3,6 +3,11 @@ use nalgebra::LU;
 use nalgebra::{DMatrix, DVector};
 use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
 
+/// Fixed start-vector seed for the randomized-SVD subspace iteration. The
+/// iteration converges onto the dominant subspace, so pinning the start makes
+/// `rsvd` reproducible without altering the subspace it recovers.
+const RSVD_SUBSPACE_SEED: u64 = 0x5253_5644_5342_5350; // "RSVDSBSP"
+
 /// Compute the Nystrom basis: `U * diag(1 / (s + eps))`.
 ///
 /// Given the left singular vectors `u` and singular values `s` from an SVD,
@@ -87,7 +92,12 @@ where
     let nc = xx.num_columns();
     let nr = xx.num_rows();
     let mut ll = DMatrix::<T>::zeros(nr, rank_and_oversample);
-    let mut qq = DMatrix::<T>::runif(nc, rank_and_oversample);
+    // Fixed seed: the 5 subspace iterations below converge onto the dominant
+    // subspace regardless of the start, so a pinned (rather than entropy) draw
+    // makes the whole randomized SVD reproducible run-to-run — which in turn
+    // pins every downstream consumer (binary-sketch collapse, layout, SVD fits)
+    // — without changing what subspace it recovers.
+    let mut qq = DMatrix::<T>::runif_seeded(nc, rank_and_oversample, RSVD_SUBSPACE_SEED);
     let zero = T::from(0.).expect("no zero found");
 
     for _i in 0..max_iter {

@@ -104,16 +104,24 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         for (compact_i, &brow) in unified.feature_to_backend_row.iter().enumerate() {
             backend_w[brow] = w[compact_i];
         }
-        unified.count_backend_mut().project_columns_weighted(
-            config.proj_dim,
-            config.block_size,
-            batch_arg,
-            &backend_w,
-        )?
+        unified
+            .count_backend_mut()
+            .project_columns_weighted_seeded(
+                config.proj_dim,
+                config.block_size,
+                batch_arg,
+                &backend_w,
+                config.seed,
+            )?
     } else {
         unified
             .count_backend_mut()
-            .project_columns_with_batch_correction(config.proj_dim, config.block_size, batch_arg)?
+            .project_columns_with_batch_correction_seeded(
+                config.proj_dim,
+                config.block_size,
+                batch_arg,
+                config.seed,
+            )?
     };
 
     let feat_weights = load_or_compute_fisher_weights(
@@ -263,6 +271,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     row_to_gene: &spec.row_to_gene,
                     b_feat: &zeros_features,
                     b_cell: &zeros_cells,
+                    seed: config.seed,
                     unspliced_rows,
                 },
                 &varmap,
@@ -275,6 +284,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 n_features,
                 n_cells,
                 embedding_dim: h,
+                seed: config.seed,
             },
             &ModelInit {
                 e_feat: None,
@@ -283,7 +293,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 b_cell: &zeros_cells,
             },
             &varmap,
-            vs,
             &config.device,
         )?,
     };
@@ -292,8 +301,10 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     for (level_idx, pb) in pb_blobs.iter().enumerate() {
         let n_pb = pb.n_cells();
         let prefix = format!("pb_l{level_idx}");
+        // Each level's cell side is keyed by its unique `{prefix}_e_cell` name,
+        // so one base seed yields an independent reproducible init per level.
         let level_model = if cell_model.factor.is_some() {
-            cell_model.new_sharing_factor(n_pb, &prefix, &varmap, &config.device)?
+            cell_model.new_sharing_factor(n_pb, &prefix, &varmap, &config.device, config.seed)?
         } else {
             JointEmbedModel::new_sharing_features(
                 ShareFeaturesArgs {
@@ -304,6 +315,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     e_cell_init: None,
                     b_cell_init: &vec![0f32; n_pb],
                     var_prefix: &prefix,
+                    seed: config.seed,
                 },
                 &varmap,
                 &config.device,

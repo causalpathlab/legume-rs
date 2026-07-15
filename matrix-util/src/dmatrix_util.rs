@@ -1,9 +1,9 @@
 use nalgebra::{ComplexField, DMatrix, Matrix};
 use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix, csr::CsrMatrix};
 
+use crate::rand_util::{collect_seeded, entropy_seed};
 use num_traits::Float;
-use rand::RngExt;
-use rand_distr::{Distribution, Gamma, StandardNormal, Uniform};
+use rand_distr::{Gamma, StandardNormal, Uniform};
 use rayon::prelude::*;
 
 pub use crate::dmatrix_rsvd::nystrom_basis;
@@ -588,44 +588,34 @@ where
     type Scalar = T;
 
     fn runif(nrow: usize, ncol: usize) -> Self::Mat {
-        let u01 = Uniform::<f32>::new(0., 1.).expect("failed to create uniform distribution");
-
-        let rvec = (0..(nrow * ncol))
-            .into_par_iter()
-            .map_init(rand::rng, |rng, _| {
-                let x = rng.sample(u01);
-                T::from(x).expect("failed to type")
-            })
-            .collect();
-
-        DMatrix::<T>::from_vec(nrow, ncol, rvec)
+        Self::runif_seeded(nrow, ncol, entropy_seed())
     }
 
     fn rnorm(nrow: usize, ncol: usize) -> Self::Mat {
-        let rvec = (0..(nrow * ncol))
-            .into_par_iter()
-            .map_init(rand::rng, |rng, _| {
-                let x: f32 = rng.sample(StandardNormal);
-                T::from(x).expect("failed to type")
-            })
-            .collect();
-
-        DMatrix::<T>::from_vec(nrow, ncol, rvec)
+        Self::rnorm_seeded(nrow, ncol, entropy_seed())
     }
 
     fn rgamma(nrow: usize, ncol: usize, param: (f32, f32)) -> Self::Mat {
+        Self::rgamma_seeded(nrow, ncol, param, entropy_seed())
+    }
+
+    fn runif_seeded(nrow: usize, ncol: usize, seed: u64) -> Self::Mat {
+        let u01 = Uniform::<f32>::new(0., 1.).expect("failed to create uniform distribution");
+        DMatrix::<T>::from_vec(nrow, ncol, collect_seeded(nrow * ncol, u01, seed))
+    }
+
+    fn rnorm_seeded(nrow: usize, ncol: usize, seed: u64) -> Self::Mat {
+        DMatrix::<T>::from_vec(
+            nrow,
+            ncol,
+            collect_seeded(nrow * ncol, StandardNormal, seed),
+        )
+    }
+
+    fn rgamma_seeded(nrow: usize, ncol: usize, param: (f32, f32), seed: u64) -> Self::Mat {
         let (shape, scale) = param;
         let pdf = Gamma::new(shape, scale).unwrap();
-
-        let rvec = (0..(nrow * ncol))
-            .into_par_iter()
-            .map_init(rand::rng, |rng, _| {
-                let x: f32 = pdf.sample(rng);
-                T::from(x).expect("failed to type")
-            })
-            .collect();
-
-        DMatrix::<T>::from_vec(nrow, ncol, rvec)
+        DMatrix::<T>::from_vec(nrow, ncol, collect_seeded(nrow * ncol, pdf, seed))
     }
 }
 
