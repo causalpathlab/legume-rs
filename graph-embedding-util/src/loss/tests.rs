@@ -173,13 +173,12 @@ fn batched_gated_matches_per_gene_gated() {
     // The batched gene-modulated per-level loss must match stacking G
     // calls to the single-gene gated version, gene-by-gene.
     use crate::model::{JointEmbedModel, ModelArgs, ModelInit};
-    use candle_util::candle_core::{DType, Device};
-    use candle_util::candle_nn::{VarBuilder, VarMap};
+    use candle_util::candle_core::Device;
+    use candle_util::candle_nn::VarMap;
     use rand::SeedableRng;
 
     let dev = Device::Cpu;
     let varmap = VarMap::new();
-    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
     let n_cells = 8;
     let n_genes = 4;
     let embedding_dim = 4;
@@ -214,6 +213,7 @@ fn batched_gated_matches_per_gene_gated() {
             n_features: n_genes,
             n_cells,
             embedding_dim,
+            seed: 0,
         },
         &ModelInit {
             e_feat: Some(&e_gene_init),
@@ -222,7 +222,6 @@ fn batched_gated_matches_per_gene_gated() {
             b_cell: &b_cell_init,
         },
         &varmap,
-        vs,
         &dev,
     )
     .expect("model");

@@ -1,33 +1,47 @@
+use crate::rand_util::{collect_f32_seeded, entropy_seed};
 use crate::traits::*;
 use candle_core::{Device, Tensor};
-use rand_distr::{Distribution, Gamma};
-use rayon::prelude::*;
+use rand_distr::{Gamma, StandardNormal, Uniform};
 
 impl SampleOps for Tensor {
     type Mat = Self;
     type Scalar = f32;
 
     fn runif(nrow: usize, ncol: usize) -> Self::Mat {
-        Tensor::rand(0_f32, 1_f32, (nrow, ncol), &Device::Cpu)
-            .expect("failed to create Tensor runif")
+        Self::runif_seeded(nrow, ncol, entropy_seed())
     }
 
     fn rnorm(nrow: usize, ncol: usize) -> Self::Mat {
-        Tensor::randn(0_f32, 1_f32, (nrow, ncol), &Device::Cpu)
-            .expect("failed to create Tensor rnorm")
+        Self::rnorm_seeded(nrow, ncol, entropy_seed())
     }
 
     fn rgamma(nrow: usize, ncol: usize, param: (f32, f32)) -> Self::Mat {
+        Self::rgamma_seeded(nrow, ncol, param, entropy_seed())
+    }
+
+    fn runif_seeded(nrow: usize, ncol: usize, seed: u64) -> Self::Mat {
+        let u01 = Uniform::new(0_f32, 1_f32).expect("failed to create uniform distribution");
+        let data = collect_f32_seeded(nrow * ncol, u01, seed);
+        Tensor::from_vec(data, (nrow, ncol), &Device::Cpu)
+            .expect("failed to create Tensor runif_seeded")
+    }
+
+    fn rnorm_seeded(nrow: usize, ncol: usize, seed: u64) -> Self::Mat {
+        // Candle's own `Tensor::randn` on the CPU backend draws from
+        // `rand::rng()` (OS entropy) and its `Device::set_seed` errors out, so
+        // there is no way to seed it through candle. Generate the sample
+        // host-side instead, where the seed is honored.
+        let data = collect_f32_seeded(nrow * ncol, StandardNormal, seed);
+        Tensor::from_vec(data, (nrow, ncol), &Device::Cpu)
+            .expect("failed to create Tensor rnorm_seeded")
+    }
+
+    fn rgamma_seeded(nrow: usize, ncol: usize, param: (f32, f32), seed: u64) -> Self::Mat {
         let (shape, scale) = param;
         let pdf = Gamma::new(shape, scale).unwrap();
-
-        let data_vec = (0..(nrow * ncol))
-            .into_par_iter()
-            .map_init(rand::rng, |rng, _| pdf.sample(rng))
-            .collect();
-
-        Tensor::from_vec(data_vec, (nrow, ncol), &Device::Cpu)
-            .expect("failed to create Tensor rgamma")
+        let data = collect_f32_seeded(nrow * ncol, pdf, seed);
+        Tensor::from_vec(data, (nrow, ncol), &Device::Cpu)
+            .expect("failed to create Tensor rgamma_seeded")
     }
 }
 

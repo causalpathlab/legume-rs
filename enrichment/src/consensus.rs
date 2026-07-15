@@ -267,10 +267,10 @@ pub fn binom_half_upper_tail(m: usize, k: usize) -> f64 {
 /// so two resampling schemes driven by the same `--seed` never walk the same stream.
 #[must_use]
 pub fn keyed_rng(seed: u64, draw: usize, item: u64) -> SmallRng {
-    let mut k = seed
-        ^ (draw as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ item.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-    k = (k ^ (k >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    k = (k ^ (k >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    SmallRng::seed_from_u64(k ^ (k >> 31))
+    // Fold the `item` domain separator into the base, then run it through the
+    // shared SplitMix64 mixer. Byte-identical to the former inline finalizer:
+    // `mix_seed(base, draw)` = `finalize(base ^ draw·GOLDEN)`, and XOR commutes,
+    // so `base = seed ^ item·C2B2` reproduces the old `seed ^ draw·GOLDEN ^ item·C2B2`.
+    let base = seed ^ item.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    SmallRng::seed_from_u64(matrix_util::rand_util::mix_seed(base, draw as u64))
 }

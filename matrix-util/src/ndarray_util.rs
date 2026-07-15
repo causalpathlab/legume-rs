@@ -1,9 +1,8 @@
+use crate::rand_util::{collect_seeded, entropy_seed};
 use crate::traits::*;
 use ndarray::prelude::*;
 use num_traits::{Float, FromPrimitive};
-use rand::RngExt;
-use rand_distr::{Distribution, Gamma, StandardNormal, Uniform};
-use rayon::prelude::*;
+use rand_distr::{Gamma, StandardNormal, Uniform};
 
 impl<T> SampleOps for ndarray::Array2<T>
 where
@@ -13,44 +12,30 @@ where
     type Scalar = T;
 
     fn runif(dd: usize, nn: usize) -> Self::Mat {
-        let u01 = Uniform::new(0_f32, 1_f32).expect("failed to create uniform distribution");
-
-        let rvec: Vec<T> = (0..(dd * nn))
-            .into_par_iter()
-            .map_init(rand::rng, |rng, _| {
-                let x = rng.sample(u01);
-                T::from(x).expect("failed to type")
-            })
-            .collect();
-
-        Array2::from_shape_vec((dd, nn), rvec).unwrap()
+        Self::runif_seeded(dd, nn, entropy_seed())
     }
 
     fn rnorm(dd: usize, nn: usize) -> Self::Mat {
-        let rvec = (0..(dd * nn))
-            .into_par_iter()
-            .map_init(rand::rng, |rng, _| {
-                let x: f32 = rng.sample(StandardNormal);
-                T::from(x).expect("failed to type")
-            })
-            .collect();
-
-        Array2::from_shape_vec((dd, nn), rvec).unwrap()
+        Self::rnorm_seeded(dd, nn, entropy_seed())
     }
 
     fn rgamma(dd: usize, nn: usize, param: (f32, f32)) -> Self::Mat {
+        Self::rgamma_seeded(dd, nn, param, entropy_seed())
+    }
+
+    fn runif_seeded(dd: usize, nn: usize, seed: u64) -> Self::Mat {
+        let u01 = Uniform::new(0_f32, 1_f32).expect("failed to create uniform distribution");
+        Array2::from_shape_vec((dd, nn), collect_seeded(dd * nn, u01, seed)).unwrap()
+    }
+
+    fn rnorm_seeded(dd: usize, nn: usize, seed: u64) -> Self::Mat {
+        Array2::from_shape_vec((dd, nn), collect_seeded(dd * nn, StandardNormal, seed)).unwrap()
+    }
+
+    fn rgamma_seeded(dd: usize, nn: usize, param: (f32, f32), seed: u64) -> Self::Mat {
         let (shape, scale) = param;
         let pdf = Gamma::new(shape, scale).unwrap();
-
-        let rvec = (0..(dd * nn))
-            .into_par_iter()
-            .map_init(rand::rng, |rng, _| {
-                let x: f32 = pdf.sample(rng);
-                T::from(x).expect("failed to type")
-            })
-            .collect();
-
-        Array2::from_shape_vec((dd, nn), rvec).unwrap()
+        Array2::from_shape_vec((dd, nn), collect_seeded(dd * nn, pdf, seed)).unwrap()
     }
 }
 

@@ -187,10 +187,16 @@ pub trait SampleOps {
     type Mat;
     type Scalar;
 
-    /// Sample a matrix from a uniform distribution `U(0,1)`
+    /// Sample a matrix from a uniform distribution `U(0,1)`.
+    ///
+    /// Unseeded: draws fresh entropy each call. For reproducible output use
+    /// [`SampleOps::runif_seeded`].
     fn runif(dd: usize, nn: usize) -> Self::Mat;
 
-    /// Sample a matrix from a normal distribution `N(0,1)`
+    /// Sample a matrix from a normal distribution `N(0,1)`.
+    ///
+    /// Unseeded: draws fresh entropy each call. For reproducible output use
+    /// [`SampleOps::rnorm_seeded`].
     fn rnorm(dd: usize, nn: usize) -> Self::Mat;
 
     /// Sample a matrix from a gamma distribution with `param` is
@@ -199,7 +205,25 @@ pub trait SampleOps {
     /// $$f(x|\alpha,\theta) = \frac{\theta^{-\alpha}}{\Gamma(\alpha)} x^{\alpha - 1} e^{-x/\theta}$$
     ///
     /// Note: `rate = 1/scale` or $\beta = 1/\theta$
+    ///
+    /// Unseeded: draws fresh entropy each call. For reproducible output use
+    /// [`SampleOps::rgamma_seeded`].
     fn rgamma(dd: usize, nn: usize, param: (f32, f32)) -> Self::Mat;
+
+    /// Seeded, thread-order-independent `U(0,1)` sample. Byte-identical across
+    /// runs, thread counts, and machines for a fixed `seed`. See
+    /// [`crate::rand_util`].
+    fn runif_seeded(dd: usize, nn: usize, seed: u64) -> Self::Mat;
+
+    /// Seeded, thread-order-independent `N(0,1)` sample. Byte-identical across
+    /// runs, thread counts, and machines for a fixed `seed`. See
+    /// [`crate::rand_util`].
+    fn rnorm_seeded(dd: usize, nn: usize, seed: u64) -> Self::Mat;
+
+    /// Seeded, thread-order-independent gamma sample (`param = (shape α, scale θ)`).
+    /// Byte-identical across runs, thread counts, and machines for a fixed
+    /// `seed`. See [`crate::rand_util`].
+    fn rgamma_seeded(dd: usize, nn: usize, param: (f32, f32), seed: u64) -> Self::Mat;
 }
 
 pub trait DistanceOps {

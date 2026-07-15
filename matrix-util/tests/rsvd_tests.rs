@@ -16,6 +16,21 @@ fn order_test() {
     assert_eq!(array, reconstructed);
 }
 
+/// `rsvd` seeds its subspace-iteration start vector with a fixed seed, so two
+/// calls on the same matrix must return byte-identical factors. This pins every
+/// downstream consumer (binary-sketch collapse, layout, SVD fits).
+#[test]
+fn dmatrix_rsvd_is_reproducible() -> anyhow::Result<()> {
+    use matrix_util::traits::*;
+    let x = nalgebra::DMatrix::<f32>::rnorm_seeded(80, 40, 99);
+    let (u1, s1, v1) = x.rsvd(5)?;
+    let (u2, s2, v2) = x.rsvd(5)?;
+    assert_eq!(u1, u2, "rsvd U must be reproducible");
+    assert_eq!(s1, s2, "rsvd S must be reproducible");
+    assert_eq!(v1, v2, "rsvd V must be reproducible");
+    Ok(())
+}
+
 #[test]
 fn dmatrix_rsvd_test() -> anyhow::Result<()> {
     use matrix_util::traits::*;

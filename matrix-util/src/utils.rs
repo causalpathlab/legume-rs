@@ -1,7 +1,15 @@
+use crate::rand_util::mix_seed;
 use rand::prelude::SliceRandom;
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 use std::hash::Hash;
+
+/// Fixed base seed for the pseudobulk down-sample shuffle. Mixed with each
+/// group's stable identity so the kept subset is reproducible and independent
+/// of thread scheduling (the shuffle previously drew from OS entropy).
+const PARTITION_SHUFFLE_SEED: u64 = 0x5041_5254_5348_5546; // "PARTSHUF"
 
 /// Median of a slice (sorts a copy). Returns `0.0` for an empty slice and
 /// is NaN-tolerant (NaNs compare as equal rather than panicking).
@@ -42,7 +50,11 @@ where
         let ncells = cells.len();
         if let Some(ntarget) = nelem_per_group {
             if ncells > ntarget {
-                let mut rng = rand::rng();
+                // Seed per group from its smallest member — stable, unique per
+                // group, and independent of thread order — so the down-sampled
+                // subset is reproducible run-to-run.
+                let key = cells.first().copied().unwrap_or(0) as u64;
+                let mut rng = SmallRng::seed_from_u64(mix_seed(PARTITION_SHUFFLE_SEED, key));
                 cells.shuffle(&mut rng);
                 cells.truncate(ntarget);
             }

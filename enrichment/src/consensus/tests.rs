@@ -1,5 +1,39 @@
 use super::*;
 
+/// Locks `keyed_rng` byte-identical to its former hand-inlined SplitMix64
+/// finalizer after the refactor to reuse `matrix_util::rand_util::mix_seed`.
+/// A regression here would silently change every `--seed`-driven resample.
+#[test]
+fn keyed_rng_matches_legacy_formula() {
+    use rand::RngExt;
+    let legacy = |seed: u64, draw: usize, item: u64| -> u64 {
+        let mut k = seed
+            ^ (draw as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ item.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        k = (k ^ (k >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        k = (k ^ (k >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        k ^ (k >> 31)
+    };
+    for &(seed, draw, item) in &[
+        (0u64, 0usize, 0u64),
+        (42, 7, 100),
+        (1, 2, 3),
+        (u64::MAX, 999, 0xDEAD_BEEF),
+        (0x9E37_79B9, 12345, 1),
+    ] {
+        let mut want = SmallRng::seed_from_u64(legacy(seed, draw, item));
+        let mut got = keyed_rng(seed, draw, item);
+        // Same seed ⇒ identical streams; check several draws.
+        for _ in 0..4 {
+            assert_eq!(
+                want.random::<u64>(),
+                got.random::<u64>(),
+                "keyed_rng drift at ({seed},{draw},{item})"
+            );
+        }
+    }
+}
+
 /// Build a `[n × k]` row-major tally from per-item vote counts.
 fn tally(rows: &[Vec<f32>]) -> (Vec<f32>, usize, usize) {
     let n = rows.len();

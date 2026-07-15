@@ -22,6 +22,7 @@ pub mod parquet;
 pub mod principal_curve;
 pub mod principal_graph;
 pub mod progress;
+pub mod rand_util;
 pub mod running_quantile;
 pub mod sparse_stat;
 pub mod stop;

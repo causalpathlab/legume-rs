@@ -36,6 +36,11 @@ pub struct TSne {
     /// local radius `R_i = Σ_j P_ij · d_ij(Y)` to `∝ 1/√n_i`, so dense
     /// regions (big PBs) shrink and sparse regions (small PBs) spread.
     density_lambda: f32,
+    /// Seed for the random layout initialization, used only in the fallback
+    /// where `fit` is called without explicit `init` coordinates (the
+    /// production `senna layout tsne` path always passes a `--seed`-derived
+    /// init). Fixed so that fallback is reproducible rather than entropy-seeded.
+    seed: u64,
 }
 
 impl Default for TSne {
@@ -50,6 +55,7 @@ impl Default for TSne {
             early_exaggeration_iter: 250,
             weights: None,
             density_lambda: 0.0,
+            seed: 42,
         }
     }
 }
@@ -118,8 +124,8 @@ impl TSne {
         let mut y_flat: Vec<f32> = if let Some(coords) = init {
             coords.to_vec()
         } else {
-            use rand::RngExt;
-            let mut rng = rand::rng();
+            use rand::{rngs::SmallRng, RngExt, SeedableRng};
+            let mut rng = SmallRng::seed_from_u64(self.seed);
             (0..n * 2).map(|_| rng.random::<f32>() - 0.5).collect()
         };
 
