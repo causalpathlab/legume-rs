@@ -67,8 +67,8 @@ pub struct PlotStrandArgs {
         long,
         short = 'o',
         help = "Output prefix (defaults to the manifest `prefix`)",
-        long_help = "Output prefix (defaults to the manifest `prefix`). Writes\n\
-                     {out}.strand/<celltype>.pdf."
+        long_help = "Output prefix (defaults to the manifest `prefix`).\n\
+                     Writes {out}.strand/<celltype>.pdf."
     )]
     pub out: Option<Box<str>>,
 

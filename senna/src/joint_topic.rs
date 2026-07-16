@@ -62,8 +62,8 @@ pub struct JointTopicArgs {
         short,
         value_delimiter(','),
         help = "Batch membership files, one per data file",
-        long_help = "Each file lists a batch label per cell in the same order as its\n\
-                     matching data file. Example: batch1.tsv,batch2.tsv"
+        long_help = "Each file lists a batch label per cell in the same order as its matching data file.\n\
+                     Example: batch1.tsv,batch2.tsv"
     )]
     pub(crate) batch_files: Option<Vec<Box<str>>>,
 
@@ -152,9 +152,9 @@ pub struct JointTopicArgs {
         long,
         default_value_t = 5000,
         help = "Cap feature dim by meta-feature coarsening (0 to disable)",
-        long_help = "Groups co-expressed features into ≤N meta-features so the model\n\
-                     trains at reduced resolution. The dictionary is expanded back to\n\
-                     full resolution on output.\n\
+        long_help = "Groups co-expressed features into ≤N meta-features\n\
+                     so the model trains at reduced resolution.\n\
+                     The dictionary is expanded back to full resolution on output.\n\
                      Independent mode: computed per modality.\n\
                      Delta mode: computed on the reference modality and shared."
     )]
@@ -172,8 +172,8 @@ pub struct JointTopicArgs {
         value_enum,
         default_value = "independent",
         help = "Joint decoder (independent|delta)",
-        long_help = "independent — each modality has its own topic dictionary; features\n\
-                                   may differ across modalities.\n\
+        long_help = "independent — each modality has its own topic dictionary;\n\
+                                   features may differ across modalities.\n\
                      delta       — shared base dictionary + cumulative chain deltas.\n\
                                    Modality 0 = softmax(z @ W_base)\n\
                                    Modality m = softmax(z @ (W_base + Σ δ_1..m))\n\

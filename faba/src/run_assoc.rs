@@ -158,11 +158,13 @@ pub struct AssocArgs {
         default_value_t = 0.1,
         help = "reporting threshold: lfsr (bayes) or BH q (quasi/binomial)",
         long_help = "Reporting threshold — the count in the log, not a filter on the output.\n\n\
-            On the Bayesian paths (the default) this is compared against `lfsr`, which is a\n\
-            Monte-Carlo tail proportion: a site whose lfsr sits near this cutoff can cross it\n\
-            from one --seed to the next. The `mcse_lfsr` column is that error, per site —\n\
-            when |lfsr − alpha| is not comfortably larger than mcse_lfsr, the row is\n\
-            under-sampled rather than borderline, and the answer is more --posterior-samples.\n\n\
+            On the Bayesian paths (the default) this is compared against `lfsr`,\n\
+            which is a Monte-Carlo tail proportion:\n\
+            a site whose lfsr sits near this cutoff can cross it from one --seed to the next.\n\
+            The `mcse_lfsr` column is that error, per site —\n\
+            when |lfsr − alpha| is not comfortably larger than mcse_lfsr,\n\
+            the row is under-sampled rather than borderline,\n\
+            and the answer is more --posterior-samples.\n\n\
             On the frequentist trend paths (--trend-method quasi|binomial) it is a BH q cutoff."
     )]
     pub fdr_alpha: f32,

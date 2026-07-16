@@ -53,8 +53,8 @@ pub struct EvalTopicArgs {
         long,
         value_delimiter = ',',
         help = "Batch membership files, one per data file",
-        long_help = "Each file lists a batch label per cell in the same order as its\n\
-                     matching data file. Example: batch1.tsv,batch2.tsv"
+        long_help = "Each file lists a batch label per cell in the same order as its matching data file.\n\
+                     Example: batch1.tsv,batch2.tsv"
     )]
     pub(crate) batch_files: Option<Vec<Box<str>>>,
 
@@ -74,8 +74,8 @@ pub struct EvalTopicArgs {
         long,
         default_value_t = 0,
         help = "Per-cell refinement steps at inference (0 = off)",
-        long_help = "Gradient steps that optimize topic logits against the frozen\n\
-                     decoder likelihood, anchored to the encoder output by L2."
+        long_help = "Gradient steps that optimize topic logits against the frozen decoder likelihood,\n\
+                     anchored to the encoder output by L2."
     )]
     pub(crate) refine_steps: usize,
 

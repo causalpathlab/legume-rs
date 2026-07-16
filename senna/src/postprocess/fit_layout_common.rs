@@ -82,8 +82,8 @@ pub struct LayoutCommonArgs {
 		     {out}.cell_coords.parquet:\n\
 		       Cell coordinates (n_cells × 2 or 3) with optional pb_id / cluster columns\n\n\
 		     {out}.pb_gene_mean.parquet:\n\
-		       Batch-corrected log1p-CPM per PB (n_pb × n_genes), used as\n\
-		       the diagnostic feature matrix for the PB-PB similarity step."
+		       Batch-corrected log1p-CPM per PB (n_pb × n_genes),\n\
+		       used as the diagnostic feature matrix for the PB-PB similarity step."
     )]
     pub out: Option<Box<str>>,
 
@@ -170,8 +170,8 @@ pub struct LayoutCommonArgs {
     #[arg(
         long,
         help = "Local scaling using k-th neighbor distance",
-        long_help = "Zelnik-Manor & Perona local scaling. σ_i = distance to k-th nearest\n\
-		     neighbour; S_scaled(i,j) = S(i,j) / sqrt(σ_i σ_j)."
+        long_help = "Zelnik-Manor & Perona local scaling.\n\
+		     σ_i = distance to k-th nearest neighbour; S_scaled(i,j) = S(i,j) / sqrt(σ_i σ_j)."
     )]
     pub local_scale_k: Option<usize>,
 
@@ -194,8 +194,8 @@ pub struct LayoutCommonArgs {
         long,
         default_value_t = 0.95,
         help = "Keep smallest PB set covering this fraction of cells",
-        long_help = "Drop PB samples in the long tail until the remaining set\n\
-		     contains at least this fraction of the total cells.\n\
+        long_help = "Drop PB samples in the long tail\n\
+		     until the remaining set contains at least this fraction of the total cells.\n\
 		     - 1.0: keep every PB (no filtering)\n\
 		     - 0.95 (default): remove minor subpopulations"
     )]

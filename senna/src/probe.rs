@@ -63,9 +63,9 @@ pub struct ProbeArgs {
         long,
         required = true,
         help = "In-distribution calibration backend that defines the null",
-        long_help = "A backend of cells the model already explains (e.g. held-out\n\
-                     training-distribution cells). Its per-cell fit distribution sets the\n\
-                     null; the query is flagged relative to its lower tail."
+        long_help = "A backend of cells the model already explains (e.g. held-out training-distribution cells).\n\
+                     Its per-cell fit distribution sets the null;\n\
+                     the query is flagged relative to its lower tail."
     )]
     calibration: Box<str>,
 
@@ -89,19 +89,22 @@ pub struct ProbeArgs {
         long,
         default_value_t = 0,
         help = "Estimate benefit / forgetting by SGD refit; value = #permutations (0 = off)",
-        long_help = "The fit score above is the potential outcome Y(0). This instead estimates\n\
-                     the effect of updating: refit the topic embeddings α, with the encoder\n\
-                     frozen, and measure the result on held-out cells.\n\n\
-                     Treatment refits α on (reference base + query); control refits on\n\
-                     (reference base + an equally-sized reference batch), so the effect is\n\
-                     that of adding *this* batch rather than ordinary data. `benefit` is the\n\
-                     fit gained on held-out query cells; `forgetting` is the fit lost on\n\
-                     held-out reference cells. Both are signed so larger is more extreme.\n\
-                     Permuting the treatment/control label of the pooled fit cells gives an\n\
-                     exact finite-sample null — no χ², no Fisher, no EIF.\n\n\
-                     Cost is 2 refits per permutation, and p bottoms out at 1/(N+1). Reaches\n\
-                     `forgetting`, which the fit score cannot: an in-distribution but\n\
-                     contaminated batch reconstructs well and still degrades the dictionary."
+        long_help = "The fit score above is the potential outcome Y(0).\n\
+                     This instead estimates the effect of updating:\n\
+                     refit the topic embeddings α, with the encoder frozen,\n\
+                     and measure the result on held-out cells.\n\n\
+                     Treatment refits α on (reference base + query);\n\
+                     control refits on (reference base + an equally-sized reference batch),\n\
+                     so the effect is that of adding *this* batch rather than ordinary data.\n\
+                     `benefit` is the fit gained on held-out query cells;\n\
+                     `forgetting` is the fit lost on held-out reference cells.\n\
+                     Both are signed so larger is more extreme.\n\
+                     Permuting the treatment/control label of the pooled fit cells gives an exact finite-sample null\n\
+                     — no χ², no Fisher, no EIF.\n\n\
+                     Cost is 2 refits per permutation, and p bottoms out at 1/(N+1).\n\
+                     Reaches `forgetting`, which the fit score cannot:\n\
+                     an in-distribution but contaminated batch reconstructs well\n\
+                     and still degrades the dictionary."
     )]
     counterfactual: usize,
 

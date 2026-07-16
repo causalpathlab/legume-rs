@@ -66,8 +66,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 10,
         help = "Minimum poly(A) tail length (bp)",
-        long_help = "Minimum number of soft-clipped A/T bases required to\n\
-                     call a read as a poly(A) junction read."
+        long_help = "Minimum number of soft-clipped A/T bases\n\
+                     required to call a read as a poly(A) junction read."
     )]
     pub(crate) polya_min_tail_length: usize,
 
@@ -76,8 +76,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 3,
         help = "Max non-A/T bases in poly(A) tail",
-        long_help = "Maximum number of non-A (forward) or non-T (reverse)\n\
-                     bases allowed in the soft-clipped tail."
+        long_help = "Maximum number of non-A (forward) or non-T (reverse) bases\n\
+                     allowed in the soft-clipped tail."
     )]
     pub(crate) polya_max_non_a_or_t: usize,
 
@@ -86,8 +86,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 10,
         help = "Internal priming check window (bp)",
-        long_help = "Window size in base pairs around the cleavage site to\n\
-                     check for genomic A/T-rich stretches (internal priming)."
+        long_help = "Window size in base pairs around the cleavage site\n\
+                     to check for genomic A/T-rich stretches (internal priming)."
     )]
     pub(crate) polya_internal_prime_window: usize,
 
@@ -96,9 +96,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 7,
         help = "A/T count threshold for internal priming",
-        long_help = "If the number of A/T bases in the internal priming\n\
-                     window meets or exceeds this threshold, the site is\n\
-                     flagged as likely internal priming and discarded."
+        long_help = "If the number of A/T bases in the internal priming window meets or exceeds this threshold,\n\
+                     the site is flagged as likely internal priming and discarded."
     )]
     pub(crate) polya_internal_prime_count: usize,
 
@@ -107,8 +106,7 @@ pub struct CountApaArgs {
         long,
         default_value_t = 10,
         help = "Minimum read coverage per site",
-        long_help = "Candidate poly(A) sites with fewer than this many\n\
-                     supporting reads are discarded."
+        long_help = "Candidate poly(A) sites with fewer than this many supporting reads are discarded."
     )]
     pub(crate) min_coverage: usize,
 
@@ -117,8 +115,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 20,
         help = "Minimum mapping quality for poly-A reads",
-        long_help = "Reads with MAPQ below this are skipped during fragment\n\
-                     extraction, consistent with the editing/SNP modalities."
+        long_help = "Reads with MAPQ below this are skipped during fragment extraction,\n\
+                     consistent with the editing/SNP modalities."
     )]
     pub(crate) min_mapping_quality: u8,
 
@@ -138,8 +136,7 @@ pub struct CountApaArgs {
         long,
         default_value_t = 10,
         help = "Minimum non-zeros per row (site)",
-        long_help = "Sites with fewer than this many non-zero cells are\n\
-                     removed from the output matrix."
+        long_help = "Sites with fewer than this many non-zero cells are removed from the output matrix."
     )]
     pub(crate) row_nnz_cutoff: usize,
 
@@ -148,8 +145,7 @@ pub struct CountApaArgs {
         long,
         default_value_t = 1,
         help = "Minimum non-zeros per column (cell)",
-        long_help = "Cells with fewer than this many non-zero sites are\n\
-                     removed from the output matrix."
+        long_help = "Cells with fewer than this many non-zero sites are removed from the output matrix."
     )]
     pub(crate) column_nnz_cutoff: usize,
 
@@ -161,8 +157,8 @@ pub struct CountApaArgs {
         help = "Output directory",
         long_help = "Directory for output files.\n\
                      In simple mode, one sparse matrix per input BAM is created.\n\
-                     In mixture mode, a single sparse matrix and a site\n\
-                     annotation parquet are created for all inputs."
+                     In mixture mode, a single sparse matrix\n\
+                     and a site annotation parquet are created for all inputs."
     )]
     pub(crate) output: Box<str>,
 
@@ -210,16 +206,16 @@ pub struct CountApaArgs {
         long = "atoi-mask",
         help = "A-to-I mask parquet (from `faba atoi` or `faba dartseq --detect-atoi`)",
         long_help = "Path to a pre-computed A-to-I sites parquet file.\n\
-                     When provided, poly(A) sites that overlap A-to-I editing\n\
-                     positions are removed before quantification."
+                     When provided, poly(A) sites that overlap A-to-I editing positions\n\
+                     are removed before quantification."
     )]
     pub(crate) atoi_mask_file: Option<Box<str>>,
 
     #[arg(
         long = "snp-mask",
         help = "SNP mask parquet from `faba snp` to filter genetic variants",
-        long_help = "Path to snp_sites.parquet from `faba snp`. Poly(A) sites\n\
-                     at known SNP positions (het or hom-alt) are removed."
+        long_help = "Path to snp_sites.parquet from `faba snp`.\n\
+                     Poly(A) sites at known SNP positions (het or hom-alt) are removed."
     )]
     pub(crate) snp_mask_file: Option<Box<str>>,
 
@@ -284,8 +280,9 @@ pub struct CountApaArgs {
         short = 'u',
         long = "utr-bed",
         help = "3'-UTR regions BED file (mixture mode)",
-        long_help = "BED file defining 3'-UTR regions. Alternative to --gff\n\
-                     for mixture mode. Each row should be a UTR interval."
+        long_help = "BED file defining 3'-UTR regions.\n\
+                     Alternative to --gff for mixture mode.\n\
+                     Each row should be a UTR interval."
     )]
     pub(crate) utr_bed: Option<Box<str>>,
 
@@ -302,8 +299,9 @@ pub struct CountApaArgs {
     #[arg(
         long,
         help = "Pre-identified pA sites BED (mixture mode)",
-        long_help = "BED file of known poly(A) sites. When provided, skips\n\
-                     de novo site discovery. Only used in mixture mode."
+        long_help = "BED file of known poly(A) sites.\n\
+                     When provided, skips de novo site discovery.\n\
+                     Only used in mixture mode."
     )]
     pub(crate) pre_sites: Option<Box<str>>,
 
@@ -323,8 +321,8 @@ pub struct CountApaArgs {
         long = "no-umi-dedup",
         default_value_t = false,
         help = "Disable UMI deduplication (mixture mode)",
-        long_help = "When set, each fragment counts once instead of being\n\
-                     deduplicated by UMI. Use for bulk or non-UMI data.\n\
+        long_help = "When set, each fragment counts once instead of being deduplicated by UMI.\n\
+                     Use for bulk or non-UMI data.\n\
                      Only used in mixture mode."
     )]
     pub(crate) no_umi_dedup: bool,
@@ -354,8 +352,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 10,
         help = "pA site enumeration step (bp, mixture mode)",
-        long_help = "Step size in base pairs for enumerating candidate pA site\n\
-                     positions along each UTR. Only used in mixture mode."
+        long_help = "Step size in base pairs for enumerating candidate pA site positions along each UTR.\n\
+                     Only used in mixture mode."
     )]
     pub(crate) theta_step: usize,
 
@@ -364,8 +362,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 70.0,
         help = "Max pA dispersion beta (mixture mode)",
-        long_help = "Upper bound on the dispersion parameter (beta) for each\n\
-                     poly(A) site component. Only used in mixture mode."
+        long_help = "Upper bound on the dispersion parameter (beta) for each poly(A) site component.\n\
+                     Only used in mixture mode."
     )]
     pub(crate) max_beta: f32,
 
@@ -374,8 +372,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 10.0,
         help = "Min pA dispersion beta (mixture mode)",
-        long_help = "Lower bound on the dispersion parameter (beta) for each\n\
-                     poly(A) site component. Only used in mixture mode."
+        long_help = "Lower bound on the dispersion parameter (beta) for each poly(A) site component.\n\
+                     Only used in mixture mode."
     )]
     pub(crate) min_beta: f32,
 
@@ -404,8 +402,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 50.0,
         help = "pA site merge distance (bp, mixture mode)",
-        long_help = "Candidate pA sites within this distance are merged into\n\
-                     a single site. Only used in mixture mode."
+        long_help = "Candidate pA sites within this distance are merged into a single site.\n\
+                     Only used in mixture mode."
     )]
     pub(crate) merge_distance: f32,
 
@@ -415,9 +413,9 @@ pub struct CountApaArgs {
         default_value_t = 0.05,
         help = "Per-site skirt eta (heavy-tail robustness, mixture mode)",
         long_help = "Each site's emission is (1 - eta) * Gaussian(alpha, beta^2)\n\
-                     + eta * Uniform(alpha - W, alpha + W). The local uniform\n\
-                     skirt absorbs near-site outliers so the BIC does not pick\n\
-                     up extra spurious sites in broad cleavage clusters.\n\
+                     + eta * Uniform(alpha - W, alpha + W).\n\
+                     The local uniform skirt absorbs near-site outliers\n\
+                     so the BIC does not pick up extra spurious sites in broad cleavage clusters.\n\
                      Set to 0 to disable. Only used in mixture mode."
     )]
     pub(crate) skirt_eta: f32,
@@ -450,11 +448,10 @@ pub struct CountApaArgs {
         long = "apa-max-sites",
         default_value_t = 20,
         help = "Cap candidate poly-A sites per UTR (top-N by coverage; 0 = unlimited)",
-        long_help = "Upper bound on how many candidate poly-A sites a UTR's BIC \
-                     site-selection considers, ranked by coverage. Long 3'UTRs can \
-                     yield hundreds of coverage peaks; capping bounds the per-UTR \
-                     EM cost with negligible accuracy loss (real UTRs have a handful \
-                     of sites). 0 = unlimited. Only used in mixture mode."
+        long_help = "Upper bound on how many candidate poly-A sites a UTR's BIC site-selection considers,\n\
+                     ranked by coverage. Long 3'UTRs can yield hundreds of coverage peaks;\n\
+                     capping bounds the per-UTR EM cost with negligible accuracy loss\n\
+                     (real UTRs have a handful of sites). 0 = unlimited. Only used in mixture mode."
     )]
     pub(crate) apa_max_sites: usize,
 

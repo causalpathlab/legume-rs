@@ -47,8 +47,8 @@ pub struct AtoICountArgs {
         required = true,
         help = "Output directory",
         long_help = "Output directory for A-to-I detection results.\n\
-                     Creates atoi_sites.parquet (detected sites) and one\n\
-                     sparse count matrix per input BAM (with _atoi suffix)."
+                     Creates atoi_sites.parquet (detected sites)\n\
+                     and one sparse count matrix per input BAM (with _atoi suffix)."
     )]
     pub output: Box<str>,
 
@@ -136,9 +136,9 @@ pub struct AtoICountArgs {
         long_help = "Unit-aware feature QC for the per-site (`_site`) output matrix:\n\
                      a site is kept only if detected in at least this many cells,\n\
                      and both of its channels (edited/unedited) are kept together.\n\
-                     The gene-level matrix is unaffected. 0 disables. Sites are a\n\
-                     distinct feature space not covered by the upstream gene\n\
-                     expression QC (--gene-min-cells)."
+                     The gene-level matrix is unaffected. 0 disables.\n\
+                     Sites are a distinct feature space\n\
+                     not covered by the upstream gene expression QC (--gene-min-cells)."
     )]
     pub site_min_cells: usize,
 
@@ -174,9 +174,9 @@ pub struct AtoICountArgs {
     #[arg(
         long = "snp-mask",
         help = "SNP mask parquet from `faba snp` to filter genetic variants",
-        long_help = "Path to snp_sites.parquet from `faba snp`. A-to-I candidates\n\
-                     at known SNP positions (het or hom-alt) are removed before\n\
-                     quantification, eliminating A/G SNPs that mimic editing."
+        long_help = "Path to snp_sites.parquet from `faba snp`.\n\
+                     A-to-I candidates at known SNP positions (het or hom-alt)\n\
+                     are removed before quantification, eliminating A/G SNPs that mimic editing."
     )]
     pub snp_mask_file: Option<Box<str>>,
 
@@ -236,9 +236,9 @@ pub struct AtoICountArgs {
         default_value_t = crate::editing::pipeline::MixtureWeightMode::Posterior,
         help = "How to weight each (cell, site) observation in the mixture EM",
         long_help = "Per-observation weighting for the per-gene Gaussian mixture.\n\
-                     `posterior` (default) uses the Beta-posterior regularized\n\
-                     effective count w = n · (c + α) / (n + α + β), where n is\n\
-                     the per-site coverage and c the converted-read count.\n\
+                     `posterior` (default) uses the Beta-posterior regularized effective count\n\
+                     w = n · (c + α) / (n + α + β), where n is the per-site coverage\n\
+                     and c the converted-read count.\n\
                      `converted` uses the raw converted-read count c (legacy)."
     )]
     pub mixture_weight: crate::editing::pipeline::MixtureWeightMode,

@@ -33,8 +33,8 @@ pub struct SnpArgs {
         help = "Reference genome FASTA (.fa, indexed with .fai)",
         long_help = "Path to the reference genome in FASTA format.\n\
                      Must be indexed (.fai); if missing, the index is created automatically.\n\
-                     Used for de novo discovery (compare reads to reference) and to\n\
-                     validate ref alleles at known sites."
+                     Used for de novo discovery (compare reads to reference)\n\
+                     and to validate ref alleles at known sites."
     )]
     pub genome_file: Box<str>,
 
@@ -48,8 +48,8 @@ pub struct SnpArgs {
                      - VCF/BCF (.vcf, .vcf.gz, .bcf): standard variant calls\n\
                      - Parquet (.parquet): output from a previous `faba snp` run\n\
                      Only biallelic SNPs are used; indels and multi-allelic sites are skipped.\n\
-                     When provided, genotypes are force-called at these positions regardless\n\
-                     of alt allele evidence. Can be combined with de novo discovery.\n\
+                     When provided, genotypes are force-called at these positions\n\
+                     regardless of alt allele evidence. Can be combined with de novo discovery.\n\
                      When omitted, only de novo discovery from the reference genome is used."
     )]
     pub known_snps: Option<Box<str>>,
@@ -62,8 +62,8 @@ pub struct SnpArgs {
         long = "gff",
         help = "Gene annotation GFF file (optional, enables gene-centric mode)",
         long_help = "Gene annotation in GFF/GTF format.\n\
-                     When provided: processes SNPs within gene boundaries, enables\n\
-                     per-cell allele count output with gene_key/SNP/chr:pos naming.\n\
+                     When provided: processes SNPs within gene boundaries,\n\
+                     enables per-cell allele count output with gene_key/SNP/chr:pos naming.\n\
                      When omitted: processes SNPs by chromosome region (bulk WGS mode),\n\
                      no per-cell sparse matrix output."
     )]
@@ -143,9 +143,9 @@ pub struct SnpArgs {
         long,
         default_value_t = 10,
         help = "Minimum coverage for de novo discovery",
-        long_help = "Minimum total read depth at a position to consider it for\n\
-                     de novo variant discovery. Positions below this threshold are\n\
-                     skipped. Does not affect known-site genotyping (see --min-depth)."
+        long_help = "Minimum total read depth at a position to consider it for de novo variant discovery.\n\
+                     Positions below this threshold are skipped.\n\
+                     Does not affect known-site genotyping (see --min-depth)."
     )]
     pub min_coverage: usize,
 
@@ -155,8 +155,8 @@ pub struct SnpArgs {
         default_value_t = 3,
         help = "Minimum alt allele reads for discovery",
         long_help = "Minimum number of reads supporting the non-reference allele\n\
-                     to consider a position as a candidate variant. Applied before\n\
-                     genotype calling."
+                     to consider a position as a candidate variant.\n\
+                     Applied before genotype calling."
     )]
     pub min_alt_count: usize,
 
@@ -179,8 +179,8 @@ pub struct SnpArgs {
         long,
         default_value_t = 5,
         help = "Minimum depth for genotype calling",
-        long_help = "Minimum total read depth to attempt genotype calling at a\n\
-                     known variant site. Sites below this threshold get NoCall (./.).\n\
+        long_help = "Minimum total read depth to attempt genotype calling at a known variant site.\n\
+                     Sites below this threshold get NoCall (./.).\n\
                      For de novo discovery, --min-coverage is used instead."
     )]
     pub min_depth: usize,
@@ -242,8 +242,9 @@ pub struct SnpArgs {
         default_value = "UB",
         help = "UMI barcode BAM tag for deduplication",
         long_help = "BAM auxiliary tag for UMI barcodes (e.g., \"UB\" for 10x).\n\
-                     Reads with the same UMI at the same genomic position are\n\
-                     deduplicated to a single observation. Disable with --no-umi-dedup."
+                     Reads with the same UMI at the same genomic position\n\
+                     are deduplicated to a single observation.\n\
+                     Disable with --no-umi-dedup."
     )]
     pub umi_tag: Box<str>,
 
@@ -252,9 +253,9 @@ pub struct SnpArgs {
         long = "no-umi-dedup",
         default_value_t = false,
         help = "Disable UMI deduplication",
-        long_help = "Skip UMI-based read deduplication. Use this for bulk WGS/RNA-seq\n\
-                     data that does not have UMI barcodes. BAM-flag duplicate filtering\n\
-                     still applies."
+        long_help = "Skip UMI-based read deduplication.\n\
+                     Use this for bulk WGS/RNA-seq data that does not have UMI barcodes.\n\
+                     BAM-flag duplicate filtering still applies."
     )]
     pub no_umi_dedup: bool,
 
@@ -266,8 +267,8 @@ pub struct SnpArgs {
         long = "use-base-quality",
         default_value_t = true,
         help = "Use per-base quality in genotype model",
-        long_help = "When enabled, genotype likelihoods use per-read Phred quality\n\
-                     scores (Li 2011 model) instead of a constant error rate.\n\
+        long_help = "When enabled, genotype likelihoods use per-read Phred quality scores (Li 2011 model)\n\
+                     instead of a constant error rate.\n\
                      More accurate but slightly slower."
     )]
     pub use_base_quality: bool,
@@ -302,8 +303,8 @@ pub struct SnpArgs {
         long,
         default_value_t = false,
         help = "Include reads without barcodes",
-        long_help = "When set, reads without a cell barcode tag are included\n\
-                     in pileup and counted under CellBarcode::Missing."
+        long_help = "When set, reads without a cell barcode tag are included in pileup\n\
+                     and counted under CellBarcode::Missing."
     )]
     pub include_missing_barcode: bool,
 

@@ -41,8 +41,8 @@ pub struct TopicArgs {
         long_help = "Sparse backends produced by `data-beans from-mtx`.\n\
                      Multiple files may be passed (comma- or space-separated)\n\
                      and are concatenated column-wise on a shared feature set.\n\
-                     When `--from <run.senna.json>` is provided and this list\n\
-                     is empty, the data paths come from the source manifest."
+                     When `--from <run.senna.json>` is provided and this list is empty,\n\
+                     the data paths come from the source manifest."
     )]
     pub(crate) data_files: Vec<Box<str>>,
 
@@ -51,11 +51,9 @@ pub struct TopicArgs {
         help = "Chain data + batch + cell→pb partition from a prior \
                 `senna {topic, masked-topic, ce-topic}` run's manifest",
         long_help = "Read a `{run}.senna.json` manifest and pre-fill `data_files`,\n\
-                     `--batch-files`, and (when present) the cell→pb partition\n\
-                     from the source run. Inheriting the partition skips the\n\
-                     expensive BBKNN + Poisson DC-SBM refinement step. Explicit\n\
-                     CLI flags override the manifest. SVD-family sources are\n\
-                     rejected."
+                     `--batch-files`, and (when present) the cell→pb partition from the source run.\n\
+                     Inheriting the partition skips the expensive BBKNN + Poisson DC-SBM refinement step.\n\
+                     Explicit CLI flags override the manifest. SVD-family sources are rejected."
     )]
     pub(crate) from: Option<Box<str>>,
 
@@ -85,8 +83,8 @@ pub struct TopicArgs {
         short,
         value_delimiter(','),
         help = "Batch membership files, one per data file",
-        long_help = "Each file lists a batch label per cell in the same order as its\n\
-                     matching data file. Example: batch1.tsv,batch2.tsv"
+        long_help = "Each file lists a batch label per cell in the same order as its matching data file.\n\
+                     Example: batch1.tsv,batch2.tsv"
     )]
     pub(crate) batch_files: Option<Vec<Box<str>>>,
 
@@ -96,11 +94,11 @@ pub struct TopicArgs {
     #[arg(
         long = "init-from",
         help = "Initialize encoder + decoder weights from a previously trained model",
-        long_help = "Path prefix of a model saved by `senna topic` (matching\n\
-                     {prefix}.model.json + {prefix}.safetensors). Architecture must\n\
-                     match: same K, encoder layers, level_decoder_dims, and\n\
-                     n_features_full / n_features_encoder. Cross-gene-set\n\
-                     warm-start is not supported — train on the same gene set."
+        long_help = "Path prefix of a model saved by `senna topic`\n\
+                     (matching {prefix}.model.json + {prefix}.safetensors).\n\
+                     Architecture must match: same K, encoder layers, level_decoder_dims,\n\
+                     and n_features_full / n_features_encoder.\n\
+                     Cross-gene-set warm-start is not supported — train on the same gene set."
     )]
     pub(crate) init_from: Option<Box<str>>,
 
@@ -184,9 +182,9 @@ pub struct TopicArgs {
         long,
         default_value_t = 1000,
         help = "Cap feature dim by meta-feature coarsening (0 to disable)",
-        long_help = "Groups co-expressed features into ≤N meta-features so the model\n\
-                     trains at reduced resolution. The dictionary is expanded back to\n\
-                     full resolution on output."
+        long_help = "Groups co-expressed features into ≤N meta-features\n\
+                     so the model trains at reduced resolution.\n\
+                     The dictionary is expanded back to full resolution on output."
     )]
     pub(crate) max_coarse_features: usize,
 
@@ -199,8 +197,8 @@ pub struct TopicArgs {
         long_help = "multinom  — NB-Fisher-weighted multinomial.\n\
                      nb        — negative binomial with per-gene dispersion.\n\
                      nbmixture — NB with ambient-RNA mixture α and per-sample ρ (default).\n\n\
-                     Multiple types (e.g. --decoder multinom,nb) train jointly with\n\
-                     a shared encoder; see --decoder-weights for loss weighting."
+                     Multiple types (e.g. --decoder multinom,nb) train jointly with a shared encoder;\n\
+                     see --decoder-weights for loss weighting."
     )]
     pub(crate) decoder: Vec<DecoderType>,
 
@@ -215,8 +213,8 @@ pub struct TopicArgs {
         long,
         default_value_t = 1e-4,
         help = "Uniform smoothing α for topic proportions (0 = off)",
-        long_help = "θ = (1-α) softmax(z) + α/K. Prevents dead topics by keeping\n\
-                     every topic on the gradient path. Set 0 to disable."
+        long_help = "θ = (1-α) softmax(z) + α/K. Prevents dead topics\n\
+                     by keeping every topic on the gradient path. Set 0 to disable."
     )]
     pub(crate) topic_smoothing: f64,
 
@@ -227,9 +225,8 @@ pub struct TopicArgs {
         long,
         default_value_t = 1.0,
         help = "Cross-entropy penalty λ on β toward anchor prior (0 = off)",
-        long_help = "Pulls the decoder dictionary toward anchor PB expression\n\
-                     profiles during training. β starts from random init;\n\
-                     the penalty guides it."
+        long_help = "Pulls the decoder dictionary toward anchor PB expression profiles\n\
+                     during training. β starts from random init; the penalty guides it."
     )]
     pub(crate) anchor_penalty: f32,
 

@@ -182,21 +182,26 @@ pub struct PlotArgs {
         value_enum,
         default_value_t = Trajectory::Auto,
         help = "Backbone: auto (default; curves if few lineages, else the one MST tree)",
-        long_help = "How the trajectory backbone is drawn. There is only ONE backbone (the\n\
-                     MST); Slingshot draws one curve per root→leaf path through it, so the\n\
-                     curve count is leaves-1. Direction is ALWAYS shown as velocity arrows\n\
-                     (from `velocity_flux`), independent of this choice.\n\
+        long_help = "How the trajectory backbone is drawn.\n\
+                     There is only ONE backbone (the MST);\n\
+                     Slingshot draws one curve per root→leaf path through it,\n\
+                     so the curve count is leaves-1.\n\
+                     Direction is ALWAYS shown as velocity arrows (from `velocity_flux`),\n\
+                     independent of this choice.\n\
                      \n\
-                       auto (default) → the Slingshot curves when the run has ≤ 24\n\
-                         lineages, otherwise the tree. Lineage count grows with\n\
-                         --n-centroids (K=40 → 16 lineages, K=200 → 97).\n\
-                       tree → the MST drawn ONCE, stroke width proportional to\n\
-                         how many root→leaf paths traverse each edge. `curves_2d` holds one\n\
-                         principal curve per lineage and they all share the trunk, so on a\n\
-                         97-lineage run the trunk is drawn 97 times and saturates into an\n\
-                         opaque mat; the tree carries the same information without it.\n\
-                       curves → the smooth per-lineage principal curves (legible for a\n\
-                         handful of lineages).\n\
+                       auto (default) → the Slingshot curves\n\
+                         when the run has ≤ 24 lineages, otherwise the tree.\n\
+                         Lineage count grows with --n-centroids\n\
+                         (K=40 → 16 lineages, K=200 → 97).\n\
+                       tree → the MST drawn ONCE,\n\
+                         stroke width proportional to how many root→leaf paths traverse each edge.\n\
+                         `curves_2d` holds one principal curve per lineage\n\
+                         and they all share the trunk,\n\
+                         so on a 97-lineage run the trunk is drawn 97 times\n\
+                         and saturates into an opaque mat;\n\
+                         the tree carries the same information without it.\n\
+                       curves → the smooth per-lineage principal curves\n\
+                         (legible for a handful of lineages).\n\
                        none   → cells and nodes only."
     )]
     pub trajectory: Trajectory,
@@ -214,13 +219,14 @@ pub struct PlotArgs {
         value_enum,
         default_value_t = NodeLabels::PerType,
         help = "Which trajectory nodes get a cell-type label (default: one per type)",
-        long_help = "Which trajectory nodes carry a cell_type label. `faba lineage` emits\n\
-                     one MST node per --n-centroids (200 by default), so labeling every\n\
-                     node repeats each type name dozens of times and the labels collide\n\
-                     into an unreadable mat.\n\
+        long_help = "Which trajectory nodes carry a cell_type label.\n\
+                     `faba lineage` emits one MST node per --n-centroids (200 by default),\n\
+                     so labeling every node repeats each type name dozens of times\n\
+                     and the labels collide into an unreadable mat.\n\
                      \n\
-                       per-type (default) → one label per called type, placed on its\n\
-                         most-differentiated node (terminal preferred). Root always labeled.\n\
+                       per-type (default) → one label per called type,\n\
+                         placed on its most-differentiated node (terminal preferred).\n\
+                         Root always labeled.\n\
                        terminal → label every terminal node, plus the root.\n\
                        root     → the root only.\n\
                        none     → no node labels; the cell legend still names the types."

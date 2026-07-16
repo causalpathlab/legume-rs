@@ -154,12 +154,11 @@ pub struct ClusteringArgs {
         long,
         value_delimiter = ',',
         help = "Raw count data files (.zarr or .h5) — enables BHC postprocess",
-        long_help = "When provided, a Bayesian hierarchical clustering pass runs over\n\
-                     the fitted clusters using per-gene sufficient stats\n\
-                     T_{k,g}=Σ_{n∈k} y_{n,g} and an empirical-Bayes Dirichlet prior\n\
-                     centred on the pooled gene marginal bg. Same recipe pinto uses\n\
-                     for link communities. Must match the cell order of --latent.\n\
-                     Omit to skip BHC."
+        long_help = "When provided, a Bayesian hierarchical clustering pass runs over the fitted clusters\n\
+                     using per-gene sufficient stats T_{k,g}=Σ_{n∈k} y_{n,g}\n\
+                     and an empirical-Bayes Dirichlet prior centred on the pooled gene marginal bg.\n\
+                     Same recipe pinto uses for link communities.\n\
+                     Must match the cell order of --latent. Omit to skip BHC."
     )]
     data_files: Option<Vec<Box<str>>>,
 
@@ -167,10 +166,10 @@ pub struct ClusteringArgs {
         long,
         default_value_t = 1.0,
         help = "Per-gene prior strength for the BHC empirical-Bayes Dirichlet prior",
-        long_help = "Total Dirichlet concentration γ = bhc_gamma_per_gene × G, where G\n\
-                     is the feature dimension. Default 1.0 = Bayes-Laplace (one prior\n\
-                     count per gene). Larger values pull every cluster more strongly\n\
-                     toward the pooled background, making BHC more eager to merge."
+        long_help = "Total Dirichlet concentration γ = bhc_gamma_per_gene × G,\n\
+                     where G is the feature dimension. Default 1.0 = Bayes-Laplace (one prior count per gene).\n\
+                     Larger values pull every cluster more strongly toward the pooled background,\n\
+                     making BHC more eager to merge."
     )]
     bhc_gamma_per_gene: f64,
 
@@ -191,10 +190,8 @@ pub struct ClusteringArgs {
     #[arg(
         long = "from",
         help = "Run manifest from `senna topic|masked-topic|joint-topic|svd|joint-svd`",
-        long_help = "When given, the manifest is updated in place with the cluster\n\
-                     output path under `cluster.clusters` so that\n\
-                     `senna annotate-by-enrichment` can pick the cluster parquet up\n\
-                     automatically."
+        long_help = "When given, the manifest is updated in place with the cluster output path under `cluster.clusters`\n\
+                     so that `senna annotate-by-enrichment` can pick the cluster parquet up automatically."
     )]
     from: Option<Box<str>>,
 }

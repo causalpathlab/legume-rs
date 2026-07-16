@@ -127,9 +127,8 @@ pub struct GeneCountArgs {
         long = "no-splice",
         default_value_t = false,
         help = "Disable spliced/unspliced separation",
-        long_help = "By default, faba produces separate spliced and unspliced\n\
-                     count matrices. Use this flag to output a single total\n\
-                     count matrix instead."
+        long_help = "By default, faba produces separate spliced and unspliced count matrices.\n\
+                     Use this flag to output a single total count matrix instead."
     )]
     pub(crate) no_splice: bool,
 
@@ -138,8 +137,8 @@ pub struct GeneCountArgs {
         long,
         default_value_t = 3,
         help = "Intron buffer zone (bp) for splice classification",
-        long_help = "Number of base pairs around exon boundaries to treat as\n\
-                     ambiguous when classifying reads as spliced or unspliced.\n\
+        long_help = "Number of base pairs around exon boundaries to treat as ambiguous\n\
+                     when classifying reads as spliced or unspliced.\n\
                      Reads falling entirely within this buffer are discarded."
     )]
     pub(crate) intron_buffer: i64,
@@ -149,10 +148,11 @@ pub struct GeneCountArgs {
         long = "umi-tag",
         default_value = "UB",
         help = "UMI BAM tag (for read dedup)",
-        long_help = "BAM tag holding the corrected UMI. Counts collapse to one\n\
-                     per (cell, gene, UMI) — matching Cell Ranger's molecule\n\
-                     counting. Standard 10x tag is \"UB\". Reads without this tag\n\
-                     are counted individually."
+        long_help = "BAM tag holding the corrected UMI.\n\
+                     Counts collapse to one per (cell, gene, UMI)\n\
+                     — matching Cell Ranger's molecule counting.\n\
+                     Standard 10x tag is \"UB\".\n\
+                     Reads without this tag are counted individually."
     )]
     pub(crate) umi_tag: Box<str>,
 

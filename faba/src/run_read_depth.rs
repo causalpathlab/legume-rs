@@ -20,8 +20,7 @@ pub struct ReadDepthArgs {
         required = true,
         help = "Bin resolution in kb",
         long_help = "Size of genomic bins in kilobases.\n\
-                     The genome is tiled at this resolution and read coverage\n\
-                     is counted per bin per cell."
+                     The genome is tiled at this resolution and read coverage is counted per bin per cell."
     )]
     pub(crate) resolution_kb: f32,
 

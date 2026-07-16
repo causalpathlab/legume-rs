@@ -109,11 +109,11 @@ pub struct AnnotateArgs {
         default_value_t = 3,
         help = "Drop a cell type with fewer than this many usable markers",
         long_help = "Minimum usable markers before a cell type is allowed to compete.\n\n\
-            A type below this is not weakly located, it is UNLOCATED. The mean of one or\n\
-            two points has no direction worth the name, and a centroid built from too few\n\
-            markers lands short — near the middle of the cell cloud, where it is close to\n\
-            EVERY cell at once. It does not compete weakly; it becomes a magnet and takes\n\
-            the dataset.\n\n\
+            A type below this is not weakly located, it is UNLOCATED.\n\
+            The mean of one or two points has no direction worth the name,\n\
+            and a centroid built from too few markers lands short —\n\
+            near the middle of the cell cloud, where it is close to EVERY cell at once.\n\
+            It does not compete weakly; it becomes a magnet and takes the dataset.\n\n\
             A dropped type keeps its column in every output. It simply never wins a cell.\n\n\
             Floored at 2: you cannot resample a single point"
     )]
@@ -179,13 +179,14 @@ pub struct AnnotateArgs {
         default_value_t = 0,
         help = "Marker-panel permutation null (the BIAS guard). 0 = off; try 200",
         long_help = "Marker-panel permutation null — the BIAS guard.\n\n\
-            Puts each type on trial: replace ONLY its markers with the same number of\n\
-            random genes (same IDF weights, matched on gene norm, drawn from the live\n\
-            marker pool), leave every rival type real, and ask whether its own genes\n\
-            place its prototype any better than random ones would.\n\n\
-            The bootstrap only measures VARIANCE, so a type whose markers are simply\n\
-            wrong comes back perfectly stable and looks like the most confident call in\n\
-            the run. This is what catches that.\n\n\
+            Puts each type on trial: replace ONLY its markers with the same number of random genes\n\
+            (same IDF weights, matched on gene norm, drawn from the live marker pool),\n\
+            leave every rival type real,\n\
+            and ask whether its own genes place its prototype any better than random ones would.\n\n\
+            The bootstrap only measures VARIANCE,\n\
+            so a type whose markers are simply wrong comes back perfectly stable\n\
+            and looks like the most confident call in the run.\n\
+            This is what catches that.\n\n\
             0 = off; try 200. Writes {out}.panel_null.tsv"
     )]
     pub panel_perm: usize,
@@ -195,15 +196,16 @@ pub struct AnnotateArgs {
         default_value_t = 0,
         help = "Support permutation null: turns label_support into a p-value/FDR. 0 = off",
         long_help = "Support permutation null — calibrates `label_support`.\n\n\
-            Shuffles which type each marker gene belongs to (within gene-norm strata, so\n\
-            no type's norm profile changes) and re-runs the whole bootstrap, to learn\n\
-            what a cell's support looks like when the panel carries no type information.\n\n\
-            This replaces an arbitrary bar with a calibrated one. --min-support 0.5 is\n\
-            not scale-free: with C types, chance agreement is 1/C, so 0.5 sits at 3x\n\
-            chance on a 6-type panel and 12x on a 24-type one — the same flag is a\n\
-            different test on different panels. An FDR means the same thing everywhere.\n\n\
-            0 = off; needs the bootstrap. Reuses the bootstrap's cached partitions, so\n\
-            the cost is the cheap half of a replicate, not a re-clustering.\n\
+            Shuffles which type each marker gene belongs to (within gene-norm strata, so no type's norm profile changes)\n\
+            and re-runs the whole bootstrap,\n\
+            to learn what a cell's support looks like when the panel carries no type information.\n\n\
+            This replaces an arbitrary bar with a calibrated one.\n\
+            --min-support 0.5 is not scale-free: with C types, chance agreement is 1/C,\n\
+            so 0.5 sits at 3x chance on a 6-type panel and 12x on a 24-type one —\n\
+            the same flag is a different test on different panels.\n\
+            An FDR means the same thing everywhere.\n\n\
+            0 = off; needs the bootstrap.\n\
+            Reuses the bootstrap's cached partitions, so the cost is the cheap half of a replicate, not a re-clustering.\n\
             Adds support_p / support_q / null_support to {out}.annot.parquet"
     )]
     pub support_perm: usize,
@@ -212,13 +214,14 @@ pub struct AnnotateArgs {
         long = "no-bootstrap-markers",
         help = "Turn OFF the stability bootstrap and ship a bare point estimate",
         long_help = "Turn OFF the stability bootstrap and ship a bare point estimate.\n\n\
-            The bootstrap is ON by default. Each draw resamples every type's marker panel\n\
-            with replacement AND re-derives the clustering; the consensus is what ships.\n\
-            So every call carries the fraction of resamples that agreed on it, and a call\n\
-            that cannot hold up across them abstains rather than being printed.\n\n\
-            Without it, `argmin` over marker centroids always returns something, and\n\
-            returns it with no error bar. Measured: 28.2% of cells were assigned to\n\
-            types the tissue does not contain, against 2.4% with it on"
+            The bootstrap is ON by default.\n\
+            Each draw resamples every type's marker panel with replacement AND re-derives the clustering;\n\
+            the consensus is what ships.\n\
+            So every call carries the fraction of resamples that agreed on it,\n\
+            and a call that cannot hold up across them abstains rather than being printed.\n\n\
+            Without it, `argmin` over marker centroids always returns something,\n\
+            and returns it with no error bar.\n\
+            Measured: 28.2% of cells were assigned to types the tissue does not contain, against 2.4% with it on"
     )]
     pub no_bootstrap_markers: bool,
 
@@ -233,14 +236,12 @@ pub struct AnnotateArgs {
         long,
         help = "Hold the clustering fixed across resamples (weakens the bootstrap)",
         long_help = "Hold the clustering fixed across resamples.\n\n\
-            By default each draw re-derives the clustering, so the partition's own\n\
-            arbitrariness is absorbed into the support rather than silently trusted.\n\
-            The kNN graph is deterministic (so runs reproduce), but Leiden still picks\n\
-            among near-equal modularity optima, and a label that flips when the\n\
-            partition is re-drawn is not a robust one.\n\n\
+            By default each draw re-derives the clustering,\n\
+            so the partition's own arbitrariness is absorbed into the support rather than silently trusted.\n\
+            The kNN graph is deterministic (so runs reproduce), but Leiden still picks among near-equal modularity optima,\n\
+            and a label that flips when the partition is re-drawn is not a robust one.\n\n\
             WARNING: with the partition held fixed the bootstrap has little to say —\n\
-            measured, NOTHING abstains (0% unassigned) and support's ability to separate\n\
-            spurious calls falls from AUC 0.93 to 0.69"
+            measured, NOTHING abstains (0% unassigned) and support's ability to separate spurious calls falls from AUC 0.93 to 0.69"
     )]
     pub no_recluster: bool,
 
@@ -248,14 +249,12 @@ pub struct AnnotateArgs {
         long,
         default_value_t = 0.5,
         help = "Minimum fraction of resamples the top label must win to be called",
-        long_help = "Minimum fraction of resamples the top label must win for the cell to\n\
-            be called at all.\n\n\
-            NOTE this bar is NOT scale-free. With C types, chance agreement is 1/C, so\n\
-            0.5 sits at ~3x chance on a 6-type panel and ~12x chance on a 24-type one —\n\
-            the same value is a different test on different panels, and their abstention\n\
-            rates are not comparable.\n\n\
-            --abstain-separable (a sign test) and --support-perm (a calibrated FDR) both\n\
-            avoid that"
+        long_help = "Minimum fraction of resamples the top label must win for the cell to be called at all.\n\n\
+            NOTE this bar is NOT scale-free.\n\
+            With C types, chance agreement is 1/C,\n\
+            so 0.5 sits at ~3x chance on a 6-type panel and ~12x chance on a 24-type one —\n\
+            the same value is a different test on different panels, and their abstention rates are not comparable.\n\n\
+            --abstain-separable (a sign test) and --support-perm (a calibrated FDR) both avoid that"
     )]
     pub min_support: f32,
 
@@ -264,13 +263,12 @@ pub struct AnnotateArgs {
         conflicts_with = "min_support",
         help = "Abstain by a sign test instead of the --min-support threshold",
         long_help = "Abstain by a TEST rather than a threshold.\n\n\
-            Keep the top label only if it beat the runner-up by more than resampling\n\
-            noise — an exact binomial sign test at --abstain-alpha. Among the m\n\
-            replicates that chose one of the two leading labels, each is a coin flip if\n\
-            the two are equally probable.\n\n\
-            No magic number, and unlike --min-support it means the same thing whatever\n\
-            the number of types. It resolves more cells, but note it decides WHEN to stay\n\
-            silent, not whether a call is right"
+            Keep the top label only if it beat the runner-up by more than resampling noise —\n\
+            an exact binomial sign test at --abstain-alpha.\n\
+            Among the m replicates that chose one of the two leading labels,\n\
+            each is a coin flip if the two are equally probable.\n\n\
+            No magic number, and unlike --min-support it means the same thing whatever the number of types.\n\
+            It resolves more cells, but note it decides WHEN to stay silent, not whether a call is right"
     )]
     pub abstain_separable: bool,
 
@@ -285,11 +283,11 @@ pub struct AnnotateArgs {
         long,
         default_value_t = 0.8,
         help = "Coverage of the reported `label_set` (the mixed annotation)",
-        long_help = "Coverage of the reported `label_set` — the smallest set of labels\n\
-            accounting for this share of the resamples.\n\n\
-            A cell that cannot be given ONE label can still be given two, and\n\
-            `HSPC/LMPP` is a far better answer than `unassigned`. The distribution is\n\
-            already computed by the bootstrap; this stops us throwing it away"
+        long_help = "Coverage of the reported `label_set` —\n\
+            the smallest set of labels accounting for this share of the resamples.\n\n\
+            A cell that cannot be given ONE label can still be given two,\n\
+            and `HSPC/LMPP` is a far better answer than `unassigned`.\n\
+            The distribution is already computed by the bootstrap; this stops us throwing it away"
     )]
     pub set_coverage: f32,
 
@@ -298,11 +296,10 @@ pub struct AnnotateArgs {
         default_value_t = 3,
         help = "Largest `label_set` worth printing (a 4-way tie is not an annotation)",
         long_help = "Largest `label_set` worth printing.\n\n\
-            `HSPC/LMPP` is an annotation; a four-way tie is not — past a point a set stops\n\
-            narrowing anything down and starts laundering \"we don't know\" as though it\n\
-            were a finding.\n\n\
-            A cell that needs more labels than this to reach --set-coverage is left\n\
-            unassigned"
+            `HSPC/LMPP` is an annotation; a four-way tie is not —\n\
+            past a point a set stops narrowing anything down\n\
+            and starts laundering \"we don't know\" as though it were a finding.\n\n\
+            A cell that needs more labels than this to reach --set-coverage is left unassigned"
     )]
     pub max_set_size: usize,
 
@@ -313,15 +310,15 @@ pub struct AnnotateArgs {
         help = "Fail if under this fraction of the marker panel is on the embedding's \
                 feature axis (0 = report only)",
         long_help = "Refuse to annotate on a marker panel the embedding mostly never saw.\n\n\
-            `faba gem` writes only its TRAINED feature rows, so a marker that missed the\n\
-            `--n-hvg` cut is not down-weighted — it is ABSENT, and it silently drops out of\n\
-            the panel. A cell type that entered with 20 markers and scores on 1 still gets a\n\
-            confident-looking call, and nothing in the output distinguishes it from a\n\
-            well-supported one.\n\n\
-            The coverage is always reported, and a type keeping under half its panel always\n\
-            warns. This makes it fatal instead. The fix when it fires is to widen the axis\n\
-            (raise `--n-hvg`) or to force the panel into training — `faba gem --markers\n\
-            <the same file>`."
+            `faba gem` writes only its TRAINED feature rows,\n\
+            so a marker that missed the `--n-hvg` cut is not down-weighted —\n\
+            it is ABSENT, and it silently drops out of the panel.\n\
+            A cell type that entered with 20 markers and scores on 1 still gets a confident-looking call,\n\
+            and nothing in the output distinguishes it from a well-supported one.\n\n\
+            The coverage is always reported, and a type keeping under half its panel always warns.\n\
+            This makes it fatal instead.\n\
+            The fix when it fires is to widen the axis (raise `--n-hvg`) or to force the panel into training —\n\
+            `faba gem --markers <the same file>`."
     )]
     pub min_panel_coverage: f32,
 }

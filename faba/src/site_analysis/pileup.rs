@@ -75,9 +75,9 @@ pub struct PileupArgs {
         required = true,
         num_args = 1..,
         help = "Sparse matrix file(s) (zarr or h5) from faba output",
-        long_help = "Sparse matrix file(s) (zarr or h5) from faba output. Multiple files\n\
-                     (e.g. replicates via a shell glob) are aggregated per genomic\n\
-                     position into a single track."
+        long_help = "Sparse matrix file(s) (zarr or h5) from faba output.\n\
+                     Multiple files (e.g. replicates via a shell glob)\n\
+                     are aggregated per genomic position into a single track."
     )]
     pub data_files: Vec<Box<str>>,
 
@@ -87,9 +87,9 @@ pub struct PileupArgs {
         visible_alias = "gene",
         value_delimiter = ',',
         help = "Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or Ensembl IDs",
-        long_help = "Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or\n\
-                     Ensembl IDs, case-insensitive. Uses the auxiliary-data relaxed\n\
-                     gene-name scheme; all matched genes are aggregated into one pileup."
+        long_help = "Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or Ensembl IDs, case-insensitive.\n\
+                     Uses the auxiliary-data relaxed gene-name scheme;\n\
+                     all matched genes are aggregated into one pileup."
     )]
     genes: Vec<Box<str>>,
 
@@ -99,8 +99,9 @@ pub struct PileupArgs {
         value_delimiter = ',',
         help = "Genomic regions to pile up: comma-separated `chr:lb-ub`",
         long_help = "Genomic regions to pile up: comma-separated `chr:lb-ub`\n\
-                     (`chr17:1000-2000,chr1:50-99`). Selects rows by position, with or\n\
-                     without `--genes`. At least one of `--genes`/`--regions` is required."
+                     (`chr17:1000-2000,chr1:50-99`).\n\
+                     Selects rows by position, with or without `--genes`.\n\
+                     At least one of `--genes`/`--regions` is required."
     )]
     regions: Vec<Box<str>>,
 
@@ -158,8 +159,8 @@ pub struct PileupArgs {
     #[arg(
         long = "gtf",
         help = "Gene annotation GTF/GFF for the middle gene-model track (exons, introns)",
-        long_help = "Gene annotation GTF/GFF for the middle gene-model track (exons,\n\
-                     introns, strand). Enables figure mode."
+        long_help = "Gene annotation GTF/GFF for the middle gene-model track (exons, introns, strand).\n\
+                     Enables figure mode."
     )]
     gtf: Option<Box<str>>,
 
@@ -167,8 +168,8 @@ pub struct PileupArgs {
         long = "bam",
         num_args = 1..,
         help = "BAM file(s) for the bottom read-depth track",
-        long_help = "BAM file(s) for the bottom read-depth track. Repeatable; replicates\n\
-                     are pooled. Enables figure mode."
+        long_help = "BAM file(s) for the bottom read-depth track.\n\
+                     Repeatable; replicates are pooled. Enables figure mode."
     )]
     bam_files: Vec<Box<str>>,
 
@@ -176,9 +177,9 @@ pub struct PileupArgs {
         long = "cell-membership",
         visible_alias = "membership",
         help = "Cell barcode -> cell type membership (TSV/CSV/Parquet)",
-        long_help = "Cell barcode -> cell type membership (TSV/CSV/Parquet). Panels are\n\
-                     faceted by cell type; without it the figure is a single \"all cells\"\n\
-                     panel."
+        long_help = "Cell barcode -> cell type membership (TSV/CSV/Parquet).\n\
+                     Panels are faceted by cell type;\n\
+                     without it the figure is a single \"all cells\" panel."
     )]
     cell_membership_file: Option<Box<str>>,
 
@@ -217,8 +218,8 @@ pub struct PileupArgs {
         value_delimiter = ',',
         help = "Restrict the top track to these modalities (e.g. `m6A,A-to-I`)",
         long_help = "Restrict the top track to these modalities (e.g. `m6A,A-to-I`).\n\
-                     Empty = all matrix rows. Matched case-insensitively against the\n\
-                     `gene/MODALITY/detail` row name."
+                     Empty = all matrix rows.\n\
+                     Matched case-insensitively against the `gene/MODALITY/detail` row name."
     )]
     top_modality: Vec<Box<str>>,
 
@@ -280,8 +281,8 @@ pub struct PileupArgs {
         long = "raster-threshold",
         default_value_t = 300,
         help = "Rasterize the per-site dot layer once a panel exceeds this many sites",
-        long_help = "Rasterize the per-site dot layer once a panel exceeds this many\n\
-                     sites (keeps SVG/PDF size bounded; axes/areas stay vector)"
+        long_help = "Rasterize the per-site dot layer once a panel exceeds this many sites\n\
+                     (keeps SVG/PDF size bounded; axes/areas stay vector)"
     )]
     raster_threshold: usize,
 }

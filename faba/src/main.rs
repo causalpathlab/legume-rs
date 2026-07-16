@@ -77,12 +77,13 @@ Output layout (every matrix is per-replicate — one per input BAM):\n\
                 {batch}_genes, {batch}_snp_{alt,depth}\n\
   apa:          {batch}_apa (proximal/distal counts, default; --no-pdui skips),\n\
                 {batch}_apa_mixture (--mixture)\n\
-  Mixture components are FIT on the pooled replicates (shared across\n\
-  batches) but COUNTED per batch, so per-batch mixture matrices share one\n\
-  row vocabulary and stack directly. The shared definitions are the only\n\
-  single files: *_sites.parquet, *_components.parquet.\n\
-  --drop-single-component prunes genes with a lone component (no relative\n\
-  signal) from the mixture matrices and component sidecars.\n\n\
+  Mixture components are FIT on the pooled replicates (shared across batches)\n\
+  but COUNTED per batch, so per-batch mixture matrices share one row vocabulary\n\
+  and stack directly.\n\
+  The shared definitions are the only single files:\n\
+  *_sites.parquet, *_components.parquet.\n\
+  --drop-single-component prunes genes with a lone component (no relative signal)\n\
+  from the mixture matrices and component sidecars.\n\n\
 Use `faba <COMMAND> --help` for detailed options on each subcommand.")]
 struct Cli {
     #[arg(short = 'v', long, global = true, help = "Enable verbose logging")]
@@ -97,26 +98,27 @@ enum Commands {
     #[command(name = "dartseq", aliases = ["dart", "m6a"],
         about = "Quantify DART-seq m6A sites from C-to-T conversions",
         long_about = "Quantify DART-seq m6A sites from C-to-T conversions\n\n\
-            Discovers m6A methylation sites from reference-anchored C->T\n\
-            (forward) or G->A (reverse) conversions at the DART motif, called by\n\
-            a WT-vs-MUT contrast: each motif C must convert significantly more in\n\
-            the signal (APOBEC1-YTH) BAMs than in the pooled catalytically-dead\n\
-            --control-bam (Fisher exact / beta-binomial LRT, effect-size guards,\n\
-            BH-FDR). A genomic C/T variant converts equally in both arms and is\n\
-            rejected, so a control is REQUIRED. Then quantifies per-cell\n\
-            methylation at the discovered sites.\n\n\
+            Discovers m6A methylation sites\n\
+            from reference-anchored C->T (forward) or G->A (reverse) conversions at the DART motif,\n\
+            called by a WT-vs-MUT contrast:\n\
+            each motif C must convert significantly more in the signal (APOBEC1-YTH) BAMs\n\
+            than in the pooled catalytically-dead --control-bam\n\
+            (Fisher exact / beta-binomial LRT, effect-size guards, BH-FDR).\n\
+            A genomic C/T variant converts equally in both arms and is rejected,\n\
+            so a control is REQUIRED.\n\
+            Then quantifies per-cell methylation at the discovered sites.\n\n\
             Outputs (one per input BAM, {batch}-prefixed):\n\
             - m6a_sites.parquet: site annotations (single)\n\
             - {batch}_m6a: gene-level two-channel matrix\n\
               (methylated + unmethylated counts per gene)\n\
-            - {batch}_m6a_site: per-site two-channel matrix, keyed on the\n\
-              single-base {chr}:{pos} site (min --site-min-cells)\n\
-            - {batch}_m6a_mixture (+ m6a_components.parquet): per-replicate\n\
-              mixture counts — components fit on pooled replicates,\n\
+            - {batch}_m6a_site: per-site two-channel matrix,\n\
+              keyed on the single-base {chr}:{pos} site (min --site-min-cells)\n\
+            - {batch}_m6a_mixture (+ m6a_components.parquet):\n\
+              per-replicate mixture counts — components fit on pooled replicates,\n\
               counted per batch (shared row schema)\n\n\
             Reference:\n  \
-            Meyer, \"DART-seq: an antibody-free method for global m6A\n\
-            detection\", Nature Methods, 16(12):1275-1280, 2019.\n\
+            Meyer, \"DART-seq: an antibody-free method\n\
+            for global m6A detection\", Nature Methods, 16(12):1275-1280, 2019.\n\
             https://doi.org/10.1038/s41592-019-0570-0",
         after_long_help = "\
 Example:\n  \
@@ -130,8 +132,8 @@ Example:\n  \
     #[command(name = "apa", aliases = ["polya"],
         about = "Quantify alternative polyadenylation (APA) sites per cell",
         long_about = "Quantify alternative polyadenylation (APA) sites per cell\n\n\
-            Discovers and quantifies poly(A) site usage from 3'-end sequencing\n\
-            data. The mixture mode implements the SCAPE model.\n\n\
+            Discovers and quantifies poly(A) site usage from 3'-end sequencing data.\n\
+            The mixture mode implements the SCAPE model.\n\n\
             Outputs:\n\
             - apa_components.parquet: shared pA-site component definitions\n\
             (fit on the pooled BAMs)\n\
@@ -142,9 +144,9 @@ Example:\n  \
             --method simple instead writes a per-replicate {batch} matrix\n\
             for each input BAM.\n\n\
             Reference:\n\
-            Zhou et al., \"SCAPE: a mixture model revealing single-cell\n\
-            polyadenylation diversity and cellular dynamics during cell\n\
-            differentiation and reprogramming\",\n\
+            Zhou et al., \"SCAPE: a mixture model revealing\n\
+            single-cell polyadenylation diversity and cellular dynamics\n\
+            during cell differentiation and reprogramming\",\n\
             Nucleic Acids Research, 50(11):e66, 2022.\n\
             https://doi.org/10.1093/nar/gkac167",
         after_long_help = "\
@@ -158,18 +160,17 @@ Example:\n  \
     #[command(name = "atoi", aliases = ["a2i", "editing"],
         about = "Detect and quantify A-to-I RNA editing sites",
         long_about = "Detect A-to-I (adenosine-to-inosine) RNA editing sites\n\n\
-            Discovers editing sites from A->G (forward) or T->C (reverse)\n\
-            conversions in BAM files, then quantifies per-cell editing\n\
-            at discovered sites.\n\n\
+            Discovers editing sites from A->G (forward) or T->C (reverse) conversions in BAM files,\n\
+            then quantifies per-cell editing at discovered sites.\n\n\
             Outputs (one per input BAM, {batch}-prefixed):\n\
-            - atoi_sites.parquet: site annotations (single); usable as\n\
-            --atoi-mask input for `faba dartseq` or `faba apa`\n\
+            - atoi_sites.parquet: site annotations (single);\n\
+            usable as --atoi-mask input for `faba dartseq` or `faba apa`\n\
             - {batch}_atoi: gene-level two-channel matrix\n\
               (edited + unedited counts per gene)\n\
-            - {batch}_atoi_site: per-site two-channel matrix, keyed on the\n\
-              single-base {chr}:{pos} site (min --site-min-cells)\n\
-            - {batch}_atoi_mixture (+ atoi_components.parquet): per-replicate\n\
-              mixture counts (unless --no-mixture)",
+            - {batch}_atoi_site: per-site two-channel matrix,\n\
+              keyed on the single-base {chr}:{pos} site (min --site-min-cells)\n\
+            - {batch}_atoi_mixture (+ atoi_components.parquet):\n\
+              per-replicate mixture counts (unless --no-mixture)",
         after_long_help = "\
 	Example:\n\
 	faba atoi sample.bam -g genes.gff -f genome.fa -o out/\n\
@@ -191,8 +192,8 @@ Example:\n  \
     #[command(name = "depth", aliases = ["read-depth", "rd"],
         about = "Compute read depth over genomic intervals",
         long_about = "Compute read depth over genomic intervals\n\n\
-            Bins the genome at a given resolution and counts read coverage\n\
-            per cell, producing a sparse (cells x bins) matrix.",
+            Bins the genome at a given resolution and counts read coverage per cell,\n\
+            producing a sparse (cells x bins) matrix.",
         after_long_help = "\
 	Example:\n\
 	faba depth sample.bam -r 10 -o out/\n\
@@ -203,9 +204,9 @@ Example:\n  \
     #[command(name = "pwm", aliases = ["scan-pwm"],
         about = "Build position weight matrix around genomic sites",
         long_about = "Build position weight matrix around genomic sites\n\n\
-            Reads site-level parquet files from dartseq or apa output, collects\n\
-            base frequencies in a +/- window around each site, and outputs\n\
-            a position weight matrix as TSV.",
+            Reads site-level parquet files from dartseq or apa output,\n\
+            collects base frequencies in a +/- window around each site,\n\
+            and outputs a position weight matrix as TSV.",
         after_long_help = "\
 	Example:\n\
 	faba pwm -s out/m6a_sites.parquet -f genome.fa -o pwm.tsv\n\
@@ -218,14 +219,15 @@ Example:\n  \
         alias = "inspect",
         about = "ASCII pileup, or a faceted Miami plot (SVG/PDF) for a gene",
         long_about = "Pileup plot for a single gene's modification sites.\n\n\
-            ASCII mode (default): reads one or more sparse matrices (zarr/h5)\n\
-            from faba output, filters to a gene, bins positions along the gene\n\
-            body, and renders a vertical ASCII histogram. Multiple files (e.g.\n\
-            replicates via a shell glob) are aggregated per position.\n\n\
+            ASCII mode (default): reads one or more sparse matrices (zarr/h5) from faba output,\n\
+            filters to a gene, bins positions along the gene body,\n\
+            and renders a vertical ASCII histogram.\n\
+            Multiple files (e.g. replicates via a shell glob) are aggregated per position.\n\n\
             Miami figure mode: passing --gtf, --bam, --format, --svg, or --png\n\
-            renders a publication SVG/PDF instead — a mirrored Manhattan with\n\
-            epi sites up, a GTF gene model in the middle, and BAM read depth\n\
-            down, faceted into one panel per cell type (--cell-membership).",
+            renders a publication SVG/PDF instead — a mirrored Manhattan\n\
+            with epi sites up, a GTF gene model in the middle,\n\
+            and BAM read depth down,\n\
+            faceted into one panel per cell type (--cell-membership).",
         after_long_help = "\
 	Examples:\n\
 	# ASCII histogram (unchanged)\n\
@@ -243,9 +245,9 @@ Example:\n  \
         alias = "mg",
         about = "Metagene histogram of site positions across gene features",
         long_about = "Metagene histogram of site positions across gene features\n\n\
-            Maps sites from a parquet file onto gene features (5'UTR, CDS,\n\
-            3'UTR, non-coding) using GFF annotations, and produces a binned\n\
-            histogram showing the distribution of sites across the metagene.",
+            Maps sites from a parquet file onto gene features (5'UTR, CDS, 3'UTR, non-coding)\n\
+            using GFF annotations,\n\
+            and produces a binned histogram showing the distribution of sites across the metagene.",
         after_long_help = "\
 	Example:\n\
 	faba metagene -s out/m6a_sites.parquet -g genes.gff -o metagene.tsv --print\n\
@@ -272,8 +274,8 @@ Example:\n  \
             Uses a binomial genotype likelihood model (cellSNP-lite;\n\
             Huang & Huang, Bioinformatics 2021).\n\n\
             The SNP mask output can be used with --snp-mask in `faba atoi`,\n\
-            `faba dartseq`, and `faba apa` to filter genetic variants that\n\
-            masquerade as base modifications.",
+            `faba dartseq`, and `faba apa`\n\
+            to filter genetic variants that masquerade as base modifications.",
         after_long_help = "\
 	Example:\n\
 	# De novo discovery\n\
@@ -340,8 +342,8 @@ Example:\n  \
             gem carries two gene programs, each annotated on its own axis (`--track`):\n\
             spliced:  gene β_g (beta_dictionary) vs cell θ (cell_embedding)  → {out}.spliced.*\n\
               velocity: gene δ_g (delta_dictionary) vs cell velocity   → {out}.velocity.*\n\
-            `both` (default) runs both; velocity is skipped with a warning when its\n\
-            inputs are absent (spliced-only gem run).",
+            `both` (default) runs both;\n\
+            velocity is skipped with a warning when its inputs are absent (spliced-only gem run).",
         after_long_help = "\
 	Example:\n\
 	faba gem --genes out/rep1_genes.zarr.zip -o out/gem\n\
@@ -362,24 +364,28 @@ Example:\n  \
         aliases = ["trajectory", "traj"],
         about = "Velocity-oriented lineage + principal curves over a `faba gem` run",
         long_about = "Infer a velocity-oriented lineage over the embeddings from `faba gem`.\n\n\
-            Reads gem's parquet outputs by prefix (`-f/--from`): the cell embedding θ\n\
-            (cell_embedding.parquet) and per-cell velocity δ (velocity.parquet). Fits K\n\
-            k-means centroids on θ, an MST over them, orients that tree by the\n\
-            per-node mean velocity flux, and fits Slingshot-style smooth principal\n\
-            curves per lineage → per-cell pseudotime + branch.\n\n\
-            Root selection (priority order): --root-node, --root-cell, --root-type\n\
-            (marker-grounded, needs --markers), --root-from-gem (gem's velocity-DAG\n\
-            source), else the velocity-flux source.\n\n\
-            The low-coverage modalities are NOT embedded here; this produces the\n\
-            lineage ordering that a separate confounder-adjusted test runs against.\n\n\
-            Outputs (all `{out}`-prefixed parquet): nodes, node_velocity, edges\n\
-            (with velocity_flux + directed edges), lineages, pseudotime,\n\
-            cell_lineage_weights, lineage_pseudotime, curves; with --markers also\n\
-            lineage_annot.* + trajectory_annotation; with --layout phate (default)\n\
-            also {cells,nodes,curves}_2d.\n\n\
+            Reads gem's parquet outputs by prefix (`-f/--from`):\n\
+            the cell embedding θ (cell_embedding.parquet)\n\
+            and per-cell velocity δ (velocity.parquet).\n\
+            Fits K k-means centroids on θ, an MST over them,\n\
+            orients that tree by the per-node mean velocity flux,\n\
+            and fits Slingshot-style smooth principal curves per lineage\n\
+            → per-cell pseudotime + branch.\n\n\
+            Root selection (priority order):\n\
+            --root-node, --root-cell, --root-type (marker-grounded, needs --markers),\n\
+            --root-from-gem (gem's velocity-DAG source),\n\
+            else the velocity-flux source.\n\n\
+            The low-coverage modalities are NOT embedded here;\n\
+            this produces the lineage ordering\n\
+            that a separate confounder-adjusted test runs against.\n\n\
+            Outputs (all `{out}`-prefixed parquet):\n\
+            nodes, node_velocity, edges (with velocity_flux + directed edges),\n\
+            lineages, pseudotime, cell_lineage_weights, lineage_pseudotime, curves;\n\
+            with --markers also lineage_annot.* + trajectory_annotation;\n\
+            with --layout phate (default) also {cells,nodes,curves}_2d.\n\n\
             Reference:\n  \
-            Street et al., \"Slingshot: cell lineage and pseudotime inference for\n\
-            single-cell transcriptomics\", BMC Genomics, 19:477, 2018.\n\
+            Street et al., \"Slingshot: cell lineage and pseudotime inference\n\
+            for single-cell transcriptomics\", BMC Genomics, 19:477, 2018.\n\
             https://doi.org/10.1186/s12864-018-4772-0",
         after_long_help = "\
 	Example:\n\
@@ -392,24 +398,28 @@ Example:\n  \
         name = "plot",
         aliases = ["plot-lineage", "trajectory-plot"],
         about = "Publication-style figure (PDF/PNG/SVG) of a `faba lineage` trajectory over its 2D embedding",
-        long_about = "Render the outputs of `faba lineage --markers` (with the default\n\
-            --layout phate) into a single annotated figure: cells laid out on the PHATE\n\
-            embedding, coloured by coarse cell type (default) or pseudotime, with the\n\
-            Slingshot principal curves + MST trajectory nodes overlaid.\n\n\
+        long_about = "Render the outputs of `faba lineage --markers` (with the default --layout phate)\n\
+            into a single annotated figure:\n\
+            cells laid out on the PHATE embedding,\n\
+            coloured by coarse cell type (default) or pseudotime,\n\
+            with the Slingshot principal curves + MST trajectory nodes overlaid.\n\n\
             Reads by prefix (`-f/--from`): {from}.cells_2d.parquet (PHATE coords),\n\
             {from}.lineage_annot.annot.parquet (per-cell coarse_label),\n\
-            {from}.curves_2d.parquet (principal curves), {from}.nodes_2d.parquet\n\
-            (MST nodes), {from}.trajectory_annotation.parquet (node role/cell_type),\n\
+            {from}.curves_2d.parquet (principal curves),\n\
+            {from}.nodes_2d.parquet (MST nodes),\n\
+            {from}.trajectory_annotation.parquet (node role/cell_type),\n\
             and {from}.pseudotime.parquet (for --color-by pseudotime).\n\n\
-            The cells are drawn as one transparent raster layer per cell type from a\n\
-            qualitative palette (with a legend), or one continuous blue->red\n\
-            pseudotime layer (with a colourbar). Principal curves + nodes are dark\n\
-            overlays; each non-Cycling_Progenitor node is labeled with its cell type\n\
-            and the root node is marked with a red star. Uses the shared plot-utils\n\
-            rasterize -> SVG -> render pipeline; writes {out}.plot.pdf by default\n\
-            (--png / --svg add those formats, --no-pdf skips the PDF). The scatter is a\n\
-            raster layer, so the PDF is a hybrid (vector text over raster points at --dpi;\n\
-            raise --dpi to 300-600 for print).",
+            The cells are drawn as one transparent raster layer per cell type\n\
+            from a qualitative palette (with a legend),\n\
+            or one continuous blue->red pseudotime layer (with a colourbar).\n\
+            Principal curves + nodes are dark overlays;\n\
+            each non-Cycling_Progenitor node is labeled with its cell type\n\
+            and the root node is marked with a red star.\n\
+            Uses the shared plot-utils rasterize -> SVG -> render pipeline;\n\
+            writes {out}.plot.pdf by default\n\
+            (--png / --svg add those formats, --no-pdf skips the PDF).\n\
+            The scatter is a raster layer, so the PDF is a hybrid\n\
+            (vector text over raster points at --dpi; raise --dpi to 300-600 for print).",
         after_long_help = "\
 	Example:\n\
 	faba lineage -f out/gem -o out/lin --markers markers.tsv\n\
@@ -423,28 +433,38 @@ Example:\n  \
         aliases = ["assoc", "temporal-assoc", "trend"],
         about = "Bayesian between-branch modality contrast along a `faba lineage`",
         long_about = "Test whether a modality (m6a/apa/atoi) diverges between lineage branches.\n\n\
-            Downstream of `faba lineage` (like `annotate` is to `gem`). Fits, per branch, a\n\
-            binomial GLM  logit(p_{b,g}) = α_b + β·1[g=L]  where α_b conditions out pseudotime\n\
-            (matched-null, à la tradeSeq patternTest / cocoa) and β is the branch's\n\
-            pseudotime-adjusted log-odds excess. Coverage (edited + unedited) is the binomial\n\
-            denominator so detection bias is conditioned out; a shrinkage prior N(0, τ²) on β\n\
-            damps noisy calls (stable across seeds — no permutation machinery). Reports the\n\
-            posterior mean effect, 90% credible interval, and lfsr = min(P(β>0), P(β<0)); the\n\
-            within-branch trend GAM (--trend-method) runs alongside.\n\n\
-            If the lineage was annotated (`faba lineage --markers`), the same two tests are\n\
-            also reported per CELL TYPE — cells sharing an annotated type are pooled across\n\
-            lineages ({out}.celltype_contrast/_trend.parquet). The between-cell-type contrast\n\
-            is the clean deliverable; the within-cell-type trend is secondary (pooling divergent\n\
-            lineages onto one pseudotime axis weakens the trend reading). Skip with --no-celltype.\n\n\
-            Not double-dipping: branches come from gem θ + velocity, which never see the\n\
-            modality.\n\n\
-            Output is tidy: `site | gene | subunit | branch` (branch level) or\n\
-            `site | gene | subunit | cell_type` (cell-type level — no branch column, because a\n\
-            cell-type aggregate pools cells across branches), then the values. The Bayesian\n\
-            tables also carry `ess` and `mcse_lfsr`: lfsr is a Monte-Carlo tail probability, so\n\
-            a site near --fdr-alpha can cross it with the seed, and mcse_lfsr is that error per\n\
-            site. When |lfsr - alpha| is not comfortably above mcse_lfsr, raise\n\
-            --posterior-samples rather than reading anything into the effect.\n\n\
+            Downstream of `faba lineage` (like `annotate` is to `gem`).\n\
+            Fits, per branch, a binomial GLM  logit(p_{b,g}) = α_b + β·1[g=L]\n\
+            where α_b conditions out pseudotime (matched-null, à la tradeSeq patternTest / cocoa)\n\
+            and β is the branch's pseudotime-adjusted log-odds excess.\n\
+            Coverage (edited + unedited) is the binomial denominator\n\
+            so detection bias is conditioned out;\n\
+            a shrinkage prior N(0, τ²) on β damps noisy calls\n\
+            (stable across seeds — no permutation machinery).\n\
+            Reports the posterior mean effect, 90% credible interval,\n\
+            and lfsr = min(P(β>0), P(β<0));\n\
+            the within-branch trend GAM (--trend-method) runs alongside.\n\n\
+            If the lineage was annotated (`faba lineage --markers`),\n\
+            the same two tests are also reported per CELL TYPE —\n\
+            cells sharing an annotated type are pooled across lineages\n\
+            ({out}.celltype_contrast/_trend.parquet).\n\
+            The between-cell-type contrast is the clean deliverable;\n\
+            the within-cell-type trend is secondary\n\
+            (pooling divergent lineages onto one pseudotime axis weakens the trend reading).\n\
+            Skip with --no-celltype.\n\n\
+            Not double-dipping:\n\
+            branches come from gem θ + velocity, which never see the modality.\n\n\
+            Output is tidy:\n\
+            `site | gene | subunit | branch` (branch level) or\n\
+            `site | gene | subunit | cell_type` (cell-type level —\n\
+            no branch column, because a cell-type aggregate pools cells across branches),\n\
+            then the values.\n\
+            The Bayesian tables also carry `ess` and `mcse_lfsr`:\n\
+            lfsr is a Monte-Carlo tail probability,\n\
+            so a site near --fdr-alpha can cross it with the seed,\n\
+            and mcse_lfsr is that error per site.\n\
+            When |lfsr - alpha| is not comfortably above mcse_lfsr,\n\
+            raise --posterior-samples rather than reading anything into the effect.\n\n\
             Reference:\n  \
             Van den Berge et al., \"Trajectory-based differential expression analysis\n\
             for single-cell sequencing data\", Nat Commun 11:1201, 2020.",
@@ -467,16 +487,18 @@ Example:\n  \
 	2. ATOI detection (A-to-I editing sites, masked by SNP)\n\
 	3. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\
         4. m6A detection (DART C→T, WT-vs-MUT contrast; skipped w/o --control-bam)\n\n\
-        ATOI is reference-anchored and FDR-controlled against a beta-binomial\n\
-        error null (no control). m6A instead needs a catalytically-dead\n\
-        control (--control-bam): each motif C is tested for higher conversion\n\
-        in the positional BAMs than the pooled control, so genomic C/T\n\
-        variants are rejected; without a control the m6A step is skipped.\n\
-        The WT-vs-MUT split is only for that contrast: control BAMs are\n\
-        otherwise quantified like the positional samples, so every\n\
-        modality is produced for them too.\n\
-        Gene filter applies after step 1; the SNP mask feeds steps 2-4\n\
-        (m6A only with --m6a-snp-mask) and the ATOI mask feeds steps 3-4.",
+        ATOI is reference-anchored and FDR-controlled\n\
+        against a beta-binomial error null (no control).\n\
+        m6A instead needs a catalytically-dead control (--control-bam):\n\
+        each motif C is tested for higher conversion in the positional BAMs\n\
+        than the pooled control, so genomic C/T variants are rejected;\n\
+        without a control the m6A step is skipped.\n\
+        The WT-vs-MUT split is only for that contrast:\n\
+        control BAMs are otherwise quantified like the positional samples,\n\
+        so every modality is produced for them too.\n\
+        Gene filter applies after step 1;\n\
+        the SNP mask feeds steps 2-4 (m6A only with --m6a-snp-mask)\n\
+        and the ATOI mask feeds steps 3-4.",
         after_long_help = "\
 	Example:\n\
 	faba all sample.bam -g genes.gff -f genome.fa -o out/\n\
