@@ -419,18 +419,27 @@ fn run_gem_genes_bge(
             .into_iter()
             .flatten()
             .collect();
-        let null = ge::null_call::embedding_null_call(&e_feat, n, h, args.model.feature_null_fdr);
+        let null = ge::null_call::ash_null_call(
+            &e_feat,
+            n,
+            h,
+            args.model.feature_null_fdr,
+            args.collapse.n_hvg,
+        );
         info!(
-            "feature-null QC — σ̂²={:.4}, ν̂={:.1}/{}, π̂₀={:.2}; {} / {} rows null at FDR {} → {}.feature_qc.parquet",
+            "feature-null QC [ash] — σ̂²={:.4}, ν̂={:.1}/{}, π̂₀={:.2}; {} / {} rows null at FDR {} → {}.feature_qc.parquet",
             null.sigma2, null.eff_dof, h, null.pi0, n - null.n_live, n, args.model.feature_null_fdr, args.out,
         );
         save_feature_qc(&e_feat, n, h, &unified.feature_names, &null, &args.out)?;
         let mut live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
 
-        // The all-null case is a degenerate-fit detector, so it has to read the RAW null
-        // call — BEFORE any `--must-train-features` rescue. Rescuing first would make
-        // `live` non-empty, the detector would never fire, and the refit would drop
-        // every row EXCEPT the force-kept ones: the panel would eat the dictionary.
+        // All-null guard: read the RAW null call BEFORE any
+        // `--must-train-features` rescue. Rescuing first would make `live`
+        // non-empty, the guard would never fire, and the refit would drop every
+        // row EXCEPT the force-kept ones — the panel would eat the dictionary. A
+        // refit on zero live rows is invalid anyway, so keep the pass-1 fit. (The
+        // ash empirical-null call retains the legitimate rows under collapse, so
+        // no drop-fraction valve is needed above 0.)
         if live.is_empty() {
             log::warn!(
                 "feature-null QC flagged all {n} rows null (degenerate fit); keeping pass-1 fit."

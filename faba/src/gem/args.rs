@@ -16,17 +16,15 @@ pub struct ModelArgs {
         long = "delta-l2",
         default_value_t = 0.0,
         help = "L2 (ridge) weight on the per-gene splice offset δ_g (0 = auto: a mild ridge is applied when unspliced rows are present)",
-        long_help = "L2 (ridge) penalty on the per-gene splice offset δ_g. When 0 (default) and\n\
-                     the input carries unspliced rows, gem auto-applies a mild ridge (L2=1.0) so a\n\
-                     δ_g dictionary is always written for `faba annotate --track velocity`; set an\n\
-                     explicit value to override, or 0 on a spliced-only input keeps δ off. When > 0,\n\
-                     unspliced rows embed as β_g + δ_g with a ridge-shrunk δ_g learned in phase\n\
-                     1: it absorbs the (dense) static per-gene nascent structure (the RNA-\n\
-                     velocity γ) so cell identity (spliced θ) stays clean and the phase-2\n\
-                     velocity increment δ (raw Poisson-MAP shift, θ fixed) becomes\n\
-                     γ-calibrated. Larger = more shrinkage\n\
-                     (δ_g pulled toward 0). Try 0.01–1.0; δ_g is written to\n\
-                     `{out}.delta_dictionary.parquet`."
+        long_help = "L2 (ridge) penalty on the per-gene splice offset δ_g.\n\
+                     When 0 (default) and the input carries unspliced rows,\n\
+                     gem auto-applies a mild ridge (L2=1.0) so a δ_g dictionary is always written for `faba annotate --track velocity`;\n\
+                     set an explicit value to override, or 0 on a spliced-only input keeps δ off.\n\
+                     When > 0, unspliced rows embed as β_g + δ_g with a ridge-shrunk δ_g learned in phase 1:\n\
+                     it absorbs the (dense) static per-gene nascent structure (the RNA-velocity γ) so cell identity (spliced θ) stays clean\n\
+                     and the phase-2 velocity increment δ (raw Poisson-MAP shift, θ fixed) becomes γ-calibrated.\n\
+                     Larger = more shrinkage (δ_g pulled toward 0).\n\
+                     Try 0.01–1.0; δ_g is written to `{out}.delta_dictionary.parquet`."
     )]
     pub delta_l2: f32,
 
@@ -34,19 +32,23 @@ pub struct ModelArgs {
         long = "feature-null-fdr",
         default_value_t = 0.05,
         help = "Empirical-Bayes feature-null QC: drop genes whose β never moved off init at this FDR, then re-fit (default 0.05; 0 = off)",
-        long_help = "Empirical-Bayes feature-null QC — ON by default at FDR 0.05, the same\n\
-                     shared engine call `senna bge` uses. After phase 1, each feature row's\n\
-                     ‖e_feat‖² (its materialized β_g) is tested against an estimated null: a\n\
-                     gene the model never moved keeps ‖e_feat‖² ~ σ²·χ²_ν, and the scale σ̂²,\n\
-                     effective dof ν̂, and null proportion π̂₀ are estimated from the data so\n\
-                     each row gets a BH q-value. Rows with q > this FDR are the untrained\n\
-                     low-detection background (the 'empty' genes that pile at the co-embed\n\
-                     centre) and are DROPPED; the model then re-fits on the live feature axis\n\
-                     (two-pass refine). β-sharing means a null gene drops both its spliced and\n\
-                     unspliced tracks together. The live/null flags and norm² are written to\n\
-                     `{out}.feature_qc.parquet`. This is the automatic, data-driven complement\n\
-                     to the `--n-hvg` top-N cut (which runs first, up front); leaving both on\n\
-                     gives the strongest feature gate. 0 disables. Must be in [0, 1)."
+        long_help = "Empirical-Bayes feature-null QC — ON by default at FDR 0.05,\n\
+                     the same shared ash (adaptive-shrinkage) engine `senna bge` uses.\n\
+                     After phase 1, each gene's materialized β_g (its ‖e_feat‖ loadings) is\n\
+                     tested one embedding dimension at a time against a per-axis null whose\n\
+                     scale is estimated empirically from the data (no fixed χ² assumption),\n\
+                     and a gene is live when it is confidently non-null on some axis\n\
+                     (local false-sign rate below this FDR).\n\
+                     The per-axis null is elicited by `--n-hvg`: the lowest-norm `n − n_hvg`\n\
+                     genes stand in as the presumed null that seeds each axis's scale,\n\
+                     which the sampler then refines.\n\
+                     Null genes are DROPPED (β-sharing drops the spliced and unspliced tracks\n\
+                     together) and the model re-fits on the live feature axis (two-pass refine);\n\
+                     dropped genes still get a projected embedding.\n\
+                     The live/null flags and norm² are written to `{out}.feature_qc.parquet`.\n\
+                     This is the automatic, data-driven complement to the `--n-hvg` top-N cut\n\
+                     (which runs first, up front); leaving both on gives the strongest feature\n\
+                     gate. 0 disables. Must be in [0, 1)."
     )]
     pub feature_null_fdr: f32,
 }
@@ -111,15 +113,14 @@ pub struct CollapseArgs {
         long = "phase1-cells-per-pb",
         default_value_t = 0,
         help = "Phase-1 cell-axis mode (k): shapes the feature dictionary in phase 1",
-        long_help = "Phase-1 cell-axis mode (`k`). Controls only what shapes the feature\n\
-                     dictionary (β) in phase 1; phase 2 ALWAYS analytically projects every\n\
-                     cell, so the per-cell embedding output is essentially unaffected by `k`.\n\
+        long_help = "Phase-1 cell-axis mode (`k`). Controls only what shapes the feature dictionary (β) in phase 1;\n\
+                     phase 2 ALWAYS analytically projects every cell,\n\
+                     so the per-cell embedding output is essentially unaffected by `k`.\n\
                      \n\
                        k = 0 (default) → suppress the cell axis in phase 1 (pure-pb:\n\
                          features shaped by pb aggregates only). Fastest.\n\
-                       1 ≤ k < n_cells → keep ≤k cells per pb-sample at EVERY collapse\n\
-                         level (union), shrinking the phase-1 budget while keeping rare /\n\
-                         shallow cells visible to the shared dictionary.\n\
+                       1 ≤ k < n_cells → keep ≤k cells per pb-sample at EVERY collapse level (union),\n\
+                         shrinking the phase-1 budget while keeping rare / shallow cells visible to the shared dictionary.\n\
                        k ≥ n_cells → every cell shapes the dictionary (slowest)."
     )]
     pub phase1_cells_per_pb: usize,
@@ -128,15 +129,17 @@ pub struct CollapseArgs {
         long = "n-hvg",
         default_value_t = 5000,
         help = "Keep only the top-N highly-variable genes (default 5000, matching senna/pinto; 0 = all genes)",
-        long_help = "Gene-level HVG feature filter (like `senna bge`). Selects the top-N most\n\
-                     variable GENES (NB dispersion-trend, spliced+unspliced pooled) and drops the\n\
-                     rest — both the spliced and unspliced rows of a dropped gene go together so\n\
-                     the β-sharing factorization stays aligned. This removes the abundant, uniform\n\
-                     housekeeping/ribosomal genes that otherwise dominate the positive edges and\n\
-                     collapse every cell onto one point; it shrinks the dictionary and restricts\n\
-                     the pseudobulk projection/membership to the kept genes. Defaults to 5000 for\n\
-                     consistency with `senna bge` / `pinto`; `0` keeps every gene (expect a\n\
-                     proliferation/housekeeping-dominated collapse on rich data). Try 2000–5000."
+        long_help = "Gene-level HVG feature filter (like `senna bge`).\n\
+                     Selects the top-N most variable GENES (NB dispersion-trend, spliced+unspliced pooled)\n\
+                     and drops the rest — both the spliced and unspliced rows of a dropped gene go together\n\
+                     so the β-sharing factorization stays aligned.\n\
+                     This removes the abundant, uniform housekeeping/ribosomal genes that otherwise dominate the positive edges\n\
+                     and collapse every cell onto one point;\n\
+                     it shrinks the dictionary and restricts the pseudobulk projection/membership to the kept genes.\n\
+                     Defaults to 5000 for consistency with `senna bge` / `pinto`;\n\
+                     `0` keeps every gene (expect a proliferation/housekeeping-dominated collapse on rich data). Try 2000–5000.\n\
+                     The kept count also seeds the `--feature-null-fdr` null call —\n\
+                     the lowest-norm `n − N` features stand in as its presumed null."
     )]
     pub n_hvg: usize,
 
@@ -144,29 +147,27 @@ pub struct CollapseArgs {
         long = "must-train-features",
         value_name = "FILE",
         help = "Genes to TRAIN on regardless of whether they make the HVG cut",
-        long_help = "Force-include list: these genes enter the FIT even when they do not make\n\
-                     the `--n-hvg` cut. UNIONed with the HVG selection, and also exempt from the\n\
-                     `--feature-null-fdr` drop — the two gates a gene would otherwise have to\n\
-                     pass. Both the spliced and unspliced rows of a kept gene are kept together,\n\
+        long_help = "Force-include list: these genes enter the FIT\n\
+                     even when they do not make the `--n-hvg` cut.\n\
+                     UNIONed with the HVG selection, and also exempt from the `--feature-null-fdr` drop —\n\
+                     the two gates a gene would otherwise have to pass.\n\
+                     Both the spliced and unspliced rows of a kept gene are kept together,\n\
                      so the β-sharing factorization stays aligned.\n\
                      \n\
-                     This is about TRAINED vs PROJECTED, not presence: a gene that misses the\n\
-                     HVG cut still gets a β in `{out}.beta_dictionary.parquet`, but a post-hoc\n\
-                     PROJECTED one (the held-out-feature regression), not an in-model estimate.\n\
-                     Name it here and it is fit in-model instead. The `trained` column of\n\
-                     `{out}.gene_qc.parquet` says which each gene got.\n\
+                     This is about TRAINED vs PROJECTED, not presence:\n\
+                     a gene that misses the HVG cut still gets a β in `{out}.beta_dictionary.parquet`,\n\
+                     but a post-hoc PROJECTED one (the held-out-feature regression), not an in-model estimate.\n\
+                     Name it here and it is fit in-model instead.\n\
+                     The `trained` column of `{out}.gene_qc.parquet` says which each gene got.\n\
                      \n\
-                     Format is inferred from the extension: .txt / .tsv / .csv / .parquet,\n\
-                     optionally gzipped. One gene per row; a gene-like header (`gene`,\n\
-                     `feature`, `symbol`, …) picks the column, else the first column is used.\n\
-                     EVERY OTHER COLUMN IS IGNORED, so a curated `gene<TAB>celltype` marker\n\
-                     table can be passed as-is.\n\
+                     Format is inferred from the extension: .txt / .tsv / .csv / .parquet, optionally gzipped.\n\
+                     One gene per row;\n\
+                     a gene-like header (`gene`, `feature`, `symbol`, …) picks the column, else the first column is used.\n\
+                     EVERY OTHER COLUMN IS IGNORED, so a curated `gene<TAB>celltype` marker table can be passed as-is.\n\
                      \n\
-                     Names are matched leniently against the `{gene}` slot of the\n\
-                     `{gene}/count/{spliced|unspliced}` rows (case-insensitive, symbol ↔\n\
-                     `ENSG…_SYMBOL` either way); unmatched names are logged, not fatal.\n\
-                     A no-op only when `--n-hvg 0` AND `--feature-null-fdr 0`, i.e. when\n\
-                     nothing would drop a gene anyway."
+                     Names are matched leniently against the `{gene}` slot of the `{gene}/count/{spliced|unspliced}` rows\n\
+                     (case-insensitive, symbol ↔ `ENSG…_SYMBOL` either way); unmatched names are logged, not fatal.\n\
+                     A no-op only when `--n-hvg 0` AND `--feature-null-fdr 0`, i.e. when nothing would drop a gene anyway."
     )]
     pub must_train_features: Option<Box<str>>,
 
@@ -175,23 +176,22 @@ pub struct CollapseArgs {
         value_name = "FILE",
         help = "Marker panel this embedding will be annotated with — force-trained, like \
                 --must-train-features",
-        long_help = "The `gene<TAB>celltype` marker panel that `faba annotate` /\n\
-                     `faba lineage --markers` will later score against this embedding. Its\n\
-                     genes are UNIONed into `--must-train-features`, i.e. trained in-model\n\
-                     regardless of the `--n-hvg` cut and the `--feature-null-fdr` drop.\n\
+        long_help = "The `gene<TAB>celltype` marker panel that `faba annotate` / `faba lineage --markers`\n\
+                     will later score against this embedding.\n\
+                     Its genes are UNIONed into `--must-train-features`,\n\
+                     i.e. trained in-model regardless of the `--n-hvg` cut and the `--feature-null-fdr` drop.\n\
                      \n\
-                     This exists because the two ends of the pipeline are easy to leave\n\
-                     inconsistent. The embedding writes only its TRAINED feature rows to\n\
-                     `{out}.feature_embedding.parquet`, and that is the table the annotators\n\
-                     read — so a marker that misses the HVG cut is not merely down-weighted,\n\
-                     it is ABSENT, and it silently leaves the panel. A cell type that entered\n\
-                     with 20 markers and scores on 1 still produces a confident-looking call.\n\
-                     Naming the panel here removes the failure mode: the genes the calls will\n\
-                     be made on are, by construction, the genes the model fit.\n\
+                     This exists because the two ends of the pipeline are easy to leave inconsistent.\n\
+                     The embedding writes only its TRAINED feature rows to `{out}.feature_embedding.parquet`,\n\
+                     and that is the table the annotators read —\n\
+                     so a marker that misses the HVG cut is not merely down-weighted,\n\
+                     it is ABSENT, and it silently leaves the panel.\n\
+                     A cell type that entered with 20 markers and scores on 1 still produces a confident-looking call.\n\
+                     Naming the panel here removes the failure mode:\n\
+                     the genes the calls will be made on are, by construction, the genes the model fit.\n\
                      \n\
-                     Same format and lenient name matching as --must-train-features (the\n\
-                     celltype column is ignored here); pass the SAME file you will pass to\n\
-                     `faba annotate --markers`."
+                     Same format and lenient name matching as --must-train-features (the celltype column is ignored here);\n\
+                     pass the SAME file you will pass to `faba annotate --markers`."
     )]
     pub markers: Option<Box<str>>,
 
@@ -216,11 +216,10 @@ pub struct CollapseArgs {
         long,
         default_value_t = true,
         help = "Use exact row-name match across files (no canonicalization)",
-        long_help = "Use exact row-name match across files (no canonicalization). \n\
-		     The gem default — required because the `{gene}/count/{spliced|unspliced}`\n\
-                     row format is sensitive to suffix-splitting. Pass\n\
-                     `--feature-name-exact=false` only if your `{gene}` slot itself\n\
-                     carries a stripping suffix."
+        long_help = "Use exact row-name match across files (no canonicalization).\n\
+                     The gem default — required because the `{gene}/count/{spliced|unspliced}` row format\n\
+                     is sensitive to suffix-splitting.\n\
+                     Pass `--feature-name-exact=false` only if your `{gene}` slot itself carries a stripping suffix."
     )]
     pub feature_name_exact: bool,
 }
@@ -234,8 +233,8 @@ pub struct TrainArgs {
     #[arg(
         long,
         help = "Batches per epoch (default: auto = one pass over largest axis)",
-        long_help = "Batches per epoch. Omit for auto — one weighted pass over the\n\
-                     largest axis (`ceil(max(n_cells, max_pb_per_level) / batch_size)`)."
+        long_help = "Batches per epoch. Omit for auto —\n\
+                     one weighted pass over the largest axis (`ceil(max(n_cells, max_pb_per_level) / batch_size)`)."
     )]
     pub batches_per_epoch: Option<usize>,
 
@@ -263,16 +262,15 @@ pub struct TrainArgs {
         long = "lineage-dag",
         default_value_t = false,
         help = "Inject developmental structure at pseudobulk scale (experimental; default off).",
-        long_help = "Shape the embedding along a pseudobulk lineage. When set, gem reads the\n\
-                     pb-level velocity (identity θ_pb + velocity δ_pb per pseudobulk per collapse\n\
-                     level), orients a directed lineage over the pseudobulks, and runs a SECOND\n\
-                     phase-1 pass with a velocity-drift term so the shared feature dictionary\n\
-                     picks up that lineage geometry — then lifts a per-cell pseudotime + fate\n\
-                     (`{out}.dag_pseudotime.parquet` / `{out}.dag_fate.parquet`). It uses the\n\
-                     LEARNED DAG by default (see `--fixed-dag`). Off by default — the per-cell\n\
-                     embedding is then byte-identical to a plain run; turning it ON changes the\n\
-                     embedding (the second pass). Only meaningful with spliced+unspliced input\n\
-                     (β-sharing)."
+        long_help = "Shape the embedding along a pseudobulk lineage.\n\
+                     When set, gem reads the pb-level velocity (identity θ_pb + velocity δ_pb per pseudobulk per collapse level),\n\
+                     orients a directed lineage over the pseudobulks, and runs a SECOND phase-1 pass with a velocity-drift term\n\
+                     so the shared feature dictionary picks up that lineage geometry —\n\
+                     then lifts a per-cell pseudotime + fate (`{out}.dag_pseudotime.parquet` / `{out}.dag_fate.parquet`).\n\
+                     It uses the LEARNED DAG by default (see `--fixed-dag`).\n\
+                     Off by default — the per-cell embedding is then byte-identical to a plain run;\n\
+                     turning it ON changes the embedding (the second pass).\n\
+                     Only meaningful with spliced+unspliced input (β-sharing)."
     )]
     pub lineage_dag: bool,
 
@@ -280,12 +278,12 @@ pub struct TrainArgs {
         long = "fixed-dag",
         default_value_t = false,
         help = "Lineage-DAG: use the fixed velocity-KNN graph instead of the default learned DAG.",
-        long_help = "Within `--lineage-dag`, orient the pb structure with a FIXED velocity-oriented\n\
-                     KNN graph, instead of LEARNING the directed adjacency `W` (the default).\n\
-                     Learning co-refines `W` with the embedding (velocity-drift SEM + DAGMA-style\n\
-                     acyclicity + L1 + velocity-orientation prior) and gives a cleaner single-\n\
-                     lineage structure; the fixed graph is faster but more fragmented. Ignored\n\
-                     unless `--lineage-dag` is set."
+        long_help = "Within `--lineage-dag`, orient the pb structure with a FIXED velocity-oriented KNN graph,\n\
+                     instead of LEARNING the directed adjacency `W` (the default).\n\
+                     Learning co-refines `W` with the embedding (velocity-drift SEM + DAGMA-style acyclicity + L1 + velocity-orientation prior)\n\
+                     and gives a cleaner single-lineage structure;\n\
+                     the fixed graph is faster but more fragmented.\n\
+                     Ignored unless `--lineage-dag` is set."
     )]
     pub fixed_dag: bool,
 
@@ -293,11 +291,11 @@ pub struct TrainArgs {
         long = "lineage-smooth",
         default_value_t = false,
         help = "Lineage-DAG: smooth the pb velocity readout δ_pb (opt-in).",
-        long_help = "Smooth the pb velocity readout δ_pb over θ-space KNN neighbours before it\n\
-                     orients the lineage graph, stabilizing sign(δ_pb). A wash on clean data\n\
-                     (no noise to remove, and it can blur branch-point velocity), so it is off\n\
-                     by default — the payoff is on noisy real spliced/unspliced ratios. Ignored\n\
-                     unless `--lineage-dag` is set."
+        long_help = "Smooth the pb velocity readout δ_pb over θ-space KNN neighbours before it orients the lineage graph,\n\
+                     stabilizing sign(δ_pb).\n\
+                     A wash on clean data (no noise to remove, and it can blur branch-point velocity),\n\
+                     so it is off by default — the payoff is on noisy real spliced/unspliced ratios.\n\
+                     Ignored unless `--lineage-dag` is set."
     )]
     pub lineage_smooth: bool,
 }
@@ -310,11 +308,9 @@ pub struct RuntimeArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Preload all sparse column data into memory before any pass over cells",
-        long_help = "Preload all sparse column data into memory before any pass over\n\
-                     cells. On by default — much faster than repeated disk reads on\n\
-                     typical SSDs, and required on slow disks. Pass `--no-preload-data`\n\
-                     to fall back to streaming reads (use only for datasets that don't\n\
-                     fit in RAM)."
+        long_help = "Preload all sparse column data into memory before any pass over cells.\n\
+                     On by default — much faster than repeated disk reads on typical SSDs, and required on slow disks.\n\
+                     Pass `--no-preload-data` to fall back to streaming reads (use only for datasets that don't fit in RAM)."
     )]
     pub preload_data: bool,
 
@@ -338,9 +334,8 @@ pub struct RuntimeArgs {
         alias = "max-threads",
         default_value_t = 16,
         help = "CPU threads (0 = all available)",
-        long_help = "Number of CPU threads for rayon-parallel work (HNSW, collapse,\n\
-                     phase-2 cell projection). Defaults to all available logical\n\
-                     CPUs (0 = all)."
+        long_help = "Number of CPU threads for rayon-parallel work (HNSW, collapse, phase-2 cell projection).\n\
+                     Defaults to all available logical CPUs (0 = all)."
     )]
     pub threads: usize,
 }
@@ -365,13 +360,11 @@ pub struct GemArgs {
         help = "Counts (gene-level) sparse matrix prefix(es), space- or comma-separated",
         long_help = "Counts (gene-level) sparse matrix prefix(es), given positionally —\n\
                      space-separated, so shell globs work: `faba gem out/*_genes.zarr.zip`.\n\
-                     Commas are also accepted. Rows must follow\n\
-                     `{gene_key}/count/{spliced|unspliced}`. Multiple files are stacked\n\
-                     under Union column alignment (cells merged by barcode); use an\n\
-                     embedded `@batch` tag on the barcodes to keep samples as distinct\n\
-                     batches (see `--batch-files`).\n\n\
-                     The `--genes a,b` flag form is still accepted, but pass one or the\n\
-                     other, not both."
+                     Commas are also accepted.\n\
+                     Rows must follow `{gene_key}/count/{spliced|unspliced}`.\n\
+                     Multiple files are stacked under Union column alignment (cells merged by barcode);\n\
+                     use an embedded `@batch` tag on the barcodes to keep samples as distinct batches (see `--batch-files`).\n\n\
+                     The `--genes a,b` flag form is still accepted, but pass one or the other, not both."
     )]
     pub genes_pos: Vec<Box<str>>,
 
@@ -387,12 +380,12 @@ pub struct GemArgs {
         long,
         value_delimiter = ',',
         help = "Optional batch labels",
-        long_help = "Optional batch labels. Under Union column alignment (gem's\n\
-                     mode) exactly **one** file is expected, listing one label per\n\
-                     unified cell — a barcode shared across modalities cannot carry two\n\
-                     labels. As an alternative to this file, embed an `@batch` tag in\n\
-                     the barcodes (e.g. `AAACCC@sampleA`); the loader infers and\n\
-                     reconciles per-cell batches from those tags."
+        long_help = "Optional batch labels.\n\
+                     Under Union column alignment (gem's mode) exactly **one** file is expected,\n\
+                     listing one label per unified cell —\n\
+                     a barcode shared across modalities cannot carry two labels.\n\
+                     As an alternative to this file, embed an `@batch` tag in the barcodes (e.g. `AAACCC@sampleA`);\n\
+                     the loader infers and reconciles per-cell batches from those tags."
     )]
     pub batch_files: Option<Vec<Box<str>>>,
 

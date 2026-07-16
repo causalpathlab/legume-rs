@@ -22,11 +22,19 @@
 //! 0, π̂₀ from the data) made cheap for the collapsed-norm statistic, where the
 //! per-coordinate standard errors ashr would use are folded into `ν̂`.
 //!
-//! Two entry points: [`chi2_null_call`] on a precomputed scaled-χ² statistic
-//! vector (the reusable core), and [`embedding_null_call`] for the common case
-//! where the statistic is the squared norm of each row of a flat `[n × h]`
-//! embedding. Per-item and deterministic (no clustering, no RNG).
+//! The **feature-null QC** (senna bge / faba gem) is [`ash_null_call`]: it works
+//! per-coordinate rather than on the collapsed norm, so it reads legitimate
+//! non-dominant structure (e.g. cross-donor variance) that the single-`(σ²,ν)`
+//! norm test masks — it calibrates a per-axis null scale from the n-hvg
+//! presumed-null and calls each feature via ash lfsr. The scaled-χ² machinery
+//! remains for the norm statistic: [`chi2_null_call`] on a precomputed
+//! scaled-χ² vector (the reusable core), and [`embedding_null_call`] for the
+//! squared-norm-of-each-row case (still used by the held-out feature-projection
+//! gate in [`crate::fit::feature_projection`]). The χ² calls are per-item and
+//! deterministic; the ash call runs a seeded collapsed-Gibbs sampler per axis.
 
+use crate::ash::{ash_normal, AshOpts};
+use rayon::prelude::*;
 use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
 
 /// Result of a null call: a live/null flag per item plus the fitted null.
@@ -190,21 +198,11 @@ pub fn embedding_lower_tail_call(nrm: &[f32], fdr: f32) -> LowerTailCall {
             n_drop: 0,
         };
     }
-    let median = |v: &[f64]| -> f64 {
-        let mut s = v.to_vec();
-        s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let m = s.len();
-        if m % 2 == 1 {
-            s[m / 2]
-        } else {
-            0.5 * (s[m / 2 - 1] + s[m / 2])
-        }
-    };
     // log statistic (floor tiny/zero norms so the log is finite).
     let x: Vec<f64> = nrm.iter().map(|&v| f64::from(v.max(1e-6)).ln()).collect();
-    let mu = median(&x);
+    let mu = median_of(x.clone());
     let dev: Vec<f64> = x.iter().map(|&v| (v - mu).abs()).collect();
-    let sigma = (1.4826 * median(&dev)).max(1e-9);
+    let sigma = (1.4826 * median_of(dev)).max(1e-9);
     let normal = Normal::new(mu, sigma).expect("normal");
     // Lower-tail p under the real-mode null: small for empties (far below μ̂).
     let p: Vec<f64> = x.iter().map(|&xi| normal.cdf(xi).clamp(0.0, 1.0)).collect();
@@ -298,4 +296,136 @@ fn solve_eff_dof(r: f64, a_lo: f64, a_hi: f64, dof_max: f64) -> f64 {
         }
     }
     0.5 * (lo + hi)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Adaptive-shrinkage (ash) feature-null call with an n-hvg-guided null
+// ────────────────────────────────────────────────────────────────────────────
+//
+// [`chi2_null_call`] fits its null to the *distribution of the collapsed norm*
+// — a scalar that has already mixed the shared-mode variance and the
+// per-feature variance — so under a dominant legitimate-variance axis it
+// calibrates to that axis and calls ~everything null. This call instead runs an
+// **empirical-null ash per embedding dimension** (see [`crate::ash`]):
+//
+//   1. treats the signed loadings `v_{i,d}` on each axis `d` as the observations
+//      (ash is a normal-means model, so signed effects are its natural input);
+//   2. fits ash `g = π₀δ₀ + Σπ_k N(0,σ_k²)` with an EMPIRICAL null — the common
+//      per-axis noise variance `s_d²` is estimated jointly by the collapsed
+//      Gibbs sampler, seeded from the presumed-null (bottom `n − n_hvg` by norm),
+//      so the anisotropy is absorbed axis-by-axis with no external scale rule;
+//   3. reads each axis's local false-sign rate `lfsr_{i,d}` (Rao-Blackwellised);
+//   4. calls a feature live when it is confidently non-null on ANY axis —
+//      `lfsr_i = min(1, h·min_d lfsr_{i,d})` (Bonferroni over the h looks) ≤ fdr.
+//
+// The h axes are independent samplers, run in parallel. No eigenbasis, no
+// drop-k, no parametric norm null: anisotropy is handled by the per-axis `s_d`,
+// the decision by ash's lfsr.
+
+fn median_of(mut v: Vec<f64>) -> f64 {
+    let m = v.len();
+    if m == 0 {
+        return 0.0;
+    }
+    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    // Quickselect the upper-middle order statistic in O(N); the lower-middle
+    // (even case) is then the max of the left partition.
+    let hi = *v.select_nth_unstable_by(m / 2, cmp).1;
+    if m % 2 == 1 {
+        hi
+    } else {
+        let lo = v[..m / 2].iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        0.5 * (lo + hi)
+    }
+}
+
+/// Adaptive-shrinkage feature-null call on a flat `[n × h]` embedding: one
+/// empirical-null ash ([`ash_normal`], collapsed Gibbs) per embedding dimension,
+/// each seeded from the presumed-null (bottom `n − n_hvg` features by norm; `0`
+/// or `≥ n` ⇒ all features). Calls a feature live when it is confidently
+/// non-null on any axis (ash lfsr, Bonferroni over the `h` coordinates) at FDR
+/// `fdr`. See the module note above.
+#[must_use]
+pub fn ash_null_call(rows: &[f32], n: usize, h: usize, fdr: f32, n_hvg: usize) -> NullCall {
+    if n == 0 || h == 0 {
+        return NullCall {
+            live: vec![false; n],
+            sigma2: 0.0,
+            eff_dof: 0.0,
+            pi0: 1.0,
+            n_live: 0,
+        };
+    }
+
+    // Presumed-null set = the bottom `n − n_hvg` features by norm (the empirical
+    // left mode of the bimodal norm distribution — the features the model never
+    // moved). Seeds each axis's null-SD init; the Gibbs sampler refines it.
+    let presumed_null: Vec<usize> = {
+        let norm2: Vec<f64> = (0..n)
+            .map(|i| {
+                rows[i * h..(i + 1) * h]
+                    .iter()
+                    .map(|&x| f64::from(x) * f64::from(x))
+                    .sum()
+            })
+            .collect();
+        let n_pn = if n_hvg == 0 || n_hvg >= n {
+            n
+        } else {
+            n - n_hvg
+        };
+        let mut order: Vec<usize> = (0..n).collect();
+        if n_pn < n {
+            // Partition (O(n)) so `order[..n_pn]` are the smallest-norm features.
+            order.select_nth_unstable_by(n_pn, |&a, &b| {
+                norm2[a]
+                    .partial_cmp(&norm2[b])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        order.truncate(n_pn);
+        order
+    };
+
+    // One empirical-null ash per axis, in parallel; each returns per-feature lfsr
+    // on that axis plus the posterior-mean null variance `s_d²` and π̂₀.
+    let opts = AshOpts::default();
+    let per_axis: Vec<(Vec<f64>, f64, f64)> = (0..h)
+        .into_par_iter()
+        .map(|d| {
+            let x_d: Vec<f64> = (0..n).map(|i| f64::from(rows[i * h + d])).collect();
+            // Seed the null SD from the presumed-null RMS on this axis.
+            let ss: f64 = presumed_null.iter().map(|&i| x_d[i] * x_d[i]).sum::<f64>()
+                / presumed_null.len().max(1) as f64;
+            let se_init = ss.sqrt().max(1e-6);
+            let axis_opts = AshOpts {
+                seed: opts.seed ^ (d as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                ..opts
+            };
+            let res = ash_normal(&x_d, se_init, &axis_opts);
+            (res.lfsr, res.null_var, res.pi0)
+        })
+        .collect();
+
+    // Per-feature: live if confidently non-null on any axis (Bonferroni lfsr).
+    let hf = h as f64;
+    let live: Vec<bool> = (0..n)
+        .map(|i| {
+            let min_lfsr = per_axis
+                .iter()
+                .map(|(lfsr, ..)| lfsr[i])
+                .fold(1.0f64, f64::min);
+            (hf * min_lfsr).min(1.0) <= f64::from(fdr)
+        })
+        .collect();
+    let n_live = live.iter().filter(|&&v| v).count();
+    let sigma2 = per_axis.iter().map(|(_, s2, _)| s2).sum::<f64>() / hf;
+    let pi0 = per_axis.iter().map(|(_, _, p)| p).sum::<f64>() / hf;
+    NullCall {
+        live,
+        sigma2,
+        eff_dof: hf,
+        pi0,
+        n_live,
+    }
 }

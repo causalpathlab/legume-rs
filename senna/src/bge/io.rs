@@ -17,14 +17,15 @@ pub(super) fn write_feature_qc(
     h: usize,
     feature_names: &[Box<str>],
     fdr: f32,
+    n_hvg: usize,
     out_prefix: &str,
 ) -> anyhow::Result<ge::null_call::NullCall> {
     use matrix_util::dmatrix_io::DMatrix;
     use matrix_util::traits::IoOps;
 
-    let null = ge::null_call::embedding_null_call(e_feat, n, h, fdr);
+    let null = ge::null_call::ash_null_call(e_feat, n, h, fdr, n_hvg);
     info!(
-        "bge feature null call — σ̂²={:.4}, ν̂={:.1}/{}, π̂₀={:.2}; {} / {} features null at FDR {} → {}.feature_qc.parquet",
+        "bge feature null call [ash] — σ̂²={:.4}, ν̂={:.1}/{}, π̂₀={:.2}; {} / {} features null at FDR {} → {}.feature_qc.parquet",
         null.sigma2, null.eff_dof, h, null.pi0, n - null.n_live, n, fdr, out_prefix
     );
 
@@ -37,5 +38,6 @@ pub(super) fn write_feature_qc(
     let cols: Vec<Box<str>> = ["norm2", "live"].iter().map(|s| Box::from(*s)).collect();
     let path = format!("{out_prefix}.feature_qc.parquet");
     m.to_parquet_with_names(&path, (Some(feature_names), Some("feature")), Some(&cols))?;
+
     Ok(null)
 }
