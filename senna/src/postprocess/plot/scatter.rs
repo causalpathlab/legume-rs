@@ -68,9 +68,9 @@ pub struct PlotArgs {
                      (+ updated by `senna layout`).",
         long_help = "If set, fills in --cell-coords, --topics, --labels, --colour-by,\n\
                      and --palette from the manifest's viz/outputs/defaults sections.\n\
-                     Any explicit CLI flag still overrides the manifest value. Paths\n\
-                     inside the manifest are resolved relative to the manifest's own\n\
-                     directory so you can move a run directory around freely."
+                     Any explicit CLI flag still overrides the manifest value.\n\
+                     Paths inside the manifest are resolved relative to the manifest's own directory\n\
+                     so you can move a run directory around freely."
     )]
     pub from: Option<Box<str>>,
 
@@ -78,8 +78,8 @@ pub struct PlotArgs {
         long,
         short = 'c',
         help = "Cell coordinates parquet (from `senna layout`)",
-        long_help = "Cell coordinates parquet (from `senna layout`); required unless\n\
-                     --from provides it."
+        long_help = "Cell coordinates parquet (from `senna layout`);\n\
+                     required unless --from provides it."
     )]
     pub cell_coords: Option<Box<str>>,
 
@@ -109,16 +109,15 @@ pub struct PlotArgs {
         long,
         help = "Annotation argmax TSV from `senna annotate-by-enrichment`",
         long_help = "Annotation argmax TSV from `senna annotate-by-enrichment`\n\
-                     (cell\\tcell_type\\tprobability). Defaults to manifest's\n\
-                     annotate.argmax."
+                     (cell\\tcell_type\\tprobability). Defaults to manifest's annotate.argmax."
     )]
     pub annotation: Option<Box<str>>,
 
     #[arg(
         long,
         help = "Pseudotime parquet from `senna pseudotime` (cells × 1)",
-        long_help = "Pseudotime parquet from `senna pseudotime` (cells × 1). Defaults\n\
-                     to manifest's pseudotime.pseudotime."
+        long_help = "Pseudotime parquet from `senna pseudotime` (cells × 1).\n\
+                     Defaults to manifest's pseudotime.pseudotime."
     )]
     pub pseudotime: Option<Box<str>>,
 
@@ -126,16 +125,16 @@ pub struct PlotArgs {
         long,
         default_value_t = false,
         help = "Preload data when auto-running `senna layout`",
-        long_help = "Preload data when auto-running `senna layout` for a manifest\n\
-                     missing layout.cell_coords (no-op if cell_coords already exists)."
+        long_help = "Preload data when auto-running `senna layout` for a manifest missing layout.cell_coords\n\
+                     (no-op if cell_coords already exists)."
     )]
     pub preload_data: bool,
 
     #[arg(
         long,
         help = "TSV mapping group_id<TAB>display_name (one per line)",
-        long_help = "TSV mapping group_id<TAB>display_name (one per line). Missing IDs\n\
-                     fall back to T{id}."
+        long_help = "TSV mapping group_id<TAB>display_name (one per line).\n\
+                     Missing IDs fall back to T{id}."
     )]
     pub labels: Option<Box<str>>,
 
@@ -205,8 +204,7 @@ pub struct PlotArgs {
         default_value_t = false,
         help = "Draw convex hull polygons around each group",
         long_help = "Draw convex hull polygons around each group (off by default:\n\
-                     scRNA groups are rarely separable in 2D, and hulls overstate\n\
-                     that)."
+                     scRNA groups are rarely separable in 2D, and hulls overstate that)."
     )]
     pub hull: bool,
 
@@ -214,11 +212,11 @@ pub struct PlotArgs {
         long,
         default_value_t = 0.95,
         help = "Fraction of closest-to-median points used for each hull (1.0 = all)",
-        long_help = "Only applies when --hull is enabled. For each group, keep only\n\
-                     the {coverage} fraction of points nearest the coordinate-wise\n\
-                     median (Euclidean) before computing the convex hull. Strips a\n\
-                     few fringe cells so one outlier can't drag the polygon across\n\
-                     the plot. Set to 1.0 to use every point."
+        long_help = "Only applies when --hull is enabled.\n\
+                     For each group, keep only the {coverage} fraction of points\n\
+                     nearest the coordinate-wise median (Euclidean) before computing the convex hull.\n\
+                     Strips a few fringe cells so one outlier can't drag the polygon across the plot.\n\
+                     Set to 1.0 to use every point."
     )]
     pub hull_coverage: f32,
 

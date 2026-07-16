@@ -27,10 +27,10 @@ pub struct DartSeqCountArgs {
         required = true,
         help = "Signal BAM files (APOBEC1-YTH fusion)",
         long_help = "Comma-separated list of signal (APOBEC1-YTH fusion) BAM files.\n\
-                     These contain the C->T conversions at m6A sites. Each motif C\n\
-                     is called by a WT-vs-MUT contrast against the --control-bam\n\
-                     samples (a genomic C/T variant converts equally in both arms\n\
-                     and is rejected); calls are FDR-corrected."
+                     These contain the C->T conversions at m6A sites.\n\
+                     Each motif C is called by a WT-vs-MUT contrast against the --control-bam samples\n\
+                     (a genomic C/T variant converts equally in both arms and is rejected);\n\
+                     calls are FDR-corrected."
     )]
     pub wt_bam_files: Vec<Box<str>>,
 
@@ -43,11 +43,11 @@ pub struct DartSeqCountArgs {
         value_delimiter = ',',
         required = true,
         help = "Control BAM files (catalytically-dead YTHmut)",
-        long_help = "Comma-separated list of control (catalytically-dead YTHmut) BAM\n\
-                     files, pooled into one background. m6A is called where the\n\
-                     signal BAMs show significantly higher C->T conversion than\n\
-                     these controls (two-sample test). Required: m6A cannot be\n\
-                     distinguished from genomic variation without a control."
+        long_help = "Comma-separated list of control (catalytically-dead YTHmut) BAM files,\n\
+                     pooled into one background.\n\
+                     m6A is called where the signal BAMs show significantly higher C->T conversion\n\
+                     than these controls (two-sample test).\n\
+                     Required: m6A cannot be distinguished from genomic variation without a control."
     )]
     pub control_bam_files: Vec<Box<str>>,
 
@@ -66,8 +66,8 @@ pub struct DartSeqCountArgs {
         long,
         default_value = "CB",
         help = "Cell barcode tag",
-        long_help = "Cell barcode tag used for cell/sample identification in 10x Genomics\n\
-                     BAM files. [See here](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam)"
+        long_help = "Cell barcode tag used for cell/sample identification in 10x Genomics BAM files.\n\
+                     [See here](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam)"
     )]
     pub cell_barcode_tag: Box<str>,
 
@@ -84,8 +84,8 @@ pub struct DartSeqCountArgs {
         long,
         default_value_t = 10,
         help = "Minimum number of total reads per site",
-        long_help = "Minimum number of total reads required per site for inclusion in\n\
-                     the analysis. Filters out low-coverage sites."
+        long_help = "Minimum number of total reads required per site for inclusion in the analysis.\n\
+                     Filters out low-coverage sites."
     )]
     pub min_coverage: usize,
 
@@ -163,10 +163,10 @@ pub struct DartSeqCountArgs {
         help = "Min cells per site for the per-site matrix feature QC (0 disables)",
         long_help = "Unit-aware feature QC for the per-site (`_site`) output matrix:\n\
                      a site is kept only if detected in at least this many cells,\n\
-                     and both of its channels (methylated/unmethylated) are kept\n\
-                     together. The gene-level matrix is unaffected. 0 disables.\n\
-                     Sites are a distinct feature space not covered by the upstream\n\
-                     gene expression QC (--gene-min-cells)."
+                     and both of its channels (methylated/unmethylated) are kept together.\n\
+                     The gene-level matrix is unaffected. 0 disables.\n\
+                     Sites are a distinct feature space\n\
+                     not covered by the upstream gene expression QC (--gene-min-cells)."
     )]
     pub site_min_cells: usize,
 
@@ -225,8 +225,7 @@ pub struct DartSeqCountArgs {
         alias = "barcode-membership",
         alias = "membership",
         help = "Cell barcode membership file for filtering cells (TSV, CSV, or Parquet)",
-        long_help = "Path to cell barcode membership file for restricting analysis to\n\
-                     specific cells.\n\
+        long_help = "Path to cell barcode membership file for restricting analysis to specific cells.\n\
                      Format: First column = cell barcode, Second column = cell type.\n\
                      Supports .tsv, .csv, .parquet, and .gz variants.\n\
                      Only cells (barcodes) present in this file will be included in analysis.\n\
@@ -238,8 +237,7 @@ pub struct DartSeqCountArgs {
         long = "membership-barcode-col",
         default_value_t = 0,
         help = "Column index for cell barcodes in membership file",
-        long_help = "Zero-based column index for the cell barcode field in\n\
-                     the membership file."
+        long_help = "Zero-based column index for the cell barcode field in the membership file."
     )]
     pub membership_barcode_col: usize,
 
@@ -247,8 +245,7 @@ pub struct DartSeqCountArgs {
         long = "membership-celltype-col",
         default_value_t = 1,
         help = "Column index for cell types in membership file",
-        long_help = "Zero-based column index for the cell type field in\n\
-                     the membership file."
+        long_help = "Zero-based column index for the cell type field in the membership file."
     )]
     pub membership_celltype_col: usize,
 
@@ -256,8 +253,8 @@ pub struct DartSeqCountArgs {
         long = "exact-barcode-match",
         default_value_t = false,
         help = "Require exact cell barcode matching",
-        long_help = "By default, membership barcodes are matched as prefixes\n\
-                     of BAM barcodes (handles suffixes like \"-1\").\n\
+        long_help = "By default, membership barcodes are matched as prefixes of BAM barcodes\n\
+                     (handles suffixes like \"-1\").\n\
                      Enable this flag to require exact string matching."
     )]
     pub exact_barcode_match: bool,
@@ -275,10 +272,9 @@ pub struct DartSeqCountArgs {
         long = "no-check-r-site",
         default_value_t = false,
         help = "Disable R site (RAC/GTY) validation in reference",
-        long_help = "By default, faba validates the R position in RAC/GTY\n\
-                     motifs against the reference genome (requires R=A/G on\n\
-                     forward strand and Y=C/T on reverse strand). Use this\n\
-                     flag to disable that check."
+        long_help = "By default, faba validates the R position in RAC/GTY motifs against the reference genome\n\
+                     (requires R=A/G on forward strand and Y=C/T on reverse strand).\n\
+                     Use this flag to disable that check."
     )]
     pub no_check_r_site: bool,
 
@@ -324,8 +320,8 @@ pub struct DartSeqCountArgs {
     #[arg(
         long = "snp-mask",
         help = "SNP mask parquet from `faba snp` to filter genetic variants",
-        long_help = "Path to snp_sites.parquet from `faba snp`. m6A candidates\n\
-                     at known SNP positions (het or hom-alt) are removed.\n\
+        long_help = "Path to snp_sites.parquet from `faba snp`.\n\
+                     m6A candidates at known SNP positions (het or hom-alt) are removed.\n\
                      Applied after A-to-I masking (if any)."
     )]
     pub snp_mask_file: Option<Box<str>>,
@@ -364,10 +360,10 @@ pub struct DartSeqCountArgs {
         alias = "mixture-initial-sigma",
         default_value_t = 0.0,
         help = "Gaussian bandwidth (nt) for component calling; 0 = auto (data-derived)",
-        long_help = "Gaussian smoothing bandwidth in nucleotides used to call mixture\n\
-                     components: the per-gene signal pileup is smoothed at this\n\
-                     bandwidth and its modes become components. 0 (default) derives\n\
-                     a global per-modality bandwidth from the empirical site spacing."
+        long_help = "Gaussian smoothing bandwidth in nucleotides used to call mixture components:\n\
+                     the per-gene signal pileup is smoothed at this bandwidth\n\
+                     and its modes become components.\n\
+                     0 (default) derives a global per-modality bandwidth from the empirical site spacing."
     )]
     pub mixture_bandwidth: f32,
 
@@ -384,10 +380,10 @@ pub struct DartSeqCountArgs {
         default_value_t = crate::editing::pipeline::MixtureWeightMode::Posterior,
         help = "How to weight each (cell, site) observation in the mixture EM",
         long_help = "Per-observation weighting for the per-gene Gaussian mixture.\n\
-                     `posterior` (default) uses the Beta-posterior regularized\n\
-                     effective count w = n · (c + α) / (n + α + β), where n is\n\
-                     the per-site coverage and c the converted-read count. This\n\
-                     prevents low-coverage 1-of-1 sites from dominating μ/σ.\n\
+                     `posterior` (default) uses the Beta-posterior regularized effective count\n\
+                     w = n · (c + α) / (n + α + β), where n is the per-site coverage\n\
+                     and c the converted-read count.\n\
+                     This prevents low-coverage 1-of-1 sites from dominating μ/σ.\n\
                      `converted` uses the raw converted-read count c (legacy)."
     )]
     pub mixture_weight: crate::editing::pipeline::MixtureWeightMode,
@@ -419,9 +415,8 @@ pub struct DartSeqCountArgs {
         long = "gene-min-cells",
         default_value_t = 10,
         help = "Min cells per gene for expression QC",
-        long_help = "Minimum number of cells with non-zero expression for a gene\n\
-                     to pass QC. Genes below this threshold are excluded before\n\
-                     site discovery."
+        long_help = "Minimum number of cells with non-zero expression for a gene to pass QC.\n\
+                     Genes below this threshold are excluded before site discovery."
     )]
     pub gene_min_cells: usize,
 
@@ -429,9 +424,9 @@ pub struct DartSeqCountArgs {
         long = "gene-min-counts",
         default_value_t = 0,
         help = "Min total UMI counts per gene for expression QC (0 disables)",
-        long_help = "Minimum total UMI counts (summed across all cells) for a gene\n\
-                     to pass QC. Genes below this threshold are excluded before\n\
-                     site discovery. 0 disables the threshold."
+        long_help = "Minimum total UMI counts (summed across all cells) for a gene to pass QC.\n\
+                     Genes below this threshold are excluded before site discovery.\n\
+                     0 disables the threshold."
     )]
     pub gene_min_counts: usize,
 
@@ -439,9 +434,8 @@ pub struct DartSeqCountArgs {
         long = "cell-min-genes",
         default_value_t = 10,
         help = "Min genes per cell for expression QC",
-        long_help = "Minimum number of genes with non-zero expression for a cell\n\
-                     to pass QC. Cells below this threshold are excluded from\n\
-                     quantification."
+        long_help = "Minimum number of genes with non-zero expression for a cell to pass QC.\n\
+                     Cells below this threshold are excluded from quantification."
     )]
     pub cell_min_genes: usize,
 
@@ -450,8 +444,8 @@ pub struct DartSeqCountArgs {
         default_value_t = false,
         help = "Skip gene expression QC step",
         long_help = "Skip the a priori gene expression QC step.\n\
-                     By default, faba counts reads per gene and filters to\n\
-                     expressed genes/cells before site discovery."
+                     By default, faba counts reads per gene\n\
+                     and filters to expressed genes/cells before site discovery."
     )]
     pub skip_gene_qc: bool,
 

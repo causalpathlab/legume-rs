@@ -124,9 +124,10 @@ pub struct LineageArgs {
         long = "no-edge-direction",
         help_heading = "Velocity direction & forest",
         help = "Skip the per-edge velocity direction test; forest = the geometric MST",
-        long_help = "Skip the per-edge velocity direction test. Every candidate edge is then\n\
-            geometry-only (abstained), so the max-weight branching reduces to the geometric MST\n\
-            rooted by the hint chain — the legacy behaviour with no velocity-informed cut/rewire."
+        long_help = "Skip the per-edge velocity direction test.\n\
+            Every candidate edge is then geometry-only (abstained),\n\
+            so the max-weight branching reduces to the geometric MST rooted by the hint chain —\n\
+            the legacy behaviour with no velocity-informed cut/rewire."
     )]
     pub no_edge_direction: bool,
 
@@ -269,15 +270,13 @@ pub struct LineageArgs {
         long,
         help_heading = "Marker annotation",
         help = "Marker TSV (gene<TAB>celltype) to name trajectory nodes by cell type",
-        long_help = "Annotate each trajectory node with a cell type by term over-representation \
-                     (the `faba annotate` core) run over the MST-node grouping, so the call \
-                     carries the same permutation-calibrated confidence.\n\
+        long_help = "Annotate each trajectory node with a cell type by term over-representation (the `faba annotate` core)\n\
+                     run over the MST-node grouping, so the call carries the same permutation-calibrated confidence.\n\
                      Input: a `gene<TAB>celltype` TSV (tab/comma/space delimited).\n\
-                     Reads the co-embedded gene vectors from \
-                     `{from}.feature_embedding.parquet` (spliced rows) and raw θ from \
-                     `{from}.cell_embedding.parquet`. Writes `{out}.lineage_annot.*` (per-cell calls \
-                     keyed by MST node) and `{out}.trajectory_annotation.parquet` \
-                     (node → role[root|terminal|internal] → cell_type → confidence)."
+                     Reads the co-embedded gene vectors from `{from}.feature_embedding.parquet` (spliced rows)\n\
+                     and raw θ from `{from}.cell_embedding.parquet`.\n\
+                     Writes `{out}.lineage_annot.*` (per-cell calls keyed by MST node)\n\
+                     and `{out}.trajectory_annotation.parquet` (node → role[root|terminal|internal] → cell_type → confidence)."
     )]
     pub markers: Option<Box<str>>,
 
@@ -295,9 +294,8 @@ pub struct LineageArgs {
         hide_short_help = true,
         help_heading = "Marker annotation",
         help = "Cell Ontology OBO file for the --markers ontology layer (needs --marker-label-cl)",
-        long_help = "Optional. Adds a TreeBH Cell-Ontology layer over the per-node marker calls, \
-                     as in `faba annotate`. Give the OBO graph here and the marker-type → CL id \
-                     map via --marker-label-cl (both required together)."
+        long_help = "Optional. Adds a TreeBH Cell-Ontology layer over the per-node marker calls, as in `faba annotate`.\n\
+                     Give the OBO graph here and the marker-type → CL id map via --marker-label-cl (both required together)."
     )]
     pub marker_obo: Option<Box<str>>,
 
@@ -314,17 +312,16 @@ pub struct LineageArgs {
         hide_short_help = true,
         help_heading = "Marker annotation",
         help = "[--markers] Turn OFF the stability bootstrap on the node calls",
-        long_help = "Turn OFF the stability bootstrap on the node calls, naming each node\n\
-            by a bare point estimate.\n\n\
-            The bootstrap is ON by default. Each draw resamples every type's marker panel\n\
-            with replacement AND re-derives the k-means grouping; the consensus is what\n\
-            ships, so a node's name carries the fraction of resamples that agreed on it.\n\n\
-            This matters most for --root-type, which picks the trajectory root as the\n\
-            highest-confidence node of a given type. Without the bootstrap that\n\
-            `confidence` is a softmaxed test statistic rather than a reproducibility —\n\
+        long_help = "Turn OFF the stability bootstrap on the node calls, naming each node by a bare point estimate.\n\n\
+            The bootstrap is ON by default.\n\
+            Each draw resamples every type's marker panel with replacement AND re-derives the k-means grouping;\n\
+            the consensus is what ships, so a node's name carries the fraction of resamples that agreed on it.\n\n\
+            This matters most for --root-type,\n\
+            which picks the trajectory root as the highest-confidence node of a given type.\n\
+            Without the bootstrap that `confidence` is a softmaxed test statistic rather than a reproducibility —\n\
             and the whole trajectory hangs off it.\n\n\
-            Costs ~6 min at --marker-n-boot 200: the replicate k-means has nothing to\n\
-            cache, unlike `faba annotate`'s kNN graph"
+            Costs ~6 min at --marker-n-boot 200:\n\
+            the replicate k-means has nothing to cache, unlike `faba annotate`'s kNN graph"
     )]
     pub no_bootstrap_markers: bool,
 

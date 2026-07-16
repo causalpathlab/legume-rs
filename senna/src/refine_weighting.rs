@@ -127,8 +127,8 @@ pub(crate) struct CollapseArgs {
         short = 'p',
         default_value_t = 50,
         help = "Random projection dimension",
-        long_help = "Target rank of the initial random sketch used to seed\n\
-                     batch correction and multi-level pseudobulk collapsing."
+        long_help = "Target rank of the initial random sketch\n\
+                     used to seed batch correction and multi-level pseudobulk collapsing."
     )]
     pub(crate) proj_dim: usize,
 
@@ -145,10 +145,9 @@ pub(crate) struct CollapseArgs {
     #[arg(
         long,
         help = "Skip per-batch correction; treat all cells as a single batch",
-        long_help = "Collapses batch membership to a single label so the random\n\
-                     projection, multilevel collapsing, and δ estimation all run\n\
-                     as if there were no batch structure. Useful for homogeneous\n\
-                     datasets or as a reference baseline."
+        long_help = "Collapses batch membership to a single label so the random projection,\n\
+                     multilevel collapsing, and δ estimation all run as if there were no batch structure.\n\
+                     Useful for homogeneous datasets or as a reference baseline."
     )]
     pub(crate) ignore_batch: bool,
 
@@ -156,8 +155,8 @@ pub(crate) struct CollapseArgs {
         long,
         default_value_t = 10,
         help = "In-batch k-NN for pb-sample merging",
-        long_help = "Number of within-batch nearest neighbours used when\n\
-                     aggregating cells into pseudobulk pb-samples."
+        long_help = "Number of within-batch nearest neighbours\n\
+                     used when aggregating cells into pseudobulk pb-samples."
     )]
     pub(crate) knn_cells: usize,
 
@@ -165,8 +164,8 @@ pub(crate) struct CollapseArgs {
         long,
         default_value_t = 3,
         help = "Multi-level coarsening levels",
-        long_help = "Hierarchical pseudobulk refinement passes. Level sort dims are\n\
-                     linearly spaced from 4 to --sort-dim. Set to 1 to disable."
+        long_help = "Hierarchical pseudobulk refinement passes.\n\
+                     Level sort dims are linearly spaced from 4 to --sort-dim. Set to 1 to disable."
     )]
     pub(crate) num_levels: usize,
 
@@ -206,8 +205,8 @@ pub(crate) struct AmortRefineArgs {
         long = "amort-refine-steps",
         default_value_t = 0,
         help = "Per-cell amortization refinement steps at inference (0 = off)",
-        long_help = "Gradient steps that optimize topic logits against the frozen\n\
-                     decoder likelihood, anchored to the encoder output by L2."
+        long_help = "Gradient steps that optimize topic logits against the frozen decoder likelihood,\n\
+                     anchored to the encoder output by L2."
     )]
     pub(crate) steps: usize,
 

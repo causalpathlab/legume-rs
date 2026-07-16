@@ -54,8 +54,8 @@ pub struct MaskedTopicArgs {
         long_help = "Sparse backends produced by `data-beans from-mtx`.\n\
                      Multiple files may be passed (comma- or space-separated)\n\
                      and are concatenated column-wise on a shared feature set.\n\
-                     When `--from <run.senna.json>` is provided and this list\n\
-                     is empty, the data paths come from the source manifest."
+                     When `--from <run.senna.json>` is provided and this list is empty,\n\
+                     the data paths come from the source manifest."
     )]
     data_files: Vec<Box<str>>,
 
@@ -64,8 +64,8 @@ pub struct MaskedTopicArgs {
         help = "Chain inputs + warm-start from a prior `senna bge / fne / topic` manifest",
         long_help = "Read a `{run}.senna.json` manifest and pre-fill `data_files`,\n\
                      `--batch-files`, and `--freeze-feature-embedding` from it.\n\
-                     Explicit CLI flags override the manifest values. SVD-family\n\
-                     manifests are rejected (no feature embedding to inherit).\n\
+                     Explicit CLI flags override the manifest values.\n\
+                     SVD-family manifests are rejected (no feature embedding to inherit).\n\
                      Typical use: bge → masked-topic warm-start.\n\
                      \n\
                      senna bge   data.zarr.zip -b batch.gz -o run-bge ...\n\
@@ -95,8 +95,8 @@ pub struct MaskedTopicArgs {
         short,
         value_delimiter(','),
         help = "Batch membership files, one per data file",
-        long_help = "Each file lists a batch label per cell in the same order as its\n\
-                     matching data file. Example: batch1.tsv,batch2.tsv"
+        long_help = "Each file lists a batch label per cell in the same order as its matching data file.\n\
+                     Example: batch1.tsv,batch2.tsv"
     )]
     batch_files: Option<Vec<Box<str>>>,
 
@@ -109,8 +109,8 @@ pub struct MaskedTopicArgs {
         long_help = "Path prefix of a model saved by `senna masked-topic`\n\
                      (matching {prefix}.model.json + {prefix}.safetensors).\n\
                      Architecture must match: same K, encoder layers,\n\
-                     embedding_dim, and n_features_full. Cross-gene-set\n\
-                     warm-start is not supported — train on the same gene set."
+                     embedding_dim, and n_features_full.\n\
+                     Cross-gene-set warm-start is not supported — train on the same gene set."
     )]
     init_from: Option<Box<str>>,
 
@@ -165,10 +165,10 @@ pub struct MaskedTopicArgs {
         help = "L2 penalty λ on the feature embedding matrix ρ (default 1.0; 0 = off)",
         long_help = "L2 penalty λ on the feature embedding matrix ρ ∈ ℝ^{D×H}:\n\
                      adds λ · mean(ρ²) to the per-minibatch loss (mean-normalized,\n\
-                     so λ stays scale-invariant across D·H). Shrinks β dynamic\n\
-                     range (β = log_softmax(α·ρᵀ)) and can speed ETM convergence\n\
-                     on high-D gene sets. Default 1.0 (mild shrinkage). Set 0.0\n\
-                     to disable. Typical: 0.1–10.0."
+                     so λ stays scale-invariant across D·H).\n\
+                     Shrinks β dynamic range (β = log_softmax(α·ρᵀ)) and can speed ETM convergence\n\
+                     on high-D gene sets.\n\
+                     Default 1.0 (mild shrinkage). Set 0.0 to disable. Typical: 0.1–10.0."
     )]
     feature_embedding_l2: f32,
 
@@ -176,16 +176,15 @@ pub struct MaskedTopicArgs {
         long,
         help = "Freeze a pre-trained per-gene embedding ρ; encoder/decoder ρ fixed",
         long_help = "Reuse a pre-trained per-gene embedding ρ from a prior senna run.\n\
-                     Loads `{prefix}.feature_embedding.parquet` (topic / cell-embedded-\n\
-                     topic layout) or `{prefix}.dictionary.parquet` (gbe layout).\n\
-                     Gene names are strict-intersected against this dataset's gene\n\
-                     axis under the `--feature-name-kind` rule; unmatched genes are\n\
-                     dropped from training. The encoder/decoder ρ stays fixed;\n\
-                     everything else (α, FC, BN, value-embedding, decoder\n\
-                     topic embeddings) trains as usual. Incompatible with\n\
-                     `--feature-network` (its restriction would change the gene\n\
-                     axis that the frozen ρ pins); forces `--feature-embedding-l2\n\
-                     0` (frozen ρ doesn't need shrinkage)."
+                     Loads `{prefix}.feature_embedding.parquet` (topic / cell-embedded-topic layout)\n\
+                     or `{prefix}.dictionary.parquet` (gbe layout).\n\
+                     Gene names are strict-intersected against this dataset's gene axis\n\
+                     under the `--feature-name-kind` rule; unmatched genes are dropped from training.\n\
+                     The encoder/decoder ρ stays fixed; everything else\n\
+                     (α, FC, BN, value-embedding, decoder topic embeddings) trains as usual.\n\
+                     Incompatible with `--feature-network`\n\
+                     (its restriction would change the gene axis that the frozen ρ pins);\n\
+                     forces `--feature-embedding-l2 0` (frozen ρ doesn't need shrinkage)."
     )]
     freeze_feature_embedding: Option<Box<str>>,
 
@@ -195,15 +194,15 @@ pub struct MaskedTopicArgs {
         help = "Warm-start ρ from a prior senna run; AdamW continues to update it",
         long_help = "Warm-start ρ from a prior senna run (typically `senna bge`).\n\
                      Same layout resolution as `--freeze-feature-embedding`\n\
-                     (gbe `{prefix}.dictionary.parquet` or topic\n\
-                     `{prefix}.feature_embedding.parquet`), same strict gene-name\n\
-                     intersection. The difference is that AdamW continues to\n\
-                     update ρ during training — this just gives a biology-aware\n\
-                     starting point instead of random Kaiming-normal init.\n\
-                     Pairs well with `senna bge` pre-training: cheap NCE-based\n\
-                     gene embedding that's robust to batch effects, used as the\n\
-                     warm-start here. Mutually exclusive with\n\
-                     `--freeze-feature-embedding`."
+                     (gbe `{prefix}.dictionary.parquet`\n\
+                     or topic `{prefix}.feature_embedding.parquet`), same strict gene-name intersection.\n\
+                     The difference is that AdamW continues to update ρ during training —\n\
+                     this just gives a biology-aware starting point\n\
+                     instead of random Kaiming-normal init.\n\
+                     Pairs well with `senna bge` pre-training:\n\
+                     cheap NCE-based gene embedding that's robust to batch effects,\n\
+                     used as the warm-start here.\n\
+                     Mutually exclusive with `--freeze-feature-embedding`."
     )]
     init_feature_embedding: Option<Box<str>>,
 
@@ -213,10 +212,10 @@ pub struct MaskedTopicArgs {
         help = "Cross-entropy penalty λ on β toward the anchor prior (0 = off)",
         long_help = "Cross-entropy penalty λ on β toward the anchor prior —\n\
                      anchors topic indices to Gram-Schmidt anchor gene sets\n\
-                     derived from the finest-level pseudobulks. Breaks the\n\
-                     K-way permutation symmetry of the ETM-factorized β and\n\
-                     is the load-bearing anti-mode-collapse force for this\n\
-                     model. 0 disables; default 1.0."
+                     derived from the finest-level pseudobulks.\n\
+                     Breaks the K-way permutation symmetry of the ETM-factorized β\n\
+                     and is the load-bearing anti-mode-collapse force for this model.\n\
+                     0 disables; default 1.0."
     )]
     anchor_penalty: f32,
 
@@ -224,10 +223,10 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 0.0,
         help = "AdamW decoupled weight decay for all parameters (default 0.0 = off)",
-        long_help = "AdamW decoupled weight decay applied uniformly to every\n\
-                     parameter (encoder ρ + α + FC + BN).\n\
-                     Per-step post-update shrinkage; doesn't enter the backward\n\
-                     graph. Default 0.0 (off, i.e. plain Adam despite the name).\n\
+        long_help = "AdamW decoupled weight decay applied uniformly to every parameter\n\
+                     (encoder ρ + α + FC + BN).\n\
+                     Per-step post-update shrinkage; doesn't enter the backward graph.\n\
+                     Default 0.0 (off, i.e. plain Adam despite the name).\n\
                      Typical: 1e-5 to 1e-4."
     )]
     weight_decay: f32,
@@ -264,19 +263,18 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = false,
         help = "Treat input files as modalities of the same cells, glued by raw barcode.",
-        long_help = "Patchy multi-modal (multiome) load. Each file keeps its own\n\
-                     feature space (no cross-file barcode suffixing); cells are\n\
-                     unioned across files by raw barcode — a cell observed only in\n\
-                     RNA contributes triplets just to the RNA row block, ATAC-only\n\
-                     cells just to the ATAC block, and shared cells get both.\n\
-                     Disables `@<basename>` suffixing on cell names. Maps to\n\
-                     `ColumnAlignment::Union` in the loader.\n\
+        long_help = "Patchy multi-modal (multiome) load. Each file keeps its own feature space\n\
+                     (no cross-file barcode suffixing); cells are unioned across files by raw barcode —\n\
+                     a cell observed only in RNA contributes triplets just to the RNA row block,\n\
+                     ATAC-only cells just to the ATAC block, and shared cells get both.\n\
+                     Disables `@<basename>` suffixing on cell names.\n\
+                     Maps to `ColumnAlignment::Union` in the loader.\n\
                      \n\
-                     With --multiome, batch resolution is constrained: a single\n\
-                     --batch-files file is allowed (one label per unified cell), or\n\
-                     embedded `@batch` tags in raw column names that AGREE across\n\
-                     modalities. The default `@<filename>` fallback is disabled — a\n\
-                     cell can come from multiple files and cannot carry two labels."
+                     With --multiome, batch resolution is constrained:\n\
+                     a single --batch-files file is allowed (one label per unified cell),\n\
+                     or embedded `@batch` tags in raw column names that AGREE across modalities.\n\
+                     The default `@<filename>` fallback is disabled —\n\
+                     a cell can come from multiple files and cannot carry two labels."
     )]
     multiome: bool,
 
@@ -296,11 +294,11 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 0.3,
         help = "Masked-imputation fraction: held-out top-K genes per cell (typical 0.2–0.5)",
-        long_help = "Masked-imputation fraction: per cell, this fraction of its\n\
-                     top-K genes is held out (masked) and predicted by the NB\n\
-                     embedded-topic head; the rest are the encoder's visible input.\n\
-                     Typical 0.2–0.5. The masking is the regularizer that replaces\n\
-                     the (collapse-prone) ELBO/KL."
+        long_help = "Masked-imputation fraction: per cell, this fraction of its top-K genes\n\
+                     is held out (masked) and predicted by the NB embedded-topic head;\n\
+                     the rest are the encoder's visible input.\n\
+                     Typical 0.2–0.5.\n\
+                     The masking is the regularizer that replaces the (collapse-prone) ELBO/KL."
     )]
     mask_fraction: f64,
 
@@ -308,13 +306,13 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 0.0,
         help = "Held-out imputation eval: fraction to hold out after training (0 = off)",
-        long_help = "After training, run a held-out masked-imputation evaluation and\n\
-                     log the mean log-likelihood per held-out gene. For each cell this\n\
-                     fraction of its observed genes is hidden, the rest encode a latent,\n\
-                     and the trained decoder imputes the hidden genes. Unlike the\n\
-                     per-epoch training likelihood this is not optimized, so it\n\
-                     distinguishes real structure from overfitting. Use a fixed\n\
-                     --eval-seed to compare heads on the same held-out positions.\n\
+        long_help = "After training, run a held-out masked-imputation evaluation\n\
+                     and log the mean log-likelihood per held-out gene.\n\
+                     For each cell this fraction of its observed genes is hidden,\n\
+                     the rest encode a latent, and the trained decoder imputes the hidden genes.\n\
+                     Unlike the per-epoch training likelihood this is not optimized,\n\
+                     so it distinguishes real structure from overfitting.\n\
+                     Use a fixed --eval-seed to compare heads on the same held-out positions.\n\
                      0 disables (default)."
     )]
     eval_mask_fraction: f64,
@@ -330,10 +328,9 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 1.0,
         help = "KL weight β for the Gaussian latent (masked-vae only; default 1.0)",
-        long_help = "KL weight β for the Gaussian latent (masked-vae only; ignored by\n\
-                     masked-topic). The masked-NB signal is weaker than a full\n\
-                     reconstruction, so β < 1 (e.g. 0.1–0.5) often avoids\n\
-                     over-regularizing the posterior toward the prior."
+        long_help = "KL weight β for the Gaussian latent (masked-vae only; ignored by masked-topic).\n\
+                     The masked-NB signal is weaker than a full reconstruction,\n\
+                     so β < 1 (e.g. 0.1–0.5) often avoids over-regularizing the posterior toward the prior."
     )]
     kl_weight: f64,
 
@@ -342,8 +339,8 @@ pub struct MaskedTopicArgs {
         value_enum,
         default_value_t = MaskScheduleArg::Fixed,
         help = "Mask-rate schedule: fixed or uniform per-minibatch sampling",
-        long_help = "Mask-rate schedule: fixed (use --mask-fraction) or uniform (sample\n\
-                     the rate per minibatch in [--mask-rate-lo, --mask-rate-hi];\n\
+        long_help = "Mask-rate schedule: fixed (use --mask-fraction)\n\
+                     or uniform (sample the rate per minibatch in [--mask-rate-lo, --mask-rate-hi];\n\
                      any-order / absorbing-diffusion style)."
     )]
     mask_schedule: MaskScheduleArg,
@@ -374,8 +371,8 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 512,
         help = "Encoder context window (top-K features per cell)",
-        long_help = "Each cell keeps its top-K features by value; minibatches use the\n\
-                     union of selected indices. Smaller K = faster decoder."
+        long_help = "Each cell keeps its top-K features by value;\n\
+                     minibatches use the union of selected indices. Smaller K = faster decoder."
     )]
     context_size: usize,
 
@@ -383,13 +380,13 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 0,
         help = "Per-feature embedding dimension H (0 = auto = 2 × n-latent-topics)",
-        long_help = "Dimension H of the per-gene embedding ρ ∈ ℝ^{D×H}. ρ is shared\n\
-                     between encoder (value-weighted pool over each cell's top-K\n\
-                     features) and decoder (β_kd = log_softmax_d(α_k · ρ_dᵀ), with\n\
-                     α ∈ ℝ^{K×H} as topic embeddings). β is rank ≤ H, so H must be\n\
-                     ≥ K (--n-latent-topics) for K independent topics to be\n\
-                     representable. Default 0 resolves to 2K for headroom. Set\n\
-                     explicitly to override; H < K errors at startup."
+        long_help = "Dimension H of the per-gene embedding ρ ∈ ℝ^{D×H}.\n\
+                     ρ is shared between encoder (value-weighted pool over each cell's top-K features)\n\
+                     and decoder (β_kd = log_softmax_d(α_k · ρ_dᵀ), with α ∈ ℝ^{K×H} as topic embeddings).\n\
+                     β is rank ≤ H, so H must be ≥ K (--n-latent-topics)\n\
+                     for K independent topics to be representable.\n\
+                     Default 0 resolves to 2K for headroom.\n\
+                     Set explicitly to override; H < K errors at startup."
     )]
     embedding_dim: usize,
 
@@ -414,13 +411,14 @@ pub struct MaskedTopicArgs {
     #[arg(
         long,
         help = "Feature-feature edge list (TSV/CSV) to restrict the feature axis",
-        long_help = "Optional feature-feature edge list (TSV/CSV) — used to\n\
-                     RESTRICT the feature axis to graph-connected genes (see\n\
-                     --no-feature-network-restrict). Graph *diffusion* (GCN) is\n\
-                     not supported by the masked encoder, so the edges only drive\n\
-                     feature selection here. Edges may be intra- or cross-modal\n\
-                     (gene-gene PPI, peak-gene ABC, ATAC-derived regulatory\n\
-                     links). Edge names are resolved against the loaded gene axis."
+        long_help = "Optional feature-feature edge list (TSV/CSV) —\n\
+                     used to RESTRICT the feature axis to graph-connected genes\n\
+                     (see --no-feature-network-restrict).\n\
+                     Graph *diffusion* (GCN) is not supported by the masked encoder,\n\
+                     so the edges only drive feature selection here.\n\
+                     Edges may be intra- or cross-modal\n\
+                     (gene-gene PPI, peak-gene ABC, ATAC-derived regulatory links).\n\
+                     Edge names are resolved against the loaded gene axis."
     )]
     feature_network: Option<Box<str>>,
 
@@ -435,11 +433,10 @@ pub struct MaskedTopicArgs {
         long,
         help = "Alias-splitting delimiter for feature-network name resolution (e.g. '_')",
         long_help = "Alias-splitting delimiter for feature-network name resolution.\n\
-                     When set (e.g. '_'), each row name is registered under its\n\
-                     full form AND every split component, so a row like\n\
-                     `ENSG00000105329_TGFB1` matches network edges that name\n\
-                     *either* `ENSG00000105329` *or* `TGFB1` (via matrix-util's\n\
-                     GeneIndexResolver — both aliases point to the same row)."
+                     When set (e.g. '_'), each row name is registered under its full form\n\
+                     AND every split component, so a row like `ENSG00000105329_TGFB1`\n\
+                     matches network edges that name *either* `ENSG00000105329` *or* `TGFB1`\n\
+                     (via matrix-util's GeneIndexResolver — both aliases point to the same row)."
     )]
     feature_network_delim: Option<char>,
 
@@ -447,11 +444,11 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 1,
         help = "Shared-neighbor edge QC threshold (default 1; 0 = keep all edges)",
-        long_help = "Shared-neighbor edge QC: drop edges (u,v) where the\n\
-                     endpoints share fewer than N neighbors in the feature\n\
-                     network. Default 1 drops edges with zero corroboration\n\
-                     — standard PPI/topological-overlap denoising. Set 0 to\n\
-                     keep every parsed edge."
+        long_help = "Shared-neighbor edge QC: drop edges (u,v)\n\
+                     where the endpoints share fewer than N neighbors in the feature network.\n\
+                     Default 1 drops edges with zero corroboration\n\
+                     — standard PPI/topological-overlap denoising.\n\
+                     Set 0 to keep every parsed edge."
     )]
     feature_network_min_shared_neighbors: usize,
 
@@ -460,11 +457,10 @@ pub struct MaskedTopicArgs {
         default_value_t = 0,
         help = "Per-node degree cap on the feature network (0 = off)",
         long_help = "Per-node degree cap on the feature network (0 = off).\n\
-                     After shared-neighbor QC, for each feature with degree\n\
-                     > N, rank its neighbors by shared-neighbor count and\n\
-                     keep the top N (union-symmetric: an edge survives iff\n\
-                     either endpoint kept it). Caps PPI hubs whose degree\n\
-                     would otherwise blow up per-cell sub-adjacency."
+                     After shared-neighbor QC, for each feature with degree > N,\n\
+                     rank its neighbors by shared-neighbor count and keep the top N\n\
+                     (union-symmetric: an edge survives iff either endpoint kept it).\n\
+                     Caps PPI hubs whose degree would otherwise blow up per-cell sub-adjacency."
     )]
     feature_network_max_degree: usize,
 
@@ -472,10 +468,9 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 0,
         help = "Iterative k-core pruning threshold on the feature network (0 = off)",
-        long_help = "Iterative k-core pruning threshold on the feature\n\
-                     network (default 0 = off). Drops every feature whose\n\
-                     degree falls below N until the surviving subgraph is\n\
-                     N-degenerate."
+        long_help = "Iterative k-core pruning threshold on the feature network (default 0 = off).\n\
+                     Drops every feature whose degree falls below N\n\
+                     until the surviving subgraph is N-degenerate."
     )]
     feature_network_min_degree: usize,
 
@@ -483,13 +478,14 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = false,
         help = "Disable feature-network feature restriction (keep full feature axis)",
-        long_help = "Disable feature-network feature restriction. By default\n\
-                     when --feature-network is supplied, features with zero\n\
-                     edges after the QC pipeline (shared-neighbor prune →\n\
-                     hub cap → k-core) are dropped from the data axis before\n\
-                     projection, collapse, and training. Pass to keep the\n\
-                     full feature axis (note: with restriction off the graph\n\
-                     has no effect — the masked encoder does not diffuse)."
+        long_help = "Disable feature-network feature restriction.\n\
+                     By default when --feature-network is supplied,\n\
+                     features with zero edges after the QC pipeline\n\
+                     (shared-neighbor prune → hub cap → k-core) are dropped from the data axis\n\
+                     before projection, collapse, and training.\n\
+                     Pass to keep the full feature axis\n\
+                     (note: with restriction off the graph has no effect —\n\
+                     the masked encoder does not diffuse)."
     )]
     no_feature_network_restrict: bool,
 
@@ -503,15 +499,12 @@ pub struct MaskedTopicArgs {
                      locus-overlap if ≥50% parse as `chr:start-end`,\n\
                      gene if ≥50% contain `_`, exact otherwise (default).\n\
                      `exact` — strict string match.\n\
-                     `gene` — also register each `_`-split component as an\n\
-                     alias (so `ENSG000_TGFB1` and `TGFB1` resolve to the\n\
-                     same row).\n\
-                     `locus` — normalize `chr1:1000-2000`, `1:1000-2000`,\n\
-                     etc. to a canonical form.\n\
-                     `locus-overlap` — same as `locus` plus cluster any\n\
-                     intervals that overlap on the same chromosome\n\
-                     (useful for cross-dataset ATAC peak sets called\n\
-                     independently)."
+                     `gene` — also register each `_`-split component as an alias\n\
+                     (so `ENSG000_TGFB1` and `TGFB1` resolve to the same row).\n\
+                     `locus` — normalize `chr1:1000-2000`, `1:1000-2000`, etc. to a canonical form.\n\
+                     `locus-overlap` — same as `locus` plus cluster any intervals\n\
+                     that overlap on the same chromosome\n\
+                     (useful for cross-dataset ATAC peak sets called independently)."
     )]
     feature_name_kind: FeatureNameKindArg,
 

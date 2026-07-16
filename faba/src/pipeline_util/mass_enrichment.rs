@@ -240,19 +240,21 @@ pub struct MassEnrichmentArgs {
         help = "Leiden auto-grouping for mass enrichment: OFF by default (bulk); set > 0 to enable (try 0.5; higher → more groups)",
         long_help = "Leiden modularity resolution for mass-enrichment cell grouping.\n\
                      \n\
-                     OFF by default (0): discovery runs in bulk, over all cells at\n\
-                     once. Set a positive resolution to turn grouping on — cells are\n\
-                     embedded (random projection + SVD on gene expression) and Leiden\n\
-                     community detection groups them automatically, the group count NOT\n\
-                     fixed but emerging from the graph (higher resolution → more, finer\n\
-                     groups). Discovery then runs per group, so cell-type-specific edits\n\
-                     are not diluted by the cells that do not carry them. Try 0.5.\n\
+                     OFF by default (0): discovery runs in bulk, over all cells at once.\n\
+                     Set a positive resolution to turn grouping on —\n\
+                     cells are embedded (random projection + SVD on gene expression)\n\
+                     and Leiden community detection groups them automatically,\n\
+                     the group count NOT fixed but emerging from the graph\n\
+                     (higher resolution → more, finer groups).\n\
+                     Discovery then runs per group,\n\
+                     so cell-type-specific edits are not diluted by the cells that do not carry them.\n\
+                     Try 0.5.\n\
                      \n\
-                     The default is off because grouping is expensive — it adds a cell\n\
-                     embedding, a kNN graph, and Leiden, and then multiplies the\n\
-                     discovery work by the number of groups. It is a deliberate opt-in\n\
-                     for when a rare compartment's edits are being washed out, not\n\
-                     something to pay for on every run."
+                     The default is off because grouping is expensive —\n\
+                     it adds a cell embedding, a kNN graph, and Leiden,\n\
+                     and then multiplies the discovery work by the number of groups.\n\
+                     It is a deliberate opt-in for when a rare compartment's edits\n\
+                     are being washed out, not something to pay for on every run."
     )]
     pub cluster_resolution: f64,
 
@@ -261,9 +263,9 @@ pub struct MassEnrichmentArgs {
         default_value_t = 30,
         hide_short_help = true,
         help = "k for the cell kNN graph fed to Leiden grouping",
-        long_help = "Number of nearest neighbours per cell when building the kNN\n\
-                     graph that Leiden partitions. Larger k → smoother, coarser\n\
-                     communities."
+        long_help = "Number of nearest neighbours per cell when building the kNN graph\n\
+                     that Leiden partitions.\n\
+                     Larger k → smoother, coarser communities."
     )]
     pub cluster_knn: usize,
 
@@ -272,11 +274,11 @@ pub struct MassEnrichmentArgs {
         default_value_t = 50,
         hide_short_help = true,
         help = "Embedding dimension for grouping (random-projection width = SVD rank)",
-        long_help = "Cell embedding dimension for Leiden grouping. Cells are\n\
-                     random-projected to this many features and the SVD is taken at\n\
-                     the same rank, so it is both the projection width and the\n\
-                     principal-component count clustered on. Capped at the cell\n\
-                     count. 30–50 is typical."
+        long_help = "Cell embedding dimension for Leiden grouping.\n\
+                     Cells are random-projected to this many features\n\
+                     and the SVD is taken at the same rank,\n\
+                     so it is both the projection width and the principal-component count clustered on.\n\
+                     Capped at the cell count. 30–50 is typical."
     )]
     pub cluster_dim: usize,
 
@@ -285,8 +287,7 @@ pub struct MassEnrichmentArgs {
         default_value_t = 100,
         hide_short_help = true,
         help = "Block size for grouping parallel processing",
-        long_help = "Number of columns processed per parallel block during\n\
-                     the random projection step."
+        long_help = "Number of columns processed per parallel block during the random projection step."
     )]
     pub cluster_block_size: usize,
 

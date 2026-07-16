@@ -19,9 +19,9 @@ pub struct DeconvolveArgs {
         required = true,
         help = "Run manifest with a feature embedding: `senna bge --skip-etm` or `masked-topic`",
         long_help = "Run manifest exposing a per-gene embedding ρ.\n\
-                     `senna bge --skip-etm` is exact: the raw Poisson ρ is persisted as\n\
-                     dictionary.parquet (default ETM bge overwrites it with β — re-run with\n\
-                     --skip-etm). `masked-topic` is supported as a transfer approximation\n\
+                     `senna bge --skip-etm` is exact: the raw Poisson ρ is persisted as dictionary.parquet\n\
+                     (default ETM bge overwrites it with β — re-run with --skip-etm).\n\
+                     `masked-topic` is supported as a transfer approximation\n\
                      (its ρ was trained under a softmax-ETM head)."
     )]
     pub from: Box<str>,
@@ -113,10 +113,10 @@ pub struct DeconvolveArgs {
         default_value_t = 10000.0,
         help = "Negative-binomial dispersion r (size); smaller = more overdispersion (default ≈ Poisson)",
         long_help = "Per-(gene,sample) overdispersion via a Gamma(r,r) multiplicative factor ε\n\
-                     on the Poisson rate: y ~ Poisson(ε·Σ_c w_c μ_{g,c}), Var(y)=λ+λ²/r. Small r\n\
-                     absorbs reference/gene misfit into ε; r → ∞ recovers Poisson. Held fixed:\n\
-                     freely sampling r is non-identifiable against the fractions (ε competes with\n\
-                     w through the per-type exposure), so it is a knob, not a hyperparameter."
+                     on the Poisson rate: y ~ Poisson(ε·Σ_c w_c μ_{g,c}), Var(y)=λ+λ²/r.\n\
+                     Small r absorbs reference/gene misfit into ε; r → ∞ recovers Poisson.\n\
+                     Held fixed: freely sampling r is non-identifiable against the fractions\n\
+                     (ε competes with w through the per-type exposure), so it is a knob, not a hyperparameter."
     )]
     pub nb_dispersion: f32,
 
@@ -125,10 +125,9 @@ pub struct DeconvolveArgs {
         default_value_t = 1.0,
         help = "Effective-count multiplier τ ∈ (0,1] tempering the likelihood (smaller → wider CIs)",
         long_help = "Power-posterior temperature: all count sufficient statistics are scaled by τ\n\
-                     (likelihood^τ), so the posterior reflects τ·(observed counts) of independent\n\
-                     evidence. τ=1 uses raw counts (tight, often overconfident at high depth);\n\
-                     τ<1 widens credible intervals (variance ∝ 1/τ). Calibrate against held-out\n\
-                     coverage."
+                     (likelihood^τ), so the posterior reflects τ·(observed counts) of independent evidence.\n\
+                     τ=1 uses raw counts (tight, often overconfident at high depth);\n\
+                     τ<1 widens credible intervals (variance ∝ 1/τ). Calibrate against held-out coverage."
     )]
     pub count_scale: f32,
 

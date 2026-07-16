@@ -96,9 +96,8 @@ pub struct PredictArgs {
         long,
         default_value_t = 0,
         help = "Decoder-side gradient steps on θ at inference (0 = encoder forward only)",
-        long_help = "If --decoder-only is set, this controls iterations of\n\
-                     uniform-init optimization. Otherwise, controls per-cell\n\
-                     refinement steps anchored to the encoder output."
+        long_help = "If --decoder-only is set, this controls iterations of uniform-init optimization.\n\
+                     Otherwise, controls per-cell refinement steps anchored to the encoder output."
     )]
     pub(crate) refine_steps: usize,
 
@@ -119,9 +118,9 @@ pub struct PredictArgs {
     #[arg(
         long,
         help = "Skip the encoder; init θ uniform and optimize purely against the frozen decoder",
-        long_help = "Useful when the held-out feature set is too divergent for the\n\
-                     trained encoder. Uses --refine-steps and --refine-lr (defaults\n\
-                     bumped to 100 / 0.05 if --refine-steps was left at 0)."
+        long_help = "Useful when the held-out feature set is too divergent for the trained encoder.\n\
+                     Uses --refine-steps and --refine-lr\n\
+                     (defaults bumped to 100 / 0.05 if --refine-steps was left at 0)."
     )]
     pub(crate) decoder_only: bool,
 
@@ -129,11 +128,10 @@ pub struct PredictArgs {
         long,
         default_value_t = 3,
         help = "Iterative TMLE rounds for held-out batch δ (0 = legacy single-pass plug-in)",
-        long_help = "Per iteration: encode all cells with current δ → θ̂; refit\n\
-                     δ as Σ_obs / Σ_pred per batch (NB-Fisher-weighted for nb /\n\
-                     nbmixture decoders, using the saved {model}.dispersion.parquet\n\
-                     when present). Default 3 typically converges; 0 reverts to the\n\
-                     legacy 1/K-marginal plug-in."
+        long_help = "Per iteration: encode all cells with current δ → θ̂;\n\
+                     refit δ as Σ_obs / Σ_pred per batch (NB-Fisher-weighted for nb / nbmixture decoders,\n\
+                     using the saved {model}.dispersion.parquet when present).\n\
+                     Default 3 typically converges; 0 reverts to the legacy 1/K-marginal plug-in."
     )]
     pub(crate) delta_iters: usize,
 
@@ -143,25 +141,23 @@ pub struct PredictArgs {
     #[arg(
         long,
         help = "Also write residual expression to a sparse backend ({out}.residual.zarr / .h5)",
-        long_help = "Regress the reference reconstruction μ ∝ δ?·Σ_k θ_k·exp(β_dk) out of\n\
-                     the held-out counts by DIVISION and write the leftover as a NEW\n\
-                     sparse backend (gene × cell). Reuses matrix-util's\n\
-                     `adjust_by_division_inplace`: per cell, x_d /= μ_d·λ with the\n\
-                     self-normalizing column scale λ = Σ_d x / Σ_d μ — so the residual\n\
-                     is a per-cell relative fold-change against the reference, the same\n\
-                     division semantics `senna svd` uses for batch adjustment. Only\n\
-                     entries above --residual-threshold are kept (all are ≥ 0), so the\n\
-                     file stays sparse. Backend chosen by extension: .zarr or .h5\n\
-                     (needs the `hdf5` feature)."
+        long_help = "Regress the reference reconstruction μ ∝ δ?·Σ_k θ_k·exp(β_dk) out of the held-out counts\n\
+                     by DIVISION and write the leftover as a NEW sparse backend (gene × cell).\n\
+                     Reuses matrix-util's `adjust_by_division_inplace`:\n\
+                     per cell, x_d /= μ_d·λ with the self-normalizing column scale λ = Σ_d x / Σ_d μ\n\
+                     — so the residual is a per-cell relative fold-change against the reference,\n\
+                     the same division semantics `senna svd` uses for batch adjustment.\n\
+                     Only entries above --residual-threshold are kept (all are ≥ 0), so the file stays sparse.\n\
+                     Backend chosen by extension: .zarr or .h5 (needs the `hdf5` feature)."
     )]
     pub(crate) residual_out: Option<Box<str>>,
 
     #[arg(
         long,
         help = "Fold per-batch δ into μ (removes topics AND batch effect)",
-        long_help = "When set, the per-gene denominator is δ_{d,b}·Σ_k θ_k·exp(β_dk) — the\n\
-                     residual is harmonized (batch effect divided out too). When unset,\n\
-                     μ comes from topics only and the residual still carries batch effects."
+        long_help = "When set, the per-gene denominator is δ_{d,b}·Σ_k θ_k·exp(β_dk)\n\
+                     — the residual is harmonized (batch effect divided out too).\n\
+                     When unset, μ comes from topics only and the residual still carries batch effects."
     )]
     pub(crate) residual_include_delta: bool,
 
@@ -177,11 +173,11 @@ pub struct PredictArgs {
         value_enum,
         default_value_t = FeatureNameKindArg::Exact,
         help = "Canonicalize query row names: auto|exact|gene|locus|locus-overlap|mixed",
-        long_help = "Mirrors the training-side flag. `exact` (default) preserves legacy\n\
-                     exact-then-flexible matching. `gene` resolves `ENSG..._TSPAN6` →\n\
-                     `TSPAN6` (rsplit on '_') so a symbol-keyed dictionary matches a\n\
-                     query keyed by `<ensembl>_<symbol>`. Applied AFTER the suffix trim\n\
-                     (see --feature-name-suffix-delim)."
+        long_help = "Mirrors the training-side flag.\n\
+                     `exact` (default) preserves legacy exact-then-flexible matching.\n\
+                     `gene` resolves `ENSG..._TSPAN6` → `TSPAN6` (rsplit on '_')\n\
+                     so a symbol-keyed dictionary matches a query keyed by `<ensembl>_<symbol>`.\n\
+                     Applied AFTER the suffix trim (see --feature-name-suffix-delim)."
     )]
     pub(crate) feature_name_kind: FeatureNameKindArg,
 
@@ -198,10 +194,10 @@ pub struct PredictArgs {
     #[arg(
         long,
         help = "Keep only rows whose suffix equals this value",
-        long_help = "e.g. `count/spliced` drops the `count/unspliced` rows of a faba\n\
-                     genes backend, collapsing the {spliced,unspliced} doubling to one\n\
-                     row per gene. Requires --feature-name-suffix-delim. Rows lacking\n\
-                     the delimiter are dropped when this is set."
+        long_help = "e.g. `count/spliced` drops the `count/unspliced` rows of a faba genes backend,\n\
+                     collapsing the {spliced,unspliced} doubling to one row per gene.\n\
+                     Requires --feature-name-suffix-delim.\n\
+                     Rows lacking the delimiter are dropped when this is set."
     )]
     pub(crate) keep_feature_suffix: Option<Box<str>>,
 }

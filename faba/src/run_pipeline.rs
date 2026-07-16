@@ -34,16 +34,19 @@ fn ser_debug<T: std::fmt::Debug, S: serde::Serializer>(v: &T, s: S) -> Result<S:
         2. ATOI detection (A-to-I editing, masked by SNP)\n\
         3. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\
         4. m6A detection (DART C→T, WT-vs-MUT contrast; skipped without --control-bam)\n\n\
-        ATOI is reference-anchored and tested per site against a beta-binomial\n\
-        sequencing-error null (--edit-error-rate/--edit-overdispersion), no control\n\
-        sample. m6A instead requires a catalytically-dead control (--control-bam):\n\
-        each motif C is tested for higher conversion in the positional BAMs than\n\
-        the pooled control (so a genomic C/T variant is rejected); the step is\n\
-        skipped when no control is given. The SNP mask is off by default for m6A\n\
+        ATOI is reference-anchored and tested per site\n\
+        against a beta-binomial sequencing-error null (--edit-error-rate/--edit-overdispersion),\n\
+        no control sample.\n\
+        m6A instead requires a catalytically-dead control (--control-bam):\n\
+        each motif C is tested for higher conversion in the positional BAMs\n\
+        than the pooled control (so a genomic C/T variant is rejected);\n\
+        the step is skipped when no control is given.\n\
+        The SNP mask is off by default for m6A\n\
         (the contrast already rejects variants; opt back in with --m6a-snp-mask).\n\
-        Step 0 discovers variants de novo and optionally force-calls at known\n\
-        sites (--known-snps, VCF/BCF/Parquet). De novo variants are VAF-filtered\n\
-        (--snp-mask-min-vaf) so RNA editing sites are preserved in the mask.\n\
+        Step 0 discovers variants de novo and optionally force-calls at known sites\n\
+        (--known-snps, VCF/BCF/Parquet).\n\
+        De novo variants are VAF-filtered (--snp-mask-min-vaf)\n\
+        so RNA editing sites are preserved in the mask.\n\
         UMI deduplication is applied to all pileup steps (disable with --no-umi-dedup)."
 )]
 pub struct PipelineArgs {
@@ -92,8 +95,8 @@ pub struct PipelineArgs {
                      the signal arm is the positional BAMs MINUS these controls.\n\
                      That split is used only for m6A site discovery;\n\
                      otherwise these controls are quantified like positional samples.\n\
-                     Their SNP, gene, ATOI, APA and m6A per-cell matrices are\n\
-                     produced too, with cells frozen per control BAM in step 1.\n\
+                     Their SNP, gene, ATOI, APA and m6A per-cell matrices are produced too,\n\
+                     with cells frozen per control BAM in step 1.\n\
                      Optional, but the m6A (DART) step is skipped without it:\n\
                      m6A cannot be separated from genomic C/T variation without a control."
     )]
@@ -352,13 +355,13 @@ pub struct PipelineArgs {
         help = "Also produce the per-gene component-mixture `_{modality}_mixture` \
                 matrices (EM; slow). Off by default — only the gene-level \
                 `{gene}/{modality}/{channel}` counts are produced.",
-        long_help = "Also produce the per-gene component-mixture matrices (EM; slow). \
-                     Off by default — only the gene-level \
+        long_help = "Also produce the per-gene component-mixture matrices (EM; slow).\n\
+                     Off by default — only the gene-level\n\
                      `{gene}/{modality}/{channel}` counts are produced.\n\n\
-                     For m6A / A-to-I this SKIPS the 1-D Gaussian mixture EM \
-                     entirely when off. For APA the SCAPE poly-A fit always runs \
-                     (PDUI needs it to identify proximal vs distal), so this gates \
-                     only the extra `_apa_mixture` component-matrix output."
+                     For m6A / A-to-I this SKIPS the 1-D Gaussian mixture EM entirely when off.\n\
+                     For APA the SCAPE poly-A fit always runs\n\
+                     (PDUI needs it to identify proximal vs distal),\n\
+                     so this gates only the extra `_apa_mixture` component-matrix output."
     )]
     pub mixture: bool,
 
@@ -371,8 +374,9 @@ pub struct PipelineArgs {
         long_help = "Path to known SNP sites. Accepts:\n\
                      - VCF/BCF (.vcf, .vcf.gz, .bcf): standard variant calls\n\
                      - Parquet (.parquet): output from a previous `faba snp` run\n\
-                     When provided, force-calls genotypes at these positions in addition\n\
-                     to de novo discovery, and builds a mask for ATOI/APA/DART filtering."
+                     When provided, force-calls genotypes at these positions\n\
+                     in addition to de novo discovery,\n\
+                     and builds a mask for ATOI/APA/DART filtering."
     )]
     pub known_snps: Option<Box<str>>,
 
@@ -412,11 +416,12 @@ pub struct PipelineArgs {
         default_value_t = 0.35,
         help = "Minimum VAF for SNP mask (filters RNA editing from de novo variants)",
         long_help = "Minimum variant allele fraction for a de novo discovered variant\n\
-                     to enter the SNP mask. A het site needs VAF in the range\n\
-                     [min_vaf, 1-min_vaf]; a hom-alt site needs VAF >= 1-min_vaf.\n\
+                     to enter the SNP mask.\n\
+                     A het site needs VAF in the range [min_vaf, 1-min_vaf];\n\
+                     a hom-alt site needs VAF >= 1-min_vaf.\n\
                      Sites with lower VAF are likely RNA editing (A-to-I or m6A)\n\
-                     rather than germline SNPs. Set to 0 to disable VAF filtering\n\
-                     (mask all called variants)."
+                     rather than germline SNPs.\n\
+                     Set to 0 to disable VAF filtering (mask all called variants)."
     )]
     pub snp_mask_min_vaf: f32,
 

@@ -46,8 +46,8 @@ pub struct JointSvdArgs {
         short,
         value_delimiter(','),
         help = "Batch membership files, one per data file",
-        long_help = "Each file lists a batch label per cell in the same order as its\n\
-                     matching data file. Example: batch1.tsv,batch2.tsv"
+        long_help = "Each file lists a batch label per cell in the same order as its matching data file.\n\
+                     Example: batch1.tsv,batch2.tsv"
     )]
     batch_files: Option<Vec<Box<str>>>,
 
