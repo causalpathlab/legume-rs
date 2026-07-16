@@ -69,32 +69,37 @@ pub struct BgeArgs {
         long,
         default_value_t = 0.05,
         help = "Drop null features (E_feat never moved off init) at this FDR, then re-fit (default 0.05; 0 = off)",
-        long_help = "Empirical-Bayes feature-null QC — ON by default at FDR 0.05. After\n\
-                     training, the shared null call tests each feature's ‖E_feat_f‖²\n\
-                     against an estimated null (a feature the model never moved keeps\n\
-                     ‖E_feat_f‖² ~ σ²·χ²_ν; scale σ̂², effective dof ν̂, and proportion π̂₀\n\
-                     are estimated from the data, each feature gets a BH q-value). Features\n\
-                     with q > this FDR are null (untrained / background — the isolated\n\
-                     off-manifold co-embedding spikes) and are DROPPED, then the model\n\
-                     re-fits on the live feature axis (two-pass refine). The live/null flags\n\
-                     and norm² are also written to {out}.feature_qc.parquet. 0 disables.\n\
-                     Must be in [0, 1)."
+        long_help = "Empirical-Bayes feature-null QC — ON by default at FDR 0.05.\n\
+                     After training, the shared ash (adaptive-shrinkage) null call tests each\n\
+                     feature's signed loadings one embedding dimension at a time, against a\n\
+                     per-axis null whose scale is estimated empirically from the data\n\
+                     (no fixed χ² assumption).\n\
+                     A feature is live when it is confidently non-null on some axis\n\
+                     (local false-sign rate below this FDR, Bonferroni over the H axes).\n\
+                     The per-axis null is elicited by `--n-hvg`: the lowest-norm `n − n_hvg`\n\
+                     features stand in as the presumed null that seeds each axis's scale,\n\
+                     which the sampler then refines.\n\
+                     Null features (untrained / background) are DROPPED and the model re-fits\n\
+                     on the live feature axis (two-pass refine);\n\
+                     dropped rows still get a projected co-embedding.\n\
+                     The live/null flags and norm² are written to {out}.feature_qc.parquet.\n\
+                     0 disables. Must be in [0, 1)."
     )]
     feature_null_fdr: f32,
 
     #[arg(
         long = "phase1-cells-per-pb",
         default_value_t = 0,
-        help = "Phase-1 cell-axis mode (k); 0 = pure-pb (fastest), phase 2 always\n\
-                projects every cell.",
-        long_help = "Phase-1 cell-axis mode (k). Controls what shapes the feature\n\
-                     dictionary in phase 1; phase 2 ALWAYS analytically projects\n\
-                     every cell, so the per-cell embedding output is unaffected.\n\
-                     k=0 (default) → suppress the cell axis entirely (pure-pb:\n\
-                     E_feat from pb aggregates only — fastest). 1≤k<n_cells →\n\
-                     keep ≤k cells per pb-sample at each collapse level (union),\n\
-                     cutting the phase-1 step budget while preserving rare-cell\n\
-                     coverage. k≥n_cells → all cells (legacy; slowest)."
+        help = "Phase-1 cell-axis mode (k); 0 = pure-pb (fastest),\n\
+                phase 2 always projects every cell.",
+        long_help = "Phase-1 cell-axis mode (k). Controls what shapes the feature dictionary in phase 1;\n\
+                     phase 2 ALWAYS analytically projects every cell,\n\
+                     so the per-cell embedding output is unaffected.\n\
+                     k=0 (default) → suppress the cell axis entirely\n\
+                     (pure-pb: E_feat from pb aggregates only — fastest).\n\
+                     1≤k<n_cells → keep ≤k cells per pb-sample at each collapse level (union),\n\
+                     cutting the phase-1 step budget while preserving rare-cell coverage.\n\
+                     k≥n_cells → all cells (legacy; slowest)."
     )]
     phase1_cells_per_pb: usize,
 
@@ -102,10 +107,10 @@ pub struct BgeArgs {
         long = "skip-etm",
         default_value_t = false,
         help = "Skip ETM resolution; emit raw bge embeddings (Z and ρ) only.",
-        long_help = "Skip the default ETM resolution and emit only the raw bge\n\
-                     embeddings (latent = cell embedding Z, dictionary = ρ). \n\
-		     By default bge resolves ETM topics from the cell embedding via\n\
-                     anchor analysis and writes a topic-model layout\n\
+        long_help = "Skip the default ETM resolution and emit only the raw bge embeddings\n\
+                     (latent = cell embedding Z, dictionary = ρ).\n\
+                     By default bge resolves ETM topics from the cell embedding\n\
+                     via anchor analysis and writes a topic-model layout\n\
                      (latent = log θ, dictionary = β)."
     )]
     skip_etm: bool,
@@ -121,8 +126,8 @@ pub struct BgeArgs {
         default_value_t = 1.0,
         help = "Up-weight matched cells in the cell-axis sampler (--multiome only;\n\
                 1.0 = off).",
-        long_help = "Up-weight matched (multi-modality) cells in the cell-axis\n\
-                     sampler by this factor so they anchor cross-modal alignment\n\
+        long_help = "Up-weight matched (multi-modality) cells in the cell-axis sampler by this factor\n\
+                     so they anchor cross-modal alignment\n\
                      (--multiome only; 1.0 = off)."
     )]
     bridge_weight: f32,
@@ -130,8 +135,8 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Disable BBKNN + DC-Poisson refinement of the multi-level pseudobulk\n\
-                partition. Default: enabled."
+        help = "Disable BBKNN + DC-Poisson refinement of the multi-level pseudobulk partition.\n\
+                Default: enabled."
     )]
     no_refine: bool,
 
@@ -169,11 +174,10 @@ pub struct BgeArgs {
         long_help = "L2 penalty λ on the shared feature embedding E_feat ∈ ℝ^{D×H}:\n\
                      adds λ · mean(E_feat²) to the per-step composite loss\n\
                      (mean-normalized, so λ stays scale-invariant across D·H).\n\
-                     Default 0 (off): mean-normalization makes the per-element\n\
-                     gradient tiny (÷ D·H), so E_feat — self-bounded under the\n\
-                     NCE + analytical-projection setup — barely moves with it\n\
-                     (toggling it shifts cell-type purity within run-to-run\n\
-                     noise). Set > 0 only if E_feat drifts on long/deep runs."
+                     Default 0 (off): mean-normalization makes the per-element gradient tiny (÷ D·H),\n\
+                     so E_feat — self-bounded under the NCE + analytical-projection setup —\n\
+                     barely moves with it (toggling it shifts cell-type purity within run-to-run noise).\n\
+                     Set > 0 only if E_feat drifts on long/deep runs."
     )]
     feature_embedding_l2: f32,
 
@@ -181,9 +185,9 @@ pub struct BgeArgs {
         long,
         default_value_t = 0.0,
         help = "AdamW decoupled weight decay (all params). Default 0.0 = off.",
-        long_help = "AdamW decoupled weight decay applied uniformly to every\n\
-                     parameter (E_feat, b_feat, per-axis heads). Per-step\n\
-                     post-update shrinkage; doesn't enter the backward graph.\n\
+        long_help = "AdamW decoupled weight decay applied uniformly to every parameter\n\
+                     (E_feat, b_feat, per-axis heads).\n\
+                     Per-step post-update shrinkage; doesn't enter the backward graph.\n\
                      Default 0.0 (off — plain Adam despite the optimizer name)."
     )]
     weight_decay: f64,
@@ -199,8 +203,8 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        help = "Optional feature-feature edge list (TSV/CSV; activates SGC\n\
-                smoothing of E_feat through the K-hop normalized adjacency)."
+        help = "Optional feature-feature edge list (TSV/CSV;\n\
+                activates SGC smoothing of E_feat through the K-hop normalized adjacency)."
     )]
     feature_network: Option<Box<str>>,
 
@@ -221,12 +225,12 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = 2,
-        help = "SGC propagation hops K (default 2; K=2 covers all shared-neighbor\n\
-                pairs).",
-        long_help = "SGC propagation hops K (default 2 — useful for sparse\n\
-                     synthetic-lethality / regulatory networks). K=2 already\n\
-                     reaches all shared-neighbor pairs, so no separate SNN\n\
-                     augmentation is needed."
+        help = "SGC propagation hops K (default 2;\n\
+                K=2 covers all shared-neighbor pairs).",
+        long_help = "SGC propagation hops K\n\
+                     (default 2 — useful for sparse synthetic-lethality / regulatory networks).\n\
+                     K=2 already reaches all shared-neighbor pairs,\n\
+                     so no separate SNN augmentation is needed."
     )]
     feature_network_k: usize,
 
@@ -249,12 +253,11 @@ pub struct BgeArgs {
         default_value_t = '_',
         help = "Delimiter for fuzzy gene-name suffix matching across input files.",
         long_help = "Delimiter for fuzzy gene-name matching across input files.\n\
-                     The last token after splitting on this char is used as the\n\
-                     canonical row name, so `ENSG00000000003_TSPAN6` (file A)\n\
-                     and `TSPAN6` (file B) merge into a single row. Pass an\n\
-                     empty string (currently unsupported by clap; set\n\
-                     --feature-name-kind to override) to fall back to exact\n\
-                     matching."
+                     The last token after splitting on this char is used as the canonical row name,\n\
+                     so `ENSG00000000003_TSPAN6` (file A) and `TSPAN6` (file B) merge into a single row.\n\
+                     Pass an empty string\n\
+                     (currently unsupported by clap; set --feature-name-kind to override)\n\
+                     to fall back to exact matching."
     )]
     feature_name_delim: char,
 
@@ -268,18 +271,17 @@ pub struct BgeArgs {
     #[arg(
         long,
         help = "Cells per block for streaming NB-Fisher / column I/O (omit for auto).",
-        long_help = "Cells per parallel block for the streaming NB-Fisher pass\n\
-                     and column-block I/O. Omit for auto-scaling (clamps to 100\n\
-                     for large feature counts — slow on rotational disks). Pass\n\
-                     1024+ when you have RAM, especially without --preload-data."
+        long_help = "Cells per parallel block for the streaming NB-Fisher pass and column-block I/O.\n\
+                     Omit for auto-scaling (clamps to 100 for large feature counts — slow on rotational disks).\n\
+                     Pass 1024+ when you have RAM, especially without --preload-data."
     )]
     block_size: Option<usize>,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Preload all sparse column data into memory. Faster when data fits\n\
-                in RAM; required on slow disks."
+        help = "Preload all sparse column data into memory.\n\
+                Faster when data fits in RAM; required on slow disks."
     )]
     preload_data: bool,
 
@@ -301,16 +303,15 @@ pub struct BgeArgs {
                      barcodes must be disjoint — a shared barcode would merge\n\
                      cells from different samples (validated; error on collision).\n\
                      \n\
-                     Feature (modality) identity: features are namespaced\n\
-                     `{name}/{modality}` so the SAME modality across samples\n\
-                     merges (shared gene panel) while DIFFERENT modalities stay\n\
-                     on separate rows — even when names collide (e.g. spliced vs\n\
-                     unspliced `TSPAN6`). The modality tag defaults to the\n\
-                     within-group file position (m0, m1, …); override it with a\n\
-                     `label=` prefix, e.g.\n\
+                     Feature (modality) identity: features are namespaced `{name}/{modality}`\n\
+                     so the SAME modality across samples merges (shared gene panel)\n\
+                     while DIFFERENT modalities stay on separate rows —\n\
+                     even when names collide (e.g. spliced vs unspliced `TSPAN6`).\n\
+                     The modality tag defaults to the within-group file position (m0, m1, …);\n\
+                     override it with a `label=` prefix, e.g.\n\
                        --multiome spliced=spliced.zarr,unspliced=unspliced.zarr\n\
-                     File ORDER within a group defines modality order, so the\n\
-                     positional default lines up across groups.\n\
+                     File ORDER within a group defines modality order,\n\
+                     so the positional default lines up across groups.\n\
                      \n\
                      Batch identity: each group becomes its own batch when\n\
                      --batch-files is omitted (modality-presence auto-batch).\n\
@@ -706,16 +707,22 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             h,
             &unified.feature_names,
             args.feature_null_fdr,
+            effective_hvg.n_hvg,
             &args.out,
         )?;
         let mut live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
 
-        // The all-null case is a degenerate-fit detector, so it has to read the RAW null
-        // call — BEFORE any `--must-train-features` rescue. Rescuing first would make
-        // `live` non-empty, the detector would never fire, and the refit would drop every
-        // feature EXCEPT the force-kept ones: the panel would eat the dictionary.
+        // All-null guard: read the RAW null call BEFORE any
+        // `--must-train-features` rescue. Rescuing first would make `live`
+        // non-empty, the guard would never fire, and the refit would drop every
+        // feature EXCEPT the force-kept ones — the panel would eat the
+        // dictionary. A refit on zero live features is invalid anyway, so keep
+        // the pass-1 output. (The ash empirical-null call retains the legitimate
+        // features under collapse, so no drop-fraction valve is needed above 0.)
         if live.is_empty() {
-            log::warn!("Feature null QC flagged all {n} features as null.");
+            log::warn!(
+                "Feature null QC flagged all {n} features as null; keeping pass-1 (no refit)."
+            );
         } else {
             // `--must-train-features` outranks the null call as well as the HVG cut: a
             // curated feature the user named stays in the dictionary even when the model

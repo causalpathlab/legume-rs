@@ -4,7 +4,7 @@
 //! genes held near the target FDR.
 
 use graph_embedding_util::null_call::{
-    chi2_null_call, embedding_lower_tail_call, embedding_null_call,
+    ash_null_call, chi2_null_call, embedding_lower_tail_call, embedding_null_call, NullCall,
 };
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -75,6 +75,79 @@ fn empty_input() {
     let call = embedding_null_call(&[], 0, 16, 0.05);
     assert_eq!(call.n_live, 0);
     assert!(call.live.is_empty());
+}
+
+#[test]
+fn ash_separates_signal_with_nhvg_null() {
+    // Clean regime: isotropic init-scale null vs signal features with one large
+    // (feature-specific) coordinate loading. The n-hvg presumed-null (bottom
+    // n − n_sig by norm) should recover the null scale and the ash lfsr call
+    // should recover the signal with FDR control.
+    let h = 16;
+    let n_null = 4000;
+    let n_sig = 1000;
+    let n = n_null + n_sig;
+    let mut rng = StdRng::seed_from_u64(31);
+    let init = Normal::new(0.0, 0.05).unwrap(); // isotropic null (init scale)
+
+    let mut beta = vec![0f32; n * h];
+    for g in 0..n {
+        for k in 0..h {
+            beta[g * h + k] = init.sample(&mut rng) as f32;
+        }
+        if g >= n_null {
+            let d = g % h; // feature-specific signal axis
+            let sign = if g % 2 == 0 { 1.0 } else { -1.0 };
+            beta[g * h + d] += 0.5 * sign; // ~10× the init scale
+        }
+    }
+
+    let call = ash_null_call(&beta, n, h, 0.05, n_sig);
+    let recall = (n_null..n).filter(|&g| call.live[g]).count() as f64 / n_sig as f64;
+    let leak = (0..n_null).filter(|&g| call.live[g]).count() as f64 / n_null as f64;
+    assert!(recall > 0.9, "ash recall too low: {recall}");
+    assert!(leak < 0.1, "ash null leak too high: {leak}");
+}
+
+#[test]
+fn ash_recovers_nondominant_signal_the_norm_call_misses() {
+    // Collapse regime: a dominant, legitimate axis (coord 0) every feature loads
+    // on (independent of signal) + a real signal on a non-dominant axis (coord 1)
+    // carried by a minority. The χ²-norm call calibrates to coord 0 and misses
+    // the coord-1 signal; the ash call (clean per-coord null from the n-hvg
+    // presumed-null) recovers it.
+    let h = 16;
+    let n_null = 850;
+    let n_sig = 150;
+    let n = n_null + n_sig;
+    let mut rng = StdRng::seed_from_u64(23);
+    let dom = Normal::new(0.0, 2.0).unwrap(); // dominant axis, all features
+    let noise = Normal::new(0.0, 0.02).unwrap(); // init-scale null on every coord
+
+    let mut beta = vec![0f32; n * h];
+    for g in 0..n {
+        for k in 0..h {
+            beta[g * h + k] = noise.sample(&mut rng) as f32;
+        }
+        beta[g * h] += dom.sample(&mut rng) as f32; // dominant, independent of signal
+        if g >= n_null {
+            let sign = if g % 2 == 0 { 1.0 } else { -1.0 };
+            beta[g * h + 1] += 0.30 * sign; // non-dominant signal
+        }
+    }
+
+    let ash = ash_null_call(&beta, n, h, 0.05, n_sig);
+    let chi2 = embedding_null_call(&beta, n, h, 0.05);
+    let recall = |c: &NullCall| (n_null..n).filter(|&g| c.live[g]).count() as f64 / n_sig as f64;
+
+    // ash recovers the non-dominant signal; the norm call can't isolate it.
+    assert!(recall(&ash) > 0.9, "ash recall too low: {}", recall(&ash));
+    assert!(
+        recall(&ash) - recall(&chi2) > 0.4,
+        "ash should beat χ²-norm on non-dominant signal: ash={}, chi2={}",
+        recall(&ash),
+        recall(&chi2)
+    );
 }
 
 #[test]
