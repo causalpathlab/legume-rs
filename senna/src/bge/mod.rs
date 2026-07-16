@@ -711,17 +711,32 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             &args.out,
         )?;
         let mut live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
+        let raw_live = live.len();
 
-        // All-null guard: read the RAW null call BEFORE any
+        // Degenerate-fit guards read the RAW null call — BEFORE any
         // `--must-train-features` rescue. Rescuing first would make `live`
         // non-empty, the guard would never fire, and the refit would drop every
         // feature EXCEPT the force-kept ones — the panel would eat the
-        // dictionary. A refit on zero live features is invalid anyway, so keep
-        // the pass-1 output. (The ash empirical-null call retains the legitimate
-        // features under collapse, so no drop-fraction valve is needed above 0.)
-        if live.is_empty() {
+        // dictionary. Two cases keep the pass-1 output and skip the refit:
+        //   (a) all-null — a refit on zero features is invalid;
+        //   (b) >90% dropped — either a genuine collapse, OR a feature set with
+        //       no empty-feature null population to find (e.g. an HVG-subset gem
+        //       run: every row is a trained HVG gene, norm² is unimodal, and the
+        //       null call over-flags). Refitting on the handful of survivors
+        //       trains a broken run, so keep pass-1 and warn.
+        if raw_live == 0 {
             log::warn!(
                 "Feature null QC flagged all {n} features as null; keeping pass-1 (no refit)."
+            );
+        } else if raw_live * 10 < n {
+            log::warn!(
+                "Feature null QC flagged {} / {n} features null ({:.0}%) — a collapse or a \
+                 null-free feature set, not a clean drop. Keeping pass-1 output instead of \
+                 refitting on only {raw_live} survivor(s). Inspect {}.feature_qc.parquet before \
+                 trusting this run.",
+                n - raw_live,
+                100.0 * (n - raw_live) as f64 / n as f64,
+                args.out
             );
         } else {
             // `--must-train-features` outranks the null call as well as the HVG cut: a
