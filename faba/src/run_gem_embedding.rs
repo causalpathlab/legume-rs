@@ -432,17 +432,32 @@ fn run_gem_genes_bge(
         );
         save_feature_qc(&e_feat, n, h, &unified.feature_names, &null, &args.out)?;
         let mut live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
+        let raw_live = live.len();
 
-        // All-null guard: read the RAW null call BEFORE any
+        // Degenerate-fit guards read the RAW null call — BEFORE any
         // `--must-train-features` rescue. Rescuing first would make `live`
         // non-empty, the guard would never fire, and the refit would drop every
-        // row EXCEPT the force-kept ones — the panel would eat the dictionary. A
-        // refit on zero live rows is invalid anyway, so keep the pass-1 fit. (The
-        // ash empirical-null call retains the legitimate rows under collapse, so
-        // no drop-fraction valve is needed above 0.)
-        if live.is_empty() {
+        // row EXCEPT the force-kept ones — the panel would eat the dictionary.
+        // Two cases keep the pass-1 fit and skip the refit:
+        //   (a) all-null — a refit on zero rows is invalid;
+        //   (b) >90% dropped — gem's HVG subset is EVERY row a trained HVG gene,
+        //       so norm² is unimodal with no empty-feature null population, and
+        //       the null call over-flags (it forces a null/signal split that
+        //       isn't there). Refitting on the handful of survivors trains a
+        //       broken run, so keep pass-1 and warn.
+        if raw_live == 0 {
             log::warn!(
                 "feature-null QC flagged all {n} rows null (degenerate fit); keeping pass-1 fit."
+            );
+        } else if raw_live * 10 < n {
+            log::warn!(
+                "feature-null QC flagged {} / {n} rows null ({:.0}%) — a collapse or a null-free \
+                 (HVG-subset) feature set, not a clean drop. Keeping pass-1 fit instead of \
+                 refitting on only {raw_live} survivor(s). Inspect {}.feature_qc.parquet before \
+                 trusting this run.",
+                n - raw_live,
+                100.0 * (n - raw_live) as f64 / n as f64,
+                args.out
             );
         } else {
             // `--must-train-features` outranks the null call as well as the HVG cut: a
