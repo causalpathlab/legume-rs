@@ -680,6 +680,11 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 // origin. Restoring coverage must not mean restoring noise.
                 null_fdr: args.feature_null_fdr,
             }),
+            // bge selects features by the norm² ash null call in `write_feature_qc`
+            // (post-fit, below), not the engine's LRT scan; and it trains with the
+            // per-pair logistic NCE. Both gem-only knobs stay at their defaults.
+            select_lrt_fdr: None,
+            nce_objective: ge::loss::NceObjective::Logistic,
         })
     };
 

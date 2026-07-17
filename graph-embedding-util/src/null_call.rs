@@ -27,15 +27,15 @@
 //! non-dominant structure (e.g. cross-donor variance) that the single-`(σ²,ν)`
 //! norm test masks — it calibrates a per-axis null scale from the n-hvg
 //! presumed-null and calls each feature via ash lfsr. The scaled-χ² machinery
-//! remains for the norm statistic: [`chi2_null_call`] on a precomputed
-//! scaled-χ² vector (the reusable core), and [`embedding_null_call`] for the
-//! squared-norm-of-each-row case (still used by the held-out feature-projection
-//! gate in [`crate::fit::feature_projection`]). The χ² calls are per-item and
-//! deterministic; the ash call runs a seeded collapsed-Gibbs sampler per axis.
+//! remains as [`chi2_null_call`] — an empirical-Bayes call on a precomputed
+//! scaled-χ² vector (the reusable core), used on the per-gene LRT by the held-out
+//! feature-projection gate in [`crate::fit::feature_projection`] and by the
+//! data-driven feature selection. The χ² call is per-item and deterministic; the
+//! ash call runs a seeded collapsed-Gibbs sampler per axis.
 
 use crate::ash::{ash_normal, AshOpts};
 use rayon::prelude::*;
-use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
+use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 /// Result of a null call: a live/null flag per item plus the fitted null.
 pub struct NullCall {
@@ -68,21 +68,6 @@ pub struct NullCall {
 pub fn live_row(rows: &[f32], i: usize, h: usize) -> Option<&[f32]> {
     let row = rows.get(i * h..(i + 1) * h)?;
     row.iter().any(|&x| x != 0.0).then_some(row)
-}
-
-/// Squared-norm null call on a flat row-major embedding `rows` (`[n × h]`):
-/// computes `s_i = ‖row_i‖²` and defers to [`chi2_null_call`] with `dof = h`.
-#[must_use]
-pub fn embedding_null_call(rows: &[f32], n: usize, h: usize, fdr: f32) -> NullCall {
-    let s: Vec<f64> = (0..n)
-        .map(|i| {
-            rows[i * h..(i + 1) * h]
-                .iter()
-                .map(|&x| f64::from(x) * f64::from(x))
-                .sum()
-        })
-        .collect();
-    chi2_null_call(&s, h, fdr)
 }
 
 /// Empirical-Bayes null call on scaled-χ² statistics `s` (each `s_i` assumed
@@ -156,79 +141,6 @@ pub fn chi2_null_call(s: &[f64], dof: usize, fdr: f32) -> NullCall {
 
     let _ = pi0; // the fit's π₀ fed the quantile map; finish_call re-derives it
     finish_call(s, &chi, sigma2, eff_dof, fdr)
-}
-
-/// Result of an [`embedding_lower_tail_call`]: which items are the lower-tail
-/// "empty / collapsed" minority (to drop) plus the fitted dominant-mode null.
-pub struct LowerTailCall {
-    /// Per-item: `true` = lower-tail outlier (empty/ambient — drop).
-    pub drop: Vec<bool>,
-    /// Null (dominant-mode) location on the `log` statistic.
-    pub mu: f64,
-    /// Null (dominant-mode) scale on the `log` statistic (robust MAD).
-    pub sigma: f64,
-    /// Number of dropped (empty) items.
-    pub n_drop: usize,
-}
-
-/// EB "is this an empty / collapsed item?" call on a per-item embedding **norm**
-/// (e.g. faba gem's pre-L2 `cell_nrms`). Mirror-image of [`chi2_null_call`]:
-/// there the null is the dominant *low* bulk and signal is the *upper* tail;
-/// here the **dominant population is the real/kept mode** and the *empties are
-/// the lower tail* — their MAP projection collapsed to ≈0, so `log(norm)` sits
-/// far below the real-cell mode.
-///
-/// The null is the real mode on `x = log(norm)`, fit with **median μ̂ +
-/// 1.4826·MAD σ̂** — both 50%-breakdown, so the empty minority *and* any
-/// heavy upper (doublet/large) tail cannot bias the null scale (the failure
-/// mode of a peak-curvature or upper-half fit, which underestimate the real
-/// mode's true spread and over-drop). Each item gets a **lower-tail** p-value
-/// `Φ((x−μ̂)/σ̂)`, conservative BH q-values (`π₀ = 1` — Storey is degenerate for
-/// a lower-tail test against a symmetric null, and conservative suits the
-/// asymmetric cost of dropping a real item), and is **dropped** when `q ≤ fdr`
-/// *and* it lies below the mode. Robust, automatic (no bounds), deterministic.
-#[must_use]
-pub fn embedding_lower_tail_call(nrm: &[f32], fdr: f32) -> LowerTailCall {
-    let n = nrm.len();
-    if n == 0 {
-        return LowerTailCall {
-            drop: vec![],
-            mu: 0.0,
-            sigma: 0.0,
-            n_drop: 0,
-        };
-    }
-    // log statistic (floor tiny/zero norms so the log is finite).
-    let x: Vec<f64> = nrm.iter().map(|&v| f64::from(v.max(1e-6)).ln()).collect();
-    let mu = median_of(x.clone());
-    let dev: Vec<f64> = x.iter().map(|&v| (v - mu).abs()).collect();
-    let sigma = (1.4826 * median_of(dev)).max(1e-9);
-    let normal = Normal::new(mu, sigma).expect("normal");
-    // Lower-tail p under the real-mode null: small for empties (far below μ̂).
-    let p: Vec<f64> = x.iter().map(|&xi| normal.cdf(xi).clamp(0.0, 1.0)).collect();
-    // Conservative BH (π₀ = 1) on the lower-tail p-values.
-    let m = n as f64;
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| p[a].partial_cmp(&p[b]).unwrap_or(std::cmp::Ordering::Equal));
-    let mut q = vec![1.0_f64; n];
-    let mut running = 1.0_f64;
-    for rank in (0..n).rev() {
-        let gi = order[rank];
-        let raw = (m * p[gi] / (rank as f64 + 1.0)).min(1.0);
-        running = running.min(raw);
-        q[gi] = running;
-    }
-    // Drop = empty: significant on the lower side only.
-    let drop: Vec<bool> = (0..n)
-        .map(|i| q[i] <= f64::from(fdr) && x[i] < mu)
-        .collect();
-    let n_drop = drop.iter().filter(|&&v| v).count();
-    LowerTailCall {
-        drop,
-        mu,
-        sigma,
-        n_drop,
-    }
 }
 
 /// Given a fixed null `σ²·χ²_ν` (via `chi`), compute upper-tail p-values on
@@ -322,23 +234,6 @@ fn solve_eff_dof(r: f64, a_lo: f64, a_hi: f64, dof_max: f64) -> f64 {
 // drop-k, no parametric norm null: anisotropy is handled by the per-axis `s_d`,
 // the decision by ash's lfsr.
 
-fn median_of(mut v: Vec<f64>) -> f64 {
-    let m = v.len();
-    if m == 0 {
-        return 0.0;
-    }
-    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
-    // Quickselect the upper-middle order statistic in O(N); the lower-middle
-    // (even case) is then the max of the left partition.
-    let hi = *v.select_nth_unstable_by(m / 2, cmp).1;
-    if m % 2 == 1 {
-        hi
-    } else {
-        let lo = v[..m / 2].iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        0.5 * (lo + hi)
-    }
-}
-
 /// Adaptive-shrinkage feature-null call on a flat `[n × h]` embedding: one
 /// empirical-null ash ([`ash_normal`], collapsed Gibbs) per embedding dimension,
 /// each seeded from the presumed-null (bottom `n − n_hvg` features by norm; `0`
@@ -403,19 +298,19 @@ pub fn ash_null_call(rows: &[f32], n: usize, h: usize, fdr: f32, n_hvg: usize) -
                 ..opts
             };
             let res = ash_normal(&x_d, se_init, &axis_opts);
-            (res.lfsr, res.null_var, res.pi0)
+            (res.lfdr, res.null_var, res.pi0)
         })
         .collect();
 
-    // Per-feature: live if confidently non-null on any axis (Bonferroni lfsr).
+    // Per-feature: live if confidently non-null on any axis (Bonferroni lfdr).
     let hf = h as f64;
     let live: Vec<bool> = (0..n)
         .map(|i| {
-            let min_lfsr = per_axis
+            let min_lfdr = per_axis
                 .iter()
-                .map(|(lfsr, ..)| lfsr[i])
+                .map(|(lfdr, ..)| lfdr[i])
                 .fold(1.0f64, f64::min);
-            (hf * min_lfsr).min(1.0) <= f64::from(fdr)
+            (hf * min_lfdr).min(1.0) <= f64::from(fdr)
         })
         .collect();
     let n_live = live.iter().filter(|&&v| v).count();

@@ -129,6 +129,10 @@ pub struct TrainingParams {
     pub num_negatives: usize,
     pub seed: u64,
     pub composite_mode: CompositeMode,
+    /// Which NCE objective the feature side trains with ([`crate::loss::NceObjective`]).
+    /// Defaults to `Softmax` (InfoNCE, `faba gem`); `senna bge` / `pinto cage` set
+    /// `Logistic`.
+    pub objective: crate::loss::NceObjective,
     /// Explicit L2 penalty `λ · ‖E_feat‖_F²` on the shared feature
     /// embedding, added to the per-step composite loss before backward.
     /// `0.0` disables. Equivalent to a zero-mean Gaussian prior on
@@ -787,6 +791,7 @@ fn chain_step(
         feats,
         &chain_axes,
         smoother,
+        params.objective,
         ctx.dev,
     )?;
     Ok(Some(chain_loss))
@@ -910,9 +915,9 @@ fn single_axis_step(
     };
 
     let bip_loss = if axis.cell_axis.is_identity {
-        nce_loss_identity(axis.model, batch, smoother, dev)?
+        nce_loss_identity(axis.model, batch, smoother, params.objective, dev)?
     } else {
-        nce_loss(axis.model, batch, &cc.coarse_to_fine, smoother, dev)?
+        nce_loss(axis.model, batch, &cc.coarse_to_fine, smoother, params.objective, dev)?
     };
     Ok(Some(bip_loss))
 }

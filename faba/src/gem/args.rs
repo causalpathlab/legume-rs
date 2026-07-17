@@ -46,9 +46,9 @@ pub struct ModelArgs {
                      together) and the model re-fits on the live feature axis (two-pass refine);\n\
                      dropped genes still get a projected embedding.\n\
                      The live/null flags and norm² are written to `{out}.feature_qc.parquet`.\n\
-                     This is the automatic, data-driven complement to the `--n-hvg` top-N cut\n\
-                     (which runs first, up front); leaving both on gives the strongest feature\n\
-                     gate. 0 disables. Must be in [0, 1)."
+                     This is the automatic ALTERNATIVE to the manual `--n-hvg` top-N cut, not a\n\
+                     complement: the two are mutually exclusive. It runs only when `--n-hvg 0`;\n\
+                     with `--n-hvg` set, HVG wins and this is skipped. 0 disables. Must be in [0, 1)."
     )]
     pub feature_null_fdr: f32,
 }
@@ -137,9 +137,8 @@ pub struct CollapseArgs {
                      and collapse every cell onto one point;\n\
                      it shrinks the dictionary and restricts the pseudobulk projection/membership to the kept genes.\n\
                      Defaults to 5000 for consistency with `senna bge` / `pinto`;\n\
-                     `0` keeps every gene (expect a proliferation/housekeeping-dominated collapse on rich data). Try 2000–5000.\n\
-                     The kept count also seeds the `--feature-null-fdr` null call —\n\
-                     the lowest-norm `n − N` features stand in as its presumed null."
+                     `0` selects data-driven instead (the `--feature-null-fdr` branch: Pass 1 → null call → refit).\n\
+                     HVG and the data-driven null are mutually exclusive — setting `--n-hvg > 0` picks HVG and skips the null call. Try 2000–5000."
     )]
     pub n_hvg: usize,
 

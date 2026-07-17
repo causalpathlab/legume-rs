@@ -1,4 +1,4 @@
-use super::feature_projection::{FeatureProjection, FeatureProjectionConfig};
+use super::feature_projection::{FeatureLrtScan, FeatureProjection, FeatureProjectionConfig};
 use super::lift::{CellLineage, LineageQc};
 use super::projection::PbLevelVelocity;
 use crate::data::UnifiedData;
@@ -157,6 +157,17 @@ pub struct FitConfig {
     /// already covers the whole backend. `None` = skip entirely.
     /// See [`crate::fit::feature_projection`].
     pub feature_projection: Option<FeatureProjectionConfig>,
+    /// Data-driven feature SELECTION (the `--n-hvg 0` branch): after phase 1, score
+    /// every gene by the LRT `D_null − D_fit` against the frozen `θ_pb` and call it
+    /// live/null at this FDR ([`crate::fit::feature_projection::select_features_by_lrt`]).
+    /// The result is returned in [`FitOutput::feature_lrt`]; the caller keeps the live
+    /// genes and refits. `Some(fdr)` only on the broad Pass 1; `None` (default) skips.
+    /// Requires `feature_projection` set (reuses its backend gene map).
+    pub select_lrt_fdr: Option<f32>,
+    /// NCE objective for the feature side ([`crate::loss::NceObjective`]). Defaults to
+    /// `Softmax` (InfoNCE), which `faba gem` uses for its dense count data; `senna bge`
+    /// / `pinto cage` set `Logistic` explicitly (byte-identical to before).
+    pub nce_objective: crate::loss::NceObjective,
 }
 
 /// Caller-provided spec for the per-gene β-sharing feature factorization. Lengths
@@ -333,6 +344,10 @@ pub struct FitOutput {
     /// was set and the run reached the stage; the inner `gene_ids` is empty when
     /// the trained axis already covered the whole backend.
     pub feature_projection: Option<FeatureProjection>,
+    /// Data-driven feature-selection scan (`--n-hvg 0` branch): per-gene LRT +
+    /// live/null call against the frozen `θ_pb`. `Some` iff [`FitConfig::select_lrt_fdr`]
+    /// was set (the broad Pass 1); the caller keeps `feature_lrt.live` genes and refits.
+    pub feature_lrt: Option<FeatureLrtScan>,
 }
 
 pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
@@ -346,6 +361,7 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
         // (single cell axis) both require `Sum`. Each phase sets its own
         // mode explicitly; this default just makes the value well-formed.
         composite_mode: CompositeMode::Sum,
+        objective: config.nce_objective,
         feature_embedding_l2: config.feature_embedding_l2,
         max_grad_norm: config.max_grad_norm,
         delta_l2: config.delta_l2,

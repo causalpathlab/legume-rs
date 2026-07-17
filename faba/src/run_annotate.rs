@@ -12,7 +12,7 @@
 //! The gene side is gem's **co-embedded feature vectors**
 //! (`{from}.feature_embedding.parquet`), *not* the `β_g` dictionary — a Euclidean
 //! nearest-centroid call is only meaningful when genes and cells share a metric
-//! space, and β does not share one with θ. See [`crate::gem_gene_embedding`] for the
+//! space, and β does not share one with θ. See [`faba::gem::marker_embedding`] for the
 //! measurements. Those rows are keyed by feature (`{gene}/count/{spliced,unspliced}`),
 //! so each track selects its own modality and re-keys by gene.
 //!
@@ -30,7 +30,7 @@ use clap::{Args, ValueEnum};
 use log::{info, warn};
 use std::path::Path;
 
-use crate::gem_gene_embedding::{load_gene_embedding, Modality};
+use faba::gem::marker_embedding::{load_gene_embedding, Modality};
 use graph_embedding_util::type_annotation::{
     annotate_embeddings_ora, Abstain, InputEmbeddings, MarkerBootstrapConfig, TermOraConfig,
 };

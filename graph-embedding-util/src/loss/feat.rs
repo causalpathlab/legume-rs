@@ -7,7 +7,7 @@
 
 use crate::data::Triplet;
 use crate::feature_network::{select_feat_emb, FeatureNetworkSmoother};
-use crate::loss::logistic_nce;
+use crate::loss::{logistic_nce, softmax_nce, NceObjective};
 use crate::model::JointEmbedModel;
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{Device, Result, Tensor};
@@ -726,6 +726,7 @@ pub fn nce_loss_chain(
     feats: ChainFeatureSide,
     axes: &[ChainAxis],
     smoother: Option<&FeatureNetworkSmoother>,
+    objective: NceObjective,
     dev: &Device,
 ) -> anyhow::Result<Tensor> {
     let b = feats.fine_feats.len();
@@ -768,7 +769,11 @@ pub fn nce_loss_chain(
             JointEmbedModel::score_diag(&e_feat_pos, &e_cell_pos, &b_feat_pos, &b_cell_pos)?;
         let neg_score =
             JointEmbedModel::score_negatives(&e_feat_neg, &e_cell_pos, &b_feat_neg, &b_cell_pos)?;
-        let per_edge = logistic_nce(&pos_score, std::slice::from_ref(&neg_score))?;
+        let negs = std::slice::from_ref(&neg_score);
+        let per_edge = match objective {
+            NceObjective::Logistic => logistic_nce(&pos_score, negs)?,
+            NceObjective::Softmax => softmax_nce(&pos_score, negs)?,
+        };
         let weighted = (per_edge * w_t.clone())?;
         let axis_loss = (weighted.sum(0)? / f64::from(w_sum))?;
         let scaled = (axis_loss * f64::from(axis.lambda))?;
@@ -877,6 +882,7 @@ pub fn nce_loss(
     batch: EdgeBatch,
     cell_coarse_to_fine: &[Vec<usize>],
     smoother: Option<&FeatureNetworkSmoother>,
+    objective: NceObjective,
     dev: &Device,
 ) -> Result<Tensor> {
     let b = batch.coarse_cells.len();
@@ -890,7 +896,7 @@ pub fn nce_loss(
     let e_cell_pos = e_cell_u.index_select(&cell_idx_t, 0)?;
     let b_cell_pos = b_cell_u.index_select(&cell_idx_t, 0)?;
 
-    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, smoother, dev)
+    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, smoother, objective, dev)
 }
 
 /// Fast path for the identity-coarsening case (every "pb-sample" is
@@ -904,6 +910,7 @@ pub fn nce_loss_identity(
     model: &JointEmbedModel,
     batch: EdgeBatch,
     smoother: Option<&FeatureNetworkSmoother>,
+    objective: NceObjective,
     dev: &Device,
 ) -> Result<Tensor> {
     let b = batch.coarse_cells.len();
@@ -913,7 +920,7 @@ pub fn nce_loss_identity(
     let cell_idx_t = Tensor::from_vec(batch.coarse_cells.clone(), b, dev)?;
     let e_cell_pos = model.e_cell.index_select(&cell_idx_t, 0)?;
     let b_cell_pos = model.b_cell.index_select(&cell_idx_t, 0)?;
-    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, smoother, dev)
+    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, smoother, objective, dev)
 }
 
 /// Shared tail of [`nce_loss`] / [`nce_loss_identity`]: feature-side
@@ -926,6 +933,7 @@ fn nce_loss_with_cell_side(
     e_cell_pos: Tensor,
     b_cell_pos: Tensor,
     smoother: Option<&FeatureNetworkSmoother>,
+    objective: NceObjective,
     dev: &Device,
 ) -> Result<Tensor> {
     let b = batch.coarse_cells.len();
@@ -977,7 +985,11 @@ fn nce_loss_with_cell_side(
     let neg_score =
         JointEmbedModel::score_negatives(&e_feat_neg, &e_cell_pos, &b_feat_neg, &b_cell_pos)?;
 
-    let per_edge = logistic_nce(&pos_score, std::slice::from_ref(&neg_score))?;
+    let negs = std::slice::from_ref(&neg_score);
+    let per_edge = match objective {
+        NceObjective::Logistic => logistic_nce(&pos_score, negs)?,
+        NceObjective::Softmax => softmax_nce(&pos_score, negs)?,
+    };
 
     // Normalize by Σw, not B: when most positives are housekeeping and
     // get downweighted, dividing by B leaves an O(mean(w)) gradient
