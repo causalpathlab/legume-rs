@@ -59,13 +59,53 @@ pub(super) use candle_util::loss::log_sigmoid;
 ///
 /// `pos` is `[B]`; each `negs` block is `[B, K]`. The `&[Tensor]` form admits
 /// several concatenated negative slates with differing K; the current callers
-/// (`feat`/`chain`) each pass a single block. (`faba gem` trains with its own
-/// sampled-softmax NCE and does NOT use this.) Returns the per-positive loss
-/// `[B]`; callers mean/weight as needed.
+/// (`feat`/`chain`) each pass a single block. Returns the per-positive loss
+/// `[B]`; callers mean/weight as needed. The [`softmax_nce`] alternative (selected
+/// per axis via [`NceObjective`]) is what `faba gem` trains its feature side with.
 pub fn logistic_nce(pos: &Tensor, negs: &[Tensor]) -> Result<Tensor> {
     let mut term = log_sigmoid(pos)?;
     for neg in negs {
         term = (term + log_sigmoid(&neg.neg()?)?.sum(1)?)?;
     }
     term.neg()
+}
+
+/// Which NCE objective a feature-side loss uses. `Softmax` (default) is sampled-
+/// softmax / InfoNCE: it normalizes the positive against its negatives in one
+/// distribution, which separates cell types better on dense count data (e.g.
+/// `faba gem`) than independent per-pair decisions. `Logistic` is the SGNS per-pair
+/// loss — `senna bge` / `pinto cage` set it explicitly (they train well with it and
+/// stay byte-identical).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NceObjective {
+    /// Per-pair logistic (SGNS) — [`logistic_nce`].
+    Logistic,
+    /// Sampled-softmax / InfoNCE — [`softmax_nce`].
+    #[default]
+    Softmax,
+}
+
+/// Per-positive **sampled-softmax (InfoNCE)** NCE loss: the positive competes
+/// against its `negs` in a single softmax.
+///
+/// ```text
+///   ℓ_i = −pos_i + logsumexp([pos_i, neg_{i,1..K}])
+/// ```
+///
+/// Same signature/shape contract as [`logistic_nce`] (`pos` `[B]`, each `negs`
+/// block `[B, K]`, returns `[B]`), so callers weight/mean identically. Unlike the
+/// logistic loss — which decides each (pos, neg) pair independently and saturates
+/// when many pairs are "somewhat positive" — the softmax normalization makes the
+/// negatives compete with the positive, which sharpens separation on dense data.
+pub fn softmax_nce(pos: &Tensor, negs: &[Tensor]) -> Result<Tensor> {
+    // logits = [pos | neg blocks] along dim 1 → `[B, 1 + ΣK]`; the positive is
+    // column 0, so the cross-entropy target is class 0 and `ℓ = logsumexp − pos`.
+    let mut cols = Vec::with_capacity(1 + negs.len());
+    cols.push(pos.unsqueeze(1)?);
+    cols.extend(negs.iter().cloned());
+    let logits = Tensor::cat(&cols, 1)?; // [B, 1 + ΣK]
+    // Numerically-stable logsumexp over the candidates (subtract the row max).
+    let m = logits.max_keepdim(1)?; // [B, 1]
+    let lse = ((logits.broadcast_sub(&m)?).exp()?.sum_keepdim(1)?.log()? + m)?; // [B, 1]
+    lse.squeeze(1)?.sub(pos)
 }

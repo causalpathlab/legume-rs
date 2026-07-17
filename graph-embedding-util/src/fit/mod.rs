@@ -518,6 +518,25 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // free model.
     cell_model.materialize_e_feat()?;
 
+    // Data-driven feature SELECTION (`--n-hvg 0` branch): score every gene by the LRT
+    // against the just-fixed `θ_pb` and call it live/null at `select_lrt_fdr`. The
+    // caller keeps the live genes and refits (Pass 2). Reuses the feature-projection
+    // count-scale pb view + per-gene Poisson-MAP solve; set only on the broad Pass 1.
+    let feature_lrt = match (config.select_lrt_fdr, config.feature_projection.as_ref()) {
+        (Some(fdr), Some(fp)) if !stop.load(std::sync::atomic::Ordering::Relaxed) => {
+            let pb = stacked_pb_view(&varmap, &collapsed_levels, &cell_to_pb_per_level, h)?;
+            Some(feature_projection::select_features_by_lrt(
+                &pb,
+                h,
+                &fp.backend_row_to_gene,
+                &fp.backend_unspliced_rows,
+                fp.ridge,
+                fdr,
+            ))
+        }
+        _ => None,
+    };
+
     // Lineage-DAG refine (gem β-sharing only; fixed velocity-KNN structure). The warm-up
     // phase 1 above yields a trained-enough dictionary: read pb-level velocity
     // (identity θ_pb + velocity δ_pb, reusing the phase-2 dual solver on the
@@ -840,6 +859,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         cell_lineage,
         lineage_qc,
         feature_projection,
+        feature_lrt,
     })
 }
 

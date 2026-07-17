@@ -13,4 +13,11 @@
 
 pub mod args;
 pub mod common;
+/// Loading gem's co-embedded **feature** embedding (`{out}.feature_embedding.parquet`)
+/// for the marker-space nearest-centroid call in `faba annotate` / `faba lineage` —
+/// the metric-compatible table, not β. See the module docs for why β/θ can't be used.
+pub mod marker_embedding;
+/// The `faba gem` run: joint spliced+unspliced gene-count embedding over the shared
+/// `graph_embedding_util` engine (identity θ + velocity δ). Binary entry: [`run::run_gem_embedding`].
+pub mod run;
 pub mod sample_id;

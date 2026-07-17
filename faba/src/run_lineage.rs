@@ -819,11 +819,11 @@ struct AnnotateTrajArgs<'a> {
 /// `--root-type` can pick the root from these calls; the caller writes
 /// `{out}.trajectory_annotation.parquet` afterwards via [`write_trajectory_annotation`].
 fn compute_node_calls(a: &AnnotateTrajArgs) -> Result<CommunityCalls> {
-    // The co-embedded feature vectors, not β — see `crate::gem_gene_embedding` for why a
+    // The co-embedded feature vectors, not β — see `faba::gem::marker_embedding` for why a
     // Euclidean nearest-centroid call against β is not a well-posed question.
-    let beta = crate::gem_gene_embedding::load_gene_embedding(
+    let beta = faba::gem::marker_embedding::load_gene_embedding(
         a.prefix,
-        crate::gem_gene_embedding::Modality::Spliced,
+        faba::gem::marker_embedding::Modality::Spliced,
     )?;
     let cfg = TermOraConfig {
         n_perm: a.num_perm,

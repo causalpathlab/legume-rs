@@ -30,8 +30,8 @@ use matrix_util::common_io::{basename, mkdir_parent};
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
 
-use faba::gem::args::GemArgs;
-use faba::gem::sample_id::{file_sample_id, longest_common_underscore_suffix};
+use crate::gem::args::GemArgs;
+use crate::gem::sample_id::{file_sample_id, longest_common_underscore_suffix};
 
 /// Default ridge on the per-gene splice offset δ_g, applied automatically whenever
 /// the input carries unspliced rows and the user did not set `--delta-l2`. Keeping a
@@ -193,8 +193,22 @@ fn run_gem_genes_bge(
     // the GENE level (so both splice tracks of a kept gene come along). It is loaded
     // whether or not HVG is on, because it also exempts its genes from the
     // `--feature-null-fdr` drop below — the other gate a gene has to survive.
+    // HVG (prespecified top-N, selected on raw counts BEFORE training) and the
+    // data-driven feature-null (Pass 1 → select on the fit → refit) are COMPETING
+    // selectors — either/or, not stacked. When `--n-hvg` is set it wins and the null
+    // call is skipped (no Pass 1 needed: HVG doesn't look at the fit); the null call
+    // runs only in the automatic `--n-hvg 0` mode. `--must-train-features` overrides
+    // whichever branch runs.
     let hvg_on = args.collapse.n_hvg > 0;
-    let selection_on = hvg_on || args.model.feature_null_fdr > 0.0;
+    let data_driven_on = !hvg_on && args.model.feature_null_fdr > 0.0;
+    if hvg_on && args.model.feature_null_fdr > 0.0 {
+        info!(
+            "--n-hvg {} set → using the HVG cut and skipping the data-driven feature-null \
+             (mutually exclusive). Pass --n-hvg 0 to select data-driven instead.",
+            args.collapse.n_hvg
+        );
+    }
+    let selection_on = hvg_on || data_driven_on;
     // `--markers` is force-trained alongside `--must-train-features`. The annotators read
     // only the TRAINED feature rows, so a marker off the trained axis is absent from the
     // panel rather than merely down-weighted — naming the panel here is what keeps the genes
@@ -324,7 +338,9 @@ fn run_gem_genes_bge(
     // is auto-on with a mild ridge whenever both tracks are present (unless the user
     // set `--delta-l2`) so a δ_g dictionary is always emitted for `faba annotate
     // --track velocity`; a spliced-only input keeps δ off.
-    let build_cfg = |unified: &UnifiedData| -> anyhow::Result<(ge::FitConfig, Vec<Box<str>>, f32)> {
+    let build_cfg = |unified: &UnifiedData,
+                     select_lrt: bool|
+     -> anyhow::Result<(ge::FitConfig, Vec<Box<str>>, f32)> {
         let (factor, gene_names) = build_splice_factor(&unified.feature_names);
         info!(
             "β-sharing factor: {} genes from {} count rows ({} unspliced rows); \
@@ -373,7 +389,10 @@ fn run_gem_genes_bge(
             phase1_cells_per_pb: args.collapse.phase1_cells_per_pb,
             feat_factor: Some(factor),
             delta_l2,
-            lineage_dag: args.train.lineage_dag,
+            // The LRT scan uses the pre-refine θ_pb (scored right after phase 1), so the
+            // throwaway data-driven selection Pass 1 skips the lineage refine — only the
+            // real fit (HVG single-pass, or the refit) pays for it.
+            lineage_dag: args.train.lineage_dag && !select_lrt,
             dag_learnable: !args.train.fixed_dag,
             lineage_smooth: args.train.lineage_smooth,
             // Always on, no flag: geu projects whatever backend genes the trained
@@ -394,108 +413,76 @@ fn run_gem_genes_bge(
                 // noise to `faba annotate`.
                 null_fdr: args.model.feature_null_fdr,
             }),
+            // Data-driven selection (Stage 2): only the broad Pass 1 scores every gene
+            // by LRT for the refit. `None` on the HVG branch and on the refit itself.
+            select_lrt_fdr: select_lrt.then_some(args.model.feature_null_fdr),
+            // Softmax (InfoNCE) NCE: on gem's dense count data the positive competing
+            // against its negatives in one distribution separates cell types better
+            // than the per-pair logistic loss senna bge / pinto cage use.
+            nce_objective: ge::loss::NceObjective::Softmax,
         };
         Ok((cfg, gene_names, delta_l2))
     };
 
-    // Pass 1 — fit on the full (post-HVG) feature axis.
-    let (cfg, mut gene_names, mut delta_l2) = build_cfg(&unified)?;
+    // Pass 1 — fit on the current feature axis. In the data-driven (`--n-hvg 0`)
+    // branch this is the BROAD pass: the engine also scores every gene by the LRT
+    // `D_null − D_fit` against the Pass-1 `θ_pb` for the selection below (`select_lrt_fdr`).
+    let (cfg, mut gene_names, mut delta_l2) = build_cfg(&unified, data_driven_on)?;
     let mut out = ge::fit(&mut unified, cfg).context("ge::fit (genes bge)")?;
 
-    // Empirical-Bayes feature-null QC — the same shared engine call `senna bge` uses.
-    // Each feature row's ‖e_feat‖² (its materialized β_g) is tested against an
-    // estimated null (a gene the model never moved keeps ‖e_feat‖² ~ σ²·χ²_ν); rows
-    // null at the FDR are the untrained low-detection background (the 'empty' genes
-    // that pile at the co-embed centre) and are DROPPED, then the model re-fits on the
-    // live axis (two-pass refine). β-sharing means a null gene drops both its tracks
-    // together. The automatic, data-driven analog of the manual `--n-hvg` cut. Off
-    // with `--feature-null-fdr 0`.
-    if args.model.feature_null_fdr > 0.0 {
-        let (n, h) = out.model.e_feat.dims2()?;
-        let e_feat: Vec<f32> = out
-            .model
-            .e_feat
-            .to_vec2::<f32>()?
-            .into_iter()
-            .flatten()
+    // Data-driven feature selection (`--n-hvg 0`): keep the genes the engine's LRT null
+    // call flagged live against the Pass-1 `θ_pb` — the dispersion-aware "θ explains this
+    // gene" statistic, NOT ‖β‖² (invalid for a re-solved gene). Then refit on the live
+    // axis (two-pass). `--must-train-features` overrides the call. Unlike the old norm²
+    // path there is no ">90% dropped" guard: dropping most genes IS the intended
+    // behaviour here (all backend genes enter Pass 1), only the all-null case is guarded.
+    if let Some(scan) = out.feature_lrt.take() {
+        // `scan.live` is per BACKEND gene id; with `--n-hvg 0` the unified axis IS the
+        // backend axis, so `backend_row_to_gene[r]` maps each feature row to its call.
+        // A live gene keeps BOTH its splice tracks (row-level via the gene map).
+        let n_rows = unified.n_features();
+        let n_genes_total = scan.live.len();
+        let n_live_genes = scan.live.iter().filter(|&&l| l).count();
+        let mut live: Vec<usize> = (0..n_rows)
+            .filter(|&r| scan.live[backend_row_to_gene[r] as usize])
             .collect();
-        let null = ge::null_call::ash_null_call(
-            &e_feat,
-            n,
-            h,
-            args.model.feature_null_fdr,
-            args.collapse.n_hvg,
-        );
-        info!(
-            "feature-null QC [ash] — σ̂²={:.4}, ν̂={:.1}/{}, π̂₀={:.2}; {} / {} rows null at FDR {} → {}.feature_qc.parquet",
-            null.sigma2, null.eff_dof, h, null.pi0, n - null.n_live, n, args.model.feature_null_fdr, args.out,
-        );
-        save_feature_qc(&e_feat, n, h, &unified.feature_names, &null, &args.out)?;
-        let mut live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
-        let raw_live = live.len();
 
-        // Degenerate-fit guards read the RAW null call — BEFORE any
-        // `--must-train-features` rescue. Rescuing first would make `live`
-        // non-empty, the guard would never fire, and the refit would drop every
-        // row EXCEPT the force-kept ones — the panel would eat the dictionary.
-        // Two cases keep the pass-1 fit and skip the refit:
-        //   (a) all-null — a refit on zero rows is invalid;
-        //   (b) >90% dropped — gem's HVG subset is EVERY row a trained HVG gene,
-        //       so norm² is unimodal with no empty-feature null population, and
-        //       the null call over-flags (it forces a null/signal split that
-        //       isn't there). Refitting on the handful of survivors trains a
-        //       broken run, so keep pass-1 and warn.
-        if raw_live == 0 {
-            log::warn!(
-                "feature-null QC flagged all {n} rows null (degenerate fit); keeping pass-1 fit."
-            );
-        } else if raw_live * 10 < n {
-            log::warn!(
-                "feature-null QC flagged {} / {n} rows null ({:.0}%) — a collapse or a null-free \
-                 (HVG-subset) feature set, not a clean drop. Keeping pass-1 fit instead of \
-                 refitting on only {raw_live} survivor(s). Inspect {}.feature_qc.parquet before \
-                 trusting this run.",
-                n - raw_live,
-                100.0 * (n - raw_live) as f64 / n as f64,
-                args.out
-            );
-        } else {
-            // `--must-train-features` outranks the null call as well as the HVG cut: a
-            // gene the user named stays in the dictionary even when the model never moved
-            // its β off init. Resolved gene-level again (not row-level) so a rescued gene
-            // keeps BOTH its splice tracks — dropping one would break the β-sharing
-            // pairing. The genes are still reported null in `{out}.feature_qc.parquet`.
-            if let Some(must_train) = must_train.as_ref() {
-                let (row_gene, genes) = intern_gene_keys(&unified.feature_names);
-                let keep_genes: rustc_hash::FxHashSet<usize> =
-                    must_train.resolve_quiet(&genes).into_iter().collect();
-                let forced_rows: Vec<usize> = (0..row_gene.len())
-                    .filter(|&r| keep_genes.contains(&(row_gene[r] as usize)))
-                    .collect();
-                let rescued = data_beans_alg::hvg::union_indices(&mut live, &forced_rows);
-                if rescued > 0 {
-                    log::warn!(
-                        "--must-train-features: {rescued} feature row(s) were called null at FDR \
-                         {} but kept anyway — those genes carry no signal in this data, so their \
-                         β stays near its init. See {}.feature_qc.parquet.",
-                        args.model.feature_null_fdr,
-                        args.out
-                    );
-                }
-            }
-
-            if live.len() < n {
-                info!(
-                    "two-pass refine: dropping {} null feature rows, re-fitting on {} live rows.",
-                    n - live.len(),
-                    live.len()
+        // `--must-train-features` outranks the null call: a named gene stays even when it
+        // carries no LRT signal (both tracks, resolved gene-level so β-sharing stays paired).
+        if let Some(must_train) = must_train.as_ref() {
+            let (row_gene, genes) = intern_gene_keys(&unified.feature_names);
+            let keep_genes: rustc_hash::FxHashSet<usize> =
+                must_train.resolve_quiet(&genes).into_iter().collect();
+            let forced_rows: Vec<usize> = (0..row_gene.len())
+                .filter(|&r| keep_genes.contains(&(row_gene[r] as usize)))
+                .collect();
+            let rescued = data_beans_alg::hvg::union_indices(&mut live, &forced_rows);
+            if rescued > 0 {
+                log::warn!(
+                    "--must-train-features: {rescued} feature row(s) called null but kept — \
+                     those genes carry no LRT signal in this data."
                 );
-                unified.subset_features(&live);
-                let (cfg2, gn2, dl2) = build_cfg(&unified)?;
-                out = ge::fit(&mut unified, cfg2).context("ge::fit refit (feature-null)")?;
-                gene_names = gn2;
-                delta_l2 = dl2;
             }
+        }
+
+        if n_live_genes == 0 {
+            log::warn!(
+                "data-driven feature-null flagged all {n_genes_total} genes null (degenerate call); \
+                 keeping the pass-1 fit."
+            );
+        } else if live.len() < n_rows {
+            info!(
+                "data-driven feature selection: {n_live_genes} / {n_genes_total} genes live \
+                 (LRT null call at FDR {}); dropping {} rows, refitting on {} live rows.",
+                args.model.feature_null_fdr,
+                n_rows - live.len(),
+                live.len(),
+            );
+            unified.subset_features(&live);
+            let (cfg2, gn2, dl2) = build_cfg(&unified, false)?;
+            out = ge::fit(&mut unified, cfg2).context("ge::fit refit (data-driven)")?;
+            gene_names = gn2;
+            delta_l2 = dl2;
         }
     }
     let n_genes = gene_names.len();
@@ -971,32 +958,6 @@ fn build_splice_factor(
     )
 }
 
-/// Write the feature-null QC report `{out}.feature_qc.parquet` (per feature row:
-/// `norm2` = ‖e_feat‖², `live` = 1 kept / 0 dropped), the same schema `senna bge`
-/// emits. `e_feat` is row-major `[n × h]`.
-fn save_feature_qc(
-    e_feat: &[f32],
-    n: usize,
-    h: usize,
-    feature_names: &[Box<str>],
-    null: &graph_embedding_util::null_call::NullCall,
-    out_prefix: &str,
-) -> anyhow::Result<()> {
-    use matrix_util::dmatrix_io::DMatrix;
-    use matrix_util::traits::IoOps;
-    let mut m = DMatrix::<f32>::zeros(n, 2);
-    for f in 0..n {
-        m[(f, 0)] = e_feat[f * h..(f + 1) * h].iter().map(|&x| x * x).sum();
-        m[(f, 1)] = f32::from(u8::from(null.live[f]));
-    }
-    let cols: Vec<Box<str>> = ["norm2", "live"].iter().map(|s| Box::from(*s)).collect();
-    m.to_parquet_with_names(
-        &format!("{out_prefix}.feature_qc.parquet"),
-        (Some(feature_names), Some("feature")),
-        Some(&cols),
-    )?;
-    Ok(())
-}
 
 fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
     // Fail on an ambiguous / empty gene spec before any I/O.
