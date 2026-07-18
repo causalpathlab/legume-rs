@@ -41,6 +41,12 @@ use crate::gem::sample_id::{file_sample_id, longest_common_underscore_suffix};
 /// range (0.01–1.0).
 const DEFAULT_DELTA_L2: f32 = 1.0;
 
+/// Mild L2 on the feature embedding `‖β_g‖`, applied by default: bounds norm inflation along
+/// the dominant axis (the σ̂² runaway that lets a few genes dominate the positive edges) without
+/// meaningfully shrinking real signal. Small — `0.1` already crushes σ̂² hard, so `1e-4` is a
+/// gentle floor rather than a heavy regulariser.
+const DEFAULT_FEATURE_L2: f32 = 1e-4;
+
 pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     validate_args(args)?;
@@ -382,7 +388,7 @@ fn run_gem_genes_bge(
                 format!("{}.fisher_weights.parquet", args.out).into_boxed_str(),
             ),
             feature_network: None,
-            feature_embedding_l2: 0.0,
+            feature_embedding_l2: DEFAULT_FEATURE_L2,
             weight_decay: 0.0,
             max_grad_norm: args.train.max_grad_norm,
             cell_weight_mult: None,
@@ -640,27 +646,90 @@ fn run_gem_genes_bge(
         write_projection_qc_json(p, &args.out)?;
     }
 
-    // Splice output (β-sharing): the identity `latent` above is the RAW spliced θ.
-    // On the cell axis we also emit the RAW velocity increment δ (`velocity.parquet`),
-    // same cell×H layout / barcodes as the latent — magnitude = speed, direction =
-    // velocity, no post-hoc unit-norm. The nascent state is just θ + δ = latent +
-    // velocity (derivable, not written). Per-gene velocity, if wanted, is the in-model
-    // δ_g (`--delta-l2`, written to delta_dictionary.parquet) — not a post-hoc average.
+    // Cell-axis velocity (β-sharing). The identity `latent` above is the RAW spliced θ.
+    // The velocity is the EMBEDDING-SPACE operator v = P·θ (`velocity_operator`): the shift
+    // that makes each cell's spliced prediction catch up to its nascent one, read off the
+    // DENOISED dictionaries β_g (spliced) and δ_g (= β_u − β_s) — no raw U−S count
+    // differencing. The per-cell Poisson increment δ_c is instead dominated by a
+    // shrinkage-toward-origin common-mode (δ_c ≈ −0.5·θ, from fitting sparse unspliced
+    // counts absolutely), so it is DEMOTED to `velocity_increment.parquet` (diagnostic).
+    // Nascent state = θ + v is derivable, not written.
     let h = args.model.embedding_dim;
     let n = unified.barcodes.len();
-    if let Some(velocity) = &out.cell_velocity {
-        let vel_t = candle_util::candle_core::Tensor::from_vec(velocity.clone(), (n, h), &cpu)?;
+    // One `cell × H` parquet writer, shared by the velocity outputs below.
+    let write_cell = |suffix: &str, data: Vec<f32>| -> anyhow::Result<()> {
+        let t = Tensor::from_vec(data, (n, h), &cpu)?;
         ge::save_embedding(
-            &format!("{}.velocity.parquet", args.out),
-            &vel_t,
+            &format!("{}.{suffix}.parquet", args.out),
+            &t,
             &unified.barcodes,
             "cell",
         )
-        .context("save velocity")?;
-        info!(
-            "wrote {}.velocity.parquet (raw cell velocity increment δ; ‖δ‖ = speed)",
-            args.out
-        );
+        .with_context(|| format!("save {suffix}"))?;
+        Ok(())
+    };
+    let operator_velocity = {
+        let vars = out.varmap.data().lock().unwrap();
+        match (vars.get("beta"), vars.get("delta")) {
+            (Some(beta), Some(delta)) => {
+                let beta_t = beta.as_tensor().to_device(&cpu)?;
+                let delta_t = delta.as_tensor().to_device(&cpu)?;
+                let n_g = beta_t.dim(0)?;
+                let beta_g = beta_t.flatten_all()?.to_vec1::<f32>()?;
+                let delta_g = delta_t.flatten_all()?.to_vec1::<f32>()?;
+                let theta = out.model.e_cell.to_device(&cpu)?.flatten_all()?.to_vec1::<f32>()?;
+                // λ=1e-2 (Gram-trace-scaled) conditions the h×h lin-solve; never an inverse.
+                let p = ge::cell_projection::velocity_operator(&beta_g, &delta_g, n_g, h, 1e-2);
+                let mut vel = ge::cell_projection::apply_velocity_operator(&theta, &p, n, h);
+                // Center per axis: v ← P(θ − θ̄). The operator has no intrinsic zero, and the
+                // population-mean velocity P·θ̄ is a common-mode drift; subtracting it is the
+                // natural gauge for a field and keeps a δ_c-style common-mode from returning.
+                let mut mean = vec![0f64; h];
+                for c in 0..n {
+                    for k in 0..h {
+                        mean[k] += f64::from(vel[c * h + k]);
+                    }
+                }
+                for m in &mut mean {
+                    *m /= n.max(1) as f64;
+                }
+                for c in 0..n {
+                    for k in 0..h {
+                        vel[c * h + k] -= mean[k] as f32;
+                    }
+                }
+                Some(vel)
+            }
+            _ => None,
+        }
+    };
+    match operator_velocity {
+        Some(vel) => {
+            write_cell("velocity", vel)?;
+            info!(
+                "wrote {}.velocity.parquet (embedding-space velocity v=P·θ; β_g+δ_g operator, no raw counts)",
+                args.out
+            );
+            // The raw increment δ_c travels alongside as a diagnostic only (shrinkage-prone).
+            if let Some(delta_c) = &out.cell_velocity {
+                write_cell("velocity_increment", delta_c.clone())?;
+                info!(
+                    "wrote {}.velocity_increment.parquet (raw δ_c increment — diagnostic; δ_c ≈ −0.5·θ)",
+                    args.out
+                );
+            }
+        }
+        // No δ_g dictionary (--delta-l2 = 0): fall back to the raw increment for velocity.parquet.
+        None => {
+            if let Some(velocity) = &out.cell_velocity {
+                write_cell("velocity", velocity.clone())?;
+                log::warn!(
+                    "wrote {}.velocity.parquet from the raw increment δ_c (no δ_g dictionary for the \
+                     operator — enable --delta-l2 for the fate-faithful embedding-space velocity)",
+                    args.out
+                );
+            }
+        }
     }
 
     // Lineage-DAG (experimental): dump the per-level pseudobulk states — identity

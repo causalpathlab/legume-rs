@@ -45,8 +45,11 @@ mod layers;
 pub mod style;
 mod svg;
 
-use io::{col_index, load_curves, load_node_positions, load_trajectory_edges, Curves};
+use io::{
+    col_index, load_curves, load_node_positions, load_trajectory_edges, load_velocity_grid, Curves,
+};
 use layers::{
+    build_grid_velocity_arrows,
     build_celltype_layers, build_curve_layer, build_nodes, build_pseudotime_layer,
     build_tree_layer, build_velocity_arrows, CellScatter,
 };
@@ -105,7 +108,9 @@ pub enum Trajectory {
     /// The MST drawn once, stroke width ∝ how many root→leaf paths cross each
     /// edge. No overplotting — use when the curve count gets large.
     Tree,
-    /// Neither.
+    /// No backbone at all — cells + the velocity field only. Drops the MST edges
+    /// AND the node dots, root star and labels (the nodes are a `--n-centroids`
+    /// artefact that wobbles run-to-run).
     None,
 }
 
@@ -119,6 +124,33 @@ pub enum ColorBy {
     Celltype,
     /// Continuous pseudotime on a blue→red ramp, plus a colourbar.
     Pseudotime,
+}
+
+/// Non-linear remap of the pseudotime → colour ramp, so a few late-time outliers do not
+/// compress the whole progenitor bulk into one end of the spectrum.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
+#[clap(rename_all = "kebab-case")]
+pub enum PseudotimeScale {
+    /// Linear in pseudotime.
+    Linear,
+    /// `√` — mild spread of the crowded low end. (default)
+    #[default]
+    Sqrt,
+    /// `log10(1 + ·)` — stronger spread of the low end.
+    Log10,
+}
+
+impl PseudotimeScale {
+    /// Map a pseudotime `v ∈ [lo, hi]` to a ramp position in `[0, 1]` under the scale.
+    pub fn frac(self, v: f32, lo: f32, span: f32) -> f32 {
+        let x = ((v - lo) / span).clamp(0.0, 1.0); // linear position first
+        match self {
+            Self::Linear => x,
+            Self::Sqrt => x.sqrt(),
+            // span-normalised log so the endpoints stay 0 and 1 regardless of magnitude.
+            Self::Log10 => (x * 9.0 + 1.0).log10(), // log10(1)=0 … log10(10)=1
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -146,6 +178,14 @@ pub struct PlotArgs {
         help = "Colour cells by coarse cell type (default) or by pseudotime"
     )]
     pub color_by: ColorBy,
+
+    #[arg(
+        long = "pseudotime-scale",
+        value_enum,
+        default_value_t = PseudotimeScale::Sqrt,
+        help = "Non-linear remap of the --color-by pseudotime ramp (default sqrt) so late-time outliers don't dominate the spectrum"
+    )]
+    pub pseudotime_scale: PseudotimeScale,
 
     #[arg(long, default_value_t = 9.0, help = "Plot width (inches)")]
     pub width: f32,
@@ -202,7 +242,8 @@ pub struct PlotArgs {
                          the tree carries the same information without it.\n\
                        curves → the smooth per-lineage principal curves\n\
                          (legible for a handful of lineages).\n\
-                       none   → cells and nodes only."
+                       none   → no backbone at all: cells + the velocity field only,\n\
+                         no MST edges, node dots, root star or labels."
     )]
     pub trajectory: Trajectory,
 
@@ -232,6 +273,41 @@ pub struct PlotArgs {
                        none     → no node labels; the cell legend still names the types."
     )]
     pub label_nodes: NodeLabels,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Colour every cell solid by its argmax `coarse_label`, ignoring the soft-set confidence fade",
+        long_help = "By default cells are coloured by their LEADING fate (the argmax `coarse_label`) with the \
+                     soft `label_set` setting opacity: a size-1 set (confident single call) draws SOLID, a \
+                     size-≥2 set (an uncommitted cell between fates) draws FADED in the same leading-fate \
+                     colour, and an empty set is `unassigned`. So the differentiation lean still shows in \
+                     colour, but a transcriptionally-central progenitor is not given a false-confident solid \
+                     call. Pass this flag to draw every cell solid by the argmax `coarse_label` (the old \
+                     winner-take-all view, with no confidence fade)."
+    )]
+    pub label_argmax: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Draw `unassigned` cells too (default: dropped, so only called/mixed cells are shown)"
+    )]
+    pub show_unassigned: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Do not print a cell-type name at each type's centroid (default: label centroids, so the plot reads without decoding many leading/second colours)"
+    )]
+    pub no_celltype_labels: bool,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Scale factor on the velocity-field arrow length (default 0.5; 1.0 = the raw grid displacement)"
+    )]
+    pub velocity_scale: f32,
 
     #[arg(
         long,
@@ -312,10 +388,13 @@ pub fn run_plot(args: &PlotArgs) -> Result<()> {
         radius_px,
     };
     let mut layers: Vec<TopicLayer> = Vec::new();
+    // Haloed cell-type names at each type's centroid (celltype colouring only).
+    let mut celltype_labels = String::new();
     // Extra vector SVG spliced in just before </svg> (legend or colourbar).
     let side_overlay = match args.color_by {
         ColorBy::Celltype => {
-            let legend = build_celltype_layers(prefix, &cells, args, &mut layers)?;
+            let (legend, labels) = build_celltype_layers(prefix, &cells, args, font_px, &mut layers)?;
+            celltype_labels = labels;
             emit_legend(&legend, font_px)
         }
         ColorBy::Pseudotime => {
@@ -375,11 +454,27 @@ pub fn run_plot(args: &PlotArgs) -> Result<()> {
         }
     }
 
+    // scVelo-style cell-velocity field (t-UMAP layout only): gridded local-flow arrows,
+    // independent of the trajectory backbone. Absent file (e.g. PHATE) → no overlay.
+    match load_velocity_grid(prefix, &bounds, ext, args.velocity_scale) {
+        // `build_grid_velocity_arrows` already returns `Ok(None)` for an empty field.
+        Ok(segs) => match build_grid_velocity_arrows(&segs, ext, radius_px) {
+            Ok(Some(layer)) => layers.push(layer),
+            Ok(None) => {}
+            Err(e) => warn!("velocity-grid arrows skipped: {e}"),
+        },
+        Err(e) => warn!("velocity-grid arrows unavailable: {e}"),
+    }
+
     //////////////////////////////////////////////////////////////
     // trajectory nodes: the dark point layer, plus labels/root //
     //////////////////////////////////////////////////////////////
-    let node_overlay = match &nodes {
-        Some(nodes) => {
+    // `--trajectory none` drops the WHOLE backbone — the edges AND the node dots,
+    // root star and labels — leaving cells + the velocity field. The MST nodes are a
+    // `--n-centroids` artefact (their count and placement wobble run-to-run); once
+    // the trajectory is off they are clutter, not signal.
+    let node_overlay = match (&nodes, matches!(backbone, Trajectory::None)) {
+        (Some(nodes), false) => {
             match build_nodes(prefix, nodes, ext, radius_px, font_px, args.label_nodes) {
                 Ok((layer, overlay)) => {
                     layers.push(layer);
@@ -391,7 +486,7 @@ pub fn run_plot(args: &PlotArgs) -> Result<()> {
                 }
             }
         }
-        None => String::new(),
+        _ => String::new(),
     };
 
     anyhow::ensure!(!layers.is_empty(), "nothing to plot");
@@ -406,7 +501,7 @@ pub fn run_plot(args: &PlotArgs) -> Result<()> {
         label_font_size_px: font_px,
         ..Default::default()
     };
-    let overlay = format!("{node_overlay}{side_overlay}");
+    let overlay = format!("{node_overlay}{celltype_labels}{side_overlay}");
     let splice = |svg: String| match overlay.is_empty() {
         true => svg,
         false => svg.replacen("</svg>", &format!("{overlay}</svg>"), 1),

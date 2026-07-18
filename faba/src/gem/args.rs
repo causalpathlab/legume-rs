@@ -7,8 +7,8 @@ use super::common::ComputeDevice;
 pub struct ModelArgs {
     #[arg(
         long,
-        default_value_t = 32,
-        help = "Embedding dimension H (size of β_g and the cell embedding)"
+        default_value_t = 128,
+        help = "Embedding dimension H (size of β_g and the cell embedding; default 128)"
     )]
     pub embedding_dim: usize,
 
@@ -127,8 +127,8 @@ pub struct CollapseArgs {
 
     #[arg(
         long = "n-hvg",
-        default_value_t = 5000,
-        help = "Keep only the top-N highly-variable genes (default 5000, matching senna/pinto; 0 = all genes)",
+        default_value_t = 0,
+        help = "HVG cut: keep the top-N highly-variable genes (default 0 = data-driven feature-null selection instead; >0 = HVG)",
         long_help = "Gene-level HVG feature filter (like `senna bge`).\n\
                      Selects the top-N most variable GENES (NB dispersion-trend, spliced+unspliced pooled)\n\
                      and drops the rest — both the spliced and unspliced rows of a dropped gene go together\n\
@@ -136,9 +136,10 @@ pub struct CollapseArgs {
                      This removes the abundant, uniform housekeeping/ribosomal genes that otherwise dominate the positive edges\n\
                      and collapse every cell onto one point;\n\
                      it shrinks the dictionary and restricts the pseudobulk projection/membership to the kept genes.\n\
-                     Defaults to 5000 for consistency with `senna bge` / `pinto`;\n\
-                     `0` selects data-driven instead (the `--feature-null-fdr` branch: Pass 1 → null call → refit).\n\
-                     HVG and the data-driven null are mutually exclusive — setting `--n-hvg > 0` picks HVG and skips the null call. Try 2000–5000."
+                     Defaults to `0`: the DATA-DRIVEN feature-null selection (the `--feature-null-fdr` branch:\n\
+                     Pass 1 → LRT null call → refit on the live genes), which keeps low-abundance markers an HVG cut would drop.\n\
+                     Set `--n-hvg > 0` to pick a fixed HVG cut instead (e.g. 5000, matching `senna bge` / `pinto`).\n\
+                     HVG and the data-driven null are mutually exclusive — setting `--n-hvg > 0` picks HVG and skips the null call."
     )]
     pub n_hvg: usize,
 

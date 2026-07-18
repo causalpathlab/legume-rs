@@ -152,8 +152,12 @@ pub fn solve_cell_increment(
 /// `feats` (the frozen bias, plus any fixed-latent log-rate folded in). The ridge
 /// `λ` applies to `v` only; the intercept `b_c` is unpenalised. Returns `(v, b_c)`.
 ///
-/// Each Newton step is a small `(h+1)×(h+1)` SPD solve; only the Hessian's upper
-/// triangle is accumulated, then mirrored.
+/// Vectorised as iteratively-reweighted least squares: the design matrix `E = [m × d]`
+/// (row `k = [e_{f_k} | 1]`, `m = feats.len()`) is FIXED across Newton steps, so it is
+/// built once and each step is two matmuls — the scores `s = Eθ` and the weighted Gram
+/// `EᵀWE` (`W = diag(μ)`). This hands the `O(m·h²)` Hessian to a SIMD-blocked `matmul`
+/// instead of a scalar rank-1 triangle accumulation; the result is algebraically identical,
+/// just reassociated. `d = h+1` SPD Cholesky solve as before.
 fn solve_poisson_map(
     feats: &[(u32, f32)],
     frozen_e: &[f32],
@@ -162,48 +166,48 @@ fn solve_poisson_map(
     lambda: f64,
 ) -> (Vec<f32>, f32) {
     let d = h + 1; // [v; b_c]
-    let mut theta = DVector::<f64>::zeros(d);
-    let mut grad = DVector::<f64>::zeros(d); // reused across iterations
-    for _ in 0..MAX_IRLS_ITERS {
-        grad.fill(0.0);
-        // Fresh Hessian (consumed by the Cholesky below, so no clone). Only
-        // the upper triangle is filled, then mirrored once.
-        let mut hess = DMatrix::<f64>::zeros(d, d);
-        for (k, &(idx, n)) in feats.iter().enumerate() {
-            let ef = &frozen_e[idx as usize * h..(idx as usize + 1) * h];
-            // s = ⟨e_f, v⟩ + offset_k + b_c
-            let mut s = edge_offset[k] + theta[h];
-            for (j, &efj) in ef.iter().enumerate() {
-                s += theta[j] * f64::from(efj);
-            }
-            let mu = s.clamp(-SCORE_CLAMP, SCORE_CLAMP).exp();
-            let resid = f64::from(n) - mu;
-            // grad += resid · ẽ ;  hess (upper triangle) += μ · ẽ ẽᵀ
-            for (a, &efa) in ef.iter().enumerate() {
-                let efa = f64::from(efa);
-                grad[a] += resid * efa;
-                let row = mu * efa;
-                for (bb, &efb) in ef.iter().enumerate().skip(a) {
-                    hess[(a, bb)] += row * f64::from(efb);
-                }
-                hess[(a, h)] += row; // cross column with the intercept (1)
-            }
-            grad[h] += resid;
-            hess[(h, h)] += mu;
+    let m = feats.len();
+    // Design matrix E and the response n, gathered once. E's last column is the intercept.
+    let mut e_mat = DMatrix::<f64>::zeros(m, d);
+    let mut n_vec = DVector::<f64>::zeros(m);
+    let offset = DVector::<f64>::from_iterator(m, edge_offset.iter().copied());
+    for (k, &(idx, n)) in feats.iter().enumerate() {
+        let ef = &frozen_e[idx as usize * h..(idx as usize + 1) * h];
+        for (j, &efj) in ef.iter().enumerate() {
+            e_mat[(k, j)] = f64::from(efj);
         }
-        // Ridge prior on v (not the intercept) + PD jitter on the diagonal.
+        e_mat[(k, h)] = 1.0;
+        n_vec[k] = f64::from(n);
+    }
+
+    let mut theta = DVector::<f64>::zeros(d);
+    let mut we = DMatrix::<f64>::zeros(m, d); // E with rows reweighted by μ; reused
+    for _ in 0..MAX_IRLS_ITERS {
+        // s = Eθ + offset ; μ = exp(clamp s) ; resid = n − μ
+        let mut s = &e_mat * &theta;
+        s += &offset;
+        let mu = s.map(|x| x.clamp(-SCORE_CLAMP, SCORE_CLAMP).exp());
+        let resid = &n_vec - &mu;
+        // grad = Eᵀ resid − λ P θ   (ridge on v only, not the intercept b_c)
+        let mut grad = e_mat.tr_mul(&resid);
+        for k in 0..h {
+            grad[k] -= lambda * theta[k];
+        }
+        // Hessian = Eᵀ diag(μ) E + λ P + jitter. Reweight E's rows by μ on the contiguous
+        // column-major backing (no per-element bounds checks), then one gemm for the Gram.
+        let (we_s, e_s, mu_s) = (we.as_mut_slice(), e_mat.as_slice(), mu.as_slice());
+        for j in 0..d {
+            let base = j * m;
+            for k in 0..m {
+                we_s[base + k] = mu_s[k] * e_s[base + k];
+            }
+        }
+        let mut hess = e_mat.tr_mul(&we);
         for k in 0..h {
             hess[(k, k)] += lambda;
-            grad[k] -= lambda * theta[k];
         }
         for k in 0..d {
             hess[(k, k)] += PD_JITTER;
-        }
-        // Mirror upper → lower to complete the symmetric Hessian.
-        for a in 0..d {
-            for bb in (a + 1)..d {
-                hess[(bb, a)] = hess[(a, bb)];
-            }
         }
         let Some(chol) = hess.cholesky() else {
             break; // degenerate; keep the current estimate
@@ -216,6 +220,84 @@ fn solve_poisson_map(
     }
     let v: Vec<f32> = (0..h).map(|k| theta[k] as f32).collect();
     (v, theta[h] as f32)
+}
+
+/// Embedding-space velocity **operator** — the fate-faithful alternative to the per-cell
+/// increment [`solve_cell_increment`]. The increment fits each cell's sparse *unspliced*
+/// counts *absolutely*, so it is dominated by a shrinkage-toward-origin common-mode
+/// (empirically `δ ≈ −0.5·θ` in ~all cells) and carries little fate direction.
+///
+/// This reads velocity off the DENOISED dictionaries instead. A cell's future spliced
+/// state is where its nascent (unspliced) content points, so the velocity is the latent
+/// shift `v` that makes the spliced prediction catch up to the nascent one, least-squares
+/// over genes:
+/// ```text
+/// minᵥ Σ_g ( β_s,g·(θ+v) − β_u,g·θ )²  ⟹  v = P·θ,   P = (BₛᵀBₛ + λI)⁻¹ Bₛᵀ D
+/// ```
+/// with `Bₛ = β_g` (the spliced dictionary) and `D = β_u − β_s = δ_g` (the delta
+/// dictionary). It touches only model parameters — **no raw U−S count differencing** — and
+/// is solved by a ridge-conditioned Cholesky lin-solve, **never an explicit matrix inverse**
+/// (`BₛᵀBₛ` is easily ill-conditioned once the latent axes correlate).
+///
+/// `beta_g`/`delta_g` are row-major `[n_genes × h]` and gene-aligned. Returns the operator
+/// `P` row-major `[h × h]`; apply it per cell with [`apply_velocity_operator`]. The ridge
+/// `lambda` is scaled to the Gram trace, so it is dimensionless.
+#[must_use]
+pub fn velocity_operator(
+    beta_g: &[f32],
+    delta_g: &[f32],
+    n_genes: usize,
+    h: usize,
+    lambda: f64,
+) -> Vec<f32> {
+    debug_assert_eq!(beta_g.len(), n_genes * h);
+    debug_assert_eq!(delta_g.len(), n_genes * h);
+    let bs = DMatrix::<f64>::from_fn(n_genes, h, |i, j| f64::from(beta_g[i * h + j]));
+    let d = DMatrix::<f64>::from_fn(n_genes, h, |i, j| f64::from(delta_g[i * h + j]));
+    let mut gram = bs.tr_mul(&bs); // Bₛᵀ Bₛ  [h×h]
+    let rhs = bs.tr_mul(&d); //       Bₛᵀ D   [h×h]
+    // Ridge scaled to the mean Gram diagonal keeps `lambda` dimensionless and the solve PD.
+    let scale = (gram.diagonal().sum() / h as f64).max(1e-12);
+    for k in 0..h {
+        gram[(k, k)] += lambda * scale;
+    }
+    // Solve gram·P = rhs by Cholesky (gram is SPD after the ridge); LU only if it somehow
+    // is not. Never an explicit inverse.
+    let p = gram
+        .clone()
+        .cholesky()
+        .map(|c| c.solve(&rhs))
+        .or_else(|| gram.lu().solve(&rhs))
+        .unwrap_or(rhs);
+    let mut out = vec![0f32; h * h];
+    for i in 0..h {
+        for j in 0..h {
+            out[i * h + j] = p[(i, j)] as f32;
+        }
+    }
+    out
+}
+
+/// Apply the [`velocity_operator`] `p` (`[h × h]` row-major) to per-cell identities:
+/// `v_c = P·θ_c`. `theta` is row-major `[n_cells × h]`; returns `[n_cells × h]` row-major.
+#[must_use]
+pub fn apply_velocity_operator(theta: &[f32], p: &[f32], n_cells: usize, h: usize) -> Vec<f32> {
+    debug_assert_eq!(theta.len(), n_cells * h);
+    debug_assert_eq!(p.len(), h * h);
+    let mut v = vec![0f32; n_cells * h];
+    v.par_chunks_mut(h)
+        .zip(theta.par_chunks(h))
+        .for_each(|(vc, tc)| {
+            for i in 0..h {
+                let row = &p[i * h..(i + 1) * h];
+                vc[i] = row
+                    .iter()
+                    .zip(tc)
+                    .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                    .sum::<f64>() as f32;
+            }
+        });
+    v
 }
 
 #[cfg(test)]
@@ -334,5 +416,40 @@ mod tests {
         let (ec, bc) = project_cells(&e, &b, &per_cell, 2, 1.0, None);
         assert_eq!(ec.len(), 4); // 2 cells × h=2
         assert_eq!(bc.len(), 2);
+    }
+
+    // The operator solves P = (BₛᵀBₛ+λI)⁻¹ BₛᵀD. With D = Bₛ·M (each gene's δ_g the same
+    // linear image of its β_s), the least-squares map must recover M (up to the tiny ridge).
+    #[test]
+    fn velocity_operator_recovers_planted_map() {
+        let (g, h) = (40usize, 5usize);
+        let bs: Vec<f32> = (0..g * h)
+            .map(|i| (((i * 7 + 3) % 23) as f32 / 23.0) - 0.5)
+            .collect();
+        let m: Vec<f32> = (0..h * h)
+            .map(|i| (((i * 11 + 5) % 17) as f32 / 17.0) - 0.5)
+            .collect();
+        let mut d = vec![0f32; g * h]; // D = Bₛ · M, row-major
+        for r in 0..g {
+            for c in 0..h {
+                d[r * h + c] = (0..h).map(|k| bs[r * h + k] * m[k * h + c]).sum();
+            }
+        }
+        let p = velocity_operator(&bs, &d, g, h, 1e-8);
+        let err = p
+            .iter()
+            .zip(&m)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(err < 1e-2, "operator did not recover the planted map (max err={err:.4})");
+    }
+
+    #[test]
+    fn apply_velocity_operator_is_matvec() {
+        let h = 3;
+        let p = vec![1.0f32, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0]; // diag(1,2,3)
+        let theta = vec![1.0f32, 1.0, 1.0, 2.0, 0.0, -1.0]; // two cells
+        let v = apply_velocity_operator(&theta, &p, 2, h);
+        assert_eq!(v, vec![1.0, 2.0, 3.0, 2.0, 0.0, -3.0]);
     }
 }

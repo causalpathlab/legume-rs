@@ -165,6 +165,13 @@ pub struct CompositeTrainContext<'a> {
     /// When set, each `Some` term's penalty is added to the per-step loss so its
     /// pb embedding is pulled toward the velocity-consistent geometry.
     pub lineage_sem: Option<&'a [Option<PbSemTerm>]>,
+    /// Optional SECOND per-axis SEM term: the θ-pseudotime DAG (same `PbSemTerm` form,
+    /// but the drift is the θ-manifold pseudotime gradient, not velocity). Added
+    /// alongside `lineage_sem`/`lineage_dag` so the embedding is shaped by both the
+    /// velocity flow AND the dense identity manifold — robust where δ is sparse (a
+    /// δ-less pb is dropped by the velocity graph but kept by this one). Aligned 1:1
+    /// with `axes`; `None` (default) is a no-op.
+    pub lineage_sem_theta: Option<&'a [Option<PbSemTerm>]>,
     /// Optional per-axis learnable pb-DAG term (lineage-DAG refine pass, learned). Aligned
     /// 1:1 with `axes` like `lineage_sem`, but its `W` is a learned adjacency
     /// co-optimized with the embedding. Mutually exclusive with `lineage_sem`.
@@ -300,26 +307,33 @@ impl Default for PbDagParams {
     }
 }
 
-/// Learnable directed pb-DAG term for one level (lineage-DAG, learned). Holds a learnable
-/// adjacency `W [P×P]` (registered in the varmap, so AdamW co-optimizes it with the
-/// embedding) plus the constant drift `s·v̂`, an identity, and a fixed **forward
-/// candidate mask** derived from the exogenous velocity. `W` is restricted to
-/// velocity-forward edges by construction (`W_eff = W ∘ fwd_mask`), so the learned
-/// DAG cannot run against the velocity field and is (near-)acyclic for free — this is
-/// the "velocity anchors orientation" idea as a hard constraint rather than a soft
-/// penalty. [`Self::dag_loss`] is `sem·‖E − W_eff(E + s·v̂)‖² + l1·‖W_eff‖₁ +
-/// acyc·h(W_eff)`, differentiable in both `E` and `W`.
+/// **Unified** learnable directed pb-DAG term for one level (lineage-DAG, learned):
+/// one adjacency `W [P×P]` explaining BOTH the δ (velocity) and θ (identity) structures.
+/// θ and δ aren't competing graphs — θ is the *topology* (which pbs are adjacent) and δ
+/// the *orientation* (which way the arrow points). So a single `W` carries both:
+/// - **δ → orientation:** the drift `s·û` and the forward mask (velocity-forward, with a
+///   θ-pseudotime fallback where δ is sparse) set the direction.
+/// - **θ → topology:** the L1 is θ-distance-weighted, so `W` is cheap only on θ-proximal
+///   edges and settles onto the identity manifold.
+///
+/// [`Self::dag_loss`] is `sem·‖E − W_effᵀ(E + s·û)‖² + l1·Σ|W_eff|·d_θ + acyc·h(W_eff)`,
+/// differentiable in both `E` and `W`. `W_eff = W ∘ fwd_mask`.
 pub struct PbDagTerm {
     /// Learnable adjacency `[P, P]` (Var tensor).
     w: Tensor,
-    /// Constant drift `s·v̂` `[P, H]` (parent's own velocity step).
+    /// Constant drift `s·û` `[P, H]`: parent's velocity step where δ is measured, θ-pseudotime
+    /// gradient where it isn't (see [`Self::new`]).
     drift: Tensor,
     /// Identity `[P, P]` — used for the trace via `(A∘I).sum`.
     eye: Tensor,
     /// Forward candidate mask `[P, P]`: `1` where edge `i→j` is velocity-forward
-    /// (`⟨θ_j − θ_i, v̂_i⟩ > 0`, `i` has velocity, `j ≠ i`), `0` otherwise. Multiplied
-    /// into `W` so only forward edges can carry weight.
+    /// (`⟨θ_j − θ_i, v̂_i⟩ > 0`) OR a τ-forward θ-KNN edge; `0` otherwise. The θ-KNN union
+    /// keeps δ-sparse pbs — which the velocity mask alone drops — in the DAG.
     fwd_mask: Tensor,
+    /// θ-distance weights `[P, P]`: `d_θ(i,j) = ‖θ_i − θ_j‖`, weighting the L1 so `W`
+    /// is cheap only on θ-proximal edges — this is what makes the single DAG explain
+    /// the θ topology (δ handles orientation via `drift`/`fwd_mask`).
+    dtheta: Tensor,
     params: PbDagParams,
     p: usize,
 }
@@ -333,6 +347,7 @@ impl PbDagTerm {
     /// oriented start; `None` zero-initializes (the DAGMA-clean but unstable start).
     pub fn new(
         vel: &PbLevelVelocity,
+        theta_dag: &crate::fit::lineage::PbLineageLevel,
         h: usize,
         params: &PbDagParams,
         var_name: &str,
@@ -346,8 +361,21 @@ impl PbDagTerm {
         }
         // Unit velocity v̂ per node (zero when ‖δ‖ ≈ 0), shared with the lineage graph.
         let (vhat, has_vel) = crate::fit::lineage::unit_velocity(vel, h);
-        // Constant drift s·v̂.
-        let drift: Vec<f32> = vhat.iter().map(|x| params.step * x).collect();
+        // Confidence-gated drift s·û: trust the velocity where it is measured, fall back
+        // to the θ-pseudotime gradient ĝ (`theta_dag.velocity`) where δ is absent — so a
+        // δ-sparse pb still drifts along the identity manifold rather than being dropped.
+        let ghat = &theta_dag.velocity;
+        let mut drift = vec![0f32; p * h];
+        for i in 0..p {
+            let src = if has_vel[i] {
+                &vhat[i * h..(i + 1) * h]
+            } else {
+                &ghat[i * h..(i + 1) * h]
+            };
+            for c in 0..h {
+                drift[i * h + c] = params.step * src[c];
+            }
+        }
         // Forward candidate mask: keep W_ij only where j is velocity-forward of i
         // (⟨θ_j − θ_i, v̂_i⟩ > 0). Undefined-velocity rows and the diagonal stay 0, so
         // the learned DAG is forward-oriented by construction. θ is the warm-up identity.
@@ -369,6 +397,36 @@ impl PbDagTerm {
                     fwd[i * p + j] = 1.0;
                 }
             }
+        }
+        // Union the θ-pseudotime DAG edges (τ-forward θ-KNN): defined wherever θ is, so
+        // δ-sparse pbs — dropped by the velocity mask above — still get forward candidates
+        // from the dense identity manifold. This is the topology δ can't supply.
+        for &(i, j, _) in &theta_dag.edges {
+            fwd[i as usize * p + j as usize] = 1.0;
+        }
+        // θ-distance weights `d_θ(i,j) = ‖θ_i − θ_j‖` for the topology-shaping L1.
+        let mut dtheta = vec![0f32; p * p];
+        for i in 0..p {
+            let ti = &theta[i * h..(i + 1) * h];
+            for j in 0..p {
+                let tj = &theta[j * h..(j + 1) * h];
+                dtheta[i * p + j] = (0..h).map(|c| (ti[c] - tj[c]).powi(2)).sum::<f32>().sqrt();
+            }
+        }
+        // Normalize by the typical θ-KNN edge length so a θ-PROXIMAL edge costs ≈1 —
+        // preserving the plain-L1 scale — and only θ-FAR edges are penalized more. Without
+        // this the raw ‖θ‖ (O(1–10)) inflates the L1 ~mean(d_θ)×, over-sparsifying W and
+        // collapsing the lineage branches. The weighting is relative, not absolute.
+        let scale = {
+            let (mut sum, mut n) = (0f32, 0u32);
+            for &(i, j, _) in &theta_dag.edges {
+                sum += dtheta[i as usize * p + j as usize];
+                n += 1;
+            }
+            (sum / n.max(1) as f32).max(1e-6)
+        };
+        for d in dtheta.iter_mut() {
+            *d /= scale;
         }
         let eye: Vec<f32> = (0..p * p)
             .map(|idx| f32::from(idx / p == idx % p))
@@ -398,6 +456,7 @@ impl PbDagTerm {
             drift: Tensor::from_vec(drift, (p, h), dev)?,
             eye: Tensor::from_vec(eye, (p, p), dev)?,
             fwd_mask: Tensor::from_vec(fwd, (p, p), dev)?,
+            dtheta: Tensor::from_vec(dtheta, (p, p), dev)?,
             params: *params,
             p,
         }))
@@ -417,8 +476,11 @@ impl PbDagTerm {
         let parent = e_cell.add(&self.drift)?; // [P, H]
         let recon = w_eff.t()?.matmul(&parent)?; // [P, H] — Wᵀ: child from parent
         let sem = e_cell.sub(&recon)?.sqr()?.sum(1)?.mean(0)?;
-        // L1 sparsity (per-node budget).
-        let l1 = w_eff.abs()?.sum(1)?.mean(0)?;
+        // θ-weighted L1: Σ_ij |W_eff_ij|·d_θ(i,j). Plain L1 is scale-free over edges;
+        // weighting by θ-distance makes a long-range (θ-far) edge cost more than a
+        // θ-proximal one, so the learned DAG settles onto the identity manifold — this
+        // is the single `W` explaining the θ topology while drift/mask carry δ.
+        let l1 = w_eff.abs()?.mul(&self.dtheta)?.sum(1)?.mean(0)?;
         // Acyclicity surrogate.
         let acyc = self.acyclicity(&w_eff)?;
         let loss = sem.affine(f64::from(self.params.sem_weight), 0.0)?;
@@ -555,6 +617,16 @@ pub fn train_composite(
             // velocity-consistent geometry; gradients reach `E_feat` through the NCE
             // coupling. `None` (default) is a no-op → byte-identical training.
             if let Some(terms) = ctx.lineage_sem {
+                for (axis, term) in ctx.axes.iter().zip(terms) {
+                    if let Some(t) = term {
+                        loss = (loss + sem_penalty(&axis.model.e_cell, t)?)?;
+                    }
+                }
+            }
+            // θ-pseudotime DAG: the SECOND lineage term, same `sem_penalty` form but
+            // drifting along the θ-manifold pseudotime instead of velocity. Added every
+            // step alongside the velocity term (fixed structure, like `lineage_sem`).
+            if let Some(terms) = ctx.lineage_sem_theta {
                 for (axis, term) in ctx.axes.iter().zip(terms) {
                     if let Some(t) = term {
                         loss = (loss + sem_penalty(&axis.model.e_cell, t)?)?;

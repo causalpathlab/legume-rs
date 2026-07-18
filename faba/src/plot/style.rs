@@ -51,6 +51,10 @@ pub const CURVE: Rgb = (108, 108, 118);
 /// assertion, distinct from the backbone it sits on.
 pub const ARROW: Rgb = (58, 58, 70);
 
+/// scVelo-style gridded cell-velocity field — plain dark grey so the flow reads
+/// clearly over the coloured cell types without competing as its own hue.
+pub const VELOCITY_FIELD: Rgb = (40, 40, 40);
+
 /// Red star at the root node.
 pub const ROOT_RED: Rgb = (214, 39, 40);
 

@@ -23,7 +23,7 @@ use super::io::{read_str_columns, Curves, NodePositions, TrajectoryEdges, UNASSI
 use super::style::{
     arrow_head_len, arrow_stroke, curve_alpha, curve_base, curve_stroke, frac_to_bin,
     node_label_dy, node_radius, root_star_radius, tree_alpha, tree_base, tree_stroke, CurveWidth,
-    Seg, ARROW, ARROW_ALPHA, CURVE, CURVE_BINS, INK, MIN_VELOCITY_FLUX, TREE_BINS,
+    Seg, ARROW, ARROW_ALPHA, CURVE, CURVE_BINS, INK, MIN_VELOCITY_FLUX, TREE_BINS, VELOCITY_FIELD,
 };
 use super::svg::{emit_halo_text, emit_star, LegendEntry};
 use super::{NodeLabels, PlotArgs};
@@ -85,68 +85,144 @@ fn rasterize_binned_segments(
         .collect()
 }
 
+/// Opacity of a MIXED (uncommitted, ≥2-label soft set) cell relative to a confident one:
+/// it is drawn in its leading fate's colour but faded, so the differentiation lean shows
+/// without manufacturing a false-confident solid call.
+const MIXED_ALPHA_FACTOR: f32 = 0.3;
+
+/// Per-cell `(display label, confident?)`. The display label is the LEADING fate, plus its
+/// runner-up as `leading/second` when a second type is also significant — read from the
+/// support-ordered `label_ranked` (largest share first), capped at the top 2. Confident = a
+/// single significant label. `--label-argmax` forces the leading fate alone, every cell solid.
+/// Falls back to the argmax `coarse_label` (no runner-up) when `label_ranked` is absent.
+fn read_cell_labels(annot_path: &str, argmax: bool) -> HashMap<Box<str>, (Box<str>, bool)> {
+    let mut out = HashMap::new();
+    match read_str_columns(annot_path, &["cell", "label_ranked"])
+        .or_else(|_| read_str_columns(annot_path, &["cell", "coarse_label"]))
+    {
+        Ok(cols) => {
+            for (c, raw) in cols[0].iter().zip(cols[1].iter()) {
+                let s = raw.trim();
+                if s.is_empty() || s.eq_ignore_ascii_case(UNASSIGNED) {
+                    out.insert(c.clone(), (Box::from(UNASSIGNED), true));
+                    continue;
+                }
+                let mut it = s.split('/');
+                let lead = it.next().unwrap_or(s);
+                let second = it.next().filter(|_| !argmax);
+                let label: Box<str> = match second {
+                    Some(sec) => format!("{lead}/{sec}").into_boxed_str(),
+                    None => Box::from(lead),
+                };
+                out.insert(c.clone(), (label, second.is_none()));
+            }
+        }
+        Err(e) => warn!("no per-cell annotation ({e}); colouring every cell as '{UNASSIGNED}'"),
+    }
+    out
+}
+
+/// The colour-carrying LEADING fate of a display label (`leading/second` → `leading`).
+fn leading_fate(display: &str) -> &str {
+    display.split('/').next().unwrap_or(display)
+}
+
 /// Build one `rasterize_group_png` layer per coarse cell type and return the
 /// legend (type → colour). Cells missing an annotation → `unassigned`.
 pub(super) fn build_celltype_layers(
     prefix: &str,
     cells: &CellScatter,
     args: &PlotArgs,
+    font_px: f32,
     layers: &mut Vec<TopicLayer>,
-) -> Result<Vec<LegendEntry>> {
+) -> Result<(Vec<LegendEntry>, String)> {
     let annot_path = format!("{prefix}.lineage_annot.annot.parquet");
-    let label_by_cell: HashMap<Box<str>, Box<str>> =
-        match read_str_columns(&annot_path, &["cell", "coarse_label"]) {
-            Ok(mut cols) => {
-                let labels = cols.pop().unwrap();
-                let cells = cols.pop().unwrap();
-                cells.into_iter().zip(labels).collect()
-            }
-            Err(e) => {
-                warn!("no per-cell annotation ({e}); colouring every cell as '{UNASSIGNED}'");
-                HashMap::new()
-            }
-        };
+    // Each cell gets its LEADING fate (argmax `coarse_label`) and whether the soft `label_set`
+    // makes that call CONFIDENT (single label) or MIXED (≥2 labels — uncommitted, between
+    // fates). Mixed cells are drawn in the leading fate's colour but faded, so the
+    // differentiation lean shows without a false-confident solid call. `--label-argmax`
+    // forces every cell confident (the old winner-take-all view).
+    let label_by_cell = read_cell_labels(&annot_path, args.label_argmax);
 
-    // Per-cell type name (join by barcode).
     let unassigned: Box<str> = Box::from(UNASSIGNED);
-    let per_cell: Vec<Box<str>> = cells
+    // One lookup per cell → (display label, confident?), then split for the passes below.
+    let (display, confident): (Vec<Box<str>>, Vec<bool>) = cells
         .names
         .iter()
         .map(|c| {
             label_by_cell
                 .get(c)
                 .cloned()
-                .unwrap_or_else(|| unassigned.clone())
+                .unwrap_or_else(|| (unassigned.clone(), true))
         })
-        .collect();
+        .unzip();
 
-    // Stable colour assignment: sort unique types, push `unassigned` last so it
-    // never steals the leading palette slot.
-    let mut types: Vec<Box<str>> = per_cell.clone();
-    types.sort_unstable();
-    types.dedup();
-    if let Some(pos) = types.iter().position(|t| t.as_ref() == UNASSIGNED) {
-        let last = types.remove(pos);
-        types.push(last);
+    // Palette keyed by LEADING fate, so `HSPC` and `HSPC/Erythroid` share one hue. Sorted;
+    // `unassigned` dropped unless --show-unassigned.
+    let mut leads: Vec<Box<str>> = display.iter().map(|d| Box::from(leading_fate(d))).collect();
+    leads.sort_unstable();
+    leads.dedup();
+    if let Some(p) = leads
+        .iter()
+        .position(|t| t.as_ref().eq_ignore_ascii_case(UNASSIGNED))
+    {
+        let u = leads.remove(p);
+        if args.show_unassigned {
+            leads.push(u);
+        }
     }
-    let pal = palette::resolve(&args.palette, types.len());
-    let type_color: HashMap<Box<str>, Rgb> = types
+    let pal = palette::resolve(&args.palette, leads.len());
+    let type_color: HashMap<Box<str>, Rgb> = leads
         .iter()
         .enumerate()
         .map(|(i, t)| (t.clone(), palette::color(&pal, i)))
         .collect();
+    let color_of = |d: &str| type_color.get(leading_fate(d)).copied().unwrap_or((150, 150, 150));
 
-    // Bucket cells (in pixel space) per type.
-    let mut pts_by_type: HashMap<Box<str>, Vec<(f32, f32)>> = HashMap::new();
+    // Bucket pixels by DISPLAY label (`leading/second`), split confident vs mixed; also gather
+    // pixels per LEADING fate for the centroid labels. `unassigned` dropped unless shown.
+    let mut conf_pts: HashMap<Box<str>, Vec<(f32, f32)>> = HashMap::new();
+    let mut mixed_pts: HashMap<Box<str>, Vec<(f32, f32)>> = HashMap::new();
+    let mut fate_pts: HashMap<Box<str>, Vec<(f32, f32)>> = HashMap::new();
     for (i, px) in cells.pixels() {
-        pts_by_type.entry(per_cell[i].clone()).or_default().push(px);
+        let d = &display[i];
+        if !args.show_unassigned && d.as_ref().eq_ignore_ascii_case(UNASSIGNED) {
+            continue;
+        }
+        let bucket = if confident[i] {
+            &mut conf_pts
+        } else {
+            &mut mixed_pts
+        };
+        bucket.entry(d.clone()).or_default().push(px);
+        fate_pts.entry(Box::from(leading_fate(d))).or_default().push(px);
     }
 
-    // One raster layer per type, in the stable legend order.
-    let mut legend = Vec::with_capacity(types.len());
-    for t in &types {
-        let color = type_color[t];
-        if let Some(pts) = pts_by_type.get(t) {
+    // Legend order: display labels sorted (groups by leading-fate prefix, e.g. `HSPC` then
+    // `HSPC/Erythroid`).
+    let mut labels: Vec<Box<str>> = conf_pts.keys().chain(mixed_pts.keys()).cloned().collect();
+    labels.sort_unstable();
+    labels.dedup();
+
+    // Pass 1: faded MIXED cells. Pass 2: solid CONFIDENT cells on top, + one legend entry each.
+    let fade = args.alpha * MIXED_ALPHA_FACTOR;
+    for d in &labels {
+        if let Some(pts) = mixed_pts.get(d) {
+            let png = rasterize_group_png(
+                pts,
+                cells.ext,
+                RadiusSpec::Scalar(cells.radius_px),
+                color_of(d),
+                fade,
+                PointShape::Circle,
+            )?;
+            layers.push(raster_layer(png, color_of(d)));
+        }
+    }
+    let mut legend = Vec::with_capacity(labels.len());
+    for d in &labels {
+        let color = color_of(d);
+        if let Some(pts) = conf_pts.get(d) {
             let png = rasterize_group_png(
                 pts,
                 cells.ext,
@@ -158,12 +234,64 @@ pub(super) fn build_celltype_layers(
             layers.push(raster_layer(png, color));
         }
         legend.push(LegendEntry {
-            label: t.to_string(),
+            label: d.to_string(),
             color,
         });
     }
-    info!("coloured {} cell types", legend.len());
-    Ok(legend)
+    let n_conf: usize = conf_pts.values().map(Vec::len).sum();
+    let n_mixed: usize = mixed_pts.values().map(Vec::len).sum();
+    info!(
+        "coloured {} label(s) over {} lead fate(s): {n_conf} confident (solid) + {n_mixed} mixed (faded, leading/second)",
+        labels.len(),
+        leads.len()
+    );
+
+    // A haloed name at each LEADING fate's centroid (marginal median of its cells) — lets the
+    // plot be read without decoding the many leading/second hues. `--no-celltype-labels` off.
+    let mut overlay = String::new();
+    if !args.no_celltype_labels {
+        overlay.push_str("  <g id=\"celltype-labels\">\n");
+        for fate in &leads {
+            // Anchor on the CONFIDENT core (a tight cluster of single-label cells) so a scattered
+            // fate's label lands on its body, not in the empty space between its lobes. Fall back
+            // to all cells of the fate when it has no confident members.
+            let pts = conf_pts
+                .get(fate)
+                .filter(|p| !p.is_empty())
+                .or_else(|| fate_pts.get(fate));
+            if let Some((mx, my)) = pts.and_then(|p| medoid_xy(p)) {
+                emit_halo_text(&mut overlay, mx, my, font_px, INK, fate);
+            }
+        }
+        overlay.push_str("  </g>\n");
+        info!("labeled {} cell-type centroid(s)", leads.len());
+    }
+    Ok((legend, overlay))
+}
+
+/// Medoid of a pixel cloud — the member point minimising summed distance to the others, so
+/// the label lands **on a real cell** in the type's densest lobe rather than in the empty space
+/// a marginal median or centroid can fall into for a multimodal type. `None` when empty.
+///
+/// Exact medoid is `O(n²)`; the candidate set is capped (every `step`-th point, ≤ `CAP`) while
+/// the cost is still summed over ALL points, so it stays `O(CAP·n)` on a large type.
+fn medoid_xy(pts: &[(f32, f32)]) -> Option<(f32, f32)> {
+    if pts.is_empty() {
+        return None;
+    }
+    const CAP: usize = 512;
+    let step = (pts.len() / CAP).max(1);
+    pts.iter()
+        .step_by(step)
+        .map(|&p| {
+            let cost: f64 = pts
+                .iter()
+                .map(|q| (f64::from(p.0 - q.0).powi(2) + f64::from(p.1 - q.1).powi(2)).sqrt())
+                .sum();
+            (p, cost)
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(p, _)| p)
 }
 
 /// Build a single continuous pseudotime layer (blue→red ramp) and return the
@@ -217,7 +345,7 @@ pub(super) fn build_pseudotime_layer(
             continue;
         }
         pts_px.push(px);
-        colors.push(palette::sample_blue_red((v - lo) / span));
+        colors.push(palette::sample_blue_red(args.pseudotime_scale.frac(v, lo, span)));
     }
     let png = rasterize_per_point_png(
         &pts_px,
@@ -391,6 +519,30 @@ pub(super) fn build_velocity_arrows(
         ARROW_ALPHA,
     )?;
     Ok(Some(raster_layer(png, ARROW)))
+}
+
+/// scVelo-style cell-velocity field: gridded arrows (already projected to pixel
+/// space) drawn as a muted-blue overlay, distinct from the backbone/trajectory
+/// arrows. Reflects the local δ flow, independent of the trajectory topology.
+pub(super) fn build_grid_velocity_arrows(
+    arrows: &[Seg],
+    ext: Extent,
+    radius_px: f32,
+) -> Result<Option<TopicLayer>> {
+    if arrows.is_empty() {
+        return Ok(None);
+    }
+    let head_len = arrow_head_len(ext);
+    info!("velocity-grid arrows: {} gridded cell-velocity vectors", arrows.len());
+    let png = rasterize_arrow_layer_png(
+        arrows,
+        ext,
+        arrow_stroke(head_len, radius_px),
+        head_len,
+        VELOCITY_FIELD,
+        ARROW_ALPHA,
+    )?;
+    Ok(Some(raster_layer(png, VELOCITY_FIELD)))
 }
 
 /// Build the trajectory-node point layer (dark dots) plus the vector overlay

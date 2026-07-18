@@ -192,5 +192,146 @@ fn build_one_level(lvl: &PbLevelVelocity, h: usize, knn: usize) -> PbLineageLeve
     }
 }
 
+/// Weight `λ` on the θ-pseudotime DAG's SEM residual (the second lineage term). The
+/// unspliced counts δ orients on are sparse, so a δ-only DAG drops every pb with no
+/// usable velocity; this term orients the SAME θ-KNN by a root-anchored θ-pseudotime
+/// (dense identity manifold) instead, keeping those pbs in the lineage.
+pub const DEFAULT_THETA_SEM_WEIGHT: f32 = 0.1;
+
+/// Build one θ-pseudotime DAG [`PbLineageLevel`] per collapse level (same order as
+/// `pb_vel`). The velocity DAG (`vel_levels`) supplies only each level's ROOT (its
+/// net velocity source, a single robust choice); everything else — topology,
+/// orientation, drift — comes from θ. See [`build_theta_dag_level`].
+pub fn build_theta_dag(
+    pb_vel: &[PbLevelVelocity],
+    vel_levels: &[PbLineageLevel],
+    h: usize,
+    knn: usize,
+) -> Vec<PbLineageLevel> {
+    pb_vel
+        .iter()
+        .zip(vel_levels)
+        .map(|(lvl, vel)| build_theta_dag_level(&lvl.theta, lvl.n_pb, h, knn, vel))
+        .collect()
+}
+
+/// θ-pseudotime DAG for one level: the **same θ-KNN topology** oriented by a
+/// root-anchored θ-pseudotime `τ` (Dijkstra distance from the velocity source over
+/// the symmetric θ-KNN) instead of by the sparse velocity. An edge `i → j` is kept
+/// when `τ_j > τ_i` — defined wherever θ is, so no pb is dropped for lacking δ. The
+/// `velocity` field is repurposed to the per-pb pseudotime-gradient direction `ĝ_i`
+/// (unit mean of `θ_j − θ_i` over τ-forward neighbours), so a [`crate::training::PbSemTerm`]
+/// drifts the embedding `ê_j → ê_i + s·ĝ_i` along the identity manifold's flow.
+fn build_theta_dag_level(
+    theta: &[f32],
+    n: usize,
+    h: usize,
+    knn: usize,
+    vel: &PbLineageLevel,
+) -> PbLineageLevel {
+    if n == 0 {
+        return PbLineageLevel { n_pb: 0, edges: vec![], velocity: vec![] };
+    }
+    let k = knn.min(n.saturating_sub(1));
+    // Symmetric θ-KNN adjacency, θ-distance edge weights (the manifold metric).
+    let mut adj: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n];
+    for i in 0..n {
+        for &(d2, j) in knn_sorted(theta, i, n, h).iter().take(k) {
+            let w = d2.sqrt();
+            adj[i].push((j, w));
+            adj[j].push((i, w)); // symmetrize (a KNN edge is bidirectional here)
+        }
+    }
+    // τ = θ-geodesic distance from the lineage root (velocity net-source).
+    let tau = theta_pseudotime(&adj, velocity_source(vel, n), n);
+    // Orient the θ-KNN by τ, and set ĝ_i = unit mean of (θ_j − θ_i) over τ-forward
+    // neighbours (the local direction of increasing pseudotime).
+    let mut velocity = vec![0f32; n * h];
+    let mut edges = Vec::new();
+    for i in 0..n {
+        let ti = row(theta, i, h);
+        let mut g = vec![0f32; h];
+        let mut forward = 0u32;
+        for &(j, _) in &adj[i] {
+            if tau[j] > tau[i] {
+                edges.push((i as u32, j as u32, 1.0f32));
+                let tj = row(theta, j, h);
+                for c in 0..h {
+                    g[c] += tj[c] - ti[c];
+                }
+                forward += 1;
+            }
+        }
+        if forward > 0 {
+            let nrm = g.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            for c in 0..h {
+                velocity[i * h + c] = g[c] / nrm;
+            }
+        }
+    }
+    PbLineageLevel { n_pb: n, edges, velocity }
+}
+
+/// Net velocity source of a directed level: the node with max `(out − in)` degree
+/// (the lineage origin, `τ ≈ 0`); ties break to the lowest id, and an edge-less
+/// graph falls back to node 0.
+fn velocity_source(vel: &PbLineageLevel, n: usize) -> usize {
+    let mut deg = vec![0i32; n];
+    for &(i, j, _) in &vel.edges {
+        deg[i as usize] += 1;
+        deg[j as usize] -= 1;
+    }
+    (0..n).max_by_key(|&i| deg[i]).unwrap_or(0)
+}
+
+/// Dijkstra shortest-path distance from `root` over a symmetric weighted adjacency.
+/// Unreachable nodes get `max finite distance + 1` so they stay finite (and sort
+/// after reachable ones) for the `τ_j > τ_i` orientation test.
+fn theta_pseudotime(adj: &[Vec<(usize, f32)>], root: usize, n: usize) -> Vec<f32> {
+    use std::cmp::Ordering;
+    use std::collections::BinaryHeap;
+    // Min-heap on distance (reverse the f32 order; ties by node id are irrelevant).
+    struct St(f32, usize);
+    impl PartialEq for St {
+        fn eq(&self, o: &Self) -> bool {
+            self.0 == o.0
+        }
+    }
+    impl Eq for St {}
+    impl PartialOrd for St {
+        fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+            Some(self.cmp(o))
+        }
+    }
+    impl Ord for St {
+        fn cmp(&self, o: &Self) -> Ordering {
+            o.0.partial_cmp(&self.0).unwrap_or(Ordering::Equal)
+        }
+    }
+    let mut dist = vec![f32::INFINITY; n];
+    dist[root] = 0.0;
+    let mut pq = BinaryHeap::new();
+    pq.push(St(0.0, root));
+    while let Some(St(d, u)) = pq.pop() {
+        if d > dist[u] {
+            continue;
+        }
+        for &(v, w) in &adj[u] {
+            let nd = d + w;
+            if nd < dist[v] {
+                dist[v] = nd;
+                pq.push(St(nd, v));
+            }
+        }
+    }
+    let max_finite = dist.iter().copied().filter(|x| x.is_finite()).fold(0.0f32, f32::max);
+    for d in dist.iter_mut() {
+        if !d.is_finite() {
+            *d = max_finite + 1.0;
+        }
+    }
+    dist
+}
+
 #[cfg(test)]
 mod tests;

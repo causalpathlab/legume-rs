@@ -140,8 +140,15 @@ fn dag_term_builds_and_loss_is_differentiable() {
         delta: vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
     };
     let vm = VarMap::new();
+    // Minimal θ-pseudotime DAG: 0→1→2 along the identity, unit gradients.
+    let theta_dag = crate::fit::lineage::PbLineageLevel {
+        n_pb: 3,
+        edges: vec![(0, 1, 1.0), (1, 2, 1.0)],
+        velocity: vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    };
     let term = PbDagTerm::new(
         &vel,
+        &theta_dag,
         h,
         &PbDagParams::default(),
         "dag_test_w",
