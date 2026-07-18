@@ -72,10 +72,10 @@ pub fn logistic_nce(pos: &Tensor, negs: &[Tensor]) -> Result<Tensor> {
 
 /// Which NCE objective a feature-side loss uses. `Softmax` (default) is sampled-
 /// softmax / InfoNCE: it normalizes the positive against its negatives in one
-/// distribution, which separates cell types better on dense count data (e.g.
-/// `faba gem`) than independent per-pair decisions. `Logistic` is the SGNS per-pair
-/// loss — `senna bge` / `pinto cage` set it explicitly (they train well with it and
-/// stay byte-identical).
+/// distribution, which separates cell types better on dense count data than
+/// independent per-pair decisions — the default for `faba gem` and `senna bge`
+/// (`--nce-objective`). `Logistic` is the SGNS per-pair loss, still selectable
+/// (and the historical bge behaviour, kept byte-identical when chosen).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NceObjective {
     /// Per-pair logistic (SGNS) — [`logistic_nce`].

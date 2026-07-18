@@ -66,7 +66,7 @@ fn adjust_cell_edges(
 /// Flatten the per-batch samplers into one `(cell_id, features, counts)` list,
 /// borrowing each cell's edge slices. Shared by the baseline and dual-axis
 /// phase-2 projections (both walk the same active cells).
-fn collect_sampler_cells(
+pub(crate) fn collect_sampler_cells(
     cell_samplers: &[PerBatchStratifiedCellSampler],
 ) -> Vec<(u32, &[u32], &[f32])> {
     let mut cells = Vec::new();
@@ -81,7 +81,7 @@ fn collect_sampler_cells(
 
 /// One cell's `(feature, count)` edges, batch-divided by its pseudobulk
 /// fold-factor when correction is on, else the raw edges.
-fn cell_edges(
+pub(crate) fn cell_edges(
     cell: u32,
     feats: &[u32],
     counts: &[f32],
@@ -95,7 +95,7 @@ fn cell_edges(
 
 /// L2-normalize to a unit direction; returns the input unchanged when its norm
 /// underflows (an all-zero / empty solve).
-fn l2_direction(v: &[f32]) -> Vec<f32> {
+pub(crate) fn l2_direction(v: &[f32]) -> Vec<f32> {
     let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if n > 1e-8 {
         v.iter().map(|x| x / n).collect()
@@ -161,6 +161,10 @@ pub(crate) fn project_cells_phase2(
 
     let feat_flat: Vec<f32> = model.e_feat.flatten_all()?.to_vec1()?;
     let solve = |edges: &[(u32, f32)]| solve_one_cell(edges, &feat_flat, &b_feat, h, lambda);
+    info!(
+        "Phase 2 per-cell solve over {n_cells} cells ({} rayon threads) ...",
+        rayon::current_num_threads()
+    );
     let solved: Vec<SolvedCell> = cells
         .par_iter()
         .map(|&(cell, feats, counts)| {

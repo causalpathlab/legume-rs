@@ -426,6 +426,9 @@ fn run_gem_genes_bge(
             // against its negatives in one distribution separates cell types better
             // than the per-pair logistic loss senna bge / pinto cage use.
             nce_objective: ge::loss::NceObjective::Softmax,
+            // gem needs the analytical phase-2: it resolves identity from spliced
+            // edges and emits the raw velocity increment δ in the same pass.
+            cell_projection: ge::CellProjection::Analytic,
         };
         Ok((cfg, gene_names, delta_l2))
     };

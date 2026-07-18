@@ -27,6 +27,48 @@ use resolve_etm::resolve_etm_topics;
 /// file's features as `{name}/{modality}`.
 type MultiomeFile = (Option<Box<str>>, Box<str>);
 
+/// NCE training objective for the bge feature/cell embedding (maps to
+/// [`ge::loss::NceObjective`]).
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+enum NceObjectiveArg {
+    /// Per-pair logistic (SGNS) — bge's historical loss; byte-identical runs.
+    Logistic,
+    /// Sampled-softmax / InfoNCE — the negatives compete with the positive in
+    /// one softmax; sharpens separation on dense data (the loss `faba gem` uses).
+    Softmax,
+}
+
+impl NceObjectiveArg {
+    fn to_ge(&self) -> ge::loss::NceObjective {
+        match self {
+            NceObjectiveArg::Logistic => ge::loss::NceObjective::Logistic,
+            NceObjectiveArg::Softmax => ge::loss::NceObjective::Softmax,
+        }
+    }
+}
+
+/// Phase-2 cell-projection method (maps to [`ge::CellProjection`]).
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+enum ProjectionArg {
+    /// Exact analytical per-cell Poisson-MAP (IRLS, CPU) — the default.
+    Analytic,
+    /// Frozen-feature NCE: train e_cell in GPU-batched blocks with the same loss
+    /// as pb-level calibration. Avoids the CPU per-cell solve (much faster at
+    /// large H); an approximate, seed-dependent embedding.
+    Nce,
+}
+
+impl ProjectionArg {
+    fn to_ge(&self) -> ge::CellProjection {
+        match self {
+            ProjectionArg::Analytic => ge::CellProjection::Analytic,
+            ProjectionArg::Nce => ge::CellProjection::Nce,
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct BgeArgs {
     #[arg(
@@ -53,7 +95,7 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        default_value_t = 16,
+        default_value_t = 128,
         help = "Embedding dimension H",
         alias = "dim-embedding"
     )]
@@ -334,6 +376,25 @@ pub struct BgeArgs {
                      written."
     )]
     no_fisher_cache: bool,
+
+    #[arg(
+        long = "nce-objective",
+        default_value_t = NceObjectiveArg::Softmax,
+        value_enum,
+        help = "NCE objective: softmax (InfoNCE — negatives compete; sharper on\n\
+                dense pseudobulk data; default) or logistic (per-pair SGNS)"
+    )]
+    nce_objective: NceObjectiveArg,
+
+    #[arg(
+        long = "projection",
+        default_value_t = ProjectionArg::Nce,
+        value_enum,
+        help = "Phase-2 cell projection: nce (frozen-feature block training —\n\
+                stochastic, GPU-batched / CPU-parallel, faster at large H;\n\
+                default) or analytic (exact per-cell Poisson-MAP, CPU)"
+    )]
+    projection: ProjectionArg,
 
     #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
     device: ComputeDevice,
@@ -681,10 +742,12 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 null_fdr: args.feature_null_fdr,
             }),
             // bge selects features by the norm² ash null call in `write_feature_qc`
-            // (post-fit, below), not the engine's LRT scan; and it trains with the
-            // per-pair logistic NCE. Both gem-only knobs stay at their defaults.
+            // (post-fit, below), not the engine's LRT scan. The NCE objective is
+            // `--nce-objective` (default softmax = InfoNCE; logistic = per-pair
+            // SGNS). The LRT knob stays off (gem-only).
             select_lrt_fdr: None,
-            nce_objective: ge::loss::NceObjective::Logistic,
+            nce_objective: args.nce_objective.to_ge(),
+            cell_projection: args.projection.to_ge(),
         })
     };
 
