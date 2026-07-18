@@ -917,7 +917,7 @@ pub fn nce_loss_identity(
     if b == 0 {
         return Tensor::zeros((), candle_util::candle_core::DType::F32, dev);
     }
-    let cell_idx_t = Tensor::from_vec(batch.coarse_cells.clone(), b, dev)?;
+    let cell_idx_t = Tensor::from_slice(&batch.coarse_cells, b, dev)?;
     let e_cell_pos = model.e_cell.index_select(&cell_idx_t, 0)?;
     let b_cell_pos = model.b_cell.index_select(&cell_idx_t, 0)?;
     nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, smoother, objective, dev)

@@ -187,7 +187,7 @@ fn fit_layout_umap_pb(
         negative_sample_rate: args.umap_negative_rate,
         learning_rate: args.umap_lr,
         seed: args.common.seed,
-        ..Umap::default()
+        ..Umap::tumap()
     };
     info!(
         "Running UMAP SGD (epochs={}, neg={}) ...",
@@ -315,7 +315,7 @@ fn run_cell_level_umap_in_place(
         negative_sample_rate: negative_rate,
         learning_rate,
         seed,
-        ..Umap::default()
+        ..Umap::tumap()
     };
     info!("Cell-level UMAP SGD (epochs={epochs}) ...");
     let refined = umap.fit(edges, n, &init_flat);

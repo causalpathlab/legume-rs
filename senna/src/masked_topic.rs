@@ -378,15 +378,15 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
-        help = "Per-feature embedding dimension H (0 = auto = 2 × n-latent-topics)",
+        default_value_t = 128,
+        help = "Per-feature embedding dimension H (default 128; 0 = auto = 2 × n-latent-topics)",
         long_help = "Dimension H of the per-gene embedding ρ ∈ ℝ^{D×H}.\n\
                      ρ is shared between encoder (value-weighted pool over each cell's top-K features)\n\
                      and decoder (β_kd = log_softmax_d(α_k · ρ_dᵀ), with α ∈ ℝ^{K×H} as topic embeddings).\n\
                      β is rank ≤ H, so H must be ≥ K (--n-latent-topics)\n\
                      for K independent topics to be representable.\n\
-                     Default 0 resolves to 2K for headroom.\n\
-                     Set explicitly to override; H < K errors at startup."
+                     Default 128; pass 0 to auto-resolve to 2K instead.\n\
+                     H < K errors at startup."
     )]
     embedding_dim: usize,
 
