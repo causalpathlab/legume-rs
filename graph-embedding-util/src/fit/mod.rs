@@ -502,6 +502,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 stop: &stop,
                 cell_to_pb_per_level: None,
                 lineage_sem: None,
+                lineage_sem_theta: None,
                 lineage_dag: None,
                 lineage_dag_stride: 1,
             },
@@ -601,9 +602,15 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     // (zero-init `W` is the unstable, non-monotone start).
                     let knn_init =
                         lineage::build_pb_lineage(&warmup_vel, h, lineage::DEFAULT_LINEAGE_KNN);
-                    // learned-DAG: learnable pb-DAG. Build one `PbDagTerm` per pb level
-                    // (registers a `W` Var — must precede the optimizer) aligned to
-                    // the refine axes ([cell?] + pb levels).
+                    // θ-pseudotime DAG per level (τ-forward θ-KNN + gradient ĝ): supplies the
+                    // unified `W`'s θ-topology (weighted L1) and the δ-sparse-fallback drift.
+                    let theta_dag = lineage::build_theta_dag(
+                        &warmup_vel, &knn_init, h, lineage::DEFAULT_LINEAGE_KNN,
+                    );
+                    // learned-DAG: one UNIFIED `PbDagTerm` per pb level — a single `W`
+                    // explaining BOTH structures (θ-weighted-L1 topology + δ/θ-gated drift).
+                    // Registers a `W` Var (must precede the optimizer), aligned to the refine
+                    // axes ([cell?] + pb levels).
                     let mut dag_terms: Vec<Option<PbDagTerm>> = Vec::with_capacity(1 + num_levels);
                     if use_cell_axis {
                         dag_terms.push(None);
@@ -612,6 +619,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                         let w0 = knn_init[i].to_dense();
                         dag_terms.push(PbDagTerm::new(
                             lvl,
+                            &theta_dag[i],
                             h,
                             &PbDagParams::default(),
                             &format!("dag_l{i}_w"),
@@ -622,8 +630,9 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     }
                     let n_dag = dag_terms.iter().filter(|t| t.is_some()).count();
                     info!(
-                        "Lineage-DAG refine (learned DAG) — {} pb-level DAG(s), warm-started \
-                         from the velocity-KNN graph [SEM + DAGMA acyclicity + L1], structure every {} steps, {} epochs",
+                        "Lineage-DAG refine (unified learned DAG) — {} pb-level DAG(s), warm-started \
+                         from the velocity-KNN graph [SEM + θ-weighted L1 + DAGMA acyclicity; δ/θ-gated \
+                         drift], structure every {} steps, {} epochs",
                         n_dag, DAG_STRIDE, config.epochs
                     );
                     let mut opt2 = AdamW::new(varmap.all_vars(), adamw_params())?;
@@ -635,6 +644,9 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                             stop: &stop,
                             cell_to_pb_per_level: None,
                             lineage_sem: None,
+                            // Unified single `W` carries θ too (θ-weighted L1 + fused drift),
+                            // so no separate θ-SEM term on the learned-DAG path.
+                            lineage_sem_theta: None,
                             lineage_dag: Some(&dag_terms),
                             lineage_dag_stride: DAG_STRIDE,
                         },
@@ -680,6 +692,10 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                         n_edges,
                         levels.len()
                     );
+                    // Second lineage term: the θ-pseudotime DAG (see the learned branch).
+                    let theta_terms = build_theta_sem_terms(
+                        &warmup_vel, &levels, h, use_cell_axis, num_levels, &config.device,
+                    )?;
                     let mut opt2 = AdamW::new(varmap.all_vars(), adamw_params())?;
                     refine_loss = train_composite(
                         &CompositeTrainContext {
@@ -689,6 +705,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                             stop: &stop,
                             cell_to_pb_per_level: None,
                             lineage_sem: Some(&terms),
+                            lineage_sem_theta: Some(&theta_terms),
                             lineage_dag: None,
                             lineage_dag_stride: 1,
                         },
@@ -982,6 +999,36 @@ fn stacked_pb_view<'a>(
         sizes,
         offsets,
     })
+}
+
+/// Build the θ-pseudotime DAG's per-axis SEM terms for the lineage refine, aligned
+/// 1:1 with the refine axes ([cell?] + pb levels) like the velocity terms. `vel_levels`
+/// is the velocity-oriented graph, used only to pick each level's root; orientation and
+/// drift come from θ. See [`lineage::build_theta_dag`].
+fn build_theta_sem_terms(
+    warmup_vel: &[PbLevelVelocity],
+    vel_levels: &[lineage::PbLineageLevel],
+    h: usize,
+    use_cell_axis: bool,
+    num_levels: usize,
+    dev: &candle_util::candle_core::Device,
+) -> anyhow::Result<Vec<Option<PbSemTerm>>> {
+    let theta_levels =
+        lineage::build_theta_dag(warmup_vel, vel_levels, h, lineage::DEFAULT_LINEAGE_KNN);
+    let mut terms: Vec<Option<PbSemTerm>> = Vec::with_capacity(1 + num_levels);
+    if use_cell_axis {
+        terms.push(None);
+    }
+    for lvl in &theta_levels {
+        terms.push(PbSemTerm::new(
+            lvl,
+            h,
+            lineage::DEFAULT_SEM_STEP,
+            lineage::DEFAULT_THETA_SEM_WEIGHT,
+            dev,
+        )?);
+    }
+    Ok(terms)
 }
 
 /// Apply the velocity-graph smoothing + confidence gating (①+②) to a pb readout when

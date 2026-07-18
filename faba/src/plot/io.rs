@@ -114,6 +114,37 @@ pub(super) fn load_node_positions(
     })
 }
 
+/// Read `{prefix}.velocity_grid_2d.parquet` (scVelo-style gridded cell-velocity arrows
+/// `[x, y, dx, dy]`, written by `faba lineage --layout umap`) and project each into
+/// pixel space as a `Seg` (tail → head). Returns an empty vec when the file is absent
+/// (the PHATE layout writes none), so callers can treat it as an optional overlay.
+pub(super) fn load_velocity_grid(
+    prefix: &str,
+    bounds: &DataBounds,
+    ext: Extent,
+    scale: f32,
+) -> Result<Vec<super::style::Seg>> {
+    let path = format!("{prefix}.velocity_grid_2d.parquet");
+    if !std::path::Path::new(&path).exists() {
+        return Ok(Vec::new());
+    }
+    let g = DMatrix::<f32>::from_parquet(&path).with_context(|| format!("reading {path}"))?;
+    let xi = col_index(&g.cols, "x", &path)?;
+    let yi = col_index(&g.cols, "y", &path)?;
+    let dxi = col_index(&g.cols, "dx", &path)?;
+    let dyi = col_index(&g.cols, "dy", &path)?;
+    let mut segs = Vec::with_capacity(g.mat.nrows());
+    for r in 0..g.mat.nrows() {
+        let (x, y) = (g.mat[(r, xi)], g.mat[(r, yi)]);
+        let (dx, dy) = (g.mat[(r, dxi)] * scale, g.mat[(r, dyi)] * scale);
+        if ![x, y, dx, dy].iter().all(|v| v.is_finite()) {
+            continue;
+        }
+        segs.push((bounds.to_pixel((x, y), ext), bounds.to_pixel((x + dx, y + dy), ext)));
+    }
+    Ok(segs)
+}
+
 //////////////////////
 // Trajectory edges //
 //////////////////////

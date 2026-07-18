@@ -33,7 +33,7 @@ use matrix_util::principal_curve::{PrincipalCurveArgs, PrincipalCurves};
 use matrix_util::principal_graph::{
     kmeans_centroids_seeded, mst_from_sqdist, pairwise_sqdist_rows_to_rows,
 };
-use matrix_util::traits::IoOps;
+use matrix_util::traits::{IoOps, MatOps};
 use matrix_util::utils::median;
 use std::collections::HashMap;
 
@@ -53,6 +53,24 @@ pub enum LayoutKind {
     /// on by default; pass `--layout none` to skip it.
     #[default]
     Phate,
+    /// t-UMAP on a **cosine** kNN graph — sharper cluster separation than PHATE when
+    /// the embedding is magnitude-heavy (PHATE's diffusion over-elongates those into
+    /// convoluted arms). Cells, MST nodes, and curve points are embedded **jointly**
+    /// in one fuzzy-kNN fit so they share the 2D space (no PHATE-style Nyström here).
+    Umap,
+}
+
+/// Feature space the t-UMAP layout embeds on (`--layout umap`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
+pub enum LayoutSpace {
+    /// θ only — the identity manifold (current state).
+    Identity,
+    /// θ + δ — the NASCENT state (where each cell is heading). Splays the manifold
+    /// toward the fates, so branches separate best on cosine t-UMAP. The default.
+    #[default]
+    Nascent,
+    /// [θ | δ] concatenated — identity and velocity as separate cosine channels.
+    Concat,
 }
 
 /// Whether the PHATE layout is warped along the confident velocity directions.
@@ -354,6 +372,31 @@ pub struct LineageArgs {
     pub layout: LayoutKind,
 
     #[arg(
+        long = "layout-space",
+        value_enum,
+        default_value_t = LayoutSpace::Nascent,
+        help = "Feature space for --layout umap: identity (θ), nascent (θ+δ, default), or concat ([θ|δ])"
+    )]
+    pub layout_space: LayoutSpace,
+
+    #[arg(
+        long = "cluster-space",
+        value_enum,
+        default_value_t = LayoutSpace::Identity,
+        help = "Feature space for the k-means grouping that drives annotation: identity (θ, default), \
+                nascent (θ+δ), or concat ([θ|δ] — velocity separates committing progenitors θ alone cannot). \
+                Marker scoring stays in θ regardless.",
+        long_help = "Which cell features the annotation k-means groups on. `identity` (θ, the spliced \
+                     state) is the default — cell TYPE is an identity question. `concat` ([θ|δ], each \
+                     channel L2-normalised) additionally splits cells by their VELOCITY direction, so two \
+                     transcriptionally-central cells heading to different fates land in different clusters — \
+                     useful on a progenitor-enriched (e.g. CD34+) sample where θ alone can't resolve the \
+                     committing structure. `nascent` (θ+δ) blends the two. The trajectory centroids and \
+                     marker scoring are always recomputed in raw θ, so only the GROUPING changes."
+    )]
+    pub cluster_space: LayoutSpace,
+
+    #[arg(
         long,
         value_enum,
         default_value_t = VelocityLayout::Auto,
@@ -397,6 +440,56 @@ pub struct LineageArgs {
 /// clamped to `[2, N]`.
 fn choose_k(n: usize, requested: Option<usize>) -> usize {
     requested.unwrap_or_else(|| (n / 10).clamp(2, 200)).min(n)
+}
+
+/// Feature matrix the annotation k-means groups on, per `--cluster-space`. `identity` = raw θ;
+/// `nascent` = θ+δ; `concat` = `[θ̂ | δ̂]` with each channel L2-normalised per row so identity and
+/// velocity contribute equally to the Euclidean k-means. Falls back to θ when velocity is absent.
+fn cluster_features(
+    theta: &DMatrix<f32>,
+    velocity: Option<&DMatrix<f32>>,
+    space: LayoutSpace,
+) -> DMatrix<f32> {
+    match (space, velocity) {
+        (LayoutSpace::Identity, _) | (_, None) => theta.clone(),
+        (LayoutSpace::Nascent, Some(v)) => {
+            let mut f = theta.clone();
+            f += v;
+            f
+        }
+        (LayoutSpace::Concat, Some(v)) => {
+            let (tn, vn) = (l2_normalize_rows(theta), l2_normalize_rows(v));
+            let (n, h) = (theta.nrows(), theta.ncols());
+            let mut f = DMatrix::<f32>::zeros(n, 2 * h);
+            f.view_mut((0, 0), (n, h)).copy_from(&tn);
+            f.view_mut((0, h), (n, h)).copy_from(&vn);
+            f
+        }
+    }
+}
+
+/// Recompute the `k` trajectory centroids in RAW θ from the grouping labels (mean θ of each
+/// cluster's cells), so the manifold geometry (MST, layout, marker scoring) stays θ-based even
+/// when the GROUPING used θ+δ or `[θ|δ]`. For the `identity` default this equals the θ k-means
+/// centroids exactly.
+fn theta_centroids_from_labels(theta: &DMatrix<f32>, labels: &[usize], k: usize) -> DMatrix<f32> {
+    let h = theta.ncols();
+    let mut c = DMatrix::<f32>::zeros(k, h);
+    let mut cnt = vec![0f32; k];
+    for (i, &l) in labels.iter().enumerate() {
+        cnt[l] += 1.0;
+        for j in 0..h {
+            c[(l, j)] += theta[(i, j)];
+        }
+    }
+    for l in 0..k {
+        if cnt[l] > 0.0 {
+            for j in 0..h {
+                c[(l, j)] /= cnt[l];
+            }
+        }
+    }
+    c
 }
 
 /// Resolve the root MST node, in priority order: `--root-node` (validated), `--root-cell`
@@ -539,22 +632,8 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         theta.ncols()
     );
 
-    /////////////////////////////
-    // k-means centroids + MST //
-    /////////////////////////////
-    let (centroids, labels) = kmeans_centroids_seeded(&theta, k, args.kmeans_iter, args.seed);
-    let (edges, _mst_weights) =
-        mst_from_sqdist(&pairwise_sqdist_rows_to_rows(&centroids, &centroids));
-    anyhow::ensure!(
-        edges.len() == k - 1,
-        "MST on {k} nodes should have {} edges, got {}",
-        k - 1,
-        edges.len()
-    );
-
-    ///////////////////////////////////////////////////////////////////////////
-    // velocity-informed directed forest: candidate graph → tested directions //
-    ///////////////////////////////////////////////////////////////////////////
+    // Velocity δ, loaded EARLY — the grouping below may cluster on it (--cluster-space), and the
+    // directed forest orients on it further down.
     let velocity_path = format!("{prefix}.velocity.parquet");
     let have_velocity = !args.no_orient_velocity && Path::new(&velocity_path).exists();
     let velocity: Option<DMatrix<f32>> = if have_velocity {
@@ -572,6 +651,35 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         }
         None
     };
+
+    /////////////////////////////
+    // k-means centroids + MST //
+    /////////////////////////////
+    // The GROUPING runs in θ (identity, default), θ+δ (nascent), or [θ|δ] (concat) per
+    // --cluster-space: velocity separates transcriptionally-central cells θ alone cannot. The
+    // trajectory centroids are recomputed in RAW θ from the resulting labels, so the manifold
+    // geometry (MST, layout, marker scoring) is unchanged — only the partition differs. For the
+    // Identity default this is exactly the old θ k-means (centroid = mean θ of its cells).
+    let cluster_feats = cluster_features(&theta, velocity.as_ref(), args.cluster_space);
+    if args.cluster_space != LayoutSpace::Identity {
+        info!(
+            "annotation grouping on {:?} space ({} dims)",
+            args.cluster_space,
+            cluster_feats.ncols()
+        );
+    }
+    let (_cf_centroids, labels) =
+        kmeans_centroids_seeded(&cluster_feats, k, args.kmeans_iter, args.seed);
+    let centroids = theta_centroids_from_labels(&theta, &labels, k);
+    let (edges, _mst_weights) =
+        mst_from_sqdist(&pairwise_sqdist_rows_to_rows(&centroids, &centroids));
+    anyhow::ensure!(
+        edges.len() == k - 1,
+        "MST on {k} nodes should have {} edges, got {}",
+        k - 1,
+        edges.len()
+    );
+
     let node_velocity = match &velocity {
         Some(v) => aggregate_node_velocity(v, &labels, k),
         None => DMatrix::<f32>::zeros(k, theta.ncols()),
@@ -782,6 +890,290 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
             args.normalize_latent,
         )?;
     }
+    if args.layout == LayoutKind::Umap {
+        emit_umap_layout(
+            &theta,
+            velocity.as_ref(),
+            args.layout_space,
+            &centroids,
+            curves,
+            &cell_names,
+            args.phate_knn,
+            args.seed,
+            &out,
+        )?;
+    }
+    Ok(())
+}
+
+/// t-UMAP 2D layout on a **cosine** kNN graph (an alternative to PHATE). Cells, MST
+/// nodes, and principal-curve points are stacked into ONE matrix, L2-normalized
+/// (cosine geometry), fed through a single fuzzy-kNN graph, and embedded jointly by
+/// `matrix_util::umap` — so all three share the 2D space (t-UMAP has no PHATE-style
+/// Nyström out-of-sample). The cell rows use the `space` representation (θ, θ+δ, or
+/// [θ|δ]); the backbone (nodes/curves) stays on θ (δ is a small increment, so the
+/// joint embedding stays coherent). Emits `{out}.{cells,nodes,curves}_2d.parquet`,
+/// plus `{out}.velocity_grid_2d.parquet` (scVelo-style gridded arrows) when δ exists.
+#[allow(clippy::too_many_arguments)]
+fn emit_umap_layout(
+    theta: &DMatrix<f32>,
+    velocity: Option<&DMatrix<f32>>,
+    space: LayoutSpace,
+    centroids: &DMatrix<f32>,
+    curves: &PrincipalCurves,
+    cell_names: &[Box<str>],
+    knn: usize,
+    seed: u64,
+    out: &str,
+) -> Result<()> {
+    use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
+    use matrix_util::umap::Umap;
+
+    let (n, h) = (theta.nrows(), theta.ncols());
+    let vel = velocity.filter(|_| space != LayoutSpace::Identity);
+    // Effective feature width: Concat doubles it ([θ|δ]); Identity/Nascent keep H.
+    let d = if space == LayoutSpace::Concat && vel.is_some() { 2 * h } else { h };
+
+    // CELLS ONLY — embedding just the cells (per the `space` representation) keeps the
+    // trajectory backbone from distorting the manifold (the R exercises are cells-only);
+    // the backbone is projected onto the fitted layout afterwards.
+    let mut feats = DMatrix::<f32>::zeros(n, d);
+    for i in 0..n {
+        for j in 0..h {
+            let d_ij = vel.map_or(0.0, |v| v[(i, j)]);
+            match space {
+                LayoutSpace::Identity => feats[(i, j)] = theta[(i, j)],
+                LayoutSpace::Nascent => feats[(i, j)] = theta[(i, j)] + d_ij,
+                LayoutSpace::Concat => {
+                    feats[(i, j)] = theta[(i, j)];
+                    feats[(i, h + j)] = d_ij;
+                }
+            }
+        }
+    }
+
+    // scale=T (MatOps::scale_columns) → cosine (L2-normalize rows) → t-UMAP.
+    let feats_n = l2_normalize_rows(&feats.scale_columns());
+    info!("t-UMAP layout (cosine + scale, space={space:?}): {n} cells, knn={knn}");
+    let graph = KnnGraph::from_rows(&feats_n, KnnGraphArgs { knn, block_size: 1000, reciprocal: false })?;
+    let w = graph.fuzzy_kernel_weights();
+    let edges: Vec<(usize, usize, f32)> = graph
+        .edges
+        .iter()
+        .zip(w.iter())
+        .map(|(&(i, j), &wt)| (i, j, wt))
+        .collect();
+
+    // Deterministic 2D init in [−10, 10] (seeded LCG — no rng dependency).
+    let mut s = seed ^ 0x9E37_79B9_7F4A_7C15;
+    let mut init = vec![0f32; n * 2];
+    for v in init.iter_mut() {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *v = (((s >> 33) as f32) / ((1u32 << 31) as f32) - 1.0) * 10.0;
+    }
+    // t-UMAP (a=b=1) — the uwot::tumap kernel; more spread than standard UMAP.
+    let coords = Umap { seed, ..Umap::tumap() }.fit(&edges, n, &init);
+    let mut cells_2d = DMatrix::<f32>::zeros(n, 2);
+    for i in 0..n {
+        cells_2d[(i, 0)] = coords[i * 2];
+        cells_2d[(i, 1)] = coords[i * 2 + 1];
+    }
+    write_xy(&cells_2d, cell_names, "cell", &format!("{out}.cells_2d.parquet"))?;
+
+    // Project the backbone (nodes + curve points, θ space) onto the cells-only layout:
+    // each lands at the mean 2D of its θ-nearest cells (t-UMAP has no Nyström).
+    let n_nodes = centroids.nrows();
+    let node_names = numbered("node_", n_nodes);
+    write_xy(
+        &project_onto_cells(centroids, theta, &cells_2d, knn),
+        &node_names,
+        "node",
+        &format!("{out}.nodes_2d.parquet"),
+    )?;
+    let total_curve: usize = curves.curves.iter().map(|c| c.points.nrows()).sum();
+    let mut curve_pts = DMatrix::<f32>::zeros(total_curve, h);
+    let mut meta: Vec<(usize, usize)> = Vec::with_capacity(total_curve);
+    let mut r = 0usize;
+    for (l, c) in curves.curves.iter().enumerate() {
+        for g in 0..c.points.nrows() {
+            for j in 0..h {
+                curve_pts[(r, j)] = c.points[(g, j)];
+            }
+            meta.push((l, g));
+            r += 1;
+        }
+    }
+    write_curves_2d(
+        &project_onto_cells(&curve_pts, theta, &cells_2d, knn),
+        &meta,
+        &format!("{out}.curves_2d.parquet"),
+    )?;
+
+    // scVelo-style gridded velocity arrows (≤ a few hundred): project δ into 2D via
+    // the θ-neighbour transition, then average onto a coarse grid.
+    if let Some(v) = velocity {
+        let grid = velocity_grid_arrows(&cells_2d, theta, v, knn);
+        write_velocity_grid(&grid, &format!("{out}.velocity_grid_2d.parquet"))?;
+    }
+    Ok(())
+}
+
+/// Project points (θ space, `[m × H]`) onto a cells-only 2D layout: each lands at the
+/// mean 2D of its `knn` θ-nearest cells (a simple k-NN out-of-sample, since t-UMAP has
+/// no PHATE-style Nyström). Parallel over the `m` points. `cell_theta` `[n × H]`,
+/// `cells_2d` `[n × 2]`.
+fn project_onto_cells(
+    pts: &DMatrix<f32>,
+    cell_theta: &DMatrix<f32>,
+    cells_2d: &DMatrix<f32>,
+    knn: usize,
+) -> DMatrix<f32> {
+    use rayon::prelude::*;
+    let (m, h) = (pts.nrows(), pts.ncols());
+    let n = cell_theta.nrows();
+    let k = knn.clamp(1, n.max(1));
+    let rows: Vec<(f32, f32)> = (0..m)
+        .into_par_iter()
+        .map(|p| {
+            let mut dist: Vec<(f32, usize)> = (0..n)
+                .map(|c| {
+                    let dd = (0..h).map(|j| (pts[(p, j)] - cell_theta[(c, j)]).powi(2)).sum::<f32>();
+                    (dd, c)
+                })
+                .collect();
+            if k < n {
+                dist.select_nth_unstable_by(k - 1, |a, b| {
+                    a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            let (mut sx, mut sy) = (0f32, 0f32);
+            for &(_, c) in dist.iter().take(k) {
+                sx += cells_2d[(c, 0)];
+                sy += cells_2d[(c, 1)];
+            }
+            (sx / k as f32, sy / k as f32)
+        })
+        .collect();
+    let mut out = DMatrix::<f32>::zeros(m, 2);
+    for (p, &(x, y)) in rows.iter().enumerate() {
+        out[(p, 0)] = x;
+        out[(p, 1)] = y;
+    }
+    out
+}
+
+/// scVelo-style velocity projection + gridding. For each cell, the 2D arrow is the
+/// θ-neighbour transition-weighted mean displacement (weight = `max(0, cos(δ_i,
+/// θ_j−θ_i))`); those are then averaged onto a `GRID×GRID` grid, keeping only cells
+/// with ≥ `MIN_PER_CELL` members. Returns `(x, y, dx, dy)` per occupied grid cell
+/// (a few hundred), unit-ish arrows scaled to the grid pitch.
+fn velocity_grid_arrows(
+    cells_2d: &DMatrix<f32>,
+    theta: &DMatrix<f32>,
+    delta: &DMatrix<f32>,
+    knn: usize,
+) -> Vec<(f32, f32, f32, f32)> {
+    use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
+    const GRID: usize = 30;
+    const MIN_PER_CELL: usize = 5;
+    let (n, h) = (theta.nrows(), theta.ncols());
+    if n == 0 {
+        return Vec::new();
+    }
+    // θ-neighbour graph (identity space) for the transition projection.
+    let Ok(graph) = KnnGraph::from_rows(theta, KnnGraphArgs { knn, block_size: 1000, reciprocal: false })
+    else {
+        return Vec::new();
+    };
+    let mut nbrs: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(i, j) in &graph.edges {
+        nbrs[i].push(j);
+        nbrs[j].push(i);
+    }
+    // Per-cell 2D velocity via θ-transition weights on δ.
+    let mut cell_vel = vec![(0f32, 0f32); n];
+    for i in 0..n {
+        let (mut vx, mut vy, mut wsum) = (0f32, 0f32, 0f32);
+        let di = (0..h).map(|c| delta[(i, c)] * delta[(i, c)]).sum::<f32>().sqrt();
+        if di < 1e-8 {
+            continue;
+        }
+        for &j in &nbrs[i] {
+            // cos(δ_i, θ_j − θ_i): the arrow points along the developmental-FORWARD flow.
+            // gem's δ is the nascent (unspliced) increment on top of θ, so `θ+δ` is the
+            // emerging/future state — the cell is heading toward `+δ`, i.e. from the
+            // progenitor hub outward to the committed compartments.
+            let (mut dot, mut dj2) = (0f32, 0f32);
+            for c in 0..h {
+                let dth = theta[(j, c)] - theta[(i, c)];
+                dot += delta[(i, c)] * dth;
+                dj2 += dth * dth;
+            }
+            let cos = if dj2 > 1e-12 { dot / (di * dj2.sqrt()) } else { 0.0 };
+            let wt = cos.max(0.0);
+            if wt > 0.0 {
+                let (dx, dy) = (cells_2d[(j, 0)] - cells_2d[(i, 0)], cells_2d[(j, 1)] - cells_2d[(i, 1)]);
+                let dn = (dx * dx + dy * dy).sqrt().max(1e-8);
+                vx += wt * dx / dn;
+                vy += wt * dy / dn;
+                wsum += wt;
+            }
+        }
+        if wsum > 0.0 {
+            cell_vel[i] = (vx / wsum, vy / wsum);
+        }
+    }
+    // Grid-average onto a GRID×GRID lattice over the layout bounds.
+    let (mut xmin, mut xmax, mut ymin, mut ymax) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for i in 0..n {
+        xmin = xmin.min(cells_2d[(i, 0)]);
+        xmax = xmax.max(cells_2d[(i, 0)]);
+        ymin = ymin.min(cells_2d[(i, 1)]);
+        ymax = ymax.max(cells_2d[(i, 1)]);
+    }
+    let (wx, wy) = ((xmax - xmin).max(1e-6), (ymax - ymin).max(1e-6));
+    let pitch = (wx / GRID as f32).min(wy / GRID as f32);
+    let mut acc: std::collections::HashMap<(usize, usize), (f32, f32, f32, f32, u32)> =
+        std::collections::HashMap::new();
+    for i in 0..n {
+        let gx = (((cells_2d[(i, 0)] - xmin) / wx * GRID as f32) as usize).min(GRID - 1);
+        let gy = (((cells_2d[(i, 1)] - ymin) / wy * GRID as f32) as usize).min(GRID - 1);
+        let e = acc.entry((gx, gy)).or_insert((0.0, 0.0, 0.0, 0.0, 0));
+        e.0 += cells_2d[(i, 0)];
+        e.1 += cells_2d[(i, 1)];
+        e.2 += cell_vel[i].0;
+        e.3 += cell_vel[i].1;
+        e.4 += 1;
+    }
+    let mut out = Vec::new();
+    for (_, (sx, sy, sdx, sdy, cnt)) in acc {
+        if (cnt as usize) < MIN_PER_CELL {
+            continue;
+        }
+        let c = cnt as f32;
+        let (mdx, mdy) = (sdx / c, sdy / c);
+        let mag = (mdx * mdx + mdy * mdy).sqrt();
+        if mag < 1e-6 {
+            continue;
+        }
+        // Scale each arrow to ~one grid pitch (unit direction × pitch).
+        out.push((sx / c, sy / c, mdx / mag * pitch, mdy / mag * pitch));
+    }
+    out
+}
+
+/// Write `{out}.velocity_grid_2d.parquet` — gridded arrows `[x, y, dx, dy]`.
+fn write_velocity_grid(arrows: &[(f32, f32, f32, f32)], path: &str) -> Result<()> {
+    let mut m = DMatrix::<f32>::zeros(arrows.len(), 4);
+    for (i, &(x, y, dx, dy)) in arrows.iter().enumerate() {
+        m[(i, 0)] = x;
+        m[(i, 1)] = y;
+        m[(i, 2)] = dx;
+        m[(i, 3)] = dy;
+    }
+    let cols: Vec<Box<str>> = ["x", "y", "dx", "dy"].iter().map(|s| Box::from(*s)).collect();
+    m.to_parquet_with_names(path, (None, None), Some(&cols))?;
+    info!("Wrote {path} ({} gridded velocity arrows)", arrows.len());
     Ok(())
 }
 

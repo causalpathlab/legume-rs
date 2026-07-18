@@ -28,6 +28,13 @@ pub struct Umap {
     pub negative_sample_rate: usize,
     pub learning_rate: f32,
     pub seed: u64,
+    /// Low-d kernel `1/(1 + a·d^(2b))`. Default `(1.929, 0.7915)` = standard UMAP
+    /// (spread=1, min_dist=0.1). `(1.0, 1.0)` = **t-UMAP** (`uwot::tumap`): the pure
+    /// t-distribution kernel `1/(1+d²)`, whose heavier tails give gentler attraction
+    /// and a more spread-out layout — better for continuum/branch structure. Use
+    /// [`Umap::tumap`] for that.
+    pub a: f32,
+    pub b: f32,
 }
 
 impl Default for Umap {
@@ -37,7 +44,18 @@ impl Default for Umap {
             negative_sample_rate: 5,
             learning_rate: 1.0,
             seed: 42,
+            a: A,
+            b: B,
         }
+    }
+}
+
+impl Umap {
+    /// t-UMAP (`uwot::tumap`): the `a=b=1` kernel `1/(1+d²)` — more spread than the
+    /// default standard-UMAP kernel. Other fields keep their defaults.
+    #[must_use]
+    pub fn tumap() -> Self {
+        Self { a: 1.0, b: 1.0, ..Self::default() }
     }
 }
 
@@ -100,6 +118,7 @@ impl Umap {
         let coords = &coords;
         let n_neg = self.negative_sample_rate;
         let seed = self.seed;
+        let (a, b) = (self.a, self.b);
 
         for epoch in 0..self.n_epochs {
             let epoch_f = epoch as f32;
@@ -118,14 +137,14 @@ impl Umap {
                         if *ne > epoch_f {
                             return;
                         }
-                        apply_attraction(coords, i, j, alpha);
+                        apply_attraction(coords, i, j, alpha, a, b);
 
                         for _ in 0..n_neg {
                             let k = rng.random_range(0..n);
                             if k == i {
                                 continue;
                             }
-                            apply_repulsion(coords, i, k, alpha);
+                            apply_repulsion(coords, i, k, alpha, a, b);
                         }
 
                         *ne += epochs_per_sample[e_idx];
@@ -138,25 +157,25 @@ impl Umap {
 }
 
 #[inline]
-fn apply_attraction(y: &HogwildCoords, i: usize, j: usize, alpha: f32) {
+fn apply_attraction(y: &HogwildCoords, i: usize, j: usize, alpha: f32, a: f32, b: f32) {
     let diff = y.get(i) - y.get(j);
     let d2 = diff.norm_squared();
     if d2 <= 0.0 {
         return;
     }
-    let d2b = d2.powf(B);
-    let coeff = -2.0 * A * B * (d2b / d2) / (A * d2b + 1.0);
+    let d2b = d2.powf(b);
+    let coeff = -2.0 * a * b * (d2b / d2) / (a * d2b + 1.0);
     let grad = (diff * coeff).map(clamp4) * alpha;
     y.add(i, grad);
     y.add(j, -grad);
 }
 
 #[inline]
-fn apply_repulsion(y: &HogwildCoords, i: usize, k: usize, alpha: f32) {
+fn apply_repulsion(y: &HogwildCoords, i: usize, k: usize, alpha: f32, a: f32, b: f32) {
     let diff = y.get(i) - y.get(k);
     let d2 = diff.norm_squared();
     let coeff = if d2 > 0.0 {
-        2.0 * B / ((0.001 + d2) * (A * d2.powf(B) + 1.0))
+        2.0 * b / ((0.001 + d2) * (a * d2.powf(b) + 1.0))
     } else {
         4.0
     };

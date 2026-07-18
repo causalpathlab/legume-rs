@@ -1661,29 +1661,35 @@ fn write_annot_parquet(
     // `k!` of them. Which member is the most probable is already carried by `coarse_label` and
     // `label_support`; this column's job is to name the *set*.
     let set_str: Vec<Box<str>>;
+    let ranked_str: Vec<Box<str>>;
     let set_size: Vec<i32>;
     if let (Some(b), Some(con)) = (boot, consensus) {
-        set_str = con
-            .label_set
-            .iter()
-            .map(|set| {
-                if set.is_empty() {
-                    // Too wide to mean anything — see `CoarseConsensus::label_set`.
-                    return Box::from(enrichment::UNASSIGNED_LABEL);
-                }
-                let mut canon = set.clone();
-                canon.sort_unstable(); // the `unassigned` column is `c`, so it sorts last
-                canon
-                    .iter()
-                    .map(|&t| label_of(t, type_names))
-                    .collect::<Vec<_>>()
-                    .join("/")
-                    .into_boxed_str()
-            })
-            .collect();
+        // One spelling of a label set: `unassigned` when empty (too wide to mean anything —
+        // see `CoarseConsensus::label_set`), else `label_of` joined by "/". `sort` canonicalises
+        // by type index (a set is a *category* with one spelling); leaving it unsorted keeps the
+        // credible-set support order (leading first) that `label_ranked` needs.
+        let join_set = |set: &[usize], sort: bool| -> Box<str> {
+            if set.is_empty() {
+                return Box::from(enrichment::UNASSIGNED_LABEL);
+            }
+            let mut ix = set.to_vec();
+            if sort {
+                ix.sort_unstable(); // the `unassigned` column is `c`, so it sorts last
+            }
+            ix.iter()
+                .map(|&t| label_of(t, type_names))
+                .collect::<Vec<_>>()
+                .join("/")
+                .into_boxed_str()
+        };
+        // `label_set` names the *category* (canonicalised); `label_ranked` is its support-ordered
+        // twin (largest share first) — the plot reads the leading fate + runner-up from it.
+        set_str = con.label_set.iter().map(|s| join_set(s, true)).collect();
+        ranked_str = con.label_set.iter().map(|s| join_set(s, false)).collect();
         set_size = con.label_set.iter().map(|s| s.len() as i32).collect();
         cols.extend([
             (Box::from("label_set"), Column::Str(&set_str)),
+            (Box::from("label_ranked"), Column::Str(&ranked_str)),
             (Box::from("label_set_size"), Column::I32(&set_size)),
             (
                 Box::from("label_set_support"),
