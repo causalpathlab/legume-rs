@@ -1,6 +1,6 @@
 use clap::Args;
 
-use super::common::ComputeDevice;
+use super::common::{ComputeDevice, ProjectionArg};
 
 /// Model dimensions.
 #[derive(Args, Debug, Clone)]
@@ -51,6 +51,27 @@ pub struct ModelArgs {
                      with `--n-hvg` set, HVG wins and this is skipped. 0 disables. Must be in [0, 1)."
     )]
     pub feature_null_fdr: f32,
+
+    #[arg(
+        long = "projection",
+        default_value_t = ProjectionArg::Nce,
+        value_enum,
+        help = "Phase-2 cell projection: nce (stochastic frozen-feature block training;\n\
+                θ on spliced edges, δ on unspliced; GPU-batched or CPU-parallel;\n\
+                the default) or analytic (exact per-cell Poisson-MAP).",
+        long_help = "How each cell's final embedding θ (and velocity increment δ)\n\
+                     is recovered once the feature side is frozen.\n\
+                     nce (default): trains θ against the frozen β_g\n\
+                     on the cell's spliced edges, then δ against β_g+δ_g\n\
+                     on the unspliced edges (scored at θ+δ, θ held fixed) —\n\
+                     the stochastic analogue of the analytic dual solve.\n\
+                     Blocked and GPU-batched or CPU-parallel, much faster\n\
+                     at the default H=128; approximate and seed-dependent.\n\
+                     analytic: the exact per-cell Poisson-MAP (IRLS) —\n\
+                     reproducible, with library-size-calibrated ‖θ‖,\n\
+                     but O(m·h²) per cell on the CPU."
+    )]
+    pub projection: ProjectionArg,
 }
 
 /// Pseudobulk collapse, phase-1 cell-axis mode, per-file sample identity, and
