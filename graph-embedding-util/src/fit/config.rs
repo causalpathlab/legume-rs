@@ -41,9 +41,10 @@ pub enum CellProjection {
     /// velocity increment `δ`. The default.
     #[default]
     Analytic,
-    /// Frozen-feature NCE: train `e_cell` in GPU-batched blocks with the
-    /// pb-level calibration loss. bge only (no `δ`); falls back to `Analytic`
-    /// for a β-sharing (gem) model.
+    /// Frozen-feature NCE: train the cell side in GPU-batched / CPU-parallel
+    /// blocks with the pb-level calibration loss. For a β-sharing (gem) model it
+    /// trains θ on the spliced edges and δ on the unspliced edges (`θ+δ`, θ
+    /// frozen) — the stochastic analogue of the analytic dual solve.
     Nce,
 }
 

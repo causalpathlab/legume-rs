@@ -765,33 +765,36 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 .expect("collapse always produces ≥1 level"),
         });
 
-        // `--projection nce` (bge only): recover e_cell by frozen-feature NCE
-        // training instead of the analytical Poisson-MAP. β-sharing (gem) needs the
-        // analytical δ solve, so it always falls back.
-        let nce_requested = config.cell_projection == CellProjection::Nce;
-        let nce_projection = nce_requested && config.feat_factor.is_none();
-        if nce_requested && config.feat_factor.is_some() {
-            info!(
-                "Phase 2 — --projection nce is bge-only (β-sharing/gem needs the analytical \
-                 δ solve); using the analytical projection"
-            );
-        }
+        // `--projection nce`: recover e_cell by frozen-feature NCE training instead
+        // of the analytical Poisson-MAP. For a β-sharing (gem) model the projection
+        // trains θ on the SPLICED edges and δ on the UNSPLICED edges (θ+δ, θ frozen)
+        // — the stochastic analogue of `solve_node_splice`.
+        let nce_projection = config.cell_projection == CellProjection::Nce;
         if nce_projection {
             let opts = projection_nce::NceProjectionOpts::bge_default(
                 config.nce_objective,
                 config.num_negatives,
                 config.seed,
             );
-            cell_nrms = projection_nce::project_cells_frozen_feature(
+            // gem passes the splice mask ⇒ the projection splits edges, stores θ
+            // raw, and runs the δ (velocity-increment) pass. bge passes None ⇒ a
+            // single θ pass over all edges, L2-direction store, no velocity.
+            let unspliced = config
+                .feat_factor
+                .as_ref()
+                .map(|s| s.unspliced_rows.as_slice());
+            let (nrms, vel) = projection_nce::project_cells_frozen_feature(
                 &mut cell_model,
                 &varmap,
                 &cell_samplers,
                 n_cells,
                 &opts,
                 batch_divisor,
+                unspliced,
                 &config.device,
             )?;
-            // No velocity increment on the bge NCE path (cell_velocity stays None).
+            cell_nrms = nrms;
+            cell_velocity = vel;
         } else {
             info!(
                 "Phase 2 — analytical per-cell projection ({n_cells} cells, feature side fixed, ridge λ={PHASE2_RIDGE})"

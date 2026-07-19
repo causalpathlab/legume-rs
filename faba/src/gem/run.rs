@@ -41,11 +41,11 @@ use crate::gem::sample_id::{file_sample_id, longest_common_underscore_suffix};
 /// range (0.01–1.0).
 const DEFAULT_DELTA_L2: f32 = 1.0;
 
-/// Mild L2 on the feature embedding `‖β_g‖`, applied by default: bounds norm inflation along
-/// the dominant axis (the σ̂² runaway that lets a few genes dominate the positive edges) without
-/// meaningfully shrinking real signal. Small — `0.1` already crushes σ̂² hard, so `1e-4` is a
-/// gentle floor rather than a heavy regulariser.
-const DEFAULT_FEATURE_L2: f32 = 1e-4;
+// NOTE: `feature_embedding_l2` MUST be 0 for gem. It penalizes a free `E_feat`
+// Var, but gem is β-sharing (`feat_factor = Some`) — the trained params are β_g
+// and δ_g (δ_g already regularized by `--delta-l2`), and `E_feat` is a
+// materialized snapshot, not a Var. A nonzero value trips the engine's
+// `feat_factor + feature_embedding_l2 > 0` guard (fit/mod.rs) and aborts the fit.
 
 pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
@@ -388,7 +388,7 @@ fn run_gem_genes_bge(
                 format!("{}.fisher_weights.parquet", args.out).into_boxed_str(),
             ),
             feature_network: None,
-            feature_embedding_l2: DEFAULT_FEATURE_L2,
+            feature_embedding_l2: 0.0, // must be 0 for β-sharing (see note above)
             weight_decay: 0.0,
             max_grad_norm: args.train.max_grad_norm,
             cell_weight_mult: None,
@@ -426,9 +426,10 @@ fn run_gem_genes_bge(
             // against its negatives in one distribution separates cell types better
             // than the per-pair logistic loss senna bge / pinto cage use.
             nce_objective: ge::loss::NceObjective::Softmax,
-            // gem needs the analytical phase-2: it resolves identity from spliced
-            // edges and emits the raw velocity increment δ in the same pass.
-            cell_projection: ge::CellProjection::Analytic,
+            // Phase-2 projection (`--projection`): nce (default) trains θ on spliced
+            // + δ on unspliced (θ+δ) stochastically; analytic is the exact per-cell
+            // Poisson-MAP dual solve. Both emit the velocity increment δ.
+            cell_projection: args.model.projection.to_ge(),
         };
         Ok((cfg, gene_names, delta_l2))
     };
@@ -713,13 +714,18 @@ fn run_gem_genes_bge(
                 "wrote {}.velocity.parquet (embedding-space velocity v=P·θ; β_g+δ_g operator, no raw counts)",
                 args.out
             );
-            // The raw increment δ_c travels alongside as a diagnostic only (shrinkage-prone).
+            // The per-cell increment δ travels alongside the operator velocity.
             if let Some(delta_c) = &out.cell_velocity {
                 write_cell("velocity_increment", delta_c.clone())?;
-                info!(
-                    "wrote {}.velocity_increment.parquet (raw δ_c increment — diagnostic; δ_c ≈ −0.5·θ)",
-                    args.out
-                );
+                let note = match args.model.projection {
+                    super::common::ProjectionArg::Nce => {
+                        "stochastic contrastive δ (NCE spliced/unspliced); reduced origin-shrinkage vs analytic, still diagnostic"
+                    }
+                    super::common::ProjectionArg::Analytic => {
+                        "analytic δ_c increment; shrinkage-prone (δ_c ≈ −0.5·θ), diagnostic only"
+                    }
+                };
+                info!("wrote {}.velocity_increment.parquet ({note})", args.out);
             }
         }
         // No δ_g dictionary (--delta-l2 = 0): fall back to the raw increment for velocity.parquet.

@@ -32,3 +32,26 @@ impl ComputeDevice {
         })
     }
 }
+
+/// Phase-2 cell-projection method for `faba gem` (maps to
+/// [`graph_embedding_util::CellProjection`]). Mirrors senna bge's `--projection`.
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum ProjectionArg {
+    /// Exact analytical per-cell Poisson-MAP (IRLS, CPU): θ from spliced edges +
+    /// the δ velocity increment from unspliced.
+    Analytic,
+    /// Stochastic frozen-feature NCE: θ on spliced edges, δ on unspliced (θ+δ),
+    /// GPU-batched / CPU-parallel — faster at large H; approximate, seed-dependent.
+    Nce,
+}
+
+impl ProjectionArg {
+    #[must_use]
+    pub fn to_ge(&self) -> graph_embedding_util::CellProjection {
+        match self {
+            ProjectionArg::Analytic => graph_embedding_util::CellProjection::Analytic,
+            ProjectionArg::Nce => graph_embedding_util::CellProjection::Nce,
+        }
+    }
+}
