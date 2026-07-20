@@ -1,5 +1,5 @@
 //! Loading gem's **gene embedding** for marker annotation — the co-embedded
-//! `{out}.feature_embedding.parquet`, not the `{out}.beta_dictionary.parquet` β.
+//! `{out}.feature_embedding.parquet`, not the `{out}.beta_feature_embedding.parquet` β.
 //!
 //! # Why not β
 //!
@@ -13,7 +13,7 @@
 //!
 //! | table | rows | mean ‖row‖ | median ‖row‖ |
 //! |---|---|---|---|
-//! | `beta_dictionary` | 34,189 | 0.21 | **0.00** |
+//! | `beta_feature_embedding` | 34,189 | 0.21 | **0.00** |
 //! | `feature_embedding` | 3,695 | 3.11 | 3.05 |
 //! | `cell_embedding` | 15,315 | 30.07 | 26.77 |
 //!

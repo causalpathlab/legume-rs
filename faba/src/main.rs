@@ -338,8 +338,8 @@ Example:\n  \
             (nearest-centroid assign → distance-outlier QC → Leiden clustering →\n\
             cluster×term hypergeometric over-representation, permutation-calibrated).\n\n\
             gem carries two gene programs, each annotated on its own axis (`--track`):\n\
-            spliced:  gene β_g (beta_dictionary) vs cell θ (cell_embedding)  → {out}.spliced.*\n\
-              velocity: gene δ_g (delta_dictionary) vs cell velocity   → {out}.velocity.*\n\
+            spliced:  gene β_g (beta_feature_embedding) vs cell θ (cell_embedding)  → {out}.spliced.*\n\
+              velocity: gene δ_g (delta_feature_embedding) vs cell velocity   → {out}.velocity.*\n\
             `both` (default) runs both;\n\
             velocity is skipped with a warning when its inputs are absent (spliced-only gem run).",
         after_long_help = "\
