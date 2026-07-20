@@ -36,7 +36,7 @@ use crate::gem::sample_id::{file_sample_id, longest_common_underscore_suffix};
 /// Default ridge on the per-gene splice offset δ_g, applied automatically whenever
 /// the input carries unspliced rows and the user did not set `--delta-l2`. Keeping a
 /// mild ridge on by default means every spliced+unspliced gem run always emits a δ_g
-/// dictionary (`{out}.delta_dictionary.parquet`) for downstream `faba annotate
+/// dictionary (`{out}.delta_feature_embedding.parquet`) for downstream `faba annotate
 /// --track velocity`, without over-shrinking. Matches the documented `--delta-l2`
 /// range (0.01–1.0).
 const DEFAULT_DELTA_L2: f32 = 1.0;
@@ -446,7 +446,8 @@ fn run_gem_genes_bge(
     // axis (two-pass). `--must-train-features` overrides the call. Unlike the old norm²
     // path there is no ">90% dropped" guard: dropping most genes IS the intended
     // behaviour here (all backend genes enter Pass 1), only the all-null case is guarded.
-    if let Some(scan) = out.feature_lrt.take() {
+    let scan_opt = out.feature_lrt.take();
+    if let Some(scan) = scan_opt.as_ref() {
         // `scan.live` is per BACKEND gene id; with `--n-hvg 0` the unified axis IS the
         // backend axis, so `backend_row_to_gene[r]` maps each feature row to its call.
         // A live gene keeps BOTH its splice tracks (row-level via the gene map).
@@ -506,7 +507,7 @@ fn run_gem_genes_bge(
     // co-embedding and sharp cell clusters are the same degree of freedom pulling
     // opposite ways — we keep the sharp clusters. (2) No velocity "driver" co-embed
     // either: a per-gene velocity readout, if wanted, is the in-model δ_g (`--delta-l2`
-    // → `{out}.delta_dictionary.parquet`), not a post-hoc average. The feature embedding
+    // → `{out}.delta_feature_embedding.parquet`), not a post-hoc average. The feature embedding
     // is keyed by *feature row* (`{gene}/count/{spliced|unspliced}`); the gene-keyed β_g
     // dictionary below is what marker-based `faba annotate` consumes.
     //
@@ -583,14 +584,14 @@ fn run_gem_genes_bge(
             }
             let merged = Tensor::from_vec(flat, (merged_gene_names.len(), h), &cpu)?;
             ge::save_embedding(
-                &format!("{}.beta_dictionary.parquet", args.out),
+                &format!("{}.beta_feature_embedding.parquet", args.out),
                 &merged,
                 &merged_gene_names,
-                "gene",
+                "feature",
             )
-            .context("save β_g dictionary")?;
+            .context("save β_g feature embedding")?;
             info!(
-                "wrote {}.beta_dictionary.parquet (per-gene β_g; {} genes, {} of them projected)",
+                "wrote {}.beta_feature_embedding.parquet (per-gene β_g; {} genes, {} of them projected)",
                 args.out,
                 merged_gene_names.len(),
                 projected_names.len()
@@ -625,14 +626,14 @@ fn run_gem_genes_bge(
             }
             let merged = Tensor::from_vec(flat, (merged_gene_names.len(), h), &cpu)?;
             ge::save_embedding(
-                &format!("{}.delta_dictionary.parquet", args.out),
+                &format!("{}.delta_feature_embedding.parquet", args.out),
                 &merged,
                 &merged_gene_names,
-                "gene",
+                "feature",
             )
-            .context("save δ_g dictionary")?;
+            .context("save δ_g feature embedding")?;
             info!(
-                "wrote {}.delta_dictionary.parquet (δ_g; {}/{} trained genes with nonzero offset, \
+                "wrote {}.delta_feature_embedding.parquet (δ_g; {}/{} trained genes with nonzero offset, \
                  {} projected)",
                 args.out,
                 nz,
@@ -645,8 +646,33 @@ fn run_gem_genes_bge(
     // Per-gene QC: which genes were trained vs projected, and how much evidence
     // each projected gene actually had. Written separately so the dictionaries stay
     // plain `gene × H` tables that downstream `faba annotate` reads unchanged.
+    // Pull each trained gene's Pass-1 selection-scan stats (LRT / deviance / detection)
+    // onto its `gene_qc` row so trained genes are no longer NaN there. The scan is
+    // indexed by BACKEND gene-id; a trained gene is a name-subset of the backend,
+    // re-interned in a different order after the live-axis refit, so match by NAME.
+    // Data-driven path only — the HVG branch runs no scan, leaving this empty (→ the
+    // trained rows stay NaN, as before).
+    let trained_scan: Vec<Option<(f32, f32, u32)>> = match scan_opt.as_ref() {
+        Some(s) => {
+            let by_name: rustc_hash::FxHashMap<&str, usize> = backend_gene_names
+                .iter()
+                .enumerate()
+                .map(|(g, n)| (n.as_ref(), g))
+                .collect();
+            gene_names
+                .iter()
+                .map(|n| {
+                    by_name
+                        .get(n.as_ref())
+                        .map(|&g| (s.lrt[g], s.deviance[g], s.n_detected[g]))
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+
     if let Some(p) = proj {
-        save_gene_qc(&merged_gene_names, &trained_norm2, p, &args.out)?;
+        save_gene_qc(&merged_gene_names, &trained_norm2, &trained_scan, p, &args.out)?;
         write_projection_qc_json(p, &args.out)?;
     }
 
@@ -896,26 +922,31 @@ fn split_count_row(name: &str) -> (&str, bool) {
 }
 
 /// Write `{out}.gene_qc.parquet` — one row per gene of the merged
-/// `beta_dictionary`, in the same order:
+/// `beta_feature_embedding`, in the same order:
 ///
 /// * `trained` — 1 = fit by the model, 0 = projected post-hoc.
 /// * `live` — 1 = the gene carries signal above the estimated null. Trained genes
 ///   reaching this point are live by construction (the two-pass QC already
 ///   dropped the null ones); a projected gene called null was **zeroed**, so its
-///   `beta_dictionary` row is all-zero rather than a fabricated direction.
+///   `beta_feature_embedding` row is all-zero rather than a fabricated direction.
 /// * `norm2` — `‖β_g‖²`.
 /// * `n_detected_pb` — pseudobulk samples (summed over collapse levels) where the
 ///   gene reads above the column floor.
-/// * `deviance` — Poisson deviance of the projection solve.
+/// * `deviance` — Poisson deviance `D_fit` of the gene's solve.
 /// * `lrt` — `D_null − D_fit`, the evidence that θ explains the gene at all. This
 ///   is the statistic `live` tests; rank projected markers by it.
 ///
-/// The last three are the projection's own goodness-of-fit and do not exist for a
-/// trained gene, so those cells are `NaN` on trained rows rather than a fabricated
-/// `0`. Filter projected markers on `live`, rank them by `lrt`.
+/// The last three carry different-but-comparable statistics for the two gene
+/// populations. For a **projected** gene they are the held-out projection's own
+/// goodness-of-fit, scored against the FINAL trained frame. For a **trained** gene
+/// they are the Pass-1 **selection scan** (`FeatureLrtScan`), scored against the
+/// pre-refit `θ_pb` — the evidence that got the gene selected. On the HVG path
+/// (`--n-hvg > 0`) no scan runs, so trained rows fall back to `NaN` there rather
+/// than a fabricated `0`. Filter projected markers on `live`, rank them by `lrt`.
 fn save_gene_qc(
     merged_gene_names: &[Box<str>],
     trained_norm2: &[f32],
+    trained_scan: &[Option<(f32, f32, u32)>],
     proj: &graph_embedding_util::FeatureProjection,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
@@ -927,9 +958,20 @@ fn save_gene_qc(
         m[(g, 0)] = 1.0;
         m[(g, 1)] = 1.0;
         m[(g, 2)] = trained_norm2[g];
-        m[(g, 3)] = f32::NAN;
-        m[(g, 4)] = f32::NAN;
-        m[(g, 5)] = f32::NAN;
+        // Selection-scan (lrt, deviance, n_detected) for this trained gene, or NaN
+        // when the scan didn't run (HVG path) / the gene wasn't in it.
+        match trained_scan.get(g).copied().flatten() {
+            Some((lrt, deviance, n_detected)) => {
+                m[(g, 3)] = n_detected as f32;
+                m[(g, 4)] = deviance;
+                m[(g, 5)] = lrt;
+            }
+            None => {
+                m[(g, 3)] = f32::NAN;
+                m[(g, 4)] = f32::NAN;
+                m[(g, 5)] = f32::NAN;
+            }
+        }
     }
     let h = proj.beta.len() / proj.gene_ids.len().max(1);
     for i in 0..proj.gene_ids.len() {

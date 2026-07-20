@@ -24,7 +24,7 @@ pub struct ModelArgs {
                      it absorbs the (dense) static per-gene nascent structure (the RNA-velocity γ) so cell identity (spliced θ) stays clean\n\
                      and the phase-2 velocity increment δ (raw Poisson-MAP shift, θ fixed) becomes γ-calibrated.\n\
                      Larger = more shrinkage (δ_g pulled toward 0).\n\
-                     Try 0.01–1.0; δ_g is written to `{out}.delta_dictionary.parquet`."
+                     Try 0.01–1.0; δ_g is written to `{out}.delta_feature_embedding.parquet`."
     )]
     pub delta_l2: f32,
 
@@ -176,7 +176,7 @@ pub struct CollapseArgs {
                      so the β-sharing factorization stays aligned.\n\
                      \n\
                      This is about TRAINED vs PROJECTED, not presence:\n\
-                     a gene that misses the HVG cut still gets a β in `{out}.beta_dictionary.parquet`,\n\
+                     a gene that misses the HVG cut still gets a β in `{out}.beta_feature_embedding.parquet`,\n\
                      but a post-hoc PROJECTED one (the held-out-feature regression), not an in-model estimate.\n\
                      Name it here and it is fit in-model instead.\n\
                      The `trained` column of `{out}.gene_qc.parquet` says which each gene got.\n\

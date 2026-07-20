@@ -511,6 +511,10 @@ pub(crate) fn project_held_out_features(
 pub struct FeatureLrtScan {
     /// `D_null − D_fit` per gene; `0` when undetected, `< 0` when the solve diverged.
     pub lrt: Vec<f32>,
+    /// Poisson deviance `D_fit` of the selection solve per gene — the same statistic
+    /// the held-out projection reports as `deviance`, but scored against the Pass-1
+    /// `θ_pb` (pre-refit). `0` for an undetected gene.
+    pub deviance: Vec<f32>,
     /// Pseudobulk samples (summed over levels) where the gene reads above the floor.
     pub n_detected: Vec<u32>,
     /// Live at the FDR — the data-driven selection.
@@ -551,7 +555,7 @@ pub(crate) fn select_features_by_lrt(
         gene_rows[g as usize].push(row);
     }
     let pbs = PbScalars::new(pb);
-    let scored: Vec<(f32, u32, f32)> = (0..n_genes)
+    let scored: Vec<(f32, f32, u32, f32)> = (0..n_genes)
         .into_par_iter()
         .map(|g| {
             let all = &gene_rows[g];
@@ -563,7 +567,7 @@ pub(crate) fn select_features_by_lrt(
             let rows: &[usize] = if spliced.is_empty() { all } else { &spliced };
             let edges = pb.edges_for_rows(rows);
             if edges.is_empty() {
-                return (0.0, 0, 0.0);
+                return (0.0, 0.0, 0, 0.0);
             }
             let n_det = count_detected(&edges, &pbs.floor_scaled);
             // Total count = the abundance the LRT null is stratified by.
@@ -572,22 +576,24 @@ pub(crate) fn select_features_by_lrt(
             // diverged IRLS, not a null gene, so raise λ and retry.
             let mut r = ridge;
             let mut esc = 0u8;
-            let lrt = loop {
+            let (deviance, lrt) = loop {
                 let (beta, b_g) = solve_one_cell(&edges, &pb.theta, &pb.bias, h, r);
-                let (_d, lrt) = deviance_and_lrt(&edges, &pb.theta, &pb.bias, &beta, b_g, h, &pbs);
+                let (d, lrt) = deviance_and_lrt(&edges, &pb.theta, &pb.bias, &beta, b_g, h, &pbs);
                 if lrt >= 0.0 || esc == MAX_RIDGE_ESCALATIONS {
-                    break lrt;
+                    break (d, lrt);
                 }
                 r *= RIDGE_ESCALATION;
                 esc += 1;
             };
-            (lrt, n_det, abundance)
+            (deviance, lrt, n_det, abundance)
         })
         .collect();
     let mut lrt = Vec::with_capacity(n_genes);
+    let mut deviance = Vec::with_capacity(n_genes);
     let mut n_detected = Vec::with_capacity(n_genes);
     let mut abundance = Vec::with_capacity(n_genes);
-    for (l, nd, ab) in scored {
+    for (d, l, nd, ab) in scored {
+        deviance.push(d);
         lrt.push(l);
         n_detected.push(nd);
         abundance.push(ab);
@@ -637,6 +643,7 @@ pub(crate) fn select_features_by_lrt(
     }
     FeatureLrtScan {
         lrt,
+        deviance,
         n_detected,
         live,
     }
