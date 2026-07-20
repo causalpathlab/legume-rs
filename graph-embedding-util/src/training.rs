@@ -26,7 +26,7 @@ use crate::loss::{
     PerBatchStratifiedCellSampler, PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs,
     StratifiedSampler,
 };
-use crate::model::JointEmbedModel;
+use crate::model::{JointEmbedModel, GATE_KL_WEIGHT};
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{DType, Var};
 use candle_util::candle_core::{Device, Tensor};
@@ -625,6 +625,17 @@ pub fn train_composite(
                     .mean_all()?
                     .affine(f64::from(params.feature_embedding_l2), 0.0)?;
                 loss = (loss + l2)?;
+            }
+            // SuSiE single-effect KL on the gate (identity + velocity): the fixed
+            // `GATE_KL_WEIGHT · (categorical + Gaussian) KL`, AMORTIZED by the minibatch
+            // size — the likelihood term is a per-edge MEAN over `batch_size` edges, so
+            // scaling the (per-gene mean) KL by `1/B` puts the two on the same per-example
+            // footing (weight `1` ⇒ the `1/B` scale). `None` when the gate is off. The
+            // shared gate lives on every axis identically; axes[0] is the representative
+            // (counted once, not once per axis).
+            if let Some(kl) = ctx.axes[0].model.gate_kl()? {
+                let w = GATE_KL_WEIGHT / params.batch_size.max(1) as f64;
+                loss = (loss + kl.affine(w, 0.0)?)?;
             }
             // L2 (ridge) shrinkage on the per-gene splice offset δ_g (factored
             // models with a splice split). `mean(δ_g²)` keeps λ scale-invariant
