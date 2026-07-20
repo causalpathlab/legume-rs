@@ -48,27 +48,6 @@ impl NceObjectiveArg {
     }
 }
 
-/// Phase-2 cell-projection method (maps to [`ge::CellProjection`]).
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-enum ProjectionArg {
-    /// Exact analytical per-cell Poisson-MAP (IRLS, CPU) — the default.
-    Analytic,
-    /// Frozen-feature NCE: train e_cell in GPU-batched blocks with the same loss
-    /// as pb-level calibration. Avoids the CPU per-cell solve (much faster at
-    /// large H); an approximate, seed-dependent embedding.
-    Nce,
-}
-
-impl ProjectionArg {
-    fn to_ge(&self) -> ge::CellProjection {
-        match self {
-            ProjectionArg::Analytic => ge::CellProjection::Analytic,
-            ProjectionArg::Nce => ge::CellProjection::Nce,
-        }
-    }
-}
-
 #[derive(Args, Debug)]
 pub struct BgeArgs {
     #[arg(
@@ -385,16 +364,6 @@ pub struct BgeArgs {
                 dense pseudobulk data; default) or logistic (per-pair SGNS)"
     )]
     nce_objective: NceObjectiveArg,
-
-    #[arg(
-        long = "projection",
-        default_value_t = ProjectionArg::Nce,
-        value_enum,
-        help = "Phase-2 cell projection: nce (frozen-feature block training —\n\
-                stochastic, GPU-batched / CPU-parallel, faster at large H;\n\
-                default) or analytic (exact per-cell Poisson-MAP, CPU)"
-    )]
-    projection: ProjectionArg,
 
     #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
     device: ComputeDevice,
@@ -747,7 +716,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             // SGNS). The LRT knob stays off (gem-only).
             select_lrt_fdr: None,
             nce_objective: args.nce_objective.to_ge(),
-            cell_projection: args.projection.to_ge(),
         })
     };
 

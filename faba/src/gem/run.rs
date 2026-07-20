@@ -422,14 +422,10 @@ fn run_gem_genes_bge(
             // Data-driven selection (Stage 2): only the broad Pass 1 scores every gene
             // by LRT for the refit. `None` on the HVG branch and on the refit itself.
             select_lrt_fdr: select_lrt.then_some(args.model.feature_null_fdr),
-            // Softmax (InfoNCE) NCE: on gem's dense count data the positive competing
-            // against its negatives in one distribution separates cell types better
-            // than the per-pair logistic loss senna bge / pinto cage use.
-            nce_objective: ge::loss::NceObjective::Softmax,
-            // Phase-2 projection (`--projection`): nce (default) trains θ on spliced
-            // + δ on unspliced (θ+δ) stochastically; analytic is the exact per-cell
-            // Poisson-MAP dual solve. Both emit the velocity increment δ.
-            cell_projection: args.model.projection.to_ge(),
+            // `--nce-objective` (default softmax = InfoNCE: on gem's dense count data
+            // the positive competing against its negatives in one distribution
+            // separates cell types better than the per-pair logistic SGNS loss).
+            nce_objective: args.model.nce_objective.to_ge(),
         };
         Ok((cfg, gene_names, delta_l2))
     };
@@ -743,15 +739,11 @@ fn run_gem_genes_bge(
             // The per-cell increment δ travels alongside the operator velocity.
             if let Some(delta_c) = &out.cell_velocity {
                 write_cell("velocity_increment", delta_c.clone())?;
-                let note = match args.model.projection {
-                    super::common::ProjectionArg::Nce => {
-                        "stochastic contrastive δ (NCE spliced/unspliced); reduced origin-shrinkage vs analytic, still diagnostic"
-                    }
-                    super::common::ProjectionArg::Analytic => {
-                        "analytic δ_c increment; shrinkage-prone (δ_c ≈ −0.5·θ), diagnostic only"
-                    }
-                };
-                info!("wrote {}.velocity_increment.parquet ({note})", args.out);
+                info!(
+                    "wrote {}.velocity_increment.parquet (analytic δ_c increment; \
+                     shrinkage-prone (δ_c ≈ −0.5·θ), diagnostic only)",
+                    args.out
+                );
             }
         }
         // No δ_g dictionary (--delta-l2 = 0): fall back to the raw increment for velocity.parquet.

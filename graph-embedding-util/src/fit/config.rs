@@ -33,21 +33,6 @@ pub(crate) const DEFAULT_STRATIFY_ALPHA_PB: f32 = 0.5;
 /// starving deeply sequenced cells.
 pub(crate) const DEFAULT_STRATIFY_ALPHA_CELL: f32 = 0.5;
 
-/// Phase-2 cell-projection method: how each cell's embedding is recovered once
-/// the feature side is frozen.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CellProjection {
-    /// Exact analytical per-cell Poisson-MAP (IRLS, CPU). Also emits the gem
-    /// velocity increment `δ`. The default.
-    #[default]
-    Analytic,
-    /// Frozen-feature NCE: train the cell side in GPU-batched / CPU-parallel
-    /// blocks with the pb-level calibration loss. For a β-sharing (gem) model it
-    /// trains θ on the spliced edges and δ on the unspliced edges (`θ+δ`, θ
-    /// frozen) — the stochastic analogue of the analytic dual solve.
-    Nce,
-}
-
 /// Hyperparameter / configuration bundle for [`fit`]. Constructed by
 /// each caller from its own CLI arguments — this crate doesn't import
 /// `clap`.
@@ -183,9 +168,6 @@ pub struct FitConfig {
     /// `Softmax` (InfoNCE), which `faba gem` uses for its dense count data; `senna bge`
     /// / `pinto cage` set `Logistic` explicitly (byte-identical to before).
     pub nce_objective: crate::loss::NceObjective,
-    /// Phase-2 cell-projection method ([`CellProjection`]). `Analytic` (default)
-    /// is the exact per-cell Poisson-MAP; `Nce` trains `e_cell` in GPU blocks.
-    pub cell_projection: CellProjection,
 }
 
 /// Caller-provided spec for the per-gene β-sharing feature factorization. Lengths

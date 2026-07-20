@@ -7,12 +7,10 @@ mod feature_projection;
 pub mod lift;
 pub mod lineage;
 pub mod projection;
-mod projection_nce;
 mod samplers;
 
 pub use config::{
-    load_feature_network, CellProjection, FeatFactorSpec, FeatureNetworkArgs, FeatureNetworkConfig,
-    FitConfig,
+    load_feature_network, FeatFactorSpec, FeatureNetworkArgs, FeatureNetworkConfig, FitConfig,
     FitOutput,
 };
 pub use feature_projection::{
@@ -765,61 +763,29 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 .expect("collapse always produces ≥1 level"),
         });
 
-        // `--projection nce`: recover e_cell by frozen-feature NCE training instead
-        // of the analytical Poisson-MAP. For a β-sharing (gem) model the projection
-        // trains θ on the SPLICED edges and δ on the UNSPLICED edges (θ+δ, θ frozen)
-        // — the stochastic analogue of `solve_node_splice`.
-        let nce_projection = config.cell_projection == CellProjection::Nce;
-        if nce_projection {
-            let opts = projection_nce::NceProjectionOpts::bge_default(
-                config.nce_objective,
-                config.num_negatives,
-                config.seed,
-            );
-            // gem passes the splice mask ⇒ the projection splits edges, stores θ
-            // raw, and runs the δ (velocity-increment) pass. bge passes None ⇒ a
-            // single θ pass over all edges, L2-direction store, no velocity.
-            let unspliced = config
-                .feat_factor
-                .as_ref()
-                .map(|s| s.unspliced_rows.as_slice());
-            let (nrms, vel) = projection_nce::project_cells_frozen_feature(
-                &mut cell_model,
-                &varmap,
-                &cell_samplers,
-                n_cells,
-                &opts,
-                batch_divisor,
-                unspliced,
-                &config.device,
-            )?;
-            cell_nrms = nrms;
-            cell_velocity = vel;
-        } else {
-            info!(
-                "Phase 2 — analytical per-cell projection ({n_cells} cells, feature side fixed, ridge λ={PHASE2_RIDGE})"
-            );
-            // β-sharing (gem): identity is resolved by the SPLICED edges (stored raw),
-            // and the same pass emits the raw velocity increment δ on the cell axis.
-            // Plain (bge): one combined projection = identity (stored as dir), no splice
-            // output.
-            let unspliced = config
-                .feat_factor
-                .as_ref()
-                .map(|s| s.unspliced_rows.as_slice());
-            let (nrms, splice) = project_cells_phase2(
-                &mut cell_model,
-                &varmap,
-                &cell_samplers,
-                n_cells,
-                f64::from(PHASE2_RIDGE),
-                &config.device,
-                batch_divisor,
-                unspliced,
-            )?;
-            cell_nrms = nrms;
-            cell_velocity = splice;
-        }
+        info!(
+            "Phase 2 — analytical per-cell projection ({n_cells} cells, feature side fixed, ridge λ={PHASE2_RIDGE})"
+        );
+        // β-sharing (gem): identity is resolved by the SPLICED edges (stored raw),
+        // and the same pass emits the raw velocity increment δ on the cell axis.
+        // Plain (bge): one combined projection = identity (stored as dir), no splice
+        // output.
+        let unspliced = config
+            .feat_factor
+            .as_ref()
+            .map(|s| s.unspliced_rows.as_slice());
+        let (nrms, splice) = project_cells_phase2(
+            &mut cell_model,
+            &varmap,
+            &cell_samplers,
+            n_cells,
+            f64::from(PHASE2_RIDGE),
+            &config.device,
+            batch_divisor,
+            unspliced,
+        )?;
+        cell_nrms = nrms;
+        cell_velocity = splice;
     }
 
     // Post-hoc held-out feature projection. Solve `β_g` for every backend

@@ -1,6 +1,6 @@
 use clap::Args;
 
-use super::common::{ComputeDevice, ProjectionArg};
+use super::common::{ComputeDevice, NceObjectiveArg};
 
 /// Model dimensions.
 #[derive(Args, Debug, Clone)]
@@ -53,25 +53,14 @@ pub struct ModelArgs {
     pub feature_null_fdr: f32,
 
     #[arg(
-        long = "projection",
-        default_value_t = ProjectionArg::Nce,
+        long = "nce-objective",
+        default_value_t = NceObjectiveArg::Softmax,
         value_enum,
-        help = "Phase-2 cell projection: nce (stochastic frozen-feature block training;\n\
-                θ on spliced edges, δ on unspliced; GPU-batched or CPU-parallel;\n\
-                the default) or analytic (exact per-cell Poisson-MAP).",
-        long_help = "How each cell's final embedding θ (and velocity increment δ)\n\
-                     is recovered once the feature side is frozen.\n\
-                     nce (default): trains θ against the frozen β_g\n\
-                     on the cell's spliced edges, then δ against β_g+δ_g\n\
-                     on the unspliced edges (scored at θ+δ, θ held fixed) —\n\
-                     the stochastic analogue of the analytic dual solve.\n\
-                     Blocked and GPU-batched or CPU-parallel, much faster\n\
-                     at the default H=128; approximate and seed-dependent.\n\
-                     analytic: the exact per-cell Poisson-MAP (IRLS) —\n\
-                     reproducible, with library-size-calibrated ‖θ‖,\n\
-                     but O(m·h²) per cell on the CPU."
+        help = "NCE objective for phase-1 training:\n\
+                softmax (InfoNCE — negatives compete in one softmax; sharper on\n\
+                dense pseudobulk data; default) or logistic (per-pair SGNS)."
     )]
-    pub projection: ProjectionArg,
+    pub nce_objective: NceObjectiveArg,
 }
 
 /// Pseudobulk collapse, phase-1 cell-axis mode, per-file sample identity, and

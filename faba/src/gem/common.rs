@@ -33,25 +33,26 @@ impl ComputeDevice {
     }
 }
 
-/// Phase-2 cell-projection method for `faba gem` (maps to
-/// [`graph_embedding_util::CellProjection`]). Mirrors senna bge's `--projection`.
+/// NCE training objective for gem's feature/cell embedding (maps to
+/// [`graph_embedding_util::loss::NceObjective`]). Mirrors senna bge's
+/// `--nce-objective`. Applies to phase-1 training.
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
-pub enum ProjectionArg {
-    /// Exact analytical per-cell Poisson-MAP (IRLS, CPU): θ from spliced edges +
-    /// the δ velocity increment from unspliced.
-    Analytic,
-    /// Stochastic frozen-feature NCE: θ on spliced edges, δ on unspliced (θ+δ),
-    /// GPU-batched / CPU-parallel — faster at large H; approximate, seed-dependent.
-    Nce,
+pub enum NceObjectiveArg {
+    /// Per-pair logistic (SGNS): each (positive, negative) pair decided
+    /// independently — bge's historical loss.
+    Logistic,
+    /// Sampled-softmax / InfoNCE: the negatives compete with the positive in one
+    /// softmax; sharpens separation on dense count data (gem's default).
+    Softmax,
 }
 
-impl ProjectionArg {
+impl NceObjectiveArg {
     #[must_use]
-    pub fn to_ge(&self) -> graph_embedding_util::CellProjection {
+    pub fn to_ge(&self) -> graph_embedding_util::loss::NceObjective {
         match self {
-            ProjectionArg::Analytic => graph_embedding_util::CellProjection::Analytic,
-            ProjectionArg::Nce => graph_embedding_util::CellProjection::Nce,
+            NceObjectiveArg::Logistic => graph_embedding_util::loss::NceObjective::Logistic,
+            NceObjectiveArg::Softmax => graph_embedding_util::loss::NceObjective::Softmax,
         }
     }
 }
