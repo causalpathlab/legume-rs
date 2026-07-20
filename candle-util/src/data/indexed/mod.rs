@@ -20,7 +20,7 @@
 use crate::data::loader_util::Minibatches;
 
 use candle_core::{Device, Tensor};
-use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
+use indicatif::{ParallelProgressIterator, ProgressBar};
 use matrix_util::traits::CandleDataLoaderOps;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -50,12 +50,18 @@ use pack::{pack_null_at_indices, pack_values_only};
 // Progress bar helper (used here and externally by cell-grouped loader) //
 ///////////////////////////////////////////////////////////////////////////
 
+/// A bounded progress bar in the **canonical workspace style** (see
+/// [`matrix_util::progress::new_progress_bar`]): `[elapsed] bar pos/len (eta) {msg}`,
+/// cyan/blue, and — crucially — registered with the shared `MULTI_PROGRESS` so `-v`
+/// log output interleaves cleanly above it. `label` is the initial `{msg}` (e.g.
+/// "Epochs", "Null rows"); the epoch trainers overwrite it each step with a live metric
+/// (`prog_bar.set_message`), matching `senna bge`. Delegating here keeps every
+/// candle-util bar on ONE style and ONE bridged `MultiProgress` — a locally-styled
+/// `ProgressBar::new` spawns a SECOND, unbridged bar that corrupts log output under
+/// `-v` (see the `matrix-util::progress` module doc).
+#[must_use]
 pub fn labeled_bar(label: &str, len: u64) -> ProgressBar {
-    ProgressBar::new(len).with_style(
-        ProgressStyle::with_template(&format!("{} {{bar:40}} {{pos}}/{{len}} ({{eta}})", label))
-            .unwrap()
-            .progress_chars("##-"),
-    )
+    matrix_util::progress::new_progress_bar(len).with_message(label.to_string())
 }
 
 /////////////////////////////////////////////////////////////////////
