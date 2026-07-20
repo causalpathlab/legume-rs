@@ -99,9 +99,7 @@ pub(crate) fn subsample_cell_samplers_multilevel(
 /// of being drowned by deeply sequenced cells.
 pub(crate) fn build_active_samplers(
     unified: &UnifiedData,
-    feat_weights: &[f32],
     alpha_cell: f32,
-    alpha_neg: f32,
     cell_weight_mult: Option<&[f32]>,
 ) -> anyhow::Result<Vec<PerBatchStratifiedCellSampler>> {
     // Build the per-batch stratified-cell samplers by **streaming columns**
@@ -167,7 +165,7 @@ pub(crate) fn build_active_samplers(
             let b = batch_membership[cell] as usize;
             col_feats[lc].push(uid);
             col_counts[lc].push(v);
-            col_wts[lc].push((v * feat_weights[uid as usize]).max(1e-8));
+            col_wts[lc].push(v);
             col_deg[lc] += v;
             feat_count[b][uid as usize] += v;
         })?;
@@ -207,10 +205,8 @@ pub(crate) fn build_active_samplers(
         let feature_pool: Vec<u32> = (0..n_features as u32)
             .filter(|&f| fc[f as usize] > 0.0)
             .collect();
-        let neg_w: Vec<f32> = feature_pool
-            .iter()
-            .map(|&f| fc[f as usize].powf(alpha_neg))
-            .collect();
+        // Uniform negatives (abundance-independent noise distribution).
+        let neg_w: Vec<f32> = vec![1.0; feature_pool.len()];
         let neg = WeightedIndex::new(neg_w).expect("batch feature pool");
         active.push(PerBatchStratifiedCellSampler {
             cell_picker,

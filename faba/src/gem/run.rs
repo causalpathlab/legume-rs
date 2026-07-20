@@ -333,9 +333,9 @@ fn run_gem_genes_bge(
     // Build a `FitConfig` for the CURRENT feature axis of `unified`, so the same
     // builder serves pass 1 (full post-HVG axis) and the post-QC re-fit (null
     // features dropped): the per-gene β-sharing factor is rebuilt from the live
-    // feature names, the δ_g ridge / HVG weights realign to the reduced axis, and
-    // the Fisher cache self-invalidates on the name mismatch. Mirrors senna bge's
-    // two-pass `build_config`. Returns the config plus the axis-derived gene names
+    // feature names, and the δ_g ridge / HVG weights realign to the reduced axis.
+    // Mirrors senna bge's two-pass `build_config`. Returns the config plus the
+    // axis-derived gene names
     // and resolved δ ridge the downstream dictionary writers need.
     //
     // Per-gene β-sharing factorization: each row `{gene}/count/{spliced|unspliced}`
@@ -384,12 +384,9 @@ fn run_gem_genes_bge(
             seed: args.runtime.seed,
             device: dev.clone(),
             block_size: None,
-            fisher_weights_cache: Some(
-                format!("{}.fisher_weights.parquet", args.out).into_boxed_str(),
-            ),
             feature_network: None,
             feature_embedding_l2: 0.0, // must be 0 for β-sharing (see note above)
-            weight_decay: 0.0,
+            weight_decay: args.train.weight_decay,
             max_grad_norm: args.train.max_grad_norm,
             cell_weight_mult: None,
             phase1_cells_per_pb: args.collapse.phase1_cells_per_pb,

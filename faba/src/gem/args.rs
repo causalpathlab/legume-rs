@@ -253,11 +253,25 @@ pub struct TrainArgs {
 
     #[arg(
         long,
-        default_value_t = 1e-3,
+        default_value_t = 1e-2,
         alias = "lr",
         help = "AdamW learning rate"
     )]
     pub learning_rate: f64,
+
+    #[arg(
+        long,
+        default_value_t = 1e-2,
+        help = "AdamW decoupled weight decay (all phase-1 params). Default 1e-2.",
+        long_help = "AdamW decoupled weight decay applied uniformly to every phase-1 parameter\n\
+                     (β_g, δ_g, per-axis heads, biases).\n\
+                     Post-update shrinkage `θ ← θ − lr·wd·θ`; it does NOT enter the backward graph,\n\
+                     so unlike an explicit E_feat L2 it is compatible with β-sharing.\n\
+                     Mild by construction: the per-step pull is far below the clipped adaptive step,\n\
+                     so it sets an equilibrium scale rather than decaying params away.\n\
+                     0.0 = off (plain Adam)."
+    )]
+    pub weight_decay: f64,
 
     #[arg(
         long = "max-grad-norm",

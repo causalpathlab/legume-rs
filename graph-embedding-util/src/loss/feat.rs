@@ -24,7 +24,6 @@ pub struct EdgeBatch {
     pub fine_feats: Vec<u32>,
     /// `[B*K]` row-major: negatives for positive `b` are at `[b*K..(b+1)*K]`.
     pub neg_feats: Vec<u32>,
-    pub edge_weights: Vec<f32>,
     pub n_negatives: usize,
 }
 
@@ -42,7 +41,6 @@ pub struct EdgeBatchArgs<'a> {
     pub triplets: &'a [Triplet],
     pub batch_sampler: &'a PerBatchSampler,
     pub cell_coarsening: &'a FeatureCoarsening,
-    pub fine_feature_weights: Option<&'a [f32]>,
     pub batch_size: usize,
     pub n_negatives: usize,
 }
@@ -50,7 +48,6 @@ pub struct EdgeBatchArgs<'a> {
 pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
     let mut coarse_cells = Vec::with_capacity(args.batch_size);
     let mut fine_feats = Vec::with_capacity(args.batch_size);
-    let mut weights = Vec::with_capacity(args.batch_size);
 
     let sampler = args.batch_sampler;
 
@@ -61,10 +58,6 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
         let c_coarse = args.cell_coarsening.fine_to_coarse[t.cell as usize] as u32;
         coarse_cells.push(c_coarse);
         fine_feats.push(t.feature);
-        let w = args
-            .fine_feature_weights
-            .map_or(1.0, |w| w[t.feature as usize]);
-        weights.push(w);
     }
 
     let mut neg_feats = Vec::with_capacity(args.batch_size * args.n_negatives);
@@ -77,7 +70,6 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
         coarse_cells,
         fine_feats,
         neg_feats,
-        edge_weights: weights,
         n_negatives: args.n_negatives,
     }
 }
@@ -88,11 +80,11 @@ pub fn sample_edge_batch(args: EdgeBatchArgs, rng: &mut impl Rng) -> EdgeBatch {
 
 /// Two-stage per-batch sampler for the cell axis. Stage 1 picks a cell
 /// (within this batch) with `q(c) ∝ degree(c)^alpha_cell`; stage 2
-/// picks a feature within that cell weighted by `count · fisher(f)`.
+/// picks a feature within that cell weighted by `count`.
 /// Mirrors [`StratifiedSampler`] but the outer stratum is fine cells
-/// (not pseudobulks), and one sampler exists per batch. Negatives use
-/// the same per-batch feature marginal (`count^alpha_neg`) as
-/// [`PerBatchSampler`]. With `alpha_cell = 1`, this is approximately
+/// (not pseudobulks), and one sampler exists per batch. Negatives are drawn
+/// UNIFORMLY over this batch's expressed-feature pool (abundance-independent),
+/// as in [`PerBatchSampler`]. With `alpha_cell = 1`, this is approximately
 /// equivalent to the flat sampler; with `alpha_cell = 0`, every cell
 /// in the batch gets uniform coverage regardless of sequencing depth.
 #[derive(Clone)]
@@ -114,11 +106,10 @@ pub struct CellFeatureSampler {
     /// Global feature ids expressed in this cell.
     pub features: Vec<u32>,
     /// Raw counts aligned with `features` (the `count` per `(cell, feature)`
-    /// edge, before any fisher/weight). Used by the analytical phase-2
-    /// projection ([`crate::cell_projection`]); the sampler itself draws via
-    /// `picker`.
+    /// edge). Used by the analytical phase-2 projection
+    /// ([`crate::cell_projection`]); the sampler itself draws via `picker`.
     pub counts: Vec<f32>,
-    /// `WeightedIndex` over `features`; weights = `count · fisher(f)`.
+    /// `WeightedIndex` over `features`; weights = `count`.
     pub picker: WeightedIndex<f32>,
 }
 
@@ -134,9 +125,7 @@ pub fn build_per_batch_stratified_cell_samplers(
     batch_membership: &[u32],
     n_batches: usize,
     n_features: usize,
-    fisher_weights: &[f32],
     alpha_cell: f32,
-    alpha_neg: f32,
     cell_weight_mult: Option<&[f32]>,
 ) -> Vec<Option<PerBatchStratifiedCellSampler>> {
     let bucket_bar = new_progress_bar(triplets.len() as u64);
@@ -200,10 +189,7 @@ pub fn build_per_batch_stratified_cell_samplers(
                 let edges = &per_cell_map[&c];
                 let features: Vec<u32> = edges.iter().map(|&(f, _)| f).collect();
                 let counts: Vec<f32> = edges.iter().map(|&(_, cnt)| cnt).collect();
-                let weights: Vec<f32> = edges
-                    .iter()
-                    .map(|&(f, cnt)| (cnt * fisher_weights[f as usize]).max(1e-8))
-                    .collect();
+                let weights: Vec<f32> = edges.iter().map(|&(_, cnt)| cnt.max(1e-8)).collect();
                 let picker = WeightedIndex::new(weights).expect("non-empty cell-feature weights");
                 per_cell.push(CellFeatureSampler {
                     features,
@@ -218,10 +204,9 @@ pub fn build_per_batch_stratified_cell_samplers(
             let feature_pool: Vec<u32> = (0..n_features as u32)
                 .filter(|&f| feat_count[f as usize] > 0.0)
                 .collect();
-            let neg_w: Vec<f32> = feature_pool
-                .iter()
-                .map(|&f| feat_count[f as usize].powf(alpha_neg))
-                .collect();
+            // Uniform negatives: every expressed feature is equally likely, so the
+            // noise distribution is independent of abundance.
+            let neg_w: Vec<f32> = vec![1.0; feature_pool.len()];
             let neg = WeightedIndex::new(neg_w).expect("non-empty batch feature pool");
 
             Some(PerBatchStratifiedCellSampler {
@@ -240,14 +225,13 @@ pub fn build_per_batch_stratified_cell_samplers(
 pub struct PerBatchStratifiedEdgeBatchArgs<'a> {
     pub sampler: &'a PerBatchStratifiedCellSampler,
     pub cell_coarsening: &'a FeatureCoarsening,
-    pub fine_feature_weights: &'a [f32],
     pub batch_size: usize,
     pub n_negatives: usize,
 }
 
 /// Two-stage draw: pick cell by `degree^alpha_cell`, then feature
-/// within cell by `count · fisher`. Output `EdgeBatch` shape matches
-/// the flat and stratified pb samplers — downstream NCE doesn't care.
+/// within cell by `count`. Output `EdgeBatch` shape matches the flat
+/// and stratified pb samplers — downstream NCE doesn't care.
 pub fn sample_per_batch_stratified_edge_batch(
     args: PerBatchStratifiedEdgeBatchArgs,
     rng: &mut impl Rng,
@@ -255,7 +239,6 @@ pub fn sample_per_batch_stratified_edge_batch(
     let s = args.sampler;
     let mut coarse_cells = Vec::with_capacity(args.batch_size);
     let mut fine_feats = Vec::with_capacity(args.batch_size);
-    let mut weights = Vec::with_capacity(args.batch_size);
 
     for _ in 0..args.batch_size {
         let lc = s.cell_picker.sample(rng);
@@ -266,7 +249,6 @@ pub fn sample_per_batch_stratified_edge_batch(
         let c_coarse = args.cell_coarsening.fine_to_coarse[c as usize] as u32;
         coarse_cells.push(c_coarse);
         fine_feats.push(f);
-        weights.push(args.fine_feature_weights[f as usize]);
     }
 
     let mut neg_feats = Vec::with_capacity(args.batch_size * args.n_negatives);
@@ -279,7 +261,6 @@ pub fn sample_per_batch_stratified_edge_batch(
         coarse_cells,
         fine_feats,
         neg_feats,
-        edge_weights: weights,
         n_negatives: args.n_negatives,
     }
 }
@@ -290,15 +271,15 @@ pub fn sample_per_batch_stratified_edge_batch(
 
 /// Two-stage stratified sampler for pseudobulk axes. Stage 1 picks a
 /// pb (stratum) by `q(p) ∝ pb_size(p)^alpha_pb`; stage 2 picks a
-/// feature within that pb weighted by `μ_pf · fisher(f)`. Compared to
+/// feature within that pb weighted by `μ_pf`. Compared to
 /// flat `WeightedIndex` over all super-edges, this guarantees every pb
 /// gets training coverage proportional to `q(p)` (uniform when
 /// `alpha_pb = 0`, count-proportional when `alpha_pb = 1`), instead of
 /// being dominated by housekeeping-gene super-edges.
 ///
-/// Negatives come from a single global pb-level feature marginal
-/// (count^`alpha_neg`), since `pb_unified` collapses all pseudobulks
-/// into one synthetic "all" batch.
+/// Negatives are drawn UNIFORMLY over the single global pb-level pool of
+/// expressed features (abundance-independent), since `pb_unified` collapses
+/// all pseudobulks into one synthetic "all" batch.
 pub struct StratifiedSampler {
     /// Picks a local pb index into `active_pbs`. Weights = `q(p)`.
     pub pb_picker: WeightedIndex<f32>,
@@ -321,8 +302,8 @@ pub struct PbFeatureSampler {
     /// draw emits both `features[i]` and `paired[i]` so δ_g trains at the spliced
     /// sampling frequency.
     pub paired: Vec<u32>,
-    /// `WeightedIndex` over `features`; per-row weights = `μ_pf · fisher(f)`,
-    /// gene-paired weights = `spliced_count · fisher(spliced_row)`.
+    /// `WeightedIndex` over `features`; per-row weights = `μ_pf`,
+    /// gene-paired weights = the gene's `total` count.
     pub picker: WeightedIndex<f32>,
 }
 
@@ -340,15 +321,11 @@ pub struct FeatPairing<'a> {
 /// `(primary_rows, paired_rows, weights)`, one entry per gene present. The gene is
 /// sampled by its **total** count (`spliced + unspliced` — the nascent fraction
 /// up-weights actively-regulated genes and no gene is dropped for lacking a mature
-/// track), `weight = total_count · fisher(primary)`. `primary` is the spliced
+/// track), `weight = total_count`. `primary` is the spliced
 /// (identity) row when present (else the nascent row for a nascent-only gene);
 /// `paired` is the unspliced row when both tracks exist (`u32::MAX` otherwise). A
 /// draw emits both rows so β_g / δ_g train at the gene's sampling frequency.
-fn gene_paired_entries(
-    edges: &[(u32, f32)],
-    fp: &FeatPairing,
-    fisher_weights: &[f32],
-) -> (Vec<u32>, Vec<u32>, Vec<f32>) {
+fn gene_paired_entries(edges: &[(u32, f32)], fp: &FeatPairing) -> (Vec<u32>, Vec<u32>, Vec<f32>) {
     // gene → (row, summed count) for each track.
     let mut spliced: FxHashMap<u32, (u32, f32)> = FxHashMap::default();
     let mut unspliced: FxHashMap<u32, (u32, f32)> = FxHashMap::default();
@@ -382,7 +359,7 @@ fn gene_paired_entries(
         };
         features.push(primary);
         paired.push(pair);
-        weights.push((total * fisher_weights[primary as usize]).max(1e-8));
+        weights.push(total.max(1e-8));
     }
     (features, paired, weights)
 }
@@ -395,9 +372,7 @@ pub fn build_stratified_sampler(
     triplets: &[Triplet],
     n_pb: usize,
     n_features: usize,
-    fisher_weights: &[f32],
     alpha_pb: f32,
-    alpha_neg: f32,
     pairing: Option<&FeatPairing>,
 ) -> Option<StratifiedSampler> {
     if triplets.is_empty() {
@@ -470,14 +445,11 @@ pub fn build_stratified_sampler(
             let (features, paired, weights) = match pairing {
                 // β-sharing: one entry per gene, sampled by spliced count, paired
                 // with its unspliced row (emitted together at draw time).
-                Some(fp) => gene_paired_entries(edges, fp, fisher_weights),
-                // Plain per-row: every expressed row sampled by count · fisher.
+                Some(fp) => gene_paired_entries(edges, fp),
+                // Plain per-row: every expressed row sampled by count.
                 None => {
                     let features: Vec<u32> = edges.iter().map(|&(f, _)| f).collect();
-                    let weights: Vec<f32> = edges
-                        .iter()
-                        .map(|&(f, c)| (c * fisher_weights[f as usize]).max(1e-8))
-                        .collect();
+                    let weights: Vec<f32> = edges.iter().map(|&(_, c)| c.max(1e-8)).collect();
                     (features, Vec::new(), weights)
                 }
             };
@@ -505,34 +477,18 @@ pub fn build_stratified_sampler(
     }
     let pb_picker = WeightedIndex::new(pb_q).expect("non-empty pb weights");
 
-    // Negative-sampling basis per feature row. Per-row (bge): the row's own count.
-    // Gene-paired (gem): the row's GENE total (spliced + unspliced) count · fisher — the
-    // SAME per-gene weighting as the positive draw, so the NCE noise distribution matches
-    // the data distribution (fisher on negatives too, not just positives). The pos/neg
-    // asymmetry (fisher on positives only) otherwise biases the learned scores toward the
-    // abundant genes.
-    let neg_basis: Vec<f32> = match pairing {
-        Some(fp) => {
-            let mut gene_total = vec![0f32; n_features];
-            for f in 0..n_features {
-                gene_total[fp.row_to_gene[f] as usize] += feat_count[f];
-            }
-            (0..n_features)
-                .map(|f| gene_total[fp.row_to_gene[f] as usize] * fisher_weights[f])
-                .collect()
-        }
-        None => feat_count.clone(),
-    };
+    // Uniform negatives: every expressed feature row is equally likely as a
+    // negative, independent of abundance (SIMBA's uniform edge-corruption option).
+    // Note a uniform noise distribution also makes the gem gene-total pooling moot —
+    // pooling only mattered to keep an abundance-weighted basis matched to the
+    // gene-paired positives; uniform is uniform either way.
     let feature_pool: Vec<u32> = (0..n_features as u32)
         .filter(|&f| feat_count[f as usize] > 0.0)
         .collect();
     if feature_pool.is_empty() {
         return None;
     }
-    let neg_w: Vec<f32> = feature_pool
-        .iter()
-        .map(|&f| neg_basis[f as usize].powf(alpha_neg))
-        .collect();
+    let neg_w: Vec<f32> = vec![1.0; feature_pool.len()];
     let neg = WeightedIndex::new(neg_w).expect("non-empty negative pool");
 
     Some(StratifiedSampler {
@@ -546,7 +502,6 @@ pub fn build_stratified_sampler(
 
 pub struct StratifiedEdgeBatchArgs<'a> {
     pub sampler: &'a StratifiedSampler,
-    pub fine_feature_weights: &'a [f32],
     pub batch_size: usize,
     pub n_negatives: usize,
 }
@@ -561,7 +516,6 @@ pub fn sample_stratified_edge_batch(
     let s = args.sampler;
     let mut coarse_cells = Vec::with_capacity(args.batch_size);
     let mut fine_feats = Vec::with_capacity(args.batch_size);
-    let mut weights = Vec::with_capacity(args.batch_size);
 
     for _ in 0..args.batch_size {
         let local_pb = s.pb_picker.sample(rng);
@@ -571,7 +525,6 @@ pub fn sample_stratified_edge_batch(
         let f = pf.features[local_f];
         coarse_cells.push(p);
         fine_feats.push(f);
-        weights.push(args.fine_feature_weights[f as usize]);
         // β-sharing gene-paired draw: the entry above is the spliced (identity)
         // row, drawn by its spliced count. Emit the paired unspliced row into the
         // same batch (same pb) so δ_g trains at the spliced sampling frequency.
@@ -580,7 +533,6 @@ pub fn sample_stratified_edge_batch(
             if u != u32::MAX {
                 coarse_cells.push(p);
                 fine_feats.push(u);
-                weights.push(args.fine_feature_weights[u as usize]);
             }
         }
     }
@@ -598,7 +550,6 @@ pub fn sample_stratified_edge_batch(
         coarse_cells,
         fine_feats,
         neg_feats,
-        edge_weights: weights,
         n_negatives: args.n_negatives,
     }
 }
@@ -653,14 +604,12 @@ pub struct ChainFeatureSide {
     pub fine_feats: Vec<u32>,
     /// Length B*K row-major; shared negatives across all axes.
     pub neg_feats: Vec<u32>,
-    pub edge_weights: Vec<f32>,
     pub n_negatives: usize,
 }
 
 pub struct ChainBatchArgs<'a> {
     pub triplets: &'a [Triplet],
     pub sampler: &'a ChainSampler<'a>,
-    pub fine_feature_weights: &'a [f32],
     pub batch_size: usize,
     pub n_negatives: usize,
 }
@@ -669,7 +618,6 @@ pub fn sample_chain_batch(args: ChainBatchArgs, rng: &mut impl Rng) -> ChainBatc
     let bs = args.sampler.batch_sampler;
     let mut leaf_cells = Vec::with_capacity(args.batch_size);
     let mut fine_feats = Vec::with_capacity(args.batch_size);
-    let mut weights = Vec::with_capacity(args.batch_size);
 
     for _ in 0..args.batch_size {
         let local_idx = bs.pos.sample(rng);
@@ -677,7 +625,6 @@ pub fn sample_chain_batch(args: ChainBatchArgs, rng: &mut impl Rng) -> ChainBatc
         let t = &args.triplets[global_idx];
         leaf_cells.push(t.cell);
         fine_feats.push(t.feature);
-        weights.push(args.fine_feature_weights[t.feature as usize]);
     }
 
     let mut neg_feats = Vec::with_capacity(args.batch_size * args.n_negatives);
@@ -691,7 +638,6 @@ pub fn sample_chain_batch(args: ChainBatchArgs, rng: &mut impl Rng) -> ChainBatc
         feats: ChainFeatureSide {
             fine_feats,
             neg_feats,
-            edge_weights: weights,
             n_negatives: args.n_negatives,
         },
     }
@@ -717,9 +663,9 @@ pub struct ChainAxis<'a> {
 /// **shared** across axes (same Var); each axis differs only in its
 /// cell-side embeddings table and the per-chain indices into it.
 ///
-/// Returns the λ-weighted sum across axes. The per-edge weight uses
-/// the cell-axis NCE's `Σw` normalization (Fisher-info-aware) so the
-/// gradient magnitude is consistent with the existing per-axis losses.
+/// Returns the λ-weighted sum across axes. Each axis's NCE is an unweighted
+/// mean over the chain batch (pure count-weighted training: the count weighting
+/// lives in the sampler's positive draw, not the loss).
 pub fn nce_loss_chain(
     e_feat: &Tensor,
     b_feat: &Tensor,
@@ -751,9 +697,6 @@ pub fn nce_loss_chain(
     let e_feat_neg = e_feat_neg_flat.reshape((b, k, h))?;
     let b_feat_neg = b_feat_neg_flat.reshape((b, k))?;
 
-    let w_sum: f32 = feats.edge_weights.iter().sum::<f32>().max(1e-8);
-    let w_t = Tensor::from_vec(feats.edge_weights, b, dev)?;
-
     let mut total: Option<Tensor> = None;
     for axis in axes {
         let n = axis.indices.dims1()?;
@@ -774,8 +717,7 @@ pub fn nce_loss_chain(
             NceObjective::Logistic => logistic_nce(&pos_score, negs)?,
             NceObjective::Softmax => softmax_nce(&pos_score, negs)?,
         };
-        let weighted = (per_edge * w_t.clone())?;
-        let axis_loss = (weighted.sum(0)? / f64::from(w_sum))?;
+        let axis_loss = per_edge.mean(0)?;
         let scaled = (axis_loss * f64::from(axis.lambda))?;
         total = Some(match total {
             Some(prev) => (prev + scaled)?,
@@ -799,8 +741,6 @@ pub fn build_per_batch_samplers(
     batch_membership: &[u32],
     n_batches: usize,
     n_features: usize,
-    fisher_weights: &[f32],
-    alpha_neg: f32,
 ) -> Vec<Option<PerBatchSampler>> {
     // Parallel bucketing of triplet indices by batch. Each worker folds
     // its chunk into per-batch local Vecs, then reduce concats per batch.
@@ -841,11 +781,7 @@ pub fn build_per_batch_samplers(
 
             let pos_w: Vec<f32> = trip_indices
                 .iter()
-                .map(|&i| {
-                    let t = &triplets[i as usize];
-                    let w = fisher_weights[t.feature as usize];
-                    (t.count * w).max(1e-8)
-                })
+                .map(|&i| triplets[i as usize].count.max(1e-8))
                 .collect();
             let pos = WeightedIndex::new(pos_w).expect("non-empty batch positives");
 
@@ -859,10 +795,9 @@ pub fn build_per_batch_samplers(
             let feature_pool: Vec<u32> = (0..n_features as u32)
                 .filter(|&f| feat_count[f as usize] > 0.0)
                 .collect();
-            let neg_w: Vec<f32> = feature_pool
-                .iter()
-                .map(|&f| feat_count[f as usize].powf(alpha_neg))
-                .collect();
+            // Uniform negatives: every expressed feature is equally likely, so the
+            // noise distribution is independent of abundance.
+            let neg_w: Vec<f32> = vec![1.0; feature_pool.len()];
             let neg = WeightedIndex::new(neg_w).expect("non-empty batch feature pool");
 
             Some(PerBatchSampler {
@@ -925,8 +860,8 @@ pub fn nce_loss_identity(
 
 /// Shared tail of [`nce_loss`] / [`nce_loss_identity`]: feature-side
 /// gathers, raw bilinear (`E_feat[f] · E_cell[c] + b_feat`) scoring,
-/// count-weighted log-σ aggregation. The cell-side embeddings come
-/// pre-resolved (pooled or directly gathered).
+/// unweighted-mean log-σ aggregation over the batch. The cell-side
+/// embeddings come pre-resolved (pooled or directly gathered).
 fn nce_loss_with_cell_side(
     model: &JointEmbedModel,
     batch: EdgeBatch,
@@ -991,13 +926,9 @@ fn nce_loss_with_cell_side(
         NceObjective::Softmax => softmax_nce(&pos_score, negs)?,
     };
 
-    // Normalize by Σw, not B: when most positives are housekeeping and
-    // get downweighted, dividing by B leaves an O(mean(w)) gradient
-    // attenuation that stalls learning.
-    let w_sum: f32 = batch.edge_weights.iter().sum::<f32>().max(1e-8);
-    let w_t = Tensor::from_vec(batch.edge_weights, b, dev)?;
-    let weighted = (per_edge * w_t)?;
-    weighted.sum(0)? / f64::from(w_sum)
+    // Unweighted mean over the batch's positives (pure count-weighted training:
+    // the count weighting lives in the sampler's positive draw, not the loss).
+    per_edge.mean(0)
 }
 
 fn unique_with_index(values: &[u32]) -> (Vec<u32>, Vec<u32>) {
@@ -1035,11 +966,10 @@ mod pairing_tests {
             row_to_gene: &row_to_gene,
             unspliced_rows: &unspliced_rows,
         };
-        let fisher = vec![1.0f32; 4];
         // pb has all four rows: gene0 spliced 5 + unspliced 2, gene1 spliced 3,
         // gene2 unspliced-only 4.
         let edges = vec![(0u32, 5.0f32), (1, 2.0), (2, 3.0), (3, 4.0)];
-        let (features, paired, weights) = gene_paired_entries(&edges, &fp, &fisher);
+        let (features, paired, weights) = gene_paired_entries(&edges, &fp);
 
         // One entry per gene present → gene0, gene1, gene2 (nascent-only kept).
         assert_eq!(features.len(), 3);
@@ -1064,13 +994,12 @@ mod pairing_tests {
             row_to_gene: &row_to_gene,
             unspliced_rows: &unspliced_rows,
         };
-        let fisher = vec![2.0f32, 1.0, 1.0, 1.0];
-        // gene0 spliced 5 + unspliced 2 → total 7; fisher applied on the primary
-        // (spliced) row (2.0) → 14. Confirms the unspliced count IS summed in.
+        // gene0 spliced 5 + unspliced 2 → total 7. Confirms the unspliced count
+        // IS summed into the (pure count) weight.
         let edges = vec![(0u32, 5.0f32), (1, 2.0)];
-        let (features, paired, weights) = gene_paired_entries(&edges, &fp, &fisher);
+        let (features, paired, weights) = gene_paired_entries(&edges, &fp);
         assert_eq!(features, vec![0]);
         assert_eq!(paired, vec![1]);
-        assert_eq!(weights, vec![14.0]);
+        assert_eq!(weights, vec![7.0]);
     }
 }

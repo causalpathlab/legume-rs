@@ -291,8 +291,8 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        help = "Cells per block for streaming NB-Fisher / column I/O (omit for auto).",
-        long_help = "Cells per parallel block for the streaming NB-Fisher pass and column-block I/O.\n\
+        help = "Cells per block for column I/O / streaming (omit for auto).",
+        long_help = "Cells per parallel block for streaming column-block I/O.\n\
                      Omit for auto-scaling (clamps to 100 for large feature counts — slow on rotational disks).\n\
                      Pass 1024+ when you have RAM, especially without --preload-data."
     )]
@@ -344,17 +344,6 @@ pub struct BgeArgs {
                      for each additional group."
     )]
     multiome: Vec<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Always recompute NB-Fisher weights, overwriting any existing cache.",
-        long_help = "Always recompute NB-Fisher weights and overwrite the cache.\n\
-                     By default `{out}.fisher_weights.parquet` is loaded if it\n\
-                     exists with matching gene names, otherwise computed and\n\
-                     written."
-    )]
-    no_fisher_cache: bool,
 
     #[arg(
         long = "nce-objective",
@@ -609,10 +598,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // so the same builder serves pass 1 (full axis), the post-QC feature re-fit
     // (null features dropped) and the cell-empty re-fit (empties dropped): HVG
     // weights subset through `feature_to_backend_row`, the feature network
-    // reloads against the live feature names, the Fisher cache self-invalidates
-    // on the name mismatch, and the cell-indexed bridge weights resolve against
-    // the live barcodes/cell axis. Everything else is axis-independent and
-    // cloned in.
+    // reloads against the live feature names, and the cell-indexed bridge weights
+    // resolve against the live barcodes/cell axis. Everything else is
+    // axis-independent and cloned in.
     let build_config = |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
         let hvg_weights = hvg_full.as_ref().map(|w| {
             unified
@@ -675,11 +663,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             seed: 1,
             device: args.device.to_device(args.device_no)?,
             block_size: args.block_size,
-            fisher_weights_cache: if args.no_fisher_cache {
-                None
-            } else {
-                Some(format!("{}.fisher_weights.parquet", args.out).into_boxed_str())
-            },
             feature_network,
             feature_embedding_l2: args.feature_embedding_l2,
             weight_decay: args.weight_decay,
