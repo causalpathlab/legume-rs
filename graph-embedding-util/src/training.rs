@@ -79,13 +79,13 @@ pub struct CompositeAxis<'a> {
 }
 
 /// Bipartite sampler attached to a composite axis. Three variants:
-/// - `PerBatch`: flat per-batch positive draw weighted by `count·fisher`.
+/// - `PerBatch`: flat per-batch positive draw weighted by `count`.
 /// - `PerBatchStratified`: per-batch two-stage draw — cell by
-///   `degree^α_cell`, feature within cell by `count·fisher`. Guarantees
+///   `degree^α_cell`, feature within cell by `count`. Guarantees
 ///   per-cell coverage so rare/shallow cells aren't drowned by deeply
 ///   sequenced ones. Used by the cell axis by default.
 /// - `Stratified`: single-sampler two-stage draw over pb's — pb by
-///   `pb_size^α_pb`, feature within pb by `count·fisher`. Used by the
+///   `pb_size^α_pb`, feature within pb by `count`. Used by the
 ///   pb axes (one synthetic batch each).
 pub enum AxisSampler<'a> {
     PerBatch(&'a [PerBatchSampler]),
@@ -151,7 +151,6 @@ pub struct TrainingParams {
 
 pub struct CompositeTrainContext<'a> {
     pub axes: &'a [CompositeAxis<'a>],
-    pub feat_weights: &'a [f32],
     pub dev: &'a Device,
     pub stop: &'a Arc<AtomicBool>,
     /// Per-level cell→pb mappings (coarsest-first; length = number of
@@ -708,8 +707,7 @@ fn sum_step(
 ) -> anyhow::Result<Option<Tensor>> {
     let mut total_loss: Option<Tensor> = None;
     for axis in ctx.axes {
-        let Some(loss) = single_axis_step(axis, rng, params, ctx.feat_weights, smoother, ctx.dev)?
-        else {
+        let Some(loss) = single_axis_step(axis, rng, params, smoother, ctx.dev)? else {
             continue;
         };
         let scaled = (loss * f64::from(axis.lambda))?;
@@ -734,8 +732,7 @@ fn sample_step(
 ) -> anyhow::Result<Option<Tensor>> {
     let axis_idx = axis_picker.sample(rng);
     let axis = &ctx.axes[axis_idx];
-    let Some(loss) = single_axis_step(axis, rng, params, ctx.feat_weights, smoother, ctx.dev)?
-    else {
+    let Some(loss) = single_axis_step(axis, rng, params, smoother, ctx.dev)? else {
         return Ok(None);
     };
     Ok(Some((loss * f64::from(lambda_sum))?))
@@ -794,7 +791,6 @@ fn chain_step(
                 ChainBatchArgs {
                     triplets: &cell_axis.unified.triplets,
                     sampler: &chain_sampler,
-                    fine_feature_weights: ctx.feat_weights,
                     batch_size: params.batch_size,
                     n_negatives: params.num_negatives,
                 },
@@ -807,13 +803,7 @@ fn chain_step(
             }
             let id = rng.random_range(0..samplers.len());
             let bs = &samplers[id];
-            sample_chain_batch_stratified(
-                bs,
-                ctx.feat_weights,
-                params.batch_size,
-                params.num_negatives,
-                rng,
-            )
+            sample_chain_batch_stratified(bs, params.batch_size, params.num_negatives, rng)
         }
         AxisSampler::Stratified(_) => {
             anyhow::bail!(
@@ -877,14 +867,12 @@ fn chain_step(
 /// same `ChainBatch` shape regardless of which sampler produced it.
 fn sample_chain_batch_stratified(
     bs: &PerBatchStratifiedCellSampler,
-    fine_feature_weights: &[f32],
     batch_size: usize,
     n_negatives: usize,
     rng: &mut StdRng,
 ) -> crate::loss::ChainBatch {
     let mut leaf_cells = Vec::with_capacity(batch_size);
     let mut fine_feats = Vec::with_capacity(batch_size);
-    let mut weights = Vec::with_capacity(batch_size);
 
     for _ in 0..batch_size {
         let lc = bs.cell_picker.sample(rng);
@@ -894,7 +882,6 @@ fn sample_chain_batch_stratified(
         let f = pf.features[lf];
         leaf_cells.push(c);
         fine_feats.push(f);
-        weights.push(fine_feature_weights[f as usize]);
     }
 
     let mut neg_feats = Vec::with_capacity(batch_size * n_negatives);
@@ -908,7 +895,6 @@ fn sample_chain_batch_stratified(
         feats: crate::loss::ChainFeatureSide {
             fine_feats,
             neg_feats,
-            edge_weights: weights,
             n_negatives,
         },
     }
@@ -921,7 +907,6 @@ fn single_axis_step(
     axis: &CompositeAxis,
     rng: &mut StdRng,
     params: &TrainingParams,
-    feat_weights: &[f32],
     smoother: Option<&FeatureNetworkSmoother>,
     dev: &Device,
 ) -> anyhow::Result<Option<Tensor>> {
@@ -954,7 +939,6 @@ fn single_axis_step(
                     triplets: &axis.unified.triplets,
                     batch_sampler: bs,
                     cell_coarsening: cc,
-                    fine_feature_weights: Some(feat_weights),
                     batch_size: params.batch_size,
                     n_negatives: params.num_negatives,
                 },
@@ -968,7 +952,6 @@ fn single_axis_step(
                 PerBatchStratifiedEdgeBatchArgs {
                     sampler: bs,
                     cell_coarsening: cc,
-                    fine_feature_weights: feat_weights,
                     batch_size: params.batch_size,
                     n_negatives: params.num_negatives,
                 },
@@ -978,7 +961,6 @@ fn single_axis_step(
         AxisSampler::Stratified(s) => sample_stratified_edge_batch(
             StratifiedEdgeBatchArgs {
                 sampler: s,
-                fine_feature_weights: feat_weights,
                 batch_size: params.batch_size,
                 n_negatives: params.num_negatives,
             },

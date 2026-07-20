@@ -57,8 +57,8 @@ pub struct UnifiedData {
     /// For each compact feature id `i ∈ 0..n_features()`, the row index into
     /// `backend`. Identity (`0..n_features()`) when no HVG was applied; the
     /// HVG selection indices after `subset_features`. Used when an upstream
-    /// pass (e.g. NB-Fisher) operates on the full backend and the result needs
-    /// to be aligned to the compact axis.
+    /// pass (e.g. HVG weighting) operates on the full backend and the result
+    /// needs to be aligned to the compact axis.
     pub feature_to_backend_row: Vec<usize>,
 
     ///////////////

@@ -38,8 +38,7 @@ use matrix_param::traits::Inference;
 use nalgebra::DMatrix;
 
 use config::{
-    load_or_compute_fisher_weights, stage_params, DEFAULT_AXIS_LAMBDA, DEFAULT_STRATIFY_ALPHA_CELL,
-    DEFAULT_STRATIFY_ALPHA_PB,
+    stage_params, DEFAULT_AXIS_LAMBDA, DEFAULT_STRATIFY_ALPHA_CELL, DEFAULT_STRATIFY_ALPHA_PB,
 };
 use projection::{project_cells_phase2, project_pbs_phase2, CellBatchDivisor, PHASE2_RIDGE};
 use samplers::{build_active_samplers, build_smoother, subsample_cell_samplers_multilevel};
@@ -68,12 +67,11 @@ use samplers::{build_active_samplers, build_smoother, subsample_cell_samplers_mu
 pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<FitOutput> {
     let n_cells = unified.n_cells();
     let h = config.embedding_dim;
-    let alpha_neg = 0.75_f32;
     let stop = crate::stop::stop_flag();
 
-    //////////////////////////////////////////////////////////////////
-    // Shared upstream: batch-corrected projection + Fisher weights //
-    //////////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////
+    // Shared upstream: batch-corrected projection //
+    ///////////////////////////////////////////////////
     info!(
         "Batch-corrected projection (proj_dim={}, {} batches)...",
         config.proj_dim,
@@ -123,12 +121,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 config.seed,
             )?
     };
-
-    let feat_weights = load_or_compute_fisher_weights(
-        unified,
-        config.block_size,
-        config.fisher_weights_cache.as_deref(),
-    )?;
 
     ///////////////////////////////////////////////////////
     // Multilevel collapse → batch-corrected pseudobulks //
@@ -330,9 +322,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     let cell_axis_coarsening = identity_axis(n_cells);
     let cell_samplers = build_active_samplers(
         unified,
-        &feat_weights,
         DEFAULT_STRATIFY_ALPHA_CELL,
-        alpha_neg,
         config.cell_weight_mult.as_deref(),
     )?;
     info!(
@@ -403,9 +393,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             &pb.triplets,
             n_pb,
             n_features,
-            &feat_weights,
             DEFAULT_STRATIFY_ALPHA_PB,
-            alpha_neg,
             pairing.as_ref(),
         )
         .ok_or_else(|| {
@@ -497,7 +485,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         train_composite(
             &CompositeTrainContext {
                 axes: &joint_axes,
-                feat_weights: &feat_weights,
                 dev: &config.device,
                 stop: &stop,
                 cell_to_pb_per_level: None,
@@ -639,7 +626,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     refine_loss = train_composite(
                         &CompositeTrainContext {
                             axes: &refine_axes,
-                            feat_weights: &feat_weights,
                             dev: &config.device,
                             stop: &stop,
                             cell_to_pb_per_level: None,
@@ -700,7 +686,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     refine_loss = train_composite(
                         &CompositeTrainContext {
                             axes: &refine_axes,
-                            feat_weights: &feat_weights,
                             dev: &config.device,
                             stop: &stop,
                             cell_to_pb_per_level: None,
@@ -745,9 +730,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         // Phase-2 batch correction (mirrors senna svd/topic): divide each cell's
         // counts by its finest-pb μ_residual fold-factor. μ_residual is gathered
         // onto the unified feature axis so a feature id indexes a row directly;
-        // built only when the collapse fit one (>1 batch). Shared by BOTH the
-        // analytical solve and the stochastic (NCE) projection so they de-batch
-        // identically.
+        // built only when the collapse fit one (>1 batch).
         let phase2_mu_residual: Option<DMatrix<f32>> = collapsed_levels
             .last()
             .and_then(|c| c.mu_residual.as_ref())
