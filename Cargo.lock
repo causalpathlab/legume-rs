@@ -2613,7 +2613,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.2.30"
+version = "0.2.31"
 dependencies = [
  "anyhow",
  "auxiliary-data",

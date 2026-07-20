@@ -127,13 +127,13 @@ pub fn ash_normal(betahat: &[f64], se_init: f64, opts: &AshOpts) -> AshResult {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let quantile = |p: f64| sorted[((p * n as f64) as usize).min(n - 1)];
     let mut centre = vec![0.0f64; m];
-    for j in 1..m {
+    for (j, c) in centre.iter_mut().enumerate().skip(1) {
         let p = if k == 1 {
             0.5
         } else {
             0.05 + 0.90 * (j - 1) as f64 / (k as f64 - 1.0)
         };
-        centre[j] = quantile(p);
+        *c = quantile(p);
     }
     let mut z = vec![0usize; n];
     let mut cnt = vec![0.0f64; m];
@@ -143,8 +143,8 @@ pub fn ash_normal(betahat: &[f64], se_init: f64, opts: &AshOpts) -> AshResult {
         let xi = betahat[i];
         let mut best = 0usize;
         let mut bd = (xi - centre[0]).abs();
-        for j in 1..m {
-            let d = (xi - centre[j]).abs();
+        for (j, &c) in centre.iter().enumerate().skip(1) {
+            let d = (xi - c).abs();
             if d < bd {
                 bd = d;
                 best = j;
@@ -204,9 +204,9 @@ pub fn ash_normal(betahat: &[f64], se_init: f64, opts: &AshOpts) -> AshResult {
             // Softmax (shared by the lfdr accumulation and the assignment draw).
             let mx = logw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             let mut sum = 0.0f64;
-            for j in 0..m {
-                logw[j] = (logw[j] - mx).exp();
-                sum += logw[j];
+            for w in &mut logw {
+                *w = (*w - mx).exp();
+                sum += *w;
             }
             let inv = 1.0 / sum.max(1e-300);
             if collect {
@@ -215,8 +215,8 @@ pub fn ash_normal(betahat: &[f64], se_init: f64, opts: &AshOpts) -> AshResult {
             // Draw z_i.
             let mut u = rng.random::<f64>() * sum;
             let mut zi = m - 1;
-            for j in 0..m {
-                u -= logw[j];
+            for (j, &w) in logw.iter().enumerate() {
+                u -= w;
                 if u <= 0.0 {
                     zi = j;
                     break;

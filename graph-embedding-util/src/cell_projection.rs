@@ -256,7 +256,7 @@ pub fn velocity_operator(
     let d = DMatrix::<f64>::from_fn(n_genes, h, |i, j| f64::from(delta_g[i * h + j]));
     let mut gram = bs.tr_mul(&bs); // Bₛᵀ Bₛ  [h×h]
     let rhs = bs.tr_mul(&d); //       Bₛᵀ D   [h×h]
-    // Ridge scaled to the mean Gram diagonal keeps `lambda` dimensionless and the solve PD.
+                             // Ridge scaled to the mean Gram diagonal keeps `lambda` dimensionless and the solve PD.
     let scale = (gram.diagonal().sum() / h as f64).max(1e-12);
     for k in 0..h {
         gram[(k, k)] += lambda * scale;
@@ -441,7 +441,10 @@ mod tests {
             .zip(&m)
             .map(|(a, b)| (a - b).abs())
             .fold(0f32, f32::max);
-        assert!(err < 1e-2, "operator did not recover the planted map (max err={err:.4})");
+        assert!(
+            err < 1e-2,
+            "operator did not recover the planted map (max err={err:.4})"
+        );
     }
 
     #[test]
