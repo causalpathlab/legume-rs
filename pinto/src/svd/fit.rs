@@ -5,6 +5,7 @@ use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
 use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
+use data_beans_alg::cell_pairs::CellPairs;
 use data_beans_alg::random_projection::*;
 
 use clap::Parser;
@@ -139,7 +140,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     let gene_names = data_vec.row_names()?;
 
     // Wrap graph with data for pair-level operations
-    let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, graph);
+    let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, &graph);
 
     srt_cell_pairs.to_parquet(
         &(c.out.to_string() + ".coord_pairs.parquet"),
@@ -163,9 +164,9 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     let batch_ref = batch_db.as_ref();
 
     let ml = graph_coarsen_multilevel(
-        &srt_cell_pairs.graph,
+        &graph,
         &mut cell_proj.proj,
-        &srt_cell_pairs.pairs,
+        srt_cell_pairs.inner.pairs(),
         CoarsenConfig {
             n_clusters: c.n_pseudobulk,
             num_levels: c.num_levels,
@@ -190,7 +191,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         all_pair_to_sample: ml.all_pair_to_sample,
     };
 
-    srt_cell_pairs.visit_pairs_by_block(
+    srt_cell_pairs.inner.visit_pairs_by_block(
         &fused_pair_delta_visitor,
         &fused_input,
         &mut all_stats,
@@ -233,7 +234,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     // 8. Nystrom projection
     info!("Nystrom projection...");
 
-    let mut proj_kn = Mat::zeros(args.n_latent_topics, srt_cell_pairs.num_pairs());
+    let mut proj_kn = Mat::zeros(args.n_latent_topics, srt_cell_pairs.inner.num_pairs());
 
     let nystrom_input = NystromPairInput {
         basis_shared: basis_dk.rows(0, n_genes).clone_owned(),
@@ -241,7 +242,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         batch_effect: batch_db,
     };
 
-    srt_cell_pairs.visit_pairs_by_block(
+    srt_cell_pairs.inner.visit_pairs_by_block(
         &nystrom_pair_delta_visitor,
         &nystrom_input,
         &mut proj_kn,
@@ -260,16 +261,12 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     )?;
 
     // 10. Propensity + dictionary
-    let edges: Vec<(usize, usize)> = srt_cell_pairs
-        .pairs
-        .iter()
-        .map(|p| (p.left, p.right))
-        .collect();
+    let edges = srt_cell_pairs.inner.pairs();
 
     let n_clusters = args.n_edge_clusters.unwrap_or(args.n_latent_topics);
     compute_propensity_and_gene_community_stat(
         &proj_kn,
-        &edges,
+        edges,
         &data_vec,
         n_cells,
         &PropensityReportConfig {
@@ -304,24 +301,24 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
 /// Fused block-based visitor: read pair data once, accumulate into all levels' stats.
 fn fused_pair_delta_visitor(
     bound: (usize, usize),
-    data: &SrtCellPairs,
+    data: &CellPairs,
     input: &FusedDeltaInput,
     arc_stats: Arc<Mutex<&mut Vec<PairDeltaCollapsedStat>>>,
 ) -> anyhow::Result<()> {
     let (lb, ub) = bound;
-    let pairs = &data.pairs[lb..ub];
+    let pairs = &data.pairs()[lb..ub];
     let n_pairs = ub - lb;
 
-    let left = pairs.iter().map(|x| x.left);
-    let right = pairs.iter().map(|x| x.right);
+    let left = pairs.iter().map(|x| x.0);
+    let right = pairs.iter().map(|x| x.1);
 
     let mut y_left = data.data.read_columns_csc(left)?;
     let mut y_right = data.data.read_columns_csc(right)?;
 
     // batch adjustment
     if let Some(delta_db) = input.batch_effect {
-        let left = pairs.iter().map(|x| x.left);
-        let right = pairs.iter().map(|x| x.right);
+        let left = pairs.iter().map(|x| x.0);
+        let right = pairs.iter().map(|x| x.1);
         let left_batches = data.data.get_batch_membership(left);
         y_left.adjust_by_division_of_selected_inplace(delta_db, &left_batches);
         let right_batches = data.data.get_batch_membership(right);
@@ -396,22 +393,22 @@ struct NystromPairInput {
 ///   proj  += shared * basis_shared[gene] + diff * basis_diff[gene]
 fn nystrom_pair_delta_visitor(
     bound: (usize, usize),
-    data: &SrtCellPairs,
+    data: &CellPairs,
     shared_in: &NystromPairInput,
     arc_proj: Arc<Mutex<&mut Mat>>,
 ) -> anyhow::Result<()> {
     let (lb, ub) = bound;
-    let pairs = &data.pairs[lb..ub];
-    let left = pairs.iter().map(|pp| pp.left);
-    let right = pairs.iter().map(|pp| pp.right);
+    let pairs = &data.pairs()[lb..ub];
+    let left = pairs.iter().map(|pp| pp.0);
+    let right = pairs.iter().map(|pp| pp.1);
 
     let mut y_left = data.data.read_columns_csc(left)?;
     let mut y_right = data.data.read_columns_csc(right)?;
 
     // batch adjustment
     if let Some(delta_db) = &shared_in.batch_effect {
-        let left = pairs.iter().map(|x| x.left);
-        let right = pairs.iter().map(|x| x.right);
+        let left = pairs.iter().map(|x| x.0);
+        let right = pairs.iter().map(|x| x.1);
         let left_batches = data.data.get_batch_membership(left);
         y_left.adjust_by_division_of_selected_inplace(delta_db, &left_batches);
         let right_batches = data.data.get_batch_membership(right);

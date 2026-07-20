@@ -6,7 +6,7 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version = "0.5.7"
+version = "0.5.8"
 
 [[bin]]
 name = "pinto"
@@ -66,8 +66,6 @@ wide = { workspace = true }
 
 special = { workspace = true }
 indicatif = { workspace = true }
-indicatif-log-bridge = { workspace = true }
 log = { workspace = true }
-env_logger = { workspace = true }
 colored = { workspace = true }
 rustc-hash = { workspace = true }

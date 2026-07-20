@@ -75,10 +75,7 @@ impl LinkGibbsSampler {
 
         let mut total_moves = 0;
 
-        let prog_bar = new_progress_bar(
-            num_sweeps as u64,
-            "Gibbs {bar:40} {pos}/{len} sweeps ({eta})",
-        );
+        let prog_bar = new_progress_bar(num_sweeps as u64).with_message("Gibbs sweeps");
 
         for _sweep in 0..num_sweeps {
             for e in 0..n {
@@ -150,10 +147,7 @@ impl LinkGibbsSampler {
         let edge_order: Vec<usize> = (0..n).collect();
         let chunk_size = std::cmp::max(256, n / rayon::current_num_threads().max(1));
 
-        let prog_bar = new_progress_bar(
-            num_sweeps as u64,
-            "Gibbs {bar:40} {pos}/{len} sweeps ({eta})",
-        );
+        let prog_bar = new_progress_bar(num_sweeps as u64).with_message("Gibbs sweeps");
 
         for sweep in 0..num_sweeps {
             let sweep_seed = base_seed.wrapping_mul(sweep as u64 + 1);
@@ -243,10 +237,7 @@ impl LinkGibbsSampler {
 
         let mut total_moves = 0;
 
-        let prog_bar = new_progress_bar(
-            max_sweeps as u64,
-            "Greedy {bar:40} {pos}/{len} sweeps ({eta})",
-        );
+        let prog_bar = new_progress_bar(max_sweeps as u64).with_message("greedy sweeps");
 
         for sweep in 0..max_sweeps {
             let lw_snap = (alpha > 0.0).then(|| stats.compute_log_weights(alpha));
@@ -355,10 +346,8 @@ impl LinkGibbsSampler {
         let mut total_moves = 0usize;
         let base_seed = self.rng.random::<u64>() | 1;
 
-        let prog_bar = new_progress_bar(
-            (num_sweeps * n_parts) as u64,
-            &format!("{label} {{bar:40}} {{pos}}/{{len}} jobs ({{eta}})"),
-        );
+        let prog_bar =
+            new_progress_bar((num_sweeps * n_parts) as u64).with_message(format!("{label} jobs"));
 
         for sweep in 0..num_sweeps {
             let sweep_seed = base_seed.wrapping_mul(sweep as u64 + 1);

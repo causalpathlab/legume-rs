@@ -1,6 +1,7 @@
 use crate::util::common::*;
 use crate::util::graph_refine::refine_labels;
 use crate::util::knn_graph::KnnGraph;
+use data_beans_alg::cell_pairs::collapse_pairs;
 use data_beans_alg::union_find::UnionFind;
 use nalgebra_sparse::{CooMatrix, CscMatrix};
 use std::cmp::Ordering;
@@ -86,10 +87,7 @@ pub fn graph_coarsen(
     let max_merges = n.saturating_sub(1);
     let mut merges = Vec::with_capacity(max_merges);
 
-    let prog_bar = new_progress_bar(
-        max_merges as u64,
-        "Coarsening {bar:40} {pos}/{len} merges ({eta})",
-    );
+    let prog_bar = new_progress_bar(max_merges as u64).with_message("coarsening merges");
 
     let mut edges: Vec<(usize, usize)> = graph.edges.clone();
     let mut edge_set: HashSet<(usize, usize)> = HashSet::default();
@@ -272,25 +270,15 @@ pub fn graph_coarsen(
 ///
 /// Each pair (i,j) maps to a canonical sample key `(min(label[i], label[j]), max(...))`.
 /// Returns `(pair_to_sample, n_samples)`.
-pub fn cell_labels_to_pair_samples(cell_labels: &[usize], pairs: &[Pair]) -> (Vec<usize>, usize) {
-    let mut pair_key_to_sample: HashMap<(usize, usize), usize> = Default::default();
-    let mut next_sample = 0usize;
-
-    let pair_to_sample: Vec<usize> = pairs
-        .iter()
-        .map(|p| {
-            let la = cell_labels[p.left];
-            let lb = cell_labels[p.right];
-            let key = (la.min(lb), la.max(lb));
-            *pair_key_to_sample.entry(key).or_insert_with(|| {
-                let s = next_sample;
-                next_sample += 1;
-                s
-            })
-        })
-        .collect();
-
-    (pair_to_sample, next_sample)
+///
+/// The sample *keys* are discarded here; `build_super_edges` keeps them. Both
+/// are views on the same collapse — see [`collapse_pairs`].
+pub fn cell_labels_to_pair_samples(
+    cell_labels: &[usize],
+    pairs: &[(usize, usize)],
+) -> (Vec<usize>, usize) {
+    let (samples, pair_to_sample) = collapse_pairs(pairs, cell_labels);
+    (pair_to_sample, samples.len())
 }
 
 /// Compute target cluster counts for multi-level extraction.
@@ -591,7 +579,7 @@ pub struct MultiLevelCoarsenResult {
 pub fn graph_coarsen_multilevel(
     graph: &KnnGraph,
     cell_features: &mut Mat,
-    pairs: &[Pair],
+    pairs: &[(usize, usize)],
     config: CoarsenConfig<'_>,
 ) -> MultiLevelCoarsenResult {
     let CoarsenConfig {

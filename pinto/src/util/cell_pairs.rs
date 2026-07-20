@@ -1,18 +1,25 @@
+//! Spatial layer over [`CellPairs`].
+//!
+//! The general "cell-cell graph + the counts behind it" structure lives in
+//! [`data_beans_alg::cell_pairs`] so senna / faba can share it. Everything
+//! here is what pinto adds on top: per-cell coordinates, the pair table that
+//! carries them, and the two ways pinto has of getting a graph in the first
+//! place (tissue positions, or a layout synthesized from expression).
+
 use crate::util::common::*;
 use crate::util::knn_graph::{KnnGraph, KnnGraphArgs};
 use dashmap::DashMap;
-use matrix_util::parquet::*;
+use data_beans_alg::cell_pairs::CellPairs;
+use matrix_util::parquet::Column;
 use matrix_util::traits::RandomizedAlgs;
-use matrix_util::utils::generate_minibatch_intervals;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-use parquet::basic::Type as ParquetType;
-
 pub struct SrtCellPairs<'a> {
-    pub data: &'a SparseIoVec,
+    /// The coordinate-free core: counts + the graph whose edges are the pairs.
+    pub inner: CellPairs<'a>,
+    /// Per-cell positions, `n_cells × n_dims`. In expression mode these are a
+    /// synthesized 2D layout rather than tissue coordinates.
     pub coordinates: &'a Mat,
-    pub graph: KnnGraph,
-    pub pairs: Vec<Pair>,
 }
 
 pub struct SrtCellPairsArgs {
@@ -22,9 +29,22 @@ pub struct SrtCellPairsArgs {
 }
 
 impl<'a> SrtCellPairs<'a> {
-    /// number of pairs
-    pub fn num_pairs(&self) -> usize {
-        self.pairs.len()
+    /// Wrap a pre-built KNN graph with data and coordinates. The graph is
+    /// borrowed, not consumed — callers keep it for the graph algorithms
+    /// (coarsening, component decomposition) that need its adjacency.
+    pub fn with_graph(
+        data: &'a SparseIoVec,
+        coordinates: &'a Mat,
+        graph: &'a KnnGraph,
+    ) -> SrtCellPairs<'a> {
+        SrtCellPairs {
+            inner: CellPairs::from_graph(data, graph),
+            coordinates,
+        }
+    }
+
+    pub fn num_coordinates(&self) -> usize {
+        self.coordinates.ncols()
     }
 
     /// Write all the coordinate pairs into `.parquet` file
@@ -45,188 +65,37 @@ impl<'a> SrtCellPairs<'a> {
             return Err(anyhow::anyhow!("invalid coordinate names"));
         }
 
-        let mut column_names = vec![];
-        let mut column_types = vec![];
-
-        // 1. left data column names
-        column_names.push("left_cell".to_string().into_boxed_str());
-        column_types.push(ParquetType::BYTE_ARRAY);
-
-        // 2. right data column names
-        column_names.push("right_cell".to_string().into_boxed_str());
-        column_types.push(ParquetType::BYTE_ARRAY);
-
-        // 3. left coordinate names
-        for x in coordinate_names.iter() {
-            column_names.push(format!("left_{}", x).into_boxed_str());
-            column_types.push(ParquetType::FLOAT);
-        }
-
-        // 4. right coordinate names
-        for x in coordinate_names.iter() {
-            column_names.push(format!("right_{}", x).into_boxed_str());
-            column_types.push(ParquetType::FLOAT);
-        }
-
-        // 5. distance
-        column_names.push("distance".to_string().into_boxed_str());
-        column_types.push(ParquetType::FLOAT);
-
-        //////////////////////////////////////
-        // write them down column by column //
-        //////////////////////////////////////
-
-        let shape = (self.num_pairs(), column_names.len());
-
-        let writer = ParquetWriter::new(
-            file_path,
-            shape,
-            (None, Some(&column_names)),
-            Some(&column_types),
-            Some("cell_pair"),
-        )?;
-        let row_names = writer.row_names_vec();
-
-        let mut writer = writer.get_writer()?;
-        let mut row_group_writer = writer.next_row_group()?;
-
-        // 0. row names
-        parquet_add_bytearray(&mut row_group_writer, row_names)?;
-
-        let cell_names = self.data.column_names()?;
-        // 1. left column names
-        parquet_add_string_column(
-            &mut row_group_writer,
-            &self
-                .pairs
-                .iter()
-                .map(|pp| cell_names[pp.left].clone())
-                .collect::<Vec<_>>(),
-        )?;
-
-        // 2. right column names
-        parquet_add_string_column(
-            &mut row_group_writer,
-            &self
-                .pairs
-                .iter()
-                .map(|pp| cell_names[pp.right].clone())
-                .collect::<Vec<_>>(),
-        )?;
-
-        let (left_coord, right_coord) = self.all_pairs_positions()?;
-
-        // 3. left coordinates
-        for coord in left_coord.iter() {
-            parquet_add_numeric_column(&mut row_group_writer, coord)?;
-        }
-
-        // 4. right coordinates
-        for coord in right_coord.iter() {
-            parquet_add_numeric_column(&mut row_group_writer, coord)?;
-        }
-
-        // 5. distances
-        parquet_add_numeric_column(&mut row_group_writer, &self.graph.distances)?;
-
-        row_group_writer.close()?;
-        writer.close()?;
-        Ok(())
-    }
-
-    ///
-    /// Take all pairs' positions
-    ///
-    /// returns `(left_coordinates, right_coordinates)`
-    ///
-    #[allow(clippy::type_complexity)]
-    pub fn all_pairs_positions(&self) -> anyhow::Result<(Vec<Vec<f32>>, Vec<Vec<f32>>)> {
-        let left: Vec<Vec<f32>> = self
-            .coordinates
-            .column_iter()
-            .map(|coord_vec| self.pairs.iter().map(|pp| coord_vec[pp.left]).collect())
-            .collect();
-        let right: Vec<Vec<f32>> = self
-            .coordinates
-            .column_iter()
-            .map(|coord_vec| self.pairs.iter().map(|pp| coord_vec[pp.right]).collect())
-            .collect();
-
-        Ok((left, right))
-    }
-
-    /// visit cell pairs by regular-sized block
-    ///
-    /// A visitor function takes
-    /// - `(lb,ub)` `(usize,usize)`
-    /// - data itself
-    /// - `shared_input`
-    /// - `shared_out` (`Arc(Mutex())`)
-    pub fn visit_pairs_by_block<Visitor, SharedIn, SharedOut>(
-        &self,
-        visitor: &Visitor,
-        shared_in: &SharedIn,
-        shared_out: &mut SharedOut,
-        block_size: Option<usize>,
-    ) -> anyhow::Result<()>
-    where
-        Visitor: Fn(
-                (usize, usize),
-                &SrtCellPairs,
-                &SharedIn,
-                Arc<Mutex<&mut SharedOut>>,
-            ) -> anyhow::Result<()>
-            + Sync
-            + Send,
-        SharedIn: Sync + Send + ?Sized,
-        SharedOut: Sync + Send,
-    {
-        let all_pairs = &self.pairs;
-        let ntot = all_pairs.len();
-        let jobs = generate_minibatch_intervals(ntot, self.data.num_rows(), block_size);
-        let arc_shared_out = Arc::new(Mutex::new(shared_out));
-
-        let prog_bar = new_progress_bar(
-            jobs.len() as u64,
-            "Processing {bar:40} {pos}/{len} blocks ({eta})",
-        );
-        jobs.par_iter()
-            .progress_with(prog_bar)
-            .map(|&(lb, ub)| -> anyhow::Result<()> {
-                visitor((lb, ub), self, shared_in, arc_shared_out.clone())
-            })
-            .collect::<anyhow::Result<()>>()
-    }
-
-    pub fn num_coordinates(&self) -> usize {
-        self.coordinates.ncols()
-    }
-
-    /// Wrap a pre-built KNN graph with data and coordinates.
-    pub fn with_graph(
-        data: &'a SparseIoVec,
-        coordinates: &'a Mat,
-        graph: KnnGraph,
-    ) -> SrtCellPairs<'a> {
-        let pairs = graph
-            .edges
+        let coords = self.pair_coordinate_columns(&coordinate_names);
+        let columns: Vec<(Box<str>, Column<'_>)> = coords
             .iter()
-            .map(|&(i, j)| Pair { left: i, right: j })
-            .collect::<Vec<_>>();
-        SrtCellPairs {
-            data,
-            coordinates,
-            graph,
-            pairs,
+            .map(|(name, values)| (name.clone(), Column::F32(values)))
+            .collect();
+
+        self.inner.to_parquet(file_path, &columns)
+    }
+
+    /// Per-pair endpoint coordinates, named and ordered the way the pair
+    /// table wants them: every `left_{dim}`, then every `right_{dim}`.
+    fn pair_coordinate_columns(&self, names: &[Box<str>]) -> Vec<(Box<str>, Vec<f32>)> {
+        let pairs = self.inner.pairs();
+        let mut out = Vec::with_capacity(names.len() * 2);
+        for (prefix, take_left) in [("left", true), ("right", false)] {
+            for (name, coord) in names.iter().zip(self.coordinates.column_iter()) {
+                let values = pairs
+                    .iter()
+                    .map(|&(l, r)| coord[if take_left { l } else { r }])
+                    .collect();
+                out.push((format!("{prefix}_{name}").into_boxed_str(), values));
+            }
         }
+        out
     }
 }
 
-/// Build a spatial KNN graph from coordinate matrix.
+/// Build a KNN graph from a row-major point matrix (`n_points × n_dims`).
 pub fn build_spatial_graph(coordinates: &Mat, args: SrtCellPairsArgs) -> anyhow::Result<KnnGraph> {
-    let points = coordinates.transpose();
-    KnnGraph::from_columns(
-        &points,
+    KnnGraph::from_rows(
+        coordinates,
         KnnGraphArgs {
             knn: args.knn,
             block_size: args.block_size.unwrap_or(1000),
@@ -435,39 +304,4 @@ pub fn connected_components(graph: &KnnGraph) -> (Vec<usize>, usize) {
         .collect();
 
     (labels, next.load(AtomicOrdering::Relaxed))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::make_test_graph;
-
-    #[test]
-    fn test_connected_components_single() {
-        let graph = make_test_graph(5, vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
-        let (labels, n_components) = connected_components(&graph);
-        assert_eq!(n_components, 1);
-        assert!(labels.iter().all(|&l| l == labels[0]));
-    }
-
-    #[test]
-    fn test_connected_components_two_cliques() {
-        let graph = make_test_graph(6, vec![(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5)]);
-        let (labels, n_components) = connected_components(&graph);
-        assert_eq!(n_components, 2);
-        assert_eq!(labels[0], labels[1]);
-        assert_eq!(labels[0], labels[2]);
-        assert_eq!(labels[3], labels[4]);
-        assert_eq!(labels[3], labels[5]);
-        assert_ne!(labels[0], labels[3]);
-    }
-
-    #[test]
-    fn test_connected_components_isolates() {
-        let graph = make_test_graph(4, vec![]);
-        let (labels, n_components) = connected_components(&graph);
-        assert_eq!(n_components, 4);
-        let unique: HashSet<usize> = labels.iter().cloned().collect();
-        assert_eq!(unique.len(), 4);
-    }
 }

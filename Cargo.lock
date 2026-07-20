@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "candle-util"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "approx",
@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-alg"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "approx",
@@ -4294,7 +4294,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinto"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "approx",
@@ -4305,10 +4305,8 @@ dependencies = [
  "dashmap",
  "data-beans",
  "data-beans-alg",
- "env_logger",
  "graph-embedding-util",
  "indicatif",
- "indicatif-log-bridge",
  "leiden",
  "log",
  "matrix-param",
@@ -5014,7 +5012,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.8.9"
+version = "0.8.10"
 dependencies = [
  "anyhow",
  "approx",

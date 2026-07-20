@@ -137,14 +137,14 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     }
 
     // Wrap graph with data for pair-level operations
-    let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, graph);
+    let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, &graph);
 
     srt_cell_pairs.to_parquet(
         &(c.out.to_string() + ".coord_pairs.parquet"),
         Some(coordinate_names.clone()),
     )?;
 
-    let edges = &srt_cell_pairs.graph.edges;
+    let edges = srt_cell_pairs.inner.pairs();
     let n_edges = edges.len();
     info!("{} cells, {} edges", n_cells, n_edges);
 
@@ -166,9 +166,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         data_vec.project_columns_with_batch_correction(c.proj_dim, c.block_size, batch_arg)?;
 
     let ml = graph_coarsen_multilevel(
-        &srt_cell_pairs.graph,
+        &graph,
         &mut cell_proj.proj.clone(),
-        &srt_cell_pairs.pairs,
+        srt_cell_pairs.inner.pairs(),
         CoarsenConfig {
             n_clusters: c.n_pseudobulk,
             num_levels: c.num_levels,
@@ -334,7 +334,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         };
 
     let comp_args = ComponentGibbsArgs {
-        graph: &srt_cell_pairs.graph,
+        graph: &graph,
         edges,
         k,
         alpha,

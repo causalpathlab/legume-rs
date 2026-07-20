@@ -5,7 +5,6 @@ pub use data_beans::sparse_io::*;
 pub use data_beans::sparse_io_vector::*;
 
 pub use indicatif::ParallelProgressIterator;
-pub use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 pub use log::{info, warn};
 pub use matrix_util::clustering::{Kmeans, KmeansArgs};
 pub use matrix_util::common_io::{basename, file_ext, read_lines};
@@ -15,43 +14,14 @@ pub use rayon::prelude::*;
 
 pub use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-pub use std::sync::{Arc, LazyLock, Mutex};
+pub use std::sync::{Arc, Mutex};
 
-/// Global `MultiProgress` instance shared by all progress bars and the log bridge.
-pub static MULTI_PROGRESS: LazyLock<MultiProgress> = LazyLock::new(MultiProgress::new);
-
-/// Initialise logging with the `indicatif-log-bridge` so that `log::info!`
-/// messages print above progress bars instead of overwriting them.
-pub fn init_logger(verbose: bool) {
-    let default_filter = if verbose {
-        matrix_util::common_io::VERBOSE_LOG_FILTER
-    } else {
-        matrix_util::common_io::QUIET_LOG_FILTER
-    };
-    let logger =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
-            .build();
-    let max_level = logger.filter();
-    let _ = indicatif_log_bridge::LogWrapper::new(MULTI_PROGRESS.clone(), logger)
-        .try_init()
-        .map(|()| log::set_max_level(max_level));
-}
-
-/// Create a new `ProgressBar` registered with the global `MULTI_PROGRESS`.
-pub fn new_progress_bar(len: u64, template: &str) -> ProgressBar {
-    let prog_bar = MULTI_PROGRESS.add(ProgressBar::new(len));
-    prog_bar.set_style(
-        ProgressStyle::with_template(template)
-            .unwrap()
-            .progress_chars("##-"),
-    );
-    prog_bar
-}
-
-pub struct Pair {
-    pub left: usize,
-    pub right: usize,
-}
+// Logging and progress bars come from `auxiliary_data::logging`, which draws
+// through the workspace-wide `matrix_util::progress::MULTI_PROGRESS`. A second
+// `MultiProgress` here would leave its bars unbridged from the log output — see
+// the `matrix_util::progress` module docs. Bar labels are set with
+// `new_progress_bar(n).with_message(..)`; the template belongs to the helper.
+pub use auxiliary_data::logging::{init_logger, new_progress_bar};
 
 // NB Fisher-info gene weighting helpers moved to
 // `data_beans_alg::gene_weighting` so senna / chickpea / pinto share one

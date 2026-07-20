@@ -7,6 +7,7 @@
 use crate::gene_network::graph::GenePairGraph;
 use crate::link_community::model::LinkProfileStore;
 use crate::util::common::*;
+use data_beans_alg::cell_pairs::collapse_pairs;
 use matrix_param::io::ParamIo;
 use matrix_util::utils::generate_minibatch_intervals;
 use nalgebra_sparse::csc::CscMatrix;
@@ -117,10 +118,7 @@ pub fn build_projection_profiles_for_edges(
 
     let jobs = generate_minibatch_intervals(n_edges, data.num_rows(), block_size);
 
-    let prog_bar = new_progress_bar(
-        jobs.len() as u64,
-        "Building edges {bar:40} {pos}/{len} blocks ({eta})",
-    );
+    let prog_bar = new_progress_bar(jobs.len() as u64).with_message("edge blocks");
 
     let partial_results: Vec<(usize, Vec<f32>)> = jobs
         .par_iter()
@@ -271,23 +269,8 @@ pub fn build_super_edges(
     edges: &[(usize, usize)],
     cell_labels: &[usize],
 ) -> (Vec<(usize, usize)>, Vec<usize>) {
-    let mut key_to_super: HashMap<(usize, usize), usize> = Default::default();
-    let mut super_edges: Vec<(usize, usize)> = Vec::new();
-    let mut fine_to_super = Vec::with_capacity(edges.len());
-
-    for &(i, j) in edges {
-        let li = cell_labels[i];
-        let lj = cell_labels[j];
-        let key = (li.min(lj), li.max(lj));
-        let se = *key_to_super.entry(key).or_insert_with(|| {
-            let s = super_edges.len();
-            super_edges.push(key);
-            s
-        });
-        fine_to_super.push(se);
-    }
-
-    (super_edges, fine_to_super)
+    let (super_set, fine_to_super) = collapse_pairs(edges, cell_labels);
+    (super_set.pairs, fine_to_super)
 }
 
 /// Transfer super-link community assignments back to fine edges.
@@ -405,10 +388,7 @@ pub fn fit_gene_community_param(
     let prop_kn = cell_propensity.transpose();
     let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
 
-    let prog_bar = new_progress_bar(
-        jobs.len() as u64,
-        "Gene-community {bar:40} {pos}/{len} blocks ({eta})",
-    );
+    let prog_bar = new_progress_bar(jobs.len() as u64).with_message("gene-community blocks");
     let partial_stats: Vec<(Mat, DVec)> = jobs
         .par_iter()
         .progress_with(prog_bar.clone())
@@ -720,10 +700,7 @@ pub fn build_module_expression(
     // Dense column-major: rows = modules, columns = cells. Small compared
     // to the raw matrix (typical n_modules is 10² range).
     let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
-    let prog_bar = new_progress_bar(
-        jobs.len() as u64,
-        "Module expression {bar:40} {pos}/{len} blocks ({eta})",
-    );
+    let prog_bar = new_progress_bar(jobs.len() as u64).with_message("module-expression blocks");
 
     let partials: Vec<(usize, Mat, Vec<f32>)> = jobs
         .par_iter()
