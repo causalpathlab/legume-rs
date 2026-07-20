@@ -103,6 +103,21 @@ pub fn save_outputs_named(
         ctx.feature_names,
         "feature",
     )?;
+    // Per-gene softmax selection `softmax(S_g)` over the embedding dims, when the
+    // gate is on (rows align with the feature dictionary; null "load-nothing" mass =
+    // `1 − rowsum`). Interpretability artifact — skipped for an ungated model.
+    if let Some(selection) = model.feature_selection()? {
+        let sel_path = format!("{out_prefix}.feature_selection.parquet");
+        save_embedding(&sel_path, &selection, ctx.feature_names, "feature")?;
+        info!("Per-gene softmax feature selection → {sel_path}");
+    }
+    // Per-gene VELOCITY selection `softmax(s_delta)` — the independent δ-gate readout
+    // (motion driver genes); `Some` only for a factored model with velocity.
+    if let Some(velocity_sel) = model.velocity_selection()? {
+        let vsel_path = format!("{out_prefix}.velocity_selection.parquet");
+        save_embedding(&vsel_path, &velocity_sel, ctx.feature_names, "feature")?;
+        info!("Per-gene softmax velocity selection → {vsel_path}");
+    }
     Ok(())
 }
 

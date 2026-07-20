@@ -23,6 +23,51 @@ use matrix_util::traits::SampleOps;
 /// `candle_nn::Init::Randn { stdev: 0.1 }`).
 const INIT_STDEV: f32 = 0.1;
 
+/// Per-gene softmax gate over the embedding dimensions — a SuSiE **single-effect**
+/// (L=1) on the feature side. Each gene's feature loading is `Ẽ_g = γ_g ⊙ β_g`:
+/// a categorical SELECTION `γ_g` (which latent dim) times a Gaussian EFFECT `β_g`
+/// (the loading magnitude). Variationally,
+///
+///   `Ẽ_{g,h} = softmax(S_g/τ)[h] · (E_{g,h} + σ_{g,h}·ε)`,   ε ~ N(0,1),
+///
+/// where `S_g` is the per-gene selection logit table (`s_feat` free / `s_beta`
+/// factored, width `H + 1`), `E_g` is the effect posterior MEAN, and `σ_g`
+/// (= `exp` of the log-std table) its posterior std. Training samples via the
+/// reparameterization; output/materialize use the mean (`σ = 0`).
+///
+/// A `(H+1)`-th "load-nothing" null column lets a gene deselect itself (graceful
+/// selection); it is always present.
+///
+/// The **KL loss** (always added, at the fixed [`GATE_KL_WEIGHT`], amortized `1/B`
+/// over the minibatch) is the proper SuSiE single-effect KL — categorical +
+/// selection-weighted Gaussian:
+///
+///   `KL = KL(softmax(S_g) ‖ π) + Σ_h softmax(S_g)[h]·KL(N(E_{g,h},σ_{g,h}²) ‖ N(0,σ₀²))`
+///
+/// with `π` a spike prior (mass [`GATE_NULL_PRIOR`] on null → a gene is a priori
+/// OFF) and `σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]. The gate is always this variational
+/// spike-and-slab single-effect — there is no deterministic (KL-off) mode.
+#[derive(Clone, Copy, Debug)]
+pub struct SoftmaxGateSpec {
+    /// Softmax temperature `τ` (`1.0` = plain softmax; `< 1` sharpens).
+    pub temperature: f32,
+}
+
+/// Effect-prior variance `σ₀²` for the Gaussian KL `KL(N(μ,σ²) ‖ N(0,σ₀²))`.
+pub const GATE_EFFECT_PRIOR_VAR: f64 = 1.0;
+/// Categorical spike-prior mass on the null column — a gene is a priori OFF.
+pub const GATE_NULL_PRIOR: f64 = 0.9;
+/// Fixed weight `λ` on the SuSiE single-effect KL. The gate is always variational;
+/// the KL is applied amortized `λ/B` over the minibatch, so `1.0` gives the `1/B`
+/// scale. A single source of truth rather than a per-run CLI knob.
+pub const GATE_KL_WEIGHT: f64 = 1.0;
+/// Initial effect log-std (`σ_init = e^{-4.6} ≈ 0.01`, a near-deterministic start).
+const GATE_LOGSTD_INIT: f32 = -4.6;
+/// Clamp bound on the effect log-std in the forward — keeps `σ = exp(logstd)` and
+/// `log σ²` finite (no overflow/underflow), so the reparam noise and the Gaussian KL
+/// stay well-behaved. Applied at read time (gradient saturates past the bound).
+const GATE_LOGSTD_CLAMP: f64 = 8.0;
+
 /// Shape of the embedding tables.
 pub struct ModelArgs {
     pub n_features: usize,
@@ -58,6 +103,18 @@ pub struct ShareFeaturesArgs<'a> {
     /// Base seed for the reproducible randn init of the cell side when
     /// `e_cell_init` is `None`.
     pub seed: u64,
+    /// Shared per-gene softmax-gate logits (free model, `[n_features, H+null]`).
+    /// `None` when the gate is off. Every head references the SAME Var so AdamW
+    /// updates it once (see [`SoftmaxGateSpec`]).
+    pub shared_s_feat: Option<Tensor>,
+    /// Shared raw feature Var kept reachable for the gated training gather (so a
+    /// post-phase-1 materialize can bake the gate into `e_feat` without clobbering
+    /// the source). `None` when the gate is off.
+    pub shared_e_feat_raw: Option<Tensor>,
+    /// Shared free-model effect log-std (`[n_features, H]`). `Some` only for a KL gate.
+    pub shared_e_feat_logstd: Option<Tensor>,
+    /// Gate configuration shared across heads. `None` when the gate is off.
+    pub gate: Option<SoftmaxGateSpec>,
 }
 
 /// Inputs for [`JointEmbedModel::new_factored`] — a per-gene β-sharing feature
@@ -113,6 +170,22 @@ pub struct FeatFactor {
     /// (the `mask` = 1/0 selector); L2-ridge in phase-1. `None` = plain β-sharing
     /// (spliced ≡ unspliced ≡ `β_g`).
     pub splice_delta: Option<(Tensor, Tensor)>,
+    /// Optional per-gene softmax-gate logits `[G, H+null]` (see [`SoftmaxGateSpec`]),
+    /// the IDENTITY gate on `β_g`. Gathered by `row_to_gene` alongside `β`/`δ`; `None`
+    /// = ungated. Cloned with the factor so composite heads share it.
+    pub s_beta: Option<Tensor>,
+    /// Optional per-gene Gaussian-effect log-std `[G, H]` (the `β` gate's variational
+    /// single-effect posterior std; `σ = exp`). `Some` iff the gate is on.
+    pub beta_logstd: Option<Tensor>,
+    /// Optional per-gene VELOCITY-gate logits `[G, H+null]` — the independent
+    /// single-effect softmax gate on `δ_g` (the motion), mirroring `s_beta`. `Some`
+    /// only when the gate is on AND `splice_delta` exists (velocity present); a gene
+    /// with no motion sends its `δ` mass to null → `δ̃_g ≈ 0` (not a driver).
+    /// `softmax(s_delta)` per feature row = the `velocity_selection` output.
+    pub s_delta: Option<Tensor>,
+    /// Optional per-gene velocity Gaussian-effect log-std `[G, H]` (the `δ` gate's
+    /// variational posterior std). `Some` iff `s_delta` is.
+    pub delta_logstd: Option<Tensor>,
 }
 
 impl FeatFactor {
@@ -145,6 +218,20 @@ pub struct JointEmbedModel {
     pub factor: Option<FeatFactor>,
     #[allow(dead_code)]
     pub embedding_dim: usize,
+    /// Free-model softmax-gate logits `[n_features, H+null]` (see [`SoftmaxGateSpec`]).
+    /// `None` for an ungated model, or for a factored one (its gate lives in
+    /// `factor.s_beta`).
+    pub s_feat: Option<Tensor>,
+    /// Raw `e_feat` Var kept reachable for the gated training gather of a FREE model,
+    /// so [`Self::materialize_e_feat`] can overwrite `e_feat` with the gated snapshot
+    /// without corrupting the source the gather reads. `None` unless free + gated.
+    pub e_feat_raw: Option<Tensor>,
+    /// Free-model Gaussian-effect log-std `[n_features, H]` (variational single-effect
+    /// posterior std; `σ = exp`). `Some` only when the KL gate is on (free model).
+    pub e_feat_logstd: Option<Tensor>,
+    /// Gate configuration (`None` = ungated). Presence is the single "is gated" flag
+    /// for both free (`s_feat`) and factored (`factor.s_beta`) models.
+    pub gate: Option<SoftmaxGateSpec>,
 }
 
 impl JointEmbedModel {
@@ -190,6 +277,10 @@ impl JointEmbedModel {
             b_cell,
             factor: None,
             embedding_dim: args.embedding_dim,
+            s_feat: None,
+            e_feat_raw: None,
+            e_feat_logstd: None,
+            gate: None,
         })
     }
 
@@ -214,6 +305,10 @@ impl JointEmbedModel {
             b_cell_init,
             var_prefix,
             seed,
+            shared_s_feat,
+            shared_e_feat_raw,
+            shared_e_feat_logstd,
+            gate,
         } = args;
         let e_name = format!("{var_prefix}_e_cell");
         let b_name = format!("{var_prefix}_b_cell");
@@ -230,6 +325,10 @@ impl JointEmbedModel {
             b_cell,
             factor: None,
             embedding_dim,
+            s_feat: shared_s_feat,
+            e_feat_raw: shared_e_feat_raw,
+            e_feat_logstd: shared_e_feat_logstd,
+            gate,
         })
     }
 
@@ -282,6 +381,10 @@ impl JointEmbedModel {
             b_cell,
             factor: Some(factor),
             embedding_dim: args.embedding_dim,
+            s_feat: None,
+            e_feat_raw: None,
+            e_feat_logstd: None,
+            gate: None,
         })
     }
 
@@ -312,6 +415,13 @@ impl JointEmbedModel {
                 b_cell_init: &vec![0f32; n_cells],
                 var_prefix,
                 seed,
+                // The factored gate rides on the cloned `factor` (`s_beta`); the
+                // free-model gate fields stay empty. Copy the gate spec so the head
+                // knows to apply it.
+                shared_s_feat: None,
+                shared_e_feat_raw: None,
+                shared_e_feat_logstd: None,
+                gate: self.gate,
             },
             varmap,
             dev,
@@ -325,10 +435,314 @@ impl JointEmbedModel {
     /// readers see a fixed dictionary. No-op for a free (non-factored) model.
     /// Call after phase 1.
     pub fn materialize_e_feat(&mut self) -> Result<()> {
-        if let Some(f) = &self.factor {
-            self.e_feat = f.e_feat()?.detach();
+        // Compute the frozen dictionary first (borrows self immutably), then assign.
+        // Uses effect MEANS (no reparam sampling) and bakes the gate(s) in.
+        let gated = if let Some(f) = &self.factor {
+            // Factored: β̃ + mask·δ̃, each side gated separately (see `factored_feat_rows`).
+            let mask = f.splice_delta.as_ref().map(|(_, m)| m.clone());
+            Some(
+                self.factored_feat_rows(f, &f.row_to_gene, mask.as_ref(), false)?
+                    .detach(),
+            )
+        } else if let (Some(raw), Some(s_feat)) = (&self.e_feat_raw, &self.s_feat) {
+            // Free + gated: bake the gate into `e_feat` from the raw Var (no smoother
+            // at materialize — SGC smoothing is a training-time device; means, no sample).
+            Some(
+                self.gated_rows(raw, self.e_feat_logstd.as_ref(), Some(s_feat), false)?
+                    .detach(),
+            )
+        } else {
+            // Free + ungated: `e_feat` already IS the trained Var — leave it (no-op,
+            // byte-identical to the pre-gate behaviour).
+            None
+        };
+        if let Some(g) = gated {
+            self.e_feat = g;
         }
         Ok(())
+    }
+
+    /// Enable the per-gene variational softmax gate on the feature side (always the
+    /// spike-and-slab single-effect — see [`SoftmaxGateSpec`]). Allocates, as Vars in
+    /// `varmap`: the selection logits (`s_feat [n_features, H+1]` free / `s_beta [G,
+    /// H+1]` factored) and the effect log-std (`e_feat_logstd` / `beta_logstd [·, H]`);
+    /// for a factored model WITH velocity (`splice_delta`), also the INDEPENDENT δ gate
+    /// (`s_delta`, `delta_logstd`). The selection logits are **null-biased** (mass on
+    /// the null column → genes start ~OFF). Call ONCE on the primary model, BEFORE
+    /// building sharing heads (which carry the shared gate via [`ShareFeaturesArgs`] /
+    /// the cloned [`FeatFactor`]).
+    pub fn enable_softmax_gate(
+        &mut self,
+        spec: SoftmaxGateSpec,
+        varmap: &VarMap,
+        dev: &Device,
+    ) -> Result<()> {
+        let h = self.embedding_dim;
+        let width = h + 1; // H real dims + one null "load-nothing" column (always present)
+                           // Init the null column so the starting selection α equals the spike prior π
+                           // (mass `GATE_NULL_PRIOR` on null, uniform on the H real dims): with real logits
+                           // 0, `null_logit = ln(π₀·H/(1−π₀))`. Internal, prior-derived — not a user knob.
+        let null_init = ((GATE_NULL_PRIOR * h as f64) / (1.0 - GATE_NULL_PRIOR)).ln() as f32;
+        let register = |name: &str, t: Tensor| -> Result<Tensor> {
+            let var = candle_util::candle_core::Var::from_tensor(&t)?;
+            varmap
+                .data()
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), var.clone());
+            Ok(var.as_tensor().clone())
+        };
+        // Null-biased selection logits `[rows, H+1]`.
+        let init_gate = |name: &str, rows: usize| -> Result<Tensor> {
+            let mut vals = vec![0f32; rows * width];
+            for r in 0..rows {
+                vals[r * width + h] = null_init;
+            }
+            register(
+                name,
+                Tensor::from_vec(vals, (rows, width), dev)?.contiguous()?,
+            )
+        };
+        // Effect log-std `[rows, H]`, init `GATE_LOGSTD_INIT` (near-deterministic start).
+        let init_logstd = |name: &str, rows: usize| -> Result<Tensor> {
+            register(
+                name,
+                Tensor::from_vec(vec![GATE_LOGSTD_INIT; rows * h], (rows, h), dev)?,
+            )
+        };
+        match &mut self.factor {
+            Some(f) => {
+                let n_genes = f.beta.dim(0)?;
+                f.s_beta = Some(init_gate("s_beta", n_genes)?);
+                f.beta_logstd = Some(init_logstd("beta_logstd", n_genes)?);
+                // Independent velocity gate on δ_g, only when velocity is present.
+                if f.splice_delta.is_some() {
+                    f.s_delta = Some(init_gate("s_delta", n_genes)?);
+                    f.delta_logstd = Some(init_logstd("delta_logstd", n_genes)?);
+                }
+            }
+            None => {
+                let n_features = self.e_feat.dim(0)?;
+                // Keep the raw Var reachable so the gather reads it while
+                // `materialize_e_feat` overwrites `e_feat` with the gated snapshot.
+                self.e_feat_raw = Some(self.e_feat.clone());
+                self.s_feat = Some(init_gate("s_feat", n_features)?);
+                self.e_feat_logstd = Some(init_logstd("e_feat_logstd", n_features)?);
+            }
+        }
+        self.gate = Some(spec);
+        Ok(())
+    }
+
+    /// The identity-gate effect log-std table (`e_feat_logstd` free / `beta_logstd`
+    /// factored), or `None` if ungated.
+    fn effect_logstd(&self) -> Option<&Tensor> {
+        match &self.factor {
+            Some(f) => f.beta_logstd.as_ref(),
+            None => self.e_feat_logstd.as_ref(),
+        }
+    }
+
+    /// Scale gate logits by the softmax temperature `τ` (`1/τ` on the logits); an
+    /// Arc-cheap clone at `τ = 1`. Shared by the gather and the KL.
+    fn apply_temperature(&self, logits: &Tensor) -> Result<Tensor> {
+        let tau = self
+            .gate
+            .expect("apply_temperature called on an ungated model")
+            .temperature;
+        if (tau - 1.0).abs() > f32::EPSILON {
+            logits.affine(1.0 / tau as f64, 0.0)
+        } else {
+            Ok(logits.clone())
+        }
+    }
+
+    /// The per-gene selection probabilities over the REAL embedding dims:
+    /// `softmax(s_rows/τ)[0..H]`. Softmax runs over the FULL width (so the null column
+    /// competes for mass), then only the first `H` columns are kept — rows need not sum
+    /// to 1, the excluded null "load-nothing" mass being `1 − rowsum`. `s_rows` is
+    /// `[N, H+1]`; returns `[N, H]`.
+    fn softmax_gate_probs(&self, s_rows: &Tensor) -> Result<Tensor> {
+        let logits = self.apply_temperature(s_rows)?;
+        let probs = candle_nn::ops::softmax(&logits, 1)?; // [N, H+1]
+        probs.narrow(1, 0, self.embedding_dim)?.contiguous() // drop the null column
+    }
+
+    /// Apply the per-gene softmax gate to gathered base rows: `base ⊙ softmax(s/τ)`
+    /// over the real dims (a gene that selects null contributes `≈ 0`). `base` is
+    /// `[N, H]`, `s_rows` is `[N, H+1]`. Stays in the autograd graph so gradients reach
+    /// both `base` (`E_g`/`β`/`δ`) and the gate logits.
+    pub fn apply_softmax_gate(&self, base: &Tensor, s_rows: &Tensor) -> Result<Tensor> {
+        base.mul(&self.softmax_gate_probs(s_rows)?)
+    }
+
+    /// One gated single-effect: reparam-sample the Gaussian effect (`μ + σ·ε`) when
+    /// `sample` and a log-std is present (else use the mean `μ`), then apply the softmax
+    /// gate when selection logits are present. `mu` / `logstd` are `[N, H]`, `s` is
+    /// `[N, H+1]`. The shared per-row primitive for both the `β` and `δ` sides (and the
+    /// free `e_feat`). With no logits/logstd it is the plain ungated gather.
+    pub(crate) fn gated_rows(
+        &self,
+        mu: &Tensor,
+        logstd: Option<&Tensor>,
+        s: Option<&Tensor>,
+        sample: bool,
+    ) -> Result<Tensor> {
+        let eff = match (sample, logstd) {
+            (true, Some(ls)) => self.sample_effect(mu, ls)?,
+            _ => mu.clone(),
+        };
+        match s {
+            Some(s) => self.apply_softmax_gate(&eff, s),
+            None => Ok(eff),
+        }
+    }
+
+    /// Compose the effective factored feature rows: `β̃ + mask·δ̃`, where each side is
+    /// its own gated single-effect ([`Self::gated_rows`]) — the IDENTITY gate on `β_g`
+    /// and the INDEPENDENT velocity gate on `δ_g`. `genes` gathers the per-gene tables
+    /// (`row_to_gene[idx]` in training, the full `row_to_gene` at materialize);
+    /// `mask_rows` is the `[N,1]` unspliced selector (already gathered), `None` when
+    /// there is no velocity. `sample` reparam-samples (training) vs uses means (output).
+    pub(crate) fn factored_feat_rows(
+        &self,
+        f: &FeatFactor,
+        genes: &Tensor,
+        mask_rows: Option<&Tensor>,
+        sample: bool,
+    ) -> Result<Tensor> {
+        let gather = |t: &Option<Tensor>| -> Result<Option<Tensor>> {
+            t.as_ref().map(|x| x.index_select(genes, 0)).transpose()
+        };
+        let (beta_ls, beta_s) = (gather(&f.beta_logstd)?, gather(&f.s_beta)?);
+        let beta = self.gated_rows(
+            &f.beta.index_select(genes, 0)?,
+            beta_ls.as_ref(),
+            beta_s.as_ref(),
+            sample,
+        )?;
+        match (&f.splice_delta, mask_rows) {
+            (Some((delta, _)), Some(m)) => {
+                let (delta_ls, delta_s) = (gather(&f.delta_logstd)?, gather(&f.s_delta)?);
+                let delta = self.gated_rows(
+                    &delta.index_select(genes, 0)?,
+                    delta_ls.as_ref(),
+                    delta_s.as_ref(),
+                    sample,
+                )?;
+                beta.add(&delta.broadcast_mul(m)?) // + mask ⊙ δ̃ on unspliced rows
+            }
+            _ => Ok(beta),
+        }
+    }
+
+    /// softmax selection `[n_features, H]` for a per-gene/per-row logit table, gathering
+    /// a factored per-gene table to feature rows via `row_to_gene`. `None` if `logits`
+    /// is `None`. The excluded null mass per row is `1 − rowsum` (a near-zero row = a
+    /// deselected gene).
+    fn selection_from(&self, logits: Option<&Tensor>) -> Result<Option<Tensor>> {
+        let Some(logits) = logits else {
+            return Ok(None);
+        };
+        let rows = match &self.factor {
+            Some(f) => logits.index_select(&f.row_to_gene, 0)?, // per-gene → per-row
+            None => logits.clone(),                             // already per-row
+        };
+        Ok(Some(self.softmax_gate_probs(&rows)?.detach()))
+    }
+
+    /// Per-feature-row IDENTITY selection `softmax(s_beta/s_feat)` `[n_features, H]`, for
+    /// interpretability; `None` for an ungated model. Rows align with `e_feat` / the
+    /// dictionary output.
+    pub fn feature_selection(&self) -> Result<Option<Tensor>> {
+        self.selection_from(self.gate_logits())
+    }
+
+    /// Per-feature-row VELOCITY selection `softmax(s_delta)` `[n_features, H]` — the
+    /// per-gene motion gate (driver genes); `None` unless the factored δ gate is on.
+    pub fn velocity_selection(&self) -> Result<Option<Tensor>> {
+        self.selection_from(self.factor.as_ref().and_then(|f| f.s_delta.as_ref()))
+    }
+
+    /// The identity-gate logit table (`s_feat` free / `s_beta` factored), or `None` if
+    /// ungated.
+    fn gate_logits(&self) -> Option<&Tensor> {
+        match &self.factor {
+            Some(f) => f.s_beta.as_ref(),
+            None => self.s_feat.as_ref(),
+        }
+    }
+
+    /// Reparameterize the Gaussian effect for the variational gate: `μ + σ·ε`, with
+    /// `σ = exp(logstd_rows)` and a fresh `ε ~ N(0,1)` each call. `mu_rows` /
+    /// `logstd_rows` are `[N, H]`. Used in the TRAINING gather so the posterior
+    /// variance feeds the likelihood; output/materialize use the mean (`σ=0`).
+    pub fn sample_effect(&self, mu_rows: &Tensor, logstd_rows: &Tensor) -> Result<Tensor> {
+        let eps = Tensor::randn(0f32, 1f32, mu_rows.shape(), mu_rows.device())?;
+        let sigma = logstd_rows
+            .clamp(-GATE_LOGSTD_CLAMP, GATE_LOGSTD_CLAMP)?
+            .exp()?;
+        mu_rows.add(&sigma.mul(&eps)?)
+    }
+
+    /// The SuSiE single-effect KL for ONE gate, averaged over rows:
+    /// `KL(softmax(logits/τ) ‖ π) + Σ_h α_h·KL(N(μ_h, e^{2·logstd_h}) ‖ N(0,σ₀²))`
+    /// — categorical selection KL to a spike prior (mass [`GATE_NULL_PRIOR`] on null)
+    /// plus the selection-WEIGHTED Gaussian effect KL (`σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]).
+    /// Shared by the identity (`β`/`e_feat`) and velocity (`δ`) gates. In the autograd graph.
+    fn single_gate_kl(&self, logits: &Tensor, logstd: &Tensor, mu: &Tensor) -> Result<Tensor> {
+        let h = self.embedding_dim;
+        let logits = self.apply_temperature(logits)?;
+        let log_alpha = candle_nn::ops::log_softmax(&logits, 1)?; // [n, H+1]
+        let alpha = log_alpha.exp()?;
+
+        // Categorical KL = Σ_c α log α − Σ_c α log π_c, with the spike prior π.
+        let neg_ent = alpha.mul(&log_alpha)?.sum(1)?; // Σ α log α  [n]
+        let log_prior_real = ((1.0 - GATE_NULL_PRIOR) / h as f64).ln();
+        let real = alpha.narrow(1, 0, h)?.sum(1)?.affine(log_prior_real, 0.0)?;
+        let null = alpha
+            .narrow(1, h, 1)?
+            .sum(1)?
+            .affine(GATE_NULL_PRIOR.ln(), 0.0)?;
+        let kl_cat = (neg_ent - (real + null)?)?; // [n]
+
+        // Gaussian KL per dim = ½[(σ²+μ²)/σ₀² − 1 − 2·logstd + ln σ₀²], σ² = e^{2 logstd}.
+        let s0 = GATE_EFFECT_PRIOR_VAR;
+        let logstd = logstd.clamp(-GATE_LOGSTD_CLAMP, GATE_LOGSTD_CLAMP)?; // finite σ, log σ²
+        let two_logstd = logstd.affine(2.0, 0.0)?; // 2·logstd = log σ²
+        let a = (two_logstd.exp()? + mu.sqr()?)?.affine(1.0 / s0, 0.0)?; // (σ²+μ²)/σ₀²
+        let kl_gauss_dim = (a - &two_logstd)?.affine(0.5, 0.5 * (s0.ln() - 1.0))?; // ½[…]
+                                                                                   // Weight by the real-dim selection prob and sum over dims.
+        let kl_gauss = alpha.narrow(1, 0, h)?.mul(&kl_gauss_dim)?.sum(1)?; // [n]
+
+        (kl_cat + kl_gauss)?.mean_all()
+    }
+
+    /// The gate's total SuSiE KL loss: the identity-gate KL plus, for a factored model
+    /// with velocity, the INDEPENDENT δ-gate KL. `None` for an ungated model. Kept in
+    /// the autograd graph.
+    pub fn gate_kl(&self) -> Result<Option<Tensor>> {
+        if self.gate.is_none() {
+            return Ok(None);
+        }
+        // Identity gate (β factored / e_feat free) — always present when gated.
+        let (Some(logits), Some(logstd)) = (self.gate_logits(), self.effect_logstd()) else {
+            return Ok(None);
+        };
+        let mu = match &self.factor {
+            Some(f) => &f.beta,
+            None => self.e_feat_raw.as_ref().unwrap_or(&self.e_feat),
+        };
+        let mut kl = self.single_gate_kl(logits, logstd, mu)?;
+        // Independent velocity gate on δ_g (factored + velocity present).
+        if let Some(f) = &self.factor {
+            if let (Some(s_delta), Some(delta_logstd), Some((delta, _))) =
+                (&f.s_delta, &f.delta_logstd, &f.splice_delta)
+            {
+                kl = (kl + self.single_gate_kl(s_delta, delta_logstd, delta)?)?;
+            }
+        }
+        Ok(Some(kl))
     }
 
     /// Mean-pool the cell embedding table over the fine children of a
@@ -457,6 +871,10 @@ fn build_feat_factor(
         beta: beta.clone(),
         row_to_gene: row_to_gene_t,
         splice_delta,
+        s_beta: None,
+        beta_logstd: None,
+        s_delta: None,
+        delta_logstd: None,
     })
 }
 
@@ -644,234 +1062,4 @@ fn dummy_dtype_check() -> DType {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn dev() -> Device {
-        Device::Cpu
-    }
-
-    /// The randn model init is drawn from the seed (not candle's unseedable CPU
-    /// device RNG), so two constructions with the same seed must produce
-    /// byte-identical embedding tables, and different seeds must diverge.
-    #[test]
-    fn model_init_is_seed_reproducible() {
-        let dev = dev();
-        // Equal feature/cell counts so the e_feat vs e_cell comparison below is
-        // shape-matched and therefore a real test of salt separation.
-        let args = || ModelArgs {
-            n_features: 16,
-            n_cells: 16,
-            embedding_dim: 4,
-            seed: 2026,
-        };
-        let init = ModelInit {
-            e_feat: None,
-            e_cell: None,
-            b_feat: &[0f32; 16],
-            b_cell: &[0f32; 16],
-        };
-        let build = |seed: u64| {
-            let mut a = args();
-            a.seed = seed;
-            let vm = VarMap::new();
-            let m = JointEmbedModel::new_with_init(a, &init, &vm, &dev).unwrap();
-            // Init tensors must be contiguous — non-contiguous Vars break CUDA
-            // matmul kernels during training.
-            assert!(m.e_feat.is_contiguous(), "e_feat init must be contiguous");
-            assert!(m.e_cell.is_contiguous(), "e_cell init must be contiguous");
-            (
-                m.e_feat.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
-                m.e_cell.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
-            )
-        };
-
-        let (ef1, ec1) = build(2026);
-        let (ef2, ec2) = build(2026);
-        assert_eq!(ef1, ef2, "same seed → identical e_feat");
-        assert_eq!(ec1, ec2, "same seed → identical e_cell");
-
-        let (ef3, _) = build(2027);
-        assert_ne!(ef1, ef3, "different seed → different e_feat");
-        // e_feat and e_cell use distinct per-tensor salts, so they must not be
-        // identical to each other even under one seed.
-        assert_ne!(
-            ef1, ec1,
-            "e_feat and e_cell must use independent sub-streams"
-        );
-    }
-
-    #[test]
-    fn pool_axis_index_add_matches_loop() {
-        // 8 fine rows × H=3, grouped into 4 coarse blocks (incl. one empty).
-        let dev = dev();
-        let table =
-            Tensor::from_vec((0..24).map(|x| x as f32).collect::<Vec<_>>(), (8, 3), &dev).unwrap();
-        let bias = Tensor::from_vec(
-            (0..8).map(|x| (x as f32) * 0.1).collect::<Vec<_>>(),
-            8,
-            &dev,
-        )
-        .unwrap();
-
-        let coarse_to_fine = vec![
-            vec![0, 1, 2],    // block 0
-            vec![3],          // block 1
-            vec![],           // block 2 (empty)
-            vec![4, 5, 6, 7], // block 3
-        ];
-        let blocks = vec![3u32, 0, 2, 1, 0]; // mixed order, repeats allowed
-
-        let (emb_new, bias_new) = pool_axis(&table, &bias, &blocks, &coarse_to_fine, &dev).unwrap();
-        let (emb_ref, bias_ref) =
-            pool_axis_loop(&table, &bias, &blocks, &coarse_to_fine, &dev).unwrap();
-
-        let emb_n: Vec<f32> = emb_new.flatten_all().unwrap().to_vec1().unwrap();
-        let emb_r: Vec<f32> = emb_ref.flatten_all().unwrap().to_vec1().unwrap();
-        let bias_n: Vec<f32> = bias_new.flatten_all().unwrap().to_vec1().unwrap();
-        let bias_r: Vec<f32> = bias_ref.flatten_all().unwrap().to_vec1().unwrap();
-
-        assert_eq!(emb_n.len(), emb_r.len());
-        assert_eq!(bias_n.len(), bias_r.len());
-        for (a, b) in emb_n.iter().zip(emb_r.iter()) {
-            assert!((a - b).abs() < 1e-5, "emb mismatch: {a} vs {b}");
-        }
-        for (a, b) in bias_n.iter().zip(bias_r.iter()) {
-            assert!((a - b).abs() < 1e-5, "bias mismatch: {a} vs {b}");
-        }
-    }
-
-    /// With `e_gene = 1/√H · 1` (a unit vector pointing along the all-
-    /// ones direction in cell-embedding space), the gated score reduces
-    /// to a rescaled product of axis-aligned projections. Concretely:
-    ///
-    ///   (e_gene · e_cell_l) = (sum_h e_cell_l[h]) / √H = m_l
-    ///   (e_gene · e_cell_r) = m_r
-    ///   pair_score = m_l · m_r + b_l + b_r
-    ///
-    /// This test asserts the gated helper computes exactly that on a
-    /// small fixture, so we have a known-good closed form before
-    /// landing the chain integration.
-    #[test]
-    fn score_cellcell_gated_matches_closed_form() {
-        let dev = dev();
-        let b = 4;
-        let h = 3;
-
-        let e_cell_l = Tensor::from_vec(
-            vec![
-                0.1f32, 0.2, 0.3, //
-                0.4, -0.1, 0.5, //
-                -0.2, 0.0, 0.7, //
-                0.8, 0.1, -0.3, //
-            ],
-            (b, h),
-            &dev,
-        )
-        .unwrap();
-        let e_cell_r = Tensor::from_vec(
-            vec![
-                0.0f32, 0.3, -0.2, //
-                0.6, 0.4, 0.1, //
-                -0.1, 0.5, 0.2, //
-                -0.4, 0.2, 0.5, //
-            ],
-            (b, h),
-            &dev,
-        )
-        .unwrap();
-        let b_l = Tensor::from_vec(vec![0.0f32, 0.01, -0.02, 0.03], b, &dev).unwrap();
-        let b_r = Tensor::from_vec(vec![-0.01f32, 0.02, 0.0, -0.03], b, &dev).unwrap();
-
-        let unit = 1.0f32 / (h as f32).sqrt();
-        let e_gene = Tensor::from_vec(vec![unit; b * h], (b, h), &dev).unwrap();
-
-        let got = JointEmbedModel::score_cellcell_gated(&e_gene, &e_cell_l, &e_cell_r, &b_l, &b_r)
-            .unwrap()
-            .to_vec1::<f32>()
-            .unwrap();
-
-        let e_l: Vec<f32> = e_cell_l.flatten_all().unwrap().to_vec1().unwrap();
-        let e_r: Vec<f32> = e_cell_r.flatten_all().unwrap().to_vec1().unwrap();
-        let b_l_h: Vec<f32> = b_l.to_vec1().unwrap();
-        let b_r_h: Vec<f32> = b_r.to_vec1().unwrap();
-        for i in 0..b {
-            let m_l: f32 = (0..h).map(|j| e_l[i * h + j]).sum::<f32>() * unit;
-            let m_r: f32 = (0..h).map(|j| e_r[i * h + j]).sum::<f32>() * unit;
-            let expected = m_l * m_r + b_l_h[i] + b_r_h[i];
-            assert!(
-                (got[i] - expected).abs() < 1e-5,
-                "row {i}: got={} expected={}",
-                got[i],
-                expected
-            );
-        }
-    }
-
-    /// Same equivalence check for the negative-side score: gated_neg
-    /// should produce `(unit·anchor)(unit·neg) + b_anchor + b_neg`
-    /// for every (B, K) entry.
-    #[test]
-    fn score_cellcell_gated_neg_matches_closed_form() {
-        let dev = dev();
-        let b = 3;
-        let k = 2;
-        let h = 4;
-
-        let e_cell_anchor = Tensor::from_vec(
-            vec![
-                0.1f32, 0.2, 0.3, 0.4, //
-                -0.1, 0.2, -0.3, 0.5, //
-                0.6, -0.2, 0.1, 0.0, //
-            ],
-            (b, h),
-            &dev,
-        )
-        .unwrap();
-        let e_cell_neg = Tensor::from_vec(
-            vec![
-                0.0f32, 0.1, 0.2, 0.3, 0.4, 0.5, -0.1, -0.2, //
-                -0.3, 0.4, 0.0, 0.1, 0.2, 0.1, 0.0, 0.3, //
-                0.5, -0.1, 0.2, 0.0, 0.0, 0.1, 0.2, 0.4, //
-            ],
-            (b, k, h),
-            &dev,
-        )
-        .unwrap();
-        let b_anchor = Tensor::from_vec(vec![0.01f32, -0.02, 0.03], b, &dev).unwrap();
-        let b_neg =
-            Tensor::from_vec(vec![0.0f32, 0.01, -0.01, 0.02, 0.0, -0.02], (b, k), &dev).unwrap();
-
-        let unit = 1.0f32 / (h as f32).sqrt();
-        let e_gene = Tensor::from_vec(vec![unit; b * h], (b, h), &dev).unwrap();
-
-        let got = JointEmbedModel::score_cellcell_gated_neg(
-            &e_gene,
-            &e_cell_anchor,
-            &e_cell_neg,
-            &b_anchor,
-            &b_neg,
-        )
-        .unwrap()
-        .to_vec2::<f32>()
-        .unwrap();
-
-        let a: Vec<f32> = e_cell_anchor.flatten_all().unwrap().to_vec1().unwrap();
-        let n: Vec<f32> = e_cell_neg.flatten_all().unwrap().to_vec1().unwrap();
-        let ba: Vec<f32> = b_anchor.to_vec1().unwrap();
-        let bn: Vec<Vec<f32>> = b_neg.to_vec2().unwrap();
-        for i in 0..b {
-            let m_a: f32 = (0..h).map(|j| a[i * h + j]).sum::<f32>() * unit;
-            for kk in 0..k {
-                let m_n: f32 = (0..h).map(|j| n[i * k * h + kk * h + j]).sum::<f32>() * unit;
-                let expected = m_a * m_n + ba[i] + bn[i][kk];
-                assert!(
-                    (got[i][kk] - expected).abs() < 1e-5,
-                    "({i},{kk}): got={} expected={}",
-                    got[i][kk],
-                    expected
-                );
-            }
-        }
-    }
-}
+mod tests;

@@ -862,6 +862,54 @@ pub fn nce_loss_identity(
     )
 }
 
+/// Gather the feature-embedding rows for `idx`, applying the per-gene softmax gate(s)
+/// when enabled. A β-sharing factored model composes `β̃ + mask·δ̃` (identity + velocity,
+/// each an independently gated single-effect — see
+/// [`JointEmbedModel::factored_feat_rows`]) via the row→gene gathers, so only the
+/// batch's rows (`b + b·k`) are materialized — never the full `[n_features, H]`
+/// dictionary — and gradients still reach `β`/`δ` and the gate logits. A free model
+/// selects from the raw `e_feat` Var (SGC-smoothed when a smoother is present; a
+/// factored model never has one — see `fit::run`) and gates that.
+///
+/// When gated, the base is reparam-sampled (`μ + σ·ε`) and multiplied by `softmax(S/τ)`
+/// over the embedding dims (the null column dropped), so gradients reach both the base
+/// and the gate logits. Ungated (`s`/`logstd` absent) it is the plain gather. This is
+/// the single feature-gather point for the bge + gem Sum-mode trainers.
+fn gather_feature_rows(
+    model: &JointEmbedModel,
+    smoother: Option<&FeatureNetworkSmoother>,
+    idx: &Tensor,
+) -> Result<Tensor> {
+    match &model.factor {
+        Some(f) => {
+            let genes = f.row_to_gene.index_select(idx, 0)?;
+            let mask = f
+                .splice_delta
+                .as_ref()
+                .map(|(_, m)| m.index_select(idx, 0)) // [b, 1] unspliced selector
+                .transpose()?;
+            model.factored_feat_rows(f, &genes, mask.as_ref(), true)
+        }
+        None => {
+            // Gate reads the RAW Var (`e_feat_raw`) once the gate is on, so a post-
+            // phase-1 materialize can overwrite `e_feat` without double-gating here.
+            let raw = model.e_feat_raw.as_ref().unwrap_or(&model.e_feat);
+            let mu = select_feat_emb(smoother, raw, idx)?; // effect mean μ
+            let logstd = model
+                .e_feat_logstd
+                .as_ref()
+                .map(|l| l.index_select(idx, 0))
+                .transpose()?;
+            let s = model
+                .s_feat
+                .as_ref()
+                .map(|s| s.index_select(idx, 0))
+                .transpose()?;
+            model.gated_rows(&mu, logstd.as_ref(), s.as_ref(), true)
+        }
+    }
+}
+
 /// Shared tail of [`nce_loss`] / [`nce_loss_identity`]: feature-side
 /// gathers, raw bilinear (`E_feat[f] · E_cell[c] + b_feat`) scoring,
 /// unweighted-mean log-σ aggregation over the batch. The cell-side
@@ -878,30 +926,9 @@ fn nce_loss_with_cell_side(
     let b = batch.coarse_cells.len();
     let k = batch.n_negatives;
 
-    // Gather the feature rows scored THIS step. A β-sharing factored model
-    // composes the row→gene→β gathers, so only the batch's rows (b + b·k) are
-    // materialized — never the full [n_features, H] dictionary per step — and β
-    // still gets gradients through the gather. A free model selects from the
-    // `e_feat` Var (SGC-smoothed when a smoother is present; a factored model
-    // never has one — see `fit::run`). Shared by pos + neg.
-    let gather_feat = |idx: &Tensor| -> Result<Tensor> {
-        match &model.factor {
-            Some(f) => {
-                let genes = f.row_to_gene.index_select(idx, 0)?;
-                let base = f.beta.index_select(&genes, 0)?; // β_g
-                match &f.splice_delta {
-                    // unspliced rows: + δ_g (β_g + mask ⊙ δ_g); spliced: mask = 0.
-                    Some((delta, mask)) => {
-                        let d = delta.index_select(&genes, 0)?; // [b, H]
-                        let m = mask.index_select(idx, 0)?; // [b, 1]
-                        base.add(&d.broadcast_mul(&m)?)
-                    }
-                    None => Ok(base),
-                }
-            }
-            None => select_feat_emb(smoother, &model.e_feat, idx),
-        }
-    };
+    // Gather the feature rows scored THIS step (see `gather_feature_rows`). Shared
+    // by pos + neg.
+    let gather_feat = |idx: &Tensor| gather_feature_rows(model, smoother, idx);
 
     let pos_feat_idx_t = Tensor::from_slice(&batch.fine_feats, b, dev)?;
     let e_feat_pos = gather_feat(&pos_feat_idx_t)?;

@@ -16,10 +16,8 @@ use crate::embed_common::*;
 use data_beans_alg::hvg::{select_hvg_streaming, HvgCliArgs};
 use graph_embedding_util as ge;
 
-mod io;
 mod resolve_etm;
 
-use io::write_feature_qc;
 use resolve_etm::resolve_etm_topics;
 
 /// One parsed `--multiome` file entry: `(optional modality label, file path)`.
@@ -86,27 +84,17 @@ pub struct BgeArgs {
     #[command(flatten)]
     qc: QcArgs,
 
+    // Per-gene softmax feature gate — ALWAYS ON for bge (the standard training):
+    // Ẽ_g = E_g ⊙ softmax(S_g), a per-gene SuSiE variational single-effect (spike-and-
+    // slab: categorical selection + Gaussian effect KL) over the H embedding dims + a
+    // null 'load-nothing' slot. A gene with no cell-state signal sends its mass to null
+    // and contributes ≈0 → single-pass feature selection. Temperature is the one knob.
     #[arg(
-        long,
-        default_value_t = 0.05,
-        help = "Drop null features (E_feat never moved off init) at this FDR, then re-fit (default 0.05; 0 = off)",
-        long_help = "Empirical-Bayes feature-null QC — ON by default at FDR 0.05.\n\
-                     After training, the shared ash (adaptive-shrinkage) null call tests each\n\
-                     feature's signed loadings one embedding dimension at a time, against a\n\
-                     per-axis null whose scale is estimated empirically from the data\n\
-                     (no fixed χ² assumption).\n\
-                     A feature is live when it is confidently non-null on some axis\n\
-                     (local false-sign rate below this FDR, Bonferroni over the H axes).\n\
-                     The per-axis null is elicited by `--n-hvg`: the lowest-norm `n − n_hvg`\n\
-                     features stand in as the presumed null that seeds each axis's scale,\n\
-                     which the sampler then refines.\n\
-                     Null features (untrained / background) are DROPPED and the model re-fits\n\
-                     on the live feature axis (two-pass refine);\n\
-                     dropped rows still get a projected co-embedding.\n\
-                     The live/null flags and norm² are written to {out}.feature_qc.parquet.\n\
-                     0 disables. Must be in [0, 1)."
+        long = "feature-softmax-temp",
+        default_value_t = 1.0,
+        help = "Softmax feature-gate temperature τ (< 1 sharpens the per-gene selection)."
     )]
-    feature_null_fdr: f32,
+    feature_softmax_temp: f32,
 
     #[arg(
         long = "phase1-cells-per-pb",
@@ -554,14 +542,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // (its graph is aligned to the live feature-name axis), so it lives in the
     // closure rather than here.
     //
-    // `--must-train-features` is loaded whether or not HVG is on, because it also
-    // exempts its features from the `--feature-null-fdr` drop further down — that
-    // gate runs independently of HVG, so a curated panel must survive it too.
+    // `--must-train-features` is a curated panel kept in the HVG-weighted set.
     let hvg_enabled = effective_hvg.selection_on();
-    let must_train = crate::hvg::load_must_train(
-        effective_hvg.must_train_file,
-        hvg_enabled || args.feature_null_fdr > 0.0,
-    )?;
+    let must_train = crate::hvg::load_must_train(effective_hvg.must_train_file, hvg_enabled)?;
     let hvg_full: Option<Vec<f32>> = if hvg_enabled {
         let hvg = select_hvg_streaming(
             unified.count_backend(),
@@ -582,17 +565,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     } else {
         Some(args.collapse.pb_refine.to_params())
     };
-
-    // Install the Ctrl-C stop handler once and share the flag across both
-    // passes — each `ge::fit` would otherwise try to register its own SIGINT
-    // handler and the second registration panics (`MultipleHandlers`).
-
-    // Full-backend feature identity, captured before any subsetting. bge never
-    // narrows the feature axis by HVG, so this differs from the trained axis only
-    // after a `--feature-null-fdr` refit — and those dropped rows are exactly what
-    // the post-hoc projection re-embeds.
-    let backend_feature_names = unified.count_backend().row_names()?;
-    let n_backend_rows = backend_feature_names.len();
 
     // Assemble a `FitConfig` for the CURRENT feature AND cell axes of `unified`,
     // so the same builder serves pass 1 (full axis), the post-QC feature re-fit
@@ -677,205 +649,47 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             lineage_dag: false,
             dag_learnable: false,
             lineage_smooth: false,
-            // bge never subsets the feature axis (HVG only reweights the random
-            // projection), so on pass 1 the trained axis IS the backend and this
-            // is an exact no-op. It earns its keep on the `--feature-null-fdr`
-            // refit, where it re-embeds the rows that pass dropped. Each backend
-            // row is its own "gene" (no β-sharing), and there is no splice track.
-            feature_projection: Some(ge::FeatureProjectionConfig {
-                ridge: ge::DEFAULT_PROJECTION_RIDGE,
-                calib_ridge: ge::DEFAULT_PROJECTION_CALIB_RIDGE,
-                backend_row_to_gene: (0..n_backend_rows as u32).collect(),
-                backend_unspliced_rows: vec![false; n_backend_rows],
-                with_velocity: false,
-                // The same null call that dropped these rows also gates their
-                // return: a row re-solves to a real direction or it stays at the
-                // origin. Restoring coverage must not mean restoring noise.
-                null_fdr: args.feature_null_fdr,
-            }),
-            // bge selects features by the norm² ash null call in `write_feature_qc`
-            // (post-fit, below), not the engine's LRT scan. The NCE objective is
-            // `--nce-objective` (default softmax = InfoNCE; logistic = per-pair
-            // SGNS). The LRT knob stays off (gem-only).
+            // The softmax feature gate does selection in one pass (a gene with no
+            // cell-state signal sends its mass to the null slot), so bge no longer
+            // holds out / re-projects any features — every gene is trained and gated.
+            feature_projection: None,
+            // The engine's LRT feature scan is gem-only; the gate is bge's selector.
             select_lrt_fdr: None,
             nce_objective: args.nce_objective.to_ge(),
+            // Per-gene softmax feature gate — the SuSiE variational spike-and-slab
+            // single-effect, ALWAYS ON for bge (null absorber + categorical + Gaussian
+            // effect KL, at the fixed internal weight). Temperature is the one knob.
+            softmax_gate: Some(ge::SoftmaxGateConfig {
+                temperature: args.feature_softmax_temp,
+            }),
         })
     };
 
-    // Pass 1: fit on the full feature axis.
+    // Single-pass gated fit over the full feature axis — the softmax gate handles
+    // feature selection during training (no post-hoc null-drop / refit).
     let cfg = build_config(&unified)?;
-    let mut out = ge::fit(&mut unified, cfg)?;
-
-    // Empirical-Bayes null-feature QC on the trained E_feat (shared with faba
-    // gem's gene QC): flags features the model never moved from init. With
-    // `--feature-null-fdr > 0` this is a two-pass refine — drop the null
-    // features and re-fit on the live axis (a fresh inference, not a reuse of
-    // the pass-1 embeddings).
-    if args.feature_null_fdr > 0.0 {
-        let (n, h) = out.model.e_feat.dims2()?;
-        let e_feat: Vec<f32> = out
-            .model
-            .e_feat
-            .to_vec2::<f32>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        let null = write_feature_qc(
-            &e_feat,
-            n,
-            h,
-            &unified.feature_names,
-            args.feature_null_fdr,
-            effective_hvg.n_hvg,
-            &args.out,
-        )?;
-        let mut live: Vec<usize> = (0..n).filter(|&i| null.live[i]).collect();
-        let raw_live = live.len();
-
-        // Degenerate-fit guards read the RAW null call — BEFORE any
-        // `--must-train-features` rescue. Rescuing first would make `live`
-        // non-empty, the guard would never fire, and the refit would drop every
-        // feature EXCEPT the force-kept ones — the panel would eat the
-        // dictionary. Two cases keep the pass-1 output and skip the refit:
-        //   (a) all-null — a refit on zero features is invalid;
-        //   (b) >90% dropped — either a genuine collapse, OR a feature set with
-        //       no empty-feature null population to find (e.g. an HVG-subset gem
-        //       run: every row is a trained HVG gene, norm² is unimodal, and the
-        //       null call over-flags). Refitting on the handful of survivors
-        //       trains a broken run, so keep pass-1 and warn.
-        if raw_live == 0 {
-            log::warn!(
-                "Feature null QC flagged all {n} features as null; keeping pass-1 (no refit)."
-            );
-        } else if raw_live * 10 < n {
-            log::warn!(
-                "Feature null QC flagged {} / {n} features null ({:.0}%) — a collapse or a \
-                 null-free feature set, not a clean drop. Keeping pass-1 output instead of \
-                 refitting on only {raw_live} survivor(s). Inspect {}.feature_qc.parquet before \
-                 trusting this run.",
-                n - raw_live,
-                100.0 * (n - raw_live) as f64 / n as f64,
-                args.out
-            );
-        } else {
-            // `--must-train-features` outranks the null call as well as the HVG cut: a
-            // curated feature the user named stays in the dictionary even when the model
-            // never moved it off init. Still reported as null in the QC parquet.
-            if let Some(must_train) = must_train.as_ref() {
-                let rescued = crate::hvg::union_indices(
-                    &mut live,
-                    &must_train.resolve_quiet(&unified.feature_names),
-                );
-                if rescued > 0 {
-                    log::warn!(
-                        "--must-train-features: {rescued} feature(s) were called null at FDR {} \
-                         but kept anyway — they carry no signal in this data, so their embeddings \
-                         stay near their init. See {}.feature_qc.parquet.",
-                        args.feature_null_fdr,
-                        args.out
-                    );
-                }
-            }
-
-            if live.len() < n {
-                info!(
-                    "Two-pass refine: dropping {} null features, re-fitting on {} live features.",
-                    n - live.len(),
-                    live.len()
-                );
-                unified.subset_features(&live);
-                let cfg = build_config(&unified)?;
-                out = ge::fit(&mut unified, cfg)?;
-            }
-        }
-    }
+    let out = ge::fit(&mut unified, cfg)?;
 
     // No per-batch cell QC: it was removed because the per-batch debris cut
     // behaved incoherently across batches (near-identical depth distributions
     // produced 0%-vs-44% drops, guillotining real cells). The upfront `--qc` floor
     // is the only cell filter; bge fits on every cell that passes it.
 
-    // The SIMBA-style co-embedding and the cluster-seeded ETM share ONE Leiden
-    // clustering of the QC-kept cell embedding: the co-embed uses its median
-    // cluster size as the temperature target, ETM uses the labels as topics —
-    // so the embedding is clustered a single time. The co-embed re-embeds every
-    // feature onto the cell manifold (gene = softmax-over-cells weighted average
-    // of cell embeddings) and OVERRIDES {out}.feature_embedding.parquet (the raw
-    // off-manifold ρ is not written). Cells are SIMBA's reference and are
-    // unchanged. Post-hoc only — training (pseudobulk efficiency, phase-2
-    // projection) is untouched.
-    let cpu = candle_core::Device::Cpu;
-    let e_feat_cpu = out.model.e_feat.to_device(&cpu)?; // [D, H] raw ρ
-    let e_cell_cpu = match qc_keep_idx.as_deref() {
-        Some(keep) => {
-            let idx: Vec<u32> = keep.iter().map(|&i| i as u32).collect();
-            let idx_t = candle_core::Tensor::from_vec(idx, keep.len(), &cpu)?;
-            out.model.e_cell.to_device(&cpu)?.index_select(&idx_t, 0)?
-        }
-        None => out.model.e_cell.to_device(&cpu)?,
-    };
-    let (cell_labels, target_eff) = ge::cell_clusters(&e_cell_cpu, args.num_topics)?;
+    // If training was interrupted (Ctrl+C), `fit()` already skipped the heavy phase-2
+    // per-cell projection, so the cell embedding is only partial. Skip the expensive
+    // post-processing too (Leiden clustering + SIMBA co-embed + ETM) — it would grind
+    // for minutes on an un-projected embedding — and write the raw partial outputs so
+    // the run exits promptly with whatever it has.
+    let interrupted = ge::stop_flag().load(std::sync::atomic::Ordering::Relaxed);
+    // ETM topic layout only on a complete, non-interrupted run.
+    let resolve_etm = !args.skip_etm && !interrupted;
 
-    // Rows the null QC dropped, re-embedded post-hoc against the frozen pseudobulk
-    // side (bge never subsets by HVG, so this is empty without a `--feature-null-fdr`
-    // refit). They join the co-embed — which is what `annotate-by-projection` reads —
-    // so a dropped gene still gets a manifold coordinate. They deliberately do NOT
-    // join `out.model.e_feat`, so ETM keeps factorizing exactly the trained rows.
-    let proj = out
-        .feature_projection
-        .as_ref()
-        .filter(|p| !p.gene_ids.is_empty());
-    let (coembed_feat, coembed_names) = match proj {
-        Some(p) => {
-            let h = out.model.embedding_dim;
-            let mut flat: Vec<f32> = e_feat_cpu.flatten_all()?.to_vec1()?;
-            flat.extend_from_slice(&p.beta);
-            let mut names = unified.feature_names.clone();
-            names.extend(
-                p.gene_ids
-                    .iter()
-                    .map(|&g| backend_feature_names[g as usize].clone()),
-            );
-            info!(
-                "restoring {} null-dropped feature(s) into the co-embed \
-                 (frame calibration on {} trained: cosine {:.3}, norm ratio {:.3}, R² {:.3})",
-                p.gene_ids.len(),
-                p.calib.n_trained,
-                p.calib.mean_cosine,
-                p.calib.norm_ratio,
-                p.calib.r2,
-            );
-            (
-                candle_core::Tensor::from_vec(flat, (names.len(), h), &cpu)?,
-                names,
-            )
-        }
-        None => (e_feat_cpu.clone(), unified.feature_names.clone()),
-    };
-    ge::write_feature_coembedding(
-        &args.out,
-        &e_cell_cpu,
-        &coembed_feat,
-        &coembed_names,
-        target_eff,
-    )?;
-
-    // Output layout depends on whether ETM was resolved (default on; --skip-etm
-    // disables):
-    //   skipped  → bge embeddings (latent = cell embedding Z, dictionary = ρ).
-    //   resolved → ETM topic-model layout (latent = log θ, dictionary = β); the
-    //         co-embedded feature_embedding is written above for both paths.
-    let resolve_etm = !args.skip_etm;
-    if resolve_etm {
-        resolve_etm_topics(
-            &out.model,
-            &unified.feature_names,
-            &unified.barcodes,
-            args,
-            qc_keep_idx.as_deref(),
-            &cell_labels,
-        )?;
-    } else {
+    if interrupted {
+        log::warn!(
+            "Interrupted — skipping co-embedding, clustering, and ETM; writing raw partial \
+             outputs (the cell embedding is un-projected). Re-run without interrupting for \
+             full results."
+        );
         ge::save_outputs(
             &out.model,
             &ge::OutputContext {
@@ -885,6 +699,69 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             },
             &args.out,
         )?;
+    } else {
+        // The SIMBA-style co-embedding and the cluster-seeded ETM share ONE Leiden
+        // clustering of the QC-kept cell embedding: the co-embed uses its median
+        // cluster size as the temperature target, ETM uses the labels as topics —
+        // so the embedding is clustered a single time. The co-embed re-embeds every
+        // feature onto the cell manifold (gene = softmax-over-cells weighted average
+        // of cell embeddings) and OVERRIDES {out}.feature_embedding.parquet (the raw
+        // off-manifold ρ is not written). Cells are SIMBA's reference and are
+        // unchanged. Post-hoc only — training (pseudobulk efficiency, phase-2
+        // projection) is untouched.
+        let cpu = candle_core::Device::Cpu;
+        let e_feat_cpu = out.model.e_feat.to_device(&cpu)?; // [D, H] raw ρ
+        let e_cell_cpu = match qc_keep_idx.as_deref() {
+            Some(keep) => {
+                let idx: Vec<u32> = keep.iter().map(|&i| i as u32).collect();
+                let idx_t = candle_core::Tensor::from_vec(idx, keep.len(), &cpu)?;
+                out.model.e_cell.to_device(&cpu)?.index_select(&idx_t, 0)?
+            }
+            None => out.model.e_cell.to_device(&cpu)?,
+        };
+        // Announce the post-training clustering + co-embed so the stretch after
+        // "finalizing outputs" doesn't read as a hang (co-embed itself shows a bar).
+        info!(
+            "Post-training: clustering {} cells + SIMBA co-embedding {} features...",
+            e_cell_cpu.dim(0)?,
+            e_feat_cpu.dim(0)?
+        );
+        let (cell_labels, target_eff) = ge::cell_clusters(&e_cell_cpu, args.num_topics)?;
+
+        // Every gene is trained + gated (no held-out projection), so the co-embed runs
+        // directly on the trained ρ. The gate zeroes deselected genes' embeddings, and
+        // the co-embed maps them onto the cell manifold like any other row.
+        ge::write_feature_coembedding(
+            &args.out,
+            &e_cell_cpu,
+            &e_feat_cpu,
+            &unified.feature_names,
+            target_eff,
+        )?;
+
+        // Output layout: ETM resolved (default) → topic-model layout (latent = log θ,
+        // dictionary = β); --skip-etm → raw bge embeddings (latent = Z, dictionary = ρ).
+        // The co-embedded feature_embedding is written above for both paths.
+        if resolve_etm {
+            resolve_etm_topics(
+                &out.model,
+                &unified.feature_names,
+                &unified.barcodes,
+                args,
+                qc_keep_idx.as_deref(),
+                &cell_labels,
+            )?;
+        } else {
+            ge::save_outputs(
+                &out.model,
+                &ge::OutputContext {
+                    feature_names: &unified.feature_names,
+                    barcodes: &unified.barcodes,
+                    cell_keep_idx: qc_keep_idx.as_deref(),
+                },
+                &args.out,
+            )?;
+        }
     }
 
     let input: Vec<String> = data_files
