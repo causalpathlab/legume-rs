@@ -28,7 +28,7 @@ pub struct GeneBatchEntry {
     /// are `a_g[u] · a_g[v]` (or uniform when the product would underflow).
     pub pos: WeightedIndex<f32>,
     /// Maps each local index in `pos` back to the global edge id in
-    /// `srt_cell_pairs.graph.edges`. Required by
+    /// `srt_cell_pairs.inner.pairs()`. Required by
     /// `sample_cell_chain_batch_with_pos`.
     pub local_to_global: Vec<u32>,
 }

@@ -137,13 +137,13 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
         &c.out,
     )?;
 
-    let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, graph);
+    let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, &graph);
     srt_cell_pairs.to_parquet(
         &(c.out.to_string() + ".coord_pairs.parquet"),
         Some(coordinate_names.clone()),
     )?;
 
-    let edges = srt_cell_pairs.graph.edges.clone();
+    let edges = srt_cell_pairs.inner.pairs();
     let n_edges = edges.len();
     info!("{} cells, {} edges, {} genes", n_cells, n_edges, n_genes);
 
@@ -164,9 +164,9 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
         data_vec.project_columns_with_batch_correction(c.proj_dim, c.block_size, batch_arg)?;
 
     let ml = graph_coarsen_multilevel(
-        &srt_cell_pairs.graph,
+        &graph,
         &mut cell_proj.proj.clone(),
-        &srt_cell_pairs.pairs,
+        srt_cell_pairs.inner.pairs(),
         CoarsenConfig {
             n_clusters: c.n_pseudobulk,
             num_levels: c.num_levels,
@@ -194,7 +194,7 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
     // operate at the same resolution.
     let mut level_profiles: Vec<Mat> = Vec::with_capacity(ml.all_cell_labels.len() + 1);
     for (l, cell_labels) in ml.all_cell_labels.iter().enumerate() {
-        let (super_edges, _f2s) = build_super_edges(&edges, cell_labels);
+        let (super_edges, _f2s) = build_super_edges(edges, cell_labels);
         let super_counts = data::build_super_cell_counts(&cell_counts_csc, cell_labels);
         let profile = data::build_super_edge_profiles(&super_counts, &super_edges);
         info!(
@@ -210,7 +210,7 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
         drop(super_counts);
     }
 
-    let fine_profile = data::build_edge_profiles(&cell_counts_csc, &edges);
+    let fine_profile = data::build_edge_profiles(&cell_counts_csc, edges);
     info!(
         "  L{} (fine): {} edges, profile [{}×{}] ({:.0} MB)",
         level_profiles.len(),
@@ -387,7 +387,7 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
         feature_emb: &feature_emb,
         topic_emb: &topic_emb,
         edge_profiles: fine_profile,
-        edges: &edges,
+        edges,
         n_cells,
         n_communities: args.n_communities,
         cell_names: &cell_names,

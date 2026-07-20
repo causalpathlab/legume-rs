@@ -1,4 +1,5 @@
 pub mod bhc;
+pub mod cell_pairs;
 pub mod collapse_data;
 pub mod dc_poisson;
 pub mod feature_coarsening;

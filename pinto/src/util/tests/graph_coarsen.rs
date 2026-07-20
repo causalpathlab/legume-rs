@@ -18,12 +18,7 @@ fn test_graph_coarsen_small() {
     assert_eq!(result.merges.len(), 5);
 
     // Extract via multilevel with 3 cluster target
-    let pairs: Vec<Pair> = (0..5)
-        .map(|i| Pair {
-            left: i,
-            right: i + 1,
-        })
-        .collect();
+    let pairs: Vec<(usize, usize)> = (0..5).map(|i| (i, i + 1)).collect();
     let ml = graph_coarsen_multilevel(
         &make_test_graph(6, vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]),
         &mut {
@@ -63,10 +58,7 @@ fn test_graph_coarsen_two_cliques() {
         features[(2, i)] = 0.1 * ((i - 3) as f32);
     }
 
-    let pairs: Vec<Pair> = edges
-        .iter()
-        .map(|&(i, j)| Pair { left: i, right: j })
-        .collect();
+    let pairs: Vec<(usize, usize)> = edges.clone();
 
     let ml = graph_coarsen_multilevel(
         &graph,
@@ -95,12 +87,7 @@ fn test_graph_coarsen_two_cliques() {
 
 #[test]
 fn test_cell_labels_to_pair_samples() {
-    let pairs = vec![
-        Pair { left: 0, right: 1 },
-        Pair { left: 2, right: 3 },
-        Pair { left: 0, right: 3 },
-        Pair { left: 1, right: 0 },
-    ];
+    let pairs = vec![(0, 1), (2, 3), (0, 3), (1, 0)];
     let labels = vec![0, 0, 1, 1];
 
     let (p2s, n_samples) = cell_labels_to_pair_samples(&labels, &pairs);
@@ -131,10 +118,7 @@ fn test_graph_coarsen_multilevel() {
     let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)];
     let graph = make_test_graph(6, edges.clone());
 
-    let pairs: Vec<Pair> = edges
-        .iter()
-        .map(|&(i, j)| Pair { left: i, right: j })
-        .collect();
+    let pairs: Vec<(usize, usize)> = edges.clone();
 
     let mut features = Mat::zeros(4, 6);
     for i in 0..6 {
@@ -226,10 +210,7 @@ fn test_spatial_seeding() {
     assert_eq!(super_graph.n_nodes, num_super);
 
     // Full multilevel with seeding
-    let pairs: Vec<Pair> = edges
-        .iter()
-        .map(|&(i, j)| Pair { left: i, right: j })
-        .collect();
+    let pairs: Vec<(usize, usize)> = edges.clone();
     let sp = SeedingParams {
         coordinates: &coords,
         batch_membership: None,
@@ -321,10 +302,7 @@ fn test_refine_labels_in_multilevel() {
         features[(3, i)] = 1.0;
     }
 
-    let pairs: Vec<Pair> = edges
-        .iter()
-        .map(|&(i, j)| Pair { left: i, right: j })
-        .collect();
+    let pairs: Vec<(usize, usize)> = edges.clone();
 
     let ml = graph_coarsen_multilevel(
         &graph,

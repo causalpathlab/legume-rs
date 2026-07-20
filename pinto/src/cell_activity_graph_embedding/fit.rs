@@ -102,14 +102,14 @@ pub fn fit_cell_activity_graph_embedding(
         save_fisher_weights(&c.out, w, &gene_names)?;
     }
 
-    let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, graph);
+    let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, &graph);
     srt_cell_pairs.to_parquet(
         &(c.out.to_string() + ".coord_pairs.parquet"),
         Some(coordinate_names.clone()),
     )?;
     let edges_owned: Vec<(u32, u32)> = srt_cell_pairs
-        .graph
-        .edges
+        .inner
+        .pairs()
         .iter()
         .map(|&(i, j)| (i as u32, j as u32))
         .collect();
@@ -127,9 +127,9 @@ pub fn fit_cell_activity_graph_embedding(
     let cell_proj =
         data_vec.project_columns_with_batch_correction(c.proj_dim, c.block_size, batch_arg)?;
     let ml = graph_coarsen_multilevel(
-        &srt_cell_pairs.graph,
+        &graph,
         &mut cell_proj.proj.clone(),
-        &srt_cell_pairs.pairs,
+        srt_cell_pairs.inner.pairs(),
         CoarsenConfig {
             n_clusters: c.n_pseudobulk,
             num_levels: c.num_levels,

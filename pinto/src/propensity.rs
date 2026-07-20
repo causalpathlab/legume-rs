@@ -275,10 +275,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             args.block_size,
         );
 
-        let prog_bar = new_progress_bar(
-            jobs.len() as u64,
-            "Gene modules {bar:40} {pos}/{len} blocks ({eta})",
-        );
+        let prog_bar = new_progress_bar(jobs.len() as u64).with_message("gene-module blocks");
         let partial_stats = jobs
             .par_iter()
             .progress_with(prog_bar.clone())
