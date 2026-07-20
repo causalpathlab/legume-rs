@@ -85,6 +85,12 @@ pub const MANIFEST_VERSION: u32 = 1;
 pub enum RunKind {
     Topic,
     Itopic,
+    /// `senna masked-vae` — same masked-imputation pipeline and same
+    /// simplex β as [`RunKind::Itopic`], but its `{out}.latent.parquet` holds
+    /// an **unconstrained Gaussian `z`**, not `log θ`. Distinct from `Itopic`
+    /// precisely so consumers stop applying the log-θ contract to it; see
+    /// [`RunKind::latent_is_log_simplex`].
+    MaskedVae,
     JointTopic,
     Vae,
     Svd,
@@ -100,6 +106,7 @@ impl RunKind {
         match self {
             RunKind::Topic => "topic",
             RunKind::Itopic => "itopic",
+            RunKind::MaskedVae => "masked-vae",
             RunKind::JointTopic => "joint-topic",
             RunKind::Vae => "vae",
             RunKind::Svd => "svd",
@@ -110,10 +117,30 @@ impl RunKind {
         }
     }
 
-    /// Topic-family kinds (topic / masked-topic / joint-topic) — produce a
-    /// probability-simplex β. SVD-family kinds produce signed loadings.
+    /// Topic-family kinds (topic / masked-topic / masked-vae / joint-topic) —
+    /// produce a probability-simplex β. SVD-family kinds produce signed
+    /// loadings.
+    ///
+    /// Note this says nothing about the *latent*: `masked-vae` has a simplex β
+    /// but a Gaussian latent. Use [`Self::latent_is_log_simplex`] for that.
     #[must_use]
     pub fn is_topic_family(self) -> bool {
+        matches!(
+            self,
+            RunKind::Topic | RunKind::Itopic | RunKind::MaskedVae | RunKind::JointTopic
+        )
+    }
+
+    /// True when `{out}.latent.parquet` holds `log θ` on the probability
+    /// simplex — i.e. `exp()` of it gives per-cell topic proportions that sum
+    /// to 1.
+    ///
+    /// False for `masked-vae` (raw Gaussian `z`), the SVD family (signed
+    /// loadings) and the embedding kinds. Anything about to `exp()` a latent,
+    /// renormalize its rows, or read it as proportions must gate on this
+    /// rather than on [`Self::is_topic_family`].
+    #[must_use]
+    pub fn latent_is_log_simplex(self) -> bool {
         matches!(self, RunKind::Topic | RunKind::Itopic | RunKind::JointTopic)
     }
 }
@@ -574,6 +601,7 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
         | RunKind::ResolveEmbeddingSpace
         | RunKind::Topic
         | RunKind::Itopic
+        | RunKind::MaskedVae
         | RunKind::JointTopic
         | RunKind::Vae => {}
         RunKind::Svd | RunKind::JointSvd => anyhow::bail!(

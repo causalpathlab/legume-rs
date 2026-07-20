@@ -867,9 +867,12 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
         gene_remap.as_ref().map(|r| r.new_to_train.as_slice()),
     )?;
 
+    // The stored latent stays raw (`z` for the Gaussian head); scoring needs
+    // proportions, so convert per the head rather than assuming `exp`.
+    let theta_nk = crate::topic::model_metadata::latent_to_theta(&z_nk, a.head);
     let (llik, total) = predictive_llik_masked(
         &data_vec,
-        &z_nk,
+        &theta_nk,
         &beta_dk,
         gene_remap.as_ref(),
         a.minibatch_size,
@@ -893,11 +896,15 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
 ///   `llik(cell) = Σ_g x_gj · log recon_gj`,   `total(cell) = Σ_g x_gj`,
 /// and `write_outputs` derives `llik_per_count = llik / total`. Genes absent
 /// from the reference model are skipped (μ = 0), mirroring
-/// [`write_residual_backend`]. Head-agnostic — the same score applies to the
-/// softmax, Gaussian, and stick-breaking latent heads (θ is already normalized).
+/// [`write_residual_backend`].
+///
+/// Takes `theta_nk` — proportions, rows summing to 1 — **not** the raw latent.
+/// The score is head-agnostic only once that conversion has happened: the
+/// simplex heads reach it with `exp(log θ)` and the Gaussian masked-VAE head
+/// with `softmax(z)`. See `crate::topic::model_metadata::latent_to_theta`.
 fn predictive_llik_masked(
     data_vec: &SparseIoVec,
-    z_nk: &Mat,
+    theta_nk: &Mat,
     beta_dk: &Mat,
     gene_remap: Option<&GeneRemap>,
     minibatch_size: usize,
@@ -913,7 +920,7 @@ fn predictive_llik_masked(
         .map(|&(lb, ub)| -> anyhow::Result<(usize, Vec<f32>, Vec<f32>)> {
             let csc = data_vec.read_columns_csc(lb..ub)?;
             let n_block = csc.ncols();
-            let theta_kn = z_nk.rows(lb, n_block).map(f32::exp).transpose();
+            let theta_kn = theta_nk.rows(lb, n_block).transpose();
             let recon_dn = &exp_beta_dk * theta_kn; // [D_train, n_block]
 
             let mut llik = vec![0f32; n_block];

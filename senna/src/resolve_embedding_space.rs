@@ -295,10 +295,14 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     // Frozen topic side: θ + the source count files //
     ///////////////////////////////////////////////////
     let (manifest, dir) = crate::run_manifest::RunManifest::load(Path::new(args.from.as_ref()))?;
+    // `latent_is_log_simplex`, not `is_topic_family`: this command `exp()`s the
+    // stored latent as θ just below, so it needs a log-θ latent specifically.
+    // `masked-vae` is topic-family but stores a raw Gaussian z (softmax, not
+    // exp), so it must be rejected here rather than silently mis-`exp`ed.
     anyhow::ensure!(
-        manifest.kind.is_topic_family(),
-        "resolve-embedding-space needs a topic-family --from run (topic / masked-topic / \
-         joint-topic) whose latent is log θ; got kind={}.",
+        manifest.kind.latent_is_log_simplex(),
+        "resolve-embedding-space needs a --from run whose latent is log θ \
+         (topic / masked-topic / joint-topic); got kind={}.",
         manifest.kind
     );
     let theta_rel = manifest

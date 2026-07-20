@@ -6,9 +6,8 @@ use candle_util::data::csc_columns_to_indexed_samples;
 use candle_util::decoder::{EmbeddedNbTopicDecoder, MaskedNbTarget};
 use candle_util::traits::*;
 use candle_util::vae::masked_topic::{
-    masked_encode, LatentHead, MaskedEncoderInput, MaskedLikelihood,
+    decoder_log_theta, masked_encode, LatentHead, MaskedEncoderInput, MaskedLikelihood,
 };
-use candle_util::vae::smooth_topics;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
@@ -293,7 +292,9 @@ pub(crate) fn evaluate_holdout_imputation(
 
         // Encode from the visible genes only, mirroring the training split
         // (including the simplex-head topic smoothing).
-        let (raw_z, kl_opt) = masked_encode(
+        // KL is a training-time term only; the held-out metric is the
+        // imputation likelihood alone.
+        let (raw_z, _kl) = masked_encode(
             encoder,
             config.head,
             &MaskedEncoderInput {
@@ -305,11 +306,9 @@ pub(crate) fn evaluate_holdout_imputation(
             },
             false,
         )?;
-        let log_z = if kl_opt.is_some() {
-            raw_z
-        } else {
-            smooth_topics(raw_z, config.topic_smoothing)?
-        };
+        // Must match the training-time decoder coupling exactly, or the
+        // held-out number is not comparable to the training trace.
+        let log_z = decoder_log_theta(raw_z, config.head, config.topic_smoothing)?;
 
         let lib_n1 = (enc_pack.values.sum_keepdim(1)? + 1.0)?;
         let target = MaskedNbTarget {

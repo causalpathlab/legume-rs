@@ -16,7 +16,7 @@ use crate::encoder::indexed::IndexedEmbeddingEncoder;
 use crate::traits::indexed::*;
 use candle_core::{Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer};
-use log::info;
+use log::{info, warn};
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::Inference;
 use nalgebra::DMatrix;
@@ -224,6 +224,33 @@ pub fn masked_encode(
             None,
         )),
     }
+}
+
+/// Project a masked-encoder latent onto the **log-simplex** the NB /
+/// multinomial decoder heads consume, then apply `topic_smoothing`.
+///
+/// The simplex heads already emit `log θ`. The Gaussian head emits a raw
+/// unconstrained `z`, which is *not* a log-simplex — and feeding that straight
+/// to the decoder left the per-topic intensity `exp(z)` unbounded (`exp(8) ≈
+/// 2981` at the encoder clamp, against `≤ 1` for the simplex heads). The head
+/// then drove itself into the ±8 clamp, where the gradient is exactly zero, and
+/// the encoder stopped learning for the rest of the run while the likelihood
+/// trace still looked alive. Projecting with `log_softmax` makes masked-VAE
+/// differ from masked-topic in exactly one respect — the reparameterized sample
+/// and its KL.
+///
+/// This is the *decoder coupling only*. The latent written to
+/// `{out}.latent.parquet` stays the raw Gaussian `z`; see [`LatentHead`].
+pub fn decoder_log_theta(
+    raw_z: Tensor,
+    head: LatentHead,
+    topic_smoothing: f64,
+) -> candle_core::Result<Tensor> {
+    let log_theta = match head {
+        LatentHead::Gaussian => candle_nn::ops::log_softmax(&raw_z, 1)?,
+        LatentHead::Softmax | LatentHead::StickBreaking => raw_z,
+    };
+    smooth_topics(log_theta, topic_smoothing)
 }
 
 /// Per-level training triple: `(encoder input, optional batch null, decoder target)`.
@@ -668,6 +695,7 @@ pub fn train_masked(
         let mut metric_cnt = 0f32;
         let mut kl_tot = 0f32;
         let mut kl_cnt = 0f32;
+        let mut skipped_steps = 0usize;
 
         for (level, loader) in data_loaders.iter().enumerate() {
             let decoder = &decoders[level];
@@ -707,13 +735,10 @@ pub fn train_masked(
                     },
                     true,
                 )?;
-                // Simplex heads (`kl_opt` None) get topic smoothing; the Gaussian
-                // `z` is a raw log-intensity, not a log-simplex, so it's left as-is.
-                let log_z = if kl_opt.is_some() {
-                    raw_z
-                } else {
-                    smooth_topics(raw_z, config.topic_smoothing)?
-                };
+                // Every head reaches the decoder as a smoothed log-simplex; the
+                // Gaussian `z` is projected with `log_softmax` first. See
+                // [`decoder_log_theta`].
+                let log_z = decoder_log_theta(raw_z, opts.latent, config.topic_smoothing)?;
 
                 // full_kd (α·ρᵀ [K,D]) — the per-topic log-partition for the NB
                 // head, and (when active) the anchor-prior CE.
@@ -770,7 +795,9 @@ pub fn train_masked(
                 }
 
                 let grads = loss.backward()?;
-                clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))?;
+                if !clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))? {
+                    skipped_steps += 1;
+                }
 
                 metric_tot += batch_metric;
                 metric_cnt += batch_count;
@@ -790,6 +817,17 @@ pub fn train_masked(
         llik_trace.push(per_metric);
         kl_trace.push(per_kl);
         prog_bar.inc(1);
+        // A skipped step means the gradient overflowed. Parameters are intact
+        // (the step was dropped, not applied), but a run that keeps skipping is
+        // diverging and its latent will be junk — say so rather than let the
+        // llik trace look healthy while nothing is learning.
+        if skipped_steps > 0 {
+            warn!(
+                "[epoch {epoch}] skipped {skipped_steps} optimizer step(s): \
+                 non-finite gradient norm. Lower --learning-rate or --grad-clip \
+                 if this persists."
+            );
+        }
         if log::log_enabled!(log::Level::Info) {
             let kl_msg = if matches!(opts.latent, LatentHead::Gaussian) {
                 format!(" kl/cell={per_kl:.4}")

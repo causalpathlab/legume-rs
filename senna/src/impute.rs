@@ -149,11 +149,16 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
     );
     info!("  θ_new: {n_new} cells × {k_new} topics; θ_ref: {n_ref} cells × {k_ref} topics");
 
-    // Latent parquets are log-softmax; exp them back to the simplex.
-    // L2 on the simplex correlates with cosine for the cell-cell matching
-    // the existing L2-backed `ColumnDict` supports.
-    theta_new.apply(|x| *x = x.exp());
-    theta_ref.apply(|x| *x = x.exp());
+    // Map both latents onto the simplex. L2 there correlates with cosine for
+    // the cell-cell matching the existing L2-backed `ColumnDict` supports.
+    //
+    // exp + per-row renorm rather than bare exp: for a log-θ latent the renorm
+    // is a no-op (rows already sum to 1), and for a `masked-vae` latent — a raw
+    // Gaussian `z`, which this path has no manifest to identify — it is exactly
+    // the `softmax(z)` that gives its proportions. Bare `exp` left those rows
+    // unnormalized, so cells were matched on library-scale-like magnitude.
+    crate::embed_common::softmax_rows_inplace(&mut theta_new);
+    crate::embed_common::softmax_rows_inplace(&mut theta_ref);
 
     // 3. Build HNSW over θ_ref and find K nearest reference cells per new cell.
     info!(
