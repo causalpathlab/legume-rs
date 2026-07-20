@@ -65,9 +65,27 @@ fn write_tensor_parquet(
     col_prefix: &str,
 ) -> anyhow::Result<()> {
     let host = tensor.to_device(&candle_core::Device::Cpu)?;
+    // Refuse to persist a diverged artifact. The masked/joint dictionary,
+    // dispersion, and feature-embedding all funnel through here and are written
+    // *before* the latent's own guard would fire, so without this a diverged run
+    // leaves NaN `dictionary.parquet` on disk. (`save_latent`/`save_dictionary`
+    // in output_helpers.rs guard the other writers; this covers the tensor path.)
+    let path = format!("{out_prefix}.{suffix}");
+    let bad = host
+        .flatten_all()?
+        .to_vec1::<f32>()?
+        .iter()
+        .filter(|x| !x.is_finite())
+        .count();
+    anyhow::ensure!(
+        bad == 0,
+        "refusing to write {path}: {bad} non-finite (NaN/Inf) entries — training \
+         diverged (check the log_likelihood trace and any \"skipped optimizer step\" \
+         warnings; re-run with a lower --learning-rate)."
+    );
     let n_cols = host.dims().last().copied().unwrap_or(0);
     host.to_parquet_with_names(
-        &format!("{out_prefix}.{suffix}"),
+        &path,
         (Some(row_names), Some(row_axis)),
         Some(&axis_id_names(col_prefix, n_cols)),
     )?;

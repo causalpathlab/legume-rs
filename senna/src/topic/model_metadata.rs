@@ -20,8 +20,10 @@ pub const MODEL_TYPE_MASKED_SBP: &str = "masked_sbp";
 /// Masked **Gaussian VAE** (`senna masked-vae`): same masked-imputation ETM
 /// pipeline as [`MODEL_TYPE_INDEXED_MASKED`], but the encoder emits a
 /// reparameterized Gaussian latent `z` (no simplex softmax) regularized by a KL
-/// term, and `exp(z)` drives the NB head's per-topic intensities. Inference is
-/// encoder-only (posterior-mean `z`).
+/// term. The NB head's per-topic intensities are `softmax(z)`, so the decoder
+/// coupling matches the simplex heads and only the reparameterized sample plus
+/// its KL differ. Inference is encoder-only (posterior-mean `z`), and the
+/// **stored latent is the raw `z`** — see [`latent_to_theta`].
 pub const MODEL_TYPE_MASKED_VAE: &str = "masked_vae";
 /// scVI-style Gaussian VAE (`senna vae`): a Gaussian (unconstrained continuous)
 /// latent `z` from a [`candle_util::encoder::GaussianEncoder`] paired with a
@@ -54,6 +56,8 @@ pub fn masked_head_from_model_type(model_type: &str) -> Option<LatentHead> {
         _ => None,
     }
 }
+
+pub use crate::embed_common::latent_to_theta;
 
 /// Human-facing CLI/log label for a masked head (the subcommand name).
 pub fn masked_head_label(head: LatentHead) -> &'static str {
@@ -137,22 +141,34 @@ impl TopicModelMetadata {
         Ok(metadata)
     }
 
-    /// Compute `θ̄_train` from the training-time `[N, K]` log θ matrix and
-    /// re-save the metadata. Idempotent — call after the post-training eval
-    /// pass returns `z_nk`.
+    /// Compute `θ̄_train` from the training-time `[N, K]` **topic-proportion**
+    /// matrix and re-save the metadata. Idempotent — call after the
+    /// post-training eval pass.
+    ///
+    /// Callers pass proportions (rows on the simplex), not the raw latent: the
+    /// simplex heads get there via `exp(log θ)`, the Gaussian masked-VAE head
+    /// via `softmax(z)`. `exp(z)` for the latter is not a proportion at all.
     pub fn populate_theta_mean_and_save(
         &mut self,
-        log_z_nk: &nalgebra::DMatrix<f32>,
+        theta_nk: &nalgebra::DMatrix<f32>,
         prefix: &str,
     ) -> anyhow::Result<()> {
-        let n = log_z_nk.nrows() as f32;
+        let n = theta_nk.nrows() as f32;
         if n <= 0.0 {
             return Ok(());
         }
-        let k = log_z_nk.ncols();
-        let theta_mean: Vec<f32> = (0..k)
-            .map(|kk| log_z_nk.column(kk).iter().map(|&x| x.exp()).sum::<f32>() / n)
-            .collect();
+        let k = theta_nk.ncols();
+        let theta_mean: Vec<f32> = (0..k).map(|kk| theta_nk.column(kk).sum() / n).collect();
+        // `serde_json` renders a non-finite f32 as `null`, so a diverged run
+        // used to land in the model file as `"theta_mean": [null, null, ...]`
+        // and was only noticed much later. This is the first place after
+        // training where the latent is inspected — fail here instead.
+        if let Some(bad) = theta_mean.iter().position(|x| !x.is_finite()) {
+            anyhow::bail!(
+                "θ̄_train[{bad}] is not finite — the trained latent contains NaN/Inf \
+                 (training diverged). Refusing to write {prefix}.model.json."
+            );
+        }
         self.theta_mean = Some(theta_mean);
         self.save(prefix)
     }

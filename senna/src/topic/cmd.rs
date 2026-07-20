@@ -999,7 +999,8 @@ where
 
     // Re-save metadata with θ̄_train populated — initial δ guess at predict
     // time, better than uniform 1/K when training is composition-imbalanced.
-    metadata.populate_theta_mean_and_save(&z_nk, &ctx.args.out)?;
+    // `senna topic` stores log θ, so proportions are just `exp`.
+    metadata.populate_theta_mean_and_save(&z_nk.map(f32::exp), &ctx.args.out)?;
     Ok(z_nk)
 }
 

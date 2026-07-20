@@ -575,6 +575,15 @@ pub fn fit_masked_vae_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
     fit_masked_model(args, LatentHead::Gaussian)
 }
 
+/// The manifest kind for a masked run. `masked-vae` gets its own kind because
+/// its latent is a Gaussian `z`, not `log θ` — see [`RunKind::latent_is_log_simplex`].
+fn masked_run_kind(head: LatentHead) -> crate::run_manifest::RunKind {
+    match head {
+        LatentHead::Gaussian => crate::run_manifest::RunKind::MaskedVae,
+        LatentHead::Softmax | LatentHead::StickBreaking => crate::run_manifest::RunKind::Itopic,
+    }
+}
+
 fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
@@ -1072,7 +1081,11 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
     };
     let z_nk = evaluate_latent_masked(&data_vec, &cpu_encoder, &eval_config, delta.as_ref(), None)?;
 
-    metadata.populate_theta_mean_and_save(&z_nk, &args.out)?;
+    // Per-cell topic proportions. Every θ consumer below reads this rather
+    // than re-deriving it, so the head's latent semantics are applied once.
+    let theta_nk = crate::topic::model_metadata::latent_to_theta(&z_nk, head);
+
+    metadata.populate_theta_mean_and_save(&theta_nk, &args.out)?;
 
     scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
 
@@ -1105,16 +1118,17 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
 
         if let Some(c2p) = cell_to_pb_per_level.as_ref().and_then(|l| l.last()) {
             let n_pb = pb_gene_gp.ncols();
-            let k = z_nk.ncols();
+            let k = theta_nk.ncols();
 
-            // θ_PB[p, ·] = mean over the cells collapsed into pseudobulk p. `z_nk` is log θ.
+            // θ_PB[p, ·] = mean over the cells collapsed into pseudobulk p.
+            // `theta_nk` is already on the simplex for every head.
             let mut pb_latent_pk = Mat::zeros(n_pb, k);
             let mut n_in_pb = vec![0f32; n_pb];
             for (n, &p) in c2p.iter().enumerate() {
-                if p < n_pb && n < z_nk.nrows() {
+                if p < n_pb && n < theta_nk.nrows() {
                     n_in_pb[p] += 1.0;
                     for kk in 0..k {
-                        pb_latent_pk[(p, kk)] += z_nk[(n, kk)].exp();
+                        pb_latent_pk[(p, kk)] += theta_nk[(n, kk)];
                     }
                 }
             }
@@ -1168,12 +1182,13 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
 
     if let Some(positions) = cnv_positions {
         if let Some(batch_labels) = crate::cnv_pseudobulk::reconstruct_batch_labels(&data_vec) {
-            let topic_probs = z_nk.map(f32::exp);
+            // `theta_nk` is unused after this; `detect_cnv_topic_informed` takes
+            // it by ref and clones internally, so pass it directly.
             let cnv_config = crate::cnv_pseudobulk::build_cnv_config(&args.cnv);
 
             let cnv_result = crate::cnv_pseudobulk::detect_cnv_topic_informed(
                 data_vec,
-                &topic_probs,
+                &theta_nk,
                 &batch_labels,
                 &positions,
                 &cnv_config,
@@ -1212,7 +1227,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        kind: crate::run_manifest::RunKind::Itopic,
+        kind: masked_run_kind(head),
         prefix: &args.out,
         data_input: &input,
         data_batch: &batch,

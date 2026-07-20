@@ -106,10 +106,19 @@ impl PhaseTimers {
 /// The `+1e-6` in the inverse-norm protects against zero-norm degeneracy;
 /// the `clamp(0, 1)` makes this a no-op when the actual norm is already
 /// below `max_norm`. Caller guarantees `max_norm > 0`.
+///
+/// Returns `false` when the global norm is not finite — the caller must then
+/// **skip the optimizer step**. This is not defensive padding: with an `Inf`
+/// anywhere in the grads the norm overflows, `scale` underflows to `0`, and
+/// the rescale below evaluates `Inf * 0 = NaN` — silently converting a single
+/// recoverable overflow into a permanently `NaN` parameter. Since `clamp` does
+/// *not* launder `NaN` into its bounds, every later forward is `NaN` too, and
+/// the run keeps going to completion and writes an all-`NaN` latent. Skipping
+/// the step leaves the parameters untouched and the run recoverable.
 fn apply_global_l2_clip(
     grads: &mut candle_core::backprop::GradStore,
     max_norm: f64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let ids: Vec<_> = grads.get_ids().copied().collect();
     let mut sumsq: Option<Tensor> = None;
     for id in &ids {
@@ -122,8 +131,13 @@ fn apply_global_l2_clip(
         }
     }
     let Some(sumsq) = sumsq else {
-        return Ok(());
+        return Ok(true);
     };
+    // One f32 host read per step. The trainers around this already sync the
+    // per-minibatch likelihood scalar, so this adds no new round-trip class.
+    if !sumsq.to_scalar::<f32>()?.is_finite() {
+        return Ok(false);
+    }
     let inv_norm = sumsq.sqrt()?.affine(1.0, 1e-6)?.powf(-1.0)?;
     let scale = inv_norm.affine(max_norm, 0.0)?.clamp(0.0_f64, 1.0_f64)?;
     for id in &ids {
@@ -132,7 +146,7 @@ fn apply_global_l2_clip(
             grads.insert_id(*id, scaled);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Backward + global-L2-norm gradient clipping + optimizer step.
@@ -141,6 +155,10 @@ fn apply_global_l2_clip(
 /// Use this when you have a `loss` tensor in hand and want a one-call
 /// step. The indexed trainer instead uses [`clip_and_step_dense`] which
 /// takes pre-computed gradients so it can time `backward()` separately.
+///
+/// A step whose global gradient norm is not finite is **skipped** (see
+/// [`apply_global_l2_clip`]); unlike [`clip_and_step_dense`] this does not
+/// report the skip, since its callers don't track it.
 pub fn clip_grads_and_step<O: Optimizer>(
     opt: &mut O,
     loss: &Tensor,
@@ -151,8 +169,9 @@ pub fn clip_grads_and_step<O: Optimizer>(
         return Ok(());
     }
     let mut grads = loss.backward()?;
-    apply_global_l2_clip(&mut grads, max_norm)?;
-    opt.step(&grads)?;
+    if apply_global_l2_clip(&mut grads, max_norm)? {
+        opt.step(&grads)?;
+    }
     Ok(())
 }
 
@@ -161,16 +180,19 @@ pub fn clip_grads_and_step<O: Optimizer>(
 /// Mirrors [`clip_grads_and_step`] but takes the already-computed grads so
 /// the caller can time `backward()` separately (used by the indexed
 /// trainer's [`PhaseTimers`]).
+///
+/// Returns `false` if the step was **skipped** because the global gradient
+/// norm was not finite (see [`apply_global_l2_clip`]).
 pub fn clip_and_step_dense(
     adam: &mut AdamW,
     mut grads: candle_core::backprop::GradStore,
     max_norm: f64,
-) -> anyhow::Result<()> {
-    if max_norm > 0.0 {
-        apply_global_l2_clip(&mut grads, max_norm)?;
+) -> anyhow::Result<bool> {
+    if max_norm > 0.0 && !apply_global_l2_clip(&mut grads, max_norm)? {
+        return Ok(false);
     }
     adam.step(&grads)?;
-    Ok(())
+    Ok(true)
 }
 
 /// Per-level loss-extension closure.

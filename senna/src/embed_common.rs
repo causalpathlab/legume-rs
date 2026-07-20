@@ -248,47 +248,64 @@ pub fn read_bulk_data_aligned(
     })
 }
 
-/// Backward + global-L2-norm gradient clipping + optimizer step.
-/// `max_norm <= 0` skips clipping (falls back to plain `backward_step`).
-pub fn clip_grads_and_step<O: candle_nn::Optimizer>(
-    opt: &mut O,
-    loss: &candle_core::Tensor,
-    max_norm: f64,
-) -> anyhow::Result<()> {
-    if max_norm <= 0.0 {
-        opt.backward_step(loss)?;
-        return Ok(());
-    }
-    let mut grads = loss.backward()?;
-    let ids: Vec<_> = grads.get_ids().copied().collect();
+// `clip_grads_and_step` lived here as a hand-rolled copy of the global-L2 clip.
+// It has been removed in favour of the single `candle_util::vae::clip_grads_and_step`,
+// which additionally skips the step when the gradient norm is non-finite
+// (this copy laundered one `Inf` gradient into all-`NaN` parameters via
+// `Inf * 0`). `senna joint-topic` — its only caller — now imports that one.
 
-    let mut sumsq: Option<candle_core::Tensor> = None;
-    for id in &ids {
-        if let Some(g) = grads.get_id(*id) {
-            let s = g.sqr()?.sum_all()?;
-            sumsq = Some(match sumsq {
-                None => s,
-                Some(prev) => (prev + s)?,
+/// Per-cell topic proportions `θ [N, K]` (rows sum to 1) from the latent a
+/// masked run stores in `{out}.latent.parquet`.
+///
+/// The simplex heads store `log θ`, so this is `exp`. The Gaussian
+/// (`masked-vae`) head stores a raw unconstrained `z` and reaches the decoder
+/// through `log_softmax(z)` (see
+/// `candle_util::vae::masked_topic::decoder_log_theta`), so its proportions are
+/// `softmax(z)`. Plain `exp(z)` — what the θ consumers used to do for every
+/// head alike — is not a proportion at all: unnormalized, and unbounded above.
+///
+/// Anything needing θ from a masked latent goes through here. The raw latent is
+/// what gets written to disk and is *not* interchangeable with this.
+#[must_use]
+pub fn latent_to_theta(z_nk: &Mat, head: candle_util::vae::masked_topic::LatentHead) -> Mat {
+    use candle_util::vae::masked_topic::LatentHead;
+    match head {
+        LatentHead::Softmax | LatentHead::StickBreaking => z_nk.map(f32::exp),
+        LatentHead::Gaussian => {
+            let mut theta = z_nk.clone();
+            softmax_rows_inplace(&mut theta);
+            theta
+        }
+    }
+}
+
+/// In-place numerically-stable per-row softmax on a host matrix (`[N, K]` →
+/// each row `softmax`ed over K): subtract the row max, `exp`, then divide by
+/// the row sum. A degenerate row — all `-inf`, or carrying a `NaN` — has no
+/// valid softmax, so it is zeroed rather than left holding `NaN`.
+///
+/// Shared by [`latent_to_theta`]'s Gaussian arm and any caller that must map a
+/// latent onto the simplex without a `LatentHead` in hand (e.g. `impute`, which
+/// reads a bare parquet). Applied to a genuine `log θ` latent, the `exp`
+/// recovers `θ` and the subsequent renormalization is a no-op (rows already
+/// sum to 1).
+pub fn softmax_rows_inplace(m: &mut Mat) {
+    for mut row in m.row_iter_mut() {
+        let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        if max.is_finite() {
+            row.iter_mut().for_each(|x| {
+                *x = (*x - max).exp();
+                sum += *x;
             });
         }
-    }
-    let Some(sumsq) = sumsq else {
-        return Ok(());
-    };
-
-    // scale = min(1, max_norm / (sqrt(sumsq) + eps)), kept on-device so the
-    // scaling decision doesn't force a per-step host sync. Always-multiply
-    // is cheaper than the host round-trip we'd need to skip the multiply
-    // when scale==1.
-    let inv_norm = sumsq.sqrt()?.affine(1.0, 1e-6)?.powf(-1.0)?;
-    let scale = inv_norm.affine(max_norm, 0.0)?.clamp(0.0_f64, 1.0_f64)?;
-
-    for id in &ids {
-        if let Some(g) = grads.get_id(*id) {
-            let scaled = g.broadcast_mul(&scale)?;
-            grads.insert_id(*id, scaled);
+        // `sum` is finite and > 0 for any row with a finite max and no NaN; the
+        // `else` zeros an all-`-inf` row (max not finite) or a NaN-poisoned one
+        // (sum is NaN) — see doc.
+        if sum.is_finite() && sum > 0.0 {
+            row.iter_mut().for_each(|x| *x /= sum);
+        } else {
+            row.iter_mut().for_each(|x| *x = 0.0);
         }
     }
-    opt.step(&grads)?;
-    Ok(())
 }

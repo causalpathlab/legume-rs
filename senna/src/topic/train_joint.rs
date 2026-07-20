@@ -9,6 +9,9 @@ use candle_util::data::*;
 use candle_util::encoder::LogSoftmaxJointEncoder;
 use candle_util::loss::topic_likelihood;
 use candle_util::traits::*;
+// The canonical clip: skips the optimizer step on a non-finite gradient norm
+// (the former `embed_common` copy laundered `Inf` into `NaN` params).
+use candle_util::vae::clip_grads_and_step;
 use matrix_util::dmatrix_util::concatenate_vertical;
 use std::sync::atomic::{AtomicBool, Ordering};
 

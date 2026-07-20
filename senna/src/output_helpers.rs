@@ -9,6 +9,27 @@
 use crate::embed_common::{axis_id_names, Mat};
 use matrix_util::traits::IoOps;
 
+/// Refuse to write a matrix that carries `NaN`/`Inf`.
+///
+/// A diverged run otherwise reaches disk looking exactly like a good one — the
+/// parquet has the right shape, the right row names and the right columns, and
+/// only the values are `NaN`. Downstream (`plot`, `cluster`, `annotate`,
+/// `pseudotime`) then fails far from the cause, or worse, quietly produces
+/// empty output. Failing here names the real problem at the point the artifact
+/// would have been created.
+fn reject_non_finite(mat: &Mat, what: &str, path: &str) -> anyhow::Result<()> {
+    let bad = mat.iter().filter(|x| !x.is_finite()).count();
+    if bad == 0 {
+        return Ok(());
+    }
+    let total = mat.nrows() * mat.ncols();
+    anyhow::bail!(
+        "refusing to write {path}: {what} has {bad}/{total} non-finite (NaN/Inf) entries \
+         — training diverged. Check the {{out}}.log_likelihood.parquet trace and any \
+         \"skipped optimizer step\" warnings; re-run with a lower --learning-rate."
+    )
+}
+
 /// Apply the near-empty output keep-mask (cell QC) to a per-cell matrix
 /// (rows = cells) and its name slice. Returns `None` when `keep_idx` is
 /// `None` or already a full-length identity (no near-empty cells), so
@@ -47,6 +68,7 @@ pub fn save_latent(
 ) -> anyhow::Result<()> {
     let cols = axis_id_names("T", latent_nk.ncols());
     let path = format!("{out}.latent.parquet");
+    reject_non_finite(latent_nk, "cell × K latent", &path)?;
     match cell_subset(latent_nk, cell_names, keep_idx) {
         Some((mat, names)) => {
             mat.to_parquet_with_names(&path, (Some(&names), Some("cell")), Some(&cols))?;
@@ -66,11 +88,9 @@ pub fn save_latent(
 /// Columns: `T0..T(K-1)`.
 pub fn save_dictionary(out: &str, dict_dk: &Mat, gene_names: &[Box<str>]) -> anyhow::Result<()> {
     let cols = axis_id_names("T", dict_dk.ncols());
-    dict_dk.to_parquet_with_names(
-        &format!("{out}.dictionary.parquet"),
-        (Some(gene_names), Some("gene")),
-        Some(&cols),
-    )?;
+    let path = format!("{out}.dictionary.parquet");
+    reject_non_finite(dict_dk, "gene × K dictionary", &path)?;
+    dict_dk.to_parquet_with_names(&path, (Some(gene_names), Some("gene")), Some(&cols))?;
     Ok(())
 }
 
@@ -78,11 +98,9 @@ pub fn save_dictionary(out: &str, dict_dk: &Mat, gene_names: &[Box<str>]) -> any
 /// Columns: `PB_0..PB_(P-1)`.
 pub fn save_pb_gene(out: &str, pb_gene_gp: &Mat, gene_names: &[Box<str>]) -> anyhow::Result<()> {
     let cols = axis_id_names("PB_", pb_gene_gp.ncols());
-    pb_gene_gp.to_parquet_with_names(
-        &format!("{out}.pb_gene.parquet"),
-        (Some(gene_names), Some("gene")),
-        Some(&cols),
-    )?;
+    let path = format!("{out}.pb_gene.parquet");
+    reject_non_finite(pb_gene_gp, "gene × P pseudobulk", &path)?;
+    pb_gene_gp.to_parquet_with_names(&path, (Some(gene_names), Some("gene")), Some(&cols))?;
     Ok(())
 }
 

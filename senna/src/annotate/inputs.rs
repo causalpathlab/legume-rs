@@ -221,12 +221,15 @@ where
         latent.mat.ncols()
     );
 
-    let is_topic = matches!(
-        manifest.kind,
-        RunKind::Topic | RunKind::Itopic | RunKind::JointTopic
-    );
-    if is_topic && latent.mat.max() <= 0.0 {
-        log::info!("Detected log-space latent (max ≤ 0); exponentiating to probabilities");
+    // Only the log-θ kinds get exponentiated. This used to sniff `max <= 0.0`
+    // instead, which mis-handles masked-vae (raw Gaussian `z`, usually max > 0
+    // so it skipped by luck) and is undefined on an all-NaN latent, where
+    // `max()`'s partial ordering decides the branch.
+    if manifest.kind.latent_is_log_simplex() {
+        log::info!(
+            "Log-simplex latent ({}); exponentiating to probabilities",
+            manifest.kind
+        );
         latent.mat = latent.mat.map(f32::exp);
     }
 

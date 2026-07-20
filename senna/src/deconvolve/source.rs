@@ -55,7 +55,10 @@ impl EmbeddingSource {
 
         match manifest.kind {
             RunKind::Bge => Self::from_bge(&manifest, &resolve),
-            RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => {
+            // masked-vae included: this path reads β + ρ only, and its β is the
+            // same gene-simplex the other topic-family kinds produce. The
+            // Gaussian latent never enters here.
+            RunKind::Topic | RunKind::Itopic | RunKind::MaskedVae | RunKind::JointTopic => {
                 Self::from_masked_topic(&manifest, &resolve)
             }
             other => anyhow::bail!(
