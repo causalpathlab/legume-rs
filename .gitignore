@@ -58,3 +58,6 @@ faba/smoke_out/
 
 # local `make install` status marker
 .make-install-status
+
+# session scratch: experiment outputs (parquets, logs, plots, analysis scripts)
+scratch/
