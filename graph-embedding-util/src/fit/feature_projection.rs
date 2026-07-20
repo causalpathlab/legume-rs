@@ -636,7 +636,9 @@ pub(crate) fn select_features_by_lrt(
             live.iter().filter(|&&l| l).count(),
             null_fdr,
             (0..n_genes).filter(|&i| n_detected[i] == 0).count(),
-            (0..n_genes).filter(|&i| n_detected[i] > 0 && lrt[i] < 0.0).count(),
+            (0..n_genes)
+                .filter(|&i| n_detected[i] > 0 && lrt[i] < 0.0)
+                .count(),
         );
     } else {
         live.fill(true);

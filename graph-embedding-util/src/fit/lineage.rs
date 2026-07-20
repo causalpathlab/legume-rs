@@ -230,7 +230,11 @@ fn build_theta_dag_level(
     vel: &PbLineageLevel,
 ) -> PbLineageLevel {
     if n == 0 {
-        return PbLineageLevel { n_pb: 0, edges: vec![], velocity: vec![] };
+        return PbLineageLevel {
+            n_pb: 0,
+            edges: vec![],
+            velocity: vec![],
+        };
     }
     let k = knn.min(n.saturating_sub(1));
     // Symmetric θ-KNN adjacency, θ-distance edge weights (the manifold metric).
@@ -269,7 +273,11 @@ fn build_theta_dag_level(
             }
         }
     }
-    PbLineageLevel { n_pb: n, edges, velocity }
+    PbLineageLevel {
+        n_pb: n,
+        edges,
+        velocity,
+    }
 }
 
 /// Net velocity source of a directed level: the node with max `(out − in)` degree
@@ -324,7 +332,11 @@ fn theta_pseudotime(adj: &[Vec<(usize, f32)>], root: usize, n: usize) -> Vec<f32
             }
         }
     }
-    let max_finite = dist.iter().copied().filter(|x| x.is_finite()).fold(0.0f32, f32::max);
+    let max_finite = dist
+        .iter()
+        .copied()
+        .filter(|x| x.is_finite())
+        .fold(0.0f32, f32::max);
     for d in dist.iter_mut() {
         if !d.is_finite() {
             *d = max_finite + 1.0;

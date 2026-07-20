@@ -831,7 +831,9 @@ pub fn nce_loss(
     let e_cell_pos = e_cell_u.index_select(&cell_idx_t, 0)?;
     let b_cell_pos = b_cell_u.index_select(&cell_idx_t, 0)?;
 
-    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, smoother, objective, dev)
+    nce_loss_with_cell_side(
+        model, batch, e_cell_pos, b_cell_pos, smoother, objective, dev,
+    )
 }
 
 /// Fast path for the identity-coarsening case (every "pb-sample" is
@@ -855,7 +857,9 @@ pub fn nce_loss_identity(
     let cell_idx_t = Tensor::from_slice(&batch.coarse_cells, b, dev)?;
     let e_cell_pos = model.e_cell.index_select(&cell_idx_t, 0)?;
     let b_cell_pos = model.b_cell.index_select(&cell_idx_t, 0)?;
-    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, smoother, objective, dev)
+    nce_loss_with_cell_side(
+        model, batch, e_cell_pos, b_cell_pos, smoother, objective, dev,
+    )
 }
 
 /// Shared tail of [`nce_loss`] / [`nce_loss_identity`]: feature-side

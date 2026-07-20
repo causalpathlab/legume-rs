@@ -116,6 +116,10 @@ pub(super) fn zero_hub_parked(
         })
         .sum::<f32>()
         / n as f32;
+    // Deliberately negated, not `radius <= 0.0`: this must also catch a NaN radius
+    // (a NaN anywhere in `cell_emb` propagates here), which `<=` would let through
+    // and turn every downstream `d2 < cutoff` test into a silent false.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(radius > 0.0) {
         // Every cell is at the same point; there is no cloud, so there is no hub to call against.
         return 0;
