@@ -145,8 +145,10 @@ pub(crate) fn project_cells_phase2(
     batch_divisor: Option<CellBatchDivisor>,
     unspliced_rows: Option<&[bool]>,
 ) -> anyhow::Result<(Vec<f32>, Option<Vec<f32>>)> {
+    use crate::progress::new_progress_bar;
     use anyhow::Context;
     use candle_util::candle_core::Tensor;
+    use indicatif::ParallelProgressIterator;
     use rayon::prelude::*;
 
     let h = model.embedding_dim;
@@ -165,8 +167,13 @@ pub(crate) fn project_cells_phase2(
         "Phase 2 per-cell solve over {n_cells} cells ({} rayon threads) ...",
         rayon::current_num_threads()
     );
+    // Bar spans the *active* cells actually walked (the samplers' union), which
+    // can be fewer than `n_cells` when some cells carry no edges.
+    let solve_bar = new_progress_bar(cells.len() as u64);
+    solve_bar.set_message("phase-2 per-cell Poisson MAP");
     let solved: Vec<SolvedCell> = cells
         .par_iter()
+        .progress_with(solve_bar.clone())
         .map(|&(cell, feats, counts)| {
             // Batch-divide the counts (μ_residual fold-factor) when correction is
             // on, then project. The fitted intercept `b_c` absorbs library size
@@ -205,6 +212,7 @@ pub(crate) fn project_cells_phase2(
             }
         })
         .collect();
+    solve_bar.finish_and_clear();
 
     let split = unspliced_rows.is_some();
     let mut velocity_flat = split.then(|| vec![0f32; n_cells * h]);
@@ -318,7 +326,15 @@ pub(crate) fn project_pbs_phase2(
     unspliced_rows: &[bool],
     lambda: f64,
 ) -> anyhow::Result<Vec<PbLevelVelocity>> {
+    use crate::progress::new_progress_bar;
+    use indicatif::ParallelProgressIterator;
     use rayon::prelude::*;
+
+    // One bar across every level's nodes, so the sequential level loop reads as a
+    // single span of work rather than a bar that restarts per level.
+    let solve_bar =
+        new_progress_bar(pb_blobs.iter().map(UnifiedData::n_cells).sum::<usize>() as u64);
+    solve_bar.set_message("phase-2 per-pseudobulk Poisson MAP");
 
     let mut out = Vec::with_capacity(pb_blobs.len());
     for pb in pb_blobs {
@@ -330,6 +346,7 @@ pub(crate) fn project_pbs_phase2(
         }
         let solved: Vec<(Vec<f32>, Vec<f32>)> = per_pb
             .par_iter()
+            .progress_with(solve_bar.clone())
             .map(|edges| {
                 let (theta, _n, _b, delta) =
                     solve_node_splice(edges, unspliced_rows, frozen_e, frozen_b, h, lambda);
@@ -347,6 +364,7 @@ pub(crate) fn project_pbs_phase2(
         }
         out.push(PbLevelVelocity { n_pb, theta, delta });
     }
+    solve_bar.finish_and_clear();
     Ok(out)
 }
 

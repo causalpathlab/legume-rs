@@ -104,7 +104,7 @@ pub fn softmax_nce(pos: &Tensor, negs: &[Tensor]) -> Result<Tensor> {
     cols.push(pos.unsqueeze(1)?);
     cols.extend(negs.iter().cloned());
     let logits = Tensor::cat(&cols, 1)?; // [B, 1 + ΣK]
-    // Numerically-stable logsumexp over the candidates (subtract the row max).
+                                         // Numerically-stable logsumexp over the candidates (subtract the row max).
     let m = logits.max_keepdim(1)?; // [B, 1]
     let lse = ((logits.broadcast_sub(&m)?).exp()?.sum_keepdim(1)?.log()? + m)?; // [B, 1]
     lse.squeeze(1)?.sub(pos)

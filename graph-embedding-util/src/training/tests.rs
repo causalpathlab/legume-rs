@@ -1,6 +1,6 @@
 //! Unit tests for the velocity-drift SEM residual and the learnable pb-DAG term.
 
-use super::{acyclicity_series, sem_penalty, PbDagParams, PbDagTerm, PbSemTerm};
+use super::{acyclicity_series, sem_penalty, PbDagParams, PbDagTerm, PbDagTermSpec, PbSemTerm};
 use crate::fit::lineage::PbLineageLevel;
 use crate::fit::projection::PbLevelVelocity;
 use candle_util::candle_core::{Device, Tensor, Var};
@@ -146,16 +146,16 @@ fn dag_term_builds_and_loss_is_differentiable() {
         edges: vec![(0, 1, 1.0), (1, 2, 1.0)],
         velocity: vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     };
-    let term = PbDagTerm::new(
-        &vel,
-        &theta_dag,
+    let term = PbDagTerm::new(PbDagTermSpec {
+        vel: &vel,
+        theta_dag: &theta_dag,
         h,
-        &PbDagParams::default(),
-        "dag_test_w",
-        &vm,
-        &dev,
-        None,
-    )
+        params: PbDagParams::default(),
+        var_name: "dag_test_w",
+        varmap: &vm,
+        dev: &dev,
+        w_init: None,
+    })
     .unwrap()
     .unwrap();
     // W starts at zero (clean DAGMA start).

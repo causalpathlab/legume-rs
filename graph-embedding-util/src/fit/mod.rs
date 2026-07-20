@@ -28,7 +28,7 @@ use crate::loss::{
 use crate::model::{FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
 use crate::training::{
     train_composite, AxisSampler, CompositeAxis, CompositeMode, CompositeTrainContext, PbDagParams,
-    PbDagTerm, PbSemTerm,
+    PbDagTerm, PbDagTermSpec, PbSemTerm,
 };
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, MultilevelParams};
@@ -592,7 +592,10 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     // θ-pseudotime DAG per level (τ-forward θ-KNN + gradient ĝ): supplies the
                     // unified `W`'s θ-topology (weighted L1) and the δ-sparse-fallback drift.
                     let theta_dag = lineage::build_theta_dag(
-                        &warmup_vel, &knn_init, h, lineage::DEFAULT_LINEAGE_KNN,
+                        &warmup_vel,
+                        &knn_init,
+                        h,
+                        lineage::DEFAULT_LINEAGE_KNN,
                     );
                     // learned-DAG: one UNIFIED `PbDagTerm` per pb level — a single `W`
                     // explaining BOTH structures (θ-weighted-L1 topology + δ/θ-gated drift).
@@ -604,16 +607,16 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     }
                     for (i, lvl) in warmup_vel.iter().enumerate() {
                         let w0 = knn_init[i].to_dense();
-                        dag_terms.push(PbDagTerm::new(
-                            lvl,
-                            &theta_dag[i],
+                        dag_terms.push(PbDagTerm::new(PbDagTermSpec {
+                            vel: lvl,
+                            theta_dag: &theta_dag[i],
                             h,
-                            &PbDagParams::default(),
-                            &format!("dag_l{i}_w"),
-                            &varmap,
-                            &config.device,
-                            Some(&w0),
-                        )?);
+                            params: PbDagParams::default(),
+                            var_name: &format!("dag_l{i}_w"),
+                            varmap: &varmap,
+                            dev: &config.device,
+                            w_init: Some(&w0),
+                        })?);
                     }
                     let n_dag = dag_terms.iter().filter(|t| t.is_some()).count();
                     info!(
@@ -680,7 +683,12 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     );
                     // Second lineage term: the θ-pseudotime DAG (see the learned branch).
                     let theta_terms = build_theta_sem_terms(
-                        &warmup_vel, &levels, h, use_cell_axis, num_levels, &config.device,
+                        &warmup_vel,
+                        &levels,
+                        h,
+                        use_cell_axis,
+                        num_levels,
+                        &config.device,
                     )?;
                     let mut opt2 = AdamW::new(varmap.all_vars(), adamw_params())?;
                     refine_loss = train_composite(

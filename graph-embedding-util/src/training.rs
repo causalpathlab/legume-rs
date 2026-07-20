@@ -337,23 +337,47 @@ pub struct PbDagTerm {
     p: usize,
 }
 
+/// Inputs to [`PbDagTerm::new`] for one pb level: the warm-up structures the term
+/// is built from (`vel`, `theta_dag`), the hyperparameters, and where to register
+/// the learnable `W` (`var_name` in `varmap`, on `dev`).
+pub struct PbDagTermSpec<'a> {
+    /// Phase-2 warm-up readout for this level — `theta` fixes the topology and
+    /// `delta` the orientation.
+    pub vel: &'a PbLevelVelocity,
+    /// θ-pseudotime lineage DAG for the same level: unions in the forward
+    /// candidates the velocity mask misses, and supplies the fallback drift
+    /// gradient where δ is absent.
+    pub theta_dag: &'a crate::fit::lineage::PbLineageLevel,
+    /// Embedding dimension `H`.
+    pub h: usize,
+    /// Step size and the SEM / L1 / acyclicity weights.
+    pub params: PbDagParams,
+    /// Name the learnable `W` Var is registered under in `varmap`.
+    pub var_name: &'a str,
+    pub varmap: &'a VarMap,
+    pub dev: &'a Device,
+    /// Warm-start for `W` (`[p×p]` row-major); `None` zero-initializes.
+    pub w_init: Option<&'a [f32]>,
+}
+
 impl PbDagTerm {
     /// Build the learnable term for one level, registering the `W` Var under
-    /// `var_name`. Returns `None` when the level has fewer than two nodes. The
+    /// `spec.var_name`. Returns `None` when the level has fewer than two nodes. The
     /// forward-orientation mask and drift are fixed from the warm-up velocity/identity
     /// (`vel.theta` / `vel.delta`). `w_init` warm-starts `W` from a fixed structure
     /// (the velocity-oriented KNN, `[p×p]` row-major) so SGD refines from a correctly-
     /// oriented start; `None` zero-initializes (the DAGMA-clean but unstable start).
-    pub fn new(
-        vel: &PbLevelVelocity,
-        theta_dag: &crate::fit::lineage::PbLineageLevel,
-        h: usize,
-        params: &PbDagParams,
-        var_name: &str,
-        varmap: &VarMap,
-        dev: &Device,
-        w_init: Option<&[f32]>,
-    ) -> anyhow::Result<Option<Self>> {
+    pub fn new(spec: PbDagTermSpec<'_>) -> anyhow::Result<Option<Self>> {
+        let PbDagTermSpec {
+            vel,
+            theta_dag,
+            h,
+            params,
+            var_name,
+            varmap,
+            dev,
+            w_init,
+        } = spec;
         let p = vel.n_pb;
         if p < 2 {
             return Ok(None);
@@ -456,7 +480,7 @@ impl PbDagTerm {
             eye: Tensor::from_vec(eye, (p, p), dev)?,
             fwd_mask: Tensor::from_vec(fwd, (p, p), dev)?,
             dtheta: Tensor::from_vec(dtheta, (p, p), dev)?,
-            params: *params,
+            params,
             p,
         }))
     }
@@ -971,7 +995,14 @@ fn single_axis_step(
     let bip_loss = if axis.cell_axis.is_identity {
         nce_loss_identity(axis.model, batch, smoother, params.objective, dev)?
     } else {
-        nce_loss(axis.model, batch, &cc.coarse_to_fine, smoother, params.objective, dev)?
+        nce_loss(
+            axis.model,
+            batch,
+            &cc.coarse_to_fine,
+            smoother,
+            params.objective,
+            dev,
+        )?
     };
     Ok(Some(bip_loss))
 }
