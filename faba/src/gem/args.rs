@@ -171,11 +171,15 @@ pub struct CollapseArgs {
         long = "markers",
         value_name = "FILE",
         help = "Marker panel this embedding will be annotated with — force-trained, like \
-                --must-train-features",
+                --must-train-features (a no-op at the default --n-hvg 0)",
         long_help = "The `gene<TAB>celltype` marker panel that `faba annotate` / `faba lineage --markers`\n\
                      will later score against this embedding.\n\
                      Its genes are UNIONed into `--must-train-features`,\n\
                      i.e. trained in-model regardless of the `--n-hvg` cut.\n\
+                     \n\
+                     Like `--must-train-features`, this is a NO-OP at the default `--n-hvg 0`:\n\
+                     every gene is trained there anyway, so the panel is on the trained axis by construction.\n\
+                     It matters only when you set `--n-hvg > 0` and the HVG cut could drop a marker.\n\
                      \n\
                      This exists because the two ends of the pipeline are easy to leave inconsistent.\n\
                      The embedding writes only its TRAINED feature rows to `{out}.feature_embedding.parquet`,\n\
@@ -343,9 +347,9 @@ pub struct RuntimeArgs {
         long,
         alias = "max-threads",
         default_value_t = 16,
-        help = "CPU threads (0 = all available)",
+        help = "CPU threads (default 16; 0 = all available)",
         long_help = "Number of CPU threads for rayon-parallel work (HNSW, collapse, phase-2 cell projection).\n\
-                     Defaults to all available logical CPUs (0 = all)."
+                     Defaults to 16; pass `0` to use every available logical CPU."
     )]
     pub threads: usize,
 }

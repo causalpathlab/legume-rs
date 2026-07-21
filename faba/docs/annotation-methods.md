@@ -23,8 +23,10 @@ re-keys by gene (`spliced` for the mature-identity track, `unspliced` for the ve
 nearest-centroid call is only meaningful if genes and cells inhabit one metric space. gem couples
 β and θ through an *inner product*, which fixes their relative directions but not their relative
 scale — and the fitted model exploits that freedom. Measured: β rows have median norm **0.00**
-(most genes are untrained and their post-hoc projection fails its null test) and mean norm 0.21,
-against cells at 30.1. At that ratio
+and mean norm 0.21, against cells at 30.1. (The measurement predates the always-on softmax gate,
+where most genes were untrained and their post-hoc projection failed its null test; a
+near-zero median β survives that change, since a gene with no cell-state signal now sends its
+gate mass to the null slot and lands at β̃_g ≈ 0 instead.) At that ratio
 
     ‖θ − c‖² = ‖θ‖² − 2⟨θ, c⟩ + ‖c‖²
 
@@ -33,11 +35,19 @@ loses the ‖c‖² term, and ‖θ‖² is constant across candidate types, so 
 largely irrespective of its direction. Measured on an untrained panel, the rank correlation
 between a type's centroid norm and the share of cells it captured was **+0.93**.
 
-> **Prerequisite.** `faba gem` must be run with `--must-train-features <panel>` using *the same
-> marker file* the annotation will use. Otherwise the panel's genes are not fitted, only
-> projected. Measured with a mismatched panel (44% of markers trained): spurious assignment to
-> types absent from the tissue ran at 59.7%; with the matching panel (97% trained) it fell to
-> **18.9%**. Report `n_live / n_markers` (in `{out}.panel_null.tsv`, or the "marker liveness" log
+> **Prerequisite — the panel must be on the trained feature axis.** A marker that never entered
+> the fit is not merely down-weighted, it is *absent* from `{out}.feature_embedding.parquet`, and
+> a type that entered with 20 markers and scores on 1 still produces a confident-looking call.
+> Measured with a mismatched panel (44% of markers trained): spurious assignment to types absent
+> from the tissue ran at 59.7%; with the matching panel (97% trained) it fell to **18.9%**.
+>
+> At gem's default `--n-hvg 0` this is satisfied by construction: every gene is trained and the
+> per-gene softmax gate does the selecting, so no panel gene can miss the axis. The prerequisite
+> bites only when you set `--n-hvg > 0` — there, pass `faba gem --markers <panel>` (or
+> `--must-train-features <panel>`) with *the same marker file* the annotation will use, which
+> force-trains the panel regardless of the HVG cut.
+>
+> Either way, report `n_live / n_markers` (in `{out}.panel_null.tsv`, or the "marker liveness" log
 > line) as a QC figure — if it is not near 100%, nothing downstream is interpretable.
 
 ---

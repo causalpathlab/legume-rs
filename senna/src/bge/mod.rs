@@ -656,8 +656,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             // cell-state signal sends its mass to the null slot), so bge no longer
             // holds out / re-projects any features — every gene is trained and gated.
             feature_projection: None,
-            // The engine's LRT feature scan is gem-only; the gate is bge's selector.
-            select_lrt_fdr: None,
             nce_objective: args.nce_objective.to_ge(),
             // Per-gene softmax feature gate — the SuSiE variational spike-and-slab
             // single-effect, ALWAYS ON for bge (null absorber + categorical + Gaussian

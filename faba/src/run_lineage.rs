@@ -357,8 +357,8 @@ pub struct LineageArgs {
         default_value_t = 0.5,
         hide_short_help = true,
         help_heading = "Marker annotation",
-        help = "[--bootstrap-markers] Minimum fraction of resamples the top label must win for \
-                a cell to be called at all"
+        help = "[--markers] Minimum fraction of resamples the top label must win for \
+                a node to be called at all (ignored under --no-bootstrap-markers)"
     )]
     pub marker_min_support: f32,
 
@@ -1062,6 +1062,32 @@ fn project_onto_cells(
     out
 }
 
+/// Running sums for one lattice bin of the velocity grid: the member cells' layout
+/// positions and their projected 2D velocities, plus the member count that turns
+/// those sums into means (and gates the bin on `MIN_PER_CELL`).
+#[derive(Default, Clone, Copy)]
+struct GridBin {
+    sum_x: f32,
+    sum_y: f32,
+    sum_dx: f32,
+    sum_dy: f32,
+    n: u32,
+}
+
+impl GridBin {
+    /// Mean position and mean velocity of the bin's members. Callers check
+    /// `n >= MIN_PER_CELL` first, so `n` is nonzero here.
+    fn means(&self) -> (f32, f32, f32, f32) {
+        let c = self.n as f32;
+        (
+            self.sum_x / c,
+            self.sum_y / c,
+            self.sum_dx / c,
+            self.sum_dy / c,
+        )
+    }
+}
+
 /// scVelo-style velocity projection + gridding. For each cell, the 2D arrow is the
 /// θ-neighbour transition-weighted mean displacement (weight = `max(0, cos(δ_i,
 /// θ_j−θ_i))`); those are then averaged onto a `GRID×GRID` grid, keeping only cells
@@ -1133,31 +1159,29 @@ fn velocity_grid_arrows(
     }
     let (wx, wy) = ((xmax - xmin).max(1e-6), (ymax - ymin).max(1e-6));
     let pitch = (wx / GRID as f32).min(wy / GRID as f32);
-    let mut acc: std::collections::HashMap<(usize, usize), (f32, f32, f32, f32, u32)> =
-        std::collections::HashMap::new();
+    let mut acc: HashMap<(usize, usize), GridBin> = HashMap::new();
     for i in 0..n {
         let gx = (((cells_2d[(i, 0)] - xmin) / wx * GRID as f32) as usize).min(GRID - 1);
         let gy = (((cells_2d[(i, 1)] - ymin) / wy * GRID as f32) as usize).min(GRID - 1);
-        let e = acc.entry((gx, gy)).or_insert((0.0, 0.0, 0.0, 0.0, 0));
-        e.0 += cells_2d[(i, 0)];
-        e.1 += cells_2d[(i, 1)];
-        e.2 += cell_vel[i].0;
-        e.3 += cell_vel[i].1;
-        e.4 += 1;
+        let e = acc.entry((gx, gy)).or_default();
+        e.sum_x += cells_2d[(i, 0)];
+        e.sum_y += cells_2d[(i, 1)];
+        e.sum_dx += cell_vel[i].0;
+        e.sum_dy += cell_vel[i].1;
+        e.n += 1;
     }
     let mut out = Vec::new();
-    for (_, (sx, sy, sdx, sdy, cnt)) in acc {
-        if (cnt as usize) < MIN_PER_CELL {
+    for bin in acc.into_values() {
+        if (bin.n as usize) < MIN_PER_CELL {
             continue;
         }
-        let c = cnt as f32;
-        let (mdx, mdy) = (sdx / c, sdy / c);
+        let (mx, my, mdx, mdy) = bin.means();
         let mag = (mdx * mdx + mdy * mdy).sqrt();
         if mag < 1e-6 {
             continue;
         }
         // Scale each arrow to ~one grid pitch (unit direction × pitch).
-        out.push((sx / c, sy / c, mdx / mag * pitch, mdy / mag * pitch));
+        out.push((mx, my, mdx / mag * pitch, mdy / mag * pitch));
     }
     out
 }
