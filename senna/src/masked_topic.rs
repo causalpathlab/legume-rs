@@ -85,8 +85,7 @@ pub struct MaskedTopicArgs {
                      {out}.log_likelihood.parquet   training loss trace\n  \
                      {out}.safetensors              encoder+decoder weights\n  \
                      {out}.cell_proj.parquet        cached random projection (for `senna layout`)\n  \
-                     {out}.senna.json               run manifest for `senna layout/plot --from`\n\n\
-                     With -x bulk files: {out}.bulk_latent.parquet additionally."
+                     {out}.senna.json               run manifest for `senna layout/plot --from`"
     )]
     out: Box<str>,
 
@@ -397,16 +396,6 @@ pub struct MaskedTopicArgs {
                      Defaults to the encoder's --context-size when not set."
     )]
     decoder_context_size: Option<usize>,
-
-    #[arg(
-        short = 'x',
-        long,
-        value_delimiter = ',',
-        help = "Bulk expression files for joint deconvolution",
-        long_help = "Accepts .parquet or .tsv.gz; rows are aligned to the SC gene set.\n\
-                     Bulk samples are embedded using the trained encoder/decoder."
-    )]
-    bulk_data_files: Option<Vec<Box<str>>>,
 
     #[arg(
         long,
@@ -856,10 +845,9 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         n_features_full, h, args.context_size, num_levels, n_features_full, dec_context_size,
     );
 
-    // Bulk deconvolution is not supported on the masked-imputation path (v1).
-    if args.bulk_data_files.is_some() {
-        warn!("--bulk-data-files is ignored by the masked-topic (not yet supported)");
-    }
+    // Bulk deconvolution is not supported on the masked-imputation path; the
+    // `-x/--bulk-data-files` flag that used to be accepted here (and silently
+    // ignored) is gone. `senna deconvolve --bulk` is the supported route.
 
     let stop = setup_stop_handler();
 

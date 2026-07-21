@@ -479,10 +479,14 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         data_input: &input,
         data_batch: &batch,
         data_input_null: &[],
-        // Joint-topic writes `{out}.base_dictionary.parquet` + per-modality
-        // delta files (`{out}_{i}.delta_logits.parquet`). Only the base
-        // dictionary is recorded here — plot doesn't consume deltas.
-        dictionary_suffix: Some("base_dictionary.parquet"),
+        // `train_and_save` writes `{out}.dictionary.parquet` (the EFFECTIVE
+        // per-modality dictionary) on BOTH decoder paths, so that is what the
+        // manifest records. `delta` additionally emits `base_dictionary.parquet`
+        // + `{out}_{i}.delta_logits.parquet`, which are not recorded here —
+        // plot consumes neither. This previously pointed unconditionally at
+        // `base_dictionary.parquet`, which the DEFAULT (`independent`) decoder
+        // never writes, leaving `outputs.dictionary` dangling.
+        dictionary_suffix: Some("dictionary.parquet"),
         // No safetensors+metadata path in joint-topic today.
         has_model: false,
         has_cell_proj: true,
