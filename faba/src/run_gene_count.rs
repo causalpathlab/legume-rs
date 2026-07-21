@@ -45,16 +45,6 @@ pub struct GeneCountArgs {
     )]
     pub(crate) gene_barcode_tag: Box<str>,
 
-    /// GFF record type filter
-    #[arg(
-        long,
-        default_value = "gene",
-        help = "GFF record type filter",
-        long_help = "GFF feature type to use for counting.\n\
-                     Common values: gene, transcript, exon, utr."
-    )]
-    pub(crate) record_type: Box<str>,
-
     /// Gene biotype filter
     #[arg(
         long,
@@ -131,17 +121,6 @@ pub struct GeneCountArgs {
                      Use this flag to output a single total count matrix instead."
     )]
     pub(crate) no_splice: bool,
-
-    /// Exon boundary buffer zone (bp) for splice classification
-    #[arg(
-        long,
-        default_value_t = 3,
-        help = "Intron buffer zone (bp) for splice classification",
-        long_help = "Number of base pairs around exon boundaries to treat as ambiguous\n\
-                     when classifying reads as spliced or unspliced.\n\
-                     Reads falling entirely within this buffer are discarded."
-    )]
-    pub(crate) intron_buffer: i64,
 
     /// UMI BAM tag used for read deduplication
     #[arg(
