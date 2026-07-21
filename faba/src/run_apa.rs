@@ -5,7 +5,7 @@ use crate::data::poly_a_stat_map::PolyASiteArgs;
 use crate::data::util_htslib::*;
 use crate::pipeline_util::{resolve_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest};
 
-use genomic_data::gff::{FeatureType as GffFeatureType, GeneId, GeneType as GffGeneType};
+use genomic_data::gff::{GeneId, GeneType as GffGeneType};
 use genomic_data::sam::CellBarcode;
 use rayon::ThreadPoolBuilder;
 
@@ -251,16 +251,6 @@ pub struct CountApaArgs {
                      Only used in simple mode."
     )]
     pub(crate) include_missing_barcode: bool,
-
-    /// GFF record type filter (simple mode)
-    #[arg(
-        long,
-        value_enum,
-        help = "GFF record type filter (simple mode)",
-        long_help = "Filter GFF records by feature type. Only used in simple mode.\n\
-                     Common values: gene, transcript, exon, utr."
-    )]
-    pub(crate) record_type: Option<GffFeatureType>,
 
     /// Gene biotype filter (simple mode)
     #[arg(

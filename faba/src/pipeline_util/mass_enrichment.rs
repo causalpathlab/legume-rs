@@ -311,14 +311,6 @@ pub struct MassEnrichmentArgs {
     )]
     pub cluster_min_col_nnz: usize,
 
-    // Deprecated: k-means grouping knobs (superseded by Leiden). Still
-    // parsed so existing command lines keep working, but ignored — passing either
-    // just warns and grouping runs at `--cluster-resolution`. Prefer that knob.
-    #[arg(long = "n-clusters", default_value_t = 1, hide = true)]
-    pub n_clusters: usize,
-
-    #[arg(long = "cluster-k-max", default_value_t = 0, hide = true)]
-    pub cluster_k_max: usize,
 }
 
 impl MassEnrichmentArgs {
@@ -340,17 +332,11 @@ impl MassEnrichmentArgs {
         gene_barcode_tag: &str,
         allow_prefix_matching: bool,
     ) -> anyhow::Result<Option<CellMembership>> {
-        // `--cluster-resolution` drives Leiden directly. The old count knobs are
-        // deprecated and ignored; warn if they were passed so the switch to
-        // resolution-driven grouping is visible.
-        if self.n_clusters > 1 || self.cluster_k_max > 1 {
-            log::warn!(
-                "--n-clusters/--cluster-k-max are deprecated and ignored; mass \
-                 enrichment now uses Leiden communities at --cluster-resolution \
-                 {:.3} (higher → more groups; 0 disables).",
-                self.cluster_resolution
-            );
-        }
+        // `--cluster-resolution` drives Leiden directly. The old k-means count
+        // knobs (`--n-clusters` / `--cluster-k-max`) are gone; they were parsed
+        // but ignored, so passing one now errors at the CLI instead of silently
+        // running at a resolution the caller never chose.
+        //
         // Resolution 0 (or below) disables grouping → bulk detection.
         if !self.enabled() {
             return Ok(None);

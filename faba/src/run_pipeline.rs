@@ -908,7 +908,6 @@ fn run_apa_step(
         gene_barcode_tag: args.gene_barcode_tag.clone(),
         resolution_bp: 10,
         include_missing_barcode: false,
-        record_type: None,
         gene_type: None,
         utr_bed: None,
         min_utr_length: 200,
