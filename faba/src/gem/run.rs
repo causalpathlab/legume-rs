@@ -196,25 +196,15 @@ fn run_gem_genes_bge(
     // membership to those genes too. `None` (n_hvg = 0) keeps every gene.
     //
     // `--must-train-features` force-includes a curated panel on top of that cut, at
-    // the GENE level (so both splice tracks of a kept gene come along). It is loaded
-    // whether or not HVG is on, because it also exempts its genes from the
-    // `--feature-null-fdr` drop below — the other gate a gene has to survive.
-    // HVG (prespecified top-N, selected on raw counts BEFORE training) and the
-    // data-driven feature-null (Pass 1 → select on the fit → refit) are COMPETING
-    // selectors — either/or, not stacked. When `--n-hvg` is set it wins and the null
-    // call is skipped (no Pass 1 needed: HVG doesn't look at the fit); the null call
-    // runs only in the automatic `--n-hvg 0` mode. `--must-train-features` overrides
-    // whichever branch runs.
+    // the GENE level (so both splice tracks of a kept gene come along). Loaded only
+    // when the HVG cut is on (the softmax gate handles selection otherwise).
+    //
+    // The softmax feature gate is gem's selector now — a gene with no cell-state signal
+    // sends its gate mass to null and contributes ≈0. The old ash-QC / LRT two-pass
+    // refit is retired. An explicit `--n-hvg N` still hard-subsets to the top-N genes
+    // (a smaller dictionary; the remainder is restored by the post-hoc projection).
     let hvg_on = args.collapse.n_hvg > 0;
-    let data_driven_on = !hvg_on && args.model.feature_null_fdr > 0.0;
-    if hvg_on && args.model.feature_null_fdr > 0.0 {
-        info!(
-            "--n-hvg {} set → using the HVG cut and skipping the data-driven feature-null \
-             (mutually exclusive). Pass --n-hvg 0 to select data-driven instead.",
-            args.collapse.n_hvg
-        );
-    }
-    let selection_on = hvg_on || data_driven_on;
+    let selection_on = hvg_on;
     // `--markers` is force-trained alongside `--must-train-features`. The annotators read
     // only the TRAINED feature rows, so a marker off the trained axis is absent from the
     // panel rather than merely down-weighted — naming the panel here is what keeps the genes
@@ -344,9 +334,7 @@ fn run_gem_genes_bge(
     // is auto-on with a mild ridge whenever both tracks are present (unless the user
     // set `--delta-l2`) so a δ_g dictionary is always emitted for `faba annotate
     // --track velocity`; a spliced-only input keeps δ off.
-    let build_cfg = |unified: &UnifiedData,
-                     select_lrt: bool|
-     -> anyhow::Result<(ge::FitConfig, Vec<Box<str>>, f32)> {
+    let build_cfg = |unified: &UnifiedData| -> anyhow::Result<(ge::FitConfig, Vec<Box<str>>, f32)> {
         let (factor, gene_names) = build_splice_factor(&unified.feature_names);
         info!(
             "β-sharing factor: {} genes from {} count rows ({} unspliced rows); \
@@ -392,104 +380,55 @@ fn run_gem_genes_bge(
             phase1_cells_per_pb: args.collapse.phase1_cells_per_pb,
             feat_factor: Some(factor),
             delta_l2,
-            // The LRT scan uses the pre-refine θ_pb (scored right after phase 1), so the
-            // throwaway data-driven selection Pass 1 skips the lineage refine — only the
-            // real fit (HVG single-pass, or the refit) pays for it.
-            lineage_dag: args.train.lineage_dag && !select_lrt,
+            lineage_dag: args.train.lineage_dag,
             dag_learnable: !args.train.fixed_dag,
             lineage_smooth: args.train.lineage_smooth,
-            // Always on, no flag: geu projects whatever backend genes the trained
-            // axis is missing. `--n-hvg 0` with no null-QC drops leaves nothing to
-            // project, so this self-disables. Runs after phase 2 and reads only the
-            // frozen pseudobulk side — the cell outputs are unaffected.
+            // Restore backend genes the trained axis is missing — the `--n-hvg`
+            // remainder — solved (with velocity) against the frozen pseudobulk side.
+            // `null_fdr: 0` = restore ALL of them (no ash-null gate; the softmax gate
+            // is now the selector). Self-disables when the trained axis is the backend
+            // (the default `--n-hvg 0`): nothing is held out. Cell outputs unaffected.
             feature_projection: Some(ge::FeatureProjectionConfig {
                 ridge: ge::DEFAULT_PROJECTION_RIDGE,
                 calib_ridge: ge::DEFAULT_PROJECTION_CALIB_RIDGE,
                 backend_row_to_gene: backend_row_to_gene.clone(),
                 backend_unspliced_rows: backend_unspliced_rows.clone(),
                 with_velocity: has_unspliced,
-                // Same EB null call the two-pass feature QC uses, on both ends:
-                // only live trained genes calibrate the frame, and a projected
-                // gene indistinguishable from the null is zeroed rather than
-                // given a fabricated direction. Null genes never shaped the cell
-                // embedding; resurrecting them as marker vectors would only add
-                // noise to `faba annotate`.
-                null_fdr: args.model.feature_null_fdr,
+                null_fdr: 0.0,
             }),
-            // Data-driven selection (Stage 2): only the broad Pass 1 scores every gene
-            // by LRT for the refit. `None` on the HVG branch and on the refit itself.
-            select_lrt_fdr: select_lrt.then_some(args.model.feature_null_fdr),
+            // The gate is gem's feature selector — the engine's LRT scan is retired.
+            select_lrt_fdr: None,
             // `--nce-objective` (default softmax = InfoNCE: on gem's dense count data
             // the positive competing against its negatives in one distribution
             // separates cell types better than the per-pair logistic SGNS loss).
             nce_objective: args.model.nce_objective.to_ge(),
+            // Per-gene softmax feature gate — the SuSiE variational spike-and-slab
+            // single-effect, ALWAYS ON. Gates β_g (identity) AND, independently, δ_g
+            // (velocity → velocity_selection); null absorber + categorical + Gaussian
+            // effect KL at the fixed internal weight. Temperature is the one knob.
+            softmax_gate: Some(ge::SoftmaxGateConfig {
+                temperature: args.model.feature_softmax_temp,
+            }),
         };
         Ok((cfg, gene_names, delta_l2))
     };
 
-    // Pass 1 — fit on the current feature axis. In the data-driven (`--n-hvg 0`)
-    // branch this is the BROAD pass: the engine also scores every gene by the LRT
-    // `D_null − D_fit` against the Pass-1 `θ_pb` for the selection below (`select_lrt_fdr`).
-    let (cfg, mut gene_names, mut delta_l2) = build_cfg(&unified, data_driven_on)?;
-    let mut out = ge::fit(&mut unified, cfg).context("ge::fit (genes bge)")?;
-
-    // Data-driven feature selection (`--n-hvg 0`): keep the genes the engine's LRT null
-    // call flagged live against the Pass-1 `θ_pb` — the dispersion-aware "θ explains this
-    // gene" statistic, NOT ‖β‖² (invalid for a re-solved gene). Then refit on the live
-    // axis (two-pass). `--must-train-features` overrides the call. Unlike the old norm²
-    // path there is no ">90% dropped" guard: dropping most genes IS the intended
-    // behaviour here (all backend genes enter Pass 1), only the all-null case is guarded.
-    let scan_opt = out.feature_lrt.take();
-    if let Some(scan) = scan_opt.as_ref() {
-        // `scan.live` is per BACKEND gene id; with `--n-hvg 0` the unified axis IS the
-        // backend axis, so `backend_row_to_gene[r]` maps each feature row to its call.
-        // A live gene keeps BOTH its splice tracks (row-level via the gene map).
-        let n_rows = unified.n_features();
-        let n_genes_total = scan.live.len();
-        let n_live_genes = scan.live.iter().filter(|&&l| l).count();
-        let mut live: Vec<usize> = (0..n_rows)
-            .filter(|&r| scan.live[backend_row_to_gene[r] as usize])
-            .collect();
-
-        // `--must-train-features` outranks the null call: a named gene stays even when it
-        // carries no LRT signal (both tracks, resolved gene-level so β-sharing stays paired).
-        if let Some(must_train) = must_train.as_ref() {
-            let (row_gene, genes) = intern_gene_keys(&unified.feature_names);
-            let keep_genes: rustc_hash::FxHashSet<usize> =
-                must_train.resolve_quiet(&genes).into_iter().collect();
-            let forced_rows: Vec<usize> = (0..row_gene.len())
-                .filter(|&r| keep_genes.contains(&(row_gene[r] as usize)))
-                .collect();
-            let rescued = data_beans_alg::hvg::union_indices(&mut live, &forced_rows);
-            if rescued > 0 {
-                log::warn!(
-                    "--must-train-features: {rescued} feature row(s) called null but kept — \
-                     those genes carry no LRT signal in this data."
-                );
-            }
-        }
-
-        if n_live_genes == 0 {
-            log::warn!(
-                "data-driven feature-null flagged all {n_genes_total} genes null (degenerate call); \
-                 keeping the pass-1 fit."
-            );
-        } else if live.len() < n_rows {
-            info!(
-                "data-driven feature selection: {n_live_genes} / {n_genes_total} genes live \
-                 (LRT null call at FDR {}); dropping {} rows, refitting on {} live rows.",
-                args.model.feature_null_fdr,
-                n_rows - live.len(),
-                live.len(),
-            );
-            unified.subset_features(&live);
-            let (cfg2, gn2, dl2) = build_cfg(&unified, false)?;
-            out = ge::fit(&mut unified, cfg2).context("ge::fit refit (data-driven)")?;
-            gene_names = gn2;
-            delta_l2 = dl2;
-        }
-    }
+    // Single-pass gated fit — the softmax gate selects features DURING training (a
+    // junk gene sends its gate mass to null → β̃_g ≈ 0), so there is no LRT null-call
+    // or two-pass refit. The `--n-hvg` remainder (if any) is restored post-hoc.
+    let (cfg, gene_names, delta_l2) = build_cfg(&unified)?;
+    let out = ge::fit(&mut unified, cfg).context("ge::fit (genes bge)")?;
     let n_genes = gene_names.len();
+
+    // On interrupt (Ctrl+C) `fit()` skips phase-2 + lineage, so the outputs below are
+    // partial. gem has no heavy post-fit stage to skip (unlike bge's co-embed/ETM), so
+    // it just writes what it has and exits — but flag that the result is un-projected.
+    if ge::stop_flag().load(std::sync::atomic::Ordering::Relaxed) {
+        log::warn!(
+            "Interrupted — outputs are partial (cell embedding un-projected; \
+             velocity/lineage skipped). Re-run without interrupting for full results."
+        );
+    }
 
     // NOTE: NO softmax co-embedding is written. (1) The gene↔cell co-embedding
     // (`{out}.feature_embedding.parquet`) is dropped: cell-type identity is carried by
@@ -639,33 +578,19 @@ fn run_gem_genes_bge(
     // Per-gene QC: which genes were trained vs projected, and how much evidence
     // each projected gene actually had. Written separately so the dictionaries stay
     // plain `gene × H` tables that downstream `faba annotate` reads unchanged.
-    // Pull each trained gene's Pass-1 selection-scan stats (LRT / deviance / detection)
-    // onto its `gene_qc` row so trained genes are no longer NaN there. The scan is
-    // indexed by BACKEND gene-id; a trained gene is a name-subset of the backend,
-    // re-interned in a different order after the live-axis refit, so match by NAME.
-    // Data-driven path only — the HVG branch runs no scan, leaving this empty (→ the
-    // trained rows stay NaN, as before).
-    let trained_scan: Vec<Option<(f32, f32, u32)>> = match scan_opt.as_ref() {
-        Some(s) => {
-            let by_name: rustc_hash::FxHashMap<&str, usize> = backend_gene_names
-                .iter()
-                .enumerate()
-                .map(|(g, n)| (n.as_ref(), g))
-                .collect();
-            gene_names
-                .iter()
-                .map(|n| {
-                    by_name
-                        .get(n.as_ref())
-                        .map(|&g| (s.lrt[g], s.deviance[g], s.n_detected[g]))
-                })
-                .collect()
-        }
-        None => Vec::new(),
-    };
+    // The LRT selection scan is retired (the gate is the selector), so trained genes
+    // carry no per-gene scan stats — `gene_qc`'s LRT/deviance/detection columns stay
+    // NaN for trained rows, as on the old HVG path.
+    let trained_scan: Vec<Option<(f32, f32, u32)>> = Vec::new();
 
     if let Some(p) = proj {
-        save_gene_qc(&merged_gene_names, &trained_norm2, &trained_scan, p, &args.out)?;
+        save_gene_qc(
+            &merged_gene_names,
+            &trained_norm2,
+            &trained_scan,
+            p,
+            &args.out,
+        )?;
         write_projection_qc_json(p, &args.out)?;
     }
 
@@ -700,7 +625,12 @@ fn run_gem_genes_bge(
                 let n_g = beta_t.dim(0)?;
                 let beta_g = beta_t.flatten_all()?.to_vec1::<f32>()?;
                 let delta_g = delta_t.flatten_all()?.to_vec1::<f32>()?;
-                let theta = out.model.e_cell.to_device(&cpu)?.flatten_all()?.to_vec1::<f32>()?;
+                let theta = out
+                    .model
+                    .e_cell
+                    .to_device(&cpu)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?;
                 // λ=1e-2 (Gram-trace-scaled) conditions the h×h lin-solve; never an inverse.
                 let p = ge::cell_projection::velocity_operator(&beta_g, &delta_g, n_g, h, 1e-2);
                 let mut vel = ge::cell_projection::apply_velocity_operator(&theta, &p, n, h);
@@ -1067,7 +997,6 @@ fn build_splice_factor(
     )
 }
 
-
 fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
     // Fail on an ambiguous / empty gene spec before any I/O.
     args.genes()?;
@@ -1075,11 +1004,6 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
         args.model.embedding_dim > 0,
         "--embedding-dim must be > 0 (got {})",
         args.model.embedding_dim
-    );
-    anyhow::ensure!(
-        (0.0..1.0).contains(&args.model.feature_null_fdr),
-        "--feature-null-fdr must be in [0, 1) (got {})",
-        args.model.feature_null_fdr
     );
     Ok(())
 }

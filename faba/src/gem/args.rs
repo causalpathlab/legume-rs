@@ -29,30 +29,6 @@ pub struct ModelArgs {
     pub delta_l2: f32,
 
     #[arg(
-        long = "feature-null-fdr",
-        default_value_t = 0.05,
-        help = "Empirical-Bayes feature-null QC: drop genes whose β never moved off init at this FDR, then re-fit (default 0.05; 0 = off)",
-        long_help = "Empirical-Bayes feature-null QC — ON by default at FDR 0.05,\n\
-                     the same shared ash (adaptive-shrinkage) engine `senna bge` uses.\n\
-                     After phase 1, each gene's materialized β_g (its ‖e_feat‖ loadings) is\n\
-                     tested one embedding dimension at a time against a per-axis null whose\n\
-                     scale is estimated empirically from the data (no fixed χ² assumption),\n\
-                     and a gene is live when it is confidently non-null on some axis\n\
-                     (local false-sign rate below this FDR).\n\
-                     The per-axis null is elicited by `--n-hvg`: the lowest-norm `n − n_hvg`\n\
-                     genes stand in as the presumed null that seeds each axis's scale,\n\
-                     which the sampler then refines.\n\
-                     Null genes are DROPPED (β-sharing drops the spliced and unspliced tracks\n\
-                     together) and the model re-fits on the live feature axis (two-pass refine);\n\
-                     dropped genes still get a projected embedding.\n\
-                     The live/null flags and norm² are written to `{out}.feature_qc.parquet`.\n\
-                     This is the automatic ALTERNATIVE to the manual `--n-hvg` top-N cut, not a\n\
-                     complement: the two are mutually exclusive. It runs only when `--n-hvg 0`;\n\
-                     with `--n-hvg` set, HVG wins and this is skipped. 0 disables. Must be in [0, 1)."
-    )]
-    pub feature_null_fdr: f32,
-
-    #[arg(
         long = "nce-objective",
         default_value_t = NceObjectiveArg::Softmax,
         value_enum,
@@ -61,6 +37,19 @@ pub struct ModelArgs {
                 dense pseudobulk data; default) or logistic (per-pair SGNS)."
     )]
     pub nce_objective: NceObjectiveArg,
+
+    // Per-gene softmax feature gate — ALWAYS ON for gem (the standard training):
+    // β_g ⊙ softmax(S_g), a per-gene SuSiE variational single-effect (spike-and-slab:
+    // categorical selection + Gaussian effect KL) over the H embedding dims + a null
+    // 'load-nothing' slot. A gene with no cell-state signal sends its mass to null and
+    // contributes ≈0 → single-pass feature selection. The velocity δ_g gets its own
+    // independent gate too (→ velocity_selection). Temperature is the one knob.
+    #[arg(
+        long = "feature-softmax-temp",
+        default_value_t = 1.0,
+        help = "Softmax feature-gate temperature τ (< 1 sharpens the per-gene selection)."
+    )]
+    pub feature_softmax_temp: f32,
 }
 
 /// Pseudobulk collapse, phase-1 cell-axis mode, per-file sample identity, and
@@ -138,18 +127,16 @@ pub struct CollapseArgs {
     #[arg(
         long = "n-hvg",
         default_value_t = 0,
-        help = "HVG cut: keep the top-N highly-variable genes (default 0 = data-driven feature-null selection instead; >0 = HVG)",
-        long_help = "Gene-level HVG feature filter (like `senna bge`).\n\
+        help = "Optional HVG cut: keep the top-N highly-variable genes (default 0 = train ALL genes; the softmax gate selects)",
+        long_help = "Optional gene-level HVG feature filter.\n\
                      Selects the top-N most variable GENES (NB dispersion-trend, spliced+unspliced pooled)\n\
                      and drops the rest — both the spliced and unspliced rows of a dropped gene go together\n\
                      so the β-sharing factorization stays aligned.\n\
-                     This removes the abundant, uniform housekeeping/ribosomal genes that otherwise dominate the positive edges\n\
-                     and collapse every cell onto one point;\n\
-                     it shrinks the dictionary and restricts the pseudobulk projection/membership to the kept genes.\n\
-                     Defaults to `0`: the DATA-DRIVEN feature-null selection (the `--feature-null-fdr` branch:\n\
-                     Pass 1 → LRT null call → refit on the live genes), which keeps low-abundance markers an HVG cut would drop.\n\
-                     Set `--n-hvg > 0` to pick a fixed HVG cut instead (e.g. 5000, matching `senna bge` / `pinto`).\n\
-                     HVG and the data-driven null are mutually exclusive — setting `--n-hvg > 0` picks HVG and skips the null call."
+                     It shrinks the dictionary and speeds the fit; the `--n-hvg` remainder is restored post-hoc\n\
+                     by the held-out-feature projection (with velocity).\n\
+                     Defaults to `0`: train ALL genes and let the per-gene softmax FEATURE GATE do the selecting\n\
+                     (a junk gene sends its gate mass to null → β̃_g ≈ 0), no HVG cut needed. This is the recommended path;\n\
+                     set `--n-hvg > 0` only for a fixed smaller dictionary (e.g. 5000, matching `senna bge` / `pinto`)."
     )]
     pub n_hvg: usize,
 
@@ -159,8 +146,7 @@ pub struct CollapseArgs {
         help = "Genes to TRAIN on regardless of whether they make the HVG cut",
         long_help = "Force-include list: these genes enter the FIT\n\
                      even when they do not make the `--n-hvg` cut.\n\
-                     UNIONed with the HVG selection, and also exempt from the `--feature-null-fdr` drop —\n\
-                     the two gates a gene would otherwise have to pass.\n\
+                     UNIONed with the HVG selection so a named gene is always trained in-model.\n\
                      Both the spliced and unspliced rows of a kept gene are kept together,\n\
                      so the β-sharing factorization stays aligned.\n\
                      \n\
@@ -177,7 +163,7 @@ pub struct CollapseArgs {
                      \n\
                      Names are matched leniently against the `{gene}` slot of the `{gene}/count/{spliced|unspliced}` rows\n\
                      (case-insensitive, symbol ↔ `ENSG…_SYMBOL` either way); unmatched names are logged, not fatal.\n\
-                     A no-op only when `--n-hvg 0` AND `--feature-null-fdr 0`, i.e. when nothing would drop a gene anyway."
+                     A no-op when `--n-hvg 0` (all genes trained), i.e. when the HVG cut wouldn't drop a gene anyway."
     )]
     pub must_train_features: Option<Box<str>>,
 
@@ -189,7 +175,7 @@ pub struct CollapseArgs {
         long_help = "The `gene<TAB>celltype` marker panel that `faba annotate` / `faba lineage --markers`\n\
                      will later score against this embedding.\n\
                      Its genes are UNIONed into `--must-train-features`,\n\
-                     i.e. trained in-model regardless of the `--n-hvg` cut and the `--feature-null-fdr` drop.\n\
+                     i.e. trained in-model regardless of the `--n-hvg` cut.\n\
                      \n\
                      This exists because the two ends of the pipeline are easy to leave inconsistent.\n\
                      The embedding writes only its TRAINED feature rows to `{out}.feature_embedding.parquet`,\n\

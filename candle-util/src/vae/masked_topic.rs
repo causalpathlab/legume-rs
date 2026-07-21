@@ -590,9 +590,11 @@ pub fn train_mixed(
             }
         }
 
-        llik_trace.push(llik_tot / count_tot);
+        let llik_avg = llik_tot / count_tot;
+        llik_trace.push(llik_avg);
         kl_trace.push(kl_tot / n_tot as f32);
 
+        prog_bar.set_message(format!("llik={llik_avg:.3}"));
         prog_bar.inc(1);
 
         if log::log_enabled!(log::Level::Info) {
@@ -816,6 +818,7 @@ pub fn train_masked(
         let per_kl = if kl_cnt > 0.0 { kl_tot / kl_cnt } else { 0.0 };
         llik_trace.push(per_metric);
         kl_trace.push(per_kl);
+        prog_bar.set_message(format!("llik={per_metric:.3}"));
         prog_bar.inc(1);
         // A skipped step means the gradient overflowed. Parameters are intact
         // (the step was dropped, not applied), but a run that keeps skipping is
