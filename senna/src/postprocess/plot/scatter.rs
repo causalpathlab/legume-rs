@@ -998,7 +998,8 @@ fn argmax_topics(path: &str, n_cells_expected: usize) -> anyhow::Result<Vec<i64>
 /// Cluster fallback for `ColorBy::Cluster` when the `cell_coords`
 /// parquet has no `cluster` column. Mirrors `senna annotate-by-enrichment`'s strategy:
 ///   1. If `manifest.cluster.clusters` is set, load that parquet.
-///   2. Otherwise run Leiden against `manifest.outputs.latent`, write
+///   2. Otherwise run Leiden against the manifest's cell embedding
+///      (`outputs.cell_embedding`, else `outputs.latent`), write
 ///      `{out}.clusters.parquet`, and update the manifest in place.
 ///
 /// Returns per-cell ids aligned to `cell_names` (`cell_coords` row order),

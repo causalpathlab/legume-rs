@@ -63,15 +63,11 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
              use `senna annotate-by-enrichment`."
         )
         })?;
-    // Cell side: prefer the explicit cell_embedding; fall back to latent (plain bge/fne).
-    let cell_rel = manifest
-        .outputs
-        .cell_embedding
-        .as_deref()
-        .or(manifest.outputs.latent.as_deref())
-        .ok_or_else(|| {
-            anyhow::anyhow!("manifest has neither `outputs.cell_embedding` nor `outputs.latent`")
-        })?;
+    // Cell side: prefer the explicit cell_embedding; fall back to latent for
+    // manifests written before Z moved there unconditionally.
+    let cell_rel = manifest.outputs.geometry_latent().ok_or_else(|| {
+        anyhow::anyhow!("manifest has neither `outputs.cell_embedding` nor `outputs.latent`")
+    })?;
 
     let feat_path = resolve(feat_rel);
     let cell_path = resolve(cell_rel);
