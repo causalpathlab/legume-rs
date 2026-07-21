@@ -156,6 +156,11 @@ pub struct FitConfig {
     /// `Softmax` (InfoNCE), which `faba gem` uses for its dense count data; `senna bge`
     /// / `pinto cage` set `Logistic` explicitly (byte-identical to before).
     pub nce_objective: crate::loss::NceObjective,
+    /// Optional per-gene softmax gate over the embedding dimensions (SuSiE single-
+    /// effect prior + graceful feature selection). `Some` enables it for both the free
+    /// (`e_feat`) and factored (`β`) feature sides; `None` (default) = ungated, byte-
+    /// identical to before. See [`SoftmaxGateConfig`] and [`crate::model::SoftmaxGateSpec`].
+    pub softmax_gate: Option<SoftmaxGateConfig>,
 }
 
 /// Caller-provided spec for the per-gene β-sharing feature factorization. Lengths
@@ -168,6 +173,17 @@ pub struct FeatFactorSpec {
     /// ignores it (spliced & unspliced both embed as `β_g`); phase 2 uses it to
     /// split each cell's edges for the dual axis-δ projection.
     pub unspliced_rows: Vec<bool>,
+}
+
+/// Caller-provided spec for the per-gene softmax feature gate — a SuSiE
+/// single-effect (L=1) prior over the embedding dimensions with a null "load-nothing"
+/// absorber for graceful feature selection. Always the variational spike-and-slab
+/// (categorical + Gaussian KL, at the fixed [`crate::model::GATE_KL_WEIGHT`]); resolves
+/// to a [`crate::model::SoftmaxGateSpec`] inside [`fit`]. See the model doc for the math.
+#[derive(Clone, Copy, Debug)]
+pub struct SoftmaxGateConfig {
+    /// Softmax temperature `τ` (`1.0` = plain softmax; `< 1` sharpens the selection).
+    pub temperature: f32,
 }
 
 /// Optional SGC feature-network smoother configuration. The graph is

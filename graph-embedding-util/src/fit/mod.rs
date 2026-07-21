@@ -11,7 +11,7 @@ mod samplers;
 
 pub use config::{
     load_feature_network, FeatFactorSpec, FeatureNetworkArgs, FeatureNetworkConfig, FitConfig,
-    FitOutput,
+    FitOutput, SoftmaxGateConfig,
 };
 pub use feature_projection::{
     CalibrationDiag, CalibrationKind, FeatureProjection, FeatureProjectionConfig,
@@ -25,7 +25,9 @@ use crate::data::UnifiedData;
 use crate::loss::{
     build_stratified_sampler, FeatPairing, PerBatchStratifiedCellSampler, StratifiedSampler,
 };
-use crate::model::{FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
+use crate::model::{
+    FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs, SoftmaxGateSpec,
+};
 use crate::training::{
     train_composite, AxisSampler, CompositeAxis, CompositeMode, CompositeTrainContext, PbDagParams,
     PbDagTerm, PbDagTermSpec, PbSemTerm,
@@ -289,6 +291,23 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         )?,
     };
 
+    // Enable the per-gene softmax gate (SuSiE single-effect prior + graceful feature
+    // selection) on the primary model BEFORE the sharing heads are built, so every
+    // head references the one shared gate Var (`s_feat`/`s_beta`).
+    if let Some(g) = config.softmax_gate {
+        cell_model.enable_softmax_gate(
+            SoftmaxGateSpec {
+                temperature: g.temperature,
+            },
+            &varmap,
+            &config.device,
+        )?;
+        info!(
+            "Softmax feature gate ON (variational spike-and-slab) — τ={}",
+            g.temperature
+        );
+    }
+
     let mut level_models: Vec<JointEmbedModel> = Vec::with_capacity(num_levels);
     for (level_idx, pb) in pb_blobs.iter().enumerate() {
         let n_pb = pb.n_cells();
@@ -308,6 +327,12 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     b_cell_init: &vec![0f32; n_pb],
                     var_prefix: &prefix,
                     seed: config.seed,
+                    // Share the free-model gate (if enabled) so every head reweights
+                    // the SAME feature side and AdamW updates one `s_feat`.
+                    shared_s_feat: cell_model.s_feat.clone(),
+                    shared_e_feat_raw: cell_model.e_feat_raw.clone(),
+                    shared_e_feat_logstd: cell_model.e_feat_logstd.clone(),
+                    gate: cell_model.gate,
                 },
                 &varmap,
                 &config.device,
@@ -880,6 +905,12 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
 /// gene's `e_feat` rows are `β_g` (spliced) and `β_g + δ_g` (unspliced), so only
 /// `β` is a clean calibration target. For a **free** model (bge) every compact
 /// feature row is its own gene and `e_feat` is exactly `β`.
+///
+/// **Softmax gate.** When the gate is on, the held-out solve estimates each gene's
+/// *effective* embedding, so the calibration target must be the GATED per-gene
+/// `β_g ⊙ softmax(s_beta_g)` (matching what `θ_pb` was trained against). The free
+/// branch needs no special handling: `model.e_feat` was already overwritten with the
+/// gated dictionary by `materialize_e_feat` before this runs.
 fn trained_gene_beta(
     model: &JointEmbedModel,
     spec: Option<&FeatFactorSpec>,
@@ -889,7 +920,13 @@ fn trained_gene_beta(
 ) -> anyhow::Result<feature_projection::TrainedBeta> {
     let (beta, backend_gene_id) = match (spec, &model.factor) {
         (Some(spec), Some(factor)) => {
-            let beta = factor.beta.flatten_all()?.to_vec1::<f32>()?;
+            // `s_beta` is `Some` iff the gate is on (both set together by
+            // `enable_softmax_gate`), so checking it alone is sufficient.
+            let beta_t = match &factor.s_beta {
+                Some(s_beta) => model.apply_softmax_gate(&factor.beta, s_beta)?,
+                None => factor.beta.clone(),
+            };
+            let beta = beta_t.flatten_all()?.to_vec1::<f32>()?;
             let n_trained_genes = beta.len() / h;
             // compact gene id → backend gene id, via any of the gene's rows.
             let mut backend_gene_id = vec![u32::MAX; n_trained_genes];

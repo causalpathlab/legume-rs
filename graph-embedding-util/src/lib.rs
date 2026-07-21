@@ -51,7 +51,8 @@ pub use feature_qc::{hvg_feature_qc, FeatureQcConfig, FeatureQcResult};
 pub use fit::{
     fit, load_feature_network, CalibrationDiag, CalibrationKind, CellLineage, FeatFactorSpec,
     FeatureNetworkArgs, FeatureProjection, FeatureProjectionConfig, FitConfig, FitOutput,
-    LineageQc, PbLevelVelocity, DEFAULT_PROJECTION_CALIB_RIDGE, DEFAULT_PROJECTION_RIDGE,
+    LineageQc, PbLevelVelocity, SoftmaxGateConfig, DEFAULT_PROJECTION_CALIB_RIDGE,
+    DEFAULT_PROJECTION_RIDGE,
 };
 pub use model::JointEmbedModel;
 pub use postprocess::{cell_clusters, feature_coembedding};

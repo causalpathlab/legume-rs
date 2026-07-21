@@ -148,6 +148,7 @@ where
         llik_trace.push(llik_avg);
         kl_trace.push(kl_avg);
 
+        prog_bar.set_message(format!("llik={llik_avg:.3}"));
         prog_bar.inc(1);
 
         info!("[epoch {}] llik={} kl={}", epoch, llik_avg, kl_avg);
@@ -265,6 +266,7 @@ pub fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
         llik_trace.push(llik_avg);
         kl_trace.push(kl_avg);
 
+        prog_bar.set_message(format!("llik={llik_avg:.3}"));
         prog_bar.inc(1);
 
         info!("[epoch {}] llik={} kl={}", epoch, llik_avg, kl_avg);

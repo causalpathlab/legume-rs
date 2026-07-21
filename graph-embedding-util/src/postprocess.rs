@@ -133,7 +133,11 @@ pub fn feature_coembedding(
         eff_from_scores(&scores_sub, t)?
     );
 
-    // Full pass, blocked over features.
+    // Full pass, blocked over features. This is the heavy post-training step
+    // (a `genes × cells` softmax-weighted average); a progress bar over the
+    // feature blocks keeps it from looking hung (canonical workspace style).
+    let prog = crate::progress::new_progress_bar(d.div_ceil(FEAT_BLOCK) as u64)
+        .with_message("co-embedding features");
     let mut blocks: Vec<Tensor> = Vec::new();
     let mut start = 0usize;
     while start < d {
@@ -141,7 +145,9 @@ pub fn feature_coembedding(
         let ef = e_feat.narrow(0, start, len)?;
         blocks.push(coembed_block(&e_cell, &ef, t)?); // [len, H]
         start += len;
+        prog.inc(1);
     }
+    prog.finish_and_clear();
     let coembed = Tensor::cat(blocks.as_slice(), 0)?; // [D, H]
     Ok((coembed, t as f32))
 }
