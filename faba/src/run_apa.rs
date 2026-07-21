@@ -252,12 +252,14 @@ pub struct CountApaArgs {
     )]
     pub(crate) include_missing_barcode: bool,
 
-    /// Gene biotype filter (simple mode)
+    /// Gene biotype filter (both modes)
     #[arg(
         long,
         value_enum,
-        help = "Gene biotype filter (simple mode)",
-        long_help = "Filter genes by biotype. Only used in simple mode.\n\
+        help = "Gene biotype filter",
+        long_help = "Filter genes by biotype. Honored in BOTH modes: simple mode\n\
+                     subsets the GffRecordMap, mixture mode filters the GFF records\n\
+                     while building UTRs.\n\
                      Common values: protein_coding, pseudogene, lncRNA."
     )]
     pub(crate) gene_type: Option<GffGeneType>,
