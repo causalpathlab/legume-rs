@@ -140,7 +140,10 @@ pub(super) fn load_velocity_grid(
         if ![x, y, dx, dy].iter().all(|v| v.is_finite()) {
             continue;
         }
-        segs.push((bounds.to_pixel((x, y), ext), bounds.to_pixel((x + dx, y + dy), ext)));
+        segs.push((
+            bounds.to_pixel((x, y), ext),
+            bounds.to_pixel((x + dx, y + dy), ext),
+        ));
     }
     Ok(segs)
 }

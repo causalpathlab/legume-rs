@@ -932,7 +932,11 @@ fn emit_umap_layout(
     let (n, h) = (theta.nrows(), theta.ncols());
     let vel = velocity.filter(|_| space != LayoutSpace::Identity);
     // Effective feature width: Concat doubles it ([θ|δ]); Identity/Nascent keep H.
-    let d = if space == LayoutSpace::Concat && vel.is_some() { 2 * h } else { h };
+    let d = if space == LayoutSpace::Concat && vel.is_some() {
+        2 * h
+    } else {
+        h
+    };
 
     // CELLS ONLY — embedding just the cells (per the `space` representation) keeps the
     // trajectory backbone from distorting the manifold (the R exercises are cells-only);
@@ -955,7 +959,14 @@ fn emit_umap_layout(
     // scale=T (MatOps::scale_columns) → cosine (L2-normalize rows) → t-UMAP.
     let feats_n = l2_normalize_rows(&feats.scale_columns());
     info!("t-UMAP layout (cosine + scale, space={space:?}): {n} cells, knn={knn}");
-    let graph = KnnGraph::from_rows(&feats_n, KnnGraphArgs { knn, block_size: 1000, reciprocal: false })?;
+    let graph = KnnGraph::from_rows(
+        &feats_n,
+        KnnGraphArgs {
+            knn,
+            block_size: 1000,
+            reciprocal: false,
+        },
+    )?;
     let w = graph.fuzzy_kernel_weights();
     let edges: Vec<(usize, usize, f32)> = graph
         .edges
@@ -968,17 +979,28 @@ fn emit_umap_layout(
     let mut s = seed ^ 0x9E37_79B9_7F4A_7C15;
     let mut init = vec![0f32; n * 2];
     for v in init.iter_mut() {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *v = (((s >> 33) as f32) / ((1u32 << 31) as f32) - 1.0) * 10.0;
     }
     // t-UMAP (a=b=1) — the uwot::tumap kernel; more spread than standard UMAP.
-    let coords = Umap { seed, ..Umap::tumap() }.fit(&edges, n, &init);
+    let coords = Umap {
+        seed,
+        ..Umap::tumap()
+    }
+    .fit(&edges, n, &init);
     let mut cells_2d = DMatrix::<f32>::zeros(n, 2);
     for i in 0..n {
         cells_2d[(i, 0)] = coords[i * 2];
         cells_2d[(i, 1)] = coords[i * 2 + 1];
     }
-    write_xy(&cells_2d, cell_names, "cell", &format!("{out}.cells_2d.parquet"))?;
+    write_xy(
+        &cells_2d,
+        cell_names,
+        "cell",
+        &format!("{out}.cells_2d.parquet"),
+    )?;
 
     // Project the backbone (nodes + curve points, θ space) onto the cells-only layout:
     // each lands at the mean 2D of its θ-nearest cells (t-UMAP has no Nyström).
@@ -1037,7 +1059,9 @@ fn project_onto_cells(
         .map(|p| {
             let mut dist: Vec<(f32, usize)> = (0..n)
                 .map(|c| {
-                    let dd = (0..h).map(|j| (pts[(p, j)] - cell_theta[(c, j)]).powi(2)).sum::<f32>();
+                    let dd = (0..h)
+                        .map(|j| (pts[(p, j)] - cell_theta[(c, j)]).powi(2))
+                        .sum::<f32>();
                     (dd, c)
                 })
                 .collect();
@@ -1107,8 +1131,14 @@ fn velocity_grid_arrows(
         return Vec::new();
     }
     // θ-neighbour graph (identity space) for the transition projection.
-    let Ok(graph) = KnnGraph::from_rows(theta, KnnGraphArgs { knn, block_size: 1000, reciprocal: false })
-    else {
+    let Ok(graph) = KnnGraph::from_rows(
+        theta,
+        KnnGraphArgs {
+            knn,
+            block_size: 1000,
+            reciprocal: false,
+        },
+    ) else {
         return Vec::new();
     };
     let mut nbrs: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -1120,7 +1150,10 @@ fn velocity_grid_arrows(
     let mut cell_vel = vec![(0f32, 0f32); n];
     for i in 0..n {
         let (mut vx, mut vy, mut wsum) = (0f32, 0f32, 0f32);
-        let di = (0..h).map(|c| delta[(i, c)] * delta[(i, c)]).sum::<f32>().sqrt();
+        let di = (0..h)
+            .map(|c| delta[(i, c)] * delta[(i, c)])
+            .sum::<f32>()
+            .sqrt();
         if di < 1e-8 {
             continue;
         }
@@ -1135,10 +1168,17 @@ fn velocity_grid_arrows(
                 dot += delta[(i, c)] * dth;
                 dj2 += dth * dth;
             }
-            let cos = if dj2 > 1e-12 { dot / (di * dj2.sqrt()) } else { 0.0 };
+            let cos = if dj2 > 1e-12 {
+                dot / (di * dj2.sqrt())
+            } else {
+                0.0
+            };
             let wt = cos.max(0.0);
             if wt > 0.0 {
-                let (dx, dy) = (cells_2d[(j, 0)] - cells_2d[(i, 0)], cells_2d[(j, 1)] - cells_2d[(i, 1)]);
+                let (dx, dy) = (
+                    cells_2d[(j, 0)] - cells_2d[(i, 0)],
+                    cells_2d[(j, 1)] - cells_2d[(i, 1)],
+                );
                 let dn = (dx * dx + dy * dy).sqrt().max(1e-8);
                 vx += wt * dx / dn;
                 vy += wt * dy / dn;
@@ -1195,7 +1235,10 @@ fn write_velocity_grid(arrows: &[(f32, f32, f32, f32)], path: &str) -> Result<()
         m[(i, 2)] = dx;
         m[(i, 3)] = dy;
     }
-    let cols: Vec<Box<str>> = ["x", "y", "dx", "dy"].iter().map(|s| Box::from(*s)).collect();
+    let cols: Vec<Box<str>> = ["x", "y", "dx", "dy"]
+        .iter()
+        .map(|s| Box::from(*s))
+        .collect();
     m.to_parquet_with_names(path, (None, None), Some(&cols))?;
     info!("Wrote {path} ({} gridded velocity arrows)", arrows.len());
     Ok(())

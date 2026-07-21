@@ -49,9 +49,8 @@ use io::{
     col_index, load_curves, load_node_positions, load_trajectory_edges, load_velocity_grid, Curves,
 };
 use layers::{
-    build_grid_velocity_arrows,
-    build_celltype_layers, build_curve_layer, build_nodes, build_pseudotime_layer,
-    build_tree_layer, build_velocity_arrows, CellScatter,
+    build_celltype_layers, build_curve_layer, build_grid_velocity_arrows, build_nodes,
+    build_pseudotime_layer, build_tree_layer, build_velocity_arrows, CellScatter,
 };
 use style::{CurveWidth, BACKGROUND, PT_PER_INCH};
 use svg::{emit_colourbar, emit_legend};
@@ -393,7 +392,8 @@ pub fn run_plot(args: &PlotArgs) -> Result<()> {
     // Extra vector SVG spliced in just before </svg> (legend or colourbar).
     let side_overlay = match args.color_by {
         ColorBy::Celltype => {
-            let (legend, labels) = build_celltype_layers(prefix, &cells, args, font_px, &mut layers)?;
+            let (legend, labels) =
+                build_celltype_layers(prefix, &cells, args, font_px, &mut layers)?;
             celltype_labels = labels;
             emit_legend(&legend, font_px)
         }
