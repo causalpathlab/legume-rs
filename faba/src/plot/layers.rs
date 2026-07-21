@@ -177,7 +177,12 @@ pub(super) fn build_celltype_layers(
         .enumerate()
         .map(|(i, t)| (t.clone(), palette::color(&pal, i)))
         .collect();
-    let color_of = |d: &str| type_color.get(leading_fate(d)).copied().unwrap_or((150, 150, 150));
+    let color_of = |d: &str| {
+        type_color
+            .get(leading_fate(d))
+            .copied()
+            .unwrap_or((150, 150, 150))
+    };
 
     // Bucket pixels by DISPLAY label (`leading/second`), split confident vs mixed; also gather
     // pixels per LEADING fate for the centroid labels. `unassigned` dropped unless shown.
@@ -195,7 +200,10 @@ pub(super) fn build_celltype_layers(
             &mut mixed_pts
         };
         bucket.entry(d.clone()).or_default().push(px);
-        fate_pts.entry(Box::from(leading_fate(d))).or_default().push(px);
+        fate_pts
+            .entry(Box::from(leading_fate(d)))
+            .or_default()
+            .push(px);
     }
 
     // Legend order: display labels sorted (groups by leading-fate prefix, e.g. `HSPC` then
@@ -345,7 +353,9 @@ pub(super) fn build_pseudotime_layer(
             continue;
         }
         pts_px.push(px);
-        colors.push(palette::sample_blue_red(args.pseudotime_scale.frac(v, lo, span)));
+        colors.push(palette::sample_blue_red(
+            args.pseudotime_scale.frac(v, lo, span),
+        ));
     }
     let png = rasterize_per_point_png(
         &pts_px,
@@ -533,7 +543,10 @@ pub(super) fn build_grid_velocity_arrows(
         return Ok(None);
     }
     let head_len = arrow_head_len(ext);
-    info!("velocity-grid arrows: {} gridded cell-velocity vectors", arrows.len());
+    info!(
+        "velocity-grid arrows: {} gridded cell-velocity vectors",
+        arrows.len()
+    );
     let png = rasterize_arrow_layer_png(
         arrows,
         ext,
