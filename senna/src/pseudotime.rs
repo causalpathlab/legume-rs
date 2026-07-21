@@ -345,10 +345,12 @@ fn resolve_latent_path(args: &PseudotimeArgs, ctx: Option<&ManifestCtx>) -> anyh
         return Ok(p.to_string());
     }
     let ctx = ctx.ok_or_else(|| anyhow::anyhow!("either --latent or --from is required"))?;
-    let rel =
-        ctx.manifest.outputs.latent.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("manifest {} has no outputs.latent", ctx.path.display())
-        })?;
+    let rel = ctx.manifest.outputs.geometry_latent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "manifest {} has no outputs.cell_embedding or outputs.latent",
+            ctx.path.display()
+        )
+    })?;
     Ok(resolve(&ctx.dir, rel).to_string_lossy().into_owned())
 }
 

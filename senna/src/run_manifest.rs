@@ -238,11 +238,17 @@ pub struct RunOutputs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_embedding: Option<String>,
     /// `{out}.cell_embedding.parquet` — N × H per-cell embedding Z in the
-    /// SAME H-space as `feature_embedding` ρ. Recorded by runs whose `latent`
-    /// is NOT itself the H-embedding: `bge --resolve-etm` (latent = log θ) and
-    /// `resolve-embedding-space`. `annotate-by-projection` prefers this over
-    /// `latent`. Absent on plain `bge`/`fne`, where `latent` already IS the
-    /// cell embedding (and the projection consumer falls back to it).
+    /// SAME H-space as `feature_embedding` ρ.
+    ///
+    /// Written by EVERY embedding command (`bge`, `fne`,
+    /// `resolve-embedding-space`), regardless of whether that run also
+    /// resolved topics: Z lives here and only here, and `latent` is reserved
+    /// for log θ. Consumers doing geometry (kNN, layout, clustering,
+    /// trajectory) should go through [`RunOutputs::geometry_latent`] rather
+    /// than reading `latent` directly, so they pick Z up automatically.
+    ///
+    /// Manifests written before this contract put Z in `latent` and left this
+    /// `None`; `geometry_latent` falls back for them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_embedding: Option<String>,
     /// `{out}.cell_to_pb.parquet` — N × `num_levels` u32 matrix of the
@@ -253,6 +259,25 @@ pub struct RunOutputs {
     /// the precomputed partition straight into the per-PB Gamma fit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_to_pb: Option<String>,
+}
+
+impl RunOutputs {
+    /// The cell × H table to use for GEOMETRY — kNN graphs, layout,
+    /// clustering, trajectory: prefer `cell_embedding`, fall back to `latent`.
+    ///
+    /// The embedding commands (`bge`, `fne`, `resolve-embedding-space`) write
+    /// their H-space Z to `cell_embedding` and reserve `latent` for log θ, so
+    /// reading `latent` directly on a topic-resolving embedding run would hand
+    /// a metric consumer log-simplex coordinates and silently apply the wrong
+    /// distance. Going through this accessor also keeps pre-contract manifests
+    /// (Z stored in `latent`, no `cell_embedding`) working unchanged.
+    ///
+    /// Topic-semantics consumers — `plot --colour-by topic`, `plot-topic` —
+    /// must NOT use this; they need θ specifically and should read `latent`.
+    #[must_use]
+    pub fn geometry_latent(&self) -> Option<&str> {
+        self.cell_embedding.as_deref().or(self.latent.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -662,15 +687,16 @@ pub struct RunDescription<'a> {
     /// `None` to omit.
     pub feature_embedding_suffix: Option<&'a str>,
     /// Suffix after `{basename}.` for the H-space per-cell embedding Z
-    /// parquet, e.g. `"cell_embedding.parquet"`. Set only when `latent` is
-    /// not itself the H-embedding (`bge --resolve-etm`,
-    /// `resolve-embedding-space`). `None` to omit.
+    /// parquet, e.g. `"cell_embedding.parquet"`. Set by every embedding
+    /// command (`bge`, `fne`, `resolve-embedding-space`) — Z always lands
+    /// here, never in `latent`. `None` to omit.
     pub cell_embedding_suffix: Option<&'a str>,
     /// Default `--colour-by` for downstream plot / layout.
     pub default_colour_by: &'a str,
-    /// True if the run emits `{basename}.latent.parquet` (per-cell K-dim
-    /// latent). All cell-based subcommands set this; `fne` (feature-only)
-    /// sets this `false`.
+    /// True if the run emits `{basename}.latent.parquet`. Topic-family fits
+    /// set this for log θ; SVD kinds for component scores. Embedding commands
+    /// set it ONLY when they also resolved topics (`bge` without `--skip-etm`)
+    /// — their Z goes to `cell_embedding_suffix` instead.
     pub has_latent: bool,
     /// True if the run emits `{basename}.cell_to_pb.parquet` — the
     /// post-refinement cell→pseudobulk membership per coarsening level.

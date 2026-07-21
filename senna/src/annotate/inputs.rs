@@ -151,8 +151,8 @@ pub fn load_from_manifest(
             .with_context(|| format!("failed to load cluster parquet {path}"))?
     } else {
         log::info!(
-            "Resolving cluster source: internal Leiden on manifest's latent ({:?})",
-            manifest.outputs.latent
+            "Resolving cluster source: internal Leiden on manifest's cell embedding ({:?})",
+            manifest.outputs.geometry_latent()
         );
         compute_clusters_from_latent(&manifest, &resolve, &cell_names, leiden_args)?
     };
@@ -206,11 +206,9 @@ pub fn compute_clusters_from_latent<F>(
 where
     F: Fn(&str) -> String,
 {
-    let latent_rel = manifest
-        .outputs
-        .latent
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("manifest missing outputs.latent"))?;
+    let latent_rel = manifest.outputs.geometry_latent().ok_or_else(|| {
+        anyhow::anyhow!("manifest missing outputs.cell_embedding and outputs.latent")
+    })?;
     use anyhow::Context;
     let latent_path = resolve(latent_rel);
     let mut latent = Mat::from_parquet_with_row_names(&latent_path, Some(0))

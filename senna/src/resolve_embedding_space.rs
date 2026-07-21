@@ -81,8 +81,7 @@ pub struct RestArgs {
         long_help = "Output prefix for every artifact. Defaults to `--from` with a trailing \
                      `.senna.json` (or `.json`) removed. Writes:\n  \
                      {out}.feature_embedding.parquet  co-embed  gene × H (ρ re-embedded onto the cell manifold; annotate reads this)\n  \
-                     {out}.cell_embedding.parquet     Z=θ·α  cell × H\n  \
-                     {out}.latent.parquet             Z      cell × H (the latent annotate-by-projection reads)\n  \
+                     {out}.cell_embedding.parquet     Z=θ·α  cell × H (the cell side annotate-by-projection reads)\n  \
                      {out}.topic_embedding.parquet    α      topic × H\n  \
                      {out}.feature_bias.parquet       b      gene × 1\n  \
                      {out}.log_likelihood.parquet     per-epoch NCE loss\n  \
@@ -481,7 +480,9 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         cell_embedding_suffix: Some("cell_embedding.parquet"),
         default_colour_by: "cluster",
-        has_latent: true,
+        // Z is the cell table and lives in cell_embedding; this run emits no
+        // log θ of its own (θ is the frozen *input*), so there is no latent.
+        has_latent: false,
         has_cell_to_pb: false,
     })?;
 
@@ -493,7 +494,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
         );
     } else {
         info!(
-            "Done — {out}.{{feature_embedding,cell_embedding,latent,topic_embedding}}.parquet. \
+            "Done — {out}.{{feature_embedding,cell_embedding,topic_embedding}}.parquet. \
              Next: `senna annotate-by-enrichment --from {out}.senna.json --markers <markers.tsv>`."
         );
     }
@@ -716,16 +717,12 @@ fn write_outputs(
     // manifold) is written by the SIMBA co-embedding step in
     // `resolve_embedding_space`, not here. This writer owns the cell/topic side.
 
-    // Z — cell × H, written as BOTH cell_embedding and latent. annotate-by-projection
-    // reads outputs.cell_embedding; latent=Z keeps plot / layout / clustering (which
-    // read outputs.latent) working, since for this run the latent IS the embedding.
+    // Z — cell × H. Written ONLY as cell_embedding: `latent` is reserved for
+    // log θ across every senna run, and this command's θ is the frozen input,
+    // not an output. plot / layout / clustering find Z through
+    // `RunOutputs::geometry_latent`, which prefers cell_embedding.
     trained.z.to_parquet_with_names(
         &format!("{out}.cell_embedding.parquet"),
-        (Some(cell_names), Some("cell")),
-        Some(&h_cols),
-    )?;
-    trained.z.to_parquet_with_names(
-        &format!("{out}.latent.parquet"),
         (Some(cell_names), Some("cell")),
         Some(&h_cols),
     )?;
@@ -756,7 +753,7 @@ fn write_outputs(
     )?;
 
     info!(
-        "Saved Z [{}×{h}] to {out}.{{cell_embedding,latent}}.parquet and α [{}×{h}] to topic_embedding.parquet",
+        "Saved Z [{}×{h}] to {out}.cell_embedding.parquet and α [{}×{h}] to topic_embedding.parquet",
         trained.z.nrows(),
         trained.alpha.nrows()
     );

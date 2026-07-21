@@ -117,10 +117,11 @@ pub struct BgeArgs {
         default_value_t = false,
         help = "Skip ETM resolution; emit raw bge embeddings (Z and ρ) only.",
         long_help = "Skip the default ETM resolution and emit only the raw bge embeddings\n\
-                     (latent = cell embedding Z, dictionary = ρ).\n\
+                     (cell_embedding = Z, dictionary = ρ, no latent).\n\
                      By default bge resolves ETM topics from the cell embedding\n\
-                     via anchor analysis and writes a topic-model layout\n\
-                     (latent = log θ, dictionary = β)."
+                     via anchor analysis and ALSO writes the topic-model tables\n\
+                     (latent = log θ, dictionary = β, topic_embedding = α).\n\
+                     Either way Z lands in {out}.cell_embedding.parquet."
     )]
     skip_etm: bool,
 
@@ -353,9 +354,11 @@ pub struct BgeArgs {
         short,
         required = true,
         help = "Output prefix",
-        long_help = "Output prefix; produces {out}.latent.parquet,\n\
-                     {out}.dictionary.parquet, {out}.feature_bias.parquet,\n\
-                     {out}.cell_bias.parquet, {out}.senna.json"
+        long_help = "Output prefix; produces {out}.cell_embedding.parquet (Z),\n\
+                     {out}.dictionary.parquet, {out}.feature_embedding.parquet,\n\
+                     {out}.feature_bias.parquet, {out}.cell_bias.parquet,\n\
+                     {out}.senna.json — plus {out}.{latent,topic_embedding}.parquet\n\
+                     unless --skip-etm"
     )]
     out: Box<str>,
 }
@@ -690,7 +693,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
              outputs (the cell embedding is un-projected). Re-run without interrupting for \
              full results."
         );
-        ge::save_outputs(
+        ge::save_outputs_named(
             &out.model,
             &ge::OutputContext {
                 feature_names: &unified.feature_names,
@@ -698,6 +701,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 cell_keep_idx: qc_keep_idx.as_deref(),
             },
             &args.out,
+            ge::EmbeddingFileNames::SENNA_EMBEDDING,
         )?;
     } else {
         // The SIMBA-style co-embedding and the cluster-seeded ETM share ONE Leiden
@@ -739,8 +743,13 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             target_eff,
         )?;
 
-        // Output layout: ETM resolved (default) → topic-model layout (latent = log θ,
-        // dictionary = β); --skip-etm → raw bge embeddings (latent = Z, dictionary = ρ).
+        // Output layout: the H-space cell embedding Z ALWAYS goes to
+        // {out}.cell_embedding.parquet, on both paths. ETM resolved (default)
+        // additionally emits the topic-model tables (latent = log θ,
+        // dictionary = β); --skip-etm emits no latent at all and keeps
+        // dictionary = ρ. So `latent` means log θ, unconditionally, and
+        // downstream geometry reads cell_embedding via
+        // `RunOutputs::geometry_latent` without having to know which flags ran.
         // The co-embedded feature_embedding is written above for both paths.
         if resolve_etm {
             resolve_etm_topics(
@@ -752,7 +761,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 &cell_labels,
             )?;
         } else {
-            ge::save_outputs(
+            ge::save_outputs_named(
                 &out.model,
                 &ge::OutputContext {
                     feature_names: &unified.feature_names,
@@ -760,6 +769,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                     cell_keep_idx: qc_keep_idx.as_deref(),
                 },
                 &args.out,
+                ge::EmbeddingFileNames::SENNA_EMBEDDING,
             )?;
         }
     }
@@ -796,23 +806,29 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         // skip-etm run's annotate-by-projection falls back to the raw-ρ
         // dictionary and ignores the co-embed file on disk).
         feature_embedding_suffix: Some("feature_embedding.parquet"),
-        // With ETM resolved `latent` is log θ (topic space); the H-space cell
-        // embedding Z is written separately so annotate-by-projection finds it.
-        // Without it, `latent` IS Z, so this stays None.
-        cell_embedding_suffix: if resolve_etm {
-            Some("cell_embedding.parquet")
-        } else {
-            None
-        },
+        // Z always lands in cell_embedding.parquet — on BOTH the ETM and
+        // --skip-etm paths — so every geometry consumer finds the H-space
+        // embedding at one fixed name.
+        cell_embedding_suffix: Some("cell_embedding.parquet"),
         default_colour_by: if resolve_etm { "topic" } else { "cluster" },
-        has_latent: true,
+        // `latent` is log θ, so it exists only when the ETM actually resolved.
+        has_latent: resolve_etm,
         has_cell_to_pb: false,
     })?;
 
-    info!(
-        "Done — outputs at {}.{{latent,dictionary,*_bias}}.parquet",
-        args.out
-    );
+    if resolve_etm {
+        info!(
+            "Done — outputs at {}.{{cell_embedding,latent,dictionary,feature_embedding,*_bias}}.parquet \
+             (cell_embedding = Z, latent = log θ)",
+            args.out
+        );
+    } else {
+        info!(
+            "Done — outputs at {}.{{cell_embedding,dictionary,feature_embedding,*_bias}}.parquet \
+             (cell_embedding = Z; no latent — topics were not resolved)",
+            args.out
+        );
+    }
 
     Ok(())
 }

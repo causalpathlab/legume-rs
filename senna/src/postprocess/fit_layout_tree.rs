@@ -70,11 +70,9 @@ pub fn fit_layout_tree(args: &LayoutTreeArgs) -> anyhow::Result<()> {
     let edges_rel = pt.edges.as_deref().ok_or_else(|| {
         anyhow::anyhow!("manifest has no pseudotime.edges — re-run `senna fit-pseudotime`")
     })?;
-    let latent_rel = manifest
-        .outputs
-        .latent
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("manifest has no outputs.latent"))?;
+    let latent_rel = manifest.outputs.geometry_latent().ok_or_else(|| {
+        anyhow::anyhow!("manifest has no outputs.cell_embedding or outputs.latent")
+    })?;
 
     let nodes_path = resolve(&manifest_dir, nodes_latent_rel)
         .to_string_lossy()

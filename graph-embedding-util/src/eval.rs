@@ -14,11 +14,13 @@ use matrix_util::traits::IoOps;
 
 /// File stems for the two embedding tables.
 ///
-/// [`Default`] is senna's convention (`latent` / `dictionary`), which every
-/// `senna {clustering, annotate, layout, plot} --from` reader expects — so
-/// `senna bge` / `fne` keep it. `faba gem` uses [`EmbeddingFileNames::EXPLICIT`]
-/// instead, and its own downstream (`faba lineage` / `faba annotate`) reads those
-/// names. The two conventions do not mix: a reader expects one or the other.
+/// [`Default`] is the legacy senna convention (`latent` / `dictionary`), kept
+/// so pre-existing manifests still describe their files correctly. senna's
+/// embedding commands now use [`EmbeddingFileNames::SENNA_EMBEDDING`], which
+/// moves the cell table to `cell_embedding` and leaves `latent` to mean log θ.
+/// `faba gem` uses [`EmbeddingFileNames::EXPLICIT`], and its own downstream
+/// (`faba lineage` / `faba annotate`) reads those names. The conventions do
+/// not mix: a reader expects one or the other.
 #[derive(Clone, Copy, Debug)]
 pub struct EmbeddingFileNames {
     /// Stem for the cell × H table.
@@ -42,6 +44,22 @@ impl EmbeddingFileNames {
     pub const EXPLICIT: Self = Self {
         cell: "cell_embedding",
         feature: "feature_embedding",
+    };
+
+    /// The convention used by senna's embedding commands (`bge`, `fne`).
+    ///
+    /// Cell side is `cell_embedding`, never `latent`: `latent` is reserved for
+    /// log θ, so a run that also resolves topics can emit both without either
+    /// table's meaning depending on which flags were passed.
+    ///
+    /// The feature side deliberately stays `dictionary` rather than following
+    /// [`Self::EXPLICIT`] — in senna, `{out}.feature_embedding.parquet` is
+    /// owned by the SIMBA co-embed (features re-placed onto the cell manifold),
+    /// and writing the raw off-manifold ρ there would hand
+    /// `annotate-by-projection` an ill-posed nearest-centroid problem.
+    pub const SENNA_EMBEDDING: Self = Self {
+        cell: "cell_embedding",
+        feature: "dictionary",
     };
 }
 

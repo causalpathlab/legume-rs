@@ -290,8 +290,11 @@ enum Commands {
                       learn the gene side, then (2) freeze it and densely fit each\n\
                       cell's embedding — every cell is swept ~once/epoch and the\n\
                       per-cell fit is separable (embarrassingly parallel).\n\n\
-                      Writes {out}.{latent,dictionary,feature_bias,cell_bias}.parquet,\n\
-                      {out}.senna.json.",
+                      Writes {out}.{cell_embedding,dictionary,feature_embedding,\n\
+                      feature_bias,cell_bias}.parquet, {out}.senna.json. The H-space\n\
+                      cell embedding Z is always {out}.cell_embedding.parquet.\n\
+                      Unless --skip-etm, an ETM is also resolved, adding\n\
+                      {out}.{latent,topic_embedding}.parquet with latent = log θ.",
         alias = "embed-graph",
         alias = "gbe"
     )]
@@ -327,7 +330,7 @@ enum Commands {
                       Z = θ·α. This recasts the topic result into a metric H-space where \
                       genes, topics, and cells coexist:\n  \n  \
                       score(cell c, gene g) = (θ_c·α)·ρ_g + b_g\n  \n\
-                      Writes {out}.{feature_embedding,cell_embedding,latent,topic_embedding}\
+                      Writes {out}.{feature_embedding,cell_embedding,topic_embedding}\
                       .parquet + senna.json (kind=resolve-embedding-space), a metric H-space \
                       where genes, topics and cells coexist (e.g. for downstream clustering / \
                       `senna annotate-by-enrichment`). H defaults to K but may exceed it."
@@ -488,7 +491,7 @@ enum Commands {
                       annotation, clusters, labels, and palette from the manifest and\n\
                       renders a 300-dpi rasterized scatter with vector text labels.\n\n\
                       Auto-fills missing pieces:\n  \
-                      • no `layout.cell_coords` → runs `senna layout phate` first.\n  \
+                      • no `layout.cell_coords` → runs `senna layout umap` first.\n  \
                       • `--colour-by cluster` but no clusters → runs Leiden on the latent.\n\n\
                       --colour-by cluster (default) | annotation | topic | pb-id | pseudotime.\n\
                       Default flips to `annotation` once `senna annotate-by-enrichment` populates the\n\

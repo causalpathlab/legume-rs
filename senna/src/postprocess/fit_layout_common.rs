@@ -299,7 +299,7 @@ impl From<&PhateCliArgs> for crate::geometry::phate::PhateArgs {
 
 // Defaults mirror the clap `default_value_t` annotations on each field
 // above. Used by callers that construct args programmatically — e.g.
-// `senna plot` auto-running `senna layout phate` when the manifest is
+// `senna plot` auto-running `senna layout umap` when the manifest is
 // missing `layout.cell_coords`. If a clap default changes, update this
 // to match.
 impl Default for LayoutCommonArgs {
@@ -523,10 +523,14 @@ pub(crate) fn preprocess_layout_data(
             .into_owned()
     };
 
+    // `geometry_latent` (not `outputs.latent`): on an embedding run the cell
+    // table to lay out is the H-space Z in `cell_embedding`, while `latent`
+    // holds log θ. Reading `latent` here would feed log-simplex coordinates to
+    // the kind-based transform below, which treats bge/fne as raw Euclidean.
     let latent_path: Option<(String, crate::run_manifest::RunKind)> = resolved
         .manifest
         .as_ref()
-        .and_then(|m| m.outputs.latent.as_ref().map(|p| (p.clone(), m.kind)))
+        .and_then(|m| m.outputs.geometry_latent().map(|p| (p.to_string(), m.kind)))
         .filter(|_| resolved.manifest_path.is_some())
         .map(|(p, kind)| (resolve_from_manifest(&p), kind));
 
@@ -665,6 +669,10 @@ fn preprocess_layout_data_from_latent(
         // respects it. (Unit-sphere/cosine normalization collapsed magnitude
         // and sheared populations apart; a raw t-UMAP on the same embedding
         // does not.)
+        //
+        // Sound because the caller resolved the path via `geometry_latent`:
+        // for these kinds that is `cell_embedding` (the H-space Z), never the
+        // log-θ `latent` an ETM-resolving bge run also writes.
         "raw Euclidean".into()
     } else {
         feat_kn.scale_rows_inplace();

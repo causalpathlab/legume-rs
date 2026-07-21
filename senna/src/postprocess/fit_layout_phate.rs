@@ -192,11 +192,12 @@ fn obtain_pseudotime(
         return Ok(pt);
     }
 
-    // No cached pseudotime → fit fresh from the latent.
-    let latent_rel = manifest.outputs.latent.as_deref().ok_or_else(|| {
+    // No cached pseudotime → fit fresh from the cell embedding.
+    let latent_rel = manifest.outputs.geometry_latent().ok_or_else(|| {
         anyhow::anyhow!(
             "--orient-by-root requested but manifest has neither pseudotime.pseudotime \
-             nor outputs.latent; run `senna fit-pseudotime` first or provide a latent"
+             nor a cell embedding (outputs.cell_embedding / outputs.latent); \
+             run `senna pseudotime` first or provide a latent"
         )
     })?;
     let latent_path = resolve(&manifest_dir, latent_rel)
