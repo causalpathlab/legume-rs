@@ -58,13 +58,16 @@ That is the disanalogy; do not lean on the precedent.
 
 Not the grouping. On the same negative control:
 
-- **The panel bootstrap** (`--bootstrap-markers`, resample the marker panel *and* re-derive the
-  clustering, ship the consensus): 28.2% → **2.4%** mature, at 38.2% abstention.
+- **The panel bootstrap** (on by default, `--no-bootstrap-markers` to disable: resample the marker
+  panel *and* re-derive the clustering, ship the consensus): 28.2% → **2.4%** mature, at 38.2%
+  abstention.
 - **The embedding.** 19 of the 24 types have **under half their markers alive** in this gem run —
-  the `--n-hvg` filter and the two-pass null cull dropped them, and the bias is type-dependent
-  (HVG rewards variance, and a rare population's markers are high-variance by construction).
-  No grouping and no statistic can rescue a centroid built from genes the model never trained on.
-  Fix upstream: `faba gem --must-train-features <panel>`.
+  the `--n-hvg` filter and the (since-retired) two-pass null cull dropped them, and the bias is
+  type-dependent (HVG rewards variance, and a rare population's markers are high-variance by
+  construction). No grouping and no statistic can rescue a centroid built from genes the model
+  never trained on. Fixed upstream since: gem now defaults to `--n-hvg 0` (train every gene, the
+  per-gene softmax gate selects), so this run's cull no longer happens by default; if you do set
+  `--n-hvg > 0`, pass `faba gem --markers <panel>`.
 
 Nothing tried here calls more than 7 of the 14 types cord blood actually contains. The grouping
 question is second-order until that is fixed.

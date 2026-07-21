@@ -396,8 +396,6 @@ fn run_gem_genes_bge(
                 with_velocity: has_unspliced,
                 null_fdr: 0.0,
             }),
-            // The gate is gem's feature selector — the engine's LRT scan is retired.
-            select_lrt_fdr: None,
             // `--nce-objective` (default softmax = InfoNCE: on gem's dense count data
             // the positive competing against its negatives in one distribution
             // separates cell types better than the per-pair logistic SGNS loss).
@@ -580,17 +578,9 @@ fn run_gem_genes_bge(
     // plain `gene × H` tables that downstream `faba annotate` reads unchanged.
     // The LRT selection scan is retired (the gate is the selector), so trained genes
     // carry no per-gene scan stats — `gene_qc`'s LRT/deviance/detection columns stay
-    // NaN for trained rows, as on the old HVG path.
-    let trained_scan: Vec<Option<(f32, f32, u32)>> = Vec::new();
-
+    // NaN for trained rows.
     if let Some(p) = proj {
-        save_gene_qc(
-            &merged_gene_names,
-            &trained_norm2,
-            &trained_scan,
-            p,
-            &args.out,
-        )?;
+        save_gene_qc(&merged_gene_names, &trained_norm2, p, &args.out)?;
         write_projection_qc_json(p, &args.out)?;
     }
 
@@ -844,10 +834,13 @@ fn split_count_row(name: &str) -> (&str, bool) {
 /// `beta_feature_embedding`, in the same order:
 ///
 /// * `trained` — 1 = fit by the model, 0 = projected post-hoc.
-/// * `live` — 1 = the gene carries signal above the estimated null. Trained genes
-///   reaching this point are live by construction (the two-pass QC already
-///   dropped the null ones); a projected gene called null was **zeroed**, so its
+/// * `live` — 1 = the gene carries signal above the estimated null. At gem's shipped
+///   settings this is 1 for **every** row: trained genes are live by construction, and
+///   the projection null gate is off (`null_fdr: 0.0` — the softmax gate is the
+///   selector, so the `--n-hvg` remainder is restored whole). It only discriminates if
+///   that gate is re-enabled, where a gene called null is **zeroed** so its
 ///   `beta_feature_embedding` row is all-zero rather than a fabricated direction.
+///   To find gated-off genes, read `norm2` instead — the gate parks them at `β̃_g ≈ 0`.
 /// * `norm2` — `‖β_g‖²`.
 /// * `n_detected_pb` — pseudobulk samples (summed over collapse levels) where the
 ///   gene reads above the column floor.
@@ -855,17 +848,14 @@ fn split_count_row(name: &str) -> (&str, bool) {
 /// * `lrt` — `D_null − D_fit`, the evidence that θ explains the gene at all. This
 ///   is the statistic `live` tests; rank projected markers by it.
 ///
-/// The last three carry different-but-comparable statistics for the two gene
-/// populations. For a **projected** gene they are the held-out projection's own
-/// goodness-of-fit, scored against the FINAL trained frame. For a **trained** gene
-/// they are the Pass-1 **selection scan** (`FeatureLrtScan`), scored against the
-/// pre-refit `θ_pb` — the evidence that got the gene selected. On the HVG path
-/// (`--n-hvg > 0`) no scan runs, so trained rows fall back to `NaN` there rather
-/// than a fabricated `0`. Filter projected markers on `live`, rank them by `lrt`.
+/// The last three are **projected-gene only**: the held-out projection's own
+/// goodness-of-fit, scored against the final trained frame. A trained gene has no
+/// comparable per-gene scan — the softmax gate selects during training rather than
+/// by a separate scored pass — so trained rows carry `NaN` there rather than a
+/// fabricated `0`. Filter projected markers on `live`, rank them by `lrt`.
 fn save_gene_qc(
     merged_gene_names: &[Box<str>],
     trained_norm2: &[f32],
-    trained_scan: &[Option<(f32, f32, u32)>],
     proj: &graph_embedding_util::FeatureProjection,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
@@ -877,20 +867,11 @@ fn save_gene_qc(
         m[(g, 0)] = 1.0;
         m[(g, 1)] = 1.0;
         m[(g, 2)] = trained_norm2[g];
-        // Selection-scan (lrt, deviance, n_detected) for this trained gene, or NaN
-        // when the scan didn't run (HVG path) / the gene wasn't in it.
-        match trained_scan.get(g).copied().flatten() {
-            Some((lrt, deviance, n_detected)) => {
-                m[(g, 3)] = n_detected as f32;
-                m[(g, 4)] = deviance;
-                m[(g, 5)] = lrt;
-            }
-            None => {
-                m[(g, 3)] = f32::NAN;
-                m[(g, 4)] = f32::NAN;
-                m[(g, 5)] = f32::NAN;
-            }
-        }
+        // No per-gene scan for a trained gene (the gate selects in-training), so the
+        // projection-only columns stay NaN rather than a fabricated 0.
+        m[(g, 3)] = f32::NAN;
+        m[(g, 4)] = f32::NAN;
+        m[(g, 5)] = f32::NAN;
     }
     let h = proj.beta.len() / proj.gene_ids.len().max(1);
     for i in 0..proj.gene_ids.len() {
