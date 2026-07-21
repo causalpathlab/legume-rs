@@ -102,10 +102,13 @@ pub struct HvgCliArgs {
         default_value_t = 5000,
         help = "Keep top N highly variable genes (0 disables HVG)",
         long_help = "Select top N genes via binned residual-variance\n\
-                     (scanpy/Seurat-style) for the random projection.\n\
-                     Collapsing and batch-effect estimation still see\n\
-                     all genes. 0 disables HVG. Ignored when\n\
-                     --warm-start is set."
+                     (scanpy/Seurat-style). Collapsing and batch-effect\n\
+                     estimation still see all genes. 0 disables HVG.\n\
+                     \n\
+                     What the selection DOES depends on the command: in\n\
+                     `senna` it weights the random projection / pb sketch only\n\
+                     (every gene is still trained); in `pinto` and `faba gem`\n\
+                     it hard-subsets the trained gene axis."
     )]
     pub n_hvg: usize,
 
@@ -113,26 +116,33 @@ pub struct HvgCliArgs {
         long,
         help = "Pre-computed HVG list (replaces --n-hvg selection)",
         long_help = "Use exactly these features instead of selecting HVGs.\n\
-                     Takes precedence over --n-hvg. Ignored when\n\
-                     --warm-start is set. Accepts .txt / .tsv / .csv /\n\
-                     .parquet (optionally gzipped); see --must-train-features\n\
-                     for the file format."
+                     Takes precedence over --n-hvg. Accepts .txt / .tsv /\n\
+                     .csv / .parquet (optionally gzipped); see\n\
+                     --must-train-features for the file format."
     )]
     pub feature_list_file: Option<Box<str>>,
 
     #[arg(
         long = "must-train-features",
         value_name = "FILE",
-        help = "Features to TRAIN on regardless of whether they make the HVG cut",
-        long_help = "Force-include list: these features enter the FIT even when they do not\n\
-                     make the --n-hvg cut. UNIONed with the selection (unlike\n\
+        help = "Keep these features in the HVG selection regardless of the cut",
+        long_help = "Force-include list: UNIONed into the --n-hvg selection (unlike\n\
                      --feature-list-file, which REPLACES it), and also exempt from the\n\
                      --feature-null-fdr drop where that flag exists.\n\
                      \n\
-                     This is about TRAINED vs PROJECTED, not presence: a feature that\n\
-                     misses the cut is not erased — it still gets a post-hoc PROJECTED\n\
-                     embedding (the held-out-feature regression). Name it here and it is\n\
-                     fit in-model instead.\n\
+                     WHAT THIS BUYS YOU DEPENDS ON THE COMMAND, because the HVG\n\
+                     selection means different things:\n\
+                     \n\
+                     • `pinto`, `faba gem` — the selection HARD-SUBSETS the trained\n\
+                       gene axis, so a feature that misses the cut is not fit at all\n\
+                       (it only gets a post-hoc PROJECTED embedding). Naming it here\n\
+                       is what puts it in the model. This is the intended use.\n\
+                     \n\
+                     • `senna` (topic / svd / vae / bge) — HVG only WEIGHTS the random\n\
+                       projection used for pseudobulk sketching; every feature is\n\
+                       trained either way. Naming it here raises its projection weight\n\
+                       and nothing more. It will NOT change whether a gene is fit, so\n\
+                       it is not a fix for weak marker embeddings here.\n\
                      \n\
                      Format is inferred from the extension: .txt / .tsv / .csv /\n\
                      .parquet, optionally gzipped. One name per row; a gene-like header\n\

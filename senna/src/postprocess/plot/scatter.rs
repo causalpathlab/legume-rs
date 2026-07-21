@@ -64,9 +64,10 @@ pub struct PlotArgs {
         long,
         short = 'f',
         help = "Run manifest JSON (+ updated by `senna layout`)",
-        long_help = "Run manifest JSON from `senna topic`/`masked-topic`/`joint-topic`\n\
-                     (+ updated by `senna layout`).",
-        long_help = "If set, fills in --cell-coords, --topics, --labels, --colour-by,\n\
+        long_help = "Run manifest JSON from any senna embedding run (+ updated by\n\
+                     `senna layout`).\n\
+                     \n\
+                     If set, fills in --cell-coords, --topics, --labels, --colour-by,\n\
                      and --palette from the manifest's viz/outputs/defaults sections.\n\
                      Any explicit CLI flag still overrides the manifest value.\n\
                      Paths inside the manifest are resolved relative to the manifest's own directory\n\
@@ -87,7 +88,8 @@ pub struct PlotArgs {
         long,
         short = 'o',
         help = "Output prefix (defaults to the manifest's `prefix` when --from is used)",
-        long_help = "Writes {out}.plot.svg, {out}.plot.png, {out}.plot.pdf."
+        long_help = "Writes {out}.plot.pdf. Pass --svg / --png to additionally emit\n\
+                     {out}.plot.svg / {out}.plot.png; --no-pdf suppresses the PDF."
     )]
     pub out: Option<Box<str>>,
 

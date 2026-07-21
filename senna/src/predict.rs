@@ -70,8 +70,12 @@ pub struct PredictArgs {
         required = true,
         help = "Output file prefix",
         long_help = "Writes:\n  \
-                     {out}.latent.parquet      [N × K] log θ\n  \
-                     {out}.predictive.parquet  per-cell [llik, total, llik_per_count]"
+                     {out}.latent.parquet      [N × K] per-cell latent — log θ for the\n                               \
+                                               topic family, raw Gaussian z for vae /\n                               \
+                                               Gaussian-head masked models\n  \
+                     {out}.predictive.parquet  per-cell [llik, total, llik_per_count]\n\n\
+                     vae models emit the latent only (encoder-only); they write no\n\
+                     predictive.parquet, and --decoder-only / --refine-* do not apply."
     )]
     pub(crate) out: Box<str>,
 
@@ -963,6 +967,17 @@ fn predictive_llik_masked(
 /// latent is continuous factors, so there is no decoder refinement to do.
 fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
     use crate::topic::model_metadata::load_feature_mean;
+
+    // The vae path is encoder-only: it never calls `resolve_mode`, so the
+    // latent-mode flags have no effect here. Say so instead of ignoring them
+    // silently — a caller passing --decoder-only otherwise gets encoder-only
+    // output with no indication the flag was dropped.
+    if args.decoder_only || args.refine_steps > 0 {
+        log::warn!(
+            "--decoder-only / --refine-* do not apply to vae models (encoder-only \
+             inference); ignoring them for this run"
+        );
+    }
 
     let (training_genes, _loadings) = load_dictionary(&args.model)?;
     let (_fm_genes, feature_mean) = load_feature_mean(&args.model)?;
