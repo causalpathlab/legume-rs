@@ -169,9 +169,20 @@ pub struct GemEncoderArgs {
 
     #[arg(
         long,
+        short = 'e',
         value_delimiter = ',',
-        default_values_t = vec![128, 128],
-        help = "Encoder hidden layer sizes after the per-track pool (comma-separated)"
+        default_values_t = vec![128, 1024, 128],
+        help = "Encoder hidden layer sizes after the per-track pool (comma-separated)",
+        long_help = "Encoder hidden layer sizes after the per-track pool, comma-separated.\n\
+                     The last entry is the trunk output width the latent head reads;\n\
+                     everything before it is hidden.\n\
+                     \n\
+                     Input is 2 * --embedding-dim (the two pooled tracks concatenated),\n\
+                     so the default is 256 -> 128 -> 1024 -> 128 -> topics.\n\
+                     \n\
+                     The wide middle matches `senna topic`, whose default is the same\n\
+                     128,1024,128 and which is the sibling this encoder is modelled on.\n\
+                     The narrow 128,128 it used before was not chosen on evidence."
     )]
     pub encoder_layers: Vec<usize>,
 
