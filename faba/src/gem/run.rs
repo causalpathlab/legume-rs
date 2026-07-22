@@ -679,25 +679,11 @@ fn run_gem_genes_bge(
                     .to_vec1::<f32>()?;
                 // λ=1e-2 (Gram-trace-scaled) conditions the h×h lin-solve; never an inverse.
                 let p = ge::cell_projection::velocity_operator(&beta_g, &delta_g, n_g, h, 1e-2);
-                let mut vel = ge::cell_projection::apply_velocity_operator(&theta, &p, n, h);
-                // Center per axis: v ← P(θ − θ̄). The operator has no intrinsic zero, and the
-                // population-mean velocity P·θ̄ is a common-mode drift; subtracting it is the
-                // natural gauge for a field and keeps a δ_c-style common-mode from returning.
-                let mut mean = vec![0f64; h];
-                for c in 0..n {
-                    for k in 0..h {
-                        mean[k] += f64::from(vel[c * h + k]);
-                    }
-                }
-                for m in &mut mean {
-                    *m /= n.max(1) as f64;
-                }
-                for c in 0..n {
-                    for k in 0..h {
-                        vel[c * h + k] -= mean[k] as f32;
-                    }
-                }
-                Some(vel)
+                // `v = P·θ` is already mean-zero: phase 2 gauge-fixes `θ` to `θ̄ = 0`
+                // over the solved cells, and the operator is linear, so
+                // `v̄ = P·θ̄ = 0`. (This used to subtract `P·θ̄` explicitly, back when
+                // phase 2 left the common mode in `θ`.)
+                Some(ge::cell_projection::apply_velocity_operator(&theta, &p, n, h))
             }
             _ => None,
         }

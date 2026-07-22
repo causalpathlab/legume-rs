@@ -44,7 +44,7 @@
 //! genes. Useful, and clearly not a free lunch — a projected `β_g` is a weaker
 //! estimate than a trained one, which is what `lrt` / `live` are there to expose.
 
-use crate::cell_projection::{solve_cell_increment, solve_one_cell};
+use crate::cell_projection::{solve_cell_increment, solve_one_cell, SCORE_CLAMP};
 use crate::null_call::chi2_null_call;
 use log::{info, warn};
 use nalgebra::{DMatrix, DVector, RowDVector};
@@ -574,9 +574,6 @@ impl PbScalars {
         }
     }
 }
-
-/// Clamp on the linear predictor before `exp`, mirroring `cell_projection`'s.
-const SCORE_CLAMP: f64 = 30.0;
 
 /// Poisson deviance `D = 2 Σ [ n log(n/μ) − (n − μ) ]` at the fitted `(β_g, b_g)`,
 /// and the likelihood-ratio statistic against the intercept-only null `β_g = 0`.

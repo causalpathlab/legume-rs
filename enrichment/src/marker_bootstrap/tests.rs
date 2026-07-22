@@ -33,7 +33,7 @@ fn profile() -> Mat {
     let mut p = Mat::zeros(G, K);
     for g in 0..LIVE {
         let b = base(g);
-        let prog = (g < K * PROG).then(|| g / PROG);
+        let prog = (g < K * PROG).then_some(g / PROG);
         for kk in 0..K {
             p[(g, kk)] = b * match prog {
                 Some(pk) if pk == kk => 0.90,
@@ -270,7 +270,7 @@ fn moments(weights: &[f32], seed: u64) -> (f32, f32) {
         &strata,
         &prof,
         weights.len(),
-        &vec![0f32; K],
+        &[0f32; K],
         600,
         &mut hit,
         &mut scratch,

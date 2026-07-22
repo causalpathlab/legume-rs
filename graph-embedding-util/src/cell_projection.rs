@@ -1,11 +1,21 @@
-//! Analytical per-cell projection onto a **frozen** feature dictionary.
+//! Analytical Poisson-MAP projection onto a **frozen** feature dictionary.
 //!
 //! Both `senna bge` and `faba gem` train in two phases: phase 1 fits the
-//! shared feature side, phase 2 re-estimates the per-cell embedding. With
-//! the feature side frozen, each cell's embedding is independent of every
-//! other cell — so phase 2 is a per-cell projection, embarrassingly
-//! parallel, and (near) closed-form. This module is the shared solver both
-//! callers use instead of SGD over a frozen-feature `e_cell` `VarMap`.
+//! shared feature side, phase 2 re-estimates the cell side. With the feature
+//! side frozen each node's embedding is independent of every other node, so
+//! the projection is embarrassingly parallel and (near) closed-form.
+//!
+//! # Scope: pseudobulks and held-out genes, **not** cells
+//!
+//! The per-**cell** phase-2 path no longer comes through here — it is a
+//! cell-block SGD ([`crate::fit::projection`]) that can afford the full
+//! all-feature log-partition this solver approximates away (see below), which
+//! is what keeps `‖θ_c‖` from running away. What remains on this solver are
+//! the two callers where the node count is small and Newton is the better
+//! tool: the per-pseudobulk velocity readout (`project_pbs_phase2`, a few
+//! hundred nodes) and the held-out gene projection
+//! ([`crate::fit::FeatureProjection`], each gene solved against the frozen
+//! pseudobulk stack).
 //!
 //! **Objective — Poisson MAP on observed features.** For a cell with frozen
 //! feature embeddings `e_f` / biases `b_f`, model its observed counts `n_f`
@@ -30,8 +40,12 @@ use rayon::prelude::*;
 
 /// Max IRLS/Newton steps per cell (converges in a few given the ridge).
 const MAX_IRLS_ITERS: usize = 8;
-/// Clamp the linear predictor before `exp` to avoid overflow.
-const SCORE_CLAMP: f64 = 30.0;
+/// Clamp on the linear predictor before `exp`, to avoid overflow.
+///
+/// Shared crate-wide: every Poisson fit here — this solver, the held-out gene
+/// projection, and the phase-2 cell blocks — exponentiates the same linear
+/// predictor in f32 (which overflows at 88), so the bound must move as one.
+pub(crate) const SCORE_CLAMP: f64 = 30.0;
 /// PD jitter added to the Hessian diagonal so the Cholesky never fails on a
 /// degenerate (few-feature) cell.
 const PD_JITTER: f64 = 1e-6;
@@ -154,10 +168,20 @@ pub fn solve_cell_increment(
 ///
 /// Vectorised as iteratively-reweighted least squares: the design matrix `E = [m × d]`
 /// (row `k = [e_{f_k} | 1]`, `m = feats.len()`) is FIXED across Newton steps, so it is
-/// built once and each step is two matmuls — the scores `s = Eθ` and the weighted Gram
-/// `EᵀWE` (`W = diag(μ)`). This hands the `O(m·h²)` Hessian to a SIMD-blocked `matmul`
-/// instead of a scalar rank-1 triangle accumulation; the result is algebraically identical,
-/// just reassociated. `d = h+1` SPD Cholesky solve as before.
+/// built once and each step reuses it for the scores `s = Eθ` and the weighted Gram
+/// `EᵀWE` (`W = diag(μ)`). `d = h+1` SPD Cholesky solve.
+///
+/// **The `O(m·d²)` Gram is the cost, and it is not a blocked matmul.** nalgebra's
+/// `tr_mul` goes through `xx_mul_to_uninit` — a scalar `d × d` loop of column dot
+/// products; only `mul_to`/`gemm` reaches `matrixmultiply`. So each Gram streams the
+/// `m × d` design matrix `d` times. That is affordable at pseudobulk scale (`m` = the
+/// node count) and was not at cell scale, where `m` is a cell's ~10⁴ expressed
+/// features: it is why the per-cell path moved to the block SGD.
+///
+/// The f64 widening is for the **Cholesky's conditioning**, not input precision —
+/// `frozen_e`, `frozen_b` and the counts are all f32 upstream. The design's intercept
+/// column is 1 while its feature columns are ~`‖β_g‖` (≈0.013 on real fits), so the
+/// Hessian's condition number is ~`(1/0.013)²` worse than the problem warrants.
 fn solve_poisson_map(
     feats: &[(u32, f32)],
     frozen_e: &[f32],
