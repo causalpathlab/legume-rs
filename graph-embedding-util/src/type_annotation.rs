@@ -457,9 +457,31 @@ pub fn annotate_by_projection(
     let n_types = type_markers.len();
     anyhow::ensure!(n_types >= 1, "annotate_by_projection needs ≥ 1 type");
 
-    // 1. Fine signatures + unit-normalized cells (gem/bge already are).
-    let type_emb_ch = type_signatures(feature_emb, n_features, type_markers, h);
+    // 0. Remove the common mode from BOTH sides before anything is normalized.
+    // Cosine is the metric here, and a shared offset is exactly the part of an
+    // embedding that carries no identity while still dominating every cosine —
+    // see `remove_common_mode` for the measurement. Each side is centred on its
+    // own mean: cells against the cell mean, genes against the gene mean.
+    //
+    // This must happen BEFORE `type_signatures` and `l2_normalize_rows`, since
+    // both consume directions and a centred direction is a different one.
+    let mut feat_c = feature_emb.to_vec();
+    let feat_cm = remove_common_mode(&mut feat_c, n_features, h);
     let mut cell_u = cell_emb.to_vec();
+    let cell_cm = remove_common_mode(&mut cell_u, n_cells, h);
+    if cell_cm > 0.5 || feat_cm > 0.5 {
+        info!(
+            "removed the common mode before scoring: {:.1}% of the cell embedding's \
+             sum-of-squares and {:.1}% of the feature embedding's. A large share here \
+             means the raw embedding put every row on nearly the same ray, which is \
+             the regime cosine cannot resolve.",
+            100.0 * cell_cm,
+            100.0 * feat_cm
+        );
+    }
+
+    // 1. Fine signatures + unit-normalized cells (gem/bge already are).
+    let type_emb_ch = type_signatures(&feat_c, n_features, type_markers, h);
     l2_normalize_rows(&mut cell_u, n_cells, h);
 
     // Marker pool: the union of every type's marker genes. The permutation
@@ -467,7 +489,7 @@ pub fn annotate_by_projection(
     // each null type is "another type's markers of the same size".
     let marker_pool = marker_gene_pool(type_markers, n_features);
     let ctx = ScoreCtx {
-        feature_emb,
+        feature_emb: &feat_c,
         marker_pool: &marker_pool,
         cell_u: &cell_u,
         n_cells,

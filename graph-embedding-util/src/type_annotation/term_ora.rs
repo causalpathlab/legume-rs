@@ -225,6 +225,37 @@ pub fn annotate_embeddings_ora(
     let n = input.cell_emb.nrows();
     let h = input.cell_emb.ncols();
     anyhow::ensure!(n >= 2, "term-ORA needs ≥ 2 cells, found {n}");
+
+    // Remove the common mode from BOTH sides first. This path is cosine
+    // throughout — `cell_knn_graph` L2-normalizes and builds the neighbour graph
+    // the Leiden communities come from, and the gene side is ranked the same way
+    // — so a shared offset that carries no identity still dominates every
+    // comparison. See `score::remove_common_mode` for the measurement.
+    //
+    // It matters most HERE, not at the per-cell scoring: if the kNN graph is
+    // built on near-parallel rows the communities are close to arbitrary, and
+    // the per-cluster ORA is then testing marker enrichment against noise
+    // clusters. Centring is a rigid translation, so the marker matching and the
+    // gene set are untouched; only the angles change.
+    let (cell_c, cell_cm) = super::score::remove_common_mode_dmat(input.cell_emb);
+    let (feat_c, feat_cm) = super::score::remove_common_mode_dmat(input.feature_emb);
+    if cell_cm > 0.5 || feat_cm > 0.5 {
+        info!(
+            "removed the common mode before scoring: {:.1}% of the cell embedding's \
+             sum-of-squares and {:.1}% of the feature embedding's. A large share here means \
+             the raw embedding put every row on nearly the same ray, which is the regime \
+             cosine cannot resolve.",
+            100.0 * cell_cm,
+            100.0 * feat_cm
+        );
+    }
+    let owned = InputEmbeddings {
+        feature_emb: &feat_c,
+        gene_names: input.gene_names,
+        cell_emb: &cell_c,
+        cell_names: input.cell_names,
+    };
+    let input = &owned;
     // Communities are Leiden over the cell kNN graph — the embedding's own geometry,
     // independent of the term labels (module docs step 4).
     let cell_flat = row_major(input.cell_emb);
