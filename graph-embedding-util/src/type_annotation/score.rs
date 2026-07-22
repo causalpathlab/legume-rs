@@ -252,6 +252,92 @@ pub(super) fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(&x, &y)| x * y).sum()
 }
 
+/// Subtract the column mean from every row of a row-major `[rows × cols]`
+/// buffer in place — i.e. remove the **common mode**, the component every row
+/// shares. Returns the share of the total sum-of-squares that was removed, for
+/// logging.
+///
+/// # Why a cosine scorer must do this
+///
+/// A shared offset `m` is by construction the part of the embedding that says
+/// nothing about which row is which, but cosine does not ignore it: with
+/// `x_i = m + d_i` and `‖m‖ ≫ ‖d_i‖`, every pair is nearly parallel and the
+/// discriminative term is attenuated by `‖d‖²/‖m‖²`. Euclidean distance is
+/// immune (the offset cancels in `x_a − x_b`), which is why this is a scorer
+/// concern and not an embedding-file one.
+///
+/// Measured on a `faba gem-topic` fit (3 wt libraries, 8791 cells, 20 topics):
+/// the cell embedding was **93.8 %** common mode and the co-embedded gene
+/// vectors **99.5 %**, so every type signature was very nearly the same unit
+/// vector. Mean pairwise cell cosine was `+0.940`, and `+0.007` once centred.
+/// Annotation collapsed accordingly — one type took 5145 of 8791 cells with
+/// 2208 unassigned; after centring the same fit and the same panel gave a real
+/// lineage spread and 490 unassigned, and the worst "called by noise" fraction
+/// fell from 70.7 % to 17.1 %.
+///
+/// The permutation null does not rescue this on its own. Drawing null marker
+/// sets from the marker pool was meant to cancel the common mode shared by
+/// markers as a class, and it does cancel the *mean* — but when the gene table
+/// is 99.5 % common mode, the spread between a real signature and a null one is
+/// down at the resampling noise, so the z-score is standardizing against its own
+/// noise floor. That is exactly the condition `type_qc` reports as "moves
+/// further under marker resampling than the margin its assignment is decided
+/// by".
+pub(super) fn remove_common_mode(buf: &mut [f32], rows: usize, cols: usize) -> f32 {
+    if rows == 0 || cols == 0 {
+        return 0.0;
+    }
+    let mut mean = vec![0f64; cols];
+    for r in 0..rows {
+        for (j, m) in mean.iter_mut().enumerate() {
+            *m += f64::from(buf[r * cols + j]);
+        }
+    }
+    for m in mean.iter_mut() {
+        *m /= rows as f64;
+    }
+    let total: f64 = buf[..rows * cols]
+        .iter()
+        .map(|&x| f64::from(x) * f64::from(x))
+        .sum();
+    let removed = rows as f64 * mean.iter().map(|&m| m * m).sum::<f64>();
+    buf.par_chunks_mut(cols).take(rows).for_each(|row| {
+        for (v, &m) in row.iter_mut().zip(mean.iter()) {
+            *v -= m as f32;
+        }
+    });
+    if total > 0.0 {
+        (removed / total) as f32
+    } else {
+        0.0
+    }
+}
+
+/// [`remove_common_mode`] for a column-major `DMatrix`, returning the centred
+/// copy and the share of sum-of-squares removed.
+///
+/// Same rationale, different caller: the term-ORA path reaches the geometry
+/// through `DMatrix` (its cell kNN graph and its per-cluster gene ranking), not
+/// through the row-major slices [`annotate_by_projection`] uses.
+pub(super) fn remove_common_mode_dmat(m: &DMatrix<f32>) -> (DMatrix<f32>, f32) {
+    if m.nrows() == 0 || m.ncols() == 0 {
+        return (m.clone(), 0.0);
+    }
+    let mu = m.row_mean();
+    let mut out = m.clone();
+    for mut row in out.row_iter_mut() {
+        row -= &mu;
+    }
+    let total: f64 = m.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
+    let removed = m.nrows() as f64 * mu.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>();
+    let share = if total > 0.0 {
+        (removed / total) as f32
+    } else {
+        0.0
+    };
+    (out, share)
+}
+
 /// L2-normalize each row of a row-major `[rows × cols]` buffer in place.
 pub(super) fn l2_normalize_rows(buf: &mut [f32], rows: usize, cols: usize) {
     buf.par_chunks_mut(cols.max(1)).take(rows).for_each(|row| {
