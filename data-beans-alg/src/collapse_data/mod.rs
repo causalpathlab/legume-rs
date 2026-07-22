@@ -718,7 +718,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
             &fine_stat,
             (1.0, 1.0),
             opt_iter,
-            &format!("Coarsen L1/{}", level_dims.len()),
+            &format!("Fit L1/{}", level_dims.len()),
             CalibrateTarget::All,
         )?;
         let mut results = vec![result];
@@ -748,7 +748,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 &coarse_stat,
                 (1.0, 1.0),
                 level_opt_iter,
-                &format!("Coarsen L{}/{}", level + 1, level_dims.len()),
+                &format!("Fit L{}/{}", level + 1, level_dims.len()),
                 CalibrateTarget::All,
             )?;
             results.push(coarse_result);
@@ -881,12 +881,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                     &stat,
                     (1.0, 1.0),
                     opt_iter,
-                    &format!(
-                        "Coarsen L1/{} layer {}/{}",
-                        level_dims.len(),
-                        d + 1,
-                        num_layers
-                    ),
+                    &format!("Fit L1/{} layer {}/{}", level_dims.len(), d + 1, num_layers),
                     CalibrateTarget::All,
                 )?);
                 fine_stats.push(stat);
@@ -915,7 +910,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                         (1.0, 1.0),
                         level_opt_iter,
                         &format!(
-                            "Coarsen L{}/{} layer {}/{}",
+                            "Fit L{}/{} layer {}/{}",
                             level + 1,
                             level_dims.len(),
                             d + 1,
@@ -1012,12 +1007,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 &stat,
                 (1.0, 1.0),
                 opt_iter,
-                &format!(
-                    "Coarsen L1/{} layer {}/{}",
-                    level_dims.len(),
-                    d + 1,
-                    num_layers
-                ),
+                &format!("Fit L1/{} layer {}/{}", level_dims.len(), d + 1, num_layers),
                 CalibrateTarget::All,
             )?);
             fine_stats.push(stat);
@@ -1057,7 +1047,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                     (1.0, 1.0),
                     level_opt_iter,
                     &format!(
-                        "Coarsen L{}/{} layer {}/{}",
+                        "Fit L{}/{} layer {}/{}",
                         level + 1,
                         level_dims.len(),
                         d + 1,

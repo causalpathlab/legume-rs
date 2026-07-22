@@ -37,7 +37,7 @@ fn blocked_optimize_matches_single_block() {
     let hyper = (1.0, 1.0);
     let iters = 25;
 
-    let full = optimize_block(&stat, hyper, iters, CalibrateTarget::All, None).unwrap();
+    let full = optimize_block(&stat, hyper, iters, CalibrateTarget::All).unwrap();
 
     // Split rows into uneven blocks and reassemble.
     let ranges = [(0usize, 3usize), (3, 4), (7, 3)];
@@ -48,7 +48,7 @@ fn blocked_optimize_matches_single_block() {
     let mut del = Vec::new();
     for (r0, nr) in ranges {
         let sub = stat.select_rows(r0, nr);
-        let out = optimize_block(&sub, hyper, iters, CalibrateTarget::All, None).unwrap();
+        let out = optimize_block(&sub, hyper, iters, CalibrateTarget::All).unwrap();
         mu_obs.push(out.mu_observed);
         mu_adj.push(out.mu_adjusted.unwrap());
         mu_res.push(out.mu_residual.unwrap());
@@ -107,7 +107,7 @@ fn mean_only_sparsifies_unobserved_cells() {
     stat.n_bs = DMatrix::from_element(b, k, 5.0);
     stat.observed_sum_db.fill(1.0); // so δ is well-defined
 
-    let out = optimize_block(&stat, (1.0, 1.0), 10, CalibrateTarget::MeanOnly, None).unwrap();
+    let out = optimize_block(&stat, (1.0, 1.0), 10, CalibrateTarget::MeanOnly).unwrap();
     let adj = out.mu_adjusted.unwrap();
     let m = adj.posterior_mean();
     // support of mu_adjusted = (observed ∪ imputed) > 0
@@ -119,7 +119,7 @@ fn mean_only_sparsifies_unobserved_cells() {
     assert_eq!(m[(0, 1)], 0.0);
 
     // All keeps the prior baseline (nonzero everywhere).
-    let out_all = optimize_block(&stat, (1.0, 1.0), 10, CalibrateTarget::All, None).unwrap();
+    let out_all = optimize_block(&stat, (1.0, 1.0), 10, CalibrateTarget::All).unwrap();
     let ma = out_all.mu_adjusted.unwrap();
     assert!(
         ma.posterior_mean()[(3, 0)] > 0.0,
@@ -136,12 +136,12 @@ fn mean_only_vconcat_drops_stats_keeps_means() {
     let hyper = (1.0, 1.0);
     let iters = 20;
 
-    let reference = optimize_block(&stat, hyper, iters, CalibrateTarget::All, None).unwrap();
+    let reference = optimize_block(&stat, hyper, iters, CalibrateTarget::All).unwrap();
 
     let mut blocks = Vec::new();
     for (r0, nr) in [(0usize, 5usize), (5, 4)] {
         let sub = stat.select_rows(r0, nr);
-        let mut out = optimize_block(&sub, hyper, iters, CalibrateTarget::MeanOnly, None).unwrap();
+        let mut out = optimize_block(&sub, hyper, iters, CalibrateTarget::MeanOnly).unwrap();
         out.release_stats();
         blocks.push(out.mu_observed);
     }

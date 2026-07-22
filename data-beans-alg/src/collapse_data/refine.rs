@@ -336,7 +336,7 @@ pub(super) fn refine_and_collect_single_layer(
         &fine_stat,
         (1.0, 1.0),
         opt_iter,
-        &format!("Coarsen L1/{}", num_levels),
+        &format!("Fit L1/{}", num_levels),
         output_calibration,
     )?;
     results.push(finest_out);
@@ -363,7 +363,7 @@ pub(super) fn refine_and_collect_single_layer(
             &coarse_stat,
             (1.0, 1.0),
             level_opt_iter,
-            &format!("Coarsen L{}/{}", level + 1, num_levels),
+            &format!("Fit L{}/{}", level + 1, num_levels),
             output_calibration,
         )?;
         results.push(out);
@@ -542,7 +542,7 @@ pub(super) fn refine_and_collect_stack(
             &stat,
             (1.0, 1.0),
             opt_iter,
-            &format!("Coarsen L1/{} layer {}/{}", num_levels, d + 1, num_layers),
+            &format!("Fit L1/{} layer {}/{}", num_levels, d + 1, num_layers),
             output_calibration,
         )?;
         finest_layer_results.push(out);
@@ -574,7 +574,7 @@ pub(super) fn refine_and_collect_stack(
                 (1.0, 1.0),
                 level_opt_iter,
                 &format!(
-                    "Coarsen L{}/{} layer {}/{}",
+                    "Fit L{}/{} layer {}/{}",
                     level + 1,
                     num_levels,
                     d + 1,
