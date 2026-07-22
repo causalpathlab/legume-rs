@@ -157,15 +157,14 @@ pub(super) fn collect_batch_stat_visitor(
 
 /// Per-feature-block kernel for [`optimize`]. Runs the DC-Poisson
 /// coordinate descent on a (sub)stat and returns a `CollapsedOut` whose row
-/// count matches `stat.num_genes()`. `progress_label` shows the
-/// per-iteration bar only when this is run as a single block; gene-blocked
-/// runs pass `None` and let the driver show a block-level bar.
+/// count matches `stat.num_genes()`. Progress is reported by the driver at
+/// block granularity — a descent iteration is cheap and fixed-cost, so it is
+/// not worth a tick of its own.
 fn optimize_block(
     stat: &CollapsedStat,
     hyper: (f32, f32),
     num_iter: usize,
     out_target: CalibrateTarget,
-    progress_label: Option<&str>,
 ) -> anyhow::Result<CollapsedOut> {
     let (a0, b0) = hyper;
     let num_genes = stat.num_genes();
@@ -205,10 +204,6 @@ fn optimize_block(
             mu_resid_param.calibrate_with(out_target);
         };
 
-        let prog_bar = progress_label.map(|label| {
-            matrix_util::progress::new_progress_bar(num_iter as u64)
-                .with_message(format!("{label} iterations"))
-        });
         for _opt_iter in 0..num_iter {
             #[cfg(debug_assertions)]
             {
@@ -242,13 +237,6 @@ fn optimize_block(
             }
             gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
             gamma_param.calibrate_with(CalibrateTarget::MeanOnly);
-
-            if let Some(pb) = &prog_bar {
-                pb.inc(1);
-            }
-        }
-        if let Some(pb) = &prog_bar {
-            pb.finish_and_clear();
         }
 
         // Output calibration after loop. `out_target` decides whether the
@@ -338,19 +326,33 @@ pub(super) fn optimize(
     let block_rows = (BLOCK_ELEMS / num_samples.max(1)).clamp(1, num_genes.max(1));
     let n_blocks = num_genes.div_ceil(block_rows.max(1));
 
-    // Small problems (e.g. topic/svd with modest pb counts) run as a single
-    // block, preserving the familiar per-iteration progress bar.
+    // Gene blocks are the reported unit: a descent iteration is cheap and
+    // fixed-cost, so per-iteration ticks would be noise, while a block visit
+    // is the coarse chunk of work worth a tick.
+    //
+    // With a single block there is nothing to count — `block_rows` scales
+    // with `1/num_samples`, so coarse levels collapse to one block and a
+    // `0/1` bar would sit at zero for the whole fit while advertising a
+    // `(0s)` ETA. A spinner says the same thing honestly: still working, no
+    // denominator implied. Small problems (e.g. topic/svd with modest pb
+    // counts) take this path too, where `select_rows` would clone the whole
+    // stat for no benefit.
     if n_blocks <= 1 {
-        return optimize_block(stat, hyper, num_iter, out_target, Some(label));
+        let spin = matrix_util::progress::new_spinner("{spinner} [{elapsed_precise}] {msg}")
+            .with_message(format!("{label} single gene-block"));
+        let out = optimize_block(stat, hyper, num_iter, out_target);
+        spin.finish_and_clear();
+        return out;
     }
+
+    // `styled_progress_bar` carries the shared steady tick, so the bar stays
+    // visibly alive between blocks instead of freezing for a whole fit.
+    let prog = styled_progress_bar(n_blocks as u64, &format!("{label} gene-blocks"));
 
     // `posterior_sample` (topic path) reads a_stat/b_stat; bge (MeanOnly)
     // does not, so those planes can be discarded per block — that's what
     // keeps the assembled output from holding the full sufficient stats.
     let keep_stats = matches!(out_target, CalibrateTarget::All);
-
-    let prog = matrix_util::progress::new_progress_bar(n_blocks as u64)
-        .with_message(format!("{label} gene-blocks"));
 
     let mut mu_obs: Vec<GammaMatrix> = Vec::with_capacity(n_blocks);
     let mut mu_adj: Vec<GammaMatrix> = Vec::new();
@@ -362,7 +364,7 @@ pub(super) fn optimize(
     while r0 < num_genes {
         let nr = block_rows.min(num_genes - r0);
         let sub = stat.select_rows(r0, nr);
-        let mut out_b = optimize_block(&sub, hyper, num_iter, out_target, None)?;
+        let mut out_b = optimize_block(&sub, hyper, num_iter, out_target)?;
         if !keep_stats {
             // Free a_stat/b_stat now so the accumulated blocks never add up
             // to the full sufficient-stat planes.
