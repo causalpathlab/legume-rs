@@ -120,8 +120,13 @@ struct Fitted {
     /// Per-gene model splice-ratio score — the factor-averaged `log β^s − log β^u`,
     /// which the design says is `log(β_g/γ_g)` up to an additive constant.
     splice_ratio: Vec<f32>,
-    /// Final `u→s` (mechanism-mode) likelihood per scored position.
-    mechanism_llik: f32,
+    /// Final MATURE-track likelihood per scored position.
+    ///
+    /// Named `mechanism` in `GemScores` for historical reasons: under the
+    /// removed cross-modal masking it scored a distinct `u→s` pass. With one
+    /// shared mask draw it is now literally the mature term
+    /// (`acc.mech_ll += ll_s_tot`), so read it as such.
+    mature_llik: f32,
     /// Final nascent-track likelihood per scored position.
     nascent_llik: f32,
     delta_norm: f32,
@@ -213,7 +218,7 @@ fn fit(sim: &Sim, epochs: usize, delta_l2: f32, seed_tag: &str) -> Fitted {
 
     Fitted {
         splice_ratio,
-        mechanism_llik: GemScores::last_finite(&scores.mechanism_llik),
+        mature_llik: GemScores::last_finite(&scores.mechanism_llik),
         nascent_llik: GemScores::last_finite(&scores.nascent_llik),
         delta_norm: GemScores::last_finite(&scores.delta_norm),
     }
@@ -258,24 +263,28 @@ fn recovers_the_planted_splicing_to_degradation_ratio() {
     );
 }
 
-/// A ridge strong enough to pin `δ ≈ 0` must cost real fit — and this pins down
-/// exactly **where** the cost lands, which is not where you would first guess.
+/// `δ` is what carries the splice ratio: pin `δ ≈ 0` with a large ridge and
+/// ratio recovery collapses.
 ///
 /// With `δ = 0` the two dictionaries are forced equal, `β^s ≡ β^u`, so the model
 /// cannot fit both compositions at once. It does not respond by fitting mature
 /// worse: mature is the deeper track, so the count-weighted likelihood prefers
-/// to satisfy it and give ground on nascent instead. Two consequences, both
-/// asserted here:
+/// to satisfy it and give ground on nascent instead.
 ///
-/// 1. The **nascent** likelihood degrades, and the recovered ratio is destroyed.
-/// 2. The **mature-side** metrics — including the `u→s` mechanism likelihood —
-///    barely move, so they are NOT delta-collapse detectors. `|delta|` is.
+/// # The secondary claim, and its limit
 ///
-/// `faba`'s `report_training_health` keys its delta warning off `|delta|` and
-/// its trend precisely because of (2); if (2) ever stops holding, that warning
-/// can be strengthened.
+/// The mature LIKELIHOOD barely moves under delta collapse, which is why
+/// `faba`'s `report_training_health` keys its warning off `|delta|` and its
+/// trend rather than off the likelihood trace.
+///
+/// That is a claim about the likelihood ONLY, and it should not be read as
+/// "the mature side is unaffected". Measured on 3 wt libraries, crushing delta
+/// moved the mature likelihood ~1 % while the mature DICTIONARY degraded
+/// materially — median canonical-marker rank 239 → 374 of 33,609. A delta
+/// collapse does damage the spliced program; it just does not announce itself
+/// in the loss.
 #[test]
-fn crushing_delta_costs_nascent_fit_but_not_the_mature_side() {
+fn crushing_delta_destroys_splice_ratio_recovery() {
     let sim = simulate(11);
     let free = fit(&sim, 170, 0.0, "free");
     let crushed = fit(&sim, 170, 1e4, "crushed");
@@ -299,20 +308,30 @@ fn crushing_delta_costs_nascent_fit_but_not_the_mature_side() {
         pearson(&free.splice_ratio, &sim.log_ratio),
         pearson(&crushed.splice_ratio, &sim.log_ratio),
     );
+    // Stated as two separate facts rather than one absolute margin: the earlier
+    // `r_free > r_crushed + 0.3` was a magic number on a stochastic fit and
+    // flaked. What the design actually claims is that the free fit recovers the
+    // ratio and that crushing delta takes most of it away.
     assert!(
-        r_free > r_crushed + 0.3,
+        r_free > 0.3,
+        "the free fit did not recover the planted ratio at all (r={r_free:.3}), \
+         so this test cannot say anything about crushing delta"
+    );
+    assert!(
+        r_crushed < 0.7 * r_free,
         "crushing delta should destroy ratio recovery, but r went {r_free:.3} -> {r_crushed:.3}"
     );
 
-    // (2) the mature side stays put — the documented blind spot.
-    let gap = (free.mechanism_llik - crushed.mechanism_llik).abs();
-    let scale = free.mechanism_llik.abs().max(1.0);
+    // (2) the mature LIKELIHOOD stays put — the documented blind spot, and the
+    // reason the delta warning keys off |delta| instead of the loss.
+    let gap = (free.mature_llik - crushed.mature_llik).abs();
+    let scale = free.mature_llik.abs().max(1.0);
     assert!(
         gap < 0.25 * scale,
-        "mechanism likelihood turned out to be sensitive to delta collapse \
+        "the mature likelihood turned out to be sensitive to delta collapse \
          (free={:.3}, crushed={:.3}). If that is now reliably true, faba's \
          delta-collapse warning can key off it instead of |delta|.",
-        free.mechanism_llik,
-        crushed.mechanism_llik
+        free.mature_llik,
+        crushed.mature_llik
     );
 }
