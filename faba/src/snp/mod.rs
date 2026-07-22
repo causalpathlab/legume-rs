@@ -1,6 +1,8 @@
 pub mod genotyper;
 pub mod io;
 pub mod pipeline;
+/// The `faba snp` run. Binary entry: [`run::run_snp`].
+pub mod run;
 
 use crate::data::dna::DnaBaseCount;
 use std::fmt;

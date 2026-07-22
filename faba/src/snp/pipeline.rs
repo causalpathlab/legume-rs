@@ -3,7 +3,7 @@ use crate::data::cell_membership::CellMembership;
 use crate::data::dna::Dna;
 use crate::data::dna_stat_map::DnaBaseFreqMap;
 use crate::data::util_htslib::{fetch_reference_base, load_fasta_index};
-use crate::pipeline_util::create_gene_key_function;
+use crate::quant::create_gene_key_function;
 use crate::snp::genotyper::{find_top_alt_allele, genotype_site, GenotypeParams, SiteInput};
 use crate::snp::io::{
     build_snp_mask, load_contigs_from_fai, write_snp_sites_parquet, write_snp_sites_vcf, KnownSnps,
@@ -45,13 +45,8 @@ impl SnpParams {
     /// Resolve both the staging write path and the user-facing target path
     /// (`.zarr.zip` when applicable). After all writes finish, call
     /// [`BackendOutputPath::finalize`] to produce the archive.
-    pub fn backend_output_path(&self, batch_name: &str) -> crate::pipeline_util::BackendOutputPath {
-        crate::pipeline_util::BackendOutputPath::new(
-            &self.output,
-            batch_name,
-            &self.backend,
-            self.zip,
-        )
+    pub fn backend_output_path(&self, batch_name: &str) -> crate::quant::BackendOutputPath {
+        crate::quant::BackendOutputPath::new(&self.output, batch_name, &self.backend, self.zip)
     }
 
     /// Create a marginal DnaBaseFreqMap configured with this pipeline's thresholds,

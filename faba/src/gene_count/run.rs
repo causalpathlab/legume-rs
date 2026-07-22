@@ -147,13 +147,13 @@ pub struct GeneCountArgs {
     pub(crate) no_umi_dedup: bool,
 
     #[command(flatten)]
-    pub(crate) mito_qc: crate::pipeline_util::MitoQcArgs,
+    pub(crate) mito_qc: crate::quant::MitoQcArgs,
 }
 
 impl GeneCountArgs {
     /// Resolve the UMI tag for dedup: `None` disables it (count reads).
     pub(crate) fn umi_dedup_tag(&self) -> Option<&[u8]> {
-        crate::pipeline_util::resolve_umi_tag(self.no_umi_dedup, &self.umi_tag)
+        crate::quant::resolve_umi_tag(self.no_umi_dedup, &self.umi_tag)
     }
 }
 

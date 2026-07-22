@@ -1,5 +1,5 @@
 use crate::common::*;
-use crate::pipeline_util::check_all_bam_indices;
+use crate::quant::check_all_bam_indices;
 use crate::snp::genotyper::GenotypeParams;
 use crate::snp::io::load_known_snps_auto;
 use crate::snp::pipeline::{run_snp_pipeline, SnpParams};

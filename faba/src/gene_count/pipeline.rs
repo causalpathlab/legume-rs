@@ -1,7 +1,7 @@
 use crate::common::*;
+use crate::gene_count::run::GeneCountArgs;
 use crate::gene_count::splice::*;
-use crate::pipeline_util::extract_gene_key;
-use crate::run_gene_count::GeneCountArgs;
+use crate::quant::extract_gene_key;
 
 use rustc_hash::FxHashMap as HashMap;
 
@@ -32,8 +32,7 @@ pub fn run_simple(
 
     // Count/cell-call on all biotypes; the gate narrows only the quantified output
     // and the pooled gene ids. Same object `faba all` and the modality QC use.
-    let gate =
-        crate::pipeline_util::GeneGate::new(&records, &args.gene_type, args.mito_qc.params());
+    let gate = crate::quant::GeneGate::new(&records, &args.gene_type, args.mito_qc.params());
 
     for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
         let njobs = records.len() as u64;
@@ -58,14 +57,14 @@ pub fn run_simple(
 
         // Cell call + mito cell filter + QC artifacts, in the one shared place.
         // No splice split here, so the unspliced track is empty.
-        let bq = crate::pipeline_util::qc_one_batch(
+        let bq = crate::quant::qc_one_batch(
             &gene_level_stats,
             &[],
             &gate,
             0,
             args.column_nnz_cutoff,
             &cell_call,
-            Some(crate::pipeline_util::QcArtifacts {
+            Some(crate::quant::QcArtifacts {
                 dir: &args.output,
                 batch_name,
             }),
@@ -74,7 +73,7 @@ pub fn run_simple(
 
         // Gene nnz filter, then the quantification gate.
         let passing_genes: rustc_hash::FxHashSet<Box<str>> =
-            crate::pipeline_util::passing_genes_from_stats(&bq.gene_stats, args.row_nnz_cutoff, 0)
+            crate::quant::passing_genes_from_stats(&bq.gene_stats, args.row_nnz_cutoff, 0)
                 .into_iter()
                 .filter(|gk| gate.quantify(gk))
                 .collect();
@@ -99,19 +98,14 @@ pub fn run_simple(
             }
         }
 
-        let out = crate::pipeline_util::BackendOutputPath::new(
-            &args.output,
-            batch_name,
-            backend,
-            args.zip,
-        );
+        let out = crate::quant::BackendOutputPath::new(&args.output, batch_name, backend, args.zip);
 
         format_data_triplets(gene_level_stats).to_backend(&out.write_path)?;
 
         out.finalize()?;
     }
 
-    crate::pipeline_util::write_qc_genes(&args.output, &all_gene_ids)?;
+    crate::quant::write_qc_genes(&args.output, &all_gene_ids)?;
 
     Ok(())
 }
@@ -151,8 +145,7 @@ pub fn run_splice_aware(
 
     // Count/cell-call on all biotypes; the gate narrows only the quantified output
     // and the pooled gene ids. Same object `faba all` and the modality QC use.
-    let gate =
-        crate::pipeline_util::GeneGate::new(&records, &args.gene_type, args.mito_qc.params());
+    let gate = crate::quant::GeneGate::new(&records, &args.gene_type, args.mito_qc.params());
 
     for (bam_file, batch_name) in args.bam_files.iter().zip(batch_names) {
         let njobs = records.len() as u64;
@@ -194,14 +187,14 @@ pub fn run_splice_aware(
         // modality QC path uses, so `faba genes` retains exactly the cells the
         // other modalities do.
         let cell_call = args.cell_qc.params();
-        let bq = crate::pipeline_util::qc_one_batch(
+        let bq = crate::quant::qc_one_batch(
             &spliced_triplets,
             &unspliced_triplets,
             &gate,
             0,
             args.column_nnz_cutoff,
             &cell_call,
-            Some(crate::pipeline_util::QcArtifacts {
+            Some(crate::quant::QcArtifacts {
                 dir: &args.output,
                 batch_name,
             }),
@@ -210,7 +203,7 @@ pub fn run_splice_aware(
 
         // Gene nnz filter, then the quantification gate.
         let passing_genes: rustc_hash::FxHashSet<Box<str>> =
-            crate::pipeline_util::passing_genes_from_stats(&bq.gene_stats, args.row_nnz_cutoff, 0)
+            crate::quant::passing_genes_from_stats(&bq.gene_stats, args.row_nnz_cutoff, 0)
                 .into_iter()
                 .filter(|gk| gate.quantify(gk))
                 .collect();
@@ -279,12 +272,8 @@ pub fn run_splice_aware(
                 .collect()
         };
 
-        let total_out = crate::pipeline_util::BackendOutputPath::new(
-            &args.output,
-            batch_name,
-            backend,
-            args.zip,
-        );
+        let total_out =
+            crate::quant::BackendOutputPath::new(&args.output, batch_name, backend, args.zip);
         format_data_triplets(total_triplets).to_backend(&total_out.write_path)?;
         info!("wrote total counts to {}", total_out.target_path);
 
@@ -305,13 +294,13 @@ pub fn run_splice_aware(
         // Write spliced + unspliced matrices in parallel (independent I/O;
         // rayon::join shares the existing worker pool, so the to_backend
         // internals don't oversubscribe).
-        let spliced_out = crate::pipeline_util::BackendOutputPath::new(
+        let spliced_out = crate::quant::BackendOutputPath::new(
             &args.output,
             &format!("{}_spliced", batch_name),
             backend,
             args.zip,
         );
-        let unspliced_out = crate::pipeline_util::BackendOutputPath::new(
+        let unspliced_out = crate::quant::BackendOutputPath::new(
             &args.output,
             &format!("{}_unspliced", batch_name),
             backend,
@@ -354,7 +343,7 @@ pub fn run_splice_aware(
     }
 
     // Pooled retained genes (shared vocabulary) for --valid-genes reuse.
-    crate::pipeline_util::write_qc_genes(&args.output, &all_gene_ids)?;
+    crate::quant::write_qc_genes(&args.output, &all_gene_ids)?;
 
     Ok(())
 }

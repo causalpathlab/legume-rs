@@ -1,3 +1,13 @@
+//! The shared quantification layer every BAM subcommand sits on: output-path
+//! resolution, gene keys, UMI tag handling, per-cell and per-gene QC gates
+//! (mito, batch, gene), channel-row emission and matrix sinks.
+//!
+//! Top-level, not under [`crate::pipeline`], on purpose. `faba all` is one of
+//! nine consumers and owns none of it — `apa`, `atoi`, `m6a`, `snp`,
+//! `gene_count`, `read_depth`, `cell_qc` and `editing` all count through here,
+//! and `editing` is a library that must not depend on a subcommand entry.
+//! It was called `pipeline_util` until that implied an owner it does not have.
+
 pub mod mass_enrichment;
 
 use crate::common::*;

@@ -16,7 +16,7 @@
 //! The final cell set is the union of the two stages.
 
 use crate::common::*;
-use crate::pipeline_util::extract_gene_key;
+use crate::quant::extract_gene_key;
 
 use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
