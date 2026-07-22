@@ -1,7 +1,7 @@
 use crate::common::*;
 use crate::data::util_htslib::*;
 use crate::read_depth::coverage::ReadCoverageCollector;
-use crate::run_read_depth::ReadDepthArgs;
+use crate::read_depth::run::ReadDepthArgs;
 
 use coitrees::IntervalTree;
 use genomic_data::bed::*;
@@ -75,12 +75,8 @@ pub fn run_read_depth_pipeline(args: &ReadDepthArgs) -> anyhow::Result<()> {
             segment_stats.len()
         );
 
-        let out = crate::pipeline_util::BackendOutputPath::new(
-            &args.output,
-            batch_name,
-            &backend,
-            args.zip,
-        );
+        let out =
+            crate::quant::BackendOutputPath::new(&args.output, batch_name, &backend, args.zip);
 
         format_data_triplets(segment_stats)
             .to_backend(&out.write_path)?

@@ -319,7 +319,7 @@ pub fn run_mixture_model(
     }
 
     let mut all_rows = HashSet::<Box<str>>::default();
-    let mut out_files: Vec<crate::pipeline_util::BackendOutputPath> = Vec::new();
+    let mut out_files: Vec<crate::quant::BackendOutputPath> = Vec::new();
     for (batch_idx, batch_name) in batch_names.iter().enumerate() {
         let Some(trip) = by_batch.remove(&batch_idx) else {
             continue;

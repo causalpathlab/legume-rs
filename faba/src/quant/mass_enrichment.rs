@@ -310,7 +310,6 @@ pub struct MassEnrichmentArgs {
                      before grouping."
     )]
     pub cluster_min_col_nnz: usize,
-
 }
 
 impl MassEnrichmentArgs {

@@ -1,5 +1,5 @@
 //! Velocity-oriented lineage inference over a `faba gem` embedding, driven by
-//! [`crate::run_lineage::run_lineage`].
+//! [`crate::lineage::run::run_lineage`].
 //!
 //! The generic numeric primitives live in `matrix-util`: seeded k-means centroids
 //! ([`matrix_util::principal_graph::kmeans_centroids_seeded`]), the K×K distance matrix
@@ -9,6 +9,16 @@
 //! that generic tree: the velocity [`orient`]ation of edges (δ from gem), and the local,
 //! root-free [`branch`] structure (junctions + sibling branches).
 
+/// The `faba lineage` command-line surface.
+pub mod args;
+mod cluster;
+mod layout;
+mod root;
+/// The `faba lineage` run. Binary entry: [`run::run_lineage`].
+pub mod run;
+mod traj_annotation;
+mod velocity_grid;
+mod write;
 // Parked for the root-free sibling-branch association test (`faba dyn-assoc`); its former
 // consumer (the junction-support bootstrap) was removed with the velocity-forest rework.
 #[allow(dead_code)]

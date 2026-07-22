@@ -6,7 +6,7 @@ use crate::data::dna_stat_map::*;
 use crate::data::util_htslib::*;
 use crate::editing::sifter::*;
 use crate::editing::ConversionSite;
-use crate::pipeline_util::*;
+use crate::quant::*;
 
 use dashmap::DashMap as HashMap;
 use dashmap::DashSet as HashSet;
@@ -76,7 +76,7 @@ pub struct ConversionParams {
     /// Unit-aware feature QC for the per-site `_site` matrix: keep a site only
     /// if detected in ≥ this many cells (both channels kept together). `0`/`1`
     /// disables. The gene-level matrix is unaffected (its gene axis is already
-    /// filtered upstream by `gene_min_cells`). See [`crate::pipeline_util::summarize_stats_per_site`].
+    /// filtered upstream by `gene_min_cells`). See [`crate::quant::summarize_stats_per_site`].
     pub site_min_cells: usize,
 }
 
@@ -174,13 +174,8 @@ impl ConversionParams {
     /// Resolve the user-facing target path (`.zarr.zip` when applicable) and
     /// the underlying write path. After writing the backend, call
     /// [`BackendOutputPath::finalize`] to zip the staging directory.
-    pub fn backend_output_path(&self, batch_name: &str) -> crate::pipeline_util::BackendOutputPath {
-        crate::pipeline_util::BackendOutputPath::new(
-            &self.output,
-            batch_name,
-            &self.backend,
-            self.zip,
-        )
+    pub fn backend_output_path(&self, batch_name: &str) -> crate::quant::BackendOutputPath {
+        crate::quant::BackendOutputPath::new(&self.output, batch_name, &self.backend, self.zip)
     }
 
     /// Minimum number of positions required to attempt site discovery.
@@ -785,7 +780,7 @@ fn collect_gene_conversion_stats(
 #[derive(Default)]
 struct ResolutionOutputs {
     rows: HashSet<Box<str>>,
-    files: Vec<crate::pipeline_util::BackendOutputPath>,
+    files: Vec<crate::quant::BackendOutputPath>,
 }
 
 /// Unified backend output for conversion sites (m6A or A-to-I).

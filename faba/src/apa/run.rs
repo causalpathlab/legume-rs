@@ -3,7 +3,7 @@ use crate::apa::likelihood::*;
 use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteArgs;
 use crate::data::util_htslib::*;
-use crate::pipeline_util::{resolve_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest};
+use crate::quant::{resolve_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest};
 
 use genomic_data::gff::{GeneId, GeneType as GffGeneType};
 use genomic_data::sam::CellBarcode;
@@ -532,7 +532,7 @@ pub struct CountApaArgs {
     pub(crate) cell_qc: crate::cell_qc::CellQcArgs,
 
     #[command(flatten)]
-    pub(crate) mito_qc: crate::pipeline_util::MitoQcArgs,
+    pub(crate) mito_qc: crate::quant::MitoQcArgs,
 
     /// Reuse a per-batch cell set from `faba genes` instead of recomputing QC
     #[arg(
@@ -570,11 +570,8 @@ impl CountApaArgs {
     /// Resolve the staging write path plus the user-facing target path
     /// (`.zarr.zip` when applicable). After writing the backend, call
     /// [`BackendOutputPath::finalize`] to zip the staging directory.
-    pub(crate) fn backend_output_path(
-        &self,
-        name: &str,
-    ) -> crate::pipeline_util::BackendOutputPath {
-        crate::pipeline_util::BackendOutputPath::new(&self.output, name, &self.backend, self.zip)
+    pub(crate) fn backend_output_path(&self, name: &str) -> crate::quant::BackendOutputPath {
+        crate::quant::BackendOutputPath::new(&self.output, name, &self.backend, self.zip)
     }
 
     pub(crate) fn qc_cutoffs(&self) -> SqueezeCutoffs {

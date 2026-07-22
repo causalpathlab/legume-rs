@@ -9,8 +9,8 @@ use crate::editing::pipeline::{
     find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, M6aContrastArgs,
 };
 use crate::editing::sifter::ModificationType;
-use crate::pipeline_util::mass_enrichment::MassEnrichmentArgs;
-use crate::pipeline_util::{
+use crate::quant::mass_enrichment::MassEnrichmentArgs;
+use crate::quant::{
     check_all_bam_indices, resolve_modality_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest,
 };
 use crate::snp::io::load_snp_mask_from_parquet;
@@ -453,7 +453,7 @@ pub struct DartSeqCountArgs {
     pub cell_qc: crate::cell_qc::CellQcArgs,
 
     #[command(flatten)]
-    pub mito_qc: crate::pipeline_util::MitoQcArgs,
+    pub mito_qc: crate::quant::MitoQcArgs,
 
     /// Reuse a per-batch cell set from `faba genes` instead of recomputing QC
     #[arg(

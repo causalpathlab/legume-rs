@@ -2,11 +2,11 @@ use crate::apa::cell_assign::*;
 use crate::apa::em::*;
 use crate::apa::fragment::*;
 use crate::apa::likelihood::*;
+use crate::apa::run::CountApaArgs;
 use crate::apa::site_discovery::*;
 use crate::apa::utr_region::*;
 use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteMap;
-use crate::run_apa::CountApaArgs;
 
 use arrow::array::{ArrayRef, Float32Array, Int64Array, StringArray, UInt32Array};
 use arrow::record_batch::RecordBatch;
@@ -518,7 +518,7 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
     }
 
     let mut all_rows = rustc_hash::FxHashSet::<Box<str>>::default();
-    let mut out_files: Vec<crate::pipeline_util::BackendOutputPath> = Vec::new();
+    let mut out_files: Vec<crate::quant::BackendOutputPath> = Vec::new();
     // The per-cell component matrix is opt-in (`--mixture`); the SCAPE fit above
     // already ran because PDUI needs it, so this only gates the extra output.
     // Bucketing `all_counts` by batch is O(n_counts) + per-count allocations, so do
@@ -1017,9 +1017,9 @@ fn compute_and_write_pdui(
 
     let batch_names = uniq_batch_names(&args.bam_files)?;
     let mut all_rows = rustc_hash::FxHashSet::<Box<str>>::default();
-    let mut out_files: Vec<crate::pipeline_util::BackendOutputPath> = Vec::new();
+    let mut out_files: Vec<crate::quant::BackendOutputPath> = Vec::new();
 
-    use crate::pipeline_util::push_channel_row;
+    use crate::quant::push_channel_row;
     use faba::feature_name::{APA, DISTAL, PROXIMAL};
     for (batch_idx, batch_name) in batch_names.iter().enumerate() {
         let b = batch_idx as u32;

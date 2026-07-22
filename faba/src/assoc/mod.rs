@@ -16,6 +16,8 @@
 mod bayes_common;
 pub mod contrast;
 pub mod contrast_bayes;
+/// The `faba assoc` run. Binary entry: [`run::run_assoc`].
+pub mod run;
 
 /// The row both Bayesian tests report — see [`bayes_common::BayesResult`]. Re-exported here
 /// because it is the shape of their (identical) output schemas, which `run_assoc` writes.

@@ -5,7 +5,7 @@ use crate::editing::mixture::MixtureParams;
 use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::*;
 use crate::editing::sifter::ModificationType;
-use crate::pipeline_util::{
+use crate::quant::{
     check_all_bam_indices, resolve_modality_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest,
 };
 use crate::snp::io::load_snp_mask_from_parquet;
@@ -292,7 +292,7 @@ pub struct AtoICountArgs {
     pub cell_qc: crate::cell_qc::CellQcArgs,
 
     #[command(flatten)]
-    pub mito_qc: crate::pipeline_util::MitoQcArgs,
+    pub mito_qc: crate::quant::MitoQcArgs,
 
     /// Reuse a per-batch cell set from `faba genes` instead of recomputing QC
     #[arg(
