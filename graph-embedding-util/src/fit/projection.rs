@@ -8,31 +8,35 @@ use log::info;
 use matrix_util::dmatrix_util::adjust_by_poisson_ratio;
 use nalgebra::DMatrix;
 
-/// Ridge prior strength λ on `e_cell` in the analytical phase-2 projection.
-/// The Poisson MAP fits each cell's observed features and this Gaussian
-/// prior stands in for the (infeasible) all-feature softmax partition.
-pub(crate) const PHASE2_RIDGE: f32 = 1.0;
+mod cell_sgd;
 
-/// One cell's phase-2 solve result.
-struct SolvedCell {
-    /// Global cell id (row into `e_cell` / `b_cell`).
-    cell: usize,
-    /// The stored `e_cell` row. On the **bge** path this is the L2 direction
-    /// `dir(θ)` (depth-robust for that pipeline); on the **gem** β-sharing (splice)
-    /// path it is the **raw** identity MAP `θ` from the spliced edges — magnitude
-    /// kept (no post-hoc unit-norm), so `‖θ‖` remains the activity/QC signal and a
-    /// zero-signal cell stays at the origin instead of a fabricated unit direction.
-    latent: Vec<f32>,
-    /// Un-normalized raw-count MAP norm the empty-droplet QC keys on (`‖θ‖` on the
-    /// splice path — identical to `‖latent‖` there since the gem latent is raw).
-    nrm_map: f32,
-    /// Fitted per-cell bias `b_c` (absorbs library size).
-    b_c: f32,
-    /// Raw velocity increment `δ` (gem splice path only; empty otherwise) — the
-    /// Poisson-MAP shift explaining the unspliced edges with the identity held
-    /// fixed. Magnitude = speed, direction = velocity; no normalization.
-    velocity: Vec<f32>,
+/// What phase 2 hands back to [`crate::fit::fit`].
+pub(crate) struct Phase2Result {
+    /// Un-normalized MAP norm the empty-droplet QC keys on (`‖θ‖`; identical to
+    /// `‖latent‖` on the splice path, where the gem latent is stored raw).
+    pub cell_nrms: Vec<f32>,
+    /// The `[n_cells × h]` raw velocity increment `δ` (`None` on bge).
+    pub velocity: Option<Vec<f32>>,
+    /// The identity mean `θ̄` the gauge fix removed, `[h]`.
+    ///
+    /// **A frame marker, not a diagnostic.** Anything that compares the stored
+    /// `e_cell` against a latent produced *outside* phase 2 must first agree on a
+    /// frame. The pseudobulk landmarks in `pb_velocity` are the live case: they are
+    /// read before phase 2 by the Newton pb readout and are never re-gauged, so the
+    /// cell-lift has to add this back before taking `dist2(θ_c, θ_p)`. Comparing
+    /// across the two frames displaces every cell by `‖θ̄‖` — 88 on the reference
+    /// fit, against a median `‖θ‖` of 5.6 after centring.
+    pub theta_mean: Vec<f32>,
 }
+
+/// Ridge prior strength λ on `e_cell` in the phase-2 projection.
+///
+/// A **mild** Gaussian prior, not a load-bearing bound: the cell-block SGD
+/// ([`cell_sgd`]) sums the log-partition over every feature, which is what
+/// identifies `θ`. The per-pseudobulk and held-out-gene solves in
+/// [`crate::cell_projection`] still fit observed features only, and there this
+/// same λ *is* the only thing standing in for the partition.
+pub(crate) const PHASE2_RIDGE: f32 = 1.0;
 
 /// Phase-2 batch correction, mirroring `senna svd`/`topic`: divide each cell's
 /// counts by its finest-pseudobulk `μ_residual` fold-factor before the
@@ -93,21 +97,18 @@ pub(crate) fn cell_edges(
     }
 }
 
-/// L2-normalize to a unit direction; returns the input unchanged when its norm
-/// underflows (an all-zero / empty solve).
-pub(crate) fn l2_direction(v: &[f32]) -> Vec<f32> {
-    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if n > 1e-8 {
-        v.iter().map(|x| x / n).collect()
-    } else {
-        v.to_vec()
-    }
-}
-
-/// Phase 2 — project every cell onto the fixed feature dictionary, in
-/// parallel, and overwrite the `e_cell` var. The per-cell bias is fitted
-/// (to absorb library size) and written into the `b_cell` var alongside
-/// `e_cell` (consistent with `faba gem`).
+/// Phase 2 — project every cell onto the fixed feature dictionary and overwrite
+/// the `e_cell` var. The per-cell bias is fitted (to absorb library size) and
+/// written into the `b_cell` var alongside `e_cell` (consistent with `faba gem`).
+///
+/// The solve itself is a **cell-block Poisson SGD** ([`cell_sgd`]): with the
+/// feature side frozen the objective is separable per cell, so a block of cells is
+/// an independent problem and each Adam step is two dense matmuls against the one
+/// shared `Eᵀ`. That formulation also affords the **full log-partition over every
+/// feature**, which is what identifies `θ` — the previous per-cell Newton solve
+/// fit only each cell's observed features and let a fixed ridge stand in for the
+/// partition, leaving `‖θ‖` free to run away along whatever direction the
+/// unobserved features carried.
 ///
 /// On the **bge** path the stored latent (`model.e_cell`) is the **L2 direction**
 /// of the Poisson-MAP embedding — depth-robust and best for that pipeline's
@@ -131,9 +132,7 @@ pub(crate) fn l2_direction(v: &[f32]) -> Vec<f32> {
 /// per-gene velocity readout comes from the in-model `δ_g` (`--delta-l2`), not a
 /// post-hoc aggregate.
 ///
-/// Returns `(cell_nrms, splice)`, where `cell_nrms` is the un-normalized MAP norm
-/// the empty-droplet QC keys on (`‖θ‖`, identical to `‖latent‖` on the splice path)
-/// and `splice` carries the `[n_cells × h]` raw velocity buffer (`None` on bge).
+/// See [`Phase2Result`] for what comes back.
 #[allow(clippy::too_many_arguments)] // frozen dictionary + samplers + batch divisor + splice mask
 pub(crate) fn project_cells_phase2(
     model: &mut JointEmbedModel,
@@ -144,95 +143,20 @@ pub(crate) fn project_cells_phase2(
     dev: &Device,
     batch_divisor: Option<CellBatchDivisor>,
     unspliced_rows: Option<&[bool]>,
-) -> anyhow::Result<(Vec<f32>, Option<Vec<f32>>)> {
-    use crate::progress::new_progress_bar;
+) -> anyhow::Result<Phase2Result> {
     use anyhow::Context;
     use candle_util::candle_core::Tensor;
-    use indicatif::ParallelProgressIterator;
-    use rayon::prelude::*;
 
     let h = model.embedding_dim;
 
     let b_feat: Vec<f32> = model.b_feat.to_vec1()?;
-    let mut e_out: Vec<f32> = model.e_cell.flatten_all()?.to_vec1()?;
-    let mut b_out: Vec<f32> = model.b_cell.to_vec1()?;
-    let mut cell_nrms = vec![0f32; n_cells];
-
-    let cells = collect_sampler_cells(cell_samplers);
-    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
-
     let feat_flat: Vec<f32> = model.e_feat.flatten_all()?.to_vec1()?;
-    let solve = |edges: &[(u32, f32)]| solve_one_cell(edges, &feat_flat, &b_feat, h, lambda);
-    info!(
-        "Phase 2 per-cell solve over {n_cells} cells ({} rayon threads) ...",
-        rayon::current_num_threads()
-    );
-    // Bar spans the *active* cells actually walked (the samplers' union), which
-    // can be fewer than `n_cells` when some cells carry no edges.
-    let solve_bar = new_progress_bar(cells.len() as u64);
-    solve_bar.set_message("phase-2 per-cell Poisson MAP");
-    let solved: Vec<SolvedCell> = cells
-        .par_iter()
-        .progress_with(solve_bar.clone())
-        .map(|&(cell, feats, counts)| {
-            // Batch-divide the counts (μ_residual fold-factor) when correction is
-            // on, then project. The fitted intercept `b_c` absorbs library size
-            // and is kept (written to `b_cell`).
-            let edges = cell_edges(cell, feats, counts, batch_divisor);
-            match unspliced_rows {
-                // bge: one combined projection = identity, stored as the L2 direction.
-                None => {
-                    let (e_map, b_c) = solve(&edges);
-                    SolvedCell {
-                        cell: cell as usize,
-                        latent: l2_direction(&e_map),
-                        nrm_map: norm(&e_map),
-                        b_c,
-                        velocity: Vec::new(),
-                    }
-                }
-                // gem β-sharing: identity = RAW spliced θ (magnitude kept); velocity =
-                // the RAW analytic increment δ explaining the unspliced edges with θ
-                // held fixed. Both index the shared β_g, so δ is a directed residual in
-                // θ's own frame. No post-hoc unit-norm on either — the nascent state is
-                // just θ + δ. δ = 0 when identity is empty or there are no unspliced edges.
-                // Empty δ (not `vec![0; h]`) when undefined — velocity_flat is already
-                // zero-initialized, so the storage loop just skips the copy.
-                Some(un) => {
-                    let (theta, theta_n, b_s, velocity) =
-                        solve_node_splice(&edges, un, &feat_flat, &b_feat, h, lambda);
-                    SolvedCell {
-                        cell: cell as usize,
-                        latent: theta,
-                        nrm_map: theta_n,
-                        b_c: b_s,
-                        velocity,
-                    }
-                }
-            }
-        })
-        .collect();
-    solve_bar.finish_and_clear();
-
-    let split = unspliced_rows.is_some();
-    let mut velocity_flat = split.then(|| vec![0f32; n_cells * h]);
-    for sc in solved {
-        let s = sc.cell * h;
-        e_out[s..s + h].copy_from_slice(&sc.latent);
-        cell_nrms[sc.cell] = sc.nrm_map;
-        b_out[sc.cell] = sc.b_c;
-        if let (Some(vf), false) = (velocity_flat.as_mut(), sc.velocity.is_empty()) {
-            vf[s..s + h].copy_from_slice(&sc.velocity);
-        }
-    }
+    let cells = collect_sampler_cells(cell_samplers);
 
     info!(
-        "Phase 2 — {} (per-cell Poisson MAP, ridge λ={lambda}{})",
-        if split {
-            "latent = raw spliced θ (magnitude kept) + raw velocity increment δ"
-        } else {
-            "latent = L2 direction"
-        },
+        "Phase 2 — cell-block Poisson SGD over {n_cells} cells ({} with edges) on {dev:?}, \
+         full log-partition, ridge λ={lambda}{}",
+        cells.len(),
         if batch_divisor.is_some() {
             ", μ_residual batch-divided"
         } else {
@@ -240,8 +164,81 @@ pub(crate) fn project_cells_phase2(
         }
     );
 
+    let out = cell_sgd::project_cells(
+        &cell_sgd::Phase2Input {
+            feat: &feat_flat,
+            b_feat: &b_feat,
+            h,
+            n_cells,
+            lambda,
+            dev,
+        },
+        &cells,
+        batch_divisor,
+        unspliced_rows,
+    )?;
+
+    /////////////////////////////////////////////////
+    // Fold the gauge shift back into `b_feat`     //
+    /////////////////////////////////////////////////
+
+    // `cell_sgd` removed the population mean from each latent. That is only a
+    // *re-gauge* — every score unchanged — if the matching `⟨e_f, mean⟩` goes into
+    // the per-feature bias. Skipping this would silently change the model, and
+    // `b_feat` is a real output (`feature_bias.parquet`) that the held-out gene
+    // projection also solves against.
+    //
+    // Which mean a row takes depends on which pass scored it: a spliced row is only
+    // ever scored as `⟨e_f, θ⟩ + β_f + c`, an unspliced row as
+    // `⟨e_f, θ + δ⟩ + β_f + c_u`. So spliced rows absorb `θ̄` and unspliced rows
+    // absorb `θ̄ + δ̄`. Off the splice path every row is a "spliced" row.
+    let mut b_feat = b_feat;
+    let n_features = b_feat.len();
+    let (tm, dm) = (&out.gauge.theta_mean, &out.gauge.delta_mean);
+    for (f, b) in b_feat.iter_mut().enumerate() {
+        let e_f = &feat_flat[f * h..(f + 1) * h];
+        let is_unspliced = unspliced_rows.is_some_and(|un| un[f]);
+        let shift: f32 = e_f
+            .iter()
+            .enumerate()
+            .map(|(k, e)| e * (tm[k] + if is_unspliced { dm[k] } else { 0.0 }))
+            .sum();
+        *b += shift;
+    }
+    let b_feat_t = Tensor::from_vec(b_feat, n_features, dev)?;
+    {
+        let vars = varmap.data().lock().unwrap();
+        vars.get("b_feat")
+            .context("b_feat var missing")?
+            .set(&b_feat_t)?;
+    }
+    model.b_feat = b_feat_t;
+
+    // `cell_nrms` is the un-normalized MAP norm the empty-droplet QC keys on, so it
+    // is always read off the RAW θ — before the bge path replaces the stored latent
+    // with its unit direction. Post-gauge-fix this is the distance from the
+    // population mean, which is the more useful "how much signal" reading anyway.
+    let cell_nrms: Vec<f32> = out
+        .theta
+        .chunks_exact(h)
+        .map(|t| t.iter().map(|x| x * x).sum::<f32>().sqrt())
+        .collect();
+
+    let mut e_out = out.theta;
+    if unspliced_rows.is_none() {
+        // bge: store the L2 direction — depth-robust and best for that pipeline's
+        // Euclidean clustering. gem keeps the magnitude (see the doc above).
+        // In place — a per-row helper returning a `Vec` would allocate per cell.
+        for row in e_out.chunks_exact_mut(h) {
+            let n = norm(row);
+            if n > 1e-8 {
+                row.iter_mut().for_each(|x| *x /= n);
+            }
+        }
+    }
+
     let e_t = Tensor::from_vec(e_out, (n_cells, h), dev)?;
-    let b_t = Tensor::from_vec(b_out, n_cells, dev)?;
+    let b_t = Tensor::from_vec(out.b_cell, n_cells, dev)?;
     {
         let vars = varmap.data().lock().unwrap();
         vars.get("e_cell")
@@ -254,20 +251,27 @@ pub(crate) fn project_cells_phase2(
     model.e_cell = e_t;
     model.b_cell = b_t;
 
-    // `velocity_flat` is `Some` iff the splice path ran (gem β-sharing); the raw
-    // per-cell velocity increment `δ`, flat `[n_cells × h]`. `None` for bge.
-    Ok((cell_nrms, velocity_flat))
+    Ok(Phase2Result {
+        cell_nrms,
+        velocity: out.velocity,
+        theta_mean: out.gauge.theta_mean,
+    })
+}
+
+/// Euclidean norm of a slice — the `√Σx²` this module and [`cell_sgd`] both need.
+pub(super) fn norm(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
 /// Split one node's `(feature, count)` edges by the unspliced mask and run the
 /// dual analytic solve: identity `θ` from the spliced edges, then the velocity
 /// increment `δ` from the unspliced edges holding `θ` fixed (same likelihood
-/// frame, so `θ + δ` is coherent). Shared by the per-cell gem β-sharing path and
-/// the per-pseudobulk readout. `frozen_e` is row-major `[n_features × h]`.
+/// frame, so `θ + δ` is coherent). The per-**pseudobulk** readout's solver — the
+/// per-cell path is [`cell_sgd`]. `frozen_e` is row-major `[n_features × h]`.
 ///
-/// Returns `(θ, ‖θ‖, b_c, δ)`; `δ` is **empty** — not zero-filled — when velocity
-/// is undefined (empty identity or no unspliced edges), so callers can skip the
-/// copy into a pre-zeroed buffer.
+/// Returns `(θ, δ)`; `δ` is **empty** — not zero-filled — when velocity is
+/// undefined (empty identity or no unspliced edges), so callers can skip the copy
+/// into a pre-zeroed buffer.
 fn solve_node_splice(
     edges: &[(u32, f32)],
     unspliced_rows: &[bool],
@@ -275,7 +279,7 @@ fn solve_node_splice(
     frozen_b: &[f32],
     h: usize,
     lambda: f64,
-) -> (Vec<f32>, f32, f32, Vec<f32>) {
+) -> (Vec<f32>, Vec<f32>) {
     let mut spliced: Vec<(u32, f32)> = Vec::with_capacity(edges.len());
     let mut unspliced: Vec<(u32, f32)> = Vec::with_capacity(edges.len());
     for &(f, c) in edges {
@@ -285,14 +289,13 @@ fn solve_node_splice(
             spliced.push((f, c));
         }
     }
-    let (theta, b_s) = solve_one_cell(&spliced, frozen_e, frozen_b, h, lambda);
-    let theta_n = theta.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let velocity = if theta_n > 1e-8 && !unspliced.is_empty() {
+    let (theta, _b_c) = solve_one_cell(&spliced, frozen_e, frozen_b, h, lambda);
+    let velocity = if norm(&theta) > 1e-8 && !unspliced.is_empty() {
         solve_cell_increment(&unspliced, &theta, frozen_e, frozen_b, h, lambda).0
     } else {
         Vec::new()
     };
-    (theta, theta_n, b_s, velocity)
+    (theta, velocity)
 }
 
 /// Per-level pseudobulk phase-2 velocity readout: the analytic identity `θ_pb`
@@ -348,9 +351,7 @@ pub(crate) fn project_pbs_phase2(
             .par_iter()
             .progress_with(solve_bar.clone())
             .map(|edges| {
-                let (theta, _n, _b, delta) =
-                    solve_node_splice(edges, unspliced_rows, frozen_e, frozen_b, h, lambda);
-                (theta, delta)
+                solve_node_splice(edges, unspliced_rows, frozen_e, frozen_b, h, lambda)
             })
             .collect();
         let mut theta = vec![0f32; n_pb * h];

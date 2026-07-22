@@ -758,7 +758,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // a cell-block Poisson SGD over `e_cell`/`b_cell` alone — see
     // `projection::project_cells_phase2`. The per-cell intercept `b_cell` is fitted
     // and kept.
-    let (cell_nrms, cell_velocity) = {
+    let phase2 = {
         // Phase-2 batch correction (mirrors senna svd/topic): divide each cell's
         // counts by its finest-pb μ_residual fold-factor. μ_residual is gathered
         // onto the unified feature axis so a feature id indexes a row directly;
@@ -851,7 +851,17 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 .unwrap_or_default(),
             };
             let traj = lift::pb_trajectory(vel, &edges, h, lineage::DEFAULT_SEM_STEP);
-            let theta_c = cell_model.e_cell.flatten_all()?.to_vec1()?;
+            // Put the cells back in the LANDMARKS' frame before comparing. `vel` was
+            // read by the Newton pb readout above, i.e. before phase 2 gauge-fixed
+            // the cell latents, and pb θ is never re-gauged — so `lift_cells`, which
+            // takes `dist2(θ_c, θ_p)` and projects `θ_c − θ_p` onto the pb velocity,
+            // would otherwise be differencing two different frames and displacing
+            // every cell by `‖θ̄‖` (88 on the reference fit, against a post-centring
+            // median `‖θ‖` of 5.6). See `Phase2Result::theta_mean`.
+            let mut theta_c: Vec<f32> = cell_model.e_cell.flatten_all()?.to_vec1()?;
+            for (k, x) in theta_c.iter_mut().enumerate() {
+                *x += phase2.theta_mean[k % h];
+            }
             let lin = lift::lift_cells(&theta_c, n_cells, vel, &traj, h, level);
             // Unsupervised per-run structural diagnostics (decisiveness, coherence, fate
             // count, ambiguity, likelihood) — for run inspection, not a validated quality
@@ -883,8 +893,8 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     Ok(FitOutput {
         model: cell_model,
         varmap,
-        cell_nrms,
-        cell_velocity,
+        cell_nrms: phase2.cell_nrms,
+        cell_velocity: phase2.velocity,
         pb_velocity,
         pb_dag_w,
         cell_lineage,
