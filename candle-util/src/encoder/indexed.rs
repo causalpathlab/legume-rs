@@ -8,10 +8,7 @@ use crate::value_transform::anscombe_lite;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, Linear, ModuleT, VarBuilder, VarMap};
 
-/// Symmetric clamp on the masked-encoder's per-topic logits (`z_mean`, and the
-/// Gaussian head's `z_lnvar`): keeps `exp`/`softmax`/stick-breaking numerically
-/// bounded. Shared by every masked head so the bound can't drift between them.
-const MASKED_LOGIT_CLAMP: f64 = 8.0;
+use crate::nn::soft_clamp::{soft_clamp, MASKED_LOGIT_CLAMP};
 
 /// Indexed embedding encoder over packed top-K input.
 ///
@@ -307,9 +304,7 @@ impl IndexedEmbeddingEncoder {
             visible_mask,
             train,
         )?;
-        self.z_mean
-            .forward_t(&bn_nl, train)?
-            .clamp(-MASKED_LOGIT_CLAMP, MASKED_LOGIT_CLAMP)
+        soft_clamp(&self.z_mean.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)
     }
 
     /// Deterministic masked-encoder forward → `log θ [N, K_topics]`.
@@ -385,14 +380,8 @@ impl IndexedEmbeddingEncoder {
             visible_mask,
             train,
         )?;
-        let z_mean_nk = self
-            .z_mean
-            .forward_t(&bn_nl, train)?
-            .clamp(-MASKED_LOGIT_CLAMP, MASKED_LOGIT_CLAMP)?;
-        let z_lnvar_nk = self
-            .z_lnvar
-            .forward_t(&bn_nl, train)?
-            .clamp(-MASKED_LOGIT_CLAMP, MASKED_LOGIT_CLAMP)?;
+        let z_mean_nk = soft_clamp(&self.z_mean.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)?;
+        let z_lnvar_nk = soft_clamp(&self.z_lnvar.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)?;
         Ok((z_mean_nk, z_lnvar_nk))
     }
 
@@ -433,22 +422,13 @@ impl IndexedEmbeddingEncoder {
         sparse_edges: Option<&SparseEdgeBatch>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
-        let clamp_lo = -8.;
-        let clamp_hi = 8.;
-
         let h_nh =
             self.preprocess_indexed(indices, values, values_null, values_mean, sparse_edges)?;
         let fc_nl = self.fc.forward_t(&h_nh, train)?;
         let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
 
-        let z_mean_nk = self
-            .z_mean
-            .forward_t(&bn_nl, train)?
-            .clamp(clamp_lo, clamp_hi)?;
-        let z_lnvar_nk = self
-            .z_lnvar
-            .forward_t(&bn_nl, train)?
-            .clamp(clamp_lo, clamp_hi)?;
+        let z_mean_nk = soft_clamp(&self.z_mean.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)?;
+        let z_lnvar_nk = soft_clamp(&self.z_lnvar.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)?;
 
         Ok((z_mean_nk, z_lnvar_nk))
     }

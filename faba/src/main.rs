@@ -26,6 +26,8 @@ use atoi::run::*;
 use docs::*;
 use faba::gem::args::GemArgs;
 use faba::gem::run::run_gem_embedding;
+use faba::gem_encoder::args::GemEncoderArgs;
+use faba::gem_encoder::run::run_gem_encoder;
 use gene_count::run::*;
 use lineage::args::*;
 use lineage::run::*;
@@ -325,6 +327,62 @@ Example:\n  \
     Gem(GemArgs),
 
     #[command(
+        name = "gem-encoder",
+        // `gem-topic`: the cell latent IS a softmax simplex, so this is a
+        // topic model over the two splice tracks — the name people reach for
+        // when they come from `senna topic` rather than from `faba gem`.
+        visible_aliases = ["gem-topic"],
+        aliases = ["gem-enc"],
+        about = "GEM-encoder: masked generative model of the nascent->mature transition",
+        long_about = "GEM-encoder — the masked generative sibling of `faba gem`.\n\n\
+            Both fit the same geometry over the same spliced+unspliced counts, from opposite directions.\n\
+            `gem` is discriminative (NCE over cell-feature edges).\n\
+            This is generative and amortized: an encoder reads a cell\'s top-K GENES\n\
+            with BOTH splice tracks attached, pools each track over that context\n\
+            (not over the full gene space),\n\
+            and an embedded-topic decoder imputes whichever track was held out.\n\n\
+            The model runs the biology forward: u + delta -> s.\n\
+            Nascent pre-mRNA is transcribed first and matures into spliced mRNA,\n\
+            so the UNSPLICED embedding is the base rho and the spliced one is rho + delta.\n\
+            Delta is therefore the steady-state splice-ratio offset\n\
+            — log(splicing / degradation), not a splicing rate —\n\
+            because that is the combination that survives at steady state (s = (beta/gamma) u).\n\
+            A gene scores high either by splicing fast or by having stable mature mRNA,\n\
+            and this model cannot tell those apart.\n\
+            NOTE this is the OPPOSITE base from `faba gem`, whose delta shifts spliced -> unspliced;\n\
+            the two write same-named delta_feature_embedding.parquet files that are NOT comparable.\n\
+            `{out}.model.json` records `delta_base`.\n\n\
+            Training masks a fraction of GENES with ONE draw shared by both tracks,\n\
+            and predicts both from ONE theta. That gives delta a monopoly: the only\n\
+            thing that can make the two tracks differ is delta itself.\n\
+            Hiding a whole track instead was tried and removed — it hands the encoder\n\
+            a competing LATENT delta, which it takes, and delta degenerates.\n\n\
+            VELOCITY is the cell-level delta = theta_nascent - theta_mature, each\n\
+            fitted POST HOC to its own track against the frozen dictionaries\n\
+            (elliptical slice sampling warm-started from the encoder, which also\n\
+            closes the amortization gap). The model has one latent by design, so it\n\
+            cannot express that difference while training; estimating delta first and\n\
+            reading the movement out of it keeps the two from competing.\n\
+            The per-axis population mean is removed before writing and recorded\n\
+            in `{out}.model.json` as `velocity_common_mode`.\n\n\
+            The latent is a softmax simplex — hence the `gem-topic` alias —\n\
+            and `{out}.latent.parquet` holds LOG THETA, so theta = exp(row),\n\
+            the same contract every senna topic-family run follows.\n\
+            Pick the loss with `--likelihood nb|multinomial`\n\
+            Pooling is a masked value-weighted sum per track, concatenated;\n\
+            the attention-slot variant was removed after it measured 3.5x worse\n\
+            on between-cell variance and went degenerate whenever a track was hidden.\n\
+            Ctrl-C stops training gracefully and still writes outputs, flagged as partial.",
+        after_long_help = "\
+	Example:\n\
+  faba gem-encoder out/rep2_wt_genes.zarr.zip out/rep2_mut_genes.zarr.zip \\\n\
+    -o out/gme -t 20 --device cuda\n\n\
+  faba gem-encoder out/*_genes.zarr.zip -o out/gme --likelihood nb\n\n\
+  Watch |delta| and the splice-ratio r in the log.\n\
+  If delta collapses toward 0, or r is near 0, the velocity is not trustworthy.")]
+    GemEncoder(GemEncoderArgs),
+
+    #[command(
         name = "annotate",
         aliases = ["annot", "ann"],
         about = "Marker-set cell-type annotation of a `faba gem` run",
@@ -333,11 +391,14 @@ Example:\n  \
             (`gene<TAB>celltype`, `-m/--markers`), then runs the shared term-ORA core\n\
             (nearest-centroid assign → distance-outlier QC → Leiden clustering →\n\
             cluster×term hypergeometric over-representation, permutation-calibrated).\n\n\
-            gem carries two gene programs, each annotated on its own axis (`--track`):\n\
-            spliced:  gene β_g (beta_feature_embedding) vs cell θ (cell_embedding)  → {out}.spliced.*\n\
-              velocity: gene δ_g (delta_feature_embedding) vs cell velocity   → {out}.velocity.*\n\
+            Two gene programs, each annotated on its own axis (`--track`). Both read the\n\
+            CO-EMBEDDED `feature_embedding.parquet` (NOT the raw `beta_feature_embedding`\n\
+            or `delta_feature_embedding`, which are model parameters off the cell manifold):\n\
+              spliced:  /count/spliced rows   vs cell θ (cell_embedding)  → {out}.spliced.*\n\
+              velocity: /count/unspliced rows vs cell velocity            → {out}.velocity.*\n\
             `both` (default) runs both;\n\
-            velocity is skipped with a warning when its inputs are absent (spliced-only gem run).",
+            velocity is skipped with a warning when the unspliced rows are absent\n\
+            (a spliced-only run has no nascent program to annotate).",
         after_long_help = "\
 	Example:\n\
 	faba gem --genes out/rep1_genes.zarr.zip -o out/gem\n\
@@ -531,6 +592,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Metagene(ref args) => run_metagene(args)?,
         Commands::Snp(ref args) => run_snp(args)?,
         Commands::Gem(ref args) => run_gem_embedding(args)?,
+        Commands::GemEncoder(ref args) => run_gem_encoder(args)?,
         Commands::Annotate(ref args) => run_annotate(args)?,
         Commands::Docs(ref args) => run_docs(args)?,
         Commands::Lineage(ref args) => run_lineage(args)?,

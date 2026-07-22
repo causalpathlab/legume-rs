@@ -24,6 +24,11 @@
 //! `--track both` (default) runs both; the velocity pass is skipped with a warning
 //! when its inputs are absent (a spliced-only gem run, or `--delta-l2 0` on data
 //! with no unspliced rows).
+//!
+//! Everything above is `--mode projection`, the default. `--mode enrichment` is a
+//! second, single-pass path for the TOPIC models `faba gem-encoder` / `gem-topic`
+//! fit, where the projection geometry does not hold: see
+//! [`super::by_enrichment`].
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
@@ -37,6 +42,22 @@ use graph_embedding_util::type_annotation::{
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::IoOps;
+
+/// How the marker panel is turned into a cell-type call.
+///
+/// The two modes are not two flavours of the same statistic — they read
+/// different files and rest on different assumptions about what the run's
+/// geometry means, so the right one is fixed by which subcommand produced the
+/// prefix.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Mode {
+    /// Euclidean nearest marker centroid in the co-embedded gene/cell space
+    /// (`faba gem`). Today's behaviour, unchanged.
+    Projection,
+    /// Marker-set over-representation across the topic dictionary, carried to
+    /// cells through θ (`faba gem-encoder` / `gem-topic`).
+    Enrichment,
+}
 
 /// Which gem program(s) to annotate.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -71,8 +92,39 @@ pub struct AnnotateArgs {
     #[arg(
         long,
         value_enum,
+        default_value_t = Mode::Projection,
+        help = "How markers become a call: nearest-centroid, or enrichment over a topic dictionary",
+        long_help = "How the marker panel becomes a cell-type call.\n\n\
+            `projection` (default) is for a `faba gem` EMBEDDING run.\n\
+            It builds each type's centroid from its markers' co-embedded feature vectors\n\
+            and hands every cell to the nearest one.\n\
+            Reads {from}.feature_embedding.parquet + {from}.cell_embedding.parquet;\n\
+            writes {out}.{track}.*\n\n\
+            `enrichment` is for a `faba gem-encoder` / `gem-topic` TOPIC-MODEL run.\n\
+            It asks, per factor, whether a type's panel is over-represented at the top of that \
+            factor's gene ranking,\n\
+            then carries the surviving factor x type edges to cells through theta.\n\
+            Reads {from}.dictionary.parquet (log beta), .latent.parquet and .pb_latent.parquet \
+            (log theta), .pb_gene.parquet;\n\
+            writes {out}.enrichment.*\n\n\
+            Do not use `projection` on a topic model.\n\
+            Nearest-centroid forms the cell-gene inner product <z_c, rho_g>,\n\
+            and for a topic model that is not a metric:\n\
+            beta = softmax_g(b_g + <alpha_t, rho_g>) depends only on gene-to-gene DIFFERENCES,\n\
+            so the per-gene bias b_g absorbs the level\n\
+            and the absolute cell-gene direction is a gauge freedom the likelihood never pins.\n\
+            `enrichment` routes the call through beta and theta -- the two things a topic model \
+            actually estimates --\n\
+            and never forms that inner product.\n\n\
+            `enrichment` is single-pass: --track does not apply to it"
+    )]
+    pub mode: Mode,
+
+    #[arg(
+        long,
+        value_enum,
         default_value_t = Track::Both,
-        help = "Which gem program(s) to annotate"
+        help = "[--mode projection] Which gem program(s) to annotate"
     )]
     pub track: Track,
 
@@ -327,6 +379,54 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
     let prefix = args.from.as_ref();
     let out = args.out.as_deref().unwrap_or(prefix).to_string();
     mkdir_parent(&out)?;
+
+    // Enrichment is a different reading of the run, not a different scorer on the
+    // same tables — it reads gem-encoder's four topic tables and shares only the
+    // marker panel and the CLI. So it forks here rather than inside the loop.
+    if args.mode == Mode::Enrichment {
+        // The spliced/velocity split belongs to the co-embedded feature axis,
+        // which this path never touches. Enrichment needs a (β, θ) couple — a
+        // gene ranking per factor AND a membership on the simplex to carry the
+        // call to cells — and the velocity is a displacement, not a membership.
+        // Silently ignoring `--track velocity` would print a mature-track answer
+        // under a velocity flag.
+        anyhow::ensure!(
+            args.track != Track::Velocity,
+            "--track velocity does not apply to --mode enrichment. Enrichment is single-pass over \
+             the MATURE dictionary ({prefix}.dictionary.parquet), and it carries a factor's call \
+             to cells through θ — the velocity is a displacement, not a membership on the simplex, \
+             so there is no (β, θ) couple for it. Drop --track, or use --mode projection on a \
+             `faba gem` run."
+        );
+        // Flags that belong to the projection scorer and have NO effect here.
+        // Accepting them silently is the worse failure: `--panel-perm 200` is
+        // the bias guard, and a user who passes it and gets a clean run will
+        // reasonably believe the panels were put on trial when they never were.
+        // Refuse instead of quietly dropping them.
+        let ignored: Vec<&str> = [
+            (args.panel_perm > 0).then_some("--panel-perm"),
+            (args.support_perm > 0).then_some("--support-perm"),
+            args.obo.is_some().then_some("--obo"),
+            args.label_cl.is_some().then_some("--label-cl"),
+            args.no_assign_qc.then_some("--no-assign-qc"),
+            // NOT --min-panel-coverage: `by_enrichment` passes it to
+            // `parse_and_match_markers`, so enrichment honours it.
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        anyhow::ensure!(
+            ignored.is_empty(),
+            "these flags belong to --mode projection and do nothing under --mode enrichment: {}. \
+             They gate the nearest-centroid assignment and its ontology layer, neither of which \
+             this path runs. Drop them, or switch to --mode projection.",
+            ignored.join(", ")
+        );
+
+        super::by_enrichment::run(prefix, &out, args)?;
+        info!("faba annotate --mode enrichment complete (prefix '{out}')");
+        return Ok(());
+    }
 
     let cfg = TermOraConfig {
         min_panel_coverage: args.min_panel_coverage,

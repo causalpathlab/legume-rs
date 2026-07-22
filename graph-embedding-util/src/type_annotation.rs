@@ -81,6 +81,16 @@ use score::*;
 /// used by BOTH annotation methods so their per-cell I/O is identical.
 pub use output::write_label_tsvs;
 
+/// The shared marker-panel reader: parse `gene<TAB>celltype`, match its genes against a caller's
+/// feature axis (exact → symbol → flexible), IDF-weight them, gate on panel coverage, and drop
+/// the types the axis cannot support.
+///
+/// Exported because the panel is the *same object* whatever is done with it downstream — this
+/// crate's nearest-centroid path, or an enrichment walk over a topic dictionary
+/// (`faba annotate --mode enrichment`). A second parser in the caller would mean two gene
+/// matchers, two IDF conventions and two coverage reports drifting apart on the same TSV.
+pub use markers::{parse_and_match_markers, MarkerSets};
+
 /// The "this cell has no call" sentinel, shared by the firm path and the marker bootstrap.
 /// (`usize::MAX`, so it is never a valid term index and any `t < c` test excludes it.)
 /// Defined in `enrichment::consensus` so the raw-count bootstrap agrees on it.

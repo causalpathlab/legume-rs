@@ -14,6 +14,11 @@ pub mod feature_name;
 
 pub mod gem;
 
+/// `faba gem-encoder` — masked generative embedding of the nascent→mature
+/// transition (`u + δ → s`). Binary entries: [`gem_encoder::run::run_gem_encoder`]
+/// and [`gem_encoder::args::GemEncoderArgs`].
+pub mod gem_encoder;
+
 /// Single-sample editing statistics (beta-binomial p-values, Benjamini-Hochberg
 /// FDR). Exposed so the pure-function tests can live under `tests/`.
 pub mod hypothesis_tests;

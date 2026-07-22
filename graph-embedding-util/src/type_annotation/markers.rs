@@ -2,7 +2,7 @@ use super::*;
 use log::warn;
 
 /// Per-type `(feature_index, weight)` marker lists — one inner `Vec` per type.
-pub(super) type MarkerSets = Vec<Vec<(u32, f32)>>;
+pub type MarkerSets = Vec<Vec<(u32, f32)>>;
 
 /// Parse a marker TSV and match its genes to `gene_names`, returning the
 /// sorted type vocabulary and per-type `(gene_index, weight)` lists.
@@ -26,7 +26,7 @@ pub(super) type MarkerSets = Vec<Vec<(u32, f32)>>;
 /// panel. A type that entered with 20 markers and scores on 1 still produces a confident-
 /// looking call, indistinguishable in the output from one that kept all 20. `min_coverage`
 /// is the floor below which that stops being a warning and becomes an error.
-pub(super) fn parse_and_match_markers(
+pub fn parse_and_match_markers(
     markers_path: &str,
     gene_names: &[Box<str>],
     use_idf: bool,

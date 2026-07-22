@@ -7,6 +7,7 @@ mod feature_projection;
 pub mod lift;
 pub mod lineage;
 pub mod projection;
+pub mod resolve_embedding;
 mod samplers;
 
 pub use config::{
@@ -19,6 +20,7 @@ pub use feature_projection::{
 };
 pub use lift::{CellLineage, LineageQc};
 pub use projection::PbLevelVelocity;
+pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
 
 use crate::coarsen::{identity_axis, AxisCoarsenings};
 use crate::data::UnifiedData;
@@ -733,14 +735,30 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         }
     }
 
-    // Phase 2: analytical per-cell projection onto the fixed feature
-    // side. With E_feat/b_feat/z/δ held fixed, each cell's embedding is
-    // independent — so rather than SGD over `e_cell`, project every cell
-    // directly (Poisson MAP, ridge prior) in parallel. The per-cell
-    // intercept `b_cell` is fitted and kept. See `crate::cell_projection`.
-    let mut cell_nrms: Vec<f32> = Vec::new();
-    let mut cell_velocity: Option<Vec<f32>> = None;
-    if !stop.load(std::sync::atomic::Ordering::Relaxed) {
+    // The first Ctrl+C stops the *major SGD loops* — phase 1 above and the lineage
+    // refine — and nothing else. Every stage from here down is a follow-up routine
+    // that turns the trained dictionary into the run's deliverables, so gating them
+    // on `stop` does not save the user time, it destroys the output. Phase 2
+    // especially: at the default `--phase1-cells-per-pb 0` the cell axis is never
+    // trained in phase 1, so `e_cell` is still its randn init until phase 2 runs —
+    // skipping it wrote a `cell_embedding.parquet` of pure noise, silently. A
+    // second Ctrl+C aborts the process outright (`matrix_util::stop`), which is the
+    // escape hatch for a user who really does want out now.
+    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+        log::warn!(
+            "phase 1 was interrupted — the feature dictionary is short-trained. The follow-up \
+             stages (phase-2 projection, held-out feature projection, cell-lift) still run, so \
+             the outputs are complete but fit against a partially trained dictionary; treat \
+             this run as a draft. Ctrl+C again to abort outright."
+        );
+    }
+
+    // Phase 2: per-cell projection onto the fixed feature side. With
+    // E_feat/b_feat/z/δ held fixed each cell's embedding is independent, so this is
+    // a cell-block Poisson SGD over `e_cell`/`b_cell` alone — see
+    // `projection::project_cells_phase2`. The per-cell intercept `b_cell` is fitted
+    // and kept.
+    let (cell_nrms, cell_velocity) = {
         // Phase-2 batch correction (mirrors senna svd/topic): divide each cell's
         // counts by its finest-pb μ_residual fold-factor. μ_residual is gathered
         // onto the unified feature axis so a feature id indexes a row directly;
@@ -760,18 +778,15 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 .expect("collapse always produces ≥1 level"),
         });
 
-        info!(
-            "Phase 2 — analytical per-cell projection ({n_cells} cells, feature side fixed, ridge λ={PHASE2_RIDGE})"
-        );
         // β-sharing (gem): identity is resolved by the SPLICED edges (stored raw),
-        // and the same pass emits the raw velocity increment δ on the cell axis.
+        // and a second pass emits the raw velocity increment δ on the cell axis.
         // Plain (bge): one combined projection = identity (stored as dir), no splice
         // output.
         let unspliced = config
             .feat_factor
             .as_ref()
             .map(|s| s.unspliced_rows.as_slice());
-        let (nrms, splice) = project_cells_phase2(
+        project_cells_phase2(
             &mut cell_model,
             &varmap,
             &cell_samplers,
@@ -780,18 +795,17 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             &config.device,
             batch_divisor,
             unspliced,
-        )?;
-        cell_nrms = nrms;
-        cell_velocity = splice;
-    }
+        )?
+    };
 
     // Post-hoc held-out feature projection. Solve `β_g` for every backend
     // feature the training axis never saw (the `--n-hvg` remainder, plus
     // anything the feature-null QC dropped) against the frozen pseudobulk side.
     // Strictly read-only on the cell side, so every cell output above is
     // unaffected. See `crate::fit::feature_projection`.
+    // Not gated on `stop` — see the phase-2 note above.
     let feature_projection = match &config.feature_projection {
-        Some(fp_cfg) if !stop.load(std::sync::atomic::Ordering::Relaxed) => {
+        Some(fp_cfg) => {
             let pb = stacked_pb_view(&varmap, &collapsed_levels, &cell_to_pb_per_level, h)?;
             let trained = trained_gene_beta(
                 &cell_model,
@@ -812,9 +826,10 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // pseudotime/fate along the oriented pb-DAG (learned `W` for the learned DAG, the fixed
     // velocity-oriented graph for the velocity-KNN) at the finest level, then landmark-blend it to
     // every cell. `None` when lineage-DAG is off or the readout is empty.
+    // Not gated on `stop` — see the phase-2 note above.
     let mut lineage_qc: Option<LineageQc> = None;
     let cell_lineage = match &pb_velocity {
-        Some(pbv) if !pbv.is_empty() && !stop.load(std::sync::atomic::Ordering::Relaxed) => {
+        Some(pbv) if !pbv.is_empty() => {
             let level = pbv.len() - 1; // finest level: densest landmark tiling
             let vel = &pbv[level];
             let edges = match &pb_dag_w {
