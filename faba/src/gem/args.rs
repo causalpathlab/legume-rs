@@ -403,7 +403,20 @@ pub struct GemArgs {
     )]
     pub batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(short, long, required = true, help = "Output prefix")]
+    #[arg(
+        short,
+        long,
+        required = true,
+        help = "Output prefix",
+        long_help = "Output file prefix.\n\
+                     \n\
+                     NOTE the per-cell tables (cell_embedding, velocity, ...) may contain\n\
+                     FEWER ROWS than the input: cell QC drops failing cells from the OUTPUTS\n\
+                     (never from the fit — every cell still informs the embedding and the\n\
+                     feature dictionary). Join downstream tables by the cell/barcode column,\n\
+                     never by row position. --no-qc keeps every cell; --qc-report writes the\n\
+                     per-cell keep/drop table."
+    )]
     pub out: Box<str>,
 
     #[command(flatten)]
@@ -414,6 +427,10 @@ pub struct GemArgs {
 
     #[command(flatten)]
     pub train: TrainArgs,
+
+    /// Cell QC, applied as an OUTPUT FILTER only — see the note on `--out`.
+    #[command(flatten)]
+    pub qc: data_beans::qc_lib::QcArgs,
 
     #[command(flatten)]
     pub runtime: RuntimeArgs,

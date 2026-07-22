@@ -445,13 +445,50 @@ fn run_gem_genes_bge(
     // `{out}.feature_embedding.parquet`) rather than senna's `latent` / `dictionary` —
     // gem is not a topic model, so "latent"/"dictionary" said less than the tables are.
     // `faba {lineage, annotate}` read these names.
+    /////////////
+    // cell QC //
+    /////////////
+    // An OUTPUT filter, matching `senna bge`: every cell and edge still informs
+    // the joint embedding and the feature dictionary; QC-failed cells are
+    // dropped only from the per-cell tables, via the `cell_keep_idx` hook
+    // `graph_embedding_util::eval` already provides (it subsets the row indices
+    // and the barcodes together, so they cannot desync).
+    let qc_keep: Option<Vec<usize>> = match args.qc.to_config() {
+        Some(cfg) => {
+            if cfg.feature_min_cells > 0 {
+                log::warn!(
+                    "--qc-feature-min-cells is ignored by gem (cell-only QC; the \
+                     dictionary keeps all features)"
+                );
+            }
+            let report = data_beans::qc_lib::compute_qc(unified.count_backend(), &cfg, None)
+                .context("cell QC")?;
+            let keep = report.emit_idx_unmasked();
+            info!(
+                "cell QC: {} / {} cells kept for OUTPUT ({} near-empty, {} MAD-outlier); \
+                 training uses all of them",
+                keep.len(),
+                unified.n_cells(),
+                report.near_empty.iter().filter(|&&e| e).count(),
+                report.n_cells_dropped,
+            );
+            if let Some(path) = args.qc.qc_report.as_deref() {
+                data_beans::qc_lib::write_qc_report(path, &unified.barcodes, &report)
+                    .context("writing the QC report")?;
+                info!("wrote {path}");
+            }
+            (keep.len() < unified.n_cells()).then_some(keep)
+        }
+        None => None,
+    };
+
     let cpu = candle_util::candle_core::Device::Cpu;
     ge::save_outputs_named(
         &out.model,
         &ge::OutputContext {
             feature_names: &unified.feature_names,
             barcodes: &unified.barcodes,
-            cell_keep_idx: None,
+            cell_keep_idx: qc_keep.as_deref(),
         },
         &args.out,
         ge::EmbeddingFileNames::EXPLICIT,
@@ -595,12 +632,31 @@ fn run_gem_genes_bge(
     let h = args.model.embedding_dim;
     let n = unified.barcodes.len();
     // One `cell × H` parquet writer, shared by the velocity outputs below.
+    //
+    // These do NOT go through `ge::save_outputs_named`, so the QC keep set has
+    // to be applied here as well — otherwise `velocity.parquet` would keep every
+    // cell while `cell_embedding.parquet` dropped some, and `faba lineage`
+    // (which pairs them elementwise) would silently align the wrong rows.
     let write_cell = |suffix: &str, data: Vec<f32>| -> anyhow::Result<()> {
-        let t = Tensor::from_vec(data, (n, h), &cpu)?;
+        let (t, names) = match qc_keep.as_deref() {
+            Some(keep) => {
+                let mut buf = Vec::with_capacity(keep.len() * h);
+                let mut nm = Vec::with_capacity(keep.len());
+                for &i in keep {
+                    buf.extend_from_slice(&data[i * h..(i + 1) * h]);
+                    nm.push(unified.barcodes[i].clone());
+                }
+                (Tensor::from_vec(buf, (keep.len(), h), &cpu)?, nm)
+            }
+            None => (
+                Tensor::from_vec(data, (n, h), &cpu)?,
+                unified.barcodes.clone(),
+            ),
+        };
         ge::save_embedding(
             &format!("{}.{suffix}.parquet", args.out),
             &t,
-            &unified.barcodes,
+            &names,
             "cell",
         )
         .with_context(|| format!("save {suffix}"))?;

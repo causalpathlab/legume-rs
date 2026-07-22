@@ -288,7 +288,26 @@ pub struct StratifiedSampler {
     /// Per-active-pb feature sampler; aligned with `active_pbs`.
     pub per_pb: Vec<PbFeatureSampler>,
     /// Negative pool: features with any nonzero pb-level count.
+    ///
+    /// Two pickers over the SAME `feature_pool`, mixed 50/50 per draw, which is
+    /// what SIMBA actually does: it "produces 100 negatives by corrupting the
+    /// edge with a source or destination sampled uniformly from the nodes with
+    /// the correct types for this relation and 100 by corrupting the edge with
+    /// a source or destination node sampled with probability proportional to
+    /// its degree" (inherited from PyTorch-BigGraph). This code previously took
+    /// only the uniform half.
+    ///
+    /// The two are not interchangeable, because NCE learns a log-ratio against
+    /// the noise distribution: at the optimum the score is
+    /// `log p(f|c) − log q(f)`. Uniform `q` leaves raw abundance, so the
+    /// nearest features to every cell are the globally most abundant ones;
+    /// degree-proportional `q` divides abundance out entirely. Mixing gives
+    /// degree-proportional behaviour at the abundant end and a uniform floor at
+    /// the rare end — more abundance correction where housekeeping genes
+    /// dominate, less where counts are too thin to estimate a degree.
     pub neg: WeightedIndex<f32>,
+    /// The degree-proportional half of the negative distribution.
+    pub neg_by_degree: WeightedIndex<f32>,
     pub feature_pool: Vec<u32>,
 }
 
@@ -490,12 +509,20 @@ pub fn build_stratified_sampler(
     }
     let neg_w: Vec<f32> = vec![1.0; feature_pool.len()];
     let neg = WeightedIndex::new(neg_w).expect("non-empty negative pool");
+    // Degree = the feature's pooled pb-level count. `max(1e-8)` only guards the
+    // picker; every entry in `feature_pool` already has a nonzero count.
+    let deg_w: Vec<f32> = feature_pool
+        .iter()
+        .map(|&f| feat_count[f as usize].max(1e-8))
+        .collect();
+    let neg_by_degree = WeightedIndex::new(deg_w).expect("non-empty negative pool");
 
     Some(StratifiedSampler {
         pb_picker,
         active_pbs,
         per_pb: per_pb_samplers,
         neg,
+        neg_by_degree,
         feature_pool,
     })
 }
@@ -540,9 +567,17 @@ pub fn sample_stratified_edge_batch(
     // Negatives scale with the actual positive count (gene-paired draws emit up to
     // 2× batch_size positives); the loss reads `neg_feats[b*K..(b+1)*K]` per positive.
     let n_pos = fine_feats.len();
-    let mut neg_feats = Vec::with_capacity(n_pos * args.n_negatives);
-    for _ in 0..(n_pos * args.n_negatives) {
-        let local = s.neg.sample(rng);
+    let n_neg = n_pos * args.n_negatives;
+    let mut neg_feats = Vec::with_capacity(n_neg);
+    // Half uniform, half degree-proportional — SIMBA's 100 + 100 split. Drawn by
+    // alternating rather than by a coin flip so the ratio is exact for any
+    // `n_negatives`, including odd ones.
+    for i in 0..n_neg {
+        let local = if i % 2 == 0 {
+            s.neg.sample(rng)
+        } else {
+            s.neg_by_degree.sample(rng)
+        };
         neg_feats.push(s.feature_pool[local]);
     }
 

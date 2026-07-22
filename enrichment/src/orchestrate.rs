@@ -613,13 +613,19 @@ pub fn annotate(
 
 /// Push the per-cluster consensus down onto the cells.
 ///
-/// `cell_membership_nk` is one-hot on this path, so a cell's cluster is the column it fires on and
-/// **its label is its cluster's label**. The per-cell posterior becomes the cluster's *bootstrap*
-/// distribution over celltypes, and the reported confidence becomes `cluster_label_support` — the
-/// fraction of resamples that agreed — rather than a softmax over one panel's test statistics.
+/// A cell's group is the column it fires **hardest** on, and **its label is that group's label**.
+/// The per-cell posterior becomes the group's *bootstrap* distribution over celltypes, and the
+/// reported confidence becomes `cluster_label_support` — the fraction of resamples that agreed —
+/// rather than a softmax over one panel's test statistics.
 ///
-/// A cell whose cluster id is out of range (the sentinel for "not clustered") stays unassigned, as
-/// it already did.
+/// The argmax matters for the **topic** kind. `cell_membership_nk` is one-hot for clusters, where
+/// argmax is just "the column it fires on", but [`GroupInputs::cell_membership_nk`] is θ_cell for
+/// topic models — every entry strictly positive — so taking the *first* positive column instead
+/// hands every cell in the run topic 0's label. Measured on a 4-topic fit whose topic×celltype
+/// call was exactly right, all 300 cells came back as topic 0's celltype.
+///
+/// A cell with no positive membership (the sentinel for "not grouped") stays unassigned, as it
+/// already did.
 fn broadcast_to_cells(
     boot: &ClusterBootstrap,
     cell_membership_nk: &Mat,
@@ -662,8 +668,10 @@ fn broadcast_to_cells(
     let mut labels: Vec<LabelWithConfidence> = Vec::with_capacity(n);
 
     for (i, cell_name) in cell_names.iter().enumerate().take(n) {
-        // The one-hot cluster this cell fires on, if any.
-        let kk = (0..k).find(|&kk| cell_membership_nk[(i, kk)] > 0.0);
+        // The group this cell fires hardest on, if any.
+        let kk = (0..k)
+            .filter(|&kk| cell_membership_nk[(i, kk)] > 0.0)
+            .max_by(|&a, &b| cell_membership_nk[(i, a)].total_cmp(&cell_membership_nk[(i, b)]));
         let Some(kk) = kk else {
             labels.push(LabelWithConfidence {
                 cell_name: cell_name.clone(),

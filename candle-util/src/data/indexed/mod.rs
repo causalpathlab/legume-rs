@@ -25,6 +25,7 @@ use matrix_util::traits::CandleDataLoaderOps;
 use rayon::prelude::*;
 use std::sync::Arc;
 
+pub mod splice_tracks;
 pub mod graph_adj;
 pub mod pack;
 pub mod stats;
@@ -32,6 +33,10 @@ pub mod top_k;
 pub mod types;
 pub mod union_scatter;
 
+pub use splice_tracks::{
+    gem_samples_from_csc, top_k_genes_from_row, GemIndexedArgs, GemIndexedData,
+    GemMinibatchData, GemSample, GeneTrackMap,
+};
 pub use graph_adj::{build_sparse_edges_from_tensor, GraphCsr, SparseEdgeBatch};
 pub use pack::gather_per_feature_at_indices;
 pub use stats::{compute_log_selection_freq, sum_sample_values};
