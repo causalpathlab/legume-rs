@@ -333,7 +333,10 @@ pub fn save_model_metadata(
     parameters.save(format!("{}.safetensors", args.out))?;
 
     let mut extra = serde_json::Map::new();
-    extra.insert("latent".into(), "log-theta".into());
+    extra.insert(
+        "latent".into(),
+        crate::manifest::Latent::LogTheta.as_str().into(),
+    );
     extra.insert("delta_base".into(), "unspliced".into());
     extra.insert("n_genes".into(), n_genes.into());
     extra.insert("n_latent".into(), args.n_latent.into());

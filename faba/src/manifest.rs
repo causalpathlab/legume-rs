@@ -80,6 +80,57 @@ impl RunKind {
     }
 }
 
+/// What the per-cell table under a prefix actually holds.
+///
+/// This is NOT derivable from [`RunKind`], which is why it is a separate field.
+/// `gem-encoder` runs produced before 2026-07-21 wrote RAW LOGITS into
+/// `latent.parquet` under the same `model_type` as today's log θ, and the two
+/// are indistinguishable by shape — so a reader that goes by the kind alone gets
+/// a plausible wrong θ on those files. The stamped field is the only thing that
+/// separates them.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Latent {
+    /// `exp()` of a row is a probability vector summing to 1.
+    LogTheta,
+    /// Euclidean coordinates — not a composition, and nothing should `exp()` it.
+    Embedding,
+}
+
+impl Latent {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LogTheta => "log-theta",
+            Self::Embedding => "embedding",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "log-theta" => Some(Self::LogTheta),
+            "embedding" => Some(Self::Embedding),
+            _ => None,
+        }
+    }
+}
+
+/// The stamped latent contract, or `None` when the prefix does not state one.
+///
+/// `None` is meaningful rather than merely missing: on a topic run it says the
+/// prefix predates the contract, which is exactly the population whose
+/// `latent.parquet` may hold raw logits. Callers should treat it as "unverified"
+/// and fall back to whatever evidence they have, not as "log θ".
+#[must_use]
+pub fn latent(prefix: &str) -> Option<Latent> {
+    let read = |p: &str| -> Option<Latent> {
+        let text = std::fs::read_to_string(p).ok()?;
+        let v: Value = serde_json::from_str(&text).ok()?;
+        Latent::parse(v["latent"].as_str()?)
+    };
+    read(&path(prefix)).or_else(|| read(&legacy_path(prefix)))
+}
+
 /// A manifest that was found and understood.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Detected {

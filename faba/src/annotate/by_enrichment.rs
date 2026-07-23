@@ -74,6 +74,7 @@ use std::io::Write;
 use std::path::Path;
 
 use super::run::AnnotateArgs;
+use faba::manifest;
 
 /// Outputs land at `{out}.enrichment.*`, never at `{out}.{track}.*`, so running
 /// both modes at one prefix leaves both sets of results intact.
@@ -227,11 +228,15 @@ fn load_topic_model(prefix: &str) -> Result<TopicModel> {
         pb_gene_gp.ncols()
     );
 
+    // What the run says its per-cell table holds, read once and applied to both
+    // θ tables — they come from the same producer under the same contract.
+    let stated = manifest::latent(prefix);
+
     Ok(TopicModel {
         dictionary_gk: exp_log_beta(&dict.mat, &dict_path),
         pb_gene_gp,
-        pb_theta_pk: exp_log_theta(&pb_latent.mat, &pb_latent_path),
-        cell_theta_nk: exp_log_theta(&latent.mat, &latent_path),
+        pb_theta_pk: exp_log_theta(&pb_latent.mat, &pb_latent_path, stated),
+        cell_theta_nk: exp_log_theta(&latent.mat, &latent_path, stated),
         gene_names,
         cell_names: latent.rows,
         topic_names: dict.cols,
@@ -369,23 +374,57 @@ fn exp_log_beta(log_beta: &Mat, path: &str) -> Mat {
 /// Under `exp()` both show up as a row sum away from 1 and get reported. Under a
 /// softmax both come back as a perfectly plausible θ, and the annotation is
 /// quietly built on it.
-fn exp_log_theta(log_theta: &Mat, path: &str) -> Mat {
+///
+/// # Which evidence leads
+///
+/// `stated` is what `{prefix}.gem.json` says the file holds, and it leads: it is
+/// authoritative where the row-sum test is circumstantial. The test stays on as
+/// CORROBORATION, because the two can disagree — a manifest copied from a
+/// different run, or a hand-edited table — and a disagreement between what a run
+/// claims and what its numbers do is worth more than either alone.
+///
+/// `stated == None` is the case the row-sum test was written for: a prefix from
+/// before the contract, whose `latent.parquet` may hold raw logits. There the
+/// heuristic is all there is, and it keeps its known blind spot — logits that
+/// happen to sum near 1 pass — which is why the remedy is to re-run the
+/// producer rather than to trust the check.
+fn exp_log_theta(log_theta: &Mat, path: &str, stated: Option<manifest::Latent>) -> Mat {
     let theta = log_theta.map(f32::exp);
     let rows = theta.nrows();
-    if rows > 0 {
-        let mean_sum: f32 = (0..rows)
-            .map(|i| theta.row(i).iter().sum::<f32>())
-            .sum::<f32>()
-            / rows as f32;
-        if !(0.5..=2.0).contains(&mean_sum) {
-            warn!(
-                "exp() of {path} has mean row sum {mean_sum:.3}, not ~1 — this file does not look \
-                 like log θ. Runs produced before 2026-07-21 stored RAW LOGITS under the same \
-                 shape and the two are indistinguishable except here; check that \
-                 {{prefix}}.gem.json carries `\"latent\": \"log-theta\"`, and re-run \
-                 `faba gem-encoder` if it does not. Annotation continues on exp() as written."
-            );
-        }
+    if rows == 0 {
+        return theta;
+    }
+    let mean_sum: f32 = (0..rows)
+        .map(|i| theta.row(i).iter().sum::<f32>())
+        .sum::<f32>()
+        / rows as f32;
+    let looks_like_theta = (0.5..=2.0).contains(&mean_sum);
+
+    match stated {
+        // Claimed log θ and behaves like it: nothing to say.
+        Some(manifest::Latent::LogTheta) if looks_like_theta => {}
+        Some(manifest::Latent::LogTheta) => warn!(
+            "{path} is stamped `\"latent\": \"log-theta\"` but exp() of it has mean row sum \
+             {mean_sum:.3}, not ~1. The manifest and the table disagree — most likely the \
+             manifest came from a different run than the parquet. Annotation continues on \
+             exp() as written; re-run `faba gem-encoder` to get a matched pair."
+        ),
+        // The manifest says this prefix is an embedding run, so there should be
+        // no log θ here at all. Loud, because it means the enrichment path was
+        // pointed at the wrong producer's output.
+        Some(manifest::Latent::Embedding) => warn!(
+            "{path} belongs to a run stamped `\"latent\": \"embedding\"` — those are Euclidean \
+             coordinates, not log θ, and exp() of them is meaningless. This prefix is a \
+             `faba gem` embedding run; use --mode projection on it."
+        ),
+        None if looks_like_theta => {}
+        None => warn!(
+            "exp() of {path} has mean row sum {mean_sum:.3}, not ~1 — this file does not look \
+             like log θ, and its prefix carries no `latent` contract to check against. Runs \
+             produced before 2026-07-21 stored RAW LOGITS under the same shape. Re-run \
+             `faba gem-encoder` to get a stamped prefix. Annotation continues on exp() as \
+             written."
+        ),
     }
     theta
 }

@@ -113,7 +113,11 @@ fn exp_log_theta_recovers_the_simplex_exactly() {
     let theta = [0.2f32, 0.3, 0.5, 0.7, 0.2, 0.1];
     let log_theta = Mat::from_row_slice(2, 3, &theta.map(f32::ln));
 
-    let got = exp_log_theta(&log_theta, "latent.parquet");
+    let got = exp_log_theta(
+        &log_theta,
+        "latent.parquet",
+        Some(manifest::Latent::LogTheta),
+    );
     for (i, want) in theta.iter().enumerate() {
         let (r, c) = (i / 3, i % 3);
         assert!(
@@ -138,7 +142,7 @@ fn exp_log_theta_recovers_the_simplex_exactly() {
 fn exp_log_theta_leaves_a_broken_contract_visible_where_softmax_would_hide_it() {
     // (a) raw logits — what runs before 2026-07-21 stored under the same shape.
     let logits = Mat::from_row_slice(1, 3, &[2.0f32, -1.0, 0.5]);
-    let got = exp_log_theta(&logits, "latent.parquet");
+    let got = exp_log_theta(&logits, "latent.parquet", None);
     let sum: f32 = got.row(0).iter().sum();
     assert!(
         (sum - 1.0).abs() > 0.5,
@@ -151,14 +155,37 @@ fn exp_log_theta_leaves_a_broken_contract_visible_where_softmax_would_hide_it() 
     // (b) a pseudobulk that observed no cells: `write_pseudobulk_tables` leaves
     // its row all-zero, so exp() is all-ones and sums to K, not 1.
     let empty_pb = Mat::zeros(1, 4);
-    let got = exp_log_theta(&empty_pb, "pb_latent.parquet");
+    let got = exp_log_theta(&empty_pb, "pb_latent.parquet", None);
     assert!((got.row(0).iter().sum::<f32>() - 4.0).abs() < 1e-5);
 }
 
 #[test]
 fn exp_log_theta_leaves_an_empty_table_alone() {
     let empty = Mat::zeros(0, 4);
-    assert_eq!(exp_log_theta(&empty, "latent.parquet").nrows(), 0);
+    assert_eq!(exp_log_theta(&empty, "latent.parquet", None).nrows(), 0);
+}
+
+/// The stamped contract steers DIAGNOSTICS ONLY — it must never change a number.
+///
+/// This is the guard on reading the manifest at all: the point of consulting it
+/// was to stop telling the user to go open a file the code could read itself,
+/// not to give the manifest a vote on what θ is. If a stamp could alter the
+/// values, a manifest copied from the wrong run would silently rewrite the
+/// annotation instead of merely mis-describing it.
+#[test]
+fn the_stated_contract_never_changes_the_values() {
+    let logits = Mat::from_row_slice(2, 3, &[2.0f32, -1.0, 0.5, 0.1, 0.2, 0.3]);
+    let baseline = exp_log_theta(&logits, "latent.parquet", None);
+    for stated in [
+        Some(manifest::Latent::LogTheta),
+        Some(manifest::Latent::Embedding),
+    ] {
+        let got = exp_log_theta(&logits, "latent.parquet", stated);
+        assert!(
+            (&got - &baseline).amax() < 1e-9,
+            "{stated:?} changed the values; it may only change what is reported"
+        );
+    }
 }
 
 ///////////////
