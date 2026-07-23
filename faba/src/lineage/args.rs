@@ -443,6 +443,26 @@ pub struct LineageArgs {
     pub layout_space: LayoutSpace,
 
     #[arg(
+        long = "layout-pcs",
+        default_value_t = 50,
+        hide_short_help = true,
+        help = "Principal components carrying the --layout umap kNN graph and SGD init (0 = raw latent + random init)",
+        long_help = "How many principal components the t-UMAP layout runs on.\n\n\
+            Both the neighbourhood graph and the SGD starting coordinates are taken from\n\
+            the PCs of the layout features, not from the raw latent — scanpy builds its\n\
+            neighbours on `X_pca` and uwot seeds SGD from a spectral/PCA init for the same\n\
+            reason: SGD then only has to refine local structure, instead of also having to\n\
+            find the global arrangement from a random scatter (which leaves the macro-layout\n\
+            seed-dependent).\n\n\
+            The LEADING component is always dropped. These rows are nonnegative, so every\n\
+            cell loads positively on it and it carries the mean profile rather than any\n\
+            between-cell contrast; dropping it is the mean-removal a centering pass would do.\n\n\
+            Capped at the latent dimension, so a value above it simply means `all but the\n\
+            mean axis`. Set 0 to keep the graph on the raw latent and the init random."
+    )]
+    pub layout_pcs: usize,
+
+    #[arg(
         long = "cluster-space",
         value_enum,
         default_value_t = LayoutSpace::Identity,

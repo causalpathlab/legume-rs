@@ -554,7 +554,7 @@ pub fn annotate_by_projection(
     let (cell_umap, cell_phate) = if cfg.layout && n_cells >= 3 {
         let umap = cell_graph
             .as_ref()
-            .map(|g| umap_from_graph(g, n_cells, cfg.umap_epochs, cfg.seed));
+            .map(|g| umap_from_graph(g, &cell_u, n_cells, h, cfg.umap_epochs, cfg.seed));
         let phate = if cfg.phate {
             phate_cells(&cell_u, n_cells, h, &community, n_comm, cfg)
         } else {

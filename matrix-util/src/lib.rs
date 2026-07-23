@@ -19,6 +19,7 @@ pub mod ndarray_stat;
 pub mod ndarray_util;
 pub mod pair_graph;
 pub mod parquet;
+pub mod pca;
 pub mod principal_curve;
 pub mod principal_graph;
 pub mod progress;

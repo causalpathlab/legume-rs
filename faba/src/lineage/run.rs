@@ -372,6 +372,7 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
             curves,
             &cell_names,
             args.phate_knn,
+            args.layout_pcs,
             args.seed,
             &out,
         )?;
