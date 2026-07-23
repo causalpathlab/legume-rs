@@ -29,6 +29,14 @@ pub(crate) const DEFAULT_STRATIFY_ALPHA_PB: f32 = 0.5;
 /// starving deeply sequenced cells.
 pub(crate) const DEFAULT_STRATIFY_ALPHA_CELL: f32 = 0.5;
 
+/// Fraction of `epochs` the lineage warm-up (phase 1) gets when `--lineage-dag`
+/// is on; the DAG refine takes the remainder, so the two passes **share one**
+/// `epochs` budget instead of each taking the full count (which doubled the
+/// training). The warm-up must be long enough that the pb velocity readout can
+/// orient the DAG — that is exactly what this fraction trades. Off the lineage
+/// path phase 1 keeps the whole budget and the run is byte-identical.
+pub(crate) const LINEAGE_WARMUP_FRAC: f64 = 0.5;
+
 /// Hyperparameter / configuration bundle for [`fit`]. Constructed by
 /// each caller from its own CLI arguments — this crate doesn't import
 /// `clap`.
