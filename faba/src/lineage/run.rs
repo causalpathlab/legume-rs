@@ -162,6 +162,25 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
 
     // Marker node calls (before rooting, so `--root-type` can ground a root hint). Also
     // writes `{out}.lineage_annot.*`.
+    //
+    // The fit above is kind-agnostic — `cell_embedding.parquet` and `velocity.parquet`
+    // are an H-space pair from either producer, so k-means → MST → curves means the same
+    // thing on both. The MARKER call is not: it is the co-embedded nearest-centroid
+    // statistic, which is what `faba annotate --mode` exists to arbitrate, and on a topic
+    // model `annotate` now defaults AWAY from it. Say so rather than let the two commands
+    // answer the same question differently without comment.
+    if args.markers.is_some()
+        && faba::manifest::detect_reporting(prefix) == Some(faba::manifest::RunKind::Topic)
+    {
+        warn!(
+            "--markers on a TOPIC model ({}): the node calls below are the co-embedded \
+             nearest-centroid statistic, which `faba annotate` no longer defaults to for \
+             this kind of run. The trajectory itself is unaffected — only the names on its \
+             nodes. For the topic-native cell call, run `faba annotate --mode enrichment` \
+             on the same prefix and read the two together.",
+            faba::manifest::path(prefix)
+        );
+    }
     let node_calls = match (args.markers.as_deref(), raw_theta.as_ref()) {
         (Some(markers), Some(raw)) => Some(compute_node_calls(&AnnotateTrajArgs {
             prefix,

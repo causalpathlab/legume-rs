@@ -11,11 +11,16 @@
 //! a plausible wrong answer rather than an error. This file is the one place a
 //! consumer can ask.
 //!
-//! Both producers write it. On the consuming side only `faba annotate` reads it
-//! so far: `faba lineage` still takes a gem prefix blind, including for the
-//! co-embedded term-ORA in `lineage::traj_annotation`, which is the same call
-//! `annotate --mode` exists to arbitrate. Wiring it is the obvious next step and
-//! is why [`detect`] is public rather than private to `annotate`.
+//! Both producers write it; both consumers read it, through
+//! [`detect_reporting`].
+//!
+//! What they do with the answer differs, and correctly so. `faba annotate` picks
+//! its whole scorer from it, because projection and enrichment are different
+//! statistics over different files. `faba lineage` only caveats its `--markers`
+//! node calls: its fit reads `cell_embedding.parquet` + `velocity.parquet`,
+//! which are an H-space pair from either producer, so k-means → MST → curves
+//! means the same thing on both. Only the marker call is the co-embedded
+//! nearest-centroid statistic that the run kind bears on.
 //!
 //! # Why not `model.json`
 //!
@@ -30,7 +35,7 @@
 //! working; [`detect`] reports that it fell back.
 
 use anyhow::Context;
-use log::info;
+use log::{info, warn};
 use serde_json::{Map, Value};
 
 /// What kind of run produced a prefix.
@@ -116,6 +121,30 @@ pub fn detect(prefix: &str) -> Option<Detected> {
         });
     }
     read(&legacy_path(prefix)).map(|kind| Detected { kind, legacy: true })
+}
+
+/// [`detect`], plus the one complaint every consumer would otherwise repeat.
+///
+/// Consumers differ in what they DO with the kind — `annotate` picks a scorer,
+/// `lineage` decides whether to caveat its marker calls — but they do not differ
+/// in how they should react to a prefix written under the old name. Keeping that
+/// here is what stops them drifting into two different messages for one
+/// situation.
+///
+/// `None` still means "this prefix does not say", and each caller handles it
+/// their own way, because the remedy depends on what they were about to do.
+#[must_use]
+pub fn detect_reporting(prefix: &str) -> Option<RunKind> {
+    let found = detect(prefix)?;
+    if found.legacy {
+        warn!(
+            "{} predates the current manifest name; re-run the producer to get {}. \
+             Reading it anyway.",
+            legacy_path(prefix),
+            path(prefix)
+        );
+    }
+    Some(found.kind)
 }
 
 /// Write `{prefix}.gem.json`, stamping `model_type` from `kind`.
