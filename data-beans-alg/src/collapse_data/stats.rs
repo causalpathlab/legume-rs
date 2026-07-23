@@ -157,14 +157,16 @@ pub(super) fn collect_batch_stat_visitor(
 
 /// Per-feature-block kernel for [`optimize`]. Runs the DC-Poisson
 /// coordinate descent on a (sub)stat and returns a `CollapsedOut` whose row
-/// count matches `stat.num_genes()`. Progress is reported by the driver at
-/// block granularity — a descent iteration is cheap and fixed-cost, so it is
-/// not worth a tick of its own.
+/// count matches `stat.num_genes()`. When `prog` is `Some`, ticks it once per
+/// descent iteration (batched path only) so the driver's bar keeps moving
+/// while a block is mid-fit; `inc` is atomic, so concurrent blocks may share
+/// one bar.
 fn optimize_block(
     stat: &CollapsedStat,
     hyper: (f32, f32),
     num_iter: usize,
     out_target: CalibrateTarget,
+    prog: Option<&indicatif::ProgressBar>,
 ) -> anyhow::Result<CollapsedOut> {
     let (a0, b0) = hyper;
     let num_genes = stat.num_genes();
@@ -237,6 +239,12 @@ fn optimize_block(
             }
             gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
             gamma_param.calibrate_with(CalibrateTarget::MeanOnly);
+
+            // Tick per descent iteration so the bar keeps moving inside a
+            // block; `inc` is atomic, so concurrent blocks share one bar.
+            if let Some(p) = prog {
+                p.inc(1);
+            }
         }
 
         // Output calibration after loop. `out_target` decides whether the
@@ -319,57 +327,107 @@ pub(super) fn optimize(
 ) -> anyhow::Result<CollapsedOut> {
     let num_genes = stat.num_genes();
     let num_samples = stat.num_samples();
+    let num_batches = stat.num_batches();
 
-    // Block width targets a fixed per-plane footprint regardless of how
-    // many features the panel carries.
-    const BLOCK_ELEMS: usize = 32_000_000;
+    // Block width bounds a single working plane, not the whole fit. Each block
+    // holds ~19 `block_rows × num_samples` planes live (4 Gamma params × 3
+    // planes + sufficient stats + descent scratch), so a 2M-element plane
+    // (~8 MB in f32) caps a block at ~150 MB regardless of how many features
+    // the panel carries. `block_rows ≈ 2M/num_samples` keeps the plane fixed
+    // at every refinement level (few samples → wider blocks, same plane).
+    //
+    // The old 32M target barely blocked at all: at `k=1024` it gave
+    // `block_rows ≈ 31k`, so a ~41k-gene panel split into just 2 uneven blocks
+    // and peak sat at ~76% of the un-blocked cost. 2M gives ~21 even blocks.
+    const BLOCK_ELEMS: usize = 2_000_000;
     let block_rows = (BLOCK_ELEMS / num_samples.max(1)).clamp(1, num_genes.max(1));
     let n_blocks = num_genes.div_ceil(block_rows.max(1));
 
-    // Gene blocks are the reported unit: a descent iteration is cheap and
-    // fixed-cost, so per-iteration ticks would be noise, while a block visit
-    // is the coarse chunk of work worth a tick.
-    //
-    // With a single block there is nothing to count — `block_rows` scales
-    // with `1/num_samples`, so coarse levels collapse to one block and a
-    // `0/1` bar would sit at zero for the whole fit while advertising a
-    // `(0s)` ETA. A spinner says the same thing honestly: still working, no
-    // denominator implied. Small problems (e.g. topic/svd with modest pb
-    // counts) take this path too, where `select_rows` would clone the whole
-    // stat for no benefit.
-    if n_blocks <= 1 {
-        let spin = matrix_util::progress::new_spinner("{spinner} [{elapsed_precise}] {msg}")
-            .with_message(format!("{label} single gene-block"));
-        let out = optimize_block(stat, hyper, num_iter, out_target);
-        spin.finish_and_clear();
-        return out;
-    }
-
-    // `styled_progress_bar` carries the shared steady tick, so the bar stays
-    // visibly alive between blocks instead of freezing for a whole fit.
-    let prog = styled_progress_bar(n_blocks as u64, &format!("{label} gene-blocks"));
+    let dims = format!("{num_genes} genes × {num_samples} samples");
 
     // `posterior_sample` (topic path) reads a_stat/b_stat; bge (MeanOnly)
     // does not, so those planes can be discarded per block — that's what
     // keeps the assembled output from holding the full sufficient stats.
     let keep_stats = matches!(out_target, CalibrateTarget::All);
 
+    // The moving unit is one descent iteration whenever the batch-correction
+    // loop runs: each block ticks `num_iter` times (`optimize_block` handed the
+    // bar), so the bar is `n_blocks × num_iter` ticks and keeps advancing even
+    // while a single block is mid-fit. Without batches a block is one
+    // closed-form pass with no inner loop, so there the unit is the block and
+    // the loop below ticks once per finished block instead.
+    let batched = num_batches > 1;
+    let total = if batched {
+        n_blocks * num_iter
+    } else {
+        n_blocks
+    };
+    let msg = if batched {
+        format!("{label} opt-iters · {dims} · {n_blocks} blocks")
+    } else {
+        format!("{label} gene-blocks · {dims}")
+    };
+
+    // One block covers the whole panel: `select_rows` would clone the full
+    // stat for nothing, and there is no job to parallelize. A moving
+    // iteration bar (batched) still beats a spinner; without batches there is
+    // nothing to count, so a spinner avoids a `0/1` bar frozen at zero.
+    if n_blocks <= 1 {
+        if batched {
+            let prog = styled_progress_bar(total as u64, &msg);
+            let out = optimize_block(stat, hyper, num_iter, out_target, Some(&prog));
+            prog.finish_and_clear();
+            return out;
+        }
+        let spin = matrix_util::progress::new_spinner("{spinner} [{elapsed_precise}] {msg}")
+            .with_message(format!("{label} single gene-block · {dims}"));
+        let out = optimize_block(stat, hyper, num_iter, out_target, None);
+        spin.finish_and_clear();
+        return out;
+    }
+
+    // The gene axis is separable — a block's fit depends only on its own rows
+    // and the shared per-sample sizes, never on other genes — so the blocks
+    // are independent jobs run concurrently. Peak memory is now
+    // (rayon width × ~150 MB), bounded by the plane cap above rather than by
+    // the feature count.
+    let ranges: Vec<(usize, usize)> = (0..n_blocks)
+        .map(|b| {
+            let r0 = b * block_rows;
+            (r0, block_rows.min(num_genes - r0))
+        })
+        .collect();
+
+    let prog = styled_progress_bar(total as u64, &msg);
+
+    // `.map(..).collect::<Result<Vec>>()` preserves input order, so blocks
+    // reassemble in gene order. `prog.inc` is atomic: batched blocks tick per
+    // iteration inside `optimize_block`; otherwise tick once per finished block.
+    let outs = ranges
+        .par_iter()
+        .map(|&(r0, nr)| -> anyhow::Result<CollapsedOut> {
+            let sub = stat.select_rows(r0, nr);
+            let mut out_b =
+                optimize_block(&sub, hyper, num_iter, out_target, batched.then_some(&prog))?;
+            if !keep_stats {
+                // Free a_stat/b_stat now so the accumulated blocks never add
+                // up to the full sufficient-stat planes.
+                out_b.release_stats();
+            }
+            if !batched {
+                prog.inc(1);
+            }
+            Ok(out_b)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    prog.finish_and_clear();
+
     let mut mu_obs: Vec<GammaMatrix> = Vec::with_capacity(n_blocks);
     let mut mu_adj: Vec<GammaMatrix> = Vec::new();
     let mut mu_res: Vec<GammaMatrix> = Vec::new();
     let mut gam: Vec<GammaMatrix> = Vec::new();
     let mut del: Vec<GammaMatrix> = Vec::new();
-
-    let mut r0 = 0;
-    while r0 < num_genes {
-        let nr = block_rows.min(num_genes - r0);
-        let sub = stat.select_rows(r0, nr);
-        let mut out_b = optimize_block(&sub, hyper, num_iter, out_target)?;
-        if !keep_stats {
-            // Free a_stat/b_stat now so the accumulated blocks never add up
-            // to the full sufficient-stat planes.
-            out_b.release_stats();
-        }
+    for out_b in outs {
         mu_obs.push(out_b.mu_observed);
         if let Some(x) = out_b.mu_adjusted {
             mu_adj.push(x);
@@ -383,10 +441,7 @@ pub(super) fn optimize(
         if let Some(x) = out_b.delta {
             del.push(x);
         }
-        prog.inc(1);
-        r0 += nr;
     }
-    prog.finish_and_clear();
 
     let join = |v: Vec<GammaMatrix>| -> Option<GammaMatrix> {
         (!v.is_empty()).then(|| GammaMatrix::vconcat(v, keep_stats))
