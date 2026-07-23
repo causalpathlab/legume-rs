@@ -41,7 +41,6 @@ use log::{info, warn};
 use crate::gem_encoder::infer::Inferred;
 use crate::gem_encoder::write::write_cell_table;
 
-
 /// Remove the per-axis population mean from the velocity, returning the removed
 /// offset. Modifies `velocity` in place.
 ///

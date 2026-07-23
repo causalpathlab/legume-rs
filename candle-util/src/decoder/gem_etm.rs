@@ -355,7 +355,12 @@ impl GemEtmDecoder {
             .matmul(&self.topic_embeddings.t()?)? // [N*K, T]
             // + b_g at the cell's genes, the same value for every topic. MUST
             // match `full_logits_kg`, since `logz_11k` is computed from that.
-            .broadcast_add(&self.logit_bias.reshape((self.n_genes, 1))?.index_select(&flat, 0)?)? // [N*K, 1]
+            .broadcast_add(
+                &self
+                    .logit_bias
+                    .reshape((self.n_genes, 1))?
+                    .index_select(&flat, 0)?,
+            )? // [N*K, 1]
             .reshape((n, k, t))?; // [N, K, T]
         let beta_nkt = logits.broadcast_sub(logz_11k)?.exp()?; // [N, K, T]
 
@@ -391,8 +396,8 @@ impl GemEtmDecoder {
             .reshape((n, k))?; // [N, K]
 
         let nb_nk = nb_log_likelihood_elem(target.values, &mu_nk, &log_phi_nk)?; // [N, K]
-        // NOTE no Fisher weight here — `φ_g` already carries per-gene
-        // information weighting, so this stays a clean MLE (see `values_weight`).
+                                                                                 // NOTE no Fisher weight here — `φ_g` already carries per-gene
+                                                                                 // information weighting, so this stays a clean MLE (see `values_weight`).
         nb_nk.mul(target.mask)?.sum(1) // [N]
     }
 
@@ -414,10 +419,10 @@ impl GemEtmDecoder {
     ) -> Result<Tensor> {
         let p_nk = self.mixture_rate_nk(log_theta_nt, target.indices, track, logz_11k)?;
         let ll_nk = (target.values * (p_nk + 1e-20)?.log()?)?; // [N, K]
-        // `Σ w_g · x_g · log p_g` when a weight is supplied — exactly senna's
-        // `traits::indexed::forward_indexed_with_log_beta` form. Multinomial has
-        // no per-gene variance parameter, so this is where the weighting has to
-        // go if it goes anywhere.
+                                                               // `Σ w_g · x_g · log p_g` when a weight is supplied — exactly senna's
+                                                               // `traits::indexed::forward_indexed_with_log_beta` form. Multinomial has
+                                                               // no per-gene variance parameter, so this is where the weighting has to
+                                                               // go if it goes anywhere.
         let w = match target.values_weight {
             Some(w) => target.mask.mul(w)?,
             None => target.mask.clone(),

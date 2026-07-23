@@ -52,7 +52,10 @@ fn output_stays_inside_the_bound() {
 fn near_identity_well_inside_the_bound() {
     let dev = Device::Cpu;
     let x = Tensor::new(&[-1.0f32, -0.25, 0.0, 0.25, 1.0], &dev).unwrap();
-    let y: Vec<f32> = soft_clamp(&x, MASKED_LOGIT_CLAMP).unwrap().to_vec1().unwrap();
+    let y: Vec<f32> = soft_clamp(&x, MASKED_LOGIT_CLAMP)
+        .unwrap()
+        .to_vec1()
+        .unwrap();
     for (a, b) in [-1.0f32, -0.25, 0.0, 0.25, 1.0].iter().zip(y.iter()) {
         assert!((a - b).abs() < 0.01, "{a} distorted to {b}");
     }

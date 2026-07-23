@@ -140,7 +140,10 @@ fn visible_slot_values_do_reach_the_latent() {
         .iter()
         .zip(b[0].iter())
         .any(|(x, y)| (x - y).abs() > 1e-5);
-    assert!(moved, "changing a visible nascent value left the latent untouched");
+    assert!(
+        moved,
+        "changing a visible nascent value left the latent untouched"
+    );
 }
 
 /// In the `u→s` mode the mature track is entirely hidden, so the latent must be
@@ -156,11 +159,23 @@ fn nascent_to_mature_mode_ignores_mature_entirely() {
 
     let a = logits(
         &enc,
-        &case(&dev, &nas, &[9.0, 2.0, 1.0, 4.0, 7.0, 3.0, 8.0, 2.0], &all_on, &all_off),
+        &case(
+            &dev,
+            &nas,
+            &[9.0, 2.0, 1.0, 4.0, 7.0, 3.0, 8.0, 2.0],
+            &all_on,
+            &all_off,
+        ),
     );
     let b = logits(
         &enc,
-        &case(&dev, &nas, &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], &all_on, &all_off),
+        &case(
+            &dev,
+            &nas,
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            &all_on,
+            &all_off,
+        ),
     );
 
     for (ra, rb) in a.iter().zip(b.iter()) {
@@ -193,12 +208,15 @@ fn sum_pooling_still_depends_on_mature_when_nascent_is_hidden() {
 
     let a = logits(
         &enc,
-        &case(&dev, &nas, &[9.0, 2.0, 1.0, 4.0, 7.0, 3.0, 8.0, 2.0], &all_off, &all_on),
+        &case(
+            &dev,
+            &nas,
+            &[9.0, 2.0, 1.0, 4.0, 7.0, 3.0, 8.0, 2.0],
+            &all_off,
+            &all_on,
+        ),
     );
-    let b = logits(
-        &enc,
-        &case(&dev, &nas, &[1.0; 8], &all_off, &all_on),
-    );
+    let b = logits(&enc, &case(&dev, &nas, &[1.0; 8], &all_off, &all_on));
     let moved = a
         .iter()
         .zip(b.iter())
@@ -267,8 +285,12 @@ fn logits_stay_strictly_inside_the_bound() {
     // tanh reaches exactly 1 and the gradient underflows again — a real limit,
     // documented on `soft_clamp`, an order of magnitude past where the hard
     // clamp bit.)
-    let x = Tensor::from_vec(vec![-40.0f32, -16.0, -8.0, 0.0, 8.0, 16.0, 40.0], (1, 7), &dev)
-        .unwrap();
+    let x = Tensor::from_vec(
+        vec![-40.0f32, -16.0, -8.0, 0.0, 8.0, 16.0, 40.0],
+        (1, 7),
+        &dev,
+    )
+    .unwrap();
     let y: Vec<f32> = soft_clamp(&x, 8.0)
         .unwrap()
         .flatten_all()

@@ -75,11 +75,7 @@ fn the_two_tracks_of_a_gene_pool_onto_one_entry() {
     let x = csc(
         4,
         1,
-        &[
-            (0, true, 0, 4.0),
-            (2, true, 0, 2.0),
-            (2, false, 0, 3.0),
-        ],
+        &[(0, true, 0, 4.0), (2, true, 0, 2.0), (2, false, 0, 3.0)],
     );
 
     let s = gem_samples_from_csc(&x, &map, &w, 1);
@@ -159,11 +155,24 @@ fn the_batch_null_is_read_per_track_not_shared() {
         None,
         None,
         Some(vec![null]),
-    ).unwrap();
+    )
+    .unwrap();
     let mb = data.minibatch_ordered(0, 1, &dev).unwrap();
 
-    let nas: Vec<f32> = mb.nascent_residual.unwrap().flatten_all().unwrap().to_vec1().unwrap();
-    let mat: Vec<f32> = mb.mature_residual.unwrap().flatten_all().unwrap().to_vec1().unwrap();
+    let nas: Vec<f32> = mb
+        .nascent_residual
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1()
+        .unwrap();
+    let mat: Vec<f32> = mb
+        .mature_residual
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1()
+        .unwrap();
     assert_eq!(nas[0], 0.25, "nascent null must come from the NASCENT row");
     assert_eq!(mat[0], 4.0, "mature null must come from the MATURE row");
     assert!(
@@ -181,8 +190,15 @@ fn no_decoder_target_when_none_is_supplied() {
     let map = map_of(4);
     let w = vec![1.0f32; 4];
     let x = csc(4, 1, &[(0, true, 0, 3.0)]);
-    let data =
-        GemIndexedData::from_samples(gem_samples_from_csc(&x, &map, &w, 4), &map, 4, None, None, None).unwrap();
+    let data = GemIndexedData::from_samples(
+        gem_samples_from_csc(&x, &map, &w, 4),
+        &map,
+        4,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let mb = data.minibatch_ordered(0, 1, &dev).unwrap();
     assert!(mb.nascent_adjusted.is_none() && mb.mature_adjusted.is_none());
     assert!(mb.nascent_residual.is_none() && mb.mature_residual.is_none());
@@ -266,9 +282,7 @@ fn inference_residual_rows_must_match_the_sample_and_row_axes() {
 
     // One residual row per sample, each covering every feature row → fine.
     let good = vec![vec![1.0f32; 6], vec![1.0f32; 6]];
-    assert!(
-        GemIndexedData::from_samples(samples.clone(), &map, 3, None, None, Some(good)).is_ok()
-    );
+    assert!(GemIndexedData::from_samples(samples.clone(), &map, 3, None, None, Some(good)).is_ok());
 
     // Too few rows for the samples.
     let err = GemIndexedData::from_samples(

@@ -125,7 +125,10 @@ impl GemMinibatchData {
     /// run uploads incrementally rather than holding the epoch resident.
     pub fn to_device(&self, dev: &Device) -> anyhow::Result<GemMinibatchData> {
         let opt = |t: &Option<Tensor>| -> anyhow::Result<Option<Tensor>> {
-            t.as_ref().map(|x| x.to_device(dev)).transpose().map_err(Into::into)
+            t.as_ref()
+                .map(|x| x.to_device(dev))
+                .transpose()
+                .map_err(Into::into)
         };
         Ok(GemMinibatchData {
             gene_indices: self.gene_indices.to_device(dev)?,

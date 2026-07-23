@@ -96,7 +96,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// the wrong one does not error; it yields a plausible but wrong `θ`.
 pub const MODEL_TYPE: &str = "gem-encoder-softmax";
 
-
 /// Per-gene likelihood for the masked imputation loss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GemLikelihood {
@@ -243,9 +242,16 @@ fn draw_masks(
     dev: &Device,
 ) -> candle_core::Result<MaskDraw> {
     let valid = &mb.slot_valid;
-    let mature_obs = mb.mature_observed.gt(0.0)?.to_dtype(DType::F32)?.mul(valid)?;
+    let mature_obs = mb
+        .mature_observed
+        .gt(0.0)?
+        .to_dtype(DType::F32)?
+        .mul(valid)?;
     let nascent_obs = if nascent_nonzero_only {
-        mb.nascent_observed.gt(0.0)?.to_dtype(DType::F32)?.mul(valid)?
+        mb.nascent_observed
+            .gt(0.0)?
+            .to_dtype(DType::F32)?
+            .mul(valid)?
     } else {
         valid.clone()
     };
@@ -375,7 +381,6 @@ fn score_track(
     let count = masked.sum_all()?.to_scalar::<f32>()?;
     Ok((ll, count))
 }
-
 
 /// Train the splice-aware masked model over per-level pseudobulk data.
 ///
@@ -580,11 +585,15 @@ pub fn train_masked_gem(
             .mean_all()?
             .to_scalar::<f32>()?
             .sqrt();
-        scores.mature_llik.push(EpochAcc::per(acc.mature_ll, acc.mature_n));
+        scores
+            .mature_llik
+            .push(EpochAcc::per(acc.mature_ll, acc.mature_n));
         scores
             .nascent_llik
             .push(EpochAcc::per(acc.nascent_ll, acc.nascent_n));
-        scores.mechanism_llik.push(EpochAcc::per(acc.mech_ll, acc.mech_n));
+        scores
+            .mechanism_llik
+            .push(EpochAcc::per(acc.mech_ll, acc.mech_n));
         scores.delta_norm.push(delta_norm);
 
         prog.set_message(format!(
@@ -713,7 +722,12 @@ pub struct ThetaFitConfig {
 
 impl Default for ThetaFitConfig {
     fn default() -> Self {
-        Self { n_steps: 16, max_shrink: 50, n_keep: 8, mean: ThetaMean::Arithmetic }
+        Self {
+            n_steps: 16,
+            max_shrink: 50,
+            n_keep: 8,
+            mean: ThetaMean::Arithmetic,
+        }
     }
 }
 
@@ -806,8 +820,16 @@ pub fn fit_theta_posterior(
     // is held out.
     let valid = &mb.slot_valid;
     let observed = match track {
-        Track::Mature => mb.mature_observed.gt(0.0)?.to_dtype(DType::F32)?.mul(valid)?,
-        Track::Nascent => mb.nascent_observed.gt(0.0)?.to_dtype(DType::F32)?.mul(valid)?,
+        Track::Mature => mb
+            .mature_observed
+            .gt(0.0)?
+            .to_dtype(DType::F32)?
+            .mul(valid)?,
+        Track::Nascent => mb
+            .nascent_observed
+            .gt(0.0)?
+            .to_dtype(DType::F32)?
+            .mul(valid)?,
     };
 
     // Fit against the DECODER TARGET, the same selection `score_track` makes:
@@ -842,7 +864,7 @@ pub fn fit_theta_posterior(
 
     let lnpdf = |z: &Tensor| -> candle_core::Result<Tensor> {
         let log_theta = theta_log_simplex(z)?; // [N, T]
-        // log p_nk = logsumexp_t ( log θ_nt + log β_nkt ), stabilized.
+                                               // log p_nk = logsumexp_t ( log θ_nt + log β_nkt ), stabilized.
         let sum_nkt = lb_nkt.broadcast_add(&log_theta.unsqueeze(1)?)?;
         let m = sum_nkt.max_keepdim(2)?;
         let log_p = (m.squeeze(2)? + sum_nkt.broadcast_sub(&m)?.exp()?.sum(2)?.log()?)?;

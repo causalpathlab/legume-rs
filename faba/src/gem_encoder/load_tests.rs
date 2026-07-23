@@ -31,7 +31,10 @@ fn non_count_rows_are_rejected_not_silently_called_spliced() {
     // right modality, wrong channel
     assert_eq!(split_count_row("ENSG001_BRCA2/count/total"), None);
     // sub-gene resolution: this model is gene-level, so a site row is not pairable
-    assert_eq!(split_count_row("ENSG001_BRCA2/count/chr1:100/spliced"), None);
+    assert_eq!(
+        split_count_row("ENSG001_BRCA2/count/chr1:100/spliced"),
+        None
+    );
     // not a feature row at all
     assert_eq!(split_count_row("weird_name"), None);
 }

@@ -55,7 +55,11 @@ impl Umap {
     /// default standard-UMAP kernel. Other fields keep their defaults.
     #[must_use]
     pub fn tumap() -> Self {
-        Self { a: 1.0, b: 1.0, ..Self::default() }
+        Self {
+            a: 1.0,
+            b: 1.0,
+            ..Self::default()
+        }
     }
 }
 

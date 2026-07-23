@@ -38,7 +38,10 @@ fn mad_gates_reach_the_config_and_are_on_by_default() {
     off.qc_mad_on_genes = false;
     off.qc_mad_on_counts = false;
     let cfg = off.to_config().unwrap();
-    assert!(!cfg.mad_on_n_genes && !cfg.mad_on_counts, "the gates must be settable OFF");
+    assert!(
+        !cfg.mad_on_n_genes && !cfg.mad_on_counts,
+        "the gates must be settable OFF"
+    );
 }
 
 /// `--qc-auto-cutoff` must reach `QcConfig` and stay off by default.

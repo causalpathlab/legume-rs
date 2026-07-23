@@ -515,4 +515,3 @@ fn write_outputs(
     );
     Ok(())
 }
-

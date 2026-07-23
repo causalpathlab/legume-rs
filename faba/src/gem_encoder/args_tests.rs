@@ -86,7 +86,10 @@ fn mask_fraction_must_be_a_proper_fraction() {
     for bad in [-0.1, 1.0, 1.5] {
         let mut a = base();
         a.mask_fraction = bad;
-        assert!(a.validate().is_err(), "mask_fraction {bad} should be rejected");
+        assert!(
+            a.validate().is_err(),
+            "mask_fraction {bad} should be rejected"
+        );
     }
     let mut a = base();
     a.mask_fraction = 0.15;

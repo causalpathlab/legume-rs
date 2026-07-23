@@ -453,7 +453,6 @@ pub struct GemEncoderArgs {
 }
 
 impl GemEncoderArgs {
-
     /// The gene matrices to load.
     pub fn genes(&self) -> anyhow::Result<&[Box<str>]> {
         anyhow::ensure!(

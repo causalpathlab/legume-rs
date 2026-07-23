@@ -6,12 +6,12 @@
 //! RNA-velocity ODE. Data is simulated FROM that ODE, so the ground truth is
 //! known and recovery is measurable rather than asserted.
 
-use candle_util::vae::masked_gem::*;
+use candle_util::candle_core::{DType, Device};
+use candle_util::candle_nn::{VarBuilder, VarMap};
 use candle_util::data::indexed::{GemIndexedArgs, GemIndexedData, GeneTrackMap};
 use candle_util::decoder::gem_etm::{GemEtmDecoder, Track};
 use candle_util::encoder::gem_encoder::{GemIndexedEncoder, GemIndexedEncoderArgs};
-use candle_util::candle_core::{DType, Device};
-use candle_util::candle_nn::{VarBuilder, VarMap};
+use candle_util::vae::masked_gem::*;
 use nalgebra::DMatrix;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -64,9 +64,7 @@ fn simulate(seed: u64) -> Sim {
     }
 
     // Per-gene splicing/degradation ratio, log-normal around 1.
-    let log_ratio: Vec<f32> = (0..G)
-        .map(|_| (rng.random::<f32>() - 0.5) * 2.4)
-        .collect();
+    let log_ratio: Vec<f32> = (0..G).map(|_| (rng.random::<f32>() - 0.5) * 2.4).collect();
     let ratio: Vec<f32> = log_ratio.iter().map(|x| x.exp()).collect();
 
     let mut counts = DMatrix::<f32>::zeros(N, 2 * G);
