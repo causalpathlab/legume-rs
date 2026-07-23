@@ -400,17 +400,7 @@ pub struct AnnotateArgs {
 /// said what they wanted, and the old behaviour stays reachable for comparing
 /// against previously published calls.
 fn resolve_mode(prefix: &str, requested: Option<Mode>) -> Mode {
-    let found = manifest::detect(prefix);
-    if let Some(manifest::Detected { legacy: true, .. }) = found {
-        warn!(
-            "{} predates the current manifest name; re-run the producer to get {}. \
-             Reading it anyway.",
-            manifest::legacy_path(prefix),
-            manifest::path(prefix)
-        );
-    }
-
-    match (requested, found.map(|d| d.kind)) {
+    match (requested, manifest::detect_reporting(prefix)) {
         (Some(Mode::Projection), Some(manifest::RunKind::Topic)) => {
             warn!(
                 "--mode projection on a TOPIC model ({} reports a gem-encoder run). \
