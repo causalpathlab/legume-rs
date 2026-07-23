@@ -564,8 +564,14 @@ pub fn gather_snp_allele_counts_by_gene(
                 let mut local_depth = Vec::new();
 
                 for site in sites.iter() {
-                    let feature_name: Box<str> =
-                        format!("{}/SNP/{}:{}", gene_key, site.chr, site.pos).into();
+                    // `{gene}/snp/{chr}:{pos}` — the SAME row name goes into both
+                    // `_snp_alt` and `_snp_depth`, so BAF is the ratio of the two
+                    // matrices and the row carries no channel field.
+                    let feature_name = faba::feature_name::unit_row(
+                        &gene_key,
+                        faba::feature_name::SNP,
+                        &format!("{}:{}", site.chr, site.pos),
+                    );
 
                     if let Some(cell_counts) = stat_map.stratified_frequency_at(site.pos) {
                         for (cb, counts) in cell_counts {

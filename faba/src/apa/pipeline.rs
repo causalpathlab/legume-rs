@@ -101,7 +101,7 @@ pub fn run_simple(args: &CountApaArgs) -> anyhow::Result<()> {
             .get(&x.gene)
             .map(|gff| format!("{}_{}", gff.gene_id, gff.gene_name))
             .unwrap_or_else(|| format!("{}", x.gene));
-        format!("{}/pA/{}:{}", gene_part, x.chr, x.start).into_boxed_str()
+        crate::apa::site_id(&gene_part, &format!("{}:{}", x.chr, x.start))
     };
 
     let cutoffs = args.qc_cutoffs();
@@ -490,14 +490,7 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
         let keep_gene = |g: &str| sites_per_gene.get(g).copied().unwrap_or(0) >= 2;
         let (before_c, before_a) = (all_counts.len(), all_annotations.len());
         all_annotations.retain(|a| keep_gene(&a.gene_name));
-        all_counts.retain(|c| {
-            let gene = c
-                .site_id
-                .split_once("/pA/")
-                .map(|(g, _)| g)
-                .unwrap_or(&c.site_id);
-            keep_gene(gene)
-        });
+        all_counts.retain(|c| keep_gene(crate::apa::site_gene(&c.site_id)));
         info!(
             "drop-single-component: {} -> {} counts, {} -> {} sites",
             before_c,
@@ -1004,13 +997,8 @@ fn compute_and_write_pdui(
     let mut counts_by_batch_gene: FxHashMap<(u32, Box<str>), Vec<&CellSiteCount>> =
         FxHashMap::default();
     for c in all_counts {
-        let gene_name = c
-            .site_id
-            .find("/pA/")
-            .map(|pos| &c.site_id[..pos])
-            .unwrap_or(c.site_id.as_ref());
         counts_by_batch_gene
-            .entry((c.batch, gene_name.into()))
+            .entry((c.batch, crate::apa::site_gene(&c.site_id).into()))
             .or_default()
             .push(c);
     }

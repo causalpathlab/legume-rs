@@ -20,7 +20,9 @@
 //! - `channel`  — the innermost (last) field: the two read-states that modality
 //!                contrasts (gene counts split [`SPLICED`]/[`UNSPLICED`]; m6A
 //!                [`METHYLATED`]/[`UNMETHYLATED`]; ATOI [`EDITED`]/[`UNEDITED`];
-//!                APA [`PROXIMAL`]/[`DISTAL`]; SNP [`ALT`]/[`REF`]).
+//!                APA [`PROXIMAL`]/[`DISTAL`]; SNP [`ALT`]/[`REF`]). Omitted by
+//!                the two producers whose contrast lives across matrices rather
+//!                than within the row — see [`unit_row`].
 //!
 //! Putting the channel last means a unit's two channel rows share a contiguous
 //! prefix (the unit), and "strip the trailing field" recovers the unit.
@@ -70,6 +72,25 @@ pub fn feature_row(gene: &str, modality: &str, channel: &str, subunit: Option<&s
         Some(s) => format!("{gene}/{modality}/{s}/{channel}").into(),
         None => format!("{gene}/{modality}/{channel}").into(),
     }
+}
+
+/// Format a channel-less UNIT row `{gene}/{modality}/{subunit}`.
+///
+/// Two producers name a unit with no channel, because their contrast lives
+/// ACROSS matrices rather than within the row:
+///
+/// - the APA poly-A mixture, `{gene}/apa/{component}` — usage is relative
+///   across the components of a gene, so no component has a counterpart channel;
+/// - SNP, `{gene}/snp/{chr}:{pos}` — the same row name is written once into
+///   `{batch}_snp_alt` and once into `{batch}_snp_depth`, and BAF is the ratio
+///   of the two matrices.
+///
+/// Such a row is indistinguishable from a gene-level one under
+/// [`parse_feature_row`]: both are three fields, and the subunit lands in the
+/// `channel` slot. A consumer has to know which matrix it is reading. Prefer
+/// [`feature_row`] wherever the modality does have two channels.
+pub fn unit_row(gene: &str, modality: &str, subunit: &str) -> Box<str> {
+    format!("{gene}/{modality}/{subunit}").into()
 }
 
 /// A feature row split into its fields, borrowing from the source string.
