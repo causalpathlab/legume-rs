@@ -146,6 +146,100 @@ pub fn batched_ess_steps(
     Ok((current, cur_lnpdf))
 }
 
+/// Run `n_steps` ESS transitions and return the posterior MEAN and SD of
+/// `transform(state)` over the trailing `n_keep` states — the estimator
+/// [`batched_ess_steps`] cannot give, since it keeps only the final draw.
+///
+/// # Why the transform is applied inside, not after
+///
+/// The estimand is usually a nonlinear map of the state: for
+/// [`crate::vae::masked_gem`] it is `θ = softmax(z)`, a composition. Since
+/// `softmax(mean z) ≠ mean softmax(z)` and only the second is `E[θ]`, averaging
+/// in `z` and mapping afterwards returns a point systematically SHARPER than
+/// the posterior mean, biased toward whichever coordinate leads — worst exactly
+/// where the likelihood is thinnest. Mapping inside the accumulator is what
+/// makes the average the quantity the caller asked for.
+///
+/// # What the SD is, and is not
+///
+/// Consecutive ESS states are autocorrelated, so `n_keep` retained states carry
+/// FEWER than `n_keep` independent draws and this SD is a lower bound on the
+/// posterior spread. It ranks rows honestly — a pinned estimate reads tighter
+/// than a floating one — but it is not a calibrated posterior standard
+/// deviation and should not be used as one.
+///
+/// The first `n_steps - n_keep` states are discarded: warm-started or not, the
+/// early transitions are the ones still travelling, and averaging them in drags
+/// the estimate back toward the initialization.
+///
+/// # Arguments
+/// * `init` - [N, K] initial parameter values (e.g. from an encoder)
+/// * `lnpdf` - batched log-likelihood: [N, K] → [N]
+/// * `n_steps` - total ESS transitions
+/// * `n_keep` - trailing states averaged, clamped to `[1, n_steps]`
+/// * `max_shrink` - safety cap on slice iterations per step (e.g. 50)
+/// * `transform` - map applied to each retained state before accumulating
+///
+/// # Returns
+/// `(mean, sd)`, both shaped like `transform`'s output. With `n_keep == 1` the
+/// mean is the final state and the SD is exactly zero.
+pub fn batched_ess_posterior<F>(
+    init: &Tensor,
+    lnpdf: &impl Fn(&Tensor) -> Result<Tensor>,
+    n_steps: usize,
+    n_keep: usize,
+    max_shrink: usize,
+    transform: F,
+) -> Result<(Tensor, Tensor)>
+where
+    F: Fn(&Tensor) -> Result<Tensor>,
+{
+    let n_steps = n_steps.max(1);
+    let keep = n_keep.clamp(1, n_steps);
+    let burn = n_steps - keep;
+
+    let dev = init.device();
+    let shape = init.dims().to_vec();
+
+    let mut current = init.clone();
+    let mut cur_lnpdf = lnpdf(&current)?;
+
+    let mut retained: Vec<Tensor> = Vec::with_capacity(keep);
+    for step in 0..n_steps {
+        let prior_samples = Tensor::randn(0f32, 1f32, shape.as_slice(), dev)?;
+        let (new_params, new_lnpdf) =
+            batched_ess_step(&current, &prior_samples, lnpdf, &cur_lnpdf, max_shrink)?;
+        current = new_params;
+        cur_lnpdf = new_lnpdf;
+        if step >= burn {
+            retained.push(transform(&current)?);
+        }
+    }
+
+    let m = retained.len();
+    let mut sum = retained[0].zeros_like()?;
+    for t in &retained {
+        sum = sum.add(t)?;
+    }
+    let mean = sum.affine(1.0 / m as f64, 0.0)?;
+
+    if m < 2 {
+        let sd = mean.zeros_like()?;
+        return Ok((mean, sd));
+    }
+
+    // Two-pass. The running sum-of-squares form loses its low bits exactly when
+    // the spread is small relative to the mean, which is the regime this SD is
+    // read in — a tight cell is the interesting case, not the rounding error.
+    let mut ss = mean.zeros_like()?;
+    for t in &retained {
+        ss = ss.add(&t.sub(&mean)?.sqr()?)?;
+    }
+    let sd = ss.affine(1.0 / (m - 1) as f64, 0.0)?.sqrt()?;
+
+    Ok((mean, sd))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
