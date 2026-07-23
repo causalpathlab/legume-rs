@@ -25,10 +25,12 @@
 //! when its inputs are absent (a spliced-only gem run, or `--delta-l2 0` on data
 //! with no unspliced rows).
 //!
-//! Everything above is `--mode projection`, the default. `--mode enrichment` is a
-//! second, single-pass path for the TOPIC models `faba gem-encoder` / `gem-topic`
-//! fit, where the projection geometry does not hold: see
-//! [`super::by_enrichment`].
+//! Everything above is `--mode projection`. `--mode enrichment` is a second,
+//! single-pass path for the TOPIC models `faba gem-encoder` / `gem-topic` fit,
+//! where the projection geometry does not hold: see [`super::by_enrichment`].
+//!
+//! Neither is *the* default — [`resolve_mode`] reads `{from}.model.json` and
+//! picks, because choosing wrong here does not error, it just answers wrong.
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
@@ -92,10 +94,17 @@ pub struct AnnotateArgs {
     #[arg(
         long,
         value_enum,
-        default_value_t = Mode::Projection,
-        help = "How markers become a call: nearest-centroid, or enrichment over a topic dictionary",
+        help = "How markers become a call [default: chosen from {from}.model.json]",
         long_help = "How the marker panel becomes a cell-type call.\n\n\
-            `projection` (default) is for a `faba gem` EMBEDDING run.\n\
+            DEFAULT: chosen from the run itself, because the wrong statistic here does not \
+            error -- it produces a plausible wrong answer.\n\
+            `faba gem-encoder` writes {from}.model.json with a `gem-encoder-*` model_type; \
+            `faba gem` writes no model.json at all,\n\
+            so the file's presence separates a topic model from an embedding run exactly.\n\
+            Topic model -> `enrichment`, embedding run -> `projection`.\n\
+            Pass --mode to override; overriding to `projection` on a topic model warns \
+            but proceeds.\n\n\
+            `projection` is for a `faba gem` EMBEDDING run.\n\
             It builds each type's centroid from its markers' co-embedded feature vectors\n\
             and hands every cell to the nearest one.\n\
             Reads {from}.feature_embedding.parquet + {from}.cell_embedding.parquet;\n\
@@ -118,7 +127,7 @@ pub struct AnnotateArgs {
             and never forms that inner product.\n\n\
             `enrichment` is single-pass: --track does not apply to it"
     )]
-    pub mode: Mode,
+    pub mode: Option<Mode>,
 
     #[arg(
         long,
@@ -375,15 +384,81 @@ pub struct AnnotateArgs {
     pub min_panel_coverage: f32,
 }
 
+/// Is this prefix a TOPIC-model run (`faba gem-encoder` / `gem-topic`)?
+///
+/// `gem-encoder` writes `{prefix}.model.json` with a `gem-encoder-*`
+/// `model_type`; `faba gem` writes no `model.json` at all (see the NOTE in
+/// `gem::run`, which also declines to write a co-embedding). So the file
+/// separates the two run kinds exactly, and the `model_type` prefix keeps
+/// working across simplex maps — `gem-encoder-softmax` today, `gem-encoder-sbp`
+/// on older files, both topic models.
+///
+/// Unreadable or absent means "not a topic model", which reproduces the
+/// behaviour every pre-existing `faba gem` prefix already had.
+fn is_topic_model(prefix: &str) -> bool {
+    let path = format!("{prefix}.model.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| {
+            v["model_type"]
+                .as_str()
+                .map(|s| s.starts_with("gem-encoder"))
+        })
+        .unwrap_or(false)
+}
+
+/// Pick the scorer when `--mode` was not given, and object when an explicit
+/// choice contradicts the run.
+///
+/// This defaults rather than erroring because the failure it guards is SILENT.
+/// Nearest-centroid on a topic model forms `⟨z_c, ρ_g⟩`, but `β` is
+/// `softmax_g(b_g + ⟨α_t, ρ_g⟩)`, which depends only on gene-to-gene
+/// differences: `b_g` absorbs the level, so the absolute cell↔gene direction is
+/// a gauge the likelihood never pins. The call comes back plausible and wrong.
+/// A default that reads the run is the only thing that closes that path for
+/// someone who did not know to look.
+///
+/// An explicit `--mode projection` on a topic model WARNS and proceeds: the user
+/// said what they wanted, and the old behaviour stays reachable for comparing
+/// against previously published calls.
+fn resolve_mode(prefix: &str, requested: Option<Mode>) -> Mode {
+    let topic = is_topic_model(prefix);
+    match requested {
+        Some(Mode::Projection) if topic => {
+            warn!(
+                "--mode projection on a TOPIC model ({prefix}.model.json reports a gem-encoder \
+                 run). Nearest-centroid forms a cell-gene inner product that a topic model does \
+                 not identify, so the call will look reasonable and not mean what it says. \
+                 Prefer --mode enrichment, or drop --mode to let it be chosen."
+            );
+            Mode::Projection
+        }
+        Some(m) => m,
+        None => {
+            let m = if topic {
+                Mode::Enrichment
+            } else {
+                Mode::Projection
+            };
+            info!("--mode not given; using {m:?} for this run (topic model: {topic})");
+            m
+        }
+    }
+}
+
 pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
     let prefix = args.from.as_ref();
     let out = args.out.as_deref().unwrap_or(prefix).to_string();
     mkdir_parent(&out)?;
+    let mode = resolve_mode(prefix, args.mode);
 
     // Enrichment is a different reading of the run, not a different scorer on the
     // same tables — it reads gem-encoder's four topic tables and shares only the
     // marker panel and the CLI. So it forks here rather than inside the loop.
-    if args.mode == Mode::Enrichment {
+    if mode == Mode::Enrichment {
         // The spliced/velocity split belongs to the co-embedded feature axis,
         // which this path never touches. Enrichment needs a (β, θ) couple — a
         // gene ranking per factor AND a membership on the simplex to carry the
@@ -550,3 +625,7 @@ fn annotate_track(
         cfg,
     )
 }
+
+#[cfg(test)]
+#[path = "run_tests.rs"]
+mod tests;
