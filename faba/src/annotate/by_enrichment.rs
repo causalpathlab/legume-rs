@@ -249,7 +249,7 @@ fn required(prefix: &str, suffix: &str) -> Result<String> {
          .pb_latent.parquet come from a `faba gem-encoder` (`gem-topic`) run — point \
          `-f/--from` at that run's `-o` prefix.\n\
          A `faba gem` embedding run writes none of them; annotate one of those with \
-         `--mode projection` (the default)."
+         `--mode projection`."
     );
     Ok(path)
 }
@@ -352,7 +352,7 @@ fn exp_log_beta(log_beta: &Mat, path: &str) -> Mat {
 
 /// `exp()` a `[·, K]` log-θ table back onto the simplex.
 ///
-/// `{out}.model.json` states the contract explicitly — `"latent": "log-theta"` —
+/// `{out}.gem.json` states the contract explicitly — `"latent": "log-theta"` —
 /// so θ is `exp()`, **not** a softmax.
 ///
 /// The distinction matters precisely because on a row that honours the contract
@@ -382,7 +382,7 @@ fn exp_log_theta(log_theta: &Mat, path: &str) -> Mat {
                 "exp() of {path} has mean row sum {mean_sum:.3}, not ~1 — this file does not look \
                  like log θ. Runs produced before 2026-07-21 stored RAW LOGITS under the same \
                  shape and the two are indistinguishable except here; check that \
-                 {{prefix}}.model.json carries `\"latent\": \"log-theta\"`, and re-run \
+                 {{prefix}}.gem.json carries `\"latent\": \"log-theta\"`, and re-run \
                  `faba gem-encoder` if it does not. Annotation continues on exp() as written."
             );
         }

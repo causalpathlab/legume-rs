@@ -121,7 +121,7 @@ pub struct GemEncoderArgs {
                      {out}.splice_ratio_qc.parquet           per-gene model vs observed ratio\n\
                      {out}.dispersion.parquet                gene × 2 NB dispersion\n\
                      {out}.log_likelihood.parquet            per-epoch training trace\n\
-                     {out}.safetensors + {out}.model.json    weights + architecture\n\
+                     {out}.safetensors + {out}.gem.json    weights + architecture\n\
                      \n\
                      NOTE the per-cell tables (latent, cell_embedding, velocity,\n\
                      velocity_factor, latent_mature, latent_nascent) may contain FEWER ROWS\n\

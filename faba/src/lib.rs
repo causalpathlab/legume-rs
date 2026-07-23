@@ -14,6 +14,11 @@ pub mod feature_name;
 
 pub mod gem;
 
+/// `{out}.gem.json` — the one place a consumer can ask which faba program
+/// produced a prefix. Written by every gem-family producer, read by every
+/// consumer that would otherwise have to guess.
+pub mod manifest;
+
 /// `faba gem-encoder` — masked generative embedding of the nascent→mature
 /// transition (`u + δ → s`). Binary entries: [`gem_encoder::run::run_gem_encoder`]
 /// and [`gem_encoder::args::GemEncoderArgs`].

@@ -203,7 +203,7 @@ pub struct GemEtmDecoder {
     /// Nascent-base is the measured choice, not a convention: it is what leaves
     /// only the DERIVED track's likelihood able to move `δ`. Flipping it halved
     /// the splice-ratio check (r = 0.144 / 0.178 against 0.331–0.361 across five
-    /// nascent-base configs), and `{out}.model.json` records it as
+    /// nascent-base configs), and `{out}.gem.json` records it as
     /// `"delta_base": "unspliced"`.
     feature_embeddings: Tensor,
     /// `δ [G, H]` splice-ratio offset — the **same** handle as the encoder.

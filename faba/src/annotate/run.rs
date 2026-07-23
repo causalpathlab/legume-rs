@@ -29,7 +29,7 @@
 //! single-pass path for the TOPIC models `faba gem-encoder` / `gem-topic` fit,
 //! where the projection geometry does not hold: see [`super::by_enrichment`].
 //!
-//! Neither is *the* default — [`resolve_mode`] reads `{from}.model.json` and
+//! Neither is *the* default — [`resolve_mode`] reads `{from}.gem.json` and
 //! picks, because choosing wrong here does not error, it just answers wrong.
 
 use anyhow::{Context, Result};
@@ -38,6 +38,7 @@ use log::{info, warn};
 use std::path::Path;
 
 use faba::gem::marker_embedding::{load_gene_embedding, Modality};
+use faba::manifest;
 use graph_embedding_util::type_annotation::{
     annotate_embeddings_ora, Abstain, InputEmbeddings, MarkerBootstrapConfig, TermOraConfig,
 };
@@ -94,13 +95,13 @@ pub struct AnnotateArgs {
     #[arg(
         long,
         value_enum,
-        help = "How markers become a call [default: chosen from {from}.model.json]",
+        help = "How markers become a call [default: chosen from {from}.gem.json]",
         long_help = "How the marker panel becomes a cell-type call.\n\n\
             DEFAULT: chosen from the run itself, because the wrong statistic here does not \
             error -- it produces a plausible wrong answer.\n\
-            `faba gem-encoder` writes {from}.model.json with a `gem-encoder-*` model_type; \
-            `faba gem` writes no model.json at all,\n\
-            so the file's presence separates a topic model from an embedding run exactly.\n\
+            Both producers write {from}.gem.json naming themselves; \
+            the model_type field says which one ran,\n\
+            so a prefix that cannot say what made it is reported rather than guessed at.\n\
             Topic model -> `enrichment`, embedding run -> `projection`.\n\
             Pass --mode to override; overriding to `projection` on a topic model warns \
             but proceeds.\n\n\
@@ -384,32 +385,6 @@ pub struct AnnotateArgs {
     pub min_panel_coverage: f32,
 }
 
-/// Is this prefix a TOPIC-model run (`faba gem-encoder` / `gem-topic`)?
-///
-/// `gem-encoder` writes `{prefix}.model.json` with a `gem-encoder-*`
-/// `model_type`; `faba gem` writes no `model.json` at all (see the NOTE in
-/// `gem::run`, which also declines to write a co-embedding). So the file
-/// separates the two run kinds exactly, and the `model_type` prefix keeps
-/// working across simplex maps — `gem-encoder-softmax` today, `gem-encoder-sbp`
-/// on older files, both topic models.
-///
-/// Unreadable or absent means "not a topic model", which reproduces the
-/// behaviour every pre-existing `faba gem` prefix already had.
-fn is_topic_model(prefix: &str) -> bool {
-    let path = format!("{prefix}.model.json");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|v| {
-            v["model_type"]
-                .as_str()
-                .map(|s| s.starts_with("gem-encoder"))
-        })
-        .unwrap_or(false)
-}
-
 /// Pick the scorer when `--mode` was not given, and object when an explicit
 /// choice contradicts the run.
 ///
@@ -425,26 +400,54 @@ fn is_topic_model(prefix: &str) -> bool {
 /// said what they wanted, and the old behaviour stays reachable for comparing
 /// against previously published calls.
 fn resolve_mode(prefix: &str, requested: Option<Mode>) -> Mode {
-    let topic = is_topic_model(prefix);
-    match requested {
-        Some(Mode::Projection) if topic => {
+    let found = manifest::detect(prefix);
+    if let Some(manifest::Detected { legacy: true, .. }) = found {
+        warn!(
+            "{} predates the current manifest name; re-run the producer to get {}. \
+             Reading it anyway.",
+            manifest::legacy_path(prefix),
+            manifest::path(prefix)
+        );
+    }
+
+    match (requested, found.map(|d| d.kind)) {
+        (Some(Mode::Projection), Some(manifest::RunKind::Topic)) => {
             warn!(
-                "--mode projection on a TOPIC model ({prefix}.model.json reports a gem-encoder \
-                 run). Nearest-centroid forms a cell-gene inner product that a topic model does \
-                 not identify, so the call will look reasonable and not mean what it says. \
-                 Prefer --mode enrichment, or drop --mode to let it be chosen."
+                "--mode projection on a TOPIC model ({} reports a gem-encoder run). \
+                 Nearest-centroid forms a cell-gene inner product that a topic model does not \
+                 identify, so the call will look reasonable and not mean what it says. \
+                 Prefer --mode enrichment, or drop --mode to let it be chosen.",
+                manifest::path(prefix)
             );
             Mode::Projection
         }
-        Some(m) => m,
-        None => {
-            let m = if topic {
-                Mode::Enrichment
-            } else {
-                Mode::Projection
+        (Some(m), _) => m,
+        (None, Some(kind)) => {
+            let m = match kind {
+                manifest::RunKind::Topic => Mode::Enrichment,
+                manifest::RunKind::Embedding => Mode::Projection,
             };
-            info!("--mode not given; using {m:?} for this run (topic model: {topic})");
+            info!(
+                "--mode not given; {} reports {kind:?} → {m:?}",
+                manifest::path(prefix)
+            );
             m
+        }
+        // Nothing here says what produced the prefix. Projection is what every
+        // pre-manifest `faba gem` run already got, so it stays the fallback
+        // rather than a new behaviour — but it is now announced, because the
+        // other things that land here are a typo'd prefix and an interrupted
+        // run. Those fail loudly a moment later when the parquet reads miss.
+        (None, None) => {
+            warn!(
+                "no {} (or legacy {}) — cannot tell which program produced this prefix, \
+                 falling back to --mode projection. If this is a gem-encoder run, pass \
+                 --mode enrichment or re-run the producer; if the prefix is wrong, the \
+                 table reads below will say so.",
+                manifest::path(prefix),
+                manifest::legacy_path(prefix)
+            );
+            Mode::Projection
         }
     }
 }
