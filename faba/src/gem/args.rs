@@ -278,28 +278,14 @@ pub struct TrainArgs {
         help = "Inject developmental structure at pseudobulk scale (experimental; default off).",
         long_help = "Shape the embedding along a pseudobulk lineage.\n\
                      When set, gem reads the pb-level velocity (identity θ_pb + velocity δ_pb per pseudobulk per collapse level),\n\
-                     orients a directed lineage over the pseudobulks, and runs a SECOND phase-1 pass with a velocity-drift term\n\
-                     so the shared feature dictionary picks up that lineage geometry —\n\
+                     orients a fixed velocity-KNN lineage over the pseudobulks, and runs a SECOND phase-1 pass with a\n\
+                     velocity-drift SEM residual so the shared feature dictionary picks up that lineage geometry —\n\
                      then lifts a per-cell pseudotime + fate (`{out}.dag_pseudotime.parquet` / `{out}.dag_fate.parquet`).\n\
-                     It uses the LEARNED DAG by default (see `--fixed-dag`).\n\
                      Off by default — the per-cell embedding is then byte-identical to a plain run;\n\
                      turning it ON changes the embedding (the second pass).\n\
                      Only meaningful with spliced+unspliced input (β-sharing)."
     )]
     pub lineage_dag: bool,
-
-    #[arg(
-        long = "fixed-dag",
-        default_value_t = false,
-        help = "Lineage-DAG: use the fixed velocity-KNN graph instead of the default learned DAG.",
-        long_help = "Within `--lineage-dag`, orient the pb structure with a FIXED velocity-oriented KNN graph,\n\
-                     instead of LEARNING the directed adjacency `W` (the default).\n\
-                     Learning co-refines `W` with the embedding (velocity-drift SEM + DAGMA-style acyclicity + L1 + velocity-orientation prior)\n\
-                     and gives a cleaner single-lineage structure;\n\
-                     the fixed graph is faster but more fragmented.\n\
-                     Ignored unless `--lineage-dag` is set."
-    )]
-    pub fixed_dag: bool,
 
     #[arg(
         long = "lineage-smooth",
@@ -312,6 +298,34 @@ pub struct TrainArgs {
                      Ignored unless `--lineage-dag` is set."
     )]
     pub lineage_smooth: bool,
+
+    #[arg(
+        long = "dense-dag",
+        default_value_t = false,
+        help = "Lineage-DAG: use the dense velocity-KNN pb graph instead of the default MST tree (opt-out).",
+        long_help = "Within `--lineage-dag`, build the pb structure as the dense velocity-KNN graph\n\
+                     (each node → its velocity-forward θ-neighbours) instead of the DEFAULT minimum spanning\n\
+                     tree oriented into a DAG.\n\
+                     The MST is a sparse single-tree lineage (n−1 edges per level) that gives a\n\
+                     better-conditioned embedding (measured: PC1 further from the ‖θ‖ norm axis);\n\
+                     the dense graph keeps more branch edges for the fate readout.\n\
+                     Ignored unless `--lineage-dag` is set."
+    )]
+    pub dense_dag: bool,
+
+    #[arg(
+        long = "sequential-velocity",
+        default_value_t = false,
+        help = "Phase 2: fit identity θ then velocity δ sequentially, not jointly (opt-out).",
+        long_help = "Revert to the SEQUENTIAL phase-2 velocity fit: identity θ from the spliced edges,\n\
+                     then the velocity increment δ from the unspliced edges with θ held fixed.\n\
+                     The DEFAULT is the JOINT solve — θ and δ estimated together, θ pulled by both\n\
+                     the spliced and unspliced tracks — which gives a better-powered θ embedding\n\
+                     (measured: PC1 further from the ‖θ‖ norm axis).\n\
+                     Use this to pin θ to the mature/spliced state for a cleaner δ velocity readout.\n\
+                     Only meaningful on spliced+unspliced input (β-sharing)."
+    )]
+    pub sequential_velocity: bool,
 }
 
 /// Runtime knobs: data preload, RNG seed, compute device, threads.

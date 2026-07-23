@@ -31,8 +31,7 @@ use crate::model::{
     FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs, SoftmaxGateSpec,
 };
 use crate::training::{
-    train_composite, AxisSampler, CompositeAxis, CompositeMode, CompositeTrainContext, PbDagParams,
-    PbDagTerm, PbDagTermSpec, PbSemTerm,
+    train_composite, AxisSampler, CompositeAxis, CompositeMode, CompositeTrainContext, PbSemTerm,
 };
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, MultilevelParams};
@@ -519,22 +518,18 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         let mut p1 = stage_params(&config);
         p1.composite_mode = CompositeMode::Sum;
         p1.epochs = warmup_epochs;
+        let cell_prefix = if use_cell_axis { "cell + " } else { "" };
+        let n_pb_levels = joint_axes.len() - usize::from(use_cell_axis);
         if refine_epochs > 0 {
             info!(
                 "Phase 1 (joint) = LINEAGE WARM-UP — {}/{} epochs; the DAG refine gets the other \
                  {} (ONE shared epoch budget, NOT doubled). Training features + {}{} pb level(s) [Sum]",
-                warmup_epochs,
-                config.epochs,
-                refine_epochs,
-                if use_cell_axis { "cell + " } else { "" },
-                joint_axes.len() - usize::from(use_cell_axis),
+                warmup_epochs, config.epochs, refine_epochs, cell_prefix, n_pb_levels,
             );
         } else {
             info!(
                 "Phase 1 (joint) — features + {}{} pb level(s) [Sum], {} epochs",
-                if use_cell_axis { "cell + " } else { "" },
-                joint_axes.len() - usize::from(use_cell_axis),
-                warmup_epochs,
+                cell_prefix, n_pb_levels, warmup_epochs,
             );
         }
         train_composite(
@@ -545,8 +540,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 cell_to_pb_per_level: None,
                 lineage_sem: None,
                 lineage_sem_theta: None,
-                lineage_dag: None,
-                lineage_dag_stride: 1,
             },
             &mut opt1,
             &p1,
@@ -570,7 +563,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // the FINAL readout (post-refine), consumed by the phase-2 cell lift. Flag off
     // or non-β-sharing ⇒ `None` and byte-identical training.
     let mut pb_velocity: Option<Vec<PbLevelVelocity>> = None;
-    let mut pb_dag_w: Option<Vec<Vec<f32>>> = None;
     let mut refine_loss = 0f32; // final refine loss → QC likelihood-hygiene signal
     if config.lineage_dag && !stop.load(std::sync::atomic::Ordering::Relaxed) {
         match config.feat_factor.as_ref() {
@@ -578,7 +570,12 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 // Warm-up pb velocity, optionally smoothed + confidence-gated (①+②) so
                 // `sign(δ_pb)` is stabilized before it orients the graph / SEM drift.
                 let warmup_vel = maybe_smooth(
-                    pb_velocity_readout(&cell_model, &pb_blobs, &spec.unspliced_rows)?,
+                    pb_velocity_readout(
+                        &cell_model,
+                        &pb_blobs,
+                        &spec.unspliced_rows,
+                        &config.device,
+                    )?,
                     h,
                     config.lineage_smooth,
                 );
@@ -613,152 +610,75 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 // (phase 1) did not, so `--lineage-dag` reallocates rather than doubles.
                 p2.epochs = refine_epochs;
 
-                if config.dag_learnable {
-                    // Sample the DATA side densely (NCE every batch, ~16 batches/epoch)
-                    // and the STRUCTURE side sparsely (`W`/SEM every DAG_STRIDE steps) —
-                    // a warm-started `W` is a light prior, not a from-scratch structure to
-                    // hammer. `DAG_STRIDE = 8` ⇒ ~2 structure updates/epoch vs 16 NCE.
-                    const DAG_STRIDE: usize = 8;
-                    p2.batches_per_epoch = Some(p2.batches_per_epoch.unwrap_or(1).max(16));
-                    // Per-axis term slices lead with the optional cell axis, so pb level
-                    // `i`'s term sits at `offset + i`.
-                    let offset = usize::from(use_cell_axis);
-                    // Warm-start each `W` from the velocity-oriented KNN so SGD refines a
-                    // correctly-oriented structure instead of learning one from zeros
-                    // (zero-init `W` is the unstable, non-monotone start).
-                    let knn_init =
-                        lineage::build_pb_lineage(&warmup_vel, h, lineage::DEFAULT_LINEAGE_KNN);
-                    // θ-pseudotime DAG per level (τ-forward θ-KNN + gradient ĝ): supplies the
-                    // unified `W`'s θ-topology (weighted L1) and the δ-sparse-fallback drift.
-                    let theta_dag = lineage::build_theta_dag(
-                        &warmup_vel,
-                        &knn_init,
-                        h,
-                        lineage::DEFAULT_LINEAGE_KNN,
-                    );
-                    // learned-DAG: one UNIFIED `PbDagTerm` per pb level — a single `W`
-                    // explaining BOTH structures (θ-weighted-L1 topology + δ/θ-gated drift).
-                    // Registers a `W` Var (must precede the optimizer), aligned to the refine
-                    // axes ([cell?] + pb levels).
-                    let mut dag_terms: Vec<Option<PbDagTerm>> = Vec::with_capacity(1 + num_levels);
-                    if use_cell_axis {
-                        dag_terms.push(None);
-                    }
-                    for (i, lvl) in warmup_vel.iter().enumerate() {
-                        let w0 = knn_init[i].to_dense();
-                        dag_terms.push(PbDagTerm::new(PbDagTermSpec {
-                            vel: lvl,
-                            theta_dag: &theta_dag[i],
-                            h,
-                            params: PbDagParams::default(),
-                            var_name: &format!("dag_l{i}_w"),
-                            varmap: &varmap,
-                            dev: &config.device,
-                            w_init: Some(&w0),
-                        })?);
-                    }
-                    let n_dag = dag_terms.iter().filter(|t| t.is_some()).count();
-                    info!(
-                        "Lineage-DAG refine (learned DAG) = SECOND pass — {}/{} epochs (phase 1's \
-                         remaining budget; SHARED with the warm-up, NOT a second full training). \
-                         Baking lineage into E_feat: {} pb-level DAG(s), warm-started from the \
-                         velocity-KNN [SEM + θ-weighted L1 + DAGMA acyclicity; δ/θ-gated drift], \
-                         structure every {} steps",
-                        refine_epochs, config.epochs, n_dag, DAG_STRIDE
-                    );
-                    let mut opt2 = AdamW::new(varmap.all_vars(), adamw_params())?;
-                    refine_loss = train_composite(
-                        &CompositeTrainContext {
-                            axes: &refine_axes,
-                            dev: &config.device,
-                            stop: &stop,
-                            cell_to_pb_per_level: None,
-                            lineage_sem: None,
-                            // Unified single `W` carries θ too (θ-weighted L1 + fused drift),
-                            // so no separate θ-SEM term on the learned-DAG path.
-                            lineage_sem_theta: None,
-                            lineage_dag: Some(&dag_terms),
-                            lineage_dag_stride: DAG_STRIDE,
-                        },
-                        &mut opt2,
-                        &p2,
-                        smoother.as_mut(),
-                    )?;
-                    // Extract the learned `W` per pb level (aligned to `pb_blobs`).
-                    let mut ws = Vec::with_capacity(num_levels);
-                    for i in 0..num_levels {
-                        ws.push(match &dag_terms[offset + i] {
-                            Some(d) => d.w_dense()?,
-                            None => Vec::new(),
-                        });
-                    }
-                    pb_dag_w = Some(ws);
-                    drop(refine_axes);
-                } else {
-                    // velocity-KNN: fixed velocity-oriented KNN graph + velocity-drift SEM residual.
-                    // The dense KNN graph (each node → its velocity-forward neighbours),
-                    // built once from the warm-up readout, shapes E_feat in a single refine
-                    // pass. `pb_dag_w` stays `None`; the cell-lift rebuilds the same graph from
-                    // the final `pb_velocity`.
-                    let levels =
-                        lineage::build_pb_lineage(&warmup_vel, h, lineage::DEFAULT_LINEAGE_KNN);
-                    let n_edges: usize = levels.iter().map(|l| l.edges.len()).sum();
-                    let mut terms: Vec<Option<PbSemTerm>> = Vec::with_capacity(1 + num_levels);
-                    if use_cell_axis {
-                        terms.push(None);
-                    }
-                    for lvl in &levels {
-                        terms.push(PbSemTerm::new(
-                            lvl,
-                            h,
-                            lineage::DEFAULT_SEM_STEP,
-                            lineage::DEFAULT_SEM_WEIGHT,
-                            &config.device,
-                        )?);
-                    }
-                    info!(
-                        "Lineage-DAG refine (fixed velocity-KNN) = SECOND pass — {}/{} epochs \
-                         (phase 1's remaining budget; SHARED with the warm-up, NOT a second full \
-                         training). Baking lineage into E_feat: {} oriented pb edge(s) across \
-                         {} level(s); velocity-drift SEM residual ON",
-                        refine_epochs,
-                        config.epochs,
-                        n_edges,
-                        levels.len()
-                    );
-                    // Second lineage term: the θ-pseudotime DAG (see the learned branch).
-                    let theta_terms = build_theta_sem_terms(
-                        &warmup_vel,
-                        &levels,
-                        h,
-                        use_cell_axis,
-                        num_levels,
-                        &config.device,
-                    )?;
-                    let mut opt2 = AdamW::new(varmap.all_vars(), adamw_params())?;
-                    refine_loss = train_composite(
-                        &CompositeTrainContext {
-                            axes: &refine_axes,
-                            dev: &config.device,
-                            stop: &stop,
-                            cell_to_pb_per_level: None,
-                            lineage_sem: Some(&terms),
-                            lineage_sem_theta: Some(&theta_terms),
-                            lineage_dag: None,
-                            lineage_dag_stride: 1,
-                        },
-                        &mut opt2,
-                        &p2,
-                        smoother.as_mut(),
-                    )?;
-                    drop(refine_axes);
+                // Fixed velocity-oriented KNN graph + velocity-drift SEM residual. The
+                // dense KNN graph (each node → its velocity-forward neighbours), built
+                // once from the warm-up readout, shapes E_feat in this single refine
+                // pass; the cell-lift rebuilds the same graph from the final `pb_velocity`.
+                let levels = lineage::build_pb_lineage(
+                    &warmup_vel,
+                    h,
+                    lineage::DEFAULT_LINEAGE_KNN,
+                    config.lineage_mst,
+                );
+                let n_edges: usize = levels.iter().map(|l| l.edges.len()).sum();
+                let mut terms: Vec<Option<PbSemTerm>> = Vec::with_capacity(1 + num_levels);
+                if use_cell_axis {
+                    terms.push(None);
                 }
+                for lvl in &levels {
+                    terms.push(PbSemTerm::new(
+                        lvl,
+                        h,
+                        lineage::DEFAULT_SEM_STEP,
+                        lineage::DEFAULT_SEM_WEIGHT,
+                        &config.device,
+                    )?);
+                }
+                info!(
+                    "Lineage refine (velocity-KNN) = SECOND pass — {}/{} epochs (phase 1's \
+                     remaining budget; SHARED with the warm-up, NOT a second full training). \
+                     Baking lineage into E_feat: {} oriented pb edge(s) across {} level(s); \
+                     velocity-drift SEM residual ON",
+                    refine_epochs,
+                    config.epochs,
+                    n_edges,
+                    levels.len()
+                );
+                // Second lineage term: the θ-pseudotime DAG.
+                let theta_terms = build_theta_sem_terms(
+                    &warmup_vel,
+                    &levels,
+                    h,
+                    use_cell_axis,
+                    num_levels,
+                    &config.device,
+                )?;
+                let mut opt2 = AdamW::new(varmap.all_vars(), adamw_params())?;
+                refine_loss = train_composite(
+                    &CompositeTrainContext {
+                        axes: &refine_axes,
+                        dev: &config.device,
+                        stop: &stop,
+                        cell_to_pb_per_level: None,
+                        lineage_sem: Some(&terms),
+                        lineage_sem_theta: Some(&theta_terms),
+                    },
+                    &mut opt2,
+                    &p2,
+                    smoother.as_mut(),
+                )?;
+                drop(refine_axes);
 
                 // Refresh the dictionary and read the FINAL pb velocity (post-refine),
                 // smoothed the same way so the cell-lift orients off a denoised field.
                 cell_model.materialize_e_feat()?;
                 pb_velocity = Some(maybe_smooth(
-                    pb_velocity_readout(&cell_model, &pb_blobs, &spec.unspliced_rows)?,
+                    pb_velocity_readout(
+                        &cell_model,
+                        &pb_blobs,
+                        &spec.unspliced_rows,
+                        &config.device,
+                    )?,
                     h,
                     config.lineage_smooth,
                 ));
@@ -832,6 +752,7 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             &config.device,
             batch_divisor,
             unspliced,
+            config.joint_velocity,
         )?
     };
 
@@ -860,33 +781,30 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
 
     // cell-lift: phase-2 cell-lineage lift (evaluation only). Runs on the FINAL pb
     // velocity readout + the now-projected per-cell identity θ_c. Integrate a pb
-    // pseudotime/fate along the oriented pb-DAG (learned `W` for the learned DAG, the fixed
-    // velocity-oriented graph for the velocity-KNN) at the finest level, then landmark-blend it to
-    // every cell. `None` when lineage-DAG is off or the readout is empty.
+    // pseudotime/fate along the fixed velocity-oriented graph at the finest level, then
+    // landmark-blend it to every cell. `None` when lineage-DAG is off or the readout is empty.
     // Not gated on `stop` — see the phase-2 note above.
     let mut lineage_qc: Option<LineageQc> = None;
     let cell_lineage = match &pb_velocity {
         Some(pbv) if !pbv.is_empty() => {
             let level = pbv.len() - 1; // finest level: densest landmark tiling
             let vel = &pbv[level];
-            let edges = match &pb_dag_w {
-                // learned-DAG: dense learned W (forward-masked) → positive-mass edges.
-                Some(ws) => lift::dense_to_edges(&ws[level], vel.n_pb),
-                // velocity-KNN: rebuild the fixed velocity-oriented graph from the readout.
-                None => lineage::build_pb_lineage(
-                    std::slice::from_ref(vel),
-                    h,
-                    lineage::DEFAULT_LINEAGE_KNN,
-                )
-                .pop()
-                .map(|l| {
-                    l.edges
-                        .into_iter()
-                        .map(|(i, j, w)| (i as usize, j as usize, w))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
-            };
+            // Rebuild the velocity-oriented pb graph from the final readout — the same
+            // fixed velocity-KNN the refine used to shape E_feat.
+            let edges = lineage::build_pb_lineage(
+                std::slice::from_ref(vel),
+                h,
+                lineage::DEFAULT_LINEAGE_KNN,
+                config.lineage_mst,
+            )
+            .pop()
+            .map(|l| {
+                l.edges
+                    .into_iter()
+                    .map(|(i, j, w)| (i as usize, j as usize, w))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
             let traj = lift::pb_trajectory(vel, &edges, h, lineage::DEFAULT_SEM_STEP);
             // Put the cells back in the LANDMARKS' frame before comparing. `vel` was
             // read by the Newton pb readout above, i.e. before phase 2 gauge-fixed
@@ -933,7 +851,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         cell_nrms: phase2.cell_nrms,
         cell_velocity: phase2.velocity,
         pb_velocity,
-        pb_dag_w,
         cell_lineage,
         lineage_qc,
         feature_projection,
@@ -1123,6 +1040,7 @@ fn pb_velocity_readout(
     model: &JointEmbedModel,
     pb_blobs: &[UnifiedData],
     unspliced_rows: &[bool],
+    dev: &candle_util::candle_core::Device,
 ) -> anyhow::Result<Vec<PbLevelVelocity>> {
     let feat_flat = model.e_feat.flatten_all()?.to_vec1()?;
     let b_feat_v = model.b_feat.to_vec1()?;
@@ -1133,6 +1051,7 @@ fn pb_velocity_readout(
         pb_blobs,
         unspliced_rows,
         f64::from(PHASE2_RIDGE),
+        dev,
     )
 }
 

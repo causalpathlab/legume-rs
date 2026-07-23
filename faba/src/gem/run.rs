@@ -379,8 +379,9 @@ fn run_gem_genes_bge(
             feat_factor: Some(factor),
             delta_l2,
             lineage_dag: args.train.lineage_dag,
-            dag_learnable: !args.train.fixed_dag,
             lineage_smooth: args.train.lineage_smooth,
+            lineage_mst: !args.train.dense_dag,
+            joint_velocity: !args.train.sequential_velocity,
             // Restore backend genes the trained axis is missing — the `--n-hvg`
             // remainder — solved (with velocity) against the frozen pseudobulk side.
             // `null_fdr: 0` = restore ALL of them (no ash-null gate; the softmax gate
@@ -681,7 +682,9 @@ fn run_gem_genes_bge(
                 // over the solved cells, and the operator is linear, so
                 // `v̄ = P·θ̄ = 0`. (This used to subtract `P·θ̄` explicitly, back when
                 // phase 2 left the common mode in `θ`.)
-                Some(ge::cell_projection::apply_velocity_operator(&theta, &p, n, h))
+                Some(ge::cell_projection::apply_velocity_operator(
+                    &theta, &p, n, h,
+                ))
             }
             _ => None,
         }
@@ -716,10 +719,9 @@ fn run_gem_genes_bge(
         }
     }
 
-    // Lineage-DAG (experimental): dump the per-level pseudobulk states — identity
-    // θ_pb, velocity δ_pb, and (learned-DAG) the learned DAG adjacency W — so the structure
-    // can be inspected / scored and consumed by the phase-2 cell lift. Only present
-    // when `--lineage-dag` ran on a β-sharing model.
+    // Lineage (experimental): dump the per-level pseudobulk states — identity θ_pb and
+    // velocity δ_pb — so the structure can be inspected / scored and consumed by the
+    // phase-2 cell lift. Only present when `--lineage-dag` ran on a β-sharing model.
     if let Some(pbv) = &out.pb_velocity {
         for (i, lvl) in pbv.iter().enumerate() {
             let np = lvl.n_pb;
@@ -742,31 +744,8 @@ fn run_gem_genes_bge(
                 "pb",
             )
             .context("save pb velocity")?;
-            if let Some(w) = out
-                .pb_dag_w
-                .as_ref()
-                .and_then(|d| d.get(i))
-                .filter(|w| !w.is_empty())
-            {
-                let wt = candle_util::candle_core::Tensor::from_vec(w.clone(), (np, np), &cpu)?;
-                ge::save_embedding(
-                    &format!("{}.pb_dag_l{i}.parquet", args.out),
-                    &wt,
-                    &pb_names,
-                    "pb",
-                )
-                .context("save pb dag W")?;
-            }
         }
-        info!(
-            "wrote pb-level θ/δ{} for {} level(s)",
-            if out.pb_dag_w.is_some() {
-                " + learned DAG W"
-            } else {
-                ""
-            },
-            pbv.len()
-        );
+        info!("wrote pb-level θ/δ for {} level(s)", pbv.len());
     }
 
     // cell-lift (phase-2 cell-lineage): per-cell pseudotime τ_c + landmark ambiguity

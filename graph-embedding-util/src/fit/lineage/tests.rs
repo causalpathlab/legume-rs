@@ -46,7 +46,7 @@ fn edges_are_velocity_forward() {
         theta: theta.clone(),
         delta,
     };
-    let out = build_pb_lineage(&[lvl], h, 2);
+    let out = build_pb_lineage(&[lvl], h, 2, false);
     let g: &PbLineageLevel = &out[0];
     assert!(!g.edges.is_empty(), "expected forward edges");
     for &(i, j, w) in &g.edges {
@@ -76,7 +76,7 @@ fn zero_velocity_node_has_no_outgoing_edges() {
         theta,
         delta,
     };
-    let out = build_pb_lineage(&[lvl], h, 2);
+    let out = build_pb_lineage(&[lvl], h, 2, false);
     let g = &out[0];
     assert!(
         g.edges.iter().all(|&(i, _, _)| i != 1),
@@ -84,4 +84,41 @@ fn zero_velocity_node_has_no_outgoing_edges() {
     );
     let v1 = &g.velocity[h..2 * h];
     assert_eq!(v1, &[0.0, 0.0]);
+}
+
+/// The MST path (`mst = true`) yields exactly `n−1` edges (a connected spanning tree),
+/// all velocity-forward on the line — sparser than the velocity-KNN.
+#[test]
+fn mst_is_a_forward_oriented_spanning_tree() {
+    let h = 2;
+    let n = 5;
+    // Five nodes on a line at x = 0..4, all velocity +x.
+    let mut theta = vec![0f32; n * h];
+    let mut delta = vec![0f32; n * h];
+    for i in 0..n {
+        theta[i * h] = i as f32;
+        delta[i * h] = 1.0;
+    }
+    let lvl = PbLevelVelocity {
+        n_pb: n,
+        theta: theta.clone(),
+        delta,
+    };
+    let out = build_pb_lineage(&[lvl], h, 3, true);
+    let g = &out[0];
+    assert_eq!(g.edges.len(), n - 1, "spanning tree must have n−1 edges");
+    for &(i, j, w) in &g.edges {
+        let (xi, xj) = (theta[i as usize * h], theta[j as usize * h]);
+        assert!(
+            xj > xi,
+            "MST edge {i}->{j} not velocity-forward (x {xi} -> {xj})"
+        );
+        assert!(w > 0.0);
+    }
+    let mut seen = vec![false; n];
+    for &(i, j, _) in &g.edges {
+        seen[i as usize] = true;
+        seen[j as usize] = true;
+    }
+    assert!(seen.iter().all(|&s| s), "MST is not connected");
 }

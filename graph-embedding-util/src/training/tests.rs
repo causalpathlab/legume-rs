@@ -1,15 +1,8 @@
-//! Unit tests for the velocity-drift SEM residual and the learnable pb-DAG term.
+//! Unit tests for the velocity-drift SEM residual.
 
-use super::{acyclicity_series, sem_penalty, PbDagParams, PbDagTerm, PbDagTermSpec, PbSemTerm};
+use super::{sem_penalty, PbSemTerm};
 use crate::fit::lineage::PbLineageLevel;
-use crate::fit::projection::PbLevelVelocity;
 use candle_util::candle_core::{Device, Tensor, Var};
-use candle_util::candle_nn::VarMap;
-
-fn eye(p: usize, dev: &Device) -> Tensor {
-    let v: Vec<f32> = (0..p * p).map(|i| f32::from(i / p == i % p)).collect();
-    Tensor::from_vec(v, (p, p), dev).unwrap()
-}
 
 /// One edge 0→1, parent velocity v̂₀ = (1,0), step s = 1. The residual is
 /// `e₁ − e₀ − v̂₀`, so the penalty vanishes exactly when `e₁ = e₀ + (1,0)` and is
@@ -94,91 +87,15 @@ fn empty_level_yields_no_term() {
     assert!(PbSemTerm::new(&level, 2, 1.0, 1.0, &dev).unwrap().is_none());
 }
 
-///////////////////////////////////
-// learned-DAG: learnable pb-DAG //
-///////////////////////////////////
-
-/// A strictly-upper-triangular (acyclic) `W` has ~zero acyclicity; a 2-cycle is
-/// strictly positive.
+/// A level with a δ-less node still builds a term (the θ-pseudotime fallback keeps
+/// it in the graph) — exercised via the fixed-KNN path in `fit`.
 #[test]
-fn acyclicity_zero_for_dag_positive_for_cycle() {
+fn sem_term_survives_multi_edge_level() {
     let dev = Device::Cpu;
-    // DAG: 0→1, 0→2, 1→2.
-    let dag = Tensor::from_vec(
-        vec![0.0f32, 0.5, 0.3, 0.0, 0.0, 0.7, 0.0, 0.0, 0.0],
-        (3, 3),
-        &dev,
-    )
-    .unwrap();
-    let h_dag = acyclicity_series(&dag, &eye(3, &dev), 6, 3)
-        .unwrap()
-        .to_scalar::<f32>()
-        .unwrap();
-    assert!(h_dag.abs() < 1e-6, "DAG acyclicity should be ~0 ({h_dag})");
-
-    // 2-cycle: 0↔1.
-    let cyc = Tensor::from_vec(vec![0.0f32, 0.6, 0.7, 0.0], (2, 2), &dev).unwrap();
-    let h_cyc = acyclicity_series(&cyc, &eye(2, &dev), 6, 2)
-        .unwrap()
-        .to_scalar::<f32>()
-        .unwrap();
-    assert!(
-        h_cyc > 1e-3,
-        "cycle acyclicity should be positive ({h_cyc})"
-    );
-}
-
-/// The learnable term builds (registering a zero-initialized `W`), and its loss is
-/// finite, non-negative, and differentiable in both `e_cell` and `W`.
-#[test]
-fn dag_term_builds_and_loss_is_differentiable() {
-    let dev = Device::Cpu;
-    let h = 3;
-    let vel = PbLevelVelocity {
-        n_pb: 3,
-        theta: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0],
-        delta: vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-    };
-    let vm = VarMap::new();
-    // Minimal θ-pseudotime DAG: 0→1→2 along the identity, unit gradients.
-    let theta_dag = crate::fit::lineage::PbLineageLevel {
+    let level = PbLineageLevel {
         n_pb: 3,
         edges: vec![(0, 1, 1.0), (1, 2, 1.0)],
         velocity: vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     };
-    let term = PbDagTerm::new(PbDagTermSpec {
-        vel: &vel,
-        theta_dag: &theta_dag,
-        h,
-        params: PbDagParams::default(),
-        var_name: "dag_test_w",
-        varmap: &vm,
-        dev: &dev,
-        w_init: None,
-    })
-    .unwrap()
-    .unwrap();
-    // W starts at zero (clean DAGMA start).
-    assert!(term.w_dense().unwrap().iter().all(|&x| x == 0.0));
-
-    let e = Var::from_tensor(
-        &Tensor::from_vec(
-            vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-            (3, h),
-            &dev,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let loss = term.dag_loss(e.as_tensor()).unwrap();
-    let val = loss.to_scalar::<f32>().unwrap();
-    assert!(
-        val.is_finite() && val >= 0.0,
-        "dag loss finite non-neg ({val})"
-    );
-    // Gradients flow to both the embedding and the W var.
-    let grads = loss.backward().unwrap();
-    assert!(grads.get(e.as_tensor()).is_some(), "no grad to e_cell");
-    let w_var = vm.data().lock().unwrap().get("dag_test_w").unwrap().clone();
-    assert!(grads.get(w_var.as_tensor()).is_some(), "no grad to W");
+    assert!(PbSemTerm::new(&level, 2, 1.0, 1.0, &dev).unwrap().is_some());
 }

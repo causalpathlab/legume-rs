@@ -1,6 +1,6 @@
 //! Unit tests for the phase-2 cell-lineage lift (cell-lift).
 
-use super::{dense_to_edges, lift_cells, pb_trajectory};
+use super::{lift_cells, pb_trajectory};
 use crate::fit::projection::PbLevelVelocity;
 
 /// A linear chain 0→1→2→3 in a 1-D latent (θ = 0,1,2,3), velocity all +1. The
@@ -134,14 +134,4 @@ fn cell_lift_orders_cells_along_chain() {
     // Ambiguity is in [0,1]; a cell right on a landmark is less ambiguous than one
     // wedged between two.
     assert!(lin.ambiguity.iter().all(|&a| (0.0..=1.0).contains(&a)));
-}
-
-/// `dense_to_edges` keeps only strictly-positive entries (forward mass); zeros and
-/// negatives (a backward-masked learnable `W`) carry no edge.
-#[test]
-fn dense_to_edges_keeps_forward_mass_only() {
-    // 3×3: 0→1 = 0.5, 1→2 = 0.3, 2→0 = −0.2 (dropped), diagonal 0.
-    let w = vec![0.0, 0.5, 0.0, 0.0, 0.0, 0.3, -0.2, 0.0, 0.0];
-    let edges = dense_to_edges(&w, 3);
-    assert_eq!(edges, vec![(0, 1, 0.5), (1, 2, 0.3)]);
 }

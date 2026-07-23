@@ -1,4 +1,7 @@
-//! Phase-2 per-cell projection as a **cell-block Poisson SGD** (candle).
+//! Block **Poisson-MAP SGD** over a frozen dictionary (candle) — the shared solver
+//! behind both the per-cell Phase 2 ([`super::cells`]) and the per-pseudobulk
+//! velocity readout ([`super::pseudobulk`]); a "node" below is a cell or a pb
+//! aggregate, whichever the caller passes.
 //!
 //! With the feature side frozen, the phase-2 objective is *separable per cell*:
 //! a cell's embedding depends only on its own edges. A **block** of cells is
@@ -166,6 +169,21 @@ pub(crate) struct Phase2Input<'a> {
     /// Ridge `λ` on the cell latent.
     pub lambda: f64,
     pub dev: &'a Device,
+    /// Log prefix, so a caller reusing this solver reads honestly: `"Phase 2"`
+    /// for the per-cell projection, `"pb velocity readout"` for the pseudobulk one.
+    pub label: &'static str,
+    /// Remove the population mean from the latents and report it in [`GaugeShift`].
+    /// **Cells set this `true`**: the common mode must leave `θ` and be folded into
+    /// `b_feat`, or it lands on the gene centroids and collapses marker annotation.
+    /// **The pb readout sets it `false`**: its landmarks are never co-embedded, and
+    /// the cell-lift differences cells against *raw* pb `θ` — so pb latents stay in
+    /// the as-trained frame and nothing is folded (`GaugeShift` comes back zero).
+    pub gauge_fix: bool,
+    /// Joint θ+δ solve (β-sharing only). When `true` and `unspliced_rows` is given, one
+    /// SGD estimates identity `θ` and velocity `δ` **together** — θ pulled by both the
+    /// spliced and unspliced tracks — instead of the default sequential θ-then-δ (δ with
+    /// θ held fixed). Ignored without `unspliced_rows`.
+    pub joint: bool,
 }
 
 /// Phase-2 result on the host, in global cell-id order.
@@ -220,8 +238,9 @@ pub(crate) struct GaugeShift {
 
 /// Project every cell onto the frozen dictionary.
 ///
-/// `cells` is the flattened sampler view (`super::collect_sampler_cells`):
-/// `(global cell id, feature ids, counts)`. `batch_divisor`, when set, applies the
+/// `cells` is the flattened per-node view `(global id, feature ids, counts)` — the
+/// per-cell sampler flattening on the `super::cells` path, one entry per pb node on
+/// the `super::pseudobulk` path. `batch_divisor`, when set, applies the
 /// `μ_residual` fold-factor divide — **once**, while the edges are flattened,
 /// rather than on every solve.
 ///
@@ -272,8 +291,8 @@ pub(crate) fn project_cells(
     // Flatten the sampler edges once, applying the batch divisor here so no solve
     // ever re-derives them. Grouped by the cell's position in `cells`.
     let edges_a = EdgeTable::build(cells, &rows_a, n_features, batch_divisor);
-    let edges_b = (!rows_b.is_empty())
-        .then(|| EdgeTable::build(cells, &rows_b, n_features, batch_divisor));
+    let edges_b =
+        (!rows_b.is_empty()).then(|| EdgeTable::build(cells, &rows_b, n_features, batch_divisor));
 
     let blocks = block_partition(&rows_a, &rows_b);
     // The bar counts **cells**, across both passes, and advances *within* a block
@@ -283,35 +302,48 @@ pub(crate) fn project_cells(
     let bar = new_progress_bar((cells.len() * (1 + usize::from(blocks.two_pass))) as u64);
     bar.enable_steady_tick(std::time::Duration::from_millis(200));
 
-    // Pass 1 — identity θ (and the kept per-cell intercept).
-    let pass_a = run_pass(
-        input,
-        &PassSpec {
-            label: "identity",
-            rows: &rows_a,
-            edges: &edges_a,
-            base_theta: None,
-            block_cells: blocks.block_cells_a,
-        },
-        cells,
-        &bar,
-    )?;
-
-    // Pass 2 — velocity increment δ, with θ held fixed.
-    let pass_b = match &edges_b {
-        Some(eb) => Some(run_pass(
-            input,
-            &PassSpec {
-                label: "velocity",
-                rows: &rows_b,
-                edges: eb,
-                base_theta: Some(&pass_a.latent),
-                block_cells: blocks.block_cells_b,
-            },
-            cells,
-            &bar,
-        )?),
-        None => None,
+    // Estimate θ (and, on the splice path, δ). Two modes:
+    //   • **joint** (β-sharing + `input.joint`): one solve over both partitions with θ
+    //     pulled by the spliced AND unspliced tracks ([`run_joint_pass`]);
+    //   • **sequential** (default): identity θ from the spliced edges, then δ as a
+    //     directed residual with θ held fixed.
+    let (pass_a, pass_b) = match (&edges_b, input.joint) {
+        (Some(eb), true) => {
+            let (pa, pb) = run_joint_pass(input, &rows_a, &edges_a, &rows_b, eb, cells, &bar)?;
+            (pa, Some(pb))
+        }
+        _ => {
+            // Pass 1 — identity θ (and the kept per-cell intercept).
+            let pass_a = run_pass(
+                input,
+                &PassSpec {
+                    label: "identity",
+                    rows: &rows_a,
+                    edges: &edges_a,
+                    base_theta: None,
+                    block_cells: blocks.block_cells_a,
+                },
+                cells,
+                &bar,
+            )?;
+            // Pass 2 — velocity increment δ, with θ held fixed.
+            let pass_b = match &edges_b {
+                Some(eb) => Some(run_pass(
+                    input,
+                    &PassSpec {
+                        label: "velocity",
+                        rows: &rows_b,
+                        edges: eb,
+                        base_theta: Some(&pass_a.latent),
+                        block_cells: blocks.block_cells_b,
+                    },
+                    cells,
+                    &bar,
+                )?),
+                None => None,
+            };
+            (pass_a, pass_b)
+        }
     };
     bar.finish_and_clear();
 
@@ -319,28 +351,34 @@ pub(crate) fn project_cells(
     // latent. Taken over the SOLVED cells only — a cell with no edges was never
     // placed by the likelihood, and after centring the origin is the population
     // mean, which is exactly where a no-information cell belongs.
-    let theta_mean = mean_rows(&pass_a.latent, h);
-    let delta_mean = pass_b
-        .as_ref()
-        .map_or_else(Vec::new, |p| mean_rows(&p.latent, h));
-    info!(
-        "Phase 2 — gauge fix: removed ‖θ̄‖={:.3}{} from the latents into b_feat \
-         (exact reparametrisation: every score is unchanged)",
-        norm(&theta_mean),
-        if delta_mean.is_empty() {
-            String::new()
-        } else {
-            format!(", ‖δ̄‖={:.3}", norm(&delta_mean))
-        },
-    );
+    let (theta_mean, delta_mean) = if input.gauge_fix {
+        let tm = mean_rows(&pass_a.latent, h);
+        let dm = pass_b
+            .as_ref()
+            .map_or_else(Vec::new, |p| mean_rows(&p.latent, h));
+        info!(
+            "{} — gauge fix: removed ‖θ̄‖={:.3}{} from the latents into b_feat \
+             (exact reparametrisation: every score is unchanged)",
+            input.label,
+            norm(&tm),
+            if dm.is_empty() {
+                String::new()
+            } else {
+                format!(", ‖δ̄‖={:.3}", norm(&dm))
+            },
+        );
+        (tm, dm)
+    } else {
+        // pb readout: no re-gauge — nothing leaves the latents. Zero means make the
+        // scatter a no-op; the caller ignores the reported (zero) `GaugeShift`.
+        (vec![0f32; h], vec![0f32; h])
+    };
 
     // Scatter the pass results (indexed by position in `cells`) back onto the
     // global cell axis. Cells the samplers never saw keep the zero row.
     let mut theta = vec![0f32; input.n_cells * h];
     let mut b_cell = vec![0f32; input.n_cells];
-    let mut velocity = pass_b
-        .as_ref()
-        .map(|_| vec![0f32; input.n_cells * h]);
+    let mut velocity = pass_b.as_ref().map(|_| vec![0f32; input.n_cells * h]);
     for (i, &(cell, _, _)) in cells.iter().enumerate() {
         let (g, l) = (cell as usize * h, i * h);
         for k in 0..h {
@@ -578,8 +616,9 @@ fn run_pass(
     let lr0 = TARGET_DELTA_S / (h as f64 * e_rms);
 
     info!(
-        "Phase 2 [{}] — {n_kept} cells × {f_live} live features (of {}; {} gate-folded), \
+        "{} [{}] — {n_kept} node(s) × {f_live} live features (of {}; {} gate-folded), \
          blocks of {}, lr {:.4} (auto: Δs≈{TARGET_DELTA_S}), ≤{MAX_STEPS} steps, ridge λ={}",
+        input.label,
         spec.label,
         spec.rows.len(),
         spec.rows.len() - f_live,
@@ -622,8 +661,9 @@ fn run_pass(
     }
 
     info!(
-        "Phase 2 [{}] — done: ⌀{:.0} steps/block, {} of {} block(s) hit the {MAX_STEPS}-step cap, \
+        "{} [{}] — done: ⌀{:.0} steps/block, {} of {} block(s) hit the {MAX_STEPS}-step cap, \
          mean per-edge deviance {:.4}, {:.0}s total ({:.1} ms/step){}",
+        input.label,
         spec.label,
         stats.mean_steps(),
         stats.at_cap,
@@ -632,7 +672,10 @@ fn run_pass(
         stats.secs,
         stats.ms_per_step(),
         if stats.clamped > 0 {
-            format!(" [WARNING: score clamp bound on {} block(s)]", stats.clamped)
+            format!(
+                " [WARNING: score clamp bound on {} block(s)]",
+                stats.clamped
+            )
         } else {
             String::new()
         },
@@ -876,7 +919,7 @@ fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     // straight into it.
     let ne = {
         let mut ne = n_t.matmul(e_aug_t)?; // [Bc, H+1]
-        // Folded rows still owe `−n_dead·c`, which lands on the intercept column.
+                                           // Folded rows still owe `−n_dead·c`, which lands on the intercept column.
         if a.dead_mass > 0.0 {
             ne = (ne + n_dead_t.reshape((bc, 1))?.broadcast_mul(intercept_mask)?)?;
         }
@@ -1013,7 +1056,11 @@ fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
 
     // Split `Θ̃` back into the latent and its intercept column.
     Ok(BlockOut {
-        latent: theta.narrow(1, 0, h)?.contiguous()?.flatten_all()?.to_vec1::<f32>()?,
+        latent: theta
+            .narrow(1, 0, h)?
+            .contiguous()?
+            .flatten_all()?
+            .to_vec1::<f32>()?,
         intercept: theta.narrow(1, h, 1)?.flatten_all()?.to_vec1::<f32>()?,
         steps,
         converged,
@@ -1024,6 +1071,414 @@ fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     })
 }
 
+/////////////////////////
+// Joint θ+δ solve      //
+/////////////////////////
+
+/// One track's frozen design for the joint solve. Unlike [`run_pass`]'s augmented `Ẽ`
+/// (ones row folding the intercept), there is **no** ones row — the joint solve carries
+/// the spliced and unspliced intercepts as separate parameters, so each track's design
+/// is just `E [F_live, H]` (+ transpose) and its bias.
+struct TrackDict {
+    /// Global feature ids of the live (non-gate-folded) rows of this track.
+    live: Vec<u32>,
+    /// `E [F_live, H]` and its transpose `Eᵀ [H, F_live]` — both needed every step.
+    e: Tensor,
+    e_t: Tensor,
+    /// `β [1, F_live]`.
+    b_row: Tensor,
+    /// `ln(Σ_f exp(β_f) + dead_mass)`, the null-model normaliser for this track.
+    null_log_norm: f64,
+    /// Gate-folded partition mass `Σ_dead exp(β_f)` (0 at the default `GATE_FOLD_EPS`).
+    dead_mass: f64,
+    /// Global → live-local feature id (`u32::MAX` off this track's live set).
+    to_live: Vec<u32>,
+    f_live: usize,
+}
+
+fn build_track(input: &Phase2Input, rows: &[u32]) -> anyhow::Result<TrackDict> {
+    let (h, dev) = (input.h, input.dev);
+    let mut live: Vec<u32> = Vec::with_capacity(rows.len());
+    let mut dead_mass = 0f64;
+    for &g in rows {
+        let e = &input.feat[g as usize * h..(g as usize + 1) * h];
+        if e.iter().map(|x| x * x).sum::<f32>().sqrt() > GATE_FOLD_EPS {
+            live.push(g);
+        } else {
+            dead_mass += f64::from(input.b_feat[g as usize]).exp();
+        }
+    }
+    anyhow::ensure!(
+        !live.is_empty(),
+        "joint phase-2: a splice track has no live features to project onto"
+    );
+    let f_live = live.len();
+    let mut e_flat = vec![0f32; f_live * h];
+    let mut b_live = vec![0f32; f_live];
+    for (l, &g) in live.iter().enumerate() {
+        e_flat[l * h..l * h + h].copy_from_slice(&input.feat[g as usize * h..(g as usize + 1) * h]);
+        b_live[l] = input.b_feat[g as usize];
+    }
+    let e = Tensor::from_vec(e_flat, (f_live, h), dev)?;
+    let e_t = e.t()?.contiguous()?;
+    let b_row = Tensor::from_vec(b_live, (1, f_live), dev)?;
+    let null_log_norm = (f64::from(b_row.exp()?.sum_all()?.to_scalar::<f32>()?) + dead_mass)
+        .max(f64::MIN_POSITIVE)
+        .ln();
+    let mut to_live = vec![u32::MAX; input.b_feat.len()];
+    for (l, &g) in live.iter().enumerate() {
+        to_live[g as usize] = l as u32;
+    }
+    Ok(TrackDict {
+        live,
+        e,
+        e_t,
+        b_row,
+        null_log_norm,
+        dead_mass,
+        to_live,
+        f_live,
+    })
+}
+
+/// Joint θ+δ solve over the spliced (`s`) and unspliced (`u`) partitions in ONE SGD:
+/// `θ` is pulled by **both** tracks, `δ` by the unspliced track only. Returns the same
+/// `(θ, δ)` `PassOut` pair the sequential two-pass produces, so the caller's gauge-fix
+/// and scatter are unchanged. `θ` carries the kept per-cell intercept `c_s` (= `b_cell`);
+/// `δ`'s `c_u` is a throwaway depth for the unspliced track.
+fn run_joint_pass(
+    input: &Phase2Input,
+    rows_s: &[u32],
+    edges_s: &EdgeTable,
+    rows_u: &[u32],
+    edges_u: &EdgeTable,
+    cells: &[(u32, &[u32], &[f32])],
+    bar: &indicatif::ProgressBar,
+) -> anyhow::Result<(PassOut, PassOut)> {
+    let h = input.h;
+    let n_kept = cells.len();
+
+    let s = build_track(input, rows_s)?;
+    let u = build_track(input, rows_u)?;
+
+    // Both tracks' `[Bc, F]` activations are resident at once, so size `Bc` from the
+    // COMBINED live feature count (half what a single pass would take).
+    let block_bc = block_cells(s.f_live + u.f_live);
+
+    // Auto-lr from the combined dictionary rms — θ sees both tracks' scale.
+    let e_rms = {
+        let ss: f64 = s
+            .live
+            .iter()
+            .chain(u.live.iter())
+            .flat_map(|&g| &input.feat[g as usize * h..(g as usize + 1) * h])
+            .map(|x| f64::from(*x) * f64::from(*x))
+            .sum();
+        (ss / ((s.f_live + u.f_live) * h) as f64).sqrt().max(1e-12)
+    };
+    let lr0 = TARGET_DELTA_S / (h as f64 * e_rms);
+
+    info!(
+        "{} [joint θ+δ] — {n_kept} cell(s) × ({}+{}) live features, blocks of {}, \
+         lr {:.4} (auto: Δs≈{TARGET_DELTA_S}), ≤{MAX_STEPS} steps, ridge λ={}",
+        input.label, s.f_live, u.f_live, block_bc, lr0, input.lambda,
+    );
+
+    let mut theta = vec![0f32; n_kept * h];
+    let mut delta = vec![0f32; n_kept * h];
+    let mut c_s = vec![0f32; n_kept];
+    let mut c_u = vec![0f32; n_kept];
+    let mut stats = PassStats::default();
+    let n_blocks = n_kept.div_ceil(block_bc);
+
+    for (b, start) in (0..n_kept).step_by(block_bc).enumerate() {
+        let end = (start + block_bc).min(n_kept);
+        let out = solve_joint_block(JointBlockArgs {
+            input,
+            s: &s,
+            u: &u,
+            rows_s,
+            rows_u,
+            edges_s,
+            edges_u,
+            lr0,
+            start,
+            end,
+            progress: &BlockProgress {
+                bar,
+                stats: &stats,
+                label: "joint",
+                block: b + 1,
+                n_blocks,
+            },
+        })?;
+        theta[start * h..end * h].copy_from_slice(&out.theta);
+        delta[start * h..end * h].copy_from_slice(&out.delta);
+        c_s[start..end].copy_from_slice(&out.c_s);
+        c_u[start..end].copy_from_slice(&out.c_u);
+        // Fold the block's stats in (PassStats fields are module-local).
+        stats.blocks += 1;
+        stats.steps += out.steps;
+        stats.at_cap += usize::from(!out.converged);
+        stats.clamped += usize::from(out.clamped);
+        stats.dev_sum += out.deviance;
+        stats.dev_n += out.n_edges as f64;
+        stats.secs += out.loop_secs;
+    }
+
+    info!(
+        "{} [joint θ+δ] — done: ⌀{:.0} steps/block, {} of {} block(s) hit the {MAX_STEPS}-step \
+         cap, mean per-edge deviance {:.4}, {:.0}s total ({:.1} ms/step)",
+        input.label,
+        stats.mean_steps(),
+        stats.at_cap,
+        stats.blocks,
+        stats.mean_deviance(),
+        stats.secs,
+        stats.ms_per_step(),
+    );
+
+    Ok((
+        PassOut {
+            latent: theta,
+            intercept: c_s,
+        },
+        PassOut {
+            latent: delta,
+            intercept: c_u,
+        },
+    ))
+}
+
+struct JointBlockArgs<'a> {
+    input: &'a Phase2Input<'a>,
+    s: &'a TrackDict,
+    u: &'a TrackDict,
+    rows_s: &'a [u32],
+    rows_u: &'a [u32],
+    edges_s: &'a EdgeTable,
+    edges_u: &'a EdgeTable,
+    lr0: f64,
+    start: usize,
+    end: usize,
+    progress: &'a BlockProgress<'a>,
+}
+
+struct JointBlockOut {
+    theta: Vec<f32>,
+    delta: Vec<f32>,
+    c_s: Vec<f32>,
+    c_u: Vec<f32>,
+    steps: usize,
+    converged: bool,
+    clamped: bool,
+    deviance: f64,
+    n_edges: usize,
+    loop_secs: f64,
+}
+
+fn solve_joint_block(a: JointBlockArgs) -> anyhow::Result<JointBlockOut> {
+    let (h, dev) = (a.input.h, a.input.dev);
+    let bc = a.end - a.start;
+    let lambda = a.input.lambda;
+
+    // Dense counts + per-cell totals + folded-count mass, per track.
+    let gather = |track: &TrackDict,
+                  rows: &[u32],
+                  edges: &EdgeTable|
+     -> anyhow::Result<(Tensor, Vec<f64>, Tensor, usize)> {
+        let f_live = track.f_live;
+        let mut n_dense = vec![0f32; bc * f_live];
+        let mut n_tot = vec![0f64; bc];
+        let mut n_dead = vec![0f32; bc];
+        let mut n_edges = 0usize;
+        for i in a.start..a.end {
+            let local = i - a.start;
+            let (feats, counts) = edges.cell_slice(i);
+            for (&f_pass, &n) in feats.iter().zip(counts) {
+                let g = rows[f_pass as usize];
+                let l = track.to_live[g as usize];
+                n_tot[local] += f64::from(n);
+                if l == u32::MAX {
+                    n_dead[local] += n;
+                } else {
+                    n_dense[local * f_live + l as usize] = n;
+                    n_edges += 1;
+                }
+            }
+        }
+        let n_t = Tensor::from_vec(n_dense, (bc, f_live), dev)?.detach();
+        let n_dead_t = Tensor::from_vec(n_dead, (bc, 1), dev)?;
+        Ok((n_t, n_tot, n_dead_t, n_edges))
+    };
+    let (ns_t, ns_tot, ns_dead, n_edges_s) = gather(a.s, a.rows_s, a.edges_s)?;
+    let (nu_t, nu_tot, nu_dead, n_edges_u) = gather(a.u, a.rows_u, a.edges_u)?;
+    let n_edges = n_edges_s + n_edges_u;
+
+    // Null-model intercept per track: c = ln(Σ_f n) − ln Σ_f exp(β) at θ = δ = 0.
+    let init_c = |n_tot: &[f64], null_ln: f64| -> Vec<f32> {
+        n_tot
+            .iter()
+            .map(|&n| {
+                if n > 0.0 {
+                    (n.ln() - null_ln).clamp(-SCORE_CLAMP, SCORE_CLAMP) as f32
+                } else {
+                    -SCORE_CLAMP as f32
+                }
+            })
+            .collect()
+    };
+    let mut theta = Tensor::zeros((bc, h), DType::F32, dev)?;
+    let mut delta = Tensor::zeros((bc, h), DType::F32, dev)?;
+    let mut c_s = Tensor::from_vec(init_c(&ns_tot, a.s.null_log_norm), (bc, 1), dev)?;
+    let mut c_u = Tensor::from_vec(init_c(&nu_tot, a.u.null_log_norm), (bc, 1), dev)?;
+
+    // Hoisted constant data-gradient pieces (the data term is linear in the params),
+    // all loop-invariant: `N_u·E_u` (feeds both θ and δ), the θ-track sum
+    // `N_s·E_s + N_u·E_u`, and `Σ_f n` for each intercept.
+    let ne_u = nu_t.matmul(&a.u.e)?; // [Bc, H]
+    let ne_sum = (ns_t.matmul(&a.s.e)? + &ne_u)?; // [Bc, H] — θ's full data gradient
+    let ncs = ns_t.sum_keepdim(1)?; // [Bc, 1]
+    let ncu = nu_t.sum_keepdim(1)?; // [Bc, 1]
+
+    let (beta1, beta2, eps) = (0.9f64, 0.999f64, 1e-8f64);
+    let mut m_th = Tensor::zeros((bc, h), DType::F32, dev)?;
+    let mut v_th = Tensor::zeros((bc, h), DType::F32, dev)?;
+    let mut m_dl = Tensor::zeros((bc, h), DType::F32, dev)?;
+    let mut v_dl = Tensor::zeros((bc, h), DType::F32, dev)?;
+    let mut m_cs = Tensor::zeros((bc, 1), DType::F32, dev)?;
+    let mut v_cs = Tensor::zeros((bc, 1), DType::F32, dev)?;
+    let mut m_cu = Tensor::zeros((bc, 1), DType::F32, dev)?;
+    let mut v_cu = Tensor::zeros((bc, 1), DType::F32, dev)?;
+
+    let mut prev = Tensor::cat(&[&theta, &delta], 1)?;
+    let mut steps = 0usize;
+    let mut converged = false;
+    let mut emitted = 0usize;
+    let loop_start = std::time::Instant::now();
+    for step in 0..MAX_STEPS {
+        let frac = step as f64 / MAX_STEPS as f64;
+        let lr = a.lr0 * (1.0 - frac * (1.0 - LR_FLOOR_FRAC));
+        let t = (step + 1) as f64;
+        let step_size = lr * (1.0 - beta2.powf(t)).sqrt() / (1.0 - beta1.powf(t));
+
+        // Scores. Spliced sees θ; unspliced sees the nascent state θ+δ. Upper-clamp only.
+        let s_s = theta
+            .matmul(&a.s.e_t)?
+            .broadcast_add(&c_s)?
+            .broadcast_add(&a.s.b_row)?
+            .minimum(SCORE_CLAMP)?;
+        let nascent = (&theta + &delta)?;
+        let s_u = nascent
+            .matmul(&a.u.e_t)?
+            .broadcast_add(&c_u)?
+            .broadcast_add(&a.u.b_row)?
+            .minimum(SCORE_CLAMP)?;
+        let mu_s = s_s.exp()?;
+        let mu_u = s_u.exp()?;
+
+        // ∂L/∂θ = (μ_s−N_s)·E_s + (μ_u−N_u)·E_u + λθ ; ∂L/∂δ = (μ_u−N_u)·E_u + λδ.
+        // `μ_u·E_u` is shared, computed once.
+        let mu_u_e = mu_u.matmul(&a.u.e)?;
+        let g_theta = (((mu_s.matmul(&a.s.e)? + &mu_u_e)? - &ne_sum)? + (&theta * lambda)?)?;
+        let g_delta = ((&mu_u_e - &ne_u)? + (&delta * lambda)?)?;
+        // ∂L/∂c = (Σ_f μ − Σ_f n), plus the folded features' `exp(c)·dead_mass − n_dead`
+        // when the gate actually folded any (dead_mass = 0 ⟺ no fold ⟺ n_dead = 0).
+        let g_cs = {
+            let g = (mu_s.sum_keepdim(1)? - &ncs)?;
+            if a.s.dead_mass > 0.0 {
+                ((g + c_s.exp()?.affine(a.s.dead_mass, 0.0)?)? - &ns_dead)?
+            } else {
+                g
+            }
+        };
+        let g_cu = {
+            let g = (mu_u.sum_keepdim(1)? - &ncu)?;
+            if a.u.dead_mass > 0.0 {
+                ((g + c_u.exp()?.affine(a.u.dead_mass, 0.0)?)? - &nu_dead)?
+            } else {
+                g
+            }
+        };
+
+        // AdamW (decoupled decay = 0; the ridge is already in the gradients).
+        let adam =
+            |p: &Tensor, g: &Tensor, m: &mut Tensor, vv: &mut Tensor| -> anyhow::Result<Tensor> {
+                *m = ((&*m * beta1)? + (g * (1.0 - beta1))?)?;
+                *vv = ((&*vv * beta2)? + (g.sqr()? * (1.0 - beta2))?)?;
+                Ok((p - (&*m * step_size)?.broadcast_div(&(vv.sqrt()? + eps)?)?)?)
+            };
+        theta = adam(&theta, &g_theta, &mut m_th, &mut v_th)?;
+        delta = adam(&delta, &g_delta, &mut m_dl, &mut v_dl)?;
+        c_s = adam(&c_s, &g_cs, &mut m_cs, &mut v_cs)?;
+        c_u = adam(&c_u, &g_cu, &mut m_cu, &mut v_cu)?;
+
+        steps = step + 1;
+        // Convergence on `‖Δ[θ,δ]‖ / ‖[θ,δ]‖`.
+        if steps.is_multiple_of(CHECK_EVERY) {
+            emitted = a.progress.advance(bc, steps, emitted);
+            a.progress.describe(steps);
+            let cur = Tensor::cat(&[&theta, &delta], 1)?;
+            let dd = Tensor::stack(
+                &[(&cur - &prev)?.sqr()?.sum_all()?, cur.sqr()?.sum_all()?],
+                0,
+            )?
+            .to_vec1::<f32>()?;
+            prev = cur;
+            if dd[1] > 0.0 && f64::from(dd[0] / dd[1]).sqrt() < TOL {
+                converged = true;
+                break;
+            }
+        }
+    }
+    let loop_secs = loop_start.elapsed().as_secs_f64();
+    a.progress.finish_block(bc, emitted);
+
+    // Deviance over both tracks' observed edges, plus a clamp-bound check.
+    let track_dev = |theta_eff: &Tensor,
+                     track: &TrackDict,
+                     c: &Tensor,
+                     n_t: &Tensor,
+                     n_edges: usize|
+     -> anyhow::Result<(f64, bool)> {
+        if n_edges == 0 {
+            return Ok((0.0, false));
+        }
+        let s = theta_eff
+            .matmul(&track.e_t)?
+            .broadcast_add(c)?
+            .broadcast_add(&track.b_row)?;
+        let clamped = s.max_all()?.to_scalar::<f32>()? >= SCORE_CLAMP as f32;
+        let s = s.clamp(-SCORE_CLAMP, SCORE_CLAMP)?;
+        let mu = s.exp()?;
+        let mask = n_t.gt(0f32)?.to_dtype(DType::F32)?;
+        let log_n = n_t.clamp(1f32, f32::MAX)?.log()?;
+        let term = ((n_t * (log_n - &s)?)? - ((n_t - &mu)? * &mask)?)?;
+        Ok((
+            f64::from(term.sum_all()?.to_scalar::<f32>()?) * 2.0,
+            clamped,
+        ))
+    };
+    let (dev_s, clamp_s) = track_dev(&theta, a.s, &c_s, &ns_t, n_edges_s)?;
+    let nascent = (&theta + &delta)?;
+    let (dev_u, clamp_u) = track_dev(&nascent, a.u, &c_u, &nu_t, n_edges_u)?;
+    let clamped = clamp_s || clamp_u;
+    let deviance = dev_s + dev_u;
+
+    Ok(JointBlockOut {
+        theta: theta.flatten_all()?.to_vec1::<f32>()?,
+        delta: delta.flatten_all()?.to_vec1::<f32>()?,
+        c_s: c_s.flatten_all()?.to_vec1::<f32>()?,
+        c_u: c_u.flatten_all()?.to_vec1::<f32>()?,
+        steps,
+        converged,
+        clamped,
+        deviance,
+        n_edges,
+        loop_secs,
+    })
+}
+
 #[cfg(test)]
-#[path = "cell_sgd_tests.rs"]
+#[path = "block_sgd_tests.rs"]
 mod tests;

@@ -6,8 +6,7 @@
 //! `i → j` is kept when `j` is velocity-forward of `i` (`⟨θ_j − θ_i, δ_i⟩ > 0`).
 //! This fixed structure feeds the velocity-drift SEM residual
 //! `Σ_{i→j} w_ij ‖ê_j − ê_i − s·v̂_i‖²` added to phase-1 training (see
-//! `crate::training::PbSemTerm`). the learned DAG replaces this fixed graph with a learnable
-//! DAGMA `W`; the residual form is unchanged.
+//! `crate::training::PbSemTerm`).
 
 use super::projection::PbLevelVelocity;
 
@@ -30,27 +29,25 @@ pub struct PbLineageLevel {
     pub velocity: Vec<f32>,
 }
 
-impl PbLineageLevel {
-    /// Dense `[n_pb × n_pb]` row-major adjacency: `[i·n + j] = w` for edge `(i→j)`,
-    /// `0` elsewhere. Warm-starts the learnable pb-DAG `W` (learned-DAG) from this fixed
-    /// velocity-oriented structure so SGD refines from a correctly-oriented start
-    /// instead of zeros. The `(i, j)` layout matches `PbDagTerm`'s forward mask.
-    #[must_use]
-    pub fn to_dense(&self) -> Vec<f32> {
-        let n = self.n_pb;
-        let mut w = vec![0f32; n * n];
-        for &(i, j, wt) in &self.edges {
-            w[i as usize * n + j as usize] = wt;
-        }
-        w
-    }
-}
-
-/// Build one [`PbLineageLevel`] per collapse level (same order as `pb_vel`).
-pub fn build_pb_lineage(pb_vel: &[PbLevelVelocity], h: usize, knn: usize) -> Vec<PbLineageLevel> {
+/// Build one [`PbLineageLevel`] per collapse level (same order as `pb_vel`). With
+/// `mst`, each level is a **minimum spanning tree** over the θ geometry, velocity-oriented
+/// into a DAG (sparse, `n−1` edges) — [`build_one_level_mst`] — instead of the dense
+/// velocity-KNN ([`build_one_level`]).
+pub fn build_pb_lineage(
+    pb_vel: &[PbLevelVelocity],
+    h: usize,
+    knn: usize,
+    mst: bool,
+) -> Vec<PbLineageLevel> {
     pb_vel
         .iter()
-        .map(|lvl| build_one_level(lvl, h, knn))
+        .map(|lvl| {
+            if mst {
+                build_one_level_mst(lvl, h)
+            } else {
+                build_one_level(lvl, h, knn)
+            }
+        })
         .collect()
 }
 
@@ -189,6 +186,107 @@ fn build_one_level(lvl: &PbLevelVelocity, h: usize, knn: usize) -> PbLineageLeve
         n_pb: n,
         edges,
         velocity,
+    }
+}
+
+/// One collapse level as a **minimum spanning tree** over the θ geometry (Prim, O(n²) —
+/// `n_pb` is small), each tree edge oriented by velocity into a DAG. A tree is acyclic
+/// under any per-edge orientation, and the downstream root-anchoring
+/// ([`crate::fit::lift::pb_trajectory`]) re-orients globally — so this enforces a sparse,
+/// single-tree lineage (`n−1` edges) in place of the dense velocity-KNN.
+#[allow(clippy::needless_range_loop)]
+fn build_one_level_mst(lvl: &PbLevelVelocity, h: usize) -> PbLineageLevel {
+    let n = lvl.n_pb;
+    let theta = &lvl.theta;
+    let (velocity, has_vel) = unit_velocity(lvl, h);
+    if n < 2 {
+        return PbLineageLevel {
+            n_pb: n,
+            edges: Vec::new(),
+            velocity,
+        };
+    }
+
+    // Prim's MST rooted at node 0, θ-distance weighted. `best_d[j]`/`best_p[j]` track the
+    // cheapest edge connecting a not-yet-in-tree node `j` to the current tree.
+    let mut in_tree = vec![false; n];
+    let mut best_d = vec![f32::INFINITY; n];
+    let mut best_p = vec![0usize; n];
+    in_tree[0] = true;
+    for j in 1..n {
+        best_d[j] = dist2(row(theta, 0, h), row(theta, j, h));
+    }
+    let mut tree: Vec<(usize, usize)> = Vec::with_capacity(n - 1);
+    for _ in 1..n {
+        let (mut u, mut ud) = (usize::MAX, f32::INFINITY);
+        for j in 0..n {
+            if !in_tree[j] && best_d[j] < ud {
+                ud = best_d[j];
+                u = j;
+            }
+        }
+        if u == usize::MAX {
+            break; // no finite edge left (degenerate); leave the tree partial
+        }
+        in_tree[u] = true;
+        tree.push((best_p[u], u));
+        for j in 0..n {
+            if !in_tree[j] {
+                let d = dist2(row(theta, u, h), row(theta, j, h));
+                if d < best_d[j] {
+                    best_d[j] = d;
+                    best_p[j] = u;
+                }
+            }
+        }
+    }
+
+    // Orient each tree edge by velocity: from the velocity-bearing endpoint toward the
+    // other. Neither endpoint has velocity ⇒ keep (a, b) — orientation is moot for
+    // acyclicity, and root-anchoring fixes global direction downstream.
+    let edges = tree
+        .into_iter()
+        .map(|(a, b)| {
+            let (i, j) = orient_by_velocity(a, b, theta, &velocity, &has_vel, h);
+            (i as u32, j as u32, 1.0f32)
+        })
+        .collect();
+
+    PbLineageLevel {
+        n_pb: n,
+        edges,
+        velocity,
+    }
+}
+
+/// Orient an undirected edge `{a, b}` from the velocity-bearing endpoint toward the other
+/// (`i → j` iff `⟨θ_j − θ_i, v̂_i⟩ ≥ 0`). Falls back to `(a, b)` when neither has velocity.
+fn orient_by_velocity(
+    a: usize,
+    b: usize,
+    theta: &[f32],
+    velocity: &[f32],
+    has_vel: &[bool],
+    h: usize,
+) -> (usize, usize) {
+    let fwd = |i: usize, j: usize| -> f32 {
+        let (ti, tj, vi) = (row(theta, i, h), row(theta, j, h), row(velocity, i, h));
+        (0..h).map(|c| (tj[c] - ti[c]) * vi[c]).sum()
+    };
+    if has_vel[a] {
+        if fwd(a, b) >= 0.0 {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    } else if has_vel[b] {
+        if fwd(b, a) >= 0.0 {
+            (b, a)
+        } else {
+            (a, b)
+        }
+    } else {
+        (a, b)
     }
 }
 
