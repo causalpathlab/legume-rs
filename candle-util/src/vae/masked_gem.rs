@@ -664,17 +664,56 @@ pub fn infer_minibatch(
     infer_latent(encoder, mb, nascent_nonzero_only, dev)
 }
 
+/// Which center of the retained `θ` draws [`fit_theta_posterior`] reports.
+///
+/// The two are Bayes estimators under different losses, and the right one is
+/// decided by the CONTRAST the caller forms downstream — not by taste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThetaMean {
+    /// `E[θ]`: average the probabilities. Coherent with a LINEAR contrast
+    /// (`θ^u − θ^s`), which is what `faba`'s velocity forms today, and what
+    /// makes `θ^u·α − θ^s·α = (θ^u − θ^s)·α` exact — the identity the H-space
+    /// velocity field relies on.
+    ///
+    /// Lands on the simplex for free: a convex combination of simplex points is
+    /// a simplex point.
+    Arithmetic,
+    /// The compositional center: average `log θ`, then close. This is the
+    /// closed geometric mean, the center under Aitchison geometry, and it is
+    /// the coherent choice for a LOG-RATIO contrast (`log(θ^u/θ^s)`) — which
+    /// compositional data analysis argues is the meaningful difference between
+    /// two compositions, since a linear difference of compositions is not
+    /// itself compositional.
+    ///
+    /// Not the default, and the reason is downstream: pairing this center with
+    /// `faba`'s current linear difference is incoherent in a way that BITES.
+    /// The geometric mean sits below the arithmetic one, by a margin that grows
+    /// with the spread of the draws — and the nascent track is the sparse, more
+    /// diffuse one, so the shrinkage would land unevenly on the two halves of a
+    /// quantity computed by differencing them. Switch this on in the same
+    /// change that moves the contrast to a log ratio, not before.
+    Geometric,
+}
+
 /// How hard to work at closing the amortization gap in [`fit_theta_to_track`].
 pub struct ThetaFitConfig {
     /// Elliptical-slice transitions per cell.
     pub n_steps: usize,
     /// Safety cap on slice shrinkages within one transition.
     pub max_shrink: usize,
+    /// Trailing states averaged into the returned `θ` — the rest are burn-in.
+    ///
+    /// Costs nothing: the transitions run either way, and this only decides how
+    /// many of the resulting states are kept instead of discarded. `1`
+    /// reproduces the single-final-draw behaviour this fit used to have.
+    pub n_keep: usize,
+    /// Which center of the retained draws to report — see [`ThetaMean`].
+    pub mean: ThetaMean,
 }
 
 impl Default for ThetaFitConfig {
     fn default() -> Self {
-        Self { n_steps: 16, max_shrink: 50 }
+        Self { n_steps: 16, max_shrink: 50, n_keep: 8, mean: ThetaMean::Arithmetic }
     }
 }
 
@@ -702,8 +741,28 @@ impl Default for ThetaFitConfig {
 /// optimization. Starting from a uniform θ would discard the encoder entirely
 /// and measure something else.
 ///
-/// It returns SAMPLES, not a point estimate, so the per-cell spread of `Δθ` is
-/// available — which is what makes "is `δ` real, or ridge-held noise?"
+/// # Why the posterior MEAN, not the final draw
+///
+/// ESS returns samples, so keeping only the last one wrote a single draw into
+/// the latent as if it were a point estimate — and `Δθ = θ^u − θ^s` differences
+/// two independent chains, so it carried two independent sampling errors with
+/// no way to tell them from biology. Averaging the trailing `cfg.n_keep` states
+/// costs nothing (the transitions run regardless; they were simply discarded)
+/// and cuts that noise by the number of INDEPENDENT draws they are worth —
+/// fewer than `cfg.n_keep`, since the states are autocorrelated.
+///
+/// ("ESS" throughout this file is elliptical slice sampling, never effective
+/// sample size; the MCMC literature uses the acronym for the latter, so the
+/// count of independent draws is spelled out rather than abbreviated here.)
+///
+/// The average is taken over `θ`, NOT over `z`. `softmax(mean z) ≠ mean
+/// softmax(z)`, and `Δθ` is a difference of COMPOSITIONS, so `E[θ]` is the
+/// estimand; averaging in `z` would return a sharper-than-posterior point,
+/// biased toward the leading topic and worst on the thin nascent track. See
+/// [`crate::mcmc::batched_ess_posterior`].
+///
+/// [`fit_theta_posterior`] returns the per-cell spread alongside the mean —
+/// which is what makes "is this cell's `Δθ` real, or sampling noise?"
 /// answerable at all.
 ///
 /// # The prior, stated
@@ -720,6 +779,28 @@ pub fn fit_theta_to_track(
     track: Track,
     cfg: &ThetaFitConfig,
 ) -> candle_core::Result<Tensor> {
+    Ok(fit_theta_posterior(decoder, mb, init_raw_z, track, cfg)?.0)
+}
+
+/// [`fit_theta_to_track`] with the per-cell spread kept: returns
+/// `(log θ posterior mean [N, T], θ posterior SD [N, T])`.
+///
+/// The SD is on whatever scale the center was taken — `θ` for
+/// [`ThetaMean::Arithmetic`], `log θ` for [`ThetaMean::Geometric`] — so that the
+/// spread always matches the geometry of the point it describes. Do not compare
+/// the two across a change of `cfg.mean`.
+///
+/// Read it as a LOWER BOUND on the posterior spread: consecutive ESS states are
+/// autocorrelated, so `cfg.n_keep` retained states are worth fewer than
+/// `cfg.n_keep` independent draws. It ranks cells honestly without being a
+/// calibrated standard deviation.
+pub fn fit_theta_posterior(
+    decoder: &GemEtmDecoder,
+    mb: &GemMinibatchData,
+    init_raw_z: &Tensor,
+    track: Track,
+    cfg: &ThetaFitConfig,
+) -> candle_core::Result<(Tensor, Tensor)> {
     // Score every OBSERVED position of this track — not a masking draw. The fit
     // asks "what θ best explains the counts this cell actually has", so nothing
     // is held out.
@@ -768,13 +849,44 @@ pub fn fit_theta_to_track(
         counts.mul(&log_p)?.sum(1) // [N]
     };
 
-    let (z, _) = crate::mcmc::batched_ess_steps(
-        &init_raw_z.detach(),
-        &lnpdf,
-        cfg.n_steps,
-        cfg.max_shrink,
-    )?;
-    theta_log_simplex(&z)
+    // Accumulate a MAP of z, never z itself — see the "posterior MEAN" section
+    // above. Which map depends on the center being reported.
+    let init = init_raw_z.detach();
+    match cfg.mean {
+        ThetaMean::Arithmetic => {
+            let (theta_mean, theta_sd) = crate::mcmc::batched_ess_posterior(
+                &init,
+                &lnpdf,
+                cfg.n_steps,
+                cfg.n_keep,
+                cfg.max_shrink,
+                |z| theta_log_simplex(z)?.exp(),
+            )?;
+            // A mean of simplex points is itself on the simplex, so this stays a
+            // valid log θ. The clamp is only against an f32 underflow to exactly
+            // 0 in a topic no retained state gave mass — `ln(0)` would put a
+            // −inf in the latent.
+            let log_theta = theta_mean.clamp(1e-20f64, 1.0f64)?.log()?;
+            Ok((log_theta, theta_sd))
+        }
+        ThetaMean::Geometric => {
+            let (log_mean, log_sd) = crate::mcmc::batched_ess_posterior(
+                &init,
+                &lnpdf,
+                cfg.n_steps,
+                cfg.n_keep,
+                cfg.max_shrink,
+                theta_log_simplex,
+            )?;
+            // `log_softmax` IS the closure operator in log space: it renormalizes
+            // the averaged log θ back onto the simplex, which the geometric mean
+            // does NOT reach on its own (unlike the arithmetic one). No clamp is
+            // needed on this branch — `log_softmax` is `z − logsumexp(z)`, finite
+            // for any finite input, so nothing can underflow to −inf on the way.
+            let log_theta = candle_nn::ops::log_softmax(&log_mean, 1)?;
+            Ok((log_theta, log_sd))
+        }
+    }
 }
 
 #[cfg(test)]
