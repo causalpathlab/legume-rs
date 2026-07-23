@@ -6,9 +6,8 @@
 //! from [`crate::gem_encoder::write`], which is the plumbing that puts tables on
 //! disk.
 
-use anyhow::Context;
 use candle_util::decoder::gem_etm::{GemEtmDecoder, Track};
-use candle_util::vae::masked_gem::{GemScores, MODEL_TYPE};
+use candle_util::vae::masked_gem::GemScores;
 use log::{info, warn};
 use matrix_util::dmatrix_io::DMatrix as IoDMatrix;
 use matrix_util::traits::IoOps;
@@ -332,26 +331,25 @@ pub fn save_model_metadata(
     parameters: &candle_util::candle_nn::VarMap,
 ) -> anyhow::Result<()> {
     parameters.save(format!("{}.safetensors", args.out))?;
-    let cm: Vec<String> = velocity_common_mode
-        .iter()
-        .map(|x| format!("{x:.6}"))
-        .collect();
-    let json = format!(
-        "{{\n  \"model_type\": \"{}\",\n  \"latent\": \"log-theta\",\n  \
-         \"delta_base\": \"unspliced\",\n  \
-         \"n_genes\": {},\n  \"n_latent\": {},\n  \"embedding_dim\": {},\n  \
-         \"encoder_layers\": {:?},\n  \"context_size\": {},\n  \
-         \"velocity_common_mode\": [{}]\n}}\n",
-        MODEL_TYPE,
-        n_genes,
-        args.n_latent,
-        args.embedding_dim,
-        args.encoder_layers,
-        args.context_size,
-        cm.join(", "),
+
+    let mut extra = serde_json::Map::new();
+    extra.insert("latent".into(), "log-theta".into());
+    extra.insert("delta_base".into(), "unspliced".into());
+    extra.insert("n_genes".into(), n_genes.into());
+    extra.insert("n_latent".into(), args.n_latent.into());
+    extra.insert("embedding_dim".into(), args.embedding_dim.into());
+    extra.insert(
+        "encoder_layers".into(),
+        args.encoder_layers.iter().copied().collect(),
     );
-    let path = format!("{}.model.json", args.out);
-    std::fs::write(&path, json).with_context(|| format!("writing {path}"))?;
-    info!("wrote {}.safetensors + {path}", args.out);
-    Ok(())
+    extra.insert("context_size".into(), args.context_size.into());
+    extra.insert(
+        "velocity_common_mode".into(),
+        velocity_common_mode.iter().copied().collect(),
+    );
+
+    info!("wrote {}.safetensors", args.out);
+    // `model_type` is stamped by the manifest writer from `RunKind::Topic`, so
+    // this file cannot spell it differently. `write` logs the path it wrote.
+    crate::manifest::write(&args.out, crate::manifest::RunKind::Topic, extra)
 }

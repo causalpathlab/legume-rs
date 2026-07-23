@@ -88,7 +88,7 @@ use candle_nn::{AdamW, Optimizer};
 use log::{info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Model-type tag persisted in `{out}.model.json`.
+/// Model-type tag persisted in `{out}.gem.json`.
 ///
 /// Kept explicit about the simplex map even though there is now only one, so a
 /// reader can still tell a current `{out}.latent.parquet` apart from an older

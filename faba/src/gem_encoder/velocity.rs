@@ -68,7 +68,7 @@ use crate::gem_encoder::write::write_cell_table;
 /// shifting in one direction would also produce one. In practice the two are
 /// not separable here, and the magnitudes above are far more consistent with
 /// the encoder asymmetry than with biology. The offset is therefore **returned
-/// and recorded** in `{out}.model.json` rather than discarded, so anyone who
+/// and recorded** in `{out}.gem.json` rather than discarded, so anyone who
 /// wants the uncentred field can add it back.
 pub fn center_velocity(velocity: &mut [f32], n: usize, vdim: usize, label: &str) -> Vec<f32> {
     if n == 0 || vdim == 0 {
@@ -99,7 +99,7 @@ pub fn center_velocity(velocity: &mut [f32], n: usize, vdim: usize, label: &str)
 
     info!(
         "{label}: removed the per-axis common mode ({share:.1}% of total sum-of-squares); \n\
-         the offset is recorded in {{out}}.model.json."
+         the offset is recorded in {{out}}.gem.json."
     );
     if share > 90.0 {
         warn!(

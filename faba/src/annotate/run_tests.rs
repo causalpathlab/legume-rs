@@ -1,102 +1,68 @@
 use super::*;
+use faba::manifest::{write as write_manifest, RunKind};
 
-/// Write `{prefix}.model.json` with the given body and hand back the prefix.
-fn with_model_json(dir: &std::path::Path, name: &str, body: &str) -> String {
-    let prefix = dir.join(name).to_string_lossy().to_string();
-    std::fs::write(format!("{prefix}.model.json"), body).unwrap();
-    prefix
+fn prefix_in(dir: &std::path::Path, name: &str) -> String {
+    dir.join(name).to_string_lossy().to_string()
 }
 
-/// A `faba gem` prefix has NO model.json, and must keep getting projection —
-/// this is every already-published embedding run, and the default moving under
-/// them would silently change what their annotations mean.
+/// What a bare `faba annotate -f <prefix>` resolves to, across every kind of
+/// prefix it can be handed.
+///
+/// - no manifest → projection: every `faba gem` run produced before the manifest
+///   existed, where a moving default would silently change what already-published
+///   annotations mean.
+/// - topic → enrichment: the whole point. Without it a no-`--mode` annotate ran
+///   nearest-centroid on a topic model, which the flag's own help forbids.
+/// - embedding → projection, resolved POSITIVELY rather than by absence — the
+///   difference between "this is a gem run" and "I found nothing and guessed".
 #[test]
-fn absent_model_json_resolves_to_projection() {
+fn the_manifest_decides_the_mode_when_none_was_given() {
     let dir = tempfile::tempdir().unwrap();
-    let prefix = dir.path().join("gem_run").to_string_lossy().to_string();
-    assert!(!is_topic_model(&prefix));
-    assert_eq!(resolve_mode(&prefix, None), Mode::Projection);
+    for (name, kind, expect) in [
+        ("mystery_run", None, Mode::Projection),
+        ("topic_run", Some(RunKind::Topic), Mode::Enrichment),
+        ("embed_run", Some(RunKind::Embedding), Mode::Projection),
+    ] {
+        let prefix = prefix_in(dir.path(), name);
+        if let Some(kind) = kind {
+            write_manifest(&prefix, kind, serde_json::Map::new()).unwrap();
+        }
+        assert_eq!(resolve_mode(&prefix, None), expect, "{name}");
+    }
 }
 
-/// The whole point: a gem-encoder prefix picks enrichment on its own. Without
-/// this, a no-`--mode` annotate ran nearest-centroid on a topic model, which the
-/// flag's own help forbids.
-#[test]
-fn gem_encoder_model_json_resolves_to_enrichment() {
-    let dir = tempfile::tempdir().unwrap();
-    let prefix = with_model_json(
-        dir.path(),
-        "topic_run",
-        r#"{"model_type": "gem-encoder-softmax", "latent": "log-theta", "n_genes": 12}"#,
-    );
-    assert!(is_topic_model(&prefix));
-    assert_eq!(resolve_mode(&prefix, None), Mode::Enrichment);
-}
-
-/// Detection is on the `gem-encoder` PREFIX, not the exact string, so older
-/// files written under a different simplex map still read as topic models. Those
-/// exist on disk and need enrichment just as much.
-#[test]
-fn older_simplex_map_still_reads_as_a_topic_model() {
-    let dir = tempfile::tempdir().unwrap();
-    let prefix = with_model_json(
-        dir.path(),
-        "sbp_run",
-        r#"{"model_type": "gem-encoder-sbp", "n_genes": 12}"#,
-    );
-    assert!(is_topic_model(&prefix));
-    assert_eq!(resolve_mode(&prefix, None), Mode::Enrichment);
-}
-
-/// An explicit choice always wins — including the discouraged one, which warns
-/// and proceeds rather than erroring. Reproducing a previously published call
-/// has to stay possible.
+/// An explicit choice always wins, in every combination — including the
+/// discouraged one, which warns and proceeds rather than erroring so that
+/// reproducing a previously published call stays possible.
 #[test]
 fn an_explicit_mode_is_never_overridden() {
     let dir = tempfile::tempdir().unwrap();
-    let topic = with_model_json(
-        dir.path(),
-        "topic_run",
-        r#"{"model_type": "gem-encoder-softmax"}"#,
-    );
-    let embed = dir.path().join("gem_run").to_string_lossy().to_string();
+    let topic = prefix_in(dir.path(), "topic_run");
+    let embed = prefix_in(dir.path(), "embed_run");
+    write_manifest(&topic, RunKind::Topic, serde_json::Map::new()).unwrap();
+    write_manifest(&embed, RunKind::Embedding, serde_json::Map::new()).unwrap();
 
-    assert_eq!(
-        resolve_mode(&topic, Some(Mode::Projection)),
-        Mode::Projection
-    );
-    assert_eq!(
-        resolve_mode(&topic, Some(Mode::Enrichment)),
-        Mode::Enrichment
-    );
-    assert_eq!(
-        resolve_mode(&embed, Some(Mode::Enrichment)),
-        Mode::Enrichment
-    );
-    assert_eq!(
-        resolve_mode(&embed, Some(Mode::Projection)),
-        Mode::Projection
-    );
+    for (prefix, requested) in [
+        (&topic, Mode::Projection),
+        (&topic, Mode::Enrichment),
+        (&embed, Mode::Projection),
+        (&embed, Mode::Enrichment),
+    ] {
+        assert_eq!(resolve_mode(prefix, Some(requested)), requested);
+    }
 }
 
-/// Malformed or truncated JSON must not panic and must not guess "topic". An
-/// interrupted write is the realistic case, and falling back to projection keeps
-/// the pre-existing behaviour rather than inventing a new one.
+/// A prefix written before the rename still resolves to enrichment. Those runs
+/// exist on disk, and the legacy name was only ever written by gem-encoder, so
+/// dropping support would strand exactly the runs that most need enrichment.
 #[test]
-fn unparseable_model_json_falls_back_to_projection() {
+fn a_legacy_manifest_still_resolves_to_enrichment() {
     let dir = tempfile::tempdir().unwrap();
-    for (name, body) in [
-        ("truncated", r#"{"model_type": "gem-encoder-soft"#),
-        ("empty", ""),
-        ("no_model_type", r#"{"latent": "log-theta"}"#),
-        ("wrong_type", r#"{"model_type": 42}"#),
-        ("other_model", r#"{"model_type": "senna-topic"}"#),
-    ] {
-        let prefix = with_model_json(dir.path(), name, body);
-        assert!(
-            !is_topic_model(&prefix),
-            "{name} must not read as a topic model"
-        );
-        assert_eq!(resolve_mode(&prefix, None), Mode::Projection, "{name}");
-    }
+    let prefix = prefix_in(dir.path(), "old_topic_run");
+    std::fs::write(
+        faba::manifest::legacy_path(&prefix),
+        r#"{"model_type": "gem-encoder-softmax", "latent": "log-theta"}"#,
+    )
+    .unwrap();
+    assert_eq!(resolve_mode(&prefix, None), Mode::Enrichment);
 }

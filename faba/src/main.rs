@@ -351,7 +351,7 @@ Example:\n  \
             and this model cannot tell those apart.\n\
             NOTE this is the OPPOSITE base from `faba gem`, whose delta shifts spliced -> unspliced;\n\
             the two write same-named delta_feature_embedding.parquet files that are NOT comparable.\n\
-            `{out}.model.json` records `delta_base`.\n\n\
+            `{out}.gem.json` records `delta_base`.\n\n\
             Training masks a fraction of GENES with ONE draw shared by both tracks,\n\
             and predicts both from ONE theta. That gives delta a monopoly: the only\n\
             thing that can make the two tracks differ is delta itself.\n\
@@ -364,7 +364,7 @@ Example:\n  \
             cannot express that difference while training; estimating delta first and\n\
             reading the movement out of it keeps the two from competing.\n\
             The per-axis population mean is removed before writing and recorded\n\
-            in `{out}.model.json` as `velocity_common_mode`.\n\n\
+            in `{out}.gem.json` as `velocity_common_mode`.\n\n\
             The latent is a softmax simplex — hence the `gem-topic` alias —\n\
             and `{out}.latent.parquet` holds LOG THETA, so theta = exp(row),\n\
             the same contract every senna topic-family run follows.\n\

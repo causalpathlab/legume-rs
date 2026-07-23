@@ -807,19 +807,24 @@ fn run_gem_genes_bge(
     // one-word verdict — `--root-from-gem` reads `n_terminals` directly to skip a
     // structureless DAG.
     if let Some(qc) = &out.lineage_qc {
-        let json = format!(
-            "{{\n  \"n_roots\": {},\n  \"n_terminals\": {},\n  \"top_source_reach\": {:.4},\n  \
-             \"velocity_coherence\": {:.4},\n  \"mean_ambiguity\": {:.4},\n  \
-             \"refine_likelihood\": {:.4}\n}}\n",
-            qc.n_roots,
-            qc.n_terminals,
-            qc.root_decisiveness,
-            qc.velocity_coherence,
-            qc.mean_ambiguity,
-            qc.likelihood,
-        );
-        std::fs::write(format!("{}.lineage_qc.json", args.out), json)
-            .with_context(|| format!("writing {}.lineage_qc.json", args.out))?;
+        // Through serde rather than a format string: these are all `{:.4}`
+        // floats, and a non-finite one renders as a bare `NaN`, which is not
+        // JSON. `root::from_gem` parses this file with `.ok()?`, so an invalid
+        // write degrades silently to "no signal" instead of erroring — serde
+        // emits `null` for a non-finite float, which parses.
+        let json = serde_json::json!({
+            "n_roots": qc.n_roots,
+            "n_terminals": qc.n_terminals,
+            "top_source_reach": qc.root_decisiveness,
+            "velocity_coherence": qc.velocity_coherence,
+            "mean_ambiguity": qc.mean_ambiguity,
+            "refine_likelihood": qc.likelihood,
+        });
+        std::fs::write(
+            format!("{}.lineage_qc.json", args.out),
+            format!("{}\n", serde_json::to_string_pretty(&json)?),
+        )
+        .with_context(|| format!("writing {}.lineage_qc.json", args.out))?;
         info!(
             "lineage-DAG structure: {} root(s), {} terminal(s), top-source reach {:.2}, \
              velocity-coherence {:.2}, mean-ambiguity {:.2} → {}.lineage_qc.json",
@@ -831,6 +836,16 @@ fn run_gem_genes_bge(
             args.out,
         );
     }
+
+    // Say what produced this prefix. gem's tables share names and shapes with
+    // gem-encoder's while meaning something different — `cell_embedding.parquet`
+    // is Euclidean here and a topic membership there — so a downstream step
+    // handed only the prefix would otherwise have to guess. `latent` records
+    // that these coordinates are NOT log θ: nothing downstream should `exp()`
+    // them.
+    let mut extra = serde_json::Map::new();
+    extra.insert("latent".into(), "embedding".into());
+    crate::manifest::write(&args.out, crate::manifest::RunKind::Embedding, extra)?;
 
     info!(
         "done (gem — raw spliced identity θ + raw velocity increment δ over the bge engine) — prefix '{}'",
@@ -936,20 +951,22 @@ fn write_projection_qc_json(
     out_prefix: &str,
 ) -> anyhow::Result<()> {
     let c = &proj.calib;
-    let json = format!(
-        "{{\n  \"n_projected\": {},\n  \"n_projected_live\": {},\n  \
-         \"n_trained_calibration\": {},\n  \"calibration\": \"{:?}\",\n  \
-         \"mean_cosine\": {:.4},\n  \"norm_ratio\": {:.4},\n  \"r2\": {:.4}\n}}\n",
-        proj.gene_ids.len(),
-        proj.live.iter().filter(|&&l| l).count(),
-        c.n_trained,
-        c.kind,
-        c.mean_cosine,
-        c.norm_ratio,
-        c.r2
-    );
+    // Serde, not a format string — same reason as `lineage_qc.json` above: the
+    // three floats can be non-finite, and `{:.4}` would emit a bare `NaN` that
+    // no JSON parser accepts. It also escapes the `{:?}` calibration rendering
+    // instead of splicing it raw between quotes.
+    let json = serde_json::json!({
+        "n_projected": proj.gene_ids.len(),
+        "n_projected_live": proj.live.iter().filter(|&&l| l).count(),
+        "n_trained_calibration": c.n_trained,
+        "calibration": format!("{:?}", c.kind),
+        "mean_cosine": c.mean_cosine,
+        "norm_ratio": c.norm_ratio,
+        "r2": c.r2,
+    });
     let path = format!("{out_prefix}.projection_qc.json");
-    std::fs::write(&path, json).with_context(|| format!("writing {path}"))?;
+    std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&json)?))
+        .with_context(|| format!("writing {path}"))?;
     Ok(())
 }
 

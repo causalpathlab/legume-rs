@@ -16,7 +16,7 @@
 //!
 //! Note this is the OPPOSITE base from `faba gem`, whose `δ_g` shifts spliced →
 //! unspliced. The two write same-named `delta_feature_embedding.parquet` files
-//! that are not directly comparable; `{out}.model.json` records `delta_base`.
+//! that are not directly comparable; `{out}.gem.json` records `delta_base`.
 
 pub mod args;
 /// Per-cell inference: streams the sparse backend, emitting **log θ**.
@@ -24,7 +24,7 @@ pub mod infer;
 pub mod load;
 /// Cell QC and the per-level training tensors, between loading and fitting.
 pub mod prepare;
-/// Diagnostics: the score trace, the splice-ratio check, `{out}.model.json`.
+/// Diagnostics: the score trace, the splice-ratio check, `{out}.gem.json`.
 pub mod report;
 pub mod run;
 /// RNA velocity — the dictionary operator `v = P·θ` and its tables.
