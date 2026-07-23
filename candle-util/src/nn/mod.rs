@@ -15,9 +15,9 @@ pub mod soft_clamp;
 pub use batch_norm::{batch_norm, BatchNorm, BatchNormConfig};
 pub use gcn::GcnBlock;
 pub use layers::{iaf_stack_linear, sparsemax, stack_relu_linear, IAFLayers, StackLayers};
-pub use soft_clamp::{soft_clamp, MASKED_LOGIT_CLAMP};
 pub use linear::{
     aggregate_linear, aggregate_linear_hard, log_softmax_linear, log_softmax_linear_nobias,
     logsumexp_forward, non_neg_linear, sparsemax_linear, AggregateLinear, NonNegLinear,
     SoftmaxLinear, SparsemaxLinear,
 };
+pub use soft_clamp::{soft_clamp, MASKED_LOGIT_CLAMP};

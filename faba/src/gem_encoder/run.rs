@@ -201,14 +201,8 @@ pub fn run_gem_encoder(args: &GemEncoderArgs) -> anyhow::Result<()> {
         &args.out,
     )?;
 
-    let common_mode = write_velocity_tables(
-        &inferred,
-        &alpha,
-        cell_names,
-        args.n_latent,
-        &args.out,
-        qc,
-    )?;
+    let common_mode =
+        write_velocity_tables(&inferred, &alpha, cell_names, args.n_latent, &args.out, qc)?;
     save_model_metadata(args, map.n_genes, &common_mode, &parameters)?;
 
     info!("done (gem-encoder) — prefix '{}'", args.out);

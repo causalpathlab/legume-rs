@@ -40,7 +40,10 @@ fn identical_tracks_give_zero_velocity() {
         .map(|(u, s)| u.exp() - s.exp())
         .collect();
     for (i, x) in v.iter().enumerate() {
-        assert!(x.abs() < 1e-6, "steady-state cell moved: component {i} = {x}");
+        assert!(
+            x.abs() < 1e-6,
+            "steady-state cell moved: component {i} = {x}"
+        );
     }
 }
 
@@ -63,8 +66,14 @@ fn a_factor_enriched_in_nascent_gets_positive_velocity() {
         .zip(inf.latent_mature.iter())
         .map(|(u, s)| u.exp() - s.exp())
         .collect();
-    assert!(v[2] > 0.0, "topic 2 is nascent-enriched, so it is the FUTURE: {v:?}");
-    assert!(v[0] < 0.0 && v[1] < 0.0, "topics it is leaving must be negative: {v:?}");
+    assert!(
+        v[2] > 0.0,
+        "topic 2 is nascent-enriched, so it is the FUTURE: {v:?}"
+    );
+    assert!(
+        v[0] < 0.0 && v[1] < 0.0,
+        "topics it is leaving must be negative: {v:?}"
+    );
     let total: f32 = v.iter().sum();
     assert!(
         total.abs() < 1e-5,

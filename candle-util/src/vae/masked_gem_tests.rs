@@ -40,7 +40,8 @@ fn planted_decoder(dev: &Device) -> (GemEtmDecoder, VarMap) {
         let a = vars
             .get("dec.topic.embeddings")
             .expect("decoder registers alpha as `topic.embeddings`");
-        a.set(&Tensor::from_vec(alpha, (K, H), dev).unwrap()).unwrap();
+        a.set(&Tensor::from_vec(alpha, (K, H), dev).unwrap())
+            .unwrap();
     }
     (dec, varmap)
 }
@@ -48,8 +49,14 @@ fn planted_decoder(dev: &Device) -> (GemEtmDecoder, VarMap) {
 /// One cell whose counts come ONLY from topic `t`'s genes, on both tracks.
 fn cell_on_topic(t: usize) -> GemSample {
     let genes: Vec<u32> = (0..G as u32).collect();
-    let vals: Vec<f32> = (0..G).map(|g| if g % K == t { 20.0 } else { 0.0 }).collect();
-    GemSample { genes, nascent: vals.clone(), mature: vals }
+    let vals: Vec<f32> = (0..G)
+        .map(|g| if g % K == t { 20.0 } else { 0.0 })
+        .collect();
+    GemSample {
+        genes,
+        nascent: vals.clone(),
+        mature: vals,
+    }
 }
 
 /// The decisive test for the post-hoc claim: fitting θ against the FROZEN
@@ -72,19 +79,16 @@ fn fit_theta_to_track_moves_toward_the_planted_topic() {
 
     // Deliberately wrong start: uniform logits, so every cell begins at 1/K.
     let init = Tensor::zeros((K, K), DType::F32, &dev).unwrap();
-    let fitted = fit_theta_to_track(
-        &dec,
-        &mb,
-        &init,
-        Track::Mature,
-        &ThetaFitConfig::default(),
-    )
-    .unwrap();
+    let fitted =
+        fit_theta_to_track(&dec, &mb, &init, Track::Mature, &ThetaFitConfig::default()).unwrap();
 
     let th: Vec<Vec<f32>> = fitted.exp().unwrap().to_vec2().unwrap();
     for (cell, row) in th.iter().enumerate() {
         let s: f32 = row.iter().sum();
-        assert!((s - 1.0).abs() < 1e-3, "row {cell} must stay on the simplex, sums to {s}");
+        assert!(
+            (s - 1.0).abs() < 1e-3,
+            "row {cell} must stay on the simplex, sums to {s}"
+        );
         // It must be closer to its own topic than a uniform start was.
         assert!(
             row[cell] > 1.0 / K as f32,
@@ -110,21 +114,22 @@ fn fit_theta_posterior_mean_stays_on_the_simplex() {
     let mb = data.minibatch_ordered(0, K, &dev).unwrap();
     let init = Tensor::zeros((K, K), DType::F32, &dev).unwrap();
 
-    let (log_theta, sd) = fit_theta_posterior(
-        &dec,
-        &mb,
-        &init,
-        Track::Mature,
-        &ThetaFitConfig::default(),
-    )
-    .unwrap();
+    let (log_theta, sd) =
+        fit_theta_posterior(&dec, &mb, &init, Track::Mature, &ThetaFitConfig::default()).unwrap();
 
-    assert_eq!(sd.dims(), log_theta.dims(), "SD must match the mean's shape");
+    assert_eq!(
+        sd.dims(),
+        log_theta.dims(),
+        "SD must match the mean's shape"
+    );
     let th: Vec<Vec<f32>> = log_theta.exp().unwrap().to_vec2().unwrap();
     for (cell, row) in th.iter().enumerate() {
         let s: f32 = row.iter().sum();
         assert!((s - 1.0).abs() < 1e-3, "row {cell} sums to {s}, not 1");
-        assert!(row.iter().all(|v| v.is_finite()), "row {cell} has non-finite θ");
+        assert!(
+            row.iter().all(|v| v.is_finite()),
+            "row {cell} has non-finite θ"
+        );
     }
     let sd_v: Vec<f32> = sd.flatten_all().unwrap().to_vec1().unwrap();
     assert!(
@@ -146,7 +151,10 @@ fn fit_theta_posterior_with_one_retained_state_has_zero_spread() {
     let mb = data.minibatch_ordered(0, 1, &dev).unwrap();
     let init = Tensor::zeros((1, K), DType::F32, &dev).unwrap();
 
-    let cfg = ThetaFitConfig { n_keep: 1, ..ThetaFitConfig::default() };
+    let cfg = ThetaFitConfig {
+        n_keep: 1,
+        ..ThetaFitConfig::default()
+    };
     let (_, sd) = fit_theta_posterior(&dec, &mb, &init, Track::Mature, &cfg).unwrap();
 
     let sd_v: Vec<f32> = sd.flatten_all().unwrap().to_vec1().unwrap();
@@ -170,21 +178,36 @@ fn fit_theta_posterior_geometric_center_is_closed() {
     let mb = data.minibatch_ordered(0, K, &dev).unwrap();
     let init = Tensor::zeros((K, K), DType::F32, &dev).unwrap();
 
-    let cfg = ThetaFitConfig { mean: ThetaMean::Geometric, ..ThetaFitConfig::default() };
+    let cfg = ThetaFitConfig {
+        mean: ThetaMean::Geometric,
+        ..ThetaFitConfig::default()
+    };
     let (log_theta, sd) = fit_theta_posterior(&dec, &mb, &init, Track::Mature, &cfg).unwrap();
 
     let th: Vec<Vec<f32>> = log_theta.exp().unwrap().to_vec2().unwrap();
     for (cell, row) in th.iter().enumerate() {
         let s: f32 = row.iter().sum();
-        assert!((s - 1.0).abs() < 1e-3, "geometric row {cell} sums to {s}, not 1");
-        assert!(row.iter().all(|v| v.is_finite()), "geometric row {cell} has non-finite θ");
+        assert!(
+            (s - 1.0).abs() < 1e-3,
+            "geometric row {cell} sums to {s}, not 1"
+        );
+        assert!(
+            row.iter().all(|v| v.is_finite()),
+            "geometric row {cell} has non-finite θ"
+        );
     }
     // The log-scale branch never clamps, so a −inf here would mean `log_softmax`
     // stopped being the safe map this branch relies on.
     let lt: Vec<f32> = log_theta.flatten_all().unwrap().to_vec1().unwrap();
-    assert!(lt.iter().all(|v| v.is_finite()), "log θ must stay finite without a clamp");
+    assert!(
+        lt.iter().all(|v| v.is_finite()),
+        "log θ must stay finite without a clamp"
+    );
     let sd_v: Vec<f32> = sd.flatten_all().unwrap().to_vec1().unwrap();
-    assert!(sd_v.iter().all(|v| v.is_finite() && *v >= 0.0), "SD must be finite, non-negative");
+    assert!(
+        sd_v.iter().all(|v| v.is_finite() && *v >= 0.0),
+        "SD must be finite, non-negative"
+    );
 }
 
 /// The spread must track how much the counts actually pin the cell. A cell with
@@ -206,19 +229,14 @@ fn fit_theta_posterior_spread_is_wider_when_the_counts_are_uninformative() {
         mature: vec![0.0; G],
     };
     // Row 0 pinned by counts, row 1 unconstrained.
-    let data = GemIndexedData::from_samples(vec![cell_on_topic(0), empty], &map, G, None, None, None)
-        .unwrap();
+    let data =
+        GemIndexedData::from_samples(vec![cell_on_topic(0), empty], &map, G, None, None, None)
+            .unwrap();
     let mb = data.minibatch_ordered(0, 2, &dev).unwrap();
     let init = Tensor::zeros((2, K), DType::F32, &dev).unwrap();
 
-    let (_, sd) = fit_theta_posterior(
-        &dec,
-        &mb,
-        &init,
-        Track::Mature,
-        &ThetaFitConfig::default(),
-    )
-    .unwrap();
+    let (_, sd) =
+        fit_theta_posterior(&dec, &mb, &init, Track::Mature, &ThetaFitConfig::default()).unwrap();
 
     let sd_rows: Vec<Vec<f32>> = sd.to_vec2().unwrap();
     let mean_of = |r: &Vec<f32>| r.iter().sum::<f32>() / r.len() as f32;
@@ -247,17 +265,14 @@ fn fit_theta_survives_a_cell_with_no_counts_on_the_track() {
             .unwrap();
     let mb = data.minibatch_ordered(0, 2, &dev).unwrap();
     let init = Tensor::zeros((2, K), DType::F32, &dev).unwrap();
-    let fitted = fit_theta_to_track(
-        &dec,
-        &mb,
-        &init,
-        Track::Nascent,
-        &ThetaFitConfig::default(),
-    )
-    .unwrap();
+    let fitted =
+        fit_theta_to_track(&dec, &mb, &init, Track::Nascent, &ThetaFitConfig::default()).unwrap();
     let th: Vec<Vec<f32>> = fitted.exp().unwrap().to_vec2().unwrap();
     for (i, row) in th.iter().enumerate() {
-        assert!(row.iter().all(|v| v.is_finite()), "row {i} has non-finite θ");
+        assert!(
+            row.iter().all(|v| v.is_finite()),
+            "row {i} has non-finite θ"
+        );
         let s: f32 = row.iter().sum();
         assert!((s - 1.0).abs() < 1e-3, "row {i} sums to {s}");
     }

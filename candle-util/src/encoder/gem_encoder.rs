@@ -52,8 +52,8 @@
 //! plus `M·H` slot parameters, so the flag and the machinery went instead.
 
 use crate::nn::batch_norm;
-use crate::nn::soft_clamp::{soft_clamp, MASKED_LOGIT_CLAMP as LOGIT_CLAMP};
 use crate::nn::layers::*;
+use crate::nn::soft_clamp::{soft_clamp, MASKED_LOGIT_CLAMP as LOGIT_CLAMP};
 use crate::value_transform::anscombe_lite;
 use candle_core::{Result, Tensor};
 use candle_nn::{Linear, ModuleT, VarBuilder, VarMap};
@@ -152,7 +152,11 @@ impl GemIndexedEncoder {
         let z_mean = candle_nn::linear(out_dim, args.n_latent, vb.pp("nn.enc.z.mean"))?;
 
         let z_lnvar = if args.latent_noise {
-            Some(candle_nn::linear(out_dim, args.n_latent, vb.pp("nn.enc.z.lnvar"))?)
+            Some(candle_nn::linear(
+                out_dim,
+                args.n_latent,
+                vb.pp("nn.enc.z.lnvar"),
+            )?)
         } else {
             None
         };
@@ -239,8 +243,8 @@ impl GemIndexedEncoder {
         let p_s = t_s
             .broadcast_mul(&input.mature_visible.unsqueeze(2)?)?
             .sum(1)?; // [N, H]
-        // Mature first: it is the better-measured track, so the trunk's
-        // leading H inputs are the ones carrying the stronger signal.
+                      // Mature first: it is the better-measured track, so the trunk's
+                      // leading H inputs are the ones carrying the stronger signal.
         Tensor::cat(&[&p_s, &p_u], 1) // [N, 2H]
     }
 

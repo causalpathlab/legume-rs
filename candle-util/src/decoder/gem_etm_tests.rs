@@ -57,7 +57,10 @@ fn zero_delta_collapses_the_two_dictionaries() {
         m.flatten_all().unwrap().to_vec1().unwrap(),
     );
     for (a, b) in nv.iter().zip(mv.iter()) {
-        assert!((a - b).abs() < 1e-6, "delta=0 but dictionaries differ: {a} vs {b}");
+        assert!(
+            (a - b).abs() < 1e-6,
+            "delta=0 but dictionaries differ: {a} vs {b}"
+        );
     }
 }
 
@@ -71,8 +74,16 @@ fn zero_delta_collapses_the_two_dictionaries() {
 fn log_dictionary_difference_is_alpha_dot_delta_up_to_a_topic_constant() {
     let (dec, _, delta, _) = fixture(0.25);
 
-    let log_n: Vec<Vec<f32>> = dec.get_dictionary(Track::Mature).unwrap().to_vec2().unwrap();
-    let log_m: Vec<Vec<f32>> = dec.get_dictionary(Track::Mature).unwrap().to_vec2().unwrap();
+    let log_n: Vec<Vec<f32>> = dec
+        .get_dictionary(Track::Mature)
+        .unwrap()
+        .to_vec2()
+        .unwrap();
+    let log_m: Vec<Vec<f32>> = dec
+        .get_dictionary(Track::Mature)
+        .unwrap()
+        .to_vec2()
+        .unwrap();
 
     // ⟨α_t, δ_g⟩ computed independently of the decoder's internals.
     let alpha_kh: Vec<Vec<f32>> = dec.topic_embeddings().to_vec2().unwrap();
@@ -160,10 +171,13 @@ fn shared_bias_moves_the_dictionary_but_leaves_the_delta_estimand_intact() {
 
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
-    let dec =
-        GemEtmDecoder::new(K, rho, delta.clone(), vb.pp("dec")).unwrap();
+    let dec = GemEtmDecoder::new(K, rho, delta.clone(), vb.pp("dec")).unwrap();
 
-    let before: Vec<Vec<f32>> = dec.get_dictionary(Track::Mature).unwrap().to_vec2().unwrap();
+    let before: Vec<Vec<f32>> = dec
+        .get_dictionary(Track::Mature)
+        .unwrap()
+        .to_vec2()
+        .unwrap();
 
     // Gene-VARYING bias. A gene-constant one is absorbed by the softmax, which
     // would make the "it moved" half of this test pass vacuously.
@@ -172,16 +186,31 @@ fn shared_bias_moves_the_dictionary_but_leaves_the_delta_estimand_intact() {
         .set(&Tensor::from_vec(b, (1, G), &dev).unwrap())
         .unwrap();
 
-    let after: Vec<Vec<f32>> = dec.get_dictionary(Track::Mature).unwrap().to_vec2().unwrap();
+    let after: Vec<Vec<f32>> = dec
+        .get_dictionary(Track::Mature)
+        .unwrap()
+        .to_vec2()
+        .unwrap();
     let moved = before
         .iter()
         .zip(after.iter())
         .any(|(x, y)| x.iter().zip(y.iter()).any(|(a, c)| (a - c).abs() > 1e-4));
-    assert!(moved, "the bias left the dictionary unchanged — it is not live");
+    assert!(
+        moved,
+        "the bias left the dictionary unchanged — it is not live"
+    );
 
     // …yet log β^s − log β^u is STILL ⟨α_t, δ_g⟩ + a per-topic constant.
-    let log_n: Vec<Vec<f32>> = dec.get_dictionary(Track::Mature).unwrap().to_vec2().unwrap();
-    let log_m: Vec<Vec<f32>> = dec.get_dictionary(Track::Mature).unwrap().to_vec2().unwrap();
+    let log_n: Vec<Vec<f32>> = dec
+        .get_dictionary(Track::Mature)
+        .unwrap()
+        .to_vec2()
+        .unwrap();
+    let log_m: Vec<Vec<f32>> = dec
+        .get_dictionary(Track::Mature)
+        .unwrap()
+        .to_vec2()
+        .unwrap();
     let alpha_kh: Vec<Vec<f32>> = dec.topic_embeddings().to_vec2().unwrap();
     let delta_gh: Vec<Vec<f32>> = delta.to_vec2().unwrap();
 
@@ -211,11 +240,15 @@ fn masked_score_ignores_unmasked_slots() {
     let k = 4;
 
     let indices = Tensor::from_vec(vec![0u32, 1, 2, 3, 4, 5, 6, 7], (n, k), &dev).unwrap();
-    let values = Tensor::from_vec(vec![3.0f32, 1.0, 7.0, 2.0, 5.0, 4.0, 1.0, 6.0], (n, k), &dev)
-        .unwrap();
+    let values = Tensor::from_vec(
+        vec![3.0f32, 1.0, 7.0, 2.0, 5.0, 4.0, 1.0, 6.0],
+        (n, k),
+        &dev,
+    )
+    .unwrap();
     let lib = (values.sum_keepdim(1).unwrap() + 1.0).unwrap();
-    let log_theta = Tensor::from_vec(vec![-1.1f32, -1.1, -1.1, -1.1, -1.1, -1.1], (n, K), &dev)
-        .unwrap();
+    let log_theta =
+        Tensor::from_vec(vec![-1.1f32, -1.1, -1.1, -1.1, -1.1, -1.1], (n, K), &dev).unwrap();
 
     let full = dec.full_logits_kg(Track::Mature).unwrap();
     let logz = GemEtmDecoder::log_partition_from_logits(&full).unwrap();
@@ -237,8 +270,12 @@ fn masked_score_ignores_unmasked_slots() {
     }
 
     // Turning one slot on must move the score off zero.
-    let one_on =
-        Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], (n, k), &dev).unwrap();
+    let one_on = Tensor::from_vec(
+        vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        (n, k),
+        &dev,
+    )
+    .unwrap();
     let target = GemMaskedTarget {
         mask: &one_on,
         ..target
@@ -274,11 +311,14 @@ fn fisher_weight_scales_multinomial_and_is_ignored_by_nb() {
     let (n, k) = (2usize, 4usize);
 
     let indices = Tensor::from_vec(vec![0u32, 1, 2, 3, 4, 5, 6, 7], (n, k), &dev).unwrap();
-    let values =
-        Tensor::from_vec(vec![3.0f32, 1.0, 7.0, 2.0, 5.0, 4.0, 1.0, 6.0], (n, k), &dev).unwrap();
+    let values = Tensor::from_vec(
+        vec![3.0f32, 1.0, 7.0, 2.0, 5.0, 4.0, 1.0, 6.0],
+        (n, k),
+        &dev,
+    )
+    .unwrap();
     let lib = (values.sum_keepdim(1).unwrap() + 1.0).unwrap();
-    let log_theta =
-        Tensor::from_vec(vec![-1.1f32; n * K], (n, K), &dev).unwrap();
+    let log_theta = Tensor::from_vec(vec![-1.1f32; n * K], (n, K), &dev).unwrap();
     let mask = Tensor::ones((n, k), DType::F32, &dev).unwrap();
     // A CONSTANT weight of 2, so the expected effect is exactly a factor of 2 on
     // a linear-in-the-term objective and exactly nothing on one that ignores it.
@@ -292,15 +332,20 @@ fn fisher_weight_scales_multinomial_and_is_ignored_by_nb() {
         mask: &mask,
         values_weight: None,
     };
-    let weighted = GemMaskedTarget { values_weight: Some(&w2), ..base };
+    let weighted = GemMaskedTarget {
+        values_weight: Some(&w2),
+        ..base
+    };
 
     let score = |t: &GemMaskedTarget<'_>, multinomial: bool| -> Vec<f32> {
         let full = dec.full_logits_kg(Track::Mature).unwrap();
         let logz = GemEtmDecoder::log_partition_from_logits(&full).unwrap();
         let ll = if multinomial {
-            dec.impute_masked_multinomial(&log_theta, t, Track::Mature, &logz).unwrap()
+            dec.impute_masked_multinomial(&log_theta, t, Track::Mature, &logz)
+                .unwrap()
         } else {
-            dec.impute_masked_nb(&log_theta, t, Track::Mature, &logz).unwrap()
+            dec.impute_masked_nb(&log_theta, t, Track::Mature, &logz)
+                .unwrap()
         };
         ll.to_vec1().unwrap()
     };
@@ -311,7 +356,10 @@ fn fisher_weight_scales_multinomial_and_is_ignored_by_nb() {
             "multinomial: weight 2 should double the term ({a} -> {b})"
         );
     }
-    for (a, b) in score(&base, false).iter().zip(score(&weighted, false).iter()) {
+    for (a, b) in score(&base, false)
+        .iter()
+        .zip(score(&weighted, false).iter())
+    {
         assert!(
             (a - b).abs() < 1e-5,
             "NB must ignore the Fisher weight ({a} -> {b}) — phi_g already weights per gene"

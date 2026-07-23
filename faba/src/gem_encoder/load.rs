@@ -11,14 +11,16 @@
 //! for the projection and collapse.
 
 use anyhow::Context;
-use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
+use auxiliary_data::data_loading::{
+    read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch,
+};
 use auxiliary_data::feature_names::FeatureNameKind;
 use candle_util::data::indexed::GeneTrackMap;
 use data_beans::sparse_io_vector::{ColumnAlignment, RowAlignment, SparseIoVec};
-use data_beans_alg::random_projection::RandProjOps;
 use data_beans_alg::collapse_data::{
     collapse_columns_multilevel_with_hierarchy, CollapsedOut, MultilevelParams,
 };
+use data_beans_alg::random_projection::RandProjOps;
 use log::info;
 use matrix_util::common_io::basename;
 use nalgebra::DMatrix;
@@ -137,7 +139,6 @@ pub struct PreparedData {
     pub gene_weights: Vec<f32>,
 }
 
-
 /// Read the gene matrices, pick HVGs, project, and collapse into pseudobulks.
 pub fn load_and_collapse(args: &GemEncoderArgs) -> anyhow::Result<PreparedData> {
     let files = args.genes()?;
@@ -230,9 +231,12 @@ pub fn load_and_collapse(args: &GemEncoderArgs) -> anyhow::Result<PreparedData> 
     );
 
     info!("computing per-row statistics (HVG ranking + shortlist weights)");
-    let row_stats =
-        data_beans_alg::sparse_streaming::streaming_sparse_running_stats(&data_vec, None, "row stats")
-            .context("row statistics")?;
+    let row_stats = data_beans_alg::sparse_streaming::streaming_sparse_running_stats(
+        &data_vec,
+        None,
+        "row stats",
+    )
+    .context("row statistics")?;
 
     // Random projection sketch drives the pseudobulk partition. HVG enters ONLY
     // here, as a 0/1 row weight — features with weight 0 are excluded from the
@@ -261,7 +265,11 @@ pub fn load_and_collapse(args: &GemEncoderArgs) -> anyhow::Result<PreparedData> 
         )
         .context("random projection")?
         .proj;
-    info!("projection sketch: {} × {}", proj_kn.nrows(), proj_kn.ncols());
+    info!(
+        "projection sketch: {} × {}",
+        proj_kn.nrows(),
+        proj_kn.ncols()
+    );
 
     info!("multi-level collapsing into pseudobulk samples ...");
     let ml = MultilevelParams {
@@ -276,13 +284,9 @@ pub fn load_and_collapse(args: &GemEncoderArgs) -> anyhow::Result<PreparedData> 
         // Same choice `faba gem` makes.
         output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
     };
-    let out = collapse_columns_multilevel_with_hierarchy(
-        &mut data_vec,
-        &proj_kn,
-        &batch_membership,
-        &ml,
-    )
-    .context("multilevel collapse")?;
+    let out =
+        collapse_columns_multilevel_with_hierarchy(&mut data_vec, &proj_kn, &batch_membership, &ml)
+            .context("multilevel collapse")?;
 
     // data-beans-alg returns levels finest-first; the trainer wants
     // coarse-first so the shared encoder sees broad structure before detail.

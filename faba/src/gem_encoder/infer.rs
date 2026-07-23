@@ -3,8 +3,8 @@
 
 use candle_util::candle_core::Device;
 use candle_util::data::indexed::{gem_samples_from_csc, GemIndexedData};
-use candle_util::encoder::gem_encoder::GemIndexedEncoder;
 use candle_util::decoder::gem_etm::{GemEtmDecoder, Track};
+use candle_util::encoder::gem_encoder::GemIndexedEncoder;
 use candle_util::vae::masked_gem::{fit_theta_to_track, infer_minibatch, ThetaFitConfig};
 use log::info;
 
@@ -103,12 +103,8 @@ pub fn infer_cells(
         let z = infer_minibatch(encoder, &mb, true, dev)?;
         // Post-hoc per-track fits, WARM-STARTED from the encoder's own z: that
         // is what makes them close the amortization gap rather than start over.
-        let z_s = fit_theta_to_track(
-            decoder, &mb, &z, Track::Mature, &fit_cfg,
-        )?;
-        let z_u = fit_theta_to_track(
-            decoder, &mb, &z, Track::Nascent, &fit_cfg,
-        )?;
+        let z_s = fit_theta_to_track(decoder, &mb, &z, Track::Mature, &fit_cfg)?;
+        let z_u = fit_theta_to_track(decoder, &mb, &z, Track::Nascent, &fit_cfg)?;
 
         // Raw encoder logits → log θ, once, here. See `Inferred::latent`.
         let z_host: Vec<f32> = candle_util::vae::masked_gem::theta_log_simplex(&z)?
@@ -128,5 +124,9 @@ pub fn infer_cells(
     }
     bar.finish_and_clear();
 
-    Ok(Inferred { latent, latent_mature, latent_nascent })
+    Ok(Inferred {
+        latent,
+        latent_mature,
+        latent_nascent,
+    })
 }
