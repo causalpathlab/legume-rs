@@ -37,6 +37,7 @@ use clap::{Args, ValueEnum};
 use log::{info, warn};
 use std::path::Path;
 
+use candle_util::decoder::gem_etm::Track as GemTrack;
 use faba::gem::marker_embedding::{load_gene_embedding, Modality};
 use faba::manifest;
 use graph_embedding_util::type_annotation::{
@@ -68,7 +69,15 @@ pub enum Track {
     /// Spliced/mature identity: gene β_g vs cell latent θ.
     Spliced,
     /// Nascent splice offset: gene δ_g vs cell velocity increment.
+    /// **`--mode projection` only** — velocity is a displacement, so enrichment
+    /// has no membership to carry a call through.
     Velocity,
+    /// Nascent PROGRAM: β^u vs the θ fitted to the nascent counts.
+    /// **`--mode enrichment` only.** Not the same thing as `velocity`: this is
+    /// a state the cell is in, on the simplex, and it is annotatable in its own
+    /// right. Reading it against `spliced` is the well-posed version of the
+    /// question `velocity` asks.
+    Nascent,
     /// Both tracks (velocity skipped with a warning if its inputs are missing).
     Both,
 }
@@ -126,7 +135,9 @@ pub struct AnnotateArgs {
             `enrichment` routes the call through beta and theta -- the two things a topic model \
             actually estimates --\n\
             and never forms that inner product.\n\n\
-            `enrichment` is single-pass: --track does not apply to it"
+            `enrichment` takes --track spliced|nascent|both (NOT velocity):\n\
+            `nascent` annotates the nascent program (dictionary_nascent + latent_nascent),\n\
+            and reading it against `spliced` is the well-posed form of the velocity question."
     )]
     pub mode: Option<Mode>,
 
@@ -134,7 +145,7 @@ pub struct AnnotateArgs {
         long,
         value_enum,
         default_value_t = Track::Both,
-        help = "[--mode projection] Which gem program(s) to annotate"
+        help = "Which gem program(s) to annotate (spliced/velocity are projection, spliced/nascent are enrichment)"
     )]
     pub track: Track,
 
@@ -460,11 +471,12 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
         // under a velocity flag.
         anyhow::ensure!(
             args.track != Track::Velocity,
-            "--track velocity does not apply to --mode enrichment. Enrichment is single-pass over \
-             the MATURE dictionary ({prefix}.dictionary.parquet), and it carries a factor's call \
-             to cells through θ — the velocity is a displacement, not a membership on the simplex, \
-             so there is no (β, θ) couple for it. Drop --track, or use --mode projection on a \
-             `faba gem` run."
+            "--track velocity does not apply to --mode enrichment: the velocity is a displacement, \
+             not a membership on the simplex, so there is no (β, θ) couple to carry a factor's \
+             call to cells through. Use --track nascent, which annotates the nascent PROGRAM \
+             ({prefix}.dictionary_nascent.parquet vs {prefix}.latent_nascent.parquet) — reading \
+             that against the spliced call is the well-posed form of the same question. \
+             `--track both` runs the pair."
         );
         // Flags that belong to the projection scorer and have NO effect here.
         // Accepting them silently is the worse failure: `--panel-perm 200` is
@@ -491,7 +503,16 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
             ignored.join(", ")
         );
 
-        super::by_enrichment::run(prefix, &out, args)?;
+        // `both` here is spliced + nascent, NOT spliced + velocity: velocity is
+        // the track this mode cannot do, and nascent is the one it can.
+        let tracks: &[GemTrack] = match args.track {
+            Track::Spliced => &[GemTrack::Mature],
+            Track::Nascent => &[GemTrack::Nascent],
+            _ => &[GemTrack::Mature, GemTrack::Nascent],
+        };
+        for &track in tracks {
+            super::by_enrichment::run(prefix, &out, track, args)?;
+        }
         info!("faba annotate --mode enrichment complete (prefix '{out}')");
         return Ok(());
     }
@@ -526,6 +547,17 @@ pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
         }),
     };
 
+    // `nascent` is the enrichment-mode track: it names a (β^u, θ^u) couple, and
+    // projection has no such pair — its unspliced side is the co-embedded δ_g
+    // rows against the velocity increment, which is `--track velocity`. Silently
+    // treating it as `both` would answer a different question under the flag.
+    anyhow::ensure!(
+        args.track != Track::Nascent,
+        "--track nascent applies to --mode enrichment, not --mode projection. Enrichment reads \
+         the nascent PROGRAM ({prefix}.dictionary_nascent.parquet vs \
+         {prefix}.latent_nascent.parquet); projection's unspliced side is the co-embedded δ_g \
+         rows against the velocity increment, which is --track velocity."
+    );
     let want_spliced = matches!(args.track, Track::Spliced | Track::Both);
     let want_velocity = matches!(args.track, Track::Velocity | Track::Both);
 

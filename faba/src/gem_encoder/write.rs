@@ -319,9 +319,20 @@ pub fn write_coembedding(
 ///
 /// - `{out}.pb_gene.parquet` `[G, P]` — the finest pseudobulk's mature-track
 ///   posterior mean, on the same gene axis as `dictionary.parquet`.
+/// - `{out}.pb_gene_nascent.parquet` `[G, P]` — the same, on the NASCENT rows,
+///   paired with `dictionary_nascent.parquet`.
 /// - `{out}.pb_latent.parquet` `[P, K]` — **log θ per pseudobulk**, the mean of
 ///   its cells' θ. Log, like `{out}.latent.parquet`, so the two files carry the
 ///   one contract; averaging happens on the simplex and the log is taken after.
+///
+/// # Why one membership serves both tracks
+///
+/// `β̃ = pb_gene · pb_membership[π]` has to reconstruct the dictionary of the
+/// track being annotated, so the GENE profile is per-track and there are two of
+/// them. The membership is not: this model has exactly ONE θ, shared by both
+/// tracks by construction, because `δ` is the only thing allowed to distinguish
+/// them (see [`candle_util::vae::masked_gem`]). A separate nascent pseudobulk
+/// membership would not be a refinement — it would contradict the model.
 pub fn write_pseudobulk_tables(
     prepared: &PreparedData,
     finest: &data_beans_alg::collapse_data::CollapsedOut,
@@ -334,22 +345,28 @@ pub fn write_pseudobulk_tables(
     let mu_dp = finest.mu_observed.posterior_mean(); // [rows, P]
     let n_pb = mu_dp.ncols();
     let g = prepared.map.n_genes;
-    let (_, mature_row) = prepared.map.per_gene_rows();
+    let (nascent_row, mature_row) = prepared.map.per_gene_rows();
 
-    // Genes lacking a mature row keep a zero column-slice: the model still has
-    // an embedding for them, and a zero pseudobulk profile simply never
-    // contributes to any enrichment score.
+    // Genes lacking a row on this track keep a zero column-slice: the model
+    // still has an embedding for them, and a zero pseudobulk profile simply
+    // never contributes to any enrichment score. That is the common case on the
+    // nascent side, where coverage is far sparser than on the mature side.
     // Pseudobulk OUTER, gene inner: both matrices are column-major, so this
     // order walks each column sequentially on both sides. Gene-outer strides
     // both by `n_pb`/`n_rows` per step — ~34 M cache-missing accesses.
-    let mut pb_gene = Mat::zeros(g, n_pb);
-    for p in 0..n_pb {
-        for (gene, row) in mature_row.iter().enumerate() {
-            if let Some(r) = row {
-                pb_gene[(gene, p)] = mu_dp[(*r as usize, p)];
+    let gather = |rows: &[Option<u32>]| {
+        let mut pb = Mat::zeros(g, n_pb);
+        for p in 0..n_pb {
+            for (gene, row) in rows.iter().enumerate() {
+                if let Some(r) = row {
+                    pb[(gene, p)] = mu_dp[(*r as usize, p)];
+                }
             }
         }
-    }
+        pb
+    };
+    let pb_gene = gather(&mature_row);
+    let pb_gene_nascent = gather(&nascent_row);
 
     let n = prepared.data_vec.num_columns();
     let groups = prepared.data_vec.get_group_membership(0..n)?;
@@ -391,6 +408,16 @@ pub fn write_pseudobulk_tables(
         "gene",
         "PB",
     )?;
+    // Rows carry the NASCENT suffix so the file cannot be mistaken for the
+    // mature one, and so `strip_track_suffix` on the reader side has something
+    // to key on rather than two identically-named axes.
+    write_matrix(
+        &matrix_util::traits::ConvertMatOps::to_tensor(&pb_gene_nascent, &cpu)?,
+        &format!("{out}.pb_gene_nascent.parquet"),
+        &track_row_names(&prepared.gene_names, Track::Nascent),
+        "gene",
+        "PB",
+    )?;
     write_matrix(
         &matrix_util::traits::ConvertMatOps::to_tensor(&pb_theta, &cpu)?,
         &format!("{out}.pb_latent.parquet"),
@@ -398,7 +425,7 @@ pub fn write_pseudobulk_tables(
         "pb",
         "T",
     )?;
-    info!("pseudobulk tables: pb_gene [{g}×{n_pb}], pb_latent [{n_pb}×{k}]");
+    info!("pseudobulk tables: pb_gene [{g}×{n_pb}] (+ nascent), pb_latent [{n_pb}×{k}]");
     Ok(())
 }
 
