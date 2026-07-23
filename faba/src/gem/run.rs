@@ -844,7 +844,10 @@ fn run_gem_genes_bge(
     // that these coordinates are NOT log θ: nothing downstream should `exp()`
     // them.
     let mut extra = serde_json::Map::new();
-    extra.insert("latent".into(), "embedding".into());
+    extra.insert(
+        "latent".into(),
+        crate::manifest::Latent::Embedding.as_str().into(),
+    );
     crate::manifest::write(&args.out, crate::manifest::RunKind::Embedding, extra)?;
 
     info!(
