@@ -1,7 +1,7 @@
 //! Phase-2 cell-lineage lift (cell-lift): evaluation-only pseudotime + fate.
 //!
-//! Phase 1 shapes the shared dictionary through a directed pb-DAG (fixed velocity-KNN or
-//! learnable learned-DAG); phase 2 analytically projects every cell onto that dictionary
+//! Phase 1 shapes the shared dictionary through a directed velocity-KNN pb graph;
+//! phase 2 analytically projects every cell onto that dictionary
 //! (identity `θ_c` + velocity `δ_c`). This module lifts the pb-level structure to
 //! cells **by evaluation only** — no extra training:
 //!
@@ -71,7 +71,7 @@ pub struct LineageQc {
     /// the backbone one source drains). A diagnostic, NOT a reliable ranker (see above).
     pub root_decisiveness: f32,
     /// Mean local velocity coherence (scVelo-style): how well each pb node's `v̂` agrees
-    /// with its θ-neighbours'. Meaningful for the velocity-KNN; ≈0 for the learned DAG (which collapses the δ readout).
+    /// with its θ-neighbours'.
     pub velocity_coherence: f32,
     /// Number of inferred roots (sources). `1`–few expected; many ⇒ fragmented field.
     pub n_roots: usize,
@@ -97,21 +97,6 @@ pub struct CellLineage {
     pub terminals: Vec<usize>,
     /// Collapse level the lift ran on (finest, by default).
     pub level: usize,
-}
-
-/// Directed edges `(i, j, w)` with `w > EDGE_EPS` from a dense `[n × n]` row-major
-/// adjacency (learned-DAG `W`, forward-masked; negatives are dropped). The lift
-/// only follows forward mass, so sub-`eps` and negative entries carry no edge.
-pub fn dense_to_edges(w: &[f32], n: usize) -> Vec<(usize, usize, f32)> {
-    let mut edges = Vec::new();
-    for (i, rowi) in w.chunks_exact(n).enumerate() {
-        for (j, &wij) in rowi.iter().enumerate() {
-            if wij > EDGE_EPS {
-                edges.push((i, j, wij));
-            }
-        }
-    }
-    edges
 }
 
 /// Boolean reachability: `reach[s*n + t]` is true when `t` is reachable from `s` over
@@ -180,9 +165,8 @@ fn find_roots(n: usize, edges: &[(usize, usize, f32)]) -> Vec<usize> {
 
 /// QC **decisiveness** diagnostic: reduce the graph to its *functional* backbone (each
 /// node keeps only its single strongest forward out-edge), then return the top source's
-/// reachable fraction `[0, 1]`. The reduction makes this comparable across the velocity-KNN's sparse
-/// velocity-KNN and the learned DAG's dense learned `W` (a dense graph trivially reaches everything,
-/// so raw reach ≡ 1 is useless). A structural summary only — its correlation with true
+/// reachable fraction `[0, 1]`. The 1-NN reduction keeps the reach meaningful even on a
+/// dense graph (raw reach ≡ 1 there is useless). A structural summary only — its correlation with true
 /// quality is unstable across runs, so it is a diagnostic, not a reliable ranker.
 fn functional_decisiveness(n: usize, edges: &[(usize, usize, f32)]) -> f32 {
     if edges.is_empty() {
@@ -379,8 +363,8 @@ fn absorbing_fate(n: usize, edges: &[(usize, usize, f32)]) -> (Vec<usize>, Vec<f
         }
     }
 
-    // B = (I − Q)^{-1} R. A tiny ridge guards residual cycles (learned-DAG acyclicity is
-    // soft, so Q may not be strictly substochastic on every row).
+    // B = (I − Q)^{-1} R. A tiny ridge guards residual cycles (the velocity-KNN graph is
+    // not guaranteed acyclic, so Q may not be strictly substochastic on every row).
     let mut im_q = DMatrix::<f64>::identity(nt, nt) - &q;
     for d in 0..nt {
         im_q[(d, d)] += LAPLACIAN_RIDGE;
@@ -402,8 +386,8 @@ fn absorbing_fate(n: usize, edges: &[(usize, usize, f32)]) -> (Vec<usize>, Vec<f
     (terminals, fate)
 }
 
-/// Build the [`PbTrajectory`] for one level from its velocity readout and directed
-/// edges (dense `W` → [`dense_to_edges`] for the learned DAG, fixed velocity-KNN edges).
+/// Build the [`PbTrajectory`] for one level from its velocity readout and the
+/// fixed velocity-KNN directed edges.
 pub fn pb_trajectory(
     vel: &PbLevelVelocity,
     edges: &[(usize, usize, f32)],

@@ -75,6 +75,9 @@ fn project(e: &[f32], b: &[f32], h: usize, per_cell: &[Vec<(u32, f32)>], lambda:
             n_cells: per_cell.len(),
             lambda,
             dev: &Device::Cpu,
+            label: "Phase 2",
+            gauge_fix: true,
+            joint: false,
         },
         &cells,
         None,
@@ -124,7 +127,10 @@ fn latents_come_back_gauge_fixed() {
 
     let out = project(&e, &b, h, &per_cell, 1e-3);
     let drift = norm(&mean_rows(&out.theta, h));
-    assert!(drift < 1e-4, "latents are not mean-zero (‖mean‖={drift:.2e})");
+    assert!(
+        drift < 1e-4,
+        "latents are not mean-zero (‖mean‖={drift:.2e})"
+    );
     assert!(
         norm(&out.gauge.theta_mean) > 1e-3,
         "a non-trivial gauge shift should have been reported"
@@ -186,6 +192,9 @@ fn unseen_cell_stays_at_the_origin() {
             n_cells: 3,
             lambda: 1e-3,
             dev: &Device::Cpu,
+            label: "Phase 2",
+            gauge_fix: true,
+            joint: false,
         },
         &cells,
         None,
@@ -248,6 +257,9 @@ fn splice_pass_recovers_theta_and_delta() {
             n_cells: 3,
             lambda: 1e-3,
             dev: &Device::Cpu,
+            label: "Phase 2",
+            gauge_fix: true,
+            joint: false,
         },
         &cells,
         None,
@@ -316,5 +328,80 @@ fn gate_folding_is_exact_for_zero_rows() {
             &fold_out.theta[i * h..(i + 1) * h],
         );
         assert!(c > 0.999, "gate folding moved cell {i} (cos={c:.4})");
+    }
+}
+
+/// Joint θ+δ (`joint: true`): the SAME planted splice problem as
+/// `splice_pass_recovers_theta_and_delta`, but θ and δ are estimated **together** in one
+/// solve (θ pulled by both tracks). Both must still recover their planted directions.
+#[test]
+fn joint_recovers_theta_and_delta() {
+    let (h, n_half) = (6, 200);
+    let n_feat = n_half * 2; // rows [0, n_half) spliced, [n_half, 2·n_half) unspliced
+    let unspliced_rows: Vec<bool> = (0..n_feat).map(|f| f >= n_half).collect();
+    let (e, b) = dictionary(n_feat, h, 0.4);
+
+    let theta_star = [
+        [0.6f32, -0.4, 0.3, 0.2, -0.5, 0.1],
+        [-0.2f32, 0.7, -0.4, 0.5, 0.2, -0.3],
+        [0.4f32, 0.1, 0.6, -0.3, -0.1, 0.5],
+    ];
+    let delta_star = [
+        [0.25f32, -0.3, 0.15, 0.2, 0.1, -0.2],
+        [-0.15f32, 0.2, 0.3, -0.1, -0.25, 0.1],
+        [0.1f32, 0.15, -0.2, 0.3, 0.2, -0.15],
+    ];
+
+    let mut feats: Vec<Vec<u32>> = Vec::new();
+    let mut counts: Vec<Vec<f32>> = Vec::new();
+    for (t, d) in theta_star.iter().zip(&delta_star) {
+        let nascent: Vec<f32> = t.iter().zip(d).map(|(a, c)| a + c).collect();
+        let (mut fi, mut ci) = (Vec::new(), Vec::new());
+        for f in 0..n_feat {
+            let ef = &e[f * h..(f + 1) * h];
+            let latent: &[f32] = if unspliced_rows[f] { &nascent } else { t };
+            let s: f32 = ef.iter().zip(latent).map(|(a, x)| a * x).sum::<f32>() + b[f] + 0.2;
+            fi.push(f as u32);
+            ci.push(s.exp());
+        }
+        feats.push(fi);
+        counts.push(ci);
+    }
+    let cells: Vec<(u32, &[u32], &[f32])> = (0..3)
+        .map(|i| (i as u32, feats[i].as_slice(), counts[i].as_slice()))
+        .collect();
+
+    let out = project_cells(
+        &Phase2Input {
+            feat: &e,
+            b_feat: &b,
+            h,
+            n_cells: 3,
+            lambda: 1e-3,
+            dev: &Device::Cpu,
+            label: "Phase 2",
+            gauge_fix: true,
+            joint: true,
+        },
+        &cells,
+        None,
+        Some(&unspliced_rows),
+    )
+    .unwrap();
+
+    let vel = out.velocity.as_ref().expect("splice mask ⇒ velocity pass");
+    for i in 0..3 {
+        let th = ungauge(&out.theta[i * h..(i + 1) * h], &out.gauge.theta_mean);
+        let dl = ungauge(&vel[i * h..(i + 1) * h], &out.gauge.delta_mean);
+        let ct = cos(&th, &theta_star[i]);
+        let cd = cos(&dl, &delta_star[i]);
+        assert!(
+            ct > 0.97,
+            "joint cell {i} identity misaligned (cos={ct:.3})"
+        );
+        assert!(
+            cd > 0.95,
+            "joint cell {i} velocity misaligned (cos={cd:.3})"
+        );
     }
 }

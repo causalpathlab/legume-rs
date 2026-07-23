@@ -2,6 +2,7 @@
 
 use super::project_pbs_phase2;
 use crate::data::UnifiedData;
+use candle_util::candle_core::Device;
 
 /// Cosine alignment of two equal-length vectors.
 fn cos(a: &[f32], b: &[f32]) -> f32 {
@@ -63,7 +64,7 @@ fn pb_projection_recovers_theta_and_delta() {
         .collect();
     let pb = UnifiedData::from_pseudobulks(&counts, names, (0..n_feat).collect()).unwrap();
 
-    let levels = project_pbs_phase2(&e, &b, h, &[pb], &unspliced_rows, 1e-3).unwrap();
+    let levels = project_pbs_phase2(&e, &b, h, &[pb], &unspliced_rows, 1e-3, &Device::Cpu).unwrap();
     assert_eq!(levels.len(), 1);
     let lv = &levels[0];
     assert_eq!(lv.n_pb, n_pb);
@@ -102,7 +103,7 @@ fn pb_projection_zero_delta_without_unspliced() {
         .collect();
     let pb = UnifiedData::from_pseudobulks(&counts, names, (0..n_feat).collect()).unwrap();
 
-    let levels = project_pbs_phase2(&e, &b, h, &[pb], &unspliced_rows, 1e-2).unwrap();
+    let levels = project_pbs_phase2(&e, &b, h, &[pb], &unspliced_rows, 1e-2, &Device::Cpu).unwrap();
     let lv = &levels[0];
     assert_eq!(lv.delta, vec![0.0; h]);
     // Identity is non-trivial (there were spliced edges).

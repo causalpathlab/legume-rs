@@ -650,8 +650,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             delta_l2: 0.0,
             // Lineage-DAG is a gem-only (β-sharing) path; off for bge.
             lineage_dag: false,
-            dag_learnable: false,
             lineage_smooth: false,
+            lineage_mst: false,
+            joint_velocity: false,
             // The softmax feature gate does selection in one pass (a gene with no
             // cell-state signal sends its mass to the null slot), so bge no longer
             // holds out / re-projects any features — every gene is trained and gated.
