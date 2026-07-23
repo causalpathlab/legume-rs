@@ -25,14 +25,58 @@ pub enum LayoutKind {
 /// Feature space the t-UMAP layout embeds on (`--layout umap`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
 pub enum LayoutSpace {
-    /// θ only — the identity manifold (current state).
-    Identity,
-    /// θ + δ — the NASCENT state (where each cell is heading). Splays the manifold
-    /// toward the fates, so branches separate best on cosine t-UMAP. The default.
+    /// θ only — the identity manifold (current state). The default: the layout is
+    /// the IDENTITY manifold and δ rides on top of it as the velocity arrow field
+    /// (`{out}.velocity_grid_2d.parquet`), rather than being baked into the
+    /// coordinates. Keeps "where cells are" and "where they are going" separable.
     #[default]
+    Identity,
+    /// θ + δ — the NASCENT state (where each cell is heading), baked into the
+    /// coordinates. Splays the manifold toward the fates, but the positions then
+    /// mix identity with velocity, so the arrow field is no longer an independent
+    /// read on the same plot.
     Nascent,
     /// [θ | δ] concatenated — identity and velocity as separate cosine channels.
     Concat,
+}
+
+/// Which per-cell table supplies θ.
+///
+/// On a topic run these are NOT the same manifold. `cell_embedding = θ·α` places
+/// every cell inside the convex hull of α's K rows, so a diffuse softmax θ
+/// compresses all cells toward the hull's centroid — the co-embedding, not the
+/// layout algorithm, is what makes such a plot blobby. `latent` reads the simplex
+/// itself and sidesteps that map entirely.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
+pub enum ThetaFrom {
+    /// `latent` on a topic run that stamps `latent: log-theta`; `cell-embedding`
+    /// otherwise. The default.
+    #[default]
+    Auto,
+    /// `{from}.cell_embedding.parquet` + `{from}.velocity.parquet` (H space).
+    CellEmbedding,
+    /// `{from}.latent.parquet` (log θ → θ) + `{from}.velocity_factor.parquet`
+    /// (K space, the topic simplex). Topic runs only.
+    Latent,
+}
+
+/// The metric θ is fitted and laid out in.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
+pub enum LatentGeometry {
+    /// `hellinger` on the topic simplex, `cosine` on a cell embedding. The default.
+    #[default]
+    Auto,
+    /// L2-normalize rows — Euclidean distance on the result is cosine distance.
+    /// `faba gem` writes `cell_embedding` RAW with its norm carrying library size,
+    /// so this is what that producer documents as the way to cluster/lay it out.
+    Cosine,
+    /// Raw rows, plain Euclidean. On a raw `cell_embedding` this is dominated by
+    /// the sequencing-depth axis.
+    Euclidean,
+    /// √θ — Euclidean distance on the result is Hellinger distance, the proper
+    /// metric on a simplex. Rows land on the unit sphere automatically (Σθ = 1),
+    /// so cosine and Euclidean coincide there.
+    Hellinger,
 }
 
 /// Whether the PHATE layout is warped along the confident velocity directions.
@@ -55,7 +99,7 @@ pub struct LineageArgs {
         long,
         short = 'f',
         help_heading = "Input/output",
-        help = "gem output prefix (reads {from}.cell_embedding.parquet and {from}.velocity.parquet)"
+        help = "gem / gem-encoder output prefix (which θ table it reads is set by --theta-from)"
     )]
     pub from: Box<str>,
 
@@ -92,11 +136,57 @@ pub struct LineageArgs {
     pub kmeans_iter: usize,
 
     #[arg(
-        long = "normalize-latent",
-        hide_short_help = true,
+        long = "theta-from",
+        value_enum,
+        default_value_t = ThetaFrom::Auto,
+        help_heading = "Input/output",
+        help = "Which table supplies θ: auto (latent on a topic run, else \
+                cell-embedding), cell-embedding, or latent",
+        long_help = "Which per-cell table supplies θ for the fit AND the layout.\n\n\
+            cell-embedding — {from}.cell_embedding.parquet + {from}.velocity.parquet (H space).\n\
+            latent         — {from}.latent.parquet (log θ, exponentiated to the simplex)\n\
+            .                + {from}.velocity_factor.parquet (K space). Topic runs only.\n\
+            auto           — latent on a run whose manifest says `gem-encoder` AND stamps\n\
+            .                `latent: log-theta`; cell-embedding otherwise.\n\n\
+            These are different manifolds on a topic run, not two views of one.\n\
+            `cell_embedding = θ·α` places every cell inside the convex hull of α's K rows,\n\
+            so a diffuse softmax θ compresses the whole population toward the hull's centroid.\n\
+            That is a property of the co-embedding map, not of PHATE or UMAP —\n\
+            which is why a blobby topic layout stays blobby whichever algorithm you pick.\n\
+            Reading the simplex directly avoids the map.\n\n\
+            `--markers` always scores in cell_embedding's H space regardless,\n\
+            since that is the space the gene vectors are co-embedded into."
+    )]
+    pub theta_from: ThetaFrom,
+
+    #[arg(
+        long = "latent-geometry",
+        value_enum,
+        default_value_t = LatentGeometry::Auto,
         help_heading = "Centroids & MST",
-        help = "L2-normalize θ (cosine geometry) for the fit AND layout \
-                [default: raw θ / Euclidean]"
+        help = "Metric for the fit AND layout: auto (hellinger on a simplex, else \
+                cosine), cosine, euclidean, or hellinger",
+        long_help = "The metric θ is fitted and laid out in.\n\n\
+            cosine    — L2-normalize rows. `faba gem` writes cell_embedding RAW,\n\
+            .           with its norm carrying library size, and its own docs say to use\n\
+            .           cosine or L2-normalize first; plain Euclidean is dominated\n\
+            .           by the sequencing-depth axis.\n\
+            hellinger — √θ, so Euclidean distance becomes Hellinger distance.\n\
+            .           The proper metric on a simplex. Rows land on the unit sphere\n\
+            .           automatically (Σθ = 1), so cosine and Euclidean coincide there.\n\
+            euclidean — raw rows. Reproduces the pre-2026-07-23 default.\n\
+            auto      — hellinger when θ came from `latent` (a simplex), else cosine.\n\n\
+            The velocity field is NOT transformed with θ: arrows are computed in the\n\
+            native θ/δ space and projected onto whatever 2D coordinates result,\n\
+            the same separation scVelo makes."
+    )]
+    pub latent_geometry: LatentGeometry,
+
+    #[arg(
+        long = "normalize-latent",
+        hide = true,
+        help_heading = "Centroids & MST",
+        help = "Deprecated: cosine is now the default. Use --latent-geometry."
     )]
     pub normalize_latent: bool,
 
@@ -336,8 +426,19 @@ pub struct LineageArgs {
     #[arg(
         long = "layout-space",
         value_enum,
-        default_value_t = LayoutSpace::Nascent,
-        help = "Feature space for --layout umap: identity (θ), nascent (θ+δ, default), or concat ([θ|δ])"
+        default_value_t = LayoutSpace::Identity,
+        help = "Feature space for --layout umap: identity (θ, default), nascent (θ+δ), or concat ([θ|δ])",
+        long_help = "Which features the t-UMAP layout embeds.\n\n\
+            identity (default) — embed θ alone, then draw δ on top as the velocity\n\
+            .                    arrow field. Position means identity and the arrows mean\n\
+            .                    motion, so the two are separable on the plot.\n\
+            nascent            — embed θ+δ, baking velocity into the coordinates.\n\
+            .                    Splays the manifold toward the fates, but positions then\n\
+            .                    mix identity with motion and the arrow field stops being\n\
+            .                    an independent read of the same plot.\n\
+            concat             — [θ | δ] as two separately-normalized channels.\n\n\
+            The arrow field is written for every setting, and always projected from the\n\
+            native θ/δ space — so `identity` is the one where layout and arrows agree."
     )]
     pub layout_space: LayoutSpace,
 

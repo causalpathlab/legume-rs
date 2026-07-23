@@ -471,9 +471,13 @@ Example:\n  \
         aliases = ["trajectory", "traj"],
         about = "Velocity-oriented lineage + principal curves over a `faba gem` run",
         long_about = "Infer a velocity-oriented lineage over the embeddings from `faba gem`.\n\n\
-            Reads gem's parquet outputs by prefix (`-f/--from`):\n\
-            the cell embedding θ (cell_embedding.parquet)\n\
-            and per-cell velocity δ (velocity.parquet).\n\
+            Reads a θ/δ pair by prefix (`-f/--from`), picked by `--theta-from`:\n\
+            on an EMBEDDING run, cell_embedding.parquet + velocity.parquet (H space);\n\
+            on a TOPIC run, latent.parquet + velocity_factor.parquet (the K-space simplex).\n\
+            The topic default is deliberate: `cell_embedding = θ·α` confines every cell\n\
+            to the convex hull of α's K rows, so a diffuse softmax θ compresses the\n\
+            population toward that hull's centroid — blobby for reasons no layout can undo.\n\
+            `--latent-geometry` sets the metric (Hellinger on a simplex, else cosine).\n\
             Fits K k-means centroids on θ and an MST over them,\n\
             then TESTS the velocity direction of every candidate edge\n\
             (bootstrap CI + sign-flip permutation; an edge that cannot clear\n\
@@ -500,7 +504,10 @@ Example:\n  \
             trees (the selected branching), lineages, pseudotime,\n\
             cell_lineage_weights, lineage_pseudotime, curves;\n\
             with --markers also lineage_annot.* + trajectory_annotation;\n\
-            with --layout phate (default) also {cells,nodes,curves}_2d.\n\n\
+            with --layout phate (default) or umap also {cells,nodes,curves}_2d\n\
+            plus velocity_grid_2d (the gridded δ arrow field, when the run has δ).\n\
+            The layout embeds θ alone by default, so position means identity\n\
+            and the arrow field carries the direction.\n\n\
             Reference:\n  \
             Street et al., \"Slingshot: cell lineage and pseudotime inference\n\
             for single-cell transcriptomics\", BMC Genomics, 19:477, 2018.\n\

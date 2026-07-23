@@ -181,7 +181,13 @@ fn end_to_end_run_writes_forest_outputs() {
         &prefix,
         "--layout",
         "none",
-        // raw θ (default) suits the flat grid geometry — no cosine normalization
+        // This fixture is a CARTESIAN grid (two chains at y=0 and y=100), not a cell
+        // embedding: under the cosine default every y=100 row normalizes to ~(0, 1),
+        // collapsing the four x-positions into one point and leaving nothing to cut.
+        // Pin the Euclidean geometry the fixture is drawn in, so this stays a test of
+        // the forest logic rather than of the default metric.
+        "--latent-geometry",
+        "euclidean",
         "--n-centroids",
         "8",
         "--edge-direction-n-boot",

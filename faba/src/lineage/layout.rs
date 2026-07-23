@@ -8,10 +8,10 @@ use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::layout::{phate_layout_2d, project_cells_nystrom, PhateArgs};
 use matrix_util::principal_curve::PrincipalCurves;
 use matrix_util::principal_graph::kmeans_centroids_seeded;
-use matrix_util::traits::MatOps;
 use std::collections::HashMap;
 
 use super::args::*;
+use super::input::apply_geometry;
 use super::velocity_grid::*;
 use super::write::*;
 use crate::lineage::orient::{undirected, EdgeCall, EdgeDirection};
@@ -27,8 +27,9 @@ use crate::lineage::orient::{undirected, EdgeCall, EdgeDirection};
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_umap_layout(
     theta: &DMatrix<f32>,
-    velocity: Option<&DMatrix<f32>>,
+    native: NativeField<'_>,
     space: LayoutSpace,
+    geometry: LatentGeometry,
     centroids: &DMatrix<f32>,
     curves: &PrincipalCurves,
     cell_names: &[Box<str>],
@@ -40,35 +41,43 @@ pub(super) fn emit_umap_layout(
     use matrix_util::umap::Umap;
 
     let (n, h) = (theta.nrows(), theta.ncols());
-    let vel = velocity.filter(|_| space != LayoutSpace::Identity);
-    // Effective feature width: Concat doubles it ([θ|δ]); Identity/Nascent keep H.
-    let d = if space == LayoutSpace::Concat && vel.is_some() {
-        2 * h
-    } else {
-        h
-    };
+    let vel = native.velocity.filter(|_| space != LayoutSpace::Identity);
 
     // CELLS ONLY — embedding just the cells (per the `space` representation) keeps the
     // trajectory backbone from distorting the manifold (the R exercises are cells-only);
     // the backbone is projected onto the fitted layout afterwards.
-    let mut feats = DMatrix::<f32>::zeros(n, d);
-    for i in 0..n {
-        for j in 0..h {
-            let d_ij = vel.map_or(0.0, |v| v[(i, j)]);
-            match space {
-                LayoutSpace::Identity => feats[(i, j)] = theta[(i, j)],
-                LayoutSpace::Nascent => feats[(i, j)] = theta[(i, j)] + d_ij,
-                LayoutSpace::Concat => {
-                    feats[(i, j)] = theta[(i, j)];
-                    feats[(i, h + j)] = d_ij;
-                }
-            }
+    //
+    // θ and δ are combined in the NATIVE space δ is expressed in, and the metric is
+    // applied to the RESULT — not the other way round. Under Hellinger the nascent
+    // state is then √(θ+δ), an exact point on the simplex, whereas transforming first
+    // would add a raw simplex increment to a √θ coordinate: a sum of two quantities
+    // that live in different spaces. For `identity` the two orders coincide.
+    let feats = match (space, vel) {
+        (LayoutSpace::Identity, _) | (_, None) => theta.clone(),
+        (LayoutSpace::Nascent, Some(v)) => apply_geometry(&(native.theta + v), geometry),
+        (LayoutSpace::Concat, Some(v)) => {
+            // Two channels, each normalized on its own so identity and velocity carry
+            // equal weight; δ is a signed increment, so it takes cosine rather than the
+            // θ channel's metric (√ of a negative is not a coordinate).
+            let (tn, vn) = (theta.clone(), l2_normalize_rows(v));
+            let mut f = DMatrix::<f32>::zeros(n, 2 * h);
+            f.view_mut((0, 0), (n, h)).copy_from(&tn);
+            f.view_mut((0, h), (n, h)).copy_from(&vn);
+            f
         }
-    }
+    };
 
-    // scale=T (MatOps::scale_columns) → cosine (L2-normalize rows) → t-UMAP.
-    let feats_n = l2_normalize_rows(&feats.scale_columns());
-    info!("t-UMAP layout (cosine + scale, space={space:?}): {n} cells, knn={knn}");
+    // Re-normalize after combining channels so `nascent`/`concat` do not let ‖δ‖ set the
+    // row scale. No column z-scoring: standardizing columns hands every latent dimension
+    // equal variance, which promotes the near-null dimensions of a decaying spectrum to
+    // the same footing as the ones carrying the structure — a reliable way to turn a
+    // manifold into a blob.
+    let feats_n = if geometry == LatentGeometry::Euclidean {
+        feats
+    } else {
+        l2_normalize_rows(&feats)
+    };
+    info!("t-UMAP layout ({geometry:?}, space={space:?}): {n} cells, knn={knn}");
     let graph = KnnGraph::from_rows(
         &feats_n,
         KnnGraphArgs {
@@ -141,13 +150,41 @@ pub(super) fn emit_umap_layout(
         &format!("{out}.curves_2d.parquet"),
     )?;
 
-    // scVelo-style gridded velocity arrows (≤ a few hundred): project δ into 2D via
-    // the θ-neighbour transition, then average onto a coarse grid.
-    if let Some(v) = velocity {
-        let grid = velocity_grid_arrows(&cells_2d, theta, v, knn);
-        write_velocity_grid(&grid, &format!("{out}.velocity_grid_2d.parquet"))?;
-    }
-    Ok(())
+    emit_velocity_field(&cells_2d, native, knn, out)
+}
+
+/// The `(θ, δ)` pair as it came off disk — the space δ is actually expressed in.
+///
+/// Held separately from the metric-transformed θ that the fit and layout use. The
+/// velocity field is a statement about the data, not about the coordinates chosen
+/// to draw it, so it is computed here and only then projected onto whatever 2D the
+/// layout produced — the separation scVelo makes between transition probabilities
+/// in expression space and the embedding they are rendered on.
+#[derive(Copy, Clone)]
+pub(super) struct NativeField<'a> {
+    pub theta: &'a DMatrix<f32>,
+    pub velocity: Option<&'a DMatrix<f32>>,
+}
+
+/// Write `{out}.velocity_grid_2d.parquet` — scVelo-style gridded arrows (a few
+/// hundred), each cell's δ projected into 2D by the native θ-neighbour transition
+/// and averaged onto a coarse lattice. A no-op when the run has no δ.
+///
+/// Emitted for BOTH layouts. The field is what makes an identity-space embedding
+/// readable as a trajectory: `--layout-space identity` deliberately keeps δ out of
+/// the coordinates, so the arrows are where the direction information goes.
+pub(super) fn emit_velocity_field(
+    cells_2d: &DMatrix<f32>,
+    native: NativeField<'_>,
+    knn: usize,
+    out: &str,
+) -> Result<()> {
+    let Some(v) = native.velocity else {
+        return Ok(());
+    };
+    let grid = velocity_grid_arrows(cells_2d, native.theta, v, knn);
+    info!("velocity field: {} gridded arrow(s)", grid.len());
+    write_velocity_grid(&grid, &format!("{out}.velocity_grid_2d.parquet"))
 }
 
 /// Project points (θ space, `[m × H]`) onto a cells-only 2D layout: each lands at the
@@ -309,6 +346,7 @@ pub(super) fn warp_layout_along_flow(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_phate_layout(
     theta: &DMatrix<f32>,
+    native: NativeField<'_>,
     centroids: &DMatrix<f32>,
     curves: &PrincipalCurves,
     cell_names: &[Box<str>],
@@ -317,20 +355,12 @@ pub(super) fn emit_phate_layout(
     seed: u64,
     out: &str,
     warp: Option<(&DirsMap, &Branching, &[usize])>,
-    normalize: bool,
 ) -> Result<()> {
     let n = theta.nrows();
-    // Cosine metric = rows projected to the unit sphere (Euclidean distance there is
-    // 2(1−cos)); with `normalize = false` PHATE runs on raw θ, i.e. true Euclidean.
-    let norm = |m: &DMatrix<f32>| {
-        if normalize {
-            l2_normalize_rows(m)
-        } else {
-            m.clone()
-        }
-    };
-    let theta_n = norm(theta);
-    let (land_feat, land_2d) = phate_landmark_layout(&theta_n, phate, n_landmarks, seed);
+    // θ, the centroids and the curve points all arrive already in the requested metric
+    // (`--latent-geometry`), so nothing is re-normalized here: doing so would silently
+    // override that choice and put the backbone in a different space from the cells.
+    let (land_feat, land_2d) = phate_landmark_layout(theta, phate, n_landmarks, seed);
     let exact = land_feat.nrows() == n;
     info!(
         "PHATE layout: {n} cells ({})",
@@ -347,12 +377,12 @@ pub(super) fn emit_phate_layout(
     let mut cells_2d = if exact {
         land_2d.clone()
     } else {
-        project_cells_nystrom(&theta_n.transpose(), &land_t, &land_2d, knn, alpha)
+        project_cells_nystrom(&theta.transpose(), &land_t, &land_2d, knn, alpha)
     };
 
     // Nodes + curve points always lift onto the landmark layout via Nyström.
     let mut nodes_2d =
-        project_cells_nystrom(&norm(centroids).transpose(), &land_t, &land_2d, knn, alpha);
+        project_cells_nystrom(&centroids.transpose(), &land_t, &land_2d, knn, alpha);
 
     if let Some((dirs_map, br, labels)) = warp {
         warp_layout_along_flow(&mut nodes_2d, &mut cells_2d, dirs_map, br, labels);
@@ -373,7 +403,7 @@ pub(super) fn emit_phate_layout(
             r += 1;
         }
     }
-    let curves_2d = project_cells_nystrom(&norm(&cpts).transpose(), &land_t, &land_2d, knn, alpha);
+    let curves_2d = project_cells_nystrom(&cpts.transpose(), &land_t, &land_2d, knn, alpha);
 
     write_xy(
         &cells_2d,
@@ -389,5 +419,8 @@ pub(super) fn emit_phate_layout(
         &format!("{out}.nodes_2d.parquet"),
     )?;
     write_curves_2d(&curves_2d, &meta, &format!("{out}.curves_2d.parquet"))?;
-    Ok(())
+
+    // Arrows come LAST, off the final coordinates: the warp above moves cells, and a field
+    // drawn from pre-warp positions would point away from where the plot puts them.
+    emit_velocity_field(&cells_2d, native, knn, out)
 }

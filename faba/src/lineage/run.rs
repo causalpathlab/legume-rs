@@ -1,8 +1,9 @@
 //! Entry point for `faba lineage` — velocity-informed lineage inference over a
 //! `faba gem` embedding.
 //!
-//! Reads gem's raw parquet outputs by prefix (`{from}.cell_embedding.parquet` = θ,
-//! `{from}.velocity.parquet` = δ), fits **K k-means centroids** on θ and an **MST**
+//! Reads a θ/δ pair by prefix — `cell_embedding` + `velocity` on an embedding run,
+//! `latent` + `velocity_factor` on a topic one (see [`super::input`]) — fits
+//! **K k-means centroids** on θ and an **MST**
 //! over them ([`matrix_util::principal_graph::mst_from_sqdist`]), tests the velocity
 //! **direction** of every candidate edge ([`crate::lineage::orient`]), and turns that
 //! into a **rooted forest** by maximum-weight branching ([`matrix_util::branching`]):
@@ -15,9 +16,8 @@
 //! (`matrix_util::…::kmeans_centroids_seeded`, kmeans++ from `--seed`), so the whole
 //! fit — centroids, MST, edge directions, forest, curves — is reproducible for a seed.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use log::{info, warn};
-use std::path::Path;
 
 use graph_embedding_util::type_annotation::{Abstain, MarkerBootstrapConfig};
 use matrix_util::branching::max_branching;
@@ -28,11 +28,11 @@ use matrix_util::principal_curve::PrincipalCurveArgs;
 use matrix_util::principal_graph::{
     kmeans_centroids_seeded, mst_from_sqdist, pairwise_sqdist_rows_to_rows,
 };
-use matrix_util::traits::IoOps;
 use std::collections::HashMap;
 
 use super::args::*;
 use super::cluster::*;
+use super::input::*;
 use super::layout::*;
 use super::root::*;
 use super::traj_annotation::*;
@@ -55,24 +55,41 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     /////////////////////////////
     // load frozen embedding θ //
     /////////////////////////////
-    // The fit (k-means → MST → curves) and the PHATE layout run on raw θ (Euclidean) by
-    // default. `--normalize-latent` L2-normalizes θ instead (cosine geometry): gem θ is
-    // cosine-oriented, so that can help when a few extreme-magnitude cells otherwise
-    // dominate the raw distances.
-    let latent_path = format!("{prefix}.cell_embedding.parquet");
-    let cell = DMatrix::<f32>::from_parquet(&latent_path)
-        .with_context(|| format!("reading cell embedding {latent_path}"))?;
-    let cell_names = cell.rows;
-    // Raw θ kept only for `--markers` node annotation, which scores in the same raw
-    // latent space `faba annotate` uses (the `theta` below drives the fit).
-    let raw_theta: Option<DMatrix<f32>> = args.markers.is_some().then(|| cell.mat.clone());
-    let theta = if args.normalize_latent {
-        l2_normalize_rows(&cell.mat)
-    } else {
-        cell.mat
-    };
-    let n = theta.nrows();
+    // WHICH manifold and in WHAT metric are both decisions with preconditions, so they
+    // live in `super::input`. On a topic run `auto` reads the SIMPLEX (latent.parquet)
+    // rather than the θ·α co-embedding: θ·α confines every cell to the convex hull of
+    // α's K rows, so a diffuse softmax θ compresses the population toward that hull's
+    // centroid — blobby for reasons no layout algorithm can undo.
+    if args.normalize_latent {
+        warn!(
+            "--normalize-latent is deprecated and now a no-op: cosine is the default \
+             geometry for a cell embedding. Use --latent-geometry to choose explicitly."
+        );
+    }
+    let theta_from = resolve_theta_from(args.theta_from, prefix)?;
+    let geometry = resolve_geometry(args.latent_geometry, theta_from);
+    let loaded = load_theta(prefix, theta_from, args.no_orient_velocity)?;
+    let LoadedTheta {
+        cell_names,
+        theta: theta_native,
+        velocity,
+    } = loaded;
+    let n = theta_native.nrows();
     anyhow::ensure!(n >= 2, "need ≥ 2 cells, got {n}");
+
+    // The fit (k-means → MST → curves) and the layout both run on the transformed θ.
+    // `theta_native` survives alongside it for the velocity field: arrows are projected
+    // from the space δ is actually expressed in, onto whichever 2D coordinates result.
+    let theta = apply_geometry(&theta_native, geometry);
+    info!("fit + layout geometry: {geometry:?}");
+
+    // `--markers` scores against the co-embedded gene vectors, which are H-space — so it
+    // reads cell_embedding even when the trajectory was fitted on the K-space simplex.
+    let raw_theta: Option<DMatrix<f32>> = args
+        .markers
+        .is_some()
+        .then(|| load_marker_theta(prefix, &cell_names))
+        .transpose()?;
 
     let k = choose_k(n, args.n_centroids);
     anyhow::ensure!(k >= 2, "need ≥ 2 centroids, got {k}");
@@ -80,26 +97,6 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         "lineage: {n} cells × {} dims → {k} centroids",
         theta.ncols()
     );
-
-    // Velocity δ, loaded EARLY — the grouping below may cluster on it (--cluster-space), and the
-    // directed forest orients on it further down.
-    let velocity_path = format!("{prefix}.velocity.parquet");
-    let have_velocity = !args.no_orient_velocity && Path::new(&velocity_path).exists();
-    let velocity: Option<DMatrix<f32>> = if have_velocity {
-        let vel = DMatrix::<f32>::from_parquet(&velocity_path)
-            .with_context(|| format!("reading velocity {velocity_path}"))?;
-        anyhow::ensure!(
-            vel.mat.nrows() == n,
-            "velocity rows ({}) != latent rows ({n})",
-            vel.mat.nrows()
-        );
-        Some(vel.mat)
-    } else {
-        if !args.no_orient_velocity {
-            warn!("velocity file {velocity_path} absent; forest falls back to the geometric MST");
-        }
-        None
-    };
 
     /////////////////////////////
     // k-means centroids + MST //
@@ -319,9 +316,16 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         )?;
     }
 
-    /////////////////////////////////////////////////////////////////
-    // optional PHATE 2D layout (cells + nodes + curves projected) //
-    /////////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////
+    // optional 2D layout (cells + nodes + curves + velocity field)  //
+    ///////////////////////////////////////////////////////////////////
+    // The field travels on the NATIVE pair, not the metric-transformed θ: an arrow
+    // is a claim about the data, and the metric only decides where the plot puts
+    // the cells it is drawn between.
+    let native_field = NativeField {
+        theta: &theta_native,
+        velocity: velocity.as_ref(),
+    };
     if args.layout == LayoutKind::Phate {
         let phate = PhateArgs {
             t: args.phate_t,
@@ -347,6 +351,7 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         }
         emit_phate_layout(
             &theta,
+            native_field,
             &centroids,
             curves,
             &cell_names,
@@ -354,15 +359,15 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
             args.phate_landmarks,
             args.seed,
             &out,
-            velocity_aware.then_some((&dirs_map, &branching, &labels)),
-            args.normalize_latent,
+            velocity_aware.then_some((&dirs_map, &branching, labels.as_slice())),
         )?;
     }
     if args.layout == LayoutKind::Umap {
         emit_umap_layout(
             &theta,
-            velocity.as_ref(),
+            native_field,
             args.layout_space,
+            geometry,
             &centroids,
             curves,
             &cell_names,

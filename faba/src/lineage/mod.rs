@@ -12,6 +12,7 @@
 /// The `faba lineage` command-line surface.
 pub mod args;
 mod cluster;
+mod input;
 mod layout;
 mod root;
 /// The `faba lineage` run. Binary entry: [`run::run_lineage`].
