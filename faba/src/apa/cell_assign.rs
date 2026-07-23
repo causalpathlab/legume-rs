@@ -10,7 +10,7 @@ pub struct CellSiteCount {
     /// SCAPE fit is shared across batches, but counts are emitted per batch.
     pub batch: u32,
     pub cell_barcode: CellBarcode,
-    /// Site identifier, e.g. "ENSG_SYMBOL_chr17_7590910_7590950/pA"
+    /// Site identifier: `{gene}/apa/{component}` (see [`crate::apa::site_id`]).
     pub site_id: Box<str>,
     /// UMI-deduplicated count
     pub count: usize,
@@ -99,12 +99,12 @@ pub fn assign_fragments_to_sites(
     }
 
     // Build site_id for each active component
-    // Format: GENE/pA/k (0-indexed component within gene)
+    // Format: GENE/apa/k (0-indexed component within gene)
     let make_site_id = |component_k: usize| -> (Box<str>, i64, i64) {
         let alpha = em_result.alphas[component_k - 1];
         let beta = em_result.betas[component_k - 1];
         let (gstart, gstop) = utr.alpha_to_genomic_range(alpha.into(), beta.into());
-        let site_id: Box<str> = format!("{}/pA/{}", utr.name, component_k - 1).into();
+        let site_id = crate::apa::site_id(&utr.name, &(component_k - 1).to_string());
         (site_id, gstart, gstop)
     };
 
@@ -134,7 +134,7 @@ pub fn assign_fragments_to_sites(
             genomic_data::sam::Strand::Forward => utr.start + alpha as i64,
             genomic_data::sam::Strand::Backward => utr.end - alpha as i64,
         };
-        let site_id: Box<str> = format!("{}/pA/{}", utr.name, k).into();
+        let site_id = crate::apa::site_id(&utr.name, &k.to_string());
         // Clamp to [0, utr_length]: alpha is a UTR-local position seeded
         // by site_discovery; a tiny numerical drift past utr_length
         // would otherwise emit a meaningless negative tail length and
@@ -193,7 +193,7 @@ pub fn assign_fragments_two_site_fast(
         .map(|((batch, cell, k), umis)| CellSiteCount {
             batch: *batch,
             cell_barcode: cell.clone(),
-            site_id: format!("{}/pA/{}", utr.name, k).into(),
+            site_id: crate::apa::site_id(&utr.name, &k.to_string()),
             count: umis.len(),
         })
         .collect();
@@ -208,7 +208,7 @@ pub fn assign_fragments_two_site_fast(
                 genomic_data::sam::Strand::Backward => utr.end - alpha as i64,
             };
             ApaSiteAnnotation {
-                site_id: format!("{}/pA/{}", utr.name, k).into(),
+                site_id: crate::apa::site_id(&utr.name, &k.to_string()),
                 gene_name: utr.name.clone(),
                 chr: utr.chr.clone(),
                 genomic_alpha,

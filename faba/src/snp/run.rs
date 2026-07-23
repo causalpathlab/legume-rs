@@ -63,7 +63,7 @@ pub struct SnpArgs {
         help = "Gene annotation GFF file (optional, enables gene-centric mode)",
         long_help = "Gene annotation in GFF/GTF format.\n\
                      When provided: processes SNPs within gene boundaries,\n\
-                     enables per-cell allele count output with gene_key/SNP/chr:pos naming.\n\
+                     enables per-cell allele count output with gene_key/snp/chr:pos naming.\n\
                      When omitted: processes SNPs by chromosome region (bulk WGS mode),\n\
                      no per-cell sparse matrix output."
     )]
