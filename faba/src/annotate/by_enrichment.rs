@@ -80,6 +80,16 @@ use faba::manifest;
 /// both modes at one prefix leaves both sets of results intact.
 const TAG: &str = "enrichment";
 
+/// Per-track output tag. Mature keeps the bare `enrichment` name so every
+/// existing path and downstream reader is untouched; nascent takes a suffix, so
+/// `--track both` leaves two complete result sets under one prefix.
+fn track_tag(track: Track) -> String {
+    match track {
+        Track::Mature => TAG.to_string(),
+        Track::Nascent => format!("{TAG}.nascent"),
+    }
+}
+
 /// How many mismatched gene ids to name before truncating the error.
 const MAX_LISTED: usize = 10;
 
@@ -87,15 +97,26 @@ const MAX_LISTED: usize = 10;
 // entry point //
 /////////////////
 
-/// Read the topic model, build the marker matrix on its gene axis, run the
-/// bipartite enrichment core, and write `{out}.enrichment.*`.
-pub fn run(prefix: &str, out: &str, args: &AnnotateArgs) -> Result<()> {
-    let model = load_topic_model(prefix)?;
+/// Read one track's topic model, build the marker matrix on its gene axis, run
+/// the bipartite enrichment core, and write `{out}.enrichment[.nascent].*`.
+///
+/// # Reading the two tracks together
+///
+/// The mature call says what a cell's current program is; the nascent call says
+/// what it is transcribing NOW. Where they disagree is where the cell is moving,
+/// and that difference is the well-posed version of the question `--track
+/// velocity` asks projection mode. Velocity itself cannot be annotated here and
+/// this is not an omission: `Δθ = θ^u − θ^s` is a displacement with negative
+/// entries that does not sum to 1, so it is not a membership on the simplex and
+/// there is nothing for the core to carry a factor×type edge through. Two
+/// calibrated calls and their difference beats one call on a displacement.
+pub fn run(prefix: &str, out: &str, track: Track, args: &AnnotateArgs) -> Result<()> {
+    let model = load_topic_model(prefix, track)?;
     let (markers_gc, celltype_names) = build_markers(args, &model.gene_names)?;
 
     info!(
-        "annotate --mode enrichment: dictionary [{} genes x {} factors], cells [{} x {}], \
-         pseudobulk [{} genes x {} PB], markers [{} genes x {} types]",
+        "annotate --mode enrichment ({track:?}): dictionary [{} genes x {} factors], \
+         cells [{} x {}], pseudobulk [{} genes x {} PB], markers [{} genes x {} types]",
         model.dictionary_gk.nrows(),
         model.dictionary_gk.ncols(),
         model.cell_theta_nk.nrows(),
@@ -155,7 +176,7 @@ pub fn run(prefix: &str, out: &str, args: &AnnotateArgs) -> Result<()> {
     };
 
     let outputs = annotate(&group, &markers_gc, &celltype_names, &config)?;
-    write_outputs(out, &outputs, &model.topic_names, &celltype_names)?;
+    write_outputs(out, track, &outputs, &model.topic_names, &celltype_names)?;
     Ok(())
 }
 
@@ -184,10 +205,36 @@ struct TopicModel {
     topic_names: Vec<Box<str>>,
 }
 
-fn load_topic_model(prefix: &str) -> Result<TopicModel> {
-    let dict_path = required(prefix, "dictionary.parquet")?;
-    let latent_path = required(prefix, "latent.parquet")?;
-    let pb_gene_path = required(prefix, "pb_gene.parquet")?;
+/// The four tables for one track.
+///
+/// Three of them are per-track and one is not. `pb_latent` is shared because
+/// this model has exactly ONE θ — `δ` is the only thing allowed to distinguish
+/// the tracks — so the pseudobulk membership the null permutes is the same
+/// object on both sides. Giving each track its own would contradict the model
+/// rather than refine it.
+///
+/// The cell membership IS per-track, and deliberately a different object from
+/// the shared one: `latent_nascent.parquet` is θ fitted to the nascent counts
+/// against the frozen nascent dictionary, which is what "call this cell on its
+/// nascent program" means. The two roles differ — the null reconstructs a
+/// dictionary from the shared θ, the call carries factor×type edges to cells
+/// through the track's own θ.
+fn track_tables(track: Track) -> (&'static str, &'static str, &'static str) {
+    match track {
+        Track::Mature => ("dictionary.parquet", "latent.parquet", "pb_gene.parquet"),
+        Track::Nascent => (
+            "dictionary_nascent.parquet",
+            "latent_nascent.parquet",
+            "pb_gene_nascent.parquet",
+        ),
+    }
+}
+
+fn load_topic_model(prefix: &str, track: Track) -> Result<TopicModel> {
+    let (dict_name, latent_name, pb_gene_name) = track_tables(track);
+    let dict_path = required(prefix, dict_name)?;
+    let latent_path = required(prefix, latent_name)?;
+    let pb_gene_path = required(prefix, pb_gene_name)?;
     let pb_latent_path = required(prefix, "pb_latent.parquet")?;
 
     let dict = DMatrix::<f32>::from_parquet(&dict_path)
@@ -202,8 +249,16 @@ fn load_topic_model(prefix: &str) -> Result<TopicModel> {
     // The dictionary is keyed by bare gene id, `pb_gene` by gem feature row
     // (`{gene}/count/spliced`) — two different call sites in `gem_encoder::run`.
     // Normalize both, then reorder pb_gene onto the dictionary's axis.
-    let gene_names: Vec<Box<str>> = dict.rows.iter().map(|r| strip_track_suffix(r)).collect();
-    let pb_gene_keys: Vec<Box<str>> = pb_gene.rows.iter().map(|r| strip_track_suffix(r)).collect();
+    let gene_names: Vec<Box<str>> = dict
+        .rows
+        .iter()
+        .map(|r| strip_track_suffix(r, track))
+        .collect();
+    let pb_gene_keys: Vec<Box<str>> = pb_gene
+        .rows
+        .iter()
+        .map(|r| strip_track_suffix(r, track))
+        .collect();
     let order = align_gene_axis(&gene_names, &pb_gene_keys, &dict_path, &pb_gene_path)?;
     let pb_gene_gp = pb_gene.mat.select_rows(&order);
 
@@ -266,9 +321,8 @@ fn required(prefix: &str, suffix: &str) -> Result<String> {
 /// (`{gene}/count/spliced`) — different call sites, one axis. Stripping the
 /// mature suffix wherever it appears puts the dictionary, the pseudobulk profile
 /// and the marker panel on the same keys.
-fn strip_track_suffix(name: &str) -> Box<str> {
-    let suffix = Track::Mature.row_suffix();
-    Box::from(name.strip_suffix(suffix).unwrap_or(name))
+fn strip_track_suffix(name: &str, track: Track) -> Box<str> {
+    Box::from(name.strip_suffix(track.row_suffix()).unwrap_or(name))
 }
 
 /// Row permutation putting `pb_genes` into `dict_genes` order.
@@ -465,11 +519,13 @@ fn build_markers(args: &AnnotateArgs, gene_names: &[Box<str>]) -> Result<(Mat, V
 /// model's factors, not a Leiden partition.
 fn write_outputs(
     out: &str,
+    track: Track,
     outputs: &AnnotateOutputs,
     topic_names: &[Box<str>],
     celltype_names: &[Box<str>],
 ) -> Result<()> {
-    let prefix = format!("{out}.{TAG}");
+    let tag = track_tag(track);
+    let prefix = format!("{out}.{tag}");
 
     let annotation_path = format!("{prefix}.annotation.parquet");
     outputs.cell_annotation_nc.to_parquet_with_names(

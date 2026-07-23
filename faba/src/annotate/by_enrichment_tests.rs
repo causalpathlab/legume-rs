@@ -25,15 +25,27 @@ fn names(xs: &[&str]) -> Vec<Box<str>> {
 fn strip_track_suffix_normalizes_both_key_styles() {
     // pb_gene rows carry the gem feature suffix, dictionary rows do not.
     assert_eq!(
-        strip_track_suffix("ENSG1_CFH/count/spliced").as_ref(),
+        strip_track_suffix("ENSG1_CFH/count/spliced", Track::Mature).as_ref(),
         "ENSG1_CFH"
     );
-    assert_eq!(strip_track_suffix("ENSG1_CFH").as_ref(), "ENSG1_CFH");
-    // Only the MATURE suffix is stripped — an unspliced row is a different axis
-    // and must not silently collide with its spliced twin.
     assert_eq!(
-        strip_track_suffix("ENSG1_CFH/count/unspliced").as_ref(),
+        strip_track_suffix("ENSG1_CFH", Track::Mature).as_ref(),
+        "ENSG1_CFH"
+    );
+    // Only the pass's OWN suffix is stripped. An unspliced row is a different
+    // axis and must not silently collide with its spliced twin — which is why
+    // the stripper is scoped to a track rather than trying both.
+    assert_eq!(
+        strip_track_suffix("ENSG1_CFH/count/unspliced", Track::Mature).as_ref(),
         "ENSG1_CFH/count/unspliced"
+    );
+    assert_eq!(
+        strip_track_suffix("ENSG1_CFH/count/unspliced", Track::Nascent).as_ref(),
+        "ENSG1_CFH"
+    );
+    assert_eq!(
+        strip_track_suffix("ENSG1_CFH/count/spliced", Track::Nascent).as_ref(),
+        "ENSG1_CFH/count/spliced"
     );
 }
 
@@ -219,4 +231,66 @@ fn exp_log_beta_gives_simplex_columns_which_specificity_needs() {
         exped.iter().copied().fold(0.0f32, f32::max) > 0.0,
         "exp(log beta) must produce a usable specificity"
     );
+}
+
+//////////////////////
+// per-track tables //
+//////////////////////
+
+/// Each track must name a COMPLETE, self-consistent set: the null recomputes
+/// `β̃ = pb_gene · pb_membership[π]` and compares it against `profile_gk`, so a
+/// pb_gene from one track paired with a dictionary from the other would
+/// reconstruct the wrong object and calibrate the ranking against it — silently,
+/// since both files have identical shape.
+#[test]
+fn each_track_names_its_own_dictionary_latent_and_pseudobulk() {
+    let (d_m, l_m, p_m) = track_tables(Track::Mature);
+    let (d_n, l_n, p_n) = track_tables(Track::Nascent);
+
+    assert_eq!(
+        (d_m, l_m, p_m),
+        ("dictionary.parquet", "latent.parquet", "pb_gene.parquet")
+    );
+    assert_eq!(
+        (d_n, l_n, p_n),
+        (
+            "dictionary_nascent.parquet",
+            "latent_nascent.parquet",
+            "pb_gene_nascent.parquet"
+        )
+    );
+    // No file is shared between the tracks. `pb_latent` is the one table both
+    // read, and it is deliberately NOT in this list: the model has a single θ,
+    // so the pseudobulk membership is track-independent by construction.
+    for (a, b) in [(d_m, d_n), (l_m, l_n), (p_m, p_n)] {
+        assert_ne!(a, b, "{a} must not serve both tracks");
+    }
+}
+
+/// Mature keeps the bare tag so existing output paths and downstream readers are
+/// untouched; nascent takes a suffix so `--track both` leaves two complete
+/// result sets under one prefix instead of one overwriting the other.
+#[test]
+fn the_two_tracks_write_to_different_output_tags() {
+    assert_eq!(track_tag(Track::Mature), "enrichment");
+    assert_eq!(track_tag(Track::Nascent), "enrichment.nascent");
+    assert_ne!(track_tag(Track::Mature), track_tag(Track::Nascent));
+}
+
+/// The gene axis has to reconcile ACROSS tracks: `pb_gene_nascent` rows carry
+/// the unspliced suffix while `dictionary_nascent` rows are bare, and
+/// `align_gene_axis` matches them by name. If the stripper only knew the mature
+/// suffix, every nascent gene would fail to match and the nascent pass would
+/// refuse to run.
+#[test]
+fn strip_track_suffix_normalizes_the_nascent_axis_too() {
+    // A nascent pb_gene reorders onto the bare-keyed nascent dictionary.
+    let dict = names(&["A", "B"]);
+    let pb = names(&["B/count/unspliced", "A/count/unspliced"]);
+    let pb_keys: Vec<Box<str>> = pb
+        .iter()
+        .map(|r| strip_track_suffix(r, Track::Nascent))
+        .collect();
+    let order = align_gene_axis(&dict, &pb_keys, "d.parquet", "p.parquet").unwrap();
+    assert_eq!(order, vec![1, 0]);
 }
