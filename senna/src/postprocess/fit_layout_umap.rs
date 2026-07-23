@@ -9,11 +9,11 @@
 //! latent and run UMAP SGD on cells directly. No Nyström, no PB output.
 
 use super::fit_layout_common::{
-    nystrom_cell_coords, preprocess_layout_data, random_init_2d, resolve_inputs,
-    write_viz_outputs_direct, write_viz_outputs_pb, DirectLayoutPrep, LayoutCommonArgs, LayoutPrep,
-    PbLayoutPrep, ResolvedViz,
+    nystrom_cell_coords, preprocess_layout_data, resolve_inputs, write_viz_outputs_direct,
+    write_viz_outputs_pb, DirectLayoutPrep, LayoutCommonArgs, LayoutPrep, PbLayoutPrep, ResolvedViz,
 };
 use crate::embed_common::*;
+use matrix_util::pca::{init_2d_from_scores, pc_scores, random_init_2d};
 use matrix_util::umap::Umap;
 use rayon::prelude::*;
 
@@ -94,32 +94,25 @@ pub fn run_default_umap_layout(manifest_path: &str, preload: bool) -> anyhow::Re
     fit_layout_umap(&args)
 }
 
-/// UMAP reference inits in [-10, 10] so gradient clamps at ±4 don't
-/// dominate the layout scale. `random_init_2d` returns [-1, 1].
-const INIT_SCALE: f32 = 10.0;
-
 /// PCA(2) initialization for the cell-level UMAP: project cells onto the top-2
-/// principal components of the (Euclidean) embedding, scaled so the largest
-/// |coord| is `INIT_SCALE`, plus tiny jitter. Uniform-random init is uwot's
-/// *fallback*; its default is spectral/PCA, which seeds the global structure so
-/// SGD only has to refine it locally — random init leaves the macro-layout
-/// seed-dependent and scrambled. PCA(2) of the already-low-dim embedding is a
-/// cheap, faithful stand-in. Falls back to scaled random init when the matrix
-/// is too small or the SVD fails.
+/// principal components of the (Euclidean) embedding. Uniform-random init is
+/// uwot's *fallback*; its default is spectral/PCA, which seeds the global
+/// structure so SGD only has to refine it locally — random init leaves the
+/// macro-layout seed-dependent and scrambled. PCA(2) of the already-low-dim
+/// embedding is a cheap, faithful stand-in.
+///
+/// Centering happens here rather than through `pc_scores`'s drop-the-leading-
+/// component route: this embedding is a signed projection, not the nonnegative
+/// latent that route assumes, so its first component is real structure — and
+/// usually the most of it.
 ///
 /// `feat_kn` is `[dims × n_cells]` (columns = cells); returns `[n_cells × 2]`.
 fn pca_init_2d(feat_kn: &Mat, seed: u64) -> Mat {
-    use rand::rngs::SmallRng;
-    use rand::{RngExt, SeedableRng};
     let d = feat_kn.nrows();
     let n = feat_kn.ncols();
-    let scaled_random = || {
-        let mut out = random_init_2d(n, seed);
-        out *= INIT_SCALE;
-        out
-    };
+    let as_coords = |flat: Vec<f32>| Mat::from_row_iterator(n, 2, flat);
     if n < 3 || d < 2 {
-        return scaled_random();
+        return as_coords(random_init_2d(n, seed));
     }
     // Center each dimension across cells (PCA needs mean-centered data):
     // `column_mean` is the per-dimension mean over the n columns; subtract it
@@ -127,28 +120,11 @@ fn pca_init_2d(feat_kn: &Mat, seed: u64) -> Mat {
     let mut centered = feat_kn.clone();
     let mean = feat_kn.column_mean();
     centered.column_iter_mut().for_each(|mut col| col -= &mean);
-    // feat_c = U·diag(s)·Vᵀ ([d×n]); per-cell PC scores = (diag(s)·Vᵀ)ᵀ = V·diag(s).
-    let Ok((_u, s, v)) = centered.rsvd(2) else {
-        return scaled_random();
-    };
-    let mut coords = Mat::zeros(n, 2);
-    for i in 0..n {
-        for k in 0..2.min(s.len()) {
-            coords[(i, k)] = v[(i, k)] * s[k];
-        }
+    // `pc_scores` takes rows as points, so hand it the [n_cells × dims] view.
+    match pc_scores(&centered.transpose(), 2, 0) {
+        Ok(scores) => as_coords(init_2d_from_scores(&scores, seed)),
+        Err(_) => as_coords(random_init_2d(n, seed)),
     }
-    // Scale so the largest |coord| is INIT_SCALE (uwot's scale_and_jitter).
-    let max_abs = coords.iter().fold(0.0_f32, |m, &x| m.max(x.abs()));
-    if max_abs > 0.0 {
-        coords *= INIT_SCALE / max_abs;
-    }
-    // Tiny jitter breaks exact ties (coincident scores → zero UMAP gradient).
-    let mut rng = SmallRng::seed_from_u64(seed ^ 0x5151_5151_5151_5151);
-    let jitter = INIT_SCALE * 1e-4;
-    for x in coords.iter_mut() {
-        *x += rng.random_range(-jitter..jitter);
-    }
-    coords
 }
 
 pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
@@ -175,12 +151,9 @@ fn fit_layout_umap_pb(
         2.0 * edges.len() as f32 / n.max(1) as f32
     );
 
-    let init = random_init_2d(n, args.common.seed);
-    let mut init_flat = Vec::with_capacity(n * 2);
-    for i in 0..n {
-        init_flat.push(init[(i, 0)] * INIT_SCALE);
-        init_flat.push(init[(i, 1)] * INIT_SCALE);
-    }
+    // PB layout keeps the random init: the PB-PB similarity arrives as a dense
+    // matrix, not the feature vectors a PC init would need.
+    let init_flat = random_init_2d(n, args.common.seed);
 
     let umap = Umap {
         n_epochs: args.umap_epochs,

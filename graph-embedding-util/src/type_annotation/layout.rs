@@ -8,9 +8,8 @@ use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::knn_graph::{self, KnnGraph};
 use matrix_util::layout::{phate_layout_2d, project_cells_nystrom, PhateArgs};
 use matrix_util::parquet::{write_named_table, Column};
+use matrix_util::pca::pc_layout_init;
 use matrix_util::umap::Umap;
-use rand::rngs::SmallRng;
-use rand::{RngExt, SeedableRng};
 use rayon::prelude::*;
 
 ////////////////////////////////
@@ -34,10 +33,23 @@ pub(super) fn leiden_from_graph(
     labels
 }
 
-/// UMAP SGD layout off the fuzzy-weighted cell kNN graph. Returns `[N×2]`
-/// row-major coords. Uses the shared `matrix_util::umap` kernel (same as
-/// `faba gem-plot`).
-pub(super) fn umap_from_graph(graph: &KnnGraph, n: usize, epochs: usize, seed: u64) -> Vec<f32> {
+/// UMAP SGD layout off the fuzzy-weighted cell kNN graph, started from the
+/// leading principal components of `cell_u` (`[N×H]` row-major, unit-norm)
+/// rather than from a random scatter. Returns `[N×2]` row-major coords. Uses
+/// the shared `matrix_util::umap` kernel (same as `faba gem-plot`).
+///
+/// Only the *init* moves to PC space here; the graph stays the caller's,
+/// because it is the same one Leiden coarsening and fine-score smoothing
+/// read, and rebuilding it on PCs would change the type calls, not just the
+/// picture.
+pub(super) fn umap_from_graph(
+    graph: &KnnGraph,
+    cell_u: &[f32],
+    n: usize,
+    h: usize,
+    epochs: usize,
+    seed: u64,
+) -> Vec<f32> {
     let fuzzy = graph.fuzzy_kernel_weights();
     let edges: Vec<(usize, usize, f32)> = graph
         .edges
@@ -51,13 +63,13 @@ pub(super) fn umap_from_graph(graph: &KnnGraph, n: usize, epochs: usize, seed: u
         edges.len(),
         epochs
     );
-    // Init in [-10, 10]² so the UMAP gradient clamp doesn't dominate scale
-    // (mirrors `faba gem-plot` / `senna layout umap`).
-    const INIT_SCALE: f32 = 10.0;
-    let mut rng = SmallRng::seed_from_u64(seed);
-    let init: Vec<f32> = (0..n * 2)
-        .map(|_| (rng.random_range(0.0_f32..1.0) * 2.0 - 1.0) * INIT_SCALE)
-        .collect();
+    // SGD starts at the top two mean-free PCs of the embedding (uwot inits from a
+    // spectral/PCA seed and falls back to a uniform draw only when it can't), so the
+    // global arrangement is seeded by the data instead of by the RNG. The leading
+    // component is dropped: `cell_u` rows are nonnegative unit vectors, so it carries
+    // the mean profile rather than any between-cell contrast.
+    let cell_mat = DMatrix::<f32>::from_row_iterator(n, h, cell_u.iter().copied());
+    let (_scores, init) = pc_layout_init(&cell_mat, 2, 1, seed);
     let umap = Umap {
         n_epochs: epochs,
         seed,

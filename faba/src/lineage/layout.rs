@@ -24,6 +24,9 @@ use crate::lineage::orient::{undirected, EdgeCall, EdgeDirection};
 /// [θ|δ]); the backbone (nodes/curves) stays on θ (δ is a small increment, so the
 /// joint embedding stays coherent). Emits `{out}.{cells,nodes,curves}_2d.parquet`,
 /// plus `{out}.velocity_grid_2d.parquet` (scVelo-style gridded arrows) when δ exists.
+///
+/// `pcs` is the principal-component budget for the graph and the SGD init (see
+/// [`matrix_util::pca`]); `0` keeps both on the raw latent with a random init.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_umap_layout(
     theta: &DMatrix<f32>,
@@ -34,10 +37,12 @@ pub(super) fn emit_umap_layout(
     curves: &PrincipalCurves,
     cell_names: &[Box<str>],
     knn: usize,
+    pcs: usize,
     seed: u64,
     out: &str,
 ) -> Result<()> {
     use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
+    use matrix_util::pca::{pc_layout_init, random_init_2d};
     use matrix_util::umap::Umap;
 
     let (n, h) = (theta.nrows(), theta.ncols());
@@ -77,9 +82,30 @@ pub(super) fn emit_umap_layout(
     } else {
         l2_normalize_rows(&feats)
     };
-    info!("t-UMAP layout ({geometry:?}, space={space:?}): {n} cells, knn={knn}");
+    // Both the neighbourhood graph and the SGD init run on principal components of
+    // the latent rather than on the latent itself — the reference pipelines' order
+    // (scanpy neighbours on `X_pca`, uwot init from a spectral/PCA seed). The leading
+    // component is dropped: these rows are nonnegative (a simplex, or a unit-normalized
+    // one), so every cell loads positively on it and it carries the mean profile, not
+    // between-cell structure. Distances on the remaining components are the mean-free
+    // ones, and the init already places the manifold's dominant axes — leaving SGD to
+    // refine local structure instead of also having to discover the global arrangement
+    // from a random scatter, which is what makes a layout seed-dependent.
+    let (pc_scores, init) = if pcs > 0 {
+        pc_layout_init(&feats_n, pcs, 1, seed)
+    } else {
+        (None, random_init_2d(n, seed))
+    };
+    let graph_feats = pc_scores.as_ref().unwrap_or(&feats_n);
+    info!(
+        "t-UMAP layout ({geometry:?}, space={space:?}): {n} cells, knn={knn}, graph+init on {}",
+        match &pc_scores {
+            Some(s) => format!("{} PCs (mean axis dropped)", s.ncols()),
+            None => format!("{} raw latent dims, random init", feats_n.ncols()),
+        }
+    );
     let graph = KnnGraph::from_rows(
-        &feats_n,
+        graph_feats,
         KnnGraphArgs {
             knn,
             block_size: 1000,
@@ -94,15 +120,6 @@ pub(super) fn emit_umap_layout(
         .map(|(&(i, j), &wt)| (i, j, wt))
         .collect();
 
-    // Deterministic 2D init in [−10, 10] (seeded LCG — no rng dependency).
-    let mut s = seed ^ 0x9E37_79B9_7F4A_7C15;
-    let mut init = vec![0f32; n * 2];
-    for v in init.iter_mut() {
-        s = s
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        *v = (((s >> 33) as f32) / ((1u32 << 31) as f32) - 1.0) * 10.0;
-    }
     // t-UMAP (a=b=1) — the uwot::tumap kernel; more spread than standard UMAP.
     let coords = Umap {
         seed,
