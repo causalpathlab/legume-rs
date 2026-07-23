@@ -310,9 +310,8 @@ fn run_gem_genes_bge(
         );
     }
 
-    // Compute device + a single shared Ctrl-C stop handler. `setup_stop_handler`
-    // registers a SIGINT handler and a second registration panics, so it must run
-    // once and be cloned into each pass's config (the feature-null refine fits twice).
+    // Compute device. gem does a single gated fit (the softmax gate selects
+    // features during training), so there is no second pass to reconcile here.
     let dev = args
         .runtime
         .device
@@ -320,11 +319,10 @@ fn run_gem_genes_bge(
         .context("candle device init")?;
     info!("compute device = {:?}", dev);
 
-    // Build a `FitConfig` for the CURRENT feature axis of `unified`, so the same
-    // builder serves pass 1 (full post-HVG axis) and the post-QC re-fit (null
-    // features dropped): the per-gene β-sharing factor is rebuilt from the live
-    // feature names, and the δ_g ridge / HVG weights realign to the reduced axis.
-    // Mirrors senna bge's two-pass `build_config`. Returns the config plus the
+    // Build a `FitConfig` for the CURRENT feature axis of `unified`: the per-gene
+    // β-sharing factor is derived from the live feature names, and the δ_g ridge /
+    // HVG weights align to that axis. gem fits ONCE (the softmax gate is the
+    // selector; the senna-bge post-QC refit is retired). Returns the config plus the
     // axis-derived gene names
     // and resolved δ ridge the downstream dictionary writers need.
     //

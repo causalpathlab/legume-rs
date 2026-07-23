@@ -43,6 +43,7 @@ use nalgebra::DMatrix;
 
 use config::{
     stage_params, DEFAULT_AXIS_LAMBDA, DEFAULT_STRATIFY_ALPHA_CELL, DEFAULT_STRATIFY_ALPHA_PB,
+    LINEAGE_WARMUP_FRAC,
 };
 use projection::{project_cells_phase2, project_pbs_phase2, CellBatchDivisor, PHASE2_RIDGE};
 use samplers::{build_active_samplers, build_smoother, subsample_cell_samplers_multilevel};
@@ -492,6 +493,20 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // The axes borrow `cell_model` / `cell_samplers`; confine them to this
     // block so those borrows are released before the phase-2 projection
     // takes `&mut cell_model`.
+
+    // `--lineage-dag` reallocates the ONE `config.epochs` budget across the warm-up
+    // (phase 1) and the refine instead of doubling it. The DAG can only be oriented
+    // from a *trained* velocity readout (chicken-and-egg), so a warm-up before the
+    // lineage term is required — but the refine is warm-started, so it needs a
+    // refinement, not a second full-length fit. Off the lineage path phase 1 keeps
+    // the whole budget (`refine_epochs == 0`) and the run is byte-identical.
+    let lineage_on = config.lineage_dag && config.feat_factor.is_some();
+    let warmup_epochs = if lineage_on && config.epochs > 0 {
+        ((LINEAGE_WARMUP_FRAC * config.epochs as f64).round() as usize).clamp(1, config.epochs)
+    } else {
+        config.epochs
+    };
+    let refine_epochs = config.epochs - warmup_epochs;
     {
         let mut joint_axes: Vec<CompositeAxis> = Vec::with_capacity(1 + pb_axes.len());
         // `use_cell_axis == false` (phase1_cells_per_pb == 0) trains E_feat from
@@ -503,12 +518,25 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         let mut opt1 = AdamW::new(varmap.all_vars(), adamw_params())?;
         let mut p1 = stage_params(&config);
         p1.composite_mode = CompositeMode::Sum;
-        info!(
-            "Phase 1 (joint) — features + {}{} pb level(s) [Sum], {} epochs",
-            if use_cell_axis { "cell + " } else { "" },
-            joint_axes.len() - usize::from(use_cell_axis),
-            config.epochs
-        );
+        p1.epochs = warmup_epochs;
+        if refine_epochs > 0 {
+            info!(
+                "Phase 1 (joint) = LINEAGE WARM-UP — {}/{} epochs; the DAG refine gets the other \
+                 {} (ONE shared epoch budget, NOT doubled). Training features + {}{} pb level(s) [Sum]",
+                warmup_epochs,
+                config.epochs,
+                refine_epochs,
+                if use_cell_axis { "cell + " } else { "" },
+                joint_axes.len() - usize::from(use_cell_axis),
+            );
+        } else {
+            info!(
+                "Phase 1 (joint) — features + {}{} pb level(s) [Sum], {} epochs",
+                if use_cell_axis { "cell + " } else { "" },
+                joint_axes.len() - usize::from(use_cell_axis),
+                warmup_epochs,
+            );
+        }
         train_composite(
             &CompositeTrainContext {
                 axes: &joint_axes,
@@ -581,6 +609,9 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                 }
                 let mut p2 = stage_params(&config);
                 p2.composite_mode = CompositeMode::Sum;
+                // Share the `config.epochs` budget: the refine gets what the warm-up
+                // (phase 1) did not, so `--lineage-dag` reallocates rather than doubles.
+                p2.epochs = refine_epochs;
 
                 if config.dag_learnable {
                     // Sample the DATA side densely (NCE every batch, ~16 batches/epoch)
@@ -628,10 +659,12 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     }
                     let n_dag = dag_terms.iter().filter(|t| t.is_some()).count();
                     info!(
-                        "Lineage-DAG refine (unified learned DAG) — {} pb-level DAG(s), warm-started \
-                         from the velocity-KNN graph [SEM + θ-weighted L1 + DAGMA acyclicity; δ/θ-gated \
-                         drift], structure every {} steps, {} epochs",
-                        n_dag, DAG_STRIDE, config.epochs
+                        "Lineage-DAG refine (learned DAG) = SECOND pass — {}/{} epochs (phase 1's \
+                         remaining budget; SHARED with the warm-up, NOT a second full training). \
+                         Baking lineage into E_feat: {} pb-level DAG(s), warm-started from the \
+                         velocity-KNN [SEM + θ-weighted L1 + DAGMA acyclicity; δ/θ-gated drift], \
+                         structure every {} steps",
+                        refine_epochs, config.epochs, n_dag, DAG_STRIDE
                     );
                     let mut opt2 = AdamW::new(varmap.all_vars(), adamw_params())?;
                     refine_loss = train_composite(
@@ -684,8 +717,12 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                         )?);
                     }
                     info!(
-                        "Lineage-DAG refine (fixed velocity-KNN) — {} oriented pb edge(s) across \
+                        "Lineage-DAG refine (fixed velocity-KNN) = SECOND pass — {}/{} epochs \
+                         (phase 1's remaining budget; SHARED with the warm-up, NOT a second full \
+                         training). Baking lineage into E_feat: {} oriented pb edge(s) across \
                          {} level(s); velocity-drift SEM residual ON",
+                        refine_epochs,
+                        config.epochs,
                         n_edges,
                         levels.len()
                     );
