@@ -341,7 +341,10 @@ pub(super) fn optimize(
     // and peak sat at ~76% of the un-blocked cost. 2M gives ~21 even blocks.
     const BLOCK_ELEMS: usize = 2_000_000;
     let block_rows = (BLOCK_ELEMS / num_samples.max(1)).clamp(1, num_genes.max(1));
-    let n_blocks = num_genes.div_ceil(block_rows.max(1));
+    // Same crate helper the sparse block-visitors use; returns half-open
+    // `(lb, ub)` gene ranges of `block_rows` each (last one short).
+    let jobs = create_jobs(num_genes, num_samples, Some(block_rows));
+    let n_blocks = jobs.len();
 
     let dims = format!("{num_genes} genes × {num_samples} samples");
 
@@ -391,22 +394,15 @@ pub(super) fn optimize(
     // are independent jobs run concurrently. Peak memory is now
     // (rayon width × ~150 MB), bounded by the plane cap above rather than by
     // the feature count.
-    let ranges: Vec<(usize, usize)> = (0..n_blocks)
-        .map(|b| {
-            let r0 = b * block_rows;
-            (r0, block_rows.min(num_genes - r0))
-        })
-        .collect();
-
     let prog = styled_progress_bar(total as u64, &msg);
 
     // `.map(..).collect::<Result<Vec>>()` preserves input order, so blocks
     // reassemble in gene order. `prog.inc` is atomic: batched blocks tick per
     // iteration inside `optimize_block`; otherwise tick once per finished block.
-    let outs = ranges
+    let outs = jobs
         .par_iter()
-        .map(|&(r0, nr)| -> anyhow::Result<CollapsedOut> {
-            let sub = stat.select_rows(r0, nr);
+        .map(|&(lb, ub)| -> anyhow::Result<CollapsedOut> {
+            let sub = stat.select_rows(lb, ub - lb);
             let mut out_b =
                 optimize_block(&sub, hyper, num_iter, out_target, batched.then_some(&prog))?;
             if !keep_stats {
