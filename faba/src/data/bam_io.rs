@@ -91,6 +91,21 @@ pub fn extract_umi(record: &bam::Record, tag: &[u8]) -> UmiBarcode {
     }
 }
 
+/// The alignment-level admission gate shared by every pileup-based modality.
+///
+/// Single definition on purpose: the cell scan
+/// ([`crate::editing::cell_activity::scan`]) judges each cell on the same reads
+/// the site test later counts, so the two must admit an identical set. When
+/// these checks lived in both places the invariant was asserted in a comment
+/// with nothing enforcing it.
+pub fn passes_alignment_filters(record: &bam::Record, min_mapping_quality: u8) -> bool {
+    record.mapq() >= min_mapping_quality
+        && !record.is_duplicate()
+        && !record.is_secondary()
+        && !record.is_supplementary()
+        && (!record.is_paired() || record.is_proper_pair())
+}
+
 /// Check if a BAM record's gene barcode matches the expected gene ID.
 /// Compares raw `&str` from the aux tag to avoid allocating a `GeneId`.
 pub fn matches_gene(

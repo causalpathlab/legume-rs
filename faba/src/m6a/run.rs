@@ -1,12 +1,13 @@
 use crate::common::*;
 use crate::data::cell_membership::CellMembership;
 use crate::editing::bed_output::process_all_bam_files_to_bed;
-use crate::editing::io::{load_atoi_mask_from_parquet, ToParquet};
+use crate::editing::io::{load_atoi_mask_from_parquet, write_discovery_outputs, ToParquet};
 use crate::editing::mask::{build_atoi_mask, filter_m6a_by_mask};
 use crate::editing::mixture::MixtureParams;
 use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::{
-    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, M6aContrastArgs,
+    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, EditTestLevel,
+    M6aContrastArgs,
 };
 use crate::editing::sifter::ModificationType;
 use crate::quant::mass_enrichment::MassEnrichmentArgs;
@@ -127,14 +128,15 @@ pub struct DartSeqCountArgs {
     #[arg(
         short = 'q',
         long = "fdr",
-        default_value_t = 0.05,
-        help = "Detection FDR target (Benjamini-Hochberg q-value)",
+        default_value_t = 0.1,
+        help = "Detection FDR target (Benjamini-Hochberg q-value); 1.0 disables it",
         long_help = "Target FDR (Benjamini-Hochberg q-value cutoff) for site detection.\n\
-                     It is applied genome-wide across all called sites,\n\
-                     not as a per-site p-value threshold.\n\
-                     The same cutoff governs both the m6A calls\n\
-                     and the A-to-I confounder-mask pass\n\
-                     (used when --detect-atoi or --atoi-mask is set)."
+                     It is applied across all putative sites that clear the\n\
+                     coverage / effect-size guards, not as a per-site p-value threshold.\n\
+                     Lenient by default (0.1); `--fdr 1.0` turns FDR off entirely,\n\
+                     leaving the coverage + delta gates as the field-standard filter.\n\
+                     Governs the m6A calls only; the A-to-I confounder-mask pass\n\
+                     (--detect-atoi) has its own `--atoi-fdr`."
     )]
     pub fdr_cutoff: f32,
 
@@ -164,6 +166,9 @@ pub struct DartSeqCountArgs {
         long_help = "Unit-aware feature QC for the per-site (`_site`) output matrix:\n\
                      a site is kept only if detected in at least this many cells,\n\
                      and both of its channels (methylated/unmethylated) are kept together.\n\
+                     This is the single-cell reproducibility control — the scDART-seq\n\
+                     criterion of a site seen in >= 10 cells — standing in for bulk\n\
+                     replicate concordance.\n\
                      The gene-level matrix is unaffected. 0 disables.\n\
                      Sites are a distinct feature space\n\
                      not covered by the upstream gene expression QC (--gene-min-cells)."
@@ -306,6 +311,16 @@ pub struct DartSeqCountArgs {
         help = "Minimum A-to-G conversions for A-to-I detection"
     )]
     pub atoi_min_conversion: usize,
+
+    #[arg(
+        long = "atoi-fdr",
+        default_value_t = 0.05,
+        help = "FDR target for the A-to-I confounder-mask pass (separate from --fdr)",
+        long_help = "Benjamini-Hochberg q-value cutoff for the A-to-I mask pass\n\
+                     (--detect-atoi). Kept separate from the m6A --fdr so the\n\
+                     confounder mask can be tuned independently of the m6A calls."
+    )]
+    pub atoi_fdr_cutoff: f32,
 
     #[arg(
         long = "atoi-mask",
@@ -462,6 +477,9 @@ pub struct DartSeqCountArgs {
     )]
     pub valid_cells_file: Option<Box<str>>,
 
+    #[command(flatten)]
+    pub cell_scan: crate::editing::cell_activity::CellScanArgs,
+
     /// Reuse the retained-gene set from `faba genes` ({batch}_genes_kept.tsv.gz)
     #[arg(long = "valid-genes")]
     pub valid_genes_file: Option<Box<str>>,
@@ -518,6 +536,8 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             },
             mut_bam_files: args.control_bam_files.clone(),
             site_min_cells: args.site_min_cells,
+            test_level: args.m6a_contrast.test_level,
+            competent_cells: None,
         }
     }
 }
@@ -533,8 +553,9 @@ impl DartSeqCountArgs {
             include_missing_barcode: self.include_missing_barcode,
             min_coverage: self.atoi_min_coverage,
             min_conversion: self.atoi_min_conversion,
-            // A-to-I mask pass shares the m6A detection FDR target (`--fdr`).
-            fdr_cutoff: self.fdr_cutoff,
+            // A-to-I mask pass has its own FDR target (`--atoi-fdr`), separate
+            // from the m6A `--fdr`.
+            fdr_cutoff: self.atoi_fdr_cutoff,
             error_rate: self.error_rate,
             overdispersion: self.overdispersion,
             backend: self.backend.clone(),
@@ -558,6 +579,10 @@ impl DartSeqCountArgs {
             // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
             mut_bam_files: Vec::new(),
             site_min_cells: self.site_min_cells,
+            // The mask pass wants per-site A-to-I positions, so always site-level
+            // (independent of the m6A `--m6a-test-level`).
+            test_level: EditTestLevel::Site,
+            competent_cells: None,
         }
     }
 }
@@ -721,7 +746,10 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     } else if args.detect_atoi {
         // Stratify the A-to-I masking pass by the same groups when enabled, so
         // cell-type-specific A-to-I edits are also masked out of m6A candidates.
-        let atoi_sites = find_all_conversion_sites(&gff_map, &atoi_params, membership.as_ref())?;
+        // Only the FDR-selected A-to-I calls feed the mask; rejected candidates
+        // are not written here (the mask is a confounder filter, not a result).
+        let atoi_sites =
+            find_all_conversion_sites(&gff_map, &atoi_params, membership.as_ref())?.selected;
         let n_atoi: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
         info!("Found {} A-to-I editing sites", n_atoi);
 
@@ -747,7 +775,31 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     // controls. `quant_bam_files` still unions the controls back in, so the
     // second pass quantifies them (once each) — see above.
     m6a_params.wt_bam_files = signal_bam_files;
-    let gene_sites = find_all_conversion_sites(&gff_map, &m6a_params, membership.as_ref())?;
+
+    // Null-cell QC, BEFORE discovery. Cells that edit no more than the control
+    // does are dropped from the SIGNAL arm only, so every site's WT counts are
+    // de-diluted as they are first computed and nothing downstream changes.
+    // Measured on chr19 + MYC: MYC is called only with this on.
+    m6a_params.competent_cells = crate::editing::cell_activity::call_and_report(
+        &gff_map,
+        &m6a_params,
+        &args.cell_scan,
+        // Null-cell calling is the LAST cell-QC stage: it asks "does this real
+        // cell edit?", which only means anything for barcodes that already
+        // passed droplet calling. Scanning every barcode would score competence
+        // on ambient droplets and let their reads into discovery.
+        gene_qc.as_ref(),
+        &args.output,
+        "m6a",
+    )?;
+
+    let discovered = find_all_conversion_sites(&gff_map, &m6a_params, membership.as_ref())?;
+
+    // Pre-mask audit: the unselected sites (with reasons) and, under gene-level
+    // testing, the per-gene test tables. Emitted before masking and the
+    // empty-selected early return, so it always accompanies the calls.
+    write_discovery_outputs(&discovered, &gff_map, &args.output, "m6a")?;
+    let gene_sites = discovered.selected;
 
     // Apply A-to-I mask to filter m6A candidates
     if let Some((_, ref mask)) = atoi_mask {
@@ -796,7 +848,21 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     if args.output_bed_file {
         process_all_bam_files_to_bed(&m6a_params, &gene_sites, &gff_map, args.output_cell_types)?;
     } else {
-        let valid_cells = gene_qc.as_ref().map(|qc| &qc.cells_by_batch);
+        // Default: the matrices keep every QC cell, so they stay
+        // column-compatible with the other modalities. `--quantify-competent-only`
+        // trades that for a de-diluted matrix.
+        let restricted = match (&m6a_params.competent_cells, gene_qc.as_ref()) {
+            (Some(comp), Some(qc)) if args.cell_scan.quantify_competent_only => {
+                Some(crate::editing::cell_activity::intersect_for_quantification(
+                    &qc.cells_by_batch,
+                    comp,
+                ))
+            }
+            _ => None,
+        };
+        let valid_cells = restricted
+            .as_ref()
+            .or_else(|| gene_qc.as_ref().map(|qc| &qc.cells_by_batch));
         process_all_bam_files_to_backend(&m6a_params, &gene_sites, &gff_map, valid_cells)?;
     }
 

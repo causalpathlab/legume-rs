@@ -5,7 +5,7 @@ use crate::data::dna::Dna;
 use crate::data::dna_stat_map::*;
 use crate::data::util_htslib::*;
 use crate::editing::sifter::*;
-use crate::editing::ConversionSite;
+use crate::editing::{CallReason, ConversionSite};
 use crate::quant::*;
 
 use dashmap::DashMap as HashMap;
@@ -31,6 +31,25 @@ pub enum MixtureWeightMode {
     /// `w_i = n_i · (c_i + α) / (n_i + α + β)`, where `n_i = c_i + u_i`.
     #[default]
     Posterior,
+}
+
+/// Unit of the editing detection test — applies to both m6A (WT-vs-MUT contrast)
+/// and A-to-I (single-sample beta-binomial).
+///
+/// `Site` tests each putative site on its own and controls FDR across all sites.
+/// `Gene` pools every putative site in a gene into one test (an m6A 2×2 contrast,
+/// or a pooled A-to-I beta-binomial) and controls FDR across genes.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Default, serde::Serialize)]
+#[clap(rename_all = "lowercase")]
+pub enum EditTestLevel {
+    /// Per-site: each putative site is tested and FDR-controlled independently.
+    /// The default — for m6A the pooled gene test dilutes a single strong site
+    /// among the gene's weaker C's, so it calls fewer, not more (measured).
+    #[default]
+    Site,
+    /// Per-gene: pool the gene's putative sites into one test; FDR is controlled
+    /// across genes. Opt-in (for m6A, prone to the dilution above).
+    Gene,
 }
 
 /// Unified parameters for base conversion (m6A and A-to-I) discovery and quantification.
@@ -78,6 +97,25 @@ pub struct ConversionParams {
     /// disables. The gene-level matrix is unaffected (its gene axis is already
     /// filtered upstream by `gene_min_cells`). See [`crate::quant::summarize_stats_per_site`].
     pub site_min_cells: usize,
+    /// Unit of the detection test / FDR: per site or pooled per gene. Applies to
+    /// both m6A and A-to-I; read by [`find_all_conversion_sites`].
+    pub test_level: EditTestLevel,
+    /// Editing-competent cells from [`crate::editing::cell_activity`], restricting
+    /// the **signal arm only**, keyed by signal BAM path.
+    ///
+    /// Per BAM, not one flat set, for the same reason `GeneCountQc::cells_by_batch`
+    /// is: barcodes are only unique within a single library, so one shared set
+    /// would let a competent cell in library A rescue the null cell that happens
+    /// to share its barcode in library B. `None`, or a BAM absent from the map,
+    /// keeps every cell for that library.
+    ///
+    /// Applied at discovery, so each site's WT counts are de-diluted as they are
+    /// first computed and nothing downstream has to be recomputed.
+    ///
+    /// Never applied to `mut_bam_files`: selecting control cells on apparent
+    /// activity selects on background, which inflates the null and biases the
+    /// contrast toward missing real sites.
+    pub competent_cells: Option<Arc<crate::editing::cell_activity::CompetentCells>>,
 }
 
 /// Default for `--site-min-cells`: keep sites seen in ≥10 cells, matching
@@ -99,17 +137,20 @@ pub struct M6aContrastArgs {
     #[arg(long = "edit-control-min-coverage", default_value_t = 3)]
     pub control_min_coverage: usize,
 
-    /// m6A: minimum absolute effect size (p_WT − p_MUT) to call a site
-    #[arg(long = "m6a-min-delta", default_value_t = 0.05)]
+    /// m6A: minimum absolute effect size (p_WT − p_MUT) to call a site.
+    /// Lenient by default — real DART rates are modest (~5% on tested data);
+    /// the FDR does the rest.
+    #[arg(long = "m6a-min-delta", default_value_t = 0.02)]
     pub m6a_min_delta: f32,
-
-    /// m6A: minimum relative effect size (p_WT / p_MUT) to call a site
-    #[arg(long = "m6a-min-ratio", default_value_t = 2.0)]
-    pub m6a_min_ratio: f32,
 
     /// m6A: overdispersion ρ for the two-sample beta-binomial LRT contrast
     #[arg(long = "m6a-contrast-overdispersion", default_value_t = 0.02)]
     pub m6a_contrast_overdispersion: f64,
+
+    /// m6A: unit of the WT-vs-MUT test — `site` (per motif C) or `gene`
+    /// (pool the gene's C's into one contrast, FDR across genes)
+    #[arg(long = "m6a-test-level", value_enum, default_value_t = EditTestLevel::Site)]
+    pub test_level: EditTestLevel,
 }
 
 impl M6aContrastArgs {
@@ -118,7 +159,6 @@ impl M6aContrastArgs {
         M6aContrast {
             min_control_coverage: self.control_min_coverage,
             min_delta: self.m6a_min_delta,
-            min_ratio: self.m6a_min_ratio,
             rho: self.m6a_contrast_overdispersion,
         }
     }
@@ -130,6 +170,24 @@ impl ConversionParams {
         if let Some(ref tag) = self.umi_tag {
             map.set_umi_tag(tag);
         }
+    }
+
+    /// Restrict a **signal-arm** map to `bam_file`'s editing-competent cells, if
+    /// any were called for it. Must be re-applied per BAM inside the read loop —
+    /// the sets are per library. Deliberately never applied to a control map —
+    /// see [`Self::competent_cells`].
+    fn restrict_to_competent_cells(
+        &self,
+        map: &mut crate::data::dna_stat_map::DnaBaseFreqMap<'_>,
+        bam_file: &str,
+    ) {
+        map.set_keep_cells(
+            &self.cell_barcode_tag,
+            self.competent_cells
+                .as_ref()
+                .and_then(|by_batch| by_batch.get(bam_file))
+                .cloned(),
+        );
     }
 
     /// BAMs that receive per-cell quantification in the second pass: the signal
@@ -213,6 +271,50 @@ impl ConversionParams {
 // FIRST PASS: Site discovery //
 ////////////////////////////////
 
+/// Outcome of FDR-filtered site discovery.
+///
+/// Every motif that clears the sifter's coverage / effect-size guards enters as
+/// a candidate carrying a raw p-value; the Benjamini-Hochberg pass then splits
+/// the candidates by the detection FDR. `selected` are the calls (q ≤ cutoff) —
+/// the sites quantified in the second pass. `rejected` are the candidates that
+/// fell short (q > cutoff); they keep their p- and q-values, so the two maps
+/// together are a complete audit of what the FDR step decided. `rejected` is
+/// *not* every motif in the genome — a motif the sifter never scored (failed
+/// coverage / effect-size / motif guards) is never materialized as a site.
+/// Callers may write `rejected` to a `*_unselected.parquet` beside the calls.
+pub struct DiscoveredSites {
+    pub selected: HashMap<GeneId, Vec<ConversionSite>>,
+    pub rejected: HashMap<GeneId, Vec<ConversionSite>>,
+    /// Per-gene pooled 2×2 contrast records, one per tested gene. Populated only
+    /// for m6A gene-level testing ([`M6aTestLevel::Gene`]); empty for per-site
+    /// m6A and for A-to-I. Lets a caller write `m6a_genes.parquet`.
+    pub gene_stats: Vec<GeneContrastStat>,
+}
+
+/// One gene's pooled WT-vs-MUT contrast under m6A gene-level testing: the summed
+/// 2×2 counts across the gene's candidate motif C's, the pooled contrast
+/// p-value, and the Benjamini-Hochberg q-value across genes. Written to
+/// `m6a_genes.parquet` — the gene-level analogue of the per-site `m6a_sites.parquet`.
+#[derive(Clone, Debug)]
+pub struct GeneContrastStat {
+    pub gene_id: GeneId,
+    /// Number of candidate motif C's pooled into this gene's contrast.
+    pub n_sites: usize,
+    pub wt_converted: u64,
+    pub wt_unconverted: u64,
+    pub mut_converted: u64,
+    pub mut_unconverted: u64,
+    /// Pooled WT-vs-MUT contrast p-value (the gene's DART test).
+    pub pv: f32,
+    /// Benjamini-Hochberg q-value across genes.
+    pub qv: f32,
+    /// Test outcome for the gene: `Selected`, or why it was rejected
+    /// (`LowControl` / `Delta` / `Fold` / `Fdr`). Ask `reason.is_selected()`
+    /// whether the gene cleared — storing that as a second field gave two
+    /// construction sites the chance to disagree with it.
+    pub reason: CallReason,
+}
+
 /// Find all conversion sites across the genome.
 ///
 /// For m6A with cell_membership: uses per-cell-type discovery.
@@ -221,7 +323,7 @@ pub fn find_all_conversion_sites(
     gff_map: &GffRecordMap,
     params: &ConversionParams,
     cell_membership: Option<&CellMembership>,
-) -> anyhow::Result<HashMap<GeneId, Vec<ConversionSite>>> {
+) -> anyhow::Result<DiscoveredSites> {
     let njobs = gff_map.len();
     info!(
         "Searching {} conversion sites over {} blocks",
@@ -261,41 +363,367 @@ pub fn find_all_conversion_sites(
     let gene_sites = Arc::try_unwrap(arc_gene_sites)
         .map_err(|_| anyhow::anyhow!("failed to release gene_sites"))?;
 
-    // Multiple-testing correction: Benjamini-Hochberg over every called site,
-    // writing each site's q-value back onto it and keeping those with
-    // q <= fdr_cutoff (the cutoff is a target FDR, not a per-site threshold).
-    // Pass 1 records each gene's offset into the flat p-value vector; pass 2
-    // uses that offset, so the two passes never share a running cursor.
+    // The test step. Discovery materialized every *putative* site (RAC/GTY motif
+    // + observed WT C→U at/above the coverage floors, or a reference A/T with
+    // observed editing for A-to-I); here the effect-size and FDR checks decide
+    // selected vs unselected and record the reason for each rejection, so
+    // `*_unselected.parquet` explains every call. m6A applies the control-coverage
+    // / delta guards then the FDR; A-to-I is single-sample, so its test is
+    // the beta-binomial FDR alone. Each is per site, or pooled per gene under
+    // `--m6a-test-level` / `--test-level` = `gene`.
     let cutoff = params.fdr_cutoff;
-    let mut offsets: Vec<(GeneId, usize)> = Vec::with_capacity(gene_sites.len());
-    let mut pvs: Vec<f32> = Vec::new();
-    for e in gene_sites.iter() {
-        offsets.push((e.key().clone(), pvs.len()));
-        pvs.extend(e.value().iter().map(|s| s.pv()));
+    let label = params.mod_type.label();
+    let discovered = match (&params.mod_type, params.test_level) {
+        (ModificationType::M6A { contrast, .. }, EditTestLevel::Gene) => {
+            m6a_partition_by_gene(gene_sites, gff_map, contrast, cutoff)
+        }
+        (ModificationType::M6A { contrast, .. }, EditTestLevel::Site) => {
+            let c = *contrast;
+            partition_by_site(gene_sites, gff_map, cutoff, move |site, strand| {
+                let (a_w, u_w, a_m, u_m) = m6a_site_counts(site, strand);
+                m6a_effect_reason(a_w, u_w, a_m, u_m, &c)
+            })
+        }
+        (ModificationType::AtoI, EditTestLevel::Gene) => atoi_partition_by_gene(
+            gene_sites,
+            gff_map,
+            params.error_rate,
+            params.overdispersion,
+            cutoff,
+        ),
+        (ModificationType::AtoI, EditTestLevel::Site) => {
+            partition_by_site(gene_sites, gff_map, cutoff, |_, _| None)
+        }
+    };
+
+    let n_sel: usize = discovered.selected.iter().map(|e| e.value().len()).sum();
+    let n_rej: usize = discovered.rejected.iter().map(|e| e.value().len()).sum();
+    info!(
+        "{} test: {} selected / {} unselected of {} putative sites (q <= {})",
+        label,
+        n_sel,
+        n_rej,
+        n_sel + n_rej,
+        cutoff,
+    );
+    Ok(discovered)
+}
+
+/// Strand-resolved `(WT converted, WT unconverted, MUT converted, MUT
+/// unconverted)` counts at an m6A site. Forward reads C→T (alt T / ref C);
+/// reverse reads G→A (alt A / ref G).
+fn m6a_site_counts(site: &ConversionSite, strand: Strand) -> (u64, u64, u64, u64) {
+    let (wt, mt) = (site.wt_freq(), site.mut_freq());
+    match strand {
+        Strand::Forward => (
+            wt.count_t() as u64,
+            wt.count_c() as u64,
+            mt.count_t() as u64,
+            mt.count_c() as u64,
+        ),
+        Strand::Backward => (
+            wt.count_a() as u64,
+            wt.count_g() as u64,
+            mt.count_a() as u64,
+            mt.count_g() as u64,
+        ),
     }
-    let n_total = pvs.len();
-    let q = faba::hypothesis_tests::benjamini_hochberg(&pvs);
-    for (k, off) in &offsets {
-        if let Some(mut v) = gene_sites.get_mut(k) {
-            let mut i = *off;
-            v.value_mut().retain_mut(|site| {
-                site.set_qv(q[i]);
-                let keep = q[i] <= cutoff;
-                i += 1;
-                keep
-            });
+}
+
+/// The m6A effect-size test on a 2×2 — used per site and on pooled gene counts.
+/// Returns the rejection reason under the control-coverage / delta guards, or
+/// `None` when the 2×2 clears them and is eligible for the FDR. Rates are raw
+/// (`a/n`, denominator floored to 1 so a zero-coverage arm reads 0, never NaN);
+/// the delta guard rejects genomic C/T variants (equal in both arms) and
+/// constitutive editing.
+///
+/// There is deliberately no fold guard. Measured on rep1/2/3 DART data, a
+/// `p_WT / p_MUT ≥ 1.25` gate passed 94–99% of putative sites and changed the
+/// call count by exactly zero — the delta guard already subsumes it, because a
+/// site clearing `p_WT − p_MUT ≥ 0.02` off a low control rate necessarily
+/// clears a 1.25× fold.
+fn m6a_effect_reason(
+    a_w: u64,
+    u_w: u64,
+    a_m: u64,
+    u_m: u64,
+    c: &M6aContrast,
+) -> Option<CallReason> {
+    let n_m = a_m + u_m;
+    if (n_m as usize) < c.min_control_coverage {
+        return Some(CallReason::LowControl);
+    }
+    let n_w = a_w + u_w;
+    let pw = a_w as f64 / n_w.max(1) as f64;
+    let pm = a_m as f64 / n_m.max(1) as f64;
+    if (pw - pm) < c.min_delta as f64 {
+        return Some(CallReason::Delta);
+    }
+    None
+}
+
+/// One gene's putative sites pooled into a single WT-vs-MUT 2×2, plus what the
+/// effect-size guards made of it. A named struct rather than a 7-tuple so the
+/// two destructuring sites cannot silently mis-order the four counts.
+struct PooledGeneContrast {
+    a_w: u64,
+    u_w: u64,
+    a_m: u64,
+    u_m: u64,
+    n_sites: usize,
+    gene_pv: f32,
+    effect: Option<CallReason>,
+}
+
+/// Split owned per-gene sites into `selected` (`reason == Selected`) and
+/// `rejected` maps, attaching the optional per-gene records.
+fn partition_owned(
+    genes: Vec<(GeneId, Vec<ConversionSite>)>,
+    gene_stats: Vec<GeneContrastStat>,
+) -> DiscoveredSites {
+    let selected = HashMap::<GeneId, Vec<ConversionSite>>::default();
+    let rejected = HashMap::<GeneId, Vec<ConversionSite>>::default();
+    for (gid, sites) in genes {
+        let (sel, rej): (Vec<_>, Vec<_>) =
+            sites.into_iter().partition(|s| s.reason().is_selected());
+        if !rej.is_empty() {
+            rejected.insert(gid.clone(), rej);
+        }
+        if !sel.is_empty() {
+            selected.insert(gid, sel);
         }
     }
-    let n_kept: usize = gene_sites.iter().map(|e| e.value().len()).sum();
-    info!(
-        "FDR (Benjamini-Hochberg): kept {} / {} {} sites at q <= {}",
-        n_kept,
-        n_total,
-        params.mod_type.label(),
-        cutoff
-    );
+    DiscoveredSites {
+        selected,
+        rejected,
+        gene_stats,
+    }
+}
 
-    Ok(gene_sites)
+/// Per-site test. Each putative site is offered to `effect_reason`; `Some`
+/// records that rejection (m6A control-coverage / delta), `None` marks the
+/// site eligible for the FDR. Benjamini-Hochberg runs over the eligible sites'
+/// p-values; those above the cutoff become `Fdr` rejections, the rest `Selected`.
+/// Every site keeps its reason, so the two maps together account for all putative
+/// sites. A-to-I passes a closure that returns `None` (FDR alone decides).
+fn partition_by_site(
+    gene_sites: HashMap<GeneId, Vec<ConversionSite>>,
+    gff_map: &GffRecordMap,
+    cutoff: f32,
+    effect_reason: impl Fn(&ConversionSite, Strand) -> Option<CallReason>,
+) -> DiscoveredSites {
+    let mut genes: Vec<(GeneId, Vec<ConversionSite>)> = gene_sites.into_iter().collect();
+
+    // Pass 1: effect-size guards; collect the eligible sites' p-values for BH.
+    let mut eligible: Vec<(usize, usize)> = Vec::new();
+    let mut eligible_pvs: Vec<f32> = Vec::new();
+    for (gi, (gid, sites)) in genes.iter_mut().enumerate() {
+        let strand = gff_map
+            .get(gid)
+            .map(|r| r.strand)
+            .unwrap_or(Strand::Forward);
+        for (si, site) in sites.iter_mut().enumerate() {
+            match effect_reason(site, strand) {
+                Some(reason) => site.set_reason(reason),
+                None => {
+                    eligible.push((gi, si));
+                    eligible_pvs.push(site.pv());
+                }
+            }
+        }
+    }
+
+    // Pass 2: BH over the eligible sites; stamp q and Selected / Fdr.
+    let q = faba::hypothesis_tests::benjamini_hochberg(&eligible_pvs);
+    for (k, &(gi, si)) in eligible.iter().enumerate() {
+        let site = &mut genes[gi].1[si];
+        site.set_qv(q[k]);
+        site.set_reason(if q[k] <= cutoff {
+            CallReason::Selected
+        } else {
+            CallReason::Fdr
+        });
+    }
+
+    partition_owned(genes, Vec::new())
+}
+
+/// Per-gene test (`--m6a-test-level gene`). Pools each gene's putative sites into
+/// one 2×2, applies the effect-size guards to the pooled counts, then runs
+/// Benjamini-Hochberg across the eligible genes. Every site of a gene inherits
+/// its gene's outcome: `qv` = the gene's q, `gene_pv` = the pooled contrast
+/// p-value, `reason` = the gene's rejection reason (or `Selected`); the per-site
+/// `pv` is left as the sifter scored it (localization). The per-gene records back
+/// `m6a_genes.parquet`.
+fn m6a_partition_by_gene(
+    gene_sites: HashMap<GeneId, Vec<ConversionSite>>,
+    gff_map: &GffRecordMap,
+    contrast: &M6aContrast,
+    cutoff: f32,
+) -> DiscoveredSites {
+    let mut genes: Vec<(GeneId, Vec<ConversionSite>)> = gene_sites.into_iter().collect();
+
+    // Pool each gene's sites → one 2×2, then run the effect-size guards on the
+    // pooled counts.
+    let mut pooled: Vec<PooledGeneContrast> = Vec::with_capacity(genes.len());
+    let mut eligible: Vec<usize> = Vec::new();
+    let mut eligible_pvs: Vec<f32> = Vec::new();
+    for (gi, (gid, sites)) in genes.iter().enumerate() {
+        let strand = gff_map
+            .get(gid)
+            .map(|r| r.strand)
+            .unwrap_or(Strand::Forward);
+        let (mut a_w, mut u_w, mut a_m, mut u_m) = (0u64, 0u64, 0u64, 0u64);
+        for site in sites.iter() {
+            let (cw, uw, cm, um) = m6a_site_counts(site, strand);
+            a_w += cw;
+            u_w += uw;
+            a_m += cm;
+            u_m += um;
+        }
+        let gene_pv = faba::hypothesis_tests::contrast_pvalue(a_w, u_w, a_m, u_m, contrast.rho);
+        let effect = m6a_effect_reason(a_w, u_w, a_m, u_m, contrast);
+        if effect.is_none() {
+            eligible.push(gi);
+            eligible_pvs.push(gene_pv);
+        }
+        pooled.push(PooledGeneContrast {
+            a_w,
+            u_w,
+            a_m,
+            u_m,
+            n_sites: sites.len(),
+            gene_pv,
+            effect,
+        });
+    }
+
+    // BH across the eligible genes; genes failing the effect guards keep theirs.
+    let q = faba::hypothesis_tests::benjamini_hochberg(&eligible_pvs);
+    let mut gene_q: Vec<f32> = vec![1.0; genes.len()];
+    let mut gene_reason: Vec<CallReason> = pooled
+        .iter()
+        .map(|p| p.effect.unwrap_or(CallReason::Selected))
+        .collect();
+    for (k, &gi) in eligible.iter().enumerate() {
+        gene_q[gi] = q[k];
+        gene_reason[gi] = if q[k] <= cutoff {
+            CallReason::Selected
+        } else {
+            CallReason::Fdr
+        };
+    }
+
+    // Stamp each site with its gene's outcome and build the per-gene records.
+    let mut gene_stats: Vec<GeneContrastStat> = Vec::with_capacity(genes.len());
+    for (gi, (gid, sites)) in genes.iter_mut().enumerate() {
+        let PooledGeneContrast {
+            a_w,
+            u_w,
+            a_m,
+            u_m,
+            n_sites,
+            gene_pv,
+            ..
+        } = pooled[gi];
+        let reason = gene_reason[gi];
+        let gq = gene_q[gi];
+        for s in sites.iter_mut() {
+            s.set_gene_pv(gene_pv);
+            s.set_qv(gq);
+            s.set_reason(reason);
+        }
+        gene_stats.push(GeneContrastStat {
+            gene_id: gid.clone(),
+            n_sites,
+            wt_converted: a_w,
+            wt_unconverted: u_w,
+            mut_converted: a_m,
+            mut_unconverted: u_m,
+            pv: gene_pv,
+            qv: gq,
+            reason,
+        });
+    }
+
+    partition_owned(genes, gene_stats)
+}
+
+/// Strand-resolved `(edited, unedited)` counts at an A-to-I site. Forward reads
+/// A→G (alt G / ref A); reverse reads T→C (alt C / ref T). Single-sample, so
+/// only the WT (signal) counts matter.
+fn atoi_site_counts(site: &ConversionSite, strand: Strand) -> (u64, u64) {
+    let wt = site.wt_freq();
+    match strand {
+        Strand::Forward => (wt.count_g() as u64, wt.count_a() as u64),
+        Strand::Backward => (wt.count_c() as u64, wt.count_t() as u64),
+    }
+}
+
+/// Per-gene A-to-I test (`--test-level gene`). Pools each gene's putative editing
+/// sites into one `(edited, coverage)` count, tests it against the beta-binomial
+/// sequencing-error null, and runs Benjamini-Hochberg across genes. Single-sample
+/// — no effect-size guards, so every gene is eligible and the FDR alone decides.
+/// Each site inherits the gene's outcome (`gene_pv`, `qv`, `reason`); the per-gene
+/// records back `atoi_genes.parquet` (MUT columns are 0 — there is no control).
+fn atoi_partition_by_gene(
+    gene_sites: HashMap<GeneId, Vec<ConversionSite>>,
+    gff_map: &GffRecordMap,
+    error_rate: f64,
+    overdispersion: f64,
+    cutoff: f32,
+) -> DiscoveredSites {
+    let mut genes: Vec<(GeneId, Vec<ConversionSite>)> = gene_sites.into_iter().collect();
+
+    // Pool each gene's sites → (edited, coverage); one beta-binomial p-value each.
+    let mut pooled: Vec<(u64, u64, usize, f32)> = Vec::with_capacity(genes.len());
+    let mut pvs: Vec<f32> = Vec::with_capacity(genes.len());
+    for (gid, sites) in genes.iter() {
+        let strand = gff_map
+            .get(gid)
+            .map(|r| r.strand)
+            .unwrap_or(Strand::Forward);
+        let (mut a, mut n) = (0u64, 0u64);
+        for site in sites.iter() {
+            let (edited, unedited) = atoi_site_counts(site, strand);
+            a += edited;
+            n += edited + unedited;
+        }
+        let gene_pv =
+            faba::hypothesis_tests::betabinom_pvalue_greater(a, n, error_rate, overdispersion);
+        pvs.push(gene_pv);
+        pooled.push((a, n, sites.len(), gene_pv));
+    }
+    let q = faba::hypothesis_tests::benjamini_hochberg(&pvs);
+
+    let mut gene_stats: Vec<GeneContrastStat> = Vec::with_capacity(genes.len());
+    for (gi, (gid, sites)) in genes.iter_mut().enumerate() {
+        let (a, n, n_sites, gene_pv) = pooled[gi];
+        let gq = q[gi];
+        let reason = if gq <= cutoff {
+            CallReason::Selected
+        } else {
+            CallReason::Fdr
+        };
+        for s in sites.iter_mut() {
+            s.set_gene_pv(gene_pv);
+            s.set_qv(gq);
+            s.set_reason(reason);
+        }
+        gene_stats.push(GeneContrastStat {
+            gene_id: gid.clone(),
+            n_sites,
+            wt_converted: a,
+            wt_unconverted: n - a,
+            mut_converted: 0,
+            mut_unconverted: 0,
+            pv: gene_pv,
+            qv: gq,
+            reason,
+        });
+    }
+
+    partition_owned(genes, gene_stats)
 }
 
 /// Per-gene site discovery: reads WT and MUT BAM files, creates
@@ -354,6 +782,7 @@ fn find_sites_with_bulk_stats(
     params.apply_umi(&mut wt_base_freq_map);
 
     for wt_file in &params.wt_bam_files {
+        params.restrict_to_competent_cells(&mut wt_base_freq_map, wt_file);
         wt_base_freq_map.update_from_gene_cached(
             cache,
             wt_file,
@@ -406,15 +835,16 @@ fn find_sites_with_bulk_stats(
     Ok(candidate_sites)
 }
 
-/// Find conversion sites using per-cell-group statistics (mass enrichment).
+/// Find conversion sites over a membership-restricted cell set (mass enrichment).
 ///
 /// Used by both m6A (WT-vs-MUT) and A-to-I (control-free, reference-anchored)
-/// whenever a `CellMembership` is supplied.
-///
-/// Reads WT BAM files once (per-cell mode), then collapses the per-cell counts
-/// into one marginal frequency map per group in a single pass
-/// (`DnaBaseFreqMap::marginalize_by_group`) — resolving each barcode's group
-/// once rather than re-scanning every cell once per group.
+/// whenever a `CellMembership` is supplied. Reads WT BAM files once over the
+/// membership cells, then discovers on their pooled marginal — NOT per cell
+/// group: a putative site needs only the motif and observed WT C→U at/above the
+/// coverage floors, so the pooled marginal detects every site any group would,
+/// with the full WT evidence per site. (Cell grouping drives the second-pass
+/// quantification; the effect-size call is the downstream gene-level pooled
+/// test, so per-group discovery would only under-count the pooled 2×2.)
 fn find_sites_with_celltype_stats(
     gff_record: &GffRecord,
     params: &ConversionParams,
@@ -436,6 +866,7 @@ fn find_sites_with_celltype_stats(
     wt_per_cell_map.set_quality_thresholds(params.min_base_quality, params.min_mapping_quality);
     params.apply_umi(&mut wt_per_cell_map);
     for wt_file in &params.wt_bam_files {
+        params.restrict_to_competent_cells(&mut wt_per_cell_map, wt_file);
         wt_per_cell_map.update_from_gene_cached(
             cache,
             wt_file,
@@ -450,7 +881,6 @@ fn find_sites_with_celltype_stats(
     }
 
     let forward = matches!(strand, Strand::Forward);
-    let mut all_candidate_sites = Vec::new();
 
     // Pooled MUT (control) background for the m6A contrast — the control is not
     // stratified by cell type, so it is built once here and shared across all
@@ -476,48 +906,26 @@ fn find_sites_with_celltype_stats(
         mut_base_freq_map.marginal_frequency_map()
     };
 
-    // Collapse the per-cell counts into one marginal map per cell group in a
-    // SINGLE pass (see `DnaBaseFreqMap::marginalize_by_group`). Each barcode's
-    // group is resolved once and memoized here, so the shared `CellMembership`
-    // lock is touched at most once per distinct barcode in this gene — not once
-    // per (position, cell) and per group, as the old K-nested re-scan did.
-    let ct_index: rustc_hash::FxHashMap<&str, usize> = cell_types
-        .iter()
-        .enumerate()
-        .map(|(i, ct)| (ct.as_ref(), i))
-        .collect();
-    let mut group_memo: rustc_hash::FxHashMap<CellBarcode, Option<usize>> =
-        rustc_hash::FxHashMap::default();
-    let per_group_freq = wt_per_cell_map.marginalize_by_group(cell_types.len(), |cb| {
-        // Clone the barcode only on a memo miss; hits (the common case, since a
-        // cell recurs across many positions) probe by reference.
-        if let Some(&g) = group_memo.get(cb) {
-            g
-        } else {
-            let g = membership
-                .matches_barcode(cb)
-                .and_then(|ct| ct_index.get(ct.as_ref()).copied());
-            group_memo.insert(cb.clone(), g);
-            g
-        }
-    });
-
-    for celltype_freq in &per_group_freq {
-        if celltype_freq.is_empty() {
-            continue;
-        }
-
-        let mut positions: Vec<i64> = celltype_freq.keys().copied().collect();
-        positions.sort_unstable();
-
-        if positions.len() < params.min_length_for_testing() {
-            continue;
-        }
-
-        let mut sifter = params.create_sifter(faidx_reader, chr, positions.len());
-        sifter.scan(&positions, celltype_freq, mut_freq, forward);
-        all_candidate_sites.extend(sifter.candidate_sites);
+    // Discover on the ALL-cell WT marginal (pooled over this gene's membership
+    // cells), NOT per cell group. A putative site needs only the motif and
+    // observed WT C→U at/above the coverage floors, and total coverage /
+    // conversion ≥ any single group's — so the pooled marginal detects every
+    // site any group would and each candidate carries the gene's full WT
+    // evidence. Per-group scanning here would emit one site per (position, group)
+    // and, after dedup, leave the pooled 2×2 counting only one group's reads —
+    // silently under-calling edited genes under gene-level testing. The
+    // effect-size decision is the downstream gene-level pooled test, not a
+    // per-group discovery guard; cell grouping drives the second pass, not this.
+    let total_wt = wt_per_cell_map.pooled_frequency_map();
+    let mut positions: Vec<i64> = total_wt.keys().copied().collect();
+    positions.sort_unstable();
+    if positions.len() < params.min_length_for_testing() {
+        return Ok(Vec::new());
     }
+
+    let mut sifter = params.create_sifter(faidx_reader, chr, positions.len());
+    sifter.scan(&positions, &total_wt, mut_freq, forward);
+    let mut all_candidate_sites = sifter.candidate_sites;
 
     all_candidate_sites.sort();
     all_candidate_sites.dedup();
@@ -986,3 +1394,6 @@ impl ModificationType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

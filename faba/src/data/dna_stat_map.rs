@@ -6,17 +6,12 @@ use genomic_data::gff::GffRecord;
 use genomic_data::sam::*;
 
 use rust_htslib::bam::{self, ext::BamRecordExtensions, record::Aux};
-use std::hash::{Hash, Hasher};
 
 pub use rustc_hash::FxHashMap as HashMap;
 use rustc_hash::FxHashSet;
 
-/// Hash a UMI string to u64 for compact dedup sets.
-fn hash_umi(umi: &str) -> u64 {
-    let mut h = rustc_hash::FxHasher::default();
-    umi.hash(&mut h);
-    h.finish()
-}
+// UMI hashing lives in `bam_io::hash_umi_bytes` — one definition, so the cell
+// scan and the site counts dedup identically.
 
 pub enum CountMode<'a> {
     Marginal {
@@ -43,6 +38,13 @@ pub struct DnaBaseFreqMap<'a> {
     umi_tag: Option<Vec<u8>>,
     use_base_quality: bool,
     quality_map: HashMap<i64, DnaBaseQual>,
+    /// Restrict counting to these cells, in **either** [`CountMode`].
+    ///
+    /// `CountMode::PerCell`'s `cell_membership` cannot serve this purpose: it is
+    /// absent from `Marginal`, so bulk discovery would silently ignore it. Site
+    /// discovery on a de-diluted WT arm needs the filter to bite in `Marginal`
+    /// mode without paying for a per-cell map, which is what this provides.
+    keep_cells: Option<(Vec<u8>, std::sync::Arc<FxHashSet<CellBarcode>>)>,
 }
 
 impl<'a> Default for DnaBaseFreqMap<'a> {
@@ -65,6 +67,7 @@ impl<'a> DnaBaseFreqMap<'a> {
             umi_tag: None,
             use_base_quality: false,
             quality_map: HashMap::default(),
+            keep_cells: None,
         }
     }
 
@@ -87,6 +90,7 @@ impl<'a> DnaBaseFreqMap<'a> {
             umi_tag: None,
             use_base_quality: false,
             quality_map: HashMap::default(),
+            keep_cells: None,
         }
     }
 
@@ -101,6 +105,24 @@ impl<'a> DnaBaseFreqMap<'a> {
     /// This dramatically reduces memory usage when processing many sites in a large gene.
     pub fn set_position_filter(&mut self, positions: FxHashSet<i64>) {
         self.position_filter = Some(positions);
+    }
+
+    /// Count only reads from `cells`, or from every cell when `None`. Applies in
+    /// both count modes, so bulk (`Marginal`) discovery can be restricted to an
+    /// already-called cell set — e.g. the editing-competent cells from
+    /// [`crate::editing::cell_activity`]. Costs one barcode lookup per read,
+    /// paid only when a set is installed.
+    ///
+    /// Takes an `Option` rather than pairing with a separate clear method
+    /// because one map is REUSED across BAMs in the discovery loop: a library
+    /// with no competent set must overwrite the previous library's, not inherit
+    /// it. Making "no restriction" an argument means the caller cannot forget.
+    pub fn set_keep_cells(
+        &mut self,
+        cell_barcode_tag: &str,
+        cells: Option<std::sync::Arc<FxHashSet<CellBarcode>>>,
+    ) {
+        self.keep_cells = cells.map(|c| (cell_barcode_tag.as_bytes().to_vec(), c));
     }
 
     pub fn set_quality_thresholds(&mut self, min_base_quality: u8, min_mapping_quality: u8) {
@@ -175,23 +197,32 @@ impl<'a> DnaBaseFreqMap<'a> {
     fn extract_umi_hash(&self, bam_record: &bam::Record) -> Option<u64> {
         let tag = self.umi_tag.as_ref()?;
         match bam_record.aux(tag) {
-            Ok(Aux::String(s)) => Some(hash_umi(s)),
+            Ok(Aux::String(s)) => Some(bam_io::hash_umi_bytes(s.as_bytes())),
             _ => None,
         }
     }
 
     fn add_bam_record(&mut self, bam_record: &bam::Record) {
-        if bam_record.mapq() < self.min_mapping_quality {
+        if !bam_io::passes_alignment_filters(bam_record, self.min_mapping_quality) {
             return;
         }
-        if bam_record.is_duplicate() {
-            return;
-        }
-        if bam_record.is_secondary() || bam_record.is_supplementary() {
-            return;
-        }
-        if bam_record.is_paired() && !bam_record.is_proper_pair() {
-            return;
+        // Interning a barcode is a thread-local borrow, a hash of the raw bytes
+        // and an `Arc` clone — on EVERY alignment. The keep-set gate and the
+        // per-cell counter read the same tag in every configuration faba builds,
+        // so resolve it once and hand it on; if the tags ever differ, fall back
+        // to re-extracting under the right one rather than silently keying the
+        // counts off the wrong tag.
+        let mut resolved: Option<CellBarcode> = None;
+        if let Some((tag, keep)) = &self.keep_cells {
+            let cb = bam_io::extract_cell_barcode(bam_record, tag);
+            if !keep.contains(&cb) {
+                return;
+            }
+            if matches!(&self.mode, CountMode::PerCell { cell_barcode_tag, .. }
+                if cell_barcode_tag == tag)
+            {
+                resolved = Some(cb);
+            }
         }
 
         let seq = bam_record.seq().as_bytes();
@@ -238,7 +269,8 @@ impl<'a> DnaBaseFreqMap<'a> {
                 cell_membership,
                 umi_seen,
             } => {
-                let cell_barcode = bam_io::extract_cell_barcode(bam_record, cell_barcode_tag);
+                let cell_barcode = resolved
+                    .unwrap_or_else(|| bam_io::extract_cell_barcode(bam_record, cell_barcode_tag));
 
                 if let Some(membership) = cell_membership {
                     if membership.matches_barcode(&cell_barcode).is_none() {
@@ -326,37 +358,29 @@ impl<'a> DnaBaseFreqMap<'a> {
         }
     }
 
-    /// Collapse the per-cell counts into one marginal frequency map per group.
+    /// Pooled (all-cell) base counts per position, in **either** [`CountMode`].
     ///
-    /// `group_of` maps a cell barcode to its dense group ordinal in `0..n_groups`
-    /// (or `None` to drop the cell). Every stored `(position, cell)` entry is
-    /// visited exactly once and folded into its cell's group, so stratified
-    /// discovery costs a single pass — not one re-scan per group. A non-`PerCell`
-    /// map has no per-cell counts and yields `n_groups` empty maps.
-    ///
-    /// `group_of` is `FnMut` so callers can memoize the (comparatively costly)
-    /// barcode→group resolution across the many positions a cell recurs at.
-    pub fn marginalize_by_group<F>(
-        &self,
-        n_groups: usize,
-        mut group_of: F,
-    ) -> Vec<HashMap<i64, DnaBaseCount>>
-    where
-        F: FnMut(&CellBarcode) -> Option<usize>,
-    {
-        let mut per_group: Vec<HashMap<i64, DnaBaseCount>> =
-            (0..n_groups).map(|_| HashMap::default()).collect();
-        if let CountMode::PerCell { counts, .. } = &self.mode {
-            for (&pos, cell_map) in counts {
-                for (cb, count) in cell_map {
-                    if let Some(g) = group_of(cb) {
-                        debug_assert!(g < n_groups, "group ordinal out of range");
-                        *per_group[g].entry(pos).or_default() += count;
+    /// `Marginal` already stores exactly this, so it is borrowed; `PerCell`
+    /// sums over cells. Site discovery needs the all-cell marginal even when
+    /// the scan is stratified by cell — a per-group scan sees only that
+    /// group's reads and would under-call — so it must not depend on the mode.
+    /// Prefer this over [`Self::marginal_frequency_map`], which is `None` for
+    /// `PerCell` and silently turns such a call into an error.
+    pub fn pooled_frequency_map(&self) -> std::borrow::Cow<'_, HashMap<i64, DnaBaseCount>> {
+        match &self.mode {
+            CountMode::Marginal { counts, .. } => std::borrow::Cow::Borrowed(counts),
+            CountMode::PerCell { counts, .. } => {
+                let mut pooled: HashMap<i64, DnaBaseCount> = HashMap::default();
+                pooled.reserve(counts.len());
+                for (pos, by_cell) in counts.iter() {
+                    let acc = pooled.entry(*pos).or_default();
+                    for cell_count in by_cell.values() {
+                        *acc += cell_count;
                     }
                 }
+                std::borrow::Cow::Owned(pooled)
             }
         }
-        per_group
     }
 
     /// Quality accumulator map (marginal mode only, requires set_use_base_quality(true))
@@ -364,3 +388,6 @@ impl<'a> DnaBaseFreqMap<'a> {
         &self.quality_map
     }
 }
+
+#[cfg(test)]
+mod tests;

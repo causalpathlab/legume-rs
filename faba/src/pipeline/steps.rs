@@ -4,7 +4,7 @@
 //! and calls the same entry point the user would — never a private copy of the work.
 
 use crate::data::cell_membership::CellMembership;
-use crate::editing::io::ToParquet;
+use crate::editing::io::{write_discovery_outputs, ToParquet};
 use crate::editing::mask::{build_atoi_mask, filter_conversion_sites_by_mask, filter_m6a_by_mask};
 use crate::editing::mixture::MixtureParams;
 use crate::editing::mixture_pipeline::run_mixture_model;
@@ -188,12 +188,16 @@ pub(super) fn run_atoi_step(
         // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
         mut_bam_files: Vec::new(),
         site_min_cells: crate::editing::pipeline::DEFAULT_SITE_MIN_CELLS,
+        test_level: args.atoi_test_level,
+        competent_cells: None,
     };
 
     // Find ATOI sites (first pass): reference-anchored A→G / T→C calls, each
     // tested against the beta-binomial sequencing-error null (no control sample).
     info!("Discovering ATOI sites (reference-anchored)...");
-    let atoi_sites = find_all_conversion_sites(&gff_map, &params, membership)?;
+    let discovered = find_all_conversion_sites(&gff_map, &params, membership)?;
+    write_discovery_outputs(&discovered, &gff_map, &args.output, "atoi")?;
+    let atoi_sites = discovered.selected;
 
     // Apply SNP mask if available
     if let Some(ref mask) = snp_mask {
@@ -386,7 +390,7 @@ pub(super) fn run_dart_step(
     );
 
     // Build ConversionParams for m6A (DART)
-    let params = ConversionParams {
+    let mut params = ConversionParams {
         mod_type: ModificationType::M6A {
             check_r_site: true,
             contrast: args.m6a_contrast.to_contrast(),
@@ -420,11 +424,32 @@ pub(super) fn run_dart_step(
         },
         mut_bam_files: args.control_bam_files.clone(),
         site_min_cells: crate::editing::pipeline::DEFAULT_SITE_MIN_CELLS,
+        test_level: args.m6a_contrast.test_level,
+        competent_cells: None,
     };
 
     // Find m6A sites (first pass)
     info!("Discovering m6A sites...");
-    let m6a_sites = find_all_conversion_sites(&gff_map, &params, membership)?;
+    // Null-cell QC before discovery, so each site's WT counts are de-diluted as
+    // they are first computed. Same call as `faba dartseq` -- the two paths share
+    // `CellScanArgs` precisely so they cannot drift.
+    params.competent_cells = crate::editing::cell_activity::call_and_report(
+        &gff_map,
+        &params,
+        &args.cell_scan,
+        // See the note at the `faba dartseq` call site: competence is only
+        // meaningful for a barcode already called as a real cell.
+        gene_count_qc.as_ref(),
+        &args.output,
+        "m6a",
+    )?;
+
+    let discovered = find_all_conversion_sites(&gff_map, &params, membership)?;
+
+    // Pre-mask audit (unselected sites + per-gene tables), shared with
+    // `faba dartseq` so both emit identical files.
+    write_discovery_outputs(&discovered, &gff_map, &args.output, "m6a")?;
+    let m6a_sites = discovered.selected;
 
     let n_sites_before: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
     info!("Found {} m6A sites before masking", n_sites_before);

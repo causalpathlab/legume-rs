@@ -106,8 +106,42 @@ pub fn fetch_reference_base(
     }
 }
 
-/// Fetch reference sequence from start to end (0-based, inclusive)
-/// Returns None if positions are invalid or chromosome not found
+/// Reference bases over `[start, end]` (0-based, inclusive), **preserving
+/// length**: anything that is
+/// not A/C/G/T — an assembly gap `N`, an IUPAC ambiguity code — becomes `None`
+/// rather than vanishing.
+///
+/// [`fetch_reference_seq`] `filter_map`s those away, which silently *shortens*
+/// the returned vector. That is harmless when the caller only wants base
+/// composition, and wrong when it maps an index back to a genomic coordinate:
+/// after the first `N`, every `pos = start + i` is off by the number of skipped
+/// bases. hg38 gene spans do overlap gaps, so use this whenever the index is a
+/// coordinate.
+pub fn fetch_reference_bases(
+    faidx: &faidx::Reader,
+    chr: &str,
+    start: i64,
+    end: i64,
+) -> anyhow::Result<Option<Vec<Option<Dna>>>> {
+    if start < 0 || end < 0 || start > end {
+        return Ok(None);
+    }
+    match faidx.fetch_seq(chr, start as usize, end as usize) {
+        Ok(seq) if !seq.is_empty() => Ok(Some(
+            seq.iter()
+                .map(|&b| Dna::from_byte(b.to_ascii_uppercase()))
+                .collect(),
+        )),
+        _ => Ok(None),
+    }
+}
+
+/// Fetch reference sequence from start to end (0-based, inclusive), keeping
+/// only A/C/G/T. Returns None if positions are invalid or chromosome not found.
+///
+/// Drops non-ACGT bases instead of preserving them, so the result can be
+/// SHORTER than `end - start + 1` — see [`fetch_reference_bases`] when the index
+/// has to stay a coordinate.
 pub fn fetch_reference_seq(
     faidx: &faidx::Reader,
     chr: &str,

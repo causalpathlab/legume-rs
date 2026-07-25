@@ -49,6 +49,7 @@ pub fn count_read_per_gene(
 }
 
 pub fn count_read_per_gene_splice(
+    cache: &mut bam_io::BamReaderCache,
     bam_file: &str,
     rec: &GffRecord,
     exon_intervals: &HashMap<GeneId, Vec<(i64, i64)>>,
@@ -79,9 +80,20 @@ pub fn count_read_per_gene_splice(
     let unspliced_name: Box<str> = format!("{}/count/unspliced", gene_name).into();
     let mut counter = SpliceAwareReadCounter::new(cell_barcode_tag, exons, umi_tag);
 
-    bam_io::for_each_record_in_gene(bam_file, rec, gene_barcode_tag, false, |bam_record| {
-        counter.classify_and_count(bam_record);
-    })?;
+    // Cached reader: the uncached entry point builds a fresh `BamReaderCache`
+    // internally, so it re-opened the BAM and re-parsed the whole-genome `.bai`
+    // for every one of ~78k genes — tens of ms each, and the dominant cost of
+    // gene QC. Every other hot path in the crate already threads a cache.
+    bam_io::for_each_record_in_gene_cached(
+        cache,
+        bam_file,
+        rec,
+        gene_barcode_tag,
+        false,
+        |bam_record| {
+            counter.classify_and_count(bam_record);
+        },
+    )?;
 
     let spliced = counter
         .spliced

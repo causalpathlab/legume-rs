@@ -53,23 +53,90 @@ The 2×2 table (signal/control × converted/unconverted) is tested one-sided:
   (`--m6a-contrast-overdispersion`, 0.02), testing `H₀: p_signal = p_control`. The one-sided
   p-value is ½·P(χ²₁ ≥ D).
 
-Before any test, a site must clear all of: signal coverage ≥ `--min-coverage` (10), signal
-conversions ≥ `--min-conversion` (5), control coverage ≥ `--edit-control-min-coverage` (3), and —
-on Jeffreys-regularised rates `(a+½)/(n+1)` — an absolute excess `≥ --m6a-min-delta` (0.05) **and**
-a fold excess `≥ --m6a-min-ratio` (2.0).
+**Null-cell QC (de-dilution).** Before discovery, a fast pre-pass tallies each cell's
+conversions at reference motif positions and drops the cells that edit no more than the
+catalytically-dead control does. These are not bad cells — droplet calling, gene
+complexity and mitochondrial fraction all pass them — the reporter simply did not work
+in them, and every existing QC stage is expression-based and therefore blind to that.
+Leaving them in contributes coverage without signal: measured on DART data, **90.9% of
+the cells covering MYC convert nothing while carrying 74.5% of its coverage**, which is
+enough to bury the gene entirely.
 
-**Multiple testing.** Benjamini–Hochberg [4] across all sites genome-wide. `-q/--fdr` (0.05) is
-therefore a **target FDR**, not a per-site p-value threshold.
+This is QC, not a hypothesis test, so it has no significance level. The cut is placed
+where the *discarded* population stops being distinguishable from the control —
+`--cell-scan-tolerance` (default **1.0**) is how much editing the discarded pool may
+still show, as a multiple of the control — and 1.0 is the *data-driven* point: cut
+exactly where the discarded pool's rate equals the control's, so nothing demonstrably
+real is thrown away. Nothing is tuned. Raising it cuts deeper and concentrates the kept
+pool; the logged `dropped/control` reports the cost. Alternatively
+`--cell-scan-control-tail` places the cut on the control's own scale ("keep cells
+editing more than 98% of depth-matched control cells"). Both are quantile/ratio rules on
+an empirical reference — **not** tests: no p-values and no multiplicity anywhere in cell
+QC. Every run logs its operating point in *both* units (`dropped/control 1.00; cut sits
+at control p95`), because the correspondence is data-dependent: tolerance 1.2 mapped to
+p95 on one panel and p98 on another, so read the reported percentile rather than
+assuming a fixed equivalence.
 
-**Stratified discovery.** By default cells are first grouped by expression (§8), and discovery runs
-*within each group* against a shared, unstratified control. This concentrates read mass, so an m6A
-site present in one cell type is not diluted below detection by every other cell type. The grouping
+Under `-v`, a side-by-side **logit-scale** histogram of the per-cell conversion rate
+(signal vs control) is printed. Logit because the rates are ~1e-4 to 1e-2 and a linear
+axis collapses them into the leftmost bins. It shows what the method rests on: the
+signal distribution is the control's own mode *plus* a long upper tail where the control
+has essentially no mass. The signal arm alone is **not** bimodal — the separation lives
+in the comparison, which is why the control library is required rather than optional.
+`--quantify-competent-only` extends the filter to the m6A output matrices as well.
+It is **off by default and scoped to m6A alone**: faba's rule is that every modality
+inherits one cell set, so restricting the m6A matrices makes their columns a subset of
+the gene/apa/atoi matrices and cross-modality joins will drop cells. Left off, the
+matrices carry every QC-passing cell — measured whole-genome, ~60% of those are null
+cells, so a per-cell methylation rate read straight off the default matrix runs low.
+The per-cell audit carries a `kept` column, so the same filtering can be done
+downstream instead. The control matrices are never restricted either way.
+
+The filter applies to the **signal arm only** — selecting control cells on apparent
+activity would select on background and inflate the null. There is no off switch:
+discovering on cells where the reporter never worked is not an alternative analysis,
+just a diluted one. The scan no-ops on its own when there is no control arm to
+calibrate against (A-to-I, or m6A run without `--control-bam`). A per-cell audit goes
+to `{output}_m6a_cell_qc.tsv.gz`, with `scored` separating "assessed and rejected" from
+"too little coverage to assess". `faba dartseq` and `faba all` share the same knobs, so
+the two paths cannot drift. Measured end to end on chr19 + MYC: 131 → 235 selected
+sites, and MYC is called only once the null cells are dropped.
+
+**Putative sites vs the test.** A site is a *putative candidate* on the sequencing pattern alone:
+the RAC/GTY motif plus observed WT C→U at/above the signal floors — signal coverage ≥
+`--min-coverage` (10) and signal conversions ≥ `--min-conversion` (5). Everything else is the *test*
+that decides selected vs unselected, applied after discovery: control coverage ≥
+`--edit-control-min-coverage` (3) and an absolute excess `≥ --m6a-min-delta` (0.02) on the raw rates
+`a/n`, then the FDR. A putative site that misses any of these is *recorded* (not dropped) in
+`m6a_sites_unselected.parquet` with a `reason` (`low_control` / `delta` / `fdr`), so every candidate
+is accounted for.
+
+There is no control-fold gate. A Bullseye-style `p_WT / p_MUT ≥ 1.25` guard was measured on three
+DART replicates and found inert: 94–99% of putative sites passed it and removing it changed the
+selected-site count by exactly zero, because a site clearing a 0.02 absolute excess off a ~0.1%
+control rate already clears 1.25×. The delta guard subsumes it.
+
+**Multiple testing.** Set by `--m6a-test-level`. Under `site` (the default) each putative motif C is
+tested and Benjamini–Hochberg [4]-corrected across all sites genome-wide. Under `gene` (opt-in) each
+gene's putative C's are pooled into one WT-vs-MUT 2×2, the effect-size guards run on the pooled
+counts, and BH runs *across genes* — but pooling dilutes a single strong site among the gene's weaker
+C's, so on real chr19 data it calls *fewer*, not more (a strong 6%-vs-0% site drops below the delta
+floor once pooled); a selected gene's result, with its reason, goes to `m6a_genes.parquet`. Either
+way `-q/--fdr` (0.1) is a lenient **target FDR**, not a per-feature threshold; `--fdr 1.0` disables
+it entirely, leaving the coverage + delta gates as the field-standard filter.
+
+**Discovery is pooled, not stratified.** When cells are grouped by expression (§8), discovery scans
+each gene's pooled WT marginal over the grouped cells — a putative site needs only the motif and
+observed C→U, and the pooled marginal detects everything any single group would, with the full WT
+evidence per site (so the gene-level pooled 2×2 is not under-counted). The grouping
 is driven by expression and never by the editing signal, which is what keeps the test honest.
 
 **Quantification.** A second pass counts, per cell and per site, converted and unconverted reads.
-Sites seen in fewer than `--site-min-cells` (10) cells are dropped. **Only cells with at least one
-converted read at a site contribute a row** — worth stating, because it means the zeros in the
-matrix are structural, not observed.
+Sites seen in fewer than `--site-min-cells` (10) cells are dropped — this is the **reproducibility**
+control, the single-cell analogue of the field's replicate-concordance requirement (scDART-seq keeps
+a site only if seen in ≥ 10 cells). **Only cells with at least one converted read at a site
+contribute a row** — worth stating, because it means the zeros in the matrix are structural, not
+observed.
 
 **Requires a control.** The command errors out without `--control-bam`. m6A cannot be told apart
 from genomic C/T variation without one.

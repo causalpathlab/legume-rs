@@ -1,5 +1,5 @@
 use crate::common::*;
-use crate::editing::io::ToParquet;
+use crate::editing::io::{write_discovery_outputs, ToParquet};
 use crate::editing::mask::filter_conversion_sites_by_mask;
 use crate::editing::mixture::MixtureParams;
 use crate::editing::mixture_pipeline::run_mixture_model;
@@ -318,6 +318,18 @@ pub struct AtoICountArgs {
         help = "Disable UMI deduplication"
     )]
     pub no_umi_dedup: bool,
+
+    #[arg(
+        long = "test-level",
+        value_enum,
+        default_value_t = EditTestLevel::Site,
+        help = "Unit of the A-to-I test: `site` (default) or `gene` (pooled per gene)",
+        long_help = "Under `site` each editing site is tested and FDR-controlled\n\
+                     independently. Under `gene` the gene's sites are pooled into one\n\
+                     single-sample beta-binomial and FDR is controlled across genes,\n\
+                     writing `atoi_genes.parquet`."
+    )]
+    pub test_level: EditTestLevel,
 }
 
 impl From<&AtoICountArgs> for ConversionParams {
@@ -354,6 +366,8 @@ impl From<&AtoICountArgs> for ConversionParams {
             // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
             mut_bam_files: Vec::new(),
             site_min_cells: args.site_min_cells,
+            test_level: args.test_level,
+            competent_cells: None,
         }
     }
 }
@@ -426,8 +440,11 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
     // Load cell membership for filtering
     let membership = params.load_membership()?;
 
-    // FIRST PASS: discover A-to-I sites
-    let atoi_sites = find_all_conversion_sites(&gff_map, &params, membership.as_ref())?;
+    // FIRST PASS: discover A-to-I sites, then emit the audit (unselected sites,
+    // and per-gene tables under --test-level gene) before keeping the calls.
+    let discovered = find_all_conversion_sites(&gff_map, &params, membership.as_ref())?;
+    write_discovery_outputs(&discovered, &gff_map, &args.output, "atoi")?;
+    let atoi_sites = discovered.selected;
     let n_atoi: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
     info!("Found {} A-to-I editing sites", n_atoi);
 

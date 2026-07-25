@@ -504,8 +504,9 @@ pub fn run_gene_count_qc(gff_file: &str, req: &GeneQcRequest) -> anyhow::Result<
         let results: Vec<_> = records
             .par_iter()
             .progress_with(new_progress_bar(njobs))
-            .map(|rec| {
+            .map_init(crate::data::bam_io::BamReaderCache::new, |cache, rec| {
                 count_read_per_gene_splice(
+                    cache,
                     bam_file,
                     rec,
                     &exon_intervals,

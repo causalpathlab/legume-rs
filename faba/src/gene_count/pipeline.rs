@@ -157,8 +157,9 @@ pub fn run_splice_aware(
         let results: Vec<SplicedUnsplicedTriplets> = records
             .par_iter()
             .progress_with(new_progress_bar(njobs))
-            .map(|rec| {
+            .map_init(crate::data::bam_io::BamReaderCache::new, |cache, rec| {
                 count_read_per_gene_splice(
+                    cache,
                     bam_file,
                     rec,
                     &exon_intervals,
