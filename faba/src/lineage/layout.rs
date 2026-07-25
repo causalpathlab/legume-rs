@@ -398,8 +398,7 @@ pub(super) fn emit_phate_layout(
     };
 
     // Nodes + curve points always lift onto the landmark layout via Nyström.
-    let mut nodes_2d =
-        project_cells_nystrom(&centroids.transpose(), &land_t, &land_2d, knn, alpha);
+    let mut nodes_2d = project_cells_nystrom(&centroids.transpose(), &land_t, &land_2d, knn, alpha);
 
     if let Some((dirs_map, br, labels)) = warp {
         warp_layout_along_flow(&mut nodes_2d, &mut cells_2d, dirs_map, br, labels);

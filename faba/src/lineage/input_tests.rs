@@ -126,7 +126,10 @@ fn hellinger_puts_a_simplex_on_the_unit_sphere() {
     // Hellinger SEPARATES what θ·α would have merged: the diffuse and pure cells are
     // far apart here, which is the whole reason for reading the simplex directly.
     let d: f32 = (0..4).map(|j| (h[(0, j)] - h[(1, j)]).powi(2)).sum::<f32>();
-    assert!(d.sqrt() > 0.5, "distinct compositions stay distinct, got {d}");
+    assert!(
+        d.sqrt() > 0.5,
+        "distinct compositions stay distinct, got {d}"
+    );
 }
 
 #[test]

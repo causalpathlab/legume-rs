@@ -100,17 +100,21 @@ enum Commands {
     #[command(name = "dartseq", aliases = ["dart", "m6a"],
         about = "Quantify DART-seq m6A sites from C-to-T conversions",
         long_about = "Quantify DART-seq m6A sites from C-to-T conversions\n\n\
-            Discovers m6A methylation sites\n\
-            from reference-anchored C->T (forward) or G->A (reverse) conversions at the DART motif,\n\
-            called by a WT-vs-MUT contrast:\n\
-            each motif C must convert significantly more in the signal (APOBEC1-YTH) BAMs\n\
-            than in the pooled catalytically-dead --control-bam\n\
-            (Fisher exact / beta-binomial LRT, effect-size guards, BH-FDR).\n\
-            A genomic C/T variant converts equally in both arms and is rejected,\n\
-            so a control is REQUIRED.\n\
-            Then quantifies per-cell methylation at the discovered sites.\n\n\
+            A site is a PUTATIVE candidate on the sequencing pattern alone:\n\
+            the RAC (forward) / GTY (reverse) motif plus observed WT C->U (G->A)\n\
+            at/above the coverage floors. The WT-vs-MUT test then decides it:\n\
+            control coverage, effect size (--m6a-min-delta),\n\
+            and BH-FDR (Fisher exact / beta-binomial LRT) — per site\n\
+            (the default) or on a pooled 2x2 per gene under --m6a-test-level gene.\n\
+            A genomic C/T variant converts equally in both arms, so a control is\n\
+            REQUIRED. Every putative site is then recorded selected or unselected\n\
+            with the reason it missed. Then quantifies per-cell methylation.\n\n\
             Outputs (one per input BAM, {batch}-prefixed):\n\
-            - m6a_sites.parquet: site annotations (single)\n\
+            - m6a_sites.parquet: selected site annotations (single)\n\
+            - m6a_sites_unselected.parquet: every putative site that missed the\n\
+              cut, with a `reason` column (low_control / delta / fdr)\n\
+            - m6a_genes.parquet (+ _unselected): per-gene pooled 2x2 test,\n\
+              only under --m6a-test-level gene (opt-in), with the same reason\n\
             - {batch}_m6a: gene-level two-channel matrix\n\
               (methylated + unmethylated counts per gene)\n\
             - {batch}_m6a_site: per-site two-channel matrix,\n\
@@ -162,11 +166,16 @@ Example:\n  \
     #[command(name = "atoi", aliases = ["a2i", "editing"],
         about = "Detect and quantify A-to-I RNA editing sites",
         long_about = "Detect A-to-I (adenosine-to-inosine) RNA editing sites\n\n\
-            Discovers editing sites from A->G (forward) or T->C (reverse) conversions in BAM files,\n\
-            then quantifies per-cell editing at discovered sites.\n\n\
+            Discovers editing sites from A->G (forward) or T->C (reverse) conversions in BAM files.\n\
+            A putative site is a reference A/T with observed editing at/above the coverage floors;\n\
+            the beta-binomial FDR then selects it (per site, or pooled per gene under\n\
+            --test-level gene — pooling suits A-to-I, which edits in clusters).\n\
+            Then quantifies per-cell editing at the selected sites.\n\n\
             Outputs (one per input BAM, {batch}-prefixed):\n\
-            - atoi_sites.parquet: site annotations (single);\n\
+            - atoi_sites.parquet: selected site annotations (single);\n\
             usable as --atoi-mask input for `faba dartseq` or `faba apa`\n\
+            - atoi_sites_unselected.parquet: putative sites that missed the FDR (reason column)\n\
+            - atoi_genes.parquet (+ _unselected): per-gene test, only under --test-level gene\n\
             - {batch}_atoi: gene-level two-channel matrix\n\
               (edited + unedited counts per gene)\n\
             - {batch}_atoi_site: per-site two-channel matrix,\n\

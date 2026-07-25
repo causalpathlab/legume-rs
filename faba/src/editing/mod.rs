@@ -1,5 +1,6 @@
 pub mod bandwidth;
 pub mod bed_output;
+pub mod cell_activity;
 pub mod io;
 pub mod mask;
 pub mod mixture;
@@ -8,6 +9,42 @@ pub mod pipeline;
 pub mod sifter;
 
 use crate::data::dna::DnaBaseCount;
+
+/// Why a putative site — or, under gene-level testing, its gene — did or did not
+/// survive the test. A putative site is defined by the sequencing pattern alone
+/// (RAC/GTY motif + observed WT C→U with enough coverage); the effect-size and
+/// FDR checks are applied afterward, and a failing site is *recorded* with the
+/// reason it missed rather than dropped, so `*_unselected.parquet` explains every
+/// call. `Selected` is also the value carried through discovery, before the test.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CallReason {
+    /// Passed every test (or not yet decided, during discovery).
+    #[default]
+    Selected,
+    /// Too little control (MUT) coverage to confirm WT-specificity.
+    LowControl,
+    /// Absolute effect size `p_WT − p_MUT` below `--m6a-min-delta`.
+    Delta,
+    /// Cleared the effect-size guards but missed the detection FDR.
+    Fdr,
+}
+
+impl CallReason {
+    /// Lower-case token written to the `reason` parquet column.
+    pub fn label(&self) -> &'static str {
+        match self {
+            CallReason::Selected => "selected",
+            CallReason::LowControl => "low_control",
+            CallReason::Delta => "delta",
+            CallReason::Fdr => "fdr",
+        }
+    }
+
+    /// Whether this reason denotes a kept call.
+    pub fn is_selected(&self) -> bool {
+        matches!(self, CallReason::Selected)
+    }
+}
 
 /// Unified site type for base conversion events (m6A and A-to-I)
 #[derive(Clone, Debug)]
@@ -21,9 +58,16 @@ pub enum ConversionSite {
         /// position. The m6A call is `WT conversion > MUT conversion`, so this
         /// is always populated for m6A sites.
         mut_freq: DnaBaseCount,
+        /// Per-site contrast p-value (site localization). Under gene-level
+        /// testing this stays per-site; `gene_pv`/`qv` carry the gene test.
         pv: f32,
-        /// Benjamini-Hochberg q-value (set by the FDR pass; `1.0` until then)
+        /// Gene-level pooled contrast p-value under `--m6a-test-level gene`
+        /// (`qv` is its BH adjustment). `NaN` under per-site testing.
+        gene_pv: f32,
+        /// Benjamini-Hochberg q-value (set by the test pass; `1.0` until then).
         qv: f32,
+        /// Test outcome (set by the test pass; `Selected` until then).
+        reason: CallReason,
     },
     /// A-to-I RNA editing site: A->G on forward strand, T->C on reverse
     AtoI {
@@ -34,8 +78,13 @@ pub enum ConversionSite {
         /// Kept as an empty default for a uniform `ConversionSite` shape.
         mut_freq: DnaBaseCount,
         pv: f32,
-        /// Benjamini-Hochberg q-value (set by the FDR pass; `1.0` until then)
+        /// Gene-level pooled beta-binomial p-value under gene testing; `NaN`
+        /// under per-site testing.
+        gene_pv: f32,
+        /// Benjamini-Hochberg q-value (set by the test pass; `1.0` until then).
         qv: f32,
+        /// Test outcome (set by the test pass; `Selected` until then).
+        reason: CallReason,
     },
 }
 
@@ -89,11 +138,43 @@ impl ConversionSite {
         }
     }
 
-    /// Set the q-value (called by the FDR pass before filtering)
+    /// Set the q-value (called by the test pass before filtering)
     pub fn set_qv(&mut self, q: f32) {
         match self {
             ConversionSite::M6A { qv, .. } => *qv = q,
             ConversionSite::AtoI { qv, .. } => *qv = q,
+        }
+    }
+
+    /// Gene-level pooled p-value (under gene testing; `NaN` under per-site).
+    pub fn gene_pv(&self) -> f32 {
+        match self {
+            ConversionSite::M6A { gene_pv, .. } => *gene_pv,
+            ConversionSite::AtoI { gene_pv, .. } => *gene_pv,
+        }
+    }
+
+    /// Set the gene-level pooled p-value (called by the gene test pass).
+    pub fn set_gene_pv(&mut self, p: f32) {
+        match self {
+            ConversionSite::M6A { gene_pv, .. } => *gene_pv = p,
+            ConversionSite::AtoI { gene_pv, .. } => *gene_pv = p,
+        }
+    }
+
+    /// Test outcome (`Selected` unless the test pass recorded a rejection).
+    pub fn reason(&self) -> CallReason {
+        match self {
+            ConversionSite::M6A { reason, .. } => *reason,
+            ConversionSite::AtoI { reason, .. } => *reason,
+        }
+    }
+
+    /// Set the test outcome (called by the test pass).
+    pub fn set_reason(&mut self, r: CallReason) {
+        match self {
+            ConversionSite::M6A { reason, .. } => *reason = r,
+            ConversionSite::AtoI { reason, .. } => *reason = r,
         }
     }
 

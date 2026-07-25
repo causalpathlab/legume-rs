@@ -1,8 +1,8 @@
 use crate::data::dna::Dna;
 use crate::data::dna::DnaBaseCount;
 use crate::data::dna_stat_map::HashMap;
-use crate::data::util_htslib::fetch_reference_base;
-use crate::editing::ConversionSite;
+use crate::data::util_htslib::{fetch_reference_base, fetch_reference_bases};
+use crate::editing::{CallReason, ConversionSite};
 use faba::hypothesis_tests::{betabinom_pvalue_greater, contrast_pvalue};
 use rust_htslib::faidx;
 
@@ -17,10 +17,8 @@ pub struct M6aContrast {
     /// with too little control coverage cannot be shown to be control-low, so it
     /// is left uncalled rather than assumed real.
     pub min_control_coverage: usize,
-    /// minimum absolute effect size `p_WT − p_MUT` (Jeffreys-regularized).
+    /// minimum absolute effect size `p_WT − p_MUT` (raw rates).
     pub min_delta: f32,
-    /// minimum relative effect size `p_WT / p_MUT` (Jeffreys-regularized).
-    pub min_ratio: f32,
     /// overdispersion ρ for the two-sample beta-binomial LRT contrast.
     pub rho: f64,
 }
@@ -36,6 +34,44 @@ pub enum ModificationType {
     },
     /// A-to-I editing: single-position A->G / T->C
     AtoI,
+}
+
+//////////////////////
+// The m6A motif    //
+//////////////////////
+
+/// The DART m6A motif rule, in ONE place.
+///
+/// `ctx[i]` is the **conversion** base; the caller supplies at least
+/// `i-2 ..= i+2` (forward reads down, reverse reads up), with `None` for
+/// anything off the contig or non-ACGT. Forward matches RAC — `[AG]`, `A`, `C`
+/// with the conversion at the C — and reverse its complement GTY: `G`, `T`,
+/// `[CT]` with the conversion at the G. `check_r_site` false relaxes both to
+/// `[ACGT]AC` / `GT[ACGT]`, which is what `--no-check-r-site` means.
+///
+/// Shared by site discovery ([`ConversionSifter`]) and the per-cell scan
+/// ([`crate::editing::cell_activity::scan`]) because the two MUST admit the
+/// same motif set: the scan decides which cells are competent for precisely the
+/// sites discovery calls, so a cell judged on a narrower motif than the sites it
+/// gates is judged on the wrong evidence. Written out twice, they had already
+/// drifted once — the scan hardcoded the R check while discovery honoured the
+/// flag.
+pub fn is_m6a_motif(ctx: &[Option<Dna>], i: usize, forward: bool, check_r_site: bool) -> bool {
+    let at = |k: isize| -> Option<Dna> {
+        usize::try_from(i as isize + k)
+            .ok()
+            .and_then(|j| ctx.get(j).copied())
+            .flatten()
+    };
+    if forward {
+        at(0) == Some(Dna::C)
+            && at(-1) == Some(Dna::A)
+            && (!check_r_site || matches!(at(-2), Some(Dna::A) | Some(Dna::G)))
+    } else {
+        at(0) == Some(Dna::G)
+            && at(1) == Some(Dna::T)
+            && (!check_r_site || matches!(at(2), Some(Dna::C) | Some(Dna::T)))
+    }
 }
 
 /// Unified sifter for detecting base conversion sites.
@@ -108,13 +144,17 @@ impl<'a> ConversionSifter<'a> {
         ))
     }
 
-    /// Two-sample m6A call at a motif C: test WT conversion against the pooled
-    /// MUT control. Returns `(p-value, cloned MUT counts)` when the site passes
-    /// every guard, else `None`. Guards: WT coverage / minimum conversion,
-    /// control coverage (`min_control_coverage`), and absolute/relative effect
-    /// size (`min_delta`, `min_ratio`) on Jeffreys-regularized rates. The
-    /// effect-size guards are what reject genomic C/T variants (equal in both
-    /// arms) and constitutive editing.
+    /// Score a *putative* m6A site at a motif C. A site is putative on the WT
+    /// sequencing evidence alone — the RAC/GTY motif (validated by the caller)
+    /// plus observed WT C→U at or above the coverage / minimum-conversion floors.
+    /// It is materialized here with its raw WT-vs-MUT contrast p-value and a copy
+    /// of the control counts; the control-coverage, effect-size (`min_delta`)
+    /// and FDR checks are the *test*, applied downstream in
+    /// [`crate::editing::pipeline::find_all_conversion_sites`], where a failing
+    /// site is recorded with its reason rather than dropped. The `contrast`'s
+    /// `rho` still parameterizes the p-value; its other fields are read by the
+    /// test pass. Returns `(p-value, cloned MUT counts)`, or `None` when the WT
+    /// evidence does not clear the coverage / minimum-conversion floors.
     fn m6a_contrast(
         &self,
         contrast: &M6aContrast,
@@ -130,27 +170,13 @@ impl<'a> ConversionSifter<'a> {
             return None;
         }
 
-        // Read control counts through the borrow; a missing control ⇒ zero counts
-        // ⇒ fails the coverage guard below (cannot confirm WT-specificity).
+        // Control counts (may be zero / thin — that is the test's concern, not
+        // candidacy). A missing control ⇒ zero counts ⇒ the site is still
+        // putative but will fail the downstream control-coverage check.
         let a_m = mut_conv.map_or(0, |m| m.get(Some(&alt_base))) as u64; // MUT converted
         let u_m = mut_conv.map_or(0, |m| m.get(Some(&ref_base))) as u64; // MUT unconverted
-        let n_m = a_m + u_m;
-        if (n_m as usize) < contrast.min_control_coverage {
-            return None;
-        }
-
-        // Jeffreys-regularized rates for the effect-size guards.
-        let pw = (a_w as f64 + 0.5) / (n_w as f64 + 1.0);
-        let pm = (a_m as f64 + 0.5) / (n_m as f64 + 1.0);
-        if (pw - pm) < contrast.min_delta as f64 {
-            return None;
-        }
-        if pw < (contrast.min_ratio as f64) * pm {
-            return None;
-        }
 
         let pv = contrast_pvalue(a_w, u_w, a_m, u_m, contrast.rho);
-        // Clone the control counts only now that the site is kept.
         Some((pv, mut_conv.cloned().unwrap_or_default()))
     }
 
@@ -159,42 +185,25 @@ impl<'a> ConversionSifter<'a> {
     ////////////////////////
 
     /// Validate RAC pattern in reference: R=A/G, A, C
-    fn validate_rac_pattern(&self, r_site: i64, m6a_site: i64, conv_site: i64) -> bool {
-        let ref_m6a = fetch_reference_base(self.faidx, self.chr, m6a_site)
-            .ok()
-            .flatten();
-        let ref_conv = fetch_reference_base(self.faidx, self.chr, conv_site)
-            .ok()
-            .flatten();
-
-        let check_r = matches!(
-            &self.mod_type,
-            ModificationType::M6A {
-                check_r_site: true,
-                ..
-            }
-        );
-        let r_site_valid = if check_r {
-            let ref_r = fetch_reference_base(self.faidx, self.chr, r_site)
-                .ok()
-                .flatten();
-            matches!(ref_r, Some(Dna::A) | Some(Dna::G))
-        } else {
-            true
-        };
-
-        r_site_valid && ref_m6a == Some(Dna::A) && ref_conv == Some(Dna::C)
+    fn validate_rac_pattern(&self, _r_site: i64, _m6a_site: i64, conv_site: i64) -> bool {
+        self.validate_motif(conv_site, true)
     }
 
     /// Validate GTY pattern in reference: G, T, Y=C/T (complement of RAC)
-    fn validate_gty_pattern(&self, conv_site: i64, m6a_site: i64, r_site: i64) -> bool {
-        let ref_conv = fetch_reference_base(self.faidx, self.chr, conv_site)
-            .ok()
-            .flatten();
-        let ref_m6a = fetch_reference_base(self.faidx, self.chr, m6a_site)
-            .ok()
-            .flatten();
+    fn validate_gty_pattern(&self, conv_site: i64, _m6a_site: i64, _r_site: i64) -> bool {
+        self.validate_motif(conv_site, false)
+    }
 
+    /// Both patterns, through the one shared rule. The triplet is derived from
+    /// `conv_site` rather than passed in, because the offsets are fixed by the
+    /// motif itself — handing them in separately let a caller ask about a
+    /// triplet that is not one.
+    ///
+    /// One `fetch_reference_bases` over the window replaces up to three
+    /// single-base fetches, and the window is the exact span the old code read:
+    /// bases beyond it are never consulted, so a candidate at a contig edge
+    /// resolves the same way it always did.
+    fn validate_motif(&self, conv_site: i64, forward: bool) -> bool {
         let check_r = matches!(
             &self.mod_type,
             ModificationType::M6A {
@@ -202,16 +211,30 @@ impl<'a> ConversionSifter<'a> {
                 ..
             }
         );
-        let r_site_valid = if check_r {
-            let ref_r = fetch_reference_base(self.faidx, self.chr, r_site)
-                .ok()
-                .flatten();
-            matches!(ref_r, Some(Dna::C) | Some(Dna::T))
+        // Forward reads [conv-2, conv]; reverse reads [conv, conv+2].
+        let (lo, hi) = if forward {
+            (conv_site - 2, conv_site)
         } else {
-            true
+            (conv_site, conv_site + 2)
         };
-
-        ref_conv == Some(Dna::G) && ref_m6a == Some(Dna::T) && r_site_valid
+        // Only the LOW end needs clamping: `fetch_reference_bases` refuses a
+        // negative start outright, so an unclamped window would drop a motif in
+        // the first two bases of a contig. The high end needs nothing — htslib
+        // truncates a past-the-end request and returns the short slice, which
+        // the shift loop already handles (pinned by the contig-edge cases in
+        // `discovery_and_the_cell_scan_both_implement_the_motif_rule`).
+        let clamped_lo = lo.max(0);
+        let mut ctx = [None; 3];
+        if let Ok(Some(seq)) = fetch_reference_bases(self.faidx, self.chr, clamped_lo, hi) {
+            let shift = (clamped_lo - lo) as usize;
+            for (k, b) in seq.iter().enumerate() {
+                if shift + k < ctx.len() {
+                    ctx[shift + k] = *b;
+                }
+            }
+        }
+        let i = if forward { 2 } else { 0 };
+        is_m6a_motif(&ctx, i, forward, check_r)
     }
 
     /// Search over RAC patterns (forward strand m6A), WT vs MUT contrast.
@@ -254,6 +277,8 @@ impl<'a> ConversionSifter<'a> {
                     mut_freq,
                     pv,
                     qv: 1.0,
+                    gene_pv: f32::NAN,
+                    reason: CallReason::default(),
                 });
             }
         }
@@ -299,6 +324,8 @@ impl<'a> ConversionSifter<'a> {
                     mut_freq,
                     pv,
                     qv: 1.0,
+                    gene_pv: f32::NAN,
+                    reason: CallReason::default(),
                 });
             }
         }
@@ -332,6 +359,8 @@ impl<'a> ConversionSifter<'a> {
                     mut_freq: DnaBaseCount::default(),
                     pv,
                     qv: 1.0,
+                    gene_pv: f32::NAN,
+                    reason: CallReason::default(),
                 });
             }
         }
@@ -365,6 +394,8 @@ impl<'a> ConversionSifter<'a> {
                     mut_freq: DnaBaseCount::default(),
                     pv,
                     qv: 1.0,
+                    gene_pv: f32::NAN,
+                    reason: CallReason::default(),
                 });
             }
         }

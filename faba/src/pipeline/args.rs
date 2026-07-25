@@ -218,7 +218,7 @@ pub struct PipelineArgs {
 
     #[arg(
         long,
-        default_value_t = 3,
+        default_value_t = 2,
         help = "Minimum A-to-G conversions for ATOI (matches `faba atoi`)"
     )]
     pub atoi_min_conversion: usize,
@@ -229,6 +229,14 @@ pub struct PipelineArgs {
         help = "ATOI detection FDR target (Benjamini-Hochberg q-value)"
     )]
     pub atoi_fdr_cutoff: f32,
+
+    #[arg(
+        long = "atoi-test-level",
+        value_enum,
+        default_value_t = crate::editing::pipeline::EditTestLevel::Site,
+        help = "Unit of the A-to-I test: `site` (default) or `gene` (pooled beta-binomial)"
+    )]
+    pub atoi_test_level: crate::editing::pipeline::EditTestLevel,
 
     ///////////////////////////////////////////////////////
     // Editing statistical null (shared by ATOI and m6A) //
@@ -282,25 +290,24 @@ pub struct PipelineArgs {
     /////////////////////
     // DART parameters //
     /////////////////////
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Minimum coverage for m6A detection"
-    )]
+    #[arg(long, default_value_t = 5, help = "Minimum coverage for m6A detection")]
     pub m6a_min_coverage: usize,
 
-    #[arg(long, default_value_t = 5, help = "Minimum C-to-T conversions for m6A")]
+    #[arg(long, default_value_t = 2, help = "Minimum C-to-T conversions for m6A")]
     pub m6a_min_conversion: usize,
 
     #[arg(
         long = "m6a-fdr",
-        default_value_t = 0.05,
+        default_value_t = 0.1,
         help = "m6A detection FDR target (Benjamini-Hochberg q-value)"
     )]
     pub m6a_fdr_cutoff: f32,
 
     #[command(flatten)]
     pub m6a_contrast: M6aContrastArgs,
+
+    #[command(flatten)]
+    pub cell_scan: crate::editing::cell_activity::CellScanArgs,
 
     /// Apply the SNP mask to m6A calls. Off by default: with the WT-vs-MUT
     /// contrast a genomic variant is rejected automatically, so the mask is
@@ -321,14 +328,14 @@ pub struct PipelineArgs {
 
     #[arg(
         long = "mixture-prior-alpha",
-        default_value_t = 1.0,
+        default_value_t = 1e-4,
         help = "Beta prior α for posterior-rate weighting (default: 1.0)"
     )]
     pub mixture_prior_alpha: f32,
 
     #[arg(
         long = "mixture-prior-beta",
-        default_value_t = 1.0,
+        default_value_t = 1e-4,
         help = "Beta prior β for posterior-rate weighting (default: 1.0)"
     )]
     pub mixture_prior_beta: f32,
