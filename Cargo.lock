@@ -2626,6 +2626,7 @@ dependencies = [
  "log",
  "matrix-param",
  "matrix-util",
+ "mcmc-util",
  "nalgebra 0.34.2",
  "nalgebra-sparse",
  "rand 0.10.1",
