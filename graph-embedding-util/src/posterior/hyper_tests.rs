@@ -49,7 +49,10 @@ fn half_cauchy_var_no_collapse_on_tiny_group() {
     let (sum_sq, n) = (1e-6f64, 1usize);
     for _ in 0..500 {
         let s2 = hv.sample(sum_sq, n, &mut rng);
-        assert!(s2.is_finite() && s2 > 0.0, "variance must stay finite/positive");
+        assert!(
+            s2.is_finite() && s2 > 0.0,
+            "variance must stay finite/positive"
+        );
         assert!(s2 < 1e6, "variance must stay bounded");
     }
 }
@@ -59,7 +62,7 @@ fn half_cauchy_var_no_collapse_on_tiny_group() {
 fn pi0_recovers_planted_sparsity() {
     let mut rng = StdRng::seed_from_u64(3);
     let (n_total, n_null) = (500usize, 350usize); // true π₀ = 0.70
-    // Weak, near-uniform prior so the data dominates.
+                                                  // Weak, near-uniform prior so the data dominates.
     let (a, b) = (1.0, 1.0);
     let mut acc = 0.0f64;
     let draws = 2000;
@@ -73,4 +76,3 @@ fn pi0_recovers_planted_sparsity() {
         "π₀ should recover the plant: got {post_mean:.3}, true {truth:.3}"
     );
 }
-

@@ -11,11 +11,7 @@ fn well_mixed_chain_reads_healthy() {
     let mut rng = StdRng::seed_from_u64(1);
     let (t, d) = (1000usize, 3usize);
     let draws: Vec<Vec<f32>> = (0..t)
-        .map(|_| {
-            (0..d)
-                .map(|_| StandardNormal.sample(&mut rng))
-                .collect()
-        })
+        .map(|_| (0..d).map(|_| StandardNormal.sample(&mut rng)).collect())
         .collect();
     let diag = chain_diagnostics(&draws);
     assert_eq!(diag.stuck_fraction, 0.0, "i.i.d. draws are never identical");

@@ -48,10 +48,7 @@ pub fn chain_diagnostics(draws: &[Vec<f32>]) -> ChainDiag {
         .map(|k| coord_ess(draws, k))
         .fold(f32::INFINITY, f32::min);
 
-    let stuck = draws
-        .windows(2)
-        .filter(|w| w[0] == w[1])
-        .count();
+    let stuck = draws.windows(2).filter(|w| w[0] == w[1]).count();
     ChainDiag {
         min_ess,
         stuck_fraction: stuck as f32 / (t - 1) as f32,
