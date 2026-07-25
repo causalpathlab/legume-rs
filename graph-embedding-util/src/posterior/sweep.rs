@@ -115,7 +115,11 @@ pub fn sweep_side(
             let chain = sampler.run(&lnpdf, &prior_draw, &init_v);
             let mean = chain.posterior_mean();
             let samples = if cfg.keep_samples {
-                chain.samples.iter().map(|s| s.as_slice().to_vec()).collect()
+                chain
+                    .samples
+                    .iter()
+                    .map(|s| s.as_slice().to_vec())
+                    .collect()
             } else {
                 Vec::new()
             };

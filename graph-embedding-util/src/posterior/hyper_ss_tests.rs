@@ -43,7 +43,11 @@ fn spike_slab_tier1_recovers_sigma0_and_pi0() {
         let eg = &e_gene[g * H..(g + 1) * H];
         for c in 0..N_CELL {
             let ec = &e_cell[c * H..(c + 1) * H];
-            let dot: f64 = eg.iter().zip(ec).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
+            let dot: f64 = eg
+                .iter()
+                .zip(ec)
+                .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                .sum();
             let s = dot + f64::from(b_gene[g]) + f64::from(b_cell[c]);
             let n = Poisson::new(s.exp()).unwrap().sample(&mut rng);
             if n > 0.0 {
@@ -52,11 +56,19 @@ fn spike_slab_tier1_recovers_sigma0_and_pi0() {
         }
     }
 
-    let side = FrozenSide { e: &e_cell, b: &b_cell, h: H };
+    let side = FrozenSide {
+        e: &e_cell,
+        b: &b_cell,
+        h: H,
+    };
     let all_cells: Vec<u32> = (0..N_CELL as u32).collect();
     let nodes: Vec<NodeTerm> = pos
         .iter()
-        .map(|p| NodeTerm { pos: p, partition: &all_cells, partition_scale: 1.0 })
+        .map(|p| NodeTerm {
+            pos: p,
+            partition: &all_cells,
+            partition_scale: 1.0,
+        })
         .collect();
 
     let cfg = HyperSsConfig::new(400, 150, 7);
@@ -64,13 +76,21 @@ fn spike_slab_tier1_recovers_sigma0_and_pi0() {
 
     eprintln!(
         "σ₀²={:.3} (true {:.3}), π₀={:.3} (true {:.3}); σ-ESS {:.0} π-ESS {:.0}",
-        res.sigma2_mean, sigma0_sq_true, res.pi0_mean, pi0_true,
-        res.sigma_diag.min_ess, res.pi0_diag.min_ess
+        res.sigma2_mean,
+        sigma0_sq_true,
+        res.pi0_mean,
+        pi0_true,
+        res.sigma_diag.min_ess,
+        res.pi0_diag.min_ess
     );
 
     // σ₀² recovered from the included slab.
     let rel = (res.sigma2_mean - sigma0_sq_true).abs() / sigma0_sq_true;
-    assert!(rel < 0.4, "σ₀² off: got {:.3}, true {sigma0_sq_true:.3}", res.sigma2_mean);
+    assert!(
+        rel < 0.4,
+        "σ₀² off: got {:.3}, true {sigma0_sq_true:.3}",
+        res.sigma2_mean
+    );
 
     // π₀ recovered (directionally): moved off the 0.9 prior toward the true 0.40.
     assert!(

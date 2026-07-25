@@ -175,7 +175,11 @@ pub fn hyper_ss(
         let mut n_incl = 0usize;
         for (g, (eg, ll, z)) in out.into_iter().enumerate() {
             if z {
-                sum_sq += eg.as_slice().iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>();
+                sum_sq += eg
+                    .as_slice()
+                    .iter()
+                    .map(|&x| f64::from(x) * f64::from(x))
+                    .sum::<f64>();
                 n_incl += 1;
             }
             e[g] = eg;

@@ -96,8 +96,7 @@ pub fn hyper_sweep(
 
     // Live state: θ per gene + its cached likelihood. cur_ll is the likelihood
     // only (the prior lives in the ellipse), so it stays valid as σ² moves.
-    let mut theta: Vec<DVector<f32>> =
-        inits.iter().map(|v| DVector::from_vec(v.clone())).collect();
+    let mut theta: Vec<DVector<f32>> = inits.iter().map(|v| DVector::from_vec(v.clone())).collect();
     // One-time, independent per gene (a full-partition poisson_lnpdf each) → parallel.
     let mut cur_ll: Vec<f32> = theta
         .par_iter()

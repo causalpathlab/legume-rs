@@ -102,8 +102,16 @@ fn interleaved_tier1_recovers_sigma0_and_mixes() {
         let (mut ts, mut hs) = (Vec::new(), Vec::new());
         for c in 0..N_CELL {
             let ec = &e_cell[c * H..(c + 1) * H];
-            let dot_t: f64 = eg.iter().zip(ec).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
-            let dot_h: f64 = eg_hat.iter().zip(ec).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
+            let dot_t: f64 = eg
+                .iter()
+                .zip(ec)
+                .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                .sum();
+            let dot_h: f64 = eg_hat
+                .iter()
+                .zip(ec)
+                .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                .sum();
             ts.push(dot_t + f64::from(b_gene[g]) + f64::from(b_cell[c]));
             hs.push(dot_h + f64::from(bg_hat) + f64::from(b_cell[c]));
         }
