@@ -3,13 +3,13 @@ use super::miami::depth::accumulate_block;
 use super::site_io::*;
 use crate::data::bam_io::{self, BamReaderCache};
 use clap::Args;
-use dashmap::DashMap as HashMap;
 use genomic_data::bed::Bed;
 use genomic_data::gff::*;
 use genomic_data::sam::Strand;
 use log::info;
 use rayon::prelude::*;
 use rust_htslib::bam::ext::BamRecordExtensions;
+use rustc_hash::FxHashMap;
 use std::io::Write;
 
 #[derive(Args, Debug)]
@@ -76,50 +76,295 @@ pub struct MetageneArgs {
     max_width: usize,
 }
 
+/////////////////////////////////////
+// Merged real-interval gene model  //
+/////////////////////////////////////
+
+/// One gene's 5'UTR, CDS, 3'UTR (or whole non-coding body) as the intervals
+/// the GFF actually annotates, merged where they overlap or touch.
+///
+/// NOT a min..max span over the gene's records. `build_union_gene_model`
+/// collapses every isoform's every CDS record into one interval reaching from
+/// the first CDS base to the last, which swallows the introns AND, in 95.9% of
+/// genes, the 3'UTR sitting inside that reach. Since a site is tested
+/// 5'UTR -> CDS -> 3'UTR, that span used to CLAIM 3'UTR sites and — being at
+/// the far end of it — pile them into the last CDS bin.
+struct MergedFeature {
+    seqname: Box<str>,
+    strand: Strand,
+    /// Sorted, disjoint, 1-based inclusive `(start, stop)`.
+    intervals: Vec<(i64, i64)>,
+    /// Summed length of `intervals`: the SPLICED length, which is what a
+    /// metagene coordinate is a fraction of. An intron is not part of the
+    /// feature, so it must not consume any of the feature's bins.
+    total_len: i64,
+}
+
+/// Sort and merge intervals that overlap or abut.
+///
+/// Adjacency (`s == last_stop + 1`) merges too: two records that meet
+/// base-to-base are one uninterrupted stretch of transcript, and leaving them
+/// split would only add a seam with no coordinate consequence.
+fn merge_intervals(intervals: &mut Vec<(i64, i64)>) {
+    intervals.sort_unstable();
+    let mut merged: Vec<(i64, i64)> = Vec::with_capacity(intervals.len());
+    for &(start, stop) in intervals.iter() {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 + 1 => last.1 = last.1.max(stop),
+            _ => merged.push((start, stop)),
+        }
+    }
+    *intervals = merged;
+}
+
+/// The identity a feature's records are pooled under: gene AND sequence name.
+/// `parse_ensembl_id` drops the `_PAR_Y` suffix, so the X and Y copies of a
+/// pseudoautosomal gene share a gene id; pooling on the id alone would place
+/// chrY intervals on chrX and inflate the spliced length.
+type GeneLocus = (GeneId, Box<str>);
+
+/// One locus' raw, unmerged `(start, stop)` records and the strand they read on.
+type RawIntervals = (Strand, Vec<(i64, i64)>);
+
+/// Collects one feature kind's raw records per gene until they can be merged.
+#[derive(Default)]
+struct FeatureBuilder {
+    by_gene: FxHashMap<GeneLocus, RawIntervals>,
+}
+
+impl FeatureBuilder {
+    fn push(&mut self, rec: &GffRecord) {
+        if rec.stop < rec.start {
+            return;
+        }
+        self.by_gene
+            .entry((rec.gene_id.clone(), rec.seqname.clone()))
+            .or_insert_with(|| (rec.strand, Vec::new()))
+            .1
+            .push((rec.start, rec.stop));
+    }
+
+    fn finish(self) -> Vec<MergedFeature> {
+        self.by_gene
+            .into_iter()
+            .filter_map(|((_gene, seqname), (strand, mut intervals))| {
+                merge_intervals(&mut intervals);
+                let total_len: i64 = intervals.iter().map(|&(s, e)| e - s + 1).sum();
+                if total_len <= 0 {
+                    return None;
+                }
+                Some(MergedFeature {
+                    seqname,
+                    strand,
+                    intervals,
+                    total_len,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Gap between two closed intervals; `0` when they overlap.
+fn distance_between_regions(a_start: i64, a_stop: i64, b_start: i64, b_stop: i64) -> i64 {
+    if a_stop < b_start {
+        b_start - a_stop
+    } else if a_start > b_stop {
+        a_start - b_stop
+    } else {
+        0
+    }
+}
+
+/// The four feature tracks, one merged model per gene per kind.
+struct FeatureTracks {
+    five_prime_utr: Vec<MergedFeature>,
+    cds: Vec<MergedFeature>,
+    three_prime_utr: Vec<MergedFeature>,
+    non_coding: Vec<MergedFeature>,
+}
+
+/// Sort raw GFF records into the four tracks.
+///
+/// GENCODE writes a generic `UTR` feature rather than `five_prime_UTR` /
+/// `three_prime_UTR`, so which end a UTR record belongs to has to be decided
+/// per record, by whether it sits closer to the gene's canonical start codon
+/// or its stop codon — the same rule `genomic_data::gff::build_utr_maps`
+/// applies, except that one can only rule on already-collapsed spans.
+/// Explicit `five_prime_UTR` / `three_prime_UTR` records are taken as given.
+fn build_feature_tracks(records: &[GffRecord]) -> anyhow::Result<FeatureTracks> {
+    let start_codons = build_codon_map(records, &FeatureType::StartCodon)?;
+    let stop_codons = build_codon_map(records, &FeatureType::StopCodon)?;
+
+    let mut five_prime = FeatureBuilder::default();
+    let mut cds = FeatureBuilder::default();
+    let mut three_prime = FeatureBuilder::default();
+    let mut non_coding = FeatureBuilder::default();
+
+    for rec in records.iter() {
+        if rec.gene_type != GeneType::CodingGene {
+            // Non-coding genes have no UTR/CDS split to make, so they keep
+            // their whole-gene boundaries.
+            if rec.feature_type == FeatureType::Gene {
+                non_coding.push(rec);
+            }
+            continue;
+        }
+
+        match rec.feature_type {
+            FeatureType::CDS => cds.push(rec),
+            FeatureType::FivePrimeUTR => five_prime.push(rec),
+            FeatureType::ThreePrimeUTR => three_prime.push(rec),
+            FeatureType::UTR => {
+                let start_codon = start_codons.get(&rec.gene_id).map(|c| (c.start, c.stop));
+                let stop_codon = stop_codons.get(&rec.gene_id).map(|c| (c.start, c.stop));
+                // Without both codons the end cannot be named, and guessing
+                // would put the record on a track it may not belong to.
+                if let (Some((sc_start, sc_stop)), Some((pc_start, pc_stop))) =
+                    (start_codon, stop_codon)
+                {
+                    let to_start = distance_between_regions(rec.start, rec.stop, sc_start, sc_stop);
+                    let to_stop = distance_between_regions(rec.start, rec.stop, pc_start, pc_stop);
+                    if to_start <= to_stop {
+                        five_prime.push(rec);
+                    } else {
+                        three_prime.push(rec);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(FeatureTracks {
+        five_prime_utr: five_prime.finish(),
+        cds: cds.finish(),
+        three_prime_utr: three_prime.finish(),
+        non_coding: non_coding.finish(),
+    })
+}
+
+////////////////////////////
+// Feature interval index  //
+////////////////////////////
+
+/// One merged interval plus what it takes to place a genomic position along
+/// the spliced feature the interval belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IndexedInterval {
+    start: i64,
+    stop: i64,
+    strand: Strand,
+    /// Spliced length of the same feature lying genomically BEFORE this
+    /// interval — the offset that turns a genomic position into a spliced one.
+    cum_before: i64,
+    total_len: i64,
+}
+
+impl IndexedInterval {
+    /// 0-based offset of `pos` along the spliced feature, read 5'->3'.
+    ///
+    /// A reverse-strand transcript reads 5'->3' as the genomic coordinate
+    /// DECREASES, so its offsets are mirrored about the feature's length.
+    fn relative_pos(&self, pos: i64) -> i64 {
+        let rel_genomic = self.cum_before + (pos - self.start);
+        let rel = match self.strand {
+            Strand::Forward => rel_genomic,
+            Strand::Backward => self.total_len - 1 - rel_genomic,
+        };
+        rel.clamp(0, (self.total_len - 1).max(0))
+    }
+
+    /// Bin of `pos` within a track of `nbins` bins.
+    fn bin(&self, pos: i64, nbins: usize) -> usize {
+        let rel = self.relative_pos(pos) as usize;
+        let total = self.total_len.max(1) as usize;
+        (rel * nbins / total).min(nbins.saturating_sub(1))
+    }
+}
+
+/// One chromosome's intervals, sorted by start.
+struct ChromIntervals {
+    intervals: Vec<IndexedInterval>,
+    /// `max_stop[i]` = the largest `stop` among `intervals[..=i]`. Sorted-ness
+    /// bounds where an interval BEGINS, not how far it reaches, so this is the
+    /// only thing that licenses stopping a backward scan early.
+    max_stop: Vec<i64>,
+}
+
 /// Per-chromosome sorted interval index for mapping positions to gene features.
 struct FeatureIndex {
-    /// (start, stop, strand) sorted by start within each chromosome
-    intervals: rustc_hash::FxHashMap<Box<str>, Vec<(i64, i64, Strand)>>,
+    by_chr: FxHashMap<Box<str>, ChromIntervals>,
 }
 
 impl FeatureIndex {
-    fn from_feature_map(map: &HashMap<GeneId, GffRecord>) -> Self {
-        let mut by_chr: rustc_hash::FxHashMap<Box<str>, Vec<(i64, i64, Strand)>> =
-            rustc_hash::FxHashMap::default();
-        for entry in map.iter() {
-            let rec = entry.value();
-            by_chr
-                .entry(rec.seqname.clone())
-                .or_default()
-                .push((rec.start, rec.stop, rec.strand));
+    fn from_features(features: &[MergedFeature]) -> Self {
+        let mut by_chr: FxHashMap<Box<str>, Vec<IndexedInterval>> = FxHashMap::default();
+        for feature in features {
+            let mut cum_before = 0;
+            for &(start, stop) in feature.intervals.iter() {
+                by_chr
+                    .entry(feature.seqname.clone())
+                    .or_default()
+                    .push(IndexedInterval {
+                        start,
+                        stop,
+                        strand: feature.strand,
+                        cum_before,
+                        total_len: feature.total_len,
+                    });
+                cum_before += stop - start + 1;
+            }
         }
-        for intervals in by_chr.values_mut() {
-            intervals.sort_by_key(|&(s, _, _)| s);
-        }
-        FeatureIndex { intervals: by_chr }
+
+        let by_chr = by_chr
+            .into_iter()
+            .map(|(chr, mut intervals)| {
+                // A total order, not just by start: where two genes' features
+                // both cover a site, `find` returns whichever the backward
+                // scan reaches first, so ordering ties by start alone would
+                // leave that site's bin at the mercy of insertion order.
+                // Intervals equal on every key place a site in the same bin
+                // of the same track, so the run is reproducible.
+                intervals
+                    .sort_by_key(|iv| (iv.start, iv.stop, iv.total_len, iv.cum_before, iv.strand));
+                let mut running = i64::MIN;
+                let max_stop = intervals
+                    .iter()
+                    .map(|iv| {
+                        running = running.max(iv.stop);
+                        running
+                    })
+                    .collect();
+                (
+                    chr,
+                    ChromIntervals {
+                        intervals,
+                        max_stop,
+                    },
+                )
+            })
+            .collect();
+
+        FeatureIndex { by_chr }
     }
 
-    /// Find the interval containing `position` (1-based GFF coords).
-    /// Returns (start, stop, strand, length) if found.
-    fn find(&self, chr: &str, position: i64) -> Option<(i64, i64, Strand, usize)> {
-        let intervals = self.intervals.get(chr)?;
-        // Binary search: find rightmost interval with start <= position
-        let idx = intervals.partition_point(|&(s, _, _)| s <= position);
-        if idx == 0 {
-            return None;
-        }
-        // Scan backwards from the candidate
-        for &(start, stop, strand) in intervals[..idx].iter().rev() {
-            if start > position {
-                continue;
-            }
-            if position <= stop {
-                let length = (stop - start + 1).max(1) as usize;
-                return Some((start, stop, strand, length));
-            }
-            // Past this point, earlier intervals have smaller start, won't contain position
-            if start < position {
+    /// Find an interval containing `position` (1-based GFF coords).
+    fn find(&self, chr: &str, position: i64) -> Option<IndexedInterval> {
+        let chrom = self.by_chr.get(chr)?;
+        // Rightmost interval with start <= position; everything left of it
+        // also starts at or before `position`, so only `stop` is still open.
+        let idx = chrom.intervals.partition_point(|iv| iv.start <= position);
+        for i in (0..idx).rev() {
+            // An earlier-STARTING interval can still reach much further than
+            // its neighbours — a first CDS exon of a long gene outruns every
+            // short exon that starts after it. Only "nothing up to here
+            // reaches `position`" is a sound reason to stop looking.
+            if chrom.max_stop[i] < position {
                 break;
+            }
+            let iv = chrom.intervals[i];
+            if position <= iv.stop {
+                return Some(iv);
             }
         }
         None
@@ -211,8 +456,7 @@ impl GeneFeatureHistogram {
 // Shared metagene bin grid  //
 //////////////////////////////
 
-/// The union gene model and bin allocation that BOTH metagene tracks are
-/// measured on.
+/// The gene model and bin allocation that BOTH metagene tracks are measured on.
 ///
 /// Built once by [`run_metagene`] and handed to the count and the coverage
 /// pass, because `count_per_covered_mb` divides one track by the other: when
@@ -220,51 +464,42 @@ impl GeneFeatureHistogram {
 /// the two places would have silently misaligned the grids and turned every
 /// ratio wrong-but-plausible. One owner, so the two cannot differ.
 struct MetageneGrid {
-    /// Union 5'UTR / CDS / 3'UTR over protein-coding genes.
-    five_prime_utr: HashMap<GeneId, GffRecord>,
-    cds: HashMap<GeneId, GffRecord>,
-    three_prime_utr: HashMap<GeneId, GffRecord>,
+    /// Merged 5'UTR / CDS / 3'UTR intervals over protein-coding genes.
+    five_prime_utr: Vec<MergedFeature>,
+    cds: Vec<MergedFeature>,
+    three_prime_utr: Vec<MergedFeature>,
     /// Whole-gene boundaries of non-coding genes — no UTR/CDS split to make.
-    non_coding: HashMap<GeneId, GffRecord>,
+    non_coding: Vec<MergedFeature>,
     /// Bins for `[5'UTR, CDS, 3'UTR]`, proportional to each region's max
     /// length. Non-coding genes are spread over the full `n_genomic_bins`.
     nbins: [usize; 3],
     n_genomic_bins: usize,
 }
 
+/// Longest spliced feature in a track, the scale each region's bin share is
+/// proportional to.
+fn max_total_len(features: &[MergedFeature]) -> i64 {
+    features.iter().map(|f| f.total_len).max().unwrap_or(1)
+}
+
 impl MetageneGrid {
     fn build(gff_file: &str, n_genomic_bins: usize) -> anyhow::Result<Self> {
-        let gff_records = read_gff_record_vec(gff_file)?;
+        Self::from_records(&read_gff_record_vec(gff_file)?, n_genomic_bins)
+    }
 
-        let protein_coding_records: Vec<GffRecord> = gff_records
-            .iter()
-            .filter(|rec| rec.gene_type == GeneType::CodingGene)
-            .cloned()
-            .collect();
-
-        let non_coding_records: Vec<GffRecord> = gff_records
-            .iter()
-            .filter(|rec| rec.gene_type != GeneType::CodingGene)
-            .cloned()
-            .collect();
-
-        let UnionGeneModel {
-            gene_boundaries: _,
-            cds,
+    fn from_records(records: &[GffRecord], n_genomic_bins: usize) -> anyhow::Result<Self> {
+        let FeatureTracks {
             five_prime_utr,
+            cds,
             three_prime_utr,
-        } = build_union_gene_model(&protein_coding_records)?;
-
-        let UnionGeneModel {
-            gene_boundaries: non_coding,
-            ..
-        } = build_union_gene_model(&non_coding_records)?;
+            non_coding,
+        } = build_feature_tracks(records)?;
 
         // Proportional bin allocation by max feature length. The floors stop a
         // long CDS from starving the short UTRs down to a couple of bins.
-        let n_five_prime = five_prime_utr.take_max_length().max(10);
-        let n_cds = cds.take_max_length();
-        let n_three_prime = three_prime_utr.take_max_length().max(20);
+        let n_five_prime = max_total_len(&five_prime_utr).max(10);
+        let n_cds = max_total_len(&cds);
+        let n_three_prime = max_total_len(&three_prime_utr).max(20);
         let ntot = (n_five_prime + n_cds + n_three_prime) as usize;
 
         let nbins = [
@@ -284,15 +519,24 @@ impl MetageneGrid {
     }
 }
 
+/// Add one site to the bin its spliced-relative position falls in.
+fn tally(hist: &mut [usize], iv: &IndexedInterval, pos: i64) {
+    if hist.is_empty() {
+        return;
+    }
+    let bin = iv.bin(pos, hist.len());
+    hist[bin] += 1;
+}
+
 fn count_metagene(sites: &[GenomicSite], grid: &MetageneGrid) -> GeneFeatureHistogram {
     let [nbins_five_prime, nbins_cds, nbins_three_prime] = grid.nbins;
     let n_genomic_bins = grid.n_genomic_bins;
 
     // Build feature indices
-    let five_prime_idx = FeatureIndex::from_feature_map(&grid.five_prime_utr);
-    let cds_idx = FeatureIndex::from_feature_map(&grid.cds);
-    let three_prime_idx = FeatureIndex::from_feature_map(&grid.three_prime_utr);
-    let nc_idx = FeatureIndex::from_feature_map(&grid.non_coding);
+    let five_prime_idx = FeatureIndex::from_features(&grid.five_prime_utr);
+    let cds_idx = FeatureIndex::from_features(&grid.cds);
+    let three_prime_idx = FeatureIndex::from_features(&grid.three_prime_utr);
+    let nc_idx = FeatureIndex::from_features(&grid.non_coding);
 
     let mut five_prime_hist = vec![0usize; nbins_five_prime];
     let mut cds_hist = vec![0usize; nbins_cds];
@@ -304,28 +548,14 @@ fn count_metagene(sites: &[GenomicSite], grid: &MetageneGrid) -> GeneFeatureHist
         // Sites use 0-based positions; GFF uses 1-based
         let gff_pos = site.position + 1;
 
-        if let Some((start, _stop, strand, length)) = five_prime_idx.find(chr, gff_pos) {
-            if nbins_five_prime > 0 {
-                let rel = strand_relative_pos(gff_pos, start, strand, length);
-                let bin = rel * nbins_five_prime / length;
-                five_prime_hist[bin.min(nbins_five_prime - 1)] += 1;
-            }
-        } else if let Some((start, _stop, strand, length)) = cds_idx.find(chr, gff_pos) {
-            if nbins_cds > 0 {
-                let rel = strand_relative_pos(gff_pos, start, strand, length);
-                let bin = rel * nbins_cds / length;
-                cds_hist[bin.min(nbins_cds - 1)] += 1;
-            }
-        } else if let Some((start, _stop, strand, length)) = three_prime_idx.find(chr, gff_pos) {
-            if nbins_three_prime > 0 {
-                let rel = strand_relative_pos(gff_pos, start, strand, length);
-                let bin = rel * nbins_three_prime / length;
-                three_prime_hist[bin.min(nbins_three_prime - 1)] += 1;
-            }
-        } else if let Some((start, _stop, strand, length)) = nc_idx.find(chr, gff_pos) {
-            let rel = strand_relative_pos(gff_pos, start, strand, length);
-            let bin = rel * n_genomic_bins / length;
-            non_coding_hist[bin.min(n_genomic_bins - 1)] += 1;
+        if let Some(iv) = five_prime_idx.find(chr, gff_pos) {
+            tally(&mut five_prime_hist, &iv, gff_pos);
+        } else if let Some(iv) = cds_idx.find(chr, gff_pos) {
+            tally(&mut cds_hist, &iv, gff_pos);
+        } else if let Some(iv) = three_prime_idx.find(chr, gff_pos) {
+            tally(&mut three_prime_hist, &iv, gff_pos);
+        } else if let Some(iv) = nc_idx.find(chr, gff_pos) {
+            tally(&mut non_coding_hist, &iv, gff_pos);
         }
     }
 
@@ -373,12 +603,45 @@ fn coverage_metagene(
 // Per-gene read-depth scan  //
 //////////////////////////////
 
-/// One gene's feature interval, flattened out of the `DashMap` so the per-gene
-/// scan can be a rayon `par_iter` over a slice.
+/// One gene's feature, flattened out of [`MergedFeature`] so the per-gene scan
+/// can be a rayon `par_iter` over a slice.
 struct FeatureRegion {
+    /// Window to fetch reads over: the outer span of the merged intervals.
+    /// Reads landing in the introns inside it are clipped away by `exons`.
     region: Bed,
+    /// Bins over the SPLICED feature, `[0, total_len - 1]` — the same
+    /// coordinate the count track bins sites in.
     edges: BinEdges,
+    /// Per merged interval: 0-based half-open `(genomic start, genomic stop,
+    /// spliced offset)`.
+    exons: Vec<(i64, i64, i64)>,
     strand: Strand,
+}
+
+impl FeatureRegion {
+    fn new(feature: &MergedFeature, nbins: usize) -> Option<Self> {
+        let (&(first_start, _), &(_, last_stop)) =
+            (feature.intervals.first()?, feature.intervals.last()?);
+
+        let mut offset = 0;
+        let mut exons = Vec::with_capacity(feature.intervals.len());
+        for &(start, stop) in feature.intervals.iter() {
+            // GFF is 1-based inclusive; BAM blocks are 0-based half-open.
+            exons.push((start - 1, stop, offset));
+            offset += stop - start + 1;
+        }
+
+        Some(FeatureRegion {
+            region: Bed {
+                chr: feature.seqname.clone(),
+                start: first_start - 1,
+                stop: last_stop,
+            },
+            edges: BinEdges::new(0, feature.total_len - 1, nbins),
+            exons,
+            strand: feature.strand,
+        })
+    }
 }
 
 /// Per-rayon-job state for the depth scan: the BAM readers this worker has
@@ -403,7 +666,7 @@ impl CoverageWorker {
 }
 
 /// Sum binned read depth across every gene's feature, oriented 5'→3' (reverse
-/// strand bins flipped, matching [`strand_relative_pos`]).
+/// strand bins flipped, matching [`IndexedInterval::relative_pos`]).
 ///
 /// This used to go through `read_depth_binned`, whose uncached entry point
 /// builds a fresh `BamReaderCache` inside — so every one of ~10^5 genes, times
@@ -415,7 +678,7 @@ impl CoverageWorker {
 /// overlap, a non-negative integer far below 2^53, so the f64 sums are exact
 /// and therefore order-independent.
 fn accumulate_feature_coverage(
-    feature_map: &HashMap<GeneId, GffRecord>,
+    features: &[MergedFeature],
     nbins: usize,
     bam_files: &[Box<str>],
 ) -> anyhow::Result<Vec<f64>> {
@@ -423,24 +686,9 @@ fn accumulate_feature_coverage(
         return Ok(vec![]);
     }
 
-    let regions: Vec<FeatureRegion> = feature_map
+    let regions: Vec<FeatureRegion> = features
         .iter()
-        .filter_map(|entry| {
-            let rec = entry.value();
-            if rec.stop <= rec.start {
-                return None;
-            }
-            // GFF is 1-based inclusive; Bed / BinEdges are 0-based.
-            Some(FeatureRegion {
-                region: Bed {
-                    chr: rec.seqname.clone(),
-                    start: rec.start - 1,
-                    stop: rec.stop,
-                },
-                edges: BinEdges::new(rec.start - 1, rec.stop - 1, nbins),
-                strand: rec.strand,
-            })
-        })
+        .filter_map(|feature| FeatureRegion::new(feature, nbins))
         .collect();
 
     regions
@@ -462,7 +710,21 @@ fn accumulate_feature_coverage(
                             // Aligned blocks only, so introns are not counted —
                             // same convention as the splice-aware counter.
                             for [bs, be] in rec.aligned_blocks() {
-                                accumulate_block(gene_bins, &feature.edges, bs, be);
+                                // Depth is binned in spliced coordinates, so a
+                                // block is clipped to each exon and shifted by
+                                // that exon's offset before it is accumulated.
+                                for &(gstart, gstop, offset) in feature.exons.iter() {
+                                    let lo = bs.max(gstart);
+                                    let hi = be.min(gstop);
+                                    if lo < hi {
+                                        accumulate_block(
+                                            gene_bins,
+                                            &feature.edges,
+                                            offset + lo - gstart,
+                                            offset + hi - gstart,
+                                        );
+                                    }
+                                }
                             }
                         },
                     )?;
@@ -528,15 +790,6 @@ fn write_combined_tsv(
     Ok(())
 }
 
-/// Strand-aware relative position (0-based offset from feature start).
-#[inline]
-fn strand_relative_pos(pos: i64, start: i64, strand: Strand, length: usize) -> usize {
-    match strand {
-        Strand::Forward => (pos - start) as usize,
-        Strand::Backward => (length - 1).saturating_sub((pos - start) as usize),
-    }
-}
-
 pub fn run_metagene(args: &MetageneArgs) -> anyhow::Result<()> {
     let sites = read_sites(&args.site_file)?;
 
@@ -563,3 +816,6 @@ pub fn run_metagene(args: &MetageneArgs) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
