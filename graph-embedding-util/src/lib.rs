@@ -36,6 +36,7 @@ pub mod loss;
 pub mod model;
 pub mod null_call;
 pub mod postprocess;
+pub mod posterior;
 pub mod progress;
 pub mod training;
 pub mod type_annotation;
