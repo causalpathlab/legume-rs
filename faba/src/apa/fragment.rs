@@ -199,9 +199,6 @@ pub fn extract_fragments_cached(
     };
 
     bam_io::for_each_record_in_region_cached(cache, bam_file, &bed, |_chr, rec| {
-        let ref_start = rec.reference_start();
-        let ref_end = rec.reference_end();
-
         // Skip unmapped and low mapping-quality reads (consistent with the
         // editing/SNP modalities, which gate reads at min_mapping_quality).
         if rec.is_unmapped() || rec.mapq() < min_mapping_quality {
@@ -227,14 +224,15 @@ pub fn extract_fragments_cached(
             false
         };
 
-        // Place the read on the SPLICED 3'UTR. The fetch window is the exons'
-        // bounding box, so it also returns reads sitting in the UTR's introns:
-        // those touch no exon and drop out here, and a read that spans an
-        // intron is credited its spliced length, not its genomic reach.
-        // htslib reports a 0-based start and a 0-based exclusive end, i.e. the
-        // 1-based inclusive span `[ref_start + 1, ref_end]`, which is the
-        // convention `exons` is in.
-        let Some((x_rel, l_val)) = utr.overlap_spliced(ref_start + 1, ref_end) else {
+        // Place the read on the SPLICED 3'UTR, block by block. The fetch window
+        // is the exons' bounding box, so it also returns reads sitting in the
+        // UTR's introns: those touch no exon and drop out here. Passing the
+        // read's outer span instead would charge it for the bases under an `N`
+        // gap whenever the gap does not coincide with an annotated intron.
+        // `aligned_blocks` is 0-based half-open, so a block `[s, e)` is the
+        // 1-based inclusive `(s + 1, e)` that `exons` is written in.
+        let blocks = rec.aligned_blocks().map(|[s, e]| (s + 1, e));
+        let Some(cover) = utr.overlap_spliced_blocks(blocks) else {
             return;
         };
 
@@ -244,18 +242,18 @@ pub fn extract_fragments_cached(
             0.0
         };
 
-        // The pA site a junction read reports is its 3'-most base, also a
-        // spliced offset. The covered stretch is contiguous once spliced, so
-        // that end is `x + l - 1` on either strand.
+        // The pA site a junction read reports is its 3'-most aligned base as a
+        // spliced offset. That is `x + l - 1` only while the read's covered
+        // offsets run unbroken, so take the end the blocks actually reached.
         let pa_pos = if is_valid_junction {
-            Some((x_rel + l_val - 1) as f32)
+            Some(cover.three_prime_rel as f32)
         } else {
             None
         };
 
         fragments.push(FragmentRecord {
-            x: x_rel as f32,
-            l: l_val as f32,
+            x: cover.x_rel as f32,
+            l: cover.len as f32,
             r,
             is_junction: pa_pos.is_some(),
             pa_site: pa_pos,

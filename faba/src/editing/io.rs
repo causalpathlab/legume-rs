@@ -1,3 +1,4 @@
+use crate::data::gene_model::SplicedGenes;
 use crate::editing::pipeline::GeneContrastStat;
 use crate::editing::ConversionSite;
 use anyhow::Result;
@@ -14,8 +15,18 @@ use std::sync::Arc;
 
 /// Trait for writing conversion site data to Parquet format
 pub trait ToParquet {
-    /// Write the data structure to a Parquet file
-    fn to_parquet<P: AsRef<Path>>(&self, gff_map: &GffRecordMap, path: P) -> Result<()>;
+    /// Write the data structure to a Parquet file.
+    ///
+    /// `spliced` supplies transcript coordinates for `rel_pos`. Not optional:
+    /// an empty model already yields the same all-null column, so an `Option`
+    /// here would only add a second way to say nothing -- and it would let a
+    /// swallowed parse error masquerade as "every site is intronic".
+    fn to_parquet<P: AsRef<Path>>(
+        &self,
+        gff_map: &GffRecordMap,
+        spliced: &SplicedGenes,
+        path: P,
+    ) -> Result<()>;
 }
 
 /// Unified Parquet output for both m6A and A-to-I conversion sites.
@@ -28,7 +39,8 @@ pub trait ToParquet {
 /// - mod_type: "m6A" or "A2I"
 /// - primary_pos: the main site position (m6a_pos for M6A, editing_pos for AtoI)
 /// - conversion_pos: nullable Int64 (Some for M6A, None/null for AtoI)
-/// - rel_pos: strand-aware relative position from gene start (0-based offset)
+/// - rel_pos: strand-aware position along the gene's merged EXONS (0-based),
+///   i.e. a transcript coordinate. Null for an intronic site, which has none.
 /// - pv: per-site contrast p-value (site localization)
 /// - gene_pv: gene-level pooled contrast p-value under `--m6a-test-level gene`
 ///   (NaN under per-site testing); `qvalue` is its BH adjustment
@@ -37,7 +49,12 @@ pub trait ToParquet {
 /// - reason: test outcome — `selected` / `low_control` / `delta` / `fdr`
 /// - wt_a, wt_t, wt_g, wt_c: base counts at the site
 impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
-    fn to_parquet<P: AsRef<Path>>(&self, gff_map: &GffRecordMap, path: P) -> Result<()> {
+    fn to_parquet<P: AsRef<Path>>(
+        &self,
+        gff_map: &GffRecordMap,
+        spliced: &SplicedGenes,
+        path: P,
+    ) -> Result<()> {
         let mut chr_vec: Vec<String> = Vec::new();
         let mut gene_ids: Vec<String> = Vec::new();
         let mut strand_vec: Vec<String> = Vec::new();
@@ -46,7 +63,7 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let mut mod_type_vec: Vec<String> = Vec::new();
         let mut primary_pos_vec: Vec<i64> = Vec::new();
         let mut conversion_pos_builder = Int64Builder::new();
-        let mut rel_pos_vec: Vec<i64> = Vec::new();
+        let mut rel_pos_builder = Int64Builder::new();
         let mut pv_vec: Vec<f32> = Vec::new();
         let mut gene_pv_vec: Vec<f32> = Vec::new();
         let mut qv_vec: Vec<f32> = Vec::new();
@@ -62,7 +79,13 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let mut mut_g_vec: Vec<u64> = Vec::new();
         let mut mut_c_vec: Vec<u64> = Vec::new();
 
-        for entry in self.iter() {
+        // Row order is fixed upstream, where discovery partitions its results
+        // (see `partition_by_site`), so every writer that reads a
+        // `DiscoveredSites` is reproducible -- not just this one.
+        let mut ordered: Vec<_> = self.iter().collect();
+        ordered.sort_unstable_by(|a, b| a.key().cmp(b.key()));
+
+        for entry in ordered.iter() {
             let (gene_id, sites) = (entry.key(), entry.value());
 
             let gff_rec = gff_map.get(gene_id);
@@ -90,19 +113,14 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
 
             let gene_str = format!("{}_{}", gene_id, gene_name);
 
-            // Convert GFF coordinates (1-based, inclusive) to 0-based half-open [lb, ub)
-            // to match BAM position coordinates
-            let lb = (gene_start - 1).max(0); // GFF 1-based start -> 0-based
-            let ub = gene_stop; // GFF 1-based inclusive end -> 0-based exclusive end
-
             for site in sites.iter() {
                 let primary_pos = site.primary_pos();
 
-                // Strand-aware relative position
-                let rel_pos = match strand_obj {
-                    Strand::Forward => primary_pos - lb,
-                    Strand::Backward => ub - primary_pos - 1,
-                };
+                // Position along the gene's merged EXONS, not from its
+                // genomic start: an intron is not in the transcript, so it must
+                // not count toward a transcript coordinate. Null for an
+                // intronic site, which has no such coordinate at all.
+                let rel_pos = spliced.rel_pos(gene_id, primary_pos, strand_obj);
 
                 chr_vec.push(chr.clone());
                 gene_ids.push(gene_str.clone());
@@ -122,7 +140,7 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
                     }
                 }
 
-                rel_pos_vec.push(rel_pos);
+                rel_pos_builder.append_option(rel_pos);
                 pv_vec.push(site.pv());
                 gene_pv_vec.push(site.gene_pv());
                 qv_vec.push(site.qv());
@@ -149,7 +167,7 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let mod_type_array = Arc::new(StringArray::from(mod_type_vec)) as ArrayRef;
         let primary_pos_array = Arc::new(Int64Array::from(primary_pos_vec)) as ArrayRef;
         let conversion_pos_array = Arc::new(conversion_pos_builder.finish()) as ArrayRef;
-        let rel_pos_array = Arc::new(Int64Array::from(rel_pos_vec)) as ArrayRef;
+        let rel_pos_array = Arc::new(rel_pos_builder.finish()) as ArrayRef;
         let pv_array = Arc::new(Float32Array::from(pv_vec)) as ArrayRef;
         let gene_pv_array = Arc::new(Float32Array::from(gene_pv_vec)) as ArrayRef;
         let qv_array = Arc::new(Float32Array::from(qv_vec)) as ArrayRef;
@@ -178,7 +196,7 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
                 arrow::datatypes::DataType::Int64,
                 true, // nullable
             ),
-            arrow::datatypes::Field::new("rel_pos", arrow::datatypes::DataType::Int64, false),
+            arrow::datatypes::Field::new("rel_pos", arrow::datatypes::DataType::Int64, true),
             arrow::datatypes::Field::new("pv", arrow::datatypes::DataType::Float32, false),
             arrow::datatypes::Field::new("gene_pv", arrow::datatypes::DataType::Float32, false),
             arrow::datatypes::Field::new("qvalue", arrow::datatypes::DataType::Float32, false),
@@ -344,12 +362,14 @@ pub fn write_gene_contrast_parquet<'a, P: AsRef<Path>>(
 pub fn write_discovery_outputs(
     discovered: &crate::editing::pipeline::DiscoveredSites,
     gff_map: &GffRecordMap,
+    spliced: &SplicedGenes,
     output_dir: &str,
     prefix: &str,
 ) -> Result<()> {
     let n_unselected: usize = discovered.rejected.iter().map(|e| e.value().len()).sum();
     discovered.rejected.to_parquet(
         gff_map,
+        spliced,
         format!("{output_dir}/{prefix}_sites_unselected.parquet"),
     )?;
     log::info!("wrote {n_unselected} unselected {prefix} sites (with reasons)");

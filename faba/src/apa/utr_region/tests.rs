@@ -101,35 +101,128 @@ fn genomic_from_spliced_rejects_offsets_outside_the_utr() {
 // Read placement  //
 /////////////////////
 
+/// The one-block call: the read's outer span, which is what placement used to
+/// be given for every read regardless of how it was spliced.
+fn span(utr: &UtrRegion, start: i64, stop: i64) -> Option<SplicedCover> {
+    utr.overlap_spliced_blocks([(start, stop)])
+}
+
 #[test]
-fn overlap_spliced_charges_a_read_only_for_the_exons_it_covers() {
+fn a_single_block_read_is_charged_only_for_the_exons_it_covers() {
     let utr = three_exon(Strand::Forward);
     // 150..320 reaches 171 genomic bases but only 50 + 21 = 71 spliced ones.
-    let (x_rel, len) = utr.overlap_spliced(150, 320).expect("touches two exons");
-    assert_eq!(x_rel, 51);
-    assert_eq!(len, 71);
-    assert_ne!(len, 320 - 150 + 1, "genomic reach must not be the length");
+    let cover = span(&utr, 150, 320).expect("touches two exons");
+    assert_eq!(cover.x_rel, 51);
+    assert_eq!(cover.len, 71);
+    assert_ne!(
+        cover.len,
+        320 - 150 + 1,
+        "genomic reach must not be the length"
+    );
+    // One block covers an unbroken run, so the 3' end is where x + l - 1 lands.
+    assert_eq!(cover.three_prime_rel, cover.x_rel + cover.len - 1);
 }
 
 #[test]
-fn overlap_spliced_orients_a_spanning_read_from_the_high_end_on_the_reverse_strand() {
+fn a_single_block_read_is_oriented_from_the_high_end_on_the_reverse_strand() {
     let utr = three_exon(Strand::Backward);
-    let (x_rel, len) = utr.overlap_spliced(150, 320).expect("touches two exons");
+    let cover = span(&utr, 150, 320).expect("touches two exons");
     // The read's 5'-most base is now its highest, 320.
-    assert_eq!(Some(x_rel), utr.spliced_offset(320));
-    assert_eq!(len, 71);
-    // The 3' end of a spliced read is x + l - 1 — the identity `fragment.rs`
-    // reports a junction read's pA position with.
-    assert_eq!(utr.genomic_from_spliced(x_rel + len - 1), Some(150));
+    assert_eq!(Some(cover.x_rel), utr.spliced_offset(320));
+    assert_eq!(cover.len, 71);
+    assert_eq!(cover.three_prime_rel, cover.x_rel + cover.len - 1);
+    assert_eq!(utr.genomic_from_spliced(cover.three_prime_rel), Some(150));
 }
 
 #[test]
-fn overlap_spliced_drops_a_read_that_lies_in_an_intron() {
+fn a_read_that_lies_in_an_intron_is_dropped() {
     for strand in [Strand::Forward, Strand::Backward] {
         let utr = three_exon(strand);
-        assert_eq!(utr.overlap_spliced(220, 249), None, "intron 200..299");
-        assert_eq!(utr.overlap_spliced(400, 450), None, "intron 350..499");
-        assert_eq!(utr.overlap_spliced(600, 700), None, "past the UTR");
+        assert_eq!(span(&utr, 220, 249), None, "intron 200..299");
+        assert_eq!(span(&utr, 400, 450), None, "intron 350..499");
+        assert_eq!(span(&utr, 600, 700), None, "past the UTR");
+    }
+}
+
+/////////////////////////////
+// Blocks, not outer spans  //
+/////////////////////////////
+
+/// The read the outer span got wrong: 1-based blocks 150..179 and 320..340, so
+/// its gap 180..319 swallows 20 exonic bases (180..199) that it never aligned
+/// to. Both blocks and span start at 150 and end at 340, so only the length —
+/// the quantity APA spends on a poly-A position — can tell them apart.
+const GAPPED_BLOCKS: [(i64, i64); 2] = [(150, 179), (320, 340)];
+
+#[test]
+fn a_gap_over_exonic_bases_is_not_charged_to_the_read() {
+    let utr = three_exon(Strand::Forward);
+    let cover = utr
+        .overlap_spliced_blocks(GAPPED_BLOCKS)
+        .expect("both blocks are exonic");
+
+    // 30 + 21 aligned bases, against the 91 the outer span 150..340 claims.
+    assert_eq!(cover.len, 51);
+    assert_eq!(
+        span(&utr, 150, 340).unwrap().len,
+        91,
+        "what the span claims"
+    );
+
+    assert_eq!(cover.x_rel, 51, "5'-most base is still 150");
+    // The gap breaks the covered run, so the 3' end is past x + l - 1 and only
+    // the block that reached it can say where it is.
+    assert_eq!(cover.three_prime_rel, 141);
+    assert_eq!(utr.genomic_from_spliced(cover.three_prime_rel), Some(340));
+    assert!(cover.three_prime_rel > cover.x_rel + cover.len - 1);
+}
+
+#[test]
+fn a_gapped_read_is_oriented_from_its_highest_base_on_the_reverse_strand() {
+    let utr = three_exon(Strand::Backward);
+    let cover = utr
+        .overlap_spliced_blocks(GAPPED_BLOCKS)
+        .expect("both blocks are exonic");
+
+    assert_eq!(cover.len, 51);
+    // Transcript 5' is now the read's highest base, 340, not its lowest.
+    assert_eq!(cover.x_rel, 60);
+    assert_eq!(Some(cover.x_rel), utr.spliced_offset(340));
+    assert_eq!(cover.three_prime_rel, 150);
+    assert_eq!(utr.genomic_from_spliced(cover.three_prime_rel), Some(150));
+}
+
+#[test]
+fn a_gap_that_matches_an_annotated_intron_still_gives_the_span_answer() {
+    // The common case, and the one the span was already right about: blocks
+    // 150..199 and 300..320 skip exactly the intron 200..299.
+    for strand in [Strand::Forward, Strand::Backward] {
+        let utr = three_exon(strand);
+        let cover = utr
+            .overlap_spliced_blocks([(150, 199), (300, 320)])
+            .expect("both blocks are exonic");
+        assert_eq!(Some(cover), span(&utr, 150, 320), "{strand:?} regressed");
+        assert_eq!(cover.len, 71);
+        // Nothing punched a hole, so the pA identity is the old one.
+        assert_eq!(cover.three_prime_rel, cover.x_rel + cover.len - 1);
+    }
+}
+
+#[test]
+fn a_block_inside_an_intron_contributes_nothing() {
+    for strand in [Strand::Forward, Strand::Backward] {
+        let utr = three_exon(strand);
+        // 220..249 is intronic, so the answer is the exonic block's alone.
+        assert_eq!(
+            utr.overlap_spliced_blocks([(150, 179), (220, 249)]),
+            span(&utr, 150, 179),
+        );
+        // With every block in an intron there is no 3'UTR position to report.
+        assert_eq!(
+            utr.overlap_spliced_blocks([(220, 249), (400, 450)]),
+            None,
+            "{strand:?}"
+        );
     }
 }
 
@@ -341,18 +434,39 @@ fn a_bed_region_keeps_the_lengths_and_offsets_it_always_had() {
     // span arithmetic put it: `x = ref_start - bed_start + 1` on the forward
     // strand and `x = bed_end - ref_end + 1` on the reverse, length 100 either way.
     assert_eq!(regions[0].strand, Strand::Forward);
-    assert_eq!(regions[0].overlap_spliced(1201, 1300), Some((201, 100)));
+    let forward = span(&regions[0], 1201, 1300).unwrap();
+    assert_eq!((forward.x_rel, forward.len), (201, 100));
     assert_eq!(regions[1].strand, Strand::Backward);
-    assert_eq!(regions[1].overlap_spliced(1201, 1300), Some((701, 100)));
+    let backward = span(&regions[1], 1201, 1300).unwrap();
+    assert_eq!((backward.x_rel, backward.len), (701, 100));
 }
 
 ////////////////////////////////
 // End-to-end read extraction  //
 ////////////////////////////////
 
+/// The query bases a CIGAR implies: `A` under a soft clip, `G` everywhere else.
+///
+/// The clip is the poly-A tail `extract_fragments_cached` calls a junction read
+/// on, so spelling one in the CIGAR is enough to get one. Keeping the aligned
+/// bases off `A` is what stops the internal-priming check from vetoing it.
+fn query_bases(cigar: &rust_htslib::bam::record::CigarString) -> Vec<u8> {
+    use rust_htslib::bam::record::Cigar;
+    cigar
+        .iter()
+        .flat_map(|op| match *op {
+            Cigar::SoftClip(len) => vec![b'A'; len as usize],
+            Cigar::Match(len) | Cigar::Ins(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
+                vec![b'G'; len as usize]
+            }
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
 /// Write a coordinate-sorted, indexed one-contig BAM. Each read is
-/// `(0-based pos, CIGAR, query length)`.
-fn write_bam(dir: &std::path::Path, reads: &[(i64, &str, usize)]) -> String {
+/// `(0-based pos, CIGAR)`; the query is derived from the CIGAR.
+fn write_bam(dir: &std::path::Path, reads: &[(i64, &str)]) -> String {
     use rust_htslib::bam::{self, header::HeaderRecord, record::CigarString, Header, Record};
 
     let path = dir.join("reads.bam");
@@ -368,11 +482,11 @@ fn write_bam(dir: &std::path::Path, reads: &[(i64, &str, usize)]) -> String {
 
     {
         let mut writer = bam::Writer::from_path(&path, &header, bam::Format::Bam).unwrap();
-        for (i, (pos, cigar, qlen)) in reads.iter().enumerate() {
+        for (i, (pos, cigar)) in reads.iter().enumerate() {
             let mut rec = Record::new();
             let cigar = CigarString::try_from(*cigar).unwrap();
-            let seq = vec![b'A'; *qlen];
-            let qual = vec![40u8; *qlen];
+            let seq = query_bases(&cigar);
+            let qual = vec![40u8; seq.len()];
             rec.set(format!("read{}", i).as_bytes(), Some(&cigar), &seq, &qual);
             rec.set_tid(0);
             rec.set_pos(*pos);
@@ -420,11 +534,11 @@ fn an_intronic_read_yields_no_fragment_and_a_spanning_one_reports_spliced_length
         dir.path(),
         &[
             // Wholly inside exon 1: 1-based 110..119.
-            (109, "10M", 10),
+            (109, "10M"),
             // Spans the UTR's first intron: 1-based 150..199, gap, 300..320.
-            (149, "50M100N21M", 71),
+            (149, "50M100N21M"),
             // Wholly inside the intron 200..299: 1-based 220..249.
-            (219, "30M", 30),
+            (219, "30M"),
         ],
     );
 
@@ -451,7 +565,7 @@ fn an_intronic_read_yields_no_fragment_and_a_spanning_one_reports_spliced_length
 #[test]
 fn a_reverse_strand_read_is_measured_from_the_high_end_of_the_spliced_utr() {
     let dir = tempfile::tempdir().unwrap();
-    let bam = write_bam(dir.path(), &[(149, "50M100N21M", 71)]);
+    let bam = write_bam(dir.path(), &[(149, "50M100N21M")]);
 
     let utr = three_exon(Strand::Backward);
     let frags = extract(&bam, &utr);
@@ -460,6 +574,53 @@ fn a_reverse_strand_read_is_measured_from_the_high_end_of_the_spliced_utr() {
     // 5'-most covered base is now 320, whose spliced offset is 80.
     assert_eq!(frags[0].x, 80.0);
     assert_eq!(frags[0].l, 71.0);
+}
+
+/// The read whose `N` gap does not line up with the UTR's intron.
+///
+/// `30M140N21M` at 0-based 149 aligns 1-based 150..179 and 320..340 and skips
+/// 180..319 — which includes exon 1's last 20 bases. Its outer span is the
+/// 150..340 of the test above, so placing reads by span cannot see the
+/// difference and charges the read the 20 bases it never aligned to.
+#[test]
+fn a_gap_that_misses_the_annotated_intron_is_charged_by_block_not_by_span() {
+    let dir = tempfile::tempdir().unwrap();
+    let bam = write_bam(dir.path(), &[(149, "30M140N21M")]);
+
+    let utr = three_exon(Strand::Forward);
+    let frags = extract(&bam, &utr);
+
+    assert_eq!(frags.len(), 1);
+    assert_eq!(frags[0].x, 51.0);
+    // 30 + 21 aligned bases. The outer span 150..340 would have said 91.
+    assert_eq!(frags[0].l, 51.0);
+    assert_eq!(
+        span(&utr, 150, 340).unwrap().len,
+        91,
+        "what the span claims"
+    );
+}
+
+/// A junction read's pA site is where its blocks END, not where its charged
+/// length runs out.
+#[test]
+fn a_gapped_junction_read_reports_the_pa_site_its_last_block_reached() {
+    let dir = tempfile::tempdir().unwrap();
+    // The same read, plus a 12bp poly-A soft clip past its last aligned base.
+    let bam = write_bam(dir.path(), &[(149, "30M140N21M12S")]);
+
+    let utr = three_exon(Strand::Forward);
+    let frags = extract(&bam, &utr);
+
+    assert_eq!(frags.len(), 1);
+    assert!(frags[0].is_junction);
+    assert_eq!(frags[0].r, 12.0);
+    // Spliced offset of 340, the read's 3'-most aligned base. The gap broke the
+    // covered run, so x + l - 1 = 101 stops 40 bases short of it — and offset
+    // 101 is genomic 300, a base this read never touched.
+    assert_eq!(frags[0].pa_site, Some(141.0));
+    assert_eq!(frags[0].x + frags[0].l - 1.0, 101.0);
+    assert_eq!(utr.genomic_from_spliced(141), Some(340));
 }
 
 /// The reported poly(A) point must lie inside the range reported beside it.

@@ -513,6 +513,15 @@ fn partition_by_site(
     effect_reason: impl Fn(&ConversionSite, Strand) -> Option<CallReason>,
 ) -> DiscoveredSites {
     let mut genes: Vec<(GeneId, Vec<ConversionSite>)> = gene_sites.into_iter().collect();
+    // Fix the order HERE, not at each writer. `gene_sites` is a DashMap, so its
+    // iteration order is whatever the parallel scan's sharding produced, and
+    // everything downstream inherits it: `gene_stats`, both gene parquets, and
+    // the site parquet. Ordering the discovery result once makes every consumer
+    // reproducible instead of asking each writer to remember to sort.
+    genes.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, sites) in genes.iter_mut() {
+        sites.sort_by_key(|s| s.primary_pos());
+    }
 
     // Pass 1: effect-size guards; collect the eligible sites' p-values for BH.
     let mut eligible: Vec<(usize, usize)> = Vec::new();
@@ -562,6 +571,15 @@ fn m6a_partition_by_gene(
     cutoff: f32,
 ) -> DiscoveredSites {
     let mut genes: Vec<(GeneId, Vec<ConversionSite>)> = gene_sites.into_iter().collect();
+    // Fix the order HERE, not at each writer. `gene_sites` is a DashMap, so its
+    // iteration order is whatever the parallel scan's sharding produced, and
+    // everything downstream inherits it: `gene_stats`, both gene parquets, and
+    // the site parquet. Ordering the discovery result once makes every consumer
+    // reproducible instead of asking each writer to remember to sort.
+    genes.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, sites) in genes.iter_mut() {
+        sites.sort_by_key(|s| s.primary_pos());
+    }
 
     // Pool each gene's sites → one 2×2, then run the effect-size guards on the
     // pooled counts.
@@ -674,6 +692,15 @@ fn atoi_partition_by_gene(
     cutoff: f32,
 ) -> DiscoveredSites {
     let mut genes: Vec<(GeneId, Vec<ConversionSite>)> = gene_sites.into_iter().collect();
+    // Fix the order HERE, not at each writer. `gene_sites` is a DashMap, so its
+    // iteration order is whatever the parallel scan's sharding produced, and
+    // everything downstream inherits it: `gene_stats`, both gene parquets, and
+    // the site parquet. Ordering the discovery result once makes every consumer
+    // reproducible instead of asking each writer to remember to sort.
+    genes.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, sites) in genes.iter_mut() {
+        sites.sort_by_key(|s| s.primary_pos());
+    }
 
     // Pool each gene's sites → (edited, coverage); one beta-binomial p-value each.
     let mut pooled: Vec<(u64, u64, usize, f32)> = Vec::with_capacity(genes.len());

@@ -30,9 +30,30 @@ pub struct UtrRegion {
     pub exons: Vec<(i64, i64)>,
 }
 
+/// Where a read's aligned blocks land on the spliced 3'UTR.
+///
+/// All three fields are in transcript orientation, so on the reverse strand
+/// `x_rel` sits at a HIGHER genomic coordinate than `three_prime_rel`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplicedCover {
+    /// 1-based spliced offset of the 5'-most base the read covers.
+    pub x_rel: i64,
+    /// Spliced bases the read genuinely covers; skipped bases are not counted.
+    pub len: i64,
+    /// 1-based spliced offset of the 3'-most base the read covers — the poly-A
+    /// end of a junction read.
+    ///
+    /// This is `x_rel + len - 1` exactly while the covered offsets form one
+    /// unbroken run, which is every read whose skips fall inside annotated
+    /// introns. A skip over exonic bases punches a hole in the run, and then
+    /// the 3' end is further out than the charged length reaches.
+    pub three_prime_rel: i64,
+}
+
 impl UtrRegion {
     /// The genomic superset to fetch reads over: the exons' bounding box, which
-    /// is a fetch window and not a coordinate system (see `overlap_spliced`).
+    /// is a fetch window and not a coordinate system (see
+    /// `overlap_spliced_blocks`).
     pub fn to_bed(&self) -> Bed {
         Bed {
             chr: self.chr.clone(),
@@ -47,9 +68,9 @@ impl UtrRegion {
     /// Offset 1 is the UTR's 5'-most base: the LOWEST genomic coordinate on the
     /// forward strand, the HIGHEST on the reverse.
     ///
-    /// Read extraction goes through `overlap_spliced`, which needs a read's
-    /// whole covered stretch rather than one position, so nothing on the hot
-    /// path calls this. It stays because it is the direction
+    /// Read extraction goes through `overlap_spliced_blocks`, which needs a
+    /// read's whole covered stretch rather than one position, so nothing on the
+    /// hot path calls this. It stays because it is the direction
     /// `genomic_from_spliced` inverts: the round-trip test is what pins the two
     /// together, and a mapping with only one side written down drifts.
     #[allow(dead_code)]
@@ -91,42 +112,63 @@ impl UtrRegion {
         None
     }
 
-    /// Intersect a read's genomic span (1-based inclusive) with the exons.
+    /// Intersect a read's ALIGNED BLOCKS with the exons.
     ///
-    /// Returns `(x_rel, len)`: the 5'-most spliced offset the read covers and
-    /// the SPLICED length it covers. An intron the read jumps contributes
-    /// nothing to `len`, and a read lying wholly inside one gets `None` — which
-    /// is what keeps intronic coverage out of a 3'UTR position estimate.
+    /// Each block is one uninterrupted run of reference bases the read aligns
+    /// to, 1-based inclusive, ascending and disjoint — what htslib's
+    /// `aligned_blocks` yields once shifted out of its 0-based half-open frame.
+    /// Only bases inside both a block and an exon are charged, so the bases a
+    /// read skips cost nothing whether or not the skip lines up with an
+    /// annotated intron. A read's outer `reference_start..reference_end` span
+    /// cannot make that distinction: it credits everything between the ends, so
+    /// an `N` gap landing on exonic sequence inflates the length the model then
+    /// spends on a poly-A position.
     ///
-    /// The covered set is one contiguous run in spliced coordinates: a read
-    /// spans a genomic interval, so any exon between two covered exons is
-    /// covered whole. Its 3' end is therefore `x_rel + len - 1`.
-    pub fn overlap_spliced(&self, ref_start: i64, ref_end: i64) -> Option<(i64, i64)> {
-        let mut before = 0i64;
+    /// `None` when no block touches an exon, which is what keeps intronic
+    /// coverage out of a 3'UTR position estimate.
+    pub fn overlap_spliced_blocks(
+        &self,
+        blocks: impl IntoIterator<Item = (i64, i64)>,
+    ) -> Option<SplicedCover> {
         let mut first = i64::MAX;
         let mut last = i64::MIN;
         let mut covered = 0i64;
 
-        for &(exon_start, exon_stop) in self.exons.iter() {
-            let lo = exon_start.max(ref_start);
-            let hi = exon_stop.min(ref_end);
-            if lo <= hi {
-                covered += hi - lo + 1;
-                first = first.min(before + lo - exon_start);
-                last = last.max(before + hi - exon_start);
+        // Exons are the inner loop so `blocks` is consumed once, straight off
+        // the CIGAR, without collecting it.
+        for (block_start, block_stop) in blocks {
+            let mut before = 0i64;
+            for &(exon_start, exon_stop) in self.exons.iter() {
+                let lo = exon_start.max(block_start);
+                let hi = exon_stop.min(block_stop);
+                if lo <= hi {
+                    covered += hi - lo + 1;
+                    first = first.min(before + lo - exon_start);
+                    last = last.max(before + hi - exon_start);
+                }
+                before += exon_stop - exon_start + 1;
             }
-            before += exon_stop - exon_start + 1;
         }
 
         if covered <= 0 {
             return None;
         }
 
-        let x_rel = match self.strand {
-            Strand::Forward => first + 1,
-            Strand::Backward => self.utr_length as i64 - last,
+        // `first`/`last` count from the low genomic end; a reverse-strand
+        // transcript reads the same run from the other end, which swaps which
+        // of the two is 5'-most.
+        let (x_rel, three_prime_rel) = match self.strand {
+            Strand::Forward => (first + 1, last + 1),
+            Strand::Backward => (
+                self.utr_length as i64 - last,
+                self.utr_length as i64 - first,
+            ),
         };
-        Some((x_rel, covered))
+        Some(SplicedCover {
+            x_rel,
+            len: covered,
+            three_prime_rel,
+        })
     }
 
     /// Convert a UTR-relative alpha to a genomic range `[alpha - beta, alpha + beta]`.
