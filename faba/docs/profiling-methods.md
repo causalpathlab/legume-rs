@@ -77,16 +77,31 @@ CDS. 3′UTRs are now merged annotated exons, `--min-utr-length` gates on the **
 a read is charged only its exonic bases — so a read lying in an intron of the 3′UTR contributes
 nothing, and one spanning an intron is credited its spliced length, not its genomic length.
 
-**A residual that cannot be driven to zero, and why.** After the fix, 4,958 of 17,502 regions
-(28.3%) still have a 3′UTR exon overlapping some CDS record. This is not a leftover artifact: of
-65,270 transcripts in GENCODE v48 basic, **zero** have a `UTR` record overlapping a `CDS` record
-*of the same transcript*. The annotation is internally consistent per transcript; the overlap
-exists only across isoforms, and any **gene-level** 3′UTR model inherits it. `ENSG00000186891`
-(TNFRSF18) is typical — one transcript's 3′UTR is 1,203,508–1,203,846 while another's CDS is
-1,203,594–1,203,960, and both records are real. Removing it would mean either electing a canonical
-transcript or subtracting the CDS union from the UTR, and both truncate the genuine 3′UTR of the
-dominant isoform. The honest description of the current model is therefore *gene-level, merged
-across isoforms* — not *per-transcript*.
+**Cross-isoform CDS/3′UTR overlap is real, and is kept.** After the fix, 4,958 of 17,502 regions
+(28.3%) still have a 3′UTR exon overlapping some CDS record. **This is biology, not a residual
+artifact, and it must not be "corrected" away.** Of 65,270 transcripts in GENCODE v48 basic,
+**zero** have a `UTR` record overlapping a `CDS` record *of the same transcript* — the annotation
+is internally consistent within a transcript. The overlap exists only *across* isoforms, which is
+exactly what alternative last exons and alternative stop usage produce: the same genomic base is
+genuinely coding in one isoform and 3′UTR in another. `ENSG00000186891` (TNFRSF18) is typical —
+one transcript's 3′UTR is 1,203,508–1,203,846 while another's CDS is 1,203,594–1,203,960, and both
+records are true.
+
+So 28.3% is a **statement about the transcriptome**, not a quality metric to minimise. A
+gene-level merged model reports that base as 3′UTR because for some isoform it is one, and reads
+there are informative about 3′-end usage — which is what APA estimates. The model is therefore
+**gene-level, merged across isoforms** — stated plainly rather than implying a per-transcript
+resolution it does not have.
+
+**Measured, if a per-transcript model is ever wanted (not implemented).** Restricting to the MANE
+Select transcript does remove the ambiguity by construction, because a transcript's own features
+are disjoint. On the same 4,033 rep1 sites it costs **6.6%** of them (266: 97 in genes with no
+MANE transcript, 169 falling in a real isoform's exon that is not the canonical one) against
+**1.3%** unassigned under the merged model. The two main tracks barely move — CDS 341 vs 373,
+3′UTR 3,420 vs 3,381 — so the CDS/3′UTR result is robust to the choice. **The 5′UTR track is
+not: 128 → 6.** Almost all of the merged model's 5′UTR sites lie in regions that are 5′UTR only in
+non-canonical isoforms (alternative first exons and TSS), so neither 5′UTR count should carry much
+weight. That 20× swing on a small track is the reason to state which model produced a figure.
 
 **Still genomic, deliberately flagged:** `rel_pos` in the site parquet (`editing/io.rs`) and in the
 methylation mixture (`editing/mixture_pipeline.rs`) is an offset from the gene start in *genomic*

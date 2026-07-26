@@ -276,10 +276,10 @@ pub struct CountApaArgs {
                      Alternative to --gff for mixture mode.\n\
                      Each row should be a UTR interval.\n\
                      \n\
-                     A BED row carries no exon structure, so each interval is taken as\n\
-                     one contiguous block. With --gff instead, 3'UTRs are built from the\n\
-                     merged annotated exons and coordinates are spliced -- so if your\n\
-                     genes have multi-exon 3'UTRs, --gff is the more faithful input."
+                     A BED row carries no exon structure.\n\
+                     So each interval is taken as one contiguous block.\n\
+                     With --gff, 3'UTRs are merged exons and coordinates are spliced.\n\
+                     Prefer --gff when your genes have multi-exon 3'UTRs."
     )]
     pub(crate) utr_bed: Option<Box<str>>,
 
@@ -290,16 +290,16 @@ pub struct CountApaArgs {
         help = "Minimum 3'-UTR SPLICED length in bp (mixture mode)",
         long_help = "UTRs shorter than this are skipped. Only used in mixture mode.\n\
                      \n\
-                     Measured on the SPLICED length -- the summed length of the 3'UTR's\n\
-                     merged annotated exons -- not on the distance from its first base\n\
-                     to its last. Those differ by a mean 6.4x (p90 12.4x) because a\n\
-                     min-start..max-stop span over a gene's isoforms swallows introns\n\
-                     and, in 46% of genes, reaches back into the CDS. Since APA measures\n\
-                     WHERE in the 3'UTR a poly(A) site sits, that span would be the wrong\n\
-                     coordinate, not merely a wrong length.\n\
+                     The length is SPLICED: the merged annotated exons summed.\n\
+                     A first-base-to-last-base span is not the same thing.\n\
+                     It runs a mean 6.4x longer (p90 12.4x).\n\
+                     Such a span swallows introns.\n\
+                     In 46% of genes it also reaches back into the CDS.\n\
+                     APA measures WHERE in the 3'UTR a poly(A) site sits.\n\
+                     So that span is the wrong coordinate, not just a wrong length.\n\
                      \n\
-                     With --utr-bed the interval is taken as given, one block, since a\n\
-                     BED row carries no exon structure.\n\
+                     With --utr-bed each interval is taken as one block.\n\
+                     A BED row carries no exon structure.\n\
                      \n\
                      See docs/profiling-methods.md section 1.1."
     )]
