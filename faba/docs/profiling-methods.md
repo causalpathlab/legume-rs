@@ -103,11 +103,16 @@ not: 128 → 6.** Almost all of the merged model's 5′UTR sites lie in regions 
 non-canonical isoforms (alternative first exons and TSS), so neither 5′UTR count should carry much
 weight. That 20× swing on a small track is the reason to state which model produced a figure.
 
-**Still genomic, deliberately flagged:** `rel_pos` in the site parquet (`editing/io.rs`) and in the
-methylation mixture (`editing/mixture_pipeline.rs`) is an offset from the gene start in *genomic*
-coordinates, so it counts introns. That is a gene-span offset, not a union-model artifact — it will
-not produce a terminal spike — but it is not a transcript coordinate either, and should not be read
-as one.
+**`rel_pos` is a transcript coordinate.** The site parquet's `rel_pos` is the strand-aware offset
+along the gene's **merged exons** — introns consume none of it. It was an offset from the gene
+start in genomic space, which for a typical human gene says more about intron content than about
+where in the mRNA a site sits. The column is **nullable**, and is null for an intronic site: such a
+site has no transcript coordinate, and substituting the nearest exon edge would put a value there
+that no reader could distinguish from a real one. About 4% of called sites are intronic.
+
+The exon model is the same shape used above — gene-level, merged across isoforms, so a base exonic
+in *any* isoform is exonic here. `editing/mixture_pipeline.rs` computes its own genomic offset for
+the mixture's position covariate and is **not** yet converted.
 
 ---
 

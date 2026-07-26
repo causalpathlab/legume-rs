@@ -640,7 +640,17 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 
     // Load and filter GFF
     info!("parsing GFF file: {}", args.gff_file);
-    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
+    // One parse, two views: the gene map and the merged-exon model. A second
+    // `GffRecordMap::from` here would re-read GENCODE (~9s) for records we
+    // already hold.
+    let gff_records = read_gff_record_vec(args.gff_file.as_ref())?;
+    let mut gff_map = GffRecordMap::from_map(build_gene_map(
+        &gff_records,
+        Some(&genomic_data::gff::FeatureType::Gene),
+    )?);
+    // Transcript coordinates for the sites parquet's rel_pos column, from the
+    // same parse that built the gene map above.
+    let spliced = crate::data::gene_model::SplicedGenes::from_records(&gff_records);
 
     if let Some(gene_type) = args.gene_type.clone() {
         gff_map.subset(gene_type);
@@ -757,6 +767,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
             ToParquet::to_parquet(
                 &atoi_sites,
                 &gff_map,
+                &spliced,
                 format!("{}/atoi_sites.parquet", args.output),
             )?;
         }
@@ -798,7 +809,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     // Pre-mask audit: the unselected sites (with reasons) and, under gene-level
     // testing, the per-gene test tables. Emitted before masking and the
     // empty-selected early return, so it always accompanies the calls.
-    write_discovery_outputs(&discovered, &gff_map, &args.output, "m6a")?;
+    write_discovery_outputs(&discovered, &gff_map, &spliced, &args.output, "m6a")?;
     let gene_sites = discovered.selected;
 
     // Apply A-to-I mask to filter m6A candidates
@@ -839,7 +850,11 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     let ndata: usize = gene_sites.iter().map(|x| x.value().len()).sum();
     info!("Found {} m6A sites", ndata);
 
-    gene_sites.to_parquet(&gff_map, format!("{}/m6a_sites.parquet", args.output))?;
+    gene_sites.to_parquet(
+        &gff_map,
+        &spliced,
+        format!("{}/m6a_sites.parquet", args.output),
+    )?;
 
     //////////////////////////////////////////
     // SECOND PASS: Collect cell-level data //

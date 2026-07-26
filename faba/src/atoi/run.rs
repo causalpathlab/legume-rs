@@ -390,7 +390,17 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
     check_all_bam_indices(&args.bam_files)?;
 
     info!("parsing GFF file: {}", args.gff_file);
-    let mut gff_map = GffRecordMap::from(args.gff_file.as_ref())?;
+    // One parse, two views: the gene map and the merged-exon model. A second
+    // `GffRecordMap::from` here would re-read GENCODE (~9s) for records we
+    // already hold.
+    let gff_records = read_gff_record_vec(args.gff_file.as_ref())?;
+    let mut gff_map = GffRecordMap::from_map(build_gene_map(
+        &gff_records,
+        Some(&genomic_data::gff::FeatureType::Gene),
+    )?);
+    // Transcript coordinates for the sites parquet's rel_pos column, from the
+    // same parse that built the gene map above.
+    let spliced = crate::data::gene_model::SplicedGenes::from_records(&gff_records);
 
     if let Some(gene_type) = args.gene_type.clone() {
         gff_map.subset(gene_type);
@@ -443,7 +453,7 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
     // FIRST PASS: discover A-to-I sites, then emit the audit (unselected sites,
     // and per-gene tables under --test-level gene) before keeping the calls.
     let discovered = find_all_conversion_sites(&gff_map, &params, membership.as_ref())?;
-    write_discovery_outputs(&discovered, &gff_map, &args.output, "atoi")?;
+    write_discovery_outputs(&discovered, &gff_map, &spliced, &args.output, "atoi")?;
     let atoi_sites = discovered.selected;
     let n_atoi: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
     info!("Found {} A-to-I editing sites", n_atoi);
@@ -469,7 +479,11 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
     }
 
     // Write sites parquet
-    atoi_sites.to_parquet(&gff_map, format!("{}/atoi_sites.parquet", args.output))?;
+    atoi_sites.to_parquet(
+        &gff_map,
+        &spliced,
+        format!("{}/atoi_sites.parquet", args.output),
+    )?;
     info!("wrote atoi_sites.parquet");
 
     // SECOND PASS: quantify into sparse matrix

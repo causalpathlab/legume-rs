@@ -19,7 +19,7 @@ use crate::snp::pipeline::{run_snp_pipeline, SnpParams};
 
 use super::args::*;
 use super::run::*;
-use genomic_data::gff::GffRecordMap;
+use genomic_data::gff::{build_gene_map, read_gff_record_vec, GffRecordMap};
 use log::info;
 use rustc_hash::FxHashSet;
 
@@ -93,15 +93,23 @@ pub(super) fn run_snp_step(args: &PipelineArgs) -> anyhow::Result<FxHashSet<(Box
 pub(super) fn filtered_gff(
     gff_file: &str,
     qc: &Option<GeneCountQc>,
-) -> anyhow::Result<GffRecordMap> {
-    let mut gff_map = GffRecordMap::from(gff_file)?;
+) -> anyhow::Result<(GffRecordMap, crate::data::gene_model::SplicedGenes)> {
+    // One parse, two views. The exon model is built BEFORE the gene filter and
+    // is left unnarrowed: it is only ever queried for genes that produced
+    // sites, which by construction survived the filter.
+    let gff_records = read_gff_record_vec(gff_file)?;
+    let spliced = crate::data::gene_model::SplicedGenes::from_records(&gff_records);
+    let mut gff_map = GffRecordMap::from_map(build_gene_map(
+        &gff_records,
+        Some(&genomic_data::gff::FeatureType::Gene),
+    )?);
     if let Some(eg) = qc {
         gff_map.retain_by_ids(&eg.gene_ids);
         info!("Filtered to {} expressed genes", gff_map.len());
     } else {
         info!("Loaded {} genes (no expression filter)", gff_map.len());
     }
-    Ok(gff_map)
+    Ok((gff_map, spliced))
 }
 
 /// Step 1 is [`run_gene_count_qc`] with the pipeline's knobs — the same call the
@@ -151,7 +159,7 @@ pub(super) fn run_atoi_step(
     membership: Option<&CellMembership>,
 ) -> anyhow::Result<AtoiMaskData> {
     // Load GFF and filter to expressed genes
-    let gff_map = filtered_gff(args.gff_file.as_ref(), gene_count_qc)?;
+    let (gff_map, spliced) = filtered_gff(args.gff_file.as_ref(), gene_count_qc)?;
 
     // Build ConversionParams for ATOI
     let params = ConversionParams {
@@ -196,7 +204,7 @@ pub(super) fn run_atoi_step(
     // tested against the beta-binomial sequencing-error null (no control sample).
     info!("Discovering ATOI sites (reference-anchored)...");
     let discovered = find_all_conversion_sites(&gff_map, &params, membership)?;
-    write_discovery_outputs(&discovered, &gff_map, &args.output, "atoi")?;
+    write_discovery_outputs(&discovered, &gff_map, &spliced, &args.output, "atoi")?;
     let atoi_sites = discovered.selected;
 
     // Apply SNP mask if available
@@ -221,7 +229,7 @@ pub(super) fn run_atoi_step(
 
     // Save site annotations
     let sites_output = format!("{}/atoi_sites.parquet", args.output);
-    atoi_sites.to_parquet(&gff_map, &sites_output)?;
+    atoi_sites.to_parquet(&gff_map, &spliced, &sites_output)?;
     info!("Saved ATOI sites to {}", sites_output);
 
     // Second pass: quantification per cell across all input samples.
@@ -363,7 +371,7 @@ pub(super) fn run_dart_step(
     membership: Option<&CellMembership>,
 ) -> anyhow::Result<()> {
     // Load GFF and filter to expressed genes
-    let gff_map = filtered_gff(args.gff_file.as_ref(), gene_count_qc)?;
+    let (gff_map, spliced) = filtered_gff(args.gff_file.as_ref(), gene_count_qc)?;
 
     // m6A is a WT-vs-MUT contrast: the signal (wt) arm is the positional BAMs
     // MINUS the control set; the control (mut) arm is --control-bam. (SNP/genes/
@@ -448,7 +456,7 @@ pub(super) fn run_dart_step(
 
     // Pre-mask audit (unselected sites + per-gene tables), shared with
     // `faba dartseq` so both emit identical files.
-    write_discovery_outputs(&discovered, &gff_map, &args.output, "m6a")?;
+    write_discovery_outputs(&discovered, &gff_map, &spliced, &args.output, "m6a")?;
     let m6a_sites = discovered.selected;
 
     let n_sites_before: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
@@ -485,7 +493,7 @@ pub(super) fn run_dart_step(
 
     // Save site annotations
     let sites_output = format!("{}/m6a_sites.parquet", args.output);
-    m6a_sites.to_parquet(&gff_map, &sites_output)?;
+    m6a_sites.to_parquet(&gff_map, &spliced, &sites_output)?;
     info!("Saved m6A sites to {}", sites_output);
 
     // Second pass: quantification per cell across all input samples.

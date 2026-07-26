@@ -86,7 +86,7 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
             .as_ref()
             .map(|q| q.matrix_by_batch.values().cloned().collect())
             .unwrap_or_default();
-        let gff_map = filtered_gff(&args.gff_file, &gene_count_qc)?;
+        let (gff_map, _spliced) = filtered_gff(&args.gff_file, &gene_count_qc)?;
         args.enrich.build_membership(
             &all_quant_bam_files(args),
             &gff_map,
