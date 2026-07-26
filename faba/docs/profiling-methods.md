@@ -111,8 +111,16 @@ site has no transcript coordinate, and substituting the nearest exon edge would 
 that no reader could distinguish from a real one. About 4% of called sites are intronic.
 
 The exon model is the same shape used above — gene-level, merged across isoforms, so a base exonic
-in *any* isoform is exonic here. `editing/mixture_pipeline.rs` computes its own genomic offset for
-the mixture's position covariate and is **not** yet converted.
+in *any* isoform is exonic here.
+
+The **methylation mixture** uses the same coordinate. Its position covariate and the `gene_length`
+that normalises it must sit on one axis, and both were genomic: consistently wrong together, so the
+fit was valid but the axis was mostly intron. Measured on rep1, moving both to spliced shrinks the
+covariate's range by a median **7.6×** (gene length 24,012 → 3,161 nt), and fitted components then
+sit at a median **66% along the mature transcript** — 3′-biased, matching the stop-codon enrichment
+in §7. Under the old axis that fraction was not interpretable. Sites with no transcript position are
+dropped from the fit rather than nudged onto the nearest exon (901 of 126,924 observations, 0.71%),
+and the count is logged.
 
 ---
 

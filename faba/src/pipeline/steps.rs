@@ -245,7 +245,14 @@ pub(super) fn run_atoi_step(
             drop_single_component: args.drop_single_component,
             ..MixtureParams::default()
         };
-        run_mixture_model(&params, &atoi_sites, &gff_map, &mix_params, valid_cells)?;
+        run_mixture_model(
+            &params,
+            &atoi_sites,
+            &gff_map,
+            &spliced,
+            &mix_params,
+            valid_cells,
+        )?;
     }
 
     Ok(AtoiMaskData { mask, n_sites })
@@ -509,7 +516,14 @@ pub(super) fn run_dart_step(
             drop_single_component: args.drop_single_component,
             ..MixtureParams::default()
         };
-        run_mixture_model(&params, &m6a_sites, &gff_map, &mix_params, valid_cells)?;
+        run_mixture_model(
+            &params,
+            &m6a_sites,
+            &gff_map,
+            &spliced,
+            &mix_params,
+            valid_cells,
+        )?;
     }
 
     Ok(())

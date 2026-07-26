@@ -52,7 +52,7 @@ impl SplicedGenes {
     /// value in the column that no downstream reader could tell from a real one.
     pub fn rel_pos(&self, gene: &GeneId, pos: i64, strand: Strand) -> Option<i64> {
         let exons = self.exons.get(gene)?;
-        let total: i64 = exons.iter().map(|&(s, e)| e - s).sum();
+        let total = Self::total_len(exons);
         let mut before = 0i64;
         for &(start, end) in exons.iter() {
             if pos < start {
@@ -68,6 +68,20 @@ impl SplicedGenes {
             before += end - start;
         }
         None
+    }
+
+    /// The gene's spliced (mature transcript) length.
+    ///
+    /// The partner of [`Self::rel_pos`]: a position and the length that
+    /// normalises it must be measured on the same axis. Pairing a spliced
+    /// offset with a genomic span would squeeze every site into the leading few
+    /// percent of the range, since introns are most of a typical human gene.
+    pub fn spliced_len(&self, gene: &GeneId) -> Option<i64> {
+        self.exons.get(gene).map(|e| Self::total_len(e))
+    }
+
+    fn total_len(exons: &[(i64, i64)]) -> i64 {
+        exons.iter().map(|&(s, e)| e - s).sum()
     }
 }
 
