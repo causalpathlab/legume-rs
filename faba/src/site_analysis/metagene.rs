@@ -28,11 +28,24 @@ pub struct MetageneArgs {
         short = 'n',
         long = "bins",
         default_value_t = 57,
-        help = "Total bins across the metagene (default: 19 per region x 3 regions)",
+        help = "Total bins across the metagene (default: 57)",
         long_help = "Total number of bins across the metagene profile.\n\
-                     Bins are split equally among the three gene regions:\n\
-                     5'UTR, CDS, and 3'UTR. Default 57 = 19 bins per region.\n\
-                     Choose a multiple of 3 for equal region widths."
+                     \n\
+                     Bins are split between the 5'UTR, CDS and 3'UTR in proportion to\n\
+                     each region's longest SPLICED length, with floors of 10 bins for\n\
+                     the 5'UTR and 20 for the 3'UTR so a long CDS cannot starve them.\n\
+                     The split therefore depends on the annotation, and bin counts can\n\
+                     differ between runs on different GFFs -- compare the shape of two\n\
+                     profiles, not their bar widths.\n\
+                     \n\
+                     Sites are assigned to the MERGED annotated intervals of a feature,\n\
+                     and position is measured along the spliced feature, so introns\n\
+                     consume no metagene coordinate. This matters: using each feature's\n\
+                     min-start..max-stop span instead (the obvious shortcut, and what\n\
+                     faba did before) makes the CDS span cover a median 83% of the gene\n\
+                     and overlap the 3'UTR in 96% of genes, so CDS claims 3'UTR sites\n\
+                     and piles them into its LAST bin -- a terminal spike that reads as\n\
+                     biology. See docs/profiling-methods.md section 1.1."
     )]
     num_bins: usize,
 

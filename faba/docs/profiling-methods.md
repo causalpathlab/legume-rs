@@ -28,6 +28,72 @@ off. This is *separate from*, and on top of, the duplicate-flag filter.
 `{gene}/{modality}/{channel}` — e.g. `{gene}/m6a/methylated`. Site-level rows carry the position:
 `{gene}/m6a/{chr}:{pos}/methylated`.
 
+### 1.1 The gene model: merged features, spliced coordinates
+
+Anything that asks *where in a transcript* a position falls — the metagene (§7), APA's poly(A)
+positions (§4) — needs a gene model, and there are two ways to get one wrong. Both were live in
+`faba` until they were measured, so the reasoning is recorded here rather than left in a commit.
+
+**Do not use union spans.** `genomic_data`'s `build_union_gene_model` collapses every record of a
+feature type for a gene into a single `min(start)..max(stop)` interval. That is not the feature;
+it is the *reach* of the feature. Measured on GENCODE v48 basic: the union CDS "span" covers a
+median **83.5%** of the whole gene, introns included, and overlaps the union UTR in **95.9%** of
+genes. The union 3′UTR span runs a mean **6.35×** its real spliced length (median 1.00×, p90
+12.4×) and overlaps the CDS span in **46.1%** of genes.
+
+Features are tested in the order 5′UTR → CDS → 3′UTR, so an oversized CDS span *claims* 3′UTR
+sites. Because those sites sit at the far end of the span, they bin to the **last CDS bin**. That
+was the origin of a terminal-bin spike that looked like biology and was not:
+
+| track | last bin / mean of the rest, union spans | with merged features |
+|---|---|---|
+| 5′UTR | 7.66× | **1.31×** |
+| CDS | 13.77× | 9.10× |
+| 3′UTR | 1.94× | **0.64×** |
+
+The tell that it was never library 3′ bias: the spike was **worst in CDS**, whereas 3′ coverage
+pileup, adapter read-through, internal priming and 3′-end base quality all predict a spike in the
+*3′UTR*. A second, independent argument applies to the m6A calls specifically — they are WT-vs-MUT
+contrasts, and the MUT arm shares the library chemistry, so anything symmetric between the arms is
+already cancelled before the metagene sees it.
+
+**Measure position along the spliced feature.** A relative position taken along a genomic span
+lets introns consume transcript coordinate. Position now runs along the concatenated merged
+intervals, mirrored on the reverse strand, so `bin = rel * nbins / spliced_len`.
+
+**Verification.** After the fix, an independent transcript-level classification in Python puts
+382 of rep1's 4,033 called sites in real CDS exons and 3,493 in real UTRs; `faba` reports 373 and
+3,509, and the 9-site gap is accounted for exactly by isoform convention (12 sites are CDS in one
+isoform and 5′UTR in another, where `faba` tests 5′UTR first, less 3 sites inside an overlapping
+gene's CDS). What survives is the expected biology: CDS climbs monotonically into the stop codon
+and the 3′UTR is strongly front-loaded just past it, matching a stop-codon distance histogram in
+which **85%** of sites lie 3′ of the stop and **43.9%** fall 100–500 nt beyond it.
+
+**The same defect reached APA.** `apa` built its 3′UTR regions from the same union model, which
+matters more there than anywhere else: APA's whole estimand is *position within the 3′UTR*, so a
+region running through introns and CDS corrupts the estimate rather than just the plot. Of 17,653
+regions admitted at `--min-utr-length 200`, **6,599 (37.4%)** had a span overlapping the gene's own
+CDS. 3′UTRs are now merged annotated exons, `--min-utr-length` gates on the **spliced** length, and
+a read is charged only its exonic bases — so a read lying in an intron of the 3′UTR contributes
+nothing, and one spanning an intron is credited its spliced length, not its genomic length.
+
+**A residual that cannot be driven to zero, and why.** After the fix, 4,958 of 17,502 regions
+(28.3%) still have a 3′UTR exon overlapping some CDS record. This is not a leftover artifact: of
+65,270 transcripts in GENCODE v48 basic, **zero** have a `UTR` record overlapping a `CDS` record
+*of the same transcript*. The annotation is internally consistent per transcript; the overlap
+exists only across isoforms, and any **gene-level** 3′UTR model inherits it. `ENSG00000186891`
+(TNFRSF18) is typical — one transcript's 3′UTR is 1,203,508–1,203,846 while another's CDS is
+1,203,594–1,203,960, and both records are real. Removing it would mean either electing a canonical
+transcript or subtracting the CDS union from the UTR, and both truncate the genuine 3′UTR of the
+dominant isoform. The honest description of the current model is therefore *gene-level, merged
+across isoforms* — not *per-transcript*.
+
+**Still genomic, deliberately flagged:** `rel_pos` in the site parquet (`editing/io.rs`) and in the
+methylation mixture (`editing/mixture_pipeline.rs`) is an offset from the gene start in *genomic*
+coordinates, so it counts introns. That is a gene-span offset, not a union-model artifact — it will
+not produce a terminal spike — but it is not a transcript coordinate either, and should not be read
+as one.
+
 ---
 
 ## 2. `dartseq` — m6A methylation
@@ -193,6 +259,16 @@ thrown away.
 **There is no significance test in the APA path.** Sites are selected by BIC (or by the mass rule
 on the fast path). No p-values, no FDR.
 
+**The 3′UTR is a spliced model** — merged annotated exons, not a `min(start)..max(stop)` span, with
+`--min-utr-length` gating on the spliced length and every UTR-relative coordinate (`alpha`, the
+fragment start `x`, the fragment length `l`, the poly(A) position) measured along the exons. A read
+inside a 3′UTR intron is not counted; a read spanning one is charged its spliced length. §1.1 gives
+the measurements and the residual cross-isoform overlap this model still carries. Two consequences
+worth knowing when comparing against older output: `genomic_start`/`genomic_stop` shift by 1 bp,
+because the alpha→genomic map is now the exact inverse of the genomic→alpha map and previously was
+not; and a fragment clipped at the UTR boundary is one base longer, because covered bases are now
+counted rather than differenced.
+
 ---
 
 ## 5. `genes` — gene counts, and cell calling
@@ -263,7 +339,11 @@ None of these fit a model or produce a p-value.
 - **`pileup`** renders one gene's sites as an ASCII histogram, or (with `--gtf`/`--bam`) a faceted
   Miami plot: sites above, gene model in the middle, read depth below, one panel per cell type.
 - **`metagene`** maps each site to its 5′UTR / CDS / 3′UTR and bins its relative, strand-aware
-  position within that feature.
+  position within that feature. Features are the **merged annotated intervals**, and position runs
+  along the **spliced** feature — see §1.1 for what goes wrong with union spans, and for the
+  measurements that established it. Bin counts per region are proportional to each region's
+  maximum spliced length (floors of 10 for the 5′UTR and 20 for the 3′UTR), so they change with
+  the annotation; compare profile *shapes* between runs, not bar widths.
 
 ---
 

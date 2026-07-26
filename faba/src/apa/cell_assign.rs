@@ -130,10 +130,7 @@ pub fn assign_fragments_to_sites(
         }
         let beta = em_result.betas[k];
         let (gstart, gstop) = utr.alpha_to_genomic_range(alpha.into(), beta.into());
-        let genomic_alpha = match utr.strand {
-            genomic_data::sam::Strand::Forward => utr.start + alpha as i64,
-            genomic_data::sam::Strand::Backward => utr.end - alpha as i64,
-        };
+        let genomic_alpha = utr.alpha_to_genomic(alpha.into());
         let site_id = crate::apa::site_id(&utr.name, &k.to_string());
         // Clamp to [0, utr_length]: alpha is a UTR-local position seeded
         // by site_discovery; a tiny numerical drift past utr_length
@@ -203,10 +200,7 @@ pub fn assign_fragments_two_site_fast(
         .map(|k| {
             let alpha = site_alphas[k];
             let (gstart, gstop) = utr.alpha_to_genomic_range(alpha.into(), beta.into());
-            let genomic_alpha = match utr.strand {
-                genomic_data::sam::Strand::Forward => utr.start + alpha as i64,
-                genomic_data::sam::Strand::Backward => utr.end - alpha as i64,
-            };
+            let genomic_alpha = utr.alpha_to_genomic(alpha.into());
             ApaSiteAnnotation {
                 site_id: crate::apa::site_id(&utr.name, &k.to_string()),
                 gene_name: utr.name.clone(),
