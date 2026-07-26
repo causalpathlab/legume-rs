@@ -54,6 +54,8 @@ fn test_cell_assignment_deduplication() {
         strand: Strand::Forward,
         name: "TEST_GENE".into(),
         utr_length: 3000,
+        // One unspliced 3000nt block, 1-based inclusive.
+        exons: vec![(10001, 13000)],
     };
 
     // Each test fragment is its own cluster (no real coarsening here).
@@ -127,6 +129,8 @@ fn test_noise_exclusion() {
         strand: Strand::Forward,
         name: "TEST_GENE".into(),
         utr_length: 3000,
+        // One unspliced 3000nt block, 1-based inclusive.
+        exons: vec![(10001, 13000)],
     };
 
     let cluster_idx: Vec<u32> = (0..fragments.len() as u32).collect();

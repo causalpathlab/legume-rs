@@ -2,7 +2,7 @@ use crate::apa::utr_region::UtrRegion;
 use crate::data::bam_io;
 use crate::data::poly_a_utils::*;
 use genomic_data::bed::Bed;
-use genomic_data::sam::{CellBarcode, Strand, UmiBarcode};
+use genomic_data::sam::{CellBarcode, UmiBarcode};
 use rust_htslib::bam::ext::BamRecordExtensions;
 
 /// Clustered fragment: one representative tuple + a count of how many
@@ -183,10 +183,6 @@ pub fn extract_fragments_cached(
 ) -> anyhow::Result<Vec<FragmentRecord>> {
     let mut fragments = Vec::new();
 
-    let utr_start = utr.start;
-    let utr_end = utr.end;
-    let utr_len = utr.utr_length as f32;
-
     // Try fetching with the original chr name; if empty, try alternate (chr1 <-> 1)
     let bed = utr.to_bed();
     let result = try_fetch_region_cached(cache, bam_file, &bed);
@@ -231,63 +227,35 @@ pub fn extract_fragments_cached(
             false
         };
 
-        // Compute UTR-relative coordinates based on strand
-        let (x, l, r, pa_pos) = match utr.strand {
-            Strand::Forward => {
-                // Forward strand: UTR position 1 is at utr_start
-                let x_abs = ref_start.max(utr_start);
-                let end_abs = ref_end.min(utr_end);
-                let x_rel = (x_abs - utr_start + 1) as f32;
-                let l_val = (end_abs - x_abs) as f32;
+        // Place the read on the SPLICED 3'UTR. The fetch window is the exons'
+        // bounding box, so it also returns reads sitting in the UTR's introns:
+        // those touch no exon and drop out here, and a read that spans an
+        // intron is credited its spliced length, not its genomic reach.
+        // htslib reports a 0-based start and a 0-based exclusive end, i.e. the
+        // 1-based inclusive span `[ref_start + 1, ref_end]`, which is the
+        // convention `exons` is in.
+        let Some((x_rel, l_val)) = utr.overlap_spliced(ref_start + 1, ref_end) else {
+            return;
+        };
 
-                if l_val <= 0.0 || x_rel < 1.0 || x_rel > utr_len {
-                    return;
-                }
+        let r = if is_valid_junction {
+            poly_tail_len as f32
+        } else {
+            0.0
+        };
 
-                let r_val = if is_valid_junction {
-                    poly_tail_len as f32
-                } else {
-                    0.0
-                };
-
-                let pa = if is_valid_junction {
-                    Some((ref_end - utr_start) as f32)
-                } else {
-                    None
-                };
-
-                (x_rel, l_val, r_val, pa)
-            }
-            Strand::Backward => {
-                // Reverse strand: UTR position 1 is at utr_end (UTR is reversed)
-                let x_abs = ref_end.min(utr_end);
-                let start_abs = ref_start.max(utr_start);
-                let x_rel = (utr_end - x_abs + 1) as f32;
-                let l_val = (x_abs - start_abs) as f32;
-
-                if l_val <= 0.0 || x_rel < 1.0 || x_rel > utr_len {
-                    return;
-                }
-
-                let r_val = if is_valid_junction {
-                    poly_tail_len as f32
-                } else {
-                    0.0
-                };
-
-                let pa = if is_valid_junction {
-                    Some((utr_end - ref_start) as f32)
-                } else {
-                    None
-                };
-
-                (x_rel, l_val, r_val, pa)
-            }
+        // The pA site a junction read reports is its 3'-most base, also a
+        // spliced offset. The covered stretch is contiguous once spliced, so
+        // that end is `x + l - 1` on either strand.
+        let pa_pos = if is_valid_junction {
+            Some((x_rel + l_val - 1) as f32)
+        } else {
+            None
         };
 
         fragments.push(FragmentRecord {
-            x,
-            l,
+            x: x_rel as f32,
+            l: l_val as f32,
             r,
             is_junction: pa_pos.is_some(),
             pa_site: pa_pos,

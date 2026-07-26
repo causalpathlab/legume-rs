@@ -12,7 +12,7 @@ use arrow::array::{ArrayRef, Float32Array, Int64Array, StringArray, UInt32Array}
 use arrow::record_batch::RecordBatch;
 use dashmap::DashMap;
 use genomic_data::bed::BedWithGene;
-use genomic_data::gff::{build_union_gene_model, read_gff_record_vec, GeneId, GffRecordMap};
+use genomic_data::gff::{read_gff_record_vec, GeneId, GffRecordMap};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::sync::{Arc, Mutex};
@@ -592,34 +592,13 @@ fn load_utrs(args: &CountApaArgs) -> anyhow::Result<Vec<UtrRegion>> {
             );
         }
 
-        let model = build_union_gene_model(&records)?;
-        info!(
-            "found {} 3'-UTR regions in gene model",
-            model.three_prime_utr.len()
-        );
+        let mut utrs = build_utr_regions_from_gff(&records)?;
+        info!("found {} 3'-UTR regions in gene model", utrs.len());
 
-        let mut utrs = Vec::new();
-        for entry in model.three_prime_utr.iter() {
-            let gene_id = entry.key();
-            let rec = entry.value();
-            // GFF coords are 1-based inclusive; nucleotide span is stop - start + 1.
-            let utr_length = (rec.stop - rec.start + 1) as usize;
-            if utr_length < args.min_utr_length {
-                continue;
-            }
-            let name: Box<str> = match &rec.gene_name {
-                genomic_data::gff::GeneSymbol::Symbol(s) => format!("{}_{}", gene_id, s).into(),
-                genomic_data::gff::GeneSymbol::Missing => format!("{}", gene_id).into(),
-            };
-            utrs.push(UtrRegion {
-                chr: rec.seqname.clone(),
-                start: rec.start,
-                end: rec.stop,
-                strand: rec.strand,
-                name,
-                utr_length,
-            });
-        }
+        // Gate on the SPLICED length: an intron between two 3'UTR exons is not
+        // sequence a read can land on, so it must not count toward the length
+        // that decides whether a region is worth fitting.
+        utrs.retain(|u| u.utr_length >= args.min_utr_length);
 
         info!("kept {} 3'-UTRs (>= {}bp)", utrs.len(), args.min_utr_length);
         Ok(utrs)

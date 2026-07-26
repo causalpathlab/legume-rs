@@ -274,7 +274,12 @@ pub struct CountApaArgs {
         help = "3'-UTR regions BED file (mixture mode)",
         long_help = "BED file defining 3'-UTR regions.\n\
                      Alternative to --gff for mixture mode.\n\
-                     Each row should be a UTR interval."
+                     Each row should be a UTR interval.\n\
+                     \n\
+                     A BED row carries no exon structure, so each interval is taken as\n\
+                     one contiguous block. With --gff instead, 3'UTRs are built from the\n\
+                     merged annotated exons and coordinates are spliced -- so if your\n\
+                     genes have multi-exon 3'UTRs, --gff is the more faithful input."
     )]
     pub(crate) utr_bed: Option<Box<str>>,
 
@@ -282,8 +287,21 @@ pub struct CountApaArgs {
     #[arg(
         long,
         default_value_t = 200,
-        help = "Minimum 3'-UTR length in bp (mixture mode)",
-        long_help = "UTRs shorter than this are skipped. Only used in mixture mode."
+        help = "Minimum 3'-UTR SPLICED length in bp (mixture mode)",
+        long_help = "UTRs shorter than this are skipped. Only used in mixture mode.\n\
+                     \n\
+                     Measured on the SPLICED length -- the summed length of the 3'UTR's\n\
+                     merged annotated exons -- not on the distance from its first base\n\
+                     to its last. Those differ by a mean 6.4x (p90 12.4x) because a\n\
+                     min-start..max-stop span over a gene's isoforms swallows introns\n\
+                     and, in 46% of genes, reaches back into the CDS. Since APA measures\n\
+                     WHERE in the 3'UTR a poly(A) site sits, that span would be the wrong\n\
+                     coordinate, not merely a wrong length.\n\
+                     \n\
+                     With --utr-bed the interval is taken as given, one block, since a\n\
+                     BED row carries no exon structure.\n\
+                     \n\
+                     See docs/profiling-methods.md section 1.1."
     )]
     pub(crate) min_utr_length: usize,
 
