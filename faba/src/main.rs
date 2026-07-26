@@ -265,11 +265,11 @@ Example:\n  \
             Maps sites from a parquet file onto gene features (5'UTR, CDS, 3'UTR, non-coding)\n\
             using GFF annotations,\n\
             and produces a binned histogram showing the distribution of sites across the metagene.\n\n\
-            A site is assigned to the MERGED annotated intervals of a feature, and its position is\n\
-            measured along the SPLICED feature, so introns consume no metagene coordinate.\n\
-            Assigning against each feature's min-start..max-stop span instead produces a spurious\n\
-            spike in the last CDS bin, because that span covers most of the gene and swallows the\n\
-            3'UTR. See docs/profiling-methods.md section 1.1.",
+            Sites map to a feature's MERGED annotated intervals.\n\
+            Position runs along the SPLICED feature.\n\
+            Introns consume no metagene coordinate.\n\
+            A min-start..max-stop span instead spikes the last CDS bin.\n\
+            See docs/profiling-methods.md section 1.1.",
         after_long_help = "\
 	Example:\n\
 	faba metagene -s out/m6a_sites.parquet -g genes.gff -o metagene.tsv --print\n\
