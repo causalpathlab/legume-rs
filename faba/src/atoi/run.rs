@@ -501,7 +501,14 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
             drop_single_component: args.drop_single_component,
             ..Default::default()
         };
-        run_mixture_model(&params, &atoi_sites, &gff_map, &mix_params, valid_cells)?;
+        run_mixture_model(
+            &params,
+            &atoi_sites,
+            &gff_map,
+            &spliced,
+            &mix_params,
+            valid_cells,
+        )?;
     }
 
     info!("done");

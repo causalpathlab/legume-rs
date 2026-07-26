@@ -26,6 +26,7 @@ pub fn run_mixture_model(
     params: &ConversionParams,
     gene_sites: &HashMap<GeneId, Vec<ConversionSite>>,
     gff_map: &GffRecordMap,
+    spliced: &crate::data::gene_model::SplicedGenes,
     mixture_params: &crate::editing::mixture::MixtureParams,
     valid_cells: Option<&rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>>>,
 ) -> anyhow::Result<()> {
@@ -97,7 +98,7 @@ pub fn run_mixture_model(
                     cb: &CellBarcode,
                     bed: &BedWithGene,
                     meth: &ConversionData|
-     -> (GeneId, (usize, f32, f32)) {
+     -> Option<(GeneId, (usize, f32, f32))> {
         let cell_idx = cell_to_idx[&(batch_idx, cb.clone())];
         let c = meth.converted as f32;
         let u = meth.unconverted as f32;
@@ -115,25 +116,50 @@ pub fn run_mixture_model(
                 }
             }
         };
-        // Convert absolute site_pos to strand-aware relative position
-        let rel_pos = if let Some(gff) = gff_map.get(&bed.gene) {
-            let lb = (gff.start - 1).max(0); // GFF 1-based -> 0-based
-            let ub = gff.stop;
-            match gff.strand {
-                Strand::Forward => (meth.site_pos - lb) as f32,
-                Strand::Backward => (ub - meth.site_pos - 1) as f32,
+        // Position along the mature transcript. This is the mixture's covariate,
+        // so it must sit on the same axis as the `gene_length` that normalises
+        // it below -- a spliced offset against a genomic span would crush every
+        // site into the first few percent of the range, introns being most of a
+        // typical human gene.
+        //
+        // An intronic site is dropped rather than nudged onto the nearest exon:
+        // it has no transcript position, and a fabricated one would be an
+        // observation the model cannot tell from a real one.
+        let strand = gff_map
+            .get(&bed.gene)
+            .map(|g| g.strand)
+            .unwrap_or(Strand::Forward);
+        let rel_pos = match spliced.rel_pos(&bed.gene, meth.site_pos, strand) {
+            Some(p) => p as f32,
+            // No exon model for this gene: fall back to the genomic pair, which
+            // `gene_length` mirrors, so the axis still agrees with itself.
+            None if spliced.spliced_len(&bed.gene).is_none() => {
+                let gff = gff_map.get(&bed.gene)?;
+                let (lb, ub) = ((gff.start - 1).max(0), gff.stop);
+                match gff.strand {
+                    Strand::Forward => (meth.site_pos - lb) as f32,
+                    Strand::Backward => (ub - meth.site_pos - 1) as f32,
+                }
             }
-        } else {
-            meth.site_pos as f32
+            None => return None,
         };
-        (bed.gene.clone(), (cell_idx, rel_pos, w))
+        Some((bed.gene.clone(), (cell_idx, rel_pos, w)))
     };
 
     let mut gene_obs: rustc_hash::FxHashMap<GeneId, Vec<(usize, f32, f32)>> =
         rustc_hash::FxHashMap::default();
+    let mut n_no_transcript_pos = 0usize;
     for (batch_idx, cb, bed, meth) in &fit_stats {
-        let (gene, obs) = make_obs(*batch_idx, cb, bed, meth);
-        gene_obs.entry(gene).or_default().push(obs);
+        match make_obs(*batch_idx, cb, bed, meth) {
+            Some((gene, obs)) => gene_obs.entry(gene).or_default().push(obs),
+            None => n_no_transcript_pos += 1,
+        }
+    }
+    if n_no_transcript_pos > 0 {
+        log::info!(
+            "mixture: dropped {n_no_transcript_pos} observation(s) at sites with no \
+             transcript position (intronic)"
+        );
     }
 
     // Resolve the component-calling bandwidth once for this modality. An
@@ -200,9 +226,14 @@ pub fn run_mixture_model(
         // Diverge: EM gets the fallback, sidecar gets NaN for missing.
         // GFF coords are 1-based inclusive (genomic-data/src/gff.rs:508),
         // so the nucleotide span is `stop - start + 1`, not `stop - start`.
-        let gene_span = gff_map
-            .get(gene_id)
-            .map(|gff| (gff.stop - gff.start + 1) as f32);
+        // Spliced length, to match the spliced positions above. Falls back to
+        // the genomic span only for genes with no exon model, which is exactly
+        // when the positions fell back too.
+        let gene_span = spliced.spliced_len(gene_id).map(|n| n as f32).or_else(|| {
+            gff_map
+                .get(gene_id)
+                .map(|gff| (gff.stop - gff.start + 1) as f32)
+        });
         let gene_length = gene_span.unwrap_or(1000.0);
         let gene_length_emit = gene_span.unwrap_or(f32::NAN);
 

@@ -1,6 +1,17 @@
 use rust_htslib::bam;
 use rust_htslib::bam::record::Cigar;
 
+///////////////////////////
+// Unpack the CIGAR once //
+///////////////////////////
+// `bam::Record::cigar()` decodes the packed ops into a fresh `Vec<Cigar>` on
+// every call, and `cigar_cached()` only answers after an explicit
+// `cache_cigar()` on a `&mut Record`, which a visitor holding `&Record` cannot
+// do. So every helper that re-derived the CIGAR from the record cost one
+// malloc+free per read, on every read of every region. The `_from_cigar` forms
+// below borrow a CIGAR the caller unpacked once; the record-taking forms stay
+// for callers that hold no CIGAR.
+
 /// Get the query alignment boundaries from CIGAR string
 /// Returns (start, end) positions in the query sequence (0-based, half-open)
 pub fn get_query_alignment_bounds(cigar: &[Cigar], seq_len: usize) -> (usize, usize) {
@@ -31,8 +42,15 @@ pub fn get_query_alignment_bounds(cigar: &[Cigar], seq_len: usize) -> (usize, us
 
 /// Count the number of A (forward) or T (reverse) bases in the soft-clipped region
 /// Returns the count of A/T bases
+///
+/// Unpacks the record's CIGAR.
+/// Callers that already hold one should use [`count_a_or_t_bases_in_tail_from_cigar`].
 pub fn count_a_or_t_bases_in_tail(bam_record: &bam::Record) -> usize {
-    let cigar = bam_record.cigar();
+    count_a_or_t_bases_in_tail_from_cigar(&bam_record.cigar(), bam_record)
+}
+
+/// A/T bases in the soft-clipped tail, read off a CIGAR the caller already unpacked.
+pub fn count_a_or_t_bases_in_tail_from_cigar(cigar: &[Cigar], bam_record: &bam::Record) -> usize {
     let is_reverse = bam_record.is_reverse();
 
     // Get soft-clip length from CIGAR
@@ -74,15 +92,32 @@ pub fn count_a_or_t_bases_in_tail(bam_record: &bam::Record) -> usize {
 /// * bam_record: The BAM record to check
 /// * misprime_in: Number of bases at the end of alignment to check
 /// * misprime_a_count: Minimum number of A/T bases to consider internal priming
+///
+/// Unpacks the record's CIGAR.
+/// Callers that already hold one should use [`check_internal_prime_from_cigar`].
 pub fn check_internal_prime(
+    bam_record: &bam::Record,
+    misprime_in: usize,
+    misprime_a_count: usize,
+) -> bool {
+    check_internal_prime_from_cigar(
+        &bam_record.cigar(),
+        bam_record,
+        misprime_in,
+        misprime_a_count,
+    )
+}
+
+/// Internal-priming check against a CIGAR the caller already unpacked.
+pub fn check_internal_prime_from_cigar(
+    cigar: &[Cigar],
     bam_record: &bam::Record,
     misprime_in: usize,
     misprime_a_count: usize,
 ) -> bool {
     // Extract aligned sequence (excluding soft-clipped regions)
     let seq = bam_record.seq().as_bytes();
-    let cigar = bam_record.cigar();
-    let (aligned_start, aligned_end) = get_query_alignment_bounds(&cigar, seq.len());
+    let (aligned_start, aligned_end) = get_query_alignment_bounds(cigar, seq.len());
     let aligned_seq = &seq[aligned_start..aligned_end];
 
     // For forward reads: check the 3' end of the aligned sequence (before poly-A tail)
@@ -99,11 +134,10 @@ pub fn check_internal_prime(
     count >= misprime_a_count
 }
 
-/// Get the soft-clip (poly-A/T tail) length from a BAM record's CIGAR.
-/// Returns the length and whether it's at the forward (3') or reverse (5') end.
-pub fn get_polya_tail_length(bam_record: &bam::Record) -> i64 {
-    let cigar = bam_record.cigar();
-    if bam_record.is_reverse() {
+/// Get the soft-clip (poly-A/T tail) length from an already-unpacked CIGAR.
+/// The tail sits at the CIGAR's 5' end on a reverse read and its 3' end on a forward one.
+pub fn get_polya_tail_length(cigar: &[Cigar], is_reverse: bool) -> i64 {
+    if is_reverse {
         match cigar.first() {
             Some(Cigar::SoftClip(len)) => *len as i64,
             _ => 0,
@@ -114,4 +148,37 @@ pub fn get_polya_tail_length(bam_record: &bam::Record) -> i64 {
             _ => 0,
         }
     }
+}
+
+///////////////////////////
+// Reference-side blocks //
+///////////////////////////
+
+/// The read's aligned blocks in htslib's frame: 0-based, half-open `[start, stop)`, ascending.
+///
+/// Same walk as `BamRecordExtensions::aligned_blocks`, op for op.
+/// `M`/`=`/`X` emit a block and advance the reference.
+/// `D` and `N` advance it without emitting, so a deletion splits the read just as a splice does.
+/// `I`/`S`/`H`/`P` move nothing, and htslib still closes the block at them.
+/// So `10M5I10M` reports two abutting blocks, not one.
+///
+/// The one difference is the allocation.
+/// htslib's version calls `Record::cigar()` internally and clones the ops per read.
+pub fn aligned_blocks(
+    cigar: &[Cigar],
+    reference_start: i64,
+) -> impl Iterator<Item = [i64; 2]> + '_ {
+    let mut pos = reference_start;
+    cigar.iter().filter_map(move |op| match *op {
+        Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
+            let start = pos;
+            pos += len as i64;
+            Some([start, pos])
+        }
+        Cigar::Del(len) | Cigar::RefSkip(len) => {
+            pos += len as i64;
+            None
+        }
+        _ => None,
+    })
 }

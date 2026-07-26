@@ -3,7 +3,6 @@ use crate::data::bam_io;
 use crate::data::poly_a_utils::*;
 use genomic_data::bed::Bed;
 use genomic_data::sam::{CellBarcode, UmiBarcode};
-use rust_htslib::bam::ext::BamRecordExtensions;
 
 /// Clustered fragment: one representative tuple + a count of how many
 /// original `FragmentRecord`s share the same (coarsened) features.
@@ -209,13 +208,21 @@ pub fn extract_fragments_cached(
         let cell_barcode = bam_io::extract_cell_barcode(rec, cb_tag);
         let umi = bam_io::extract_umi(rec, umi_tag);
 
+        // Every test below is a walk over the same CIGAR, so unpack it once and
+        // lend it out. `Record::cigar()` allocates a fresh `Vec<Cigar>` per call
+        // — and `rec.aligned_blocks()` calls it internally — so asking the
+        // record for its CIGAR three or four times is three or four
+        // malloc+frees on every read of every 3'UTR of every BAM.
+        let cigar = rec.cigar();
+
         // Determine if this is a valid junction read (poly-A/T tail passes all checks)
-        let poly_tail_len = get_polya_tail_length(rec);
+        let poly_tail_len = get_polya_tail_length(&cigar, rec.is_reverse());
         let is_valid_junction = if poly_tail_len >= polya.min_tail as i64 {
-            let at_count = count_a_or_t_bases_in_tail(rec);
+            let at_count = count_a_or_t_bases_in_tail_from_cigar(&cigar, rec);
             let non_at = poly_tail_len as usize - at_count;
             non_at <= polya.max_non_at
-                && !check_internal_prime(
+                && !check_internal_prime_from_cigar(
+                    &cigar,
                     rec,
                     polya.internal_prime_window,
                     polya.internal_prime_count,
@@ -231,7 +238,7 @@ pub fn extract_fragments_cached(
         // gap whenever the gap does not coincide with an annotated intron.
         // `aligned_blocks` is 0-based half-open, so a block `[s, e)` is the
         // 1-based inclusive `(s + 1, e)` that `exons` is written in.
-        let blocks = rec.aligned_blocks().map(|[s, e]| (s + 1, e));
+        let blocks = aligned_blocks(&cigar, rec.pos()).map(|[s, e]| (s + 1, e));
         let Some(cover) = utr.overlap_spliced_blocks(blocks) else {
             return;
         };

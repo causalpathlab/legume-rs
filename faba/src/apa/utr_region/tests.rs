@@ -658,3 +658,87 @@ fn the_reported_point_lies_within_the_reported_range() {
         }
     }
 }
+
+//////////////////////////////////
+// Aligned blocks off the CIGAR //
+//////////////////////////////////
+
+/// A mapped record carrying `cigar` at 0-based `pos`, query bases and all.
+fn record_with_cigar(pos: i64, cigar: &str) -> rust_htslib::bam::Record {
+    use rust_htslib::bam::{record::CigarString, Record};
+
+    let cigar = CigarString::try_from(cigar).unwrap();
+    let seq = query_bases(&cigar);
+    let qual = vec![40u8; seq.len()];
+    let mut rec = Record::new();
+    rec.set(b"read", Some(&cigar), &seq, &qual);
+    rec.set_tid(0);
+    rec.set_pos(pos);
+    rec.set_mapq(60);
+    rec.unset_unmapped();
+    rec
+}
+
+/// The blocks fragment extraction walks must be htslib's blocks, op for op.
+///
+/// `extract_fragments_cached` dropped `rec.aligned_blocks()`: it unpacks the CIGAR a second time.
+/// Borrowing the CIGAR the poly-A checks unpacked is only safe while both walks agree everywhere.
+/// `D` splits a read just as `N` does, and `I` closes a block without moving the reference.
+/// Clips and pads emit nothing and move nothing.
+#[test]
+fn aligned_blocks_off_a_borrowed_cigar_match_htslibs_own() {
+    use crate::data::poly_a_utils::aligned_blocks;
+    use rust_htslib::bam::ext::BamRecordExtensions;
+
+    let cases = [
+        // Plain match, and the operations that are pure query-side padding.
+        "100M",
+        "10S80M10S",
+        "5H95M",
+        "5H10S80M10S5H",
+        // Leading and trailing clips only on one side.
+        "12S88M",
+        "88M12S",
+        // Insertions: no reference movement, but htslib still breaks the block.
+        "40M5I55M",
+        "10S40M5I50M10S",
+        // Deletions split exactly like skips do — the easiest divergence to write.
+        "40M5D55M",
+        "40M100N60M",
+        "40M5D55M200N30M",
+        // Multiple skips, and a read that both clips and skips repeatedly.
+        "30M100N30M200N40M",
+        "10S30M100N30M200N30M10S",
+        // `=`/`X` are match operations and must emit blocks like `M`.
+        "50=50X",
+        "20=5X10N30=15X",
+        // Degenerate edges: a read that aligns nothing, and a leading skip.
+        "100S",
+        "50N100M",
+    ];
+
+    for cigar in cases {
+        for pos in [0i64, 1, 149, 1_000_000] {
+            let rec = record_with_cigar(pos, cigar);
+            let expected: Vec<[i64; 2]> = rec.aligned_blocks().collect();
+            let actual: Vec<[i64; 2]> = aligned_blocks(&rec.cigar(), rec.pos()).collect();
+            assert_eq!(actual, expected, "{cigar} at pos {pos}");
+        }
+    }
+}
+
+/// The `D`/`N` split is the one htslib behaviour a hand-written walk tends to drop.
+#[test]
+fn a_deletion_splits_a_block_the_same_way_a_skip_does() {
+    use crate::data::poly_a_utils::aligned_blocks;
+
+    let rec = record_with_cigar(100, "40M5D55M");
+    let blocks: Vec<[i64; 2]> = aligned_blocks(&rec.cigar(), rec.pos()).collect();
+    // The 5 deleted reference bases 140..144 belong to no block.
+    assert_eq!(blocks, vec![[100, 140], [145, 200]]);
+
+    // An insertion moves nothing, so the two blocks abut at the same coordinate.
+    let rec = record_with_cigar(100, "40M5I55M");
+    let blocks: Vec<[i64; 2]> = aligned_blocks(&rec.cigar(), rec.pos()).collect();
+    assert_eq!(blocks, vec![[100, 140], [140, 195]]);
+}
