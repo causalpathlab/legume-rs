@@ -353,12 +353,30 @@ impl GffRecordMap {
         self.records.get(gene_id).map(|x| x.value().clone())
     }
 
-    /// Get all `GffRecord`s in the map
+    /// Get all `GffRecord`s in the map, sorted by `(seqname, start, gene_id)`.
+    ///
+    /// Callers `par_iter()` this vector and fetch from a BAM at each record's
+    /// locus. Rayon splits a slice into contiguous chunks, so coordinate order
+    /// gives each worker one forward sweep through a distinct genomic block
+    /// instead of the scattered seeking the underlying map's hash order
+    /// produces — which is what readahead needs to help, and matters most on
+    /// rotational storage. The `gene_id` tie-break also makes the order
+    /// deterministic, which hash order never was.
     pub fn records(&self) -> Vec<GffRecord> {
-        self.records
+        let mut records = self
+            .records
             .iter()
             .map(|entry| entry.value().clone())
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+
+        records.sort_unstable_by(|a, b| {
+            a.seqname
+                .cmp(&b.seqname)
+                .then(a.start.cmp(&b.start))
+                .then(a.gene_id.cmp(&b.gene_id))
+        });
+
+        records
     }
 
     /// Count the number of records in the map
@@ -613,4 +631,53 @@ pub fn parse_gff(words: Vec<Box<str>>) -> Option<GffRecord> {
         gene_name,
         gene_type,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gene(id: &str, seqname: &str, start: i64, stop: i64) -> (GeneId, GffRecord) {
+        let gene_id = GeneId::Ensembl(id.into());
+        let rec = GffRecord {
+            seqname: seqname.into(),
+            feature_type: FeatureType::Gene,
+            start,
+            stop,
+            strand: Strand::Forward,
+            gene_id: gene_id.clone(),
+            gene_name: GeneSymbol::Missing,
+            gene_type: GeneType::CodingGene,
+        };
+        (gene_id, rec)
+    }
+
+    #[test]
+    fn records_come_back_in_coordinate_order() {
+        // Two chromosomes, inserted out of coordinate order, with ENSG001 and
+        // ENSG002 sharing a start so the gene_id tie-break is exercised too.
+        // Callers rely on the sweep being contiguous per rayon chunk, and
+        // nothing else in the pipeline would notice a regression to hash order.
+        let records: HashMap<GeneId, GffRecord> = Default::default();
+        for (id, seqname, start, stop) in [
+            ("ENSG005", "chr2", 900, 1000),
+            ("ENSG003", "chr1", 5000, 6000),
+            ("ENSG001", "chr1", 100, 200),
+            ("ENSG004", "chr2", 50, 80),
+            ("ENSG002", "chr1", 100, 300),
+        ] {
+            let (gene_id, rec) = gene(id, seqname, start, stop);
+            records.insert(gene_id, rec);
+        }
+
+        let got: Vec<String> = GffRecordMap::from_map(records)
+            .records()
+            .iter()
+            .map(|r| r.gene_id.to_string())
+            .collect();
+
+        // Gene ids, not coordinates: ENSG001 and ENSG002 are both (chr1, 100),
+        // so only the id reveals whether the tie-break actually ran.
+        assert_eq!(got, ["ENSG001", "ENSG002", "ENSG003", "ENSG004", "ENSG005"]);
+    }
 }
