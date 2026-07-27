@@ -188,11 +188,16 @@ pub fn extract_fragments_cached(
     let bed = match result {
         Some(b) => b,
         None => {
+            // Only the chromosome NAME differs on the retry, so take the window
+            // from `to_bed()` rather than rebuilding it from `utr.start`/`end`.
+            // Those two fields do not mean the same thing on both construction
+            // paths -- the GFF path stores a 1-based exon start, the --utr-bed
+            // loader a 0-based one -- so rebuilding here reintroduced the
+            // off-by-one that `to_bed()` exists to resolve.
             let alt_chr = alternate_chr_name(&utr.chr);
             Bed {
                 chr: alt_chr.into(),
-                start: utr.start,
-                stop: utr.end,
+                ..utr.to_bed()
             }
         }
     };

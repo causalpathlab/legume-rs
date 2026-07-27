@@ -195,9 +195,19 @@ pub fn for_each_record_in_gene_cached(
     include_missing_barcode: bool,
     mut visitor: impl FnMut(&bam::Record),
 ) -> anyhow::Result<()> {
+    // GFF is 1-based inclusive; htslib's fetch is 0-based, start-inclusive,
+    // stop-exclusive. The `(&str, start, stop)` tuple resolves to
+    // `FetchDefinition::RegionString`, which looks the name up and then takes the
+    // SAME numeric path as the tid form -- it does not build a samtools-style
+    // 1-based region string, so the coordinates really are 0-based.
+    //
+    // Passing the 1-based start straight through shifted the window one base
+    // right, dropping reads that end exactly on the gene's first base. Harmless
+    // per gene, but it meant `count_reads_per_gene` and
+    // `count_read_per_gene_splice` admitted different reads for the same gene.
     let region = (
         gff_record.seqname.as_ref(),
-        gff_record.start,
+        (gff_record.start - 1).max(0),
         gff_record.stop,
     );
 

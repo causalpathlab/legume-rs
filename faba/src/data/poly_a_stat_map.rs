@@ -128,12 +128,19 @@ impl PolyASiteMap {
             self.qc_args.internal_prime_a_or_t_count,
         );
 
-        // Calculate genomic position for poly-A site
+        // The cleavage site is the first position PAST the templated stretch, on
+        // whichever side the tail was added -- the `S` in the diagram above.
+        //
+        // Forward, that is `reference_end()`, which is already exclusive. Reverse,
+        // the tail is added leftward in genomic coordinates, so it is one base
+        // BEFORE the first aligned base, not the first aligned base itself:
+        // in the diagram the matched run starts at index 16 and `S` sits at 15.
+        // Using `reference_start()` put every reverse-strand site 1bp inside the
+        // transcript, so the two strands disagreed by one base and the exact-match
+        // test against the SNP / A-to-I masks looked at the wrong position.
         let poly_a_position = if bam_record.is_reverse() {
-            // Reverse: poly-T ends at reference_start()
-            bam_record.reference_start()
+            (bam_record.reference_start() - 1).max(0)
         } else {
-            // Forward: poly-A starts at reference_end()
             bam_record.reference_end()
         };
 

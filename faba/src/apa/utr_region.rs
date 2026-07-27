@@ -15,9 +15,15 @@ use std::io::BufRead;
 /// span is not a 3'UTR position at all.
 pub struct UtrRegion {
     pub chr: Box<str>,
-    /// Lowest exon start. A BAM **fetch** bound only, never a coordinate origin.
+    /// Low end of the region. A BAM **fetch** bound only, never a coordinate origin.
+    ///
+    /// The two constructors disagree about its frame: the GFF builder stores the
+    /// 1-based lowest exon start, the BED loader the raw 0-based BED start.
+    /// Nothing may read it as a genomic coordinate for that reason — use
+    /// [`UtrRegion::to_bed`], which derives the fetch window from `exons`.
     pub start: i64,
-    /// Highest exon stop. A BAM **fetch** bound only, never a coordinate origin.
+    /// Highest exon stop, 1-based inclusive. A BAM **fetch** bound only, never a
+    /// coordinate origin.
     pub end: i64,
     pub strand: Strand,
     pub name: Box<str>,
@@ -54,11 +60,28 @@ impl UtrRegion {
     /// The genomic superset to fetch reads over: the exons' bounding box, which
     /// is a fetch window and not a coordinate system (see
     /// `overlap_spliced_blocks`).
+    ///
+    /// The window is returned in htslib's fetch frame — 0-based, `start`
+    /// inclusive and `stop` exclusive — because that is what the `Bed` is handed
+    /// to.
+    /// `exons` is 1-based inclusive, so the window opens one base below the
+    /// lowest exon start; taking `start` as the bound instead left a read ending
+    /// exactly on the UTR's first base outside the fetch.
+    ///
+    /// The frame is read off `exons` rather than `start`/`end` deliberately: the
+    /// two constructors disagree about `start` — `build_utr_regions_from_gff`
+    /// sets it to the 1-based lowest exon start, `load_utr_regions_from_bed` to
+    /// the raw 0-based BED start — while `exons` means the same thing on both
+    /// paths.
     pub fn to_bed(&self) -> Bed {
         Bed {
             chr: self.chr.clone(),
-            start: self.start,
-            stop: self.end,
+            start: self
+                .exons
+                .first()
+                .map_or(self.start, |&(s, _)| s - 1)
+                .max(0),
+            stop: self.exons.last().map_or(self.end, |&(_, e)| e),
         }
     }
 
@@ -177,6 +200,8 @@ impl UtrRegion {
     /// stays a raw genomic half-width because callers intersect the result with
     /// genomic coordinates (edit/SNP masks, annotation output), not with a
     /// second spliced interval.
+    ///
+    /// 0-based, inheriting the frame of [`UtrRegion::alpha_to_genomic`].
     pub fn alpha_to_genomic_range(&self, alpha: f64, beta: f64) -> (i64, i64) {
         let genomic_alpha = self.alpha_to_genomic(alpha);
         let start = (genomic_alpha - beta as i64).max(0);
@@ -184,22 +209,37 @@ impl UtrRegion {
         (start, stop)
     }
 
-    /// A UTR-relative alpha as a genomic coordinate, through the exons.
+    /// A UTR-relative alpha as a **0-based** genomic coordinate, through the exons.
     ///
     /// The one place this conversion is written. It used to be spelled inline
     /// as `start + alpha` / `end - alpha` at three call sites, which was the
     /// same map only while a UTR was one contiguous block: on a spliced model a
     /// linear step lands in an intron, and the reported point could fall
     /// outside the `[start, stop]` range emitted beside it on the same row.
+    ///
+    /// This is also where a position LEAVES `UtrRegion`'s internal frame, so it
+    /// is where the frame changes.
+    /// `exons` — and every offset taken against them — is 1-based inclusive,
+    /// while every genomic position faba compares or writes elsewhere is
+    /// 0-based: the A-to-I / SNP masks (`record.pos()`, `DnaBaseFreqMap` gpos
+    /// keys), the `primary_pos` and `pos` columns of the other site parquets,
+    /// and `fetch_reference_seq`.
+    /// Exporting the 1-based value made `genomic_alpha` the one position column
+    /// out of step with the rest, which masked the wrong base, shifted APA's
+    /// metagene assignment, and mis-registered its PWM window by 1bp.
     pub fn alpha_to_genomic(&self, alpha: f64) -> i64 {
         // Alpha is seeded by site discovery and nudged by EM, so it can drift a
         // hair past either end of the UTR; clamp rather than lose the site.
         let offset = (alpha as i64).clamp(1, (self.utr_length as i64).max(1));
-        self.genomic_from_spliced(offset)
+        // The fallback bound comes off `exons` for the same reason `to_bed` does:
+        // `start`/`end` do not share one frame across the two constructors.
+        let one_based = self
+            .genomic_from_spliced(offset)
             .unwrap_or(match self.strand {
-                Strand::Forward => self.start,
-                Strand::Backward => self.end,
-            })
+                Strand::Forward => self.exons.first().map_or(self.start, |&(s, _)| s),
+                Strand::Backward => self.exons.last().map_or(self.end, |&(_, e)| e),
+            });
+        (one_based - 1).max(0)
     }
 }
 
