@@ -76,7 +76,13 @@ pub(super) fn run_snp_step(args: &PipelineArgs) -> anyhow::Result<FxHashSet<(Box
         backend: args.backend.clone(),
         zip: args.zip,
         output: args.output.clone(),
-        bulk: true,
+        // Per-cell, like `faba snp` standalone: `faba all` documents
+        // `{batch}_snp_{alt,depth}` in its output layout and promises control
+        // BAMs a per-cell SNP matrix, and it already hands the pipeline the
+        // `Some(&gff_map)` that pass 2 needs.
+        // Running bulk suppressed exactly the matrices the help advertised, and
+        // the SNP mask every later step consumes is built in pass 1 either way.
+        bulk: false,
         umi_tag,
         use_base_quality: true,
         min_vaf,
@@ -505,7 +511,16 @@ pub(super) fn run_dart_step(
 
     // Second pass: quantification per cell across all input samples.
     info!("Quantifying m6A sites per cell...");
-    let valid_cells = gene_count_qc.as_ref().map(|qc| &qc.cells_by_batch);
+    // Same decision as `faba dartseq` -- via the shared helper, so the flag
+    // cannot be honoured on one path and ignored on the other.
+    let restricted = crate::editing::cell_activity::cells_for_quantification(
+        params.competent_cells.as_ref(),
+        gene_count_qc.as_ref().map(|qc| &qc.cells_by_batch),
+        args.cell_scan.quantify_competent_only,
+    );
+    let valid_cells = restricted
+        .as_ref()
+        .or_else(|| gene_count_qc.as_ref().map(|qc| &qc.cells_by_batch));
     process_all_bam_files_to_backend(&params, &m6a_sites, &gff_map, valid_cells)?;
 
     // Mixture model (opt-in): cluster modification sites per gene. Skipped by
@@ -527,4 +542,46 @@ pub(super) fn run_dart_step(
     }
 
     Ok(())
+}
+
+/////////////////////////////////
+// Step 5: per-cell read depth //
+/////////////////////////////////
+
+/// Bin per-cell read depth genome-wide, reusing the cells gene counting froze.
+///
+/// Opt-in via `--depth-resolution-kb`: it costs a full extra pass over every
+/// BAM, so it does not run unless asked for.
+///
+/// Passing `cells_by_batch` is not just for column-compatibility with the other
+/// modalities. `ReadCoverageCollector` stores one interval PER READ per cell, so
+/// without a keep-set it holds intervals for every ambient droplet in the BAM.
+/// Measured on one chr19 BAM: peak RSS 1108 MB unfiltered vs 157 MB restricted.
+pub(super) fn run_read_depth_step(
+    args: &PipelineArgs,
+    gene_count_qc: &Option<GeneCountQc>,
+) -> anyhow::Result<()> {
+    let Some(resolution_kb) = args.depth_resolution_kb else {
+        return Ok(());
+    };
+
+    let depth_args = crate::read_depth::run::ReadDepthArgs {
+        bam_files: all_quant_bam_files(args),
+        resolution_kb,
+        block_size_mb: 1,
+        cell_barcode_tag: args.cell_barcode_tag.clone(),
+        row_nnz_cutoff: 0,
+        column_nnz_cutoff: 0,
+        backend: args.backend.clone(),
+        zip: args.zip,
+        // The pipeline hands the frozen cell set over directly, so there is no
+        // reason to round-trip it through the `--valid-cells` directory.
+        valid_cells_file: None,
+        output: args.output.clone(),
+    };
+
+    crate::read_depth::pipeline::run_read_depth_pipeline_with_cells(
+        &depth_args,
+        gene_count_qc.as_ref().map(|qc| &qc.cells_by_batch),
+    )
 }

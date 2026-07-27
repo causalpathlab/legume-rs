@@ -83,16 +83,20 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         long,
-        default_value_t = 10,
+        default_value_t = 5,
         help = "Minimum number of total reads per site",
-        long_help = "Minimum number of total reads required per site for inclusion in the analysis.\n\
-                     Filters out low-coverage sites."
+        long_help = "Minimum number of total reads required per site for inclusion.\n\
+                     Filters out low-coverage sites.\n\
+                     \n\
+                     Null-cell QC removes cells that never edit before discovery runs.\n\
+                     That roughly halves the coverage a site is judged on.\n\
+                     The floor is set for the de-diluted depth, not the raw depth."
     )]
     pub min_coverage: usize,
 
     #[arg(
         long = "min-conversion",
-        default_value_t = 5,
+        default_value_t = 2,
         help = "Minimum converted (C->T) reads per site"
     )]
     pub min_conversion: usize,
@@ -268,8 +272,11 @@ pub struct DartSeqCountArgs {
         long = "output-cell-types",
         default_value_t = false,
         help = "Include cell type annotation in BED output",
-        long_help = "Append a cell type column to BED output lines.\n\
-                     Requires --cell-membership or --n-clusters > 1."
+        long_help = "Append a cell type column to BED output lines (--output-bed-file only).\n\
+                     Requires --cell-membership: the column is read from that file.\n\
+                     Every row is written as \"unknown\" without it.\n\
+                     --cluster-resolution does NOT fill this column.\n\
+                     Its Leiden groups stratify site DISCOVERY and never reach the BED writer."
     )]
     pub output_cell_types: bool,
 
@@ -294,7 +301,7 @@ pub struct DartSeqCountArgs {
                      Detected sites are written to a separate parquet file\n\
                      and used as a mask to exclude false-positive m6A candidates\n\
                      whose RAC/GTY triplet overlaps an A-to-I site.\n\
-                     This mask pass shares the m6A detection FDR target (--fdr)."
+                     This mask pass is FDR-controlled at its own --atoi-fdr, not the m6A --fdr."
     )]
     pub detect_atoi: bool,
 
@@ -406,14 +413,14 @@ pub struct DartSeqCountArgs {
     #[arg(
         long = "mixture-prior-alpha",
         default_value_t = 1.0,
-        help = "Beta prior α for posterior-rate weighting (default: 1.0)"
+        help = "Beta prior α for posterior-rate weighting"
     )]
     pub mixture_prior_alpha: f32,
 
     #[arg(
         long = "mixture-prior-beta",
         default_value_t = 1.0,
-        help = "Beta prior β for posterior-rate weighting (default: 1.0)"
+        help = "Beta prior β for posterior-rate weighting"
     )]
     pub mixture_prior_beta: f32,
 
@@ -480,7 +487,7 @@ pub struct DartSeqCountArgs {
     #[command(flatten)]
     pub cell_scan: crate::editing::cell_activity::CellScanArgs,
 
-    /// Reuse the retained-gene set from `faba genes` ({batch}_genes_kept.tsv.gz)
+    /// Reuse the retained-gene set from `faba genes` (its pooled `genes_kept.tsv.gz`)
     #[arg(long = "valid-genes")]
     pub valid_genes_file: Option<Box<str>>,
 
@@ -866,15 +873,11 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         // Default: the matrices keep every QC cell, so they stay
         // column-compatible with the other modalities. `--quantify-competent-only`
         // trades that for a de-diluted matrix.
-        let restricted = match (&m6a_params.competent_cells, gene_qc.as_ref()) {
-            (Some(comp), Some(qc)) if args.cell_scan.quantify_competent_only => {
-                Some(crate::editing::cell_activity::intersect_for_quantification(
-                    &qc.cells_by_batch,
-                    comp,
-                ))
-            }
-            _ => None,
-        };
+        let restricted = crate::editing::cell_activity::cells_for_quantification(
+            m6a_params.competent_cells.as_ref(),
+            gene_qc.as_ref().map(|qc| &qc.cells_by_batch),
+            args.cell_scan.quantify_competent_only,
+        );
         let valid_cells = restricted
             .as_ref()
             .or_else(|| gene_qc.as_ref().map(|qc| &qc.cells_by_batch));

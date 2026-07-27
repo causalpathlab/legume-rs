@@ -386,10 +386,11 @@ SNP  →  genes  →  [expression grouping]  →  ATOI  →  m6A  →  APA
 - **SNP** runs first, in bulk mode, and produces the variant mask. It is not fatal if it fails.
 - **genes** calls cells and picks the expressed gene set. **Every downstream modality inherits
   both** — this is what makes the modalities directly comparable, since they share a cell axis.
-- **The expression grouping** (`--cluster-resolution`, default 0.5, on) builds one shared cell
-  grouping by random projection → randomised SVD → kNN graph → **Leiden** [15]. It is used to
-  stratify m6A and A-to-I *discovery*, for the reason given in §2. It is **not** cell typing, and
-  should not be reported as such.
+- **The expression grouping** (`--cluster-resolution`, default 0, **off**) builds one shared cell
+  grouping by random projection → randomised SVD → kNN graph → **Leiden** [15]. Set a positive
+  resolution (try 0.5) to turn it on; at 0 discovery runs in bulk, over all cells at once. It is
+  used to stratify m6A and A-to-I *discovery*, for the reason given in §2. It is **not** cell
+  typing, and should not be reported as such.
 - **ATOI** runs masked by the SNP mask, and produces the editing mask.
 - **m6A** runs masked by the editing mask (a C→T at an edited site is not methylation). It is
   **skipped, not failed**, if no `--control-bam` is given. The SNP mask is *not* applied by
@@ -405,14 +406,12 @@ once, by the gene-counting step, and not silently re-filtered by each modality a
 ## 9. Where the code and its own help text disagree
 
 Found by reading both. These are documentation bugs, not method bugs, but they will mislead anyone
-writing this up from `--help` alone:
+writing this up from `--help` alone. The rest of what this section used to list has since been
+fixed in the help text itself, so only the live discrepancy is kept here:
 
 | flag / text | says | actually |
 |---|---|---|
-| `faba all` `about` | `SNP → genes → ATOI → APA → m6A` | runs `SNP → genes → ATOI → m6A → APA` |
-| `--mixture-max-k` (m6A, A-to-I) | "max components to test **via BIC**" | m6A/A-to-I call components from smoothed-density **modes**; `max_k` is only a cap. BIC genuinely selects `K` **in APA only** |
-| `--intron-buffer` (genes) | "reads within this buffer are discarded" | declared, but **no consumer** — the splice classifier uses a strict "any base outside an exon" rule |
-| `--valid-genes` help | `{batch}_genes_kept.tsv.gz` | the file written is the pooled `genes_kept.tsv.gz` |
+| `--mixture-max-k` (m6A, A-to-I) | "max components to test **via BIC**" | m6A/A-to-I call components from smoothed-density **modes**, then truncate to `max_k` (`editing/mixture.rs`), so it is a plain cap and never a selection criterion. BIC genuinely selects `K` **in APA only**. The same stale claim is repeated by `--no-mixture`'s help and by `fit_gene_mixture`'s own rustdoc |
 
 ---
 

@@ -23,8 +23,9 @@ pub(super) fn ser_debug<T: std::fmt::Debug, S: serde::Serializer>(
         0. SNP genotyping (de novo discovery + optional known sites)\n\
         1. Gene expression filtering (identify expressed genes)\n\
         2. ATOI detection (A-to-I editing, masked by SNP)\n\
-        3. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\
-        4. m6A detection (DART C→T, WT-vs-MUT contrast; skipped without --control-bam)\n\n\
+        3. m6A detection (DART C→T, WT-vs-MUT contrast; skipped without --control-bam)\n\
+        4. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\n\
+        APA runs last because the SCAPE EM is the heavy step and nothing else waits on it.\n\n\
         ATOI is reference-anchored and tested per site\n\
         against a beta-binomial sequencing-error null (--edit-error-rate/--edit-overdispersion),\n\
         no control sample.\n\
@@ -216,9 +217,12 @@ pub struct PipelineArgs {
     )]
     pub atoi_min_coverage: usize,
 
+    // "matches `faba atoi`" is now true. It was not: the pipeline called an
+    // A-to-I site at 2 conversions while the standalone wanted 3, so the same
+    // BAM produced a different site list depending on which command ran it.
     #[arg(
         long,
-        default_value_t = 2,
+        default_value_t = 3,
         help = "Minimum A-to-G conversions for ATOI (matches `faba atoi`)"
     )]
     pub atoi_min_conversion: usize,
@@ -290,10 +294,23 @@ pub struct PipelineArgs {
     /////////////////////
     // DART parameters //
     /////////////////////
-    #[arg(long, default_value_t = 5, help = "Minimum coverage for m6A detection")]
+    // Both floors are `faba dartseq`'s own defaults. The pipeline used to run at
+    // half of each (5 / 2), so `faba all` called m6A sites that a hand-run
+    // `faba dartseq` rejected — the one thing this module exists to prevent.
+    // Chained m6A discovery is therefore STRICTER than in previous releases;
+    // expect fewer sites, and pass the flags explicitly to get the old floors.
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Minimum coverage for m6A detection (matches `faba dartseq`)"
+    )]
     pub m6a_min_coverage: usize,
 
-    #[arg(long, default_value_t = 2, help = "Minimum C-to-T conversions for m6A")]
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Minimum C-to-T conversions for m6A (matches `faba dartseq`)"
+    )]
     pub m6a_min_conversion: usize,
 
     #[arg(
@@ -326,17 +343,22 @@ pub struct PipelineArgs {
     )]
     pub mixture_weight: crate::editing::pipeline::MixtureWeightMode,
 
+    // α = β = 1 (uniform Beta) is what `faba dartseq` and `faba atoi` use. The
+    // pipeline used 1e-4, a near-improper prior that leaves a 1-of-1 site at
+    // almost full weight — the very thing posterior weighting exists to damp.
+    // The help string already said "(default: 1.0)" while the code said 1e-4,
+    // so the restated default is dropped here: clap prints the real one.
     #[arg(
         long = "mixture-prior-alpha",
-        default_value_t = 1e-4,
-        help = "Beta prior α for posterior-rate weighting (default: 1.0)"
+        default_value_t = 1.0,
+        help = "Beta prior α for posterior-rate weighting"
     )]
     pub mixture_prior_alpha: f32,
 
     #[arg(
         long = "mixture-prior-beta",
-        default_value_t = 1e-4,
-        help = "Beta prior β for posterior-rate weighting (default: 1.0)"
+        default_value_t = 1.0,
+        help = "Beta prior β for posterior-rate weighting"
     )]
     pub mixture_prior_beta: f32,
 
@@ -454,6 +476,26 @@ pub struct PipelineArgs {
 
     #[arg(long, default_value_t = false, help = "Skip APA quantification step")]
     pub skip_apa: bool,
+
+    #[arg(
+        long = "depth-resolution-kb",
+        help = "Also bin per-cell read depth at this resolution, in KILOBASES",
+        long_help = "Bin per-cell read depth genome-wide at this resolution, in kilobases.\n\
+                     \n\
+                     Omit the flag and the depth step is skipped entirely.\n\
+                     It is opt-in because it costs a full extra pass over every BAM.\n\
+                     \n\
+                     Depth reuses the cells frozen by gene counting, so its columns line\n\
+                     up with the other modalities.\n\
+                     Rows are named {chr}:{start}-{end}, the one modality not keyed by\n\
+                     gene, because a bin is not a gene.\n\
+                     \n\
+                     The grid is anchored at each chromosome's start and does not depend\n\
+                     on how the work was chunked.\n\
+                     Only the last bin of a chromosome is short, as in the standard CNV\n\
+                     binning tools."
+    )]
+    pub depth_resolution_kb: Option<f32>,
 
     //////////////////////////////
     // Mass-enrichment grouping //

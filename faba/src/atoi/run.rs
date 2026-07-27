@@ -246,14 +246,14 @@ pub struct AtoICountArgs {
     #[arg(
         long = "mixture-prior-alpha",
         default_value_t = 1.0,
-        help = "Beta prior α for posterior-rate weighting (default: 1.0)"
+        help = "Beta prior α for posterior-rate weighting"
     )]
     pub mixture_prior_alpha: f32,
 
     #[arg(
         long = "mixture-prior-beta",
         default_value_t = 1.0,
-        help = "Beta prior β for posterior-rate weighting (default: 1.0)"
+        help = "Beta prior β for posterior-rate weighting"
     )]
     pub mixture_prior_beta: f32,
 
@@ -301,7 +301,7 @@ pub struct AtoICountArgs {
     )]
     pub valid_cells_file: Option<Box<str>>,
 
-    /// Reuse the retained-gene set from `faba genes` ({batch}_genes_kept.tsv.gz)
+    /// Reuse the retained-gene set from `faba genes` (its pooled `genes_kept.tsv.gz`)
     #[arg(long = "valid-genes")]
     pub valid_genes_file: Option<Box<str>>,
 
