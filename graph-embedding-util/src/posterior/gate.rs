@@ -77,11 +77,41 @@ pub struct GenePosterior {
     pub cs_coverage: f32,
 }
 
+impl GenePosterior {
+    /// The "not sampled" marker for a gene the stop flag skipped: every field
+    /// empty, so [`Self::is_sampled`] is false and no zero can be mistaken for a
+    /// measured PIP of 0.
+    #[must_use]
+    fn skipped() -> Self {
+        Self {
+            pip: Vec::new(),
+            mean_beta: Vec::new(),
+            std_beta: Vec::new(),
+            credible_set: Vec::new(),
+            cs_coverage: 0.0,
+        }
+    }
+
+    /// Did this gene actually run? False only for a gene skipped by SIGINT — a
+    /// sampled gene always has one `pip` entry per embedding dim.
+    #[must_use]
+    pub fn is_sampled(&self) -> bool {
+        !self.pip.is_empty()
+    }
+}
+
 /// Sample every gene's gate posterior against the frozen cell side, in parallel.
 ///
 /// `nodes[g]` is gene `g`'s observed edges + partition (cells); `biases[g]` is its
 /// fixed MAP bias `b_g`; `side` is the frozen cell embedding. Returns one
 /// [`GenePosterior`] per gene, aligned with `nodes`.
+///
+/// SIGINT is polled per gene, because this is the longest loop in the module (a
+/// whole-dictionary sweep runs for minutes) and an un-interruptible one would
+/// make Ctrl+C read as a hang. A gene skipped by the stop flag comes back with an
+/// **empty** `pip` — unambiguous, since a sampled gene always has `H` entries — so
+/// the caller can report how many were skipped instead of silently writing a
+/// truncated or fabricated table. Genes already in flight finish normally.
 #[must_use]
 pub fn gate_posterior(
     nodes: &[NodeTerm],
@@ -92,11 +122,15 @@ pub fn gate_posterior(
     let h = side.h;
     assert_eq!(nodes.len(), biases.len(), "nodes / biases length mismatch");
     let prior = SoftmaxNormalPrior::new(cfg.logit_var, cfg.effect_var);
+    let stop = crate::stop::stop_flag();
     nodes
         .par_iter()
         .zip(biases.par_iter())
         .enumerate()
         .map(|(g, (node, &b_g))| {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return GenePosterior::skipped();
+            }
             let b_g = f64::from(b_g);
             let lnpdf = |theta: &DVector<f32>| poisson_ll(theta.as_slice(), b_g, node, side);
             let config = McmcConfig {

@@ -38,6 +38,6 @@ pub use gate::{gate_posterior, GateConfig, GenePosterior};
 pub use hyper::{sample_pi0, HalfCauchyVar};
 pub use hyper_ss::{hyper_ss, HyperSsConfig, HyperSsResult};
 pub use hyper_sweep::{hyper_sweep, HyperSweepConfig, HyperSweepResult};
-pub use index::{build_gene_index, ContrastiveIndex};
+pub use index::{build_gene_index, BiasCalibration, ContrastiveIndex};
 pub use lnpdf::{poisson_ll, poisson_lnpdf, FrozenSide, NodeTerm};
 pub use sweep::{sweep_side, NodePosterior, SweepConfig};
