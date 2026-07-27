@@ -3,7 +3,7 @@ use genomic_data::sam::CellBarcode;
 
 use coitrees::{COITree, Interval, IntervalTree};
 use rust_htslib::bam::{self, ext::BamRecordExtensions};
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet};
 
 /// Read coverage tracker that organizes genomic intervals by cell barcode and chromosome.
 ///
@@ -13,6 +13,13 @@ use rustc_hash::FxHashMap as HashMap;
 pub struct ReadCoverageCollector<'a> {
     cell_chr_to_intervals: HashMap<CellBarcode, HashMap<Box<str>, Vec<Interval<()>>>>,
     cell_barcode_tag: &'a str,
+    /// Restrict counting to these cells; `None` keeps every observed barcode.
+    ///
+    /// Borrowed, not `Arc`-shared as in [`crate::data::dna_stat_map::DnaBaseFreqMap`]:
+    /// a collector lives for ONE block while the called-cell set lives for the
+    /// whole run, so borrowing spares a set clone per block job — and a genome at
+    /// 10 kb bins is tens of thousands of blocks.
+    keep_cells: Option<&'a FxHashSet<CellBarcode>>,
 }
 
 impl<'a> ReadCoverageCollector<'a> {
@@ -24,7 +31,20 @@ impl<'a> ReadCoverageCollector<'a> {
         Self {
             cell_chr_to_intervals: HashMap::default(),
             cell_barcode_tag,
+            keep_cells: None,
         }
+    }
+
+    /// Count only reads from `cells`, or from every barcode when `None`.
+    ///
+    /// No tag argument (unlike [`crate::data::dna_stat_map::DnaBaseFreqMap::set_keep_cells`])
+    /// because this collector already owns the one tag it keys on: taking a second
+    /// one could only introduce a disagreement between the gate and the counts.
+    ///
+    /// Takes an `Option` so "no restriction" is something a caller must state
+    /// rather than forget.
+    pub fn set_keep_cells(&mut self, cells: Option<&'a FxHashSet<CellBarcode>>) {
+        self.keep_cells = cells;
     }
 
     /// Converts accumulated intervals into COITrees for efficient querying.
@@ -72,8 +92,26 @@ impl<'a> ReadCoverageCollector<'a> {
     pub fn update(&mut self, chr: &str, bam_record: &bam::Record) {
         let cell_barcode =
             bam_io::extract_cell_barcode(bam_record, self.cell_barcode_tag.as_bytes());
+
+        // Gate here, before the CIGAR walk in `reference_end()` and before any
+        // map entry: this collector keeps one interval PER READ, so a barcode
+        // admitted at this line costs memory for the rest of the block, not just
+        // a hash lookup. An unfiltered run therefore scales with every barcode in
+        // the BAM -- ambient droplets included, which is most of them.
+        if let Some(keep) = self.keep_cells {
+            // A read with no CB tag is not a called cell, so it must not survive
+            // as the `"."` column once a keep-set is in force.
+            if cell_barcode == CellBarcode::Missing || !keep.contains(&cell_barcode) {
+                return;
+            }
+        }
+
+        // coitrees intervals are END-INCLUSIVE, but `reference_end()` is the
+        // first base PAST the alignment. Storing it verbatim stretched every
+        // read one base to the right, so a read finishing just before a segment
+        // still overlapped it.
         let first = bam_record.pos() as i32;
-        let last = bam_record.reference_end() as i32;
+        let last = (bam_record.reference_end() as i32 - 1).max(first);
 
         let chr_to_intervals = self.cell_chr_to_intervals.entry(cell_barcode).or_default();
 
@@ -81,3 +119,6 @@ impl<'a> ReadCoverageCollector<'a> {
         intervals.push(Interval::new(first, last, ()));
     }
 }
+
+#[cfg(test)]
+mod tests;

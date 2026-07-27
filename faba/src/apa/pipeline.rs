@@ -761,10 +761,10 @@ fn process_utr(
             args.min_coverage,
         );
         // Drop clusters coinciding with an A-to-I edit / SNP (parity with the EM path).
+        // `alpha_to_genomic` answers 0-based, which is the frame the mask is
+        // keyed in, so the two sides compare directly.
         if let Some(masked) = site_mask.and_then(|m| m.get(&*utr.chr)) {
-            clusters.retain(|&(alpha, _)| {
-                !masked.contains(&utr.alpha_to_genomic_range(alpha as f64, 0.0).0)
-            });
+            clusters.retain(|&(alpha, _)| !masked.contains(&utr.alpha_to_genomic(alpha as f64)));
         }
         discover_ns.fetch_add(
             t_discover.elapsed().as_nanos() as u64,
@@ -811,17 +811,16 @@ fn process_utr(
     };
 
     // Drop candidate sites that coincide with an A-to-I edit or SNP. Candidate
-    // positions are UTR-relative alpha; map each to genomic via the same transform
-    // the EM uses, then test (chr, pos) membership. Parity with run_simple.
+    // positions are UTR-relative alpha; map each through the exons, then test
+    // (chr, pos) membership. `alpha_to_genomic` and the mask are both 0-based —
+    // the frame `run_simple` compares in, since its positions come straight off
+    // `reference_start()`/`reference_end()`.
     let candidate_sites: Vec<f32> = match site_mask.and_then(|m| m.get(&*utr.chr)) {
         Some(masked_pos) => {
             let before = candidate_sites.len();
             let kept: Vec<f32> = candidate_sites
                 .into_iter()
-                .filter(|&alpha| {
-                    let g = utr.alpha_to_genomic_range(alpha as f64, 0.0).0;
-                    !masked_pos.contains(&g)
-                })
+                .filter(|&alpha| !masked_pos.contains(&utr.alpha_to_genomic(alpha as f64)))
                 .collect();
             if kept.len() != before {
                 log::debug!(

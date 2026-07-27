@@ -1,5 +1,6 @@
 use super::*;
 use genomic_data::gff::GeneType;
+use rustc_hash::FxHashSet;
 
 ////////////////////////
 // Spliced coordinate  //
@@ -95,6 +96,57 @@ fn genomic_from_spliced_rejects_offsets_outside_the_utr() {
         assert_eq!(utr.genomic_from_spliced(-1), None);
         assert_eq!(utr.genomic_from_spliced(SPLICED_LEN as i64 + 1), None);
     }
+}
+
+///////////////////
+// Fetch window  //
+///////////////////
+
+/// `to_bed` feeds htslib's `fetch`, which is 0-based with an exclusive stop, so
+/// the window has to open one base below the lowest 1-based exon start.
+/// With the 1-based start as the bound, a read ending exactly on the UTR's first
+/// base fell outside the fetch.
+#[test]
+fn to_bed_is_the_0_based_window_the_exons_span() {
+    for strand in [Strand::Forward, Strand::Backward] {
+        let bed = three_exon(strand).to_bed();
+        assert_eq!(bed.start, EXONS[0].0 - 1, "{strand:?}");
+        assert_eq!(bed.stop, EXONS[2].1, "{strand:?}");
+
+        // The UTR's own first base, in htslib's frame, is inside the window.
+        let first_base = EXONS[0].0 - 1;
+        assert!(
+            bed.start <= first_base && first_base < bed.stop,
+            "{strand:?}"
+        );
+    }
+}
+
+/// The two constructors store `start` in different frames (see the field doc),
+/// so the window is derived from `exons` — and both paths must land on the same
+/// answer for the same region.
+#[test]
+fn both_constructors_agree_about_the_fetch_window() {
+    let f = write_bed(&["chr1\t1000\t2000\t+"]);
+    let from_bed = &load_utr_regions_from_bed(f.path().to_str().unwrap()).unwrap()[0];
+    // The same one-block region, built the way the GFF path builds it: `start`
+    // is the 1-based lowest exon start, not the 0-based BED one.
+    let from_gff = UtrRegion {
+        chr: "chr1".into(),
+        start: 1001,
+        end: 2000,
+        strand: Strand::Forward,
+        name: "G".into(),
+        utr_length: 1000,
+        exons: vec![(1001, 2000)],
+    };
+    assert_ne!(
+        from_bed.start, from_gff.start,
+        "the frames really do differ"
+    );
+    assert_eq!(from_bed.to_bed().start, from_gff.to_bed().start);
+    assert_eq!(from_bed.to_bed().stop, from_gff.to_bed().stop);
+    assert_eq!(from_bed.to_bed().start, 1000);
 }
 
 /////////////////////
@@ -229,15 +281,15 @@ fn a_block_inside_an_intron_contributes_nothing() {
 #[test]
 fn alpha_to_genomic_range_maps_alpha_through_the_exons() {
     let utr = three_exon(Strand::Forward);
-    // Alpha 101 is the first base of exon 2; a linear span map would have put
-    // it at 100 + 101 = 201, inside the intron.
+    // Alpha 101 is the first base of exon 2 — 1-based 300, so 0-based 299; a
+    // linear span map would have put it at 100 + 101 = 201, inside the intron.
     let (start, stop) = utr.alpha_to_genomic_range(101.0, 10.0);
-    assert_eq!((start, stop), (290, 310));
+    assert_eq!((start, stop), (289, 309));
 
     let utr = three_exon(Strand::Backward);
-    // Reverse: alpha 101 counts down from 549 and lands on 199.
+    // Reverse: alpha 101 counts down from 549 and lands on 1-based 199.
     let (start, stop) = utr.alpha_to_genomic_range(101.0, 10.0);
-    assert_eq!((start, stop), (189, 209));
+    assert_eq!((start, stop), (188, 208));
 }
 
 #[test]
@@ -245,11 +297,67 @@ fn alpha_to_genomic_range_clamps_alpha_that_drifted_off_the_utr() {
     let utr = three_exon(Strand::Forward);
     // EM can nudge alpha a hair past either end; a site is worth keeping at the
     // boundary rather than losing to an out-of-range map.
-    assert_eq!(utr.alpha_to_genomic_range(0.0, 0.0).0, 100);
+    assert_eq!(utr.alpha_to_genomic_range(0.0, 0.0).0, 99);
     assert_eq!(
         utr.alpha_to_genomic_range(SPLICED_LEN as f64 + 5.0, 0.0).0,
-        549
+        548
     );
+}
+
+///////////////////////////////
+// The frame alpha leaves in //
+///////////////////////////////
+
+/// `alpha_to_genomic` is the boundary where a spliced offset becomes a genomic
+/// coordinate the rest of faba reads, so it answers 0-based while `exons` and
+/// `spliced_offset` stay 1-based.
+#[test]
+fn alpha_to_genomic_leaves_the_1_based_exon_frame() {
+    for strand in [Strand::Forward, Strand::Backward] {
+        let utr = three_exon(strand);
+        for offset in 1..=SPLICED_LEN as i64 {
+            let one_based = utr.genomic_from_spliced(offset).expect("offset in range");
+            assert_eq!(
+                utr.alpha_to_genomic(offset as f64),
+                one_based - 1,
+                "{strand:?} offset {offset} must leave 0-based"
+            );
+        }
+    }
+}
+
+/// The bug this pins: an A-to-I / SNP mask entry names a BAM position, so it is
+/// 0-based, and comparing it against the 1-based exon frame both let the named
+/// site through and dropped the base below it instead.
+#[test]
+fn a_position_mask_drops_the_site_it_names_and_not_its_neighbour() {
+    for strand in [Strand::Forward, Strand::Backward] {
+        let utr = three_exon(strand);
+
+        // Two adjacent exonic bases, named in the 1-based frame `exons` uses.
+        let (site_1based, neighbour_1based) = (150, 149);
+        let site = utr.spliced_offset(site_1based).expect("exonic") as f64;
+        let neighbour = utr.spliced_offset(neighbour_1based).expect("exonic") as f64;
+
+        // The mask as `load_polya_site_mask` builds it: BAM positions, so the
+        // base `exons` calls 150 is the one the mask calls 149.
+        let masked: FxHashSet<i64> = [site_1based - 1].into_iter().collect();
+
+        assert!(
+            masked.contains(&utr.alpha_to_genomic(site)),
+            "{strand:?}: the site the mask names must be dropped"
+        );
+        assert!(
+            !masked.contains(&utr.alpha_to_genomic(neighbour)),
+            "{strand:?}: the neighbour was never named by the mask"
+        );
+
+        // What the 1-based frame answered before: it missed the named site
+        // entirely and masked the base below it in its place.
+        let one_based = |alpha: f64| utr.alpha_to_genomic(alpha) + 1;
+        assert!(!masked.contains(&one_based(site)), "{strand:?}");
+        assert!(masked.contains(&one_based(neighbour)), "{strand:?}");
+    }
 }
 
 /////////////////////////
@@ -643,7 +751,9 @@ fn the_reported_point_lies_within_the_reported_range() {
             utr_length: 300,
             exons: vec![(1000, 1149), (1550, 1699)],
         };
-        let in_exon = |p: i64| utr.exons.iter().any(|&(s, e)| p >= s && p <= e);
+        // Both sides of the comparison are 0-based, so each 1-based exon is
+        // shifted into that frame rather than the point being shifted back.
+        let in_exon = |p: i64| utr.exons.iter().any(|&(s, e)| (s - 1..=e - 1).contains(&p));
         for alpha in 1..=utr.utr_length as i64 {
             let point = utr.alpha_to_genomic(alpha as f64);
             let (lo, hi) = utr.alpha_to_genomic_range(alpha as f64, 25.0);
