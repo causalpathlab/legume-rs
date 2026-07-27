@@ -846,6 +846,25 @@ pub fn call_and_report(
 ///
 /// Control BAMs are never touched — they carry no competent set, and filtering
 /// the control on activity is the bias this whole stage exists to avoid.
+/// The cell set the m6A matrices are quantified over.
+///
+/// Returns `Some` only when `--quantify-competent-only` is set AND there is a
+/// competence call to apply; the caller falls back to the full QC set otherwise.
+///
+/// Exists so `faba dartseq` and `faba all` cannot answer this differently. They
+/// did: the flag was wired into the standalone path only, so `faba all
+/// --quantify-competent-only` exited 0 and wrote undiluted matrices.
+pub fn cells_for_quantification(
+    competent: Option<&Arc<CompetentCells>>,
+    qc_cells: Option<&FxHashMap<Box<str>, FxHashSet<CellBarcode>>>,
+    competent_only: bool,
+) -> Option<FxHashMap<Box<str>, FxHashSet<CellBarcode>>> {
+    match (competent, qc_cells) {
+        (Some(comp), Some(qc)) if competent_only => Some(intersect_for_quantification(qc, comp)),
+        _ => None,
+    }
+}
+
 pub fn intersect_for_quantification(
     qc_cells: &FxHashMap<Box<str>, FxHashSet<CellBarcode>>,
     competent: &CompetentCells,

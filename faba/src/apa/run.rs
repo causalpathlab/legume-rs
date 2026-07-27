@@ -242,12 +242,16 @@ pub struct CountApaArgs {
     )]
     pub(crate) resolution_bp: usize,
 
-    /// Include reads without cell barcode (simple mode)
+    /// Include reads the cell barcode tag OR the gene tag fails to place (simple mode)
     #[arg(
         long,
         default_value_t = false,
-        help = "Include reads without barcode (simple mode)",
-        long_help = "Include reads missing a cell barcode tag in the count.\n\
+        help = "Include reads with no cell barcode, and reads the gene tag cannot place (simple mode)",
+        long_help = "This relaxes TWO filters, not just the cell one.\n\
+                     Reads missing a cell barcode tag are included in the count.\n\
+                     Reads without a gene tag (--gene-barcode-tag, `GX` by default) are kept too.\n\
+                     Such a read counts toward whichever gene's window it was fetched in.\n\
+                     Off by default, so a read must carry both tags to be counted.\n\
                      Only used in simple mode."
     )]
     pub(crate) include_missing_barcode: bool,
@@ -559,7 +563,7 @@ pub struct CountApaArgs {
     )]
     pub(crate) valid_cells_file: Option<Box<str>>,
 
-    /// Reuse the retained-gene set from `faba genes` ({batch}_genes_kept.tsv.gz)
+    /// Reuse the retained-gene set from `faba genes` (its pooled `genes_kept.tsv.gz`)
     #[arg(long = "valid-genes")]
     pub(crate) valid_genes_file: Option<Box<str>>,
 }

@@ -313,8 +313,8 @@ pub struct MassEnrichmentArgs {
 }
 
 impl MassEnrichmentArgs {
-    /// Whether grouping is on. On by default (resolution 0.5); disabled only when
-    /// `--cluster-resolution` is set to 0 (or below), which restores bulk detection.
+    /// Whether grouping is on. Off by default: grouping runs only when
+    /// `--cluster-resolution` is set above 0. Resolution 0 (or below) is bulk detection.
     pub fn enabled(&self) -> bool {
         self.cluster_resolution > 0.0
     }

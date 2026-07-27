@@ -642,11 +642,11 @@ Example:\n  \
         APA runs LAST because the SCAPE EM is the heavy step\n\
         and nothing else waits on it;\n\
         m6A discovery needs only the SNP + ATOI masks, so the fast modalities finish first.\n\n\
-        Between steps 1 and 2, cells are grouped ONCE for mass enrichment\n\
-        (Leiden at `--cluster-resolution`, 0.5 by default),\n\
-        and ATOI and m6A both stratify discovery on those shared groups —\n\
-        so the two modalities cannot disagree about which cells were compared.\n\
-        This is ON by default; `--cluster-resolution 0` restores bulk discovery.\n\n\
+        Discovery runs in bulk by default, over all cells at once.\n\
+        Set `--cluster-resolution` above 0 (try 0.5) to group cells for mass enrichment instead.\n\
+        Grouping then happens ONCE, between steps 1 and 2.\n\
+        ATOI and m6A both stratify discovery on those same shared groups.\n\
+        The two modalities therefore cannot disagree about which cells were compared.\n\n\
         ATOI is reference-anchored and FDR-controlled\n\
         against a beta-binomial error null (no control).\n\
         m6A instead needs a catalytically-dead control (--control-bam):\n\

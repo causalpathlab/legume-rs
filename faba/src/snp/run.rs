@@ -298,13 +298,16 @@ pub struct SnpArgs {
     )]
     pub zip: bool,
 
-    /// Include reads without cell barcode information.
+    /// Include reads the cell barcode tag OR the gene tag fails to place.
     #[arg(
         long,
         default_value_t = false,
-        help = "Include reads without barcodes",
-        long_help = "When set, reads without a cell barcode tag are included in pileup\n\
-                     and counted under CellBarcode::Missing."
+        help = "Include reads with no cell barcode, and reads the gene tag cannot place",
+        long_help = "This relaxes TWO filters, not just the cell one.\n\
+                     Reads without a cell barcode tag are piled up under CellBarcode::Missing.\n\
+                     Reads without a gene tag (--gene-barcode-tag, `GX` by default) are kept too.\n\
+                     Such a read counts toward whichever gene's window it was fetched in.\n\
+                     Off by default, so a read must carry both tags to be counted."
     )]
     pub include_missing_barcode: bool,
 
