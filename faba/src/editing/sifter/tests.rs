@@ -38,7 +38,6 @@ fn make_m6a_sifter<'a>(faidx: &'a faidx::Reader) -> ConversionSifter<'a> {
             contrast: M6aContrast {
                 min_control_coverage: 10,
                 min_delta: 0.05,
-                rho: 0.02,
             },
         },
         candidate_sites: Vec::new(),
@@ -418,7 +417,6 @@ fn discovery_and_the_cell_scan_both_implement_the_motif_rule() {
             contrast: M6aContrast {
                 min_control_coverage: 10,
                 min_delta: 0.05,
-                rho: 0.02,
             },
         };
         let bases = fetch_reference_bases(&faidx, "chr1", 0, n - 1)

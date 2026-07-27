@@ -179,7 +179,7 @@ pub(super) fn run_atoi_step(
         include_missing_barcode: false,
         min_coverage: args.atoi_min_coverage,
         min_conversion: args.atoi_min_conversion,
-        fdr_cutoff: args.atoi_fdr_cutoff,
+        pvalue_cutoff: args.atoi_pvalue_cutoff,
         error_rate: args.edit_error_rate,
         overdispersion: args.edit_overdispersion,
         backend: args.backend.clone(),
@@ -202,7 +202,6 @@ pub(super) fn run_atoi_step(
         // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
         mut_bam_files: Vec::new(),
         site_min_cells: crate::editing::pipeline::DEFAULT_SITE_MIN_CELLS,
-        test_level: args.atoi_test_level,
         competent_cells: None,
     };
 
@@ -423,7 +422,7 @@ pub(super) fn run_dart_step(
         include_missing_barcode: false,
         min_coverage: args.m6a_min_coverage,
         min_conversion: args.m6a_min_conversion,
-        fdr_cutoff: args.m6a_fdr_cutoff,
+        pvalue_cutoff: args.m6a_pvalue_cutoff,
         error_rate: args.edit_error_rate,
         overdispersion: args.edit_overdispersion,
         backend: args.backend.clone(),
@@ -445,7 +444,6 @@ pub(super) fn run_dart_step(
         },
         mut_bam_files: args.control_bam_files.clone(),
         site_min_cells: crate::editing::pipeline::DEFAULT_SITE_MIN_CELLS,
-        test_level: args.m6a_contrast.test_level,
         competent_cells: None,
     };
 
@@ -467,7 +465,7 @@ pub(super) fn run_dart_step(
 
     let discovered = find_all_conversion_sites(&gff_map, &params, membership)?;
 
-    // Pre-mask audit (unselected sites + per-gene tables), shared with
+    // Pre-mask audit (unselected sites, with reasons), shared with
     // `faba dartseq` so both emit identical files.
     write_discovery_outputs(&discovered, &gff_map, &spliced, &args.output, "m6a")?;
     let m6a_sites = discovered.selected;

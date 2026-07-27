@@ -1,5 +1,4 @@
 use crate::data::gene_model::SplicedGenes;
-use crate::editing::pipeline::GeneContrastStat;
 use crate::editing::ConversionSite;
 use anyhow::Result;
 use arrow::array::{ArrayRef, Float32Array, Int64Array, Int64Builder, StringArray, UInt64Array};
@@ -41,12 +40,8 @@ pub trait ToParquet {
 /// - conversion_pos: nullable Int64 (Some for M6A, None/null for AtoI)
 /// - rel_pos: strand-aware position along the gene's merged EXONS (0-based),
 ///   i.e. a transcript coordinate. Null for an intronic site, which has none.
-/// - pv: per-site contrast p-value (site localization)
-/// - gene_pv: gene-level pooled contrast p-value under `--m6a-test-level gene`
-///   (NaN under per-site testing); `qvalue` is its BH adjustment
-/// - qvalue: Benjamini-Hochberg q-value — per-site under site testing, the
-///   shared gene q under gene testing
-/// - reason: test outcome — `selected` / `low_control` / `delta` / `fdr`
+/// - pv: per-site contrast p-value — the statistic the call is made on
+/// - reason: test outcome — `selected` / `low_control` / `delta` / `pvalue`
 /// - wt_a, wt_t, wt_g, wt_c: base counts at the site
 impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
     fn to_parquet<P: AsRef<Path>>(
@@ -65,8 +60,6 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let mut conversion_pos_builder = Int64Builder::new();
         let mut rel_pos_builder = Int64Builder::new();
         let mut pv_vec: Vec<f32> = Vec::new();
-        let mut gene_pv_vec: Vec<f32> = Vec::new();
-        let mut qv_vec: Vec<f32> = Vec::new();
         let mut reason_vec: Vec<String> = Vec::new();
         let mut wt_a_vec: Vec<u64> = Vec::new();
         let mut wt_t_vec: Vec<u64> = Vec::new();
@@ -142,8 +135,6 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
 
                 rel_pos_builder.append_option(rel_pos);
                 pv_vec.push(site.pv());
-                gene_pv_vec.push(site.gene_pv());
-                qv_vec.push(site.qv());
                 reason_vec.push(site.reason().label().to_string());
 
                 wt_a_vec.push(site.wt_freq().count_a() as u64);
@@ -169,8 +160,6 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let conversion_pos_array = Arc::new(conversion_pos_builder.finish()) as ArrayRef;
         let rel_pos_array = Arc::new(rel_pos_builder.finish()) as ArrayRef;
         let pv_array = Arc::new(Float32Array::from(pv_vec)) as ArrayRef;
-        let gene_pv_array = Arc::new(Float32Array::from(gene_pv_vec)) as ArrayRef;
-        let qv_array = Arc::new(Float32Array::from(qv_vec)) as ArrayRef;
         let reason_array = Arc::new(StringArray::from(reason_vec)) as ArrayRef;
 
         let wt_a_array = Arc::new(UInt64Array::from(wt_a_vec)) as ArrayRef;
@@ -198,8 +187,6 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
             ),
             arrow::datatypes::Field::new("rel_pos", arrow::datatypes::DataType::Int64, true),
             arrow::datatypes::Field::new("pv", arrow::datatypes::DataType::Float32, false),
-            arrow::datatypes::Field::new("gene_pv", arrow::datatypes::DataType::Float32, false),
-            arrow::datatypes::Field::new("qvalue", arrow::datatypes::DataType::Float32, false),
             arrow::datatypes::Field::new("reason", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("wt_a", arrow::datatypes::DataType::UInt64, false),
             arrow::datatypes::Field::new("wt_t", arrow::datatypes::DataType::UInt64, false),
@@ -224,8 +211,6 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
                 conversion_pos_array,
                 rel_pos_array,
                 pv_array,
-                gene_pv_array,
-                qv_array,
                 reason_array,
                 wt_a_array,
                 wt_t_array,
@@ -249,116 +234,12 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
     }
 }
 
-/// Write per-gene m6A contrast records to `m6a_genes.parquet` — the gene-level
-/// analogue of the per-site `m6a_sites.parquet`. One row per gene: the pooled
-/// 2×2 (WT/MUT converted/unconverted) summed across the gene's candidate motif
-/// C's, the pooled contrast p-value, and the Benjamini-Hochberg q-value across
-/// genes. Only produced under `--m6a-test-level gene`.
-///
-/// Columns: chr, gene (`{gene_id}_{gene_name}`), strand, gene_start, gene_stop,
-/// n_sites, wt_converted, wt_unconverted, mut_converted, mut_unconverted, pv,
-/// qvalue, reason (`selected` / `low_control` / `delta` / `fdr`).
-pub fn write_gene_contrast_parquet<'a, P: AsRef<Path>>(
-    stats: impl IntoIterator<Item = &'a GeneContrastStat>,
-    gff_map: &GffRecordMap,
-    path: P,
-) -> Result<()> {
-    use arrow::datatypes::{DataType, Field, Schema};
-
-    let mut chr_vec: Vec<String> = Vec::new();
-    let mut gene_vec: Vec<String> = Vec::new();
-    let mut strand_vec: Vec<String> = Vec::new();
-    let mut gene_start_vec: Vec<i64> = Vec::new();
-    let mut gene_stop_vec: Vec<i64> = Vec::new();
-    let mut n_sites_vec: Vec<u64> = Vec::new();
-    let mut wt_conv_vec: Vec<u64> = Vec::new();
-    let mut wt_unconv_vec: Vec<u64> = Vec::new();
-    let mut mut_conv_vec: Vec<u64> = Vec::new();
-    let mut mut_unconv_vec: Vec<u64> = Vec::new();
-    let mut pv_vec: Vec<f32> = Vec::new();
-    let mut qv_vec: Vec<f32> = Vec::new();
-    let mut reason_vec: Vec<String> = Vec::new();
-
-    for s in stats {
-        let (chr, gene_name, strand_str, gene_start, gene_stop) = gff_map
-            .get(&s.gene_id)
-            .map(|rec| {
-                (
-                    format!("{}", rec.seqname),
-                    format!("{}", rec.gene_name),
-                    format!("{}", rec.strand),
-                    rec.start,
-                    rec.stop,
-                )
-            })
-            .unwrap_or_else(|| (".".into(), ".".into(), ".".into(), 0, 0));
-
-        chr_vec.push(chr);
-        gene_vec.push(format!("{}_{}", s.gene_id, gene_name));
-        strand_vec.push(strand_str);
-        gene_start_vec.push(gene_start);
-        gene_stop_vec.push(gene_stop);
-        n_sites_vec.push(s.n_sites as u64);
-        wt_conv_vec.push(s.wt_converted);
-        wt_unconv_vec.push(s.wt_unconverted);
-        mut_conv_vec.push(s.mut_converted);
-        mut_unconv_vec.push(s.mut_unconverted);
-        pv_vec.push(s.pv);
-        qv_vec.push(s.qv);
-        reason_vec.push(s.reason.label().to_string());
-    }
-
-    let schema = Schema::new(vec![
-        Field::new("chr", DataType::Utf8, false),
-        Field::new("gene", DataType::Utf8, false),
-        Field::new("strand", DataType::Utf8, false),
-        Field::new("gene_start", DataType::Int64, false),
-        Field::new("gene_stop", DataType::Int64, false),
-        Field::new("n_sites", DataType::UInt64, false),
-        Field::new("wt_converted", DataType::UInt64, false),
-        Field::new("wt_unconverted", DataType::UInt64, false),
-        Field::new("mut_converted", DataType::UInt64, false),
-        Field::new("mut_unconverted", DataType::UInt64, false),
-        Field::new("pv", DataType::Float32, false),
-        Field::new("qvalue", DataType::Float32, false),
-        Field::new("reason", DataType::Utf8, false),
-    ]);
-
-    let batch = RecordBatch::try_new(
-        Arc::new(schema.clone()),
-        vec![
-            Arc::new(StringArray::from(chr_vec)) as ArrayRef,
-            Arc::new(StringArray::from(gene_vec)) as ArrayRef,
-            Arc::new(StringArray::from(strand_vec)) as ArrayRef,
-            Arc::new(Int64Array::from(gene_start_vec)) as ArrayRef,
-            Arc::new(Int64Array::from(gene_stop_vec)) as ArrayRef,
-            Arc::new(UInt64Array::from(n_sites_vec)) as ArrayRef,
-            Arc::new(UInt64Array::from(wt_conv_vec)) as ArrayRef,
-            Arc::new(UInt64Array::from(wt_unconv_vec)) as ArrayRef,
-            Arc::new(UInt64Array::from(mut_conv_vec)) as ArrayRef,
-            Arc::new(UInt64Array::from(mut_unconv_vec)) as ArrayRef,
-            Arc::new(Float32Array::from(pv_vec)) as ArrayRef,
-            Arc::new(Float32Array::from(qv_vec)) as ArrayRef,
-            Arc::new(StringArray::from(reason_vec)) as ArrayRef,
-        ],
-    )?;
-
-    let file = File::create(path)?;
-    let props = WriterProperties::builder().build();
-    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))?;
-    writer.write(&batch)?;
-    writer.close()?;
-
-    Ok(())
-}
-
-/// Emit the discovery audit outputs for one modality, shared by `faba dartseq`
+/// Emit the discovery audit output for one modality, shared by `faba dartseq`
 /// and `faba all` so both write identical files. `prefix` is the modality file
-/// stem (e.g. `"m6a"`). Writes `{prefix}_sites_unselected.parquet` (every
-/// putative site that missed the cut, with its `reason`) and, under gene-level
-/// testing (non-empty `gene_stats`), `{prefix}_genes.parquet` +
-/// `{prefix}_genes_unselected.parquet`. The *selected* sites are written by the
-/// caller after masking; this is the pre-mask audit of the test itself.
+/// stem (e.g. `"m6a"`). Writes `{prefix}_sites_unselected.parquet`: every
+/// putative site that missed the cut, with its `reason`. The *selected* sites
+/// are written by the caller after masking; this is the pre-mask audit of the
+/// test itself.
 pub fn write_discovery_outputs(
     discovered: &crate::editing::pipeline::DiscoveredSites,
     gff_map: &GffRecordMap,
@@ -373,34 +254,6 @@ pub fn write_discovery_outputs(
         format!("{output_dir}/{prefix}_sites_unselected.parquet"),
     )?;
     log::info!("wrote {n_unselected} unselected {prefix} sites (with reasons)");
-
-    if !discovered.gene_stats.is_empty() {
-        let n_sel = discovered
-            .gene_stats
-            .iter()
-            .filter(|g| g.reason.is_selected())
-            .count();
-        write_gene_contrast_parquet(
-            discovered
-                .gene_stats
-                .iter()
-                .filter(|g| g.reason.is_selected()),
-            gff_map,
-            format!("{output_dir}/{prefix}_genes.parquet"),
-        )?;
-        write_gene_contrast_parquet(
-            discovered
-                .gene_stats
-                .iter()
-                .filter(|g| !g.reason.is_selected()),
-            gff_map,
-            format!("{output_dir}/{prefix}_genes_unselected.parquet"),
-        )?;
-        log::info!(
-            "wrote {n_sel} selected / {} unselected {prefix} genes (per-gene test)",
-            discovered.gene_stats.len() - n_sel,
-        );
-    }
     Ok(())
 }
 

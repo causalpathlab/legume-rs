@@ -35,71 +35,29 @@ fn fisher_degenerate_margins_return_one() {
 // Beta-binomial LRT (one-sided, WT > MUT) //
 /////////////////////////////////////////////
 
+/// The contrast is ONE exact test now, so this pins the property the old
+/// two-branch version could not have: the p-value never gets larger when the
+/// evidence gets stronger. The dispatch broke exactly this -- one extra
+/// converted control read moved p 7.6e6-fold, and doubling coverage at a fixed
+/// effect made a site less significant.
 #[test]
-fn lrt_wt_enriched_low_fraction_is_significant() {
-    // The regime faba was missing: ~50% WT vs ~5% MUT at good depth.
-    let p = betabinom_lrt_greater(50, 100, 5, 100, 0.02);
-    assert!(p < 0.01, "WT-enriched site should be significant, got {p}");
-}
-
-#[test]
-fn lrt_equal_rates_not_significant() {
-    // p̂_W == p̂_M → WT is not strictly above MUT → one-sided p = 1 (conservative).
-    let p = betabinom_lrt_greater(50, 100, 50, 100, 0.02);
-    assert_eq!(p, 1.0, "equal rates carry no WT>MUT evidence, got {p}");
-}
-
-#[test]
-fn lrt_marginal_excess_is_near_half() {
-    // A hair above equal → D ≈ 0 → one-sided p ≈ 0.5 (the boundary of the
-    // half-chi-bar), i.e. not significant.
-    let p = betabinom_lrt_greater(51, 100, 50, 100, 0.02);
+fn contrast_is_monotone_in_the_evidence() {
+    // Sweep the control's converted count across the OLD branch boundary at 5.
+    let ps: Vec<f32> = (0..10)
+        .map(|a_m| contrast_pvalue(40, 360, a_m, 400 - a_m))
+        .collect();
+    for w in ps.windows(2) {
+        assert!(
+            w[1] >= w[0],
+            "more control signal must not make a site MORE significant: {ps:?}"
+        );
+    }
+    // ...and more data at a fixed effect must not weaken the call.
+    let small = contrast_pvalue(20, 180, 2, 198);
+    let big = contrast_pvalue(40, 360, 4, 396);
     assert!(
-        p > 0.3,
-        "marginal WT excess should be non-significant, got {p}"
-    );
-}
-
-#[test]
-fn lrt_wt_below_mut_returns_one() {
-    assert_eq!(betabinom_lrt_greater(5, 100, 50, 100, 0.02), 1.0);
-}
-
-#[test]
-fn lrt_overdispersion_rescues_high_coverage_variant() {
-    // A hom/het variant: near-equal, very high coverage, tiny WT excess.
-    // With real overdispersion the LRT must NOT call it significant, even
-    // though sheer n would make a naive binomial test tiny.
-    let p = betabinom_lrt_greater(1030, 2000, 1000, 2000, 0.1);
-    assert!(
-        p > 0.05,
-        "overdispersion should spare a high-cov variant, got {p}"
-    );
-}
-
-///////////////////////
-// contrast dispatch //
-///////////////////////
-
-#[test]
-fn contrast_small_counts_match_fisher() {
-    let a_w = 6;
-    let u_w = 1;
-    let a_m = 1;
-    let u_m = 8;
-    assert_eq!(
-        contrast_pvalue(a_w, u_w, a_m, u_m, 0.02),
-        fisher_exact_greater(a_w, u_w, a_m, u_m)
-    );
-}
-
-#[test]
-fn contrast_large_counts_use_lrt() {
-    // All cells ≥ 5 and total ≥ 100 → LRT branch.
-    let (a_w, u_w, a_m, u_m) = (60u64, 140u64, 6u64, 194u64);
-    assert_eq!(
-        contrast_pvalue(a_w, u_w, a_m, u_m, 0.02),
-        betabinom_lrt_greater(a_w, a_w + u_w, a_m, a_m + u_m, 0.02)
+        big <= small,
+        "doubling coverage at the same rates weakened the call: {small} -> {big}"
     );
 }
 

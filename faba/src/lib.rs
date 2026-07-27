@@ -24,6 +24,9 @@ pub mod manifest;
 /// and [`gem_encoder::args::GemEncoderArgs`].
 pub mod gem_encoder;
 
-/// Single-sample editing statistics (beta-binomial p-values, Benjamini-Hochberg
-/// FDR). Exposed so the pure-function tests can live under `tests/`.
+/// Shared test statistics: the beta-binomial and Fisher-exact p-values the
+/// editing caller is built on, plus the Benjamini-Hochberg adjustment used by
+/// `lineage`, `dyn-assoc` and cell QC. The editing caller does NOT use BH:
+/// neighbouring sites share reads, so BH's dependence assumption fails there.
+/// Exposed so the pure-function tests can live under `tests/`.
 pub mod hypothesis_tests;

@@ -228,19 +228,11 @@ pub struct PipelineArgs {
     pub atoi_min_conversion: usize,
 
     #[arg(
-        long = "atoi-fdr",
+        long = "atoi-pvalue",
         default_value_t = 0.05,
-        help = "ATOI detection FDR target (Benjamini-Hochberg q-value)"
+        help = "Marginal p-value cutoff for ATOI detection (no multiplicity correction)"
     )]
-    pub atoi_fdr_cutoff: f32,
-
-    #[arg(
-        long = "atoi-test-level",
-        value_enum,
-        default_value_t = crate::editing::pipeline::EditTestLevel::Site,
-        help = "Unit of the A-to-I test: `site` (default) or `gene` (pooled beta-binomial)"
-    )]
-    pub atoi_test_level: crate::editing::pipeline::EditTestLevel,
+    pub atoi_pvalue_cutoff: f32,
 
     ///////////////////////////////////////////////////////
     // Editing statistical null (shared by ATOI and m6A) //
@@ -314,11 +306,11 @@ pub struct PipelineArgs {
     pub m6a_min_conversion: usize,
 
     #[arg(
-        long = "m6a-fdr",
-        default_value_t = 0.1,
-        help = "m6A detection FDR target (Benjamini-Hochberg q-value)"
+        long = "m6a-pvalue",
+        default_value_t = 0.05,
+        help = "Marginal p-value cutoff for m6A detection (no multiplicity correction)"
     )]
-    pub m6a_fdr_cutoff: f32,
+    pub m6a_pvalue_cutoff: f32,
 
     #[command(flatten)]
     pub m6a_contrast: M6aContrastArgs,
