@@ -16,6 +16,7 @@ use crate::embed_common::*;
 use data_beans_alg::hvg::{select_hvg_streaming, HvgCliArgs};
 use graph_embedding_util as ge;
 
+mod posterior;
 mod resolve_etm;
 
 use resolve_etm::resolve_etm_topics;
@@ -349,6 +350,86 @@ pub struct BgeArgs {
     #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
     device_no: usize,
 
+    // ─── posterior (MCMC over the fitted gate) ───────────────────────────────
+    // `--mcmc N` is the headline spelling — parallel to `-i/--epochs` for SGD,
+    // one number that says how long to run the sampler — and turning it on IS
+    // the flag: it implies `--posterior both`. `--posterior` narrows that.
+    #[arg(
+        long = "mcmc",
+        alias = "jitter",
+        value_name = "N",
+        help = "Sample the exact posterior over the fitted gate, N draws per chain\n\
+                (implies --posterior both). Off unless given.",
+        long_help = "Run MCMC over the fitted gate and write the posterior tables:\n\
+                     N is the number of RETAINED draws per chain (warmup is N/2 more),\n\
+                     the sampler's analogue of `-i/--epochs`.\n\
+                     \n\
+                     Training fits the per-gene softmax gate VARIATIONALLY and reports a point\n\
+                     estimate; this samples the SAME model exactly, against the frozen MAP cell side,\n\
+                     so selection comes with calibrated uncertainty:\n\
+                     per-dim posterior inclusion probabilities, a credible set over the dims a gene loads,\n\
+                     and the effect posterior.\n\
+                     \n\
+                     Passing this implies `--posterior both` (the full-Bayes answer);\n\
+                     use `--posterior` to ask for less.\n\
+                     Try 200 to start. Cost is roughly 0.6 core-seconds per gene per 200 draws,\n\
+                     so a whole dictionary runs for minutes — Ctrl+C returns partial results.\n\
+                     Writes {out}.{feature_pip,feature_posterior}.parquet + {out}.posterior_hyper.json.\n\
+                     `--jitter` is an accepted alias."
+    )]
+    mcmc: Option<usize>,
+
+    #[arg(
+        long = "posterior",
+        value_enum,
+        value_name = "MODE",
+        help = "Which posterior to sample: off (default) | gate | hyper | both.\n\
+                Omit and pass --mcmc N for the usual case.",
+        long_help = "Which posterior to sample after the MAP fit. Chain length comes from `--mcmc N`\n\
+                     (default 200 when only this flag is given).\n\
+                     \n\
+                       off   → no posterior; the run is byte-identical to one without these flags (default).\n\
+                       gate  → the per-gene selection posterior only (PIP, credible sets, effect posterior).\n\
+                       hyper → the Tier-1 hyperparameters only: the slab variance σ₀² and the sparsity π₀,\n\
+                               which the gate otherwise hard-codes, sampled from the data.\n\
+                       both  → both, AND the learned σ₀² is fed into the gate's slab prior.\n\
+                               That coupling is the hierarchical payoff, so `both` is more than the union\n\
+                               of the two — it is what `--mcmc` selects.\n\
+                     \n\
+                     `--posterior off` together with `--mcmc N` is an error (one turns it off, the other on)."
+    )]
+    posterior: Option<posterior::PosteriorMode>,
+
+    #[arg(
+        long = "posterior-genes",
+        default_value_t = 0,
+        value_name = "N",
+        help = "Cap the posterior to the top-N features by observed count (0 = all).",
+        long_help = "Limit the posterior to the N features carrying the most observed count mass\n\
+                     (a gene with no counts has nothing for the likelihood to move,\n\
+                     so this puts the sampling budget where the posterior is informative).\n\
+                     0 (default) samples every feature.\n\
+                     Use it to keep an exploratory run short; the un-sampled features are simply absent\n\
+                     from the output tables, not written as null."
+    )]
+    posterior_genes: usize,
+
+    #[arg(
+        long = "posterior-partition",
+        default_value_t = posterior::DEFAULT_PARTITION,
+        value_name = "N",
+        help = "Cells in the frozen partition that normalizes the Poisson rate (default 1024).",
+        long_help = "Size of the frozen negative slate: the number of cells summed in the Poisson\n\
+                     rate normalizer, drawn ONCE per run and held fixed (a slate that moved between\n\
+                     sweeps would leave the chain with no fixed target).\n\
+                     \n\
+                     This is the Monte-Carlo RESOLUTION of the normalizer, not a subsample of the data —\n\
+                     every observed count still enters the likelihood exactly.\n\
+                     Raise it on very large inputs, where the default is thin relative to the cell count;\n\
+                     cost grows linearly with it. Clamped to the cell count."
+    )]
+    posterior_partition: usize,
+
     #[arg(
         long,
         short,
@@ -365,6 +446,9 @@ pub struct BgeArgs {
 
 pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
+    // Reconcile --posterior with --mcmc/--jitter BEFORE any I/O, so a
+    // contradictory pair fails in the first second rather than after the fit.
+    let posterior_plan = posterior::resolve(args)?;
 
     // Input files: positional (single-modality) OR --multiome modality groups.
     // Each --multiome occurrence is one group; comma-separated files within it.
@@ -814,6 +898,22 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         has_latent: resolve_etm,
         has_cell_to_pb: false,
     })?;
+
+    // The posterior runs LAST, and only on a complete fit. Two reasons: an
+    // interrupted fit never ran phase-2, so `e_cell` is un-projected and freezing
+    // it would sample against the wrong side; and a whole-dictionary sweep takes
+    // minutes, so putting it after every normal output means a Ctrl+C here costs
+    // only the posterior tables, not the run.
+    if posterior_plan.mode != posterior::PosteriorMode::Off {
+        if interrupted {
+            log::warn!(
+                "Skipping the posterior — the fit was interrupted, so the cell embedding \
+                 is un-projected and would be the wrong side to condition on."
+            );
+        } else {
+            posterior::run_posterior(args, posterior_plan, &unified, &out.model)?;
+        }
+    }
 
     if resolve_etm {
         info!(
