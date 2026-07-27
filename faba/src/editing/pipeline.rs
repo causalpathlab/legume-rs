@@ -168,7 +168,7 @@ impl ConversionParams {
     /// If a UMI tag is configured, enable UMI dedup on the given freq map.
     fn apply_umi(&self, map: &mut crate::data::dna_stat_map::DnaBaseFreqMap<'_>) {
         if let Some(ref tag) = self.umi_tag {
-            map.set_umi_tag(tag);
+            map.set_umi_tag(tag, &self.cell_barcode_tag);
         }
     }
 

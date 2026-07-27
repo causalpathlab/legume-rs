@@ -55,7 +55,7 @@ impl SnpParams {
         let mut m = DnaBaseFreqMap::new();
         m.set_quality_thresholds(self.min_base_quality, self.min_mapping_quality);
         if let Some(ref tag) = self.umi_tag {
-            m.set_umi_tag(tag);
+            m.set_umi_tag(tag, &self.cell_barcode_tag);
         }
         m.set_use_base_quality(self.use_base_quality);
         m
@@ -70,7 +70,7 @@ impl SnpParams {
         let mut m = DnaBaseFreqMap::new_with_cell_barcode(&self.cell_barcode_tag, cell_membership);
         m.set_quality_thresholds(self.min_base_quality, self.min_mapping_quality);
         if let Some(ref tag) = self.umi_tag {
-            m.set_umi_tag(tag);
+            m.set_umi_tag(tag, &self.cell_barcode_tag);
         }
         m
     }
