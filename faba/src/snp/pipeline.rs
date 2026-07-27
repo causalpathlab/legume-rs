@@ -95,7 +95,6 @@ pub fn pileup_known_snps_by_gene(
     let njobs = records.len() as u64;
     info!("Genotyping known SNPs across {} genes", njobs);
 
-    let arc_sites = Arc::new(Mutex::new(Vec::<SnpSite>::new()));
     let gene_site_map = Arc::new(DashMap::<GeneId, Vec<SnpSite>>::default());
 
     records
@@ -166,23 +165,17 @@ pub fn pileup_known_snps_by_gene(
                     gene_site_map
                         .entry(rec.gene_id.clone())
                         .or_default()
-                        .extend(local_sites.clone());
-                    arc_sites.lock().expect("lock").extend(local_sites);
+                        .extend(local_sites);
                 }
 
                 Ok(())
             },
         )?;
 
-    let mut sites = Arc::try_unwrap(arc_sites)
-        .map_err(|_| anyhow::anyhow!("failed to release sites"))?
-        .into_inner()?;
-
-    sites.sort_by(|a, b| a.chr.cmp(&b.chr).then(a.pos.cmp(&b.pos)));
-    sites.dedup_by(|a, b| a.chr == b.chr && a.pos == b.pos);
-
     let gene_sites = Arc::try_unwrap(gene_site_map)
         .map_err(|_| anyhow::anyhow!("failed to release gene_site_map"))?;
+
+    let sites = flatten_sites_by_owner_gene(&gene_sites);
 
     Ok(GenePileupResult { sites, gene_sites })
 }
@@ -289,7 +282,6 @@ pub fn discover_snps_by_gene(
     // Validate reference genome upfront
     load_fasta_index(&params.genome_file)?;
 
-    let arc_sites = Arc::new(Mutex::new(Vec::<SnpSite>::new()));
     let gene_site_map = Arc::new(DashMap::<GeneId, Vec<SnpSite>>::default());
 
     records
@@ -370,23 +362,17 @@ pub fn discover_snps_by_gene(
                     gene_site_map
                         .entry(rec.gene_id.clone())
                         .or_default()
-                        .extend(local_sites.clone());
-                    arc_sites.lock().expect("lock").extend(local_sites);
+                        .extend(local_sites);
                 }
 
                 Ok(())
             },
         )?;
 
-    let mut sites = Arc::try_unwrap(arc_sites)
-        .map_err(|_| anyhow::anyhow!("failed to release sites"))?
-        .into_inner()?;
-
-    sites.sort_by(|a, b| a.chr.cmp(&b.chr).then(a.pos.cmp(&b.pos)));
-    sites.dedup_by(|a, b| a.chr == b.chr && a.pos == b.pos);
-
     let gene_sites = Arc::try_unwrap(gene_site_map)
         .map_err(|_| anyhow::anyhow!("failed to release gene_site_map"))?;
+
+    let sites = flatten_sites_by_owner_gene(&gene_sites);
 
     Ok(GenePileupResult { sites, gene_sites })
 }
@@ -497,16 +483,55 @@ pub fn discover_snps_by_region(params: &SnpParams) -> anyhow::Result<Vec<SnpSite
 // SECOND PASS: Per-cell allele counts (10x single-cell mode) //
 ////////////////////////////////////////////////////////////////
 
+/// Flatten the per-gene sites to exactly ONE record per locus.
+///
+/// A locus inside two overlapping genes is piled up once per gene, and the two
+/// pileups disagree on the counts: UMI dedup is scoped to the gene, so a read
+/// covering this locus is dropped when an earlier read sharing its
+/// `(cell, UMI)` fell anywhere else in that gene's span, and the longer span
+/// suppresses more. Both records used to be pushed onto one shared vector and
+/// deduped by arrival order, which made the reported depth depend on whichever
+/// worker thread reached the mutex first — the same input could genotype
+/// differently from run to run.
+///
+/// The winner is the record from the owner gene, the lexicographically smallest
+/// gene id carrying the locus. That is the rule
+/// [`dedup_loci_by_owner_gene`] already applies to the per-gene map, so the
+/// parquet, the VCF, the SNP mask and the BAF matrix now describe every locus
+/// with the same counts instead of disagreeing.
+fn flatten_sites_by_owner_gene(gene_sites: &DashMap<GeneId, Vec<SnpSite>>) -> Vec<SnpSite> {
+    let mut owned: FxHashMap<(Box<str>, i64), (GeneId, SnpSite)> = FxHashMap::default();
+
+    for entry in gene_sites.iter() {
+        let gene = entry.key();
+        for site in entry.value() {
+            owned
+                .entry((site.chr.clone(), site.pos))
+                .and_modify(|held| {
+                    if gene < &held.0 {
+                        *held = (gene.clone(), site.clone());
+                    }
+                })
+                .or_insert_with(|| (gene.clone(), site.clone()));
+        }
+    }
+
+    let mut sites: Vec<SnpSite> = owned.into_values().map(|(_, site)| site).collect();
+    sites.sort_by(|a, b| a.chr.cmp(&b.chr).then(a.pos.cmp(&b.pos)));
+    sites
+}
+
 /// Give every called locus exactly ONE owner gene.
 ///
 /// `gene_sites` is built by iterating GFF records, so a variant inside two
-/// overlapping genes lands under both keys — the flat `sites` vector is deduped
-/// by `(chr, pos)`, this map never was. The gene is only how pass 2 finds reads
-/// to fetch, and the row is named for the locus, so a locus left under two genes
-/// would be scanned twice and its counts written twice under one row name.
+/// overlapping genes lands under both keys. The gene is only how pass 2 finds
+/// reads to fetch, and the row is named for the locus, so a locus left under two
+/// genes would be scanned twice and its counts written twice under one row name.
 ///
 /// The owner is the lexicographically smallest gene id carrying the locus, which
-/// makes the choice independent of GFF order and of thread scheduling.
+/// makes the choice independent of GFF order and of thread scheduling — see
+/// [`flatten_sites_by_owner_gene`], which picks the same winner for the flat
+/// call set.
 fn dedup_loci_by_owner_gene(gene_sites: &DashMap<GeneId, Vec<SnpSite>>) -> usize {
     let mut owner: FxHashMap<(Box<str>, i64), GeneId> = FxHashMap::default();
     for entry in gene_sites.iter() {

@@ -14,6 +14,15 @@ fn site(chr: &str, pos: i64) -> SnpSite {
     }
 }
 
+fn site_with_depth(chr: &str, pos: i64, depth: usize) -> SnpSite {
+    let mut counts = crate::data::dna::DnaBaseCount::new();
+    counts.add(Some(&crate::data::dna::Dna::A), depth);
+    SnpSite {
+        counts,
+        ..site(chr, pos)
+    }
+}
+
 fn gene_sites(entries: &[(&str, &[(&str, i64)])]) -> DashMap<GeneId, Vec<SnpSite>> {
     let map = DashMap::<GeneId, Vec<SnpSite>>::default();
     for (gene, loci) in entries {
@@ -96,6 +105,61 @@ fn the_same_position_on_two_contigs_is_two_loci() {
 
     assert_eq!(dropped, 0);
     assert_eq!(loci_of(&map).len(), 2);
+}
+
+/// A locus in two overlapping genes is piled up once per gene and the two
+/// tallies genuinely disagree, because UMI dedup is scoped to the gene. The flat
+/// call set must take the owner gene's record — the same winner the per-gene map
+/// keeps — instead of whichever worker thread pushed first. Both insertion
+/// orders are exercised, since arrival order is exactly what used to decide it.
+#[test]
+fn the_flat_call_set_takes_the_owner_genes_counts() {
+    for order in [
+        [("AAA_FIRST", 11usize), ("ZZZ_LAST", 77usize)],
+        [("ZZZ_LAST", 77usize), ("AAA_FIRST", 11usize)],
+    ] {
+        let map = DashMap::<GeneId, Vec<SnpSite>>::default();
+        for (gene, depth) in order {
+            map.insert(
+                GeneId::Ensembl(gene.into()),
+                vec![site_with_depth("chr1", 200, depth)],
+            );
+        }
+
+        let sites = flatten_sites_by_owner_gene(&map);
+
+        assert_eq!(sites.len(), 1, "one record per locus");
+        assert_eq!(
+            sites[0].depth(),
+            11,
+            "counts come from the owner gene AAA_FIRST, not from arrival order"
+        );
+    }
+}
+
+/// The call set is written to parquet and VCF, both of which want loci in
+/// coordinate order.
+#[test]
+fn the_flat_call_set_is_sorted_by_locus() {
+    let map = gene_sites(&[
+        ("GENE_B", &[("chr2", 50), ("chr1", 300)]),
+        ("GENE_A", &[("chr1", 100), ("chr2", 10)]),
+    ]);
+
+    let got: Vec<(String, i64)> = flatten_sites_by_owner_gene(&map)
+        .iter()
+        .map(|s| (s.chr.to_string(), s.pos))
+        .collect();
+
+    assert_eq!(
+        got,
+        vec![
+            ("chr1".to_string(), 100),
+            ("chr1".to_string(), 300),
+            ("chr2".to_string(), 10),
+            ("chr2".to_string(), 50),
+        ]
+    );
 }
 
 /// Nothing shared, nothing touched.
