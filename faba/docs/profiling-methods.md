@@ -139,13 +139,20 @@ converts at the same rate in signal and control."** That framing is what makes t
 work: a germline C/T variant converts equally in both arms, so it fails the test rather than
 having to be masked out.
 
-The 2×2 table (signal/control × converted/unconverted) is tested one-sided:
+The 2×2 table (signal/control × converted/unconverted) is tested one-sided by a single test:
+**Fisher's exact test** [3], conditioning on all four margins, returning `P(signal converted ≥
+observed)`.
 
-- **Fisher's exact test** [3] when any cell of the table has fewer than 5 reads, or total coverage
-  is under 100;
-- otherwise a **beta-binomial likelihood-ratio test** with a shared overdispersion ρ
-  (`--m6a-contrast-overdispersion`, 0.02), testing `H₀: p_signal = p_control`. The one-sided
-  p-value is ½·P(χ²₁ ≥ D).
+There used to be a second branch — an overdispersed beta-binomial likelihood-ratio test, taken once
+every cell reached 5 reads and total coverage reached 100. Both tests were individually correct; the
+*dispatch* was not. Two different nulls met at a count threshold, so the p-value jumped
+discontinuously across it: measured, one extra converted read in the control moved it 7.6e6-fold
+(3.7e-9 → 2.8e-2), and doubling coverage at a fixed effect made a site *less* significant (5.6e-4 →
+5.3e-2). A statistic that is not monotone in its own evidence cannot rank sites. The exact branch was
+kept because it was already the majority: on rep1, 94.6% of called sites took Fisher, since DART
+control background is 0.1–1% and the control converted count is 0–2 at 88% of sites. The cost, stated
+plainly: overdispersion (fitted at 0.022–0.045) is now unmodelled rather than applied to the 5.4% of
+sites that reached the LRT.
 
 **Null-cell QC (de-dilution).** Before discovery, a fast pre-pass tallies each cell's
 conversions at reference motif positions and drops the cells that edit no more than the
@@ -201,28 +208,51 @@ the RAC/GTY motif plus observed WT C→U at/above the signal floors — signal c
 `--min-coverage` (10) and signal conversions ≥ `--min-conversion` (5). Everything else is the *test*
 that decides selected vs unselected, applied after discovery: control coverage ≥
 `--edit-control-min-coverage` (3) and an absolute excess `≥ --m6a-min-delta` (0.02) on the raw rates
-`a/n`, then the FDR. A putative site that misses any of these is *recorded* (not dropped) in
-`m6a_sites_unselected.parquet` with a `reason` (`low_control` / `delta` / `fdr`), so every candidate
-is accounted for.
+`a/n`, then the p-value cutoff. A putative site that misses any of these is *recorded* (not dropped)
+in `m6a_sites_unselected.parquet` with a `reason` (`low_control` / `delta` / `pvalue`), so every
+candidate is accounted for.
 
 There is no control-fold gate. A Bullseye-style `p_WT / p_MUT ≥ 1.25` guard was measured on three
 DART replicates and found inert: 94–99% of putative sites passed it and removing it changed the
 selected-site count by exactly zero, because a site clearing a 0.02 absolute excess off a ~0.1%
 control rate already clears 1.25×. The delta guard subsumes it.
 
-**Multiple testing.** Set by `--m6a-test-level`. Under `site` (the default) each putative motif C is
-tested and Benjamini–Hochberg [4]-corrected across all sites genome-wide. Under `gene` (opt-in) each
-gene's putative C's are pooled into one WT-vs-MUT 2×2, the effect-size guards run on the pooled
-counts, and BH runs *across genes* — but pooling dilutes a single strong site among the gene's weaker
-C's, so on real chr19 data it calls *fewer*, not more (a strong 6%-vs-0% site drops below the delta
-floor once pooled); a selected gene's result, with its reason, goes to `m6a_genes.parquet`. Either
-way `-q/--fdr` (0.1) is a lenient **target FDR**, not a per-feature threshold; `--fdr 1.0` disables
-it entirely, leaving the coverage + delta gates as the field-standard filter.
+**Multiple testing: there is none.** Each putative motif C is tested on its own and kept when its
+marginal p-value clears `-q/--pvalue` (**0.05**). No Benjamini–Hochberg, no q-values — the `qvalue`
+column of `m6a_sites.parquet` is the p-value itself, kept only for schema stability.
+
+This is deliberate. BH [4] controls the FDR under independence or *positive regression dependence*,
+and neighbouring candidate C's have neither: they are covered by the **same reads**, so their 2×2s
+share cells and depth, and a read converted at one site is evidence *against* its unconverted
+neighbour — the dependence is not even reliably positive. Under arbitrary dependence the valid
+procedure is Benjamini–Yekutieli, which divides α by `Σ 1/i ≈ ln m`: a **10.6× penalty** at the
+~28,000 putative sites of one library, i.e. calling almost nothing. Between "BY and call nothing" and
+"stop claiming FDR control", claiming BH's guarantee while its assumption fails was the one
+indefensible option. Two further measurements point the same way: BH was running on p-values that are
+not uniform under H₀ (a site only exists once it clears `--min-conversion`, so the null tail is
+truncated away), and on the post-guard subset, filtered by `--m6a-min-delta` — monotone in the very
+statistic being tested — which deflated every q by roughly #eligible/#putative. This matches the
+field: Bullseye and scDART call sites by thresholds plus control fold and replicate reproducibility,
+not by a genome-wide FDR. `--pvalue 1.0` disables the cutoff entirely, leaving the coverage + delta
+gates as the field-standard filter.
+
+**The unit is the site, never the gene.** A gene-level mode used to pool every putative C in a gene
+into one 2×2 and test that. It is gone. faba's whole m6A method rests on **de-dilution** — cells that
+never edit are removed *before* discovery, because leaving them in buries real signal in a
+denominator of non-signal (see the null-cell QC above). Pooling a gene re-introduces exactly that
+failure one level up: it averages a focal methylation site against the gene's non-methylated
+positions, with no corresponding de-dilution step. Measured on MYC: 12 putative sites, of which three
+are strong (per-site signal-vs-control deltas of 3.6%, 2.9%, 3.4%; p = 1.3e-4, 2.5e-4, 3.8e-17).
+Pooled across all 12 the delta is **0.0150**, under the 0.02 floor — so the gene was rejected at the
+effect guard and all 12 sites inherited that verdict. Per site, all three are called. Gene pooling is
+dilution-honest by construction and dilution-*blind* in practice, precisely on the focally methylated
+genes the assay exists to find. `m6a_genes.parquet` / `atoi_genes.parquet` and their `_unselected`
+companions are no longer produced.
 
 **Discovery is pooled, not stratified.** When cells are grouped by expression (§8), discovery scans
 each gene's pooled WT marginal over the grouped cells — a putative site needs only the motif and
 observed C→U, and the pooled marginal detects everything any single group would, with the full WT
-evidence per site (so the gene-level pooled 2×2 is not under-counted). The grouping
+evidence per site (so no site's 2×2 is under-counted). The grouping
 is driven by expression and never by the editing signal, which is what keeps the test honest.
 
 **Quantification.** A second pass counts, per cell and per site, converted and unconverted reads.
@@ -248,8 +278,10 @@ noise: `k ~ BetaBinomial(n, α, β)` with mean `ε = --error-rate` (0.01) and in
 to a plain binomial. This is the single-condition test used by SAILOR [5] and JACUSA2 [6].
 
 Gates before testing: `n ≥ --min-coverage` (**5** — note this differs from dartseq's 10) and
-`k ≥ --min-conversion` (**3**). Then Benjamini–Hochberg [4] across all sites, keeping `q ≤ --fdr`
-(0.05).
+`k ≥ --min-conversion` (**3**). Then the same marginal cutoff as §2, keeping `p ≤ --pvalue` (0.05)
+per site — no multiplicity correction, and no gene-level pooling, for the reasons given there. The
+argument is if anything stronger here: A-to-I has no control arm and no de-dilution pre-pass, so a
+pooled gene test would average edited positions against unedited ones with nothing to undo it.
 
 Quantification is as in §2, with channels `edited` / `unedited`.
 

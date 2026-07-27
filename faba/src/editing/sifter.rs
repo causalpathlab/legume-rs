@@ -19,8 +19,6 @@ pub struct M6aContrast {
     pub min_control_coverage: usize,
     /// minimum absolute effect size `p_WT − p_MUT` (raw rates).
     pub min_delta: f32,
-    /// overdispersion ρ for the two-sample beta-binomial LRT contrast.
-    pub rho: f64,
 }
 
 /// Controls which scanning logic to use
@@ -149,15 +147,15 @@ impl<'a> ConversionSifter<'a> {
     /// plus observed WT C→U at or above the coverage / minimum-conversion floors.
     /// It is materialized here with its raw WT-vs-MUT contrast p-value and a copy
     /// of the control counts; the control-coverage, effect-size (`min_delta`)
-    /// and FDR checks are the *test*, applied downstream in
+    /// and p-value checks are the *test*, applied downstream in
     /// [`crate::editing::pipeline::find_all_conversion_sites`], where a failing
-    /// site is recorded with its reason rather than dropped. The `contrast`'s
-    /// `rho` still parameterizes the p-value; its other fields are read by the
-    /// test pass. Returns `(p-value, cloned MUT counts)`, or `None` when the WT
+    /// site is recorded with its reason rather than dropped. Every field of
+    /// `contrast` is read by that test pass, none of them here.
+    /// Returns `(p-value, cloned MUT counts)`, or `None` when the WT
     /// evidence does not clear the coverage / minimum-conversion floors.
     fn m6a_contrast(
         &self,
-        contrast: &M6aContrast,
+        _contrast: &M6aContrast,
         wt: &DnaBaseCount,
         mut_conv: Option<&DnaBaseCount>,
         ref_base: Dna,
@@ -176,7 +174,7 @@ impl<'a> ConversionSifter<'a> {
         let a_m = mut_conv.map_or(0, |m| m.get(Some(&alt_base))) as u64; // MUT converted
         let u_m = mut_conv.map_or(0, |m| m.get(Some(&ref_base))) as u64; // MUT unconverted
 
-        let pv = contrast_pvalue(a_w, u_w, a_m, u_m, contrast.rho);
+        let pv = contrast_pvalue(a_w, u_w, a_m, u_m);
         Some((pv, mut_conv.cloned().unwrap_or_default()))
     }
 
@@ -276,8 +274,6 @@ impl<'a> ConversionSifter<'a> {
                     wt_freq: wt_conv.clone(),
                     mut_freq,
                     pv,
-                    qv: 1.0,
-                    gene_pv: f32::NAN,
                     reason: CallReason::default(),
                 });
             }
@@ -323,8 +319,6 @@ impl<'a> ConversionSifter<'a> {
                     wt_freq: wt_conv.clone(),
                     mut_freq,
                     pv,
-                    qv: 1.0,
-                    gene_pv: f32::NAN,
                     reason: CallReason::default(),
                 });
             }
@@ -358,8 +352,6 @@ impl<'a> ConversionSifter<'a> {
                     wt_freq: wt_freq.clone(),
                     mut_freq: DnaBaseCount::default(),
                     pv,
-                    qv: 1.0,
-                    gene_pv: f32::NAN,
                     reason: CallReason::default(),
                 });
             }
@@ -393,8 +385,6 @@ impl<'a> ConversionSifter<'a> {
                     wt_freq: wt_freq.clone(),
                     mut_freq: DnaBaseCount::default(),
                     pv,
-                    qv: 1.0,
-                    gene_pv: f32::NAN,
                     reason: CallReason::default(),
                 });
             }

@@ -142,73 +142,30 @@ pub fn fisher_exact_greater(a_w: u64, u_w: u64, a_m: u64, u_m: u64) -> f32 {
     ((max + sum.ln()).exp() as f32).clamp(0.0, 1.0)
 }
 
-/// Beta-binomial log-likelihood of `a` edited of `n` at rate `p` and dispersion
-/// `s = (1-ρ)/ρ`, **dropping** the `ln C(n, a)` term (it cancels in the LRT
-/// since `(a, n)` are shared between the full and null fits).
-fn betabinom_loglik_kernel(a: u64, n: u64, p: f64, s: f64) -> f64 {
-    let p = p.clamp(1e-9, 1.0 - 1e-9);
-    let alpha = p * s;
-    let beta = (1.0 - p) * s;
-    let lbeta = |x: f64, y: f64| ln_gamma(x) + ln_gamma(y) - ln_gamma(x + y);
-    lbeta(a as f64 + alpha, (n - a) as f64 + beta) - lbeta(alpha, beta)
-}
-
-/// One-sided beta-binomial likelihood-ratio test that the WT conversion rate
-/// exceeds the MUT (control) rate, sharing a global overdispersion `rho`.
+/// Two-sample WT-vs-MUT conversion p-value for DART m6A: the one-sided
+/// [`fisher_exact_greater`] on the 2x2 of (WT, MUT) x (converted, unconverted).
 ///
-/// `a_W ~ BetaBinom(n_W, p_W, ρ)`, `a_M ~ BetaBinom(n_M, p_M, ρ)`; H₀: `p_W = p_M`.
-/// `D = 2[ℓ(p̂_W) + ℓ(p̂_M) − ℓ(p̂₀) − ℓ(p̂₀)]`, `p̂₀` the pooled rate; the one-sided
-/// p-value is `½·P(χ²₁ ≥ D)` when `p̂_W > p̂_M`, else `1`. Unlike Fisher, the
-/// overdispersion `ρ` prevents a high-coverage variant with a stable allelic
-/// ratio from being called significant by sheer read count — this is the
-/// large-count branch of the contrast.
-pub fn betabinom_lrt_greater(a_w: u64, n_w: u64, a_m: u64, n_m: u64, rho: f64) -> f32 {
-    if n_w == 0 || n_m == 0 {
-        return 1.0;
-    }
-    let pw = a_w as f64 / n_w as f64;
-    let pm = a_m as f64 / n_m as f64;
-    if pw <= pm {
-        return 1.0; // one-sided: nothing to call when WT is not above MUT
-    }
-    let rho = rho.clamp(1e-6, 1.0 - 1e-6);
-    let s = (1.0 - rho) / rho;
-    let p0 = (a_w + a_m) as f64 / (n_w + n_m) as f64;
-    let d = 2.0
-        * (betabinom_loglik_kernel(a_w, n_w, pw, s) + betabinom_loglik_kernel(a_m, n_m, pm, s)
-            - betabinom_loglik_kernel(a_w, n_w, p0, s)
-            - betabinom_loglik_kernel(a_m, n_m, p0, s));
-    let d = d.max(0.0);
-    // Half-χ²₁ one-sided tail. For 1 dof the survival function is closed form:
-    // P(χ²₁ ≥ d) = erfc(√(d/2)), avoiding a ChiSquared object + incomplete-gamma.
-    let p = 0.5 * statrs::function::erf::erfc((d / 2.0).sqrt());
-    (p as f32).clamp(0.0, 1.0)
-}
-
-/// Two-sample WT-vs-MUT conversion p-value for DART m6A. Dispatches to the
-/// exact [`fisher_exact_greater`] when any cell is small (or total coverage is
-/// low), and to the overdispersed [`betabinom_lrt_greater`] otherwise (where an
-/// exact test would over-call on high-coverage variants). `rho` is the
-/// beta-binomial overdispersion of the LRT null.
-pub fn contrast_pvalue(a_w: u64, u_w: u64, a_m: u64, u_m: u64, rho: f64) -> f32 {
-    /// Per-cell count below which the χ²-asymptotic LRT is unreliable → use the
-    /// exact (Fisher) branch. The textbook expected-cell-count threshold.
-    const FISHER_MIN_CELL: u64 = 5;
-    /// Total coverage below which the asymptotic LRT is unreliable → exact branch.
-    const LRT_MIN_TOTAL_COVERAGE: u64 = 100;
-
-    let n_w = a_w + u_w;
-    let n_m = a_m + u_m;
-    let small = a_w < FISHER_MIN_CELL
-        || u_w < FISHER_MIN_CELL
-        || a_m < FISHER_MIN_CELL
-        || u_m < FISHER_MIN_CELL
-        || (n_w + n_m) < LRT_MIN_TOTAL_COVERAGE;
-    if small {
-        fisher_exact_greater(a_w, u_w, a_m, u_m)
-    } else {
-        betabinom_lrt_greater(a_w, n_w, a_m, n_m, rho)
-    }
+/// This used to dispatch to an overdispersed beta-binomial LRT once every cell
+/// reached 5 and total coverage reached 100. Both tests were individually
+/// correct; the DISPATCH was not. Two different nulls met at a count threshold,
+/// so the p-value jumped discontinuously across it. Measured: one extra
+/// converted read in the control moved it 7.6e6-fold (3.7e-9 -> 2.8e-2), and
+/// doubling coverage at a fixed effect made a site LESS significant (5.6e-4 ->
+/// 5.3e-2). A statistic that is not monotone in its own evidence cannot rank
+/// sites, and BH then ranks them by which side of a count threshold they fell.
+///
+/// Dropping the asymptotic branch rather than the exact one was not close:
+/// measured on rep1, 94.6% of called sites already took Fisher, because DART
+/// control background is 0.1-1% so the control converted count is 0-2 at 88% of
+/// sites. The LRT was both the minority path and the only consumer of `rho`.
+///
+/// The cost, stated plainly: overdispersion (fitted at 0.022-0.045) is now
+/// unmodelled, rather than applied to the 5.4% of sites that reached the LRT.
+/// That is the configuration Phase A validated -- 32.1% replicate
+/// reproducibility, 270x over chance -- because that validation ran on a rule
+/// which was already 94.6% Fisher.
+pub fn contrast_pvalue(a_w: u64, u_w: u64, a_m: u64, u_m: u64) -> f32 {
+    fisher_exact_greater(a_w, u_w, a_m, u_m)
 }
 
 /// Mean of a slice (`NaN` if empty).

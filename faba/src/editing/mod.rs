@@ -10,12 +10,12 @@ pub mod sifter;
 
 use crate::data::dna::DnaBaseCount;
 
-/// Why a putative site — or, under gene-level testing, its gene — did or did not
-/// survive the test. A putative site is defined by the sequencing pattern alone
-/// (RAC/GTY motif + observed WT C→U with enough coverage); the effect-size and
-/// FDR checks are applied afterward, and a failing site is *recorded* with the
-/// reason it missed rather than dropped, so `*_unselected.parquet` explains every
-/// call. `Selected` is also the value carried through discovery, before the test.
+/// Why a putative site did or did not survive the test. A putative site is
+/// defined by the sequencing pattern alone (RAC/GTY motif + observed WT C→U with
+/// enough coverage); the effect-size and p-value checks are applied afterward,
+/// and a failing site is *recorded* with the reason it missed rather than
+/// dropped, so `*_unselected.parquet` explains every call. `Selected` is also
+/// the value carried through discovery, before the test.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CallReason {
     /// Passed every test (or not yet decided, during discovery).
@@ -25,8 +25,16 @@ pub enum CallReason {
     LowControl,
     /// Absolute effect size `p_WT − p_MUT` below `--m6a-min-delta`.
     Delta,
-    /// Cleared the effect-size guards but missed the detection FDR.
-    Fdr,
+    /// Cleared the effect-size guards but missed the p-value cutoff.
+    ///
+    /// faba does NO multiplicity correction. BH needs independence or positive
+    /// regression dependence, and neighbouring sites are covered by the same
+    /// reads -- a read converted at one is evidence against its unconverted
+    /// neighbour, so the dependence is not even reliably positive. Under
+    /// arbitrary dependence the valid procedure is Benjamini-Yekutieli, whose
+    /// ~ln(m) penalty is 10.6x at 28k sites. Claiming a guarantee whose
+    /// assumption fails is worse than claiming none.
+    Pvalue,
 }
 
 impl CallReason {
@@ -36,7 +44,7 @@ impl CallReason {
             CallReason::Selected => "selected",
             CallReason::LowControl => "low_control",
             CallReason::Delta => "delta",
-            CallReason::Fdr => "fdr",
+            CallReason::Pvalue => "pvalue",
         }
     }
 
@@ -58,14 +66,11 @@ pub enum ConversionSite {
         /// position. The m6A call is `WT conversion > MUT conversion`, so this
         /// is always populated for m6A sites.
         mut_freq: DnaBaseCount,
-        /// Per-site contrast p-value (site localization). Under gene-level
-        /// testing this stays per-site; `gene_pv`/`qv` carry the gene test.
+        /// Per-site WT-vs-MUT contrast p-value — the statistic the call is made on.
         pv: f32,
-        /// Gene-level pooled contrast p-value under `--m6a-test-level gene`
-        /// (`qv` is its BH adjustment). `NaN` under per-site testing.
-        gene_pv: f32,
-        /// Benjamini-Hochberg q-value (set by the test pass; `1.0` until then).
-        qv: f32,
+        /// Selection statistic (set by the test pass; `1.0` until then).
+        /// Equal to `pv`: faba applies no multiplicity correction (see
+        /// [`CallReason::Pvalue`]).
         /// Test outcome (set by the test pass; `Selected` until then).
         reason: CallReason,
     },
@@ -78,11 +83,9 @@ pub enum ConversionSite {
         /// Kept as an empty default for a uniform `ConversionSite` shape.
         mut_freq: DnaBaseCount,
         pv: f32,
-        /// Gene-level pooled beta-binomial p-value under gene testing; `NaN`
-        /// under per-site testing.
-        gene_pv: f32,
-        /// Benjamini-Hochberg q-value (set by the test pass; `1.0` until then).
-        qv: f32,
+        /// Selection statistic (set by the test pass; `1.0` until then).
+        /// Equal to `pv`: faba applies no multiplicity correction (see
+        /// [`CallReason::Pvalue`]).
         /// Test outcome (set by the test pass; `Selected` until then).
         reason: CallReason,
     },
@@ -127,38 +130,6 @@ impl ConversionSite {
         match self {
             ConversionSite::M6A { pv, .. } => *pv,
             ConversionSite::AtoI { pv, .. } => *pv,
-        }
-    }
-
-    /// Benjamini-Hochberg q-value (the FDR the site cleared)
-    pub fn qv(&self) -> f32 {
-        match self {
-            ConversionSite::M6A { qv, .. } => *qv,
-            ConversionSite::AtoI { qv, .. } => *qv,
-        }
-    }
-
-    /// Set the q-value (called by the test pass before filtering)
-    pub fn set_qv(&mut self, q: f32) {
-        match self {
-            ConversionSite::M6A { qv, .. } => *qv = q,
-            ConversionSite::AtoI { qv, .. } => *qv = q,
-        }
-    }
-
-    /// Gene-level pooled p-value (under gene testing; `NaN` under per-site).
-    pub fn gene_pv(&self) -> f32 {
-        match self {
-            ConversionSite::M6A { gene_pv, .. } => *gene_pv,
-            ConversionSite::AtoI { gene_pv, .. } => *gene_pv,
-        }
-    }
-
-    /// Set the gene-level pooled p-value (called by the gene test pass).
-    pub fn set_gene_pv(&mut self, p: f32) {
-        match self {
-            ConversionSite::M6A { gene_pv, .. } => *gene_pv = p,
-            ConversionSite::AtoI { gene_pv, .. } => *gene_pv = p,
         }
     }
 

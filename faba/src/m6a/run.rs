@@ -6,8 +6,7 @@ use crate::editing::mask::{build_atoi_mask, filter_m6a_by_mask};
 use crate::editing::mixture::MixtureParams;
 use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::{
-    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, EditTestLevel,
-    M6aContrastArgs,
+    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, M6aContrastArgs,
 };
 use crate::editing::sifter::ModificationType;
 use crate::quant::mass_enrichment::MassEnrichmentArgs;
@@ -29,9 +28,8 @@ pub struct DartSeqCountArgs {
         help = "Signal BAM files (APOBEC1-YTH fusion)",
         long_help = "Comma-separated list of signal (APOBEC1-YTH fusion) BAM files.\n\
                      These contain the C->T conversions at m6A sites.\n\
-                     Each motif C is called by a WT-vs-MUT contrast against the --control-bam samples\n\
-                     (a genomic C/T variant converts equally in both arms and is rejected);\n\
-                     calls are FDR-corrected."
+                     Each motif C is called by a WT-vs-MUT contrast against the --control-bam samples.\n\
+                     A genomic C/T variant converts equally in both arms and is rejected."
     )]
     pub wt_bam_files: Vec<Box<str>>,
 
@@ -131,18 +129,21 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         short = 'q',
-        long = "fdr",
-        default_value_t = 0.1,
-        help = "Detection FDR target (Benjamini-Hochberg q-value); 1.0 disables it",
-        long_help = "Target FDR (Benjamini-Hochberg q-value cutoff) for site detection.\n\
-                     It is applied across all putative sites that clear the\n\
-                     coverage / effect-size guards, not as a per-site p-value threshold.\n\
-                     Lenient by default (0.1); `--fdr 1.0` turns FDR off entirely,\n\
-                     leaving the coverage + delta gates as the field-standard filter.\n\
+        long = "pvalue",
+        default_value_t = 0.05,
+        help = "Marginal p-value cutoff for site detection; 1.0 disables it",
+        long_help = "Marginal p-value cutoff for site detection.\n\
+                     It is applied per site, to each putative site that clears the\n\
+                     coverage / effect-size guards.\n\
+                     There is no multiplicity correction:\n\
+                     BH needs independence or positive regression dependence,\n\
+                     and neighbouring sites share reads.\n\
+                     `--pvalue 1.0` leaves the coverage + delta gates\n\
+                     as the field-standard filter.\n\
                      Governs the m6A calls only; the A-to-I confounder-mask pass\n\
-                     (--detect-atoi) has its own `--atoi-fdr`."
+                     (--detect-atoi) has its own `--atoi-pvalue`."
     )]
-    pub fdr_cutoff: f32,
+    pub pvalue_cutoff: f32,
 
     #[arg(
         long,
@@ -301,7 +302,7 @@ pub struct DartSeqCountArgs {
                      Detected sites are written to a separate parquet file\n\
                      and used as a mask to exclude false-positive m6A candidates\n\
                      whose RAC/GTY triplet overlaps an A-to-I site.\n\
-                     This mask pass is FDR-controlled at its own --atoi-fdr, not the m6A --fdr."
+                     This mask pass has its own --atoi-pvalue cutoff, not the m6A --pvalue."
     )]
     pub detect_atoi: bool,
 
@@ -320,14 +321,14 @@ pub struct DartSeqCountArgs {
     pub atoi_min_conversion: usize,
 
     #[arg(
-        long = "atoi-fdr",
+        long = "atoi-pvalue",
         default_value_t = 0.05,
-        help = "FDR target for the A-to-I confounder-mask pass (separate from --fdr)",
-        long_help = "Benjamini-Hochberg q-value cutoff for the A-to-I mask pass\n\
-                     (--detect-atoi). Kept separate from the m6A --fdr so the\n\
-                     confounder mask can be tuned independently of the m6A calls."
+        help = "Marginal p-value cutoff for the A-to-I confounder-mask pass",
+        long_help = "Marginal p-value cutoff for the A-to-I mask pass (--detect-atoi).\n\
+                     Kept separate from the m6A --pvalue so the confounder mask\n\
+                     can be tuned independently of the m6A calls."
     )]
-    pub atoi_fdr_cutoff: f32,
+    pub atoi_pvalue_cutoff: f32,
 
     #[arg(
         long = "atoi-mask",
@@ -517,7 +518,7 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             include_missing_barcode: args.include_missing_barcode,
             min_coverage: args.min_coverage,
             min_conversion: args.min_conversion,
-            fdr_cutoff: args.fdr_cutoff,
+            pvalue_cutoff: args.pvalue_cutoff,
             error_rate: args.error_rate,
             overdispersion: args.overdispersion,
             backend: args.backend.clone(),
@@ -543,7 +544,6 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             },
             mut_bam_files: args.control_bam_files.clone(),
             site_min_cells: args.site_min_cells,
-            test_level: args.m6a_contrast.test_level,
             competent_cells: None,
         }
     }
@@ -560,9 +560,9 @@ impl DartSeqCountArgs {
             include_missing_barcode: self.include_missing_barcode,
             min_coverage: self.atoi_min_coverage,
             min_conversion: self.atoi_min_conversion,
-            // A-to-I mask pass has its own FDR target (`--atoi-fdr`), separate
-            // from the m6A `--fdr`.
-            fdr_cutoff: self.atoi_fdr_cutoff,
+            // A-to-I mask pass has its own cutoff (`--atoi-pvalue`), separate
+            // from the m6A `--pvalue`.
+            pvalue_cutoff: self.atoi_pvalue_cutoff,
             error_rate: self.error_rate,
             overdispersion: self.overdispersion,
             backend: self.backend.clone(),
@@ -586,9 +586,6 @@ impl DartSeqCountArgs {
             // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
             mut_bam_files: Vec::new(),
             site_min_cells: self.site_min_cells,
-            // The mask pass wants per-site A-to-I positions, so always site-level
-            // (independent of the m6A `--m6a-test-level`).
-            test_level: EditTestLevel::Site,
             competent_cells: None,
         }
     }
@@ -763,7 +760,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     } else if args.detect_atoi {
         // Stratify the A-to-I masking pass by the same groups when enabled, so
         // cell-type-specific A-to-I edits are also masked out of m6A candidates.
-        // Only the FDR-selected A-to-I calls feed the mask; rejected candidates
+        // Only the selected A-to-I calls feed the mask; rejected candidates
         // are not written here (the mask is a confounder filter, not a result).
         let atoi_sites =
             find_all_conversion_sites(&gff_map, &atoi_params, membership.as_ref())?.selected;
@@ -813,9 +810,8 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
 
     let discovered = find_all_conversion_sites(&gff_map, &m6a_params, membership.as_ref())?;
 
-    // Pre-mask audit: the unselected sites (with reasons) and, under gene-level
-    // testing, the per-gene test tables. Emitted before masking and the
-    // empty-selected early return, so it always accompanies the calls.
+    // Pre-mask audit: the unselected sites, with reasons. Emitted before masking
+    // and the empty-selected early return, so it always accompanies the calls.
     write_discovery_outputs(&discovered, &gff_map, &spliced, &args.output, "m6a")?;
     let gene_sites = discovered.selected;
 
