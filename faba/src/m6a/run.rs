@@ -130,18 +130,17 @@ pub struct DartSeqCountArgs {
     #[arg(
         short = 'q',
         long = "pvalue",
-        default_value_t = 0.05,
+        default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
         help = "Marginal p-value cutoff for site detection; 1.0 disables it",
-        long_help = "Marginal p-value cutoff for site detection.\n\
-                     It is applied per site, to each putative site that clears the\n\
-                     coverage / effect-size guards.\n\
-                     There is no multiplicity correction:\n\
-                     BH needs independence or positive regression dependence,\n\
-                     and neighbouring sites share reads.\n\
-                     `--pvalue 1.0` leaves the coverage + delta gates\n\
-                     as the field-standard filter.\n\
-                     Governs the m6A calls only; the A-to-I confounder-mask pass\n\
-                     (--detect-atoi) has its own `--atoi-pvalue`."
+        long_help = "Marginal p-value cutoff for m6A site detection.\n\
+                     Applied per site, to whatever clears the coverage and delta guards.\n\
+                     There is no multiplicity correction.\n\
+                     BH needs independence or positive regression dependence.\n\
+                     Neighbouring sites share reads, so it has neither.\n\
+                     Expect about `cutoff x tested` false calls; the run log prints both.\n\
+                     `--pvalue 1.0` leaves the coverage and delta gates as the filter.\n\
+                     Governs the m6A calls only.\n\
+                     The A-to-I mask pass (--detect-atoi) has its own `--atoi-pvalue`."
     )]
     pub pvalue_cutoff: f32,
 
@@ -322,7 +321,7 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         long = "atoi-pvalue",
-        default_value_t = 0.05,
+        default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
         help = "Marginal p-value cutoff for the A-to-I confounder-mask pass",
         long_help = "Marginal p-value cutoff for the A-to-I mask pass (--detect-atoi).\n\
                      Kept separate from the m6A --pvalue so the confounder mask\n\

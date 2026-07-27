@@ -25,7 +25,11 @@ pub enum CallReason {
     LowControl,
     /// Absolute effect size `p_WT − p_MUT` below `--m6a-min-delta`.
     Delta,
-    /// Cleared the effect-size guards but missed the p-value cutoff.
+    /// Missed the p-value cutoff.
+    ///
+    /// m6A reaches this only after clearing the control-coverage and
+    /// effect-size guards. A-to-I is single-sample and has no guards above the
+    /// coverage floors, so for it the p-value is the whole test.
     ///
     /// faba does NO multiplicity correction. BH needs independence or positive
     /// regression dependence, and neighbouring sites are covered by the same
@@ -68,9 +72,6 @@ pub enum ConversionSite {
         mut_freq: DnaBaseCount,
         /// Per-site WT-vs-MUT contrast p-value — the statistic the call is made on.
         pv: f32,
-        /// Selection statistic (set by the test pass; `1.0` until then).
-        /// Equal to `pv`: faba applies no multiplicity correction (see
-        /// [`CallReason::Pvalue`]).
         /// Test outcome (set by the test pass; `Selected` until then).
         reason: CallReason,
     },
@@ -83,9 +84,6 @@ pub enum ConversionSite {
         /// Kept as an empty default for a uniform `ConversionSite` shape.
         mut_freq: DnaBaseCount,
         pv: f32,
-        /// Selection statistic (set by the test pass; `1.0` until then).
-        /// Equal to `pv`: faba applies no multiplicity correction (see
-        /// [`CallReason::Pvalue`]).
         /// Test outcome (set by the test pass; `Selected` until then).
         reason: CallReason,
     },
@@ -125,7 +123,8 @@ impl ConversionSite {
         }
     }
 
-    /// Raw beta-binomial p-value vs the sequencing-error null
+    /// The site's own p-value: Fisher exact WT-vs-MUT for m6A, beta-binomial
+    /// against the sequencing-error null for A-to-I.
     pub fn pv(&self) -> f32 {
         match self {
             ConversionSite::M6A { pv, .. } => *pv,

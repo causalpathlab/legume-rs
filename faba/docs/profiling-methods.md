@@ -205,7 +205,7 @@ sites, and MYC is called only once the null cells are dropped.
 
 **Putative sites vs the test.** A site is a *putative candidate* on the sequencing pattern alone:
 the RAC/GTY motif plus observed WT C→U at/above the signal floors — signal coverage ≥
-`--min-coverage` (10) and signal conversions ≥ `--min-conversion` (5). Everything else is the *test*
+`--min-coverage` (5) and signal conversions ≥ `--min-conversion` (2). Everything else is the *test*
 that decides selected vs unselected, applied after discovery: control coverage ≥
 `--edit-control-min-coverage` (3) and an absolute excess `≥ --m6a-min-delta` (0.02) on the raw rates
 `a/n`, then the p-value cutoff. A putative site that misses any of these is *recorded* (not dropped)
@@ -218,8 +218,15 @@ selected-site count by exactly zero, because a site clearing a 0.02 absolute exc
 control rate already clears 1.25×. The delta guard subsumes it.
 
 **Multiple testing: there is none.** Each putative motif C is tested on its own and kept when its
-marginal p-value clears `-q/--pvalue` (**0.05**). No Benjamini–Hochberg, no q-values — the `qvalue`
-column of `m6a_sites.parquet` is the p-value itself, kept only for schema stability.
+marginal p-value clears `-q/--pvalue` (**0.05**). No Benjamini–Hochberg and no q-values:
+`m6a_sites.parquet` carries a single `pv` column and nothing beside it.
+
+A marginal cutoff is **not** scale-free the way an FDR threshold is. "q ≤ 0.05" means the same thing
+at 300 tests and at 300,000; "p ≤ 0.05" admits `0.05 × m` null sites, so its meaning moves with `m`
+and the flag alone cannot tell you what you bought. Every run therefore logs that expected false-call
+count beside the tally — `~640 false calls expected under the null (0.05 x 12800 tested)` — where `m`
+counts the sites that actually reached the cutoff, i.e. selected plus `pvalue`-rejected, not the ones
+the coverage/delta guards had already stopped.
 
 This is deliberate. BH [4] controls the FDR under independence or *positive regression dependence*,
 and neighbouring candidate C's have neither: they are covered by the **same reads**, so their 2×2s
@@ -247,7 +254,8 @@ Pooled across all 12 the delta is **0.0150**, under the 0.02 floor — so the ge
 effect guard and all 12 sites inherited that verdict. Per site, all three are called. Gene pooling is
 dilution-honest by construction and dilution-*blind* in practice, precisely on the focally methylated
 genes the assay exists to find. `m6a_genes.parquet` / `atoi_genes.parquet` and their `_unselected`
-companions are no longer produced.
+companions are no longer produced, and the `gene_pv` and `qvalue` columns are gone from the site
+parquets — `qvalue` had become a byte-for-byte copy of `pv`, which is a lying name, not a schema.
 
 **Discovery is pooled, not stratified.** When cells are grouped by expression (§8), discovery scans
 each gene's pooled WT marginal over the grouped cells — a putative site needs only the motif and
@@ -277,8 +285,8 @@ noise: `k ~ BetaBinomial(n, α, β)` with mean `ε = --error-rate` (0.01) and in
 `ρ = --overdispersion` (0.1). The p-value is the upper tail `P(K ≥ k)`. With ρ = 0 this degenerates
 to a plain binomial. This is the single-condition test used by SAILOR [5] and JACUSA2 [6].
 
-Gates before testing: `n ≥ --min-coverage` (**5** — note this differs from dartseq's 10) and
-`k ≥ --min-conversion` (**3**). Then the same marginal cutoff as §2, keeping `p ≤ --pvalue` (0.05)
+Gates before testing: `n ≥ --min-coverage` (**5**) and `k ≥ --min-conversion` (**3** — note this
+differs from dartseq's 2). Then the same marginal cutoff as §2, keeping `p ≤ --pvalue` (0.05)
 per site — no multiplicity correction, and no gene-level pooling, for the reasons given there. The
 argument is if anything stronger here: A-to-I has no control arm and no de-dilution pre-pass, so a
 pooled gene test would average edited positions against unedited ones with nothing to undo it.

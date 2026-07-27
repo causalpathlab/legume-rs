@@ -72,7 +72,7 @@ pub struct ConversionParams {
     pub umi_tag: Option<Box<str>>,
     /// MUT (catalytically-dead YTHmut) control BAMs for the m6A WT-vs-MUT
     /// contrast. Pooled into one background. Empty for A-to-I (single-sample).
-    /// The contrast guards (coverage/effect-size/ρ) live on the
+    /// The contrast guards (control coverage / effect size) live on the
     /// [`ModificationType::M6A`] arm's [`M6aContrast`], not here.
     pub mut_bam_files: Vec<Box<str>>,
     /// Unit-aware feature QC for the per-site `_site` matrix: keep a site only
@@ -102,6 +102,12 @@ pub struct ConversionParams {
 /// faba's `gene_min_cells` convention. Cell Ranger does not filter features on
 /// its output matrices (only barcodes), so there is no upstream rule to mirror.
 pub const DEFAULT_SITE_MIN_CELLS: usize = 10;
+
+/// Default for every editing `--pvalue` / `--atoi-pvalue` / `--m6a-pvalue`.
+/// Defined once because it is a MARGINAL cutoff, not an FDR target: its meaning
+/// depends on how many sites were tested, so the m6A and A-to-I arms and the
+/// chained pipeline must not be able to drift to different values silently.
+pub const DEFAULT_PVALUE_CUTOFF: f32 = 0.05;
 
 /// Shared clap args for the m6A WT-vs-MUT contrast guards: the control-coverage
 /// floor and the effect-size floor.
@@ -328,26 +334,47 @@ pub fn find_all_conversion_sites(
     // strongest.
     let cutoff = params.pvalue_cutoff;
     let label = params.mod_type.label();
-    let discovered = match &params.mod_type {
-        ModificationType::M6A { contrast, .. } => {
-            let c = *contrast;
-            partition_by_site(gene_sites, gff_map, cutoff, move |site, strand| {
-                let (a_w, u_w, a_m, u_m) = m6a_site_counts(site, strand);
-                m6a_effect_reason(a_w, u_w, a_m, u_m, &c)
-            })
-        }
-        ModificationType::AtoI => partition_by_site(gene_sites, gff_map, cutoff, |_, _| None),
+    let contrast = match &params.mod_type {
+        ModificationType::M6A { contrast, .. } => Some(*contrast),
+        ModificationType::AtoI => None,
     };
+    let discovered = partition_by_site(gene_sites, gff_map, cutoff, contrast);
 
     let n_sel: usize = discovered.selected.iter().map(|e| e.value().len()).sum();
     let n_rej: usize = discovered.rejected.iter().map(|e| e.value().len()).sum();
+
+    // Report the expected false-call count, because the cutoff alone cannot.
+    // A q-value threshold is scale-free in the number of tests -- "q <= 0.05"
+    // means the same thing at 300 sites and at 300k, and BH supplied that
+    // reading for free. A MARGINAL p-value cutoff does not: it admits
+    // `cutoff x m` null sites, so its meaning moves with m and the user cannot
+    // recover m from the flag. So log m and the product outright.
+    //
+    // m is the number of sites that reached the cutoff -- `Selected` plus the
+    // `Pvalue` rejections. Guard rejections (LowControl / Delta) were never
+    // tested and must not inflate the count.
+    let n_tested = n_sel
+        + discovered
+            .rejected
+            .iter()
+            .map(|e| {
+                e.value()
+                    .iter()
+                    .filter(|s| s.reason() == CallReason::Pvalue)
+                    .count()
+            })
+            .sum::<usize>();
     info!(
-        "{} test: {} selected / {} unselected of {} putative sites (p <= {})",
+        "{} test: {} selected / {} unselected of {} putative sites (p <= {}); \
+         ~{:.0} false calls expected under the null ({} x {} tested)",
         label,
         n_sel,
         n_rej,
         n_sel + n_rej,
         cutoff,
+        cutoff as f64 * n_tested as f64,
+        cutoff,
+        n_tested,
     );
     Ok(discovered)
 }
@@ -405,35 +432,23 @@ fn m6a_effect_reason(
     None
 }
 
-/// Split owned per-gene sites into `selected` (`reason == Selected`) and
-/// `rejected` maps.
-fn partition_owned(genes: Vec<(GeneId, Vec<ConversionSite>)>) -> DiscoveredSites {
-    let selected = HashMap::<GeneId, Vec<ConversionSite>>::default();
-    let rejected = HashMap::<GeneId, Vec<ConversionSite>>::default();
-    for (gid, sites) in genes {
-        let (sel, rej): (Vec<_>, Vec<_>) =
-            sites.into_iter().partition(|s| s.reason().is_selected());
-        if !rej.is_empty() {
-            rejected.insert(gid.clone(), rej);
-        }
-        if !sel.is_empty() {
-            selected.insert(gid, sel);
-        }
-    }
-    DiscoveredSites { selected, rejected }
-}
-
-/// The test. Each putative site is offered to `effect_reason`; `Some`
-/// records that rejection (m6A control-coverage / delta), `None` marks the
-/// site eligible for the p-value cutoff. Sites above the cutoff become `Pvalue`
-/// rejections, the rest `Selected`.
+/// The test. Each putative site takes the m6A effect guards first — a
+/// `LowControl` / `Delta` rejection keeps its own reason, so the audit says
+/// which guard fired — and whatever survives them takes the p-value cutoff,
+/// becoming `Selected` at or below it and a `Pvalue` rejection above.
 /// Every site keeps its reason, so the two maps together account for all putative
-/// sites. A-to-I passes a closure that returns `None` (the p-value alone decides).
+/// sites. A-to-I passes `contrast: None`: it is single-sample, with no control
+/// arm to guard against, so the p-value alone decides.
+///
+/// One in-place pass, because the verdict is local to the site. It was two —
+/// collect every eligible index, then revisit — only because BH is a GLOBAL
+/// procedure: no site's verdict was knowable until every eligible p-value had
+/// been gathered and ranked.
 fn partition_by_site(
     gene_sites: HashMap<GeneId, Vec<ConversionSite>>,
     gff_map: &GffRecordMap,
     cutoff: f32,
-    effect_reason: impl Fn(&ConversionSite, Strand) -> Option<CallReason>,
+    contrast: Option<M6aContrast>,
 ) -> DiscoveredSites {
     let mut genes: Vec<(GeneId, Vec<ConversionSite>)> = gene_sites.into_iter().collect();
     // Fix the order HERE, not at each writer. `gene_sites` is a DashMap, so its
@@ -445,22 +460,7 @@ fn partition_by_site(
         sites.sort_by_key(|s| s.primary_pos());
     }
 
-    // Pass 1: effect-size guards. Whatever they reject keeps that reason.
-    let mut eligible: Vec<(usize, usize)> = Vec::new();
-    for (gi, (gid, sites)) in genes.iter_mut().enumerate() {
-        let strand = gff_map
-            .get(gid)
-            .map(|r| r.strand)
-            .unwrap_or(Strand::Forward);
-        for (si, site) in sites.iter_mut().enumerate() {
-            match effect_reason(site, strand) {
-                Some(reason) => site.set_reason(reason),
-                None => eligible.push((gi, si)),
-            }
-        }
-    }
-
-    // Pass 2: a plain p-value cutoff. NOT Benjamini-Hochberg.
+    // The cutoff is a plain marginal p-value. NOT Benjamini-Hochberg.
     //
     // BH controls FDR under independence or positive regression dependence, and
     // sites have neither. Neighbouring candidate C's are covered by the SAME
@@ -483,17 +483,35 @@ fn partition_by_site(
     // within-gene dependence, and it is gone too: it dilutes a focal
     // modification against the gene's non-modified positions, with no
     // de-dilution step to undo it (see [`DiscoveredSites`]).
-    for &(gi, si) in eligible.iter() {
-        let site = &mut genes[gi].1[si];
-        let pv = site.pv();
-        site.set_reason(if pv <= cutoff {
-            CallReason::Selected
-        } else {
-            CallReason::Pvalue
-        });
+    let selected = HashMap::<GeneId, Vec<ConversionSite>>::default();
+    let rejected = HashMap::<GeneId, Vec<ConversionSite>>::default();
+    for (gid, mut sites) in genes {
+        let strand = gff_map
+            .get(&gid)
+            .map(|r| r.strand)
+            .unwrap_or(Strand::Forward);
+        for site in sites.iter_mut() {
+            let guard = contrast.as_ref().and_then(|c| {
+                let (a_w, u_w, a_m, u_m) = m6a_site_counts(site, strand);
+                m6a_effect_reason(a_w, u_w, a_m, u_m, c)
+            });
+            site.set_reason(guard.unwrap_or(if site.pv() <= cutoff {
+                CallReason::Selected
+            } else {
+                CallReason::Pvalue
+            }));
+        }
+        let (sel, rej): (Vec<_>, Vec<_>) =
+            sites.into_iter().partition(|s| s.reason().is_selected());
+        if !rej.is_empty() {
+            rejected.insert(gid.clone(), rej);
+        }
+        if !sel.is_empty() {
+            selected.insert(gid, sel);
+        }
     }
 
-    partition_owned(genes)
+    DiscoveredSites { selected, rejected }
 }
 
 /// Per-gene site discovery: reads WT and MUT BAM files, creates

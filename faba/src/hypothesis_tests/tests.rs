@@ -31,9 +31,9 @@ fn fisher_degenerate_margins_return_one() {
     assert_eq!(fisher_exact_greater(0, 10, 0, 10), 1.0); // no converted reads anywhere
 }
 
-/////////////////////////////////////////////
-// Beta-binomial LRT (one-sided, WT > MUT) //
-/////////////////////////////////////////////
+///////////////////////////////
+// Contrast p-value monotone //
+///////////////////////////////
 
 /// The contrast is ONE exact test now, so this pins the property the old
 /// two-branch version could not have: the p-value never gets larger when the

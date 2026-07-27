@@ -6,7 +6,7 @@ use crate::editing::{CallReason, ConversionSite};
 use faba::hypothesis_tests::{betabinom_pvalue_greater, contrast_pvalue};
 use rust_htslib::faidx;
 
-/// Statistical guards + dispersion for the m6A WT-vs-MUT contrast.
+/// Statistical guards for the m6A WT-vs-MUT contrast.
 ///
 /// m6A-only: A-to-I is single-sample and carries none of this, which is why the
 /// config hangs on the `M6A` arm below rather than living as flat sifter/param
@@ -149,13 +149,11 @@ impl<'a> ConversionSifter<'a> {
     /// of the control counts; the control-coverage, effect-size (`min_delta`)
     /// and p-value checks are the *test*, applied downstream in
     /// [`crate::editing::pipeline::find_all_conversion_sites`], where a failing
-    /// site is recorded with its reason rather than dropped. Every field of
-    /// `contrast` is read by that test pass, none of them here.
+    /// site is recorded with its reason rather than dropped.
     /// Returns `(p-value, cloned MUT counts)`, or `None` when the WT
     /// evidence does not clear the coverage / minimum-conversion floors.
     fn m6a_contrast(
         &self,
-        _contrast: &M6aContrast,
         wt: &DnaBaseCount,
         mut_conv: Option<&DnaBaseCount>,
         ref_base: Dna,
@@ -242,10 +240,9 @@ impl<'a> ConversionSifter<'a> {
         wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
         mut_pos_to_freq: Option<&HashMap<i64, DnaBaseCount>>,
     ) {
-        let contrast = match &self.mod_type {
-            ModificationType::M6A { contrast, .. } => *contrast,
-            ModificationType::AtoI => return, // sweeps are only dispatched for m6A
-        };
+        if !matches!(self.mod_type, ModificationType::M6A { .. }) {
+            return; // sweeps are only dispatched for m6A
+        }
         for j in 2..positions.len() {
             let r_site = positions[j - 2];
             let m6a_site = positions[j - 1];
@@ -265,9 +262,7 @@ impl<'a> ConversionSifter<'a> {
             let mut_conv = mut_pos_to_freq.and_then(|m| m.get(&conv_site));
 
             // DART edits C→T at the motif C; test WT T-fraction vs the MUT control.
-            if let Some((pv, mut_freq)) =
-                self.m6a_contrast(&contrast, wt_conv, mut_conv, Dna::C, Dna::T)
-            {
+            if let Some((pv, mut_freq)) = self.m6a_contrast(wt_conv, mut_conv, Dna::C, Dna::T) {
                 self.candidate_sites.push(ConversionSite::M6A {
                     m6a_pos: m6a_site,
                     conversion_pos: conv_site,
@@ -287,10 +282,9 @@ impl<'a> ConversionSifter<'a> {
         wt_pos_to_freq: &HashMap<i64, DnaBaseCount>,
         mut_pos_to_freq: Option<&HashMap<i64, DnaBaseCount>>,
     ) {
-        let contrast = match &self.mod_type {
-            ModificationType::M6A { contrast, .. } => *contrast,
-            ModificationType::AtoI => return, // sweeps are only dispatched for m6A
-        };
+        if !matches!(self.mod_type, ModificationType::M6A { .. }) {
+            return; // sweeps are only dispatched for m6A
+        }
         for j in 0..positions.len().saturating_sub(2) {
             let conv_site = positions[j];
             let m6a_site = positions[j + 1];
@@ -310,9 +304,7 @@ impl<'a> ConversionSifter<'a> {
             let mut_conv = mut_pos_to_freq.and_then(|m| m.get(&conv_site));
 
             // Reverse strand: motif C→T appears as G→A on the reference.
-            if let Some((pv, mut_freq)) =
-                self.m6a_contrast(&contrast, wt_conv, mut_conv, Dna::G, Dna::A)
-            {
+            if let Some((pv, mut_freq)) = self.m6a_contrast(wt_conv, mut_conv, Dna::G, Dna::A) {
                 self.candidate_sites.push(ConversionSite::M6A {
                     m6a_pos: m6a_site,
                     conversion_pos: conv_site,
