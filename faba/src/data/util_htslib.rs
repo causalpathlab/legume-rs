@@ -57,25 +57,41 @@ pub fn create_bam_jobs(
         let max_size = hdr.target_len(tid as u32).unwrap() as i64;
         let name_ = String::from_utf8(name.to_vec()).unwrap();
         let chr_name = name_.into_boxed_str();
-        let nblock = (max_size as usize).div_ceil(block_size as usize) as i64;
 
-        let jobs = (0..nblock)
-            .map(|block| {
-                let lb = if block * block_size > overlap {
-                    block * block_size - overlap
-                } else {
-                    block * block_size
-                };
-
-                let ub = ((block + 1) * block_size + overlap).min(max_size);
-
-                (chr_name.clone(), lb, ub)
-            })
-            .collect::<Vec<_>>();
-        ret.extend(jobs);
+        ret.extend(
+            contig_blocks(max_size, block_size, overlap)
+                .into_iter()
+                .map(|(lb, ub)| (chr_name.clone(), lb, ub)),
+        );
     }
 
     Ok(ret)
+}
+
+/// Partition one contig of length `max_size` into `[lb, ub)` blocks of
+/// `block_size`, each padded by `overlap` on both sides and clamped to the contig.
+///
+/// Blocks always START at a multiple of `block_size` (before padding), which is
+/// what lets a caller align a finer grid to the block grid: `faba depth` tiles
+/// bins inside these blocks, so a block size that is a whole number of bins keeps
+/// every bin edge genome-absolute. Split out of [`create_bam_jobs`] so that
+/// property is testable without a BAM header.
+pub fn contig_blocks(max_size: i64, block_size: i64, overlap: i64) -> Vec<(i64, i64)> {
+    let nblock = (max_size as usize).div_ceil(block_size as usize) as i64;
+
+    (0..nblock)
+        .map(|block| {
+            let lb = if block * block_size > overlap {
+                block * block_size - overlap
+            } else {
+                block * block_size
+            };
+
+            let ub = ((block + 1) * block_size + overlap).min(max_size);
+
+            (lb, ub)
+        })
+        .collect()
 }
 
 /// Load and index a FASTA file for random access
