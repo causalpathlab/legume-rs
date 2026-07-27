@@ -6,7 +6,6 @@
 
 use crate::common::*;
 use crate::editing::pipeline::M6aContrastArgs;
-use crate::quant::mass_enrichment::MassEnrichmentArgs;
 
 /// Serialize a field by its `Debug` form — for foreign enums that carry no `Serialize`.
 pub(super) fn ser_debug<T: std::fmt::Debug, S: serde::Serializer>(
@@ -488,10 +487,4 @@ pub struct PipelineArgs {
                      binning tools."
     )]
     pub depth_resolution_kb: Option<f32>,
-
-    //////////////////////////////
-    // Mass-enrichment grouping //
-    //////////////////////////////
-    #[command(flatten)]
-    pub enrich: MassEnrichmentArgs,
 }

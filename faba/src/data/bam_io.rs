@@ -203,8 +203,8 @@ pub fn for_each_record_in_gene_cached(
     //
     // Passing the 1-based start straight through shifted the window one base
     // right, dropping reads that end exactly on the gene's first base. Harmless
-    // per gene, but it meant `count_reads_per_gene` and
-    // `count_read_per_gene_splice` admitted different reads for the same gene.
+    // per gene, but it meant two callers counting the same gene through
+    // different entry points admitted different reads.
     let region = (
         gff_record.seqname.as_ref(),
         (gff_record.start - 1).max(0),

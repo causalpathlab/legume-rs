@@ -3,7 +3,6 @@
 //! Each one builds the standalone subcommand's args from [`super::args::PipelineArgs`]
 //! and calls the same entry point the user would — never a private copy of the work.
 
-use crate::data::cell_membership::CellMembership;
 use crate::editing::io::{write_discovery_outputs, ToParquet};
 use crate::editing::mask::{build_atoi_mask, filter_conversion_sites_by_mask, filter_m6a_by_mask};
 use crate::editing::mixture::MixtureParams;
@@ -162,7 +161,6 @@ pub(super) fn run_atoi_step(
     args: &PipelineArgs,
     gene_count_qc: &Option<GeneCountQc>,
     snp_mask: &Option<FxHashSet<(Box<str>, i64)>>,
-    membership: Option<&CellMembership>,
 ) -> anyhow::Result<AtoiMaskData> {
     // Load GFF and filter to expressed genes
     let (gff_map, spliced) = filtered_gff(args.gff_file.as_ref(), gene_count_qc)?;
@@ -208,7 +206,7 @@ pub(super) fn run_atoi_step(
     // Find ATOI sites (first pass): reference-anchored A→G / T→C calls, each
     // tested against the beta-binomial sequencing-error null (no control sample).
     info!("Discovering ATOI sites (reference-anchored)...");
-    let discovered = find_all_conversion_sites(&gff_map, &params, membership)?;
+    let discovered = find_all_conversion_sites(&gff_map, &params, None)?;
     write_discovery_outputs(&discovered, &gff_map, &spliced, &args.output, "atoi")?;
     let atoi_sites = discovered.selected;
 
@@ -380,7 +378,6 @@ pub(super) fn run_dart_step(
     atoi_mask: &Option<AtoiMaskData>,
     snp_mask: &Option<FxHashSet<(Box<str>, i64)>>,
     gene_count_qc: &Option<GeneCountQc>,
-    membership: Option<&CellMembership>,
 ) -> anyhow::Result<()> {
     // Load GFF and filter to expressed genes
     let (gff_map, spliced) = filtered_gff(args.gff_file.as_ref(), gene_count_qc)?;
@@ -463,7 +460,7 @@ pub(super) fn run_dart_step(
         "m6a",
     )?;
 
-    let discovered = find_all_conversion_sites(&gff_map, &params, membership)?;
+    let discovered = find_all_conversion_sites(&gff_map, &params, None)?;
 
     // Pre-mask audit (unselected sites, with reasons), shared with
     // `faba dartseq` so both emit identical files.

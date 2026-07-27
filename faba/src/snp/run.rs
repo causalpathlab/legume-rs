@@ -63,15 +63,17 @@ pub struct SnpArgs {
         help = "Gene annotation GFF file (optional, enables gene-centric mode)",
         long_help = "Gene annotation in GFF/GTF format.\n\
                      When provided: processes SNPs within gene boundaries,\n\
-                     enables per-cell allele count output with gene_key/snp/chr:pos naming.\n\
+                     and enables the per-cell allele frequency matrix.\n\
+                     Genes give each locus a region to fetch reads from;\n\
+                     they do not appear in its row name.\n\
                      When omitted: processes SNPs by chromosome region (bulk WGS mode),\n\
                      no per-cell sparse matrix output."
     )]
     pub gff_file: Option<Box<str>>,
 
     /// Output directory for results.
-    /// Creates: snp_sites.parquet (genotype calls), and optionally
-    /// *_snp_alt + *_snp_depth per-cell matrices for BAF (`.zarr.zip` by
+    /// Creates: snp_sites.parquet (the genotype calls), and optionally
+    /// *_baf per-cell allele frequency matrices (`.zarr.zip` by
     /// default, `.zarr` with --no-zip, `.h5` for the hdf5 backend).
     #[arg(
         short,
@@ -80,11 +82,14 @@ pub struct SnpArgs {
         help = "Output directory",
         long_help = "Output directory for SNP genotyping results. Created if needed.\n\
                      Outputs:\n\
-                     - snp_sites.parquet: all genotyped sites with allele counts and GQ\n\
-                     - {batch}_snp_alt: per-cell alt allele count matrix (10x mode)\n\
-                     - {batch}_snp_depth: per-cell total depth matrix (10x mode)\n\
+                     - snp_sites.parquet: the CALL SET —\n\
+                       every genotyped site with allele counts, genotype and GQ\n\
+                     - {batch}_baf: per-cell ALLELE FREQUENCY matrix (10x mode),\n\
+                       rows `{chr}:{pos}/baf/{alt|depth}`, keyed on the locus\n\
+                       and carrying no genotype\n\
                      (matrices are `.zarr.zip` by default; `.zarr` with --no-zip,\n\
-                     `.h5` for the hdf5 backend.) BAF per cell = alt / depth."
+                     `.h5` for the hdf5 backend.)\n\
+                     BAF per cell = alt / depth; the channels nest, so never sum them."
     )]
     pub output: Box<str>,
 

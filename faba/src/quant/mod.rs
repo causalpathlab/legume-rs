@@ -8,8 +8,6 @@
 //! and `editing` is a library that must not depend on a subcommand entry.
 //! It was called `pipeline_util` until that implied an owner it does not have.
 
-pub mod mass_enrichment;
-
 use crate::common::*;
 use crate::data::conversion::*;
 use crate::data::util_htslib::*;
@@ -280,8 +278,8 @@ pub struct GeneCountQc {
     pub cells_by_batch: rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<CellBarcode>>,
     /// Persisted per-batch gene-count matrix path (target on disk), keyed by
     /// **BAM file path** like `cells_by_batch`. Empty when QC did not write a
-    /// matrix (e.g. the `--valid-cells` reuse path). Consumers (mass enrichment)
-    /// load these instead of re-scanning the BAMs.
+    /// matrix (e.g. the `--valid-cells` reuse path). Consumers (the null-cell
+    /// scan) load these instead of re-scanning the BAMs.
     pub matrix_by_batch: rustc_hash::FxHashMap<Box<str>, Box<str>>,
 }
 
@@ -564,7 +562,7 @@ pub fn run_gene_count_qc(gff_file: &str, req: &GeneQcRequest) -> anyhow::Result<
         );
 
         // Persist the gene-count matrix we already built (no extra BAM scan), so
-        // counts are reported in every mode and mass enrichment can reuse them.
+        // counts are reported in every mode and the null-cell scan can reuse them.
         if let Some(sink) = persist {
             let keep = |t: Vec<(CellBarcode, Box<str>, f32)>| -> Vec<_> {
                 t.into_par_iter()
@@ -681,7 +679,7 @@ pub struct GeneQcRequest<'a> {
     pub valid_genes_file: Option<&'a str>,
     pub skip_gene_qc: bool,
     /// When set, the QC pass persists the gene-count matrix it builds (so counts
-    /// are reported in every mode, and mass enrichment can reuse it). `None`
+    /// are reported in every mode, and the null-cell scan can reuse it). `None`
     /// skips the write (e.g. the `--valid-cells` reuse path builds no matrix).
     pub persist: Option<GeneMatrixSink<'a>>,
 }
