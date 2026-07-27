@@ -29,9 +29,16 @@ const BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} (
 /// Tick frames shared by every [`new_spinner`].
 const SPINNER_TICKS: &str = "⠁⠂⠄⡀⢀⠠⠐⠈ ";
 
+/// Repaint cadence for both bars and spinners. Without a steady tick a bar
+/// only repaints when [`ProgressBar::inc`] fires, so work with a heavy-tailed
+/// per-item cost (one huge gene among thousands of small ones) leaves a frozen
+/// elapsed time on screen for minutes and reads as a hang.
+const STEADY_TICK: Duration = Duration::from_millis(200);
+
 /// Create a progress bar registered with the shared [`MULTI_PROGRESS`] and
 /// styled with the standard template. Attach a trailing label with
 /// [`ProgressBar::with_message`], e.g. `new_progress_bar(n).with_message("blocks")`.
+/// Repaints on the shared [`STEADY_TICK`] cadence.
 #[must_use]
 pub fn new_progress_bar(len: u64) -> ProgressBar {
     let prog_bar = MULTI_PROGRESS.add(ProgressBar::new(len));
@@ -40,14 +47,15 @@ pub fn new_progress_bar(len: u64) -> ProgressBar {
             .unwrap()
             .progress_chars("##-"),
     );
+    prog_bar.enable_steady_tick(STEADY_TICK);
     prog_bar
 }
 
 /// Create a spinner registered with the shared [`MULTI_PROGRESS`] for
 /// unbounded / streaming work (no known total). `template` is an indicatif
 /// spinner template (e.g. `"{spinner} streamed {pos} fragments ({per_sec})"`);
-/// the shared tick frames and a 200 ms steady tick are applied so the spinner
-/// animates and stays visually consistent across crates.
+/// the shared tick frames and the shared [`STEADY_TICK`] cadence are applied so
+/// the spinner animates and stays visually consistent across crates.
 #[must_use]
 pub fn new_spinner(template: &str) -> ProgressBar {
     let prog_bar = MULTI_PROGRESS.add(ProgressBar::new_spinner());
@@ -56,6 +64,6 @@ pub fn new_spinner(template: &str) -> ProgressBar {
             .unwrap()
             .tick_chars(SPINNER_TICKS),
     );
-    prog_bar.enable_steady_tick(Duration::from_millis(200));
+    prog_bar.enable_steady_tick(STEADY_TICK);
     prog_bar
 }
