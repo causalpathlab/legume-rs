@@ -13,7 +13,6 @@ use crate::editing::ConversionSite;
 use dashmap::DashMap as HashMap;
 use dashmap::DashSet as HashSet;
 use genomic_data::gff::{GeneId, GffRecordMap};
-use std::sync::{Arc, Mutex};
 
 /// Run per-gene 1D Gaussian mixture model on discovered sites and output results.
 ///
@@ -162,6 +161,29 @@ pub fn run_mixture_model(
         );
     }
 
+    // Fix the gene order HERE, where the observations are assembled, not at the
+    // writer, matching how discovery fixes the order of the site parquets.
+    // `gene_obs` is an FxHashMap whose iteration order is inherited from
+    // `fit_stats`, and `gather_conversion_stats` builds that as `DashMap ->
+    // par_bridge -> Mutex::extend`: one gene's rows arrive as a contiguous
+    // block, but the blocks arrive in whatever order the threads finished.
+    // Nothing downstream promised to re-sort, so `{m6a,atoi}_components.parquet`
+    // inherited it. Ordered before the bandwidth is estimated, not just before
+    // the fit, because that step pools every gene's site gaps into one weighted
+    // median and so reads the gene order too.
+    //
+    // Each gene's observation list is deliberately left as pushed. It is
+    // already deterministic — the block is emitted sites in position order,
+    // cells in the pile-up's FxHashMap order, and that map is built by one
+    // thread off a fixed hasher — and the EM is not order-invariant in f32: its
+    // M-step accumulates γ serially and it stops on an absolute `tol = 1e-6`
+    // applied to an unnormalized log-likelihood of order 1e4, so which
+    // iteration it halts on is settled by rounding. Sorting the observations
+    // here moved 270 of 511 fitted π by up to 0.046 (measured) and made
+    // nothing more reproducible.
+    let mut gene_entries: Vec<_> = gene_obs.into_iter().collect();
+    gene_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
     // Resolve the component-calling bandwidth once for this modality. An
     // explicit --mixture-bandwidth (> 0) wins; otherwise estimate a global value
     // from the empirical within-gene site spacing (cluster-aware for A-to-I).
@@ -175,9 +197,9 @@ pub fn run_mixture_model(
             } else {
                 BandwidthParams::m6a()
             };
-            let per_gene: Vec<Vec<(f32, f32)>> = gene_obs
-                .values()
-                .map(|obs| obs.iter().map(|&(_, pos, w)| (pos, w)).collect())
+            let per_gene: Vec<Vec<(f32, f32)>> = gene_entries
+                .iter()
+                .map(|(_, obs)| obs.iter().map(|&(_, pos, w)| (pos, w)).collect())
                 .collect();
             let est = estimate_bandwidth(&per_gene, &bw_params);
             info!(
@@ -201,52 +223,61 @@ pub fn run_mixture_model(
     };
     let mixture_params = &resolved_params;
 
-    // Fit mixture per gene in parallel
-    let gene_entries: Vec<_> = gene_obs.into_iter().collect();
+    // Fit mixture per gene in parallel.
     // Triplets carry the batch index so the single pooled fit can be
     // demultiplexed into one matrix per replicate at write time.
     type Triplet = (usize, CellBarcode, Box<str>, f32);
-    let arc_triplets: Arc<Mutex<Vec<Triplet>>> = Arc::new(Mutex::new(Vec::new()));
-    let arc_annotations: Arc<Mutex<Vec<MixtureComponentAnnotation>>> =
-        Arc::new(Mutex::new(Vec::new()));
 
-    gene_entries.par_iter().for_each(|(gene_id, obs_list)| {
-        let gene_name: Box<str> = gff_map
-            .get(gene_id)
-            .map(|gff| match &gff.gene_name {
-                GeneSymbol::Symbol(s) => format!("{}_{}", gene_id, s),
-                GeneSymbol::Missing => format!("{}", gene_id),
-            })
-            .unwrap_or_else(|| format!("{}", gene_id))
-            .into();
-
-        // `gene_length` feeds the EM's uniform-noise normalizer (where a
-        // 1000-nt fallback is fine) AND the parquet sidecar (where it
-        // should not smuggle a sentinel out as if it were a measurement).
-        // Diverge: EM gets the fallback, sidecar gets NaN for missing.
-        // GFF coords are 1-based inclusive (genomic-data/src/gff.rs:508),
-        // so the nucleotide span is `stop - start + 1`, not `stop - start`.
-        // Spliced length, to match the spliced positions above. Falls back to
-        // the genomic span only for genes with no exon model, which is exactly
-        // when the positions fell back too.
-        let gene_span = spliced.spliced_len(gene_id).map(|n| n as f32).or_else(|| {
-            gff_map
+    // `map(..).collect()` rather than each worker extending a shared
+    // `Mutex<Vec<_>>`. This is the source that actually bit: the lock handed out
+    // slots in whatever order the threads happened to finish fitting, so four
+    // pre-fix runs on identical input wrote the same 511 component rows in four
+    // different orders. An indexed rayon collect returns them in `gene_entries`
+    // order instead — sorting `gene_entries` above would have bought nothing on
+    // its own.
+    let per_gene: Vec<(Vec<Triplet>, Vec<MixtureComponentAnnotation>)> = gene_entries
+        .par_iter()
+        .map(|(gene_id, obs_list)| {
+            let gene_name: Box<str> = gff_map
                 .get(gene_id)
-                .map(|gff| (gff.stop - gff.start + 1) as f32)
-        });
-        let gene_length = gene_span.unwrap_or(1000.0);
-        let gene_length_emit = gene_span.unwrap_or(f32::NAN);
+                .map(|gff| match &gff.gene_name {
+                    GeneSymbol::Symbol(s) => format!("{}_{}", gene_id, s),
+                    GeneSymbol::Missing => format!("{}", gene_id),
+                })
+                .unwrap_or_else(|| format!("{}", gene_id))
+                .into();
 
-        let cell_observations: Vec<WeightedObservation> = obs_list
-            .iter()
-            .map(|&(cell_idx, position, count)| WeightedObservation {
-                cell_idx,
-                position,
-                count,
-            })
-            .collect();
+            // `gene_length` feeds the EM's uniform-noise normalizer (where a
+            // 1000-nt fallback is fine) AND the parquet sidecar (where it
+            // should not smuggle a sentinel out as if it were a measurement).
+            // Diverge: EM gets the fallback, sidecar gets NaN for missing.
+            // GFF coords are 1-based inclusive (genomic-data/src/gff.rs:508),
+            // so the nucleotide span is `stop - start + 1`, not `stop - start`.
+            // Spliced length, to match the spliced positions above. Falls back to
+            // the genomic span only for genes with no exon model, which is exactly
+            // when the positions fell back too.
+            let gene_span = spliced.spliced_len(gene_id).map(|n| n as f32).or_else(|| {
+                gff_map
+                    .get(gene_id)
+                    .map(|gff| (gff.stop - gff.start + 1) as f32)
+            });
+            let gene_length = gene_span.unwrap_or(1000.0);
+            let gene_length_emit = gene_span.unwrap_or(f32::NAN);
 
-        if let Some(result) = fit_gene_mixture(&cell_observations, gene_length, mixture_params) {
+            let cell_observations: Vec<WeightedObservation> = obs_list
+                .iter()
+                .map(|&(cell_idx, position, count)| WeightedObservation {
+                    cell_idx,
+                    position,
+                    count,
+                })
+                .collect();
+
+            let Some(result) = fit_gene_mixture(&cell_observations, gene_length, mixture_params)
+            else {
+                return (Vec::new(), Vec::new());
+            };
+
             // Build component annotations (filter pi=0) and a forward old→new map
             // for the 1-based GMM component index used in result.cell_component_counts.
             let mut local_annotations = Vec::new();
@@ -278,7 +309,7 @@ pub fn run_mixture_model(
             // component: their lone per-cell count is just the gene total,
             // so the row carries no relative/differential signal.
             if mixture_params.drop_single_component && local_annotations.len() < 2 {
-                return;
+                return (Vec::new(), Vec::new());
             }
 
             // Build triplets: (batch, cell_barcode, feature_id, count).
@@ -303,21 +334,16 @@ pub fn run_mixture_model(
                 }
             }
 
-            arc_triplets.lock().expect("lock").extend(local_triplets);
-            arc_annotations
-                .lock()
-                .expect("lock")
-                .extend(local_annotations);
-        }
-    });
+            (local_triplets, local_annotations)
+        })
+        .collect();
 
-    let triplets_data = Arc::try_unwrap(arc_triplets)
-        .map_err(|_| anyhow::anyhow!("failed to unwrap triplets"))?
-        .into_inner()?;
-
-    let annotations = Arc::try_unwrap(arc_annotations)
-        .map_err(|_| anyhow::anyhow!("failed to unwrap annotations"))?
-        .into_inner()?;
+    let mut triplets_data: Vec<Triplet> = Vec::new();
+    let mut annotations: Vec<MixtureComponentAnnotation> = Vec::new();
+    for (gene_triplets, gene_annotations) in per_gene {
+        triplets_data.extend(gene_triplets);
+        annotations.extend(gene_annotations);
+    }
 
     info!(
         "Mixture model: {} triplets, {} component annotations",

@@ -31,9 +31,25 @@ pub fn process_all_bam_files_to_bed(
             membership.as_ref(),
             None,
         )?;
+
+        // Fix the line order HERE, where the rows are assembled, not in the
+        // writer. `gather_conversion_stats` is `DashMap -> par_bridge ->
+        // Mutex::extend`, so the vector arrives in whatever order the threads
+        // finished. Sorting on `BedWithGene` alone did not repair that: one BED
+        // row is emitted per (site, cell), so every cell at a site compares
+        // equal, and `par_sort_by` is not stable — two runs on identical input
+        // shuffled those blocks and no longer byte-compared. The key below is
+        // total: `site_pos` separates two motif C's that share a conversion
+        // position, and the barcode separates the cells at one site.
+        stats.par_sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| a.2.site_pos.cmp(&b.2.site_pos))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
         let bed_path = format!("{}/{}.bed.gz", &params.output, batch_name);
         write_bed(
-            &mut stats,
+            &stats,
             gff_map,
             &bed_path,
             membership.as_ref(),
@@ -59,8 +75,12 @@ pub fn process_all_bam_files_to_bed(
     Ok(())
 }
 
+/// Write rows in the order given — the caller orders them (see
+/// [`process_all_bam_files_to_bed`]), as discovery does for the site parquets.
+/// Sorting here is what produced the bug: a writer keys on the fields it is
+/// about to print, and those were not a total order over the rows it was handed.
 pub fn write_bed(
-    stats: &mut [(CellBarcode, BedWithGene, ConversionData)],
+    stats: &[(CellBarcode, BedWithGene, ConversionData)],
     gff_map: &GffRecordMap,
     file_path: &str,
     cell_membership: Option<&CellMembership>,
@@ -68,8 +88,6 @@ pub fn write_bed(
 ) -> anyhow::Result<()> {
     use rust_htslib::bgzf::Writer as BWriter;
     use std::io::Write;
-
-    stats.par_sort_by(|a, b| a.1.cmp(&b.1));
 
     let lines: Vec<_> = stats
         .iter()
