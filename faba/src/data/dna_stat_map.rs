@@ -16,9 +16,12 @@ use rustc_hash::FxHashSet;
 pub enum CountMode<'a> {
     Marginal {
         counts: HashMap<i64, DnaBaseCount>,
-        // Per-read UMI dedup: one entry per unique UMI hash in the region.
-        // A read whose UMI has been seen is skipped entirely, not per-base.
-        umi_seen: FxHashSet<u64>,
+        // Per-read UMI dedup keyed by (cell, UMI hash), exactly as `PerCell`.
+        // A UMI is only unique WITHIN a cell, so keying on the hash alone
+        // collapses molecules from different cells and silently deletes
+        // coverage. A read whose (cell, UMI) has been seen is skipped
+        // entirely, not per-base.
+        umi_seen: FxHashSet<(CellBarcode, u64)>,
     },
     PerCell {
         counts: HashMap<i64, HashMap<CellBarcode, DnaBaseCount>>,
@@ -36,6 +39,9 @@ pub struct DnaBaseFreqMap<'a> {
     min_base_quality: u8,
     min_mapping_quality: u8,
     umi_tag: Option<Vec<u8>>,
+    /// Cell barcode tag used to key UMI dedup. Set together with `umi_tag` by
+    /// [`Self::set_umi_tag`], because dedup is per (cell, UMI) in BOTH modes.
+    dedup_cell_tag: Vec<u8>,
     use_base_quality: bool,
     quality_map: HashMap<i64, DnaBaseQual>,
     /// Restrict counting to these cells, in **either** [`CountMode`].
@@ -65,6 +71,7 @@ impl<'a> DnaBaseFreqMap<'a> {
             min_base_quality: 20,
             min_mapping_quality: 20,
             umi_tag: None,
+            dedup_cell_tag: Vec::new(),
             use_base_quality: false,
             quality_map: HashMap::default(),
             keep_cells: None,
@@ -88,6 +95,7 @@ impl<'a> DnaBaseFreqMap<'a> {
             min_base_quality: 20,
             min_mapping_quality: 20,
             umi_tag: None,
+            dedup_cell_tag: Vec::new(),
             use_base_quality: false,
             quality_map: HashMap::default(),
             keep_cells: None,
@@ -130,10 +138,20 @@ impl<'a> DnaBaseFreqMap<'a> {
         self.min_mapping_quality = min_mapping_quality;
     }
 
-    /// Enable UMI-based deduplication. Reads sharing the same UMI at the same
-    /// position (and same cell barcode in per-cell mode) are counted only once.
-    pub fn set_umi_tag(&mut self, tag: &str) {
-        self.umi_tag = Some(tag.as_bytes().to_vec());
+    /// Enable UMI-based deduplication, keyed by `(cell, UMI)` in BOTH modes.
+    ///
+    /// The cell barcode tag is required rather than optional because a 10x UMI
+    /// is only unique within a droplet: two cells legitimately carry the same
+    /// UMI sequence for different molecules, so collapsing on the hash alone
+    /// deletes real coverage. `Marginal` did exactly that, which is why the
+    /// tag is a parameter here instead of something a caller can forget.
+    ///
+    /// On data with no cell barcode the tag simply misses, every read resolves
+    /// to `CellBarcode::Missing`, and the key degenerates to the UMI alone --
+    /// the old behaviour, which is the right one for true bulk input.
+    pub fn set_umi_tag(&mut self, umi_tag: &str, cell_barcode_tag: &str) {
+        self.umi_tag = Some(umi_tag.as_bytes().to_vec());
+        self.dedup_cell_tag = cell_barcode_tag.as_bytes().to_vec();
     }
 
     /// Enable per-base quality accumulation for Li 2011 genotype likelihood model.
@@ -230,10 +248,14 @@ impl<'a> DnaBaseFreqMap<'a> {
 
         match &mut self.mode {
             CountMode::Marginal { counts, umi_seen } => {
-                // Per-read dedup: if this UMI has already been counted in this
-                // region, drop the whole record before touching the per-base loop.
+                // Per-read dedup keyed by (cell, UMI): drop the whole record
+                // before touching the per-base loop. Resolving the barcode here
+                // costs a lookup only when dedup is on.
                 if let Some(h) = umi_hash {
-                    if !umi_seen.insert(h) {
+                    let cell = resolved.unwrap_or_else(|| {
+                        bam_io::extract_cell_barcode(bam_record, &self.dedup_cell_tag)
+                    });
+                    if !umi_seen.insert((cell, h)) {
                         return;
                     }
                 }

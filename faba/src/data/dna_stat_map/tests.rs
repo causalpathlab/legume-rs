@@ -109,3 +109,58 @@ fn clearing_the_cell_filter_really_drops_it() {
         "a stale keep-set would filter the next library against the wrong barcodes"
     );
 }
+
+/// A UMI is only unique WITHIN a cell, so two cells may legitimately carry the
+/// same UMI sequence for different molecules. Collapsing on the UMI alone
+/// deletes one of them.
+///
+/// `docs/profiling-methods.md` states the contract: reads sharing a UMI collapse
+/// to one observation **per cell per gene**. `Marginal` -- the DEFAULT discovery
+/// path for m6A, A-to-I and every SNP pass -- deduped on the bare UMI hash, so
+/// it silently dropped real coverage on exactly the high-expression genes that
+/// clear the coverage floors and produce calls. Five other dedup sites in the
+/// crate key on `(cell, UMI)`, two of them under comments claiming they match
+/// this one.
+#[test]
+fn marginal_dedup_keeps_the_same_umi_from_different_cells() {
+    use rust_htslib::bam::record::{Aux, Record};
+
+    let read = |cell: &str, umi: &str| {
+        let mut rec = Record::new();
+        let cigar = rust_htslib::bam::record::CigarString::try_from("4M").unwrap();
+        rec.set(b"r", Some(&cigar), b"ACGT", &[40u8; 4]);
+        rec.set_tid(0);
+        rec.set_pos(100);
+        rec.set_mapq(60);
+        rec.unset_unmapped();
+        rec.push_aux(b"CB", Aux::String(cell)).unwrap();
+        rec.push_aux(b"UB", Aux::String(umi)).unwrap();
+        rec
+    };
+
+    let mut map = DnaBaseFreqMap::new();
+    map.set_umi_tag("UB", "CB");
+    // Same UMI string, two different cells: two molecules, not one.
+    map.add_bam_record(&read("CELL_A", "SAMEUMI"));
+    map.add_bam_record(&read("CELL_B", "SAMEUMI"));
+
+    let counts = map.marginal_frequency_map().expect("Marginal map");
+    let depth: usize = counts.get(&100).map(|c| c.total()).unwrap_or(0);
+    assert_eq!(
+        depth, 2,
+        "two cells sharing a UMI are two molecules; deduping on the UMI alone \
+         drops one and understates coverage"
+    );
+
+    // ...and the same cell repeating a UMI is still one molecule.
+    let mut same = DnaBaseFreqMap::new();
+    same.set_umi_tag("UB", "CB");
+    same.add_bam_record(&read("CELL_A", "SAMEUMI"));
+    same.add_bam_record(&read("CELL_A", "SAMEUMI"));
+    let counts = same.marginal_frequency_map().expect("Marginal map");
+    assert_eq!(
+        counts.get(&100).map(|c| c.total()).unwrap_or(0),
+        1,
+        "a PCR duplicate within one cell must still collapse"
+    );
+}
