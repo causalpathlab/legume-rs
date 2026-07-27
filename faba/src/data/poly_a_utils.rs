@@ -42,13 +42,6 @@ pub fn get_query_alignment_bounds(cigar: &[Cigar], seq_len: usize) -> (usize, us
 
 /// Count the number of A (forward) or T (reverse) bases in the soft-clipped region
 /// Returns the count of A/T bases
-///
-/// Unpacks the record's CIGAR.
-/// Callers that already hold one should use [`count_a_or_t_bases_in_tail_from_cigar`].
-pub fn count_a_or_t_bases_in_tail(bam_record: &bam::Record) -> usize {
-    count_a_or_t_bases_in_tail_from_cigar(&bam_record.cigar(), bam_record)
-}
-
 /// A/T bases in the soft-clipped tail, read off a CIGAR the caller already unpacked.
 pub fn count_a_or_t_bases_in_tail_from_cigar(cigar: &[Cigar], bam_record: &bam::Record) -> usize {
     let is_reverse = bam_record.is_reverse();
@@ -86,29 +79,17 @@ pub fn count_a_or_t_bases_in_tail_from_cigar(cigar: &[Cigar], bam_record: &bam::
         .count()
 }
 
-/// Check if a read is internally-primed based on poly-A/T content at
-/// the end of the aligned sequence (checks for genomic A-rich or T-rich regions)
+/// Is this read internally primed?
 ///
+/// Checks poly-A/T content at the end of the aligned sequence, which catches a
+/// tail templated by a genomic A-rich or T-rich stretch rather than transcribed.
+/// Takes a CIGAR the caller already unpacked, because `Record::cigar()`
+/// allocates on every call.
+///
+/// * cigar: the record's unpacked CIGAR
 /// * bam_record: The BAM record to check
 /// * misprime_in: Number of bases at the end of alignment to check
 /// * misprime_a_count: Minimum number of A/T bases to consider internal priming
-///
-/// Unpacks the record's CIGAR.
-/// Callers that already hold one should use [`check_internal_prime_from_cigar`].
-pub fn check_internal_prime(
-    bam_record: &bam::Record,
-    misprime_in: usize,
-    misprime_a_count: usize,
-) -> bool {
-    check_internal_prime_from_cigar(
-        &bam_record.cigar(),
-        bam_record,
-        misprime_in,
-        misprime_a_count,
-    )
-}
-
-/// Internal-priming check against a CIGAR the caller already unpacked.
 pub fn check_internal_prime_from_cigar(
     cigar: &[Cigar],
     bam_record: &bam::Record,

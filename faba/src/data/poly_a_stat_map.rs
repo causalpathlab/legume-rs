@@ -108,16 +108,21 @@ impl PolyASiteMap {
             return;
         }
 
+        // Reuse the CIGAR unpacked above rather than the record-taking
+        // wrappers, which each re-derive it: `Record::cigar()` allocates a fresh
+        // `Vec<Cigar>` on both branches, cached or not.
+        //
         // Count A (forward) or T (reverse) bases in the soft-clipped
         // region to filter by maximum non-A/non-T bases allowed in the tail
-        let num_a_or_t = count_a_or_t_bases_in_tail(bam_record);
+        let num_a_or_t = count_a_or_t_bases_in_tail_from_cigar(&cigar, bam_record);
         let non_a_or_t_count = poly_length as usize - num_a_or_t;
         if non_a_or_t_count > self.qc_args.max_non_a_or_t_bases {
             return;
         }
 
         // Check for internal priming in the aligned sequence
-        let is_internally_primed = check_internal_prime(
+        let is_internally_primed = check_internal_prime_from_cigar(
+            &cigar,
             bam_record,
             self.qc_args.internal_prime_in,
             self.qc_args.internal_prime_a_or_t_count,
