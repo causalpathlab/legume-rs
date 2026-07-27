@@ -103,8 +103,16 @@ pub struct AtoICountArgs {
     #[arg(
         short = 'q',
         long = "pvalue",
-        default_value_t = 0.05,
-        help = "Marginal p-value cutoff for A-to-I site detection (no multiplicity correction)"
+        default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
+        help = "Marginal p-value cutoff for A-to-I site detection (no multiplicity correction)",
+        long_help = "Marginal p-value cutoff for A-to-I site detection.\n\
+                     Applied per site, above the coverage and conversion floors.\n\
+                     A-to-I is single-sample, so this cutoff is its entire test.\n\
+                     There is no multiplicity correction.\n\
+                     BH needs independence or positive regression dependence.\n\
+                     Neighbouring sites share reads, so it has neither.\n\
+                     Expect about `cutoff x tested` false calls; the run log prints both.\n\
+                     `--pvalue 1.0` leaves the coverage floors as the only filter."
     )]
     pub pvalue_cutoff: f32,
 

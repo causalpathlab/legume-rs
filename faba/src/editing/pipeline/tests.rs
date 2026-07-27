@@ -1,4 +1,4 @@
-use super::{m6a_effect_reason, m6a_site_counts, partition_by_site};
+use super::{m6a_effect_reason, partition_by_site};
 use crate::data::dna::{Dna, DnaBaseCount};
 use crate::editing::sifter::M6aContrast;
 use crate::editing::{CallReason, ConversionSite};
@@ -119,10 +119,7 @@ fn site_level_calls_the_focal_c_a_pooled_gene_test_would_bury() {
     sites.insert(gene_id("COLD"), vec![fwd_site(800, 80, 20, 80, 20, 1e-9)]);
 
     let c = contrast(10);
-    let discovered = partition_by_site(sites, &gm, 0.05, move |site, strand| {
-        let (a_w, u_w, a_m, u_m) = m6a_site_counts(site, strand);
-        m6a_effect_reason(a_w, u_w, a_m, u_m, &c)
-    });
+    let discovered = partition_by_site(sites, &gm, 0.05, Some(c));
 
     let selected = discovered.selected.get(&gene_id("FOCAL")).unwrap();
     assert_eq!(selected.len(), 1, "only the focal C survives");

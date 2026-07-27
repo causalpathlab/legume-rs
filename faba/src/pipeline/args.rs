@@ -229,7 +229,7 @@ pub struct PipelineArgs {
 
     #[arg(
         long = "atoi-pvalue",
-        default_value_t = 0.05,
+        default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
         help = "Marginal p-value cutoff for ATOI detection (no multiplicity correction)"
     )]
     pub atoi_pvalue_cutoff: f32,
@@ -307,7 +307,7 @@ pub struct PipelineArgs {
 
     #[arg(
         long = "m6a-pvalue",
-        default_value_t = 0.05,
+        default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
         help = "Marginal p-value cutoff for m6A detection (no multiplicity correction)"
     )]
     pub m6a_pvalue_cutoff: f32,

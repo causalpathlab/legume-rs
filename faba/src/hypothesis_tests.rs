@@ -71,6 +71,19 @@ fn upper_tail_p(k: u64, n: u64, log_pmf: impl Fn(u64) -> f64) -> f64 {
 }
 
 /// Benjamini-Hochberg FDR adjustment. Returns q-values in the input order.
+///
+/// BH controls the FDR only under independence or positive regression
+/// dependence (PRDS), so check that the tests are of that kind before reaching
+/// for it. The `lineage`, `dyn-assoc` and cell-QC callers are: their units
+/// (branches, genes, droplets) do not share observations.
+///
+/// The editing caller deliberately does NOT use this. Neighbouring conversion
+/// sites are covered by the SAME reads, and a read converted at one site is
+/// evidence against its unconverted neighbour, so the dependence is not even
+/// reliably positive. The valid procedure under arbitrary dependence is
+/// Benjamini-Yekutieli, whose `sum(1/i) ~ ln m` penalty is 10.6x at the ~28k
+/// putative sites of one library; editing selects on a marginal p-value
+/// instead, claiming no FDR guarantee rather than one whose assumption fails.
 pub fn benjamini_hochberg(pvalues: &[f32]) -> Vec<f32> {
     let m = pvalues.len();
     if m == 0 {
@@ -106,8 +119,9 @@ fn ln_choose(n: u64, k: u64) -> f64 {
 /// Returns `P(WT converted count ≥ a_w)` conditioning on all four margins
 /// (the hypergeometric right tail). Small p ⇒ WT editing exceeds the MUT
 /// control. A genomic C/T variant has equal rates in both arms ⇒ p ≈ 1. This
-/// is the exact small-count branch of the DART m6A two-sample call; it makes
-/// no distributional assumption, so it is the right tool when any cell is tiny.
+/// is the whole of the DART m6A two-sample call — there is no second branch.
+/// It makes no distributional assumption, so it stays exact however tiny a
+/// cell of the table gets.
 pub fn fisher_exact_greater(a_w: u64, u_w: u64, a_m: u64, u_m: u64) -> f32 {
     let r1 = a_w + u_w; // WT row total
     let r2 = a_m + u_m; // MUT row total
@@ -142,8 +156,9 @@ pub fn fisher_exact_greater(a_w: u64, u_w: u64, a_m: u64, u_m: u64) -> f32 {
     ((max + sum.ln()).exp() as f32).clamp(0.0, 1.0)
 }
 
-/// Two-sample WT-vs-MUT conversion p-value for DART m6A: the one-sided
-/// [`fisher_exact_greater`] on the 2x2 of (WT, MUT) x (converted, unconverted).
+/// Two-sample WT-vs-MUT conversion p-value for DART m6A. The domain-level name
+/// for the call, delegating to [`fisher_exact_greater`], which documents the
+/// 2x2 and the tail.
 ///
 /// This used to dispatch to an overdispersed beta-binomial LRT once every cell
 /// reached 5 and total coverage reached 100. Both tests were individually
