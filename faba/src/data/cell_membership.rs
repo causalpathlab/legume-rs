@@ -111,31 +111,11 @@ impl CellMembership {
         self.inner.unique_groups()
     }
 
-    /// Create cell membership from cluster assignments
-    pub fn from_clusters(barcodes: &[Box<str>], assignments: &[usize], allow_prefix: bool) -> Self {
-        let pairs = barcodes
-            .iter()
-            .zip(assignments.iter())
-            .map(|(barcode, &cluster)| {
-                let celltype: Box<str> = format!("cluster_{}", cluster).into();
-                (barcode.clone(), celltype)
-            });
-
-        let inner = Membership::from_pairs(pairs, allow_prefix);
-
-        log::info!(
-            "Created membership from {} cells in {} clusters",
-            inner.len(),
-            assignments.iter().max().map(|x| x + 1).unwrap_or(0)
-        );
-
-        Self {
-            inner,
-            match_cache: Mutex::new(HashMap::default()),
-            matched: AtomicUsize::new(0),
-            total_checked: AtomicUsize::new(0),
-        }
-    }
+    // There is deliberately no constructor from cluster assignments. Membership
+    // comes from `--cell-membership` and nowhere else: a grouping derived from
+    // the same cells the test then reads is an inference the caller never
+    // declared, and one this pipeline cannot price, since it runs one exact test
+    // per site with no multiplicity correction.
 }
 
 #[cfg(test)]

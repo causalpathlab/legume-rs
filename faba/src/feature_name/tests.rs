@@ -59,10 +59,33 @@ fn count_and_other_modalities_use_the_same_shape() {
         feature_row("GENE", APA, PROXIMAL, Some("chr1:100-200")).as_ref(),
         "GENE/apa/chr1:100-200/proximal"
     );
+    // BAF's unit is the locus, not a gene, and it takes no subunit — the two
+    // channels hang directly off the coordinate.
     assert_eq!(
-        feature_row("GENE", SNP, ALT, Some("chr1:200")).as_ref(),
-        "GENE/snp/chr1:200/alt"
+        feature_row("chr1:200", BAF, ALT, None).as_ref(),
+        "chr1:200/baf/alt"
     );
+    assert_eq!(
+        feature_row("chr1:200", BAF, DEPTH, None).as_ref(),
+        "chr1:200/baf/depth"
+    );
+}
+
+/// A BAF row still round-trips through the generic parser: three fields, so the
+/// locus lands in the `gene` slot and the parsed unit is the bare locus.
+#[test]
+fn baf_rows_parse_with_the_locus_as_the_unit() {
+    let parsed = parse_feature_row("chr1:200/baf/alt").expect("3-field row parses");
+    assert_eq!(parsed.gene, "chr1:200");
+    assert_eq!(parsed.modality, BAF);
+    assert_eq!(parsed.channel, ALT);
+    assert_eq!(parsed.subunit, None);
+    assert_eq!(parsed.unit().as_ref(), "chr1:200");
+
+    // Both channels of a locus share the unit, which is what lets a consumer
+    // pair them for the ratio.
+    let depth = parse_feature_row("chr1:200/baf/depth").expect("3-field row parses");
+    assert_eq!(depth.unit(), parsed.unit());
 }
 
 #[test]

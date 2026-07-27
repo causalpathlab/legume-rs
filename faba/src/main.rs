@@ -65,18 +65,25 @@ Feature naming convention:\n\
            (site), gene_key/atoi/{component}/{channel} (mixture)\n\
   apa:     gene_key/apa/{proximal|distal} (gene),\n\
            gene_key/apa/{component} (mixture)\n\
-  snp:     gene_key/snp/{chr}:{pos}\n\n\
+  baf:     {chr}:{pos}/baf/{alt|depth}\n\n\
   The channel is always the LAST field, so a 4-field row carries a subunit\n\
-  (site or mixture component) and a 3-field row is gene-level.\n\
-  The apa mixture and snp rows are the exception: they name a unit with no\n\
-  channel, because their contrast lives ACROSS matrices\n\
-  (snp alt vs depth) rather than within the row.\n\
-  Split on '/' to extract (gene_key, modality, detail) for cross-modal joins.\n\n\
+  (site or mixture component) and a 3-field row is unit-level.\n\
+  The apa mixture is the exception: it names a unit with no channel,\n\
+  because its contrast lives ACROSS a gene's components rather than within a row.\n\n\
+  baf is keyed on the LOCUS, not on a gene:\n\
+  a variant is a coordinate and belongs to no gene,\n\
+  and keying it by gene named the same variant twice wherever two genes overlapped.\n\
+  Its two channels also NEST rather than partition (alt ≤ depth),\n\
+  so BAF is alt/depth — do not sum a locus's channels to recover coverage.\n\n\
+  Split on '/' to extract (unit, modality, detail) for cross-modal joins.\n\n\
 Output layout (every matrix is per-replicate — one per input BAM):\n\
   per-modality: {batch}_m6a, {batch}_atoi (gene two-channel:\n\
                 {gene}/{mod}/{pos} = converted, /{neg} = unconverted),\n\
                 plus {batch}_{m6a,atoi}_site (per-site) and _mixture,\n\
-                {batch}_genes, {batch}_snp_{alt,depth}\n\
+                {batch}_genes\n\
+  baf:          {batch}_baf — per-cell alt and depth reads at each called locus\n\
+                (`faba snp` writes it; the CALL SET is snp_sites.parquet/.vcf.gz)\n\
+  depth:        {batch}_depth — binned per-cell read depth (--depth-resolution-kb)\n\
   apa:          {batch}_apa (proximal/distal counts, default; --no-pdui skips),\n\
                 {batch}_apa_mixture (--mixture)\n\
   Mixture components are FIT on the pooled replicates (shared across batches)\n\
@@ -288,13 +295,17 @@ Example:\n  \
             - snp_sites.parquet: genotype calls with allele counts and GQ\n\
             - snp_sites.vcf.gz: the same calls as VCF\n\
               (skipped with a warning when the FASTA has no readable .fai)\n\
-            - {batch}_snp_alt: per-cell alt allele count matrix (10x)\n\
-            - {batch}_snp_depth: per-cell total depth matrix (10x)\n\
-            The two per-cell matrices need -g/--gff:\n\
-            rows are keyed `{gene_key}/snp/{chr}:{pos}`,\n\
-            so without gene annotations the site cannot be named and they are skipped.\n\
+            - {batch}_baf: per-cell allele frequency matrix (10x)\n\n\
+            The GENOTYPE CALLS are the parquet/VCF. `{batch}_baf` is a different\n\
+            thing: an allele-frequency track carrying two read counts per cell per\n\
+            locus and no genotype, no GQ, no rsid.\n\
+            Rows are `{chr}:{pos}/baf/{alt|depth}` — keyed on the LOCUS, since a\n\
+            variant is a coordinate and belongs to no gene.\n\
+            BAF = alt / depth per cell per locus;\n\
+            the channels nest (alt ≤ depth), so never sum them.\n\
+            Needs -g/--gff, which is what gives each locus a region to fetch reads from.\n\
             (matrices are `.zarr.zip` by default; `.zarr` with --no-zip,\n\
-            `.h5` for the hdf5 backend.) BAF = alt / depth per cell per site.\n\n\
+            `.h5` for the hdf5 backend.)\n\n\
             Uses a binomial genotype likelihood model (cellSNP-lite;\n\
             Huang & Huang, Bioinformatics 2021).\n\n\
             The SNP mask output can be used with --snp-mask in `faba atoi`,\n\
@@ -633,17 +644,20 @@ Example:\n  \
 	Orchestrates the complete analysis workflow:\n\
 	0. SNP genotyping (de novo + optional --known-snps; skip --skip-snp)\n\
 	1. Gene expression filtering (identify expressed genes)\n\
-	2. ATOI detection (A-to-I editing sites, masked by SNP)\n\
-        3. m6A detection (DART C→T, WT-vs-MUT contrast; skipped w/o --control-bam)\n\
-        4. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\n\
+	2. Per-cell read depth (only with --depth-resolution-kb)\n\
+	3. ATOI detection (A-to-I editing sites, masked by SNP)\n\
+        4. m6A detection (DART C→T, WT-vs-MUT contrast; skipped w/o --control-bam)\n\
+        5. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\n\
+        Read depth is independent of every other step:\n\
+        it consumes no mask, produces none, and nothing downstream reads it.\n\
+        It runs straight after gene counting only to share that step's called-cell axis,\n\
+        so its columns match every other matrix.\n\n\
         APA runs LAST because the SCAPE EM is the heavy step\n\
         and nothing else waits on it;\n\
         m6A discovery needs only the SNP + ATOI masks, so the fast modalities finish first.\n\n\
-        Discovery runs in bulk by default, over all cells at once.\n\
-        Set `--cluster-resolution` above 0 (try 0.5) to group cells for mass enrichment instead.\n\
-        Grouping then happens ONCE, between steps 1 and 2.\n\
-        ATOI and m6A both stratify discovery on those same shared groups.\n\
-        The two modalities therefore cannot disagree about which cells were compared.\n\n\
+        Discovery runs in bulk, over all cells that passed step 1 at once,\n\
+        for both ATOI and m6A —\n\
+        so the two modalities cannot disagree about which cells were compared.\n\n\
         ATOI is reference-anchored and tested per site\n\
         against a beta-binomial error null (no control).\n\
         m6A instead needs a catalytically-dead control (--control-bam):\n\

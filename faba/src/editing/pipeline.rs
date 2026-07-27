@@ -623,16 +623,16 @@ fn find_sites_with_bulk_stats(
     Ok(candidate_sites)
 }
 
-/// Find conversion sites over a membership-restricted cell set (mass enrichment).
+/// Find conversion sites over a membership-restricted cell set.
 ///
 /// Used by both m6A (WT-vs-MUT) and A-to-I (control-free, reference-anchored)
-/// whenever a `CellMembership` is supplied. Reads WT BAM files once over the
+/// whenever `--cell-membership` supplies one. Reads WT BAM files once over the
 /// membership cells, then discovers on their pooled marginal — NOT per cell
-/// group: a putative site needs only the motif and observed WT C→U at/above the
-/// coverage floors, so the pooled marginal detects every site any group would,
-/// with the full WT evidence per site. (Cell grouping drives the second-pass
-/// quantification; the effect-size call is the downstream per-site test, so
-/// per-group discovery would only under-count each site's 2×2.)
+/// type: a putative site needs only the motif and observed WT C→U at/above the
+/// coverage floors, so the pooled marginal detects every site any one type
+/// would, with the full WT evidence per site. (The cell types drive the
+/// second-pass quantification; the effect-size call is the downstream per-site
+/// test, so per-type discovery would only under-count each site's 2×2.)
 fn find_sites_with_celltype_stats(
     gff_record: &GffRecord,
     params: &ConversionParams,
@@ -695,15 +695,16 @@ fn find_sites_with_celltype_stats(
     };
 
     // Discover on the ALL-cell WT marginal (pooled over this gene's membership
-    // cells), NOT per cell group. A putative site needs only the motif and
+    // cells), NOT per cell type. A putative site needs only the motif and
     // observed WT C→U at/above the coverage floors, and total coverage /
-    // conversion ≥ any single group's — so the pooled marginal detects every
-    // site any group would and each candidate carries the gene's full WT
-    // evidence. Per-group scanning here would emit one site per (position, group)
-    // and, after dedup, leave each site's 2×2 counting only one group's reads —
-    // silently under-calling edited sites. The effect-size decision is the
-    // downstream per-site test, not a per-group discovery guard; cell grouping
-    // drives the second pass, not this.
+    // conversion ≥ any single type's — so the pooled marginal detects every
+    // site any one type would and each candidate carries the gene's full WT
+    // evidence. Per-type scanning here would emit one site per (position, type)
+    // and, after dedup, leave each site's 2×2 counting only one type's reads —
+    // silently under-calling edited sites. It also turns discovery into a max
+    // over types, which this pipeline cannot absorb: it runs one exact test per
+    // site with no multiplicity correction. The effect-size decision is the
+    // downstream per-site test; the cell types drive the second pass, not this.
     let total_wt = wt_per_cell_map.pooled_frequency_map();
     let mut positions: Vec<i64> = total_wt.keys().copied().collect();
     positions.sort_unstable();

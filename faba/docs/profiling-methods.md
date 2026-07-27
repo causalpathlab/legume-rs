@@ -257,11 +257,25 @@ genes the assay exists to find. `m6a_genes.parquet` / `atoi_genes.parquet` and t
 companions are no longer produced, and the `gene_pv` and `qvalue` columns are gone from the site
 parquets — `qvalue` had become a byte-for-byte copy of `pv`, which is a lying name, not a schema.
 
-**Discovery is pooled, not stratified.** When cells are grouped by expression (§8), discovery scans
-each gene's pooled WT marginal over the grouped cells — a putative site needs only the motif and
-observed C→U, and the pooled marginal detects everything any single group would, with the full WT
-evidence per site (so no site's 2×2 is under-counted). The grouping
-is driven by expression and never by the editing signal, which is what keeps the test honest.
+**Discovery is pooled, never stratified.** Discovery scans each gene's pooled WT marginal over
+every cell that passed QC. A putative site needs only the motif and observed C→U, and the pooled
+marginal detects everything any single subset of cells would, with the full WT evidence per site,
+so no site's 2×2 is under-counted. Supplying `--cell-membership` restricts *which* cells enter that
+marginal, but the labels themselves reach only the second pass — they never split the test.
+
+This is a deliberate reversal. Earlier versions auto-grouped cells by expression (random projection
+→ randomised SVD → kNN → Leiden, behind `--cluster-resolution`) and stratified discovery on those
+groups, on the theory that an edit confined to a sub-population is diluted by pooling. It was
+removed, for three reasons. Mechanically, per-group scanning emits one site per (position, group)
+and, after dedup, leaves each site's 2×2 holding a single group's reads — it *lost* evidence rather
+than concentrating it. Statistically, calling a site when any of K groups clears the guard is a max
+over K correlated tests, and this pipeline runs one exact test per site with no multiplicity
+correction, relying on cross-replicate reproducibility instead — precisely the rule a
+max-over-strata scan defeats. Biologically, the premise was wrong: conversion rate at a DART site is
+set by catalytic competence (does this cell express functional APOBEC1–YTH) and by the site's m6A
+occupancy, and neither is the axis a whole-transcriptome embedding partitions on. The dilution was
+real but it was competence-structured, not cell-type-structured, which is why the null-cell QC
+above recovers it — 18 → 66 reproducible sites — and the expression grouping did not.
 
 **Quantification.** A second pass counts, per cell and per site, converted and unconverted reads.
 Sites seen in fewer than `--site-min-cells` (10) cells are dropped — this is the **reproducibility**
@@ -387,8 +401,24 @@ The call is the **maximum a posteriori** genotype under priors `P(het) = 0.001`,
 `GQ < --min-gq` (20). **There is no multiple-testing correction in the SNP path** — GQ is the only
 confidence gate.
 
-In single-cell mode `faba` writes two same-shaped matrices, `{batch}_snp_alt` and
-`{batch}_snp_depth`, so a per-cell B-allele fraction is `alt / depth`.
+**The call set and the allele-frequency track are different objects.** `snp_sites.parquet` (and
+the matching VCF) is the call set: genotype, GQ, rsid, pooled allele counts. In single-cell mode
+`faba` also writes one per-cell matrix, `{batch}_baf`, and it carries none of that — only two read
+counts per cell per locus, on channels `alt` and `depth`, so a per-cell B-allele fraction is
+`alt / depth`. It is named for what it measures rather than for the step that chose its positions,
+because reading it as "the SNP output" invites treating a per-cell count as a per-cell genotype.
+
+Two properties of that matrix are worth stating, since both differ from every other faba modality:
+
+- **Rows are keyed on the locus, not on a gene** — `{chr}:{pos}/baf/{alt|depth}`. A variant is a
+  coordinate; it does not belong to the gene whose region happened to fetch its reads. Keying rows
+  by gene, as earlier versions did, gave a variant inside two overlapping genes two different row
+  names and counted its reads twice. Genes are still required (`-g/--gff`) because they are how
+  pass 2 finds reads to fetch, and each locus is now assigned exactly one owner gene so it is
+  scanned once.
+- **The two channels nest rather than partition.** Everywhere else a unit's channels are exclusive
+  and sum to coverage (methylated + unmethylated, spliced + unspliced). Here `alt ≤ depth`, so BAF
+  is `alt / depth` and summing the two channels is meaningless.
 
 **One asymmetry to know about.** The SNP *mask* used to protect RNA-editing sites from being
 thrown away as variants applies a VAF filter (`--snp-mask-min-vaf`, 0.35) **only inside
@@ -420,18 +450,21 @@ None of these fit a model or produce a p-value.
 The steps run in this order, and each one's output constrains the next:
 
 ```
-SNP  →  genes  →  [expression grouping]  →  ATOI  →  m6A  →  APA
+SNP  →  genes  →  [depth]  →  ATOI  →  m6A  →  APA
 ```
 
 - **SNP** runs first, in bulk mode, and produces the variant mask. It is not fatal if it fails.
 - **genes** calls cells and picks the expressed gene set. **Every downstream modality inherits
   both** — this is what makes the modalities directly comparable, since they share a cell axis.
-- **The expression grouping** (`--cluster-resolution`, default 0, **off**) builds one shared cell
-  grouping by random projection → randomised SVD → kNN graph → **Leiden** [15]. Set a positive
-  resolution (try 0.5) to turn it on; at 0 discovery runs in bulk, over all cells at once. It is
-  used to stratify m6A and A-to-I *discovery*, for the reason given in §2. It is **not** cell
-  typing, and should not be reported as such.
-- **ATOI** runs masked by the SNP mask, and produces the editing mask.
+- **depth** (`--depth-resolution-kb`, opt-in) writes `{batch}_depth`, binned per-cell read depth.
+  It is independent of every other step: it reads no mask, produces none, and nothing downstream
+  consumes it, so it can fail without costing anything that follows. It sits directly after gene
+  counting for one reason only — that is where the called-cell axis exists, and sharing it keeps
+  the depth matrix's columns identical to every other modality's.
+- **ATOI** runs masked by the SNP mask, and produces the editing mask. Discovery is in bulk, over
+  the cells step 1 called — as it is for m6A, so the two cannot disagree about which cells were
+  compared. There is no cell grouping step; `--cluster-resolution` and the Leiden grouping behind
+  it were removed, for the reasons in §2.
 - **m6A** runs masked by the editing mask (a C→T at an edited site is not methylation). It is
   **skipped, not failed**, if no `--control-bam` is given. The SNP mask is *not* applied by
   default, because the WT-vs-MUT contrast already rejects germline variants.
@@ -486,5 +519,3 @@ fixed in the help text itself, so only the live discrepancy is kept here:
     (2011).
 14. Huang X, Huang Y. *cellsnp-lite: an efficient tool for genotyping single cells.* Bioinformatics
     37, 4569–4571 (2021).
-15. Traag VA, Waltman L, van Eck NJ. *From Louvain to Leiden: guaranteeing well-connected
-    communities.* Sci Rep 9, 5233 (2019).

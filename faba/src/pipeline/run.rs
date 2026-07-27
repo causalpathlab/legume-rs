@@ -1,7 +1,6 @@
 use super::args::*;
 use super::steps::*;
 use crate::common::*;
-use crate::data::cell_membership::CellMembership;
 use crate::quant::check_all_bam_indices;
 
 use anyhow::Context;
@@ -74,35 +73,24 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
         None
     };
 
-    // Mass-enrichment grouping (shared instrument for stratified discovery).
-    // Built once over all quantified cells so ATOI (all samples) and m6A (signal
-    // arm ⊆ all samples) stratify on the same groups; `None` when disabled
-    // (`--cluster-resolution 0`, the default), which is bulk discovery.
-    let enrich_membership: Option<CellMembership> = if args.enrich.enabled() {
-        info!("Grouping cells for mass enrichment (shared across ATOI + m6A)");
-        // Reuse the gene-count matrices Step 1 persisted (no BAM re-scan). The gff
-        // is only consulted on the fallback path (no persisted matrix).
-        let matrix_paths: Vec<Box<str>> = gene_count_qc
-            .as_ref()
-            .map(|q| q.matrix_by_batch.values().cloned().collect())
-            .unwrap_or_default();
-        let (gff_map, _spliced) = filtered_gff(&args.gff_file, &gene_count_qc)?;
-        args.enrich.build_membership(
-            &all_quant_bam_files(args),
-            &gff_map,
-            &matrix_paths,
-            &args.cell_barcode_tag,
-            &args.gene_barcode_tag,
-            true,
-        )?
-    } else {
-        None
-    };
+    // Step 2: per-cell read depth -- opt-in, and independent: it consumes no
+    // mask and produces none, and nothing downstream reads `{batch}_depth`. It
+    // sits here, directly after gene counting, only because that is where the
+    // called-cell axis becomes available -- the depth matrix shares its columns
+    // with every other modality rather than inventing its own. Being independent
+    // it can also fail without costing anything that follows.
+    if args.depth_resolution_kb.is_some() {
+        info!("Step 2/{}: per-cell read depth", n_steps);
+        match run_read_depth_step(args, &gene_count_qc) {
+            Ok(_) => info!("Read depth complete"),
+            Err(e) => log::warn!("Read depth step failed: {}", e),
+        }
+    }
 
-    // Step 2: ATOI Detection
+    // Step 3: ATOI Detection
     let atoi_mask = if !args.skip_atoi {
-        info!("Step 2/{}: ATOI detection", n_steps);
-        match run_atoi_step(args, &gene_count_qc, &snp_mask, enrich_membership.as_ref()) {
+        info!("Step 3/{}: ATOI detection", n_steps);
+        match run_atoi_step(args, &gene_count_qc, &snp_mask) {
             Ok(mask_data) => {
                 info!(
                     "ATOI complete: {} sites, {} mask positions",
@@ -117,54 +105,38 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
             }
         }
     } else {
-        info!("Step 2/{}: SKIPPED (--skip-atoi)", n_steps);
+        info!("Step 3/{}: SKIPPED (--skip-atoi)", n_steps);
         None
     };
 
-    // Step 3: m6A (DART) detection — WT-vs-MUT contrast at motif Cs (signal arm =
+    // Step 4: m6A (DART) detection — WT-vs-MUT contrast at motif Cs (signal arm =
     // positional BAMs minus --control-bam, tested against the pooled control).
     // m6A discovery uses only the SNP + ATOI masks (NOT APA), so it runs BEFORE
     // the heavy APA EM — the fast modalities all finish first. Requires a
     // control; skipped (not failed) when none is supplied.
     if args.control_bam_files.is_empty() {
         info!(
-            "Step 3/{}: SKIPPED (m6A needs --control-bam for the WT-vs-MUT contrast)",
+            "Step 4/{}: SKIPPED (m6A needs --control-bam for the WT-vs-MUT contrast)",
             n_steps
         );
     } else {
-        info!("Step 3/{}: m6A detection", n_steps);
-        match run_dart_step(
-            args,
-            &atoi_mask,
-            &snp_mask,
-            &gene_count_qc,
-            enrich_membership.as_ref(),
-        ) {
+        info!("Step 4/{}: m6A detection", n_steps);
+        match run_dart_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
             Ok(_) => info!("m6A complete"),
             Err(e) => log::warn!("m6A step failed: {}", e),
         }
     }
 
-    // Step 4: APA analysis — the heavy SCAPE EM, run LAST so it never blocks the
-    // fast modalities (genes / ATOI / m6A) that downstream work needs first.
+    // Step 5: APA analysis — the heavy SCAPE EM, run LAST so it never blocks the
+    // fast modalities (genes / depth / ATOI / m6A) that downstream work needs first.
     if !args.skip_apa {
-        info!("Step 4/{}: APA analysis", n_steps);
+        info!("Step 5/{}: APA analysis", n_steps);
         match run_apa_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
             Ok(_) => info!("APA complete"),
             Err(e) => log::warn!("APA step failed: {}", e),
         }
     } else {
-        info!("Step 4/{}: SKIPPED (--skip-apa)", n_steps);
-    }
-
-    // Step 5: per-cell read depth -- opt-in, and last, because it is a full
-    // extra pass over every BAM and nothing downstream consumes it.
-    if args.depth_resolution_kb.is_some() {
-        info!("Step 5/{}: per-cell read depth", n_steps);
-        match run_read_depth_step(args, &gene_count_qc) {
-            Ok(_) => info!("Read depth complete"),
-            Err(e) => log::warn!("Read depth step failed: {}", e),
-        }
+        info!("Step 5/{}: SKIPPED (--skip-apa)", n_steps);
     }
 
     write_pipeline_summary(args)?;
@@ -177,10 +149,11 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
 ///
 /// "Effective" is the whole point, and it is why this serializes [`PipelineArgs`] itself
 /// rather than re-listing fields by hand. A run is defined as much by the defaults it did not
-/// override as by the flags it passed — and faba's defaults have changed between builds
-/// (`--cluster-resolution` used to be 0.5 and is now 0; `--n-bootstrap` existed and then did
-/// not). Recording only the command line would leave a rerun unable to tell whether an output
-/// was produced with grouping on or off, and `faba --version` cannot settle it either (the
+/// override as by the flags it passed — and faba's options have changed between builds
+/// (`--cluster-resolution` defaulted to 0.5, then to 0, and is now gone entirely;
+/// `--n-bootstrap` existed and then did not). Recording only the command line would leave a
+/// rerun unable to tell whether an output was produced with grouping on or off, and
+/// `faba --version` cannot settle it either (the
 /// version has gone 0.10.3 → 0.13.0 → 0.11.0 → 0.12.0, non-monotonic). The previous summary
 /// recorded four input paths and no parameters at all, so it could not answer the question it
 /// existed to answer.

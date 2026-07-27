@@ -3,7 +3,6 @@ use crate::data::cell_membership::CellMembership;
 use crate::data::dna::Dna;
 use crate::data::dna_stat_map::DnaBaseFreqMap;
 use crate::data::util_htslib::{fetch_reference_base, load_fasta_index};
-use crate::quant::create_gene_key_function;
 use crate::snp::genotyper::{find_top_alt_allele, genotype_site, GenotypeParams, SiteInput};
 use crate::snp::io::{
     build_snp_mask, load_contigs_from_fai, write_snp_sites_parquet, write_snp_sites_vcf, KnownSnps,
@@ -11,10 +10,10 @@ use crate::snp::io::{
 use crate::snp::{SnpGenotype, SnpSite};
 
 use dashmap::DashMap;
-use genomic_data::bed::{Bed, BedWithGene};
+use genomic_data::bed::Bed;
 use genomic_data::gff::{GeneId, GffRecordMap};
 use log::info;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::{Arc, Mutex};
 
 /// Parameters for SNP genotyping pipeline
@@ -498,24 +497,60 @@ pub fn discover_snps_by_region(params: &SnpParams) -> anyhow::Result<Vec<SnpSite
 // SECOND PASS: Per-cell allele counts (10x single-cell mode) //
 ////////////////////////////////////////////////////////////////
 
-/// Dual per-cell output: alt allele counts + total depth.
-pub struct DualTriplets {
-    pub alt_triplets: Vec<(CellBarcode, Box<str>, f32)>,
-    pub depth_triplets: Vec<(CellBarcode, Box<str>, f32)>,
+/// Give every called locus exactly ONE owner gene.
+///
+/// `gene_sites` is built by iterating GFF records, so a variant inside two
+/// overlapping genes lands under both keys — the flat `sites` vector is deduped
+/// by `(chr, pos)`, this map never was. The gene is only how pass 2 finds reads
+/// to fetch, and the row is named for the locus, so a locus left under two genes
+/// would be scanned twice and its counts written twice under one row name.
+///
+/// The owner is the lexicographically smallest gene id carrying the locus, which
+/// makes the choice independent of GFF order and of thread scheduling.
+fn dedup_loci_by_owner_gene(gene_sites: &DashMap<GeneId, Vec<SnpSite>>) -> usize {
+    let mut owner: FxHashMap<(Box<str>, i64), GeneId> = FxHashMap::default();
+    for entry in gene_sites.iter() {
+        let gene = entry.key();
+        for site in entry.value() {
+            owner
+                .entry((site.chr.clone(), site.pos))
+                .and_modify(|g| {
+                    if gene < g {
+                        *g = gene.clone();
+                    }
+                })
+                .or_insert_with(|| gene.clone());
+        }
+    }
+
+    let mut dropped = 0usize;
+    for mut entry in gene_sites.iter_mut() {
+        let gene = entry.key().clone();
+        let before = entry.value().len();
+        entry
+            .value_mut()
+            .retain(|s| owner.get(&(s.chr.clone(), s.pos)) == Some(&gene));
+        dropped += before - entry.value().len();
+    }
+    gene_sites.retain(|_, v| !v.is_empty());
+    dropped
 }
 
-/// Gather per-cell allele counts and depth at called SNP sites.
+/// Gather per-cell allele counts at called variant loci as ONE channelized
+/// triplet set: [`ALT`](faba::feature_name::ALT) reads and
+/// [`DEPTH`](faba::feature_name::DEPTH) reads per cell per locus.
+///
+/// `called_sites` is keyed by gene only because a gene gives htslib a region to
+/// fetch. Every locus must already have a single owner gene — see
+/// [`dedup_loci_by_owner_gene`] — or it is counted once per gene containing it.
 pub fn gather_snp_allele_counts_by_gene(
     called_sites: &DashMap<GeneId, Vec<SnpSite>>,
     gff_map: &GffRecordMap,
     params: &SnpParams,
     bam_file: &str,
     cell_membership: Option<&CellMembership>,
-) -> anyhow::Result<DualTriplets> {
-    let gene_key_fn = create_gene_key_function(gff_map);
-
-    let arc_alt = Arc::new(Mutex::new(Vec::new()));
-    let arc_depth = Arc::new(Mutex::new(Vec::new()));
+) -> anyhow::Result<Vec<(CellBarcode, Box<str>, f32)>> {
+    let arc_baf = Arc::new(Mutex::new(Vec::new()));
 
     called_sites
         .iter()
@@ -549,70 +584,62 @@ pub fn gather_snp_allele_counts_by_gene(
                     params.include_missing_barcode,
                 )?;
 
-                let chr = gff.seqname.as_ref();
-
-                let bed = BedWithGene {
-                    chr: chr.into(),
-                    start: gff.start,
-                    stop: gff.stop,
-                    gene: gene_id.clone(),
-                    strand: gff.strand,
-                };
-                let gene_key = gene_key_fn(&bed);
-
-                let mut local_alt = Vec::new();
-                let mut local_depth = Vec::new();
+                let mut local = Vec::new();
 
                 for site in sites.iter() {
-                    // `{gene}/snp/{chr}:{pos}` — the SAME row name goes into both
-                    // `_snp_alt` and `_snp_depth`, so BAF is the ratio of the two
-                    // matrices and the row carries no channel field.
-                    let feature_name = faba::feature_name::unit_row(
-                        &gene_key,
-                        faba::feature_name::SNP,
-                        &format!("{}:{}", site.chr, site.pos),
+                    // The unit is the LOCUS. A variant is a coordinate, not a
+                    // gene: it does not belong to the gene whose region happened
+                    // to fetch its reads, and naming it `{gene}/...` split one
+                    // variant into two features wherever two genes overlapped.
+                    let locus = format!("{}:{}", site.chr, site.pos);
+                    let alt_row = faba::feature_name::feature_row(
+                        &locus,
+                        faba::feature_name::BAF,
+                        faba::feature_name::ALT,
+                        None,
+                    );
+                    let depth_row = faba::feature_name::feature_row(
+                        &locus,
+                        faba::feature_name::BAF,
+                        faba::feature_name::DEPTH,
+                        None,
                     );
 
-                    if let Some(cell_counts) = stat_map.stratified_frequency_at(site.pos) {
-                        for (cb, counts) in cell_counts {
-                            if !params.include_missing_barcode && cb == &CellBarcode::Missing {
-                                continue;
-                            }
-                            let alt_count = counts.get(Dna::from_byte(site.alt_allele).as_ref());
-                            let depth = counts.total();
+                    let Some(cell_counts) = stat_map.stratified_frequency_at(site.pos) else {
+                        continue;
+                    };
 
-                            if depth > 0 {
-                                local_alt.push((
-                                    cb.clone(),
-                                    feature_name.clone(),
-                                    alt_count as f32,
-                                ));
-                                local_depth.push((cb.clone(), feature_name.clone(), depth as f32));
-                            }
+                    for (cb, counts) in cell_counts {
+                        if !params.include_missing_barcode && cb == &CellBarcode::Missing {
+                            continue;
                         }
+                        let alt = counts.get(Dna::from_byte(site.alt_allele).as_ref());
+                        let depth = counts.total();
+
+                        if depth == 0 {
+                            continue;
+                        }
+
+                        // `alt` NESTS inside `depth` (alt ≤ depth); the pair does
+                        // not partition coverage the way every other modality's
+                        // channels do. BAF is alt / depth.
+                        local.push((cb.clone(), alt_row.clone(), alt as f32));
+                        local.push((cb.clone(), depth_row.clone(), depth as f32));
                     }
                 }
 
-                if !local_alt.is_empty() {
-                    arc_alt.lock().expect("lock").extend(local_alt);
-                    arc_depth.lock().expect("lock").extend(local_depth);
+                if !local.is_empty() {
+                    arc_baf.lock().expect("lock").extend(local);
                 }
 
                 Ok(())
             },
         )?;
 
-    let alt_triplets = Arc::try_unwrap(arc_alt)
-        .map_err(|_| anyhow::anyhow!("failed to release alt triplets"))?
-        .into_inner()?;
-    let depth_triplets = Arc::try_unwrap(arc_depth)
-        .map_err(|_| anyhow::anyhow!("failed to release depth triplets"))?
-        .into_inner()?;
-
-    Ok(DualTriplets {
-        alt_triplets,
-        depth_triplets,
-    })
+    Arc::try_unwrap(arc_baf)
+        .map_err(|_| anyhow::anyhow!("failed to release baf triplets"))?
+        .into_inner()
+        .map_err(Into::into)
 }
 
 //////////////////////////////////////
@@ -728,49 +755,40 @@ pub fn run_snp_pipeline(
                 }
                 gene_sites.retain(|_, v| !v.is_empty());
 
+                // Rows are named for the locus, so a variant sitting in two
+                // overlapping genes has to be assigned one owner before pass 2
+                // — otherwise it is fetched twice and written twice under the
+                // same row name.
+                let shared = dedup_loci_by_owner_gene(&gene_sites);
+                if shared > 0 {
+                    info!(
+                        "{} locus-in-gene duplicate(s) from overlapping genes; \
+                         each locus counted once",
+                        shared
+                    );
+                }
+
                 let batch_names = uniq_batch_names(&params.bam_files)?;
 
                 for (bam_file, batch_name) in params.bam_files.iter().zip(batch_names.iter()) {
                     info!("Second pass (per-cell): {}", bam_file);
-                    let dual =
+                    let baf_triplets =
                         gather_snp_allele_counts_by_gene(&gene_sites, gff, params, bam_file, None)?;
 
-                    if dual.alt_triplets.is_empty() {
-                        info!("no per-cell SNP data for {}", bam_file);
+                    if baf_triplets.is_empty() {
+                        info!("no per-cell allele data for {}", bam_file);
                         continue;
                     }
 
-                    // Collect union names so both matrices have identical dimensions
-                    let union = collect_union_names(&dual.alt_triplets, &dual.depth_triplets);
-
-                    // Alt allele count matrix
-                    let alt_data = format_data_triplets_shared(
-                        dual.alt_triplets,
-                        &union.feature_to_index,
-                        &union.cell_to_index,
-                        union.row_names.clone(),
-                        union.col_names.clone(),
-                    );
-                    let alt_out = params.backend_output_path(&format!("{}_snp_alt", batch_name));
-                    info!("Writing alt count matrix: {}", alt_out.target_path);
-                    let alt_data_io = alt_data.to_backend(&alt_out.write_path)?;
-                    drop(alt_data_io);
-                    alt_out.finalize()?;
-
-                    // Total depth matrix
-                    let depth_data = format_data_triplets_shared(
-                        dual.depth_triplets,
-                        &union.feature_to_index,
-                        &union.cell_to_index,
-                        union.row_names,
-                        union.col_names,
-                    );
-                    let depth_out =
-                        params.backend_output_path(&format!("{}_snp_depth", batch_name));
-                    info!("Writing depth matrix: {}", depth_out.target_path);
-                    let depth_data_io = depth_data.to_backend(&depth_out.write_path)?;
-                    drop(depth_data_io);
-                    depth_out.finalize()?;
+                    // One matrix, two channels per locus (`alt` and `depth`), so
+                    // BAF is a division inside one file instead of a join across
+                    // two whose row orders a consumer had to trust.
+                    let baf_out = params.backend_output_path(&format!("{}_baf", batch_name));
+                    info!("Writing allele frequency matrix: {}", baf_out.target_path);
+                    let baf_io =
+                        format_data_triplets(baf_triplets).to_backend(&baf_out.write_path)?;
+                    drop(baf_io);
+                    baf_out.finalize()?;
                 }
             }
         } else {
@@ -780,3 +798,6 @@ pub fn run_snp_pipeline(
 
     Ok(snp_mask)
 }
+
+#[cfg(test)]
+mod tests;

@@ -2,7 +2,7 @@
 //! subcommands over one set of BAM files.
 //!
 //! Steps shared with the standalone subcommands (BAM index checks, mito QC,
-//! mass enrichment) live in [`crate::quant`], which the standalone
+//! gene-expression QC) live in [`crate::quant`], which the standalone
 //! entries also use.
 
 /// The `faba all` command-line surface.

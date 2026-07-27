@@ -9,7 +9,6 @@ use crate::editing::pipeline::{
     find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, M6aContrastArgs,
 };
 use crate::editing::sifter::ModificationType;
-use crate::quant::mass_enrichment::MassEnrichmentArgs;
 use crate::quant::{
     check_all_bam_indices, resolve_modality_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest,
 };
@@ -274,9 +273,7 @@ pub struct DartSeqCountArgs {
         help = "Include cell type annotation in BED output",
         long_help = "Append a cell type column to BED output lines (--output-bed-file only).\n\
                      Requires --cell-membership: the column is read from that file.\n\
-                     Every row is written as \"unknown\" without it.\n\
-                     --cluster-resolution does NOT fill this column.\n\
-                     Its Leiden groups stratify site DISCOVERY and never reach the BED writer."
+                     Every row is written as \"unknown\" without it."
     )]
     pub output_cell_types: bool,
 
@@ -423,12 +420,6 @@ pub struct DartSeqCountArgs {
         help = "Beta prior β for posterior-rate weighting"
     )]
     pub mixture_prior_beta: f32,
-
-    //////////////////////////////
-    // Mass-enrichment grouping //
-    //////////////////////////////
-    #[command(flatten)]
-    enrich: MassEnrichmentArgs,
 
     ////////////////////////
     // Gene expression QC //
@@ -708,40 +699,30 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Load cell membership: from file, from clustering, or none
-    let membership = if let Some(ref path) = args.cell_membership_file {
-        // Load from file
-        let m = CellMembership::from_file(
-            path,
-            args.membership_barcode_col,
-            args.membership_celltype_col,
-            !args.exact_barcode_match,
-        )?;
-        info!(
-            "Loaded {} cell barcodes from membership file: {}",
-            m.num_cells(),
-            path
-        );
-        info!("Prefix matching: {}", !args.exact_barcode_match);
-        Some(m)
-    } else {
-        // Generate membership by grouping cells for mass enrichment (returns None
-        // when grouping is disabled). Reuse the gene-count matrices QC just persisted so
-        // enrichment does not re-scan the BAMs. The instrument is built over the
-        // signal (wt) cells here by design; the pipeline builds it over the
-        // all-quant union instead (shared with ATOI) — see run_pipeline.
-        let matrix_paths: Vec<Box<str>> = gene_qc
-            .as_ref()
-            .map(|q| q.matrix_by_batch.values().cloned().collect())
-            .unwrap_or_default();
-        args.enrich.build_membership(
-            &signal_bam_files,
-            &gff_map,
-            &matrix_paths,
-            &args.cell_barcode_tag,
-            &args.gene_barcode_tag,
-            !args.exact_barcode_match,
-        )?
+    // Cell membership restricts every pass to the listed barcodes, and comes only
+    // from `--cell-membership`. There is no derived grouping: cells were once
+    // auto-grouped by expression (Leiden, `--cluster-resolution`) on the theory
+    // that a cell-type-specific edit is diluted by pooling, but discovery pools
+    // the marginal either way (see `find_sites_with_celltype_stats`), so the
+    // groups changed no test. The dilution that mattered was catalytic
+    // competence, not cell type, and `cell_activity` removes it directly.
+    let membership = match args.cell_membership_file {
+        Some(ref path) => {
+            let m = CellMembership::from_file(
+                path,
+                args.membership_barcode_col,
+                args.membership_celltype_col,
+                !args.exact_barcode_match,
+            )?;
+            info!(
+                "Loaded {} cell barcodes from membership file: {}",
+                m.num_cells(),
+                path
+            );
+            info!("Prefix matching: {}", !args.exact_barcode_match);
+            Some(m)
+        }
+        None => None,
     };
 
     /////////////////////////////////
@@ -757,10 +738,10 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         info!("Loaded A-to-I mask with {} positions", mask.len());
         Some((None, mask))
     } else if args.detect_atoi {
-        // Stratify the A-to-I masking pass by the same groups when enabled, so
-        // cell-type-specific A-to-I edits are also masked out of m6A candidates.
-        // Only the selected A-to-I calls feed the mask; rejected candidates
-        // are not written here (the mask is a confounder filter, not a result).
+        // The A-to-I masking pass sees the same cell set as m6A discovery, so the
+        // two modalities cannot disagree about which cells were compared. Only the
+        // selected A-to-I calls feed the mask; rejected candidates are not written
+        // here (the mask is a confounder filter, not a result).
         let atoi_sites =
             find_all_conversion_sites(&gff_map, &atoi_params, membership.as_ref())?.selected;
         let n_atoi: usize = atoi_sites.iter().map(|x| x.value().len()).sum();

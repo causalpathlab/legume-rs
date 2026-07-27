@@ -13,31 +13,24 @@ fn parse_defaults() -> PipelineArgs {
     Wrap::parse_from(["faba", "a.bam", "-g", "g.gff", "-f", "g.fa", "-o", "out"]).p
 }
 
+/// The Leiden mass-enrichment grouping is gone, so its flags must not parse. A
+/// removed flag that still parses is worse than one that errors: the caller
+/// believes it asked for grouping and gets an ungrouped run with exit code 0.
 #[test]
-fn mass_enrichment_is_off_by_default() {
-    let args = parse_defaults();
-    assert_eq!(args.enrich.cluster_resolution, 0.0);
-    assert!(
-        !args.enrich.enabled(),
-        "grouping must be OFF unless asked for — it adds an embedding, a kNN graph and \
-         Leiden, then multiplies discovery by the group count"
-    );
-
-    // …and a positive resolution still turns it on.
-    let on = Wrap::parse_from([
-        "faba",
-        "a.bam",
-        "-g",
-        "g.gff",
-        "-f",
-        "g.fa",
-        "-o",
-        "out",
+fn the_removed_grouping_flags_do_not_parse() {
+    for flag in [
         "--cluster-resolution",
-        "0.5",
-    ])
-    .p;
-    assert!(on.enrich.enabled());
+        "--cluster-knn",
+        "--cluster-dim",
+        "--cluster-block-size",
+        "--cluster-min-row-nnz",
+        "--cluster-min-col-nnz",
+    ] {
+        let parsed = Wrap::try_parse_from([
+            "faba", "a.bam", "-g", "g.gff", "-f", "g.fa", "-o", "out", flag, "0.5",
+        ]);
+        assert!(parsed.is_err(), "{flag} still parses");
+    }
 }
 
 #[test]
@@ -49,7 +42,6 @@ fn summary_records_the_effective_options_not_just_the_inputs() {
     let json = serde_json::to_value(&args).expect("PipelineArgs serializes");
 
     // A default the user never typed is still recorded.
-    assert_eq!(json["enrich"]["cluster_resolution"], 0.0);
     assert_eq!(json["max_threads"], 16);
     // The foreign enum goes in by its Debug form rather than being dropped.
     assert!(
