@@ -77,7 +77,7 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
     // Mass-enrichment grouping (shared instrument for stratified discovery).
     // Built once over all quantified cells so ATOI (all samples) and m6A (signal
     // arm ⊆ all samples) stratify on the same groups; `None` when disabled
-    // (`--n-clusters <= 1`), which restores bulk discovery.
+    // (`--cluster-resolution 0`, the default), which is bulk discovery.
     let enrich_membership: Option<CellMembership> = if args.enrich.enabled() {
         info!("Grouping cells for mass enrichment (shared across ATOI + m6A)");
         // Reuse the gene-count matrices Step 1 persisted (no BAM re-scan). The gff
@@ -155,6 +155,16 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
         }
     } else {
         info!("Step 4/{}: SKIPPED (--skip-apa)", n_steps);
+    }
+
+    // Step 5: per-cell read depth -- opt-in, and last, because it is a full
+    // extra pass over every BAM and nothing downstream consumes it.
+    if args.depth_resolution_kb.is_some() {
+        info!("Step 5/{}: per-cell read depth", n_steps);
+        match run_read_depth_step(args, &gene_count_qc) {
+            Ok(_) => info!("Read depth complete"),
+            Err(e) => log::warn!("Read depth step failed: {}", e),
+        }
     }
 
     write_pipeline_summary(args)?;

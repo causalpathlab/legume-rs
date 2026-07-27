@@ -31,7 +31,8 @@ pub struct ReadDepthArgs {
         default_value_t = 1,
         help = "Block size for parallelism (Mb)",
         long_help = "Size of genomic blocks in megabases for parallel processing.\n\
-                     Must be larger than the bin resolution."
+                     Must be larger than the bin resolution.\n\
+                     Rounded up to a whole number of bins, so the bin grid never depends on it."
     )]
     pub(crate) block_size_mb: usize,
 
@@ -86,6 +87,16 @@ pub struct ReadDepthArgs {
     )]
     pub(crate) zip: bool,
 
+    /// Restrict the output to a per-batch cell set from `faba genes`
+    #[arg(
+        long = "valid-cells",
+        help = "Directory of `faba genes` outputs ({batch}_cells.tsv.gz) to reuse",
+        long_help = "Directory of `faba genes` outputs ({batch}_cells.tsv.gz) to reuse.\n\
+                     Without it every observed barcode gets a column, ambient droplets included.\n\
+                     Reads with no cell barcode tag are dropped whenever this is given."
+    )]
+    pub(crate) valid_cells_file: Option<Box<str>>,
+
     /// Output directory
     #[arg(
         short,
@@ -100,6 +111,11 @@ pub struct ReadDepthArgs {
 
 /// Count read depth
 pub fn run_read_depth(args: &ReadDepthArgs) -> anyhow::Result<()> {
+    // A resolution under 1 bp truncates to a zero-width bin, which tiles nothing.
+    if (args.resolution_kb * 1000.0) as usize == 0 {
+        return Err(anyhow::anyhow!("resolution should be at least one base"));
+    }
+
     if (args.resolution_kb * 1000.0) as usize > args.block_size_mb * 1_000_000 {
         return Err(anyhow::anyhow!(
             "resolution should be smaller than the block size"
