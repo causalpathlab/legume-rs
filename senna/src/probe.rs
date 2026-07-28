@@ -82,7 +82,11 @@ pub struct ProbeArgs {
     #[arg(long, default_value_t = 500, help = "Evaluation minibatch size")]
     minibatch_size: usize,
 
-    #[arg(long, help = "Load all columns into memory before scoring")]
+    #[arg(
+        long,
+        help = "Load all columns into memory before scoring",
+        hide = true
+    )]
     preload_data: bool,
 
     #[arg(

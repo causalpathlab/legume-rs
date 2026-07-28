@@ -16,7 +16,6 @@
 //!   scoring modulates by `e_gene[gene_ids[g]]`. Used by `pinto cage`
 //!   to collapse 18k tiny CUDA forwards per epoch into ~600 big ones.
 
-use crate::feature_network::{select_feat_emb, FeatureNetworkSmoother};
 use crate::loss::cell::{LevelSiblingPool, PerBatchCellSampler};
 use crate::loss::logistic_nce;
 use crate::model::JointEmbedModel;
@@ -205,7 +204,6 @@ pub fn cell_cell_nce_loss_per_level_gated(
     model: &JointEmbedModel,
     batch: CellChainBatch,
     gene_id: u32,
-    smoother: Option<&FeatureNetworkSmoother>,
     dev: &Device,
 ) -> Result<Tensor> {
     let b = batch.left_cells.len();
@@ -225,7 +223,7 @@ pub fn cell_cell_nce_loss_per_level_gated(
 
     // One gene → one row of e_gene, broadcast to [B, H].
     let gene_idx_one = Tensor::from_vec(vec![gene_id], 1, dev)?;
-    let e_gene_row = select_feat_emb(smoother, &model.e_feat, &gene_idx_one)?; // [1, H]
+    let e_gene_row = &model.e_feat.index_select(&gene_idx_one, 0)?; // [1, H]
     let h = e_gene_row.dim(1)?;
     let e_gene_b = e_gene_row.broadcast_as((b, h))?;
 
@@ -264,7 +262,6 @@ pub fn cell_cell_nce_loss_per_level_batched_gated(
     batches: Vec<CellChainBatch>,
     gene_ids: &[u32],
     dim_gates: Option<&Tensor>,
-    smoother: Option<&FeatureNetworkSmoother>,
     dev: &Device,
 ) -> Result<Tensor> {
     let g = batches.len();
@@ -316,7 +313,7 @@ pub fn cell_cell_nce_loss_per_level_batched_gated(
     let b_left = model.b_cell.index_select(&left_idx, 0)?;
     let e_right = model.e_cell.index_select(&right_idx, 0)?;
     let b_right = model.b_cell.index_select(&right_idx, 0)?;
-    let e_gene = select_feat_emb(smoother, &model.e_feat, &gene_idx)?; // [G*B, H]
+    let e_gene = &model.e_feat.index_select(&gene_idx, 0)?; // [G*B, H]
 
     let mut per_gene_per_level: Vec<Tensor> = Vec::with_capacity(l);
     for (lvl_idx, lvl_neg) in all_neg_per_level.into_iter().enumerate() {

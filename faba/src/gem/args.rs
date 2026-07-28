@@ -47,7 +47,8 @@ pub struct ModelArgs {
     #[arg(
         long = "feature-softmax-temp",
         default_value_t = 1.0,
-        help = "Softmax feature-gate temperature τ (< 1 sharpens the per-gene selection)."
+        help = "Softmax feature-gate temperature τ (< 1 sharpens the per-gene selection).",
+        hide = true
     )]
     pub feature_softmax_temp: f32,
 }
@@ -120,7 +121,8 @@ pub struct CollapseArgs {
                          features shaped by pb aggregates only). Fastest.\n\
                        1 ≤ k < n_cells → keep ≤k cells per pb-sample at EVERY collapse level (union),\n\
                          shrinking the phase-1 budget while keeping rare / shallow cells visible to the shared dictionary.\n\
-                       k ≥ n_cells → every cell shapes the dictionary (slowest)."
+                       k ≥ n_cells → every cell shapes the dictionary (slowest).",
+        hide = true
     )]
     pub phase1_cells_per_pb: usize,
 

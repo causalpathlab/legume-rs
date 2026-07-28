@@ -381,7 +381,6 @@ fn run_gem_genes_bge(
             seed: args.runtime.seed,
             device: dev.clone(),
             block_size: None,
-            feature_network: None,
             feature_embedding_l2: 0.0, // must be 0 for β-sharing (see note above)
             weight_decay: args.train.weight_decay,
             max_grad_norm: args.train.max_grad_norm,

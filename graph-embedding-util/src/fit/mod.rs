@@ -10,10 +10,7 @@ pub mod projection;
 pub mod resolve_embedding;
 mod samplers;
 
-pub use config::{
-    load_feature_network, FeatFactorSpec, FeatureNetworkArgs, FeatureNetworkConfig, FitConfig,
-    FitOutput, SoftmaxGateConfig,
-};
+pub use config::{FeatFactorSpec, FitConfig, FitOutput, SoftmaxGateConfig};
 pub use feature_projection::{
     CalibrationDiag, CalibrationKind, FeatureProjection, FeatureProjectionConfig,
     DEFAULT_PROJECTION_CALIB_RIDGE, DEFAULT_PROJECTION_RIDGE,
@@ -43,7 +40,7 @@ use config::{
     LINEAGE_WARMUP_FRAC,
 };
 use projection::{project_cells_phase2, project_pbs_phase2, CellBatchDivisor, PHASE2_RIDGE};
-use samplers::{build_active_samplers, build_smoother, subsample_cell_samplers_multilevel};
+use samplers::{build_active_samplers, subsample_cell_samplers_multilevel};
 
 /// Composite-objective gbe fit — trained in **two phases**.
 ///
@@ -66,7 +63,7 @@ use samplers::{build_active_samplers, build_smoother, subsample_cell_samplers_mu
 /// starved: the per-epoch budget was sized by the pseudobulk count, so
 /// `E_cell` received ~1 step/epoch across all cells and never left random
 /// init (all useful training happened at the pb level).
-pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<FitOutput> {
+pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOutput> {
     let n_cells = unified.n_cells();
     let h = config.embedding_dim;
     let stop = crate::stop::stop_flag();
@@ -215,12 +212,8 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
     // unique `pb_l{idx}` prefix.
     let mut cell_model = match &config.feat_factor {
         Some(spec) => {
-            // β-sharing is incompatible with the SGC smoother and the free-E_feat
-            // L2 (both assume a single free feature table per row).
-            anyhow::ensure!(
-                config.feature_network.is_none(),
-                "feat_factor (β-sharing) is not supported together with --feature-network"
-            );
+            // β-sharing is incompatible with the free-E_feat L2, which assumes a
+            // single free feature table per row.
             anyhow::ensure!(
                 config.feature_embedding_l2 == 0.0,
                 "feat_factor (β-sharing) is not supported with feature_embedding_l2 > 0"
@@ -430,8 +423,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         level_axes_data.push((axis, stratified));
     }
 
-    let mut smoother = build_smoother(config.feature_network.take(), n_features, h)?;
-
     // Note on biases: the per-CELL bias `b_cell` and the per-PB biases
     // (`pb_l*_b_cell`) BOTH train in phase 1 — a per-sample bias absorbs
     // that sample's depth so the shared `E_feat` captures composition, not
@@ -534,7 +525,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
             },
             &mut opt1,
             &p1,
-            smoother.as_mut(),
         )?;
     }
     // `cell_axis` / `pb_axes` borrows of `cell_model` / `cell_samplers` end
@@ -656,7 +646,6 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
                     },
                     &mut opt2,
                     &p2,
-                    smoother.as_mut(),
                 )?;
                 drop(refine_axes);
 

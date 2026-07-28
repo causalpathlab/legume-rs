@@ -8,9 +8,13 @@
 //! `gbe` remains a clap alias for one release cycle.
 //!
 //! All algorithmic work lives in `graph_embedding_util`. This file
-//! exists only to translate `BgeArgs` → `FitConfig`, resolve the
-//! optional feature-network edge file against the unified feature
-//! axis, and write senna's run manifest after training.
+//! exists only to translate `BgeArgs` → `FitConfig` and write senna's
+//! run manifest after training.
+//!
+//! `--feature-network` (SGC smoothing of `E_feat` through a feature-feature
+//! edge list) was removed along with its implementation: it saw no practical
+//! use, and its six flags dominated bge's surface. `senna topic` /
+//! `masked-topic` keep their own, unrelated feature-network restriction.
 
 use crate::embed_common::*;
 use data_beans_alg::hvg::{select_hvg_streaming, HvgCliArgs};
@@ -94,7 +98,8 @@ pub struct BgeArgs {
     #[arg(
         long = "feature-softmax-temp",
         default_value_t = 1.0,
-        help = "Softmax feature-gate temperature τ (< 1 sharpens each dim's gene distribution)."
+        help = "Softmax feature-gate temperature τ (< 1 sharpens each dim's gene distribution).",
+        hide = true
     )]
     feature_softmax_temp: f32,
 
@@ -110,7 +115,8 @@ pub struct BgeArgs {
                      (pure-pb: E_feat from pb aggregates only — fastest).\n\
                      1≤k<n_cells → keep ≤k cells per pb-sample at each collapse level (union),\n\
                      cutting the phase-1 step budget while preserving rare-cell coverage.\n\
-                     k≥n_cells → all cells (legacy; slowest)."
+                     k≥n_cells → all cells (legacy; slowest).",
+        hide = true
     )]
     phase1_cells_per_pb: usize,
 
@@ -161,7 +167,8 @@ pub struct BgeArgs {
     /// default: 100).
     #[arg(
         long,
-        help = "Batches per epoch (default: auto = one pass over largest axis)"
+        help = "Batches per epoch (default: auto = one pass over largest axis)",
+        hide = true
     )]
     batches_per_epoch: Option<usize>,
 
@@ -215,77 +222,11 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        help = "Optional feature-feature edge list (TSV/CSV;\n\
-                activates SGC smoothing of E_feat through the K-hop normalized adjacency)."
-    )]
-    feature_network: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Allow prefix matching when resolving feature-network names"
-    )]
-    feature_network_prefix_match: bool,
-
-    #[arg(
-        long,
-        help = "Name-stripping delimiter for feature-network resolution\n\
-                (e.g. '.' to match `TP53.1` → `TP53`)"
-    )]
-    feature_network_delim: Option<char>,
-
-    #[arg(
-        long,
-        default_value_t = 2,
-        help = "SGC propagation hops K (default 2;\n\
-                K=2 covers all shared-neighbor pairs).",
-        long_help = "SGC propagation hops K\n\
-                     (default 2 — useful for sparse synthetic-lethality / regulatory networks).\n\
-                     K=2 already reaches all shared-neighbor pairs,\n\
-                     so no separate SNN augmentation is needed."
-    )]
-    feature_network_k: usize,
-
-    #[arg(
-        long,
-        default_value_t = 0.1,
-        help = "SGC neighbor-mix coefficient α ∈ [0, 1]; smaller = gentler nudge"
-    )]
-    feature_network_alpha: f32,
-
-    #[arg(
-        long,
-        default_value_t = 5,
-        help = "Re-propagate the frozen network residual every N epochs"
-    )]
-    feature_network_refresh: usize,
-
-    #[arg(
-        long,
-        default_value_t = '_',
-        help = "Delimiter for fuzzy gene-name suffix matching across input files.",
-        long_help = "Delimiter for fuzzy gene-name matching across input files.\n\
-                     The last token after splitting on this char is used as the canonical row name,\n\
-                     so `ENSG00000000003_TSPAN6` (file A) and `TSPAN6` (file B) merge into a single row.\n\
-                     Pass an empty string\n\
-                     (currently unsupported by clap; set --feature-name-kind to override)\n\
-                     to fall back to exact matching."
-    )]
-    feature_name_delim: char,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Disable fuzzy gene-name matching (use exact row-name match across files)"
-    )]
-    feature_name_exact: bool,
-
-    #[arg(
-        long,
         help = "Cells per block for column I/O / streaming (omit for auto).",
         long_help = "Cells per parallel block for streaming column-block I/O.\n\
                      Omit for auto-scaling (clamps to 100 for large feature counts — slow on rotational disks).\n\
-                     Pass 1024+ when you have RAM, especially without --preload-data."
+                     Pass 1024+ when you have RAM, especially without --preload-data.",
+        hide = true
     )]
     block_size: Option<usize>,
 
@@ -293,7 +234,8 @@ pub struct BgeArgs {
         long,
         default_value_t = false,
         help = "Preload all sparse column data into memory.\n\
-                Faster when data fits in RAM; required on slow disks."
+                Faster when data fits in RAM; required on slow disks.",
+        hide = true
     )]
     preload_data: bool,
 
@@ -421,17 +363,18 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
 
     // Multiome mixes gene rows (RNA) and locus rows (ATAC peaks) on one axis,
     // so canonicalize per-name via `Mixed` (genes → gene rule, `chrX:s-e` →
-    // locus rule). This also makes feature-network edges (e.g. gene↔peak
-    // cis-links) resolve against the same canonical names. `--feature-name-exact`
-    // still forces verbatim matching.
-    let feature_kind = if args.feature_name_exact {
-        ge::FeatureNameKind::Exact
-    } else if is_multiome {
+    // locus rule).
+    //
+    // The rule is fixed rather than exposed: `--feature-name-delim` /
+    // `--feature-name-exact` were CLI knobs whose defaults ('_', fuzzy) were the
+    // only settings anyone used, and `_` is the separator every loader in this
+    // workspace already writes (`ENSG…_TSPAN6`). `faba gem` and `senna predict`
+    // still expose their own overrides where query-vs-reference name bridging is
+    // an actual concern.
+    let feature_kind = if is_multiome {
         ge::FeatureNameKind::Mixed
     } else {
-        ge::FeatureNameKind::Gene {
-            delim: args.feature_name_delim,
-        }
+        ge::FeatureNameKind::Gene { delim: '_' }
     };
 
     // Flatten groups to get the per-file slice passed to load_unified_data,
@@ -611,22 +554,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 .map(|&i| w[i])
                 .collect::<Vec<f32>>()
         });
-        let feature_network = args
-            .feature_network
-            .as_deref()
-            .map(|path| {
-                ge::load_feature_network(ge::FeatureNetworkArgs {
-                    path,
-                    feature_names: &unified.feature_names,
-                    prefix_match: args.feature_network_prefix_match,
-                    delim: args.feature_network_delim,
-                    k_hops: args.feature_network_k,
-                    alpha: args.feature_network_alpha,
-                    refresh_epochs: args.feature_network_refresh,
-                    feature_kind: feature_kind.clone(),
-                })
-            })
-            .transpose()?;
         // Up-weight matched (multi-modality) cells in the cell-axis sampler so
         // they anchor the cross-modal alignment. No-op outside --multiome.
         let cell_weight_mult: Option<Vec<f32>> =
@@ -664,7 +591,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             seed: args.seed,
             device: args.device.to_device(args.device_no)?,
             block_size: args.block_size,
-            feature_network,
             feature_embedding_l2: args.feature_embedding_l2,
             weight_decay: args.weight_decay,
             max_grad_norm: args.max_grad_norm,

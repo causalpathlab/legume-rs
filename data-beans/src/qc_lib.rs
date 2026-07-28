@@ -596,6 +596,7 @@ pub struct QcArgs {
 
     #[arg(
         long = "qc-min-counts",
+        hide = true,
         default_value_t = 0.0,
         help = "Hard floor on total counts per cell — cells below it are dropped",
         long_help = "Hard floor on total counts per cell — cells below it are dropped\n\
@@ -605,6 +606,7 @@ pub struct QcArgs {
 
     #[arg(
         long = "qc-mito-pattern",
+        hide = true,
         help = "Regex over feature names selecting mitochondrial genes (enables the",
         long_help = "Regex over feature names selecting mitochondrial genes (enables\n\
                      the mito-fraction outlier metric), e.g. `(?i)^MT-`."
@@ -612,19 +614,20 @@ pub struct QcArgs {
     pub qc_mito_pattern: Option<String>,
 
     /// Hard max mitochondrial fraction (0..1).
-    #[arg(long = "qc-mito-max-frac")]
+    #[arg(long = "qc-mito-max-frac", hide = true)]
     pub qc_mito_max_frac: Option<f32>,
 
     /// Regex over feature names selecting ribosomal genes.
-    #[arg(long = "qc-ribo-pattern")]
+    #[arg(long = "qc-ribo-pattern", hide = true)]
     pub qc_ribo_pattern: Option<String>,
 
     /// Hard max ribosomal fraction (0..1).
-    #[arg(long = "qc-ribo-max-frac")]
+    #[arg(long = "qc-ribo-max-frac", hide = true)]
     pub qc_ribo_max_frac: Option<f32>,
 
     #[arg(
         long = "qc-feature-min-cells",
+        hide = true,
         default_value_t = 0,
         help = "Feature/row QC (off by default): DROP genes (rows) expressed in fewer",
         long_help = "Feature/row QC (off by default): DROP genes (rows) expressed in\n\
@@ -644,6 +647,7 @@ pub struct QcArgs {
 
     #[arg(
         long = "qc-histogram",
+        hide = true,
         default_value_t = false,
         help = "Print the per-cell nnz histogram + the (diagnostic) 2-means suggested cutoff",
         long_help = "Print an ASCII histogram of the per-cell nnz distribution with the\n\
@@ -656,6 +660,7 @@ pub struct QcArgs {
 
     #[arg(
         long = "qc-mad-on-genes",
+        hide = true,
         default_value_t = true,
         help = "MAD-outlier drop on the per-cell detected-feature count",
         long_help = "Drop cells whose detected-feature count falls outside\n\
@@ -670,6 +675,7 @@ pub struct QcArgs {
 
     #[arg(
         long = "qc-mad-on-counts",
+        hide = true,
         default_value_t = true,
         help = "MAD-outlier drop on per-cell total counts",
         long_help = "Drop cells whose total count falls outside\n\
@@ -680,6 +686,7 @@ pub struct QcArgs {
 
     #[arg(
         long = "qc-auto-cutoff",
+        hide = true,
         default_value_t = false,
         help = "Apply the bimodal 2-means cell-calling cutoff (aggressive upfront cut)",
         long_help = "Apply the 2-means bimodal cutoff on the per-cell nnz distribution as a\n\

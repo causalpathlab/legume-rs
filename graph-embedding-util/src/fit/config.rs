@@ -3,12 +3,9 @@ use super::lift::{CellLineage, LineageQc};
 use super::projection::PbLevelVelocity;
 use crate::model::JointEmbedModel;
 use crate::training::{CompositeMode, TrainingParams};
-use auxiliary_data::feature_names::FeatureNameKind;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::VarMap;
 use data_beans_alg::refine_multilevel::RefineParams;
-use log::info;
-use matrix_util::pair_graph::FeaturePairGraph;
 
 /// Per-axis mixing weight in the composite loss. Defaults to 1.0 for
 /// every axis (uniform); callers can override by passing a different
@@ -73,7 +70,6 @@ pub struct FitConfig {
     /// rotational disks. Pass `Some(1024)` or higher when you have
     /// the RAM, especially without `--preload-data`.
     pub block_size: Option<usize>,
-    pub feature_network: Option<FeatureNetworkConfig>,
     /// Optional per-row HVG weights for the random projection (length =
     /// full feature axis). When `Some(w)`, the RP uses
     /// `project_columns_weighted` with these weights — uninformative
@@ -185,59 +181,6 @@ pub struct FeatFactorSpec {
 /// duplicate meant the model's doc was updated when the gate changed and the
 /// config's was not, so a caller reading the public API got the deleted design.
 pub use crate::model::SoftmaxGateSpec as SoftmaxGateConfig;
-
-/// Optional SGC feature-network smoother configuration. The graph is
-/// already loaded and aligned to the model's feature axis — caller
-/// owns the file → graph translation.
-pub struct FeatureNetworkConfig {
-    pub graph: FeaturePairGraph,
-    pub k_hops: usize,
-    pub alpha: f32,
-    pub refresh_epochs: usize,
-}
-
-/// CLI-flag-shaped helper that resolves an edge-list file against the
-/// unified feature axis and packages it as a [`FeatureNetworkConfig`].
-/// `senna gbe` reaches this so the resolution + zero-edge guard live
-/// here to keep error messages consistent.
-pub struct FeatureNetworkArgs<'a> {
-    pub path: &'a str,
-    pub feature_names: &'a [Box<str>],
-    pub prefix_match: bool,
-    pub delim: Option<char>,
-    pub k_hops: usize,
-    pub alpha: f32,
-    pub refresh_epochs: usize,
-    /// Canonicalizer applied to both the axis names and each edge endpoint
-    /// before matching — the same `FeatureNameKind` used to load the data,
-    /// so an edge file with raw gene / `chrX:start-end` names resolves
-    /// against the canonicalized unified axis (e.g. multiome cis-links).
-    pub feature_kind: FeatureNameKind,
-}
-
-pub fn load_feature_network(args: FeatureNetworkArgs) -> anyhow::Result<FeatureNetworkConfig> {
-    info!("Loading feature network from {}...", args.path);
-    let kind = args.feature_kind.clone();
-    let graph = FeaturePairGraph::from_edge_list_canon(
-        args.path,
-        args.feature_names.to_vec(),
-        args.prefix_match,
-        args.delim,
-        &|s| kind.canonicalize(s),
-    )?;
-    if graph.num_edges() == 0 {
-        anyhow::bail!(
-            "Feature network has 0 matched edges — check name resolution \
-             (--feature-network-delim / --feature-network-prefix-match)."
-        );
-    }
-    Ok(FeatureNetworkConfig {
-        graph,
-        k_hops: args.k_hops,
-        alpha: args.alpha,
-        refresh_epochs: args.refresh_epochs,
-    })
-}
 
 /// Trained model + its `VarMap`. The varmap is exposed so callers can
 /// save checkpoints or re-run inference; the current caller (`senna

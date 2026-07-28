@@ -6,7 +6,6 @@
 //! shape so the downstream NCE loss is sampler-agnostic.
 
 use crate::data::Triplet;
-use crate::feature_network::{select_feat_emb, FeatureNetworkSmoother};
 use crate::loss::{logistic_nce, softmax_nce, NceObjective};
 use crate::model::JointEmbedModel;
 use crate::progress::new_progress_bar;
@@ -706,7 +705,6 @@ pub fn nce_loss_chain(
     b_feat: &Tensor,
     feats: ChainFeatureSide,
     axes: &[ChainAxis],
-    smoother: Option<&FeatureNetworkSmoother>,
     objective: NceObjective,
     dev: &Device,
 ) -> anyhow::Result<Tensor> {
@@ -722,11 +720,11 @@ pub fn nce_loss_chain(
 
     // Feature side gathered once for the whole chain step.
     let pos_feat_idx = Tensor::from_slice(&feats.fine_feats, b, dev)?;
-    let e_feat_pos = select_feat_emb(smoother, e_feat, &pos_feat_idx)?;
+    let e_feat_pos = e_feat.index_select(&pos_feat_idx, 0)?;
     let b_feat_pos = b_feat.index_select(&pos_feat_idx, 0)?;
 
     let neg_feat_idx = Tensor::from_slice(&feats.neg_feats, b * k, dev)?;
-    let e_feat_neg_flat = select_feat_emb(smoother, e_feat, &neg_feat_idx)?;
+    let e_feat_neg_flat = e_feat.index_select(&neg_feat_idx, 0)?;
     let b_feat_neg_flat = b_feat.index_select(&neg_feat_idx, 0)?;
     let h = e_feat_neg_flat.dim(1)?;
     let e_feat_neg = e_feat_neg_flat.reshape((b, k, h))?;
@@ -851,7 +849,6 @@ pub fn nce_loss(
     model: &JointEmbedModel,
     batch: EdgeBatch,
     cell_coarse_to_fine: &[Vec<usize>],
-    smoother: Option<&FeatureNetworkSmoother>,
     objective: NceObjective,
     dev: &Device,
 ) -> Result<Tensor> {
@@ -866,9 +863,7 @@ pub fn nce_loss(
     let e_cell_pos = e_cell_u.index_select(&cell_idx_t, 0)?;
     let b_cell_pos = b_cell_u.index_select(&cell_idx_t, 0)?;
 
-    nce_loss_with_cell_side(
-        model, batch, e_cell_pos, b_cell_pos, smoother, objective, dev,
-    )
+    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, objective, dev)
 }
 
 /// Fast path for the identity-coarsening case (every "pb-sample" is
@@ -881,7 +876,6 @@ pub fn nce_loss(
 pub fn nce_loss_identity(
     model: &JointEmbedModel,
     batch: EdgeBatch,
-    smoother: Option<&FeatureNetworkSmoother>,
     objective: NceObjective,
     dev: &Device,
 ) -> Result<Tensor> {
@@ -892,9 +886,7 @@ pub fn nce_loss_identity(
     let cell_idx_t = Tensor::from_slice(&batch.coarse_cells, b, dev)?;
     let e_cell_pos = model.e_cell.index_select(&cell_idx_t, 0)?;
     let b_cell_pos = model.b_cell.index_select(&cell_idx_t, 0)?;
-    nce_loss_with_cell_side(
-        model, batch, e_cell_pos, b_cell_pos, smoother, objective, dev,
-    )
+    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, objective, dev)
 }
 
 /// Gather the feature-embedding rows for `idx`, applying the per-gene softmax gate(s)
@@ -910,11 +902,7 @@ pub fn nce_loss_identity(
 /// over the embedding dims (the null column dropped), so gradients reach both the base
 /// and the gate logits. Ungated (`s`/`logstd` absent) it is the plain gather. This is
 /// the single feature-gather point for the bge + gem Sum-mode trainers.
-fn gather_feature_rows(
-    model: &JointEmbedModel,
-    smoother: Option<&FeatureNetworkSmoother>,
-    idx: &Tensor,
-) -> Result<Tensor> {
+fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tensor> {
     match &model.factor {
         Some(f) => {
             let genes = f.row_to_gene.index_select(idx, 0)?;
@@ -929,7 +917,7 @@ fn gather_feature_rows(
             // Gate reads the RAW Var (`e_feat_raw`) once the gate is on, so a post-
             // phase-1 materialize can overwrite `e_feat` without double-gating here.
             let raw = model.e_feat_raw.as_ref().unwrap_or(&model.e_feat);
-            let mu = select_feat_emb(smoother, raw, idx)?; // effect mean μ
+            let mu = raw.index_select(idx, 0)?; // effect mean μ
             let logstd = model
                 .e_feat_logstd
                 .as_ref()
@@ -950,7 +938,6 @@ fn nce_loss_with_cell_side(
     batch: EdgeBatch,
     e_cell_pos: Tensor,
     b_cell_pos: Tensor,
-    smoother: Option<&FeatureNetworkSmoother>,
     objective: NceObjective,
     dev: &Device,
 ) -> Result<Tensor> {
@@ -959,7 +946,7 @@ fn nce_loss_with_cell_side(
 
     // Gather the feature rows scored THIS step (see `gather_feature_rows`). Shared
     // by pos + neg.
-    let gather_feat = |idx: &Tensor| gather_feature_rows(model, smoother, idx);
+    let gather_feat = |idx: &Tensor| gather_feature_rows(model, idx);
 
     let pos_feat_idx_t = Tensor::from_slice(&batch.fine_feats, b, dev)?;
     let e_feat_pos = gather_feat(&pos_feat_idx_t)?;

@@ -114,7 +114,6 @@ fn gate_posterior_on_hca_bm() -> anyhow::Result<()> {
         seed: 1,
         device: candle_util::candle_core::Device::new_cuda(0)?,
         block_size: Some(2048), // NOT None → None clamps to ~100 cols (glacial disk I/O)
-        feature_network: None,
         hvg_weights: None,
         // Lighten the DC-Poisson refine (default 20+10 sweeps/level) for feasibility.
         refine: Some(graph_embedding_util::RefineParams {

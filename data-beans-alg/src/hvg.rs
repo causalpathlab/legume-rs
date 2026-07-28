@@ -100,7 +100,11 @@ pub struct HvgCliArgs {
     #[arg(
         long = "n-hvg",
         default_value_t = 5000,
-        help = "Keep top N highly variable genes (0 disables HVG)",
+        // The one-line help has to say what selection actually DOES, because it
+        // differs by command and "keep top N genes" reads as a hard subset
+        // everywhere — which is wrong for senna, where every gene is still trained.
+        help = "Top N variable genes, 0 = all (senna: weights phase-1 sketching, still trains \
+                every gene; pinto / faba gem: hard-subsets the trained gene axis)",
         long_help = "Select top N genes via binned residual-variance\n\
                      (scanpy/Seurat-style). Collapsing and batch-effect\n\
                      estimation still see all genes. 0 disables HVG.\n\
@@ -127,8 +131,7 @@ pub struct HvgCliArgs {
         value_name = "FILE",
         help = "Keep these features in the HVG selection regardless of the cut",
         long_help = "Force-include list: UNIONed into the --n-hvg selection (unlike\n\
-                     --feature-list-file, which REPLACES it), and also exempt from the\n\
-                     --feature-null-fdr drop where that flag exists.\n\
+                     --feature-list-file, which REPLACES it).\n\
                      \n\
                      WHAT THIS BUYS YOU DEPENDS ON THE COMMAND, because the HVG\n\
                      selection means different things:\n\
@@ -152,8 +155,7 @@ pub struct HvgCliArgs {
                      \n\
                      Names are matched leniently (case-insensitive, symbol ↔\n\
                      `ENSG…_SYMBOL` either way); unmatched names are logged, not fatal.\n\
-                     A no-op when nothing would drop a feature anyway (--n-hvg 0, and\n\
-                     --feature-null-fdr 0 on the subcommands that have it)."
+                     A no-op when nothing would drop a feature anyway (--n-hvg 0)."
     )]
     pub must_train_features: Option<Box<str>>,
 }

@@ -76,7 +76,8 @@ pub struct VaeArgs {
 
     #[arg(
         long,
-        help = "Cells per rayon job (omit for auto-scaling by feature count)"
+        help = "Cells per rayon job (omit for auto-scaling by feature count)",
+        hide = true
     )]
     pub(crate) block_size: Option<usize>,
 
@@ -140,7 +141,8 @@ pub struct VaeArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Load all columns into memory before training"
+        help = "Load all columns into memory before training",
+        hide = true
     )]
     pub(crate) preload_data: bool,
 

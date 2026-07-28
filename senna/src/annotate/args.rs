@@ -126,7 +126,8 @@ pub struct AnnotateArgs {
         default_value_t = 1024,
         help = "Cells per CSC read block when streaming raw counts for per-cluster aggregation",
         long_help = "Cells per CSC read block when streaming raw counts for per-cluster aggregation\n\
-                     and NB-Fisher trend fitting. Larger blocks → fewer reads but more memory."
+                     and NB-Fisher trend fitting. Larger blocks → fewer reads but more memory.",
+        hide = true
     )]
     pub block_size: usize,
 
@@ -209,7 +210,8 @@ pub struct AnnotateArgs {
         default_value_t = false,
         help = "Preload columns into memory after opening the zarr/h5 backend",
         long_help = "Preload columns into memory after opening the zarr/h5 backend.\n\
-                     On slow disks this trades memory for I/O latency on later block reads."
+                     On slow disks this trades memory for I/O latency on later block reads.",
+        hide = true
     )]
     pub preload_data: bool,
 

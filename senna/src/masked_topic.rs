@@ -115,7 +115,8 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
-        help = "Cells per rayon job (omit for auto-scaling by feature count)"
+        help = "Cells per rayon job (omit for auto-scaling by feature count)",
+        hide = true
     )]
     block_size: Option<usize>,
 
@@ -238,7 +239,12 @@ pub struct MaskedTopicArgs {
     )]
     device: ComputeDevice,
 
-    #[arg(long, default_value_t = 0, help = "CUDA/Metal device index")]
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "CUDA/Metal device index",
+        hide = true
+    )]
     device_no: usize,
 
     #[arg(
@@ -247,14 +253,16 @@ pub struct MaskedTopicArgs {
         default_value = "residual",
         help = "Batch adjustment (batch|residual)",
         long_help = "batch    — subtract per-batch pseudobulk mean.\n\
-                     residual — divide by fitted delta per pseudobulk group."
+                     residual — divide by fitted delta per pseudobulk group.",
+        hide = true
     )]
     adj_method: AdjMethod,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Load all columns into memory before training"
+        help = "Load all columns into memory before training",
+        hide = true
     )]
     preload_data: bool,
 
@@ -312,14 +320,16 @@ pub struct MaskedTopicArgs {
                      Unlike the per-epoch training likelihood this is not optimized,\n\
                      so it distinguishes real structure from overfitting.\n\
                      Use a fixed --eval-seed to compare heads on the same held-out positions.\n\
-                     0 disables (default)."
+                     0 disables (default).",
+        hide = true
     )]
     eval_mask_fraction: f64,
 
     #[arg(
         long,
         default_value_t = 42,
-        help = "Seed for the held-out imputation mask (see --eval-mask-fraction)"
+        help = "Seed for the held-out imputation mask (see --eval-mask-fraction)",
+        hide = true
     )]
     eval_seed: u64,
 
@@ -355,14 +365,16 @@ pub struct MaskedTopicArgs {
     #[arg(
         long,
         default_value_t = 0.1,
-        help = "Lower bound of the per-minibatch mask rate when --mask-schedule=uniform."
+        help = "Lower bound of the per-minibatch mask rate when --mask-schedule=uniform.",
+        hide = true
     )]
     mask_rate_lo: f64,
 
     #[arg(
         long,
         default_value_t = 0.6,
-        help = "Upper bound of the per-minibatch mask rate when --mask-schedule=uniform."
+        help = "Upper bound of the per-minibatch mask rate when --mask-schedule=uniform.",
+        hide = true
     )]
     mask_rate_hi: f64,
 
@@ -414,7 +426,8 @@ pub struct MaskedTopicArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Also try forward/reverse prefix matching for feature-network name resolution"
+        help = "Also try forward/reverse prefix matching for feature-network name resolution",
+        hide = true
     )]
     feature_network_prefix_match: bool,
 
@@ -425,7 +438,8 @@ pub struct MaskedTopicArgs {
                      When set (e.g. '_'), each row name is registered under its full form\n\
                      AND every split component, so a row like `ENSG00000105329_TGFB1`\n\
                      matches network edges that name *either* `ENSG00000105329` *or* `TGFB1`\n\
-                     (via matrix-util's GeneIndexResolver — both aliases point to the same row)."
+                     (via matrix-util's GeneIndexResolver — both aliases point to the same row).",
+        hide = true
     )]
     feature_network_delim: Option<char>,
 
@@ -437,7 +451,8 @@ pub struct MaskedTopicArgs {
                      where the endpoints share fewer than N neighbors in the feature network.\n\
                      Default 1 drops edges with zero corroboration\n\
                      — standard PPI/topological-overlap denoising.\n\
-                     Set 0 to keep every parsed edge."
+                     Set 0 to keep every parsed edge.",
+        hide = true
     )]
     feature_network_min_shared_neighbors: usize,
 
@@ -449,7 +464,8 @@ pub struct MaskedTopicArgs {
                      After shared-neighbor QC, for each feature with degree > N,\n\
                      rank its neighbors by shared-neighbor count and keep the top N\n\
                      (union-symmetric: an edge survives iff either endpoint kept it).\n\
-                     Caps PPI hubs whose degree would otherwise blow up per-cell sub-adjacency."
+                     Caps PPI hubs whose degree would otherwise blow up per-cell sub-adjacency.",
+        hide = true
     )]
     feature_network_max_degree: usize,
 
@@ -459,7 +475,8 @@ pub struct MaskedTopicArgs {
         help = "Iterative k-core pruning threshold on the feature network (0 = off)",
         long_help = "Iterative k-core pruning threshold on the feature network (default 0 = off).\n\
                      Drops every feature whose degree falls below N\n\
-                     until the surviving subgraph is N-degenerate."
+                     until the surviving subgraph is N-degenerate.",
+        hide = true
     )]
     feature_network_min_degree: usize,
 

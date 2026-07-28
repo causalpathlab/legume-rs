@@ -63,11 +63,16 @@ pub struct EvalTopicArgs {
 
     #[arg(
         long,
-        help = "Cells per delta-estimation block (omit for auto-scaling by feature count)"
+        help = "Cells per delta-estimation block (omit for auto-scaling by feature count)",
+        hide = true
     )]
     pub(crate) block_size: Option<usize>,
 
-    #[arg(long, help = "Load all columns into memory before evaluation")]
+    #[arg(
+        long,
+        help = "Load all columns into memory before evaluation",
+        hide = true
+    )]
     pub(crate) preload_data: bool,
 
     #[arg(

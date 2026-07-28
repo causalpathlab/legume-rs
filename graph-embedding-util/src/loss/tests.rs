@@ -267,7 +267,7 @@ fn batched_gated_matches_per_gene_gated() {
             },
             &mut rng_b,
         );
-        let single = cell_cell_nce_loss_per_level_gated(&model, batch_a, gid, None, &dev)
+        let single = cell_cell_nce_loss_per_level_gated(&model, batch_a, gid, &dev)
             .expect("single gated")
             .to_vec1::<f32>()
             .unwrap();
@@ -278,7 +278,6 @@ fn batched_gated_matches_per_gene_gated() {
         &model,
         batches_for_batched,
         &gene_ids,
-        None,
         None,
         &dev,
     )
