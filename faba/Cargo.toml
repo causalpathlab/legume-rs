@@ -80,7 +80,7 @@ colored = { workspace = true }
 rustc-hash = { workspace = true }
 dashmap = { version = "6.1.0", features = ["rayon"] }
 rust-htslib = { workspace = true }
-arrow = "58"
+arrow = "59"
 
 # rna-mod-embed subcommand. candle_core / candle_nn come transitively
 # through candle-util (matches the senna / pinto convention) so the
