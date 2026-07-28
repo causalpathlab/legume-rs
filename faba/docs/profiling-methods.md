@@ -36,9 +36,12 @@ Both were live in `faba` until they were measured, so the reasoning is recorded 
 left in a commit. **The metagene no longer uses this model — see §1.2** — but it is what the
 defects below were found on, and it still governs everything else.
 
-**Do not use union spans.** `genomic_data`'s `build_union_gene_model` collapses every record of a
-feature type for a gene into a single `min(start)..max(stop)` interval. That is not the feature;
-it is the *reach* of the feature. Measured on GENCODE v48 basic: the union CDS "span" covers a
+**Do not use union spans.** `genomic_data` used to offer a `build_union_gene_model` that collapsed
+every record of a feature type for a gene into a single `min(start)..max(stop)` interval. That is
+not the feature; it is the *reach* of the feature. It has since been deleted — nothing called it
+once the metagene moved to per-transcript models (§1.2) — but the measurement is why, and the same
+mistake is available to anyone who reaches for `min`/`max` over a gene's records. On GENCODE v48
+basic: the union CDS "span" covers a
 median **83.5%** of the whole gene, introns included, and overlaps the union UTR in **95.9%** of
 genes. The union 3′UTR span runs a mean **6.35×** its real spliced length (median 1.00×, p90
 12.4×) and overlaps the CDS span in **46.1%** of genes.
