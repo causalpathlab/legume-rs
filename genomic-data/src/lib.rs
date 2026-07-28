@@ -12,3 +12,4 @@ pub mod gff;
 pub mod plink;
 pub mod positions;
 pub mod sam;
+pub mod transcript;
