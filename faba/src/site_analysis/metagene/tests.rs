@@ -437,6 +437,58 @@ fn bin_edges_reproduce_metaplotr_rescaling() {
     assert!((h.bin_edges(UTR3, 1).1 - 3.68).abs() < 1e-9);
 }
 
+/// Verbatim from `rel_and_abs_dist_calc.pl:38-40`, which prints its header in
+/// three statements. If this drifts, `visualize_metagenes.R` stops reading our
+/// output, which is the only reason the file exists.
+#[test]
+fn dist_measures_header_matches_metaplotr() {
+    let metaplotr = "chr\tcoord\tgene_name\trefseqID\trel_location\t\
+                     utr5_st\tutr5_end\tcds_st\tcds_end\tutr3_st\tutr3_end\t\
+                     utr5_size\tcds_size\tutr3_size";
+    assert!(
+        DIST_MEASURES_HEADER.starts_with(metaplotr),
+        "MetaPlotR's 14 columns must come first, in its order\n  ours: {DIST_MEASURES_HEADER}"
+    );
+    // Our two extras go after theirs, so a positional reader is unaffected.
+    assert_eq!(
+        &DIST_MEASURES_HEADER[metaplotr.len()..],
+        "\tstrand\trescaled_location"
+    );
+}
+
+#[test]
+fn utr3_st_is_the_signed_distance_from_the_stop_codon() {
+    // The column MetaPlotR's feature-distance plot is drawn on. Positions are
+    // 1-based along the mature transcript, so the first 3'UTR base sits exactly
+    // on the boundary and reads 0; a CDS base reads negative.
+    let records = two_exon_tx("ENST1", "G", Strand::Forward);
+    let models = elect_longest_isoform(build_transcript_models(&records));
+    let m = &models[0];
+
+    let utr3_st = |a: &SiteAssignment| {
+        let preceding = match a.region {
+            UTR5 => 0,
+            CDS => m.utr5_size,
+            _ => m.utr5_size + m.cds_size,
+        };
+        (preceding + a.rel + 1) - (m.utr5_size + m.cds_size + 1)
+    };
+
+    // 1603 is the first 3'UTR base (the stop codon 1600..1602 folds into CDS).
+    let first_utr3 = &place(&records, &[1603])[0];
+    assert_eq!(first_utr3.region, UTR3);
+    assert_eq!(utr3_st(first_utr3), 0);
+
+    // The last CDS base is one before it.
+    let last_cds = &place(&records, &[1602])[0];
+    assert_eq!(last_cds.region, CDS);
+    assert_eq!(utr3_st(last_cds), -1);
+
+    // …and a base deeper into the 3'UTR is positive.
+    let later = &place(&records, &[1613])[0];
+    assert_eq!(utr3_st(later), 10);
+}
+
 #[test]
 fn tsv_keeps_its_first_three_columns_and_integrates_to_one() {
     let dir = tempfile::tempdir().expect("tempdir");
