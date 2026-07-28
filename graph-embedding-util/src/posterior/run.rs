@@ -40,7 +40,18 @@ pub const DEFAULT_PARTITION: usize = 1024;
 pub enum PosteriorMode {
     /// No posterior — the run is byte-identical to one built before this existed.
     Off,
-    /// Per-gene gate posterior only (PIP + credible sets + effect posterior).
+    /// Per-gene single-effect posterior: a softmax over dims per gene, giving a
+    /// PIP simplex, credible sets and the effect posterior.
+    ///
+    /// NOTE this targets a parameterization the TRAINER NO LONGER USES. The gate
+    /// now normalizes over genes within a dim (`crate::model::SoftmaxGateSpec`),
+    /// and that is not expressible as a per-gene sampler at all — normalizing over
+    /// genes couples them, so no per-gene factorization is exact for it. What this
+    /// samples is therefore a valid posterior under ITS OWN single-effect prior,
+    /// not the posterior of your fit. It is still the only sampler here that
+    /// yields set-valued credible sets, which is what you want when the frozen
+    /// dims are collinear. [`Self::PerDim`] is the closer match to the deployed
+    /// gate.
     Gate,
     /// Tier-1 hyperparameters only (`σ₀²`, `π₀`, per-gene inclusion probability).
     Hyper,
@@ -55,20 +66,50 @@ pub enum PosteriorMode {
     /// folded into [`Self::Both`] because it costs `H` likelihood passes per
     /// anchor per sweep, which is not something to add to an existing default.
     PerDim,
+    /// Every sampler on one fit — the gate, the Tier-1 hypers and the per-dim
+    /// block.
+    ///
+    /// This is the only way to compare the gate's selection against
+    /// [`super::dim_block`]'s on the SAME frozen side, which is the only
+    /// comparison that means anything: the embedding basis rotates between fits
+    /// (cross-seed ARI 0.0365 against a same-seed floor of 1.0000), so a dim index
+    /// from one run is not the dim index from another. Costly — read the per-mode
+    /// notes before reaching for it.
+    All,
+}
+
+/// Which samplers a resolved plan runs. The user-facing spelling stays the
+/// `--posterior` enum; this is what the pipeline reads.
+///
+/// Kept as an explicit set rather than predicates over the enum: with three
+/// independent samplers a flat enum can only name a few of the eight reachable
+/// combinations, and adding a fourth would silently mean auditing every
+/// `matches!` to decide whether the new variant belongs in it — an audit nothing
+/// forces, since a one-armed `matches!` keeps compiling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Samplers {
+    pub gate: bool,
+    pub hyper: bool,
+    pub per_dim: bool,
 }
 
 impl PosteriorMode {
+    /// The samplers this mode selects.
     #[must_use]
-    pub fn runs_gate(self) -> bool {
-        matches!(self, Self::Gate | Self::Both)
-    }
-    #[must_use]
-    pub fn runs_hyper(self) -> bool {
-        matches!(self, Self::Hyper | Self::Both)
-    }
-    #[must_use]
-    pub fn runs_per_dim(self) -> bool {
-        matches!(self, Self::PerDim)
+    pub fn samplers(self) -> Samplers {
+        let (gate, hyper, per_dim) = match self {
+            Self::Off => (false, false, false),
+            Self::Gate => (true, false, false),
+            Self::Hyper => (false, true, false),
+            Self::Both => (true, true, false),
+            Self::PerDim => (false, false, true),
+            Self::All => (true, true, true),
+        };
+        Samplers {
+            gate,
+            hyper,
+            per_dim,
+        }
     }
 }
 
@@ -113,7 +154,7 @@ pub struct PosteriorArgs {
         long = "posterior",
         value_enum,
         value_name = "MODE",
-        help = "Which posterior to sample: off (default) | gate | hyper | both | perdim.\n\
+        help = "Which posterior to sample: off (default) | gate | hyper | both | perdim | all.\n\
                 Omit and pass --mcmc N for the usual case.",
         long_help = "Which posterior to sample after the MAP fit. Chain length comes from `--mcmc N`\n\
                      (default 200 when only this flag is given).\n\
@@ -122,9 +163,18 @@ pub struct PosteriorArgs {
                        gate  → the per-gene selection posterior only (PIP, credible sets, effect posterior).\n\
                        hyper → the Tier-1 hyperparameters only: the slab variance σ₀² and the sparsity π₀,\n\
                                which the gate otherwise hard-codes, sampled from the data.\n\
-                       both  → both, AND the learned σ₀² is fed into the gate's slab prior.\n\
-                               That coupling is the hierarchical payoff, so `both` is more than the union\n\
-                               of the two — it is what `--mcmc` selects.\n\
+                       both  → both, and the learned σ₀² is offered to the gate's slab prior.\n\
+                               In practice that coupling is USUALLY REFUSED: σ₀² and the effects it\n\
+                               scales are strongly dependent (Neal's funnel), and the measured chain ESS\n\
+                               on real data runs ~4-11 against the ≥10 bar, so `both` typically\n\
+                               degrades to the plain union. Check `adopted_sigma2` in the JSON to see\n\
+                               which happened; a null there means the fixed prior was kept.\n\
+                       perdim → per-dim selection (independent Bernoulli per dim, per-dim σ₀h²/π₀h).\n\
+                               Matches the axis the gate is actually trained on. Costs H likelihood\n\
+                               passes per anchor per sweep, so it is opt-in.\n\
+                       all   → every sampler on one fit. The only way to compare the gate's\n\
+                               selection against the per-dim one on the SAME frozen side, which is the\n\
+                               only comparison that means anything (the basis rotates between fits).\n\
                      \n\
                      `--posterior off` together with `--mcmc N` is an error (one turns it off, the other on)."
     )]
@@ -167,6 +217,9 @@ pub struct PosteriorArgs {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PosteriorPlan {
     pub mode: PosteriorMode,
+    /// Which samplers to run — resolved from `mode` once, so the pipeline never
+    /// re-derives it.
+    pub samplers: Samplers,
     /// Retained draws per chain; warmup is `n_samples / 2` on top.
     pub n_samples: usize,
     /// Anchors to sample: `0` = all, else the top-N by observed count.
@@ -201,6 +254,7 @@ impl PosteriorArgs {
         anyhow::ensure!(n_samples > 0, "--mcmc must be > 0 (got {n_samples})");
         Ok(Some(PosteriorPlan {
             mode,
+            samplers: mode.samplers(),
             n_samples,
             n_genes: self.posterior_genes,
             n_partition: self.posterior_partition,
@@ -365,7 +419,7 @@ fn run_track(
 
     // Hypers first: the learned σ₀² feeds the gate's slab prior below, which is
     // the whole reason `both` is more than the union of its parts.
-    let hyper = plan.mode.runs_hyper().then(|| {
+    let hyper = plan.samplers.hyper.then(|| {
         let t = std::time::Instant::now();
         let res = hyper_ss(
             &nodes,
@@ -390,7 +444,7 @@ fn run_track(
     let learned_sigma2 = hyper.as_ref().and_then(|res| {
         let adopted = res.trustworthy_sigma2();
         if adopted.is_none() {
-            let consequence = if plan.mode.runs_gate() {
+            let consequence = if plan.samplers.gate {
                 "not adopted for the gate prior — keeping the model's fixed slab variance"
             } else {
                 "report it as a scale, not a value"
@@ -406,7 +460,7 @@ fn run_track(
         adopted
     });
 
-    let gate = plan.mode.runs_gate().then(|| {
+    let gate = plan.samplers.gate.then(|| {
         let mut cfg = GateConfig::new(plan.n_samples, plan.n_samples / 2, plan.seed ^ 0x2);
         if let Some(s2) = learned_sigma2 {
             info!(
@@ -415,6 +469,14 @@ fn run_track(
             );
             cfg.effect_var = s2;
         }
+        log::warn!(
+            "  [{}] the gate posterior samples a PER-GENE softmax over dims — the \
+             parameterization the trainer replaced. `{{out}}.{}_pip.parquet` is a valid \
+             posterior under that prior, NOT the posterior of this fit; use \
+             `--posterior perdim` for the axis actually trained",
+            track.label,
+            track.tag,
+        );
         let t = std::time::Instant::now();
         let res = gate_posterior(&nodes, &side, &cfg);
         let done = res.iter().filter(|g| g.is_sampled()).count();
@@ -437,7 +499,7 @@ fn run_track(
     // Per-dim selection: independent inclusion per embedding dim, with its own
     // per-dim `(σ₀h², π₀h)`. Self-contained, so it neither reads `learned_sigma2`
     // nor needs the gate to have run.
-    let per_dim = plan.mode.runs_per_dim().then(|| {
+    let per_dim = plan.samplers.per_dim.then(|| {
         let t = std::time::Instant::now();
         let res = dim_block(
             &nodes,
