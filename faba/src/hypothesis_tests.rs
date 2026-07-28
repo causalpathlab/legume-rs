@@ -183,6 +183,122 @@ pub fn contrast_pvalue(a_w: u64, u_w: u64, a_m: u64, u_m: u64) -> f32 {
     fisher_exact_greater(a_w, u_w, a_m, u_m)
 }
 
+////////////////////////
+// The odds ratio     //
+////////////////////////
+
+/// Log odds ratio of the WT-vs-MUT conversion 2×2, on the RAW counts.
+///
+/// ```text
+///           converted   unconverted
+///   WT      a_w         u_w
+///   MUT     a_m         u_m
+/// ```
+///
+/// `ln( (a_w · u_m) / (u_w · a_m) )`. This is the parameter
+/// [`fisher_exact_greater`]'s null is about (`OR = 1`), which is the entire
+/// reason it exists: the site guard and the site test finally measure ONE
+/// quantity on ONE scale. Its predecessor, an absolute `p_WT − p_MUT` floor, did
+/// not — a difference is additive and the test is multiplicative, and at a
+/// 0.1–0.3% control background `p_WT − p_MUT` is numerically just `p_WT`, so a
+/// flag documented as an effect-size guard behaved as a minimum-WT-rate filter.
+///
+/// **No continuity correction, deliberately.** `a_m = 0` at most DART sites (57% measured on
+/// chr19+MYC; the control converts 0-2 reads at 80-88% depending on library),
+/// so `+inf` here is the common case rather than an edge case, and it is the
+/// right answer: a control that never converts puts the WT odds infinitely above
+/// it. Adding 0.5 to every cell instead makes this guard pass only when the WT
+/// odds exceed `0.5/(n_MUT + 0.5)` — an implied minimum WT rate of 12.5% at
+/// `n_MUT = 3`, 25% at `n_MUT = 1`, which is the very pathology the odds ratio
+/// replaced. Worked case: `(30, 4970, 0, 3)` is a 0.6% WT site whose control
+/// converts 0 of 3 reads. Raw, that is `+inf`; corrected, it is −3.148, i.e. a
+/// claim that the control converts 23× MORE, on the strength of three reads.
+/// Both agree the site is unproven (Fisher p = 0.982), but only the raw value
+/// lets it be recorded as `Pvalue` ("no evidence") rather than `OddsRatio`
+/// ("no effect"). Use [`log_odds_ratio_woolf`] when a finite, writable estimate
+/// is wanted; never for a decision.
+///
+/// Correcting only when a zero cell appears was considered and rejected: it
+/// reintroduces exactly the discontinuity [`contrast_pvalue`] documents deleting,
+/// with two different rules meeting at `a_m: 1 → 0`.
+///
+/// Degenerate conventions, mirroring [`fisher_exact_greater`]'s `1.0`:
+/// - both products zero (nothing converted anywhere, or nothing unconverted
+///   anywhere) ⇒ `0.0`, i.e. `OR = 1`: the table carries no information.
+/// - `u_w · a_m == 0` otherwise ⇒ `+inf` (the MUT odds are zero).
+/// - `a_w · u_m == 0` otherwise ⇒ `-inf` (the MUT odds are infinite).
+///
+/// Never `NaN`, so a caller's comparison always decides rather than silently
+/// falling through — the failure mode the `.max(1)` denominators of the old
+/// rate-difference guard existed to avoid.
+pub fn log_odds_ratio(a_w: u64, u_w: u64, a_m: u64, u_m: u64) -> f64 {
+    let num = a_w as f64 * u_m as f64;
+    let den = u_w as f64 * a_m as f64;
+    // The only case IEEE cannot express: `ln(0) - ln(0)` is `NaN`, and a caller
+    // comparing with `<` would then silently KEEP the site instead of rejecting
+    // it. Every other convention falls out of `ln(0) = -inf` — one empty product
+    // gives ±inf, and equal products are the SAME f64, so their logs cancel to a
+    // true `0.0` (which is how a genomic C/T variant lands exactly on `OR = 1`).
+    if num == 0.0 && den == 0.0 {
+        return 0.0;
+    }
+    num.ln() - den.ln()
+}
+
+/// Haldane–Anscombe continuity correction: 0.5 added to every cell of the 2×2.
+const HALDANE: f64 = 0.5;
+
+/// Haldane–Anscombe corrected log odds ratio and its Woolf standard error,
+/// `(log_or, se)`. **Reporting only — never a decision.**
+///
+/// Adds [`HALDANE`] to all four cells, then
+/// `se = sqrt(1/a_w + 1/u_w + 1/a_m + 1/u_m)` on the corrected cells. Both are
+/// always finite, which is the one thing the correction buys here and the only
+/// reason it is used at all: a `Float32` parquet column cannot hold the `+inf`
+/// that [`log_odds_ratio`] correctly returns at a clean control.
+///
+/// - Woolf, B. (1955). On estimating the relation between blood group and
+///   disease. *Annals of Human Genetics* 19, 251–253. — the standard error.
+/// - Haldane, J. B. S. (1956). The estimation and significance of the logarithm
+///   of a ratio of frequencies. *Annals of Human Genetics* 20(4), 309–311.
+///   doi:10.1111/j.1469-1809.1955.tb01285.x — the +0.5; his own framing is that
+///   the uncorrected estimate "has a bias which is not always negligible".
+/// - Anscombe, F. J. (1956). On estimating binomial response relations.
+///   *Biometrika* 43(3–4), 461–464. — independent derivation.
+/// - Gart, J. J. & Zweifel, J. R. (1967). On the bias of various estimators of
+///   the logit and its variance with application to quantal bioassay.
+///   *Biometrika* 54, 181–187. — the reference for the correction's bias
+///   properties. Cited, not paraphrased: the paper was not accessible when this
+///   was written, so no specific optimality claim is made for 0.5 here.
+///
+/// Read the SE first. It is dominated by the SMALLEST cell, not by either
+/// library's depth, so it blows up exactly when a site is thin — which is how
+/// "do not read an effect size off a low-abundance site" becomes a number
+/// instead of a warning. A rate DIFFERENCE cannot do this: 1 converted of 5
+/// reads and 1 of 744 are both "delta", but the first is quantized at 0.2 and
+/// the second at 0.001, so the difference reports depth rather than effect.
+///
+/// Two consequences to state plainly, because they otherwise read as bugs:
+///
+/// 1. With `a_m = 0` the corrected control cell is 0.5, so `se >= sqrt(2) ≈
+///    1.414` no matter how deep either arm runs. At most DART sites the SE is
+///    therefore floored by the pseudo-count rather than by the data: it still
+///    says "this OR is a lower bound, uncertain by roughly `e^2.8` ≈ 16-fold",
+///    but it does NOT rank those sites against each other. Rank by `pv`, which
+///    conditions on the margins exactly.
+/// 2. For the same reason the corrected estimate can disagree in SIGN with
+///    [`log_odds_ratio`] when the control arm is nearly empty. That is expected,
+///    not a defect: the guard uses the raw value, and this pair is descriptive.
+pub fn log_odds_ratio_woolf(a_w: u64, u_w: u64, a_m: u64, u_m: u64) -> (f64, f64) {
+    let a_w = a_w as f64 + HALDANE;
+    let u_w = u_w as f64 + HALDANE;
+    let a_m = a_m as f64 + HALDANE;
+    let u_m = u_m as f64 + HALDANE;
+    let log_or = (a_w * u_m).ln() - (u_w * a_m).ln();
+    let se = (1.0 / a_w + 1.0 / u_w + 1.0 / a_m + 1.0 / u_m).sqrt();
+    (log_or, se)
+}
+
 /// Mean of a slice (`NaN` if empty).
 pub fn mean(x: &[f32]) -> f32 {
     if x.is_empty() {

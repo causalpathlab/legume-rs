@@ -110,7 +110,7 @@ enum Commands {
             A site is a PUTATIVE candidate on the sequencing pattern alone:\n\
             the RAC (forward) / GTY (reverse) motif plus observed WT C->U (G->A)\n\
             at/above the coverage floors. The WT-vs-MUT test then decides it:\n\
-            control coverage, effect size (--m6a-min-delta),\n\
+            control coverage, the odds ratio (--m6a-min-log-odds),\n\
             and a marginal p-value cutoff (--pvalue) on the one-sided Fisher exact\n\
             test of the site's 2x2. The unit is always the site.\n\
             A genomic C/T variant converts equally in both arms, so a control is\n\
@@ -119,7 +119,7 @@ enum Commands {
             Outputs (one per input BAM, {batch}-prefixed):\n\
             - m6a_sites.parquet: selected site annotations (single)\n\
             - m6a_sites_unselected.parquet: every putative site that missed the\n\
-              cut, with a `reason` column (low_control / delta / pvalue)\n\
+              cut, with a `reason` column (low_control / odds_ratio / pvalue)\n\
             - {batch}_m6a: gene-level two-channel matrix\n\
               (methylated + unmethylated counts per gene)\n\
             - {batch}_m6a_site: per-site two-channel matrix,\n\

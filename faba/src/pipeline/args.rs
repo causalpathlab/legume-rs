@@ -285,21 +285,20 @@ pub struct PipelineArgs {
     /////////////////////
     // DART parameters //
     /////////////////////
-    // Both floors are `faba dartseq`'s own defaults. The pipeline used to run at
-    // half of each (5 / 2), so `faba all` called m6A sites that a hand-run
-    // `faba dartseq` rejected — the one thing this module exists to prevent.
-    // Chained m6A discovery is therefore STRICTER than in previous releases;
-    // expect fewer sites, and pass the flags explicitly to get the old floors.
+    // Shared with `faba dartseq` by const, not by convention — see
+    // `DEFAULT_M6A_MIN_COVERAGE` for why these two must not be allowed to drift,
+    // and the long_help on `faba dartseq --min-coverage` for the measured cost of
+    // the current values.
     #[arg(
         long,
-        default_value_t = 5,
+        default_value_t = crate::editing::pipeline::DEFAULT_M6A_MIN_COVERAGE,
         help = "Minimum coverage for m6A detection (matches `faba dartseq`)"
     )]
     pub m6a_min_coverage: usize,
 
     #[arg(
         long,
-        default_value_t = 2,
+        default_value_t = crate::editing::pipeline::DEFAULT_M6A_MIN_CONVERSION,
         help = "Minimum C-to-T conversions for m6A (matches `faba dartseq`)"
     )]
     pub m6a_min_conversion: usize,

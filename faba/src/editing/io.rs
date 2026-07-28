@@ -1,9 +1,12 @@
 use crate::data::gene_model::SplicedGenes;
 use crate::editing::ConversionSite;
 use anyhow::Result;
-use arrow::array::{ArrayRef, Float32Array, Int64Array, Int64Builder, StringArray, UInt64Array};
+use arrow::array::{
+    ArrayRef, Float32Array, Float32Builder, Int64Array, Int64Builder, StringArray, UInt64Array,
+};
 use arrow::record_batch::RecordBatch;
 use dashmap::DashMap;
+use faba::hypothesis_tests::log_odds_ratio_woolf;
 use genomic_data::gff::{GeneId, GffRecordMap};
 use genomic_data::sam::Strand;
 use parquet::arrow::ArrowWriter;
@@ -41,7 +44,21 @@ pub trait ToParquet {
 /// - rel_pos: strand-aware position along the gene's merged EXONS (0-based),
 ///   i.e. a transcript coordinate. Null for an intronic site, which has none.
 /// - pv: per-site contrast p-value — the statistic the call is made on
-/// - reason: test outcome — `selected` / `low_control` / `delta` / `pvalue`
+/// - log_odds: Haldane-corrected log odds ratio (WT vs MUT), null for A-to-I.
+///   A shrunken ESTIMATE, not the guard's value: the guard uses the raw
+///   cross-product, which is `+inf` when the control never converts, and its
+///   verdict is in `reason`. Read `log_odds_se` before reading this.
+/// - log_odds_se: Woolf standard error on the same corrected cells, null for
+///   A-to-I. Dominated by the SMALLEST cell rather than by either library's
+///   depth, so it is large exactly where the site is thin — this is the
+///   machine-readable form of "do not read an effect size off a low-abundance
+///   site", which a rate difference could never express. Caveat: with zero
+///   control conversions (57% of sites on chr19+MYC) it is floored near 1.41 by the
+///   pseudo-count regardless of depth, so it flags those sites without ranking
+///   them; rank by `pv`. `log_odds − 1.96·log_odds_se` is a Wald lower bound if
+///   one is wanted — deliberately neither a column nor a filter, because it
+///   approximates the exact one-sided test `pv` already reports.
+/// - reason: test outcome — `selected` / `low_control` / `odds_ratio` / `pvalue`
 /// - wt_a, wt_t, wt_g, wt_c: base counts at the site
 impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
     fn to_parquet<P: AsRef<Path>>(
@@ -60,6 +77,9 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let mut conversion_pos_builder = Int64Builder::new();
         let mut rel_pos_builder = Int64Builder::new();
         let mut pv_vec: Vec<f32> = Vec::new();
+        // Nullable: A-to-I is single-sample, so it has no 2×2 and no odds ratio.
+        let mut log_odds_builder = Float32Builder::new();
+        let mut log_odds_se_builder = Float32Builder::new();
         let mut reason_vec: Vec<String> = Vec::new();
         let mut wt_a_vec: Vec<u64> = Vec::new();
         let mut wt_t_vec: Vec<u64> = Vec::new();
@@ -135,6 +155,24 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
 
                 rel_pos_builder.append_option(rel_pos);
                 pv_vec.push(site.pv());
+
+                // The reported effect size. Haldane-corrected, unlike the guard,
+                // only because a Float32 column cannot hold the `+inf` the raw
+                // cross-product correctly returns at a clean control. Derived
+                // from the stored counts rather than cached on the site, through
+                // the SAME `contrast_counts` the guard used, so the two cannot
+                // drift on which base is "converted" for a given strand.
+                //
+                // `contrast_counts` is `None` for A-to-I, which carries both the
+                // null and the reason for it: a zero would read as "OR = 1", a
+                // measured absence of effect, not an absent measurement.
+                let (log_odds, se) = site
+                    .contrast_counts(strand_obj)
+                    .map(|(a_w, u_w, a_m, u_m)| log_odds_ratio_woolf(a_w, u_w, a_m, u_m))
+                    .unzip();
+                log_odds_builder.append_option(log_odds.map(|v| v as f32));
+                log_odds_se_builder.append_option(se.map(|v| v as f32));
+
                 reason_vec.push(site.reason().label().to_string());
 
                 wt_a_vec.push(site.wt_freq().count_a() as u64);
@@ -160,6 +198,8 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let conversion_pos_array = Arc::new(conversion_pos_builder.finish()) as ArrayRef;
         let rel_pos_array = Arc::new(rel_pos_builder.finish()) as ArrayRef;
         let pv_array = Arc::new(Float32Array::from(pv_vec)) as ArrayRef;
+        let log_odds_array = Arc::new(log_odds_builder.finish()) as ArrayRef;
+        let log_odds_se_array = Arc::new(log_odds_se_builder.finish()) as ArrayRef;
         let reason_array = Arc::new(StringArray::from(reason_vec)) as ArrayRef;
 
         let wt_a_array = Arc::new(UInt64Array::from(wt_a_vec)) as ArrayRef;
@@ -187,6 +227,8 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
             ),
             arrow::datatypes::Field::new("rel_pos", arrow::datatypes::DataType::Int64, true),
             arrow::datatypes::Field::new("pv", arrow::datatypes::DataType::Float32, false),
+            arrow::datatypes::Field::new("log_odds", arrow::datatypes::DataType::Float32, true),
+            arrow::datatypes::Field::new("log_odds_se", arrow::datatypes::DataType::Float32, true),
             arrow::datatypes::Field::new("reason", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("wt_a", arrow::datatypes::DataType::UInt64, false),
             arrow::datatypes::Field::new("wt_t", arrow::datatypes::DataType::UInt64, false),
@@ -211,6 +253,8 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
                 conversion_pos_array,
                 rel_pos_array,
                 pv_array,
+                log_odds_array,
+                log_odds_se_array,
                 reason_array,
                 wt_a_array,
                 wt_t_array,

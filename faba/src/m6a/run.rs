@@ -80,10 +80,26 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         long,
-        default_value_t = 5,
+        default_value_t = crate::editing::pipeline::DEFAULT_M6A_MIN_COVERAGE,
         help = "Minimum number of total reads per site",
         long_help = "Minimum number of total reads required per site for inclusion.\n\
-                     Filters out low-coverage sites.\n\
+                     \n\
+                     A candidacy floor, not a call: it decides which sites are\n\
+                     worth testing at all, and the p-value decides which are real.\n\
+                     Set low on purpose, because discovery is meant to be\n\
+                     promiscuous — a thin site costs almost nothing in the backend\n\
+                     and is easy to drop downstream, while a site never discovered\n\
+                     cannot be recovered without a rerun.\n\
+                     \n\
+                     KNOWN COST, measured on chr19+MYC. Lowering this to 3 and\n\
+                     --min-conversion to 1 took the candidate pool from 1,606 to\n\
+                     3,503 and the tested count from 1,579 to 3,439, but changed the\n\
+                     call set by TWO sites (978 -> 980). Because the cutoff is\n\
+                     marginal with no multiplicity correction, every extra test adds\n\
+                     0.05 expected false calls: 79 -> 172, i.e. 8.1% -> 17.5% of the\n\
+                     calls. Pass --min-coverage 5 --min-conversion 2 to buy that\n\
+                     back if a cleaner call set matters more than coverage of the\n\
+                     thin tail.\n\
                      \n\
                      Null-cell QC removes cells that never edit before discovery runs.\n\
                      That roughly halves the coverage a site is judged on.\n\
@@ -93,8 +109,22 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         long = "min-conversion",
-        default_value_t = 2,
-        help = "Minimum converted (C->T) reads per site"
+        default_value_t = crate::editing::pipeline::DEFAULT_M6A_MIN_CONVERSION,
+        help = "Minimum converted (C->T) reads per site",
+        long_help = "Minimum converted (C->T) reads required per site.\n\
+                     \n\
+                     Also a candidacy floor. At the default of 1 a single converted\n\
+                     read makes a site testable, which is the promiscuous end of the\n\
+                     range: it raises the candidate count, and with it the run time,\n\
+                     the size of m6a_sites_unselected.parquet, and the expected\n\
+                     false-call count — see --min-coverage for the measurement, which\n\
+                     found the pair of loosened floors bought two extra calls for\n\
+                     twice the false-call burden.\n\
+                     \n\
+                     Note this truncates the null: a site only exists once it clears\n\
+                     this floor, so the p-values are not uniform under H0. That is\n\
+                     one of the reasons faba reports a marginal cutoff rather than\n\
+                     claiming FDR control."
     )]
     pub min_conversion: usize,
 
@@ -132,12 +162,12 @@ pub struct DartSeqCountArgs {
         default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
         help = "Marginal p-value cutoff for site detection; 1.0 disables it",
         long_help = "Marginal p-value cutoff for m6A site detection.\n\
-                     Applied per site, to whatever clears the coverage and delta guards.\n\
+                     Applied per site, to whatever clears the coverage and odds-ratio guards.\n\
                      There is no multiplicity correction.\n\
                      BH needs independence or positive regression dependence.\n\
                      Neighbouring sites share reads, so it has neither.\n\
                      Expect about `cutoff x tested` false calls; the run log prints both.\n\
-                     `--pvalue 1.0` leaves the coverage and delta gates as the filter.\n\
+                     `--pvalue 1.0` leaves the coverage and odds-ratio gates as the filter.\n\
                      Governs the m6A calls only.\n\
                      The A-to-I mask pass (--detect-atoi) has its own `--atoi-pvalue`."
     )]
