@@ -1,5 +1,5 @@
 use super::*;
-use genomic_data::gff::GeneType;
+use genomic_data::gff::{GeneType, TranscriptId};
 use rustc_hash::FxHashSet;
 
 ////////////////////////
@@ -381,6 +381,7 @@ fn gff_rec(
         gene_id: GeneId::Ensembl(gene.into()),
         gene_name: GeneSymbol::Symbol(gene.into()),
         gene_type: GeneType::CodingGene,
+        transcript_id: TranscriptId::Missing,
     }
 }
 

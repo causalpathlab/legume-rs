@@ -3,7 +3,9 @@ use crate::data::dna::{Dna, DnaBaseCount};
 use crate::editing::sifter::M6aContrast;
 use crate::editing::{CallReason, ConversionSite};
 use dashmap::DashMap;
-use genomic_data::gff::{FeatureType, GeneId, GeneSymbol, GeneType, GffRecord, GffRecordMap};
+use genomic_data::gff::{
+    FeatureType, GeneId, GeneSymbol, GeneType, GffRecord, GffRecordMap, TranscriptId,
+};
 use genomic_data::sam::Strand;
 
 fn base_count(entries: &[(Dna, usize)]) -> DnaBaseCount {
@@ -71,6 +73,7 @@ fn gff(genes: &[(&str, Strand)]) -> GffRecordMap {
                 gene_id: gid,
                 gene_name: GeneSymbol::Symbol((*name).into()),
                 gene_type: GeneType::CodingGene,
+                transcript_id: TranscriptId::Missing,
             },
         );
     }
