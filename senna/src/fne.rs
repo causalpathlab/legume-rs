@@ -82,7 +82,7 @@ pub struct FneArgs {
     #[arg(short = 'i', long, default_value_t = 200, help = "Training epochs")]
     epochs: usize,
 
-    #[arg(long, default_value_t = 100, help = "Batches per epoch")]
+    #[arg(long, default_value_t = 100, help = "Batches per epoch", hide = true)]
     batches_per_epoch: usize,
 
     #[arg(long, default_value_t = 1024, help = "Positive edges per minibatch")]

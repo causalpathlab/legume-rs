@@ -90,10 +90,18 @@ pub struct PredictArgs {
     #[arg(long, default_value_t = 500, help = "Evaluation minibatch size")]
     pub(crate) minibatch_size: usize,
 
-    #[arg(long, help = "Cells per delta-estimation block (auto by default)")]
+    #[arg(
+        long,
+        help = "Cells per delta-estimation block (auto by default)",
+        hide = true
+    )]
     pub(crate) block_size: Option<usize>,
 
-    #[arg(long, help = "Load all columns into memory before evaluation")]
+    #[arg(
+        long,
+        help = "Load all columns into memory before evaluation",
+        hide = true
+    )]
     pub(crate) preload_data: bool,
 
     #[arg(

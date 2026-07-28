@@ -97,7 +97,12 @@ pub struct LayoutCommonArgs {
     )]
     pub batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(long, default_value_t = false, help = "Preload all columns data")]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Preload all columns data",
+        hide = true
+    )]
     pub preload_data: bool,
 
     #[arg(
@@ -134,7 +139,8 @@ pub struct LayoutCommonArgs {
 
     #[arg(
         long,
-        help = "Cells per rayon job (omit for auto-scaling by feature count)"
+        help = "Cells per rayon job (omit for auto-scaling by feature count)",
+        hide = true
     )]
     pub block_size: Option<usize>,
 

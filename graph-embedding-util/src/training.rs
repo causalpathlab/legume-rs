@@ -16,7 +16,6 @@
 
 use crate::coarsen::AxisCoarsenings;
 use crate::data::UnifiedData;
-use crate::feature_network::FeatureNetworkSmoother;
 use crate::fit::lineage::PbLineageLevel;
 use crate::loss::{
     nce_loss, nce_loss_chain, nce_loss_identity, sample_chain_batch, sample_edge_batch,
@@ -244,7 +243,6 @@ pub fn train_composite(
     ctx: &CompositeTrainContext,
     opt: &mut AdamW,
     params: &TrainingParams,
-    smoother: Option<&mut FeatureNetworkSmoother>,
 ) -> anyhow::Result<f32> {
     assert!(!ctx.axes.is_empty(), "composite training needs >= 1 axis");
 
@@ -253,13 +251,12 @@ pub fn train_composite(
     let prog_bar = new_progress_bar(params.epochs as u64);
 
     let mut rng = StdRng::seed_from_u64(params.seed);
-    let refresh_every = smoother.as_ref().map_or(0, |s| s.refresh_epochs);
-    let mut smoother = smoother;
     let mut last_avg = 0f32; // final-epoch mean loss, returned as the fit-hygiene signal
 
-    // Smoother refreshes against the *shared* E_feat — pull it from the
+    // `--feature-embedding-l2` penalizes the *shared* E_feat — pull it from the
     // first axis (every axis points at the same tensor).
     let shared_e_feat = ctx.axes[0].model.e_feat.clone();
+
     // Shared per-gene splice offset δ_g (factored splice models), for the L2 (ridge)
     // penalty below. `None` for free / plain-β-sharing models.
     let shared_delta = ctx.axes[0]
@@ -302,12 +299,6 @@ pub fn train_composite(
     );
 
     for epoch in 0..params.epochs {
-        if let Some(sm) = smoother.as_deref_mut() {
-            if refresh_every > 0 && epoch % refresh_every == 0 {
-                sm.refresh(&shared_e_feat, ctx.dev)?;
-            }
-        }
-
         // Loss kept **on-device** and synced to a scalar once per epoch (not
         // per minibatch) — `detach()` keeps the running sum off the autograd
         // graph so each step's forward graph is still freed immediately,
@@ -317,16 +308,15 @@ pub fn train_composite(
 
         for _ in 0..batches_per_epoch {
             let loss = match params.composite_mode {
-                CompositeMode::Sum => sum_step(ctx, &mut rng, params, smoother.as_deref())?,
+                CompositeMode::Sum => sum_step(ctx, &mut rng, params)?,
                 CompositeMode::Sample => sample_step(
                     ctx,
                     &mut rng,
                     params,
-                    smoother.as_deref(),
                     axis_picker.as_ref().unwrap(),
                     lambda_sum,
                 )?,
-                CompositeMode::Chain => chain_step(ctx, &mut rng, params, smoother.as_deref())?,
+                CompositeMode::Chain => chain_step(ctx, &mut rng, params)?,
             };
             let Some(mut loss) = loss else { continue };
             if params.feature_embedding_l2 > 0.0 {
@@ -435,11 +425,10 @@ fn sum_step(
     ctx: &CompositeTrainContext,
     rng: &mut StdRng,
     params: &TrainingParams,
-    smoother: Option<&FeatureNetworkSmoother>,
 ) -> anyhow::Result<Option<Tensor>> {
     let mut total_loss: Option<Tensor> = None;
     for axis in ctx.axes {
-        let Some(loss) = single_axis_step(axis, rng, params, smoother, ctx.dev)? else {
+        let Some(loss) = single_axis_step(axis, rng, params, ctx.dev)? else {
             continue;
         };
         let scaled = (loss * f64::from(axis.lambda))?;
@@ -458,13 +447,12 @@ fn sample_step(
     ctx: &CompositeTrainContext,
     rng: &mut StdRng,
     params: &TrainingParams,
-    smoother: Option<&FeatureNetworkSmoother>,
     axis_picker: &WeightedIndex<f32>,
     lambda_sum: f32,
 ) -> anyhow::Result<Option<Tensor>> {
     let axis_idx = axis_picker.sample(rng);
     let axis = &ctx.axes[axis_idx];
-    let Some(loss) = single_axis_step(axis, rng, params, smoother, ctx.dev)? else {
+    let Some(loss) = single_axis_step(axis, rng, params, ctx.dev)? else {
         return Ok(None);
     };
     Ok(Some((loss * f64::from(lambda_sum))?))
@@ -479,7 +467,6 @@ fn chain_step(
     ctx: &CompositeTrainContext,
     rng: &mut StdRng,
     params: &TrainingParams,
-    smoother: Option<&FeatureNetworkSmoother>,
 ) -> anyhow::Result<Option<Tensor>> {
     let cell_to_pb = ctx.cell_to_pb_per_level.ok_or_else(|| {
         anyhow::anyhow!(
@@ -584,7 +571,6 @@ fn chain_step(
         &cell_axis.model.b_feat,
         feats,
         &chain_axes,
-        smoother,
         params.objective,
         ctx.dev,
     )?;
@@ -639,7 +625,6 @@ fn single_axis_step(
     axis: &CompositeAxis,
     rng: &mut StdRng,
     params: &TrainingParams,
-    smoother: Option<&FeatureNetworkSmoother>,
     dev: &Device,
 ) -> anyhow::Result<Option<Tensor>> {
     if axis.sampler.is_empty() {
@@ -701,16 +686,9 @@ fn single_axis_step(
     };
 
     let bip_loss = if axis.cell_axis.is_identity {
-        nce_loss_identity(axis.model, batch, smoother, params.objective, dev)?
+        nce_loss_identity(axis.model, batch, params.objective, dev)?
     } else {
-        nce_loss(
-            axis.model,
-            batch,
-            &cc.coarse_to_fine,
-            smoother,
-            params.objective,
-            dev,
-        )?
+        nce_loss(axis.model, batch, &cc.coarse_to_fine, params.objective, dev)?
     };
     Ok(Some(bip_loss))
 }

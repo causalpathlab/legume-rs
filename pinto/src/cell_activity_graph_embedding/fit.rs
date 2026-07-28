@@ -381,7 +381,6 @@ pub fn fit_cell_activity_graph_embedding(
                 cb_batches,
                 &gene_ids_u32,
                 Some(&dim_gates),
-                None, // smoother — wired later for --gene-network
                 &dev,
             )?; // [G, L]
                 // NB-Fisher per-gene precision: scale each gene's row of the

@@ -92,10 +92,18 @@ pub struct ImputeArgs {
     #[arg(long, default_value_t = 500, help = "Predict / read minibatch size")]
     pub minibatch_size: usize,
 
-    #[arg(long, help = "Cells per delta-estimation block (auto by default)")]
+    #[arg(
+        long,
+        help = "Cells per delta-estimation block (auto by default)",
+        hide = true
+    )]
     pub block_size: Option<usize>,
 
-    #[arg(long, help = "Load all columns into memory before evaluation")]
+    #[arg(
+        long,
+        help = "Load all columns into memory before evaluation",
+        hide = true
+    )]
     pub preload_data: bool,
 
     #[arg(short, long, help = "Verbose logging")]

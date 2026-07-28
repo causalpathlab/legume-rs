@@ -29,7 +29,6 @@ pub mod cell_projection;
 pub mod coarsen;
 pub mod data;
 pub mod eval;
-pub mod feature_network;
 pub mod feature_qc;
 pub mod fit;
 pub mod loss;
@@ -50,10 +49,9 @@ pub use eval::{
 };
 pub use feature_qc::{hvg_feature_qc, FeatureQcConfig, FeatureQcResult};
 pub use fit::{
-    fit, load_feature_network, CalibrationDiag, CalibrationKind, CellLineage, FeatFactorSpec,
-    FeatureNetworkArgs, FeatureProjection, FeatureProjectionConfig, FitConfig, FitOutput,
-    LineageQc, PbLevelVelocity, SoftmaxGateConfig, DEFAULT_PROJECTION_CALIB_RIDGE,
-    DEFAULT_PROJECTION_RIDGE,
+    fit, CalibrationDiag, CalibrationKind, CellLineage, FeatFactorSpec, FeatureProjection,
+    FeatureProjectionConfig, FitConfig, FitOutput, LineageQc, PbLevelVelocity, SoftmaxGateConfig,
+    DEFAULT_PROJECTION_CALIB_RIDGE, DEFAULT_PROJECTION_RIDGE,
 };
 pub use model::JointEmbedModel;
 pub use postprocess::{cell_clusters, feature_coembedding};

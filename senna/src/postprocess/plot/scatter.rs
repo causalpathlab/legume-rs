@@ -128,7 +128,8 @@ pub struct PlotArgs {
         default_value_t = false,
         help = "Preload data when auto-running `senna layout`",
         long_help = "Preload data when auto-running `senna layout` for a manifest missing layout.cell_coords\n\
-                     (no-op if cell_coords already exists)."
+                     (no-op if cell_coords already exists).",
+        hide = true
     )]
     pub preload_data: bool,
 

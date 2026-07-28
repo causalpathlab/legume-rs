@@ -114,7 +114,8 @@ pub struct RestArgs {
         help = "Minibatches per epoch",
         long_help = "Minibatches drawn per epoch. Each is --batch-size positive (cell,gene) \
                      edges, so one epoch visits ≈ batches_per_epoch × batch_size edges sampled \
-                     with replacement ∝ count."
+                     with replacement ∝ count.",
+        hide = true
     )]
     batches_per_epoch: usize,
 
@@ -196,7 +197,8 @@ pub struct RestArgs {
         long_help = "Block size for the single streaming pass that extracts positive edges \
                      from the counts: cells are read (read_columns_csc) in chunks of this \
                      many, so larger blocks raise peak RAM per read. With --preload-data the \
-                     whole matrix is already resident, so this only bounds the per-block CSC."
+                     whole matrix is already resident, so this only bounds the per-block CSC.",
+        hide = true
     )]
     block_size: Option<usize>,
 
@@ -206,7 +208,8 @@ pub struct RestArgs {
         help = "Preload all sparse columns into memory first",
         long_help = "Load every backend column into memory before the edge-extraction pass. \
                      Strongly recommended on rotational/slow disks, where the streaming reads \
-                     are otherwise I/O-bound."
+                     are otherwise I/O-bound.",
+        hide = true
     )]
     preload_data: bool,
 

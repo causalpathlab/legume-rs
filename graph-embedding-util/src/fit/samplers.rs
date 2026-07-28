@@ -1,9 +1,7 @@
-use super::config::FeatureNetworkConfig;
 use crate::data::UnifiedData;
-use crate::feature_network::FeatureNetworkSmoother;
 use crate::loss::{CellFeatureSampler, PerBatchStratifiedCellSampler};
 use crate::progress::new_progress_bar;
-use log::{info, warn};
+use log::warn;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -227,38 +225,4 @@ pub(crate) fn build_active_samplers(
         anyhow::bail!("no non-empty batches available for sampling");
     }
     Ok(active)
-}
-
-pub(crate) fn build_smoother(
-    feature_network: Option<FeatureNetworkConfig>,
-    n_features: usize,
-    embedding_dim: usize,
-) -> anyhow::Result<Option<FeatureNetworkSmoother>> {
-    let Some(FeatureNetworkConfig {
-        graph,
-        k_hops,
-        alpha,
-        refresh_epochs,
-    }) = feature_network
-    else {
-        return Ok(None);
-    };
-    if graph.num_edges() == 0 {
-        anyhow::bail!("feature network has 0 matched edges — check name resolution at the caller");
-    }
-    info!(
-        "SGC smoothing: K={}, α={}, refresh={} epochs over {} edges",
-        k_hops,
-        alpha,
-        refresh_epochs,
-        graph.num_edges()
-    );
-    Ok(Some(FeatureNetworkSmoother::new(
-        &graph,
-        n_features,
-        embedding_dim,
-        alpha,
-        k_hops,
-        refresh_epochs,
-    )?))
 }

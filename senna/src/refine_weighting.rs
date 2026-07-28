@@ -72,6 +72,7 @@ pub(crate) struct PbRefineArgs {
         value_enum,
         default_value_t = WeightingArg::NbFisherInfo,
         help = WEIGHTING_HELP,
+        hide = true
     )]
     pub(crate) weighting: WeightingArg,
 
@@ -79,7 +80,8 @@ pub(crate) struct PbRefineArgs {
         id = "pb_refine_seed",
         long = "pb-refine-seed",
         default_value_t = 42,
-        help = "Seed for PB refinement Gibbs sampler"
+        help = "Seed for PB refinement Gibbs sampler",
+        hide = true
     )]
     pub(crate) seed: u64,
 }
