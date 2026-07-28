@@ -266,21 +266,34 @@ Example:\n  \
         alias = "mg",
         about = "Metagene histogram of site positions across gene features",
         long_about = "Metagene histogram of site positions across gene features\n\n\
-            Bins sites from a parquet file along the 5'UTR, CDS and 3'UTR of protein-coding genes.\n\
+            Follows the MetaPlotR convention, so a profile can be held against a published one.\n\
+            Each site is placed on ONE elected transcript per gene, the longest spliced.\n\
+            That transcript's 5'UTR, CDS and 3'UTR are disjoint, so nothing needs a priority order.\n\
+            Position runs along the SPLICED region; introns consume no coordinate.\n\
             Non-coding genes are left out unless --include-non-coding asks for them.\n\n\
-            Sites map to a feature's MERGED annotated intervals.\n\
-            Position runs along the SPLICED feature.\n\
-            Introns consume no metagene coordinate.\n\
-            A min-start..max-stop span instead spikes the last CDS bin.\n\n\
+            Bins split between the regions by each region's MEDIAN spliced length,\n\
+            taken over the assigned sites, so widths depend on the sites as well as the annotation.\n\
+            Compare the shape of two profiles rather than their bar widths.\n\n\
             Bin heights are RAW counts, never a rate.\n\
             A bin is also taller where more of its positions were deep enough to test,\n\
             which on a 3'-biased library means the last bins of the 3'UTR.\n\
-            A terminal peak is therefore not evidence of enrichment on its own.\n\
-            See docs/profiling-methods.md section 1.1.",
+            A terminal peak is therefore not evidence of enrichment on its own.\n\n\
+            Neither --isoforms nor --dist-measures exists in MetaPlotR itself.\n\
+            Its pipeline emits every overlapping transcript and leaves the choice to a script,\n\
+            so `--isoforms all` is that raw output and `longest` is what the script intends.\n\
+            --dist-measures is our name for the per-site table that script reads.\n\n\
+            See docs/profiling-methods.md sections 1.2 and 7.\n\n\
+            Reference:\n\
+            Olarerin-George and Jaffrey, \"MetaPlotR: a Perl/R pipeline\n\
+            for plotting metagenes of nucleotide modifications and other\n\
+            transcriptomic sites\", Bioinformatics, 33(10):1563-1564, 2017.\n\
+            https://doi.org/10.1093/bioinformatics/btx002",
         after_long_help = "\
 	Example:\n\
 	faba metagene -s out/m6a_sites.parquet -g genes.gff -o metagene.tsv --print\n\
-  faba metagene -s out/atoi_sites.parquet -g genes.gff -o metagene.tsv -n 30"
+	# write the table MetaPlotR's visualize_metagenes.R reads:\n\
+	faba metagene -s out/m6a_sites.parquet -g genes.gff -o metagene.tsv \\\n\
+	--dist-measures m6a.dist.measures.txt"
     )]
     Metagene(MetageneArgs),
 
