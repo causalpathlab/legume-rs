@@ -27,9 +27,7 @@ use crate::data::UnifiedData;
 use crate::loss::{
     build_stratified_sampler, FeatPairing, PerBatchStratifiedCellSampler, StratifiedSampler,
 };
-use crate::model::{
-    FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs, SoftmaxGateSpec,
-};
+use crate::model::{FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
 use crate::training::{
     train_composite, AxisSampler, CompositeAxis, CompositeMode, CompositeTrainContext, PbSemTerm,
 };
@@ -293,19 +291,12 @@ pub fn fit(unified: &mut UnifiedData, mut config: FitConfig) -> anyhow::Result<F
         )?,
     };
 
-    // Enable the per-gene softmax gate (SuSiE single-effect prior + graceful feature
-    // selection) on the primary model BEFORE the sharing heads are built, so every
-    // head references the one shared gate Var (`s_feat`/`s_beta`).
+    // Enable the softmax feature gate on the primary model BEFORE the sharing heads
+    // are built, so every head references the one shared gate Var (`s_feat`/`s_beta`).
     if let Some(g) = config.softmax_gate {
-        cell_model.enable_softmax_gate(
-            SoftmaxGateSpec {
-                temperature: g.temperature,
-            },
-            &varmap,
-            &config.device,
-        )?;
+        cell_model.enable_softmax_gate(g, &varmap, &config.device)?;
         info!(
-            "Softmax feature gate ON (variational spike-and-slab) — τ={}",
+            "Softmax feature gate ON (per-dim distribution over genes) — τ={}",
             g.temperature
         );
     }
@@ -882,7 +873,7 @@ fn trained_gene_beta(
             // `s_beta` is `Some` iff the gate is on (both set together by
             // `enable_softmax_gate`), so checking it alone is sufficient.
             let beta_t = match &factor.s_beta {
-                Some(s_beta) => model.apply_softmax_gate(&factor.beta, s_beta)?,
+                Some(s_beta) => factor.beta.mul(&model.gate_weights(s_beta)?)?,
                 None => factor.beta.clone(),
             };
             let beta = beta_t.flatten_all()?.to_vec1::<f32>()?;

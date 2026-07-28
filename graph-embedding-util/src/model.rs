@@ -23,30 +23,54 @@ use matrix_util::traits::SampleOps;
 /// `candle_nn::Init::Randn { stdev: 0.1 }`).
 const INIT_STDEV: f32 = 0.1;
 
-/// Per-gene softmax gate over the embedding dimensions — a SuSiE **single-effect**
-/// (L=1) on the feature side. Each gene's feature loading is `Ẽ_g = γ_g ⊙ β_g`:
-/// a categorical SELECTION `γ_g` (which latent dim) times a Gaussian EFFECT `β_g`
-/// (the loading magnitude). Variationally,
+/// Softmax feature gate — a **per-dimension distribution over genes**.
 ///
-///   `Ẽ_{g,h} = softmax(S_g/τ)[h] · (E_{g,h} + σ_{g,h}·ε)`,   ε ~ N(0,1),
+/// Each gene's feature loading is `Ẽ_g = γ_g ⊙ β_g`: a SELECTION weight `γ_g`
+/// times a Gaussian EFFECT `β_g` (the loading magnitude). Variationally,
 ///
-/// where `S_g` is the per-gene selection logit table (`s_feat` free / `s_beta`
-/// factored, width `H + 1`), `E_g` is the effect posterior MEAN, and `σ_g`
-/// (= `exp` of the log-std table) its posterior std. Training samples via the
-/// reparameterization; output/materialize use the mean (`σ = 0`).
+///   `Ẽ_{g,h} = D · softmax_g(S_{·,h}/τ)[g] · (E_{g,h} + σ_{g,h}·ε)`,  ε ~ N(0,1),
 ///
-/// A `(H+1)`-th "load-nothing" null column lets a gene deselect itself (graceful
-/// selection); it is always present.
+/// where `S` is the selection logit table (`s_feat` free / `s_beta` factored,
+/// `[D × H]`), `E_g` is the effect posterior MEAN, and `σ_g` (= `exp` of the
+/// log-std table) its posterior std. Training samples via the reparameterization;
+/// output/materialize use the mean (`σ = 0`).
 ///
-/// The **KL loss** (always added, at the fixed [`GATE_KL_WEIGHT`], amortized `1/B`
-/// over the minibatch) is the proper SuSiE single-effect KL — categorical +
-/// selection-weighted Gaussian:
+/// # The softmax runs over GENES, within a dim
 ///
-///   `KL = KL(softmax(S_g) ‖ π) + Σ_h softmax(S_g)[h]·KL(N(E_{g,h},σ_{g,h}²) ‖ N(0,σ₀²))`
+/// So every **dim** carries one unit of selection mass to distribute over genes —
+/// the topic-model convention (`β_h` is a distribution over genes), and what makes
+/// "the markers of dim `h`" a well-posed question.
 ///
-/// with `π` a spike prior (mass [`GATE_NULL_PRIOR`] on null → a gene is a priori
-/// OFF) and `σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]. The gate is always this variational
-/// spike-and-slab single-effect — there is no deterministic (KL-off) mode.
+/// The alternative — normalizing over dims within a gene — was implemented,
+/// measured and removed. It gives each *gene* a budget and constrains no dim, so
+/// dims are free to accumulate mass unequally: measured column sums on a real 12k
+/// BMMC fit ran 167–536, a 3.2× spread, with the top two dims taking 25.7% of all
+/// selected mass against 12.5% uniform. Under this axis that spread is **1.000 by
+/// construction**. It also made the gate a SuSiE single-effect (one unit per gene
+/// *is* a single effect) and forced a null "load-nothing" column to exist, since a
+/// gene with no signal still had to spend its unit somewhere.
+///
+/// **There is no null column here.** With no per-gene budget, a gene belonging
+/// nowhere simply takes small mass in every column, so an absorber has nothing to
+/// absorb. Weights are rescaled by the gene count `D` so a uniform gate is exactly
+/// the identity — a raw softmax over 20k genes averages 5e-5 and would collapse
+/// the score by three orders of magnitude.
+///
+/// # KL loss
+///
+/// Always added, at the fixed [`GATE_KL_WEIGHT`], amortized `1/B` over the
+/// minibatch:
+///
+///   `loss += Σ_h H(A_{·,h})  +  Σ_h A_{g,h}·KL(N(E_{g,h},σ_{g,h}²) ‖ N(0,σ₀²))`
+///
+/// The second term is the standard selection-weighted Gaussian KL with
+/// `σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]. The first is the column's Shannon **entropy**
+/// — a concentration regularizer, and deliberately not dressed up as a KL. A KL to
+/// a *uniform* prior over genes would be minimized by a dense dim, which is
+/// backwards; the Bayesian alternative, a Dirichlet(α<1) log-prior
+/// `(α−1)·Σ_g log A_{g,h}`, is unbounded as `A → 0` and runs away. Entropy is the
+/// bounded equivalent (in `[0, ln D]`), minimized exactly when a dim concentrates
+/// on few genes.
 #[derive(Clone, Copy, Debug)]
 pub struct SoftmaxGateSpec {
     /// Softmax temperature `τ` (`1.0` = plain softmax; `< 1` sharpens).
@@ -55,8 +79,6 @@ pub struct SoftmaxGateSpec {
 
 /// Effect-prior variance `σ₀²` for the Gaussian KL `KL(N(μ,σ²) ‖ N(0,σ₀²))`.
 pub const GATE_EFFECT_PRIOR_VAR: f64 = 1.0;
-/// Categorical spike-prior mass on the null column — a gene is a priori OFF.
-pub const GATE_NULL_PRIOR: f64 = 0.9;
 /// Fixed weight `λ` on the SuSiE single-effect KL. The gate is always variational;
 /// the KL is applied amortized `λ/B` over the minibatch, so `1.0` gives the `1/B`
 /// scale. A single source of truth rather than a per-run CLI knob.
@@ -103,7 +125,7 @@ pub struct ShareFeaturesArgs<'a> {
     /// Base seed for the reproducible randn init of the cell side when
     /// `e_cell_init` is `None`.
     pub seed: u64,
-    /// Shared per-gene softmax-gate logits (free model, `[n_features, H+null]`).
+    /// Shared softmax-gate logits (free model, `[n_features, H]`).
     /// `None` when the gate is off. Every head references the SAME Var so AdamW
     /// updates it once (see [`SoftmaxGateSpec`]).
     pub shared_s_feat: Option<Tensor>,
@@ -170,14 +192,14 @@ pub struct FeatFactor {
     /// (the `mask` = 1/0 selector); L2-ridge in phase-1. `None` = plain β-sharing
     /// (spliced ≡ unspliced ≡ `β_g`).
     pub splice_delta: Option<(Tensor, Tensor)>,
-    /// Optional per-gene softmax-gate logits `[G, H+null]` (see [`SoftmaxGateSpec`]),
+    /// Optional per-gene softmax-gate logits `[G, H]` (see [`SoftmaxGateSpec`]),
     /// the IDENTITY gate on `β_g`. Gathered by `row_to_gene` alongside `β`/`δ`; `None`
     /// = ungated. Cloned with the factor so composite heads share it.
     pub s_beta: Option<Tensor>,
     /// Optional per-gene Gaussian-effect log-std `[G, H]` (the `β` gate's variational
     /// single-effect posterior std; `σ = exp`). `Some` iff the gate is on.
     pub beta_logstd: Option<Tensor>,
-    /// Optional per-gene VELOCITY-gate logits `[G, H+null]` — the independent
+    /// Optional per-gene VELOCITY-gate logits `[G, H]` — the independent
     /// single-effect softmax gate on `δ_g` (the motion), mirroring `s_beta`. `Some`
     /// only when the gate is on AND `splice_delta` exists (velocity present); a gene
     /// with no motion sends its `δ` mass to null → `δ̃_g ≈ 0` (not a driver).
@@ -218,7 +240,7 @@ pub struct JointEmbedModel {
     pub factor: Option<FeatFactor>,
     #[allow(dead_code)]
     pub embedding_dim: usize,
-    /// Free-model softmax-gate logits `[n_features, H+null]` (see [`SoftmaxGateSpec`]).
+    /// Free-model softmax-gate logits `[n_features, H]` (see [`SoftmaxGateSpec`]).
     /// `None` for an ungated model, or for a factored one (its gate lives in
     /// `factor.s_beta`).
     pub s_feat: Option<Tensor>,
@@ -448,8 +470,13 @@ impl JointEmbedModel {
             // Free + gated: bake the gate into `e_feat` from the raw Var (no smoother
             // at materialize — SGC smoothing is a training-time device; means, no sample).
             Some(
-                self.gated_rows(raw, self.e_feat_logstd.as_ref(), Some(s_feat), false)?
-                    .detach(),
+                self.gated_rows(
+                    raw,
+                    self.e_feat_logstd.as_ref(),
+                    Some(&self.gate_weights(s_feat)?),
+                    false,
+                )?
+                .detach(),
             )
         } else {
             // Free + ungated: `e_feat` already IS the trained Var — leave it (no-op,
@@ -462,15 +489,15 @@ impl JointEmbedModel {
         Ok(())
     }
 
-    /// Enable the per-gene variational softmax gate on the feature side (always the
-    /// spike-and-slab single-effect — see [`SoftmaxGateSpec`]). Allocates, as Vars in
-    /// `varmap`: the selection logits (`s_feat [n_features, H+1]` free / `s_beta [G,
-    /// H+1]` factored) and the effect log-std (`e_feat_logstd` / `beta_logstd [·, H]`);
-    /// for a factored model WITH velocity (`splice_delta`), also the INDEPENDENT δ gate
-    /// (`s_delta`, `delta_logstd`). The selection logits are **null-biased** (mass on
-    /// the null column → genes start ~OFF). Call ONCE on the primary model, BEFORE
-    /// building sharing heads (which carry the shared gate via [`ShareFeaturesArgs`] /
-    /// the cloned [`FeatFactor`]).
+    /// Enable the variational softmax gate on the feature side (see
+    /// [`SoftmaxGateSpec`]). Allocates, as Vars in `varmap`: the selection logits
+    /// (`s_feat [n_features, H]` free / `s_beta [G, H]` factored) and the effect
+    /// log-std (`e_feat_logstd` / `beta_logstd [·, H]`); for a factored model WITH
+    /// velocity (`splice_delta`), also the INDEPENDENT δ gate (`s_delta`,
+    /// `delta_logstd`). Logits start at **zero**, which the `D` rescale makes exactly
+    /// the identity — an untrained gate is inert rather than biased. Call ONCE on the
+    /// primary model, BEFORE building sharing heads (which carry the shared gate via
+    /// [`ShareFeaturesArgs`] / the cloned [`FeatFactor`]).
     pub fn enable_softmax_gate(
         &mut self,
         spec: SoftmaxGateSpec,
@@ -478,11 +505,6 @@ impl JointEmbedModel {
         dev: &Device,
     ) -> Result<()> {
         let h = self.embedding_dim;
-        let width = h + 1; // H real dims + one null "load-nothing" column (always present)
-                           // Init the null column so the starting selection α equals the spike prior π
-                           // (mass `GATE_NULL_PRIOR` on null, uniform on the H real dims): with real logits
-                           // 0, `null_logit = ln(π₀·H/(1−π₀))`. Internal, prior-derived — not a user knob.
-        let null_init = ((GATE_NULL_PRIOR * h as f64) / (1.0 - GATE_NULL_PRIOR)).ln() as f32;
         let register = |name: &str, t: Tensor| -> Result<Tensor> {
             let var = candle_util::candle_core::Var::from_tensor(&t)?;
             varmap
@@ -492,17 +514,12 @@ impl JointEmbedModel {
                 .insert(name.to_string(), var.clone());
             Ok(var.as_tensor().clone())
         };
-        // Null-biased selection logits `[rows, H+1]`.
-        let init_gate = |name: &str, rows: usize| -> Result<Tensor> {
-            let mut vals = vec![0f32; rows * width];
-            for r in 0..rows {
-                vals[r * width + h] = null_init;
-            }
-            register(
-                name,
-                Tensor::from_vec(vals, (rows, width), dev)?.contiguous()?,
-            )
-        };
+        // Selection logits `[rows, H]`, all zero — a uniform gate, which the `D`
+        // rescale makes exactly the identity, so training starts from "no selection"
+        // rather than from an arbitrary bias. (No null column: the budget is on the
+        // dims, so a gene belonging nowhere just takes small mass in every column.)
+        let init_gate =
+            |name: &str, rows: usize| register(name, Tensor::zeros((rows, h), DType::F32, dev)?);
         // Effect log-std `[rows, H]`, init `GATE_LOGSTD_INIT` (near-deterministic start).
         let init_logstd = |name: &str, rows: usize| -> Result<Tensor> {
             register(
@@ -557,23 +574,43 @@ impl JointEmbedModel {
         }
     }
 
-    /// The per-gene selection probabilities over the REAL embedding dims:
-    /// `softmax(s_rows/τ)[0..H]`. Softmax runs over the FULL width (so the null column
-    /// competes for mass), then only the first `H` columns are kept — rows need not sum
-    /// to 1, the excluded null "load-nothing" mass being `1 − rowsum`. `s_rows` is
-    /// `[N, H+1]`; returns `[N, H]`.
-    fn softmax_gate_probs(&self, s_rows: &Tensor) -> Result<Tensor> {
-        let logits = self.apply_temperature(s_rows)?;
-        let probs = candle_nn::ops::softmax(&logits, 1)?; // [N, H+1]
-        probs.narrow(1, 0, self.embedding_dim)?.contiguous() // drop the null column
+    /// The gate's multiplier table `[rows, H]` for a **whole** logit table.
+    ///
+    /// # This must be handed the FULL table, never a gathered minibatch
+    ///
+    /// The normalizer runs down the GENE axis, so a
+    /// gathered subset would silently normalize over the minibatch — and over
+    /// duplicated rows, since negative sampling repeats genes. It would compile,
+    /// run, and train garbage. Callers therefore compute this once on the full
+    /// table and `index_select` **afterwards**; [`Self::gated_rows`] takes the
+    /// already-gathered weights, not logits, so the wrong order is not expressible.
+    ///
+    /// `Gene` weights are scaled by the row count: a raw softmax over `D` genes
+    /// averages `1/D`, which would shrink every score by three orders of magnitude
+    /// at `D = 20k`. Scaling by `D` makes a uniform gate exactly the identity, so
+    /// the two axes are on the same footing and `temperature` means the same thing.
+    pub(crate) fn gate_weights(&self, full_logits: &Tensor) -> Result<Tensor> {
+        let logits = self.apply_temperature(full_logits)?;
+        let n_genes = logits.dim(0)?;
+        candle_nn::ops::softmax(&logits, 0)?.affine(n_genes as f64, 0.0)
     }
 
-    /// Apply the per-gene softmax gate to gathered base rows: `base ⊙ softmax(s/τ)`
-    /// over the real dims (a gene that selects null contributes `≈ 0`). `base` is
-    /// `[N, H]`, `s_rows` is `[N, H+1]`. Stays in the autograd graph so gradients reach
-    /// both `base` (`E_g`/`β`/`δ`) and the gate logits.
-    pub fn apply_softmax_gate(&self, base: &Tensor, s_rows: &Tensor) -> Result<Tensor> {
-        base.mul(&self.softmax_gate_probs(s_rows)?)
+    /// The ONLY way to produce a `w` argument for [`Self::gated_rows`]: normalize the
+    /// full logit table, then gather the requested rows.
+    ///
+    /// Both steps live here so the ordering cannot be got wrong at a call site. It
+    /// matters because the softmax reduces down the GENE axis: gathering first would
+    /// normalize over whatever subset was gathered — a minibatch (with rows negative
+    /// sampling duplicates), or a factored model's feature rows (which repeat each
+    /// gene once per splice track). Either compiles, runs, and trains garbage.
+    pub(crate) fn gathered_gate_weights(
+        &self,
+        logits: Option<&Tensor>,
+        rows: &Tensor,
+    ) -> Result<Option<Tensor>> {
+        logits
+            .map(|x| self.gate_weights(x)?.index_select(rows, 0))
+            .transpose()
     }
 
     /// One gated single-effect: reparam-sample the Gaussian effect (`μ + σ·ε`) when
@@ -585,21 +622,21 @@ impl JointEmbedModel {
         &self,
         mu: &Tensor,
         logstd: Option<&Tensor>,
-        s: Option<&Tensor>,
+        w: Option<&Tensor>,
         sample: bool,
     ) -> Result<Tensor> {
         let eff = match (sample, logstd) {
             (true, Some(ls)) => self.sample_effect(mu, ls)?,
             _ => mu.clone(),
         };
-        match s {
-            Some(s) => self.apply_softmax_gate(&eff, s),
+        match w {
+            Some(w) => eff.mul(w),
             None => Ok(eff),
         }
     }
 
     /// Compose the effective factored feature rows: `β̃ + mask·δ̃`, where each side is
-    /// its own gated single-effect ([`Self::gated_rows`]) — the IDENTITY gate on `β_g`
+    /// its own gated effect ([`Self::gated_rows`]) — the IDENTITY gate on `β_g`
     /// and the INDEPENDENT velocity gate on `δ_g`. `genes` gathers the per-gene tables
     /// (`row_to_gene[idx]` in training, the full `row_to_gene` at materialize);
     /// `mask_rows` is the `[N,1]` unspliced selector (already gathered), `None` when
@@ -614,7 +651,10 @@ impl JointEmbedModel {
         let gather = |t: &Option<Tensor>| -> Result<Option<Tensor>> {
             t.as_ref().map(|x| x.index_select(genes, 0)).transpose()
         };
-        let (beta_ls, beta_s) = (gather(&f.beta_logstd)?, gather(&f.s_beta)?);
+        let (beta_ls, beta_s) = (
+            gather(&f.beta_logstd)?,
+            self.gathered_gate_weights(f.s_beta.as_ref(), genes)?,
+        );
         let beta = self.gated_rows(
             &f.beta.index_select(genes, 0)?,
             beta_ls.as_ref(),
@@ -623,7 +663,10 @@ impl JointEmbedModel {
         )?;
         match (&f.splice_delta, mask_rows) {
             (Some((delta, _)), Some(m)) => {
-                let (delta_ls, delta_s) = (gather(&f.delta_logstd)?, gather(&f.s_delta)?);
+                let (delta_ls, delta_s) = (
+                    gather(&f.delta_logstd)?,
+                    self.gathered_gate_weights(f.s_delta.as_ref(), genes)?,
+                );
                 let delta = self.gated_rows(
                     &delta.index_select(genes, 0)?,
                     delta_ls.as_ref(),
@@ -644,11 +687,16 @@ impl JointEmbedModel {
         let Some(logits) = logits else {
             return Ok(None);
         };
+        // Normalize on the FULL table first, then expand per-gene → per-row. Doing
+        // it the other way round would normalize over duplicated rows on the `Gene`
+        // axis (a factored model repeats each gene once per splice track), halving
+        // every value while leaving the β-sharing equality test passing.
+        let w = self.gate_weights(logits)?;
         let rows = match &self.factor {
-            Some(f) => logits.index_select(&f.row_to_gene, 0)?, // per-gene → per-row
-            None => logits.clone(),                             // already per-row
+            Some(f) => w.index_select(&f.row_to_gene, 0)?,
+            None => w,
         };
-        Ok(Some(self.softmax_gate_probs(&rows)?.detach()))
+        Ok(Some(rows.detach()))
     }
 
     /// Per-feature-row IDENTITY selection `softmax(s_beta/s_feat)` `[n_features, H]`, for
@@ -685,37 +733,58 @@ impl JointEmbedModel {
         mu_rows.add(&sigma.mul(&eps)?)
     }
 
-    /// The SuSiE single-effect KL for ONE gate, averaged over rows:
-    /// `KL(softmax(logits/τ) ‖ π) + Σ_h α_h·KL(N(μ_h, e^{2·logstd_h}) ‖ N(0,σ₀²))`
-    /// — categorical selection KL to a spike prior (mass [`GATE_NULL_PRIOR`] on null)
-    /// plus the selection-WEIGHTED Gaussian effect KL (`σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]).
-    /// Shared by the identity (`β`/`e_feat`) and velocity (`δ`) gates. In the autograd graph.
+    /// One gate's regularization term: the per-dim concentration penalty plus the
+    /// selection-weighted Gaussian effect KL (`σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]).
+    /// Shared by the identity (`β`/`e_feat`) and velocity (`δ`) gates. In the
+    /// autograd graph.
+    ///
+    /// # Both terms are deliberately kept `O(1)` in `D` and `H`
+    ///
+    /// They are summed under one [`GATE_KL_WEIGHT`], so if their scales diverge the
+    /// larger silently sets the loss and the smaller stops existing. That is not
+    /// hypothetical — it is what happened when the gate's softmax moved from the dim
+    /// axis to the gene axis: `α` went from `≈1/(H+1)` to `≈1/D`, the forward pass
+    /// compensated via the `D` rescale in [`Self::gate_weights`] but this function
+    /// did not, and at `D = 20287, H = 16` the effect prior came out **~49,000×**
+    /// smaller than the concentration term — numerically switched off. So:
+    ///
+    /// * the entropy is normalized by its own `ln D` maximum and MEANED over dims,
+    ///   putting it in `[0, 1]` whatever the gene count or embedding width;
+    /// * the Gaussian KL is weighted by the weights the LIKELIHOOD actually applies
+    ///   (`D·α`, i.e. what [`Self::gate_weights`] returns), not raw `α`, and meaned
+    ///   over every entry.
+    ///
+    /// `gate_terms_are_commensurate` pins the ratio so a future reduction change
+    /// cannot re-open this quietly.
     fn single_gate_kl(&self, logits: &Tensor, logstd: &Tensor, mu: &Tensor) -> Result<Tensor> {
-        let h = self.embedding_dim;
         let logits = self.apply_temperature(logits)?;
-        let log_alpha = candle_nn::ops::log_softmax(&logits, 1)?; // [n, H+1]
+        // Normalize down the GENE axis — the same reduction `gate_weights` does.
+        let log_alpha = candle_nn::ops::log_softmax(&logits, 0)?;
         let alpha = log_alpha.exp()?;
+        let n_genes = alpha.dim(0)? as f64;
 
-        // Categorical KL = Σ_c α log α − Σ_c α log π_c, with the spike prior π.
-        let neg_ent = alpha.mul(&log_alpha)?.sum(1)?; // Σ α log α  [n]
-        let log_prior_real = ((1.0 - GATE_NULL_PRIOR) / h as f64).ln();
-        let real = alpha.narrow(1, 0, h)?.sum(1)?.affine(log_prior_real, 0.0)?;
-        let null = alpha
-            .narrow(1, h, 1)?
-            .sum(1)?
-            .affine(GATE_NULL_PRIOR.ln(), 0.0)?;
-        let kl_cat = (neg_ent - (real + null)?)?; // [n]
+        // Concentration: each dim's Shannon entropy `H(A_{·,h}) = −Σ_g A log A`,
+        // scaled by its `ln D` maximum and averaged over dims → `[0, 1]`, where 1 is
+        // a perfectly spread dim and 0 a dim concentrated on one gene.
+        // `sum(0)` then mean-over-dims is `sum_all / H`; written as `sum_all` because
+        // a dim-0 reduce misses candle's vectorized path (it only fast-paths
+        // reductions over the LAST dims) while `sum_all` takes it.
+        let n_dims = alpha.dim(1)? as f64;
+        let kl_cat = alpha
+            .mul(&log_alpha)?
+            .sum_all()?
+            .affine(-1.0 / (n_genes.ln() * n_dims), 0.0)?;
 
-        // Gaussian KL per dim = ½[(σ²+μ²)/σ₀² − 1 − 2·logstd + ln σ₀²], σ² = e^{2 logstd}.
+        // Gaussian KL per entry = ½[(σ²+μ²)/σ₀² − 1 − 2·logstd + ln σ₀²], σ² = e^{2 logstd}.
         let s0 = GATE_EFFECT_PRIOR_VAR;
         let logstd = logstd.clamp(-GATE_LOGSTD_CLAMP, GATE_LOGSTD_CLAMP)?; // finite σ, log σ²
         let two_logstd = logstd.affine(2.0, 0.0)?; // 2·logstd = log σ²
         let a = (two_logstd.exp()? + mu.sqr()?)?.affine(1.0 / s0, 0.0)?; // (σ²+μ²)/σ₀²
         let kl_gauss_dim = (a - &two_logstd)?.affine(0.5, 0.5 * (s0.ln() - 1.0))?; // ½[…]
-                                                                                   // Weight by the real-dim selection prob and sum over dims.
-        let kl_gauss = alpha.narrow(1, 0, h)?.mul(&kl_gauss_dim)?.sum(1)?; // [n]
+                                                                                   // Weighted by the gate the likelihood sees, then averaged over all entries.
+        let kl_gauss = alpha.affine(n_genes, 0.0)?.mul(&kl_gauss_dim)?.mean_all()?;
 
-        (kl_cat + kl_gauss)?.mean_all()
+        kl_cat + kl_gauss
     }
 
     /// The gate's total SuSiE KL loss: the identity-gate KL plus, for a factored model
