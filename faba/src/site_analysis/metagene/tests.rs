@@ -16,6 +16,7 @@ fn rec(gene: &str, feature_type: FeatureType, start: i64, stop: i64, strand: Str
         gene_id: GeneId::Ensembl(gene.into()),
         gene_name: GeneSymbol::Symbol(gene.into()),
         gene_type: GeneType::CodingGene,
+        transcript_id: TranscriptId::Missing,
     }
 }
 

@@ -457,6 +457,19 @@ pub enum GeneSymbol {
     Missing,
 }
 
+/// One transcript's identity, when the annotation names it.
+///
+/// GENCODE writes `transcript_id` on every exon, CDS, UTR and codon line, so a
+/// record can be attributed to the isoform it came from rather than only to its
+/// gene. `Missing` covers the rest: a `gene` row has no transcript, and an
+/// Ensembl-flavoured GFF3 spells the attribute `ID=transcript:ENST…`, which the
+/// key/value scan below does not match — the same limitation `gene_id` has.
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone)]
+pub enum TranscriptId {
+    Ensembl(Box<str>),
+    Missing,
+}
+
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone)]
 pub enum GeneType {
     CodingGene,
@@ -518,6 +531,22 @@ impl From<GeneSymbol> for Box<str> {
     }
 }
 
+impl From<TranscriptId> for Box<str> {
+    fn from(tx_id: TranscriptId) -> Self {
+        match tx_id {
+            TranscriptId::Ensembl(id) => id,
+            TranscriptId::Missing => Box::from("."),
+        }
+    }
+}
+
+impl std::fmt::Display for TranscriptId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let x: Box<str> = self.clone().into();
+        write!(f, "{}", x)
+    }
+}
+
 /// GFF record
 #[derive(Clone, Debug)]
 pub struct GffRecord {
@@ -529,6 +558,10 @@ pub struct GffRecord {
     pub gene_id: GeneId,
     pub gene_name: GeneSymbol,
     pub gene_type: GeneType,
+    /// The isoform this record came from, `Missing` on gene-level rows.
+    /// Every existing consumer keys on `gene_id` and ignores this; it is here
+    /// for per-transcript models (`crate::transcript`).
+    pub transcript_id: TranscriptId,
 }
 
 /// Build sorted, merged exon intervals per gene from GFF records.
@@ -591,6 +624,7 @@ pub fn parse_gff(words: Vec<Box<str>>) -> Option<GffRecord> {
     let mut gene_id = GeneId::Missing;
     let mut gene_name = GeneSymbol::Missing;
     let mut gene_type = GeneType::NonCoding;
+    let mut transcript_id = TranscriptId::Missing;
 
     fn trim(x: Option<&str>) -> Option<&str> {
         x.map(|s| {
@@ -617,6 +651,11 @@ pub fn parse_gff(words: Vec<Box<str>>) -> Option<GffRecord> {
             (Some("gene_type"), Some(gtype)) => {
                 gene_type = gtype.into();
             }
+            (Some("transcript_id"), Some(id)) => {
+                if let Some(ensembl) = parse_ensembl_id(id) {
+                    transcript_id = TranscriptId::Ensembl(ensembl.into());
+                }
+            }
             _ => {}
         }
     }
@@ -630,6 +669,7 @@ pub fn parse_gff(words: Vec<Box<str>>) -> Option<GffRecord> {
         gene_id,
         gene_name,
         gene_type,
+        transcript_id,
     })
 }
 
@@ -648,8 +688,53 @@ mod tests {
             gene_id: gene_id.clone(),
             gene_name: GeneSymbol::Missing,
             gene_type: GeneType::CodingGene,
+            transcript_id: TranscriptId::Missing,
         };
         (gene_id, rec)
+    }
+
+    /// A real GENCODE v46 CDS attribute column, verbatim. `transcript_id` used
+    /// to fall through the catch-all arm and be lost; every per-transcript
+    /// model depends on it surviving, and on the version suffix being stripped
+    /// the same way `gene_id` strips it.
+    #[test]
+    fn transcript_id_survives_parsing() {
+        let attrs = "gene_id \"ENSG00000186092.7\"; transcript_id \"ENST00000641515.2\"; \
+                     gene_type \"protein_coding\"; gene_name \"OR4F5\"; \
+                     transcript_type \"protein_coding\"; transcript_name \"OR4F5-201\"; \
+                     exon_number 2;";
+        let words: Vec<Box<str>> = [
+            "chr1", "HAVANA", "CDS", "65565", "65573", ".", "+", "0", attrs,
+        ]
+        .iter()
+        .map(|s| Box::from(*s))
+        .collect();
+
+        let rec = parse_gff(words).expect("a well-formed CDS line parses");
+        assert_eq!(
+            rec.transcript_id,
+            TranscriptId::Ensembl("ENST00000641515".into())
+        );
+        // …and the fields that were already parsed are untouched.
+        assert_eq!(rec.gene_id, GeneId::Ensembl("ENSG00000186092".into()));
+        assert_eq!(rec.gene_type, GeneType::CodingGene);
+        assert_eq!(rec.feature_type, FeatureType::CDS);
+    }
+
+    /// A `gene` row carries no transcript, and must not borrow one.
+    #[test]
+    fn a_gene_row_has_no_transcript_id() {
+        let attrs = "gene_id \"ENSG00000186092.7\"; gene_type \"protein_coding\"; \
+                     gene_name \"OR4F5\";";
+        let words: Vec<Box<str>> = [
+            "chr1", "HAVANA", "gene", "65419", "71585", ".", "+", ".", attrs,
+        ]
+        .iter()
+        .map(|s| Box::from(*s))
+        .collect();
+
+        let rec = parse_gff(words).expect("a well-formed gene line parses");
+        assert_eq!(rec.transcript_id, TranscriptId::Missing);
     }
 
     #[test]
