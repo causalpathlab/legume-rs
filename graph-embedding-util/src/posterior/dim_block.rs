@@ -79,8 +79,10 @@
 //! confidently wrong on *both*. This is not hypothetical — measured max VIF on
 //! real 12k BMMC fits at `H=16` is **29–37**, far past the conventional 5. Check
 //! [`super::frozen_diag`], which reports it per run and warns at 5. When it is
-//! high, read a gene's row as a profile rather than a winner, and prefer
-//! [`super::gate`]'s credible set for a set-valued answer.
+//! high, read a gene's row as a profile rather than a winner: the mass a dim
+//! carries may belong to its collinear partner. [`super::gate`] offers a
+//! set-valued credible set instead, but it samples a per-gene single-effect --
+//! a parameterization the trainer no longer uses -- and is not on the CLI path.
 
 use super::diagnostics::{scalar_diagnostics, ChainDiag};
 use super::hyper::{bic_penalty, gene_rng, sample_pi0, sigmoid, HalfCauchyVar};

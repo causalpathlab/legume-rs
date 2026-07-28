@@ -909,7 +909,7 @@ fn run_gem_genes_bge(
     if let Some(plan) = posterior_plan {
         extra.insert(
             "posterior".into(),
-            serde_json::json!(format!("{:?}", plan.mode).to_lowercase()),
+            serde_json::json!({ "draws": plan.n_samples, "anchors": plan.n_genes }),
         );
     }
     crate::manifest::write(&args.out, crate::manifest::RunKind::Embedding, extra)?;
