@@ -121,9 +121,11 @@ pub fn save_outputs_named(
         ctx.feature_names,
         "feature",
     )?;
-    // Per-gene softmax selection `softmax(S_g)` over the embedding dims, when the
-    // gate is on (rows align with the feature dictionary; null "load-nothing" mass =
-    // `1 − rowsum`). Interpretability artifact — skipped for an ungated model.
+    // The gate's selection weights, when the gate is on. Rows align with the feature
+    // dictionary. Read it by COLUMN, not by row: the softmax runs over genes within a
+    // dim, so each COLUMN carries one unit of mass (rescaled so a uniform gate is the
+    // identity, hence a column averages 1.0). A row does not sum to anything
+    // meaningful, and there is no null column. Skipped for an ungated model.
     if let Some(selection) = model.feature_selection()? {
         let sel_path = format!("{out_prefix}.feature_selection.parquet");
         save_embedding(&sel_path, &selection, ctx.feature_names, "feature")?;

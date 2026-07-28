@@ -899,7 +899,7 @@ pub fn nce_loss_identity(
 
 /// Gather the feature-embedding rows for `idx`, applying the per-gene softmax gate(s)
 /// when enabled. A β-sharing factored model composes `β̃ + mask·δ̃` (identity + velocity,
-/// each an independently gated single-effect — see
+/// each an independently gated effect — see
 /// [`JointEmbedModel::factored_feat_rows`]) via the row→gene gathers, so only the
 /// batch's rows (`b + b·k`) are materialized — never the full `[n_features, H]`
 /// dictionary — and gradients still reach `β`/`δ` and the gate logits. A free model
@@ -935,12 +935,8 @@ fn gather_feature_rows(
                 .as_ref()
                 .map(|l| l.index_select(idx, 0))
                 .transpose()?;
-            let s = model
-                .s_feat
-                .as_ref()
-                .map(|s| s.index_select(idx, 0))
-                .transpose()?;
-            model.gated_rows(&mu, logstd.as_ref(), s.as_ref(), true)
+            let w = model.gathered_gate_weights(model.s_feat.as_ref(), idx)?;
+            model.gated_rows(&mu, logstd.as_ref(), w.as_ref(), true)
         }
     }
 }

@@ -181,16 +181,10 @@ pub struct FeatFactorSpec {
     pub unspliced_rows: Vec<bool>,
 }
 
-/// Caller-provided spec for the per-gene softmax feature gate — a SuSiE
-/// single-effect (L=1) prior over the embedding dimensions with a null "load-nothing"
-/// absorber for graceful feature selection. Always the variational spike-and-slab
-/// (categorical + Gaussian KL, at the fixed [`crate::model::GATE_KL_WEIGHT`]); resolves
-/// to a [`crate::model::SoftmaxGateSpec`] inside [`fit`]. See the model doc for the math.
-#[derive(Clone, Copy, Debug)]
-pub struct SoftmaxGateConfig {
-    /// Softmax temperature `τ` (`1.0` = plain softmax; `< 1` sharpens the selection).
-    pub temperature: f32,
-}
+/// Caller-facing name for the gate spec. One type, not a parallel copy: an earlier
+/// duplicate meant the model's doc was updated when the gate changed and the
+/// config's was not, so a caller reading the public API got the deleted design.
+pub use crate::model::SoftmaxGateSpec as SoftmaxGateConfig;
 
 /// Optional SGC feature-network smoother configuration. The graph is
 /// already loaded and aligned to the model's feature axis — caller
