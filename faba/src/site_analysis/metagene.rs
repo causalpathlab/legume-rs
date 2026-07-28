@@ -49,6 +49,19 @@ pub struct MetageneArgs {
     )]
     num_bins: usize,
 
+    #[arg(
+        long = "include-non-coding",
+        help = "Also profile non-coding genes, as a separate ncRNA track",
+        long_help = "Also profile non-coding genes, as a separate ncRNA track.\n\
+                     \n\
+                     Only protein-coding genes are profiled by default.\n\
+                     A non-coding gene has no start or stop codon to split on.\n\
+                     Its whole body therefore becomes one undivided ncRNA track,\n\
+                     which is not on the same coordinate as the 5'UTR/CDS/3'UTR one.\n\
+                     Sites in a non-coding gene are dropped unless this is passed."
+    )]
+    include_non_coding: bool,
+
     #[arg(short, long, required = true, help = "Output TSV file path")]
     output: Box<str>,
 
@@ -178,7 +191,10 @@ struct FeatureTracks {
 /// or its stop codon — the same rule `genomic_data::gff::build_utr_maps`
 /// applies, except that one can only rule on already-collapsed spans.
 /// Explicit `five_prime_UTR` / `three_prime_UTR` records are taken as given.
-fn build_feature_tracks(records: &[GffRecord]) -> anyhow::Result<FeatureTracks> {
+fn build_feature_tracks(
+    records: &[GffRecord],
+    include_non_coding: bool,
+) -> anyhow::Result<FeatureTracks> {
     let start_codons = build_codon_map(records, &FeatureType::StartCodon)?;
     let stop_codons = build_codon_map(records, &FeatureType::StopCodon)?;
 
@@ -190,8 +206,11 @@ fn build_feature_tracks(records: &[GffRecord]) -> anyhow::Result<FeatureTracks> 
     for rec in records.iter() {
         if rec.gene_type != GeneType::CodingGene {
             // Non-coding genes have no UTR/CDS split to make, so they keep
-            // their whole-gene boundaries.
-            if rec.feature_type == FeatureType::Gene {
+            // their whole-gene boundaries. Off by default: that track measures
+            // position along an undivided gene body, which is not the
+            // coordinate the other three are on, so reading the four together
+            // as one profile compares lengths that mean different things.
+            if include_non_coding && rec.feature_type == FeatureType::Gene {
                 non_coding.push(rec);
             }
             continue;

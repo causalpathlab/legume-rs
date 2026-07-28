@@ -66,42 +66,15 @@ pub struct PosteriorArgs {
                      held at its MAP, since an unspliced row scores ⟨β_g + δ_g, e_c⟩);\n\
                      `senna bge` has only the identity gate.\n\
                      \n\
+                     Every anchor carrying at least one count is sampled; anchors with none have a\n\
+                     flat likelihood, so they are skipped rather than redrawing their prior.\n\
                      Cost scales with H likelihood passes per anchor per sweep, so a whole dictionary\n\
-                     runs for minutes — Ctrl+C returns partial results. Use --posterior-genes to cap it.\n\
+                     runs for minutes — Ctrl+C returns partial results, and a smaller N is the way\n\
+                     to shorten an exploratory run.\n\
                      Writes one per-dim PIP parquet per gate, plus {out}.posterior_hyper.json.\n\
                      `--mcmc` and `--jitter` are accepted aliases."
     )]
     pub posterior: Option<usize>,
-
-    #[arg(
-        long = "posterior-genes",
-        default_value_t = 0,
-        value_name = "N",
-        help = "Cap the posterior to the top-N genes by observed count (0 = all).",
-        long_help = "Limit the posterior to the N genes carrying the most observed count mass\n\
-                     (a gene with no counts has nothing for the likelihood to move,\n\
-                     so this puts the sampling budget where the posterior is informative).\n\
-                     0 (default) samples every gene.\n\
-                     Use it to keep an exploratory run short; the un-sampled genes are simply absent\n\
-                     from the output tables, not written as null."
-    )]
-    pub posterior_genes: usize,
-
-    #[arg(
-        long = "posterior-partition",
-        default_value_t = DEFAULT_PARTITION,
-        value_name = "N",
-        help = "Cells in the frozen partition that normalizes the Poisson rate (default 1024).",
-        long_help = "Size of the frozen negative slate: the number of cells summed in the Poisson\n\
-                     rate normalizer, drawn ONCE per run and held fixed (a slate that moved between\n\
-                     sweeps would leave the chain with no fixed target).\n\
-                     \n\
-                     This is the Monte-Carlo RESOLUTION of the normalizer, not a subsample of the data —\n\
-                     every observed count still enters the likelihood exactly.\n\
-                     Raise it on very large inputs, where the default is thin relative to the cell count;\n\
-                     cost grows linearly with it. Clamped to the cell count."
-    )]
-    pub posterior_partition: usize,
 }
 
 /// A resolved posterior request. Reaching this type at all means the posterior
@@ -111,10 +84,6 @@ pub struct PosteriorArgs {
 pub struct PosteriorPlan {
     /// Retained draws per chain; warmup is `n_samples / 2` on top.
     pub n_samples: usize,
-    /// Anchors to sample: `0` = all, else the top-N by observed count.
-    pub n_genes: usize,
-    /// Requested slate size; clamped to the cell count when the index is built.
-    pub n_partition: usize,
     /// Base seed, so a reproducible fit gives a reproducible posterior. Each
     /// sampler derives a distinct stream from it.
     pub seed: u64,
@@ -128,12 +97,7 @@ impl PosteriorArgs {
             return Ok(None);
         };
         anyhow::ensure!(n_samples > 0, "--posterior must be > 0 (got {n_samples})");
-        Ok(Some(PosteriorPlan {
-            n_samples,
-            n_genes: self.posterior_genes,
-            n_partition: self.posterior_partition,
-            seed,
-        }))
+        Ok(Some(PosteriorPlan { n_samples, seed }))
     }
 }
 
@@ -170,7 +134,11 @@ pub fn run_posterior(
     frozen: &FrozenMap,
     tracks: &[TrackSpec],
 ) -> anyhow::Result<()> {
-    let n_partition = plan.n_partition.min(unified.n_cells());
+    // Derived, not configured: the slate is the Monte-Carlo resolution of the rate
+    // normalizer, and `DEFAULT_PARTITION` rows is enough at any realistic cell count
+    // (cost grows linearly with it, accuracy barely does). Clamped to the cell count
+    // so a small input sums its whole other side exactly.
+    let n_partition = DEFAULT_PARTITION.min(unified.n_cells());
     let mut per_track = serde_json::Map::new();
     for track in tracks {
         let summary = run_track(out_prefix, plan, unified, frozen, track, n_partition)?;
@@ -225,7 +193,12 @@ fn run_track(
     )?;
     let n_empty = idx.n_empty_anchors();
 
-    let picked = idx.top_anchors_by_count(plan.n_genes);
+    // Every anchor that carries information. An anchor with no counts has a FLAT
+    // likelihood (`multinomial_ll` returns 0), so sampling it just redraws the prior
+    // — on real data that was over half the axis (18,666 of 34,008 on BMMC), i.e.
+    // most of the budget spent learning nothing. Skipping them is not a coverage
+    // choice, so it is not a flag.
+    let picked = idx.informative_anchors();
     let all_nodes = idx.node_terms();
     let nodes: Vec<_> = picked.iter().map(|&g| all_nodes[g]).collect();
     let side = idx.frozen_side();
@@ -288,7 +261,12 @@ fn run_track(
     write_dim_pip(out_prefix, track, &per_dim, &names)?;
 
     Ok(serde_json::json!({
+        // Sampled anchors, and the ones skipped because they carry no counts. Both,
+        // so a reader can see what fraction of the axis the posterior covers — a
+        // bare count of sampled anchors reads as the whole axis when it is often
+        // barely half of it.
         "n_anchors": picked.len(),
+        "n_skipped_empty": n_empty,
         // Per-dim hypers, one entry per embedding dim. Arrays rather than a table
         // because H is small, and they are the answer to "is this dim used at all".
         "per_dim": {

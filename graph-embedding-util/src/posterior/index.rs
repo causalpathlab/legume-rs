@@ -328,6 +328,21 @@ pub fn build_index(
 /// posterior is the prior. Worth reporting: on a full gene annotation this can be
 /// over half the axis.
 impl ContrastiveIndex {
+    /// Anchors carrying at least one observed count, in anchor order.
+    ///
+    /// The complement is not a subsample. An anchor with no counts makes
+    /// [`super::lnpdf::multinomial_ll`] return a constant, so its posterior IS its
+    /// prior and sampling it redraws something already known. On real data that is
+    /// over half the feature axis (18,666 of 34,008 on 12k BMMC), i.e. most of the
+    /// budget spent learning nothing — so this is a correctness-shaped default, not
+    /// a coverage knob.
+    #[must_use]
+    pub fn informative_anchors(&self) -> Vec<usize> {
+        (0..self.n_anchors())
+            .filter(|&a| !self.pos[a].is_empty())
+            .collect()
+    }
+
     #[must_use]
     pub fn n_empty_anchors(&self) -> usize {
         self.pos.iter().filter(|p| p.is_empty()).count()
