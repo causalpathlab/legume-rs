@@ -643,8 +643,30 @@ impl GeneFeatureHistogram {
     }
 }
 
-/// MetaPlotR's own per-site table, so its `visualize_metagenes.R` runs on this
-/// output unmodified. Column names are theirs, not ours.
+/// MetaPlotR's `*.dist.measures.txt` schema, so its `visualize_metagenes.R`
+/// runs on this file with only its input path changed.
+///
+/// The first fourteen columns and their order are `rel_and_abs_dist_calc.pl`'s,
+/// not ours; `strand` and `rescaled_location` are appended after them so a
+/// positional reader of theirs is unaffected.
+///
+/// The six `_st`/`_end` columns are that script's ABSOLUTE distances:
+/// `mrna_pos - endpoint`, in 1-based spliced coordinates running 5'->3'
+/// (`make_annot_bed.pl` numbers the first exonic base 1 on either strand).
+/// `utr3_st` is therefore the signed distance from the stop codon — negative
+/// inside the CDS, positive into the 3'UTR — which is the coordinate its
+/// feature-distance plot is drawn on, and the one a landmark-anchored profile
+/// needs. A region the transcript does not have prints `NA`, as theirs does.
+///
+/// `coord` is 1-BASED. MetaPlotR reads it off the `end` field of a 0-based BED
+/// (`chr1 566859 566860` yields 566860), whereas the site parquet stores the
+/// 0-based position — verified against hg38: at `primary_pos` chr1:169804275
+/// the reference base is G, and only at `primary_pos + 1` is it the A of the
+/// RAC, with the deaminated C following.
+const DIST_MEASURES_HEADER: &str = "chr\tcoord\tgene_name\trefseqID\trel_location\t\
+     utr5_st\tutr5_end\tcds_st\tcds_end\tutr3_st\tutr3_end\t\
+     utr5_size\tcds_size\tutr3_size\tstrand\trescaled_location";
+
 fn write_dist_measures(
     path: &str,
     sites: &[GenomicSite],
@@ -653,10 +675,8 @@ fn write_dist_measures(
     scale: &ScaleFactors,
 ) -> anyhow::Result<()> {
     let mut w = matrix_util::common_io::open_buf_writer(path)?;
-    writeln!(
-        w,
-        "chr\tcoord\tgene_name\trefseqID\trel_location\tutr5_size\tcds_size\tutr3_size\tstrand\trescaled_location"
-    )?;
+    writeln!(w, "{}", DIST_MEASURES_HEADER)?;
+
     for a in assignments.iter() {
         let Some(mi) = a.model else {
             continue; // ncRNA has no transcript, and no MetaPlotR counterpart
@@ -664,14 +684,43 @@ fn write_dist_measures(
         let m = &models[mi as usize];
         let site = &sites[a.site as usize];
         let rel_location = a.rel_location();
+
+        // 1-based position along the mature transcript.
+        let preceding = match a.region {
+            UTR5 => 0,
+            CDS => m.utr5_size,
+            _ => m.utr5_size + m.cds_size,
+        };
+        let mrna_pos = preceding + a.rel + 1;
+
+        // Region boundaries in the same frame, inclusive on both ends.
+        let bounds = [
+            (m.utr5_size > 0).then_some((1, m.utr5_size)),
+            (m.cds_size > 0).then_some((m.utr5_size + 1, m.utr5_size + m.cds_size)),
+            (m.utr3_size > 0).then_some((
+                m.utr5_size + m.cds_size + 1,
+                m.utr5_size + m.cds_size + m.utr3_size,
+            )),
+        ];
+        let mut abs = String::new();
+        for b in bounds.iter() {
+            match b {
+                Some((st, end)) => {
+                    abs.push_str(&format!("{}\t{}\t", mrna_pos - st, mrna_pos - end))
+                }
+                None => abs.push_str("NA\tNA\t"),
+            }
+        }
+
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{:.6}",
+            "{}\t{}\t{}\t{}\t{:.6}\t{}{}\t{}\t{}\t{}\t{:.6}",
             site.chr,
-            site.position,
+            site.position + 1,
             m.gene_name,
             m.transcript_id,
             rel_location,
+            abs,
             m.utr5_size,
             m.cds_size,
             m.utr3_size,
