@@ -82,11 +82,7 @@ fn feature_posterior_recovers_and_covers() {
     let all_cells: Vec<u32> = (0..N_CELL as u32).collect();
     let nodes: Vec<NodeTerm> = pos_by_feat
         .iter()
-        .map(|pos| NodeTerm {
-            pos,
-            partition: &all_cells,
-            partition_scale: 1.0,
-        })
+        .map(|pos| NodeTerm::new(pos, &all_cells, 1.0))
         .collect();
 
     // Warm start at zero (no MAP available in the unit test); ESS finds the mode.

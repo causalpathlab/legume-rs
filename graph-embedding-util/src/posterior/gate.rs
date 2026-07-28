@@ -12,16 +12,19 @@
 //! **credible set** over the loaded dims, and the **effect posterior** — replacing
 //! the point-estimate gate with a calibrated one.
 //!
-//! `rayon par_iter` over genes; each gene is one `mcmc_sparse` call. The bias
-//! `b_g` is held at the MAP (the gate selects which *dim* a gene loads, not the
-//! library-size intercept), so `θ_g` is the `H`-dim gated loading only.
+//! `rayon par_iter` over genes; each gene is one `mcmc_sparse` call. The
+//! library-size intercept is PROFILED OUT rather than held fixed (see
+//! [`multinomial_ll`]), so `θ_g` is the `H`-dim gated loading only and the
+//! nuisance rate cannot tilt which dim is selected.
 //!
-//! First cut uses `SoftmaxNormalPrior` as-is: softmax over the `H` real dims, no
-//! explicit "load-nothing" null column. A junk gene still reads as null through a
-//! near-zero effect + a wide credible set; the null-biased absorber
-//! (`GATE_NULL_PRIOR`, mirroring `enable_softmax_gate`) is a later refinement.
+//! `SoftmaxNormalPrior` puts a per-gene softmax over the `H` dims — one unit of
+//! selection mass per gene. NOTE that the TRAINED gate no longer does this: it
+//! normalizes over genes within a dim (see `model::SoftmaxGateSpec`), so this is a
+//! valid per-gene posterior under its own single-effect prior, not the exact
+//! posterior of the deployed gate. `super::dim_block` is the closer match. A junk
+//! gene still reads as null here through a near-zero effect + a wide credible set.
 
-use super::lnpdf::{poisson_ll, FrozenSide, NodeTerm};
+use super::lnpdf::{multinomial_ll, FrozenSide, NodeTerm};
 use mcmc_util::engine::McmcConfig;
 use mcmc_util::sparse_regression::{compute_posterior_std_beta, mcmc_sparse, SoftmaxNormalPrior};
 use nalgebra::DVector;
@@ -64,8 +67,10 @@ impl GateConfig {
 
 /// One gene's exact gate posterior.
 pub struct GenePosterior {
-    /// Per-dim posterior inclusion probability `[H]` — which embedding dim the
-    /// gene loads. The exact analogue of the variational `feature_selection()` row.
+    /// Per-dim posterior inclusion probability `[H]` — which embedding dim the gene
+    /// loads, under THIS module's per-gene single-effect prior. Not a readout of
+    /// `feature_selection()`, whose rows no longer carry per-gene mass; see the
+    /// module header.
     pub pip: Vec<f32>,
     /// Posterior-mean loading `E[Σ_l α_l·β_l]` `[H]`.
     pub mean_beta: Vec<f32>,
@@ -102,9 +107,13 @@ impl GenePosterior {
 
 /// Sample every gene's gate posterior against the frozen cell side, in parallel.
 ///
-/// `nodes[g]` is gene `g`'s observed edges + partition (cells); `biases[g]` is its
-/// fixed MAP bias `b_g`; `side` is the frozen cell embedding. Returns one
-/// [`GenePosterior`] per gene, aligned with `nodes`.
+/// `nodes[g]` is gene `g`'s observed edges + partition (cells); `side` is the
+/// frozen cell embedding. Returns one [`GenePosterior`] per gene, aligned with
+/// `nodes`.
+///
+/// There is no per-gene intercept to supply: the likelihood is
+/// [`multinomial_ll`], the Poisson with `b_g` profiled out, so the gate samples
+/// only the `H`-dim loading and the nuisance rate cannot bias the direction.
 ///
 /// SIGINT is polled per gene, because this is the longest loop in the module (a
 /// whole-dictionary sweep runs for minutes) and an un-interruptible one would
@@ -115,24 +124,20 @@ impl GenePosterior {
 #[must_use]
 pub fn gate_posterior(
     nodes: &[NodeTerm],
-    biases: &[f32],
     side: &FrozenSide,
     cfg: &GateConfig,
 ) -> Vec<GenePosterior> {
     let h = side.h;
-    assert_eq!(nodes.len(), biases.len(), "nodes / biases length mismatch");
     let prior = SoftmaxNormalPrior::new(cfg.logit_var, cfg.effect_var);
     let stop = crate::stop::stop_flag();
     nodes
         .par_iter()
-        .zip(biases.par_iter())
         .enumerate()
-        .map(|(g, (node, &b_g))| {
+        .map(|(g, node)| {
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                 return GenePosterior::skipped();
             }
-            let b_g = f64::from(b_g);
-            let lnpdf = |theta: &DVector<f32>| poisson_ll(theta.as_slice(), b_g, node, side);
+            let lnpdf = |theta: &DVector<f32>| multinomial_ll(theta.as_slice(), node, side);
             let config = McmcConfig {
                 n_samples: cfg.n_samples,
                 warmup: cfg.warmup,

@@ -39,7 +39,7 @@ pub struct ModelArgs {
     pub nce_objective: NceObjectiveArg,
 
     // Per-gene softmax feature gate — ALWAYS ON for gem (the standard training):
-    // β_g ⊙ softmax(S_g), a per-gene SuSiE variational single-effect (spike-and-slab:
+    // β_g ⊙ softmax(S_g), a per-dim distribution over genes (slab:
     // categorical selection + Gaussian effect KL) over the H embedding dims + a null
     // 'load-nothing' slot. A gene with no cell-state signal sends its mass to null and
     // contributes ≈0 → single-pass feature selection. The velocity δ_g gets its own
@@ -135,7 +135,7 @@ pub struct CollapseArgs {
                      It shrinks the dictionary and speeds the fit; the `--n-hvg` remainder is restored post-hoc\n\
                      by the held-out-feature projection (with velocity).\n\
                      Defaults to `0`: train ALL genes and let the per-gene softmax FEATURE GATE do the selecting\n\
-                     (a junk gene sends its gate mass to null → β̃_g ≈ 0), no HVG cut needed. This is the recommended path;\n\
+                     (a junk gene simply takes small mass in every dim → β̃_g ≈ 0), no HVG cut needed. This is the recommended path;\n\
                      set `--n-hvg > 0` only for a fixed smaller dictionary (e.g. 5000, matching `senna bge` / `pinto`)."
     )]
     pub n_hvg: usize,
@@ -441,6 +441,11 @@ pub struct GemArgs {
 
     #[command(flatten)]
     pub train: TrainArgs,
+
+    /// The shared `--posterior` / `--mcmc` flag group (see
+    /// `ge::posterior::PosteriorArgs`); `senna bge` flattens the same one.
+    #[command(flatten)]
+    pub posterior: graph_embedding_util::posterior::PosteriorArgs,
 
     /// Cell QC, applied as an OUTPUT FILTER only — see the note on `--out`.
     #[command(flatten)]

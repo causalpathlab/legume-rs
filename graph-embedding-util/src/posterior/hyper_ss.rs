@@ -24,8 +24,8 @@
 //! polled at the sweep boundary.
 
 use super::diagnostics::{scalar_diagnostics, ChainDiag};
-use super::hyper::{gene_rng, sample_pi0, HalfCauchyVar};
-use super::lnpdf::{poisson_ll, FrozenSide, NodeTerm};
+use super::hyper::{bic_penalty, gene_rng, sample_pi0, sigmoid, HalfCauchyVar};
+use super::lnpdf::{multinomial_ll, FrozenSide, NodeTerm};
 use mcmc_util::engine::elliptical_slice_step;
 use nalgebra::DVector;
 use rand::rngs::StdRng;
@@ -42,7 +42,7 @@ pub struct HyperSsConfig {
     pub seed: u64,
     /// Half-Cauchy prior scale `A` on the effect SD (the slab width).
     pub half_cauchy_scale: f64,
-    /// Beta hyperprior `(a, b)` on `π₀` (e.g. `(9, 1)` centers on `GATE_NULL_PRIOR`).
+    /// Beta hyperprior `(a, b)` on `π₀` (e.g. `(9, 1)` centers on 0.9 — mostly OFF).
     pub beta_a: f64,
     pub beta_b: f64,
 }
@@ -77,27 +77,13 @@ pub struct HyperSsResult {
     pub pi0_diag: ChainDiag,
 }
 
-fn sigmoid(x: f64) -> f64 {
-    if x >= 0.0 {
-        1.0 / (1.0 + (-x).exp())
-    } else {
-        let e = x.exp();
-        e / (1.0 + e)
-    }
-}
-
 /// Run the interleaved spike-and-slab Tier-1. `nodes[g]` is gene `g`'s likelihood
-/// terms against the frozen `side`; `biases[g]` its fixed MAP bias `b_g`.
+/// terms against the frozen `side`. The per-gene intercept is profiled out by
+/// [`multinomial_ll`], so none is supplied.
 #[must_use]
-pub fn hyper_ss(
-    nodes: &[NodeTerm],
-    biases: &[f32],
-    side: &FrozenSide,
-    cfg: &HyperSsConfig,
-) -> HyperSsResult {
+pub fn hyper_ss(nodes: &[NodeTerm], side: &FrozenSide, cfg: &HyperSsConfig) -> HyperSsResult {
     let h = side.h;
     let n_genes = nodes.len();
-    assert_eq!(n_genes, biases.len(), "nodes / biases length mismatch");
     let k = cfg.transitions_per_sweep.max(1);
     let zeros_h = DVector::<f32>::zeros(h);
 
@@ -105,21 +91,20 @@ pub fn hyper_ss(
     // setup passes each evaluate `poisson_ll` over the whole partition per gene, so
     // run them in parallel (one-time, independent per gene, bit-identical).
     let mut e: Vec<DVector<f32>> = (0..n_genes).map(|_| DVector::zeros(h)).collect();
-    let mut cur_ll: Vec<f32> = (0..n_genes)
-        .into_par_iter()
-        .map(|g| poisson_ll(e[g].as_slice(), f64::from(biases[g]), &nodes[g], side))
-        .collect();
-    // ℓ(0) per gene — the null score (bias only), constant across sweeps.
+    // ℓ(0) per gene — the null score, constant across sweeps. The live effects
+    // start at zero, so `cur_ll` is the SAME quantity: compute it once.
     let ll_off: Vec<f32> = (0..n_genes)
         .into_par_iter()
-        .map(|g| poisson_ll(zeros_h.as_slice(), f64::from(biases[g]), &nodes[g], side))
+        .map(|g| multinomial_ll(zeros_h.as_slice(), &nodes[g], side))
         .collect();
-    // BIC/Occam inclusion penalty `½·H·ln(m)` per gene — loop-invariant (the slab
-    // dimension `H` and the gene's observation count are fixed), so precompute it
-    // once rather than in the per-gene, per-sweep hot map.
+    let mut cur_ll: Vec<f32> = ll_off.clone();
+    // BIC/Occam inclusion penalty per gene, pricing the whole `H`-dim slab in one
+    // decision — loop-invariant, so precompute rather than recompute in the
+    // per-gene, per-sweep hot map. `dim_block` passes `1.0` instead, for one
+    // coordinate at a time.
     let bic_pen: Vec<f64> = nodes
         .iter()
-        .map(|node| 0.5 * h as f64 * (node.partition.len().max(2) as f64).ln())
+        .map(|node| bic_penalty(h as f64, node.partition.len()))
         .collect();
 
     let mut hv = HalfCauchyVar::new(cfg.half_cauchy_scale);
@@ -146,8 +131,7 @@ pub fn hyper_ss(
             .map(|g| {
                 let mut rng = gene_rng(cfg.seed, g, sweep);
                 let node = &nodes[g];
-                let b_g = f64::from(biases[g]);
-                let lnpdf = |x: &DVector<f32>| poisson_ll(x.as_slice(), b_g, node, side);
+                let lnpdf = |x: &DVector<f32>| multinomial_ll(x.as_slice(), node, side);
                 let mut eg = e[g].clone();
                 let mut ll = cur_ll[g];
                 for _ in 0..k {

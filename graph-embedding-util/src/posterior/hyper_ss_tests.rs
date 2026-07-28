@@ -64,15 +64,11 @@ fn spike_slab_tier1_recovers_sigma0_and_pi0() {
     let all_cells: Vec<u32> = (0..N_CELL as u32).collect();
     let nodes: Vec<NodeTerm> = pos
         .iter()
-        .map(|p| NodeTerm {
-            pos: p,
-            partition: &all_cells,
-            partition_scale: 1.0,
-        })
+        .map(|p| NodeTerm::new(p, &all_cells, 1.0))
         .collect();
 
     let cfg = HyperSsConfig::new(400, 150, 7);
-    let res = hyper_ss(&nodes, &b_gene, &side, &cfg);
+    let res = hyper_ss(&nodes, &side, &cfg);
 
     eprintln!(
         "σ₀²={:.3} (true {:.3}), π₀={:.3} (true {:.3}); σ-ESS {:.0} π-ESS {:.0}",

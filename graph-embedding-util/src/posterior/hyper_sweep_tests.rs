@@ -60,11 +60,7 @@ fn interleaved_tier1_recovers_sigma0_and_mixes() {
     let all_cells: Vec<u32> = (0..N_CELL as u32).collect();
     let nodes: Vec<NodeTerm> = pos
         .iter()
-        .map(|p| NodeTerm {
-            pos: p,
-            partition: &all_cells,
-            partition_scale: 1.0,
-        })
+        .map(|p| NodeTerm::new(p, &all_cells, 1.0))
         .collect();
     let inits: Vec<Vec<f32>> = (0..N_GENES).map(|_| vec![0.0f32; H + 1]).collect();
 

@@ -73,15 +73,11 @@ fn gate_posterior_recovers_loaded_dim_and_nulls() {
     let all_cells: Vec<u32> = (0..N_CELL as u32).collect();
     let nodes: Vec<NodeTerm> = pos_by_gene
         .iter()
-        .map(|pos| NodeTerm {
-            pos,
-            partition: &all_cells,
-            partition_scale: 1.0,
-        })
+        .map(|pos| NodeTerm::new(pos, &all_cells, 1.0))
         .collect();
 
     let cfg = GateConfig::new(2000, 800, 11);
-    let post = gate_posterior(&nodes, &b_gene, &side, &cfg);
+    let post = gate_posterior(&nodes, &side, &cfg);
     assert_eq!(post.len(), n_genes);
 
     // (1) Signal genes: argmax PIP == planted dim.
