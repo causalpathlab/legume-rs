@@ -462,24 +462,27 @@ impl GeneFeatureHistogram {
 // Shared metagene bin grid  //
 //////////////////////////////
 
-/// The gene model and bin allocation that BOTH metagene tracks are measured on.
+/// The gene model and bin allocation every metagene track is measured on.
 ///
-/// Built once by [`run_metagene`] and handed to the count and the coverage
-/// pass, because `count_per_covered_mb` divides one track by the other: when
-/// each pass re-derived its own bin counts, a change to a bin floor in one of
-/// the two places would have silently misaligned the grids and turned every
-/// ratio wrong-but-plausible. One owner, so the two cannot differ.
+/// Built once by [`run_metagene`] so that the tracks cannot drift apart: a
+/// change to a bin floor has one place to happen, and the histogram it feeds
+/// stays on a single grid.
 struct MetageneGrid {
     /// Merged 5'UTR / CDS / 3'UTR intervals over protein-coding genes.
     five_prime_utr: Vec<MergedFeature>,
     cds: Vec<MergedFeature>,
     three_prime_utr: Vec<MergedFeature>,
     /// Whole-gene boundaries of non-coding genes — no UTR/CDS split to make.
+    /// Empty unless `--include-non-coding` asked for the track.
     non_coding: Vec<MergedFeature>,
     /// Bins for `[5'UTR, CDS, 3'UTR]`, proportional to each region's max
-    /// length. Non-coding genes are spread over the full `n_genomic_bins`.
+    /// length.
     nbins: [usize; 3],
-    n_genomic_bins: usize,
+    /// Bins for the non-coding track, which is spread over the full
+    /// `n_genomic_bins` when it is on and is `0` wide when it is off — so a
+    /// track that was never asked for writes no rows rather than a run of
+    /// zeros a reader would have to know to ignore.
+    nbins_non_coding: usize,
 }
 
 /// Longest spliced feature in a track, the scale each region's bin share is
@@ -489,17 +492,29 @@ fn max_total_len(features: &[MergedFeature]) -> i64 {
 }
 
 impl MetageneGrid {
-    fn build(gff_file: &str, n_genomic_bins: usize) -> anyhow::Result<Self> {
-        Self::from_records(&read_gff_record_vec(gff_file)?, n_genomic_bins)
+    fn build(
+        gff_file: &str,
+        n_genomic_bins: usize,
+        include_non_coding: bool,
+    ) -> anyhow::Result<Self> {
+        Self::from_records(
+            &read_gff_record_vec(gff_file)?,
+            n_genomic_bins,
+            include_non_coding,
+        )
     }
 
-    fn from_records(records: &[GffRecord], n_genomic_bins: usize) -> anyhow::Result<Self> {
+    fn from_records(
+        records: &[GffRecord],
+        n_genomic_bins: usize,
+        include_non_coding: bool,
+    ) -> anyhow::Result<Self> {
         let FeatureTracks {
             five_prime_utr,
             cds,
             three_prime_utr,
             non_coding,
-        } = build_feature_tracks(records)?;
+        } = build_feature_tracks(records, include_non_coding)?;
 
         // Proportional bin allocation by max feature length. The floors stop a
         // long CDS from starving the short UTRs down to a couple of bins.
@@ -514,13 +529,19 @@ impl MetageneGrid {
             n_three_prime as usize * n_genomic_bins / ntot,
         ];
 
+        let nbins_non_coding = if include_non_coding {
+            n_genomic_bins
+        } else {
+            0
+        };
+
         Ok(Self {
             five_prime_utr,
             cds,
             three_prime_utr,
             non_coding,
             nbins,
-            n_genomic_bins,
+            nbins_non_coding,
         })
     }
 }
@@ -536,7 +557,6 @@ fn tally(hist: &mut [usize], iv: &IndexedInterval, pos: i64) {
 
 fn count_metagene(sites: &[GenomicSite], grid: &MetageneGrid) -> GeneFeatureHistogram {
     let [nbins_five_prime, nbins_cds, nbins_three_prime] = grid.nbins;
-    let n_genomic_bins = grid.n_genomic_bins;
 
     // Build feature indices
     let five_prime_idx = FeatureIndex::from_features(&grid.five_prime_utr);
@@ -547,7 +567,7 @@ fn count_metagene(sites: &[GenomicSite], grid: &MetageneGrid) -> GeneFeatureHist
     let mut five_prime_hist = vec![0usize; nbins_five_prime];
     let mut cds_hist = vec![0usize; nbins_cds];
     let mut three_prime_hist = vec![0usize; nbins_three_prime];
-    let mut non_coding_hist = vec![0usize; n_genomic_bins];
+    let mut non_coding_hist = vec![0usize; grid.nbins_non_coding];
 
     for site in sites {
         let chr = site.chr.as_ref();
@@ -576,7 +596,7 @@ fn count_metagene(sites: &[GenomicSite], grid: &MetageneGrid) -> GeneFeatureHist
 pub fn run_metagene(args: &MetageneArgs) -> anyhow::Result<()> {
     let sites = read_sites(&args.site_file)?;
 
-    let grid = MetageneGrid::build(&args.gff_file, args.num_bins)?;
+    let grid = MetageneGrid::build(&args.gff_file, args.num_bins, args.include_non_coding)?;
     let histogram = count_metagene(&sites, &grid);
     histogram.to_tsv(&args.output)?;
     info!("wrote metagene histogram to {}", args.output);

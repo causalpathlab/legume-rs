@@ -266,14 +266,19 @@ Example:\n  \
         alias = "mg",
         about = "Metagene histogram of site positions across gene features",
         long_about = "Metagene histogram of site positions across gene features\n\n\
-            Maps sites from a parquet file onto gene features (5'UTR, CDS, 3'UTR, non-coding)\n\
+            Maps sites from a parquet file onto the 5'UTR, CDS and 3'UTR of protein-coding genes\n\
             using GFF annotations,\n\
-            and produces a binned histogram showing the distribution of sites across the metagene.\n\n\
+            and produces a binned histogram showing the distribution of sites across the metagene.\n\
+            Non-coding genes are left out unless --include-non-coding asks for them.\n\n\
             Sites map to a feature's MERGED annotated intervals.\n\
             Position runs along the SPLICED feature.\n\
             Introns consume no metagene coordinate.\n\
             A min-start..max-stop span instead spikes the last CDS bin.\n\
-            See docs/profiling-methods.md section 1.1.",
+            See docs/profiling-methods.md section 1.1.\n\n\
+            The counts are RAW: a bin's height is also a function of how many positions in it\n\
+            were deep enough to test, which on 3'-biased libraries rises steeply toward\n\
+            the transcript end. Divide by a background profile before reading a terminal peak\n\
+            as enrichment.",
         after_long_help = "\
 	Example:\n\
 	faba metagene -s out/m6a_sites.parquet -g genes.gff -o metagene.tsv --print\n\

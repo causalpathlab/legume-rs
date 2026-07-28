@@ -71,7 +71,7 @@ pub struct PosteriorArgs {
                      Cost scales with H likelihood passes per anchor per sweep, so a whole dictionary\n\
                      runs for minutes — Ctrl+C returns partial results, and a smaller N is the way\n\
                      to shorten an exploratory run.\n\
-                     Writes one per-dim PIP parquet per gate, plus {out}.posterior_hyper.json.\n\
+                     Writes one PIP parquet per gate, plus {out}.posterior_hyper.json.\n\
                      `--mcmc` and `--jitter` are accepted aliases."
     )]
     pub posterior: Option<usize>,
@@ -258,7 +258,7 @@ fn run_track(
         );
         res
     };
-    write_dim_pip(out_prefix, track, &per_dim, &names)?;
+    write_pip(out_prefix, track, &per_dim, &names)?;
 
     Ok(serde_json::json!({
         // Sampled anchors, and the ones skipped because they carry no counts. Both,
@@ -282,51 +282,22 @@ fn run_track(
     }))
 }
 
-/// `{out}.{tag}_dimpip.parquet` — `[n_sel × H]` per-dim inclusion probabilities
-/// from [`dim_block`].
+/// `{out}.{tag}_pip.parquet` — `[n_sel × H]` per-dim posterior inclusion
+/// probabilities from [`dim_block`], one row per sampled anchor.
 ///
-/// Same shape as [`write_pip`] and deliberately a separate file rather than extra
-/// columns on it, because the two answer different questions: the gate's row is a
-/// simplex over dims (they compete for one effect's worth of mass), while these are
-/// independent Bernoullis and a row may sum past 1. Merging them into one table
-/// would invite reading a row of one as a row of the other.
-fn write_dim_pip(
+/// Read it per ENTRY, not per row. Inclusion is independent per dim, so a row does
+/// not sum to 1 and may sum past it — a gene is free to load several dims. (It was
+/// briefly `_dimpip` to distinguish it from a gate table that no longer ships.)
+fn write_pip(
     out_prefix: &str,
     track: &TrackSpec,
     res: &DimBlockResult,
     names: &[Box<str>],
 ) -> anyhow::Result<()> {
-    write_pip_table(
-        out_prefix,
-        track,
-        "dimpip",
-        "independent per-dim inclusion probability — a row MAY sum past 1",
-        res.pip.clone(),
-        res.h,
-        names,
-    )
-}
-
-/// Write one `[n_sel × H]` selection table.
-///
-/// `stem` names the file and `what` is the description logged. Those descriptions
-/// **must** differ between callers: a `--posterior perdim` run alongside a gate run
-/// writes both tables, and reading a row of one as a row of the other is precisely
-/// the mistake the separate files exist to prevent — so the log line is the reader's
-/// first defence against it.
-fn write_pip_table(
-    out_prefix: &str,
-    track: &TrackSpec,
-    stem: &str,
-    what: &str,
-    flat: Vec<f32>,
-    h: usize,
-    names: &[Box<str>],
-) -> anyhow::Result<()> {
-    let t = Tensor::from_vec(flat, (names.len(), h), &Device::Cpu)?;
-    let path = format!("{out_prefix}.{}_{stem}.parquet", track.tag);
+    let t = Tensor::from_vec(res.pip.clone(), (names.len(), res.h), &Device::Cpu)?;
+    let path = format!("{out_prefix}.{}_pip.parquet", track.tag);
     save_embedding(&path, &t, names, track.axis)?;
-    info!("wrote {path} ({what})");
+    info!("wrote {path} (per-dim inclusion probability — a row MAY sum past 1)");
     Ok(())
 }
 
