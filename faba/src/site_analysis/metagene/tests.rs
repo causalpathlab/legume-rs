@@ -87,8 +87,17 @@ fn totals(hist: &GeneFeatureHistogram) -> [usize; 4] {
     ]
 }
 
+/// Where one site lands under the default: protein-coding genes only.
 fn classify(records: &[GffRecord], pos_1based: i64) -> [usize; 4] {
-    let grid = MetageneGrid::from_records(records, 60).expect("grid");
+    classify_with_non_coding(records, pos_1based, false)
+}
+
+fn classify_with_non_coding(
+    records: &[GffRecord],
+    pos_1based: i64,
+    include_non_coding: bool,
+) -> [usize; 4] {
+    let grid = MetageneGrid::from_records(records, 60, include_non_coding).expect("grid");
     totals(&count_metagene(&[site(pos_1based)], &grid))
 }
 
@@ -207,7 +216,7 @@ fn isoform_records_merge_instead_of_spanning() {
         rec("G", FeatureType::CDS, 1201, 1300, Strand::Forward),
         rec("G", FeatureType::CDS, 2000, 2100, Strand::Forward),
     ];
-    let tracks = build_feature_tracks(&records).expect("tracks");
+    let tracks = build_feature_tracks(&records, false).expect("tracks");
     assert_eq!(tracks.cds.len(), 1);
     assert_eq!(tracks.cds[0].intervals, vec![(1000, 1300), (2000, 2100)]);
     assert_eq!(tracks.cds[0].total_len, 301 + 101);
@@ -216,8 +225,34 @@ fn isoform_records_merge_instead_of_spanning() {
 #[test]
 fn non_coding_genes_keep_whole_gene_boundaries() {
     let records = vec![non_coding_rec("NC", 5000, 6000, Strand::Forward)];
-    assert_eq!(classify(&records, 5500), [0, 0, 0, 1]);
-    assert_eq!(classify(&records, 4999), [0, 0, 0, 0]);
+    assert_eq!(classify_with_non_coding(&records, 5500, true), [0, 0, 0, 1]);
+    assert_eq!(classify_with_non_coding(&records, 4999, true), [0, 0, 0, 0]);
+}
+
+#[test]
+fn non_coding_genes_are_dropped_by_default() {
+    let records = vec![non_coding_rec("NC", 5000, 6000, Strand::Forward)];
+    // The site is inside the gene, and still contributes nothing: without
+    // --include-non-coding the ncRNA track is not built at all.
+    assert_eq!(classify(&records, 5500), [0, 0, 0, 0]);
+
+    let grid = MetageneGrid::from_records(&records, 60, false).expect("grid");
+    assert!(grid.non_coding.is_empty());
+    // Zero-wide, so `to_tsv` writes no ncRNA rows rather than 60 zeros.
+    assert_eq!(grid.nbins_non_coding, 0);
+}
+
+#[test]
+fn a_coding_gene_is_profiled_whether_or_not_non_coding_is_included() {
+    // The flag adds a track; it must not disturb the three that were there.
+    let records = two_exon_gene("G", Strand::Forward);
+    for pos in [950, 1050, 2050, 2200, 1500] {
+        assert_eq!(
+            classify(&records, pos),
+            classify_with_non_coding(&records, pos, true),
+            "position {pos}"
+        );
+    }
 }
 
 ///////////////////////////////
