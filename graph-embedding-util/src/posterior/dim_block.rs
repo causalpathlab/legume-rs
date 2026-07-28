@@ -85,7 +85,7 @@
 //! a parameterization the trainer no longer uses -- and is not on the CLI path.
 
 use super::diagnostics::{scalar_diagnostics, ChainDiag};
-use super::hyper::{bic_penalty, gene_rng, sample_pi0, sigmoid, HalfCauchyVar};
+use super::hyper::{gene_rng, sample_pi0, sigmoid, HalfCauchyVar};
 use super::lnpdf::{multinomial_ll, FrozenSide, NodeTerm};
 use mcmc_util::engine::elliptical_slice_step;
 use nalgebra::DVector;
@@ -181,18 +181,14 @@ pub fn dim_block(nodes: &[NodeTerm], side: &FrozenSide, cfg: &DimBlockConfig) ->
     let n_genes = nodes.len();
     let k = cfg.transitions_per_dim.max(1);
 
-    // Live per-gene slab effects. Start at zero, matching `hyper_ss`.
-    // Live per-gene slab effects `β_g`, and one shared all-zero vector for the
-    // "dim off" likelihood (hoisted out of the parallel map, as `hyper_ss` does).
+    // Live per-gene state: the slab effects `β_g` and the inclusion indicators
+    // `z_g`. BOTH are carried, because `z` genuinely gates — the effective loading
+    // is `z ⊙ β`, so a coordinate that is off contributes nothing to the offset the
+    // other dims condition on. Cold start: every `z` off, so the data has to earn
+    // each dim rather than starting from "all included".
     let mut beta: Vec<DVector<f32>> = (0..n_genes).map(|_| DVector::zeros(h)).collect();
+    let mut zed: Vec<Vec<bool>> = (0..n_genes).map(|_| vec![false; h]).collect();
     let zeros_h = DVector::<f32>::zeros(h);
-
-    // Occam penalty for turning ONE coordinate on — `hyper_ss` passes `h` here
-    // instead, because it prices the whole `H`-dim slab in a single decision.
-    let bic_pen: Vec<f64> = nodes
-        .iter()
-        .map(|node| bic_penalty(1.0, node.partition.len()))
-        .collect();
 
     let mut hv: Vec<HalfCauchyVar> = (0..h)
         .map(|_| HalfCauchyVar::new(cfg.half_cauchy_scale))
@@ -227,32 +223,23 @@ pub fn dim_block(nodes: &[NodeTerm], side: &FrozenSide, cfg: &DimBlockConfig) ->
                 let mut rng = gene_rng(cfg.seed, g, sweep);
                 let node = &nodes[g];
                 let mut th = beta[g].clone();
-                let mut z = vec![false; h];
+                let mut z = zed[g].clone();
 
                 // `off` is scratch, allocated once per gene per sweep and rewritten
-                // per dim — the reason genes are the parallel axis. (`cur` is NOT
-                // reused: `elliptical_slice_step` returns a fresh vector, so the
-                // binding is rebound rather than written through.)
+                // per dim — the reason genes are the parallel axis.
                 let mut off = vec![0.0f32; h];
                 let mut cur = DVector::<f32>::zeros(h);
                 let mut nu = DVector::<f32>::zeros(h);
 
-                // The likelihood of the gene's FULL current loading. It carries
-                // across the whole dim scan: at every `d`, `off + cur` reconstructs
-                // exactly `base + th`, so the value the previous ESS returned is
-                // still the value this dim starts from. Recomputing it per dim —
-                // which an earlier version did — costs a full pass over `pos` +
-                // `partition` for every one of the `n_genes × H` pairs per sweep.
-                let mut ll = multinomial_ll(th.as_slice(), node, side);
-
                 for d in 0..h {
-                    // The frozen direction for this coordinate: the gene's own
-                    // caller-supplied offset (gem's velocity gate holds β_g here)
-                    // PLUS every other dim of its current loading. That is what
-                    // makes this the conditional θ_gd | θ_g,−d.
+                    // The frozen direction for this coordinate: the caller's offset
+                    // (gem's velocity gate holds β_g here) PLUS the EFFECTIVE loading
+                    // of every other dim, `z_k·β_k`. A dim that is off contributes
+                    // nothing — that is what makes this a spike-and-slab rather than
+                    // a slab with a label attached.
                     for (kk, o) in off.iter_mut().enumerate() {
                         let base = node.offset.map_or(0.0, |b| b[kk]);
-                        *o = base + if kk == d { 0.0 } else { th[kk] };
+                        *o = base + if kk == d || !z[kk] { 0.0 } else { th[kk] };
                     }
                     let node_d = NodeTerm {
                         offset: Some(&off),
@@ -260,30 +247,44 @@ pub fn dim_block(nodes: &[NodeTerm], side: &FrozenSide, cfg: &DimBlockConfig) ->
                     };
                     let lnpdf = |x: &DVector<f32>| multinomial_ll(x.as_slice(), &node_d, side);
 
-                    // `cur` and `nu` are zero off coordinate `d`, so the ESS
-                    // ellipse `cur·cos + nu·sin` moves ONLY that coordinate —
-                    // a 1-D slice through the joint, with the rest carried in
-                    // `off`. Everything else about the step is the shared,
-                    // already-tested elliptical slice sampler.
+                    // ℓ with dim `d` OFF. Needed for the `z` draw, and it is also the
+                    // likelihood the ESS would start from, so it is not extra work.
+                    let ll_off = lnpdf(&zeros_h);
+
+                    // β_gd | z_gd. `cur` and `nu` are zero off coordinate `d`, so the
+                    // ESS ellipse moves ONLY that coordinate — a 1-D slice through the
+                    // joint, with the rest carried in `off`.
                     cur.fill(0.0);
                     cur[d] = th[d];
-                    nu.fill(0.0); // only index `d` is ever written below
-                    for _ in 0..k {
+                    let ll_on = if z[d] {
+                        // On: fit it against the likelihood.
+                        let mut ll = lnpdf(&cur);
+                        nu.fill(0.0);
+                        for _ in 0..k {
+                            let g_std: f64 = StandardNormal.sample(&mut rng);
+                            nu[d] = g_std as f32 * sd[d];
+                            let (nc, nl) = elliptical_slice_step(&cur, &nu, &lnpdf, ll, &mut rng);
+                            cur = nc;
+                            ll = nl;
+                        }
+                        ll
+                    } else {
+                        // Off: the likelihood does not see `β_gd` at all, so its exact
+                        // conditional IS the prior. Drawing it here rather than keeping
+                        // the stale fit is what makes the `z` step below a valid Gibbs
+                        // move — and it is why no Occam/BIC correction is needed. A
+                        // fitted `β` always beats 0, so comparing against one would bias
+                        // every coordinate ON; a prior draw usually does not, and the
+                        // penalty emerges from the chain visiting these states.
                         let g_std: f64 = StandardNormal.sample(&mut rng);
-                        nu[d] = g_std as f32 * sd[d];
-                        let (nc, nl) = elliptical_slice_step(&cur, &nu, &lnpdf, ll, &mut rng);
-                        cur = nc;
-                        ll = nl;
-                    }
+                        cur[d] = g_std as f32 * sd[d];
+                        lnpdf(&cur)
+                    };
                     th[d] = cur[d];
 
-                    // z_gd ~ Bernoulli(σ(logit)); the on-vs-off log-likelihood
-                    // ratio for THIS coordinate alone, since `off` already holds
-                    // every other dim. This evaluation buys the READOUT, not the
-                    // chain — `θ_gd` is never actually spiked to zero — and it
-                    // cannot be hoisted, since it moves with `θ_g,−d`.
-                    let ll_off = lnpdf(&zeros_h);
-                    let logit = log_prior_odds[d] + f64::from(ll) - f64::from(ll_off) - bic_pen[g];
+                    // z_gd | β_gd — an exact Gibbs draw from the joint, needing no
+                    // marginal likelihood: `p(z|β,y) ∝ p(y|z·β)·p(z)`.
+                    let logit = log_prior_odds[d] + f64::from(ll_on) - f64::from(ll_off);
                     z[d] = rng.random::<f64>() < sigmoid(logit);
                 }
                 GeneDraw { beta: th, z }
@@ -303,13 +304,15 @@ pub fn dim_block(nodes: &[NodeTerm], side: &FrozenSide, cfg: &DimBlockConfig) ->
                     n_incl[d] += 1;
                     if keep {
                         pip_acc[g * h + d] += 1.0;
+                        // The EFFECTIVE loading is `z·β`, so an excluded draw
+                        // contributes 0 — the posterior mean is over what the model
+                        // actually uses, not over the latent slab value.
+                        beta_acc[g * h + d] += v;
                     }
-                }
-                if keep {
-                    beta_acc[g * h + d] += v;
                 }
             }
             beta[g] = draw.beta;
+            zed[g] = draw.z;
         }
 
         for d in 0..h {
