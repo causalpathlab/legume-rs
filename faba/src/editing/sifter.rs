@@ -17,8 +17,18 @@ pub struct M6aContrast {
     /// with too little control coverage cannot be shown to be control-low, so it
     /// is left uncalled rather than assumed real.
     pub min_control_coverage: usize,
-    /// minimum absolute effect size `p_WT − p_MUT` (raw rates).
-    pub min_delta: f32,
+    /// minimum log odds ratio `ln((a_w·u_m)/(u_w·a_m))` of the WT arm over the
+    /// control, on the raw counts.
+    ///
+    /// The odds ratio is the parameter the site's Fisher exact null is about, so
+    /// this guard and that test are on one scale — which the absolute
+    /// `p_WT − p_MUT` floor it replaced was not.
+    ///
+    /// [`faba::hypothesis_tests::log_odds_ratio`] is the single home for that
+    /// argument, the measurements behind it, and why no continuity correction may
+    /// be applied on this path. Do not restate them here: they are measured
+    /// numbers, and copies drift.
+    pub min_log_odds: f32,
 }
 
 /// Controls which scanning logic to use
@@ -146,7 +156,7 @@ impl<'a> ConversionSifter<'a> {
     /// sequencing evidence alone — the RAC/GTY motif (validated by the caller)
     /// plus observed WT C→U at or above the coverage / minimum-conversion floors.
     /// It is materialized here with its raw WT-vs-MUT contrast p-value and a copy
-    /// of the control counts; the control-coverage, effect-size (`min_delta`)
+    /// of the control counts; the control-coverage, odds-ratio (`min_log_odds`)
     /// and p-value checks are the *test*, applied downstream in
     /// [`crate::editing::pipeline::find_all_conversion_sites`], where a failing
     /// site is recorded with its reason rather than dropped.

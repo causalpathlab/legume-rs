@@ -205,17 +205,144 @@ sites, and MYC is called only once the null cells are dropped.
 
 **Putative sites vs the test.** A site is a *putative candidate* on the sequencing pattern alone:
 the RAC/GTY motif plus observed WT C→U at/above the signal floors — signal coverage ≥
-`--min-coverage` (5) and signal conversions ≥ `--min-conversion` (2). Everything else is the *test*
-that decides selected vs unselected, applied after discovery: control coverage ≥
-`--edit-control-min-coverage` (3) and an absolute excess `≥ --m6a-min-delta` (0.02) on the raw rates
-`a/n`, then the p-value cutoff. A putative site that misses any of these is *recorded* (not dropped)
-in `m6a_sites_unselected.parquet` with a `reason` (`low_control` / `delta` / `pvalue`), so every
+`--min-coverage` (3) and signal conversions ≥ `--min-conversion` (1). Those floors are deliberately
+low: discovery is meant to be promiscuous, because a thin site costs almost nothing in the backend
+and is easy to drop downstream, while a site never discovered cannot be recovered without a rerun.
+Everything else is the *test* that decides selected vs unselected, applied after discovery: control
+coverage ≥ `--edit-control-min-coverage` (1) and a log odds ratio ≥ `--m6a-min-log-odds` (1e-4),
+then the p-value cutoff. A putative site that misses any of these is *recorded* (not dropped) in
+`m6a_sites_unselected.parquet` with a `reason` (`low_control` / `odds_ratio` / `pvalue`), so every
 candidate is accounted for.
 
-There is no control-fold gate. A Bullseye-style `p_WT / p_MUT ≥ 1.25` guard was measured on three
-DART replicates and found inert: 94–99% of putative sites passed it and removing it changed the
-selected-site count by exactly zero, because a site clearing a 0.02 absolute excess off a ~0.1%
-control rate already clears 1.25×. The delta guard subsumes it.
+The guard uses the **raw** cross-product `ln((a_w·u_m)/(u_w·a_m))`, with no continuity correction, so
+a control that never converts reads `+∞` and passes. That is the common case, not an edge case — the
+control converts nothing at all at 57% of sites (measured on chr19+MYC) and 0–2 reads at 80–88%. Correcting the guard would invert its meaning: with
+`a_m = 0` a Haldane-corrected guard passes only when the WT odds exceed `0.5/(n_MUT + 0.5)`, an
+implied **minimum WT rate** of 12.5% at `n_MUT = 3` and 25% at `n_MUT = 1` — which is precisely the
+pathology the odds ratio was brought in to remove. Worked case: `(a_w, u_w, a_m, u_m) = (30, 4970,
+0, 3)` is a 0.6% WT site whose control converts 0 of 3 reads. Raw, that is `+∞`; corrected, −3.148,
+i.e. a claim that the control converts 23× *more*, off three reads. Both agree the site is unproven
+(Fisher p = 0.982) — but only the raw guard lets it be recorded as `pvalue` ("no evidence") instead
+of `odds_ratio` ("no effect").
+
+The default `1e-4` is not tuned; it means "direction only". On integer counts the smallest odds ratio
+above 1 a table can express is `1 + 1/(u_w·a_m)`, which exceeds 1e-4 for every table with `u_w·a_m`
+below 10⁴ — essentially all of them. So the threshold falls in the gap between "exactly 1" and the
+next expressible value, and anything from about 1e-6 to 1e-4 behaves identically. A genomic C/T
+variant converts equally in both arms, so its two cross-products are the same float and its log odds
+is exactly `0.0`: rejected at any positive floor, at any depth. That is the one job this guard has.
+
+**Why a ratio and not a difference.** `--m6a-min-delta`, an absolute `p_WT − p_MUT` floor, was
+removed because it measured the wrong thing in three separate ways.
+
+It was on the wrong *scale*. The Fisher exact test's null is `OR = 1`, which is multiplicative; a
+difference is additive. Guard and test were not measuring the same quantity.
+
+It barely consulted the *control*. DART background runs 0.1–0.3%, so `p_WT − p_MUT ≈ p_WT`. Measured
+on real data, delta correlated with the WT conversion rate at **ρ = 0.983** but with the log odds
+ratio at only **ρ = 0.172** — a flag documented as an effect-size guard behaving as a minimum-WT-rate
+filter. It rejected 36,830 candidates whose median odds ratio was **4.83**, with median WT coverage
+744 (three times the 254 of the sites it *kept*) and median control background 0.0008 (four times
+cleaner than the kept sites). In MYC the site with the **smallest** delta (0.0121) had the **largest**
+odds ratio (8.05) — the guard ranked the gene's best site last.
+
+And it was denominated in a unit the method itself rescales. Null-cell QC leaves `a_w` alone and
+shrinks `u_w`, so it multiplies the WT *odds* by `1/f` — and `f` differs per gene (74.5% of MYC's
+coverage is null-cell, see above). One fixed additive threshold therefore meant something different
+at every gene. A log-odds threshold absorbs that rescaling as a constant shift.
+
+**Do not read an effect size off a low-abundance site.** This is the sharpest form of the argument.
+A rate difference is bounded by the larger arm's rate and quantized by depth, so it reports *depth*,
+not effect: one converted read of five scores `delta = 0.20`, while a genuinely strong site at 40 of
+744 scores 0.053. The thin site's delta is four times larger and means nothing. Two sites with
+identical `1/5` WT arms score the same 0.20 whether the control has 300 reads or 20.
+
+The site parquets therefore carry `log_odds` and `log_odds_se` beside `pv`. The standard error is
+Woolf's [15], `sqrt(Σ 1/n_ij)` on cells corrected by the Haldane–Anscombe +0.5 [16, 17, 18] — applied
+to the *reported* estimate only, never to the guard, for the reason given above. It is dominated by
+the **smallest cell**
+rather than by either library's depth — so it is large exactly where the evidence is thin, which is
+how "do not trust this effect size" becomes a number instead of a warning. On the two `1/5` sites
+above it reads 1.71 either way, but the Wald lower bounds separate them at 2.50 and −0.20.
+
+Two caveats, stated so they do not arrive as bug reports. With `a_m = 0` the corrected control cell
+is 0.5, so the SE is floored near `√2 ≈ 1.41` regardless of depth: at the 57% of sites with no control conversion it flags
+uncertainty without *ranking* it, and ranking there is `pv`'s job. And because the reported estimate
+is corrected while the guard is not, the two can disagree in sign at a nearly-empty control — by
+design, as the worked case above shows. `log_odds − 1.96·log_odds_se` is a Wald lower bound if one
+is wanted; it is deliberately neither a column nor a filter, because to a normal approximation it is
+the same one-sided test `pv` already reports exactly.
+
+**Measured on chr19 + MYC (faba 0.12.5).** Of 3,503 putative sites, 980 selected, 2,459 rejected on
+the p-value, **61 (1.7%) on the odds ratio**, and 3 on control coverage. The odds-ratio rejection
+rate is what the retired 1.25× fold gate predicted (it passed 94–99% of sites), which is the check
+that the new guard is doing the job it claims and no more.
+
+Re-running at the pre-0.12.5 floors isolates the guard from the floors, and the split is sharp:
+
+| | putative | tested | selected | expected false |
+|---|---|---|---|---|
+| floors 5 / 2 / 3 | 1,606 | 1,579 | 978 | 79 (8.1% of calls) |
+| floors 3 / 1 / 1 | 3,503 | 3,439 | 980 | 172 (17.5% of calls) |
+
+So **the call set is the guard's doing, not the floors'.** At the old floors, the retired delta rule
+would have cut 994 of the 1,606 putative sites, and **542 of those are now selected** — the call set
+goes from 436 to 978, a 2.24× increase attributable entirely to the change of statistic. The
+remaining 425 land on `pvalue`. An earlier draft of this section predicted the opposite split
+(mostly relabelling, few new calls); the measurement contradicted it, and the delta guard really was
+suppressing a majority of the calls it touched.
+
+**The loosened candidacy floors, by contrast, are not obviously worth it.** They doubled the
+candidate pool and the tested count to buy **two** extra calls, while doubling the expected
+false-call burden from 79 to 172 — because the cutoff is marginal, every additional test costs 0.05
+expected false calls whether or not it yields one. `--min-coverage 5 --min-conversion 2` restores
+the cleaner call set at the price of the thin tail. Storage was never the constraint; multiplicity is.
+
+There is no separate control-fold gate, because the odds-ratio guard *is* one. A Bullseye-style
+`p_WT / p_MUT ≥ 1.25` guard was measured on three DART replicates and found inert: 94–99% of putative
+sites passed it and removing it changed the selected-site count by exactly zero. The current guard is
+the same family — on odds rather than rates, with the threshold at ~1.0 rather than 1.25 — kept for
+agreement with the test's null rather than as a filter. That measurement is also this rule's
+falsifiable prediction: `odds_ratio` rejections should be a small minority of putative sites, and if
+they are common something is wrong.
+
+**The two arms are not symmetric, and resampling cannot fix it.** The WT arm is de-diluted (restricted
+to editing-competent cells) while the control is not, so the arms rest on different cell counts. That
+asymmetry is real but it is not a *variance* problem, and matching sample sizes would not help.
+
+The Woolf SE is dominated by the smallest cell, and at a typical site that cell is `a_m` — the
+control's *converted* count, 0–2 at 80–88% of sites — not either library's depth. In a representative
+2×2 (`n_WT` 744, `n_MUT` 1201) only **4%** of the variance comes from the WT arm; `u_m = 1200`
+contributes `1/1200 ≈ 0`. Subsampling the control down to WT depth therefore discards the term that
+was already free, moving the SE from 0.83 to 0.96 and the bound from 2.46 to 2.25.
+
+It would also add variance without removing bias. Simple random subsampling is unbiased for a
+proportion, so the resampled control rate has the same expectation; it only inflates the variance by
+`n_MUT/n_WT`, levelling the more precise arm down to the less precise one. Worse here specifically:
+with `a_m ∈ {0,1,2}` at most sites, subsampling turns `a_m = 1` into `a_m = 0` most of the time,
+converting a measured background into a structural zero. And the closed form is what such a bootstrap
+converges to anyway — the bootstrap variance of a proportion is `p(1−p)/n`, whose delta-method logit
+SE is `1/a + 1/u`, and summing the arms gives Woolf exactly.
+
+Ambient contamination of the control is likewise not a bias: ambient soup in a MUT library is MUT
+RNA, so its conversion rate matches the cells it leaked from and the mixture collapses back.
+
+What does survive is **selection, not contamination**. Competent cells are chosen by their conversion
+at the same motif positions discovery then tests — the motif rule is deliberately shared between the
+cell scan and the sifter — so `p_WT` is conditioned on an outcome-dependent event and `p_MUT` is not.
+No work on the control arm fixes that. The contrast is coherent under one **stated assumption**: that
+the control arm is homogeneous, with no editing-competent subpopulation. If every control cell shares
+one background rate, conditioning on competence within it is vacuous, and comparing selected-WT to
+all-MUT is a legitimate contrast — "the rate among editing cells" against "the one rate there is".
+That premise is what a catalytically-dead control *is*, and it is also why control cells must never
+be competence-filtered: selecting them on apparent activity would select on background. A second,
+weaker assumption backs it: competence is scored over ~28,000 motif positions, so any single site
+contributes ~1/n of its own selection evidence — negligible at a typical site, largest at exactly the
+strong sites that drove the ranking.
+
+Both are testable rather than merely asserted. The cell scan already fits a beta-binomial null from
+the control arm, so running the competence call *on* the control and looking for a competent tail
+tests the first directly. If the control is homogeneous, there is nothing to correct.
 
 **Multiple testing: there is none.** Each putative motif C is tested on its own and kept when its
 marginal p-value clears `-q/--pvalue` (**0.05**). No Benjamini–Hochberg and no q-values:
@@ -226,7 +353,7 @@ at 300 tests and at 300,000; "p ≤ 0.05" admits `0.05 × m` null sites, so its 
 and the flag alone cannot tell you what you bought. Every run therefore logs that expected false-call
 count beside the tally — `~640 false calls expected under the null (0.05 x 12800 tested)` — where `m`
 counts the sites that actually reached the cutoff, i.e. selected plus `pvalue`-rejected, not the ones
-the coverage/delta guards had already stopped.
+the coverage/odds-ratio guards had already stopped.
 
 This is deliberate. BH [4] controls the FDR under independence or *positive regression dependence*,
 and neighbouring candidate C's have neither: they are covered by the **same reads**, so their 2×2s
@@ -237,23 +364,32 @@ procedure is Benjamini–Yekutieli, which divides α by `Σ 1/i ≈ ln m`: a **1
 "stop claiming FDR control", claiming BH's guarantee while its assumption fails was the one
 indefensible option. Two further measurements point the same way: BH was running on p-values that are
 not uniform under H₀ (a site only exists once it clears `--min-conversion`, so the null tail is
-truncated away), and on the post-guard subset, filtered by `--m6a-min-delta` — monotone in the very
-statistic being tested — which deflated every q by roughly #eligible/#putative. This matches the
-field: Bullseye and scDART call sites by thresholds plus control fold and replicate reproducibility,
-not by a genome-wide FDR. `--pvalue 1.0` disables the cutoff entirely, leaving the coverage + delta
-gates as the field-standard filter.
+truncated away), and on the post-guard subset. That second objection is *stronger* now than it was:
+the subset is filtered by `--m6a-min-log-odds`, which is monotone in a monotone transform of the
+Fisher statistic itself rather than merely correlated with it as the old delta guard was, so the
+conditioning deflates every q by roughly #eligible/#putative and is even harder to defend. This
+matches the field: Bullseye and scDART call sites by thresholds plus control fold and replicate
+reproducibility, not by a genome-wide FDR. `--pvalue 1.0` disables the cutoff entirely, leaving the
+coverage + odds-ratio gates as the field-standard filter.
 
 **The unit is the site, never the gene.** A gene-level mode used to pool every putative C in a gene
 into one 2×2 and test that. It is gone. faba's whole m6A method rests on **de-dilution** — cells that
 never edit are removed *before* discovery, because leaving them in buries real signal in a
 denominator of non-signal (see the null-cell QC above). Pooling a gene re-introduces exactly that
 failure one level up: it averages a focal methylation site against the gene's non-methylated
-positions, with no corresponding de-dilution step. Measured on MYC: 12 putative sites, of which three
-are strong (per-site signal-vs-control deltas of 3.6%, 2.9%, 3.4%; p = 1.3e-4, 2.5e-4, 3.8e-17).
-Pooled across all 12 the delta is **0.0150**, under the 0.02 floor — so the gene was rejected at the
-effect guard and all 12 sites inherited that verdict. Per site, all three are called. Gene pooling is
-dilution-honest by construction and dilution-*blind* in practice, precisely on the focally methylated
-genes the assay exists to find. `m6a_genes.parquet` / `atoi_genes.parquet` and their `_unselected`
+positions, with no corresponding de-dilution step. The decisive objection is that a gene-level verdict
+cannot say **which** C carries the mark, and that holds under any guard.
+
+Under the retired delta guard the dilution surfaced as false negatives. Measured on MYC: 12 putative
+sites, of which three are strong (per-site signal-vs-control deltas of 3.6%, 2.9%, 3.4%; p = 1.3e-4,
+2.5e-4, 3.8e-17). Pooled across all 12 the delta was **0.0150**, under that rule's 0.02 floor — so
+the gene was rejected at the effect guard and all 12 sites inherited that verdict, while per site all
+three are called. That number is **historical**: it describes a guard that no longer exists. Under
+the odds-ratio guard a pooled 2×2 of that shape clears the floor comfortably, so pooling now fails in
+the opposite direction, by false **attribution** — one verdict inherited by every C in the gene, most
+of which carry nothing. The direction of the error moved; the argument for the site as the unit did
+not. Gene pooling is dilution-honest by construction and dilution-*blind* in practice, precisely on
+the focally methylated genes the assay exists to find. `m6a_genes.parquet` / `atoi_genes.parquet` and their `_unselected`
 companions are no longer produced, and the `gene_pv` and `qvalue` columns are gone from the site
 parquets — `qvalue` had become a byte-for-byte copy of `pv`, which is a lying name, not a schema.
 
@@ -519,3 +655,10 @@ fixed in the help text itself, so only the live discrepancy is kept here:
     (2011).
 14. Huang X, Huang Y. *cellsnp-lite: an efficient tool for genotyping single cells.* Bioinformatics
     37, 4569–4571 (2021).
+15. Woolf B. *On estimating the relation between blood group and disease.* Ann Hum Genet 19,
+    251–253 (1955). [the log-odds standard error]
+16. Haldane JBS. *The estimation and significance of the logarithm of a ratio of frequencies.*
+    Ann Hum Genet 20, 309–311 (1956). doi:10.1111/j.1469-1809.1955.tb01285.x [the +0.5 correction]
+17. Anscombe FJ. *On estimating binomial response relations.* Biometrika 43, 461–464 (1956).
+18. Gart JJ, Zweifel JR. *On the bias of various estimators of the logit and its variance with
+    application to quantal bioassay.* Biometrika 54, 181–187 (1967).

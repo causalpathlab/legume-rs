@@ -300,7 +300,7 @@ fn channel_bases_follow_the_modality_and_strand() {
         check_r_site: true,
         contrast: M6aContrast {
             min_control_coverage: 1,
-            min_delta: 0.0,
+            min_log_odds: 1e-4,
         },
     };
     // m6A is a C->U deamination: C->T read forward, G->A read on the reverse strand.
@@ -518,7 +518,7 @@ fn the_dense_mask_reproduces_the_hashed_scan_exactly() {
         check_r_site,
         contrast: M6aContrast {
             min_control_coverage: 1,
-            min_delta: 0.0,
+            min_log_odds: 1e-4,
         },
     };
     let (_f, faidx) = scan_fasta(&scan_reference());
@@ -557,7 +557,7 @@ fn the_dense_mask_agrees_on_references_nobody_designed() {
         check_r_site,
         contrast: M6aContrast {
             min_control_coverage: 1,
-            min_delta: 0.0,
+            min_log_odds: 1e-4,
         },
     };
     let mut state = 0x2545_f491_4f6c_dd1du64;
@@ -607,7 +607,7 @@ fn the_single_fetch_leaves_candidate_positions_unchanged() {
         check_r_site: true,
         contrast: M6aContrast {
             min_control_coverage: 1,
-            min_delta: 0.0,
+            min_log_odds: 1e-4,
         },
     };
     let (_f, faidx) = scan_fasta(&scan_reference());
@@ -638,7 +638,7 @@ fn background_skips_the_keep_out_zone_and_then_takes_every_fourth() {
         check_r_site: true,
         contrast: M6aContrast {
             min_control_coverage: 1,
-            min_delta: 0.0,
+            min_log_odds: 1e-4,
         },
     };
     let (_f, faidx) = scan_fasta(&scan_reference());

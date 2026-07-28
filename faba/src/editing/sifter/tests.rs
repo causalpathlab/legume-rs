@@ -37,7 +37,7 @@ fn make_m6a_sifter<'a>(faidx: &'a faidx::Reader) -> ConversionSifter<'a> {
             check_r_site: true,
             contrast: M6aContrast {
                 min_control_coverage: 10,
-                min_delta: 0.05,
+                min_log_odds: 1e-4,
             },
         },
         candidate_sites: Vec::new(),
@@ -105,7 +105,8 @@ fn test_forward_sweep_no_control_is_still_putative() {
 fn test_forward_sweep_variant_equal_in_mut_is_putative_but_nonsignificant() {
     // A genomic C/T variant edits equally in WT and MUT. It is still a putative
     // site (the WT shows the motif + C→U), but the contrast p-value is ~1 (no
-    // WT-specificity) and the downstream delta test records it as rejected.
+    // WT-specificity) and the downstream odds-ratio test records it as rejected:
+    // equal rates give an odds ratio of exactly 1, whose log is exactly 0.
     let seq = "NNNNNNNNGAC";
     let (_f, reader) = create_test_fasta(seq);
     let mut sifter = make_m6a_sifter(&reader);
@@ -416,7 +417,7 @@ fn discovery_and_the_cell_scan_both_implement_the_motif_rule() {
             check_r_site: check_r,
             contrast: M6aContrast {
                 min_control_coverage: 10,
-                min_delta: 0.05,
+                min_log_odds: 1e-4,
             },
         };
         let bases = fetch_reference_bases(&faidx, "chr1", 0, n - 1)
