@@ -1,8 +1,7 @@
 //! The `--posterior` / `--mcmc` step, end to end: flags, orchestration, outputs.
 //!
 //! Both `senna bge` and `faba gem` run the *same* pipeline over a fitted model —
-//! build the frozen index, recalibrate the intercepts, sample the Tier-1 hypers,
-//! feed the learned slab variance to the gate, sample the gate, write the tables.
+//! build the frozen index, sample the per-dim selection posterior, write the tables.
 //! Only three things genuinely differ between them: which rows form an anchor
 //! (bge: one per feature row; gem: one per gene, per splice track), whether a
 //! frozen offset is carried (gem's velocity gate holds `β_g` at its MAP), and the
@@ -16,14 +15,11 @@
 
 use super::dim_block::{dim_block, DimBlockConfig, DimBlockResult};
 use super::frozen_diag::frozen_side_diag;
-use super::gate::{gate_posterior, GateConfig, GenePosterior};
-use super::hyper_ss::{hyper_ss, HyperSsConfig, HyperSsResult};
 use super::index::{build_index, FrozenMap, RowGrouping};
 use crate::eval::save_embedding;
 use anyhow::Context;
 use candle_util::candle_core::{Device, Tensor};
 use log::info;
-use matrix_util::traits::IoOps;
 
 /// Default retained draws per chain when `--posterior` is given without `--mcmc`.
 pub const DEFAULT_SAMPLES: usize = 200;
@@ -34,85 +30,6 @@ pub const DEFAULT_SAMPLES: usize = 200;
 /// exactly.
 pub const DEFAULT_PARTITION: usize = 1024;
 
-/// Which posterior to run after the MAP fit.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-#[clap(rename_all = "lowercase")]
-pub enum PosteriorMode {
-    /// No posterior — the run is byte-identical to one built before this existed.
-    Off,
-    /// Per-gene single-effect posterior: a softmax over dims per gene, giving a
-    /// PIP simplex, credible sets and the effect posterior.
-    ///
-    /// NOTE this targets a parameterization the TRAINER NO LONGER USES. The gate
-    /// now normalizes over genes within a dim (`crate::model::SoftmaxGateSpec`),
-    /// and that is not expressible as a per-gene sampler at all — normalizing over
-    /// genes couples them, so no per-gene factorization is exact for it. What this
-    /// samples is therefore a valid posterior under ITS OWN single-effect prior,
-    /// not the posterior of your fit. It is still the only sampler here that
-    /// yields set-valued credible sets, which is what you want when the frozen
-    /// dims are collinear. [`Self::PerDim`] is the closer match to the deployed
-    /// gate.
-    Gate,
-    /// Tier-1 hyperparameters only (`σ₀²`, `π₀`, per-gene inclusion probability).
-    Hyper,
-    /// Both, with the learned `σ₀²` feeding the gate's slab prior.
-    Both,
-    /// Per-dim selection ([`super::dim_block`]): an independent Bernoulli per
-    /// embedding dim with its own `(σ₀h², π₀h)`, instead of the gate's softmax
-    /// over dims.
-    ///
-    /// Self-contained — it learns its own per-dim hyperparameters, so it neither
-    /// needs nor reads the Tier-1 globals. Kept a separate mode rather than
-    /// folded into [`Self::Both`] because it costs `H` likelihood passes per
-    /// anchor per sweep, which is not something to add to an existing default.
-    PerDim,
-    /// Every sampler on one fit — the gate, the Tier-1 hypers and the per-dim
-    /// block.
-    ///
-    /// This is the only way to compare the gate's selection against
-    /// [`super::dim_block`]'s on the SAME frozen side, which is the only
-    /// comparison that means anything: the embedding basis rotates between fits
-    /// (cross-seed ARI 0.0365 against a same-seed floor of 1.0000), so a dim index
-    /// from one run is not the dim index from another. Costly — read the per-mode
-    /// notes before reaching for it.
-    All,
-}
-
-/// Which samplers a resolved plan runs. The user-facing spelling stays the
-/// `--posterior` enum; this is what the pipeline reads.
-///
-/// Kept as an explicit set rather than predicates over the enum: with three
-/// independent samplers a flat enum can only name a few of the eight reachable
-/// combinations, and adding a fourth would silently mean auditing every
-/// `matches!` to decide whether the new variant belongs in it — an audit nothing
-/// forces, since a one-armed `matches!` keeps compiling.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct Samplers {
-    pub gate: bool,
-    pub hyper: bool,
-    pub per_dim: bool,
-}
-
-impl PosteriorMode {
-    /// The samplers this mode selects.
-    #[must_use]
-    pub fn samplers(self) -> Samplers {
-        let (gate, hyper, per_dim) = match self {
-            Self::Off => (false, false, false),
-            Self::Gate => (true, false, false),
-            Self::Hyper => (false, true, false),
-            Self::Both => (true, true, false),
-            Self::PerDim => (false, false, true),
-            Self::All => (true, true, true),
-        };
-        Samplers {
-            gate,
-            hyper,
-            per_dim,
-        }
-    }
-}
-
 /// The `--posterior` / `--mcmc` flag group, flattened by each CLI's args struct.
 ///
 /// The help is written to cover both callers: on a model with more than one gate
@@ -121,64 +38,40 @@ impl PosteriorMode {
 #[derive(clap::Args, Debug, Clone)]
 pub struct PosteriorArgs {
     #[arg(
-        long = "mcmc",
+        long = "posterior",
+        alias = "mcmc",
         alias = "jitter",
         value_name = "N",
-        help = "Sample the exact posterior over the fitted gate(s), N draws per chain\n\
-                (implies --posterior both). Off unless given.",
-        long_help = "Run MCMC over the fitted gate(s) and write the posterior tables:\n\
-                     N is the number of RETAINED draws per chain (warmup is N/2 more),\n\
-                     the sampler's analogue of `-i/--epochs`.\n\
+        num_args = 0..=1,
+        default_missing_value = "200",
+        help = "Sample the posterior over feature selection, N retained draws per chain\n\
+                (bare --posterior uses 200). Off unless given.",
+        long_help = "Sample the exact posterior over which embedding dims each gene loads, and write\n\
+                     the tables. N is the number of RETAINED draws per chain (warmup is N/2 more),\n\
+                     the sampler's analogue of `-i/--epochs`. Bare `--posterior` uses 200.\n\
+                     Omit it entirely and the run is byte-identical to one built before this existed.\n\
                      \n\
-                     Training fits the per-gene softmax gate VARIATIONALLY and reports a point estimate;\n\
-                     this samples the SAME model exactly, against the frozen MAP cell side,\n\
-                     so selection comes with calibrated uncertainty:\n\
-                     per-dim posterior inclusion probabilities, a credible set over the dims a gene loads,\n\
-                     and the effect posterior.\n\
+                     Training fits feature selection VARIATIONALLY and reports a point estimate;\n\
+                     this samples it against the frozen MAP cell side, so selection comes with\n\
+                     calibrated uncertainty: a per-dim posterior inclusion probability per gene,\n\
+                     plus the per-dim slab variance σ₀h² and sparsity π₀h learned from the data\n\
+                     rather than hard-coded.\n\
+                     \n\
+                     Inclusion is INDEPENDENT per dim, matching the axis the gate is trained on\n\
+                     (a softmax over genes within a dim), so a gene may load several dims at once\n\
+                     and its row does NOT sum to 1.\n\
                      \n\
                      Every gate the model has is sampled. `faba gem` has two — the identity gate on β_g\n\
                      (read from the spliced rows) and the velocity gate on δ_g (the unspliced rows, with β_g\n\
                      held at its MAP, since an unspliced row scores ⟨β_g + δ_g, e_c⟩);\n\
                      `senna bge` has only the identity gate.\n\
                      \n\
-                     Passing this implies `--posterior both` (the full-Bayes answer);\n\
-                     use `--posterior` to ask for less.\n\
-                     Try 200 to start. Cost is roughly 0.6 core-seconds per gene per 200 draws,\n\
-                     so a whole dictionary runs for minutes — Ctrl+C returns partial results.\n\
-                     Writes one PIP + summary parquet pair per gate, plus {out}.posterior_hyper.json.\n\
-                     `--jitter` is an accepted alias."
+                     Cost scales with H likelihood passes per anchor per sweep, so a whole dictionary\n\
+                     runs for minutes — Ctrl+C returns partial results. Use --posterior-genes to cap it.\n\
+                     Writes one per-dim PIP parquet per gate, plus {out}.posterior_hyper.json.\n\
+                     `--mcmc` and `--jitter` are accepted aliases."
     )]
-    pub mcmc: Option<usize>,
-
-    #[arg(
-        long = "posterior",
-        value_enum,
-        value_name = "MODE",
-        help = "Which posterior to sample: off (default) | gate | hyper | both | perdim | all.\n\
-                Omit and pass --mcmc N for the usual case.",
-        long_help = "Which posterior to sample after the MAP fit. Chain length comes from `--mcmc N`\n\
-                     (default 200 when only this flag is given).\n\
-                     \n\
-                       off   → no posterior; the run is byte-identical to one without these flags (default).\n\
-                       gate  → the per-gene selection posterior only (PIP, credible sets, effect posterior).\n\
-                       hyper → the Tier-1 hyperparameters only: the slab variance σ₀² and the sparsity π₀,\n\
-                               which the gate otherwise hard-codes, sampled from the data.\n\
-                       both  → both, and the learned σ₀² is offered to the gate's slab prior.\n\
-                               In practice that coupling is USUALLY REFUSED: σ₀² and the effects it\n\
-                               scales are strongly dependent (Neal's funnel), and the measured chain ESS\n\
-                               on real data runs ~4-11 against the ≥10 bar, so `both` typically\n\
-                               degrades to the plain union. Check `adopted_sigma2` in the JSON to see\n\
-                               which happened; a null there means the fixed prior was kept.\n\
-                       perdim → per-dim selection (independent Bernoulli per dim, per-dim σ₀h²/π₀h).\n\
-                               Matches the axis the gate is actually trained on. Costs H likelihood\n\
-                               passes per anchor per sweep, so it is opt-in.\n\
-                       all   → every sampler on one fit. The only way to compare the gate's\n\
-                               selection against the per-dim one on the SAME frozen side, which is the\n\
-                               only comparison that means anything (the basis rotates between fits).\n\
-                     \n\
-                     `--posterior off` together with `--mcmc N` is an error (one turns it off, the other on)."
-    )]
-    pub posterior: Option<PosteriorMode>,
+    pub posterior: Option<usize>,
 
     #[arg(
         long = "posterior-genes",
@@ -216,10 +109,6 @@ pub struct PosteriorArgs {
 /// code has to re-test for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PosteriorPlan {
-    pub mode: PosteriorMode,
-    /// Which samplers to run — resolved from `mode` once, so the pipeline never
-    /// re-derives it.
-    pub samplers: Samplers,
     /// Retained draws per chain; warmup is `n_samples / 2` on top.
     pub n_samples: usize,
     /// Anchors to sample: `0` = all, else the top-N by observed count.
@@ -232,29 +121,14 @@ pub struct PosteriorPlan {
 }
 
 impl PosteriorArgs {
-    /// Reconcile `--posterior` (which posterior) with `--mcmc` / `--jitter` (how
-    /// long). `None` means the posterior is off.
-    ///
-    /// `--mcmc N` alone is the headline spelling — it means "run the sampler for
-    /// `N` draws", so it turns the posterior on at [`PosteriorMode::Both`], the
-    /// full-Bayes answer. `--posterior` narrows that. Asking for both `off` and a
-    /// draw count is a genuine contradiction, not something to resolve silently,
-    /// so it errors rather than picking a winner.
+    /// Resolve `--posterior [N]` into a plan. `None` means the posterior is off,
+    /// so no downstream code has to re-test for it.
     pub fn resolve(&self, seed: u64) -> anyhow::Result<Option<PosteriorPlan>> {
-        let mode = match (self.posterior, self.mcmc) {
-            (Some(PosteriorMode::Off), Some(n)) => anyhow::bail!(
-                "--posterior off contradicts --mcmc {n} (one turns the posterior off, \
-                 the other on) — pass one or the other"
-            ),
-            (Some(PosteriorMode::Off) | None, None) => return Ok(None),
-            (Some(mode), _) => mode,
-            (None, Some(_)) => PosteriorMode::Both,
+        let Some(n_samples) = self.posterior else {
+            return Ok(None);
         };
-        let n_samples = self.mcmc.unwrap_or(DEFAULT_SAMPLES);
-        anyhow::ensure!(n_samples > 0, "--mcmc must be > 0 (got {n_samples})");
+        anyhow::ensure!(n_samples > 0, "--posterior must be > 0 (got {n_samples})");
         Ok(Some(PosteriorPlan {
-            mode,
-            samplers: mode.samplers(),
             n_samples,
             n_genes: self.posterior_genes,
             n_partition: self.posterior_partition,
@@ -306,7 +180,6 @@ pub fn run_posterior(
     // `n_partition` is the CLAMPED value, not the request: a 300-cell input asked
     // for 1024 and got 300, and the JSON should record what the sampler used.
     let json = serde_json::json!({
-        "mode": format!("{:?}", plan.mode).to_lowercase(),
         "n_samples": plan.n_samples,
         "warmup": plan.n_samples / 2,
         "n_partition": n_partition,
@@ -322,29 +195,6 @@ pub fn run_posterior(
         .with_context(|| format!("writing {path}"))?;
     info!("wrote {path}");
     Ok(())
-}
-
-/// Minimum `σ₀²`-chain ESS before the learned slab variance may replace the
-/// model's fixed `GATE_EFFECT_PRIOR_VAR`.
-///
-/// The variance and the effects it scales are strongly dependent (Neal's funnel),
-/// and the centered draw mixes badly at large `σ₀²` — a measured ESS of ~3 on
-/// multi-donor HCA BM and on BMMC. A funnel-degenerate scale is worse than the
-/// fixed prior it would replace, so a chain below this bar is reported and
-/// discarded rather than used. Lives next to the sampler that produces the
-/// diagnostic, so every caller judges it the same way.
-pub const SIGMA2_MIN_ESS: f32 = 10.0;
-
-impl HyperSsResult {
-    /// The learned slab variance, or `None` when its chain did not mix well
-    /// enough to trust the magnitude (see [`SIGMA2_MIN_ESS`]).
-    #[must_use]
-    pub fn trustworthy_sigma2(&self) -> Option<f32> {
-        (self.sigma_diag.min_ess >= SIGMA2_MIN_ESS
-            && self.sigma2_mean.is_finite()
-            && self.sigma2_mean > 0.0)
-            .then_some(self.sigma2_mean as f32)
-    }
 }
 
 /// One gate: build its anchored index, sample, write its two tables.
@@ -400,106 +250,25 @@ fn run_track(
         log::warn!(
             "  [{}] frozen dims are collinear (max VIF {:.1} ≥ 5) — per-dim inclusion \
              probabilities split mass between the correlated dims and can read \
-             confidently wrong on both; prefer the gate's credible set",
+             confidently wrong on both — read a gene's row as a profile, not a winner",
             track.label,
             geom.max_vif,
         );
     }
     info!(
-        "posterior [{}] ({:?}): {} of {} anchors ({n_empty} with no counts), \
+        "posterior [{}]: {} of {} anchors ({n_empty} with no counts), \
          {} draws/chain (+{} warmup), {n_partition}-row partition — \
          Ctrl+C returns partial results",
         track.label,
-        plan.mode,
         picked.len(),
         idx.n_anchors(),
         plan.n_samples,
         plan.n_samples / 2,
     );
 
-    // Hypers first: the learned σ₀² feeds the gate's slab prior below, which is
-    // the whole reason `both` is more than the union of its parts.
-    let hyper = plan.samplers.hyper.then(|| {
-        let t = std::time::Instant::now();
-        let res = hyper_ss(
-            &nodes,
-            &side,
-            &HyperSsConfig::new(plan.n_samples, plan.n_samples / 2, plan.seed ^ 0x1),
-        );
-        info!(
-            "  [{}] hypers: σ₀² = {:.4} (ESS {:.0}), π₀ = {:.4} (ESS {:.0}) in {:.1}s",
-            track.label,
-            res.sigma2_mean,
-            res.sigma_diag.min_ess,
-            res.pi0_mean,
-            res.pi0_diag.min_ess,
-            t.elapsed().as_secs_f32()
-        );
-        res
-    });
-
-    // The warning is phrased by what is at stake in this mode: without a gate to
-    // feed there is no prior to have refused, and saying so anyway sends the
-    // reader looking for a gate that never ran.
-    let learned_sigma2 = hyper.as_ref().and_then(|res| {
-        let adopted = res.trustworthy_sigma2();
-        if adopted.is_none() {
-            let consequence = if plan.samplers.gate {
-                "not adopted for the gate prior — keeping the model's fixed slab variance"
-            } else {
-                "report it as a scale, not a value"
-            };
-            log::warn!(
-                "  [{}] σ₀² = {:.4} is not trustworthy (ESS {:.0} < {SIGMA2_MIN_ESS}, \
-                 Neal's funnel): {consequence}",
-                track.label,
-                res.sigma2_mean,
-                res.sigma_diag.min_ess,
-            );
-        }
-        adopted
-    });
-
-    let gate = plan.samplers.gate.then(|| {
-        let mut cfg = GateConfig::new(plan.n_samples, plan.n_samples / 2, plan.seed ^ 0x2);
-        if let Some(s2) = learned_sigma2 {
-            info!(
-                "  [{}] gate slab variance σ₀² ← {s2:.4} (learned)",
-                track.label
-            );
-            cfg.effect_var = s2;
-        }
-        log::warn!(
-            "  [{}] the gate posterior samples a PER-GENE softmax over dims — the \
-             parameterization the trainer replaced. `{{out}}.{}_pip.parquet` is a valid \
-             posterior under that prior, NOT the posterior of this fit; use \
-             `--posterior perdim` for the axis actually trained",
-            track.label,
-            track.tag,
-        );
-        let t = std::time::Instant::now();
-        let res = gate_posterior(&nodes, &side, &cfg);
-        let done = res.iter().filter(|g| g.is_sampled()).count();
-        info!(
-            "  [{}] gate: {done} of {} anchors sampled in {:.1}s",
-            track.label,
-            res.len(),
-            t.elapsed().as_secs_f32()
-        );
-        if done < res.len() {
-            log::warn!(
-                "  [{}] interrupted — {} anchor(s) not sampled, written as NaN",
-                track.label,
-                res.len() - done
-            );
-        }
-        res
-    });
-
     // Per-dim selection: independent inclusion per embedding dim, with its own
-    // per-dim `(σ₀h², π₀h)`. Self-contained, so it neither reads `learned_sigma2`
-    // nor needs the gate to have run.
-    let per_dim = plan.samplers.per_dim.then(|| {
+    // per-dim `(σ₀h², π₀h)`, learned from the data rather than hard-coded.
+    let per_dim = {
         let t = std::time::Instant::now();
         let res = dim_block(
             &nodes,
@@ -515,39 +284,19 @@ fn run_track(
             t.elapsed().as_secs_f32()
         );
         res
-    });
-
-    if let Some(gate) = &gate {
-        write_pip(out_prefix, track, gate, &names, frozen.h)?;
-        write_summary(out_prefix, track, gate, hyper.as_ref(), &names)?;
-    }
-    if let Some(pd) = &per_dim {
-        write_dim_pip(out_prefix, track, pd, &names)?;
-    }
+    };
+    write_dim_pip(out_prefix, track, &per_dim, &names)?;
 
     Ok(serde_json::json!({
         "n_anchors": picked.len(),
-        "sigma2_mean": hyper.as_ref().map(|h| h.sigma2_mean),
-        "sigma2_min_ess": hyper.as_ref().map(|h| h.sigma_diag.min_ess),
-        "sigma2_stuck_fraction": hyper.as_ref().map(|h| h.sigma_diag.stuck_fraction),
-        "pi0_mean": hyper.as_ref().map(|h| h.pi0_mean),
-        "pi0_min_ess": hyper.as_ref().map(|h| h.pi0_diag.min_ess),
-        "pi0_stuck_fraction": hyper.as_ref().map(|h| h.pi0_diag.stuck_fraction),
-        // Did the learned σ₀² actually reach the gate, or was it discarded as
-        // funnel-degenerate? Without this the gate's prior is unrecoverable.
-        "adopted_sigma2": learned_sigma2,
-        "sigma2_min_ess_required": SIGMA2_MIN_ESS,
-        // Anchors with no counts: their likelihood is flat, so the posterior is
-        // the prior. Reported because it can be over half a full gene annotation.
-        "n_empty_anchors": n_empty,
         // Per-dim hypers, one entry per embedding dim. Arrays rather than a table
         // because H is small, and they are the answer to "is this dim used at all".
-        "per_dim": per_dim.as_ref().map(|p| serde_json::json!({
-            "sigma2": p.sigma2,
-            "pi0": p.pi0,
-            "sigma2_min_ess": p.sigma_diag.iter().map(|d| d.min_ess).collect::<Vec<_>>(),
-            "pi0_min_ess": p.pi0_diag.iter().map(|d| d.min_ess).collect::<Vec<_>>(),
-        })),
+        "per_dim": {
+            "sigma2": per_dim.sigma2,
+            "pi0": per_dim.pi0,
+            "sigma2_min_ess": per_dim.sigma_diag.iter().map(|d| d.min_ess).collect::<Vec<_>>(),
+            "pi0_min_ess": per_dim.pi0_diag.iter().map(|d| d.min_ess).collect::<Vec<_>>(),
+        },
         // Geometry of the frozen side (see `frozen_diag`): whether a per-dim
         // readout is trustworthy is a property of THIS, not of the chains.
         // Serialized whole so the JSON cannot drift from the struct.
@@ -600,96 +349,6 @@ fn write_pip_table(
     let path = format!("{out_prefix}.{}_{stem}.parquet", track.tag);
     save_embedding(&path, &t, names, track.axis)?;
     info!("wrote {path} ({what})");
-    Ok(())
-}
-
-/// `{out}.{tag}_pip.parquet` — `[n_sel × H]` posterior inclusion probabilities,
-/// the calibrated analogue of the variational selection table. An anchor skipped
-/// by SIGINT is a NaN row.
-fn write_pip(
-    out_prefix: &str,
-    track: &TrackSpec,
-    gate: &[GenePosterior],
-    names: &[Box<str>],
-    h: usize,
-) -> anyhow::Result<()> {
-    let mut flat = Vec::with_capacity(gate.len() * h);
-    for g in gate {
-        match g.is_sampled() {
-            true => flat.extend_from_slice(&g.pip),
-            false => flat.extend(std::iter::repeat_n(f32::NAN, h)),
-        }
-    }
-    write_pip_table(
-        out_prefix,
-        track,
-        "pip",
-        "gate selection posterior — each row is a simplex over dims",
-        flat,
-        h,
-        names,
-    )
-}
-
-/// `{out}.{tag}_posterior.parquet` — the per-anchor summary a human reads: how
-/// concentrated the selection is, how wide the credible set had to be, and how
-/// large the effect is.
-fn write_summary(
-    out_prefix: &str,
-    track: &TrackSpec,
-    gate: &[GenePosterior],
-    hyper: Option<&HyperSsResult>,
-    names: &[Box<str>],
-) -> anyhow::Result<()> {
-    let cols: Vec<Box<str>> = [
-        "max_pip",
-        "argmax_dim",
-        "cs_size",
-        "cs_coverage",
-        "effect_norm",
-        "effect_sd",
-        "inclusion_prob",
-    ]
-    .iter()
-    .map(|s| Box::<str>::from(*s))
-    .collect();
-    let n_col = cols.len();
-
-    let mut flat = Vec::with_capacity(gate.len() * n_col);
-    for (i, g) in gate.iter().enumerate() {
-        // `inclusion_prob` is indexed by ANCHOR position, like `gate` itself —
-        // `hyper_ss` ran on the same picked subset, not on the full axis.
-        let incl = hyper.map_or(f32::NAN, |hr| hr.inclusion_prob[i]);
-        if !g.is_sampled() {
-            flat.extend(std::iter::repeat_n(f32::NAN, n_col - 1));
-            flat.push(incl); // the hypers may have finished even if the gate did not
-            continue;
-        }
-        // `min_by` with the comparator reversed keeps the fold's first-wins tie
-        // behaviour (`max_by` returns the last) without an `f32::MIN` sentinel.
-        let (argmax, max_pip) = g
-            .pip
-            .iter()
-            .copied()
-            .enumerate()
-            .min_by(|a, b| b.1.total_cmp(&a.1))
-            .unwrap_or((0, f32::NAN));
-        let l2 = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let mean_sd = g.std_beta.iter().sum::<f32>() / g.std_beta.len().max(1) as f32;
-        flat.extend_from_slice(&[
-            max_pip,
-            argmax as f32,
-            g.credible_set.len() as f32,
-            g.cs_coverage,
-            l2(&g.mean_beta),
-            mean_sd,
-            incl,
-        ]);
-    }
-    let t = Tensor::from_vec(flat, (gate.len(), n_col), &Device::Cpu)?;
-    let path = format!("{out_prefix}.{}_posterior.parquet", track.tag);
-    t.to_parquet_with_names(&path, (Some(names), Some(track.axis)), Some(&cols))?;
-    info!("wrote {path} (per-anchor selection posterior summary)");
     Ok(())
 }
 
