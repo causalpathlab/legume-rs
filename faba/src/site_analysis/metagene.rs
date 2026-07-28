@@ -54,19 +54,20 @@ pub struct MetageneArgs {
         short = 'n',
         long = "bins",
         default_value_t = 200,
+        value_parser = clap::value_parser!(u32).range(1..=1_000_000),
         help = "Total bins across the metagene (default: 200)",
         long_help = "Total number of bins across the 5'UTR, CDS and 3'UTR.\n\
                      \n\
                      MetaPlotR plots its metagene with 200 breaks, hence the default.\n\
                      Bins are split between the three regions in proportion to each\n\
                      region's MEDIAN spliced length over the assigned sites.\n\
-                     A maximum would be set by a single gene: titin's merged CDS is\n\
-                     114,586 nt against a median of 1,347, which is what the previous\n\
-                     allocation keyed on.\n\
+                     The median rather than the maximum, which one gene would set:\n\
+                     titin's merged CDS is 114,586 nt against a median of 1,347.\n\
+                     A region that has sites always keeps at least one bin.\n\
                      The split depends on the annotation and on the sites, so compare\n\
                      the shape of two profiles rather than their bar widths."
     )]
-    num_bins: usize,
+    num_bins: u32,
 
     #[arg(
         long = "isoforms",
@@ -118,9 +119,10 @@ pub struct MetageneArgs {
     #[arg(
         long = "max-width",
         default_value_t = 60,
+        value_parser = clap::value_parser!(u32).range(1..),
         help = "Maximum width of ASCII histogram"
     )]
-    max_width: usize,
+    max_width: u32,
 }
 
 /////////////////////
@@ -266,12 +268,16 @@ impl RegionIndex {
                 // A total order, not just by start: ties on every key place a
                 // site identically, so the run is reproducible whatever order
                 // the parser handed the records over in.
+                // A total order that does NOT include `model`: that index comes
+                // from iterating an FxHashMap filled in `par_bridge` order, so
+                // it varies between runs on identical input, and two isoforms
+                // sharing an exon are separated by nothing else — which made
+                // `--dist-measures` row order irreproducible.
                 intervals.sort_by_key(|iv| {
                     (
                         iv.start,
                         iv.stop,
                         iv.region,
-                        iv.model,
                         iv.total_len,
                         iv.cum_before,
                         iv.strand,
@@ -298,11 +304,18 @@ impl RegionIndex {
         RegionIndex { by_chr }
     }
 
-    /// Every interval containing `position` (1-based GFF coords).
+    /// Every interval on `strand` containing `position` (1-based GFF coords).
     ///
     /// All of them, not the first: MetaPlotR emits one row per site and
-    /// transcript, so a site inside two elected transcripts is counted in each.
-    fn find_all(&self, chr: &str, position: i64, out: &mut Vec<IndexedInterval>) {
+    /// transcript, so a site inside two overlapping transcripts is counted in
+    /// each. That is `intersectBed -wo`.
+    ///
+    /// SAME STRAND ONLY, which is the `-s` in that same `intersectBed` call.
+    /// Without it a site also lands on every antisense transcript overlapping
+    /// it — and `relative_pos` mirrors on the reverse strand, so the phantom
+    /// copy sits at `1 - p` instead of `p`. Measured on the shipped m6A calls
+    /// before this filter existed: 1,631 of 55,504 rows, 2.9%.
+    fn find_all(&self, chr: &str, position: i64, strand: Strand, out: &mut Vec<IndexedInterval>) {
         out.clear();
         let Some(chrom) = self.by_chr.get(chr) else {
             return;
@@ -319,7 +332,7 @@ impl RegionIndex {
                 break;
             }
             let iv = chrom.intervals[i];
-            if position <= iv.stop {
+            if position <= iv.stop && iv.strand == strand {
                 out.push(iv);
             }
         }
@@ -380,12 +393,24 @@ fn assign_sites(sites: &[GenomicSite], index: &RegionIndex) -> (Vec<SiteAssignme
     for (si, site) in sites.iter().enumerate() {
         // Sites use 0-based positions; GFF uses 1-based.
         let gff_pos = site.position + 1;
-        index.find_all(site.chr.as_ref(), gff_pos, &mut hits);
+        index.find_all(site.chr.as_ref(), gff_pos, site.strand, &mut hits);
         if hits.is_empty() {
             unassigned += 1;
             continue;
         }
+        // The ncRNA track is a fallback, not a parallel one. A site inside a
+        // coding transcript belongs to that transcript's region; letting it
+        // ALSO land on an overlapping non-coding gene body counts it twice and
+        // reprints the coding profile on a track that has no stop codon.
+        // Non-coding gene bodies span coding genes constantly — antisense
+        // lincRNAs, snoRNA/miRNA hosts — so this is the common case, not a
+        // corner. MetaPlotR has no ncRNA track at all, so nothing here is
+        // constrained by it.
+        let on_coding = hits.iter().any(|iv| iv.region != NCRNA);
         for iv in hits.iter() {
+            if on_coding && iv.region == NCRNA {
+                continue;
+            }
             out.push(iv.place(si as u32, gff_pos));
         }
     }
@@ -428,6 +453,17 @@ impl ScaleFactors {
         }
     }
 
+    /// Stand-in for a run with no coding assignment. The coding tracks are then
+    /// zero-wide so nothing reads these widths; it exists so the histogram and
+    /// the writers stay total instead of threading an `Option` everywhere.
+    fn none() -> Self {
+        Self {
+            twice_median: [0; 3],
+            utr5_sf: 1.0,
+            utr3_sf: 1.0,
+        }
+    }
+
     /// Median region sizes, for reporting only.
     fn median(&self) -> [f64; 3] {
         [
@@ -460,7 +496,7 @@ fn twice_median(values: &mut [i64]) -> i64 {
 fn scale_factors(
     assignments: &[SiteAssignment],
     models: &[TranscriptModel],
-) -> anyhow::Result<ScaleFactors> {
+) -> Option<ScaleFactors> {
     let mut per_region: [Vec<i64>; 3] = Default::default();
     for a in assignments.iter() {
         let Some(mi) = a.model else {
@@ -476,12 +512,13 @@ fn scale_factors(
         m[r] = twice_median(&mut per_region[r]);
     }
     if m[CDS] == 0 {
-        anyhow::bail!(
-            "no site was placed on a coding sequence, so MetaPlotR's scale factors \
-             (which are relative to the median CDS) are undefined"
-        );
+        // Every width MetaPlotR draws is relative to the median CDS, so with no
+        // coding assignment there is no coding axis. `None` rather than an
+        // error: the ncRNA track is on its own [0,1] axis and needs none of
+        // this, so a run whose sites are all non-coding still has an answer.
+        return None;
     }
-    Ok(ScaleFactors {
+    Some(ScaleFactors {
         twice_median: m,
         utr5_sf: m[UTR5] as f64 / m[CDS] as f64,
         utr3_sf: m[UTR3] as f64 / m[CDS] as f64,
@@ -493,16 +530,26 @@ fn scale_factors(
 /// Integer throughout, with the remainder going to the largest fractional
 /// parts, so the three always sum to `n` and the result does not depend on
 /// float rounding.
+/// A region with sites in it must never get zero bins: `accumulate` would drop
+/// every one of them, and because `to_tsv` takes its denominator from the
+/// BINNED counts they would leave the `frac`/`density` denominator too — the
+/// file would still integrate to 1 and give the reader no sign a whole track
+/// had gone. So each represented region is floored at one bin, taken from the
+/// widest.
 fn allocate_bins(n: usize, m: &[i64; 3]) -> [usize; 3] {
     let total: i64 = m.iter().sum();
-    if total <= 0 {
+    if total <= 0 || n == 0 {
         return [0, n, 0];
     }
+    // i128 so a large --bins cannot wrap: n is an unbounded usize and the
+    // medians are genomic lengths, so the product leaves i64 for absurd but
+    // reachable inputs.
+    let total = total as i128;
     let mut out = [0usize; 3];
-    let mut rem = [(0i64, 0usize); 3];
+    let mut rem = [(0i128, 0usize); 3];
     let mut used = 0usize;
     for r in 0..3 {
-        let exact = m[r] * n as i64;
+        let exact = m[r] as i128 * n as i128;
         out[r] = (exact / total) as usize;
         used += out[r];
         rem[r] = (exact % total, r);
@@ -511,6 +558,22 @@ fn allocate_bins(n: usize, m: &[i64; 3]) -> [usize; 3] {
     rem.sort_by_key(|&(f, r)| (std::cmp::Reverse(f), std::cmp::Reverse(m[r]), r));
     for &(_, r) in rem.iter().take(n.saturating_sub(used)) {
         out[r] += 1;
+    }
+
+    // Floor every represented region at one bin, paying from the widest. Only
+    // reachable when `n` is small relative to the spread of the medians: at the
+    // measured [310, 2052, 3440], `--bins 10` gives the 5'UTR zero.
+    for r in 0..3 {
+        if m[r] > 0 && out[r] == 0 {
+            let donor = (0..3)
+                .filter(|&d| out[d] > 1)
+                .max_by_key(|&d| out[d])
+                .unwrap_or(r);
+            if donor != r {
+                out[donor] -= 1;
+                out[r] = 1;
+            }
+        }
     }
     out
 }
@@ -524,8 +587,13 @@ fn allocate_bins(n: usize, m: &[i64; 3]) -> [usize; 3] {
 struct BinGrid([usize; 4]);
 
 impl BinGrid {
-    fn new(n: usize, scale: &ScaleFactors, include_non_coding: bool) -> Self {
-        let coding = allocate_bins(n, &scale.twice_median);
+    fn new(n: usize, scale: Option<&ScaleFactors>, include_non_coding: bool) -> Self {
+        // No coding assignment means no coding axis, so those tracks get no
+        // bins rather than the whole budget.
+        let coding = match scale {
+            Some(s) => allocate_bins(n, &s.twice_median),
+            None => [0usize; 3],
+        };
         // The ncRNA track is on its own axis, so it gets the whole budget —
         // and `0` when it was not asked for, which is what makes `to_tsv` emit
         // no rows for it rather than a run of zeros a reader must know to skip.
@@ -732,8 +800,7 @@ fn write_dist_measures(
     Ok(())
 }
 
-/// Whole-gene bodies of non-coding genes, which have no UTR/CDS split.
-/// One non-coding gene's merged body, in the same shape the coding path uses:
+/// One non-coding gene's merged EXONS, in the same shape the coding path uses:
 /// a locus with its intervals, so the index builder clones the sequence name
 /// once per gene rather than once per interval.
 struct NonCodingBody {
@@ -742,6 +809,17 @@ struct NonCodingBody {
     intervals: Vec<(i64, i64)>,
 }
 
+/// Merged exons per non-coding gene — the mature transcript, not the locus.
+///
+/// Exons, not the `gene` row's `min..max` span: that span carries the introns,
+/// so an intronic site would be assigned to the ncRNA track and given a
+/// position, while the identical case inside a coding gene is correctly left
+/// unassigned. Introns consume no metagene coordinate, on either track.
+///
+/// Exons are pooled across the gene's isoforms, which is the gene-union model
+/// (§1.1) rather than the elected-transcript one the coding tracks use. A
+/// non-coding gene has no CDS to elect on, and this track is our own extension
+/// with no MetaPlotR counterpart, so there is nothing to be faithful to.
 fn non_coding_bodies(records: &[GffRecord]) -> Vec<NonCodingBody> {
     // Keyed on gene AND sequence name: `parse_ensembl_id` drops the `_PAR_Y`
     // suffix, so keying on the id alone would fuse the chrX and chrY copies of
@@ -749,7 +827,7 @@ fn non_coding_bodies(records: &[GffRecord]) -> Vec<NonCodingBody> {
     let mut by_gene: FxHashMap<(GeneId, Box<str>), NonCodingBody> = FxHashMap::default();
     for rec in records.iter() {
         if rec.gene_type == GeneType::CodingGene
-            || rec.feature_type != FeatureType::Gene
+            || rec.feature_type != FeatureType::Exon
             || rec.stop < rec.start
         {
             continue;
@@ -778,6 +856,28 @@ pub fn run_metagene(args: &MetageneArgs) -> anyhow::Result<()> {
     let records = read_gff_record_vec(&args.gff_file)?;
 
     let models = build_transcript_models(&records);
+    if models.is_empty() {
+        // The region split is derived from `exon` records minus the coding
+        // extent, so an annotation that carries CDS/UTR/codon lines but no
+        // `exon` lines yields nothing — and would otherwise die much later, in
+        // `scale_factors`, with a message about the SITES. Name the real cause.
+        let has_exon = records.iter().any(|r| r.feature_type == FeatureType::Exon);
+        let has_cds = records.iter().any(|r| r.feature_type == FeatureType::CDS);
+        if has_cds && !has_exon {
+            anyhow::bail!(
+                "{} has CDS records but no `exon` records, and the transcript model is \
+                 built from exons. GENCODE, Ensembl and RefSeq all emit exon lines; a \
+                 CDS/UTR-only or hand-subsetted annotation does not.",
+                args.gff_file
+            );
+        }
+        anyhow::bail!(
+            "no coding transcript could be built from {}. Coding transcripts need \
+             `exon` and `CDS` records carrying both `gene_type`/`gene_biotype` \
+             protein_coding and a `transcript_id` attribute.",
+            args.gff_file
+        );
+    }
     let n_models = models.len();
     let models = match args.isoforms {
         IsoformPolicy::Longest => elect_longest_isoform(models),
@@ -802,9 +902,27 @@ pub fn run_metagene(args: &MetageneArgs) -> anyhow::Result<()> {
     // Placement first, widths second: MetaPlotR's scale factors are weighted by
     // the sites themselves, so no bin width is known until every site is placed.
     let (assignments, unassigned) = assign_sites(&sites, &index);
-    let scale = scale_factors(&assignments, &models)?;
-    let grid = BinGrid::new(args.num_bins, &scale, args.include_non_coding);
+    let scale = scale_factors(&assignments, &models);
+    let grid = BinGrid::new(
+        args.num_bins as usize,
+        scale.as_ref(),
+        args.include_non_coding,
+    );
     let nbins = grid.0;
+
+    if scale.is_none() {
+        if nbins[NCRNA] == 0 {
+            anyhow::bail!(
+                "no site was placed on a coding transcript, so there is nothing to profile. \
+                 MetaPlotR's bin widths are all relative to the median CDS, so a coding axis \
+                 needs at least one coding assignment. Pass --include-non-coding to profile \
+                 the ncRNA track instead, or check that the GFF and the sites use the same \
+                 chromosome names."
+            );
+        }
+        info!("no coding assignment: writing the ncRNA track only");
+    }
+    let scale = scale.unwrap_or_else(ScaleFactors::none);
 
     let n_rows: usize = assignments.iter().filter(|a| a.model.is_some()).count();
     info!(
@@ -834,7 +952,7 @@ pub fn run_metagene(args: &MetageneArgs) -> anyhow::Result<()> {
     info!("wrote metagene histogram to {}", args.output);
 
     if args.print_histogram {
-        histogram.print(args.max_width);
+        histogram.print(args.max_width as usize);
     }
 
     Ok(())

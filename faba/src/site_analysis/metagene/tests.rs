@@ -28,11 +28,13 @@ fn rec(
     }
 }
 
+/// A non-coding gene's EXON, which is what the ncRNA track is built from —
+/// the `gene` row's span would carry the introns.
 fn non_coding_rec(gene: &str, start: i64, stop: i64, strand: Strand) -> GffRecord {
     GffRecord {
         gene_type: GeneType::LincRNA,
         transcript_id: TranscriptId::Missing,
-        ..rec("none", gene, FeatureType::Gene, start, stop, strand)
+        ..rec("none", gene, FeatureType::Exon, start, stop, strand)
     }
 }
 
@@ -61,31 +63,40 @@ fn two_exon_tx(tx: &str, gene: &str, strand: Strand) -> Vec<GffRecord> {
 }
 
 /// Sites carry 0-based positions; every coordinate in these tests is the
-/// 1-based GFF one.
-fn site(pos_1based: i64) -> GenomicSite {
+/// 1-based GFF one. The strand matters: placement is same-strand only, as
+/// MetaPlotR's `intersectBed -s` is.
+fn site(pos_1based: i64, strand: Strand) -> GenomicSite {
     GenomicSite {
         chr: CHR.into(),
         position: pos_1based - 1,
-        strand: Strand::Forward,
+        strand,
     }
 }
 
 /// Build the index the way `run_metagene` does, then place sites on it.
-fn place(records: &[GffRecord], positions: &[i64]) -> Vec<SiteAssignment> {
+fn place_on(records: &[GffRecord], positions: &[i64], strand: Strand) -> Vec<SiteAssignment> {
     let models = elect_longest_isoform(build_transcript_models(records));
     let nc = non_coding_bodies(records);
     let index = RegionIndex::build(&models, &nc);
-    let sites: Vec<GenomicSite> = positions.iter().map(|&p| site(p)).collect();
+    let sites: Vec<GenomicSite> = positions.iter().map(|&p| site(p, strand)).collect();
     assign_sites(&sites, &index).0
 }
 
-/// `[5'UTR, CDS, 3'UTR, ncRNA]` totals for one site.
-fn classify(records: &[GffRecord], pos_1based: i64) -> [usize; 4] {
+fn place(records: &[GffRecord], positions: &[i64]) -> Vec<SiteAssignment> {
+    place_on(records, positions, Strand::Forward)
+}
+
+/// `[5'UTR, CDS, 3'UTR, ncRNA]` totals for one site on `strand`.
+fn classify_on(records: &[GffRecord], pos_1based: i64, strand: Strand) -> [usize; 4] {
     let mut out = [0usize; 4];
-    for a in place(records, &[pos_1based]) {
+    for a in place_on(records, &[pos_1based], strand) {
         out[a.region] += 1;
     }
     out
+}
+
+fn classify(records: &[GffRecord], pos_1based: i64) -> [usize; 4] {
+    classify_on(records, pos_1based, Strand::Forward)
 }
 
 /////////////////////////
@@ -109,10 +120,14 @@ fn feature(strand: Strand, intervals: &[(i64, i64)]) -> TranscriptModel {
     }
 }
 
-fn hits(idx: &RegionIndex, pos: i64) -> Vec<IndexedInterval> {
+fn hits_on(idx: &RegionIndex, pos: i64, strand: Strand) -> Vec<IndexedInterval> {
     let mut v = Vec::new();
-    idx.find_all(CHR, pos, &mut v);
+    idx.find_all(CHR, pos, strand, &mut v);
     v
+}
+
+fn hits(idx: &RegionIndex, pos: i64) -> Vec<IndexedInterval> {
+    hits_on(idx, pos, Strand::Forward)
 }
 
 #[test]
@@ -135,7 +150,7 @@ fn find_reaches_past_a_shorter_later_interval() {
     assert_eq!(hits(&idx, 5001).len(), 0);
     assert_eq!(hits(&idx, 99).len(), 0);
     let mut v = Vec::new();
-    idx.find_all("chrX", 1000, &mut v);
+    idx.find_all("chrX", 1000, Strand::Forward, &mut v);
     assert!(v.is_empty());
 }
 
@@ -192,15 +207,16 @@ fn relative_position_runs_along_the_spliced_feature() {
 #[test]
 fn reverse_strand_relative_position_runs_five_to_three() {
     let idx = RegionIndex::build(&[feature(Strand::Backward, &[(100, 199), (300, 399)])], &[]);
-    let rel = |pos| hits(&idx, pos)[0].relative_pos(pos);
+    let rel = |pos| hits_on(&idx, pos, Strand::Backward)[0].relative_pos(pos);
 
     assert_eq!(rel(399), 0);
     assert_eq!(rel(300), 99);
     assert_eq!(rel(199), 100);
     assert_eq!(rel(100), 199);
 
-    assert_eq!(hits(&idx, 399)[0].place(0, 399).bin(10), 0);
-    assert_eq!(hits(&idx, 100)[0].place(0, 100).bin(10), 9);
+    let b = |p: i64| hits_on(&idx, p, Strand::Backward)[0].place(0, p).bin(10);
+    assert_eq!(b(399), 0);
+    assert_eq!(b(100), 9);
 }
 
 #[test]
@@ -227,7 +243,7 @@ fn regions_are_disjoint_so_no_priority_order_is_needed() {
     for strand in [Strand::Forward, Strand::Backward] {
         let records = two_exon_tx("ENST1", "G", strand);
         for pos in [1050, 1150, 1550, 1650] {
-            let total: usize = classify(&records, pos).iter().sum();
+            let total: usize = classify_on(&records, pos, strand).iter().sum();
             assert!(total <= 1, "position {pos} landed twice on {strand:?}");
         }
     }
@@ -238,10 +254,22 @@ fn intronic_site_between_cds_exons_is_not_called_cds() {
     for strand in [Strand::Forward, Strand::Backward] {
         let records = two_exon_tx("ENST1", "G", strand);
         // 1300 sits in the intron between exons 1000..1199 and 1500..1699.
-        assert_eq!(classify(&records, 1300), [0, 0, 0, 0], "{strand:?}");
+        assert_eq!(
+            classify_on(&records, 1300, strand),
+            [0, 0, 0, 0],
+            "{strand:?}"
+        );
         // The coding exons themselves are still CDS.
-        assert_eq!(classify(&records, 1150), [0, 1, 0, 0], "{strand:?}");
-        assert_eq!(classify(&records, 1550), [0, 1, 0, 0], "{strand:?}");
+        assert_eq!(
+            classify_on(&records, 1150, strand),
+            [0, 1, 0, 0],
+            "{strand:?}"
+        );
+        assert_eq!(
+            classify_on(&records, 1550, strand),
+            [0, 1, 0, 0],
+            "{strand:?}"
+        );
     }
 }
 
@@ -277,7 +305,7 @@ fn rel_location_spans_zero_to_three() {
 #[test]
 fn reverse_strand_rel_location_also_runs_five_to_three() {
     let records = two_exon_tx("ENST1", "G", Strand::Backward);
-    let at = |p: i64| place(&records, &[p])[0].rel_location();
+    let at = |p: i64| place_on(&records, &[p], Strand::Backward)[0].rel_location();
     // On the reverse strand the 5'UTR is the HIGH end, and every region reads
     // 5'->3' as the genomic coordinate DECREASES. So the transcript starts at
     // 1699 and the 3'UTR's first base is its highest coordinate, 1096 — the
@@ -374,7 +402,7 @@ fn scale_factors_need_a_coding_assignment() {
         rel: 0,
         total_len: 1,
     }];
-    assert!(scale_factors(&assignments, &models).is_err());
+    assert!(scale_factors(&assignments, &models).is_none());
 }
 
 //////////////////////////
@@ -534,11 +562,11 @@ fn the_grid_sizes_all_four_tracks_together() {
         utr3_sf: 0.5,
     };
 
-    let off = BinGrid::new(100, &scale, false).0;
+    let off = BinGrid::new(100, Some(&scale), false).0;
     assert_eq!(off, [25, 50, 25, 0], "no ncRNA track unless asked for");
     assert_eq!(off[..3].iter().sum::<usize>(), 100);
 
-    let on = BinGrid::new(100, &scale, true).0;
+    let on = BinGrid::new(100, Some(&scale), true).0;
     assert_eq!(
         on,
         [25, 50, 25, 100],
@@ -560,4 +588,128 @@ fn non_coding_genes_keep_whole_gene_boundaries() {
     let records = vec![non_coding_rec("NC", 5000, 6000, Strand::Forward)];
     assert_eq!(classify(&records, 5500), [0, 0, 0, 1]);
     assert_eq!(classify(&records, 4999), [0, 0, 0, 0]);
+}
+
+//////////////////////////////
+// Regressions from review   //
+//////////////////////////////
+
+#[test]
+fn a_site_is_not_placed_on_an_antisense_transcript() {
+    // MetaPlotR intersects with `-s`. Without that filter a + strand site also
+    // lands on every - strand transcript overlapping it, and `relative_pos`
+    // mirrors, so the phantom copy sits at 1-p instead of p. Measured on the
+    // shipped m6A calls before the filter: 1,631 of 55,504 rows.
+    let mut records = two_exon_tx("FWD", "GF", Strand::Forward);
+    records.extend(two_exon_tx("REV", "GR", Strand::Backward));
+
+    // 1150 is a CDS base of both fixtures; each strand may claim it once.
+    assert_eq!(classify_on(&records, 1150, Strand::Forward), [0, 1, 0, 0]);
+    assert_eq!(classify_on(&records, 1150, Strand::Backward), [0, 1, 0, 0]);
+}
+
+#[test]
+fn a_coding_site_is_not_also_counted_on_the_ncrna_track() {
+    // Non-coding bodies span coding genes constantly. The ncRNA track is a
+    // fallback, not a parallel one, or the coding profile is reprinted on a
+    // track that has no stop codon.
+    let mut records = two_exon_tx("ENST1", "G", Strand::Forward);
+    records.push(non_coding_rec("NC", 900, 2300, Strand::Forward));
+
+    // A coding base goes to CDS only, even though the ncRNA body covers it.
+    assert_eq!(classify(&records, 1150), [0, 1, 0, 0]);
+    // A base no coding region claims still reaches the ncRNA track.
+    assert_eq!(classify(&records, 1300), [0, 0, 0, 1]);
+}
+
+#[test]
+fn the_ncrna_track_is_spliced_not_the_gene_span() {
+    // Two exons with an intron between them. A site in the intron has no
+    // transcript position, exactly as inside a coding gene.
+    let records = vec![
+        non_coding_rec("NC", 1000, 1099, Strand::Forward),
+        non_coding_rec("NC", 1500, 1599, Strand::Forward),
+    ];
+    assert_eq!(classify(&records, 1050), [0, 0, 0, 1]);
+    assert_eq!(classify(&records, 1550), [0, 0, 0, 1]);
+    assert_eq!(classify(&records, 1300), [0, 0, 0, 0], "intronic");
+
+    // …and the coordinate skips the intron: exon 2's first base is base 100
+    // of a 200 nt body, so it bins at the midpoint.
+    let a = place(&records, &[1500]);
+    assert_eq!(a[0].bin(10), 5);
+}
+
+#[test]
+fn a_region_with_sites_never_loses_all_its_bins() {
+    // At the measured medians, `--bins 10` used to give the 5'UTR zero bins,
+    // and `accumulate` then dropped every 5'UTR site while `to_tsv` took its
+    // denominator from the binned counts — so the file still integrated to 1
+    // with a whole track missing.
+    for n in [1usize, 3, 7, 10, 57, 200] {
+        let got = allocate_bins(n, &[310, 2052, 3440]);
+        assert_eq!(got.iter().sum::<usize>(), n, "n={n} got={got:?}");
+        if n >= 3 {
+            assert!(
+                got.iter().all(|&b| b > 0),
+                "n={n} left a represented region with no bins: {got:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn twice_median_returns_both_middle_values_on_even_n() {
+    // The even-n branch is `*mid + max(lower)`. The tempting `2 * *mid` agrees
+    // whenever the two middle order statistics are equal, which every other
+    // test in this file happens to satisfy — so this one uses a sample where
+    // they differ and the two formulas disagree.
+    let mut v = vec![1i64, 2, 3, 4]; // middles 2 and 3 -> 5
+    assert_eq!(twice_median(&mut v), 5);
+
+    let mut v = vec![10i64, 1, 7, 3]; // sorted 1,3,7,10 -> 3+7 = 10
+    assert_eq!(twice_median(&mut v), 10);
+
+    // Odd n is just twice the middle, and the empty case is 0.
+    let mut v = vec![5i64, 1, 9];
+    assert_eq!(twice_median(&mut v), 10);
+    assert_eq!(twice_median(&mut []), 0);
+}
+
+#[test]
+fn dist_measures_writes_metaplotr_columns_and_distances() {
+    // The header constant is checked elsewhere; this exercises the WRITER, so
+    // a lost tab or a reordered field is caught rather than assumed.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("dist.tsv");
+    let path = path.to_str().unwrap();
+
+    let records = two_exon_tx("ENST1", "G", Strand::Forward);
+    let models = elect_longest_isoform(build_transcript_models(&records));
+    let sites = vec![site(1603, Strand::Forward)]; // first 3'UTR base
+    let index = RegionIndex::build(&models, &[]);
+    let (assignments, _) = assign_sites(&sites, &index);
+    let scale = ScaleFactors {
+        twice_median: [200, 400, 200],
+        utr5_sf: 0.5,
+        utr3_sf: 0.5,
+    };
+    write_dist_measures(path, &sites, &assignments, &models, &scale).expect("write");
+
+    let text = std::fs::read_to_string(path).expect("read");
+    let mut lines = text.lines();
+    assert_eq!(lines.next().unwrap(), DIST_MEASURES_HEADER);
+
+    let row: Vec<&str> = lines.next().expect("one row").split('\t').collect();
+    assert_eq!(row.len(), 16, "14 MetaPlotR columns plus our two: {row:?}");
+    assert_eq!(row[0], "chr1");
+    assert_eq!(row[1], "1603", "coord is 1-based, as MetaPlotR's is");
+    assert_eq!(row[3], "ENST1");
+    // utr3_st is column 9: the first 3'UTR base sits exactly on the boundary.
+    assert_eq!(row[9], "0");
+    // …and cds_end (column 8) is one past the last CDS base.
+    assert_eq!(row[8], "1");
+    // The three sizes follow: 5'UTR 100, CDS 203 (stop codon folded in), 3'UTR 97.
+    assert_eq!((row[11], row[12], row[13]), ("100", "203", "97"));
+    assert!(lines.next().is_none(), "exactly one assignment expected");
 }
