@@ -40,14 +40,6 @@ pub fn merge_intervals(intervals: &mut Vec<(i64, i64)>) {
     *intervals = merged;
 }
 
-/// The identity a transcript's records are pooled under: id AND sequence name.
-///
-/// `parse_ensembl_id` drops the `_PAR_Y` suffix, so the X and Y copies of a
-/// pseudoautosomal transcript share an id; pooling on the id alone would place
-/// chrY exons on chrX and inflate the spliced length. GENCODE v46 happens to
-/// carry no `_PAR_Y` transcripts, but older releases do.
-type TranscriptLocus = (TranscriptId, Box<str>);
-
 /// One isoform's exon structure, split into the three transcript regions.
 ///
 /// Intervals are 1-based inclusive, sorted and disjoint, in genomic order on
@@ -77,22 +69,36 @@ impl TranscriptModel {
 }
 
 /// Everything one transcript's records contribute, before the CDS split.
-#[derive(Default)]
+///
+/// The identity fields are seeded from the first record and are never absent
+/// afterwards, so they are stored plainly rather than as `Option`s that every
+/// reader would have to unwrap. Only `cds` is genuinely optional — a transcript
+/// with no CDS record is not a coding transcript and gets dropped.
 struct Builder {
-    gene_id: Option<GeneId>,
-    gene_name: Option<GeneSymbol>,
-    seqname: Option<Box<str>>,
-    strand: Option<Strand>,
+    gene_id: GeneId,
+    gene_name: GeneSymbol,
+    strand: Strand,
     exons: Vec<(i64, i64)>,
     /// Genomic extent of the coding sequence, widened over the stop codon.
-    cds_lo: Option<i64>,
-    cds_hi: Option<i64>,
+    cds: Option<(i64, i64)>,
 }
 
 impl Builder {
+    fn new(rec: &GffRecord) -> Self {
+        Self {
+            gene_id: rec.gene_id.clone(),
+            gene_name: rec.gene_name.clone(),
+            strand: rec.strand,
+            exons: Vec::new(),
+            cds: None,
+        }
+    }
+
     fn widen_cds(&mut self, start: i64, stop: i64) {
-        self.cds_lo = Some(self.cds_lo.map_or(start, |lo| lo.min(start)));
-        self.cds_hi = Some(self.cds_hi.map_or(stop, |hi| hi.max(stop)));
+        self.cds = Some(match self.cds {
+            Some((lo, hi)) => (lo.min(start), hi.max(stop)),
+            None => (start, stop),
+        });
     }
 }
 
@@ -109,85 +115,101 @@ impl Builder {
 /// entirely: exons plus the coding extent already determine the split, so there
 /// is no codon-distance heuristic to get wrong.
 pub fn build_transcript_models(records: &[GffRecord]) -> Vec<TranscriptModel> {
-    let mut by_tx: FxHashMap<TranscriptLocus, Builder> = FxHashMap::default();
+    // Nested seqname -> transcript id, for two reasons.
+    //
+    // Identity: `parse_ensembl_id` drops the `_PAR_Y` suffix, so the X and Y
+    // copies of a pseudoautosomal transcript share an id. Pooling on the id
+    // alone would place chrY exons on chrX and inflate the spliced length.
+    // GENCODE v46 carries no `_PAR_Y` transcripts; older releases do.
+    //
+    // Cost: both levels probe by `&str`, so the hot loop allocates only on
+    // first sight of a transcript. Keying one map on an owned
+    // `(TranscriptId, Box<str>)` makes `entry` clone BOTH halves for every one
+    // of ~2.1M qualifying GENCODE records and discard all but the ~111k that
+    // open a new builder.
+    let mut by_chr: FxHashMap<Box<str>, FxHashMap<Box<str>, Builder>> = FxHashMap::default();
 
     for rec in records.iter() {
         if rec.gene_type != GeneType::CodingGene || rec.stop < rec.start {
             continue;
         }
-        let TranscriptId::Ensembl(_) = rec.transcript_id else {
+        let TranscriptId::Ensembl(ref tx) = rec.transcript_id else {
             continue; // gene-level rows carry no transcript
         };
-        if !matches!(
-            rec.feature_type,
-            FeatureType::Exon | FeatureType::CDS | FeatureType::StopCodon
-        ) {
-            continue;
-        }
+        // One dispatch on the feature type: everything else is never read.
+        let is_exon = match rec.feature_type {
+            FeatureType::Exon => true,
+            FeatureType::CDS | FeatureType::StopCodon => false,
+            _ => continue,
+        };
 
-        let b = by_tx
-            .entry((rec.transcript_id.clone(), rec.seqname.clone()))
-            .or_default();
-        b.gene_id.get_or_insert_with(|| rec.gene_id.clone());
-        b.gene_name.get_or_insert_with(|| rec.gene_name.clone());
-        b.seqname.get_or_insert_with(|| rec.seqname.clone());
-        b.strand.get_or_insert(rec.strand);
+        let by_tx = match by_chr.get_mut(&*rec.seqname) {
+            Some(m) => m,
+            None => by_chr.entry(rec.seqname.clone()).or_default(),
+        };
+        let b = match by_tx.get_mut(&**tx) {
+            Some(b) => b,
+            None => by_tx.entry(tx.clone()).or_insert_with(|| Builder::new(rec)),
+        };
 
-        match rec.feature_type {
-            FeatureType::Exon => b.exons.push((rec.start, rec.stop)),
-            FeatureType::CDS | FeatureType::StopCodon => b.widen_cds(rec.start, rec.stop),
-            _ => unreachable!("filtered above"),
+        if is_exon {
+            b.exons.push((rec.start, rec.stop));
+        } else {
+            b.widen_cds(rec.start, rec.stop);
         }
     }
 
-    by_tx
+    by_chr
         .into_iter()
-        .filter_map(|((transcript_id, _), mut b)| {
-            let (cds_lo, cds_hi) = (b.cds_lo?, b.cds_hi?);
-            if b.exons.is_empty() {
-                return None;
-            }
-            merge_intervals(&mut b.exons);
-
-            // Split the spliced exon set on the coding extent. `lower` and
-            // `upper` are genomic, so which one is the 5' flank depends on the
-            // strand; an exon straddling a boundary contributes to both sides.
-            let (mut lower, mut middle, mut upper) = (Vec::new(), Vec::new(), Vec::new());
-            for &(s, e) in b.exons.iter() {
-                if s < cds_lo {
-                    lower.push((s, e.min(cds_lo - 1)));
+        .flat_map(|(seqname, by_tx)| {
+            by_tx.into_iter().filter_map(move |(tx_id, mut b)| {
+                let (cds_lo, cds_hi) = b.cds?;
+                if b.exons.is_empty() {
+                    return None;
                 }
-                if e > cds_hi {
-                    upper.push((s.max(cds_hi + 1), e));
-                }
-                let (ms, me) = (s.max(cds_lo), e.min(cds_hi));
-                if ms <= me {
-                    middle.push((ms, me));
-                }
-            }
-            if middle.is_empty() {
-                return None; // no coding exon: not a coding transcript here
-            }
+                merge_intervals(&mut b.exons);
 
-            let strand = b.strand?;
-            let (utr5, utr3) = match strand {
-                Strand::Forward => (lower, upper),
-                Strand::Backward => (upper, lower),
-            };
-            let spliced = |v: &Vec<(i64, i64)>| v.iter().map(|&(s, e)| e - s + 1).sum::<i64>();
+                // Split the spliced exon set on the coding extent. `lower` and
+                // `upper` are genomic, so which one is the 5' flank depends on
+                // the strand; an exon straddling a boundary feeds both sides.
+                let mut lower = Vec::new();
+                let mut middle = Vec::with_capacity(b.exons.len());
+                let mut upper = Vec::new();
+                for &(s, e) in b.exons.iter() {
+                    if s < cds_lo {
+                        lower.push((s, e.min(cds_lo - 1)));
+                    }
+                    if e > cds_hi {
+                        upper.push((s.max(cds_hi + 1), e));
+                    }
+                    let (ms, me) = (s.max(cds_lo), e.min(cds_hi));
+                    if ms <= me {
+                        middle.push((ms, me));
+                    }
+                }
+                if middle.is_empty() {
+                    return None; // no coding exon: not a coding transcript here
+                }
 
-            Some(TranscriptModel {
-                gene_id: b.gene_id?,
-                gene_name: b.gene_name.unwrap_or(GeneSymbol::Missing),
-                transcript_id,
-                seqname: b.seqname?,
-                strand,
-                utr5_size: spliced(&utr5),
-                cds_size: spliced(&middle),
-                utr3_size: spliced(&utr3),
-                utr5,
-                cds: middle,
-                utr3,
+                let (utr5, utr3) = match b.strand {
+                    Strand::Forward => (lower, upper),
+                    Strand::Backward => (upper, lower),
+                };
+                let spliced = |v: &Vec<(i64, i64)>| v.iter().map(|&(s, e)| e - s + 1).sum::<i64>();
+
+                Some(TranscriptModel {
+                    gene_id: b.gene_id,
+                    gene_name: b.gene_name,
+                    transcript_id: TranscriptId::Ensembl(tx_id),
+                    seqname: seqname.clone(),
+                    strand: b.strand,
+                    utr5_size: spliced(&utr5),
+                    cds_size: spliced(&middle),
+                    utr3_size: spliced(&utr3),
+                    utr5,
+                    cds: middle,
+                    utr3,
+                })
             })
         })
         .collect()
@@ -206,15 +228,12 @@ pub fn build_transcript_models(records: &[GffRecord]) -> Vec<TranscriptModel> {
 /// collects through `par_bridge`, so record order is not reproducible and a
 /// file-order tie-break would make the elected set vary between runs.
 pub fn elect_longest_isoform(models: Vec<TranscriptModel>) -> Vec<TranscriptModel> {
+    // The rule as one lexicographic key: longest wins, smaller id breaks ties.
+    let key = |m: &TranscriptModel| (m.trx_len(), std::cmp::Reverse(m.transcript_id.clone()));
+
     let mut best: FxHashMap<GeneId, TranscriptModel> = FxHashMap::default();
     for m in models {
-        let replace = match best.get(&m.gene_id) {
-            None => true,
-            Some(cur) => {
-                m.trx_len() > cur.trx_len()
-                    || (m.trx_len() == cur.trx_len() && m.transcript_id < cur.transcript_id)
-            }
-        };
+        let replace = best.get(&m.gene_id).is_none_or(|cur| key(&m) > key(cur));
         if replace {
             best.insert(m.gene_id.clone(), m);
         }
