@@ -30,9 +30,11 @@ off. This is *separate from*, and on top of, the duplicate-flag filter.
 
 ### 1.1 The gene model: merged features, spliced coordinates
 
-Anything that asks *where in a transcript* a position falls — the metagene (§7), APA's poly(A)
-positions (§4) — needs a gene model, and there are two ways to get one wrong. Both were live in
-`faba` until they were measured, so the reasoning is recorded here rather than left in a commit.
+Anything that asks *where in a transcript* a position falls — APA's poly(A) positions (§4),
+`rel_pos`, the methylation mixture — needs a gene model, and there are two ways to get one wrong.
+Both were live in `faba` until they were measured, so the reasoning is recorded here rather than
+left in a commit. **The metagene no longer uses this model — see §1.2** — but it is what the
+defects below were found on, and it still governs everything else.
 
 **Do not use union spans.** `genomic_data`'s `build_union_gene_model` collapses every record of a
 feature type for a gene into a single `min(start)..max(stop)` interval. That is not the feature;
@@ -41,9 +43,12 @@ median **83.5%** of the whole gene, introns included, and overlaps the union UTR
 genes. The union 3′UTR span runs a mean **6.35×** its real spliced length (median 1.00×, p90
 12.4×) and overlaps the CDS span in **46.1%** of genes.
 
-Features are tested in the order 5′UTR → CDS → 3′UTR, so an oversized CDS span *claims* 3′UTR
-sites. Because those sites sit at the far end of the span, they bin to the **last CDS bin**. That
-was the origin of a terminal-bin spike that looked like biology and was not:
+Under a gene-level model, features had to be tested in the order 5′UTR → CDS → 3′UTR, so an
+oversized CDS span *claimed* 3′UTR sites. Because those sites sit at the far end of the span, they
+binned to the **last CDS bin**. That was the origin of a terminal-bin spike that looked like biology
+and was not. (The metagene has since moved to per-transcript regions, which are disjoint, so it
+needs no priority order at all — §1.2. The measurement stands as how the defect was found, and the
+ordering problem is still live for anything that classifies a position against merged features.)
 
 | track | last bin / mean of the rest, union spans | with merged features |
 |---|---|---|
@@ -58,14 +63,17 @@ contrasts, and the MUT arm shares the library chemistry, so anything symmetric b
 already cancelled before the metagene sees it.
 
 **Measure position along the spliced feature.** A relative position taken along a genomic span
-lets introns consume transcript coordinate. Position now runs along the concatenated merged
-intervals, mirrored on the reverse strand, so `bin = rel * nbins / spliced_len`.
+lets introns consume transcript coordinate. Position runs along the concatenated intervals,
+mirrored on the reverse strand, so `bin = rel * nbins / spliced_len`. That correction applies on
+both models: the metagene now takes it along one transcript's regions, everything else along the
+gene's merged ones.
 
 **Verification.** After the fix, an independent transcript-level classification in Python puts
-382 of rep1's 4,033 called sites in real CDS exons and 3,493 in real UTRs; `faba` reports 373 and
-3,509, and the 9-site gap is accounted for exactly by isoform convention (12 sites are CDS in one
-isoform and 5′UTR in another, where `faba` tests 5′UTR first, less 3 sites inside an overlapping
-gene's CDS). What survives is the expected biology: CDS climbs monotonically into the stop codon
+382 of rep1's 4,033 called sites in real CDS exons and 3,493 in real UTRs; the gene-level model
+reported 373 and 3,509, and the 9-site gap is accounted for exactly by isoform convention (12 sites
+are CDS in one isoform and 5′UTR in another, where that model tested 5′UTR first, less 3 sites
+inside an overlapping gene's CDS). What survives is the expected biology: CDS climbs monotonically
+into the stop codon
 and the 3′UTR is strongly front-loaded just past it, matching a stop-codon distance histogram in
 which **85%** of sites lie 3′ of the stop and **43.9%** fall 100–500 nt beyond it.
 
@@ -93,15 +101,52 @@ there are informative about 3′-end usage — which is what APA estimates. The 
 **gene-level, merged across isoforms** — stated plainly rather than implying a per-transcript
 resolution it does not have.
 
-**Measured, if a per-transcript model is ever wanted (not implemented).** Restricting to the MANE
-Select transcript does remove the ambiguity by construction, because a transcript's own features
-are disjoint. On the same 4,033 rep1 sites it costs **6.6%** of them (266: 97 in genes with no
-MANE transcript, 169 falling in a real isoform's exon that is not the canonical one) against
-**1.3%** unassigned under the merged model. The two main tracks barely move — CDS 341 vs 373,
-3′UTR 3,420 vs 3,381 — so the CDS/3′UTR result is robust to the choice. **The 5′UTR track is
-not: 128 → 6.** Almost all of the merged model's 5′UTR sites lie in regions that are 5′UTR only in
-non-canonical isoforms (alternative first exons and TSS), so neither 5′UTR count should carry much
-weight. That 20× swing on a small track is the reason to state which model produced a figure.
+### 1.2 The metagene is per-transcript; the rest of `faba` is not
+
+`metagene` (§7) is the one exception to everything above. It elects **one transcript per gene** —
+the longest spliced — and places each site on that transcript's own 5′UTR / CDS / 3′UTR, which are
+disjoint by construction. It does so because its job is to be held against a *published* profile:
+scDART-seq's metagene was made with MetaPlotR [19], and a shape difference is only informative if
+the procedure is the same one. **Fidelity to that procedure beats improving on it.**
+
+Nothing else moved. APA still measures 3′-end usage on the merged model, `rel_pos` is still the
+offset along merged exons, and the methylation mixture still shares that axis. Their estimands are
+about *any-isoform* exonic evidence, where merging is the right answer rather than the wrong one.
+
+**The cost is measured and it is not small.** On gencode v46 with 59,703 m6A calls, electing one
+transcript leaves **11.84%** of sites unassigned against **6.16%** under the merged model, and the
+5′UTR track collapses from **3,500 to 433** sites. CDS and 3′UTR are robust — CDS 13,958 → 13,849
+(−0.8%), 3′UTR 38,570 → 41,223 (+6.9%).
+
+This was predicted. An earlier MANE-Select experiment on 4,033 rep1 sites cost 6.6% of them against
+1.3% unassigned, moved CDS 373 → 341 and 3′UTR 3,381 → 3,420, and collapsed the 5′UTR **128 → 6**.
+Almost all of the merged model's 5′UTR sites lie in regions that are 5′UTR only in non-canonical
+isoforms (alternative first exons and TSS). **Neither 5′UTR count should carry weight**, and that
+20× swing on a small track is the reason to state which model produced a figure.
+
+The effect on the profile is not subtle. Under the merged model the 3′UTR's terminal bin was the
+tallest thing in the plot at **2.08×** the mid-UTR trough while the stop-codon bin barely registered
+at **1.38×**; per transcript those become **0.82×** and **5.27×**. The two models support opposite
+readings of the same sites.
+
+**Deviations from MetaPlotR**, all deliberate, all documented where they are implemented
+(`genomic-data/src/transcript.rs`, `faba/src/site_analysis/metagene.rs`):
+
+1. *Isoform election.* Its `visualize_metagenes.R` writes `dist[duplicated(gene_name), ]`, which
+   keeps rows two through N — dropping every single-isoform gene outright and keeping all but the
+   shortest of the rest. Its README variant de-duplicates an *unsorted* table and so elects by file
+   order. Neither matches what either document says it does; we implement the stated intent, and
+   break ties on `transcript_id` because `read_gff_record_vec` collects through `par_bridge` and
+   record order is not reproducible. Running their script on our own `--dist-measures` output shows
+   the gap directly: their dedup yields scale factors 0.1532/1.7373 where our election gives
+   0.1511/1.6764.
+2. *Site-weighted medians.* Bin widths come from median region sizes over the **assigned sites**,
+   not the transcript set — `visualize_metagenes.R` computes them from `dist`, one row per site. On
+   our calls the two readings differ by 59% in the 3′UTR (**1.6764** site-weighted against
+   **1.0554** transcript-weighted). The transcript-weighted reading would draw the 3′UTR at 63% of
+   its correct width and still look entirely plausible.
+3. *`--include-non-coding`* has no MetaPlotR counterpart. That track sits on its own [0,1] axis and
+   its density is normalised within itself.
 
 **`rel_pos` is a transcript coordinate.** The site parquet's `rel_pos` is the strand-aware offset
 along the gene's **merged exons** — introns consume none of it. It was an offset from the gene
@@ -572,12 +617,28 @@ None of these fit a model or produce a p-value.
   complementing minus-strand sites. The output is a base-frequency matrix, not a log-odds PWM.
 - **`pileup`** renders one gene's sites as an ASCII histogram, or (with `--gtf`/`--bam`) a faceted
   Miami plot: sites above, gene model in the middle, read depth below, one panel per cell type.
-- **`metagene`** maps each site to its 5′UTR / CDS / 3′UTR and bins its relative, strand-aware
-  position within that feature. Features are the **merged annotated intervals**, and position runs
-  along the **spliced** feature — see §1.1 for what goes wrong with union spans, and for the
-  measurements that established it. Bin counts per region are proportional to each region's
-  maximum spliced length (floors of 10 for the 5′UTR and 20 for the 3′UTR), so they change with
-  the annotation; compare profile *shapes* between runs, not bar widths.
+- **`metagene`** follows MetaPlotR [19], so its output can be held against published m6A profiles.
+  Each site is placed on **one elected transcript** — the longest spliced per gene, or every coding
+  isoform under `--isoforms all` — and given that transcript's coordinate: 5′UTR in [0,1), CDS in
+  [1,2), 3′UTR in [2,3). Within a transcript the three regions are disjoint, so nothing needs a
+  priority order and no union span can claim a neighbour's sites. Position runs along the
+  **spliced** region. §1.2 has the model, its measured cost, and the three places we follow
+  MetaPlotR's stated procedure rather than its published code.
+  Bins split between the regions in proportion to each region's **median** spliced length over the
+  assigned sites, so they depend on the sites as well as the annotation — compare profile *shapes*
+  between runs, not bar widths. A maximum would be one gene's: titin's merged CDS is 114,586 nt
+  against a median of 1,347.
+  The TSV keeps `#feature`, `genomic_bin` and `count`, then appends `bin_start`, `bin_end`, `frac`
+  and `density` on MetaPlotR's rescaled axis, where the CDS keeps width 1 and each UTR is drawn at
+  its median size relative to the CDS.
+  `--dist-measures` writes MetaPlotR's own per-site table — its fourteen columns in its order, then
+  `strand` and `rescaled_location` — so `visualize_metagenes.R` runs on faba output with only its
+  input path changed. Note `coord` there is **1-based**, matching the `end` field of the 0-based BED
+  MetaPlotR reads, whereas the site parquet stores 0-based. Its `utr3_st` column is the signed
+  spliced distance from the stop codon, which is what its feature-distance plot is drawn on.
+  **Counts are raw.** A bin is also taller where more of its positions were deep enough to test,
+  which on a 3′-biased library means the last bins of the 3′UTR; a terminal peak is not evidence of
+  enrichment on its own.
 
 ---
 
@@ -662,3 +723,6 @@ fixed in the help text itself, so only the live discrepancy is kept here:
 17. Anscombe FJ. *On estimating binomial response relations.* Biometrika 43, 461–464 (1956).
 18. Gart JJ, Zweifel JR. *On the bias of various estimators of the logit and its variance with
     application to quantal bioassay.* Biometrika 54, 181–187 (1967).
+19. Olarerin-George AO, Jaffrey SR. *MetaPlotR: a Perl/R pipeline for plotting metagenes of
+    nucleotide modifications and other transcriptomic sites.* Bioinformatics 33, 1563–1564 (2017).
+    doi:10.1093/bioinformatics/btx002 [the metagene convention, §1.2 and §7]
