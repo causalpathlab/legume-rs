@@ -8,7 +8,7 @@
 //! not the other.
 
 use super::*;
-use crate::posterior::ChainDiag;
+use crate::posterior::{ChainDiag, Samplers};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -69,17 +69,55 @@ fn perdim_is_opt_in_and_not_part_of_both() {
         .unwrap();
     assert_eq!(plan.mode, PosteriorMode::PerDim);
     assert_eq!(plan.n_samples, 300);
-    assert!(plan.mode.runs_per_dim());
     // Self-contained: it learns its own per-dim hypers, so it neither runs nor
     // needs the Tier-1 globals or the gate.
-    assert!(!plan.mode.runs_gate() && !plan.mode.runs_hyper());
+    assert_eq!(
+        plan.samplers,
+        Samplers {
+            gate: false,
+            hyper: false,
+            per_dim: true
+        }
+    );
 
-    let both = plan_of(&["--mcmc", "300"]).unwrap().unwrap().mode;
+    let both = plan_of(&["--mcmc", "300"]).unwrap().unwrap().samplers;
     assert!(
-        !both.runs_per_dim(),
+        !both.per_dim,
         "`both` must not silently pull in the per-dim sampler"
     );
-    assert!(both.runs_gate() && both.runs_hyper());
+    assert!(both.gate && both.hyper);
+}
+
+/// `all` is the ONLY mode that puts the gate and the per-dim sampler on one fit.
+/// That comparison has to be same-fit: the basis rotates between runs (cross-seed
+/// ARI 0.0365 against a same-seed floor of 1.0000), so a dim index from one fit is
+/// not the dim index from another. Before `all` existed the comparison the
+/// `posterior_dim_block` integration test calls the real test was unreachable from
+/// the CLI at all.
+#[test]
+fn all_is_the_only_mode_that_runs_gate_and_perdim_together() {
+    let s = plan_of(&["--posterior", "all", "--mcmc", "50"])
+        .unwrap()
+        .unwrap()
+        .samplers;
+    assert_eq!(
+        s,
+        Samplers {
+            gate: true,
+            hyper: true,
+            per_dim: true
+        }
+    );
+    for m in ["gate", "hyper", "both", "perdim"] {
+        let o = plan_of(&["--posterior", m, "--mcmc", "50"])
+            .unwrap()
+            .unwrap()
+            .samplers;
+        assert!(
+            !(o.gate && o.per_dim),
+            "`{m}` must not pair gate with per-dim; only `all` does"
+        );
+    }
 }
 
 #[test]

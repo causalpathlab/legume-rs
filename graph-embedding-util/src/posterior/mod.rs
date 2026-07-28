@@ -54,7 +54,7 @@ pub use hyper_sweep::{hyper_sweep, HyperSweepConfig, HyperSweepResult};
 pub use index::{build_index, BiasCalibration, ContrastiveIndex, FrozenMap, RowGrouping};
 pub use lnpdf::{poisson_ll, poisson_lnpdf, FrozenSide, NodeTerm};
 pub use run::{
-    run_posterior, PosteriorArgs, PosteriorMode, PosteriorPlan, TrackSpec, DEFAULT_PARTITION,
-    DEFAULT_SAMPLES, SIGMA2_MIN_ESS,
+    run_posterior, PosteriorArgs, PosteriorMode, PosteriorPlan, Samplers, TrackSpec,
+    DEFAULT_PARTITION, DEFAULT_SAMPLES, SIGMA2_MIN_ESS,
 };
 pub use sweep::{sweep_side, NodePosterior, SweepConfig};
