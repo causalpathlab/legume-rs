@@ -231,11 +231,17 @@ pub fn elect_longest_isoform(models: Vec<TranscriptModel>) -> Vec<TranscriptMode
     // The rule as one lexicographic key: longest wins, smaller id breaks ties.
     let key = |m: &TranscriptModel| (m.trx_len(), std::cmp::Reverse(m.transcript_id.clone()));
 
-    let mut best: FxHashMap<GeneId, TranscriptModel> = FxHashMap::default();
+    // Keyed on gene AND sequence name, for the same reason the builder above
+    // nests its map: `parse_ensembl_id` drops the `_PAR_Y` suffix, so the chrX
+    // and chrY copies of a pseudoautosomal gene share a GeneId. Electing on the
+    // id alone would put them in competition and discard one chromosome's copy
+    // — undoing the separation the builder went out of its way to keep.
+    let mut best: FxHashMap<(GeneId, Box<str>), TranscriptModel> = FxHashMap::default();
     for m in models {
-        let replace = best.get(&m.gene_id).is_none_or(|cur| key(&m) > key(cur));
+        let k = (m.gene_id.clone(), m.seqname.clone());
+        let replace = best.get(&k).is_none_or(|cur| key(&m) > key(cur));
         if replace {
-            best.insert(m.gene_id.clone(), m);
+            best.insert(k, m);
         }
     }
     best.into_values().collect()
