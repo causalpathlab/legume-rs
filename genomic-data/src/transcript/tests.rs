@@ -31,7 +31,9 @@ fn rec(
 ///
 /// Exons 1000..1199 and 1500..1699 (400 nt spliced). The coding sequence runs
 /// 1100..1599 with its stop codon written separately, GENCODE-style, at the 3'
-/// end. On the forward strand that leaves a 100 nt 5'UTR and a 100 nt 3'UTR.
+/// end. That stop codon folds into the CDS, so the forward strand leaves a
+/// 100 nt 5'UTR and a 97 nt 3'UTR — those three bases are the whole point of
+/// `stop_codon_is_part_of_the_cds`.
 fn two_exon_tx(tx: &str, gene: &str, strand: Strand) -> Vec<GffRecord> {
     // Stop codon sits at the 3' end of the CDS, which flips with the strand.
     let stop_codon = match strand {
