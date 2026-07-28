@@ -17,6 +17,9 @@ pub mod common;
 /// for the marker-space nearest-centroid call in `faba annotate` / `faba lineage` —
 /// the metric-compatible table, not β. See the module docs for why β/θ can't be used.
 pub mod marker_embedding;
+/// The exact MCMC posterior over gem's two fitted gates (identity `β_g` and
+/// velocity `δ_g`), behind `--mcmc` / `--posterior`. Entry: [`posterior::run_posterior`].
+pub mod posterior;
 /// The `faba gem` run: joint spliced+unspliced gene-count embedding over the shared
 /// `graph_embedding_util` engine (identity θ + velocity δ). Binary entry: [`run::run_gem_embedding`].
 pub mod run;

@@ -50,6 +50,9 @@ const DEFAULT_DELTA_L2: f32 = 1.0;
 pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     validate_args(args)?;
+    // Reconcile --posterior with --mcmc/--jitter BEFORE any I/O, so a
+    // contradictory pair fails in the first second rather than after the fit.
+    let posterior_plan = args.posterior.resolve(args.runtime.seed)?;
 
     let n_threads = if args.runtime.threads == 0 {
         std::thread::available_parallelism()
@@ -84,7 +87,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         args.batch_files.as_deref()
     };
 
-    run_gem_genes_bge(args, feature_kind, batch_files)
+    run_gem_genes_bge(args, feature_kind, batch_files, posterior_plan)
 }
 
 /// Load the `--genes` files into one `UnifiedData`, tagging each file's
@@ -130,6 +133,7 @@ fn run_gem_genes_bge(
     args: &GemArgs,
     feature_kind: FeatureNameKind,
     batch_files: Option<&[Box<str>]>,
+    posterior_plan: Option<graph_embedding_util::posterior::PosteriorPlan>,
 ) -> anyhow::Result<()> {
     use graph_embedding_util as ge;
 
@@ -332,8 +336,15 @@ fn run_gem_genes_bge(
     // is auto-on with a mild ridge whenever both tracks are present (unless the user
     // set `--delta-l2`) so a δ_g dictionary is always emitted for `faba annotate
     // --track velocity`; a spliced-only input keeps δ off.
-    let build_cfg = |unified: &UnifiedData| -> anyhow::Result<(ge::FitConfig, Vec<Box<str>>, f32)> {
+    // Returns the axis-derived gene names and δ ridge the dictionary writers need,
+    // plus the row→gene map and unspliced mask — the posterior anchors on genes per
+    // splice track, and re-deriving them later would both cost a second intern pass
+    // and let the two copies desync if the feature axis ever moved between.
+    type CfgParts = (ge::FitConfig, Vec<Box<str>>, f32, Vec<u32>, Vec<bool>);
+    let build_cfg = |unified: &UnifiedData| -> anyhow::Result<CfgParts> {
         let (factor, gene_names) = build_splice_factor(&unified.feature_names);
+        let (row_to_gene, unspliced_rows) =
+            (factor.row_to_gene.clone(), factor.unspliced_rows.clone());
         info!(
             "β-sharing factor: {} genes from {} count rows ({} unspliced rows); \
              splice δ → cell-axis velocity increment",
@@ -407,13 +418,13 @@ fn run_gem_genes_bge(
                 temperature: args.model.feature_softmax_temp,
             }),
         };
-        Ok((cfg, gene_names, delta_l2))
+        Ok((cfg, gene_names, delta_l2, row_to_gene, unspliced_rows))
     };
 
     // Single-pass gated fit — the softmax gate selects features DURING training (a
     // junk gene sends its gate mass to null → β̃_g ≈ 0), so there is no LRT null-call
     // or two-pass refit. The `--n-hvg` remainder (if any) is restored post-hoc.
-    let (cfg, gene_names, delta_l2) = build_cfg(&unified)?;
+    let (cfg, gene_names, delta_l2, row_to_gene, unspliced_rows) = build_cfg(&unified)?;
     let out = ge::fit(&mut unified, cfg).context("ge::fit (genes bge)")?;
     let n_genes = gene_names.len();
 
@@ -535,12 +546,20 @@ fn run_gem_genes_bge(
     // the cell latent θ. Projected genes are appended, so a marker set sees the whole
     // backend. Symmetric with the δ_g dictionary below.
     let mut trained_norm2: Vec<f32> = Vec::new();
+    // The trained per-gene β_g, kept for the velocity posterior: an unspliced row
+    // scores ⟨β_g + δ_g, e_c⟩, so sampling δ_g means holding this at its MAP. Only
+    // copied when a posterior will consume it — it is ~n_genes×H floats on a path
+    // every gem run takes.
+    let mut beta_map: Option<Vec<f32>> = None;
     {
         let vars = out.varmap.data().lock().unwrap();
         if let Some(beta) = vars.get("beta") {
             let beta_t = beta.as_tensor().to_device(&cpu)?;
             let h = beta_t.dim(1)?;
             let mut flat: Vec<f32> = beta_t.flatten_all()?.to_vec1()?;
+            if posterior_plan.is_some() {
+                beta_map = Some(flat[..n_genes * h].to_vec());
+            }
             trained_norm2 = flat
                 .chunks_exact(h)
                 .map(|r| r.iter().map(|x| x * x).sum())
@@ -837,6 +856,42 @@ fn run_gem_genes_bge(
         );
     }
 
+    // The posterior runs LAST, and only on a complete fit. Two reasons: an
+    // interrupted fit never ran phase-2, so `e_cell` is un-projected and freezing
+    // it would sample against the wrong side; and a whole-dictionary sweep takes
+    // minutes, so putting it after every normal output means a Ctrl+C here costs
+    // only the posterior tables, not the run.
+    if let Some(plan) = posterior_plan {
+        if ge::stop_flag().load(std::sync::atomic::Ordering::Relaxed) {
+            log::warn!(
+                "Skipping the posterior — the fit was interrupted, so the cell embedding \
+                 is un-projected and would be the wrong side to condition on."
+            );
+        } else if let Some(beta) = beta_map.as_deref() {
+            crate::gem::posterior::run_posterior(
+                &args.out,
+                plan,
+                &unified,
+                &out.model,
+                &crate::gem::posterior::GemTracks {
+                    row_to_gene: &row_to_gene,
+                    unspliced_rows: &unspliced_rows,
+                    gene_names: &gene_names,
+                    beta,
+                },
+            )?;
+        } else {
+            // The user asked for a posterior and is getting no tables; say why.
+            // Silence here reads as "it ran and found nothing", which is worse
+            // than the failure itself.
+            log::warn!(
+                "Skipping the posterior — the fitted model has no `beta` table, so the \
+                 velocity track has nothing to hold at its MAP. This means the fit was \
+                 not a factored (β-sharing) model."
+            );
+        }
+    }
+
     // Say what produced this prefix. gem's tables share names and shapes with
     // gem-encoder's while meaning something different — `cell_embedding.parquet`
     // is Euclidean here and a topic membership there — so a downstream step
@@ -848,6 +903,15 @@ fn run_gem_genes_bge(
         "latent".into(),
         crate::manifest::Latent::Embedding.as_str().into(),
     );
+    // Record the posterior tables when they were produced, so a consumer handed
+    // only the prefix can tell a calibrated selection is available without
+    // stat()-ing for filenames. Absent on a plain run, which is the honest signal.
+    if let Some(plan) = posterior_plan {
+        extra.insert(
+            "posterior".into(),
+            serde_json::json!(format!("{:?}", plan.mode).to_lowercase()),
+        );
+    }
     crate::manifest::write(&args.out, crate::manifest::RunKind::Embedding, extra)?;
 
     info!(

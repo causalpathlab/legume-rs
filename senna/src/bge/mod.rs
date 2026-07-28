@@ -85,15 +85,16 @@ pub struct BgeArgs {
     #[command(flatten)]
     qc: QcArgs,
 
-    // Per-gene softmax feature gate — ALWAYS ON for bge (the standard training):
-    // Ẽ_g = E_g ⊙ softmax(S_g), a per-gene SuSiE variational single-effect (spike-and-
-    // slab: categorical selection + Gaussian effect KL) over the H embedding dims + a
-    // null 'load-nothing' slot. A gene with no cell-state signal sends its mass to null
-    // and contributes ≈0 → single-pass feature selection. Temperature is the one knob.
+    // Softmax feature gate — ALWAYS ON for bge (the standard training):
+    // Ẽ_{g,h} = D · softmax_g(S_{·,h})[g] · E_{g,h}. The softmax runs over GENES within
+    // a dim, so every dim carries one unit of selection mass to distribute — each dim is
+    // a distribution over genes, and no dim can hoard. There is no null column (with no
+    // per-gene budget, an unselected gene simply takes small mass everywhere).
+    // Temperature is the one knob.
     #[arg(
         long = "feature-softmax-temp",
         default_value_t = 1.0,
-        help = "Softmax feature-gate temperature τ (< 1 sharpens the per-gene selection)."
+        help = "Softmax feature-gate temperature τ (< 1 sharpens each dim's gene distribution)."
     )]
     feature_softmax_temp: f32,
 
@@ -344,91 +345,33 @@ pub struct BgeArgs {
     )]
     nce_objective: NceObjectiveArg,
 
+    #[arg(
+        long,
+        default_value_t = 1,
+        value_name = "N",
+        help = "Seed for training and the posterior (default 1).",
+        long_help = "Seed for the fit's sampling RNG and parameter initialization,\n\
+                     and for the posterior samplers when --mcmc/--posterior is given.\n\
+                     \n\
+                     Changing it gives an INDEPENDENT fit — different initialization\n\
+                     and different minibatch order — which is what an A/B across seeds needs.\n\
+                     \n\
+                     It does NOT make a run bit-reproducible: the variational gate's\n\
+                     reparameterization noise is drawn from the device RNG, outside this stream,\n\
+                     so two runs at the same seed still differ slightly."
+    )]
+    seed: u64,
+
     #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
     device: ComputeDevice,
 
     #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
     device_no: usize,
 
-    // ─── posterior (MCMC over the fitted gate) ───────────────────────────────
-    // `--mcmc N` is the headline spelling — parallel to `-i/--epochs` for SGD,
-    // one number that says how long to run the sampler — and turning it on IS
-    // the flag: it implies `--posterior both`. `--posterior` narrows that.
-    #[arg(
-        long = "mcmc",
-        alias = "jitter",
-        value_name = "N",
-        help = "Sample the exact posterior over the fitted gate, N draws per chain\n\
-                (implies --posterior both). Off unless given.",
-        long_help = "Run MCMC over the fitted gate and write the posterior tables:\n\
-                     N is the number of RETAINED draws per chain (warmup is N/2 more),\n\
-                     the sampler's analogue of `-i/--epochs`.\n\
-                     \n\
-                     Training fits the per-gene softmax gate VARIATIONALLY and reports a point\n\
-                     estimate; this samples the SAME model exactly, against the frozen MAP cell side,\n\
-                     so selection comes with calibrated uncertainty:\n\
-                     per-dim posterior inclusion probabilities, a credible set over the dims a gene loads,\n\
-                     and the effect posterior.\n\
-                     \n\
-                     Passing this implies `--posterior both` (the full-Bayes answer);\n\
-                     use `--posterior` to ask for less.\n\
-                     Try 200 to start. Cost is roughly 0.6 core-seconds per gene per 200 draws,\n\
-                     so a whole dictionary runs for minutes — Ctrl+C returns partial results.\n\
-                     Writes {out}.{feature_pip,feature_posterior}.parquet + {out}.posterior_hyper.json.\n\
-                     `--jitter` is an accepted alias."
-    )]
-    mcmc: Option<usize>,
-
-    #[arg(
-        long = "posterior",
-        value_enum,
-        value_name = "MODE",
-        help = "Which posterior to sample: off (default) | gate | hyper | both.\n\
-                Omit and pass --mcmc N for the usual case.",
-        long_help = "Which posterior to sample after the MAP fit. Chain length comes from `--mcmc N`\n\
-                     (default 200 when only this flag is given).\n\
-                     \n\
-                       off   → no posterior; the run is byte-identical to one without these flags (default).\n\
-                       gate  → the per-gene selection posterior only (PIP, credible sets, effect posterior).\n\
-                       hyper → the Tier-1 hyperparameters only: the slab variance σ₀² and the sparsity π₀,\n\
-                               which the gate otherwise hard-codes, sampled from the data.\n\
-                       both  → both, AND the learned σ₀² is fed into the gate's slab prior.\n\
-                               That coupling is the hierarchical payoff, so `both` is more than the union\n\
-                               of the two — it is what `--mcmc` selects.\n\
-                     \n\
-                     `--posterior off` together with `--mcmc N` is an error (one turns it off, the other on)."
-    )]
-    posterior: Option<posterior::PosteriorMode>,
-
-    #[arg(
-        long = "posterior-genes",
-        default_value_t = 0,
-        value_name = "N",
-        help = "Cap the posterior to the top-N features by observed count (0 = all).",
-        long_help = "Limit the posterior to the N features carrying the most observed count mass\n\
-                     (a gene with no counts has nothing for the likelihood to move,\n\
-                     so this puts the sampling budget where the posterior is informative).\n\
-                     0 (default) samples every feature.\n\
-                     Use it to keep an exploratory run short; the un-sampled features are simply absent\n\
-                     from the output tables, not written as null."
-    )]
-    posterior_genes: usize,
-
-    #[arg(
-        long = "posterior-partition",
-        default_value_t = posterior::DEFAULT_PARTITION,
-        value_name = "N",
-        help = "Cells in the frozen partition that normalizes the Poisson rate (default 1024).",
-        long_help = "Size of the frozen negative slate: the number of cells summed in the Poisson\n\
-                     rate normalizer, drawn ONCE per run and held fixed (a slate that moved between\n\
-                     sweeps would leave the chain with no fixed target).\n\
-                     \n\
-                     This is the Monte-Carlo RESOLUTION of the normalizer, not a subsample of the data —\n\
-                     every observed count still enters the likelihood exactly.\n\
-                     Raise it on very large inputs, where the default is thin relative to the cell count;\n\
-                     cost grows linearly with it. Clamped to the cell count."
-    )]
-    posterior_partition: usize,
+    /// The shared `--posterior` / `--mcmc` flag group (see
+    /// `ge::posterior::PosteriorArgs`); `faba gem` flattens the same one.
+    #[command(flatten)]
+    posterior: ge::posterior::PosteriorArgs,
 
     #[arg(
         long,
@@ -448,7 +391,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     // Reconcile --posterior with --mcmc/--jitter BEFORE any I/O, so a
     // contradictory pair fails in the first second rather than after the fit.
-    let posterior_plan = posterior::resolve(args)?;
+    let posterior_plan = args.posterior.resolve(args.seed)?;
 
     // Input files: positional (single-modality) OR --multiome modality groups.
     // Each --multiome occurrence is one group; comma-separated files within it.
@@ -718,8 +661,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             batch_size: args.batch_size,
             num_negatives: args.num_negatives,
             learning_rate: args.learning_rate,
-            // gbe no longer exposes a --seed knob; pin the sampling RNG.
-            seed: 1,
+            seed: args.seed,
             device: args.device.to_device(args.device_no)?,
             block_size: args.block_size,
             feature_network,
@@ -904,14 +846,14 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // it would sample against the wrong side; and a whole-dictionary sweep takes
     // minutes, so putting it after every normal output means a Ctrl+C here costs
     // only the posterior tables, not the run.
-    if posterior_plan.mode != posterior::PosteriorMode::Off {
+    if let Some(plan) = posterior_plan {
         if interrupted {
             log::warn!(
                 "Skipping the posterior — the fit was interrupted, so the cell embedding \
                  is un-projected and would be the wrong side to condition on."
             );
         } else {
-            posterior::run_posterior(args, posterior_plan, &unified, &out.model)?;
+            posterior::run_posterior(args, plan, &unified, &out.model)?;
         }
     }
 

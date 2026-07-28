@@ -1,7 +1,9 @@
 //! Hierarchical hyperpriors — conjugate Gibbs draws for the prior scales the
 //! gate/sweep otherwise hold fixed. This is full Bayes on what the *variational*
-//! gate hard-codes (`GATE_EFFECT_PRIOR_VAR = 1.0`, `GATE_NULL_PRIOR = 0.9`, the
-//! ridge): learn them and pool across genes.
+//! gate hard-codes (`GATE_EFFECT_PRIOR_VAR = 1.0`, the sparsity, the ridge): learn
+//! them and pool across genes. NOTE the trained gate no longer has a null column at
+//! all (see `crate::model::SoftmaxGateSpec`); `π₀` here is this module's OWN
+//! spike-and-slab null mass, not a readout of the gate's.
 //!
 //! Each is a cheap closed-form draw from sufficient statistics, run as a **serial
 //! reduce** between the parallel per-gene/per-cell sweeps (map-reduce cadence).
@@ -20,7 +22,7 @@
 //! Tiered escalation (turn on only once the previous mixes): Tier 0 = all fixed;
 //! Tier 1 = the two global scalars σ₀² + π₀ ([`HalfCauchyVar`] + [`sample_pi0`],
 //! composed by [`super::hyper_ss`]); Tier 2 = per-dim variances under a shared
-//! prior (a `Vec<HalfCauchyVar>`) — not yet implemented.
+//! prior, a `Vec<HalfCauchyVar>` composed by [`super::dim_block`].
 
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
@@ -80,9 +82,10 @@ impl HalfCauchyVar {
 }
 
 /// Beta-Binomial global sparsity `π₀` (null mass): given `n_null` of `n_total`
-/// genes at the null column, `π₀ | · ~ Beta(a + n_null, b + n_active)`, clamped off
-/// the boundary. `(a, b)` are the Beta hyperprior counts (e.g. `(9, 1)` centers on
-/// the model's `GATE_NULL_PRIOR = 0.9` while staying weak).
+/// genes at this module's null state, `π₀ | · ~ Beta(a + n_null, b + n_active)`,
+/// clamped off the boundary. `(a, b)` are the Beta hyperprior counts; `(9, 1)`
+/// centers on 0.9, a weak prior that genes are mostly OFF. (Historically that
+/// matched the trainer's null column, which no longer exists.)
 #[must_use]
 pub fn sample_pi0(n_null: usize, n_total: usize, a: f64, b: f64, rng: &mut impl Rng) -> f64 {
     let n_active = (n_total.saturating_sub(n_null)) as f64;
@@ -91,8 +94,36 @@ pub fn sample_pi0(n_null: usize, n_total: usize, a: f64, b: f64, rng: &mut impl 
     p.clamp(PI0_EPS, 1.0 - PI0_EPS)
 }
 
+/// BIC/Occam penalty for turning `n_params` extra parameters on: `½·n·ln(m)`,
+/// with `m` the anchor's observation count.
+///
+/// Shared because the *choice* of `m` is a modelling decision, not an
+/// implementation detail: [`super::hyper_ss`] prices a whole `H`-dim slab
+/// (`n_params = H`) and [`super::dim_block`] prices one coordinate
+/// (`n_params = 1`), but both must agree on what counts as a sample. Without the
+/// penalty a null anchor's noisy draw fits about as well as zero, its inclusion
+/// reverts to the prior, and `π₀` collapses downward.
+#[must_use]
+pub(super) fn bic_penalty(n_params: f64, n_obs: usize) -> f64 {
+    0.5 * n_params * (n_obs.max(2) as f64).ln()
+}
+
+/// Numerically stable logistic, branching on the sign so neither `exp` overflows.
+/// The spike-and-slab inclusion draw in every sweep goes through this, so it lives
+/// here with the other primitives rather than being re-rolled per sampler.
+#[must_use]
+pub(super) fn sigmoid(x: f64) -> f64 {
+    if x >= 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
+}
+
 /// Per-(gene, sweep) independent RNG stream — reproducible, no stored state.
-/// Shared by the interleaved sweeps ([`super::hyper_sweep`], [`super::hyper_ss`]).
+/// Shared by every interleaved sweep ([`super::hyper_sweep`], [`super::hyper_ss`],
+/// [`super::dim_block`]).
 pub(super) fn gene_rng(seed: u64, unit: usize, sweep: usize) -> SmallRng {
     let s = seed
         ^ (unit as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
