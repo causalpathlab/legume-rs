@@ -605,15 +605,24 @@ fn run_pass(
     // is ≈ lr, so a step moves the linear predictor by `Δs ≈ lr · H · rms(e)`;
     // pinning `Δs` makes the schedule invariant to the `β ↔ θ` scale duality that
     // otherwise leaves `lr` either useless or divergent.
-    let e_rms = {
-        let ss: f64 = live
+    // `ẽ` is the ARITHMETIC mean |e|, not the RMS. A step `Δθ` moves gene `f`'s score
+    // by `Δs_f = ⟨e_f, Δθ⟩ ≈ lr·h·E|e|`, so inverting THAT is what pins `Δs` at the
+    // target. Using `√E[e²]` instead delivers `TARGET_DELTA_S/κ` with
+    // `κ = √E[e²]/E|e| ≥ 1` — it calibrates on the loudest genes while most of a
+    // cell's likelihood rides on the median one. Measured on real fits `κ` ran
+    // 2.8–66, i.e. 2–35% of the intended step, and `cor(log κ, kNN purity) = −0.93`
+    // over 12 fits: large `κ` ⇒ blocks hit the step cap ⇒ under-converged `θ`.
+    // Both estimators are scale-free (a uniform `E → αE` cancels), so this is about
+    // the TAIL, not the magnitude.
+    let e_mean = {
+        let sa: f64 = live
             .iter()
             .flat_map(|&g| &input.feat[g as usize * h..(g as usize + 1) * h])
-            .map(|x| f64::from(*x) * f64::from(*x))
+            .map(|x| f64::from(*x).abs())
             .sum();
-        (ss / (f_live * h) as f64).sqrt().max(1e-12)
+        (sa / (f_live * h) as f64).max(1e-12)
     };
-    let lr0 = TARGET_DELTA_S / (h as f64 * e_rms);
+    let lr0 = TARGET_DELTA_S / (h as f64 * e_mean);
 
     info!(
         "{} [{}] — {n_kept} node(s) × {f_live} live features (of {}; {} gate-folded), \
@@ -1166,17 +1175,18 @@ fn run_joint_pass(
     let block_bc = block_cells(s.f_live + u.f_live);
 
     // Auto-lr from the combined dictionary rms — θ sees both tracks' scale.
-    let e_rms = {
-        let ss: f64 = s
+    // Same L1 scale as the θ-only pass above — see the note there.
+    let e_mean = {
+        let sa: f64 = s
             .live
             .iter()
             .chain(u.live.iter())
             .flat_map(|&g| &input.feat[g as usize * h..(g as usize + 1) * h])
-            .map(|x| f64::from(*x) * f64::from(*x))
+            .map(|x| f64::from(*x).abs())
             .sum();
-        (ss / ((s.f_live + u.f_live) * h) as f64).sqrt().max(1e-12)
+        (sa / ((s.f_live + u.f_live) * h) as f64).max(1e-12)
     };
-    let lr0 = TARGET_DELTA_S / (h as f64 * e_rms);
+    let lr0 = TARGET_DELTA_S / (h as f64 * e_mean);
 
     info!(
         "{} [joint θ+δ] — {n_kept} cell(s) × ({}+{}) live features, blocks of {}, \
