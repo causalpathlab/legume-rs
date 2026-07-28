@@ -54,11 +54,10 @@ pub struct MetageneArgs {
         help = "Also profile non-coding genes, as a separate ncRNA track",
         long_help = "Also profile non-coding genes, as a separate ncRNA track.\n\
                      \n\
-                     Only protein-coding genes are profiled by default.\n\
                      A non-coding gene has no start or stop codon to split on.\n\
-                     Its whole body therefore becomes one undivided ncRNA track,\n\
-                     which is not on the same coordinate as the 5'UTR/CDS/3'UTR one.\n\
-                     Sites in a non-coding gene are dropped unless this is passed."
+                     Its whole body becomes one undivided ncRNA track.\n\
+                     That is not the coordinate the other three are on.\n\
+                     Reading all four as one profile compares unlike lengths."
     )]
     include_non_coding: bool,
 
@@ -183,7 +182,8 @@ struct FeatureTracks {
     non_coding: Vec<MergedFeature>,
 }
 
-/// Sort raw GFF records into the four tracks.
+/// Sort raw GFF records into the feature tracks, keeping the non-coding track
+/// only when `include_non_coding` asks for it.
 ///
 /// GENCODE writes a generic `UTR` feature rather than `five_prime_UTR` /
 /// `three_prime_UTR`, so which end a UTR record belongs to has to be decided
@@ -195,8 +195,21 @@ fn build_feature_tracks(
     records: &[GffRecord],
     include_non_coding: bool,
 ) -> anyhow::Result<FeatureTracks> {
-    let start_codons = build_codon_map(records, &FeatureType::StartCodon)?;
-    let stop_codons = build_codon_map(records, &FeatureType::StopCodon)?;
+    // Only the generic-`UTR` arm below consults the codons, and GFF3 names both
+    // UTR ends outright — so on that input the two maps would be built, cloning
+    // a record apiece, and never read. The scan stops at the first bare `UTR`,
+    // which is the first record of interest on the GTF input that does need it.
+    let needs_codons = records
+        .iter()
+        .any(|rec| rec.feature_type == FeatureType::UTR);
+    let (start_codons, stop_codons) = if needs_codons {
+        (
+            build_codon_map(records, &FeatureType::StartCodon)?,
+            build_codon_map(records, &FeatureType::StopCodon)?,
+        )
+    } else {
+        Default::default()
+    };
 
     let mut five_prime = FeatureBuilder::default();
     let mut cds = FeatureBuilder::default();
@@ -205,11 +218,8 @@ fn build_feature_tracks(
 
     for rec in records.iter() {
         if rec.gene_type != GeneType::CodingGene {
-            // Non-coding genes have no UTR/CDS split to make, so they keep
-            // their whole-gene boundaries. Off by default: that track measures
-            // position along an undivided gene body, which is not the
-            // coordinate the other three are on, so reading the four together
-            // as one profile compares lengths that mean different things.
+            // Whole-gene boundaries: there is no UTR/CDS split to make.
+            // Off by default; the reason is on `--include-non-coding`.
             if include_non_coding && rec.feature_type == FeatureType::Gene {
                 non_coding.push(rec);
             }
@@ -306,18 +316,18 @@ impl FeatureIndex {
     fn from_features(features: &[MergedFeature]) -> Self {
         let mut by_chr: FxHashMap<Box<str>, Vec<IndexedInterval>> = FxHashMap::default();
         for feature in features {
+            // Once per FEATURE, not once per interval: the lookup and the
+            // seqname clone are the same for every interval of one feature.
+            let chrom = by_chr.entry(feature.seqname.clone()).or_default();
             let mut cum_before = 0;
             for &(start, stop) in feature.intervals.iter() {
-                by_chr
-                    .entry(feature.seqname.clone())
-                    .or_default()
-                    .push(IndexedInterval {
-                        start,
-                        stop,
-                        strand: feature.strand,
-                        cum_before,
-                        total_len: feature.total_len,
-                    });
+                chrom.push(IndexedInterval {
+                    start,
+                    stop,
+                    strand: feature.strand,
+                    cum_before,
+                    total_len: feature.total_len,
+                });
                 cum_before += stop - start + 1;
             }
         }
@@ -392,9 +402,8 @@ pub struct GeneFeatureHistogram {
 ///
 /// These strings are an output contract: downstream scripts select rows by
 /// `#feature`. Spelled without apostrophes because that is what the established
-/// TSV has always emitted — the coverage writer briefly used `5'UTR`/`3'UTR`,
-/// so the same logical row was named two ways depending on whether `--bam` was
-/// passed, and a script grepping `^5UTR` silently matched nothing.
+/// TSV has always emitted; a second speller once wrote `5'UTR`/`3'UTR` for the
+/// same logical row, and a script grepping `^5UTR` silently matched nothing.
 const FEATURE_LABELS: [&str; 4] = ["5UTR", "CDS", "3UTR", "ncRNA"];
 
 impl GeneFeatureHistogram {
@@ -462,11 +471,8 @@ impl GeneFeatureHistogram {
 // Shared metagene bin grid  //
 //////////////////////////////
 
-/// The gene model and bin allocation every metagene track is measured on.
-///
-/// Built once by [`run_metagene`] so that the tracks cannot drift apart: a
-/// change to a bin floor has one place to happen, and the histogram it feeds
-/// stays on a single grid.
+/// The merged gene model and the bin width of each track, together — the whole
+/// input `count_metagene` measures sites against.
 struct MetageneGrid {
     /// Merged 5'UTR / CDS / 3'UTR intervals over protein-coding genes.
     five_prime_utr: Vec<MergedFeature>,
@@ -475,14 +481,13 @@ struct MetageneGrid {
     /// Whole-gene boundaries of non-coding genes — no UTR/CDS split to make.
     /// Empty unless `--include-non-coding` asked for the track.
     non_coding: Vec<MergedFeature>,
-    /// Bins for `[5'UTR, CDS, 3'UTR]`, proportional to each region's max
-    /// length.
-    nbins: [usize; 3],
-    /// Bins for the non-coding track, which is spread over the full
-    /// `n_genomic_bins` when it is on and is `0` wide when it is off — so a
-    /// track that was never asked for writes no rows rather than a run of
-    /// zeros a reader would have to know to ignore.
-    nbins_non_coding: usize,
+    /// Bin widths for `[5'UTR, CDS, 3'UTR, ncRNA]`, in the order the tracks are
+    /// reported. The three coding widths are proportional to each region's max
+    /// length; ncRNA gets the whole budget when it is on and `0` when it is
+    /// off, so a track nobody asked for writes no rows rather than a run of
+    /// zeros a reader would have to know to ignore. One owner for all four, so
+    /// no track can end up sized against a different grid than its neighbours.
+    nbins: [usize; 4],
 }
 
 /// Longest spliced feature in a track, the scale each region's bin share is
@@ -492,18 +497,6 @@ fn max_total_len(features: &[MergedFeature]) -> i64 {
 }
 
 impl MetageneGrid {
-    fn build(
-        gff_file: &str,
-        n_genomic_bins: usize,
-        include_non_coding: bool,
-    ) -> anyhow::Result<Self> {
-        Self::from_records(
-            &read_gff_record_vec(gff_file)?,
-            n_genomic_bins,
-            include_non_coding,
-        )
-    }
-
     fn from_records(
         records: &[GffRecord],
         n_genomic_bins: usize,
@@ -527,13 +520,12 @@ impl MetageneGrid {
             n_five_prime as usize * n_genomic_bins / ntot,
             n_cds as usize * n_genomic_bins / ntot,
             n_three_prime as usize * n_genomic_bins / ntot,
+            if include_non_coding {
+                n_genomic_bins
+            } else {
+                0
+            },
         ];
-
-        let nbins_non_coding = if include_non_coding {
-            n_genomic_bins
-        } else {
-            0
-        };
 
         Ok(Self {
             five_prime_utr,
@@ -541,7 +533,6 @@ impl MetageneGrid {
             three_prime_utr,
             non_coding,
             nbins,
-            nbins_non_coding,
         })
     }
 }
@@ -556,7 +547,7 @@ fn tally(hist: &mut [usize], iv: &IndexedInterval, pos: i64) {
 }
 
 fn count_metagene(sites: &[GenomicSite], grid: &MetageneGrid) -> GeneFeatureHistogram {
-    let [nbins_five_prime, nbins_cds, nbins_three_prime] = grid.nbins;
+    let [nbins_five_prime, nbins_cds, nbins_three_prime, nbins_non_coding] = grid.nbins;
 
     // Build feature indices
     let five_prime_idx = FeatureIndex::from_features(&grid.five_prime_utr);
@@ -567,7 +558,7 @@ fn count_metagene(sites: &[GenomicSite], grid: &MetageneGrid) -> GeneFeatureHist
     let mut five_prime_hist = vec![0usize; nbins_five_prime];
     let mut cds_hist = vec![0usize; nbins_cds];
     let mut three_prime_hist = vec![0usize; nbins_three_prime];
-    let mut non_coding_hist = vec![0usize; grid.nbins_non_coding];
+    let mut non_coding_hist = vec![0usize; nbins_non_coding];
 
     for site in sites {
         let chr = site.chr.as_ref();
@@ -596,7 +587,8 @@ fn count_metagene(sites: &[GenomicSite], grid: &MetageneGrid) -> GeneFeatureHist
 pub fn run_metagene(args: &MetageneArgs) -> anyhow::Result<()> {
     let sites = read_sites(&args.site_file)?;
 
-    let grid = MetageneGrid::build(&args.gff_file, args.num_bins, args.include_non_coding)?;
+    let records = read_gff_record_vec(&args.gff_file)?;
+    let grid = MetageneGrid::from_records(&records, args.num_bins, args.include_non_coding)?;
     let histogram = count_metagene(&sites, &grid);
     histogram.to_tsv(&args.output)?;
     info!("wrote metagene histogram to {}", args.output);

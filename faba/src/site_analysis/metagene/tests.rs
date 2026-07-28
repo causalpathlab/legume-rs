@@ -239,20 +239,33 @@ fn non_coding_genes_are_dropped_by_default() {
     let grid = MetageneGrid::from_records(&records, 60, false).expect("grid");
     assert!(grid.non_coding.is_empty());
     // Zero-wide, so `to_tsv` writes no ncRNA rows rather than 60 zeros.
-    assert_eq!(grid.nbins_non_coding, 0);
+    assert_eq!(grid.nbins[3], 0);
+
+    // …and the flag is what decides that, not the absence of such genes:
+    // asked-for-but-empty still gets its full-width track.
+    let on = MetageneGrid::from_records(&records, 60, true).expect("grid");
+    assert_eq!(on.nbins[3], 60);
 }
 
 #[test]
-fn a_coding_gene_is_profiled_whether_or_not_non_coding_is_included() {
-    // The flag adds a track; it must not disturb the three that were there.
-    let records = two_exon_gene("G", Strand::Forward);
-    for pos in [950, 1050, 2050, 2200, 1500] {
+fn a_coding_gene_keeps_its_sites_when_a_non_coding_gene_overlaps_it() {
+    // The ncRNA gene spans the whole coding one, so every coding site is also
+    // inside it. Turning the track ON must not let it claim any of them —
+    // without an overlap in the fixture the assertion could not fail either way.
+    let mut records = two_exon_gene("G", Strand::Forward);
+    records.push(non_coding_rec("NC", 900, 2300, Strand::Forward));
+
+    for pos in [950, 1050, 2050, 2200] {
         assert_eq!(
             classify(&records, pos),
             classify_with_non_coding(&records, pos, true),
-            "position {pos}"
+            "position {pos} moved when the ncRNA track was enabled"
         );
     }
+    // The intron belongs to no coding feature, so there the ncRNA gene DOES
+    // take the site once its track exists — the flag is doing something.
+    assert_eq!(classify(&records, 1500), [0, 0, 0, 0]);
+    assert_eq!(classify_with_non_coding(&records, 1500, true), [0, 0, 0, 1]);
 }
 
 ///////////////////////////////
