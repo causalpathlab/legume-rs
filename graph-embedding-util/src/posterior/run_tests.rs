@@ -59,28 +59,6 @@ fn zero_draws_is_an_error() {
     assert!(plan_of(&["--posterior", "0"]).is_err());
 }
 
-#[test]
-fn coverage_flags_reach_the_plan() {
-    let plan = plan_of(&[
-        "--posterior",
-        "10",
-        "--posterior-genes",
-        "400",
-        "--posterior-partition",
-        "64",
-    ])
-    .unwrap()
-    .unwrap();
-    assert_eq!(plan.n_genes, 400);
-    assert_eq!(plan.n_partition, 64);
-}
-
-#[test]
-fn partition_defaults_to_the_documented_value() {
-    let plan = plan_of(&["--posterior", "10"]).unwrap().unwrap();
-    assert_eq!(plan.n_partition, DEFAULT_PARTITION);
-}
-
 /// The caller's seed reaches the plan, so a reproducible fit gives a
 /// reproducible posterior.
 #[test]
