@@ -5,9 +5,8 @@
 //!
 //! Every sampler here conditions on one side held fixed, so the frozen matrix
 //! `Eᵒ` `[n_other × h]` is the design the anchors are regressed against. Two of
-//! its properties decide whether a **per-dim** readout — [`super::gate`]'s PIP,
-//! [`super::dim_block`]'s inclusion — means anything at all, and neither is
-//! visible from the chains:
+//! its properties decide whether a **per-dim** readout — [`super::dim_block`]'s
+//! inclusion — means anything at all, and neither is visible from the chains:
 //!
 //! 1. **Collinearity.** If two dims of `Eᵒ` are near-parallel, "which of them does
 //!    this anchor load" is not identifiable and independent per-dim marginals will
@@ -30,8 +29,8 @@
 //!
 //! This is a diagnostic of the **data**, not of a chain, which is why it lives
 //! here and not in [`super::diagnostics`] — every entry point there takes a draw
-//! series. The shape follows [`super::index::BiasCalibration`]: a plain struct of
-//! measured scalars, computed once and handed to the caller to report.
+//! series. The shape is deliberately plain — a struct of measured scalars, computed
+//! once and handed to the caller to report — so nothing here decides anything.
 
 use super::lnpdf::FrozenSide;
 use nalgebra::DMatrix;

@@ -132,3 +132,37 @@ fn the_eff_target_is_clamped_above_and_below() {
     let singletons: Vec<usize> = (0..64).collect();
     assert_eq!(target_eff_from_labels(&singletons, 64), MIN_TARGET_EFF);
 }
+
+//////////////////////////////////////////
+// PIP-driven confidence shrinkage (§8) //
+//////////////////////////////////////////
+
+#[test]
+fn shrinkage_scales_each_feature_row_by_its_own_weight() {
+    let dev = candle_util::candle_core::Device::Cpu;
+    let co = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (3, 2), &dev).unwrap();
+    let out = shrink_by_confidence(&co, &[1.0, 0.5, 0.0]).unwrap();
+    let got: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+    assert_eq!(got, vec![1.0, 2.0, 1.5, 2.0, 0.0, 0.0]);
+}
+
+
+/// The case measured on real data: a selection posterior estimated on far more
+/// dims than the embedding's effective rank saturates, `max_h PIP` is ≈1 for
+/// every feature, and the shrinkage becomes one constant. It must be reported as
+/// degenerate rather than applied silently.
+#[test]
+fn a_saturated_posterior_is_reported_as_degenerate() {
+    let saturated: Vec<f32> = (0..500).map(|i| 0.97 + (i % 4) as f32 * 0.005).collect();
+    let s = confidence_spread(&saturated);
+    assert!(
+        s.is_degenerate(),
+        "spread [{:.3}, {:.3}] should read as degenerate",
+        s.min,
+        s.max
+    );
+    assert_eq!(s.n_below_half, 0);
+    assert_eq!(s.n, 500);
+}
+
+

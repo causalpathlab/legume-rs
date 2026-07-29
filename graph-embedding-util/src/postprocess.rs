@@ -205,6 +205,91 @@ pub fn feature_coembedding(
     Ok((coembed, t as f32))
 }
 
+/// Shrink each co-embedded feature toward the origin by a per-feature confidence
+/// in `[0, 1]`, e.g. the phase-1 selection posterior's `max_h PIP[g, h]`.
+///
+/// **What it is, stated plainly:** a confidence-weighted radial compression. It is
+/// not a correction for anything, and it should not be described as one.
+///
+/// An earlier version of this doc justified it by a mechanism that does not hold.
+/// The reasoning went: `standardize_columns` divides every feature's score column by
+/// its own SD, floored at `SD_FLOOR`, which removes magnitude — so a signal-free
+/// feature gets a near-constant column, a near-uniform softmax over cells, and lands
+/// on the global cell centroid, the densest part of the plot. The first half is true;
+/// the conclusion is not. **Measured on the control arm: 0.0% of genes lie within 0.1
+/// cell-radii of the centroid, median distance 0.803.** There is no pile-up to undo.
+/// What this function does is *create* a concentration — at the origin — by pulling
+/// low-confidence features into it. That may still be what a caller wants, but it is
+/// a choice about how the plot reads, not a repair.
+///
+/// **Why the output side, which does still hold.** Doing it on the INPUT side
+/// instead would change `P`, and then `T` — calibrated
+/// on a 1024-feature subsample of the *unscaled* tensor — would be spent in units
+/// it was not fitted in. The module already warns about exactly that mismatch
+/// where `T` is calibrated.
+///
+/// A caller with no confidence signal should not call this at all rather than
+/// pass all-ones: an all-ones vector is a no-op, and one worth *saying* out loud,
+/// which is what the caller's report is for.
+pub fn shrink_by_confidence(coembed: &Tensor, confidence: &[f32]) -> anyhow::Result<Tensor> {
+    let (d, _h) = coembed.dims2()?;
+    anyhow::ensure!(
+        confidence.len() == d,
+        "shrink_by_confidence: {} weights for {d} features",
+        confidence.len()
+    );
+    let w = Tensor::from_slice(confidence, (d, 1), coembed.device())?;
+    Ok(coembed.broadcast_mul(&w)?)
+}
+
+/// How much a confidence vector would actually change the co-embedding, so a
+/// caller can report it instead of applying a silent no-op.
+///
+/// A selection posterior estimated on far more dims than the embedding really
+/// uses saturates: every feature loads *something*, `max_h PIP` is ≈1 for all of
+/// them, and the shrinkage multiplies by a constant. That is invisible in the
+/// output but obvious in these numbers, which is why they are returned rather
+/// than logged from inside.
+#[must_use]
+pub fn confidence_spread(confidence: &[f32]) -> ConfidenceSpread {
+    let n = confidence.len();
+    if n == 0 {
+        return ConfidenceSpread::default();
+    }
+    let mut v: Vec<f32> = confidence.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let q = |f: f64| v[((n - 1) as f64 * f).round() as usize];
+    ConfidenceSpread {
+        min: v[0],
+        p05: q(0.05),
+        median: q(0.5),
+        max: v[n - 1],
+        n_below_half: v.iter().filter(|&&x| x < 0.5).count(),
+        n,
+    }
+}
+
+/// Summary of a per-feature confidence vector — see [`confidence_spread`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConfidenceSpread {
+    pub min: f32,
+    pub p05: f32,
+    pub median: f32,
+    pub max: f32,
+    /// Features the shrinkage would pull at least halfway to the origin.
+    pub n_below_half: usize,
+    pub n: usize,
+}
+
+impl ConfidenceSpread {
+    /// `true` when the vector is so concentrated that shrinking by it is
+    /// indistinguishable from scaling everything by one constant.
+    #[must_use]
+    pub fn is_degenerate(&self) -> bool {
+        self.max - self.min < 0.05
+    }
+}
+
 /// Rescale each FEATURE's score column to unit SD over cells.
 ///
 /// Without this, one global `T` meets a score scale that varies with `‖e_f‖` —

@@ -20,9 +20,10 @@
 //! as `compute_pip` guards with `.max(1e-15)`.
 //!
 //! Tiered escalation (turn on only once the previous mixes): Tier 0 = all fixed;
-//! Tier 1 = the two global scalars σ₀² + π₀ ([`HalfCauchyVar`] + [`sample_pi0`],
-//! composed by [`super::hyper_ss`]); Tier 2 = per-dim variances under a shared
-//! prior, a `Vec<HalfCauchyVar>` composed by [`super::dim_block`].
+//! Tier 1 = the two global scalars σ₀² + π₀ ([`HalfCauchyVar`] + [`sample_pi0`]);
+//! Tier 2 = per-dim variances under a shared prior, a `Vec<HalfCauchyVar>` composed
+//! by [`super::dim_block`]. Only Tier 2 is on the CLI path — the whole-gene Tier 1
+//! sampler was retired, and these primitives are what it left behind.
 
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
@@ -94,19 +95,6 @@ pub fn sample_pi0(n_null: usize, n_total: usize, a: f64, b: f64, rng: &mut impl 
     p.clamp(PI0_EPS, 1.0 - PI0_EPS)
 }
 
-/// BIC/Occam penalty for turning `n_params` extra parameters on: `½·n·ln(m)`,
-/// with `m` the anchor's observation count.
-///
-/// Shared because the *choice* of `m` is a modelling decision, not an
-/// implementation detail: [`super::hyper_ss`] prices a whole `H`-dim slab
-/// (`n_params = H`) and [`super::dim_block`] prices one coordinate
-/// (`n_params = 1`), but both must agree on what counts as a sample. Without the
-/// penalty a null anchor's noisy draw fits about as well as zero, its inclusion
-/// reverts to the prior, and `π₀` collapses downward.
-#[must_use]
-pub(super) fn bic_penalty(n_params: f64, n_obs: usize) -> f64 {
-    0.5 * n_params * (n_obs.max(2) as f64).ln()
-}
 
 /// Numerically stable logistic, branching on the sign so neither `exp` overflows.
 /// The spike-and-slab inclusion draw in every sweep goes through this, so it lives
@@ -121,9 +109,9 @@ pub(super) fn sigmoid(x: f64) -> f64 {
     }
 }
 
-/// Per-(gene, sweep) independent RNG stream — reproducible, no stored state.
-/// Shared by every interleaved sweep ([`super::hyper_sweep`], [`super::hyper_ss`],
-/// [`super::dim_block`]).
+/// Per-(gene, sweep) independent RNG stream — reproducible, no stored state. This
+/// keying is what makes [`super::dim_block`] reproducible under any rayon schedule,
+/// so it must stay a function of `(seed, unit, sweep)` and nothing else.
 pub(super) fn gene_rng(seed: u64, unit: usize, sweep: usize) -> SmallRng {
     let s = seed
         ^ (unit as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
