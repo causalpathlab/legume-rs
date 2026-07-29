@@ -12,12 +12,12 @@ use super::traits::EssParam;
 /// drifts within the slice threshold. When this cap is hit we fall back to
 /// the current state — well-defined because `cur_lnpdf > hh` is guaranteed
 /// by `hh = ln(U) + cur_lnpdf` with `U ∈ (0,1)`.
-const MAX_BRACKET_ITERS: usize = 64;
+pub(crate) const MAX_BRACKET_ITERS: usize = 64;
 
 /// Bracket-width floor; if `phi_max − phi_min` falls below this the proposal
 /// is numerically indistinguishable from current — same fallback as the
 /// iteration cap.
-const BRACKET_MIN_WIDTH: f32 = 1e-6;
+pub(crate) const BRACKET_MIN_WIDTH: f32 = 1e-6;
 
 /// One ESS transition. Returns `(new_params, new_lnpdf)`.
 ///
