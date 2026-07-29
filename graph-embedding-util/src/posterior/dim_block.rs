@@ -376,8 +376,10 @@ fn incremental_ll(
         return multinomial_ll_at(node, off, x, d, side);
     }
 
-    // Data term: ⟨off + x·e_d, m⟩, with `off` already zero at `d`.
-    let mut data = 0.0f64;
+    // Data term: ⟨off + x·e_d, m⟩ plus the `Σ n·b_o` the collapse omits, so this
+    // agrees with `multinomial_ll_at` in absolute value and the radius guard's
+    // choice of form is not observable in a `z` logit or a slice threshold.
+    let mut data = mom.bias_dot;
     for (kk, (o, m)) in off.iter().zip(&mom.m).enumerate() {
         if kk != d {
             data += f64::from(*o) * f64::from(*m);

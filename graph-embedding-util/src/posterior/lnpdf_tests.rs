@@ -1,12 +1,16 @@
 //! The collapsed data term must be interchangeable with the edge walk.
 //!
-//! [`AnchorMoment`] drops a `Σ_pos n·b_o` constant, so the two paths do **not**
-//! agree in absolute value — and they are not supposed to. What has to hold is
-//! that every comparison a sampler actually makes is unchanged, i.e. the two
-//! differ by a constant that does not depend on `e_a`. Both consumers are
-//! differences: elliptical slice sampling compares a likelihood against a
-//! threshold derived from another likelihood, and the `z` draw uses
-//! `ll_on − ll_off`.
+//! The `⟨v, m⟩` collapse omits `Σ_pos n·b_o`, and [`AnchorMoment`] carries that term
+//! in `bias_dot` so the two paths agree in **absolute value**, not merely up to a
+//! constant.
+//!
+//! An earlier version of this file asserted only the weaker property, reasoning that
+//! both consumers are differences — a slice threshold derived from another
+//! likelihood, and the `z` draw's `ll_on − ll_off` — so a constant cancels. That is
+//! true only if both sides of a comparison take the SAME form, and the radius guard
+//! chooses per evaluation: a `z` draw whose `ll_off` at `x = 0` is inside the radius
+//! while its `ll_on` is outside compares a collapse against a walk, and the constant
+//! lands in the logit at full size.
 
 use super::*;
 
@@ -30,7 +34,7 @@ fn probe(k: f32) -> Vec<f32> {
 }
 
 #[test]
-fn the_moment_path_shifts_the_likelihood_by_a_constant() {
+fn the_moment_path_equals_the_walk() {
     let (e, b) = side_buffers();
     let side = FrozenSide { e: &e, b: &b, h: H };
     let pos: Vec<(u32, f32)> = (0..N_OTHER as u32)
@@ -43,33 +47,73 @@ fn the_moment_path_shifts_the_likelihood_by_a_constant() {
     let mom = AnchorMoment::new(&pos, &side);
     let collapsed = walk.with_moment(&mom);
 
-    // The gap must be the same at every probe — that is what "constant in e_a"
-    // means, and it is the whole claim.
-    let gaps: Vec<f64> = [0.0f32, 0.5, 1.0, -1.3, 2.7]
-        .iter()
-        .map(|&k| {
-            let x = probe(k);
-            f64::from(multinomial_ll(&x, &walk, &side))
-                - f64::from(multinomial_ll(&x, &collapsed, &side))
-        })
-        .collect();
-
-    let first = gaps[0];
-    for (i, g) in gaps.iter().enumerate() {
-        assert!(
-            (g - first).abs() < 1e-3,
-            "gap must not depend on e_a: probe {i} gave {g}, probe 0 gave {first}"
-        );
-    }
-
-    // And it really is `Σ_pos n·b_o`, not some other constant.
+    // `bias_dot` is the term the collapse omits, so it must be exactly Σ n·b_o.
     let expected: f64 = pos
         .iter()
         .map(|&(o, n)| f64::from(n) * f64::from(b[o as usize]))
         .sum();
     assert!(
-        (first - expected).abs() < 1e-3,
-        "gap {first} should be Σ n·b_o = {expected}"
+        (mom.bias_dot - expected).abs() < 1e-6,
+        "bias_dot {} should be Σ n·b_o = {expected}",
+        mom.bias_dot
+    );
+
+    // With it carried, the two forms agree outright at every probe — so which form
+    // the radius guard picked is not observable to any consumer.
+    for &k in &[0.0f32, 0.5, 1.0, -1.3, 2.7] {
+        let x = probe(k);
+        let w = f64::from(multinomial_ll(&x, &walk, &side));
+        let c = f64::from(multinomial_ll(&x, &collapsed, &side));
+        assert!(
+            (w - c).abs() / w.abs().max(1.0) < 1e-3,
+            "probe {k}: walk {w} vs collapse {c} — the forms must agree in absolute \
+             value, not up to a constant"
+        );
+    }
+}
+
+/// REGRESSION: the guard chooses per evaluation, so a single `z` logit can straddle
+/// it. With the omitted `Σ n·b_o` restored that is harmless; without it the logit is
+/// wrong by that term, which is not small — it grows with the anchor's edge count.
+///
+/// Constructed to straddle deliberately: `x = 0` sits inside the radius and the
+/// probe sits outside, which is exactly the `ll_off` / `ll_on` pair the gate draws.
+#[test]
+fn a_logit_straddling_the_safe_radius_is_not_corrupted() {
+    let (e, b) = side_buffers();
+    let side = FrozenSide { e: &e, b: &b, h: H };
+    let pos: Vec<(u32, f32)> = (0..N_OTHER as u32).map(|o| (o, 1.0 + (o % 4) as f32)).collect();
+    let partition: Vec<u32> = (0..N_OTHER as u32).collect();
+
+    let walk = NodeTerm::new(&pos, &partition, 1.0);
+    let mom = AnchorMoment::new(&pos, &side);
+    let collapsed = walk.with_moment(&mom);
+    assert!(mom.safe_radius > 0.0, "fixture needs a usable safe region");
+    assert!(
+        mom.bias_dot.abs() > 1.0,
+        "fixture's Σ n·b_o is {:.3}, too small for this test to detect the bug",
+        mom.bias_dot
+    );
+
+    let off = vec![0f32; H];
+    let inside = off.clone(); // ‖0‖ = 0, comfortably inside
+    let outside: Vec<f32> = probe(1.0)
+        .iter()
+        .map(|v| v * 100.0 * mom.safe_radius.max(1.0))
+        .collect();
+
+    // The collapsed node must produce the same logit as the all-walk node, even
+    // though `inside` takes the fast path and `outside` takes the slow one.
+    let logit_mixed = f64::from(multinomial_ll(&outside, &collapsed, &side))
+        - f64::from(multinomial_ll(&inside, &collapsed, &side));
+    let logit_walk = f64::from(multinomial_ll(&outside, &walk, &side))
+        - f64::from(multinomial_ll(&inside, &walk, &side));
+    assert!(
+        (logit_mixed - logit_walk).abs() / logit_walk.abs().max(1.0) < 1e-3,
+        "a logit straddling the radius is off by {:.3} ({logit_mixed} vs {logit_walk}); \
+         Σ n·b_o is {:.3}",
+        logit_mixed - logit_walk,
+        mom.bias_dot
     );
 }
 

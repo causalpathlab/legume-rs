@@ -61,11 +61,20 @@ impl FrozenSide<'_> {
 /// edges, and re-walking them per dim per sweep dominates everything else.
 ///
 /// **Difference from the edge walk, and the bound that keeps it safe.** The
-/// collapsed form drops the constant `Σ_pos n·b_o`, which cancels in both
-/// consumers (an elliptical-slice threshold comparison, and the `z` draw's
-/// `ll_on − ll_off`), so that part is free.
+/// collapsed form omits `Σ_pos n·b_o`, so [`Self::bias_dot`] carries it and
+/// [`multinomial_ll`] adds it back.
 ///
-/// It also cannot apply the per-edge [`SCORE_CLAMP`], and that part is **not**
+/// It would be tempting not to: the term is constant in `e_a`, and it cancels in
+/// both consumers — an elliptical-slice threshold comparison, and the `z` draw's
+/// `ll_on − ll_off`. That reasoning is **wrong**, because the choice between the
+/// collapse and the walk is made per EVALUATION, not per anchor. A `z` draw whose
+/// `ll_off` at `x = 0` sits inside the radius while its `ll_on` sits outside
+/// compares a collapsed value against a walked one, and then the constant does not
+/// cancel — it lands in the logit at full size. The same holds for a slice threshold
+/// whose current point and proposal straddle the radius. Carrying the term makes the
+/// two forms agree in absolute value, so which one ran stops being observable.
+///
+/// The collapse also cannot apply the per-edge [`SCORE_CLAMP`], and that part is **not**
 /// free. `SCORE_CLAMP` is 30 — a modelling bound, not an `exp` overflow guard at
 /// ~88 — and `clamp` is nonlinear in `e_a`, so once any score saturates the two
 /// forms stop differing by a constant. Worse, the partition term stays clamped:
@@ -81,6 +90,10 @@ pub struct AnchorMoment {
     pub m: Vec<f32>,
     /// `Σ_pos n` — the anchor's total observed count.
     pub total: f64,
+    /// `Σ_pos n·b_o` — the part of the data term the `⟨v, m⟩` collapse leaves out.
+    /// Added back so the collapsed and walked forms are equal, not merely equal up
+    /// to a constant; see the type doc for why "up to a constant" is not enough.
+    pub bias_dot: f64,
     /// Largest `‖e_a + offset‖` for which no observed edge's score can reach
     /// `±SCORE_CLAMP`, so the collapsed data term is exactly the clamped one.
     ///
@@ -94,6 +107,7 @@ impl AnchorMoment {
     pub fn new(pos: &[(u32, f32)], side: &FrozenSide) -> Self {
         let mut m = vec![0.0f32; side.h];
         let mut total = 0.0f64;
+        let mut bias_dot = 0.0f64;
         let mut max_row_norm = 0.0f32;
         let mut max_abs_b = 0.0f32;
         for &(o, n) in pos {
@@ -106,6 +120,7 @@ impl AnchorMoment {
             max_row_norm = max_row_norm.max(nrm2.sqrt());
             max_abs_b = max_abs_b.max(side.b[o as usize].abs());
             total += f64::from(n);
+            bias_dot += f64::from(n) * f64::from(side.b[o as usize]);
         }
         let headroom = SCORE_CLAMP as f32 - max_abs_b;
         let safe_radius = if max_row_norm > 0.0 && headroom > 0.0 {
@@ -118,6 +133,7 @@ impl AnchorMoment {
         Self {
             m,
             total,
+            bias_dot,
             safe_radius,
         }
     }
@@ -274,9 +290,10 @@ pub fn multinomial_ll(e_a: &[f32], node: &NodeTerm, side: &FrozenSide) -> f32 {
         r2.sqrt() <= mom.safe_radius
     });
     let (data, total) = match moment {
-        // Collapsed form: `Σ_pos n·⟨e_a + off, e_o⟩ = ⟨e_a + off, m⟩`. See
-        // `AnchorMoment` for why dropping the `Σ n·b_o` constant leaves every
-        // downstream comparison unchanged.
+        // Collapsed form: `Σ_pos n·⟨e_a + off, e_o⟩ = ⟨e_a + off, m⟩`, plus the
+        // `Σ n·b_o` the collapse leaves out — carried in `bias_dot` so this branch
+        // equals the walk outright. See `AnchorMoment` for why "equal up to a
+        // constant" is not sufficient when the guard switches per evaluation.
         Some(mom) => {
             debug_assert_eq!(mom.m.len(), side.h);
             let dot: f64 = match node.offset {
@@ -292,7 +309,7 @@ pub fn multinomial_ll(e_a: &[f32], node: &NodeTerm, side: &FrozenSide) -> f32 {
                     .map(|((a, f), m)| (f64::from(*a) + f64::from(*f)) * f64::from(*m))
                     .sum(),
             };
-            (dot, mom.total)
+            (dot + mom.bias_dot, mom.total)
         }
         None => {
             let mut data = 0.0f64;
