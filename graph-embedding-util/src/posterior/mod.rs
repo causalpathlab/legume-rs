@@ -42,6 +42,7 @@ pub mod lnpdf;
 pub mod pb_gibbs;
 pub mod pb_index;
 pub mod run;
+pub mod score;
 
 pub use diagnostics::{chain_diagnostics, scalar_diagnostics, worst_case, ChainDiag};
 pub use dim_block::{dim_block, DimBlockConfig, DimBlockResult};
