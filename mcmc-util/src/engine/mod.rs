@@ -14,6 +14,7 @@
 mod chain;
 pub mod diagnostics;
 mod elliptical_slice;
+mod elliptical_slice_batch;
 mod model;
 mod runner;
 pub mod traits;
@@ -21,6 +22,7 @@ pub mod traits;
 pub use chain::McmcChain;
 pub use diagnostics::{ess, mcse_proportion};
 pub use elliptical_slice::{elliptical_slice_step, EssSampler};
+pub use elliptical_slice_batch::{elliptical_slice_batch, BatchStep};
 pub use model::McmcModel;
 pub use runner::{run_mcmc, run_mcmc_parallel, McmcConfig};
 pub use traits::{EssParam, EssParamSummary};
