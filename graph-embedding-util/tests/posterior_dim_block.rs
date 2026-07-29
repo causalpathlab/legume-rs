@@ -42,7 +42,7 @@
 //! so this measures a different (real) deficiency than that metric does.
 
 use graph_embedding_util::posterior::{
-    dim_block, gate_posterior, DimBlockConfig, FrozenSide, GateConfig, NodeTerm,
+    dim_block, DimBlockConfig, FrozenSide, NodeTerm,
 };
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -123,7 +123,6 @@ fn per_dim_blocking_recovers_a_multi_dim_truth_the_gate_must_trade_off() {
         .collect();
 
     let res = dim_block(&nodes, &side, &DimBlockConfig::new(400, 150, 7));
-    let gate = gate_posterior(&nodes, &side, &GateConfig::new(1200, 500, 7));
 
     // Separation: mean PIP on a gene's TRUE dims vs its false ones.
     let (mut on, mut off) = (Vec::new(), Vec::new());
@@ -139,9 +138,12 @@ fn per_dim_blocking_recovers_a_multi_dim_truth_the_gate_must_trade_off() {
     }
     let (on_m, off_m) = (mean(&on), mean(&off));
 
-    // How many of a gene's true dims does each sampler actually NAME (PIP ≥ 0.5)?
-    // This is the headline comparison: the gate's row is a simplex, so it cannot
-    // put ≥ 0.5 on more than one dim however clear the truth is.
+    // How many of a gene's true dims does the sampler actually NAME (PIP ≥ 0.5)?
+    // This is the headline claim, and it is stated ABSOLUTELY: a three-dim truth
+    // must get more than one dim named. A softmax-over-dims parameterization
+    // cannot do that at any chain length, which is why the per-dim model exists —
+    // but the assertion does not need the retired single-effect sampler present to
+    // be meaningful, only the number itself.
     let named = |row: &[f32], dims: &[usize]| -> f64 {
         dims.iter().filter(|&&d| row[d] >= 0.5).count() as f64
     };
@@ -151,20 +153,10 @@ fn per_dim_blocking_recovers_a_multi_dim_truth_the_gate_must_trade_off() {
         .map(|g| named(res.pip_row(g), &truth[g]))
         .sum::<f64>()
         / N_B as f64;
-    let gate_named: f64 = block_b
-        .clone()
-        .map(|g| named(&gate[g].pip, &truth[g]))
-        .sum::<f64>()
-        / N_B as f64;
 
     let row_sum_b: f32 = block_b
         .clone()
         .map(|g| res.pip_row(g).iter().sum::<f32>())
-        .sum::<f32>()
-        / N_B as f32;
-    let gate_row_sum_b: f32 = block_b
-        .clone()
-        .map(|g| gate[g].pip.iter().sum::<f32>())
         .sum::<f32>()
         / N_B as f32;
 
@@ -178,8 +170,7 @@ fn per_dim_blocking_recovers_a_multi_dim_truth_the_gate_must_trade_off() {
 
     eprintln!(
         "dim_block: mean PIP on-dims {on_m:.3} vs off-dims {off_m:.3} | \
-         block-B true dims named (of 3): dim_block {db_named:.2} vs gate {gate_named:.2} | \
-         mean row sum: dim_block {row_sum_b:.2} vs gate {gate_row_sum_b:.2} | \
+         block-B true dims named (of 3): {db_named:.2} | mean row sum: {row_sum_b:.2} | \
          pi0 unloaded dim {:.3} vs loaded mean {loaded_pi0:.3} | \
          sigma2 {:?}",
         res.pi0[UNLOADED],
@@ -200,21 +191,18 @@ fn per_dim_blocking_recovers_a_multi_dim_truth_the_gate_must_trade_off() {
     // gate's softmax cannot do at any chain length. If this ever drops to ~1 the
     // per-dim model has silently become a single-effect again.
     assert!(
-        db_named > gate_named + 0.5,
+        db_named > 1.5,
         "per-dim blocking must name more of a multi-dim truth than the \
-         single-effect gate (dim_block {db_named:.2} vs gate {gate_named:.2} of 3)"
+         single-effect parameterization could ({db_named:.2} of 3 named)"
     );
     assert!(
         db_named > 1.0,
         "a three-dim truth must get more than one dim named, got {db_named:.2}"
     );
 
-    // (3) The rows are genuinely non-competing — the gate's sum to 1 by
-    // construction, so this is the structural difference made measurable.
-    assert!(
-        (gate_row_sum_b - 1.0).abs() < 0.05,
-        "sanity: the gate's PIP row is a simplex (got {gate_row_sum_b:.3})"
-    );
+    // (3) The rows are genuinely non-competing. A softmax-over-dims row sums to 1
+    // by construction, so a row summing past it is the structural difference made
+    // measurable — no second sampler needed to see it.
     assert!(
         row_sum_b > 1.2,
         "per-dim rows must be free to exceed 1 (got {row_sum_b:.3})"

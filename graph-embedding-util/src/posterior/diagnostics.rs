@@ -2,8 +2,8 @@
 //! `mcmc_util`'s ready-made chain diagnostics, plus the one thing they don't
 //! provide: a bracket-fallback proxy.
 //!
-//! The retained draws from [`super::sweep::NodePosterior`] are per-node chains of
-//! `θ = [e ; b]`. [`chain_diagnostics`] reports, per node:
+//! Retained draws arrive as per-node chains of `θ = [e ; b]`.
+//! [`chain_diagnostics`] reports, per node:
 //!   * **min ESS** across coordinates (`mcmc_util::ess`) — the honest summary; a
 //!     healthy chain has ESS a real fraction of the retained count.
 //!   * **stuck fraction** — the share of adjacent draws that are byte-identical.

@@ -29,6 +29,34 @@ pub struct ModelArgs {
     pub delta_l2: f32,
 
     #[arg(
+        long = "independent-delta-gate",
+        default_value_t = false,
+        help = "Let the velocity gate select dims the identity gate did not\n\
+                (--posterior runs only). Default: nested.",
+        long_help = "gem carries TWO feature-side gates and --posterior samples both: the\n\
+                     identity gate on β_g, pinned by the spliced rows, and the velocity gate\n\
+                     on δ_g, pinned by the unspliced rows with β_g carried as an offset that\n\
+                     is refreshed every sweep. This flag decides how the two relate.\n\
+                     \n\
+                     By default the velocity gate is NESTED inside the identity gate:\n\
+                     δ_g may be included on an embedding dim only where β_g already is.\n\
+                     Velocity is a deviation from the identity loading, so a gene moving\n\
+                     along a dim its identity does not load is a state the model should\n\
+                     not visit.\n\
+                     \n\
+                     Nesting also removes a real failure mode. β is pinned by the spliced\n\
+                     rows and δ by the unspliced-minus-spliced contrast, so a gene observed\n\
+                     ONLY in the unspliced track pins β+δ but neither alone; two independent\n\
+                     gates then split inclusion mass between (z_β=1, z_δ=0) and (z_β=0, z_δ=1)\n\
+                     and read confidently wrong on both. Such genes are reported as\n\
+                     unidentified and written as NaN in the δ tables either way.\n\
+                     \n\
+                     Pass this flag to sample the two gates independently, e.g. to check\n\
+                     whether any gene really does carry velocity on a dim its identity misses."
+    )]
+    pub independent_delta_gate: bool,
+
+    #[arg(
         long = "nce-objective",
         default_value_t = NceObjectiveArg::Softmax,
         value_enum,

@@ -3,7 +3,7 @@
 //! [`UnifiedData`] (so this crate stays free of file/path concerns).
 
 mod config;
-mod feature_projection;
+pub(crate) mod feature_projection;
 pub mod lift;
 pub mod lineage;
 pub mod projection;
@@ -530,10 +530,75 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // `cell_axis` / `pb_axes` borrows of `cell_model` / `cell_samplers` end
     // here, freeing them for the phase-2 `&mut` projection below.
 
+    // Phase-1 posterior. Runs HERE — after the SGD that warm-starts it, before
+    // `materialize_e_feat` bakes the dictionary — so writing the posterior means
+    // back into the Vars makes this a refinement of phase 1 rather than a second
+    // set of tables nothing reads. Everything downstream (phase 2, the
+    // dictionary, the co-embed) then sees the sampled fit.
+    let mut splice_posterior = None;
+    let pb_posterior = match config.pb_posterior.as_ref() {
+        None => None,
+        Some(pcfg) if config.feat_factor.is_some() => {
+            // gem's β-sharing side: one `β_g` per gene plus `δ_g` on the unspliced
+            // rows, i.e. TWO gates over a row→gene grouping. Sampled by the splice
+            // variant; the write-back targets `beta` / `delta`, not `e_feat`.
+            let spec = config.feat_factor.as_ref().expect("checked");
+            let pb = stacked_pb_view(&varmap, &collapsed_levels, &cell_to_pb_per_level, h)?;
+            // NOT `cell_model.e_feat`: on a factored model the training loss never
+            // touches that Var, and `materialize_e_feat` has not run yet — it is
+            // still the randn snapshot from init. Build the per-row MAP from the
+            // trained `beta`/`delta` Vars instead, so both the warm start and the
+            // fallback loading for rows no gene claims come from the actual fit.
+            let e_feat_map = materialized_splice_rows(&varmap, spec, unified.n_features(), h)?;
+            let b_feat_map: Vec<f32> = cell_model.b_feat.to_vec1()?;
+            let feat = crate::posterior::pb_index::FeatureSide {
+                e_feat: &e_feat_map,
+                b_feat: &b_feat_map,
+                feature_to_backend_row: &unified.feature_to_backend_row,
+            };
+            let tracks = crate::posterior::pb_gibbs::SpliceTracks {
+                row_to_gene: &spec.row_to_gene,
+                unspliced_rows: &spec.unspliced_rows,
+                n_genes: spec.row_to_gene.iter().copied().max().map_or(0, |m| m as usize + 1),
+                nested: config.pb_posterior_nested_delta,
+            };
+            let res = crate::posterior::pb_gibbs::pb_gibbs_splice(&pb, &feat, &tracks, h, pcfg)?;
+            write_back_splice(&varmap, &res, num_levels)?;
+            splice_posterior = Some(res);
+            None
+        }
+        Some(pcfg) => {
+            let pb = stacked_pb_view(&varmap, &collapsed_levels, &cell_to_pb_per_level, h)?;
+            let e_feat_map: Vec<f32> = cell_model.e_feat.flatten_all()?.to_vec1()?;
+            let b_feat_map: Vec<f32> = cell_model.b_feat.to_vec1()?;
+            let feat = crate::posterior::pb_index::FeatureSide {
+                e_feat: &e_feat_map,
+                b_feat: &b_feat_map,
+                feature_to_backend_row: &unified.feature_to_backend_row,
+            };
+            // Free model ⇒ a feature row IS an anchor, so no grouping.
+            let res = crate::posterior::pb_gibbs::pb_gibbs(&pb, &feat, None, h, pcfg)?;
+            write_back_posterior(&varmap, &res, num_levels)?;
+            Some(res)
+        }
+    };
+
     // Snapshot the deltaTopic β+δ into the `e_feat` field so phase-2 (and every
     // output/co-embed reader) sees a fixed materialized dictionary. No-op for a
     // free model.
     cell_model.materialize_e_feat()?;
+
+    // The posterior's feature side lands HERE, on the materialized field, not on
+    // the raw Var above — `E[z·β]` is already gated by its own selection, so
+    // feeding it through `materialize_e_feat` would apply the trained gate a
+    // second time. See `overwrite_feature_side`.
+    if let Some(res) = pb_posterior.as_ref() {
+        overwrite_feature_side(&mut cell_model, &res.mean_beta, &res.mean_b_feat, h)?;
+    }
+    if let Some(res) = splice_posterior.as_ref() {
+        let rows = scatter_gene_to_rows(res, &config, unified.n_features(), h);
+        overwrite_feature_side(&mut cell_model, &rows.0, &rows.1, h)?;
+    }
 
     // Lineage-DAG refine (gem β-sharing only; fixed velocity-KNN structure). The warm-up
     // phase 1 above yields a trained-enough dictionary: read pb-level velocity
@@ -834,6 +899,8 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         cell_lineage,
         lineage_qc,
         feature_projection,
+        pb_posterior,
+        splice_posterior,
     })
 }
 
@@ -910,7 +977,230 @@ fn trained_gene_beta(
 /// Counts come from `mu_adjusted` when the collapse produced one, matching the
 /// `pb_blobs` the model actually trained on, so held-out and trained genes are on
 /// the same scale.
-fn stacked_pb_view<'a>(
+/// Splice-model write-back: `beta` and `delta` are the gene-side Vars under
+/// β-sharing, not `e_feat` (which is a materialized snapshot rebuilt from them).
+///
+/// `delta` exists only when the model was built with a velocity offset; a run
+/// without one simply has no Var to write and its `delta_mean` is all zeros.
+fn write_back_splice(
+    varmap: &VarMap,
+    res: &crate::posterior::pb_gibbs::SpliceGibbsResult,
+    num_levels: usize,
+) -> anyhow::Result<()> {
+    use candle_util::candle_core::{Device, Tensor};
+    let vars = varmap.data().lock().expect("varmap poisoned");
+    let set = |name: &str, values: &[f32]| -> anyhow::Result<bool> {
+        let Some(var) = vars.get(name) else {
+            return Ok(false);
+        };
+        anyhow::ensure!(
+            var.elem_count() == values.len(),
+            "splice write-back for {name}: have {} values, var holds {}",
+            values.len(),
+            var.elem_count()
+        );
+        let rows = values.len() / res.h.max(1);
+        let t = Tensor::from_slice(values, (rows, res.h), &Device::Cpu)?.to_device(var.device())?;
+        var.set(&t)?;
+        Ok(true)
+    };
+    anyhow::ensure!(
+        set("beta", &res.beta_mean)?,
+        "splice write-back: the model has no `beta` var"
+    );
+    if !set("delta", &res.delta_mean)? {
+        log::debug!("splice write-back: no `delta` var (velocity off) — β only");
+    }
+    drop(vars);
+    write_back_pb_levels(varmap, &res.mean_pb, &res.mean_b_pb, res.h, num_levels)
+}
+
+/// Write the **pseudobulk** half of the phase-1 posterior back into the `VarMap`.
+///
+/// Written through the `VarMap` by name, not through `level_models[l].e_cell`:
+/// those are `Tensor`s aliasing the `Var`s' storage, and whether they observe an
+/// in-place `Var::set` is a candle implementation detail — the same reason
+/// [`stacked_pb_view`] reads by name.
+///
+/// The FEATURE half is deliberately not written here; see
+/// [`overwrite_feature_side`] for why it has to wait until after
+/// `materialize_e_feat`.
+fn write_back_posterior(
+    varmap: &VarMap,
+    res: &crate::posterior::pb_gibbs::PbGibbsResult,
+    num_levels: usize,
+) -> anyhow::Result<()> {
+    write_back_pb_levels(
+        varmap,
+        &res.mean_pb,
+        &res.mean_b_pb,
+        res.h,
+        num_levels,
+    )
+}
+
+/// The per-row phase-1 MAP for a β-sharing model, read from the trained Vars:
+/// `β_g` on a spliced row, `β_g + δ_g` on an unspliced one.
+///
+/// This exists because `cell_model.e_feat` is NOT the fit on this path — the
+/// factored loss trains `beta`/`delta` and `e_feat` stays at its random
+/// initialisation until `materialize_e_feat`, which runs after the posterior.
+/// Reading it there would warm-start the sampler from noise.
+fn materialized_splice_rows(
+    varmap: &VarMap,
+    spec: &FeatFactorSpec,
+    n_features: usize,
+    h: usize,
+) -> anyhow::Result<Vec<f32>> {
+    let vars = varmap.data().lock().expect("varmap poisoned");
+    let get = |name: &str| -> anyhow::Result<Option<Vec<f32>>> {
+        match vars.get(name) {
+            None => Ok(None),
+            Some(v) => Ok(Some(v.as_tensor().flatten_all()?.to_vec1::<f32>()?)),
+        }
+    };
+    let beta = get("beta")?
+        .ok_or_else(|| anyhow::anyhow!("factored model has no `beta` var to warm-start from"))?;
+    let delta = get("delta")?;
+    let mut out = vec![0f32; n_features * h];
+    for (uid, (&g, &unspliced)) in spec.row_to_gene.iter().zip(&spec.unspliced_rows).enumerate() {
+        if g == u32::MAX || uid >= n_features {
+            continue;
+        }
+        let (src, dst) = (g as usize * h, uid * h);
+        for k in 0..h {
+            let d = if unspliced {
+                delta.as_ref().map_or(0.0, |v| v[src + k])
+            } else {
+                0.0
+            };
+            out[dst + k] = beta[src + k] + d;
+        }
+    }
+    Ok(out)
+}
+
+/// Expand gem's per-GENE splice posterior onto the per-ROW feature axis the
+/// materialized dictionary lives on: `β_g` on a spliced row, `β_g + δ_g` on an
+/// unspliced one, and each row's own profiled intercept.
+///
+/// Genes whose `δ` is not identified contribute `β_g` alone — a prior draw has no
+/// business entering the dictionary just because it has the right shape.
+fn scatter_gene_to_rows(
+    res: &crate::posterior::pb_gibbs::SpliceGibbsResult,
+    config: &FitConfig,
+    n_features: usize,
+    h: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let mut e = vec![0f32; n_features * h];
+    let mut b = vec![0f32; n_features];
+    let Some(spec) = config.feat_factor.as_ref() else {
+        return (e, b);
+    };
+    for (uid, (&g, &unspliced)) in spec.row_to_gene.iter().zip(&spec.unspliced_rows).enumerate() {
+        if g == u32::MAX || uid >= n_features {
+            continue;
+        }
+        let (src, dst) = (g as usize * h, uid * h);
+        let use_delta = unspliced && res.delta_identified.get(g as usize).copied().unwrap_or(false);
+        for k in 0..h {
+            e[dst + k] = res.beta_mean[src + k] + if use_delta { res.delta_mean[src + k] } else { 0.0 };
+        }
+        b[uid] = res.mean_b_feat.get(g as usize).copied().unwrap_or(0.0);
+    }
+    (e, b)
+}
+
+/// Replace the materialized dictionary with the posterior mean, AFTER the gate has
+/// been baked in.
+///
+/// This cannot be a `Var::set` on `"e_feat"` before `materialize_e_feat`. For a
+/// free + gated model — which is every `senna bge` run — `e_feat_raw` aliases that
+/// Var and holds the **ungated** loading; `materialize_e_feat` then writes
+/// `gate ⊙ raw` into the `e_feat` field. The posterior mean is `E[z·β]`, already
+/// gated by its own selection, so putting it in the raw slot makes the shipped
+/// dictionary `gate² ⊙ β`: every partially down-weighted gene shrunk quadratically,
+/// no error, and identical shapes throughout.
+///
+/// The bias moves with it. `multinomial_ll` profiles the intercept out, so the
+/// sampled loading is only identified alongside `b_a*`; leaving the NCE-fitted bias
+/// in place pairs a sampled embedding with an intercept from a different objective.
+fn overwrite_feature_side(
+    model: &mut JointEmbedModel,
+    e_feat: &[f32],
+    b_feat: &[f32],
+    h: usize,
+) -> anyhow::Result<()> {
+    use candle_util::candle_core::{Device, Tensor};
+    let dev = model.e_feat.device().clone();
+    let rows = e_feat.len() / h.max(1);
+    anyhow::ensure!(
+        model.e_feat.elem_count() == e_feat.len() && model.b_feat.elem_count() == b_feat.len(),
+        "posterior feature write-back: {} loadings / {} biases against a {}×{} dictionary",
+        e_feat.len(),
+        b_feat.len(),
+        model.e_feat.elem_count() / h.max(1),
+        h
+    );
+    model.e_feat = Tensor::from_slice(e_feat, (rows, h), &Device::Cpu)?.to_device(&dev)?;
+    model.b_feat = Tensor::from_slice(b_feat, rows, &Device::Cpu)?.to_device(&dev)?;
+    Ok(())
+}
+
+/// Slice the stacked pb posterior mean back into each level's own Var.
+///
+/// Shared by both feature-side parameterizations: the pb heads are the same
+/// objects either way, and the stacked axis they came from is level-ordered, so
+/// consuming it exactly is also the check that the level sizes still agree.
+fn write_back_pb_levels(
+    varmap: &VarMap,
+    mean_pb: &[f32],
+    mean_b_pb: &[f32],
+    h: usize,
+    num_levels: usize,
+) -> anyhow::Result<()> {
+    use candle_util::candle_core::{Device, Tensor};
+    let vars = varmap.data().lock().expect("varmap poisoned");
+    let mut off = 0usize;
+    for level in 0..num_levels {
+        let name = format!("pb_l{level}_e_cell");
+        let Some(var) = vars.get(&name) else { continue };
+        let n_pb = var.elem_count() / h.max(1);
+        let end = off + n_pb * h;
+        anyhow::ensure!(
+            end <= mean_pb.len(),
+            "pb write-back for {name}: stacked axis holds {} values, level needs {end}",
+            mean_pb.len()
+        );
+        let t = Tensor::from_slice(&mean_pb[off..end], (n_pb, h), &Device::Cpu)?
+            .to_device(var.device())?;
+        var.set(&t)?;
+        // The paired bias moves with the loading: the profile likelihood
+        // maximised it out, so they are only identified together.
+        let bias_name = format!("pb_l{level}_b_cell");
+        if let Some(bvar) = vars.get(&bias_name) {
+            let (bs, be) = (off / h, end / h);
+            anyhow::ensure!(
+                bvar.elem_count() == be - bs,
+                "pb bias write-back for {bias_name}: var holds {}, level needs {}",
+                bvar.elem_count(),
+                be - bs
+            );
+            let bt = Tensor::from_slice(&mean_b_pb[bs..be], be - bs, &Device::Cpu)?
+                .to_device(bvar.device())?;
+            bvar.set(&bt)?;
+        }
+        off = end;
+    }
+    anyhow::ensure!(
+        off == mean_pb.len(),
+        "pb write-back consumed {off} of {} stacked values — level sizes disagree",
+        mean_pb.len()
+    );
+    Ok(())
+}
+
+pub(crate) fn stacked_pb_view<'a>(
     varmap: &VarMap,
     collapsed_levels: &'a [data_beans_alg::collapse_data::CollapsedOut],
     cell_to_pb_per_level: &[Vec<usize>],

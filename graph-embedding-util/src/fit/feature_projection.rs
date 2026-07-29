@@ -238,6 +238,12 @@ pub(crate) struct StackedPb<'a> {
 }
 
 impl StackedPb<'_> {
+    /// Total pseudobulk columns across every level — the length of the stacked
+    /// `bias` axis, and the size of the other side a pb-anchored sampler sees.
+    pub(crate) fn n_pb_total(&self) -> usize {
+        self.bias.len()
+    }
+
     /// Dense edge list for one backend row: every pseudobulk column of every
     /// level, on the **count** scale (`rate · size_p`). `n_pb` is ~1350 stacked at
     /// the defaults, so dense is both affordable and a genuinely better-posed

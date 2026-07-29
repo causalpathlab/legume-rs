@@ -20,7 +20,6 @@ use crate::embed_common::*;
 use data_beans_alg::hvg::{select_hvg_streaming, HvgCliArgs};
 use graph_embedding_util as ge;
 
-mod posterior;
 mod resolve_etm;
 
 use resolve_etm::resolve_etm_topics;
@@ -132,6 +131,35 @@ pub struct BgeArgs {
                      Either way Z lands in {out}.cell_embedding.parquet."
     )]
     skip_etm: bool,
+
+    #[arg(
+        long = "no-pip-shrinkage",
+        default_value_t = false,
+        help = "Do not shrink co-embedded features by their selection-posterior\n\
+                confidence (--posterior runs only).",
+        long_help = "By default, when --posterior has run, each feature's co-embedded\n\
+                     coordinate is scaled by its `max_h PIP` — the posterior probability\n\
+                     that it loads ANY embedding dim. It is applied after the softmax, so\n\
+                     the attention weights and the calibrated temperature are untouched;\n\
+                     what it does is compress low-confidence features radially toward the\n\
+                     origin.\n\
+                     \n\
+                     READ THAT LITERALLY: it is a confidence-weighted radial scaling, not a\n\
+                     correction for anything. An earlier version of this help claimed it\n\
+                     rescued signal-free genes from a pile-up on the global cell centroid.\n\
+                     Measured, there is no such pile-up — 0.0% of genes sit within 0.1\n\
+                     cell-radii of the centroid and the median distance is 0.80 — so the\n\
+                     shrinkage does not undo a concentration, it CREATES one, at the origin.\n\
+                     Whether that is what you want depends on how you plan to read the plot.\n\
+                     \n\
+                     The scaling is also only as informative as the posterior behind it. When\n\
+                     the embedding dimension far exceeds the embedding's effective rank,\n\
+                     nearly every gene loads something, `max_h PIP` saturates near 1, and\n\
+                     the weights degenerate into one constant — the run reports the weight\n\
+                     spread so that case is visible rather than silent.\n\
+                     Pass this flag to keep the raw co-embedding."
+    )]
+    no_pip_shrinkage: bool,
 
     #[arg(
         long = "num-topics",
@@ -609,6 +637,17 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             // cell-state signal sends its mass to the null slot), so bge no longer
             // holds out / re-projects any features — every gene is trained and gated.
             feature_projection: None,
+            // `--posterior N` now means N retained sweeps of the phase-1
+            // pseudobulk Gibbs, run inside `fit` and written back into the model
+            // — not a post-hoc pass over the finished fit.
+            pb_posterior_nested_delta: true,
+            pb_posterior: posterior_plan.map(|plan| {
+                ge::posterior::pb_gibbs::PbGibbsConfig::new(
+                    plan.n_samples,
+                    plan.n_samples / 2,
+                    plan.seed,
+                )
+            }),
             nce_objective: args.nce_objective.to_ge(),
             // Per-gene softmax feature gate — the SuSiE variational spike-and-slab
             // single-effect, ALWAYS ON for bge (null absorber + categorical + Gaussian
@@ -686,12 +725,29 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         // Every gene is trained + gated (no held-out projection), so the co-embed runs
         // directly on the trained ρ. The gate zeroes deselected genes' embeddings, and
         // the co-embed maps them onto the cell manifold like any other row.
+        //
+        // When the phase-1 posterior ran, each feature is additionally compressed
+        // toward the origin by its `max_h PIP` — the co-embed has no other per-feature
+        // quality signal. This is a radial scaling, NOT a fix for a centroid pile-up:
+        // measured, 0.0% of genes sit within 0.1 cell-radii of the centroid (median
+        // 0.803), so it creates a concentration rather than undoing one. See
+        // `shrink_by_confidence`. `--no-pip-shrinkage` opts out.
+        let confidence: Option<Vec<f32>> = (!args.no_pip_shrinkage)
+            .then_some(out.pb_posterior.as_ref())
+            .flatten()
+            .map(|p| {
+                p.pip
+                    .chunks_exact(p.h)
+                    .map(|row| row.iter().copied().fold(0f32, f32::max))
+                    .collect()
+            });
         ge::write_feature_coembedding(
             &args.out,
             &e_cell_cpu,
             &e_feat_cpu,
             &unified.feature_names,
             target_eff,
+            confidence.as_deref(),
         )?;
 
         // Output layout: the H-space cell embedding Z ALWAYS goes to
@@ -767,19 +823,41 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         has_cell_to_pb: false,
     })?;
 
-    // The posterior runs LAST, and only on a complete fit. Two reasons: an
-    // interrupted fit never ran phase-2, so `e_cell` is un-projected and freezing
-    // it would sample against the wrong side; and a whole-dictionary sweep takes
-    // minutes, so putting it after every normal output means a Ctrl+C here costs
-    // only the posterior tables, not the run.
-    if let Some(plan) = posterior_plan {
-        if interrupted {
+    // The posterior no longer runs here. It is phase-1's own sampler now
+    // (`FitConfig::pb_posterior`), so it happens INSIDE `fit` — before phase 2,
+    // before the co-embedding, and against the pseudobulk side rather than a
+    // frozen full-cell side. The old guard here ("skip when interrupted, because
+    // `e_cell` is un-projected") no longer applies: the pb Gibbs never reads
+    // `e_cell`. Only its tables are written here, after the fit's own outputs.
+    if let Some(post) = out.pb_posterior.as_ref() {
+        ge::eval::write_pb_posterior_tables(&args.out, post, &unified.feature_names)?;
+        ge::posterior::pb_gibbs::write_posterior_hyper_from_model(
+            &args.out,
+            post,
+            &out.varmap,
+            args.posterior.posterior.unwrap_or(0),
+            args.seed,
+        )?;
+        let worst_ess = post
+            .sigma_diag
+            .iter()
+            .chain(&post.pi0_diag)
+            .map(|d| f64::from(d.min_ess))
+            .fold(f64::INFINITY, f64::min);
+        info!(
+            "phase-1 posterior: {} sweeps retained, per-dim σ₀² median {:.4}, \
+             π₀ median {:.3}, worst hyper ESS {:.1}",
+            post.n_kept,
+            median_of(&post.sigma2),
+            median_of(&post.pi0),
+            worst_ess
+        );
+        if worst_ess < 10.0 {
             log::warn!(
-                "Skipping the posterior — the fit was interrupted, so the cell embedding \
-                 is un-projected and would be the wrong side to condition on."
+                "posterior hyper chains barely moved (min ESS {worst_ess:.1}) — the per-dim \
+                 σ₀²/π₀ are close to their priors, so read the inclusion probabilities as \
+                 weakly identified rather than as calibrated selection."
             );
-        } else {
-            posterior::run_posterior(args, plan, &unified, &out.model)?;
         }
     }
 
@@ -798,4 +876,15 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Median of a slice, for the one-line posterior summary. Empty ⇒ `NaN`, which
+/// serializes and prints as such rather than silently reading as zero.
+fn median_of(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    s[s.len() / 2]
 }

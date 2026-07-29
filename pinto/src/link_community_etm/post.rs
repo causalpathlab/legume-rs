@@ -143,7 +143,7 @@ pub fn run_inference_and_write(args: InferenceArgs) -> anyhow::Result<()> {
         "cell",
     )?;
     let (_labels, target_eff) = cell_clusters(&z_t, Some(args.n_communities))?;
-    write_feature_coembedding(args.out_prefix, &z_t, &rho_t, args.gene_names, target_eff)?;
+    write_feature_coembedding(args.out_prefix, &z_t, &rho_t, args.gene_names, target_eff, None)?;
 
     Ok(())
 }

@@ -397,6 +397,17 @@ fn run_gem_genes_bge(
             // `null_fdr: 0` = restore ALL of them (no ash-null gate; the softmax gate
             // is now the selector). Self-disables when the trained axis is the backend
             // (the default `--n-hvg 0`): nothing is held out. Cell outputs unaffected.
+            // `--posterior N` drives the phase-1 pb Gibbs over BOTH gates. Leaving
+            // this `None` while still resolving `posterior_plan` made the flag a
+            // silent no-op that the run manifest nonetheless advertised.
+            pb_posterior: posterior_plan.map(|plan| {
+                ge::posterior::pb_gibbs::PbGibbsConfig::new(
+                    plan.n_samples,
+                    plan.n_samples / 2,
+                    plan.seed,
+                )
+            }),
+            pb_posterior_nested_delta: !args.model.independent_delta_gate,
             feature_projection: Some(ge::FeatureProjectionConfig {
                 ridge: ge::DEFAULT_PROJECTION_RIDGE,
                 calib_ridge: ge::DEFAULT_PROJECTION_CALIB_RIDGE,
@@ -423,9 +434,31 @@ fn run_gem_genes_bge(
     // Single-pass gated fit — the softmax gate selects features DURING training (a
     // junk gene sends its gate mass to null → β̃_g ≈ 0), so there is no LRT null-call
     // or two-pass refit. The `--n-hvg` remainder (if any) is restored post-hoc.
-    let (cfg, gene_names, delta_l2, row_to_gene, unspliced_rows) = build_cfg(&unified)?;
+    // `row_to_gene` / `unspliced_rows` now travel to the sampler inside `FitConfig`
+    // (`feat_factor`), so nothing outside `fit` re-derives the splice keying.
+    let (cfg, gene_names, delta_l2, _row_to_gene, _unspliced_rows) = build_cfg(&unified)?;
     let out = ge::fit(&mut unified, cfg).context("ge::fit (genes bge)")?;
     let n_genes = gene_names.len();
+
+    // Both gates' posteriors, keyed by gene so they join against the β dictionary.
+    if let Some(post) = out.splice_posterior.as_ref() {
+        ge::eval::write_splice_posterior_tables(&args.out, post, &gene_names)?;
+        ge::posterior::pb_gibbs::write_splice_posterior_hyper(
+            &args.out,
+            post,
+            &out.varmap,
+            args.posterior.posterior.unwrap_or(0),
+            args.runtime.seed,
+        )?;
+        info!(
+            "phase-1 splice posterior: {} sweeps; β π₀ median {:.3}, δ π₀ median {:.3}; \
+             {} gene(s) with an unidentified δ",
+            post.n_kept,
+            median_f64(&post.beta_pi0),
+            median_f64(&post.delta_pi0),
+            post.delta_identified.iter().filter(|&&x| !x).count(),
+        );
+    }
 
     // On interrupt (Ctrl+C) `fit()` skips phase-2 + lineage, so the outputs below are
     // partial. gem has no heavy post-fit stage to skip (unlike bge's co-embed/ETM), so
@@ -545,20 +578,15 @@ fn run_gem_genes_bge(
     // the cell latent θ. Projected genes are appended, so a marker set sees the whole
     // backend. Symmetric with the δ_g dictionary below.
     let mut trained_norm2: Vec<f32> = Vec::new();
-    // The trained per-gene β_g, kept for the velocity posterior: an unspliced row
-    // scores ⟨β_g + δ_g, e_c⟩, so sampling δ_g means holding this at its MAP. Only
-    // copied when a posterior will consume it — it is ~n_genes×H floats on a path
-    // every gem run takes.
-    let mut beta_map: Option<Vec<f32>> = None;
+    // β_g no longer needs to be snapshotted for the velocity posterior: the δ block
+    // now carries β as a per-anchor offset refreshed EVERY sweep inside `fit`,
+    // rather than against a one-time MAP copy taken out here.
     {
         let vars = out.varmap.data().lock().unwrap();
         if let Some(beta) = vars.get("beta") {
             let beta_t = beta.as_tensor().to_device(&cpu)?;
             let h = beta_t.dim(1)?;
             let mut flat: Vec<f32> = beta_t.flatten_all()?.to_vec1()?;
-            if posterior_plan.is_some() {
-                beta_map = Some(flat[..n_genes * h].to_vec());
-            }
             trained_norm2 = flat
                 .chunks_exact(h)
                 .map(|r| r.iter().map(|x| x * x).sum())
@@ -855,41 +883,11 @@ fn run_gem_genes_bge(
         );
     }
 
-    // The posterior runs LAST, and only on a complete fit. Two reasons: an
-    // interrupted fit never ran phase-2, so `e_cell` is un-projected and freezing
-    // it would sample against the wrong side; and a whole-dictionary sweep takes
-    // minutes, so putting it after every normal output means a Ctrl+C here costs
-    // only the posterior tables, not the run.
-    if let Some(plan) = posterior_plan {
-        if ge::stop_flag().load(std::sync::atomic::Ordering::Relaxed) {
-            log::warn!(
-                "Skipping the posterior — the fit was interrupted, so the cell embedding \
-                 is un-projected and would be the wrong side to condition on."
-            );
-        } else if let Some(beta) = beta_map.as_deref() {
-            crate::gem::posterior::run_posterior(
-                &args.out,
-                plan,
-                &unified,
-                &out.model,
-                &crate::gem::posterior::GemTracks {
-                    row_to_gene: &row_to_gene,
-                    unspliced_rows: &unspliced_rows,
-                    gene_names: &gene_names,
-                    beta,
-                },
-            )?;
-        } else {
-            // The user asked for a posterior and is getting no tables; say why.
-            // Silence here reads as "it ran and found nothing", which is worse
-            // than the failure itself.
-            log::warn!(
-                "Skipping the posterior — the fitted model has no `beta` table, so the \
-                 velocity track has nothing to hold at its MAP. This means the fit was \
-                 not a factored (β-sharing) model."
-            );
-        }
-    }
+    // The posterior no longer runs here. It is phase-1's own sampler now
+    // (`FitConfig::pb_posterior`), so it happens INSIDE `fit`, against the
+    // pseudobulk side. gem's β-sharing feature side is not wired to it yet — see
+    // the warning `fit` emits — so a `--posterior` on this path is currently a
+    // no-op rather than a post-hoc pass over the finished fit.
 
     // Say what produced this prefix. gem's tables share names and shapes with
     // gem-encoder's while meaning something different — `cell_embedding.parquet`
@@ -1089,4 +1087,14 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
         args.model.embedding_dim
     );
     Ok(())
+}
+
+/// Median of a slice, for the one-line posterior summary. Empty ⇒ `NaN`.
+fn median_f64(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    s[s.len() / 2]
 }
