@@ -62,7 +62,19 @@ pub struct ModelArgs {
         value_enum,
         help = "NCE objective for phase-1 training:\n\
                 softmax (InfoNCE — negatives compete in one softmax; sharper on\n\
-                dense pseudobulk data; default) or logistic (per-pair SGNS)."
+                dense pseudobulk data; default) or logistic (per-pair SGNS).",
+        long_help = "Which objective phase-1 SGD trains the feature side with.\n\
+                     `softmax` (default) is sampled-softmax / InfoNCE: the positive competes\n\
+                     with its negatives in one distribution, which separates cell types better\n\
+                     on dense pseudobulk counts. `logistic` is the per-pair SGNS loss.\n\
+                     \n\
+                     `logistic` CANNOT be combined with `--posterior`. The sampler's likelihood\n\
+                     is the profiled Poisson, whose normalizer is the same estimand as\n\
+                     sampled-softmax — dividing it by the anchor total gives InfoNCE exactly —\n\
+                     but SGNS is a sum of independent per-pair decisions with no logsumexp\n\
+                     anywhere. Sampling a logistic fit with it would report a posterior for a\n\
+                     different model, so the combination is a hard error rather than a silent\n\
+                     mismatch."
     )]
     pub nce_objective: NceObjectiveArg,
 
@@ -156,9 +168,9 @@ pub struct CollapseArgs {
 
     #[arg(
         long = "n-hvg",
-        default_value_t = 0,
-        help = "Optional HVG weighting: the top-N highly-variable genes carry the pseudobulk\n\
-                projection (default 0 = every gene carries it; the softmax gate selects).",
+        default_value_t = 5000,
+        help = "HVG weighting: the top-N highly-variable genes carry the pseudobulk\n\
+                projection (default 5000, matching `senna bge`; 0 = every gene carries it).",
         long_help = "Optional gene-level HVG weighting, with the SAME meaning as in `senna bge`.\n\
                      Selects the top-N most variable GENES (NB dispersion-trend, spliced+unspliced\n\
                      pooled, both tracks of a gene together so the β-sharing factorization stays\n\
@@ -175,10 +187,16 @@ pub struct CollapseArgs {
                      and the fit is no longer smaller or faster for setting it — that was the one\n\
                      thing the hard cut bought.\n\
                      \n\
-                     Defaults to `0`: every gene carries the projection and the per-gene softmax\n\
-                     FEATURE GATE does the selecting (a junk gene simply takes small mass in every\n\
-                     dim → β̃_g ≈ 0). Set `--n-hvg > 0` to focus the pseudobulk geometry on the\n\
-                     variable genes (e.g. 5000, matching `senna bge` / `pinto`)."
+                     Defaults to `5000`, the same default `senna bge` and `pinto` carry. It used\n\
+                     to default to 0, which was the right answer while this flag DROPPED genes —\n\
+                     there, 0 meant `keep everything`. Now that it only weights, 0 means `let\n\
+                     depth and abundance decide where the pseudobulks land`, which is a weaker\n\
+                     default, not a safer one.\n\
+                     \n\
+                     Pass `--n-hvg 0` to give every gene equal projection weight. That is a\n\
+                     reasonable choice — the per-gene softmax FEATURE GATE still selects during\n\
+                     training, so nothing is lost from the model either way — but it lets the\n\
+                     partition be shaped by whatever is most abundant rather than by what varies."
     )]
     pub n_hvg: usize,
 
@@ -326,7 +344,11 @@ pub struct TrainArgs {
                      then lifts a per-cell pseudotime + fate (`{out}.dag_pseudotime.parquet` / `{out}.dag_fate.parquet`).\n\
                      Off by default — the per-cell embedding is then byte-identical to a plain run;\n\
                      turning it ON changes the embedding (the second pass).\n\
-                     Only meaningful with spliced+unspliced input (β-sharing)."
+                     Only meaningful with spliced+unspliced input (β-sharing).\n\
+                     \n\
+                     CANNOT be combined with `--posterior`, which REPLACES phase-1 training\n\
+                     rather than refining it — there is then no trained fit for the second pass\n\
+                     to refine. That combination is a hard error, not a silent skip."
     )]
     pub lineage_dag: bool,
 
