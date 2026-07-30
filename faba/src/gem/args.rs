@@ -157,34 +157,47 @@ pub struct CollapseArgs {
     #[arg(
         long = "n-hvg",
         default_value_t = 0,
-        help = "Optional HVG cut: keep the top-N highly-variable genes (default 0 = train ALL genes; the softmax gate selects)",
-        long_help = "Optional gene-level HVG feature filter.\n\
-                     Selects the top-N most variable GENES (NB dispersion-trend, spliced+unspliced pooled)\n\
-                     and drops the rest — both the spliced and unspliced rows of a dropped gene go together\n\
-                     so the β-sharing factorization stays aligned.\n\
-                     It shrinks the dictionary and speeds the fit; the `--n-hvg` remainder is restored post-hoc\n\
-                     by the held-out-feature projection (with velocity).\n\
-                     Defaults to `0`: train ALL genes and let the per-gene softmax FEATURE GATE do the selecting\n\
-                     (a junk gene simply takes small mass in every dim → β̃_g ≈ 0), no HVG cut needed. This is the recommended path;\n\
-                     set `--n-hvg > 0` only for a fixed smaller dictionary (e.g. 5000, matching `senna bge` / `pinto`)."
+        help = "Optional HVG weighting: the top-N highly-variable genes carry the pseudobulk\n\
+                projection (default 0 = every gene carries it; the softmax gate selects).",
+        long_help = "Optional gene-level HVG weighting, with the SAME meaning as in `senna bge`.\n\
+                     Selects the top-N most variable GENES (NB dispersion-trend, spliced+unspliced\n\
+                     pooled, both tracks of a gene together so the β-sharing factorization stays\n\
+                     aligned) and gives the rest projection weight ZERO.\n\
+                     \n\
+                     WEIGHTS, DOES NOT DROP. The non-selected genes sit out the basis the multilevel\n\
+                     pseudobulk partition is built from, but they stay on the feature axis: still\n\
+                     trained, still gated, still present in the dictionary, the δ_g velocity table\n\
+                     and `--posterior`'s anchor set. So the selection shapes WHERE the pseudobulks\n\
+                     land without deciding which genes the model may use.\n\
+                     \n\
+                     This changed: `--n-hvg N` used to hard-subset the feature axis, which made a gem\n\
+                     run and a `senna bge` run at the same N different experiments. It no longer does,\n\
+                     and the fit is no longer smaller or faster for setting it — that was the one\n\
+                     thing the hard cut bought.\n\
+                     \n\
+                     Defaults to `0`: every gene carries the projection and the per-gene softmax\n\
+                     FEATURE GATE does the selecting (a junk gene simply takes small mass in every\n\
+                     dim → β̃_g ≈ 0). Set `--n-hvg > 0` to focus the pseudobulk geometry on the\n\
+                     variable genes (e.g. 5000, matching `senna bge` / `pinto`)."
     )]
     pub n_hvg: usize,
 
     #[arg(
         long = "must-train-features",
         value_name = "FILE",
-        help = "Genes to TRAIN on regardless of whether they make the HVG cut",
-        long_help = "Force-include list: these genes enter the FIT\n\
-                     even when they do not make the `--n-hvg` cut.\n\
-                     UNIONed with the HVG selection so a named gene is always trained in-model.\n\
-                     Both the spliced and unspliced rows of a kept gene are kept together,\n\
-                     so the β-sharing factorization stays aligned.\n\
+        help = "Genes forced into the pseudobulk projection basis even if not HVGs",
+        long_help = "Force-include list: these genes are UNIONed into the `--n-hvg` selection, so\n\
+                     they carry projection weight 1.0 even when their variance does not earn it.\n\
+                     Both the spliced and unspliced rows of a named gene come along, so the\n\
+                     β-sharing factorization stays aligned.\n\
                      \n\
-                     This is about TRAINED vs PROJECTED, not presence:\n\
-                     a gene that misses the HVG cut still gets a β in `{out}.beta_feature_embedding.parquet`,\n\
-                     but a post-hoc PROJECTED one (the held-out-feature regression), not an in-model estimate.\n\
-                     Name it here and it is fit in-model instead.\n\
-                     The `trained` column of `{out}.gene_qc.parquet` says which each gene got.\n\
+                     NARROWER THAN THE NAME SUGGESTS, since `--n-hvg` started weighting rather\n\
+                     than dropping. Every gene is now trained in-model whatever you pass here —\n\
+                     there is no trained-vs-projected split left to force, and the held-out\n\
+                     feature regression no longer runs at all. What this still does is decide\n\
+                     which genes shape WHERE the pseudobulks land. Useful when a curated panel\n\
+                     is biologically important but not variable enough to make the cut; useless\n\
+                     as a way to get a gene into the output, because it is already there.\n\
                      \n\
                      Format is inferred from the extension: .txt / .tsv / .csv / .parquet, optionally gzipped.\n\
                      One gene per row;\n\
@@ -200,25 +213,25 @@ pub struct CollapseArgs {
     #[arg(
         long = "markers",
         value_name = "FILE",
-        help = "Marker panel this embedding will be annotated with — force-trained, like \
-                --must-train-features (a no-op at the default --n-hvg 0)",
+        help = "Marker panel this embedding will be annotated with — forced into the\n\
+                projection basis, like --must-train-features (a no-op at --n-hvg 0)",
         long_help = "The `gene<TAB>celltype` marker panel that `faba annotate` / `faba lineage --markers`\n\
-                     will later score against this embedding.\n\
-                     Its genes are UNIONed into `--must-train-features`,\n\
-                     i.e. trained in-model regardless of the `--n-hvg` cut.\n\
+                     will later score against this embedding. Its genes are UNIONed into\n\
+                     `--must-train-features`, so they carry projection weight regardless of the\n\
+                     `--n-hvg` selection.\n\
                      \n\
-                     Like `--must-train-features`, this is a NO-OP at the default `--n-hvg 0`:\n\
-                     every gene is trained there anyway, so the panel is on the trained axis by construction.\n\
-                     It matters only when you set `--n-hvg > 0` and the HVG cut could drop a marker.\n\
+                     THE FAILURE MODE THIS EXISTED FOR IS GONE. It was written when `--n-hvg`\n\
+                     hard-subsetted the feature axis: a marker that missed the cut was ABSENT\n\
+                     from `{out}.feature_embedding.parquet` — the table the annotators read — so\n\
+                     it silently left the panel, and a cell type that entered with 20 markers and\n\
+                     scored on 1 still produced a confident-looking call. `--n-hvg` now weights\n\
+                     instead of dropping, so every marker is on the trained axis by construction\n\
+                     and cannot silently leave.\n\
                      \n\
-                     This exists because the two ends of the pipeline are easy to leave inconsistent.\n\
-                     The embedding writes only its TRAINED feature rows to `{out}.feature_embedding.parquet`,\n\
-                     and that is the table the annotators read —\n\
-                     so a marker that misses the HVG cut is not merely down-weighted,\n\
-                     it is ABSENT, and it silently leaves the panel.\n\
-                     A cell type that entered with 20 markers and scores on 1 still produces a confident-looking call.\n\
-                     Naming the panel here removes the failure mode:\n\
-                     the genes the calls will be made on are, by construction, the genes the model fit.\n\
+                     What remains is a modelling nudge, not a safety net: naming the panel biases\n\
+                     the pseudobulk geometry toward separating the compartments the panel will\n\
+                     later call. Read `annotate`'s agreement as a check on the grouping rather\n\
+                     than an independent confirmation — which is what the run already logs.\n\
                      \n\
                      Same format and lenient name matching as --must-train-features (the celltype column is ignored here);\n\
                      pass the SAME file you will pass to `faba annotate --markers`."
