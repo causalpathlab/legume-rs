@@ -29,19 +29,37 @@ pub struct PosteriorArgs {
         value_name = "N",
         num_args = 0..=1,
         default_missing_value = "200",
-        help = "Sample phase 1 instead of stopping at its point estimate, N retained\n\
-                sweeps (bare --posterior uses 200). Off unless given.",
-        long_help = "Replace phase 1's SGD point estimate with a sampled one. N is the number of\n\
-                     RETAINED sweeps (warmup is N/2 more), the sampler's analogue of `-i/--epochs`.\n\
-                     Bare `--posterior` uses 200. Omit it and the run is byte-identical to one\n\
-                     built before this existed.\n\
+        help = "SAMPLE phase 1 instead of training it — N retained sweeps, and SGD\n\
+                does not run (bare --posterior uses 200). Off unless given.",
+        long_help = "Phase 1 is SGD XOR sampling, and this flag picks sampling. SGD does NOT\n\
+                     run: --epochs keeps its value but stops applying to this phase. N is the\n\
+                     number of RETAINED sweeps (warmup is N/2 more), the sampler's analogue of\n\
+                     `-i/--epochs`. Bare `--posterior` uses 200. Omit the flag entirely and the\n\
+                     run is byte-identical to one built before this existed.\n\
                      \n\
-                     This is a two-sided blocked Gibbs over the PSEUDOBULK model, warm-started\n\
-                     from the SGD fit and run before phase 2. It alternates the gene side given\n\
-                     the pseudobulks and the pseudobulks given the genes, over every collapse\n\
-                     level at once, and writes its posterior means back into the model — so the\n\
-                     dictionary, phase 2 and the co-embedding all read the sampled fit rather\n\
-                     than a second set of tables.\n\
+                     WHY EXCLUSIVE, rather than sampling around the SGD fit. An initialization\n\
+                     cannot bias a CONVERGED chain — it only sets burn-in — so warm-starting\n\
+                     from an optimum is either harmless or fatal. It is fatal here: when the\n\
+                     embedding's effective rank is far below its dimension the surplus\n\
+                     directions have a flat likelihood, the chain random-walks in them, and\n\
+                     nothing washes out at any practical sweep count. The output would then\n\
+                     describe curvature around wherever SGD landed rather than a posterior. The\n\
+                     price is that burn-in is now yours to check, which is what the reported R̂\n\
+                     is for.\n\
+                     \n\
+                     This is a two-sided blocked Gibbs over the PSEUDOBULK model, run before\n\
+                     phase 2. It alternates the gene side given the pseudobulks and the\n\
+                     pseudobulks given the genes, over every collapse level at once, and writes\n\
+                     its posterior means back into the model — so the dictionary, phase 2 and\n\
+                     the co-embedding all read the sampled fit rather than a second set of\n\
+                     tables. Phase 2 still runs: it is an analytical Poisson-MAP projection, not\n\
+                     SGD.\n\
+                     \n\
+                     Requires the pure-pseudobulk phase 1 (--phase1-cells-per-pb 0, the\n\
+                     default): a cell axis is trained only by SGD, so there is no cell block to\n\
+                     sample and one would be left at its initialization. Cannot be combined\n\
+                     with --lineage-dag, which refines a trained fit. Both are hard errors\n\
+                     rather than silent degradations.\n\
                      \n\
                      Selection lives on the feature side: each (gene, dim) gets a posterior\n\
                      inclusion probability, alongside the per-dim slab variance σ₀h² and sparsity\n\
@@ -61,9 +79,12 @@ pub struct PosteriorArgs {
                      stop discriminating. The run reports effective rank, per-dim hypers and\n\
                      their ESS so that case is visible.\n\
                      \n\
-                     Cost scales with H likelihood passes per anchor per sweep, so a whole\n\
-                     dictionary runs for a long time — Ctrl+C returns partial results, and a\n\
-                     smaller N is the way to shorten an exploratory run.\n\
+                     Cost is one column pass per dim per sweep over the whole anchor axis, so a\n\
+                     full dictionary runs for a long time — Ctrl+C returns partial results, and\n\
+                     a smaller N is the way to shorten an exploratory run. The run reports its\n\
+                     own bracket-fallback count; a large fraction there means coordinates are\n\
+                     stalling rather than moving, and the numbers should not be read as a\n\
+                     converged posterior.\n\
                      Writes {out}.feature_pip.parquet + {out}.feature_posterior_mean.parquet\n\
                      (gem: one pair per gate, keyed by gene).\n\
                      `--mcmc` and `--jitter` are accepted aliases."

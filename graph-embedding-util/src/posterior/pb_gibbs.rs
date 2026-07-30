@@ -133,6 +133,18 @@ pub(crate) fn pb_gibbs(
     // anchors this run samples; the pb side starts at its own MAP.
     let mut e_gene = warm_start_genes(feat, anchors, n_anchors, h);
     let mut e_pb = pb.theta.clone();
+    // Intercepts are LIVE, not snapshotted. Each block profiles out its own anchor's
+    // intercept analytically, so after a block the just-sampled side's biases are known
+    // exactly — and the OTHER side then has to score against those, not against a
+    // value fitted before any sampling happened. Under a warm start the difference is
+    // small because the snapshot was an SGD fit; with no SGD to snapshot there is
+    // nothing there but the initialization, which is why this cannot stay frozen.
+    //
+    // Note these are PROFILE steps, not draws: the conditional maximizer plugged in,
+    // i.e. Bayes-EM inside the Gibbs sweep. The write-back has always done exactly this
+    // once at the end; carrying it into the loop is the same operation, not a new one.
+    let mut b_pb_live = pair.by_feature.other_b.clone();
+    let mut b_row_live = pair.by_pb.other_b.clone();
     // Scratch for the row-indexed view of the gene side, rebuilt each sweep.
     let mut e_rows = feat.e_feat.to_vec();
 
@@ -165,7 +177,7 @@ pub(crate) fn pb_gibbs(
         // other side's current state that many times over.
         let side_pb = FrozenSide {
             e: &e_pb,
-            b: &pair.by_feature.other_b,
+            b: &b_pb_live,
             h,
         };
         let moments: Vec<AnchorMoment> = pair
@@ -201,6 +213,10 @@ pub(crate) fn pb_gibbs(
         // sweep resumes the chain rather than restarting cold.
         e_gene.copy_from_slice(&g.mean_beta);
         z_gene = Some(g.final_z.clone());
+        // One term on this path, so `b_profiled` is one intercept per anchor. Scatter
+        // it to rows the same way the loadings are: rows this run does not sample keep
+        // their phase-1 value rather than being dropped.
+        scatter_to_rows(&g.b_profiled, anchors, feat.b_feat, 1, &mut b_row_live);
 
         if keep {
             for (acc, v) in pip_acc.iter_mut().zip(&g.pip) {
@@ -227,7 +243,7 @@ pub(crate) fn pb_gibbs(
         // Every dim is on: a pseudobulk is a location, not a selection.
         let side_gene = FrozenSide {
             e: &e_rows,
-            b: &pair.by_pb.other_b,
+            b: &b_row_live,
             h,
         };
         let pb_moments: Vec<AnchorMoment> = pair
@@ -253,6 +269,11 @@ pub(crate) fn pb_gibbs(
         pb_cfg.transitions_per_dim = cfg.transitions_per_dim;
         let p = dim_block(&pb_nodes, &side_gene, &pb_cfg);
         e_pb.copy_from_slice(&p.mean_beta);
+        // The pb intercepts absorb the exposure: `T_p` is a pseudobulk's total COUNT
+        // (edges already carry `rate · size_p`), so the profiled value is the whole
+        // `b_pb + ln size_p` the score needs, not just the free part. That is why this
+        // can replace `other_b` outright without re-adding `ln size_p`.
+        b_pb_live.copy_from_slice(&p.b_profiled);
 
         if keep {
             for (acc, v) in pb_acc.iter_mut().zip(&p.mean_beta) {
@@ -287,9 +308,14 @@ pub(crate) fn pb_gibbs(
     // Recover the intercepts the profile likelihood maximised out, against the
     // POSTERIOR-MEAN sides — the loadings and the biases have to describe the same
     // model, or every downstream rate is off by a per-anchor factor.
+    //
+    // The other side's biases come from the LIVE buffers, i.e. where the chain ended,
+    // not from the pre-sampling snapshot. Profiling against the snapshot would pair a
+    // sampled embedding with an intercept fitted before any sampling ran, which is the
+    // mismatch this whole profiling scheme exists to avoid.
     let side_pb_final = FrozenSide {
         e: &mean_pb,
-        b: &pair.by_feature.other_b,
+        b: &b_pb_live,
         h,
     };
     let mean_b_feat: Vec<f32> = (0..n_anchors)
@@ -308,7 +334,7 @@ pub(crate) fn pb_gibbs(
     scatter_to_rows(&mean_beta, anchors, feat.e_feat, h, &mut e_rows);
     let side_rows_final = FrozenSide {
         e: &e_rows,
-        b: &pair.by_pb.other_b,
+        b: &b_row_live,
         h,
     };
     let mean_b_pb: Vec<f32> = (0..n_pb)
@@ -781,6 +807,12 @@ pub(crate) fn pb_gibbs_splice(
     let mut e_delta = vec![0f32; n_genes * h];
     let mut e_pb = pb.theta.clone();
     let mut e_rows = feat.e_feat.to_vec();
+    // Intercepts are LIVE here for the same reason as on the plain path: each block
+    // profiles its own anchor's intercept out exactly, so the other side must score
+    // against that rather than against a pre-sampling snapshot. See the plain path's
+    // note on why this is a profile step and not a draw.
+    let mut b_pb_live = beta_pair.by_feature.other_b.clone();
+    let mut b_row_live = beta_pair.by_pb.other_b.clone();
     // Inclusion state carried between outer sweeps, one per gate — without it the
     // ESS branch is unreachable and every draw comes from the prior.
     let (mut z_beta, mut z_delta): (Option<Vec<bool>>, Option<Vec<bool>>) = (None, None);
@@ -797,7 +829,7 @@ pub(crate) fn pb_gibbs_splice(
         let keep = sweep >= cfg.burnin;
         let side_pb = FrozenSide {
             e: &e_pb,
-            b: &beta_pair.by_feature.other_b,
+            b: &b_pb_live,
             h,
         };
 
@@ -873,13 +905,17 @@ pub(crate) fn pb_gibbs_splice(
         );
         e_delta.copy_from_slice(&d.mean_beta);
         z_delta = Some(d.final_z.clone());
+        // Row intercepts, each from the block that last moved its track. The β block
+        // carries two terms (spliced at 0, unspliced at 1), but δ ran after it, so an
+        // unspliced row's current intercept is δ's; spliced rows take β's term 0.
+        scatter_splice_bias_to_rows(&b.b_profiled, &d.b_profiled, tracks, feat.b_feat, &mut b_row_live);
 
         // pb | β, δ. The pb side sees the EFFECTIVE per-row loading: β on spliced
         // rows, β+δ on unspliced ones — which is what the model scores.
         scatter_splice_to_rows(&e_beta, &e_delta, tracks, feat.e_feat, h, &mut e_rows);
         let side_rows = FrozenSide {
             e: &e_rows,
-            b: &beta_pair.by_pb.other_b,
+            b: &b_row_live,
             h,
         };
         let mut pb_cfg = DimBlockConfig::new(1, 0, block_seed(cfg.seed, 0x85EB, sweep))
@@ -908,6 +944,7 @@ pub(crate) fn pb_gibbs_splice(
             dim_block(&nodes, &side_rows, &pb_cfg)
         };
         e_pb.copy_from_slice(&pbres.mean_beta);
+        b_pb_live.copy_from_slice(&pbres.b_profiled);
 
         if keep {
             acc.add(&b, &d, &pbres);
@@ -920,7 +957,7 @@ pub(crate) fn pb_gibbs_splice(
     // Intercepts against the posterior-mean sides, same reasoning as the bge path.
     let side_pb_final = FrozenSide {
         e: &out.mean_pb,
-        b: &beta_pair.by_feature.other_b,
+        b: &b_pb_live,
         h,
     };
     out.mean_b_feat = (0..n_genes)
@@ -943,7 +980,7 @@ pub(crate) fn pb_gibbs_splice(
     scatter_splice_to_rows(&out.beta_mean, &out.delta_mean, tracks, feat.e_feat, h, &mut e_rows);
     let side_rows_final = FrozenSide {
         e: &e_rows,
-        b: &beta_pair.by_pb.other_b,
+        b: &b_row_live,
         h,
     };
     out.mean_b_pb = (0..pb.n_pb_total())
@@ -1132,6 +1169,32 @@ fn scatter_splice_to_rows(
 /// every row mapped to an anchor takes that anchor's current draw, and every
 /// dropped row keeps `map_fallback` — its phase-1 MAP. Dropped rows are not
 /// sampled but they ARE observed, so they belong in the pb conditional.
+/// Scatter each gate's profiled intercept onto the rows it describes.
+///
+/// `beta_b` is `[n_genes × 2]` — the β block runs over both tracks, spliced term first —
+/// and `delta_b` is `[n_genes × 1]` from the δ block. A row takes δ's value when it is
+/// unspliced and β's spliced term otherwise, because those are the blocks that last
+/// moved each track. Rows no gene claims keep `fallback`, matching how
+/// [`scatter_splice_to_rows`] treats loadings: dropping them would misspecify the pb
+/// likelihood rather than merely omit them.
+fn scatter_splice_bias_to_rows(
+    beta_b: &[f32],
+    delta_b: &[f32],
+    tracks: &SpliceTracks<'_>,
+    fallback: &[f32],
+    out: &mut [f32],
+) {
+    out.copy_from_slice(fallback);
+    for (row, &g) in tracks.row_to_gene.iter().enumerate() {
+        let g = g as usize;
+        out[row] = if tracks.unspliced_rows[row] {
+            delta_b[g]
+        } else {
+            beta_b[g * 2]
+        };
+    }
+}
+
 fn scatter_to_rows(
     e_anchor: &[f32],
     anchors: Option<&AnchorMap<'_>>,

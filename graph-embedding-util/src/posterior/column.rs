@@ -47,6 +47,7 @@
 use super::hyper::{gene_rng, sigmoid};
 use super::lnpdf::{AnchorMoment, FrozenSide, NodeTerm};
 use super::score::{AnchorScore, ColumnCtx, SlateSlab};
+use crate::cell_projection::SCORE_CLAMP;
 use mcmc_util::engine::elliptical_slice_batch;
 use rand::rngs::SmallRng;
 use rand::RngExt;
@@ -80,6 +81,12 @@ pub(super) struct TileDraw {
     pub fallbacks: usize,
     /// Likelihood-evaluation rounds summed over dims, i.e. the tile's actual cost.
     pub rounds: usize,
+    /// `[b × n_terms]` profiled intercepts at the end of the sweep, anchor-major.
+    ///
+    /// One per TERM, not per anchor: gem's spliced and unspliced rows are separate
+    /// observations with independent biases, and sharing one would force the static
+    /// level onto a rank-`h` bilinear. Read [`TermTile::profiled_bias`] for the form.
+    pub b_profiled: Vec<f32>,
 }
 
 /// Everything a tile pass needs that is constant across tiles.
@@ -256,6 +263,29 @@ impl<'a> TermTile<'a> {
         }
     }
 
+    /// Anchor `i`'s profiled intercept, `b* = ln(T_i) − ln(scale · Σ_slate exp(s_j))`.
+    ///
+    /// The closed-form maximizer of the Poisson likelihood in `b`, which is what makes
+    /// the sampled likelihood free of an intercept at all. Cheap here and only here:
+    /// after the dim loop `s` already holds the final scores, so this is `O(k)` rather
+    /// than the `O(k·h)` a fresh evaluation would cost. Scores are deliberately NOT
+    /// clamped, matching the estimand the profile was derived from.
+    fn profiled_bias(&self, i: usize) -> f32 {
+        if self.total[i] <= 0.0 {
+            // No counts ⇒ no rate to match. Park it at the floor rather than emit a
+            // `ln(0)`, so a silent anchor cannot contribute to another side's scores.
+            return -(SCORE_CLAMP as f32);
+        }
+        let s = &self.s[i * self.k..(i + 1) * self.k];
+        let hi = f64::from(s.iter().copied().fold(f32::NEG_INFINITY, f32::max));
+        if !hi.is_finite() {
+            return 0.0;
+        }
+        let acc: f64 = s.iter().map(|&v| (f64::from(v) - hi).exp()).sum();
+        let log_part = hi + (self.partition_scale * acc).max(f64::MIN_POSITIVE).ln();
+        (self.total[i].ln() - log_part).clamp(-SCORE_CLAMP, SCORE_CLAMP) as f32
+    }
+
     /// Borrow this term's state as a [`ColumnCtx`]. `v` is shared across terms — it is
     /// the anchor's loading, not a per-term quantity — so it is passed in.
     fn ctx<'c>(&'c self, v: &'c [f32], side: &'c FrozenSide<'c>, h: usize) -> ColumnCtx<'c> {
@@ -299,7 +329,13 @@ pub(super) fn sample_tile<S: AnchorScore>(
     let mut fallbacks = 0usize;
     let mut rounds = 0usize;
     if b == 0 {
-        return TileDraw { beta, z, fallbacks, rounds };
+        return TileDraw {
+            beta,
+            z,
+            fallbacks,
+            rounds,
+            b_profiled: Vec::new(),
+        };
     }
     let n_terms = nodes[0].len();
 
@@ -446,7 +482,23 @@ pub(super) fn sample_tile<S: AnchorScore>(
         }
     }
 
-    TileDraw { beta, z, fallbacks, rounds }
+    // The intercepts, from the state the sweep ended in. `terms[t].s` already holds
+    // the final scores, so this is one extra pass over the slate rather than a fresh
+    // `O(k·h)` evaluation per anchor.
+    let mut b_profiled = vec![0.0f32; b * n_terms];
+    for (t, term) in terms.iter().enumerate() {
+        for i in 0..b {
+            b_profiled[i * n_terms + t] = term.profiled_bias(i);
+        }
+    }
+
+    TileDraw {
+        beta,
+        z,
+        fallbacks,
+        rounds,
+        b_profiled,
+    }
 }
 
 /// `out[slot] = Σ_terms ll` for anchor `active[slot]` with dim `d` set to `x[slot]`.

@@ -481,6 +481,38 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // lineage term is required — but the refine is warm-started, so it needs a
     // refinement, not a second full-length fit. Off the lineage path phase 1 keeps
     // the whole budget (`refine_epochs == 0`) and the run is byte-identical.
+    // Phase 1 is SGD **xor** sampling. An initialization cannot bias a *converged*
+    // chain — it only sets burn-in — so warm-starting the sampler from an SGD optimum is
+    // either harmless or fatal, and the recorded rank collapse says fatal: with an
+    // effective rank of ~2.5 of 128 and max VIF ~105, the surplus directions have a flat
+    // likelihood, the chain random-walks in them, and nothing washes out at any sweep
+    // count anyone will pay for. `pip` and `π₀h` would then describe curvature around
+    // the SGD optimum rather than a posterior. So when the posterior is requested it
+    // *replaces* phase 1 rather than refining it.
+    //
+    // Phase **2** is unaffected: it is an analytical Poisson-MAP projection, not SGD.
+    let sample_phase1 = config.pb_posterior.is_some();
+    if sample_phase1 {
+        // Constraints, enforced rather than discovered. Neither is reachable by
+        // accident — `phase1_cells_per_pb` defaults to 0 and the lineage refine is
+        // opt-in — but silently leaving a cell axis at its random init, or silently
+        // skipping a refine the caller asked for, would both be worse than stopping.
+        anyhow::ensure!(
+            !use_cell_axis,
+            "--posterior samples the PSEUDOBULK phase, and there is no cell block to \
+             sample: --phase1-cells-per-pb {} would add a cell axis that only SGD \
+             trains, leaving it at its random initialization. Pass \
+             --phase1-cells-per-pb 0 (the default) to sample, or drop --posterior to \
+             train that axis.",
+            config.phase1_cells_per_pb
+        );
+        anyhow::ensure!(
+            !(config.lineage_dag && config.feat_factor.is_some()),
+            "--lineage-dag refines a TRAINED fit by SGD, so it cannot be combined with \
+             --posterior, which replaces that training. Run one or the other."
+        );
+    }
+
     let lineage_on = config.lineage_dag && config.feat_factor.is_some();
     let warmup_epochs = if lineage_on && config.epochs > 0 {
         ((LINEAGE_WARMUP_FRAC * config.epochs as f64).round() as usize).clamp(1, config.epochs)
@@ -488,7 +520,18 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         config.epochs
     };
     let refine_epochs = config.epochs - warmup_epochs;
-    {
+    if sample_phase1 {
+        // One unmissable line, because "did SGD run?" must never be a guess. `--epochs`
+        // is deliberately named in it: it still has a value and it no longer governs
+        // this phase, which is exactly the kind of thing a reader assumes otherwise.
+        info!(
+            "Phase 1 = SAMPLED, not trained — SGD is SKIPPED on this path, so --epochs \
+             ({}) does not apply to it. The pseudobulk model is initialized from the \
+             data and then sampled; phase 2 still runs (it is an analytical projection, \
+             not SGD).",
+            config.epochs
+        );
+    } else {
         let mut joint_axes: Vec<CompositeAxis> = Vec::with_capacity(1 + pb_axes.len());
         // `use_cell_axis == false` (phase1_cells_per_pb == 0) trains E_feat from
         // pb aggregates only; `cell_axis` is left unused (its borrow ends here).
