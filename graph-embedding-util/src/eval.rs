@@ -121,22 +121,28 @@ pub fn save_outputs_named(
         ctx.feature_names,
         "feature",
     )?;
-    // The gate's selection weights, when the gate is on. Rows align with the feature
-    // dictionary. Read it by COLUMN, not by row: the softmax runs over genes within a
-    // dim, so each COLUMN carries one unit of mass (rescaled so a uniform gate is the
-    // identity, hence a column averages 1.0). A row does not sum to anything
-    // meaningful, and there is no null column. Skipped for an ungated model.
+    // The gate's inclusion probabilities `σ(S)`, when the gate is on. Rows align with
+    // the feature dictionary. Every entry is an INDEPENDENT probability in (0,1) for
+    // that (gene, dim): neither rows nor columns sum to anything in particular, and a
+    // gene may load several dims. This is the variational estimate of exactly what
+    // `--posterior` samples into `feature_pip` / `beta_pip`, so the two are directly
+    // comparable. Skipped for an ungated model.
+    //
+    // The predecessor was a per-dim softmax over genes, where a COLUMN carried one
+    // unit of mass and 1.0 meant "neutral". Anything reading these tables against that
+    // convention will misread them — the neutral point is gone, and the range is now
+    // (0,1) rather than (0, D).
     if let Some(selection) = model.feature_selection()? {
         let sel_path = format!("{out_prefix}.feature_selection.parquet");
         save_embedding(&sel_path, &selection, ctx.feature_names, "feature")?;
-        info!("Per-gene softmax feature selection → {sel_path}");
+        info!("Per-gene feature inclusion probability σ(S) → {sel_path}");
     }
-    // Per-gene VELOCITY selection `softmax(s_delta)` — the independent δ-gate readout
+    // Per-gene VELOCITY inclusion `σ(s_delta)` — the independent δ-gate readout
     // (motion driver genes); `Some` only for a factored model with velocity.
     if let Some(velocity_sel) = model.velocity_selection()? {
         let vsel_path = format!("{out_prefix}.velocity_selection.parquet");
         save_embedding(&vsel_path, &velocity_sel, ctx.feature_names, "feature")?;
-        info!("Per-gene softmax velocity selection → {vsel_path}");
+        info!("Per-gene velocity inclusion probability σ(s_δ) → {vsel_path}");
     }
     Ok(())
 }

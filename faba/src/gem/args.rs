@@ -78,19 +78,23 @@ pub struct ModelArgs {
     )]
     pub nce_objective: NceObjectiveArg,
 
-    // Per-gene softmax feature gate — ALWAYS ON for gem (the standard training):
-    // β_g ⊙ softmax(S_g), a per-dim distribution over genes (slab:
-    // categorical selection + Gaussian effect KL) over the H embedding dims + a null
-    // 'load-nothing' slot. A gene with no cell-state signal sends its mass to null and
-    // contributes ≈0 → single-pass feature selection. The velocity δ_g gets its own
-    // independent gate too (→ velocity_selection). Temperature is the one knob.
+    // Per-gene spike-and-slab feature gate — ALWAYS ON for gem (the standard
+    // training): β_g ⊙ σ(S_g), an INDEPENDENT inclusion probability per (gene, dim)
+    // — Bernoulli selection + Gaussian effect KL, with each dim's inclusion rate π_h
+    // learned. There is no null slot and no per-dim budget: a gene with no cell-state
+    // signal simply has σ(S) → 0 in every dim and contributes ≈0, giving single-pass
+    // feature selection. σ(S) is the same estimand `--posterior` reports as a PIP, so
+    // feature_selection.parquet and beta_pip.parquet are now comparable. The velocity
+    // δ_g gets its own independent gate and its own π_h (→ velocity_selection).
+    // Temperature is the one knob.
     #[arg(
-        long = "feature-softmax-temp",
+        long = "feature-gate-temp",
+        alias = "feature-softmax-temp",
         default_value_t = 1.0,
-        help = "Softmax feature-gate temperature τ (< 1 sharpens the per-gene selection).",
+        help = "Feature-gate temperature τ (< 1 sharpens each inclusion probability toward 0/1).",
         hide = true
     )]
-    pub feature_softmax_temp: f32,
+    pub feature_gate_temp: f32,
 }
 
 /// Pseudobulk collapse, phase-1 cell-axis mode, per-file sample identity, and

@@ -957,11 +957,37 @@ pub(crate) fn pb_gibbs_splice(
     let n_spliced: usize = beta_pair.by_feature.pos.iter().map(Vec::len).sum();
     let n_unspliced: usize = delta_pair.by_feature.pos.iter().map(Vec::len).sum();
     info!(
-        "gem splice Gibbs: {n_genes} gene(s), {} spliced / {} unspliced edge(s), {} gate ({} sweeps)",
+        "gem splice Gibbs: {n_genes} gene(s), {} spliced / {} unspliced edge(s), {} gate \
+         ({} sweeps +{} warmup); partitions {} pb / {} feature (scale {:.2} / {:.2})",
         n_spliced,
         n_unspliced,
-        if tracks.nested { "nested z_δ ⊆ z_β" } else { "independent" },
+        if tracks.nested {
+            "nested z_δ ⊆ z_β"
+        } else {
+            "independent"
+        },
         cfg.n_sweeps,
+        cfg.burnin,
+        beta_pair.by_feature.partition.len(),
+        beta_pair.by_pb.partition.len(),
+        beta_pair.by_feature.partition_scale,
+        beta_pair.by_pb.partition_scale,
+    );
+    // Cost, up front, because this run is long enough that finding out empirically is
+    // expensive. A sweep is THREE blocks and the gene side of it is THREE term-passes
+    // (β over both tracks, δ over unspliced) where `senna bge`'s is one — so at equal
+    // `h`, gene count and slate, gem's gene side is ~3x bge's. Measured on this tree at
+    // `h=128`, slate 1460, saturating anchors: 87 ms per 1000 anchors per term-pass, and
+    // the pass is LINEAR in `h` and in the slate, flat in edge count (the `AnchorMoment`
+    // collapse is why). So the levers, in measured order of effect, are `--threads`
+    // (16 by default, well under a big box), `--embedding-dim`, and the sweep count —
+    // NOT the edge count, which is what a slow run tempts you to cut first.
+    info!(
+        "gem splice Gibbs cost ~ n_genes × h × slate × 3 term-passes per sweep: \
+         {n_genes} × {h} × {} × 3 × {} sweeps, on {} rayon thread(s)",
+        beta_pair.by_feature.partition.len(),
+        cfg.n_sweeps + cfg.burnin,
+        rayon::current_num_threads(),
     );
 
     let mut e_beta = warm_start_genes(feat, Some(&beta_anchors), n_genes, h);

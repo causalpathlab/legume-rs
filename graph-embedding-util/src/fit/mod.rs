@@ -10,7 +10,7 @@ pub mod resolve_embedding;
 mod samplers;
 pub(crate) mod stacked_pb;
 
-pub use config::{FeatFactorSpec, FitConfig, FitOutput, SoftmaxGateConfig};
+pub use config::{FeatFactorSpec, FeatureGateConfig, FitConfig, FitOutput};
 pub use lift::{CellLineage, LineageQc};
 pub use projection::PbLevelVelocity;
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
@@ -282,8 +282,8 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
 
     // Enable the softmax feature gate on the primary model BEFORE the sharing heads
     // are built, so every head references the one shared gate Var (`s_feat`/`s_beta`).
-    if let Some(g) = config.softmax_gate {
-        cell_model.enable_softmax_gate(g, &varmap, &config.device)?;
+    if let Some(g) = config.feature_gate {
+        cell_model.enable_feature_gate(g, &varmap, &config.device)?;
         info!(
             "Softmax feature gate ON (per-dim distribution over genes) — τ={}",
             g.temperature
@@ -660,12 +660,139 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // the raw Var above — `E[z·β]` is already gated by its own selection, so
     // feeding it through `materialize_e_feat` would apply the trained gate a
     // second time. See `overwrite_feature_side`.
-    if let Some(res) = pb_posterior.as_ref() {
-        overwrite_feature_side(&mut cell_model, &res.mean_beta, &res.mean_b_feat, h)?;
+    //
+    // JITTER SKIPS THIS. `mean_beta` is `E[z·β]` — already gated — so installing it as
+    // the SGD starting point and then applying the mask on top would gate twice, the
+    // exact double-application this comment warns about. Under jitter the posterior
+    // contributes the SELECTION and SGD fits the loading from its own initialization.
+    // The posterior gate is now UNCONDITIONAL: `--posterior` samples the selection and
+    // SGD then fits the loading under it. It no longer replaces SGD.
+    //
+    // Measured on BM1, 3 seeds, paired: `pip ⊙ β` beat plain SGD on kNN label purity in
+    // every seed (0.6739 ± 0.0074 vs 0.6664 ± 0.0068) with a 5.7x sparser dictionary
+    // (1531 vs 8785 effective genes/dim). A STOCHASTIC `z ~ Bern(pip)` mask redrawn per
+    // epoch was also tried and lost 3/3 — 0.6632, below plain SGD — so the mask is held
+    // at its mean rather than sampled. Dropout's noise costs more here than its
+    // decorrelation buys.
+    let jitter = config.pb_posterior.is_some();
+    if !jitter {
+        if let Some(res) = pb_posterior.as_ref() {
+            overwrite_feature_side(&mut cell_model, &res.mean_beta, &res.mean_b_feat, h)?;
+        }
+        if let Some(res) = splice_posterior.as_ref() {
+            let rows = scatter_gene_to_rows(res, &config, unified.n_features(), h);
+            overwrite_feature_side(&mut cell_model, &rows.0, &rows.1, h)?;
+        }
     }
-    if let Some(res) = splice_posterior.as_ref() {
-        let rows = scatter_gene_to_rows(res, &config, unified.n_features(), h);
-        overwrite_feature_side(&mut cell_model, &rows.0, &rows.1, h)?;
+
+    /////////////////////////////////////////////////////////////////
+    // Jitter: posterior-informed dropout, then SGD for the loading //
+    /////////////////////////////////////////////////////////////////
+    //
+    // The sampler above produced `pip`; SGD now fits the loading under draws from it.
+    //
+    // Deliberately NOT Monte-Carlo EM: `pip` is estimated once and frozen, where MCEM
+    // would re-estimate it against the updated `β` each outer round. So the selection
+    // is fixed at what a cold-started chain saw, and cannot be refined by the loading
+    // SGD goes on to find. That is the known limitation of this design, not an
+    // oversight — buying it back costs another sampler run per round.
+    if jitter && !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        let (pip, rows) = match (pb_posterior.as_ref(), splice_posterior.as_ref()) {
+            // Free model: an anchor IS a feature row, so `pip` is already row-indexed.
+            (Some(res), _) => (res.pip.clone(), unified.n_features()),
+            // Factored: `beta_pip` is per GENE, which is the axis `s_beta` lives on —
+            // `gathered_gate_weights` gathers rows from it via `row_to_gene`.
+            (_, Some(res)) => {
+                let n_genes = res.beta_pip.len() / h.max(1);
+                (res.beta_pip.clone(), n_genes)
+            }
+            (None, None) => unreachable!("jitter requires a posterior"),
+        };
+        let nz = pip.iter().filter(|&&p| p <= 0.0).count();
+        info!(
+            "Jitter — SGD under posterior dropout: pip over {rows} unit(s) x {h} dim(s),              mean {:.3}, {} entrie(s) at exactly 0 (permanently masked; their loading              never trains and the dictionary carries exact zeros). z ~ Bern(pip) is              redrawn ONCE PER EPOCH, not per minibatch — z is a latent for the dataset.",
+            pip.iter().sum::<f32>() / pip.len().max(1) as f32,
+            nz,
+        );
+        cell_model.set_gate_pip(&pip, rows, &config.device)?;
+        // gem's SECOND gate gets its OWN table. Masking δ with β's inclusion would tie a
+        // gene's motion to its identity selection — the conflation `GateKind` exists to
+        // prevent. `delta_pip` is NaN where δ is unidentified (a gene missing one splice
+        // track), and NaN must not reach the mask: an unidentified δ is exactly one that
+        // should be masked OFF, so it maps to 0.
+        if let Some(res) = splice_posterior.as_ref() {
+            let dpip: Vec<f32> = res
+                .delta_pip
+                .iter()
+                .map(|p| if p.is_finite() { *p } else { 0.0 })
+                .collect();
+            let n_unident = res.delta_pip.iter().filter(|p| !p.is_finite()).count();
+            cell_model.set_delta_gate_pip(&dpip, rows, &config.device)?;
+            info!(
+                "Jitter — velocity gate: separate δ pip over {rows} gene(s), mean {:.3}; \
+                 {n_unident} unidentified (masked off)",
+                dpip.iter().sum::<f32>() / dpip.len().max(1) as f32,
+            );
+        }
+        let cell_cell = cell_model.gate_mask_cell();
+        let dpip_shared: Option<Vec<f32>> = splice_posterior.as_ref().map(|res| {
+            res.delta_pip
+                .iter()
+                .map(|p| if p.is_finite() { *p } else { 0.0 })
+                .collect()
+        });
+        for m in &mut level_models {
+            m.set_gate_pip(&pip, rows, &config.device)?;
+            if let Some(dp) = dpip_shared.as_ref() {
+                m.set_delta_gate_pip(dp, rows, &config.device)?;
+            }
+            m.share_gate_mask(&cell_cell);
+        }
+
+        let mut jitter_axes: Vec<CompositeAxis> = Vec::with_capacity(num_levels);
+        for (i, model) in level_models.iter().enumerate() {
+            let (axis, stratified) = &level_axes_data[i];
+            jitter_axes.push(CompositeAxis {
+                model,
+                unified: &pb_blobs[i],
+                cell_axis: axis,
+                sampler: AxisSampler::Stratified(stratified),
+                lambda: DEFAULT_AXIS_LAMBDA,
+                label: "pb",
+            });
+        }
+        let mut optj = AdamW::new(varmap.all_vars(), adamw_params())?;
+        let mut pj = stage_params(&config);
+        pj.composite_mode = CompositeMode::Sum;
+        pj.epochs = config.epochs;
+        info!(
+            "Phase 1 (jitter) — features + {} pb level(s) [Sum], {} epochs",
+            num_levels, pj.epochs
+        );
+        train_composite(
+            &CompositeTrainContext {
+                axes: &jitter_axes,
+                dev: &config.device,
+                stop: &stop,
+                cell_to_pb_per_level: None,
+                lineage_sem: None,
+                lineage_sem_theta: None,
+            },
+            &mut optj,
+            &pj,
+        )?;
+        drop(jitter_axes);
+        // Back to the mean for everything downstream: training averaged over draws, so
+        // `E[z ⊙ β] = pip ⊙ β` is the dictionary the fit actually implies. Leaving a
+        // draw installed would ship ONE random sub-model as if it were the answer.
+        cell_model.clear_gate_mask();
+        // RE-MATERIALIZE. `materialize_e_feat` already ran above, BEFORE this training,
+        // so `e_feat` is a snapshot of the pre-jitter Vars — and it is what phase 2
+        // projects against and what the dictionary output writes. Without this the whole
+        // jitter pass is invisible downstream: the cells get projected onto a dictionary
+        // that does not match the parameters just fitted, which looks exactly like a
+        // model that trained badly rather than one whose output was never refreshed.
+        cell_model.materialize_e_feat()?;
     }
 
     // Lineage-DAG refine (gem β-sharing only; fixed velocity-KNN structure). The warm-up

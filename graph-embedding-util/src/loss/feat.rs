@@ -923,7 +923,11 @@ fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tensor> 
                 .as_ref()
                 .map(|l| l.index_select(idx, 0))
                 .transpose()?;
-            let w = model.gathered_gate_weights(model.s_feat.as_ref(), idx)?;
+            let w = model.gathered_gate_weights(
+                crate::model::GateKind::Identity,
+                model.s_feat.as_ref(),
+                idx,
+            )?;
             model.gated_rows(&mu, logstd.as_ref(), w.as_ref(), true)
         }
     }

@@ -2,7 +2,7 @@
 //! gate/sweep otherwise hold fixed. This is full Bayes on what the *variational*
 //! gate hard-codes (`GATE_EFFECT_PRIOR_VAR = 1.0`, the sparsity, the ridge): learn
 //! them and pool across genes. NOTE the trained gate no longer has a null column at
-//! all (see `crate::model::SoftmaxGateSpec`); `π₀` here is this module's OWN
+//! all (see `crate::model::FeatureGateSpec`); `π₀` here is this module's OWN
 //! spike-and-slab null mass, not a readout of the gate's.
 //!
 //! Each is a cheap closed-form draw from sufficient statistics, run as a **serial

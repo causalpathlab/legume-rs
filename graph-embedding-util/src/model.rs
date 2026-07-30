@@ -18,71 +18,120 @@ use candle_util::candle_core::{DType, Device, Result, Tensor};
 use candle_util::candle_nn::{self, VarBuilder, VarMap};
 use matrix_util::rand_util::name_seed;
 use matrix_util::traits::SampleOps;
+use std::sync::{Arc, Mutex};
 
 /// stdev of the embedding-table randn init (matches the former
 /// `candle_nn::Init::Randn { stdev: 0.1 }`).
 const INIT_STDEV: f32 = 0.1;
 
-/// Softmax feature gate — a **per-dimension distribution over genes**.
+/// Bernoulli spike-and-slab feature gate — an **independent inclusion probability
+/// per (gene, dim)**.
 ///
 /// Each gene's feature loading is `Ẽ_g = γ_g ⊙ β_g`: a SELECTION weight `γ_g`
 /// times a Gaussian EFFECT `β_g` (the loading magnitude). Variationally,
 ///
-///   `Ẽ_{g,h} = D · softmax_g(S_{·,h}/τ)[g] · (E_{g,h} + σ_{g,h}·ε)`,  ε ~ N(0,1),
+///   `Ẽ_{g,h} = σ(S_{g,h}/τ) · (E_{g,h} + σ_{g,h}·ε)`,  ε ~ N(0,1),
 ///
 /// where `S` is the selection logit table (`s_feat` free / `s_beta` factored,
 /// `[D × H]`), `E_g` is the effect posterior MEAN, and `σ_g` (= `exp` of the
 /// log-std table) its posterior std. Training samples via the reparameterization;
 /// output/materialize use the mean (`σ = 0`).
 ///
-/// # The softmax runs over GENES, within a dim
+/// This is mean-field spike-and-slab: `q(z_{g,h}) = Bern(α_{g,h})`,
+/// `q(β_{g,h}) = N(E,σ²)`, and the forward carries `E[z·β] = α·E`. No Gumbel or
+/// hard-concrete relaxation is involved — the expectation IS differentiable.
 ///
-/// So every **dim** carries one unit of selection mass to distribute over genes —
-/// the topic-model convention (`β_h` is a distribution over genes), and what makes
-/// "the markers of dim `h`" a well-posed question.
+/// # `α` is the same estimand the sampler reports as a PIP
 ///
-/// The alternative — normalizing over dims within a gene — was implemented,
-/// measured and removed. It gives each *gene* a budget and constrains no dim, so
-/// dims are free to accumulate mass unequally: measured column sums on a real 12k
-/// BMMC fit ran 167–536, a 3.2× spread, with the top two dims taking 25.7% of all
-/// selected mass against 12.5% uniform. Under this axis that spread is **1.000 by
-/// construction**. It also made the gate a SuSiE single-effect (one unit per gene
-/// *is* a single effect) and forced a null "load-nothing" column to exist, since a
-/// gene with no signal still had to spend its unit somewhere.
+/// That is the point of the Bernoulli form. `posterior::dim_block` samples
+/// `z_{g,h}` and reports `P(z=1 | data)`; this gate optimizes `q(z=1)` for the same
+/// coordinate. So `feature_selection.parquet` and `feature_pip.parquet` are one
+/// quantity estimated two ways, and can be COMPARED — which the previous softmax
+/// gate made impossible.
 ///
-/// **There is no null column here.** With no per-gene budget, a gene belonging
-/// nowhere simply takes small mass in every column, so an absorber has nothing to
-/// absorb. Weights are rescaled by the gene count `D` so a uniform gate is exactly
-/// the identity — a raw softmax over 20k genes averages 5e-5 and would collapse
-/// the score by three orders of magnitude.
+/// The predecessor normalized over GENES within a dim, giving every dim one unit of
+/// selection mass. That made "the markers of dim `h`" a distribution, but it is a
+/// simplex (`D−1` free parameters per dim) where a PIP table is a product of
+/// Bernoullis (`D`), so no rescaling connects them: measured on one fit that both
+/// trained and sampled, `Spearman(normalized gate, PIP) = 0.021`.
+///
+/// # Per-dim mass is now SOFT, via a learned `π_h`
+///
+/// The softmax pinned each dim's mass at exactly 1.000 by construction. A sigmoid
+/// constrains nothing, so mass control moves into the prior: `KL(Bern(α) ‖ Bern(π_h))`
+/// pulls each dim's expected mass `Σ_g α_{g,h}` toward `D·π_h`, with `π_h` learned
+/// per dim exactly as `posterior::hyper::sample_pi0` learns it for the sampler.
+///
+/// This is a real weakening and the failure mode is on record: when per-dim mass last
+/// went unconstrained, column sums on a 12k BMMC fit ran 167–536, a 3.2× spread, with
+/// the top two dims taking 25.7% of all selected mass against 12.5% uniform. Report
+/// the spread on any new fit rather than assuming `π_h` handles it.
 ///
 /// # KL loss
 ///
 /// Always added, at the fixed [`GATE_KL_WEIGHT`], amortized `1/B` over the
 /// minibatch:
 ///
-///   `loss += Σ_h H(A_{·,h})  +  Σ_h A_{g,h}·KL(N(E_{g,h},σ_{g,h}²) ‖ N(0,σ₀²))`
+///   `loss += mean_{g,h}[ KL(Bern(α_{g,h}) ‖ Bern(π_h)) + α_{g,h}·KL(N(E,σ²) ‖ N(0,σ₀²)) ]`
+///          `+ Σ_h −log Beta(π_h; a, b)`
 ///
-/// The second term is the standard selection-weighted Gaussian KL with
-/// `σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]. The first is the column's Shannon **entropy**
-/// — a concentration regularizer, and deliberately not dressed up as a KL. A KL to
-/// a *uniform* prior over genes would be minimized by a dense dim, which is
-/// backwards; the Bayesian alternative, a Dirichlet(α<1) log-prior
-/// `(α−1)·Σ_g log A_{g,h}`, is unbounded as `A → 0` and runs away. Entropy is the
-/// bounded equivalent (in `[0, ln D]`), minimized exactly when a dim concentrates
-/// on few genes.
+/// with `σ₀² =` [`GATE_EFFECT_PRIOR_VAR`] and `(a,b) =`
+/// [`GATE_PI_BETA_A`]/[`GATE_PI_BETA_B`]. Both mean-reduced terms are `O(1)` per
+/// entry, so unlike the softmax form neither needs a `ln D` or `D` correction to
+/// stay commensurate with the other — see [`JointEmbedModel::single_gate_kl`] for
+/// why that matters and what it cost last time.
+/// Which gate a weight lookup is for.
+///
+/// A factored model carries TWO gates — the identity `β_g` and the velocity `δ_g` —
+/// and they are different objects with their own inclusion probabilities (which is why
+/// `posterior::pb_gibbs` samples them with separate `σ₀h²`/`π₀h`). The gate weight
+/// functions take a `Tensor` of logits, and a `Tensor` cannot be identified, so the
+/// caller must say which gate it is asking about. Inferring it would silently hand
+/// `δ` the `β` mask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateKind {
+    Identity,
+    Velocity,
+}
+
 #[derive(Clone, Copy, Debug)]
-pub struct SoftmaxGateSpec {
-    /// Softmax temperature `τ` (`1.0` = plain softmax; `< 1` sharpens).
+pub struct FeatureGateSpec {
+    /// Gate temperature `τ` (`1.0` = plain sigmoid; `< 1` sharpens toward 0/1).
     pub temperature: f32,
 }
 
 /// Effect-prior variance `σ₀²` for the Gaussian KL `KL(N(μ,σ²) ‖ N(0,σ₀²))`.
 pub const GATE_EFFECT_PRIOR_VAR: f64 = 1.0;
-/// Fixed weight `λ` on the SuSiE single-effect KL. The gate is always variational;
+/// Fixed weight `λ` on the spike-and-slab KL. The gate is always variational;
 /// the KL is applied amortized `λ/B` over the minibatch, so `1.0` gives the `1/B`
 /// scale. A single source of truth rather than a per-run CLI knob.
 pub const GATE_KL_WEIGHT: f64 = 1.0;
+/// `Beta(a, b)` hyperprior on each dim's inclusion rate `π_h`.
+///
+/// **Mind the convention.** `posterior::hyper::sample_pi0` draws `π₀ = P(OFF)` under
+/// `Beta(9, 1)`, centred on 0.9 OFF. `π_h` here is `P(ON)`, so the matching prior is
+/// the mirror image, `Beta(1, 9)`, centred on 0.1 — the same 10% inclusion the
+/// sampler assumes. With `a = 1` the `(a−1)·ln π` term vanishes and only
+/// `(b−1)·ln(1−π)` survives, which is bounded as `π → 0`; that is deliberate, since
+/// the `Dirichlet(α<1)` analogue the softmax gate rejected ran away at the boundary.
+pub const GATE_PI_BETA_A: f64 = 1.0;
+/// See [`GATE_PI_BETA_A`] — `b = 9` centres `π_h` on `a/(a+b) = 0.1`.
+pub const GATE_PI_BETA_B: f64 = 9.0;
+/// Keeps `π_h` and `α` off the 0/1 boundary so `ln π`, `ln(1−π)` stay finite.
+/// Mirrors `posterior::hyper::PI0_EPS`, which does the same job for the sampler.
+const GATE_PI_EPS: f64 = 1e-6;
+/// Initial gate logit. `σ(4) ≈ 0.982`, so an untrained gate is ~the identity and a
+/// fresh model's `Ẽ ≈ β` — the same "inert rather than biased" property the softmax
+/// gate got from a zero init (`softmax(0)·D = 1` exactly).
+///
+/// **Do NOT init at 0 here, and note the asymmetry with the sampler.**
+/// `σ(0) = 0.5` would halve the entire dictionary, which propagates into the NCE
+/// scale and the phase-2 projection. And where `dim_block` cold-starts `z` all-OFF
+/// so the data has to earn each dim, SGD cannot: a zeroed gate kills the gradient
+/// reaching `β` through `α·β`, so the fit starts dead. Gibbs can turn a coordinate
+/// back on from a likelihood ratio; gradient descent cannot recover from a zeroed
+/// multiplier.
+const GATE_LOGIT_INIT: f32 = 4.0;
 /// Initial effect log-std (`σ_init = e^{-4.6} ≈ 0.01`, a near-deterministic start).
 const GATE_LOGSTD_INIT: f32 = -4.6;
 /// Clamp bound on the effect log-std in the forward — keeps `σ = exp(logstd)` and
@@ -127,7 +176,7 @@ pub struct ShareFeaturesArgs<'a> {
     pub seed: u64,
     /// Shared softmax-gate logits (free model, `[n_features, H]`).
     /// `None` when the gate is off. Every head references the SAME Var so AdamW
-    /// updates it once (see [`SoftmaxGateSpec`]).
+    /// updates it once (see [`FeatureGateSpec`]).
     pub shared_s_feat: Option<Tensor>,
     /// Shared raw feature Var kept reachable for the gated training gather (so a
     /// post-phase-1 materialize can bake the gate into `e_feat` without clobbering
@@ -136,7 +185,7 @@ pub struct ShareFeaturesArgs<'a> {
     /// Shared free-model effect log-std (`[n_features, H]`). `Some` only for a KL gate.
     pub shared_e_feat_logstd: Option<Tensor>,
     /// Gate configuration shared across heads. `None` when the gate is off.
-    pub gate: Option<SoftmaxGateSpec>,
+    pub gate: Option<FeatureGateSpec>,
 }
 
 /// Inputs for [`JointEmbedModel::new_factored`] — a per-gene β-sharing feature
@@ -192,7 +241,7 @@ pub struct FeatFactor {
     /// (the `mask` = 1/0 selector); L2-ridge in phase-1. `None` = plain β-sharing
     /// (spliced ≡ unspliced ≡ `β_g`).
     pub splice_delta: Option<(Tensor, Tensor)>,
-    /// Optional per-gene softmax-gate logits `[G, H]` (see [`SoftmaxGateSpec`]),
+    /// Optional per-gene softmax-gate logits `[G, H]` (see [`FeatureGateSpec`]),
     /// the IDENTITY gate on `β_g`. Gathered by `row_to_gene` alongside `β`/`δ`; `None`
     /// = ungated. Cloned with the factor so composite heads share it.
     pub s_beta: Option<Tensor>,
@@ -200,14 +249,26 @@ pub struct FeatFactor {
     /// single-effect posterior std; `σ = exp`). `Some` iff the gate is on.
     pub beta_logstd: Option<Tensor>,
     /// Optional per-gene VELOCITY-gate logits `[G, H]` — the independent
-    /// single-effect softmax gate on `δ_g` (the motion), mirroring `s_beta`. `Some`
+    /// spike-and-slab gate on `δ_g` (the motion), mirroring `s_beta`. `Some`
     /// only when the gate is on AND `splice_delta` exists (velocity present); a gene
-    /// with no motion sends its `δ` mass to null → `δ̃_g ≈ 0` (not a driver).
-    /// `softmax(s_delta)` per feature row = the `velocity_selection` output.
+    /// with no motion has `σ(s_delta) → 0` → `δ̃_g ≈ 0` (not a driver).
+    /// `σ(s_delta)` per feature row = the `velocity_selection` output.
     pub s_delta: Option<Tensor>,
     /// Optional per-gene velocity Gaussian-effect log-std `[G, H]` (the `δ` gate's
     /// variational posterior std). `Some` iff `s_delta` is.
     pub delta_logstd: Option<Tensor>,
+    /// Frozen VELOCITY inclusion probabilities `[G, H]` from a `--posterior` run —
+    /// the `δ` counterpart of [`JointEmbedModel::gate_pip`]. Separate table because
+    /// `β`'s inclusion and `δ`'s are different quantities; sharing one would mask the
+    /// motion by the identity's selection.
+    pub delta_gate_pip: Option<Tensor>,
+    /// This epoch's `z ~ Bern(delta_gate_pip)`, shared across axes like the identity
+    /// mask. `None` ⇒ use the mean.
+    pub delta_gate_mask: Option<Arc<Mutex<Option<Tensor>>>>,
+    /// Per-dim inclusion rate logits `[H]` for the VELOCITY gate — `π_h = σ(·)`.
+    /// Separate from the identity gate's, because a loading and a deviation from it
+    /// are not on one scale. `Some` iff `s_delta` is.
+    pub delta_pi_logit: Option<Tensor>,
 }
 
 impl FeatFactor {
@@ -240,7 +301,7 @@ pub struct JointEmbedModel {
     pub factor: Option<FeatFactor>,
     #[allow(dead_code)]
     pub embedding_dim: usize,
-    /// Free-model softmax-gate logits `[n_features, H]` (see [`SoftmaxGateSpec`]).
+    /// Free-model softmax-gate logits `[n_features, H]` (see [`FeatureGateSpec`]).
     /// `None` for an ungated model, or for a factored one (its gate lives in
     /// `factor.s_beta`).
     pub s_feat: Option<Tensor>,
@@ -251,9 +312,58 @@ pub struct JointEmbedModel {
     /// Free-model Gaussian-effect log-std `[n_features, H]` (variational single-effect
     /// posterior std; `σ = exp`). `Some` only when the KL gate is on (free model).
     pub e_feat_logstd: Option<Tensor>,
+    /// **Jitter (posterior-informed dropout).** Frozen `[rows, H]` inclusion
+    /// probabilities taken from a completed `--posterior` run — `P(z=1 | data)`, not a
+    /// learned parameter. `Some` puts the model in jitter mode: [`Self::gate_weights`]
+    /// stops consulting the learned logits entirely and returns a per-epoch Bernoulli
+    /// draw from this table during training, or this table itself (the mean `E[z]`) at
+    /// output.
+    ///
+    /// This is Hinton's dropout with an INFERRED keep-probability. Classic dropout picks
+    /// one global rate `p` and scales weights by `p` at test time; here the rate is
+    /// per-`(gene, dim)` and comes from a posterior, and the same rule applies —
+    /// `z ~ Bern(pip)` while training, `pip ⊙ β` at output. The regularization story
+    /// carries over unchanged (it breaks co-adaptation between genes); what differs is
+    /// that the rates are estimated rather than chosen.
+    ///
+    /// This exists because the LEARNED Bernoulli gate does not train. Measured on BM1:
+    /// the KL that has to drive selection is ~70x under-weighted against the true ELBO,
+    /// and initializing the logits anywhere the gate is inert (`σ(4) ≈ 0.98`) puts them
+    /// where `∂α/∂S = α(1−α)` passes 1/14 of the available gradient — so `α` never
+    /// leaves its initialization, and for the 37% of genes never drawn as NCE positives
+    /// it cannot, receiving exactly zero gradient. Sampling `z` is not subject to any of
+    /// that: the selection is an INPUT, computed by a method that demonstrably works.
+    pub gate_pip: Option<Tensor>,
+    /// The current epoch's `z ~ Bern(gate_pip)` draw, `[rows, H]` of 0/1 in f32.
+    ///
+    /// Redrawn once per EPOCH, never per minibatch: `z` is a latent for the DATASET, so
+    /// a per-batch draw would model it as if each minibatch had its own inclusion state
+    /// and would add gradient variance for nothing. One draw per epoch makes each epoch
+    /// a coherent sub-model.
+    ///
+    /// This is NOT Monte-Carlo EM, despite the resemblance. `gate_pip` is estimated
+    /// once and frozen; a real MCEM would re-estimate `z`'s distribution against the
+    /// updated `β` on every outer round. Here the selection never learns anything from
+    /// the loading that SGD goes on to fit.
+    ///
+    /// SHARED across axes and interior-mutable on purpose. The composite fit runs
+    /// several axes that share Vars but are separate `JointEmbedModel` values, and the
+    /// training loop holds them behind `&`. One `Arc` cell means a single redraw is
+    /// seen by every axis at once — so the axes cannot drift onto different sub-models
+    /// within an epoch, which a per-model field would have allowed.
+    pub gate_mask: Arc<Mutex<Option<Tensor>>>,
+    /// Per-dim inclusion rate logits `[H]` for the IDENTITY gate — `π_h = σ(·)`, the
+    /// SGD analogue of `posterior::hyper::sample_pi0`'s per-dim `π₀h`. Lives on the
+    /// model rather than beside the logit table because it is indexed by dim, not by
+    /// row, so free and factored models share one home for it. `Some` iff gated.
+    ///
+    /// Only the axis that computes [`Self::gate_kl`] needs it (training calls that on
+    /// `axes[0]`), so it is deliberately NOT plumbed through [`ShareFeaturesArgs`] the
+    /// way `s_feat` is.
+    pub gate_pi_logit: Option<Tensor>,
     /// Gate configuration (`None` = ungated). Presence is the single "is gated" flag
     /// for both free (`s_feat`) and factored (`factor.s_beta`) models.
-    pub gate: Option<SoftmaxGateSpec>,
+    pub gate: Option<FeatureGateSpec>,
 }
 
 impl JointEmbedModel {
@@ -302,6 +412,9 @@ impl JointEmbedModel {
             s_feat: None,
             e_feat_raw: None,
             e_feat_logstd: None,
+            gate_pip: None,
+            gate_mask: Arc::new(Mutex::new(None)),
+            gate_pi_logit: None,
             gate: None,
         })
     }
@@ -350,6 +463,9 @@ impl JointEmbedModel {
             s_feat: shared_s_feat,
             e_feat_raw: shared_e_feat_raw,
             e_feat_logstd: shared_e_feat_logstd,
+            gate_pip: None,
+            gate_mask: Arc::new(Mutex::new(None)),
+            gate_pi_logit: None,
             gate,
         })
     }
@@ -406,6 +522,9 @@ impl JointEmbedModel {
             s_feat: None,
             e_feat_raw: None,
             e_feat_logstd: None,
+            gate_pip: None,
+            gate_mask: Arc::new(Mutex::new(None)),
+            gate_pi_logit: None,
             gate: None,
         })
     }
@@ -473,7 +592,7 @@ impl JointEmbedModel {
                 self.gated_rows(
                     raw,
                     self.e_feat_logstd.as_ref(),
-                    Some(&self.gate_weights(s_feat)?),
+                    Some(&self.gate_weights(GateKind::Identity, s_feat)?),
                     false,
                 )?
                 .detach(),
@@ -489,18 +608,20 @@ impl JointEmbedModel {
         Ok(())
     }
 
-    /// Enable the variational softmax gate on the feature side (see
-    /// [`SoftmaxGateSpec`]). Allocates, as Vars in `varmap`: the selection logits
-    /// (`s_feat [n_features, H]` free / `s_beta [G, H]` factored) and the effect
-    /// log-std (`e_feat_logstd` / `beta_logstd [·, H]`); for a factored model WITH
-    /// velocity (`splice_delta`), also the INDEPENDENT δ gate (`s_delta`,
-    /// `delta_logstd`). Logits start at **zero**, which the `D` rescale makes exactly
-    /// the identity — an untrained gate is inert rather than biased. Call ONCE on the
+    /// Enable the variational spike-and-slab gate on the feature side (see
+    /// [`FeatureGateSpec`]). Allocates, as Vars in `varmap`: the selection logits
+    /// (`s_feat [n_features, H]` free / `s_beta [G, H]` factored), the effect
+    /// log-std (`e_feat_logstd` / `beta_logstd [·, H]`), and the per-dim inclusion
+    /// rate (`gate_pi_logit [H]`); for a factored model WITH velocity
+    /// (`splice_delta`), also the INDEPENDENT δ gate (`s_delta`, `delta_logstd`,
+    /// `delta_pi_logit`). Logits start at [`GATE_LOGIT_INIT`], so `σ ≈ 0.98` and an
+    /// untrained gate is inert rather than biased — see that constant for why zero
+    /// would be wrong here even though it was right for the softmax. Call ONCE on the
     /// primary model, BEFORE building sharing heads (which carry the shared gate via
     /// [`ShareFeaturesArgs`] / the cloned [`FeatFactor`]).
-    pub fn enable_softmax_gate(
+    pub fn enable_feature_gate(
         &mut self,
-        spec: SoftmaxGateSpec,
+        spec: FeatureGateSpec,
         varmap: &VarMap,
         dev: &Device,
     ) -> Result<()> {
@@ -514,12 +635,23 @@ impl JointEmbedModel {
                 .insert(name.to_string(), var.clone());
             Ok(var.as_tensor().clone())
         };
-        // Selection logits `[rows, H]`, all zero — a uniform gate, which the `D`
-        // rescale makes exactly the identity, so training starts from "no selection"
-        // rather than from an arbitrary bias. (No null column: the budget is on the
-        // dims, so a gene belonging nowhere just takes small mass in every column.)
-        let init_gate =
-            |name: &str, rows: usize| register(name, Tensor::zeros((rows, h), DType::F32, dev)?);
+        // Selection logits `[rows, H]` at `GATE_LOGIT_INIT` — `σ ≈ 0.98`, so the gate
+        // starts as ~the identity and the data turns coordinates OFF rather than on.
+        // The reverse (init at 0 ⇒ `σ = 0.5`) would halve the dictionary AND leave
+        // `β`'s gradient scaled by the gate it is trying to earn; see the constant.
+        let init_gate = |name: &str, rows: usize| -> Result<Tensor> {
+            register(
+                name,
+                Tensor::from_vec(vec![GATE_LOGIT_INIT; rows * h], (rows, h), dev)?,
+            )
+        };
+        // Per-dim inclusion rate `[H]`, init at the Beta prior's mean so an untrained
+        // `π_h` states the prior rather than an arbitrary one.
+        let init_pi = |name: &str| -> Result<Tensor> {
+            let mean = GATE_PI_BETA_A / (GATE_PI_BETA_A + GATE_PI_BETA_B);
+            let logit = (mean / (1.0 - mean)).ln() as f32;
+            register(name, Tensor::from_vec(vec![logit; h], (h,), dev)?)
+        };
         // Effect log-std `[rows, H]`, init `GATE_LOGSTD_INIT` (near-deterministic start).
         let init_logstd = |name: &str, rows: usize| -> Result<Tensor> {
             register(
@@ -527,6 +659,7 @@ impl JointEmbedModel {
                 Tensor::from_vec(vec![GATE_LOGSTD_INIT; rows * h], (rows, h), dev)?,
             )
         };
+        self.gate_pi_logit = Some(init_pi("gate_pi_logit")?);
         match &mut self.factor {
             Some(f) => {
                 let n_genes = f.beta.dim(0)?;
@@ -536,6 +669,7 @@ impl JointEmbedModel {
                 if f.splice_delta.is_some() {
                     f.s_delta = Some(init_gate("s_delta", n_genes)?);
                     f.delta_logstd = Some(init_logstd("delta_logstd", n_genes)?);
+                    f.delta_pi_logit = Some(init_pi("delta_pi_logit")?);
                 }
             }
             None => {
@@ -574,42 +708,141 @@ impl JointEmbedModel {
         }
     }
 
-    /// The gate's multiplier table `[rows, H]` for a **whole** logit table.
+    /// The gate's multiplier table `[rows, H]` — `α = σ(S/τ)`, the variational
+    /// inclusion probability `q(z=1)` for each `(gene, dim)`.
     ///
-    /// # This must be handed the FULL table, never a gathered minibatch
+    /// **Elementwise, and that is load-bearing.** The predecessor was a softmax down
+    /// the GENE axis, so handing it a gathered minibatch silently renormalized over
+    /// whatever subset arrived — including rows duplicated by negative sampling, or a
+    /// factored model's per-splice-track repeats. It compiled, ran, and trained
+    /// garbage, which is why [`Self::gathered_gate_weights`] exists to pin the order.
+    /// A sigmoid couples nothing, so that whole hazard is gone: gather-then-gate and
+    /// gate-then-gather now agree, and `gate_order_is_invariant_under_a_sigmoid`
+    /// asserts it.
     ///
-    /// The normalizer runs down the GENE axis, so a
-    /// gathered subset would silently normalize over the minibatch — and over
-    /// duplicated rows, since negative sampling repeats genes. It would compile,
-    /// run, and train garbage. Callers therefore compute this once on the full
-    /// table and `index_select` **afterwards**; [`Self::gated_rows`] takes the
-    /// already-gathered weights, not logits, so the wrong order is not expressible.
-    ///
-    /// `Gene` weights are scaled by the row count: a raw softmax over `D` genes
-    /// averages `1/D`, which would shrink every score by three orders of magnitude
-    /// at `D = 20k`. Scaling by `D` makes a uniform gate exactly the identity, so
-    /// the two axes are on the same footing and `temperature` means the same thing.
-    pub(crate) fn gate_weights(&self, full_logits: &Tensor) -> Result<Tensor> {
-        let logits = self.apply_temperature(full_logits)?;
-        let n_genes = logits.dim(0)?;
-        candle_nn::ops::softmax(&logits, 0)?.affine(n_genes as f64, 0.0)
+    /// No `D` rescale either. It existed to stop a `1/D`-scale softmax collapsing the
+    /// score by three orders of magnitude at `D = 20k`; `σ` is already `O(1)`.
+    pub(crate) fn gate_weights(&self, kind: GateKind, full_logits: &Tensor) -> Result<Tensor> {
+        let (pip, mask) = match kind {
+            GateKind::Identity => (self.gate_pip.as_ref(), Some(&self.gate_mask)),
+            GateKind::Velocity => match &self.factor {
+                Some(f) => (f.delta_gate_pip.as_ref(), f.delta_gate_mask.as_ref()),
+                None => (None, None),
+            },
+        };
+        if pip.is_some() {
+            if let Some(cell) = mask {
+                if let Some(m) = cell.lock().expect("gate mask poisoned").as_ref() {
+                    return Ok(m.clone());
+                }
+            }
+        }
+        if let Some(p) = pip {
+            return Ok(p.clone());
+        }
+        candle_nn::ops::sigmoid(&self.apply_temperature(full_logits)?)
     }
 
-    /// The ONLY way to produce a `w` argument for [`Self::gated_rows`]: normalize the
-    /// full logit table, then gather the requested rows.
+    /// Install a frozen posterior inclusion table and switch the model to jitter mode.
+    /// `pip` is `[rows, H]` row-major, on the gate's own axis (feature rows for a free
+    /// model, genes for a factored one). Call [`Self::resample_gate_mask`] once per
+    /// epoch afterwards; until then the model uses the mean.
+    pub fn set_gate_pip(&mut self, pip: &[f32], rows: usize, dev: &Device) -> Result<()> {
+        let h = self.embedding_dim;
+        assert_eq!(pip.len(), rows * h, "gate pip must be [rows, H]");
+        self.gate_pip = Some(Tensor::from_slice(pip, (rows, h), &Device::Cpu)?.to_device(dev)?);
+        *self.gate_mask.lock().expect("gate mask poisoned") = None;
+        Ok(())
+    }
+
+    /// Install the VELOCITY gate's frozen inclusion table (factored models only).
+    /// `pip` is `[n_genes, H]`, the axis `s_delta` lives on.
+    pub fn set_delta_gate_pip(&mut self, pip: &[f32], rows: usize, dev: &Device) -> Result<()> {
+        let h = self.embedding_dim;
+        assert_eq!(pip.len(), rows * h, "delta pip must be [genes, H]");
+        let t = Tensor::from_slice(pip, (rows, h), &Device::Cpu)?.to_device(dev)?;
+        if let Some(f) = self.factor.as_mut() {
+            f.delta_gate_pip = Some(t);
+            f.delta_gate_mask = Some(Arc::new(Mutex::new(None)));
+        }
+        Ok(())
+    }
+
+    /// Point this model's mask at an existing shared cell, so every composite axis
+    /// redraws together. Call after [`Self::set_gate_pip`] on each axis.
+    pub fn share_gate_mask(&mut self, cell: &Arc<Mutex<Option<Tensor>>>) {
+        self.gate_mask = Arc::clone(cell);
+    }
+
+    /// The shared mask cell, for handing to the other axes.
+    #[must_use]
+    pub fn gate_mask_cell(&self) -> Arc<Mutex<Option<Tensor>>> {
+        Arc::clone(&self.gate_mask)
+    }
+
+    /// Draw this epoch's `z ~ Bern(gate_pip)` and RETURN it. `None` when jitter is off.
     ///
-    /// Both steps live here so the ordering cannot be got wrong at a call site. It
-    /// matters because the softmax reduces down the GENE axis: gathering first would
-    /// normalize over whatever subset was gathered — a minibatch (with rows negative
-    /// sampling duplicates), or a factored model's feature rows (which repeat each
-    /// gene once per splice track). Either compiles, runs, and trains garbage.
+    /// Returns rather than stores because the composite fit runs several axes that
+    /// share Vars but are separate `JointEmbedModel` values — `gate_mask` is a plain
+    /// field, not a Var, so it does not propagate. Every axis must be handed the SAME
+    /// draw via [`Self::set_gate_mask`], or the axes would train against different
+    /// sub-models within one epoch and the mask would stop meaning "this epoch's `z`".
+    ///
+    /// Uses the device RNG, so a jittered fit is not bit-reproducible across runs —
+    /// already true of the gate's reparameterization noise, so this adds no new class
+    /// of irreproducibility.
+    pub fn resample_gate_mask(&self) -> Result<()> {
+        let Some(pip) = &self.gate_pip else {
+            return Ok(());
+        };
+        let u = Tensor::rand(0f32, 1f32, pip.shape(), pip.device())?;
+        // `z = 1` with probability `pip`.
+        let z = u.lt(pip)?.to_dtype(DType::F32)?;
+        *self.gate_mask.lock().expect("gate mask poisoned") = Some(z);
+        // The velocity gate draws its OWN `z` from its OWN `pip` — a shared draw would
+        // tie a gene's motion to its identity selection, which is precisely the
+        // conflation this whole `GateKind` split exists to prevent.
+        if let Some(f) = &self.factor {
+            if let (Some(dp), Some(cell)) = (&f.delta_gate_pip, &f.delta_gate_mask) {
+                let du = Tensor::rand(0f32, 1f32, dp.shape(), dp.device())?;
+                *cell.lock().expect("delta gate mask poisoned") =
+                    Some(du.lt(dp)?.to_dtype(DType::F32)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop the epoch mask so the model reverts to the mean `E[z] = pip` — what output
+    /// and `materialize_e_feat` must use, since training averaged over draws.
+    pub fn clear_gate_mask(&self) {
+        *self.gate_mask.lock().expect("gate mask poisoned") = None;
+        if let Some(f) = &self.factor {
+            if let Some(cell) = &f.delta_gate_mask {
+                *cell.lock().expect("delta gate mask poisoned") = None;
+            }
+        }
+    }
+
+    /// Is this model in jitter (posterior-informed dropout) mode?
+    #[must_use]
+    pub fn is_jittered(&self) -> bool {
+        self.gate_pip.is_some()
+    }
+
+    /// Gate the full logit table, then gather the requested rows.
+    ///
+    /// Order no longer matters — [`Self::gate_weights`] is elementwise — so this is
+    /// now a convenience, not a guard. Kept because every call site already uses it
+    /// and the shape is right; do not read it as evidence that the ordering is still
+    /// dangerous.
     pub(crate) fn gathered_gate_weights(
         &self,
+        kind: GateKind,
         logits: Option<&Tensor>,
         rows: &Tensor,
     ) -> Result<Option<Tensor>> {
         logits
-            .map(|x| self.gate_weights(x)?.index_select(rows, 0))
+            .map(|x| self.gate_weights(kind, x)?.index_select(rows, 0))
             .transpose()
     }
 
@@ -653,7 +886,7 @@ impl JointEmbedModel {
         };
         let (beta_ls, beta_s) = (
             gather(&f.beta_logstd)?,
-            self.gathered_gate_weights(f.s_beta.as_ref(), genes)?,
+            self.gathered_gate_weights(GateKind::Identity, f.s_beta.as_ref(), genes)?,
         );
         let beta = self.gated_rows(
             &f.beta.index_select(genes, 0)?,
@@ -665,7 +898,7 @@ impl JointEmbedModel {
             (Some((delta, _)), Some(m)) => {
                 let (delta_ls, delta_s) = (
                     gather(&f.delta_logstd)?,
-                    self.gathered_gate_weights(f.s_delta.as_ref(), genes)?,
+                    self.gathered_gate_weights(GateKind::Velocity, f.s_delta.as_ref(), genes)?,
                 );
                 let delta = self.gated_rows(
                     &delta.index_select(genes, 0)?,
@@ -683,7 +916,7 @@ impl JointEmbedModel {
     /// a factored per-gene table to feature rows via `row_to_gene`. `None` if `logits`
     /// is `None`. The excluded null mass per row is `1 − rowsum` (a near-zero row = a
     /// deselected gene).
-    fn selection_from(&self, logits: Option<&Tensor>) -> Result<Option<Tensor>> {
+    fn selection_from(&self, kind: GateKind, logits: Option<&Tensor>) -> Result<Option<Tensor>> {
         let Some(logits) = logits else {
             return Ok(None);
         };
@@ -691,7 +924,7 @@ impl JointEmbedModel {
         // it the other way round would normalize over duplicated rows on the `Gene`
         // axis (a factored model repeats each gene once per splice track), halving
         // every value while leaving the β-sharing equality test passing.
-        let w = self.gate_weights(logits)?;
+        let w = self.gate_weights(kind, logits)?;
         let rows = match &self.factor {
             Some(f) => w.index_select(&f.row_to_gene, 0)?,
             None => w,
@@ -703,13 +936,16 @@ impl JointEmbedModel {
     /// interpretability; `None` for an ungated model. Rows align with `e_feat` / the
     /// dictionary output.
     pub fn feature_selection(&self) -> Result<Option<Tensor>> {
-        self.selection_from(self.gate_logits())
+        self.selection_from(GateKind::Identity, self.gate_logits())
     }
 
     /// Per-feature-row VELOCITY selection `softmax(s_delta)` `[n_features, H]` — the
     /// per-gene motion gate (driver genes); `None` unless the factored δ gate is on.
     pub fn velocity_selection(&self) -> Result<Option<Tensor>> {
-        self.selection_from(self.factor.as_ref().and_then(|f| f.s_delta.as_ref()))
+        self.selection_from(
+            GateKind::Velocity,
+            self.factor.as_ref().and_then(|f| f.s_delta.as_ref()),
+        )
     }
 
     /// The identity-gate logit table (`s_feat` free / `s_beta` factored), or `None` if
@@ -733,47 +969,60 @@ impl JointEmbedModel {
         mu_rows.add(&sigma.mul(&eps)?)
     }
 
-    /// One gate's regularization term: the per-dim concentration penalty plus the
-    /// selection-weighted Gaussian effect KL (`σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]).
-    /// Shared by the identity (`β`/`e_feat`) and velocity (`δ`) gates. In the
-    /// autograd graph.
+    /// One gate's spike-and-slab KL: the Bernoulli inclusion KL against the dim's
+    /// learned rate `π_h`, plus the inclusion-weighted Gaussian effect KL
+    /// (`σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]), plus `π_h`'s own Beta hyperprior. Shared
+    /// by the identity (`β`/`e_feat`) and velocity (`δ`) gates. In the autograd graph.
     ///
-    /// # Both terms are deliberately kept `O(1)` in `D` and `H`
+    /// # The three terms must stay commensurate
     ///
     /// They are summed under one [`GATE_KL_WEIGHT`], so if their scales diverge the
-    /// larger silently sets the loss and the smaller stops existing. That is not
+    /// largest silently sets the loss and the others stop existing. That is not
     /// hypothetical — it is what happened when the gate's softmax moved from the dim
     /// axis to the gene axis: `α` went from `≈1/(H+1)` to `≈1/D`, the forward pass
-    /// compensated via the `D` rescale in [`Self::gate_weights`] but this function
-    /// did not, and at `D = 20287, H = 16` the effect prior came out **~49,000×**
-    /// smaller than the concentration term — numerically switched off. So:
+    /// compensated via a `D` rescale and this function did not, and at
+    /// `D = 20287, H = 16` the effect prior came out **~49,000×** smaller than the
+    /// concentration term — numerically switched off.
     ///
-    /// * the entropy is normalized by its own `ln D` maximum and MEANED over dims,
-    ///   putting it in `[0, 1]` whatever the gene count or embedding width;
-    /// * the Gaussian KL is weighted by the weights the LIKELIHOOD actually applies
-    ///   (`D·α`, i.e. what [`Self::gate_weights`] returns), not raw `α`, and meaned
-    ///   over every entry.
+    /// The Bernoulli form is better behaved: `α = σ(·)` is `O(1)` per entry with no
+    /// `D` in it, so the first two terms are commensurate by construction once both
+    /// are meaned over entries — no `ln D` normalization needed. The surviving rule
+    /// is the one that fixed it last time, and it is unchanged in spirit:
+    ///
+    /// * the Gaussian KL is weighted by the weight the LIKELIHOOD actually applies —
+    ///   now plain `α`, since that is what [`Self::gate_weights`] returns — and meaned
+    ///   over every entry;
+    /// * the Beta hyperprior is `O(H)` against the others' `O(D·H)`, so it is divided
+    ///   by `D·H` to preserve the ratio the true (summed) ELBO would have. With
+    ///   `D ≈ 20k` that makes it a genuinely weak prior which the data dominates —
+    ///   the same regime `posterior::hyper::sample_pi0`'s `Beta(9,1)` sits in.
     ///
     /// `gate_terms_are_commensurate` pins the ratio so a future reduction change
     /// cannot re-open this quietly.
-    fn single_gate_kl(&self, logits: &Tensor, logstd: &Tensor, mu: &Tensor) -> Result<Tensor> {
+    fn single_gate_kl(
+        &self,
+        logits: &Tensor,
+        pi_logit: &Tensor,
+        logstd: &Tensor,
+        mu: &Tensor,
+    ) -> Result<Tensor> {
         let logits = self.apply_temperature(logits)?;
-        // Normalize down the GENE axis — the same reduction `gate_weights` does.
-        let log_alpha = candle_nn::ops::log_softmax(&logits, 0)?;
-        let alpha = log_alpha.exp()?;
+        // `α = q(z=1)` per (gene, dim) — the same table `gate_weights` feeds the
+        // likelihood. Clamped off 0/1 so the logs below stay finite.
+        let alpha = candle_nn::ops::sigmoid(&logits)?.clamp(GATE_PI_EPS, 1.0 - GATE_PI_EPS)?;
         let n_genes = alpha.dim(0)? as f64;
-
-        // Concentration: each dim's Shannon entropy `H(A_{·,h}) = −Σ_g A log A`,
-        // scaled by its `ln D` maximum and averaged over dims → `[0, 1]`, where 1 is
-        // a perfectly spread dim and 0 a dim concentrated on one gene.
-        // `sum(0)` then mean-over-dims is `sum_all / H`; written as `sum_all` because
-        // a dim-0 reduce misses candle's vectorized path (it only fast-paths
-        // reductions over the LAST dims) while `sum_all` takes it.
         let n_dims = alpha.dim(1)? as f64;
-        let kl_cat = alpha
-            .mul(&log_alpha)?
-            .sum_all()?
-            .affine(-1.0 / (n_genes.ln() * n_dims), 0.0)?;
+
+        // Per-dim inclusion rate `π_h`, broadcast over genes.
+        let pi = candle_nn::ops::sigmoid(pi_logit)?.clamp(GATE_PI_EPS, 1.0 - GATE_PI_EPS)?;
+        let pi_row = pi.reshape((1, alpha.dim(1)?))?;
+
+        // KL(Bern(α) ‖ Bern(π)) = α·[ln α − ln π] + (1−α)·[ln(1−α) − ln(1−π)]
+        let one_m_alpha = alpha.affine(-1.0, 1.0)?;
+        let one_m_pi = pi_row.affine(-1.0, 1.0)?;
+        let kl_bern = (alpha.mul(&alpha.log()?.broadcast_sub(&pi_row.log()?)?)?
+            + one_m_alpha.mul(&one_m_alpha.log()?.broadcast_sub(&one_m_pi.log()?)?)?)?
+        .mean_all()?;
 
         // Gaussian KL per entry = ½[(σ²+μ²)/σ₀² − 1 − 2·logstd + ln σ₀²], σ² = e^{2 logstd}.
         let s0 = GATE_EFFECT_PRIOR_VAR;
@@ -782,33 +1031,62 @@ impl JointEmbedModel {
         let a = (two_logstd.exp()? + mu.sqr()?)?.affine(1.0 / s0, 0.0)?; // (σ²+μ²)/σ₀²
         let kl_gauss_dim = (a - &two_logstd)?.affine(0.5, 0.5 * (s0.ln() - 1.0))?; // ½[…]
                                                                                    // Weighted by the gate the likelihood sees, then averaged over all entries.
-        let kl_gauss = alpha.affine(n_genes, 0.0)?.mul(&kl_gauss_dim)?.mean_all()?;
+        let kl_gauss = alpha.mul(&kl_gauss_dim)?.mean_all()?;
 
-        kl_cat + kl_gauss
+        // −log Beta(π_h; a, b) up to a constant = −[(a−1)·ln π + (b−1)·ln(1−π)],
+        // summed over dims and put on the same per-entry footing as the two above.
+        let beta_nlp = (pi.log()?.affine(-(GATE_PI_BETA_A - 1.0), 0.0)?.sub(
+            &pi.affine(-1.0, 1.0)?
+                .log()?
+                .affine(GATE_PI_BETA_B - 1.0, 0.0)?,
+        )?)
+        .sum_all()?
+        .affine(1.0 / (n_genes * n_dims), 0.0)?;
+
+        kl_bern + kl_gauss + beta_nlp
     }
 
-    /// The gate's total SuSiE KL loss: the identity-gate KL plus, for a factored model
-    /// with velocity, the INDEPENDENT δ-gate KL. `None` for an ungated model. Kept in
-    /// the autograd graph.
+    /// The gate's total spike-and-slab KL: the identity-gate KL plus, for a factored
+    /// model with velocity, the INDEPENDENT δ-gate KL. `None` for an ungated model.
+    /// Kept in the autograd graph.
+    ///
+    /// Each gate carries its OWN `π_h` table. They are different objects — an identity
+    /// loading and a deviation from it are not on one scale — so a shared inclusion
+    /// rate would force them to agree, which is the same reason
+    /// `posterior::pb_gibbs` gives every gate its own `σ₀h²` and `π₀h`.
     pub fn gate_kl(&self) -> Result<Option<Tensor>> {
         if self.gate.is_none() {
             return Ok(None);
         }
+        // Under jitter the selection is an input, not a parameter: the logits are never
+        // consulted by `gate_weights`, so regularizing them would only add a term that
+        // moves Vars nothing reads. The inclusion prior lives in the sampler that
+        // produced `gate_pip`.
+        if self.gate_pip.is_some() {
+            return Ok(None);
+        }
         // Identity gate (β factored / e_feat free) — always present when gated.
-        let (Some(logits), Some(logstd)) = (self.gate_logits(), self.effect_logstd()) else {
+        let (Some(logits), Some(logstd), Some(pi)) = (
+            self.gate_logits(),
+            self.effect_logstd(),
+            self.gate_pi_logit.as_ref(),
+        ) else {
             return Ok(None);
         };
         let mu = match &self.factor {
             Some(f) => &f.beta,
             None => self.e_feat_raw.as_ref().unwrap_or(&self.e_feat),
         };
-        let mut kl = self.single_gate_kl(logits, logstd, mu)?;
+        let mut kl = self.single_gate_kl(logits, pi, logstd, mu)?;
         // Independent velocity gate on δ_g (factored + velocity present).
         if let Some(f) = &self.factor {
-            if let (Some(s_delta), Some(delta_logstd), Some((delta, _))) =
-                (&f.s_delta, &f.delta_logstd, &f.splice_delta)
-            {
-                kl = (kl + self.single_gate_kl(s_delta, delta_logstd, delta)?)?;
+            if let (Some(s_delta), Some(delta_pi), Some(delta_logstd), Some((delta, _))) = (
+                &f.s_delta,
+                &f.delta_pi_logit,
+                &f.delta_logstd,
+                &f.splice_delta,
+            ) {
+                kl = (kl + self.single_gate_kl(s_delta, delta_pi, delta_logstd, delta)?)?;
             }
         }
         Ok(Some(kl))
@@ -944,6 +1222,9 @@ fn build_feat_factor(
         beta_logstd: None,
         s_delta: None,
         delta_logstd: None,
+        delta_gate_pip: None,
+        delta_gate_mask: None,
+        delta_pi_logit: None,
     })
 }
 
