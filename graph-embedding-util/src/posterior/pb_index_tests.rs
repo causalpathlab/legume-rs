@@ -107,12 +107,15 @@ fn edges_carry_the_size_p_exposure() {
 }
 
 
-/// The pb axis is NOT exact by construction — it grows with the cell count (2000
-/// cells measured 838/494/128, Σ 1460). Above the cap it must slate like any
-/// other axis, or a large run pays an exact sum over thousands of columns per
-/// likelihood evaluation.
+/// An axis wide relative to the cap must slate, and the scale must fold the slate back up
+/// to the pool it was drawn from — not to the raw axis length, since the normalizer runs
+/// over the EXPRESSED axis.
+///
+/// `n_partition = 1` against a 5-pb axis puts it past `EXACT_FACTOR × n_partition = 4`.
+/// The 4-row feature axis sits exactly at the threshold and so stays exact, which
+/// incidentally checks that the two sides are decided independently.
 #[test]
-fn the_pb_partition_slates_once_it_exceeds_the_cap() {
+fn a_wide_axis_slates_and_scales_to_its_pool() {
     let (counts, sizes, offsets) = fixture();
     let (h, n_features) = (3usize, 4usize);
     let pb = stacked(&counts, &sizes, &offsets, h);
@@ -123,16 +126,79 @@ fn the_pb_partition_slates_once_it_exceeds_the_cap() {
         feature_to_backend_row: &map,
     };
 
-    let pair = build_pb_index_pair(&pb, &feat, None, h, 2, 7).unwrap();
+    let pair = build_pb_index_pair(&pb, &feat, None, h, 1, 7).unwrap();
 
-    assert_eq!(pair.by_feature.partition.len(), 2, "pb side slated to the cap");
+    assert_eq!(pair.by_feature.partition.len(), 1, "pb side slated to the cap");
     assert!(
-        (pair.by_feature.partition_scale - 2.5).abs() < 1e-12,
-        "scale folds 5 columns up from a 2-column slate, got {}",
+        (pair.by_feature.partition_scale - 5.0).abs() < 1e-12,
+        "scale folds the 5-pb pool up from a 1-entry slate, got {}",
         pair.by_feature.partition_scale
     );
-    assert_eq!(pair.by_pb.partition.len(), 2);
-    assert!((pair.by_pb.partition_scale - 2.0).abs() < 1e-12);
+    // 4 expressed rows <= 4 x 1, so the feature side is summed outright.
+    assert_eq!(pair.by_pb.partition.len(), 4, "feature side should be exact here");
+    assert!((pair.by_pb.partition_scale - 1.0).abs() < 1e-12);
+}
+
+/// An axis cheap relative to the cap is summed EXACTLY, which is what removes the Jensen
+/// bias in the profiled log-normalizer: `ln` of a sampled sum underestimates `ln` of the
+/// true sum, so an exact axis has no such gap to correct.
+#[test]
+fn a_cheap_axis_is_summed_exactly() {
+    let (counts, sizes, offsets) = fixture();
+    let (h, n_features) = (3usize, 4usize);
+    let pb = stacked(&counts, &sizes, &offsets, h);
+    let (e_feat, b_feat, map) = feature_side(n_features, h);
+    let feat = FeatureSide {
+        e_feat: &e_feat,
+        b_feat: &b_feat,
+        feature_to_backend_row: &map,
+    };
+
+    // A cap of 1024 dwarfs both axes, so neither slates.
+    let pair = build_pb_index_pair(&pb, &feat, None, h, 1024, 7).unwrap();
+    assert!((pair.by_feature.partition_scale - 1.0).abs() < 1e-12);
+    assert!((pair.by_pb.partition_scale - 1.0).abs() < 1e-12);
+    assert_eq!(pair.by_feature.partition.len(), 5);
+    assert_eq!(pair.by_pb.partition.len(), 4);
+}
+
+/// The slate pool is the EXPRESSED axis, matching the trainer, whose negatives are drawn
+/// uniformly over its expressed `feature_pool`. A row observed nowhere has a prior-driven
+/// embedding, so what it contributes to a normalizer is arbitrary — noise entering every
+/// anchor's score with nothing behind it.
+#[test]
+fn the_slate_pool_excludes_rows_observed_nowhere() {
+    // Row 2 is already zero in level 0; blank it in level 1 too so it is unobserved.
+    let (mut counts, sizes, offsets) = fixture();
+    for m in &mut counts {
+        for s in 0..m.ncols() {
+            m[(2, s)] = 0.0;
+        }
+    }
+    let (h, n_features) = (3usize, 4usize);
+    let pb = stacked(&counts, &sizes, &offsets, h);
+    let (e_feat, b_feat, map) = feature_side(n_features, h);
+    let feat = FeatureSide {
+        e_feat: &e_feat,
+        b_feat: &b_feat,
+        feature_to_backend_row: &map,
+    };
+
+    let pair = build_pb_index_pair(&pb, &feat, None, h, 1024, 7).unwrap();
+    assert!(
+        !pair.by_pb.partition.contains(&2),
+        "an unobserved row must not be in the normalizer pool: {:?}",
+        pair.by_pb.partition
+    );
+    assert_eq!(
+        pair.by_pb.partition.len(),
+        3,
+        "3 of 4 rows are expressed, so the exact sum is over 3"
+    );
+    // The other three survive, so this is not a blanket exclusion.
+    for r in [0u32, 1, 3] {
+        assert!(pair.by_pb.partition.contains(&r), "row {r} is expressed");
+    }
 }
 
 /// A row dropped by the anchor map leaves the GENE side but must stay in every
@@ -187,7 +253,8 @@ fn the_negative_slate_is_a_random_sample_not_the_head() {
     let n = 4000usize;
     let k = 200usize;
     let mut rng = StdRng::seed_from_u64(9);
-    let slate = super::sample_slate(n, k, &mut rng);
+    let pool: Vec<u32> = (0..n as u32).collect();
+    let slate = super::sample_slate_from(&pool, k, &mut rng);
 
     assert_eq!(slate.len(), k);
     let mut sorted = slate.clone();
