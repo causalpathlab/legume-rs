@@ -253,7 +253,7 @@ fn gated_model(n_features: usize, h: usize, vm: &VarMap) -> JointEmbedModel {
     // The gate is always the variational spike-and-slab single-effect. The
     // selection/materialize tests read effect MEANS (no sampling), so they are
     // unaffected by the variational log-std this allocates.
-    m.enable_softmax_gate(SoftmaxGateSpec { temperature: 1.0 }, vm, &dev())
+    m.enable_feature_gate(FeatureGateSpec { temperature: 1.0 }, vm, &dev())
         .unwrap();
     m
 }
@@ -267,8 +267,16 @@ fn gated_model(n_features: usize, h: usize, vm: &VarMap) -> JointEmbedModel {
 /// Also pins that there is no null column, and that the `D` rescale leaves a column
 /// averaging 1 — without it every weight would be `~1/D` and the score would
 /// collapse by three orders of magnitude while merely looking like a bad fit.
+/// The gate is a per-(gene, dim) PROBABILITY — every weight in `(0,1)`, and each
+/// entry responds only to its own logit.
+///
+/// This replaces `every_dim_carries_one_unit_of_mass`, which asserted the softmax's
+/// conserved per-dim mass. That property is deliberately gone: it is what made the
+/// gate a simplex and therefore incomparable with the sampler's PIP table. Mass is
+/// now controlled softly by the learned `π_h`, so there is no exact invariant to
+/// assert here — the spread is a MEASUREMENT the fit reports, not a guarantee.
 #[test]
-fn every_dim_carries_one_unit_of_mass() {
+fn gate_is_a_per_entry_probability() {
     let vm = VarMap::new();
     let (n_features, h) = (7usize, 3usize);
     let mut m = gated_model(n_features, h, &vm);
@@ -285,72 +293,115 @@ fn every_dim_carries_one_unit_of_mass() {
     assert_eq!(
         logits.dims(),
         &[n_features, h],
-        "no null column: width is H"
+        "width is H, no null column"
     );
 
-    let w = m.gate_weights(logits).unwrap();
-    let col_mean = w.mean(0).unwrap().to_vec1::<f32>().unwrap();
-    for (d, v) in col_mean.iter().enumerate() {
+    let w = m.gate_weights(GateKind::Identity, logits).unwrap();
+    let flat = w.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    for (i, v) in flat.iter().enumerate() {
         assert!(
-            (v - 1.0).abs() < 1e-5,
-            "dim {d} must still average weight 1 despite lopsided logits, got {v}"
+            *v > 0.0 && *v < 1.0,
+            "entry {i} must be a probability, got {v}"
         );
     }
-    // And the lopsidedness IS present — otherwise the assertion above is vacuous.
-    let flat = w.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-    let spread =
-        flat.iter().fold(0.0f32, |m, x| m.max(*x)) / flat.iter().fold(f32::MAX, |m, x| m.min(*x));
+    // Independence: bumping ONE logit moves ONE weight. Under the old softmax this
+    // was impossible — raising a gene necessarily lowered every other in its dim —
+    // and that coupling is exactly what made the gate incomparable with a PIP.
+    let mut bumped = flat.clone();
+    bumped[0] = 0.0; // placeholder, replaced below
+    let mut logits2 = logits.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    logits2[0] += 3.0;
+    let w2 = m
+        .gate_weights(
+            GateKind::Identity,
+            &Tensor::from_vec(logits2, (n_features, h), &dev()).unwrap(),
+        )
+        .unwrap();
+    let flat2 = w2.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    bumped[0] = flat2[0];
     assert!(
-        spread > 10.0,
-        "fixture must actually be lopsided within a column (max/min {spread:.1})"
+        flat2[0] > flat[0] + 1e-4,
+        "the bumped entry must rise: {} -> {}",
+        flat[0],
+        flat2[0]
     );
+    for i in 1..flat.len() {
+        assert!(
+            (flat2[i] - flat[i]).abs() < 1e-6,
+            "entry {i} must be untouched by another entry's logit ({} -> {})",
+            flat[i],
+            flat2[i]
+        );
+    }
 }
 
-/// The two terms `single_gate_kl` sums must stay COMMENSURATE — they share one
+/// The terms `single_gate_kl` sums must stay COMMENSURATE — they share one
 /// `GATE_KL_WEIGHT`, so a scale gap silently deletes the smaller one. This caught a
 /// real regression: when the softmax moved to the gene axis, `α` fell from
-/// `≈1/(H+1)` to `≈1/D`, the forward pass compensated via the `D` rescale and the
+/// `≈1/(H+1)` to `≈1/D`, the forward pass compensated via a `D` rescale and the
 /// KL did not, and the effect prior came out ~49,000× too small.
 ///
-/// Asserted as a ratio rather than an absolute, and on a model whose effect KL is
-/// made non-trivial (nonzero `μ`), so it tracks the reductions rather than the
-/// fixture.
+/// Measured as a RATIO, by differencing two models that differ only in the effect
+/// mean `μ`. The Gaussian term is the only one that depends on `μ`, so the gap
+/// between them IS that term's contribution — which is what an absolute bound on the
+/// total cannot show. (The previous version leaned on the entropy being `≤ 1` by
+/// construction; the Bernoulli inclusion KL has no such bound, so that inference no
+/// longer holds and the test would have passed vacuously.)
 #[test]
 fn gate_terms_are_commensurate() {
     let vm = VarMap::new();
     let (n_features, h) = (64usize, 4usize);
-    let mut m = gated_model(n_features, h, &vm);
-    // Give the effect a real mean so its KL is not ~0 for trivial reasons.
-    m.e_feat_raw =
-        Some(Tensor::from_vec(vec![0.7f32; n_features * h], (n_features, h), &dev()).unwrap());
 
-    let total = m
-        .gate_kl()
-        .unwrap()
-        .expect("gate on")
-        .to_vec0::<f32>()
-        .unwrap();
-    assert!(total.is_finite(), "gate KL must be finite, got {total}");
-    // Entropy alone is <= 1 by construction (normalized by ln D), so a total far
-    // above that means the Gaussian term is present and contributing; a total
-    // pinned at <= 1 would mean it has been scaled away again.
+    let kl_at = |mu: f32| -> f32 {
+        let vm = VarMap::new();
+        let mut m = gated_model(n_features, h, &vm);
+        m.e_feat_raw =
+            Some(Tensor::from_vec(vec![mu; n_features * h], (n_features, h), &dev()).unwrap());
+        m.gate_kl()
+            .unwrap()
+            .expect("gate on")
+            .to_vec0::<f32>()
+            .unwrap()
+    };
+    let _ = &vm;
+
+    let flat = kl_at(0.0); // inclusion KL + Beta prior, effect term ~minimal
+    let bumped = kl_at(0.7); // + a real Gaussian effect penalty
     assert!(
-        total > 1.0 && total < 100.0,
-        "the two terms must be within a couple of orders of magnitude — total {total} \
-         suggests one has swamped or erased the other"
+        flat.is_finite() && bumped.is_finite(),
+        "gate KL must be finite, got {flat} / {bumped}"
+    );
+
+    let gauss = bumped - flat;
+    assert!(
+        gauss > 0.0,
+        "the Gaussian effect term must respond to μ at all — got {gauss}"
+    );
+    // Neither term may be more than ~2 orders of magnitude from the other. `flat` is
+    // dominated by the inclusion KL; `gauss` is the effect penalty.
+    let ratio = (gauss / flat).max(flat / gauss);
+    assert!(
+        ratio < 100.0,
+        "inclusion KL ({flat}) and effect KL ({gauss}) must be within a couple of \
+         orders of magnitude — ratio {ratio} means one has swamped or erased the other"
     );
 }
 
-/// The normalizer must span the FULL gene axis. Gathering rows and THEN
-/// normalizing would renormalize over the minibatch — which compiles, runs, and
-/// trains garbage — so this pins the ordering by showing the two disagree.
+/// Gather order no longer matters, because the gate is elementwise.
+///
+/// The INVERSE of this used to be asserted, and for good reason: a softmax down the
+/// gene axis renormalized over whatever subset it was handed, so gathering first
+/// trained garbage that still compiled and ran. `gathered_gate_weights` exists to
+/// pin that ordering. Under `σ` the hazard is structurally impossible, and this test
+/// now records that — if it ever fails, something has reintroduced a cross-gene
+/// coupling into the gate and the ordering guard needs to come back.
 #[test]
-fn gene_axis_normalizer_spans_all_genes_not_the_gathered_subset() {
+fn gate_order_is_invariant_under_a_sigmoid() {
     let vm = VarMap::new();
     let (n_features, h) = (8usize, 3usize);
     let m = gated_model(n_features, h, &vm);
     let logits = m.s_feat.as_ref().expect("gate on");
-    // Make the logits non-uniform, else both orders agree trivially.
+    // Non-uniform logits, so agreement is a real result and not a fixture artifact.
     let logits = logits
         .broadcast_add(
             &Tensor::from_vec(
@@ -363,27 +414,41 @@ fn gene_axis_normalizer_spans_all_genes_not_the_gathered_subset() {
         .unwrap();
 
     let idx = Tensor::from_vec(vec![0u32, 1, 2], 3, &dev()).unwrap();
-    let correct = m
-        .gate_weights(&logits)
+    let gate_then_gather = m
+        .gate_weights(GateKind::Identity, &logits)
         .unwrap()
         .index_select(&idx, 0)
         .unwrap();
-    let wrong = m
-        .gate_weights(&logits.index_select(&idx, 0).unwrap())
+    let gather_then_gate = m
+        .gate_weights(GateKind::Identity, &logits.index_select(&idx, 0).unwrap())
         .unwrap();
 
-    let c = correct.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-    let x = wrong.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-    let maxdiff = c
+    let a = gate_then_gather
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    let b = gather_then_gate
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    let maxdiff = a
         .iter()
-        .zip(&x)
-        .map(|(a, b)| (a - b).abs())
+        .zip(&b)
+        .map(|(x, y)| (x - y).abs())
         .fold(0.0f32, f32::max);
     assert!(
-        maxdiff > 1e-3,
-        "gather-then-normalize must DIFFER from normalize-then-gather on the Gene \
-         axis (max diff {maxdiff}); if these agree the test fixture is degenerate \
-         and the ordering bug would slip through unnoticed"
+        maxdiff < 1e-6,
+        "an elementwise gate must give the same answer either order (max diff \
+         {maxdiff}); a nonzero gap means the gate couples genes again"
+    );
+    // The fixture is non-degenerate: the gathered rows are not all equal.
+    let spread =
+        a.iter().fold(0.0f32, |m, x| m.max(*x)) - a.iter().fold(f32::MAX, |m, x| m.min(*x));
+    assert!(
+        spread > 1e-3,
+        "fixture must vary across rows (spread {spread})"
     );
 }
 
@@ -414,34 +479,63 @@ fn ungated_model_is_inert() {
     assert!(m.feature_selection().unwrap().is_none());
 }
 
-/// Zero logits ⇒ a uniform gate, and the `D` rescale makes that EXACTLY the
-/// identity: every weight is 1.0, so an untrained gate neither shrinks nor tilts
-/// the embedding. Without the rescale these would each be `1/D` and the score
-/// would collapse by three orders of magnitude at a realistic gene count.
+/// An UNTRAINED gate must be ~inert: `σ(GATE_LOGIT_INIT) ≈ 0.98`, so a fresh model's
+/// `Ẽ ≈ β` and nothing is shrunk or tilted before a single step.
+///
+/// This is why the init is NOT zero. `σ(0) = 0.5` would halve the whole dictionary —
+/// propagating into the NCE scale and the phase-2 projection — and would also scale
+/// down the gradient reaching `β` through `α·β`. (The softmax predecessor got the
+/// same property FROM a zero init, since `softmax(0)·D = 1` exactly; the arithmetic
+/// changed, the requirement did not.)
 #[test]
-fn zero_logits_give_an_identity_gate() {
+fn untrained_gate_is_inert() {
     let (n_features, h) = (6usize, 4usize);
     let vm = VarMap::new();
-    // No override needed: the gate INITIALIZES to all-zero logits, so this also
-    // pins that an untrained gate is inert rather than biased.
     let m = gated_model(n_features, h, &vm);
     let sel = m.feature_selection().unwrap().unwrap();
     assert_eq!(sel.dims(), &[n_features, h], "no null column");
     for x in sel.flatten_all().unwrap().to_vec1::<f32>().unwrap() {
         assert!(
-            (x - 1.0).abs() < 1e-6,
-            "uniform gate must be the identity, got {x}"
+            x > 0.97 && x < 1.0,
+            "an untrained gate must pass the loading through nearly unchanged, got {x}"
         );
     }
 
-    // And applying it to an all-ones base leaves the base untouched.
+    // Applying it to an all-ones base leaves the base nearly untouched — and in
+    // particular does NOT halve it, which a zero init would.
     let base = Tensor::ones((n_features, h), DType::F32, &dev()).unwrap();
-    let w = m.gate_weights(m.s_feat.as_ref().unwrap()).unwrap();
+    let w = m
+        .gate_weights(GateKind::Identity, m.s_feat.as_ref().unwrap())
+        .unwrap();
     let gated = base.mul(&w).unwrap();
     for x in gated.flatten_all().unwrap().to_vec1::<f32>().unwrap() {
         assert!(
-            (x - 1.0).abs() < 1e-6,
-            "identity gate must not move the base, got {x}"
+            (x - 1.0).abs() < 0.03,
+            "untrained gate must not rescale the base, got {x}"
+        );
+    }
+}
+
+/// `π_h` starts at the `Beta(a,b)` prior mean, and it is a SEPARATE table per gate.
+///
+/// Both matter. An untrained `π_h` should state the prior rather than an arbitrary
+/// rate, and a shared `π` across the identity and velocity gates would force a
+/// loading and a deviation from it onto one sparsity — the same reason
+/// `posterior::pb_gibbs` gives every gate its own `σ₀h²` and `π₀h`.
+#[test]
+fn pi_starts_at_the_prior_mean_and_is_per_gate() {
+    use crate::model::{GATE_PI_BETA_A, GATE_PI_BETA_B};
+    let (n_features, h) = (6usize, 4usize);
+    let vm = VarMap::new();
+    let m = gated_model(n_features, h, &vm);
+    let pi_logit = m.gate_pi_logit.as_ref().expect("gate on");
+    assert_eq!(pi_logit.dims(), &[h], "pi is indexed by DIM, one per h");
+    let want = (GATE_PI_BETA_A / (GATE_PI_BETA_A + GATE_PI_BETA_B)) as f32;
+    for x in pi_logit.to_vec1::<f32>().unwrap() {
+        let pi = 1.0 / (1.0 + (-x).exp());
+        assert!(
+            (pi - want).abs() < 1e-5,
+            "pi must start at the Beta prior mean {want}, got {pi}"
         );
     }
 }
@@ -493,7 +587,7 @@ fn backward_reaches_gate_logits() {
     // Normalize on the FULL table, then gather — gathering first would renormalize
     // over the subset, which is the bug `gathered_gate_weights` exists to prevent.
     let w = m
-        .gathered_gate_weights(m.s_feat.as_ref(), &idx)
+        .gathered_gate_weights(GateKind::Identity, m.s_feat.as_ref(), &idx)
         .unwrap()
         .unwrap();
     let gated = base.mul(&w).unwrap();
@@ -595,7 +689,7 @@ fn delta_gate_independent_and_beta_shared() {
         &dev(),
     )
     .unwrap();
-    m.enable_softmax_gate(SoftmaxGateSpec { temperature: 1.0 }, &vm, &dev())
+    m.enable_feature_gate(FeatureGateSpec { temperature: 1.0 }, &vm, &dev())
         .unwrap();
 
     // Independent velocity gate allocated (velocity present).

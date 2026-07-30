@@ -88,19 +88,21 @@ pub struct BgeArgs {
     #[command(flatten)]
     qc: QcArgs,
 
-    // Softmax feature gate — ALWAYS ON for bge (the standard training):
-    // Ẽ_{g,h} = D · softmax_g(S_{·,h})[g] · E_{g,h}. The softmax runs over GENES within
-    // a dim, so every dim carries one unit of selection mass to distribute — each dim is
-    // a distribution over genes, and no dim can hoard. There is no null column (with no
-    // per-gene budget, an unselected gene simply takes small mass everywhere).
+    // Spike-and-slab feature gate — ALWAYS ON for bge (the standard training):
+    // Ẽ_{g,h} = σ(S_{g,h}) · E_{g,h}, an INDEPENDENT inclusion probability per
+    // (gene, dim). Each dim's inclusion rate π_h is learned, so per-dim mass is
+    // controlled by the prior rather than pinned by a normalizer. There is no null
+    // column: an unselected gene simply has σ(S) → 0 everywhere. σ(S) is the same
+    // estimand `--posterior` reports as feature_pip, so the two are comparable.
     // Temperature is the one knob.
     #[arg(
-        long = "feature-softmax-temp",
+        long = "feature-gate-temp",
+        alias = "feature-softmax-temp",
         default_value_t = 1.0,
-        help = "Softmax feature-gate temperature τ (< 1 sharpens each dim's gene distribution).",
+        help = "Feature-gate temperature τ (< 1 sharpens each inclusion probability toward 0/1).",
         hide = true
     )]
-    feature_softmax_temp: f32,
+    feature_gate_temp: f32,
 
     #[arg(
         long = "phase1-cells-per-pb",
@@ -648,8 +650,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             // Per-gene softmax feature gate — the SuSiE variational spike-and-slab
             // single-effect, ALWAYS ON for bge (null absorber + categorical + Gaussian
             // effect KL, at the fixed internal weight). Temperature is the one knob.
-            softmax_gate: Some(ge::SoftmaxGateConfig {
-                temperature: args.feature_softmax_temp,
+            feature_gate: Some(ge::FeatureGateConfig {
+                temperature: args.feature_gate_temp,
             }),
         })
     };

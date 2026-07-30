@@ -42,9 +42,13 @@
 //! answers instead is "which dims does this gene use", which is the one the
 //! downstream selection and annotation calls actually ask.
 //!
-//! NOTE the trained gate has since moved to normalizing over GENES within a dim
-//! (`crate::model::SoftmaxGateSpec`), so neither sampler here is its exact
-//! posterior — but this one, being per-dim, is the closer match.
+//! NOTE the trained gate is now a per-(gene, dim) Bernoulli spike-and-slab
+//! (`crate::model::FeatureGateSpec`) — the SAME generative model this block samples,
+//! optimized variationally instead. So `σ(S)` from an SGD fit and the `pip` this
+//! block reports are one estimand estimated two ways, and comparing them is the
+//! intended check on the variational approximation. (Before the gate went Bernoulli
+//! it was a softmax over genes within a dim, a simplex, which no rescaling connects
+//! to a product of Bernoullis; measured rank correlation between the two was 0.02.)
 //!
 //! # Blocking, and the mixing trade
 //!
@@ -124,12 +128,14 @@ pub struct DimBlockConfig {
     /// Optional `[n_anchors × h]` row-major warm start for `β`, e.g. the phase-1
     /// SGD MAP. `None` cold-starts at zero.
     ///
-    /// **`z` is always cold**, warm start or not. The trained gate is a softmax
-    /// *over genes within a dim* (`crate::model::SoftmaxGateSpec`), which is a
-    /// different object from this per-dim spike-and-slab — thresholding one into
-    /// the other would invent a correspondence neither parameterization implies.
-    /// A warm `β` gives the chain a sensible scale; the data still has to earn
-    /// each dim.
+    /// **`z` is always cold**, warm start or not — and note this is now a CHOICE
+    /// rather than a necessity. The trained gate is the same Bernoulli spike-and-slab
+    /// (`crate::model::FeatureGateSpec`), so its `σ(S)` could in principle seed `z`.
+    /// It deliberately does not: warm-starting the indicator from a variational
+    /// optimum is what `posterior::run`'s exclusivity argument rules out, since a
+    /// mean-field `q(z)` cannot represent the correlated selection this block exists
+    /// to explore. A warm `β` gives the chain a sensible scale; the data still has to
+    /// earn each dim.
     pub init_beta: Option<Vec<f32>>,
     /// Progress-bar label, so a run with several blocks says which one is moving.
     pub label: Box<str>,

@@ -166,11 +166,13 @@ pub struct FitConfig {
     /// `Softmax` (InfoNCE), which `faba gem` uses for its dense count data; `senna bge`
     /// / `pinto cage` set `Logistic` explicitly (byte-identical to before).
     pub nce_objective: crate::loss::NceObjective,
-    /// Optional per-gene softmax gate over the embedding dimensions (SuSiE single-
-    /// effect prior + graceful feature selection). `Some` enables it for both the free
-    /// (`e_feat`) and factored (`β`) feature sides; `None` (default) = ungated, byte-
-    /// identical to before. See [`SoftmaxGateConfig`] and [`crate::model::SoftmaxGateSpec`].
-    pub softmax_gate: Option<SoftmaxGateConfig>,
+    /// Optional per-gene spike-and-slab gate over the embedding dimensions (Bernoulli
+    /// inclusion + Gaussian effect prior = graceful feature selection). `Some` enables
+    /// it for both the free (`e_feat`) and factored (`β`) feature sides; `None`
+    /// (default) = ungated. Its `σ(S)` output is the same estimand
+    /// `posterior::dim_block` samples as a PIP. See [`FeatureGateConfig`] and
+    /// [`crate::model::FeatureGateSpec`].
+    pub feature_gate: Option<FeatureGateConfig>,
 }
 
 /// Caller-provided spec for the per-gene β-sharing feature factorization. Lengths
@@ -188,7 +190,7 @@ pub struct FeatFactorSpec {
 /// Caller-facing name for the gate spec. One type, not a parallel copy: an earlier
 /// duplicate meant the model's doc was updated when the gate changed and the
 /// config's was not, so a caller reading the public API got the deleted design.
-pub use crate::model::SoftmaxGateSpec as SoftmaxGateConfig;
+pub use crate::model::FeatureGateSpec as FeatureGateConfig;
 
 /// Trained model + its `VarMap`. The varmap is exposed so callers can
 /// save checkpoints or re-run inference; the current caller (`senna

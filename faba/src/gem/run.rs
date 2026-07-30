@@ -431,8 +431,8 @@ fn run_gem_genes_bge(
             // single-effect, ALWAYS ON. Gates β_g (identity) AND, independently, δ_g
             // (velocity → velocity_selection); null absorber + categorical + Gaussian
             // effect KL at the fixed internal weight. Temperature is the one knob.
-            softmax_gate: Some(ge::SoftmaxGateConfig {
-                temperature: args.model.feature_softmax_temp,
+            feature_gate: Some(ge::FeatureGateConfig {
+                temperature: args.model.feature_gate_temp,
             }),
         };
         Ok((cfg, gene_names, delta_l2, row_to_gene, unspliced_rows))
