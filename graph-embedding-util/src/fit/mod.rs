@@ -2,13 +2,16 @@
 //! own CLI args into a [`FitConfig`] and pass already-loaded
 //! [`UnifiedData`] (so this crate stays free of file/path concerns).
 
+mod axes;
 mod config;
 pub mod lift;
 pub mod lineage;
+mod models;
 pub mod projection;
 pub mod resolve_embedding;
 mod samplers;
 mod selection;
+mod setup;
 pub(crate) mod stacked_pb;
 
 pub use config::{FeatFactorSpec, FeatureGateConfig, FitConfig, FitOutput};
@@ -16,28 +19,18 @@ pub use lift::{CellLineage, LineageQc};
 pub use projection::PbLevelVelocity;
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
 
-use crate::coarsen::{identity_axis, AxisCoarsenings};
 use crate::data::UnifiedData;
-use crate::loss::{
-    build_stratified_sampler, FeatPairing, PerBatchStratifiedCellSampler, StratifiedSampler,
-};
-use crate::model::{FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
+use crate::model::JointEmbedModel;
 use crate::training::{
     train_composite, AxisSampler, CompositeAxis, CompositeMode, CompositeTrainContext, PbSemTerm,
 };
-use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
-use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, MultilevelParams};
-use data_beans_alg::random_projection::RandProjOps;
+use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
 use log::info;
 use matrix_param::traits::Inference;
 use nalgebra::DMatrix;
 
-use config::{
-    stage_params, DEFAULT_AXIS_LAMBDA, DEFAULT_STRATIFY_ALPHA_CELL, DEFAULT_STRATIFY_ALPHA_PB,
-    LINEAGE_WARMUP_FRAC,
-};
+use config::{stage_params, DEFAULT_AXIS_LAMBDA, LINEAGE_WARMUP_FRAC};
 use projection::{project_cells_phase2, project_pbs_phase2, CellBatchDivisor, PHASE2_RIDGE};
-use samplers::{build_active_samplers, subsample_cell_samplers_multilevel};
 use selection::{install_selection, run_selection_pass, SelectionPassInput};
 
 /// Composite-objective gbe fit — trained in **two phases**.
@@ -66,362 +59,35 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     let h = config.embedding_dim;
     let stop = crate::stop::stop_flag();
 
-    ///////////////////////////////////////////////////
-    // Shared upstream: batch-corrected projection //
-    ///////////////////////////////////////////////////
-    info!(
-        "Batch-corrected projection (proj_dim={}, {} batches)...",
-        config.proj_dim,
-        unified.n_batches()
-    );
-    let batch_labels: Vec<Box<str>> = unified.batch_labels();
-    let batch_arg = (unified.n_batches() > 1).then_some(batch_labels.as_slice());
-    let proj_out = if let Some(w) = config.hvg_weights.as_deref() {
-        anyhow::ensure!(
-            w.len() == unified.n_features(),
-            "hvg_weights length {} != n_features {} (HVG mask must be aligned to the unified \
-             feature axis BEFORE any subset/coarsening — pass full-axis weights from the wrapper)",
-            w.len(),
-            unified.n_features()
-        );
-        info!(
-            "HVG-weighted projection: {} weighted features (>= 1.0)",
-            w.iter().filter(|&&x| x > 0.0).count()
-        );
-        // The projection runs on the full backend row axis, which may be
-        // wider than the compact feature axis when a prior pass dropped
-        // features (e.g. the two-pass null-QC refine in `senna bge`). Scatter
-        // the compact weights to backend rows via `feature_to_backend_row`;
-        // rows not in the current feature axis get 0 so they sit out the
-        // projection basis. Identity (and a no-op) when no subset has happened.
-        let backend_rows = unified.count_backend().num_rows();
-        let mut backend_w = vec![0.0f32; backend_rows];
-        for (compact_i, &brow) in unified.feature_to_backend_row.iter().enumerate() {
-            backend_w[brow] = w[compact_i];
-        }
-        unified
-            .count_backend_mut()
-            .project_columns_weighted_seeded(
-                config.proj_dim,
-                config.block_size,
-                batch_arg,
-                &backend_w,
-                config.seed,
-            )?
-    } else {
-        unified
-            .count_backend_mut()
-            .project_columns_with_batch_correction_seeded(
-                config.proj_dim,
-                config.block_size,
-                batch_arg,
-                config.seed,
-            )?
-    };
-
-    ///////////////////////////////////////////////////////
-    // Multilevel collapse → batch-corrected pseudobulks //
-    ///////////////////////////////////////////////////////
-    //
-    // `sort_dim` controls how many bits of the binary-sketched projection
-    // are used to hash cells into the *finest* pb-sample partition (so
-    // `2^sort_dim` is the max number of distinct codes / pb-samples at
-    // that level). Exposed directly via `FitConfig.sort_dim` for parity
-    // with `senna topic` / `svd` rather than derived from a target count.
-    info!(
-        "Multilevel collapse (sort_dim={}, {} levels requested)...",
-        config.sort_dim, config.num_levels
-    );
-    let collapse_out = collapse_columns_multilevel_with_hierarchy(
-        unified.count_backend_mut(),
-        &proj_out.proj,
-        &batch_labels,
-        &MultilevelParams {
-            knn_pb_samples: config.knn_pb_samples,
-            num_levels: config.num_levels.max(1),
-            sort_dim: config.sort_dim,
-            num_opt_iter: config.num_opt_iter,
-            refine: config.refine.clone(),
-            // bge only reads `posterior_mean()` off the collapse output
-            // (see the pb_full loop below), so skip the sd / log_mean /
-            // log_sd planes entirely — that's the bulk of the coarsen-stage
-            // memory at high pb-sample counts.
-            output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
-        },
-    )?;
-    let mut collapsed_levels = collapse_out.levels;
-    // Per-level cell→pb (finest-first, matching `collapsed_levels`
-    // pre-reverse). Surfaced for the future nested chain sampler;
-    // currently informational only — use it to derive the pb-tree
-    // parent map between adjacent levels via `derive_parent_map`.
-    let mut cell_to_pb_per_level = collapse_out.cell_to_pb_per_level;
-    // After this reverse, levels are ordered coarsest..finest. Senna
-    // topic uses the same order so the curriculum trains coarse first.
-    collapsed_levels.reverse();
-    cell_to_pb_per_level.reverse();
-    let num_levels = collapsed_levels.len();
-
+    ///////////////////////////////////////////////
+    // Shared upstream: projection → pseudobulks //
+    ///////////////////////////////////////////////
     let n_features = unified.n_features();
     let feature_to_backend = unified.feature_to_backend_row.clone();
-
-    ///////////////////////////////
-    // Pseudobulk data per level //
-    ///////////////////////////////
-    //
-    // pb counts live on the unified feature axis directly. If the
-    // backend (per_file_data[0]) holds more rows than the unified axis
-    // — e.g. an HVG mask narrowed `unified.feature_names` — gather the
-    // unified rows out of the backend's pb matrix. Otherwise reuse it.
-    let mut pb_blobs: Vec<UnifiedData> = Vec::with_capacity(num_levels);
-    for collapsed in &collapsed_levels {
-        let pb_full: &DMatrix<f32> = match &collapsed.mu_adjusted {
-            Some(adj) => adj.posterior_mean(),
-            None => collapsed.mu_observed.posterior_mean(),
-        };
-        let pb_count_ds = gather_to_unified_axis(pb_full, n_features, &feature_to_backend);
-        pb_blobs.push(UnifiedData::from_pseudobulks(
-            &pb_count_ds,
-            unified.feature_names.clone(),
-            unified.feature_to_backend_row.clone(),
-        )?);
-    }
-
-    // NOTE: the flat cell↔feature edge list is intentionally *not* built.
-    // The cell axis is always `PerBatchStratified`, whose sampler is built by
-    // streaming columns in `build_active_samplers` and is self-contained at
-    // sample time — so `unified.triplets` stays empty. `materialize_cell_triplets`
-    // remains available only for reviving the flat `PerBatch` path.
+    let pb = setup::build_pseudobulks(unified, &config)?;
+    let num_levels = pb.num_levels();
+    let setup::Pseudobulks {
+        collapsed_levels,
+        cell_to_pb_per_level,
+        blobs: pb_blobs,
+    } = pb;
 
     ////////////////////////////////
     // VarMap and embedding heads //
     ////////////////////////////////
     let varmap = VarMap::new();
-    let vs = VarBuilder::from_varmap(
-        &varmap,
-        candle_util::candle_core::DType::F32,
-        &config.device,
-    );
-    let zeros_features = vec![0f32; n_features];
-    let zeros_cells = vec![0f32; n_cells];
-
-    // The cell head allocates the canonical feature-side Vars ("e_feat"/"b_feat"
-    // for a free model, or "beta"/"b_feat" when β-sharing factored); every level
-    // head then SHARES that feature side and registers its own cell side under a
-    // unique `pb_l{idx}` prefix.
-    let mut cell_model = match &config.feat_factor {
-        Some(spec) => {
-            // β-sharing is incompatible with the free-E_feat L2, which assumes a
-            // single free feature table per row.
-            anyhow::ensure!(
-                config.feature_embedding_l2 == 0.0,
-                "feat_factor (β-sharing) is not supported with feature_embedding_l2 > 0"
-            );
-            anyhow::ensure!(
-                spec.row_to_gene.len() == n_features && spec.unspliced_rows.len() == n_features,
-                "feat_factor row maps (row_to_gene {}, unspliced_rows {}) must match n_features {}",
-                spec.row_to_gene.len(),
-                spec.unspliced_rows.len(),
-                n_features
-            );
-            // Dense gene ids → count is the max + 1 (single source of truth: the
-            // row→gene map; no separately-supplied n_genes to keep in sync).
-            let n_genes = spec
-                .row_to_gene
-                .iter()
-                .copied()
-                .max()
-                .map_or(0, |m| m as usize + 1);
-            info!(
-                "per-gene β-sharing factorization: {} features → {} genes ({} unspliced rows); \
-                 splice δ recovered post-hoc on the cell axis (dual phase-2 projection)",
-                n_features,
-                n_genes,
-                spec.unspliced_rows.iter().filter(|&&b| b).count(),
-            );
-            // Allocate the ridge-shrunk per-gene splice offset δ_g only when its
-            // L2 penalty is on; otherwise plain β-sharing (spliced ≡ unspliced ≡ β_g).
-            let unspliced_rows = (config.delta_l2 > 0.0).then_some(spec.unspliced_rows.as_slice());
-            if unspliced_rows.is_some() {
-                info!(
-                    "δ_g splice offset ON (L2={}): unspliced rows embed as β_g + δ_g",
-                    config.delta_l2
-                );
-            }
-            JointEmbedModel::new_factored(
-                FactoredInit {
-                    n_features,
-                    n_cells,
-                    embedding_dim: h,
-                    n_genes,
-                    row_to_gene: &spec.row_to_gene,
-                    b_feat: &zeros_features,
-                    b_cell: &zeros_cells,
-                    seed: config.seed,
-                    unspliced_rows,
-                },
-                &varmap,
-                vs,
-                &config.device,
-            )?
-        }
-        None => JointEmbedModel::new_with_init(
-            ModelArgs {
-                n_features,
-                n_cells,
-                embedding_dim: h,
-                seed: config.seed,
-            },
-            &ModelInit {
-                e_feat: None,
-                e_cell: None,
-                b_feat: &zeros_features,
-                b_cell: &zeros_cells,
-            },
-            &varmap,
-            &config.device,
-        )?,
-    };
-
-    // Enable the learned feature gate on the primary model BEFORE the sharing heads are
-    // built, so every head references the one shared gate Var (`s_feat`/`s_beta`).
-    if let Some(g) = config.feature_gate {
-        cell_model.enable_feature_gate(g, &varmap, &config.device)?;
-        info!(
-            "Learned feature gate ON — an INDEPENDENT Bernoulli inclusion probability \
-             σ(S) per (feature, dim), with each dim's rate π_h learned. τ={}",
-            g.temperature
-        );
-    }
-
-    let mut level_models: Vec<JointEmbedModel> = Vec::with_capacity(num_levels);
-    for (level_idx, pb) in pb_blobs.iter().enumerate() {
-        let n_pb = pb.n_cells();
-        let prefix = format!("pb_l{level_idx}");
-        // Each level's cell side is keyed by its unique `{prefix}_e_cell` name,
-        // so one base seed yields an independent reproducible init per level.
-        let level_model = if cell_model.factor.is_some() {
-            cell_model.new_sharing_factor(n_pb, &prefix, &varmap, &config.device, config.seed)?
-        } else {
-            JointEmbedModel::new_sharing_features(
-                ShareFeaturesArgs {
-                    n_cells: n_pb,
-                    embedding_dim: h,
-                    shared_e_feat: cell_model.e_feat.clone(),
-                    shared_b_feat: cell_model.b_feat.clone(),
-                    e_cell_init: None,
-                    b_cell_init: &vec![0f32; n_pb],
-                    var_prefix: &prefix,
-                    seed: config.seed,
-                    // Share the free-model gate (if enabled) so every head reweights
-                    // the SAME feature side and AdamW updates one `s_feat`.
-                    shared_s_feat: cell_model.s_feat.clone(),
-                    shared_e_feat_raw: cell_model.e_feat_raw.clone(),
-                    shared_e_feat_logstd: cell_model.e_feat_logstd.clone(),
-                    shared_gate_pi_logit: cell_model.gate_pi_logit.clone(),
-                    gate: cell_model.gate,
-                },
-                &varmap,
-                &config.device,
-            )?
-        };
-        level_models.push(level_model);
-    }
+    let models::Heads {
+        mut cell_model,
+        mut level_models,
+    } = models::build_heads(unified, &pb_blobs, &config, &varmap)?;
 
     ////////////////////////////////
     // Composite axes and trainer //
     ////////////////////////////////
-    let cell_axis_coarsening = identity_axis(n_cells);
-    let cell_samplers = build_active_samplers(
-        unified,
-        DEFAULT_STRATIFY_ALPHA_CELL,
-        config.cell_weight_mult.as_deref(),
-    )?;
-    info!(
-        "Composite axis cell ({} cells × {} features, strat-cell α={}, {} active batch(es))",
-        n_cells,
-        n_features,
-        DEFAULT_STRATIFY_ALPHA_CELL,
-        cell_samplers.len()
-    );
-
-    // Phase-1 cell-axis mode (`phase1_cells_per_pb` = k). The full
-    // `cell_samplers` above are always kept for the phase-2 projection (which
-    // visits every cell); k only controls what shapes `E_feat` in phase 1:
-    //   k == 0           → suppress the cell axis entirely (pure-pb phase 1);
-    //                      `E_feat` is driven by pb aggregates only.
-    //   1 ≤ k < n_cells  → subsample a *separate, smaller* view keeping ≤k cells
-    //                      per pb-sample at every collapse level (union),
-    //                      shrinking the per-epoch step budget from `n_cells`
-    //                      to ≈ k × pb-samples while preserving rare-cell coverage.
-    //   k ≥ n_cells      → no pb-sample can exceed k, so subsampling is a no-op:
-    //                      use the full set (legacy all-cells behaviour).
-    let use_cell_axis = config.phase1_cells_per_pb != 0;
-    let phase1_cell_samplers_owned: Option<Vec<PerBatchStratifiedCellSampler>> =
-        (config.phase1_cells_per_pb >= 1 && config.phase1_cells_per_pb < n_cells).then(|| {
-            subsample_cell_samplers_multilevel(
-                &cell_samplers,
-                &cell_to_pb_per_level,
-                config.phase1_cells_per_pb,
-                DEFAULT_STRATIFY_ALPHA_CELL,
-                config.cell_weight_mult.as_deref(),
-                config.seed,
-            )
-        });
-    let phase1_cell_samplers: &[PerBatchStratifiedCellSampler] =
-        if let Some(sub) = &phase1_cell_samplers_owned {
-            let kept: usize = sub.iter().map(|s| s.active_cells.len()).sum();
-            info!(
-                "Phase-1 cell subsampling: ≤{} cells per pb-sample (all {} levels) → \
-             {} of {} cells shape E_feat (phase 2 still projects all {})",
-                config.phase1_cells_per_pb, num_levels, kept, n_cells, n_cells
-            );
-            sub
-        } else {
-            // k == 0 → cell axis suppressed (logged); k ≥ n_cells → legacy all-cells.
-            if !use_cell_axis {
-                info!(
-                    "Phase-1 cell axis SUPPRESSED (pure-pb): E_feat shaped by pb aggregates \
-                 only; phase 2 still projects all {n_cells} cells"
-                );
-            }
-            &cell_samplers
-        };
-
-    // β-sharing (gem): sample phase-1 positives by GENE at the spliced count, and
-    // emit the paired unspliced edge so δ_g trains at that frequency (identity stays
-    // spliced-driven, no double-bite from nascent abundance). `None` for bge (per-row).
-    let pairing = config.feat_factor.as_ref().map(|spec| FeatPairing {
-        row_to_gene: &spec.row_to_gene,
-        unspliced_rows: &spec.unspliced_rows,
-    });
-
-    let mut level_axes_data: Vec<(AxisCoarsenings, StratifiedSampler)> =
-        Vec::with_capacity(num_levels);
-    for (level_idx, pb) in pb_blobs.iter().enumerate() {
-        let n_pb = pb.n_cells();
-        let axis = identity_axis(n_pb);
-        let stratified = build_stratified_sampler(
-            &pb.triplets,
-            n_pb,
-            n_features,
-            DEFAULT_STRATIFY_ALPHA_PB,
-            pairing.as_ref(),
-        )
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "pb_l{level_idx}: stratified sampler build failed (no positives or empty feature pool)"
-            )
-        })?;
-        info!(
-            "Composite axis pb_l{} ({} pseudobulks × {} features, stratified α={}, {} active pb(s))",
-            level_idx,
-            n_pb,
-            n_features,
-            DEFAULT_STRATIFY_ALPHA_PB,
-            stratified.active_pbs.len()
-        );
-        level_axes_data.push((axis, stratified));
-    }
+    let ax = axes::build_axis_data(unified, &pb_blobs, &cell_to_pb_per_level, &config)?;
+    let (use_cell_axis, cell_axis_coarsening) = (ax.use_cell_axis, &ax.cell_axis_coarsening);
+    let (cell_samplers, level_axes_data) = (&ax.cell_samplers, &ax.level_axes);
+    let phase1_cell_samplers = ax.phase1_cell_samplers();
 
     /////////////////////////////////////////////////////////////
     // Selection pass: sample WHICH features load WHICH dims    //
@@ -492,7 +158,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     let cell_axis = CompositeAxis {
         model: &cell_model,
         unified,
-        cell_axis: &cell_axis_coarsening,
+        cell_axis: cell_axis_coarsening,
         sampler: AxisSampler::PerBatchStratified(phase1_cell_samplers),
         lambda: DEFAULT_AXIS_LAMBDA,
         label: "cell",
@@ -633,7 +299,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
                     refine_axes.push(CompositeAxis {
                         model: &cell_model,
                         unified,
-                        cell_axis: &cell_axis_coarsening,
+                        cell_axis: cell_axis_coarsening,
                         sampler: AxisSampler::PerBatchStratified(phase1_cell_samplers),
                         lambda: DEFAULT_AXIS_LAMBDA,
                         label: "cell",
@@ -768,7 +434,9 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         let phase2_mu_residual: Option<DMatrix<f32>> = collapsed_levels
             .last()
             .and_then(|c| c.mu_residual.as_ref())
-            .map(|mr| gather_to_unified_axis(mr.posterior_mean(), n_features, &feature_to_backend));
+            .map(|mr| {
+                setup::gather_to_unified_axis(mr.posterior_mean(), n_features, &feature_to_backend)
+            });
         let batch_divisor = phase2_mu_residual.as_ref().map(|mu| CellBatchDivisor {
             mu_residual: mu,
             // `.last()` is always `Some` here: the divisor only exists when the
@@ -791,7 +459,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         project_cells_phase2(
             &mut cell_model,
             &varmap,
-            &cell_samplers,
+            cell_samplers,
             n_cells,
             f64::from(PHASE2_RIDGE),
             &config.device,
@@ -1020,26 +688,4 @@ fn pb_velocity_readout(
         f64::from(PHASE2_RIDGE),
         dev,
     )
-}
-
-/// Gather a backend-axis `[backend_rows × cols]` matrix onto the unified feature
-/// axis `[n_features × cols]` via `feature_to_backend` (a clone when the axes
-/// already match, e.g. no HVG mask narrowed the feature set). Shared by the
-/// per-level pb counts and the phase-2 `μ_residual` divisor.
-fn gather_to_unified_axis(
-    backend: &DMatrix<f32>,
-    n_features: usize,
-    feature_to_backend: &[usize],
-) -> DMatrix<f32> {
-    if backend.nrows() == n_features {
-        return backend.clone();
-    }
-    let cols = backend.ncols();
-    let mut out = DMatrix::<f32>::zeros(n_features, cols);
-    for (new_i, &old_i) in feature_to_backend.iter().enumerate() {
-        for s in 0..cols {
-            out[(new_i, s)] = backend[(old_i, s)];
-        }
-    }
-    out
 }
