@@ -191,13 +191,21 @@ fn run_gem_genes_bge(
         .map(|n| split_count_row(n).1)
         .collect();
 
-    // Optional gene-level HVG feature filter (like `senna bge`): select the top-N
-    // most variable GENES and drop the rest — dropping BOTH the spliced and
-    // unspliced rows of a dropped gene together so the β-sharing factorization
-    // stays aligned. `subset_features` narrows the dictionary/co-embed (removing
-    // the low-detection "empty" genes that pile at the co-embed centre); the
-    // uniform `hvg_weights` over the survivors then restricts the pb projection /
-    // membership to those genes too. `None` (n_hvg = 0) keeps every gene.
+    // Optional gene-level HVG feature filter. NOTE this is NOT what `--n-hvg` does in
+    // `senna bge`, and the difference is deliberate at both ends: bge keeps the full
+    // feature axis and uses the selection only to WEIGHT its random projection, while here
+    // it hard-subsets. Selecting the top-N most variable GENES drops the rest — both the
+    // spliced and unspliced rows of a dropped gene together, so the β-sharing
+    // factorization stays aligned — and `subset_features` narrows the dictionary/co-embed
+    // accordingly, with the uniform `hvg_weights` over the survivors then restricting the
+    // pb projection / membership to those genes too. `None` (n_hvg = 0, the DEFAULT) keeps
+    // every gene and lets the softmax gate select, which is the recommended path.
+    //
+    // What the subset is for is a smaller dictionary, and nothing more. An earlier version
+    // of this comment justified it as "removing the low-detection empty genes that pile at
+    // the co-embed centre" — the same premise measured FALSE on bge's control arm, where
+    // 0.0% of genes sit within 0.1 cell-radii of the centroid and the median distance is
+    // 0.803. It has never been measured here either way, so it is not a reason to cite.
     //
     // `--must-train-features` force-includes a curated panel on top of that cut, at
     // the GENE level (so both splice tracks of a kept gene come along). Loaded only
