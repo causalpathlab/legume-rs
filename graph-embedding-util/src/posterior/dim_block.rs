@@ -284,6 +284,12 @@ pub struct DimBlockResult {
     /// sampled embedding with an intercept fitted under a different state is exactly the
     /// mismatch that made frozen intercepts need recalibration.
     pub b_profiled: Vec<f32>,
+    /// Likelihood terms per anchor — the row stride of [`Self::b_profiled`].
+    ///
+    /// Carried so no caller has to know it. gem's β block runs over two splice tracks and
+    /// so has two intercepts per gene; every other block has one. Read it through
+    /// [`Self::intercept`] rather than indexing.
+    pub n_terms: usize,
 }
 
 impl DimBlockResult {
@@ -297,6 +303,27 @@ impl DimBlockResult {
     #[must_use]
     pub fn beta_row(&self, g: usize) -> &[f32] {
         &self.mean_beta[g * self.h..(g + 1) * self.h]
+    }
+
+    /// Anchor `g`'s profiled intercept for likelihood term `t`.
+    ///
+    /// The point of the accessor is that the stride lives here and nowhere else. A caller
+    /// that indexed `b_profiled` directly would have to hard-code the term count, and a
+    /// block that later gained or lost a term would silently read the wrong element rather
+    /// than fail to compile.
+    ///
+    /// # Panics
+    ///
+    /// If `t >= n_terms` — that is a caller confusing one block's term layout for
+    /// another's, which should be loud.
+    #[must_use]
+    pub fn intercept(&self, g: usize, t: usize) -> f32 {
+        assert!(
+            t < self.n_terms,
+            "term {t} requested from a block with {} term(s)",
+            self.n_terms
+        );
+        self.b_profiled[g * self.n_terms + t]
     }
 }
 
@@ -313,7 +340,7 @@ impl DimBlockResult {
 /// per anchor, which is every caller that is not modelling two tracks.
 #[must_use]
 pub fn dim_block(nodes: &[NodeTerm], side: &FrozenSide, cfg: &DimBlockConfig) -> DimBlockResult {
-    let anchors: Vec<Vec<NodeTerm>> = nodes.iter().map(|n| vec![*n]) .collect();
+    let anchors: Vec<Vec<NodeTerm>> = nodes.iter().map(|n| vec![*n]).collect();
     dim_block_multi(&anchors, side, cfg)
 }
 
@@ -432,9 +459,9 @@ pub fn dim_block_multi(
     // The whole sampler is this one loop, and on a real dictionary it runs for
     // minutes with nothing on stdout. Ticked from the serial outer loop, so it
     // never contends with the rayon map inside.
-    let pb_bar = cfg
-        .show_progress
-        .then(|| new_progress_bar(cfg.n_sweeps as u64).with_message(format!("{} sweeps", cfg.label)));
+    let pb_bar = cfg.show_progress.then(|| {
+        new_progress_bar(cfg.n_sweeps as u64).with_message(format!("{} sweeps", cfg.label))
+    });
 
     for sweep in 0..cfg.n_sweeps {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -578,6 +605,7 @@ pub fn dim_block_multi(
         n_transitions,
         n_evals,
         b_profiled,
+        n_terms,
     }
 }
 

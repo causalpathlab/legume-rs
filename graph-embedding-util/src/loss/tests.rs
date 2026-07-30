@@ -5,8 +5,7 @@
 
 use crate::loss::cell::LevelSiblingPool;
 use crate::loss::{
-    build_per_batch_cell_samplers, cell_cell_nce_loss_per_level_batched_gated,
-    sample_cell_chain_batch, CellChainBatch, CellChainBatchArgs, PbChainFilter,
+    build_per_batch_cell_samplers, sample_cell_chain_batch, CellChainBatchArgs, PbChainFilter,
 };
 
 #[test]

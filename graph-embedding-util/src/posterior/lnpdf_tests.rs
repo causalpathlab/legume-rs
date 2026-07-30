@@ -82,7 +82,9 @@ fn the_moment_path_equals_the_walk() {
 fn a_logit_straddling_the_safe_radius_is_not_corrupted() {
     let (e, b) = side_buffers();
     let side = FrozenSide { e: &e, b: &b, h: H };
-    let pos: Vec<(u32, f32)> = (0..N_OTHER as u32).map(|o| (o, 1.0 + (o % 4) as f32)).collect();
+    let pos: Vec<(u32, f32)> = (0..N_OTHER as u32)
+        .map(|o| (o, 1.0 + (o % 4) as f32))
+        .collect();
     let partition: Vec<u32> = (0..N_OTHER as u32).collect();
 
     let walk = NodeTerm::new(&pos, &partition, 1.0);
@@ -117,7 +119,6 @@ fn a_logit_straddling_the_safe_radius_is_not_corrupted() {
     );
 }
 
-
 /// A frozen offset has to be folded in on both paths — gem's velocity track
 /// sends `β_g` through here, and a moment path that ignored it would silently
 /// sample the wrong conditional.
@@ -137,8 +138,8 @@ fn the_offset_is_honoured_by_the_moment_path() {
     let collapsed = walk.with_moment(&mom);
 
     let (x1, x2) = (probe(1.1), probe(-0.4));
-    let d_walk = f64::from(multinomial_ll(&x1, &walk, &side))
-        - f64::from(multinomial_ll(&x2, &walk, &side));
+    let d_walk =
+        f64::from(multinomial_ll(&x1, &walk, &side)) - f64::from(multinomial_ll(&x2, &walk, &side));
     let d_mom = f64::from(multinomial_ll(&x1, &collapsed, &side))
         - f64::from(multinomial_ll(&x2, &collapsed, &side));
     assert!(
@@ -158,7 +159,6 @@ fn the_offset_is_honoured_by_the_moment_path() {
     );
 }
 
-
 /// REGRESSION (review finding): SCORE_CLAMP is 30, a modelling bound, and `clamp`
 /// is nonlinear in `e_a` — so once scores saturate the collapsed data term stops
 /// differing from the walk by a constant. The earlier tests all probed the small-
@@ -174,7 +174,10 @@ fn the_moment_path_defers_to_the_walk_once_scores_saturate() {
     let walk = NodeTerm::new(&pos, &partition, 1.0);
     let mom = AnchorMoment::new(&pos, &side);
     let collapsed = walk.with_moment(&mom);
-    assert!(mom.safe_radius > 0.0, "fixture should have a usable safe region");
+    assert!(
+        mom.safe_radius > 0.0,
+        "fixture should have a usable safe region"
+    );
 
     // Well outside the radius, every score saturates and the two forms MUST agree
     // exactly — the guard has to have sent this through the clamped walk.
@@ -199,4 +202,3 @@ fn the_moment_path_defers_to_the_walk_once_scores_saturate() {
         "likelihood still grows with ||e_a|| past saturation: {l1} -> {l2}"
     );
 }
-

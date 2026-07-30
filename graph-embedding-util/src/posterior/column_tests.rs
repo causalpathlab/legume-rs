@@ -32,7 +32,7 @@ fn edge_lists() -> Vec<Vec<(u32, f32)>> {
                 return Vec::new();
             }
             (0..K as u32)
-                .filter(|o| (*o as usize + i) % 3 == 0)
+                .filter(|o| (*o as usize + i).is_multiple_of(3))
                 .map(|o| (o, 1.0 + ((o as usize * 2 + i) % 4) as f32))
                 .collect()
         })
@@ -141,7 +141,10 @@ fn results_do_not_depend_on_the_tile_boundary() {
         z_split[lo * H..hi * H].copy_from_slice(&part.z);
     }
 
-    assert_eq!(whole.beta, beta_split, "loadings depend on the tile boundary");
+    assert_eq!(
+        whole.beta, beta_split,
+        "loadings depend on the tile boundary"
+    );
     assert_eq!(whole.z, z_split, "inclusions depend on the tile boundary");
 }
 
@@ -173,10 +176,7 @@ fn peel_and_restore_round_trip() {
     }
 
     for (i, (got, want)) in term.s.iter().zip(&s0).enumerate() {
-        assert!(
-            (got - want).abs() < 1e-4,
-            "s[{i}] drifted: {got} vs {want}"
-        );
+        assert!((got - want).abs() < 1e-4, "s[{i}] drifted: {got} vs {want}");
     }
     for (i, (got, want)) in term.data.iter().zip(&data0).enumerate() {
         assert!(
@@ -318,7 +318,10 @@ fn a_vetoed_coordinate_is_pinned_off() {
         &z0,
     );
     for i in 0..B {
-        assert!(!draw.z[i * H + 1], "anchor {i} dim 1 was vetoed but came back on");
+        assert!(
+            !draw.z[i * H + 1],
+            "anchor {i} dim 1 was vetoed but came back on"
+        );
     }
     // And the veto must not be a blanket off-switch.
     assert!(
@@ -375,7 +378,10 @@ fn the_profiled_intercept_reproduces_the_observed_total() {
         let got = f64::from(term.profiled_bias(i));
         if pos[i].is_empty() {
             // No counts ⇒ no rate to match, so the floor rather than a `ln(0)`.
-            assert!(got < -20.0, "empty anchor {i} should be parked at the floor, got {got}");
+            assert!(
+                got < -20.0,
+                "empty anchor {i} should be parked at the floor, got {got}"
+            );
             continue;
         }
         // Independent construction: score every slate entry from scratch.
@@ -428,7 +434,10 @@ fn the_tile_reports_its_cost() {
         &beta0,
         &z0,
     );
-    assert!(draw.rounds > 0, "a sweep that evaluated nothing did not sample");
+    assert!(
+        draw.rounds > 0,
+        "a sweep that evaluated nothing did not sample"
+    );
     // One batched call per shrinkage round per dim; a healthy bracket takes a handful.
     assert!(
         draw.rounds < H * 64,

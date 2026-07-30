@@ -38,13 +38,31 @@
 //! one caller of that deliberately walks the edges instead.
 
 use super::diagnostics::scalar_diagnostics;
-use super::dim_block::{dim_block, dim_block_multi, DimBlockConfig, DimBlockResult};
 use super::diagnostics::ChainDiag;
+use super::dim_block::{dim_block, dim_block_multi, DimBlockConfig, DimBlockResult};
 use super::lnpdf::{FrozenSide, NodeTerm};
 use super::pb_index::{build_pb_index_pair, AnchorMap, FeatureSide};
 use crate::fit::feature_projection::StackedPb;
 use crate::progress::new_progress_bar;
 use log::info;
+
+/// Which likelihood term of gem's β block describes which splice track.
+///
+/// The β block is deliberately built over BOTH tracks — β appears in the unspliced rows
+/// too, so a spliced-only kernel would not be the conditional `p(β | δ, ·)`. That makes
+/// "term 0" and "term 1" a contract between where the terms are constructed and everything
+/// that reads the block's per-term output. Naming it keeps the contract in one place
+/// instead of as a bare stride at each use site.
+struct BetaTerm;
+
+impl BetaTerm {
+    /// The gene's spliced rows, scoring `⟨β, e_p⟩`.
+    const SPLICED: usize = 0;
+    /// The gene's unspliced rows, scoring `⟨β + δ, e_p⟩` with δ carried as the offset.
+    const UNSPLICED: usize = 1;
+    /// How many terms the β block carries. The δ block carries one.
+    const COUNT: usize = 2;
+}
 
 /// Configuration for [`pb_gibbs`].
 pub struct PbGibbsConfig {
@@ -209,7 +227,13 @@ pub(crate) fn pb_gibbs(
             .by_feature
             .pos
             .iter()
-            .map(|p| NodeTerm::new(p, &pair.by_feature.partition, pair.by_feature.partition_scale))
+            .map(|p| {
+                NodeTerm::new(
+                    p,
+                    &pair.by_feature.partition,
+                    pair.by_feature.partition_scale,
+                )
+            })
             .collect();
         let mut gene_cfg = DimBlockConfig::new(1, 0, block_seed(cfg.seed, 0x9E37, sweep))
             .with_init_beta(e_gene.clone())
@@ -267,9 +291,7 @@ pub(crate) fn pb_gibbs(
             .by_pb
             .pos
             .iter()
-            .map(|p| {
-                NodeTerm::new(p, &pair.by_pb.partition, pair.by_pb.partition_scale)
-            })
+            .map(|p| NodeTerm::new(p, &pair.by_pb.partition, pair.by_pb.partition_scale))
             .collect();
         let mut pb_cfg = DimBlockConfig::new(1, 0, block_seed(cfg.seed, 0x85EB, sweep))
             .with_init_beta(e_pb.clone())
@@ -340,7 +362,10 @@ pub(crate) fn pb_gibbs(
     };
     let mean_b_feat: Vec<f32> = (0..n_anchors)
         .map(|a| {
-            let total: f64 = pair.by_feature.pos[a].iter().map(|&(_, n)| f64::from(n)).sum();
+            let total: f64 = pair.by_feature.pos[a]
+                .iter()
+                .map(|&(_, n)| f64::from(n))
+                .sum();
             profiled_bias(
                 total,
                 &mean_beta[a * h..(a + 1) * h],
@@ -469,7 +494,15 @@ pub fn write_splice_posterior_hyper(
             "n_unidentified": res.delta_identified.iter().filter(|&&x| !x).count(),
         },
     });
-    emit_hyper_json(out_prefix, res.h, res.n_kept, res.partition, seed, &side, gates)
+    emit_hyper_json(
+        out_prefix,
+        res.h,
+        res.n_kept,
+        res.partition,
+        seed,
+        &side,
+        gates,
+    )
 }
 
 /// The stacked pb side, read back out of the fitted `VarMap`.
@@ -731,7 +764,10 @@ fn profiled_bias(
         };
         dot + f64::from(side.b[o as usize])
     };
-    let m = partition.iter().map(|&o| sc(o)).fold(f64::NEG_INFINITY, f64::max);
+    let m = partition
+        .iter()
+        .map(|&o| sc(o))
+        .fold(f64::NEG_INFINITY, f64::max);
     if !m.is_finite() {
         return 0.0;
     }
@@ -752,7 +788,9 @@ fn profiled_bias(
 fn block_seed(seed: u64, salt: u64, sweep: usize) -> u64 {
     seed.rotate_left(17)
         ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ (sweep as u64).wrapping_add(1).wrapping_mul(0xBF58_476D_1CE4_E5B9)
+        ^ (sweep as u64)
+            .wrapping_add(1)
+            .wrapping_mul(0xBF58_476D_1CE4_E5B9)
 }
 
 /// Gene-side warm start `[n_anchors × h]`, pooled from the phase-1 feature rows.
@@ -884,7 +922,8 @@ pub(crate) fn pb_gibbs_splice(
         row_to_anchor: &unspliced_map,
         n_anchors: n_genes,
     };
-    let beta_pair = build_pb_index_pair(pb, feat, Some(&beta_anchors), h, cfg.n_partition, cfg.seed)?;
+    let beta_pair =
+        build_pb_index_pair(pb, feat, Some(&beta_anchors), h, cfg.n_partition, cfg.seed)?;
     let delta_pair =
         build_pb_index_pair(pb, feat, Some(&delta_anchors), h, cfg.n_partition, cfg.seed)?;
 
@@ -964,22 +1003,24 @@ pub(crate) fn pb_gibbs_splice(
         // intercept profiles out separately and the sum is the joint's profile.
         let beta_terms: Vec<Vec<NodeTerm>> = (0..n_genes)
             .map(|a| {
-                vec![
+                let mut terms = vec![
                     NodeTerm::new(
                         &beta_pair.by_feature.pos[a],
                         &beta_pair.by_feature.partition,
                         beta_pair.by_feature.partition_scale,
-                    ),
-                    {
-                        let mut t = NodeTerm::new(
-                            &delta_pair.by_feature.pos[a],
-                            &delta_pair.by_feature.partition,
-                            delta_pair.by_feature.partition_scale,
-                        );
-                        t.offset = Some(&e_delta[a * h..(a + 1) * h]);
-                        t
-                    },
-                ]
+                    );
+                    BetaTerm::COUNT
+                ];
+                terms[BetaTerm::UNSPLICED] = {
+                    let mut t = NodeTerm::new(
+                        &delta_pair.by_feature.pos[a],
+                        &delta_pair.by_feature.partition,
+                        delta_pair.by_feature.partition_scale,
+                    );
+                    t.offset = Some(&e_delta[a * h..(a + 1) * h]);
+                    t
+                };
+                terms
             })
             .collect();
         let mut beta_cfg = DimBlockConfig::new(1, 0, block_seed(cfg.seed, 0xB37A, sweep))
@@ -1017,7 +1058,7 @@ pub(crate) fn pb_gibbs_splice(
         // Row intercepts, each from the block that last moved its track. The β block
         // carries two terms (spliced at 0, unspliced at 1), but δ ran after it, so an
         // unspliced row's current intercept is δ's; spliced rows take β's term 0.
-        scatter_splice_bias_to_rows(&b.b_profiled, &d.b_profiled, tracks, feat.b_feat, &mut b_row_live);
+        scatter_splice_bias_to_rows(&b, &d, tracks, feat.b_feat, &mut b_row_live);
 
         // pb | β, δ. The pb side sees the EFFECTIVE per-row loading: β on spliced
         // rows, β+δ on unspliced ones — which is what the model scores.
@@ -1039,7 +1080,11 @@ pub(crate) fn pb_gibbs_splice(
                 .pos
                 .iter()
                 .map(|p| {
-                    NodeTerm::new(p, &beta_pair.by_pb.partition, beta_pair.by_pb.partition_scale)
+                    NodeTerm::new(
+                        p,
+                        &beta_pair.by_pb.partition,
+                        beta_pair.by_pb.partition_scale,
+                    )
                 })
                 .collect();
             dim_block(&nodes, &side_rows, &pb_cfg)
@@ -1055,13 +1100,16 @@ pub(crate) fn pb_gibbs_splice(
         bar.inc(1);
     }
     bar.finish_and_clear();
-    let mut out = acc.finish(h, delta_identified)?;
-    out.partition = PartitionGeometry {
-        pb_entries: beta_pair.by_feature.partition.len(),
-        pb_scale: beta_pair.by_feature.partition_scale,
-        feat_entries: beta_pair.by_pb.partition.len(),
-        feat_scale: beta_pair.by_pb.partition_scale,
-    };
+    let mut out = acc.finish(
+        h,
+        delta_identified,
+        PartitionGeometry {
+            pb_entries: beta_pair.by_feature.partition.len(),
+            pb_scale: beta_pair.by_feature.partition_scale,
+            feat_entries: beta_pair.by_pb.partition.len(),
+            feat_scale: beta_pair.by_pb.partition_scale,
+        },
+    )?;
     report_convergence(
         "gem splice (β gate)",
         &out.beta_sigma_diag,
@@ -1101,7 +1149,14 @@ pub(crate) fn pb_gibbs_splice(
             )
         })
         .collect();
-    scatter_splice_to_rows(&out.beta_mean, &out.delta_mean, tracks, feat.e_feat, h, &mut e_rows);
+    scatter_splice_to_rows(
+        &out.beta_mean,
+        &out.delta_mean,
+        tracks,
+        feat.e_feat,
+        h,
+        &mut e_rows,
+    );
     let side_rows_final = FrozenSide {
         e: &e_rows,
         b: &b_row_live,
@@ -1109,7 +1164,10 @@ pub(crate) fn pb_gibbs_splice(
     };
     out.mean_b_pb = (0..pb.n_pb_total())
         .map(|p| {
-            let total: f64 = beta_pair.by_pb.pos[p].iter().map(|&(_, n)| f64::from(n)).sum();
+            let total: f64 = beta_pair.by_pb.pos[p]
+                .iter()
+                .map(|&(_, n)| f64::from(n))
+                .sum();
             profiled_bias(
                 total,
                 &out.mean_pb[p * h..(p + 1) * h],
@@ -1222,12 +1280,19 @@ impl SpliceAcc {
         self.n += 1;
     }
 
-    fn finish(self, h: usize, delta_identified: Vec<bool>) -> anyhow::Result<SpliceGibbsResult> {
+    fn finish(
+        self,
+        h: usize,
+        delta_identified: Vec<bool>,
+        partition: PartitionGeometry,
+    ) -> anyhow::Result<SpliceGibbsResult> {
         anyhow::ensure!(self.n > 0, "gem splice Gibbs retained zero sweeps");
         let inv = 1.0 / self.n as f64;
         let f32s = |v: &[f64]| -> Vec<f32> { v.iter().map(|&a| (a * inv) as f32).collect() };
         let f64s = |c: &[Vec<f64>]| -> Vec<f64> {
-            c.iter().map(|v| v.iter().sum::<f64>() / v.len().max(1) as f64).collect()
+            c.iter()
+                .map(|v| v.iter().sum::<f64>() / v.len().max(1) as f64)
+                .collect()
         };
         let diag = |c: &[Vec<f64>]| -> Vec<ChainDiag> {
             c.iter().map(|v| scalar_diagnostics(v)).collect()
@@ -1247,15 +1312,7 @@ impl SpliceAcc {
             beta_pi0: f64s(&self.bpi),
             delta_sigma2: f64s(&self.ds2),
             delta_pi0: f64s(&self.dpi),
-            // Overwritten by the caller, which is the only place that has seen the index.
-            // Zeroed here rather than guessed: a plausible-looking default would be
-            // reported as fact if the caller ever forgot to set it.
-            partition: PartitionGeometry {
-                pb_entries: 0,
-                pb_scale: f64::NAN,
-                feat_entries: 0,
-                feat_scale: f64::NAN,
-            },
+            partition,
             beta_sigma_diag: diag(&self.bs2),
             beta_pi0_diag: diag(&self.bpi),
             delta_sigma_diag: diag(&self.ds2),
@@ -1302,26 +1359,43 @@ fn scatter_splice_to_rows(
 /// sampled but they ARE observed, so they belong in the pb conditional.
 /// Scatter each gate's profiled intercept onto the rows it describes.
 ///
-/// `beta_b` is `[n_genes × 2]` — the β block runs over both tracks, spliced term first —
-/// and `delta_b` is `[n_genes × 1]` from the δ block. A row takes δ's value when it is
-/// unspliced and β's spliced term otherwise, because those are the blocks that last
-/// moved each track. Rows no gene claims keep `fallback`, matching how
-/// [`scatter_splice_to_rows`] treats loadings: dropping them would misspecify the pb
-/// likelihood rather than merely omit them.
+/// A row takes δ's intercept when it is unspliced and β's SPLICED term otherwise, because
+/// those are the blocks that last moved each track. Both are read through
+/// [`DimBlockResult::intercept`], so the term stride lives on the result and not here.
+///
+/// **No `u32::MAX` sentinel to skip, unlike the anchor-map scatters.** `row_to_gene` comes
+/// from `intern_gene_keys`, which assigns `gid = gene_ids.len()` and pushes one for EVERY
+/// row unconditionally — so it is dense in `0..n_genes` by construction and has no code
+/// path that emits a sentinel. The sentinels live only in the per-track maps derived from
+/// it (`spliced_map` / `unspliced_map`), which is why the sibling scatters do check. The
+/// assertion below is the invariant, not the prose.
 fn scatter_splice_bias_to_rows(
-    beta_b: &[f32],
-    delta_b: &[f32],
+    beta: &DimBlockResult,
+    delta: &DimBlockResult,
     tracks: &SpliceTracks<'_>,
     fallback: &[f32],
     out: &mut [f32],
 ) {
+    debug_assert_eq!(
+        beta.n_terms,
+        BetaTerm::COUNT,
+        "the β block should carry one term per splice track"
+    );
+    debug_assert!(
+        tracks
+            .row_to_gene
+            .iter()
+            .all(|&g| (g as usize) < tracks.n_genes),
+        "row_to_gene must be dense in 0..n_genes — a sentinel here would index the wrong \
+         gene's intercept rather than be skipped"
+    );
     out.copy_from_slice(fallback);
     for (row, &g) in tracks.row_to_gene.iter().enumerate() {
         let g = g as usize;
         out[row] = if tracks.unspliced_rows[row] {
-            delta_b[g]
+            delta.intercept(g, 0)
         } else {
-            beta_b[g * 2]
+            beta.intercept(g, BetaTerm::SPLICED)
         };
     }
 }

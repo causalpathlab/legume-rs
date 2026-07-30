@@ -50,13 +50,17 @@ fn the_batch_is_n_scalar_transitions_bit_for_bit() {
         let mut rng = SmallRng::seed_from_u64(seeds[i]);
         let c = DVector::from_vec(vec![cur[i]]);
         let p = DVector::from_vec(vec![nu[i]]);
-        let (v, l) = elliptical_slice_step(&c, &p, &|x: &DVector<f32>| ll(i, x[0]), cur_ll[i], &mut rng);
+        let (v, l) =
+            elliptical_slice_step(&c, &p, &|x: &DVector<f32>| ll(i, x[0]), cur_ll[i], &mut rng);
         assert_eq!(
             step.value[i], v[0],
             "item {i}: batch value {} vs scalar {}",
             step.value[i], v[0]
         );
-        assert_eq!(step.lnpdf[i], l, "item {i}: batch lnpdf disagrees with scalar");
+        assert_eq!(
+            step.lnpdf[i], l,
+            "item {i}: batch lnpdf disagrees with scalar"
+        );
     }
 }
 
@@ -195,7 +199,10 @@ fn an_unsatisfiable_slice_falls_back_and_is_counted() {
 
     assert_eq!(step.fallbacks, N, "every item should have fallen back");
     assert_eq!(step.value, cur, "a fallback must leave the value untouched");
-    assert_eq!(step.lnpdf, cur_ll, "a fallback must leave the lnpdf untouched");
+    assert_eq!(
+        step.lnpdf, cur_ll,
+        "a fallback must leave the lnpdf untouched"
+    );
     assert!(
         step.rounds <= MAX_BRACKET_ITERS,
         "rounds {} exceeded the cap",

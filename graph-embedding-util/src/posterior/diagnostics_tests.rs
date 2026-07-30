@@ -59,7 +59,10 @@ fn worst_case_surfaces_the_bad_node() {
     let w = worst_case(&[healthy, bad, healthy, drifting]);
     assert_eq!(w.min_ess, 3.0);
     assert_eq!(w.stuck_fraction, 0.9);
-    assert_eq!(w.rhat, 3.4, "the worst R̂ must survive a pool of healthy ESS");
+    assert_eq!(
+        w.rhat, 3.4,
+        "the worst R̂ must survive a pool of healthy ESS"
+    );
 }
 
 /// A too-short chain returns a well-formed (non-panicking) summary.

@@ -53,16 +53,17 @@ fn leading_component_is_the_mean_axis() {
     let all_same_sign = v0.iter().all(|&x| x > 0.0) || v0.iter().all(|&x| x < 0.0);
     assert!(all_same_sign, "leading loadings change sign: {v0:?}");
 
-    let col_mean: Vec<f32> = (0..data.ncols())
-        .map(|j| data.column(j).mean())
-        .collect();
+    let col_mean: Vec<f32> = (0..data.ncols()).map(|j| data.column(j).mean()).collect();
     let cos = {
         let dot: f32 = v0.iter().zip(&col_mean).map(|(a, b)| a * b).sum();
         let nv: f32 = v0.iter().map(|x| x * x).sum::<f32>().sqrt();
         let nm: f32 = col_mean.iter().map(|x| x * x).sum::<f32>().sqrt();
         (dot / (nv * nm)).abs()
     };
-    assert!(cos > 0.99, "leading component is not the mean axis: cos={cos:.4}");
+    assert!(
+        cos > 0.99,
+        "leading component is not the mean axis: cos={cos:.4}"
+    );
 }
 
 /// Dropping the leading uncentered component recovers what an explicit
@@ -84,7 +85,10 @@ fn drop_leading_matches_centered_pca() {
         let a: Vec<f32> = dropped.column(c).iter().copied().collect();
         let b: Vec<f32> = explicit.column(c).iter().copied().collect();
         let r = pearson(&a, &b).abs();
-        assert!(r > 0.95, "component {c} disagrees with centered PCA: |r|={r:.4}");
+        assert!(
+            r > 0.95,
+            "component {c} disagrees with centered PCA: |r|={r:.4}"
+        );
     }
 }
 

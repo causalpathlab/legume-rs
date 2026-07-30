@@ -37,7 +37,7 @@ fn edges() -> Vec<Vec<(u32, f32)>> {
                 return Vec::new();
             }
             (0..K as u32)
-                .filter(|o| (*o as usize + i) % 4 == 0)
+                .filter(|o| (*o as usize + i).is_multiple_of(4))
                 .map(|o| (o, 1.0 + ((o as usize + i) % 5) as f32))
                 .collect()
         })
@@ -131,11 +131,24 @@ fn naive(d: usize, beta: &[f32], offset: Option<&[f32]>, side: &FrozenSide) -> N
         }
     }
 
-    Naive { s, v, data, sumsq, m, total, safe_radius }
+    Naive {
+        s,
+        v,
+        data,
+        sumsq,
+        m,
+        total,
+        safe_radius,
+    }
 }
 
 /// The scalar oracle at the same point: rebuild the full loading and call
 /// [`multinomial_ll`], which is what the sampler used to do one coordinate at a time.
+///
+/// Deliberately takes every input positionally rather than bundling them: this is the
+/// reference the batched path is checked against, so it should share as little structure
+/// with the thing under test as possible.
+#[allow(clippy::too_many_arguments)]
 fn oracle(
     d: usize,
     i: usize,
@@ -192,9 +205,9 @@ fn worst_gap(beta: &[f32], offset: Option<&[f32]>, xs: &[f32]) -> f64 {
             let xv = vec![x; B];
             let mut out = vec![0.0f32; B];
             ProfiledPoisson.ll_column(&ctx, d, &c_d, &xv, &active, &mut out);
-            for i in 0..B {
+            for (i, &got) in out.iter().enumerate() {
                 let want = oracle(d, i, x, beta, offset, &side, &partition, scale);
-                let gap = f64::from(out[i] - want).abs() / f64::from(want).abs().max(1.0);
+                let gap = f64::from(got - want).abs() / f64::from(want).abs().max(1.0);
                 worst = worst.max(gap);
             }
         }
@@ -288,10 +301,10 @@ fn past_the_safe_radius_it_defers_to_the_walk_exactly() {
     let mut out = vec![0.0f32; B];
     ProfiledPoisson.ll_column(&ctx, d, &c_d, &xv, &active, &mut out);
 
-    for i in 0..B {
+    for (i, &got) in out.iter().enumerate() {
         let want = oracle(d, i, x, &beta, None, &side, &partition, 1.0);
         assert_eq!(
-            out[i], want,
+            got, want,
             "anchor {i} outside the radius must be the exact walk, not a collapse"
         );
     }
@@ -307,7 +320,10 @@ fn an_empty_anchor_is_flat() {
     let partition: Vec<u32> = (0..K as u32).collect();
     let pos = edges();
     let pos_ref: Vec<&[(u32, f32)]> = pos.iter().map(Vec::as_slice).collect();
-    assert!(pos[3].is_empty(), "anchor 3 is the empty one by construction");
+    assert!(
+        pos[3].is_empty(),
+        "anchor 3 is the empty one by construction"
+    );
 
     let beta = loadings(1.0);
     let d = 4usize;
