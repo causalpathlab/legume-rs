@@ -81,6 +81,14 @@ pub(super) struct TileDraw {
     pub fallbacks: usize,
     /// Likelihood-evaluation rounds summed over dims, i.e. the tile's actual cost.
     pub rounds: usize,
+    /// Slice transitions ATTEMPTED — the honest denominator for [`Self::fallbacks`].
+    ///
+    /// Counts only the coordinates that actually ran a slice move, i.e. those included on
+    /// entry. A coordinate that is off has a flat likelihood in `β`, so it takes a prior
+    /// draw with no bracket and cannot fall back; counting it would inflate the
+    /// denominator by `1/(1−π₀)` and make a badly stalled run read as healthy — at the
+    /// measured `π₀ ≈ 0.885` that is a factor of nearly nine.
+    pub transitions: usize,
     /// `[b × n_terms]` profiled intercepts at the end of the sweep, anchor-major.
     ///
     /// One per TERM, not per anchor: gem's spliced and unspliced rows are separate
@@ -328,12 +336,14 @@ pub(super) fn sample_tile<S: AnchorScore>(
     let mut z = z_in.to_vec();
     let mut fallbacks = 0usize;
     let mut rounds = 0usize;
+    let mut transitions = 0usize;
     if b == 0 {
         return TileDraw {
             beta,
             z,
             fallbacks,
             rounds,
+            transitions,
             b_profiled: Vec::new(),
         };
     }
@@ -446,6 +456,7 @@ pub(super) fn sample_tile<S: AnchorScore>(
                     });
                 fallbacks += step.fallbacks;
                 rounds += step.rounds;
+                transitions += on.len();
                 cur = step.value;
                 start = step.lnpdf;
             }
@@ -497,6 +508,7 @@ pub(super) fn sample_tile<S: AnchorScore>(
         z,
         fallbacks,
         rounds,
+        transitions,
         b_profiled,
     }
 }
