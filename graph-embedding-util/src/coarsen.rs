@@ -15,16 +15,7 @@ pub struct AxisCoarsenings {
     pub is_identity: bool,
 }
 
-impl AxisCoarsenings {
-    #[must_use]
-    pub fn avg_n_coarse(&self) -> f32 {
-        if self.coarsenings.is_empty() {
-            return 0.0;
-        }
-        let sum: usize = self.coarsenings.iter().map(|c| c.num_coarse).sum();
-        sum as f32 / self.coarsenings.len() as f32
-    }
-}
+impl AxisCoarsenings {}
 
 /// One identity coarsening over `n` items. Each item is its own
 /// pb-sample; `pool_cells` becomes a no-op (mean of one row = that
