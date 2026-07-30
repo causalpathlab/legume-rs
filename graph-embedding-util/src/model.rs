@@ -745,23 +745,27 @@ impl JointEmbedModel {
     /// `pip` is `[rows, H]` row-major, on the gate's own axis (feature rows for a free
     /// model, genes for a factored one). Call [`Self::resample_gate_mask`] once per
     /// epoch afterwards; until then the model uses the mean.
-    pub fn set_gate_pip(&mut self, pip: &[f32], rows: usize, dev: &Device) -> Result<()> {
+    pub fn set_gate_pip(
+        &mut self,
+        kind: GateKind,
+        pip: &[f32],
+        rows: usize,
+        dev: &Device,
+    ) -> Result<()> {
         let h = self.embedding_dim;
         assert_eq!(pip.len(), rows * h, "gate pip must be [rows, H]");
-        self.gate_pip = Some(Tensor::from_slice(pip, (rows, h), &Device::Cpu)?.to_device(dev)?);
-        *self.gate_mask.lock().expect("gate mask poisoned") = None;
-        Ok(())
-    }
-
-    /// Install the VELOCITY gate's frozen inclusion table (factored models only).
-    /// `pip` is `[n_genes, H]`, the axis `s_delta` lives on.
-    pub fn set_delta_gate_pip(&mut self, pip: &[f32], rows: usize, dev: &Device) -> Result<()> {
-        let h = self.embedding_dim;
-        assert_eq!(pip.len(), rows * h, "delta pip must be [genes, H]");
         let t = Tensor::from_slice(pip, (rows, h), &Device::Cpu)?.to_device(dev)?;
-        if let Some(f) = self.factor.as_mut() {
-            f.delta_gate_pip = Some(t);
-            f.delta_gate_mask = Some(Arc::new(Mutex::new(None)));
+        match kind {
+            GateKind::Identity => {
+                self.gate_pip = Some(t);
+                *self.gate_mask.lock().expect("gate mask poisoned") = None;
+            }
+            GateKind::Velocity => {
+                if let Some(f) = self.factor.as_mut() {
+                    f.delta_gate_pip = Some(t);
+                    f.delta_gate_mask = Some(Arc::new(Mutex::new(None)));
+                }
+            }
         }
         Ok(())
     }
