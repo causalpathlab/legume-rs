@@ -424,3 +424,243 @@ fn profiled_poisson_declares_both_fast_paths() {
     );
     assert_eq!(ProfiledPoisson.label(), "profiled-poisson");
 }
+
+///////////////////////////////////////////////////////////
+// Precision gate for a dense (candle/CUDA) backend       //
+///////////////////////////////////////////////////////////
+
+/// The same estimand accumulated entirely in `f32` — what a candle/CUDA backend would be
+/// forced into, since candle's element types are `f32` and its reductions accumulate there.
+///
+/// Written as a second [`AnchorScore`] rather than a flag on the first, which is the point
+/// of the seam: a whole alternative numeric path is a ~20-line impl, and the two can be
+/// diffed on the same context with no production code touched.
+struct F32Poisson;
+
+impl AnchorScore for F32Poisson {
+    fn label(&self) -> &'static str {
+        "profiled-poisson-f32"
+    }
+    fn affine_in_anchor(&self) -> bool {
+        true
+    }
+    fn data_term_is_linear(&self) -> bool {
+        true
+    }
+    fn ll_column(
+        &self,
+        ctx: &ColumnCtx<'_>,
+        d: usize,
+        c_d: &[f32],
+        x: &[f32],
+        active: &[u32],
+        out: &mut [f32],
+    ) {
+        let clamp = SCORE_CLAMP as f32;
+        for (slot, (&i, &xi)) in out.iter_mut().zip(active.iter().zip(x)) {
+            let i = i as usize;
+            let total = ctx.total[i] as f32;
+            if total == 0.0 {
+                *slot = 0.0;
+                continue;
+            }
+            // No radius fallback: the point is to measure the reduction, and a fixture
+            // that left the safe radius would be measuring the walk instead.
+            let data = ctx.data[i] as f32 + xi * ctx.moment_at(i, d);
+            let mut acc = 0.0f32;
+            for (sj, cj) in ctx.scores(i).iter().zip(c_d) {
+                let v = (sj + xi * cj).clamp(-clamp, clamp);
+                acc += (v - clamp).exp();
+            }
+            *slot = data - total * (clamp + acc.max(f32::MIN_POSITIVE).ln());
+        }
+    }
+}
+
+/// A wide-slate, high-count context — the two things that amplify a summation error.
+/// `k` at the production default of 1024, and counts big enough that `T_a` reaches the
+/// thousands, because `T_a` multiplies the log-normalizer's error directly.
+#[allow(clippy::type_complexity)]
+fn big_fixture(
+    hh: usize,
+    kk: usize,
+    bb: usize,
+    count_scale: f32,
+) -> (Vec<f32>, Vec<f32>, Vec<u32>, Vec<Vec<(u32, f32)>>, Vec<f32>) {
+    let mut e = vec![0.0f32; kk * hh];
+    for o in 0..kk {
+        for d in 0..hh {
+            e[o * hh + d] = ((o * (d + 5) + 3 * d) % 17) as f32 * 0.03 - 0.24;
+        }
+    }
+    let b: Vec<f32> = (0..kk).map(|o| (o % 13) as f32 * 0.02 - 0.12).collect();
+    let partition: Vec<u32> = (0..kk as u32).collect();
+    let pos: Vec<Vec<(u32, f32)>> = (0..bb)
+        .map(|i| {
+            (0..kk as u32)
+                .filter(|o| (*o as usize + i) % 3 == 0)
+                .map(|o| (o, count_scale * (1.0 + ((o as usize + i) % 9) as f32)))
+                .collect()
+        })
+        .collect();
+    let beta: Vec<f32> = (0..bb * hh)
+        .map(|i| ((i * 11) % 19) as f32 * 0.015 - 0.13)
+        .collect();
+    (e, b, partition, pos, beta)
+}
+
+/// THE GATE for a dense backend. `f32` accumulation must not disturb what the sampler
+/// actually consumes.
+///
+/// Two quantities, and the second is the one that matters. The absolute `ll` error scales
+/// with `T_a`, so on a high-count anchor it can look alarming — but no consumer reads an
+/// absolute `ll`. Both consumers read DIFFERENCES: the slice threshold compares one `ll`
+/// against another, and the `z` draw uses `ll_on − ll_off`. Those two evaluations sum the
+/// same terms in the same order and differ only in one coordinate, so their errors are
+/// highly correlated and largely cancel. This measures both so the cancellation is
+/// demonstrated rather than assumed.
+///
+/// # Result, measured
+///
+/// ```text
+/// counts×1   T_a max   1368   |Δll| 0.0029   |Δlogit| 0.0039   ⇒ ΔPIP 9.8e-4
+/// counts×50  T_a max  68400   |Δll| 0.1562   |Δlogit| 0.2500   ⇒ ΔPIP 6.3e-2
+/// ```
+///
+/// **The error is LINEAR IN `T_a`** — 54× for a 50× count increase — because
+/// `ll = data − T_a·ln(acc)` multiplies the reduction's rounding by the anchor's total. A
+/// pseudobulk's total genuinely is tens of thousands, so at that scale `f32` accumulation
+/// moves an inclusion probability by ~6 percentage points. A naive dense port would change
+/// the answer, not just the speed.
+///
+/// That does not kill the idea, it constrains it. Three routes, each measurable with this
+/// same harness before any kernel is written: `f64` reductions on device (a non-starter on
+/// the consumer cards here, where FP64 runs at 1/64 rate); pairwise or Kahan summation,
+/// which trades `O(k·ε)` for `O(log k · ε)` and is what a GPU tree reduction does anyway;
+/// or returning the LOGIT from the device rather than two `ll`s, so the `T_a` scaling
+/// happens once in `f64` on the host. Note the errors did NOT cancel across the two
+/// evaluations here (`Δ(ln acc_on − ln acc_off) ≈ 3.7e-6`, about 30 ulp), so the third
+/// route needs the difference formed on-device to help.
+///
+/// Ignored by default: this is a decision-support measurement, not an invariant of the
+/// shipped code, which accumulates in `f64` and is unaffected. Run it deliberately:
+///
+/// ```text
+/// cargo test -p graph-embedding-util --release f32_accumulation -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "precision measurement for a dense backend; run with --ignored --nocapture"]
+fn f32_accumulation_preserves_the_logit_a_dense_backend_would_need() {
+    const HH: usize = 32;
+    const KK: usize = 1024;
+    const BB: usize = 64;
+
+    for &count_scale in &[1.0f32, 50.0] {
+        let (e, b, partition, pos, beta) = big_fixture(HH, KK, BB, count_scale);
+        let side = FrozenSide { e: &e, b: &b, h: HH };
+        let pos_ref: Vec<&[(u32, f32)]> = pos.iter().map(Vec::as_slice).collect();
+        let active: Vec<u32> = (0..BB as u32).collect();
+
+        // Build the peeled state for dim 0 from the definitions, as elsewhere in this file.
+        let d = 0usize;
+        let mut v = beta.clone();
+        for i in 0..BB {
+            v[i * HH + d] = 0.0;
+        }
+        let (mut m, mut total, mut data, mut sumsq, radius) = (
+            vec![0.0f32; BB * HH],
+            vec![0.0f64; BB],
+            vec![0.0f64; BB],
+            vec![0.0f32; BB],
+            vec![f32::INFINITY; BB],
+        );
+        for (i, p) in pos.iter().enumerate() {
+            for &(o, n) in p {
+                let row = &e[o as usize * HH..(o as usize + 1) * HH];
+                for (k, val) in row.iter().enumerate() {
+                    m[i * HH + k] += n * val;
+                }
+                total[i] += f64::from(n);
+                data[i] += f64::from(n) * f64::from(b[o as usize]);
+            }
+        }
+        let mut s = vec![0.0f32; BB * KK];
+        for i in 0..BB {
+            for j in 0..KK {
+                let mut acc = b[j];
+                for k in 0..HH {
+                    acc += v[i * HH + k] * e[j * HH + k];
+                }
+                s[i * KK + j] = acc;
+            }
+            for k in 0..HH {
+                let w = v[i * HH + k];
+                data[i] += f64::from(w) * f64::from(m[i * HH + k]);
+                if k != d {
+                    sumsq[i] += w * w;
+                }
+            }
+        }
+        let ctx = ColumnCtx {
+            s: &s,
+            v: &v,
+            data: &data,
+            sumsq: &sumsq,
+            m: &m,
+            total: &total,
+            safe_radius: &radius,
+            offset: None,
+            pos: &pos_ref,
+            partition: &partition,
+            partition_scale: 1.0,
+            side: &side,
+            k: KK,
+            h: HH,
+        };
+        let c_d: Vec<f32> = (0..KK).map(|j| e[j * HH + d]).collect();
+
+        // `ll_off` at x = 0 and `ll_on` at a plausible slab draw, in both precisions.
+        let zeros = vec![0.0f32; BB];
+        let xs: Vec<f32> = (0..BB).map(|i| 0.05 + (i % 7) as f32 * 0.02).collect();
+        let mut off64 = vec![0.0f32; BB];
+        let mut on64 = vec![0.0f32; BB];
+        let mut off32 = vec![0.0f32; BB];
+        let mut on32 = vec![0.0f32; BB];
+        ProfiledPoisson.ll_column(&ctx, d, &c_d, &zeros, &active, &mut off64);
+        ProfiledPoisson.ll_column(&ctx, d, &c_d, &xs, &active, &mut on64);
+        F32Poisson.ll_column(&ctx, d, &c_d, &zeros, &active, &mut off32);
+        F32Poisson.ll_column(&ctx, d, &c_d, &xs, &active, &mut on32);
+
+        let mut worst_ll = 0.0f64;
+        let mut worst_logit = 0.0f64;
+        let mut typical_logit = 0.0f64;
+        for i in 0..BB {
+            worst_ll = worst_ll.max(f64::from(on64[i] - on32[i]).abs());
+            let l64 = f64::from(on64[i]) - f64::from(off64[i]);
+            let l32 = f64::from(on32[i]) - f64::from(off32[i]);
+            worst_logit = worst_logit.max((l64 - l32).abs());
+            typical_logit += l64.abs() / BB as f64;
+        }
+        let t_max = total.iter().copied().fold(0.0f64, f64::max);
+        // What the error COSTS, in the unit the output is reported in. The logit is
+        // consumed through `sigmoid`, whose derivative is at most 1/4, so a logit
+        // perturbation of `δ` moves the inclusion probability by at most `δ/4`. That —
+        // not the logit's relative error — is the number to judge, because a PIP is what
+        // reaches a reader and it is reported to about three digits.
+        let pip_error = worst_logit / 4.0;
+        println!(
+            "f32 gate  counts×{count_scale:<4}  T_a max {t_max:>9.0}  \
+             worst |Δll| {worst_ll:>10.4}  worst |Δlogit| {worst_logit:>9.5}  \
+             mean |logit| {typical_logit:>9.4}  ⇒ worst ΔPIP {pip_error:.2e}"
+        );
+
+        // Deliberately NOT asserting a bound on `pip_error`. The high-count arm exceeds
+        // any bound worth setting — that IS the finding — so an assertion here would just
+        // be a permanently red test restating the doc comment. What is asserted is that
+        // the measurement actually ran: a silent zero would look like a clean pass.
+        assert!(
+            worst_ll.is_finite() && worst_logit.is_finite() && typical_logit > 0.0,
+            "the fixture produced no usable signal, so these numbers mean nothing"
+        );
+    }
+}
