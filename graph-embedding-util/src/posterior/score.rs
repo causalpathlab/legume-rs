@@ -113,6 +113,11 @@ impl SlateSlab {
 pub struct ColumnCtx<'a> {
     /// `[b × k]` row-major slate scores, peeled: `s[i,j] = Σ_{k≠d} v_ik·e_j[k] + b_j`
     /// with any offset folded in.
+    ///
+    /// **EMPTY when the score declined [`AnchorScore::affine_in_anchor`]** — the block is
+    /// only meaningful for a score whose per-entry value is affine in the loading, so it is
+    /// not built at all otherwise. Reach it through [`Self::scores`], which panics rather
+    /// than returning nothing.
     pub s: &'a [f32],
     /// `[b × h]` effective loading `z ⊙ β` with dim `d` **zeroed**. Only the exact
     /// fallback needs it; the fast path works from `s` alone.
@@ -159,9 +164,20 @@ pub struct ColumnCtx<'a> {
 
 impl ColumnCtx<'_> {
     /// Anchor `i`'s peeled slate scores, `[k]`.
+    ///
+    /// # Panics
+    ///
+    /// If the score declined [`AnchorScore::affine_in_anchor`], in which case the block was
+    /// never built. That is a score reading state it told the caller it would not need, and
+    /// it should fail loudly rather than be handed a plausible empty slice.
     #[inline]
     #[must_use]
     pub fn scores(&self, i: usize) -> &[f32] {
+        assert!(
+            !self.s.is_empty(),
+            "this score declared `affine_in_anchor() == false`, so no slate score block was \
+             built — compute from `v` and the edges instead"
+        );
         &self.s[i * self.k..(i + 1) * self.k]
     }
 
@@ -217,12 +233,20 @@ pub trait AnchorScore: Sync {
         out: &mut [f32],
     );
 
-    /// Is `s_j` affine in the anchor's loading, so [`ColumnCtx::s`] can be carried
-    /// across the dim loop by a rank-1 update?
+    /// Is `s_j` affine in the anchor's loading, so [`ColumnCtx::s`] can be carried across
+    /// the dim loop by a rank-1 update?
     ///
-    /// `false` — the default — means the caller must rebuild the whole score block
-    /// per dim, at `O(b·k·h)` instead of `O(b·k)`. Correct either way; declaring it
-    /// wrongly is not.
+    /// **This is honoured, not merely recorded.** Declaring `false` makes the caller skip
+    /// building the score block entirely — the dominant setup cost, one `O(b·k·h)` pass per
+    /// tile per sweep — and leaves [`ColumnCtx::s`] EMPTY. A score that declines this must
+    /// therefore compute from [`ColumnCtx::v`] and the raw edges, and must not call
+    /// [`ColumnCtx::scores`], which will panic on an empty block rather than hand back
+    /// silence. `column_tests`'s `a_non_bilinear_likelihood_is_sampled_correctly` is a
+    /// worked example.
+    ///
+    /// Declaring it wrongly in the other direction — `true` for a score that is not affine
+    /// — is the dangerous case: the block would be carried by an update its algebra does
+    /// not license, and nothing would fail loudly.
     fn affine_in_anchor(&self) -> bool {
         false
     }

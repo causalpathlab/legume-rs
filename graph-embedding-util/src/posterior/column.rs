@@ -153,6 +153,7 @@ impl<'a> TermTile<'a> {
         side: &FrozenSide<'_>,
         v: &[f32],
         h: usize,
+        affine: bool,
     ) -> Self {
         let b = nodes.len();
         let k = slab.k();
@@ -189,17 +190,30 @@ impl<'a> TermTile<'a> {
         }
 
         // s[i,j] = b_j + Σ_d (v_id + off_id)·col[d*k + j]
-        let mut s = vec![0.0f32; b * k];
-        for i in 0..b {
-            let row = &mut s[i * k..(i + 1) * k];
-            row.copy_from_slice(slab.biases());
-            for d in 0..h {
-                let w = v[i * h + d] + off_at(i, d);
-                if w == 0.0 {
-                    continue;
-                }
-                for (sj, cj) in row.iter_mut().zip(slab.dim(d)) {
-                    *sj += w * cj;
+        //
+        // Skipped entirely for a score that does not declare `affine_in_anchor`: the block
+        // is only meaningful if `s_j` is affine in the loading, and building it is the
+        // dominant setup cost — one `O(b·k·h)` pass per tile per sweep. A Tier-3 score
+        // computes from `ctx.v` and the raw edges instead, so it would never read this.
+        // Left EMPTY rather than zeroed, so `ColumnCtx::scores` panics on a score that
+        // reads it after declaring it would not.
+        let mut s = if affine {
+            vec![0.0f32; b * k]
+        } else {
+            Vec::new()
+        };
+        if affine {
+            for i in 0..b {
+                let row = &mut s[i * k..(i + 1) * k];
+                row.copy_from_slice(slab.biases());
+                for d in 0..h {
+                    let w = v[i * h + d] + off_at(i, d);
+                    if w == 0.0 {
+                        continue;
+                    }
+                    for (sj, cj) in row.iter_mut().zip(slab.dim(d)) {
+                        *sj += w * cj;
+                    }
                 }
             }
         }
@@ -238,6 +252,8 @@ impl<'a> TermTile<'a> {
     fn peel(&mut self, v: &[f32], d: usize, h: usize) {
         let k = self.k;
         let col = self.slab.dim(d);
+        // Empty when the score declined `affine_in_anchor`; there is then nothing to carry.
+        let carry_scores = !self.s.is_empty();
         for i in 0..self.total.len() {
             let w = v[i * h + d];
             let off = self.offset.as_ref().map_or(0.0f32, |o| o[i * h + d]);
@@ -247,8 +263,10 @@ impl<'a> TermTile<'a> {
                 continue;
             }
             self.data[i] -= f64::from(w) * f64::from(self.m[i * h + d]);
-            for (sj, cj) in self.s[i * k..(i + 1) * k].iter_mut().zip(col) {
-                *sj -= w * cj;
+            if carry_scores {
+                for (sj, cj) in self.s[i * k..(i + 1) * k].iter_mut().zip(col) {
+                    *sj -= w * cj;
+                }
             }
         }
     }
@@ -258,6 +276,7 @@ impl<'a> TermTile<'a> {
     fn restore(&mut self, v: &[f32], d: usize, h: usize) {
         let k = self.k;
         let col = self.slab.dim(d);
+        let carry_scores = !self.s.is_empty();
         for i in 0..self.total.len() {
             let w = v[i * h + d];
             let off = self.offset.as_ref().map_or(0.0f32, |o| o[i * h + d]);
@@ -266,8 +285,10 @@ impl<'a> TermTile<'a> {
                 continue;
             }
             self.data[i] += f64::from(w) * f64::from(self.m[i * h + d]);
-            for (sj, cj) in self.s[i * k..(i + 1) * k].iter_mut().zip(col) {
-                *sj += w * cj;
+            if carry_scores {
+                for (sj, cj) in self.s[i * k..(i + 1) * k].iter_mut().zip(col) {
+                    *sj += w * cj;
+                }
             }
         }
     }
@@ -280,6 +301,12 @@ impl<'a> TermTile<'a> {
     /// than the `O(k·h)` a fresh evaluation would cost. Scores are deliberately NOT
     /// clamped, matching the estimand the profile was derived from.
     fn profiled_bias(&self, i: usize) -> f32 {
+        if self.s.is_empty() {
+            // No carried scores ⇒ no `Σ exp(s)` to profile against. A score that declined
+            // `affine_in_anchor` owns its own intercept, so returning the floor here would
+            // be inventing one.
+            return f32::NAN;
+        }
         if self.total[i] <= 0.0 {
             // No counts ⇒ no rate to match. Park it at the floor rather than emit a
             // `ln(0)`, so a silent anchor cannot contribute to another side's scores.
@@ -362,7 +389,17 @@ pub(super) fn sample_tile<S: AnchorScore>(
         .collect();
 
     let mut terms: Vec<TermTile> = (0..n_terms)
-        .map(|t| TermTile::seed(nodes, t, &slabs[t], args.side, &v, h))
+        .map(|t| {
+            TermTile::seed(
+                nodes,
+                t,
+                &slabs[t],
+                args.side,
+                &v,
+                h,
+                score.affine_in_anchor(),
+            )
+        })
         .collect();
 
     // Scratch reused across dims, so the dim loop allocates nothing.
