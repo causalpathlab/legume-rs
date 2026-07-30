@@ -299,6 +299,12 @@ pub fn train_composite(
     );
 
     for epoch in 0..params.epochs {
+        // One `z ~ Bern(pip)` draw for the whole epoch, shared by every axis.
+        //
+        // Per-EPOCH, not per-minibatch: `z` is a latent for the DATASET, so a per-batch
+        // draw would model it as if each minibatch had its own inclusion state and would
+        // add gradient variance for nothing. No-op unless a `gate_pip` is installed.
+        ctx.axes[0].model.resample_gate_mask()?;
         // Loss kept **on-device** and synced to a scalar once per epoch (not
         // per minibatch) — `detach()` keeps the running sum off the autograd
         // graph so each step's forward graph is still freed immediately,

@@ -80,6 +80,10 @@ const INIT_STDEV: f32 = 0.1;
 /// entry, so unlike the softmax form neither needs a `ln D` or `D` correction to
 /// stay commensurate with the other — see [`JointEmbedModel::single_gate_kl`] for
 /// why that matters and what it cost last time.
+/// One gate's frozen inclusion table and its shared per-epoch draw cell.
+/// `(pip, mask)`; either may be absent when that gate is not posterior-gated.
+type GateTables<'a> = (Option<&'a Tensor>, Option<&'a Arc<Mutex<Option<Tensor>>>>);
+
 /// Which gate a weight lookup is for.
 ///
 /// A factored model carries TWO gates — the identity `β_g` and the velocity `δ_g` —
@@ -723,13 +727,7 @@ impl JointEmbedModel {
     /// No `D` rescale either. It existed to stop a `1/D`-scale softmax collapsing the
     /// score by three orders of magnitude at `D = 20k`; `σ` is already `O(1)`.
     pub(crate) fn gate_weights(&self, kind: GateKind, full_logits: &Tensor) -> Result<Tensor> {
-        let (pip, mask) = match kind {
-            GateKind::Identity => (self.gate_pip.as_ref(), Some(&self.gate_mask)),
-            GateKind::Velocity => match &self.factor {
-                Some(f) => (f.delta_gate_pip.as_ref(), f.delta_gate_mask.as_ref()),
-                None => (None, None),
-            },
-        };
+        let (pip, mask) = self.gate_tables(kind);
         if pip.is_some() {
             if let Some(cell) = mask {
                 if let Some(m) = cell.lock().expect("gate mask poisoned").as_ref() {
@@ -841,9 +839,38 @@ impl JointEmbedModel {
         logits: Option<&Tensor>,
         rows: &Tensor,
     ) -> Result<Option<Tensor>> {
+        // GATHER FIRST. The predecessor was a softmax down the gene axis and had to see
+        // the whole table; `σ` is elementwise (`gate_order_is_invariant_under_a_sigmoid`
+        // pins it), so selecting rows before transforming is exact and avoids
+        // materialising `[G, H]` to keep `[batch, H]` — 33x waste per positive gather at
+        // G = 34k, on every step, per axis, and paid again on backward.
+        let (pip, mask) = self.gate_tables(kind);
+        if pip.is_some() {
+            if let Some(cell) = mask {
+                if let Some(m) = cell.lock().expect("gate mask poisoned").as_ref() {
+                    return Ok(Some(m.index_select(rows, 0)?));
+                }
+            }
+            return pip.map(|p| p.index_select(rows, 0)).transpose();
+        }
         logits
-            .map(|x| self.gate_weights(kind, x)?.index_select(rows, 0))
+            .map(|x| {
+                let g = x.index_select(rows, 0)?;
+                candle_nn::ops::sigmoid(&self.apply_temperature(&g)?)
+            })
             .transpose()
+    }
+
+    /// The `(pip, mask cell)` pair for one gate — the branch `gate_weights` and
+    /// `gathered_gate_weights` share.
+    fn gate_tables(&self, kind: GateKind) -> GateTables<'_> {
+        match kind {
+            GateKind::Identity => (self.gate_pip.as_ref(), Some(&self.gate_mask)),
+            GateKind::Velocity => match &self.factor {
+                Some(f) => (f.delta_gate_pip.as_ref(), f.delta_gate_mask.as_ref()),
+                None => (None, None),
+            },
+        }
     }
 
     /// One gated single-effect: reparam-sample the Gaussian effect (`μ + σ·ε`) when

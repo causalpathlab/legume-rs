@@ -29,23 +29,28 @@ pub struct PosteriorArgs {
         value_name = "N",
         num_args = 0..=1,
         default_missing_value = "200",
-        help = "SAMPLE phase 1 instead of training it — N retained sweeps, and SGD\n\
-                does not run (bare --posterior uses 200). Off unless given.",
-        long_help = "Phase 1 is SGD XOR sampling, and this flag picks sampling. SGD does NOT\n\
-                     run: --epochs keeps its value but stops applying to this phase. N is the\n\
-                     number of RETAINED sweeps (warmup is N/2 more), the sampler's analogue of\n\
-                     `-i/--epochs`. Bare `--posterior` uses 200. Omit the flag entirely and the\n\
-                     run is byte-identical to one built before this existed.\n\
+        help = "SAMPLE the phase-1 feature SELECTION, then fit the loading by SGD\n\
+                under it — N retained sweeps (bare --posterior uses 200).",
+        long_help = "The sampler chooses WHICH features load each dim; SGD then fits HOW MUCH.\n\
+                     N is the number of RETAINED sweeps (warmup is N/2 more). Bare\n\
+                     `--posterior` uses 200.\n\
                      \n\
-                     WHY EXCLUSIVE, rather than sampling around the SGD fit. An initialization\n\
-                     cannot bias a CONVERGED chain — it only sets burn-in — so warm-starting\n\
-                     from an optimum is either harmless or fatal. It is fatal here: when the\n\
-                     embedding's effective rank is far below its dimension the surplus\n\
-                     directions have a flat likelihood, the chain random-walks in them, and\n\
-                     nothing washes out at any practical sweep count. The output would then\n\
-                     describe curvature around wherever SGD landed rather than a posterior. The\n\
-                     price is that burn-in is now yours to check, which is what the reported R̂\n\
-                     is for.\n\
+                     WHY BOTH, rather than one or the other. A learned gate does not train:\n\
+                     the KL that would drive selection sits far below the true ELBO, the\n\
+                     sigmoid passes a fraction of the gradient wherever the gate is inert,\n\
+                     and — decisively — a large share of features are never drawn as NCE\n\
+                     positives at all, so their gate receives EXACTLY zero gradient and\n\
+                     reports its initialization forever. The sampler has no such blind spot:\n\
+                     its column pass touches every anchor on every sweep. So selection comes\n\
+                     from sampling, where it works, and the loading from SGD, which is far\n\
+                     faster and moves to the GPU.\n\
+                     \n\
+                     The inclusion probabilities are applied as a per-(feature, dim) mask:\n\
+                     `z ~ Bern(pip)`, redrawn once per EPOCH (not per minibatch — z is a\n\
+                     latent for the dataset), with the mean `pip` used at output so the\n\
+                     written dictionary matches what training averaged over. Features with\n\
+                     pip 0 are masked permanently: their loading never trains and the\n\
+                     dictionary carries exact zeros.\n\
                      \n\
                      This is a two-sided blocked Gibbs over the PSEUDOBULK model, run before\n\
                      phase 2. It alternates the gene side given the pseudobulks and the\n\
