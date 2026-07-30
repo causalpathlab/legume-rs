@@ -8,6 +8,7 @@ pub mod lineage;
 pub mod projection;
 pub mod resolve_embedding;
 mod samplers;
+mod selection;
 pub(crate) mod stacked_pb;
 
 pub use config::{FeatFactorSpec, FeatureGateConfig, FitConfig, FitOutput};
@@ -20,9 +21,7 @@ use crate::data::UnifiedData;
 use crate::loss::{
     build_stratified_sampler, FeatPairing, PerBatchStratifiedCellSampler, StratifiedSampler,
 };
-use crate::model::{
-    FactoredInit, GateKind, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs,
-};
+use crate::model::{FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
 use crate::training::{
     train_composite, AxisSampler, CompositeAxis, CompositeMode, CompositeTrainContext, PbSemTerm,
 };
@@ -39,6 +38,7 @@ use config::{
 };
 use projection::{project_cells_phase2, project_pbs_phase2, CellBatchDivisor, PHASE2_RIDGE};
 use samplers::{build_active_samplers, subsample_cell_samplers_multilevel};
+use selection::{install_selection, run_selection_pass, SelectionPassInput};
 
 /// Composite-objective gbe fit — trained in **two phases**.
 ///
@@ -422,6 +422,56 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         level_axes_data.push((axis, stratified));
     }
 
+    /////////////////////////////////////////////////////////////
+    // Selection pass: sample WHICH features load WHICH dims    //
+    /////////////////////////////////////////////////////////////
+    //
+    // Runs BEFORE phase 1, and shapes it. The sampler chooses the selection; the SGD
+    // below fits the loading under a mask drawn from it. Two things follow from the
+    // ordering, and both are the reason it is here rather than after:
+    //
+    // * there is exactly ONE training block. The predecessor sampled *after* phase 1
+    //   and then ran a second, copied SGD block under the mask, which meant a SIGINT
+    //   between them skipped both the write-back and that second block while phase 2
+    //   (which deliberately does not check `stop`) went on to project every cell onto a
+    //   randn-initialized dictionary and write it out as a complete result;
+    // * the write-back cannot double-gate. `beta_mean` is `E[z·β]` — already gated by
+    //   the sampler's own selection — so installing it as the starting point and then
+    //   applying the mask on top would gate twice. The feature side is therefore NOT
+    //   written back at all: the posterior contributes the selection, SGD fits the
+    //   loading from its own initialization. Only the pb side is warm-started.
+    //
+    // Deliberately NOT Monte-Carlo EM: `pip` is estimated once and frozen, where MCEM
+    // would re-estimate it against the updated `β` each outer round. So the selection
+    // is fixed at what a cold chain saw, and cannot be refined by the loading SGD goes
+    // on to find. That is the known limitation of this design, not an oversight —
+    // buying it back costs another sampler run per round.
+    let mut splice_posterior = None;
+    let pb_posterior = run_selection_pass(
+        &SelectionPassInput {
+            config: &config,
+            unified,
+            varmap: &varmap,
+            collapsed_levels: &collapsed_levels,
+            cell_to_pb_per_level: &cell_to_pb_per_level,
+            b_feat: &cell_model.b_feat,
+            e_feat: &cell_model.e_feat,
+        },
+        use_cell_axis,
+        num_levels,
+        h,
+        &mut splice_posterior,
+    )?;
+    install_selection(
+        &mut cell_model,
+        &mut level_models,
+        pb_posterior.as_ref(),
+        splice_posterior.as_ref(),
+        unified.n_features(),
+        h,
+        &config.device,
+    )?;
+
     // Note on biases: the per-CELL bias `b_cell` and the per-PB biases
     // (`pb_l*_b_cell`) BOTH train in phase 1 — a per-sample bias absorbs
     // that sample's depth so the shared `E_feat` captures composition, not
@@ -480,62 +530,6 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // lineage term is required — but the refine is warm-started, so it needs a
     // refinement, not a second full-length fit. Off the lineage path phase 1 keeps
     // the whole budget (`refine_epochs == 0`) and the run is byte-identical.
-    // Phase 1 is SGD **xor** sampling. An initialization cannot bias a *converged*
-    // chain — it only sets burn-in — so warm-starting the sampler from an SGD optimum is
-    // either harmless or fatal, and the recorded rank collapse says fatal: with an
-    // effective rank of ~2.5 of 128 and max VIF ~105, the surplus directions have a flat
-    // likelihood, the chain random-walks in them, and nothing washes out at any sweep
-    // count anyone will pay for. `pip` and `π₀h` would then describe curvature around
-    // the SGD optimum rather than a posterior. So when the posterior is requested it
-    // *replaces* phase 1 rather than refining it.
-    //
-    // Phase **2** is unaffected: it is an analytical Poisson-MAP projection, not SGD.
-    let sample_phase1 = config.pb_posterior.is_some();
-    if sample_phase1 {
-        // Constraints, enforced rather than discovered. Neither is reachable by
-        // accident — `phase1_cells_per_pb` defaults to 0 and the lineage refine is
-        // opt-in — but silently leaving a cell axis at its random init, or silently
-        // skipping a refine the caller asked for, would both be worse than stopping.
-        anyhow::ensure!(
-            !use_cell_axis,
-            "--posterior samples the PSEUDOBULK phase, and there is no cell block to \
-             sample: --phase1-cells-per-pb {} would add a cell axis that only SGD \
-             trains, leaving it at its random initialization. Pass \
-             --phase1-cells-per-pb 0 (the default) to sample, or drop --posterior to \
-             train that axis.",
-            config.phase1_cells_per_pb
-        );
-        anyhow::ensure!(
-            !(config.lineage_dag && config.feat_factor.is_some()),
-            "--lineage-dag refines a TRAINED fit by SGD, so it cannot be combined with \
-             --posterior, which replaces that training. Run one or the other."
-        );
-        // The sampler's likelihood is the profiled Poisson, whose normalizer
-        // `T_a · ln Σ exp(s)` IS the sampled-softmax estimand: dividing it by `T_a` gives
-        // `E_{o~p̂}[s_o] − ln Σ exp(s_o)`, which is InfoNCE for the anchor with its
-        // positives weighted by count. Against `NceObjective::Logistic` that identity
-        // simply does not hold — SGNS is a sum of independent per-pair decisions,
-        // `Σ log σ(s) + Σ log σ(−s)`, with no `logsumexp` anywhere.
-        //
-        // So sampling a logistic fit with this likelihood would report a posterior for a
-        // model nobody asked for, and would do it silently, with a full set of
-        // plausible-looking tables. Refuse instead. Sampling the logistic objective is a
-        // real option and the design is settled — it stays `affine_in_anchor`, so the
-        // rank-1 column update still applies, and its intercept has no closed-form
-        // profile but does have a monotone score equation solvable per sweep by bisection,
-        // exactly the Bayes-EM step the Poisson path already takes for its live
-        // intercepts. It is simply not implemented, and an error is the honest way to say
-        // that.
-        anyhow::ensure!(
-            config.nce_objective != crate::loss::NceObjective::Logistic,
-            "--posterior samples the profiled-Poisson likelihood, which is the same \
-             estimand as --nce-objective softmax but NOT as logistic (SGNS is a sum of \
-             per-pair decisions, with no logsumexp). Sampling a logistic fit with it would \
-             report a posterior for a different model. Use --nce-objective softmax with \
-             --posterior, or drop --posterior to train with logistic."
-        );
-    }
-
     let lineage_on = config.lineage_dag && config.feat_factor.is_some();
     let warmup_epochs = if lineage_on && config.epochs > 0 {
         ((LINEAGE_WARMUP_FRAC * config.epochs as f64).round() as usize).clamp(1, config.epochs)
@@ -543,18 +537,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         config.epochs
     };
     let refine_epochs = config.epochs - warmup_epochs;
-    if sample_phase1 {
-        // One unmissable line, because "did SGD run?" must never be a guess. `--epochs`
-        // is deliberately named in it: it still has a value and it no longer governs
-        // this phase, which is exactly the kind of thing a reader assumes otherwise.
-        info!(
-            "Phase 1 = SAMPLED, not trained — SGD is SKIPPED on this path, so --epochs \
-             ({}) does not apply to it. The pseudobulk model is initialized from the \
-             data and then sampled; phase 2 still runs (it is an analytical projection, \
-             not SGD).",
-            config.epochs
-        );
-    } else {
+    {
         let mut joint_axes: Vec<CompositeAxis> = Vec::with_capacity(1 + pb_axes.len());
         // `use_cell_axis == false` (phase1_cells_per_pb == 0) trains E_feat from
         // pb aggregates only; `cell_axis` is left unused (its borrow ends here).
@@ -568,16 +551,22 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         p1.epochs = warmup_epochs;
         let cell_prefix = if use_cell_axis { "cell + " } else { "" };
         let n_pb_levels = joint_axes.len() - usize::from(use_cell_axis);
+        let under = if cell_model.is_jittered() {
+            " UNDER THE SAMPLED MASK (z ~ Bern(pip), redrawn once per epoch)"
+        } else {
+            ""
+        };
         if refine_epochs > 0 {
             info!(
                 "Phase 1 (joint) = LINEAGE WARM-UP — {}/{} epochs; the DAG refine gets the other \
-                 {} (ONE shared epoch budget, NOT doubled). Training features + {}{} pb level(s) [Sum]",
-                warmup_epochs, config.epochs, refine_epochs, cell_prefix, n_pb_levels,
+                 {} (ONE shared epoch budget, NOT doubled). Training features + {}{} pb level(s) \
+                 [Sum]{}",
+                warmup_epochs, config.epochs, refine_epochs, cell_prefix, n_pb_levels, under,
             );
         } else {
             info!(
-                "Phase 1 (joint) — features + {}{} pb level(s) [Sum], {} epochs",
-                cell_prefix, n_pb_levels, warmup_epochs,
+                "Phase 1 (joint) — features + {}{} pb level(s) [Sum], {} epochs{}",
+                cell_prefix, n_pb_levels, warmup_epochs, under,
             );
         }
         train_composite(
@@ -596,205 +585,19 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // `cell_axis` / `pb_axes` borrows of `cell_model` / `cell_samplers` end
     // here, freeing them for the phase-2 `&mut` projection below.
 
-    // Phase-1 posterior. Runs HERE — after the SGD that warm-starts it, before
-    // `materialize_e_feat` bakes the dictionary — so writing the posterior means
-    // back into the Vars makes this a refinement of phase 1 rather than a second
-    // set of tables nothing reads. Everything downstream (phase 2, the
-    // dictionary, the co-embed) then sees the sampled fit.
-    let mut splice_posterior = None;
-    let pb_posterior = match config.pb_posterior.as_ref() {
-        None => None,
-        Some(pcfg) if config.feat_factor.is_some() => {
-            // gem's β-sharing side: one `β_g` per gene plus `δ_g` on the unspliced
-            // rows, i.e. TWO gates over a row→gene grouping. Sampled by the splice
-            // variant; the write-back targets `beta` / `delta`, not `e_feat`.
-            let spec = config.feat_factor.as_ref().expect("checked");
-            let pb = stacked_pb_view(&varmap, &collapsed_levels, &cell_to_pb_per_level, h)?;
-            // NOT `cell_model.e_feat`: on a factored model the training loss never
-            // touches that Var, and `materialize_e_feat` has not run yet — it is
-            // still the randn snapshot from init. Build the per-row MAP from the
-            // trained `beta`/`delta` Vars instead, so both the warm start and the
-            // fallback loading for rows no gene claims come from the actual fit.
-            let e_feat_map = materialized_splice_rows(&varmap, spec, unified.n_features(), h)?;
-            let b_feat_map: Vec<f32> = cell_model.b_feat.to_vec1()?;
-            let feat = crate::posterior::pb_index::FeatureSide {
-                e_feat: &e_feat_map,
-                b_feat: &b_feat_map,
-                feature_to_backend_row: &unified.feature_to_backend_row,
-            };
-            let tracks = crate::posterior::pb_gibbs::SpliceTracks {
-                row_to_gene: &spec.row_to_gene,
-                unspliced_rows: &spec.unspliced_rows,
-                n_genes: spec
-                    .row_to_gene
-                    .iter()
-                    .copied()
-                    .max()
-                    .map_or(0, |m| m as usize + 1),
-                nested: config.pb_posterior_nested_delta,
-            };
-            let res = crate::posterior::pb_gibbs::pb_gibbs_splice(&pb, &feat, &tracks, h, pcfg)?;
-            write_back_splice(&varmap, &res, num_levels)?;
-            splice_posterior = Some(res);
-            None
-        }
-        Some(pcfg) => {
-            let pb = stacked_pb_view(&varmap, &collapsed_levels, &cell_to_pb_per_level, h)?;
-            let e_feat_map: Vec<f32> = cell_model.e_feat.flatten_all()?.to_vec1()?;
-            let b_feat_map: Vec<f32> = cell_model.b_feat.to_vec1()?;
-            let feat = crate::posterior::pb_index::FeatureSide {
-                e_feat: &e_feat_map,
-                b_feat: &b_feat_map,
-                feature_to_backend_row: &unified.feature_to_backend_row,
-            };
-            // Free model ⇒ a feature row IS an anchor, so no grouping.
-            let res = crate::posterior::pb_gibbs::pb_gibbs(&pb, &feat, None, h, pcfg)?;
-            write_back_posterior(&varmap, &res, num_levels)?;
-            Some(res)
-        }
-    };
-
-    // Snapshot the deltaTopic β+δ into the `e_feat` field so phase-2 (and every
-    // output/co-embed reader) sees a fixed materialized dictionary. No-op for a
-    // free model.
+    // Back to the mean for everything downstream: training averaged over draws, so
+    // `E[z ⊙ β] = pip ⊙ β` is the dictionary the fit actually implies. Leaving a draw
+    // installed would ship ONE random sub-model as if it were the answer. No-op when
+    // no `pip` was installed.
+    cell_model.clear_gate_mask();
+    // Snapshot β+δ (gate baked in) into the `e_feat` field so phase 2 and every
+    // output/co-embed reader see a fixed materialized dictionary. No-op for a free,
+    // ungated model. This MUST come after the training above: `e_feat` is what phase 2
+    // projects against and what the dictionary output writes, so materializing before
+    // the fit would leave the whole pass invisible downstream — cells projected onto a
+    // dictionary that does not match the parameters just fitted, which looks exactly
+    // like a model that trained badly rather than one whose output was never refreshed.
     cell_model.materialize_e_feat()?;
-
-    // The posterior's feature side lands HERE, on the materialized field, not on
-    // the raw Var above — `E[z·β]` is already gated by its own selection, so
-    // feeding it through `materialize_e_feat` would apply the trained gate a
-    // second time. See `overwrite_feature_side`.
-    //
-    // JITTER SKIPS THIS. `mean_beta` is `E[z·β]` — already gated — so installing it as
-    // the SGD starting point and then applying the mask on top would gate twice, the
-    // exact double-application this comment warns about. Under jitter the posterior
-    // contributes the SELECTION and SGD fits the loading from its own initialization.
-    // The posterior gate is now UNCONDITIONAL: `--posterior` samples the selection and
-    // SGD then fits the loading under it. It no longer replaces SGD.
-    //
-    // Measured on BM1, 3 seeds, paired: `pip ⊙ β` beat plain SGD on kNN label purity in
-    // every seed (0.6739 ± 0.0074 vs 0.6664 ± 0.0068) with a 5.7x sparser dictionary
-    // (1531 vs 8785 effective genes/dim). A STOCHASTIC `z ~ Bern(pip)` mask redrawn per
-    // epoch was also tried and lost 3/3 — 0.6632, below plain SGD — so the mask is held
-    // at its mean rather than sampled. Dropout's noise costs more here than its
-    // decorrelation buys.
-    let jitter = config.pb_posterior.is_some();
-    if !jitter {
-        if let Some(res) = pb_posterior.as_ref() {
-            overwrite_feature_side(&mut cell_model, &res.mean_beta, &res.mean_b_feat, h)?;
-        }
-        if let Some(res) = splice_posterior.as_ref() {
-            let rows = scatter_gene_to_rows(res, &config, unified.n_features(), h);
-            overwrite_feature_side(&mut cell_model, &rows.0, &rows.1, h)?;
-        }
-    }
-
-    /////////////////////////////////////////////////////////////////
-    // Jitter: posterior-informed dropout, then SGD for the loading //
-    /////////////////////////////////////////////////////////////////
-    //
-    // The sampler above produced `pip`; SGD now fits the loading under draws from it.
-    //
-    // Deliberately NOT Monte-Carlo EM: `pip` is estimated once and frozen, where MCEM
-    // would re-estimate it against the updated `β` each outer round. So the selection
-    // is fixed at what a cold-started chain saw, and cannot be refined by the loading
-    // SGD goes on to find. That is the known limitation of this design, not an
-    // oversight — buying it back costs another sampler run per round.
-    if jitter && !stop.load(std::sync::atomic::Ordering::Relaxed) {
-        let (pip, rows) = match (pb_posterior.as_ref(), splice_posterior.as_ref()) {
-            // Free model: an anchor IS a feature row, so `pip` is already row-indexed.
-            (Some(res), _) => (res.pip.clone(), unified.n_features()),
-            // Factored: `beta_pip` is per GENE, which is the axis `s_beta` lives on —
-            // `gathered_gate_weights` gathers rows from it via `row_to_gene`.
-            (_, Some(res)) => {
-                let n_genes = res.beta_pip.len() / h.max(1);
-                (res.beta_pip.clone(), n_genes)
-            }
-            (None, None) => unreachable!("jitter requires a posterior"),
-        };
-        let nz = pip.iter().filter(|&&p| p <= 0.0).count();
-        info!(
-            "Jitter — SGD under posterior dropout: pip over {rows} unit(s) x {h} dim(s),              mean {:.3}, {} entrie(s) at exactly 0 (permanently masked; their loading              never trains and the dictionary carries exact zeros). z ~ Bern(pip) is              redrawn ONCE PER EPOCH, not per minibatch — z is a latent for the dataset.",
-            pip.iter().sum::<f32>() / pip.len().max(1) as f32,
-            nz,
-        );
-        cell_model.set_gate_pip(GateKind::Identity, &pip, rows, &config.device)?;
-        // gem's SECOND gate gets its OWN table. Masking δ with β's inclusion would tie a
-        // gene's motion to its identity selection — the conflation `GateKind` exists to
-        // prevent. `delta_pip` is NaN where δ is unidentified (a gene missing one splice
-        // track), and NaN must not reach the mask: an unidentified δ is exactly one that
-        // should be masked OFF, so it maps to 0.
-        // Scrubbed ONCE and reused by every model below: `delta_pip` is NaN where δ is
-        // unidentified (a gene missing one splice track), and NaN must not reach a mask.
-        // An unidentified δ is exactly one that should be OFF, so it maps to 0.
-        let dpip: Option<Vec<f32>> = splice_posterior.as_ref().map(|res| {
-            res.delta_pip
-                .iter()
-                .map(|p| if p.is_finite() { *p } else { 0.0 })
-                .collect()
-        });
-        if let (Some(res), Some(dpip)) = (splice_posterior.as_ref(), dpip.as_ref()) {
-            let n_unident = res.delta_pip.iter().filter(|p| !p.is_finite()).count();
-            cell_model.set_gate_pip(GateKind::Velocity, dpip, rows, &config.device)?;
-            info!(
-                "Jitter — velocity gate: separate δ pip over {rows} gene(s), mean {:.3}; \
-                 {n_unident} unidentified (masked off)",
-                dpip.iter().sum::<f32>() / dpip.len().max(1) as f32,
-            );
-        }
-        let cell_cell = cell_model.gate_mask_cell();
-        for m in &mut level_models {
-            m.set_gate_pip(GateKind::Identity, &pip, rows, &config.device)?;
-            if let Some(dp) = dpip.as_ref() {
-                m.set_gate_pip(GateKind::Velocity, dp, rows, &config.device)?;
-            }
-            m.share_gate_mask(&cell_cell);
-        }
-
-        let mut jitter_axes: Vec<CompositeAxis> = Vec::with_capacity(num_levels);
-        for (i, model) in level_models.iter().enumerate() {
-            let (axis, stratified) = &level_axes_data[i];
-            jitter_axes.push(CompositeAxis {
-                model,
-                unified: &pb_blobs[i],
-                cell_axis: axis,
-                sampler: AxisSampler::Stratified(stratified),
-                lambda: DEFAULT_AXIS_LAMBDA,
-                label: "pb",
-            });
-        }
-        let mut optj = AdamW::new(varmap.all_vars(), adamw_params())?;
-        let mut pj = stage_params(&config);
-        pj.composite_mode = CompositeMode::Sum;
-        pj.epochs = config.epochs;
-        info!(
-            "Phase 1 (jitter) — features + {} pb level(s) [Sum], {} epochs",
-            num_levels, pj.epochs
-        );
-        train_composite(
-            &CompositeTrainContext {
-                axes: &jitter_axes,
-                dev: &config.device,
-                stop: &stop,
-                cell_to_pb_per_level: None,
-                lineage_sem: None,
-                lineage_sem_theta: None,
-            },
-            &mut optj,
-            &pj,
-        )?;
-        drop(jitter_axes);
-        // Back to the mean for everything downstream: training averaged over draws, so
-        // `E[z ⊙ β] = pip ⊙ β` is the dictionary the fit actually implies. Leaving a
-        // draw installed would ship ONE random sub-model as if it were the answer.
-        cell_model.clear_gate_mask();
-        // RE-MATERIALIZE. `materialize_e_feat` already ran above, BEFORE this training,
-        // so `e_feat` is a snapshot of the pre-jitter Vars — and it is what phase 2
-        // projects against and what the dictionary output writes. Without this the whole
-        // jitter pass is invisible downstream: the cells get projected onto a dictionary
-        // that does not match the parameters just fitted, which looks exactly like a
-        // model that trained badly rather than one whose output was never refreshed.
-        cell_model.materialize_e_feat()?;
-    }
 
     // Lineage-DAG refine (gem β-sharing only; fixed velocity-KNN structure). The warm-up
     // phase 1 above yields a trained-enough dictionary: read pb-level velocity
@@ -1093,243 +896,6 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
 /// Counts come from `mu_adjusted` when the collapse produced one, matching the
 /// `pb_blobs` the model actually trained on, so the sampler sees the same scale the
 /// fit did.
-/// Splice-model write-back: `beta` and `delta` are the gene-side Vars under
-/// β-sharing, not `e_feat` (which is a materialized snapshot rebuilt from them).
-///
-/// `delta` exists only when the model was built with a velocity offset; a run
-/// without one simply has no Var to write and its `delta_mean` is all zeros.
-fn write_back_splice(
-    varmap: &VarMap,
-    res: &crate::posterior::pb_gibbs::SpliceGibbsResult,
-    num_levels: usize,
-) -> anyhow::Result<()> {
-    use candle_util::candle_core::{Device, Tensor};
-    let vars = varmap.data().lock().expect("varmap poisoned");
-    let set = |name: &str, values: &[f32]| -> anyhow::Result<bool> {
-        let Some(var) = vars.get(name) else {
-            return Ok(false);
-        };
-        anyhow::ensure!(
-            var.elem_count() == values.len(),
-            "splice write-back for {name}: have {} values, var holds {}",
-            values.len(),
-            var.elem_count()
-        );
-        let rows = values.len() / res.h.max(1);
-        let t = Tensor::from_slice(values, (rows, res.h), &Device::Cpu)?.to_device(var.device())?;
-        var.set(&t)?;
-        Ok(true)
-    };
-    anyhow::ensure!(
-        set("beta", &res.beta_mean)?,
-        "splice write-back: the model has no `beta` var"
-    );
-    if !set("delta", &res.delta_mean)? {
-        log::debug!("splice write-back: no `delta` var (velocity off) — β only");
-    }
-    drop(vars);
-    write_back_pb_levels(varmap, &res.mean_pb, &res.mean_b_pb, res.h, num_levels)
-}
-
-/// Write the **pseudobulk** half of the phase-1 posterior back into the `VarMap`.
-///
-/// Written through the `VarMap` by name, not through `level_models[l].e_cell`:
-/// those are `Tensor`s aliasing the `Var`s' storage, and whether they observe an
-/// in-place `Var::set` is a candle implementation detail — the same reason
-/// [`stacked_pb_view`] reads by name.
-///
-/// The FEATURE half is deliberately not written here; see
-/// [`overwrite_feature_side`] for why it has to wait until after
-/// `materialize_e_feat`.
-fn write_back_posterior(
-    varmap: &VarMap,
-    res: &crate::posterior::pb_gibbs::PbGibbsResult,
-    num_levels: usize,
-) -> anyhow::Result<()> {
-    write_back_pb_levels(varmap, &res.mean_pb, &res.mean_b_pb, res.h, num_levels)
-}
-
-/// The per-row phase-1 MAP for a β-sharing model, read from the trained Vars:
-/// `β_g` on a spliced row, `β_g + δ_g` on an unspliced one.
-///
-/// This exists because `cell_model.e_feat` is NOT the fit on this path — the
-/// factored loss trains `beta`/`delta` and `e_feat` stays at its random
-/// initialisation until `materialize_e_feat`, which runs after the posterior.
-/// Reading it there would warm-start the sampler from noise.
-fn materialized_splice_rows(
-    varmap: &VarMap,
-    spec: &FeatFactorSpec,
-    n_features: usize,
-    h: usize,
-) -> anyhow::Result<Vec<f32>> {
-    let vars = varmap.data().lock().expect("varmap poisoned");
-    let get = |name: &str| -> anyhow::Result<Option<Vec<f32>>> {
-        match vars.get(name) {
-            None => Ok(None),
-            Some(v) => Ok(Some(v.as_tensor().flatten_all()?.to_vec1::<f32>()?)),
-        }
-    };
-    let beta = get("beta")?
-        .ok_or_else(|| anyhow::anyhow!("factored model has no `beta` var to warm-start from"))?;
-    let delta = get("delta")?;
-    let mut out = vec![0f32; n_features * h];
-    for (uid, (&g, &unspliced)) in spec
-        .row_to_gene
-        .iter()
-        .zip(&spec.unspliced_rows)
-        .enumerate()
-    {
-        if g == u32::MAX || uid >= n_features {
-            continue;
-        }
-        let (src, dst) = (g as usize * h, uid * h);
-        for k in 0..h {
-            let d = if unspliced {
-                delta.as_ref().map_or(0.0, |v| v[src + k])
-            } else {
-                0.0
-            };
-            out[dst + k] = beta[src + k] + d;
-        }
-    }
-    Ok(out)
-}
-
-/// Expand gem's per-GENE splice posterior onto the per-ROW feature axis the
-/// materialized dictionary lives on: `β_g` on a spliced row, `β_g + δ_g` on an
-/// unspliced one, and each row's own profiled intercept.
-///
-/// Genes whose `δ` is not identified contribute `β_g` alone — a prior draw has no
-/// business entering the dictionary just because it has the right shape.
-fn scatter_gene_to_rows(
-    res: &crate::posterior::pb_gibbs::SpliceGibbsResult,
-    config: &FitConfig,
-    n_features: usize,
-    h: usize,
-) -> (Vec<f32>, Vec<f32>) {
-    let mut e = vec![0f32; n_features * h];
-    let mut b = vec![0f32; n_features];
-    let Some(spec) = config.feat_factor.as_ref() else {
-        return (e, b);
-    };
-    for (uid, (&g, &unspliced)) in spec
-        .row_to_gene
-        .iter()
-        .zip(&spec.unspliced_rows)
-        .enumerate()
-    {
-        if g == u32::MAX || uid >= n_features {
-            continue;
-        }
-        let (src, dst) = (g as usize * h, uid * h);
-        let use_delta = unspliced
-            && res
-                .delta_identified
-                .get(g as usize)
-                .copied()
-                .unwrap_or(false);
-        for k in 0..h {
-            e[dst + k] = res.beta_mean[src + k]
-                + if use_delta {
-                    res.delta_mean[src + k]
-                } else {
-                    0.0
-                };
-        }
-        b[uid] = res.mean_b_feat.get(g as usize).copied().unwrap_or(0.0);
-    }
-    (e, b)
-}
-
-/// Replace the materialized dictionary with the posterior mean, AFTER the gate has
-/// been baked in.
-///
-/// This cannot be a `Var::set` on `"e_feat"` before `materialize_e_feat`. For a
-/// free + gated model — which is every `senna bge` run — `e_feat_raw` aliases that
-/// Var and holds the **ungated** loading; `materialize_e_feat` then writes
-/// `gate ⊙ raw` into the `e_feat` field. The posterior mean is `E[z·β]`, already
-/// gated by its own selection, so putting it in the raw slot makes the shipped
-/// dictionary `gate² ⊙ β`: every partially down-weighted gene shrunk quadratically,
-/// no error, and identical shapes throughout.
-///
-/// The bias moves with it. `multinomial_ll` profiles the intercept out, so the
-/// sampled loading is only identified alongside `b_a*`; leaving the NCE-fitted bias
-/// in place pairs a sampled embedding with an intercept from a different objective.
-fn overwrite_feature_side(
-    model: &mut JointEmbedModel,
-    e_feat: &[f32],
-    b_feat: &[f32],
-    h: usize,
-) -> anyhow::Result<()> {
-    use candle_util::candle_core::{Device, Tensor};
-    let dev = model.e_feat.device().clone();
-    let rows = e_feat.len() / h.max(1);
-    anyhow::ensure!(
-        model.e_feat.elem_count() == e_feat.len() && model.b_feat.elem_count() == b_feat.len(),
-        "posterior feature write-back: {} loadings / {} biases against a {}×{} dictionary",
-        e_feat.len(),
-        b_feat.len(),
-        model.e_feat.elem_count() / h.max(1),
-        h
-    );
-    model.e_feat = Tensor::from_slice(e_feat, (rows, h), &Device::Cpu)?.to_device(&dev)?;
-    model.b_feat = Tensor::from_slice(b_feat, rows, &Device::Cpu)?.to_device(&dev)?;
-    Ok(())
-}
-
-/// Slice the stacked pb posterior mean back into each level's own Var.
-///
-/// Shared by both feature-side parameterizations: the pb heads are the same
-/// objects either way, and the stacked axis they came from is level-ordered, so
-/// consuming it exactly is also the check that the level sizes still agree.
-fn write_back_pb_levels(
-    varmap: &VarMap,
-    mean_pb: &[f32],
-    mean_b_pb: &[f32],
-    h: usize,
-    num_levels: usize,
-) -> anyhow::Result<()> {
-    use candle_util::candle_core::{Device, Tensor};
-    let vars = varmap.data().lock().expect("varmap poisoned");
-    let mut off = 0usize;
-    for level in 0..num_levels {
-        let name = format!("pb_l{level}_e_cell");
-        let Some(var) = vars.get(&name) else { continue };
-        let n_pb = var.elem_count() / h.max(1);
-        let end = off + n_pb * h;
-        anyhow::ensure!(
-            end <= mean_pb.len(),
-            "pb write-back for {name}: stacked axis holds {} values, level needs {end}",
-            mean_pb.len()
-        );
-        let t = Tensor::from_slice(&mean_pb[off..end], (n_pb, h), &Device::Cpu)?
-            .to_device(var.device())?;
-        var.set(&t)?;
-        // The paired bias moves with the loading: the profile likelihood
-        // maximised it out, so they are only identified together.
-        let bias_name = format!("pb_l{level}_b_cell");
-        if let Some(bvar) = vars.get(&bias_name) {
-            let (bs, be) = (off / h, end / h);
-            anyhow::ensure!(
-                bvar.elem_count() == be - bs,
-                "pb bias write-back for {bias_name}: var holds {}, level needs {}",
-                bvar.elem_count(),
-                be - bs
-            );
-            let bt = Tensor::from_slice(&mean_b_pb[bs..be], be - bs, &Device::Cpu)?
-                .to_device(bvar.device())?;
-            bvar.set(&bt)?;
-        }
-        off = end;
-    }
-    anyhow::ensure!(
-        off == mean_pb.len(),
-        "pb write-back consumed {off} of {} stacked values — level sizes disagree",
-        mean_pb.len()
-    );
-    Ok(())
-}
-
 pub(crate) fn stacked_pb_view<'a>(
     varmap: &VarMap,
     collapsed_levels: &'a [data_beans_alg::collapse_data::CollapsedOut],

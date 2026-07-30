@@ -779,16 +779,43 @@ impl JointEmbedModel {
         Ok(())
     }
 
-    /// Point this model's mask at an existing shared cell, so every composite axis
-    /// redraws together. Call after [`Self::set_gate_pip`] on each axis.
-    pub fn share_gate_mask(&mut self, cell: &Arc<Mutex<Option<Tensor>>>) {
-        self.gate_mask = Arc::clone(cell);
+    /// Point BOTH of this model's mask cells at existing shared ones, so every
+    /// composite axis redraws together. Call after [`Self::set_gate_pip`] on each axis.
+    ///
+    /// Takes both gates at once ON PURPOSE. [`Self::set_gate_pip`] mints a fresh `Arc`
+    /// for the velocity cell every time it is called, so a caller that shares only the
+    /// identity cell leaves each axis holding its own δ mask — and since
+    /// [`Self::resample_gate_mask`] runs on `axes[0]` alone, every OTHER axis then gates
+    /// δ by the mean while `axes[0]` gates it by a draw. The axes train against
+    /// different sub-models within one epoch, silently. A single entry point that
+    /// cannot be half-called is the fix.
+    pub fn share_gate_masks(
+        &mut self,
+        identity: &Arc<Mutex<Option<Tensor>>>,
+        velocity: Option<&Arc<Mutex<Option<Tensor>>>>,
+    ) {
+        self.gate_mask = Arc::clone(identity);
+        if let (Some(f), Some(cell)) = (self.factor.as_mut(), velocity) {
+            if f.delta_gate_pip.is_some() {
+                f.delta_gate_mask = Some(Arc::clone(cell));
+            }
+        }
     }
 
-    /// The shared mask cell, for handing to the other axes.
+    /// The shared identity mask cell, for handing to the other axes.
     #[must_use]
     pub fn gate_mask_cell(&self) -> Arc<Mutex<Option<Tensor>>> {
         Arc::clone(&self.gate_mask)
+    }
+
+    /// The shared VELOCITY mask cell; `None` unless a δ pip is installed.
+    #[must_use]
+    pub fn velocity_mask_cell(&self) -> Option<Arc<Mutex<Option<Tensor>>>> {
+        self.factor
+            .as_ref()?
+            .delta_gate_mask
+            .as_ref()
+            .map(Arc::clone)
     }
 
     /// Draw this epoch's `z ~ Bern(gate_pip)` and RETURN it. `None` when jitter is off.
