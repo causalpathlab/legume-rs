@@ -13,6 +13,7 @@
 //! them plant **several** cells: with a single cell the mean is that cell and
 //! centring is trivially degenerate.
 
+use super::edges::block_cells;
 use super::*;
 use candle_util::candle_core::Device;
 
