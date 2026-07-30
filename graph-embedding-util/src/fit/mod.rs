@@ -511,6 +511,30 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             "--lineage-dag refines a TRAINED fit by SGD, so it cannot be combined with \
              --posterior, which replaces that training. Run one or the other."
         );
+        // The sampler's likelihood is the profiled Poisson, whose normalizer
+        // `T_a · ln Σ exp(s)` IS the sampled-softmax estimand: dividing it by `T_a` gives
+        // `E_{o~p̂}[s_o] − ln Σ exp(s_o)`, which is InfoNCE for the anchor with its
+        // positives weighted by count. Against `NceObjective::Logistic` that identity
+        // simply does not hold — SGNS is a sum of independent per-pair decisions,
+        // `Σ log σ(s) + Σ log σ(−s)`, with no `logsumexp` anywhere.
+        //
+        // So sampling a logistic fit with this likelihood would report a posterior for a
+        // model nobody asked for, and would do it silently, with a full set of
+        // plausible-looking tables. Refuse instead. Sampling the logistic objective is a
+        // real option and the design is settled — it stays `affine_in_anchor`, so the
+        // rank-1 column update still applies, and its intercept has no closed-form
+        // profile but does have a monotone score equation solvable per sweep by bisection,
+        // exactly the Bayes-EM step the Poisson path already takes for its live
+        // intercepts. It is simply not implemented, and an error is the honest way to say
+        // that.
+        anyhow::ensure!(
+            config.nce_objective != crate::loss::NceObjective::Logistic,
+            "--posterior samples the profiled-Poisson likelihood, which is the same \
+             estimand as --nce-objective softmax but NOT as logistic (SGNS is a sum of \
+             per-pair decisions, with no logsumexp). Sampling a logistic fit with it would \
+             report a posterior for a different model. Use --nce-objective softmax with \
+             --posterior, or drop --posterior to train with logistic."
+        );
     }
 
     let lineage_on = config.lineage_dag && config.feat_factor.is_some();

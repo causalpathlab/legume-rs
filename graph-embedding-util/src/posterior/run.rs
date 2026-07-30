@@ -58,8 +58,11 @@ pub struct PosteriorArgs {
                      Requires the pure-pseudobulk phase 1 (--phase1-cells-per-pb 0, the\n\
                      default): a cell axis is trained only by SGD, so there is no cell block to\n\
                      sample and one would be left at its initialization. Cannot be combined\n\
-                     with --lineage-dag, which refines a trained fit. Both are hard errors\n\
-                     rather than silent degradations.\n\
+                     with --lineage-dag, which refines a trained fit. Requires\n\
+                     --nce-objective softmax: the sampled likelihood is the profiled Poisson,\n\
+                     which is the same estimand as sampled-softmax but not as logistic, so\n\
+                     sampling a logistic fit would report a posterior for a different model.\n\
+                     All three are hard errors rather than silent degradations.\n\
                      \n\
                      Selection lives on the feature side: each (gene, dim) gets a posterior\n\
                      inclusion probability, alongside the per-dim slab variance σ₀h² and sparsity\n\
