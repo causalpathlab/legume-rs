@@ -115,8 +115,6 @@ fn an_empty_gene_reverts_to_the_prior() {
     );
 }
 
-
-
 /// Same seed ⇒ same answer. The per-gene streams are derived from `(seed, gene,
 /// sweep)` with no shared mutable state, so a rayon reschedule must not change the
 /// result — otherwise no A/B against this sampler is trustworthy.
@@ -152,7 +150,9 @@ fn a_resumed_block_actually_reads_its_warm_start() {
     ];
     let on = vec![true; pos.len() * H];
     let run_warm = |scale: f32| {
-        let init: Vec<f32> = (0..pos.len() * H).map(|i| scale * (1.0 + i as f32)).collect();
+        let init: Vec<f32> = (0..pos.len() * H)
+            .map(|i| scale * (1.0 + i as f32))
+            .collect();
         run_with(&pos, 404, |c| {
             c.with_init_beta(init.clone()).with_init_z(on.clone())
         })
@@ -165,7 +165,6 @@ fn a_resumed_block_actually_reads_its_warm_start() {
         "warm start is being discarded — the loadings do not depend on init_beta"
     );
 }
-
 
 /// With selection off every coordinate stays included, so no PIP is below 1 and
 /// nothing is written back as an exact zero. The old `beta_b = 1e12` trick could
@@ -193,7 +192,12 @@ fn selection_off_keeps_every_coordinate_included() {
 #[test]
 fn vetoed_coordinates_do_not_inflate_pi0() {
     let pos: Vec<Vec<(u32, f32)>> = (0..40)
-        .map(|g| vec![((g % N_CELL) as u32, 6.0f32), (((g + 5) % N_CELL) as u32, 3.0)])
+        .map(|g| {
+            vec![
+                ((g % N_CELL) as u32, 6.0f32),
+                (((g + 5) % N_CELL) as u32, 3.0),
+            ]
+        })
         .collect();
     // Dim 0 is allowed for every anchor; dim 1 is vetoed for 90% of them.
     let mut allowed = vec![true; pos.len() * H];

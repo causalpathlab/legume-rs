@@ -5,25 +5,38 @@ use nalgebra::DMatrix;
 /// a mix of zero and nonzero so the sparse pass has something to drop.
 fn fixture() -> (Vec<DMatrix<f32>>, Vec<Vec<f32>>, Vec<usize>) {
     // level 0: 4 rows × 2 cols
-    let l0 = DMatrix::from_row_slice(4, 2, &[
-        1.0, 0.0, //
-        2.0, 3.0, //
-        0.0, 0.0, //
-        4.0, 5.0,
-    ]);
+    let l0 = DMatrix::from_row_slice(
+        4,
+        2,
+        &[
+            1.0, 0.0, //
+            2.0, 3.0, //
+            0.0, 0.0, //
+            4.0, 5.0,
+        ],
+    );
     // level 1: 4 rows × 3 cols
-    let l1 = DMatrix::from_row_slice(4, 3, &[
-        0.0, 1.0, 0.0, //
-        0.0, 0.0, 2.0, //
-        3.0, 0.0, 0.0, //
-        0.0, 4.0, 0.0,
-    ]);
+    let l1 = DMatrix::from_row_slice(
+        4,
+        3,
+        &[
+            0.0, 1.0, 0.0, //
+            0.0, 0.0, 2.0, //
+            3.0, 0.0, 0.0, //
+            0.0, 4.0, 0.0,
+        ],
+    );
     let sizes = vec![vec![10.0, 20.0], vec![2.0, 4.0, 8.0]];
     let offsets = vec![0, 2];
     (vec![l0, l1], sizes, offsets)
 }
 
-fn stacked<'a>(counts: &'a [DMatrix<f32>], sizes: &[Vec<f32>], offsets: &[usize], h: usize) -> StackedPb<'a> {
+fn stacked<'a>(
+    counts: &'a [DMatrix<f32>],
+    sizes: &[Vec<f32>],
+    offsets: &[usize],
+    h: usize,
+) -> StackedPb<'a> {
     let n_pb: usize = counts.iter().map(nalgebra::Matrix::ncols).sum();
     StackedPb {
         theta: vec![0.5f32; n_pb * h],
@@ -60,7 +73,10 @@ fn both_orientations_hold_the_same_edges() {
 
     let by_feature: usize = pair.by_feature.pos.iter().map(Vec::len).sum();
     let by_pb: usize = pair.by_pb.pos.iter().map(Vec::len).sum();
-    assert_eq!(by_feature, by_pb, "the two bucketings must hold the same edges");
+    assert_eq!(
+        by_feature, by_pb,
+        "the two bucketings must hold the same edges"
+    );
     assert_eq!(by_feature, pair.n_edges);
 
     // 5 nonzeros in level 0 (rows 0,1,1,3,3) + 4 in level 1 (one per row).
@@ -106,7 +122,6 @@ fn edges_carry_the_size_p_exposure() {
     assert!(pair.by_pb.pos[3].contains(&(3, 16.0)));
 }
 
-
 /// An axis wide relative to the cap must slate, and the scale must fold the slate back up
 /// to the pool it was drawn from — not to the raw axis length, since the normalizer runs
 /// over the EXPRESSED axis.
@@ -128,14 +143,22 @@ fn a_wide_axis_slates_and_scales_to_its_pool() {
 
     let pair = build_pb_index_pair(&pb, &feat, None, h, 1, 7).unwrap();
 
-    assert_eq!(pair.by_feature.partition.len(), 1, "pb side slated to the cap");
+    assert_eq!(
+        pair.by_feature.partition.len(),
+        1,
+        "pb side slated to the cap"
+    );
     assert!(
         (pair.by_feature.partition_scale - 5.0).abs() < 1e-12,
         "scale folds the 5-pb pool up from a 1-entry slate, got {}",
         pair.by_feature.partition_scale
     );
     // 4 expressed rows <= 4 x 1, so the feature side is summed outright.
-    assert_eq!(pair.by_pb.partition.len(), 4, "feature side should be exact here");
+    assert_eq!(
+        pair.by_pb.partition.len(),
+        4,
+        "feature side should be exact here"
+    );
     assert!((pair.by_pb.partition_scale - 1.0).abs() < 1e-12);
 }
 
@@ -230,7 +253,10 @@ fn dropped_rows_leave_the_gene_side_but_not_the_pb_side() {
     // The pb side still holds all 9.
     let by_pb: usize = pair.by_pb.pos.iter().map(Vec::len).sum();
     assert_eq!(by_pb, 9);
-    assert_eq!(pair.n_edges, 9, "n_edges counts observed data, not gene-side keeps");
+    assert_eq!(
+        pair.n_edges, 9,
+        "n_edges counts observed data, not gene-side keeps"
+    );
 
     // Pooling adds: gene 0 gets rows 0 and 1 at pb column 0 as two separate edges.
     let at_pb0: Vec<f32> = pair.by_feature.pos[0]
@@ -240,7 +266,6 @@ fn dropped_rows_leave_the_gene_side_but_not_the_pb_side() {
         .collect();
     assert_eq!(at_pb0, vec![10.0, 20.0], "rate 1×10 and rate 2×10");
 }
-
 
 /// The slate must be a random sample, not the low-index prefix. `partial_shuffle`
 /// puts its sample at the END of the slice, so discarding the return value and

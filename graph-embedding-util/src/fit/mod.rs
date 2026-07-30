@@ -626,7 +626,12 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             let tracks = crate::posterior::pb_gibbs::SpliceTracks {
                 row_to_gene: &spec.row_to_gene,
                 unspliced_rows: &spec.unspliced_rows,
-                n_genes: spec.row_to_gene.iter().copied().max().map_or(0, |m| m as usize + 1),
+                n_genes: spec
+                    .row_to_gene
+                    .iter()
+                    .copied()
+                    .max()
+                    .map_or(0, |m| m as usize + 1),
                 nested: config.pb_posterior_nested_delta,
             };
             let res = crate::posterior::pb_gibbs::pb_gibbs_splice(&pb, &feat, &tracks, h, pcfg)?;
@@ -1097,13 +1102,7 @@ fn write_back_posterior(
     res: &crate::posterior::pb_gibbs::PbGibbsResult,
     num_levels: usize,
 ) -> anyhow::Result<()> {
-    write_back_pb_levels(
-        varmap,
-        &res.mean_pb,
-        &res.mean_b_pb,
-        res.h,
-        num_levels,
-    )
+    write_back_pb_levels(varmap, &res.mean_pb, &res.mean_b_pb, res.h, num_levels)
 }
 
 /// The per-row phase-1 MAP for a β-sharing model, read from the trained Vars:
@@ -1130,7 +1129,12 @@ fn materialized_splice_rows(
         .ok_or_else(|| anyhow::anyhow!("factored model has no `beta` var to warm-start from"))?;
     let delta = get("delta")?;
     let mut out = vec![0f32; n_features * h];
-    for (uid, (&g, &unspliced)) in spec.row_to_gene.iter().zip(&spec.unspliced_rows).enumerate() {
+    for (uid, (&g, &unspliced)) in spec
+        .row_to_gene
+        .iter()
+        .zip(&spec.unspliced_rows)
+        .enumerate()
+    {
         if g == u32::MAX || uid >= n_features {
             continue;
         }
@@ -1164,14 +1168,29 @@ fn scatter_gene_to_rows(
     let Some(spec) = config.feat_factor.as_ref() else {
         return (e, b);
     };
-    for (uid, (&g, &unspliced)) in spec.row_to_gene.iter().zip(&spec.unspliced_rows).enumerate() {
+    for (uid, (&g, &unspliced)) in spec
+        .row_to_gene
+        .iter()
+        .zip(&spec.unspliced_rows)
+        .enumerate()
+    {
         if g == u32::MAX || uid >= n_features {
             continue;
         }
         let (src, dst) = (g as usize * h, uid * h);
-        let use_delta = unspliced && res.delta_identified.get(g as usize).copied().unwrap_or(false);
+        let use_delta = unspliced
+            && res
+                .delta_identified
+                .get(g as usize)
+                .copied()
+                .unwrap_or(false);
         for k in 0..h {
-            e[dst + k] = res.beta_mean[src + k] + if use_delta { res.delta_mean[src + k] } else { 0.0 };
+            e[dst + k] = res.beta_mean[src + k]
+                + if use_delta {
+                    res.delta_mean[src + k]
+                } else {
+                    0.0
+                };
         }
         b[uid] = res.mean_b_feat.get(g as usize).copied().unwrap_or(0.0);
     }

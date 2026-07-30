@@ -146,7 +146,6 @@ fn shrinkage_scales_each_feature_row_by_its_own_weight() {
     assert_eq!(got, vec![1.0, 2.0, 1.5, 2.0, 0.0, 0.0]);
 }
 
-
 /// The case measured on real data: a selection posterior estimated on far more
 /// dims than the embedding's effective rank saturates, `max_h PIP` is ≈1 for
 /// every feature, and the shrinkage becomes one constant. It must be reported as
@@ -164,5 +163,3 @@ fn a_saturated_posterior_is_reported_as_degenerate() {
     assert_eq!(s.n_below_half, 0);
     assert_eq!(s.n, 500);
 }
-
-

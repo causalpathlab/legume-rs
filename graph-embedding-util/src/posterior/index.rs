@@ -82,7 +82,9 @@ impl ContrastiveIndex {
     /// prior and sampling it redraws something already known.
     #[must_use]
     pub fn informative_anchors(&self) -> Vec<usize> {
-        (0..self.n_anchors()).filter(|&a| !self.pos[a].is_empty()).collect()
+        (0..self.n_anchors())
+            .filter(|&a| !self.pos[a].is_empty())
+            .collect()
     }
 
     #[must_use]

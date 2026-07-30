@@ -385,7 +385,9 @@ pub(super) fn sample_tile<S: AnchorScore>(
     let mut start: Vec<f32> = Vec::with_capacity(b);
     let mut draw: Vec<f32> = Vec::with_capacity(b);
     let mut idx_buf: Vec<u32> = Vec::with_capacity(b);
-    let mut sub: Vec<SmallRng> = (0..b).map(|i| gene_rng(args.seed, lo + i, args.sweep)).collect();
+    let mut sub: Vec<SmallRng> = (0..b)
+        .map(|i| gene_rng(args.seed, lo + i, args.sweep))
+        .collect();
 
     for d in 0..h {
         // ---- peel dim `d` out of every term ----
@@ -399,7 +401,17 @@ pub(super) fn sample_tile<S: AnchorScore>(
         // ---- ll with dim `d` contributing nothing ----
         // Needed for the `z` draw, and it is where an excluded coordinate starts, so
         // it is not extra work.
-        eval(score, args, &terms, &v, d, &zeros[..b], &all, &mut ll_off, &mut scratch);
+        eval(
+            score,
+            args,
+            &terms,
+            &v,
+            d,
+            &zeros[..b],
+            &all,
+            &mut ll_off,
+            &mut scratch,
+        );
 
         // ---- β | z ----
         let sd_d = args.sd[d];
@@ -429,7 +441,17 @@ pub(super) fn sample_tile<S: AnchorScore>(
             xs.extend(off.iter().map(|&i| nu[i as usize]));
             out_buf.clear();
             out_buf.resize(off.len(), 0.0);
-            eval(score, args, &terms, &v, d, &xs, &off, &mut out_buf, &mut scratch);
+            eval(
+                score,
+                args,
+                &terms,
+                &v,
+                d,
+                &xs,
+                &off,
+                &mut out_buf,
+                &mut scratch,
+            );
             for (slot, &i) in off.iter().enumerate() {
                 let i = i as usize;
                 beta[i * h + d] = xs[slot];
@@ -442,7 +464,17 @@ pub(super) fn sample_tile<S: AnchorScore>(
             cur.extend(on.iter().map(|&i| beta[i as usize * h + d]));
             start.clear();
             start.resize(on.len(), 0.0);
-            eval(score, args, &terms, &v, d, &cur, &on, &mut start, &mut scratch);
+            eval(
+                score,
+                args,
+                &terms,
+                &v,
+                d,
+                &cur,
+                &on,
+                &mut start,
+                &mut scratch,
+            );
 
             // The kernel needs one stream per ITEM, and a scattered mutable subset of
             // `rngs` is not expressible — so derive a fresh stream per (anchor, dim).
@@ -550,6 +582,11 @@ pub(super) fn sample_tile<S: AnchorScore>(
 /// Summing over terms is what makes gem's two splice tracks one likelihood. Legitimate
 /// because the tracks are separate rows with independent biases, so each intercept
 /// profiles out on its own.
+///
+/// Takes its inputs positionally rather than through a context struct: `terms` is borrowed
+/// mutably by the peel/restore either side of every call, so a struct holding it across
+/// the dim loop would not borrow-check, and one built per call would be pure ceremony.
+#[allow(clippy::too_many_arguments)]
 fn eval<S: AnchorScore>(
     score: &S,
     args: &ColumnArgs<'_>,

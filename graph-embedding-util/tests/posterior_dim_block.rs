@@ -41,9 +41,7 @@
 //! equal-magnitude multi-dim truth the gate's *argmax* still lands on a true dim,
 //! so this measures a different (real) deficiency than that metric does.
 
-use graph_embedding_util::posterior::{
-    dim_block, DimBlockConfig, FrozenSide, NodeTerm,
-};
+use graph_embedding_util::posterior::{dim_block, DimBlockConfig, FrozenSide, NodeTerm};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Poisson, StandardNormal};

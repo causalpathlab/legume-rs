@@ -56,7 +56,12 @@ fn column_pass_bench() {
         .map(|_| {
             let n = 1 + rng.random_range(0..N_POS);
             (0..n)
-                .map(|_| (rng.random_range(0..K as u32), 1.0 + rng.random_range(0..5) as f32))
+                .map(|_| {
+                    (
+                        rng.random_range(0..K as u32),
+                        1.0 + rng.random_range(0..5) as f32,
+                    )
+                })
                 .collect()
         })
         .collect();
@@ -83,15 +88,23 @@ fn column_pass_bench() {
          sigma2 {:?}\n  pi0 {:?}",
         dt.as_nanos() as f64 / units as f64,
         res.n_kept,
-        res.sigma2.iter().map(|v| (v * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
-        res.pi0.iter().map(|v| (v * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
+        res.sigma2
+            .iter()
+            .map(|v| (v * 1000.0).round() / 1000.0)
+            .collect::<Vec<_>>(),
+        res.pi0
+            .iter()
+            .map(|v| (v * 1000.0).round() / 1000.0)
+            .collect::<Vec<_>>(),
     );
 
     // Not an assertion about speed — just that the run produced a usable posterior, so
     // a timing number is not being read off a degenerate chain.
     assert!(res.n_kept > 0, "nothing retained");
     assert!(
-        res.pip.iter().all(|p| p.is_finite() && (0.0..=1.0).contains(p)),
+        res.pip
+            .iter()
+            .all(|p| p.is_finite() && (0.0..=1.0).contains(p)),
         "PIP table is not a probability table"
     );
     assert!(

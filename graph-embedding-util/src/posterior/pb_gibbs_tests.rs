@@ -29,7 +29,9 @@ fn stacked(c: &[DMatrix<f32>]) -> StackedPb<'_> {
 
 fn feat_buffers() -> (Vec<f32>, Vec<f32>, Vec<usize>) {
     (
-        (0..N_FEAT * H).map(|i| (i % 5) as f32 * 0.15 - 0.3).collect(),
+        (0..N_FEAT * H)
+            .map(|i| (i % 5) as f32 * 0.15 - 0.3)
+            .collect(),
         (0..N_FEAT).map(|i| (i % 3) as f32 * 0.1 - 0.2).collect(),
         (0..N_FEAT).collect(),
     )
@@ -47,9 +49,6 @@ fn run(cfg: &PbGibbsConfig, anchors: Option<&AnchorMap<'_>>) -> PbGibbsResult {
     pb_gibbs(&pb, &feat, anchors, H, cfg).unwrap()
 }
 
-
-
-
 /// Under a grouping the anchor axis shrinks to the gene count, and rows that
 /// share a gene must not double its warm start — they are copies of one `β_g`,
 /// not two independent observations of it.
@@ -65,7 +64,11 @@ fn grouped_anchors_pool_without_doubling_the_warm_start() {
 
     assert_eq!(res.pip.len(), 2 * H);
     assert_eq!(res.mean_beta.len(), 2 * H);
-    assert_eq!(res.mean_pb.len(), 5 * H, "the pb axis is unaffected by grouping");
+    assert_eq!(
+        res.mean_pb.len(),
+        5 * H,
+        "the pb axis is unaffected by grouping"
+    );
 
     // The warm start itself is the thing at risk, so check it directly.
     let (e, b, map) = feat_buffers();
@@ -75,8 +78,16 @@ fn grouped_anchors_pool_without_doubling_the_warm_start() {
         feature_to_backend_row: &map,
     };
     let ws = warm_start_genes(&feat, Some(&anchors), 2, H);
-    assert_eq!(&ws[..H], &e[..H], "gene 0 takes row 0 verbatim, not row 0 + row 1");
-    assert_eq!(&ws[H..2 * H], &e[2 * H..3 * H], "gene 1 takes row 2 verbatim");
+    assert_eq!(
+        &ws[..H],
+        &e[..H],
+        "gene 0 takes row 0 verbatim, not row 0 + row 1"
+    );
+    assert_eq!(
+        &ws[H..2 * H],
+        &e[2 * H..3 * H],
+        "gene 1 takes row 2 verbatim"
+    );
 }
 
 /// A zero-sweep request is a caller bug, not a silently empty result.
@@ -110,7 +121,11 @@ fn splice_maps() -> (Vec<u32>, Vec<bool>) {
     (row_to_gene, unspliced)
 }
 
-fn run_splice(nested: bool, seed: u64, counts_override: Option<Vec<DMatrix<f32>>>) -> SpliceGibbsResult {
+fn run_splice(
+    nested: bool,
+    seed: u64,
+    counts_override: Option<Vec<DMatrix<f32>>>,
+) -> SpliceGibbsResult {
     let c = counts_override.unwrap_or_else(counts);
     let pb = stacked(&c);
     let (e, b, map) = feat_buffers();
@@ -128,7 +143,6 @@ fn run_splice(nested: bool, seed: u64, counts_override: Option<Vec<DMatrix<f32>>
     };
     pb_gibbs_splice(&pb, &feat, &tracks, H, &PbGibbsConfig::new(6, 2, seed)).unwrap()
 }
-
 
 /// The nesting constraint: `z_δ` may only be on where `z_β` is. Asserted through
 /// the posterior means, since an excluded draw contributes exactly zero — so a δ
@@ -168,5 +182,3 @@ fn a_gene_with_no_spliced_counts_is_flagged_unidentified() {
     assert!(!r.delta_identified[1], "gene 1 has no spliced counts");
     assert!(r.delta_identified[2], "gene 2 keeps its spliced counts");
 }
-
-

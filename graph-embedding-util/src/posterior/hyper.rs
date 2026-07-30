@@ -95,7 +95,6 @@ pub fn sample_pi0(n_null: usize, n_total: usize, a: f64, b: f64, rng: &mut impl 
     p.clamp(PI0_EPS, 1.0 - PI0_EPS)
 }
 
-
 /// Numerically stable logistic, branching on the sign so neither `exp` overflows.
 /// The spike-and-slab inclusion draw in every sweep goes through this, so it lives
 /// here with the other primitives rather than being re-rolled per sampler.

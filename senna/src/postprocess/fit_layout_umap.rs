@@ -10,7 +10,8 @@
 
 use super::fit_layout_common::{
     nystrom_cell_coords, preprocess_layout_data, resolve_inputs, write_viz_outputs_direct,
-    write_viz_outputs_pb, DirectLayoutPrep, LayoutCommonArgs, LayoutPrep, PbLayoutPrep, ResolvedViz,
+    write_viz_outputs_pb, DirectLayoutPrep, LayoutCommonArgs, LayoutPrep, PbLayoutPrep,
+    ResolvedViz,
 };
 use crate::embed_common::*;
 use matrix_util::pca::{init_2d_from_scores, pc_scores, random_init_2d};
