@@ -20,7 +20,9 @@ use crate::data::UnifiedData;
 use crate::loss::{
     build_stratified_sampler, FeatPairing, PerBatchStratifiedCellSampler, StratifiedSampler,
 };
-use crate::model::{FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
+use crate::model::{
+    FactoredInit, GateKind, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs,
+};
 use crate::training::{
     train_composite, AxisSampler, CompositeAxis, CompositeMode, CompositeTrainContext, PbSemTerm,
 };
@@ -714,20 +716,24 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             pip.iter().sum::<f32>() / pip.len().max(1) as f32,
             nz,
         );
-        cell_model.set_gate_pip(&pip, rows, &config.device)?;
+        cell_model.set_gate_pip(GateKind::Identity, &pip, rows, &config.device)?;
         // gem's SECOND gate gets its OWN table. Masking δ with β's inclusion would tie a
         // gene's motion to its identity selection — the conflation `GateKind` exists to
         // prevent. `delta_pip` is NaN where δ is unidentified (a gene missing one splice
         // track), and NaN must not reach the mask: an unidentified δ is exactly one that
         // should be masked OFF, so it maps to 0.
-        if let Some(res) = splice_posterior.as_ref() {
-            let dpip: Vec<f32> = res
-                .delta_pip
+        // Scrubbed ONCE and reused by every model below: `delta_pip` is NaN where δ is
+        // unidentified (a gene missing one splice track), and NaN must not reach a mask.
+        // An unidentified δ is exactly one that should be OFF, so it maps to 0.
+        let dpip: Option<Vec<f32>> = splice_posterior.as_ref().map(|res| {
+            res.delta_pip
                 .iter()
                 .map(|p| if p.is_finite() { *p } else { 0.0 })
-                .collect();
+                .collect()
+        });
+        if let (Some(res), Some(dpip)) = (splice_posterior.as_ref(), dpip.as_ref()) {
             let n_unident = res.delta_pip.iter().filter(|p| !p.is_finite()).count();
-            cell_model.set_delta_gate_pip(&dpip, rows, &config.device)?;
+            cell_model.set_gate_pip(GateKind::Velocity, dpip, rows, &config.device)?;
             info!(
                 "Jitter — velocity gate: separate δ pip over {rows} gene(s), mean {:.3}; \
                  {n_unident} unidentified (masked off)",
@@ -735,16 +741,10 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             );
         }
         let cell_cell = cell_model.gate_mask_cell();
-        let dpip_shared: Option<Vec<f32>> = splice_posterior.as_ref().map(|res| {
-            res.delta_pip
-                .iter()
-                .map(|p| if p.is_finite() { *p } else { 0.0 })
-                .collect()
-        });
         for m in &mut level_models {
-            m.set_gate_pip(&pip, rows, &config.device)?;
-            if let Some(dp) = dpip_shared.as_ref() {
-                m.set_delta_gate_pip(dp, rows, &config.device)?;
+            m.set_gate_pip(GateKind::Identity, &pip, rows, &config.device)?;
+            if let Some(dp) = dpip.as_ref() {
+                m.set_gate_pip(GateKind::Velocity, dp, rows, &config.device)?;
             }
             m.share_gate_mask(&cell_cell);
         }
