@@ -165,7 +165,7 @@ fn peel_and_restore_round_trip() {
         .map(|i| if z0[i] { beta0[i] } else { 0.0 })
         .collect();
 
-    let mut term = TermTile::seed(&nodes, 0, &slab, &side, &v, H);
+    let mut term = TermTile::seed(&nodes, 0, &slab, &side, &v, H, true);
     let s0 = term.s.clone();
     let data0 = term.data.clone();
     let sumsq0 = term.sumsq.clone();
@@ -221,7 +221,7 @@ fn a_peel_matches_reseeding_with_that_coordinate_zeroed() {
         .collect();
 
     let d = 2usize;
-    let mut peeled = TermTile::seed(&nodes, 0, &slab, &side, &v, H);
+    let mut peeled = TermTile::seed(&nodes, 0, &slab, &side, &v, H, true);
     peeled.peel(&v, d, H);
 
     // Independent construction: seed from a loading whose dim `d` is already zero. The
@@ -230,7 +230,7 @@ fn a_peel_matches_reseeding_with_that_coordinate_zeroed() {
     for i in 0..B {
         v_zero[i * H + d] = 0.0;
     }
-    let fresh = TermTile::seed(&nodes, 0, &slab, &side, &v_zero, H);
+    let fresh = TermTile::seed(&nodes, 0, &slab, &side, &v_zero, H, true);
 
     for (i, (got, want)) in peeled.s.iter().zip(&fresh.s).enumerate() {
         assert!(
@@ -372,7 +372,7 @@ fn the_profiled_intercept_reproduces_the_observed_total() {
     let v: Vec<f32> = (0..B * H)
         .map(|i| if z0[i] { beta0[i] } else { 0.0 })
         .collect();
-    let term = TermTile::seed(&nodes, 0, &slab, &side, &v, H);
+    let term = TermTile::seed(&nodes, 0, &slab, &side, &v, H, true);
 
     for i in 0..B {
         let got = f64::from(term.profiled_bias(i));
@@ -443,5 +443,171 @@ fn the_tile_reports_its_cost() {
         draw.rounds < H * 64,
         "{} rounds over {H} dims means brackets are stalling",
         draw.rounds
+    );
+}
+
+////////////////////////////////////////////////////////////
+// The oracle claim: ANY log-likelihood, not just bilinear //
+////////////////////////////////////////////////////////////
+
+/// A likelihood with nothing to do with the bilinear-Poisson form: a Gaussian pulling each
+/// anchor's loading toward a planted target.
+///
+/// It reads NOTHING precomputed — no `s`, no `data`, no `sumsq`, no `m`, no slate at all —
+/// only `ctx.v` and the candidate `x`. Declares both capabilities false, because neither
+/// holds: there are no per-slate scores to keep by a rank-1 update and no data term to
+/// collapse.
+///
+/// This is what "the sampler is a likelihood oracle" has to mean if it means anything:
+/// elliptical slice sampling constrains the PRIOR, and reads the likelihood only through
+/// `ll(θ) > threshold`. Nothing in the transition kernel may depend on the score's algebra.
+struct PlantedGaussian<'t> {
+    /// `[b × h]` target the likelihood pulls each anchor toward.
+    target: &'t [f32],
+    /// Likelihood SD. Smaller ⇒ the data dominates the prior.
+    sd: f32,
+}
+
+impl AnchorScore for PlantedGaussian<'_> {
+    fn label(&self) -> &'static str {
+        "planted-gaussian"
+    }
+    // Deliberately both false: this score is the Tier-3 case.
+    fn affine_in_anchor(&self) -> bool {
+        false
+    }
+    fn data_term_is_linear(&self) -> bool {
+        false
+    }
+
+    fn ll_column(
+        &self,
+        ctx: &ColumnCtx<'_>,
+        d: usize,
+        _c_d: &[f32],
+        x: &[f32],
+        active: &[u32],
+        out: &mut [f32],
+    ) {
+        let prec = 1.0f64 / f64::from(self.sd * self.sd);
+        for (slot, (&i, &xi)) in out.iter_mut().zip(active.iter().zip(x)) {
+            let i = i as usize;
+            // Rebuild the full loading from `v` — the only field this score touches — and
+            // score it directly. `v` has dim `d` zeroed, so `x` goes there.
+            let mut acc = 0.0f64;
+            for k in 0..ctx.h {
+                let vk = if k == d { xi } else { ctx.loading(i)[k] };
+                let r = f64::from(vk - self.target[i * ctx.h + k]);
+                acc += r * r;
+            }
+            *slot = (-0.5 * prec * acc) as f32;
+        }
+    }
+}
+
+/// A non-bilinear likelihood must be sampled correctly, and correctness here is checkable
+/// against a closed form: with prior `N(0, σ₀²)` per coordinate and likelihood
+/// `N(target, σ²)`, the posterior is Gaussian with
+///
+/// ```text
+///   mean = target · (1/σ²) / (1/σ₀² + 1/σ²),   var = 1 / (1/σ₀² + 1/σ²)
+/// ```
+///
+/// So this asserts the *shrunk* target rather than the target itself — a sampler that
+/// ignored the prior would hit `target` exactly and fail, and one that ignored the
+/// likelihood would sit at 0 and fail. Both failure modes are excluded.
+///
+/// `selection` is off so `z ≡ 1` and `v == β`: this is about the ESS move, not the gate.
+#[test]
+fn a_non_bilinear_likelihood_is_sampled_correctly() {
+    const SWEEPS: usize = 1200;
+    const BURN: usize = 200;
+    const SD0: f32 = 0.6; // prior SD, matching `args()`
+    const SD: f32 = 0.35; // likelihood SD
+
+    let (e, b) = side_buffers();
+    let side = FrozenSide { e: &e, b: &b, h: H };
+    let partition: Vec<u32> = (0..K as u32).collect();
+    let pos = edge_lists();
+    let slabs = vec![SlateSlab::new(&partition, &side)];
+    let nodes = nodes_for(&pos, &partition, 0, B);
+
+    let target: Vec<f32> = (0..B * H)
+        .map(|i| ((i * 7) % 11) as f32 * 0.12 - 0.6)
+        .collect();
+    let score = PlantedGaussian {
+        target: &target,
+        sd: SD,
+    };
+
+    let (mut beta, _) = initial_state();
+    let mut z = vec![true; B * H];
+    let mut acc = vec![0.0f64; B * H];
+    let mut kept = 0usize;
+
+    for sweep in 0..SWEEPS {
+        let a = ColumnArgs {
+            side: &side,
+            sd: &[SD0; H],
+            log_prior_odds: &[0.0f64; H],
+            veto: None,
+            selection: false,
+            transitions: 1,
+            seed: 909,
+            sweep,
+            h: H,
+        };
+        let draw = sample_tile(&score, &a, &nodes, &slabs, 0, &beta, &z);
+        beta = draw.beta;
+        z = draw.z;
+        if sweep >= BURN {
+            for (s, &v) in acc.iter_mut().zip(&beta) {
+                *s += f64::from(v);
+            }
+            kept += 1;
+        }
+    }
+
+    let prec0 = 1.0 / f64::from(SD0 * SD0);
+    let prec = 1.0 / f64::from(SD * SD);
+    let shrink = prec / (prec0 + prec);
+    let post_sd = (1.0 / (prec0 + prec)).sqrt();
+    let mut worst = 0.0f64;
+    let mut mean_dev = 0.0f64;
+    let mut mean_target = 0.0f64;
+    for i in 0..B * H {
+        let got = acc[i] / kept as f64;
+        let want = f64::from(target[i]) * shrink;
+        worst = worst.max((got - want).abs());
+        mean_dev += (got - want).abs() / (B * H) as f64;
+        mean_target += f64::from(target[i]).abs() / (B * H) as f64;
+    }
+    println!(
+        "blackbox oracle: {kept} kept sweeps, shrinkage {shrink:.4} (posterior SD {post_sd:.3}), \
+         mean |dev| {mean_dev:.4}, worst |dev| {worst:.4}"
+    );
+
+    // The bound is DERIVED, not picked. Assert on the MEAN deviation, whose Monte-Carlo
+    // variance is `B·H` times smaller than the worst coordinate's, and check it against the
+    // two ways this could be wrong rather than against a round number:
+    //
+    //   ignoring the prior      ⇒ shrinkage 1, mean deviation ≈ mean|target|·(1−shrink)
+    //   ignoring the likelihood ⇒ shrinkage 0, mean deviation ≈ mean|target|·shrink
+    //
+    // so the tolerance must sit well below both, and it does — by roughly 2× and 6×.
+    let if_no_prior = mean_target * (1.0 - shrink);
+    let if_no_likelihood = mean_target * shrink;
+    let tol = 0.25 * if_no_prior.min(if_no_likelihood);
+    assert!(
+        mean_dev < tol,
+        "a non-bilinear likelihood was not sampled to its analytic posterior — mean \
+         deviation {mean_dev:.4} against a tolerance of {tol:.4}; ignoring the prior would \
+         give {if_no_prior:.4} and ignoring the likelihood {if_no_likelihood:.4}"
+    );
+    // And no single coordinate may be wildly off, at a bound set by the posterior's own
+    // spread rather than by a constant.
+    assert!(
+        worst < 0.6 * post_sd,
+        "coordinate-wise deviation {worst:.4} exceeds 0.6 posterior SD ({post_sd:.3})"
     );
 }

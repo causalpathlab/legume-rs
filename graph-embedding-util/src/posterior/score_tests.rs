@@ -498,7 +498,7 @@ fn big_fixture(
     let pos: Vec<Vec<(u32, f32)>> = (0..bb)
         .map(|i| {
             (0..kk as u32)
-                .filter(|o| (*o as usize + i) % 3 == 0)
+                .filter(|o| (*o as usize + i).is_multiple_of(3))
                 .map(|o| (o, count_scale * (1.0 + ((o as usize + i) % 9) as f32)))
                 .collect()
         })
@@ -557,7 +557,11 @@ fn f32_accumulation_preserves_the_logit_a_dense_backend_would_need() {
 
     for &count_scale in &[1.0f32, 50.0] {
         let (e, b, partition, pos, beta) = big_fixture(HH, KK, BB, count_scale);
-        let side = FrozenSide { e: &e, b: &b, h: HH };
+        let side = FrozenSide {
+            e: &e,
+            b: &b,
+            h: HH,
+        };
         let pos_ref: Vec<&[(u32, f32)]> = pos.iter().map(Vec::as_slice).collect();
         let active: Vec<u32> = (0..BB as u32).collect();
 
