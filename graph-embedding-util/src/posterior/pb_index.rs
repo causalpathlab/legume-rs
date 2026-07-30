@@ -10,13 +10,36 @@
 //!
 //! ## Why pseudobulks and not cells
 //!
-//! The pb axis is small — `[10, 7, 4]` sort dims give ≤1024/128/16 columns per
-//! level, ~1168 stacked — so the Poisson rate normalizer over it is **exact**:
-//! `n_partition` clamps to the column count and `partition_scale` is `1.0`. The
-//! cell-anchored builder cannot say that; on a 8.3k-cell input it samples a
-//! 1024-of-8313 slate. Note the exactness is a property of the **gene** block
-//! only: the pb block's other side is the feature axis (tens of thousands of
-//! rows), so it still draws a frozen slate.
+//! The pb axis is an order of magnitude smaller than the cell axis — ~1168 stacked on an
+//! 8.3k-cell input — so the Poisson rate normalizer over it can be summed **exactly**,
+//! where the cell-anchored builder had to sample 1024 of 8313. The exactness is a
+//! property of the **gene** block only: the pb block's other side is the feature axis,
+//! tens of thousands of rows, and there an exact sum costs `n_features / n_partition` on
+//! every likelihood evaluation. `EXACT_FACTOR` in [`build_pb_index_pair`] is where that
+//! trade is made, with the arithmetic written out.
+//!
+//! ## The slate is frozen, and must stay frozen
+//!
+//! One slate is drawn per axis per run and shared across every anchor and every sweep.
+//! That is not laziness. Redrawing it per sweep would move the target each sweep, so the
+//! chain would have no fixed stationary distribution — a plug-in normalizer estimate does
+//! not buy pseudo-marginal validity, it just makes the likelihood noisy in a way nothing
+//! corrects. Frozen, this is valid MCMC on a fixed *approximate* target. The lever on the
+//! approximation is slate SIZE, not refresh rate.
+//!
+//! ## The bias an exact axis removes
+//!
+//! ```text
+//!   poisson_ll      ll -= scale · Σ_slate exp(s)      linear in the sum ⇒ UNBIASED
+//!   multinomial_ll  ll -= T_a · ln Σ_slate exp(s)     log OF the sum    ⇒ E[ln X] < ln E[X]
+//! ```
+//!
+//! Profiling the anchor intercept out is what turns the normalizer into a log of the sum,
+//! and Jensen then makes the profiled form *underestimate* the log-normalizer — so it
+//! overestimates the likelihood, worst at high `T_a`. That is the price of the centering
+//! `multinomial_ll`'s consequence #2 buys, and it is real: an exact axis has no such gap,
+//! a slated one does. Worth knowing which axes are exact in a given run, which is why the
+//! builder logs it.
 //!
 //! ## Exposure — the part that is easy to get wrong
 //!
@@ -36,18 +59,20 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
-/// Draw `k` distinct indices out of `0..n` uniformly at random.
+/// Draw `k` distinct entries from `pool`, uniformly without replacement.
 ///
-/// `partial_shuffle` puts the sample at the **END** of the slice and returns it as
-/// the first element of the pair — rand's own doctest asserts
-/// `sampled == &y[len - amount..]`. Discarding that return value and calling
-/// `truncate(k)` therefore keeps the UNSELECTED head, which is a sorted prefix of
-/// the axis, not a sample. That silently turns the frozen negative slate into
-/// "the first k rows in backend order" while `partition_scale` still folds it up
-/// as if it were uniform, so every rate estimate is biased toward whatever those
-/// rows happen to be. Use the returned slice.
-fn sample_slate(n: usize, k: usize, rng: &mut StdRng) -> Vec<u32> {
-    let mut all: Vec<u32> = (0..n as u32).collect();
+/// Takes an explicit pool rather than `0..n` so the slate can be restricted to the
+/// expressed axis — see the caller for why the normalizer runs over that set.
+///
+/// `partial_shuffle` puts the sample at the **END** of the slice and returns it as the
+/// first element of the pair — rand's own doctest asserts `sampled == &y[len - amount..]`.
+/// Discarding that return value and calling `truncate(k)` therefore keeps the UNSELECTED
+/// head, which is a sorted prefix of the axis, not a sample. That silently turns the
+/// frozen negative slate into "the first k entries in pool order" while `partition_scale`
+/// still folds it up as if it were uniform, so every rate estimate is biased toward
+/// whatever those entries happen to be. Use the returned slice.
+fn sample_slate_from(pool: &[u32], k: usize, rng: &mut StdRng) -> Vec<u32> {
+    let mut all = pool.to_vec();
     let (selected, _rest) = all.partial_shuffle(rng, k);
     selected.to_vec()
 }
@@ -186,35 +211,82 @@ pub(crate) fn build_pb_index_pair(
         }
     };
 
-    // pb side: sum exactly when it is small enough to be free, else draw a slate
-    // like any other axis.
+    // Which rows and pseudobulks were observed at all.
     //
-    // Measured, and NOT what the design assumed: the collapse does not size a
-    // level at `2^sort_dim`. It builds the finest level from a kNN ratio — 2000
-    // cells gave 838/494/128 pb, Σ = 1460, i.e. ~0.73 × n_cells stacked. So the pb
-    // axis grows WITH the cell count and "exact is free" only holds at small n.
-    // Above the cap an exact sum would cost more per likelihood evaluation than
-    // the cell-side slate this replaces.
-    let (partition_pb, scale_pb) = if n_partition == 0 || n_partition >= n_pb {
-        ((0..n_pb as u32).collect::<Vec<u32>>(), 1.0)
-    } else {
-        let mut rng = StdRng::seed_from_u64(seed ^ 0x51ED_270B);
-        (
-            sample_slate(n_pb, n_partition, &mut rng),
-            n_pb as f64 / n_partition as f64,
-        )
-    };
+    // The normalizer runs over the EXPRESSED axis, not the full one. Be clear that this
+    // is a modelling choice and not merely variance reduction: an unexpressed row still
+    // has an embedding and still contributes `exp(s)` to the full sum, so dropping it
+    // changes the estimand. Two reasons to drop it anyway. It matches the trainer, whose
+    // negatives are drawn uniformly over `feature_pool` — the expressed set — so the
+    // sampled and fitted normalizers describe the same axis. And a row with no counts
+    // anywhere has a prior-driven embedding, so what it contributes is arbitrary: it
+    // would be noise entering every anchor's normalizer with nothing behind it.
+    //
+    // `partition_scale` therefore folds a slate up to the EXPRESSED count, not to
+    // `n_features` / `n_pb`.
+    let mut pb_seen = vec![false; n_pb];
+    let mut row_seen = vec![false; n_features];
+    for (level, mat) in pb.counts.iter().enumerate() {
+        let base = pb.offsets[level];
+        for s in 0..mat.ncols() {
+            for r in 0..mat.nrows() {
+                if mat[(r, s)] > 0.0 {
+                    pb_seen[base + s] = true;
+                    row_seen[r] = true;
+                }
+            }
+        }
+    }
+    let pb_pool: Vec<u32> = (0..n_pb as u32).filter(|&p| pb_seen[p as usize]).collect();
+    let row_pool: Vec<u32> = (0..n_features as u32)
+        .filter(|&r| row_seen[r as usize])
+        .collect();
 
-    // Feature side needs a slate: the row axis is tens of thousands wide.
-    let (partition_feat, scale_feat) = if n_partition == 0 || n_partition >= n_features {
-        ((0..n_features as u32).collect::<Vec<u32>>(), 1.0)
-    } else {
-        let mut rng = StdRng::seed_from_u64(seed ^ 0x9E37_79B9);
-        (
-            sample_slate(n_features, n_partition, &mut rng),
-            n_features as f64 / n_partition as f64,
-        )
+    // Exact where it is genuinely cheap, slate where it is not — and the arithmetic
+    // decides, not a guess.
+    //
+    // Measured, and NOT what the design assumed: the collapse does not size a level at
+    // `2^sort_dim`. It builds the finest level from a kNN ratio — 2000 cells gave
+    // 838/494/128 pb, Σ = 1460 — so the pb axis grows WITH the cell count and "exact is
+    // free" only holds at small n.
+    //
+    // What an exact sum costs is one factor `n_axis / n_partition` on every likelihood
+    // evaluation in the block anchored on the OTHER side. On the pb axis that is
+    // 1460/1024 ≈ 1.4, which buys away a real Jensen bias for almost nothing. On the
+    // feature axis it is 30392/1024 ≈ 30. That block holds ~1460 anchors against the
+    // gene block's ~30k, so 30× on ~5% of the work is still roughly +150% overall —
+    // affordable is not the same as free, so it is NOT taken by default. `EXACT_FACTOR`
+    // is where that line sits.
+    //
+    // (An earlier note here compared an exact sum against `n_partition · h` — the
+    // pre-transpose per-evaluation cost — and concluded exact was cheaper. That baseline
+    // is gone: the column pass costs `O(n_partition)` per evaluation, so the comparison
+    // is against `n_partition` and exact is `n_axis / n_partition` times dearer.)
+    const EXACT_FACTOR: usize = 4;
+    let resolve = |pool: &[u32], salt: u64| -> (Vec<u32>, f64) {
+        // Exact: no Monte-Carlo error, and therefore no Jensen bias in the profiled
+        // log-normalizer, so no scale either.
+        if n_partition == 0 || pool.len() <= EXACT_FACTOR * n_partition {
+            return (pool.to_vec(), 1.0);
+        }
+        let mut rng = StdRng::seed_from_u64(seed ^ salt);
+        let slate = sample_slate_from(pool, n_partition, &mut rng);
+        (slate, pool.len() as f64 / n_partition as f64)
     };
+    let (partition_pb, scale_pb) = resolve(&pb_pool, 0x51ED_270B);
+    let (partition_feat, scale_feat) = resolve(&row_pool, 0x9E37_79B9);
+    log::info!(
+        "posterior normalizers: pb axis {} of {n_pb} expressed → {} entries (scale {:.2}{}), \
+         feature axis {} of {n_features} expressed → {} entries (scale {:.2}{})",
+        pb_pool.len(),
+        partition_pb.len(),
+        scale_pb,
+        if scale_pb == 1.0 { ", EXACT" } else { "" },
+        row_pool.len(),
+        partition_feat.len(),
+        scale_feat,
+        if scale_feat == 1.0 { ", EXACT" } else { "" },
+    );
 
     Ok(PbIndexPair {
         by_feature: ContrastiveIndex {
