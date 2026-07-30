@@ -282,12 +282,13 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         )?,
     };
 
-    // Enable the softmax feature gate on the primary model BEFORE the sharing heads
-    // are built, so every head references the one shared gate Var (`s_feat`/`s_beta`).
+    // Enable the learned feature gate on the primary model BEFORE the sharing heads are
+    // built, so every head references the one shared gate Var (`s_feat`/`s_beta`).
     if let Some(g) = config.feature_gate {
         cell_model.enable_feature_gate(g, &varmap, &config.device)?;
         info!(
-            "Softmax feature gate ON (per-dim distribution over genes) — τ={}",
+            "Learned feature gate ON — an INDEPENDENT Bernoulli inclusion probability \
+             σ(S) per (feature, dim), with each dim's rate π_h learned. τ={}",
             g.temperature
         );
     }

@@ -475,19 +475,20 @@ pub fn nce_loss_identity(
     nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, objective, dev)
 }
 
-/// Gather the feature-embedding rows for `idx`, applying the per-gene softmax gate(s)
-/// when enabled. A β-sharing factored model composes `β̃ + mask·δ̃` (identity + velocity,
-/// each an independently gated effect — see
-/// [`JointEmbedModel::factored_feat_rows`]) via the row→gene gathers, so only the
-/// batch's rows (`b + b·k`) are materialized — never the full `[n_features, H]`
-/// dictionary — and gradients still reach `β`/`δ` and the gate logits. A free model
-/// selects from the raw `e_feat` Var (SGC-smoothed when a smoother is present; a
-/// factored model never has one — see `fit::run`) and gates that.
+/// Gather the feature-embedding rows for `idx`, applying the per-gene gate(s) when
+/// enabled. A β-sharing factored model composes `β̃ + mask·δ̃` (identity + velocity, each
+/// an independently gated effect — see [`JointEmbedModel::factored_feat_rows`]) via the
+/// row→gene gathers, so only the batch's rows (`b + b·k`) are materialized — never the
+/// full `[n_features, H]` dictionary — and gradients still reach `β`/`δ` and the gate
+/// logits. A free model selects from the raw `e_feat` Var (SGC-smoothed when a smoother
+/// is present; a factored model never has one — see `fit::run`) and gates that.
 ///
-/// When gated, the base is reparam-sampled (`μ + σ·ε`) and multiplied by `softmax(S/τ)`
-/// over the embedding dims (the null column dropped), so gradients reach both the base
-/// and the gate logits. Ungated (`s`/`logstd` absent) it is the plain gather. This is
-/// the single feature-gather point for the bge + gem Sum-mode trainers.
+/// When gated, the base is reparam-sampled (`μ + σ·ε`) and multiplied by the gate's
+/// weight table: this epoch's `z ~ Bern(pip)` when a selection pass installed one, else
+/// the learned `α = σ(S/τ)` — an INDEPENDENT inclusion probability per (feature, dim),
+/// with no normalizer and no null column. Gradients reach both the base and, on the
+/// learned path, the logits. Ungated with no `pip` it is the plain gather. This is the
+/// single feature-gather point for the bge + gem trainers.
 fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tensor> {
     match &model.factor {
         Some(f) => {
