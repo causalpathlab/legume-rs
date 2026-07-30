@@ -18,11 +18,9 @@ use crate::coarsen::AxisCoarsenings;
 use crate::data::UnifiedData;
 use crate::fit::lineage::PbLineageLevel;
 use crate::loss::{
-    nce_loss, nce_loss_chain, nce_loss_identity, sample_chain_batch, sample_edge_batch,
-    sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, ChainAxis,
-    ChainBatchArgs, ChainSampler, EdgeBatch, EdgeBatchArgs, PerBatchSampler,
-    PerBatchStratifiedCellSampler, PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs,
-    StratifiedSampler,
+    nce_loss, nce_loss_identity, sample_per_batch_stratified_edge_batch,
+    sample_stratified_edge_batch, EdgeBatch, PerBatchStratifiedCellSampler,
+    PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
 };
 use crate::model::{JointEmbedModel, GATE_KL_WEIGHT};
 use crate::progress::new_progress_bar;
@@ -30,33 +28,25 @@ use candle_util::candle_core::{Device, Tensor};
 use candle_util::candle_nn::AdamW;
 use log::info;
 use rand::{rngs::StdRng, RngExt, SeedableRng};
-use rand_distr::weighted::WeightedIndex;
-use rand_distr::Distribution;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// How `train_composite` mixes per-axis NCE losses each step.
 ///
-/// - [`Sum`]: every step computes one minibatch per axis and sums the
-///   losses (with per-axis `λ` weights). Lower-variance gradient per
-///   step but `O(n_axes)` work per step.
-/// - [`Sample`]: every step picks a single axis with probability
-///   `λ_k / Σλ`, computes its NCE on one minibatch, and scales by
-///   `Σλ`. Same expected gradient as `Sum`, higher variance per step,
-///   `O(1)` work per step.
-/// - [`Chain`]: every step samples a coordinated bottom-up chain — a
-///   real `(cell, feature)` triplet whose pb ancestors at each level
-///   are derived via the `cell→pb_per_level` map. All axes share the
-///   same positive feature and negatives per chain; cell-side indices
-///   differ per axis. One feature-side gather + one backward per step,
-///   with coherent across-level gradients on `E_feat`. Lowest variance
-///   per step, comparable per-step compute to `Sum`.
+/// Only [`Sum`] exists: every step computes one minibatch per axis and sums the
+/// losses. Lower-variance gradient per step, `O(n_axes)` work per step.
+///
+/// Two other modes were carried here for a long time and neither was ever selected —
+/// `stage_params` hard-coded `Sum` and all three call sites re-assigned `Sum`. `Sample`
+/// picked one axis per step weighted by `λ`; `Chain` sampled a coordinated bottom-up
+/// `(cell, feature)` chain through the pb levels, and additionally required a
+/// `cell_to_pb_per_level` that every `CompositeTrainContext` passed as `None`, so it was
+/// unreachable twice over. The enum is kept (rather than deleted outright) because it
+/// names what phase 1's objective IS, which the sampler's docs refer to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CompositeMode {
     #[default]
     Sum,
-    Sample,
-    Chain,
 }
 
 /// One axis in the composite training objective. `model` shares its
@@ -74,8 +64,7 @@ pub struct CompositeAxis<'a> {
     pub label: &'a str,
 }
 
-/// Bipartite sampler attached to a composite axis. Three variants:
-/// - `PerBatch`: flat per-batch positive draw weighted by `count`.
+/// Bipartite sampler attached to a composite axis. Two variants:
 /// - `PerBatchStratified`: per-batch two-stage draw — cell by
 ///   `degree^α_cell`, feature within cell by `count`. Guarantees
 ///   per-cell coverage so rare/shallow cells aren't drowned by deeply
@@ -83,8 +72,12 @@ pub struct CompositeAxis<'a> {
 /// - `Stratified`: single-sampler two-stage draw over pb's — pb by
 ///   `pb_size^α_pb`, feature within pb by `count`. Used by the
 ///   pb axes (one synthetic batch each).
+///
+/// A third, `PerBatch` — a flat per-batch positive draw weighted by `count` — was
+/// matched in two places and constructed in none. It read `UnifiedData::triplets`,
+/// which the cell axis leaves empty because positives are drawn from the backend at
+/// sample time.
 pub enum AxisSampler<'a> {
-    PerBatch(&'a [PerBatchSampler]),
     PerBatchStratified(&'a [PerBatchStratifiedCellSampler]),
     Stratified(&'a StratifiedSampler),
 }
@@ -92,7 +85,6 @@ pub enum AxisSampler<'a> {
 impl AxisSampler<'_> {
     fn is_empty(&self) -> bool {
         match self {
-            Self::PerBatch(s) => s.is_empty(),
             Self::PerBatchStratified(s) => s.is_empty(),
             Self::Stratified(_) => false,
         }
@@ -109,7 +101,6 @@ impl AxisSampler<'_> {
     #[must_use]
     pub fn n_units(&self) -> usize {
         match self {
-            Self::PerBatch(s) => s.len(),
             Self::PerBatchStratified(s) => s.iter().map(|x| x.active_cells.len()).sum(),
             Self::Stratified(s) => s.active_pbs.len(),
         }
@@ -265,18 +256,6 @@ pub fn train_composite(
         .as_ref()
         .and_then(|f| f.splice_delta.as_ref().map(|(delta, _)| delta.clone()));
     // Pre-build the axis sampler for `Sample` mode. Reused every step;
-    // weights = `λ_k`, so picking axis `k` happens with probability
-    // `λ_k / Σλ`. The `Σλ` scale gets applied to the chosen axis's loss
-    // so `E_k[L_step] = Σ_k λ_k · L_k` matches `Sum` mode in expectation.
-    let lambda_sum: f32 = ctx.axes.iter().map(|a| a.lambda).sum();
-    let axis_picker: Option<WeightedIndex<f32>> = if params.composite_mode == CompositeMode::Sample
-    {
-        let weights: Vec<f32> = ctx.axes.iter().map(|a| a.lambda.max(1e-8)).collect();
-        Some(WeightedIndex::new(weights).expect("non-empty axis weights"))
-    } else {
-        None
-    };
-
     // Resolve `batches_per_epoch`: explicit override, or auto = one
     // weighted pass over the largest axis. `n_units` is per-cell for the
     // cell axis and `active_pbs.len()` for the pb axes.
@@ -313,17 +292,8 @@ pub fn train_composite(
         let mut n_steps = 0usize;
 
         for _ in 0..batches_per_epoch {
-            let loss = match params.composite_mode {
-                CompositeMode::Sum => sum_step(ctx, &mut rng, params)?,
-                CompositeMode::Sample => sample_step(
-                    ctx,
-                    &mut rng,
-                    params,
-                    axis_picker.as_ref().unwrap(),
-                    lambda_sum,
-                )?,
-                CompositeMode::Chain => chain_step(ctx, &mut rng, params)?,
-            };
+            let CompositeMode::Sum = params.composite_mode;
+            let loss = sum_step(ctx, &mut rng, params)?;
             let Some(mut loss) = loss else { continue };
             if params.feature_embedding_l2 > 0.0 {
                 // `mean_all` keeps λ scale-invariant across `D · H`.
@@ -446,184 +416,6 @@ fn sum_step(
     Ok(total_loss)
 }
 
-/// One step of `CompositeMode::Sample` — pick a single axis weighted
-/// by λ and run its NCE forward. Multiplied by `Σλ` so the per-step
-/// gradient is unbiased for the same multi-task objective as `Sum`.
-fn sample_step(
-    ctx: &CompositeTrainContext,
-    rng: &mut StdRng,
-    params: &TrainingParams,
-    axis_picker: &WeightedIndex<f32>,
-    lambda_sum: f32,
-) -> anyhow::Result<Option<Tensor>> {
-    let axis_idx = axis_picker.sample(rng);
-    let axis = &ctx.axes[axis_idx];
-    let Some(loss) = single_axis_step(axis, rng, params, ctx.dev)? else {
-        return Ok(None);
-    };
-    Ok(Some((loss * f64::from(lambda_sum))?))
-}
-
-/// One step of `CompositeMode::Chain` — sample a coordinated chain
-/// batch (real cell-axis triplets, with pb ancestors derived from the
-/// stored cell→pb maps), then score every axis (cell + each pb level)
-/// with the same shared positive feature and shared negatives. One
-/// `nce_loss_chain` call returns the λ-weighted sum across all axes.
-fn chain_step(
-    ctx: &CompositeTrainContext,
-    rng: &mut StdRng,
-    params: &TrainingParams,
-) -> anyhow::Result<Option<Tensor>> {
-    let cell_to_pb = ctx.cell_to_pb_per_level.ok_or_else(|| {
-        anyhow::anyhow!(
-            "CompositeMode::Chain requires CompositeTrainContext.cell_to_pb_per_level = Some(..)"
-        )
-    })?;
-    let cell_axis = ctx
-        .axes
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("CompositeMode::Chain needs the cell axis as axes[0]"))?;
-    let pb_axes = &ctx.axes[1..];
-    anyhow::ensure!(
-        pb_axes.len() == cell_to_pb.len(),
-        "Chain mode: {} pb axes vs {} cell→pb levels — must match",
-        pb_axes.len(),
-        cell_to_pb.len()
-    );
-
-    // Chain mode accepts either flat per-batch or stratified per-batch
-    // cell samplers — both produce real `(cell, feature)` positives that
-    // can be walked up the pb tree. Stratified is the recommended default.
-    let chain = match cell_axis.sampler {
-        AxisSampler::PerBatch(samplers) => {
-            if samplers.is_empty() {
-                return Ok(None);
-            }
-            anyhow::ensure!(
-                !cell_axis.unified.triplets.is_empty(),
-                "flat PerBatch cell sampler needs a materialized edge list, but \
-                 unified.triplets is empty (the streaming PerBatchStratified path \
-                 leaves it empty) — call materialize_cell_triplets() to revive the \
-                 flat path"
-            );
-            let id = rng.random_range(0..samplers.len());
-            let bs = &samplers[id];
-            let chain_sampler = ChainSampler {
-                batch_sampler: bs,
-                cell_to_pb_per_level: cell_to_pb,
-            };
-            sample_chain_batch(
-                ChainBatchArgs {
-                    triplets: &cell_axis.unified.triplets,
-                    sampler: &chain_sampler,
-                    batch_size: params.batch_size,
-                    n_negatives: params.num_negatives,
-                },
-                rng,
-            )
-        }
-        AxisSampler::PerBatchStratified(samplers) => {
-            if samplers.is_empty() {
-                return Ok(None);
-            }
-            let id = rng.random_range(0..samplers.len());
-            let bs = &samplers[id];
-            sample_chain_batch_stratified(bs, params.batch_size, params.num_negatives, rng)
-        }
-        AxisSampler::Stratified(_) => {
-            anyhow::bail!(
-                "Chain mode: cell axis must use PerBatch or PerBatchStratified \
-                 (need real triplets). Got Stratified (pb-only)."
-            );
-        }
-    };
-    let crate::loss::ChainBatch { leaf_cells, feats } = chain;
-    let b = leaf_cells.len();
-
-    // Build all per-axis cell-side index tensors up front. The cell
-    // axis uses leaf_cells directly; each pb axis derives its indices
-    // by mapping leaf_cells through that level's cell→pb on host
-    // *before* moving leaf_cells into a tensor (avoids a `to_vec1`
-    // round-trip back from device). One Vec→Tensor allocation per
-    // axis per step instead of two (the loss function used to clone
-    // again to call `Tensor::from_vec` itself).
-    let mut idx_tensors: Vec<Tensor> = Vec::with_capacity(ctx.axes.len());
-    for c2p in cell_to_pb {
-        let pb_ids: Vec<u32> = leaf_cells.iter().map(|&c| c2p[c as usize] as u32).collect();
-        idx_tensors.push(Tensor::from_vec(pb_ids, b, ctx.dev)?);
-    }
-    let cell_idx_tensor = Tensor::from_vec(leaf_cells, b, ctx.dev)?;
-
-    let mut chain_axes: Vec<ChainAxis> = Vec::with_capacity(ctx.axes.len());
-    chain_axes.push(ChainAxis {
-        e_cell: &cell_axis.model.e_cell,
-        b_cell: &cell_axis.model.b_cell,
-        indices: &cell_idx_tensor,
-        lambda: cell_axis.lambda,
-        label: cell_axis.label,
-    });
-    for (i, axis) in pb_axes.iter().enumerate() {
-        chain_axes.push(ChainAxis {
-            e_cell: &axis.model.e_cell,
-            b_cell: &axis.model.b_cell,
-            indices: &idx_tensors[i],
-            lambda: axis.lambda,
-            label: axis.label,
-        });
-    }
-
-    let chain_loss = nce_loss_chain(
-        &cell_axis.model.e_feat,
-        &cell_axis.model.b_feat,
-        feats,
-        &chain_axes,
-        params.objective,
-        ctx.dev,
-    )?;
-    Ok(Some(chain_loss))
-}
-
-/// Chain-batch sampler for the stratified per-batch cell sampler.
-/// Mirrors `loss::sample_chain_batch` but draws each leaf
-/// `(cell, feature)` via the two-stage `cell_picker` → `per_cell` path
-/// instead of a flat triplet pick. Shared negatives come from the same
-/// per-batch feature pool, so downstream `nce_loss_chain` consumes the
-/// same `ChainBatch` shape regardless of which sampler produced it.
-fn sample_chain_batch_stratified(
-    bs: &PerBatchStratifiedCellSampler,
-    batch_size: usize,
-    n_negatives: usize,
-    rng: &mut StdRng,
-) -> crate::loss::ChainBatch {
-    let mut leaf_cells = Vec::with_capacity(batch_size);
-    let mut fine_feats = Vec::with_capacity(batch_size);
-
-    for _ in 0..batch_size {
-        let lc = bs.cell_picker.sample(rng);
-        let c = bs.active_cells[lc];
-        let pf = &bs.per_cell[lc];
-        let lf = pf.picker.sample(rng);
-        let f = pf.features[lf];
-        leaf_cells.push(c);
-        fine_feats.push(f);
-    }
-
-    let mut neg_feats = Vec::with_capacity(batch_size * n_negatives);
-    for _ in 0..(batch_size * n_negatives) {
-        let local = bs.neg.sample(rng);
-        neg_feats.push(bs.feature_pool[local]);
-    }
-
-    crate::loss::ChainBatch {
-        leaf_cells,
-        feats: crate::loss::ChainFeatureSide {
-            fine_feats,
-            neg_feats,
-            n_negatives,
-        },
-    }
-}
-
 /// Sample a minibatch from a single axis and compute its bipartite NCE
 /// loss (taking the identity fast path when the axis has identity
 /// coarsening). Returns `None` when the axis has no positives to sample.
@@ -648,26 +440,6 @@ fn single_axis_step(
     let cc = &axis.cell_axis.coarsenings[seed_k];
 
     let batch: EdgeBatch = match axis.sampler {
-        AxisSampler::PerBatch(samplers) => {
-            anyhow::ensure!(
-                !axis.unified.triplets.is_empty(),
-                "flat PerBatch sampler needs a materialized edge list, but \
-                 unified.triplets is empty (streaming PerBatchStratified leaves it \
-                 empty) — call materialize_cell_triplets() to revive the flat path"
-            );
-            let id = rng.random_range(0..samplers.len());
-            let bs = &samplers[id];
-            sample_edge_batch(
-                EdgeBatchArgs {
-                    triplets: &axis.unified.triplets,
-                    batch_sampler: bs,
-                    cell_coarsening: cc,
-                    batch_size: params.batch_size,
-                    n_negatives: params.num_negatives,
-                },
-                rng,
-            )
-        }
         AxisSampler::PerBatchStratified(samplers) => {
             let id = rng.random_range(0..samplers.len());
             let bs = &samplers[id];

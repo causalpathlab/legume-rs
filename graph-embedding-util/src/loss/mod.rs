@@ -21,9 +21,13 @@
 
 use candle_util::candle_core::{Result, Tensor};
 
-pub mod cell;
-pub mod chain;
-pub mod feat;
+// `pub(crate)`, with the public surface re-exported below. Every consumer in the
+// workspace already goes through those re-exports, and keeping the modules private
+// means rustc reports an item nobody calls instead of assuming an external caller —
+// which is how ~800 lines of unreachable sampler and chain code sat here unnoticed.
+pub(crate) mod cell;
+pub(crate) mod chain;
+pub(crate) mod feat;
 
 #[cfg(test)]
 mod tests;
@@ -36,12 +40,10 @@ pub use chain::{
     sample_cell_chain_batch_with_pos, CellChainBatch, CellChainBatchArgs, CellChainBatchStats,
 };
 pub use feat::{
-    build_per_batch_samplers, build_per_batch_stratified_cell_samplers, build_stratified_sampler,
-    nce_loss, nce_loss_chain, nce_loss_identity, sample_chain_batch, sample_edge_batch,
-    sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, CellFeatureSampler,
-    ChainAxis, ChainBatch, ChainBatchArgs, ChainFeatureSide, ChainSampler, EdgeBatch,
-    EdgeBatchArgs, FeatPairing, PbFeatureSampler, PerBatchSampler, PerBatchStratifiedCellSampler,
-    PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
+    build_stratified_sampler, nce_loss, nce_loss_identity, sample_per_batch_stratified_edge_batch,
+    sample_stratified_edge_batch, CellFeatureSampler, EdgeBatch, FeatPairing, PbFeatureSampler,
+    PerBatchStratifiedCellSampler, PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs,
+    StratifiedSampler,
 };
 
 /// The one canonical numerically-stable `log σ(x)` lives in `candle_util`;
