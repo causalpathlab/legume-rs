@@ -1,4 +1,3 @@
-use super::feature_projection::{FeatureProjection, FeatureProjectionConfig};
 use super::lift::{CellLineage, LineageQc};
 use super::projection::PbLevelVelocity;
 use crate::model::JointEmbedModel;
@@ -147,13 +146,6 @@ pub struct FitConfig {
     /// instead of the default sequential θ-then-δ-with-θ-fixed. Only meaningful on the
     /// β-sharing (splice) path.
     pub joint_velocity: bool,
-    /// Post-hoc projection of the features that never entered training — the
-    /// `--n-hvg` remainder. Runs strictly after phase 2 against the frozen
-    /// pseudobulk side, so every cell-side output is unchanged. No-op when the
-    /// trained feature axis already covers the whole backend (the default
-    /// `--n-hvg 0`). `None` = skip entirely.
-    /// See [`crate::fit::feature_projection`].
-    pub feature_projection: Option<FeatureProjectionConfig>,
     /// Sample phase 1 instead of stopping at its SGD point estimate: a two-sided
     /// blocked Gibbs over the **pseudobulk** model, warm-started from that MAP
     /// (see [`crate::posterior::pb_gibbs`]). Runs between phase 1 and
@@ -232,11 +224,6 @@ pub struct FitOutput {
     /// broken runs and inspect structure — NOT a validated quality ranker. Written as
     /// `{out}.lineage_qc.json`. `Some` alongside `cell_lineage`; `None` otherwise.
     pub lineage_qc: Option<LineageQc>,
-    /// Embeddings for the features that never entered training, solved post-hoc
-    /// against the frozen pseudobulk side. `Some` iff [`FitConfig::feature_projection`]
-    /// was set and the run reached the stage; the inner `gene_ids` is empty when
-    /// the trained axis already covered the whole backend.
-    pub feature_projection: Option<FeatureProjection>,
     /// Phase-1 posterior: per-`(feature, dim)` inclusion probability and both
     /// sides' posterior-mean loadings. `Some` iff [`FitConfig::pb_posterior`] was
     /// set and the run reached the stage.

@@ -177,20 +177,6 @@ fn run_gem_genes_bge(
         unified.n_batches()
     );
 
-    // Full-backend gene identity, captured BEFORE any subsetting. `subset_features`
-    // narrows the compact axis but never touches the backend, so these stay valid
-    // across both fit passes and give the post-hoc projection the complement of
-    // whatever survived: the `--n-hvg` remainder plus the feature-null drops.
-    let backend_feature_names = unified
-        .count_backend()
-        .row_names()
-        .context("backend row names")?;
-    let (backend_row_to_gene, backend_gene_names) = intern_gene_keys(&backend_feature_names);
-    let backend_unspliced_rows: Vec<bool> = backend_feature_names
-        .iter()
-        .map(|n| split_count_row(n).1)
-        .collect();
-
     // Optional gene-level HVG feature filter. NOTE this is NOT what `--n-hvg` does in
     // `senna bge`, and the difference is deliberate at both ends: bge keeps the full
     // feature axis and uses the selection only to WEIGHT its random projection, while here
@@ -437,14 +423,6 @@ fn run_gem_genes_bge(
                 )
             }),
             pb_posterior_nested_delta: !args.model.independent_delta_gate,
-            feature_projection: Some(ge::FeatureProjectionConfig {
-                ridge: ge::DEFAULT_PROJECTION_RIDGE,
-                calib_ridge: ge::DEFAULT_PROJECTION_CALIB_RIDGE,
-                backend_row_to_gene: backend_row_to_gene.clone(),
-                backend_unspliced_rows: backend_unspliced_rows.clone(),
-                with_velocity: has_unspliced,
-                null_fdr: 0.0,
-            }),
             // `--nce-objective` (default softmax = InfoNCE: on gem's dense count data
             // the positive competing against its negatives in one distribution
             // separates cell types better than the per-pair logistic SGNS loss).
@@ -566,47 +544,12 @@ fn run_gem_genes_bge(
     )
     .context("save outputs")?;
 
-    // Post-hoc projected genes: everything the trained axis never saw (the `--n-hvg`
-    // remainder plus any feature-null drops), solved against the frozen pseudobulk
-    // side. `None`/empty when the trained axis already covered the backend. A gene is
-    // projected only when NONE of its rows were trained, so these names are disjoint
-    // from `gene_names` and the dictionaries concatenate without a dedup pass.
-    let proj = out
-        .feature_projection
-        .as_ref()
-        .filter(|p| !p.gene_ids.is_empty());
-    let projected_names: Vec<Box<str>> = proj
-        .map(|p| {
-            p.gene_ids
-                .iter()
-                .map(|&g| backend_gene_names[g as usize].clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut merged_gene_names = gene_names.clone();
-    merged_gene_names.extend(projected_names.iter().cloned());
-    if let Some(p) = proj {
-        info!(
-            "held-out gene projection: {} trained + {} projected = {} genes; \
-             {:?} frame calibration on {} trained genes (cosine {:.3}, norm ratio {:.3}, R² {:.3})",
-            n_genes,
-            projected_names.len(),
-            merged_gene_names.len(),
-            p.calib.kind,
-            p.calib.n_trained,
-            p.calib.mean_cosine,
-            p.calib.norm_ratio,
-            p.calib.r2,
-        );
-    }
-
     // Gene-keyed β_g dictionary. `save_outputs` writes the dictionary keyed by feature
     // row (`{gene}/count/spliced|unspliced`), which a gene-symbol marker set cannot
     // match. Read the per-gene `beta` Var directly and save it row-labeled by gene —
     // the spliced/mature gene program that `faba annotate --track spliced` pairs with
-    // the cell latent θ. Projected genes are appended, so a marker set sees the whole
-    // backend. Symmetric with the δ_g dictionary below.
-    let mut trained_norm2: Vec<f32> = Vec::new();
+    // the cell latent θ. Every gene is in-model, so this table IS the whole gene axis.
+    // Symmetric with the δ_g dictionary below.
     // β_g no longer needs to be snapshotted for the velocity posterior: the δ block
     // now carries β as a per-anchor offset refreshed EVERY sweep inside `fit`,
     // rather than against a one-time MAP copy taken out here.
@@ -615,27 +558,19 @@ fn run_gem_genes_bge(
         if let Some(beta) = vars.get("beta") {
             let beta_t = beta.as_tensor().to_device(&cpu)?;
             let h = beta_t.dim(1)?;
-            let mut flat: Vec<f32> = beta_t.flatten_all()?.to_vec1()?;
-            trained_norm2 = flat
-                .chunks_exact(h)
-                .map(|r| r.iter().map(|x| x * x).sum())
-                .collect();
-            if let Some(p) = proj {
-                flat.extend_from_slice(&p.beta);
-            }
-            let merged = Tensor::from_vec(flat, (merged_gene_names.len(), h), &cpu)?;
+            let flat: Vec<f32> = beta_t.flatten_all()?.to_vec1()?;
+            let merged = Tensor::from_vec(flat, (gene_names.len(), h), &cpu)?;
             ge::save_embedding(
                 &format!("{}.beta_feature_embedding.parquet", args.out),
                 &merged,
-                &merged_gene_names,
+                &gene_names,
                 "feature",
             )
             .context("save β_g feature embedding")?;
             info!(
-                "wrote {}.beta_feature_embedding.parquet (per-gene β_g; {} genes, {} of them projected)",
+                "wrote {}.beta_feature_embedding.parquet (per-gene β_g; {} genes, all in-model)",
                 args.out,
-                merged_gene_names.len(),
-                projected_names.len()
+                gene_names.len(),
             );
         }
     }
@@ -644,12 +579,6 @@ fn run_gem_genes_bge(
     // (unspliced e_f = β_g + δ_g). Read the trained `delta` Var from the varmap
     // and save it row-labeled by gene — genes with large ‖δ_g‖ carry a distinct
     // nascent/velocity program; the L2 ridge shrinks the rest toward 0.
-    //
-    // Projected genes get the analytic increment solved against their unspliced
-    // pseudobulk edges, or a zero row when they have no unspliced track. Treat a
-    // projected δ_g as low-confidence: the genes HVG dropped are exactly the
-    // low-detection ones, so their unspliced signal is thin. Gate on
-    // `n_detected_pb` in `{out}.gene_qc.parquet`.
     if delta_l2 > 0.0 {
         let vars = out.varmap.data().lock().unwrap();
         if let Some(delta) = vars.get("delta") {
@@ -660,41 +589,27 @@ fn run_gem_genes_bge(
             // readout, not a sparsity one).
             let per_gene_max: Vec<f32> = d_t.abs()?.max(1)?.to_vec1()?;
             let nz = per_gene_max.iter().filter(|&&x| x > 1e-6).count();
-            let mut flat: Vec<f32> = d_t.flatten_all()?.to_vec1()?;
-            match proj.and_then(|p| p.delta.as_ref()) {
-                Some(d) => flat.extend_from_slice(d),
-                None => flat.resize(merged_gene_names.len() * h, 0.0),
-            }
-            let merged = Tensor::from_vec(flat, (merged_gene_names.len(), h), &cpu)?;
+            let flat: Vec<f32> = d_t.flatten_all()?.to_vec1()?;
+            let merged = Tensor::from_vec(flat, (gene_names.len(), h), &cpu)?;
             ge::save_embedding(
                 &format!("{}.delta_feature_embedding.parquet", args.out),
                 &merged,
-                &merged_gene_names,
+                &gene_names,
                 "feature",
             )
             .context("save δ_g feature embedding")?;
             info!(
-                "wrote {}.delta_feature_embedding.parquet (δ_g; {}/{} trained genes with nonzero offset, \
-                 {} projected)",
-                args.out,
-                nz,
-                n_genes,
-                projected_names.len()
+                "wrote {}.delta_feature_embedding.parquet (δ_g; {}/{} genes with nonzero offset)",
+                args.out, nz, n_genes,
             );
         }
     }
 
-    // Per-gene QC: which genes were trained vs projected, and how much evidence
-    // each projected gene actually had. Written separately so the dictionaries stay
-    // plain `gene × H` tables that downstream `faba annotate` reads unchanged.
-    // The LRT selection scan is retired (the gate is the selector), so trained genes
-    // carry no per-gene scan stats — `gene_qc`'s LRT/deviance/detection columns stay
-    // NaN for trained rows.
-    if let Some(p) = proj {
-        save_gene_qc(&merged_gene_names, &trained_norm2, p, &args.out)?;
-        write_projection_qc_json(p, &args.out)?;
-    }
-
+    // `{out}.gene_qc.parquet` and `{out}.projection_qc.json` are gone with the two-stage
+    // fit. Every column they carried described the trained-vs-projected split — which gene
+    // got an in-model estimate, how much evidence a projected one had, how well the two
+    // frames were calibrated against each other. There is one frame now, so those columns
+    // would be a constant `trained = true` beside all-NaN scan statistics.
     // Cell-axis velocity (β-sharing). The identity `latent` above is the RAW spliced θ.
     // The velocity is the EMBEDDING-SPACE operator v = P·θ (`velocity_operator`): the shift
     // that makes each cell's spliced prediction catch up to its nascent one, read off the
@@ -955,112 +870,6 @@ fn split_count_row(name: &str) -> (&str, bool) {
         Some((gene, suffix)) => (gene, suffix == "unspliced"),
         None => (name, false),
     }
-}
-
-/// Write `{out}.gene_qc.parquet` — one row per gene of the merged
-/// `beta_feature_embedding`, in the same order:
-///
-/// * `trained` — 1 = fit by the model, 0 = projected post-hoc.
-/// * `live` — 1 = the gene carries signal above the estimated null. At gem's shipped
-///   settings this is 1 for **every** row: trained genes are live by construction, and
-///   the projection null gate is off (`null_fdr: 0.0` — the softmax gate is the
-///   selector, so the `--n-hvg` remainder is restored whole). It only discriminates if
-///   that gate is re-enabled, where a gene called null is **zeroed** so its
-///   `beta_feature_embedding` row is all-zero rather than a fabricated direction.
-///   To find gated-off genes, read `norm2` instead — the gate parks them at `β̃_g ≈ 0`.
-/// * `norm2` — `‖β_g‖²`.
-/// * `n_detected_pb` — pseudobulk samples (summed over collapse levels) where the
-///   gene reads above the column floor.
-/// * `deviance` — Poisson deviance `D_fit` of the gene's solve.
-/// * `lrt` — `D_null − D_fit`, the evidence that θ explains the gene at all. This
-///   is the statistic `live` tests; rank projected markers by it.
-///
-/// The last three are **projected-gene only**: the held-out projection's own
-/// goodness-of-fit, scored against the final trained frame. A trained gene has no
-/// comparable per-gene scan — the softmax gate selects during training rather than
-/// by a separate scored pass — so trained rows carry `NaN` there rather than a
-/// fabricated `0`. Filter projected markers on `live`, rank them by `lrt`.
-fn save_gene_qc(
-    merged_gene_names: &[Box<str>],
-    trained_norm2: &[f32],
-    proj: &graph_embedding_util::FeatureProjection,
-    out_prefix: &str,
-) -> anyhow::Result<()> {
-    use matrix_util::dmatrix_io::DMatrix;
-    use matrix_util::traits::IoOps;
-    let n_trained = trained_norm2.len();
-    let mut m = DMatrix::<f32>::zeros(merged_gene_names.len(), 6);
-    for g in 0..n_trained {
-        m[(g, 0)] = 1.0;
-        m[(g, 1)] = 1.0;
-        m[(g, 2)] = trained_norm2[g];
-        // No per-gene scan for a trained gene (the gate selects in-training), so the
-        // projection-only columns stay NaN rather than a fabricated 0.
-        m[(g, 3)] = f32::NAN;
-        m[(g, 4)] = f32::NAN;
-        m[(g, 5)] = f32::NAN;
-    }
-    let h = proj.beta.len() / proj.gene_ids.len().max(1);
-    for i in 0..proj.gene_ids.len() {
-        let g = n_trained + i;
-        m[(g, 0)] = 0.0;
-        m[(g, 1)] = f32::from(u8::from(proj.live[i]));
-        m[(g, 2)] = proj.beta[i * h..(i + 1) * h].iter().map(|x| x * x).sum();
-        m[(g, 3)] = proj.n_detected_pb[i] as f32;
-        m[(g, 4)] = proj.deviance[i];
-        m[(g, 5)] = proj.lrt[i];
-    }
-    let cols: Vec<Box<str>> = [
-        "trained",
-        "live",
-        "norm2",
-        "n_detected_pb",
-        "deviance",
-        "lrt",
-    ]
-    .iter()
-    .map(|s| (*s).into())
-    .collect();
-    let path = format!("{out_prefix}.gene_qc.parquet");
-    m.to_parquet_with_names(&path, (Some(merged_gene_names), Some("gene")), Some(&cols))
-        .with_context(|| format!("writing {path}"))?;
-    let n_live = proj.live.iter().filter(|&&l| l).count();
-    info!(
-        "wrote {path} ({} trained, {} projected of which {} live)",
-        n_trained,
-        proj.gene_ids.len(),
-        n_live
-    );
-    Ok(())
-}
-
-/// Write `{out}.projection_qc.json` — how well the Poisson-MAP frame agreed with
-/// the trained NCE frame before calibration, measured on the trained genes.
-/// `mean_cosine` near 1 with `norm_ratio` near 1 means the two frames already
-/// agreed and the `H×H` map was close to the identity. A low `mean_cosine` means
-/// they genuinely disagree: distrust the projected genes rather than reading them.
-fn write_projection_qc_json(
-    proj: &graph_embedding_util::FeatureProjection,
-    out_prefix: &str,
-) -> anyhow::Result<()> {
-    let c = &proj.calib;
-    // Serde, not a format string — same reason as `lineage_qc.json` above: the
-    // three floats can be non-finite, and `{:.4}` would emit a bare `NaN` that
-    // no JSON parser accepts. It also escapes the `{:?}` calibration rendering
-    // instead of splicing it raw between quotes.
-    let json = serde_json::json!({
-        "n_projected": proj.gene_ids.len(),
-        "n_projected_live": proj.live.iter().filter(|&&l| l).count(),
-        "n_trained_calibration": c.n_trained,
-        "calibration": format!("{:?}", c.kind),
-        "mean_cosine": c.mean_cosine,
-        "norm_ratio": c.norm_ratio,
-        "r2": c.r2,
-    });
-    let path = format!("{out_prefix}.projection_qc.json");
-    std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&json)?))
-        .with_context(|| format!("writing {path}"))?;
-    Ok(())
 }
 
 /// Intern each row's gene key (see [`split_count_row`]) to a dense gene id. Returns

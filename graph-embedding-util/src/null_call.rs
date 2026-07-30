@@ -28,9 +28,9 @@
 //! norm test masks — it calibrates a per-axis null scale from the n-hvg
 //! presumed-null and calls each feature via ash lfsr. The scaled-χ² machinery
 //! remains as [`chi2_null_call`] — an empirical-Bayes call on a precomputed
-//! scaled-χ² vector (the reusable core), used on the per-gene LRT by the held-out
-//! feature-projection gate in [`crate::fit::feature_projection`] and by the
-//! data-driven feature selection. The χ² call is per-item and deterministic; the
+//! scaled-χ² vector (the reusable core), used by the data-driven feature selection.
+//! (It also served a held-out feature-projection gate, which is gone: the softmax gate
+//! selects in one pass, so nothing is held out.) The χ² call is per-item and deterministic; the
 //! ash call runs a seeded collapsed-Gibbs sampler per axis.
 
 use crate::ash::{ash_normal, AshOpts};
@@ -56,10 +56,9 @@ pub struct NullCall {
 /// embedding** — in range and not all-zero. `None` for a dead row.
 ///
 /// An exactly-all-zero row is this crate's in-band "no usable embedding" signal: a
-/// held-out feature that fails its null call is *zeroed* rather than handed a
-/// fabricated direction (see [`crate::fit::feature_projection`]), and `faba gem`
-/// records which in `gene_qc.parquet`. Consumers must read it as **missing data, not
-/// an observation of zero** — averaging it in would drag the mean toward the origin.
+/// feature with no usable estimate is *zeroed* rather than handed a fabricated
+/// direction. Consumers must read it as **missing data, not an observation of zero** —
+/// averaging it in would drag the mean toward the origin.
 ///
 /// This is an invariant, not a heuristic: a row the model actually trained is never
 /// exactly zero (SGD from a random init in `f32`, and there is no sparsity penalty on

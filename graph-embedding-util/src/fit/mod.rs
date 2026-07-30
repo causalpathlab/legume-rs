@@ -3,18 +3,14 @@
 //! [`UnifiedData`] (so this crate stays free of file/path concerns).
 
 mod config;
-pub(crate) mod feature_projection;
 pub mod lift;
 pub mod lineage;
 pub mod projection;
 pub mod resolve_embedding;
 mod samplers;
+pub(crate) mod stacked_pb;
 
 pub use config::{FeatFactorSpec, FitConfig, FitOutput, SoftmaxGateConfig};
-pub use feature_projection::{
-    CalibrationDiag, CalibrationKind, FeatureProjection, FeatureProjectionConfig,
-    DEFAULT_PROJECTION_CALIB_RIDGE, DEFAULT_PROJECTION_RIDGE,
-};
 pub use lift::{CellLineage, LineageQc};
 pub use projection::PbLevelVelocity;
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
@@ -821,7 +817,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     if stop.load(std::sync::atomic::Ordering::Relaxed) {
         log::warn!(
             "phase 1 was interrupted — the feature dictionary is short-trained. The follow-up \
-             stages (phase-2 projection, held-out feature projection, cell-lift) still run, so \
+             stages (phase-2 projection, cell-lift) still run, so \
              the outputs are complete but fit against a partially trained dictionary; treat \
              this run as a draft. Ctrl+C again to abort outright."
         );
@@ -871,29 +867,6 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             unspliced,
             config.joint_velocity,
         )?
-    };
-
-    // Post-hoc held-out feature projection. Solve `β_g` for every backend
-    // feature the training axis never saw (the `--n-hvg` remainder, plus
-    // anything the feature-null QC dropped) against the frozen pseudobulk side.
-    // Strictly read-only on the cell side, so every cell output above is
-    // unaffected. See `crate::fit::feature_projection`.
-    // Not gated on `stop` — see the phase-2 note above.
-    let feature_projection = match &config.feature_projection {
-        Some(fp_cfg) => {
-            let pb = stacked_pb_view(&varmap, &collapsed_levels, &cell_to_pb_per_level, h)?;
-            let trained = trained_gene_beta(
-                &cell_model,
-                config.feat_factor.as_ref(),
-                &feature_to_backend,
-                &fp_cfg.backend_row_to_gene,
-                h,
-            )?;
-            Some(feature_projection::project_held_out_features(
-                &pb, h, &trained, fp_cfg,
-            ))
-        }
-        _ => None,
     };
 
     // cell-lift: phase-2 cell-lineage lift (evaluation only). Runs on the FINAL pb
@@ -970,65 +943,8 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         pb_velocity,
         cell_lineage,
         lineage_qc,
-        feature_projection,
         pb_posterior,
         splice_posterior,
-    })
-}
-
-/// The trained per-gene `β`, plus each trained gene's id on the caller's backend
-/// gene axis. Returns `(beta [n_trained_genes × H] row-major, backend_gene_id)`.
-///
-/// For a **factored** (β-sharing) model the source is the `beta` Var itself: a
-/// gene's `e_feat` rows are `β_g` (spliced) and `β_g + δ_g` (unspliced), so only
-/// `β` is a clean calibration target. For a **free** model (bge) every compact
-/// feature row is its own gene and `e_feat` is exactly `β`.
-///
-/// **Softmax gate.** When the gate is on, the held-out solve estimates each gene's
-/// *effective* embedding, so the calibration target must be the GATED per-gene
-/// `β_g ⊙ softmax(s_beta_g)` (matching what `θ_pb` was trained against). The free
-/// branch needs no special handling: `model.e_feat` was already overwritten with the
-/// gated dictionary by `materialize_e_feat` before this runs.
-fn trained_gene_beta(
-    model: &JointEmbedModel,
-    spec: Option<&FeatFactorSpec>,
-    feature_to_backend: &[usize],
-    backend_row_to_gene: &[u32],
-    h: usize,
-) -> anyhow::Result<feature_projection::TrainedBeta> {
-    let (beta, backend_gene_id) = match (spec, &model.factor) {
-        (Some(spec), Some(factor)) => {
-            // `s_beta` is `Some` iff the gate is on (both set together by
-            // `enable_softmax_gate`), so checking it alone is sufficient.
-            let beta_t = match &factor.s_beta {
-                Some(s_beta) => factor.beta.mul(&model.gate_weights(s_beta)?)?,
-                None => factor.beta.clone(),
-            };
-            let beta = beta_t.flatten_all()?.to_vec1::<f32>()?;
-            let n_trained_genes = beta.len() / h;
-            // compact gene id → backend gene id, via any of the gene's rows.
-            let mut backend_gene_id = vec![u32::MAX; n_trained_genes];
-            for (r, &g) in spec.row_to_gene.iter().enumerate() {
-                backend_gene_id[g as usize] = backend_row_to_gene[feature_to_backend[r]];
-            }
-            anyhow::ensure!(
-                backend_gene_id.iter().all(|&g| g != u32::MAX),
-                "trained gene without any feature row — β-sharing factor is inconsistent"
-            );
-            (beta, backend_gene_id)
-        }
-        _ => {
-            let beta = model.e_feat.flatten_all()?.to_vec1::<f32>()?;
-            let backend_gene_id = feature_to_backend
-                .iter()
-                .map(|&row| backend_row_to_gene[row])
-                .collect();
-            (beta, backend_gene_id)
-        }
-    };
-    Ok(feature_projection::TrainedBeta {
-        beta,
-        backend_gene_id,
     })
 }
 
@@ -1038,8 +954,8 @@ fn trained_gene_beta(
 /// Phase 1 shapes `β` against exactly these axes — one per level, combined with
 /// `CompositeMode::Sum` at uniform [`DEFAULT_AXIS_LAMBDA`] — and with the default
 /// `phase1_cells_per_pb == 0` the cell axis is suppressed entirely, so this stack
-/// *is* the objective `β` was fit under. Solving a held-out gene against it puts
-/// the result in `β`'s native frame.
+/// *is* the objective `β` was fit under — which is what makes it the right frame for
+/// the posterior sampler to condition on.
 ///
 /// The pb Vars are read out of the `VarMap` by name rather than off
 /// `level_models[l].e_cell`: the latter is a `Tensor` aliasing the `Var`'s
@@ -1047,8 +963,8 @@ fn trained_gene_beta(
 /// implementation detail.
 ///
 /// Counts come from `mu_adjusted` when the collapse produced one, matching the
-/// `pb_blobs` the model actually trained on, so held-out and trained genes are on
-/// the same scale.
+/// `pb_blobs` the model actually trained on, so the sampler sees the same scale the
+/// fit did.
 /// Splice-model write-back: `beta` and `delta` are the gene-side Vars under
 /// β-sharing, not `e_feat` (which is a materialized snapshot rebuilt from them).
 ///
@@ -1291,7 +1207,7 @@ pub(crate) fn stacked_pb_view<'a>(
     collapsed_levels: &'a [data_beans_alg::collapse_data::CollapsedOut],
     cell_to_pb_per_level: &[Vec<usize>],
     h: usize,
-) -> anyhow::Result<feature_projection::StackedPb<'a>> {
+) -> anyhow::Result<stacked_pb::StackedPb<'a>> {
     let vars = varmap.data().lock().expect("varmap poisoned");
     let (mut theta, mut bias, mut counts, mut sizes, mut offsets) =
         (vec![], vec![], vec![], vec![], vec![]);
@@ -1337,7 +1253,7 @@ pub(crate) fn stacked_pb_view<'a>(
         counts.push(pb_full);
         sizes.push(level_sizes);
     }
-    Ok(feature_projection::StackedPb {
+    Ok(stacked_pb::StackedPb {
         theta,
         bias,
         counts,

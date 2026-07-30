@@ -42,7 +42,7 @@ use super::diagnostics::ChainDiag;
 use super::dim_block::{dim_block, dim_block_multi, DimBlockConfig, DimBlockResult};
 use super::lnpdf::{FrozenSide, NodeTerm};
 use super::pb_index::{build_pb_index_pair, AnchorMap, FeatureSide};
-use crate::fit::feature_projection::StackedPb;
+use crate::fit::stacked_pb::StackedPb;
 use crate::progress::new_progress_bar;
 use log::info;
 

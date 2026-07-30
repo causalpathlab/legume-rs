@@ -2,11 +2,11 @@
 //! one anchored on feature rows (genes) with the pb side frozen, and one anchored
 //! on pseudobulk columns with the feature side frozen.
 //!
-//! [`super::index::build_index`] hard-codes the other orientation — anchors are
-//! genes, the other side is *cells*, and the negative slate is drawn from cells.
-//! That is the right shape for a post-hoc pass over a fitted model, but a Gibbs
-//! that alternates sides needs the transpose as well, and it needs both built from
-//! the same data so the two conditionals describe one joint.
+//! The retired cell-anchored builder hard-coded the other orientation — anchors were
+//! genes, the other side *cells*, and the negative slate drawn from cells. That is the
+//! right shape for a post-hoc pass over a fitted model, but a Gibbs that alternates sides
+//! needs the transpose as well, and it needs both built from the same data so the two
+//! conditionals describe one joint.
 //!
 //! ## Why pseudobulks and not cells
 //!
@@ -54,7 +54,7 @@
 //! [`StackedPb`], rather than re-deriving either here.
 
 use super::index::ContrastiveIndex;
-use crate::fit::feature_projection::StackedPb;
+use crate::fit::stacked_pb::StackedPb;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
