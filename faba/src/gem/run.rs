@@ -237,6 +237,10 @@ fn run_gem_genes_bge(
     let must_train =
         (!parts.is_empty()).then(|| data_beans_alg::hvg::MustTrainFeatures::union(&parts));
 
+    // Per-ROW projection weights over the FULL feature axis, matching what `senna bge`
+    // does. `None` when `--n-hvg 0`.
+    let mut hvg_row_weights: Option<Vec<f32>> = None;
+
     if hvg_on {
         use data_beans_alg::hvg::select_hvg_by_stats;
         use data_beans_alg::sparse_streaming::streaming_sparse_running_stats;
@@ -304,20 +308,34 @@ fn run_gem_genes_bge(
                 keep_genes.len()
             );
         }
-        let keep_rows: Vec<usize> = (0..row_gene.len())
-            .filter(|&r| keep_genes.contains(&(row_gene[r] as usize)))
-            .collect();
-        let before = unified.n_features();
-        unified.subset_features(&keep_rows);
+        // WEIGHT, do not subset — the `senna bge` semantics. Non-selected genes get
+        // projection weight 0, so they sit out the basis the pseudobulk partition is built
+        // from, but they stay on the feature axis: still trained, still gated, still in the
+        // dictionary, the co-embedding and the posterior's anchor set.
+        //
+        // This used to call `subset_features`, which dropped them outright. Weighting is
+        // strictly more informative for the same cost — the RP sees the same genes either
+        // way — and it makes `--n-hvg N` mean the same thing on both CLIs, so a gem run and
+        // a bge run at the same N are finally the same experiment. What it gives up is the
+        // smaller dictionary and faster fit a hard cut bought; if that is wanted back it
+        // belongs behind its own flag rather than overloading this one.
+        let mut w = vec![0.0f32; unified.n_features()];
+        for (r, slot) in w.iter_mut().enumerate() {
+            if keep_genes.contains(&(row_gene[r] as usize)) {
+                *slot = 1.0;
+            }
+        }
+        let weighted_rows = w.iter().filter(|&&x| x > 0.0).count();
+        hvg_row_weights = Some(w);
         info!(
-            "HVG filter (--n-hvg {}): {} genes → {} kept ({} HVG + {} force-kept; \
-             {} → {} feature rows)",
+            "HVG weighting (--n-hvg {}): {} of {} genes selected ({} HVG + {} force-kept) \
+             → {} of {} feature rows carry the projection; every gene still trains",
             args.collapse.n_hvg,
-            n_genes,
             keep_genes.len(),
+            n_genes,
             keep_genes.len() - forced,
             forced,
-            before,
+            weighted_rows,
             unified.n_features()
         );
     }
@@ -368,7 +386,10 @@ fn run_gem_genes_bge(
         } else {
             0.0
         };
-        let hvg_weights = hvg_on.then(|| vec![1.0f32; unified.n_features()]);
+        // The selection's own per-row weights over the full axis. Previously this was a
+        // UNIFORM vector over the survivors of a subset, which weighted nothing — the
+        // selection had already happened by deletion.
+        let hvg_weights = hvg_row_weights.clone();
         let cfg = ge::FitConfig {
             embedding_dim: args.model.embedding_dim,
             num_levels: args.collapse.num_levels,
