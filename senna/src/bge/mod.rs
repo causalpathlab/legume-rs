@@ -835,7 +835,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             &args.out,
             post,
             &out.varmap,
-            args.posterior.posterior.unwrap_or(0),
+            // geometry now travels on the result, not as a caller-supplied cap
             args.seed,
         )?;
         let worst_ess = post
