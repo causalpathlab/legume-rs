@@ -33,6 +33,7 @@
 //! Poisson fit is a quasi-Poisson whose per-dim slab variance collapses toward
 //! zero, which is exactly what this module's `σ₀h²` would then report.
 
+pub(crate) mod column;
 pub mod diagnostics;
 pub mod dim_block;
 pub mod frozen_diag;
