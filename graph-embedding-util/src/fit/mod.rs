@@ -316,6 +316,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
                     shared_s_feat: cell_model.s_feat.clone(),
                     shared_e_feat_raw: cell_model.e_feat_raw.clone(),
                     shared_e_feat_logstd: cell_model.e_feat_logstd.clone(),
+                    shared_gate_pi_logit: cell_model.gate_pi_logit.clone(),
                     gate: cell_model.gate,
                 },
                 &varmap,

@@ -755,3 +755,96 @@ fn ungated_factored_has_no_delta_gate() {
     assert!(m.velocity_selection().unwrap().is_none());
     assert!(m.gate_kl().unwrap().is_none());
 }
+
+/// A SHARING HEAD must keep the gate KL. `train_composite` evaluates `gate_kl` on
+/// `ctx.axes[0]`, and with `--phase1-cells-per-pb 0` — the default in both CLIs —
+/// that axis is a pb head, not the model the gate was enabled on. `π_h` lives on the
+/// model rather than on the shared `s_feat`, so a head that is not handed it returns
+/// `None` here and every gate regularisation silently leaves the loss with the build
+/// green. That is exactly what shipped; this test is the thing that was missing.
+#[test]
+fn a_sharing_head_still_has_a_gate_kl() {
+    let (n_features, h) = (6usize, 4usize);
+    let vm = VarMap::new();
+    let m = gated_model(n_features, h, &vm);
+    let head = JointEmbedModel::new_sharing_features(
+        ShareFeaturesArgs {
+            n_cells: 5,
+            embedding_dim: h,
+            shared_e_feat: m.e_feat.clone(),
+            shared_b_feat: m.b_feat.clone(),
+            e_cell_init: None,
+            b_cell_init: &[0f32; 5],
+            var_prefix: "pb_l0",
+            seed: 3,
+            shared_s_feat: m.s_feat.clone(),
+            shared_e_feat_raw: m.e_feat_raw.clone(),
+            shared_e_feat_logstd: m.e_feat_logstd.clone(),
+            shared_gate_pi_logit: m.gate_pi_logit.clone(),
+            gate: m.gate,
+        },
+        &vm,
+        &dev(),
+    )
+    .unwrap();
+    let kl = head
+        .gate_kl()
+        .unwrap()
+        .expect("a head that shares the gate must also share its KL");
+    let v: f32 = kl.to_scalar().unwrap();
+    assert!(v.is_finite(), "head gate KL must be finite, got {v}");
+    let base: f32 = m.gate_kl().unwrap().unwrap().to_scalar().unwrap();
+    assert!(
+        (v - base).abs() < 1e-6,
+        "a head shares every gate Var, so its KL must equal the primary's: {v} vs {base}"
+    );
+}
+
+/// Under jitter the SELECTION is frozen input, but `β` is still trained — so the
+/// Gaussian effect KL must survive even though the Bernoulli and Beta terms do not.
+/// Returning `None` for the whole thing (as an earlier version did) removes the only
+/// shrinkage on the loading for the entire jitter fit.
+#[test]
+fn jitter_keeps_the_effect_kl_and_drops_the_selection_terms() {
+    let (n_features, h) = (6usize, 4usize);
+    let vm = VarMap::new();
+    let mut m = gated_model(n_features, h, &vm);
+    let learned: f32 = m.gate_kl().unwrap().unwrap().to_scalar().unwrap();
+
+    // All-ones pip: the effect KL is then weighted exactly as the learned gate's
+    // `α ≈ σ(4) = 0.982` weights it, so the two differ only by the terms jitter drops.
+    m.set_gate_pip(
+        GateKind::Identity,
+        &vec![1.0; n_features * h],
+        n_features,
+        &dev(),
+    )
+    .unwrap();
+    let jittered: f32 = m
+        .gate_kl()
+        .unwrap()
+        .expect("jitter must still pay the Gaussian effect KL on β")
+        .to_scalar()
+        .unwrap();
+    assert!(jittered.is_finite() && jittered > 0.0);
+    assert!(
+        jittered < learned,
+        "jitter drops the Bernoulli + Beta terms, so it must be the smaller of the \
+         two: {jittered} vs {learned}"
+    );
+
+    // A zero pip switches every coordinate off, and a coordinate the likelihood never
+    // reads must not be charged a prior for its loading.
+    m.set_gate_pip(
+        GateKind::Identity,
+        &vec![0.0; n_features * h],
+        n_features,
+        &dev(),
+    )
+    .unwrap();
+    let off: f32 = m.gate_kl().unwrap().unwrap().to_scalar().unwrap();
+    assert!(
+        off.abs() < 1e-6,
+        "a fully masked gate must cost nothing, got {off}"
+    );
+}

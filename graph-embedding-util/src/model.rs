@@ -188,6 +188,12 @@ pub struct ShareFeaturesArgs<'a> {
     pub shared_e_feat_raw: Option<Tensor>,
     /// Shared free-model effect log-std (`[n_features, H]`). `Some` only for a KL gate.
     pub shared_e_feat_logstd: Option<Tensor>,
+    /// Shared per-dim inclusion rate `π_h` (`[H]`). Must be handed to every head:
+    /// `train_composite` computes [`JointEmbedModel::gate_kl`] on `ctx.axes[0]`, which
+    /// is a pb head — not the cell model — whenever `--phase1-cells-per-pb` is 0 (the
+    /// default in both CLIs). Leaving it `None` makes `gate_kl` return `None` and the
+    /// gate regularisation disappear from the loss with the build green.
+    pub shared_gate_pi_logit: Option<Tensor>,
     /// Gate configuration shared across heads. `None` when the gate is off.
     pub gate: Option<FeatureGateSpec>,
 }
@@ -447,6 +453,7 @@ impl JointEmbedModel {
             shared_s_feat,
             shared_e_feat_raw,
             shared_e_feat_logstd,
+            shared_gate_pi_logit,
             gate,
         } = args;
         let e_name = format!("{var_prefix}_e_cell");
@@ -469,7 +476,7 @@ impl JointEmbedModel {
             e_feat_logstd: shared_e_feat_logstd,
             gate_pip: None,
             gate_mask: Arc::new(Mutex::new(None)),
-            gate_pi_logit: None,
+            gate_pi_logit: shared_gate_pi_logit,
             gate,
         })
     }
@@ -562,10 +569,12 @@ impl JointEmbedModel {
                 seed,
                 // The factored gate rides on the cloned `factor` (`s_beta`); the
                 // free-model gate fields stay empty. Copy the gate spec so the head
-                // knows to apply it.
+                // knows to apply it, and `π_h`, which lives on the model rather than
+                // the factor and is what `gate_kl` needs.
                 shared_s_feat: None,
                 shared_e_feat_raw: None,
                 shared_e_feat_logstd: None,
+                shared_gate_pi_logit: self.gate_pi_logit.clone(),
                 gate: self.gate,
             },
             varmap,
@@ -1000,6 +1009,23 @@ impl JointEmbedModel {
         mu_rows.add(&sigma.mul(&eps)?)
     }
 
+    /// The inclusion-weighted Gaussian effect KL, per entry
+    /// `½[(σ²+μ²)/σ₀² − 1 − 2·logstd + ln σ₀²]` against `σ₀² =`
+    /// [`GATE_EFFECT_PRIOR_VAR`], weighted by `w` and meaned over every entry.
+    ///
+    /// `w` must be the weight the LIKELIHOOD actually applies to this effect, so that a
+    /// coordinate the gate has turned off is not also asked to pay a prior for a
+    /// loading nothing reads. Under a learned gate that is `α = σ(S/τ)`; under jitter it
+    /// is the frozen `pip`, since training averages over `z ~ Bern(pip)` and `E[z] = pip`.
+    fn effect_kl(w: &Tensor, logstd: &Tensor, mu: &Tensor) -> Result<Tensor> {
+        let s0 = GATE_EFFECT_PRIOR_VAR;
+        let logstd = logstd.clamp(-GATE_LOGSTD_CLAMP, GATE_LOGSTD_CLAMP)?; // finite σ, log σ²
+        let two_logstd = logstd.affine(2.0, 0.0)?; // 2·logstd = log σ²
+        let a = (two_logstd.exp()? + mu.sqr()?)?.affine(1.0 / s0, 0.0)?; // (σ²+μ²)/σ₀²
+        let per_entry = (a - &two_logstd)?.affine(0.5, 0.5 * (s0.ln() - 1.0))?; // ½[…]
+        w.mul(&per_entry)?.mean_all()
+    }
+
     /// One gate's spike-and-slab KL: the Bernoulli inclusion KL against the dim's
     /// learned rate `π_h`, plus the inclusion-weighted Gaussian effect KL
     /// (`σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]), plus `π_h`'s own Beta hyperprior. Shared
@@ -1055,14 +1081,7 @@ impl JointEmbedModel {
             + one_m_alpha.mul(&one_m_alpha.log()?.broadcast_sub(&one_m_pi.log()?)?)?)?
         .mean_all()?;
 
-        // Gaussian KL per entry = ½[(σ²+μ²)/σ₀² − 1 − 2·logstd + ln σ₀²], σ² = e^{2 logstd}.
-        let s0 = GATE_EFFECT_PRIOR_VAR;
-        let logstd = logstd.clamp(-GATE_LOGSTD_CLAMP, GATE_LOGSTD_CLAMP)?; // finite σ, log σ²
-        let two_logstd = logstd.affine(2.0, 0.0)?; // 2·logstd = log σ²
-        let a = (two_logstd.exp()? + mu.sqr()?)?.affine(1.0 / s0, 0.0)?; // (σ²+μ²)/σ₀²
-        let kl_gauss_dim = (a - &two_logstd)?.affine(0.5, 0.5 * (s0.ln() - 1.0))?; // ½[…]
-                                                                                   // Weighted by the gate the likelihood sees, then averaged over all entries.
-        let kl_gauss = alpha.mul(&kl_gauss_dim)?.mean_all()?;
+        let kl_gauss = Self::effect_kl(&alpha, logstd, mu)?;
 
         // −log Beta(π_h; a, b) up to a constant = −[(a−1)·ln π + (b−1)·ln(1−π)],
         // summed over dims and put on the same per-entry footing as the two above.
@@ -1077,50 +1096,77 @@ impl JointEmbedModel {
         kl_bern + kl_gauss + beta_nlp
     }
 
-    /// The gate's total spike-and-slab KL: the identity-gate KL plus, for a factored
-    /// model with velocity, the INDEPENDENT δ-gate KL. `None` for an ungated model.
-    /// Kept in the autograd graph.
+    /// The gate's total KL: the identity gate's plus, for a factored model with
+    /// velocity, the INDEPENDENT δ gate's. `None` for an ungated model. Kept in the
+    /// autograd graph.
     ///
     /// Each gate carries its OWN `π_h` table. They are different objects — an identity
     /// loading and a deviation from it are not on one scale — so a shared inclusion
     /// rate would force them to agree, which is the same reason
     /// `posterior::pb_gibbs` gives every gate its own `σ₀h²` and `π₀h`.
+    ///
+    /// # Two regimes
+    ///
+    /// **Learned gate** — the full spike-and-slab KL ([`Self::single_gate_kl`]).
+    ///
+    /// **Jitter** (a `pip` is installed) — the SELECTION is an input, not a parameter:
+    /// `gate_weights` never consults the logits, so the Bernoulli and Beta terms would
+    /// only move Vars nothing reads, and the inclusion prior already lives in the
+    /// sampler that produced the `pip`. The Gaussian effect KL is a different matter —
+    /// `β` is very much still a trained parameter under the mask — so that term stays,
+    /// weighted by the `pip` (what the likelihood applies in expectation). Dropping it
+    /// too, as an earlier version did, silently removed the ONLY shrinkage on the
+    /// loading for the whole jitter fit.
     pub fn gate_kl(&self) -> Result<Option<Tensor>> {
         if self.gate.is_none() {
             return Ok(None);
         }
-        // Under jitter the selection is an input, not a parameter: the logits are never
-        // consulted by `gate_weights`, so regularizing them would only add a term that
-        // moves Vars nothing reads. The inclusion prior lives in the sampler that
-        // produced `gate_pip`.
-        if self.gate_pip.is_some() {
-            return Ok(None);
-        }
-        // Identity gate (β factored / e_feat free) — always present when gated.
-        let (Some(logits), Some(logstd), Some(pi)) = (
-            self.gate_logits(),
-            self.effect_logstd(),
-            self.gate_pi_logit.as_ref(),
-        ) else {
-            return Ok(None);
-        };
         let mu = match &self.factor {
             Some(f) => &f.beta,
             None => self.e_feat_raw.as_ref().unwrap_or(&self.e_feat),
         };
-        let mut kl = self.single_gate_kl(logits, pi, logstd, mu)?;
+        let mut kl = self.one_gate_kl(GateKind::Identity, self.gate_logits(), mu)?;
         // Independent velocity gate on δ_g (factored + velocity present).
         if let Some(f) = &self.factor {
-            if let (Some(s_delta), Some(delta_pi), Some(delta_logstd), Some((delta, _))) = (
-                &f.s_delta,
-                &f.delta_pi_logit,
-                &f.delta_logstd,
-                &f.splice_delta,
-            ) {
-                kl = (kl + self.single_gate_kl(s_delta, delta_pi, delta_logstd, delta)?)?;
+            if let Some((delta, _)) = &f.splice_delta {
+                let dkl = self.one_gate_kl(GateKind::Velocity, f.s_delta.as_ref(), delta)?;
+                kl = match (kl, dkl) {
+                    (Some(a), Some(b)) => Some((a + b)?),
+                    (a, b) => a.or(b),
+                };
             }
         }
-        Ok(Some(kl))
+        Ok(kl)
+    }
+
+    /// One gate's contribution to [`Self::gate_kl`], picking the regime off whether a
+    /// `pip` is installed for that [`GateKind`]. `None` when the gate has no effect
+    /// log-std (a deterministic effect has no Gaussian KL to pay) or, on the learned
+    /// path, no logits / no `π_h`.
+    fn one_gate_kl(
+        &self,
+        kind: GateKind,
+        logits: Option<&Tensor>,
+        mu: &Tensor,
+    ) -> Result<Option<Tensor>> {
+        let (logstd, pi_logit) = match kind {
+            GateKind::Identity => (self.effect_logstd(), self.gate_pi_logit.as_ref()),
+            GateKind::Velocity => match &self.factor {
+                Some(f) => (f.delta_logstd.as_ref(), f.delta_pi_logit.as_ref()),
+                None => (None, None),
+            },
+        };
+        let Some(logstd) = logstd else {
+            return Ok(None);
+        };
+        let (pip, _) = self.gate_tables(kind);
+        if let Some(pip) = pip {
+            return Ok(Some(Self::effect_kl(pip, logstd, mu)?));
+        }
+        let (Some(logits), Some(pi)) = (logits, pi_logit) else {
+            return Ok(None);
+        };
+        Ok(Some(self.single_gate_kl(logits, pi, logstd, mu)?))
     }
 
     /// Mean-pool the cell embedding table over the fine children of a
