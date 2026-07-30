@@ -269,7 +269,9 @@ pub struct DimBlockResult {
     /// coordinates stall still produces a full table of plausible numbers. Compare it
     /// against [`Self::n_transitions`].
     pub fallbacks: usize,
-    /// Slice transitions attempted, the denominator for [`Self::fallbacks`].
+    /// Slice transitions ATTEMPTED, the denominator for [`Self::fallbacks`] — only the
+    /// coordinates that actually ran a slice move, not every `(anchor, dim)`. An excluded
+    /// coordinate draws from the prior with no bracket and cannot fall back.
     pub n_transitions: usize,
     /// Batched likelihood evaluations — the run's actual cost, in the unit the column
     /// pass charges for.
@@ -496,7 +498,7 @@ pub fn dim_block_multi(
         for (lo, hi, draw) in draws {
             fallbacks += draw.fallbacks;
             n_evals += draw.rounds;
-            n_transitions += (hi - lo) * h * cfg.transitions_per_dim.max(1);
+            n_transitions += draw.transitions;
             for i in 0..(hi - lo) {
                 let g = lo + i;
                 for d in 0..h {

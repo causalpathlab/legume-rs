@@ -301,7 +301,13 @@ impl AnchorScore for ProfiledPoisson {
             // folded; dim `d` contributes the sampled value PLUS its frozen offset.
             let off_d = ctx.offset_at(i, d);
             let v_d = xi + off_d;
-            let r2 = ctx.sumsq[i] + v_d * v_d;
+            // `sumsq` is carried by subtract-then-add across the dim loop, so f32
+            // cancellation can leave it very slightly NEGATIVE — reachable whenever the
+            // peeled coordinate was the anchor's only nonzero one, which is the common case
+            // early in a run while `z` is still mostly off. `sqrt` of that is NaN, and
+            // `NaN > radius` is FALSE, so the guard would quietly wave the fast path
+            // through instead of falling back. Clamp rather than trust the arithmetic.
+            let r2 = (ctx.sumsq[i].max(0.0) + v_d * v_d).max(0.0);
             if r2.sqrt() > ctx.safe_radius[i] {
                 *slot = self.walk(ctx, i, d, xi, &mut full);
                 continue;

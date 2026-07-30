@@ -334,7 +334,12 @@ pub(crate) fn pb_gibbs(
     let mean_pb: Vec<f32> = pb_acc.iter().map(|&a| (a * inv) as f32).collect();
     let sigma_diag: Vec<ChainDiag> = sigma2_chain.iter().map(|c| scalar_diagnostics(c)).collect();
     let pi0_diag: Vec<ChainDiag> = pi0_chain.iter().map(|c| scalar_diagnostics(c)).collect();
-    report_convergence("pb Gibbs", &sigma_diag, &pi0_diag, fallbacks, n_transitions);
+    report_convergence(
+        "pb Gibbs",
+        &sigma_diag,
+        &pi0_diag,
+        Some((fallbacks, n_transitions)),
+    );
 
     // Recover the intercepts the profile likelihood maximised out, against the
     // POSTERIOR-MEAN sides — the loadings and the biases have to describe the same
@@ -661,8 +666,11 @@ fn report_convergence(
     label: &str,
     sigma_diag: &[ChainDiag],
     pi0_diag: &[ChainDiag],
-    fallbacks: usize,
-    n_transitions: usize,
+    // `None` = this line does not own a fallback count. Deliberately not `(0, 0)`:
+    // "0 of 0" prints as 0.00% and reads as "nothing stalled", which is the opposite of
+    // "not measured here". A reporting path that exists to stop bad numbers being believed
+    // must not itself invent a clean one.
+    bracket: Option<(usize, usize)>,
 ) {
     // Split-R̂ over the hyper chains. `1.01` is the conventional pass; past `1.1` the
     // chain has not converged and the per-dim numbers should not be read as a posterior.
@@ -671,20 +679,25 @@ fn report_convergence(
     let failing = |d: &[ChainDiag]| d.iter().filter(|c| c.rhat > RHAT_WARN).count();
     let min_ess = |d: &[ChainDiag]| d.iter().map(|c| c.min_ess).fold(f32::INFINITY, f32::min);
 
-    let frac = if n_transitions == 0 {
-        0.0
-    } else {
-        fallbacks as f64 / n_transitions as f64
+    // The denominator is transitions ATTEMPTED, not every `(anchor, dim)`: an excluded
+    // coordinate takes a prior draw with no bracket and cannot fall back, so counting it
+    // would divide by `1/(1−π₀)` too many and make a stalled run read as healthy — at a
+    // measured `π₀ ≈ 0.885` that is a factor of nearly nine.
+    let frac = bracket.and_then(|(f, n)| (n > 0).then(|| f as f64 / n as f64));
+    let bracket_note = match (bracket, frac) {
+        (Some((f, n)), Some(p)) => format!("bracket fallbacks {f}/{n} ({:.2}%)", 100.0 * p),
+        (Some((f, _)), None) => format!("bracket fallbacks {f}/0 (no transitions attempted)"),
+        (None, _) => "bracket fallbacks counted on the run's other line".to_string(),
     };
     info!(
-        "{label}: split-R̂ worst {:.3} (σ₀²) / {:.3} (π₀), {} of {} dims over {RHAT_WARN};          min ESS {:.1} / {:.1}; bracket fallbacks {fallbacks}/{n_transitions} ({:.2}%)",
+        "{label}: split-R̂ worst {:.3} (σ₀²) / {:.3} (π₀), {} of {} dims over {RHAT_WARN}; \
+         min ESS {:.1} / {:.1}; {bracket_note}",
         worst(sigma_diag),
         worst(pi0_diag),
         failing(sigma_diag) + failing(pi0_diag),
         sigma_diag.len() + pi0_diag.len(),
         min_ess(sigma_diag),
         min_ess(pi0_diag),
-        100.0 * frac,
     );
     let n_bad = failing(sigma_diag) + failing(pi0_diag);
     if n_bad > 0 {
@@ -695,12 +708,12 @@ fn report_convergence(
              than as measurements, and raise --posterior N before reading them."
         );
     }
-    if frac > 0.25 {
+    if frac.is_some_and(|p| p > 0.25) {
         log::warn!(
             "{:.0}% of slice transitions exhausted their bracket and fell back to the current \
              value, so most coordinates are not moving. The tables will still be fully \
              populated; they are not a sample.",
-            100.0 * frac,
+            100.0 * frac.unwrap_or(0.0),
         );
     }
 }
@@ -1091,8 +1104,8 @@ pub(crate) fn pb_gibbs_splice(
         "gem splice (β gate)",
         &out.beta_sigma_diag,
         &out.beta_pi0_diag,
-        fallbacks,
-        n_transitions,
+        // Summed over all THREE blocks, so it belongs to the run, not to this gate.
+        Some((fallbacks, n_transitions)),
     );
     // The δ gate gets its own line: it is a different object on a different scale, so a
     // shared summary would let one gate's healthy chains cover for the other's.
@@ -1100,8 +1113,7 @@ pub(crate) fn pb_gibbs_splice(
         "gem splice (δ gate)",
         &out.delta_sigma_diag,
         &out.delta_pi0_diag,
-        0,
-        0,
+        None,
     );
 
     // Intercepts against the posterior-mean sides, same reasoning as the bge path.
