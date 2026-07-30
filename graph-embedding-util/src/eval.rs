@@ -121,12 +121,17 @@ pub fn save_outputs_named(
         ctx.feature_names,
         "feature",
     )?;
-    // The gate's inclusion probabilities `σ(S)`, when the gate is on. Rows align with
-    // the feature dictionary. Every entry is an INDEPENDENT probability in (0,1) for
-    // that (gene, dim): neither rows nor columns sum to anything in particular, and a
-    // gene may load several dims. This is the variational estimate of exactly what
-    // `--posterior` samples into `feature_pip` / `beta_pip`, so the two are directly
-    // comparable. Skipped for an ungated model.
+    // The LEARNED gate's inclusion probabilities `σ(S)`, when that gate is what
+    // selected. Rows align with the feature dictionary. Every entry is an INDEPENDENT
+    // probability in (0,1) for that (gene, dim): neither rows nor columns sum to
+    // anything in particular, and a gene may load several dims. This is the variational
+    // estimate of the same estimand `--posterior` samples into `feature_pip` /
+    // `beta_pip`.
+    //
+    // Skipped for an ungated model, AND under `--posterior`: there the selection pass
+    // installed a `pip`, training stopped reading these logits, and `feature_pip` is
+    // already the table to read. Emitting both would ship two files with identical
+    // bytes and a comment inviting the reader to compare them.
     //
     // The predecessor was a per-dim softmax over genes, where a COLUMN carried one
     // unit of mass and 1.0 meant "neutral". Anything reading these tables against that

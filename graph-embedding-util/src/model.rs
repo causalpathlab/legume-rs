@@ -598,27 +598,51 @@ impl JointEmbedModel {
                 self.factored_feat_rows(f, &f.row_to_gene, mask.as_ref(), false)?
                     .detach(),
             )
-        } else if let (Some(raw), Some(s_feat)) = (&self.e_feat_raw, &self.s_feat) {
-            // Free + gated: bake the gate into `e_feat` from the raw Var (no smoother
-            // at materialize — SGC smoothing is a training-time device; means, no sample).
+        } else if let Some(w) = self.free_feature_multiplier()? {
+            // Free + gated: bake whatever multiplies the loading into `e_feat`, reading
+            // the RAW Var so a second call cannot gate twice (no smoother at
+            // materialize — SGC smoothing is a training-time device; means, no sample).
+            //
+            // "Whatever multiplies" is the point. It used to require the LEARNED gate's
+            // Vars to be present, so an ungated model carrying only an installed `pip`
+            // trained under the mask — `gather_feature_rows` takes the pip branch
+            // regardless of the gate — and then shipped the dictionary unmasked,
+            // because this arm did not fire. Phase 2 projected against a dictionary the
+            // fit never used.
+            let raw = self.e_feat_raw.as_ref().unwrap_or(&self.e_feat);
             Some(
-                self.gated_rows(
-                    raw,
-                    self.e_feat_logstd.as_ref(),
-                    Some(&self.gate_weights(GateKind::Identity, s_feat)?),
-                    false,
-                )?
-                .detach(),
+                self.gated_rows(raw, self.e_feat_logstd.as_ref(), Some(&w), false)?
+                    .detach(),
             )
         } else {
-            // Free + ungated: `e_feat` already IS the trained Var — leave it (no-op,
-            // byte-identical to the pre-gate behaviour).
+            // Free + ungated + no pip: `e_feat` already IS the trained Var — leave it
+            // (no-op, byte-identical to the pre-gate behaviour).
             None
         };
         if let Some(g) = gated {
             self.e_feat = g;
         }
         Ok(())
+    }
+
+    /// What currently multiplies a FREE model's feature loading: the installed `pip`
+    /// (or this epoch's draw from it), else the learned gate's `α = σ(S/τ)`, else
+    /// `None` for a model with neither. Factored models compose their own via
+    /// [`Self::factored_feat_rows`].
+    ///
+    /// The two cases must both be here, and in this order. `gate_weights` ignores its
+    /// logits argument once a `pip` is installed, but it panics on an ungated model —
+    /// `apply_temperature` reads `self.gate` — so the learned branch may only be
+    /// reached when `s_feat` exists.
+    fn free_feature_multiplier(&self) -> Result<Option<Tensor>> {
+        if self.gate_pip.is_some() {
+            let raw = self.e_feat_raw.as_ref().unwrap_or(&self.e_feat);
+            return Ok(Some(self.gate_weights(GateKind::Identity, raw)?));
+        }
+        match self.s_feat.as_ref() {
+            Some(s) => Ok(Some(self.gate_weights(GateKind::Identity, s)?)),
+            None => Ok(None),
+        }
     }
 
     /// Enable the variational spike-and-slab gate on the feature side (see
@@ -763,11 +787,33 @@ impl JointEmbedModel {
     ) -> Result<()> {
         let h = self.embedding_dim;
         assert_eq!(pip.len(), rows * h, "gate pip must be [rows, H]");
-        let t = Tensor::from_slice(pip, (rows, h), &Device::Cpu)?.to_device(dev)?;
+        self.install_gate_pip(
+            kind,
+            &Tensor::from_slice(pip, (rows, h), &Device::Cpu)?.to_device(dev)?,
+        )
+    }
+
+    /// [`Self::set_gate_pip`] for a table already on the device.
+    ///
+    /// The composite fit installs the SAME `pip` on the primary model and on every pb
+    /// head. Going through the slice form once per model re-uploads it each time —
+    /// `[34k genes, 128 dims]` is 17 MB per copy, paid once per level on top of the
+    /// one that was needed. `Tensor` clones share storage, so this uploads once.
+    pub fn install_gate_pip(&mut self, kind: GateKind, pip: &Tensor) -> Result<()> {
+        let t = pip.clone();
         match kind {
             GateKind::Identity => {
                 self.gate_pip = Some(t);
                 *self.gate_mask.lock().expect("gate mask poisoned") = None;
+                // A free model with no LEARNED gate has no `e_feat_raw`, so `e_feat` is
+                // both the trained Var and the field `materialize_e_feat` writes.
+                // Pin the Var here (the clone aliases the same storage, so it keeps
+                // tracking training) and materialize then reads a source it never
+                // writes — otherwise a second materialize would gate an already-gated
+                // dictionary. Factored models are unaffected: they rebuild from `beta`.
+                if self.factor.is_none() && self.e_feat_raw.is_none() {
+                    self.e_feat_raw = Some(self.e_feat.clone());
+                }
             }
             GateKind::Velocity => {
                 if let Some(f) = self.factor.as_mut() {
@@ -987,10 +1033,18 @@ impl JointEmbedModel {
         let Some(logits) = logits else {
             return Ok(None);
         };
-        // Normalize on the FULL table first, then expand per-gene → per-row. Doing
-        // it the other way round would normalize over duplicated rows on the `Gene`
-        // axis (a factored model repeats each gene once per splice track), halving
-        // every value while leaving the β-sharing equality test passing.
+        // A LEARNED readout only. Once a selection pass installs a `pip`, training
+        // never consults these logits again, so `α = σ(S/τ)` is frozen at its init and
+        // says nothing about the fit — while `gate_weights` would hand back the `pip`
+        // itself, making this table a byte copy of `feature_pip.parquet` that the docs
+        // then invite the reader to compare against it. Emit nothing instead.
+        let (pip, _) = self.gate_tables(kind);
+        if pip.is_some() {
+            return Ok(None);
+        }
+        // Compute on the FULL table first, then expand per-gene → per-row: a factored
+        // model repeats each gene once per splice track, so the other order would
+        // transform over duplicated rows on the `Gene` axis.
         let w = self.gate_weights(kind, logits)?;
         let rows = match &self.factor {
             Some(f) => w.index_select(&f.row_to_gene, 0)?,

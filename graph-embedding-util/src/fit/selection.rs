@@ -235,16 +235,25 @@ pub(crate) fn install_selection(
         );
     }
 
-    cell_model.set_gate_pip(GateKind::Identity, pip, rows, dev)?;
-    if let Some(d) = dpip.as_ref() {
-        cell_model.set_gate_pip(GateKind::Velocity, d, rows, dev)?;
+    // Upload each table ONCE and hand every model a storage-sharing clone. The slice
+    // form re-uploads per call, and at `[34k genes, 128 dims]` that is 17 MB per model
+    // per gate, paid again for every collapse level.
+    let upload = |v: &[f32]| -> anyhow::Result<Tensor> {
+        Ok(Tensor::from_slice(v, (rows, h), &Device::Cpu)?.to_device(dev)?)
+    };
+    let pip_t = upload(pip)?;
+    let dpip_t = dpip.as_deref().map(upload).transpose()?;
+
+    cell_model.install_gate_pip(GateKind::Identity, &pip_t)?;
+    if let Some(d) = dpip_t.as_ref() {
+        cell_model.install_gate_pip(GateKind::Velocity, d)?;
     }
     let (identity_cell, velocity_cell) =
         (cell_model.gate_mask_cell(), cell_model.velocity_mask_cell());
     for m in level_models {
-        m.set_gate_pip(GateKind::Identity, pip, rows, dev)?;
-        if let Some(d) = dpip.as_ref() {
-            m.set_gate_pip(GateKind::Velocity, d, rows, dev)?;
+        m.install_gate_pip(GateKind::Identity, &pip_t)?;
+        if let Some(d) = dpip_t.as_ref() {
+            m.install_gate_pip(GateKind::Velocity, d)?;
         }
         m.share_gate_masks(&identity_cell, velocity_cell.as_ref());
     }

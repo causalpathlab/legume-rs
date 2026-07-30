@@ -380,3 +380,95 @@ fn a_zero_pip_never_draws_on() {
         }
     }
 }
+
+/// An UNGATED model carrying only an installed `pip` must ship the masked dictionary.
+///
+/// `gather_feature_rows` takes the pip branch whether or not the learned gate exists,
+/// so such a model trains under the mask. `materialize_e_feat` used to require the
+/// learned gate's Vars to be present before it baked anything in, so the dictionary
+/// went out UNMASKED — phase 2 then projected every cell against a feature side the
+/// fit had never used. Nothing about that fails to compile, and no arm of it is
+/// unreachable: `senna bge --posterior` reaches it whenever the gate is off.
+#[test]
+fn an_ungated_model_ships_the_mask_it_trained_under() {
+    let (n_features, h) = (8usize, 3usize);
+    let vm = VarMap::new();
+    let mut pip = vec![1.0f32; n_features * h];
+    for (i, p) in pip.iter_mut().enumerate() {
+        if i % 3 == 0 {
+            *p = 0.0;
+        }
+    }
+    let (mut m, _) = free_with_heads(n_features, h, 1, &pip, &vm);
+    assert!(
+        m.gate.is_none() && m.s_feat.is_none(),
+        "precondition: no LEARNED gate, only a pip"
+    );
+    let raw: Vec<f32> = m
+        .e_feat_raw
+        .as_ref()
+        .expect("installing a pip pins the raw Var")
+        .flatten_all()
+        .unwrap()
+        .to_vec1()
+        .unwrap();
+
+    m.materialize_e_feat().unwrap();
+    let got: Vec<f32> = m.e_feat.flatten_all().unwrap().to_vec1().unwrap();
+    for (i, (g, r)) in got.iter().zip(&raw).enumerate() {
+        let want = r * pip[i];
+        assert!(
+            (g - want).abs() < 1e-6,
+            "entry {i}: dictionary {g} != raw {r} x pip {}",
+            pip[i]
+        );
+    }
+
+    // And it is IDEMPOTENT: materializing again must not gate the already-gated table.
+    m.materialize_e_feat().unwrap();
+    let twice: Vec<f32> = m.e_feat.flatten_all().unwrap().to_vec1().unwrap();
+    assert_eq!(
+        got, twice,
+        "a second materialize must not apply the pip twice"
+    );
+}
+
+/// Under a `pip`, `feature_selection` must emit NOTHING rather than the pip again.
+/// Training stops reading the learned logits the moment a pip is installed, so their
+/// `α` is frozen at its init — and `gate_weights` would hand back the pip itself,
+/// making `feature_selection.parquet` a byte copy of `feature_pip.parquet`.
+#[test]
+fn a_pip_suppresses_the_learned_selection_table() {
+    let (n_genes, h) = (4usize, 3usize);
+    let vm = VarMap::new();
+    let (mut m, mut heads) = factored_with_head(n_genes, h, &vm);
+    m.enable_feature_gate(
+        crate::model::FeatureGateSpec { temperature: 1.0 },
+        &vm,
+        &dev(),
+    )
+    .unwrap();
+    assert!(
+        m.feature_selection().unwrap().is_some(),
+        "with only the learned gate the table is the readout"
+    );
+    let splice = splice_result(n_genes, h, 0.5, 0.5, true);
+    install_selection(
+        &mut m,
+        &mut heads,
+        None,
+        Some(&splice),
+        n_genes * 2,
+        h,
+        &dev(),
+    )
+    .unwrap();
+    assert!(
+        m.feature_selection().unwrap().is_none(),
+        "once a pip selects, feature_pip is the table to read"
+    );
+    assert!(
+        m.velocity_selection().unwrap().is_none(),
+        "same for the velocity gate"
+    );
+}
