@@ -24,7 +24,6 @@
     clippy::many_single_char_names
 )]
 
-pub mod ash;
 pub mod cell_projection;
 pub mod coarsen;
 pub mod data;
@@ -33,7 +32,6 @@ pub mod feature_qc;
 pub mod fit;
 pub mod loss;
 pub mod model;
-pub mod null_call;
 pub mod posterior;
 pub mod postprocess;
 pub mod progress;

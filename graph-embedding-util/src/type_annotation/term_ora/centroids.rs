@@ -6,7 +6,7 @@
 //! because every one of them reads the same `[c × h]` prototype block under the same
 //! Euclidean metric, and the guards against a short centroid have to agree across them.
 
-use crate::null_call::live_row;
+use crate::type_annotation::live_row;
 use crate::type_annotation::markers::MarkerSets;
 use crate::type_annotation::UNASSIGNED;
 use anyhow::Result;

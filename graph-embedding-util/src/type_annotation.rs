@@ -102,6 +102,31 @@ pub(super) fn n_communities(community: &[usize]) -> usize {
     community.iter().copied().max().map_or(0, |m| m + 1).max(1)
 }
 
+/// Row `i` of a flat row-major embedding (`[· × h]`) **when it carries a usable
+/// embedding** — in range and not all-zero. `None` for a dead row.
+///
+/// An exactly-all-zero row is this crate's in-band "no usable embedding" signal: a
+/// feature with no usable estimate is *zeroed* rather than handed a fabricated
+/// direction. Consumers must read it as **missing data, not an observation of zero** —
+/// averaging it in would drag the mean toward the origin.
+///
+/// Two mechanisms put an exact zero there, and both mean the same thing. A consumer can
+/// zero a row it has judged uninformative (`hub_call` does, for the rows the co-embedding
+/// parked at the centre of the cell cloud). And the posterior selection pass installs a
+/// per-`(feature, dim)` `pip`: an entry at `pip == 0` is permanently masked, its loading
+/// never trains, and the materialized dictionary carries an exact zero — so an all-zero
+/// row is a feature the selection excluded on *every* dimension, which is precisely the
+/// "no usable direction" case this function exists to catch.
+///
+/// It remains an invariant rather than a heuristic: a coordinate that actually trained is
+/// never exactly zero (SGD from a random init in `f32`), so a zero is always a decision
+/// somebody made, never an estimate that happened to land on the origin.
+#[must_use]
+pub(super) fn live_row(rows: &[f32], i: usize, h: usize) -> Option<&[f32]> {
+    let row = rows.get(i * h..(i + 1) * h)?;
+    row.iter().any(|&x| x != 0.0).then_some(row)
+}
+
 /// Firm projection annotation by term over-representation within cell clusters
 /// (Euclidean nearest-centroid → QC → cluster → hypergeometric + permutation
 /// calibration → optional TreeBH ontology). The statistically-firm successor to
@@ -139,25 +164,6 @@ pub use support_null::{run_support_null, SupportNull};
 /// loader (load OBO + `label→CL`, inject access closures, run). Shared by the
 /// term-ORA path and by `senna annotate-ontology` / `-by-enrichment`.
 pub use ontology_obo::annotate_ontology_from_obo;
-
-/// File-name suffixes (relative to the `out_prefix`) of every artifact
-/// [`annotate_embeddings`] writes — the single source of truth for the
-/// projection annotation output set, so callers (e.g. `senna
-/// annotate-by-projection --clean`) can erase a prior run without
-/// re-transcribing the names across a crate boundary. Keep in sync with the
-/// writers in `output`/`layout`.
-pub const ANNOT_OUTPUT_SUFFIXES: &[&str] = &[
-    ".annot.parquet",
-    ".membership.tsv",
-    ".argmax.tsv",
-    ".community_profile.parquet",
-    ".type_map.parquet",
-    ".marker_embedding.parquet",
-    ".type_embedding.parquet",
-    ".coarse_embedding.parquet",
-    ".cell_coords.parquet",
-    ".feature_coords.parquet",
-];
 
 /// Tunables for the annotation routines.
 pub struct AnnotateProjConfig {

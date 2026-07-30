@@ -11,11 +11,11 @@
 //! `partition_scale = n_other / |slate|` folds a sampled slate back up to the full
 //! Poisson normalizer; a slate covering the whole other side has scale `1`.
 
-use super::lnpdf::{FrozenSide, NodeTerm};
+use super::lnpdf::FrozenSide;
 
 /// Owned frozen index: the fixed other side plus per-anchor observed edges and
-/// the shared negative slate. Views into it are handed to the samplers via
-/// [`Self::frozen_side`] / [`Self::node_terms`].
+/// the shared negative slate. A view of the fixed side is handed to the samplers
+/// via [`Self::frozen_side`].
 pub struct ContrastiveIndex {
     /// Frozen other-side embeddings `[n_other × h]` row-major.
     pub other_e: Vec<f32>,
@@ -33,8 +33,8 @@ pub struct ContrastiveIndex {
     /// `n_other / |partition|` — folds the sampled slate up to the full sum.
     pub partition_scale: f64,
     /// Optional `[n_anchors × h]` row-major frozen directions, one per anchor,
-    /// handed to each [`NodeTerm`] as its `offset` (see that field). `None` for
-    /// the plain case where the sampler explores an absolute loading.
+    /// handed to each [`super::lnpdf::NodeTerm`] as its `offset` (see that field).
+    /// `None` for the plain case where the sampler explores an absolute loading.
     pub anchor_offset: Option<Vec<f32>>,
 }
 
@@ -49,46 +49,9 @@ impl ContrastiveIndex {
         }
     }
 
-    /// One [`NodeTerm`] per anchor (all sharing the frozen slate), each carrying
-    /// its [`Self::anchor_offset`] row when one is set.
-    #[must_use]
-    pub fn node_terms(&self) -> Vec<NodeTerm<'_>> {
-        self.pos
-            .iter()
-            .enumerate()
-            .map(|(a, pos)| NodeTerm {
-                pos,
-                partition: &self.partition,
-                partition_scale: self.partition_scale,
-                offset: self
-                    .anchor_offset
-                    .as_ref()
-                    .map(|off| &off[a * self.h..(a + 1) * self.h]),
-                moment: None,
-            })
-            .collect()
-    }
-
     /// Number of anchors.
     #[must_use]
     pub fn n_anchors(&self) -> usize {
         self.pos.len()
-    }
-
-    /// Anchors carrying at least one observed count, in anchor order.
-    ///
-    /// The complement is not a subsample. An anchor with no counts makes
-    /// [`super::lnpdf::multinomial_ll`] return a constant, so its posterior IS its
-    /// prior and sampling it redraws something already known.
-    #[must_use]
-    pub fn informative_anchors(&self) -> Vec<usize> {
-        (0..self.n_anchors())
-            .filter(|&a| !self.pos[a].is_empty())
-            .collect()
-    }
-
-    #[must_use]
-    pub fn n_empty_anchors(&self) -> usize {
-        self.pos.iter().filter(|p| p.is_empty()).count()
     }
 }

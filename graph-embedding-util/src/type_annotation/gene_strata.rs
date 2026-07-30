@@ -35,7 +35,7 @@
 //! Wallenius noncentral hypergeometric. We *can* permute, so we get the exact conditional null and
 //! skip the noncentral approximation entirely.)
 
-use crate::null_call::live_row;
+use super::live_row;
 
 /// The marker-gene pool, binned by embedding norm.
 pub(super) struct GeneStrata {

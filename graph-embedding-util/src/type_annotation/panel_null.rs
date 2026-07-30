@@ -53,10 +53,10 @@
 //! one question worth asking: **are these the right genes?**
 
 use super::gene_strata::GeneStrata;
+use super::live_row;
 use super::marker_bootstrap::sq_dist;
 use super::markers::marker_gene_pool;
 use super::term_ora::term_centroids;
-use crate::null_call::live_row;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use rayon::prelude::*;
