@@ -656,7 +656,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         })
     };
 
-    // Single-pass gated fit over the full feature axis — the softmax gate handles
+    // Single-pass gated fit over the full feature axis — the feature gate handles
     // feature selection during training (no post-hoc null-drop / refit).
     let cfg = build_config(&unified)?;
     let out = ge::fit(&mut unified, cfg)?;
