@@ -215,4 +215,26 @@ fn per_dim_blocking_recovers_a_multi_dim_truth_the_gate_must_trade_off() {
          ({:.3} vs {loaded_pi0:.3}) — otherwise the per-dim hypers are inert",
         res.pi0[UNLOADED]
     );
+
+    // (5) The slab variances on dims that carry signal are estimated from thousands of
+    // included coordinates, so they are stable and worth asserting.
+    //
+    // `sigma2[UNLOADED]` deliberately is NOT. With `π₀ ≈ 0.94` on a 40-anchor block
+    // only a couple of coordinates are ever included there, so its Half-Cauchy draw is
+    // prior-dominated and swings over most of the prior's support between runs — it has
+    // been seen at both 0.23 and 1.00 on this fixture under different RNG streams. That
+    // is the per-dim hyper behaving correctly (tight where there is data, loose where
+    // there is none), not a regression, and pinning it would make this test fail for
+    // the wrong reason.
+    for d in 0..H {
+        if d == UNLOADED {
+            continue;
+        }
+        assert!(
+            res.sigma2[d].is_finite() && (0.5..4.0).contains(&res.sigma2[d]),
+            "loaded dim {d}'s slab variance {:.3} left the plausible band — these are \
+             pooled over every anchor on the dim, so they should not wander",
+            res.sigma2[d]
+        );
+    }
 }

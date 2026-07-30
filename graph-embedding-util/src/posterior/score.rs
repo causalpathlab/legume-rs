@@ -43,6 +43,63 @@
 use super::lnpdf::{multinomial_ll, FrozenSide, NodeTerm};
 use crate::cell_projection::SCORE_CLAMP;
 
+/// The frozen side restricted to one term's negative slate, **transposed** so a
+/// single dim's column is contiguous.
+///
+/// A column pass changes exactly one coordinate at a time, so a score only ever
+/// shifts by `Δ · e_o[d]`. Holding `e_o[d]` contiguous across the slate is what turns
+/// the rate normalizer from `|slate|` dot products of length `h` into one pass of
+/// `|slate|` multiply-adds — a per-anchor cost that scales with `h` rather than `h²`.
+///
+/// Built once per block and shared read-only across every tile: `h × |slate|` floats,
+/// 128 KB at `h = 32`, `|slate| = 1024`, so it stays resident alongside a tile.
+pub struct SlateSlab {
+    /// `col[d * k + j] = e[slate[j] * h + d]`.
+    col: Vec<f32>,
+    /// `b_o` per slate entry.
+    b: Vec<f32>,
+    k: usize,
+}
+
+impl SlateSlab {
+    /// Transpose `side`'s slate rows into dim-major order.
+    #[must_use]
+    pub fn new(partition: &[u32], side: &FrozenSide) -> Self {
+        let (h, k) = (side.h, partition.len());
+        let mut col = vec![0f32; h * k];
+        let mut b = vec![0f32; k];
+        for (j, &o) in partition.iter().enumerate() {
+            let row = &side.e[o as usize * h..(o as usize + 1) * h];
+            for (d, v) in row.iter().enumerate() {
+                col[d * k + j] = *v;
+            }
+            b[j] = side.b[o as usize];
+        }
+        Self { col, b, k }
+    }
+
+    /// Dim `d`'s contiguous column over the slate, `[k]`.
+    #[inline]
+    #[must_use]
+    pub fn dim(&self, d: usize) -> &[f32] {
+        &self.col[d * self.k..(d + 1) * self.k]
+    }
+
+    /// Per-slate-entry biases `b_o`, `[k]`.
+    #[inline]
+    #[must_use]
+    pub fn biases(&self) -> &[f32] {
+        &self.b
+    }
+
+    /// Slate width.
+    #[inline]
+    #[must_use]
+    pub fn k(&self) -> usize {
+        self.k
+    }
+}
+
 /// Everything a column evaluation reads, built once per tile per sweep.
 ///
 /// All fields are `[b …]`-shaped over the anchors of ONE tile, not over the whole

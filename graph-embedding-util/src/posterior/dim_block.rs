@@ -48,22 +48,33 @@
 //!
 //! # Blocking, and the mixing trade
 //!
-//! Given the frozen cell side, genes are conditionally independent, so the outer
-//! `rayon par_iter` is over **genes** and the dim scan runs *inside* each gene's
-//! closure. That ordering is deliberate:
+//! What this file owns is the **statistical scaffolding**: the sweep loop, the per-dim
+//! hyper draws, the accumulators, the diagnostics and the interrupt. The sampling
+//! itself is a column pass in [`super::column`] — for each dim, every anchor at once —
+//! and this drives it one tile of anchors at a time so each tile's score block stays
+//! cache-resident across the whole dim scan.
 //!
-//!   * it is a proper systematic-scan Gibbs — dim `h` conditions on the already
-//!     updated dims `< h` of the same gene;
-//!   * it amortizes the per-gene scratch buffers over the whole scan instead of
-//!     reallocating per `(gene, dim)`;
-//!   * the hypers update once per sweep, after every gene — standard blocked Gibbs.
+//! Given the frozen cell side, genes are conditionally independent, which is what makes
+//! that transpose valid: a single dim's conditional factorizes over anchors. Two things
+//! follow, and they are load-bearing:
 //!
-//! The honest cost: a coordinate-wise scan mixes **worse** than a joint-over-dims
-//! block when the dims are correlated, and they are — the dims are coupled through
-//! the cell Gram `Σ = Eᶜᵀ Eᶜ`, which is not diagonal. We take that trade because the
-//! *selection* estimand is what was wrong, not the mixing. The standard fix if it
-//! bites is to draw in a whitened basis; the per-dim readout is what must stay in
-//! the original basis, not the draw.
+//!   * dims stay **sequential** within a tile, so this is a proper systematic-scan
+//!     Gibbs — dim `h` conditions on the already updated dims `< h`;
+//!   * the hypers update once per sweep, after every tile has reported, from additive
+//!     sufficient statistics. Standard blocked Gibbs, and unaffected by how the anchor
+//!     axis happened to be cut.
+//!
+//! Tiling is for locality, never for mixing, and the answer must not depend on the tile
+//! width — every anchor's randomness is keyed by its global index. `column`'s own tests
+//! assert that directly.
+//!
+//! The honest cost: a coordinate-wise scan mixes **worse** than a joint-over-dims block
+//! when the dims are correlated, and they are — the dims are coupled through the cell
+//! Gram `Σ = Eᶜᵀ Eᶜ`, which is not diagonal. We take that trade because the *selection*
+//! estimand is what was wrong, not the mixing, and because a joint move over dims
+//! cannot produce a per-coordinate inclusion indicator at all. The standard fix if it
+//! bites is to draw in a whitened basis; the per-dim readout is what must stay in the
+//! original basis, not the draw.
 //!
 //! # Identifiability caveat — read the PIPs as a set
 //!
@@ -84,16 +95,14 @@
 //! set-valued credible set instead, but only by sampling a per-gene
 //! parameterization the trainer no longer uses.
 
+use super::column;
 use super::diagnostics::{scalar_diagnostics, ChainDiag};
-use super::hyper::{gene_rng, sample_pi0, sigmoid, HalfCauchyVar};
-use super::lnpdf::{multinomial_ll, FrozenSide, NodeTerm};
-use crate::cell_projection::SCORE_CLAMP;
+use super::hyper::{sample_pi0, HalfCauchyVar};
+use super::lnpdf::{FrozenSide, NodeTerm};
+use super::score::{ProfiledPoisson, SlateSlab};
 use crate::progress::new_progress_bar;
-use mcmc_util::engine::elliptical_slice_step;
-use nalgebra::DVector;
 use rand::rngs::StdRng;
-use rand::{RngExt, SeedableRng};
-use rand_distr::{Distribution, StandardNormal};
+use rand::SeedableRng;
 use rayon::prelude::*;
 
 /// Configuration for [`dim_block`].
@@ -252,6 +261,19 @@ pub struct DimBlockResult {
     /// the next block on it (see [`DimBlockConfig::z_allowed`]); for reporting,
     /// use [`Self::pip`].
     pub final_z: Vec<bool>,
+    /// Slice transitions that exhausted their bracket and fell back to the current
+    /// value, summed over every `(anchor, dim, sweep)`.
+    ///
+    /// This is the sampler's analogue of a rejected move, and it is reported rather
+    /// than swallowed for the same reason a truncated result set is: a run where most
+    /// coordinates stall still produces a full table of plausible numbers. Compare it
+    /// against [`Self::n_transitions`].
+    pub fallbacks: usize,
+    /// Slice transitions attempted, the denominator for [`Self::fallbacks`].
+    pub n_transitions: usize,
+    /// Batched likelihood evaluations — the run's actual cost, in the unit the column
+    /// pass charges for.
+    pub n_evals: usize,
 }
 
 impl DimBlockResult {
@@ -269,155 +291,6 @@ impl DimBlockResult {
 }
 
 /// Per-gene sweep state handed back from the parallel map.
-struct GeneDraw {
-    beta: DVector<f32>,
-    z: Vec<bool>,
-}
-
-/// The frozen side restricted to one term's negative slate, **transposed** so a
-/// single dim's column is contiguous.
-///
-/// The dim scan changes exactly one coordinate at a time, so a score only ever
-/// shifts by `Δ · e_o[d]`. Holding `e_o[d]` contiguous across the slate turns the
-/// rate normalizer from `|slate|` dot products of length `h` into one pass of
-/// `|slate|` multiply-adds — the difference between a per-anchor cost that scales
-/// with `h²` and one that scales with `h`.
-///
-/// Built once per block and shared read-only across anchors: `h × |slate|` floats,
-/// 128 KB at `h = 32`, `|slate| = 1024`.
-struct SlateSlab {
-    /// `col[d * k + j] = e[slate[j] * h + d]`.
-    col: Vec<f32>,
-    /// `b_o` per slate entry.
-    b: Vec<f32>,
-    k: usize,
-}
-
-impl SlateSlab {
-    fn new(partition: &[u32], side: &FrozenSide) -> Self {
-        let (h, k) = (side.h, partition.len());
-        let mut col = vec![0f32; h * k];
-        let mut b = vec![0f32; k];
-        for (j, &o) in partition.iter().enumerate() {
-            let row = &side.e[o as usize * h..(o as usize + 1) * h];
-            for (d, v) in row.iter().enumerate() {
-                col[d * k + j] = *v;
-            }
-            b[j] = side.b[o as usize];
-        }
-        Self { col, b, k }
-    }
-
-    #[inline]
-    fn dim(&self, d: usize) -> &[f32] {
-        &self.col[d * self.k..(d + 1) * self.k]
-    }
-}
-
-/// `s[j] = ⟨v, e_o⟩ + b_o` for an anchor's current effective loading `v` — its
-/// frozen offset plus every INCLUDED dim. One `|slate| × h` pass per term per
-/// sweep; every dim afterwards is `O(|slate|)`.
-fn seed_scores(
-    node: &NodeTerm,
-    slab: &SlateSlab,
-    th: &DVector<f32>,
-    z: &[bool],
-    h: usize,
-) -> Vec<f64> {
-    let mut s: Vec<f64> = slab.b.iter().map(|b| f64::from(*b)).collect();
-    for d in 0..h {
-        let w = node.offset.map_or(0.0, |b| b[d]) + if z[d] { th[d] } else { 0.0 };
-        if w == 0.0 {
-            continue;
-        }
-        for (sj, cj) in s.iter_mut().zip(slab.dim(d)) {
-            *sj += f64::from(w) * f64::from(*cj);
-        }
-    }
-    s
-}
-
-/// The profile log-likelihood at coordinate `d` set to `x`, given running scores
-/// `s` that already exclude that coordinate.
-///
-/// Identical in value to [`multinomial_ll`], not an approximation of it:
-/// [`SCORE_CLAMP`] is applied here, at the point the score is exponentiated,
-/// which is exactly where `score()` applies it. The saving is that the other
-/// `h − 1` coordinates are already folded into `s`, so the normalizer costs one
-/// pass over the slate instead of `|slate|` dot products of length `h`.
-///
-/// Falls back to the full walk when the loading leaves the moment's safe radius —
-/// the same guard [`multinomial_ll`] applies, for the same reason.
-fn incremental_ll(
-    node: &NodeTerm,
-    off: &[f32],
-    x: f32,
-    d: usize,
-    slab: &SlateSlab,
-    s: &[f64],
-    side: &FrozenSide,
-) -> f32 {
-    let Some(mom) = node.moment else {
-        // No precomputed moment: the data term needs the edge walk anyway, so
-        // there is nothing to gain here.
-        return multinomial_ll_at(node, off, x, d, side);
-    };
-    if mom.total == 0.0 {
-        return 0.0; // no counts ⇒ flat in `e_a`
-    }
-    // Outside the safe radius the collapsed data term is not the clamped one.
-    let mut nrm2 = x * x;
-    for (kk, o) in off.iter().enumerate() {
-        if kk != d {
-            nrm2 += o * o;
-        }
-    }
-    if nrm2.sqrt() > mom.safe_radius {
-        return multinomial_ll_at(node, off, x, d, side);
-    }
-
-    // Data term: ⟨off + x·e_d, m⟩ plus the `Σ n·b_o` the collapse omits, so this
-    // agrees with `multinomial_ll_at` in absolute value and the radius guard's
-    // choice of form is not observable in a `z` logit or a slice threshold.
-    let mut data = mom.bias_dot;
-    for (kk, (o, m)) in off.iter().zip(&mom.m).enumerate() {
-        if kk != d {
-            data += f64::from(*o) * f64::from(*m);
-        }
-    }
-    data += f64::from(x) * f64::from(mom.m[d]);
-
-    // Normalizer: one pass, clamping each score exactly as `score()` does.
-    let col = slab.dim(d);
-    let mut m_max = f64::NEG_INFINITY;
-    for (sj, cj) in s.iter().zip(col) {
-        let v = (sj + f64::from(x) * f64::from(*cj)).clamp(-SCORE_CLAMP, SCORE_CLAMP);
-        if v > m_max {
-            m_max = v;
-        }
-    }
-    if !m_max.is_finite() {
-        return 0.0;
-    }
-    let mut acc = 0.0f64;
-    for (sj, cj) in s.iter().zip(col) {
-        let v = (sj + f64::from(x) * f64::from(*cj)).clamp(-SCORE_CLAMP, SCORE_CLAMP);
-        acc += (v - m_max).exp();
-    }
-    (data - mom.total * (m_max + acc.max(f64::MIN_POSITIVE).ln())) as f32
-}
-
-/// Reference path: rebuild the full loading and call [`multinomial_ll`].
-fn multinomial_ll_at(node: &NodeTerm, off: &[f32], x: f32, d: usize, side: &FrozenSide) -> f32 {
-    let mut e = vec![0f32; side.h];
-    e[d] = x;
-    let n = NodeTerm {
-        offset: Some(off),
-        ..*node
-    };
-    multinomial_ll(&e, &n, side)
-}
-
 /// Run the per-dim block Gibbs. `nodes[g]` is gene `g`'s likelihood terms against
 /// the frozen `side`; the per-gene intercept is profiled out by
 /// [`multinomial_ll`], so none is supplied.
@@ -465,35 +338,32 @@ pub fn dim_block_multi(
     let nodes = anchors;
     let h = side.h;
     let n_genes = nodes.len();
-    let k = cfg.transitions_per_dim.max(1);
 
-    // Live per-gene state: the slab effects `β_g` and the inclusion indicators
-    // `z_g`. BOTH are carried, because `z` genuinely gates — the effective loading
-    // is `z ⊙ β`, so a coordinate that is off contributes nothing to the offset the
-    // other dims condition on. `z` always cold-starts every dim off, so the data
-    // has to earn each one rather than starting from "all included"; `β` may be
-    // warm-started from a MAP fit (see `DimBlockConfig::init_beta`).
-    let mut beta: Vec<DVector<f32>> = match cfg.init_beta.as_deref() {
-        None => (0..n_genes).map(|_| DVector::zeros(h)).collect(),
+    // Live state, FLAT `[n_genes × h]`: the slab effects `β` and the inclusion
+    // indicators `z`. Both are carried, because `z` genuinely gates — the effective
+    // loading is `z ⊙ β`, so a coordinate that is off contributes nothing to what the
+    // other dims condition on. `z` always cold-starts every dim off, so the data has
+    // to earn each one rather than starting from "all included"; `β` may be
+    // warm-started (see `DimBlockConfig::init_beta`).
+    let mut beta: Vec<f32> = match cfg.init_beta.as_deref() {
+        None => vec![0.0f32; n_genes * h],
         Some(v) => {
-            // A silently mis-shaped warm start would produce a confident wrong
-            // answer rather than an obvious failure, so this is a hard check even
-            // though the function is infallible otherwise.
+            // A silently mis-shaped warm start would produce a confident wrong answer
+            // rather than an obvious failure, so this is a hard check even though the
+            // function is infallible otherwise.
             assert!(
                 v.len() == n_genes * h,
                 "init_beta is {} floats but {n_genes} anchors × {h} dims = {}",
                 v.len(),
                 n_genes * h
             );
-            (0..n_genes)
-                .map(|g| DVector::from_column_slice(&v[g * h..(g + 1) * h]))
-                .collect()
+            v.to_vec()
         }
     };
-    let mut zed: Vec<Vec<bool>> = match cfg.init_z.as_deref() {
+    let mut zed: Vec<bool> = match cfg.init_z.as_deref() {
         // `selection == false` pins every coordinate on; there is nothing to resume.
-        _ if !cfg.selection => (0..n_genes).map(|_| vec![true; h]).collect(),
-        None => (0..n_genes).map(|_| vec![false; h]).collect(),
+        _ if !cfg.selection => vec![true; n_genes * h],
+        None => vec![false; n_genes * h],
         Some(v) => {
             assert!(
                 v.len() == n_genes * h,
@@ -501,10 +371,22 @@ pub fn dim_block_multi(
                 v.len(),
                 n_genes * h
             );
-            (0..n_genes).map(|g| v[g * h..(g + 1) * h].to_vec()).collect()
+            v.to_vec()
         }
     };
-    let zeros_h = DVector::<f32>::zeros(h);
+
+    // Anchors are processed in TILES so each tile's `[b × k]` score block stays
+    // cache-resident across the whole dim loop; see `super::column`.
+    let n_terms = nodes.first().map_or(1, Vec::len);
+    let slate_k = nodes
+        .first()
+        .and_then(|terms| terms.first())
+        .map_or(1, |t| t.partition.len());
+    let tile_b = column::tile_size(slate_k, n_terms);
+    let tiles: Vec<(usize, usize)> = (0..n_genes)
+        .step_by(tile_b)
+        .map(|lo| (lo, (lo + tile_b).min(n_genes)))
+        .collect();
 
     let mut hv: Vec<HalfCauchyVar> = (0..h)
         .map(|_| HalfCauchyVar::new(cfg.half_cauchy_scale))
@@ -531,6 +413,9 @@ pub fn dim_block_multi(
         .unwrap_or_default();
 
     let mut n_kept = 0usize;
+    let mut fallbacks = 0usize;
+    let mut n_evals = 0usize;
+    let mut n_transitions = 0usize;
     let stop = crate::stop::stop_flag();
 
     // The whole sampler is this one loop, and on a real dictionary it runs for
@@ -555,132 +440,34 @@ pub fn dim_block_multi(
 
         let veto = cfg.z_allowed.as_deref();
         let selection = cfg.selection;
-        let draws: Vec<GeneDraw> = (0..n_genes)
-            .into_par_iter()
-            .map(|g| {
-                let mut rng = gene_rng(cfg.seed, g, sweep);
-                let node = &nodes[g];
-                let mut th = beta[g].clone();
-                let mut z = zed[g].clone();
-
-                // Scratch, allocated once per anchor per sweep and rewritten per
-                // dim — the reason anchors are the parallel axis. One offset
-                // buffer per TERM, since terms differ in their frozen base.
-                let mut offs: Vec<Vec<f32>> = vec![vec![0.0f32; h]; node.len()];
-                let mut cur = DVector::<f32>::zeros(h);
-                let mut nu = DVector::<f32>::zeros(h);
-
-                // Running slate scores, one buffer per term: `s[j] = ⟨v, e_o⟩ + b_o`
-                // for the anchor's CURRENT effective loading `v` (its frozen offset
-                // plus every INCLUDED dim). Seeding costs one `|slate| × h` pass per
-                // term per sweep; after that each dim is `O(|slate|)`.
-                let mut srun: Vec<Vec<f64>> = node
-                    .iter()
-                    .enumerate()
-                    .map(|(t, n)| seed_scores(n, &slabs[t], &th, &z, h))
-                    .collect();
-
-                for d in 0..h {
-                    // The frozen direction for this coordinate: the term's own
-                    // offset (gem's velocity track holds β_g here) PLUS the
-                    // EFFECTIVE loading of every other dim, `z_k·β_k`. A dim that
-                    // is off contributes nothing — that is what makes this a
-                    // spike-and-slab rather than a slab with a label attached.
-                    for (t, off) in offs.iter_mut().enumerate() {
-                        for (kk, o) in off.iter_mut().enumerate() {
-                            let base = node[t].offset.map_or(0.0, |b| b[kk]);
-                            *o = base + if kk == d || !z[kk] { 0.0 } else { th[kk] };
-                        }
-                    }
-
-                    // Peel dim `d` out of every term's running score, so `s_wo[t][j]`
-                    // is the score with this coordinate contributing nothing. Adding
-                    // `x · e_o[d]` back is then the whole cost of evaluating at `x`.
-                    let peeled = if z[d] { th[d] } else { 0.0 };
-                    for (t, s) in srun.iter_mut().enumerate() {
-                        if peeled != 0.0 {
-                            let colr = slabs[t].dim(d);
-                            for (sj, cj) in s.iter_mut().zip(colr) {
-                                *sj -= f64::from(peeled) * f64::from(*cj);
-                            }
-                        }
-                    }
-
-                    let lnpdf = |x: &DVector<f32>| -> f32 {
-                        node.iter()
-                            .zip(&offs)
-                            .enumerate()
-                            .map(|(t, (n, off))| {
-                                incremental_ll(n, off, x[d], d, &slabs[t], &srun[t], side)
-                            })
-                            .sum()
-                    };
-
-                    // ℓ with dim `d` OFF. Needed for the `z` draw, and it is also the
-                    // likelihood the ESS would start from, so it is not extra work.
-                    let ll_off = lnpdf(&zeros_h);
-
-                    // β_gd | z_gd. `cur` and `nu` are zero off coordinate `d`, so the
-                    // ESS ellipse moves ONLY that coordinate — a 1-D slice through the
-                    // joint, with the rest carried in `off`.
-                    cur.fill(0.0);
-                    cur[d] = th[d];
-                    let ll_on = if z[d] {
-                        // On: fit it against the likelihood.
-                        let mut ll = lnpdf(&cur);
-                        nu.fill(0.0);
-                        for _ in 0..k {
-                            let g_std: f64 = StandardNormal.sample(&mut rng);
-                            nu[d] = g_std as f32 * sd[d];
-                            let (nc, nl) = elliptical_slice_step(&cur, &nu, &lnpdf, ll, &mut rng);
-                            cur = nc;
-                            ll = nl;
-                        }
-                        ll
-                    } else {
-                        // Off: the likelihood does not see `β_gd` at all, so its exact
-                        // conditional IS the prior. Drawing it here rather than keeping
-                        // the stale fit is what makes the `z` step below a valid Gibbs
-                        // move — and it is why no Occam/BIC correction is needed. A
-                        // fitted `β` always beats 0, so comparing against one would bias
-                        // every coordinate ON; a prior draw usually does not, and the
-                        // penalty emerges from the chain visiting these states.
-                        let g_std: f64 = StandardNormal.sample(&mut rng);
-                        cur[d] = g_std as f32 * sd[d];
-                        lnpdf(&cur)
-                    };
-                    th[d] = cur[d];
-
-                    // z_gd | β_gd — an exact Gibbs draw from the joint, needing no
-                    // marginal likelihood: `p(z|β,y) ∝ p(y|z·β)·p(z)`. A vetoed
-                    // coordinate is pinned off instead: it is excluded by the
-                    // model, not merely unfavoured by the data.
-                    z[d] = if !selection {
-                        true
-                    } else {
-                        match veto {
-                            Some(mask) if !mask[g * h + d] => false,
-                            _ => {
-                                let logit =
-                                    log_prior_odds[d] + f64::from(ll_on) - f64::from(ll_off);
-                                rng.random::<f64>() < sigmoid(logit)
-                            }
-                        }
-                    };
-
-                    // Fold the coordinate's NEW effective value back in, so the
-                    // running scores describe the state the next dim conditions on.
-                    let restored = if z[d] { th[d] } else { 0.0 };
-                    if restored != 0.0 {
-                        for (t, s) in srun.iter_mut().enumerate() {
-                            let colr = slabs[t].dim(d);
-                            for (sj, cj) in s.iter_mut().zip(colr) {
-                                *sj += f64::from(restored) * f64::from(*cj);
-                            }
-                        }
-                    }
-                }
-                GeneDraw { beta: th, z }
+        // One tile at a time, dims INSIDE. `super::column` explains why: given the
+        // frozen side a dim's conditional factorizes over anchors, so a tile's score
+        // block can be carried across the whole dim loop by rank-1 updates and stays
+        // cache-resident while it is.
+        let draws: Vec<(usize, usize, column::TileDraw)> = tiles
+            .par_iter()
+            .map(|&(lo, hi)| {
+                let cargs = column::ColumnArgs {
+                    side,
+                    sd: &sd,
+                    log_prior_odds: &log_prior_odds,
+                    veto,
+                    selection,
+                    transitions: cfg.transitions_per_dim,
+                    seed: cfg.seed,
+                    sweep,
+                    h,
+                };
+                let draw = column::sample_tile(
+                    &ProfiledPoisson,
+                    &cargs,
+                    &nodes[lo..hi],
+                    &slabs,
+                    lo,
+                    &beta[lo * h..hi * h],
+                    &zed[lo * h..hi * h],
+                );
+                (lo, hi, draw)
             })
             .collect();
 
@@ -697,26 +484,32 @@ pub fn dim_block_multi(
         let mut n_incl = vec![0usize; h];
         let mut n_eligible = vec![0usize; h];
         let keep = sweep >= cfg.burnin;
-        for (g, draw) in draws.into_iter().enumerate() {
-            for d in 0..h {
-                let v = f64::from(draw.beta[d]);
-                if veto.is_none_or(|mask| mask[g * h + d]) {
-                    n_eligible[d] += 1;
-                }
-                if draw.z[d] {
-                    sum_sq[d] += v * v;
-                    n_incl[d] += 1;
-                    if keep {
-                        pip_acc[g * h + d] += 1.0;
-                        // The EFFECTIVE loading is `z·β`, so an excluded draw
-                        // contributes 0 — the posterior mean is over what the model
-                        // actually uses, not over the latent slab value.
-                        beta_acc[g * h + d] += v;
+        for (lo, hi, draw) in draws {
+            fallbacks += draw.fallbacks;
+            n_evals += draw.rounds;
+            n_transitions += (hi - lo) * h * cfg.transitions_per_dim.max(1);
+            for i in 0..(hi - lo) {
+                let g = lo + i;
+                for d in 0..h {
+                    let v = f64::from(draw.beta[i * h + d]);
+                    if veto.is_none_or(|mask| mask[g * h + d]) {
+                        n_eligible[d] += 1;
+                    }
+                    if draw.z[i * h + d] {
+                        sum_sq[d] += v * v;
+                        n_incl[d] += 1;
+                        if keep {
+                            pip_acc[g * h + d] += 1.0;
+                            // The EFFECTIVE loading is `z·β`, so an excluded draw
+                            // contributes 0 — the posterior mean is over what the model
+                            // actually uses, not over the latent slab value.
+                            beta_acc[g * h + d] += v;
+                        }
                     }
                 }
             }
-            beta[g] = draw.beta;
-            zed[g] = draw.z;
+            beta[lo * h..hi * h].copy_from_slice(&draw.beta);
+            zed[lo * h..hi * h].copy_from_slice(&draw.z);
         }
 
         for d in 0..h {
@@ -768,7 +561,10 @@ pub fn dim_block_multi(
         pi0_diag: pi0_chain.iter().map(|c| scalar_diagnostics(c)).collect(),
         h,
         n_kept,
-        final_z: zed.into_iter().flatten().collect(),
+        final_z: zed,
+        fallbacks,
+        n_transitions,
+        n_evals,
     }
 }
 
