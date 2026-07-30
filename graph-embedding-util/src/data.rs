@@ -343,66 +343,6 @@ impl UnifiedData {
         self.cell_modality = new_cell_modality;
     }
 
-    /// Build the cell↔feature edge list (`triplets`) from `backend`
-    /// on the *current* unified feature axis. Deferred from construction so
-    /// this training-only structure (~12 B/edge) doesn't coexist with the
-    /// collapse's sufficient-stats during the peak collapse phase — call it
-    /// after the collapse, before training. Honors any `subset_features`
-    /// already applied: only kept backend rows are emitted, remapped to
-    /// compact unified ids via `feature_to_backend_row`. Idempotent-ish: it
-    /// replaces whatever `triplets` currently holds.
-    pub fn materialize_cell_triplets(&mut self) -> anyhow::Result<()> {
-        let data = self.count_backend();
-        let n_cells = data.num_columns();
-        let backend_rows = data.num_rows();
-
-        // backend compact row → unified compact id (u32::MAX ⇒ dropped by
-        // an HVG/frozen subset). Identity when no subset was applied.
-        let mut backend_to_unified = vec![u32::MAX; backend_rows];
-        for (uid, &brow) in self.feature_to_backend_row.iter().enumerate() {
-            if brow < backend_rows {
-                backend_to_unified[brow] = uid as u32;
-            }
-        }
-
-        info!("Materializing sparse triplets (unified feature space)...");
-        let nnz_hint = data.num_non_zeros().unwrap_or(0);
-        // Bound the per-slab read even when nnz is unavailable (nnz_hint==0),
-        // otherwise the slab would clamp to the whole matrix.
-        let chunk_cols = if nnz_hint > 0 {
-            let avg_per_col = (nnz_hint / n_cells.max(1)).max(1);
-            (8_000_000 / avg_per_col).clamp(1, n_cells.max(1))
-        } else {
-            (1usize << 14).min(n_cells.max(1))
-        };
-        let pb_bar = new_progress_bar(nnz_hint.max(1) as u64);
-        pb_bar.set_message("triplets");
-        let mut triplets: Vec<Triplet> = Vec::with_capacity(nnz_hint);
-        let mut since_tick = 0u64;
-        data.for_each_triplet(0..n_cells, chunk_cols, |row, col, v| {
-            if v != 0.0 {
-                let uid = backend_to_unified[row as usize];
-                if uid != u32::MAX {
-                    triplets.push(Triplet {
-                        cell: col as u32,
-                        feature: uid,
-                        count: v,
-                    });
-                    since_tick += 1;
-                    if since_tick == 1 << 20 {
-                        pb_bar.inc(since_tick);
-                        since_tick = 0;
-                    }
-                }
-            }
-        })?;
-        pb_bar.inc(since_tick);
-        pb_bar.finish_and_clear();
-        info!("  edges: {}", triplets.len());
-        self.triplets = triplets;
-        Ok(())
-    }
-
     /// Build a `UnifiedData` from a single in-memory `SparseIoVec` plus
     /// per-cell batch labels. Internal helper for [`load_unified_data`].
     pub(crate) fn from_sparse_io(
