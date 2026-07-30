@@ -633,10 +633,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             lineage_smooth: false,
             lineage_mst: false,
             joint_velocity: false,
-            // The softmax feature gate does selection in one pass (a gene with no
-            // cell-state signal sends its mass to the null slot), so bge no longer
-            // holds out / re-projects any features — every gene is trained and gated.
-            feature_projection: None,
             // `--posterior N` now means N retained sweeps of the phase-1
             // pseudobulk Gibbs, run inside `fit` and written back into the model
             // — not a post-hoc pass over the finished fit.

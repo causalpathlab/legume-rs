@@ -11,11 +11,10 @@
 //! cell-block SGD ([`crate::fit::projection`]) that can afford the full
 //! all-feature log-partition this solver approximates away (see below), which
 //! is what keeps `‖θ_c‖` from running away. What remains on this solver are
-//! the two callers where the node count is small and Newton is the better
-//! tool: the per-pseudobulk velocity readout (`project_pbs_phase2`, a few
-//! hundred nodes) and the held-out gene projection
-//! ([`crate::fit::FeatureProjection`], each gene solved against the frozen
-//! pseudobulk stack).
+//! the caller where the node count is small and Newton is the better tool: the
+//! per-pseudobulk velocity readout (`project_pbs_phase2`, a few hundred nodes).
+//! It also served the held-out gene projection, which is gone — the softmax gate
+//! selects in one pass, so no gene is held out to be solved separately.
 //!
 //! **Objective — Poisson MAP on observed features.** For a cell with frozen
 //! feature embeddings `e_f` / biases `b_f`, model its observed counts `n_f`

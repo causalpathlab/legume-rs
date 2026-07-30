@@ -327,10 +327,9 @@ impl DimBlockResult {
     }
 }
 
-/// Per-gene sweep state handed back from the parallel map.
 /// Run the per-dim block Gibbs. `nodes[g]` is gene `g`'s likelihood terms against
-/// the frozen `side`; the per-gene intercept is profiled out by
-/// [`multinomial_ll`], so none is supplied.
+/// the frozen `side`; the per-gene intercept is profiled out by the score itself
+/// (see [`super::score::ProfiledPoisson`]), so none is supplied.
 ///
 /// SIGINT is polled at the sweep boundary: the accumulators are already valid
 /// posterior means over the sweeps completed so far, so an interrupted run
