@@ -20,7 +20,7 @@ mod runner;
 pub mod traits;
 
 pub use chain::McmcChain;
-pub use diagnostics::{ess, mcse_proportion};
+pub use diagnostics::{ess, mcse_proportion, split_rhat};
 pub use elliptical_slice::{elliptical_slice_step, EssSampler};
 pub use elliptical_slice_batch::{elliptical_slice_batch, BatchStep};
 pub use model::McmcModel;

@@ -160,6 +160,9 @@ pub(crate) fn pb_gibbs(
     // restarts cold, the ESS branch is unreachable, and every β is a prior draw.
     let mut z_gene: Option<Vec<bool>> = None;
     let mut n_kept = 0usize;
+    // Summed over both blocks and every sweep: a fallback anywhere is a coordinate
+    // that did not move, and the ratio is what says whether the run sampled at all.
+    let (mut fallbacks, mut n_transitions) = (0usize, 0usize);
 
     let stop = crate::stop::stop_flag();
     let total = cfg.n_sweeps + cfg.burnin;
@@ -213,6 +216,8 @@ pub(crate) fn pb_gibbs(
         // sweep resumes the chain rather than restarting cold.
         e_gene.copy_from_slice(&g.mean_beta);
         z_gene = Some(g.final_z.clone());
+        fallbacks += g.fallbacks;
+        n_transitions += g.n_transitions;
         // One term on this path, so `b_profiled` is one intercept per anchor. Scatter
         // it to rows the same way the loadings are: rows this run does not sample keep
         // their phase-1 value rather than being dropped.
@@ -274,6 +279,8 @@ pub(crate) fn pb_gibbs(
         // `b_pb + ln size_p` the score needs, not just the free part. That is why this
         // can replace `other_b` outright without re-adding `ln size_p`.
         b_pb_live.copy_from_slice(&p.b_profiled);
+        fallbacks += p.fallbacks;
+        n_transitions += p.n_transitions;
 
         if keep {
             for (acc, v) in pb_acc.iter_mut().zip(&p.mean_beta) {
@@ -304,6 +311,9 @@ pub(crate) fn pb_gibbs(
     };
     let mean_beta: Vec<f32> = beta_acc.iter().map(|&a| (a * inv) as f32).collect();
     let mean_pb: Vec<f32> = pb_acc.iter().map(|&a| (a * inv) as f32).collect();
+    let sigma_diag: Vec<ChainDiag> = sigma2_chain.iter().map(|c| scalar_diagnostics(c)).collect();
+    let pi0_diag: Vec<ChainDiag> = pi0_chain.iter().map(|c| scalar_diagnostics(c)).collect();
+    report_convergence("pb Gibbs", &sigma_diag, &pi0_diag, fallbacks, n_transitions);
 
     // Recover the intercepts the profile likelihood maximised out, against the
     // POSTERIOR-MEAN sides — the loadings and the biases have to describe the same
@@ -359,8 +369,8 @@ pub(crate) fn pb_gibbs(
         mean_b_pb,
         sigma2: mean_chain(&sigma2_chain),
         pi0: mean_chain(&pi0_chain),
-        sigma_diag: sigma2_chain.iter().map(|c| scalar_diagnostics(c)).collect(),
-        pi0_diag: pi0_chain.iter().map(|c| scalar_diagnostics(c)).collect(),
+        sigma_diag,
+        pi0_diag,
         h,
         n_kept,
     })
@@ -431,13 +441,17 @@ pub fn write_splice_posterior_hyper(
             "sigma2": res.beta_sigma2,
             "pi0": res.beta_pi0,
             "sigma2_min_ess": res.beta_sigma_diag.iter().map(|d| d.min_ess).collect::<Vec<_>>(),
+            "sigma2_rhat": res.beta_sigma_diag.iter().map(|d| d.rhat).collect::<Vec<_>>(),
             "pi0_min_ess": res.beta_pi0_diag.iter().map(|d| d.min_ess).collect::<Vec<_>>(),
+            "pi0_rhat": res.beta_pi0_diag.iter().map(|d| d.rhat).collect::<Vec<_>>(),
         },
         "delta": {
             "sigma2": res.delta_sigma2,
             "pi0": res.delta_pi0,
             "sigma2_min_ess": res.delta_sigma_diag.iter().map(|d| d.min_ess).collect::<Vec<_>>(),
+            "sigma2_rhat": res.delta_sigma_diag.iter().map(|d| d.rhat).collect::<Vec<_>>(),
             "pi0_min_ess": res.delta_pi0_diag.iter().map(|d| d.min_ess).collect::<Vec<_>>(),
+            "pi0_rhat": res.delta_pi0_diag.iter().map(|d| d.rhat).collect::<Vec<_>>(),
             "n_unidentified": res.delta_identified.iter().filter(|&&x| !x).count(),
         },
     });
@@ -563,7 +577,9 @@ fn write_posterior_hyper(
             "sigma2": res.sigma2,
             "pi0": res.pi0,
             "sigma2_min_ess": res.sigma_diag.iter().map(|d| d.min_ess).collect::<Vec<_>>(),
+            "sigma2_rhat": res.sigma_diag.iter().map(|d| d.rhat).collect::<Vec<_>>(),
             "pi0_min_ess": res.pi0_diag.iter().map(|d| d.min_ess).collect::<Vec<_>>(),
+            "pi0_rhat": res.pi0_diag.iter().map(|d| d.rhat).collect::<Vec<_>>(),
         },
         "frozen_side": geom,
     });
@@ -582,6 +598,67 @@ fn write_posterior_hyper(
 /// which is exactly where a naive sum loses its low bits. An anchor with no counts
 /// has no rate to match and is parked at `-SCORE_CLAMP` (rate ≈ 0), matching
 /// [`super::index::ContrastiveIndex::calibrate_anchor_bias`].
+/// Report what a run's chains are actually worth, at `info`, plus a `warn` when they are
+/// not worth much.
+///
+/// Both numbers exist because they fail independently. `min_ess` says how much the draws
+/// are WORTH; `rhat` says whether they are draws from one distribution at all — a chain
+/// that never left its starting region can have a healthy ESS and an R̂ of 3, because it
+/// is mixing efficiently inside the wrong place. The bracket-fallback fraction is the
+/// third: a fallback is the slice sampler's analogue of a rejected move, and a run where
+/// most coordinates stall still returns a full table of plausible-looking numbers.
+///
+/// This matters more now than it used to. With phase 1 SAMPLED rather than trained there
+/// is no point estimate to fall back on, so an unconverged chain is not a caveat on the
+/// output — it is the output.
+fn report_convergence(
+    label: &str,
+    sigma_diag: &[ChainDiag],
+    pi0_diag: &[ChainDiag],
+    fallbacks: usize,
+    n_transitions: usize,
+) {
+    // Split-R̂ over the hyper chains. `1.01` is the conventional pass; past `1.1` the
+    // chain has not converged and the per-dim numbers should not be read as a posterior.
+    const RHAT_WARN: f32 = 1.1;
+    let worst = |d: &[ChainDiag]| d.iter().map(|c| c.rhat).fold(1.0f32, f32::max);
+    let failing = |d: &[ChainDiag]| d.iter().filter(|c| c.rhat > RHAT_WARN).count();
+    let min_ess = |d: &[ChainDiag]| d.iter().map(|c| c.min_ess).fold(f32::INFINITY, f32::min);
+
+    let frac = if n_transitions == 0 {
+        0.0
+    } else {
+        fallbacks as f64 / n_transitions as f64
+    };
+    info!(
+        "{label}: split-R̂ worst {:.3} (σ₀²) / {:.3} (π₀), {} of {} dims over {RHAT_WARN};          min ESS {:.1} / {:.1}; bracket fallbacks {fallbacks}/{n_transitions} ({:.2}%)",
+        worst(sigma_diag),
+        worst(pi0_diag),
+        failing(sigma_diag) + failing(pi0_diag),
+        sigma_diag.len() + pi0_diag.len(),
+        min_ess(sigma_diag),
+        min_ess(pi0_diag),
+        100.0 * frac,
+    );
+    let n_bad = failing(sigma_diag) + failing(pi0_diag);
+    if n_bad > 0 {
+        log::warn!(
+            "{n_bad} hyper chain(s) have split-R̂ above {RHAT_WARN}, so those dims are NOT \
+             stationary — their σ₀²/π₀ and every PIP that conditioned on them describe where \
+             the chain happened to be, not a posterior. Treat them as unidentified rather \
+             than as measurements, and raise --posterior N before reading them."
+        );
+    }
+    if frac > 0.25 {
+        log::warn!(
+            "{:.0}% of slice transitions exhausted their bracket and fell back to the current \
+             value, so most coordinates are not moving. The tables will still be fully \
+             populated; they are not a sample.",
+            100.0 * frac,
+        );
+    }
+}
+
 fn profiled_bias(
     total: f64,
     e_a: &[f32],
@@ -818,6 +895,7 @@ pub(crate) fn pb_gibbs_splice(
     let (mut z_beta, mut z_delta): (Option<Vec<bool>>, Option<Vec<bool>>) = (None, None);
 
     let mut acc = SpliceAcc::new(n_genes, pb.n_pb_total(), h);
+    let (mut fallbacks, mut n_transitions) = (0usize, 0usize);
     let stop = crate::stop::stop_flag();
     let total = cfg.n_sweeps + cfg.burnin;
     let bar = new_progress_bar(total as u64).with_message("gem splice sweeps");
@@ -946,6 +1024,8 @@ pub(crate) fn pb_gibbs_splice(
         e_pb.copy_from_slice(&pbres.mean_beta);
         b_pb_live.copy_from_slice(&pbres.b_profiled);
 
+        fallbacks += b.fallbacks + d.fallbacks + pbres.fallbacks;
+        n_transitions += b.n_transitions + d.n_transitions + pbres.n_transitions;
         if keep {
             acc.add(&b, &d, &pbres);
         }
@@ -953,6 +1033,22 @@ pub(crate) fn pb_gibbs_splice(
     }
     bar.finish_and_clear();
     let mut out = acc.finish(h, delta_identified)?;
+    report_convergence(
+        "gem splice (β gate)",
+        &out.beta_sigma_diag,
+        &out.beta_pi0_diag,
+        fallbacks,
+        n_transitions,
+    );
+    // The δ gate gets its own line: it is a different object on a different scale, so a
+    // shared summary would let one gate's healthy chains cover for the other's.
+    report_convergence(
+        "gem splice (δ gate)",
+        &out.delta_sigma_diag,
+        &out.delta_pi0_diag,
+        0,
+        0,
+    );
 
     // Intercepts against the posterior-mean sides, same reasoning as the bge path.
     let side_pb_final = FrozenSide {

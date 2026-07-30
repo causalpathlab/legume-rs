@@ -13,7 +13,7 @@
 //!     counter for it, but the output reveals it — a stalled chain is visible,
 //!     not silent.
 //!
-pub use mcmc_util::engine::ess;
+pub use mcmc_util::engine::{ess, split_rhat};
 
 /// Per-node mixing summary.
 #[derive(Clone, Copy, Debug)]
@@ -22,6 +22,16 @@ pub struct ChainDiag {
     pub min_ess: f32,
     /// Fraction of adjacent draws identical to their predecessor (fallback proxy).
     pub stuck_fraction: f32,
+    /// Split-R̂ over the retained draws — see [`split_rhat`].
+    ///
+    /// `min_ess` says how much a chain's draws are WORTH; this says whether they are
+    /// draws from one distribution at all. They fail independently: a chain that never
+    /// left its starting region can have a healthy ESS and an R̂ of 3, because it is
+    /// mixing efficiently within the wrong place. That distinction is why both are
+    /// reported, and it is the one that matters when phase 1 is sampled rather than
+    /// trained — there is then no point estimate to fall back on, so an unconverged
+    /// chain is the whole output.
+    pub rhat: f32,
 }
 
 /// Effective sample size of one coordinate's series across a node's draws.
@@ -41,6 +51,7 @@ pub fn chain_diagnostics(draws: &[Vec<f32>]) -> ChainDiag {
         return ChainDiag {
             min_ess: t as f32,
             stuck_fraction: 0.0,
+            rhat: 1.0,
         };
     }
     let dim = draws[0].len();
@@ -49,9 +60,15 @@ pub fn chain_diagnostics(draws: &[Vec<f32>]) -> ChainDiag {
         .fold(f32::INFINITY, f32::min);
 
     let stuck = draws.windows(2).filter(|w| w[0] == w[1]).count();
+    // Worst coordinate, matching `min_ess`: one non-stationary coordinate makes the
+    // node's draws unusable, so averaging would hide exactly the case worth seeing.
+    let worst_rhat = (0..dim)
+        .map(|k| split_rhat(&draws.iter().map(|d| d[k]).collect::<Vec<f32>>()))
+        .fold(1.0f32, f32::max);
     ChainDiag {
         min_ess,
         stuck_fraction: stuck as f32 / (t - 1) as f32,
+        rhat: worst_rhat,
     }
 }
 
@@ -66,6 +83,7 @@ pub fn scalar_diagnostics(chain: &[f64]) -> ChainDiag {
         return ChainDiag {
             min_ess: t as f32,
             stuck_fraction: 0.0,
+            rhat: 1.0,
         };
     }
     let series: Vec<f32> = chain.iter().map(|&v| v as f32).collect();
@@ -73,6 +91,7 @@ pub fn scalar_diagnostics(chain: &[f64]) -> ChainDiag {
     ChainDiag {
         min_ess: ess(&series),
         stuck_fraction: stuck as f32 / (t - 1) as f32,
+        rhat: split_rhat(&series),
     }
 }
 
@@ -85,10 +104,12 @@ pub fn worst_case(diags: &[ChainDiag]) -> ChainDiag {
         ChainDiag {
             min_ess: f32::INFINITY,
             stuck_fraction: 0.0,
+            rhat: 1.0,
         },
         |acc, d| ChainDiag {
             min_ess: acc.min_ess.min(d.min_ess),
             stuck_fraction: acc.stuck_fraction.max(d.stuck_fraction),
+            rhat: acc.rhat.max(d.rhat),
         },
     )
 }
