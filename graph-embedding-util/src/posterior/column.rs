@@ -134,8 +134,8 @@ struct TermTile<'a> {
     safe_radius: Vec<f32>,
     /// `[b × h]` frozen offset, or `None` in the plain case.
     offset: Option<Vec<f32>>,
-    /// `[b]` observed edges, so the ctx can hand them to the exact walk.
-    pos: Vec<Vec<(u32, f32)>>,
+    /// `[b]` observed edges, BORROWED from the caller's nodes — see `ColumnCtx::pos`.
+    pos: Vec<&'a [(u32, f32)]>,
     slab: &'a SlateSlab,
     partition: &'a [u32],
     partition_scale: f64,
@@ -172,7 +172,7 @@ impl<'a> TermTile<'a> {
         });
         let off_at = |i: usize, d: usize| offset.as_ref().map_or(0.0f32, |o| o[i * h + d]);
 
-        let pos: Vec<Vec<(u32, f32)>> = nodes.iter().map(|terms| terms[t].pos.to_vec()).collect();
+        let pos: Vec<&'a [(u32, f32)]> = nodes.iter().map(|terms| terms[t].pos).collect();
 
         // Moment statistics. Rebuilt per sweep because the frozen side moves per sweep,
         // which is also why the caller cannot hand these in.
@@ -205,7 +205,8 @@ impl<'a> TermTile<'a> {
         }
 
         // data[i] = Σ_pos n·b_o + Σ_d (v_id + off_id)·m_id ; sumsq[i] = Σ_d (·)²
-        let mut data = bias_dot.clone();
+        // `bias_dot` has no other reader, so it IS the data term's starting value.
+        let mut data = bias_dot;
         let mut sumsq = vec![0.0f32; b];
         for i in 0..b {
             for d in 0..h {
@@ -369,8 +370,22 @@ pub(super) fn sample_tile<S: AnchorScore>(
     let mut ll_on = vec![0.0f32; b];
     let mut nu = vec![0.0f32; b];
     let mut scratch = vec![0.0f32; b];
+    let mut inner = vec![0.0f32; b];
     let zeros = vec![0.0f32; b];
     let all: Vec<u32> = (0..b as u32).collect();
+    // Hoisted out of the dim loop. Each of these was an allocation per (tile, dim) —
+    // roughly `h` per tile per sweep each — and `sub` was the expensive one: a fresh
+    // `Vec<SmallRng>` of up to `b` entries, 16 KB at `b = 512`, which also evicts the
+    // tile's score block from the cache it was tiled to stay in.
+    let mut on: Vec<u32> = Vec::with_capacity(b);
+    let mut off: Vec<u32> = Vec::with_capacity(b);
+    let mut xs: Vec<f32> = Vec::with_capacity(b);
+    let mut out_buf: Vec<f32> = Vec::with_capacity(b);
+    let mut cur: Vec<f32> = Vec::with_capacity(b);
+    let mut start: Vec<f32> = Vec::with_capacity(b);
+    let mut draw: Vec<f32> = Vec::with_capacity(b);
+    let mut idx_buf: Vec<u32> = Vec::with_capacity(b);
+    let mut sub: Vec<SmallRng> = (0..b).map(|i| gene_rng(args.seed, lo + i, args.sweep)).collect();
 
     for d in 0..h {
         // ---- peel dim `d` out of every term ----
@@ -399,8 +414,8 @@ pub(super) fn sample_tile<S: AnchorScore>(
         // keeping the stale fit is what makes the `z` step below a valid Gibbs move,
         // and why no Occam correction is needed: a fitted β always beats 0, so
         // comparing against one would bias every coordinate on.
-        let mut on: Vec<u32> = Vec::new();
-        let mut off: Vec<u32> = Vec::new();
+        on.clear();
+        off.clear();
         for i in 0..b {
             if z[i * h + d] {
                 on.push(i as u32);
@@ -410,55 +425,72 @@ pub(super) fn sample_tile<S: AnchorScore>(
         }
 
         if !off.is_empty() {
-            let xs: Vec<f32> = off.iter().map(|&i| nu[i as usize]).collect();
-            let mut out = vec![0.0f32; off.len()];
-            eval(score, args, &terms, &v, d, &xs, &off, &mut out, &mut scratch);
+            xs.clear();
+            xs.extend(off.iter().map(|&i| nu[i as usize]));
+            out_buf.clear();
+            out_buf.resize(off.len(), 0.0);
+            eval(score, args, &terms, &v, d, &xs, &off, &mut out_buf, &mut scratch);
             for (slot, &i) in off.iter().enumerate() {
                 let i = i as usize;
                 beta[i * h + d] = xs[slot];
-                ll_on[i] = out[slot];
+                ll_on[i] = out_buf[slot];
             }
         }
 
         if !on.is_empty() {
-            let mut cur: Vec<f32> = on.iter().map(|&i| beta[i as usize * h + d]).collect();
-            let mut start = vec![0.0f32; on.len()];
+            cur.clear();
+            cur.extend(on.iter().map(|&i| beta[i as usize * h + d]));
+            start.clear();
+            start.resize(on.len(), 0.0);
             eval(score, args, &terms, &v, d, &cur, &on, &mut start, &mut scratch);
 
             // The kernel needs one stream per ITEM, and a scattered mutable subset of
             // `rngs` is not expressible — so derive a fresh stream per (anchor, dim).
             // Keyed on the GLOBAL anchor, so it stays tile-invariant, and salted by dim
             // so no two dims share a stream.
-            let mut sub: Vec<SmallRng> = on
-                .iter()
-                .map(|&i| gene_rng(args.seed ^ ((d as u64 + 1) << 32), lo + i as usize, args.sweep))
-                .collect();
-            let mut inner = vec![0.0f32; b];
+            // Re-keyed in place rather than re-collected: the reseeding is required for
+            // reproducibility, the reallocation is not.
+            sub.truncate(on.len());
+            while sub.len() < on.len() {
+                sub.push(gene_rng(args.seed, lo, args.sweep));
+            }
+            for (slot, &i) in on.iter().enumerate() {
+                sub[slot] = gene_rng(
+                    args.seed ^ ((d as u64 + 1) << 32),
+                    lo + i as usize,
+                    args.sweep,
+                );
+            }
 
             for t in 0..args.transitions.max(1) {
                 // Each transition needs its own prior draw; the first reuses the `nu`
                 // already drawn above so `transitions = 1` consumes exactly one.
-                let draw: Vec<f32> = if t == 0 {
-                    on.iter().map(|&i| nu[i as usize]).collect()
+                draw.clear();
+                if t == 0 {
+                    draw.extend(on.iter().map(|&i| nu[i as usize]));
                 } else {
-                    on.iter()
-                        .map(|&i| {
-                            let g: f64 = StandardNormal.sample(&mut rngs[i as usize]);
-                            g as f32 * sd_d
-                        })
-                        .collect()
-                };
-                let step =
-                    elliptical_slice_batch(&cur, &draw, &start, &mut sub, &mut |x, active, out| {
+                    for &i in &on {
+                        let g: f64 = StandardNormal.sample(&mut rngs[i as usize]);
+                        draw.push(g as f32 * sd_d);
+                    }
+                }
+                let step = elliptical_slice_batch(
+                    &cur,
+                    &draw,
+                    &start,
+                    &mut sub[..on.len()],
+                    &mut |x, active, out| {
                         // `active` indexes into `on`; map back to tile-local anchors.
-                        let idx: Vec<u32> = active.iter().map(|&a| on[a as usize]).collect();
-                        eval(score, args, &terms, &v, d, x, &idx, out, &mut inner);
-                    });
+                        idx_buf.clear();
+                        idx_buf.extend(active.iter().map(|&a| on[a as usize]));
+                        eval(score, args, &terms, &v, d, x, &idx_buf, out, &mut inner);
+                    },
+                );
                 fallbacks += step.fallbacks;
                 rounds += step.rounds;
                 transitions += on.len();
-                cur = step.value;
-                start = step.lnpdf;
+                cur.copy_from_slice(&step.value);
+                start.copy_from_slice(&step.lnpdf);
             }
             for (slot, &i) in on.iter().enumerate() {
                 let i = i as usize;
