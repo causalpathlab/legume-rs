@@ -112,11 +112,6 @@ impl UnifiedData {
         self.batch_names.len()
     }
 
-    #[must_use]
-    pub fn n_conditions(&self) -> usize {
-        self.condition_names.len()
-    }
-
     /// Per-cell batch labels (`batch_names[batch_membership[c]]`), in cell-id
     /// order. Length == `n_cells()`. The string form the projection /
     /// multilevel collapse consume for within-batch negatives.
@@ -273,74 +268,6 @@ impl UnifiedData {
         }
         self.feature_names = new_feature_names;
         self.feature_to_backend_row = new_feature_to_backend_row;
-    }
-
-    /// Restrict to a subset of cells (by current global cell id).
-    /// Drops triplets whose cell isn't in `selected_indices`, remaps
-    /// remaining cells to compact 0..k indices, and updates all
-    /// per-cell metadata vecs (`barcodes`, `batch_membership`,
-    /// `condition_membership`, `cell_modality`).
-    ///
-    /// `backend` is **not** touched — the `SparseIoVec` retains the
-    /// original column layout.
-    pub fn subset_cells(&mut self, selected_indices: &[usize]) {
-        if selected_indices.len() == self.n_cells() {
-            return; // no-op
-        }
-        let n_old = self.n_cells();
-        let mut old_to_new: Vec<i32> = vec![-1; n_old];
-        for (new_i, &old_i) in selected_indices.iter().enumerate() {
-            debug_assert!(old_i < n_old, "selected index {old_i} out of range");
-            old_to_new[old_i] = new_i as i32;
-        }
-
-        let new_barcodes: Vec<Box<str>> = selected_indices
-            .iter()
-            .map(|&i| self.barcodes[i].clone())
-            .collect();
-        let new_batch_membership: Vec<u32> = selected_indices
-            .iter()
-            .map(|&i| self.batch_membership[i])
-            .collect();
-        let new_condition_membership: Vec<u32> = selected_indices
-            .iter()
-            .map(|&i| self.condition_membership[i])
-            .collect();
-        let new_cell_modality: Vec<u32> = selected_indices
-            .iter()
-            .map(|&i| self.cell_modality[i])
-            .collect();
-
-        let n_before = self.triplets.len();
-        self.triplets.retain_mut(|t| {
-            let new_id = old_to_new[t.cell as usize];
-            if new_id >= 0 {
-                t.cell = new_id as u32;
-                true
-            } else {
-                false
-            }
-        });
-
-        if n_before > 0 {
-            info!(
-                "Cell subset: {} → {} cells ({} → {} edges retained)",
-                n_old,
-                new_barcodes.len(),
-                n_before,
-                self.triplets.len()
-            );
-        } else {
-            info!(
-                "Cell subset: {} → {} cells (triplets built later from this axis)",
-                n_old,
-                new_barcodes.len()
-            );
-        }
-        self.barcodes = new_barcodes;
-        self.batch_membership = new_batch_membership;
-        self.condition_membership = new_condition_membership;
-        self.cell_modality = new_cell_modality;
     }
 
     /// Build a `UnifiedData` from a single in-memory `SparseIoVec` plus
