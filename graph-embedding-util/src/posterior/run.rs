@@ -88,8 +88,13 @@ pub struct PosteriorArgs {
                      own bracket-fallback count; a large fraction there means coordinates are\n\
                      stalling rather than moving, and the numbers should not be read as a\n\
                      converged posterior.\n\
-                     Writes {out}.feature_pip.parquet + {out}.feature_posterior_mean.parquet\n\
-                     (gem: one pair per gate, keyed by gene).\n\
+                     Writes one PIP table and one posterior-mean table PER GATE, keyed by the\n\
+                     feature the gate is over. A single-gate model gets\n\
+                     {out}.feature_pip.parquet and {out}.feature_posterior_mean.parquet; a model\n\
+                     with two gates (gem's identity β_g and velocity δ_g) gets\n\
+                     {out}.beta_pip.parquet, {out}.beta_posterior_mean.parquet,\n\
+                     {out}.delta_pip.parquet and {out}.delta_posterior_mean.parquet, keyed by\n\
+                     gene rather than by feature row.\n\
                      `--mcmc` and `--jitter` are accepted aliases."
     )]
     pub posterior: Option<usize>,

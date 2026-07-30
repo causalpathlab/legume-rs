@@ -375,7 +375,13 @@ Example:\n  \
             Per-gene velocity is the in-model δ_g\n\
             → `{out}.delta_feature_embedding.parquet`;\n\
             it is written whenever the input carries unspliced rows\n\
-            (`--delta-l2 0`, the default, auto-applies a mild ridge to keep it identified).\n\n\
+            (`--delta-l2 0`, the default, auto-applies a mild ridge to keep it identified).\n\
+            The per-gene identity β_g is `{out}.beta_feature_embedding.parquet`,\n\
+            gene-keyed so a marker panel joins against it directly.\n\n\
+            `{out}.velocity_increment.parquet` is a DIAGNOSTIC, not the velocity:\n\
+            it is the raw per-cell Poisson increment δ_c, which is dominated by a\n\
+            shrinkage-toward-origin common mode (δ_c ≈ −0.5·θ, from fitting sparse\n\
+            unspliced counts absolutely). Use `{out}.velocity.parquet` for the velocity.\n\n\
             With `--lineage-dag` it also shapes the embedding along a pseudobulk lineage.\n\
             It then writes a per-cell pseudotime + fate backbone.\n\
             That backbone is a prior for `faba lineage`, not a replacement.\n\n\
