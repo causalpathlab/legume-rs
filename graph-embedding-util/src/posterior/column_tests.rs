@@ -347,6 +347,65 @@ fn the_same_seed_reproduces_the_tile() {
     assert_eq!(one.fallbacks, two.fallbacks);
 }
 
+/// The profiled intercept must satisfy its defining identity, `exp(b*)·A(θ) = T`, i.e.
+/// `b* = ln T − ln(scale · Σ_slate exp(s))`.
+///
+/// This is the mechanism the alternating sampler leans on to keep the two sides'
+/// intercepts live: each block profiles its own anchor's intercept exactly, so the other
+/// side can score against a value that describes the state it is conditioning on rather
+/// than one snapshotted before sampling began. Checked against an independent
+/// computation from the naive definition, because `profiled_bias` reads the carried
+/// scores and a bug there would be invisible in every shape.
+#[test]
+fn the_profiled_intercept_reproduces_the_observed_total() {
+    let (e, b) = side_buffers();
+    let side = FrozenSide { e: &e, b: &b, h: H };
+    let partition: Vec<u32> = (0..K as u32).collect();
+    let pos = edge_lists();
+    let slab = SlateSlab::new(&partition, &side);
+    let nodes = nodes_for(&pos, &partition, 0, B);
+
+    let (beta0, z0) = initial_state();
+    let v: Vec<f32> = (0..B * H)
+        .map(|i| if z0[i] { beta0[i] } else { 0.0 })
+        .collect();
+    let term = TermTile::seed(&nodes, 0, &slab, &side, &v, H);
+
+    for i in 0..B {
+        let got = f64::from(term.profiled_bias(i));
+        if pos[i].is_empty() {
+            // No counts ⇒ no rate to match, so the floor rather than a `ln(0)`.
+            assert!(got < -20.0, "empty anchor {i} should be parked at the floor, got {got}");
+            continue;
+        }
+        // Independent construction: score every slate entry from scratch.
+        let total: f64 = pos[i].iter().map(|&(_, n)| f64::from(n)).sum();
+        let part: f64 = partition
+            .iter()
+            .map(|&o| {
+                let e_o = &e[o as usize * H..(o as usize + 1) * H];
+                let dot: f64 = (0..H)
+                    .map(|d| f64::from(v[i * H + d]) * f64::from(e_o[d]))
+                    .sum();
+                (dot + f64::from(b[o as usize])).exp()
+            })
+            .sum();
+        let want = total.ln() - part.ln();
+        assert!(
+            (got - want).abs() < 1e-3,
+            "anchor {i}: profiled intercept {got} should be ln({total}) − ln({part}) = {want}"
+        );
+
+        // And state the identity the way it is used: the implied rate integrates to the
+        // observed total.
+        let implied = got.exp() * part;
+        assert!(
+            (implied - total).abs() / total < 1e-3,
+            "anchor {i}: exp(b*)·A = {implied} should equal the observed total {total}"
+        );
+    }
+}
+
 /// The pass must report its own cost rather than hiding it. `rounds` is the number of
 /// batched likelihood calls, so it bounds the work and makes a stalled sampler visible;
 /// an active-set loop is exactly where such a count goes missing.

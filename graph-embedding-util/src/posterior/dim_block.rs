@@ -274,6 +274,14 @@ pub struct DimBlockResult {
     /// Batched likelihood evaluations — the run's actual cost, in the unit the column
     /// pass charges for.
     pub n_evals: usize,
+    /// `[n_anchors × n_terms]` profiled intercepts from the LAST sweep, anchor-major.
+    ///
+    /// A single draw's worth, like [`Self::final_z`], and for the same reason: an outer
+    /// alternating sampler needs the intercept that goes WITH the loadings it is about
+    /// to condition on. Loadings and biases have to describe one model — pairing a
+    /// sampled embedding with an intercept fitted under a different state is exactly the
+    /// mismatch that made frozen intercepts need recalibration.
+    pub b_profiled: Vec<f32>,
 }
 
 impl DimBlockResult {
@@ -416,6 +424,7 @@ pub fn dim_block_multi(
     let mut fallbacks = 0usize;
     let mut n_evals = 0usize;
     let mut n_transitions = 0usize;
+    let mut b_profiled = vec![0.0f32; n_genes * n_terms];
     let stop = crate::stop::stop_flag();
 
     // The whole sampler is this one loop, and on a real dictionary it runs for
@@ -510,6 +519,7 @@ pub fn dim_block_multi(
             }
             beta[lo * h..hi * h].copy_from_slice(&draw.beta);
             zed[lo * h..hi * h].copy_from_slice(&draw.z);
+            b_profiled[lo * n_terms..hi * n_terms].copy_from_slice(&draw.b_profiled);
         }
 
         for d in 0..h {
@@ -565,6 +575,7 @@ pub fn dim_block_multi(
         fallbacks,
         n_transitions,
         n_evals,
+        b_profiled,
     }
 }
 
