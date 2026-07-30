@@ -71,10 +71,10 @@
 //! variability is held fixed between them rather than being an extra source of difference.
 
 use super::gene_strata::GeneStrata;
+use super::live_row;
 use super::marker_bootstrap::{assign_nearest, label_support, LivePanel, MarkerBootstrapConfig};
 use super::markers::marker_gene_pool;
 use super::term_ora::{replicate_label, Partition, TermOraConfig};
-use crate::null_call::live_row;
 use anyhow::Result;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;

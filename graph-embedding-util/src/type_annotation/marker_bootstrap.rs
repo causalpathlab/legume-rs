@@ -45,8 +45,7 @@
 //! are being assigned by noise, and no amount of downstream statistics will fix that. The
 //! cure is upstream (`faba gem --must-train-features <panel>`), not here.
 
-use super::UNASSIGNED;
-use crate::null_call::live_row;
+use super::{live_row, UNASSIGNED};
 use anyhow::Result;
 use rand::RngExt;
 use rayon::prelude::*;

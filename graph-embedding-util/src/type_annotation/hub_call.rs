@@ -2,7 +2,7 @@
 //!
 //! # The laundering
 //!
-//! [`crate::null_call::live_row`] is the contract every consumer here relies on: an untrained
+//! [`super::live_row`] is the contract every consumer here relies on: an untrained
 //! feature row is *deliberately zeroed*, and must be read as **missing data, not an observation of
 //! zero**. It rests on an invariant — "a row the model actually trained is never exactly zero" —
 //! and that invariant is sound for the raw dictionary `ρ`.
@@ -50,13 +50,14 @@
 //! genuinely expressed in every cell at the same level — neither can localize a cell type, and both
 //! are the wrong thing to average into a centroid. Zeroing is correct either way.
 //!
-//! A *relative* threshold rather than a fitted null is deliberate. The obvious move is to hand
-//! `‖e_g − hub‖²` to [`crate::null_call::chi2_null_call`], and it is **wrong**: that call asks which
-//! rows are significantly *above* a fitted null bulk, so on a healthy embedding — where every gene
-//! is legitimately far from the hub and there is no low spike at all — nothing is above the bulk,
-//! nothing is called live, and it zeroes the entire gene space. The test
-//! `an_embedding_with_nothing_at_the_hub_is_left_alone` exists because that is exactly what happened.
-//! The rule here degenerates safely: no point mass ⇒ nothing zeroed.
+//! A *relative* threshold rather than a fitted null is deliberate. The obvious move is to fit an
+//! empirical null to the spread of `‖e_g − hub‖²` and keep whatever is significant under it, and it
+//! is **wrong**: such a call asks which rows sit significantly *above* the fitted null bulk, so on a
+//! healthy embedding — where every gene is legitimately far from the hub and there is no low spike
+//! at all — nothing is above the bulk, nothing is called live, and it zeroes the entire gene space.
+//! The offenders here are *below* the bulk, and a fitted null has no floor to test them against.
+//! The test `an_embedding_with_nothing_at_the_hub_is_left_alone` exists because that is exactly what
+//! happened. The rule here degenerates safely: no point mass ⇒ nothing zeroed.
 //!
 //! Rows that are zeroed restore the `live_row` invariant, and every existing consumer (the
 //! centroids, the marker bootstrap's live panel, the panel null's pool, the support null's pool, the
@@ -85,7 +86,7 @@ const HUB_RADIUS_FRAC: f32 = 0.05;
 /// Zero every feature row that the co-embedding parked at the hub of the cell cloud.
 ///
 /// `beta_flat` is `[g × h]` row-major and is modified in place; `cell_emb` is `[n × h]`. Returns
-/// how many rows were zeroed. See the module doc — this restores the [`crate::null_call::live_row`]
+/// how many rows were zeroed. See the module doc — this restores the [`super::live_row`]
 /// invariant that the co-embedding breaks.
 pub(super) fn zero_hub_parked(
     beta_flat: &mut [f32],
