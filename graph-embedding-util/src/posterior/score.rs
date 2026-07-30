@@ -139,7 +139,12 @@ pub struct ColumnCtx<'a> {
     /// is sampled as a deviation from it. `None` is the plain case.
     pub offset: Option<&'a [f32]>,
     /// `[b]` observed `(other-index, count)` edges per anchor, for the exact walk.
-    pub pos: &'a [Vec<(u32, f32)>],
+    ///
+    /// Borrowed, not owned: these are the caller's edge lists and nothing here mutates
+    /// them. Copying instead would duplicate the whole observed data of one side per tile
+    /// per sweep — on a pb block whose anchors each touch tens of thousands of edges that
+    /// is the entire count matrix, memcpy'd, every sweep.
+    pub pos: &'a [&'a [(u32, f32)]],
     /// Other-side indices summed in the normalizer.
     pub partition: &'a [u32],
     /// `n_other / |partition|`, folding a sampled slate up to the full sum.
@@ -320,27 +325,28 @@ impl AnchorScore for ProfiledPoisson {
             // differing from it by a constant.
             let data = ctx.data[i] + f64::from(xi) * f64::from(ctx.moment_at(i, d));
 
-            // Normalizer: one pass over the slate, clamping each score exactly where
-            // `lnpdf::score` clamps it, and max-shifted in f64.
+            // Normalizer: ONE pass over the slate, clamping each score exactly where
+            // `lnpdf::score` clamps it.
+            //
+            // A logsumexp normally needs a first pass to find the row max. Here it does
+            // not, and the reason is the clamp: every term is already confined to
+            // `[-SCORE_CLAMP, SCORE_CLAMP]`, so shifting by the constant `SCORE_CLAMP`
+            // puts every exponent in `[e^-60, 1]` — nowhere near f64's range at either
+            // end. A fixed shift is as stable as the data-dependent one and halves the
+            // innermost loop of the whole sampler.
             let s = ctx.scores(i);
             let xd = f64::from(xi);
-            let mut hi = f64::NEG_INFINITY;
-            for (sj, cj) in s.iter().zip(c_d) {
-                let v = (f64::from(*sj) + xd * f64::from(*cj)).clamp(-SCORE_CLAMP, SCORE_CLAMP);
-                if v > hi {
-                    hi = v;
-                }
-            }
-            if !hi.is_finite() {
-                *slot = 0.0;
-                continue;
-            }
             let mut acc = 0.0f64;
             for (sj, cj) in s.iter().zip(c_d) {
                 let v = (f64::from(*sj) + xd * f64::from(*cj)).clamp(-SCORE_CLAMP, SCORE_CLAMP);
-                acc += (v - hi).exp();
+                acc += (v - SCORE_CLAMP).exp();
             }
-            *slot = (data - total * (hi + acc.max(f64::MIN_POSITIVE).ln())) as f32;
+            if !acc.is_finite() {
+                *slot = 0.0;
+                continue;
+            }
+            let log_part = SCORE_CLAMP + acc.max(f64::MIN_POSITIVE).ln();
+            *slot = (data - total * log_part) as f32;
         }
     }
 }
@@ -355,10 +361,8 @@ impl ProfiledPoisson {
         full.copy_from_slice(ctx.loading(i));
         full[d] = xi;
         let node = NodeTerm {
-            offset: ctx
-                .offset
-                .map(|o| &o[i * ctx.h..(i + 1) * ctx.h]),
-            ..NodeTerm::new(&ctx.pos[i], ctx.partition, ctx.partition_scale)
+            offset: ctx.offset.map(|o| &o[i * ctx.h..(i + 1) * ctx.h]),
+            ..NodeTerm::new(ctx.pos[i], ctx.partition, ctx.partition_scale)
         };
         multinomial_ll(full, &node, ctx.side)
     }

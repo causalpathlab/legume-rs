@@ -163,6 +163,7 @@ fn worst_gap(beta: &[f32], offset: Option<&[f32]>, xs: &[f32]) -> f64 {
     let side = FrozenSide { e: &e, b: &b, h: H };
     let partition: Vec<u32> = (0..K as u32).collect();
     let pos = edges();
+    let pos_ref: Vec<&[(u32, f32)]> = pos.iter().map(Vec::as_slice).collect();
     let scale = 1.0f64;
     let active: Vec<u32> = (0..B as u32).collect();
 
@@ -178,7 +179,7 @@ fn worst_gap(beta: &[f32], offset: Option<&[f32]>, xs: &[f32]) -> f64 {
             total: &n.total,
             safe_radius: &n.safe_radius,
             offset,
-            pos: &pos,
+            pos: &pos_ref,
             partition: &partition,
             partition_scale: scale,
             side: &side,
@@ -253,6 +254,7 @@ fn past_the_safe_radius_it_defers_to_the_walk_exactly() {
     let side = FrozenSide { e: &e, b: &b, h: H };
     let partition: Vec<u32> = (0..K as u32).collect();
     let pos = edges();
+    let pos_ref: Vec<&[(u32, f32)]> = pos.iter().map(Vec::as_slice).collect();
     let active: Vec<u32> = (0..B as u32).collect();
 
     // Blow the loading far past any plausible radius.
@@ -273,7 +275,7 @@ fn past_the_safe_radius_it_defers_to_the_walk_exactly() {
         total: &n.total,
         safe_radius: &n.safe_radius,
         offset: None,
-        pos: &pos,
+        pos: &pos_ref,
         partition: &partition,
         partition_scale: 1.0,
         side: &side,
@@ -304,6 +306,7 @@ fn an_empty_anchor_is_flat() {
     let side = FrozenSide { e: &e, b: &b, h: H };
     let partition: Vec<u32> = (0..K as u32).collect();
     let pos = edges();
+    let pos_ref: Vec<&[(u32, f32)]> = pos.iter().map(Vec::as_slice).collect();
     assert!(pos[3].is_empty(), "anchor 3 is the empty one by construction");
 
     let beta = loadings(1.0);
@@ -318,7 +321,7 @@ fn an_empty_anchor_is_flat() {
         total: &n.total,
         safe_radius: &n.safe_radius,
         offset: None,
-        pos: &pos,
+        pos: &pos_ref,
         partition: &partition,
         partition_scale: 1.0,
         side: &side,
@@ -349,6 +352,7 @@ fn subsetting_the_active_set_changes_nothing() {
     let side = FrozenSide { e: &e, b: &b, h: H };
     let partition: Vec<u32> = (0..K as u32).collect();
     let pos = edges();
+    let pos_ref: Vec<&[(u32, f32)]> = pos.iter().map(Vec::as_slice).collect();
     let beta = loadings(1.0);
     let d = 2usize;
     let n = naive(d, &beta, None, &side);
@@ -361,7 +365,7 @@ fn subsetting_the_active_set_changes_nothing() {
         total: &n.total,
         safe_radius: &n.safe_radius,
         offset: None,
-        pos: &pos,
+        pos: &pos_ref,
         partition: &partition,
         partition_scale: 1.0,
         side: &side,

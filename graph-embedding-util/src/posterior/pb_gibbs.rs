@@ -31,15 +31,16 @@
 //!
 //! The frozen side is constant *within* a block, which is what makes each block
 //! embarrassingly parallel over its anchors — the same property the one-sided
-//! samplers rely on. Between blocks the other side has moved, so each block
-//! rebuilds its [`AnchorMoment`]s. That rebuild is `O(edges · h)` once per block
-//! per sweep, against `O(anchors · h · evals · |partition|)` for the dim scan
-//! itself, so it does not show up in the profile.
+//! samplers rely on. Between blocks the other side has moved, so the per-anchor moment
+//! statistics have to be rebuilt; that happens inside the column pass, per tile and in
+//! parallel, so this file does not build them. It used to, and they were never read —
+//! the only consumer of `NodeTerm::moment` is `multinomial_ll`, and the column path's
+//! one caller of that deliberately walks the edges instead.
 
 use super::diagnostics::scalar_diagnostics;
 use super::dim_block::{dim_block, dim_block_multi, DimBlockConfig, DimBlockResult};
 use super::diagnostics::ChainDiag;
-use super::lnpdf::{AnchorMoment, FrozenSide, NodeTerm};
+use super::lnpdf::{FrozenSide, NodeTerm};
 use super::pb_index::{build_pb_index_pair, AnchorMap, FeatureSide};
 use crate::fit::feature_projection::StackedPb;
 use crate::progress::new_progress_bar;
@@ -204,21 +205,11 @@ pub(crate) fn pb_gibbs(
             b: &b_pb_live,
             h,
         };
-        let moments: Vec<AnchorMoment> = pair
-            .by_feature
-            .pos
-            .iter()
-            .map(|p| AnchorMoment::new(p, &side_pb))
-            .collect();
         let nodes: Vec<NodeTerm> = pair
             .by_feature
             .pos
             .iter()
-            .zip(&moments)
-            .map(|(p, m)| {
-                NodeTerm::new(p, &pair.by_feature.partition, pair.by_feature.partition_scale)
-                    .with_moment(m)
-            })
+            .map(|p| NodeTerm::new(p, &pair.by_feature.partition, pair.by_feature.partition_scale))
             .collect();
         let mut gene_cfg = DimBlockConfig::new(1, 0, block_seed(cfg.seed, 0x9E37, sweep))
             .with_init_beta(e_gene.clone())
@@ -272,19 +263,12 @@ pub(crate) fn pb_gibbs(
             b: &b_row_live,
             h,
         };
-        let pb_moments: Vec<AnchorMoment> = pair
-            .by_pb
-            .pos
-            .iter()
-            .map(|p| AnchorMoment::new(p, &side_gene))
-            .collect();
         let pb_nodes: Vec<NodeTerm> = pair
             .by_pb
             .pos
             .iter()
-            .zip(&pb_moments)
-            .map(|(p, m)| {
-                NodeTerm::new(p, &pair.by_pb.partition, pair.by_pb.partition_scale).with_moment(m)
+            .map(|p| {
+                NodeTerm::new(p, &pair.by_pb.partition, pair.by_pb.partition_scale)
             })
             .collect();
         let mut pb_cfg = DimBlockConfig::new(1, 0, block_seed(cfg.seed, 0x85EB, sweep))
@@ -978,18 +962,6 @@ pub(crate) fn pb_gibbs_splice(
         // conditionals of one joint. The unspliced term carries δ as its offset;
         // the two tracks have independent per-row biases, so each term's
         // intercept profiles out separately and the sum is the joint's profile.
-        let beta_moments_s: Vec<AnchorMoment> = beta_pair
-            .by_feature
-            .pos
-            .iter()
-            .map(|p| AnchorMoment::new(p, &side_pb))
-            .collect();
-        let beta_moments_u: Vec<AnchorMoment> = delta_pair
-            .by_feature
-            .pos
-            .iter()
-            .map(|p| AnchorMoment::new(p, &side_pb))
-            .collect();
         let beta_terms: Vec<Vec<NodeTerm>> = (0..n_genes)
             .map(|a| {
                 vec![
@@ -997,15 +969,13 @@ pub(crate) fn pb_gibbs_splice(
                         &beta_pair.by_feature.pos[a],
                         &beta_pair.by_feature.partition,
                         beta_pair.by_feature.partition_scale,
-                    )
-                    .with_moment(&beta_moments_s[a]),
+                    ),
                     {
                         let mut t = NodeTerm::new(
                             &delta_pair.by_feature.pos[a],
                             &delta_pair.by_feature.partition,
                             delta_pair.by_feature.partition_scale,
-                        )
-                        .with_moment(&beta_moments_u[a]);
+                        );
                         t.offset = Some(&e_delta[a * h..(a + 1) * h]);
                         t
                     },
@@ -1064,20 +1034,12 @@ pub(crate) fn pb_gibbs_splice(
             .quiet();
         pb_cfg.transitions_per_dim = cfg.transitions_per_dim;
         let pbres = {
-            let moments: Vec<AnchorMoment> = beta_pair
-                .by_pb
-                .pos
-                .iter()
-                .map(|p| AnchorMoment::new(p, &side_rows))
-                .collect();
             let nodes: Vec<NodeTerm> = beta_pair
                 .by_pb
                 .pos
                 .iter()
-                .zip(&moments)
-                .map(|(p, m)| {
+                .map(|p| {
                     NodeTerm::new(p, &beta_pair.by_pb.partition, beta_pair.by_pb.partition_scale)
-                        .with_moment(m)
                 })
                 .collect();
             dim_block(&nodes, &side_rows, &pb_cfg)
@@ -1161,7 +1123,7 @@ pub(crate) fn pb_gibbs_splice(
     Ok(out)
 }
 
-/// One gene-side block: build moments against the current frozen side, run a
+/// One gene-side block: build the anchor terms against the current frozen side, run a
 /// single `dim_block` sweep, hand back the draw.
 #[allow(clippy::too_many_arguments)]
 fn run_block(
@@ -1179,13 +1141,11 @@ fn run_block(
     label: &str,
 ) -> DimBlockResult {
     let h = side.h;
-    let moments: Vec<AnchorMoment> = pos.iter().map(|p| AnchorMoment::new(p, side)).collect();
     let nodes: Vec<NodeTerm> = pos
         .iter()
-        .zip(&moments)
         .enumerate()
-        .map(|(a, (p, m))| {
-            let mut n = NodeTerm::new(p, partition, partition_scale).with_moment(m);
+        .map(|(a, p)| {
+            let mut n = NodeTerm::new(p, partition, partition_scale);
             n.offset = offset.map(|o| &o[a * h..(a + 1) * h]);
             n
         })
