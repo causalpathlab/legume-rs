@@ -72,6 +72,25 @@ impl PbGibbsConfig {
     }
 }
 
+/// What each block's Poisson rate normalizer actually summed over.
+///
+/// Reported rather than inferred from the config, because since the slate became
+/// data-dependent — exact where an axis is cheap relative to the cap, sampled where it is
+/// not, and drawn from the EXPRESSED axis either way — the cap no longer says what a run
+/// did. A `scale` of `1.0` means that axis was summed exactly and so carries no
+/// Monte-Carlo error in its log-normalizer; anything above it does.
+#[derive(Clone, Copy, Debug)]
+pub struct PartitionGeometry {
+    /// Entries summed in the gene block's normalizer (over the pb axis), and the factor
+    /// folding them up to the expressed pb count.
+    pub pb_entries: usize,
+    pub pb_scale: f64,
+    /// Entries summed in the pb block's normalizer (over the feature axis), and its
+    /// fold-up factor.
+    pub feat_entries: usize,
+    pub feat_scale: f64,
+}
+
 /// What the sweep leaves behind: the gene side's selection posterior, both sides'
 /// posterior-mean loadings, and the per-dim hypers the gene block learned.
 pub struct PbGibbsResult {
@@ -100,6 +119,8 @@ pub struct PbGibbsResult {
     pub pi0: Vec<f64>,
     pub sigma_diag: Vec<ChainDiag>,
     pub pi0_diag: Vec<ChainDiag>,
+    /// What the normalizers actually summed over — see [`PartitionGeometry`].
+    pub partition: PartitionGeometry,
     pub h: usize,
     /// Outer sweeps actually retained — below `n_sweeps` only if SIGINT hit.
     pub n_kept: usize,
@@ -371,6 +392,12 @@ pub(crate) fn pb_gibbs(
         pi0: mean_chain(&pi0_chain),
         sigma_diag,
         pi0_diag,
+        partition: PartitionGeometry {
+            pb_entries: pair.by_feature.partition.len(),
+            pb_scale: pair.by_feature.partition_scale,
+            feat_entries: pair.by_pb.partition.len(),
+            feat_scale: pair.by_pb.partition_scale,
+        },
         h,
         n_kept,
     })
@@ -389,7 +416,6 @@ pub fn write_posterior_hyper_from_model(
     out_prefix: &str,
     res: &PbGibbsResult,
     varmap: &candle_util::candle_nn::VarMap,
-    n_partition: usize,
     seed: u64,
 ) -> anyhow::Result<()> {
     let vars = varmap.data().lock().expect("varmap poisoned");
@@ -417,7 +443,7 @@ pub fn write_posterior_hyper_from_model(
         b: &b,
         h: res.h,
     };
-    write_posterior_hyper(out_prefix, res, &side, n_partition, seed)
+    write_posterior_hyper(out_prefix, res, &side, seed)
 }
 
 /// Splice-model twin of [`write_posterior_hyper_from_model`], with a `per_dim`
@@ -427,7 +453,6 @@ pub fn write_splice_posterior_hyper(
     out_prefix: &str,
     res: &SpliceGibbsResult,
     varmap: &candle_util::candle_nn::VarMap,
-    n_partition: usize,
     seed: u64,
 ) -> anyhow::Result<()> {
     let (e, b) = stacked_pb_from_varmap(varmap, res.h)?;
@@ -455,7 +480,7 @@ pub fn write_splice_posterior_hyper(
             "n_unidentified": res.delta_identified.iter().filter(|&&x| !x).count(),
         },
     });
-    emit_hyper_json(out_prefix, res.h, res.n_kept, n_partition, seed, &side, gates)
+    emit_hyper_json(out_prefix, res.h, res.n_kept, res.partition, seed, &side, gates)
 }
 
 /// The stacked pb side, read back out of the fitted `VarMap`.
@@ -488,7 +513,7 @@ fn emit_hyper_json(
     out_prefix: &str,
     h: usize,
     n_kept: usize,
-    n_partition: usize,
+    partition: PartitionGeometry,
     seed: u64,
     frozen_pb: &FrozenSide<'_>,
     per_gate: serde_json::Value,
@@ -521,7 +546,18 @@ fn emit_hyper_json(
     }
     let json = serde_json::json!({
         "n_sweeps": n_kept,
-        "n_partition": n_partition,
+        // What the normalizers ACTUALLY summed over. `scale == 1.0` marks an axis summed
+        // exactly, hence free of the Jensen bias a sampled log-normalizer carries; the
+        // config cap is not reported because since the slate became data-dependent it no
+        // longer says what a run did.
+        "partition": {
+            "pb_entries": partition.pb_entries,
+            "pb_scale": partition.pb_scale,
+            "pb_exact": partition.pb_scale == 1.0,
+            "feature_entries": partition.feat_entries,
+            "feature_scale": partition.feat_scale,
+            "feature_exact": partition.feat_scale == 1.0,
+        },
         "seed": seed,
         "interrupted": crate::stop::stop_flag().load(std::sync::atomic::Ordering::Relaxed),
         "gates": per_gate,
@@ -537,7 +573,6 @@ fn write_posterior_hyper(
     out_prefix: &str,
     res: &PbGibbsResult,
     frozen_pb: &FrozenSide<'_>,
-    n_partition: usize,
     seed: u64,
 ) -> anyhow::Result<()> {
     let geom = super::frozen_diag::frozen_side_diag(frozen_pb);
@@ -570,7 +605,18 @@ fn write_posterior_hyper(
     }
     let json = serde_json::json!({
         "n_sweeps": res.n_kept,
-        "n_partition": n_partition,
+        // What the normalizers ACTUALLY summed over. `scale == 1.0` marks an axis summed
+        // exactly, hence free of the Jensen bias a sampled log-normalizer carries; the
+        // config cap is not reported because since the slate became data-dependent it no
+        // longer says what a run did.
+        "partition": {
+            "pb_entries": res.partition.pb_entries,
+            "pb_scale": res.partition.pb_scale,
+            "pb_exact": res.partition.pb_scale == 1.0,
+            "feature_entries": res.partition.feat_entries,
+            "feature_scale": res.partition.feat_scale,
+            "feature_exact": res.partition.feat_scale == 1.0,
+        },
         "seed": seed,
         "interrupted": crate::stop::stop_flag().load(std::sync::atomic::Ordering::Relaxed),
         "per_dim": {
@@ -780,6 +826,8 @@ pub struct SpliceGibbsResult {
     pub delta_sigma2: Vec<f64>,
     pub delta_pi0: Vec<f64>,
     /// Mixing diagnostics per dim, over the OUTER sweeps — see `SpliceAcc`.
+    /// What the normalizers actually summed over — see [`PartitionGeometry`].
+    pub partition: PartitionGeometry,
     pub beta_sigma_diag: Vec<ChainDiag>,
     pub beta_pi0_diag: Vec<ChainDiag>,
     pub delta_sigma_diag: Vec<ChainDiag>,
@@ -1033,6 +1081,12 @@ pub(crate) fn pb_gibbs_splice(
     }
     bar.finish_and_clear();
     let mut out = acc.finish(h, delta_identified)?;
+    out.partition = PartitionGeometry {
+        pb_entries: beta_pair.by_feature.partition.len(),
+        pb_scale: beta_pair.by_feature.partition_scale,
+        feat_entries: beta_pair.by_pb.partition.len(),
+        feat_scale: beta_pair.by_pb.partition_scale,
+    };
     report_convergence(
         "gem splice (β gate)",
         &out.beta_sigma_diag,
@@ -1221,6 +1275,15 @@ impl SpliceAcc {
             beta_pi0: f64s(&self.bpi),
             delta_sigma2: f64s(&self.ds2),
             delta_pi0: f64s(&self.dpi),
+            // Overwritten by the caller, which is the only place that has seen the index.
+            // Zeroed here rather than guessed: a plausible-looking default would be
+            // reported as fact if the caller ever forgot to set it.
+            partition: PartitionGeometry {
+                pb_entries: 0,
+                pb_scale: f64::NAN,
+                feat_entries: 0,
+                feat_scale: f64::NAN,
+            },
             beta_sigma_diag: diag(&self.bs2),
             beta_pi0_diag: diag(&self.bpi),
             delta_sigma_diag: diag(&self.ds2),

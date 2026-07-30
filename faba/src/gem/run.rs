@@ -447,7 +447,7 @@ fn run_gem_genes_bge(
             &args.out,
             post,
             &out.varmap,
-            args.posterior.posterior.unwrap_or(0),
+            // geometry now travels on the result, not as a caller-supplied cap
             args.runtime.seed,
         )?;
         info!(
