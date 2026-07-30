@@ -72,6 +72,85 @@ pub fn ess(x: &[f32]) -> f32 {
     (nf / tau).max(1.0) as f32
 }
 
+/// **Split-R̂** for one chain: the Gelman–Rubin statistic computed by cutting the chain
+/// into consecutive segments and treating them as separate chains.
+///
+/// Why split rather than multi-chain. R̂ compares between-segment variance against
+/// within-segment variance, so it is sensitive to exactly the failure a single long run
+/// hides: a chain still drifting, where the first half and the second half are sampling
+/// different regions. `1.0` means the segments are indistinguishable; the conventional
+/// threshold is `1.01`, and anything above `1.1` should be read as "this has not
+/// converged" rather than as a mild warning.
+///
+/// What it CANNOT see, and this bound matters: a mode both halves are stuck in. Split-R̂
+/// certifies stationarity, not that the chain found the right place — for that there is
+/// no substitute for independent chains from dispersed starts.
+///
+/// Returns `1.0` for a chain too short to split (nothing to compare), and `1.0` for a
+/// perfectly constant chain, since a zero within-segment variance means the segments
+/// agree exactly rather than that they disagree infinitely.
+#[must_use]
+pub fn split_rhat(x: &[f32]) -> f32 {
+    let t = x.len();
+    // Four segments where there is length for it — more segments give more power to
+    // detect drift — falling back to two, and to "no answer" below that.
+    let m = if t >= 40 {
+        4
+    } else if t >= 8 {
+        2
+    } else {
+        return 1.0;
+    };
+    let n = t / m;
+    if n < 2 {
+        return 1.0;
+    }
+
+    let mut means = Vec::with_capacity(m);
+    let mut within = 0.0f64;
+    for s in 0..m {
+        let seg = &x[s * n..(s + 1) * n];
+        let mean = seg.iter().map(|&v| f64::from(v)).sum::<f64>() / n as f64;
+        let var = seg
+            .iter()
+            .map(|&v| {
+                let d = f64::from(v) - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / (n - 1) as f64;
+        means.push(mean);
+        within += var;
+    }
+    let w = within / m as f64;
+    if w <= 0.0 {
+        // Every segment is internally constant. If they also agree with each other the
+        // chain is simply pinned; if they do not, `w = 0` makes the ratio meaningless,
+        // so report the disagreement as non-convergence rather than dividing by zero.
+        let lo = means.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = means.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        return if (hi - lo).abs() <= f64::EPSILON {
+            1.0
+        } else {
+            f32::INFINITY
+        };
+    }
+
+    let grand = means.iter().sum::<f64>() / m as f64;
+    let b = means
+        .iter()
+        .map(|mu| {
+            let d = mu - grand;
+            d * d
+        })
+        .sum::<f64>()
+        / (m - 1) as f64
+        * n as f64;
+
+    let var_hat = (n - 1) as f64 / n as f64 * w + b / n as f64;
+    (var_hat / w).sqrt() as f32
+}
+
 /// Monte-Carlo standard error of a probability `p` estimated from a chain with effective
 /// sample size `ess` — e.g. the `lfsr`, which is a posterior tail probability.
 ///

@@ -79,3 +79,71 @@ fn mcse_is_nonzero_at_p_zero() {
     // Fewer effective draws ⇒ strictly more error.
     assert!(mcse_proportion(0.1, 100.0) > se_border);
 }
+
+/////////////////
+// Split-R̂    //
+/////////////////
+
+/// A stationary chain's segments are interchangeable, so R̂ sits at ~1.
+#[test]
+fn a_stationary_chain_has_rhat_near_one() {
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
+    use rand_distr::{Distribution, StandardNormal};
+    let mut rng = SmallRng::seed_from_u64(11);
+    let x: Vec<f32> = (0..800)
+        .map(|_| {
+            let g: f64 = StandardNormal.sample(&mut rng);
+            g as f32
+        })
+        .collect();
+    let r = split_rhat(&x);
+    assert!(
+        (r - 1.0).abs() < 0.05,
+        "iid draws should give R̂ ≈ 1, got {r}"
+    );
+}
+
+/// THE case this exists for: a chain still drifting. The segments then sample different
+/// regions, between-segment variance dominates, and R̂ must rise well past the 1.01
+/// convention — otherwise a run that never left its initialization would report as
+/// converged, which under SGD-xor-sampling is the whole output.
+#[test]
+fn a_drifting_chain_is_caught() {
+    let x: Vec<f32> = (0..800).map(|i| i as f32 * 0.01).collect();
+    let r = split_rhat(&x);
+    assert!(
+        r > 1.1,
+        "a linear drift must not pass as converged, got R̂ {r}"
+    );
+}
+
+/// A chain that never moved is pinned, not divergent — its segments agree exactly. Guards
+/// the zero-within-variance branch, which would otherwise divide by zero and report a
+/// stuck chain as infinitely bad rather than as suspiciously perfect.
+#[test]
+fn a_constant_chain_reports_one_not_a_division_by_zero() {
+    let x = vec![0.7f32; 400];
+    let r = split_rhat(&x);
+    assert_eq!(r, 1.0, "a pinned chain should read 1.0, got {r}");
+}
+
+/// Segments that are each internally constant but disagree with each other are the one
+/// case where zero within-variance means genuine non-convergence, and it must be reported
+/// as such rather than silently becoming 1.0.
+#[test]
+fn constant_but_disagreeing_segments_are_not_converged() {
+    let mut x = vec![0.0f32; 200];
+    x.extend(vec![5.0f32; 200]);
+    assert!(
+        split_rhat(&x) > 1.1,
+        "two constant halves at different levels are not converged"
+    );
+}
+
+/// Too short to split ⇒ no claim, rather than a number computed from two points.
+#[test]
+fn a_chain_too_short_to_split_makes_no_claim() {
+    assert_eq!(split_rhat(&[1.0, 2.0, 3.0]), 1.0);
+    assert_eq!(split_rhat(&[]), 1.0);
+}

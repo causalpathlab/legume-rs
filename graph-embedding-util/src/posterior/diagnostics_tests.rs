@@ -34,20 +34,32 @@ fn stalled_chain_is_visible() {
     );
 }
 
-/// `worst_case` surfaces the stalled node even amid healthy ones.
+/// `worst_case` surfaces the stalled node even amid healthy ones — separately on each
+/// axis, since a node can fail one and pass the others. In particular a node may mix
+/// efficiently (high ESS, no stuck draws) inside a region it never leaves, which only R̂
+/// sees; folding these together would let that node hide.
 #[test]
 fn worst_case_surfaces_the_bad_node() {
     let healthy = ChainDiag {
         min_ess: 800.0,
         stuck_fraction: 0.0,
+        rhat: 1.001,
     };
     let bad = ChainDiag {
         min_ess: 3.0,
         stuck_fraction: 0.9,
+        rhat: 1.02,
     };
-    let w = worst_case(&[healthy, bad, healthy]);
+    // Mixes well, but is not stationary — the case ESS alone cannot report.
+    let drifting = ChainDiag {
+        min_ess: 900.0,
+        stuck_fraction: 0.0,
+        rhat: 3.4,
+    };
+    let w = worst_case(&[healthy, bad, healthy, drifting]);
     assert_eq!(w.min_ess, 3.0);
     assert_eq!(w.stuck_fraction, 0.9);
+    assert_eq!(w.rhat, 3.4, "the worst R̂ must survive a pool of healthy ESS");
 }
 
 /// A too-short chain returns a well-formed (non-panicking) summary.
