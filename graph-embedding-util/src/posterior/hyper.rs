@@ -26,7 +26,7 @@
 //! sampler was retired, and these primitives are what it left behind.
 
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rand_distr::{Beta, Distribution, Gamma};
 
 /// SD-band clamp mirroring `model::GATE_LOGSTD_CLAMP` (`σ = exp(logσ)` stays finite).
@@ -93,6 +93,141 @@ pub fn sample_pi0(n_null: usize, n_total: usize, a: f64, b: f64, rng: &mut impl 
     let beta = Beta::new(a + n_null as f64, b + n_active).expect("valid Beta params");
     let p: f64 = beta.sample(rng);
     p.clamp(PI0_EPS, 1.0 - PI0_EPS)
+}
+
+/////////////////////////////////////////
+// Truncated IBP: stick-breaking sticks //
+/////////////////////////////////////////
+
+/// Max shrinkage steps in the univariate slice sampler below. Reaching it means the
+/// bracket never found an acceptable point, which on a log-concave target means the
+/// current value is already at a near-degenerate mode; keeping it is the safe fallback.
+const SLICE_MAX_SHRINK: usize = 64;
+
+/// Truncated Indian-Buffet-Process inclusion rates via stick-breaking
+/// (Teh, Görür & Ghahramani 2007), held as the sticks themselves.
+///
+/// ```text
+///   v_j ~ Beta(α, 1),      π_h = ∏_{j ≤ h} v_j
+/// ```
+///
+/// Each `v_j ∈ (0,1)`, so `π` is **monotonically decreasing** in the dim index. That
+/// ordering is the whole point, and it is what an independent `Beta(a,b)` per dim
+/// cannot express: with ~34k genes on every dim, an O(1) Beta prior is swamped, so
+/// each unused dim independently re-estimates its own inclusion rate back to the same
+/// value — measured flat at 0.787–0.930 across 16 dims on BM1 while the likelihood
+/// supported only ~3.4 of them. Here the tail is squeezed toward zero by CONSTRUCTION,
+/// which no amount of data can outvote.
+///
+/// Truncating at `H` keeps the dimension fixed, so every downstream interface — the
+/// `[rows, H]` mask, the `h0..hH` outputs, the phase-2 projection — is untouched. The
+/// only thing the model sees is [`Self::pi0`], a length-`H` vector, exactly as before.
+///
+/// A second consequence worth naming: ordering the dims removes the dim-PERMUTATION
+/// gauge, the last symmetry left once the gate breaks rotation. Dims become comparable
+/// across runs the way PCA components are.
+#[derive(Clone, Debug)]
+pub struct StickBreaking {
+    /// Concentration `α`. Larger ⇒ sticks nearer 1 ⇒ slower decay ⇒ more dims used.
+    /// Under the IBP it is the expected number of dims a gene loads.
+    pub alpha: f64,
+    /// The sticks `v_j`, one per dim.
+    v: Vec<f64>,
+}
+
+impl StickBreaking {
+    /// Sticks at the prior mean `α/(α+1)`, so an untrained state states the prior.
+    #[must_use]
+    pub fn new(alpha: f64, h: usize) -> Self {
+        Self {
+            alpha,
+            v: vec![alpha / (alpha + 1.0); h],
+        }
+    }
+
+    /// Per-dim EXCLUSION rates `π₀ₕ = 1 − ∏_{j ≤ h} v_j`, the vector the sampler
+    /// consumes. Monotonically INCREASING, since the inclusion rates decrease.
+    #[must_use]
+    pub fn pi0(&self) -> Vec<f64> {
+        let mut cum = 1.0f64;
+        self.v
+            .iter()
+            .map(|&vj| {
+                cum *= vj;
+                (1.0 - cum).clamp(PI0_EPS, 1.0 - PI0_EPS)
+            })
+            .collect()
+    }
+
+    /// One Gibbs sweep over the sticks given per-dim inclusion counts: `m[h]` of
+    /// `n[h]` coordinates included on dim `h`.
+    ///
+    /// The conditional for a single `v_j` with the others fixed is, up to a constant,
+    ///
+    /// ```text
+    ///   (α − 1 + Σ_{h ≥ j} m_h)·ln v_j  +  Σ_{h ≥ j} (n_h − m_h)·ln(1 − v_j·c_h)
+    ///   where c_h = ∏_{i ≤ h, i ≠ j} v_i
+    /// ```
+    ///
+    /// The first term is Beta-like; the `ln(1 − v·c)` term is what breaks conjugacy —
+    /// hence slice sampling rather than a closed form. Both terms are concave in `v_j`,
+    /// so the target is log-concave on `(0,1)` and simple interval shrinkage (no
+    /// stepping-out needed on a bounded support) mixes well.
+    pub fn sample(&mut self, m: &[usize], n: &[usize], rng: &mut impl Rng) {
+        debug_assert_eq!(m.len(), self.v.len());
+        debug_assert_eq!(n.len(), self.v.len());
+        let h = self.v.len();
+        for j in 0..h {
+            // `c_h` for every h ≥ j: the product of the OTHER sticks up to h.
+            let mut c = Vec::with_capacity(h - j);
+            let mut prod = self.v[..j].iter().product::<f64>();
+            for hh in j..h {
+                if hh > j {
+                    prod *= self.v[hh];
+                }
+                c.push(prod);
+            }
+            let pow: f64 = self.alpha - 1.0 + m[j..].iter().sum::<usize>() as f64;
+            let ln_target = |v: f64| -> f64 {
+                if !(v > 0.0 && v < 1.0) {
+                    return f64::NEG_INFINITY;
+                }
+                let mut lp = pow * v.ln();
+                for (k, hh) in (j..h).enumerate() {
+                    let off = (n[hh] - m[hh].min(n[hh])) as f64;
+                    if off > 0.0 {
+                        lp += off * (1.0 - v * c[k]).max(f64::MIN_POSITIVE).ln();
+                    }
+                }
+                lp
+            };
+            self.v[j] = slice_unit(self.v[j], ln_target, rng);
+        }
+    }
+}
+
+/// Univariate slice sampler for a log-concave density on `(0, 1)`.
+///
+/// Bounded support, so the bracket starts as the whole interval and only shrinks —
+/// the stepping-out phase of Neal (2003) is unnecessary and would only cost evaluations.
+fn slice_unit(x0: f64, ln_f: impl Fn(f64) -> f64, rng: &mut impl Rng) -> f64 {
+    let y = ln_f(x0) + rng.random::<f64>().max(f64::MIN_POSITIVE).ln();
+    if !y.is_finite() {
+        return x0;
+    }
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for _ in 0..SLICE_MAX_SHRINK {
+        let x = lo + rng.random::<f64>() * (hi - lo);
+        if ln_f(x) > y {
+            return x.clamp(PI0_EPS, 1.0 - PI0_EPS);
+        }
+        if x < x0 {
+            lo = x;
+        } else {
+            hi = x;
+        }
+    }
+    x0
 }
 
 /// Numerically stable logistic, branching on the sign so neither `exp` overflows.

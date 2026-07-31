@@ -76,3 +76,92 @@ fn pi0_recovers_planted_sparsity() {
         "π₀ should recover the plant: got {post_mean:.3}, true {truth:.3}"
     );
 }
+
+///////////////////////////////////
+// Truncated IBP stick-breaking //
+///////////////////////////////////
+
+/// `π₀` is monotonically INCREASING in the dim index, whatever the sticks are —
+/// equivalently, the inclusion rates decrease. This is the structural property the
+/// independent per-dim `Beta(a,b)` cannot express, and the reason for the change: it
+/// cannot be outvoted by data, so surplus dims are squeezed off by construction.
+#[test]
+fn stick_breaking_pi0_is_monotone_whatever_the_sticks() {
+    let mut rng = StdRng::seed_from_u64(7);
+    for alpha in [0.5f64, 1.0, 3.0, 10.0] {
+        let mut sb = StickBreaking::new(alpha, 16);
+        // Drive it with arbitrary counts so the sticks are not at their init.
+        let m: Vec<usize> = (0..16).map(|d| 500 - 25 * d).collect();
+        let n = vec![1000usize; 16];
+        for _ in 0..20 {
+            sb.sample(&m, &n, &mut rng);
+        }
+        let pi0 = sb.pi0();
+        for w in pi0.windows(2) {
+            assert!(
+                w[1] >= w[0] - 1e-12,
+                "exclusion must not DECREASE with dim (α={alpha}): {pi0:?}"
+            );
+        }
+    }
+}
+
+/// With no data the sticks sample their `Beta(α, 1)` prior, whose mean is `α/(α+1)`.
+/// This is the check that the slice step targets the right density — everything else
+/// rides on it, and a slice sampler that silently returns its starting point would
+/// pass every monotonicity test above.
+#[test]
+fn sticks_recover_their_beta_prior_with_no_data() {
+    let mut rng = StdRng::seed_from_u64(11);
+    for alpha in [1.0f64, 4.0] {
+        let h = 1usize;
+        let mut sb = StickBreaking::new(alpha, h);
+        // Zero eligible coordinates ⇒ the likelihood is flat ⇒ the prior is the target.
+        let (m, n) = (vec![0usize; h], vec![0usize; h]);
+        let mut acc = 0.0f64;
+        let draws = 4000;
+        for _ in 0..draws {
+            sb.sample(&m, &n, &mut rng);
+            acc += 1.0 - sb.pi0()[0]; // inclusion = v_0 at h = 1
+        }
+        let got = acc / draws as f64;
+        let want = alpha / (alpha + 1.0);
+        assert!(
+            (got - want).abs() < 0.03,
+            "α={alpha}: stick mean {got:.4} != Beta(α,1) mean {want:.4}"
+        );
+    }
+}
+
+/// The data moves the sticks: a dim with many inclusions holds a high rate, and the
+/// tail collapses. This is the behaviour the flat per-dim `Beta` failed to produce on
+/// BM1 (0.787–0.930 across 16 dims while only ~3.4 were supported).
+#[test]
+fn a_supported_head_and_an_empty_tail_separate() {
+    let mut rng = StdRng::seed_from_u64(3);
+    let h = 12usize;
+    let mut sb = StickBreaking::new(3.0, h);
+    // First 3 dims: 80% of genes included. Remaining 9: nothing.
+    let n = vec![2000usize; h];
+    let m: Vec<usize> = (0..h).map(|d| if d < 3 { 1600 } else { 0 }).collect();
+    for _ in 0..200 {
+        sb.sample(&m, &n, &mut rng);
+    }
+    let incl: Vec<f64> = sb.pi0().iter().map(|p| 1.0 - p).collect();
+    assert!(
+        incl[0] > 0.5,
+        "a dim with 80% inclusion must keep a high rate, got {:.3}",
+        incl[0]
+    );
+    assert!(
+        incl[h - 1] < 0.05,
+        "an empty tail dim must collapse, got {:.3}",
+        incl[h - 1]
+    );
+    assert!(
+        incl[2] > incl[h - 1] * 5.0,
+        "head and tail must separate: {:.3} vs {:.3}",
+        incl[2],
+        incl[h - 1]
+    );
+}

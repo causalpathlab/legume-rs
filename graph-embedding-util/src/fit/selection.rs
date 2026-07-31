@@ -81,6 +81,20 @@ pub(crate) fn run_selection_pass(
          phase-1 SGD then fits the loading under. --epochs still governs that SGD.",
         pcfg.n_sweeps,
     );
+    match pcfg.stick_alpha {
+        Some(a) => info!(
+            "  inclusion prior: truncated IBP, stick-breaking at α={a} — per-dim rates \
+             are forced to DECREASE with the dim index, so surplus dims are squeezed \
+             off rather than each re-estimating the same rate. α is the expected dims \
+             per feature and does NOT scale with --embedding-dim, which is therefore a \
+             truncation rather than a knob."
+        ),
+        None => info!(
+            "  inclusion prior: independent Beta per dim (--no-stick-breaking). With \
+             many features per dim this is swamped by the data — it neither imposes \
+             sparsity nor collapses unused dims. Drop the flag for the default IBP."
+        ),
+    }
     let pb = super::stacked_pb_view(varmap, collapsed_levels, cell_to_pb_per_level, h)?;
     let b_feat_map: Vec<f32> = b_feat.to_vec1()?;
 

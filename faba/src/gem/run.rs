@@ -419,11 +419,13 @@ fn run_gem_genes_bge(
             // this `None` while still resolving `posterior_plan` made the flag a
             // silent no-op that the run manifest nonetheless advertised.
             pb_posterior: posterior_plan.map(|plan| {
-                ge::posterior::pb_gibbs::PbGibbsConfig::new(
+                let mut c = ge::posterior::pb_gibbs::PbGibbsConfig::new(
                     plan.n_samples,
                     plan.n_samples / 2,
                     plan.seed,
-                )
+                );
+                c.stick_alpha = plan.stick_alpha;
+                c
             }),
             pb_posterior_nested_delta: !args.model.independent_delta_gate,
             // `--nce-objective` (default softmax = InfoNCE: on gem's dense count data

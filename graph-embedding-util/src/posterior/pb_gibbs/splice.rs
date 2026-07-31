@@ -247,6 +247,7 @@ pub(crate) fn pb_gibbs_splice(
             beta_cfg = beta_cfg.with_init_z(z);
         }
         beta_cfg.transitions_per_dim = cfg.transitions_per_dim;
+        beta_cfg.stick_alpha = cfg.stick_alpha;
         let b = dim_block_multi(&beta_terms, &side_pb, &beta_cfg);
         drop(beta_terms);
         e_beta.copy_from_slice(&b.mean_beta);
