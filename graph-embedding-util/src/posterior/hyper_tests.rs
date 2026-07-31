@@ -78,90 +78,98 @@ fn pi0_recovers_planted_sparsity() {
 }
 
 ///////////////////////////////////
-// Truncated IBP stick-breaking //
-///////////////////////////////////
+// Truncated IBP ladder      //
+///////////////////////////////
 
-/// `π₀` is monotonically INCREASING in the dim index, whatever the sticks are —
-/// equivalently, the inclusion rates decrease. This is the structural property the
-/// independent per-dim `Beta(a,b)` cannot express, and the reason for the change: it
-/// cannot be outvoted by data, so surplus dims are squeezed off by construction.
+/// `π₀` INCREASES with the dim index for any α — equivalently the inclusion rates
+/// decay. This is the structural property the independent per-dim `Beta(a,b)` cannot
+/// express, and the whole reason for the prior: with ~34k features on a dim, an O(1)
+/// Beta is swamped and every unused dim re-estimates the same rate, whereas a
+/// monotone ladder cannot be outvoted.
 #[test]
-fn stick_breaking_pi0_is_monotone_whatever_the_sticks() {
-    let mut rng = StdRng::seed_from_u64(7);
-    for alpha in [0.5f64, 1.0, 3.0, 10.0] {
-        let mut sb = StickBreaking::new(alpha, 16);
-        // Drive it with arbitrary counts so the sticks are not at their init.
-        let m: Vec<usize> = (0..16).map(|d| 500 - 25 * d).collect();
-        let n = vec![1000usize; 16];
-        for _ in 0..20 {
-            sb.sample(&m, &n, &mut rng);
-        }
-        let pi0 = sb.pi0();
+fn the_ibp_ladder_is_monotone_for_any_alpha() {
+    for alpha in [0.1f64, 0.5, 1.0, 3.0, 10.0, 100.0] {
+        let pi0 = ibp_pi0(alpha, 32);
+        assert_eq!(pi0.len(), 32);
         for w in pi0.windows(2) {
             assert!(
                 w[1] >= w[0] - 1e-12,
                 "exclusion must not DECREASE with dim (α={alpha}): {pi0:?}"
             );
         }
+        assert!(pi0.iter().all(|p| *p > 0.0 && *p < 1.0), "α={alpha}");
     }
 }
 
-/// With no data the sticks sample their `Beta(α, 1)` prior, whose mean is `α/(α+1)`.
-/// This is the check that the slice step targets the right density — everything else
-/// rides on it, and a slice sampler that silently returns its starting point would
-/// pass every monotonicity test above.
+/// α IS the expected number of dims a feature loads, and — the property that makes
+/// `--embedding-dim` a truncation rather than a knob — it does not scale with `H`.
+///
+/// `Σ_h (α/(α+1))^{h+1}` is geometric with ratio `α/(α+1)`, so it converges to `α`.
+/// Doubling `H` therefore cannot double how many dims the prior expects a feature to
+/// use; it only extends a tail that is already negligible. Measured on BM1, that is
+/// what separated this prior from the Beta: 16 -> 32 dims moved the active count
+/// 10 -> 12 here, against 16 -> 32 for the unordered alternative.
 #[test]
-fn sticks_recover_their_beta_prior_with_no_data() {
-    let mut rng = StdRng::seed_from_u64(11);
-    for alpha in [1.0f64, 4.0] {
-        let h = 1usize;
-        let mut sb = StickBreaking::new(alpha, h);
-        // Zero eligible coordinates ⇒ the likelihood is flat ⇒ the prior is the target.
-        let (m, n) = (vec![0usize; h], vec![0usize; h]);
-        let mut acc = 0.0f64;
-        let draws = 4000;
-        for _ in 0..draws {
-            sb.sample(&m, &n, &mut rng);
-            acc += 1.0 - sb.pi0()[0]; // inclusion = v_0 at h = 1
-        }
-        let got = acc / draws as f64;
-        let want = alpha / (alpha + 1.0);
+fn expected_dims_per_feature_is_alpha_and_does_not_scale_with_h() {
+    for alpha in [0.5f64, 1.0, 2.0, 5.0] {
+        let dims = |h: usize| -> f64 { ibp_pi0(alpha, h).iter().map(|p| 1.0 - p).sum() };
+        let (d16, d32, d256) = (dims(16), dims(32), dims(256));
+        // Up to the boundary clamp. `ibp_pi0` floors every rate off 0/1 so
+        // `log_prior_odds` stays finite, which leaves each dim a residual `PI0_EPS` of
+        // inclusion — so a long tail overshoots α by at most `H · PI0_EPS`. At H = 256
+        // that is 0.026; at the H values anyone runs it is ~1e-3.
+        let floor = 256.0 * PI0_EPS;
         assert!(
-            (got - want).abs() < 0.03,
-            "α={alpha}: stick mean {got:.4} != Beta(α,1) mean {want:.4}"
+            d256 <= alpha + floor,
+            "α={alpha}: the geometric sum must not exceed α beyond the clamp floor, \
+             got {d256}"
+        );
+        assert!(
+            (d256 - alpha).abs() < floor,
+            "α={alpha}: at large H the sum must converge to α, got {d256}"
+        );
+        // The load-bearing one: doubling the truncation barely moves it — PROVIDED H is
+        // large relative to α. The series has ratio α/(α+1), so a big α converges
+        // slowly: at α = 5 the ratio is 0.833 and H = 16 still truncates ~5% of the
+        // mass, which is why the bound below scales with α rather than being flat.
+        let converged = alpha / (alpha + 1.0);
+        let truncated_at_16 = alpha * converged.powi(16);
+        assert!(
+            (d32 - d16).abs() <= truncated_at_16 + 256.0 * PI0_EPS,
+            "α={alpha}: H 16 -> 32 moved expected dims {d16} -> {d32}, more than the \
+             {truncated_at_16} the truncation itself accounts for"
         );
     }
 }
 
-/// The data moves the sticks: a dim with many inclusions holds a high rate, and the
-/// tail collapses. This is the behaviour the flat per-dim `Beta` failed to produce on
-/// BM1 (0.787–0.930 across 16 dims while only ~3.4 were supported).
+/// The H-invariance above is not unconditional: it holds once `H` is large relative to
+/// `α`, and the docs should not promise more than that.
+///
+/// At the shipped default `α = 1` the ratio is 0.5, so 16 dims already carry
+/// `1 − 2⁻¹⁶` of the mass and doubling H is invisible. At `α = 5` the ratio is 0.833
+/// and 16 dims carry only ~95%, so H is still doing real work. Pinned so a future
+/// default change has to confront it.
 #[test]
-fn a_supported_head_and_an_empty_tail_separate() {
-    let mut rng = StdRng::seed_from_u64(3);
-    let h = 12usize;
-    let mut sb = StickBreaking::new(3.0, h);
-    // First 3 dims: 80% of genes included. Remaining 9: nothing.
-    let n = vec![2000usize; h];
-    let m: Vec<usize> = (0..h).map(|d| if d < 3 { 1600 } else { 0 }).collect();
-    for _ in 0..200 {
-        sb.sample(&m, &n, &mut rng);
-    }
-    let incl: Vec<f64> = sb.pi0().iter().map(|p| 1.0 - p).collect();
+fn h_invariance_needs_h_large_relative_to_alpha() {
+    let dims = |alpha: f64, h: usize| -> f64 { ibp_pi0(alpha, h).iter().map(|p| 1.0 - p).sum() };
+
+    // Default α: the geometry is fully converged by 16 dims (ratio 0.5, so the tail is
+    // 2⁻¹⁶ ≈ 1.5e-5). What little the sum moves is the boundary CLAMP, not truncation —
+    // 16 extra dims each floored at `PI0_EPS` inclusion — so the bound is that floor,
+    // and the assertion is that the geometry contributes essentially nothing on top.
+    let (lo, hi) = (dims(1.0, 16), dims(1.0, 32));
+    let clamp_floor = 16.0 * PI0_EPS;
     assert!(
-        incl[0] > 0.5,
-        "a dim with 80% inclusion must keep a high rate, got {:.3}",
-        incl[0]
+        (hi - lo) <= clamp_floor + 1e-4,
+        "α=1: H 16 -> 32 should move only by the clamp floor {clamp_floor}, got \
+         {lo} -> {hi}"
     );
+
+    // Large α relative to H: the truncation still bites, by design.
+    let (lo5, hi5) = (dims(5.0, 16), dims(5.0, 32));
     assert!(
-        incl[h - 1] < 0.05,
-        "an empty tail dim must collapse, got {:.3}",
-        incl[h - 1]
-    );
-    assert!(
-        incl[2] > incl[h - 1] * 5.0,
-        "head and tail must separate: {:.3} vs {:.3}",
-        incl[2],
-        incl[h - 1]
+        hi5 - lo5 > 0.1,
+        "α=5 at H=16 must still be truncating — if this stops holding the ladder \
+         changed shape: {lo5} -> {hi5}"
     );
 }

@@ -455,11 +455,16 @@ fn run_gem_genes_bge(
             args.runtime.seed,
         )?;
         info!(
-            "phase-1 splice posterior: {} sweeps; β π₀ median {:.3}, δ π₀ median {:.3}; \
+            "phase-1 splice posterior: {} sweeps; dims/gene β {:.2}, δ {:.2} (posterior); \
              {} gene(s) with an unidentified δ",
             post.n_kept,
-            median_f64(&post.beta_pi0),
-            median_f64(&post.delta_pi0),
+            // Mean row-sum of each gate's PIP table — the dims a gene loads AS INFERRED,
+            // per gate. Not `Σ_h (1 − π₀ₕ)`, which under the default IBP is the fixed
+            // ladder and would echo `α` twice over; not a median, which on a monotone
+            // ladder is the rate at dim H/2. Each gate gets its own because that is the
+            // point of sampling them separately.
+            mean_dims(&post.beta_pip, post.h),
+            mean_dims(&post.delta_pip, post.h),
             post.delta_identified.iter().filter(|&&x| !x).count(),
         );
     }
@@ -862,6 +867,13 @@ fn run_gem_genes_bge(
 /// Split a gem feature row `{gene}/count/{spliced|unspliced}` into its gene key and
 /// whether it is the unspliced track. Rows not matching that shape fall back to
 /// `(whole name, spliced)` — defensive; genes-only input is all count rows.
+/// Mean row-sum of a `[n_anchors × h]` PIP table: the expected number of dims an
+/// anchor loads, as inferred. `0` for an empty table.
+fn mean_dims(pip: &[f32], h: usize) -> f64 {
+    let rows = (pip.len() / h.max(1)).max(1);
+    f64::from(pip.iter().sum::<f32>()) / rows as f64
+}
+
 fn split_count_row(name: &str) -> (&str, bool) {
     match name.rsplit_once("/count/") {
         Some((gene, suffix)) => (gene, suffix == "unspliced"),
@@ -922,14 +934,4 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
         args.model.embedding_dim
     );
     Ok(())
-}
-
-/// Median of a slice, for the one-line posterior summary. Empty ⇒ `NaN`.
-fn median_f64(v: &[f64]) -> f64 {
-    if v.is_empty() {
-        return f64::NAN;
-    }
-    let mut s = v.to_vec();
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    s[s.len() / 2]
 }

@@ -101,7 +101,7 @@
 
 use super::column;
 use super::diagnostics::{scalar_diagnostics, ChainDiag};
-use super::hyper::{sample_pi0, HalfCauchyVar, StickBreaking};
+use super::hyper::{ibp_pi0, sample_pi0, HalfCauchyVar};
 
 use super::lnpdf::{FrozenSide, NodeTerm};
 use super::score::{ProfiledPoisson, SlateSlab};
@@ -138,7 +138,7 @@ pub struct DimBlockConfig {
     /// (`v_j ~ Beta(α,1)`, `π_h = ∏_{j≤h} v_j`) instead of an independent `Beta(a,b)`
     /// per dim, so they are forced to DECREASE with the dim index and surplus dims are
     /// squeezed off rather than each re-estimating the same rate. `None` keeps the
-    /// independent per-dim Beta. See [`StickBreaking`].
+    /// independent per-dim Beta. See [`super::hyper::ibp_pi0`].
     pub stick_alpha: Option<f64>,
     /// Optional `[n_anchors × h]` row-major warm start for `β`, e.g. the phase-1
     /// SGD MAP. `None` cold-starts at zero.
@@ -455,12 +455,14 @@ pub fn dim_block_multi(
         .map(|_| HalfCauchyVar::new(cfg.half_cauchy_scale))
         .collect();
     let mut sigma2 = vec![cfg.half_cauchy_scale * cfg.half_cauchy_scale; h];
-    // Either an independent `Beta(a,b)` per dim, or the truncated-IBP sticks. Both
+    // Either an independent `Beta(a,b)` per dim, or the truncated-IBP ladder. Both
     // produce the same thing — a length-`h` vector of exclusion rates — which is the
     // model's ONLY view of the prior, so nothing downstream changes with the choice.
-    let mut sticks = cfg.stick_alpha.map(|a| StickBreaking::new(a, h));
-    let mut pi0 = match &sticks {
-        Some(sb) => sb.pi0(),
+    //
+    // Under the IBP the ladder is FIXED: `α` is a chosen hyperparameter, not a sampled
+    // one, so `pi0` does not move across sweeps. See [`ibp_pi0`] for why.
+    let mut pi0 = match cfg.stick_alpha {
+        Some(alpha) => ibp_pi0(alpha, h),
         None => vec![cfg.beta_a / (cfg.beta_a + cfg.beta_b); h],
     };
     let mut hyper_rng = StdRng::seed_from_u64(cfg.seed ^ 0x7A11_0C0D);
@@ -590,26 +592,17 @@ pub fn dim_block_multi(
         // Only eligible coordinates are Bernoulli trials — see the note above. With
         // selection off there is nothing to infer, so `π₀` is left at its prior mean
         // rather than being "estimated" from a vector of all-ones.
-        if selection {
-            match &mut sticks {
-                // Truncated IBP: ONE joint update, because the sticks are coupled —
-                // `v_j` constrains every dim from `j` on, which is exactly the coupling
-                // an independent per-dim draw lacks.
-                Some(sb) => {
-                    sb.sample(&n_incl, &n_eligible, &mut hyper_rng);
-                    pi0 = sb.pi0();
-                }
-                None => {
-                    for d in 0..h {
-                        pi0[d] = sample_pi0(
-                            n_eligible[d].saturating_sub(n_incl[d]),
-                            n_eligible[d],
-                            cfg.beta_a,
-                            cfg.beta_b,
-                            &mut hyper_rng,
-                        );
-                    }
-                }
+        // The IBP ladder is fixed, so there is nothing to draw for it; only the
+        // independent-Beta path has a sparsity parameter to infer.
+        if selection && cfg.stick_alpha.is_none() {
+            for d in 0..h {
+                pi0[d] = sample_pi0(
+                    n_eligible[d].saturating_sub(n_incl[d]),
+                    n_eligible[d],
+                    cfg.beta_a,
+                    cfg.beta_b,
+                    &mut hyper_rng,
+                );
             }
         }
 

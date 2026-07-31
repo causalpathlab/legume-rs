@@ -839,15 +839,17 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             .fold(f64::INFINITY, f64::min);
         info!(
             "phase-1 posterior: {} sweeps retained, per-dim σ₀² median {:.4}, \
-             expected dims/feature {:.2}, worst hyper ESS {:.1}",
+             dims/feature {:.2} (posterior), worst hyper ESS {:.1}",
             post.n_kept,
             median_of(&post.sigma2),
-            // Σ_h (1 − π₀ₕ), not the median. Under the default IBP the rates are a
-            // MONOTONE profile, so their median is just the rate at dim H/2 and says
-            // nothing about how many dims are live. The sum is the expected number of
-            // dims a feature loads — directly comparable to the α the selection pass
-            // reports going in.
-            post.pi0.iter().map(|p| 1.0 - p).sum::<f64>(),
+            // Mean row-sum of the PIP table: the expected number of dims a feature
+            // loads, AS INFERRED. Deliberately not `Σ_h (1 − π₀ₕ)`, which under the
+            // default IBP is the fixed ladder and would merely echo the `α` that went
+            // in; and not a median over π₀, which on a monotone ladder is just the rate
+            // at dim H/2. This is the one number here the data actually determined, and
+            // it is on the same scale as `α`, so the two can be read against each other.
+            f64::from(post.pip.iter().sum::<f32>())
+                / (post.pip.len() / post.h.max(1)).max(1) as f64,
             worst_ess
         );
         if worst_ess < 10.0 {
