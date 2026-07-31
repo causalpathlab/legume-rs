@@ -11,11 +11,13 @@
 //! `partition_scale = n_other / |slate|` folds a sampled slate back up to the full
 //! Poisson normalizer; a slate covering the whole other side has scale `1`.
 
-use super::lnpdf::FrozenSide;
-
-/// Owned frozen index: the fixed other side plus per-anchor observed edges and
-/// the shared negative slate. A view of the fixed side is handed to the samplers
-/// via [`Self::frozen_side`].
+/// Owned frozen index: the fixed other side plus per-anchor observed edges and the
+/// shared negative slate.
+///
+/// A plain container. The samplers do NOT read the fixed side through an accessor here
+/// — each builds its own [`super::lnpdf::FrozenSide`] literal over whatever arrays it
+/// holds, which for the pb sweeps is usually not a `ContrastiveIndex` at all. An
+/// accessor existed for a while and never had a caller.
 pub struct ContrastiveIndex {
     /// Frozen other-side embeddings `[n_other × h]` row-major.
     pub other_e: Vec<f32>,
@@ -36,22 +38,4 @@ pub struct ContrastiveIndex {
     /// handed to each [`super::lnpdf::NodeTerm`] as its `offset` (see that field).
     /// `None` for the plain case where the sampler explores an absolute loading.
     pub anchor_offset: Option<Vec<f32>>,
-}
-
-impl ContrastiveIndex {
-    /// The frozen other side as a borrowing [`FrozenSide`].
-    #[must_use]
-    pub fn frozen_side(&self) -> FrozenSide<'_> {
-        FrozenSide {
-            e: &self.other_e,
-            b: &self.other_b,
-            h: self.h,
-        }
-    }
-
-    /// Number of anchors.
-    #[must_use]
-    pub fn n_anchors(&self) -> usize {
-        self.pos.len()
-    }
 }
