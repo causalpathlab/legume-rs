@@ -103,18 +103,19 @@ use super::column;
 use super::diagnostics::{scalar_diagnostics, ChainDiag};
 use super::hyper::{sample_pi0, HalfCauchyVar, StickBreaking};
 
-/// Default stick-breaking concentration: `α = 1`, i.e. a feature loads ONE dim in
-/// expectation. Chosen as the sparsest defensible prior rather than fitted — measured
-/// dims-per-feature on BM1 was 1.89 under the unordered Beta, so `α = 1` leans toward
-/// sparsity and lets the likelihood argue upward. `Beta(1, 1)` is uniform on each
-/// stick, so it is also the least committal choice of stick distribution.
-pub const DEFAULT_STICK_ALPHA: f64 = 1.0;
 use super::lnpdf::{FrozenSide, NodeTerm};
 use super::score::{ProfiledPoisson, SlateSlab};
 use crate::progress::new_progress_bar;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rayon::prelude::*;
+
+/// Default stick-breaking concentration: `α = 1`, i.e. a feature loads ONE dim in
+/// expectation. Chosen as the sparsest defensible prior rather than fitted — measured
+/// dims-per-feature on BM1 was 1.89 under the unordered Beta, so `α = 1` leans toward
+/// sparsity and lets the likelihood argue upward. `Beta(1, 1)` is uniform on each
+/// stick, so it is also the least committal choice of stick distribution.
+pub const DEFAULT_STICK_ALPHA: f64 = 1.0;
 
 /// Configuration for [`dim_block`].
 pub struct DimBlockConfig {
@@ -226,6 +227,11 @@ impl DimBlockConfig {
     #[must_use]
     pub fn without_selection(mut self) -> Self {
         self.selection = false;
+        // Clear the inclusion prior with it. Nothing reads it when `selection` is off —
+        // both `dim_block_multi` and `column`'s draw branch on `selection` first — but
+        // leaving it set means two configs in one run disagree about which prior is in
+        // effect, which is the state a reader has to reason about. One switch, not two.
+        self.stick_alpha = None;
         self
     }
 

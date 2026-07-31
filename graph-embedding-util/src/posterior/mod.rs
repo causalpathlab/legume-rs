@@ -48,7 +48,7 @@ pub mod score;
 pub use diagnostics::{chain_diagnostics, scalar_diagnostics, worst_case, ChainDiag};
 pub use dim_block::{dim_block, DimBlockConfig, DimBlockResult};
 pub use frozen_diag::{frozen_side_diag, FrozenSideDiag};
-pub use hyper::{sample_pi0, HalfCauchyVar};
+pub use hyper::{sample_pi0, HalfCauchyVar, StickBreaking};
 pub use index::ContrastiveIndex;
 pub use lnpdf::{poisson_ll, poisson_lnpdf, AnchorMoment, FrozenSide, NodeTerm};
 pub use run::{PosteriorArgs, PosteriorPlan, DEFAULT_PARTITION, DEFAULT_SAMPLES};

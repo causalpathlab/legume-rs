@@ -65,3 +65,43 @@ fn zero_draws_is_an_error() {
 fn seed_is_carried_from_the_caller() {
     assert_eq!(plan_of(&["--posterior", "10"]).unwrap().unwrap().seed, SEED);
 }
+
+/// The truncated IBP is the DEFAULT prior, so a bare `--posterior` must already
+/// carry a concentration. A regression here is silent: the sampler falls back to
+/// the unordered Beta and reports a full, plausible, entirely flat `π₀`.
+#[test]
+fn the_default_prior_is_the_truncated_ibp() {
+    let plan = plan_of(&["--posterior"]).unwrap().unwrap();
+    assert_eq!(
+        plan.stick_alpha,
+        Some(crate::posterior::dim_block::DEFAULT_STICK_ALPHA),
+        "bare --posterior must default to stick-breaking"
+    );
+}
+
+/// `--no-stick-breaking` is the opt-out, and it must reach the plan as `None`
+/// rather than as some sentinel the sampler then has to re-interpret.
+#[test]
+fn no_stick_breaking_falls_back_to_the_independent_beta() {
+    let plan = plan_of(&["--posterior", "--no-stick-breaking"])
+        .unwrap()
+        .unwrap();
+    assert!(plan.stick_alpha.is_none());
+}
+
+#[test]
+fn an_explicit_concentration_is_carried() {
+    let plan = plan_of(&["--posterior", "--stick-alpha", "2.5"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.stick_alpha, Some(2.5));
+}
+
+/// A non-positive or non-finite concentration is not a Beta at all — reject it
+/// rather than letting `Beta::new` panic deep inside a sweep.
+#[test]
+fn a_non_positive_concentration_is_an_error() {
+    assert!(plan_of(&["--posterior", "--stick-alpha", "0"]).is_err());
+    assert!(plan_of(&["--posterior", "--stick-alpha", "-1"]).is_err());
+    assert!(plan_of(&["--posterior", "--stick-alpha", "nan"]).is_err());
+}
