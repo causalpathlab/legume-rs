@@ -640,16 +640,19 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             // — not a post-hoc pass over the finished fit.
             pb_posterior_nested_delta: true,
             pb_posterior: posterior_plan.map(|plan| {
-                ge::posterior::pb_gibbs::PbGibbsConfig::new(
+                let mut c = ge::posterior::pb_gibbs::PbGibbsConfig::new(
                     plan.n_samples,
                     plan.n_samples / 2,
                     plan.seed,
-                )
+                );
+                c.stick_alpha = plan.stick_alpha;
+                c
             }),
             nce_objective: args.nce_objective.to_ge(),
-            // Per-gene softmax feature gate — the SuSiE variational spike-and-slab
-            // single-effect, ALWAYS ON for bge (null absorber + categorical + Gaussian
-            // effect KL, at the fixed internal weight). Temperature is the one knob.
+            // Per-(gene, dim) Bernoulli spike-and-slab feature gate, ALWAYS ON for bge
+            // (inclusion KL against a learned π_h + Gaussian effect KL, at the fixed
+            // internal weight). There is no null absorber and no simplex — that was the
+            // retired softmax. Temperature is the one knob.
             feature_gate: Some(ge::FeatureGateConfig {
                 temperature: args.feature_gate_temp,
             }),

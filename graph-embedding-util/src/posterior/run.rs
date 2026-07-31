@@ -103,18 +103,69 @@ pub struct PosteriorArgs {
                      `--mcmc` and `--jitter` are accepted aliases."
     )]
     pub posterior: Option<usize>,
+
+    #[arg(
+        long = "stick-alpha",
+        value_name = "ALPHA",
+        default_value_t = crate::posterior::dim_block::DEFAULT_STICK_ALPHA,
+        requires = "posterior",
+        help = "Truncated-IBP concentration α — the expected number of dims a feature\n\
+                loads. Independent of --embedding-dim.",
+        long_help = "Concentration α for the TRUNCATED INDIAN BUFFET PROCESS on the per-dim\n\
+                     inclusion rates, which is the DEFAULT selection prior.\n\
+                     \n\
+                     Stick-breaking (Teh, Görür & Ghahramani 2007) draws v_j ~ Beta(α, 1) and\n\
+                     sets each dim's inclusion rate to the running product ∏_{j≤h} v_j, so the\n\
+                     rates DECREASE with the dim index and surplus dims are squeezed off by\n\
+                     construction. α is the expected number of dims a feature loads, and it is\n\
+                     independent of --embedding-dim: measured on BM1, doubling H from 16 to 32\n\
+                     moved the active-dim count only 10 -> 12, against 16 -> 32 under the\n\
+                     unordered alternative. So H is a TRUNCATION, not a tuning knob.\n\
+                     \n\
+                     WHY IT IS THE DEFAULT. With tens of thousands of features on every dim, an\n\
+                     independent Beta prior carries O(1) pseudo-counts against O(10^4)\n\
+                     observations and is swamped, so every unused dim re-estimates the SAME\n\
+                     rate rather than collapsing — measured flat at 0.787-0.930 across 16 dims\n\
+                     while the likelihood supported ~3.4 of them. Stick-breaking is a\n\
+                     structural constraint, which data cannot outvote. It also mixes BETTER on\n\
+                     the sparsity parameter (split-R-hat 3.09 -> 1.35), because each stick\n\
+                     pools across every dim above it.\n\
+                     \n\
+                     A SIDE EFFECT WORTH KNOWING: the dims become ordered, which removes the\n\
+                     dim-permutation gauge and makes them comparable across runs the way PCA\n\
+                     components are. And a feature with NO counts now reverts to each dim's\n\
+                     population rate rather than to a flat null — on the leading dim that is\n\
+                     about a coin flip at α = 1. Lower α if that matters for your read.\n\
+                     \n\
+                     Pass --no-stick-breaking for the previous independent-Beta-per-dim prior."
+    )]
+    pub stick_alpha: f64,
+
+    #[arg(
+        long = "no-stick-breaking",
+        requires = "posterior",
+        help = "Use an independent Beta prior per dim instead of the truncated IBP.",
+        long_help = "Revert the selection prior to an independent Beta(a,b) on every dim — no\n\
+                     ordering, no coupling between dims. This is what shipped before the IBP\n\
+                     became the default, and it is kept for A/B: with many features per dim it\n\
+                     is swamped by the data, so it neither imposes sparsity nor collapses\n\
+                     unused dims. See --stick-alpha."
+    )]
+    pub no_stick_breaking: bool,
 }
 
 /// A resolved posterior request. Reaching this type at all means the posterior
 /// is ON — [`PosteriorArgs::resolve`] returns `None` for `off`, so no downstream
 /// code has to re-test for it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PosteriorPlan {
     /// Retained draws per chain; warmup is `n_samples / 2` on top.
     pub n_samples: usize,
     /// Base seed, so a reproducible fit gives a reproducible posterior. Each
     /// sampler derives a distinct stream from it.
     pub seed: u64,
+    /// `Some(α)` = truncated-IBP stick-breaking on the per-dim inclusion rates.
+    pub stick_alpha: Option<f64>,
 }
 
 impl PosteriorArgs {
@@ -125,7 +176,16 @@ impl PosteriorArgs {
             return Ok(None);
         };
         anyhow::ensure!(n_samples > 0, "--posterior must be > 0 (got {n_samples})");
-        Ok(Some(PosteriorPlan { n_samples, seed }))
+        anyhow::ensure!(
+            self.stick_alpha > 0.0 && self.stick_alpha.is_finite(),
+            "--stick-alpha must be a positive, finite concentration (got {})",
+            self.stick_alpha
+        );
+        Ok(Some(PosteriorPlan {
+            n_samples,
+            seed,
+            stick_alpha: (!self.no_stick_breaking).then_some(self.stick_alpha),
+        }))
     }
 }
 

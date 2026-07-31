@@ -85,6 +85,10 @@ pub struct PbGibbsConfig {
     pub n_partition: usize,
     /// Inner ESS transitions per `(anchor, dim)` within a block.
     pub transitions_per_dim: usize,
+    /// `Some(α)` puts the per-dim inclusion rates under a TRUNCATED IBP
+    /// (stick-breaking) instead of an independent `Beta(a,b)` per dim. See
+    /// [`super::dim_block::DimBlockConfig::stick_alpha`].
+    pub stick_alpha: Option<f64>,
 }
 
 impl PbGibbsConfig {
@@ -96,6 +100,7 @@ impl PbGibbsConfig {
             seed,
             n_partition: super::run::DEFAULT_PARTITION,
             transitions_per_dim: 1,
+            stick_alpha: Some(super::dim_block::DEFAULT_STICK_ALPHA),
         }
     }
 }
@@ -252,6 +257,10 @@ pub(crate) fn pb_gibbs(
             gene_cfg = gene_cfg.with_init_z(z);
         }
         gene_cfg.transitions_per_dim = cfg.transitions_per_dim;
+        // The GENE block is the one that selects, so it is the one the inclusion prior
+        // reaches. (The pb block below runs `without_selection`, so a prior there would
+        // have nothing to act on.)
+        gene_cfg.stick_alpha = cfg.stick_alpha;
         let g = dim_block(&nodes, &side_pb, &gene_cfg);
 
         // The gene side hands the pb block its EFFECTIVE loading `z·β`: a dim the

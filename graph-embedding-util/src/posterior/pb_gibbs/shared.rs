@@ -205,6 +205,7 @@ pub(super) fn run_block(
         .with_label(label)
         .quiet();
     bcfg.transitions_per_dim = cfg.transitions_per_dim;
+    bcfg.stick_alpha = cfg.stick_alpha;
     if let Some(mask) = z_allowed {
         bcfg = bcfg.with_z_allowed(mask);
     }

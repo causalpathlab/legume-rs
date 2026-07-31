@@ -101,7 +101,14 @@
 
 use super::column;
 use super::diagnostics::{scalar_diagnostics, ChainDiag};
-use super::hyper::{sample_pi0, HalfCauchyVar};
+use super::hyper::{sample_pi0, HalfCauchyVar, StickBreaking};
+
+/// Default stick-breaking concentration: `α = 1`, i.e. a feature loads ONE dim in
+/// expectation. Chosen as the sparsest defensible prior rather than fitted — measured
+/// dims-per-feature on BM1 was 1.89 under the unordered Beta, so `α = 1` leans toward
+/// sparsity and lets the likelihood argue upward. `Beta(1, 1)` is uniform on each
+/// stick, so it is also the least committal choice of stick distribution.
+pub const DEFAULT_STICK_ALPHA: f64 = 1.0;
 use super::lnpdf::{FrozenSide, NodeTerm};
 use super::score::{ProfiledPoisson, SlateSlab};
 use crate::progress::new_progress_bar;
@@ -125,6 +132,13 @@ pub struct DimBlockConfig {
     /// partial-pooled per-dim model rather than `H` unrelated fits.
     pub beta_a: f64,
     pub beta_b: f64,
+    /// `Some(α)` selects the TRUNCATED IBP — the DEFAULT: inclusion rates come from
+    /// stick-breaking
+    /// (`v_j ~ Beta(α,1)`, `π_h = ∏_{j≤h} v_j`) instead of an independent `Beta(a,b)`
+    /// per dim, so they are forced to DECREASE with the dim index and surplus dims are
+    /// squeezed off rather than each re-estimating the same rate. `None` keeps the
+    /// independent per-dim Beta. See [`StickBreaking`].
+    pub stick_alpha: Option<f64>,
     /// Optional `[n_anchors × h]` row-major warm start for `β`, e.g. the phase-1
     /// SGD MAP. `None` cold-starts at zero.
     ///
@@ -190,6 +204,7 @@ impl DimBlockConfig {
             half_cauchy_scale: 1.0,
             beta_a: 9.0,
             beta_b: 1.0,
+            stick_alpha: Some(DEFAULT_STICK_ALPHA),
             init_beta: None,
             label: "mcmc".into(),
             show_progress: true,
@@ -434,7 +449,14 @@ pub fn dim_block_multi(
         .map(|_| HalfCauchyVar::new(cfg.half_cauchy_scale))
         .collect();
     let mut sigma2 = vec![cfg.half_cauchy_scale * cfg.half_cauchy_scale; h];
-    let mut pi0 = vec![cfg.beta_a / (cfg.beta_a + cfg.beta_b); h];
+    // Either an independent `Beta(a,b)` per dim, or the truncated-IBP sticks. Both
+    // produce the same thing — a length-`h` vector of exclusion rates — which is the
+    // model's ONLY view of the prior, so nothing downstream changes with the choice.
+    let mut sticks = cfg.stick_alpha.map(|a| StickBreaking::new(a, h));
+    let mut pi0 = match &sticks {
+        Some(sb) => sb.pi0(),
+        None => vec![cfg.beta_a / (cfg.beta_a + cfg.beta_b); h],
+    };
     let mut hyper_rng = StdRng::seed_from_u64(cfg.seed ^ 0x7A11_0C0D);
 
     let mut sigma2_chain: Vec<Vec<f64>> = vec![Vec::new(); h];
@@ -558,17 +580,30 @@ pub fn dim_block_multi(
 
         for d in 0..h {
             sigma2[d] = hv[d].sample(sum_sq[d], n_incl[d].max(1), &mut hyper_rng);
-            // Only eligible coordinates are Bernoulli trials — see the note above.
-            // With selection off there is nothing to infer, so `π₀` is left at its
-            // prior mean rather than being "estimated" from a vector of all-ones.
-            if selection {
-                pi0[d] = sample_pi0(
-                    n_eligible[d].saturating_sub(n_incl[d]),
-                    n_eligible[d],
-                    cfg.beta_a,
-                    cfg.beta_b,
-                    &mut hyper_rng,
-                );
+        }
+        // Only eligible coordinates are Bernoulli trials — see the note above. With
+        // selection off there is nothing to infer, so `π₀` is left at its prior mean
+        // rather than being "estimated" from a vector of all-ones.
+        if selection {
+            match &mut sticks {
+                // Truncated IBP: ONE joint update, because the sticks are coupled —
+                // `v_j` constrains every dim from `j` on, which is exactly the coupling
+                // an independent per-dim draw lacks.
+                Some(sb) => {
+                    sb.sample(&n_incl, &n_eligible, &mut hyper_rng);
+                    pi0 = sb.pi0();
+                }
+                None => {
+                    for d in 0..h {
+                        pi0[d] = sample_pi0(
+                            n_eligible[d].saturating_sub(n_incl[d]),
+                            n_eligible[d],
+                            cfg.beta_a,
+                            cfg.beta_b,
+                            &mut hyper_rng,
+                        );
+                    }
+                }
             }
         }
 

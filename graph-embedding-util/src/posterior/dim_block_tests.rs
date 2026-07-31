@@ -95,18 +95,27 @@ fn a_gene_with_counts_gains_inclusion_mass() {
 }
 
 /// A gene with no counts has a flat likelihood, so its inclusion is decided by the
-/// prior alone and its loading must not drift away from the slab mean. Guards
-/// against an empty anchor being reported as a confident selection — over half the
-/// anchors on a real annotation have no counts.
+/// prior alone and its loading must not drift away from the slab mean. Guards against
+/// an empty anchor being reported as a MEASUREMENT — over half the anchors on a real
+/// annotation have no counts.
+///
+/// Asserted against the sampled per-dim prior (`1 − π₀ₕ`) rather than a fixed
+/// threshold, which is what "reverts to the prior" actually means and is the only form
+/// that survives a change of prior. The previous version asserted `PIP < 0.5` on every
+/// dim — true under an unordered `Beta(9,1)`, where every dim sits near 0.1, but false
+/// under stick-breaking, where the LEADING dim's rate is `α/(α+1)` before the data
+/// speaks. That is a real consequence, not a test artifact: an empty anchor now tracks
+/// the population inclusion rate of each dim, which on dim 0 is a coin flip.
 #[test]
 fn an_empty_gene_reverts_to_the_prior() {
     let pos = vec![Vec::new(), vec![(2u32, 5.0f32), (9, 4.0)]];
     let res = run(&pos, 37);
 
     for (d, &p) in res.pip_row(0).iter().enumerate() {
+        let prior_incl = 1.0 - res.pi0[d] as f32;
         assert!(
-            p < 0.5,
-            "empty gene dim {d} must fall to the null-biased prior, got PIP {p}"
+            (p - prior_incl).abs() < 0.25,
+            "empty gene dim {d}: PIP {p} must track the prior {prior_incl}, not the data"
         );
     }
     assert!(
