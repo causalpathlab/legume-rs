@@ -418,15 +418,7 @@ fn run_gem_genes_bge(
             // `--posterior N` drives the phase-1 pb Gibbs over BOTH gates. Leaving
             // this `None` while still resolving `posterior_plan` made the flag a
             // silent no-op that the run manifest nonetheless advertised.
-            pb_posterior: posterior_plan.map(|plan| {
-                let mut c = ge::posterior::pb_gibbs::PbGibbsConfig::new(
-                    plan.n_samples,
-                    plan.n_samples / 2,
-                    plan.seed,
-                );
-                c.stick_alpha = plan.stick_alpha;
-                c
-            }),
+            pb_posterior: posterior_plan.map(|plan| plan.pb_gibbs_config()),
             pb_posterior_nested_delta: !args.model.independent_delta_gate,
             // `--nce-objective` (default softmax = InfoNCE: on gem's dense count data
             // the positive competing against its negatives in one distribution

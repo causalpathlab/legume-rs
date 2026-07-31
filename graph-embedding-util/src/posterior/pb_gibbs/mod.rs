@@ -258,8 +258,9 @@ pub(crate) fn pb_gibbs(
         }
         gene_cfg.transitions_per_dim = cfg.transitions_per_dim;
         // The GENE block is the one that selects, so it is the one the inclusion prior
-        // reaches. (The pb block below runs `without_selection`, so a prior there would
-        // have nothing to act on.)
+        // reaches. The pb block below calls `without_selection`, which clears the prior
+        // as part of turning selection off — so it is not that the assignment is skipped
+        // there, it is that the concept does not apply.
         gene_cfg.stick_alpha = cfg.stick_alpha;
         let g = dim_block(&nodes, &side_pb, &gene_cfg);
 

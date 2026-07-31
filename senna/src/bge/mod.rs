@@ -639,15 +639,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             // pseudobulk Gibbs, run inside `fit` and written back into the model
             // — not a post-hoc pass over the finished fit.
             pb_posterior_nested_delta: true,
-            pb_posterior: posterior_plan.map(|plan| {
-                let mut c = ge::posterior::pb_gibbs::PbGibbsConfig::new(
-                    plan.n_samples,
-                    plan.n_samples / 2,
-                    plan.seed,
-                );
-                c.stick_alpha = plan.stick_alpha;
-                c
-            }),
+            pb_posterior: posterior_plan.map(|plan| plan.pb_gibbs_config()),
             nce_objective: args.nce_objective.to_ge(),
             // Per-(gene, dim) Bernoulli spike-and-slab feature gate, ALWAYS ON for bge
             // (inclusion KL against a learned π_h + Gaussian effect KL, at the fixed
@@ -847,10 +839,15 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             .fold(f64::INFINITY, f64::min);
         info!(
             "phase-1 posterior: {} sweeps retained, per-dim σ₀² median {:.4}, \
-             π₀ median {:.3}, worst hyper ESS {:.1}",
+             expected dims/feature {:.2}, worst hyper ESS {:.1}",
             post.n_kept,
             median_of(&post.sigma2),
-            median_of(&post.pi0),
+            // Σ_h (1 − π₀ₕ), not the median. Under the default IBP the rates are a
+            // MONOTONE profile, so their median is just the rate at dim H/2 and says
+            // nothing about how many dims are live. The sum is the expected number of
+            // dims a feature loads — directly comparable to the α the selection pass
+            // reports going in.
+            post.pi0.iter().map(|p| 1.0 - p).sum::<f64>(),
             worst_ess
         );
         if worst_ess < 10.0 {

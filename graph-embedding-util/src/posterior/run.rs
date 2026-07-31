@@ -70,10 +70,11 @@ pub struct PosteriorArgs {
                      All three are hard errors rather than silent degradations.\n\
                      \n\
                      Selection lives on the feature side: each (gene, dim) gets a posterior\n\
-                     inclusion probability, alongside the per-dim slab variance σ₀h² and sparsity\n\
-                     π₀h learned from the data. Inclusion is INDEPENDENT per dim, so a gene may\n\
-                     load several and its row does NOT sum to 1. A pseudobulk is a location, not\n\
-                     a selection, so that side is sampled without a spike-and-slab.\n\
+                     inclusion probability, alongside the per-dim slab variance σ₀h². Inclusion\n\
+                     is INDEPENDENT per dim, so a gene may load several and its row does NOT sum\n\
+                     to 1. A pseudobulk is a location, not a selection, so that side is sampled\n\
+                     without a spike-and-slab. The per-dim inclusion RATES come from the\n\
+                     truncated IBP by default — see --stick-alpha.\n\
                      \n\
                      A model carrying more than one feature-side gate has every one of them\n\
                      sampled, each with its own σ₀h² and π₀h. They are different objects — a\n\
@@ -82,10 +83,12 @@ pub struct PosteriorArgs {
                      \n\
                      READ THE OUTPUT AGAINST THE EFFECTIVE RANK. When the embedding dimension\n\
                      far exceeds the rank the embedding actually uses, the likelihood carries no\n\
-                     information about the surplus dims and their inclusion indicators simply\n\
-                     reproduce the prior — every gene then loads something and the probabilities\n\
-                     stop discriminating. The run reports effective rank, per-dim hypers and\n\
-                     their ESS so that case is visible.\n\
+                     information about the surplus dims and their inclusion indicators fall back\n\
+                     on the prior. Under the default IBP that prior DECAYS with the dim index, so\n\
+                     surplus dims are pushed toward zero rather than toward a shared rate; under\n\
+                     --no-stick-breaking they instead all reproduce the same flat rate and stop\n\
+                     discriminating. The run reports effective rank, per-dim hypers and their ESS\n\
+                     so the case is visible either way.\n\
                      \n\
                      Cost is one column pass per dim per sweep over the whole anchor axis, so a\n\
                      full dictionary runs for a long time — Ctrl+C returns partial results, and\n\
@@ -107,6 +110,7 @@ pub struct PosteriorArgs {
     #[arg(
         long = "stick-alpha",
         value_name = "ALPHA",
+        conflicts_with = "no_stick_breaking",
         default_value_t = crate::posterior::dim_block::DEFAULT_STICK_ALPHA,
         requires = "posterior",
         help = "Truncated-IBP concentration α — the expected number of dims a feature\n\
@@ -166,6 +170,23 @@ pub struct PosteriorPlan {
     pub seed: u64,
     /// `Some(α)` = truncated-IBP stick-breaking on the per-dim inclusion rates.
     pub stick_alpha: Option<f64>,
+}
+
+impl PosteriorPlan {
+    /// The sampler config this plan implies.
+    ///
+    /// Lives here because `PosteriorPlan` is the resolved form of the flags and
+    /// `PbGibbsConfig` is their only consumer — so the `n_samples / 2` warmup rule sits
+    /// beside the docstring that states it, instead of being spelled out in `senna` and
+    /// `faba` separately. Both CLIs had drifted into byte-identical copies of this, and
+    /// a new posterior knob meant editing two crates to reach two binaries.
+    #[must_use]
+    pub fn pb_gibbs_config(&self) -> super::pb_gibbs::PbGibbsConfig {
+        let mut cfg =
+            super::pb_gibbs::PbGibbsConfig::new(self.n_samples, self.n_samples / 2, self.seed);
+        cfg.stick_alpha = self.stick_alpha;
+        cfg
+    }
 }
 
 impl PosteriorArgs {

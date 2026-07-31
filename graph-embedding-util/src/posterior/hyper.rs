@@ -111,6 +111,10 @@ const SLICE_MAX_SHRINK: usize = 64;
 ///   v_j ~ Beta(α, 1),      π_h = ∏_{j ≤ h} v_j
 /// ```
 ///
+/// NOT the same construction as `candle_util::vae::stick_breaking_log_simplex`, which
+/// is the DP/GEM form `θ_k = v_k ∏_{j < k}(1 − v_j)` and sums to 1. This one is the IBP
+/// form: the `π_h` are independent inclusion RATES and do not sum to anything.
+///
 /// Each `v_j ∈ (0,1)`, so `π` is **monotonically decreasing** in the dim index. That
 /// ordering is the whole point, and it is what an independent `Beta(a,b)` per dim
 /// cannot express: with ~34k genes on every dim, an O(1) Beta prior is swamped, so
@@ -215,11 +219,14 @@ fn slice_unit(x0: f64, ln_f: impl Fn(f64) -> f64, rng: &mut impl Rng) -> f64 {
     if !y.is_finite() {
         return x0;
     }
-    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    // Bracket the OPEN interval directly rather than clamping the accepted point
+    // afterwards: a clamp can return a value the slice never accepted, which is a
+    // silent bias rather than a guard.
+    let (mut lo, mut hi) = (PI0_EPS, 1.0 - PI0_EPS);
     for _ in 0..SLICE_MAX_SHRINK {
         let x = lo + rng.random::<f64>() * (hi - lo);
         if ln_f(x) > y {
-            return x.clamp(PI0_EPS, 1.0 - PI0_EPS);
+            return x;
         }
         if x < x0 {
             lo = x;
