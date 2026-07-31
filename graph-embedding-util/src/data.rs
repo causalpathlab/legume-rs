@@ -64,8 +64,9 @@ pub struct UnifiedData {
     ///////////////
     // edge list //
     ///////////////
-    /// Cell↔feature edges. Empty until `materialize_cell_triplets` is called
-    /// (real-data path), or pre-built by `from_pseudobulks`.
+    /// Cell↔feature edges. Pre-built by `from_pseudobulks` for a pb blob; EMPTY on the
+    /// cell axis, whose sampler streams positives out of the backend at sample time and
+    /// never needs a materialized list.
     pub triplets: Vec<Triplet>,
 
     ////////////////////
@@ -248,9 +249,10 @@ impl UnifiedData {
             }
         });
 
-        // The edge-count half is only meaningful when triplets are already
-        // materialized; in the streaming path they're empty here (built later
-        // from the subsetted axis), so don't report a misleading "0 → 0".
+        // The edge-count half is only meaningful for a pb blob, which carries its
+        // triplets. The CELL axis never materializes an edge list — positives are drawn
+        // from the backend at sample time — so reporting "0 → 0" edges there would read
+        // as "the subset dropped everything" rather than "there was nothing to drop".
         if n_before > 0 {
             log::info!(
                 "Feature subset: {} → {} features ({} → {} edges retained)",
@@ -261,7 +263,7 @@ impl UnifiedData {
             );
         } else {
             log::info!(
-                "Feature subset: {} → {} features (triplets built later from this axis)",
+                "Feature subset: {} → {} features (no edge list on this axis)",
                 n_old,
                 new_feature_names.len()
             );
@@ -362,12 +364,11 @@ impl UnifiedData {
             );
         }
 
-        // Triplets (the cell↔feature edge list for training) are NOT built
-        // here. They're a training-only structure the collapse never reads, so
-        // materializing them at load would needlessly stack ~12 B/edge on top
-        // of the collapse's sufficient-stats during the (peak) collapse phase.
-        // `materialize_cell_triplets` builds them after the collapse instead,
-        // on the final (possibly HVG/frozen-subset) feature axis.
+        // Triplets (the cell↔feature edge list) are NOT built here, and nothing builds
+        // them later either: the cell axis is always `PerBatchStratified`, whose sampler
+        // streams columns and draws positives from the backend at sample time. Building
+        // the list would stack ~12 B/edge on top of the collapse's sufficient-stats
+        // during the peak collapse phase, to produce something no sampler reads.
         let n_features = feature_names.len();
         Ok(UnifiedData {
             barcodes,
