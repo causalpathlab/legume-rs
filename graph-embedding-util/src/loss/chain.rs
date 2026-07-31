@@ -3,9 +3,9 @@
 //! Same `(left, right)` positive pair per row is scored against
 //! per-level negatives that share the anchor's pb at the previous chain
 //! level but differ at the current one (the sibling-rejection variant).
-//! Cell-side analogue of the feature-side `nce_loss_chain` in
-//! [`crate::loss::feat`]: gives the cell embedding multi-resolution
-//! classification signal in one coherent step.
+//! Gives the cell embedding multi-resolution classification signal in one coherent
+//! step. It had a feature-side analogue in [`crate::loss::feat`]; that one was deleted
+//! along with the chain composite mode, which nothing could reach.
 //!
 //! The gene-modulated public functions live here:
 //!

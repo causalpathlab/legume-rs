@@ -226,13 +226,13 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         if refine_epochs > 0 {
             info!(
                 "Phase 1 (joint) = LINEAGE WARM-UP — {}/{} epochs; the DAG refine gets the other \
-                 {} (ONE shared epoch budget, NOT doubled). Training features + {}{} pb level(s) \
-                 [Sum]{}",
+                 {} (ONE shared epoch budget, NOT doubled). Training features + {}{} pb \
+                 level(s){}",
                 warmup_epochs, config.epochs, refine_epochs, cell_prefix, n_pb_levels, under,
             );
         } else {
             info!(
-                "Phase 1 (joint) — features + {}{} pb level(s) [Sum], {} epochs{}",
+                "Phase 1 (joint) — features + {}{} pb level(s), {} epochs{}",
                 cell_prefix, n_pb_levels, warmup_epochs, under,
             );
         }

@@ -140,10 +140,12 @@ pub struct CompositeTrainContext<'a> {
     pub axes: &'a [CompositeAxis<'a>],
     pub dev: &'a Device,
     pub stop: &'a Arc<AtomicBool>,
-    /// Per-level cell→pb mappings (coarsest-first; length = number of
-    /// pb axes = `axes.len() - 1`). Required for `CompositeMode::Chain`;
-    /// ignored otherwise. Comes from
-    /// `MultilevelCollapseOut::cell_to_pb_per_level`.
+    /// Per-level cell→pb mappings (coarsest-first; length = number of pb axes =
+    /// `axes.len() - 1`), from `MultilevelCollapseOut::cell_to_pb_per_level`.
+    ///
+    /// Currently unread — its one consumer was the chain composite mode, which was
+    /// deleted as unreachable. Kept because a nested chain sampler is the standing plan
+    /// for this field and rebuilding the plumbing is the expensive part.
     pub cell_to_pb_per_level: Option<&'a [Vec<usize>]>,
     /// Optional per-axis velocity-drift SEM term (lineage-DAG refine pass, fixed velocity-KNN
     /// structure). Aligned 1:1 with `axes`: `None` for axes with no lineage structure
