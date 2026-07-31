@@ -21,15 +21,13 @@ pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest
 
 use crate::data::UnifiedData;
 use crate::model::JointEmbedModel;
-use crate::training::{
-    train_composite, AxisSampler, CompositeAxis, CompositeMode, CompositeTrainContext, PbSemTerm,
-};
+use crate::training::{train_composite, CompositeTrainContext, PbSemTerm};
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
 use log::info;
 use matrix_param::traits::Inference;
 use nalgebra::DMatrix;
 
-use config::{stage_params, DEFAULT_AXIS_LAMBDA, LINEAGE_WARMUP_FRAC};
+use config::{stage_params, LINEAGE_WARMUP_FRAC};
 use projection::{project_cells_phase2, project_pbs_phase2, CellBatchDivisor, PHASE2_RIDGE};
 use selection::{install_selection, run_selection_pass, SelectionPassInput};
 
@@ -85,9 +83,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // Composite axes and trainer //
     ////////////////////////////////
     let ax = axes::build_axis_data(unified, &pb_blobs, &cell_to_pb_per_level, &config)?;
-    let (use_cell_axis, cell_axis_coarsening) = (ax.use_cell_axis, &ax.cell_axis_coarsening);
-    let (cell_samplers, level_axes_data) = (&ax.cell_samplers, &ax.level_axes);
-    let phase1_cell_samplers = ax.phase1_cell_samplers();
+    let (use_cell_axis, cell_samplers) = (ax.use_cell_axis, &ax.cell_samplers);
 
     /////////////////////////////////////////////////////////////
     // Selection pass: sample WHICH features load WHICH dims    //
@@ -153,30 +149,6 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         ..Default::default()
     };
 
-    // Cell axis (per-cell embedding). Trained jointly in phase 1 (to shape
-    // `E_feat`) and recalibrated in phase 2 against the fixed feature side.
-    let cell_axis = CompositeAxis {
-        model: &cell_model,
-        unified,
-        cell_axis: cell_axis_coarsening,
-        sampler: AxisSampler::PerBatchStratified(phase1_cell_samplers),
-        lambda: DEFAULT_AXIS_LAMBDA,
-        label: "cell",
-    };
-    // Pseudobulk axes (coarsest→finest).
-    let mut pb_axes: Vec<CompositeAxis> = Vec::with_capacity(num_levels);
-    for (i, model) in level_models.iter().enumerate() {
-        let (axis, stratified) = &level_axes_data[i];
-        pb_axes.push(CompositeAxis {
-            model,
-            unified: &pb_blobs[i],
-            cell_axis: axis,
-            sampler: AxisSampler::Stratified(stratified),
-            lambda: DEFAULT_AXIS_LAMBDA,
-            label: "pb",
-        });
-    }
-
     /////////////////////////////
     // Phase 1: joint training //
     /////////////////////////////
@@ -205,19 +177,12 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     };
     let refine_epochs = config.epochs - warmup_epochs;
     {
-        let mut joint_axes: Vec<CompositeAxis> = Vec::with_capacity(1 + pb_axes.len());
-        // `use_cell_axis == false` (phase1_cells_per_pb == 0) trains E_feat from
-        // pb aggregates only; `cell_axis` is left unused (its borrow ends here).
-        if use_cell_axis {
-            joint_axes.push(cell_axis);
-        }
-        joint_axes.append(&mut pb_axes);
+        let joint_axes = ax.composite_axes(&cell_model, &level_models, unified, &pb_blobs);
         let mut opt1 = AdamW::new(varmap.all_vars(), adamw_params())?;
         let mut p1 = stage_params(&config);
-        p1.composite_mode = CompositeMode::Sum;
         p1.epochs = warmup_epochs;
         let cell_prefix = if use_cell_axis { "cell + " } else { "" };
-        let n_pb_levels = joint_axes.len() - usize::from(use_cell_axis);
+        let n_pb_levels = num_levels;
         let under = if cell_model.is_jittered() {
             " UNDER THE SAMPLED MASK (z ~ Bern(pip), redrawn once per epoch)"
         } else {
@@ -292,32 +257,10 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
                     config.lineage_smooth,
                 );
 
-                // Rebuild the phase-1 axes for the refine pass (warm-up axes were
-                // consumed). Same axis set; only the lineage term differs.
-                let mut refine_axes: Vec<CompositeAxis> = Vec::with_capacity(1 + num_levels);
-                if use_cell_axis {
-                    refine_axes.push(CompositeAxis {
-                        model: &cell_model,
-                        unified,
-                        cell_axis: cell_axis_coarsening,
-                        sampler: AxisSampler::PerBatchStratified(phase1_cell_samplers),
-                        lambda: DEFAULT_AXIS_LAMBDA,
-                        label: "cell",
-                    });
-                }
-                for (i, model) in level_models.iter().enumerate() {
-                    let (axis, stratified) = &level_axes_data[i];
-                    refine_axes.push(CompositeAxis {
-                        model,
-                        unified: &pb_blobs[i],
-                        cell_axis: axis,
-                        sampler: AxisSampler::Stratified(stratified),
-                        lambda: DEFAULT_AXIS_LAMBDA,
-                        label: "pb",
-                    });
-                }
+                // The SAME axis set the warm-up trained — that identity is the point
+                // of the refine, which differs only by its SEM term.
+                let refine_axes = ax.composite_axes(&cell_model, &level_models, unified, &pb_blobs);
                 let mut p2 = stage_params(&config);
-                p2.composite_mode = CompositeMode::Sum;
                 // Share the `config.epochs` budget: the refine gets what the warm-up
                 // (phase 1) did not, so `--lineage-dag` reallocates rather than doubles.
                 p2.epochs = refine_epochs;
@@ -552,7 +495,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
 /// table, paired with that level's full-backend count matrix.
 ///
 /// Phase 1 shapes `β` against exactly these axes — one per level, combined with
-/// `CompositeMode::Sum` at uniform [`DEFAULT_AXIS_LAMBDA`] — and with the default
+/// summed at uniform `λ = 1` — and with the default
 /// `phase1_cells_per_pb == 0` the cell axis is suppressed entirely, so this stack
 /// *is* the objective `β` was fit under — which is what makes it the right frame for
 /// the posterior sampler to condition on.

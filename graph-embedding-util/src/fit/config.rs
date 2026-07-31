@@ -1,7 +1,7 @@
 use super::lift::{CellLineage, LineageQc};
 use super::projection::PbLevelVelocity;
 use crate::model::JointEmbedModel;
-use crate::training::{CompositeMode, TrainingParams};
+use crate::training::TrainingParams;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::VarMap;
 use data_beans_alg::refine_multilevel::RefineParams;
@@ -249,7 +249,6 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
         // bge is two-phase: phase 1 (pb axes, no cell axis) and phase 2
         // (single cell axis) both require `Sum`. Each phase sets its own
         // mode explicitly; this default just makes the value well-formed.
-        composite_mode: CompositeMode::Sum,
         objective: config.nce_objective,
         feature_embedding_l2: config.feature_embedding_l2,
         max_grad_norm: config.max_grad_norm,

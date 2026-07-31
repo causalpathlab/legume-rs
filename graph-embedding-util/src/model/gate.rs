@@ -279,8 +279,9 @@ impl JointEmbedModel {
         }
     }
 
-    /// Scale gate logits by the softmax temperature `τ` (`1/τ` on the logits); an
-    /// Arc-cheap clone at `τ = 1`. Shared by the gather and the KL.
+    /// Scale gate logits by the gate temperature `τ` (`1/τ` on the logits); an
+    /// Arc-cheap clone at `τ = 1`, which is what both CLIs pass. Shared by the gather
+    /// and the KL.
     fn apply_temperature(&self, logits: &Tensor) -> Result<Tensor> {
         let tau = self
             .gate
@@ -323,31 +324,27 @@ impl JointEmbedModel {
     }
 
     /// Install a frozen posterior inclusion table and switch the model to jitter mode.
-    /// `pip` is `[rows, H]` row-major, on the gate's own axis (feature rows for a free
-    /// model, genes for a factored one). Call [`Self::resample_gate_mask`] once per
-    /// epoch afterwards; until then the model uses the mean.
-    pub fn set_gate_pip(
-        &mut self,
-        kind: GateKind,
-        pip: &[f32],
-        rows: usize,
-        dev: &Device,
-    ) -> Result<()> {
-        let h = self.embedding_dim;
-        assert_eq!(pip.len(), rows * h, "gate pip must be [rows, H]");
-        self.install_gate_pip(
-            kind,
-            &Tensor::from_slice(pip, (rows, h), &Device::Cpu)?.to_device(dev)?,
-        )
-    }
-
-    /// [`Self::set_gate_pip`] for a table already on the device.
     ///
-    /// The composite fit installs the SAME `pip` on the primary model and on every pb
-    /// head. Going through the slice form once per model re-uploads it each time —
-    /// `[34k genes, 128 dims]` is 17 MB per copy, paid once per level on top of the
-    /// one that was needed. `Tensor` clones share storage, so this uploads once.
+    /// `pip` is `[rows, H]` on the gate's own axis — feature rows for a free model,
+    /// genes for a factored one — and ALREADY ON THE DEVICE. Call
+    /// [`Self::resample_gate_mask`] once per epoch afterwards; until then the model
+    /// uses the mean.
+    ///
+    /// Takes a `Tensor` rather than a slice because the composite fit installs the SAME
+    /// table on the primary model and on every pb head. A slice form would re-upload it
+    /// per call — `[34k genes, 128 dims]` is 17 MB a copy, paid once per level on top
+    /// of the one that was needed — whereas a `Tensor` clone shares storage, so the
+    /// caller uploads once. (There WAS a slice form; it ended up with no caller outside
+    /// its own tests once `install_selection` started uploading once, so it went.)
     pub fn install_gate_pip(&mut self, kind: GateKind, pip: &Tensor) -> Result<()> {
+        // The row count is the caller's business — it differs per gate axis — but the
+        // dim count is this model's, and a mismatch would otherwise surface much later
+        // as a broadcast failure inside the training gather.
+        assert_eq!(
+            pip.dim(1)?,
+            self.embedding_dim,
+            "gate pip must be [rows, H]"
+        );
         let t = pip.clone();
         match kind {
             GateKind::Identity => {
@@ -507,10 +504,15 @@ impl JointEmbedModel {
         }
     }
 
-    /// softmax selection `[n_features, H]` for a per-gene/per-row logit table, gathering
-    /// a factored per-gene table to feature rows via `row_to_gene`. `None` if `logits`
-    /// is `None`. The excluded null mass per row is `1 − rowsum` (a near-zero row = a
-    /// deselected gene).
+    /// The LEARNED gate's per-row inclusion table `α = σ(S/τ)` `[n_features, H]`,
+    /// gathering a factored per-gene table to feature rows via `row_to_gene`. `None` if
+    /// `logits` is `None`, or if a `pip` has taken over the selection (see below).
+    ///
+    /// Every entry is an INDEPENDENT probability in `(0,1)`. There is no null slot and
+    /// no per-row budget — a deselected gene simply has `α → 0` on every dim, rather
+    /// than sending mass somewhere. The predecessor was a per-dim softmax over genes,
+    /// where a row summed to one and `1 − rowsum` WAS the excluded mass; reading these
+    /// values against that convention inverts them.
     fn selection_from(&self, kind: GateKind, logits: Option<&Tensor>) -> Result<Option<Tensor>> {
         let Some(logits) = logits else {
             return Ok(None);
@@ -535,15 +537,16 @@ impl JointEmbedModel {
         Ok(Some(rows.detach()))
     }
 
-    /// Per-feature-row IDENTITY selection `softmax(s_beta/s_feat)` `[n_features, H]`, for
-    /// interpretability; `None` for an ungated model. Rows align with `e_feat` / the
-    /// dictionary output.
+    /// Per-feature-row IDENTITY inclusion `σ(s_beta/s_feat)` `[n_features, H]`, for
+    /// interpretability; `None` for an ungated model, and `None` under a `pip` (read
+    /// `feature_pip.parquet` there). Rows align with `e_feat` / the dictionary output.
     pub fn feature_selection(&self) -> Result<Option<Tensor>> {
         self.selection_from(GateKind::Identity, self.gate_logits())
     }
 
-    /// Per-feature-row VELOCITY selection `softmax(s_delta)` `[n_features, H]` — the
-    /// per-gene motion gate (driver genes); `None` unless the factored δ gate is on.
+    /// Per-feature-row VELOCITY inclusion `σ(s_delta)` `[n_features, H]` — the per-gene
+    /// motion gate (driver genes); `None` unless the factored δ gate is on, and `None`
+    /// under a `pip` (read `delta_pip.parquet` there).
     pub fn velocity_selection(&self) -> Result<Option<Tensor>> {
         self.selection_from(
             GateKind::Velocity,
@@ -572,7 +575,17 @@ impl JointEmbedModel {
         let s0 = GATE_EFFECT_PRIOR_VAR;
         let logstd = logstd.clamp(-GATE_LOGSTD_CLAMP, GATE_LOGSTD_CLAMP)?; // finite σ, log σ²
         let two_logstd = logstd.affine(2.0, 0.0)?; // 2·logstd = log σ²
-        let a = (two_logstd.exp()? + mu.sqr()?)?.affine(1.0 / s0, 0.0)?; // (σ²+μ²)/σ₀²
+        let sum_sq = (two_logstd.exp()? + mu.sqr()?)?; // σ² + μ²
+                                                       // `(σ²+μ²)/σ₀²`. Skipped outright at `σ₀² = 1` — candle's `affine` only
+                                                       // short-circuits on an EMPTY tensor, so a `×1 +0` still allocates a full
+                                                       // `[rows, H]` buffer and adds a backward node. This runs once per minibatch per
+                                                       // gate, on the whole feature table rather than the batch, so a no-op pass at
+                                                       // 34k × 128 is ~17 MB of traffic for nothing.
+        let a = if (s0 - 1.0).abs() > f64::EPSILON {
+            sum_sq.affine(1.0 / s0, 0.0)?
+        } else {
+            sum_sq
+        };
         let per_entry = (a - &two_logstd)?.affine(0.5, 0.5 * (s0.ln() - 1.0))?; // ½[…]
         w.mul(&per_entry)?.mean_all()
     }
@@ -700,17 +713,26 @@ impl JointEmbedModel {
         logits: Option<&Tensor>,
         mu: &Tensor,
     ) -> Result<Option<Tensor>> {
-        let (logstd, pi_logit) = match kind {
-            GateKind::Identity => (self.effect_logstd(), self.gate_pi_logit.as_ref()),
+        // ONE walk of `GateKind`. Splitting the pip out into a second `gate_tables`
+        // call meant dispatching twice and discarding the mask half of the result.
+        let (logstd, pi_logit, pip) = match kind {
+            GateKind::Identity => (
+                self.effect_logstd(),
+                self.gate_pi_logit.as_ref(),
+                self.gate_pip.as_ref(),
+            ),
             GateKind::Velocity => match &self.factor {
-                Some(f) => (f.delta_logstd.as_ref(), f.delta_pi_logit.as_ref()),
-                None => (None, None),
+                Some(f) => (
+                    f.delta_logstd.as_ref(),
+                    f.delta_pi_logit.as_ref(),
+                    f.delta_gate_pip.as_ref(),
+                ),
+                None => (None, None, None),
             },
         };
         let Some(logstd) = logstd else {
             return Ok(None);
         };
-        let (pip, _) = self.gate_tables(kind);
         if let Some(pip) = pip {
             return Ok(Some(Self::effect_kl(pip, logstd, mu)?));
         }

@@ -15,8 +15,6 @@ pub struct AxisCoarsenings {
     pub is_identity: bool,
 }
 
-impl AxisCoarsenings {}
-
 /// One identity coarsening over `n` items. Each item is its own
 /// pb-sample; `pool_cells` becomes a no-op (mean of one row = that
 /// row) and `sample_edge_batch` resolves `coarse_cell == fine_cell`.
