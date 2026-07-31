@@ -96,6 +96,7 @@ pub struct PosteriorArgs {
                      own bracket-fallback count; a large fraction there means coordinates are\n\
                      stalling rather than moving, and the numbers should not be read as a\n\
                      converged posterior.\n\
+                     \n\
                      Writes one PIP table and one posterior-mean table PER GATE, keyed by the\n\
                      feature the gate is over. A single-gate model gets\n\
                      {out}.feature_pip.parquet and {out}.feature_posterior_mean.parquet; a model\n\
@@ -103,6 +104,7 @@ pub struct PosteriorArgs {
                      {out}.beta_pip.parquet, {out}.beta_posterior_mean.parquet,\n\
                      {out}.delta_pip.parquet and {out}.delta_posterior_mean.parquet, keyed by\n\
                      gene rather than by feature row.\n\
+                     \n\
                      `--mcmc` and `--jitter` are accepted aliases."
     )]
     pub posterior: Option<usize>,
@@ -118,22 +120,31 @@ pub struct PosteriorArgs {
         long_help = "Concentration α for the TRUNCATED INDIAN BUFFET PROCESS on the per-dim\n\
                      inclusion rates, which is the DEFAULT selection prior.\n\
                      \n\
-                     Stick-breaking (Teh, Görür & Ghahramani 2007) draws v_j ~ Beta(α, 1) and\n\
-                     sets each dim's inclusion rate to the running product ∏_{j≤h} v_j, so the\n\
-                     rates DECREASE with the dim index and surplus dims are squeezed off by\n\
-                     construction. α is the expected number of dims a feature loads, and it is\n\
+                     Stick-breaking (Teh, Görür & Ghahramani 2007) puts each dim's inclusion\n\
+                     rate at the running product ∏_{j≤h} v_j of sticks v_j ~ Beta(α, 1), held\n\
+                     at their prior mean — so the rate at dim h is (α/(α+1))^(h+1), decreasing\n\
+                     with the dim index, and surplus dims are squeezed off by construction. α is the expected number of dims a feature loads, and it is\n\
                      independent of --embedding-dim: measured on BM1, doubling H from 16 to 32\n\
                      moved the active-dim count only 10 -> 12, against 16 -> 32 under the\n\
                      unordered alternative. So H is a TRUNCATION, not a tuning knob.\n\
                      \n\
                      WHY IT IS THE DEFAULT. With tens of thousands of features on every dim, an\n\
                      independent Beta prior carries O(1) pseudo-counts against O(10^4)\n\
-                     observations and is swamped, so every unused dim re-estimates the SAME\n\
-                     rate rather than collapsing — measured flat at 0.787-0.930 across 16 dims\n\
-                     while the likelihood supported ~3.4 of them. Stick-breaking is a\n\
-                     structural constraint, which data cannot outvote. It also mixes BETTER on\n\
-                     the sparsity parameter (split-R-hat 3.09 -> 1.35), because each stick\n\
-                     pools across every dim above it.\n\
+                     observations and is swamped, so every unused dim settles on the SAME rate\n\
+                     rather than collapsing — measured flat at 0.787-0.930 across 16 dims while\n\
+                     the likelihood supported ~3.4 of them. The ladder is a structural\n\
+                     constraint, which data cannot outvote.\n\
+                     \n\
+                     ALPHA IS CHOSEN, NOT FITTED. The rates are held at the stick-breaking\n\
+                     prior mean and nothing resamples them, so there is no chain to converge\n\
+                     and no per-dim R-hat to read. Letting them adapt was measured on BM1 and\n\
+                     moved the dictionary's effective rank under 5% (9.05 -> 8.64) while making\n\
+                     the fit LESS sparse, so it was not worth the machinery.\n\
+                     \n\
+                     H MUST BE LARGE RELATIVE TO ALPHA. The ladder is geometric with ratio\n\
+                     alpha/(alpha+1), so at alpha = 1 sixteen dims already carry all of the\n\
+                     mass, but at alpha = 5 they carry only ~95% and --embedding-dim is still\n\
+                     truncating the prior. Keep H well above alpha.\n\
                      \n\
                      A SIDE EFFECT WORTH KNOWING: the dims become ordered, which removes the\n\
                      dim-permutation gauge and makes them comparable across runs the way PCA\n\
