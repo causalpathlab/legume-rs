@@ -31,24 +31,6 @@ use rand::{rngs::StdRng, RngExt, SeedableRng};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// How `train_composite` mixes per-axis NCE losses each step.
-///
-/// Only [`Sum`] exists: every step computes one minibatch per axis and sums the
-/// losses. Lower-variance gradient per step, `O(n_axes)` work per step.
-///
-/// Two other modes were carried here for a long time and neither was ever selected —
-/// `stage_params` hard-coded `Sum` and all three call sites re-assigned `Sum`. `Sample`
-/// picked one axis per step weighted by `λ`; `Chain` sampled a coordinated bottom-up
-/// `(cell, feature)` chain through the pb levels, and additionally required a
-/// `cell_to_pb_per_level` that every `CompositeTrainContext` passed as `None`, so it was
-/// unreachable twice over. The enum is kept (rather than deleted outright) because it
-/// names what phase 1's objective IS, which the sampler's docs refer to.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CompositeMode {
-    #[default]
-    Sum,
-}
-
 /// One axis in the composite training objective. `model` shares its
 /// `e_feat` / `b_feat` Tensors with every other axis (same Var under
 /// the hood); `e_cell` / `b_cell` are unique per axis.
@@ -115,7 +97,6 @@ pub struct TrainingParams {
     pub batch_size: usize,
     pub num_negatives: usize,
     pub seed: u64,
-    pub composite_mode: CompositeMode,
     /// Which NCE objective the feature side trains with ([`crate::loss::NceObjective`]).
     /// Defaults to `Softmax` (InfoNCE, `faba gem`); `senna bge` / `pinto cage` set
     /// `Logistic`.
@@ -257,7 +238,6 @@ pub fn train_composite(
         .factor
         .as_ref()
         .and_then(|f| f.splice_delta.as_ref().map(|(delta, _)| delta.clone()));
-    // Pre-build the axis sampler for `Sample` mode. Reused every step;
     // Resolve `batches_per_epoch`: explicit override, or auto = one
     // weighted pass over the largest axis. `n_units` is per-cell for the
     // cell axis and `active_pbs.len()` for the pb axes.
@@ -294,7 +274,6 @@ pub fn train_composite(
         let mut n_steps = 0usize;
 
         for _ in 0..batches_per_epoch {
-            let CompositeMode::Sum = params.composite_mode;
             let loss = sum_step(ctx, &mut rng, params)?;
             let Some(mut loss) = loss else { continue };
             if params.feature_embedding_l2 > 0.0 {
@@ -397,7 +376,7 @@ pub fn train_composite(
     Ok(last_avg)
 }
 
-/// One step of `CompositeMode::Sum` — sample a minibatch from every
+/// One training step — sample a minibatch from every
 /// axis, compute each axis's NCE loss, return the λ-weighted sum.
 fn sum_step(
     ctx: &CompositeTrainContext,

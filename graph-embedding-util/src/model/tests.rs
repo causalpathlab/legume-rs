@@ -4,6 +4,13 @@ fn dev() -> Device {
     Device::Cpu
 }
 
+/// A `[rows, H]` pip table on the test device. `install_gate_pip` takes a tensor
+/// because the composite fit uploads once and shares it across heads; tests have no
+/// such concern, so they build one here.
+fn pip_tensor(pip: &[f32], rows: usize, h: usize) -> Tensor {
+    Tensor::from_slice(pip, (rows, h), &dev()).unwrap()
+}
+
 /// The randn model init is drawn from the seed (not candle's unseedable CPU
 /// device RNG), so two constructions with the same seed must produce
 /// byte-identical embedding tables, and different seeds must diverge.
@@ -813,11 +820,9 @@ fn jitter_keeps_the_effect_kl_and_drops_the_selection_terms() {
 
     // All-ones pip: the effect KL is then weighted exactly as the learned gate's
     // `α ≈ σ(4) = 0.982` weights it, so the two differ only by the terms jitter drops.
-    m.set_gate_pip(
+    m.install_gate_pip(
         GateKind::Identity,
-        &vec![1.0; n_features * h],
-        n_features,
-        &dev(),
+        &pip_tensor(&vec![1.0; n_features * h], n_features, h),
     )
     .unwrap();
     let jittered: f32 = m
@@ -835,11 +840,9 @@ fn jitter_keeps_the_effect_kl_and_drops_the_selection_terms() {
 
     // A zero pip switches every coordinate off, and a coordinate the likelihood never
     // reads must not be charged a prior for its loading.
-    m.set_gate_pip(
+    m.install_gate_pip(
         GateKind::Identity,
-        &vec![0.0; n_features * h],
-        n_features,
-        &dev(),
+        &pip_tensor(&vec![0.0; n_features * h], n_features, h),
     )
     .unwrap();
     let off: f32 = m.gate_kl().unwrap().unwrap().to_scalar().unwrap();

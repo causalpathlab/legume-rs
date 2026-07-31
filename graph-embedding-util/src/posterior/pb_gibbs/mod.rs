@@ -13,7 +13,7 @@
 //!
 //! ## All levels at once, and why that needs no special code
 //!
-//! Phase 1's objective is `CompositeMode::Sum` with `λ = 1` per level, i.e. the
+//! Phase 1's objective is a SUM over axes with `λ = 1` per level, i.e. the
 //! log-likelihoods of the levels add. [`StackedPb`] already concatenates every
 //! level into one pb axis with `offsets[l]` marking where each starts, so a
 //! single Poisson likelihood over that concatenated axis **is** the sum over

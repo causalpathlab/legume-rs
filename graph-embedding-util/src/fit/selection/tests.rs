@@ -1,7 +1,7 @@
 //! Tests for the selection pass's mask plumbing.
 //!
 //! Every defect these cover shipped to `main` with `cargo build` and `cargo test`
-//! green, because no test touched `set_gate_pip`, `share_gate_masks`,
+//! green, because no test touched `install_gate_pip`, `share_gate_masks`,
 //! `resample_gate_mask`, `clear_gate_mask`, or the pip branch of
 //! `gathered_gate_weights`. Compilation cannot see any of them: the fields are plain
 //! `Option`s and `Arc`s, so dropping one is a runtime behaviour change, not a type
@@ -14,6 +14,13 @@ use candle_util::candle_nn::{VarBuilder, VarMap};
 
 fn dev() -> Device {
     Device::Cpu
+}
+
+/// A `[rows, H]` pip table on the test device. `install_gate_pip` takes a tensor
+/// because the composite fit uploads once and shares it across heads; tests have no
+/// such concern, so they build one here.
+fn pip_tensor(pip: &[f32], rows: usize, h: usize) -> Tensor {
+    Tensor::from_slice(pip, (rows, h), &dev()).unwrap()
 }
 
 /// A free model plus `n_heads` sharing heads, all gated by the same `pip`, wired the
@@ -66,11 +73,11 @@ fn free_with_heads(
             .unwrap()
         })
         .collect();
-    m.set_gate_pip(GateKind::Identity, pip, n_features, &dev())
+    m.install_gate_pip(GateKind::Identity, &pip_tensor(pip, n_features, h))
         .unwrap();
     let cell = m.gate_mask_cell();
     for head in &mut heads {
-        head.set_gate_pip(GateKind::Identity, pip, n_features, &dev())
+        head.install_gate_pip(GateKind::Identity, &pip_tensor(pip, n_features, h))
             .unwrap();
         head.share_gate_masks(&cell, None);
     }
@@ -241,7 +248,7 @@ fn an_unidentified_delta_is_masked_off_not_gated_at_the_prior() {
     );
 }
 
-/// Every axis must see the SAME δ draw. `set_gate_pip` mints a fresh `Arc` for the
+/// Every axis must see the SAME δ draw. `install_gate_pip` mints a fresh `Arc` for the
 /// velocity cell each call, and `resample_gate_mask` runs on `axes[0]` only — so a
 /// caller that shares just the identity cell leaves every other axis gating δ by the
 /// mean while `axes[0]` gates it by a draw, i.e. the axes train against different

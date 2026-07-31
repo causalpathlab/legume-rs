@@ -5,7 +5,7 @@
 //! [`pool_axis`] takes a bare `[D, H]` table, so none of them can borrow the
 //! model. Kept together as the layer between a host-side init and a device Var.
 
-use candle_util::candle_core::{DType, Device, Result, Tensor};
+use candle_util::candle_core::{Device, Result, Tensor};
 use candle_util::candle_nn::VarMap;
 use matrix_util::rand_util::name_seed;
 use matrix_util::traits::SampleOps;
@@ -222,9 +222,4 @@ pub(super) fn pool_axis_loop(
     let emb_stack = Tensor::stack(&emb_rows, 0)?;
     let bias_stack = Tensor::stack(&bias_rows, 0)?;
     Ok((emb_stack, bias_stack))
-}
-
-#[allow(unused)]
-fn dummy_dtype_check() -> DType {
-    DType::F32
 }

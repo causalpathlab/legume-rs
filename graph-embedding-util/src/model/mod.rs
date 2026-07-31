@@ -206,11 +206,9 @@ pub struct JointEmbedModel {
     pub b_cell: Tensor,
     /// Optional per-gene β-sharing feature parameterization (`None` = free `e_feat`).
     pub factor: Option<FeatFactor>,
-    #[allow(dead_code)]
     pub embedding_dim: usize,
-    /// Free-model softmax-gate logits `[n_features, H]` (see [`FeatureGateSpec`]).
-    /// `None` for an ungated model, or for a factored one (its gate lives in
-    /// `factor.s_beta`).
+    /// Free-model gate logits `[n_features, H]` (see [`FeatureGateSpec`]). `None` for
+    /// an ungated model, or for a factored one (its gate lives in `factor.s_beta`).
     pub s_feat: Option<Tensor>,
     /// Raw `e_feat` Var kept reachable for the gated training gather of a FREE model,
     /// so [`Self::materialize_e_feat`] can overwrite `e_feat` with the gated snapshot
@@ -264,9 +262,13 @@ pub struct JointEmbedModel {
     /// model rather than beside the logit table because it is indexed by dim, not by
     /// row, so free and factored models share one home for it. `Some` iff gated.
     ///
-    /// Only the axis that computes [`Self::gate_kl`] needs it (training calls that on
-    /// `axes[0]`), so it is deliberately NOT plumbed through [`ShareFeaturesArgs`] the
-    /// way `s_feat` is.
+    /// It MUST be plumbed through [`ShareFeaturesArgs`] like `s_feat`, and this doc once
+    /// said the opposite — that only the axis computing [`Self::gate_kl`] needs it, so
+    /// sharing it was unnecessary. That reasoning is inverted: training calls `gate_kl`
+    /// on `axes[0]`, which is a pb HEAD, not the model the gate was enabled on, whenever
+    /// `--phase1-cells-per-pb` is 0 — the default in both CLIs. A head without it makes
+    /// `gate_kl` return `None`, and the entire gate regularisation leaves the loss with
+    /// the build green. Do not un-share it.
     pub gate_pi_logit: Option<Tensor>,
     /// Gate configuration (`None` = ungated). Presence is the single "is gated" flag
     /// for both free (`s_feat`) and factored (`factor.s_beta`) models.

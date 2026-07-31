@@ -84,16 +84,22 @@ pub(crate) fn run_selection_pass(
     let pb = super::stacked_pb_view(varmap, collapsed_levels, cell_to_pb_per_level, h)?;
     let b_feat_map: Vec<f32> = b_feat.to_vec1()?;
 
+    // gem's β-sharing side reads `beta`/`delta` per GENE; a free model's `e_feat` IS
+    // the per-row table. Either way the sampler sees one row-indexed warm start.
+    let e_feat_map = match config.feat_factor.as_ref() {
+        Some(spec) => per_row_loadings(varmap, spec, unified.n_features(), h)?,
+        None => e_feat.flatten_all()?.to_vec1()?,
+    };
+    let feat = crate::posterior::pb_index::FeatureSide {
+        e_feat: &e_feat_map,
+        b_feat: &b_feat_map,
+        feature_to_backend_row: &unified.feature_to_backend_row,
+    };
+
     match config.feat_factor.as_ref() {
-        // gem's β-sharing side: one `β_g` per gene plus `δ_g` on the unspliced rows,
-        // i.e. TWO gates over a row→gene grouping.
+        // One `β_g` per gene plus `δ_g` on the unspliced rows: TWO gates over a
+        // row→gene grouping.
         Some(spec) => {
-            let e_feat_map = per_row_loadings(varmap, spec, unified.n_features(), h)?;
-            let feat = crate::posterior::pb_index::FeatureSide {
-                e_feat: &e_feat_map,
-                b_feat: &b_feat_map,
-                feature_to_backend_row: &unified.feature_to_backend_row,
-            };
             let tracks = crate::posterior::pb_gibbs::SpliceTracks {
                 row_to_gene: &spec.row_to_gene,
                 unspliced_rows: &spec.unspliced_rows,
@@ -112,12 +118,6 @@ pub(crate) fn run_selection_pass(
         }
         // Free model ⇒ a feature row IS an anchor, so no grouping.
         None => {
-            let e_feat_map: Vec<f32> = e_feat.flatten_all()?.to_vec1()?;
-            let feat = crate::posterior::pb_index::FeatureSide {
-                e_feat: &e_feat_map,
-                b_feat: &b_feat_map,
-                feature_to_backend_row: &unified.feature_to_backend_row,
-            };
             let res = crate::posterior::pb_gibbs::pb_gibbs(&pb, &feat, None, h, pcfg)?;
             write_back_pb_levels(varmap, &res.mean_pb, &res.mean_b_pb, res.h, num_levels)?;
             Ok(Some(res))

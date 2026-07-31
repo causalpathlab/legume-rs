@@ -6,13 +6,17 @@
 //! the constructor's own frame, and working around that is what keeps this stage stuck
 //! inline in a 1000-line function.
 
-use super::config::{FitConfig, DEFAULT_STRATIFY_ALPHA_CELL, DEFAULT_STRATIFY_ALPHA_PB};
+use super::config::{
+    FitConfig, DEFAULT_AXIS_LAMBDA, DEFAULT_STRATIFY_ALPHA_CELL, DEFAULT_STRATIFY_ALPHA_PB,
+};
 use super::samplers::{build_active_samplers, subsample_cell_samplers_multilevel};
 use crate::coarsen::{identity_axis, AxisCoarsenings};
 use crate::data::UnifiedData;
 use crate::loss::{
     build_stratified_sampler, FeatPairing, PerBatchStratifiedCellSampler, StratifiedSampler,
 };
+use crate::model::JointEmbedModel;
+use crate::training::{AxisSampler, CompositeAxis};
 use log::info;
 
 /// Everything the composite axes are assembled from.
@@ -23,7 +27,7 @@ pub(super) struct AxisData {
     pub cell_samplers: Vec<PerBatchStratifiedCellSampler>,
     /// A separate, smaller cell view for phase 1 when `--phase1-cells-per-pb` asks for
     /// one. `None` means phase 1 uses `cell_samplers` as-is (or no cell axis at all).
-    pub phase1_subsample: Option<Vec<PerBatchStratifiedCellSampler>>,
+    phase1_subsample: Option<Vec<PerBatchStratifiedCellSampler>>,
     /// `(coarsening, sampler)` per collapse level, coarsest → finest.
     pub level_axes: Vec<(AxisCoarsenings, StratifiedSampler)>,
     /// Does phase 1 get a cell axis at all? False at the default
@@ -34,10 +38,58 @@ pub(super) struct AxisData {
 impl AxisData {
     /// The cell samplers that shape `E_feat` in phase 1 — the subsample when there is
     /// one, the full set otherwise.
-    pub fn phase1_cell_samplers(&self) -> &[PerBatchStratifiedCellSampler] {
+    fn phase1_cell_samplers(&self) -> &[PerBatchStratifiedCellSampler] {
         self.phase1_subsample
             .as_deref()
             .unwrap_or(&self.cell_samplers)
+    }
+
+    /// The composite axis set phase 1 trains: `[cell?] + one per pb level`, coarsest →
+    /// finest.
+    ///
+    /// ONE definition, called once per training pass. The lineage refine runs a second
+    /// pass over the SAME axes — that identity is the load-bearing invariant of the
+    /// lineage path, since the refine is supposed to differ from the warm-up only by
+    /// its SEM term. It used to be maintained by two verbatim copies of this builder
+    /// 140 lines apart, which agree today and would drift on the first change to
+    /// `lambda`, a sampler, or the cell-axis condition, with nothing failing to
+    /// compile.
+    ///
+    /// Every field of [`CompositeAxis`] is a `&'a` borrow, so the borrows are simply
+    /// re-taken per call and "the warm-up axes were consumed" stops being a reason to
+    /// copy the code.
+    pub fn composite_axes<'a>(
+        &'a self,
+        cell_model: &'a JointEmbedModel,
+        level_models: &'a [JointEmbedModel],
+        unified: &'a UnifiedData,
+        pb_blobs: &'a [UnifiedData],
+    ) -> Vec<CompositeAxis<'a>> {
+        let mut axes: Vec<CompositeAxis<'a>> = Vec::with_capacity(1 + level_models.len());
+        // Per-cell embedding, trained jointly to shape `E_feat`. Suppressed at the
+        // default `--phase1-cells-per-pb 0`, where pb aggregates shape it alone.
+        if self.use_cell_axis {
+            axes.push(CompositeAxis {
+                model: cell_model,
+                unified,
+                cell_axis: &self.cell_axis_coarsening,
+                sampler: AxisSampler::PerBatchStratified(self.phase1_cell_samplers()),
+                lambda: DEFAULT_AXIS_LAMBDA,
+                label: "cell",
+            });
+        }
+        for (i, model) in level_models.iter().enumerate() {
+            let (axis, stratified) = &self.level_axes[i];
+            axes.push(CompositeAxis {
+                model,
+                unified: &pb_blobs[i],
+                cell_axis: axis,
+                sampler: AxisSampler::Stratified(stratified),
+                lambda: DEFAULT_AXIS_LAMBDA,
+                label: "pb",
+            });
+        }
+        axes
     }
 }
 
