@@ -177,7 +177,11 @@ pub struct SrtLinkCommunityArgs {
         default_value_t = false,
         help = "Disable per-level cascade outputs (still runs the V-cycle)",
         long_help = "By default the V-cycle emits per-level outputs:\n\
-                     <out>.L{l}.link_community.parquet <out>.L{l}.propensity.parquet <out>.L{l}.gene_community.parquet They let you inspect the clustering at every resolution.\n\
+                     \n  \
+                     <out>.L{l}.link_community.parquet\n  \
+                     <out>.L{l}.propensity.parquet\n  \
+                     <out>.L{l}.gene_community.parquet\n\
+                     They let you inspect the clustering at every resolution.\n\
                      \n\
                      Pass this flag to skip those writes.\n\
                      Only the final fine-resolution outputs are then emitted,\n\
@@ -194,7 +198,8 @@ pub struct SrtLinkCommunityArgs {
                      It then freezes the K×K incidence matrix:\n\
                      log B[k, k'] = ψ(a + S[k, k']) − log(b + W[k']) That is the variational E_q[log B] under Gamma(a, b).\n\
                      \n\
-                     The final EM-Gibbs and greedy score then gains the term Σ_{k'} (θ_L[k'] + θ_R[k']) · log B[k, k'] That pulls the labelling toward block structure.\n\
+                     The final EM-Gibbs and greedy score then gains the term Σ_{k'} (θ_L[k'] + θ_R[k']) · log B[k, k'].\n\
+                     That pulls the labelling toward block structure.\n\
                      The factorised Poisson rate alone cannot see it.\n\
                      Our Xenium leukemia smoke test gained ~50% MI. It cost ~9% more wall time.\n\
                      \n\

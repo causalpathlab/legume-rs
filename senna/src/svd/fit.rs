@@ -10,7 +10,8 @@ pub struct SvdArgs {
         value_delimiter = ',',
         help = "Input data files (.zarr or .h5)",
         long_help = "Sparse backends produced by `data-beans from-mtx`.\n\
-                     Multiple files may be passed (comma- or space-separated) and are concatenated column-wise on a shared feature set."
+                     Multiple files may be passed, comma- or space-separated,\n\
+                     and are concatenated column-wise on a shared feature set."
     )]
     data_files: Vec<Box<str>>,
 

@@ -359,8 +359,7 @@ pub struct LineageArgs {
                      run over the MST-node grouping,\n\
                      so the call carries the same permutation-calibrated confidence.\n\
                      pub(super) Input: a `gene<TAB>celltype` TSV (tab/comma/space delimited).\n\
-                     Reads the co-embedded gene vectors from\n\
-                     `{from}.feature_embedding.parquet` (spliced rows),\n\
+                     Reads the co-embedded gene vectors from `{from}.feature_embedding.parquet` (spliced rows),\n\
                      and raw θ from `{from}.cell_embedding.parquet`.\n\
                      Writes `{out}.lineage_annot.*`, the per-cell calls keyed by MST node,\n\
                      and `{out}.trajectory_annotation.parquet`:\n\
@@ -483,13 +482,12 @@ pub struct LineageArgs {
         help = "Principal components carrying the --layout umap kNN graph and SGD init (0 = raw latent + random init)",
         long_help = "How many principal components the t-UMAP layout runs on.\n\
                      \n\
-                     Both the neighbourhood graph and the SGD starting coordinates\n\
-                     are taken from the PCs of the layout features,\n\
-                     not from the raw latent —\n\
+                     Both the neighbourhood graph and the SGD starting coordinates,\n\
+                     are taken from the PCs of the layout features, not from the raw latent —\n\
                      scanpy builds its neighbours on `X_pca` and uwot seeds SGD from a spectral/PCA init for the same reason:\n\
                      SGD then only has to refine local structure,\n\
-                     instead of also having to find the global arrangement\n\
-                     from a random scatter, which leaves the macro-layout seed-dependent.\n\
+                     instead of also having to find the global arrangement from a random scatter,\n\
+                     which leaves the macro-layout seed-dependent.\n\
                      \n\
                      The LEADING component is always dropped. These rows are nonnegative,\n\
                      so every cell loads positively on it,\n\

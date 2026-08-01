@@ -144,7 +144,9 @@ pub struct PredictArgs {
         default_value_t = 3,
         help = "Iterative TMLE rounds for held-out batch δ (0 = legacy single-pass plug-in)",
         long_help = "Per iteration: encode all cells with current δ → θ̂;\n\
-                     refit δ as Σ_obs / Σ_pred per batch (NB-Fisher-weighted for nb / nbmixture decoders, using the saved {model}.dispersion.parquet when present).\n\
+                     refit δ as Σ_obs / Σ_pred per batch.\n\
+                     NB-Fisher-weighted for nb / nbmixture decoders,\n\
+                     using the saved {model}.dispersion.parquet when present.\n\
                      Default 3 typically converges;\n\
                      0 reverts to the legacy 1/K-marginal plug-in."
     )]
@@ -194,7 +196,8 @@ pub struct PredictArgs {
         help = "Canonicalize query row names: auto|exact|gene|locus|locus-overlap|mixed",
         long_help = "Mirrors the training-side flag.\n\
                      `exact` (default) preserves legacy exact-then-flexible matching.\n\
-                     `gene` resolves `ENSG..._TSPAN6` → `TSPAN6` (rsplit on '_') so a symbol-keyed dictionary matches a query keyed by `<ensembl>_<symbol>`.\n\
+                     `gene` resolves `ENSG..._TSPAN6` → `TSPAN6`, rsplit on '_',\n\
+                     so a symbol-keyed dictionary matches a query keyed by `<ensembl>_<symbol>`.\n\
                      Applied AFTER the suffix trim (see --feature-name-suffix-delim)."
     )]
     pub(crate) feature_name_kind: FeatureNameKindArg,
@@ -203,7 +206,9 @@ pub struct PredictArgs {
         long,
         help = "Split query row names on this char; keep prefix as base key",
         long_help = "Split query row names on this character. With '/',\n\
-                     `ENSG00000000003_TSPAN6/count/spliced` splits into the base `ENSG00000000003_TSPAN6` and suffix `count/spliced`.\n\
+                     `ENSG00000000003_TSPAN6/count/spliced` splits into\n\
+                     the base `ENSG00000000003_TSPAN6`,\n\
+                     and the suffix `count/spliced`.\n\
                      The suffix is then available to --keep-feature-suffix.\n\
                      The base is handed to --feature-name-kind."
     )]

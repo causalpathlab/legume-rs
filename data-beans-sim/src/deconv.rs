@@ -56,7 +56,8 @@ pub struct SimConvArgs {
         long,
         default_value_t = 0.3,
         help = "Dirichlet concentration parameter for topic mixing fractions",
-        long_help = "Dirichlet concentration parameter for topic mixing fractions (smaller = more skewed, e.g. 0.1-0.5; larger = more uniform)"
+        long_help = "Dirichlet concentration parameter for topic mixing fractions.\n\
+                     Smaller = more skewed, e.g. 0.1-0.5; larger = more uniform."
     )]
     dirichlet_alpha: f64,
 

@@ -420,8 +420,7 @@ pub struct CountApaArgs {
         help = "Per-site skirt eta (heavy-tail robustness, mixture mode)",
         long_help = "Each site's emission is (1 - eta) * Gaussian(alpha, beta^2) + eta * Uniform(alpha - W, alpha + W).\n\
                      The local uniform skirt absorbs near-site outliers,\n\
-                     so the BIC does not pick up extra spurious sites\n\
-                     in broad cleavage clusters.\n\
+                     so broad cleavage clusters do not make the BIC pick up extra spurious sites.\n\
                      Set to 0 to disable. Only used in mixture mode."
     )]
     pub(crate) skirt_eta: f32,
@@ -442,9 +441,9 @@ pub struct CountApaArgs {
         default_value_t = 2.0,
         help = "Post-EM merge tolerance in beta units (mixture mode)",
         long_help = "After BIC site selection,\n\
-                     selected sites with |alpha_i - alpha_j| < merge_beta_mult * max(beta_i, beta_j)\n\
-                     are collapsed, keeping the higher-pi site, and weights re-fit.\n\
-                     Set to 0 to disable. Only used in mixture mode."
+                     selected sites are collapsed when |alpha_i - alpha_j| < merge_beta_mult * max(beta_i, beta_j),\n\
+                     keeping the higher-pi site, and weights are re-fit. Set to 0 to disable.\n\
+                     Only used in mixture mode."
     )]
     pub(crate) merge_beta_mult: f32,
 

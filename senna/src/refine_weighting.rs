@@ -129,7 +129,8 @@ pub(crate) struct CollapseArgs {
         short = 'p',
         default_value_t = 50,
         help = "Random projection dimension",
-        long_help = "Target rank of the initial random sketch used to seed batch correction and multi-level pseudobulk collapsing."
+        long_help = "Target rank of the initial random sketch,\n\
+                     used to seed batch correction and multi-level pseudobulk collapsing."
     )]
     pub(crate) proj_dim: usize,
 

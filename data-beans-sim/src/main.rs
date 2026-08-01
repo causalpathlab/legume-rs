@@ -68,7 +68,8 @@ enum Commands {
     #[command(
         about = "Log-normal topic factor model (with optional reference-conditioned NB+copula sampling)",
         long_about = "Synthetic mode (no `--reference`):\n\
-                      `Y(g,j) ~ Poisson( (depth/G) · δ(g,B(j)) · Σ_k β(g,k) θ(k,j) )` with explicit log-space variance decomposition for both β and δ:\n\
+                      `Y(g,j) ~ Poisson( (depth/G) · δ(g,B(j)) · Σ_k β(g,k) θ(k,j) )`,\n\
+            with an explicit log-space variance decomposition for both β and δ:\n\
                       log β(g,k) = σ_β · [√pve_topic · u_{g,k} + √(1−pve_topic) · v_g] − σ_β²/2\n\
                       log δ(g,b) =        √pve_batch · z_{g,b} + √(1−pve_batch) · w_g\n\
                       with u, v, z, w ~ N(0, 1) iid. `--beta-scale` controls σ_β.\n\

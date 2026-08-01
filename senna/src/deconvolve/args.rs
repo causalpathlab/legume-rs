@@ -21,7 +21,8 @@ pub struct DeconvolveArgs {
                 `senna bge --skip-etm` or `masked-topic`",
         long_help = "Run manifest exposing a per-gene embedding ρ.\n\
                      `senna bge --skip-etm` is exact:\n\
-                     the raw Poisson ρ is persisted as dictionary.parquet (default ETM bge overwrites it with β — re-run with --skip-etm).\n\
+                     the raw Poisson ρ is persisted as dictionary.parquet.\n\
+                     Default ETM bge overwrites it with β — re-run with --skip-etm.\n\
                      `masked-topic` is supported as a transfer approximation (its ρ was trained under a softmax-ETM head)."
     )]
     pub from: Box<str>,
@@ -116,9 +117,9 @@ pub struct DeconvolveArgs {
         long_help = "Per-(gene,sample) overdispersion via a Gamma(r,r) multiplicative factor ε on the Poisson rate:\n\
                      y ~ Poisson(ε·Σ_c w_c μ_{g,c}), Var(y)=λ+λ²/r.\n\
                      Small r absorbs reference/gene misfit into ε; r → ∞ recovers Poisson.\n\
-                     Held fixed:\n\
-                     freely sampling r is non-identifiable against the fractions (ε competes with w through the per-type exposure),\n\
-                     so it is a knob, not a hyperparameter."
+                     Held fixed: freely sampling r is non-identifiable against the fractions,\n\
+                     since ε competes with w through the per-type exposure, so it is a knob,\n\
+                     not a hyperparameter."
     )]
     pub nb_dispersion: f32,
 

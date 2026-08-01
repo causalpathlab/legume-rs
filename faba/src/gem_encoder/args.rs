@@ -123,9 +123,8 @@ pub struct GemEncoderArgs {
                      {out}.log_likelihood.parquet            per-epoch training trace\n\
                      {out}.safetensors + {out}.gem.json    weights + architecture\n\
                      \n\
-                     NOTE the per-cell tables may contain FEWER ROWS than the input:\n\
-                     latent, cell_embedding, velocity, velocity_factor,\n\
-                     latent_mature, latent_nascent.\n\
+                     NOTE the per-cell tables may contain FEWER ROWS than the input: latent,\n\
+                     cell_embedding, velocity, velocity_factor, latent_mature, latent_nascent.\n\
                      cell QC drops failing cells from the OUTPUTS (never from training).\n\
                      Join downstream tables by the cell/barcode column, never by row position.\n\
                      --no-qc keeps every cell; --qc-report writes the per-cell keep/drop table."
@@ -277,9 +276,9 @@ pub struct GemEncoderArgs {
                      it is a per-gene embedding in R^H contracted with the topic embedding alpha,\n\
                      so <alpha_t, delta_g> is rank-H and never a free gene-by-topic matrix.\n\
                      The ridge is a second constraint layered on that one,\n\
-                     and measurement does not support paying for it.\n\
-                     3 wt libraries, 8791 cells, 20 topics, 300 epochs;\n\
-                     marker rank is the median of 10 canonical markers\n\
+                     and measurement does not support paying for it. 3 wt libraries,\n\
+                     8791 cells, 20 topics, 300 epochs;\n\
+                     marker rank is the median of 10 canonical markers,\n\
                      by probability within their best topic, of 33609 genes:\n\
                      \n\
                      --delta-l2     splice r     marker rank, beta / delta     |delta|\n\
@@ -294,8 +293,8 @@ pub struct GemEncoderArgs {
                      Note that with the ridge off,\n\
                      |delta| grows slowly and had NOT flattened by epoch 300,\n\
                      so it is not a quantity to read convergence from.\n\
-                     Raise this only if you have specific reason to think\n\
-                     delta is fitting noise on the sparse unspliced track —\n\
+                     Raise this only on specific evidence:\n\
+                     that delta is fitting noise on the sparse unspliced track —\n\
                      that was long assumed to be the dominant failure mode,\n\
                      and on this data it was not observed."
     )]
@@ -374,8 +373,7 @@ pub struct GemEncoderArgs {
                      which is the wrong scope for a partitioning heuristic —\n\
                      a marker gene that missed the cut was not down-weighted downstream,\n\
                      it was ABSENT from dictionary.parquet,\n\
-                     and `faba annotate` would score that cell type\n\
-                     on whatever fraction of its panel survived,\n\
+                     and `faba annotate` would score that cell type on whatever fraction of its panel survived,\n\
                      and still return a confident-looking call.\n\
                      \n\
                      0 uses every gene in the first random projection too."
