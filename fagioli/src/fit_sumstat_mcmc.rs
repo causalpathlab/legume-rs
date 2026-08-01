@@ -56,8 +56,9 @@ pub struct FitSumstatMcmcArgs {
         help_heading = "MCMC Sampler",
         default_value = "2",
         help = "Thinning interval (collect every N-th sweep)",
-        long_help = "Collect a sample every N-th sweep after warmup to reduce\n\
-            autocorrelation between posterior samples. Default: 2."
+        long_help = "Collect a sample every N-th sweep, after warmup.\n\
+            That reduces autocorrelation between posterior samples.\n\
+            The default is 2."
     )]
     pub thin: usize,
 
@@ -67,8 +68,9 @@ pub struct FitSumstatMcmcArgs {
         default_value = "1.0",
         help = "Prior variance on inclusion logits",
         long_help = "Prior variance for the Gaussian prior on raw inclusion logits.\n\
-            Controls ESS step size: larger values allow bigger jumps in\n\
-            inclusion probability space. Default: 1.0."
+            It controls the ESS step size.\n\
+            Larger values allow bigger jumps in inclusion-probability space.\n\
+            The default is 1.0."
     )]
     pub logit_var: f32,
 
@@ -77,11 +79,14 @@ pub struct FitSumstatMcmcArgs {
         help_heading = "MCMC Sampler",
         default_value_t = false,
         help = "Estimate the effect size prior variance via Gibbs",
-        long_help = "When enabled, the effect size prior variance is sampled via a\n\
-            conjugate inverse-gamma Gibbs update instead of being fixed.\n\
-            This adapts the prior to the data, improving calibration when\n\
-            the initial prior_var (from LDSC h²) is misspecified.\n\
-            Prior: InvGamma(0.01, 0.01). Default: disabled."
+        long_help = "When enabled, the effect-size prior variance is sampled.\n\
+            The update is a conjugate inverse-gamma Gibbs step.\n\
+            Otherwise that variance stays fixed.\n\
+            \n\
+            Sampling adapts the prior to the data.\n\
+            It improves calibration when the initial prior_var, from LDSC h²,\n\
+            is misspecified.\n\
+            The prior is InvGamma(0.01, 0.01), and this is disabled by default."
     )]
     pub estimate_prior_var: bool,
 }
