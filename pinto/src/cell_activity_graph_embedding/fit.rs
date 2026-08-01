@@ -283,21 +283,22 @@ pub fn fit_cell_activity_graph_embedding(
                 &pb,
                 args.embedding_dim,
                 &crate::cell_activity_graph_embedding::selection::SelectArgs {
-                    sweeps: 100,
-                    burnin: 50,
+                    sweeps: args.selection_sweeps,
+                    burnin: args.selection_sweeps / 2,
                     seed: c.seed,
                 },
             )?;
         sel.log_summary();
-        sel.pip_matrix().to_parquet_with_names(
-            &(c.out.to_string() + ".feature_pip.parquet"),
-            (Some(&gene_names), Some("gene")),
-            Some(&embedding_col_names(args.embedding_dim)),
-        )?;
-        info!("Wrote {}.feature_pip.parquet", c.out);
-        // The posterior mean EFFECTIVE loading `E[z·β]`, the companion half of
-        // the pip table — `geu::eval::write_pb_posterior_tables` emits both for
-        // `senna bge` and cage was shipping only the first.
+        // The PIP table itself is NOT written. Under this arm `pip` is a set of
+        // dropout keep-rates, not a reported estimand: it gates the gradient
+        // during training and nothing downstream reads it, the same way a
+        // dropout mask is never shipped. `senna bge` writes one because there
+        // the gate is baked into the dictionary (`materialize_e_feat`) and the
+        // table documents what was applied; cage ships the raw embedding, so a
+        // table would only invite someone to re-apply a selection that was
+        // regularization rather than a coefficient.
+        //
+        // The posterior mean EFFECTIVE loading `E[z·β]`.
         //
         // Not consumed by training under this arm: `e_feat` is randomly
         // initialized and the selection enters as a gate instead, because
@@ -768,11 +769,13 @@ pub fn fit_cell_activity_graph_embedding(
 
     // Gene embedding [G × D] — same shared D-dim space as cells, over the FULL
     // gene axis. There is no HVG row subset to mirror any more: HVG weights the
-    // projection, so every gene is trained and every gene gets a row here and
-    // in the PIP table below.
+    // projection, so every gene is trained and every gene gets a row here.
     //
-    // RAW, UNGATED effects. The selection ships beside them in
-    // `feature_pip.parquet`, so downstream decides whether to multiply.
+    // These are the trained effects as-is. The selection is NOT re-applied on
+    // top and no `pip` ships to let anyone re-apply it: the gate was dropout
+    // over the gradient, so what it did is already expressed in the values
+    // below. Multiplying them by a keep-rate would shrink a second time for a
+    // selection that was never a coefficient.
     let e_gene_out = tensor_to_mat(&model.e_feat)?;
     let b_gene_out = tensor_to_mat_1d(&model.b_feat)?;
 

@@ -703,12 +703,6 @@ pub fn select_features(
 }
 
 impl Selection {
-    /// `pip` as an `[n_genes × D]` matrix for parquet output.
-    #[must_use]
-    pub fn pip_matrix(&self) -> Mat {
-        Mat::from_row_slice(self.n_genes, self.dim, &self.pip)
-    }
-
     /// `mean_beta` as an `[n_genes × D]` matrix, for parquet output.
     #[must_use]
     pub fn mean_beta_matrix(&self) -> Mat {
