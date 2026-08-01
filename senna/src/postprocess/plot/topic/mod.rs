@@ -94,9 +94,9 @@ pub struct PlotTopicArgs {
         long,
         short = 'f',
         help = "Run manifest JSON from `senna topic`/`masked-topic`/`joint-topic`",
-        long_help = "If set, fills in --latent / --dictionary and the batch-file \
-                     list from the manifest's outputs/data sections. CLI flags \
-                     still override individual values."
+        long_help = "Fills in --latent, --dictionary and the batch-file list.\n\
+                     They come from the manifest's outputs and data sections.\n\
+                     CLI flags still override individual values."
     )]
     pub from: Option<Box<str>>,
 
@@ -139,7 +139,7 @@ pub struct PlotTopicArgs {
         value_enum,
         default_value_t = GroupBy::Batch,
         help = "Group cells into panels by batch or by cell-type label",
-        long_help = "Group cells into panels by batch (default)\n\
+        long_help = "Group cells into panels by batch, which is the default,\n\
                      or by `senna annotate-by-enrichment` cell-type label."
     )]
     pub group_by: GroupBy,

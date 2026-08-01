@@ -56,9 +56,10 @@ pub struct FneArgs {
         long_help = "One or more positional paths, comma-separated or space-separated.\n\
                      Each file is whitespace/comma/tab-delimited; every line is a pair of feature names.\n\
                      Lines starting with `#` are skipped; self-loops and duplicates are dropped silently.\n\
-                     When multiple files are given, the node set is the union of canonical names across all files\n\
-                     and the edge set is the deduplicated union of pair-edges\n\
-                     — handy for combining BioGRID + STRING + KEGG into a single graph."
+                     With multiple files, the node set unions canonical names.\n\
+                     The edge set is the deduplicated union of pair-edges.\n\
+                     That is handy for combining BioGRID, STRING and KEGG\n\
+                     into a single graph."
     )]
     networks: Vec<Box<str>>,
 
@@ -109,17 +110,17 @@ pub struct FneArgs {
     #[arg(
         long,
         default_value_t = 0.75,
-        help = "Negative sampling exponent α: q(k) ∝ degree(k)^α. \
-                node2vec/word2vec default 0.75."
+        help = "Negative sampling exponent α: q(k) ∝ degree(k)^α"
     )]
     neg_alpha: f32,
 
     #[arg(
         long,
         default_value_t = '_',
-        help = "Delimiter for canonical gene-name matching. The last token after \
-                splitting on this char is the canonical name, so `ENSG00000_TGFB1` \
-                and `TGFB1` merge into a single node."
+        help = "Delimiter for canonical gene-name matching",
+        long_help = "Delimiter for canonical gene-name matching.\n\
+                     The last token after splitting on this char is canonical.\n\
+                     So `ENSG00000_TGFB1` and `TGFB1` merge into one node."
     )]
     feature_name_delim: char,
 
