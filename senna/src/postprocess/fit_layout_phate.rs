@@ -40,16 +40,18 @@ pub struct LayoutPhateArgs {
         long,
         default_value_t = false,
         help = "Rotate so the pseudotime root sits at the bottom of the layout",
-        long_help = "Rigid 2D rotation of the PHATE layout so the pseudotime root \
-                     anchor sits below the tip anchor along the y-axis. PHATE \
-                     coords are only defined up to rotation/reflection, so this \
-                     is principled — preserves all distances and cluster \
-                     structure.\n\n\
-                     Uses `manifest.pseudotime` if already populated; otherwise \
-                     fits a fresh principal graph from `outputs.latent` (using \
-                     `--root-cell` / `--root-node`) in-memory without writing \
-                     any artifacts. Run `senna pseudotime` first if you \
-                     want non-default principal-graph hyperparameters."
+        long_help = "Rigid 2D rotation of the PHATE layout.\n\
+                     It puts the pseudotime root anchor below the tip anchor,\n\
+                     along the y-axis.\n\
+                     PHATE coords are defined only up to rotation and reflection,\n\
+                     so this is principled.\n\
+                     All distances and cluster structure are preserved.\n\n\
+                     `manifest.pseudotime` is used when already populated.\n\
+                     Otherwise a fresh principal graph is fit in memory from\n\
+                     `outputs.latent`, using --root-cell or --root-node.\n\
+                     No artifacts are written in that case.\n\
+                     Run `senna pseudotime` first for non-default\n\
+                     principal-graph hyperparameters."
     )]
     orient_by_root: bool,
 

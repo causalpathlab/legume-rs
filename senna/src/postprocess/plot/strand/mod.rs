@@ -43,10 +43,11 @@ pub struct PlotStrandArgs {
         long,
         short = 'f',
         help = "Run manifest JSON from `senna {topic,...}` enriched by `senna annotate-by-enrichment`",
-        long_help = "Fills --activity (from annotate.cluster_expression + \
-                     annotate.cluster_celltype_q) and --out (from the manifest \
-                     prefix). Explicit CLI flags still win. Paths inside the \
-                     manifest resolve relative to its own directory."
+        long_help = "Fills in --activity and --out from the manifest.\n\
+                     --activity comes from annotate.cluster_expression and\n\
+                     annotate.cluster_celltype_q; --out from the manifest prefix.\n\
+                     Explicit CLI flags still win.\n\
+                     Paths inside the manifest resolve against its own directory."
     )]
     pub from: Option<Box<str>>,
 
@@ -58,8 +59,11 @@ pub struct PlotStrandArgs {
 
     #[arg(
         long,
-        help = "Override the gene × group activity matrix (parquet, gene-name rows). \
-                Default: derived gene × cell-type matrix from the manifest's annotate outputs."
+        help = "Override the gene × group activity matrix",
+        long_help = "Override the gene × group activity matrix.\n\
+                     It is a parquet with gene-name rows.\n\
+                     By default it is derived from the manifest's annotate\n\
+                     outputs, as a gene × cell-type matrix."
     )]
     pub activity: Option<Box<str>>,
 
@@ -75,8 +79,11 @@ pub struct PlotStrandArgs {
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Restrict to these chromosomes (comma-separated, 'chr' prefix optional). \
-                Default: all autosomes + X/Y/M present in the GTF, in karyotype order."
+        help = "Restrict to these chromosomes, comma-separated",
+        long_help = "Restrict to these chromosomes, comma-separated.\n\
+                     The 'chr' prefix is optional.\n\
+                     The default is every autosome plus X, Y and M in the GTF,\n\
+                     in karyotype order."
     )]
     pub chromosomes: Option<Vec<Box<str>>>,
 
