@@ -157,8 +157,11 @@ pub struct PlotArgs {
     #[arg(
         long,
         short = 'f',
-        help = "lineage output prefix (reads {from}.cells_2d.parquet, .curves_2d, \
-                .nodes_2d, .lineage_annot.annot, .trajectory_annotation, .pseudotime)"
+        help = "lineage output prefix",
+        long_help = "lineage output prefix.\n\
+                     It reads {from}.cells_2d.parquet, .curves_2d, .nodes_2d,\n\
+                     .lineage_annot.annot, .trajectory_annotation\n\
+                     and .pseudotime."
     )]
     pub from: Box<str>,
 
@@ -277,13 +280,21 @@ pub struct PlotArgs {
         long,
         default_value_t = false,
         help = "Colour every cell solid by its argmax `coarse_label`, ignoring the soft-set confidence fade",
-        long_help = "By default cells are coloured by their LEADING fate (the argmax `coarse_label`) with the \
-                     soft `label_set` setting opacity: a size-1 set (confident single call) draws SOLID, a \
-                     size-≥2 set (an uncommitted cell between fates) draws FADED in the same leading-fate \
-                     colour, and an empty set is `unassigned`. So the differentiation lean still shows in \
-                     colour, but a transcriptionally-central progenitor is not given a false-confident solid \
-                     call. Pass this flag to draw every cell solid by the argmax `coarse_label` (the old \
-                     winner-take-all view, with no confidence fade)."
+        long_help = "By default cells are coloured by their LEADING fate.\n\
+                     That is the argmax `coarse_label`.\n\
+                     The soft `label_set` then sets opacity.\n\
+                     \n\
+                     A size-1 set is a confident single call, and draws SOLID.\n\
+                     A size-2-or-more set is an uncommitted cell between fates,\n\
+                     and draws FADED in the same leading-fate colour.\n\
+                     An empty set is `unassigned`.\n\
+                     \n\
+                     So the differentiation lean still shows in colour.\n\
+                     A transcriptionally-central progenitor is not given a\n\
+                     false-confident solid call.\n\
+                     \n\
+                     Pass this flag to draw every cell solid by the argmax.\n\
+                     That is the old winner-take-all view, with no fade."
     )]
     pub label_argmax: bool,
 
@@ -318,9 +329,14 @@ pub struct PlotArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Also emit flattened PNG (default: PDF only). The scatter/curves/nodes \
-                are raster layers, so the PDF is a hybrid — vector text/legend/star over \
-                a raster point cloud rendered at --dpi. Raise --dpi (300-600) for print."
+        help = "Also emit a flattened PNG; PDF only by default",
+        long_help = "Also emit a flattened PNG.\n\
+                     PDF only is the default.\n\
+                     \n\
+                     The scatter, curves and nodes are raster layers.\n\
+                     So the PDF is a hybrid: vector text, legend and star,\n\
+                     over a raster point cloud rendered at --dpi.\n\
+                     Raise --dpi to 300-600 for print."
     )]
     pub png: bool,
 

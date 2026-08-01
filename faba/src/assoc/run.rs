@@ -172,10 +172,15 @@ pub struct AssocArgs {
     #[arg(
         long,
         conflicts_with = "no_celltype",
-        help = "cell<TAB>cell_type TSV for the cell-type-level report \
-                (default: {from}.lineage_annot.membership.tsv from `faba lineage --markers`). \
-                Unassigned/unmatched cells stay in the contrast 'rest' as background but are \
-                not reported as a cell type. Errors if this explicit path is missing."
+        help = "cell<TAB>cell_type TSV for the cell-type-level report",
+        long_help = "cell<TAB>cell_type TSV for the cell-type-level report.\n\
+                     It defaults to {from}.lineage_annot.membership.tsv,\n\
+                     written by `faba lineage --markers`.\n\
+                     \n\
+                     Unassigned and unmatched cells stay in the contrast 'rest',\n\
+                     as background.\n\
+                     They are not reported as a cell type.\n\
+                     An explicit path that is missing is an error."
     )]
     pub celltype_annot: Option<Box<str>>,
 

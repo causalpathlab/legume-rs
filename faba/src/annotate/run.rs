@@ -106,35 +106,41 @@ pub struct AnnotateArgs {
         value_enum,
         help = "How markers become a call [default: chosen from {from}.gem.json]",
         long_help = "How the marker panel becomes a cell-type call.\n\n\
-            DEFAULT: chosen from the run itself, because the wrong statistic here does not \
-            error -- it produces a plausible wrong answer.\n\
-            Both producers write {from}.gem.json naming themselves; \
-            the model_type field says which one ran,\n\
-            so a prefix that cannot say what made it is reported rather than guessed at.\n\
+            DEFAULT: chosen from the run itself.\n\
+            The wrong statistic here does not error.\n\
+            It produces a plausible wrong answer instead.\n\
+            \n\
+            Both producers write {from}.gem.json naming themselves.\n\
+            The model_type field says which one ran.\n\
+            A prefix that cannot say what made it is reported,\n\
+            rather than guessed at.\n\
             Topic model -> `enrichment`, embedding run -> `projection`.\n\
-            Pass --mode to override; overriding to `projection` on a topic model warns \
-            but proceeds.\n\n\
+            Pass --mode to override.\n\
+            Overriding to `projection` on a topic model warns, then proceeds.\n\n\
             `projection` is for a `faba gem` EMBEDDING run.\n\
             It builds each type's centroid from its markers' co-embedded feature vectors\n\
             and hands every cell to the nearest one.\n\
             Reads {from}.feature_embedding.parquet + {from}.cell_embedding.parquet;\n\
             writes {out}.{track}.*\n\n\
             `enrichment` is for a `faba gem-encoder` / `gem-topic` TOPIC-MODEL run.\n\
-            It asks, per factor, whether a type's panel is over-represented at the top of that \
-            factor's gene ranking,\n\
-            then carries the surviving factor x type edges to cells through theta.\n\
-            Reads {from}.dictionary.parquet (log beta), .latent.parquet and .pb_latent.parquet \
-            (log theta), .pb_gene.parquet;\n\
-            writes {out}.enrichment.*\n\n\
+            It asks, per factor, whether a type's panel is over-represented\n\
+            at the top of that factor's gene ranking.\n\
+            Surviving factor x type edges are then carried to cells,\n\
+            through theta.\n\
+            \n\
+            Reads {from}.dictionary.parquet, which is log beta;\n\
+            .latent.parquet and .pb_latent.parquet, which are log theta;\n\
+            and .pb_gene.parquet.\n\
+            Writes {out}.enrichment.*\n\n\
             Do not use `projection` on a topic model.\n\
             Nearest-centroid forms the cell-gene inner product <z_c, rho_g>,\n\
             and for a topic model that is not a metric:\n\
             beta = softmax_g(b_g + <alpha_t, rho_g>) depends only on gene-to-gene DIFFERENCES,\n\
             so the per-gene bias b_g absorbs the level\n\
             and the absolute cell-gene direction is a gauge freedom the likelihood never pins.\n\
-            `enrichment` routes the call through beta and theta -- the two things a topic model \
-            actually estimates --\n\
-            and never forms that inner product.\n\n\
+            `enrichment` routes the call through beta and theta.\n\
+            Those are the two things a topic model actually estimates.\n\
+            It never forms that inner product.\n\n\
             `enrichment` takes --track spliced|nascent|both (NOT velocity):\n\
             `nascent` annotates the nascent program (dictionary_nascent + latent_nascent),\n\
             and reading it against `spliced` is the well-posed form of the velocity question."
@@ -380,8 +386,7 @@ pub struct AnnotateArgs {
         long,
         default_value_t = 0.0,
         value_name = "FRAC",
-        help = "Fail if under this fraction of the marker panel is on the embedding's \
-                feature axis (0 = report only)",
+        help = "Minimum marker-panel coverage of the feature axis; 0 = report only",
         long_help = "Refuse to annotate on a marker panel the embedding mostly never saw.\n\n\
             `faba gem` writes only its TRAINED feature rows,\n\
             so a marker that missed the `--n-hvg` cut is not down-weighted —\n\

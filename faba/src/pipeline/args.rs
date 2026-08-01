@@ -137,26 +137,34 @@ pub struct PipelineArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "Minimum cells per gene (gene filtering; 0 = off, matching \
-                Cell Ranger, which keeps every gene/feature)"
+        help = "Minimum cells per gene; 0 = off",
+        long_help = "Minimum cells per gene, for gene filtering.\n\
+                     0 turns it off, matching Cell Ranger,\n\
+                     which keeps every gene and feature."
     )]
     pub gene_min_cells: usize,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "Minimum UMI per gene (gene filtering; 0 = off, matching \
-                Cell Ranger, which keeps every gene/feature)"
+        help = "Minimum UMI per gene; 0 = off",
+        long_help = "Minimum UMI per gene, for gene filtering.\n\
+                     0 turns it off, matching Cell Ranger,\n\
+                     which keeps every gene and feature."
     )]
     pub gene_min_counts: usize,
 
     #[arg(
         long,
         default_value_t = 0,
-        help = "Minimum detected genes (nnz) per cell; cells below this are \
-                dropped from gene counts and every downstream modality. \
-                0 = off (default), so cell calling is pure Cell Ranger \
-                EmptyDrops/OrdMag with no extra min-genes floor"
+        help = "Minimum detected genes (nnz) per cell; 0 = off",
+        long_help = "Minimum detected genes, as nnz, per cell.\n\
+                     Cells below it are dropped from gene counts,\n\
+                     and from every downstream modality.\n\
+                     \n\
+                     0 is the default and turns it off.\n\
+                     Cell calling is then pure Cell Ranger EmptyDrops/OrdMag,\n\
+                     with no extra min-genes floor."
     )]
     pub cell_min_genes: usize,
 
@@ -169,10 +177,14 @@ pub struct PipelineArgs {
     #[arg(
         long,
         default_value = "",
-        help = "Gene biotype to quantify. Empty (default) keeps all biotypes. \
-                Pass a value to restrict: protein_coding, lncRNA, pseudogene. \
-                QC/cell-calling always uses ALL biotypes; only the quantified \
-                gene set (gene counts + ATOI/APA/m6A) is restricted to this type."
+        help = "Gene biotype to quantify; empty keeps all",
+        long_help = "Gene biotype to quantify.\n\
+                     Empty is the default, and keeps all biotypes.\n\
+                     Pass a value to restrict: protein_coding, lncRNA, pseudogene.\n\
+                     \n\
+                     QC and cell-calling always use ALL biotypes.\n\
+                     Only the quantified gene set is restricted.\n\
+                     That set is gene counts plus ATOI, APA and m6A."
     )]
     pub gene_type: Box<str>,
 
@@ -240,8 +252,11 @@ pub struct PipelineArgs {
         long = "edit-error-rate",
         alias = "error-rate",
         default_value_t = 0.01,
-        help = "Sequencing-error rate ε: the beta-binomial null mean the edited \
-                fraction is tested against (reference-anchored, no control sample)"
+        help = "Sequencing-error rate ε: the beta-binomial null mean",
+        long_help = "Sequencing-error rate ε.\n\
+                     It is the beta-binomial null mean.\n\
+                     The edited fraction is tested against it.\n\
+                     The test is reference-anchored, with no control sample."
     )]
     pub edit_error_rate: f64,
 
@@ -266,16 +281,21 @@ pub struct PipelineArgs {
     #[arg(
         long = "apa-max-sites",
         default_value_t = 20,
-        help = "Cap candidate poly-A sites per UTR for APA BIC selection \
-                (top-N by coverage; 0 = unlimited). Bounds EM cost on long 3'UTRs."
+        help = "Cap candidate poly-A sites per UTR; 0 = unlimited",
+        long_help = "Cap on candidate poly-A sites per UTR, for APA BIC selection.\n\
+                     Sites are ranked top-N by coverage; 0 is unlimited.\n\
+                     This bounds EM cost on long 3'UTRs."
     )]
     pub apa_max_sites: usize,
 
     #[arg(
         long = "apa-em-pdui",
         default_value_t = false,
-        help = "Use the full SCAPE EM for PDUI instead of the fast top-2 nearest-site \
-                assignment (slower; --mixture also forces the EM)"
+        help = "Use the full SCAPE EM for PDUI",
+        long_help = "Use the full SCAPE EM for PDUI.\n\
+                     The default is a fast top-2 nearest-site assignment.\n\
+                     The EM is slower.\n\
+                     --mixture also forces it."
     )]
     pub apa_em_pdui: bool,
 
@@ -362,12 +382,13 @@ pub struct PipelineArgs {
     #[arg(
         long = "mixture",
         default_value_t = false,
-        help = "Also produce the per-gene component-mixture `_{modality}_mixture` \
-                matrices (EM; slow). Off by default — only the gene-level \
-                `{gene}/{modality}/{channel}` counts are produced.",
-        long_help = "Also produce the per-gene component-mixture matrices (EM; slow).\n\
-                     Off by default — only the gene-level\n\
-                     `{gene}/{modality}/{channel}` counts are produced.\n\n\
+        help = "Also produce the per-gene component-mixture matrices",
+        long_help = "Also produce the per-gene component-mixture matrices.\n\
+                     They come from an EM fit, which is slow.\n\
+                     \n\
+                     This is off by default.\n\
+                     Only the gene-level `{gene}/{modality}/{channel}` counts\n\
+                     are produced then.\n\n\
                      For m6A / A-to-I this SKIPS the 1-D Gaussian mixture EM entirely when off.\n\
                      For APA the SCAPE poly-A fit always runs\n\
                      (PDUI needs it to identify proximal vs distal),\n\
