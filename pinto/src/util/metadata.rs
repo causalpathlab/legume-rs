@@ -380,7 +380,7 @@ pub fn create_prop_metadata(
         tag: "final".to_string(),
         level_index: 0,
         propensity: format!("{prefix}.propensity.parquet"),
-        link_community: Some(format!("{prefix}.edge_cluster.parquet")),
+        link_community: Some(format!("{prefix}.link_community.parquet")),
         gene_community: None,
         entropy_present: Some(true),
     }];
