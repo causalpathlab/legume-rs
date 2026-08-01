@@ -303,8 +303,9 @@ enum Commands {
                       A cell's propensity is its incident-edge fraction.\n\
                       That is the same definition `lc` and `dsvd` use.\n\
                       --edge-cluster-method picks the cut.\n\
-                      kmeans uses a fixed --n-edge-clusters.\n\
-                      leiden decides the count from --leiden-resolution.\n\n\
+                      leiden is the default, deciding the count\n\
+                      from --leiden-resolution.\n\
+                      kmeans instead uses a fixed --n-edge-clusters.\n\n\
                       Outputs:\n\
                       \x20 {out}.cell_embedding.parquet  cell × embedding_dim\n\
                       \x20 {out}.cell_bias.parquet       per-cell scalar\n\
