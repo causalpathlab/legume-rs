@@ -23,30 +23,34 @@ pub struct ToH5adArgs {
         short,
         long,
         help = "Output `.h5ad` file (default: <input stem>.h5ad)",
-        long_help = "Output AnnData h5ad path. `.h5ad` is appended if the name \
-                     has no such suffix. Defaults to the input file's stem \
-                     with a `.h5ad` extension."
+        long_help = "Output AnnData h5ad path.\n\
+                     `.h5ad` is appended when the name lacks that suffix.\n\
+                     It defaults to the input file's stem, plus `.h5ad`."
     )]
     pub output: Option<Box<str>>,
 
     #[arg(
         long,
         help = "Cell-metadata TSV to attach as `obs` columns",
-        long_help = "Optional (gzip ok) TSV whose first column is the cell key. \
-                     Keys are matched against the backend column names, with a \
-                     `barcode@donor` -> `barcode` fallback. Remaining columns \
-                     become `obs` columns; unmatched cells get `NA`. \
-                     Pair this with the `*.cell_metadata.tsv.gz` that `from-h5ad` \
-                     wrote to round-trip cell annotations."
+        long_help = "Optional TSV whose first column is the cell key; gzip is fine.\n\
+                     Keys match against the backend column names.\n\
+                     A `barcode@donor` -> `barcode` fallback applies.\n\
+                     \n\
+                     Remaining columns become `obs` columns.\n\
+                     Unmatched cells get `NA`.\n\
+                     \n\
+                     Pair this with the `*.cell_metadata.tsv.gz` that `from-h5ad`\n\
+                     wrote, to round-trip cell annotations."
     )]
     pub obs: Option<Box<str>>,
 
     #[arg(
         long,
         help = "Feature-metadata TSV to attach as `var` columns",
-        long_help = "Optional (gzip ok) TSV whose first column is the feature key \
-                     (matched against the backend row names). Remaining columns \
-                     become `var` columns; unmatched features get `NA`."
+        long_help = "Optional TSV whose first column is the feature key; gzip is fine.\n\
+                     Keys match against the backend row names.\n\
+                     Remaining columns become `var` columns.\n\
+                     Unmatched features get `NA`."
     )]
     pub var: Option<Box<str>>,
 }

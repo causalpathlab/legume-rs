@@ -571,13 +571,15 @@ pub struct QcArgs {
                      - MAD-outlier drops on detected features and total counts\n    \
                        (--qc-mad-on-genes / --qc-mad-on-counts, band --qc-mads).\n\
                      \n\
-                     The bimodal 2-means cut stays OFF unless --qc-auto-cutoff, so the\n\
-                     model / embedding still makes the real empty-vs-real call.\n\
+                     The bimodal 2-means cut stays OFF unless --qc-auto-cutoff.\n\
+                     So the model or embedding still makes the empty-vs-real call.\n\
                      \n\
-                     Outputs may therefore have FEWER ROWS than the input — join by the\n\
-                     cell/barcode name column, never by position. Use --qc-report to see\n\
-                     exactly what was dropped, or `--qc-mad-on-genes=false\n\
-                     --qc-mad-on-counts=false` for the older near-empty-floor-only gate."
+                     Outputs may therefore have FEWER ROWS than the input.\n\
+                     Join by the cell/barcode name column, never by position.\n\
+                     \n\
+                     Use --qc-report to see exactly what was dropped.\n\
+                     Pass `--qc-mad-on-genes=false --qc-mad-on-counts=false`\n\
+                     for the older near-empty-floor-only gate."
     )]
     pub no_qc: bool,
 
@@ -588,9 +590,10 @@ pub struct QcArgs {
     #[arg(
         long = "qc-min-cell-nnz",
         default_value_t = 2,
-        help = "Near-empty floor: cells with fewer detected features than this are",
-        long_help = "Near-empty floor: cells with fewer detected features than this\n\
-                     are dropped from the per-cell outputs (still kept in training)."
+        help = "Near-empty floor on a cell's detected-feature count",
+        long_help = "Near-empty floor on the detected-feature count.\n\
+                     Cells below it are dropped from the per-cell outputs.\n\
+                     They are still kept in training."
     )]
     pub qc_min_cell_nnz: usize,
 
@@ -598,18 +601,20 @@ pub struct QcArgs {
         long = "qc-min-counts",
         hide = true,
         default_value_t = 0.0,
-        help = "Hard floor on total counts per cell — cells below it are dropped",
-        long_help = "Hard floor on total counts per cell — cells below it are dropped\n\
-                     from training (0 disables)."
+        help = "Hard floor on total counts per cell",
+        long_help = "Hard floor on total counts per cell.\n\
+                     Cells below it are dropped from training.\n\
+                     0 disables the floor."
     )]
     pub qc_min_counts: f32,
 
     #[arg(
         long = "qc-mito-pattern",
         hide = true,
-        help = "Regex over feature names selecting mitochondrial genes (enables the",
-        long_help = "Regex over feature names selecting mitochondrial genes (enables\n\
-                     the mito-fraction outlier metric), e.g. `(?i)^MT-`."
+        help = "Regex over feature names selecting mitochondrial genes",
+        long_help = "Regex over feature names selecting mitochondrial genes.\n\
+                     It enables the mito-fraction outlier metric.\n\
+                     An example is `(?i)^MT-`."
     )]
     pub qc_mito_pattern: Option<String>,
 
@@ -629,19 +634,19 @@ pub struct QcArgs {
         long = "qc-feature-min-cells",
         hide = true,
         default_value_t = 0,
-        help = "Feature/row QC (off by default): DROP genes (rows) expressed in fewer",
-        long_help = "Feature/row QC (off by default): DROP genes (rows) expressed in\n\
-                     fewer than this many cells. Not applied by `bge` (cell-only\n\
-                     QC there)."
+        help = "Feature/row QC: drop genes expressed in too few cells",
+        long_help = "Feature/row QC; off by default.\n\
+                     It DROPS gene rows expressed in fewer than this many cells.\n\
+                     `bge` does not apply it, since QC there is cell-only."
     )]
     pub qc_feature_min_cells: usize,
 
     #[arg(
         long = "qc-report",
-        help = "Write a per-cell QC table (.tsv) of metrics + near_empty/train_keep",
-        long_help = "Write a per-cell QC table (.tsv) of metrics +\n\
-                     near_empty/train_keep flags, so you can see exactly which\n\
-                     cells were dropped."
+        help = "Write a per-cell QC table (.tsv)",
+        long_help = "Write a per-cell QC table, as .tsv.\n\
+                     It carries the metrics plus near_empty and train_keep flags.\n\
+                     You can then see exactly which cells were dropped."
     )]
     pub qc_report: Option<Box<str>>,
 
@@ -650,11 +655,14 @@ pub struct QcArgs {
         hide = true,
         default_value_t = false,
         help = "Print the per-cell nnz histogram + the (diagnostic) 2-means suggested cutoff",
-        long_help = "Print an ASCII histogram of the per-cell nnz distribution with the\n\
-                     suggested (2-means) cutoff marked — the same summary as\n\
-                     `data-beans squeeze --show-histogram`. Purely diagnostic: the cutoff\n\
-                     is shown, not applied (the upfront gate is the conservative\n\
-                     --qc-min-cell-nnz floor), useful for picking --qc-min-cell-nnz by hand."
+        long_help = "Print an ASCII histogram of the per-cell nnz distribution.\n\
+                     The suggested 2-means cutoff is marked.\n\
+                     It is the same summary as `data-beans squeeze --show-histogram`.\n\
+                     \n\
+                     This is purely diagnostic.\n\
+                     The cutoff is shown, not applied.\n\
+                     The upfront gate is the conservative --qc-min-cell-nnz floor.\n\
+                     Use the histogram to pick --qc-min-cell-nnz by hand."
     )]
     pub qc_histogram: bool,
 
@@ -666,10 +674,14 @@ pub struct QcArgs {
         long_help = "Drop cells whose detected-feature count falls outside\n\
                      `median +/- --qc-mads * MAD * 1.4826`.\n\
                      \n\
-                     ON by default. This and --qc-mad-on-counts were previously hardcoded\n\
-                     OFF with no way to enable them, which also made --qc-mads inert unless\n\
-                     --qc-mito-pattern happened to be set. Pass `--qc-mad-on-genes=false`\n\
-                     for the old conservative-floor behaviour (near-empty nnz gate only)."
+                     ON by default.\n\
+                     This and --qc-mad-on-counts were previously hardcoded OFF,\n\
+                     with no way to enable them.\n\
+                     That also made --qc-mads inert, unless --qc-mito-pattern\n\
+                     happened to be set.\n\
+                     \n\
+                     Pass `--qc-mad-on-genes=false` for the old conservative-floor\n\
+                     behaviour, which is the near-empty nnz gate only."
     )]
     pub qc_mad_on_genes: bool,
 
@@ -689,12 +701,14 @@ pub struct QcArgs {
         hide = true,
         default_value_t = false,
         help = "Apply the bimodal 2-means cell-calling cutoff (aggressive upfront cut)",
-        long_help = "Apply the 2-means bimodal cutoff on the per-cell nnz distribution as a\n\
-                     hard cell call, rather than only reporting it (--qc-histogram).\n\
+        long_help = "Apply the 2-means bimodal cutoff as a hard cell call.\n\
+                     It runs on the per-cell nnz distribution.\n\
+                     Without this flag it is only reported, via --qc-histogram.\n\
                      \n\
-                     OFF by default: the conservative near-empty floor plus the model's own\n\
-                     empty-call is the intended gate. This flag was referenced in the docs\n\
-                     before it existed."
+                     OFF by default.\n\
+                     The intended gate is the conservative near-empty floor,\n\
+                     plus the model's own empty-call.\n\
+                     This flag was referenced in the docs before it existed."
     )]
     pub qc_auto_cutoff: bool,
 }
