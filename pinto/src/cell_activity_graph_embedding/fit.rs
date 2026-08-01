@@ -48,9 +48,7 @@
 //! two are alternatives, not complements — `feature_posterior_mean.parquet`
 //! ships `E[z*beta]` for downstream use.
 
-use crate::cell_activity_graph_embedding::args::{
-    CellActivityGraphEmbeddingArgs, EdgeClusterMethod,
-};
+use crate::cell_activity_graph_embedding::args::CellActivityGraphEmbeddingArgs;
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
 };
@@ -60,7 +58,7 @@ use crate::cell_activity_graph_embedding::pair_projection::{
     project_pairs, PairBatchDivisor, PairLatent, PairProjectionArgs, ProjectionArgs,
 };
 use crate::link_community::profiles::{
-    compute_propensity_and_gene_community_stat, EdgeClustering, PropensityReportConfig,
+    compute_propensity_and_gene_community_stat, PropensityReportConfig,
 };
 use crate::util::cell_pairs::SrtCellPairs;
 use crate::util::common::*;
@@ -882,17 +880,7 @@ pub fn fit_cell_activity_graph_embedding(
     // `embedding_dim` interaction regimes, so the graph decides the count and
     // `n_edge_clusters` is only a target (or nothing, when left unset). Under
     // k-means the requested count IS the count.
-    let clustering = match args.edge_cluster_method {
-        EdgeClusterMethod::Kmeans => EdgeClustering::Kmeans {
-            n_clusters: args.n_edge_clusters.unwrap_or(args.embedding_dim),
-        },
-        EdgeClusterMethod::Leiden => EdgeClustering::Leiden {
-            knn: args.leiden_knn,
-            resolution: args.leiden_resolution,
-            target: args.n_edge_clusters,
-            seed: c.seed,
-        },
-    };
+    let clustering = args.edge_clustering.resolve(args.embedding_dim, c.seed);
     let n_edge_clusters = compute_propensity_and_gene_community_stat(
         &proj_kn,
         &edges_usize,
