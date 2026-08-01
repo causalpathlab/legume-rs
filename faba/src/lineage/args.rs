@@ -140,8 +140,7 @@ pub struct LineageArgs {
         value_enum,
         default_value_t = ThetaFrom::Auto,
         help_heading = "Input/output",
-        help = "Which table supplies θ: auto (latent on a topic run, else \
-                cell-embedding), cell-embedding, or latent",
+        help = "Which table supplies θ: auto, cell-embedding, or latent",
         long_help = "Which per-cell table supplies θ for the fit AND the layout.\n\n\
             cell-embedding — {from}.cell_embedding.parquet + {from}.velocity.parquet (H space).\n\
             latent         — {from}.latent.parquet (log θ, exponentiated to the simplex)\n\
@@ -164,8 +163,7 @@ pub struct LineageArgs {
         value_enum,
         default_value_t = LatentGeometry::Auto,
         help_heading = "Centroids & MST",
-        help = "Metric for the fit AND layout: auto (hellinger on a simplex, else \
-                cosine), cosine, euclidean, or hellinger",
+        help = "Metric for fit and layout: auto, cosine, euclidean or hellinger",
         long_help = "The metric θ is fitted and laid out in.\n\n\
             cosine    — L2-normalize rows. `faba gem` writes cell_embedding RAW,\n\
             .           with its norm carrying library size, and its own docs say to use\n\
@@ -258,29 +256,41 @@ pub struct LineageArgs {
         long,
         hide_short_help = true,
         help_heading = "Velocity direction & forest",
-        help = "Forest granularity τ_root: virtual no-parent weight; higher ⇒ more trees. \
-                Default = median selected arc weight."
+        help = "Forest granularity τ_root: the virtual no-parent weight",
+        long_help = "Forest granularity τ_root.\n\
+                     It is the virtual no-parent weight.\n\
+                     Higher values give more trees.\n\
+                     The default is the median selected arc weight."
     )]
     pub root_affinity: Option<f32>,
 
     #[arg(
         long = "root-type",
         help_heading = "Root selection",
-        help = "Root the trajectory at the highest-confidence node of this cell type \
-                (needs --markers), e.g. `--root-type HSC_MPP`. Marker-grounded and robust \
-                to unreliable velocity; overrides --root-from-gem / velocity but is itself \
-                overridden by --root-node / --root-cell."
+        help = "Root the trajectory at this cell type's best node",
+        long_help = "Root the trajectory at a cell type's highest-confidence node.\n\
+                     This needs --markers, as in `--root-type HSC_MPP`.\n\
+                     \n\
+                     It is marker-grounded, so it is robust to unreliable velocity.\n\
+                     It overrides --root-from-gem and the velocity pick.\n\
+                     --root-node and --root-cell override it in turn."
     )]
     pub root_type: Option<Box<str>>,
 
     #[arg(
         long = "root-from-gem",
         help_heading = "Root selection",
-        help = "Anchor the root at gem's velocity-DAG source: the modal MST node of the \
-                low-τ region in {from}.dag_pseudotime.parquet. More robust than the per-edge \
-                flux pick, while lineage still fits the curves. Overridden by \
-                --root-node / --root-cell / --root-type; falls back to the flux root if the \
-                file is absent or gem's DAG has no terminal structure (lineage_qc.json)."
+        help = "Anchor the root at gem's velocity-DAG source",
+        long_help = "Anchor the root at gem's velocity-DAG source.\n\
+                     That is the modal MST node of the low-τ region,\n\
+                     in {from}.dag_pseudotime.parquet.\n\
+                     It is more robust than the per-edge flux pick,\n\
+                     and lineage still fits the curves.\n\
+                     \n\
+                     --root-node, --root-cell and --root-type override it.\n\
+                     It falls back to the flux root when the file is absent,\n\
+                     or when gem's DAG has no terminal structure;\n\
+                     see lineage_qc.json."
     )]
     pub root_from_gem: bool,
 
@@ -409,8 +419,10 @@ pub struct LineageArgs {
         default_value_t = 0.5,
         hide_short_help = true,
         help_heading = "Marker annotation",
-        help = "[--markers] Minimum fraction of resamples the top label must win for \
-                a node to be called at all (ignored under --no-bootstrap-markers)"
+        help = "[--markers] Minimum resample support for a node call",
+        long_help = "Minimum fraction of resamples the top label must win.\n\
+                     Below it, a node is not called at all.\n\
+                     --no-bootstrap-markers ignores this."
     )]
     pub marker_min_support: f32,
 
@@ -466,16 +478,23 @@ pub struct LineageArgs {
         long = "cluster-space",
         value_enum,
         default_value_t = LayoutSpace::Identity,
-        help = "Feature space for the k-means grouping that drives annotation: identity (θ, default), \
-                nascent (θ+δ), or concat ([θ|δ] — velocity separates committing progenitors θ alone cannot). \
-                Marker scoring stays in θ regardless.",
-        long_help = "Which cell features the annotation k-means groups on. `identity` (θ, the spliced \
-                     state) is the default — cell TYPE is an identity question. `concat` ([θ|δ], each \
-                     channel L2-normalised) additionally splits cells by their VELOCITY direction, so two \
-                     transcriptionally-central cells heading to different fates land in different clusters — \
-                     useful on a progenitor-enriched (e.g. CD34+) sample where θ alone can't resolve the \
-                     committing structure. `nascent` (θ+δ) blends the two. The trajectory centroids and \
-                     marker scoring are always recomputed in raw θ, so only the GROUPING changes."
+        help = "Feature space for the annotation k-means grouping",
+        long_help = "Which cell features the annotation k-means groups on.\n\
+                     \n\
+                     `identity` is θ, the spliced state, and the default.\n\
+                     Cell TYPE is an identity question.\n\
+                     \n\
+                     `concat` is [θ|δ], each channel L2-normalised.\n\
+                     It additionally splits cells by VELOCITY direction.\n\
+                     Two transcriptionally-central cells heading to different\n\
+                     fates then land in different clusters.\n\
+                     That helps on a progenitor-enriched sample, such as CD34+,\n\
+                     where θ alone cannot resolve the committing structure.\n\
+                     \n\
+                     `nascent` is θ+δ, and blends the two.\n\
+                     \n\
+                     Trajectory centroids and marker scoring always recompute\n\
+                     in raw θ, so only the GROUPING changes."
     )]
     pub cluster_space: LayoutSpace,
 
@@ -484,8 +503,10 @@ pub struct LineageArgs {
         value_enum,
         default_value_t = VelocityLayout::Auto,
         help_heading = "PHATE layout",
-        help = "Warp the PHATE layout along confident velocity directions: auto (when \
-                enough edges are oriented), on, or off"
+        help = "Warp the PHATE layout along confident velocity directions",
+        long_help = "Warp the PHATE layout along confident velocity directions.\n\
+                     `auto` warps when enough edges are oriented.\n\
+                     `on` and `off` force the choice."
     )]
     pub velocity_aware_layout: VelocityLayout,
 
@@ -512,9 +533,12 @@ pub struct LineageArgs {
         default_value_t = 2000,
         hide_short_help = true,
         help_heading = "PHATE layout",
-        help = "PHATE landmark budget: above this many cells, PHATE runs on a \
-                landmark subsample + Nyström lift (scales linearly). Raise it \
-                if the layout looks thin/stringy on very large data."
+        help = "PHATE landmark budget",
+        long_help = "PHATE landmark budget.\n\
+                     Above this many cells, PHATE runs on a landmark subsample,\n\
+                     then lifts by Nyström, which scales linearly.\n\
+                     Raise it if the layout looks thin or stringy on very\n\
+                     large data."
     )]
     pub phate_landmarks: usize,
 }
