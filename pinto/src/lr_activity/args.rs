@@ -11,11 +11,13 @@ pub struct SrtLrActivityArgs {
         long,
         required = true,
         help = "Prefix of a prior `pinto lc` run",
-        long_help = "Prefix of a prior `pinto lc` run. Reads edge→community assignments\n\
-                     from {prefix}.link_community.parquet and cell-pair metadata\n\
-                     (including per-edge batch labels when present) from\n\
-                     {prefix}.coord_pairs.parquet. Row order in both files must\n\
-                     match — they are joined by position."
+        long_help = "Prefix of a prior `pinto lc` run.\n\
+                     Edge-to-community assignments are read from\n\
+                     {prefix}.link_community.parquet.\n\
+                     Cell-pair metadata comes from {prefix}.coord_pairs.parquet,\n\
+                     including per-edge batch labels when present.\n\
+                     Row order must match across both files.\n\
+                     They are joined by position."
     )]
     pub lc_prefix: Box<str>,
 
@@ -23,11 +25,13 @@ pub struct SrtLrActivityArgs {
         long,
         required = true,
         help = "Two-column TSV of directional ligand→receptor pairs",
-        long_help = "Directional ligand→receptor pair file. One pair per line, with\n\
-                     two whitespace/tab/comma-separated columns: ligand gene,\n\
-                     receptor gene. Delimiter auto-detected (.csv → comma, else tab).\n\
-                     Gene names must match row names in the expression data; pairs\n\
-                     referencing missing genes are dropped with a warning."
+        long_help = "Directional ligand→receptor pair file, one pair per line.\n\
+                     Each line holds two columns: ligand gene, then receptor gene.\n\
+                     They may be separated by whitespace, tab or comma.\n\
+                     The delimiter is auto-detected: comma for .csv, else tab.\n\
+                     \n\
+                     Gene names must match row names in the expression data.\n\
+                     Pairs naming a missing gene are dropped with a warning."
     )]
     pub lr_pairs: Box<str>,
 
@@ -35,13 +39,14 @@ pub struct SrtLrActivityArgs {
         long,
         default_value_t = 10,
         help = "Random-projection dimension for propensity binary-sort",
-        long_help = "Number of random-projection axes used to assign each cell to a\n\
-                     propensity bin via binary sort. Each batch gets up to 2^d bins;\n\
-                     pseudobulk samples are (batch × propensity-bin) combinations.\n\
-                     Defaults to 10 (≈1024 bins per batch, typical practice). Larger\n\
-                     d → finer pseudobulk resolution and more permutation power, at\n\
-                     the cost of fewer cells per pseudobulk; d=12 (~4096 bins) starts\n\
-                     to make per-sample pseudobulks too sparse on Visium-scale data."
+        long_help = "Random-projection axes for binning cells by propensity.\n\
+                     A binary sort over d axes gives each batch up to 2^d bins.\n\
+                     Pseudobulk samples are (batch × propensity-bin) pairs.\n\
+                     \n\
+                     The default of 10 gives ≈1024 bins per batch.\n\
+                     Larger d buys finer resolution and more permutation power.\n\
+                     It also leaves fewer cells per pseudobulk.\n\
+                     At d=12, roughly 4096 bins, Visium-scale data turns sparse."
     )]
     pub propensity_dim: usize,
 
@@ -56,16 +61,16 @@ pub struct SrtLrActivityArgs {
         long,
         default_value_t = 4,
         help = "Number of top propensity bits to stratify the shuffle by (0 = unstratified)",
-        long_help = "Sample permutation reshuffles L only within sample groups\n\
-                     sharing the top --shuffle-stratify-dim bits of the propensity\n\
-                     binary code, preserving the cell-population marginal across\n\
-                     permutations. Without it, free shuffles across populations\n\
-                     pick up cell-type-marginal correlations and become\n\
-                     anti-conservative.\n\
+        long_help = "Permutation reshuffles L within sample groups only.\n\
+                     A group shares the top s bits of the propensity binary code.\n\
+                     That preserves the cell-population marginal across permutations.\n\
+                     Free shuffles across populations behave differently.\n\
+                     They pick up cell-type marginals, and turn anti-conservative.\n\
                      \n\
-                     Default 4 → 16 stratification buckets, holding 2^(d−4) samples\n\
-                     each (e.g. ~64 samples/bucket at d=10). Pick s ≤ d − 3 so each\n\
-                     bucket retains ≥ ~8 samples. 0 disables stratification."
+                     The default of 4 gives 16 stratification buckets.\n\
+                     Each holds 2^(d−4) samples, so about 64 at d=10.\n\
+                     Pick s ≤ d − 3 to keep at least ~8 samples per bucket.\n\
+                     Pass 0 to disable stratification."
     )]
     pub shuffle_stratify_dim: usize,
 
@@ -80,8 +85,8 @@ pub struct SrtLrActivityArgs {
         long,
         default_value_t = 100,
         help = "Skip communities with fewer than this many edges",
-        long_help = "Skip communities with fewer than this many edges; sparse\n\
-                     communities can't calibrate the null distribution reliably."
+        long_help = "Skip communities holding fewer than this many edges.\n\
+                     A sparse community cannot calibrate the null reliably."
     )]
     pub min_edges_per_community: usize,
 
@@ -89,10 +94,11 @@ pub struct SrtLrActivityArgs {
         long,
         default_value = "_",
         help = "Delimiter used to split compound gene row names (e.g. `_` for ENSG..._SYMBOL)",
-        long_help = "Delimiter used to alias compound gene row names. Pass `_` (default)\n\
-                     to match `ENSG00000105329_TGFB1` by either the Ensembl id or the\n\
-                     symbol. Pass an empty string or a non-present character to disable\n\
-                     aliasing and require exact full-name matches."
+        long_help = "Delimiter used to alias compound gene row names.\n\
+                     The default `_` aliases `ENSG00000105329_TGFB1`.\n\
+                     Either the Ensembl id or the symbol then matches it.\n\
+                     Pass an empty string, or a character that never occurs,\n\
+                     to disable aliasing and demand exact full-name matches."
     )]
     pub gene_delimiter: Option<char>,
 
@@ -107,8 +113,8 @@ pub struct SrtLrActivityArgs {
         long,
         default_value_t = true,
         help = "Also write a JSON sidecar with per-stratum edge lists for sig. pairs",
-        long_help = "Also write a JSON sidecar with per-stratum participating edge\n\
-                     lists for significant pairs."
+        long_help = "Also write a JSON sidecar of participating edge lists.\n\
+                     They are recorded per stratum, for significant pairs."
     )]
     pub emit_json: bool,
 
@@ -116,8 +122,8 @@ pub struct SrtLrActivityArgs {
         long,
         default_value_t = 0.05,
         help = "Westfall-Young FWER cutoff for edge participation in the JSON sidecar",
-        long_help = "Westfall-Young FWER cutoff for including a pair's edge\n\
-                     participation in the JSON sidecar."
+        long_help = "Westfall-Young FWER cutoff for the JSON sidecar.\n\
+                     A pair's edge participation is included below it."
     )]
     pub json_fwer_threshold: f32,
 }

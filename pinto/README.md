@@ -73,7 +73,7 @@ pinto prop -z out.latent.parquet -e out.coord_pairs.parquet -o prop
 ```
 
 **Outputs:** `{out}.propensity.parquet` (with `entropy` column),
-`{out}.edge_cluster.parquet`, `{out}.metadata.json`, and — when
+`{out}.link_community.parquet`, `{out}.metadata.json`, and — when
 expression data is provided — `{out}.genes.parquet`.
 
 ### `lr-activity` — directional ligand→receptor test per community

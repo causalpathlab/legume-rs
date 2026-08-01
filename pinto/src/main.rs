@@ -51,8 +51,9 @@ fn print_logo() {
 #[command(
     version,
     about = "PINTO - Proximity-based Interaction Network for Tissue Organization",
-    long_about = "PINTO discovers cell-cell interaction patterns from spatial\n\
-                  transcriptomics via link community detection on cell-pair graphs.\n\n\
+    long_about = "PINTO discovers cell-cell interaction patterns.\n\
+                  It reads spatial transcriptomics.\n\
+                  It detects link communities on cell-pair graphs.\n\n\
                   SUBCOMMANDS:\n\n\
                   \x20 lc    Link community model (recommended)\n\
                   \x20       Assigns each cell-cell edge to a community via collapsed\n\
@@ -96,8 +97,8 @@ enum Commands {
     #[command(
         alias = "dsvd",
         about = "Gene-level shared/difference analysis by SVD",
-        long_about = "Gene-level cell-cell interaction analysis by SVD with\n\
-                      shared/difference channels.\n\n\
+        long_about = "Gene-level cell-cell interaction analysis by SVD.\n\
+                      It uses shared and difference channels.\n\n\
                       Model:\n\
                       \x20 For each cell pair e=(i,j) and gene g:\n\
                       \x20   sigma_e^g = log1p(x_ig) + log1p(x_jg)    shared\n\
@@ -147,9 +148,9 @@ enum Commands {
         about = "Estimate vertex propensity from edge clusters (standalone)",
         long_about = "Estimate vertex (cell) propensity scores from edge\n\
                       (cell-pair) cluster assignments.\n\n\
-                      NOTE: dsvd now produces propensity and edge cluster\n\
-                      outputs inline. Use this subcommand only when you need\n\
-                      a different K or separate expression data.\n\n\
+                      NOTE: dsvd produces propensity and edge outputs inline.\n\
+                      Use this subcommand only for a different K,\n\
+                      or for separate expression data.\n\n\
                       Model:\n\
                       \x20 Given latent codes z_e [E x T] from delta-svd:\n\
                       \x20   c_e = argmin_k ||z_e - centroid_k||  K-means cluster\n\
@@ -174,7 +175,7 @@ enum Commands {
                       - {out}.propensity.parquet: per-vertex propensity (N x K)\n\
                       \x20 Columns: C0 .. C{K-1}, cluster (argmax),\n\
                       \x20 entropy (Shannon, nats), plus optional coord trailer.\n\
-                      - {out}.edge_cluster.parquet: edge cluster assignments\n\
+                      - {out}.link_community.parquet: per-edge community labels\n\
                       - {out}.genes.parquet: cluster-specific gene expression (when expr_data_files provided).\n\
                       \x20 Housekeeping-adjusted by default (row-scaled by 1/(bg[g]+ε));\n\
                       \x20 pass --no-adjust-housekeeping for raw rates\n\
@@ -187,8 +188,9 @@ enum Commands {
         alias = "lc",
         about = "Link community model via collapsed Gibbs sampling",
         long_about = "Link community detection for spatial transcriptomics.\n\n\
-                      Assigns each cell-cell edge to one of K communities based on\n\
-                      per-edge expression profiles, then derives per-cell soft membership.\n\n\
+                      Each cell-cell edge is assigned to one of K communities.\n\
+                      The assignment reads per-edge expression profiles.\n\
+                      Per-cell soft membership follows from those labels.\n\n\
                       QUICK START:\n\n\
                       \x20 # Typical spatial run (10x Visium):\n\
                       \x20 pinto lc data.h5 -c tissue_positions.csv -o out\n\n\
@@ -273,8 +275,8 @@ enum Commands {
                       cage visits one gene at a time.\n\
                       Each gene defines a per-cell activity vector.\n\
                       That vector gates a shared multi-scale cell-cell hierarchy.\n\n\
-                      A per-gene per-dim selection is SAMPLED by block Gibbs\n\
-                      against a pseudobulk Poisson.\n\
+                      A per-gene per-dim selection is SAMPLED by block Gibbs.\n\
+                      It runs against a pseudobulk Poisson.\n\
                       The resulting inclusion probabilities become DROP RATES.\n\
                       A fresh z ~ Bern(pip) is drawn each epoch.\n\
                       Every epoch therefore trains a different sub-network.\n\
@@ -291,8 +293,8 @@ enum Commands {
                       senna bge and faba gem do the same.\n\
                       Every gene is trained and present in every output table.\n\
                       Use --genes-per-epoch to cap per-epoch cost instead.\n\n\
-                      After training, every CELL PAIR is projected onto the\n\
-                      frozen gene embedding.\n\
+                      After training, every CELL PAIR is projected.\n\
+                      The target is the frozen gene embedding.\n\
                       Its pooled counts x_gu + x_gv are fit by Poisson MAP.\n\
                       That gives a per-pair latent e_uv.\n\
                       The solve is rayon-parallel, one D+1 problem per pair,\n\
@@ -324,32 +326,39 @@ enum Commands {
     #[command(
         visible_alias = "cage-annotate",
         about = "Marker-set cell-type annotation by projection (any embedding run)",
-        long_about = "Firm cell-type annotation via the shared term-ORA core\n\
-                      (the embedding-grounded twin of `senna annotate-by-projection`\n\
-                      and `faba annotate`): embed each marker-defined type as the\n\
-                      IDF-weighted centroid of its marker feature embeddings, hard-\n\
-                      assign every cell to its nearest centroid, prune distance\n\
-                      outliers, Leiden-cluster the cells, then test each cluster ×\n\
-                      term for hypergeometric over-representation (permutation-\n\
-                      calibrated). Optional TreeBH Cell-Ontology calling with --obo.\n\n\
-                      Reads `{prefix}.feature_embedding.parquet` +\n\
-                      `{prefix}.cell_embedding.parquet` from any pinto embedding run\n\
-                      (`cage`, or `lc-etm` via its SIMBA co-embedding). Point\n\
-                      --feature-embedding / --cell-embedding at explicit paths to\n\
-                      annotate anything else.\n\n\
-                      Outputs the shared per-cell contract at\n\
-                      {out}.annot.{parquet,membership.tsv,argmax.tsv} plus the\n\
-                      cluster × term p/q/Q matrices."
+        long_about = "Firm cell-type annotation via the shared term-ORA core.\n\
+                      This is the embedding-grounded twin of\n\
+                      `senna annotate-by-projection` and `faba annotate`.\n\n\
+                      Each marker-defined type is embedded as a centroid.\n\
+                      That centroid is an IDF-weighted mean.\n\
+                      It averages the type's marker feature embeddings.\n\
+                      Every cell is hard-assigned to its nearest centroid.\n\
+                      Distance outliers are then pruned.\n\
+                      The cells are Leiden-clustered.\n\
+                      Each cluster × term is then tested.\n\
+                      The test is hypergeometric over-representation,\n\
+                      permutation-calibrated.\n\
+                      --obo adds optional TreeBH Cell-Ontology calling.\n\n\
+                      Inputs are `{prefix}.feature_embedding.parquet` and\n\
+                      `{prefix}.cell_embedding.parquet`.\n\
+                      Any pinto embedding run supplies them: `cage`,\n\
+                      or `lc-etm` via its SIMBA co-embedding.\n\
+                      To annotate anything else, point\n\
+                      --feature-embedding and --cell-embedding at explicit paths.\n\n\
+                      Outputs follow the shared per-cell contract:\n\
+                      {out}.annot.{parquet,membership.tsv,argmax.tsv}.\n\
+                      The cluster × term p/q/Q matrices ship alongside."
     )]
     Annotate(AnnotateArgs),
 
     #[command(
         about = "Link community via embedded topic model (indexed VAE)",
-        long_about = "Embedding-based link community detection: each cell-cell\n\
-                      edge e = (i, j) is treated as a 'document' with token\n\
-                      counts y_e = x_i + x_j, then fit as an indexed topic\n\
-                      ETM (Dieng et al., 2020) using\n\
-                      `candle_util::vae::masked_topic`.\n\n\
+        long_about = "Embedding-based link community detection.\n\
+                      Each cell-cell edge e = (i, j) is a 'document'.\n\
+                      Its token counts are y_e = x_i + x_j.\n\
+                      Those are fit as an indexed topic ETM,\n\
+                      after Dieng et al., 2020.\n\
+                      The implementation is `candle_util::vae::masked_topic`.\n\n\
                       MODEL:\n\n\
                       \x20 π_e   = encoder(top-K of y_e)         ∈ Δ^K\n\
                       \x20 β     = softmax_g(α · ρᵀ)             [G × K]\n\
@@ -357,9 +366,9 @@ enum Commands {
                       \x20           Jean importance correction over the per-\n\
                       \x20           batch gene union; the dense [K, D] is\n\
                       \x20           never materialised).\n\n\
-                      The K topics are the link communities; β is the\n\
-                      community→gene dictionary; per-cell propensity is the\n\
-                      mass-preserving soft aggregation\n\
+                      The K topics are the link communities.\n\
+                      β is the community→gene dictionary.\n\
+                      Per-cell propensity is a mass-preserving aggregation:\n\
                       \x20 propensity[i, k] = (1/deg(i)) · Σ_{e ∋ i} π_e[k].\n\n\
                       TRAINING (--train-mode):\n\n\
                       \x20 masked (default) — hold out a fraction of each\n\
@@ -389,10 +398,10 @@ enum Commands {
     #[command(
         alias = "p",
         about = "Plot spatial scatter from pinto lc/dsvd/prop outputs",
-        long_about = "Render publication-quality PDFs (+ SVG/PNG) from pinto\n\
-                      outputs. Works on `pinto lc`, `pinto dsvd`, and\n\
-                      `pinto prop` runs. Defaults to flat-top hexagon markers\n\
-                      that tile tightly; size adapts to plot density.\n\n\
+        long_about = "Render publication-quality PDFs, and SVG or PNG.\n\
+                      It reads outputs from lc, dsvd, prop and cage.\n\
+                      Markers default to tightly tiling flat-top hexagons.\n\
+                      Their size adapts to plot density.\n\n\
                       INPUT (--from):\n\n\
                       \x20 Pass either a `{prefix}.pinto.json` (preferred —\n\
                       \x20 carries level list, dict-merge presence, and any lr_activity\n\
@@ -439,8 +448,9 @@ enum Commands {
                       \x20            --lr-hull-min-cells, --no-lr-hulls,\n\
                       \x20            --no-lr-overlay, --lr-coexpr-bins,\n\
                       \x20            --lr-activity-json (override path).\n\n\
-                      Levels: `final`, `L0..Ln` (V-cycle), `draft`. Cores: one\n\
-                      per batch label (read from coord_pairs.parquet).\n\n\
+                      Levels are `final`, `L0..Ln` and `draft`.\n\
+                      There is one core per batch label.\n\
+                      Batch labels are read from coord_pairs.parquet.\n\n\
                       Outlier handling is robust by default: coordinate bounds,\n\
                       color scales, and size scales all use percentile clipping\n\
                       (see --coord-clip, --expr-clip).\n\n\
@@ -452,9 +462,9 @@ enum Commands {
     #[command(
         aliases = ["lra", "test-lr"],
         about = "Posthoc directional ligand→receptor activity test per link community",
-        long_about = "Tests whether a user-supplied directional ligand→receptor list shows\n\
-                      coherent activity within each link community from a prior `pinto lc`\n\
-                      run.\n\n\
+        long_about = "Tests a user-supplied directional ligand→receptor list.\n\
+                      It asks whether that list acts coherently.\n\
+                      Coherence is judged per community of a prior lc run.\n\n\
                       DESIGN:\n\
                       \x20 1. Cells are collapsed into pseudobulk samples =\n\
                       \x20    (batch × propensity-bin), where the propensity bin is the\n\

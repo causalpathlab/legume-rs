@@ -138,14 +138,13 @@ pub struct CellActivityGraphEmbeddingArgs {
                      Deliberately too few to converge a posterior on its own.\n\
                      A refresh is one cheap step in a long sequence.\n\
                      The chain warm-starts from the previous round's state.\n\
-                     What makes the selection good is many rounds against an\n\
-                     embedding that keeps moving.\n\
+                     Many rounds against a moving embedding make it good.\n\
                      Running any single round to convergence does not.\n\
                      \n\
                      10 sweeps means 5 kept.\n\
                      That is only sane because the PIP is Rao-Blackwellized.\n\
-                     Each kept sweep contributes the ANALYTIC inclusion\n\
-                     probability rather than one 0/1 draw.\n\
+                     Each kept sweep contributes an ANALYTIC probability.\n\
+                     That beats contributing one 0/1 draw.\n\
                      So 5 sweeps do not pin the estimate to a 1/5 grid.\n\
                      Raising this buys precision per round.\n\
                      Spending the same budget on more epochs is usually better."
@@ -161,8 +160,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      \n\
                      This round only has to BREAK IN.\n\
                      It gets the chain off its initialization and somewhere sane.\n\
-                     It is not asked to converge, so it carries no more sweeps\n\
-                     than a refresh does.\n\
+                     It is not asked to converge.\n\
+                     So it carries no more sweeps than a refresh does.\n\
                      The SVD basis it sees is not the embedding the model ships.\n\
                      A precise fit here would answer the wrong question precisely.\n\
                      The refreshes against the live embedding do the real work.\n\
@@ -175,8 +174,8 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         help = "Skip the degree-corrected Poisson refinement of the coarsening levels",
-        long_help = "By default each coarsening level gets a second-opinion\n\
-                     refinement on RAW counts (degree-corrected Poisson).\n\
+        long_help = "Each coarsening level gets a second-opinion refinement.\n\
+                     It runs on RAW counts, degree-corrected Poisson.\n\
                      It is the same pass `pinto lc` runs.\n\
                      Without it, levels are cut on cosine-of-projection alone,\n\
                      which ignores depth and over-dispersion in the counts.\n\
@@ -204,8 +203,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      A high value here is a ceiling, not a fixed cost.\n\
                      \n\
                      Pair with --genes-per-epoch to cap per-epoch cost.\n\
-                     Pair with --selection-refresh-epochs to keep the sampler\n\
-                     off the critical path."
+                     Pair with --selection-refresh-epochs as well.\n\
+                     That keeps the sampler off the critical path."
     )]
     pub epochs: usize,
 
@@ -214,8 +213,8 @@ pub struct CellActivityGraphEmbeddingArgs {
         default_value_t = 64,
         help = "Genes per outer parallel sampling chunk",
         long_help = "The outer loop samples this many genes in parallel via rayon.\n\
-                     Forward and backward then run serially, because candle Var\n\
-                     is not parallel-safe.\n\
+                     Forward and backward then run serially.\n\
+                     candle Var is not parallel-safe.\n\
                      The default is sized for a laptop.\n\
                      Raise it if you have many cores."
     )]
@@ -259,7 +258,7 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "Exponent on within-gene positive-edge weights a_g[u]·a_g[v]",
         long_help = "Stage-2 coverage exponent, one axis down from bge's alpha_pb.\n\
                      Positive edges within a gene are drawn with probability\n\
-                     proportional to (a_g[u]·a_g[v])^activity-alpha.\n\
+                     ∝ (a_g[u]·a_g[v])^activity-alpha.\n\
                      The default of 1.0 keeps the activity-proportional draw.\n\
                      0.0 makes every active edge of a gene equally likely,\n\
                      so no high-activity hub pair dominates that gene."
@@ -269,8 +268,8 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         help = "Disable NB-Fisher per-gene precision weighting of the loss",
-        long_help = "By default each gene's contribution to the contrastive loss\n\
-                     is down-weighted by its NB Fisher-info weight w_g ∈ (0,1].\n\
+        long_help = "Each gene's contribution to the loss is down-weighted.\n\
+                     The weight is its NB Fisher-info w_g ∈ (0,1].\n\
                      High-mean, high-dispersion housekeeping genes go toward 0.\n\
                      Informative low-mean genes go toward 1.\n\
                      This matches `pinto lc` and `senna bge`.\n\
@@ -283,17 +282,18 @@ pub struct CellActivityGraphEmbeddingArgs {
         default_value_t = 0,
         help = "Genes visited per epoch; 0 = the whole axis",
         long_help = "Cost lever.\n\
-                     cage walks the gene axis once per epoch, so runtime is\n\
-                     linear in the number of genes.\n\
+                     cage walks the gene axis once per epoch.\n\
+                     Runtime is therefore linear in the gene count.\n\
                      This caps how many are VISITED per epoch.\n\
                      A fresh random subset is drawn each time.\n\
                      \n\
                      That is stochastic coverage, NOT feature selection.\n\
-                     Every gene stays on the trained axis, keeps its sampled\n\
-                     loading, and appears in every output table.\n\
+                     Every gene stays on the trained axis.\n\
+                     It keeps its sampled loading.\n\
+                     It appears in every output table.\n\
                      A gene left out simply waits for a later epoch.\n\
-                     Contrast --n-hvg, which weights the projection and\n\
-                     likewise drops nobody."
+                     Contrast --n-hvg, which weights the projection.\n\
+                     That likewise drops nobody."
     )]
     pub genes_per_epoch: usize,
 
@@ -337,8 +337,8 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         default_value_t = 0,
         help = "Window (epochs) for convergence check; 0 disables",
-        long_help = "After each epoch, look at the last `convergence-window`\n\
-                     mean losses.\n\
+        long_help = "After each epoch, look at the recent mean losses.\n\
+                     The window is `convergence-window` epochs wide.\n\
                      Stop training when their (max − min) / |mean| falls below\n\
                      --convergence-tol.\n\
                      Pass 0 to run all --epochs unconditionally."
@@ -358,10 +358,10 @@ pub struct CellActivityGraphEmbeddingArgs {
         value_enum,
         help = "How to cut the pair latent into link communities",
         long_help = "kmeans fixes the community count at --n-edge-clusters.\n\
-                     leiden builds a cosine kNN graph over the pair latent and\n\
-                     lets --leiden-resolution decide how many communities exist.\n\
-                     Under leiden, --n-edge-clusters becomes a target the\n\
-                     resolution is steered toward rather than a hard count."
+                     leiden builds a cosine kNN graph over the pair latent.\n\
+                     --leiden-resolution then decides how many communities exist.\n\
+                     Under leiden, --n-edge-clusters is only a target.\n\
+                     The resolution is steered toward it, not fixed at it."
     )]
     pub edge_cluster_method: EdgeClusterMethod,
 
@@ -383,8 +383,8 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         help = "Link communities to cut from the pair latent [default: --embedding-dim]",
         long_help = "Number of edge clusters k-means cuts from the pair latent.\n\
-                     A cell's propensity is the fraction of its incident edges\n\
-                     in each community.\n\
+                     A cell's propensity is its incident-edge fraction,\n\
+                     taken per community.\n\
                      This is the definition `pinto lc` and `pinto dsvd` use.\n\
                      Omit to fall back to --embedding-dim.\n\
                      Writes {prefix}.propensity.parquet,\n\
@@ -410,8 +410,8 @@ pub struct CellActivityGraphEmbeddingArgs {
         default_value_t = 1.0,
         help = "Ridge λ on the per-pair latent in the projection",
         long_help = "Gaussian prior strength on `e_uv` in the pair projection.\n\
-                     The log-partition is summed over every gene, so this is a\n\
-                     mild prior rather than the only bound on the fit.\n\
+                     The log-partition is summed over every gene.\n\
+                     So this is a mild prior, not the only bound on the fit.\n\
                      The per-pair intercept is never penalized."
     )]
     pub pair_ridge: f32,
@@ -428,8 +428,9 @@ pub struct CellActivityGraphEmbeddingArgs {
         default_value_t = 512,
         help = "Genes sampled per step for the projection log-partition; 0 = all",
         long_help = "The projection's log-partition runs over every gene.\n\
-                     That sum is the dominant cost, so each Adam step draws\n\
-                     this many genes ∝ their empirical abundance.\n\
+                     That sum is the dominant cost.\n\
+                     So each Adam step draws this many genes instead,\n\
+                     ∝ their empirical abundance.\n\
                      The importance weights cancel under that proposal.\n\
                      The estimate is therefore unbiased, and exact at e_uv = 0.\n\
                      Pass 0 to sum every gene instead."
