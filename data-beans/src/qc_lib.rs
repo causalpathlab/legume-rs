@@ -578,8 +578,8 @@ pub struct QcArgs {
                      Join by the cell/barcode name column, never by position.\n\
                      \n\
                      Use --qc-report to see exactly what was dropped.\n\
-                     Pass `--qc-mad-on-genes=false --qc-mad-on-counts=false`\n\
-                     for the older near-empty-floor-only gate."
+                     For the older near-empty-floor-only gate, pass\n\
+                     `--qc-mad-on-genes=false --qc-mad-on-counts=false`."
     )]
     pub no_qc: bool,
 
@@ -677,11 +677,11 @@ pub struct QcArgs {
                      ON by default.\n\
                      This and --qc-mad-on-counts were previously hardcoded OFF,\n\
                      with no way to enable them.\n\
-                     That also made --qc-mads inert, unless --qc-mito-pattern\n\
-                     happened to be set.\n\
+                     That also made --qc-mads inert.\n\
+                     Only a set --qc-mito-pattern revived it.\n\
                      \n\
-                     Pass `--qc-mad-on-genes=false` for the old conservative-floor\n\
-                     behaviour, which is the near-empty nnz gate only."
+                     Pass `--qc-mad-on-genes=false` for the old behaviour.\n\
+                     That is the conservative near-empty nnz gate alone."
     )]
     pub qc_mad_on_genes: bool,
 

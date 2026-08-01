@@ -125,9 +125,10 @@ pub struct From10xMatrixArgs {
         long,
         default_value = "gene,peak",
         help = "Select row type (comma-separated patterns; ANY match keeps the row)",
-        long_help = "Select row type for inclusion. Comma-separated case-insensitive substrings; \n\
-		     a row is kept if its type contains any pattern. Default 'gene,peak' \n\
-		     keeps both Gene Expression and ATAC Peaks."
+        long_help = "Select which row types to include.\n\
+		     Patterns are comma-separated, case-insensitive substrings.\n\
+		     A row is kept if its type contains any pattern.\n\
+		     The default 'gene,peak' keeps Gene Expression and ATAC Peaks."
     )]
     pub select_row_type: Box<str>,
 

@@ -221,8 +221,8 @@ enum Commands {
         long_about = "Build a backend from a 10X Genomics Cell Ranger feature-barcode matrix HDF5 file.\n\
 		      Expected layout: matrix/{data,indices,indptr,barcodes,features/...}\n\
 		      \n\
-		      This is the `filtered_feature_bc_matrix.h5` or `raw_feature_bc_matrix.h5`\n\
-		      output from Cell Ranger count/multi.\n\
+		      This is Cell Ranger's `filtered_feature_bc_matrix.h5`,\n\
+		      or its `raw_feature_bc_matrix.h5`, from count or multi.\n\
 		      \n\
 		      Use --root-group-name, --data-field, etc. to customize field paths.\n\
 		      Use --select-row-type to filter features (default: 'gene').",
@@ -252,12 +252,14 @@ enum Commands {
     #[command(
         name = "from-10x-molecule",
         about = "Build backend from 10X molecule_info.h5",
-        long_about = "Build a backend by aggregating per-molecule counts from a 10X Genomics\n\
-		      molecule_info.h5 file into a feature x cell sparse matrix.\n\
+        long_about = "Build a backend by aggregating per-molecule counts.\n\
+		      The input is a 10X Genomics molecule_info.h5 file.\n\
+		      The output is a feature x cell sparse matrix.\n\
 		      \n\
 		      Each molecule has (barcode_idx, feature_idx, count, gem_group, library_idx).\n\
-		      Molecules are filtered by --library-type and optionally by Cell Ranger's\n\
-		      pass_filter (valid cell calls), then aggregated into count triplets.\n\
+		      Molecules are filtered by --library-type.\n\
+		      Cell Ranger's pass_filter, its valid cell calls, can filter too.\n\
+		      Survivors are aggregated into count triplets.\n\
 		      \n\
 		      Barcode names are formatted as SEQUENCE-GEMGROUP (e.g., AAACCTGA-1).\n\
 		      Handles multi-sample (cellranger aggr) and multi-library (CITE-seq) data."
@@ -275,9 +277,10 @@ enum Commands {
                       (cells x features) layout and written as a gzip-compressed CSR\n\
                       `X` (gzip, not Blosc, so h5py needs no filter plugin).\n\
                       \n\
-                      Row names -> var/_index, column names -> obs/_index. Attach\n\
-                      cell/feature annotations with --obs / --var (e.g. feed back the\n\
-                      `*.cell_metadata.tsv.gz` that `from-h5ad` emitted).",
+                      Row names map to var/_index; column names to obs/_index.\n\
+                      Attach cell and feature annotations with --obs and --var.\n\
+                      Feeding back the `*.cell_metadata.tsv.gz` that `from-h5ad`\n\
+                      emitted is the usual round trip.",
         visible_alias = "to-anndata"
     )]
     ToH5ad(ToH5adArgs),
@@ -309,8 +312,8 @@ enum Commands {
     #[command(
         name = "from-fragments",
         about = "Build ATAC/histone backend from a fragments TSV file",
-        long_about = "Build a (feature x cell) sparse backend by streaming an scATAC /\n\
-                      histone fragments TSV file.\n\
+        long_about = "Build a (feature x cell) sparse backend by streaming a TSV.\n\
+                      The input is an scATAC or histone fragments file.\n\
                       \n\
                       Expected format (tab-separated, one fragment per line):\n\
                         chr<TAB>start<TAB>end<TAB>barcode[<TAB>count]\n\
@@ -318,10 +321,12 @@ enum Commands {
                       Both plain gzip and bgzipped files are accepted; '#' header lines\n\
                       (e.g. cellranger-arc metadata) are skipped.\n\
                       \n\
-                      Features are either user-supplied peaks (--peaks <bed>) or\n\
-                      fixed-width genome tiles discovered on the fly (--bin-size, default 5000).\n\
-                      Each fragment contributes 1 (or its column-5 count with --use-count)\n\
-                      to every feature it overlaps."
+                      Features are user-supplied peaks, via --peaks <bed>.\n\
+                      Otherwise they are fixed-width genome tiles, discovered on\n\
+                      the fly at --bin-size, which defaults to 5000.\n\
+                      \n\
+                      Each fragment contributes 1 to every feature it overlaps.\n\
+                      With --use-count it contributes its column-5 count instead."
     )]
     FromFragments(FromFragmentsArgs),
 
@@ -392,13 +397,17 @@ enum Commands {
 
     #[command(
         about = "Randomly subsample cells and/or genes into a smaller backend",
-        long_about = "Draw a random subset of cells (columns) and/or genes (rows) into a new,\n\
-			      smaller backend. Handy for making quick test/demo datasets.\n\
+        long_about = "Draw a random subset of cells and/or genes into a new backend.\n\
+			      Cells are columns; genes are rows.\n\
+			      This is handy for quick test and demo datasets.\n\
 			      \n\
-			      Specify counts (--cells / --genes) or fractions (--cell-frac /\n\
-			      --gene-frac); an unset dimension keeps all of its entries. Sampling\n\
-			      is reproducible via --seed and reads only the selected columns, so\n\
-			      cost scales with the output size, not the input.",
+			      Specify counts with --cells and --genes.\n\
+			      Or specify fractions with --cell-frac and --gene-frac.\n\
+			      An unset dimension keeps all of its entries.\n\
+			      \n\
+			      Sampling is reproducible via --seed.\n\
+			      It reads only the selected columns.\n\
+			      Cost therefore scales with the output size, not the input.",
         visible_alias = "downsample"
     )]
     Subsample(SubsampleArgs),
@@ -468,9 +477,10 @@ enum Commands {
 
     #[command(
         about = "ASCII log-scale histogram of a row/column statistic",
-        long_about = "Print an ASCII log10(x+1) histogram of a per-feature (row) and/or\n\
-		      per-cell (column) statistic — the same summary shown by\n\
-		      `squeeze --show-histogram`, exposed as a standalone command.\n\
+        long_about = "Print an ASCII log10(x+1) histogram of a statistic.\n\
+		      It covers the per-feature (row) and per-cell (column) axes.\n\
+		      This is the summary `squeeze --show-histogram` shows,\n\
+		      exposed as a standalone command.\n\
 		      \n\
 		      Choose the statistic with --stat (default `nnz`; also `sum`,\n\
 		      `mean`, `sd`) and the margin with --dim (default `both`).\n\

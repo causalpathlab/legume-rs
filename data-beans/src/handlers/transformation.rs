@@ -135,8 +135,9 @@ pub struct RunSqueezeArgs {
         long,
         default_value_t = false,
         help = "Show ASCII histogram of row/column nnz distributions",
-        long_help = "Display log1p-transformed ASCII histograms of row and column \n\
-		     non-zero counts before squeezing. Helps determine appropriate cutoff values."
+        long_help = "Display log1p-transformed ASCII histograms.\n\
+		     They cover row and column non-zero counts, before squeezing.\n\
+		     Use them to pick appropriate cutoff values."
     )]
     pub show_histogram: bool,
 
@@ -175,10 +176,14 @@ pub struct RunSqueezeArgs {
         long,
         default_value_t = false,
         help = "Apply the k-means-suggested nnz cutoff headlessly (no prompt)",
-        long_help = "Resolve row/column cutoffs from a 2-means split of log(1+nnz) and squeeze \n\
-		     without prompting. Explicit --row-nnz-cutoff / --column-nnz-cutoff still win \n\
-		     per dimension, so you can pin one axis and auto the other. \n\
-		     Combine with --dry-run to preview the resolved cutoffs without writing."
+        long_help = "Resolve row and column cutoffs automatically, then squeeze.\n\
+		     The cutoffs come from a 2-means split of log(1+nnz).\n\
+		     No prompt is shown.\n\
+		     \n\
+		     Explicit --row-nnz-cutoff and --column-nnz-cutoff still win,\n\
+		     per dimension.\n\
+		     So you can pin one axis and auto the other.\n\
+		     Combine with --dry-run to preview the cutoffs without writing."
     )]
     pub auto_cutoff: bool,
 

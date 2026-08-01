@@ -57,9 +57,9 @@ pub struct MergeBackendArgs {
         long_help = "Output file header: {output}.{backend} and {output}.batch.gz. \n\
 		     The zarr backend produces {output}.zarr.zip by default;\n\
 		     pass --no-zip to keep a {output}.zarr directory instead.\n\
-		     The backend will contain everything. \n\
-		     Batch assignment information will be saved in a separate file \n\
-		     and is needed for embedding steps later."
+		     The backend will contain everything.\n\
+		     Batch assignment information goes to a separate file.\n\
+		     Later embedding steps need it."
     )]
     pub output: Box<str>,
 
@@ -107,12 +107,12 @@ pub struct MergeMtxArgs {
         value_delimiter = ',',
         required = true,
         help = "Input data directories",
-        long_help = "Within each directory and its sub-directories, \n\
-		     the program will search for files named as specified by \n\
-                     (1) `mtx_file_name`, \n\
-		     (2) `feature_file_name`, \n\
-		     and (3) `barcode_file_name` \n\
-		     to merge into one backend file."
+        long_help = "Each directory and its sub-directories are searched.\n\
+		     The program looks for files named by:\n\
+                     (1) `mtx_file_name`,\n\
+		     (2) `feature_file_name`,\n\
+		     (3) `barcode_file_name`.\n\
+		     Those are merged into one backend file."
     )]
     pub data_directories: Vec<Box<str>>,
 
@@ -134,9 +134,9 @@ pub struct MergeMtxArgs {
         long_help = "Output file header: {output}.{backend} and {output}.batch.gz. \n\
                      The zarr backend produces {output}.zarr.zip by default;\n\
                      pass --no-zip to keep a {output}.zarr directory instead.\n\
-                     The backend will contain all merged data. \n\
-                     Batch assignment information will be saved in a separate file and \n\
-		     is needed for embedding steps later."
+                     The backend will contain all merged data.\n\
+                     Batch assignment information goes to a separate file.\n\
+		     Later embedding steps need it."
     )]
     pub output: Box<str>,
 
