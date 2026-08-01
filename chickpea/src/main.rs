@@ -37,9 +37,10 @@ fn print_logo() {
     version,
     about = "chickpea — peak-to-gene cis-regulatory linkage for paired single-cell RNA + ATAC",
     long_about = "chickpea — peak-to-gene cis-regulatory linkage\n\n\
-        Links ATAC peaks to RNA genes from paired single-cell RNA + ATAC\n\
-        data by summary-statistics fine-mapping (SuSiE-RSS) in a shared\n\
-        pseudobulk embedding.\n\n\
+        Links ATAC peaks to RNA genes.\n\
+        The input is paired single-cell RNA + ATAC data.\n\
+        Linkage is by summary-statistics fine-mapping, SuSiE-RSS,\n\
+        in a shared pseudobulk embedding.\n\n\
         Usage:\n\
           data-beans-sim multiome -o sim --n-topics 10\n\
           chickpea peak-to-gene --rna-files sim.rna.zarr \\\n\
@@ -66,13 +67,15 @@ enum Commands {
     /// Fine-map cis peak→gene links via SuSiE-RSS on pseudobulk summary stats
     #[command(
         long_about = "Link ATAC peaks to RNA genes by summary-statistics fine-mapping.\n\n\
-            Pseudobulk the matched RNA + ATAC cells and embed peaks (and the\n\
-            projected genes) in a shared ATAC latent space. Score each cis\n\
-            peak–gene pair by a log-linear regression z in that space, then\n\
-            fine-map per gene with SuSiE-RSS using the peak–peak correlation\n\
-            (LD) structure. Lighter and faster than `fit-topic` (no neural model).\n\n\
-            Outputs: {out}.results.bed.gz (chr start end peak_id gene_id pip\n\
-            effect_mean effect_std z distance).",
+            Pseudobulk the matched RNA + ATAC cells.\n\
+            Embed peaks, and the projected genes, in a shared ATAC latent space.\n\
+            Score each cis peak–gene pair by a log-linear regression z there.\n\
+            Then fine-map per gene with SuSiE-RSS,\n\
+            using the peak–peak correlation (LD) structure.\n\
+            This is lighter and faster than `fit-topic`, with no neural model.\n\n\
+            Outputs {out}.results.bed.gz.\n\
+            Its columns are chr, start, end, peak_id, gene_id, pip,\n\
+            effect_mean, effect_std, z and distance.",
         after_long_help = ENV_HELP,
         aliases = ["p2g", "peak2gene"]
     )]

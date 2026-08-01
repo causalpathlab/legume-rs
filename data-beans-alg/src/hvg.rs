@@ -104,14 +104,15 @@ pub struct HvgCliArgs {
         // differs by command and "keep top N genes" reads as a hard subset
         // everywhere — which is wrong for senna, where every gene is still trained.
         help = "Top N variable genes; 0 = all",
-        long_help = "Select top N genes via binned residual-variance\n\
-                     (scanpy/Seurat-style). Collapsing and batch-effect\n\
-                     estimation still see all genes. 0 disables HVG.\n\
+        long_help = "Select the top N genes by binned residual variance.\n\
+                     The method is scanpy/Seurat-style.\n\
+                     Collapsing and batch-effect estimation still see all genes.\n\
+                     0 disables HVG selection.\n\
                      \n\
-                     What the selection DOES depends on the command: in\n\
-                     `senna` it weights the random projection / pb sketch only\n\
-                     (every gene is still trained); in `pinto` and `faba gem`\n\
-                     it hard-subsets the trained gene axis."
+                     What the selection DOES depends on the command.\n\
+                     In `senna` it only weights the random projection,\n\
+                     the pb sketch; every gene is still trained.\n\
+                     In `pinto` and `faba gem` it hard-subsets the trained axis."
     )]
     pub n_hvg: usize,
 
@@ -119,9 +120,10 @@ pub struct HvgCliArgs {
         long,
         help = "Pre-computed HVG list (replaces --n-hvg selection)",
         long_help = "Use exactly these features instead of selecting HVGs.\n\
-                     Takes precedence over --n-hvg. Accepts .txt / .tsv /\n\
-                     .csv / .parquet (optionally gzipped); see\n\
-                     --must-train-features for the file format."
+                     It takes precedence over --n-hvg.\n\
+                     Accepted formats: .txt, .tsv, .csv and .parquet,\n\
+                     optionally gzipped.\n\
+                     See --must-train-features for the file format."
     )]
     pub feature_list_file: Option<Box<str>>,
 
@@ -135,22 +137,27 @@ pub struct HvgCliArgs {
                      WHAT THIS BUYS YOU DEPENDS ON THE COMMAND, because the HVG\n\
                      selection means different things:\n\
                      \n\
-                     • `pinto`, `faba gem` — the selection HARD-SUBSETS the trained\n\
-                       gene axis, so a feature that misses the cut is not fit at all\n\
-                       (it only gets a post-hoc PROJECTED embedding). Naming it here\n\
-                       is what puts it in the model. This is the intended use.\n\
+                     • `pinto`, `faba gem` — the selection HARD-SUBSETS the\n\
+                       trained gene axis.\n\
+                       A feature that misses the cut is not fit at all;\n\
+                       it only gets a post-hoc PROJECTED embedding.\n\
+                       Naming it here is what puts it in the model.\n\
+                       This is the intended use.\n\
                      \n\
-                     • `senna` (topic / svd / vae / bge) — HVG only WEIGHTS the random\n\
-                       projection used for pseudobulk sketching; every feature is\n\
-                       trained either way. Naming it here raises its projection weight\n\
-                       and nothing more. It will NOT change whether a gene is fit, so\n\
-                       it is not a fix for weak marker embeddings here.\n\
+                     • `senna` (topic / svd / vae / bge) — HVG only WEIGHTS the\n\
+                       random projection used for pseudobulk sketching.\n\
+                       Every feature is trained either way.\n\
+                       Naming it here raises its projection weight, nothing more.\n\
+                       It will NOT change whether a gene is fit.\n\
+                       So it is not a fix for weak marker embeddings here.\n\
                      \n\
-                     Format is inferred from the extension: .txt / .tsv / .csv /\n\
-                     .parquet, optionally gzipped. One name per row; a gene-like header\n\
-                     (`gene`, `feature`, `symbol`, …) picks the column, else the first\n\
-                     column is used. EVERY OTHER COLUMN IS IGNORED, so a curated\n\
-                     `gene<TAB>celltype` marker table can be passed as-is.\n\
+                     Format is inferred from the extension.\n\
+                     Accepted: .txt, .tsv, .csv and .parquet, optionally gzipped.\n\
+                     There is one name per row.\n\
+                     A gene-like header picks the column: `gene`, `feature`,\n\
+                     `symbol` and so on; otherwise the first column is used.\n\
+                     EVERY OTHER COLUMN IS IGNORED.\n\
+                     So a curated `gene<TAB>celltype` marker table works as-is.\n\
                      \n\
                      Names are matched leniently (case-insensitive, symbol ↔\n\
                      `ENSG…_SYMBOL` either way); unmatched names are logged, not fatal.\n\

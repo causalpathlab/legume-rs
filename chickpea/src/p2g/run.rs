@@ -135,8 +135,10 @@ pub struct PeakToGeneArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Use ATAC-only --tmle confounder instead of joint RNA+ATAC\n\
-                co-embedding (tighter FDP, lower power)"
+        help = "Use an ATAC-only --tmle confounder",
+        long_help = "Use an ATAC-only --tmle confounder.\n\
+                     The default is a joint RNA+ATAC co-embedding.\n\
+                     ATAC-only tightens FDP, and lowers power."
     )]
     tmle_atac_only: bool,
 
@@ -175,10 +177,13 @@ pub struct PeakToGeneArgs {
         value_enum,
         default_value = "equi",
         help = "Knockoff diagonal s: equi (default), mvr, or me",
-        long_help = "Knockoff diagonal s method: equi (equicorrelated, default), mvr\n\
-                     (min-variance reconstructability), me (max entropy). For dense cis\n\
-                     sets reduce --max-cis / raise --ko-ridge — the s-method does not\n\
-                     rescue a rank-deficient LD matrix."
+        long_help = "Knockoff diagonal s method.\n\
+                     equi is equicorrelated, and the default.\n\
+                     mvr is min-variance reconstructability.\n\
+                     me is max entropy.\n\
+                     \n\
+                     For dense cis sets, reduce --max-cis or raise --ko-ridge.\n\
+                     The s-method does not rescue a rank-deficient LD matrix."
     )]
     ko_s: KoSMethod,
 
