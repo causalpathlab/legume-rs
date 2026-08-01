@@ -15,9 +15,8 @@ use matrix_util::common_io::*;
 pub struct FromH5adArgs {
     #[arg(
         help = "Input AnnData h5ad file",
-        long_help = "Specify the AnnData h5ad file (CELLxGENE schema v7).\n\
-		     Expected layout: X/{data,indices,indptr}, obs/, var/.\n\
-		     Prefers raw/X over X when available."
+        long_help = "Specify the AnnData h5ad file (CELLxGENE schema v7). Expected layout:\n\
+                     X/{data,indices,indptr}, obs/, var/. Prefers raw/X over X when available."
     )]
     pub h5ad_file: Box<str>,
 
@@ -35,9 +34,9 @@ pub struct FromH5adArgs {
         long,
         help = "Output file header or name",
         long_help = "Specify the output file header.\n\
-		     The zarr backend produces {output}.zarr.zip by default;\n\
-		     pass --no-zip to keep a {output}.zarr directory instead.\n\
-		     Metadata files will be named {output}.cell_metadata.tsv.gz, etc."
+                     The zarr backend produces {output}.zarr.zip by default;\n\
+                     pass --no-zip to keep a {output}.zarr directory instead.\n\
+                     Metadata files will be named {output}.cell_metadata.tsv.gz, etc."
     )]
     pub output: Box<str>,
 
@@ -51,7 +50,7 @@ pub struct FromH5adArgs {
         default_values_t = [Box::<str>::from("_index"), Box::from("gene_id")],
         help = "var/ field(s) for feature ID (fallback list)",
         long_help = "Comma-separated list of var/ dataset names to try for the feature ID (e.g. Ensembl ID).\n\
-		     The first one found is used. Default: '_index,gene_id'."
+                     The first one found is used. Default: '_index,gene_id'."
     )]
     pub row_id_field: Vec<Box<str>>,
 
@@ -61,8 +60,9 @@ pub struct FromH5adArgs {
         default_values_t = [Box::<str>::from("feature_name"), Box::from("gene_name")],
         help = "var/ field(s) for gene symbol (fallback list)",
         long_help = "Comma-separated list of var/ column names to try for the gene symbol.\n\
-		     The first column found is used. Joined with the ID to form 'ID_SYMBOL' row names.\n\
-		     Default: 'feature_name,gene_name'."
+                     The first column found is used.\n\
+                     Joined with the ID to form 'ID_SYMBOL' row names. Default:\n\
+                     'feature_name,gene_name'."
     )]
     pub row_name_field: Vec<Box<str>>,
 
@@ -72,7 +72,7 @@ pub struct FromH5adArgs {
         default_values_t = [Box::<str>::from("_index"), Box::from("cell")],
         help = "obs/ field(s) for cell barcode (fallback list)",
         long_help = "Comma-separated list of obs/ dataset names to try for the cell barcode.\n\
-		     The first one found is used. Default: '_index,cell'."
+                     The first one found is used. Default: '_index,cell'."
     )]
     pub col_name_field: Vec<Box<str>>,
 
@@ -81,8 +81,8 @@ pub struct FromH5adArgs {
         default_value = "",
         help = "Select row type (biotype) for filtering",
         long_help = "Filter features by biotype (e.g., 'protein_coding', 'lncRNA').\n\
-		     Leave empty to keep all features (default).\n\
-		     CELLxGENE uses biotype annotations rather than 'Gene Expression'."
+                     Leave empty to keep all features (default).\n\
+                     CELLxGENE uses biotype annotations rather than 'Gene Expression'."
     )]
     pub select_row_type: Box<str>,
 

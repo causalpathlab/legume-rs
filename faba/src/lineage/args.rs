@@ -141,20 +141,24 @@ pub struct LineageArgs {
         default_value_t = ThetaFrom::Auto,
         help_heading = "Input/output",
         help = "Which table supplies θ: auto, cell-embedding, or latent",
-        long_help = "Which per-cell table supplies θ for the fit AND the layout.\n\n\
-            cell-embedding — {from}.cell_embedding.parquet + {from}.velocity.parquet (H space).\n\
-            latent         — {from}.latent.parquet (log θ, exponentiated to the simplex)\n\
-            .                + {from}.velocity_factor.parquet (K space). Topic runs only.\n\
-            auto           — latent on a run whose manifest says `gem-encoder` AND stamps\n\
-            .                `latent: log-theta`; cell-embedding otherwise.\n\n\
-            These are different manifolds on a topic run, not two views of one.\n\
-            `cell_embedding = θ·α` places every cell inside the convex hull of α's K rows,\n\
-            so a diffuse softmax θ compresses the whole population toward the hull's centroid.\n\
-            That is a property of the co-embedding map, not of PHATE or UMAP —\n\
-            which is why a blobby topic layout stays blobby whichever algorithm you pick.\n\
-            Reading the simplex directly avoids the map.\n\n\
-            `--markers` always scores in cell_embedding's H space regardless,\n\
-            since that is the space the gene vectors are co-embedded into."
+        long_help = "Which per-cell table supplies θ for the fit AND the layout.\n\
+                     \n\
+                     cell-embedding —\n\
+                     {from}.cell_embedding.parquet + {from}.velocity.parquet (H space).\n\
+                     latent         — {from}.latent.parquet (log θ, exponentiated to the simplex)\n\
+                     .                + {from}.velocity_factor.parquet (K space). Topic runs only.\n\
+                     auto           — latent on a run whose manifest says `gem-encoder` AND stamps\n\
+                     .                `latent: log-theta`; cell-embedding otherwise.\n\
+                     \n\
+                     These are different manifolds on a topic run, not two views of one.\n\
+                     `cell_embedding = θ·α` places every cell inside the convex hull of α's K rows,\n\
+                     so a diffuse softmax θ compresses the whole population toward the hull's centroid.\n\
+                     That is a property of the co-embedding map, not of PHATE or UMAP —\n\
+                     which is why a blobby topic layout stays blobby whichever algorithm you pick.\n\
+                     Reading the simplex directly avoids the map.\n\
+                     \n\
+                     `--markers` always scores in cell_embedding's H space regardless,\n\
+                     since that is the space the gene vectors are co-embedded into."
     )]
     pub theta_from: ThetaFrom,
 
@@ -164,19 +168,21 @@ pub struct LineageArgs {
         default_value_t = LatentGeometry::Auto,
         help_heading = "Centroids & MST",
         help = "Metric for fit and layout: auto, cosine, euclidean or hellinger",
-        long_help = "The metric θ is fitted and laid out in.\n\n\
-            cosine    — L2-normalize rows. `faba gem` writes cell_embedding RAW,\n\
-            .           with its norm carrying library size, and its own docs say to use\n\
-            .           cosine or L2-normalize first; plain Euclidean is dominated\n\
-            .           by the sequencing-depth axis.\n\
-            hellinger — √θ, so Euclidean distance becomes Hellinger distance.\n\
-            .           The proper metric on a simplex. Rows land on the unit sphere\n\
-            .           automatically (Σθ = 1), so cosine and Euclidean coincide there.\n\
-            euclidean — raw rows. Reproduces the pre-2026-07-23 default.\n\
-            auto      — hellinger when θ came from `latent` (a simplex), else cosine.\n\n\
-            The velocity field is NOT transformed with θ: arrows are computed in the\n\
-            native θ/δ space and projected onto whatever 2D coordinates result,\n\
-            the same separation scVelo makes."
+        long_help = "The metric θ is fitted and laid out in.\n\
+                     \n\
+                     cosine    — L2-normalize rows. `faba gem` writes cell_embedding RAW,\n\
+                     .           with its norm carrying library size, and its own docs say to use\n\
+                     .           cosine or L2-normalize first; plain Euclidean is dominated\n\
+                     .           by the sequencing-depth axis.\n\
+                     hellinger — √θ, so Euclidean distance becomes Hellinger distance.\n\
+                     .           The proper metric on a simplex. Rows land on the unit sphere\n\
+                     .           automatically (Σθ = 1), so cosine and Euclidean coincide there.\n\
+                     euclidean — raw rows. Reproduces the pre-2026-07-23 default.\n\
+                     auto      — hellinger when θ came from `latent` (a simplex), else cosine.\n\
+                     \n\
+                     The velocity field is NOT transformed with θ:\n\
+                     arrows are computed in the native θ/δ space and projected onto whatever 2D coordinates result,\n\
+                     the same separation scVelo makes."
     )]
     pub latent_geometry: LatentGeometry,
 
@@ -193,9 +199,9 @@ pub struct LineageArgs {
         help_heading = "Velocity direction & forest",
         help = "Skip the per-edge velocity direction test; forest = the geometric MST",
         long_help = "Skip the per-edge velocity direction test.\n\
-            Every candidate edge is then geometry-only (abstained),\n\
-            so the max-weight branching reduces to the geometric MST rooted by the hint chain —\n\
-            the legacy behaviour with no velocity-informed cut/rewire."
+                     Every candidate edge is then geometry-only (abstained),\n\
+                     so the max-weight branching reduces to the geometric MST rooted by the hint chain —\n\
+                     the legacy behaviour with no velocity-informed cut/rewire."
     )]
     pub no_edge_direction: bool,
 
@@ -257,8 +263,7 @@ pub struct LineageArgs {
         hide_short_help = true,
         help_heading = "Velocity direction & forest",
         help = "Forest granularity τ_root: the virtual no-parent weight",
-        long_help = "Forest granularity τ_root.\n\
-                     It is the virtual no-parent weight.\n\
+        long_help = "Forest granularity τ_root. It is the virtual no-parent weight.\n\
                      Higher values give more trees.\n\
                      The default is the median selected arc weight."
     )]
@@ -289,8 +294,7 @@ pub struct LineageArgs {
                      \n\
                      --root-node, --root-cell and --root-type override it.\n\
                      It falls back to the flux root when the file is absent,\n\
-                     or when gem's DAG has no terminal structure;\n\
-                     see lineage_qc.json."
+                     or when gem's DAG has no terminal structure; see lineage_qc.json."
     )]
     pub root_from_gem: bool,
 
@@ -350,13 +354,11 @@ pub struct LineageArgs {
         long,
         help_heading = "Marker annotation",
         help = "Marker TSV (gene<TAB>celltype) to name trajectory nodes by cell type",
-        long_help = "Annotate each trajectory node with a cell type by term over-representation (the `faba annotate` core)\n\
-                     run over the MST-node grouping, so the call carries the same permutation-calibrated confidence.\n\
+        long_help = "Annotate each trajectory node with a cell type by term over-representation (the `faba annotate` core) run over the MST-node grouping,\n\
+                     so the call carries the same permutation-calibrated confidence.\n\
                      pub(super) Input: a `gene<TAB>celltype` TSV (tab/comma/space delimited).\n\
-                     Reads the co-embedded gene vectors from `{from}.feature_embedding.parquet` (spliced rows)\n\
-                     and raw θ from `{from}.cell_embedding.parquet`.\n\
-                     Writes `{out}.lineage_annot.*` (per-cell calls keyed by MST node)\n\
-                     and `{out}.trajectory_annotation.parquet` (node → role[root|terminal|internal] → cell_type → confidence)."
+                     Reads the co-embedded gene vectors from `{from}.feature_embedding.parquet` (spliced rows) and raw θ from `{from}.cell_embedding.parquet`.\n\
+                     Writes `{out}.lineage_annot.*` (per-cell calls keyed by MST node) and `{out}.trajectory_annotation.parquet` (node → role[root|terminal|internal] → cell_type → confidence)."
     )]
     pub markers: Option<Box<str>>,
 
@@ -365,7 +367,8 @@ pub struct LineageArgs {
         default_value_t = 500,
         hide_short_help = true,
         help_heading = "Marker annotation",
-        help = "With --markers: permutation draws calibrating each node's over-representation"
+        help = "With --markers:\n\
+                permutation draws calibrating each node's over-representation"
     )]
     pub marker_num_perm: usize,
 
@@ -374,7 +377,9 @@ pub struct LineageArgs {
         hide_short_help = true,
         help_heading = "Marker annotation",
         help = "Cell Ontology OBO file for the --markers ontology layer (needs --marker-label-cl)",
-        long_help = "Optional. Adds a TreeBH Cell-Ontology layer over the per-node marker calls, as in `faba annotate`.\n\
+        long_help = "Optional.\n\
+                     Adds a TreeBH Cell-Ontology layer over the per-node marker calls,\n\
+                     as in `faba annotate`.\n\
                      Give the OBO graph here and the marker-type → CL id map via --marker-label-cl (both required together)."
     )]
     pub marker_obo: Option<Box<str>>,
@@ -392,16 +397,22 @@ pub struct LineageArgs {
         hide_short_help = true,
         help_heading = "Marker annotation",
         help = "[--markers] Turn OFF the stability bootstrap on the node calls",
-        long_help = "Turn OFF the stability bootstrap on the node calls, naming each node by a bare point estimate.\n\n\
-            The bootstrap is ON by default.\n\
-            Each draw resamples every type's marker panel with replacement AND re-derives the k-means grouping;\n\
-            the consensus is what ships, so a node's name carries the fraction of resamples that agreed on it.\n\n\
-            This matters most for --root-type,\n\
-            which picks the trajectory root as the highest-confidence node of a given type.\n\
-            Without the bootstrap that `confidence` is a softmaxed test statistic rather than a reproducibility —\n\
-            and the whole trajectory hangs off it.\n\n\
-            Costs ~6 min at --marker-n-boot 200:\n\
-            the replicate k-means has nothing to cache, unlike `faba annotate`'s kNN graph"
+        long_help = "Turn OFF the stability bootstrap on the node calls,\n\
+                     naming each node by a bare point estimate.\n\
+                     \n\
+                     The bootstrap is ON by default.\n\
+                     Each draw resamples every type's marker panel with replacement AND re-derives the k-means grouping;\n\
+                     the consensus is what ships,\n\
+                     so a node's name carries the fraction of resamples that agreed on it.\n\
+                     \n\
+                     This matters most for --root-type,\n\
+                     which picks the trajectory root as the highest-confidence node of a given type.\n\
+                     Without the bootstrap that `confidence` is a softmaxed test statistic rather than a reproducibility —\n\
+                     and the whole trajectory hangs off it.\n\
+                     \n\
+                     Costs ~6 min at --marker-n-boot 200:\n\
+                     the replicate k-means has nothing to cache,\n\
+                     unlike `faba annotate`'s kNN graph"
     )]
     pub no_bootstrap_markers: bool,
 
@@ -420,8 +431,8 @@ pub struct LineageArgs {
         hide_short_help = true,
         help_heading = "Marker annotation",
         help = "[--markers] Minimum resample support for a node call",
-        long_help = "Minimum fraction of resamples the top label must win.\n\
-                     Below it, a node is not called at all.\n\
+        long_help = "Minimum fraction of resamples the top label must win. Below it,\n\
+                     a node is not called at all.\n\
                      --no-bootstrap-markers ignores this."
     )]
     pub marker_min_support: f32,
@@ -431,7 +442,8 @@ pub struct LineageArgs {
         value_enum,
         default_value_t = LayoutKind::Phate,
         help_heading = "PHATE layout",
-        help = "2D layout for plotting (default: phate). Emits {out}.{cells,nodes,curves}_2d.parquet; 'none' to skip"
+        help = "2D layout for plotting (default: phate).\n\
+                Emits {out}.{cells,nodes,curves}_2d.parquet; 'none' to skip"
     )]
     pub layout: LayoutKind,
 
@@ -439,18 +451,22 @@ pub struct LineageArgs {
         long = "layout-space",
         value_enum,
         default_value_t = LayoutSpace::Identity,
-        help = "Feature space for --layout umap: identity (θ, default), nascent (θ+δ), or concat ([θ|δ])",
-        long_help = "Which features the t-UMAP layout embeds.\n\n\
-            identity (default) — embed θ alone, then draw δ on top as the velocity\n\
-            .                    arrow field. Position means identity and the arrows mean\n\
-            .                    motion, so the two are separable on the plot.\n\
-            nascent            — embed θ+δ, baking velocity into the coordinates.\n\
-            .                    Splays the manifold toward the fates, but positions then\n\
-            .                    mix identity with motion and the arrow field stops being\n\
-            .                    an independent read of the same plot.\n\
-            concat             — [θ | δ] as two separately-normalized channels.\n\n\
-            The arrow field is written for every setting, and always projected from the\n\
-            native θ/δ space — so `identity` is the one where layout and arrows agree."
+        help = "Feature space for --layout umap: identity (θ, default), nascent (θ+δ),\n\
+                or concat ([θ|δ])",
+        long_help = "Which features the t-UMAP layout embeds.\n\
+                     \n\
+                     identity (default) — embed θ alone, then draw δ on top as the velocity\n\
+                     .                    arrow field. Position means identity and the arrows mean\n\
+                     .                    motion, so the two are separable on the plot.\n\
+                     nascent            — embed θ+δ, baking velocity into the coordinates.\n\
+                     .                    Splays the manifold toward the fates, but positions then\n\
+                     .                    mix identity with motion and the arrow field stops being\n\
+                     .                    an independent read of the same plot.\n\
+                     concat             — [θ | δ] as two separately-normalized channels.\n\
+                     \n\
+                     The arrow field is written for every setting,\n\
+                     and always projected from the native θ/δ space —\n\
+                     so `identity` is the one where layout and arrows agree."
     )]
     pub layout_space: LayoutSpace,
 
@@ -459,18 +475,21 @@ pub struct LineageArgs {
         default_value_t = 50,
         hide_short_help = true,
         help = "Principal components carrying the --layout umap kNN graph and SGD init (0 = raw latent + random init)",
-        long_help = "How many principal components the t-UMAP layout runs on.\n\n\
-            Both the neighbourhood graph and the SGD starting coordinates are taken from\n\
-            the PCs of the layout features, not from the raw latent — scanpy builds its\n\
-            neighbours on `X_pca` and uwot seeds SGD from a spectral/PCA init for the same\n\
-            reason: SGD then only has to refine local structure, instead of also having to\n\
-            find the global arrangement from a random scatter (which leaves the macro-layout\n\
-            seed-dependent).\n\n\
-            The LEADING component is always dropped. These rows are nonnegative, so every\n\
-            cell loads positively on it and it carries the mean profile rather than any\n\
-            between-cell contrast; dropping it is the mean-removal a centering pass would do.\n\n\
-            Capped at the latent dimension, so a value above it simply means `all but the\n\
-            mean axis`. Set 0 to keep the graph on the raw latent and the init random."
+        long_help = "How many principal components the t-UMAP layout runs on.\n\
+                     \n\
+                     Both the neighbourhood graph and the SGD starting coordinates are taken from the PCs of the layout features,\n\
+                     not from the raw latent —\n\
+                     scanpy builds its neighbours on `X_pca` and uwot seeds SGD from a spectral/PCA init for the same reason:\n\
+                     SGD then only has to refine local structure,\n\
+                     instead of also having to find the global arrangement from a random scatter (which leaves the macro-layout seed-dependent).\n\
+                     \n\
+                     The LEADING component is always dropped. These rows are nonnegative,\n\
+                     so every cell loads positively on it and it carries the mean profile rather than any between-cell contrast;\n\
+                     dropping it is the mean-removal a centering pass would do.\n\
+                     \n\
+                     Capped at the latent dimension,\n\
+                     so a value above it simply means `all but the mean axis`.\n\
+                     Set 0 to keep the graph on the raw latent and the init random."
     )]
     pub layout_pcs: usize,
 
@@ -486,15 +505,14 @@ pub struct LineageArgs {
                      \n\
                      `concat` is [θ|δ], each channel L2-normalised.\n\
                      It additionally splits cells by VELOCITY direction.\n\
-                     Two transcriptionally-central cells heading to different\n\
-                     fates then land in different clusters.\n\
+                     Two transcriptionally-central cells heading to different fates then land in different clusters.\n\
                      That helps on a progenitor-enriched sample, such as CD34+,\n\
                      where θ alone cannot resolve the committing structure.\n\
                      \n\
                      `nascent` is θ+δ, and blends the two.\n\
                      \n\
-                     Trajectory centroids and marker scoring always recompute\n\
-                     in raw θ, so only the GROUPING changes."
+                     Trajectory centroids and marker scoring always recompute in raw θ,\n\
+                     so only the GROUPING changes."
     )]
     pub cluster_space: LayoutSpace,
 
@@ -534,11 +552,10 @@ pub struct LineageArgs {
         hide_short_help = true,
         help_heading = "PHATE layout",
         help = "PHATE landmark budget",
-        long_help = "PHATE landmark budget.\n\
-                     Above this many cells, PHATE runs on a landmark subsample,\n\
-                     then lifts by Nyström, which scales linearly.\n\
-                     Raise it if the layout looks thin or stringy on very\n\
-                     large data."
+        long_help = "PHATE landmark budget. Above this many cells,\n\
+                     PHATE runs on a landmark subsample, then lifts by Nyström,\n\
+                     which scales linearly.\n\
+                     Raise it if the layout looks thin or stringy on very large data."
     )]
     pub phate_landmarks: usize,
 }

@@ -69,10 +69,10 @@ pub struct CommonSumstatArgs {
         help_heading = "Input",
         help = "GWAS summary statistics file (.sumstats.bed.gz)",
         long_help = "BGZF-compressed summary statistics file in BED-like format.\n\
-            Required columns: chr, end (or pos), z (or zscore).\n\
-            Optional columns: start, snp_id, a1/ea, a2/nea, trait_idx, n, beta, se, pvalue.\n\
-            SNPs are matched to the reference panel by chr+position.\n\
-            Strand-ambiguous alleles (A/T, C/G) are automatically dropped."
+                     Required columns: chr, end (or pos), z (or zscore). Optional columns:\n\
+                     start, snp_id, a1/ea, a2/nea, trait_idx, n, beta, se, pvalue.\n\
+                     SNPs are matched to the reference panel by chr+position.\n\
+                     Strand-ambiguous alleles (A/T, C/G) are automatically dropped."
     )]
     pub sumstat_file: Box<str>,
 
@@ -81,9 +81,9 @@ pub struct CommonSumstatArgs {
         help_heading = "Input",
         help = "PLINK BED file prefix for LD reference panel (without .bed/.bim/.fam)",
         long_help = "Path prefix for PLINK binary genotype files used as the LD reference panel.\n\
-            Reads {prefix}.bed, {prefix}.bim, and {prefix}.fam.\n\
-            The LD matrix R = X'X/n is computed from these genotypes.\n\
-            SNP positions in .bim are used to match against summary statistics."
+                     Reads {prefix}.bed, {prefix}.bim, and {prefix}.fam.\n\
+                     The LD matrix R = X'X/n is computed from these genotypes.\n\
+                     SNP positions in .bim are used to match against summary statistics."
     )]
     pub bed_prefix: Box<str>,
 
@@ -156,10 +156,10 @@ pub struct CommonSumstatArgs {
         help_heading = "LD Blocks",
         help = "External LD block boundary file (BED: chr, start, end)",
         long_help = "External LD block file in BED format (chr, start, end).\n\
-            Each block defines an independent fine-mapping region.\n\
-            If omitted, LD blocks are estimated automatically.\n\
-            Estimation uses the reference genotypes,\n\
-            via Nystrom and rSVD embedding distances."
+                     Each block defines an independent fine-mapping region. If omitted,\n\
+                     LD blocks are estimated automatically.\n\
+                     Estimation uses the reference genotypes,\n\
+                     via Nystrom and rSVD embedding distances."
     )]
     pub ld_block_file: Option<Box<str>>,
 
@@ -209,10 +209,9 @@ pub struct CommonSumstatArgs {
         default_value = "10",
         help = "Number of sparse components L (max causal SNPs per block)",
         long_help = "Number of sparse components (L) in the model.\n\
-            Each component can select one causal SNP.\n\
-            L is therefore the maximum number of causal variants,\n\
-            per LD block.\n\
-            Used by both SGVB (SuSiE) and MCMC. Default: 10."
+                     Each component can select one causal SNP.\n\
+                     L is therefore the maximum number of causal variants, per LD block.\n\
+                     Used by both SGVB (SuSiE) and MCMC. Default: 10."
     )]
     pub num_components: usize,
 
@@ -221,12 +220,13 @@ pub struct CommonSumstatArgs {
         help_heading = "Model",
         default_value = "",
         help = "Prior variance for effect sizes (comma-separated, empty = adaptive)",
-        long_help = "Prior variance(s) for the effect size distribution.\n\n\
-            If empty (default), an adaptive grid is built from LDSC h² estimation.\n\
-            - SGVB: fits each grid value and selects the best by ELBO.\n\
-            - MCMC: uses the median of the grid as a single prior variance\n\
-              A single given value is used as-is.\n\
-              Pass --estimate-prior-var to let the chain learn it from data."
+        long_help = "Prior variance(s) for the effect size distribution.\n\
+                     \n\
+                     If empty (default), an adaptive grid is built from LDSC h² estimation.\n\
+                     - SGVB: fits each grid value and selects the best by ELBO.\n\
+                     - MCMC: uses the median of the grid as a single prior variance\n\
+                     A single given value is used as-is.\n\
+                     Pass --estimate-prior-var to let the chain learn it from data."
     )]
     pub prior_var: Box<str>,
 

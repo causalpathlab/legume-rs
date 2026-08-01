@@ -47,8 +47,8 @@ pub struct CollapseArgs {
         long,
         value_delimiter = ',',
         help = "Latent topic proportion files (comma-separated)",
-        long_help = "Latent topic proportion files (comma-separated). Each file is a full\n\
-                     `cell × topic` matrix."
+        long_help = "Latent topic proportion files (comma-separated).\n\
+                     Each file is a full `cell × topic` matrix."
     )]
     topic_proportion_files: Option<Vec<Box<str>>>,
 
@@ -94,8 +94,7 @@ pub struct CollapseArgs {
         default_value_t = false,
         help = "Disable NB-Fisher housekeeping gene adjustment",
         long_help = "By default, per-(individual, cell_type) count sums are scaled.\n\
-                     The row scale is the NB-Fisher weight\n\
-                     w_g = 1 / (1 + π_g · s̄ · φ(μ_g)).\n\
+                     The row scale is the NB-Fisher weight w_g = 1 / (1 + π_g · s̄ · φ(μ_g)).\n\
                      It is applied before the Gamma posterior update.\n\
                      \n\
                      High-mean, high-dispersion housekeeping genes are attenuated.\n\

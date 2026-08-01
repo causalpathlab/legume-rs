@@ -19,40 +19,46 @@ pub struct ModelArgs {
         long_help = "L2 (ridge) penalty on the per-gene splice offset δ_g.\n\
                      When 0 (default) and the input carries unspliced rows,\n\
                      gem auto-applies a mild ridge (L2=1.0) so a δ_g dictionary is always written for `faba annotate --track velocity`;\n\
-                     set an explicit value to override, or 0 on a spliced-only input keeps δ off.\n\
-                     When > 0, unspliced rows embed as β_g + δ_g with a ridge-shrunk δ_g learned in phase 1:\n\
-                     it absorbs the (dense) static per-gene nascent structure (the RNA-velocity γ) so cell identity (spliced θ) stays clean\n\
-                     and the phase-2 velocity increment δ (raw Poisson-MAP shift, θ fixed) becomes γ-calibrated.\n\
-                     Larger = more shrinkage (δ_g pulled toward 0).\n\
-                     Try 0.01–1.0; δ_g is written to `{out}.delta_feature_embedding.parquet`."
+                     set an explicit value to override,\n\
+                     or 0 on a spliced-only input keeps δ off. When > 0,\n\
+                     unspliced rows embed as β_g + δ_g with a ridge-shrunk δ_g learned in phase 1:\n\
+                     It absorbs the dense static per-gene nascent structure,\n\
+                     the RNA-velocity γ. Cell identity, the spliced θ, therefore stays clean.\n\
+                     The phase-2 velocity increment δ then becomes γ-calibrated.\n\
+                     That increment is a raw Poisson-MAP shift with θ fixed.\n\
+                     Larger = more shrinkage (δ_g pulled toward 0). Try 0.01–1.0;\n\
+                     δ_g is written to `{out}.delta_feature_embedding.parquet`."
     )]
     pub delta_l2: f32,
 
     #[arg(
         long = "independent-delta-gate",
         default_value_t = false,
-        help = "Let the velocity gate select dims the identity gate did not\n\
-                (--posterior runs only). Default: nested.",
-        long_help = "gem carries TWO feature-side gates and --posterior samples both: the\n\
-                     identity gate on β_g, pinned by the spliced rows, and the velocity gate\n\
-                     on δ_g, pinned by the unspliced rows with β_g carried as an offset that\n\
-                     is refreshed every sweep. This flag decides how the two relate.\n\
+        help = "Let the velocity gate select dims the identity gate did not (--posterior runs only).\n\
+                Default: nested.",
+        long_help = "gem carries TWO feature-side gates, and --posterior samples both.\n\
+                     The identity gate sits on β_g, pinned by the spliced rows.\n\
+                     The velocity gate sits on δ_g, pinned by the unspliced rows,\n\
+                     with β_g carried as an offset that refreshes every sweep.\n\
+                     This flag decides how the two relate.\n\
                      \n\
                      By default the velocity gate is NESTED inside the identity gate:\n\
                      δ_g may be included on an embedding dim only where β_g already is.\n\
-                     Velocity is a deviation from the identity loading, so a gene moving\n\
-                     along a dim its identity does not load is a state the model should\n\
-                     not visit.\n\
+                     Velocity is a deviation from the identity loading.\n\
+                     So a gene should not move along a dim its identity misses.\n\
+                     The model treats that as a state not to visit.\n\
                      \n\
-                     Nesting also removes a real failure mode. β is pinned by the spliced\n\
-                     rows and δ by the unspliced-minus-spliced contrast, so a gene observed\n\
-                     ONLY in the unspliced track pins β+δ but neither alone; two independent\n\
-                     gates then split inclusion mass between (z_β=1, z_δ=0) and (z_β=0, z_δ=1)\n\
-                     and read confidently wrong on both. Such genes are reported as\n\
-                     unidentified and written as NaN in the δ tables either way.\n\
+                     Nesting also removes a real failure mode. β is pinned by the spliced rows.\n\
+                     δ is pinned by the unspliced-minus-spliced contrast.\n\
+                     A gene seen ONLY in the unspliced track pins β+δ.\n\
+                     It pins neither of them alone.\n\
                      \n\
-                     Pass this flag to sample the two gates independently, e.g. to check\n\
-                     whether any gene really does carry velocity on a dim its identity misses."
+                     Two independent gates then split inclusion mass between (z_β=1, z_δ=0) and (z_β=0, z_δ=1).\n\
+                     Both read confidently wrong. Such genes are reported as unidentified.\n\
+                     They are written as NaN in the δ tables, either way.\n\
+                     \n\
+                     Pass this flag to sample the two gates independently.\n\
+                     That checks for genes carrying velocity on a dim their identity misses."
     )]
     pub independent_delta_gate: bool,
 
@@ -60,21 +66,24 @@ pub struct ModelArgs {
         long = "nce-objective",
         default_value_t = NceObjectiveArg::Softmax,
         value_enum,
-        help = "NCE objective for phase-1 training:\n\
-                softmax (InfoNCE — negatives compete in one softmax; sharper on\n\
-                dense pseudobulk data; default) or logistic (per-pair SGNS).",
+        help = "NCE objective for phase-1 training: softmax or logistic",
         long_help = "Which objective phase-1 SGD trains the feature side with.\n\
-                     `softmax` (default) is sampled-softmax / InfoNCE: the positive competes\n\
-                     with its negatives in one distribution, which separates cell types better\n\
-                     on dense pseudobulk counts. `logistic` is the per-pair SGNS loss.\n\
                      \n\
-                     `logistic` CANNOT be combined with `--posterior`. The sampler's likelihood\n\
-                     is the profiled Poisson, whose normalizer is the same estimand as\n\
-                     sampled-softmax — dividing it by the anchor total gives InfoNCE exactly —\n\
-                     but SGNS is a sum of independent per-pair decisions with no logsumexp\n\
-                     anywhere. Sampling a logistic fit with it would report a posterior for a\n\
-                     different model, so the combination is a hard error rather than a silent\n\
-                     mismatch."
+                     `softmax` is the default: sampled-softmax, or InfoNCE.\n\
+                     The positive competes with its negatives in one distribution.\n\
+                     That separates cell types better on dense pseudobulk counts.\n\
+                     \n\
+                     `logistic` is the per-pair SGNS loss.\n\
+                     \n\
+                     `logistic` CANNOT be combined with `--posterior`.\n\
+                     The sampler's likelihood is the profiled Poisson.\n\
+                     Its normalizer is the same estimand as sampled-softmax:\n\
+                     dividing by the anchor total gives InfoNCE exactly.\n\
+                     \n\
+                     SGNS is different. It is a sum of independent per-pair decisions,\n\
+                     with no logsumexp anywhere.\n\
+                     Sampling a logistic fit would report the wrong posterior.\n\
+                     The combination is a hard error, not a silent mismatch."
     )]
     pub nce_objective: NceObjectiveArg,
 
@@ -118,7 +127,8 @@ pub struct CollapseArgs {
     #[arg(
         long,
         default_value_t = 3,
-        help = "Number of pseudobulk collapse levels (coarse→fine); each level is a training axis"
+        help = "Number of pseudobulk collapse levels (coarse→fine);\n\
+                each level is a training axis"
     )]
     pub num_levels: usize,
 
@@ -157,15 +167,16 @@ pub struct CollapseArgs {
         long = "phase1-cells-per-pb",
         default_value_t = 0,
         help = "Phase-1 cell-axis mode (k): shapes the feature dictionary in phase 1",
-        long_help = "Phase-1 cell-axis mode (`k`). Controls only what shapes the feature dictionary (β) in phase 1;\n\
+        long_help = "Phase-1 cell-axis mode (`k`).\n\
+                     Controls only what shapes the feature dictionary (β) in phase 1;\n\
                      phase 2 ALWAYS analytically projects every cell,\n\
                      so the per-cell embedding output is essentially unaffected by `k`.\n\
                      \n\
-                       k = 0 (default) → suppress the cell axis in phase 1 (pure-pb:\n\
-                         features shaped by pb aggregates only). Fastest.\n\
-                       1 ≤ k < n_cells → keep ≤k cells per pb-sample at EVERY collapse level (union),\n\
-                         shrinking the phase-1 budget while keeping rare / shallow cells visible to the shared dictionary.\n\
-                       k ≥ n_cells → every cell shapes the dictionary (slowest).",
+                     k = 0 (default) → suppress the cell axis in phase 1 (pure-pb: features shaped by pb aggregates only).\n\
+                     Fastest.\n\
+                     1 ≤ k < n_cells → keep ≤k cells per pb-sample at EVERY collapse level (union),\n\
+                     shrinking the phase-1 budget while keeping rare / shallow cells visible to the shared dictionary.\n\
+                     k ≥ n_cells → every cell shapes the dictionary (slowest).",
         hide = true
     )]
     pub phase1_cells_per_pb: usize,
@@ -173,34 +184,42 @@ pub struct CollapseArgs {
     #[arg(
         long = "n-hvg",
         default_value_t = 5000,
-        help = "HVG weighting: the top-N highly-variable genes carry the pseudobulk\n\
-                projection (default 5000, matching `senna bge`; 0 = every gene carries it).",
-        long_help = "Optional gene-level HVG weighting, with the SAME meaning as in `senna bge`.\n\
-                     Selects the top-N most variable GENES (NB dispersion-trend, spliced+unspliced\n\
-                     pooled, both tracks of a gene together so the β-sharing factorization stays\n\
-                     aligned) and gives the rest projection weight ZERO.\n\
+        help = "HVG weighting: the top-N variable genes carry the pseudobulk projection.\n\
+                Default 5000, matching `senna bge`; 0 = all genes.",
+        long_help = "Optional gene-level HVG weighting.\n\
+                     It has the SAME meaning here as in `senna bge`.\n\
                      \n\
-                     WEIGHTS, DOES NOT DROP. The non-selected genes sit out the basis the multilevel\n\
-                     pseudobulk partition is built from, but they stay on the feature axis: still\n\
-                     trained, still gated, still present in the dictionary, the δ_g velocity table\n\
-                     and `--posterior`'s anchor set. So the selection shapes WHERE the pseudobulks\n\
-                     land without deciding which genes the model may use.\n\
+                     Selects the top-N most variable GENES by NB dispersion trend.\n\
+                     Spliced and unspliced are pooled, both tracks of a gene together,\n\
+                     so the β-sharing factorization stays aligned.\n\
+                     The rest get projection weight ZERO.\n\
                      \n\
-                     This changed: `--n-hvg N` used to hard-subset the feature axis, which made a gem\n\
-                     run and a `senna bge` run at the same N different experiments. It no longer does,\n\
-                     and the fit is no longer smaller or faster for setting it — that was the one\n\
-                     thing the hard cut bought.\n\
+                     WEIGHTS, DOES NOT DROP.\n\
+                     Non-selected genes sit out the basis that the multilevel pseudobulk partition is built from.\n\
+                     They stay on the feature axis regardless: still trained, still gated,\n\
+                     still present in the dictionary, in the δ_g velocity table,\n\
+                     and in `--posterior`'s anchor set.\n\
+                     So the selection shapes WHERE the pseudobulks land.\n\
+                     It does not decide which genes the model may use.\n\
                      \n\
-                     Defaults to `5000`, the same default `senna bge` and `pinto` carry. It used\n\
-                     to default to 0, which was the right answer while this flag DROPPED genes —\n\
-                     there, 0 meant `keep everything`. Now that it only weights, 0 means `let\n\
-                     depth and abundance decide where the pseudobulks land`, which is a weaker\n\
-                     default, not a safer one.\n\
+                     This changed. `--n-hvg N` used to hard-subset the feature axis,\n\
+                     which made a gem run and a `senna bge` run at the same N into different experiments.\n\
+                     It no longer does.\n\
+                     The fit is also no longer smaller or faster for setting it —\n\
+                     that was the one thing the hard cut bought.\n\
                      \n\
-                     Pass `--n-hvg 0` to give every gene equal projection weight. That is a\n\
-                     reasonable choice — the per-gene softmax FEATURE GATE still selects during\n\
-                     training, so nothing is lost from the model either way — but it lets the\n\
-                     partition be shaped by whatever is most abundant rather than by what varies."
+                     Defaults to `5000`, the default `senna bge` and `pinto` carry.\n\
+                     It used to default to 0, the right answer while this flag DROPPED genes:\n\
+                     there, 0 meant `keep everything`. Now that it only weights,\n\
+                     0 means `let depth and abundance decide where the pseudobulks land`.\n\
+                     That is a weaker default, not a safer one.\n\
+                     \n\
+                     Pass `--n-hvg 0` to give every gene equal projection weight.\n\
+                     That is a reasonable choice.\n\
+                     The per-gene softmax FEATURE GATE still selects during training,\n\
+                     so nothing is lost from the model either way.\n\
+                     But it lets the partition be shaped by whatever is most abundant,\n\
+                     rather than by what varies."
     )]
     pub n_hvg: usize,
 
@@ -208,52 +227,56 @@ pub struct CollapseArgs {
         long = "must-train-features",
         value_name = "FILE",
         help = "Genes forced into the pseudobulk projection basis even if not HVGs",
-        long_help = "Force-include list: these genes are UNIONed into the `--n-hvg` selection, so\n\
-                     they carry projection weight 1.0 even when their variance does not earn it.\n\
-                     Both the spliced and unspliced rows of a named gene come along, so the\n\
-                     β-sharing factorization stays aligned.\n\
+        long_help = "Force-include list. These genes are UNIONed into the `--n-hvg` selection,\n\
+                     so they carry projection weight 1.0 even when their variance does not earn it.\n\
+                     Both the spliced and unspliced rows of a named gene come along,\n\
+                     so the β-sharing factorization stays aligned.\n\
                      \n\
-                     NARROWER THAN THE NAME SUGGESTS, since `--n-hvg` started weighting rather\n\
-                     than dropping. Every gene is now trained in-model whatever you pass here —\n\
-                     there is no trained-vs-projected split left to force, and the held-out\n\
-                     feature regression no longer runs at all. What this still does is decide\n\
-                     which genes shape WHERE the pseudobulks land. Useful when a curated panel\n\
-                     is biologically important but not variable enough to make the cut; useless\n\
-                     as a way to get a gene into the output, because it is already there.\n\
+                     NARROWER THAN THE NAME SUGGESTS,\n\
+                     since `--n-hvg` started weighting rather than dropping.\n\
+                     Every gene is now trained in-model whatever you pass here.\n\
+                     There is no trained-vs-projected split left to force,\n\
+                     and the held-out feature regression no longer runs at all.\n\
+                     What this still does is decide which genes shape WHERE the pseudobulks land.\n\
+                     Useful when a curated panel is biologically important but not variable enough to make the cut.\n\
+                     Useless as a way to get a gene into the output,\n\
+                     because it is already there.\n\
                      \n\
-                     Format is inferred from the extension: .txt / .tsv / .csv / .parquet, optionally gzipped.\n\
-                     One gene per row;\n\
-                     a gene-like header (`gene`, `feature`, `symbol`, …) picks the column, else the first column is used.\n\
-                     EVERY OTHER COLUMN IS IGNORED, so a curated `gene<TAB>celltype` marker table can be passed as-is.\n\
+                     Format is inferred from the extension, optionally gzipped:\n\
+                     .txt / .tsv / .csv / .parquet. One gene per row.\n\
+                     A gene-like header (`gene`, `feature`, `symbol`, …) picks the column;\n\
+                     otherwise the first column is used. EVERY OTHER COLUMN IS IGNORED,\n\
+                     so a curated `gene<TAB>celltype` marker table can be passed as-is.\n\
                      \n\
-                     Names are matched leniently against the `{gene}` slot of the `{gene}/count/{spliced|unspliced}` rows\n\
-                     (case-insensitive, symbol ↔ `ENSG…_SYMBOL` either way); unmatched names are logged, not fatal.\n\
-                     A no-op when `--n-hvg 0` (all genes trained), i.e. when the HVG cut wouldn't drop a gene anyway."
+                     Names are matched leniently against the `{gene}` slot of the `{gene}/count/{spliced|unspliced}` rows (case-insensitive, symbol ↔ `ENSG…_SYMBOL` either way);\n\
+                     unmatched names are logged, not fatal.\n\
+                     A no-op when `--n-hvg 0` (all genes trained),\n\
+                     i.e. when the HVG cut wouldn't drop a gene anyway."
     )]
     pub must_train_features: Option<Box<str>>,
 
     #[arg(
         long = "markers",
         value_name = "FILE",
-        help = "Marker panel this embedding will be annotated with — forced into the\n\
-                projection basis, like --must-train-features (a no-op at --n-hvg 0)",
-        long_help = "The `gene<TAB>celltype` marker panel that `faba annotate` / `faba lineage --markers`\n\
-                     will later score against this embedding. Its genes are UNIONed into\n\
-                     `--must-train-features`, so they carry projection weight regardless of the\n\
-                     `--n-hvg` selection.\n\
+        help = "Marker panel this embedding will be annotated with —\n\
+                forced into the projection basis,\n\
+                like --must-train-features (a no-op at --n-hvg 0)",
+        long_help = "The `gene<TAB>celltype` marker panel that `faba annotate` / `faba lineage --markers` will later score against this embedding.\n\
+                     Its genes are UNIONed into `--must-train-features`,\n\
+                     so they carry projection weight regardless of the `--n-hvg` selection.\n\
                      \n\
-                     THE FAILURE MODE THIS EXISTED FOR IS GONE. It was written when `--n-hvg`\n\
-                     hard-subsetted the feature axis: a marker that missed the cut was ABSENT\n\
-                     from `{out}.feature_embedding.parquet` — the table the annotators read — so\n\
-                     it silently left the panel, and a cell type that entered with 20 markers and\n\
-                     scored on 1 still produced a confident-looking call. `--n-hvg` now weights\n\
-                     instead of dropping, so every marker is on the trained axis by construction\n\
-                     and cannot silently leave.\n\
+                     THE FAILURE MODE THIS EXISTED FOR IS GONE.\n\
+                     It was written when `--n-hvg` hard-subsetted the feature axis:\n\
+                     a marker that missed the cut was ABSENT from `{out}.feature_embedding.parquet` —\n\
+                     the table the annotators read — so it silently left the panel,\n\
+                     and a cell type that entered with 20 markers and scored on 1 still produced a confident-looking call.\n\
+                     `--n-hvg` now weights instead of dropping,\n\
+                     so every marker is on the trained axis by construction and cannot silently leave.\n\
                      \n\
-                     What remains is a modelling nudge, not a safety net: naming the panel biases\n\
-                     the pseudobulk geometry toward separating the compartments the panel will\n\
-                     later call. Read `annotate`'s agreement as a check on the grouping rather\n\
-                     than an independent confirmation — which is what the run already logs.\n\
+                     What remains is a modelling nudge, not a safety net:\n\
+                     naming the panel biases the pseudobulk geometry toward separating the compartments the panel will later call.\n\
+                     Read `annotate`'s agreement as a check on the grouping rather than an independent confirmation —\n\
+                     which is what the run already logs.\n\
                      \n\
                      Same format and lenient name matching as --must-train-features (the celltype column is ignored here);\n\
                      pass the SAME file you will pass to `faba annotate --markers`."
@@ -271,9 +294,8 @@ pub struct CollapseArgs {
         long,
         default_value_t = '_',
         help = "Delimiter for fuzzy gene-name matching across input files",
-        long_help = "Delimiter for fuzzy gene-name matching across input files \n\
-		     (last token after the split is the canonical row name). \n\
-		     Ignored unless `--feature-name-exact` is *off*."
+        long_help = "Delimiter for fuzzy gene-name matching across input files (last token after the split is the canonical row name).\n\
+                     Ignored unless `--feature-name-exact` is *off*."
     )]
     pub feature_name_delim: char,
 
@@ -282,8 +304,8 @@ pub struct CollapseArgs {
         default_value_t = true,
         help = "Use exact row-name match across files (no canonicalization)",
         long_help = "Use exact row-name match across files (no canonicalization).\n\
-                     The gem default — required because the `{gene}/count/{spliced|unspliced}` row format\n\
-                     is sensitive to suffix-splitting.\n\
+                     The gem default —\n\
+                     required because the `{gene}/count/{spliced|unspliced}` row format is sensitive to suffix-splitting.\n\
                      Pass `--feature-name-exact=false` only if your `{gene}` slot itself carries a stripping suffix."
     )]
     pub feature_name_exact: bool,
@@ -318,11 +340,12 @@ pub struct TrainArgs {
         long,
         default_value_t = 1e-2,
         help = "AdamW decoupled weight decay (all phase-1 params). Default 1e-2.",
-        long_help = "AdamW decoupled weight decay applied uniformly to every phase-1 parameter\n\
-                     (β_g, δ_g, per-axis heads, biases).\n\
-                     Post-update shrinkage `θ ← θ − lr·wd·θ`; it does NOT enter the backward graph,\n\
+        long_help = "AdamW decoupled weight decay applied uniformly to every phase-1 parameter (β_g, δ_g, per-axis heads, biases).\n\
+                     Post-update shrinkage `θ ← θ − lr·wd·θ`;\n\
+                     it does NOT enter the backward graph,\n\
                      so unlike an explicit E_feat L2 it is compatible with β-sharing.\n\
-                     Mild by construction: the per-step pull is far below the clipped adaptive step,\n\
+                     Mild by construction:\n\
+                     the per-step pull is far below the clipped adaptive step,\n\
                      so it sets an equilibrium scale rather than decaying params away.\n\
                      0.0 = off (plain Adam)."
     )]
@@ -331,9 +354,9 @@ pub struct TrainArgs {
     #[arg(
         long = "max-grad-norm",
         default_value_t = 1.0,
-        help = "Global-norm gradient clip for phase-1 AdamW (0 = off).\n\
-		When > 0, each step's gradients are scaled down \n\
-		if their global L2 norm exceeds this, bounding embedding inflation on loss spikes."
+        help = "Global-norm gradient clip for phase-1 AdamW (0 = off). When > 0,\n\
+                each step's gradients are scaled down if their global L2 norm exceeds this,\n\
+                bounding embedding inflation on loss spikes."
     )]
     pub max_grad_norm: f32,
 
@@ -341,18 +364,20 @@ pub struct TrainArgs {
         long = "lineage-dag",
         default_value_t = false,
         help = "Inject developmental structure at pseudobulk scale (experimental; default off).",
-        long_help = "Shape the embedding along a pseudobulk lineage.\n\
-                     When set, gem reads the pb-level velocity (identity θ_pb + velocity δ_pb per pseudobulk per collapse level),\n\
-                     orients a fixed velocity-KNN lineage over the pseudobulks, and runs a SECOND phase-1 pass with a\n\
-                     velocity-drift SEM residual so the shared feature dictionary picks up that lineage geometry —\n\
+        long_help = "Shape the embedding along a pseudobulk lineage. When set,\n\
+                     gem reads the pb-level velocity (identity θ_pb + velocity δ_pb per pseudobulk per collapse level),\n\
+                     orients a fixed velocity-KNN lineage over the pseudobulks,\n\
+                     and runs a SECOND phase-1 pass with a velocity-drift SEM residual so the shared feature dictionary picks up that lineage geometry —\n\
                      then lifts a per-cell pseudotime + fate (`{out}.dag_pseudotime.parquet` / `{out}.dag_fate.parquet`).\n\
-                     Off by default — the per-cell embedding is then byte-identical to a plain run;\n\
+                     Off by default —\n\
+                     the per-cell embedding is then byte-identical to a plain run;\n\
                      turning it ON changes the embedding (the second pass).\n\
                      Only meaningful with spliced+unspliced input (β-sharing).\n\
                      \n\
-                     CANNOT be combined with `--posterior`, which REPLACES phase-1 training\n\
-                     rather than refining it — there is then no trained fit for the second pass\n\
-                     to refine. That combination is a hard error, not a silent skip."
+                     CANNOT be combined with `--posterior`,\n\
+                     which REPLACES phase-1 training rather than refining it —\n\
+                     there is then no trained fit for the second pass to refine.\n\
+                     That combination is a hard error, not a silent skip."
     )]
     pub lineage_dag: bool,
 
@@ -363,7 +388,8 @@ pub struct TrainArgs {
         long_help = "Smooth the pb velocity readout δ_pb over θ-space KNN neighbours before it orients the lineage graph,\n\
                      stabilizing sign(δ_pb).\n\
                      A wash on clean data (no noise to remove, and it can blur branch-point velocity),\n\
-                     so it is off by default — the payoff is on noisy real spliced/unspliced ratios.\n\
+                     so it is off by default —\n\
+                     the payoff is on noisy real spliced/unspliced ratios.\n\
                      Ignored unless `--lineage-dag` is set."
     )]
     pub lineage_smooth: bool,
@@ -371,12 +397,11 @@ pub struct TrainArgs {
     #[arg(
         long = "dense-dag",
         default_value_t = false,
-        help = "Lineage-DAG: use the dense velocity-KNN pb graph instead of the default MST tree (opt-out).",
-        long_help = "Within `--lineage-dag`, build the pb structure as the dense velocity-KNN graph\n\
-                     (each node → its velocity-forward θ-neighbours) instead of the DEFAULT minimum spanning\n\
-                     tree oriented into a DAG.\n\
-                     The MST is a sparse single-tree lineage (n−1 edges per level) that gives a\n\
-                     better-conditioned embedding (measured: PC1 further from the ‖θ‖ norm axis);\n\
+        help = "Lineage-DAG:\n\
+                use the dense velocity-KNN pb graph instead of the default MST tree (opt-out).",
+        long_help = "Within `--lineage-dag`,\n\
+                     build the pb structure as the dense velocity-KNN graph (each node → its velocity-forward θ-neighbours) instead of the DEFAULT minimum spanning tree oriented into a DAG.\n\
+                     The MST is a sparse single-tree lineage (n−1 edges per level) that gives a better-conditioned embedding (measured: PC1 further from the ‖θ‖ norm axis);\n\
                      the dense graph keeps more branch edges for the fate readout.\n\
                      Ignored unless `--lineage-dag` is set."
     )]
@@ -385,12 +410,14 @@ pub struct TrainArgs {
     #[arg(
         long = "sequential-velocity",
         default_value_t = false,
-        help = "Phase 2: fit identity θ then velocity δ sequentially, not jointly (opt-out).",
-        long_help = "Revert to the SEQUENTIAL phase-2 velocity fit: identity θ from the spliced edges,\n\
+        help = "Phase 2: fit identity θ then velocity δ sequentially,\n\
+                not jointly (opt-out).",
+        long_help = "Revert to the SEQUENTIAL phase-2 velocity fit:\n\
+                     identity θ from the spliced edges,\n\
                      then the velocity increment δ from the unspliced edges with θ held fixed.\n\
-                     The DEFAULT is the JOINT solve — θ and δ estimated together, θ pulled by both\n\
-                     the spliced and unspliced tracks — which gives a better-powered θ embedding\n\
-                     (measured: PC1 further from the ‖θ‖ norm axis).\n\
+                     The DEFAULT is the JOINT solve — θ and δ estimated together,\n\
+                     θ pulled by both the spliced and unspliced tracks —\n\
+                     which gives a better-powered θ embedding (measured: PC1 further from the ‖θ‖ norm axis).\n\
                      Use this to pin θ to the mature/spliced state for a cleaner δ velocity readout.\n\
                      Only meaningful on spliced+unspliced input (β-sharing)."
     )]
@@ -406,7 +433,8 @@ pub struct RuntimeArgs {
         action = clap::ArgAction::SetFalse,
         help = "Preload all sparse column data into memory before any pass over cells",
         long_help = "Preload all sparse column data into memory before any pass over cells.\n\
-                     On by default — much faster than repeated disk reads on typical SSDs, and required on slow disks.\n\
+                     On by default — much faster than repeated disk reads on typical SSDs,\n\
+                     and required on slow disks.\n\
                      Pass `--no-preload-data` to fall back to streaming reads (use only for datasets that don't fit in RAM)."
     )]
     pub preload_data: bool,
@@ -460,8 +488,10 @@ pub struct GemArgs {
                      Commas are also accepted.\n\
                      Rows must follow `{gene_key}/count/{spliced|unspliced}`.\n\
                      Multiple files are stacked under Union column alignment (cells merged by barcode);\n\
-                     use an embedded `@batch` tag on the barcodes to keep samples as distinct batches (see `--batch-files`).\n\n\
-                     The `--genes a,b` flag form is still accepted, but pass one or the other, not both."
+                     use an embedded `@batch` tag on the barcodes to keep samples as distinct batches (see `--batch-files`).\n\
+                     \n\
+                     The `--genes a,b` flag form is still accepted, but pass one or the other,\n\
+                     not both."
     )]
     pub genes_pos: Vec<Box<str>>,
 
@@ -481,7 +511,8 @@ pub struct GemArgs {
                      Under Union column alignment (gem's mode) exactly **one** file is expected,\n\
                      listing one label per unified cell —\n\
                      a barcode shared across modalities cannot carry two labels.\n\
-                     As an alternative to this file, embed an `@batch` tag in the barcodes (e.g. `AAACCC@sampleA`);\n\
+                     As an alternative to this file,\n\
+                     embed an `@batch` tag in the barcodes (e.g. `AAACCC@sampleA`);\n\
                      the loader infers and reconciles per-cell batches from those tags."
     )]
     pub batch_files: Option<Vec<Box<str>>>,
@@ -493,12 +524,10 @@ pub struct GemArgs {
         help = "Output prefix",
         long_help = "Output file prefix.\n\
                      \n\
-                     NOTE the per-cell tables (cell_embedding, velocity, ...) may contain\n\
-                     FEWER ROWS than the input: cell QC drops failing cells from the OUTPUTS\n\
-                     (never from the fit — every cell still informs the embedding and the\n\
-                     feature dictionary). Join downstream tables by the cell/barcode column,\n\
-                     never by row position. --no-qc keeps every cell; --qc-report writes the\n\
-                     per-cell keep/drop table."
+                     NOTE the per-cell tables (cell_embedding, velocity, ...) may contain FEWER ROWS than the input:\n\
+                     cell QC drops failing cells from the OUTPUTS (never from the fit — every cell still informs the embedding and the feature dictionary).\n\
+                     Join downstream tables by the cell/barcode column, never by row position.\n\
+                     --no-qc keeps every cell; --qc-report writes the per-cell keep/drop table."
     )]
     pub out: Box<str>,
 

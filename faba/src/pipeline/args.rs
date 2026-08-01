@@ -18,27 +18,25 @@ pub(super) fn ser_debug<T: std::fmt::Debug, S: serde::Serializer>(
 #[derive(Args, Debug, serde::Serialize)]
 #[command(
     about = "Run unified RNA-seq pipeline: SNP → genes → ATOI → m6A → APA",
-    long_about = "Orchestrates the complete RNA-seq analysis pipeline:\n\n\
-        0. SNP genotyping (de novo discovery + optional known sites)\n\
-        1. Gene expression filtering (identify expressed genes)\n\
-        2. ATOI detection (A-to-I editing, masked by SNP)\n\
-        3. m6A detection (DART C→T, WT-vs-MUT contrast; skipped without --control-bam)\n\
-        4. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\n\
-        APA runs last because the SCAPE EM is the heavy step and nothing else waits on it.\n\n\
-        ATOI is reference-anchored and tested per site\n\
-        against a beta-binomial sequencing-error null (--edit-error-rate/--edit-overdispersion),\n\
-        no control sample.\n\
-        m6A instead requires a catalytically-dead control (--control-bam):\n\
-        each motif C is tested for higher conversion in the positional BAMs\n\
-        than the pooled control (so a genomic C/T variant is rejected);\n\
-        the step is skipped when no control is given.\n\
-        The SNP mask is off by default for m6A\n\
-        (the contrast already rejects variants; opt back in with --m6a-snp-mask).\n\
-        Step 0 discovers variants de novo and optionally force-calls at known sites\n\
-        (--known-snps, VCF/BCF/Parquet).\n\
-        De novo variants are VAF-filtered (--snp-mask-min-vaf)\n\
-        so RNA editing sites are preserved in the mask.\n\
-        UMI deduplication is applied to all pileup steps (disable with --no-umi-dedup)."
+    long_about = "Orchestrates the complete RNA-seq analysis pipeline:\n\
+                  \n\
+                  0. SNP genotyping (de novo discovery + optional known sites)\n\
+                  1. Gene expression filtering (identify expressed genes)\n\
+                  2. ATOI detection (A-to-I editing, masked by SNP)\n\
+                  3. m6A detection (DART C→T, WT-vs-MUT contrast; skipped without --control-bam)\n\
+                  4. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\
+                  \n\
+                  APA runs last because the SCAPE EM is the heavy step and nothing else waits on it.\n\
+                  \n\
+                  ATOI is reference-anchored and tested per site against a beta-binomial sequencing-error null (--edit-error-rate/--edit-overdispersion),\n\
+                  no control sample.\n\
+                  m6A instead requires a catalytically-dead control (--control-bam):\n\
+                  each motif C is tested for higher conversion in the positional BAMs than the pooled control (so a genomic C/T variant is rejected);\n\
+                  the step is skipped when no control is given.\n\
+                  The SNP mask is off by default for m6A (the contrast already rejects variants; opt back in with --m6a-snp-mask).\n\
+                  Step 0 discovers variants de novo and optionally force-calls at known sites (--known-snps, VCF/BCF/Parquet).\n\
+                  De novo variants are VAF-filtered (--snp-mask-min-vaf) so RNA editing sites are preserved in the mask.\n\
+                  UMI deduplication is applied to all pileup steps (disable with --no-umi-dedup)."
 )]
 pub struct PipelineArgs {
     // Required inputs
@@ -46,8 +44,8 @@ pub struct PipelineArgs {
         value_delimiter = ',',
         required = true,
         help = "Input BAM files (comma-separated)",
-        long_help = "Comma-separated BAM files used across every modality:\n\
-                     gene counting, ATOI, APA and m6A quantification."
+        long_help = "Comma-separated BAM files used across every modality: gene counting, ATOI,\n\
+                     APA and m6A quantification."
     )]
     pub bam_files: Vec<Box<str>>,
 
@@ -87,8 +85,8 @@ pub struct PipelineArgs {
                      That split is used only for m6A site discovery;\n\
                      otherwise these controls are quantified like positional samples.\n\
                      Their SNP, gene, ATOI, APA and m6A per-cell matrices are produced too,\n\
-                     with cells frozen per control BAM in step 1.\n\
-                     Optional, but the m6A (DART) step is skipped without it:\n\
+                     with cells frozen per control BAM in step 1. Optional,\n\
+                     but the m6A (DART) step is skipped without it:\n\
                      m6A cannot be separated from genomic C/T variation without a control."
     )]
     pub control_bam_files: Vec<Box<str>>,
@@ -118,8 +116,7 @@ pub struct PipelineArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
-        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive\n\
-                     (zarr backend only; no effect on hdf5)"
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive (zarr backend only; no effect on hdf5)"
     )]
     pub zip: bool,
 
@@ -138,9 +135,8 @@ pub struct PipelineArgs {
         long,
         default_value_t = 0,
         help = "Minimum cells per gene; 0 = off",
-        long_help = "Minimum cells per gene, for gene filtering.\n\
-                     0 turns it off, matching Cell Ranger,\n\
-                     which keeps every gene and feature."
+        long_help = "Minimum cells per gene, for gene filtering. 0 turns it off,\n\
+                     matching Cell Ranger, which keeps every gene and feature."
     )]
     pub gene_min_cells: usize,
 
@@ -148,9 +144,8 @@ pub struct PipelineArgs {
         long,
         default_value_t = 0,
         help = "Minimum UMI per gene; 0 = off",
-        long_help = "Minimum UMI per gene, for gene filtering.\n\
-                     0 turns it off, matching Cell Ranger,\n\
-                     which keeps every gene and feature."
+        long_help = "Minimum UMI per gene, for gene filtering. 0 turns it off,\n\
+                     matching Cell Ranger, which keeps every gene and feature."
     )]
     pub gene_min_counts: usize,
 
@@ -178,8 +173,7 @@ pub struct PipelineArgs {
         long,
         default_value = "",
         help = "Gene biotype to quantify; empty keeps all",
-        long_help = "Gene biotype to quantify.\n\
-                     Empty is the default, and keeps all biotypes.\n\
+        long_help = "Gene biotype to quantify. Empty is the default, and keeps all biotypes.\n\
                      Pass a value to restrict: protein_coding, lncRNA, pseudogene.\n\
                      \n\
                      QC and cell-calling always use ALL biotypes.\n\
@@ -253,10 +247,9 @@ pub struct PipelineArgs {
         alias = "error-rate",
         default_value_t = 0.01,
         help = "Sequencing-error rate ε: the beta-binomial null mean",
-        long_help = "Sequencing-error rate ε.\n\
-                     It is the beta-binomial null mean.\n\
-                     The edited fraction is tested against it.\n\
-                     The test is reference-anchored, with no control sample."
+        long_help = "Sequencing-error rate ε. It is the beta-binomial null mean.\n\
+                     The edited fraction is tested against it. The test is reference-anchored,\n\
+                     with no control sample."
     )]
     pub edit_error_rate: f64,
 
@@ -293,8 +286,7 @@ pub struct PipelineArgs {
         default_value_t = false,
         help = "Use the full SCAPE EM for PDUI",
         long_help = "Use the full SCAPE EM for PDUI.\n\
-                     The default is a fast top-2 nearest-site assignment.\n\
-                     The EM is slower.\n\
+                     The default is a fast top-2 nearest-site assignment. The EM is slower.\n\
                      --mixture also forces it."
     )]
     pub apa_em_pdui: bool,
@@ -387,11 +379,10 @@ pub struct PipelineArgs {
                      They come from an EM fit, which is slow.\n\
                      \n\
                      This is off by default.\n\
-                     Only the gene-level `{gene}/{modality}/{channel}` counts\n\
-                     are produced then.\n\n\
+                     Only the gene-level `{gene}/{modality}/{channel}` counts are produced then.\n\
+                     \n\
                      For m6A / A-to-I this SKIPS the 1-D Gaussian mixture EM entirely when off.\n\
-                     For APA the SCAPE poly-A fit always runs\n\
-                     (PDUI needs it to identify proximal vs distal),\n\
+                     For APA the SCAPE poly-A fit always runs (PDUI needs it to identify proximal vs distal),\n\
                      so this gates only the extra `_apa_mixture` component-matrix output."
     )]
     pub mixture: bool,
@@ -405,8 +396,8 @@ pub struct PipelineArgs {
         long_help = "Path to known SNP sites. Accepts:\n\
                      - VCF/BCF (.vcf, .vcf.gz, .bcf): standard variant calls\n\
                      - Parquet (.parquet): output from a previous `faba snp` run\n\
-                     When provided, force-calls genotypes at these positions\n\
-                     in addition to de novo discovery,\n\
+                     When provided,\n\
+                     force-calls genotypes at these positions in addition to de novo discovery,\n\
                      and builds a mask for ATOI/APA/DART filtering."
     )]
     pub known_snps: Option<Box<str>>,
@@ -446,12 +437,10 @@ pub struct PipelineArgs {
         long,
         default_value_t = 0.35,
         help = "Minimum VAF for SNP mask (filters RNA editing from de novo variants)",
-        long_help = "Minimum variant allele fraction for a de novo discovered variant\n\
-                     to enter the SNP mask.\n\
+        long_help = "Minimum variant allele fraction for a de novo discovered variant to enter the SNP mask.\n\
                      A het site needs VAF in the range [min_vaf, 1-min_vaf];\n\
                      a hom-alt site needs VAF >= 1-min_vaf.\n\
-                     Sites with lower VAF are likely RNA editing (A-to-I or m6A)\n\
-                     rather than germline SNPs.\n\
+                     Sites with lower VAF are likely RNA editing (A-to-I or m6A) rather than germline SNPs.\n\
                      Set to 0 to disable VAF filtering (mask all called variants)."
     )]
     pub snp_mask_min_vaf: f32,
@@ -496,15 +485,14 @@ pub struct PipelineArgs {
                      Omit the flag and the depth step is skipped entirely.\n\
                      It is opt-in because it costs a full extra pass over every BAM.\n\
                      \n\
-                     Depth reuses the cells frozen by gene counting, so its columns line\n\
-                     up with the other modalities.\n\
-                     Rows are named {chr}:{start}-{end}, the one modality not keyed by\n\
-                     gene, because a bin is not a gene.\n\
+                     Depth reuses the cells frozen by gene counting,\n\
+                     so its columns line up with the other modalities.\n\
+                     Rows are named {chr}:{start}-{end}, the one modality not keyed by gene,\n\
+                     because a bin is not a gene.\n\
                      \n\
-                     The grid is anchored at each chromosome's start and does not depend\n\
-                     on how the work was chunked.\n\
-                     Only the last bin of a chromosome is short, as in the standard CNV\n\
-                     binning tools."
+                     The grid is anchored at each chromosome's start and does not depend on how the work was chunked.\n\
+                     Only the last bin of a chromosome is short,\n\
+                     as in the standard CNV binning tools."
     )]
     pub depth_resolution_kb: Option<f32>,
 }

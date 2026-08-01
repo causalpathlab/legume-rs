@@ -36,8 +36,7 @@ pub struct AtoICountArgs {
         long = "genome",
         help = "Reference genome FASTA file",
         long_help = "Path to reference genome in FASTA format (.fa or .fasta).\n\
-                     Used to validate base calls at editing sites.\n\
-                     File must be indexed (.fai)."
+                     Used to validate base calls at editing sites. File must be indexed (.fai)."
     )]
     pub genome_file: Box<str>,
 
@@ -47,8 +46,7 @@ pub struct AtoICountArgs {
         required = true,
         help = "Output directory",
         long_help = "Output directory for A-to-I detection results.\n\
-                     Creates atoi_sites.parquet (detected sites)\n\
-                     and one sparse count matrix per input BAM (with _atoi suffix)."
+                     Creates atoi_sites.parquet (detected sites) and one sparse count matrix per input BAM (with _atoi suffix)."
     )]
     pub output: Box<str>,
 
@@ -105,10 +103,9 @@ pub struct AtoICountArgs {
         long = "pvalue",
         default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
         help = "Marginal p-value cutoff for A-to-I site detection (no multiplicity correction)",
-        long_help = "Marginal p-value cutoff for A-to-I site detection.\n\
-                     Applied per site, above the coverage and conversion floors.\n\
-                     A-to-I is single-sample, so this cutoff is its entire test.\n\
-                     There is no multiplicity correction.\n\
+        long_help = "Marginal p-value cutoff for A-to-I site detection. Applied per site,\n\
+                     above the coverage and conversion floors. A-to-I is single-sample,\n\
+                     so this cutoff is its entire test. There is no multiplicity correction.\n\
                      BH needs independence or positive regression dependence.\n\
                      Neighbouring sites share reads, so it has neither.\n\
                      Expect about `cutoff x tested` false calls; the run log prints both.\n\
@@ -129,8 +126,7 @@ pub struct AtoICountArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
-        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive\n\
-                     (zarr backend only; no effect on hdf5)"
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive (zarr backend only; no effect on hdf5)"
     )]
     pub zip: bool,
 
@@ -145,8 +141,7 @@ pub struct AtoICountArgs {
                      a site is kept only if detected in at least this many cells,\n\
                      and both of its channels (edited/unedited) are kept together.\n\
                      The gene-level matrix is unaffected. 0 disables.\n\
-                     Sites are a distinct feature space\n\
-                     not covered by the upstream gene expression QC (--gene-min-cells)."
+                     Sites are a distinct feature space not covered by the upstream gene expression QC (--gene-min-cells)."
     )]
     pub site_min_cells: usize,
 
@@ -183,8 +178,8 @@ pub struct AtoICountArgs {
         long = "snp-mask",
         help = "SNP mask parquet from `faba snp` to filter genetic variants",
         long_help = "Path to snp_sites.parquet from `faba snp`.\n\
-                     A-to-I candidates at known SNP positions (het or hom-alt)\n\
-                     are removed before quantification, eliminating A/G SNPs that mimic editing."
+                     A-to-I candidates at known SNP positions (het or hom-alt) are removed before quantification,\n\
+                     eliminating A/G SNPs that mimic editing."
     )]
     pub snp_mask_file: Option<Box<str>>,
 
@@ -244,9 +239,8 @@ pub struct AtoICountArgs {
         default_value_t = crate::editing::pipeline::MixtureWeightMode::Posterior,
         help = "How to weight each (cell, site) observation in the mixture EM",
         long_help = "Per-observation weighting for the per-gene Gaussian mixture.\n\
-                     `posterior` (default) uses the Beta-posterior regularized effective count\n\
-                     w = n · (c + α) / (n + α + β), where n is the per-site coverage\n\
-                     and c the converted-read count.\n\
+                     `posterior` (default) uses the Beta-posterior regularized effective count w = n · (c + α) / (n + α + β),\n\
+                     where n is the per-site coverage and c the converted-read count.\n\
                      `converted` uses the raw converted-read count c (legacy)."
     )]
     pub mixture_weight: crate::editing::pipeline::MixtureWeightMode,

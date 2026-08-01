@@ -27,11 +27,13 @@ pub struct FitSumstatSgvbArgs {
         long,
         default_value = "susie",
         help = "Fine-mapping model: 'susie', 'bisusie', or 'spike-slab'",
-        long_help = "Fine-mapping model to use:\n\n\
-            - susie: Sum of Single Effects with null absorber.\n\
-            - bisusie: Bivariate SuSiE with separate predictor/outcome softmaxes.\n\
-            - spike-slab: Independent per-SNP Bernoulli inclusion gates.\n\n\
-            Default: susie."
+        long_help = "Fine-mapping model to use:\n\
+                     \n\
+                     - susie: Sum of Single Effects with null absorber.\n\
+                     - bisusie: Bivariate SuSiE with separate predictor/outcome softmaxes.\n\
+                     - spike-slab: Independent per-SNP Bernoulli inclusion gates.\n\
+                     \n\
+                     Default: susie."
     )]
     pub model: Box<str>,
 
@@ -39,10 +41,11 @@ pub struct FitSumstatSgvbArgs {
         long,
         default_value = "single",
         help = "Prior type: 'single' (grid search) or 'ash' (mixture-of-Gaussians)",
-        long_help = "Prior type for effect sizes:\n\n\
-            - single: Fixed single-Gaussian prior. Grid search over --prior-var.\n\
-            - ash: Mixture-of-Gaussians (adaptive shrinkage) prior.\n\
-              --prior-var grid becomes mixture components with learnable weights."
+        long_help = "Prior type for effect sizes:\n\
+                     \n\
+                     - single: Fixed single-Gaussian prior. Grid search over --prior-var.\n\
+                     - ash: Mixture-of-Gaussians (adaptive shrinkage) prior.\n\
+                     --prior-var grid becomes mixture components with learnable weights."
     )]
     pub prior_type: Box<str>,
 
@@ -67,8 +70,7 @@ pub struct FitSumstatSgvbArgs {
     #[arg(
         long,
         help = "Row minibatch size; omit to auto-scale by variant count",
-        long_help = "Row minibatch size.\n\
-                     Omit it to auto-scale by variant count.\n\
+        long_help = "Row minibatch size. Omit it to auto-scale by variant count.\n\
                      The full batch is used when N <= this value."
     )]
     pub batch_size: Option<usize>,

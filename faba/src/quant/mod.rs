@@ -785,8 +785,7 @@ pub struct MitoQcArgs {
         default_value = MITO_CHR_DEFAULT,
         help = "Mitochondrial chromosome name(s) (comma-separated)",
         long_help = "Genes on these chromosomes are treated as mitochondrial:\n\
-                     excluded from the quantified gene set (unless --keep-mito)\n\
-                     and summarized in the per-cell MT-fraction QC.\n\
+                     excluded from the quantified gene set (unless --keep-mito) and summarized in the per-cell MT-fraction QC.\n\
                      Matched case-insensitively against the GFF seqname."
     )]
     pub mito_chr: Box<str>,
@@ -796,8 +795,7 @@ pub struct MitoQcArgs {
         long = "keep-mito",
         default_value_t = false,
         help = "Keep mitochondrial genes in the quantified gene set",
-        long_help = "By default mitochondrial genes are dropped from what is quantified\n\
-                     (their per-cell MT fraction is still reported as QC).\n\
+        long_help = "By default mitochondrial genes are dropped from what is quantified (their per-cell MT fraction is still reported as QC).\n\
                      Use this flag to retain them."
     )]
     pub keep_mito: bool,
@@ -809,8 +807,7 @@ pub struct MitoQcArgs {
         help = "Max MT fraction per cell: >0 = fixed cutoff; 0 = elbow cutoff",
         long_help = "Cells whose mitochondrial UMI fraction exceeds the cutoff are removed during QC.\n\
                      A value > 0 is a fixed cutoff;\n\
-                     the default 0 uses a data-driven elbow cutoff on the MT% distribution\n\
-                     (drops the high-MT burst tail).\n\
+                     the default 0 uses a data-driven elbow cutoff on the MT% distribution (drops the high-MT burst tail).\n\
                      See --no-mito-cell-qc to disable."
     )]
     pub max_mito_frac: f64,
@@ -821,8 +818,7 @@ pub struct MitoQcArgs {
         default_value_t = false,
         help = "Disable MT cell QC (report MT% only, drop no cells)",
         long_help = "Report per-cell MT% but drop no cells.\n\
-                     Mitochondrial genes are still excluded from the quantified gene set\n\
-                     unless --keep-mito."
+                     Mitochondrial genes are still excluded from the quantified gene set unless --keep-mito."
     )]
     pub no_mito_cell_qc: bool,
 }

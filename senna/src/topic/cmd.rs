@@ -50,7 +50,8 @@ pub struct TopicArgs {
         long,
         help = "Chain data, batch and cell→pb partition from a prior run",
         long_help = "Read a `{run}.senna.json` manifest and pre-fill `data_files`,\n\
-                     `--batch-files`, and (when present) the cell→pb partition from the source run.\n\
+                     `--batch-files`,\n\
+                     and (when present) the cell→pb partition from the source run.\n\
                      Inheriting the partition skips the expensive BBKNN + Poisson DC-SBM refinement step.\n\
                      Explicit CLI flags override the manifest. SVD-family sources are rejected."
     )]
@@ -72,8 +73,10 @@ pub struct TopicArgs {
                      {out}.alpha.parquet            ambient gene profile (nbmixture)\n  \
                      {out}.rho.parquet              ρ sigmoid coefficients (nbmixture)\n  \
                      {out}.cell_proj.parquet        cached random projection (for `senna layout`)\n  \
-                     {out}.senna.json               run manifest for `senna layout/plot --from`\n\n\
-                     With --decoder a,b,c: per-decoder dictionaries written as {out}.{name}.dictionary.parquet."
+                     {out}.senna.json               run manifest for `senna layout/plot --from`\n\
+                     \n\
+                     With --decoder a,b,c:\n\
+                     per-decoder dictionaries written as {out}.{name}.dictionary.parquet."
     )]
     pub(crate) out: Box<str>,
 
@@ -93,8 +96,7 @@ pub struct TopicArgs {
     #[arg(
         long = "init-from",
         help = "Initialize encoder + decoder weights from a previously trained model",
-        long_help = "Path prefix of a model saved by `senna topic`\n\
-                     (matching {prefix}.model.json + {prefix}.safetensors).\n\
+        long_help = "Path prefix of a model saved by `senna topic` (matching {prefix}.model.json + {prefix}.safetensors).\n\
                      Architecture must match: same K, encoder layers, level_decoder_dims,\n\
                      and n_features_full / n_features_encoder.\n\
                      Cross-gene-set warm-start is not supported — train on the same gene set."
@@ -197,7 +199,8 @@ pub struct TopicArgs {
         help = "Decoder type(s) [multinom|nb|nbmixture], comma-separated",
         long_help = "multinom  — NB-Fisher-weighted multinomial.\n\
                      nb        — negative binomial with per-gene dispersion.\n\
-                     nbmixture — NB with ambient-RNA mixture α and per-sample ρ (default).\n\n\
+                     nbmixture — NB with ambient-RNA mixture α and per-sample ρ (default).\n\
+                     \n\
                      Multiple types (e.g. --decoder multinom,nb) train jointly with a shared encoder;\n\
                      see --decoder-weights for loss weighting."
     )]
@@ -214,8 +217,7 @@ pub struct TopicArgs {
         long,
         default_value_t = 1e-4,
         help = "Uniform smoothing α for topic proportions (0 = off)",
-        long_help = "θ = (1-α) softmax(z) + α/K.\n\
-                     It prevents dead topics,\n\
+        long_help = "θ = (1-α) softmax(z) + α/K. It prevents dead topics,\n\
                      by keeping every topic on the gradient path. Set 0 to disable."
     )]
     pub(crate) topic_smoothing: f64,
@@ -228,8 +230,8 @@ pub struct TopicArgs {
         default_value_t = 1.0,
         help = "Cross-entropy penalty λ on β toward anchor prior (0 = off)",
         long_help = "Pulls the decoder dictionary toward anchor PB profiles.\n\
-                     This happens during training.\n\
-                     β starts from a random init, and the penalty guides it."
+                     This happens during training. β starts from a random init,\n\
+                     and the penalty guides it."
     )]
     pub(crate) anchor_penalty: f32,
 

@@ -48,8 +48,8 @@ pub struct RuntimeArgs {
         default_value_t = ComputeDevice::Cuda,
         value_enum,
         help = "Compute device",
-        long_help = "Compute device. `cuda` / `metal` require the matching cargo feature\n\
-                     (`cargo install faba --features cuda`);\n\
+        long_help = "Compute device.\n\
+                     `cuda` / `metal` require the matching cargo feature (`cargo install faba --features cuda`);\n\
                      a binary built without it falls back to `cpu` with a warning."
     )]
     pub device: ComputeDevice,
@@ -81,8 +81,8 @@ pub struct GemEncoderArgs {
         value_name = "GENES",
         value_delimiter = ',',
         help = "Gene count matrix prefix(es), space- or comma-separated",
-        long_help = "Gene-level count matrices, given positionally —\n\
-                     space-separated, so shell globs work: `faba gem-encoder out/*_genes.zarr.zip`.\n\
+        long_help = "Gene-level count matrices, given positionally — space-separated,\n\
+                     so shell globs work: `faba gem-encoder out/*_genes.zarr.zip`.\n\
                      Commas are also accepted.\n\
                      Rows must follow `{gene_key}/count/{spliced|unspliced}`;\n\
                      the unspliced rows are REQUIRED (they are the model's base — see --delta-l2).\n\
@@ -123,12 +123,10 @@ pub struct GemEncoderArgs {
                      {out}.log_likelihood.parquet            per-epoch training trace\n\
                      {out}.safetensors + {out}.gem.json    weights + architecture\n\
                      \n\
-                     NOTE the per-cell tables (latent, cell_embedding, velocity,\n\
-                     velocity_factor, latent_mature, latent_nascent) may contain FEWER ROWS\n\
-                     than the input: cell QC drops\n\
-                     failing cells from the OUTPUTS (never from training). Join downstream\n\
-                     tables by the cell/barcode column, never by row position. --no-qc keeps\n\
-                     every cell; --qc-report writes the per-cell keep/drop table."
+                     NOTE the per-cell tables (latent, cell_embedding, velocity, velocity_factor, latent_mature, latent_nascent) may contain FEWER ROWS than the input:\n\
+                     cell QC drops failing cells from the OUTPUTS (never from training).\n\
+                     Join downstream tables by the cell/barcode column, never by row position.\n\
+                     --no-qc keeps every cell; --qc-report writes the per-cell keep/drop table."
     )]
     pub out: Box<str>,
 
@@ -160,10 +158,12 @@ pub struct GemEncoderArgs {
                      A full Gaussian + KL head was implemented and removed:\n\
                      at kl=1.0 the latent collapsed to effective rank 1.03 (a one-dimensional curve),\n\
                      at kl=0.1 it reached 2.14, both far below the softmax head.\n\
-                     This flag keeps the half of that head which might still help — the sampling —\n\
-                     and drops the half that did the damage — the prior-pulling KL.\n\
+                     This flag keeps the half of that head which might still help —\n\
+                     the sampling — and drops the half that did the damage —\n\
+                     the prior-pulling KL.\n\
                      \n\
-                     Inference stays deterministic either way, so the velocity passes are unaffected."
+                     Inference stays deterministic either way,\n\
+                     so the velocity passes are unaffected."
     )]
     pub latent_noise: bool,
 
@@ -180,8 +180,8 @@ pub struct GemEncoderArgs {
                      Input is 2 * --embedding-dim (the two pooled tracks concatenated),\n\
                      so the default is 256 -> 128 -> 1024 -> 128 -> topics.\n\
                      \n\
-                     The wide middle matches `senna topic`, whose default is the same\n\
-                     128,1024,128 and which is the sibling this encoder is modelled on.\n\
+                     The wide middle matches `senna topic`,\n\
+                     whose default is the same 128,1024,128 and which is the sibling this encoder is modelled on.\n\
                      The narrow 128,128 it used before was not chosen on evidence."
     )]
     pub encoder_layers: Vec<usize>,
@@ -190,9 +190,10 @@ pub struct GemEncoderArgs {
         long,
         default_value_t = 512,
         help = "Encoder context window: top-K GENES per cell",
-        long_help = "Each cell keeps its top-K genes, ranked on the pooled (spliced + unspliced) score,\n\
-                     so a gene's two tracks are always selected together.\n\
-                     Smaller K is faster; larger K sees more of each cell."
+        long_help = "Each cell keeps its top-K genes,\n\
+                     ranked on the pooled (spliced + unspliced) score,\n\
+                     so a gene's two tracks are always selected together. Smaller K is faster;\n\
+                     larger K sees more of each cell."
     )]
     pub context_size: usize,
 
@@ -200,19 +201,19 @@ pub struct GemEncoderArgs {
         long,
         value_enum,
         default_value_t = LikelihoodArg::Multinomial,
-        help = "Masked-loss likelihood: multinomial (depth-invariant, default) or nb (over-dispersed counts)",
-        long_help = "multinomial — models each track's COMPOSITION over genes; no library size, no dispersion.\n\
+        help = "Masked-loss likelihood:\n\
+                multinomial (depth-invariant, default) or nb (over-dispersed counts)",
+        long_help = "multinomial — models each track's COMPOSITION over genes; no library size,\n\
+                     no dispersion.\n\
                      nb          — models absolute counts, library-scaled, with a learnable per-gene dispersion.\n\
                      \n\
-                     Multinomial is the default because sample depth varies a lot in practice\n\
-                     (in one six-sample cohort the inputs spanned 552 to 7195 cells),\n\
+                     Multinomial is the default because sample depth varies a lot in practice (in one six-sample cohort the inputs spanned 552 to 7195 cells),\n\
                      and under NB the deepest pseudobulks dominate the objective.\n\
-                     Across 3 replicates per arm on that cohort, multinomial gave a richer latent\n\
-                     on every metric (effective rank 5.9 vs 4.8, factors used 14.3 vs 9.7,\n\
-                     median max-factor weight 0.26 vs 0.19).\n\
+                     Across 3 replicates per arm on that cohort,\n\
+                     multinomial gave a richer latent on every metric (effective rank 5.9 vs 4.8, factors used 14.3 vs 9.7, median max-factor weight 0.26 vs 0.19).\n\
                      \n\
-                     Note the margin is suggestive, not decisive at n=3 — run-to-run spread is large\n\
-                     (NB effective rank ranged 3.8-6.2 across identical configs).\n\
+                     Note the margin is suggestive, not decisive at n=3 —\n\
+                     run-to-run spread is large (NB effective rank ranged 3.8-6.2 across identical configs).\n\
                      Prefer nb when depth is uniform and absolute abundance is what you want modelled."
     )]
     pub likelihood: LikelihoodArg,
@@ -224,20 +225,22 @@ pub struct GemEncoderArgs {
         long,
         default_value_t = 0.15,
         help = "Per-gene hide probability for the masked-imputation loss",
-        long_help = "Per-gene hide probability. ONE Bernoulli draw per gene, SHARED by both\n\
-                     splice tracks, so hiding a gene hides it wholly and both its tracks are\n\
-                     scored there.\n\
+        long_help = "Per-gene hide probability. ONE Bernoulli draw per gene,\n\
+                     SHARED by both splice tracks,\n\
+                     so hiding a gene hides it wholly and both its tracks are scored there.\n\
                      \n\
-                     The shared draw is what gives delta a monopoly. Both tracks are predicted\n\
-                     from ONE theta, so the only thing that can make them differ is delta.\n\
-                     Cross-modal masking (hiding a whole track) was tried and removed: it hands\n\
-                     the encoder two different inputs and therefore a competing LATENT delta,\n\
-                     which it takes — measured ||dz|| at 1.43x the latent's own spread, with\n\
-                     canonical lineage markers falling from rank ~200 to ~33,400 of 34,179.\n\
+                     The shared draw is what gives delta a monopoly.\n\
+                     Both tracks are predicted from ONE theta,\n\
+                     so the only thing that can make them differ is delta.\n\
+                     Cross-modal masking (hiding a whole track) was tried and removed:\n\
+                     it hands the encoder two different inputs and therefore a competing LATENT delta,\n\
+                     which it takes — measured ||dz|| at 1.43x the latent's own spread,\n\
+                     with canonical lineage markers falling from rank ~200 to ~33,400 of 34,179.\n\
                      \n\
                      0.15 is the masked-language-modelling convention: BERT's rate, and the\n\
-                     rate Geneformer masks transcriptomes at. Inherited from text rather than\n\
-                     derived from transcriptomics — a defensible default, not a tuned one."
+                     rate Geneformer masks transcriptomes at.\n\
+                     Inherited from text rather than derived from transcriptomics —\n\
+                     a defensible default, not a tuned one."
     )]
     pub mask_fraction: f64,
 
@@ -251,15 +254,17 @@ pub struct GemEncoderArgs {
         long_help = "L2 ridge on the per-gene splice-ratio offset delta.\n\
                      \n\
                      The model is parameterized nascent-first: the unspliced embedding is rho,\n\
-                     and the spliced one is rho + delta, so delta is the steady-state splice-ratio offset.\n\
+                     and the spliced one is rho + delta,\n\
+                     so delta is the steady-state splice-ratio offset.\n\
                      It is log(splicing / DEGRADATION), not a splicing rate:\n\
                      a gene scores high either by splicing fast or by having stable mature mRNA,\n\
                      and this model cannot tell those apart.\n\
-                     Under this parameterization <alpha_t, delta_g> is the steady-state\n\
-                     log(splicing / degradation) ratio of the RNA-velocity ODE,\n\
+                     Under this parameterization <alpha_t,\n\
+                     delta_g> is the steady-state log(splicing / degradation) ratio of the RNA-velocity ODE,\n\
                      made factor-resolved and low-rank.\n\
                      \n\
-                     The ridge's null, delta = 0, is exactly 'mature composition equals nascent composition',\n\
+                     The ridge's null, delta = 0,\n\
+                     is exactly 'mature composition equals nascent composition',\n\
                      i.e. no differential processing.\n\
                      Too large and the two dictionaries coincide and there is no velocity signal at all.\n\
                      \n\
@@ -267,24 +272,23 @@ pub struct GemEncoderArgs {
                      it is a per-gene embedding in R^H contracted with the topic embedding alpha,\n\
                      so <alpha_t, delta_g> is rank-H and never a free gene-by-topic matrix.\n\
                      The ridge is a second constraint layered on that one,\n\
-                     and measurement does not support paying for it\n\
-                     (3 wt libraries, 8791 cells, 20 topics, 300 epochs; marker rank is the median\n\
-                     of 10 canonical markers by probability within their best topic, of 33609 genes):\n\
+                     and measurement does not support paying for it (3 wt libraries, 8791 cells, 20 topics, 300 epochs; marker rank is the median of 10 canonical markers by probability within their best topic, of 33609 genes):\n\
                      \n\
-                       --delta-l2     splice r     marker rank, beta / delta     |delta|\n\
-                       0 (default)       0.387             239 / 124              0.88\n\
-                       1                 0.398             276 / 204              0.54\n\
-                       1e4               0.206             374 / 495              0.03\n\
+                     --delta-l2     splice r     marker rank, beta / delta     |delta|\n\
+                     0 (default)       0.387             239 / 124              0.88\n\
+                     1                 0.398             276 / 204              0.54\n\
+                     1e4               0.206             374 / 495              0.03\n\
                      \n\
                      Crushing delta costs the splice ratio AND the dictionary, both tracks.\n\
                      Between 0 and 1 the gap is small and points both ways:\n\
                      0 recovers markers better, 1 is marginally better on the splice ratio.\n\
                      \n\
-                     Note that with the ridge off, |delta| grows slowly and had NOT flattened\n\
-                     by epoch 300, so it is not a quantity to read convergence from.\n\
-                     Raise this only if you have specific reason to think delta is fitting noise\n\
-                     on the sparse unspliced track — that was long assumed to be the dominant\n\
-                     failure mode, and on this data it was not observed."
+                     Note that with the ridge off,\n\
+                     |delta| grows slowly and had NOT flattened by epoch 300,\n\
+                     so it is not a quantity to read convergence from.\n\
+                     Raise this only if you have specific reason to think delta is fitting noise on the sparse unspliced track —\n\
+                     that was long assumed to be the dominant failure mode,\n\
+                     and on this data it was not observed."
     )]
     pub delta_l2: f32,
 
@@ -349,19 +353,18 @@ pub struct GemEncoderArgs {
         help = "Rank the top-N variable GENES to build the pseudobulk sketch (0 = use all)",
         long_help = "Gene-level highly-variable-gene ranking for the RANDOM PROJECTION only.\n\
                      \n\
-                     The top-N most variable genes (spliced + unspliced pooled) get weight 1 in\n\
-                     the projection that drives the pseudobulk partition; the rest get 0 and are\n\
-                     excluded from the projection geometry. The partition is then built where\n\
-                     the structure is, on variable genes, instead of being diluted by ~30k\n\
-                     near-constant ones.\n\
+                     The top-N most variable genes (spliced + unspliced pooled) get weight 1 in the projection that drives the pseudobulk partition;\n\
+                     the rest get 0 and are excluded from the projection geometry.\n\
+                     The partition is then built where the structure is, on variable genes,\n\
+                     instead of being diluted by ~30k near-constant ones.\n\
                      \n\
-                     It does NOT restrict the model. Training, the dictionaries and every\n\
-                     output still cover every gene. An earlier version masked the rows off the\n\
-                     matrix outright, which is the wrong scope for a partitioning heuristic —\n\
-                     a marker gene that missed the cut was not down-weighted downstream, it was\n\
-                     ABSENT from dictionary.parquet, and `faba annotate` would score that cell\n\
-                     type on whatever fraction of its panel survived and still return a\n\
-                     confident-looking call.\n\
+                     It does NOT restrict the model. Training,\n\
+                     the dictionaries and every output still cover every gene.\n\
+                     An earlier version masked the rows off the matrix outright,\n\
+                     which is the wrong scope for a partitioning heuristic —\n\
+                     a marker gene that missed the cut was not down-weighted downstream,\n\
+                     it was ABSENT from dictionary.parquet,\n\
+                     and `faba annotate` would score that cell type on whatever fraction of its panel survived and still return a confident-looking call.\n\
                      \n\
                      0 uses every gene in the first random projection too."
     )]
@@ -378,24 +381,26 @@ pub struct GemEncoderArgs {
         long_help = "Batch adjustment, ON by default. Pass `--no-batch-adjust` to disable.\n\
                      \n\
                      When on, the model is trained as a triple:\n\
-                       encoder input  = mu_observed  (the batch-MIXED counts)\n\
-                       encoder null   = mu_residual  (the per-batch offset, PER TRACK)\n\
-                       decoder target = mu_adjusted  (the batch-FREE counts)\n\
+                     encoder input  = mu_observed  (the batch-MIXED counts)\n\
+                     encoder null   = mu_residual  (the per-batch offset, PER TRACK)\n\
+                     decoder target = mu_adjusted  (the batch-FREE counts)\n\
                      \n\
-                     So the encoder is given the batch signal as information rather than\n\
-                     having a correction imposed on it, while the decoder is scored against\n\
-                     a target with no batch effect in it — which is what leaves the latent\n\
-                     no gradient reward for carrying batch.\n\
-                     At inference the encoder gets the same pair: the cell's observed counts\n\
-                     plus its pseudobulk's residual, so training and evaluation agree.\n\
+                     So the encoder is given the batch signal as information rather than having a correction imposed on it,\n\
+                     while the decoder is scored against a target with no batch effect in it —\n\
+                     which is what leaves the latent no gradient reward for carrying batch.\n\
+                     At inference the encoder gets the same pair:\n\
+                     the cell's observed counts plus its pseudobulk's residual,\n\
+                     so training and evaluation agree.\n\
                      \n\
-                     CHECK WHAT YOUR BATCHES ARE.\n\
-                     Batch is resolved in three tiers: --batch-files, then an embedded\n\
-                     `@`-tag in the cell names, then the file name. With several inputs and no\n\
+                     CHECK WHAT YOUR BATCHES ARE. Batch is resolved in three tiers:\n\
+                     --batch-files, then an embedded `@`-tag in the cell names,\n\
+                     then the file name. With several inputs and no\n\
                      --batch-files, each file's cells are tagged `@<sample>` and that tag\n\
-                     becomes the batch — so on rep{1,2,3}_{wt,mut} the batches are the SIX\n\
-                     samples, wt/mut among them, and adjustment removes the wt-vs-mut contrast\n\
-                     along with donor effects. If that contrast is the biology, pass\n\
+                     becomes the batch —\n\
+                     so on rep{1,2,3}_{wt,mut} the batches are the SIX samples,\n\
+                     wt/mut among them,\n\
+                     and adjustment removes the wt-vs-mut contrast along with donor effects.\n\
+                     If that contrast is the biology, pass\n\
                      --batch-files with the labels you mean (e.g. replicate), or\n\
                      --no-batch-adjust.\n\
                      \n\

@@ -108,8 +108,7 @@ pub struct PseudotimeArgs {
         long,
         short = 'l',
         help = "Latent representation file (cells × K)",
-        long_help = "Cell × K latent matrix in parquet or TSV.\n\
-                     Typical sources:\n  \
+        long_help = "Cell × K latent matrix in parquet or TSV. Typical sources:\n  \
                      - senna topic / masked-topic / joint-topic → .latent.parquet\n  \
                      - senna svd                          → .latent.parquet\n\
                      The first column is expected to be cell names."
@@ -119,8 +118,8 @@ pub struct PseudotimeArgs {
     #[arg(
         long = "from",
         help = "Run manifest from `senna topic|masked-topic|joint-topic|svd|joint-svd`",
-        long_help = "When given, latent is read from the manifest's outputs.latent path\n\
-                     (resolved relative to the manifest directory).\n\
+        long_help = "When given,\n\
+                     latent is read from the manifest's outputs.latent path (resolved relative to the manifest directory).\n\
                      One of --latent or --from is required."
     )]
     from: Option<Box<str>>,
@@ -133,7 +132,8 @@ pub struct PseudotimeArgs {
 
     #[arg(
         long,
-        help = "Root principal-graph node id (0 ≤ id < n-centroids); alternative to --root-cell"
+        help = "Root principal-graph node id (0 ≤ id < n-centroids);\n\
+                alternative to --root-cell"
     )]
     root_node: Option<usize>,
 
@@ -187,10 +187,10 @@ pub struct PseudotimeArgs {
         long_help = "Output prefix. Generates:\n  \
                      {out}.pseudotime.parquet           — cells × 1 pseudotime\n  \
                      {out}.principal_graph.nodes.parquet — K × D centroid coordinates\n  \
-                     {out}.principal_graph.edges.parquet — E × 3 (from, to, weight)\n\n\
+                     {out}.principal_graph.edges.parquet — E × 3 (from, to, weight)\n\
+                     \n\
                      The Reingold-Tilford tree layout is no longer written here.\n\
-                     Run `senna layout tree --from <manifest>` after this command\n\
-                     to produce {out}.tree_layout.{cell_coords,nodes_2d}.parquet."
+                     Run `senna layout tree --from <manifest>` after this command to produce {out}.tree_layout.{cell_coords,nodes_2d}.parquet."
     )]
     out: Box<str>,
 }

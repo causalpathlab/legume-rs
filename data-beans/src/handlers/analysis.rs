@@ -25,7 +25,7 @@ pub struct RunStatArgs {
         value_delimiter = ',',
         help = "Input data files in '.zarr' or '.h5' format",
         long_help = "Provide data files in either '.zarr' or '.h5' format.\n\
-		     Convert '.mtx' files with the 'data-beans from-mtx' command."
+                     Convert '.mtx' files with the 'data-beans from-mtx' command."
     )]
     pub data_files: Vec<Box<str>>,
 
@@ -43,11 +43,11 @@ pub struct RunStatArgs {
         long,
         help = "Row name regex pattern for column statistics",
         long_help = "Regex pattern selecting row names.\n\
-		     It applies when accumulating statistics over columns.\n\
-		     Only rows matching this pattern will be included.\n\
-		     Examples: '^MT-' (starts with MT-), 'GAPDH$' (ends with GAPDH),\n\
-		     '^(MT|RPL|RPS)-' (mitochondrial or ribosomal genes).\n\
-		     Matching is case-insensitive."
+                     It applies when accumulating statistics over columns.\n\
+                     Only rows matching this pattern will be included. Examples:\n\
+                     '^MT-' (starts with MT-), 'GAPDH$' (ends with GAPDH),\n\
+                     '^(MT|RPL|RPS)-' (mitochondrial or ribosomal genes).\n\
+                     Matching is case-insensitive."
     )]
     pub row_name_pattern: Option<Box<str>>,
 
@@ -56,8 +56,8 @@ pub struct RunStatArgs {
         long,
         help = "Column group membership file for row statistics",
         long_help = "File defining column group membership.\n\
-		     It applies when accumulating statistics over rows.\n\
-		     The statistics are then computed group-wise."
+                     It applies when accumulating statistics over rows.\n\
+                     The statistics are then computed group-wise."
     )]
     pub column_group_file: Option<Box<str>>,
 
@@ -67,8 +67,9 @@ pub struct RunStatArgs {
         default_value = "@",
         help = "Delimiter for extracting base barcode from column names",
         long_help = "Delimiter used to extract the base barcode for matching.\n\
-		     With delimiter '@', column 'ACGT-1@batch1' matches\n\
-		     membership key 'ACGT-1@batch2', via base key 'ACGT-1'."
+                     With delimiter '@',\n\
+                     column 'ACGT-1@batch1' matches membership key 'ACGT-1@batch2',\n\
+                     via base key 'ACGT-1'."
     )]
     pub delimiter: char,
 
@@ -77,8 +78,8 @@ pub struct RunStatArgs {
         alias = "preload-data",
         default_value_t = false,
         help = "Preload data into memory for faster processing",
-        long_help = "Preload all column data into memory before computing statistics. \n\
-		     This can significantly speed up processing but requires more memory."
+        long_help = "Preload all column data into memory before computing statistics.\n\
+                     This can significantly speed up processing but requires more memory."
     )]
     pub preload: bool,
 
@@ -93,9 +94,9 @@ pub struct RunStatArgs {
         long,
         default_value = "stdout",
         help = "Output statistics file",
-        long_help = "Specify the output file for statistics. \n\
-		     You can provide a '.parquet' file for efficient storage, \n\
-		     or use 'stdout' to print results to the console."
+        long_help = "Specify the output file for statistics.\n\
+                     You can provide a '.parquet' file for efficient storage,\n\
+                     or use 'stdout' to print results to the console."
     )]
     pub output: Box<str>,
 }

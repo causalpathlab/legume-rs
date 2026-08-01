@@ -31,8 +31,7 @@ pub struct SimConvArgs {
         long,
         required = true,
         help = "topic matrix with the first column corresponds to cell barcodes",
-        long_help = "topic matrix with the first column corresponds to cell\n\
-                     barcodes (`.parquet`, `.tsv.gz`, `.csv.gz`)"
+        long_help = "topic matrix with the first column corresponds to cell barcodes (`.parquet`, `.tsv.gz`, `.csv.gz`)"
     )]
     topic_file: Box<str>,
 
@@ -57,8 +56,7 @@ pub struct SimConvArgs {
         long,
         default_value_t = 0.3,
         help = "Dirichlet concentration parameter for topic mixing fractions",
-        long_help = "Dirichlet concentration parameter for topic mixing fractions\n\
-                     (smaller = more skewed, e.g. 0.1-0.5; larger = more uniform)"
+        long_help = "Dirichlet concentration parameter for topic mixing fractions (smaller = more skewed, e.g. 0.1-0.5; larger = more uniform)"
     )]
     dirichlet_alpha: f64,
 

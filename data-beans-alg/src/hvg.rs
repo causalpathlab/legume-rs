@@ -110,8 +110,8 @@ pub struct HvgCliArgs {
                      0 disables HVG selection.\n\
                      \n\
                      What the selection DOES depends on the command.\n\
-                     In `senna` it only weights the random projection,\n\
-                     the pb sketch; every gene is still trained.\n\
+                     In `senna` it only weights the random projection, the pb sketch;\n\
+                     every gene is still trained.\n\
                      In `pinto` and `faba gem` it hard-subsets the trained axis."
     )]
     pub n_hvg: usize,
@@ -120,9 +120,8 @@ pub struct HvgCliArgs {
         long,
         help = "Pre-computed HVG list (replaces --n-hvg selection)",
         long_help = "Use exactly these features instead of selecting HVGs.\n\
-                     It takes precedence over --n-hvg.\n\
-                     Accepted formats: .txt, .tsv, .csv and .parquet,\n\
-                     optionally gzipped.\n\
+                     It takes precedence over --n-hvg. Accepted formats: .txt, .tsv,\n\
+                     .csv and .parquet, optionally gzipped.\n\
                      See --must-train-features for the file format."
     )]
     pub feature_list_file: Option<Box<str>>,
@@ -134,33 +133,30 @@ pub struct HvgCliArgs {
         long_help = "Force-include list: UNIONed into the --n-hvg selection (unlike\n\
                      --feature-list-file, which REPLACES it).\n\
                      \n\
-                     WHAT THIS BUYS YOU DEPENDS ON THE COMMAND, because the HVG\n\
-                     selection means different things:\n\
+                     WHAT THIS BUYS YOU DEPENDS ON THE COMMAND,\n\
+                     because the HVG selection means different things:\n\
                      \n\
                      • `pinto`, `faba gem` — the selection HARD-SUBSETS the\n\
-                       trained gene axis.\n\
-                       A feature that misses the cut is not fit at all;\n\
-                       it only gets a post-hoc PROJECTED embedding.\n\
-                       Naming it here is what puts it in the model.\n\
-                       This is the intended use.\n\
+                     trained gene axis. A feature that misses the cut is not fit at all;\n\
+                     it only gets a post-hoc PROJECTED embedding.\n\
+                     Naming it here is what puts it in the model. This is the intended use.\n\
                      \n\
                      • `senna` (topic / svd / vae / bge) — HVG only WEIGHTS the\n\
-                       random projection used for pseudobulk sketching.\n\
-                       Every feature is trained either way.\n\
-                       Naming it here raises its projection weight, nothing more.\n\
-                       It will NOT change whether a gene is fit.\n\
-                       So it is not a fix for weak marker embeddings here.\n\
+                     random projection used for pseudobulk sketching.\n\
+                     Every feature is trained either way.\n\
+                     Naming it here raises its projection weight, nothing more.\n\
+                     It will NOT change whether a gene is fit.\n\
+                     So it is not a fix for weak marker embeddings here.\n\
                      \n\
-                     Format is inferred from the extension.\n\
-                     Accepted: .txt, .tsv, .csv and .parquet, optionally gzipped.\n\
-                     There is one name per row.\n\
+                     Format is inferred from the extension. Accepted: .txt, .tsv,\n\
+                     .csv and .parquet, optionally gzipped. There is one name per row.\n\
                      A gene-like header picks the column: `gene`, `feature`,\n\
                      `symbol` and so on; otherwise the first column is used.\n\
                      EVERY OTHER COLUMN IS IGNORED.\n\
                      So a curated `gene<TAB>celltype` marker table works as-is.\n\
                      \n\
-                     Names are matched leniently (case-insensitive, symbol ↔\n\
-                     `ENSG…_SYMBOL` either way); unmatched names are logged, not fatal.\n\
+                     Names are matched leniently (case-insensitive, symbol ↔ `ENSG…_SYMBOL` either way);\n\
+                     unmatched names are logged, not fatal.\n\
                      A no-op when nothing would drop a feature anyway (--n-hvg 0)."
     )]
     pub must_train_features: Option<Box<str>>,

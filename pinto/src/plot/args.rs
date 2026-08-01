@@ -47,8 +47,8 @@ pub struct SrtPlotArgs {
         help = "Input prefix or JSON metadata file",
         long_help = "Input prefix, or a JSON metadata file.\n\
                      A path ending in .json or .pinto.json is read as metadata.\n\
-                     Anything else is treated as a prefix, and the\n\
-                     {prefix}.*.parquet files are discovered from it."
+                     Anything else is treated as a prefix,\n\
+                     and the {prefix}.*.parquet files are discovered from it."
     )]
     pub from: Box<str>,
 
@@ -56,8 +56,7 @@ pub struct SrtPlotArgs {
         long,
         help = "Expression data file (.h5/.zarr); comma-separated for multi-sample runs",
         long_help = "Expression data file, .h5 or .zarr.\n\
-                     It is required only when --top-markers > 0.\n\
-                     Comma-separate several files for multi-sample runs.",
+                     It is required only when --top-markers > 0. Comma-separate several files for multi-sample runs.",
         value_delimiter = ','
     )]
     pub data: Option<Vec<Box<str>>>,
@@ -68,8 +67,7 @@ pub struct SrtPlotArgs {
         help = "Output prefix (defaults to --from)",
         long_help = "Output prefix; it defaults to --from.\n\
                      Figures land in {out}.plots/{kind}/{level}.*.pdf,\n\
-                     one subdirectory per kind.\n\
-                     The run also writes {out}.plot.manifest.json."
+                     one subdirectory per kind. The run also writes {out}.plot.manifest.json."
     )]
     pub out: Option<Box<str>>,
 
@@ -101,8 +99,7 @@ pub struct SrtPlotArgs {
         long,
         default_value_t = 3.0,
         help = "Max radius multiplier for propensity/expression size mapping",
-        long_help = "Max radius multiplier for propensity / expression size mapping\n\
-                     (base_size * scale at p99)."
+        long_help = "Max radius multiplier for propensity / expression size mapping (base_size * scale at p99)."
     )]
     pub size_scale: f32,
 
@@ -137,7 +134,8 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 0.02,
-        help = "Percentile clip for expression standardization (2 → p02/p98). Clamps outliers."
+        help = "Percentile clip for expression standardization (2 → p02/p98).\n\
+                Clamps outliers."
     )]
     pub expr_clip: f32,
 
@@ -175,8 +173,7 @@ pub struct SrtPlotArgs {
         long,
         default_value = "all",
         help = "Which levels to plot: `all` | `final` | `draft` | comma-list",
-        long_help = "Which levels to plot.\n\
-                     Accepts `all`, `final`, `draft`, or a comma-list.\n\
+        long_help = "Which levels to plot. Accepts `all`, `final`, `draft`, or a comma-list.\n\
                      A comma-list looks like `final,L0,L2,draft`."
     )]
     pub levels: Box<str>,
@@ -223,8 +220,7 @@ pub struct SrtPlotArgs {
         long,
         default_value_t = 2,
         help = "Neighborhood depth from each focal cell (1 = direct; 2 = 2-hop)",
-        long_help = "Neighborhood depth from each focal cell.\n\
-                     1 takes direct neighbours only.\n\
+        long_help = "Neighborhood depth from each focal cell. 1 takes direct neighbours only.\n\
                      2 takes two hops, and is the default."
     )]
     pub neighborhood_hops: u8,
@@ -249,10 +245,10 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         help = "Path to a `pinto lr-activity` JSON sidecar.",
-        long_help = "Path to a `pinto lr-activity` JSON sidecar.\n\
-                     If omitted, {prefix}.pinto.json is consulted instead.\n\
-                     Its `outputs.lr_activity` field supplies the path.\n\
-                     With neither present, the overlays are skipped silently.\n\
+        long_help = "Path to a `pinto lr-activity` JSON sidecar. If omitted,\n\
+                     {prefix}.pinto.json is consulted instead.\n\
+                     Its `outputs.lr_activity` field supplies the path. With neither present,\n\
+                     the overlays are skipped silently.\n\
                      \n\
                      One overlay PDF is written per core and significant pair.\n\
                      --lr-top-pairs caps that by |z| within each stratum."
@@ -299,8 +295,8 @@ pub struct SrtPlotArgs {
         default_value_t = 2,
         help = "Belt width (hops) around uncommitted cells for LR overlay focal set",
         long_help = "Belt width in graph hops around uncommitted cells.\n\
-                     It sets the LR-overlay focal set.\n\
-                     1 takes direct neighbours only; 2 takes two hops."
+                     It sets the LR-overlay focal set. 1 takes direct neighbours only;\n\
+                     2 takes two hops."
     )]
     pub lr_belt_hops: u8,
 
@@ -316,8 +312,8 @@ pub struct SrtPlotArgs {
         default_value_t = 25,
         help = "Skip communities with too few dominant cells per batch",
         long_help = "Skip a community whose dominant-cell count is below this.\n\
-                     The count is taken within each batch, or core.\n\
-                     Propensity, marker and LR plots are all skipped.\n\
+                     The count is taken within each batch, or core. Propensity,\n\
+                     marker and LR plots are all skipped.\n\
                      This is independent of --min-edges-per-community,\n\
                      which instead applies across all batches."
     )]
@@ -363,8 +359,8 @@ pub struct SrtPlotArgs {
                      \n\
                      `log-ratio` is the default.\n\
                      It maps log((R_receiver+1)/(L_sender+1)) on a red↔blue ramp.\n\
-                     Red means R≫L, so ligand-limited and activating.\n\
-                     Blue means L≫R, so receptor-saturated and at plateau.\n\
+                     Red means R≫L, so ligand-limited and activating. Blue means L≫R,\n\
+                     so receptor-saturated and at plateau.\n\
                      \n\
                      `direction` colours by in, out and internal classes.\n\
                      `coexpr` colours by pair-centred sqrt(L·R) deviation."

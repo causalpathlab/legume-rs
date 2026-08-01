@@ -64,14 +64,12 @@ pub struct PlotArgs {
         long,
         short = 'f',
         help = "Run manifest JSON (+ updated by `senna layout`)",
-        long_help = "Run manifest JSON from any senna embedding run (+ updated by\n\
-                     `senna layout`).\n\
+        long_help = "Run manifest JSON from any senna embedding run (+ updated by `senna layout`).\n\
                      \n\
                      If set, fills in --cell-coords, --topics, --labels, --colour-by,\n\
                      and --palette from the manifest's viz/outputs/defaults sections.\n\
                      Any explicit CLI flag still overrides the manifest value.\n\
-                     Paths inside the manifest are resolved relative to the manifest's own directory\n\
-                     so you can move a run directory around freely."
+                     Paths inside the manifest are resolved relative to the manifest's own directory so you can move a run directory around freely."
     )]
     pub from: Option<Box<str>>,
 
@@ -88,8 +86,9 @@ pub struct PlotArgs {
         long,
         short = 'o',
         help = "Output prefix (defaults to the manifest's `prefix` when --from is used)",
-        long_help = "Writes {out}.plot.pdf. Pass --svg / --png to additionally emit\n\
-                     {out}.plot.svg / {out}.plot.png; --no-pdf suppresses the PDF."
+        long_help = "Writes {out}.plot.pdf.\n\
+                     Pass --svg / --png to additionally emit {out}.plot.svg / {out}.plot.png;\n\
+                     --no-pdf suppresses the PDF."
     )]
     pub out: Option<Box<str>>,
 
@@ -127,8 +126,7 @@ pub struct PlotArgs {
         long,
         default_value_t = false,
         help = "Preload data when auto-running `senna layout`",
-        long_help = "Preload data when auto-running `senna layout` for a manifest missing layout.cell_coords\n\
-                     (no-op if cell_coords already exists).",
+        long_help = "Preload data when auto-running `senna layout` for a manifest missing layout.cell_coords (no-op if cell_coords already exists).",
         hide = true
     )]
     pub preload_data: bool,
@@ -145,8 +143,7 @@ pub struct PlotArgs {
         long,
         help = "Drop groups with fewer than N cells (0 = keep all)",
         long_help = "Filter out small/dead groups before rendering. When unset,\n\
-                     defaults to max(50, n_cells / 200) for --colour-by topic\n\
-                     (kills argmax ghosts on dead topics) and 0 otherwise.\n\
+                     defaults to max(50, n_cells / 200) for --colour-by topic (kills argmax ghosts on dead topics) and 0 otherwise.\n\
                      Pass --min-topic-cells 0 to opt out of the auto threshold."
     )]
     pub min_topic_cells: Option<usize>,
@@ -206,8 +203,7 @@ pub struct PlotArgs {
         long,
         default_value_t = false,
         help = "Draw convex hull polygons around each group",
-        long_help = "Draw convex hull polygons around each group (off by default:\n\
-                     scRNA groups are rarely separable in 2D, and hulls overstate that)."
+        long_help = "Draw convex hull polygons around each group (off by default: scRNA groups are rarely separable in 2D, and hulls overstate that)."
     )]
     pub hull: bool,
 
@@ -215,9 +211,8 @@ pub struct PlotArgs {
         long,
         default_value_t = 0.95,
         help = "Fraction of closest-to-median points used for each hull (1.0 = all)",
-        long_help = "Only applies when --hull is enabled.\n\
-                     For each group, keep only the {coverage} fraction of points\n\
-                     nearest the coordinate-wise median (Euclidean) before computing the convex hull.\n\
+        long_help = "Only applies when --hull is enabled. For each group,\n\
+                     keep only the {coverage} fraction of points nearest the coordinate-wise median (Euclidean) before computing the convex hull.\n\
                      Strips a few fringe cells so one outlier can't drag the polygon across the plot.\n\
                      Set to 1.0 to use every point."
     )]

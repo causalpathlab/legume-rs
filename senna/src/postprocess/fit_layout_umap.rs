@@ -42,8 +42,8 @@ pub struct LayoutUmapArgs {
         help = "Cell-level UMAP fine-tune epochs after Nyström (0 = disabled)",
         long_help = "Run an extra UMAP SGD after the PB-level pass.\n\
                      The PB-level UMAP and Nyström placement come first.\n\
-                     The extra pass uses a cell-cell fuzzy kNN graph,\n\
-                     in latent space, warm-started from Nyström.\n\
+                     The extra pass uses a cell-cell fuzzy kNN graph, in latent space,\n\
+                     warm-started from Nyström.\n\
                      \n\
                      It resolves intra-PB structure that Nyström collapses.\n\
                      Cost scales about linearly in cell count.\n\

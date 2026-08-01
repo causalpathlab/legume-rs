@@ -46,8 +46,7 @@ pub struct PredictArgs {
         value_delimiter = ',',
         help = "Held-out data files (.zarr or .h5)",
         long_help = "Sparse backends to score with the pre-trained model.\n\
-                     Gene sets may differ from training.\n\
-                     Missing genes are padded.\n\
+                     Gene sets may differ from training. Missing genes are padded.\n\
                      Per-batch delta is re-estimated from the frozen dictionary."
     )]
     pub(crate) data_files: Vec<Box<str>>,
@@ -72,9 +71,10 @@ pub struct PredictArgs {
         help = "Output file prefix",
         long_help = "Writes:\n  \
                      {out}.latent.parquet      [N × K] per-cell latent — log θ for the\n                               \
-                                               topic family, raw Gaussian z for vae /\n                               \
-                                               Gaussian-head masked models\n  \
-                     {out}.predictive.parquet  per-cell [llik, total, llik_per_count]\n\n\
+                     topic family, raw Gaussian z for vae /\n                               \
+                     Gaussian-head masked models\n  \
+                     {out}.predictive.parquet  per-cell [llik, total, llik_per_count]\n\
+                     \n\
                      vae models emit the latent only, encoder-only.\n\
                      They write no predictive.parquet.\n\
                      --decoder-only and --refine-* do not apply to them."
@@ -110,8 +110,9 @@ pub struct PredictArgs {
         long,
         default_value_t = 0,
         help = "Decoder-side gradient steps on θ at inference (0 = encoder forward only)",
-        long_help = "If --decoder-only is set, this controls iterations of uniform-init optimization.\n\
-                     Otherwise, controls per-cell refinement steps anchored to the encoder output."
+        long_help = "If --decoder-only is set,\n\
+                     this controls iterations of uniform-init optimization. Otherwise,\n\
+                     controls per-cell refinement steps anchored to the encoder output."
     )]
     pub(crate) refine_steps: usize,
 
@@ -131,10 +132,10 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        help = "Skip the encoder; init θ uniform and optimize purely against the frozen decoder",
+        help = "Skip the encoder;\n\
+                init θ uniform and optimize purely against the frozen decoder",
         long_help = "Useful when the held-out feature set is too divergent for the trained encoder.\n\
-                     Uses --refine-steps and --refine-lr\n\
-                     (defaults bumped to 100 / 0.05 if --refine-steps was left at 0)."
+                     Uses --refine-steps and --refine-lr (defaults bumped to 100 / 0.05 if --refine-steps was left at 0)."
     )]
     pub(crate) decoder_only: bool,
 
@@ -143,9 +144,9 @@ pub struct PredictArgs {
         default_value_t = 3,
         help = "Iterative TMLE rounds for held-out batch δ (0 = legacy single-pass plug-in)",
         long_help = "Per iteration: encode all cells with current δ → θ̂;\n\
-                     refit δ as Σ_obs / Σ_pred per batch (NB-Fisher-weighted for nb / nbmixture decoders,\n\
-                     using the saved {model}.dispersion.parquet when present).\n\
-                     Default 3 typically converges; 0 reverts to the legacy 1/K-marginal plug-in."
+                     refit δ as Σ_obs / Σ_pred per batch (NB-Fisher-weighted for nb / nbmixture decoders, using the saved {model}.dispersion.parquet when present).\n\
+                     Default 3 typically converges;\n\
+                     0 reverts to the legacy 1/K-marginal plug-in."
     )]
     pub(crate) delta_iters: usize,
 
@@ -156,29 +157,26 @@ pub struct PredictArgs {
         long,
         help = "Also write residual expression to a sparse backend ({out}.residual.zarr / .h5)",
         long_help = "Regress the reference reconstruction out of the held-out counts.\n\
-                     The reference is μ ∝ δ?·Σ_k θ_k·exp(β_dk).\n\
-                     Regression is by DIVISION.\n\
+                     The reference is μ ∝ δ?·Σ_k θ_k·exp(β_dk). Regression is by DIVISION.\n\
                      The leftover is written as a NEW sparse backend, gene × cell.\n\
                      \n\
-                     It reuses matrix-util's `adjust_by_division_inplace`.\n\
-                     Per cell, x_d /= μ_d·λ.\n\
-                     λ = Σ_d x / Σ_d μ is the self-normalizing column scale.\n\
+                     It reuses matrix-util's `adjust_by_division_inplace`. Per cell,\n\
+                     x_d /= μ_d·λ. λ = Σ_d x / Σ_d μ is the self-normalizing column scale.\n\
                      So the residual is a per-cell relative fold-change.\n\
                      `senna svd` uses the same division semantics for batches.\n\
                      \n\
-                     Only entries above --residual-threshold are kept.\n\
-                     All are ≥ 0, so the file stays sparse.\n\
-                     The backend follows the extension: .zarr, or .h5 with the\n\
-                     `hdf5` feature."
+                     Only entries above --residual-threshold are kept. All are ≥ 0,\n\
+                     so the file stays sparse. The backend follows the extension: .zarr,\n\
+                     or .h5 with the `hdf5` feature."
     )]
     pub(crate) residual_out: Option<Box<str>>,
 
     #[arg(
         long,
         help = "Fold per-batch δ into μ (removes topics AND batch effect)",
-        long_help = "When set, the per-gene denominator is δ_{d,b}·Σ_k θ_k·exp(β_dk)\n\
-                     — the residual is harmonized (batch effect divided out too).\n\
-                     When unset, μ comes from topics only and the residual still carries batch effects."
+        long_help = "When set, the per-gene denominator is δ_{d,b}·Σ_k θ_k·exp(β_dk) —\n\
+                     the residual is harmonized (batch effect divided out too). When unset,\n\
+                     μ comes from topics only and the residual still carries batch effects."
     )]
     pub(crate) residual_include_delta: bool,
 
@@ -196,8 +194,7 @@ pub struct PredictArgs {
         help = "Canonicalize query row names: auto|exact|gene|locus|locus-overlap|mixed",
         long_help = "Mirrors the training-side flag.\n\
                      `exact` (default) preserves legacy exact-then-flexible matching.\n\
-                     `gene` resolves `ENSG..._TSPAN6` → `TSPAN6` (rsplit on '_')\n\
-                     so a symbol-keyed dictionary matches a query keyed by `<ensembl>_<symbol>`.\n\
+                     `gene` resolves `ENSG..._TSPAN6` → `TSPAN6` (rsplit on '_') so a symbol-keyed dictionary matches a query keyed by `<ensembl>_<symbol>`.\n\
                      Applied AFTER the suffix trim (see --feature-name-suffix-delim)."
     )]
     pub(crate) feature_name_kind: FeatureNameKindArg,
@@ -205,9 +202,8 @@ pub struct PredictArgs {
     #[arg(
         long,
         help = "Split query row names on this char; keep prefix as base key",
-        long_help = "Split query row names on this character.\n\
-                     With '/', `ENSG00000000003_TSPAN6/count/spliced` splits into\n\
-                     the base `ENSG00000000003_TSPAN6` and suffix `count/spliced`.\n\
+        long_help = "Split query row names on this character. With '/',\n\
+                     `ENSG00000000003_TSPAN6/count/spliced` splits into the base `ENSG00000000003_TSPAN6` and suffix `count/spliced`.\n\
                      The suffix is then available to --keep-feature-suffix.\n\
                      The base is handed to --feature-name-kind."
     )]

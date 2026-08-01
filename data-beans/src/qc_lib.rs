@@ -569,7 +569,7 @@ pub struct QcArgs {
                      By DEFAULT (without this flag) cell QC is:\n  \
                      - a near-empty nnz floor (--qc-min-cell-nnz), and\n  \
                      - MAD-outlier drops on detected features and total counts\n    \
-                       (--qc-mad-on-genes / --qc-mad-on-counts, band --qc-mads).\n\
+                     (--qc-mad-on-genes / --qc-mad-on-counts, band --qc-mads).\n\
                      \n\
                      The bimodal 2-means cut stays OFF unless --qc-auto-cutoff.\n\
                      So the model or embedding still makes the empty-vs-real call.\n\
@@ -578,8 +578,8 @@ pub struct QcArgs {
                      Join by the cell/barcode name column, never by position.\n\
                      \n\
                      Use --qc-report to see exactly what was dropped.\n\
-                     For the older near-empty-floor-only gate, pass\n\
-                     `--qc-mad-on-genes=false --qc-mad-on-counts=false`."
+                     For the older near-empty-floor-only gate,\n\
+                     pass `--qc-mad-on-genes=false --qc-mad-on-counts=false`."
     )]
     pub no_qc: bool,
 
@@ -603,8 +603,7 @@ pub struct QcArgs {
         default_value_t = 0.0,
         help = "Hard floor on total counts per cell",
         long_help = "Hard floor on total counts per cell.\n\
-                     Cells below it are dropped from training.\n\
-                     0 disables the floor."
+                     Cells below it are dropped from training. 0 disables the floor."
     )]
     pub qc_min_counts: f32,
 
@@ -613,8 +612,7 @@ pub struct QcArgs {
         hide = true,
         help = "Regex over feature names selecting mitochondrial genes",
         long_help = "Regex over feature names selecting mitochondrial genes.\n\
-                     It enables the mito-fraction outlier metric.\n\
-                     An example is `(?i)^MT-`."
+                     It enables the mito-fraction outlier metric. An example is `(?i)^MT-`."
     )]
     pub qc_mito_pattern: Option<String>,
 
@@ -659,8 +657,7 @@ pub struct QcArgs {
                      The suggested 2-means cutoff is marked.\n\
                      It is the same summary as `data-beans squeeze --show-histogram`.\n\
                      \n\
-                     This is purely diagnostic.\n\
-                     The cutoff is shown, not applied.\n\
+                     This is purely diagnostic. The cutoff is shown, not applied.\n\
                      The upfront gate is the conservative --qc-min-cell-nnz floor.\n\
                      Use the histogram to pick --qc-min-cell-nnz by hand."
     )]
@@ -671,13 +668,10 @@ pub struct QcArgs {
         hide = true,
         default_value_t = true,
         help = "MAD-outlier drop on the per-cell detected-feature count",
-        long_help = "Drop cells whose detected-feature count falls outside\n\
-                     `median +/- --qc-mads * MAD * 1.4826`.\n\
+        long_help = "Drop cells whose detected-feature count falls outside `median +/- --qc-mads * MAD * 1.4826`.\n\
                      \n\
-                     ON by default.\n\
-                     This and --qc-mad-on-counts were previously hardcoded OFF,\n\
-                     with no way to enable them.\n\
-                     That also made --qc-mads inert.\n\
+                     ON by default. This and --qc-mad-on-counts were previously hardcoded OFF,\n\
+                     with no way to enable them. That also made --qc-mads inert.\n\
                      Only a set --qc-mito-pattern revived it.\n\
                      \n\
                      Pass `--qc-mad-on-genes=false` for the old behaviour.\n\
@@ -690,8 +684,7 @@ pub struct QcArgs {
         hide = true,
         default_value_t = true,
         help = "MAD-outlier drop on per-cell total counts",
-        long_help = "Drop cells whose total count falls outside\n\
-                     `median +/- --qc-mads * MAD * 1.4826`.\n\
+        long_help = "Drop cells whose total count falls outside `median +/- --qc-mads * MAD * 1.4826`.\n\
                      ON by default; see --qc-mad-on-genes."
     )]
     pub qc_mad_on_counts: bool,
@@ -705,8 +698,7 @@ pub struct QcArgs {
                      It runs on the per-cell nnz distribution.\n\
                      Without this flag it is only reported, via --qc-histogram.\n\
                      \n\
-                     OFF by default.\n\
-                     The intended gate is the conservative near-empty floor,\n\
+                     OFF by default. The intended gate is the conservative near-empty floor,\n\
                      plus the model's own empty-call.\n\
                      This flag was referenced in the docs before it existed."
     )]

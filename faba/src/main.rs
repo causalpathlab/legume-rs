@@ -108,14 +108,15 @@ enum Commands {
         about = "Quantify DART-seq m6A sites from C-to-T conversions",
         long_about = "Quantify DART-seq m6A sites from C-to-T conversions\n\n\
             A site is a PUTATIVE candidate on the sequencing pattern alone:\n\
-            the RAC (forward) / GTY (reverse) motif plus observed WT C->U (G->A)\n\
-            at/above the coverage floors. The WT-vs-MUT test then decides it:\n\
+            the RAC (forward) / GTY (reverse) motif,\n\
+            plus observed WT C->U (G->A) at/above the coverage floors.\n\
+            The WT-vs-MUT test then decides it:\n\
             control coverage, the odds ratio (--m6a-min-log-odds),\n\
-            and a marginal p-value cutoff (--pvalue) on the one-sided Fisher exact\n\
-            test of the site's 2x2. The unit is always the site.\n\
-            A genomic C/T variant converts equally in both arms, so a control is\n\
-            REQUIRED. Every putative site is then recorded selected or unselected\n\
-            with the reason it missed. Then quantifies per-cell methylation.\n\n\
+            and a marginal p-value cutoff (--pvalue) on the one-sided Fisher exact test of the site's 2x2.\n\
+            The unit is always the site.\n\
+            A genomic C/T variant converts equally in both arms, so a control is REQUIRED.\n\
+            Every putative site is then recorded selected or unselected, with the reason it missed.\n\
+            Then quantifies per-cell methylation.\n\n\
             Outputs (one per input BAM, {batch}-prefixed):\n\
             - m6a_sites.parquet: selected site annotations (single)\n\
             - m6a_sites_unselected.parquet: every putative site that missed the\n\
@@ -128,8 +129,8 @@ enum Commands {
               per-replicate mixture counts — components fit on pooled replicates,\n\
               counted per batch (shared row schema); --no-mixture skips it\n\n\
             Reference:\n  \
-            Meyer, \"DART-seq: an antibody-free method\n\
-            for global m6A detection\", Nature Methods, 16(12):1275-1280, 2019.\n\
+            Meyer, \"DART-seq: an antibody-free method for global m6A detection\",\n\
+            Nature Methods, 16(12):1275-1280, 2019.\n\
             https://doi.org/10.1038/s41592-019-0570-0",
         after_long_help = "\
 Example:\n  \
@@ -155,9 +156,7 @@ Example:\n  \
             --method simple instead writes a per-replicate {batch} matrix\n\
             for each input BAM.\n\n\
             Reference:\n\
-            Zhou et al., \"SCAPE: a mixture model revealing\n\
-            single-cell polyadenylation diversity and cellular dynamics\n\
-            during cell differentiation and reprogramming\",\n\
+            Zhou et al., \"SCAPE: a mixture model revealing single-cell polyadenylation diversity and cellular dynamics during cell differentiation and reprogramming\",\n\
             Nucleic Acids Research, 50(11):e66, 2022.\n\
             https://doi.org/10.1093/nar/gkac167",
         after_long_help = "\
@@ -170,22 +169,23 @@ Example:\n  \
 
     #[command(name = "atoi", aliases = ["a2i", "editing"],
         about = "Detect and quantify A-to-I RNA editing sites",
-        long_about = "Detect A-to-I (adenosine-to-inosine) RNA editing sites\n\n\
-            Discovers editing sites from A->G (forward) or T->C (reverse) conversions in BAM files.\n\
-            A putative site is a reference A/T with observed editing at/above the coverage floors.\n\
-            A marginal p-value cutoff (--pvalue) on the beta-binomial test then selects it,\n\
-            per site.\n\
-            Then quantifies per-cell editing at the selected sites.\n\n\
-            Outputs (one per input BAM, {batch}-prefixed):\n\
-            - atoi_sites.parquet: selected site annotations (single);\n\
-            usable as --atoi-mask input for `faba dartseq` or `faba apa`\n\
-            - atoi_sites_unselected.parquet: putative sites that missed the cut (reason column)\n\
-            - {batch}_atoi: gene-level two-channel matrix\n\
-              (edited + unedited counts per gene)\n\
-            - {batch}_atoi_site: per-site two-channel matrix,\n\
-              keyed on the single-base {chr}:{pos} site (min --site-min-cells)\n\
-            - {batch}_atoi_mixture (+ atoi_components.parquet):\n\
-              per-replicate mixture counts (unless --no-mixture)",
+        long_about = "Detect A-to-I (adenosine-to-inosine) RNA editing sites\n\
+                      \n\
+                      Discovers editing sites from A->G (forward) or T->C (reverse) conversions in BAM files.\n\
+                      A putative site is a reference A/T with observed editing at/above the coverage floors.\n\
+                      A marginal p-value cutoff (--pvalue) on the beta-binomial test then selects it,\n\
+                      per site. Then quantifies per-cell editing at the selected sites.\n\
+                      \n\
+                      Outputs (one per input BAM, {batch}-prefixed):\n\
+                      - atoi_sites.parquet: selected site annotations (single);\n\
+                      usable as --atoi-mask input for `faba dartseq` or `faba apa`\n\
+                      - atoi_sites_unselected.parquet: putative sites that missed the cut (reason column)\n\
+                      - {batch}_atoi: gene-level two-channel matrix\n\
+                      (edited + unedited counts per gene)\n\
+                      - {batch}_atoi_site: per-site two-channel matrix,\n\
+                      keyed on the single-base {chr}:{pos} site (min --site-min-cells)\n\
+                      - {batch}_atoi_mixture (+ atoi_components.parquet):\n\
+                      per-replicate mixture counts (unless --no-mixture)",
         after_long_help = "\
 	Example:\n\
 	faba atoi sample.bam -g genes.gff -f genome.fa -o out/\n\
@@ -194,11 +194,12 @@ Example:\n  \
 
     #[command(name = "genes", aliases = ["count-genes"],
         about = "Count reads per gene for single-cell or bulk RNA-seq",
-        long_about = "Count reads per gene for single-cell or bulk RNA-seq\n\n\
-            Produces a sparse (features x cells) count matrix per input BAM\n\
-            from GFF gene annotations. Supports 10x-style cell barcodes.\n\
-            Rows are `{gene_key}/count/{spliced|unspliced}` by default;\n\
-            --no-splice collapses them to one `{gene_key}/count/total` row per gene.",
+        long_about = "Count reads per gene for single-cell or bulk RNA-seq\n\
+                      \n\
+                      Produces a sparse (features x cells) count matrix per input BAM from GFF gene annotations.\n\
+                      Supports 10x-style cell barcodes.\n\
+                      Rows are `{gene_key}/count/{spliced|unspliced}` by default;\n\
+                      --no-splice collapses them to one `{gene_key}/count/total` row per gene.",
         after_long_help = "\
 	Example:\n\
 	faba genes sample.bam -g genes.gff -o out/\n\
@@ -208,10 +209,10 @@ Example:\n  \
 
     #[command(name = "depth", aliases = ["read-depth", "rd"],
         about = "Compute read depth over genomic intervals",
-        long_about = "Compute read depth over genomic intervals\n\n\
-            Bins the genome at the -r/--resolution-kb resolution (in KILOBASES)\n\
-            and counts read coverage per cell,\n\
-            producing a sparse (bins x cells) matrix per input BAM.",
+        long_about = "Compute read depth over genomic intervals\n\
+                      \n\
+                      Bins the genome at the -r/--resolution-kb resolution (in KILOBASES) and counts read coverage per cell,\n\
+                      producing a sparse (bins x cells) matrix per input BAM.",
         after_long_help = "\
 	Example:\n\
 	faba depth sample.bam -r 10 -o out/\n\
@@ -221,10 +222,11 @@ Example:\n  \
 
     #[command(name = "pwm", aliases = ["scan-pwm"],
         about = "Build position weight matrix around genomic sites",
-        long_about = "Build position weight matrix around genomic sites\n\n\
-            Reads site-level parquet files from dartseq or apa output,\n\
-            collects base frequencies in a +/- window around each site,\n\
-            and outputs a position weight matrix as TSV.",
+        long_about = "Build position weight matrix around genomic sites\n\
+                      \n\
+                      Reads site-level parquet files from dartseq or apa output,\n\
+                      collects base frequencies in a +/- window around each site,\n\
+                      and outputs a position weight matrix as TSV.",
         after_long_help = "\
 	Example:\n\
 	faba pwm -s out/m6a_sites.parquet -f genome.fa -o pwm.tsv\n\
@@ -236,19 +238,23 @@ Example:\n  \
         name = "pileup",
         alias = "inspect",
         about = "ASCII pileup, or a faceted Miami plot (SVG/PDF) for a gene",
-        long_about = "Pileup plot for a gene's (or region's) modification sites.\n\n\
-            Selection is `-q/--genes` (symbols or Ensembl IDs) and/or\n\
-            `--regions chr:lb-ub`; at least one is required,\n\
-            and everything matched is aggregated into one pileup.\n\n\
-            ASCII mode (default): reads one or more sparse matrices (zarr/h5) from faba output,\n\
-            filters to the selection, bins positions along the gene body,\n\
-            and renders a vertical ASCII histogram.\n\
-            Multiple files (e.g. replicates via a shell glob) are aggregated per position.\n\n\
-            Miami figure mode: passing --gtf, --bam, --format, --svg, or --png\n\
-            renders a publication SVG/PDF instead — a mirrored Manhattan\n\
-            with epi sites up, a GTF gene model in the middle,\n\
-            and BAM read depth down,\n\
-            faceted into one panel per cell type (--cell-membership).",
+        long_about = "Pileup plot for a gene's (or region's) modification sites.\n\
+                      \n\
+                      Selection is `-q/--genes` (symbols or Ensembl IDs) and/or `--regions chr:lb-ub`;\n\
+                      at least one is required,\n\
+                      and everything matched is aggregated into one pileup.\n\
+                      \n\
+                      ASCII mode (default):\n\
+                      reads one or more sparse matrices (zarr/h5) from faba output,\n\
+                      filters to the selection, bins positions along the gene body,\n\
+                      and renders a vertical ASCII histogram.\n\
+                      Multiple files (e.g. replicates via a shell glob) are aggregated per position.\n\
+                      \n\
+                      Miami figure mode: passing --gtf, --bam, --format, --svg,\n\
+                      or --png renders a publication SVG/PDF instead —\n\
+                      a mirrored Manhattan with epi sites up, a GTF gene model in the middle,\n\
+                      and BAM read depth down,\n\
+                      faceted into one panel per cell type (--cell-membership).",
         after_long_help = "\
 	Examples:\n\
 	# ASCII histogram (unchanged)\n\
@@ -284,9 +290,8 @@ Example:\n  \
             --dist-measures is our name for the per-site table that script reads.\n\n\
             See docs/profiling-methods.md sections 1.2 and 7.\n\n\
             Reference:\n\
-            Olarerin-George and Jaffrey, \"MetaPlotR: a Perl/R pipeline\n\
-            for plotting metagenes of nucleotide modifications and other\n\
-            transcriptomic sites\", Bioinformatics, 33(10):1563-1564, 2017.\n\
+            Olarerin-George and Jaffrey, \"MetaPlotR: a Perl/R pipeline for plotting metagenes of nucleotide modifications and other transcriptomic sites\",\n\
+            Bioinformatics, 33(10):1563-1564, 2017.\n\
             https://doi.org/10.1093/bioinformatics/btx002",
         after_long_help = "\
 	Example:\n\
@@ -299,34 +304,38 @@ Example:\n  \
 
     #[command(name = "snp", aliases = ["genotype"],
         about = "Discover and genotype SNP variants from BAM pileup",
-        long_about = "Discover and genotype SNP variants from BAM pileup\n\n\
-            Two modes of operation:\n\
-            1. De novo discovery (default): compare reads to reference genome,\n\
-               call variants where alt allele evidence exceeds thresholds.\n\
-            2. Known-site genotyping (--known-snps): force-call at VCF positions.\n\
-            Both modes can be combined.\n\n\
-            Supports 10x single-cell (per-cell allele counts + depth for BAF)\n\
-            and bulk WGS/RNA-seq modes.\n\n\
-            Outputs:\n\
-            - snp_sites.parquet: genotype calls with allele counts and GQ\n\
-            - snp_sites.vcf.gz: the same calls as VCF\n\
-              (skipped with a warning when the FASTA has no readable .fai)\n\
-            - {batch}_baf: per-cell allele frequency matrix (10x)\n\n\
-            The GENOTYPE CALLS are the parquet/VCF. `{batch}_baf` is a different\n\
-            thing: an allele-frequency track carrying two read counts per cell per\n\
-            locus and no genotype, no GQ, no rsid.\n\
-            Rows are `{chr}:{pos}/baf/{alt|depth}` — keyed on the LOCUS, since a\n\
-            variant is a coordinate and belongs to no gene.\n\
-            BAF = alt / depth per cell per locus;\n\
-            the channels nest (alt ≤ depth), so never sum them.\n\
-            Needs -g/--gff, which is what gives each locus a region to fetch reads from.\n\
-            (matrices are `.zarr.zip` by default; `.zarr` with --no-zip,\n\
-            `.h5` for the hdf5 backend.)\n\n\
-            Uses a binomial genotype likelihood model (cellSNP-lite;\n\
-            Huang & Huang, Bioinformatics 2021).\n\n\
-            The SNP mask output can be used with --snp-mask in `faba atoi`,\n\
-            `faba dartseq`, and `faba apa`\n\
-            to filter genetic variants that masquerade as base modifications.",
+        long_about = "Discover and genotype SNP variants from BAM pileup\n\
+                      \n\
+                      Two modes of operation:\n\
+                      1. De novo discovery (default): compare reads to reference genome,\n\
+                      call variants where alt allele evidence exceeds thresholds.\n\
+                      2. Known-site genotyping (--known-snps): force-call at VCF positions.\n\
+                      Both modes can be combined.\n\
+                      \n\
+                      Supports 10x single-cell (per-cell allele counts + depth for BAF) and bulk WGS/RNA-seq modes.\n\
+                      \n\
+                      Outputs:\n\
+                      - snp_sites.parquet: genotype calls with allele counts and GQ\n\
+                      - snp_sites.vcf.gz: the same calls as VCF\n\
+                      (skipped with a warning when the FASTA has no readable .fai)\n\
+                      - {batch}_baf: per-cell allele frequency matrix (10x)\n\
+                      \n\
+                      The GENOTYPE CALLS are the parquet/VCF.\n\
+                      `{batch}_baf` is a different thing:\n\
+                      an allele-frequency track carrying two read counts per cell per locus and no genotype,\n\
+                      no GQ, no rsid. Rows are `{chr}:{pos}/baf/{alt|depth}` —\n\
+                      keyed on the LOCUS,\n\
+                      since a variant is a coordinate and belongs to no gene.\n\
+                      BAF = alt / depth per cell per locus; the channels nest (alt ≤ depth),\n\
+                      so never sum them. Needs -g/--gff,\n\
+                      which is what gives each locus a region to fetch reads from.\n\
+                      (matrices are `.zarr.zip` by default; `.zarr` with --no-zip, `.h5` for the hdf5 backend.)\n\
+                      \n\
+                      Uses a binomial genotype likelihood model (cellSNP-lite; Huang & Huang, Bioinformatics 2021).\n\
+                      \n\
+                      The SNP mask output can be used with --snp-mask in `faba atoi`,\n\
+                      `faba dartseq`,\n\
+                      and `faba apa` to filter genetic variants that masquerade as base modifications.",
         after_long_help = "\
 	Example:\n\
 	# De novo discovery\n\
@@ -359,34 +368,36 @@ Example:\n  \
         aliases = ["gem-embedding"],
         about = "GEM: Geodesic Embedding for RNA Motion in one cell space",
         long_about = "Geodesic Embedding for RNA Motion: a joint cell-feature embedding.\n\
-            Motion is the local velocity δ (the tangent); the lineage is the geodesic path it traces.\n\
-            Runs over the shared graph_embedding_util engine, which is modality-agnostic.\n\
-            Fed gene counts (spliced + unspliced) today; embeds any per-feature count.\n\n\
-            Per-gene β-sharing: each `{gene}/count/{spliced|unspliced}` row embeds as β_g.\n\
-            A gene's spliced and unspliced tracks thus share one identity.\n\
-            Cell identity θ → `{out}.cell_embedding.parquet` (raw)\n\
-            and the velocity increment δ → `{out}.velocity.parquet`\n\
-            are solved JOINTLY by default,\n\
-            so θ is powered by both splice tracks rather than the spliced one alone.\n\
-            `--sequential-velocity` reverts to the older two-step fit\n\
-            (θ from the spliced edges, then δ from the unspliced with θ held fixed),\n\
-            which pins θ to the mature state for a cleaner δ readout.\n\
-            The nascent state is just θ+δ; ‖δ‖ is speed.\n\
-            Per-gene velocity is the in-model δ_g\n\
-            → `{out}.delta_feature_embedding.parquet`;\n\
-            it is written whenever the input carries unspliced rows\n\
-            (`--delta-l2 0`, the default, auto-applies a mild ridge to keep it identified).\n\
-            The per-gene identity β_g is `{out}.beta_feature_embedding.parquet`,\n\
-            gene-keyed so a marker panel joins against it directly.\n\n\
-            `{out}.velocity_increment.parquet` is a DIAGNOSTIC, not the velocity:\n\
-            it is the raw per-cell Poisson increment δ_c, which is dominated by a\n\
-            shrinkage-toward-origin common mode (δ_c ≈ −0.5·θ, from fitting sparse\n\
-            unspliced counts absolutely). Use `{out}.velocity.parquet` for the velocity.\n\n\
-            With `--lineage-dag` it also shapes the embedding along a pseudobulk lineage.\n\
-            It then writes a per-cell pseudotime + fate backbone.\n\
-            That backbone is a prior for `faba lineage`, not a replacement.\n\n\
-            `{out}.gem.json` records that this prefix came from the EMBEDDING model,\n\
-            which is how `faba annotate` and `faba lineage` pick their statistic.",
+                      Motion is the local velocity δ (the tangent);\n\
+                      the lineage is the geodesic path it traces.\n\
+                      Runs over the shared graph_embedding_util engine,\n\
+                      which is modality-agnostic. Fed gene counts (spliced + unspliced) today;\n\
+                      embeds any per-feature count.\n\
+                      \n\
+                      Per-gene β-sharing:\n\
+                      each `{gene}/count/{spliced|unspliced}` row embeds as β_g.\n\
+                      A gene's spliced and unspliced tracks thus share one identity.\n\
+                      Cell identity θ → `{out}.cell_embedding.parquet` (raw) and the velocity increment δ → `{out}.velocity.parquet` are solved JOINTLY by default,\n\
+                      so θ is powered by both splice tracks rather than the spliced one alone.\n\
+                      `--sequential-velocity` reverts to the older two-step fit (θ from the spliced edges, then δ from the unspliced with θ held fixed),\n\
+                      which pins θ to the mature state for a cleaner δ readout.\n\
+                      The nascent state is just θ+δ; ‖δ‖ is speed.\n\
+                      Per-gene velocity is the in-model δ_g → `{out}.delta_feature_embedding.parquet`;\n\
+                      it is written whenever the input carries unspliced rows (`--delta-l2 0`, the default, auto-applies a mild ridge to keep it identified).\n\
+                      The per-gene identity β_g is `{out}.beta_feature_embedding.parquet`,\n\
+                      gene-keyed so a marker panel joins against it directly.\n\
+                      \n\
+                      `{out}.velocity_increment.parquet` is a DIAGNOSTIC, not the velocity:\n\
+                      it is the raw per-cell Poisson increment δ_c,\n\
+                      which is dominated by a shrinkage-toward-origin common mode (δ_c ≈ −0.5·θ, from fitting sparse unspliced counts absolutely).\n\
+                      Use `{out}.velocity.parquet` for the velocity.\n\
+                      \n\
+                      With `--lineage-dag` it also shapes the embedding along a pseudobulk lineage.\n\
+                      It then writes a per-cell pseudotime + fate backbone.\n\
+                      That backbone is a prior for `faba lineage`, not a replacement.\n\
+                      \n\
+                      `{out}.gem.json` records that this prefix came from the EMBEDDING model,\n\
+                      which is how `faba annotate` and `faba lineage` pick their statistic.",
         after_long_help = "\
 	Example:\n\
   faba gem out/rep1_wt_genes.zarr.zip -o out/gem\n\n\
@@ -405,51 +416,59 @@ Example:\n  \
         visible_aliases = ["gem-topic"],
         aliases = ["gem-enc"],
         about = "GEM-encoder: a masked generative model of the GEM",
-        long_about = "GEM-encoder — the masked generative sibling of `faba gem`.\n\n\
-            Both fit the same geometry over the same spliced+unspliced counts, from opposite directions.\n\
-            `gem` is discriminative (NCE over cell-feature edges).\n\
-            This is generative and amortized: an encoder reads a cell\'s top-K GENES\n\
-            with BOTH splice tracks attached, pools each track over that context\n\
-            (not over the full gene space),\n\
-            and an embedded-topic decoder imputes whichever track was held out.\n\n\
-            The model runs the biology forward: u + delta -> s.\n\
-            Nascent pre-mRNA is transcribed first and matures into spliced mRNA,\n\
-            so the UNSPLICED embedding is the base rho and the spliced one is rho + delta.\n\
-            Delta is therefore the steady-state splice-ratio offset\n\
-            — log(splicing / degradation), not a splicing rate —\n\
-            because that is the combination that survives at steady state (s = (beta/gamma) u).\n\
-            A gene scores high either by splicing fast or by having stable mature mRNA,\n\
-            and this model cannot tell those apart.\n\
-            NOTE this is the OPPOSITE base from `faba gem`, whose delta shifts spliced -> unspliced;\n\
-            the two write same-named delta_feature_embedding.parquet files that are NOT comparable.\n\
-            `{out}.gem.json` records `delta_base`.\n\n\
-            Training masks a fraction of GENES with ONE draw shared by both tracks,\n\
-            and predicts both from ONE theta. That gives delta a monopoly: the only\n\
-            thing that can make the two tracks differ is delta itself.\n\
-            Hiding a whole track instead was tried and removed — it hands the encoder\n\
-            a competing LATENT delta, which it takes, and delta degenerates.\n\n\
-            VELOCITY is the cell-level delta = theta_nascent - theta_mature, each\n\
-            fitted POST HOC to its own track against the frozen dictionaries\n\
-            (elliptical slice sampling warm-started from the encoder, which also\n\
-            closes the amortization gap). The model has one latent by design, so it\n\
-            cannot express that difference while training; estimating delta first and\n\
-            reading the movement out of it keeps the two from competing.\n\
-            The per-axis population mean is removed before writing and recorded\n\
-            in `{out}.gem.json` as `velocity_common_mode`.\n\n\
-            The latent is a softmax simplex — hence the `gem-topic` alias —\n\
-            and `{out}.latent.parquet` holds LOG THETA, so theta = exp(row),\n\
-            the same contract every senna topic-family run follows.\n\
-            Pick the loss with `--likelihood nb|multinomial`\n\n\
-            BATCH ADJUSTMENT IS ON BY DEFAULT, and you should check what your batches are:\n\
-            with several inputs and no `--batch-files`,\n\
-            each file's cells are tagged `@<sample>` and that tag becomes the batch —\n\
-            so on rep{1,2,3}_{wt,mut} the batches are the SIX samples\n\
-            and the wt-vs-mut contrast is removed along with the donor effects.\n\
-            Pass `--batch-files` with the labels you mean, or `--no-batch-adjust`.\n\n\
-            Pooling is a masked value-weighted sum per track, concatenated;\n\
-            the attention-slot variant was removed after it measured 3.5x worse\n\
-            on between-cell variance and went degenerate whenever a track was hidden.\n\
-            Ctrl-C stops training gracefully and still writes outputs, flagged as partial.",
+        long_about = "GEM-encoder — the masked generative sibling of `faba gem`.\n\
+                      \n\
+                      Both fit the same geometry over the same spliced+unspliced counts,\n\
+                      from opposite directions.\n\
+                      `gem` is discriminative (NCE over cell-feature edges).\n\
+                      This is generative and amortized:\n\
+                      an encoder reads a cell\'s top-K GENES with BOTH splice tracks attached,\n\
+                      pools each track over that context (not over the full gene space),\n\
+                      and an embedded-topic decoder imputes whichever track was held out.\n\
+                      \n\
+                      The model runs the biology forward:\n\
+                      u + delta -> s. Nascent pre-mRNA is transcribed first and matures into spliced mRNA,\n\
+                      so the UNSPLICED embedding is the base rho and the spliced one is rho + delta.\n\
+                      Delta is therefore the steady-state splice-ratio offset —\n\
+                      log(splicing / degradation), not a splicing rate —\n\
+                      because that is the combination that survives at steady state (s = (beta/gamma) u).\n\
+                      A gene scores high either by splicing fast or by having stable mature mRNA,\n\
+                      and this model cannot tell those apart.\n\
+                      NOTE this is the OPPOSITE base from `faba gem`,\n\
+                      whose delta shifts spliced -> unspliced;\n\
+                      the two write same-named delta_feature_embedding.parquet files that are NOT comparable.\n\
+                      `{out}.gem.json` records `delta_base`.\n\
+                      \n\
+                      Training masks a fraction of GENES with ONE draw shared by both tracks,\n\
+                      and predicts both from ONE theta. That gives delta a monopoly:\n\
+                      the only thing that can make the two tracks differ is delta itself.\n\
+                      Hiding a whole track instead was tried and removed —\n\
+                      it hands the encoder a competing LATENT delta, which it takes,\n\
+                      and delta degenerates.\n\
+                      \n\
+                      VELOCITY is the cell-level delta = theta_nascent - theta_mature,\n\
+                      each fitted POST HOC to its own track against the frozen dictionaries (elliptical slice sampling warm-started from the encoder, which also closes the amortization gap).\n\
+                      The model has one latent by design,\n\
+                      so it cannot express that difference while training;\n\
+                      estimating delta first and reading the movement out of it keeps the two from competing.\n\
+                      The per-axis population mean is removed before writing and recorded in `{out}.gem.json` as `velocity_common_mode`.\n\
+                      \n\
+                      The latent is a softmax simplex — hence the `gem-topic` alias —\n\
+                      and `{out}.latent.parquet` holds LOG THETA, so theta = exp(row),\n\
+                      the same contract every senna topic-family run follows.\n\
+                      Pick the loss with `--likelihood nb|multinomial`\n\
+                      \n\
+                      BATCH ADJUSTMENT IS ON BY DEFAULT,\n\
+                      and you should check what your batches are:\n\
+                      with several inputs and no `--batch-files`,\n\
+                      each file's cells are tagged `@<sample>` and that tag becomes the batch —\n\
+                      so on rep{1,2,3}_{wt,mut} the batches are the SIX samples and the wt-vs-mut contrast is removed along with the donor effects.\n\
+                      Pass `--batch-files` with the labels you mean, or `--no-batch-adjust`.\n\
+                      \n\
+                      Pooling is a masked value-weighted sum per track, concatenated;\n\
+                      the attention-slot variant was removed after it measured 3.5x worse on between-cell variance and went degenerate whenever a track was hidden.\n\
+                      Ctrl-C stops training gracefully and still writes outputs,\n\
+                      flagged as partial.",
         after_long_help = "\
 	Example:\n\
   faba gem-encoder out/rep2_wt_genes.zarr.zip out/rep2_mut_genes.zarr.zip \\\n\
@@ -463,38 +482,38 @@ Example:\n  \
         name = "annotate",
         aliases = ["annot", "ann"],
         about = "Marker-set cell-type annotation of a `faba gem` or `gem-encoder` run",
-        long_about = "Annotate a gem-family run against a marker set.\n\n\
-            Reads the run's parquet outputs by prefix (`-f/--from`) and a marker TSV\n\
-            (`gene<TAB>celltype`, `-m/--markers`), then runs the shared term-ORA core\n\
-            (assign → distance-outlier QC → Leiden clustering →\n\
-            cluster×term hypergeometric over-representation, permutation-calibrated).\n\n\
-            TWO SCORERS (`--mode`), and they are not two flavours of one statistic:\n\
-            they read different files and rest on different assumptions about the geometry.\n\
-            The default is read from `{from}.gem.json` rather than fixed,\n\
-            because the wrong one here does not error — it answers wrong.\n\
-            An embedding run (`faba gem`) → `projection`;\n\
-            a topic model (`faba gem-encoder` / `gem-topic`) → `enrichment`.\n\
-            A prefix that cannot say what produced it is reported, not guessed at.\n\n\
-            `projection` builds each type's centroid from its markers' CO-EMBEDDED\n\
-            feature vectors and hands every cell to the nearest one. It reads\n\
-            `feature_embedding.parquet` (NOT the raw `beta_feature_embedding` or\n\
-            `delta_feature_embedding`, which are model parameters off the cell manifold)\n\
-            plus `cell_embedding.parquet`. Its tracks:\n\
-              spliced:  /count/spliced rows   vs cell θ         → {out}.spliced.*\n\
-              velocity: /count/unspliced rows vs cell velocity  → {out}.velocity.*\n\n\
-            `enrichment` never forms a cell-gene inner product —\n\
-            on a topic model that is not a metric, since β depends only on gene-to-gene\n\
-            differences and the absolute direction is a gauge the likelihood never pins.\n\
-            It asks per factor whether a type's panel is over-represented at the top of\n\
-            that factor's gene ranking, then carries the surviving factor×type edges to\n\
-            cells through θ. It reads `dictionary.parquet`, `latent.parquet`,\n\
-            `pb_latent.parquet` and `pb_gene.parquet` → {out}.enrichment.*\n\
-            Its tracks are `spliced` and `nascent` (NOT velocity: a displacement has no\n\
-            membership to carry a call through). `nascent` annotates the nascent PROGRAM\n\
-            — a state the cell is in, on the simplex — and reading it against `spliced`\n\
-            is the well-posed form of the question `velocity` asks.\n\n\
-            `--track both` (default) runs both of whichever pair applies;\n\
-            the second track is skipped with a warning when its inputs are absent.",
+        long_about = "Annotate a gem-family run against a marker set.\n\
+                      \n\
+                      Reads the run's parquet outputs by prefix (`-f/--from`) and a marker TSV (`gene<TAB>celltype`, `-m/--markers`),\n\
+                      then runs the shared term-ORA core (assign → distance-outlier QC → Leiden clustering → cluster×term hypergeometric over-representation, permutation-calibrated).\n\
+                      \n\
+                      TWO SCORERS (`--mode`), and they are not two flavours of one statistic:\n\
+                      they read different files and rest on different assumptions about the geometry.\n\
+                      The default is read from `{from}.gem.json` rather than fixed,\n\
+                      because the wrong one here does not error — it answers wrong.\n\
+                      An embedding run (`faba gem`) → `projection`;\n\
+                      a topic model (`faba gem-encoder` / `gem-topic`) → `enrichment`.\n\
+                      A prefix that cannot say what produced it is reported, not guessed at.\n\
+                      \n\
+                      `projection` builds each type's centroid from its markers' CO-EMBEDDED feature vectors and hands every cell to the nearest one.\n\
+                      It reads `feature_embedding.parquet` (NOT the raw `beta_feature_embedding` or `delta_feature_embedding`, which are model parameters off the cell manifold) plus `cell_embedding.parquet`.\n\
+                      Its tracks:\n\
+                      spliced:  /count/spliced rows   vs cell θ         → {out}.spliced.*\n\
+                      velocity: /count/unspliced rows vs cell velocity  → {out}.velocity.*\n\
+                      \n\
+                      `enrichment` never forms a cell-gene inner product —\n\
+                      on a topic model that is not a metric,\n\
+                      since β depends only on gene-to-gene differences and the absolute direction is a gauge the likelihood never pins.\n\
+                      It asks per factor whether a type's panel is over-represented at the top of that factor's gene ranking,\n\
+                      then carries the surviving factor×type edges to cells through θ.\n\
+                      It reads `dictionary.parquet`, `latent.parquet`,\n\
+                      `pb_latent.parquet` and `pb_gene.parquet` → {out}.enrichment.* Its tracks are `spliced` and `nascent` (NOT velocity: a displacement has no membership to carry a call through).\n\
+                      `nascent` annotates the nascent PROGRAM — a state the cell is in,\n\
+                      on the simplex —\n\
+                      and reading it against `spliced` is the well-posed form of the question `velocity` asks.\n\
+                      \n\
+                      `--track both` (default) runs both of whichever pair applies;\n\
+                      the second track is skipped with a warning when its inputs are absent.",
         after_long_help = "\
 	Example:\n\
 	faba gem --genes out/rep1_genes.zarr.zip -o out/gem\n\
@@ -505,8 +524,9 @@ Example:\n  \
     #[command(
         name = "docs",
         about = "Print the method write-ups compiled into this binary",
-        long_about = "Print the method write-ups compiled into this binary.\n\n\
-            Run with no argument to list what there is."
+        long_about = "Print the method write-ups compiled into this binary.\n\
+                      \n\
+                      Run with no argument to list what there is."
     )]
     Docs(DocsArgs),
 
@@ -518,9 +538,10 @@ Example:\n  \
             Reads a θ/δ pair by prefix (`-f/--from`), picked by `--theta-from`:\n\
             on an EMBEDDING run, cell_embedding.parquet + velocity.parquet (H space);\n\
             on a TOPIC run, latent.parquet + velocity_factor.parquet (the K-space simplex).\n\
-            The topic default is deliberate: `cell_embedding = θ·α` confines every cell\n\
-            to the convex hull of α's K rows, so a diffuse softmax θ compresses the\n\
-            population toward that hull's centroid — blobby for reasons no layout can undo.\n\
+            The topic default is deliberate:\n\
+            `cell_embedding = θ·α` confines every cell to the convex hull of α's K rows,\n\
+            so a diffuse softmax θ compresses the population toward that hull's centroid —\n\
+            blobby for reasons no layout can undo.\n\
             `--latent-geometry` sets the metric (Hellinger on a simplex, else cosine).\n\
             Fits K k-means centroids on θ and an MST over them,\n\
             then TESTS the velocity direction of every candidate edge\n\
@@ -540,21 +561,20 @@ Example:\n  \
             --root-from-gem (gem's velocity-DAG source),\n\
             else the velocity-flux source.\n\n\
             The low-coverage modalities are NOT embedded here;\n\
-            this produces the lineage ordering\n\
-            that a separate confounder-adjusted test runs against.\n\n\
+            this produces the lineage ordering that a separate confounder-adjusted test runs against.\n\n\
             Outputs (all `{out}`-prefixed parquet):\n\
             nodes, node_velocity,\n\
             edges (every candidate edge with its velocity_flux, CI, q and call),\n\
             trees (the selected branching), lineages, pseudotime,\n\
             cell_lineage_weights, lineage_pseudotime, curves;\n\
             with --markers also lineage_annot.* + trajectory_annotation;\n\
-            with --layout phate (default) or umap also {cells,nodes,curves}_2d\n\
+            with --layout phate (default) or umap also {cells,nodes,curves}_2d,\n\
             plus velocity_grid_2d (the gridded δ arrow field, when the run has δ).\n\
-            The layout embeds θ alone by default, so position means identity\n\
+            The layout embeds θ alone by default, so position means identity,\n\
             and the arrow field carries the direction.\n\n\
             Reference:\n  \
-            Street et al., \"Slingshot: cell lineage and pseudotime inference\n\
-            for single-cell transcriptomics\", BMC Genomics, 19:477, 2018.\n\
+            Street et al., \"Slingshot: cell lineage and pseudotime inference for single-cell transcriptomics\",\n\
+            BMC Genomics, 19:477, 2018.\n\
             https://doi.org/10.1186/s12864-018-4772-0",
         after_long_help = "\
 	Example:\n\
@@ -567,36 +587,35 @@ Example:\n  \
         name = "plot",
         aliases = ["plot-lineage", "trajectory-plot"],
         about = "Publication-style figure (PDF/PNG/SVG) of a `faba lineage` trajectory over its 2D embedding",
-        long_about = "Render the outputs of `faba lineage --markers` (with the default --layout phate)\n\
-            into a single annotated figure:\n\
-            cells laid out on the PHATE embedding,\n\
-            coloured by coarse cell type (default) or pseudotime,\n\
-            with a trajectory backbone, velocity arrows and MST nodes overlaid.\n\n\
-            Reads by prefix (`-f/--from`): {from}.cells_2d.parquet (PHATE coords),\n\
-            {from}.lineage_annot.annot.parquet (per-cell coarse_label),\n\
-            {from}.curves_2d.parquet (principal curves),\n\
-            {from}.nodes_2d.parquet (MST nodes),\n\
-            {from}.trajectory_annotation.parquet (node role/cell_type),\n\
-            and {from}.pseudotime.parquet (for --color-by pseudotime).\n\n\
-            The cells are drawn as transparent raster layers per cell type\n\
-            from a qualitative palette (with a legend) —\n\
-            confident calls solid, mixed ones faded —\n\
-            or one continuous blue->red pseudotime layer (with a colourbar).\n\n\
-            The backbone is `--trajectory auto` by default:\n\
-            the Slingshot principal curves when the run has few lineages,\n\
-            otherwise the MST drawn ONCE with stroke weight by traversal count\n\
-            (the curves all share the trunk, so past ~24 lineages they overplot\n\
-            into an opaque mat). Force it with `tree`, `curves` or `none`.\n\
-            Direction is ALWAYS shown as velocity arrows read off `velocity_flux`,\n\
-            independent of that choice, and only on edges whose velocity earned one.\n\
-            Nodes are dark overlays; the root is marked with a red star, and\n\
-            `--label-nodes` (default `per-type`) labels one node per called cell type,\n\
-            on its most-differentiated node.\n\
-            Uses the shared plot-utils rasterize -> SVG -> render pipeline;\n\
-            writes {out}.plot.pdf by default\n\
-            (--png / --svg add those formats, --no-pdf skips the PDF).\n\
-            The scatter is a raster layer, so the PDF is a hybrid\n\
-            (vector text over raster points at --dpi; raise --dpi to 300-600 for print).",
+        long_about = "Render the outputs of `faba lineage --markers` (with the default --layout phate) into a single annotated figure:\n\
+                      cells laid out on the PHATE embedding,\n\
+                      coloured by coarse cell type (default) or pseudotime,\n\
+                      with a trajectory backbone, velocity arrows and MST nodes overlaid.\n\
+                      \n\
+                      Reads by prefix (`-f/--from`): {from}.cells_2d.parquet (PHATE coords),\n\
+                      {from}.lineage_annot.annot.parquet (per-cell coarse_label),\n\
+                      {from}.curves_2d.parquet (principal curves),\n\
+                      {from}.nodes_2d.parquet (MST nodes),\n\
+                      {from}.trajectory_annotation.parquet (node role/cell_type),\n\
+                      and {from}.pseudotime.parquet (for --color-by pseudotime).\n\
+                      \n\
+                      The cells are drawn as transparent raster layers per cell type from a qualitative palette (with a legend) —\n\
+                      confident calls solid, mixed ones faded —\n\
+                      or one continuous blue->red pseudotime layer (with a colourbar).\n\
+                      \n\
+                      The backbone is `--trajectory auto` by default:\n\
+                      the Slingshot principal curves when the run has few lineages,\n\
+                      otherwise the MST drawn ONCE with stroke weight by traversal count (the curves all share the trunk, so past ~24 lineages they overplot into an opaque mat).\n\
+                      Force it with `tree`, `curves` or `none`.\n\
+                      Direction is ALWAYS shown as velocity arrows read off `velocity_flux`,\n\
+                      independent of that choice, and only on edges whose velocity earned one.\n\
+                      Nodes are dark overlays; the root is marked with a red star,\n\
+                      and `--label-nodes` (default `per-type`) labels one node per called cell type,\n\
+                      on its most-differentiated node.\n\
+                      Uses the shared plot-utils rasterize -> SVG -> render pipeline;\n\
+                      writes {out}.plot.pdf by default (--png / --svg add those formats, --no-pdf skips the PDF).\n\
+                      The scatter is a raster layer,\n\
+                      so the PDF is a hybrid (vector text over raster points at --dpi; raise --dpi to 300-600 for print).",
         after_long_help = "\
 	Example:\n\
 	faba lineage -f out/gem -o out/lin --markers markers.tsv\n\
@@ -611,15 +630,17 @@ Example:\n  \
         about = "Bayesian between-branch modality contrast along a `faba lineage`",
         long_about = "Test whether a modality (m6a/apa/atoi) diverges between lineage branches.\n\n\
             Downstream of `faba lineage` (like `annotate` is to `gem`).\n\
-            Cells are pooled into pseudotime BINS, and each branch L is tested against the rest\n\
-            with a binomial GLM  logit(p_{b,g}) = α_b + β·1[g=L],\n\
-            where b indexes the bin and the per-bin baseline α_b conditions out pseudotime\n\
-            (matched-null, à la tradeSeq patternTest / cocoa)\n\
+            Cells are pooled into pseudotime BINS,\n\
+            and each branch L is tested against the rest with a binomial GLM:\n\
+            logit(p_{b,g}) = α_b + β·1[g=L],\n\
+            where b indexes the bin.\n\
+            The per-bin baseline α_b conditions out pseudotime,\n\
+            a matched null, à la tradeSeq patternTest / cocoa,\n\
             so β is the branch's pseudotime-adjusted log-odds excess.\n\
-            Coverage (edited + unedited) is the binomial denominator\n\
+            Coverage (edited + unedited) is the binomial denominator,\n\
             so detection bias is conditioned out;\n\
-            a shrinkage prior N(0, τ²) on β damps noisy calls\n\
-            (stable across seeds — no permutation machinery).\n\
+            a shrinkage prior N(0, τ²) on β damps noisy calls,\n\
+            stable across seeds, with no permutation machinery.\n\
             Reports the posterior mean effect, 90% credible interval,\n\
             and lfsr = min(P(β>0), P(β<0));\n\
             the within-branch trend GAM (--trend-method) runs alongside.\n\n\
@@ -648,8 +669,8 @@ Example:\n  \
             When |lfsr - alpha| is not comfortably above mcse_lfsr,\n\
             raise --posterior-samples rather than reading anything into the effect.\n\n\
             Reference:\n  \
-            Van den Berge et al., \"Trajectory-based differential expression analysis\n\
-            for single-cell sequencing data\", Nat Commun 11:1201, 2020.",
+            Van den Berge et al., \"Trajectory-based differential expression analysis for single-cell sequencing data\",\n\
+            Nat Commun 11:1201, 2020.",
         after_long_help = "\
 	Example:\n\
 	faba lineage -f out/gem -o out/lin --markers markers.tsv\n\
@@ -661,37 +682,39 @@ Example:\n  \
         name = "all",
         aliases = ["pipeline", "full", "magic"],
         about = "Run all RNA-seq analyses: SNP → genes → ATOI → m6A → APA",
-        long_about = "\
-	Run all RNA-seq analyses in a unified pipeline\n\n\
-	Orchestrates the complete analysis workflow:\n\
-	0. SNP genotyping (de novo + optional --known-snps; skip --skip-snp)\n\
-	1. Gene expression filtering (identify expressed genes)\n\
-	2. Per-cell read depth (only with --depth-resolution-kb)\n\
-	3. ATOI detection (A-to-I editing sites, masked by SNP)\n\
-        4. m6A detection (DART C→T, WT-vs-MUT contrast; skipped w/o --control-bam)\n\
-        5. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\n\
-        Read depth is independent of every other step:\n\
-        it consumes no mask, produces none, and nothing downstream reads it.\n\
-        It runs straight after gene counting only to share that step's called-cell axis,\n\
-        so its columns match every other matrix.\n\n\
-        APA runs LAST because the SCAPE EM is the heavy step\n\
-        and nothing else waits on it;\n\
-        m6A discovery needs only the SNP + ATOI masks, so the fast modalities finish first.\n\n\
-        Discovery runs in bulk, over all cells that passed step 1 at once,\n\
-        for both ATOI and m6A —\n\
-        so the two modalities cannot disagree about which cells were compared.\n\n\
-        ATOI is reference-anchored and tested per site\n\
-        against a beta-binomial error null (no control).\n\
-        m6A instead needs a catalytically-dead control (--control-bam):\n\
-        each motif C is tested for higher conversion in the positional BAMs\n\
-        than the pooled control, so genomic C/T variants are rejected;\n\
-        without a control the m6A step is skipped.\n\
-        The WT-vs-MUT split is only for that contrast:\n\
-        control BAMs are otherwise quantified like the positional samples,\n\
-        so every modality is produced for them too.\n\
-        Gene filter applies after step 1;\n\
-        the SNP mask feeds steps 2-4 (m6A only with --m6a-snp-mask)\n\
-        and the ATOI mask feeds steps 3-4.",
+        long_about = "Run all RNA-seq analyses in a unified pipeline\n\
+                      \n\
+                      Orchestrates the complete analysis workflow:\n\
+                      0. SNP genotyping (de novo + optional --known-snps; skip --skip-snp)\n\
+                      1. Gene expression filtering (identify expressed genes)\n\
+                      2. Per-cell read depth (only with --depth-resolution-kb)\n\
+                      3. ATOI detection (A-to-I editing sites, masked by SNP)\n\
+                      4. m6A detection (DART C→T, WT-vs-MUT contrast; skipped w/o --control-bam)\n\
+                      5. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\
+                      \n\
+                      Read depth is independent of every other step: it consumes no mask,\n\
+                      produces none, and nothing downstream reads it.\n\
+                      It runs straight after gene counting only to share that step's called-cell axis,\n\
+                      so its columns match every other matrix.\n\
+                      \n\
+                      APA runs LAST because the SCAPE EM is the heavy step and nothing else waits on it;\n\
+                      m6A discovery needs only the SNP + ATOI masks,\n\
+                      so the fast modalities finish first.\n\
+                      \n\
+                      Discovery runs in bulk, over all cells that passed step 1 at once,\n\
+                      for both ATOI and m6A —\n\
+                      so the two modalities cannot disagree about which cells were compared.\n\
+                      \n\
+                      ATOI is reference-anchored and tested per site against a beta-binomial error null (no control).\n\
+                      m6A instead needs a catalytically-dead control (--control-bam):\n\
+                      each motif C is tested for higher conversion in the positional BAMs than the pooled control,\n\
+                      so genomic C/T variants are rejected;\n\
+                      without a control the m6A step is skipped.\n\
+                      The WT-vs-MUT split is only for that contrast:\n\
+                      control BAMs are otherwise quantified like the positional samples,\n\
+                      so every modality is produced for them too.\n\
+                      Gene filter applies after step 1;\n\
+                      the SNP mask feeds steps 2-4 (m6A only with --m6a-snp-mask) and the ATOI mask feeds steps 3-4.",
         after_long_help = "\
 	Example:\n\
 	faba all sample.bam -g genes.gff -f genome.fa -o out/\n\

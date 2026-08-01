@@ -26,8 +26,8 @@ pub struct FromMultiomeArgs {
     #[arg(
         long,
         help = "Optional ATAC fragments file (e.g. atac_fragments.tsv.gz)",
-        long_help = "Optional ATAC fragments file (e.g. atac_fragments.tsv.gz).\n\
-                     When provided, writes {out}.fragments.tsv.gz filtered to matched barcodes."
+        long_help = "Optional ATAC fragments file (e.g. atac_fragments.tsv.gz). When provided,\n\
+                     writes {out}.fragments.tsv.gz filtered to matched barcodes."
     )]
     pub fragments: Option<Box<str>>,
 }

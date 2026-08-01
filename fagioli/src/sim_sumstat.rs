@@ -105,8 +105,8 @@ pub struct SimSumstatArgs {
     #[arg(
         long,
         help = "External LD block file (BED: chr, start, end)",
-        long_help = "External LD block file in BED format (chr, start, end).\n\
-            If omitted, blocks are estimated from the genotype data via Nystrom + rSVD."
+        long_help = "External LD block file in BED format (chr, start, end). If omitted,\n\
+                     blocks are estimated from the genotype data via Nystrom + rSVD."
     )]
     pub ld_block_file: Option<Box<str>>,
 

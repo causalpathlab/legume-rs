@@ -13,7 +13,7 @@ pub struct SrtPropensityArgs {
         long,
         help = "Number of edge clusters for K-means",
         long_help = "Number of edge clusters for K-means.\n\
-                       Defaults to the number of latent dimensions if not specified."
+                     Defaults to the number of latent dimensions if not specified."
     )]
     n_edge_clusters: Option<usize>,
 
@@ -38,7 +38,7 @@ pub struct SrtPropensityArgs {
         required = true,
         help = "Coordinate pair file (.coord_pairs.parquet)",
         long_help = "Coordinate pair file (.coord_pairs.parquet from delta-svd).\n\
-                       Must contain left_cell and right_cell columns."
+                     Must contain left_cell and right_cell columns."
     )]
     coord_pair_file: Box<str>,
 
@@ -47,8 +47,8 @@ pub struct SrtPropensityArgs {
         long,
         value_delimiter(','),
         help = "Expression data files (.zarr or .h5)",
-        long_help = "Expression data files (.zarr or .h5, comma separated).\n\
-                       Optional; used for additional per-vertex expression statistics."
+        long_help = "Expression data files (.zarr or .h5, comma separated). Optional;\n\
+                     used for additional per-vertex expression statistics."
     )]
     expr_data_files: Option<Vec<Box<str>>>,
 
@@ -71,7 +71,7 @@ pub struct SrtPropensityArgs {
         value_delimiter(','),
         help = "Coordinate column names in coord_pair_file",
         long_help = "Coordinate column names in coord_pair_file (comma separated).\n\
-                       Looked up as left_{name} and right_{name}."
+                     Looked up as left_{name} and right_{name}."
     )]
     coord_column_names: Option<Vec<Box<str>>>,
 
@@ -86,8 +86,8 @@ pub struct SrtPropensityArgs {
         short,
         required = true,
         help = "Output file prefix",
-        long_help = "Output file prefix.\n\
-                       Generates: {out}.propensity.parquet, {out}.link_community.parquet"
+        long_help = "Output file prefix. Generates: {out}.propensity.parquet,\n\
+                     {out}.link_community.parquet"
     )]
     out: Box<str>,
 }

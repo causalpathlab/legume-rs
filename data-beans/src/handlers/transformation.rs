@@ -125,8 +125,8 @@ pub struct RunSqueezeArgs {
         alias = "preload-data",
         default_value_t = true,
         help = "Preload data into memory for faster processing",
-        long_help = "Preload all column data into memory before squeezing. \n\
-		     This can significantly speed up processing but requires more memory."
+        long_help = "Preload all column data into memory before squeezing.\n\
+                     This can significantly speed up processing but requires more memory."
     )]
     pub preload: bool,
 
@@ -136,8 +136,8 @@ pub struct RunSqueezeArgs {
         default_value_t = false,
         help = "Show ASCII histogram of row/column nnz distributions",
         long_help = "Display log1p-transformed ASCII histograms.\n\
-		     They cover row and column non-zero counts, before squeezing.\n\
-		     Use them to pick appropriate cutoff values."
+                     They cover row and column non-zero counts, before squeezing.\n\
+                     Use them to pick appropriate cutoff values."
     )]
     pub show_histogram: bool,
 
@@ -145,8 +145,8 @@ pub struct RunSqueezeArgs {
     #[arg(
         long,
         help = "Output file prefix for saving histogram data",
-        long_help = "Save histogram data to {prefix}.row_nnz.txt and {prefix}.col_nnz.txt files. \n\
-		     Each file contains nnz counts that can be used for further analysis."
+        long_help = "Save histogram data to {prefix}.row_nnz.txt and {prefix}.col_nnz.txt files.\n\
+                     Each file contains nnz counts that can be used for further analysis."
     )]
     pub save_histogram: Option<Box<str>>,
 
@@ -155,8 +155,8 @@ pub struct RunSqueezeArgs {
         long,
         default_value_t = false,
         help = "Preview mode - show histograms without squeezing",
-        long_help = "Only display histograms and statistics without actually performing the squeeze operation. \n\
-		     Useful for determining appropriate cutoff values."
+        long_help = "Only display histograms and statistics without actually performing the squeeze operation.\n\
+                     Useful for determining appropriate cutoff values."
     )]
     pub dry_run: bool,
 
@@ -166,8 +166,8 @@ pub struct RunSqueezeArgs {
         long,
         default_value_t = false,
         help = "Interactive mode - ask for confirmation after showing histogram",
-        long_help = "Show histogram and prompt user to proceed, adjust cutoffs, or cancel. \n\
-		     Automatically enables --show-histogram."
+        long_help = "Show histogram and prompt user to proceed, adjust cutoffs, or cancel.\n\
+                     Automatically enables --show-histogram."
     )]
     pub interactive: bool,
 
@@ -177,13 +177,11 @@ pub struct RunSqueezeArgs {
         default_value_t = false,
         help = "Apply the k-means-suggested nnz cutoff headlessly (no prompt)",
         long_help = "Resolve row and column cutoffs automatically, then squeeze.\n\
-		     The cutoffs come from a 2-means split of log(1+nnz).\n\
-		     No prompt is shown.\n\
-		     \n\
-		     Explicit --row-nnz-cutoff and --column-nnz-cutoff still win,\n\
-		     per dimension.\n\
-		     So you can pin one axis and auto the other.\n\
-		     Combine with --dry-run to preview the cutoffs without writing."
+                     The cutoffs come from a 2-means split of log(1+nnz). No prompt is shown.\n\
+                     \n\
+                     Explicit --row-nnz-cutoff and --column-nnz-cutoff still win,\n\
+                     per dimension. So you can pin one axis and auto the other.\n\
+                     Combine with --dry-run to preview the cutoffs without writing."
     )]
     pub auto_cutoff: bool,
 
@@ -192,9 +190,11 @@ pub struct RunSqueezeArgs {
         short,
         long,
         help = "Output file for squeezed data",
-        long_help = "Save squeezed data to a new file instead of modifying in-place. \n\
-		     With multiple inputs, all files will be squeezed and merged into {output}.{backend}. \n\
-		     If not specified, modifies files in-place (requires confirmation in interactive mode)."
+        long_help = "Save squeezed data to a new file instead of modifying in-place.\n\
+                     With multiple inputs,\n\
+                     all files will be squeezed and merged into {output}.{backend}.\n\
+                     If not specified,\n\
+                     modifies files in-place (requires confirmation in interactive mode)."
     )]
     pub output: Option<Box<str>>,
 
@@ -205,8 +205,8 @@ pub struct RunSqueezeArgs {
         default_value = "common",
         help = "Row alignment strategy when merging multiple files",
         long_help = "How to align rows across files after squeezing:\n\
-		     - common: Keep only rows present in ALL files (intersection)\n\
-		     - union: Keep rows present in ANY file (union, fills missing with zeros)"
+                     - common: Keep only rows present in ALL files (intersection)\n\
+                     - union: Keep rows present in ANY file (union, fills missing with zeros)"
     )]
     pub row_align: RowAlignMode,
 }

@@ -43,9 +43,9 @@ pub struct DartSeqCountArgs {
         help = "Control BAM files (catalytically-dead YTHmut)",
         long_help = "Comma-separated list of control (catalytically-dead YTHmut) BAM files,\n\
                      pooled into one background.\n\
-                     m6A is called where the signal BAMs show significantly higher C->T conversion\n\
-                     than these controls (two-sample test).\n\
-                     Required: m6A cannot be distinguished from genomic variation without a control."
+                     m6A is called where the signal BAMs show significantly higher C->T conversion than these controls (two-sample test).\n\
+                     Required:\n\
+                     m6A cannot be distinguished from genomic variation without a control."
     )]
     pub control_bam_files: Vec<Box<str>>,
 
@@ -74,7 +74,7 @@ pub struct DartSeqCountArgs {
         default_value = "GX",
         help = "Gene barcode tag",
         long_help = "Barcode tag used for gene identification in 10x Genomics BAM files.\n\
-		    [See here](`https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam`)"
+                     [See here](`https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/output/bam`)"
     )]
     pub gene_barcode_tag: Box<str>,
 
@@ -84,22 +84,22 @@ pub struct DartSeqCountArgs {
         help = "Minimum number of total reads per site",
         long_help = "Minimum number of total reads required per site for inclusion.\n\
                      \n\
-                     A candidacy floor, not a call: it decides which sites are\n\
-                     worth testing at all, and the p-value decides which are real.\n\
-                     Set low on purpose, because discovery is meant to be\n\
-                     promiscuous — a thin site costs almost nothing in the backend\n\
-                     and is easy to drop downstream, while a site never discovered\n\
-                     cannot be recovered without a rerun.\n\
+                     A candidacy floor, not a call:\n\
+                     it decides which sites are worth testing at all,\n\
+                     and the p-value decides which are real. Set low on purpose,\n\
+                     because discovery is meant to be promiscuous —\n\
+                     a thin site costs almost nothing in the backend and is easy to drop downstream,\n\
+                     while a site never discovered cannot be recovered without a rerun.\n\
                      \n\
                      KNOWN COST, measured on chr19+MYC. Lowering this to 3 and\n\
                      --min-conversion to 1 took the candidate pool from 1,606 to\n\
-                     3,503 and the tested count from 1,579 to 3,439, but changed the\n\
-                     call set by TWO sites (978 -> 980). Because the cutoff is\n\
-                     marginal with no multiplicity correction, every extra test adds\n\
+                     3,503 and the tested count from 1,579 to 3,439,\n\
+                     but changed the call set by TWO sites (978 -> 980).\n\
+                     Because the cutoff is marginal with no multiplicity correction,\n\
+                     every extra test adds\n\
                      0.05 expected false calls: 79 -> 172, i.e. 8.1% -> 17.5% of the\n\
-                     calls. Pass --min-coverage 5 --min-conversion 2 to buy that\n\
-                     back if a cleaner call set matters more than coverage of the\n\
-                     thin tail.\n\
+                     calls.\n\
+                     Pass --min-coverage 5 --min-conversion 2 to buy that back if a cleaner call set matters more than coverage of the thin tail.\n\
                      \n\
                      Null-cell QC removes cells that never edit before discovery runs.\n\
                      That roughly halves the coverage a site is judged on.\n\
@@ -113,18 +113,18 @@ pub struct DartSeqCountArgs {
         help = "Minimum converted (C->T) reads per site",
         long_help = "Minimum converted (C->T) reads required per site.\n\
                      \n\
-                     Also a candidacy floor. At the default of 1 a single converted\n\
-                     read makes a site testable, which is the promiscuous end of the\n\
-                     range: it raises the candidate count, and with it the run time,\n\
-                     the size of m6a_sites_unselected.parquet, and the expected\n\
-                     false-call count — see --min-coverage for the measurement, which\n\
-                     found the pair of loosened floors bought two extra calls for\n\
-                     twice the false-call burden.\n\
+                     Also a candidacy floor.\n\
+                     At the default of 1 a single converted read makes a site testable,\n\
+                     which is the promiscuous end of the range: it raises the candidate count,\n\
+                     and with it the run time, the size of m6a_sites_unselected.parquet,\n\
+                     and the expected false-call count —\n\
+                     see --min-coverage for the measurement,\n\
+                     which found the pair of loosened floors bought two extra calls for twice the false-call burden.\n\
                      \n\
-                     Note this truncates the null: a site only exists once it clears\n\
-                     this floor, so the p-values are not uniform under H0. That is\n\
-                     one of the reasons faba reports a marginal cutoff rather than\n\
-                     claiming FDR control."
+                     Note this truncates the null:\n\
+                     a site only exists once it clears this floor,\n\
+                     so the p-values are not uniform under H0.\n\
+                     That is one of the reasons faba reports a marginal cutoff rather than claiming FDR control."
     )]
     pub min_conversion: usize,
 
@@ -161,8 +161,8 @@ pub struct DartSeqCountArgs {
         long = "pvalue",
         default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
         help = "Marginal p-value cutoff for site detection; 1.0 disables it",
-        long_help = "Marginal p-value cutoff for m6A site detection.\n\
-                     Applied per site, to whatever clears the coverage and odds-ratio guards.\n\
+        long_help = "Marginal p-value cutoff for m6A site detection. Applied per site,\n\
+                     to whatever clears the coverage and odds-ratio guards.\n\
                      There is no multiplicity correction.\n\
                      BH needs independence or positive regression dependence.\n\
                      Neighbouring sites share reads, so it has neither.\n\
@@ -177,8 +177,8 @@ pub struct DartSeqCountArgs {
         long,
         value_enum,
         help = "Gene type (protein_coding, pseudogene, lncRNA)",
-        long_help = "Filter analysis by gene type. \n\
-		     Options include protein_coding, pseudogene, or lncRNA."
+        long_help = "Filter analysis by gene type. Options include protein_coding, pseudogene,\n\
+                     or lncRNA."
     )]
     gene_type: Option<GffGeneType>,
 
@@ -199,12 +199,11 @@ pub struct DartSeqCountArgs {
         long_help = "Unit-aware feature QC for the per-site (`_site`) output matrix:\n\
                      a site is kept only if detected in at least this many cells,\n\
                      and both of its channels (methylated/unmethylated) are kept together.\n\
-                     This is the single-cell reproducibility control — the scDART-seq\n\
-                     criterion of a site seen in >= 10 cells — standing in for bulk\n\
-                     replicate concordance.\n\
+                     This is the single-cell reproducibility control —\n\
+                     the scDART-seq criterion of a site seen in >= 10 cells —\n\
+                     standing in for bulk replicate concordance.\n\
                      The gene-level matrix is unaffected. 0 disables.\n\
-                     Sites are a distinct feature space\n\
-                     not covered by the upstream gene expression QC (--gene-min-cells)."
+                     Sites are a distinct feature space not covered by the upstream gene expression QC (--gene-min-cells)."
     )]
     pub site_min_cells: usize,
 
@@ -222,8 +221,7 @@ pub struct DartSeqCountArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
-        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive\n\
-                     (zarr backend only; no effect on hdf5)"
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive (zarr backend only; no effect on hdf5)"
     )]
     pub zip: bool,
 
@@ -231,8 +229,7 @@ pub struct DartSeqCountArgs {
         long,
         default_value_t = false,
         help = "Include reads w/o barcode info",
-        long_help = "Include reads that are missing gene and cell barcode information\n\
-                     in the analysis."
+        long_help = "Include reads that are missing gene and cell barcode information in the analysis."
     )]
     pub include_missing_barcode: bool,
 
@@ -251,10 +248,9 @@ pub struct DartSeqCountArgs {
         short = 'f',
         long = "genome",
         help = "Reference genome FASTA file",
-        long_help = "Path to reference genome in FASTA format (.fa or .fasta). \n\
-		     Used to validate base calls at editing sites. \n\
-		     File must be indexed (.fai). If index doesn't exist, one will be created. \n\
-		     Example: genome.fa"
+        long_help = "Path to reference genome in FASTA format (.fa or .fasta).\n\
+                     Used to validate base calls at editing sites. File must be indexed (.fai).\n\
+                     If index doesn't exist, one will be created. Example: genome.fa"
     )]
     pub genome_file: Box<str>,
 
@@ -267,7 +263,8 @@ pub struct DartSeqCountArgs {
                      Format: First column = cell barcode, Second column = cell type.\n\
                      Supports .tsv, .csv, .parquet, and .gz variants.\n\
                      Only cells (barcodes) present in this file will be included in analysis.\n\
-                     By default, barcodes are prefix-matched (use --exact-barcode-match to change)."
+                     By default,\n\
+                     barcodes are prefix-matched (use --exact-barcode-match to change)."
     )]
     pub cell_membership_file: Option<Box<str>>,
 
@@ -311,8 +308,8 @@ pub struct DartSeqCountArgs {
         long = "no-check-r-site",
         default_value_t = false,
         help = "Disable R site (RAC/GTY) validation in reference",
-        long_help = "By default, faba validates the R position in RAC/GTY motifs against the reference genome\n\
-                     (requires R=A/G on forward strand and Y=C/T on reverse strand).\n\
+        long_help = "By default,\n\
+                     faba validates the R position in RAC/GTY motifs against the reference genome (requires R=A/G on forward strand and Y=C/T on reverse strand).\n\
                      Use this flag to disable that check."
     )]
     pub no_check_r_site: bool,
@@ -325,9 +322,7 @@ pub struct DartSeqCountArgs {
         default_value_t = false,
         help = "Detect A-to-I editing sites and mask them from m6A calling",
         long_help = "Detect A-to-I (adenosine-to-inosine) RNA editing sites via A→G conversions.\n\
-                     Detected sites are written to a separate parquet file\n\
-                     and used as a mask to exclude false-positive m6A candidates\n\
-                     whose RAC/GTY triplet overlaps an A-to-I site.\n\
+                     Detected sites are written to a separate parquet file and used as a mask to exclude false-positive m6A candidates whose RAC/GTY triplet overlaps an A-to-I site.\n\
                      This mask pass has its own --atoi-pvalue cutoff, not the m6A --pvalue."
     )]
     pub detect_atoi: bool,
@@ -351,17 +346,15 @@ pub struct DartSeqCountArgs {
         default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
         help = "Marginal p-value cutoff for the A-to-I confounder-mask pass",
         long_help = "Marginal p-value cutoff for the A-to-I mask pass (--detect-atoi).\n\
-                     Kept separate from the m6A --pvalue so the confounder mask\n\
-                     can be tuned independently of the m6A calls."
+                     Kept separate from the m6A --pvalue so the confounder mask can be tuned independently of the m6A calls."
     )]
     pub atoi_pvalue_cutoff: f32,
 
     #[arg(
         long = "atoi-mask",
         help = "Pre-computed A-to-I mask parquet (from `faba atoi` or `--detect-atoi`)",
-        long_help = "Path to a pre-computed A-to-I sites parquet file.\n\
-                     When provided, skips A-to-I discovery and loads the mask\n\
-                     directly from this file to filter m6A candidates.\n\
+        long_help = "Path to a pre-computed A-to-I sites parquet file. When provided,\n\
+                     skips A-to-I discovery and loads the mask directly from this file to filter m6A candidates.\n\
                      Implies --detect-atoi behavior for masking."
     )]
     pub atoi_mask_file: Option<Box<str>>,
@@ -382,11 +375,10 @@ pub struct DartSeqCountArgs {
         long = "no-mixture",
         default_value_t = false,
         help = "Disable 1D Gaussian mixture clustering of modification sites",
-        long_help = "Disable 1D Gaussian mixture clustering of modification sites.\n\
-                     By default, faba fits a mixture of Gaussians + uniform noise\n\
-                     to the discovered site positions per gene, selecting K by BIC.\n\
-                     This outputs a sparse (cells x mixture_components) count matrix\n\
-                     and a m6a_components.parquet file."
+        long_help = "Disable 1D Gaussian mixture clustering of modification sites. By default,\n\
+                     faba fits a mixture of Gaussians + uniform noise to the discovered site positions per gene,\n\
+                     selecting K by BIC.\n\
+                     This outputs a sparse (cells x mixture_components) count matrix and a m6a_components.parquet file."
     )]
     pub no_mixture: bool,
 
@@ -410,8 +402,7 @@ pub struct DartSeqCountArgs {
         default_value_t = 0.0,
         help = "Gaussian bandwidth (nt) for component calling; 0 = auto (data-derived)",
         long_help = "Gaussian smoothing bandwidth in nucleotides used to call mixture components:\n\
-                     the per-gene signal pileup is smoothed at this bandwidth\n\
-                     and its modes become components.\n\
+                     the per-gene signal pileup is smoothed at this bandwidth and its modes become components.\n\
                      0 (default) derives a global per-modality bandwidth from the empirical site spacing."
     )]
     pub mixture_bandwidth: f32,
@@ -429,9 +420,8 @@ pub struct DartSeqCountArgs {
         default_value_t = crate::editing::pipeline::MixtureWeightMode::Posterior,
         help = "How to weight each (cell, site) observation in the mixture EM",
         long_help = "Per-observation weighting for the per-gene Gaussian mixture.\n\
-                     `posterior` (default) uses the Beta-posterior regularized effective count\n\
-                     w = n · (c + α) / (n + α + β), where n is the per-site coverage\n\
-                     and c the converted-read count.\n\
+                     `posterior` (default) uses the Beta-posterior regularized effective count w = n · (c + α) / (n + α + β),\n\
+                     where n is the per-site coverage and c the converted-read count.\n\
                      This prevents low-coverage 1-of-1 sites from dominating μ/σ.\n\
                      `converted` uses the raw converted-read count c (legacy)."
     )]
@@ -486,9 +476,8 @@ pub struct DartSeqCountArgs {
         long = "skip-gene-qc",
         default_value_t = false,
         help = "Skip gene expression QC step",
-        long_help = "Skip the a priori gene expression QC step.\n\
-                     By default, faba counts reads per gene\n\
-                     and filters to expressed genes/cells before site discovery."
+        long_help = "Skip the a priori gene expression QC step. By default,\n\
+                     faba counts reads per gene and filters to expressed genes/cells before site discovery."
     )]
     pub skip_gene_qc: bool,
 

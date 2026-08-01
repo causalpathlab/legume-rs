@@ -40,9 +40,8 @@ fn main() -> anyhow::Result<()> {
 #[command(
     version,
     about = "Synthetic single-cell-like data generators for the data-beans ecosystem.",
-    long_about = "data-beans-sim simulates sparse count matrices.\n\
-                  Available structure: factor-model, CNV, multimodal, and\n\
-                  topic-conditioned bulk-deconvolution.\n\
+    long_about = "data-beans-sim simulates sparse count matrices. Available structure:\n\
+                  factor-model, CNV, multimodal, and topic-conditioned bulk-deconvolution.\n\
                   \n\
                   Outputs use the same zarr/h5 backend formats `data-beans` reads.\n\
                   Simulated and real datasets therefore share one toolchain."
@@ -69,30 +68,27 @@ enum Commands {
     #[command(
         about = "Log-normal topic factor model (with optional reference-conditioned NB+copula sampling)",
         long_about = "Synthetic mode (no `--reference`):\n\
-                      `Y(g,j) ~ Poisson( (depth/G) · δ(g,B(j)) · Σ_k β(g,k) θ(k,j) )`\n\
-                      with explicit log-space variance decomposition for both β and δ:\n\
-                        log β(g,k) = σ_β · [√pve_topic · u_{g,k} + √(1−pve_topic) · v_g] − σ_β²/2\n\
-                        log δ(g,b) =        √pve_batch · z_{g,b} + √(1−pve_batch) · w_g\n\
-                      with u, v, z, w ~ N(0, 1) iid.\n\
-                      `--beta-scale` controls σ_β.\n\
+                      `Y(g,j) ~ Poisson( (depth/G) · δ(g,B(j)) · Σ_k β(g,k) θ(k,j) )` with explicit log-space variance decomposition for both β and δ:\n\
+                      log β(g,k) = σ_β · [√pve_topic · u_{g,k} + √(1−pve_topic) · v_g] − σ_β²/2\n\
+                      log δ(g,b) =        √pve_batch · z_{g,b} + √(1−pve_batch) · w_g\n\
+                      with u, v, z, w ~ N(0, 1) iid. `--beta-scale` controls σ_β.\n\
                       `pve_topic` and `pve_batch` are independent variance shares;\n\
-                      both can be 1.\n\
-                      `depth` is the **expected** library size.\n\
-                      It is emergent, with no per-cell rescaling.\n\
+                      both can be 1. `depth` is the **expected** library size. It is emergent,\n\
+                      with no per-cell rescaling.\n\
                       \n\
-                      Reference mode (`--reference <h5/zarr>`): two-stage GLM, NB+copula sampling —\n\
-                        stage 1:  log λ⁰ = log μ̂_g + √pve_topic·t + √pve_noise·ε\n\
-                        stage 2:  log λ  = log λ⁰ + √pve_batch·z_{g,b} + √(1−pve_batch)·w_g\n\
-                        sample :  y ~ NB(λ, r̂_g)  via  u=Φ(z*),  F⁻¹_NB(u; λ, r̂)\n\
-                      where t is z-scored log(β·θ) per cell.\n\
-                      β is drawn as in synthetic mode, and ε is iid N(0, 1).\n\
-                      z_{g,b} comes from the gene-gene copula factor, at rank\n\
-                      `--batch-rank`, on axes chosen by `--batch-program`.\n\
+                      Reference mode (`--reference <h5/zarr>`): two-stage GLM,\n\
+                      NB+copula sampling —\n\
+                      stage 1:  log λ⁰ = log μ̂_g + √pve_topic·t + √pve_noise·ε\n\
+                      stage 2:  log λ  = log λ⁰ + √pve_batch·z_{g,b} + √(1−pve_batch)·w_g\n\
+                      sample :  y ~ NB(λ, r̂_g)  via  u=Φ(z*),  F⁻¹_NB(u; λ, r̂)\n\
+                      where t is z-scored log(β·θ) per cell. β is drawn as in synthetic mode,\n\
+                      and ε is iid N(0, 1). z_{g,b} comes from the gene-gene copula factor,\n\
+                      at rank `--batch-rank`, on axes chosen by `--batch-program`.\n\
                       w_g iid N(0, 1) gives the batch-invariant per-gene shift.\n\
                       \n\
                       `--depth` is reinterpreted as a multiplicative scale.\n\
-                      Library size then matches the reference's mean.\n\
-                      This follows the scDesign, scDesign2 and scDesign3 lineage.\n\
+                      Library size then matches the reference's mean. This follows the scDesign,\n\
+                      scDesign2 and scDesign3 lineage.\n\
                       \n\
                       See data-beans-sim/docs/topic.md for the full derivation."
     )]
@@ -101,14 +97,11 @@ enum Commands {
     #[command(
         about = "Bulk (convoluted) data matrix from real SC reference (experimental)",
         long_about = "Synthesise bulk pseudo-samples from real single-cell counts.\n\
-                      Cells are Dirichlet-mixed under a supplied per-cell topic\n\
-                      membership.\n\
+                      Cells are Dirichlet-mixed under a supplied per-cell topic membership.\n\
                       \n\
-                      Each sample is an exact weighted sum of cells with known\n\
-                      topic memberships.\n\
-                      There is no extra noise model.\n\
-                      So ground-truth fractions are recovered, up to whatever the\n\
-                      cell-pool sampling implies.\n\
+                      Each sample is an exact weighted sum of cells with known topic memberships.\n\
+                      There is no extra noise model. So ground-truth fractions are recovered,\n\
+                      up to whatever the cell-pool sampling implies.\n\
                       \n\
                       See data-beans-sim/docs/bulk.md for the full derivation."
     )]
@@ -116,23 +109,20 @@ enum Commands {
 
     #[command(
         about = "Multimodal count data with shared base + delta dictionaries",
-        long_about = "Generate M count matrices from shared latent topics θ with modality-specific\n\
-                      dictionaries:\n\
-                        β_0(:,k) = softmax_g( W_base[k,:]            )    (reference modality)\n\
-                        β_m(:,k) = softmax_g( W_base[k,:] + Δ_m[k,:] )    (m = 1..M-1)\n\
+        long_about = "Generate M count matrices from shared latent topics θ with modality-specific dictionaries:\n\
+                      β_0(:,k) = softmax_g( W_base[k,:]            )    (reference modality)\n\
+                      β_m(:,k) = softmax_g( W_base[k,:] + Δ_m[k,:] )    (m = 1..M-1)\n\
                       where W_base ~ N(0, base_scale²).\n\
                       In hierarchical mode the logits are stick-breaking-derived.\n\
                       Δ_m is sparse spike-and-slab.\n\
-                      `n_delta_features` genes per topic carry an iid\n\
-                      N(0, delta_scale²) perturbation; the rest are zero.\n\
+                      `n_delta_features` genes per topic carry an iid N(0, delta_scale²) perturbation;\n\
+                      the rest are zero.\n\
                       \n\
-                      Per-modality counts (batch effects independent per modality unless\n\
-                      `--shared-batch-effects`):\n\
-                        log δ_m(g,b) = √pve_batch · z_{g,b} + √(1−pve_batch) · w_g\n\
-                        Y_m(g,j)    ~ Poisson( depth_m · δ_m(g,B(j)) · Σ_k β_m(g,k) θ(k,j) )\n\
-                      depth_m is the **expected** library size for modality m.\n\
-                      It is emergent, with no per-cell rescaling.\n\
-                      Each β_m(:,k) sums to 1 over genes.\n\
+                      Per-modality counts (batch effects independent per modality unless `--shared-batch-effects`):\n\
+                      log δ_m(g,b) = √pve_batch · z_{g,b} + √(1−pve_batch) · w_g\n\
+                      Y_m(g,j)    ~ Poisson( depth_m · δ_m(g,B(j)) · Σ_k β_m(g,k) θ(k,j) )\n\
+                      depth_m is the **expected** library size for modality m. It is emergent,\n\
+                      with no per-cell rescaling. Each β_m(:,k) sums to 1 over genes.\n\
                       So the cell-level total of (β·θ) sums to 1 deterministically,\n\
                       and `depth_m` directly sets E[lib(j) | m].\n\
                       \n\
@@ -141,12 +131,11 @@ enum Commands {
     Multimodal(RunSimulateMultimodalArgs),
 
     #[command(
-        about = "Paired ATAC + RNA simulator: cell types switch peaks on/off, genes inherit their enhancers (two-step), with peak-gene ground truth",
+        about = "Paired ATAC + RNA simulator: cell types switch peaks on/off,\n\
+                 genes inherit their enhancers (two-step), with peak-gene ground truth",
         long_about = "Synthetic mode, used when no `--reference-*` is given.\n\
-                      It is a two-step generative model.\n\
-                      Cis links are cell-type-INVARIANT.\n\
-                      Cell-type-specific expression arises because upstream peaks\n\
-                      switch on and off per cell type.\n\
+                      It is a two-step generative model. Cis links are cell-type-INVARIANT.\n\
+                      Cell-type-specific expression arises because upstream peaks switch on and off per cell type.\n\
                       \n\
                       Step 1 — ATAC from topics. Per cell j, topic mix θ_j (concentration\n\
                       --topic-concentration). Each peak p:\n\
@@ -160,24 +149,19 @@ enum Commands {
                       Step 2 — RNA conditional on enhancers.\n\
                       A linked gene inherits its causal peaks' signal,\n\
                       sig = √π_topic·T + √π_priv·P, via an invariant cis link:\n\
-                      \u{20} E_gj = σ·( √pve_cis·std(Σ_{p∈M_g} sig_p) + √(1−pve_cis)·N_g [+ batch] )\n\
-                      The gene has no topic path of its own.\n\
+                      \u{20} E_gj = σ·( √pve_cis·std(Σ_{p∈M_g} sig_p) + √(1−pve_cis)·N_g [+ batch] ) The gene has no topic path of its own.\n\
                       Cell-type specificity propagates through its peaks.\n\
-                      Unlinked genes are noise.\n\
-                      Counts are Poisson(depth·softmax).\n\
+                      Unlinked genes are noise. Counts are Poisson(depth·softmax).\n\
                       \n\
-                      Identifiability.\n\
-                      Only an enhancer's PRIVATE part reaches its gene.\n\
-                      Co-active bystanders share only T.\n\
-                      So --pve-private is the recoverability dial.\n\
+                      Identifiability. Only an enhancer's PRIVATE part reaches its gene.\n\
+                      Co-active bystanders share only T. So --pve-private is the recoverability dial.\n\
                       --pve-cis sets the gene's cis-dependence strength.\n\
                       Ground truth is M[G,P].\n\
                       \n\
                       Reference mode uses `--reference-rna` or `--reference-atac`.\n\
-                      Each modality gets a two-stage GLM, with NB+copula PIT\n\
-                      sampling.\n\
-                      A normalized {topic, noise, batch} budget weights the\n\
-                      log-rate; there is no cis term.\n\
+                      Each modality gets a two-stage GLM, with NB+copula PIT sampling.\n\
+                      A normalized {topic, noise, batch} budget weights the log-rate;\n\
+                      there is no cis term.\n\
                       Reference row counts override --n-genes and --n-peaks.\n\
                       \n\
                       See data-beans-sim/docs/multiome.md for the full derivation."
@@ -188,17 +172,16 @@ enum Commands {
         about = "RNA modification + processing simulator (counts + m6A + A-to-I + APA)",
         long_about = "Generate sparse per-track count matrices.\n\
                       They are shaped like a `faba all` run.\n\
-                      There is one .zarr.zip per RNA track: expression counts,\n\
-                      m6A methylation, A-to-I editing, and alternative\n\
-                      polyadenylation.\n\
+                      There is one .zarr.zip per RNA track: expression counts, m6A methylation,\n\
+                      A-to-I editing, and alternative polyadenylation.\n\
                       Rows are named '{gene}/{track}/{detail}'.\n\
                       A full set of ground-truth parquets ships alongside.\n\
                       \n\
                       Substrate-level coupling is encoded.\n\
-                      m6A and pA share a long-3'UTR substrate axis.\n\
-                      A-to-I rides on Alu/dsRNA.\n\
-                      Writer and editor programs are shared, so one cell-state\n\
-                      topic can drive multiple tracks.\n\n\
+                      m6A and pA share a long-3'UTR substrate axis. A-to-I rides on Alu/dsRNA.\n\
+                      Writer and editor programs are shared,\n\
+                      so one cell-state topic can drive multiple tracks.\n\
+                      \n\
                       Generative model summary:\n\
                       \u{20} cell state    θ_{k,j} ~ Dirichlet (shared with writer/editor activity)\n\
                       \u{20} substrate     s_g ~ N(0, I_S);  φ_{g,m} = Bernoulli(σ(s_g·w_m + b_m))\n\

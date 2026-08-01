@@ -15,8 +15,8 @@ use matrix_util::common_io::*;
 pub struct From10xMatrixArgs {
     #[arg(
         help = "Input HDF5 file containing sparse matrix triplets",
-        long_help = "Specify the HDF5 file where triplets of sparse matrix data are stored. \n\
-		     Supports 10X Genomics and H5AD formats."
+        long_help = "Specify the HDF5 file where triplets of sparse matrix data are stored.\n\
+                     Supports 10X Genomics and H5AD formats."
     )]
     pub h5_file: Box<str>,
 
@@ -25,8 +25,8 @@ pub struct From10xMatrixArgs {
         value_enum,
         default_value = "zarr",
         help = "Backend format for output",
-        long_help = "Choose the backend format for the output file. \n\
-		     Supported formats include 'zarr' and 'h5'"
+        long_help = "Choose the backend format for the output file.\n\
+                     Supported formats include 'zarr' and 'h5'"
     )]
     pub backend: SparseIoBackend,
 
@@ -34,10 +34,10 @@ pub struct From10xMatrixArgs {
         short,
         long,
         help = "Output file header or name",
-        long_help = "Specify the output file header. \n\
-		     The zarr backend produces {output}.zarr.zip by default;\n\
-		     pass --no-zip to keep a {output}.zarr directory instead.\n\
-		     Redundant {backend} names will be ignored."
+        long_help = "Specify the output file header.\n\
+                     The zarr backend produces {output}.zarr.zip by default;\n\
+                     pass --no-zip to keep a {output}.zarr directory instead.\n\
+                     Redundant {backend} names will be ignored."
     )]
     pub output: Box<str>,
 
@@ -50,8 +50,8 @@ pub struct From10xMatrixArgs {
         long,
         default_value = "matrix",
         help = "Root group name for sparse data triplets",
-        long_help = "Set the root group name under which sparse data triplets are stored in the HDF5 file. \n\
-		     Use the 'list-h5' command to inspect available groups."
+        long_help = "Set the root group name under which sparse data triplets are stored in the HDF5 file.\n\
+                     Use the 'list-h5' command to inspect available groups."
     )]
     pub root_group_name: Box<str>,
 
@@ -69,8 +69,8 @@ pub struct From10xMatrixArgs {
         long,
         default_value = "indices",
         help = "Indices field name",
-        long_help = "Name of the dataset containing indices. \n\
-		     Row indices for CSC, column indices for CSR, under the root group."
+        long_help = "Name of the dataset containing indices. Row indices for CSC,\n\
+                     column indices for CSR, under the root group."
     )]
     pub indices_field: Box<str>,
 
@@ -79,8 +79,8 @@ pub struct From10xMatrixArgs {
         long,
         default_value = "indptr",
         help = "Indptr field name",
-        long_help = "Name of the dataset containing indptr. \n\
-		     Column pointers for CSC, row pointers for CSR, under the root group."
+        long_help = "Name of the dataset containing indptr. Column pointers for CSC,\n\
+                     row pointers for CSR, under the root group."
     )]
     pub indptr_field: Box<str>,
 
@@ -108,7 +108,8 @@ pub struct From10xMatrixArgs {
         long,
         default_value = "features/name",
         help = "Row name field name",
-        long_help = "Group or dataset name for row, gene, or feature names under the root group."
+        long_help = "Group or dataset name for row, gene,\n\
+                     or feature names under the root group."
     )]
     pub row_name_field: Box<str>,
 
@@ -117,7 +118,8 @@ pub struct From10xMatrixArgs {
         long,
         default_value = "features/feature_type",
         help = "Row type field name",
-        long_help = "Group or dataset name for row, gene, or feature types under the root group."
+        long_help = "Group or dataset name for row, gene,\n\
+                     or feature types under the root group."
     )]
     pub row_type_field: Box<str>,
 
@@ -125,10 +127,10 @@ pub struct From10xMatrixArgs {
         long,
         default_value = "gene,peak",
         help = "Select row type (comma-separated patterns; ANY match keeps the row)",
-        long_help = "Select which row types to include.\n\
-		     Patterns are comma-separated, case-insensitive substrings.\n\
-		     A row is kept if its type contains any pattern.\n\
-		     The default 'gene,peak' keeps Gene Expression and ATAC Peaks."
+        long_help = "Select which row types to include. Patterns are comma-separated,\n\
+                     case-insensitive substrings.\n\
+                     A row is kept if its type contains any pattern.\n\
+                     The default 'gene,peak' keeps Gene Expression and ATAC Peaks."
     )]
     pub select_row_type: Box<str>,
 
@@ -153,8 +155,8 @@ pub struct From10xMatrixArgs {
         long,
         default_value_t = false,
         help = "Squeeze sparse rows or columns",
-        long_help = "Enable squeezing to remove rows and columns with too few non-zeros. \n\
-		     This can help reduce file size and improve performance."
+        long_help = "Enable squeezing to remove rows and columns with too few non-zeros.\n\
+                     This can help reduce file size and improve performance."
     )]
     pub do_squeeze: bool,
 
@@ -162,8 +164,8 @@ pub struct From10xMatrixArgs {
         long,
         default_value_t = 1,
         help = "Row non-zero cutoff",
-        long_help = "Minimum number of non-zero elements required for rows. \n\
-		     Rows with fewer non-zeros will be removed if squeezing is enabled."
+        long_help = "Minimum number of non-zero elements required for rows.\n\
+                     Rows with fewer non-zeros will be removed if squeezing is enabled."
     )]
     pub row_nnz_cutoff: usize,
 
@@ -171,8 +173,8 @@ pub struct From10xMatrixArgs {
         long,
         default_value_t = 1,
         help = "Column non-zero cutoff",
-        long_help = "Minimum number of non-zero elements required for columns. \n\
-		     Columns with fewer non-zeros will be removed if squeezing is enabled."
+        long_help = "Minimum number of non-zero elements required for columns.\n\
+                     Columns with fewer non-zeros will be removed if squeezing is enabled."
     )]
     pub column_nnz_cutoff: usize,
 

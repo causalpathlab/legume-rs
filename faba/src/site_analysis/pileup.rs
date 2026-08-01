@@ -76,8 +76,7 @@ pub struct PileupArgs {
         num_args = 1..,
         help = "Sparse matrix file(s) (zarr or h5) from faba output",
         long_help = "Sparse matrix file(s) (zarr or h5) from faba output.\n\
-                     Multiple files (e.g. replicates via a shell glob)\n\
-                     are aggregated per genomic position into a single track."
+                     Multiple files (e.g. replicates via a shell glob) are aggregated per genomic position into a single track."
     )]
     pub data_files: Vec<Box<str>>,
 
@@ -87,8 +86,8 @@ pub struct PileupArgs {
         visible_alias = "gene",
         value_delimiter = ',',
         help = "Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or Ensembl IDs",
-        long_help = "Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or Ensembl IDs, case-insensitive.\n\
-                     Uses the auxiliary-data relaxed gene-name scheme;\n\
+        long_help = "Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or Ensembl IDs,\n\
+                     case-insensitive. Uses the auxiliary-data relaxed gene-name scheme;\n\
                      all matched genes are aggregated into one pileup."
     )]
     genes: Vec<Box<str>>,
@@ -98,8 +97,8 @@ pub struct PileupArgs {
         visible_alias = "region",
         value_delimiter = ',',
         help = "Genomic regions to pile up: comma-separated `chr:lb-ub`",
-        long_help = "Genomic regions to pile up: comma-separated `chr:lb-ub`\n\
-                     (`chr17:1000-2000,chr1:50-99`).\n\
+        long_help = "Genomic regions to pile up:\n\
+                     comma-separated `chr:lb-ub` (`chr17:1000-2000,chr1:50-99`).\n\
                      Selects rows by position, with or without `--genes`.\n\
                      At least one of `--genes`/`--regions` is required."
     )]
@@ -168,8 +167,8 @@ pub struct PileupArgs {
         long = "bam",
         num_args = 1..,
         help = "BAM file(s) for the bottom read-depth track",
-        long_help = "BAM file(s) for the bottom read-depth track.\n\
-                     Repeatable; replicates are pooled. Enables figure mode."
+        long_help = "BAM file(s) for the bottom read-depth track. Repeatable;\n\
+                     replicates are pooled. Enables figure mode."
     )]
     bam_files: Vec<Box<str>>,
 
@@ -201,8 +200,9 @@ pub struct PileupArgs {
         long = "exact-barcode-match",
         default_value_t = false,
         help = "Require exact barcode matching",
-        long_help = "Require exact barcode matching (default: membership barcodes match\n\
-                     as prefixes of BAM/matrix barcodes, handling \"-1\" suffixes)"
+        long_help = "Require exact barcode matching.\n\
+                     By default, membership barcodes match as prefixes of BAM or matrix barcodes,\n\
+                     which handles \"-1\" suffixes."
     )]
     exact_barcode_match: bool,
 
@@ -281,8 +281,7 @@ pub struct PileupArgs {
         long = "raster-threshold",
         default_value_t = 300,
         help = "Rasterize the per-site dot layer once a panel exceeds this many sites",
-        long_help = "Rasterize the per-site dot layer once a panel exceeds this many sites\n\
-                     (keeps SVG/PDF size bounded; axes/areas stay vector)"
+        long_help = "Rasterize the per-site dot layer once a panel exceeds this many sites (keeps SVG/PDF size bounded; axes/areas stay vector)"
     )]
     raster_threshold: usize,
 }

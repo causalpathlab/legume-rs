@@ -42,11 +42,12 @@ pub struct ClusteringArgs {
         required = true,
         help = "Latent representation file (cells × K)",
         long_help = "Latent topic proportions or SVD projection (cells × K matrix).\n\
-		     Used as feature space for clustering.\n\n\
-		     Expected formats:\n\
-		     - From `senna topic`: .latent.parquet (cells × topics)\n\
-		     - From `senna svd`: .projection.parquet (cells × components)\n\
-		     - First column: cell names"
+                     Used as feature space for clustering.\n\
+                     \n\
+                     Expected formats:\n\
+                     - From `senna topic`: .latent.parquet (cells × topics)\n\
+                     - From `senna svd`: .projection.parquet (cells × components)\n\
+                     - First column: cell names"
     )]
     latent: Box<str>,
 
@@ -54,12 +55,13 @@ pub struct ClusteringArgs {
         long,
         short = 'k',
         help = "Number of clusters",
-        long_help = "Number of clusters for k-means.\n\
-		     If not specified, defaults to the number of topics/components in latent.\n\n\
-		     Tuning:\n\
-		     - Start with number of expected cell types\n\
-		     - Use silhouette score or elbow method to optimize\n\
-		     - For hierarchical data, start with broader clusters"
+        long_help = "Number of clusters for k-means. If not specified,\n\
+                     defaults to the number of topics/components in latent.\n\
+                     \n\
+                     Tuning:\n\
+                     - Start with number of expected cell types\n\
+                     - Use silhouette score or elbow method to optimize\n\
+                     - For hierarchical data, start with broader clusters"
     )]
     num_clusters: Option<usize>,
 
@@ -68,18 +70,17 @@ pub struct ClusteringArgs {
         short = 'm',
         default_value = "kmeans",
         help = "Clustering method",
-        long_help = "Clustering algorithm:\n\n\
-		     - kmeans: K-means clustering (default)\n\
-		       Fast, works well for spherical clusters\n\
-		       Requires specifying k\n\n\
-		     - leiden: Leiden algorithm (graph-based)\n\
-		       Finds communities in cell similarity graph\n\
-		       Automatically determines number of clusters\n\
-		       Use --knn and --resolution to tune\n\n\
-		     - hsblock: Hierarchical Stochastic Block Model (graph-based)\n\
-		       Collapsed Gibbs sampling + greedy refinement\n\
-		       Number of clusters = 2^(tree_depth-1)\n\
-		       Use --knn, --tree-depth, and --edge-scale to tune"
+        long_help = "Clustering algorithm:\n\
+                     \n\
+                     - kmeans: K-means clustering (default)\n\
+                     Fast, works well for spherical clusters Requires specifying k\n\
+                     \n\
+                     - leiden: Leiden algorithm (graph-based)\n\
+                     Finds communities in cell similarity graph Automatically determines number of clusters Use --knn and --resolution to tune\n\
+                     \n\
+                     - hsblock: Hierarchical Stochastic Block Model (graph-based)\n\
+                     Collapsed Gibbs sampling + greedy refinement Number of clusters = 2^(tree_depth-1) Use --knn,\n\
+                     --tree-depth, and --edge-scale to tune"
     )]
     method: ClusterMethodCli,
 
@@ -97,8 +98,7 @@ pub struct ClusteringArgs {
         long,
         default_value_t = 1.0,
         help = "Resolution parameter for Leiden modularity",
-        long_help = "Resolution parameter for Leiden modularity (higher = more clusters,\n\
-                     default 1.0)."
+        long_help = "Resolution parameter for Leiden modularity (higher = more clusters, default 1.0)."
     )]
     resolution: f64,
 
@@ -120,8 +120,8 @@ pub struct ClusteringArgs {
         long,
         default_value_t = 100.0,
         help = "Edge weight scale for HSBM (default 100.0)",
-        long_help = "Edge weight scale for HSBM (default 100.0); scales fuzzy KNN weights\n\
-                     to count-like values expected by the graph-tool backend."
+        long_help = "Edge weight scale for HSBM (default 100.0);\n\
+                     scales fuzzy KNN weights to count-like values expected by the graph-tool backend."
     )]
     edge_scale: f64,
 
@@ -132,8 +132,8 @@ pub struct ClusteringArgs {
         long,
         default_value_t = 2,
         help = "Minimum cluster size to report (default 2)",
-        long_help = "Minimum cluster size to report; smaller clusters become unassigned\n\
-                     (default 2)."
+        long_help = "Minimum cluster size to report;\n\
+                     smaller clusters become unassigned (default 2)."
     )]
     min_cluster_size: usize,
 
@@ -142,11 +142,12 @@ pub struct ClusteringArgs {
         short = 'o',
         required = true,
         help = "Output file prefix",
-        long_help = "Output file prefix.\n\n\
-		     Generates:\n\
-		     - {out}.clusters.parquet: Cluster assignments (cell × cluster)\n\
-		     - {out}.bhc.merges.parquet: BHC merge tree (when --data is given)\n\
-		     - {out}.bhc.cut.parquet:    BHC consensus cut (when --data is given)"
+        long_help = "Output file prefix.\n\
+                     \n\
+                     Generates:\n\
+                     - {out}.clusters.parquet: Cluster assignments (cell × cluster)\n\
+                     - {out}.bhc.merges.parquet: BHC merge tree (when --data is given)\n\
+                     - {out}.bhc.cut.parquet:    BHC consensus cut (when --data is given)"
     )]
     out: Box<str>,
 
@@ -154,9 +155,8 @@ pub struct ClusteringArgs {
         long,
         value_delimiter = ',',
         help = "Raw count data files (.zarr or .h5) — enables BHC postprocess",
-        long_help = "When provided, a Bayesian hierarchical clustering pass runs over the fitted clusters\n\
-                     using per-gene sufficient stats T_{k,g}=Σ_{n∈k} y_{n,g}\n\
-                     and an empirical-Bayes Dirichlet prior centred on the pooled gene marginal bg.\n\
+        long_help = "When provided,\n\
+                     a Bayesian hierarchical clustering pass runs over the fitted clusters using per-gene sufficient stats T_{k,g}=Σ_{n∈k} y_{n,g} and an empirical-Bayes Dirichlet prior centred on the pooled gene marginal bg.\n\
                      Same recipe pinto uses for link communities.\n\
                      Must match the cell order of --latent. Omit to skip BHC."
     )]
@@ -167,7 +167,8 @@ pub struct ClusteringArgs {
         default_value_t = 1.0,
         help = "Per-gene prior strength for the BHC empirical-Bayes Dirichlet prior",
         long_help = "Total Dirichlet concentration γ = bhc_gamma_per_gene × G,\n\
-                     where G is the feature dimension. Default 1.0 = Bayes-Laplace (one prior count per gene).\n\
+                     where G is the feature dimension.\n\
+                     Default 1.0 = Bayes-Laplace (one prior count per gene).\n\
                      Larger values pull every cluster more strongly toward the pooled background,\n\
                      making BHC more eager to merge."
     )]
@@ -190,8 +191,8 @@ pub struct ClusteringArgs {
     #[arg(
         long = "from",
         help = "Run manifest from `senna topic|masked-topic|joint-topic|svd|joint-svd`",
-        long_help = "When given, the manifest is updated in place with the cluster output path under `cluster.clusters`\n\
-                     so that `senna annotate-by-enrichment` can pick the cluster parquet up automatically."
+        long_help = "When given,\n\
+                     the manifest is updated in place with the cluster output path under `cluster.clusters` so that `senna annotate-by-enrichment` can pick the cluster parquet up automatically."
     )]
     from: Option<Box<str>>,
 }

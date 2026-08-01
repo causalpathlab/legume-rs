@@ -198,10 +198,10 @@ struct Cli {
         global = true,
         value_name = "N",
         help = "Limit the number of CPU threads",
-        long_help = "Limit the global rayon thread pool and HDF5/blosc compression threads. \n\
-		     Useful for bounding peak memory on `from-*` and `merge-*` subcommands, \n\
-		     since each rayon worker may hold its own intermediate buffers. \n\
-		     Defaults to all logical CPUs when unset."
+        long_help = "Limit the global rayon thread pool and HDF5/blosc compression threads.\n\
+                     Useful for bounding peak memory on `from-*` and `merge-*` subcommands,\n\
+                     since each rayon worker may hold its own intermediate buffers.\n\
+                     Defaults to all logical CPUs when unset."
     )]
     n_threads: Option<usize>,
 
@@ -219,13 +219,13 @@ enum Commands {
         name = "from-10x-matrix",
         about = "Build backend from 10X Genomics feature-barcode matrix `h5`",
         long_about = "Build a backend from a 10X Genomics Cell Ranger feature-barcode matrix HDF5 file.\n\
-		      Expected layout: matrix/{data,indices,indptr,barcodes,features/...}\n\
-		      \n\
-		      This is Cell Ranger's `filtered_feature_bc_matrix.h5`,\n\
-		      or its `raw_feature_bc_matrix.h5`, from count or multi.\n\
-		      \n\
-		      Use --root-group-name, --data-field, etc. to customize field paths.\n\
-		      Use --select-row-type to filter features (default: 'gene').",
+                      Expected layout: matrix/{data,indices,indptr,barcodes,features/...}\n\
+                      \n\
+                      This is Cell Ranger's `filtered_feature_bc_matrix.h5`,\n\
+                      or its `raw_feature_bc_matrix.h5`, from count or multi.\n\
+                      \n\
+                      Use --root-group-name, --data-field, etc. to customize field paths.\n\
+                      Use --select-row-type to filter features (default: 'gene').",
         visible_alias = "from-h5"
     )]
     From10xMatrix(From10xMatrixArgs),
@@ -234,17 +234,17 @@ enum Commands {
     #[command(
         about = "Build backend from AnnData `h5ad` file (CELLxGENE schema)",
         long_about = "Build a backend from an AnnData h5ad file (CELLxGENE schema v7, AnnData spec v0.1.0).\n\
-		      \n\
-		      Auto-detects sparse format (CSR/CSC) and transposes to (features x cells).\n\
-		      Prefers raw/X (raw counts) over X (processed) when available.\n\
-		      \n\
-		      Additionally outputs:\n\
-		      - {output}.cell_metadata.tsv.gz    (all obs columns per cell)\n\
-		      - {output}.barcode_to_donor.tsv.gz (barcode-to-donor mapping, if donor_id exists)\n\
-		      - {output}.sample_metadata.tsv.gz  (one row per donor, if donor_id exists)\n\
-		      \n\
-		      Column names become barcode@donor_id for multi-donor data.\n\
-		      Use --select-row-type to filter by biotype (e.g., 'protein_coding')."
+                      \n\
+                      Auto-detects sparse format (CSR/CSC) and transposes to (features x cells).\n\
+                      Prefers raw/X (raw counts) over X (processed) when available.\n\
+                      \n\
+                      Additionally outputs:\n\
+                      - {output}.cell_metadata.tsv.gz    (all obs columns per cell)\n\
+                      - {output}.barcode_to_donor.tsv.gz (barcode-to-donor mapping, if donor_id exists)\n\
+                      - {output}.sample_metadata.tsv.gz  (one row per donor, if donor_id exists)\n\
+                      \n\
+                      Column names become barcode@donor_id for multi-donor data.\n\
+                      Use --select-row-type to filter by biotype (e.g., 'protein_coding')."
     )]
     FromH5ad(FromH5adArgs),
 
@@ -253,16 +253,16 @@ enum Commands {
         name = "from-10x-molecule",
         about = "Build backend from 10X molecule_info.h5",
         long_about = "Build a backend by aggregating per-molecule counts.\n\
-		      The input is a 10X Genomics molecule_info.h5 file.\n\
-		      The output is a feature x cell sparse matrix.\n\
-		      \n\
-		      Each molecule has (barcode_idx, feature_idx, count, gem_group, library_idx).\n\
-		      Molecules are filtered by --library-type.\n\
-		      Cell Ranger's pass_filter, its valid cell calls, can filter too.\n\
-		      Survivors are aggregated into count triplets.\n\
-		      \n\
-		      Barcode names are formatted as SEQUENCE-GEMGROUP (e.g., AAACCTGA-1).\n\
-		      Handles multi-sample (cellranger aggr) and multi-library (CITE-seq) data."
+                      The input is a 10X Genomics molecule_info.h5 file.\n\
+                      The output is a feature x cell sparse matrix.\n\
+                      \n\
+                      Each molecule has (barcode_idx, feature_idx, count, gem_group, library_idx).\n\
+                      Molecules are filtered by --library-type. Cell Ranger's pass_filter,\n\
+                      its valid cell calls, can filter too.\n\
+                      Survivors are aggregated into count triplets.\n\
+                      \n\
+                      Barcode names are formatted as SEQUENCE-GEMGROUP (e.g., AAACCTGA-1).\n\
+                      Handles multi-sample (cellranger aggr) and multi-library (CITE-seq) data."
     )]
     From10xMolecule(From10xMoleculeArgs),
 
@@ -273,14 +273,11 @@ enum Commands {
         long_about = "Export a backend to an AnnData h5ad file readable by scanpy / anndata.\n\
                       This is the inverse of `from-h5ad`.\n\
                       \n\
-                      The (features x cells) backend is transposed back to AnnData's\n\
-                      (cells x features) layout and written as a gzip-compressed CSR\n\
-                      `X` (gzip, not Blosc, so h5py needs no filter plugin).\n\
+                      The (features x cells) backend is transposed back to AnnData's (cells x features) layout and written as a gzip-compressed CSR `X` (gzip, not Blosc, so h5py needs no filter plugin).\n\
                       \n\
                       Row names map to var/_index; column names to obs/_index.\n\
                       Attach cell and feature annotations with --obs and --var.\n\
-                      Feeding back the `*.cell_metadata.tsv.gz` that `from-h5ad`\n\
-                      emitted is the usual round trip.",
+                      Feeding back the `*.cell_metadata.tsv.gz` that `from-h5ad` emitted is the usual round trip.",
         visible_alias = "to-anndata"
     )]
     ToH5ad(ToH5adArgs),
@@ -289,15 +286,15 @@ enum Commands {
         name = "to-mtx",
         about = "Export backend to a 10x-style MatrixMarket triplet (MEX)",
         long_about = "Export a backend to a 10x Genomics Cell Ranger MEX triplet directory,\n\
-			      loadable with `scanpy.read_10x_mtx(dir)` or Seurat `Read10X(dir)`.\n\
-			      This is the inverse of `from-mtx` and needs no HDF5.\n\
-			      \n\
-			      Writes into the output directory (Cell Ranger v3 gzipped layout):\n\
-			      - matrix.mtx.gz   (integer MatrixMarket, features x barcodes, 1-based)\n\
-			      - features.tsv.gz (id, name, feature_type; composite names split on '_')\n\
-			      - barcodes.tsv.gz (one barcode per line)\n\
-			      \n\
-			      Pass --no-gzip for the uncompressed layout.",
+                      loadable with `scanpy.read_10x_mtx(dir)` or Seurat `Read10X(dir)`.\n\
+                      This is the inverse of `from-mtx` and needs no HDF5.\n\
+                      \n\
+                      Writes into the output directory (Cell Ranger v3 gzipped layout):\n\
+                      - matrix.mtx.gz   (integer MatrixMarket, features x barcodes, 1-based)\n\
+                      - features.tsv.gz (id, name, feature_type; composite names split on '_')\n\
+                      - barcodes.tsv.gz (one barcode per line)\n\
+                      \n\
+                      Pass --no-gzip for the uncompressed layout.",
         visible_alias = "to-10x"
     )]
     ToMtx(ToMtxArgs),
@@ -305,7 +302,7 @@ enum Commands {
     #[command(
         about = "Build backend from triplets in 10X Xenium `zarr`",
         long_about = "Build a backend from triplets in `zarr` format.\n\
-		      Supports conversion and indexing for fast access."
+                      Supports conversion and indexing for fast access."
     )]
     FromZarr(FromZarrArgs),
 
@@ -316,14 +313,14 @@ enum Commands {
                       The input is an scATAC or histone fragments file.\n\
                       \n\
                       Expected format (tab-separated, one fragment per line):\n\
-                        chr<TAB>start<TAB>end<TAB>barcode[<TAB>count]\n\
+                      chr<TAB>start<TAB>end<TAB>barcode[<TAB>count]\n\
                       \n\
-                      Both plain gzip and bgzipped files are accepted; '#' header lines\n\
-                      (e.g. cellranger-arc metadata) are skipped.\n\
+                      Both plain gzip and bgzipped files are accepted;\n\
+                      '#' header lines (e.g. cellranger-arc metadata) are skipped.\n\
                       \n\
                       Features are user-supplied peaks, via --peaks <bed>.\n\
-                      Otherwise they are fixed-width genome tiles, discovered on\n\
-                      the fly at --bin-size, which defaults to 5000.\n\
+                      Otherwise they are fixed-width genome tiles,\n\
+                      discovered on the fly at --bin-size, which defaults to 5000.\n\
                       \n\
                       Each fragment contributes 1 to every feature it overlaps.\n\
                       With --use-count it contributes its column-5 count instead."
@@ -332,22 +329,22 @@ enum Commands {
 
     #[command(
         about = "List contents of `h5` file",
-        long_about = "List what are included in the `h5` file.\n\
-		      Shows datasets, groups, and metadata."
+        long_about = "List what are included in the `h5` file. Shows datasets, groups,\n\
+                      and metadata."
     )]
     ListH5(ListH5Args),
 
     #[command(
         about = "List contents of `zarr` file",
         long_about = "List what are included in the `zarr` file.\n\
-		      Displays structure and available arrays."
+                      Displays structure and available arrays."
     )]
     ListZarr(ListZarrArgs),
 
     #[command(
         about = "Sort rows by name order",
         long_about = "Sort rows according to the order of row names specified in a row name file.\n\
-		      Useful for aligning datasets and ensuring consistent row order."
+                      Useful for aligning datasets and ensuring consistent row order."
     )]
     ReorderRows(ReorderRowsArgs),
 
@@ -355,7 +352,7 @@ enum Commands {
         about = "Take columns and output dense matrix",
         visible_aliases = ["take-columns"],
         long_about = "Take columns from the sparse matrix and save them to an `output` file as a dense matrix for quick examination.\n\
-		      Useful for extracting subsets for visualization or analysis."
+                      Useful for extracting subsets for visualization or analysis."
     )]
     Columns(TakeColumnsArgs),
 
@@ -363,64 +360,64 @@ enum Commands {
         about = "Take rows and output dense matrix (transposed)",
         visible_aliases = ["take-rows"],
         long_about = "Take rows from the sparse matrix and save them to an `output` file as a dense matrix for quick examination.\n\
-		      For convenience, it will output a transposed (`column x selected_row`) matrix."
+                      For convenience,\n\
+                      it will output a transposed (`column x selected_row`) matrix."
     )]
     Rows(TakeRowsArgs),
 
     #[command(
         about = "List column names",
         long_about = "List all column names in the backend.\n\
-		      Useful for inspecting available features."
+                      Useful for inspecting available features."
     )]
     ColumnNames(TakeColumnNamesArgs),
 
     #[command(
         about = "List row names",
         long_about = "List all row names in the backend.\n\
-		      Useful for inspecting available samples or observations."
+                      Useful for inspecting available samples or observations."
     )]
     RowNames(TakeRowNamesArgs),
 
     #[command(
         about = "Subset columns and create new backend",
         long_about = "Take columns from the sparse matrix and create a new sparse matrix backend.\n\
-		      Allows for focused analysis on selected features."
+                      Allows for focused analysis on selected features."
     )]
     SubsetColumns(SubsetColumnsArgs),
 
     #[command(
         about = "Subset rows and create new backend",
         long_about = "Take rows from the sparse matrix and create a new sparse matrix backend.\n\
-		      Allows for focused analysis on selected samples/observations."
+                      Allows for focused analysis on selected samples/observations."
     )]
     SubsetRows(SubsetRowsArgs),
 
     #[command(
         about = "Randomly subsample cells and/or genes into a smaller backend",
         long_about = "Draw a random subset of cells and/or genes into a new backend.\n\
-			      Cells are columns; genes are rows.\n\
-			      This is handy for quick test and demo datasets.\n\
-			      \n\
-			      Specify counts with --cells and --genes.\n\
-			      Or specify fractions with --cell-frac and --gene-frac.\n\
-			      An unset dimension keeps all of its entries.\n\
-			      \n\
-			      Sampling is reproducible via --seed.\n\
-			      It reads only the selected columns.\n\
-			      Cost therefore scales with the output size, not the input.",
+                      Cells are columns; genes are rows.\n\
+                      This is handy for quick test and demo datasets.\n\
+                      \n\
+                      Specify counts with --cells and --genes.\n\
+                      Or specify fractions with --cell-frac and --gene-frac.\n\
+                      An unset dimension keeps all of its entries.\n\
+                      \n\
+                      Sampling is reproducible via --seed. It reads only the selected columns.\n\
+                      Cost therefore scales with the output size, not the input.",
         visible_alias = "downsample"
     )]
     Subsample(SubsampleArgs),
 
     #[command(
         about = "Convert a backend between on-disk formats (zarr <-> h5)",
-        long_about = "Convert a backend to a different on-disk format, preserving the matrix\n\
-			      and row/column names:\n\
-			      - zarr <-> h5 (re-encodes the data)\n\
-			      - .zarr <-> .zarr.zip (unzip / re-zip)\n\
-			      \n\
-			      The output format follows --backend and the output path (pass\n\
-			      --no-zip to keep a .zarr directory instead of a .zarr.zip archive).",
+        long_about = "Convert a backend to a different on-disk format,\n\
+                      preserving the matrix and row/column names:\n\
+                      - zarr <-> h5 (re-encodes the data)\n\
+                      - .zarr <-> .zarr.zip (unzip / re-zip)\n\
+                      \n\
+                      The output format follows --backend and the output path (pass\n\
+                      --no-zip to keep a .zarr directory instead of a .zarr.zip archive).",
         visible_alias = "to-backend"
     )]
     Convert(ConvertArgs),
@@ -428,8 +425,8 @@ enum Commands {
     #[command(
         about = "Align data backends",
         long_about = "To ensure that column names are aligned for multimodal analysis.\n\
-		      We will only keep columns and rows matched across files.\n\
-		      1st row: `D(1,1)-D(1,2)`, 2nd row: `D(2,1)-D(2,2)`, etc.",
+                      We will only keep columns and rows matched across files. 1st row:\n\
+                      `D(1,1)-D(1,2)`, 2nd row: `D(2,1)-D(2,2)`, etc.",
         visible_alias = "align"
     )]
     AlignData(AlignDataArgs),
@@ -437,14 +434,14 @@ enum Commands {
     #[command(
         about = "Merge multiple `.mtx` files",
         long_about = "Merge multiple 10x `.mtx` files into one fileset.\n\
-		      Useful for combining datasets from different sources."
+                      Useful for combining datasets from different sources."
     )]
     MergeMtx(MergeMtxArgs),
 
     #[command(
         about = "Merge multiple backend files",
         long_about = "Merge multiple backend file(sets) into one.\n\
-		      Supports various formats and options for merging.",
+                      Supports various formats and options for merging.",
         visible_alias = "merge"
     )]
     MergeBackend(MergeBackendArgs),
@@ -452,25 +449,23 @@ enum Commands {
     #[command(
         about = "Squeeze out sparse rows/columns",
         long_about = "Squeeze out rows and columns with too few non-zeros.\n\
-		      It will overwrite the original (be careful) and save the indices kept."
+                      It will overwrite the original (be careful) and save the indices kept."
     )]
     Squeeze(RunSqueezeArgs),
 
     #[command(
         about = "Show basic matrix info",
-        long_about = "Show basic information of a sparse matrix.\n\
-		      If output header is provided, row and column names will be saved."
+        long_about = "Show basic information of a sparse matrix. If output header is provided,\n\
+                      row and column names will be saved."
     )]
     Info(InfoArgs),
 
     #[command(
         about = "Take matrix statistics",
         long_about = "Take basic statistics from a sparse matrix.\n\
-		      The output file will contain columns of \n\
-		      (1) `nnz` - number of non-zero elements, \n\
-		      (2) `tot` - total sum, \n\
-		      (3) `mu` - average `μ`, \n\
-		      (4) `sig` - standard deviation `σ`.",
+                      The output file will contain columns of (1) `nnz` - number of non-zero elements,\n\
+                      (2) `tot` - total sum, (3) `mu` - average `μ`,\n\
+                      (4) `sig` - standard deviation `σ`.",
         visible_alias = "stat"
     )]
     Statistics(RunStatArgs),
@@ -478,13 +473,12 @@ enum Commands {
     #[command(
         about = "ASCII log-scale histogram of a row/column statistic",
         long_about = "Print an ASCII log10(x+1) histogram of a statistic.\n\
-		      It covers the per-feature (row) and per-cell (column) axes.\n\
-		      This is the summary `squeeze --show-histogram` shows,\n\
-		      exposed as a standalone command.\n\
-		      \n\
-		      Choose the statistic with --stat (default `nnz`; also `sum`,\n\
-		      `mean`, `sd`) and the margin with --dim (default `both`).\n\
-		      Pass -o/--output to also dump the raw per-unit values.",
+                      It covers the per-feature (row) and per-cell (column) axes.\n\
+                      This is the summary `squeeze --show-histogram` shows,\n\
+                      exposed as a standalone command.\n\
+                      \n\
+                      Choose the statistic with --stat (default `nnz`; also `sum`, `mean`, `sd`) and the margin with --dim (default `both`).\n\
+                      Pass -o/--output to also dump the raw per-unit values.",
         visible_alias = "hist"
     )]
     Histogram(RunHistogramArgs),

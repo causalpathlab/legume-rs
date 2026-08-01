@@ -105,45 +105,45 @@ pub struct AnnotateArgs {
         long,
         value_enum,
         help = "How markers become a call [default: chosen from {from}.gem.json]",
-        long_help = "How the marker panel becomes a cell-type call.\n\n\
-            DEFAULT: chosen from the run itself.\n\
-            The wrong statistic here does not error.\n\
-            It produces a plausible wrong answer instead.\n\
-            \n\
-            Both producers write {from}.gem.json naming themselves.\n\
-            The model_type field says which one ran.\n\
-            A prefix that cannot say what made it is reported,\n\
-            rather than guessed at.\n\
-            Topic model -> `enrichment`, embedding run -> `projection`.\n\
-            Pass --mode to override.\n\
-            Overriding to `projection` on a topic model warns, then proceeds.\n\n\
-            `projection` is for a `faba gem` EMBEDDING run.\n\
-            It builds each type's centroid from its markers' co-embedded feature vectors\n\
-            and hands every cell to the nearest one.\n\
-            Reads {from}.feature_embedding.parquet + {from}.cell_embedding.parquet;\n\
-            writes {out}.{track}.*\n\n\
-            `enrichment` is for a `faba gem-encoder` / `gem-topic` TOPIC-MODEL run.\n\
-            It asks, per factor, whether a type's panel is over-represented\n\
-            at the top of that factor's gene ranking.\n\
-            Surviving factor x type edges are then carried to cells,\n\
-            through theta.\n\
-            \n\
-            Reads {from}.dictionary.parquet, which is log beta;\n\
-            .latent.parquet and .pb_latent.parquet, which are log theta;\n\
-            and .pb_gene.parquet.\n\
-            Writes {out}.enrichment.*\n\n\
-            Do not use `projection` on a topic model.\n\
-            Nearest-centroid forms the cell-gene inner product <z_c, rho_g>,\n\
-            and for a topic model that is not a metric:\n\
-            beta = softmax_g(b_g + <alpha_t, rho_g>) depends only on gene-to-gene DIFFERENCES,\n\
-            so the per-gene bias b_g absorbs the level\n\
-            and the absolute cell-gene direction is a gauge freedom the likelihood never pins.\n\
-            `enrichment` routes the call through beta and theta.\n\
-            Those are the two things a topic model actually estimates.\n\
-            It never forms that inner product.\n\n\
-            `enrichment` takes --track spliced|nascent|both (NOT velocity):\n\
-            `nascent` annotates the nascent program (dictionary_nascent + latent_nascent),\n\
-            and reading it against `spliced` is the well-posed form of the velocity question."
+        long_help = "How the marker panel becomes a cell-type call.\n\
+                     \n\
+                     DEFAULT: chosen from the run itself.\n\
+                     The wrong statistic here does not error.\n\
+                     It produces a plausible wrong answer instead.\n\
+                     \n\
+                     Both producers write {from}.gem.json naming themselves.\n\
+                     The model_type field says which one ran.\n\
+                     A prefix that cannot say what made it is reported, rather than guessed at.\n\
+                     Topic model -> `enrichment`, embedding run -> `projection`.\n\
+                     Pass --mode to override.\n\
+                     Overriding to `projection` on a topic model warns, then proceeds.\n\
+                     \n\
+                     `projection` is for a `faba gem` EMBEDDING run.\n\
+                     It builds each type's centroid from its markers' co-embedded feature vectors and hands every cell to the nearest one.\n\
+                     Reads {from}.feature_embedding.parquet + {from}.cell_embedding.parquet;\n\
+                     writes {out}.{track}.*\n\
+                     \n\
+                     `enrichment` is for a `faba gem-encoder` / `gem-topic` TOPIC-MODEL run.\n\
+                     It asks, per factor,\n\
+                     whether a type's panel is over-represented at the top of that factor's gene ranking.\n\
+                     Surviving factor x type edges are then carried to cells, through theta.\n\
+                     \n\
+                     Reads {from}.dictionary.parquet, which is log beta;\n\
+                     .latent.parquet and .pb_latent.parquet, which are log theta;\n\
+                     and .pb_gene.parquet. Writes {out}.enrichment.*\n\
+                     \n\
+                     Do not use `projection` on a topic model.\n\
+                     Nearest-centroid forms the cell-gene inner product <z_c, rho_g>,\n\
+                     and for a topic model that is not a metric:\n\
+                     beta = softmax_g(b_g + <alpha_t, rho_g>) depends only on gene-to-gene DIFFERENCES,\n\
+                     so the per-gene bias b_g absorbs the level and the absolute cell-gene direction is a gauge freedom the likelihood never pins.\n\
+                     `enrichment` routes the call through beta and theta.\n\
+                     Those are the two things a topic model actually estimates.\n\
+                     It never forms that inner product.\n\
+                     \n\
+                     `enrichment` takes --track spliced|nascent|both (NOT velocity):\n\
+                     `nascent` annotates the nascent program (dictionary_nascent + latent_nascent),\n\
+                     and reading it against `spliced` is the well-posed form of the velocity question."
     )]
     pub mode: Option<Mode>,
 
@@ -187,14 +187,19 @@ pub struct AnnotateArgs {
         long = "min-markers",
         default_value_t = 3,
         help = "Drop a cell type with fewer than this many usable markers",
-        long_help = "Minimum usable markers before a cell type is allowed to compete.\n\n\
-            A type below this is not weakly located, it is UNLOCATED.\n\
-            The mean of one or two points has no direction worth the name,\n\
-            and a centroid built from too few markers lands short —\n\
-            near the middle of the cell cloud, where it is close to EVERY cell at once.\n\
-            It does not compete weakly; it becomes a magnet and takes the dataset.\n\n\
-            A dropped type keeps its column in every output. It simply never wins a cell.\n\n\
-            Floored at 2: you cannot resample a single point"
+        long_help = "Minimum usable markers before a cell type is allowed to compete.\n\
+                     \n\
+                     A type below this is not weakly located, it is UNLOCATED.\n\
+                     The mean of one or two points has no direction worth the name,\n\
+                     and a centroid built from too few markers lands short —\n\
+                     near the middle of the cell cloud,\n\
+                     where it is close to EVERY cell at once. It does not compete weakly;\n\
+                     it becomes a magnet and takes the dataset.\n\
+                     \n\
+                     A dropped type keeps its column in every output.\n\
+                     It simply never wins a cell.\n\
+                     \n\
+                     Floored at 2: you cannot resample a single point"
     )]
     pub min_markers: usize,
 
@@ -257,16 +262,18 @@ pub struct AnnotateArgs {
         long,
         default_value_t = 0,
         help = "Marker-panel permutation null (the BIAS guard). 0 = off; try 200",
-        long_help = "Marker-panel permutation null — the BIAS guard.\n\n\
-            Puts each type on trial: replace ONLY its markers with the same number of random genes\n\
-            (same IDF weights, matched on gene norm, drawn from the live marker pool),\n\
-            leave every rival type real,\n\
-            and ask whether its own genes place its prototype any better than random ones would.\n\n\
-            The bootstrap only measures VARIANCE,\n\
-            so a type whose markers are simply wrong comes back perfectly stable\n\
-            and looks like the most confident call in the run.\n\
-            This is what catches that.\n\n\
-            0 = off; try 200. Writes {out}.panel_null.tsv"
+        long_help = "Marker-panel permutation null — the BIAS guard.\n\
+                     \n\
+                     Puts each type on trial:\n\
+                     replace ONLY its markers with the same number of random genes (same IDF weights, matched on gene norm, drawn from the live marker pool),\n\
+                     leave every rival type real,\n\
+                     and ask whether its own genes place its prototype any better than random ones would.\n\
+                     \n\
+                     The bootstrap only measures VARIANCE,\n\
+                     so a type whose markers are simply wrong comes back perfectly stable and looks like the most confident call in the run.\n\
+                     This is what catches that.\n\
+                     \n\
+                     0 = off; try 200. Writes {out}.panel_null.tsv"
     )]
     pub panel_perm: usize,
 
@@ -274,33 +281,38 @@ pub struct AnnotateArgs {
         long,
         default_value_t = 0,
         help = "Support permutation null: turns label_support into a p-value/FDR. 0 = off",
-        long_help = "Support permutation null — calibrates `label_support`.\n\n\
-            Shuffles which type each marker gene belongs to (within gene-norm strata, so no type's norm profile changes)\n\
-            and re-runs the whole bootstrap,\n\
-            to learn what a cell's support looks like when the panel carries no type information.\n\n\
-            This replaces an arbitrary bar with a calibrated one.\n\
-            --min-support 0.5 is not scale-free: with C types, chance agreement is 1/C,\n\
-            so 0.5 sits at 3x chance on a 6-type panel and 12x on a 24-type one —\n\
-            the same flag is a different test on different panels.\n\
-            An FDR means the same thing everywhere.\n\n\
-            0 = off; needs the bootstrap.\n\
-            Reuses the bootstrap's cached partitions, so the cost is the cheap half of a replicate, not a re-clustering.\n\
-            Adds support_p / support_q / null_support to {out}.annot.parquet"
+        long_help = "Support permutation null — calibrates `label_support`.\n\
+                     \n\
+                     Shuffles which type each marker gene belongs to (within gene-norm strata, so no type's norm profile changes) and re-runs the whole bootstrap,\n\
+                     to learn what a cell's support looks like when the panel carries no type information.\n\
+                     \n\
+                     This replaces an arbitrary bar with a calibrated one.\n\
+                     --min-support 0.5 is not scale-free: with C types, chance agreement is 1/C,\n\
+                     so 0.5 sits at 3x chance on a 6-type panel and 12x on a 24-type one —\n\
+                     the same flag is a different test on different panels.\n\
+                     An FDR means the same thing everywhere.\n\
+                     \n\
+                     0 = off; needs the bootstrap. Reuses the bootstrap's cached partitions,\n\
+                     so the cost is the cheap half of a replicate, not a re-clustering.\n\
+                     Adds support_p / support_q / null_support to {out}.annot.parquet"
     )]
     pub support_perm: usize,
 
     #[arg(
         long = "no-bootstrap-markers",
         help = "Turn OFF the stability bootstrap and ship a bare point estimate",
-        long_help = "Turn OFF the stability bootstrap and ship a bare point estimate.\n\n\
-            The bootstrap is ON by default.\n\
-            Each draw resamples every type's marker panel with replacement AND re-derives the clustering;\n\
-            the consensus is what ships.\n\
-            So every call carries the fraction of resamples that agreed on it,\n\
-            and a call that cannot hold up across them abstains rather than being printed.\n\n\
-            Without it, `argmin` over marker centroids always returns something,\n\
-            and returns it with no error bar.\n\
-            Measured: 28.2% of cells were assigned to types the tissue does not contain, against 2.4% with it on"
+        long_help = "Turn OFF the stability bootstrap and ship a bare point estimate.\n\
+                     \n\
+                     The bootstrap is ON by default.\n\
+                     Each draw resamples every type's marker panel with replacement AND re-derives the clustering;\n\
+                     the consensus is what ships.\n\
+                     So every call carries the fraction of resamples that agreed on it,\n\
+                     and a call that cannot hold up across them abstains rather than being printed.\n\
+                     \n\
+                     Without it, `argmin` over marker centroids always returns something,\n\
+                     and returns it with no error bar. Measured:\n\
+                     28.2% of cells were assigned to types the tissue does not contain,\n\
+                     against 2.4% with it on"
     )]
     pub no_bootstrap_markers: bool,
 
@@ -314,13 +326,17 @@ pub struct AnnotateArgs {
     #[arg(
         long,
         help = "Hold the clustering fixed across resamples (weakens the bootstrap)",
-        long_help = "Hold the clustering fixed across resamples.\n\n\
-            By default each draw re-derives the clustering,\n\
-            so the partition's own arbitrariness is absorbed into the support rather than silently trusted.\n\
-            The kNN graph is deterministic (so runs reproduce), but Leiden still picks among near-equal modularity optima,\n\
-            and a label that flips when the partition is re-drawn is not a robust one.\n\n\
-            WARNING: with the partition held fixed the bootstrap has little to say —\n\
-            measured, NOTHING abstains (0% unassigned) and support's ability to separate spurious calls falls from AUC 0.93 to 0.69"
+        long_help = "Hold the clustering fixed across resamples.\n\
+                     \n\
+                     By default each draw re-derives the clustering,\n\
+                     so the partition's own arbitrariness is absorbed into the support rather than silently trusted.\n\
+                     The kNN graph is deterministic (so runs reproduce),\n\
+                     but Leiden still picks among near-equal modularity optima,\n\
+                     and a label that flips when the partition is re-drawn is not a robust one.\n\
+                     \n\
+                     WARNING: with the partition held fixed the bootstrap has little to say —\n\
+                     measured,\n\
+                     NOTHING abstains (0% unassigned) and support's ability to separate spurious calls falls from AUC 0.93 to 0.69"
     )]
     pub no_recluster: bool,
 
@@ -328,12 +344,14 @@ pub struct AnnotateArgs {
         long,
         default_value_t = 0.5,
         help = "Minimum fraction of resamples the top label must win to be called",
-        long_help = "Minimum fraction of resamples the top label must win for the cell to be called at all.\n\n\
-            NOTE this bar is NOT scale-free.\n\
-            With C types, chance agreement is 1/C,\n\
-            so 0.5 sits at ~3x chance on a 6-type panel and ~12x chance on a 24-type one —\n\
-            the same value is a different test on different panels, and their abstention rates are not comparable.\n\n\
-            --abstain-separable (a sign test) and --support-perm (a calibrated FDR) both avoid that"
+        long_help = "Minimum fraction of resamples the top label must win for the cell to be called at all.\n\
+                     \n\
+                     NOTE this bar is NOT scale-free. With C types, chance agreement is 1/C,\n\
+                     so 0.5 sits at ~3x chance on a 6-type panel and ~12x chance on a 24-type one —\n\
+                     the same value is a different test on different panels,\n\
+                     and their abstention rates are not comparable.\n\
+                     \n\
+                     --abstain-separable (a sign test) and --support-perm (a calibrated FDR) both avoid that"
     )]
     pub min_support: f32,
 
@@ -341,13 +359,17 @@ pub struct AnnotateArgs {
         long,
         conflicts_with = "min_support",
         help = "Abstain by a sign test instead of the --min-support threshold",
-        long_help = "Abstain by a TEST rather than a threshold.\n\n\
-            Keep the top label only if it beat the runner-up by more than resampling noise —\n\
-            an exact binomial sign test at --abstain-alpha.\n\
-            Among the m replicates that chose one of the two leading labels,\n\
-            each is a coin flip if the two are equally probable.\n\n\
-            No magic number, and unlike --min-support it means the same thing whatever the number of types.\n\
-            It resolves more cells, but note it decides WHEN to stay silent, not whether a call is right"
+        long_help = "Abstain by a TEST rather than a threshold.\n\
+                     \n\
+                     Keep the top label only if it beat the runner-up by more than resampling noise —\n\
+                     an exact binomial sign test at --abstain-alpha.\n\
+                     Among the m replicates that chose one of the two leading labels,\n\
+                     each is a coin flip if the two are equally probable.\n\
+                     \n\
+                     No magic number,\n\
+                     and unlike --min-support it means the same thing whatever the number of types.\n\
+                     It resolves more cells, but note it decides WHEN to stay silent,\n\
+                     not whether a call is right"
     )]
     pub abstain_separable: bool,
 
@@ -363,10 +385,12 @@ pub struct AnnotateArgs {
         default_value_t = 0.8,
         help = "Coverage of the reported `label_set` (the mixed annotation)",
         long_help = "Coverage of the reported `label_set` —\n\
-            the smallest set of labels accounting for this share of the resamples.\n\n\
-            A cell that cannot be given ONE label can still be given two,\n\
-            and `HSPC/LMPP` is a far better answer than `unassigned`.\n\
-            The distribution is already computed by the bootstrap; this stops us throwing it away"
+                     the smallest set of labels accounting for this share of the resamples.\n\
+                     \n\
+                     A cell that cannot be given ONE label can still be given two,\n\
+                     and `HSPC/LMPP` is a far better answer than `unassigned`.\n\
+                     The distribution is already computed by the bootstrap;\n\
+                     this stops us throwing it away"
     )]
     pub set_coverage: f32,
 
@@ -376,7 +400,7 @@ pub struct AnnotateArgs {
         help = "Largest `label_set` worth printing (a 4-way tie is not an annotation)",
         long_help = "Largest `label_set` worth printing.\n\n\
             `HSPC/LMPP` is an annotation; a four-way tie is not —\n\
-            past a point a set stops narrowing anything down\n\
+            past a point a set stops narrowing anything down,\n\
             and starts laundering \"we don't know\" as though it were a finding.\n\n\
             A cell that needs more labels than this to reach --set-coverage is left unassigned"
     )]
@@ -387,16 +411,19 @@ pub struct AnnotateArgs {
         default_value_t = 0.0,
         value_name = "FRAC",
         help = "Minimum marker-panel coverage of the feature axis; 0 = report only",
-        long_help = "Refuse to annotate on a marker panel the embedding mostly never saw.\n\n\
-            `faba gem` writes only its TRAINED feature rows,\n\
-            so a marker that missed the `--n-hvg` cut is not down-weighted —\n\
-            it is ABSENT, and it silently drops out of the panel.\n\
-            A cell type that entered with 20 markers and scores on 1 still gets a confident-looking call,\n\
-            and nothing in the output distinguishes it from a well-supported one.\n\n\
-            The coverage is always reported, and a type keeping under half its panel always warns.\n\
-            This makes it fatal instead.\n\
-            The fix when it fires is to widen the axis (raise `--n-hvg`) or to force the panel into training —\n\
-            `faba gem --markers <the same file>`."
+        long_help = "Refuse to annotate on a marker panel the embedding mostly never saw.\n\
+                     \n\
+                     `faba gem` writes only its TRAINED feature rows,\n\
+                     so a marker that missed the `--n-hvg` cut is not down-weighted —\n\
+                     it is ABSENT, and it silently drops out of the panel.\n\
+                     A cell type that entered with 20 markers and scores on 1 still gets a confident-looking call,\n\
+                     and nothing in the output distinguishes it from a well-supported one.\n\
+                     \n\
+                     The coverage is always reported,\n\
+                     and a type keeping under half its panel always warns.\n\
+                     This makes it fatal instead.\n\
+                     The fix when it fires is to widen the axis (raise `--n-hvg`) or to force the panel into training —\n\
+                     `faba gem --markers <the same file>`."
     )]
     pub min_panel_coverage: f32,
 }

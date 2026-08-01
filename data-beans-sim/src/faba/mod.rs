@@ -86,8 +86,8 @@ pub struct FabaArgs {
         long,
         default_value_t = 3,
         help = "Mixture components per modifier (g, m)",
-        long_help = "Mixture components per modifier (g, m).\n\
-                     The count modality is fixed at 2: spliced and unspliced."
+        long_help = "Mixture components per modifier (g, m). The count modality is fixed at 2:\n\
+                     spliced and unspliced."
     )]
     pub components_per_modifier: usize,
 
@@ -238,8 +238,7 @@ pub struct FabaArgs {
         default_value_t = 0.1,
         help = "Fraction of substrate-positive (g, m) pairs held out",
         long_help = "Fraction of substrate-positive (g, m) pairs held out.\n\
-                     No rows are emitted for them.\n\
-                     They serve the imputation evaluation."
+                     No rows are emitted for them. They serve the imputation evaluation."
     )]
     pub held_out_frac: f32,
 
