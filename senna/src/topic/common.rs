@@ -400,7 +400,7 @@ pub struct LoadCollapseArgs<'a> {
     pub want_hierarchy: bool,
     /// Optional pre-built `cell_to_pb_per_level` membership (finest-
     /// last) paired with the source's `cell_names`, inherited from a
-    /// prior `senna {topic, masked-topic, ce-topic}` run via `--from`.
+    /// prior `senna {topic, masked-topic}` run via `--from`.
     /// `load_and_collapse` aligns it to `data_vec.column_names()` by
     /// name and then routes through
     /// `collapse_columns_multilevel_with_partition`, skipping the

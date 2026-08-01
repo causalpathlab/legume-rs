@@ -48,7 +48,7 @@ pub struct LayoutPhateArgs {
                      Uses `manifest.pseudotime` if already populated; otherwise \
                      fits a fresh principal graph from `outputs.latent` (using \
                      `--root-cell` / `--root-node`) in-memory without writing \
-                     any artifacts. Run `senna fit-pseudotime` first if you \
+                     any artifacts. Run `senna pseudotime` first if you \
                      want non-default principal-graph hyperparameters."
     )]
     orient_by_root: bool,

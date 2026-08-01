@@ -2,7 +2,7 @@
 //! pseudotime entry.
 //!
 //! Reads `manifest.pseudotime.{nodes_latent, edges, root_node}` written by
-//! `senna fit-pseudotime`, reconstructs the principal graph, re-projects
+//! `senna pseudotime`, reconstructs the principal graph, re-projects
 //! cells onto it, then runs the RT layout + per-cell jitter. Writes
 //! `{out}.tree_layout.{cell_coords,nodes_2d}.parquet` and updates
 //! `manifest.pseudotime.tree_{cell_coords,nodes_2d}`.
@@ -18,7 +18,7 @@ pub struct LayoutTreeArgs {
     #[arg(
         long = "from",
         required = true,
-        help = "Run manifest JSON written by `senna fit-pseudotime`"
+        help = "Run manifest JSON written by `senna pseudotime`"
     )]
     from: Box<str>,
 
@@ -59,16 +59,16 @@ pub fn fit_layout_tree(args: &LayoutTreeArgs) -> anyhow::Result<()> {
     let root_node = pt.root_node.ok_or_else(|| {
         anyhow::anyhow!(
             "manifest {} has no pseudotime entries; run \
-             `senna fit-pseudotime --from {} --root-cell <name>` first",
+             `senna pseudotime --from {} --root-cell <name>` first",
             manifest_path.display(),
             manifest_path.display()
         )
     })?;
     let nodes_latent_rel = pt.nodes_latent.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("manifest has no pseudotime.nodes_latent — re-run `senna fit-pseudotime`")
+        anyhow::anyhow!("manifest has no pseudotime.nodes_latent — re-run `senna pseudotime`")
     })?;
     let edges_rel = pt.edges.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("manifest has no pseudotime.edges — re-run `senna fit-pseudotime`")
+        anyhow::anyhow!("manifest has no pseudotime.edges — re-run `senna pseudotime`")
     })?;
     let latent_rel = manifest.outputs.geometry_latent().ok_or_else(|| {
         anyhow::anyhow!("manifest has no outputs.cell_embedding or outputs.latent")
@@ -168,7 +168,7 @@ pub fn fit_layout_tree(args: &LayoutTreeArgs) -> anyhow::Result<()> {
 }
 
 /// Rebuild a [`PrincipalGraph`] from the parquet artifacts written by
-/// `senna fit-pseudotime`. `n_iters` and `final_objective` are not
+/// `senna pseudotime`. `n_iters` and `final_objective` are not
 /// persisted and are left at placeholder zeros — neither the RT layout
 /// nor cell projection consult them.
 fn reconstruct_principal_graph(nodes: Mat, edges_mat: &Mat) -> anyhow::Result<PrincipalGraph> {

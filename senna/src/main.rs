@@ -143,14 +143,16 @@ fn print_logo() {
     long_about = "SENNA — Stochastic data Embedding with Nearest Neighbourhood Adjustment.\n\n\
                   Input: sparse backends in `.zarr` or `.h5` (convert from Matrix Market\n\
                   with `data-beans from-mtx`).\n\n\
-                  Pipeline (each step writes its outputs back to the run manifest\n\
-                  `{prefix}.senna.json`, so downstream commands need no extra flags):\n\n  \
+                  Each step writes its outputs back to the run manifest\n\
+                  `{prefix}.senna.json`.\n\
+                  Downstream commands read data and batch files from it.\n\
+                  Steps 3 and 5 still need their own --latent / --out.\n\n  \
                   1. Train embedding   senna topic | masked-topic | svd\n                       \
                                        senna joint-topic | joint-svd       (multi-modality)\n  \
                   2. Held-out inference senna predict                       (apply trained model)\n  \
-                  3. Cluster cells     senna clustering --from run.senna.json\n  \
+                  3. Cluster cells     senna clustering --from run.senna.json --latent L --out O\n  \
                   4. Annotate cells    senna annotate-by-enrichment --from run.senna.json -m markers.tsv\n  \
-                  5. Trajectory        senna pseudotime --from run.senna.json\n  \
+                  5. Trajectory        senna pseudotime --from run.senna.json --out O\n  \
                   6. 2D layout         senna layout {phate|tsne|umap} --from run.senna.json\n  \
                   7. Scatter plot      senna plot       --from run.senna.json\n  \
                   8. Topic diagnostics senna plot-topic --from run.senna.json\n\n\
@@ -170,9 +172,12 @@ enum Commands {
     #[command(
         about = "Train topic-model embedding (VAE).",
         long_about = "Probabilistic topic-model embedding.\n\n\
-                      Stages: (1) batch-aware pseudobulk collapsing, (2) encoder-decoder\n\
-                      VAE via SGD, (3) per-cell topic inference. Decoders: multinomial,\n\
-                      negative-binomial, vMF (combine via comma-separated --decoder).\n\n\
+                      Stages:\n\
+                      \x20 1. batch-aware pseudobulk collapsing\n\
+                      \x20 2. encoder-decoder VAE via SGD\n\
+                      \x20 3. per-cell topic inference\n\n\
+                      Decoders are multinom, nb and nbmixture (the default).\n\
+                      Combine them with a comma-separated --decoder.\n\n\
                       Writes {out}.{latent,dictionary}.parquet, {out}.safetensors,\n\
                       {out}.model.json, {out}.senna.json (run manifest)."
     )]
@@ -532,14 +537,26 @@ enum Commands {
 enum LayoutCmd {
     #[command(about = "PHATE diffusion embedding of pseudobulks (recommended default).")]
     Phate(LayoutPhateArgs),
-    #[command(about = "t-SNE of pseudobulks on raw-gene similarity (random init).")]
+    #[command(
+        about = "t-SNE of pseudobulks on raw-gene similarity (random init).",
+        long_about = "t-SNE layout of pseudobulks.\n\n\
+                      Similarity is computed on raw genes, and the embedding\n\
+                      starts from a random initialization.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
     Tsne(LayoutTsneArgs),
-    #[command(about = "UMAP-style SGD of pseudobulks over the fuzzy kNN graph.")]
+    #[command(
+        about = "UMAP-style SGD of pseudobulks over the fuzzy kNN graph.",
+        long_about = "UMAP-style layout of pseudobulks.\n\n\
+                      A fuzzy kNN graph is built over the pseudobulks.\n\
+                      Attractive and repulsive forces are then optimized by SGD.\n\
+                      Cells are placed from their pseudobulk coordinates."
+    )]
     Umap(LayoutUmapArgs),
     #[command(
         about = "Reingold-Tilford tree layout from a pseudotime run.",
         long_about = "Reads the principal graph + root node from `manifest.pseudotime`\n\
-                      (written by `senna fit-pseudotime`), then produces a top-down tree\n\
+                      (written by `senna pseudotime`), then produces a top-down tree\n\
                       layout where y is geodesic pseudotime and x is sibling order.\n\n\
                       Writes manifest.pseudotime.tree_{cell_coords,nodes_2d}."
     )]
