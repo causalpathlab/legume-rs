@@ -85,7 +85,10 @@ pub struct SnpArgs {
                      every genotyped site with allele counts, genotype and GQ\n\
                      - {batch}_baf: per-cell ALLELE FREQUENCY matrix (10x mode),\n\
                      rows `{chr}:{pos}/baf/{alt|depth}`,\n\
-                     keyed on the locus and carrying no genotype (matrices are `.zarr.zip` by default; `.zarr` with --no-zip, `.h5` for the hdf5 backend.) BAF per cell = alt / depth;\n\
+                     keyed on the locus and carrying no genotype.\n\
+                     Matrices are `.zarr.zip` by default;\n\
+                     `.zarr` with --no-zip, `.h5` for the hdf5 backend.\n\
+                     BAF per cell = alt / depth;\n\
                      the channels nest, so never sum them."
     )]
     pub output: Box<str>,
@@ -156,7 +159,8 @@ pub struct SnpArgs {
         long,
         default_value_t = 3,
         help = "Minimum alt allele reads for discovery",
-        long_help = "Minimum number of reads supporting the non-reference allele to consider a position as a candidate variant.\n\
+        long_help = "Minimum number of reads supporting the non-reference allele\n\
+                     for a position to count as a candidate variant.\n\
                      Applied before genotype calling."
     )]
     pub min_alt_count: usize,
@@ -166,7 +170,8 @@ pub struct SnpArgs {
         long,
         default_value_t = 0.1,
         help = "Minimum alt allele frequency for discovery",
-        long_help = "Minimum fraction of reads supporting the non-reference allele (alt_count / total_depth) to consider a position as a candidate.\n\
+        long_help = "Minimum fraction of reads supporting the non-reference allele,\n\
+                     alt_count / total_depth, for a position to count as a candidate.\n\
                      Default 0.1 (10%) balances sensitivity with false positive rate."
     )]
     pub min_alt_freq: f64,
@@ -292,7 +297,8 @@ pub struct SnpArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
-        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive (zarr backend only; no effect on hdf5)"
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive.\n\
+                     Zarr backend only; no effect on hdf5."
     )]
     pub zip: bool,
 

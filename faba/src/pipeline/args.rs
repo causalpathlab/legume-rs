@@ -28,13 +28,18 @@ pub(super) fn ser_debug<T: std::fmt::Debug, S: serde::Serializer>(
                   \n\
                   APA runs last because the SCAPE EM is the heavy step and nothing else waits on it.\n\
                   \n\
-                  ATOI is reference-anchored and tested per site against a beta-binomial sequencing-error null (--edit-error-rate/--edit-overdispersion),\n\
+                  ATOI is reference-anchored, tested per site against a beta-binomial\n\
+            sequencing-error null (--edit-error-rate/--edit-overdispersion),\n\
                   no control sample.\n\
                   m6A instead requires a catalytically-dead control (--control-bam):\n\
-                  each motif C is tested for higher conversion in the positional BAMs than the pooled control (so a genomic C/T variant is rejected);\n\
+                  each motif C is tested for higher conversion in the positional BAMs\n\
+            than the pooled control, so a genomic C/T variant is rejected;\n\
                   the step is skipped when no control is given.\n\
-                  The SNP mask is off by default for m6A (the contrast already rejects variants; opt back in with --m6a-snp-mask).\n\
-                  Step 0 discovers variants de novo and optionally force-calls at known sites (--known-snps, VCF/BCF/Parquet).\n\
+                  The SNP mask is off by default for m6A:\n\
+            the contrast already rejects variants.\n\
+            Opt back in with --m6a-snp-mask.\n\
+                  Step 0 discovers variants de novo,\n\
+            and optionally force-calls at known sites (--known-snps, VCF/BCF/Parquet).\n\
                   De novo variants are VAF-filtered (--snp-mask-min-vaf) so RNA editing sites are preserved in the mask.\n\
                   UMI deduplication is applied to all pileup steps (disable with --no-umi-dedup)."
 )]
@@ -116,7 +121,8 @@ pub struct PipelineArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
-        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive (zarr backend only; no effect on hdf5)"
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive.\n\
+                     Zarr backend only; no effect on hdf5."
     )]
     pub zip: bool,
 

@@ -43,7 +43,8 @@ pub struct DartSeqCountArgs {
         help = "Control BAM files (catalytically-dead YTHmut)",
         long_help = "Comma-separated list of control (catalytically-dead YTHmut) BAM files,\n\
                      pooled into one background.\n\
-                     m6A is called where the signal BAMs show significantly higher C->T conversion than these controls (two-sample test).\n\
+                     m6A is called where the signal BAMs show significantly higher\n\
+                     C->T conversion than these controls, by a two-sample test.\n\
                      Required:\n\
                      m6A cannot be distinguished from genomic variation without a control."
     )]
@@ -99,7 +100,8 @@ pub struct DartSeqCountArgs {
                      every extra test adds\n\
                      0.05 expected false calls: 79 -> 172, i.e. 8.1% -> 17.5% of the\n\
                      calls.\n\
-                     Pass --min-coverage 5 --min-conversion 2 to buy that back if a cleaner call set matters more than coverage of the thin tail.\n\
+                     Pass --min-coverage 5 --min-conversion 2 to buy that back,\n\
+                     if a cleaner call set matters more than coverage of the thin tail.\n\
                      \n\
                      Null-cell QC removes cells that never edit before discovery runs.\n\
                      That roughly halves the coverage a site is judged on.\n\
@@ -221,7 +223,8 @@ pub struct DartSeqCountArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
-        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive (zarr backend only; no effect on hdf5)"
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive.\n\
+                     Zarr backend only; no effect on hdf5."
     )]
     pub zip: bool,
 
@@ -309,7 +312,8 @@ pub struct DartSeqCountArgs {
         default_value_t = false,
         help = "Disable R site (RAC/GTY) validation in reference",
         long_help = "By default,\n\
-                     faba validates the R position in RAC/GTY motifs against the reference genome (requires R=A/G on forward strand and Y=C/T on reverse strand).\n\
+                     faba validates the R position in RAC/GTY motifs against the reference genome.\n\
+                     It requires R=A/G on the forward strand, Y=C/T on the reverse.\n\
                      Use this flag to disable that check."
     )]
     pub no_check_r_site: bool,
@@ -322,7 +326,9 @@ pub struct DartSeqCountArgs {
         default_value_t = false,
         help = "Detect A-to-I editing sites and mask them from m6A calling",
         long_help = "Detect A-to-I (adenosine-to-inosine) RNA editing sites via A→G conversions.\n\
-                     Detected sites are written to a separate parquet file and used as a mask to exclude false-positive m6A candidates whose RAC/GTY triplet overlaps an A-to-I site.\n\
+                     Detected sites are written to a separate parquet file,\n\
+                     then used as a mask to exclude false-positive m6A candidates\n\
+                     whose RAC/GTY triplet overlaps an A-to-I site.\n\
                      This mask pass has its own --atoi-pvalue cutoff, not the m6A --pvalue."
     )]
     pub detect_atoi: bool,

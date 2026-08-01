@@ -59,7 +59,8 @@ pub struct MetageneArgs {
         long_help = "Total number of bins across the 5'UTR, CDS and 3'UTR.\n\
                      \n\
                      MetaPlotR plots its metagene with 200 breaks, hence the default.\n\
-                     Bins are split between the three regions in proportion to each region's MEDIAN spliced length over the assigned sites.\n\
+                     Bins are split between the three regions in proportion\n\
+                     to each region's MEDIAN spliced length over the assigned sites.\n\
                      The median rather than the maximum, which one gene would set:\n\
                      titin's merged CDS is 114,586 nt against a median of 1,347.\n\
                      A region that has sites always keeps at least one bin.\n\

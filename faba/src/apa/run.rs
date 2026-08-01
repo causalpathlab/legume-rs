@@ -84,7 +84,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 10,
         help = "Internal priming check window (bp)",
-        long_help = "Window size in base pairs around the cleavage site to check for genomic A/T-rich stretches (internal priming)."
+        long_help = "Window size in base pairs around the cleavage site,\n\
+                     checked for genomic A/T-rich stretches (internal priming)."
     )]
     pub(crate) polya_internal_prime_window: usize,
 
@@ -173,7 +174,8 @@ pub struct CountApaArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
-        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive (zarr backend only; no effect on hdf5)"
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive.\n\
+                     Zarr backend only; no effect on hdf5."
     )]
     pub(crate) zip: bool,
 
@@ -417,7 +419,9 @@ pub struct CountApaArgs {
         default_value_t = 0.05,
         help = "Per-site skirt eta (heavy-tail robustness, mixture mode)",
         long_help = "Each site's emission is (1 - eta) * Gaussian(alpha, beta^2) + eta * Uniform(alpha - W, alpha + W).\n\
-                     The local uniform skirt absorbs near-site outliers so the BIC does not pick up extra spurious sites in broad cleavage clusters.\n\
+                     The local uniform skirt absorbs near-site outliers,\n\
+                     so the BIC does not pick up extra spurious sites\n\
+                     in broad cleavage clusters.\n\
                      Set to 0 to disable. Only used in mixture mode."
     )]
     pub(crate) skirt_eta: f32,
@@ -438,7 +442,8 @@ pub struct CountApaArgs {
         default_value_t = 2.0,
         help = "Post-EM merge tolerance in beta units (mixture mode)",
         long_help = "After BIC site selection,\n\
-                     selected sites with |alpha_i - alpha_j| < merge_beta_mult * max(beta_i, beta_j) are collapsed (higher-pi site kept) and weights re-fit.\n\
+                     selected sites with |alpha_i - alpha_j| < merge_beta_mult * max(beta_i, beta_j)\n\
+                     are collapsed, keeping the higher-pi site, and weights re-fit.\n\
                      Set to 0 to disable. Only used in mixture mode."
     )]
     pub(crate) merge_beta_mult: f32,

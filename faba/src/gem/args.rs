@@ -15,10 +15,12 @@ pub struct ModelArgs {
     #[arg(
         long = "delta-l2",
         default_value_t = 0.0,
-        help = "L2 (ridge) weight on the per-gene splice offset δ_g (0 = auto: a mild ridge is applied when unspliced rows are present)",
+        help = "L2 (ridge) weight on the per-gene splice offset δ_g.\n\
+                0 = auto: a mild ridge when unspliced rows are present.",
         long_help = "L2 (ridge) penalty on the per-gene splice offset δ_g.\n\
                      When 0 (default) and the input carries unspliced rows,\n\
-                     gem auto-applies a mild ridge (L2=1.0) so a δ_g dictionary is always written for `faba annotate --track velocity`;\n\
+                     gem auto-applies a mild ridge (L2=1.0),\n\
+                     so a δ_g dictionary is always written for `faba annotate --track velocity`;\n\
                      set an explicit value to override,\n\
                      or 0 on a spliced-only input keeps δ off. When > 0,\n\
                      unspliced rows embed as β_g + δ_g with a ridge-shrunk δ_g learned in phase 1:\n\
@@ -248,7 +250,9 @@ pub struct CollapseArgs {
                      otherwise the first column is used. EVERY OTHER COLUMN IS IGNORED,\n\
                      so a curated `gene<TAB>celltype` marker table can be passed as-is.\n\
                      \n\
-                     Names are matched leniently against the `{gene}` slot of the `{gene}/count/{spliced|unspliced}` rows (case-insensitive, symbol ↔ `ENSG…_SYMBOL` either way);\n\
+                     Names are matched leniently against the `{gene}` slot of the\n\
+                     `{gene}/count/{spliced|unspliced}` rows:\n\
+                     case-insensitive, symbol ↔ `ENSG…_SYMBOL` either way;\n\
                      unmatched names are logged, not fatal.\n\
                      A no-op when `--n-hvg 0` (all genes trained),\n\
                      i.e. when the HVG cut wouldn't drop a gene anyway."
@@ -261,7 +265,8 @@ pub struct CollapseArgs {
         help = "Marker panel this embedding will be annotated with —\n\
                 forced into the projection basis,\n\
                 like --must-train-features (a no-op at --n-hvg 0)",
-        long_help = "The `gene<TAB>celltype` marker panel that `faba annotate` / `faba lineage --markers` will later score against this embedding.\n\
+        long_help = "The `gene<TAB>celltype` marker panel that `faba annotate`\n\
+                     or `faba lineage --markers` will later score against this embedding.\n\
                      Its genes are UNIONed into `--must-train-features`,\n\
                      so they carry projection weight regardless of the `--n-hvg` selection.\n\
                      \n\
@@ -274,7 +279,8 @@ pub struct CollapseArgs {
                      so every marker is on the trained axis by construction and cannot silently leave.\n\
                      \n\
                      What remains is a modelling nudge, not a safety net:\n\
-                     naming the panel biases the pseudobulk geometry toward separating the compartments the panel will later call.\n\
+                     naming the panel biases the pseudobulk geometry\n\
+                     toward separating the compartments the panel will later call.\n\
                      Read `annotate`'s agreement as a check on the grouping rather than an independent confirmation —\n\
                      which is what the run already logs.\n\
                      \n\
@@ -294,7 +300,8 @@ pub struct CollapseArgs {
         long,
         default_value_t = '_',
         help = "Delimiter for fuzzy gene-name matching across input files",
-        long_help = "Delimiter for fuzzy gene-name matching across input files (last token after the split is the canonical row name).\n\
+        long_help = "Delimiter for fuzzy gene-name matching across input files.\n\
+                     The last token after the split is the canonical row name.\n\
                      Ignored unless `--feature-name-exact` is *off*."
     )]
     pub feature_name_delim: char,
@@ -340,7 +347,9 @@ pub struct TrainArgs {
         long,
         default_value_t = 1e-2,
         help = "AdamW decoupled weight decay (all phase-1 params). Default 1e-2.",
-        long_help = "AdamW decoupled weight decay applied uniformly to every phase-1 parameter (β_g, δ_g, per-axis heads, biases).\n\
+        long_help = "AdamW decoupled weight decay,\n\
+                     applied uniformly to every phase-1 parameter:\n\
+                     β_g, δ_g, per-axis heads, biases.\n\
                      Post-update shrinkage `θ ← θ − lr·wd·θ`;\n\
                      it does NOT enter the backward graph,\n\
                      so unlike an explicit E_feat L2 it is compatible with β-sharing.\n\
@@ -367,7 +376,8 @@ pub struct TrainArgs {
         long_help = "Shape the embedding along a pseudobulk lineage. When set,\n\
                      gem reads the pb-level velocity (identity θ_pb + velocity δ_pb per pseudobulk per collapse level),\n\
                      orients a fixed velocity-KNN lineage over the pseudobulks,\n\
-                     and runs a SECOND phase-1 pass with a velocity-drift SEM residual so the shared feature dictionary picks up that lineage geometry —\n\
+                     and runs a SECOND phase-1 pass with a velocity-drift SEM residual,\n\
+                     so the shared feature dictionary picks up that lineage geometry —\n\
                      then lifts a per-cell pseudotime + fate (`{out}.dag_pseudotime.parquet` / `{out}.dag_fate.parquet`).\n\
                      Off by default —\n\
                      the per-cell embedding is then byte-identical to a plain run;\n\
@@ -400,8 +410,12 @@ pub struct TrainArgs {
         help = "Lineage-DAG:\n\
                 use the dense velocity-KNN pb graph instead of the default MST tree (opt-out).",
         long_help = "Within `--lineage-dag`,\n\
-                     build the pb structure as the dense velocity-KNN graph (each node → its velocity-forward θ-neighbours) instead of the DEFAULT minimum spanning tree oriented into a DAG.\n\
-                     The MST is a sparse single-tree lineage (n−1 edges per level) that gives a better-conditioned embedding (measured: PC1 further from the ‖θ‖ norm axis);\n\
+                     build the pb structure as the dense velocity-KNN graph,\n\
+                     each node → its velocity-forward θ-neighbours,\n\
+                     instead of the DEFAULT minimum spanning tree oriented into a DAG.\n\
+                     The MST is a sparse single-tree lineage, n−1 edges per level,\n\
+                     that gives a better-conditioned embedding:\n\
+                     measured, PC1 lands further from the ‖θ‖ norm axis;\n\
                      the dense graph keeps more branch edges for the fate readout.\n\
                      Ignored unless `--lineage-dag` is set."
     )]
@@ -525,7 +539,8 @@ pub struct GemArgs {
         long_help = "Output file prefix.\n\
                      \n\
                      NOTE the per-cell tables (cell_embedding, velocity, ...) may contain FEWER ROWS than the input:\n\
-                     cell QC drops failing cells from the OUTPUTS (never from the fit — every cell still informs the embedding and the feature dictionary).\n\
+                     cell QC drops failing cells from the OUTPUTS, never from the fit —\n\
+                     every cell still informs the embedding and the feature dictionary.\n\
                      Join downstream tables by the cell/barcode column, never by row position.\n\
                      --no-qc keeps every cell; --qc-report writes the per-cell keep/drop table."
     )]

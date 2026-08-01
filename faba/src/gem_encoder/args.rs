@@ -123,7 +123,9 @@ pub struct GemEncoderArgs {
                      {out}.log_likelihood.parquet            per-epoch training trace\n\
                      {out}.safetensors + {out}.gem.json    weights + architecture\n\
                      \n\
-                     NOTE the per-cell tables (latent, cell_embedding, velocity, velocity_factor, latent_mature, latent_nascent) may contain FEWER ROWS than the input:\n\
+                     NOTE the per-cell tables may contain FEWER ROWS than the input:\n\
+                     latent, cell_embedding, velocity, velocity_factor,\n\
+                     latent_mature, latent_nascent.\n\
                      cell QC drops failing cells from the OUTPUTS (never from training).\n\
                      Join downstream tables by the cell/barcode column, never by row position.\n\
                      --no-qc keeps every cell; --qc-report writes the per-cell keep/drop table."
@@ -207,10 +209,13 @@ pub struct GemEncoderArgs {
                      no dispersion.\n\
                      nb          — models absolute counts, library-scaled, with a learnable per-gene dispersion.\n\
                      \n\
-                     Multinomial is the default because sample depth varies a lot in practice (in one six-sample cohort the inputs spanned 552 to 7195 cells),\n\
+                     Multinomial is the default because sample depth varies a lot in practice:\n\
+                     in one six-sample cohort the inputs spanned 552 to 7195 cells,\n\
                      and under NB the deepest pseudobulks dominate the objective.\n\
                      Across 3 replicates per arm on that cohort,\n\
-                     multinomial gave a richer latent on every metric (effective rank 5.9 vs 4.8, factors used 14.3 vs 9.7, median max-factor weight 0.26 vs 0.19).\n\
+                     multinomial gave a richer latent on every metric:\n\
+                     effective rank 5.9 vs 4.8, factors used 14.3 vs 9.7,\n\
+                     median max-factor weight 0.26 vs 0.19.\n\
                      \n\
                      Note the margin is suggestive, not decisive at n=3 —\n\
                      run-to-run spread is large (NB effective rank ranged 3.8-6.2 across identical configs).\n\
@@ -272,7 +277,10 @@ pub struct GemEncoderArgs {
                      it is a per-gene embedding in R^H contracted with the topic embedding alpha,\n\
                      so <alpha_t, delta_g> is rank-H and never a free gene-by-topic matrix.\n\
                      The ridge is a second constraint layered on that one,\n\
-                     and measurement does not support paying for it (3 wt libraries, 8791 cells, 20 topics, 300 epochs; marker rank is the median of 10 canonical markers by probability within their best topic, of 33609 genes):\n\
+                     and measurement does not support paying for it.\n\
+                     3 wt libraries, 8791 cells, 20 topics, 300 epochs;\n\
+                     marker rank is the median of 10 canonical markers\n\
+                     by probability within their best topic, of 33609 genes:\n\
                      \n\
                      --delta-l2     splice r     marker rank, beta / delta     |delta|\n\
                      0 (default)       0.387             239 / 124              0.88\n\
@@ -286,7 +294,8 @@ pub struct GemEncoderArgs {
                      Note that with the ridge off,\n\
                      |delta| grows slowly and had NOT flattened by epoch 300,\n\
                      so it is not a quantity to read convergence from.\n\
-                     Raise this only if you have specific reason to think delta is fitting noise on the sparse unspliced track —\n\
+                     Raise this only if you have specific reason to think\n\
+                     delta is fitting noise on the sparse unspliced track —\n\
                      that was long assumed to be the dominant failure mode,\n\
                      and on this data it was not observed."
     )]
@@ -353,7 +362,8 @@ pub struct GemEncoderArgs {
         help = "Rank the top-N variable GENES to build the pseudobulk sketch (0 = use all)",
         long_help = "Gene-level highly-variable-gene ranking for the RANDOM PROJECTION only.\n\
                      \n\
-                     The top-N most variable genes (spliced + unspliced pooled) get weight 1 in the projection that drives the pseudobulk partition;\n\
+                     The top-N most variable genes, spliced + unspliced pooled,\n\
+                     get weight 1 in the projection that drives the pseudobulk partition;\n\
                      the rest get 0 and are excluded from the projection geometry.\n\
                      The partition is then built where the structure is, on variable genes,\n\
                      instead of being diluted by ~30k near-constant ones.\n\
@@ -364,7 +374,9 @@ pub struct GemEncoderArgs {
                      which is the wrong scope for a partitioning heuristic —\n\
                      a marker gene that missed the cut was not down-weighted downstream,\n\
                      it was ABSENT from dictionary.parquet,\n\
-                     and `faba annotate` would score that cell type on whatever fraction of its panel survived and still return a confident-looking call.\n\
+                     and `faba annotate` would score that cell type\n\
+                     on whatever fraction of its panel survived,\n\
+                     and still return a confident-looking call.\n\
                      \n\
                      0 uses every gene in the first random projection too."
     )]
