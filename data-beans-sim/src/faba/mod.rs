@@ -68,8 +68,10 @@ pub struct FabaArgs {
     #[arg(
         long,
         default_value_t = 8,
-        help = "Cell-state topics K (single axis — also drives writer/editor activity, \
-                so A_{m,k} couples topic k to modality m's modification machinery)"
+        help = "Cell-state topics K (one axis)",
+        long_help = "Cell-state topics K, on a single axis.\n\
+                     It also drives writer and editor activity.\n\
+                     A_{m,k} couples topic k to modality m's machinery."
     )]
     pub k_topics: usize,
 
@@ -83,8 +85,9 @@ pub struct FabaArgs {
     #[arg(
         long,
         default_value_t = 3,
-        help = "Number of mixture components per modifier (g, m); count is fixed at 2 \
-                (spliced, unspliced)"
+        help = "Mixture components per modifier (g, m)",
+        long_help = "Mixture components per modifier (g, m).\n\
+                     The count modality is fixed at 2: spliced and unspliced."
     )]
     pub components_per_modifier: usize,
 
@@ -150,13 +153,22 @@ pub struct FabaArgs {
         long,
         default_value_t = 1.0,
         help = "Topic-PVE π_topic ∈ [0,1] — topic-structure share, NOT a magnitude",
-        long_help = "Topic-PVE π_topic ∈ [0,1]: variance share of topic structure, \
-                     applied to BOTH the dictionary β and the cell proportions θ. \
-                     β: log β(g,k) = σ_β·[√π_topic·u_{g,k} + √(1−π_topic)·v_g] − σ_β²/2 \
-                     (π_topic=1 ⇒ fully per-(gene,topic); π_topic=0 ⇒ per-gene only, no \
-                     topics). θ: θ(k*,j) = π_topic + (1−π_topic)/K for a cell's drawn \
-                     topic k*, (1−π_topic)/K otherwise — so π_topic=1 ⇒ ONE-HOT (pure) \
-                     topics, π_topic=0 ⇒ flat. Independent of --pve-batch."
+        long_help = "Topic-PVE π_topic ∈ [0,1].\n\
+                     It is the variance share of topic structure.\n\
+                     It applies to BOTH the dictionary β and the proportions θ.\n\
+                     \n\
+                     For β:\n\
+                     \x20 log β(g,k) = σ_β·[√π_topic·u_{g,k} + √(1−π_topic)·v_g] − σ_β²/2\n\
+                     π_topic=1 gives fully per-(gene,topic) structure.\n\
+                     π_topic=0 gives per-gene only, with no topics.\n\
+                     \n\
+                     For θ, at a cell's drawn topic k*:\n\
+                     \x20 θ(k*,j) = π_topic + (1−π_topic)/K\n\
+                     Other topics get (1−π_topic)/K.\n\
+                     So π_topic=1 gives ONE-HOT, pure topics.\n\
+                     π_topic=0 gives a flat θ.\n\
+                     \n\
+                     This is independent of --pve-batch."
     )]
     pub pve_topic: f32,
 
@@ -164,13 +176,20 @@ pub struct FabaArgs {
         long,
         default_value_t = 1.0,
         help = "Batch-PVE π_batch ∈ [0,1] — batch-SPECIFICITY share, NOT magnitude",
-        long_help = "Batch-PVE π_batch ∈ [0,1]: variance share between batch-SPECIFIC and \
-                     batch-INVARIANT components of the log batch shift, \
-                     log δ(g,b) = √π_batch·z_{g,b} + √(1−π_batch)·w_g (z,w ~ N(0,1)). \
-                     Var(log δ)=1 ALWAYS — π_batch sets how batch-specific the effect is, \
-                     not how large: π_batch=1 ⇒ fully batch-specific (max inter-batch \
-                     difference); π_batch=0 ⇒ all batches share one shift w_g (NO \
-                     inter-batch effect). Independent of --pve-topic (both can be 1)."
+        long_help = "Batch-PVE π_batch ∈ [0,1].\n\
+                     It splits the log batch shift in two.\n\
+                     One part is batch-SPECIFIC, the other batch-INVARIANT:\n\
+                     \x20 log δ(g,b) = √π_batch·z_{g,b} + √(1−π_batch)·w_g\n\
+                     Both z and w are N(0,1).\n\
+                     \n\
+                     Var(log δ) = 1 ALWAYS.\n\
+                     π_batch sets how batch-specific the effect is, not how large.\n\
+                     π_batch=1 is fully batch-specific.\n\
+                     That is the maximum inter-batch difference.\n\
+                     π_batch=0 makes all batches share one shift w_g, so there is\n\
+                     NO inter-batch effect.\n\
+                     \n\
+                     This is independent of --pve-topic; both can be 1."
     )]
     pub pve_batch: f32,
 
@@ -180,16 +199,21 @@ pub struct FabaArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Trajectory mode: cell states follow a branching pseudotime with a \
-                recoverable RNA velocity (nascent leads mature).",
-        long_help = "Trajectory mode (default off = the standard Dirichlet cell states).\n\
-                     Each cell gets a pseudotime t ∈ [0,1] and a branch; the topic state θ(t)\n\
-                     moves along a bifurcating path (root topics 0→1 for t≤0.5, then 1→(2+b)\n\
-                     for branch b). The SPLICED (mature) track uses θ(t); the UNSPLICED\n\
-                     (nascent) track uses the look-ahead θ(t+Δ), so gem's velocity δ points\n\
-                     along the trajectory tangent. Ground truth is written to\n\
-                     `{out}.pseudotime.parquet` (pseudotime + branch) and\n\
-                     `{out}.topic_proportions_future.parquet`. Requires K ≥ 2 + n-branches."
+        help = "Trajectory mode: branching pseudotime with recoverable velocity",
+        long_help = "Trajectory mode; off by default, giving Dirichlet cell states.\n\
+                     \n\
+                     Each cell gets a pseudotime t ∈ [0,1] and a branch.\n\
+                     The topic state θ(t) moves along a bifurcating path.\n\
+                     Root topics run 0→1 for t≤0.5, then 1→(2+b) for branch b.\n\
+                     \n\
+                     The SPLICED (mature) track uses θ(t).\n\
+                     The UNSPLICED (nascent) track uses the look-ahead θ(t+Δ).\n\
+                     So gem's velocity δ points along the trajectory tangent.\n\
+                     \n\
+                     Ground truth goes to two files.\n\
+                     `{out}.pseudotime.parquet` carries pseudotime and branch.\n\
+                     `{out}.topic_proportions_future.parquet` carries the rest.\n\
+                     This requires K ≥ 2 + n-branches."
     )]
     pub trajectory: bool,
 
@@ -203,16 +227,19 @@ pub struct FabaArgs {
     #[arg(
         long,
         default_value_t = 0.1,
-        help = "Trajectory mode: velocity look-ahead Δ in pseudotime units — how far the \
-                nascent (unspliced) state leads the mature (spliced) state"
+        help = "Trajectory mode: velocity look-ahead Δ in pseudotime units",
+        long_help = "Velocity look-ahead Δ, in pseudotime units.\n\
+                     It sets how far the nascent state leads the mature one."
     )]
     pub velocity_lookahead: f32,
 
     #[arg(
         long,
         default_value_t = 0.1,
-        help = "Fraction of substrate-positive (g, m) pairs held out (no rows emitted) \
-                for imputation evaluation"
+        help = "Fraction of substrate-positive (g, m) pairs held out",
+        long_help = "Fraction of substrate-positive (g, m) pairs held out.\n\
+                     No rows are emitted for them.\n\
+                     They serve the imputation evaluation."
     )]
     pub held_out_frac: f32,
 
@@ -229,8 +256,9 @@ pub struct FabaArgs {
 
     #[arg(
         long,
-        help = "Write plain .zarr directories instead of .zarr.zip archives \
-                (zip is the default — pass this to opt out)"
+        help = "Write plain .zarr directories, not .zarr.zip archives",
+        long_help = "Write plain .zarr directories instead of .zarr.zip archives.\n\
+                     Zip is the default; pass this to opt out."
     )]
     pub no_zip: bool,
 }
