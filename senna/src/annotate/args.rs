@@ -74,9 +74,13 @@ pub struct AnnotateArgs {
 
     #[arg(
         long = "gaf",
-        help = "GO annotation file (.gaf/.gaf.gz). Ontology mode: score each term as a \
-                cross-cluster-contrasted module score on the cluster profile → per-cluster \
-                signature ({out}.ontology_signature.tsv). --obo supplies term names."
+        help = "GO annotation file (.gaf/.gaf.gz)",
+        long_help = "GO annotation file, .gaf or .gaf.gz.\n\
+                     In ontology mode each term gets a module score.\n\
+                     It is cross-cluster-contrasted on the cluster profile.\n\
+                     That yields a per-cluster signature in\n\
+                     {out}.ontology_signature.tsv.\n\
+                     --obo supplies the term names."
     )]
     pub gaf: Option<Box<str>>,
 
@@ -103,8 +107,10 @@ pub struct AnnotateArgs {
     #[arg(
         long = "max-gene-set",
         default_value_t = 500,
-        help = "Ontology mode: maximum matched members (size window; excludes \
-                near-universal terms)"
+        help = "Ontology mode: maximum matched members per term",
+        long_help = "Maximum matched members for a term, in ontology mode.\n\
+                     It is the upper end of the size window.\n\
+                     It excludes near-universal terms."
     )]
     pub max_gene_set: usize,
 
@@ -112,9 +118,10 @@ pub struct AnnotateArgs {
         short = 'o',
         long = "out",
         help = "Output prefix for annotation artifacts",
-        long_help = "Output prefix for annotation artifacts. When omitted, derived from `--from`\n\
-                     by stripping `.senna.json` (or `.json`) —\n\
-                     e.g. `--from temp.senna.json` → `--out temp`."
+        long_help = "Output prefix for annotation artifacts.\n\
+                     When omitted, it is derived from `--from`,\n\
+                     by stripping `.senna.json` or `.json`.\n\
+                     So `--from temp.senna.json` gives `--out temp`."
     )]
     pub out: Option<Box<str>>,
 
@@ -125,8 +132,9 @@ pub struct AnnotateArgs {
         long = "block-size",
         default_value_t = 1024,
         help = "Cells per CSC read block when streaming raw counts for per-cluster aggregation",
-        long_help = "Cells per CSC read block when streaming raw counts for per-cluster aggregation\n\
-                     and NB-Fisher trend fitting. Larger blocks → fewer reads but more memory.",
+        long_help = "Cells per CSC read block when streaming raw counts.\n\
+                     It covers per-cluster aggregation and NB-Fisher trend fitting.\n\
+                     Larger blocks mean fewer reads, and more memory.",
         hide = true
     )]
     pub block_size: usize,
@@ -135,9 +143,9 @@ pub struct AnnotateArgs {
         long = "num-draws",
         default_value_t = 1000,
         help = "Random gene-set draws per cell type (Efron–Tibshirani moments)",
-        long_help = "Number of random gene-set draws per celltype\n\
-                     for the Efron–Tibshirani row-randomization moments\n\
-                     (used to restandardize both observed and permuted ES)."
+        long_help = "Random gene-set draws per celltype.\n\
+                     They supply the Efron–Tibshirani row-randomization moments.\n\
+                     Those restandardize both observed and permuted ES."
     )]
     pub num_draws: usize,
 
@@ -159,8 +167,8 @@ pub struct AnnotateArgs {
         long_help = "Minimum matched markers before a cell type is allowed to compete.\n\n\
             A type below this is not weakly supported, it is UNSUPPORTED:\n\
             an enrichment walk over one or two genes is noise,\n\
-            and the winner's curse then hands the cluster\n\
-            to whichever noisy panel happened to spike.\n\n\
+            The winner's curse then hands the cluster away.\n\
+            Whichever noisy panel happened to spike takes it.\n\n\
             A dropped type keeps its column in every output.\n\
             It simply never wins a cluster.\n\n\
             Floored at 2: you cannot resample a single point"
@@ -220,10 +228,11 @@ pub struct AnnotateArgs {
         default_value_t = false,
         help = "Disable data-aware specificity re-weighting of marker genes",
         long_help = "Disable data-aware specificity re-weighting of marker genes.\n\
-                     By default, each marker is multiplied by an empirical specificity score\n\
-                     derived from the cluster expression matrix\n\
-                     (`max simplex value across clusters`, rescaled to [0, 1]) —\n\
-                     this suppresses markers that fire broadly (e.g. GZMB shared between NK and CD8 effector).\n\
+                     By default each marker is multiplied by a specificity score.\n\
+                     That score comes from the cluster expression matrix:\n\
+                     the max simplex value across clusters, rescaled to [0, 1].\n\
+                     It suppresses markers that fire broadly.\n\
+                     GZMB, shared between NK and CD8 effector, is the usual example.\n\
                      Set this flag to fall back to IDF-only weighting."
     )]
     pub no_empirical_specificity: bool,
@@ -233,8 +242,11 @@ pub struct AnnotateArgs {
     //////////////////////////////////////////////////
     #[arg(
         long = "obo",
-        help = "Cell Ontology .obo (e.g. cl-basic.obo). Given WITH --label-cl, runs TreeBH \
-                ontology calling inline → {out}.ontology_assignment.tsv + .ontology_node_mass.parquet"
+        help = "Cell Ontology .obo, e.g. cl-basic.obo",
+        long_help = "Cell Ontology .obo file, such as cl-basic.obo.\n\
+                     Given WITH --label-cl, it runs TreeBH ontology calling inline.\n\
+                     That writes {out}.ontology_assignment.tsv and\n\
+                     {out}.ontology_node_mass.parquet."
     )]
     pub obo: Option<Box<str>>,
 
@@ -261,20 +273,23 @@ pub struct AnnotateArgs {
     #[arg(
         long = "no-gene-strata",
         help = "Draw the null gene sets uniformly instead of within gene-abundance strata",
-        long_help = "Draw the null gene sets uniformly over all genes\n\
-            instead of within gene-abundance strata (GOseq).\n\
+        long_help = "Draw the null gene sets uniformly over all genes.\n\
+            The default instead draws within gene-abundance strata, as GOseq does.\n\
             NOT recommended — this restores a known bias.\n\n\
             The enrichment score is standardized against random gene sets,\n\
             and that standardization is the decision variable\n\
             (the label is the argmax over celltypes of it).\n\
-            A uniform draw is ~30% undetected genes, which sort to the bottom of every ranking\n\
-            and can never be enriched — so it is trivially easy to beat,\n\
-            and easy to beat by an amount that DIFFERS PER CELLTYPE,\n\
+            A uniform draw is ~30% undetected genes.\n\
+            Those sort to the bottom of every ranking, and can never be enriched.\n\
+            So the null is trivially easy to beat.\n\
+            Worse, it is easy to beat by an amount that DIFFERS PER CELLTYPE,\n\
             because panels differ in how well-expressed their markers are.\n\n\
             Measured with the uniform null:\n\
-            a celltype's mean es_std was a perfectly monotone function of its markers' mean expression\n\
-            (Spearman +1.000 across every type) — which no biology produces.\n\
-            Stratifying puts the abundance advantage on both sides of the comparison, where it cancels.\n\n\
+            a celltype's mean es_std tracked its markers' mean expression.\n\
+            It did so perfectly, at Spearman +1.000 across every type.\n\
+            No biology produces that.\n\
+            Stratifying puts the abundance advantage on both sides,\n\
+            where it cancels.\n\n\
             This is GOseq's gene-length correction [Young et al. 2010] in expression space.\n\
             Kept only as an escape hatch and to reproduce pre-0.4 outputs"
     )]
@@ -287,19 +302,23 @@ pub struct AnnotateArgs {
         long = "no-bootstrap-markers",
         help = "Turn OFF the stability bootstrap and ship a bare point estimate",
         long_help = "Turn OFF the stability bootstrap and ship a bare point estimate.\n\n\
-            The bootstrap is ON by default. Each draw resamples every celltype's marker panel\n\
-            with replacement, re-walks the enrichment score and re-calls the FDR;\n\
-            the consensus is what ships.\n\
-            So every call carries the fraction of resamples that agreed on it,\n\
-            and a call that cannot hold up across them abstains.\n\n\
+            The bootstrap is ON by default.\n\
+            Each draw resamples every celltype's marker panel with replacement,\n\
+            re-walks the enrichment score, and re-calls the FDR.\n\
+            The consensus is what ships.\n\
+            So every call carries the fraction of resamples that agreed.\n\
+            A call that cannot hold up across them abstains.\n\n\
             NOTE the support here is PER-CLUSTER, not per-cell:\n\
-            on this path a cell's label IS its cluster's label (the cell→cluster membership is one-hot),\n\
-            so there is no per-cell decision to resample.\n\
+            on this path a cell's label IS its cluster's label.\n\
+            The cell→cluster membership is one-hot.\n\
+            So there is no per-cell decision to resample.\n\
             It is written out as `cluster_label_support`.\n\
-            Unlike `annotate-by-projection`, this bootstrap does NOT re-derive the clustering —\n\
-            that would mean re-streaming the raw counts off the backend once per draw —\n\
-            so it sees the variance the PANEL contributes\n\
-            and not the variance the PARTITION contributes, and is optimistic accordingly"
+            This bootstrap does NOT re-derive the clustering.\n\
+            `annotate-by-projection` does.\n\
+            Doing so would re-stream the raw counts once per draw.\n\
+            So it sees the variance the PANEL contributes.\n\
+            It misses the variance the PARTITION contributes.\n\
+            It is optimistic accordingly."
     )]
     pub no_bootstrap_markers: bool,
 
@@ -345,10 +364,12 @@ pub struct AnnotateArgs {
         conflicts_with = "min_support",
         help = "Abstain by a sign test instead of the --min-support threshold",
         long_help = "Abstain by a TEST rather than a threshold.\n\n\
-            Keep the top label only if it beat the runner-up by more than resampling noise —\n\
-            an exact binomial sign test at --abstain-alpha.\n\
-            No magic number, and unlike --min-support it means the same thing\n\
-            whatever the number of celltypes"
+            Keep the top label only if it beat the runner-up.\n\
+            The margin must exceed resampling noise.\n\
+            The test is an exact binomial sign test at --abstain-alpha.\n\
+            There is no magic number.\n\
+            It also means the same thing at any number of celltypes,\n\
+            which --min-support does not."
     )]
     pub abstain_separable: bool,
 
@@ -363,8 +384,8 @@ pub struct AnnotateArgs {
         long = "set-coverage",
         default_value_t = 0.8,
         help = "Coverage of the reported `label_set` (the mixed annotation)",
-        long_help = "Coverage of the reported `label_set` — the smallest set of labels\n\
-            accounting for this share of the resamples.\n\n\
+        long_help = "Coverage of the reported `label_set`.\n\
+            It is the smallest label set covering this share of resamples.\n\n\
             A cluster that cannot be given ONE label can still be given two,\n\
             and `HSPC/LMPP` is a far better answer than `unassigned`"
     )]
@@ -490,8 +511,11 @@ pub struct AnnotateProjectionArgs {
 
     #[arg(
         long = "obo",
-        help = "Cell Ontology .obo (e.g. cl-basic.obo). With --label-cl, runs TreeBH ontology \
-                calling on the cluster × term matrix → {out}.ontology_assignment.tsv"
+        help = "Cell Ontology .obo, e.g. cl-basic.obo",
+        long_help = "Cell Ontology .obo file, such as cl-basic.obo.\n\
+                     With --label-cl, it runs TreeBH ontology calling.\n\
+                     The input is the cluster × term matrix.\n\
+                     That writes {out}.ontology_assignment.tsv."
     )]
     pub obo: Option<Box<str>>,
 
@@ -535,10 +559,12 @@ pub struct AnnotateProjectionArgs {
         default_value_t = 0,
         help = "Support permutation null: turns label_support into a p-value/FDR. 0 = off",
         long_help = "Support permutation null — calibrates `label_support`.\n\n\
-            Shuffles which type each marker gene belongs to\n\
-            (within gene-norm strata, so no type's norm profile changes)\n\
-            and re-runs the whole bootstrap, to learn what a cell's support looks like\n\
-            when the panel carries no type information.\n\n\
+            It shuffles which type each marker gene belongs to.\n\
+            Shuffling stays within gene-norm strata.\n\
+            No type's norm profile changes as a result.\n\
+            The whole bootstrap then re-runs.\n\
+            That shows what support looks like when the panel carries\n\
+            no type information.\n\n\
             This replaces an arbitrary bar with a calibrated one.\n\
             --min-support 0.5 is not scale-free: with C types, chance agreement is 1/C,\n\
             so 0.5 sits at 3x chance on a 6-type panel and 12x on a 24-type one —\n\
@@ -578,15 +604,16 @@ pub struct AnnotateProjectionArgs {
         long = "no-recluster",
         help = "Hold the clustering fixed across resamples (weakens the bootstrap)",
         long_help = "Hold the clustering fixed across resamples.\n\n\
-            By default each draw re-derives the clustering,\n\
-            so the partition's own arbitrariness is absorbed into the support\n\
-            rather than silently trusted.\n\
+            By default each draw re-derives the clustering.\n\
+            The partition's own arbitrariness is then absorbed into the\n\
+            support, rather than silently trusted.\n\
             The kNN graph is deterministic (so runs reproduce),\n\
             but Leiden still picks among near-equal modularity optima,\n\
             and a label that flips when the partition is re-drawn is not a robust one.\n\n\
-            WARNING: with the partition held fixed the bootstrap has little to say —\n\
-            measured, NOTHING abstains (0% unassigned)\n\
-            and support's ability to separate spurious calls falls from AUC 0.93 to 0.69"
+            WARNING: with the partition held fixed the bootstrap says little.\n\
+            Measured, NOTHING abstains: 0% unassigned.\n\
+            Support's power to separate spurious calls falls from\n\
+            AUC 0.93 to 0.69."
     )]
     pub no_recluster: bool,
 
@@ -610,14 +637,17 @@ pub struct AnnotateProjectionArgs {
         conflicts_with = "min_support",
         help = "Abstain by a sign test instead of the --min-support threshold",
         long_help = "Abstain by a TEST rather than a threshold.\n\n\
-            Keep the top label only if it beat the runner-up by more than resampling noise —\n\
-            an exact binomial sign test at --abstain-alpha.\n\
-            Among the m replicates that chose one of the two leading labels,\n\
-            each is a coin flip if the two are equally probable.\n\n\
-            No magic number, and unlike --min-support it means the same thing\n\
-            whatever the number of types.\n\
-            It resolves more cells, but note it decides WHEN to stay silent,\n\
-            not whether a call is right"
+            Keep the top label only if it beat the runner-up.\n\
+            The margin must exceed resampling noise.\n\
+            The test is an exact binomial sign test at --abstain-alpha.\n\
+            Among the m replicates choosing one of the two leading labels,\n\
+            each is a coin flip when the two are equally probable.\n\n\
+            There is no magic number.\n\
+            It means the same thing at any number of types,\n\
+            which --min-support does not.\n\
+            It resolves more cells.\n\
+            Note that it decides WHEN to stay silent, not whether a call\n\
+            is right."
     )]
     pub abstain_separable: bool,
 
@@ -632,8 +662,8 @@ pub struct AnnotateProjectionArgs {
         long = "set-coverage",
         default_value_t = 0.8,
         help = "Coverage of the reported `label_set` (the mixed annotation)",
-        long_help = "Coverage of the reported `label_set` — the smallest set of labels\n\
-            accounting for this share of the resamples.\n\n\
+        long_help = "Coverage of the reported `label_set`.\n\
+            It is the smallest label set covering this share of resamples.\n\n\
             A cell that cannot be given ONE label can still be given two,\n\
             and `HSPC/LMPP` is a far better answer than `unassigned`.\n\
             The distribution is already computed by the bootstrap; this stops us throwing it away"
@@ -645,9 +675,9 @@ pub struct AnnotateProjectionArgs {
         default_value_t = 3,
         help = "Largest `label_set` worth printing (a 4-way tie is not an annotation)",
         long_help = "Largest `label_set` worth printing.\n\n\
-            `HSPC/LMPP` is an annotation; a four-way tie is not —\n\
-            past a point a set stops narrowing anything down\n\
-            and starts laundering \"we don't know\" as though it were a finding.\n\n\
+            `HSPC/LMPP` is an annotation; a four-way tie is not.\n\
+            Past a point a set stops narrowing anything down.\n\
+            It starts laundering \"we don't know\" as though it were a finding.\n\n\
             A cell that needs more labels than this to reach --set-coverage is left unassigned"
     )]
     pub max_set_size: usize,
@@ -688,9 +718,9 @@ pub struct AnnotateOntologyArgs {
         long = "obo",
         required = true,
         help = "Cell Ontology OBO file (e.g. cl-basic.obo)",
-        long_help = "Cell Ontology OBO file. Fetch the basic release with:\n\
-                     curl -sSL https://github.com/obophenotype/cell-ontology/\
-                     releases/latest/download/cl-basic.obo -o cl-basic.obo"
+        long_help = "Cell Ontology OBO file.\n\
+                     Fetch the basic release with:\n\
+                     \x20 curl -sSL https://github.com/obophenotype/cell-ontology/releases/latest/download/cl-basic.obo -o cl-basic.obo"
     )]
     pub obo: Box<str>,
 
@@ -720,10 +750,12 @@ pub struct AnnotateOntologyArgs {
         default_value_t = false,
         help = "Force the (saturated) permutation p-values instead of the default z→p",
         long_help = "Force `cluster_celltype_p`.\n\
-                     By default the walk scores on Φ(−z)\n\
-                     using the correlation-preserving permutation z (`*_perm_z`) when present,\n\
-                     else the row-randomization restandardized ES (`*_es_std`).\n\
-                     The permutation p is resolution-limited (≈1/B) and rarely preferable."
+                     By default the walk scores on Φ(−z).\n\
+                     It uses the correlation-preserving permutation z (`*_perm_z`)\n\
+                     when present.\n\
+                     Otherwise it uses the restandardized ES (`*_es_std`).\n\
+                     The permutation p is resolution-limited, at about 1/B.\n\
+                     It is rarely preferable."
     )]
     pub use_perm_p: bool,
 
