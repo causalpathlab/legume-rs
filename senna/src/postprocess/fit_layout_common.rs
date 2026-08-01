@@ -43,11 +43,16 @@ pub enum LandmarkStrategy {
 /// isolated nodes from collapsing the layout.
 const SELF_LOOP_REG: f32 = 0.01;
 
-/// Args shared by `senna layout tsne` and `senna layout phate`.
+/// Args shared by `senna layout phate`, `tsne` and `umap`.
 ///
 /// These drive the PB construction / batch-correction / similarity /
 /// cell-placement path. Layout-specific args live on the per-command
 /// structs and are not duplicated here.
+///
+/// Every command that flattens this struct should declare its own
+/// `long_about`. clap otherwise renders THIS doc comment as that
+/// command's description, which is how `tsne` and `umap` came to
+/// introduce themselves as "args shared by ...".
 #[derive(Args, Debug, Clone)]
 pub struct LayoutCommonArgs {
     #[arg(

@@ -254,7 +254,7 @@ pub struct RunOutputs {
     /// `{out}.cell_to_pb.parquet` — N × `num_levels` u32 matrix of the
     /// post-refinement cell→pseudobulk membership per coarsening level
     /// (finest-last to match `collapsed_levels`). Cached so a downstream
-    /// `senna {topic, masked-topic, ce-topic} --from` chain can skip the
+    /// `senna {topic, masked-topic} --from` chain can skip the
     /// expensive HNSW + binary-sort + DC-SBM refinement step and feed
     /// the precomputed partition straight into the per-PB Gamma fit.
     #[serde(default, skip_serializing_if = "Option::is_none")]

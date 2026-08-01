@@ -49,7 +49,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         help = "Chain data + batch + cell→pb partition from a prior \
-                `senna {topic, masked-topic, ce-topic}` run's manifest",
+                `senna {topic, masked-topic}` run's manifest",
         long_help = "Read a `{run}.senna.json` manifest and pre-fill `data_files`,\n\
                      `--batch-files`, and (when present) the cell→pb partition from the source run.\n\
                      Inheriting the partition skips the expensive BBKNN + Poisson DC-SBM refinement step.\n\
