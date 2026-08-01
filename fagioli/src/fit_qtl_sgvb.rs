@@ -227,8 +227,7 @@ pub struct FitQtlSgvbArgs {
 
     #[arg(
         long,
-        help = "Row minibatch size (full batch when N <= this value); \
-                omit to auto-scale by variant count",
+        help = "Row minibatch size; omit to auto-scale by variant count",
         long_help = "Number of individuals sampled per gradient step. When the total\n\
             number of individuals N exceeds this value, random minibatches of\n\
             this size are drawn each iteration. When N <= batch_size, all\n\

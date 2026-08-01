@@ -66,8 +66,10 @@ pub struct FitSumstatSgvbArgs {
 
     #[arg(
         long,
-        help = "Row minibatch size; omit to auto-scale by variant count \
-                (full batch when N <= this value)"
+        help = "Row minibatch size; omit to auto-scale by variant count",
+        long_help = "Row minibatch size.\n\
+                     Omit it to auto-scale by variant count.\n\
+                     The full batch is used when N <= this value."
     )]
     pub batch_size: Option<usize>,
 
