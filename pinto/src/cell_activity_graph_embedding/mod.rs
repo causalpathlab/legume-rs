@@ -25,15 +25,18 @@
 //! in their negative pools.
 
 pub mod args;
-pub mod cluster;
 pub mod fit;
 pub mod gene_chain_sampler;
 pub mod gene_gating;
 pub mod loss;
+pub mod pair_projection;
 pub mod selection;
 
 #[cfg(test)]
 mod loss_tests;
+
+#[cfg(test)]
+mod tests;
 
 pub use args::CellActivityGraphEmbeddingArgs;
 pub use fit::fit_cell_activity_graph_embedding;

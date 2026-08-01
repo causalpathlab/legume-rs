@@ -48,28 +48,34 @@
 //! two are alternatives, not complements — `feature_posterior_mean.parquet`
 //! ships `E[z*beta]` for downstream use.
 
-use crate::cell_activity_graph_embedding::args::CellActivityGraphEmbeddingArgs;
-use crate::cell_activity_graph_embedding::cluster::{
-    edge_community_from_propensity, propensity_against_centroids, run_kmeans_clustering,
-    KmeansClusteringArgs, KmeansClusteringResult,
+use crate::cell_activity_graph_embedding::args::{
+    CellActivityGraphEmbeddingArgs, EdgeClusterMethod,
 };
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
 };
 use crate::cell_activity_graph_embedding::gene_gating::build_cell_activities;
 use crate::cell_activity_graph_embedding::loss::{cage_nce_loss_per_level, CageLossOut};
-use crate::link_community::outputs::write_link_communities;
+use crate::cell_activity_graph_embedding::pair_projection::{
+    project_pairs, PairBatchDivisor, PairLatent, PairProjectionArgs, ProjectionArgs,
+};
+use crate::link_community::profiles::{
+    compute_propensity_and_gene_community_stat, EdgeClustering, PropensityReportConfig,
+};
 use crate::util::cell_pairs::SrtCellPairs;
 use crate::util::common::*;
 use crate::util::graph_coarsen::{
     graph_coarsen_multilevel, CoarsenConfig, DcPoissonConfig, SeedingParams,
 };
-use crate::util::metadata::{create_cage_metadata, CageClusterInfo, RunInputs};
+use crate::util::metadata::{create_cage_metadata, RunInputs};
 use crate::util::score_trace::{write_score_trace, ScoreEntry};
 use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
 
 use candle_util::candle_core::Tensor;
+// `Optimizer` is what puts `AdamW::new` in scope; the step itself goes through
+// `clip_grads_and_step`.
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
+use candle_util::vae::clip_grads_and_step;
 use data_beans_alg::gene_weighting::save_fisher_weights;
 use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
@@ -636,7 +642,12 @@ pub fn fit_cell_activity_graph_embedding(
                 total = (total + cell_l2)?;
                 total = (total + gene_l2)?;
             }
-            opt.backward_step(&total)?;
+            // Global-norm clip before the step. The NCE loss spikes when a
+            // chunk draws a gene whose active edges are nearly all positives,
+            // and an unbounded step there inflates the embedding norms every
+            // later epoch has to work against. A step whose global norm is
+            // non-finite is skipped rather than laundered into the parameters.
+            clip_grads_and_step(&mut opt, &total, f64::from(args.grad_clip))?;
 
             // Diagnostics (no host sync) — accumulate detached tensors.
             // Per-gene mean of per_level → [L] for this chunk; running sum.
@@ -793,92 +804,104 @@ pub fn fit_cell_activity_graph_embedding(
 
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
-    //////////////////////////////////////////////////
-    // 10. Optional k-means clustering + propensity //
-    //////////////////////////////////////////////////
-    // k-means++ (via matrix-util) on the L2-normalized cell embedding.
-    // Soft propensity comes from temperature-softmax of cosine to the
-    // per-cluster centroid; genes get the same recipe against the same
-    // centroids (feature dictionary [G × K]).
-    let run_clustering = args.n_clusters > 0;
-    let cluster_info: Option<CageClusterInfo> = if run_clustering {
-        let kmeans_args = KmeansClusteringArgs {
-            n_clusters: args.n_clusters,
-            propensity_temp: args.propensity_temp,
-            max_iter: args.kmeans_max_iter,
-        };
-        let KmeansClusteringResult {
-            labels,
-            n_clusters,
-            propensity,
-            centroids,
-        } = run_kmeans_clustering(&e_cell_mat, &kmeans_args)?;
-
-        let cluster_col_names: Vec<Box<str>> = (0..n_clusters)
-            .map(|k| format!("cluster_{k}").into_boxed_str())
-            .collect();
-
-        // Hard cluster labels [N × 1], NaN for filtered cells.
-        let mut hard = Mat::zeros(n_cells, 1);
-        for (i, &lab) in labels.iter().enumerate() {
-            hard[(i, 0)] = if lab == usize::MAX {
-                f32::NAN
-            } else {
-                lab as f32
-            };
+    /////////////////////////////////////////////////////////
+    // 10. Pair projection -> link communities -> propensity  //
+    /////////////////////////////////////////////////////////
+    // cage's downstream contract is the one `lc` and `dsvd` publish, and it is
+    // built on the CELL PAIR, not the cell: a latent per pair, k-means over
+    // those pairs for link communities, and a cell's propensity as the mix of
+    // communities its incident edges carry.
+    //
+    // The pair latent comes from projecting each pair's POOLED counts onto the
+    // frozen gene embedding (`pair_projection`) — the same phase-2 move `senna
+    // bge` makes for cells, with the pair as the node. cage's own score
+    // decomposes an edge as `⟨θ_g, e_u ⊙ e_v⟩`, so a Hadamard product is the
+    // closed form this generalizes: the projection lets the pair's own expression
+    // move it off that point, which is what puts a boundary pair between the
+    // two programs it pools instead of on either endpoint.
+    let pair_batch = batch_db.as_ref().map(|delta| PairBatchDivisor {
+        delta,
+        batch_of_cell: &batch_membership_u32,
+    });
+    let PairLatent {
+        latent: pair_latent,
+        bias: pair_bias,
+    } = project_pairs(
+        &data_vec,
+        &edges_owned,
+        &e_gene_out,
+        pair_batch,
+        &PairProjectionArgs {
+            projection: ProjectionArgs {
+                ridge: args.pair_ridge,
+                steps: args.pair_steps,
+                gene_sample: args.pair_gene_sample,
+            },
+            seed: c.seed,
+            pair_block: args.pair_block,
+            block_size: c.block_size,
+        },
+    )?;
+    {
+        // `β_uv` is the pair's log pooled depth; it never leaves this function,
+        // but its spread is the cheapest check that the projection saw real data.
+        let mut sorted = pair_bias;
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if let (Some(&lo), Some(&hi)) = (sorted.first(), sorted.last()) {
+            info!(
+                "Pair intercept β: min {:.3}, median {:.3}, max {:.3}",
+                lo,
+                sorted[sorted.len() / 2],
+                hi
+            );
         }
-        hard.to_parquet_with_names(
-            &(c.out.to_string() + ".clusters.parquet"),
-            (Some(&cell_names), Some("cell")),
-            Some(&[Box::from("cluster")]),
-        )?;
+    }
 
-        // Soft cell propensity [N × K].
-        propensity.to_parquet_with_names(
-            &(c.out.to_string() + ".cluster_propensity.parquet"),
-            (Some(&cell_names), Some("cell")),
-            Some(&cluster_col_names),
-        )?;
+    let edges_usize: Vec<(usize, usize)> = edges_owned
+        .iter()
+        .map(|&(u, v)| (u as usize, v as usize))
+        .collect();
 
-        // Feature dictionary [G × K] — same softmax-over-centroids recipe on
-        // the gene side, over the full gene axis.
-        let feature_dict =
-            propensity_against_centroids(&e_gene_out, &centroids, args.propensity_temp);
-        feature_dict.to_parquet_with_names(
-            &(c.out.to_string() + ".feature_dictionary.parquet"),
-            (Some(&gene_names), Some("feature")),
-            Some(&cluster_col_names),
-        )?;
+    // `[D × E]` with every pair L2-normalized — the exact shape and
+    // normalization `pinto dsvd` hands the shared routine, so edge k-means
+    // clusters on composition and not on pooled depth.
+    let mut proj_kn = pair_latent.transpose();
+    proj_kn.normalize_columns_inplace();
 
-        // Per-edge community via Hadamard-argmax of endpoint propensity.
-        // Lands at `link_community.parquet` so `pinto lr-activity
-        // --lc-prefix {prefix}` can run directly without an adapter.
-        let edges_usize: Vec<(usize, usize)> = edges_owned
-            .iter()
-            .map(|&(u, v)| (u as usize, v as usize))
-            .collect();
-        let edge_community = edge_community_from_propensity(&edges_owned, &propensity);
-        write_link_communities(
-            &(c.out.to_string() + ".link_community.parquet"),
-            &edges_usize,
-            &edge_community,
-            &cell_names,
-        )?;
+    proj_kn.transpose().to_parquet_with_names(
+        &(c.out.to_string() + ".latent.parquet"),
+        (None, Some("cell_pair")),
+        Some(&embedding_col_names(args.embedding_dim)),
+    )?;
 
-        info!(
-            "Wrote leiden cluster artifacts: {} clusters, {} cells × {} = propensity, \
-             {} features × {} = dictionary, {} edges = link_community",
-            n_clusters,
-            n_cells,
-            n_clusters,
-            gene_names.len(),
-            n_clusters,
-            edges_usize.len(),
-        );
-        Some(CageClusterInfo { n_clusters })
-    } else {
-        None
+    // k-means over pairs -> per-edge community -> cell propensity (incident-edge
+    // fractions) + entropy + the Poisson-Gamma gene x community dictionary. One
+    // routine, shared verbatim with `lc` and `dsvd`, so every subcommand's
+    // propensity means the same thing.
+    // Under k-means the requested count IS the count; under Leiden it is only a
+    // target (or nothing, when the user left it unset) and the graph decides.
+    let clustering = match args.edge_cluster_method {
+        EdgeClusterMethod::Kmeans => EdgeClustering::Kmeans {
+            n_clusters: args.n_edge_clusters.unwrap_or(args.embedding_dim),
+        },
+        EdgeClusterMethod::Leiden => EdgeClustering::Leiden {
+            knn: args.leiden_knn,
+            resolution: args.leiden_resolution,
+            target: args.n_edge_clusters,
+            seed: c.seed,
+        },
     };
+    let n_edge_clusters = compute_propensity_and_gene_community_stat(
+        &proj_kn,
+        &edges_usize,
+        &data_vec,
+        n_cells,
+        &PropensityReportConfig {
+            clustering,
+            block_size: c.block_size,
+        },
+        &c.out,
+    )?;
 
     // Metadata
     {
@@ -892,10 +915,9 @@ pub fn fit_cell_activity_graph_embedding(
                 n_cells,
                 n_genes,
                 n_edges,
-                k: args.embedding_dim,
+                k: n_edge_clusters,
             },
             batch_db.is_some(),
-            cluster_info,
         );
         let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
         meta.write(&meta_path)?;

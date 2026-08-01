@@ -1,5 +1,5 @@
 use crate::link_community::profiles::{
-    compute_propensity_and_gene_community_stat, PropensityReportConfig,
+    compute_propensity_and_gene_community_stat, EdgeClustering, PropensityReportConfig,
 };
 use crate::util::cell_pairs::*;
 use crate::util::common::*;
@@ -263,14 +263,18 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     // 10. Propensity + dictionary
     let edges = srt_cell_pairs.inner.pairs();
 
-    let n_clusters = args.n_edge_clusters.unwrap_or(args.n_latent_topics);
-    compute_propensity_and_gene_community_stat(
+    // dsvd stays on k-means: its `--n-edge-clusters` is documented as the exact
+    // community count, and `pinto prop` exists precisely to re-cut the same
+    // latent at a different K.
+    let n_clusters = compute_propensity_and_gene_community_stat(
         &proj_kn,
         edges,
         &data_vec,
         n_cells,
         &PropensityReportConfig {
-            n_clusters,
+            clustering: EdgeClustering::Kmeans {
+                n_clusters: args.n_edge_clusters.unwrap_or(args.n_latent_topics),
+            },
             block_size: c.block_size,
         },
         &c.out,

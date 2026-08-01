@@ -3,15 +3,18 @@
 //! Two discovery paths, tried in order:
 //!
 //! 1. **Filesystem glob** — `{prefix}{.L*,.draft,}.propensity.parquet`
-//!    siblings. This is the lc / dsvd / prop convention; each Level
-//!    gets paths derived from the `infix` field.
+//!    siblings. This is the convention every subcommand that produces a
+//!    propensity follows (lc / lc-etm / dsvd / prop / cage); each Level
+//!    gets paths derived from the `infix` field. Sibling paths are
+//!    derived by pattern, so a subcommand that writes the propensity but
+//!    not the edge table (`prop`, which still emits the older
+//!    `edge_cluster.parquet`) simply loses the mesh overlay.
 //! 2. **`.pinto.json` fallback** — when the glob finds nothing, read
 //!    `{prefix}.pinto.json` and build a single `final` Level whose
 //!    explicit paths point at `outputs.{propensity, link_community,
-//!    gene_community}` (or the equivalent fields in `levels[]`). This
-//!    is how cage / cage-mcmc plug in: their propensity-equivalent
-//!    file is `cluster_propensity.parquet`, named via the JSON rather
-//!    than discoverable by glob.
+//!    gene_community}` (or the equivalent fields in `levels[]`). Kept
+//!    for runs whose propensity-equivalent artifact is named something
+//!    the glob cannot see.
 //!
 //! `Level` carries explicit `PathBuf`s for the propensity / link-
 //! community / gene-community parquets so both paths populate the same
@@ -33,9 +36,9 @@ pub struct Level {
     /// parquet for this level. Always populated.
     pub propensity: PathBuf,
     /// Optional path to the link-community parquet (per-edge community
-    /// labels — lc / dsvd). `None` for subcommands without a per-edge
-    /// community concept (cage / cage-mcmc); plot skips mesh / edge
-    /// overlays for those levels.
+    /// labels — lc / lc-etm / dsvd / cage all write one). `None`, or a
+    /// path that does not exist, makes plot skip mesh / edge overlays
+    /// for that level rather than fail.
     pub link_community: Option<PathBuf>,
     /// Optional path to the gene-community (or feature-dictionary)
     /// parquet. `None` when the run didn't produce one.
@@ -76,12 +79,12 @@ impl LevelSelector {
 ///
 /// Order of operations:
 /// 1. Filesystem glob for `{prefix}{.L*,.draft,}.propensity.parquet`.
-///    This is the lc / dsvd / prop path; returns levels in natural
+///    This is the lc / dsvd / prop / cage path; returns levels in natural
 ///    plotting order (`final` → `L0…Ln` → `draft`).
 /// 2. If the glob found nothing, fall back to reading
 ///    `{prefix}.pinto.json` and constructing a single `final` Level
-///    from `levels[0]`. This covers cage / cage-mcmc whose propensity
-///    artifact is named `cluster_propensity.parquet` (no glob match).
+///    from `levels[0]`, for runs whose artifacts are named something the
+///    glob cannot see.
 ///
 /// Filters by `selector` in both paths. Empty result is an error.
 pub fn discover_levels(prefix: &str, selector: &LevelSelector) -> anyhow::Result<Vec<Level>> {
