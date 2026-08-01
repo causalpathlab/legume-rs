@@ -53,10 +53,12 @@ pub struct RunSimulateArgs {
     #[arg(
         long,
         help = "Real single-cell reference (.h5, .zarr, .zarr.zip)",
-        long_help = "Real single-cell reference (`.h5`, `.zarr`, `.zarr.zip`). When set,\n\
-                     the GLM pipeline is unchanged, but the final count generation step\n\
-                     swaps `Poisson(λ)` for a copula-coupled NB draw using per-gene\n\
-                     dispersion `r̂_g` and a global Σ̂ fitted from this reference."
+        long_help = "Real single-cell reference: `.h5`, `.zarr` or `.zarr.zip`.\n\
+                     When set, the GLM pipeline is unchanged.\n\
+                     Only the final count generation step differs.\n\
+                     It swaps `Poisson(λ)` for a copula-coupled NB draw.\n\
+                     That draw uses the per-gene dispersion `r̂_g`,\n\
+                     and a global Σ̂ fitted from this reference."
     )]
     pub reference: Option<Box<str>>,
 
@@ -64,8 +66,10 @@ pub struct RunSimulateArgs {
         long,
         default_value_t = 2000,
         help = "HVG count for the gene-gene copula",
-        long_help = "HVG count for the gene-gene copula. Genes outside the HVG set are\n\
-                     sampled independently from `NB(λ_{g,j}, r̂_g)`. Used only with `--reference`."
+        long_help = "HVG count for the gene-gene copula.\n\
+                     Genes outside the HVG set are sampled independently,\n\
+                     from `NB(λ_{g,j}, r̂_g)`.\n\
+                     This is used only with `--reference`."
     )]
     pub n_hvg: usize,
 
@@ -73,8 +77,9 @@ pub struct RunSimulateArgs {
         long,
         default_value_t = 100,
         help = "Maximum rank of the low-rank Σ̂ factor F = U·diag(σ)/√N",
-        long_help = "Maximum rank of the low-rank `Σ̂` factor `F = U·diag(σ)/√N`. Effective\n\
-                     rank is `min(rank, n_hvg, n_reference_cells)`. Used only with `--reference`."
+        long_help = "Maximum rank of the low-rank `Σ̂` factor `F = U·diag(σ)/√N`.\n\
+                     The effective rank is `min(rank, n_hvg, n_reference_cells)`.\n\
+                     This is used only with `--reference`."
     )]
     pub copula_rank: usize,
 
@@ -82,8 +87,9 @@ pub struct RunSimulateArgs {
         long,
         default_value_t = 1e-3,
         help = "Per-gene isotropic ridge variance added at sample time on top of Σ̂",
-        long_help = "Per-gene isotropic ridge variance added at sample time on top of `Σ̂`.\n\
-                     Used only with `--reference`."
+        long_help = "Per-gene isotropic ridge variance.\n\
+                     It is added at sample time, on top of `Σ̂`.\n\
+                     This is used only with `--reference`."
     )]
     pub regularization: f32,
 
@@ -91,17 +97,21 @@ pub struct RunSimulateArgs {
         long,
         default_value_t = 1e-2,
         help = "Lower bound on the NB size parameter r̂_g",
-        long_help = "Lower bound on the NB size parameter `r̂_g`. Tames runaway dispersion\n\
-                     when MoM yields a near-zero `r` for noisy genes. Used only with `--reference`."
+        long_help = "Lower bound on the NB size parameter `r̂_g`.\n\
+                     It tames runaway dispersion.\n\
+                     MoM can yield a near-zero `r` for noisy genes.\n\
+                     This is used only with `--reference`."
     )]
     pub r_floor: f32,
 
     #[arg(
         long,
         default_value_t = 1000,
-        help = "Expected library size E[Σ_g Y(g,j)] per cell (emergent — no per-cell rescaling). \
-                Synthetic mode: enters as λ_scale = depth/G. Reference mode: multiplicative \
-                scale on the reference's per-gene mean μ̂_g."
+        help = "Expected library size E[Σ_g Y(g,j)] per cell",
+        long_help = "Expected library size E[Σ_g Y(g,j)] per cell.\n\
+                     It is emergent; nothing is rescaled per cell.\n\
+                     In synthetic mode it enters as λ_scale = depth/G.\n\
+                     In reference mode it scales the per-gene mean μ̂_g."
     )]
     pub depth: usize,
 
@@ -119,23 +129,33 @@ pub struct RunSimulateArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Topic-PVE π_topic ∈ [0, 1]. Variance share between topic-specific and \
-                topic-invariant components in log β: \
-                log β(g,k) = σ_β·[√π_topic · u(g,k) + √(1−π_topic) · v(g)] − σ_β²/2. \
-                Also softens θ from one-hot toward uniform: θ(k*,j) = π_topic + (1−π_topic)/K. \
-                π_topic = 0 ⇒ no topic structure; π_topic = 1 ⇒ pure topic structure. \
-                Independent of pve_batch (both can be 1)."
+        help = "Topic-PVE π_topic ∈ [0, 1]",
+        long_help = "Topic-PVE π_topic ∈ [0, 1].\n\
+                     It splits log β in two.\n\
+                     One part is topic-specific, the other topic-invariant:\n\
+                     \x20 log β(g,k) = σ_β·[√π_topic·u(g,k) + √(1−π_topic)·v(g)] − σ_β²/2\n\
+                     \n\
+                     It also softens θ from one-hot toward uniform:\n\
+                     \x20 θ(k*,j) = π_topic + (1−π_topic)/K\n\
+                     \n\
+                     π_topic = 0 gives no topic structure.\n\
+                     π_topic = 1 gives pure topic structure.\n\
+                     It is independent of pve_batch; both can be 1."
     )]
     pub pve_topic: f32,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Batch-PVE π_batch ∈ [0, 1]. Variance share between batch-specific and \
-                batch-invariant components in log δ: \
-                log δ(g,b) = √π_batch · z(g,b) + √(1−π_batch) · w(g). \
-                π_batch = 0 ⇒ batches share a single per-gene shift exp(w); \
-                π_batch = 1 ⇒ fully batch-specific. Independent of pve_topic."
+        help = "Batch-PVE π_batch ∈ [0, 1]",
+        long_help = "Batch-PVE π_batch ∈ [0, 1].\n\
+                     It splits log δ in two.\n\
+                     One part is batch-specific, the other batch-invariant:\n\
+                     \x20 log δ(g,b) = √π_batch·z(g,b) + √(1−π_batch)·w(g)\n\
+                     \n\
+                     π_batch = 0 makes batches share one per-gene shift exp(w).\n\
+                     π_batch = 1 is fully batch-specific.\n\
+                     It is independent of pve_topic."
     )]
     pub pve_batch: f32,
 
@@ -143,11 +163,17 @@ pub struct RunSimulateArgs {
         long,
         default_value_t = 0.0,
         help = "PVE-style magnitude for the per-cell residual log-mean noise term",
-        long_help = "PVE-style magnitude for the per-cell residual log-mean noise term\n\
-                     in stage 1 of the reference-mode two-stage simulator. Setting this\n\
-                     > 0 adds `√pve_noise · ε_{g,j}` (`ε ~ N(0,1)` iid per gene per cell)\n\
-                     on top of the topic perturbation, before batch is applied. Default\n\
-                     0 keeps stage 1 fully topic + reference-baseline driven."
+        long_help = "PVE-style magnitude for the per-cell residual noise term.\n\
+                     It applies to the log-mean, in stage 1 of the reference-mode\n\
+                     two-stage simulator.\n\
+                     \n\
+                     Above 0 it adds `√pve_noise · ε_{g,j}`.\n\
+                     `ε ~ N(0,1)` is iid per gene per cell.\n\
+                     The term sits on top of the topic perturbation,\n\
+                     and applies before batch.\n\
+                     \n\
+                     The default of 0 keeps stage 1 driven by topics and the\n\
+                     reference baseline alone."
     )]
     pub pve_noise: f32,
 
@@ -155,10 +181,12 @@ pub struct RunSimulateArgs {
         long,
         default_value_t = 2,
         help = "Rank of the batch-program subspace (reference mode)",
-        long_help = "Rank of the batch-program subspace (reference mode). `0` = each\n\
-                     gene's batch shift is iid log-normal (Splatter-style). `2-3` =\n\
-                     genes co-shift along a low-dim subspace (\"batch program\"). Higher\n\
-                     ranks make batch effects look more structured."
+        long_help = "Rank of the batch-program subspace, in reference mode.\n\
+                     `0` makes each gene's batch shift iid log-normal,\n\
+                     which is the Splatter style.\n\
+                     `2-3` makes genes co-shift along a low-dim subspace,\n\
+                     a \"batch program\".\n\
+                     Higher ranks make batch effects look more structured."
     )]
     pub batch_rank: usize,
 
@@ -167,11 +195,16 @@ pub struct RunSimulateArgs {
         value_enum,
         default_value_t = BatchProgram::Random,
         help = "Where the batch-program subspace comes from when --batch-rank > 0",
-        long_help = "Where the batch-program subspace comes from when `--batch-rank > 0`.\n\
-                     `random` = fresh low-dim random factor (default; arbitrary subspace).\n\
-                     `empirical` = top columns of the reference's fitted gene-gene copula\n\
-                     factor (worst case: batch shifts ride the reference's real\n\
-                     co-expression PCs)."
+        long_help = "Where the batch-program subspace comes from.\n\
+                     This applies when `--batch-rank > 0`.\n\
+                     \n\
+                     `random` draws a fresh low-dim random factor.\n\
+                     It is the default, and an arbitrary subspace.\n\
+                     \n\
+                     `empirical` takes the top columns of the reference's fitted\n\
+                     gene-gene copula factor.\n\
+                     That is the worst case: batch shifts then ride the\n\
+                     reference's real co-expression PCs."
     )]
     pub batch_program: BatchProgram,
 
@@ -182,21 +215,31 @@ pub struct RunSimulateArgs {
         long,
         value_delimiter = ',',
         help = "Route cells whose dominant topic is in this list to a second `<out>.holdout` backend",
-        long_help = "Comma-separated 0-indexed topic ids. Cells whose dominant topic (argmax θ)\n\
-                     is in this set are written to `<out>.holdout.<backend>` instead of the\n\
-                     primary `<out>.<backend>`, so a model trained on the primary file provably\n\
-                     never sees these topics. β/θ ground-truth parquets stay full; column names\n\
-                     in both backends are the original cell indices (cross-reference\n\
-                     `<out>.prop.parquet`). Default: unset → a single output file. Synthetic mode only."
+        long_help = "Comma-separated 0-indexed topic ids.\n\
+                     A cell whose dominant topic (argmax θ) is in this set goes to\n\
+                     `<out>.holdout.<backend>`.\n\
+                     It is kept out of the primary `<out>.<backend>`.\n\
+                     So a model trained on the primary file provably never sees\n\
+                     these topics.\n\
+                     \n\
+                     The β and θ ground-truth parquets stay full.\n\
+                     Column names in both backends are the original cell indices.\n\
+                     Cross-reference them against `<out>.prop.parquet`.\n\
+                     \n\
+                     Unset by default, giving a single output file.\n\
+                     Synthetic mode only."
     )]
     pub holdout_topics: Option<Vec<usize>>,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Log-normal scale σ_β. Total log-variance per gene-topic entry is σ_β² \
-                (independent of pve_topic); E[β(g,k)] = 1 by centering. Higher = more \
-                variable expression across genes and topics."
+        help = "Log-normal scale σ_β",
+        long_help = "Log-normal scale σ_β.\n\
+                     Total log-variance per gene-topic entry is σ_β².\n\
+                     That is independent of pve_topic.\n\
+                     Centering gives E[β(g,k)] = 1.\n\
+                     Higher values vary expression more across genes and topics."
     )]
     pub beta_scale: f32,
 
@@ -242,9 +285,12 @@ pub struct RunSimulateMultimodalArgs {
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Expected library size per modality, comma-separated (e.g. 1000,500). \
-                One entry per modality; length defines M. Each modality's β columns are \
-                softmax-normalized over genes, so depth_m directly sets E[lib(j)|m]."
+        help = "Expected library size per modality, comma-separated",
+        long_help = "Expected library size per modality, comma-separated.\n\
+                     An example is 1000,500.\n\
+                     There is one entry per modality, and the length defines M.\n\
+                     Each modality's β columns are softmax-normalized over genes.\n\
+                     So depth_m directly sets E[lib(j)|m]."
     )]
     pub depth: Vec<usize>,
 
@@ -262,8 +308,10 @@ pub struct RunSimulateMultimodalArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Scale σ_base of base-dictionary logits W_base ~ N(0, σ_base²) when \
-                hierarchical mode is off."
+        help = "Scale σ_base of base-dictionary logits",
+        long_help = "Scale σ_base of the base-dictionary logits.\n\
+                     They are drawn W_base ~ N(0, σ_base²).\n\
+                     This applies when hierarchical mode is off."
     )]
     pub base_scale: f32,
 
@@ -284,17 +332,22 @@ pub struct RunSimulateMultimodalArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Topic-PVE π_topic ∈ [0, 1]. Softens θ from one-hot toward uniform: \
-                θ(k*,j) = π_topic + (1−π_topic)/K. Independent of pve_batch."
+        help = "Topic-PVE π_topic ∈ [0, 1]",
+        long_help = "Topic-PVE π_topic ∈ [0, 1].\n\
+                     It softens θ from one-hot toward uniform:\n\
+                     \x20 θ(k*,j) = π_topic + (1−π_topic)/K\n\
+                     It is independent of pve_batch."
     )]
     pub pve_topic: f32,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Batch-PVE π_batch ∈ [0, 1]. Variance share in log δ: \
-                log δ_m(g,b) = √π_batch · z(g,b) + √(1−π_batch) · w(g). \
-                Independent of pve_topic."
+        help = "Batch-PVE π_batch ∈ [0, 1]",
+        long_help = "Batch-PVE π_batch ∈ [0, 1].\n\
+                     It sets the variance share in log δ:\n\
+                     \x20 log δ_m(g,b) = √π_batch·z(g,b) + √(1−π_batch)·w(g)\n\
+                     It is independent of pve_topic."
     )]
     pub pve_batch: f32,
 
