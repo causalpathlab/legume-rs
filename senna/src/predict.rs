@@ -46,8 +46,9 @@ pub struct PredictArgs {
         value_delimiter = ',',
         help = "Held-out data files (.zarr or .h5)",
         long_help = "Sparse backends to score with the pre-trained model.\n\
-                     Gene sets may differ from training; missing genes are padded\n\
-                     and per-batch delta is re-estimated from the frozen dictionary."
+                     Gene sets may differ from training.\n\
+                     Missing genes are padded.\n\
+                     Per-batch delta is re-estimated from the frozen dictionary."
     )]
     pub(crate) data_files: Vec<Box<str>>,
 
@@ -74,8 +75,9 @@ pub struct PredictArgs {
                                                topic family, raw Gaussian z for vae /\n                               \
                                                Gaussian-head masked models\n  \
                      {out}.predictive.parquet  per-cell [llik, total, llik_per_count]\n\n\
-                     vae models emit the latent only (encoder-only); they write no\n\
-                     predictive.parquet, and --decoder-only / --refine-* do not apply."
+                     vae models emit the latent only, encoder-only.\n\
+                     They write no predictive.parquet.\n\
+                     --decoder-only and --refine-* do not apply to them."
     )]
     pub(crate) out: Box<str>,
 
@@ -153,14 +155,21 @@ pub struct PredictArgs {
     #[arg(
         long,
         help = "Also write residual expression to a sparse backend ({out}.residual.zarr / .h5)",
-        long_help = "Regress the reference reconstruction μ ∝ δ?·Σ_k θ_k·exp(β_dk) out of the held-out counts\n\
-                     by DIVISION and write the leftover as a NEW sparse backend (gene × cell).\n\
-                     Reuses matrix-util's `adjust_by_division_inplace`:\n\
-                     per cell, x_d /= μ_d·λ with the self-normalizing column scale λ = Σ_d x / Σ_d μ\n\
-                     — so the residual is a per-cell relative fold-change against the reference,\n\
-                     the same division semantics `senna svd` uses for batch adjustment.\n\
-                     Only entries above --residual-threshold are kept (all are ≥ 0), so the file stays sparse.\n\
-                     Backend chosen by extension: .zarr or .h5 (needs the `hdf5` feature)."
+        long_help = "Regress the reference reconstruction out of the held-out counts.\n\
+                     The reference is μ ∝ δ?·Σ_k θ_k·exp(β_dk).\n\
+                     Regression is by DIVISION.\n\
+                     The leftover is written as a NEW sparse backend, gene × cell.\n\
+                     \n\
+                     It reuses matrix-util's `adjust_by_division_inplace`.\n\
+                     Per cell, x_d /= μ_d·λ.\n\
+                     λ = Σ_d x / Σ_d μ is the self-normalizing column scale.\n\
+                     So the residual is a per-cell relative fold-change.\n\
+                     `senna svd` uses the same division semantics for batches.\n\
+                     \n\
+                     Only entries above --residual-threshold are kept.\n\
+                     All are ≥ 0, so the file stays sparse.\n\
+                     The backend follows the extension: .zarr, or .h5 with the\n\
+                     `hdf5` feature."
     )]
     pub(crate) residual_out: Option<Box<str>>,
 
@@ -196,10 +205,11 @@ pub struct PredictArgs {
     #[arg(
         long,
         help = "Split query row names on this char; keep prefix as base key",
-        long_help = "e.g. '/' turns `ENSG00000000003_TSPAN6/count/spliced` into base\n\
-                     `ENSG00000000003_TSPAN6` (+ suffix `count/spliced`). The suffix is\n\
-                     then available to --keep-feature-suffix for filtering, and the base\n\
-                     is handed to --feature-name-kind for canonicalization."
+        long_help = "Split query row names on this character.\n\
+                     With '/', `ENSG00000000003_TSPAN6/count/spliced` splits into\n\
+                     the base `ENSG00000000003_TSPAN6` and suffix `count/spliced`.\n\
+                     The suffix is then available to --keep-feature-suffix.\n\
+                     The base is handed to --feature-name-kind."
     )]
     pub(crate) feature_name_suffix_delim: Option<char>,
 

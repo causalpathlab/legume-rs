@@ -563,8 +563,7 @@ pub struct AnnotateProjectionArgs {
             Shuffling stays within gene-norm strata.\n\
             No type's norm profile changes as a result.\n\
             The whole bootstrap then re-runs.\n\
-            That shows what support looks like when the panel carries\n\
-            no type information.\n\n\
+            That shows what support looks like on an uninformative panel.\n\n\
             This replaces an arbitrary bar with a calibrated one.\n\
             --min-support 0.5 is not scale-free: with C types, chance agreement is 1/C,\n\
             so 0.5 sits at 3x chance on a 6-type panel and 12x on a 24-type one —\n\
@@ -605,8 +604,8 @@ pub struct AnnotateProjectionArgs {
         help = "Hold the clustering fixed across resamples (weakens the bootstrap)",
         long_help = "Hold the clustering fixed across resamples.\n\n\
             By default each draw re-derives the clustering.\n\
-            The partition's own arbitrariness is then absorbed into the\n\
-            support, rather than silently trusted.\n\
+            The partition's own arbitrariness is then absorbed.\n\
+            It lands in the support, rather than being silently trusted.\n\
             The kNN graph is deterministic (so runs reproduce),\n\
             but Leiden still picks among near-equal modularity optima,\n\
             and a label that flips when the partition is re-drawn is not a robust one.\n\n\
@@ -646,8 +645,8 @@ pub struct AnnotateProjectionArgs {
             It means the same thing at any number of types,\n\
             which --min-support does not.\n\
             It resolves more cells.\n\
-            Note that it decides WHEN to stay silent, not whether a call\n\
-            is right."
+            Note what it decides.\n\
+            It sets WHEN to stay silent, not whether a call is right."
     )]
     pub abstain_separable: bool,
 
@@ -751,8 +750,8 @@ pub struct AnnotateOntologyArgs {
         help = "Force the (saturated) permutation p-values instead of the default z→p",
         long_help = "Force `cluster_celltype_p`.\n\
                      By default the walk scores on Φ(−z).\n\
-                     It uses the correlation-preserving permutation z (`*_perm_z`)\n\
-                     when present.\n\
+                     It prefers the correlation-preserving permutation z,\n\
+                     stored as `*_perm_z`.\n\
                      Otherwise it uses the restandardized ES (`*_es_std`).\n\
                      The permutation p is resolution-limited, at about 1/B.\n\
                      It is rarely preferable."
