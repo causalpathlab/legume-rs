@@ -5,24 +5,7 @@ use auxiliary_data::feature_names::FeatureNameKind;
 use clap::{Parser, ValueEnum};
 use data_beans_alg::hvg::HvgCliArgs;
 
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-pub enum ComputeDevice {
-    Cpu,
-    Cuda,
-    Metal,
-}
-
-impl ComputeDevice {
-    pub fn to_device(&self, device_no: usize) -> anyhow::Result<candle_util::candle_core::Device> {
-        use candle_util::candle_core::Device;
-        Ok(match self {
-            ComputeDevice::Cpu => Device::Cpu,
-            ComputeDevice::Cuda => Device::new_cuda(device_no)?,
-            ComputeDevice::Metal => Device::new_metal(device_no)?,
-        })
-    }
-}
+use crate::util::device::ComputeDevice;
 
 /// Row-name canonicalization strategy for matching the data's gene
 /// names against external resources (PPI networks, marker lists,
@@ -89,6 +72,58 @@ pub struct CellActivityGraphEmbeddingArgs {
                        mixed — per-row dispatch (RNA+ATAC paired axes)"
     )]
     pub gene_name_mode: GeneNameMode,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Re-estimate pip every N epochs against the current embedding; 0 = never",
+        long_help = "How often to re-estimate the gate's keep-probabilities.\n\
+                     \n\
+                     The per-epoch z draw is dropout-style regularization: a hard \
+                     0/1 mask per (gene, dim) that zeroes the gradient for \
+                     excluded coordinates, so each epoch trains a different \
+                     sub-network. This flag controls how often the DROP RATES \
+                     behind it are refreshed.\n\
+                     \n\
+                     They need refreshing because the initial fit runs against an \
+                     SVD of pseudobulk log-counts, which is not the embedding the \
+                     model ships. Every N epochs the live cell embedding is \
+                     folded up into the pseudobulks and the sampler re-runs, \
+                     warm-started from the previous round.\n\
+                     \n\
+                     This is NOT EM: the refresh is a Poisson fit on counts while \
+                     training is edge NCE, so there is no single objective being \
+                     improved and no convergence guarantee.\n\
+                     \n\
+                     1 (default) refreshes every epoch. Raise it if the sampler \
+                     dominates wall-clock; 0 disables the refresh and keeps the \
+                     initial rates for the whole run."
+    )]
+    pub selection_refresh_epochs: usize,
+
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "Sweeps per pip refresh (half are burn-in)",
+        long_help = "Gibbs sweeps for each --selection-refresh-epochs round. Far \
+                     fewer than the cold initial run because the chain is \
+                     warm-started from the previous round's inclusion state."
+    )]
+    pub selection_refresh_sweeps: usize,
+
+    #[arg(
+        long,
+        help = "Skip the degree-corrected Poisson refinement of the coarsening levels",
+        long_help = "By default each coarsening level gets a second-opinion \
+                     refinement on RAW counts (degree-corrected Poisson), the same \
+                     pass `pinto lc` runs. Without it the levels are cut on \
+                     cosine-of-projection alone, which ignores depth and \
+                     over-disperion in the counts.\n\
+                     \n\
+                     Set this to skip it: the context build reads the count matrix \
+                     once more up front, so this is the lever if that I/O matters."
+    )]
+    pub no_dc_poisson: bool,
 
     #[arg(long, default_value_t = 16, help = "Cell embedding dimensionality")]
     pub embedding_dim: usize,
@@ -165,10 +200,18 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        default_value_t = 1e-4,
-        help = "L2 penalty on softplus_floored(γ[L,D]) per-level per-dim gates"
+        default_value_t = 0,
+        help = "Genes visited per epoch; 0 = the whole axis",
+        long_help = "Cost lever. cage walks the gene axis once per epoch, so runtime is \
+                     linear in the number of genes. This caps how many are VISITED per \
+                     epoch, drawing a fresh random subset each time.\n\
+                     \n\
+                     Stochastic coverage, NOT feature selection: every gene stays on the \
+                     trained axis, keeps its sampled loading, and appears in every output \
+                     table — it simply waits for a later epoch. Contrast --n-hvg, which \
+                     weights the projection and likewise drops nobody."
     )]
-    pub gate_l2: f32,
+    pub genes_per_epoch: usize,
 
     #[arg(
         long,
@@ -190,9 +233,18 @@ pub struct CellActivityGraphEmbeddingArgs {
     pub chain_levels: Vec<usize>,
 
     /// HVG selection: senna-style shared CLI (`--n-hvg`,
-    /// `--feature-list-file`). cage applies it as a **subset** (not a
-    /// reweighting like `senna bge`), so the gene-axis training cost
-    /// drops linearly with the selected K. `--n-hvg 0` disables.
+    /// `--feature-list-file`). cage **weights the random projection** with it,
+    /// exactly as `senna bge` and `faba gem` do — non-selected genes get
+    /// projection weight 0 and so sit out the basis the coarsening hierarchy is
+    /// built from, but they stay on the trained axis: still fit, still sampled,
+    /// still in the PIP table. The selection shapes *where the pseudobulks
+    /// land*, not *which genes the model may use*. `--n-hvg 0` disables.
+    ///
+    /// This used to hard-subset the trained axis. It no longer does, because
+    /// the Gibbs-sampled spike-and-slab is the feature selector now and running
+    /// a variance cut in front of it would select twice, cruder first and
+    /// irreversibly. Use `--genes-per-epoch` for the cost lever the subset used
+    /// to provide.
     #[command(flatten)]
     pub hvg: HvgCliArgs,
 

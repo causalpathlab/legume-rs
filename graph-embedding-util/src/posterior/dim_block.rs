@@ -571,13 +571,29 @@ pub fn dim_block_multi(
                     if draw.z[i * h + d] {
                         sum_sq[d] += v * v;
                         n_incl[d] += 1;
-                        if keep {
-                            pip_acc[g * h + d] += 1.0;
-                            // The EFFECTIVE loading is `z·β`, so an excluded draw
-                            // contributes 0 — the posterior mean is over what the model
-                            // actually uses, not over the latent slab value.
-                            beta_acc[g * h + d] += v;
-                        }
+                    }
+                    if keep {
+                        // RAO-BLACKWELLIZED. Accumulate the ANALYTIC conditional
+                        // probability, not the binary draw: `p_incl` is
+                        // `E[z | rest of state]`, so this has the same expectation as
+                        // averaging `z` and never higher variance (Rao-Blackwell), the
+                        // dropped term being the Bernoulli variance `p(1-p)`.
+                        //
+                        // It also removes the resolution floor. Averaging `z` over
+                        // `n_kept` sweeps can only land on a `1/n_kept` grid — measured
+                        // on GBM Visium at 50 kept sweeps: exactly 51 distinct values
+                        // and 64% of entries pinned at 0, which cannot tell a true PIP
+                        // of 1e-6 from 0.01.
+                        //
+                        // The EFFECTIVE loading is `z·β`, so `beta_acc` weights the slab
+                        // value by that same probability: the posterior mean is over what
+                        // the model actually uses, not over the latent slab value. Note
+                        // `sum_sq`/`n_incl` above still key off the BINARY draw — the
+                        // slab variance and null mass are defined by which coordinates
+                        // are genuinely in this sweep's model, not by a soft weight.
+                        let p = f64::from(draw.p_incl[i * h + d]);
+                        pip_acc[g * h + d] += p;
+                        beta_acc[g * h + d] += p * v;
                     }
                 }
             }

@@ -1,5 +1,6 @@
 //! CLI arguments for `pinto lc-etm` — link community via embedded topic model.
 
+use crate::util::device::ComputeDevice;
 use clap::{Parser, ValueEnum};
 
 /// Per-gene likelihood for the masked imputation loss (`--train-mode masked`).
@@ -47,6 +48,12 @@ pub enum TrainMode {
 pub struct SrtLinkCommunityEtmArgs {
     #[command(flatten)]
     pub common: crate::util::input::SrtInputArgs,
+
+    #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
+    pub device: ComputeDevice,
+
+    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
+    pub device_no: usize,
 
     #[arg(
         long,

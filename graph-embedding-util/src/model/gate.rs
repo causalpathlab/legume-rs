@@ -464,7 +464,13 @@ impl JointEmbedModel {
     /// now a convenience, not a guard. Kept because every call site already uses it
     /// and the shape is right; do not read it as evidence that the ordering is still
     /// dangerous.
-    pub(crate) fn gathered_gate_weights(
+    /// The SAFE external entry point for applying the gate.
+    ///
+    /// Gathers rows first, then transforms — exact because the gate is
+    /// elementwise, and it avoids materializing `[G, H]` to keep `[batch, H]`.
+    /// [`Self::gate_weights`] stays crate-private so out-of-crate callers cannot
+    /// re-open the gather-vs-gate ordering hazard this form exists to prevent.
+    pub fn gathered_gate_weights(
         &self,
         kind: GateKind,
         logits: Option<&Tensor>,

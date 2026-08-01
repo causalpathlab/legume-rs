@@ -76,6 +76,17 @@ pub(super) struct TileDraw {
     pub beta: Vec<f32>,
     /// `[b × h]` inclusion indicators after this sweep.
     pub z: Vec<bool>,
+    /// `[b × h]` ANALYTIC conditional inclusion probability
+    /// `P(z = 1 | beta, sigma0^2, pi0, data)` — the sigmoid whose coin flip produced
+    /// [`Self::z`], kept rather than discarded.
+    ///
+    /// Averaging THIS over sweeps instead of the binary `z` is the Rao-Blackwellized
+    /// PIP: it is `E[z | rest of state]`, so it has the same expectation and never
+    /// higher variance, dropping the Bernoulli term `p(1-p)` entirely. With 50 kept
+    /// sweeps the binary average lands on a 1/50 grid — measured on GBM Visium, 51
+    /// distinct values and 64% of entries exactly 0, which cannot separate a true PIP
+    /// of 1e-6 from 0.01 and zeroes that share of `E[z*beta]` outright.
+    pub p_incl: Vec<f32>,
     /// Bracket fallbacks summed over dims — the batched kernel's analogue of a
     /// rejected move. Reported, never swallowed.
     pub fallbacks: usize,
@@ -362,6 +373,7 @@ pub(super) fn sample_tile<S: AnchorScore>(
     let b = nodes.len();
     let mut beta = beta_in.to_vec();
     let mut z = z_in.to_vec();
+    let mut p_incl = vec![0.0f32; z.len()];
     let mut fallbacks = 0usize;
     let mut rounds = 0usize;
     let mut transitions = 0usize;
@@ -369,6 +381,7 @@ pub(super) fn sample_tile<S: AnchorScore>(
         return TileDraw {
             beta,
             z,
+            p_incl: Vec::new(),
             fallbacks,
             rounds,
             transitions,
@@ -575,14 +588,22 @@ pub(super) fn sample_tile<S: AnchorScore>(
                 match args.veto {
                     // Vetoed coordinates are excluded BY THE MODEL, not merely
                     // disfavoured by the data, so they are pinned rather than drawn.
-                    Some(mask) if !mask[(lo + i) * h + d] => false,
+                    // Probability 0, not a small number: this is not weak evidence.
+                    Some(mask) if !mask[(lo + i) * h + d] => {
+                        p_incl[idx] = 0.0;
+                        false
+                    }
                     _ => {
                         let logit =
                             args.log_prior_odds[d] + f64::from(ll_on[i]) - f64::from(ll_off[i]);
-                        rngs[i].random::<f64>() < sigmoid(logit)
+                        let p = sigmoid(logit);
+                        p_incl[idx] = p as f32;
+                        rngs[i].random::<f64>() < p
                     }
                 }
             } else {
+                // Selection off: every coordinate is in, with certainty.
+                p_incl[idx] = 1.0;
                 true
             };
             v[idx] = if z[idx] { beta[idx] } else { 0.0 };
@@ -607,6 +628,7 @@ pub(super) fn sample_tile<S: AnchorScore>(
     TileDraw {
         beta,
         z,
+        p_incl,
         fallbacks,
         rounds,
         transitions,

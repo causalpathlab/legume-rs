@@ -1,6 +1,7 @@
 pub mod batch_effects;
 pub mod cell_pairs;
 pub mod common;
+pub mod device;
 pub mod graph_coarsen;
 pub mod graph_dc_poisson_refine;
 pub mod graph_refine;

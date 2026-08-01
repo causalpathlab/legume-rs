@@ -6,18 +6,8 @@
 //! Gives the cell embedding multi-resolution classification signal in one coherent
 //! step. It had a feature-side analogue in [`crate::loss::feat`]; that one was deleted
 //! along with the chain composite mode, which nothing could reach.
-//!
-//! The gene-modulated public functions live here:
-//!
-//! - [`cell_cell_nce_loss_per_level_batched_gated`] — returns `[G, L]`
-//!   for `G` independent chain batches in one forward pass; per-gene
-//!   scoring modulates by `e_gene[gene_ids[g]]`. Used by `pinto cage`
-//!   to collapse 18k tiny CUDA forwards per epoch into ~600 big ones.
 
 use crate::loss::cell::{LevelSiblingPool, PerBatchCellSampler};
-use crate::loss::logistic_nce;
-use crate::model::JointEmbedModel;
-use candle_util::candle_core::{Device, Result, Tensor};
 use rand::{Rng, RngExt};
 use rand_distr::weighted::WeightedIndex;
 use rand_distr::Distribution;
@@ -179,119 +169,4 @@ fn draw_one_negative(
         Some(pool) => pool[rng.random_range(0..pool.len())],
         None => s.cell_pool[s.neg.sample(rng)],
     }
-}
-
-///////////////////////////////////////////////////////////////
-// Gene-modulated (v3) variants — gene identity enters score //
-
-/// Batched gene-modulated per-level loss for `G` independent
-/// `CellChainBatch`es, one per gene. Returns `[G, L]` per-(gene, level)
-/// losses. cage calls this once per chunk; `gene_ids[g]` is the gene
-/// id corresponding to `batches[g]`.
-///
-/// Optional `dim_gates: [L, D]` (already passed through `softplus_floored`
-/// or similar positive transform) modulates `e_gene` per chain level
-/// via elementwise multiply with the gate row. Cage uses this to
-/// learn which embedding dimensions matter at each coarsening scale.
-/// `None` recovers the un-gated gene-modulated score.
-///
-/// All batches must share the same `B`, `L`, and `K`.
-pub fn cell_cell_nce_loss_per_level_batched_gated(
-    model: &JointEmbedModel,
-    batches: Vec<CellChainBatch>,
-    gene_ids: &[u32],
-    dim_gates: Option<&Tensor>,
-    dev: &Device,
-) -> Result<Tensor> {
-    let g = batches.len();
-    assert!(g > 0, "non-empty batches required");
-    assert_eq!(
-        gene_ids.len(),
-        g,
-        "gene_ids ({}) and batches ({}) length mismatch",
-        gene_ids.len(),
-        g
-    );
-    let b = batches[0].left_cells.len();
-    let l = batches[0].per_level_neg.len();
-    let k = batches[0].n_negatives;
-    for cb in &batches {
-        assert_eq!(cb.left_cells.len(), b, "batched_gated: B mismatch");
-        assert_eq!(cb.per_level_neg.len(), l, "batched_gated: L mismatch");
-        assert_eq!(cb.n_negatives, k, "batched_gated: K mismatch");
-    }
-    if b == 0 {
-        return Tensor::zeros((g, l), candle_util::candle_core::DType::F32, dev);
-    }
-
-    let total_b = g * b;
-    let total_neg = total_b * k;
-
-    let mut all_left: Vec<u32> = Vec::with_capacity(total_b);
-    let mut all_right: Vec<u32> = Vec::with_capacity(total_b);
-    let mut all_neg_per_level: Vec<Vec<u32>> =
-        (0..l).map(|_| Vec::with_capacity(total_neg)).collect();
-    // Replicate each gene id B times so that the gene-side gather
-    // lines up row-for-row with the [G*B] cell-side gather.
-    let mut gene_repeat: Vec<u32> = Vec::with_capacity(total_b);
-    for (cb, &gid) in batches.into_iter().zip(gene_ids.iter()) {
-        all_left.extend(cb.left_cells);
-        all_right.extend(cb.right_cells);
-        for _ in 0..b {
-            gene_repeat.push(gid);
-        }
-        for (lvl_idx, lvl_neg) in cb.per_level_neg.into_iter().enumerate() {
-            all_neg_per_level[lvl_idx].extend(lvl_neg);
-        }
-    }
-
-    let left_idx = Tensor::from_vec(all_left, total_b, dev)?;
-    let right_idx = Tensor::from_vec(all_right, total_b, dev)?;
-    let gene_idx = Tensor::from_vec(gene_repeat, total_b, dev)?;
-    let e_left = model.e_cell.index_select(&left_idx, 0)?;
-    let b_left = model.b_cell.index_select(&left_idx, 0)?;
-    let e_right = model.e_cell.index_select(&right_idx, 0)?;
-    let b_right = model.b_cell.index_select(&right_idx, 0)?;
-    let e_gene = &model.e_feat.index_select(&gene_idx, 0)?; // [G*B, H]
-
-    let mut per_gene_per_level: Vec<Tensor> = Vec::with_capacity(l);
-    for (lvl_idx, lvl_neg) in all_neg_per_level.into_iter().enumerate() {
-        // Optional per-level per-dim gating: modulate `e_gene` by
-        // `dim_gates[ℓ, :]` (already a positive `[L, D]` tensor; row ℓ
-        // broadcasts over `G*B`). With no gate the score reduces to
-        // the original gene-modulated form.
-        let e_gene_lvl = if let Some(g_t) = dim_gates {
-            let row = g_t.narrow(0, lvl_idx, 1)?;
-            let h = e_gene.dim(1)?;
-            let bcast = row.broadcast_as((total_b, h))?;
-            (e_gene.clone() * bcast)?
-        } else {
-            e_gene.clone()
-        };
-        let pos_score = JointEmbedModel::score_cellcell_gated(
-            &e_gene_lvl,
-            &e_left,
-            &e_right,
-            &b_left,
-            &b_right,
-        )?;
-        let neg_idx = Tensor::from_vec(lvl_neg, total_neg, dev)?;
-        let e_neg_flat = model.e_cell.index_select(&neg_idx, 0)?;
-        let b_neg_flat = model.b_cell.index_select(&neg_idx, 0)?;
-        let h = e_neg_flat.dim(1)?;
-        let e_neg = e_neg_flat.reshape((total_b, k, h))?;
-        let b_neg = b_neg_flat.reshape((total_b, k))?;
-        let neg_score = JointEmbedModel::score_cellcell_gated_neg(
-            &e_gene_lvl,
-            &e_left,
-            &e_neg,
-            &b_left,
-            &b_neg,
-        )?;
-        let per_edge = logistic_nce(&pos_score, std::slice::from_ref(&neg_score))?;
-        let per_edge_gb = per_edge.reshape((g, b))?;
-        let per_gene = per_edge_gb.mean(1)?; // [G]
-        per_gene_per_level.push(per_gene);
-    }
-    Tensor::stack(&per_gene_per_level, 1)
 }

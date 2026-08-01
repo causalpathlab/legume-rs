@@ -26,7 +26,7 @@ use crate::util::cell_pairs::*;
 use crate::util::common::Mat;
 use crate::util::graph_coarsen::*;
 use crate::util::input::*;
-use candle_util::candle_core::{self, Device};
+use candle_util::candle_core::{self};
 use candle_util::candle_nn::{VarBuilder, VarMap};
 use candle_util::decoder::{EmbeddedNbTopicDecoder, EmbeddedTopicDecoder};
 use candle_util::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
@@ -241,7 +241,8 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
     ///////////////////////////////////////////////////
     // 7. Encoder + per-level decoders (ETM ρ tying) //
     ///////////////////////////////////////////////////
-    let dev = Device::Cpu;
+    let dev = args.device.to_device(args.device_no)?;
+    info!("Using device: {:?}", dev);
     let parameters = VarMap::new();
     let dtype = candle_core::DType::F32;
     let param_builder = VarBuilder::from_varmap(&parameters, dtype, &dev);

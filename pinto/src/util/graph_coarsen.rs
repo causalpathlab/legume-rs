@@ -453,16 +453,22 @@ pub(super) fn spatial_seed_labels(
     (labels, num_super)
 }
 
-/// Build a super-graph from seed labels.
+/// Coarsen the cell graph onto super-nodes: Louvain / METIS semantics.
 ///
-/// Averages cell features per super-node and creates edges between
-/// adjacent super-nodes (from original graph edges crossing boundaries).
-pub(super) fn build_super_graph(
+/// An intra-group edge (`si == sj`) is NOT an edge of the coarse graph — it
+/// folds into the super-NODE. Callers that aggregate member counts onto the
+/// node already hold that mass; emitting a `(a, a)` self-loop as well would
+/// count it twice.
+///
+/// Returns the super-graph, per-super-node mean features, and `fine_to_super`:
+/// for each input edge, the index of its super-edge, or `None` when the edge is
+/// internal to one super-node.
+pub(crate) fn build_super_graph(
     seed_labels: &[usize],
     num_super: usize,
     graph: &KnnGraph,
     cell_features: &Mat,
-) -> (KnnGraph, Mat) {
+) -> (KnnGraph, Mat, Vec<Option<usize>>) {
     let dim = cell_features.nrows();
 
     // Aggregate features: sum columns per super-node via column ops
@@ -480,17 +486,24 @@ pub(super) fn build_super_graph(
     }
 
     let est_edges = graph.edges.len();
-    let mut edge_set: HashSet<(usize, usize)> =
-        HashSet::with_capacity_and_hasher(est_edges, Default::default());
+    // Keyed by INDEX, not just membership, so the fine->super map falls out of
+    // the same pass instead of needing a second one.
+    let mut edge_set: HashMap<(usize, usize), usize> =
+        HashMap::with_capacity_and_hasher(est_edges, Default::default());
     let mut super_edges: Vec<(usize, usize)> = Vec::with_capacity(est_edges);
+    let mut fine_to_super: Vec<Option<usize>> = Vec::with_capacity(est_edges);
     for &(i, j) in &graph.edges {
         let si = seed_labels[i];
         let sj = seed_labels[j];
-        if si != sj {
+        if si == sj {
+            fine_to_super.push(None);
+        } else {
             let key = (si.min(sj), si.max(sj));
-            if edge_set.insert(key) {
+            let idx = *edge_set.entry(key).or_insert_with(|| {
                 super_edges.push(key);
-            }
+                super_edges.len() - 1
+            });
+            fine_to_super.push(Some(idx));
         }
     }
 
@@ -516,7 +529,7 @@ pub(super) fn build_super_graph(
         super_graph.edges.len()
     );
 
-    (super_graph, super_features)
+    (super_graph, super_features, fine_to_super)
 }
 
 /// Optional spatial seeding parameters for large datasets.
@@ -576,6 +589,43 @@ pub struct MultiLevelCoarsenResult {
 ///
 /// Returns per-level pair-to-sample mappings ready for the fused or
 /// per-sample visitors.
+///
+/// # CELLS are collapsed and refined; edges are INDUCED
+///
+/// Everything here operates on the node axis: [`refine_labels`] moves CELLS
+/// between clusters to improve cosine-to-centroid, with the KNN graph only
+/// RESTRICTING which moves are legal (graph-adjacent clusters, plus a
+/// connectivity guard that rejects moves splitting the source cluster).
+///
+/// No edge is ever collapsed or refined directly. Cell-cell edges become
+/// super-cell↔super-cell edges as a CONSEQUENCE of the cell partition, via
+/// [`cell_labels_to_pair_samples`] here and `build_super_edges` downstream. So
+/// the pseudobulk unit is a super-CELL, and super-edges are derived from it —
+/// which is why `cage`'s sampler conditions on a per-super-cell `e_pb`.
+///
+/// # Levels are NESTED, and that takes two passes in opposite orders
+///
+/// Each finer cluster lies inside exactly one coarser cluster. The two halves
+/// of the algorithm require OPPOSITE traversal orders, which is why they cannot
+/// share a loop:
+///
+/// - **Pass 1 (cut) — finest → coarsest.** Forced: `merge_idx` only advances,
+///   so the union-find can add merges but never undo one. Produces perfectly
+///   nested raw cuts, one merge sequence stopped at different points.
+/// - **Pass 2 (refine) — coarsest → finest.** Forced the other way: a level can
+///   only be constrained by a parent that already exists in final form.
+///
+/// Interleaving them is the bug this structure exists to prevent — a node
+/// refined at a fine level could move into a cluster whose coarse parent
+/// differed, and nothing put it back. Measured before the fix: worst-level
+/// nesting purity 0.925 on a synthetic ring; on GBM Visium the finest level
+/// held 1024 super-cells non-nested vs 1402 nested.
+///
+/// Note the re-nesting step at the top of pass 2: refining a PARENT moves nodes
+/// out of the clusters its child cut was carved from, so the child violates
+/// nesting BEFORE any sweep runs. The child cut is therefore intersected with
+/// the refined parent first, splitting straddlers. The refine-time constraint
+/// alone cannot repair a violation that is already present at entry.
 pub fn graph_coarsen_multilevel(
     graph: &KnnGraph,
     cell_features: &mut Mat,
@@ -606,7 +656,7 @@ pub fn graph_coarsen_multilevel(
         let target_super = (n_clusters * 8).min(n_original / 4).max(n_clusters + 1);
         let (labels, num_super) =
             spatial_seed_labels(sp.coordinates, graph, target_super, sp.batch_membership);
-        let (super_graph, mut super_features) =
+        let (super_graph, mut super_features, _) =
             build_super_graph(&labels, num_super, graph, cell_features);
 
         super_features.normalize_columns_inplace();
@@ -668,10 +718,16 @@ pub fn graph_coarsen_multilevel(
             None
         };
 
-    // Previous (next-coarser) level's refined entity labels drive the sibling
-    // constraint. `None` at the coarsest level.
-    let mut prev_entity_labels: Option<Vec<usize>> = None;
-
+    // PASS 1 — cut the dendrogram at every level. This MUST run finest →
+    // coarsest: `merge_idx` only ever advances, so the union-find can add
+    // merges but never undo one. The cuts are perfectly nested by construction,
+    // being one merge sequence stopped at different points.
+    //
+    // Refinement is deliberately NOT done here. It has to run in the opposite
+    // order (see pass 2), and interleaving the two is what silently broke the
+    // hierarchy: a node refined at a fine level could move into a cluster whose
+    // coarse parent differed, and nothing put it back.
+    let mut raw_cuts: Vec<(usize, Vec<usize>)> = Vec::with_capacity(sorted.len());
     for (nc, orig_idx) in sorted {
         let target = n_coarsen
             .saturating_sub(nc)
@@ -684,7 +740,7 @@ pub fn graph_coarsen_multilevel(
         // Compact labels at the coarsened level
         let mut rep_to_label: HashMap<usize, usize> = Default::default();
         let mut next_label = 0usize;
-        let mut coarse_labels: Vec<usize> = (0..n_coarsen)
+        let cut: Vec<usize> = (0..n_coarsen)
             .map(|i| {
                 let r = uf.find(i);
                 *rep_to_label.entry(r).or_insert_with(|| {
@@ -694,10 +750,45 @@ pub fn graph_coarsen_multilevel(
                 })
             })
             .collect();
-        rep_to_label.clear();
+        raw_cuts.push((orig_idx, cut));
+    }
 
-        // Refine this level's clustering. Per-level seed keeps levels reproducible
-        // and independent.
+    // PASS 2 — refine COARSEST → FINEST, each level nesting inside the parent
+    // that was just refined. This is the order the sibling constraint needs:
+    // a level can only be constrained by a parent that already exists in final
+    // form. `parent_labels = None` at the coarsest level, which genuinely has
+    // no parent.
+    // The refined parent, in the coarsen-entity space. `None` for the coarsest.
+    let mut parent_entity_labels: Option<Vec<usize>> = None;
+
+    for (orig_idx, mut coarse_labels) in raw_cuts.into_iter().rev() {
+        // Re-nest this level's raw cut inside the parent as ALREADY REFINED.
+        // The raw cuts nest in each other, but refining the parent moved nodes
+        // out of the clusters the child cut was carved from, so the child is no
+        // longer nested in it. Intersecting restores that: a child cluster
+        // straddling two refined parents is SPLIT at the boundary.
+        //
+        // This only ever splits, never merges, so the level stays at least as
+        // fine as its target. Skipping it and relying on the refine-time
+        // constraint alone is not enough — the violation is present before a
+        // single sweep runs.
+        if let Some(parents) = parent_entity_labels.as_deref() {
+            let mut key_to_label: HashMap<(usize, usize), usize> = Default::default();
+            let mut next = 0usize;
+            for (i, lab) in coarse_labels.iter_mut().enumerate() {
+                let key = (*lab, parents[i]);
+                *lab = *key_to_label.entry(key).or_insert_with(|| {
+                    let l = next;
+                    next += 1;
+                    l
+                });
+            }
+        }
+
+        // Refine this level's clustering. Per-level seed keeps levels
+        // reproducible; the parent constraint keeps them NESTED, so "coarsest →
+        // finest" describes a real hierarchy rather than three independent
+        // clusterings that happen to differ in size.
         if refine_iterations > 0 {
             let seed = (orig_idx as u64).wrapping_mul(0x9E3779B97F4A7C15);
             refine_labels(
@@ -706,6 +797,7 @@ pub fn graph_coarsen_multilevel(
                 &mut coarse_labels,
                 refine_iterations,
                 seed,
+                parent_entity_labels.as_deref(),
             );
         }
 
@@ -725,14 +817,19 @@ pub fn graph_coarsen_multilevel(
             let moves = crate::util::graph_dc_poisson_refine::refine_level_dc_poisson(
                 ctx,
                 &mut coarse_labels,
-                prev_entity_labels.as_deref(),
+                parent_entity_labels.as_deref(),
                 &cfg.params,
                 &mut rng,
                 &level_label,
             );
             info!("  level {} DC-Poisson refined: {} moves", orig_idx, moves);
-            prev_entity_labels = Some(coarse_labels.clone());
         }
+
+        // This level becomes the parent of the next (finer) one. Set for EVERY
+        // level, not just the DC-Poisson path — that assignment used to live
+        // inside the `if let` above, so the constraint was unreachable unless
+        // `--dc-poisson` was on.
+        parent_entity_labels = Some(coarse_labels.clone());
 
         // Compose with seed labels to get original-cell-level labels
         let cell_labels: Vec<usize> = if let Some(ref sl) = seed_labels {
@@ -764,6 +861,42 @@ pub fn graph_coarsen_multilevel(
         level_n_clusters.len(),
         all_num_samples
     );
+
+    // Verify the nesting guarantee on the ACTUAL data, not just in the unit
+    // test. Every finer cluster must sit inside exactly one coarser cluster;
+    // anything below 1.000 means a level is not a refinement of its parent and
+    // the hierarchy is a fiction. Cheap (one pass per level) and it is the only
+    // place the property is observable on a real run.
+    for l in 1..all_cell_labels.len() {
+        let coarse = &all_cell_labels[l - 1];
+        let fine = &all_cell_labels[l];
+        let n_fine = fine.iter().max().copied().map_or(0, |m| m + 1);
+        let mut parent_of = vec![usize::MAX; n_fine];
+        let mut straddlers = 0usize;
+        let mut counted = vec![false; n_fine];
+        for (cell, &f) in fine.iter().enumerate() {
+            if parent_of[f] == usize::MAX {
+                parent_of[f] = coarse[cell];
+            } else if parent_of[f] != coarse[cell] && !counted[f] {
+                counted[f] = true;
+                straddlers += 1;
+            }
+        }
+        let purity = 1.0 - (straddlers as f64 / n_fine.max(1) as f64);
+        // Silent when healthy: nesting is guaranteed by construction (pass 2's
+        // re-nest + the parent constraint), so a per-level "purity 1.000" line
+        // is pure noise. The check itself stays — it is one pass per level, and
+        // it is the only thing that would catch a regression on real data.
+        if straddlers == 0 {
+            log::debug!("  level {l} nests in level {}: purity 1.000", l - 1);
+        } else {
+            warn!(
+                "  level {l} does NOT nest in level {}: purity {purity:.3} \
+                 ({straddlers} of {n_fine} clusters straddle two parents)",
+                l - 1
+            );
+        }
+    }
 
     MultiLevelCoarsenResult {
         all_pair_to_sample,

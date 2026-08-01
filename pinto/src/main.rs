@@ -271,16 +271,32 @@ enum Commands {
         about = "Activity-gated cell-graph embedding (cage)",
         long_about = "Learn per-cell embeddings on the spatial cell-cell graph by\n\
                       visiting each gene: every gene defines a per-cell activity\n\
-                      vector that gates a shared multi-scale cell-cell hierarchy,\n\
-                      and contrastive (NCE) updates are summed over per-level\n\
-                      per-dim learnable gates γ[L, D]. Embedding-only — no\n\
-                      count decoder.\n\n\
+                      vector that gates a shared multi-scale cell-cell hierarchy.\n\
+                      A per-gene per-dim selection is SAMPLED by block Gibbs\n\
+                      against a pseudobulk Poisson. The resulting inclusion\n\
+                      probabilities become DROP RATES: a fresh z ~ Bern(pip) is\n\
+                      drawn each epoch, so every epoch trains a different\n\
+                      sub-network. They are re-estimated periodically against\n\
+                      the embedding being learned (--selection-refresh-epochs).\n\
+                      --embedding-dim is an UPPER BOUND: the stick-breaking\n\
+                      (IBP) prior orders dims by decreasing admittance.\n\
+                      How many are really used is decided by the data.\n\
+                      Chain levels differ only in their negative pools.\n\
+                      Embedding-only — no count decoder.\n\n\
+                      NOTE --n-hvg no longer subsets the trained gene axis. It\n\
+                      weights the random projection that builds the coarsening\n\
+                      hierarchy (as in senna bge / faba gem); every gene is\n\
+                      trained and present in every output table. Use\n\
+                      --genes-per-epoch to cap per-epoch cost instead.\n\n\
                       Outputs:\n\
                       \x20 {out}.cell_embedding.parquet  cell × embedding_dim\n\
                       \x20 {out}.cell_bias.parquet       per-cell scalar\n\
                       \x20 {out}.feature_embedding.parquet  feature × embedding_dim\n\
+                      \x20 {out}.feature_pip.parquet      feature × dim (sampled PIP;\n\
+                      \x20                                the gate's drop rates)\n\
+                      \x20 {out}.feature_posterior_mean.parquet  feature × dim (E[z*beta])\n\
+                      \x20 {out}.pseudobulk_cells.parquet  cell × (coords, super-cell, e_pb)\n\
                       \x20 {out}.gene_bias.parquet       per-gene scalar\n\
-                      \x20 {out}.level_dim_gates.parquet level × dim (softplus_floored γ)\n\
                       \x20 {out}.coord_pairs.parquet     spatial edge list\n\
                       \x20 {out}.scores.parquet          per-epoch loss trace\n\
                       \x20 {out}.delta.parquet           batch effects (multi-batch only)\n\
