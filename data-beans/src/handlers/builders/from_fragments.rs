@@ -14,9 +14,10 @@ pub struct FromFragmentsArgs {
         long_help = "Per-fragment records, one per line, tab-separated:\n\
                      chr<TAB>start<TAB>end<TAB>barcode[<TAB>count]\n\
                      \n\
-                     Lines starting with '#' are skipped (e.g. the cellranger-arc\n\
-                     header block). Both plain gzip and bgzip-compressed files\n\
-                     are supported (MultiGzDecoder reads concatenated blocks)."
+                     Lines starting with '#' are skipped.\n\
+                     The cellranger-arc header block is the usual case.\n\
+                     Plain gzip and bgzip-compressed files are both supported;\n\
+                     MultiGzDecoder reads concatenated blocks."
     )]
     pub fragments: Box<str>,
 
@@ -40,10 +41,11 @@ pub struct FromFragmentsArgs {
     #[arg(
         long,
         help = "BED file of peaks (chr<TAB>start<TAB>end[...])",
-        long_help = "When provided, fragments are aggregated into these regions\n\
-                     instead of fixed-width genome tiles. Lines starting with '#',\n\
-                     'track', or 'browser' are skipped. Row names are formatted as\n\
-                     `chr:start-end`. Peaks may overlap."
+        long_help = "When provided, fragments aggregate into these regions.\n\
+                     Fixed-width genome tiles are then not used.\n\
+                     Lines starting with '#', 'track' or 'browser' are skipped.\n\
+                     Row names are formatted `chr:start-end`.\n\
+                     Peaks may overlap."
     )]
     pub peaks: Option<Box<str>>,
 
@@ -51,17 +53,19 @@ pub struct FromFragmentsArgs {
         long,
         default_value_t = 5000,
         help = "Tile width in bp when --peaks is not provided",
-        long_help = "Tile the genome into fixed-width bins on the fly. Bin (i)\n\
-                     spans [i*bin_size, (i+1)*bin_size). Each fragment contributes\n\
-                     to every bin it overlaps. Set 0 to disable (then --peaks is required)."
+        long_help = "Tile the genome into fixed-width bins on the fly.\n\
+                     Bin i spans [i*bin_size, (i+1)*bin_size).\n\
+                     Each fragment contributes to every bin it overlaps.\n\
+                     Set 0 to disable tiling; --peaks is then required."
     )]
     pub bin_size: u64,
 
     #[arg(
         long,
         help = "Barcode whitelist file (one barcode per line, plain or .gz)",
-        long_help = "When provided, fragments whose barcode is not in this list\n\
-                     are skipped and the column order matches the whitelist."
+        long_help = "When provided, this list acts as a whitelist.\n\
+                     Fragments whose barcode is absent are skipped.\n\
+                     Column order then matches the whitelist."
     )]
     pub barcodes: Option<Box<str>>,
 
@@ -81,8 +85,8 @@ pub struct FromFragmentsArgs {
         help = "Decompress the fragments file in-memory and parse in parallel",
         long_help = "By default the file is streamed line-by-line, single-threaded.\n\
                      \n\
-                     With this flag the whole decompressed file is loaded into\n\
-                     one byte buffer.\n\
+                     With this flag the whole file is decompressed into memory,\n\
+                     as one byte buffer.\n\
                      Parsing and aggregation then split across rayon workers.\n\
                      \n\
                      This is recommended for fast SSDs.\n\

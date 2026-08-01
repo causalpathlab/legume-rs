@@ -20,10 +20,11 @@ pub struct ToMtxArgs {
         short,
         long,
         help = "Output directory for the 10x-style triplet",
-        long_help = "Output directory. The 10x Cell Ranger MEX triplet is written inside it as\n\
-                     matrix.mtx.gz, features.tsv.gz, barcodes.tsv.gz (loadable with\n\
-                     `scanpy.read_10x_mtx(dir)` or Seurat `Read10X(dir)`). The directory\n\
-                     is created if missing."
+        long_help = "Output directory.\n\
+                     The 10x Cell Ranger MEX triplet is written inside it:\n\
+                     matrix.mtx.gz, features.tsv.gz and barcodes.tsv.gz.\n\
+                     `scanpy.read_10x_mtx(dir)` and Seurat `Read10X(dir)` load it.\n\
+                     The directory is created if missing."
     )]
     pub output: Box<str>,
 
@@ -36,9 +37,10 @@ pub struct ToMtxArgs {
         long,
         default_value = "Gene Expression",
         help = "feature_type written to column 3 of features.tsv",
-        long_help = "Value written to the third column (feature_type) of features.tsv for\n\
-                     every feature. 10x uses e.g. 'Gene Expression', 'Antibody Capture',\n\
-                     'Peaks'. `from-mtx` reads this back for --select-row-type filtering."
+        long_help = "Value written to the third column of features.tsv.\n\
+                     That column is feature_type, and every feature gets this value.\n\
+                     10x uses 'Gene Expression', 'Antibody Capture' or 'Peaks'.\n\
+                     `from-mtx` reads it back for --select-row-type filtering."
     )]
     pub feature_type: Box<str>,
 }

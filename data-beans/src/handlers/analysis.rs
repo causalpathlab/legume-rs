@@ -24,9 +24,8 @@ pub struct RunStatArgs {
         required = true,
         value_delimiter = ',',
         help = "Input data files in '.zarr' or '.h5' format",
-        long_help = "Provide data files in either '.zarr' or '.h5' format. \n\
-		     You can convert '.mtx' files to '.zarr' or '.h5' using\n\
-		     the 'data-beans from-mtx' command."
+        long_help = "Provide data files in either '.zarr' or '.h5' format.\n\
+		     Convert '.mtx' files with the 'data-beans from-mtx' command."
     )]
     pub data_files: Vec<Box<str>>,
 
@@ -43,8 +42,8 @@ pub struct RunStatArgs {
         short,
         long,
         help = "Row name regex pattern for column statistics",
-        long_help = "Specify a regex pattern to select row names \n\
-		     when accumulating statistics over columns.\n\
+        long_help = "Regex pattern selecting row names.\n\
+		     It applies when accumulating statistics over columns.\n\
 		     Only rows matching this pattern will be included.\n\
 		     Examples: '^MT-' (starts with MT-), 'GAPDH$' (ends with GAPDH),\n\
 		     '^(MT|RPL|RPS)-' (mitochondrial or ribosomal genes).\n\
@@ -56,9 +55,9 @@ pub struct RunStatArgs {
         short = 'g',
         long,
         help = "Column group membership file for row statistics",
-        long_help = "Provide a file that defines column group membership \n\
-		     when accumulating statistics over rows. \n\
-		     This provides statistics computed for group-wise analysis."
+        long_help = "File defining column group membership.\n\
+		     It applies when accumulating statistics over rows.\n\
+		     The statistics are then computed group-wise."
     )]
     pub column_group_file: Option<Box<str>>,
 
@@ -67,9 +66,9 @@ pub struct RunStatArgs {
         long,
         default_value = "@",
         help = "Delimiter for extracting base barcode from column names",
-        long_help = "Delimiter character used to extract base barcode for matching. \n\
-		     For example, with delimiter '@', column 'ACGT-1@batch1' matches \n\
-		     membership key 'ACGT-1@batch2' via base key 'ACGT-1'."
+        long_help = "Delimiter used to extract the base barcode for matching.\n\
+		     With delimiter '@', column 'ACGT-1@batch1' matches\n\
+		     membership key 'ACGT-1@batch2', via base key 'ACGT-1'."
     )]
     pub delimiter: char,
 
