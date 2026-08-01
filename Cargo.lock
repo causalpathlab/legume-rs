@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "approx",
@@ -4288,7 +4288,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinto"
-version = "0.5.16"
+version = "0.5.17"
 dependencies = [
  "anyhow",
  "approx",

@@ -104,7 +104,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      Refreshing every epoch then re-derives a settled answer.\n\
                      Pass 1 to refresh every epoch anyway.\n\
                      Pass 0 to keep the cold rates for the whole run.\n\
-                     That is what `senna bge` does."
+                     That is what `senna bge` does.",
+        hide = true
     )]
     pub selection_refresh_epochs: usize,
 
@@ -126,7 +127,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      That beats contributing one 0/1 draw.\n\
                      So 5 sweeps do not pin the estimate to a 1/5 grid.\n\
                      Raising this buys precision per round.\n\
-                     Spending the same budget on more epochs is usually better."
+                     Spending the same budget on more epochs is usually better.",
+        hide = true
     )]
     pub selection_refresh_sweeps: usize,
 
@@ -146,7 +148,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      The refreshes against the live embedding do the real work.\n\
                      \n\
                      Raise it if you set --selection-refresh-epochs 0.\n\
-                     The cold rates are then the only ones the run ever uses."
+                     The cold rates are then the only ones the run ever uses.",
+        hide = true
     )]
     pub selection_sweeps: usize,
 
@@ -161,7 +164,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      \n\
                      Set this to skip that pass.\n\
                      The context build reads the count matrix once more up front,\n\
-                     so this is the lever if that I/O matters."
+                     so this is the lever if that I/O matters.",
+        hide = true
     )]
     pub no_dc_poisson: bool,
 
@@ -193,28 +197,32 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "Genes per outer parallel sampling chunk",
         long_help = "The outer loop samples this many genes in parallel via rayon.\n\
                      Forward and backward then run serially. candle Var is not parallel-safe.\n\
-                     The default is sized for a laptop. Raise it if you have many cores."
+                     The default is sized for a laptop. Raise it if you have many cores.",
+        hide = true
     )]
     pub gene_batch_size: usize,
 
     #[arg(
         long,
         default_value_t = 256,
-        help = "Positive edges drawn per (gene, batch) sample"
+        help = "Positive edges drawn per (gene, batch) sample",
+        hide = true
     )]
     pub per_gene_batch: usize,
 
     #[arg(
         long,
         default_value_t = 8,
-        help = "Sibling negatives drawn per positive edge per chain level"
+        help = "Sibling negatives drawn per positive edge per chain level",
+        hide = true
     )]
     pub n_negatives: usize,
 
     #[arg(
         long,
         default_value_t = 0.75,
-        help = "Negative-degree exponent (power-of-degree negative sampling)"
+        help = "Negative-degree exponent (power-of-degree negative sampling)",
+        hide = true
     )]
     pub alpha_neg: f32,
 
@@ -225,7 +233,8 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         default_value_t = ActivityNorm::Log1p,
         value_enum,
-        help = "Per-gene activity normalization"
+        help = "Per-gene activity normalization",
+        hide = true,
     )]
     pub activity_norm: ActivityNorm,
 
@@ -237,7 +246,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      Positive edges within a gene are drawn with probability ∝ (a_g[u]·a_g[v])^activity-alpha.\n\
                      The default of 1.0 keeps the activity-proportional draw.\n\
                      0.0 makes every active edge of a gene equally likely,\n\
-                     so no high-activity hub pair dominates that gene."
+                     so no high-activity hub pair dominates that gene.",
+        hide = true
     )]
     pub activity_alpha: f32,
 
@@ -248,7 +258,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      The weight is its NB Fisher-info w_g ∈ (0,1]. High-mean,\n\
                      high-dispersion housekeeping genes go toward 0,\n\
                      and informative low-mean genes go toward 1. This matches `pinto lc` and `senna bge`.\n\
-                     Set this flag to train every gene at equal weight."
+                     Set this flag to train every gene at equal weight.",
+        hide = true
     )]
     pub no_fisher_weights: bool,
 
@@ -277,7 +288,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      It adds λ · (mean(E_cell²) + mean(E_gene²)) to the loss.\n\
                      The means keep λ scale-invariant across N,\n\
                      G and D. The default of 1.0 is mild shrinkage; 0.0 disables it.\n\
-                     Typical values run from 0.1 to 10.0."
+                     Typical values run from 0.1 to 10.0.",
+        hide = true
     )]
     pub embedding_l2: f32,
 
@@ -313,14 +325,16 @@ pub struct CellActivityGraphEmbeddingArgs {
                      The window is `convergence-window` epochs wide.\n\
                      Stop training when their (max − min) / |mean| falls below\n\
                      --convergence-tol.\n\
-                     Pass 0 to run all --epochs unconditionally."
+                     Pass 0 to run all --epochs unconditionally.",
+        hide = true
     )]
     pub convergence_window: usize,
 
     #[arg(
         long,
         default_value_t = 0.01,
-        help = "Relative-range threshold over --convergence-window for stopping"
+        help = "Relative-range threshold over --convergence-window for stopping",
+        hide = true
     )]
     pub convergence_tol: f32,
 
@@ -347,14 +361,16 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "Ridge λ on the per-pair latent in the projection",
         long_help = "Gaussian prior strength on `e_uv` in the pair projection.\n\
                      The log-partition is summed over every gene. So this is a mild prior,\n\
-                     not the only bound on the fit. The per-pair intercept is never penalized."
+                     not the only bound on the fit. The per-pair intercept is never penalized.",
+        hide = true
     )]
     pub pair_ridge: f32,
 
     #[arg(
         long,
         default_value_t = 300,
-        help = "Adam steps per cell pair in the projection"
+        help = "Adam steps per cell pair in the projection",
+        hide = true
     )]
     pub pair_steps: usize,
 
@@ -368,14 +384,16 @@ pub struct CellActivityGraphEmbeddingArgs {
                      ∝ their empirical abundance.\n\
                      The importance weights cancel under that proposal.\n\
                      The estimate is therefore unbiased,\n\
-                     and exact at e_uv = 0. Pass 0 to sum every gene instead."
+                     and exact at e_uv = 0. Pass 0 to sum every gene instead.",
+        hide = true
     )]
     pub pair_gene_sample: usize,
 
     #[arg(
         long,
         default_value_t = 8192,
-        help = "Cell pairs per projection read block (bounds the count slab held at once)"
+        help = "Cell pairs per projection read block (bounds the count slab held at once)",
+        hide = true
     )]
     pub pair_block: usize,
 }

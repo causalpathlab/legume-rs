@@ -80,7 +80,8 @@ pub struct SrtLinkCommunityEtmArgs {
         value_enum,
         default_value_t = MaskedLikelihood::Nb,
         help = "Masked mode:\n\
-                per-gene likelihood (nb = over-dispersed counts; multinomial = compositional)"
+                per-gene likelihood (nb = over-dispersed counts; multinomial = compositional)",
+        hide = true,
     )]
     pub masked_likelihood: MaskedLikelihood,
 
@@ -93,7 +94,8 @@ pub struct SrtLinkCommunityEtmArgs {
                      They become the NB imputation targets.\n\
                      The encoder sees only the visible remainder.\n\
                      Typical values run 0.3 to 0.6.\n\
-                     --train-mode elbo ignores this flag."
+                     --train-mode elbo ignores this flag.",
+        hide = true
     )]
     pub mask_fraction: f64,
 
@@ -115,7 +117,8 @@ pub struct SrtLinkCommunityEtmArgs {
         long_help = "Top-K genes, by count, taken per edge as encoder input.\n\
                      The encoder looks up ρ at those genes.\n\
                      It aggregates them into the per-edge hidden state.\n\
-                     A larger context buys capacity and costs training time."
+                     A larger context buys capacity and costs training time.",
+        hide = true
     )]
     pub context_size: usize,
 
@@ -138,7 +141,8 @@ pub struct SrtLinkCommunityEtmArgs {
         help = "Edge minibatch size",
         long_help = "Edges per minibatch. Smaller batches add noise per step and save memory.\n\
                      Larger ones steady the gradient and cost memory. At E ≈ 2M edges,\n\
-                     4096 gives ~500 steps per epoch, measured at the finest V-cycle level."
+                     4096 gives ~500 steps per epoch, measured at the finest V-cycle level.",
+        hide = true
     )]
     pub batch_edges: usize,
 
@@ -152,7 +156,8 @@ pub struct SrtLinkCommunityEtmArgs {
         long_help = "Per-edge topic smoothing strength.\n\
                      It mixes encoder output with the uniform, in log space:\n\
                      log_z ← log((1-α)·exp(log_z) + α/K). This stabilises early training;\n\
-                     0 disables it."
+                     0 disables it.",
+        hide = true
     )]
     pub topic_smoothing: f64,
 
@@ -166,14 +171,16 @@ pub struct SrtLinkCommunityEtmArgs {
     #[arg(
         long,
         default_value_t = 0.0,
-        help = "L2 penalty on ρ (gene embedding); 0 disables"
+        help = "L2 penalty on ρ (gene embedding); 0 disables",
+        hide = true
     )]
     pub feature_embedding_l2: f32,
 
     #[arg(
         long,
         default_value_t = 0.0,
-        help = "AdamW decoupled weight decay (post-step)"
+        help = "AdamW decoupled weight decay (post-step)",
+        hide = true
     )]
     pub weight_decay: f32,
 
