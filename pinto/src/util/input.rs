@@ -14,10 +14,11 @@ pub struct SrtInputArgs {
         required = true,
         value_delimiter(','),
         help = "Spatial gene expression data files (.zarr or .h5)",
-        long_help = "Spatial gene expression data files (.zarr or .h5 format, comma separated).\n\
+        long_help = "Spatial gene expression data files, comma separated.\n\
+                       Accepted formats are .zarr and .h5.\n\
                        Each file is a genes-by-cells sparse matrix.\n\
-                       Multiple files are concatenated column-wise (cells), and each file\n\
-                       is treated as a separate batch unless --batch is specified."
+                       Multiple files are concatenated column-wise, over cells.\n\
+                       Each file is then its own batch unless --batch says otherwise."
     )]
     pub data_files: Vec<Box<str>>,
 
@@ -26,20 +27,23 @@ pub struct SrtInputArgs {
         short = 'c',
         value_delimiter(','),
         help = "Spatial coordinate files, one per data file (recommended)",
-        long_help = "Spatial coordinate files, one per data file (comma separated).\n\
+        long_help = "Spatial coordinate files, one per data file, comma separated.\n\
                        Recommended for spatial transcriptomics data.\n\
-                       When omitted, the cell-cell KNN graph is built from\n\
-                       random-projected gene expression instead of spatial\n\
-                       coordinates (expression mode).\n\
-                       Accepted formats: CSV, TSV, space-delimited text, .parquet,\n\
-                       or .zarr/.zarr.zip (Xenium cells.zarr.zip).\n\
-                       For CSV/TSV/parquet: first column is cell/barcode names\n\
-                       (must match data file column names), subsequent columns\n\
-                       are spatial coordinates.\n\
-                       For zarr: cell IDs are read from /cell_id and coordinates\n\
-                       from /cell_summary (column names from its attributes).\n\
-                       Coordinate columns are selected by --coord-column-names or\n\
-                       --coord-column-indices."
+                       Omit them to run in expression mode.\n\
+                       The KNN graph then comes from gene expression.\n\
+                       \n\
+                       Accepted formats: CSV, TSV, space-delimited text,\n\
+                       .parquet, or .zarr/.zarr.zip (Xenium cells.zarr.zip).\n\
+                       \n\
+                       In CSV, TSV and parquet, the first column is cell names.\n\
+                       Those names must match the data file's column names.\n\
+                       Every later column is a spatial coordinate.\n\
+                       \n\
+                       In zarr, cell IDs are read from /cell_id.\n\
+                       Coordinates come from /cell_summary.\n\
+                       Its attributes supply the column names.\n\
+                       \n\
+                       Pick columns with --coord-column-names or -indices."
     )]
     pub coord_files: Vec<Box<str>>,
 
@@ -47,10 +51,10 @@ pub struct SrtInputArgs {
         long = "coord-column-indices",
         value_delimiter(','),
         help = "0-based column indices for coordinates in coord files",
-        long_help = "0-based column indices for coordinate columns (comma separated).\n\
-                       Use when the coord file has extra columns beyond barcode,x,y.\n\
-                       Overrides --coord-column-names when both are specified.\n\
-                       Example: --coord-column-indices 1,2 for 2nd and 3rd columns."
+        long_help = "0-based column indices for coordinate columns, comma separated.\n\
+                       Use this when the coord file has columns beyond barcode,x,y.\n\
+                       It overrides --coord-column-names when both are given.\n\
+                       Example: --coord-column-indices 1,2 picks columns 2 and 3."
     )]
     pub coord_columns: Option<Vec<usize>>,
 
@@ -59,10 +63,12 @@ pub struct SrtInputArgs {
         value_delimiter(','),
         default_value = "pxl_row_in_fullres,pxl_col_in_fullres,cell_centroid_x,cell_centroid_y",
         help = "Column names for spatial coordinates in coord files",
-        long_help = "Column names to select as spatial coordinates (comma separated).\n\
-                       Names that don't exist in a given file are silently skipped,\n\
-                       so the default covers both Visium and Xenium layouts.\n\
-                       Default: pxl_row_in_fullres,pxl_col_in_fullres,cell_centroid_x,cell_centroid_y"
+        long_help = "Column names to select as spatial coordinates, comma separated.\n\
+                       Names absent from a given file are silently skipped.\n\
+                       The default therefore covers Visium and Xenium alike.\n\
+                       \n\
+                       Default: pxl_row_in_fullres, pxl_col_in_fullres,\n\
+                       cell_centroid_x, cell_centroid_y"
     )]
     pub coord_column_names: Vec<Box<str>>,
 
@@ -70,8 +76,9 @@ pub struct SrtInputArgs {
         long,
         help = "Header row index in coord files (0 = first line)",
         long_help = "0-based row index of the header in coord files.\n\
-                       If omitted, auto-detected by checking whether the first row\n\
-                       looks numeric. Set to 0 when the first line is column names."
+                       If omitted, it is auto-detected.\n\
+                       Detection checks whether the first row looks numeric.\n\
+                       Set it to 0 when the first line holds column names."
     )]
     pub coord_header_row: Option<usize>,
 
@@ -80,9 +87,9 @@ pub struct SrtInputArgs {
         short = 'b',
         value_delimiter(','),
         help = "Batch label files, one per data file",
-        long_help = "Batch membership files, one per data file (comma separated).\n\
-                       Plain text, one batch label per line (one line per cell).\n\
-                       Cells with the same label share batch effects.\n\
+        long_help = "Batch membership files, one per data file, comma separated.\n\
+                       Each is plain text with one batch label per cell, per line.\n\
+                       Cells sharing a label share batch effects.\n\
                        If omitted, each data file is treated as one batch."
     )]
     pub batch_files: Option<Vec<Box<str>>>,
@@ -112,9 +119,10 @@ pub struct SrtInputArgs {
         long,
         default_value_t = false,
         help = "Preload all sparse data into memory",
-        long_help = "Preload all sparse column data into memory before processing.\n\
-                       Faster when data fits in RAM; required for some parallel\n\
-                       access patterns. Increases peak memory usage."
+        long_help = "Preload all sparse column data into memory up front.\n\
+                       Faster when the data fits in RAM.\n\
+                       Some parallel access patterns require it.\n\
+                       It raises peak memory usage."
     )]
     pub preload_data: bool,
 
@@ -125,10 +133,12 @@ pub struct SrtInputArgs {
         long,
         default_value_t = 5,
         help = "Number of multi-level coarsening levels",
-        long_help = "Number of hierarchical coarsening levels (coarse-to-fine).\n\
-                       At each level, cells are merged via graph-constrained matching,\n\
-                       halving the number of groups. More levels give better initialization\n\
-                       for the finest level but take longer. Typical range: 2-10."
+        long_help = "Number of hierarchical coarsening levels, coarse to fine.\n\
+                       Each level merges cells by graph-constrained matching.\n\
+                       That halves the number of groups per level.\n\
+                       More levels initialize the finest level better.\n\
+                       They also take longer.\n\
+                       Typical range: 2-10."
     )]
     pub num_levels: usize,
 
@@ -136,11 +146,13 @@ pub struct SrtInputArgs {
         long,
         default_value_t = 5,
         help = "Refinement sweeps per coarsening level (0 to disable)",
-        long_help = "Leiden-style local-moving sweeps applied to each coarsening level\n\
-                       after the dendrogram cut. Each sweep lets nodes move to graph-adjacent\n\
-                       clusters that improve cosine similarity to centroid; moves that would\n\
-                       disconnect the source cluster are rejected. Converges early when no\n\
-                       node moves; 5 is usually enough. Set to 0 to skip refinement."
+        long_help = "Leiden-style local-moving sweeps per coarsening level.\n\
+                       They run after the dendrogram cut.\n\
+                       A sweep moves nodes to graph-adjacent clusters.\n\
+                       A move must improve cosine similarity to the centroid.\n\
+                       Moves that would disconnect the source cluster are rejected.\n\
+                       Sweeping stops early once no node moves.\n\
+                       5 is usually enough; 0 skips refinement."
     )]
     pub refine_iterations: usize,
 
@@ -149,10 +161,11 @@ pub struct SrtInputArgs {
         short = 'p',
         default_value_t = 50,
         help = "Random projection dimension for cell embeddings",
-        long_help = "Dimension of random projections used for cell embeddings.\n\
-                       Cells are projected from gene space (G dims) down to this\n\
-                       dimension for KNN graph construction and coarsening.\n\
-                       Higher values preserve more signal but cost more memory."
+        long_help = "Dimension of the random projection for cell embeddings.\n\
+                       Cells are projected from G gene dimensions down to this one.\n\
+                       That projection feeds KNN construction and coarsening.\n\
+                       Higher values preserve more signal.\n\
+                       They also cost more memory."
     )]
     pub proj_dim: usize,
 
@@ -160,12 +173,13 @@ pub struct SrtInputArgs {
         long = "batch-knn",
         default_value_t = 10,
         help = "KNN for cross-batch matching during batch correction",
-        long_help = "Number of nearest neighbours for cross-batch pb-sample matching.\n\
-                       During batch effect estimation, cells are coarsened into pb-samples.\n\
-                       Each pb-sample finds its K nearest neighbors from other batches via\n\
-                       HNSW on centroids. These cross-batch matches provide counterfactual\n\
-                       expression estimates for batch effect decomposition.\n\
-                       Only used when multiple batches are present."
+        long_help = "Neighbours per pb-sample for cross-batch matching.\n\
+                       Batch-effect estimation first coarsens cells into pb-samples.\n\
+                       Each pb-sample then finds K neighbours in other batches.\n\
+                       The search is HNSW over centroids.\n\
+                       Those matches give counterfactual expression estimates.\n\
+                       Batch-effect decomposition needs them.\n\
+                       This is used only when multiple batches are present."
     )]
     pub batch_knn: usize,
 
@@ -175,10 +189,10 @@ pub struct SrtInputArgs {
         default_value_t = 1024,
         help = "Target number of pseudobulk samples at coarsest level",
         long_help = "Target number of pseudobulk cell groups at the coarsest level.\n\
-                       Cells are merged via graph-constrained coarsening until roughly\n\
-                       this many groups remain. These pseudobulk samples are used for\n\
-                       Poisson-Gamma estimation and multi-level refinement.\n\
-                       Larger values give finer granularity but slower coarsening."
+                       Coarsening merges cells until roughly this many remain.\n\
+                       They feed Poisson-Gamma estimation and refinement.\n\
+                       Larger values give finer granularity.\n\
+                       They also coarsen more slowly."
     )]
     pub n_pseudobulk: usize,
 
@@ -187,13 +201,15 @@ pub struct SrtInputArgs {
         long,
         default_value_t = 5,
         help = "KNN: neighbours per cell for cell-pair graph",
-        long_help = "Number of nearest neighbours per cell for building the\n\
-                       cell-pair graph. Each cell connects to its K closest neighbours\n\
-                       via HNSW index (Euclidean distance).\n\
-                       With --coord: neighbours in spatial coordinate space.\n\
-                       Without --coord: neighbours in expression embedding space.\n\
-                       The resulting edges define cell pairs for all downstream analysis.\n\
-                       Typical range: 3-20 (spatial), 10-30 (expression)."
+        long_help = "Neighbours per cell when building the cell-pair graph.\n\
+                       Each cell connects to its K closest neighbours.\n\
+                       Search runs over an HNSW index in Euclidean distance.\n\
+                       \n\
+                       With --coord, neighbours live in coordinate space.\n\
+                       Without it, they live in expression embedding space.\n\
+                       \n\
+                       The resulting edges are the cell pairs used downstream.\n\
+                       Typical range: 3-20 spatial, 10-30 expression."
     )]
     pub knn_spatial: usize,
 
@@ -201,11 +217,12 @@ pub struct SrtInputArgs {
         long,
         default_value_t = false,
         help = "Use reciprocal (mutual) KNN matching for spatial graph",
-        long_help = "Use reciprocal (mutual) KNN matching for the spatial cell graph.\n\
-                       By default, union matching is used: an edge (i,j) exists if i is\n\
-                       in j's KNN list OR j is in i's KNN list. With reciprocal matching,\n\
-                       both must be in each other's KNN list, producing a sparser graph\n\
-                       with higher-confidence edges."
+        long_help = "Use reciprocal (mutual) KNN matching for the spatial graph.\n\
+                       The default is union matching.\n\
+                       There an edge (i,j) exists if i is in j's KNN list,\n\
+                       or j is in i's.\n\
+                       Reciprocal matching requires both.\n\
+                       That yields a sparser graph of higher-confidence edges."
     )]
     pub reciprocal: bool,
 
