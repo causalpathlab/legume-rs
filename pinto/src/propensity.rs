@@ -112,22 +112,12 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         );
     }
 
-    let proj_km = proj_mk.transpose();
-
-    // Same cut `cage` and `dsvd` make, through the same enum. Under leiden the
-    // realized count is whatever the graph found, so read it back off the
-    // labels rather than trusting what was asked for.
-    let edge_membership = args
-        .edge_clustering
-        .resolve(proj_km.nrows(), args.seed)
-        .cluster(&proj_km)?;
-    let num_clusters = edge_membership.iter().copied().max().map_or(0, |m| m + 1);
-    anyhow::ensure!(num_clusters >= 1, "edge clustering produced no communities");
-    info!(
-        "{} link communities over {} edges",
-        num_clusters,
-        rows.len()
-    );
+    // Same cut `cage` and `dsvd` make, through the same enum. `proj_mk` is
+    // already `[E × K]`, the orientation the routine wants, so the latent is
+    // clustered in place off the parquet read.
+    let edge_membership = args.edge_clustering.resolve(args.seed).cluster(&proj_mk)?;
+    let num_clusters =
+        crate::link_community::profiles::realized_communities(&edge_membership, rows.len())?;
 
     info!("calibrating propensity");
 

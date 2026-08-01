@@ -1,34 +1,29 @@
 //! Shared CLI surface for cutting a pair latent into link communities.
 //!
-//! `cage` and `dsvd` both end in the same place: an `[K_latent × N_pairs]`
-//! projection that has to become per-edge community labels. They therefore
-//! offer the same flags, with the same meanings and the same defaults, and
-//! resolve them through the same [`EdgeClustering`] enum that
-//! `compute_propensity_and_gene_community_stat` consumes.
+//! `cage`, `dsvd` and `prop` all end in the same place: an
+//! `[N_pairs × K_latent]` projection that has to become per-edge community
+//! labels. They therefore offer the same flags, with the same meanings and the
+//! same defaults, and resolve them through the same [`EdgeClustering`] enum
+//! that `compute_propensity_and_gene_community_stat` consumes.
 
 use crate::link_community::profiles::EdgeClustering;
 use clap::{Args, ValueEnum};
 
 /// Clusterer for the per-pair latent. `kmeans` fixes the count;
 /// `leiden` discovers it from the graph.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// No `Display` impl: clap renders `default_value_t` for a `value_enum` field
+/// through `ValueEnum::to_possible_value`, so a hand-written one would be a
+/// second copy of the names `rename_all` already derives.
+#[derive(ValueEnum, Clone, Copy, Debug)]
 #[clap(rename_all = "lowercase")]
 pub enum EdgeClusterMethod {
     Kmeans,
     Leiden,
 }
 
-impl std::fmt::Display for EdgeClusterMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Kmeans => write!(f, "kmeans"),
-            Self::Leiden => write!(f, "leiden"),
-        }
-    }
-}
-
 /// The flags every pair-latent subcommand shares. Flatten this rather than
-/// re-declaring them, so the two commands cannot drift apart.
+/// re-declaring them, so the three commands cannot drift apart.
 #[derive(Args, Debug, Clone)]
 pub struct EdgeClusterArgs {
     #[arg(
@@ -75,8 +70,7 @@ pub struct EdgeClusterArgs {
                      \n\
                      A cell's propensity is its incident-edge fraction, taken per community.\n\
                      This is the definition `pinto lc` and `pinto dsvd` use.\n\
-                     Writes {prefix}.propensity.parquet, {prefix}.link_community.parquet,\n\
-                     and {prefix}.gene_community.parquet."
+                     See this subcommand's own --help for the files it writes."
     )]
     pub n_edge_clusters: Option<usize>,
 
@@ -90,13 +84,14 @@ pub struct EdgeClusterArgs {
 }
 
 impl EdgeClusterArgs {
-    /// Resolve to the algorithm-side enum. `latent_width` is the k-means
-    /// fallback when `--n-edge-clusters` was left unset; Leiden ignores it,
-    /// since an unset target is exactly what lets the graph decide.
-    pub fn resolve(&self, latent_width: usize, seed: u64) -> EdgeClustering {
+    /// Resolve to the algorithm-side enum. An unset `--n-edge-clusters` stays
+    /// `None` in both arms: k-means falls back to the latent width, which
+    /// [`EdgeClustering::cluster`] reads off the matrix it is handed, and for
+    /// Leiden an absent target is exactly what lets the graph decide.
+    pub fn resolve(&self, seed: u64) -> EdgeClustering {
         match self.edge_cluster_method {
             EdgeClusterMethod::Kmeans => EdgeClustering::Kmeans {
-                n_clusters: self.n_edge_clusters.unwrap_or(latent_width),
+                n_clusters: self.n_edge_clusters,
                 max_iter: self.kmeans_max_iter,
             },
             EdgeClusterMethod::Leiden => EdgeClustering::Leiden {

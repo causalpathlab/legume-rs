@@ -253,7 +253,10 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     // is driven by direction rather than magnitude.
     proj_kn.normalize_columns_inplace();
 
-    proj_kn.transpose().to_parquet_with_names(
+    // One `[E × T]` copy, written out and then clustered — the shared routine
+    // takes pairs as rows, so this is the same buffer both times.
+    let proj_ne = proj_kn.transpose();
+    proj_ne.to_parquet_with_names(
         &(c.out.to_string() + ".latent.parquet"),
         (None, Some("cell_pair")),
         None,
@@ -267,12 +270,12 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     // that many interaction regimes. `pinto prop` still re-cuts the same latent
     // at a fixed K when you want one.
     let n_clusters = compute_propensity_and_gene_community_stat(
-        &proj_kn,
+        &proj_ne,
         edges,
         &data_vec,
         n_cells,
         &PropensityReportConfig {
-            clustering: args.edge_clustering.resolve(args.n_latent_topics, c.seed),
+            clustering: args.edge_clustering.resolve(c.seed),
             block_size: c.block_size,
         },
         &c.out,
