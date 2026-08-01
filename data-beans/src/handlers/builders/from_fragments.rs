@@ -79,12 +79,15 @@ pub struct FromFragmentsArgs {
         long,
         default_value_t = false,
         help = "Decompress the fragments file in-memory and parse in parallel",
-        long_help = "By default the file is streamed line-by-line on a single \
-                     thread. With this flag, the whole (decompressed) file is \
-                     loaded into a byte buffer once and parsing/aggregation is \
-                     split across rayon workers. Recommended for fast SSDs and \
-                     for large inputs on machines with enough RAM \
-                     (~3-10x of the compressed file size). \
+        long_help = "By default the file is streamed line-by-line, single-threaded.\n\
+                     \n\
+                     With this flag the whole decompressed file is loaded into\n\
+                     one byte buffer.\n\
+                     Parsing and aggregation then split across rayon workers.\n\
+                     \n\
+                     This is recommended for fast SSDs.\n\
+                     It also suits large inputs on machines with enough RAM,\n\
+                     roughly 3-10x the compressed file size.\n\
                      Output is identical to the serial path."
     )]
     pub preload_data: bool,

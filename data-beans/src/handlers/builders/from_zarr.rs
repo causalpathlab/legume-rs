@@ -168,8 +168,9 @@ pub struct FromZarrArgs {
 
     #[arg(
         long,
-        help = "Cells per rayon job for the post-build squeeze pass \
-                (omit for auto-scaling by feature count)"
+        help = "Cells per rayon job for the post-build squeeze pass",
+        long_help = "Cells per rayon job for the post-build squeeze pass.\n\
+                     Omit it for auto-scaling by feature count."
     )]
     pub block_size: Option<usize>,
 }
