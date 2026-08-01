@@ -62,7 +62,7 @@ fn print_logo() {
                   \x20       Cell-pair shared/difference analysis via Poisson-Gamma\n\
                   \x20       SVD on pseudobulk co-expression.\n\n\
                   \x20 prop  Propensity (standalone)\n\
-                  \x20       Re-cluster edge latent codes from dsvd with different K.\n\n\
+                  \x20       Re-cut a cage/dsvd edge latent at a different K.\n\n\
                   QUICK START:\n\n\
                   \x20 # Prepare data (convert MTX to HDF5):\n\
                   \x20 data-beans from-mtx -r features.tsv.gz -c barcodes.tsv.gz \\\n\
@@ -155,12 +155,15 @@ enum Commands {
         about = "Estimate vertex propensity from edge clusters (standalone)",
         long_about = "Estimate vertex (cell) propensity scores from edge\n\
                       (cell-pair) cluster assignments.\n\n\
-                      NOTE: dsvd produces propensity and edge outputs inline.\n\
-                      Use this subcommand only for a different K,\n\
-                      or for separate expression data.\n\n\
+                      NOTE: cage and dsvd produce propensity and edge outputs inline.\n\
+                      Use this subcommand to re-cut the same latent,\n\
+                      or for separate expression data.\n\
+                      It is the fixed-K path:\n\
+                      --edge-cluster-method kmeans --n-edge-clusters K.\n\n\
                       Model:\n\
-                      \x20 Given latent codes z_e [E x T] from delta-svd:\n\
-                      \x20   c_e = argmin_k ||z_e - centroid_k||  K-means cluster\n\
+                      \x20 Given latent codes z_e [E x T] from cage or delta-svd:\n\
+                      \x20   c_e = the pair's community, cut by leiden (default)\n\
+                      \x20        or by kmeans, argmin_k ||z_e - centroid_k||\n\
                       \x20 For each vertex i:\n\
                       \x20   p_i[k] = |{e incident to i : c_e = k}| / degree(i)\n\
                       \x20 Optionally, cluster-specific gene expression:\n\
@@ -168,14 +171,14 @@ enum Commands {
                       Algorithm:\n\
                       \x20 1. Load latent codes Z [E x T] from .latent.parquet\n\
                       \x20 2. Load cell pair names from .coord_pairs.parquet\n\
-                      \x20 3. K-means on Z^T -> cluster assignment c_e for each edge\n\
+                      \x20 3. Cluster Z^T -> assignment c_e for each edge\n\
                       \x20 4. For each vertex i, count edges per cluster:\n\
                       \x20    p_i[k] = count(c_e=k for e incident to i) / deg(i)\n\
                       \x20 5. dominant_cluster[i] = argmax_k p_i[k]\n\
                       \x20 6. If expression data provided:\n\
                       \x20    weighted gene sums per cluster -> Poisson-Gamma\n\n\
                       Inputs:\n\
-                      - .latent.parquet (from delta-svd)\n\
+                      - .latent.parquet (from cage or delta-svd)\n\
                       - .coord_pairs.parquet (cell pair names)\n\
                       - Optionally, expression data (.zarr or .h5)\n\n\
                       Outputs:\n\

@@ -79,6 +79,14 @@ pub struct EdgeClusterArgs {
                      and {prefix}.gene_community.parquet."
     )]
     pub n_edge_clusters: Option<usize>,
+
+    #[arg(
+        long,
+        alias = "maxiter-clustering",
+        default_value_t = 100,
+        help = "Lloyd iterations for kmeans; ignored under leiden"
+    )]
+    pub kmeans_max_iter: usize,
 }
 
 impl EdgeClusterArgs {
@@ -89,6 +97,7 @@ impl EdgeClusterArgs {
         match self.edge_cluster_method {
             EdgeClusterMethod::Kmeans => EdgeClustering::Kmeans {
                 n_clusters: self.n_edge_clusters.unwrap_or(latent_width),
+                max_iter: self.kmeans_max_iter,
             },
             EdgeClusterMethod::Leiden => EdgeClustering::Leiden {
                 knn: self.leiden_knn,
